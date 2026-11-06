@@ -553,6 +553,12 @@ fn auto_native(build: bool) -> Result<String, String> {
     let Some((krate, dir)) = crate::run::root_package() else {
         return Err(format!("no native build to compare with (the program's package is unknown); {}", how));
     };
+    // a git run's package is in its virtual tree: cargo cannot build what is not on disk, and a
+    // log or target made there was a real folder at the virtual root, which refused every overlay
+    // lease of its box after it (a Linux node, 11-06)
+    if crate::vfs::is_virtual(&dir) {
+        return Err(format!("no native build of a package in a git run's virtual tree ({}): cargo builds only what is on disk; {}", dir, how));
+    }
     let mut ws = std::path::PathBuf::from(&dir);
     let mut cur = ws.clone();
     loop {

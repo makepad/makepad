@@ -820,8 +820,42 @@ impl Tcx {
         }
     }
 
+    /// rustc_middle/src/ty/util.rs:1337: no query in the simple cases (`needs_drop_components`);
+    /// a single component is the query's key, normalized with its regions erased.
     pub fn needs_drop(&self, prog: &Program, env: TypingEnv, ty: TyId) -> bool {
-        Providers { tcx: self, prog }.needs_drop(TypeKey { env, ty }).expect("needs_drop query")
+        let mut parts = (0usize, ty);
+        if self.needs_drop_components(ty, &mut parts).is_err() { return true; }
+        let query_ty = match parts { (0, _) => return false, (1, c) => c, _ => ty };
+        let query_ty = self.try_normalize_erasing_regions(prog, env, query_ty).unwrap_or_else(|_| self.tys.erase_regions(query_ty));
+        Providers { tcx: self, prog }.needs_drop(TypeKey { env, ty: query_ty }).expect("needs_drop query")
+    }
+
+    /// util.rs:1533 `needs_drop_components` as a count and the first component (`needs_drop` only
+    /// asks for none, one or more): Err = always requires drop.
+    fn needs_drop_components(&self, ty: TyId, out: &mut (usize, TyId)) -> Result<(), ()> {
+        let add = |n: usize, first: TyId, out: &mut (usize, TyId)| { if out.0 == 0 { out.1 = first; } out.0 += n; };
+        match *self.tys.kind(ty) {
+            TyKind::Bool | TyKind::Int(_) | TyKind::Float(_) | TyKind::Never | TyKind::FnDef(..) | TyKind::FnPtr(..) | TyKind::Char
+            | TyKind::Ptr(..) | TyKind::Ref(..) | TyKind::Str | TyKind::Foreign(_) => Ok(()),
+            TyKind::Dyn(..) | TyKind::Error => Err(()),
+            TyKind::Slice(e) => self.needs_drop_components(e, out),
+            TyKind::Array(e, len) => {
+                let mut elem = (0usize, e);
+                let res = self.needs_drop_components(e, &mut elem);
+                if res.is_ok() && elem.0 == 0 { return Ok(()); }
+                match len.try_to_target_usize(&self.tys) {
+                    // arrays of size zero don't need drop, even if their element type does
+                    Some(0) => Ok(()),
+                    Some(_) => { res?; add(elem.0, elem.1, out); Ok(()) }
+                    None => { add(1, ty, out); Ok(()) }
+                }
+            }
+            TyKind::Tuple(fields) => {
+                for &f in self.tys.list(fields) { self.needs_drop_components(f, out)?; }
+                Ok(())
+            }
+            _ => { add(1, ty, out); Ok(()) }
+        }
     }
 
     pub fn is_freeze(&self, prog: &Program, env: TypingEnv, ty: TyId) -> bool {

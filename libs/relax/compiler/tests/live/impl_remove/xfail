@@ -1,1 +1,0 @@
-M13: removing a trait impl takes the restart rung today (the impl tables are not edited for removals; live dyn values would keep its vtable)

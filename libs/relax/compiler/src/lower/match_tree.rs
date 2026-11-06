@@ -647,13 +647,14 @@ impl<'a> Lcx<'a> {
             tree.failed = true;
             return;
         };
+        let l = self.layout(ty);
         if tag.len() != 1 {
             tree.failed = true;
             return;
         }
         let tests: Vec<(u32, u32)> = kids.iter().filter(|k| k.0.is_some() && k.1 != default).map(|k| (k.0.unwrap(), k.1)).collect();
         for (i, &(vi, to)) in tests.iter().enumerate() {
-            let Some(discr) = adt.discriminant_for_variant(&self.u.tcx, &self.u.prog, vi) else {
+            let Some(discr) = crate::lower::variant_key(self.u, &l, &adt, vi) else {
                 tree.failed = true;
                 return;
             };

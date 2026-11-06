@@ -15,14 +15,13 @@ use crate::typeck::{Body, Res};
 pub fn check_items(prog: &Program, tcx: &Tcx, own: &[bool]) {
     if !lint::enabled() { return; }
     crate::lint_early::check_items(prog, tcx, own);
+    let mut pt = crate::lint_dead::PartTimes::new("lint_pass::check_items");
     crate::lint_late::check_items(prog, tcx, own);
-    for i in 0..prog.defs.len() {
-        let def = prog.defs[i];
-        if !own.get(def.krate as usize).copied().unwrap_or(false) { continue; }
-        let d = DefId(i as u32);
-        if lint::generated(prog, d) { continue; }
-        nonstandard_style_item(prog, d);
-    }
+    pt.mark("lint_late::check_items");
+    let defs: Vec<DefId> = (0..prog.defs.len() as u32).map(DefId).filter(|&d| own.get(prog.def(d).krate as usize).copied().unwrap_or(false) && !lint::generated(prog, d)).collect();
+    lint::par_each(&defs, |&d| nonstandard_style_item(prog, d));
+    pt.mark("nonstandard_style");
+    pt.report(own.iter().filter(|&&o| o).count());
 }
 
 // ---------------------------------------------------------------- nonstandard_style

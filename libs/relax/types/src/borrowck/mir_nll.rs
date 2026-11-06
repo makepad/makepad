@@ -45,12 +45,39 @@ impl LocationMap {
         targets.visit_terminator(block.terminator.as_ref().unwrap(), at);
         targets.points
     }
-    pub fn predecessors(&self, body: &Body) -> Vec<Vec<usize>> {
-        let mut result = vec![vec![]; self.num_points()];
-        for p in 0..self.num_points() { for q in self.successors(body, p) { result[q].push(p); } }
-        result
+    /// Each point's predecessors, in point order. Built per block: a statement's successor is the
+    /// next point, only a terminator's targets are walked (a list per point and a block search
+    /// per point cost borrowck an allocation and more for every MIR location).
+    pub fn predecessors(&self, body: &Body) -> Predecessors {
+        let n = self.num_points();
+        // (successor, predecessor), in ascending predecessor order
+        let mut edges = Vec::with_capacity(n + body.basic_blocks.len());
+        for b in 0..body.basic_blocks.len() {
+            let (start, end) = (self.offsets[b], self.offsets[b + 1]);
+            for p in start..end - 1 { edges.push((p + 1, p)); }
+            for q in self.successors(body, end - 1) { edges.push((q, end - 1)); }
+        }
+        let mut starts = vec![0usize; n + 1];
+        for &(q, _) in &edges { starts[q + 1] += 1; }
+        for i in 0..n { starts[i + 1] += starts[i]; }
+        let mut fill = starts[..n].to_vec();
+        let mut points = vec![0usize; edges.len()];
+        for (q, p) in edges { points[fill[q]] = p; fill[q] += 1; }
+        Predecessors { starts, points }
     }
     pub fn matches(&self, body: &Body) -> bool { self.offsets == Self::new(body).offsets }
+}
+/// The points before each point (`LocationMap::predecessors`): one flat list, a point's own in
+/// point order.
+pub struct Predecessors { starts: Vec<usize>, points: Vec<usize> }
+impl Predecessors {
+    /// The positions of `p`'s predecessors (`at`).
+    pub fn range(&self, p: usize) -> std::ops::Range<usize> { self.starts[p]..self.starts[p + 1] }
+    pub fn at(&self, i: usize) -> usize { self.points[i] }
+}
+impl std::ops::Index<usize> for Predecessors {
+    type Output = [usize];
+    fn index(&self, p: usize) -> &[usize] { &self.points[self.range(p)] }
 }
 /// C-NLL5 supplies renumbered type-check/liveness output; no BIR producer is used.
 pub struct RegionInput {

@@ -13,7 +13,7 @@ use crate::infer::opaque_types::OpaqueTypeKey;
 use crate::tcx::{TypingMode, TypingModeEqWrapper};
 use crate::types::*;
 use crate::types::fold::{TypeFolder, super_fold_ty};
-use std::collections::HashMap;
+use crate::fxhash::HashMap;
 pub mod response;
 pub mod method_response;
 pub mod user_type;

@@ -1,1 +1,1 @@
-v1 patch out=file
+v1 patch out=file note=guarded copies: `live::step` was inlined into

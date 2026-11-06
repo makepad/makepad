@@ -63,7 +63,8 @@ step_libtest_build() {
   CARGO_INCREMENTAL=0 cargo test --release -p relax-compiler --lib --no-run -j8 > "$log/libtest" 2>&1 || { grep -E "^error" -A6 "$log/libtest" | head -20; fail="$fail relax-compiler-libtest-build"; }
 }
 check_pkg() { # check_pkg <label> <pkg> <dir> [check options: --also=<libs> from affected.py's feature flips]
-  full=$(cd "$3" && $B check "${@:4}" "$2" 2>&1)
+  # on CHECK_JOBS threads when step_qcheck runs it beside others, else on the lease's
+  full=$(cd "$3" && ${CHECK_JOBS:+env MAKEPAD_RUN_JOBS=$CHECK_JOBS} $B check "${@:4}" "$2" 2>&1)
   # a flip's lib the program build does not compile (a provided crate behind the HAL, e.g. makepad-render
   # in makepad-run-android): no build of <pkg> compiles it under the flip; the lib's own check stands
   if echo "$full" | grep -qE "^makepad check: --also [^ ]+: not in [^ ]+'s build$"; then
@@ -91,6 +92,9 @@ step_checks() {
   jit=${CARGO_TARGET_DIR:-$PWD/target}/host/makepad
   se=$(bash libs/relax/compiler/tests/strict_errors/run.sh "$jit" 2>&1); echo "$se" | grep -E 'FAILED|^strict_errors'; case "$se" in *"strict_errors: ok"*) ;; *) fail="$fail strict-errors";; esac
   lc=$(python3 libs/relax/compiler/tests/live/run_cases.py --makepad "$jit" 2>&1) || fail="$fail live-cases"; echo "$lc" | grep -E '^(FAIL|XPASS|live cases)|^         v[0-9]' | cut -c1-230
+  # the real-time case beside two more copies of itself: their compiles stay off its thread's cores
+  # (its failure names the copies that failed and each one's longest call: `rt-lock-copies[1:5289us,3:5056us]`)
+  rl=$(python3 libs/relax/compiler/tests/live/run_cases.py --makepad "$jit" --only rt_lock --copies 3 2>&1) || fail="$fail rt-lock-copies[$(echo "$rl" | sed -nE -e 's/^ *copy ([0-9]+): .*stall ([0-9]+) us.*/\1:\2us/p' -e t -e 's/^ *copy ([0-9]+): .*/\1/p' | paste -sd, -)]"; echo "$rl" | grep -E '^(FAIL|XPASS|live cases)|^         v[0-9]|copy [0-9]' | cut -c1-230
 }
 step_check_stage() { check_pkg stage makepad-stage apps/commercial; }
 present() { # present <name> <dir> <pkg args...>: headless cold run from a fresh home; 1 when the app reports `present`
@@ -349,19 +353,28 @@ qpresent_one() {
   pkg=$2; dir=$3; shift 3; present "$pkg" "$dir" "$pkg" "$@"
   if [ -z "$fail" ]; then unit_line ok "$unit"; else unit_line fail "$unit"; fi
 }
-# the checks side by side, at most one per CHECK_GB of the box's memory available at their start and four a core:
-# 47 at once peaked at 27 GB on a 30 GB box beside its WM and AI hub, and the kernel's OOM kill took the box's user
-# services down with them (11-03)
+# the checks side by side on the lease's cores (MAKEPAD_RUN_JOBS), less the depcheck's while it runs beside them:
+# at most one per CHECK_CORES of them, each on CHECK_CORES threads. Four a core, each on all the lease's threads, ran
+# 20 checks on 160 threads: a 16-core box at load 52.8 under a gate charged 8 cores, its hub build and a lane's run
+# waiting behind it (11-06). And at most one per CHECK_GB of the box's memory available at their start: 47 at once
+# peaked at 27 GB on a 30 GB box beside its WM and AI hub, and the kernel's OOM kill took the box's user services
+# down with them (11-03).
 step_qcheck() {
-  local cores=${MAKEPAD_RUN_JOBS:-8} avail max
+  local cores=${MAKEPAD_RUN_JOBS:-8} avail max beside=""
+  if [ -n "$depcheck" ] && kill -0 "$depcheck" 2>/dev/null; then
+    cores=$(( cores - (cores + 1) / 2 )); beside=", the depcheck beside them"
+  fi
+  [ "$cores" -ge 1 ] || cores=1
+  CHECK_JOBS=${CHECK_CORES:-2}; [ "$CHECK_JOBS" -le "$cores" ] || CHECK_JOBS=$cores
+  max=$(( cores / CHECK_JOBS ))
   avail=$(awk '/^MemAvailable:/ { print int($2 / 1048576) }' /proc/meminfo 2>/dev/null)
-  max=$(( cores * 4 ))
   if [ -n "$avail" ]; then
     [ $(( avail / ${CHECK_GB:-1} )) -lt "$max" ] && max=$(( avail / ${CHECK_GB:-1} ))
   fi
   [ "$max" -ge 1 ] || max=1
-  echo "qcheck: $(grep -c . "$log/checks") checks, at most $max at once (${avail:-?} GB available)"
+  echo "qcheck: $(grep -c . "$log/checks") checks, at most $max at once on $CHECK_JOBS threads each$beside (${avail:-?} GB available)"
   at_once qcheck_one "$log/checks" "$max"
+  CHECK_JOBS=""
 }
 # one cargo check of a lines file's packages (affected.py's `<word> <pkg> <dir>`), beside the JIT steps on half the
 # lease's cores, niced. Its release profile has its own build directory in the node's one target: no wait on the JIT

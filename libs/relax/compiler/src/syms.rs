@@ -141,7 +141,12 @@ struct SymsInner {
 struct DataIndex {
     objs: Vec<DataObj>,
     by_start: BTreeMap<u64, u32>,
+    /// the objects named as vtables (`vtable:<type>:<dyn type>`), in registration order
+    vtables: Vec<u32>,
 }
+
+/// The name prefix of a vtable's data object (jit.rs Unit::vtable).
+pub const VTABLE_NAME: &str = "vtable:";
 
 impl Syms {
     pub fn new(vals: u64, dom0: u64) -> Syms {
@@ -177,6 +182,14 @@ impl Syms {
         let class = class_of(&self.kinds[id as usize]);
         unsafe { std::ptr::write((self.classes as *mut u8).add(id as usize), class as u8) };
         Sym::new(id)
+    }
+
+    /// The slot of a tier record symbol (`SymKind::TierRec`), without copying the kind.
+    pub(crate) fn tier_slot(&self, id: u32) -> Option<u32> {
+        match ((id as usize) < self.kinds.len()).then(|| &self.kinds[id as usize]) {
+            Some(SymKind::TierRec(s)) => Some(*s),
+            _ => None,
+        }
     }
 
     pub fn kind(&self, id: u32) -> Option<SymKind> {
@@ -240,6 +253,9 @@ impl Syms {
         let syms: Vec<Sym> = objs.iter().enumerate().map(|(i, o)| self.intern(SymKind::Data(first + i as u32), o.0)).collect();
         for (i, (start, len, align, name)) in objs.iter().enumerate() {
             let kind = DataKind::Relocs(ptrs(i, &syms));
+            if name.as_deref().is_some_and(|n| n.starts_with(VTABLE_NAME)) {
+                d.vtables.push(first + i as u32);
+            }
             d.objs.push(DataObj { start: *start, len: *len, align: *align, kind, sym: syms[i].id, name: name.clone(), mutable: false, ptrs: None, opaque: false });
             d.by_start.insert(*start, first + i as u32);
         }
@@ -300,8 +316,24 @@ impl Syms {
         let name = name.clone();
         let mut d = self.data.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(&i) = d.by_start.get(&start) {
+            if name.starts_with(VTABLE_NAME) && !d.objs[i as usize].name.as_deref().is_some_and(|n| n.starts_with(VTABLE_NAME)) {
+                d.vtables.push(i);
+            }
             d.objs[i as usize].name = Some(name);
         }
+    }
+
+    /// Every vtable of this run (lowered, linked from the disk cache, placed from the startup
+    /// image -- only a lowered one is in Unit::vtables): (start, name).
+    pub fn vtable_objs(&self) -> Vec<(u64, String)> {
+        let d = self.data.lock().unwrap_or_else(|e| e.into_inner());
+        d.vtables.iter().filter_map(|&i| d.objs.get(i as usize)).filter_map(|o| Some((o.start, o.name.clone()?))).collect()
+    }
+
+    /// Whether a vtable's data object starts at `addr`.
+    pub fn is_vtable(&self, addr: u64) -> bool {
+        let d = self.data.lock().unwrap_or_else(|e| e.into_inner());
+        d.by_start.get(&addr).and_then(|&i| d.objs.get(i as usize)).is_some_and(|o| o.name.as_deref().is_some_and(|n| n.starts_with(VTABLE_NAME)))
     }
 
     /// The runtime entry named `name` (RtSyms field name).
@@ -477,6 +509,21 @@ pub(crate) fn data_thunks(u: &Unit, addr: u64, out: &mut Vec<u32>) {
             }
         }
     }
+}
+
+/// The data objects the constant data object at `addr` points at itself (a vtable's supertrait
+/// vtables): their addresses.
+pub(crate) fn data_children(u: &Unit, addr: u64) -> Vec<u64> {
+    let mut out = Vec::new();
+    for idx in u.syms.data_at(addr).into_iter().filter_map(|s| match u.syms.kind(s.id) { Some(SymKind::Data(i)) => Some(i), _ => None }) {
+        let Some((_, _, ptrs, _)) = obj_ptrs(u, idx) else { continue };
+        for s in ptrs.iter().filter_map(|(_, s)| *s) {
+            if let Some(SymKind::Data(_)) = u.syms.kind(s.id) {
+                out.push(u.syms.addr(s));
+            }
+        }
+    }
+    out
 }
 
 /// (start, len, pointer words, opaque) of object `idx`, computing the pointer words once.

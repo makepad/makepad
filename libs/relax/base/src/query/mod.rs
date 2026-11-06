@@ -70,10 +70,16 @@ pub struct QueryEngine {
     state: Mutex<State>,
     task_reads: Mutex<Vec<TaskReads>>,
     empty_anon: std::sync::OnceLock<DepNodeIndex>,
-    /// Input nodes as read (index, fingerprint): every query reads inputs, and taking `state`
-    /// for each read serialised the parallel `makepad check`. Inputs change only through
-    /// `set_input` (`&mut self`), which clears this.
-    inputs: crate::conc::ShardMap<QueryId, (DepNodeIndex, Fingerprint)>,
+}
+
+thread_local! {
+    /// The input nodes this thread read (index, fingerprint), for one engine at one revision:
+    /// every query reads inputs, so taking `state` for each read serialised the parallel
+    /// `makepad check`, and one map shared by its threads bounced its lock between their cores.
+    /// Inputs change only through `set_input` (`&mut self`), which starts a revision when one
+    /// changes.
+    static INPUTS_SEEN: std::cell::RefCell<(u64, u64, HashMap<QueryId, (DepNodeIndex, Fingerprint)>)> =
+        std::cell::RefCell::new((0, 0, HashMap::default()));
 }
 
 impl Default for QueryEngine {
@@ -84,7 +90,7 @@ impl Default for QueryEngine {
 
 impl QueryEngine {
     pub fn new() -> Self {
-        Self { id: next_id(), revision: 1, state: Mutex::new(State::default()), task_reads: Mutex::new(Vec::new()), empty_anon: Default::default(), inputs: Default::default() }
+        Self { id: next_id(), revision: 1, state: Mutex::new(State::default()), task_reads: Mutex::new(Vec::new()), empty_anon: Default::default() }
     }
 
     /// Exact backing capacities for the graph's compact stores. Called by the
@@ -130,7 +136,6 @@ impl QueryEngine {
     /// Inputs are eval_always roots (rustc_middle/src/dep_graph/graph.rs:334,921).
     pub fn set_input(&mut self, kind: u16, key: u32, fingerprint: Fingerprint) -> Result<(), QueryError> {
         let query = QueryId { kind, key };
-        self.inputs.clear();
         let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
         let index = state.graph.find(query).ok_or(QueryError::MissingInput(query))?;
         if !state.graph.eval_always(index) {
@@ -147,7 +152,12 @@ impl QueryEngine {
 
     pub fn input(&self, kind: u16, key: u32) -> Result<Fingerprint, QueryError> {
         let query = QueryId { kind, key };
-        let (index, fingerprint) = match self.inputs.get(&query) {
+        // (a query run by a thread-local destructor reads past the map's own teardown)
+        let seen = INPUTS_SEEN.try_with(|c| {
+            let c = c.borrow();
+            if c.0 == self.id && c.1 == self.revision { c.2.get(&query).copied() } else { None }
+        }).ok().flatten();
+        let (index, fingerprint) = match seen {
             Some(x) => x,
             None => {
                 let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -156,7 +166,16 @@ impl QueryEngine {
                     return Err(QueryError::KindConflict(kind));
                 }
                 let x = (index, state.graph.fingerprint(index).ok_or(QueryError::MissingInput(query))?);
-                self.inputs.insert(query, x);
+                drop(state);
+                let _ = INPUTS_SEEN.try_with(|c| {
+                    // the system heap: the map outlives any one compile on this thread
+                    let _k = crate::zone_alloc::kept();
+                    let mut c = c.borrow_mut();
+                    if c.0 != self.id || c.1 != self.revision {
+                        *c = (self.id, self.revision, HashMap::default());
+                    }
+                    c.2.insert(query, x);
+                });
                 x
             }
         };

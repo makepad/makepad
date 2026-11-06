@@ -499,6 +499,11 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
     // the types interned since the encode, copied from the live interner: ids stay identical
     tcx.tys.top_up_from(&u.tcx.tys).ok_or("the image holds more types than the program")?;
     compare((&u.prog, &u.tcx), (&prog, &tcx))?;
+    // the crates the unit bound (Unit::new, bind_added_provided) keep rustc's layout: the restored
+    // program has their marks, as the new layouts below have the opaque types
+    for (c, now) in prog.crates.iter_mut().zip(&u.prog.crates) {
+        c.rustc_laid = now.rustc_laid;
+    }
     if added {
         // the program's own recipes, not the image's: its graph is the boot's (what the cache
         // records the program by) and its load recipe lists each crate as it was loaded

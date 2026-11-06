@@ -1142,16 +1142,47 @@ impl<'a> Gates<'a> {
     }
 }
 
+/// The feature gates of each of `crates` once their bodies are loaded (`check_crate`, then
+/// `check_bodies` and `check_imports`), the crates on the pool: by crate, its errors in that order.
+pub fn check_crates(prog: &Program, tcx: &crate::tcx::Tcx, crates: &[u32]) -> Vec<Vec<String>> {
+    // each crate's definitions and imports, in their order
+    let mut slot = vec![usize::MAX; prog.crates.len()];
+    let mut uniq: Vec<u32> = Vec::new();
+    for &k in crates {
+        if slot[k as usize] == usize::MAX { slot[k as usize] = uniq.len(); uniq.push(k); }
+    }
+    let mut defs: Vec<Vec<crate::program::DefId>> = vec![Vec::new(); uniq.len()];
+    for i in 0..prog.defs.len() {
+        let d = crate::program::DefId(i as u32);
+        if let Some(&s) = slot.get(prog.def(d).krate as usize).filter(|&&s| s != usize::MAX) { defs[s].push(d); }
+    }
+    let mut imports: Vec<Vec<usize>> = vec![Vec::new(); uniq.len()];
+    for (i, imp) in prog.imports.iter().enumerate() {
+        let Some(&k) = prog.file_crate.get(imp.file as usize) else { continue };
+        if let Some(&s) = slot.get(k as usize).filter(|&&s| s != usize::MAX) { imports[s].push(i); }
+    }
+    let mut order: Vec<usize> = (0..uniq.len()).collect();
+    order.sort_by_key(|&s| (std::cmp::Reverse(defs[s].len()), s));
+    let mut by: Vec<Vec<String>> = vec![Vec::new(); uniq.len()];
+    for (s, v) in order.iter().zip(crate::lint::par_each(&order, |&s| {
+        let k = uniq[s];
+        let mut v = check_crate(prog, tcx, k);
+        v.extend(check_bodies(prog, tcx, k, &defs[s]));
+        v.extend(check_imports(prog, k, &imports[s]));
+        v
+    })) { by[*s] = v; }
+    crates.iter().map(|&k| by[slot[k as usize]].clone()).collect()
+}
+
 /// The bodies of a checked crate's owners (fn bodies and const / static initializers) and the
 /// items nested in them, once the bodies are loaded.
-pub fn check_bodies(prog: &Program, tcx: &crate::tcx::Tcx, krate: u32) -> Vec<String> {
+fn check_bodies(prog: &Program, tcx: &crate::tcx::Tcx, krate: u32, defs: &[crate::program::DefId]) -> Vec<String> {
     let info = &prog.crates[krate as usize];
     let feats = info.features(prog);
     let mut out = Vec::new();
-    for i in 0..prog.defs.len() {
-        let d = crate::program::DefId(i as u32);
+    for &d in defs {
         let def = prog.def(d);
-        if def.krate != krate || !matches!(def.kind, DefKind::Fn | DefKind::AssocFn | DefKind::Const | DefKind::Static | DefKind::AssocConst) { continue; }
+        if !matches!(def.kind, DefKind::Fn | DefKind::AssocFn | DefKind::Const | DefKind::Static | DefKind::AssocConst) { continue; }
         if prog.item_defs.get(&(def.file, def.item.0)) != Some(&d) { continue; }
         let mut w = Gates::new(prog, tcx, krate, def.file, feats);
         w.scope = def.scope;
@@ -1238,11 +1269,12 @@ fn stability_table() -> &'static std::collections::HashMap<&'static str, (&'stat
 
 /// rustc_passes stability.rs `check_path` on `use` declarations: every module and item a checked
 /// crate's import names must be stable or have its feature enabled.
-pub fn check_imports(prog: &Program, krate: u32) -> Vec<String> {
+fn check_imports(prog: &Program, krate: u32, imports: &[usize]) -> Vec<String> {
     let feats = prog.crates[krate as usize].features(prog);
     let mut out = Vec::new();
-    for imp in prog.imports.iter() {
-        if imp.ext || prog.file_crate.get(imp.file as usize) != Some(&krate) { continue; }
+    for &i in imports {
+        let imp = &prog.imports[i];
+        if imp.ext { continue; }
         let pf = &*prog.files[imp.file as usize];
         if !matches!(pf.expansion_kind(imp.pos), crate::parser::ExpnKind::Root | crate::parser::ExpnKind::LocalRules) { continue; }
         let names: Vec<&str> = imp.segs.iter().map(|sg| prog.syms.str(sg.1)).collect();

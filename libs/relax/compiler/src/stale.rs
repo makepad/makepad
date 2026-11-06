@@ -360,11 +360,7 @@ fn handle_held(h: Held) {
     let paused = crate::inspect::instrument::pause_program();
     eprintln!("makepad: the app is paused ({} threads held) -- decide: makepad inspect {} resume <id> restart | stop (the Run panel offers both)", paused, std::process::id());
     let decision = crate::inspect::events::park_stale(h.os_id, None, &message, &frames);
-    if decision == crate::inspect::events::StaleDecision::Stop {
-        eprintln!("makepad: stale access on a stack: stopped");
-        crate::os::fault::die_by(11);
-    }
-    restart_run();
+    decided(decision, 11, "stale access on a stack");
 }
 
 fn handle(rec: &Rec) {
@@ -419,11 +415,7 @@ fn handle(rec: &Rec) {
     let paused = crate::inspect::instrument::pause_program();
     eprintln!("makepad: the app is paused ({} threads held) -- decide: makepad inspect {} resume <id> restart | stop (the Run panel offers both)", paused, std::process::id());
     let decision = crate::inspect::events::park_stale(rec.os_id.load(Ordering::Relaxed), domain, &message, &frames);
-    if decision == crate::inspect::events::StaleDecision::Stop {
-        eprintln!("makepad: stale access: stopped");
-        crate::os::fault::die_by(sig);
-    }
-    restart_run();
+    decided(decision, sig, "stale access");
 }
 
 /// What the watcher told, for `makepad inspect <pid> stale`: (verdict line, report JSON).
@@ -452,6 +444,24 @@ fn where_in(r: &Range, addr: u64) -> String {
     match r.kind {
         "unloaded module" => crate::sandbox::describe_window_offset(addr - r.lo),
         _ => format!("{:#x} bytes in", addr - r.lo),
+    }
+}
+
+/// What the person decided on a parked stale access: stop ends the process by the fault's signal,
+/// restart starts the next run. A run that ends meanwhile (a restart or stop taken elsewhere: the
+/// ring, the WM's toast, its domain stopping) gets no second restart: its paused threads run again
+/// so that its end reaches them, and the faulting thread stays parked until the end takes it.
+fn decided(decision: crate::inspect::events::StaleDecision, sig: i32, what: &str) {
+    use crate::inspect::events::StaleDecision;
+    match decision {
+        StaleDecision::Stop => {
+            eprintln!("makepad: {what}: stopped");
+            crate::os::fault::die_by(sig);
+        }
+        StaleDecision::Restart => restart_run(),
+        StaleDecision::Ending => {
+            crate::inspect::instrument::resume_program();
+        }
     }
 }
 

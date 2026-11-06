@@ -18,7 +18,7 @@ use crate::typeck::{Body, Res, PAT_KEY};
 use crate::types::{TyId, TyKind, TypeFlags};
 use constructor::{ConstructorSet, Ctor, IntRange, MaybeInfiniteInt, RangeEnd, Slice, SliceKind, VariantVisibility};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use crate::fxhash::HashMap;
 use usefulness::{MatchArm, PlaceValidity, Usefulness, WitnessPat};
 
 /// A deconstructed pattern's index in `Cx::pats`.
@@ -1244,7 +1244,7 @@ enum LetSource {
 pub fn body_cx<'a>(prog: &'a Program, tcx: &'a Tcx, body: &'a Body) -> Cx<'a> {
     let d = prog.def(body.def);
     let env = TypingEnv { limit: crate::tcx::RecursionLimit::for_item(prog, body.def), param_env: body.param_env.unwrap_or_default(), mode: crate::tcx::TypingMode::non_body_analysis() };
-    Cx { prog, tcx, body, env, module: d.scope, krate: d.krate, pats: Vec::new(), next_opaque: 0, inhabited: RefCell::new(HashMap::new()), const_errors: Vec::new() }
+    Cx { prog, tcx, body, env, module: d.scope, krate: d.krate, pats: Vec::new(), next_opaque: 0, inhabited: RefCell::new(HashMap::default()), const_errors: Vec::new() }
 }
 
 impl Cx<'_> {
@@ -1289,9 +1289,9 @@ impl<'a> Checker<'a> {
         let n = body.expr_ty.len();
         let typed = |i: usize| body.expr_typed.get(i);
         // the `let` expressions of `if` / `while` conditions
-        let mut let_source: HashMap<u32, LetSource> = HashMap::new();
+        let mut let_source: HashMap<u32, LetSource> = HashMap::default();
         // the attributes of the arm an `if let` guard belongs to
-        let mut guard_attrs: HashMap<u32, Vec<Attr>> = HashMap::new();
+        let mut guard_attrs: HashMap<u32, Vec<Attr>> = HashMap::default();
         let mut blocks: Vec<BlockId> = body.body.into_iter().collect();
         for i in 0..n {
             if !typed(i) { continue; }

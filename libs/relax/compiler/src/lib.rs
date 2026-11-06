@@ -95,6 +95,7 @@ pub mod sandbox;
 pub mod stale;
 pub mod invalid;
 pub mod domain;
+mod sections;
 pub(crate) mod domain_res;
 pub(crate) mod domain_threads;
 pub mod jit;
@@ -128,6 +129,7 @@ mod test_pkg;
 pub mod tui;
 pub mod check;
 mod check_order;
+mod check_reuse;
 mod typeck_bg;
 mod gandalf_out;
 pub mod serve;
@@ -1071,6 +1073,11 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
         }
     }
     let total_runs = runs.len();
+    // the platform's start code runs the program's constructors before the harness (sections.rs)
+    if let Err(e) = unsafe { crate::sections::run_constructors(&mut *u, krate, None) } {
+        eprintln!("error: {e}");
+        return 101;
+    }
     for (ri, d) in runs.into_iter().enumerate() {
         let last_round = ri + tests.len() >= total_runs;
         let name = u.prog.def_path(d);
@@ -1095,6 +1102,13 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
             // the same test at the same time in N domains of this unit (domain 0 + N-1 new
             // blocks), each on its own thread: a static shared between them fails its asserts
             let bases: Vec<u64> = std::iter::once(u.syms.dom0()).chain((1..runtime.test_domains).map(|_| crate::owner::call(crate::owner::Class::Program, || crate::domain::create(&u)))).collect();
+            // a new domain's statics are their initial images: its constructors run in it too
+            for &b in &bases[1..] {
+                if let Err(e) = unsafe { crate::sections::run_constructors(up, krate, Some(b)) } {
+                    eprintln!("error: {e}");
+                    return 101;
+                }
+            }
             let upa = up as usize;
             let rs: Vec<_> = std::thread::scope(|sc| {
                 let hs: Vec<_> = bases.iter().map(|&b| sc.spawn(move || unsafe { jit::call_jit_in(upa as *mut jit::Unit, b, entry, 0) })).collect();
@@ -1294,6 +1308,9 @@ mod value_tests;
 
 #[cfg(test)]
 mod check_lint_tests;
+
+#[cfg(test)]
+mod check_reuse_tests;
 
 #[cfg(test)]
 #[test]

@@ -30,9 +30,9 @@ pub struct Caps {
     /// vfmadd*ps ymm
     pub fma: bool,
     /// AVX2's 32-bit lane forms too (`op256_ints`: integer arithmetic, compares, shifts, zips,
-    /// conversions, rounding, selects, splats). Compute's eight-lane kernels turn it on (their
-    /// halves are integer and float chains alike); Relax's tiers keep the float forms only
-    /// until these are measured on its workloads.
+    /// conversions, rounding, selects, splats): on with AVX2 (compute's eight-lane kernels and
+    /// Relax's tiers, whose stream-map vectoriser computes a float loop's masks and blends as
+    /// such halves).
     pub ints: bool,
 }
 

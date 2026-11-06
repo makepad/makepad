@@ -1,0 +1,6 @@
+# v1: a variant inserted before the held one, fitting the running layout: the held value is still C4
+v1 patch
+# v2: a unit variant inserted first: `==` and `mem::discriminant` read the held value by the new numbers
+v2 patch
+# v3: a variant inserted after code read the numbers (`mem::discriminant`): the restart rung
+v3 restart note=read them as numbers

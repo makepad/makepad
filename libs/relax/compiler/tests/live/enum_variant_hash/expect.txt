@@ -1,0 +1,4 @@
+# v1: a variant added at the end: the running variants keep their positions, the set finds Settings
+v1 patch
+# v2: a variant inserted before Settings: the hash the set holds was made from its old position
+v2 restart note=derived `Hash`

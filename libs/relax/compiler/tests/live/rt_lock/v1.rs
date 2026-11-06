@@ -4,13 +4,20 @@
 // holding today's unit lock). The real-time thread must never compile and never wait for the
 // compiler: the installer compiles every uncompiled callee reachable from patched code before it
 // installs, and the patch compiles off the lock. Expected: no call of `voice` takes 5 ms or more
-// in any window (`heavy` is built big enough that compiling it takes far longer).
+// of its own in any window (`heavy` is built big enough that compiling it takes far longer).
+// A call's own time is what the compiler could take from it: on Linux, its thread's CPU time
+// over the call, or all of its time when it blocked (a voluntary switch). Being preempted is
+// neither: the stand-in runs at the normal policy, so a busy box preempts it for a scheduler
+// slice or more (2-22 ms with 3-8 copies on a loaded node, none with a voluntary switch), where
+// a real audio thread runs at a real-time policy.
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 static ITERS: AtomicU64 = AtomicU64::new(0);
+// the longest call's own time (the verdict), and the longest call including preemption
 static MAX_NS: AtomicU64 = AtomicU64::new(0);
+static MAX_WALL_NS: AtomicU64 = AtomicU64::new(0);
 static SINK: AtomicU64 = AtomicU64::new(0);
 // voice(7) as last computed on the real-time thread: proves it runs the edited code
 static LAST7: AtomicU64 = AtomicU64::new(0);
@@ -43,14 +50,51 @@ fn voice(i: u64) -> u64 {
     heavy(i) ^ 0x55
 }
 
+// The calling thread's CPU time so far (ns) and its voluntary switches; off Linux none (0, 0):
+// all of a call's time is its own.
+#[cfg(target_os = "linux")]
+fn thread_use() -> (u64, i64) {
+    #[repr(C)]
+    struct Timespec {
+        s: i64,
+        ns: i64,
+    }
+    #[repr(C)]
+    struct Rusage {
+        f: [i64; 18],
+    }
+    unsafe extern "C" {
+        fn clock_gettime(clock: i32, t: *mut Timespec) -> i32;
+        fn getrusage(who: i32, u: *mut Rusage) -> i32;
+    }
+    let mut t = Timespec { s: 0, ns: 0 };
+    let mut u = Rusage { f: [0; 18] };
+    // CLOCK_THREAD_CPUTIME_ID, RUSAGE_THREAD; ru_nvcsw is the 17th field
+    unsafe {
+        clock_gettime(3, &mut t);
+        getrusage(1, &mut u);
+    }
+    (t.s as u64 * 1_000_000_000 + t.ns as u64, u.f[16])
+}
+#[cfg(not(target_os = "linux"))]
+fn thread_use() -> (u64, i64) {
+    (0, 0)
+}
+
 fn rt_loop() {
+    let linux = cfg!(target_os = "linux");
     let mut i = 0u64;
     loop {
+        // (CPU time does not run while the thread is preempted, wherever that lands)
+        let (cpu0, vol0) = thread_use();
         let t = Instant::now();
         let v = voice(i);
         let ns = t.elapsed().as_nanos() as u64;
+        let (cpu1, vol1) = thread_use();
         SINK.fetch_xor(v, Ordering::Relaxed);
-        MAX_NS.fetch_max(ns, Ordering::SeqCst);
+        let own = if linux && vol1 == vol0 { cpu1.saturating_sub(cpu0).min(ns) } else { ns };
+        MAX_NS.fetch_max(own, Ordering::SeqCst);
+        MAX_WALL_NS.fetch_max(ns, Ordering::SeqCst);
         if ITERS.fetch_add(1, Ordering::SeqCst) % 1024 == 0 {
             LAST7.store(voice(7), Ordering::SeqCst);
         }
@@ -72,14 +116,17 @@ fn run() {
         wait_iters(100_000);
         println!("out big {}", big(1) & 1 < 2);
         MAX_NS.store(0, Ordering::SeqCst);
+        MAX_WALL_NS.store(0, Ordering::SeqCst);
         return;
     }
     wait_iters(100_000);
     let max = MAX_NS.swap(0, Ordering::SeqCst);
+    let wall = MAX_WALL_NS.swap(0, Ordering::SeqCst);
     println!("out voice7 {}", LAST7.load(Ordering::SeqCst));
     if max < 5_000_000 {
         println!("out rt ok");
     } else {
         println!("out rt stall {} us", max / 1000);
     }
+    println!("rt longest call {} us, {} us of it its own", wall / 1000, max / 1000);
 }

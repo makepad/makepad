@@ -1,4 +1,4 @@
-# v1: inserted variant: the held value maps by name (still C4)
-v1 patch|reinst
-# v2: removing the held variant without #[default] is refused, naming where the value lives
-v2 refuse note=HELD
+# v1: a variant whose payload grows the enum (8 -> 24 bytes): the running values cannot hold it in place, restart
+v1 restart note=does not fit the running values' layout
+# v2: removing the held variant: a running value may hold it, restart naming where it lives (hotreload.md 13)
+v2 restart note=HELD

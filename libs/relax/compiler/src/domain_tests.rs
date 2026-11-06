@@ -91,6 +91,7 @@ fn launch_with(u: &mut Unit, entry: u64, id: Option<DomainId>, arg: u64) -> (Dom
         base,
         entry,
         arg,
+        None,
         "teardown-fixture",
         None,
     )

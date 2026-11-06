@@ -98,6 +98,18 @@ impl AdtT {
         }
         Some(result)
     }
+    /// The value variant `index`'s tag holds in a Direct-tagged layout: its discriminant, or the
+    /// tag a live edit kept for it (`live_tags`, M10).
+    pub fn tag_for_variant(&self, tcx: &Tcx, prog: &Program, index: u32) -> Option<Discr> {
+        if self.live_tags.is_empty() { return self.discriminant_for_variant(tcx, prog, index); }
+        let at = self.initial_discriminant(tcx);
+        self.live_tags.get(index as usize).map(|&val| Discr { val, ty: at.ty, bytes: at.bytes })
+    }
+    /// The variant whose Direct tag holds `tag` (sign-extended as the tag's type), by
+    /// `tag_for_variant`.
+    pub fn variant_of_tag(&self, tcx: &Tcx, prog: &Program, tag: i128) -> Option<u32> {
+        (0..self.variants.len() as u32).find(|&v| self.tag_for_variant(tcx, prog, v).is_some_and(|t| t.signed_value() == tag))
+    }
     /// Empty enums have no discriminant, including for layout's placeholder variant 0.
     pub fn discriminant_for_variant(&self, tcx: &Tcx, prog: &Program, index: u32) -> Option<Discr> {
         if !self.is_enum() { return None; }

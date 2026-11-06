@@ -1,0 +1,3 @@
+# v1: a static joins the laid-out section `zz_live`: the restart rung, naming it; the running
+# program keeps its table of two (out=prev)
+v1 restart note=link section

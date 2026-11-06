@@ -385,6 +385,46 @@ pub(crate) fn hold_old_frames(u: &Unit, gen: u32, layout: &str, paused: bool) ->
     n
 }
 
+/// A patch that changes a struct's layout in place (reload.rs fresh_layout_struct), about to
+/// install with the program threads paused (inspect::instrument::pause_for_patch): the first frame
+/// of a program thread in code of one of `slots` (any version: what the patch rebuilds was built
+/// for the old layout), or in an earlier version of any slot (code of a text no longer the
+/// program's, whose types are not asked), named for the restart's reason. Err: a stack could not
+/// be read to its end.
+pub(crate) fn frame_in(u: &Unit, slots: &crate::fxhash::HashSet<u32>) -> Result<Option<String>, String> {
+    let caps = crate::inspect::capture_all(&crate::inspect::instrument::program_thread)?;
+    let code = u.code.read().unwrap_or_else(|e| e.into_inner());
+    for c in caps {
+        if let Some(e) = c.err {
+            return Err(format!("thread {}: {}", c.t.os_id, e));
+        }
+        if let Some(why) = c.stops() {
+            return Err(format!("thread {}: {}", c.t.os_id, why));
+        }
+        let mut at: Vec<u64> = c.frames.iter().enumerate().map(|(k, &a)| if k == 0 { a } else { a.wrapping_sub(1) }).collect();
+        if c.lr != 0 {
+            at.push(c.lr.wrapping_sub(1));
+        }
+        #[cfg(target_arch = "x86_64")]
+        if c.sp != 0 {
+            if let Some(w) = crate::inspect::threads::read_mem(c.sp, 8) {
+                at.push(u64::from_le_bytes(w[..8].try_into().unwrap()).wrapping_sub(1));
+            }
+        }
+        for a in at {
+            let Some((start, _, slot)) = code.entry_at(a) else { continue };
+            let f = &u.fns[slot as usize];
+            if slots.contains(&slot) {
+                return Ok(Some(format!("`{}` is running", f.name)));
+            }
+            if start != f.code {
+                return Ok(Some(format!("`{}` runs code from before an earlier edit", f.name)));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
 pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;

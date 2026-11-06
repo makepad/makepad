@@ -424,7 +424,7 @@ pub mod obligations {
 
     impl<'a, 'tcx> Wfcx<'a, 'tcx> {
         fn register(&mut self, goal: Goal, pos: u32) {
-            self.ocx.engine.register_predicate_obligation(self.infcx, PredicateObligation { goal, recursion_depth: 0, cause: ObligationCause { span: pos, body_id: self.def } });
+            self.ocx.engine.register_predicate_obligation(self.infcx, self.ocx.prog, PredicateObligation { goal, recursion_depth: 0, cause: ObligationCause { span: pos, body_id: self.def } });
         }
 
         /// wfcheck.rs WfCheckingCtxt::deeply_normalize. A type that cannot be normalized stays as

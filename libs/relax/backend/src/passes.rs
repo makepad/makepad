@@ -6172,6 +6172,10 @@ pub fn sroa_with(f: &mut Func, tile: bool) -> bool {
     changed
 }
 
+/// The escape call sites an escaped slot may have and still be promoted (each last-use site
+/// costs a reachability walk).
+const SROA_ESC_SITES: u32 = 12;
+
 pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -> bool {
     let nv = f.vregs.len();
     let ns = f.slots.len();
@@ -6253,6 +6257,20 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
         }
     }
     let at = |v: VReg| addr[v.0 as usize];
+    // A guarded inline copy's slow call (a live session) runs only after a patch of its callee:
+    // a slot it gets at offset 0 and keeps no pointer to (its result buffer by construction,
+    // `Func::sret`) is written back and read again around that call alone (a reload site, below),
+    // at any loop depth.
+    let guard_nocap = |bi: usize, k: usize, sl: u32| -> bool {
+        f.guard_call(bi, k)
+            && match &f.blocks[bi].insts[k] {
+                Inst::Call(c, args, _) => args.iter().enumerate().all(|(j, a)| {
+                    let sret = j == 0 && matches!(c, Callee::Fn(id) | Callee::CFn(id, _) if f.sret_callees.contains(id));
+                    at(*a).0 != sl || (at(*a).1 == 0 && (sret || sroa_nocapture(c, j)))
+                }),
+                _ => false,
+            }
+    };
     // a slot qualifies when its addresses are only bases, copy operands or derivations
     let mut ok = vec![true; ns];
     // slots whose address is passed to calls that are their last uses (an iterator handed
@@ -6331,14 +6349,38 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
             sroa_reject_slot(&mut ok, at(*u).0 as usize, SroaReject::Escape, &mut stats);
         }
     }
+    // escaped slots in copies that are promoted anyway (below): the slow call reads or writes
+    // bytes no access names, so they count as copied in and out whole
+    let mut copied_esc = vec![false; ns];
     if esc.iter().any(|x| *x) {
+        // An escaped slot stays out of copies (a copy is no access the last-use test below sees),
+        // unless every escape is a guarded copy's slow call that keeps no pointer to it: those are
+        // reload sites, after which the slot's cells are its value again.
+        let mut guard_only = vec![true; ns];
+        let mut nsites = vec![0u32; ns];
+        for &(bi, k) in &rel {
+            if let Inst::Call(_, args, _) = &f.blocks[bi as usize].insts[k as usize] {
+                for (j, a) in args.iter().enumerate() {
+                    let sl = at(*a).0;
+                    if sl != u32::MAX && !args[..j].iter().any(|b| at(*b).0 == sl) {
+                        nsites[sl as usize] += 1;
+                        guard_only[sl as usize] &= guard_nocap(bi as usize, k as usize, sl);
+                    }
+                }
+            }
+        }
         for &(bi, k) in &rel {
             {
                 let i = &f.blocks[bi as usize].insts[k as usize];
                 if let Inst::Copy(d, s2, _) = i {
                     for v in [*d, *s2] {
-                        if at(v).0 != u32::MAX && esc[at(v).0 as usize] {
-                            sroa_reject_slot(&mut ok, at(v).0 as usize, SroaReject::Escape, &mut stats);
+                        let sl = at(v).0;
+                        if sl != u32::MAX && esc[sl as usize] {
+                            if guard_only[sl as usize] && nsites[sl as usize] <= SROA_ESC_SITES {
+                                copied_esc[sl as usize] = true;
+                            } else {
+                                sroa_reject_slot(&mut ok, sl as usize, SroaReject::Escape, &mut stats);
+                            }
                         }
                     }
                 }
@@ -6473,6 +6515,16 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                     }
                     _ => {}
                 }
+            }
+        }
+        // (the escaped slots in copies: their whole bytes, both ways, so the group is tiled and
+        // every byte the slow call reads or writes has a cell its flush and reload move)
+        for sl in 0..ns {
+            if copied_esc[sl] && ok[sl] {
+                let (g, lo) = (root[sl] as usize, delta[sl]);
+                copies.push((g as u32, lo, lo + f.slots[sl].size as i64, 0, false));
+                has_in[g] = true;
+                has_out[g] = true;
             }
         }
         cells.sort_unstable_by_key(|c| (c.0, c.1, mem_key(c.2)));
@@ -6700,7 +6752,7 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
             }
             // few escape sites only (each last-use site costs a reachability walk; no-capture
             // sites are cheap: a Vec's push loop has a few grow calls)
-            if sites[sl].len() > 12 {
+            if sites[sl].len() > SROA_ESC_SITES as usize {
                 sroa_reject_slot(&mut ok, sl, SroaReject::Escape, &mut stats);
                 continue;
             }
@@ -6714,18 +6766,13 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                 // ... and only when the call runs less often than the slot's accesses: a flush and
                 // reload per call in the slot's own loop costs more than the memory traffic it
                 // saves (bench_rt sort_ints / shape got slower with calls inside the hot loop)
-                // A guarded inline copy's slow call (a live session) runs only after a patch of its
-                // callee: its flush and reload cost the path the copy runs nothing, at any depth,
-                // and its result buffer is no capture by construction (`Func::sret`).
-                let guard = f.guard_call(bi, k);
-                let nocap = (guard || depth[bi] < acc_depth[sl])
-                    && match &f.blocks[bi].insts[k] {
-                        Inst::Call(c, args, _) => args.iter().enumerate().all(|(j, a)| {
-                            let sret = guard && j == 0 && matches!(c, Callee::Fn(id) | Callee::CFn(id, _) if f.sret_callees.contains(id));
-                            at(*a).0 != sl as u32 || (at(*a).1 == 0 && (sret || sroa_nocapture(c, j)))
-                        }),
-                        _ => false,
-                    };
+                // (a guarded copy's slow call: `guard_nocap`)
+                let nocap = guard_nocap(bi, k, sl as u32)
+                    || depth[bi] < acc_depth[sl]
+                        && match &f.blocks[bi].insts[k] {
+                            Inst::Call(c, args, _) => args.iter().enumerate().all(|(j, a)| at(*a).0 != sl as u32 || (at(*a).1 == 0 && sroa_nocapture(c, j))),
+                            _ => false,
+                        };
                 if nocap {
                     reload_sites.push((bi as u32, k as u32, sl as u32));
                     continue;
@@ -6861,6 +6908,24 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
     };
     // invoked reload sites: the reloads go on both edges (blocks made below)
     let mut edge_reloads: Vec<(usize, u32, VReg)> = Vec::new();
+    // (block, instruction, slot): a guarded copy's slow call handed the slot as its result buffer
+    // alone (`Slot::ret`: it writes all of it). The cells' values before it are dead, so they are
+    // not flushed: a flush keeps them live around the loop the copy runs in, which the copy's own
+    // path pays for (a popped Option's tag stored, copied and reloaded each iteration)
+    let ret_sites: Vec<(u32, u32, u32)> = reload_sites
+        .iter()
+        .copied()
+        .filter(|&(bi, k, sl)| {
+            f.slots[sl as usize].ret
+                && f.guard_call(bi as usize, k as usize)
+                && match &f.blocks[bi as usize].insts[k as usize] {
+                    Inst::Call(Callee::Fn(id) | Callee::CFn(id, _), args, _) => {
+                        f.sret_callees.contains(id) && args.first().map(|a| at(*a)) == Some((sl, 0)) && !args[1..].iter().any(|a| at(*a).0 == sl)
+                    }
+                    _ => false,
+                }
+        })
+        .collect();
     // temporaries of sub-cell accesses (vregs nv0.., added after the rewrite)
     let nv0 = f.vregs.len() as u32;
     let mut sub_tmps: Vec<Cls> = Vec::new();
@@ -6989,7 +7054,7 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                 Inst::Call(_, args, _) if !esc_addr.is_empty() => {
                     // an escaped slot's last use: the slot gets its cells' values first
                     for &(sl, a) in &esc_addr {
-                        if !args.iter().any(|x| at(*x).0 == sl) {
+                        if !args.iter().any(|x| at(*x).0 == sl) || ret_sites.contains(&(bi as u32, k as u32, sl)) {
                             continue;
                         }
                         let g = root[sl as usize] as usize;

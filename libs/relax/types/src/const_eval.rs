@@ -16,7 +16,11 @@ pub(crate) struct ConstEvalKey {
 pub enum ErrorHandled { TooGeneric, Reported(ValTreeCreationError) }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ValTreeCreationError { NonSupportedType(crate::types::TyId), NodesOverflow, CyclicConst, ErrorHandled(&'static str) }
+pub enum ValTreeCreationError {
+    NonSupportedType(crate::types::TyId), NodesOverflow, CyclicConst, ErrorHandled(&'static str),
+    /// the constant's body has type errors, which are the report (rustc's AlreadyReported)
+    Tainted,
+}
 
 pub type EvalToValTreeResult = Result<ValTree, ErrorHandled>;
 
@@ -25,6 +29,10 @@ pub type EvalToValTreeResult = Result<ValTree, ErrorHandled>;
 pub(crate) fn eval_to_valtree(tcx: &Tcx, prog: &Program, key: &ConstEvalKey) -> EvalToValTreeResult {
     match fold_to_valtree(tcx, prog, key, false) {
         Folded::Value(value) => value,
+        // rustc_const_eval interpret/eval_context.rs load_mir: a body tainted by errors is not
+        // evaluated (throw_inval!(AlreadyReported)). Whether another evaluation ran it first, and on
+        // which thread its errors were emitted, then changes nothing in the output.
+        Folded::Execute(key) if tainted_body(tcx, prog, key.def) => Err(ErrorHandled::Reported(ValTreeCreationError::Tainted)),
         Folded::Execute(key) => match tcx.const_eval_provider {
             Some(provider) => (provider.evaluate)(provider.context, key.typing_env, key.def, &key.args),
             None => Err(evaluation_error()),
@@ -33,6 +41,14 @@ pub(crate) fn eval_to_valtree(tcx: &Tcx, prog: &Program, key: &ConstEvalKey) -> 
 }
 
 enum Folded { Value(EvalToValTreeResult), Execute(ConstEvalKey) }
+
+/// A body of a checked crate with type errors: the check reports them as that body owner's
+/// (anonymous constants included), so no evaluation of it runs or reports. Outside the checked
+/// crates a body's build is its report (`makepad run` notes the errors of the code it builds),
+/// so it is evaluated as before.
+pub fn tainted_body(tcx: &Tcx, prog: &Program, def: DefId) -> bool {
+    tcx.validates(prog, prog.def(def).file) && !tcx.typeck(prog, def).errors.is_empty()
+}
 
 /// RELOAD' (lead design, round 33): the value of `def` by const folding alone, never by the
 /// executable provider -- named constants it reads are folded the same way, not through the

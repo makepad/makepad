@@ -20,9 +20,18 @@ struct ObligationStorage { pending: Vec<(PredicateObligation, Option<GoalStalled
 pub struct FulfillmentCtxt { obligations: ObligationStorage, usable_in_snapshot: usize }
 impl FulfillmentCtxt {
     pub fn new(infcx: &InferCtxt<'_>) -> Self { Self { obligations: Default::default(), usable_in_snapshot: infcx.num_open_snapshots() } }
-    pub fn register_predicate_obligation(&mut self, infcx: &InferCtxt<'_>, obligation: PredicateObligation) {
+    /// fulfill.rs:129-151: a goal the fast path proves is never added; one it finds stalled waits
+    /// with its precise `stalled_on` (evaluate_root_goal tries the fast path again only then).
+    pub fn register_predicate_obligation(&mut self, infcx: &InferCtxt<'_>, prog: &Program, obligation: PredicateObligation) {
         assert_eq!(self.usable_in_snapshot, infcx.num_open_snapshots());
-        self.obligations.pending.push((obligation, None));
+        let span = infcx.origin_span.replace(obligation.cause.span);
+        let fast = super::eval_ctxt::fast_path::compute_goal_fast_path(infcx, prog, &obligation.goal);
+        infcx.origin_span.set(span);
+        match fast {
+            Some(r) if r.certainty.is_yes() => {}
+            Some(r) => self.obligations.pending.push((obligation, r.stalled_on)),
+            None => self.obligations.pending.push((obligation, None)),
+        }
     }
     pub fn has_pending_obligations(&self) -> bool { !self.obligations.pending.is_empty() }
     pub fn pending_obligations(&self) -> Vec<PredicateObligation> { self.obligations.pending.iter().map(|(o,_)| o.clone()).collect() }
@@ -85,7 +94,7 @@ impl FulfillmentCtxt {
 pub struct ObligationCtxt<'a, 'tcx> { pub infcx: &'a InferCtxt<'tcx>, pub prog: &'a Program, pub engine: FulfillmentCtxt, pub cause: ObligationCause }
 impl<'a, 'tcx> ObligationCtxt<'a, 'tcx> {
     pub fn new(infcx: &'a InferCtxt<'tcx>, prog: &'a Program) -> Self { Self { infcx, prog, engine: FulfillmentCtxt::new(infcx), cause: infcx.cause } }
-    pub fn register_obligation(&mut self, goal: Goal) { self.engine.register_predicate_obligation(self.infcx, PredicateObligation { goal, recursion_depth: 0, cause: self.cause }); }
+    pub fn register_obligation(&mut self, goal: Goal) { self.engine.register_predicate_obligation(self.infcx, self.prog, PredicateObligation { goal, recursion_depth: 0, cause: self.cause }); }
     pub fn register_obligations(&mut self, goals: Vec<Goal>) { for goal in goals { self.register_obligation(goal); } }
     pub fn eq(&mut self, env: &ParamEnvId, a: TyId, b: TyId) -> Result<(), NoSolution> {
         let goals = self.infcx.at(self.prog, env.clone()).eq(a, b).map_err(|_| NoSolution)?;

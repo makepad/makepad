@@ -200,14 +200,23 @@ impl Interp<'_> {
         Ok(adt.discriminants(self.tcx, self.prog).into_iter().map(|(_, d)| d.val).collect())
     }
 
+    /// The values the variants' Direct tags hold: the discriminants, or the tags a live edit kept
+    /// (AdtT::live_tags).
+    fn adt_tags(&self, ty: TyId) -> R<Vec<u128>> {
+        let TyKind::Adt(d, ..) = self.tcx.tys.kind(ty) else { return unsupported("discriminant of a non-enum") };
+        let Some(adt) = self.tcx.adts.get(d) else { return unsupported("adt") };
+        if !adt.live_tags.is_empty() { return Ok(adt.live_tags.clone()); }
+        self.adt_discrs(ty)
+    }
+
     fn write_discriminant(&mut self, p: MPlace, variant: u32) -> R<()> {
         let l = self.layout(p.ty)?;
-        let discrs = self.adt_discrs(p.ty)?;
+        let tags = self.adt_tags(p.ty)?;
         let Some((off, mem)) = l.tag else { return Ok(()) };
         let size = mem_size(mem);
         let tag = match l.enc {
             crate::layout::TagEnc::Single(_) => return Ok(()),
-            crate::layout::TagEnc::Direct => discrs[variant as usize],
+            crate::layout::TagEnc::Direct => tags[variant as usize],
             crate::layout::TagEnc::Niche { untagged, lo, hi, start } => {
                 if variant == untagged || variant < lo || variant > hi { return Ok(()); }
                 start.wrapping_add((variant - lo) as u128)
@@ -226,9 +235,9 @@ impl Interp<'_> {
         // (discriminant.rs: a pointer in the tag of a niche whose only invalid value is 0 is the untagged variant)
         if !tv.ptrs.is_empty() { if let crate::layout::TagEnc::Niche { untagged, .. } = l.enc { return Ok(untagged); } }
         let tag = self.int_of(&tv)?;
-        let discrs = self.adt_discrs(p.ty)?;
+        let tags = self.adt_tags(p.ty)?;
         match l.enc {
-            crate::layout::TagEnc::Direct => discrs.iter().position(|d| d & mask(size) == tag).map(|v| v as u32).map_or_else(|| ub(format!("enum value has invalid tag: {tag:#x}")), Ok),
+            crate::layout::TagEnc::Direct => tags.iter().position(|d| d & mask(size) == tag).map(|v| v as u32).map_or_else(|| ub(format!("enum value has invalid tag: {tag:#x}")), Ok),
             crate::layout::TagEnc::Niche { untagged, lo, hi, start } => {
                 let rel = tag.wrapping_sub(start) & mask(size);
                 if rel <= (hi - lo) as u128 && lo + rel as u32 != untagged { Ok(lo + rel as u32) } else { Ok(untagged) }

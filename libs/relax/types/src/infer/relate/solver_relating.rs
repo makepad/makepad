@@ -4,7 +4,7 @@ use super::*;
 use crate::consts::{ConstKind, InferConst, IsRigid};
 use crate::next_solver::{PredicateKind, ClauseKind, AliasTerm, Goal, Predicate, ProjectionClause, SubtypePredicate, Term};
 use crate::next_solver::ParamEnvId;
-use std::collections::HashSet;
+use crate::fxhash::HashSet;
 
 pub struct SolverRelating<'a, 'tcx> {
     pub(crate) infcx: &'a InferCtxt<'tcx>,
@@ -18,7 +18,7 @@ pub struct SolverRelating<'a, 'tcx> {
 impl<'a, 'tcx> SolverRelating<'a, 'tcx> {
     pub fn new(infcx: &'a InferCtxt<'tcx>,
     prog: &'a crate::program::Program, ambient_variance: V, param_env: ParamEnvId) -> Self {
-        Self { infcx, prog, param_env, ambient_variance, goals: Vec::new(), cache: HashSet::new() }
+        Self { infcx, prog, param_env, ambient_variance, goals: Vec::new(), cache: HashSet::default() }
     }
     fn register_predicate(&mut self, predicate: Predicate) { self.goals.push(Goal { param_env: self.param_env, predicate }); }
 }

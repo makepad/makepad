@@ -4,8 +4,10 @@
 // held at the fork and never reached exec (makepad-app-aihub: GpuCache -> nvidia-smi with a
 // PR_SET_PDEATHSIG pre_exec, 2026-10-24). Every pre_exec closure here is a fresh instantiation
 // (not compiled before its fork) so that the child is where its code is first reached.
-// Lines starting with "| " must equal real std's (os_diff.sh / core_diff.sh). The same file is the
-// `makepad run relax-fork-busy` program (tools/run/fixture/src/fork_busy.rs, fork_busy.sh).
+// Lines starting with "| " must equal real std's (os_diff.sh / core_diff.sh). The file is kept
+// twice, byte-identical: here, for the std diff runners, and as tools/run/fixture/src/os_fork_busy.rs,
+// the `makepad run relax-fork-busy` program (fork_busy.rs, fork_busy.sh), so the fixture crate holds
+// no file from outside itself (tests copy it alone). fork_busy.sh fails when the two differ.
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

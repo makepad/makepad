@@ -18,7 +18,9 @@
 //! symbol), positions, layout facts, flags -- stays as it is. An inline candidate's patch flag (a
 //! live session's guard symbol, `Func::patch_flag`) and the flags of its unguarded copies
 //! (`Func::unguarded_flags`) are compared as they are too; the root's are not (its own code does
-//! not read them). A result naming a slot the input
+//! not read them). The copy versions the guards compare (`Func::copy_ver`, the root's and each
+//! deferred candidate's own: a word of the slot being built) are compared by the value the build
+//! read, and a hit's code and bodies name the instance's words instead. A result naming a slot the input
 //! does not name (none is known to exist) is not stored. Each slot keeps its own code copy, its
 //! own thunk and its own RIR: function pointers stay distinct, tier-ups, patches and the disk
 //! cache see an ordinary build.
@@ -88,6 +90,7 @@ impl Canon {
 fn hash_prep<H: std::hash::Hasher>(p: &Prep, c: &mut Canon, h: &mut H) {
     use std::hash::Hash;
     p.func.hash_body_mapped(h, &mut |s| c.add(s));
+    p.func.copy_ver.map(|x| x.1).hash(h);
     p.callees.len().hash(h);
     for (s, f, a) in &p.callees {
         (c.add(*s), a).hash(h);
@@ -134,6 +137,7 @@ impl SPrep {
 fn same(p: &Prep, cp: &Canon, s: &SPrep, cs: &Canon) -> bool {
     let (mut mp, mut ms) = (cp.map(), cs.map());
     p.func.same_body_mapped(&mut mp, &s.func, &mut ms)
+        && p.func.copy_ver.map(|x| x.1) == s.func.copy_ver.map(|x| x.1)
         && p.callees.len() == s.callees.len()
         && p.callees.iter().zip(&s.callees).all(|(a, b)| mp(a.0) == ms(b.0) && a.2 == b.2 && a.1.patch_flag == b.1.patch_flag && a.1.unguarded_flags == b.1.unguarded_flags && a.1.same_body_mapped(&mut mp, &b.1, &mut ms))
         && p.facts.len() == s.facts.len()
@@ -237,6 +241,35 @@ pub(crate) fn key(id: u32, p: &Prep, settings: (bool, bool, bool, u64)) -> Key {
     Key { hash, settings, canon, names: n }
 }
 
+/// The copy version words of a stored preparation (`s`: the root's, then each deferred
+/// candidate's, depth first) paired with those of the instance's (`p`) where they differ.
+fn word_pairs(p: &Prep, s: &SPrep, out: &mut Vec<(relax_backend::rir::Sym, relax_backend::rir::Sym)>) {
+    if let (Some(a), Some(b)) = (s.func.copy_ver, p.func.copy_ver) {
+        if a.0 != b.0 {
+            out.push((a.0, b.0));
+        }
+    }
+    for (x, y) in p.deferred.iter().zip(&s.deferred) {
+        word_pairs(&x.2, &y.2, out);
+    }
+}
+
+/// A body of a stored back end, naming the instance's copy version words (`word_pairs`).
+fn rename_words(f: &mut Func, words: &[(relax_backend::rir::Sym, relax_backend::rir::Sym)]) {
+    if words.is_empty() {
+        return;
+    }
+    let to = |s: relax_backend::rir::Sym| words.iter().find(|w| w.0 == s).map_or(s, |w| w.1);
+    for b in &mut f.blocks {
+        for i in &mut b.insts {
+            if let relax_backend::rir::Inst::Addr(_, s) = i {
+                *s = to(*s);
+            }
+        }
+    }
+    f.copy_ver = f.copy_ver.map(|(w, v)| (to(w), v));
+}
+
 /// What a hit hands the back end's caller (BackDone's parts), slots renamed to the instance's.
 pub(crate) type Hit = (Option<(Arc<Func>, Vec<(u32, usize)>, u64)>, Vec<u8>, Vec<(u32, u64)>, Vec<RelocAt>, u64, Vec<Deferred>, (u32, u32));
 
@@ -256,19 +289,28 @@ pub(crate) fn lookup(k: &Key, p: &Prep) -> Option<Hit> {
     let e = e?;
     let back = |s: &mut u32| *s = k.canon.order[*s as usize];
     let name = |ix: u32| k.names.iter().find(|x| x.0 == ix).map(|x| x.1.clone()).unwrap_or_default();
+    let mut words = Vec::new();
+    word_pairs(p, &e.prep, &mut words);
     let func = |f: &Func, ix: u32| {
         let mut f = f.clone();
         f.fn_slots_mut(&mut |s| back(s));
         f.nounwind_inputs.sort_unstable();
         f.name = name(ix);
+        rename_words(&mut f, &words);
         f
     };
     let inl = |v: &[(u32, usize)]| v.iter().map(|&(s, r)| (k.canon.order[s as usize], r)).collect::<Vec<_>>();
     let opt = e.opt.as_ref().map(|(f, i, ns)| (Arc::new(func(f, 0)), inl(i), *ns));
     let relocs = e.relocs.iter().map(|r| {
         let mut r = *r;
-        if let Reloc::Slot(s) | Reloc::Thunk(s) | Reloc::Call(s) = &mut r.target {
-            back(s);
+        match &mut r.target {
+            Reloc::Slot(s) | Reloc::Thunk(s) | Reloc::Call(s) => back(s),
+            Reloc::Sym(s) => {
+                if let Some(w) = words.iter().find(|w| w.0 == *s) {
+                    *s = w.1;
+                }
+            }
+            _ => {}
         }
         r
     }).collect();

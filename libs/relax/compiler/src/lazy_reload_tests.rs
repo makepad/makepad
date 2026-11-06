@@ -623,6 +623,97 @@ fn specv_verified_rebuild_runs_twin_code_not_lazy_compiles() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// SPEC-V (lane JITLIVEO3): a twin runs in its base's place until the base's verdict is clean, so
+/// the base's own record and counters saw none of that run. The twin gets a counted build (its
+/// unverified baseline code is its code for good), and the base's O3 build takes the twin's counts,
+/// mapped onto its own blocks by source position. Before, a base reached O3 with static
+/// frequencies (the twin's heat thrown away) or waited for counts of its own.
+#[test]
+fn specv_base_o3_takes_its_twins_counts() {
+    const CHILD: &str = "MAKEPAD_RUN_SPECV_TWIN_PGO_TEST";
+    let Ok(case) = std::env::var(CHILD) else {
+        for case in ["twinpgo"] {
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.args(["--exact", "lazy_reload_tests::specv_base_o3_takes_its_twins_counts", "--nocapture", "--test-threads=1", "--format=terse"])
+                .env(CHILD, case).env("MAKEPAD_RUN_GANDALF_ALL", "0");
+            let output = cmd.output().unwrap();
+            assert!(output.status.success(), "{case}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
+        return;
+    };
+    use std::sync::atomic::Ordering;
+    crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
+    crate::jit::set_ahead_level(crate::options::AheadLevel::AotMax);
+    crate::jit::SPECV_HOLD.store(1, Ordering::Relaxed);
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-specv-twinpgo-{}-{}", case, std::process::id()));
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+    std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    // mid's loop runs 12 times a call, its `leaf` arm 4 of them
+    let src = "#[inline(never)] pub fn leaf(a: &mut u32, b: &u32) -> u32 { *a += *b; *a }\n\
+        #[inline(never)] pub fn mid(a: &mut u32, b: &u32) -> u32 { let mut s = 0u32; let mut i = 0u32; while i < 12 { if i % 3 == 0 { s = s.wrapping_add(leaf(a, b)); } else { s = s.wrapping_add(i); } i += 1; } s }\n\
+        pub fn root(out: &mut u32) { let mut x = 1u32; let y = 2u32; *out = mid(&mut x, &y); }\n";
+    std::fs::write(dir.join("app/src/lib.rs"), src).unwrap();
+    let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
+    let session = Arc::new(crate::Session::default());
+    let (prog, core, app_crate) = crate::load_with_std(&session, &app, "specv_twinpgo", false).unwrap();
+    let graph = format!(r#"{{"units":[{{"pkg_id":"path+file://{}/app#app@0.1.0","target":{{"name":"app","src_path":{}}}}}]}}"#, dir.display(), crate::diag::quote(&app));
+    let roots = crate::reload::gandalf_app_roots(&crate::unitgraph::Units::from_json(graph.as_bytes()).unwrap(), dir.join("app").to_str().unwrap());
+    let find = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = crate::program::DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == name).then_some(id)
+    }).unwrap();
+    let (leaf_def, mid_def, root_def) = (find("leaf"), find("mid"), find("root"));
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    crate::borrowck::event::set_app_scope(roots);
+    let mut u = crate::jit::Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut crate::jit::Unit;
+    crate::syms::set_unit(up);
+    let (leaf, mid, root, root_entry) = crate::owner::call(crate::owner::Class::Program, || {
+        let l = u.fn_id(crate::jit::FnKey::Inst(leaf_def, vec![]));
+        let m = u.fn_id(crate::jit::FnKey::Inst(mid_def, vec![]));
+        let r = u.fn_id(crate::jit::FnKey::Inst(root_def, vec![]));
+        (l, m, r, u.entry(r))
+    });
+    // x = 1 + 2k at the k-th leaf call: s = 3 + 5 + 7 + 9 + (1 + 2 + 4 + 5 + 7 + 8 + 10 + 11)
+    let run = || {
+        let mut result = 0u32;
+        unsafe { crate::jit::call_jit(up, root_entry, &mut result as *mut u32 as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        assert_eq!(result, 72);
+    };
+    // held verdicts: root's call runs mid's twin
+    run();
+    let twin = u.plain_twin_of(mid).expect("mid's twin");
+    assert!(u.fns[twin as usize].compiled && !u.fns[mid as usize].compiled, "the twin ran, the base never did");
+    // the twin's counted build: its unverified code is the twin's code for good
+    assert!(unsafe { crate::jit::counted_build(up, twin, false) }, "the twin gets a counted build");
+    const RUNS: u32 = 5;
+    for _ in 0..RUNS {
+        run();
+    }
+    // the release: mid's verdict is clean, its own (verified) RIR differs from the twin's
+    crate::jit::specv_release();
+    let t0 = std::time::Instant::now();
+    loop {
+        crate::borrowck::settle().recv().unwrap();
+        if [leaf, mid, root].iter().all(|&i| u.verdict_clean(i)) { break; }
+        assert!(t0.elapsed().as_secs() < 20, "no clean verdicts");
+    }
+    assert!(u.refresh_verified(mid));
+    unsafe { crate::jit::build_normal(up, mid) }.unwrap();
+    let r = u.fns[mid as usize].rir.clone().expect("mid's RIR");
+    assert!(!r.baseline, "verified: mid's own RIR");
+    // its O3 input gets the twin's counts: the loop's blocks ran 12 per call, the leaf arm 4
+    let counts = u.pgo_counts_for(mid, &r).expect("the base's O3 build takes its twin's counts");
+    let top = counts.iter().copied().fold(0.0f32, f32::max);
+    assert!(top >= (12 * RUNS) as f32, "the loop's counts reach the base: {counts:?}\n{}", r.dump());
+    assert!(counts.iter().any(|&c| c >= (4 * RUNS) as f32 && c < (12 * RUNS) as f32), "the leaf arm ran a third of the loop: {counts:?}\n{}", r.dump());
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Relaxed Rust D3: a pair of index borrows the checker accepts only with a run-time check
 /// (`&mut v[i]`, `&mut v[j]`). Before the verdict the body runs as written (SPEC-V: unverified);
 /// once it is clean, the verified code is lowered with the check: an overlap panics as

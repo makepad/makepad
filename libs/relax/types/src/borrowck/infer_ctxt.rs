@@ -279,6 +279,10 @@ impl BorrowckTypeOps for BorrowckInferCtxt<'_> {
         self.fully_perform_op(out, locations, ConstraintCategory::Boring, ParamEnvAnd { param_env: self.param_env_id(), value: Normalize { value: ty } }).unwrap_or(ty)
     }
     fn deeply_normalize_sig(&mut self, out: &mut MirTypeckRegionConstraints, sig: &FnSig, at: Location) -> Result<FnSig, ()> {
+        // normalize.rs:15 try_fast_path: a signature without aliases is its own normalization, and no
+        // fn pointer type is made for it (normalize_type_op's own fast path, taken before interning).
+        let tys = &self.tcx.tys;
+        if sig.inputs.iter().chain([&sig.output]).all(|&t| !tys.may_project(t) && !tys.has_opaque(t)) { return Ok(sig.clone()); }
         let value = self.tcx.tys.intern(TyKind::FnPtr(self.tcx.tys.mk_list(&sig.inputs), sig.output, sig.header, 0));
         let ty = self.fully_perform_op(out, Locations::Single(at), ConstraintCategory::Boring, ParamEnvAnd { param_env: self.param_env_id(), value: Normalize { value } }).map_err(|_| ())?;
         let TyKind::FnPtr(inputs, output, header, _) = self.tcx.tys.kind(ty) else { unreachable!() };
@@ -343,10 +347,8 @@ impl BorrowckTypeOps for BorrowckInferCtxt<'_> {
     fn fn_def_sig(&self, def: DefId, args: &[TyId], regions: crate::types::RegionArgsId) -> PolyFnSig {
         let args = self.tcx.complete_args(self.prog, def, args, regions);
         let sig = self.tcx.fn_item_sig(self.prog, def).expect("FnDef signature");
-        let ty = self.tcx.tys.intern(TyKind::FnPtr(self.tcx.tys.mk_list(&sig.params), sig.ret, sig.header, sig.bound_regions));
-        let ty = self.tcx.instantiate_ty(self.prog, def, &args, ty);
-        let TyKind::FnPtr(inputs, output, header, bound_regions) = self.tcx.tys.kind(ty) else { unreachable!() };
-        PolyFnSig { sig: FnSig { inputs: self.tcx.tys.list(*inputs).to_vec(), output: *output, header: *header }, bound_regions: *bound_regions }
+        let (inputs, output) = self.tcx.instantiate_sig_tys(self.prog, def, &args, &sig.params, sig.ret);
+        PolyFnSig { sig: FnSig { inputs, output, header: sig.header }, bound_regions: sig.bound_regions }
     }
     fn field_ty(&self, base: PlaceTy, field: FieldIdx) -> Option<TyId> {
         match self.tcx.tys.kind(base.ty) {

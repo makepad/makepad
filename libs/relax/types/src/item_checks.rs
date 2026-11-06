@@ -156,6 +156,12 @@ pub fn private_assoc_types(prog: &Program, tcx: &Tcx, own: &[bool]) -> Vec<Strin
     let mut errors = Vec::new();
     // (a definition an expansion wrote has no visibility the AST states: its checks are skipped)
     let written = |d: DefId| { let def = prog.def(d); def.item.0 != u32::MAX && prog.files.get(def.file as usize).is_some_and(|f| f.ast.items.get(def.item.0 as usize).is_some_and(|it| it.lo < f.src_len)) };
+    // the associated types of each impl, in definition order
+    let mut assoc_tys: std::collections::HashMap<DefId, Vec<DefId>> = std::collections::HashMap::new();
+    for j in 0..prog.defs.len() {
+        let adef = prog.def(DefId(j as u32));
+        if adef.kind == DefKind::AssocTy && adef.parent != NO_DEF { assoc_tys.entry(adef.parent).or_default().push(DefId(j as u32)); }
+    }
     for i in 0..prog.defs.len() {
         let imp = DefId(i as u32);
         let idef = prog.def(imp);
@@ -178,10 +184,8 @@ pub fn private_assoc_types(prog: &Program, tcx: &Tcx, own: &[bool]) -> Vec<Strin
             }
         }
         if !known { continue; }
-        for j in 0..prog.defs.len() {
-            let ad = DefId(j as u32);
+        for &ad in assoc_tys.get(&imp).into_iter().flatten() {
             let adef = prog.def(ad);
-            if adef.kind != DefKind::AssocTy || adef.parent != imp { continue; }
             let Ok(t) = tcx.type_of(prog, ad) else { continue };
             let mut used = Vec::new();
             adts(prog, tcx, t, &mut used, 0);

@@ -199,3 +199,29 @@ fn round31_discriminant_errors_preserve_recovery_and_diagnostics() {
     assert_eq!(adt.discriminant_for_variant(&tcx, &prog, 1).unwrap().val, 1);
     assert!(tcx.adts[&named(&prog, "Reset")].check_discriminants(&tcx, &prog).is_empty());
 }
+
+// rustc's load_mir: a constant whose body has type errors is not evaluated. Its body's errors are
+// the report: no E0080 joins them (which thread ran the evaluation used to decide that).
+#[test]
+fn tainted_body_is_not_evaluated() {
+    let dir = std::env::temp_dir().join(format!("relax-const-tainted-{}-{}", std::process::id(), crate::unique_test_suffix()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("lib.rs");
+    std::fs::write(&path, br#"#![no_std]
+        const fn one() -> u8 { 1 }
+        const BAD: usize = one();
+    "#).unwrap();
+    let mut prog = Program::new(&std::sync::Arc::new(crate::Session::default()));
+    prog.load_crate("const_tainted", path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&prog.session, &[]), Vec::new()).unwrap();
+    // a checked crate: the check reports its bodies' errors
+    for c in prog.crates.iter_mut() { c.validate = true; }
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(dir).unwrap();
+    assert!(tcx.typeck(&prog, named(&prog, "BAD")).errors.iter().any(|e| e.contains("E0308")));
+    let reported = tcx.dcx.err_count();
+    let value = tcx.const_eval_resolve(&prog, TypingEnv::fully_monomorphized(&prog), named(&prog, "BAD"), &[]);
+    assert_eq!(value, Err(ErrorHandled::Reported(crate::const_eval::ValTreeCreationError::Tainted)));
+    assert_eq!(tcx.dcx.err_count(), reported, "the evaluation reports nothing of its own");
+}

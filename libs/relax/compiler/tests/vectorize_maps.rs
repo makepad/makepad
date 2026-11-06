@@ -1,9 +1,12 @@
 // Element maps that O3 vectorises (codegen loops.rs vectorize_stream_maps): f32 and 32-bit
-// integer loops over iterator zips and raw-pointer streams with a loop-invariant scalar, every
-// length 0..=40 at several start offsets (unaligned vector loads, remainders of every size), and
-// destination streams that overlap the source streams at every distance from -9 to 9 elements
-// (the runtime distance check must keep the scalar order); each result is compared with a
-// reference whose per-element step is a call (never widened); called often enough to tier up.
+// integer loops over iterator zips and raw-pointer streams with a loop-invariant scalar, a loop
+// whose branches only pick values (folded into selects: pick_lanes, and pick_sum filling a local
+// array), every length 0..=40 at several start offsets (unaligned vector loads, remainders of
+// every size), and destination streams that overlap the source streams at every distance from
+// -9 to 9 elements, also within a local array (the runtime distance check must keep the scalar
+// order; a local array whose address goes nowhere else needs none against other streams); each
+// result is compared with a reference whose per-element step is a call (never widened); called
+// often enough to tier up.
 use std::hint::black_box;
 
 #[inline(never)]
@@ -53,6 +56,18 @@ unsafe fn stream(dst: *mut f32, src: *const f32, n: usize) {
         *d = *s * 2.0 + 1.0;
         d = d.add(1);
         s = s.add(1);
+    }
+}
+/// the same over a count of the elements left, tested after each one
+#[inline(never)]
+unsafe fn count_down(dst: *mut f32, src: *const f32, mut n: usize) {
+    let mut d = dst;
+    let mut s = src;
+    while n != 0 {
+        *d = *s * 2.0 + 1.0;
+        d = d.add(1);
+        s = s.add(1);
+        n -= 1;
     }
 }
 #[inline(never)]
@@ -210,6 +225,101 @@ fn idx_sq_ref(out: &mut [f32], a: &[f32]) {
     }
 }
 
+/// branches that only pick values, over eight lanes of three corner arrays (a winding number's
+/// atan2 with every path computed: compares, a float's sign bit, selects): the stream-map
+/// vectoriser folds them into selects and widens the loop
+fn atan2_select(y: f32, x: f32) -> f32 {
+    let yn = (y < 0.0) | ((y == 0.0) & y.is_sign_negative());
+    let xn = (x < 0.0) | ((x == 0.0) & x.is_sign_negative());
+    let ax = if xn { 0.0 - x } else { x };
+    let ay = if yn { 0.0 - y } else { y };
+    let swap = ay > ax;
+    let q = if swap { ax } else { ay } / if swap { ay } else { ax };
+    let r = if ax == ay { 1.0 } else { q };
+    let big = r > 0.41421357;
+    let r = if big { (r - 1.0) / (r + 1.0) } else { r };
+    let base = if big { 0.7853982 } else { 0.0 };
+    let z = r * r;
+    let a = base + (r + (r * z) * (-0.33333334 + z * (0.2 + z * -0.14285715)));
+    let a = if swap { 1.5707964 - a } else { a };
+    let a = if xn { 3.1415927 - a } else { a };
+    let a = if yn { a * -1.0 } else { a };
+    let on_x = if xn { if yn { -3.1415927 } else { 3.1415927 } } else { y };
+    let on_y = if yn { -1.5707964 } else { 1.5707964 };
+    if y == 0.0 { on_x } else if x == 0.0 { on_y } else { a }
+}
+#[inline(always)]
+fn pick_lanes_body(t: &[[f32; 8]; 3], p: [f32; 2]) -> [f32; 8] {
+    let mut out = [0.0f32; 8];
+    for l in 0..8 {
+        let (y, x) = (t[0][l] - p[0], t[1][l] * t[2][l] - p[1]);
+        out[l] = atan2_select(y, x) * 0.5;
+    }
+    out
+}
+#[inline(never)]
+fn pick_lanes(t: &[[f32; 8]; 3], p: [f32; 2]) -> [f32; 8] {
+    pick_lanes_body(t, p)
+}
+/// the loop inlined where its result is a local array (the slot's address made in the loop
+/// body), summed over a run of it after
+#[inline(never)]
+fn pick_sum(t: &[[f32; 8]; 3], p: [f32; 2], n: usize) -> f32 {
+    let out = pick_lanes_body(t, p);
+    let mut w = 0.0f32;
+    for &s in &out[..n] {
+        w += s;
+    }
+    w
+}
+#[inline(never)]
+fn pick_lanes_ref(t: &[[f32; 8]; 3], p: [f32; 2]) -> [f32; 8] {
+    let mut out = [0.0f32; 8];
+    for l in 0..8 {
+        let (y, x) = (t[0][l] - p[0], t[1][l] * t[2][l] - p[1]);
+        out[l] = black_box(atan2_select(black_box(y), x)) * 0.5;
+    }
+    out
+}
+
+/// a local array mapped onto itself `k` elements on (stored at a + k, loaded at a): both streams
+/// are the array's, so the distance check stays and each element is made from one already
+/// rewritten, in order; summed after
+#[inline(never)]
+fn slot_ahead(src: &[f32], k: usize, n: usize) -> f32 {
+    let mut a = [0.0f32; 64];
+    for (o, v) in a.iter_mut().zip(src) {
+        *o = *v;
+    }
+    unsafe {
+        let p = a.as_mut_ptr();
+        let q = p.add(k);
+        for i in 0..n {
+            *q.add(i) = *p.add(i) * 2.0 + 1.0;
+        }
+    }
+    let mut w = 0.0f32;
+    for &s in &a {
+        w += s;
+    }
+    w
+}
+#[inline(never)]
+fn slot_ahead_ref(src: &[f32], k: usize, n: usize) -> f32 {
+    let mut a = [0.0f32; 64];
+    for (o, v) in a.iter_mut().zip(src) {
+        *o = *v;
+    }
+    for i in 0..n {
+        a[i + k] = black_box(a[i] * 2.0) + 1.0;
+    }
+    let mut w = 0.0f32;
+    for &s in &a {
+        w += s;
+    }
+    w
+}
+
 fn bits(v: &[f32]) -> Vec<u32> {
     v.iter().map(|x| x.to_bits()).collect()
 }
@@ -319,13 +429,37 @@ fn vectorized_maps() {
                 }
                 fails += (bits(&b1) != bits(&b2)) as u32;
             }
+            {
+                // zeros of both signs, equal magnitudes, infinities and NaN among the lanes
+                let special = [0.0f32, -0.0, 1.0, -1.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, 0.5];
+                let mut t = [[0.0f32; 8]; 3];
+                for (k, row) in t.iter_mut().enumerate() {
+                    for (l, v) in row.iter_mut().enumerate() {
+                        let w = (rep as usize).wrapping_mul(31) + n * 7 + k * 13 + l * 5;
+                        *v = if w % 5 == 0 { special[(w / 5) % 8] } else { src[w % 64] };
+                    }
+                }
+                let p = [special[n % 8] * (rep % 3) as f32, src[(rep as usize + n) % 64]];
+                let r = pick_lanes_ref(&t, p);
+                fails += (bits(&pick_lanes(&t, p)) != bits(&r)) as u32;
+                let mut w = 0.0f32;
+                for &s in &r[..n % 9] {
+                    w += s;
+                }
+                fails += (pick_sum(&t, p, n % 9).to_bits() != w.to_bits()) as u32;
+            }
+            for k in 0..10 {
+                fails += (slot_ahead(&src, k, n).to_bits() != slot_ahead_ref(&src, k, n).to_bits()) as u32;
+            }
             let mut d = vec![0.0f32; 64];
+            let mut c = vec![0.0f32; 64];
             let mut e = vec![0.0f32; 64];
             unsafe {
                 stream(d.as_mut_ptr(), src.as_ptr(), n);
+                count_down(c.as_mut_ptr(), src.as_ptr(), n);
                 stream_ref(e.as_mut_ptr(), src.as_ptr(), n);
             }
-            fails += (bits(&d) != bits(&e)) as u32;
+            fails += (bits(&d) != bits(&e)) as u32 + (bits(&c) != bits(&e)) as u32;
         }
     }
     println!("| fails {}", fails);

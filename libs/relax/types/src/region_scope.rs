@@ -45,7 +45,7 @@ pub struct ScopeTree {
     /// The tail expressions of blocks of editions before 2024, whose temporaries are dropped earlier
     /// from edition 2024 (rustc `backwards_incompatible_scope`; recorded for the lint
     /// `tail_expr_drop_order`, which only `makepad check` runs).
-    backwards_incompatible_nodes: std::collections::HashSet<Node>,
+    backwards_incompatible_nodes: crate::fxhash::HashSet<Node>,
     positions: HashMap<u32, ExprPosition>,
     yield_in_scope: Vec<Vec<u32>>,
 }

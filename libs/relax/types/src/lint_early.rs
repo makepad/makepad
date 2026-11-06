@@ -45,32 +45,41 @@ pub const UNUSED_VISIBILITIES: Lint = lint::lint("unused_visibilities");
 /// Item-level passes over the definitions of the checked crates marked in `own`.
 pub fn check_items(prog: &Program, tcx: &Tcx, own: &[bool]) {
     if !lint::enabled() { return; }
-    for i in 0..prog.defs.len() {
-        let def = prog.defs[i];
-        if !own.get(def.krate as usize).copied().unwrap_or(false) { continue; }
-        if lint::generated(prog, DefId(i as u32)) {
-            // (rustc's wfcheck lints a derive's impl too: its lifetime parameters carry the spans of the
-            // type's own, outside the expansion)
-            if def.kind == DefKind::Impl && lint::derived(prog, DefId(i as u32)) { redundant_lifetimes(prog, tcx, DefId(i as u32)); }
-            continue;
-        }
-        attr_lints(prog, DefId(i as u32));
-        check_def_item(prog, tcx, DefId(i as u32));
-        if matches!(def.kind, DefKind::Fn | DefKind::ForeignFn | DefKind::Impl | DefKind::Trait | DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::TypeAlias | DefKind::Const | DefKind::Static) { lifetime_lints(prog, DefId(i as u32)); }
-        if !matches!(def.kind, DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn | DefKind::Struct | DefKind::Union
-            | DefKind::Enum | DefKind::TypeAlias | DefKind::AssocTy | DefKind::ForeignTy | DefKind::Trait | DefKind::Impl
-            | DefKind::Const | DefKind::Static | DefKind::AssocConst | DefKind::ForeignStatic) { continue; }
-        let d = DefId(i as u32);
-        let mut w = W::new(prog, def.file, d);
-        w.names = Some(names(prog, tcx, d));
-        w.item(def.item, def.kind);
-        item_lints(prog, d);
-    }
+    let mut pt = crate::lint_dead::PartTimes::new("lint_early::check_items");
+    // the definitions on the pool (each one's lints are its own)
+    let defs: Vec<DefId> = (0..prog.defs.len() as u32).map(DefId).filter(|&d| own.get(prog.def(d).krate as usize).copied().unwrap_or(false)).collect();
+    lint::par_each(&defs, |&d| check_item(prog, tcx, d));
+    pt.mark("items");
     for (k, o) in own.iter().enumerate() {
         if *o { special_module_name(prog, k as u32); }
     }
+    pt.mark("special_module_name");
     check_module_items(prog, own);
+    pt.mark("check_module_items");
     token_lints(prog, own);
+    pt.mark("token_lints");
+    pt.report(own.iter().filter(|&&o| o).count());
+}
+
+/// check_items of one definition.
+fn check_item(prog: &Program, tcx: &Tcx, d: DefId) {
+    let def = *prog.def(d);
+    if lint::generated(prog, d) {
+        // (rustc's wfcheck lints a derive's impl too: its lifetime parameters carry the spans of the
+        // type's own, outside the expansion)
+        if def.kind == DefKind::Impl && lint::derived(prog, d) { redundant_lifetimes(prog, tcx, d); }
+        return;
+    }
+    attr_lints(prog, d);
+    check_def_item(prog, tcx, d);
+    if matches!(def.kind, DefKind::Fn | DefKind::ForeignFn | DefKind::Impl | DefKind::Trait | DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::TypeAlias | DefKind::Const | DefKind::Static) { lifetime_lints(prog, d); }
+    if !matches!(def.kind, DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn | DefKind::Struct | DefKind::Union
+        | DefKind::Enum | DefKind::TypeAlias | DefKind::AssocTy | DefKind::ForeignTy | DefKind::Trait | DefKind::Impl
+        | DefKind::Const | DefKind::Static | DefKind::AssocConst | DefKind::ForeignStatic) { return; }
+    let mut w = W::new(prog, def.file, d);
+    w.names = Some(names(prog, tcx, d));
+    w.item(def.item, def.kind);
+    item_lints(prog, d);
 }
 
 /// Body-level passes over one typed body owner.
@@ -3702,20 +3711,28 @@ fn meta_variable_misuse(prog: &Program, own: &[bool]) {
 pub const UNUSED_MACROS: Lint = lint::lint("unused_macros");
 pub const UNUSED_MACRO_RULES: Lint = lint::lint("unused_macro_rules");
 
+/// The early lints that wait for the checked crates' bodies to be expanded (what the parser and
+/// the expansion recorded), and the unused macros.
+pub fn finish(prog: &Program, own: &[bool]) {
+    if !lint::enabled() { return; }
+    let mut pt = crate::lint_dead::PartTimes::new("lint_early::finish");
+    trailing_semis(prog, own); pt.mark("trailing_semis");
+    incomplete_includes(prog, own); pt.mark("incomplete_includes");
+    meta_variable_misuse(prog, own); pt.mark("meta_variable_misuse");
+    cfg_attr_empties(prog, own); pt.mark("cfg_attr_empties");
+    varargs_without_patterns(prog, own); pt.mark("varargs_without_patterns");
+    named_args_positional(prog, own); pt.mark("named_args_positional");
+    macro_expanded_macro_exports(prog, own); pt.mark("macro_expanded_macro_exports");
+    macro_call_ambiguities(prog, own); pt.mark("macro_call_ambiguities");
+    crate_attr_lints(prog, own); pt.mark("crate_attr_lints");
+    unused_macros(prog, own); pt.mark("unused_macros");
+    pt.report(own.iter().filter(|&&o| o).count());
+}
+
 /// rustc_resolve `check_unused_macros`, after the checked crates' bodies are all expanded: a
 /// private `macro_rules!` no invocation resolved to, and the rules of the others that no
 /// expansion matched.
-pub fn finish(prog: &Program, own: &[bool]) {
-    if !lint::enabled() { return; }
-    trailing_semis(prog, own);
-    incomplete_includes(prog, own);
-    meta_variable_misuse(prog, own);
-    cfg_attr_empties(prog, own);
-    varargs_without_patterns(prog, own);
-    named_args_positional(prog, own);
-    macro_expanded_macro_exports(prog, own);
-    macro_call_ambiguities(prog, own);
-    crate_attr_lints(prog, own);
+fn unused_macros(prog: &Program, own: &[bool]) {
     let (defs, used) = crate::macros::uses::take();
     if defs.is_empty() { return; }
     // Bodies nothing demanded are never expanded, so an invocation inside one leaves no record:

@@ -1,1 +1,0 @@
-M10: a Copy struct keeps its layout (a bitwise copy would share the extension block): restart rung by design

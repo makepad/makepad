@@ -1208,14 +1208,18 @@ impl<'a> Dead<'a> {
     }
 }
 
-/// MAKEPAD_RUN_CHECK_TIMES: finish's parts of 50 ms or more, summed over the crates
-struct PartTimes {
+/// MAKEPAD_RUN_CHECK_TIMES: a pass's parts of 50 ms or more, summed over the crates
+pub(crate) struct PartTimes {
+    pass: &'static str,
     on: bool,
     t: std::time::Instant,
     parts: Vec<(&'static str, std::time::Duration)>,
 }
 impl PartTimes {
-    fn mark(&mut self, part: &'static str) {
+    pub(crate) fn new(pass: &'static str) -> Self {
+        PartTimes { pass, on: std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some(), t: std::time::Instant::now(), parts: Vec::new() }
+    }
+    pub(crate) fn mark(&mut self, part: &'static str) {
         if !self.on { return; }
         let dt = self.t.elapsed();
         match self.parts.iter_mut().find(|p| p.0 == part) {
@@ -1224,9 +1228,18 @@ impl PartTimes {
         }
         self.t = std::time::Instant::now();
     }
-    fn report(&self, crates: usize) {
+    /// `other`'s parts summed into these (a worker's).
+    pub(crate) fn add(&mut self, other: PartTimes) {
+        for (part, dt) in other.parts {
+            match self.parts.iter_mut().find(|p| p.0 == part) {
+                Some(p) => p.1 += dt,
+                None => self.parts.push((part, dt)),
+            }
+        }
+    }
+    pub(crate) fn report(&self, crates: usize) {
         for &(part, dt) in &self.parts {
-            if dt.as_millis() >= 50 { eprintln!("makepad check: lint_dead::finish {} {:.2} s ({} crates)", part, dt.as_secs_f64(), crates); }
+            if dt.as_millis() >= 50 { eprintln!("makepad check: {} {} {:.2} s ({} crates)", self.pass, part, dt.as_secs_f64(), crates); }
         }
     }
 }
@@ -1253,7 +1266,7 @@ pub struct CrateItems<'p> {
 /// reported an error of that never bind in rustc, besides the ones still open.
 pub fn finish(prog: &Program, tcx: &Tcx, own: &[bool], root: u32, late: bool, erroneous: &[usize]) {
     if !lint::enabled() { return; }
-    let mut pt = PartTimes { on: std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some(), t: std::time::Instant::now(), parts: Vec::new() };
+    let mut pt = PartTimes::new("lint_dead::finish");
     let refs = BODY_REFS.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default();
     let mut traits = crate::lint_imports::take_method_traits();
     let n = prog.crates.len();
@@ -1283,26 +1296,42 @@ pub fn finish(prog: &Program, tcx: &Tcx, own: &[bool], root: u32, late: bool, er
         if open.contains(&i) { c.unresolved.push(im); }
     }
     pt.mark("children");
-    for c in &crates {
-        let t = traits.remove(&c.krate).unwrap_or_default();
-        finish_crate(prog, tcx, c, root, &refs, &children, &t, late, &mut pt);
-    }
+    // the crates on the pool, the biggest first
+    let traits: Vec<HashSet<DefId>> = crates.iter().map(|c| traits.remove(&c.krate).unwrap_or_default()).collect();
+    let mut order: Vec<usize> = (0..crates.len()).collect();
+    order.sort_by_key(|&i| (std::cmp::Reverse(crates[i].defs.len()), i));
+    let parts = crate::lint::par_each(&order, |&i| {
+        let mut pt = PartTimes::new("lint_dead::finish");
+        finish_crate(&CrateCx { prog, tcx, c: &crates[i], root, refs: &refs, children: &children }, &traits[i], late, &mut pt);
+        pt
+    });
+    for p in parts { pt.add(p); }
     pt.report(crates.len());
 }
 
+/// The shared read-only context for one checked crate's lints.
+struct CrateCx<'a> {
+    prog: &'a Program,
+    tcx: &'a Tcx,
+    c: &'a CrateItems<'a>,
+    root: u32,
+    refs: &'a HashMap<DefId, BodyInfo>,
+    children: &'a HashMap<DefId, Vec<DefId>>,
+}
+
 /// One checked crate's dead code and reachability lints (`late`), and its unused imports.
-#[allow(clippy::too_many_arguments)]
-fn finish_crate(prog: &Program, tcx: &Tcx, c: &CrateItems, root: u32, refs: &HashMap<DefId, BodyInfo>, children: &HashMap<DefId, Vec<DefId>>, traits: &HashSet<DefId>, late: bool, pt: &mut PartTimes) {
+fn finish_crate(cx: &CrateCx<'_>, traits: &HashSet<DefId>, late: bool, pt: &mut PartTimes) {
+    let CrateCx { prog, tcx, c, .. } = *cx;
     let reach = Reach::compute(prog, tcx, c);
     pt.mark("Reach::compute");
-    if late { late_lints(prog, tcx, c, root, refs, children, &reach, pt); }
+    if late { late_lints(cx, &reach, pt); }
     crate::lint_imports::check(prog, tcx, c, &reach, traits);
     pt.mark("lint_imports::check");
 }
 
 /// misc_checking_3 of one checked crate: dead code, then the late lints of its items.
-#[allow(clippy::too_many_arguments)]
-fn late_lints(prog: &Program, tcx: &Tcx, c: &CrateItems, root: u32, refs: &HashMap<DefId, BodyInfo>, children: &HashMap<DefId, Vec<DefId>>, reach: &Reach, pt: &mut PartTimes) {
+fn late_lints(cx: &CrateCx<'_>, reach: &Reach, pt: &mut PartTimes) {
+    let CrateCx { prog, tcx, c, root, refs, children } = *cx;
     let own = &c.own[..];
     let mut s = Dead { prog, tcx, own, refs, live: HashSet::new(), live_log: Vec::new(), live_fields: HashSet::new(), worklist: Vec::new(), scanned: HashSet::new(), propagated: false, ignored_derived: HashMap::new(), children };
     // seeds

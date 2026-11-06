@@ -94,8 +94,25 @@ pub fn cmd_live(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
         return 1;
     }
     jit::enable_pipelining(options);
+    // the platform's start code runs the program's constructors before the harness (sections.rs)
+    if let Err(e) = unsafe { crate::sections::run_constructors(&mut *u, krate, None) } {
+        eprintln!("error: {e}");
+        return 101;
+    }
     println!("v0: first run (lazy compile on first call)");
     run_tests(&mut u, &tests);
+    // MAKEPAD_RUN_LIVE_SETTLE (a case's env): the second run starts once the first run's O3 work
+    // is done and stays done a moment (a thread the first run left running turns its code hot
+    // meanwhile), so the edits meet settled code: O3 builds and the guarded copies they inline
+    if std::env::var_os("MAKEPAD_RUN_LIVE_SETTLE").is_some() {
+        let up: *const Unit = &*u;
+        let mut quiet = 0;
+        while quiet < 20 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let settled = crate::owner::call(crate::owner::Class::Program, || jit::o3_settled(unsafe { &*up }));
+            quiet = if settled { quiet + 1 } else { 0 };
+        }
+    }
     println!("v0: second run (all compiled)");
     run_tests(&mut u, &tests);
     let mut undos: Vec<crate::reload::Undo> = Vec::new();

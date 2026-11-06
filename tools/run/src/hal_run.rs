@@ -81,8 +81,9 @@ static UI_WAIT_ARMED: AtomicBool = AtomicBool::new(false);
 /// long lazy compile, or a load's thousands of short ones; never a short hiccup). The JIT ring
 /// shows only past one.
 const BLOCK_AFTER: Duration = Duration::from_nanos(relax_compiler::postframe::BLOCK_SHOW_NS);
-/// The centre card is reserved for a sustained wait, beyond the ring's earlier notice.
-const WAIT_CARD_AFTER: Duration = Duration::from_millis(500);
+/// The load screen's look comes back over the app only for a sustained wait, beyond the ring's
+/// earlier notice (a short wait never flashes it).
+const WAIT_AFTER: Duration = Duration::from_millis(500);
 /// The UI has not been blocked on the JIT for this long: the warm-up is over.
 const READY_QUIET_NS: u64 = 300_000_000;
 
@@ -965,26 +966,54 @@ pub fn observe(id: u32, next: &DomainState) {
     }
 }
 
-/// The run window's Restart (and a crashed app's saved fix): a build that failed before the app
-/// started compiles again; a crashed app's next run starts; a running app restarts as `session
-/// relaunch` does (with its state when it restarts itself).
+/// The run window's Restart: a build that failed before the app started compiles again; a crashed
+/// app's next run starts; a running app restarts as `session relaunch` does (with its state when
+/// it restarts itself).
 fn retry(crashed: bool) -> Result<(), String> {
-    {
-        let mut guard = state();
-        let r = guard.as_mut().ok_or("no run window")?;
-        if r.initial_failed {
-            r.retry = true;
-            RETRY.notify_one();
-            return Ok(());
-        }
-        if r.domain == 0 {
-            return Err("the app has not started yet".into());
-        }
+    if retry_failed_build()? {
+        return Ok(());
     }
     if crashed {
         return relax_compiler::reload::restart_run("restart after the app crashed");
     }
     relax_compiler::reload::relaunch_pending().map(|_| ())
+}
+
+/// A build that failed before the app started compiles again (true: no app runs, nothing of it to
+/// keep). False: the app started. Err: it has not started yet.
+fn retry_failed_build() -> Result<bool, String> {
+    let mut guard = state();
+    let r = guard.as_mut().ok_or("no run window")?;
+    if r.initial_failed {
+        r.retry = true;
+        RETRY.notify_one();
+        return Ok(true);
+    }
+    if r.domain == 0 {
+        return Err("the app has not started yet".into());
+    }
+    Ok(false)
+}
+
+/// What a change of the sources did while the window shows a failure.
+#[derive(Debug, PartialEq, Eq)]
+enum AfterFailure {
+    /// the build that failed before the app started compiles again
+    Rebuild,
+    /// the app crashed: its next run is offered (Restart), not started
+    Offered,
+}
+
+/// The sources changed while the window shows a failure. A build that failed before the app
+/// started compiles again. A crashed app waits for the person's Restart (the window's, the WM's
+/// toast, `session relaunch`): offered, never started on its own -- a landing changes the sources
+/// as a save does.
+fn sources_changed_after_failure() -> Result<AfterFailure, String> {
+    if retry_failed_build()? {
+        return Ok(AfterFailure::Rebuild);
+    }
+    relax_compiler::reload::offer_restart_after_crash();
+    Ok(AfterFailure::Offered)
 }
 
 fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Document) {
@@ -1265,15 +1294,10 @@ fn pump(
     let mut arrive_at: Option<Instant> = None;
     let mut dot_noted = None;
     let ring = ring_on();
-    // A dump-only preview: after the running app's first half second, show the card for
-    // three seconds and fade it out. No synthetic JIT wait or input change. Works hidden
-    // even with the ring disabled: MAKEPAD_RUN_WAIT_CARD=update|rebuild.
-    let wait_preview = host.dumping().then(|| std::env::var("MAKEPAD_RUN_WAIT_CARD").ok()).flatten();
-    let wait_preview = match wait_preview.as_deref() {
-        Some("update") => Some(0),
-        Some("rebuild") => Some(1),
-        _ => None,
-    };
+    // A dump-only preview: after the running app's first half second, show a UI wait's look
+    // for three seconds and fade it out. No synthetic JIT wait or input change. Works hidden
+    // even with the ring disabled: MAKEPAD_RUN_WAIT_PREVIEW=1.
+    let wait_preview = host.dumping() && std::env::var_os("MAKEPAD_RUN_WAIT_PREVIEW").is_some();
     let mut wait_preview_at: Option<Instant> = None;
     // the run's inspect view (the halted view over the app without a stop): opened by
     // `makepad inspect <app> session view open` (the JIT ring is display only)
@@ -1282,6 +1306,8 @@ fn pump(
     let mut view_shown: Option<String> = None;
     relax_compiler::inspect::run_view::set_wake(|| Hal::global().wake_session(HOST));
     let mut warm_up_at: Option<Instant> = None;
+    // a sustained UI wait's look over the app came on at (the log says how long it stayed)
+    let mut wait_at: Option<Instant> = None;
     // MAKEPAD_RUN_POSTFRAME_LOG (the responsiveness trace): the JIT ring's UI blocks too
     let mut watch = Watch::new(std::env::var_os("MAKEPAD_RUN_POSTFRAME_LOG").is_some());
     relax_compiler::postframe::on_ui_wait(ui_wait_began);
@@ -1382,14 +1408,12 @@ fn pump(
                 }
                 Update::Document(document) => host.reload(document),
                 Update::Environment(environment) => host.environment(environment),
-                Update::SourcesChanged => {
-                    if failed {
-                        match retry(true) {
-                            Ok(()) => failed = false,
-                            Err(e) => post(Update::Message(e)),
-                        }
-                    }
-                }
+                Update::SourcesChanged if failed => match sources_changed_after_failure() {
+                    Ok(AfterFailure::Rebuild) => failed = false,
+                    Ok(AfterFailure::Offered) => data.domain = "Boot failed · sources changed: Restart".into(),
+                    Err(e) => post(Update::Message(e)),
+                },
+                Update::SourcesChanged => {}
                 Update::Domain(next) => match next {
                     DomainState::Compiling(name) => {
                         let phase = match name.as_str() {
@@ -1528,16 +1552,20 @@ fn pump(
                         w.val.presentations,
                         w.val.borrower_presented,
                         w.lent_to,
+                        // a layer the HAL composes that has not taken the app's newest frame
+                        w.val.overlay.as_ref().is_some_and(|o| o.composed && o.fresh && !o.layer.is_none()),
                     )
                 })
         });
         let mut may_present = true;
         let mut app_frame = false;
         let mut app_frames = 0;
+        let mut layer_behind = false;
         let mut lent_to_app = false;
         let first_present = active;
-        if let Some((geom, borrower_frame, presentations, borrower_presented, lent)) = physical {
+        if let Some((geom, borrower_frame, presentations, borrower_presented, lent, behind)) = physical {
             app_frames = presentations;
+            layer_behind = behind;
             lent_to_app = lent == domain && domain != 0;
             app_frame = borrower_frame && lent == domain && domain != 0;
             may_present = !borrower_frame || lent == 0;
@@ -1683,9 +1711,9 @@ fn pump(
                     || update_ready
                     || data.parked.is_some()
                     || (active && !restarted)));
-        // the window layer (Metal): the boot field the app's first frames go under, the warm-up
+        // the window layer: the boot field the app's first frames go under, the warm-up
         // after its first present (until the JIT's readiness signal). An opaque overlay, a failure
-        // or a stop takes it away. Later UI waits get the Updating card, below.
+        // or a stop takes it away. A later sustained UI wait brings the warm-up look back, below.
         // the boot stage begins before the app has the window, once the field has presented
         // (its first frame then never reaches the window before the layer)
         let layers = host.layers() && !overlay && !failed && !update_ready && data.parked.is_none();
@@ -1785,42 +1813,46 @@ fn pump(
                 restart_says(phase, since.as_secs(), &host::build_progress(), host::restart_pinned(), keeps)
             }),
         }).flatten();
-        // The existing wait hook is the only idle check. No card work (queue sampling,
-        // layout or drawing) until it is armed. An app present (or an episode gap without
-        // a wait) ends the episode, and with it the card.
+        // The existing wait hook is the only idle check. No wait work (layout or drawing) until
+        // it is armed. An app present (or an episode gap without a wait) ends the episode, and
+        // with it the wait's look.
         let can_wait = running && layers && !update_ready && patch_notice.is_none() && !action_failed
             && document_errors.is_empty() && !matches!(alert, Some(RingAlert::RebuildFailed | RingAlert::UpdateReady));
         // ui_blocked_ns is the episode's: a load's thousands of short waits count as one wait
-        // until the UI thread has been free for an episode gap (it drew a frame), so the card
+        // until the UI thread has been free for an episode gap (it drew a frame), so the look
         // holds through the gaps between them instead of flickering
         let waiting = can_wait && UI_WAIT_ARMED.load(Ordering::Acquire)
-            && relax_compiler::postframe::ui_blocked_ns() > WAIT_CARD_AFTER.as_nanos() as u64;
-        let ring_work = if (running && ring && host.badges()) || waiting {
-            watch.look(host.dump_ms(), restart_asked).filter(|_| data.parked.is_none())
-        } else {
-            None
-        };
+            && relax_compiler::postframe::ui_blocked_ns() > WAIT_AFTER.as_nanos() as u64;
         if waiting {
-            want = ring_work.map(LayerWant::Updating);
+            want = Some(LayerWant::Waiting);
+        }
+        if waiting != wait_at.is_some() {
+            match wait_at.take() {
+                Some(at) => {
+                    // (a view that takes the window, an alert, a failure: the look gives way to it)
+                    let why = if can_wait { "the UI is free again: the load screen fades out" } else { "the load screen gives way to the run's view" };
+                    eprintln!("makepad-run: after {:.0} ms {why}", at.elapsed().as_secs_f64() * 1000.0);
+                }
+                None => {
+                    wait_at = Some(Instant::now());
+                    eprintln!("makepad-run: the UI waits on the JIT ({:.0} ms): the load screen fades in", relax_compiler::postframe::ui_blocked_ns() as f64 / 1e6);
+                }
+            }
         }
         if can_wait {
-            if let Some(rebuild) = wait_preview {
+            if wait_preview {
                 let elapsed = wait_preview_at.get_or_insert_with(Instant::now).elapsed();
-                if elapsed >= WAIT_CARD_AFTER && elapsed < Duration::from_millis(3500) {
-                    want = Some(LayerWant::Updating(RingWant {
-                        done: 1769, pending: 7543, o2: 3071, o3: 4472,
-                        lazy: true, block: true, rate: 44.0, busy: elapsed, rebuild,
-                        ..Default::default()
-                    }));
-                } else if elapsed < WAIT_CARD_AFTER {
-                    wake_in = Some(WAIT_CARD_AFTER - elapsed);
+                if elapsed >= WAIT_AFTER && elapsed < Duration::from_millis(3500) {
+                    want = Some(LayerWant::Waiting);
+                } else if elapsed < WAIT_AFTER {
+                    wake_in = Some(WAIT_AFTER - elapsed);
                 }
             }
             if let Some(wait) = watch.block_wake() {
                 wake_in = Some(wake_in.map_or(wait, |w: Duration| w.min(wait)));
             }
         }
-        host.layer(want, app_frames);
+        host.layer(want, app_frames, layer_behind);
         let veiled = host.veil(veil);
         if let Some(wait) = veiled {
             wake_in = Some(wake_in.map_or(wait, |w: Duration| w.min(wait)));
@@ -1830,7 +1862,7 @@ fn pump(
             LEFT.1.notify_all();
         }
         if running && ring && host.badges() {
-            let want = ring_work;
+            let want = watch.look(host.dump_ms(), restart_asked).filter(|_| data.parked.is_none());
             if inspect_open {
                 let summary = ring_detail.map(str::to_owned)
                     .unwrap_or_else(|| format!("JIT · {}", relax_boot::ring_summary(want, alert)));
@@ -2275,5 +2307,39 @@ mod ring_tip_tests {
         assert_eq!(says(&at(301, 790, "relax-compiler", "")), "Building the new JIT: 301/790 · 12 s · then it restarts with its state");
         assert!(says(&at(0, 0, "", "build directory")).starts_with("Waiting for another JIT build"));
         assert!(restart_says(Phase::Restarting, 0, &BuildProgress::default(), true, "").contains("unpinned"));
+    }
+}
+
+#[cfg(test)]
+mod crash_offer_tests {
+    use super::{sources_changed_after_failure, state, AfterFailure, Run};
+    use makepad_hal::Id;
+
+    /// A crashed app's sources change (the person's save, or a landing in the checkout): its next
+    /// run is offered and waits for the person's Restart, it is not started (a landing restarted a
+    /// crashed app on its own). A build that failed before the app started compiles again.
+    #[test]
+    fn a_crashed_apps_changed_sources_wait_for_its_restart() {
+        let home = std::env::temp_dir().join(format!("makepad-run-crash-offer-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let log = home.join("live.jsonl");
+        std::env::set_var("MAKEPAD_RUN_LIVE_LOG", &log);
+        let run = |domain, initial_failed| Some(Run { window: Id::NONE, spec: None, domain, initial_failed, retry: false });
+        *state() = run(7, false);
+        for _ in 0..2 {
+            assert_eq!(sources_changed_after_failure(), Ok(AfterFailure::Offered));
+        }
+        let why = relax_compiler::reload::CRASHED_SOURCES_CHANGED;
+        assert!(relax_compiler::reload::restart_pending().iter().any(|p| p == why), "the restart is offered: {:?}", relax_compiler::reload::restart_pending());
+        assert!(!state().as_ref().unwrap().retry, "nothing starts");
+        let offers = std::fs::read_to_string(&log).unwrap_or_default().matches("\"event\":\"restart_offered\"").count();
+        assert_eq!(offers, 1, "offered once (the WM's toast): every save after it says it again");
+        *state() = run(0, true);
+        assert_eq!(sources_changed_after_failure(), Ok(AfterFailure::Rebuild));
+        assert!(state().as_ref().unwrap().retry, "the failed build compiles again");
+        *state() = run(0, false);
+        assert!(sources_changed_after_failure().is_err(), "no app has started");
+        *state() = None;
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

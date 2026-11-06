@@ -188,6 +188,13 @@ pub fn note_verdict(v: &Verdict) {
     RELAXED_RECORDS.lock().unwrap_or_else(|e| e.into_inner()).extend(v.relaxed_records.iter().cloned());
 }
 
+/// Whether the check's bodies accepted anything only relaxed Rust allows (field views, Polonius,
+/// disjoint indices: what `finish_check` reports): such a check's verdicts are not stored
+/// (check_reuse.rs: its report is the whole check's).
+pub fn relaxed_pending() -> bool {
+    !FV_ONLY.lock().unwrap_or_else(|e| e.into_inner()).is_empty() || !RELAXED_RECORDS.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+}
+
 /// End of `makepad check`: the "accepted only with field views" report (what rustc would reject)
 /// and, with MAKEPAD_RUN_FV_EXPORT=<dir>, the rewritten sources for rustc.
 pub fn finish_check(prog: &Program) {

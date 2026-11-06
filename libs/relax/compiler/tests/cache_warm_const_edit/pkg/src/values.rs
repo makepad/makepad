@@ -10,6 +10,19 @@ pub const CONST_PATTERN: u64 = 1;
 pub const CONST_LEN: usize = 1;
 pub const CONST_LATE: u64 = 1;
 pub const CONST_INCLUDE: &str = include_str!("data.txt");
+// a table of included texts, one through a macro's `concat!` path (Fab's demo plates)
+pub struct Doc {
+    pub key: &'static str,
+    pub text: &'static str,
+}
+macro_rules! doc {
+    ($key:literal) => {
+        Doc { key: $key, text: include_str!(concat!($key, ".txt")) }
+    };
+}
+pub const DOCS: &[Doc] = &[doc!("doc_a"), Doc { key: "doc_b", text: include_str!("doc_b.txt") }];
+// an include whose path no text names (`env!`): its save asks for a restart
+pub const DOC_E: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/doc_e.txt"));
 pub const CONST_SAME: u64 = 1;
 pub const CONST_MACRO: u64 = 1;
 pub static STATIC_DIRECT: u64 = 1;
@@ -171,6 +184,112 @@ pub fn late_tiny() -> u64 {
 pub fn late_always() -> u64 {
     1
 }
+// dyn_method_add: a trait object made once, called through its vtable on every row; the edit adds
+// a method ahead of the one called (its vtable entry moves) and changes what it returns
+pub trait Dm {
+    fn a(&self) -> u64;
+}
+pub struct DmX;
+impl Dm for DmX {
+    fn a(&self) -> u64 {
+        1
+    }
+}
+pub static DM: std::sync::OnceLock<Box<dyn Dm + Send + Sync>> = std::sync::OnceLock::new();
+#[inline(never)]
+pub fn dm_held() -> u64 {
+    DM.get_or_init(|| Box::new(DmX)).a()
+}
+// (dyn_method_add_late: the same call, first made after the edit)
+#[inline(never)]
+pub fn dm_late() -> u64 {
+    DM.get_or_init(|| Box::new(DmX)).a()
+}
+// dyn_vtable_fresh: the trait object is made by code whose text the edit leaves; the edit adds a
+// method ahead of the one called and a reader calls both
+pub trait Dv {
+    fn a(&self) -> u64;
+}
+pub struct DvX;
+impl Dv for DvX {
+    fn a(&self) -> u64 {
+        1
+    }
+}
+pub fn dv_read() -> u64 {
+    dv_held().a()
+}
+pub static DV: std::sync::OnceLock<Box<dyn Dv + Send + Sync>> = std::sync::OnceLock::new();
+#[inline(never)]
+pub fn dv_held() -> &'static (dyn Dv + Send + Sync) {
+    &**DV.get_or_init(|| Box::new(DvX))
+}
+// dyn_impl_removed: an impl removed while a trait object of it lives, the code that made it edited
+// to make another one: the edit lands, the object keeps its vtable
+pub struct Ri(pub u64);
+impl std::fmt::Display for Ri {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+pub const RI_K: u64 = 0;
+pub fn ri_make() -> Box<dyn std::fmt::Display + Send + Sync> {
+    Box::new(Ri(7))
+}
+pub static RI: std::sync::OnceLock<Box<dyn std::fmt::Display + Send + Sync>> = std::sync::OnceLock::new();
+#[inline(never)]
+pub fn ri_read() -> u64 {
+    RI.get_or_init(ri_make).to_string().len() as u64 + RI_K
+}
+
+// enum_insert: a value held from the first run, a variant inserted before it (a running variant
+// keeps its tag by name) and the reader edited to build the new one and order it
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
+pub enum Ev {
+    A,
+    B(u32),
+    C { level: u8 },
+}
+pub static EV: std::sync::Mutex<Option<Ev>> = std::sync::Mutex::new(None);
+#[inline(never)]
+pub fn ev_read() -> u64 {
+    let mut g = EV.lock().unwrap();
+    let held = g.get_or_insert(Ev::C { level: 4 });
+    let level = match held {
+        Ev::C { level } => *level as u64,
+        _ => 0,
+    };
+    level + if Ev::A < *held { 10 } else { 0 }
+}
+// enum_insert_cast: a fieldless enum read as a number (`as`) by running code; a variant inserted
+// before a running one moves its number: the edit restarts
+#[derive(Clone, Copy)]
+pub enum Lv {
+    Low,
+    High,
+}
+#[inline(never)]
+pub fn lv_index(l: Lv) -> u64 {
+    l as u64
+}
+pub fn lv_read() -> u64 {
+    lv_index(Lv::High)
+}
+// enum_insert_hash: a derived `Hash` ran (a set holds a value's hash, made from the variant's
+// position); a variant inserted before the held one moves it: the edit restarts
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Hk {
+    P,
+    Q,
+}
+pub const HK_K: u64 = 0;
+pub static HK: std::sync::Mutex<Option<std::collections::HashSet<Hk>>> = std::sync::Mutex::new(None);
+#[inline(never)]
+pub fn hk_read() -> u64 {
+    let mut g = HK.lock().unwrap();
+    let set = g.get_or_insert_with(|| [Hk::Q].into_iter().collect());
+    set.contains(&Hk::Q) as u64 + HK_K
+}
 
 pub const CONST_NONLIT: u64 = 1 + 0;
 
@@ -243,3 +362,36 @@ impl ViaNew {
     }
 }
 pub static STATIC_THROUGH_NEW: ViaNew = ViaNew::new();
+
+// A Copy struct no running value holds (a frame of the loop never sees one): a field added
+// before another moves it, and the reader whose text stays builds an outer struct holding it.
+#[derive(Clone, Copy)]
+pub struct Cp {
+    pub a: u32,
+    pub b: u64,
+}
+#[inline(never)]
+pub fn cp_make(i: u32) -> Cp {
+    Cp { a: i, b: (i as u64) << 8 }
+}
+pub struct CpOuter {
+    pub tag: u8,
+    pub cs: [Cp; 2],
+}
+#[inline(never)]
+pub fn cp_read() -> u64 {
+    let o = CpOuter { tag: 1, cs: [cp_make(1), cp_make(2)] };
+    o.cs.iter().map(|c| c.a as u64 + c.b).sum::<u64>() + o.tag as u64
+}
+
+// A Copy struct the loop's frame holds: a field added restarts (the frame may hold one in the
+// old layout).
+#[derive(Clone, Copy)]
+pub struct CpF {
+    pub a: u32,
+    pub b: u64,
+}
+#[inline(never)]
+pub fn cpf_new() -> CpF {
+    CpF { a: 1, b: 1 }
+}

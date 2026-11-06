@@ -26,6 +26,19 @@ impl Tcx {
     pub fn instantiate_ty(&self, prog: &Program, def: DefId, args: &[GenericArg], ty: TyId) -> TyId {
         crate::types::fold::EarlyBinder::bind(&self.tys, ty).instantiate(&self.tys, &self.generic_indices_of(prog, def), args)
     }
+    /// rustc `fn_sig(def).instantiate(tcx, args)`: each type of the signature is instantiated inside the
+    /// signature's binder (depth 1, as when its fn pointer type is folded), and no fn pointer type is
+    /// interned for a signature that is only read.
+    pub fn instantiate_sig_tys(&self, prog: &Program, def: DefId, args: &[GenericArg], params: &[TyId], ret: TyId) -> (Vec<TyId>, TyId) {
+        use crate::types::fold::TypeFolder;
+        let mut f = ArgFolder { indices: self.generic_indices_of(prog, def), args };
+        let mut inst = |t| {
+            let t = self.tys.set_aliases_to_non_rigid(t);
+            if args.is_empty() { assert!(!self.tys.flags(t).contains(crate::types::TypeFlags::HAS_TY_PARAM)); return t; }
+            f.fold_ty(&self.tys, t, 1)
+        };
+        (params.iter().map(|&t| inst(t)).collect(), inst(ret))
+    }
     pub fn instantiate_predicate(&self, prog: &Program, def: DefId, args: &[GenericArg], p: &Predicate) -> Predicate {
         fold::fold_predicate(&self.tys, p, &mut ArgFolder { indices: &self.generic_indices_of(prog, def), args })
     }

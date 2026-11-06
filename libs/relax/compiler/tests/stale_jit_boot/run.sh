@@ -34,13 +34,14 @@ makepad-relax-api = { path = "$R/libs/relax_api" }
 EOF
 printf '\npub fn stale_jit_boot_marker() {}\n' >> "$T/ws/fixture/src/lib.rs"
 fails=""
-# check <case> <phrase> <binary> <makepad args..>: the run fails, naming the change and $2
+# check <case> <phrase> <binary> <makepad args..>: the run fails, naming the change (the copy's
+# lib.rs and nothing else) and $2
 check() {
     local case=$1 phrase=$2 exe=$3
     shift 3
     out=$(cd "$T/ws" && MAKEPAD_RUN_CACHE=off MAKEPAD_RUN_HOME="$T/home" TMPDIR="$T/tmp" perl -e 'alarm 300; exec @ARGV' "$exe" "$@" 2>&1)
     rc=$?
-    if [ $rc = 0 ] || [ $rc = 142 ] || ! echo "$out" | grep -q "The JIT itself changed (relax_provided_fixture" || ! echo "$out" | grep -q "$phrase"; then
+    if [ $rc = 0 ] || [ $rc = 142 ] || ! echo "$out" | grep -qE "The JIT itself changed \(relax_provided_fixture: [^,)]*/ws/fixture/src/lib\.rs\)" || ! echo "$out" | grep -q "$phrase"; then
         fails="$fails $case:rc=$rc"
         echo "---- $case (rc $rc, 142: the alarm, a hang)"
         echo "$out" | tail -8

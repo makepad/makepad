@@ -442,6 +442,30 @@ pub fn emit_in(prog: &Program, def: DefId, inner: &[Attr], lint: &Lint, file: u3
     SINK.lock().unwrap_or_else(|e| e.into_inner()).push(Reported { level, lint: lint.name, def, seq, line });
 }
 
+/// `f` on each of `items` on the pool's workers (MAKEPAD_RUN_JOBS), the next free worker taking
+/// the next item (the biggest first balance them), results in item order. A lint pass may run
+/// its crates or items so: the sink takes reports from any thread, and the check's sort orders
+/// them (check_order.rs), never the order they came in.
+pub(crate) fn par_each<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let jobs = crate::preload::jobs().min(items.len());
+    if jobs < 2 { return items.iter().map(&f).collect(); }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut parts: Vec<(usize, R)> = crate::pool::scope(|sc| {
+        let hs: Vec<_> = (0..jobs).map(|_| sc.spawn(|| {
+            let mut out = Vec::new();
+            loop {
+                let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(x) = items.get(k) else { break };
+                out.push((k, f(x)));
+            }
+            out
+        })).collect();
+        hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    });
+    parts.sort_by_key(|p| p.0);
+    parts.into_iter().map(|p| p.1).collect()
+}
+
 /// The lints reported since the last take: (errors, warnings).
 pub fn take() -> (Vec<String>, Vec<String>) {
     let mut errors = Vec::new();
@@ -453,6 +477,12 @@ pub fn take() -> (Vec<String>, Vec<String>) {
         if r.level >= Level::Deny { errors.push(r.line) } else { warnings.push(r.line) }
     }
     (errors, warnings)
+}
+
+/// How many reports `take_reported` would return now: the reports a pass made are the ones
+/// between its start's and its end's count (`makepad check`'s verdict reuse tags them).
+pub fn reported_len() -> usize {
+    SINK.lock().unwrap_or_else(|e| e.into_inner()).len()
 }
 
 /// Everything reported since the last take, in report order (a report made twice is there twice).

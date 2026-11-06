@@ -319,6 +319,8 @@ impl Types {
         *t.chunks[0].get_mut() = std::ptr::null_mut();
         t.image = Some(MappedTypes { rows });
         *t.len.get_mut() = n as u32;
+        // `new`'s pre-interned variables are the image's first rows and regions (same build)
+        if !t.preinterned_hold() { return None; }
         Some(t)
     }
 }

@@ -985,7 +985,7 @@ pub(crate) fn skip_fnkey(d: &mut D, depth: u32, v: &mut dyn FnMut(Atom)) -> Opti
 
 
 /// A slot installed from the startup image: its code (linked, at `at`), unwind trailer, pc map
-/// and, for tier-1 code, the slots its body inlined.
+/// and the slots its body inlined.
 pub(crate) struct PrelinkedSlot {
     pub id: u32,
     pub at: u64,
@@ -993,7 +993,13 @@ pub(crate) struct PrelinkedSlot {
     /// its unwind trailer, read in place from the image (Unit::unwind_at)
     pub trailer: &'static [u8],
     pub pc: crate::jit::PcMap,
-    pub inlined: Option<Vec<u32>>,
+    /// the slots its code took in, at every tier: a live patch of one builds this code again
+    /// (reload: `inlined_into`), which a copy inlined unguarded relies on (opt::unguard_prefix)
+    pub inlined: Vec<u32>,
+    /// tier-1 (O3) code (cache.rs TIER_O3)
+    pub o3: bool,
+    /// a live session: the patch flags and copy versions its code reads (jit note_guard_reads)
+    pub guards: Vec<relax_backend::rir::Sym>,
     /// O2 code (cache.rs TIER_O2): no O2 build for it this run
     pub o2: bool,
     /// baseline code (cache.rs TIER_BASE): built again at O2 after the first present
@@ -1688,6 +1694,15 @@ impl Linker {
         let at = u.code_block(total as u64);
         // copied and linked in place: one pass over the block
         let mut linked = vec![false; layout.len()];
+        let live = u.prog.session.options.live;
+        let mut guards: Vec<Vec<relax_backend::rir::Sym>> = vec![Vec::new(); if live { layout.len() } else { 0 }];
+        // the image's symbols that are vtables: a slot naming one makes trait objects with it
+        // (Unit::vtable_makers, what an impl's removal checks)
+        let vt_starts: std::collections::HashSet<u64> = u.syms.vtable_objs().into_iter().map(|(a, _)| a).collect();
+        let is_vt: Vec<bool> = if vt_starts.is_empty() { Vec::new() } else {
+            im.sym_sym.iter().map(|s| s.flatten().is_some_and(|s| s.off == 0 && matches!(u.syms.kind(s.id), Some(SymKind::Data(_))) && vt_starts.contains(&u.syms.value(s)))).collect()
+        };
+        let mut makes: Vec<Vec<u64>> = vec![Vec::new(); if is_vt.is_empty() { 0 } else { layout.len() }];
         {
             let env = &u.env;
             let syms = &u.syms;
@@ -1707,7 +1722,15 @@ impl Linker {
                             };
                             let v = match t {
                                 IMG_SLOT | IMG_THUNK | IMG_CALL => im.slot_of(ix).map(|x| env.reloc_value(match t { IMG_SLOT => Reloc::Slot(x), IMG_CALL => Reloc::Call(x), _ => Reloc::Thunk(x) })),
-                                IMG_SYM => im.fresh.get(&ri).copied().or_else(|| im.sym_sym.get(ix as usize).copied().flatten().flatten()).map(|s| syms.value(s)),
+                                IMG_SYM => im.fresh.get(&ri).copied().or_else(|| im.sym_sym.get(ix as usize).copied().flatten().flatten()).map(|s| {
+                                    if live && (s.off == crate::jit::PATCH_FLAG_OFF || s.off == crate::jit::COPY_VER_OFF) {
+                                        guards[k].push(s);
+                                    }
+                                    if is_vt.get(ix as usize).copied().unwrap_or(false) && !im.fresh.contains_key(&ri) {
+                                        makes[k].push(syms.value(s));
+                                    }
+                                    syms.value(s)
+                                }),
                                 IMG_TLS_KEY => Some(env.reloc_value(Reloc::TlsKey)),
                                 IMG_TLS_SLOW => Some(env.reloc_value(Reloc::TlsSlow)),
                                 _ => Some(env.reloc_value(Reloc::Resume)),
@@ -1730,7 +1753,7 @@ impl Linker {
             c.linked.reserve(layout.len());
             c.linked_key.reserve(layout.len());
         }
-        for ((si, id, off, n, trailer), ok) in layout.into_iter().zip(linked) {
+        for (k, ((si, id, off, n, trailer), ok)) in layout.into_iter().zip(linked).enumerate() {
             if !ok {
                 // its bytes stay in the block, unreachable: no table word points there
                 im.failed += 1;
@@ -1740,14 +1763,17 @@ impl Linker {
             let s = &im.slots[si];
             let (pcs, tier, inl, entry, key) = (s.pc, s.tier, s.inl, s.entry, s.key);
             let pc = crate::jit::PcMap::mapped(&im.bytes[pcs.0..pcs.1], files);
-            if !u.aux { crate::harness::reach::note(id, im.flat[inl.0..inl.1].iter().filter_map(|&k| im.slot_of(k))); }
-            let inlined = (tier == TIER_O3).then(|| im.flat[inl.0..inl.1].iter().filter_map(|&k| im.slot_of(k)).collect());
+            let inlined: Vec<u32> = im.flat[inl.0..inl.1].iter().filter_map(|&k| im.slot_of(k)).collect();
+            if !u.aux { crate::harness::reach::note(id, inlined.iter().copied()); }
             let kind = im.keys[key as usize].first().copied().unwrap_or(u8::MAX);
+            for &a in makes.get(k).map_or(&[][..], |v| v.as_slice()) {
+                u.note_vtable_maker(a, id);
+            }
             let c = self.cache();
             c.linked.insert(id);
             c.linked_key.insert(id, entry);
             let verdict = if tier == TIER_O3 { TierVerdict::None } else { c.tier_verdict_key(entry) };
-            out.push(PrelinkedSlot { id, at: at + off as u64, len: n as u32, trailer, pc, inlined, o2: tier == TIER_O2, base: tier == TIER_BASE, kind, verdict });
+            out.push(PrelinkedSlot { id, at: at + off as u64, len: n as u32, trailer, pc, inlined, o3: tier == TIER_O3, guards: if live { std::mem::take(&mut guards[k]) } else { Vec::new() }, o2: tier == TIER_O2, base: tier == TIER_BASE, kind, verdict });
         }
         out
     }

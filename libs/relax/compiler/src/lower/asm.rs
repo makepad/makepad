@@ -407,10 +407,11 @@ impl<'a> Lcx<'a> {
             return Ok(self.u.syms.intern(crate::syms::SymKind::Thunk(id), self.u.entry(id)));
         }
         if let Some(Res::Def(d)) = self.b.res.get(&x.0).copied() {
-            if self.u.prog.def(d).kind == DefKind::ForeignStatic {
+            if self.u.prog.def(d).kind == DefKind::ForeignStatic && !self.u.is_section_bound(d) {
                 return self.u.foreign_sym(d).ok_or_else(|| format!("sym operand: `{}` has no address on this host", self.u.prog.name(d)));
             }
-            if self.u.prog.def(d).kind == DefKind::Static {
+            // a static, or a section bound (the end of the program's laid-out section)
+            if matches!(self.u.prog.def(d).kind, DefKind::Static | DefKind::ForeignStatic) {
                 // the compile domain's copy (assembly cannot add a thread's domain base)
                 let a = self.static_addr(d);
                 return Ok(self.u.syms.intern(crate::syms::SymKind::StaticAddr(d), a));

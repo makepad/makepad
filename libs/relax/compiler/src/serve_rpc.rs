@@ -160,7 +160,7 @@ fn owner_package(path: &str, root: &Path) -> Result<String, String> {
     }
     Err("cannot identify the file's package; supply pkg".into())
 }
-fn canonical(p: &str) -> String { crate::vfs::canonicalize(p).map(|p|crate::vfs::normalize_path(&p.to_string_lossy())).unwrap_or_else(|_|crate::vfs::normalize_path(p)) }
+use crate::vfs::canonical;
 
 pub fn cmd_serve(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
     match run(sess, args) { Ok(()) => 0, Err(e) => { eprintln!("makepad serve: {e}"); 2 } }

@@ -1,14 +1,15 @@
 //! The window layer: the Ignition Field over the running app, composed by this session (the
 //! HAL's `window_overlay` with a layer texture). The app's frames go to its retained image, which
-//! the HAL copies into `APP` at the start of each of our frames; we draw the window.
+//! the HAL copies into `APP` at the start of our next frame after each new one; we draw the window.
 //!
 //! The sequence: the boot field (the app's first frames already land under it, never on the
 //! screen); at the first present a Gaussian-blurred app fades in behind the still-working galaxy
 //! (its stars glinting, the warm-up arc advancing with the functions built ahead); when the app
 //! is ready (the JIT's readiness signal) the arc closes, the sharp app fades in and the galaxy
-//! goes, and the layer with it. Later sustained UI waits show an Updating card over the same
-//! blurred image. Its fade can reverse when the UI responds or waits again. Every fade
-//! runs on this session's clock, never the app's.
+//! goes, and the layer with it. A later sustained UI wait on the JIT brings that warm-up look
+//! back over the app's frozen frame (the galaxy over the blurred, dimmed app), crossfading
+//! with the sharp app, and takes it away when the UI is free; that fade reverses when the UI
+//! responds or waits again. Every fade runs on this session's clock, never the app's.
 use makepad_hal::Id;
 use std::time::Instant;
 
@@ -25,7 +26,8 @@ pub const SIGMA: f32 = 4.0;
 
 const FADE_IN: f32 = 0.5;
 const LIFT: f32 = 1.1;
-const UPDATE_FADE: f32 = 0.2;
+/// a UI wait's crossfade between the sharp app and the warm-up look, either way (s)
+pub const WAIT_FADE: f32 = 0.3;
 
 /// What the run asks the layer to show (hal_run, from the JIT's signals).
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -39,8 +41,9 @@ pub enum Want {
     /// the run's view over a paused app (a parked panic, a halted patch): the app's last frame
     /// dimmed under the view, in the app's own window
     Paused,
-    /// a sustained UI-thread JIT wait; display only, input stays with the app
-    Updating(crate::RingWant),
+    /// a sustained UI-thread JIT wait: the warm-up look over the app's frozen frame; display
+    /// only, input stays with the app
+    Waiting,
 }
 
 /// The paused app's darkening under the run's view.
@@ -61,15 +64,13 @@ pub struct Look {
     pub resolve: f32,
     /// the layer has faded out: it can go
     pub done: bool,
-    /// the Updating card and blurred backdrop's opacity (no field while present)
-    pub updating: Option<f32>,
 }
 
 impl Look {
     /// The start screen at `opacity` over the app's frames (`Boot::veil`: the window's badge
     /// layer, which every backend composes).
     pub fn veil(opacity: f32) -> Self {
-        Look { blur: false, backdrop: opacity, galaxy: opacity, sharp: 0.0, progress: -1.0, resolve: -1.0, done: false, updating: None }
+        Look { blur: false, backdrop: opacity, galaxy: opacity, sharp: 0.0, progress: -1.0, resolve: -1.0, done: false }
     }
 }
 
@@ -90,9 +91,10 @@ pub struct Layer {
     pub ahead: u64,
     /// the last frame's look had faded out
     done: bool,
-    update_at: Option<Instant>,
-    update_from: f32,
-    update_out: bool,
+    /// a UI wait's fade: when it last turned, the opacity it turned at, whether it goes out
+    wait_at: Option<Instant>,
+    wait_from: f32,
+    wait_out: bool,
 }
 
 fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
@@ -114,9 +116,9 @@ impl Layer {
             app_frames: 0,
             ahead: 0,
             done: false,
-            update_at: None,
-            update_from: 0.0,
-            update_out: false,
+            wait_at: None,
+            wait_from: 0.0,
+            wait_out: false,
         }
     }
 
@@ -135,31 +137,31 @@ impl Layer {
 
     /// The run's wish for this turn. A new boot starts the sequence again.
     pub fn set(&mut self, want: Option<Want>) {
-        // Only the wait card retains the layer on None, for its 200 ms exit. Boot, paused
-        // views and errors replace it immediately. No clock is read on the idle path.
-        if matches!(want, Some(Want::Updating(_))) {
-            if self.update_at.is_none() || self.update_out {
+        // Only a UI wait retains the layer on None, for its fade out. Boot, paused views and
+        // errors replace it immediately. No clock is read on the idle path.
+        if want == Some(Want::Waiting) {
+            if self.wait_at.is_none() || self.wait_out {
                 let now = Instant::now();
-                self.update_from = self.update_opacity(now);
-                self.update_at = Some(now);
-                self.update_out = false;
+                self.wait_from = self.wait_opacity(now);
+                self.wait_at = Some(now);
+                self.wait_out = false;
             }
-        } else if want.is_none() && matches!(self.want, Some(Want::Updating(_))) {
+        } else if want.is_none() && self.want == Some(Want::Waiting) {
             let now = Instant::now();
-            if !self.update_out {
-                self.update_from = self.update_opacity(now);
-                self.update_at = Some(now);
-                self.update_out = true;
+            if !self.wait_out {
+                self.wait_from = self.wait_opacity(now);
+                self.wait_at = Some(now);
+                self.wait_out = true;
             }
-            if self.update_opacity(now) > 0.0 {
+            if self.wait_opacity(now) > 0.0 {
                 return;
             }
-            self.update_at = None;
-            self.update_from = 0.0;
+            self.wait_at = None;
+            self.wait_from = 0.0;
         } else {
-            self.update_at = None;
-            self.update_from = 0.0;
-            self.update_out = false;
+            self.wait_at = None;
+            self.wait_from = 0.0;
+            self.wait_out = false;
         }
         match want {
             Some(Want::Boot) | None => {
@@ -177,7 +179,7 @@ impl Layer {
             Some(Want::Ready) => {
                 self.ready_at.get_or_insert_with(Instant::now);
             }
-            Some(Want::Paused | Want::Updating(_)) => {}
+            Some(Want::Paused | Want::Waiting) => {}
         }
         if self.want.as_ref().map(std::mem::discriminant) != want.as_ref().map(std::mem::discriminant) {
             self.done = false;
@@ -185,10 +187,11 @@ impl Layer {
         self.want = want;
     }
 
-    fn update_opacity(&self, now: Instant) -> f32 {
-        let Some(at) = self.update_at else { return 0.0 };
-        let target = if self.update_out { 0.0 } else { 1.0 };
-        self.update_from + (target - self.update_from) * smooth(0.0, UPDATE_FADE, now.duration_since(at).as_secs_f32())
+    /// How far a UI wait's warm-up look has come in (0: the sharp app, 1: the look).
+    fn wait_opacity(&self, now: Instant) -> f32 {
+        let Some(at) = self.wait_at else { return 0.0 };
+        let target = if self.wait_out { 0.0 } else { 1.0 };
+        self.wait_from + (target - self.wait_from) * smooth(0.0, WAIT_FADE, now.duration_since(at).as_secs_f32())
     }
 
     /// Whether the last frame drawn had faded out.
@@ -208,15 +211,14 @@ impl Layer {
             progress: -1.0,
             resolve: -1.0,
             done: false,
-            updating: None,
         };
         match self.want {
             None | Some(Want::Boot) | Some(Want::Paused) => {}
-            Some(Want::Updating(_)) => {
+            Some(Want::Waiting) => {
+                // the warm-up's galaxy over the blurred app, under the sharp app going and coming
                 look.blur = true;
                 look.backdrop = 0.0;
-                look.galaxy = 0.0;
-                look.updating = Some(self.update_opacity(now));
+                look.sharp = 1.0 - self.wait_opacity(now);
             }
             Some(Want::WarmUp { .. }) | Some(Want::Ready) => {
                 // the blurred app replaces the deep field behind the galaxy

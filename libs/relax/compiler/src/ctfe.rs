@@ -1351,6 +1351,7 @@ impl<'a> Ctx<'a> {
             crate::jit::cert_note_value(u, d, &args);
             return Some(a);
         }
+        if crate::jit::refuses_tainted(u, d) { return None; }
         if u.const_failed.contains(&(d, args.clone())) || self.depth >= CALL_DEPTH {
             return None;
         }
@@ -1450,7 +1451,7 @@ impl<'a> Ctx<'a> {
             // the tag (lower::emit_store_disc)
             if let Some((toff, relax_backend::rir::Mem::Int(tn, _))) = l.tag {
                 let tv = match l.enc {
-                    crate::layout::TagEnc::Direct => Some(adt.discriminant_for_variant(&self.u.tcx, &self.u.prog, vi)?.val),
+                    crate::layout::TagEnc::Direct => Some(adt.tag_for_variant(&self.u.tcx, &self.u.prog, vi)?.val),
                     crate::layout::TagEnc::Single(_) => None,
                     crate::layout::TagEnc::Niche { untagged, lo, start, .. } => {
                         if vi == untagged {

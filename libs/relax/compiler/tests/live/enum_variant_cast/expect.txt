@@ -1,0 +1,4 @@
+# v1: a variant added at the end: the running numbers stay
+v1 patch
+# v2: a variant inserted before High: `index` read High's number, which moves
+v2 restart note=read them as numbers

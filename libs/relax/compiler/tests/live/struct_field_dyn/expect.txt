@@ -1,0 +1,2 @@
+# v1: a field added to a struct a running trait object may hold (SHOWN): the restart rung, the trait objects named
+v1 restart out=prev note=made trait objects of `live::P`

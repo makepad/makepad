@@ -23,13 +23,14 @@ pub(crate) struct SolverCache {
     global_cache: Box<[relax_session::sync::Mutex<graph::GlobalCache>]>,
 }
 /// hash -> arena index of an interned value: the value lives once, in its arena; a lookup
-/// compares against the arena entry (rustc's interner shape). Entries whose 64-bit hashes are
-/// equal beyond the first go to `more` (checked only when one exists).
-#[derive(Default)]
+/// compares against the arena entry (rustc's interner shape). The types' open-addressing index
+/// (slot: the hash's high half over the id + 1), read without a lock: a sharded RwLock map's
+/// reader counts bounced between the check's cores on every goal.
 struct IdIndex {
-    first: crate::conc::ShardMap<u64, u32>,
-    more: relax_session::sync::Mutex<std::collections::HashMap<u64, Vec<u32>>>,
-    has_more: std::sync::atomic::AtomicBool,
+    index: crate::types::index::Index<u64>,
+}
+impl Default for IdIndex {
+    fn default() -> Self { IdIndex { index: crate::types::index::Index::new() } }
 }
 impl IdIndex {
     fn hash_of<T: std::hash::Hash>(v: &T) -> u64 {
@@ -37,25 +38,20 @@ impl IdIndex {
         let mut h = crate::fxhash::FxHasher::default(); v.hash(&mut h); h.finish()
     }
     fn mem_stats(&self) -> (usize, usize) {
-        let (n, mut b) = self.first.mem_stats(|_, _| 0);
-        for v in self.more.lock().unwrap_or_else(|e| e.into_inner()).values() { b += v.capacity() * 4 + 64; }
-        (n, b)
+        (self.index.count(), self.index.bytes())
     }
+    #[inline]
     fn get(&self, h: u64, is: impl Fn(u32) -> bool) -> Option<u32> {
-        if let Some(id) = self.first.get(&h) {
-            if is(id) { return Some(id); }
-            if self.has_more.load(std::sync::atomic::Ordering::Acquire) {
-                let more = self.more.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(ids) = more.get(&h) { return ids.iter().copied().find(|&i| is(i)); }
-            }
-        }
-        None
+        let h = (h >> 32) as u32;
+        let s = self.index.find(h, |s| (s >> 32) as u32 == h && is(s as u32 - 1))?;
+        Some(s as u32 - 1)
     }
     /// Caller holds the intern lock and has seen `get` fail.
     fn insert(&self, h: u64, id: u32) {
-        if self.first.get(&h).is_none() { self.first.insert(h, id); return; }
-        self.more.lock().unwrap_or_else(|e| e.into_inner()).entry(h).or_default().push(id);
-        self.has_more.store(true, std::sync::atomic::Ordering::Release);
+        let h = (h >> 32) as u32;
+        let slot = (h as u64) << 32 | (id as u64 + 1);
+        let mut g = self.index.lock();
+        self.index.claim(&mut g, h, slot, || self.index.table().filled().map(|s| ((s >> 32) as u32, s)).chain(std::iter::once((h, slot))));
     }
 }
 const SOLVER_CAP: usize = 1 << 26;

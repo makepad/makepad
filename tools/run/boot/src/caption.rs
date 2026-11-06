@@ -8,6 +8,10 @@
 //! in the strip when the buttons leave room for it, else in the widest gap they leave, cut with
 //! an ellipsis. The strip is the window's drag region (`Boot::drag_answer`).
 //!
+//! Over the app's frame (the window layer, once the app has shown it) the strip is the app's own
+//! caption (`WindowCaption`), drawn sharp from that frame, never this one: one caption through
+//! the layer's crossfades, the one that takes the window's input.
+//!
 //! Under a makepad window manager (`info_flags::WM_HOSTED`) the window's controls are the WM's,
 //! as the app's own caption draws them (widgets' `resolve_chrome`, one table:
 //! `makepad_hal::WindowControls`): in a macOS-like family the traffic lights at the strip's

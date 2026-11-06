@@ -9,6 +9,8 @@
 # program print "never reached exec" (and `makepad inspect why-hung` names the child's wait). Run from the workspace root (the JIT runs through `cargo run --profile host`).
 # ROUNDS (default 10), the JIT runs through `cargo run --profile host`, AHEAD (default: the binary's).
 ROOT=$(pwd)
+# the fixture's copy of the program is the std lane's test, byte for byte
+cmp -s "$ROOT/libs/relax/compiler/tests/std/os_fork_busy.rs" "$ROOT/tools/run/fixture/src/os_fork_busy.rs" || { echo "fork_busy: FAILED (tools/run/fixture/src/os_fork_busy.rs differs from libs/relax/compiler/tests/std/os_fork_busy.rs)"; exit 1; }
 # the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
 J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
 ROUNDS=${ROUNDS:-10}

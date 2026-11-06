@@ -52,17 +52,36 @@ fn text_range(pf: &ParsedFile) -> (u32, u32) {
 }
 
 pub(crate) fn file_digest(pf: &ParsedFile) -> FileDigest {
-    digest_into(pf, None)
+    digest_into(pf, None, None)
 }
 
 /// The interface text of a file (holes marked `{..}`): MAKEPAD_RUN_CACHE_IFACE diagnostics.
 pub(crate) fn iface_text(pf: &ParsedFile) -> Vec<u8> {
     let mut v = Vec::new();
-    digest_into(pf, Some(&mut v));
+    digest_into(pf, Some(&mut v), None);
     v
 }
 
-fn digest_into(pf: &ParsedFile, mut text: Option<&mut Vec<u8>>) -> FileDigest {
+/// A file's interface by item (check_reuse.rs): each named item's piece -- a fn, const, static,
+/// struct, union, enum, type alias, trait or inline module among the file's own items, with no
+/// impl, macro or extern block inside it -- and the hash of all the rest (the inner attributes,
+/// imports, impls, macro definitions and calls, extern blocks, `mod` declarations, the items with
+/// such an item inside). Two files with equal tables have equal interfaces; a file whose
+/// rest is the same and whose named items are a superset only added items.
+pub(crate) struct FileTable {
+    pub rest: u128,
+    /// (piece hash, item), by hash
+    pub named: Vec<(u128, ItemId)>,
+}
+
+/// The file's digest and its table.
+pub(crate) fn file_digest_table(pf: &ParsedFile) -> (FileDigest, FileTable) {
+    let mut t = FileTable { rest: 0, named: Vec::new() };
+    let d = digest_into(pf, None, Some(&mut t));
+    (d, t)
+}
+
+fn digest_into(pf: &ParsedFile, mut text: Option<&mut Vec<u8>>, table: Option<&mut FileTable>) -> FileDigest {
     let (lo, hi) = text_range(pf);
     let ast = &pf.ast;
     let n = ast.items.len();
@@ -232,10 +251,51 @@ fn digest_into(pf: &ParsedFile, mut text: Option<&mut Vec<u8>>) -> FileDigest {
         }
     }
     ordered.push(piece(&mut segs, want_text));
-    for (&i, mut segs) in ast.root_items.iter().zip(item_segs) {
+    // (table) the root items that define a global item inside them -- an impl, a macro
+    // definition or item macro, an extern block or crate, in a body or an inline module: such an
+    // item is more than its name, so it counts among the rest
+    let mut global = vec![false; ast.root_items.len()];
+    if table.is_some() {
+        let mut ranges: Vec<(u32, u32, usize)> = ast.root_items.iter().enumerate().map(|(idx, &i)| {
+            let it = ast.item(i);
+            (ast.list(it.attrs).iter().filter_map(attr_span).map(|s| s.0).min().unwrap_or(it.lo).min(it.lo), it.hi, idx)
+        }).collect();
+        ranges.sort_unstable();
+        let roots: std::collections::HashSet<u32> = ast.root_items.iter().map(|i| i.0).collect();
+        for (j, x) in ast.items.iter().enumerate() {
+            if roots.contains(&(j as u32)) { continue; }
+            if !matches!(x.kind, ItemKind::Impl(_) | ItemKind::MacroRules(_) | ItemKind::Mac(_) | ItemKind::ForeignMod(_) | ItemKind::ExternCrate(_)) { continue; }
+            let at = pf.call_site(x.lo);
+            let k = ranges.partition_point(|r| r.1 <= at);
+            if let Some(&(rlo, _, idx)) = ranges.get(k) { if rlo <= at { global[idx] = true; } }
+        }
+    }
+    let mut named: Vec<(u128, ItemId)> = Vec::new();
+    let mut unnamed: Vec<u128> = Vec::new();
+    for (idx, (&i, mut segs)) in ast.root_items.iter().zip(item_segs).enumerate() {
         let it = ast.item(i);
         let p = piece(&mut segs, want_text);
+        if table.is_some() {
+            match it.kind {
+                ItemKind::MacroRules(_) | ItemKind::Mac(_) => {}
+                ItemKind::Fn(..) | ItemKind::Const(..) | ItemKind::Static(..) | ItemKind::Struct(_) | ItemKind::Union(_) | ItemKind::Enum(_)
+                    | ItemKind::TypeAlias(_) | ItemKind::Trait(_) | ItemKind::TraitAlias(_) | ItemKind::Mod(Some(_)) if !global[idx] => named.push((p.0, i)),
+                _ => unnamed.push(p.0),
+            }
+        }
         if matches!(it.kind, ItemKind::MacroRules(_) | ItemKind::Mac(_)) { ordered.push(p) } else { free.push(p) }
+    }
+    if let Some(t) = table {
+        named.sort_unstable();
+        unnamed.sort_unstable();
+        let mut h = Sip128::new();
+        h.str("iface-rest");
+        h.u32(ordered.len() as u32);
+        for (x, _) in &ordered { h.u128(*x); }
+        h.u32(unnamed.len() as u32);
+        for x in unnamed { h.u128(x); }
+        t.rest = h.finish128();
+        t.named = named;
     }
     free.sort_unstable();
     let mut h = Sip128::new();
@@ -530,6 +590,40 @@ pub(crate) fn apply_bound(prog: &crate::program::Program, plain: &[u128], bound:
 }
 
 /// The digests of files `want` into `out` (indexed by file), on several threads.
+/// The digest and the table (file_digest_table) of each file of `want`, on several threads.
+pub(crate) fn file_tables_of(prog: &crate::program::Program, want: &[usize]) -> Vec<Option<(FileDigest, FileTable)>> {
+    let mut out: Vec<Option<(FileDigest, FileTable)>> = (0..prog.files.len()).map(|_| None).collect();
+    if want.is_empty() { return out; }
+    struct Shared<'a>(&'a [std::sync::Arc<ParsedFile>]);
+    // read-only: the parses are complete (their lazily built tables are OnceLocks)
+    unsafe impl Sync for Shared<'_> {}
+    let files = Shared(&prog.files);
+    let threads = std::thread::available_parallelism().map_or(4, |x| x.get()).clamp(1, 8);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let parts: Vec<Vec<(usize, (FileDigest, FileTable))>> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..threads)
+            .map(|_| {
+                let (files, next) = (&files, &next);
+                s.spawn(move || {
+                    let mut v = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&f) = want.get(i) else { break };
+                        let Some(pf) = files.0.get(f) else { continue };
+                        v.push((f, file_digest_table(pf)));
+                    }
+                    v
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap_or_default()).collect()
+    });
+    for (i, d) in parts.into_iter().flatten() {
+        if let Some(o) = out.get_mut(i) { *o = Some(d); }
+    }
+    out
+}
+
 pub(crate) fn file_digests_of(prog: &crate::program::Program, want: &[usize], out: &mut [Option<std::sync::Arc<FileDigest>>]) {
     if want.is_empty() { return; }
     struct Shared<'a>(&'a [std::sync::Arc<ParsedFile>]);

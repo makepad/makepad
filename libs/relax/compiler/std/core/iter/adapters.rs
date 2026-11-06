@@ -435,6 +435,31 @@ impl<I: Iterator> Iterator for StepBy<I> {
 
 impl<I: ExactSizeIterator> ExactSizeIterator for StepBy<I> {}
 
+impl<I: ExactSizeIterator> StepBy<I> {
+    /// How many elements of `iter` to skip from the back to reach the last one this yields (core
+    /// step_by.rs next_back_index).
+    fn next_back_index(&self) -> usize {
+        let rem = self.iter.len() % (self.step_minus_one + 1);
+        if self.first_take {
+            if rem == 0 { self.step_minus_one } else { rem - 1 }
+        } else {
+            rem
+        }
+    }
+}
+
+impl<I: DoubleEndedIterator + ExactSizeIterator> DoubleEndedIterator for StepBy<I> {
+    fn next_back(&mut self) -> Option<I::Item> {
+        self.iter.nth_back(self.next_back_index())
+    }
+    fn nth_back(&mut self, n: usize) -> Option<I::Item> {
+        // an out-of-range `n` saturates: `iter.nth_back(usize::MAX)` is past the end of any
+        // exact-size iterator
+        let n = n.saturating_mul(self.step_minus_one + 1).saturating_add(self.next_back_index());
+        self.iter.nth_back(n)
+    }
+}
+
 // ---------------------------------------------------------------- Chain
 
 #[derive(Clone, Debug)]

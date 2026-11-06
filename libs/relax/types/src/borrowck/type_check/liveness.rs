@@ -57,7 +57,7 @@ struct LocalUses { defs: Vec<usize>, uses: Vec<usize>, drops: Vec<usize> }
 /// dataflow is only solved if a drop-live query needs it.
 pub struct LivenessComputation<'a> {
     prog: &'a Program, tcx: &'a Tcx, body: &'a Body, locations: &'a LocationMap, moves: &'a MoveData,
-    uses: Vec<LocalUses>, predecessors: Vec<Vec<usize>>,
+    uses: Vec<LocalUses>, predecessors: crate::borrowck::mir_nll::Predecessors,
     init_states: Option<Vec<Option<(BitSet, BitSet)>>>,
 }
 /// One local's liveness: where its value may still be used, where it may only be dropped,
@@ -110,7 +110,8 @@ impl<'a> LivenessComputation<'a> {
                 if self.initialized_at(p, path, false) && drop_live.insert(p) { drop_locations.push(p); stack.push(p); }
             }
             while let Some(p) = stack.pop() {
-                for q in self.predecessors[p].clone() {
+                for i in self.predecessors.range(p) {
+                    let q = self.predecessors.at(i);
                     if defs.contains(q) || use_live.contains(q) { continue; }
                     // Check initializedness only at predecessor block exits. A
                     // move within a block was already a use-live boundary.

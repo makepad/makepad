@@ -467,8 +467,29 @@ fn dispatch_command(req: &Req, out: &mut Out) {
         "resume" if !req.pos.is_empty() => events::cmd_resume(req, out),
         "count" | "break" | "restartable" | "probes" | "rm" | "continue" | "pause" | "resume" => instrument::cmd(req, out),
         "" => out.err("empty request"),
-        c => out.err(&format!("unknown command `{}` (try `help`)", c)),
+        c => out.err(&unknown_command(c)),
     }
+}
+
+/// An unknown command's error names the commands there are: the app's (what the program
+/// registered) and the host's, each by its first word. A lane's `move` once failed with only
+/// "try `help`", and the lane concluded that remote pointer moves never reach hover (11-03).
+fn unknown_command(c: &str) -> String {
+    let mut app: Vec<String> = Vec::new();
+    for (name, _, _) in PROVIDERS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        if !app.contains(name) {
+            app.push(name.clone());
+        }
+    }
+    let host_table = host_commands();
+    let mut host: Vec<&str> = Vec::new();
+    for (name, _, _) in COMMANDS.iter().chain(makepad_gpu_trace::query::COMMANDS).chain(host_table.iter()) {
+        if let Some(word) = name.split_whitespace().next().filter(|w| !host.contains(w)) {
+            host.push(word);
+        }
+    }
+    let app = if app.is_empty() { String::new() } else { format!("the app's commands are {}; ", app.join(", ")) };
+    format!("unknown command `{c}`: {app}the JIT host's are {} (`help` describes each)", host.join(", "))
 }
 
 /// The front end was busy for an inspect load (modules::InModuleErr::FrontBusy): nothing changed.
@@ -1911,6 +1932,10 @@ mod tests {
             let answer = String::from_utf8(bytes).unwrap();
             assert!(answer.contains("unknown parameter") && answer.contains("typo") && answer.contains("known:"), "{command}: {answer}");
         }
+        let (bytes, _) = makepad_remote::cmd::answer(super::dispatch_command, "frobnicate");
+        let unknown = String::from_utf8(bytes).unwrap();
+        assert!(unknown.contains("unknown command `frobnicate`: ") && unknown.contains("why-hung, ") && unknown.contains("(`help` describes each)"), "an unknown command names the known ones: {unknown}");
+        assert_eq!(unknown.matches(" session,").count(), 1, "each command's first word once: {unknown}");
         for command in ["timeline stop n=2", "jit queue ms=1", "heap stop rate=1", "vm roots depth=1"] {
             let (bytes, _) = makepad_remote::cmd::answer(super::dispatch_command, command);
             let answer = String::from_utf8(bytes).unwrap();

@@ -202,6 +202,11 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
         }
     }
 
+    /// An empty map of the same size and heap.
+    pub fn empty_like(&self) -> Self {
+        Self::build(self.bits, self.kept)
+    }
+
     #[inline]
     fn phase(&self) -> Option<crate::zone_alloc::PhaseGuard> {
         if self.kept { Some(crate::zone_alloc::kept()) } else { None }

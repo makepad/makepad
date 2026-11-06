@@ -96,6 +96,20 @@ pub fn talk(out: &mut u64) {
 }
 "#;
 
+const SPEAK_CONST: &str = r#"
+pub trait Speak { fn say(&self) -> u64; }
+pub struct Dog;
+impl Speak for Dog {
+    fn say(&self) -> u64 { 3 }
+}
+
+static LOUD: &dyn Speak = &Dog;
+
+pub fn talk(out: &mut u64) {
+    *out = LOUD.say();
+}
+"#;
+
 const HOLDER: &str = r#"pub enum Note { Thickness(u64), Other }
 
 static mut STORED: Option<Box<dyn Fn() -> u64>> = None;
@@ -141,7 +155,8 @@ fn a_refused_enum_edit_keeps_the_older_body_a_closure_needs() {
 
 /// A closure of a replaced version whose body is gone is no error of the program, so no edit of
 /// it can resume the call: it is an internal compiler error, a failed hot load (jit.rs compile_ice,
-/// tools/run/fixture/hot_fail.py), which never parks.
+/// tools/run/fixture/hot_fail.py), which never parks. Its one line carries what the report needs
+/// (jit.rs missing_owner_facts): the owner, both versions, the bodies held, what the edit kept.
 #[test]
 fn a_closure_of_a_replaced_version_without_its_body_is_an_internal_error() {
     in_child("reload_items_tests::a_closure_of_a_replaced_version_without_its_body_is_an_internal_error", &["only"], |_| {
@@ -157,22 +172,38 @@ fn a_closure_of_a_replaced_version_without_its_body_is_an_internal_error() {
             let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call("run_stored"))).unwrap_err();
             let message = failed.downcast_ref::<String>().cloned().unwrap_or_default();
             assert!(message.contains("closure parent body missing") && crate::jit::is_ice_stub_message(message.trim_start_matches("JIT call panicked: ")), "{message}");
+            for fact in ["owner `", "store", "lib.rs:", "the closure's version v", "replaced by v", "owner bodies held: none", "the edit that replaced it kept this body", "owner code ", "inlined into "] {
+                assert!(message.contains(fact), "{fact:?} in {message}");
+            }
         });
     });
 }
 
 #[test]
 fn edits_of_items_apply_live() {
-    in_child("reload_items_tests::edits_of_items_apply_live", &["patch", "restart"], |case| {
-        if case == "restart" {
+    in_child("reload_items_tests::edits_of_items_apply_live", &["patch", "dyn_maker", "dyn_const"], |case| {
+        if case == "dyn_maker" {
             let lib = format!("{LIB}{SPEAK}");
-            live_app("items-restart", &[("lib.rs", &lib), ("other.rs", OTHER)], &["talk"], |call, edit| {
+            live_app("items-dyn-maker", &[("lib.rs", &lib), ("other.rs", OTHER)], &["talk"], |call, edit| {
                 assert_eq!(call("talk"), 3);
-                // a trait object of `Dog` holds the removed impl's `say`: the code that makes them
-                // is not known to the edit, and `Dog` stays -- the edit restarts
+                // the trait objects of `Dog` that hold the removed impl's `say` keep their vtable
+                // and its code; the code that makes them (Unit::vtable_makers: `talk`) is rebuilt
+                // with the edit, which makes none
                 let outcome = edit("lib.rs", &[("impl Speak for Dog {\n    fn say(&self) -> u64 { 3 }\n}\n", ""), ("let d: Box<dyn Speak> = Box::new(Dog);\n    *out = d.say();", "*out = 4;")]);
-                assert_eq!(outcome.rung, Rung::Restart, "{:?}", outcome.lines);
-                assert_eq!(call("talk"), 3, "nothing of the edit installed");
+                assert_eq!(outcome.rung, Rung::Patch, "{:?}", outcome.lines);
+                assert_eq!(call("talk"), 4);
+            });
+            return;
+        }
+        if case == "dyn_const" {
+            let lib = format!("{LIB}{SPEAK_CONST}");
+            live_app("items-dyn-const", &[("lib.rs", &lib), ("other.rs", OTHER)], &["talk"], |call, edit| {
+                assert_eq!(call("talk"), 3);
+                // the only trait object of `Dog` is a static's value, which the edit removes with
+                // its reader: the object keeps its vtable and its code, and nothing reads it again
+                let outcome = edit("lib.rs", &[("impl Speak for Dog {\n    fn say(&self) -> u64 { 3 }\n}\n", ""), ("static LOUD: &dyn Speak = &Dog;\n", ""), ("*out = LOUD.say();", "*out = 4;")]);
+                assert_eq!(outcome.rung, Rung::Patch, "{:?}", outcome.lines);
+                assert_eq!(call("talk"), 4);
             });
             return;
         }

@@ -30,6 +30,14 @@ fn multiple() -> u32 { 6 }
 #[cfg_attr(any(), mac::boom)]
 fn ordered() -> u32 { 3 }
 
+// A #[cfg] that holds is gone before an attribute macro sees the item, before or after it: the
+// macro sees only #[inline].
+#[cfg(all())]
+#[mac::check_attrs(inline)]
+#[cfg(not(any()))]
+#[inline]
+fn configured() -> u32 { 8 }
+
 #[cfg_attr(all(), mac::m, derive(mac::Marked, Clone))]
 #[cfg_attr(any(), mac::boom)]
 struct Derived;
@@ -106,6 +114,6 @@ fn main() {
     assert_eq!((Derived::derived(), Direct::derived(), store.value()), (17, 17, 11));
     assert_eq!((imported::selected(), imported::benchmark(), imported::child::dropped()), (14, 16, 19));
     assert_eq!((local(), imported_local()), (18, 20));
-    assert_eq!(qualified(), 10);
+    assert_eq!((qualified(), configured()), (10, 8));
     println!("cfg attr macros ok");
 }

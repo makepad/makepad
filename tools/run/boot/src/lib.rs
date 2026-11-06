@@ -36,7 +36,6 @@ mod layer;
 mod layout;
 mod ring;
 mod text;
-mod updating;
 
 use document::{Program, ERROR_BAND, FIELD, GLYPH, ICON, PIPE_BANK_SIZE};
 pub use groups::order as order_diagnostics;
@@ -416,7 +415,7 @@ impl Boot {
         if self.chrome.hosted.is_some() {
             return false;
         }
-        self.layer(None, 0);
+        self.layer(None, 0, false);
         let Some(window) = self.window.take() else { return true };
         let mut writer = CmdWriter::new(HOST);
         if let Some(badge) = self.ring.window.take() {
@@ -1320,7 +1319,7 @@ impl Boot {
         }
     }
 
-    /// Whether the window layer is on (the field, wait card or paused view over the app).
+    /// Whether the window layer is on (the field or the paused view over the app).
     pub fn layer_on(&self) -> bool {
         self.renderer.as_ref().is_some_and(|r| r.layer.on)
     }
@@ -1336,8 +1335,10 @@ impl Boot {
     }
 
     /// The run's wish for the window layer this turn, and the app's presented frames so far (a
-    /// new one is blurred again). `None` fades an Updating card out; other layers go at once.
-    pub fn layer(&mut self, want: Option<LayerWant>, app_frames: u64) {
+    /// new one is blurred again). `None` fades a UI wait's look out; other layers go at once.
+    /// `behind`: the layer composed by the HAL has not taken the app's newest frame yet (it was
+    /// still with the window system): the layer is drawn again, which takes it, and blurs it again.
+    pub fn layer(&mut self, want: Option<LayerWant>, app_frames: u64, behind: bool) {
         // the paused view replaces a panel (the HAL keeps one overlay per window); the boot
         // field's layer never does
         let want = want.filter(|w| self.layers() && (self.overlay.is_none() || *w == LayerWant::Paused));
@@ -1362,6 +1363,10 @@ impl Boot {
         renderer.layer.set(want);
         let want = renderer.layer.want();
         renderer.layer.app_frames = app_frames;
+        if behind && renderer.layer.on {
+            renderer.redraw = true;
+            renderer.layer.blurred = None;
+        }
         let mut writer = CmdWriter::new(HOST);
         if paused {
             // the layer takes the panel's place without a removal in between
@@ -1730,7 +1735,8 @@ impl Boot {
             .is_some_and(|r| r.layer.on && r.layer.peek_done())
     }
 
-    /// The boot field or the display-only Updating card over the running app.
+    /// The boot field: in the boot window, or over the running app (the window layer, the
+    /// start screen's veil).
     fn present_field(&mut self) {
         let Some(window) = self.window else { return };
         let viewport = [self.geometry[2], self.geometry[3]];
@@ -1738,6 +1744,7 @@ impl Boot {
         let pixels = makepad_hal::window_pixels(viewport.map(f64::from), dpi as f64).map(|n| n as f32);
         let reduce_motion = self.environment.reduce_motion;
         let caption = self.caption();
+        let app_caption = self.app_caption();
         let focus = self.focused as u8 as f32;
         let build_start_ns = makepad_hal::clock_ns();
         let renderer = self.renderer.as_mut().unwrap();
@@ -1750,60 +1757,57 @@ impl Boot {
             Some(opacity) => Some(layer::Look::veil(opacity)),
             None => layered.then(|| renderer.layer.look(reduce_motion)),
         };
+        // over the app (its frame shows, blurred or sharp) the caption strip is the app's own,
+        // sharp: one caption through every crossfade, the one that takes the window's input (the
+        // layer leaves it with the app). Ours only over the boot field.
+        let app_strip = app_caption.filter(|c| c.height > 0.0 && layered && look.is_some_and(|l| l.blur));
+        let caption = match app_strip {
+            Some(_) => caption::Caption { height: 0.0, buttons: Vec::new(), ..caption },
+            None => caption,
+        };
         // the window buttons only once the start screen covers the app's
         let opaque = veil.is_none_or(|opacity| opacity >= 1.0);
         let region = [0.0, 0.0, viewport[0], viewport[1]];
         renderer.text.begin_layout();
-        let updating = look.and_then(|l| l.updating);
-        let frame = updating.is_none().then(|| {
-            renderer.field.frame(
-                &mut writer,
-                &program.pipes[FIELD],
-                &self.state,
-                time,
-                region,
-                reduce_motion,
-                false,
-                look.map_or(-1.0, |l| l.resolve),
-                veil.is_some() || renderer.layer.on && !matches!(renderer.layer.want(), None | Some(LayerWant::Boot)),
-            )
-        });
-        let card = if let Some(LayerWant::Updating(work)) = renderer.layer.want().filter(|_| layered) {
-            Some(updating::layout(&mut renderer.text, program, work, viewport, &mut renderer.layout))
-        } else {
-            None
-        };
-        if frame.is_some() {
-            let hint = program.label(layout::phase_key(self.state.phase));
-            let mut status = None;
-            if let Some(look) = look.filter(|l| l.progress >= 0.0) {
-                status = Some(if look.resolve >= 0.0 {
-                    "Ready".to_string()
-                } else {
-                    let app = caption.title.as_deref().unwrap_or(&self.state.app);
-                    format!("Warming up {app}")
-                });
-            }
-            if veil.is_some() && self.restart_begun {
-                status = Some(format!("Restarting {}", caption.title.as_deref().unwrap_or(&self.state.app)));
-            }
-            renderer.field.hud(
-                &mut renderer.text,
-                &self.state,
-                &hint,
-                status.as_deref(),
-                viewport,
-                time,
-                &caption,
-                &mut renderer.layout,
-            );
+        let frame = renderer.field.frame(
+            &mut writer,
+            &program.pipes[FIELD],
+            &self.state,
+            time,
+            region,
+            reduce_motion,
+            false,
+            look.map_or(-1.0, |l| l.resolve),
+            veil.is_some() || renderer.layer.on && !matches!(renderer.layer.want(), None | Some(LayerWant::Boot)),
+        );
+        let hint = program.label(layout::phase_key(self.state.phase));
+        let app = caption.title.as_deref().unwrap_or(&self.state.app);
+        let mut status = None;
+        if let Some(look) = look.filter(|l| l.progress >= 0.0) {
+            status = Some(if look.resolve >= 0.0 { "Ready".to_string() } else { format!("Warming up {app}") });
         }
+        if layered && renderer.layer.want() == Some(LayerWant::Waiting) {
+            status = Some(format!("Updating {app}"));
+        }
+        if veil.is_some() && self.restart_begun {
+            status = Some(format!("Restarting {app}"));
+        }
+        renderer.field.hud(
+            &mut renderer.text,
+            &self.state,
+            &hint,
+            status.as_deref(),
+            viewport,
+            time,
+            &caption,
+            &mut renderer.layout,
+        );
         renderer.text.end_layout();
         renderer.text.begin_frame();
         let mut requests = Vec::new();
         let mut glyphs = Vec::new();
         let bounds = [0.0, 0.0, viewport[0], viewport[1]];
-        let fade = updating.unwrap_or_else(|| look.map_or(1.0, |l| l.galaxy));
+        let fade = look.map_or(1.0, |l| l.galaxy);
         for line in &mut renderer.layout.fixed_text {
             let y = line.position[1];
             let mut line = TextLine {
@@ -1839,9 +1843,9 @@ impl Boot {
                     (id!(dark), &[1.0]),
                     (id!(reduce_motion), &[reduce_motion as u8 as f32]),
                     (id!(time), &[time]),
-                    (id!(view), &frame.as_ref().map_or([0.0; 4], |f| f.view)),
-                    (id!(field_params), &frame.as_ref().map_or([0.0; 4], |f| f.params)),
-                    (id!(field_fall), &frame.as_ref().map_or([0.0; 4], |f| f.fall)),
+                    (id!(view), &frame.view),
+                    (id!(field_params), &frame.params),
+                    (id!(field_fall), &frame.fall),
                     (id!(field_layer), &field_layer),
                     (id!(field_fault), &field_fault),
                     (id!(radius), &[sdf.radius]),
@@ -1856,7 +1860,7 @@ impl Boot {
         common(&program.pipes[GLYPH], &mut glyph_uniforms);
         // the caption's window buttons (the field's only cards)
         let mut buttons = Vec::new();
-        if let Some(ground) = caption.ground.filter(|_| caption.height > 0.0 && updating.is_none() && opaque) {
+        if let Some(ground) = caption.ground.filter(|_| caption.height > 0.0 && opaque) {
             program.pipes[ERROR_BAND].instances.write(
                 &[(id!(rect), &[0.0, 0.0, viewport[0], caption.height]), (id!(accent), &[CAPTION_GROUND]), (id!(tint), &ground)],
                 &mut buttons,
@@ -1876,20 +1880,6 @@ impl Boot {
                 ],
                 &mut buttons,
             );
-        }
-        if let Some(card) = card {
-            // The shadow extends 16 points around the face, offset down by 6 (Dialog's
-            // elevation_4). These are draw instances only, never entries in layout.cards.
-            let [x, y, w, h] = card.rect;
-            for (rect, accent) in [
-                ([x - 16.0, y - 16.0, w + 32.0, h + 38.0], 8.0),
-                (card.track, 9.0),
-            ] {
-                program.pipes[ERROR_BAND].instances.write(
-                    &[(id!(rect), &rect), (id!(accent), &[accent]), (id!(pressed), &[fade]), (id!(selected), &[card.progress])],
-                    &mut buttons,
-                );
-            }
         }
         let mut band_uniforms = Vec::new();
         common(&program.pipes[ERROR_BAND], &mut band_uniforms);
@@ -1968,7 +1958,7 @@ impl Boot {
             ..Default::default()
         });
         let scissor = [0.0, 0.0, pixels[0], pixels[1]];
-        let mut app = |writer: &mut CmdWriter, texture: u32, opacity: f32, dim: f32, updating: bool| {
+        let mut app = |writer: &mut CmdWriter, texture: u32, opacity: f32, dim: f32, scissor: [f32; 4]| {
             if let Some(pipe) = layer_pipe.filter(|_| opacity > 0.0) {
                 let mut uniforms = Vec::new();
                 pipe.uniforms
@@ -1979,7 +1969,6 @@ impl Boot {
                         (id!(rect), &[0.0, 0.0, viewport[0], viewport[1]]),
                         (id!(opacity), &[opacity]),
                         (id!(dim), &[dim]),
-                        (id!(updating), &[updating as u8 as f32]),
                     ],
                     &mut data,
                 );
@@ -1988,13 +1977,10 @@ impl Boot {
                 kept.push(uniforms);
             }
         };
-        if let Some(opacity) = updating {
-            app(&mut writer, layer::APP, 1.0, 0.0, false);
-            app(&mut writer, layer::QUARTER, opacity, 0.0, true);
-        } else if look.is_some_and(|l| l.blur) {
-            app(&mut writer, layer::QUARTER, 1.0, layer::BLUR_DIM, false);
+        if look.is_some_and(|l| l.blur) {
+            app(&mut writer, layer::QUARTER, 1.0, layer::BLUR_DIM, scissor);
         }
-        if let Some(frame) = frame.filter(|_| fade > 0.0 || look.is_some_and(|l| l.backdrop > 0.0)) {
+        if fade > 0.0 || look.is_some_and(|l| l.backdrop > 0.0) {
             program.pipes[FIELD].draw_buffer(
                 &mut writer,
                 frame.instances,
@@ -2019,8 +2005,13 @@ impl Boot {
             renderer.text.atlas(),
             scissor,
         );
+        if let Some(strip) = app_strip {
+            let top = (strip.top * dpi).round().clamp(0.0, pixels[1]);
+            let bottom = ((strip.top + strip.height) * dpi).round().clamp(top, pixels[1]);
+            app(&mut writer, layer::APP, 1.0, 0.0, [0.0, top, pixels[0], bottom - top]);
+        }
         if let Some(look) = look {
-            app(&mut writer, layer::APP, look.sharp, 0.0, false);
+            app(&mut writer, layer::APP, look.sharp, 0.0, scissor);
         }
         writer.frame_set_build_end(makepad_hal::clock_ns());
         let snapshot = self.dump.as_mut().and_then(|d| d.due());

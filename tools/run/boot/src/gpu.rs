@@ -117,7 +117,7 @@ impl Pipeline {
     ) -> Result<Self, String> {
         let (backend, packing) = match dialect {
             dialect::MSL => (ShaderBackend::Metal, UniformPacking::Metal),
-            dialect::SPIRV => (ShaderBackend::Glsl, UniformPacking::Std140),
+            dialect::SPIRV | dialect::GLSL => (ShaderBackend::Glsl, UniformPacking::Std140),
             // the packing the app's HAL client compiles D3D11 shaders with
             dialect::HLSL => (ShaderBackend::Hlsl, UniformPacking::Std140),
             other => return Err(format!("Unsupported HAL boot shader dialect {other}")),
@@ -125,6 +125,8 @@ impl Pipeline {
         let mut options =
             ShaderCompileOptions::new(backend, false, dialect == dialect::SPIRV, false, false);
         options.uniform_packing = packing;
+        // GLES links the complete stages the compiler emits (as the app's HAL client asks)
+        options.gles_complete = dialect == dialect::GLSL;
         let output = compile_shader(vm, shader, &options);
         if output.has_errors() {
             return Err(output.error_report().into());
@@ -135,6 +137,8 @@ impl Pipeline {
         let mut uniforms = Record::default();
         let mut scope = Record::default();
         let mut textures = 0;
+        // the one texture's name and sampler (GLES binds a texture by name, with its sampler)
+        let mut texture = None;
         let mut geometry = false;
         let mut vertex = false;
         let mut fragment = false;
@@ -253,6 +257,7 @@ impl Pipeline {
                         ));
                     }
                     textures += 1;
+                    texture = Some((io.name(), io.sampler()));
                 }
                 ShaderIoKind::VertexPosition => vertex = true,
                 ShaderIoKind::FragmentOutput(0) => fragment = true,
@@ -370,6 +375,90 @@ impl Pipeline {
                         pixel: false,
                     })
                     .collect(),
+            }
+            .encode()
+        } else if dialect == dialect::GLSL {
+            // The HAL's GLES pipeline payload (makepad_hal::glsl), as the app's HAL client builds
+            // it (`gl_payload`, platform/src/os/hal/shader.rs): the complete stages, the five
+            // uniform blocks, packed vec4 attributes for the geometry and the instance floats
+            // (those past the attribute limit come from the instance word texture), the texture
+            // by name with its sampler.
+            let sources = output
+                .view()
+                .glsl
+                .ok_or("Shader compiler returned no GLSL")?;
+            let info = sources.info();
+            if info.typed_geometry {
+                return Err("Boot shader inputs are floats: no typed attributes".into());
+            }
+            let mut attributes = Vec::new();
+            for (instance, slots, prefix) in [
+                (false, info.geometry_slots, "geometry"),
+                (true, info.instance_slots, "instance"),
+            ] {
+                let vec4s = slots.div_ceil(4);
+                let count = if instance {
+                    info.instance_fetch_from.map_or(vec4s, |from| from.min(vec4s))
+                } else {
+                    vec4s
+                };
+                for i in 0..count {
+                    attributes.push(makepad_hal::glsl::Attribute {
+                        name: format!("packed_{prefix}_{i}"),
+                        offset: i as u32 * 16,
+                        format: 3,
+                        lanes: (slots - i * 4).min(4) as u32,
+                        instance,
+                    });
+                }
+            }
+            let textures = texture
+                .map(|(name, sampler)| makepad_hal::glsl::Texture {
+                    name: format!("tex_{name}"),
+                    shape: 0,
+                    sampler: desc.samplers().get(sampler).map_or(
+                        makepad_hal::spirv::SpirvSampler {
+                            filter: 1,
+                            address: 1,
+                            compare: false,
+                            pixel: false,
+                        },
+                        |sampler| makepad_hal::spirv::SpirvSampler {
+                            filter: match sampler.filter {
+                                SamplerFilter::Nearest => 0,
+                                SamplerFilter::Linear => 1,
+                            },
+                            address: match sampler.address {
+                                SamplerAddress::Repeat => 0,
+                                SamplerAddress::ClampToEdge => 1,
+                                SamplerAddress::ClampToZero => 2,
+                                SamplerAddress::MirroredRepeat => 3,
+                            },
+                            compare: sampler.compare,
+                            pixel: sampler.coord == SamplerCoord::Pixel,
+                        },
+                    ),
+                })
+                .into_iter()
+                .collect();
+            makepad_hal::glsl::GlslPipeline {
+                vertex: sources.vertex().to_owned(),
+                fragment: sources.fragment().to_owned(),
+                blocks: [
+                    "draw_callUniforms",
+                    "passUniforms",
+                    "draw_listUniforms",
+                    "userUniforms",
+                    "liveUniforms",
+                ]
+                .map(String::from)
+                .to_vec(),
+                attributes,
+                textures,
+                vertex_stride: info.geometry_slots as u32 * 4,
+                instance_stride: info.instance_slots as u32 * 4,
+                instance_texture: info.instance_fetch_from.is_some(),
+                pick: false,
             }
             .encode()
         } else {

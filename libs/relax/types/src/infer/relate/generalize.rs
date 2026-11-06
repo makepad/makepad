@@ -4,7 +4,7 @@ use crate::consts::{ConstKind, InferConst, IsRigid};
 use crate::infer::type_variable::TypeVariableValue;
 use crate::infer::unify_key::ConstVariableValue;
 use crate::types::{RegionKind, UniverseIndex};
-use std::collections::HashMap;
+use crate::fxhash::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TermVid { Ty(u32), Const(u32) }
@@ -34,7 +34,7 @@ impl InferCtxt<'_> {
             let TypeVariableValue::Unknown { universe } = table.probe(target_vid) else { panic!("resolved target") };
             (universe, table.root_var(target_vid))
         };
-        let mut generalizer = Generalizer { infcx: self, prog: prog, root_vid: TermVid::Ty(root), for_universe: universe, ambient_variance: variance, in_alias: false, cache: HashMap::new() };
+        let mut generalizer = Generalizer { infcx: self, prog: prog, root_vid: TermVid::Ty(root), for_universe: universe, ambient_variance: variance, in_alias: false, cache: HashMap::default() };
         let generalized = generalizer.tys(source, source)?;
         if let TyKind::Infer(vid) = self.tcx.tys.kind(generalized) {
             self.inner.borrow_mut().type_variables().equate(target_vid, *vid);
@@ -50,7 +50,7 @@ impl InferCtxt<'_> {
             let ConstVariableValue::Unknown { universe } = table.probe_value(target_vid) else { panic!("resolved target") };
             (universe, table.find(target_vid))
         };
-        let mut generalizer = Generalizer { infcx: self, prog: relation.prog(), root_vid: TermVid::Const(root), for_universe: universe, ambient_variance: V::Inv, in_alias: false, cache: HashMap::new() };
+        let mut generalizer = Generalizer { infcx: self, prog: relation.prog(), root_vid: TermVid::Const(root), for_universe: universe, ambient_variance: V::Inv, in_alias: false, cache: HashMap::default() };
         let generalized = generalizer.consts(source, source)?;
         if let ConstKind::Infer(InferConst::Var(vid)) = self.tcx.tys.const_kind(generalized) {
             self.inner.borrow_mut().const_unification_table().union(target_vid, vid.0);

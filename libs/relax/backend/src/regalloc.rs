@@ -141,8 +141,8 @@ pub enum Remat {
     Const(i64),
     /// the address of stack slot n
     Slot(u32),
-    /// a V128 constant: every lane `bits` (`Inst::VConst`): one movi / literal load at a use beats a
-    /// spill store at the definition and a reload at each use
+    /// a vector constant: every lane `bits` (`Inst::VConst`, V128 or V256): one movi / literal load
+    /// at a use beats a spill store at the definition and a reload at each use
     VConst(u32),
     /// a scalar float constant (`Inst::Fconst`: bits, f64?) where the target loads one in a single
     /// instruction at a use (`RegConfig::fconst_remat`; arm64: fmov #imm or a literal load)
@@ -3481,7 +3481,7 @@ fn remat_values(options: &relax_session::Options, f: &Func, reach: &[bool], cfg:
             // one definition, or every definition the same constant (built on several paths)
             let same_const = matches!(i, Remat::Const(_)) && kdefs[d].2 && kdefs[d].1 == ndef[d];
             let cls_ok = match i {
-                Remat::VConst(_) => f.vregs[d] == Cls::V128,
+                Remat::VConst(_) => matches!(f.vregs[d], Cls::V128 | Cls::V256),
                 Remat::FConst(_, w) => f.vregs[d] == if w { Cls::F64 } else { Cls::F32 },
                 _ => f.vregs[d] == Cls::I,
             };

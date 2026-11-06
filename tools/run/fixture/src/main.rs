@@ -115,5 +115,11 @@ fn main() {
         }
         println!("note round trips {} growth under 96 MiB: {}", total, peak_rss() - before < 96 * 1024 * 1024);
     }
+    {
+        // a plain struct of a String and plain data, built and read on this side
+        let l = Loc { file: String::from("src/app.rs"), col: 5, line: 42 };
+        let n = l.next_line();
+        println!("loc {:?} {} {} {}", l, n.line, n.col, n == l.clone());
+    }
     println!("asm {}", asm_twice(40));
 }

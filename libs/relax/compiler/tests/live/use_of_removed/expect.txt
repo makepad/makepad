@@ -1,0 +1,2 @@
+v1 refuse note=E0432: unresolved import `w::f`
+v2 refuse note=E0432: unresolved import `w::f`

@@ -35,9 +35,6 @@ pub enum Role {
     Errors,
     Panic,
     Hints,
-    UpdatingTitle,
-    UpdatingStatus,
-    UpdatingDetail,
 }
 
 #[derive(Clone, Copy)]
@@ -189,9 +186,6 @@ impl Program {
                     Some(v) if v == id!(errors) => Role::Errors,
                     Some(v) if v == id!(panic) => Role::Panic,
                     Some(v) if v == id!(hints) => Role::Hints,
-                    Some(v) if v == id!(updating_title) => Role::UpdatingTitle,
-                    Some(v) if v == id!(updating_status) => Role::UpdatingStatus,
-                    Some(v) if v == id!(updating_detail) => Role::UpdatingDetail,
                     _ => return Err("Unknown boot line role".into()),
                 };
                 lines.push(Line {
@@ -416,7 +410,7 @@ mod tests {
     /// The bundled document compiles for every dialect, with the window layer's pipe.
     #[test]
     fn bundled_document_compiles_with_its_layer() {
-        for dialect in [makepad_hal::dialect::MSL, makepad_hal::dialect::SPIRV, makepad_hal::dialect::HLSL] {
+        for dialect in [makepad_hal::dialect::MSL, makepad_hal::dialect::SPIRV, makepad_hal::dialect::HLSL, makepad_hal::dialect::GLSL] {
             let program = super::Program::compile(&crate::Document::bundled(), dialect, 0, 1)
                 .unwrap_or_else(|e| panic!("{:?}", e.iter().map(|d| d.message.clone()).collect::<Vec<_>>()));
             assert!(program.layer.is_some() && program.icon);

@@ -603,25 +603,34 @@ impl Layouts {
 
     /// Live sessions (M10, hotreload.md section 13): a struct in the application's scope that
     /// edits may give fields in place -- named fields, no repr other than Rust's, not Copy (a
-    /// bitwise copy would share the extension block).
+    /// bitwise copy would share the extension block). Never a provided crate's (`rustc_laid`):
+    /// its values are rustc's bytes, and an application whose tree holds the framework's sources
+    /// has the crate in its scope.
     pub fn live_editable(&self, lcx: &LayoutCx<'_>, tcx: &Tcx, d: crate::program::DefId, adt: &crate::tcx::AdtT, t: TyId) -> bool {
+        self.live_editable_form(lcx, d, adt) && Self::is_copy(lcx, tcx, t) == Some(false)
+    }
+
+    /// What live_editable asks of a struct but its Copy impl: of the application's scope (not a
+    /// provided crate's), named fields, Rust's repr, in a live session.
+    pub fn live_editable_form(&self, lcx: &LayoutCx<'_>, d: crate::program::DefId, adt: &crate::tcx::AdtT) -> bool {
         if !LIVE_SESSION.load(std::sync::atomic::Ordering::Relaxed) {
             return false;
         }
         let prog = lcx.prog;
-        if !crate::borrowck::event::app_crate(prog, prog.def(d).krate) || adt.is_enum || adt.is_union {
+        let krate = prog.def(d).krate;
+        if prog.crates[krate as usize].rustc_laid || !crate::borrowck::event::app_crate(prog, krate) || adt.is_enum || adt.is_union {
             return false;
         }
         if adt.repr_c || adt.repr_packed != 0 || adt.repr_align != 0 || adt.repr_int.is_some() || adt.no_niche || adt.valid_start.is_some() || adt.valid_end.is_some() {
             return false;
         }
-        if adt.variants.first().map_or(true, |v| v.shape != 2) {
-            return false;
-        }
-        match tcx.copy_trait {
-            Some(c) => !tcx.type_implements_trait(prog, crate::tcx::TypingEnv::fully_monomorphized(&prog), TraitRef { def_id: c, args: vec![GenericArg::Type(t)] }).may_apply(),
-            None => false,
-        }
+        adt.variants.first().is_some_and(|v| v.shape == 2)
+    }
+
+    /// Whether `t` may be Copy (None: there is no Copy trait to ask).
+    pub fn is_copy(lcx: &LayoutCx<'_>, tcx: &Tcx, t: TyId) -> Option<bool> {
+        let c = tcx.copy_trait?;
+        Some(tcx.type_implements_trait(lcx.prog, crate::tcx::TypingEnv::fully_monomorphized(lcx.prog), TraitRef { def_id: c, args: vec![GenericArg::Type(t)] }).may_apply())
     }
 
     /// Live sessions (M10): an enum of the program's own crate with Rust's repr, which variants
@@ -631,7 +640,8 @@ impl Layouts {
             return false;
         }
         let prog = lcx.prog;
-        prog.def(d).krate == root_crate() && !adt.repr_c && adt.repr_int.is_none() && adt.repr_align == 0 && adt.repr_packed == 0 && !adt.no_niche
+        let krate = prog.def(d).krate;
+        krate == root_crate() && !prog.crates[krate as usize].rustc_laid && !adt.repr_c && adt.repr_int.is_none() && adt.repr_align == 0 && adt.repr_packed == 0 && !adt.no_niche
     }
 
     /// Is `t` 4 GiB or larger (its layout saturated)?
@@ -1204,8 +1214,9 @@ impl Layouts {
 
     fn tagged(&self, lcx: &LayoutCx<'_>, tcx: &Tcx, adt: &crate::tcx::AdtT, vfl: &[Vec<FieldL>], vls: &[Vec<&'static Layout>], repr: Repr) -> Layout {
         let nv = vfl.len();
-        // the discriminants of inhabited variants, and the largest gap between them (wrapping)
-        let mut ds: Vec<i128> = (0..nv).filter(|&i| adt.repr_c || !vfl[i].iter().any(|f| f.uninhabited)).map(|i| adt.discriminant_for_variant(tcx, lcx.prog, i as u32).expect("existing layout variant").signed_value()).collect();
+        // the tags of inhabited variants (their discriminants, or the tags a live edit kept), and
+        // the largest gap between them (wrapping)
+        let mut ds: Vec<i128> = (0..nv).filter(|&i| adt.repr_c || !vfl[i].iter().any(|f| f.uninhabited)).map(|i| adt.tag_for_variant(tcx, lcx.prog, i as u32).expect("existing layout variant").signed_value()).collect();
         ds.sort();
         ds.dedup();
         let discr_signed = match adt.repr_int {

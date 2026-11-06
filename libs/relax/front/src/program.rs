@@ -429,6 +429,10 @@ pub struct CrateInfo {
     /// the crate's errors are reported (set by the check for its checked crates): validation-only
     /// checks run for it and for no other crate
     pub validate: bool,
+    /// a provided crate (rustc built it into the loader and `makepad run` binds it): rustc lays
+    /// its types out, so none of them takes the live layout, wherever the crate's sources are
+    /// (an edit of one rebuilds makepad, it is never patched in place). Set when the unit binds it.
+    pub rustc_laid: bool,
     /// relaxed-Rust features this crate opts in to (relaxed.rs; empty = strict), read on first
     /// use (only a relaxable error or the borrow checker asks; strict programs never read it)
     relaxed: std::sync::OnceLock<Vec<String>>,
@@ -545,13 +549,19 @@ fn retain_load_memos<K: Clone + std::hash::Hash + Eq, V: Clone>(
     entries.retain(|k, v| keep(k, v));
     let kept = entries.len();
     if kept != before {
-        *cache = Default::default();
+        *cache = cache.empty_like();
         for (k, v) in entries {
             cache.insert(k, v);
         }
     }
     (kept, before - kept)
 }
+
+/// Buckets (log2) of the per-(module, name) memos, `scope_cache` and `glob_cache`: a body check
+/// of a big workspace fills each with ~1M entries (sandbox: 0.88M and 0.98M), and a chain longer
+/// than a node or two is a cache miss per node on every lookup. 8 MB of buckets each, in zeroed
+/// pages that stay untouched until a bucket is used.
+const NAME_MEMO_BITS: u32 = 20;
 
 pub struct Program {
     collected_starts: Vec<collected::Start>,
@@ -611,10 +621,6 @@ pub struct Program {
     /// bodies are being checked: during collection nearly every lookup is unique, and a memo
     /// would cost more than it saves (set by jit::Unit::new)
     pub body_memos: std::sync::atomic::AtomicBool,
-    /// `path_segs` per path occurrence: (file, segment count, first lo, a hash of every
-    /// segment's span) -> the segments' kinds and symbols (a pure function of the file's text;
-    /// cleared when a file is replaced)
-    pub path_seg_cache: crate::conc::MemoMap<(u32, u32, u32, u64), std::sync::Arc<[(crate::ast::SegKind, Sym)]>>,
     /// traits each module's scope binds, with visibility (after import resolution)
     trait_bind_cache: crate::conc::MemoMap<u32, std::sync::Arc<Vec<(DefId, BindVis)>>>,
     /// imports are resolved (glob results no longer change)
@@ -934,19 +940,18 @@ impl Program {
             trait_scope: Default::default(),
             errors: Vec::new(),
             macros: Default::default(),
-            glob_cache: Default::default(),
+            glob_cache: crate::conc::MemoMap::with_bits(NAME_MEMO_BITS),
             glob_amb_cache: Default::default(),
             glob_prec_cache: Default::default(),
             own_crates: Vec::new(),
             sim_ambiguity: None,
             sim_diags: None,
             sim_macros: None,
-            scope_cache: Default::default(),
+            scope_cache: crate::conc::MemoMap::with_bits(NAME_MEMO_BITS),
             import_used: Default::default(),
             glob_used: Default::default(),
             extern_used: Default::default(),
             body_memos: Default::default(),
-            path_seg_cache: Default::default(),
             trait_bind_cache: Default::default(),
             prelexed: Default::default(),
             ahead: Default::default(),
@@ -1285,7 +1290,7 @@ impl Program {
         let root_mod = self.new_module(root_def, None, None, krate, 0);
         self.defs[root_def.0 as usize].sub = root_mod;
         self.defs[root_def.0 as usize].scope = root_mod;
-        self.crates.push(CrateInfo { name: cname, root_mod, edition, recursion_limit: 128, deps, cfg, proc_macro: false, is_bin: false, harness: false, validate: false, relaxed: Default::default(), features: Default::default(), impl_view: Default::default(), root_path: root.to_string(), context: crate::source_context::Context::new(root, self.sources.clone(), &self.session) });
+        self.crates.push(CrateInfo { name: cname, root_mod, edition, recursion_limit: 128, deps, cfg, proc_macro: false, is_bin: false, harness: false, validate: false, rustc_laid: false, relaxed: Default::default(), features: Default::default(), impl_view: Default::default(), root_path: root.to_string(), context: crate::source_context::Context::new(root, self.sources.clone(), &self.session) });
         let kname = self.syms.str(cname).to_string();
         let akey = crate::preload::crate_key(&kname, root, &self.crates[krate as usize].cfg);
         if !self.ahead.contains_key(&akey) {
@@ -2129,7 +2134,6 @@ impl Program {
     pub fn memo_mem_lines(&self) -> Vec<(String, u64)> {
         let mut out = Vec::new();
         let mut push = |name: &str, (n, b): (usize, usize)| out.push((format!("program {} ({})", name, n), b as u64));
-        push("path_seg_cache", self.path_seg_cache.mem_stats(|_, v| 16 + v.len() * std::mem::size_of::<(crate::ast::SegKind, Sym)>()));
         push("scope_cache", self.scope_cache.mem_stats(|_, _| 0));
         push("glob_cache", self.glob_cache.mem_stats(|_, _| 0));
         push("trait_bind_cache", self.trait_bind_cache.mem_stats(|_, v| 40 + v.capacity() * std::mem::size_of::<(DefId, BindVis)>()));
@@ -2144,7 +2148,6 @@ impl Program {
     pub unsafe fn detach_caches(&self, retired: &mut Vec<Box<dyn Send>>) {
         retired.push(Box::new(self.glob_cache.detach()));
         retired.push(Box::new(self.scope_cache.detach()));
-        retired.push(Box::new(self.path_seg_cache.detach()));
         retired.push(Box::new(self.trait_bind_cache.detach()));
         retired.push(Box::new(self.trait_scope.detach()));
     }
@@ -2155,7 +2158,6 @@ impl Program {
     pub unsafe fn reclaim_caches(&self) {
         self.glob_cache.reclaim();
         self.scope_cache.reclaim();
-        self.path_seg_cache.reclaim();
         self.trait_bind_cache.reclaim();
         self.trait_scope.reclaim();
     }
@@ -2224,13 +2226,6 @@ impl Program {
         for &(lo, hi) in &v.idents {
             let s = std::str::from_utf8(&v.pf.src[lo as usize..hi as usize]).unwrap_or("?").to_string();
             self.syms.intern(&s);
-        }
-        // A path's segments depend only on its file's text (a file version never changes) and
-        // on whether each name is interned yet; path_segs recomputes an entry that met a name
-        // not interned, so the memo stays valid across a scoped item edit. Clearing (and freeing)
-        // it cost ~0.7 s per item edit once boot filled it (lead decision 52 R1).
-        if !same_scopes && visible.is_none() {
-            self.path_seg_cache.clear();
         }
         let new = self.files.len() as u32;
         let table = std::sync::Arc::make_mut(&mut self.macros);
@@ -2380,7 +2375,6 @@ impl Program {
             self.crates[self.file_crate[old as usize] as usize].context = context.clone();
         }
         self.parse_reuse.remove(&new);
-        self.path_seg_cache.clear();
         self.forget_bindings();
         for e in self.import_versions.remove(&new).unwrap_or_default().into_iter().rev() {
             std::sync::Arc::make_mut(&mut self.macros).apply_import_edit(&e.undone());
@@ -2394,40 +2388,47 @@ impl Program {
     /// Hot reload: collects items a new file version added. `items`: (item, where it goes):
     /// `Ok(module)` for a module-level item, `Err(impl def)` for an associated item of an existing
     /// impl. Returns the new defs (names bound in their modules, impls registered).
-    /// A live edit added variants at the end of enum `d` (M10): their defs, after the running
-    /// ones. Returns how many variants the enum had (for `truncate_variants` on a refusal).
-    pub fn add_variants(&mut self, d: DefId) -> usize {
+    /// The variant defs of enum `d` from its item's text (a live edit, M10): a running variant
+    /// keeps its def by name wherever the text now puts it (its index, `sub`, follows; code
+    /// type-checked before the edit names a variant by its def), and an added one gets a new def.
+    /// Reload compares the result with its running AdtT snapshot. Returns the list the enum had,
+    /// for `restore_variants` on a refusal.
+    pub fn add_variants(&mut self, d: DefId) -> Vec<DefId> {
         let (file, item, sub, dkrate, dscope) = {
             let df = self.def(d);
             (df.file, df.item, df.sub, df.krate, df.scope)
         };
         let li = sub as usize;
-        let had = self.variants.get(li).map_or(0, |v| v.len());
+        let had: Vec<DefId> = self.variants.get(li).cloned().unwrap_or_default();
         let names: Vec<Ident> = match &self.files[file as usize].ast.item(item).kind {
             ItemKind::Enum(r) => { let ast = &self.files[file as usize].ast; ast.list(ast.row(*r).variants).iter().map(|x| x.name).collect() }
             _ => return had,
         };
-        let (krate, scope) = self.variants.get(li).and_then(|v| v.first()).map_or((dkrate, dscope), |&v0| (self.def(v0).krate, self.def(v0).scope));
-        // The definition table describes the published source, including renamed
-        // or reordered variants. Reload compares it with its running AdtT snapshot.
-        for vi in 0..had.min(names.len()) {
-            let name = self.ident(file, names[vi]);
-            let vd = self.variants[li][vi];
-            self.defs[vd.0 as usize].name = name;
+        let Some(_) = self.variants.get(li) else { return had };
+        let (krate, scope) = had.first().map_or((dkrate, dscope), |&v0| (self.def(v0).krate, self.def(v0).scope));
+        let mut list: Vec<DefId> = Vec::with_capacity(names.len());
+        for (vi, n) in names.iter().enumerate() {
+            let name = self.ident(file, *n);
+            let vd = match had.iter().copied().find(|v| self.defs[v.0 as usize].name == name && !list.contains(v)) {
+                Some(v) => v,
+                None => self.add_def(Def { kind: DefKind::Variant, name, parent: d, file, item, sub: vi as u32, is_pub: true, krate, scope }),
+            };
+            self.defs[vd.0 as usize].sub = vi as u32;
+            list.push(vd);
         }
-        for vi in had..names.len() {
-            let vname = self.ident(file, names[vi]);
-            let vd = self.add_def(Def { kind: DefKind::Variant, name: vname, parent: d, file, item, sub: vi as u32, is_pub: true, krate, scope });
-            self.variants[li].push(vd);
-        }
+        self.variants[li] = list;
         had
     }
 
-    /// Undoes `add_variants` (a refused edit): enum `d` has `n` variants again.
-    pub fn truncate_variants(&mut self, d: DefId, n: usize) {
+    /// Undoes `add_variants` (a refused edit): enum `d` has the variant defs `had` again, each at
+    /// its index.
+    pub fn restore_variants(&mut self, d: DefId, had: &[DefId]) {
         let li = self.def(d).sub as usize;
+        for (vi, v) in had.iter().enumerate() {
+            self.defs[v.0 as usize].sub = vi as u32;
+        }
         if let Some(v) = self.variants.get_mut(li) {
-            v.truncate(n);
+            *v = had.to_vec();
         }
     }
 
@@ -2449,12 +2450,14 @@ impl Program {
                     let (dir, mod_rs) = self.module_source_directory(module);
                     self.collect_items(file, &[iid], module, &dir, mod_rs)?;
                 }
-                Err(imp) => {
-                    let krate = self.defs[imp.0 as usize].krate;
-                    let module = self.defs[imp.0 as usize].scope;
-                    if let Some(ad) = self.collect_assoc(file, iid, imp, krate, module)? {
-                        let ii = self.defs[imp.0 as usize].sub as usize;
-                        self.impls[ii].items.push(ad);
+                Err(owner) => {
+                    let krate = self.defs[owner.0 as usize].krate;
+                    let module = self.defs[owner.0 as usize].scope;
+                    if let Some(ad) = self.collect_assoc(file, iid, owner, krate, module)? {
+                        // an impl's item, or a trait's: after the items it has (their places in
+                        // the trait's vtable stay)
+                        let sub = self.defs[owner.0 as usize].sub as usize;
+                        if self.defs[owner.0 as usize].kind == DefKind::Trait { self.traits[sub].push(ad); } else { self.impls[sub].items.push(ad); }
                         self.collect_body_items(file, iid, module, Some(ad))?;
                         crate::def_collector::collect_definitions(self, ad)?;
                     }
@@ -2601,6 +2604,11 @@ impl Program {
                     self.impls[ii].items.retain(|x| *x != d);
                 }
             }
+            // a trait's item leaves its trait (a trait that goes keeps its list: it is unbound)
+            if parent.0 != u32::MAX && (parent.0 as usize) < self.defs.len() && self.defs[parent.0 as usize].kind == DefKind::Trait && !defs.contains(&parent) {
+                let ti = self.defs[parent.0 as usize].sub as usize;
+                if let Some(items) = self.traits.get_mut(ti) { items.retain(|x| *x != d); }
+            }
         }
         self.forget_bindings();
         self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
@@ -2644,9 +2652,99 @@ impl Program {
         out
     }
 
-    /// Undoes `unbind_use` (a refused edit).
+    /// Hot reload: the imports that bound one of `defs` (defs an edit removed, a fn's old def
+    /// that a new signature replaced among them) resolve again from their paths, as a fresh run
+    /// resolves them: to the def at the path now, or to nothing. Returns the undo record
+    /// (`rebind_use`) and the imports that no longer resolve: (file, position, path).
+    pub fn reresolve_imports_of(&mut self, defs: &[DefId]) -> (Vec<UseUndo>, Vec<(u32, u32, String)>) {
+        let gone_defs: crate::fxhash::HashSet<DefId> = defs.iter().copied().collect();
+        let (mut undo, mut again) = (Vec::new(), Vec::new());
+        for i in 0..self.imports.len() {
+            let im = &self.imports[i];
+            let (true, false, Some(name)) = (im.done, im.glob, im.bind) else { continue };
+            let (m, bound) = (im.module, im.bound);
+            let md = &self.mods[m as usize];
+            let hit = (bound & BOUND_TYPES != 0 && md.types.get(&name).is_some_and(|d| gone_defs.contains(d)))
+                || (bound & BOUND_VALUES != 0 && md.values.get(&name).is_some_and(|d| gone_defs.contains(d)));
+            if !hit {
+                continue;
+            }
+            let mut gone = Vec::new();
+            for (is_type, bit) in [(true, BOUND_TYPES), (false, BOUND_VALUES)] {
+                if bound & bit == 0 {
+                    continue;
+                }
+                let md = &mut self.mods[m as usize];
+                let d = if is_type { md.types.remove(&name) } else { md.values.remove(&name) };
+                let flags = md.import_pub.remove(&(name, is_type)).unwrap_or(0);
+                if let Some(d) = d {
+                    gone.push((is_type, name, d, flags));
+                }
+            }
+            undo.push(UseUndo { index: i, module: m, bind: Some(name), done: true, glob: false, bound, gone });
+            self.imports[i].done = false;
+            self.imports[i].bound &= !(BOUND_TYPES | BOUND_VALUES);
+            again.push(i);
+        }
+        if again.is_empty() {
+            return (undo, Vec::new());
+        }
+        self.forget_bindings();
+        self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
+        // strict passes while they make progress, then one that settles (resolve_imports_passes)
+        for settle in [false, true] {
+            self.import_settle = settle;
+            loop {
+                let mut progress = false;
+                for &i in &again {
+                    if !self.imports[i].done && self.try_import(i) {
+                        self.imports[i].done = true;
+                        progress = true;
+                    }
+                }
+                if !progress {
+                    break;
+                }
+            }
+        }
+        self.import_settle = false;
+        self.forget_bindings();
+        self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
+        let unresolved = again.iter().filter(|&&i| !self.imports[i].done).map(|&i| (self.imports[i].file, self.imports[i].pos, self.import_path(i))).collect();
+        (undo, unresolved)
+    }
+
+    /// An import's path as written (`crate::w::f`, `w::*`).
+    fn import_path(&self, i: usize) -> String {
+        let im = &self.imports[i];
+        let mut p = String::new();
+        for (k, s) in &im.segs {
+            if !p.is_empty() {
+                p.push_str("::");
+            }
+            p.push_str(match k {
+                SegKind::Crate => "crate",
+                SegKind::SelfValue => "self",
+                SegKind::Super => "super",
+                _ => self.syms.str(*s),
+            });
+        }
+        if im.glob {
+            p.push_str("::*");
+        }
+        p
+    }
+
+    /// Undoes `unbind_use` and `reresolve_imports_of` (a refused or rolled-back edit): what the
+    /// import binds now goes, what it bound before comes back.
     pub fn rebind_use(&mut self, undo: Vec<UseUndo>) {
-        for u in undo {
+        for u in undo.into_iter().rev() {
+            let im = &self.imports[u.index];
+            if let (true, Some(name)) = (im.done, im.bind) {
+                let md = &mut self.mods[u.module as usize];
+                if im.bound & BOUND_TYPES != 0 { md.types.remove(&name); md.import_pub.remove(&(name, true)); }
+                if im.bound & BOUND_VALUES != 0 { md.values.remove(&name); md.import_pub.remove(&(name, false)); }
+            }
             let im = &mut self.imports[u.index];
             im.bind = u.bind;
             im.done = u.done;
@@ -2699,11 +2797,15 @@ impl Program {
                 DefKind::Fn | DefKind::Const | DefKind::Static => self.define(scope, false, name, d),
                 DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::TypeAlias | DefKind::Trait | DefKind::Mod => self.define(scope, true, name, d),
                 DefKind::AssocFn | DefKind::AssocConst | DefKind::AssocTy => {
-                    if self.defs[parent.0 as usize].kind == DefKind::Impl {
-                        let ii = self.defs[parent.0 as usize].sub as usize;
-                        if !self.impls[ii].items.contains(&d) {
-                            self.impls[ii].items.push(d);
-                        }
+                    let sub = self.defs[parent.0 as usize].sub as usize;
+                    let items = match self.defs[parent.0 as usize].kind {
+                        DefKind::Impl => Some(&mut self.impls[sub].items),
+                        // (the caller restores the trait's order: its vtable's)
+                        DefKind::Trait => self.traits.get_mut(sub),
+                        _ => None,
+                    };
+                    if let Some(items) = items.filter(|v| !v.contains(&d)) {
+                        items.push(d);
                     }
                 }
                 _ => {}
@@ -3949,23 +4051,19 @@ impl Program {
         // Scope/trait-scope also read the implicit prelude. A changed prelude
         // therefore invalidates those scopes even without an explicit glob edge.
         let prelude_changed = self.prelude_modules().iter().any(|m| invalid.contains(m));
-        let files: crate::fxhash::HashSet<u32> = invalid.iter().map(|&m| self.mods[m as usize].file).collect();
         let scope = retain_load_memos(&mut self.scope_cache, |(m, _, _), v| !prelude_changed && !invalid.contains(m) && v.is_some());
         let glob = retain_load_memos(&mut self.glob_cache, |(m, _, _), v| !invalid.contains(m) && v.is_some());
-        // Segments are file text, not resolution results. Invalidate the files of
-        // changed scopes conservatively; unchanged files cannot acquire new text.
-        let path_seg = retain_load_memos(&mut self.path_seg_cache, |(f, _, _, _), _| !files.contains(f));
         let trait_bind = retain_load_memos(&mut self.trait_bind_cache, |m, v| !invalid.contains(m) && !v.is_empty());
         let trait_scope = retain_load_memos(&mut self.trait_scope, |m, v| !prelude_changed && !invalid.contains(m) && !v.is_empty());
         self.imports_done = true;
         self.load_graph = Some(graph);
         if std::env::var_os("MAKEPAD_RUN_DEFERRED_TRACE").is_some() {
-            let kept = scope.0 + glob.0 + path_seg.0 + trait_bind.0 + trait_scope.0;
-            let dropped = scope.1 + glob.1 + path_seg.1 + trait_bind.1 + trait_scope.1;
-            eprintln!("makepad-run deferred: front-load {} imports_retried={} imports_done={} settle_retries={} wait_modules={} modules_invalidated={} cache_kept={} cache_dropped={} prelude_changed={} scope={:?} glob={:?} path_seg={:?} trait_bind={:?} trait_scope={:?} index_built={}",
+            let kept = scope.0 + glob.0 + trait_bind.0 + trait_scope.0;
+            let dropped = scope.1 + glob.1 + trait_bind.1 + trait_scope.1;
+            eprintln!("makepad-run deferred: front-load {} imports_retried={} imports_done={} settle_retries={} wait_modules={} modules_invalidated={} cache_kept={} cache_dropped={} prelude_changed={} scope={:?} glob={:?} trait_bind={:?} trait_scope={:?} index_built={}",
                 self.def_path(self.mods[m as usize].def), retried, completed, settled, affected.len(),
                 if prelude_changed { self.mods.len() } else { invalid.len() }, kept, dropped, prelude_changed,
-                scope, glob, path_seg, trait_bind, trait_scope, indexed);
+                scope, glob, trait_bind, trait_scope, indexed);
         }
         Ok((d0, bindings_changed))
     }
@@ -4052,22 +4150,8 @@ impl Program {
         let reportable: Vec<usize> = pending.into_iter().filter(|&i| self.import_reportable(i, &mut macro_binds)).collect();
         for i in reportable {
             if !deferred.contains(&i) {
+                let p = self.import_path(i);
                 let im = &self.imports[i];
-                let mut p = String::new();
-                for (k, s) in &im.segs {
-                    if !p.is_empty() {
-                        p.push_str("::");
-                    }
-                    p.push_str(match k {
-                        SegKind::Crate => "crate",
-                        SegKind::SelfValue => "self",
-                        SegKind::Super => "super",
-                        _ => self.syms.str(*s),
-                    });
-                }
-                if im.glob {
-                    p.push_str("::*");
-                }
                 let f = &self.files[im.file as usize];
                 let source_pos = f.diagnostic_pos(im.pos);
                 let source_pos = source_pos.min(f.src_len);
@@ -6091,41 +6175,36 @@ pub fn hint_path(defs: &[Def], syms: &Interner, files: &[std::sync::Arc<ParsedFi
 /// Files parsed ahead (preload.rs) that the loader parsed again (run.rs reports it).
 pub static PARSE_AGAIN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// A path's segments as (kind, symbol), memoised per occurrence in `path_seg_cache` once body
-/// memos are on.
-pub fn path_segs(prog: &Program, file: u32, p: &Path) -> std::sync::Arc<[(SegKind, Sym)]> {
-    if !prog.body_memos.load(std::sync::atomic::Ordering::Relaxed) {
-        return path_segs_uncached(prog, file, p).into();
-    }
-    let mut h: u64 = 0;
-    for s in prog.files[file as usize].ast.segs(p.segs) {
-        h = (h.rotate_left(5) ^ (((s.name.lo as u64) << 32) | s.name.hi as u64)).wrapping_mul(0xf135_7aea_2e62_a9c5);
-    }
-    let lo = prog.files[file as usize].ast.segs(p.segs).first().map_or(0, |s| s.name.lo);
-    let key = (file, p.segs.len() as u32, lo, h);
-    let stale = match prog.path_seg_cache.get(&key) {
-        // (a name not interned when the entry was made may be now: Program::commit_version_in)
-        Some(v) if v.iter().any(|&(_, sym)| sym == u32::MAX) => Some(v),
-        Some(v) => return v,
-        None => None,
-    };
-    let v: std::sync::Arc<[(SegKind, Sym)]> = path_segs_uncached(prog, file, p).into();
-    if stale.as_deref() != Some(&*v) { prog.path_seg_cache.insert(key, v.clone()); }
-    v
+/// A path's segments as (kind, symbol), `u32::MAX` for a name no file interned: held inline up
+/// to four segments. Built afresh on each call: two string-table probes per segment cost less
+/// than any memo of them (a per-occurrence one held 4M entries for sandbox and cost 8% of the
+/// body checks walking its chains).
+pub struct PathSegs {
+    len: usize,
+    inline: [(SegKind, Sym); 4],
+    spill: Vec<(SegKind, Sym)>,
 }
 
-fn path_segs_uncached(prog: &Program, file: u32, p: &Path) -> Vec<(SegKind, Sym)> {
-    let f = &prog.files[file as usize];
-    let mut v = Vec::new();
-    for s in prog.files[file as usize].ast.segs(p.segs) {
-        let t = f.text(s.name);
-        let t = match t.strip_prefix("r#") {
-            Some(x) => x,
-            None => t,
-        };
-        v.push((s.kind(), prog.syms.get(t).unwrap_or(u32::MAX)));
+impl std::ops::Deref for PathSegs {
+    type Target = [(SegKind, Sym)];
+    #[inline]
+    fn deref(&self) -> &[(SegKind, Sym)] {
+        if self.len > 4 { &self.spill } else { &self.inline[..self.len] }
     }
-    v
+}
+
+pub fn path_segs(prog: &Program, file: u32, p: &Path) -> PathSegs {
+    let f = &prog.files[file as usize];
+    let segs = f.ast.segs(p.segs);
+    let mut out = PathSegs { len: segs.len(), inline: [(SegKind::Ident, u32::MAX); 4], spill: Vec::new() };
+    if segs.len() > 4 { out.spill.reserve_exact(segs.len()); }
+    for (i, s) in segs.iter().enumerate() {
+        let t = f.text(s.name);
+        let t = t.strip_prefix("r#").unwrap_or(t);
+        let v = (s.kind(), prog.syms.get(t).unwrap_or(u32::MAX));
+        if segs.len() <= 4 { out.inline[i] = v } else { out.spill.push(v) }
+    }
+    out
 }
 
 /// One lookup through glob imports (a fixpoint over glob cycles, see lookup_in_module_vis).
@@ -6321,7 +6400,6 @@ mod deferred_load_tests {
         p.defer_skipped_imports(1, &pending);
         p.scope_cache.clear();
         p.glob_cache.clear();
-        p.path_seg_cache.clear();
         p.trait_bind_cache.clear();
         p.trait_scope.clear();
         p.imports_done = true;

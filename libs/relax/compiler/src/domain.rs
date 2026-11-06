@@ -1517,14 +1517,16 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
     }
     // the domain's main thread (its name, its handle) is process state
     if crate::preload::trace() { eprintln!("boot-trace: domain {id} launching at t={:.1} ms", crate::clock::ms_since_start()); }
-    let launched = crate::zone_alloc::kept_with(|| launch_main(upn, id, base, target, arg, &spec.package, spec.around.clone()));
+    let launched = crate::zone_alloc::kept_with(|| launch_main(upn, id, base, target, arg, Some(root), &spec.package, spec.around.clone()));
     if let Err(e) = launched {
         return fail(id, vec![e]);
     }
     Ok(id)
 }
 
-fn launch_main(upn: usize, id: DomainId, base: u64, target: u64, arg: u64, package: &str, around: Option<Around>) -> Result<std::thread::JoinHandle<()>, String> {
+/// `root`: the program crate whose constructors run before its main (None: an entry that is no
+/// program's main, a fixture's).
+fn launch_main(upn: usize, id: DomainId, base: u64, target: u64, arg: u64, root: Option<u32>, package: &str, around: Option<Around>) -> Result<std::thread::JoinHandle<()>, String> {
     if crate::run::app_domain() == Some(id) {
         // (its block and heap are in the registry: a native thread's call finds them from now)
         RUN_SCOPE.store(foreign_scope_of(base), std::sync::atomic::Ordering::Release);
@@ -1557,6 +1559,13 @@ fn launch_main(upn: usize, id: DomainId, base: u64, target: u64, arg: u64, packa
                 d.info.state = DomainState::Running;
             }
             notify_state(id, &DomainState::Running);
+            // the platform's start code runs the program's constructors before its main (sections.rs)
+            if let Some(root) = root {
+                if let Err(e) = unsafe { crate::sections::run_constructors(up, root, Some(base)) } {
+                    end(id, DomainState::Crashed(e));
+                    return;
+                }
+            }
             if crate::run::app_domain() == Some(id) { crate::first_frame::main_entered(); }
             match unsafe { crate::jit::call_jit_in(up, base, target, arg) } {
                 Ok(_) => end(id, DomainState::Exited(0)),

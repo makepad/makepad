@@ -412,7 +412,8 @@ impl Types {
                 ValTreeKind::Branch(_) => "{aggregate}".into(),
             },
             ConstKind::Param(p) => format!("N{}", p.index),
-            ConstKind::Infer(InferConst::Var(v)) => format!("?C{}", v.0),
+            // rustc_middle/src/ty/print/pretty.rs pretty_print_const: an inference variable is `_`
+            ConstKind::Infer(InferConst::Var(_)) => "_".into(),
             ConstKind::Bound(d, b) => format!("^{}.C{}", d, b.var.0),
             ConstKind::Placeholder(p) => format!("!{}.C{}", p.universe.0, p.bound.var.0),
             ConstKind::Alias(_, alias) => format!("const#{}", alias.kind.def_id().0),

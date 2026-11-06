@@ -11,7 +11,7 @@ crate::collected_fields!(FieldT, name, ty, is_pub, vis_mod);
 crate::collected_fields!(VariantT, def, name, shape, fields, discr);
 crate::collected_fields!(AdtT, region_contract, generic_indices, flags, region_params,
     is_enum, is_union, n_generics, variants, repr_c, repr_int, repr_align, repr_packed,
-    valid_start, valid_end, no_niche, param_maybe_unsized, ext_from, ext_conv);
+    valid_start, valid_end, no_niche, param_maybe_unsized, ext_from, ext_conv, live_tags);
 crate::collected_id!(AdtFlags);
 crate::collected_fields!(Destructor, did);
 crate::collected_fields!(OpaqueDecl, region_contract, bounds);
@@ -99,13 +99,6 @@ impl Tcx {
             .filter(|d| matches!(prog.def(*d).kind, DefKind::AssocFn | DefKind::Trait)).collect();
         defs.extend((first..prog.defs.len()).map(|d| DefId(d as u32)));
         self.collect_added(prog, &defs, true);
-        for d in defs {
-            if prog.def(d).kind == DefKind::Trait {
-                let mut all = Vec::new(); let mut todo = vec![d];
-                while let Some(x) = todo.pop() { if !all.contains(&x) { all.push(x); todo.extend(self.trait_supers(prog, x)); } }
-                self.trait_closure.insert(d, all);
-            }
-        }
         self.flush_errs();
         self.seal_collected_diagnostics();
         self.publish_collected();

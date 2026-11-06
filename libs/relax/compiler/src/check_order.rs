@@ -13,6 +13,14 @@ use std::collections::HashMap;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum Phase { Resolve, Early, Attrs, Wf, Typeck, Mir, Late, Post }
 
+impl Phase {
+    /// (check_reuse.rs: a stored entry's phase)
+    pub(crate) fn code(self) -> u8 { self as u8 }
+    pub(crate) fn of_code(c: u8) -> Option<Self> {
+        [Phase::Resolve, Phase::Early, Phase::Attrs, Phase::Wf, Phase::Typeck, Phase::Mir, Phase::Late, Phase::Post].get(c as usize).copied()
+    }
+}
+
 /// The steps of a body owner's MIR checks: check_unsafety, mir_borrowck (mir_built's thir
 /// check_match, mir_promoted's tail_expr_drop_order lint, then borrowck's unused_mut and its
 /// errors), check_liveness.
@@ -183,12 +191,32 @@ impl<'p> Places<'p> {
     }
 
     fn of_def(&mut self, d: DefId) -> Place {
-        if d == NO_DEF || d.0 as usize >= self.prog.defs.len() { return (0, Vec::new(), 0); }
+        match self.def_at(d) {
+            Some((file, l, c)) => self.at(file, l, c),
+            None => (0, Vec::new(), 0),
+        }
+    }
+
+    /// (file, line, col) of definition `d` (None: no definition)
+    fn def_at(&self, d: DefId) -> Option<(u32, u32, u32)> {
+        if d == NO_DEF || d.0 as usize >= self.prog.defs.len() { return None; }
         let def = self.prog.def(d);
         let lo = if def.kind == DefKind::Mod && self.prog.mods.get(def.sub as usize).is_some_and(|m| m.parent_mod.is_none()) { 0 }
             else { self.prog.files[def.file as usize].ast.item(def.item).lo };
         let (l, c) = self.prog.files[def.file as usize].line_col(lo);
-        self.at(def.file, l as u32, c as u32)
+        Some((def.file, l as u32, c as u32))
+    }
+
+    /// The definition whose place groups an entry of `s`: its body owner's (the type and MIR
+    /// checks), its module's (dead code, the late lints); `At`: the entry's own place.
+    fn group_of(&self, s: Stage) -> GroupOf {
+        match (s.phase, s.step) {
+            (Phase::Typeck | Phase::Mir, _) if s.group != NO_DEF => GroupOf::Def(self.typeck_root(s.group)),
+            (Phase::Late, LATE_DEAD | LATE_LINTS) if s.group != NO_DEF => GroupOf::Def(self.module_of(s.group)),
+            // (an error of a body owner the check did not name: its own place stands for the owner's)
+            (Phase::Typeck | Phase::Mir, _) => GroupOf::At,
+            _ => GroupOf::Zero,
+        }
     }
 
     /// The body owner that type-checks `d` (a closure and a constant inside a body are checked
@@ -225,9 +253,50 @@ pub(crate) enum Out {
     Borrow(Box<GandalfEvent>),
 }
 
+enum GroupOf { Zero, At, Def(DefId) }
+
+/// Where an entry's group stands, as the sort placed it (check_reuse.rs stores it with the
+/// entry): nowhere, at the entry's own place, or at a definition's (path, line, col).
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) enum GroupAt { Zero, At, Path(String, u32, u32) }
+
 /// `seq`: the order its analysis reported it in, where that is rustc's (the liveness lints of a
-/// body owner: lint_liveness.rs); 0 elsewhere, the place decides.
-pub(crate) struct Entry { pub stage: Stage, pub seq: u32, pub out: Out }
+/// body owner: lint_liveness.rs); 0 elsewhere, the place decides. `group_at`: a replayed entry's
+/// group (check_reuse.rs); None: the stage's.
+pub(crate) struct Entry { pub stage: Stage, pub seq: u32, pub out: Out, pub group_at: Option<GroupAt> }
+
+impl Entry {
+    pub(crate) fn new(stage: Stage, seq: u32, out: Out) -> Self { Self { stage, seq, out, group_at: None } }
+}
+
+/// The group of each of `stages` as `sort` places it, by path (check_reuse.rs stores it).
+pub(crate) fn groups_at(prog: &Program, stages: &[Stage]) -> Vec<GroupAt> {
+    let places = Places::new(prog);
+    stages.iter().map(|&s| match places.group_of(s) {
+        GroupOf::Zero => GroupAt::Zero,
+        GroupOf::At => GroupAt::At,
+        GroupOf::Def(d) => match places.def_at(d) {
+            Some((file, l, c)) => GroupAt::Path(prog.file_paths.get(file as usize).cloned().unwrap_or_default(), l, c),
+            None => GroupAt::Zero,
+        },
+    }).collect()
+}
+
+/// Every source path a check line names (`path:line:col`, its `-->` lines included), as written.
+pub(crate) fn paths_named(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let l = line.trim_start();
+        let l = l.strip_prefix("--> ").or_else(|| l.strip_prefix("::: ")).unwrap_or(l);
+        if let Some((p, _, _)) = location(l) { out.push(p); }
+    }
+    out
+}
+
+/// The path of a check line's place (`location`).
+pub(crate) fn path_of(text: &str) -> Option<&str> {
+    location(text).map(|(p, _, _)| p)
+}
 
 /// (path, line, col) of a check line or a rendered borrow error.
 fn location(text: &str) -> Option<(&str, u32, u32)> {
@@ -263,12 +332,15 @@ pub(crate) fn sort(prog: &Program, entries: Vec<Entry>) -> Vec<Entry> {
             },
         };
         let s = e.stage;
-        let group = match (s.phase, s.step) {
-            (Phase::Typeck | Phase::Mir, _) if s.group != NO_DEF => { let r = places.typeck_root(s.group); places.of_def(r) }
-            (Phase::Late, LATE_DEAD | LATE_LINTS) if s.group != NO_DEF => { let m = places.module_of(s.group); places.of_def(m) }
-            // (an error of a body owner the check did not name: its own place stands for the owner's)
-            (Phase::Typeck | Phase::Mir, _) => at.clone(),
-            _ => (0, Vec::new(), 0),
+        let group = match &e.group_at {
+            Some(GroupAt::Zero) => (0, Vec::new(), 0),
+            Some(GroupAt::At) => at.clone(),
+            Some(GroupAt::Path(p, l, c)) => places.at_path(p, *l, *c),
+            None => match places.group_of(s) {
+                GroupOf::Def(d) => places.of_def(d),
+                GroupOf::At => at.clone(),
+                GroupOf::Zero => (0, Vec::new(), 0),
+            },
         };
         let krate = if s.phase == Phase::Typeck || s.phase == Phase::Mir { group.0 } else { at.0 };
         let owner = if s.phase == Phase::Mir { group.clone() } else { (0, Vec::new(), 0) };

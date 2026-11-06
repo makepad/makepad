@@ -1477,7 +1477,11 @@ impl<'a> Gen<'a> {
             // recomputed at each use (Alloc::remat)
             Loc::None => {
                 if let Remat::VConst(bits) = self.al.remat[v.0 as usize] {
-                    self.vconst_into(scratch, bits);
+                    if self.f.vregs[v.0 as usize] == Cls::V256 {
+                        self.vconst_y(scratch, bits);
+                    } else {
+                        self.vconst_into(scratch, bits);
+                    }
                 }
                 scratch
             }
@@ -1494,6 +1498,22 @@ impl<'a> Gen<'a> {
         self.a.rex(false, xd, 0, 0, false);
         self.a.byte(0x0f);
         self.a.byte(0x10);
+        self.a.byte(((xd & 7) << 3) | 5);
+        let at = self.a.pos();
+        self.a.u32(0);
+        self.vpool.push((at, bits as u128 * 0x0000_0001_0000_0001_0000_0001_0000_0001));
+    }
+    /// ymm xd = every lane `bits`: vxorps for zero, else vbroadcastss from the constant pool
+    fn vconst_y(&mut self, xd: u8, bits: u32) {
+        if bits == 0 {
+            self.a.vex_l(0, 1, false, true, 0x57, xd, xd, xd); // vxorps
+            return;
+        }
+        // vbroadcastss ymm, [rip + entry]
+        self.a.byte(0xc4);
+        self.a.byte(((!(xd >> 3) & 1) << 7) | (1 << 6) | (1 << 5) | 2);
+        self.a.byte((15 << 3) | (1 << 2) | 1);
+        self.a.byte(0x18);
         self.a.byte(((xd & 7) << 3) | 5);
         let at = self.a.pos();
         self.a.u32(0);
@@ -4863,21 +4883,11 @@ impl<'a> Gen<'a> {
                 self.a.vex_l(1, 2, false, true, 0x18, xd, 0, xs); // vbroadcastss ymm, xmm
                 self.fin_f(d, xd);
             }
+            // a constant without a register is made at its uses (Alloc::remat)
+            Inst::VConst(d, _) if self.al.loc[d.0 as usize] == Loc::None => {}
             Inst::VConst(d, bits) => {
                 let xd = self.def_f(d, XS);
-                if bits == 0 {
-                    self.a.vex_l(0, 1, false, true, 0x57, xd, xd, xd); // vxorps
-                } else {
-                    // vbroadcastss ymm, [rip + entry]
-                    self.a.byte(0xc4);
-                    self.a.byte(((!(xd >> 3) & 1) << 7) | (1 << 6) | (1 << 5) | 2);
-                    self.a.byte((15 << 3) | (1 << 2) | 1);
-                    self.a.byte(0x18);
-                    self.a.byte(((xd & 7) << 3) | 5);
-                    let at = self.a.pos();
-                    self.a.u32(0);
-                    self.vpool.push((at, bits as u128 * 0x0000_0001_0000_0001_0000_0001_0000_0001));
-                }
+                self.vconst_y(xd, bits);
                 self.fin_f(d, xd);
             }
             Inst::VFma(np, na, _, w, d, a, b, c) => {
@@ -6662,7 +6672,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     let paired;
     let f = if host_avx(options) && (env.opt_regs || f.full) && f.vregs.contains(&Cls::V128) && !crate::stats::opt_off(options, "-pair256") {
         let mut g = f.clone();
-        if crate::pair256::pair256(&mut g, crate::pair256::Caps { avx2: options.cpu.avx2, fma: options.cpu.fma, ints: false }) {
+        if crate::pair256::pair256(&mut g, crate::pair256::Caps { avx2: options.cpu.avx2, fma: options.cpu.fma, ints: options.cpu.avx2 }) {
             paired = g;
             &paired
         } else {

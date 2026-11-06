@@ -167,6 +167,29 @@ fn const_include() -> u64 {
 }
 
 #[inline(never)]
+fn include_macro() -> u64 {
+    values::DOCS.iter().map(|d| d.text.len()).sum::<usize>() as u64
+}
+
+#[inline(never)]
+fn include_found() -> u64 {
+    values::DOCS.iter().find(|d| d.key == "doc_b").map_or(0, |d| d.text.len() as u64)
+}
+
+// found by key through a fn pointer the program stored at its start (Fab's demo builder)
+static FIND: std::sync::OnceLock<fn(&str) -> u64> = std::sync::OnceLock::new();
+#[inline(never)]
+fn include_added() -> u64 {
+    let find = FIND.get_or_init(|| |key| values::DOCS.iter().find(|d| d.key == key).map_or(0, |d| d.text.len() as u64));
+    find("doc_c")
+}
+
+#[inline(never)]
+fn include_env() -> u64 {
+    values::DOC_E.len() as u64
+}
+
+#[inline(never)]
 fn body_include() -> u64 {
     include_str!("body.txt").len() as u64
 }
@@ -359,6 +382,7 @@ fn run() {
         let every_late = if late { warm_const_dep::every_late() } else { 0 };
         let (const_late, static_late, body_late, always_late) = if late { (const_late(), static_late(), body_late(), always_late()) } else { (0, 0, 0, 0) };
         let running = fields::Running::new();
+        let held_copy = values::cpf_new();
         let field_running_frame = running.u[0] + running.u.len() as u64 * 10;
         let row = [
             ("field_running_frame", field_running_frame),
@@ -400,6 +424,10 @@ fn run() {
             ("const_same", values::same_file()),
             ("const_include", const_include()),
             ("body_include", body_include()),
+            ("include_macro", include_macro()),
+            ("include_found", include_found()),
+            ("include_added", include_added()),
+            ("include_env", include_env()),
             ("static_direct", static_direct()),
             ("static_through", static_through()),
             ("body_inlined", body_inlined()),
@@ -430,6 +458,15 @@ fn run() {
             ("static_late", static_late),
             ("body_late", body_late),
             ("always_late", always_late),
+            ("dyn_method_add", values::dm_held()),
+            ("dyn_method_add_late", if late { values::dm_late() } else { 0 }),
+            ("dyn_vtable_fresh", values::dv_read()),
+            ("dyn_impl_removed", values::ri_read()),
+            ("enum_insert", values::ev_read()),
+            ("enum_insert_cast", values::lv_read()),
+            ("enum_insert_hash", values::hk_read()),
+            ("field_copy", values::cp_read()),
+            ("field_copy_frame", held_copy.a as u64 + held_copy.b),
         ];
         let mut line = format!("out tick {n}");
         for (name, v) in row.into_iter().chain(readers::row(late)) {

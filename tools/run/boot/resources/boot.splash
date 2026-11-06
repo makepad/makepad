@@ -340,23 +340,6 @@ let jit_tip_px = fn(p: vec2, s: vec2, a: float, ink: float, dp: float) -> vec4 {
     alpha = alpha * (1.0 - h) + h
     return vec4(col * a, alpha * a)
 }
-// Display-only Updating card. BlurModal (widgets/core/src/modal.rs) supplies the 200 ms
-// fade and black 0.2 backdrop tint below; it leaves its content unstyled. The face copies
-// Dialog's shared dark-theme tokens: radius_l 8, surface_container_high (0.36 mixed 8% with
-// white), outline white 25%, elevation_4 black #00000080, radius 16 and offset (0, 6).
-// The quad includes the shadow margin: (16, 16) before the face, (16, 22) after it.
-let updating_card_px = fn(p: vec2, s: vec2, a: float, dp: float) -> vec4 {
-    let size = s - vec2(32.0, 38.0)
-    let local = p - vec2(16.0)
-    let e = rounded(local, size, 8.0)
-    let face = clamp(0.5 - e * dp, 0.0, 1.0)
-    let hair = clamp(1.0 - abs(e + 0.5) * dp, 0.0, 1.0) * 0.25
-    let distance = max(rounded(local - vec2(0.0, 6.0), size, 8.0), 0.0)
-    let shadow = exp(-0.5 * distance * distance / 64.0) * #00000080.a
-    let surface = mix(vec3(0.36), vec3(1.0), 0.08)
-    let col = mix(surface, vec3(1.0), hair) * face
-    return vec4(col * a, (face + shadow * (1.0 - face)) * a)
-}
 let Quad = {
     geom: vertex_buffer(vec2f)
     rect: instance(vec4(0.0))
@@ -392,9 +375,6 @@ let Quad = {
         {role: @location size: 11 height: 16 gap: 4 color: #9d8cff}
         {role: @errors size: 14 height: 20 gap: 4 color: #ece6ff}
         {role: @panic size: 15 height: 21 gap: 4 color: #ffd2c4}
-        {role: @updating_title size: 22 height: 28 gap: 8 color: #ffffff}
-        {role: @updating_status size: 14 height: 20 gap: 8 color: #ffffff}
-        {role: @updating_detail size: 13 height: 18 gap: 4 color: #ffffffa8}
         {role: @hints size: 10 height: 15 gap: 0 color: #8a80b4}
     ]
     hints: {
@@ -431,8 +411,7 @@ let Quad = {
     // 4 caption window button (action: its glyph, 3..5 a traffic light; selected: hover;
     // block: the window has focus), 7 the caption's ground (tint), 5 the JIT ring (selected:
     // its fill, block: its mode, pressed: opacity, action: its spin, beat: hover, ink: on a dark
-    // caption), 6 the ring's tooltip plate (pressed: opacity, ink), 8 the Updating card and
-    // 9 its progress track (pressed: opacity, selected: progress)
+    // caption), 6 the ring's tooltip plate (pressed: opacity, ink)
     error_band: Quad{
         time: uniform(0.0)
         reduce_motion: uniform(0.0)
@@ -449,15 +428,6 @@ let Quad = {
             let p = self.pos * s
             let dp = max(self.dpi, 1.0)
             let px = (self.rect.xy + p) * dp
-            if self.accent > 8.5 {
-                let cover = clamp(0.5 - rounded(p, s, 2.0) * dp, 0.0, 1.0)
-                let fill = clamp((s.x * self.selected - p.x) * dp, 0.0, 1.0)
-                let color = mix(#ffffff26, #e6a294, fill)
-                return vec4(color.rgb * color.a, color.a) * cover * self.pressed
-            }
-            if self.accent > 7.5 {
-                return updating_card_px(p, s, self.pressed, dp)
-            }
             if self.accent > 6.5 {
                 // the caption's ground: the app's caption bar colour (`tint`, opaque)
                 return vec4(self.tint.rgb * self.tint.a, self.tint.a)
@@ -598,7 +568,6 @@ let Quad = {
         opacity: instance(1.0)
         mode: instance(0.0)
         dim: instance(0.0)
-        updating: instance(0.0)
         dir: instance(vec2(0.0))
         sigma: instance(4.0)
         pixel: fn() {
@@ -606,7 +575,7 @@ let Quad = {
             if self.mode < 0.5 {
                 let c = self.image_texture.sample(uv)
                 let px = (self.rect.xy + self.pos * self.rect.zw) * max(self.dpi, 1.0)
-                let tone = if self.updating > 0.5 { c.rgb * 0.8 } else { mix(c.rgb, #0c0918.rgb * 0.6 + c.rgb * 0.4, self.dim) }
+                let tone = mix(c.rgb, #0c0918.rgb * 0.6 + c.rgb * 0.4, self.dim)
                 let n = vec3(dither(px) * step(0.001, self.dim))
                 return vec4((tone + n) * self.opacity, self.opacity)
             }

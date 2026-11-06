@@ -1497,6 +1497,12 @@ impl Deps {
         None
     }
 
+    /// Whether the graph's nodes are of file version `f`: a boot file, or the version a re-key
+    /// walked in its place (not one an edit made after it).
+    pub(crate) fn has_file(&self, prog: &Program, f: u32) -> bool {
+        self.file_versions.contains_key(&f) || (f as usize) < prog.boot_files
+    }
+
     /// Whether `d`'s crate is in the graph.
     pub(crate) fn in_graph(&self, prog: &Program, d: DefId) -> bool {
         !self.atomic.get(prog.def(d).krate as usize).copied().unwrap_or(true)

@@ -437,6 +437,15 @@ fn mark_live(base: &Path, file: &Path, stamp: bool) {
     }
 }
 
+/// Stamps the store at `path` (its generation 0 path, as `live` lists it) used by this run, as
+/// opening it would (mark_live), without reading it: a run that relies on what an earlier run
+/// read from it keeps it in use (check_reuse.rs Early).
+pub fn stamp_used(path: &Path) {
+    let base = base_path(path);
+    let file = current(&base);
+    if file.exists() { mark_live(&base, &file, true); }
+}
+
 /// The generation files this process opened (a stale generation it still reads is not deleted).
 static OPEN_FILES: relax_session::sync::Mutex<Option<std::collections::HashSet<PathBuf>>> = relax_session::sync::Mutex::new(None);
 

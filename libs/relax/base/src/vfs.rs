@@ -593,6 +593,13 @@ pub fn canonicalize(path: impl AsRef<std::path::Path>) -> io::Result<std::path::
     std::fs::canonicalize(path)
 }
 
+/// A path's one spelling, for comparing two paths: [`canonicalize`]d where a mount or the disk
+/// has it, else [`normalize_path`]d. A path under an overlay's virtual root is on no disk, and
+/// Windows spells one path several ways (`C:\a` and `c:/a`).
+pub fn canonical(path: &str) -> String {
+    canonicalize(path).map(|p| normalize_path(&p.to_string_lossy())).unwrap_or_else(|_| normalize_path(path))
+}
+
 pub fn exists(path: impl AsRef<std::path::Path>) -> bool {
     let found = exists_inner(path.as_ref());
     if found {
@@ -1458,6 +1465,25 @@ mod tests {
         set_edits(None);
         MOUNTS.write().unwrap().retain(|m| m.root != normalize_path(root));
         let _ = std::fs::remove_dir_all(&edits);
+    }
+
+    /// A test target's source under an overlay is on no disk: its spellings (the Windows host's
+    /// separators among them) are one path.
+    #[test]
+    fn a_virtual_source_has_one_canonical_spelling() {
+        let _one = EDITS_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let fixture = test_store::Fixture::new(&[("app/tests/chain.rs", b"t")]);
+        let root = "/canonical-test/vfs/m";
+        mount(root, fixture.store.clone(), &fixture.commit).unwrap();
+        let path = format!("{root}/app/tests/chain.rs");
+        assert!(std::fs::canonicalize(&path).is_err());
+        for spelling in [r"\canonical-test\vfs\m\app\tests\chain.rs", "/canonical-test/vfs/m/app/./src/../tests/chain.rs"] {
+            assert_eq!(canonical(spelling), canonical(&path), "{spelling}");
+        }
+        assert_eq!(canonical(&path), path);
+        MOUNTS.write().unwrap().retain(|m| m.root != normalize_path(root));
+        // off every mount and disk: by its components, the drive's letter in one case
+        assert_eq!(canonical(r"C:\nowhere\tests\chain.rs"), canonical("c:/nowhere/tests/chain.rs"));
     }
 
     #[test]

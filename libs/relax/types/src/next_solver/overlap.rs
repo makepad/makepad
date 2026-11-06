@@ -40,7 +40,7 @@ fn impl_intersection_has_impossible_obligation(infcx: &InferCtxt<'_>, prog: &Pro
     for e in &errors { if matches!(e,fulfill::NextSolverError::TrueError(_)) { return None; } }
     let pending=ocx.engine.pending_obligations();
     let mut ocx=fulfill::ObligationCtxt::new(infcx,prog);
-    for obligation in pending { ocx.engine.register_predicate_obligation(infcx,obligation); }
+    for obligation in pending { ocx.engine.register_predicate_obligation(infcx,prog,obligation); }
     let mut overflowing=Vec::new();
     for error in errors.into_iter().chain(ocx.engine.evaluate_obligations_error_on_ambiguity(infcx,prog)) {
         match error {

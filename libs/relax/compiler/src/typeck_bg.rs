@@ -61,9 +61,7 @@ fn stopping() -> bool {
 /// The crates this check covers -- not the app's (checked before main), not a proc-macro crate,
 /// not the sysroot, and no clean verdict stored for it -- with their verdicts' cache keys.
 fn todo_crates(u: &Unit, root: u32, skipped: &[u128]) -> (Vec<bool>, Vec<Option<u128>>) {
-    fn canon(p: &str) -> String {
-        std::fs::canonicalize(p).map(|c| c.display().to_string()).unwrap_or_else(|_| p.to_string())
-    }
+    use crate::vfs::canonical as canon;
     let std_dir = format!("{}/", canon(&crate::std_dir()).trim_end_matches('/'));
     let prog = &u.prog;
     (0..prog.crates.len() as u32).map(|k| {

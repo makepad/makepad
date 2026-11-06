@@ -151,6 +151,11 @@ fn manifest_features(toml: &str) -> Vec<String> {
     on
 }
 
+/// Whether any site was accepted only in relaxed mode so far (`finish_check` reports them).
+pub fn pending() -> bool {
+    !NOTES.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+}
+
 pub fn note(n: Note) {
     let mut v = NOTES.lock().unwrap_or_else(|e| e.into_inner());
     if !v.iter().any(|x| x.at == n.at && x.code == n.code && x.msg == n.msg) {

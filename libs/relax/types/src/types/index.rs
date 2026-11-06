@@ -1,15 +1,16 @@
-//! The interners' hash index (types and lists): open addressing with linear probing over a
-//! power-of-two table of slots, 0 being empty. Lookups read it without locks; claims and
-//! growth hold its lock. It doubles when a claim would make it more than 3/4 full, so its size
-//! follows the number of entries: a small app's few 10^5 types take a table of a few MB, a
-//! check of a large app's dependencies (~10^7 types) a proportionally larger one. A replaced
-//! table stays allocated until the interner is dropped or mutably borrowed, since a lookup may
-//! still be probing it; every replaced table together is smaller than the current one.
+//! The interners' hash index (types, lists, regions, solver inputs and results): open
+//! addressing with linear probing over a power-of-two table of slots, 0 being empty. Lookups
+//! read it without locks; claims and growth hold its lock. It doubles when a claim would make
+//! it more than 3/4 full, so its size follows the number of entries: a small app's few 10^5
+//! types take a table of a few MB, a check of a large app's dependencies (~10^7 types) a
+//! proportionally larger one. A replaced table stays allocated until the interner is dropped or
+//! mutably borrowed, since a lookup may still be probing it; every replaced table together is
+//! smaller than the current one.
 use relax_session::sync::{Mutex, MutexGuard};
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 /// A slot: a nonzero value names an entry (how is the interner's business).
-pub(super) trait Slot: Copy + Eq + 'static {
+pub(crate) trait Slot: Copy + Eq + 'static {
     type Atomic: Send + Sync;
     const EMPTY: Self;
     fn atomic(v: Self) -> Self::Atomic;
@@ -37,7 +38,7 @@ impl Slot for u64 {
 /// The first table's size (log2).
 const MIN_BITS: u32 = 10;
 
-pub(super) struct Table<S: Slot> {
+pub(crate) struct Table<S: Slot> {
     bits: u32,
     slots: Box<[S::Atomic]>,
 }
@@ -64,23 +65,23 @@ impl<S: Slot> Table<S> {
     }
 
     /// The slots as they are, `keep` deciding which stay (the others read as empty).
-    pub(super) fn snapshot(&self, keep: impl Fn(S) -> bool) -> Vec<S> {
+    pub(crate) fn snapshot(&self, keep: impl Fn(S) -> bool) -> Vec<S> {
         self.slots.iter().map(|a| S::load(a)).map(|s| if s != S::EMPTY && keep(s) { s } else { S::EMPTY }).collect()
     }
 
     /// The filled slots.
-    pub(super) fn filled(&self) -> impl Iterator<Item = S> + '_ {
+    pub(crate) fn filled(&self) -> impl Iterator<Item = S> + '_ {
         self.slots.iter().map(|a| S::load(a)).filter(|&s| s != S::EMPTY)
     }
 }
 
 /// What the lock guards: the entry count (the load) and the replaced tables.
-pub(super) struct Claims<S: Slot> {
+pub(crate) struct Claims<S: Slot> {
     count: usize,
     retired: Vec<Box<Table<S>>>,
 }
 
-pub(super) struct Index<S: Slot> {
+pub(crate) struct Index<S: Slot> {
     table: AtomicPtr<Table<S>>,
     lock: Mutex<Claims<S>>,
 }
@@ -92,7 +93,7 @@ impl<S: Slot> Drop for Index<S> {
 }
 
 impl<S: Slot> Index<S> {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::of(Table::new(MIN_BITS), 0)
     }
 
@@ -102,14 +103,14 @@ impl<S: Slot> Index<S> {
 
     /// The current table. It lives while `self` is shared (a replaced one is retired, not freed).
     #[inline(always)]
-    pub(super) fn table(&self) -> &Table<S> {
+    pub(crate) fn table(&self) -> &Table<S> {
         // Acquire: a table is complete before its pointer is published
         unsafe { &*self.table.load(Ordering::Acquire) }
     }
 
     /// The first slot from `h`'s home that `hit` accepts, before an empty one.
     #[inline]
-    pub(super) fn find(&self, h: u32, mut hit: impl FnMut(S) -> bool) -> Option<S> {
+    pub(crate) fn find(&self, h: u32, mut hit: impl FnMut(S) -> bool) -> Option<S> {
         let t = self.table();
         let mask = t.slots.len() - 1;
         let mut i = t.home(h);
@@ -125,14 +126,14 @@ impl<S: Slot> Index<S> {
         }
     }
 
-    pub(super) fn lock(&self) -> MutexGuard<'_, Claims<S>> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Claims<S>> {
         self.lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Claims a slot for `s` (hash `h`), the caller holding the lock (`g`). When that would make
     /// the table more than 3/4 full, the table doubles instead: `all` yields every (hash, slot)
     /// the doubled table holds, `s` included.
-    pub(super) fn claim<I: Iterator<Item = (u32, S)>>(&self, g: &mut Claims<S>, h: u32, s: S, all: impl FnOnce() -> I) {
+    pub(crate) fn claim<I: Iterator<Item = (u32, S)>>(&self, g: &mut Claims<S>, h: u32, s: S, all: impl FnOnce() -> I) {
         g.count += 1;
         let t = self.table();
         if g.count <= (t.slots.len() >> 2) * 3 {
@@ -148,24 +149,24 @@ impl<S: Slot> Index<S> {
     }
 
     /// Entries claimed.
-    pub(super) fn count(&self) -> usize {
+    pub(crate) fn count(&self) -> usize {
         self.lock().count
     }
 
     /// Bytes held: the current table and the replaced ones.
-    pub(super) fn bytes(&self) -> usize {
+    pub(crate) fn bytes(&self) -> usize {
         let g = self.lock();
         let size = |t: &Table<S>| t.slots.len() * std::mem::size_of::<S>();
         size(self.table()) + g.retired.iter().map(|t| size(&**t)).sum::<usize>()
     }
 
     /// Frees the replaced tables (no lookup can be probing them: `self` is not shared).
-    pub(super) fn free_retired(&mut self) {
+    pub(crate) fn free_retired(&mut self) {
         self.lock.get_mut().unwrap_or_else(|e| e.into_inner()).retired.clear();
     }
 
     /// A table from an image's slots (`ok` checks each nonzero slot); None: not a table.
-    pub(super) fn restored(slots: &[S], ok: impl Fn(S) -> bool) -> Option<Self> {
+    pub(crate) fn restored(slots: &[S], ok: impl Fn(S) -> bool) -> Option<Self> {
         let bits = slots.len().trailing_zeros();
         if !slots.len().is_power_of_two() || bits < MIN_BITS || bits > 31 {
             return None;
@@ -183,7 +184,7 @@ impl<S: Slot> Index<S> {
     }
 
     /// A copy of `live`'s current table (nothing claims while it is taken).
-    pub(super) fn copy_of(live: &Self) -> Self {
+    pub(crate) fn copy_of(live: &Self) -> Self {
         let g = live.lock();
         let t = live.table();
         Self::of(Box::new(Table { bits: t.bits, slots: t.slots.iter().map(|a| S::atomic(S::load(a))).collect() }), g.count)

@@ -565,13 +565,25 @@ fn keep(name: &str, s: Snap) {
     v.push((name.to_string(), Snap { at_ms: s.at_ms, nodes: s.nodes.clone() }));
 }
 
+/// An arena's resident bytes from its chunk states (`arena_states`): its small chunks' rows and its
+/// large runs (the sparse and old rows count chunks of those rows again).
+fn arena_resident(a: &[usize; 29]) -> usize {
+    a[3] + a[7] + a[11] + a[15] + a[18]
+}
+
 /// `memory [compiler=1] [n=24]`: the snapshot as a ranked tree plus findings, and the growth since
 /// the previous `memory` (kept as snapshot `last`).
 pub fn cmd_memory(req: &Req, out: &mut Out) {
     out.line(&format!("{{\"freed_by_domain_teardown_bytes\":{}}}", crate::domain::freed_by_teardown()));
-    for d in crate::domain::list() {
-        out.line(&format!("{{\"domain\":{},\"package\":{},\"state\":{},\"arena_in_use_bytes\":{},\"arena_committed_bytes\":{},\"arena_touched_small_bytes\":{},\"arena_live_slot_bytes\":{},\"arena_large_bytes\":{},\"static_committed_bytes\":{},\"threads\":{},\"thread_names\":[{}]}}",
-            d.id, json_str(&d.package), json_str(&format!("{:?}", d.state)), d.arena_in_use, d.arena_committed, d.arena_detail.0, d.arena_detail.1, d.arena_detail.2, d.static_committed, d.threads,
+    // a domain heap's committed bytes are address space made writable a whole chunk at a time (each
+    // thread's current chunk per size class), not memory: its resident bytes are what the footprint
+    // counts (the chunk states' page query)
+    let heaps = crate::domain::heap_states();
+    let resident_of = |id: crate::domain::DomainId| heaps.iter().find(|h| h.0 == id).map_or(0, |h| arena_resident(&h.1));
+    let domains = crate::domain::list();
+    for d in &domains {
+        out.line(&format!("{{\"domain\":{},\"package\":{},\"state\":{},\"arena_in_use_bytes\":{},\"arena_resident_bytes\":{},\"arena_committed_bytes\":{},\"arena_touched_small_bytes\":{},\"arena_live_slot_bytes\":{},\"arena_large_bytes\":{},\"static_committed_bytes\":{},\"threads\":{},\"thread_names\":[{}]}}",
+            d.id, json_str(&d.package), json_str(&format!("{:?}", d.state)), d.arena_in_use, resident_of(d.id), d.arena_committed, d.arena_detail.0, d.arena_detail.1, d.arena_detail.2, d.static_committed, d.threads,
             d.thread_names.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(",")));
     }
     // chunk states with resident bytes (MB): attached / listed / released / full, then large, then sparse
@@ -581,8 +593,8 @@ pub fn cmd_memory(req: &Req, out: &mut Out) {
         format!("\"attached\":{},\"listed\":{},\"released\":{},\"full\":{},\"large\":{{\"runs\":{},\"committed_mb\":{},\"resident_mb\":{},\"requested_mb\":{}}},\"sparse\":{{\"chunks\":{},\"resident_mb\":{}}},\"old\":{{\"chunks\":{},\"live_slots_mb\":{},\"resident_mb\":{}}},\"free_granules\":{{\"attached_mb\":{},\"listed_mb\":{}}},\"attached_use\":{{\"requested_mb\":{},\"remote_pending_mb\":{}}}",
             row(0), row(1), row(2), row(3), a[16], mb(a[17]), mb(a[18]), mb(a[28]), a[19], mb(a[20]), a[21], mb(a[22]), mb(a[23]), mb(a[24]), mb(a[25]), mb(a[26]), mb(a[27]))
     };
-    for (id, a) in crate::domain::heap_states() {
-        out.line(&format!("{{\"arena_states\":\"domain {id:?}\",{}}}", st(&a)));
+    for (id, a) in &heaps {
+        out.line(&format!("{{\"arena_states\":\"domain {id:?}\",{}}}", st(a)));
     }
     let (cs, bs) = crate::zone_alloc::arena_states();
     out.line(&format!("{{\"arena_states\":\"compiler\",{}}}", st(&cs)));
@@ -609,13 +621,22 @@ pub fn cmd_memory(req: &Req, out: &mut Out) {
     out.line(&total);
     let ev = crate::zone_alloc::compiler_events();
     let jobs = crate::zone_alloc::job_stats();
+    // The program's heap: a hosted app's is its domain's arena (malloc then holds makepad run's own
+    // and its compiled-in crates' blocks), else the system malloc; held free = resident beyond use.
+    let app = crate::run::app_domain().and_then(|id| domains.iter().find(|d| d.id == id && heaps.iter().any(|h| h.0 == id)));
+    let (program, p_inuse, p_held, p_resident) = match app {
+        Some(d) => (format!("domain {} arena", d.id), d.arena_in_use as u64, (resident_of(d.id) as u64).saturating_sub(d.arena_in_use as u64), resident_of(d.id) as u64),
+        None => ("system malloc".to_string(), inuse, free, inuse + free),
+    };
     // The program's malloc, the compiler's arenas and the JIT's mappings are accounted apart.
     out.line(&format!("{{\"trims\":{},\"last_trim_ms\":{}}}", crate::memstat::TRIMS.load(std::sync::atomic::Ordering::Relaxed), crate::memstat::LAST_TRIM_MS.load(std::sync::atomic::Ordering::Relaxed)));
     out.line(&format!(
-        "{{\"split\":{{\"routing\":{},\"program_heap_in_use_mb\":{},\"program_heap_held_free_mb\":{},\"compiler_arena_committed_mb\":{},\"compiler_arena_live_mb\":{},\"slots_arena_committed_mb\":{},\"slots_arena_live_mb\":{},\"slots_arena_touched_mb\":{},\"slots_arena_large_mb\":{},\"jit_code_mb\":{},\"jit_ro_data_mb\":{},\"program_statics_mb\":{},\"burst_arena_committed_mb\":{},\"compiler_arena_touched_mb\":{},\"compiler_arena_live_slots_mb\":{},\"compiler_arena_large_mb\":{},\"compiler_arena_chunks_listed\":{},\"compiler_arena_events\":{{\"contended_chunk\":{},\"contended_pool\":{},\"contended_warm\":{},\"contended_partial\":{},\"yields\":{},\"commits\":{},\"decommits\":{},\"pushes\":{},\"pops\":{}}},\"job_arena\":{{\"jobs\":{},\"survivor_jobs\":{},\"survivor_bytes\":{}}}}}}}",
+        "{{\"split\":{{\"routing\":{},\"program_heap\":{},\"program_heap_in_use_mb\":{},\"program_heap_held_free_mb\":{},\"program_heap_resident_mb\":{},\"compiler_arena_committed_mb\":{},\"compiler_arena_live_mb\":{},\"slots_arena_committed_mb\":{},\"slots_arena_live_mb\":{},\"slots_arena_touched_mb\":{},\"slots_arena_large_mb\":{},\"jit_code_mb\":{},\"jit_ro_data_mb\":{},\"program_statics_mb\":{},\"burst_arena_committed_mb\":{},\"compiler_arena_touched_mb\":{},\"compiler_arena_live_slots_mb\":{},\"compiler_arena_large_mb\":{},\"compiler_arena_chunks_listed\":{},\"compiler_arena_events\":{{\"contended_chunk\":{},\"contended_pool\":{},\"contended_warm\":{},\"contended_partial\":{},\"yields\":{},\"commits\":{},\"decommits\":{},\"pushes\":{},\"pops\":{}}},\"job_arena\":{{\"jobs\":{},\"survivor_jobs\":{},\"survivor_bytes\":{}}}}}}}",
         json_str(if crate::zone_alloc::compiler_arena_enabled() { "compiler arena" } else { "off (MAKEPAD_RUN_COMPILER_ARENA=0)" }),
-        mb(inuse),
-        mb(free),
+        json_str(&program),
+        mb(p_inuse),
+        mb(p_held),
+        mb(p_resident),
         mb(snap.get("makepad-run/compiler arena committed")),
         mb(snap.get("makepad-run/compiler arena live")),
         mb(snap.get("makepad-run/slot arena committed")),

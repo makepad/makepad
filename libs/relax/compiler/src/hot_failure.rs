@@ -159,6 +159,9 @@ pub fn checker_panic(body: &str, message: &str) {
 pub fn recovering() -> bool { ACTIVE.load(Ordering::Acquire) }
 /// Whether a live edit was attempted in this process.
 pub(crate) fn edit_ran() -> bool { state().current.is_some() }
+/// A live edit was attempted in this process (tests of what follows one).
+#[cfg(test)]
+pub(crate) fn edit_ran_for_test() { let old = state().current.replace(empty_attempt()); drop(old); }
 pub(crate) fn enable() { REPORTING.store(true, Ordering::Release); }
 pub fn has_error() -> bool { ERROR.load(Ordering::Acquire) }
 /// Whether this run is a restart's replacement whose restore has not completed (`restored`).
@@ -337,9 +340,15 @@ pub(crate) fn next_run_failed(path: &std::path::Path, why: &str) {
     }
 }
 
+/// This run read its recovery record (`restore`): the run's start and its watcher's both ask, and
+/// the first read removes the file (a run started in place keeps its hand-over: the second read
+/// found no file and said "cannot restore the pending recovery record").
+static RESTORE_READ: AtomicBool = AtomicBool::new(false);
+
 pub(crate) fn restore() {
     let _kept = crate::zone_alloc::kept();
     let Some(path) = crate::run_end::run_input("MAKEPAD_JIT_RECOVERY") else { return };
+    if RESTORE_READ.swap(true, Ordering::AcqRel) { return; }
     // (a process's first run: the programs it starts do not take its recovery for theirs)
     if !crate::run_end::started_in_place() { std::env::remove_var("MAKEPAD_JIT_RECOVERY"); }
     match std::fs::read_to_string(&path).ok().and_then(|s| Record::parse(&s)) {
@@ -358,4 +367,5 @@ pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
     reset(&STATE, std::sync::OnceLock::new());
     reset(&RECORDED, AtomicU64::new(0));
+    reset(&RESTORE_READ, AtomicBool::new(false));
 }

@@ -2699,7 +2699,7 @@ required-features = ["b", "manual"]
     /// and the integration tests, a `test = false` bin left out -- beside the plain lib they link,
     /// with the dev-dependencies; `--lib` and `--bins` are the plain targets, without them. A
     /// `makepad check --tests` had checked the integration tests only, and so reported none of
-    /// the bins' unit tests' lints (`unused_mut` in fab's sla.rs tests, cargo check's 11-05).
+    /// the bins' unit tests' lints (`unused_mut` in a binary's unit tests, cargo check's 11-05).
     #[test]
     fn check_target_flags_are_cargo_checks() {
         let sess = &std::sync::Arc::new(crate::Session::default());

@@ -237,48 +237,27 @@ impl Program {
         // names some checked module binds through a glob: only their calls can be ambiguous
         let globbed: crate::fxhash::HashSet<Sym> = table.iter().filter(|(_, b)| b.glob.is_some()).map(|(&(_, n), _)| n).collect();
         if globbed.is_empty() { return out; }
+        // (each path's first file, as a search of the paths finds it)
+        let mut by_path: crate::fxhash::HashMap<&str, u32> = Default::default();
+        for (i, p) in self.file_paths.iter().enumerate() { by_path.entry(p.as_str()).or_insert(i as u32); }
         let mut seen = crate::fxhash::HashSet::default();
-        let mut items_of: crate::fxhash::HashMap<u32, Vec<(u32, u32, u32)>> = Default::default();
-        let mut blocks_of: crate::fxhash::HashMap<u32, Vec<(u32, u32, u32)>> = Default::default();
+        let mut todo: Vec<(u32, u32, Sym, u32)> = Vec::new();
         for (path, pos, name) in calls {
             let Some(name) = self.syms.get(&name) else { continue };
             if !globbed.contains(&name) { continue; }
-            let Some(file) = self.file_paths.iter().position(|p| *p == path) else { continue };
-            let file = file as u32;
+            let Some(&file) = by_path.get(path.as_str()) else { continue };
             let krate = self.file_crate.get(file as usize).copied().unwrap_or(u32::MAX);
             if !own.get(krate as usize).copied().unwrap_or(false) || !seen.insert((file, pos)) { continue; }
-            let Some(module) = self.call_module(file, pos, &mut items_of, &mut blocks_of) else { continue };
-            if self.textual_macro_at(module, file, pos, name) { continue; }
+            todo.push((file, pos, name, krate));
+        }
+        if todo.is_empty() { return out; }
+        let ix = CallScopes::new(self, todo.iter().map(|t| t.0).collect());
+        for (file, pos, name, krate) in todo {
+            let Some(module) = ix.call_module(self, file, pos) else { continue };
+            if ix.textual_macro_at(self, module, file, pos, name) { continue; }
             if let Some(d) = self.macro_call_ambiguity(table, module, krate, name) { out.push((file, pos, d.0, d.1)); }
         }
         out
-    }
-
-    /// The module whose scope a call at `pos` of `file` resolves in: the innermost body block that is a
-    /// module, else the scope of the innermost item holding it.
-    fn call_module(&self, file: u32, pos: u32, items_of: &mut crate::fxhash::HashMap<u32, Vec<(u32, u32, u32)>>, blocks_of: &mut crate::fxhash::HashMap<u32, Vec<(u32, u32, u32)>>) -> Option<u32> {
-        let ast = &self.files.get(file as usize)?.ast;
-        let blocks = blocks_of.entry(file).or_insert_with(|| {
-            self.block_mods.iter().filter(|((f, _), _)| *f == file).map(|(&(_, b), &m)| { let bl = ast.block(BlockId(b)); (bl.lo, bl.hi, m) }).collect()
-        });
-        if let Some(&(_, _, m)) = blocks.iter().filter(|(lo, hi, _)| *lo <= pos && pos < *hi).min_by_key(|(lo, hi, _)| hi - lo) { return Some(m); }
-        let items = items_of.entry(file).or_insert_with(|| {
-            // (an inline `mod` item: the calls written in it resolve in that module)
-            self.defs.iter().filter(|d| d.file == file && d.item.0 != u32::MAX && !matches!(d.kind, DefKind::Closure | DefKind::AnonConst | DefKind::OpaqueTy | DefKind::Prim(_) | DefKind::Field | DefKind::Variant | DefKind::MacroRules))
-                .map(|d| { let it = ast.item(d.item); (it.lo, it.hi, if d.kind == DefKind::Mod { d.sub } else { d.scope }) }).collect()
-        });
-        if let Some(&(_, _, m)) = items.iter().filter(|(lo, hi, _)| *lo <= pos && pos < *hi).min_by_key(|(lo, hi, _)| hi - lo) { return Some(m); }
-        (0..self.mods.len()).find(|&i| { let md = &self.mods[i]; md.file == file && md.lexical_parent.is_none() && self.def(md.def).kind == DefKind::Mod && self.def(md.def).sub as usize == i }).map(|m| m as u32)
-    }
-
-    /// A `macro_rules! name` written before `pos` of `file` in the call's module or an enclosing one
-    /// (rustc's MacroRules scopes, searched first: a result there is never ambiguous with a module's).
-    fn textual_macro_at(&self, module: u32, file: u32, pos: u32, name: Sym) -> bool {
-        let mut chain = Vec::new();
-        let mut m = Some(module);
-        while let Some(x) = m { chain.push(self.mods[x as usize].def); m = self.mods[x as usize].lexical_parent.or(self.mods[x as usize].parent_mod); }
-        let Some(f) = self.files.get(file as usize) else { return false };
-        self.defs.iter().any(|d| d.kind == DefKind::MacroRules && d.name == name && d.file == file && chain.contains(&d.parent) && f.ast.item(d.item).lo < pos)
     }
 
     fn macro_call_ambiguity(&self, table: &HashMap<(u32, Sym), MacBinding>, module: u32, krate: u32, name: Sym) -> Option<(Option<&'static str>, String)> {
@@ -1710,5 +1689,64 @@ mod tests {
         let k = k.unwrap();
         let expansions: usize = prog.files.iter().zip(&prog.file_crate).filter(|(_, &c)| c == k).map(|(f, _)| f.exp_map.len()).sum();
         assert_eq!(expansions, 9, "expansions of a chain of 9 calls");
+    }
+}
+
+/// What `macro_call_ambiguities` looks up in each file with calls, gathered in one pass over the
+/// definitions, block modules and modules (in their order: the first of equally small spans wins,
+/// as a search finds it).
+struct CallScopes {
+    /// by file: the innermost-first candidates of a call's scope, (lo, hi, module)
+    blocks: crate::fxhash::HashMap<u32, Vec<(u32, u32, u32)>>,
+    items: crate::fxhash::HashMap<u32, Vec<(u32, u32, u32)>>,
+    /// the file's own module (no lexical parent)
+    file_mod: crate::fxhash::HashMap<u32, u32>,
+    /// the `macro_rules!` definitions by (file, name)
+    rules: crate::fxhash::HashMap<(u32, Sym), Vec<DefId>>,
+}
+
+impl CallScopes {
+    fn new(p: &Program, files: crate::fxhash::HashSet<u32>) -> Self {
+        let mut blocks: crate::fxhash::HashMap<u32, Vec<(u32, u32, u32)>> = Default::default();
+        for (&(f, b), &m) in p.block_mods.iter() {
+            if !files.contains(&f) { continue; }
+            let bl = p.files[f as usize].ast.block(BlockId(b));
+            blocks.entry(f).or_default().push((bl.lo, bl.hi, m));
+        }
+        let mut items: crate::fxhash::HashMap<u32, Vec<(u32, u32, u32)>> = Default::default();
+        let mut rules: crate::fxhash::HashMap<(u32, Sym), Vec<DefId>> = Default::default();
+        for (i, d) in p.defs.iter().enumerate() {
+            if !files.contains(&d.file) { continue; }
+            if d.kind == DefKind::MacroRules { rules.entry((d.file, d.name)).or_default().push(DefId(i as u32)); }
+            // (an inline `mod` item: the calls written in it resolve in that module)
+            if d.item.0 != u32::MAX && !matches!(d.kind, DefKind::Closure | DefKind::AnonConst | DefKind::OpaqueTy | DefKind::Prim(_) | DefKind::Field | DefKind::Variant | DefKind::MacroRules) {
+                let it = p.files[d.file as usize].ast.item(d.item);
+                items.entry(d.file).or_default().push((it.lo, it.hi, if d.kind == DefKind::Mod { d.sub } else { d.scope }));
+            }
+        }
+        let mut file_mod: crate::fxhash::HashMap<u32, u32> = Default::default();
+        for (i, md) in p.mods.iter().enumerate() {
+            if !files.contains(&md.file) || md.lexical_parent.is_some() || p.def(md.def).kind != DefKind::Mod || p.def(md.def).sub as usize != i { continue; }
+            file_mod.entry(md.file).or_insert(i as u32);
+        }
+        CallScopes { blocks, items, file_mod, rules }
+    }
+
+    /// The module whose scope a call at `pos` of `file` resolves in: the innermost body block that is a
+    /// module, else the scope of the innermost item holding it.
+    fn call_module(&self, p: &Program, file: u32, pos: u32) -> Option<u32> {
+        p.files.get(file as usize)?;
+        let inner = |v: Option<&Vec<(u32, u32, u32)>>| v.into_iter().flatten().filter(|(lo, hi, _)| *lo <= pos && pos < *hi).min_by_key(|(lo, hi, _)| hi - lo).map(|x| x.2);
+        inner(self.blocks.get(&file)).or_else(|| inner(self.items.get(&file))).or_else(|| self.file_mod.get(&file).copied())
+    }
+
+    /// A `macro_rules! name` written before `pos` of `file` in the call's module or an enclosing one
+    /// (rustc's MacroRules scopes, searched first: a result there is never ambiguous with a module's).
+    fn textual_macro_at(&self, p: &Program, module: u32, file: u32, pos: u32, name: Sym) -> bool {
+        let mut chain = Vec::new();
+        let mut m = Some(module);
+        while let Some(x) = m { chain.push(p.mods[x as usize].def); m = p.mods[x as usize].lexical_parent.or(p.mods[x as usize].parent_mod); }
+        let Some(f) = p.files.get(file as usize) else { return false };
+        self.rules.get(&(file, name)).into_iter().flatten().any(|&d| { let d = p.def(d); chain.contains(&d.parent) && f.ast.item(d.item).lo < pos })
     }
 }

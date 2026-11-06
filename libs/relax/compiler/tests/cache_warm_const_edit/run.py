@@ -17,6 +17,14 @@ A probe that reads late first calls its reader after the edit: that code comes f
 A const that only values read must land, and a const a type uses must restart, saying why (MUST).
 const_every: one const of a dependency, every way code reads it, all from the warm cache.
 field_*: a struct's field list edited with no reader's text changing; field_every reads one field every way.
+dyn_*: a trait object made before the edit, its trait's method list edited: the edit restarts (MUST),
+its vtable linked from the disk cache as much as built by this run; dyn_impl_removed: the impl the
+object's vtable holds removed with the code that made it changed: lands (MUST), the object keeps its vtable.
+enum_insert*: a variant inserted before a held one: lands (MUST); restarts (MUST) when code that ran read
+the numbers it moves, an `as` cast or a derived `Hash`, linked from the disk cache as much as built by this run.
+field_copy: a field added to a Copy struct no running value holds: lands (MUST) in its new layout, and the reader
+whose text stays (it builds an outer struct holding it) is rebuilt for it. field_copy_frame: one the loop's frame
+holds restarts (MUST), naming the running fn.
 A stored entry can be older than the manifest of the run that reads it: the edited text's first run,
 reaching none of the late readers, writes its own manifest (its keys are "unchanged" from then on),
 and the next run's first late reads must still see that the entries they find are of the old text.
@@ -90,6 +98,15 @@ PROBES = [
     ("body_inlined", V, "pub fn tiny() -> u64 {\n    1\n", "pub fn tiny() -> u64 {\n    2\n", 2),
     ("body_late", V, "pub fn late_tiny() -> u64 {\n    1\n", "pub fn late_tiny() -> u64 {\n    2\n", 2),
     ("always_late", V, "pub fn late_always() -> u64 {\n    1\n", "pub fn late_always() -> u64 {\n    2\n", 2),
+    ("dyn_method_add", V, "pub trait Dm {\n    fn a(&self) -> u64;\n}\npub struct DmX;\nimpl Dm for DmX {\n    fn a(&self) -> u64 {\n        1\n", "pub trait Dm {\n    fn z(&self) -> u64 {\n        9\n    }\n    fn a(&self) -> u64;\n}\npub struct DmX;\nimpl Dm for DmX {\n    fn a(&self) -> u64 {\n        2\n", 2),
+    ("dyn_method_add_late", V, "pub trait Dm {\n    fn a(&self) -> u64;\n}\npub struct DmX;\nimpl Dm for DmX {\n    fn a(&self) -> u64 {\n        1\n", "pub trait Dm {\n    fn z(&self) -> u64 {\n        9\n    }\n    fn a(&self) -> u64;\n}\npub struct DmX;\nimpl Dm for DmX {\n    fn a(&self) -> u64 {\n        2\n", 2),
+    ("dyn_vtable_fresh", V, "pub trait Dv {\n    fn a(&self) -> u64;\n}\npub struct DvX;\nimpl Dv for DvX {\n    fn a(&self) -> u64 {\n        1\n    }\n}\npub fn dv_read() -> u64 {\n    dv_held().a()\n}\n", "pub trait Dv {\n    fn z(&self) -> u64 {\n        9\n    }\n    fn a(&self) -> u64;\n}\npub struct DvX;\nimpl Dv for DvX {\n    fn a(&self) -> u64 {\n        2\n    }\n}\npub fn dv_read() -> u64 {\n    dv_held().a() * 10 + dv_held().z() - 9\n}\n", 20),
+    ("dyn_impl_removed", V, "impl std::fmt::Display for Ri {\n    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n        write!(f, \"{}\", self.0)\n    }\n}\npub const RI_K: u64 = 0;\npub fn ri_make() -> Box<dyn std::fmt::Display + Send + Sync> {\n    Box::new(Ri(7))\n", "pub const RI_K: u64 = 1;\npub fn ri_make() -> Box<dyn std::fmt::Display + Send + Sync> {\n    Box::new(7u64)\n", 2),
+    ("field_copy", V, "pub struct Cp {\n    pub a: u32,\n    pub b: u64,\n}\n#[inline(never)]\npub fn cp_make(i: u32) -> Cp {\n    Cp { a: i, b: (i as u64) << 8 }\n", "pub struct Cp {\n    pub a: u32,\n    pub c: u16,\n    pub b: u64,\n}\n#[inline(never)]\npub fn cp_make(i: u32) -> Cp {\n    Cp { a: i, c: 3, b: (i as u64) << 9 }\n", 1540),
+    ("field_copy_frame", V, "pub struct CpF {\n    pub a: u32,\n    pub b: u64,\n}\n#[inline(never)]\npub fn cpf_new() -> CpF {\n    CpF { a: 1, b: 1 }\n", "pub struct CpF {\n    pub z: u8,\n    pub a: u32,\n    pub b: u64,\n}\n#[inline(never)]\npub fn cpf_new() -> CpF {\n    CpF { z: 0, a: 1, b: 2 }\n", 3),
+    ("enum_insert", V, "pub enum Ev {\n    A,\n    B(u32),\n    C { level: u8 },\n}\npub static EV: std::sync::Mutex<Option<Ev>> = std::sync::Mutex::new(None);\n#[inline(never)]\npub fn ev_read() -> u64 {\n    let mut g = EV.lock().unwrap();\n    let held = g.get_or_insert(Ev::C { level: 4 });\n    let level = match held {\n        Ev::C { level } => *level as u64,\n        _ => 0,\n    };\n    level + if Ev::A < *held { 10 } else { 0 }\n}\n", "pub enum Ev {\n    A,\n    X(u16),\n    B(u32),\n    C { level: u8 },\n}\npub static EV: std::sync::Mutex<Option<Ev>> = std::sync::Mutex::new(None);\n#[inline(never)]\npub fn ev_read() -> u64 {\n    let mut g = EV.lock().unwrap();\n    let held = g.get_or_insert(Ev::C { level: 4 });\n    let level = match held {\n        Ev::C { level } => *level as u64,\n        _ => 0,\n    };\n    level + if Ev::A < *held { 10 } else { 0 } + if Ev::X(3) < *held && Ev::A < Ev::X(3) { 300 } else { 0 }\n}\n", 314),
+    ("enum_insert_cast", V, "pub enum Lv {\n    Low,\n    High,", "pub enum Lv {\n    Low,\n    Mid,\n    High,", 2),
+    ("enum_insert_hash", V, "pub enum Hk {\n    P,\n    Q,\n}\npub const HK_K: u64 = 0;", "pub enum Hk {\n    P,\n    R,\n    Q,\n}\npub const HK_K: u64 = 1;", 2),
     ("static_direct", V, "STATIC_DIRECT: u64 = 1;", "STATIC_DIRECT: u64 = 2;", 2),
     ("static_through", V, "STATIC_THROUGH: u64 = 1;", "STATIC_THROUGH: u64 = 2;", 2),
     ("static_late", V, "STATIC_LATE: u64 = 1;", "STATIC_LATE: u64 = 2;", 2),
@@ -123,10 +140,30 @@ PROBES += [
     ("field_enum", F, "A([u64; 2]),\n    B,\n}\nuse Pay::*;\n#[inline(never)]\npub fn pay_new() -> Pay {\n    if std::env::var(\"NEVER_SET\").is_ok() {\n        return B;\n    }\n    A([5; 2])",
      "A([u64; 3]),\n    B,\n}\nuse Pay::*;\n#[inline(never)]\npub fn pay_new() -> Pay {\n    if std::env::var(\"NEVER_SET\").is_ok() {\n        return B;\n    }\n    A([5; 3])", 3),
 ]
+# A body edit of the same file first: the const is then in that edit's version of the file, which
+# the keys' item graph (made from the boot text) did not have; the const edit said "no key shows its
+# readers there" and restarted.
+FIRST = {"const_after_body": (V, "pub fn late_tiny() -> u64 {\n    1\n", "pub fn late_tiny() -> u64 {\n    2 - 1\n")}
+PROBES += [("const_after_body", V, "CONST_DIRECT: u64 = 1;", "CONST_DIRECT: u64 = 2;", 2)]
+# An included file edited: a table of texts, one included through a macro's `concat!` path, read
+# whole and found by key (Fab's demo plates); and after a body edit of the including file. The
+# program prints the new text's length or the edit restarts: never "patched" with the old text.
+PROBES += [
+    ("include_macro", "src/doc_a.txt", "a", "aa", 3),
+    ("include_found", "src/doc_b.txt", "b", "bbb", 3),
+    ("include_after_body", "src/data.txt", "x", "xx", 2),
+    # a demo added to the table, found by key through a fn pointer stored at the start ("no demo")
+    ("include_added", V, 'doc!("doc_a"), Doc {', 'doc!("doc_a"), doc!("doc_c"), Doc {', 3),
+    # a path made by `env!`: no text names the file, so a restart applies its save
+    ("include_env", "src/doc_e.txt", "e", "eee", 3),
+]
+FIRST["include_after_body"] = (V, "pub fn late_tiny() -> u64 {\n    1\n", "pub fn late_tiny() -> u64 {\n    2 - 1\n")
 # every value a probe prints, when it is more than its own
 READS = {"const_every": {"every_direct": 2, "every_fn": 2, "every_inlined": 2, "every_generic": 2, "every_closure": 2, "every_assoc": 2, "every_derived": 3, "every_late": 2}}
 READS["field_every"] = {n: 47 for n in ("fe_method", "fe_free", "fe_pattern", "fe_closure", "fe_generic", "fe_inlined", "fe_macro", "fe_update", "fe_update_self", "fe_clone", "fe_nested", "fe_dyn", "fe_late")}
 READS["field_every"].update(fe_eq=1, fe_debug=4, fe_write=48, fe_held=40, fe_rest=3)
+READS["const_after_body"] = {"const_direct": 2}
+READS["include_after_body"] = {"const_include": 2}
 # (a new run makes the held value with the new layout)
 FRESH_READS = dict(READS, field_every=dict(READS["field_every"], fe_held=47))
 LAND = "landed"
@@ -150,6 +187,12 @@ MUST = {
     "field_nested": LAND, "field_const_read": EVALUATED, "field_const_fn": EVALUATED, "field_static": EVALUATED,
     "field_import": TYPE_NAMES, "field_offset": EVALUATED, "field_running_frame": STILL_RUNS, "field_blocked_frame": STILL_RUNS, "field_short_walk": STILL_RUNS,
     "const_other_new": LAND, "static_from_const": RUNS_ONCE, "static_through_fn": RUNS_ONCE, "static_through_new": RUNS_ONCE,
+    "const_after_body": LAND, "include_macro": LAND, "include_found": LAND, "include_after_body": LAND, "include_added": LAND,
+    "include_env": r"makes its path from other tokens",
+    # a trait object the program made holds the old method table: linked from the disk cache too
+    "dyn_method_add": r"old method table", "dyn_method_add_late": r"old method table", "dyn_vtable_fresh": r"old method table", "dyn_impl_removed": LAND,
+    # a variant inserted before a held one: lands; restarts when code that ran read the numbers it moves
+    "enum_insert": LAND, "field_copy": LAND, "field_copy_frame": r"is running: its frame may hold", "enum_insert_cast": r"read them as numbers", "enum_insert_hash": r"derived `Hash`",
 }
 # A second edit in the same session: the first one's evaluations must not read as a type's.
 SECOND = {"field_nested": ("pub v: [u64; 3],\n}\nimpl Inner {\n    pub fn new() -> Inner {\n        Inner { v: [5; 3] }", "pub v: [u64; 4],\n}\nimpl Inner {\n    pub fn new() -> Inner {\n        Inner { v: [5; 4] }", 45), "const_nonliteral": ("CONST_NONLIT: u64 = 2 + 0;", "CONST_NONLIT: u64 = 3 + 0;", 3), "const_direct": ("CONST_DIRECT: u64 = 2;", "CONST_DIRECT: u64 = 3;", 3)}
@@ -238,15 +281,31 @@ def session(probe, rel, old, new, want):
     def last():
         return next((l for l in reversed(out) if l.startswith("out tick ")), None)
     row = {"probe": probe, "outcome": "no start", "value": None, "patch": "", "trace": ""}
+    restore = []
     try:
         if not wait(lambda: last() is not None and os.path.exists(ready), 120):
             return row, err
         if not cold and not any("prelinked" in l for l in err) and not wait(lambda: any("prelinked" in l for l in err), 5):
             row["outcome"] = "not warm"
             return row, err
+        edited = base
+        if probe in FIRST:
+            first_rel, first_old, first_new = FIRST[probe]
+            first_path = os.path.join(pkg, first_rel)
+            first_base = open(first_path).read()
+            assert first_old in first_base, first_old
+            restore.append((first_path, first_base))
+            if first_path == path:
+                edited = base.replace(first_old, first_new)
+            mark = len(err)
+            save(first_path, first_base.replace(first_old, first_new))
+            if not wait(lambda: any(": patched (" in l for l in err[mark:]), 20):
+                row["outcome"] = "FIRST EDIT DID NOT LAND"
+                return row, err
         t_save = time.time()
-        save(path, base.replace(old, new))
-        said = lambda: next((l for l in err if ": patched (" in l or "a restart applies it" in l or "REFUSED" in l), None)
+        mark = len(err)
+        save(path, edited.replace(old, new))
+        said = lambda: next((l for l in err[mark:] if ": patched (" in l or "a restart applies it" in l or "REFUSED" in l), None)
         wait(lambda: said() is not None, 20)
         line = said() or ""
         restart = "a restart applies it" in line
@@ -306,6 +365,8 @@ def session(probe, rel, old, new, want):
             if not shows_new(line, probe, want, FRESH_READS):
                 row["outcome"] += " + FRESH RUN STALE"
         save(path, base)
+        for other, text in restore:
+            save(other, text)
 
 
 fails = 0
@@ -362,8 +423,8 @@ for probe, rel, old, new, want in PROBES:
     fails += 0 if ok else 1
     print("%-23s %-15s %6s ms value=%-4s want=%-2s relaunch=%-4s fresh=%-4s %s | %s" % (probe, row["outcome"], row.get("ms", "-"), row["value"], want, row.get("relaunch", "-"), row.get("fresh", "-"), row["trace"], row["patch"]), flush=True)
     if not ok and "-v" in args:
-        for l in err[-12:]:
-            print("    | " + l[:200])
+        for l in [l for l in err[:-12] if "restart the app" in l or "new layout" in l] + err[-12:]:
+            print("    | " + l[:400])
 shutil.rmtree(tmp, ignore_errors=True)
 print("cache_warm_const_edit: %s" % ("ok" if not fails else "%d stale" % fails))
 sys.exit(1 if fails else 0)
