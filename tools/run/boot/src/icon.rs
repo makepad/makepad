@@ -5,6 +5,7 @@ use makepad_zune_png::{makepad_zune_core::bytestream::ZCursor, PngDecoder};
 // Texture ids have their own pool. The HAL lends its glyph atlas a different id.
 pub const TEXTURE: Id = Id::new(0, 1);
 
+#[derive(Clone)]
 pub struct Icon {
     size: [u32; 2],
     rgba: Vec<u8>,

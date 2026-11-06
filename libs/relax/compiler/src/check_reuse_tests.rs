@@ -134,13 +134,14 @@ fn a_new_pub_item_nothing_can_see_checks_only_its_crate() {
         |d| std::fs::write(d.join("lib.rs"), format!("{LIB}pub fn g() {{}}\n")).unwrap(), &[], 1);
 }
 
-/// A glob import brings every name of its module: an item added there checks the crate with the
-/// glob again.
+/// A glob import brings every name of its module, but a crate's check finds an item only under a
+/// name its text writes: an item added there, by a name the crate with the glob does not write,
+/// checks only the library again.
 #[test]
-fn a_new_pub_item_a_glob_brings_checks_the_crate_with_the_glob() {
+fn a_new_pub_item_a_glob_brings_named_nowhere_above_checks_only_its_crate() {
     let bin = format!("use pkg::*;\n{BIN}");
     changed("pubglob", &[("lib.rs", LIB), ("bin.rs", &bin)], &[],
-        |d| std::fs::write(d.join("lib.rs"), format!("{LIB}pub fn g() {{}}\n")).unwrap(), &[], 0);
+        |d| std::fs::write(d.join("lib.rs"), format!("{LIB}pub fn g() {{}}\n")).unwrap(), &[], 1);
 }
 
 /// An added item that shadows a name its module's glob import brought (`pkg::g` named the
@@ -162,11 +163,103 @@ fn a_new_pub_item_defining_an_impl_checks_the_crates_above() {
         |d| std::fs::write(d.join("lib.rs"), format!("{lib}pub fn g() {{ impl W {{ pub fn two(&self) -> u32 {{ 2 }} }} }}\n")).unwrap(), &[], 0);
 }
 
-/// A changed signature is no added item: the crates above it are checked again.
+/// A changed signature checks again the crates whose text names it.
 #[test]
 fn a_changed_pub_item_checks_the_crates_above() {
     changed("pubchange", &[("lib.rs", LIB), ("bin.rs", BIN)], &[],
         |d| std::fs::write(d.join("lib.rs"), LIB.replace("-> u32 { 1 }", "-> u64 { 1 }")).unwrap(), &[], 0);
+}
+
+/// A changed signature no crate above names, a method added to an impl, a doc line: only the
+/// library is checked again.
+#[test]
+fn an_interface_edit_nothing_above_names_checks_only_its_crate() {
+    let lib = format!("/// One.\npub fn g() -> u32 {{ 1 }}\npub struct S;\nimpl S {{\n    pub fn one(&self) -> u32 {{ 1 }}\n}}\n{LIB}");
+    let bin = "fn main() { let x = pkg::f(); let y = pkg::S.one(); }\nfn unused_in_bin() {}\n";
+    let files = [("lib.rs", lib.as_str()), ("bin.rs", bin)];
+    changed("ifsig", &files, &[], |d| std::fs::write(d.join("lib.rs"), lib.replace("g() -> u32 { 1 }", "g() -> u64 { 1 }")).unwrap(), &[], 1);
+    changed("ifmethod", &files, &[], |d| std::fs::write(d.join("lib.rs"), lib.replace("impl S {\n", "impl S {\n    pub fn two(&self) -> u32 { 2 }\n")).unwrap(), &[], 1);
+    changed("ifdoc", &files, &[], |d| std::fs::write(d.join("lib.rs"), lib.replace("/// One.", "/// One, and more.\n/// A second line.")).unwrap(), &[], 1);
+}
+
+/// A verdict that stood after an interface change is stored with that interface: the next change
+/// is compared against it.
+#[test]
+fn a_verdict_that_stood_is_checked_against_the_next_change() {
+    if std::env::var_os(CHILD).is_some() { return; }
+    let lib = format!("pub fn g() -> u32 {{ 1 }}\n{LIB}");
+    let dir = package("stood", &[("lib.rs", &lib), ("bin.rs", BIN)]);
+    let first = check_in_child(&dir, true, &[]);
+    assert_eq!((first.hits, first.code), (0, 0), "{first:?}");
+    let lib = lib.replace("g() -> u32", "g() -> u64");
+    std::fs::write(dir.join("lib.rs"), &lib).unwrap();
+    let stood = check_in_child(&dir, true, &[]);
+    assert_eq!((stood.hits, &stood.diags), (1, &first.diags), "{stood:?}");
+    std::fs::write(dir.join("lib.rs"), lib.replace("f() -> u32", "f() -> u64")).unwrap();
+    let sig = check_in_child(&dir, true, &[]);
+    let cold = check_in_child(&dir, false, &[]);
+    assert_eq!((&sig.diags, sig.code, sig.hits), (&cold.diags, cold.code, 0), "reused {sig:?}, cold {cold:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Never stale: an auto trait through a private field. `Arc` to `Rc` in a private field of a pub
+/// struct makes it not `Send` for a binary that names only a fn returning it.
+#[test]
+fn a_private_field_changing_an_auto_trait_checks_the_crates_above() {
+    let lib = "pub struct S { inner: std::sync::Arc<u32> }\npub fn make() -> S { S { inner: std::sync::Arc::new(1) } }\nimpl S { pub fn get(&self) -> u32 { *self.inner } }\nfn unused_in_lib() {}\n";
+    let bin = "fn needs_send<T: Send>(_: T) {}\nfn main() { needs_send(pkg::make()); }\nfn unused_in_bin() {}\n";
+    changed("autotrait", &[("lib.rs", lib), ("bin.rs", bin)], &[], |d| std::fs::write(d.join("lib.rs"), lib.replace("std::sync::Arc", "std::rc::Rc")).unwrap(), &[], 0);
+}
+
+/// Never stale: a trait impl that inference and method resolution find for code that names only
+/// the fns around the type. `impl From<A> for B` gone: `take_b(make_a().into())` fails; `impl
+/// Display` gone: `format!("{}", make())` fails. An impl added for a type nothing above names
+/// checks only the library.
+#[test]
+fn a_trait_impl_change_checks_the_crates_that_select_it() {
+    let lib = "pub struct A;\npub struct B;\nimpl From<A> for B { fn from(_: A) -> B { B } }\npub fn make_a() -> A { A }\npub fn take_b(_: B) {}\nfn unused_in_lib() {}\n";
+    let bin = "fn main() { pkg::take_b(pkg::make_a().into()); }\nfn unused_in_bin() {}\n";
+    changed("fromimpl", &[("lib.rs", lib), ("bin.rs", bin)], &[], |d| std::fs::write(d.join("lib.rs"), lib.replace("impl From<A> for B { fn from(_: A) -> B { B } }\n", "")).unwrap(), &[], 0);
+    let lib = "pub struct D;\nimpl std::fmt::Display for D { fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str(\"d\") } }\npub fn make() -> D { D }\nfn unused_in_lib() {}\n";
+    let bin = "fn main() { let s = format!(\"{}\", pkg::make()); }\nfn unused_in_bin() {}\n";
+    changed("displayimpl", &[("lib.rs", lib), ("bin.rs", bin)], &[], |d| std::fs::write(d.join("lib.rs"), lib.replace("impl std::fmt::Display for D { fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str(\"d\") } }\n", "")).unwrap(), &[], 0);
+    let lib = format!("pub struct Q;\n{LIB}");
+    changed("cloneimpl", &[("lib.rs", &lib), ("bin.rs", BIN)], &[], |d| std::fs::write(d.join("lib.rs"), format!("{lib}impl Clone for Q {{ fn clone(&self) -> Q {{ Q }} }}\n")).unwrap(), &[], 1);
+}
+
+/// Never stale: blanket impls and coherence. A blanket impl gone: `5u8.hi()` through a glob (the
+/// binary writes the method's name only) fails; a blanket impl added overlaps the binary's own impl.
+#[test]
+fn a_blanket_impl_change_checks_the_crates_above() {
+    let lib = "pub trait Hi { fn hi(&self) -> u32 { 1 } }\nimpl<X: Copy> Hi for X {}\nfn unused_in_lib() {}\n";
+    let bin = "use pkg::*;\nfn main() { let _ = 5u8.hi(); }\nfn unused_in_bin() {}\n";
+    changed("blanket", &[("lib.rs", lib), ("bin.rs", bin)], &[], |d| std::fs::write(d.join("lib.rs"), lib.replace("impl<X: Copy> Hi for X {}\n", "")).unwrap(), &[], 0);
+    let lib = "pub trait T {}\nfn unused_in_lib() {}\n";
+    let bin = "struct Mine;\nimpl pkg::T for Mine {}\nfn main() { let _ = Mine; }\nfn unused_in_bin() {}\n";
+    changed("overlap", &[("lib.rs", lib), ("bin.rs", bin)], &[], |d| std::fs::write(d.join("lib.rs"), format!("{lib}impl<X> T for X {{}}\n")).unwrap(), &[], 0);
+}
+
+/// Never stale: a const value and a type's size used in the binary's const and array length.
+#[test]
+fn a_const_value_or_size_change_checks_the_crates_above() {
+    let lib = "pub const N: usize = 4;\nfn unused_in_lib() {}\n";
+    let bin = "const M: usize = pkg::N * 2;\nfn main() { let a: [u8; M] = [0; 8]; let _ = a; }\nfn unused_in_bin() {}\n";
+    changed("constval", &[("lib.rs", lib), ("bin.rs", bin)], &[], |d| std::fs::write(d.join("lib.rs"), lib.replace("= 4;", "= 5;")).unwrap(), &[], 0);
+    let lib = "pub struct S { pub a: u32 }\nfn unused_in_lib() {}\n";
+    let bin = "const SZ: usize = std::mem::size_of::<pkg::S>();\nfn main() { let a: [u8; SZ] = [0; 4]; let _ = a; }\nfn unused_in_bin() {}\n";
+    changed("typesize", &[("lib.rs", lib), ("bin.rs", bin)], &[], |d| std::fs::write(d.join("lib.rs"), lib.replace("pub a: u32 }", "pub a: u32, pub b: u32 }")).unwrap(), &[], 0);
+}
+
+/// Never stale: a `macro_rules!` change reaching the binary through its expansion: the items it
+/// expands to, and a fn its expansion calls that the binary's text does not name.
+#[test]
+fn a_macro_change_checks_the_crates_its_expansions_reach() {
+    let lib = "#[macro_export]\nmacro_rules! make { () => { pub fn made() -> u32 { 1 } } }\nfn unused_in_lib() {}\n";
+    let bin = "pkg::make!();\nfn main() { let x: u32 = made(); let _ = x; }\nfn unused_in_bin() {}\n";
+    changed("macroitems", &[("lib.rs", lib), ("bin.rs", bin)], &[], |d| std::fs::write(d.join("lib.rs"), lib.replace("-> u32 { 1 }", "-> u64 { 1 }")).unwrap(), &[], 0);
+    let lib = "pub fn helper() -> u32 { 1 }\n#[macro_export]\nmacro_rules! call { () => { $crate::helper() } }\nfn unused_in_lib() {}\n";
+    let bin = "fn main() { let x: u32 = pkg::call!(); let _ = x; }\nfn unused_in_bin() {}\n";
+    changed("macrocall", &[("lib.rs", lib), ("bin.rs", bin)], &[], |d| std::fs::write(d.join("lib.rs"), lib.replace("helper() -> u32 { 1 }", "helper() -> u64 { 1 }")).unwrap(), &[], 0);
 }
 
 /// A feature is in the crate's cfg: flipped, the library (and so the binary) is checked again.

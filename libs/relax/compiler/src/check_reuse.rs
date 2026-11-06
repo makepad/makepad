@@ -17,16 +17,27 @@
 //! source that the crate and its closure read (include_str!, include!, env!: session sip.rs late
 //! inputs, which lazily parsed bodies read after the load), and the text of every other crate a
 //! stored diagnostic points into. So a body edit in a dependency checks that dependency again,
-//! not every crate above it. An interface that changed only by items added to its files (a fn,
-//! const, static, struct, union, enum, type alias, trait or inline module that defines no impl,
-//! macro or extern block inside it: `KIND_TABLE` holds each checked crate's interface by item,
-//! items.rs FileTable) leaves a verdict standing unless the
-//! crate's modules see an added item through glob imports (rustc_resolve: a glob imports every name
-//! of its module; the new name may shadow the prelude there, turn a binding pattern into a
-//! constant, or clash with another glob's), or a module that sees it through globs had its name
-//! already from elsewhere (a path through that module now finds it, or an ambiguity): then every
-//! crate above it is checked again. Any other name an added item has was unresolved before, and
-//! the check that stored the verdict passed.
+//! not every crate above it.
+//!
+//! An interface that changed is compared by node (`KIND_TABLE` holds each checked crate's
+//! interface as the nodes of the code cache's item graph, cache/deps.rs check_nodes, those of the
+//! fragments its item macros expanded into among them): what a crate's check takes from another
+//! crate reaches it through a name its text or its macro expansions write (the verdict holds them:
+//! cache.rs text_names), or through a node that names such a name (deps.rs: name resolution finds
+//! an item only under a name written; a type's layout, a signature, a constant's value come from
+//! the pieces of the items named, whose own names reach what they are made of; trait selection
+//! finds an impl under its self type's names, and one that applies to types its self type does
+//! not name -- a blanket impl, one for a primitive, a reference or an alias -- also under its
+//! trait's name, its items' names, its trait's arguments' names and its trait's items' names). So
+//! the names under which a changed, added or removed node is found are dirty, and so, transitively,
+//! are those of every node whose piece names a dirty name, in whichever crate (a check of a crate
+//! that sees two others finds an impl of one for a type the other's items name) (`Dirty`). A
+//! verdict stands while its crate's text writes no dirty name. What a name cannot show is coarse:
+//! a changed always node (inner attributes, glob and `as _` imports, an item macro outside a
+//! module, one defining an impl or a macro where no name finds it, a skipped file) or a changed
+//! head (the crate's dependencies by alias) checks every crate that can see it again; a node
+//! invoking a macro whose expansion it does not have is dirty when a crate it can see owns a dirty
+//! node. A doc comment is in no piece: editing one checks only its crate again.
 //!
 //! A verdict (`KIND_CRATE`) is the crate's diagnostics as the check rendered them, each with where
 //! the sort places it (check_order.rs: its stage and its group, by path) and whether only a check
@@ -46,17 +57,17 @@
 //! before the load: the command line, the unit graph and the load's graph certificate (the inputs
 //! and module probes the front's images rest on). The next check of that command line whose
 //! certificate is current prints it right after the build scripts, with no load at all.
-use crate::ast::ItemId;
+use crate::cache::CheckNode;
 use crate::check_order::{Entry, GroupAt, Out, Phase, Stage};
-use crate::program::{DefKind, Program, NO_DEF};
+use crate::program::{Program, NO_DEF};
 use crate::sip::Sip128;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const KIND_CRATE: u32 = 1;
 const KIND_RUN: u32 = 2;
-/// a checked crate's interface by file and item (`Table`), under its identity and interface hash
+/// a checked crate's interface by node (`Table`), under its identity and interface hash
 const KIND_TABLE: u32 = 3;
 /// a whole check's output under a key known before the load (`Early`)
 const KIND_EARLY: u32 = 4;
@@ -76,26 +87,54 @@ struct Verdict {
     refs: Vec<(u128, u128)>,
     /// (crate identity, its interface): the checked crates of its closure, as it was checked
     deps: Vec<(u128, u128)>,
+    /// the names the crate's text and its macro expansions write, sorted (cache.rs text_names)
+    names: Vec<u64>,
     entries: Vec<Stored>,
 }
 
-/// A checked crate's interface by file and item, as a stored verdict above it saw it: its head
-/// (identity, dependencies by alias) and by path the file's rest and its named items' hashes
-/// (items.rs FileTable), sorted.
+/// A checked crate's interface by node (deps.rs CheckNode), as a stored verdict above it saw it:
+/// its head (identity, dependencies by alias) and its nodes, sorted by piece.
 struct Table {
     head: u128,
-    files: Vec<(String, u128, Vec<u128>)>,
+    nodes: Vec<TNode>,
+}
+
+/// A node of a `Table`: its piece, NODE_* flags, the names it is found under, a trait impl's
+/// trait and the other names that find it when it applies to types its self type does not name
+/// (CheckNode::wide).
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct TNode {
+    piece: u128,
+    flags: u8,
+    keys: Vec<u64>,
+    wide: Vec<u64>,
+}
+
+/// reached by every node of the crates that can see it (CheckNode::always; a skipped file)
+const NODE_ALWAYS: u8 = 1;
+/// a trait impl whose self type's head is a named path (CheckNode::named_head)
+const NODE_NAMED_HEAD: u8 = 2;
+
+impl Table {
+    /// A crate's table from its `head` and its nodes now.
+    fn of(head: u128, nodes: &[CheckNode]) -> Table {
+        let mut nodes: Vec<TNode> = nodes.iter().map(|x| TNode {
+            piece: x.piece,
+            flags: if x.always { NODE_ALWAYS } else { 0 } | if x.named_head { NODE_NAMED_HEAD } else { 0 },
+            keys: x.keys.clone(),
+            wide: x.wide.clone(),
+        }).collect();
+        nodes.sort_unstable();
+        Table { head, nodes }
+    }
 }
 
 /// A file of a checked crate that a checked crate depends on, now: its path, the file (None: the
-/// load skipped it; its text hash stands for its interface and rest), its interface hash, its
-/// table's rest and named items (hash, item) by hash.
+/// load skipped it; its text hash stands for its interface), its interface hash.
 struct CurFile {
     path: String,
     file: Option<usize>,
     iface: u128,
-    rest: u128,
-    named: Vec<(u128, ItemId)>,
 }
 
 /// One check's reuse: the checked crates' keys, the hits and their diagnostics.
@@ -121,11 +160,15 @@ pub(crate) struct Reuse {
     ifaces: Vec<u128>,
     cur: Vec<Vec<CurFile>>,
     table_stored: Vec<bool>,
+    /// by file: the digests of `cur`'s files (their nodes: CheckNode)
+    digests: Vec<Option<std::sync::Arc<crate::cache::FileDigest>>>,
+    /// by crate: its interface's table now, once made (`Dirty::of`, `record`)
+    tables: Vec<Option<Table>>,
     /// parallel to `checked`: (identity, interface) of the checked crates of its closure, now
     deps: Vec<Vec<(u128, u128)>>,
-    /// parallel to `checked`: a hit whose verdict was checked against an interface that only
-    /// gained items since (stored again with today's)
-    added: Vec<bool>,
+    /// parallel to `checked`: a hit whose verdict was checked against interfaces that changed since
+    /// (stored again with today's)
+    restore: Vec<bool>,
     store_entries: usize,
     /// run.rs: no signature error was printed (a run record may be stored)
     pub(crate) sig_clean: bool,
@@ -188,28 +231,30 @@ fn crate_files(prog: &Program, skipped: &[(u32, String, u128)]) -> Vec<Vec<(Stri
     files
 }
 
-/// The files of the crates `of` marks, by crate: their interfaces by item (CurFile), by path.
-fn iface_files(prog: &Program, of: &[bool], skipped: &[(u32, String, u128)]) -> Vec<Vec<CurFile>> {
+/// The files of the crates `of` marks, by crate: their interfaces (CurFile), by path; and the
+/// loaded ones' digests, by file. The fragments (the expansions of item macros the load expanded
+/// after the file's parse, under its path) are files of the crate's interface too: an edit of a
+/// macro another crate defines changes them.
+fn iface_files(prog: &Program, of: &[bool], skipped: &[(u32, String, u128)]) -> (Vec<Vec<CurFile>>, Vec<Option<std::sync::Arc<crate::cache::FileDigest>>>) {
     let mut files: Vec<Vec<CurFile>> = (0..prog.crates.len()).map(|_| Vec::new()).collect();
     let want: Vec<usize> = (0..prog.files.len())
-        .filter(|f| !prog.front_macro_fragments.contains(f) && prog.file_crate.get(*f).is_some_and(|&c| of.get(c as usize).copied().unwrap_or(false)))
+        .filter(|f| prog.file_crate.get(*f).is_some_and(|&c| of.get(c as usize).copied().unwrap_or(false)))
         .collect();
-    if want.is_empty() { return files; }
-    let mut tables = crate::cache::file_tables(prog, &want);
+    let digests = crate::cache::file_digests_of(prog, &want);
     for f in want {
-        let (Some(&c), Some(path), Some((d, t))) = (prog.file_crate.get(f), prog.file_paths.get(f), tables[f].take()) else { continue };
-        files[c as usize].push(CurFile { path: path.clone(), file: Some(f), iface: d.iface, rest: t.rest, named: t.named });
+        let (Some(&c), Some(path), Some(Some(d))) = (prog.file_crate.get(f), prog.file_paths.get(f), digests.get(f)) else { continue };
+        files[c as usize].push(CurFile { path: path.clone(), file: Some(f), iface: d.iface });
     }
     for (c, path, h) in skipped {
         if of.get(*c as usize).copied().unwrap_or(false) {
-            files[*c as usize].push(CurFile { path: path.clone(), file: None, iface: *h, rest: *h, named: Vec::new() });
+            files[*c as usize].push(CurFile { path: path.clone(), file: None, iface: *h });
         }
     }
     for v in &mut files {
         v.sort_unstable_by(|a, b| (&a.path, a.iface).cmp(&(&b.path, b.iface)));
         v.dedup_by(|a, b| a.path == b.path && a.iface == b.iface);
     }
-    files
+    (files, digests)
 }
 
 /// A crate's head: its identity and its dependencies by alias.
@@ -243,86 +288,6 @@ fn table_key(ident: u128, iface: u128) -> u128 {
     h.u128(ident);
     h.u128(iface);
     h.finish128()
-}
-
-/// The items `cur` added to the interface `old` saw ((file, item)), when that is all that changed:
-/// the same head, files and rest of each, and every item of old still there as it was. None
-/// otherwise.
-fn added_items(old: &Table, head: u128, cur: &[CurFile]) -> Option<Vec<(usize, ItemId)>> {
-    if old.head != head || old.files.len() != cur.len() { return None; }
-    let mut added = Vec::new();
-    for ((path, rest, named), c) in old.files.iter().zip(cur) {
-        if *path != c.path || *rest != c.rest { return None; }
-        // (both by hash: old's must all be in cur's)
-        let mut i = 0;
-        for &(h, item) in &c.named {
-            match named.get(i) {
-                Some(&o) if o == h => i += 1,
-                Some(&o) if o < h => return None,
-                _ => added.push((c.file?, item)),
-            }
-        }
-        if i < named.len() { return None; }
-    }
-    Some(added)
-}
-
-/// By module, the modules that import it with a glob (`use m::*`).
-fn glob_users(prog: &Program) -> Vec<Vec<u32>> {
-    let mut users: Vec<Vec<u32>> = vec![Vec::new(); prog.mods.len()];
-    for (m, md) in prog.mods.iter().enumerate() {
-        for &(g, _) in &md.globs {
-            let gd = prog.def(g);
-            if gd.kind == DefKind::Mod {
-                if let Some(v) = users.get_mut(gd.sub as usize) { v.push(m as u32); }
-            }
-        }
-    }
-    users
-}
-
-/// The crates whose check item `item` added to file `file` can change: those of the modules that
-/// see its module's names through glob imports, its own among them. None: every crate above it
-/// -- one of those modules, or a module one of them sees through globs, binds its name already
-/// (a path through it found that binding, which the new item shadows or makes ambiguous), or the
-/// item has no definition in a module.
-fn added_reach(prog: &Program, users: &[Vec<u32>], file: usize, item: ItemId) -> Option<HashSet<u32>> {
-    let &d = prog.item_defs.get(&(file as u32, item.0))?;
-    let def = *prog.def(d);
-    if def.parent == NO_DEF || prog.def(def.parent).kind != DefKind::Mod { return None; }
-    let m = prog.def(def.parent).sub;
-    let n = prog.mods.len();
-    // (a struct's constructor is bound to its item too)
-    let own = |x: crate::program::DefId| { let xd = prog.def(x); xd.file == def.file && xd.item == def.item };
-    let mut seen = vec![false; n];
-    let mut sees = vec![m];
-    seen[m as usize] = true;
-    let mut k = 0;
-    while k < sees.len() {
-        let a = sees[k] as usize;
-        k += 1;
-        for &b in users.get(a).into_iter().flatten() {
-            if !std::mem::replace(&mut seen[b as usize], true) { sees.push(b); }
-        }
-    }
-    let mut seen = vec![false; n];
-    let mut walk = sees.clone();
-    for &a in &walk { seen[a as usize] = true; }
-    let mut k = 0;
-    while k < walk.len() {
-        let md = &prog.mods[walk[k] as usize];
-        k += 1;
-        if [md.types.get(&def.name), md.values.get(&def.name)].into_iter().flatten().any(|&x| !own(x)) { return None; }
-        for &(g, _) in &md.globs {
-            let gd = prog.def(g);
-            match gd.kind {
-                DefKind::Mod => if !std::mem::replace(&mut seen[gd.sub as usize], true) { walk.push(gd.sub) },
-                DefKind::Enum => if [false, true].into_iter().filter_map(|ns| prog.lookup_in_container(g, def.name, ns)).any(|x| !own(x)) { return None },
-                _ => {}
-            }
-        }
-    }
-    Some(sees.iter().map(|&a| prog.mods[a as usize].krate).collect())
 }
 
 /// The text of crate `c` and of every crate of its closure (a proc-macro crate's code).
@@ -372,7 +337,7 @@ impl Reuse {
         let skipped = skipped_files(prog);
         let text_files = crate_files(prog, &skipped);
         let texts: Vec<u128> = (0..n).map(|c| crate_hash("check-text", heads[c], text_files[c].iter().map(|(p, h)| (p.as_str(), *h)))).collect();
-        let cur = iface_files(prog, &iface_of, &skipped);
+        let (cur, digests) = iface_files(prog, &iface_of, &skipped);
         let ifaces: Vec<u128> = (0..n).map(|c| if iface_of[c] { crate_hash("check-iface", heads[c], cur[c].iter().map(|f| (f.path.as_str(), f.iface))) } else { 0 }).collect();
         let mut deep: HashMap<u32, u128> = HashMap::new();
         let env = env_key(prog);
@@ -424,11 +389,11 @@ impl Reuse {
         let mut r = Reuse {
             path, write, hit: vec![false; checked.len()], raw: vec![None; checked.len()], keys, checked, closures,
             stored: Vec::new(), run_key, run_hit: false, idents, texts, heads, ifaces, cur, table_stored: vec![false; n],
-            deps, added: Vec::new(), store_entries: 0, sig_clean: false, t_keys: Default::default(),
+            digests, tables: (0..n).map(|_| None).collect(), deps, restore: Vec::new(), store_entries: 0, sig_clean: false, t_keys: Default::default(),
             skipped: (skipped.iter().filter(|s| is_checked[s.0 as usize]).count(), skipped.iter().filter(|s| !is_checked[s.0 as usize]).count()),
             files: Vec::new(), late: Vec::new(),
         };
-        r.added = vec![false; r.checked.len()];
+        r.restore = vec![false; r.checked.len()];
         // MAKEPAD_RUN_CHECK_REUSE_TRACE: each crate's key parts (two checks' traces diff to what changed)
         if trace {
             for c in 0..n {
@@ -454,7 +419,7 @@ impl Reuse {
             }
             let by_ident: HashMap<u128, u32> = r.idents.iter().enumerate().map(|(c, &i)| (i, c as u32)).collect();
             let mut late_memo: HashMap<(String, u8, String, u128), bool> = HashMap::new();
-            // verdicts checked against an interface that changed since: (j, verdict, the changed
+            // verdicts checked against interfaces that changed since: (j, verdict, the changed
             // (crate, interface it saw))
             let mut changed: Vec<(usize, Verdict, Vec<(u32, u128)>)> = Vec::new();
             for j in 0..r.checked.len() {
@@ -478,38 +443,23 @@ impl Reuse {
                     changed.push((j, v, since));
                 }
             }
-            // an interface that only gained items: the crates the items can reach
-            let mut reach: HashMap<(u32, u128), Option<HashSet<u32>>> = HashMap::new();
-            let mut users: Option<Vec<Vec<u32>>> = None;
-            for (j, v, since) in changed {
-                let c = r.checked[j];
-                let ok = since.iter().all(|&(d, was)| {
-                    if d == u32::MAX { return false; }
-                    let reach = reach.entry((d, was)).or_insert_with(|| {
-                        let old = match store.get_checked(table_key(r.idents[d as usize], was)) { Some((KIND_TABLE, p)) => decode_table(p), _ => None };
-                        let added = old.and_then(|old| added_items(&old, r.heads[d as usize], &r.cur[d as usize]));
-                        let users = users.get_or_insert_with(|| glob_users(prog));
-                        let reach = added.as_ref().and_then(|added| {
-                            let mut all = HashSet::new();
-                            for &(f, item) in added { all.extend(added_reach(prog, users, f, item)?); }
-                            Some(all)
-                        });
-                        if trace {
-                            let names: Vec<&str> = added.iter().flatten().filter_map(|&(f, item)| prog.item_defs.get(&(f as u32, item.0)).map(|&x| prog.syms.str(prog.def(x).name))).collect();
-                            let crates: Vec<&str> = reach.iter().flatten().map(|&k| prog.syms.str(prog.crates[k as usize].name)).collect();
-                            eprintln!("check-reuse-trace: {} interface changed: added {:?}, reaching {:?}", prog.syms.str(prog.crates[d as usize].name), added.as_ref().map(|_| names), reach.as_ref().map(|_| crates));
-                        }
-                        reach
-                    });
-                    reach.as_ref().is_some_and(|reach| !reach.contains(&c))
-                });
-                if ok {
-                    r.hit[j] = true;
-                    r.added[j] = true;
-                    r.late.extend(v.late);
-                    r.stored.extend(v.entries);
-                } else {
-                    r.raw[j] = None;
+            if !changed.is_empty() {
+                let dirty = Dirty::of(prog, &mut r, &store, &changed, trace);
+                for (j, v, since) in changed {
+                    let c = r.checked[j];
+                    let ok = since.iter().all(|&(d, was)| d != u32::MAX && !dirty.unknown.contains(&(d, was)))
+                        && !dirty.reaches(&r.closures[j], &v.names);
+                    if trace { eprintln!("check-reuse-trace: {} checked against changed interfaces: {}", prog.syms.str(prog.crates[c as usize].name), if ok { "stands" } else { "checked again" }); }
+                    if ok {
+                        let v = Verdict { deps: r.deps[j].clone(), ..v };
+                        r.raw[j] = Some(encode(&v));
+                        r.hit[j] = true;
+                        r.restore[j] = true;
+                        r.late.extend(v.late);
+                        r.stored.extend(v.entries);
+                    } else {
+                        r.raw[j] = None;
+                    }
                 }
             }
             r.run_hit = matches!(store.get_checked(r.run_key), Some((KIND_RUN, _)));
@@ -519,8 +469,31 @@ impl Reuse {
         r
     }
 
-    /// The hits whose verdicts were checked against an interface that only gained items since.
-    pub(crate) fn added_hits(&self) -> usize { self.added.iter().filter(|a| **a).count() }
+    /// The hits whose verdicts were checked against interfaces that changed since.
+    pub(crate) fn restored(&self) -> usize { self.restore.iter().filter(|a| **a).count() }
+
+    /// The nodes now of each crate of `which` (CheckNode; a file the load skipped is one always
+    /// node of its text), by crate.
+    fn nodes_now(&self, prog: &Program, which: &[u32], user: &crate::cache::UserNames) -> Vec<(u32, Vec<CheckNode>)> {
+        let want: Vec<usize> = which.iter().flat_map(|&c| self.cur[c as usize].iter().filter_map(|f| f.file)).collect();
+        let mut by_file = crate::cache::check_nodes_of(prog, &want, &self.digests, &user.macros);
+        which.iter().map(|&c| {
+            let mut v = Vec::new();
+            for f in &self.cur[c as usize] {
+                match f.file {
+                    Some(k) => v.extend(by_file.get_mut(k).and_then(Option::take).unwrap_or_default()),
+                    None => {
+                        let mut h = Sip128::new();
+                        h.str("check-skipped-file");
+                        h.str(&f.path);
+                        h.u128(f.iface);
+                        v.push(CheckNode { piece: h.finish128(), keys: Vec::new(), names: Vec::new(), wide: Vec::new(), named_head: true, trait_def: false, always: true, coarse: false });
+                    }
+                }
+            }
+            (c, v)
+        }).collect()
+    }
 
     /// Whether checked crate `c`'s verdict is reused.
     pub(crate) fn is_hit(&self, c: u32) -> bool {
@@ -581,9 +554,20 @@ impl Reuse {
         let stages: Vec<Stage> = entries.iter().map(|e| e.stage).collect();
         let groups = crate::check_order::groups_at(prog, &stages);
         let late = crate::sip::late_inputs();
+        // the names the text of each crate that did not hit writes (its fragments' and expansions'
+        // among them)
+        let fresh: Vec<usize> = (0..self.checked.len()).filter(|&j| !self.hit[j]).collect();
+        let mut slot: Vec<Option<usize>> = vec![None; prog.crates.len()];
+        for (k, &j) in fresh.iter().enumerate() { slot[self.checked[j] as usize] = Some(k); }
+        let mut files: Vec<Vec<usize>> = vec![Vec::new(); fresh.len()];
+        for (f, &c) in prog.file_crate.iter().enumerate() {
+            if let Some(k) = slot.get(c as usize).copied().flatten() { files[k].push(f); }
+        }
+        let mut text_names = crate::cache::text_names(prog, &files).into_iter();
         let mut new: Vec<crate::pack::NewEntry> = Vec::new();
         for j in 0..self.checked.len() {
             if self.hit[j] { continue; }
+            let written = text_names.next().unwrap_or_default();
             let c = self.checked[j];
             // the late inputs of the crate and of its closure (by crate name, as the front notes them)
             let names: std::collections::HashSet<&str> = std::iter::once(c).chain(self.closures[j].iter().copied())
@@ -608,15 +592,12 @@ impl Reuse {
                 Some(Stored { phase: e.stage.phase, step: e.stage.step, flags: flags[i], seq: e.seq, group: groups[i].clone(), text: text.clone() })
             }).collect();
             let late = mine.into_iter().cloned().collect();
-            new.push(crate::pack::NewEntry { key: self.keys[j], kind: KIND_CRATE, payload: encode(&Verdict { late, refs, deps: self.deps[j].clone(), entries }) });
+            new.push(crate::pack::NewEntry { key: self.keys[j], kind: KIND_CRATE, payload: encode(&Verdict { late, refs, deps: self.deps[j].clone(), names: written, entries }) });
         }
-        // a hit checked against an interface that only gained items: stored with today's
+        // a hit checked against interfaces that changed since: stored with today's
         for j in 0..self.checked.len() {
-            if !self.added[j] { continue; }
-            if let Some(mut v) = self.raw[j].take().as_deref().and_then(decode) {
-                v.deps = self.deps[j].clone();
-                new.push(crate::pack::NewEntry { key: self.keys[j], kind: KIND_CRATE, payload: encode(&v) });
-            }
+            if !self.restore[j] { continue; }
+            if let Some(p) = self.raw[j].take() { new.push(crate::pack::NewEntry { key: self.keys[j], kind: KIND_CRATE, payload: p }); }
         }
         if self.sig_clean {
             new.push(crate::pack::NewEntry { key: self.run_key, kind: KIND_RUN, payload: VERSION.to_le_bytes().to_vec() });
@@ -629,17 +610,157 @@ impl Reuse {
                 if let Some(p) = self.raw[j].take() { new.push(crate::pack::NewEntry { key: self.keys[j], kind: KIND_CRATE, payload: p }); }
             }
         }
-        // the interfaces the verdicts were checked against, by item (a later check compares them)
-        for c in 0..self.cur.len() {
-            if self.ifaces[c] == 0 { continue; }
-            if drop_all || !self.table_stored[c] {
-                new.push(crate::pack::NewEntry { key: table_key(self.idents[c], self.ifaces[c]), kind: KIND_TABLE, payload: encode_table(self.heads[c], &self.cur[c]) });
+        // the interfaces the verdicts were checked against, by node (a later check compares them)
+        let want: Vec<u32> = (0..self.cur.len() as u32).filter(|&c| self.ifaces[c as usize] != 0 && (drop_all || !self.table_stored[c as usize])).collect();
+        let missing: Vec<u32> = want.iter().copied().filter(|&c| self.tables[c as usize].is_none()).collect();
+        if !missing.is_empty() {
+            let user = crate::cache::user_names(prog);
+            for (c, v) in self.nodes_now(prog, &missing, &user) { self.tables[c as usize] = Some(Table::of(self.heads[c as usize], &v)); }
+        }
+        for c in want {
+            if let Some(t) = &self.tables[c as usize] {
+                new.push(crate::pack::NewEntry { key: table_key(self.idents[c as usize], self.ifaces[c as usize]), kind: KIND_TABLE, payload: encode_table(t) });
             }
         }
         let dir = self.path.parent().unwrap_or(Path::new("."));
         let r = dir.parent().map_or(Ok(()), crate::pack::ensure_private_dir).and_then(|_| crate::pack::ensure_private_dir(dir))
             .and_then(|_| crate::store::append(&self.path, new, drop_all).map_err(|e| e.to_string()));
         if verbose { eprintln!("makepad check: verdicts stored ({:?})", r.err()); }
+    }
+}
+
+/// What changed in the interfaces that verdicts checked against older ones of saw (module doc):
+/// the names under which a changed node is found, and transitively those of every node naming a
+/// dirty name.
+struct Dirty {
+    /// (crate, interface) whose table the store does not hold: what changed is not known
+    unknown: HashSet<(u32, u128)>,
+    /// by crate: a change no name shows (its head, an always node): every crate that can see it
+    /// is checked again
+    coarse: Vec<bool>,
+    names: crate::fxhash::HashSet<u64>,
+}
+
+/// The nodes that differ between two tables' sorted nodes: a piece the other lacks, or holds a
+/// different number of times or with other flags. (The same piece is the same node whatever names
+/// it is found under now: an inherent impl's header gains its new items' names, nodes of their own.)
+fn changed_nodes<'a>(old: &'a [TNode], new: &'a [TNode], mut f: impl FnMut(&'a TNode)) {
+    let (mut i, mut j) = (0, 0);
+    loop {
+        let p = match (old.get(i), new.get(j)) {
+            (Some(a), Some(b)) => a.piece.min(b.piece),
+            (Some(a), None) => a.piece,
+            (None, Some(b)) => b.piece,
+            (None, None) => break,
+        };
+        let i2 = i + old[i..].iter().take_while(|x| x.piece == p).count();
+        let j2 = j + new[j..].iter().take_while(|x| x.piece == p).count();
+        let (a, b) = (&old[i..i2], &new[j..j2]);
+        if a.len() != b.len() || a.iter().zip(b).any(|(x, y)| x.flags != y.flags) {
+            for x in a.iter().chain(b) { f(x); }
+        }
+        (i, j) = (i2, j2);
+    }
+}
+
+impl Dirty {
+    /// Whether a verdict of a crate whose dependency closure is `closure` and whose text writes
+    /// `names` rests on anything dirty.
+    fn reaches(&self, closure: &[u32], names: &[u64]) -> bool {
+        closure.iter().any(|&c| self.coarse.get(c as usize).copied().unwrap_or(true)) || names.iter().any(|m| self.names.contains(m))
+    }
+
+    /// Node `keys`, `wide` and `named_head` dirty: the names it is found under, and for an impl
+    /// that applies to types its self type does not name (a blanket impl, one for a primitive, a
+    /// reference or an alias) its trait's name, its items' names, its trait's arguments' names
+    /// and (`traits`: the trait definitions of those trait names are dirty) the trait's items'.
+    fn mark(&mut self, keys: &[u64], wide: &[u64], named_head: bool, aliases: &HashSet<u64>, traits: &mut crate::fxhash::HashSet<u64>) -> bool {
+        let mut grew = false;
+        for &m in keys { grew |= self.names.insert(m); }
+        if !wide.is_empty() && (!named_head || keys.iter().any(|k| aliases.contains(k))) {
+            for &m in wide { grew |= self.names.insert(m); }
+            grew |= traits.insert(wide[0]);
+        }
+        grew
+    }
+
+    /// What changed in the interfaces `changed` (each verdict's (crate, the interface it saw))
+    /// since. The tables made now are kept (`Reuse::tables`: the check stores the missing ones).
+    fn of(prog: &Program, r: &mut Reuse, store: &crate::store::Store, changed: &[(usize, Verdict, Vec<(u32, u128)>)], trace: bool) -> Dirty {
+        let t0 = std::time::Instant::now();
+        let n = prog.crates.len();
+        let mut d = Dirty { unknown: HashSet::new(), coarse: vec![false; n], names: Default::default() };
+        let user = crate::cache::user_names(prog);
+        let mut pairs: Vec<(u32, u128)> = changed.iter().flat_map(|x| x.2.iter().copied()).filter(|p| p.0 != u32::MAX).collect();
+        pairs.sort_unstable();
+        pairs.dedup();
+        let mut first: Vec<u32> = pairs.iter().map(|p| p.0).collect();
+        first.dedup();
+        let mut now: Vec<Option<Vec<CheckNode>>> = (0..n).map(|_| None).collect();
+        for (c, v) in r.nodes_now(prog, &first, &user) {
+            r.tables[c as usize] = Some(Table::of(r.heads[c as usize], &v));
+            now[c as usize] = Some(v);
+        }
+        // the crates owning a dirty node; the traits whose impls for unnamed types are dirty
+        let mut owns = vec![false; n];
+        let mut traits: crate::fxhash::HashSet<u64> = Default::default();
+        let mut changed_n = 0usize;
+        for &(c, was) in &pairs {
+            let old = match store.get_checked(table_key(r.idents[c as usize], was)) { Some((KIND_TABLE, p)) => decode_table(p), _ => None };
+            let (Some(old), Some(new)) = (old, r.tables[c as usize].as_ref()) else { d.unknown.insert((c, was)); continue };
+            if old.head != new.head { d.coarse[c as usize] = true; owns[c as usize] = true; continue; }
+            let mut seen: Vec<&TNode> = Vec::new();
+            changed_nodes(&old.nodes, &new.nodes, |x| seen.push(x));
+            changed_n += seen.len();
+            for x in seen {
+                owns[c as usize] = true;
+                if x.flags & NODE_ALWAYS != 0 { d.coarse[c as usize] = true; }
+                d.mark(&x.keys, &x.wide, x.flags & NODE_NAMED_HEAD != 0, &user.aliases, &mut traits);
+            }
+        }
+        let seeds = d.names.len();
+        let mut passes = 0;
+        if owns.iter().any(|o| *o) {
+            // every node of every crate with an interface that names a dirty name is dirty, and so
+            // are the names it is found under: whichever crate's (a check of a crate that sees
+            // both finds an impl of one for a type the other names), to a fixpoint
+            let rest: Vec<u32> = (0..n as u32).filter(|&c| r.ifaces[c as usize] != 0 && now[c as usize].is_none()).collect();
+            for (c, v) in r.nodes_now(prog, &rest, &user) {
+                if !r.table_stored[c as usize] { r.tables[c as usize] = Some(Table::of(r.heads[c as usize], &v)); }
+                now[c as usize] = Some(v);
+            }
+            let mut done: Vec<Vec<bool>> = now.iter().map(|v| vec![false; v.as_ref().map_or(0, Vec::len)]).collect();
+            let mut closures: HashMap<usize, Vec<u32>> = HashMap::new();
+            loop {
+                passes += 1;
+                let mut grew = false;
+                for c in 0..n {
+                    let Some(v) = &now[c] else { continue };
+                    // (a node invoking a macro it has no expansion of: dirty when a crate it can
+                    // see owns a dirty node)
+                    let mut sees: Option<bool> = None;
+                    for (k, x) in v.iter().enumerate() {
+                        if done[c][k] { continue; }
+                        let hit = x.names.iter().any(|m| d.names.contains(m))
+                            || (x.trait_def && x.keys.iter().any(|m| traits.contains(m)))
+                            || (x.coarse && *sees.get_or_insert_with(|| owns[c] || closures.entry(c).or_insert_with(|| crate::check::dependency_closure(prog, c as u32)).iter().any(|&e| owns[e as usize])));
+                        if !hit { continue; }
+                        done[c][k] = true;
+                        if !owns[c] { owns[c] = true; grew = true; }
+                        if x.always && x.coarse { d.coarse[c] = true; }
+                        grew |= d.mark(&x.keys, &x.wide, x.named_head, &user.aliases, &mut traits);
+                    }
+                }
+                if !grew { break; }
+            }
+        }
+        if trace || prog.session.options.verbose {
+            let nodes: usize = now.iter().flatten().map(Vec::len).sum();
+            let coarse: Vec<&str> = (0..n).filter(|&c| d.coarse[c]).map(|c| prog.syms.str(prog.crates[c].name)).collect();
+            eprintln!("makepad check: changed interfaces: {} ({} unknown), {} changed nodes, {} seed names, {} dirty names after {} passes over {} nodes, coarse {:?}, {:.1} ms",
+                pairs.len(), d.unknown.len(), changed_n, seeds, d.names.len(), passes, nodes, coarse, t0.elapsed().as_secs_f64() * 1e3);
+        }
+        d
     }
 }
 
@@ -803,8 +924,10 @@ fn decode_early(p: &[u8]) -> Option<EarlyRecord> {
 struct W(Vec<u8>);
 impl W {
     fn u32(&mut self, x: u32) { self.0.extend_from_slice(&x.to_le_bytes()); }
+    fn u64(&mut self, x: u64) { self.0.extend_from_slice(&x.to_le_bytes()); }
     fn u128(&mut self, x: u128) { self.0.extend_from_slice(&x.to_le_bytes()); }
     fn str(&mut self, s: &str) { self.u32(s.len() as u32); self.0.extend_from_slice(s.as_bytes()); }
+    fn u64s(&mut self, v: &[u64]) { self.u32(v.len() as u32); for x in v { self.u64(*x); } }
 }
 
 struct R<'a>(&'a [u8]);
@@ -817,7 +940,13 @@ impl<'a> R<'a> {
     }
     fn u8(&mut self) -> Option<u8> { Some(self.take(1)?[0]) }
     fn u32(&mut self) -> Option<u32> { Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?)) }
+    fn u64(&mut self) -> Option<u64> { Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?)) }
     fn u128(&mut self) -> Option<u128> { Some(u128::from_le_bytes(self.take(16)?.try_into().ok()?)) }
+    fn u64s(&mut self) -> Option<Vec<u64>> {
+        let n = self.u32()? as usize;
+        if self.0.len() < n.saturating_mul(8) { return None; }
+        (0..n).map(|_| self.u64()).collect()
+    }
     fn str(&mut self) -> Option<String> { let n = self.u32()? as usize; String::from_utf8(self.take(n)?.to_vec()).ok() }
 }
 
@@ -830,6 +959,7 @@ fn encode(v: &Verdict) -> Vec<u8> {
     for (i, t) in &v.refs { w.u128(*i); w.u128(*t); }
     w.u32(v.deps.len() as u32);
     for (i, f) in &v.deps { w.u128(*i); w.u128(*f); }
+    w.u64s(&v.names);
     w.u32(v.entries.len() as u32);
     for e in &v.entries {
         w.0.push(e.phase.code());
@@ -846,16 +976,16 @@ fn encode(v: &Verdict) -> Vec<u8> {
     w.0
 }
 
-fn encode_table(head: u128, files: &[CurFile]) -> Vec<u8> {
+fn encode_table(t: &Table) -> Vec<u8> {
     let mut w = W(Vec::new());
     w.u32(VERSION);
-    w.u128(head);
-    w.u32(files.len() as u32);
-    for f in files {
-        w.str(&f.path);
-        w.u128(f.rest);
-        w.u32(f.named.len() as u32);
-        for (h, _) in &f.named { w.u128(*h); }
+    w.u128(t.head);
+    w.u32(t.nodes.len() as u32);
+    for x in &t.nodes {
+        w.u128(x.piece);
+        w.0.push(x.flags);
+        w.u64s(&x.keys);
+        w.u64s(&x.wide);
     }
     w.0
 }
@@ -864,14 +994,11 @@ fn decode_table(p: &[u8]) -> Option<Table> {
     let mut r = R(p);
     if r.u32()? != VERSION { return None; }
     let head = r.u128()?;
-    let mut files = Vec::new();
-    for _ in 0..r.u32()? {
-        let (path, rest) = (r.str()?, r.u128()?);
-        let mut named = Vec::new();
-        for _ in 0..r.u32()? { named.push(r.u128()?); }
-        files.push((path, rest, named));
-    }
-    r.0.is_empty().then_some(Table { head, files })
+    let n = r.u32()? as usize;
+    if r.0.len() < n.saturating_mul(25) { return None; }
+    let mut nodes = Vec::with_capacity(n);
+    for _ in 0..n { nodes.push(TNode { piece: r.u128()?, flags: r.u8()?, keys: r.u64s()?, wide: r.u64s()? }); }
+    r.0.is_empty().then_some(Table { head, nodes })
 }
 
 fn decode(p: &[u8]) -> Option<Verdict> {
@@ -883,6 +1010,7 @@ fn decode(p: &[u8]) -> Option<Verdict> {
     for _ in 0..r.u32()? { refs.push((r.u128()?, r.u128()?)); }
     let mut deps = Vec::new();
     for _ in 0..r.u32()? { deps.push((r.u128()?, r.u128()?)); }
+    let names = r.u64s()?;
     let mut entries = Vec::new();
     for _ in 0..r.u32()? {
         let phase = Phase::of_code(r.u8()?)?;
@@ -895,5 +1023,5 @@ fn decode(p: &[u8]) -> Option<Verdict> {
         };
         entries.push(Stored { phase, step, flags, seq, group, text: r.str()? });
     }
-    r.0.is_empty().then_some(Verdict { late, refs, deps, entries })
+    r.0.is_empty().then_some(Verdict { late, refs, deps, names, entries })
 }

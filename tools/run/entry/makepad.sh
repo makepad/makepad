@@ -165,6 +165,16 @@ size_of() { wc -c < "$1" | tr -d ' '; }
 cfgq() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 # One-line pointers and stamps are published only after the whole line is written.
 atomic_line() { printf '%s\n' "$2" > "$1.part" && mv -f "$1.part" "$1"; }
+# rust_llvm_link DIR: the rustc component ships rust-objcopy (rustc strips macOS release builds with
+# it) in lib/rustlib/<host>/bin, where it looks for LLVM in ../lib, but puts LLVM itself in lib/;
+# only the llvm-tools component (a second copy of LLVM) fills that ../lib. A link there instead.
+rust_llvm_link() {
+    for rl_lib in "$1"/lib/libLLVM*; do
+        [ -f "$rl_lib" ] || continue
+        rl_at=$1/lib/rustlib/$triple/lib/${rl_lib##*/}
+        [ -e "$rl_at" ] || ln -sf "../../../${rl_lib##*/}" "$rl_at" || return 1
+    done
+}
 loader_folder_ready() {
     case "$1" in
         src) ;;
@@ -182,6 +192,9 @@ loader_folder_ready() {
 # (OSC 11, or COLORFGBG). Lines longer than the terminal are cut, not wrapped, and a resized
 # terminal is drawn again. Other output (a file, a pipe) gets plain lines: one when a step changes
 # state, and every ten seconds while it works. makepad.bat draws the same screen on Windows.
+# While the screen is up, stderr goes to cache/logs/stderr.log and is shown below the screen when it
+# ends; a script the shell stops on an error of its own (fail and ctrl+c end the screen themselves)
+# gets a failure screen with the shell's message below it.
 e=$(printf '\033')
 tty_out= stty_saved=
 if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ] && stty_saved=$(stty -g </dev/tty 2>/dev/null) && [ -n "$stty_saved" ]; then
@@ -212,8 +225,15 @@ row_1= row_2= row_3= row_4= info_1= info_2= info_3= info_4=
 # plain output: a row's last state and when it is said again
 last_1=next last_2=next last_3=next last_4=next next_1=9999999999 next_2=9999999999 next_3=9999999999 next_4=9999999999
 name_1="Rust $rust_version" cur_row= foot= hint='ctrl+c stops · run makepad.sh again to continue'
-note= note2= note3= where= framed= bg_asked= clock= clock_stop= t0= spin_frame=0 winched=1 term_rows=24 term_cols=80
+note= note2= note3= where= screen_err= framed= bg_asked= clock= clock_stop= t0= spin_frame=0 winched=1 term_rows=24 term_cols=80
 
+# out TEXT: TEXT to the terminal through printf(1), never the shell's own printf. A resize (SIGWINCH,
+# trapped here) or a job ending (SIGCHLD) interrupts a write the terminal is slow to take, and bash
+# 3.2 (macOS's /bin/sh) then keeps the unwritten rest of the frame in its buffer and writes it out
+# with whatever it writes next, even into a value read back with $(...): the time read for the
+# build's clock came back as the time and half a frame, and the arithmetic on it stopped the
+# script. printf(1) has the signals' defaults (ignored, nothing interrupted) and keeps nothing.
+out() { env printf '%s' "$1"; }
 pad() { padded=$1; while [ "${#padded}" -lt "$2" ]; do padded="$padded "; done; }
 short() { case "$1" in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
 # mmss SECONDS -> mmss: m:ss, or h:mm:ss from an hour on
@@ -304,7 +324,7 @@ draw() {
     d_out="$d_out${e}[10;1H${e}[K${e}[11;3H${c_dim}${rule}${c_r0}${e}[K${e}[12;3H${foot}${c_r0}${e}[K${e}[13;3H${c_dim}${hint}${c_r0}${e}[K"
     d_out="$d_out${e}[14;3H${c_warn}${note}${c_r0}${e}[K${e}[15;3H${c_dim}${note2}${c_r0}${e}[K${e}[16;3H${c_warn}${note3}${c_r0}${e}[K"
     if [ "$term_cols" -ge 116 ] && [ "$term_rows" -ge 18 ]; then d_out="$d_out$logo_color$logo_out$c_r0"; fi
-    printf '%s' "$d_out${e}[17;1H"
+    out "$d_out${e}[17;1H"
 }
 # The terminal's background (OSC 11, or COLORFGBG): a light one gets a light grey mark. Asked once,
 # when the mark first shows; dark when nobody answers within 0.3 s.
@@ -331,19 +351,30 @@ screen_start() {
         return 0
     fi
     stty -echo </dev/tty 2>/dev/null || :
-    printf '%s' "${e}]0;Makepad${e}\\${e}[?25l${e}[?7l"
+    if mkdir -p "$logs_dir" 2>/dev/null && : 2>/dev/null > "$logs_dir/stderr.log"; then
+        screen_err=$logs_dir/stderr.log
+        exec 3>&2 2>>"$screen_err"
+    fi
+    out "${e}]0;Makepad${e}\\${e}[?25l${e}[?7l"
     framed=1
     trap 'winched=1' WINCH
     draw
 }
 # screen_end: the terminal as it was (keys typed meanwhile, or an answer that came late, read
-# away), the screen left standing and the cursor below it
+# away), the screen left standing and the cursor below it, and below that what went to stderr while
+# it was up (control characters taken out, so none of it moves the cursor or recolours the terminal)
 screen_end() {
     [ -n "$framed" ] || return 0
     framed=
+    trap - WINCH
     stty -icanon min 0 time 0 </dev/tty 2>/dev/null && dd bs=4096 count=1 </dev/tty >/dev/null 2>&1
     stty "$stty_saved" </dev/tty 2>/dev/null || :
-    printf '%s' "${e}[?7h${e}[?25h${e}[17;1H"
+    out "${e}[?7h${e}[?25h${e}[17;1H"
+    if [ -n "$screen_err" ]; then
+        exec 2>&3 3>&-
+        [ ! -s "$screen_err" ] || tr -d '\000-\010\013-\037\177' < "$screen_err" | sed 's/^/  /' >&2
+        screen_err=
+    fi
 }
 # notice TEXT: a line in yellow below the screen's keys (plain output: a line of its own)
 notice() {
@@ -377,15 +408,29 @@ screen_fail() {
     screen_end
     if [ "$sf_first" != "$1" ] || [ "${#sf_first}" -gt 76 ]; then printf '  %s\n' "$1" >&2; fi
 }
+# screen_stopped: ctrl+c, which may have stopped a frame halfway: the screen drawn again in full
 screen_stopped() {
     [ -n "$framed" ] || return 0
+    winched=1
     foot="${c_warn}✗${c_r0} Stopped. Run makepad.sh again to continue: what is here stays."
     hint=
     draw
     screen_end
 }
+# on_exit STATUS (the EXIT trap): a screen still up after a nonzero exit means the shell stopped the
+# script on an error of its own (an expansion, an unset variable): its jobs stopped, its step crossed
+# out, the shell's message below the screen
+on_exit() {
+    if [ -n "$framed" ] && [ "$1" != 0 ]; then
+        stamp shell-error
+        stop_jobs
+        clock_stop=1
+        screen_fail "makepad.sh stopped on an error of its own; the shell's message is below."
+    fi
+    screen_end
+}
 trap 'stamp stopped; stop_jobs; screen_stopped; exit 130' INT TERM
-trap 'screen_end' EXIT
+trap 'on_exit $?' EXIT
 # amount BYTES TOTAL SPEED -> amount: " 43%   98 of 218 MB    12.3 MB/s" (KB below 10 MB; no
 # speed until there is one)
 amount() {
@@ -615,6 +660,7 @@ need_rust=
 rust_release=$rust_version
 if [ "$(cat "$rust_own/.toolchain-version" 2>/dev/null)" = "$rust_version $triple" ] \
     && [ -x "$rust_own/bin/cargo" ] && [ -x "$rust_own/bin/rustc" ]; then
+    rust_llvm_link "$rust_own" || fail "Cannot link LLVM for rust-objcopy in $rust_own"
     row 1 ok ready "${c_dim}in rust/${c_r0}"
 elif rust_check --probe "$rust_version"; then
     rust=$rust_sysroot
@@ -819,6 +865,7 @@ if [ -n "$need_rust" ]; then
         done ) \
             2>>"$logs/unpack-$part.log" || fail "Unpacking $part failed: it could not be moved into place." "$logs/unpack-$part.log"
     done
+    rust_llvm_link "$ready" || fail "Cannot link LLVM for rust-objcopy in $ready"
     printf '%s %s' "$rust_version" "$triple" > "$ready/.toolchain-version"
     rm -rf "$rust_own"
     mv "$ready" "$rust_own" || fail "Cannot move Rust into $rust_own"

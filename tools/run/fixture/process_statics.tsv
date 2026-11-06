@@ -191,6 +191,7 @@ makepad_run::hal_run::quit_trace::T0	clock
 makepad_run::quit_signal::native::FIRST_NS	first quit signal, quitting is one way
 makepad_run::quit_signal::native::WAKE	signal pipe of this process
 makepad_run::quit_signal::native::WRITE_FD	signal pipe of this process
+makepad_run::run_host::ONCE	Once registering the HAL host and the run host, the same functions for every run
 makepad_script::base64::DECODE	constant decode table
 makepad_script::census::CENSUS_OTHER_VM	native fn of the census crate compiled into the loader, set once
 makepad_script::clock::monotonic_now::START	clock epoch of this process
@@ -778,6 +779,7 @@ relax_compiler::reload::watch_events::native::KICK	wake of the OS watcher, a sta
 relax_compiler::reload::watch_events::native::flush::N	flush marker counter never reused (reload_watch.rs:324)
 relax_compiler::reload::watch_events::native::kick_fd::FD	eventfd of the process
 relax_compiler::reload::watch_events::native::port::PORT	OS completion port; cfg-off: windows
+relax_compiler::run::APP_START	set only in cmd_run_app, which restart skips
 relax_compiler::run::CHECK_RECORDS_COLLECTED	`makepad check` only
 relax_compiler::run::HARNESS_RUN	`makepad test` only, the harness restarts by exec
 relax_compiler::run::HOSTED_RUN	set only in cmd_run, which restart skips
@@ -787,6 +789,7 @@ relax_compiler::run::QUIET	from args, same next run, only ever set true
 relax_compiler::run::REPORT_FILE	launcher FIFO, reopened by --report-to
 relax_compiler::run::REPORT_PATH	env MAKEPAD_RUN_REPORT, same next run
 relax_compiler::run::SILENT	from args, same next run, only ever set true
+relax_compiler::run::SOURCE_FAILURE	set only before the app's source is had (cmd_run_app), which restart skips
 relax_compiler::run::YIELD_SECTION	static label, overwritten
 relax_compiler::run::cmd_run_inner::AT_EXIT	the process's atexit handler, installed once
 relax_compiler::run::exit_trace::ON	env MAKEPAD_RUN_LINK_TRACE read once, nothing sets it

@@ -69,6 +69,23 @@ pub fn relax_dir() -> PathBuf {
     DEFAULT.get_or_init(|| crate::zone_alloc::kept_with(|| relax_dir_for(&workspace_dir()))).clone()
 }
 
+/// A git store run's workspace before its stores are mounted (`root`: its outer mount to be, the
+/// virtual `<run home>/vfs/<label>`): an app's start opens its window first, and the window keeps
+/// its geometry and boot timings in the run dir, which is then the one the mounted run has.
+pub fn preset_virtual_workspace(root: &str) {
+    let _ = DEFAULT.set(crate::zone_alloc::kept_with(|| virtual_dir(&crate::vfs::normalize_path(root))));
+}
+
+/// The run dir of a virtual workspace whose outer mount is `root`.
+fn virtual_dir(root: &str) -> PathBuf {
+    // FNV-1a: short (Windows' 260-character path limit; build outputs nest below it)
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in root.bytes() {
+        h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+    }
+    crate::gitstore::relax_home().join("target").join(format!("{:08x}", h as u32))
+}
+
 /// MAKEPAD_RUN_CACHE_DIR when set (tests and measurement).
 pub fn override_dir() -> Option<PathBuf> {
     std::env::var_os("MAKEPAD_RUN_CACHE_DIR").filter(|d| !d.is_empty()).map(|dir| {
@@ -82,13 +99,7 @@ pub fn override_dir() -> Option<PathBuf> {
 /// workspace: `<relax home>/target/<8 hex>`.
 pub fn relax_dir_for(start: &str) -> PathBuf {
     if crate::vfs::is_virtual(start) {
-        let root = crate::vfs::outer_root(start).unwrap_or_else(|| crate::vfs::normalize_path(start));
-        // FNV-1a: short (Windows' 260-character path limit; build outputs nest below it)
-        let mut h: u64 = 0xcbf29ce484222325;
-        for b in root.bytes() {
-            h = (h ^ b as u64).wrapping_mul(0x100000001b3);
-        }
-        return crate::gitstore::relax_home().join("target").join(format!("{:08x}", h as u32));
+        return virtual_dir(&crate::vfs::outer_root(start).unwrap_or_else(|| crate::vfs::normalize_path(start)));
     }
     let target = crate::resolve::target_dir(start).unwrap_or_else(|_| format!("{}/target", crate::vfs::normalize_path(start)));
     Path::new(&target).join("makepad-run")

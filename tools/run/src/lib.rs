@@ -65,6 +65,7 @@ pub static HOST: relax_runner::Host = relax_runner::Host {
     provenance: env!("MAKEPAD_RUN_PROVENANCE"),
     init: init,
     provide: provided,
+    run_host: run_host,
     // interactive visual iteration: a bounded compile-ahead of what the UI is about to need
     ahead: relax_compiler::options::AheadLevel::Balanced,
     // apps for users: third-party compile-time code stays sandboxed
@@ -164,8 +165,7 @@ extern crate relax_provided_fixture;
 
 fn provided() {
     use std::collections::HashMap;
-    // the HAL starts and stops apps as domains through this host; the boot app's privilege is the host's grant
-    hal_host::register();
+    run_host();
     // the registry, its keys and the lazily built `type_name` strings of the entries (statics of
     // the provided crates) live for the process: the program's heap, not the compiler's
     let _kept = relax_compiler::zone_alloc::kept();
@@ -229,24 +229,36 @@ fn provided() {
     #[cfg(any(unix, windows))]
     relax_compiler::reload::set_before_exec(hal_run::prepare_exec, hal_run::undo_exec);
     relax_compiler::reload::set_restart_begins(hal_run::restart_begins);
-    relax_compiler::run::set_main_host(relax_compiler::run::MainHost {
-        domain_zero: cfg!(target_os = "android"),
-        run: hal_run::run,
-        open: hal_run::open,
-        start: hal_run::start,
-        batch: hal_run::batch,
-        end_app: hal_run::end_app,
-        next_run: hal_run::next_run,
+}
+
+/// The HAL's host, the main-thread run host (the window, the boot screen) and the run's native
+/// end, once: with the provided crates, or before them for an app's start, whose window opens
+/// before its source is had (`relax_runner::Host::run_host`).
+fn run_host() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // the HAL starts and stops apps as domains through this host; the boot app's privilege is the host's grant
+        hal_host::register();
+        relax_compiler::run::set_main_host(relax_compiler::run::MainHost {
+            domain_zero: cfg!(target_os = "android"),
+            run: hal_run::run,
+            open: hal_run::open,
+            start: hal_run::start,
+            batch: hal_run::batch,
+            status: hal_run::status,
+            end_app: hal_run::end_app,
+            next_run: hal_run::next_run,
+        });
+        relax_compiler::run_end::set_native_end(
+            || {
+                makepad_hal::end_run();
+                makepad_script::end_run();
+                makepad_script_census::end_run();
+                makepad_script_compute::end_run();
+            },
+            makepad_script::end_domain,
+        );
     });
-    relax_compiler::run_end::set_native_end(
-        || {
-            makepad_hal::end_run();
-            makepad_script::end_run();
-            makepad_script_census::end_run();
-            makepad_script_compute::end_run();
-        },
-        makepad_script::end_domain,
-    );
 }
 
 /// makepad inspect's Splash VM commands (makepad_script::inspect_query).

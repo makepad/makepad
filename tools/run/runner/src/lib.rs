@@ -55,6 +55,10 @@ pub struct Host {
     pub init: fn(),
     /// before a session is made: registers the provided crates and the main-thread run host
     pub provide: fn(),
+    /// the HAL's host and the main-thread run host (the window, the run's end) without the
+    /// provided crates, before the program's source is had: an app's start opens its window
+    /// first (`provide` registers them too)
+    pub run_host: fn(),
     /// how much the JIT compiles ahead of the program's calls when neither `--ahead=` nor
     /// MAKEPAD_RUN_AHEAD says (jit::AheadPolicy): the entry point's default
     pub ahead: relax_compiler::options::AheadLevel,
@@ -73,7 +77,7 @@ pub struct Host {
 
 /// The bare runner (bin `relax`): provides nothing; tests, checks and agents' boots compile only
 /// what runs.
-pub const BARE: Host = Host { provenance: env!("RELAX_RUNNER_PROVENANCE"), init: || {}, provide: || {}, ahead: relax_compiler::options::AheadLevel::Minimal, proc_macros: relax_compiler::pmhost::Policy::Open, default_launch: None, package: env!("CARGO_PKG_NAME"), manifest: concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml") };
+pub const BARE: Host = Host { provenance: env!("RELAX_RUNNER_PROVENANCE"), init: || {}, provide: || {}, run_host: || {}, ahead: relax_compiler::options::AheadLevel::Minimal, proc_macros: relax_compiler::pmhost::Policy::Open, default_launch: None, package: env!("CARGO_PKG_NAME"), manifest: concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml") };
 
 static HOST: std::sync::OnceLock<&'static Host> = std::sync::OnceLock::new();
 
@@ -455,6 +459,41 @@ fn run_spec(opts: Vec<String>, spec: &fetch::Spec, cached: bool, rest: Vec<Strin
             let _ = relax_compiler::run::report_open(p);
         }
     }
+    // an app's start from its launch record (`launch::resolve` named the app): its window opens
+    // first and shows the source being had, or why it could not be
+    if std::env::var_os("MAKEPAD_APP_ID").is_some() {
+        // its window keeps its geometry in the run dir, which the mount would otherwise decide
+        let workspace = fetch::workspace(&home, spec);
+        relax_compiler::dirs::preset_virtual_workspace(&workspace);
+        // what the run says of itself is set before its window's threads run (the environment is
+        // the process's: a write while another thread reads it is a race); what only its source
+        // says follows the mount (`mount_vars`)
+        std::env::set_var("MAKEPAD_RUN_SPEC", spec.args().join("\u{1f}"));
+        std::env::set_var("MAKEPAD_RUN_WORKSPACE", &workspace);
+        let words: Vec<String> = opts.iter().chain(&rest).cloned().collect();
+        let package = rest[0].clone();
+        let (home, spec, opts, rest) = (home.clone(), spec.clone(), opts.clone(), rest.clone());
+        let prepare = move || -> Result<std::sync::Arc<relax_compiler::Session>, String> {
+            // the stores, their mounts and the run's environment live for the process, as the
+            // main thread makes them for any other run: the program's heap, not the compile
+            // thread's compiler arena (the settle swap destroys it)
+            let workspace = relax_compiler::zone_alloc::kept_with(|| -> Result<String, String> {
+                let snap = if cached { fetch::cached(&home, &spec) } else { fetch::fetch(&home, &spec) }?;
+                let workspace = fetch::mount(&home, &snap)?;
+                mount_vars(&workspace, &rest[0]);
+                std::mem::forget(snap);
+                Ok(workspace)
+            })?;
+            let (sess, words, invocation) = session(opts.clone(), rest.clone());
+            // compiler-arena blocks (the compile thread's allocations go there): see boot_package
+            std::mem::forget((workspace, words, invocation));
+            Ok(sess)
+        };
+        (host().run_host)();
+        if let Some(code) = relax_compiler::run::cmd_run_app(&package, words, Box::new(prepare)) {
+            return code;
+        }
+    }
     let snap = match if cached { fetch::cached(&home, spec) } else { fetch::fetch(&home, spec) } {
         Ok(s) => s,
         Err(e) => {
@@ -581,21 +620,30 @@ fn export_to(snap: Result<fetch::Snapshot, String>, out: &str) -> ! {
 /// in `workspace`, a virtual workspace whose stores are mounted on Relax's VFS. Also the
 /// embedder's entry (the Android host mounts the APK's source store, then runs `--exports`).
 pub fn run_mounted(workspace: &str, opts: Vec<String>, rest: Vec<String>) -> i32 {
-    let workspace = workspace.to_string();
-    std::env::set_var("MAKEPAD_RUN_WORKSPACE", &workspace);
+    mount_env(workspace, &rest[0]);
+    boot_package(opts, rest)
+}
+
+/// What a run of the mounted workspace and the programs it starts see: the workspace and its
+/// mounts, its std, the package's run-env.
+fn mount_env(workspace: &str, package: &str) {
+    std::env::set_var("MAKEPAD_RUN_WORKSPACE", workspace);
+    mount_vars(workspace, package);
+}
+
+/// What only the mounted source says: its mounts, its std, the package's run-env.
+fn mount_vars(workspace: &str, package: &str) {
     // programs it starts that run on Relax (the runner's apps) mount the same repositories
     std::env::set_var("MAKEPAD_RUN_VFS", relax_compiler::vfs::mounts_text());
     // Verify the mounted std against the compiler build before any std disk probes.
     let own = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../libs/relax/compiler/std");
-    relax_compiler::std_source::select(&workspace, &own);
+    relax_compiler::std_source::select(workspace, &own);
     // the run's own files (unit graph, build script outputs, code cache): no workspace on disk,
     // so its relax dir is $MAKEPAD_RUN_HOME/target/<hash of the virtual workspace> (relax dirs.rs), one
     // per spec shape (the same across updates)
-    apply_run_env(&workspace, &rest[0]);
-    let code = boot_package(opts, rest);
+    apply_run_env(workspace, package);
     // compiler-arena blocks (the boot thread compiles): see boot_package
-    std::mem::forget((workspace, own));
-    code
+    std::mem::forget(own);
 }
 
 /// Runs `rest` (the package and its flags) with `opts` in the current directory, a checkout:
@@ -608,20 +656,8 @@ pub fn run_checkout(opts: Vec<String>, rest: Vec<String>) -> i32 {
 }
 
 fn boot_package(opts: Vec<String>, rest: Vec<String>) -> i32 {
-    // an embedder's boot thread (the Android host) compiles like the loader's main thread: the
-    // allocations go to the compiler arena, std's mpmc context is entered in the kept heap first
-    {
-        let _k = relax_compiler::zone_alloc::kept();
-        let (_tx, rx) = std::sync::mpsc::sync_channel::<()>(0);
-        let _ = rx.recv_timeout(std::time::Duration::ZERO);
-    }
     let _phase = relax_compiler::zone_alloc::compiler();
-    provided();
-    let mut a = opts;
-    a.extend(rest);
-    let mut invocation = vec!["loader".to_string(), "run".to_string()];
-    invocation.extend_from_slice(&a);
-    let sess = relax_compiler::session_from_env(&invocation);
+    let (sess, a, invocation) = session(opts, rest);
     let code = relax_compiler::run::cmd_run(&sess, &a);
     // made in the compiler arena (the boot thread's allocations go there), which the zone swap
     // after the first present destroyed: freeing them on the way out wrote into unmapped chunks
@@ -629,6 +665,24 @@ fn boot_package(opts: Vec<String>, rest: Vec<String>) -> i32 {
     // `makepad run <git url>`). The callers on this path forget theirs the same way.
     std::mem::forget((sess, a, invocation));
     code
+}
+
+/// The run's session, its words and its invocation, made on the thread that compiles (an
+/// embedder's boot thread, as the Android host's, compiles like the loader's main thread): its
+/// allocations go to the compiler arena, std's mpmc context is entered in the kept heap first.
+fn session(opts: Vec<String>, rest: Vec<String>) -> (std::sync::Arc<relax_compiler::Session>, Vec<String>, Vec<String>) {
+    {
+        let _k = relax_compiler::zone_alloc::kept();
+        let (_tx, rx) = std::sync::mpsc::sync_channel::<()>(0);
+        let _ = rx.recv_timeout(std::time::Duration::ZERO);
+    }
+    provided();
+    let mut a = opts;
+    a.extend(rest);
+    let mut invocation = vec!["loader".to_string(), "run".to_string()];
+    invocation.extend_from_slice(&a);
+    let sess = relax_compiler::session_from_env(&invocation);
+    (sess, a, invocation)
 }
 
 

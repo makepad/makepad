@@ -43,8 +43,9 @@ mod image;
 use image::{ManifestImage, IMAGE_MAGIC};
 pub(crate) use image::{prelink_unit, PrelinkedSlot};
 mod items;
-pub(crate) use items::{FileDigest, FileTable};
+pub(crate) use items::FileDigest;
 mod deps;
+pub(crate) use deps::{user_names, CheckNode, Name, UserNames};
 mod demand;
 mod front_run;
 pub use front_run::FrontSink;
@@ -254,8 +255,89 @@ pub enum Mode {
 /// The interface digest (items.rs: the file's items outside the fn bodies that are holes) and its
 /// table by item of each file of `want`, by file (None: not wanted), on several threads: `makepad
 /// check`'s verdict keys (check_reuse.rs).
-pub(crate) fn file_tables(prog: &crate::program::Program, want: &[usize]) -> Vec<Option<(FileDigest, FileTable)>> {
-    items::file_tables_of(prog, want)
+pub(crate) fn file_digests_of(prog: &crate::program::Program, want: &[usize]) -> Vec<Option<std::sync::Arc<FileDigest>>> {
+    let mut out: Vec<Option<std::sync::Arc<FileDigest>>> = (0..prog.files.len()).map(|_| None).collect();
+    items::file_digests_of(prog, want, &mut out);
+    out
+}
+
+/// The nodes of files `want` (with their digests `digests`, by file) as a check's verdict reuse
+/// compares them (deps.rs check_nodes; `user_macros`: deps.rs user_names), on several
+/// threads: by file.
+pub(crate) fn check_nodes_of(prog: &crate::program::Program, want: &[usize], digests: &[Option<std::sync::Arc<FileDigest>>], user_macros: &std::collections::HashSet<Name>) -> Vec<Option<Vec<CheckNode>>> {
+    let mut out: Vec<Option<Vec<CheckNode>>> = (0..prog.files.len()).map(|_| None).collect();
+    if want.is_empty() { return out; }
+    deps::parse_interface_parts(prog, &prog.files, want, digests);
+    struct Shared<'a>(&'a [std::sync::Arc<crate::parser::ParsedFile>]);
+    // read-only: the parses are complete (their lazily built tables are OnceLocks)
+    unsafe impl Sync for Shared<'_> {}
+    let files = Shared(&prog.files);
+    let threads = std::thread::available_parallelism().map_or(4, |x| x.get()).clamp(1, 8);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let parts: Vec<Vec<(usize, Vec<CheckNode>)>> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..threads).map(|_| {
+            let (files, next) = (&files, &next);
+            s.spawn(move || {
+                let mut v = Vec::new();
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(&f) = want.get(i) else { break };
+                    let (Some(pf), Some(Some(dg))) = (files.0.get(f), digests.get(f)) else { continue };
+                    v.push((f, deps::check_nodes(pf, dg, prog.file_paths.get(f).map_or("", |p| p.as_str()), user_macros)));
+                }
+                v
+            })
+        }).collect();
+        hs.into_iter().map(|h| h.join().unwrap_or_default()).collect()
+    });
+    for (f, v) in parts.into_iter().flatten() { out[f] = Some(v); }
+    out
+}
+
+/// The names (deps.rs Name) the text of each list of files of `want` writes, its macro
+/// expansions' (its lazily parsed bodies' among them) included, sorted: what a crate's check can
+/// have looked up. On several threads: by list.
+pub(crate) fn text_names(prog: &crate::program::Program, want: &[Vec<usize>]) -> Vec<Vec<Name>> {
+    // the skipped bodies first (their expansions): parsed here, read on the threads
+    for &f in want.iter().flatten() {
+        if let (Some(pf), Some(&c)) = (prog.files.get(f), prog.file_crate.get(f)) { let _ = pf.part(&prog.crates[c as usize].cfg); }
+    }
+    struct Shared<'a>(&'a [std::sync::Arc<crate::parser::ParsedFile>]);
+    // read-only: the parses are complete (their lazily built tables are OnceLocks)
+    unsafe impl Sync for Shared<'_> {}
+    let files = Shared(&prog.files);
+    let threads = std::thread::available_parallelism().map_or(4, |x| x.get()).clamp(1, 8);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let parts: Vec<Vec<(usize, Vec<Name>)>> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..threads).map(|_| {
+            let (files, next) = (&files, &next);
+            s.spawn(move || {
+                let mut v = Vec::new();
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(list) = want.get(i) else { break };
+                    let mut names = Vec::new();
+                    for &f in list {
+                        let Some(pf) = files.0.get(f) else { continue };
+                        let src: &[u8] = &pf.src;
+                        deps::scan(src, &[(0, src.len() as u32)], &[], &mut names, &mut Vec::new());
+                        for p in pf.parts() {
+                            let ext: &[u8] = &p.ext;
+                            deps::scan(ext, &[(0, ext.len() as u32)], &[], &mut names, &mut Vec::new());
+                        }
+                    }
+                    names.sort_unstable();
+                    names.dedup();
+                    v.push((i, names));
+                }
+                v
+            })
+        }).collect();
+        hs.into_iter().map(|h| h.join().unwrap_or_default()).collect()
+    });
+    let mut out: Vec<Vec<Name>> = vec![Vec::new(); want.len()];
+    for (i, v) in parts.into_iter().flatten() { out[i] = v; }
+    out
 }
 
 /// File `f`'s interface text (holes marked `{..}`): check_reuse.rs traces.

@@ -131,6 +131,11 @@ pub fn cached(home: &Path, spec: &Spec) -> Result<Snapshot, String> {
     }
 }
 
+/// The virtual workspace `spec` mounts at (`mount`), known before its fetch.
+pub fn workspace(home: &Path, spec: &Spec) -> String {
+    home.join("vfs").join(label(spec)).display().to_string()
+}
+
 /// Mounts the snapshot under `<home>/vfs/<label>` (a folder that is never created) and returns
 /// that virtual workspace.
 pub fn mount(home: &Path, snap: &Snapshot) -> Result<String, String> {

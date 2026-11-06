@@ -29,6 +29,9 @@ struct Run {
     domain: u32,
     initial_failed: bool,
     retry: bool,
+    /// the window opened before the package's folder was known (an app's start: its source came
+    /// after): the package's name, icon and document follow when it is
+    unnamed: bool,
 }
 
 #[derive(Clone)]
@@ -45,6 +48,10 @@ enum Update {
     Message(String),
     /// The program turned out to draw nothing: its load screen closes, the run goes on.
     Batch,
+    /// What an app's start does before its compile (getting its source).
+    Status(String),
+    /// The app's name and icon, once its package is known (`Run::unnamed`).
+    Identity(String, Option<Icon>),
     SourcesChanged,
     Document(Document),
     Environment(Environment),
@@ -550,7 +557,9 @@ fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>) {
             return;
         }
         EXIT.store(code, Ordering::Release);
-        if run.window.is_none() || !relax_compiler::run::live_session() || unseen() {
+        // an app's start that could not get its source shows why and waits for the Restart
+        let source = relax_compiler::run::source_failure();
+        if run.window.is_none() || !(relax_compiler::run::live_session() || source.is_some()) || unseen() {
             // No native window backend: there is no run UI to retry from. A run that is
             // no live session takes no edit that could fix the build: it ends with the
             // code (a test's child under CARGO_BIN_EXE_* is waited for by its parent).
@@ -571,9 +580,10 @@ fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>) {
             let update_ready = code == 0 && panicked.is_none() && relax_compiler::reload::host::update_message().is_some();
             run.initial_failed = !update_ready && run.spec.is_none();
             if !update_ready {
-                post(Update::Failure(match &panicked {
-                    Some(line) => format!("Compilation failed: the compiler panicked: {line}"),
-                    None => format!("Compilation failed (exit {code})"),
+                post(Update::Failure(match (&panicked, source) {
+                    (Some(line), _) => format!("Compilation failed: the compiler panicked: {line}"),
+                    (None, Some(source)) => format!("The app's source could not be had: {source}"),
+                    (None, None) => format!("Compilation failed (exit {code})"),
                 }));
             }
             if run.spec.is_some() {
@@ -721,13 +731,27 @@ fn identity(package: &str, package_dir: &str) -> (String, Option<Icon>) {
     (name, icon)
 }
 
-/// Called after graph resolution, before build scripts or application sources.
+/// Called after graph resolution, before build scripts or application sources; for an app's
+/// start (`relax_compiler::run::cmd_run_app`) before its source too, with no `package_dir`: the
+/// window then has the launch's title, and the package's own name, icon and document come with
+/// the call after its graph.
 pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
     // JNI captures the Activity before compilation; the app opens the device when ready.
     if cfg!(target_os = "android") {
         return Ok(());
     }
-    if state().is_some() {
+    if let Some(run) = state().as_mut() {
+        if run.unnamed && !package_dir.is_empty() {
+            run.unnamed = false;
+            let _kept = relax_compiler::zone_alloc::kept();
+            let (app, icon) = identity(package, package_dir);
+            post(Update::Identity(app, icon));
+            match document(package_dir) {
+                Ok(document) if document.live => post(Update::Document(document)),
+                Ok(_) => {}
+                Err(e) => post(Update::Message(e)),
+            }
+        }
         return Ok(());
     }
     let _kept = relax_compiler::zone_alloc::kept();
@@ -782,16 +806,22 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
             .join("boot")
             .join(format!("{key:016x}.timings")),
     );
-    let document = document(package_dir).unwrap_or_else(|e| {
-        post(Update::Message(e));
+    let unnamed = package_dir.is_empty();
+    let document = if unnamed {
         Document::bundled()
-    });
+    } else {
+        document(package_dir).unwrap_or_else(|e| {
+            post(Update::Message(e));
+            Document::bundled()
+        })
+    };
     *state() = Some(Run {
         window: Id::NONE,
         spec: None,
         domain: 0,
         initial_failed: false,
         retry: false,
+        unnamed,
     });
     run_state::set_observer(|event| post(Update::Compiler(event)));
     relax_compiler::tui::track_for_host();
@@ -799,7 +829,11 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
     relax_compiler::inspect::events::run_state_available(
         info.dialect != makepad_hal::dialect::NONE,
     );
-    let (app, icon) = identity(package, package_dir);
+    let (app, icon) = if unnamed {
+        (std::env::var("MAKEPAD_APP_TITLE").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| package.to_owned()), None)
+    } else {
+        identity(package, package_dir)
+    };
     let initial = State {
         app,
         domain: "Compiling".into(),
@@ -885,6 +919,11 @@ pub fn start(spec: AppSpec) -> Result<(), String> {
 /// The program went quiet without starting an app (`MainHost::batch`).
 pub fn batch() {
     post(Update::Batch);
+}
+
+/// What an app's start does before its compile (`MainHost::status`).
+pub fn status(text: &str) {
+    post(Update::Status(text.to_string()));
 }
 
 pub fn spec(id: u32) -> Option<AppSpec> {
@@ -1407,6 +1446,16 @@ fn pump(
                     }
                 }
                 Update::Document(document) => host.reload(document),
+                Update::Status(text) => {
+                    data.domain = text;
+                    data.current.clear();
+                }
+                Update::Identity(app, icon) => {
+                    data.app = app;
+                    if let Some(icon) = icon {
+                        host.icon(icon);
+                    }
+                }
                 Update::Environment(environment) => host.environment(environment),
                 Update::SourcesChanged if failed => match sources_changed_after_failure() {
                     Ok(AfterFailure::Rebuild) => failed = false,
@@ -2324,7 +2373,7 @@ mod crash_offer_tests {
         std::fs::create_dir_all(&home).unwrap();
         let log = home.join("live.jsonl");
         std::env::set_var("MAKEPAD_RUN_LIVE_LOG", &log);
-        let run = |domain, initial_failed| Some(Run { window: Id::NONE, spec: None, domain, initial_failed, retry: false });
+        let run = |domain, initial_failed| Some(Run { window: Id::NONE, spec: None, domain, initial_failed, retry: false, unnamed: false });
         *state() = run(7, false);
         for _ in 0..2 {
             assert_eq!(sources_changed_after_failure(), Ok(AfterFailure::Offered));

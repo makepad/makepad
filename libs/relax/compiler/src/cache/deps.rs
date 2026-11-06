@@ -848,6 +848,157 @@ fn file_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: &str) -> Vec
     out
 }
 
+/// The skipped bodies of files `files` that hold a fn body in the interface (an `impl Trait`
+/// return, async, const, items inside) the load skipped and that invokes a macro, parsed: the
+/// expansions' names belong to the node; without them it would be coarse -- and whether it is must
+/// not depend on what ran before the nodes were made.
+pub(crate) fn parse_interface_parts(prog: &Program, parsed: &[std::sync::Arc<ParsedFile>], files: &[usize], digests: &[Option<std::sync::Arc<super::items::FileDigest>>]) {
+    for &f in files {
+        let (Some(pf), Some(Some(dg))) = (parsed.get(f), digests.get(f)) else { continue };
+        if pf.part.get().is_some() { continue; }
+        let needs = pf.ast.items.iter().enumerate().any(|(i, it)| {
+            matches!(it.kind, ItemKind::Fn(sig, None, _) if pf.ast.fn_sig(sig).lazy_body.is_some())
+                && dg.body_span(crate::ast::ItemId(i as u32)).is_none()
+                && { let (mut n, mut inv) = (Vec::new(), Vec::new()); scan(&pf.src, &[(it.lo, it.hi)], &[], &mut n, &mut inv); inv.iter().any(|&m| m & QUIET_BIT == 0 || late_builtin(m)) }
+        });
+        if needs {
+            if let Some(&c) = prog.file_crate.get(f) { let _ = pf.part(&prog.crates[c as usize].cfg); }
+        }
+    }
+}
+
+/// The names of the macros and the type aliases defined outside the sysroot.
+pub(crate) struct UserNames {
+    /// `macro_rules!` anywhere in a file, a proc-macro crate's root fns: a quiet macro of such a
+    /// name may expand to anything
+    pub macros: std::collections::HashSet<Name>,
+    /// a trait impl for an alias applies to the type it names
+    pub aliases: std::collections::HashSet<Name>,
+}
+
+pub(crate) fn user_names(prog: &Program) -> UserNames {
+    let std_dir = crate::std_dir();
+    let user: Vec<bool> = (0..prog.crates.len()).map(|c| !sysroot(prog, c, &std_dir)).collect();
+    let mut out = UserNames { macros: Default::default(), aliases: Default::default() };
+    for (f, pf) in prog.files.iter().enumerate() {
+        let Some(&c) = prog.file_crate.get(f) else { continue };
+        if !user.get(c as usize).copied().unwrap_or(false) { continue; }
+        let proc_root = prog.crates[c as usize].proc_macro && f < prog.boot_files;
+        for (i, it) in pf.ast.items.iter().enumerate() {
+            let set = match it.kind {
+                ItemKind::MacroRules(_) => &mut out.macros,
+                ItemKind::Fn(..) if proc_root && pf.ast.root_items.iter().any(|r| r.0 as usize == i) => &mut out.macros,
+                ItemKind::TypeAlias(_) => &mut out.aliases,
+                _ => continue,
+            };
+            let n = pf.text(it.name);
+            if !n.is_empty() { set.insert(name_of(n.as_bytes())); }
+        }
+    }
+    out
+}
+
+/// A node of the item graph as a check's verdict reuse compares two interfaces of a crate by it
+/// (check_reuse.rs): the crates above see a change of the crate only through the names its changed
+/// nodes are found under, except through the nodes flagged here.
+pub(crate) struct CheckNode {
+    /// its piece with its identity (file_nodes)
+    pub piece: u128,
+    /// the names it is found under (file_nodes; a trait impl: the names of its self type), and an
+    /// inherent impl's or extern block's header under its items' names (they depend on it)
+    pub keys: Vec<Name>,
+    /// the names its piece writes
+    pub names: Vec<Name>,
+    /// a trait impl: its trait's name first, then its items' names and the names in its trait's
+    /// generic arguments. An impl that applies to types its self type does not name (`named_head`
+    /// false, or an alias: check_reuse.rs Dirty) is found under these too: `5u8.hi()` asks a
+    /// blanket impl of `hi`'s trait, `x.into()` asks `From<X> for u32` through core's blanket impl
+    pub wide: Vec<Name>,
+    /// a trait impl whose self type's head is a named path (file_nodes)
+    pub named_head: bool,
+    /// a trait definition (its keys: its name and its items' names)
+    pub trait_def: bool,
+    /// reached by every node of the crates that can see it: an always node (inner attributes, glob
+    /// and `as _` imports, an item macro outside a module), or one whose text defines an impl, a
+    /// macro or an extern block that no name finds (in a fn body or a constant's initializer). An
+    /// item macro of a module is not: the load expands it into a file of its own (a fragment, whose
+    /// nodes stand for its expansion)
+    pub always: bool,
+    /// it invokes a macro whose expansion it does not have (a loud one, or a quiet one of a name a
+    /// user macro has: `user_names`): what it names is not known
+    pub coarse: bool,
+}
+
+/// One file's nodes as a check's verdict reuse compares them (CheckNode).
+pub(crate) fn check_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: &str, user_macros: &std::collections::HashSet<Name>) -> Vec<CheckNode> {
+    let ast = &pf.ast;
+    let raws = file_nodes(pf, dg, path);
+    // the items of the modules (an item macro there is expanded into a fragment)
+    let mut in_module = vec![false; ast.items.len()];
+    for (i, parent) in reached(pf) {
+        let module = parent.is_none_or(|p| matches!(ast.item(crate::ast::ItemId(p)).kind, ItemKind::Mod(_)));
+        if let Some(m) = in_module.get_mut(i as usize) { *m = module; }
+    }
+    // where the global items no name finds were written: an impl, a macro definition or item
+    // macro, an extern block or crate outside the modules, impls and traits (file_nodes' nodes)
+    let mut reached_items = vec![false; ast.items.len()];
+    for (i, _) in reached(pf) { if let Some(r) = reached_items.get_mut(i as usize) { *r = true; } }
+    let mut hidden: Vec<u32> = ast.items.iter().enumerate()
+        .filter(|(i, it)| !reached_items[*i] && matches!(it.kind, ItemKind::Impl(_) | ItemKind::MacroRules(_) | ItemKind::Mac(_) | ItemKind::ForeignMod(_) | ItemKind::ExternCrate(_)))
+        .map(|(_, it)| pf.call_site(it.lo)).collect();
+    hidden.sort_unstable();
+    let mut header_keys: HashMap<u32, Vec<Name>> = HashMap::new();
+    for r in &raws {
+        if let Some(h) = r.header { header_keys.entry(h).or_default().extend_from_slice(&r.keys); }
+    }
+    raws.into_iter().map(|r| {
+        let item = r.items.first().copied();
+        let mut keys = r.keys;
+        let mut wide = Vec::new();
+        if let Some(t) = r.trait_name {
+            for &k in r.items.iter().skip(1) {
+                let n = pf.text(ast.item(crate::ast::ItemId(k)).name);
+                if !n.is_empty() { wide.push(name_of(n.as_bytes())); }
+            }
+            if let Some(ItemKind::Impl(row)) = item.map(|i| &ast.item(crate::ast::ItemId(i)).kind) {
+                let im = ast.row(*row);
+                let params: Vec<&str> = ast.list(im.generics.params).iter().map(|g| pf.text(g.name)).collect();
+                for s in im.trait_.as_ref().map_or(&[][..], |p| ast.segs(p.segs)) {
+                    match ast.gargs(s.args()) {
+                        Some(crate::ast::GenericArgs::Angle(l)) => for g in ast.list(*l) {
+                            match g {
+                                crate::ast::GenericArg::Type(t) | crate::ast::GenericArg::Binding(_, _, t) => { ty_names(pf, *t, &params, &mut wide, 0); }
+                                _ => {}
+                            }
+                        },
+                        Some(crate::ast::GenericArgs::Paren(l, ret)) => {
+                            for t in ast.list(*l) { ty_names(pf, *t, &params, &mut wide, 0); }
+                            if let Some(t) = ret { ty_names(pf, *t, &params, &mut wide, 0); }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            wide.sort_unstable();
+            wide.dedup();
+            wide.retain(|&n| n != t);
+            wide.insert(0, t);
+        }
+        let trait_def = item.is_some_and(|i| matches!(ast.item(crate::ast::ItemId(i)).kind, ItemKind::Trait(_)));
+        if let Some(v) = item.and_then(|i| header_keys.get(&i)) { keys.extend_from_slice(v); }
+        keys.sort_unstable();
+        keys.dedup();
+        let global = item.is_some_and(|i| {
+            let (lo, hi) = full_span(pf, i);
+            let k = hidden.partition_point(|&p| p < lo);
+            hidden.get(k).is_some_and(|&p| p < hi)
+        });
+        let module_mac = r.mac && item.is_some_and(|i| in_module.get(i as usize).copied().unwrap_or(false));
+        let coarse = (r.mac && !module_mac) || (!r.rules && r.invoked.iter().any(|&m| m & QUIET_BIT == 0 || user_macros.contains(&(m & !QUIET_BIT))));
+        CheckNode { piece: r.piece, keys, names: r.names, wide, named_head: r.named_head, trait_def, always: (r.always && !module_mac) || global, coarse }
+    }).collect()
+}
+
 fn kind_code(k: &ItemKind) -> u32 {
     match k {
         ItemKind::Use(_) => 1, ItemKind::ExternCrate(_) => 2, ItemKind::Fn(..) => 3, ItemKind::Struct(_) => 4,
@@ -975,22 +1126,7 @@ impl Deps {
             .filter(|&f| prog.file_crate.get(f).is_some_and(|&c| !atomic.get(c as usize).copied().unwrap_or(true) && !clean[c as usize]))
             .filter(|&f| digests.get(f).is_some_and(|d| d.is_some()))
             .collect();
-        // a fn body in the interface (an `impl Trait` return, async, const, items inside) that the
-        // load skipped and that invokes a macro: its file's skipped bodies are parsed now (the
-        // expansions' names belong to the node; without them it would be coarse -- and whether it
-        // is must not depend on what ran before the graph was built)
-        for &f in &files {
-            let (Some(pf), Some(Some(dg))) = (parsed.get(f), digests.get(f)) else { continue };
-            if pf.part.get().is_some() { continue; }
-            let needs = pf.ast.items.iter().enumerate().any(|(i, it)| {
-                matches!(it.kind, ItemKind::Fn(sig, None, _) if pf.ast.fn_sig(sig).lazy_body.is_some())
-                    && dg.body_span(crate::ast::ItemId(i as u32)).is_none()
-                    && { let (mut n, mut inv) = (Vec::new(), Vec::new()); scan(&pf.src, &[(it.lo, it.hi)], &[], &mut n, &mut inv); inv.iter().any(|&m| m & QUIET_BIT == 0 || late_builtin(m)) }
-            });
-            if needs {
-                if let Some(&c) = prog.file_crate.get(f) { let _ = pf.part(&prog.crates[c as usize].cfg); }
-            }
-        }
+        parse_interface_parts(prog, parsed, &files, digests);
         struct Shared<'a>(&'a [std::sync::Arc<ParsedFile>]);
         unsafe impl Sync for Shared<'_> {}
         let pfs = Shared(parsed);

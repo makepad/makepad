@@ -229,10 +229,7 @@ pub fn cmd_run(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
         session_cache_off();
     }
     start_console(args);
-    let host = MAIN_HOST.get().filter(|_| {
-        !sess.runtime.boot_only && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none()
-            && !args.iter().take_while(|a| a.as_str() != "--").any(|a| matches!(a.as_str(), "--check" | "--watch" | "--entry" | "--exports" | "--harness" | "--plain-test"))
-    }).filter(|_| hosted_program(sess, args));
+    let host = run_host(sess.runtime.boot_only, args).filter(|_| hosted_program(sess, args));
     let code = if let Some(host) = host {
         HOSTED_RUN.store(true, Ordering::Release);
         let sess = sess.clone();
@@ -244,6 +241,76 @@ pub fn cmd_run(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
     } else {
         cmd_run_inner(sess, args, None)
     };
+    run_ended(code, json, args, start)
+}
+
+/// The host a run may go on (the HAL's main loop: its window, the boot screen): none for a
+/// boot-only run, a build script's child, a check, a watch, an entry or exports query, a test
+/// harness or a plain test.
+fn run_host(boot_only: bool, args: &[String]) -> Option<&'static MainHost> {
+    MAIN_HOST.get().filter(|_| {
+        !boot_only && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none()
+            && !args.iter().take_while(|a| a.as_str() != "--").any(|a| matches!(a.as_str(), "--check" | "--watch" | "--entry" | "--exports" | "--harness" | "--plain-test"))
+    })
+}
+
+/// An app's start from its launch record (`makepad app <id>`: its OS entry, the Runner): its
+/// window opens first, before the app's source is fetched and mounted, so the start shows at once
+/// with what it does (`MainHost::status`), a source it cannot get included. `prepare` gets the
+/// source and makes the run's session: on the compile thread, again at the window's Restart after
+/// it failed, never again once it succeeded. `args` are the run's words. None: no host takes this
+/// run, and the caller runs it as `cmd_run` does.
+pub fn cmd_run_app(package: &str, args: Vec<String>, mut prepare: Box<dyn FnMut() -> Result<std::sync::Arc<crate::Session>, String> + Send>) -> Option<i32> {
+    let host = run_host(std::env::var_os("MAKEPAD_RUN_BOOT_ONLY").is_some(), &args)?;
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    crate::run_end::leftovers::mark();
+    let start = std::time::Instant::now();
+    HOSTED_RUN.store(true, Ordering::Release);
+    APP_START.store(true, Ordering::Release);
+    let package = package.to_string();
+    let words = args.clone();
+    let mut sess = None;
+    let code = (host.run)(Box::new(move || {
+        if sess.is_none() {
+            *SOURCE_FAILURE.lock().unwrap() = None;
+            if let Err(e) = (host.open)(&package, "") {
+                eprintln!("makepad-run: {e}");
+            }
+            (host.status)("Getting the source");
+            match prepare() {
+                Ok(s) => {
+                    sess = Some(s);
+                    (host.status)("Compiling");
+                }
+                Err(e) => {
+                    eprintln!("makepad: {e}");
+                    report_failed(&e, 1);
+                    *SOURCE_FAILURE.lock().unwrap() = Some(e);
+                    return 1;
+                }
+            }
+        }
+        let sess = sess.as_ref().expect("the prepared session");
+        start_console(&words);
+        cmd_run_inner(sess, &words, None)
+    }));
+    Some(run_ended(code, false, &args, start))
+}
+
+/// The run is an app's start whose window opened before its graph (`cmd_run_app`).
+static APP_START: AtomicBool = AtomicBool::new(false);
+
+/// Why an app start's source could not be had (`cmd_run_app`): its window shows it and stays for
+/// the Restart (the source can come meanwhile: the Runner downloads it, the network is back).
+static SOURCE_FAILURE: relax_session::sync::Mutex<Option<String>> = relax_session::sync::Mutex::new(None);
+
+/// Why this app start's source could not be had, when it could not (`SOURCE_FAILURE`).
+pub fn source_failure() -> Option<String> {
+    SOURCE_FAILURE.lock().unwrap().clone()
+}
+
+/// What every run does at its end, hosted or not: the verdict, the exit summary and code.
+fn run_ended(code: i32, json: bool, args: &[String], start: Instant) -> i32 {
     if crate::harness::live::enabled() && crate::hot_failure::recovering() {
         crate::hot_failure::restart_failed(&format!("the replacement test harness ended before it started (exit {code})"));
         crate::hot_failure::pump();
@@ -567,7 +634,13 @@ pub(crate) fn resolve_package(
     // The graph is enough to choose the host. Its window opens now, beside the rest of the
     // resolve (the watch inputs, the substitutions, the hash and the build scripts); the process
     // main thread is already serving the HAL. The resolve ends when the window is open.
-    let window = (boot && HOSTED_RUN.load(Ordering::Acquire) && g.crates.iter().any(|c| c.name == "makepad_hal")).then(|| {
+    let hal = g.crates.iter().any(|c| c.name == "makepad_hal");
+    // an app start's window opened before its graph was known (`cmd_run_app`): a program that
+    // links no HAL draws nothing in it, so it closes and the run goes on
+    if boot && !hal && APP_START.load(Ordering::Acquire) {
+        batch_program();
+    }
+    let window = (boot && HOSTED_RUN.load(Ordering::Acquire) && hal).then(|| {
         let (package, dir) = (package.to_string(), g.pkg[g.root].0.clone());
         let _k = crate::zone_alloc::kept();
         // the start waits for the window's first present: it has the first frame's deadline
@@ -1590,7 +1663,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     } else { None };
     if let Some(r) = &reuse {
         if std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some() {
-            eprintln!("makepad check: verdict keys of {} crates in {:.1} ms ({} + {} files skipped): {} unchanged ({} beside added items), run record {}", r.crates(), r.t_keys.as_secs_f64() * 1e3, r.skipped.0, r.skipped.1, r.hits(), r.added_hits(), r.full());
+            eprintln!("makepad check: verdict keys of {} crates in {:.1} ms ({} + {} files skipped): {} unchanged ({} against changed interfaces), run record {}", r.crates(), r.t_keys.as_secs_f64() * 1e3, r.skipped.0, r.skipped.1, r.hits(), r.restored(), r.full());
         }
         // (a load that parsed or collected anything records it with the check: run it)
         if r.full() && prog.front_restored.iter().all(|x| *x) && !CHECK_RECORDS_COLLECTED.load(Ordering::Relaxed) {
@@ -2568,6 +2641,8 @@ pub struct MainHost {
     pub start: fn(crate::domain::AppSpec) -> Result<(), String>,
     /// The program turned out to draw nothing (first_frame): its load screen closes, the run goes on.
     pub batch: fn(),
+    /// What an app's start does before its compile (`cmd_run_app`: getting its source), in its window.
+    pub status: fn(&str),
     /// A run's threads have ended (`run_end`): the app's session goes, with what it held of the
     /// GPU, and the window back to the host.
     pub end_app: fn(),
