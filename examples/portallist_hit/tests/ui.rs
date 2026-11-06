@@ -182,3 +182,39 @@ fn one_big_wheel_delta_jumps_instead_of_walking_every_row(app: TestApp) {
          was walked instead of jumped"
     );
 }
+
+/// What a row reports when nothing of it is on screen: offscreen, with no bounds, not on
+/// screen at the rect it was drawn at. Clipped on either side, and by whichever ancestor
+/// clips it: the PortalList's row drawn past its bottom edge; and in `cropped_scroll`,
+/// scrolled 80px, the rows above its top (its own clip) and those below the 120px crop
+/// around it (inside its own 200px, clipped by the view around it).
+#[makepad_test]
+fn rows_drawn_with_nothing_on_screen_are_offscreen(app: TestApp) {
+    let offscreen = |w: &NodeMatch| w.states.contains(makepad_test::States::OFFSCREEN);
+    let row = |nodes: &[NodeMatch], text: &str| nodes.iter().find(|w| w.name == text).cloned();
+    let report = |nodes: &[NodeMatch], prefix: &str| -> Vec<(String, [i64; 4], bool)> {
+        nodes.iter().filter(|w| w.name.starts_with(prefix)).map(|w| (w.name.clone(), [w.x(), w.y(), w.width(), w.height()], offscreen(w))).collect()
+    };
+
+    // the list's row 5, drawn in the band under it
+    app.locator(Selector::all().text_exact("Play 4")).wait_visible();
+    let nodes = app.widget_snapshot().nodes();
+    let below = row(&nodes, "Play 5").unwrap_or_else(|| panic!("row 5 is drawn past the list's bottom edge: {:?}", report(&nodes, "Play")));
+    assert!(offscreen(&below) && below.bounds.is_empty(), "row 5, drawn past the list's bottom edge: {:?}", report(&nodes, "Play"));
+    let inside = row(&nodes, "Play 4").expect("row 4");
+    assert!(!offscreen(&inside) && !inside.bounds.is_empty(), "row 4, inside the list: {:?}", report(&nodes, "Play"));
+
+    // the cropped scroll view, scrolled 80px: rows 0 and 1 above its top, 7 on below the crop
+    app.locator(Selector::all().text_exact("CropRow 0")).wheel(0.0, 80.0);
+    app.locator(Selector::all().text_exact("CropRow 0")).wait_count(0);
+    let nodes = app.widget_snapshot().nodes();
+    let crop = report(&nodes, "CropRow");
+    for text in ["CropRow 0", "CropRow 1", "CropRow 7", "CropRow 11"] {
+        let w = row(&nodes, text).unwrap_or_else(|| panic!("{text} is drawn: {crop:?}"));
+        assert!(offscreen(&w) && w.bounds.is_empty(), "{text}, clipped away, is offscreen with no bounds: {crop:?}");
+    }
+    for text in ["CropRow 3", "CropRow 4"] {
+        let w = row(&nodes, text).unwrap_or_else(|| panic!("{text} is drawn: {crop:?}"));
+        assert!(!offscreen(&w) && !w.bounds.is_empty(), "{text}, inside the crop, is on screen: {crop:?}");
+    }
+}
