@@ -510,6 +510,7 @@ Windows.Win32.UI.Input.Ime.ImmGetContext
 Windows.Win32.UI.Input.Ime.ImmReleaseContext
 Windows.Win32.UI.Input.Ime.ImmSetCandidateWindow
 Windows.Win32.UI.Input.Ime.ImmSetCompositionWindow
+Windows.Win32.UI.Input.KeyboardAndMouse.GetDoubleClickTime
 Windows.Win32.UI.Input.KeyboardAndMouse.GetKeyState
 Windows.Win32.UI.Input.KeyboardAndMouse.ReleaseCapture
 Windows.Win32.UI.Input.KeyboardAndMouse.SetCapture
@@ -729,8 +730,10 @@ Windows.Win32.UI.WindowsAndMessaging.PostThreadMessageW
 Windows.Win32.UI.WindowsAndMessaging.QS_ALLINPUT
 Windows.Win32.UI.WindowsAndMessaging.RegisterClassExW
 Windows.Win32.UI.WindowsAndMessaging.SIZE_MINIMIZED
+Windows.Win32.UI.WindowsAndMessaging.SM_CXDOUBLECLK
 Windows.Win32.UI.WindowsAndMessaging.SM_CXICON
 Windows.Win32.UI.WindowsAndMessaging.SM_CXSMICON
+Windows.Win32.UI.WindowsAndMessaging.SM_CYDOUBLECLK
 Windows.Win32.UI.WindowsAndMessaging.SM_CYICON
 Windows.Win32.UI.WindowsAndMessaging.SM_CYSMICON
 Windows.Win32.UI.WindowsAndMessaging.SWP_FRAMECHANGED
@@ -1181,6 +1184,7 @@ Windows.Win32.UI.WindowsAndMessaging.TrackPopupMenuEx
 Windows.Win32.UI.WindowsAndMessaging.IsZoomed
 Windows.Win32.UI.WindowsAndMessaging.GetCursorPos
 Windows.Win32.Graphics.Gdi.ClientToScreen
+Windows.Win32.UI.WindowsAndMessaging.WM_NCLBUTTONDBLCLK
 Windows.Win32.UI.WindowsAndMessaging.WM_NCLBUTTONDOWN
 Windows.Win32.UI.WindowsAndMessaging.WM_APP
 Windows.Win32.UI.WindowsAndMessaging.WM_MOUSEHWHEEL
