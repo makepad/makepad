@@ -813,7 +813,7 @@ pub fn set_wait_hook(hook: extern "C" fn(u8)) { let _ = WAIT_HOOK.set(hook); }
 /// The class `set_thread_class` last gave the calling thread (the UI thread: Interactive); None: it
 /// set none, or a promotion failed. A job the thread waits for runs at its class meanwhile.
 #[relax_api]
-pub fn thread_class() -> Option<u8> { THREAD_CLASS.with(Cell::get).map(|class| if class > BACKGROUND { INTERACTIVE } else { class }) }
+pub fn thread_class() -> Option<u8> { THREAD_CLASS.with(Cell::get).map(|class| match class { 3 => INTERACTIVE, IDLE => BACKGROUND, class => class }) }
 #[relax_api]
 pub fn queued(class: u8, client: u8, delta: i32) {
     valid(class, client);
@@ -856,6 +856,8 @@ thread_local! {
     static LENDS: Cell<u32> = const { Cell::new(0) };
     /// set_ui_thread's thread: its OS class stays the UI's
     static UI_THREAD: Cell<bool> = const { Cell::new(false) };
+    /// this thread runs at the OS's idle policy (Linux SCHED_IDLE): set_thread_idle
+    static IDLE_NOW: Cell<bool> = const { Cell::new(false) };
 }
 /// Applies the class to the calling thread, caching successful applications only.
 /// Linux may refuse a promotion without CAP_SYS_NICE; failure is returned, not hidden.
@@ -879,9 +881,25 @@ pub fn set_ui_thread() -> bool {
     applied
 }
 
+/// The calling thread goes below every other thread: Linux SCHED_IDLE (a core runs it only when no
+/// other thread wants that core), elsewhere the Background class's priority. A thread without
+/// CAP_SYS_NICE (RLIMIT_NICE 0) cannot leave SCHED_IDLE again; Background work keeps it there.
+pub fn set_thread_idle() -> bool {
+    if UI_THREAD.with(Cell::get) { return false; }
+    apply_thread_class(IDLE)
+}
+/// The calling thread runs at the OS's idle policy (`set_thread_idle` took effect, and nothing
+/// raised it since).
+pub fn thread_idle() -> bool { IDLE_NOW.with(Cell::get) }
+/// The OS class code of `set_thread_idle` (below Background; 3 is the UI's).
+const IDLE: u8 = 4;
+
 fn apply_thread_class(class: u8) -> bool {
     THREAD_CLASS.with(|current| {
         if current.get() == Some(class) { return true; }
+        // Background work on a thread at the idle policy: it stays there, below Background (a
+        // thread without CAP_SYS_NICE could not leave it anyway)
+        if class == BACKGROUND && IDLE_NOW.with(Cell::get) { return true; }
         let applied = os_class(class);
         // A failed call may have partially changed the OS state.
         current.set(if applied { Some(class) } else { None });
@@ -891,7 +909,7 @@ fn apply_thread_class(class: u8) -> bool {
 #[cfg(target_os = "macos")]
 fn os_class(class: u8) -> bool {
     unsafe extern "C" { fn pthread_set_qos_class_self_np(class: u32, relative: i32) -> i32; }
-    unsafe { pthread_set_qos_class_self_np([0x19, 0x15, 0x11, 0x21][class as usize], 0) == 0 }
+    unsafe { pthread_set_qos_class_self_np([0x19, 0x15, 0x11, 0x21, 0x11][class as usize], 0) == 0 }
 }
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn os_class(class: u8) -> bool {
@@ -905,10 +923,12 @@ fn os_class(class: u8) -> bool {
     }
     static BASE: OnceLock<i32> = OnceLock::new();
     let base = *BASE.get_or_init(|| unsafe { getpriority(0, getpid() as u32) }.clamp(0, 19));
-    let nice = (base + [1, 3, 8, 0][class as usize]).min(19);
+    let nice = (base + [1, 3, 8, 0, 8][class as usize]).min(19);
     unsafe {
         let priority = setpriority(0, 0, nice) == 0;
-        let policy = sched_setscheduler(0, if class == BACKGROUND { 3 } else { 0 }, &SchedParam { priority: 0 }) == 0;
+        // SCHED_IDLE 5, SCHED_BATCH 3, SCHED_OTHER 0; a refused change leaves the policy as it was
+        let policy = sched_setscheduler(0, match class { IDLE => 5, BACKGROUND => 3, _ => 0 }, &SchedParam { priority: 0 }) == 0;
+        if policy { IDLE_NOW.with(|idle| idle.set(class == IDLE)); }
         priority && policy && getpriority(0, 0) == nice
     }
 }
@@ -922,7 +942,7 @@ fn os_class(class: u8) -> bool {
     // Background at Normal, not below: Windows priority is strict, so below another program's busy threads
     // it gets almost no time (tier-up all but stopped, the program stayed on its slow code); the budget
     // decides how much of the machine Background takes
-    unsafe { SetThreadPriority(GetCurrentThread(), [1, 0, 0, 2][class as usize]) != 0 }
+    unsafe { SetThreadPriority(GetCurrentThread(), [1, 0, 0, 2, 0][class as usize]) != 0 }
 }
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android", windows)))]
 fn os_class(_class: u8) -> bool { false }

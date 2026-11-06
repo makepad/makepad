@@ -507,3 +507,21 @@ fn a_second_jit_job_waits_for_a_token() {
     assert_eq!(rx.recv().unwrap(), 1);
     finish(second);
 }
+
+/// set_thread_idle: the thread runs at SCHED_IDLE, Background work leaves it there (it reads as
+/// Background), and the UI thread never goes there.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn idle_thread_stays_below_background() {
+    unsafe extern "C" { fn sched_getscheduler(pid: i32) -> i32; }
+    let (policy, idle, class) = thread::spawn(|| {
+        assert!(!thread_idle(), "a new thread is not idle");
+        set_thread_class(BACKGROUND);
+        assert!(set_thread_idle(), "an unprivileged thread may lower itself to SCHED_IDLE");
+        set_thread_class(BACKGROUND);
+        (unsafe { sched_getscheduler(0) }, thread_idle(), thread_class())
+    }).join().unwrap();
+    assert_eq!((policy, idle, class), (5, true, Some(BACKGROUND)), "SCHED_IDLE, kept by Background work");
+    let ui = thread::spawn(|| { set_ui_thread(); (set_thread_idle(), thread_idle(), unsafe { sched_getscheduler(0) }) }).join().unwrap();
+    assert_eq!(ui, (false, false, 0), "the UI thread stays SCHED_OTHER");
+}

@@ -234,40 +234,40 @@ fn transition(dev:&Device,cb:vk::CommandBuffer,image:vk::Image,old:vk::ImageLayo
 } }
 
 /// Every call writes the complete destination. The source rectangle is an output's
-/// position in the wide desktop, never a repaint region. Overflow outputs are letterboxed
-/// (only then is the destination cleared first). Unscaled images of the same format are
-/// copied, not blitted: a copy is the cheaper GPU path, and across GPUs half the bytes of
-/// a clear plus a blit. `same_format`: both images have the same Vulkan format.
+/// screen in the wide desktop (the whole frame without one, or while a frame of an older
+/// size is retained), never a repaint region. It is shown scaled to fit, aspect kept and
+/// letterboxed (`wide_desktop::fit`; only then is the destination cleared first): an output of
+/// the screen's own size gets it 1:1, a mirror output of another size a smoothly (linearly)
+/// filtered blit. Unscaled images of the same format are copied, not blitted: a copy is the
+/// cheaper GPU path, and across GPUs half the bytes of a clear plus a blit.
+/// `same_format`: both images have the same Vulkan format.
 fn blit_full(dev:&Device,cb:vk::CommandBuffer,source:vk::Image,source_layout:vk::ImageLayout,source_size:[u32;2],
     destination:vk::Image,destination_layout:vk::ImageLayout,size:[u32;2],placement:Option<wide_desktop::SliceRect>,same_format:bool) -> ScanoutOp {
     let sub = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1);
-    let (src,dst) = if let Some(r) = placement.filter(|r| r.x + r.width <= source_size[0] && r.y + r.height <= source_size[1]) {
-        ([r.x,r.y,r.width,r.height],[0,0,size[0],size[1]])
-    } else {
-        let scale = (size[0] as f64 / source_size[0].max(1) as f64).min(size[1] as f64 / source_size[1].max(1) as f64);
-        let w = (source_size[0] as f64 * scale).round().clamp(1.0,size[0] as f64) as u32;
-        let h = (source_size[1] as f64 * scale).round().clamp(1.0,size[1] as f64) as u32;
-        ([0,0,source_size[0],source_size[1]],[(size[0]-w)/2,(size[1]-h)/2,w,h])
-    };
+    let r = placement.filter(|r| r.x + r.width <= source_size[0] && r.y + r.height <= source_size[1])
+        .unwrap_or(wide_desktop::SliceRect { x:0,y:0,width:source_size[0],height:source_size[1] });
+    let d = wide_desktop::fit((r.width,r.height),(size[0],size[1]));
+    let (src,dst) = ([r.x,r.y,r.width,r.height],[d.x,d.y,d.width,d.height]);
+    let unscaled = src[2] == dst[2] && src[3] == dst[3];
     let offsets = |r:[u32;4]| [vk::Offset3D { x:r[0] as i32,y:r[1] as i32,z:0 },vk::Offset3D { x:(r[0]+r[2]) as i32,y:(r[1]+r[3]) as i32,z:1 }];
     unsafe {
         if dst != [0,0,size[0],size[1]] {
             dev.raw.cmd_clear_color_image(cb,destination,destination_layout,&vk::ClearColorValue { float32:[0.0,0.0,0.0,1.0] },&[range()]);
             transition(dev,cb,destination,destination_layout,destination_layout);
         }
-        if same_format && src[2] == dst[2] && src[3] == dst[3] {
+        if same_format && unscaled {
             let copy = vk::ImageCopy::default().src_subresource(sub).dst_subresource(sub)
                 .src_offset(offsets(src)[0]).dst_offset(offsets(dst)[0]).extent(vk::Extent3D { width:dst[2],height:dst[3],depth:1 });
             dev.raw.cmd_copy_image(cb,source,source_layout,destination,destination_layout,&[copy]);
         } else {
             let blit = vk::ImageBlit::default().src_subresource(sub).dst_subresource(sub).src_offsets(offsets(src)).dst_offsets(offsets(dst));
-            // A desktop shown smaller than it is (a virtual or mirrored desktop on a smaller
-            // panel) is filtered: nearest would drop whole pixel columns (text strokes).
-            let filter = if dst[2] < src[2] || dst[3] < src[3] { vk::Filter::LINEAR } else { vk::Filter::NEAREST };
+            // Scaled either way (a mirror output of another size, a virtual desktop) is filtered:
+            // nearest would drop or double whole pixel columns (text strokes).
+            let filter = if unscaled { vk::Filter::NEAREST } else { vk::Filter::LINEAR };
             dev.raw.cmd_blit_image(cb,source,source_layout,destination,destination_layout,&[blit],filter);
         }
     }
-    ScanoutOp { source: src, destination: dst, copied: same_format && src[2] == dst[2] && src[3] == dst[3] }
+    ScanoutOp { source: src, destination: dst, copied: same_format && unscaled }
 }
 
 /// What one `blit_full` did: the source rectangle, where it landed in the destination, and
@@ -607,29 +607,74 @@ fn drain_parked_acquires() {
     lock(&PARKED_ACQUIRES).extend(pending);
 }
 
-/// One output that shows the desktop, as the pacing choice sees it.
-struct PacingCandidate<'a> { index:usize, name:&'a str, refresh_mhz:u32, external:bool, main:bool, rendering_gpu:bool }
+/// One output that shows a screen of the desktop, as the pacing choice sees it.
+struct PacingCandidate<'a> { index:usize, name:&'a str, refresh_mhz:u32, screen:usize,
+    /// its screen's optimise-for output (which paces that screen)
+    optimise:bool, main:bool, rendering_gpu:bool }
 
 /// Which output paces the desktop, and whether that is the setting's own pick (`true`) or
 /// Auto's "each screen at its own refresh" (`false`, reported as `paced_by: None`). Every
 /// other output shows the newest frame at its own refresh and never causes a render.
-/// `Auto`: extended -- credit follows the fastest screen, so each screen runs at its own
-/// refresh (the panel is not held back, a slow monitor presents only the frames it can
-/// show); mirror -- the slowest EXTERNAL output (the audience screen shows every frame),
-/// else the built-in. Ties prefer the main screen, then the rendering GPU (no cross-GPU
-/// copy on the pacing path), then the first. A named screen that is gone falls back to Auto.
-fn pacing_choice(pacing:&crate::direct::DisplayPacing,mirror:bool,outputs:&[PacingCandidate]) -> Option<(usize,bool)> {
+/// `Auto`: each screen is paced by its optimise-for output (a mirrored screen's other outputs
+/// show the newest frame at their own refresh); one screen -- it paces, reported when it is
+/// mirrored; several -- credit follows the fastest of them, so each screen runs at its own
+/// refresh (the panel is not held back, a slow monitor presents only the frames it can show).
+/// Ties prefer the main screen, then the rendering GPU (no cross-GPU copy on the pacing path),
+/// then the first. A named output that is gone falls back to Auto.
+fn pacing_choice(pacing:&crate::direct::DisplayPacing,outputs:&[PacingCandidate]) -> Option<(usize,bool)> {
     use crate::direct::DisplayPacing;
     let tie = |c:&PacingCandidate| (!c.main,!c.rendering_gpu,c.index);
-    let slowest = |external:bool| outputs.iter().filter(|c| !external || c.external).min_by_key(|c| (c.refresh_mhz,tie(c))).map(|c| c.index);
-    let fastest = || outputs.iter().max_by_key(|c| (c.refresh_mhz,std::cmp::Reverse(tie(c)))).map(|c| c.index);
-    let auto = || if mirror { slowest(true).or_else(|| slowest(false)).map(|i| (i,true)) } else { fastest().map(|i| (i,false)) };
+    let slowest = || outputs.iter().min_by_key(|c| (c.refresh_mhz,tie(c))).map(|c| c.index);
+    let fastest = |only_pacers:bool| outputs.iter().filter(|c| !only_pacers || c.optimise)
+        .max_by_key(|c| (c.refresh_mhz,std::cmp::Reverse(tie(c)))).map(|c| c.index);
+    let auto = || {
+        let first = outputs.first()?.screen;
+        if outputs.iter().all(|c| c.screen == first) {
+            let mirrored = outputs.len() > 1;
+            outputs.iter().find(|c| c.optimise).map(|c| (c.index,mirrored))
+        } else { fastest(true).map(|i| (i,false)) }
+    };
     match pacing {
         DisplayPacing::Auto => auto(),
-        DisplayPacing::Slowest => slowest(false).map(|i| (i,true)),
-        DisplayPacing::Fastest => fastest().map(|i| (i,true)),
+        DisplayPacing::Slowest => slowest().map(|i| (i,true)),
+        DisplayPacing::Fastest => fastest(false).map(|i| (i,true)),
         DisplayPacing::Screen(name) => outputs.iter().find(|c| c.name == name).map(|c| (c.index,true)).or_else(auto),
     }
+}
+
+/// A screen of the desktop over the live outputs (see `DisplayArrangement::group`).
+struct Screen {
+    name:String,
+    /// indices into `Context::outputs`, arranged order
+    outputs:Vec<usize>,
+    /// the output it is sized for (one of `outputs`)
+    optimise_for:usize,
+    /// its rectangle of the wide desktop; `None` when it does not fit the GPU's limits
+    rect:Option<wide_desktop::SliceRect>,
+}
+
+/// The output a screen is optimised for: the arranged one when it is live, else the largest
+/// (then the first).
+fn optimise_for(group:&crate::direct::ScreenGroup,sizes:&[[u32;2]]) -> usize {
+    group.optimise_for.unwrap_or_else(|| {
+        let area = |i:&usize| u64::from(sizes[*i][0]) * u64::from(sizes[*i][1]);
+        let best = group.outputs.iter().map(area).max().unwrap_or(0);
+        *group.outputs.iter().find(|i| area(i) == best).unwrap()
+    })
+}
+
+/// The desktop's screens over live outputs of `sizes` (their modes, in output order) named
+/// `names`, laid out within the GPU's limits: the desktop size, the screens and each output's
+/// rectangle (its screen's).
+fn arrange_screens(arrangement:&crate::direct::DisplayArrangement,names:&[&str],sizes:&[[u32;2]],max:[u32;2])
+    -> ([u32;2],Vec<Screen>,Vec<Option<wide_desktop::SliceRect>>) {
+    let groups = arrangement.group(names);
+    let modes:Vec<_> = groups.iter().map(|g| { let o = optimise_for(g,sizes); wide_desktop::ScreenMode::new(&g.name,sizes[o][0],sizes[o][1]) }).collect();
+    let layout = wide_desktop::arrange(&modes,&[],max[0],max[1]);
+    let screens:Vec<Screen> = groups.into_iter().map(|g| Screen { rect:layout.rect_of(&g.name),optimise_for:optimise_for(&g,sizes),name:g.name,outputs:g.outputs }).collect();
+    let mut placements = vec![None; names.len()];
+    for screen in &screens { for &i in &screen.outputs { placements[i] = screen.rect; } }
+    ([layout.width,layout.height],screens,placements)
 }
 
 /// A connector that could not be driven, with the request it failed under. It is
@@ -730,9 +775,20 @@ struct Context {
     cards:HashMap<PathBuf,Card>, outputs:Vec<Output>, failed:Vec<Failed>,
     /// Per connector, the last mode an output was created with: the first fallback.
     working:HashMap<String,DisplayMode>,
-    /// Mirror's optimised screen (see `DisplayArrangement::Mirror`); `None`: extended.
-    mirror:Option<String>, pacing:crate::direct::DisplayPacing, connectors:Vec<DrmConnector>,
-    filter:DrmFilter, modes:HashMap<String,String>, mode:Option<String>, order:Vec<String>, primary:Option<String>,
+    /// How the outputs make up the screens (see `DisplayArrangement`), and the screens it
+    /// gives over the live outputs (`layout`).
+    arrangement:DisplayArrangement, screens:Vec<Screen>,
+    /// `MAKEPAD_DISPLAY_ARRANGEMENT` pinned the arrangement: no saved profile applies.
+    arrangement_pinned:bool,
+    /// The saved profiles' file (`display_profiles::layout_path`), read whenever the
+    /// set of connected monitors changes, and the set they were last looked up for.
+    profiles:Option<PathBuf>, monitors:Option<Vec<u64>>,
+    /// Connectors whose mode `MAKEPAD_DRM_MODES` pinned: a profile leaves them alone.
+    modes_pinned:HashSet<String>,
+    pacing:crate::direct::DisplayPacing, connectors:Vec<DrmConnector>,
+    filter:DrmFilter, modes:HashMap<String,String>, mode:Option<String>,
+    /// An output of the main screen.
+    primary:Option<String>,
     size:[u32;2], active:bool, window:Option<Key>, current:Option<Frame>, frames:VecDeque<Frame>,
     /// Frames handed to the outputs whose present has not completed on the pacing output yet,
     /// with the callback that reports it (oldest first).
@@ -746,12 +802,19 @@ impl Context {
         let physical = unsafe { compositor.instance.enumerate_physical_devices() }.map_err(error)?;
         let mut mode = std::env::var("MAKEPAD_DRM_MODE").ok().filter(|m| !m.is_empty() && m != "auto");
         for arg in std::env::args() { if let Some(value) = arg.strip_prefix("-mode=").or_else(|| arg.strip_prefix("--mode=")) { mode = (value != "auto").then(|| value.to_owned()); } }
-        let modes = wide_desktop::parse_mode_overrides(&std::env::var("MAKEPAD_DRM_MODES").unwrap_or_default()).into_iter().collect();
-        let order = wide_desktop::parse_display_order(&std::env::var("MAKEPAD_DISPLAY_ORDER").unwrap_or_default());
+        let modes:HashMap<String,String> = wide_desktop::parse_mode_overrides(&std::env::var("MAKEPAD_DRM_MODES").unwrap_or_default()).into_iter().collect();
+        let modes_pinned = modes.keys().cloned().collect();
+        let pinned = std::env::var("MAKEPAD_DISPLAY_ARRANGEMENT").ok().filter(|v| !v.trim().is_empty()).and_then(|text| match DisplayArrangement::parse(&text) {
+            Ok(arrangement) => Some(arrangement),
+            Err(e) => { eprintln!("[hal-direct] MAKEPAD_DISPLAY_ARRANGEMENT={text:?}: {e}; not pinned"); None }
+        });
+        let profiles = crate::display_profiles::layout_path();
         let virtual_head = virtual_from_env().map(|d| VirtualHead::new(compositor.clone(),d)).transpose()?;
         Ok(Self { devices:HashMap::from([(compositor.physical,compositor.clone())]),compositor,physical,
-            cards:HashMap::new(),outputs:Vec::new(),failed:Vec::new(),working:HashMap::new(),mirror:None,pacing:Default::default(),connectors:Vec::new(),filter:DrmFilter::from_env(),
-            modes,mode,order,primary:None,size:[0,0],active:true,window:None,current:None,frames:VecDeque::new(),presenting:VecDeque::new(),sequence:0,demand:false,awaiting:false,credit_due:0,
+            cards:HashMap::new(),outputs:Vec::new(),failed:Vec::new(),working:HashMap::new(),
+            arrangement_pinned:pinned.is_some(),arrangement:pinned.unwrap_or_default(),screens:Vec::new(),profiles,monitors:None,modes_pinned,
+            pacing:Default::default(),connectors:Vec::new(),filter:DrmFilter::from_env(),
+            modes,mode,primary:None,size:[0,0],active:true,window:None,current:None,frames:VecDeque::new(),presenting:VecDeque::new(),sequence:0,demand:false,awaiting:false,credit_due:0,
             virtual_head })
     }
     /// The HAL replaced its lost GPU device. The outputs' swapchains, surfaces, copy jobs and
@@ -807,7 +870,8 @@ impl Context {
             Some(card) => drm_connector_modes(card.file.as_raw_fd(),connector.id),
             None => OpenOptions::new().read(true).write(true).open(&connector.card).map(|f| drm_connector_modes(f.as_raw_fd(),connector.id)).unwrap_or_default(),
         };
-        let row = LinuxDisplayOutput { name:connector.name.clone(),card:card_name(&connector.card),status:reason.clone(),error:Some(reason),
+        let row = LinuxDisplayOutput { name:connector.name.clone(),monitor:connector.monitor.clone(),fingerprint:connector.fingerprint,
+            card:card_name(&connector.card),status:reason.clone(),error:Some(reason),
             requested:requested.clone(),modes,native,pci:pci(&connector.card),mode_override:self.modes.get(&connector.name).cloned(),..Default::default() };
         self.failed.push(Failed { connector:connector.clone(),requested,row });
     }
@@ -825,6 +889,7 @@ impl Context {
     /// retried when it is replugged (or another monitor appears on it) or its mode
     /// request changes. Returns without touching anything when nothing changed.
     fn reconcile(&mut self,connectors:Vec<DrmConnector>,state:&State) {
+        self.restore_profile(&connectors);
         if self.panels_off() {
             // The virtual display is the desktop and the panels show nothing: no display is
             // held (each goes back to the console), no swapchain, no scanout.
@@ -840,6 +905,12 @@ impl Context {
         let mut kept = Vec::new(); let mut retired = Vec::new();
         for mut output in std::mem::take(&mut self.outputs) {
             let request = requested(&output.connector.name);
+            if self.arrangement.is_off(&output.connector.name) {
+                // Turned off: no swapchain, no scanout. A connector that stays keeps its display
+                // acquired (below), so turning it on again needs no new grant.
+                eprintln!("[hal-direct] {}: turned off",output.connector.name);
+                retired.push(output); continue;
+            }
             match output_fate(connectors.contains(&output.connector),output.rebuild,output.requested.as_deref(),request.as_deref()) {
                 Fate::Keep => kept.push(output),
                 Fate::Recheck => {
@@ -860,18 +931,17 @@ impl Context {
             }
         }
         let failed_before = self.failed.len();
-        self.failed.retain(|f| connectors.contains(&f.connector) && f.requested == requested(&f.connector.name));
+        self.failed.retain(|f| connectors.contains(&f.connector) && f.requested == requested(&f.connector.name) && !self.arrangement.is_off(&f.connector.name));
         let pending:Vec<_> = connectors.iter().filter(|c| !kept.iter().any(|o:&Output| o.connector == **c)
-            && !self.failed.iter().any(|f| f.connector == **c)).cloned().collect();
+            && !self.failed.iter().any(|f| f.connector == **c) && !self.arrangement.is_off(&c.name)).cloned().collect();
         self.outputs = kept;
         let topology_changed = !retired.is_empty() || !pending.is_empty() || self.failed.len() != failed_before || connectors != self.connectors;
         self.connectors = connectors;
         if !topology_changed {
-            // An order change (or a rescan with nothing new) only moves screens.
-            let before:Vec<_> = self.outputs.iter().map(|o| o.placement).collect();
-            let size = self.size;
+            // A rescan with nothing new (or an arrangement change) only moves screens.
+            let before = self.composition();
             self.layout();
-            if size == self.size && before == self.outputs.iter().map(|o| o.placement).collect::<Vec<_>>() { return; }
+            if before == self.composition() { return; }
         }
         // A topology generation invalidates an outstanding credit: the client may have
         // discarded it while the desktop had zero size. Reflow needs a fresh full frame.
@@ -990,82 +1060,110 @@ impl Context {
         self.outputs.sort_by_key(|o| connector_rank(&o.connector.name));
         self.layout(); self.publish(state);
     }
-    /// Mirror <-> Extended: only what each output presents changes (the whole shared
-    /// desktop scaled into its swapchain, or its own rectangle of the wide desktop) and the
-    /// screen list. Every output keeps its display, mode, plane, surface and swapchain: no
-    /// blank, no modeset. The desktop size changes, so the client gets a fresh credit and
-    /// draws a whole frame at the new size; until then the retained frame is letterboxed.
+    /// A new arrangement (screens regrouped, reordered, another optimise-for output): only what
+    /// each output presents changes (its screen's rectangle of the wide desktop, scaled to fit)
+    /// and the screen list. Every output keeps its display, mode, plane, surface and swapchain:
+    /// no blank, no modeset. When the desktop changes, the client gets a fresh credit and draws
+    /// a whole frame at the new size; until then the retained frame is letterboxed. Turning an
+    /// output on or off is the reconcile's (`run`).
     fn recompose(&mut self,state:&State) {
-        let before = (self.size,self.outputs.iter().map(|o| o.placement).collect::<Vec<_>>());
+        let before = self.composition();
         self.layout();
-        if before == (self.size,self.outputs.iter().map(|o| o.placement).collect::<Vec<_>>()) { self.publish(state); return; }
+        if before == self.composition() { self.publish(state); return; }
         self.awaiting = false; self.demand |= self.window.is_some();
         state.ready.store(0,Ordering::Release);
-        eprintln!("[hal-direct] arrangement {}: desktop {}x{}, no output rebuilt",self.mirror_target().map_or("extended".to_string(),|n| format!("mirror of {n}")),self.size[0],self.size[1]);
+        eprintln!("[hal-direct] arrangement {}: desktop {}x{}, no output rebuilt",self.arrangement.text(),self.size[0],self.size[1]);
         self.publish(state);
     }
-    /// The mirrored screen, when mirroring is asked for and that screen is shown.
-    fn mirror_target(&self) -> Option<&str> {
-        self.mirror.as_deref().filter(|name| self.outputs.iter().any(|o| o.connector.name == *name))
+    /// What the outputs show: the desktop size, each output's rectangle and the screens.
+    fn composition(&self) -> ([u32;2],Vec<Option<wide_desktop::SliceRect>>,Vec<(String,Vec<usize>,usize)>) {
+        (self.size,self.outputs.iter().map(|o| o.placement).collect(),self.screens.iter().map(|s| (s.name.clone(),s.outputs.clone(),s.optimise_for)).collect())
+    }
+    /// The saved profile for the monitors connected now, once per new set of monitors (start-up,
+    /// a monitor plugged in or out): its arrangement, modes, main screen and pacing replace the
+    /// running ones. No saved profile for the set: the running arrangement stays (an output it
+    /// does not name extends the desktop). Pinned by `MAKEPAD_DISPLAY_ARRANGEMENT`: never.
+    fn restore_profile(&mut self,connectors:&[DrmConnector]) {
+        use crate::display_profiles::{monitor_set, DisplayProfiles, OutputKey};
+        let monitors = monitor_set(connectors.iter().map(|c| c.fingerprint));
+        if connectors.is_empty() || self.monitors.as_ref() == Some(&monitors) { return; }
+        self.monitors = Some(monitors.clone());
+        let Some(path) = self.profiles.as_ref().filter(|_| !self.arrangement_pinned) else { return };
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => { eprintln!("[hal-direct] saved display profiles {}: {e}",path.display()); return; }
+        };
+        let Some(profile) = DisplayProfiles::parse(&text).find(&monitors).cloned() else {
+            eprintln!("[hal-direct] no saved display profile for these {} monitors; keeping {}",monitors.len(),self.arrangement.text());
+            return;
+        };
+        let connected:Vec<(String,OutputKey)> = connectors.iter()
+            .filter_map(|c| Some((c.name.clone(),OutputKey::new(&pci(&c.card)?,&c.name,c.fingerprint)))).collect();
+        let settings = profile.resolve(&connected);
+        for (name,mode) in settings.modes {
+            if self.modes_pinned.contains(&name) { continue; }
+            match mode { Some(mode) => { self.modes.insert(name,mode); } None => { self.modes.remove(&name); } }
+        }
+        self.arrangement = settings.arrangement;
+        if settings.main.is_some() { self.primary = settings.main; }
+        self.pacing = settings.pacing;
+        eprintln!("[hal-direct] saved display profile for these {} monitors: {}",monitors.len(),self.arrangement.text());
     }
     fn layout(&mut self) {
         if let Some(head) = &self.virtual_head {
             // The virtual desktop at its own size; every panel shows it scaled to fit (a
             // panel whose mode is the same size copies it 1:1).
             self.size = [head.display.width,head.display.height];
+            self.screens.clear();
             for output in &mut self.outputs { output.placement = None; }
             return;
         }
-        if let Some(target) = self.mirror_target().map(str::to_owned) {
-            // Mirror: one desktop at the optimised screen's mode. That screen shows it
-            // 1:1; every other output has no rectangle of its own, so its copy (or its
-            // cross-GPU bridge blit) scales the whole desktop in, aspect kept.
-            let size = self.outputs.iter().find(|o| o.connector.name == target).map(|o| o.size()).unwrap();
-            self.size = size;
-            for output in &mut self.outputs {
-                output.placement = (output.connector.name == target).then_some(wide_desktop::SliceRect { x:0,y:0,width:size[0],height:size[1] });
-            }
-            return;
-        }
-        let screens:Vec<_> = self.outputs.iter().map(|o| wide_desktop::ScreenMode::new(&o.connector.name,o.mode.extent.width,o.mode.extent.height)).collect();
+        let names:Vec<&str> = self.outputs.iter().map(|o| o.connector.name.as_str()).collect();
+        let sizes:Vec<[u32;2]> = self.outputs.iter().map(|o| o.size()).collect();
         let limits = &self.compositor.properties.limits;
-        let layout = wide_desktop::arrange(&screens,&self.order,limits.max_framebuffer_width.min(limits.max_image_dimension2_d),limits.max_framebuffer_height.min(limits.max_image_dimension2_d));
-        self.size = [layout.width,layout.height];
-        for output in &mut self.outputs { output.placement = layout.rect_of(&output.connector.name); }
+        let max = [limits.max_framebuffer_width.min(limits.max_image_dimension2_d),limits.max_framebuffer_height.min(limits.max_image_dimension2_d)];
+        let (size,screens,placements) = arrange_screens(&self.arrangement,&names,&sizes,max);
+        self.size = size; self.screens = screens;
+        for (output,placement) in self.outputs.iter_mut().zip(placements) { output.placement = placement; }
     }
-    fn primary_index(&self) -> Option<usize> {
-        self.primary.as_ref().and_then(|n| self.outputs.iter().position(|o| &o.connector.name == n))
-            .or_else(|| self.outputs.iter().position(|o| o.placement.is_some()))
+    /// The main screen (index into `screens`): the one showing `primary`, else the one the
+    /// arrangement puts it on (its output unplugged, the rest still showing it), else the first
+    /// placed one.
+    fn primary_screen(&self) -> Option<usize> {
+        let name = self.primary.as_deref();
+        name.and_then(|n| self.screens.iter().position(|s| s.outputs.iter().any(|&i| self.outputs[i].connector.name == n)))
+            .or_else(|| name.and_then(|n| self.arrangement.screens.iter().find(|a| a.outputs.iter().any(|o| o == n)))
+                .and_then(|a| self.screens.iter().position(|s| s.name == a.outputs[0])))
+            .filter(|&i| self.screens[i].rect.is_some())
+            .or_else(|| self.screens.iter().position(|s| s.rect.is_some()))
+    }
+    fn pacing_candidates(&self) -> Vec<PacingCandidate<'_>> {
+        let main = self.primary_screen();
+        self.screens.iter().enumerate().filter(|(_,s)| s.rect.is_some()).flat_map(|(si,s)| s.outputs.iter().map(move |&i| (si,s,i)))
+            .map(|(si,s,i)| { let o = &self.outputs[i]; PacingCandidate {
+                index:i, name:&o.connector.name, refresh_mhz:o.mode.refresh_mhz, screen:si, optimise:s.optimise_for == i,
+                main:Some(si) == main, rendering_gpu:o.dev.physical == self.compositor.physical,
+            } }).collect()
     }
     /// The output whose presents pace the desktop (gives the client its frame credit), from
     /// the pacing setting, resolved again on every call so hotplug, mode and arrangement
     /// changes apply at once (see `pacing_choice`).
     fn pacing_index(&self) -> Option<usize> {
-        let main = self.primary_index();
-        let mirror = self.mirror_target().is_some();
-        let candidates:Vec<_> = self.outputs.iter().enumerate().filter(|(_,o)| mirror || o.placement.is_some()).map(|(i,o)| PacingCandidate {
-            index:i, name:&o.connector.name, refresh_mhz:o.mode.refresh_mhz, external:connector_rank(&o.connector.name).0 == 1,
-            main:Some(i) == main, rendering_gpu:o.dev.physical == self.compositor.physical,
-        }).collect();
-        pacing_choice(&self.pacing,mirror,&candidates).map(|(i,_)| i).or(main)
+        pacing_choice(&self.pacing,&self.pacing_candidates()).map(|(i,_)| i)
+            .or_else(|| self.primary_screen().map(|s| self.screens[s].optimise_for))
     }
     /// `paced_by` for the inventory: the pacing output, or `None` while every screen runs at
-    /// its own refresh (Auto, extended).
+    /// its own refresh (Auto, several screens).
     fn paced_by(&self) -> Option<String> {
         if self.virtual_head.is_some() { return Some(VIRTUAL_OUTPUT.into()); }
-        let main = self.primary_index();
-        let mirror = self.mirror_target().is_some();
-        let candidates:Vec<_> = self.outputs.iter().enumerate().filter(|(_,o)| mirror || o.placement.is_some()).map(|(i,o)| PacingCandidate {
-            index:i, name:&o.connector.name, refresh_mhz:o.mode.refresh_mhz, external:connector_rank(&o.connector.name).0 == 1,
-            main:Some(i) == main, rendering_gpu:o.dev.physical == self.compositor.physical,
-        }).collect();
-        pacing_choice(&self.pacing,mirror,&candidates).filter(|(_,pick)| *pick).map(|(i,_)| self.outputs[i].connector.name.clone())
+        pacing_choice(&self.pacing,&self.pacing_candidates()).filter(|(_,pick)| *pick).map(|(i,_)| self.outputs[i].connector.name.clone())
     }
     fn publish(&self,state:&State) {
-        let main = if self.virtual_head.is_some() { None } else { self.primary_index() };
-        let mut outputs:Vec<_> = self.outputs.iter().enumerate().map(|(i,o)| LinuxDisplayOutput {
-            name:o.connector.name.clone(),width:o.mode.extent.width,height:o.mode.extent.height,refresh_hz:o.mode.refresh_mhz as f64 / 1000.0,
-            primary:Some(i) == main,card:card_name(&o.connector.card),desktop_position:o.placement.map(|r| (r.x,r.y)),active:o.last_present != 0,
+        let mut outputs:Vec<_> = self.outputs.iter().map(|o| LinuxDisplayOutput {
+            name:o.connector.name.clone(),monitor:o.connector.monitor.clone(),fingerprint:o.connector.fingerprint,
+            width:o.mode.extent.width,height:o.mode.extent.height,refresh_hz:o.mode.refresh_mhz as f64 / 1000.0,
+            card:card_name(&o.connector.card),active:o.last_present != 0,
             status:match (&o.error,o.last_present != 0) {
                 (Some(e),_) => format!("requested mode failed, showing {}: {e}",mode_label(&o.mode)),
                 (None,true) => "active".into(),
@@ -1076,28 +1174,38 @@ impl Context {
             native:self.cards.get(&o.connector.card).and_then(|c| drm_connector_modes(c.file.as_raw_fd(),o.connector.id).1),
         }).collect();
         outputs.extend(self.failed.iter().map(|f| f.row.clone()));
-        if self.panels_off() {
-            // The connected panels, listed (with their modes) but not driven.
-            outputs.extend(self.connectors.iter().map(|c| {
-                let (modes,native) = OpenOptions::new().read(true).write(true).open(&c.card).map(|f| drm_connector_modes(f.as_raw_fd(),c.id)).unwrap_or_default();
-                LinuxDisplayOutput { name:c.name.clone(),card:card_name(&c.card),status:"not driven: the virtual display is the desktop".into(),
-                    modes,native,pci:pci(&c.card),mode_override:self.modes.get(&c.name).cloned(),..Default::default() }
-            }));
-        }
+        // The connected outputs that are not driven, listed with their modes: every panel while
+        // the virtual display is the desktop with its panels off, else the ones turned off.
+        let panels_off = self.panels_off();
+        outputs.extend(self.connectors.iter().filter(|c| panels_off || self.arrangement.is_off(&c.name)).map(|c| {
+            let (modes,native) = match self.cards.get(&c.card) {
+                Some(card) => drm_connector_modes(card.file.as_raw_fd(),c.id),
+                None => OpenOptions::new().read(true).write(true).open(&c.card).map(|f| drm_connector_modes(f.as_raw_fd(),c.id)).unwrap_or_default(),
+            };
+            let status = if panels_off { "not driven: the virtual display is the desktop" } else { "off" };
+            LinuxDisplayOutput { name:c.name.clone(),monitor:c.monitor.clone(),fingerprint:c.fingerprint,card:card_name(&c.card),status:status.into(),
+                modes,native,pci:pci(&c.card),mode_override:self.modes.get(&c.name).cloned(),..Default::default() }
+        }));
         outputs.sort_by_key(|o| connector_rank(&o.name));
+        let main = self.primary_screen();
+        let mut screens:Vec<_> = self.screens.iter().enumerate().filter_map(|(i,s)| { let r = s.rect?; Some(LinuxDisplayScreen {
+            name:s.name.clone(),outputs:s.outputs.iter().map(|&o| self.outputs[o].connector.name.clone()).collect(),
+            optimise_for:self.outputs[s.optimise_for].connector.name.clone(),x:r.x,y:r.y,width:r.width,height:r.height,primary:Some(i) == main,
+        }) }).collect();
         if let Some(head) = &self.virtual_head {
             let d = head.display;
-            outputs.insert(0,LinuxDisplayOutput { name:VIRTUAL_OUTPUT.into(),width:d.width,height:d.height,refresh_hz:d.refresh_hz(),primary:true,
-                desktop_position:Some((0,0)),active:head.last_present != 0,
+            outputs.insert(0,LinuxDisplayOutput { name:VIRTUAL_OUTPUT.into(),width:d.width,height:d.height,refresh_hz:d.refresh_hz(),active:head.last_present != 0,
                 status:if head.last_present != 0 { "active (virtual)".into() } else { "virtual; waiting for first frame".into() },
                 modes:vec![(d.width,d.height,d.refresh_hz())],..Default::default() });
+            screens = vec![LinuxDisplayScreen { name:VIRTUAL_OUTPUT.into(),outputs:vec![VIRTUAL_OUTPUT.into()],optimise_for:VIRTUAL_OUTPUT.into(),
+                x:0,y:0,width:d.width,height:d.height,primary:true }];
         }
         {
             let mut snapshot = lock(&state.snapshot);
-            let arrangement = self.mirror_target().map_or(crate::direct::DisplayArrangement::Extended,|name| crate::direct::DisplayArrangement::Mirror { optimise_for:name.to_owned() });
             let paced_by = self.paced_by();
             let virtual_display = self.virtual_head.as_ref().map(|h| h.display);
-            snapshot.displays = LinuxDisplaySnapshot { direct:true,outputs,arrangement,pacing:self.pacing.clone(),paced_by,virtual_display }; snapshot.size = self.size;
+            snapshot.displays = LinuxDisplaySnapshot { direct:true,outputs,screens,arrangement:self.arrangement.clone(),pacing:self.pacing.clone(),paced_by,virtual_display };
+            snapshot.size = self.size;
             if !self.outputs.is_empty() || self.virtual_head.is_some() { state.acquired.store(true,Ordering::Release); }
             // A reacquired output has no phase until its new swapchain presents.
             snapshot.timings = self.outputs.iter().filter(|o| o.last_present != 0 && o.mode.refresh_mhz != 0)
@@ -1276,10 +1384,11 @@ pub(super) fn run(state:Arc<State>,device:Arc<Device>) {
                     if let Some(mode) = mode { context.modes.insert(name,mode); } else { context.modes.remove(&name); }
                     rescan = true;
                 }
-                Command::Order(order) => { context.order = order; rescan = true; }
-                // A composition change, never a mode change: no output is touched.
+                // A composition change, never a mode change: no output is touched, except one
+                // turned on or off (the reconcile below).
                 Command::Arrangement(arrangement) => {
-                    context.mirror = match arrangement { crate::direct::DisplayArrangement::Mirror { optimise_for } => Some(optimise_for), _ => None };
+                    rescan |= arrangement.off != context.arrangement.off;
+                    context.arrangement = arrangement;
                     context.recompose(&state);
                 }
                 Command::Primary(name) => { context.primary = Some(name); context.publish(&state); }
@@ -1351,26 +1460,67 @@ pub(super) fn run(state:Arc<State>,device:Arc<Device>) {
 mod tests {
     use super::*;
     use crate::direct::DisplayPacing;
-    fn c(index:usize,name:&'static str,hz:u32,external:bool,main:bool,rendering_gpu:bool) -> PacingCandidate<'static> {
-        PacingCandidate { index,name,refresh_mhz:hz*1000,external,main,rendering_gpu }
+    fn c(index:usize,name:&'static str,hz:u32,screen:usize,optimise:bool,main:bool,rendering_gpu:bool) -> PacingCandidate<'static> {
+        PacingCandidate { index,name,refresh_mhz:hz*1000,screen,optimise,main,rendering_gpu }
     }
     #[test]
-    fn pacing_follows_the_setting_and_the_arrangement() {
-        // 149: the 240 Hz panel on the Intel GPU (main), a 30 Hz HDMI monitor on the rendering GPU
-        let both = [c(0,"card0-eDP-1",240,false,true,false),c(1,"card1-HDMI-A-2",30,true,false,true)];
-        assert_eq!(pacing_choice(&DisplayPacing::Auto,false,&both),Some((0,false)),"extended: each screen at its own refresh");
-        assert_eq!(pacing_choice(&DisplayPacing::Auto,true,&both),Some((1,true)),"mirror: the audience screen paces");
-        assert_eq!(pacing_choice(&DisplayPacing::Slowest,false,&both),Some((1,true)));
-        assert_eq!(pacing_choice(&DisplayPacing::Fastest,true,&both),Some((0,true)));
-        assert_eq!(pacing_choice(&DisplayPacing::Screen("card1-HDMI-A-2".into()),false,&both),Some((1,true)));
-        assert_eq!(pacing_choice(&DisplayPacing::Screen("card9-DP-1".into()),true,&both),Some((1,true)),"a gone output falls back to Auto");
-        let panel = [c(0,"card0-eDP-1",240,false,true,false)];
-        assert_eq!(pacing_choice(&DisplayPacing::Auto,true,&panel),Some((0,true)),"mirror without an external: the built-in");
-        let two_external = [c(0,"card0-eDP-1",60,false,true,true),c(1,"card1-DP-3",144,true,false,true),c(2,"card1-HDMI-A-2",120,true,false,false)];
-        assert_eq!(pacing_choice(&DisplayPacing::Auto,true,&two_external),Some((2,true)),"mirror: the slowest external, not the slower panel");
-        let tie = [c(0,"card0-eDP-1",60,false,false,false),c(1,"card1-DP-3",60,true,true,true)];
-        assert_eq!(pacing_choice(&DisplayPacing::Slowest,false,&tie),Some((1,true)),"ties prefer the main screen");
-        assert_eq!(pacing_choice(&DisplayPacing::Auto,false,&[]),None);
+    fn pacing_follows_the_setting_and_each_screens_optimise_for_output() {
+        // a 240 Hz panel on the Intel GPU (main), a 30 Hz HDMI monitor on the rendering GPU
+        let extended = [c(0,"card0-eDP-1",240,0,true,true,false),c(1,"card1-HDMI-A-2",30,1,true,false,true)];
+        assert_eq!(pacing_choice(&DisplayPacing::Auto,&extended),Some((0,false)),"two screens: each at its own refresh");
+        let mirror = [c(0,"card0-eDP-1",240,0,false,true,false),c(1,"card1-HDMI-A-2",30,0,true,true,true)];
+        assert_eq!(pacing_choice(&DisplayPacing::Auto,&mirror),Some((1,true)),"one mirrored screen: its optimise-for output paces");
+        let mirror = [c(0,"card0-eDP-1",240,0,true,true,false),c(1,"card1-HDMI-A-2",30,0,false,true,true)];
+        assert_eq!(pacing_choice(&DisplayPacing::Auto,&mirror),Some((0,true)),"optimised for the panel: the panel paces");
+        assert_eq!(pacing_choice(&DisplayPacing::Slowest,&extended),Some((1,true)));
+        assert_eq!(pacing_choice(&DisplayPacing::Fastest,&mirror),Some((0,true)));
+        assert_eq!(pacing_choice(&DisplayPacing::Screen("card1-HDMI-A-2".into()),&extended),Some((1,true)));
+        assert_eq!(pacing_choice(&DisplayPacing::Screen("card9-DP-1".into()),&mirror),Some((0,true)),"a gone output falls back to Auto");
+        // [B 60] [A 144 main] [C 240 + D 60, optimised for D]: the mirror is paced by D, so A is the fastest pacer
+        let users = [c(0,"B",60,0,true,false,true),c(1,"A",144,1,true,true,true),c(2,"C",240,2,false,false,true),c(3,"D",60,2,true,false,true)];
+        assert_eq!(pacing_choice(&DisplayPacing::Auto,&users),Some((1,false)),"several screens: the fastest screen's own pacer");
+        assert_eq!(pacing_choice(&DisplayPacing::Fastest,&users),Some((2,true)),"Fastest: any output");
+        let tie = [c(0,"card0-eDP-1",60,0,true,false,false),c(1,"card1-DP-3",60,1,true,true,true)];
+        assert_eq!(pacing_choice(&DisplayPacing::Slowest,&tie),Some((1,true)),"ties prefer the main screen");
+        assert_eq!(pacing_choice(&DisplayPacing::Auto,&[]),None);
+    }
+    #[test]
+    fn the_users_screens_are_laid_out_once_each_with_the_mirror_sized_by_its_choice() {
+        use crate::direct::DisplayArrangement;
+        let r = |x,y,width,height| Some(wide_desktop::SliceRect { x,y,width,height });
+        let names = ["A","B","C","D"];
+        // A 2560x1440, B 1920x1080, C 3840x2160, D 2560x1440 (C and D both 16:9)
+        let sizes = [[2560,1440],[1920,1080],[3840,2160],[2560,1440]];
+        let max = [32768,32768];
+        let users = DisplayArrangement::parse("B,A,C+D").unwrap();
+        let (size,screens,placements) = arrange_screens(&users,&names,&sizes,max);
+        assert_eq!(screens.iter().map(|s| (s.name.as_str(),s.outputs.clone(),s.optimise_for)).collect::<Vec<_>>(),
+            vec![("B",vec![1],1),("A",vec![0],0),("C",vec![2,3],2)],"three screens; the mirror defaults to its largest monitor");
+        assert_eq!(size,[1920+2560+3840,2160]);
+        assert_eq!(placements,vec![r(1920,0,2560,1440),r(0,0,1920,1080),r(4480,0,3840,2160),r(4480,0,3840,2160)],
+            "both mirror outputs show the one screen rectangle: rendered once");
+        assert_eq!(wide_desktop::fit((3840,2160),(2560,1440)),wide_desktop::SliceRect { x:0,y:0,width:2560,height:1440 },"D shows it scaled, whole");
+        // optimised for D: the screen takes D's size, nothing else moves
+        let (size,screens,placements) = arrange_screens(&DisplayArrangement::parse("B,A,C+*D").unwrap(),&names,&sizes,max);
+        assert_eq!((screens[2].name.as_str(),screens[2].optimise_for),("C",3),"the name stays: its windows stay");
+        assert_eq!((size,placements[2],placements[3]),([1920+2560+2560,1440],r(4480,0,2560,1440),r(4480,0,2560,1440)));
+        // a 16:10 panel mirrored with a 16:9 monitor: letterboxed both ways
+        let (_,screens,placements) = arrange_screens(&DisplayArrangement::parse("P+M").unwrap(),&["P","M"],&[[2560,1600],[1920,1080]],max);
+        assert_eq!((screens.len(),placements[1]),(1,r(0,0,2560,1600)));
+        assert_eq!(wide_desktop::fit((2560,1600),(1920,1080)),wide_desktop::SliceRect { x:96,y:0,width:1728,height:1080 });
+        let (_,_,placements) = arrange_screens(&DisplayArrangement::parse("P+*M").unwrap(),&["P","M"],&[[2560,1600],[1920,1080]],max);
+        assert_eq!(placements[0],r(0,0,1920,1080));
+        assert_eq!(wide_desktop::fit((1920,1080),(2560,1600)),wide_desktop::SliceRect { x:0,y:80,width:2560,height:1440 });
+        // C unplugged: the mirror goes on with D, at D's size, under the same name
+        let (_,screens,placements) = arrange_screens(&users,&["A","B","D"],&[[2560,1440],[1920,1080],[2560,1440]],max);
+        assert_eq!((screens.len(),screens[2].name.as_str(),placements[2]),(3,"C",r(4480,0,2560,1440)));
+        // mirror everything / extend everything are the two ends of the same model
+        let (_,screens,_) = arrange_screens(&DisplayArrangement::parse("A+B+C+D").unwrap(),&names,&sizes,max);
+        assert_eq!(screens.len(),1);
+        let (_,screens,_) = arrange_screens(&DisplayArrangement::default(),&names,&sizes,max);
+        assert_eq!(screens.len(),4);
+        let (_,screens,placements) = arrange_screens(&DisplayArrangement::parse("off:B").unwrap(),&["A","C"],&[[2560,1440],[3840,2160]],max);
+        assert_eq!((screens.len(),placements[1]),(2,r(2560,0,3840,2160)));
     }
     fn render_order(devices:&[(bool,vk::PhysicalDeviceType,u8)]) -> Vec<usize> {
         let mut ranked:Vec<_> = devices.iter().enumerate().map(|(i,(selected,kind,builtin))| (render_rank(*selected,*kind,*builtin,i),i)).collect();
@@ -1391,7 +1541,7 @@ mod tests {
         assert_eq!(render_order(&[(false,T::DISCRETE_GPU,1),(true,T::INTEGRATED_GPU,0)])[0],1,"an explicit pin wins");
     }
     fn connector(card:&str,name:&str,id:u32,fingerprint:u64) -> DrmConnector {
-        DrmConnector { card:PathBuf::from(format!("/dev/dri/{card}")),name:format!("{card}-{name}"),id,fingerprint }
+        DrmConnector { card:PathBuf::from(format!("/dev/dri/{card}")),name:format!("{card}-{name}"),id,fingerprint,monitor:String::new() }
     }
     #[test]
     fn a_saved_mode_stays_on_its_own_screen() {

@@ -37,7 +37,6 @@ enum Command {
     Resume,
     Stop,
     Mode(String, Option<String>),
-    Order(Vec<String>),
     Primary(String),
     Arrangement(crate::direct::DisplayArrangement),
     Pacing(crate::direct::DisplayPacing),
@@ -189,13 +188,15 @@ impl App {
             let snapshot = lock(&self.state.snapshot);
             (snapshot.size, snapshot.displays.clone(), snapshot.generation)
         };
-        let mut screens: Vec<_> = displays.outputs.iter().filter_map(|o| {
-            let (x,y) = o.desktop_position?;
-            let bounds = [x as f64 / self.state.dpi, y as f64 / self.state.dpi, o.width as f64 / self.state.dpi, o.height as f64 / self.state.dpi];
-            Some(crate::ScreenInfo { bounds, work_area: bounds, is_primary: o.primary })
+        // One screen per desktop surface: a mirrored screen is one rectangle, whatever its outputs.
+        let dpi = self.state.dpi;
+        let mut screens: Vec<_> = displays.screens.iter().map(|s| {
+            let bounds = [s.x as f64 / dpi, s.y as f64 / dpi, s.width as f64 / dpi, s.height as f64 / dpi];
+            crate::ScreenInfo { bounds, work_area: bounds, is_primary: s.primary }
         }).collect();
         screens.sort_by(|a,b| a.bounds[0].total_cmp(&b.bounds[0]));
-        let refresh = displays.outputs.iter().find(|o| o.primary).map_or(0.0, |o| o.refresh_hz as f32);
+        // The main screen's refresh is that of the output it is optimised for.
+        let refresh = displays.main_screen().and_then(|s| displays.output(&s.optimise_for)).map_or(0.0, |o| o.refresh_hz as f32);
         self.generation = generation;
         if let Some(input) = &mut self.input {
             input.set_bounds(size[0] as f64 / self.state.dpi, size[1] as f64 / self.state.dpi, self.state.dpi);
@@ -248,10 +249,14 @@ impl App {
         };
         let command = match command {
             DisplayCommand::Source(name) => { connected(&name)?; Command::Primary(name) }
-            DisplayCommand::Order(order) => Command::Order(order),
             DisplayCommand::Virtual(display) => Command::Virtual(display),
             DisplayCommand::Arrangement(arrangement) => {
-                if let crate::direct::DisplayArrangement::Mirror { optimise_for } = &arrangement { connected(optimise_for)?; }
+                // Every output may be named before it is plugged in; only all-dark is refused.
+                let snapshot = lock(&self.state.snapshot);
+                if !snapshot.displays.outputs.is_empty() && snapshot.displays.outputs.iter().all(|o| arrangement.is_off(&o.name)) {
+                    return Err("an arrangement must leave a connected output on".into());
+                }
+                drop(snapshot);
                 Command::Arrangement(arrangement)
             }
             DisplayCommand::Pacing(pacing) => {

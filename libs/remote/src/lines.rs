@@ -19,6 +19,13 @@ pub fn client_gone() -> bool {
     ASKED_ON.with(|c| c.borrow().as_ref().is_some_and(Conn::is_closed))
 }
 
+/// The connection of the request this thread answers (None outside a request): for a wait that
+/// asks whether its client has gone from a loop or a thread of its own, where [`client_gone`]
+/// sees no request.
+pub fn asked_on() -> Option<Conn> {
+    ASKED_ON.with(|c| c.borrow().clone())
+}
+
 /// Answers one request line by pushing answer lines (no `end` line).
 pub type Handler = dyn Fn(&str, &mut Vec<String>) + Send + Sync;
 

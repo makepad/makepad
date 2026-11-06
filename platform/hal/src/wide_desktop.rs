@@ -1,11 +1,11 @@
 //! Arranging the screens the direct renderer drives into one wide desktop.
 //!
-//! Screens sit left to right along their top edges at their native
-//! resolutions. The renderer draws the whole desktop once into one
-//! composition image; each screen shows its own rectangle of it, unscaled.
-//! A saved order of connector names overrides the default order; screens it
-//! does not name follow in default order. A screen that would make the
-//! composition larger than the GPU can render is left out of the desktop.
+//! Screens sit left to right along their top edges, each at its optimise-for
+//! output's native resolution. The renderer draws the whole desktop once into
+//! one composition image; each output shows its screen's rectangle of it,
+//! unscaled when its mode has the screen's size, else scaled to fit (`fit`).
+//! A screen that would make the composition larger than the GPU can render is
+//! left out of the desktop.
 //!
 //! Pure geometry, so it is unit tested without a GPU: no Vulkan, no DRM.
 
@@ -129,10 +129,16 @@ pub fn parse_mode_overrides(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// A left-to-right order of connector names from text like
-/// `card0-HDMI-A-2, card1-HDMI-A-1` (commas or semicolons; blanks ignored).
-pub fn parse_display_order(text: &str) -> Vec<String> {
-    text.split([',', ';']).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string).collect()
+/// Where a `source` sized picture shows on an `output` sized one, scaled to fit with its aspect
+/// kept and centred (letterboxed or pillarboxed). The same size fills the output 1:1.
+pub fn fit(source: (u32, u32), output: (u32, u32)) -> SliceRect {
+    if source == output {
+        return SliceRect { x: 0, y: 0, width: output.0, height: output.1 };
+    }
+    let scale = (output.0 as f64 / source.0.max(1) as f64).min(output.1 as f64 / source.1.max(1) as f64);
+    let width = (source.0 as f64 * scale).round().clamp(1.0, output.0.max(1) as f64) as u32;
+    let height = (source.1 as f64 * scale).round().clamp(1.0, output.1.max(1) as f64) as u32;
+    SliceRect { x: (output.0.saturating_sub(width)) / 2, y: (output.1.saturating_sub(height)) / 2, width, height }
 }
 
 /// Clamps a pointer to the union of `rects` (each `[x, y, width, height]`, in the pointer's
@@ -286,12 +292,14 @@ mod tests {
     }
 
     #[test]
-    fn display_order_is_read_from_text() {
-        assert_eq!(
-            parse_display_order(" card0-HDMI-A-2 ,card1-HDMI-A-1;; "),
-            vec!["card0-HDMI-A-2".to_string(), "card1-HDMI-A-1".to_string()]
-        );
-        assert!(parse_display_order("").is_empty());
+    fn a_mirror_output_shows_its_screen_scaled_to_fit() {
+        let r = |x, y, width, height| SliceRect { x, y, width, height };
+        assert_eq!(fit((2560, 1440), (2560, 1440)), r(0, 0, 2560, 1440), "the same size: 1:1");
+        assert_eq!(fit((3840, 2160), (2560, 1440)), r(0, 0, 2560, 1440), "4K screen on a QHD monitor: same aspect, whole");
+        assert_eq!(fit((2560, 1440), (3840, 2160)), r(0, 0, 3840, 2160), "and up");
+        assert_eq!(fit((2560, 1600), (1920, 1080)), r(96, 0, 1728, 1080), "16:10 on 16:9: pillarboxed");
+        assert_eq!(fit((3840, 2160), (1920, 1200)), r(0, 60, 1920, 1080), "16:9 on 16:10: letterboxed");
+        assert_eq!(fit((1920, 1080), (1080, 1920)), r(0, 656, 1080, 608), "a portrait monitor");
     }
 
     #[test]

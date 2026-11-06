@@ -37,6 +37,7 @@ pub mod fake_camera;
 pub mod clipboard;
 pub mod drag_promise;
 pub mod direct;
+pub mod display_profiles;
 pub mod user_input;
 #[cfg(target_os = "linux")]
 pub mod wide_desktop;

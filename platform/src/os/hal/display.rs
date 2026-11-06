@@ -20,14 +20,7 @@ impl DisplayClient {
         for req in self.queued.drain(..) {
             match &self.pending[&req] {
                 LinuxDisplayCommand::Source(name) => w.direct_display_source(req, name.as_bytes()),
-                LinuxDisplayCommand::Order(order) => {
-                    let names: Vec<_> = order.iter().map(String::as_str).collect();
-                    w.direct_display_order(req, names.len() as u32, &pack_strs(&names));
-                }
-                LinuxDisplayCommand::Arrangement(arrangement) => w.direct_display_arrangement(req, match arrangement {
-                    makepad_hal::direct::DisplayArrangement::Extended => &[][..],
-                    makepad_hal::direct::DisplayArrangement::Mirror { optimise_for } => optimise_for.as_bytes(),
-                }),
+                LinuxDisplayCommand::Arrangement(arrangement) => w.direct_display_arrangement(req, arrangement.text().as_bytes()),
                 LinuxDisplayCommand::Pacing(pacing) => w.direct_display_pacing(req, &pack_strs(&pacing.args())),
                 LinuxDisplayCommand::Virtual(display) => match display {
                     Some(v) => w.direct_display_virtual(req, 2, &pack_strs(&[&v.mode_string(), v.panels.as_str()])),
@@ -63,7 +56,9 @@ impl Cx {
         let rect = |r: [f64; 4]| crate::makepad_math::Rect {
             pos: crate::makepad_math::dvec2(r[0], r[1]), size: crate::makepad_math::dvec2(r[2], r[3]),
         };
-        let names = inventory.snapshot.outputs.iter().filter(|o| o.desktop_position.is_some()).map(|o| o.name.clone());
+        // One screen per desktop surface, named after its first arranged output: a mirror
+        // that gains or loses an output keeps its name, and so its windows.
+        let names = inventory.snapshot.screens.iter().map(|s| s.name.clone());
         let mut screens: Vec<_> = names.zip(inventory.screens.into_iter().map(|s| crate::screen::ScreenGeom {
             bounds: rect(s.bounds), work_area: rect(s.work_area), is_primary: s.is_primary,
         })).collect();

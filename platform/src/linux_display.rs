@@ -1,17 +1,19 @@
 //! Display inventory and controls of the HAL direct (DRM/KMS) shell, as Cx sees them over the pipe.
 //!
-//! The direct backend drives one wide desktop: every connector of the
-//! rendering GPU side by side, left to right along their top edges, at their
-//! native pixels divided by the global DPI factor (see `linux_wide_desktop`).
-//! Each connector shows its own rectangle of it. A connector that does not
-//! fit within the GPU's limits shows the whole desktop letterboxed.
+//! The direct backend drives one wide desktop of screens (`DisplayArrangement`), side by
+//! side, left to right along their top edges, at native pixels divided by the global DPI
+//! factor. A screen shows on one output, or on several (a mirror): it is rendered once, at
+//! the size of the output it is optimised for, and the others show it scaled to fit.
+//! An output can also be off. The saved layouts (`display_profiles`) are applied by the
+//! backend whenever the set of connected monitors changes.
 //! This module is the UI-facing contract: the window manager reads the
 //! snapshot to list displays and their state; it never touches Vulkan.
 //!
 //! Outside the direct Vulkan backend (Wayland/X11 builds, hosted children)
 //! the snapshot is empty with `direct == false`.
 
-pub use makepad_hal::direct::{DisplayArrangement, DisplayPacing, LinuxDisplayFrameTiming, LinuxDisplayOutput, LinuxDisplaySnapshot, VirtualDisplay, VirtualPanels, LINUX_VULKAN_DEVICE_ENV, VIRTUAL_OUTPUT};
+pub use makepad_hal::direct::{ArrangedScreen, DisplayArrangement, DisplayPacing, LinuxDisplayFrameTiming, LinuxDisplayOutput, LinuxDisplayScreen, LinuxDisplaySnapshot, ScreenGroup, VirtualDisplay, VirtualPanels, LINUX_VULKAN_DEVICE_ENV, VIRTUAL_OUTPUT};
+pub use makepad_hal::display_profiles;
 
 pub use makepad_hal::direct::DisplayCommand as LinuxDisplayCommand;
 
@@ -46,17 +48,14 @@ impl crate::cx::Cx {
     pub fn linux_set_display_source(&mut self, name: &str) -> Result<(), String> {
         self.hal_queue_display(LinuxDisplayCommand::Source(name.into()))
     }
-    /// Queue an order request; the host's `Result` arrives as `Event::LinuxDisplayResult`.
-    pub fn linux_set_display_order(&mut self, order: &[String]) -> Result<(), String> {
-        self.hal_queue_display(LinuxDisplayCommand::Order(order.to_vec()))
-    }
     /// Validate mode syntax locally and queue it; host acceptance arrives as `Event::LinuxDisplayResult`.
     pub fn linux_set_display_mode(&mut self, name: &str, mode: Option<&str>) -> Result<(), String> {
         self.hal_queue_display(LinuxDisplayCommand::Mode { name: name.into(), mode: mode.map(str::to_owned) })
     }
-    /// Extended desktop, or mirror every output optimised for one screen (the desktop is
-    /// rendered at its mode, the others show it letterboxed). Host acceptance arrives as
-    /// `Event::LinuxDisplayResult`; the snapshot's `arrangement` follows.
+    /// The screens left to right, which outputs each shows and which one it is optimised
+    /// for, and the outputs that are off. No modeset unless an output turns on or off.
+    /// Host acceptance arrives as `Event::LinuxDisplayResult`; the snapshot's `arrangement`
+    /// and `screens` follow.
     pub fn linux_set_display_arrangement(&mut self, arrangement: &DisplayArrangement) -> Result<(), String> {
         self.hal_queue_display(LinuxDisplayCommand::Arrangement(arrangement.clone()))
     }

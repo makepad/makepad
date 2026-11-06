@@ -37,6 +37,10 @@ struct Record {
     depth: usize,
     owner: NodeId,
     part_key: u64,
+    /// A part drawn as an area of its own (a list's row): its bounds, and whether it is
+    /// offscreen, are that area's once the frame's turtles finish, as a widget's are. Empty:
+    /// the part carries its own.
+    drawn: Area,
     label_for: NodeId,
     generated_labels: Vec<NodeId>,
     parts: HashMap<u64, NodeId>,
@@ -274,7 +278,8 @@ impl CxA11y {
     /// Insert a non-widget child. Keys are stable application item identities, not draw indices.
     /// Overflow of the wire's 16-bit part field uses a fresh widget id from the same allocator;
     /// dispatch always resolves the owner, so large virtual collections do not truncate or collide.
-    pub fn set_part(&mut self, token: u32, key: u64, parent_key: Option<u64>, mut node: Node, alloc: impl FnOnce() -> u64) {
+    /// `drawn`: the area the part drew as, when it drew as one of its own (see [`Record::drawn`]).
+    pub fn set_part(&mut self, token: u32, key: u64, parent_key: Option<u64>, mut node: Node, drawn: Area, alloc: impl FnOnce() -> u64) {
         let f = self.stack[token as usize];
         let Some(w) = f.window else { return };
         let tree = self.windows.get_mut(&w).unwrap();
@@ -311,6 +316,7 @@ impl CxA11y {
         let rec = tree.records.get_mut(&id).unwrap();
         rec.owner = f.id;
         rec.part_key = key;
+        rec.drawn = drawn;
         rec.next = node;
     }
     /// The path of the node being built could not be named yet: it is asked again once the
@@ -411,12 +417,14 @@ impl CxA11y {
                 }
                 if rec.alive {
                     if !rec.owner.is_none() {
-                        // Parts carry their own bounds, but focus belongs to the owner's real Area.
+                        // Parts carry their own bounds, but focus belongs to the owner's real
+                        // Area; one drawn as an area of its own stands where that area shows.
+                        if !rec.drawn.is_empty() {
+                            shown_at(&mut rec.next, bounds(rec.drawn));
+                        }
                     } else {
-                        if let Some(b) = bounds(rec.area) {
-                            rec.next.bounds = b;
-                        } else if !rec.area.is_empty() {
-                            rec.next.bounds = Default::default();
+                        if !rec.area.is_empty() {
+                            shown_at(&mut rec.next, bounds(rec.area));
                         }
                         if let (Some(at), Some(now)) = (rec.text_at, origin(rec.area)) {
                             follow_origin(&mut rec.next, [now[0] - at[0], now[1] - at[1]]);
@@ -784,6 +792,14 @@ impl Cx {
         self.a11y = a11y;
     }
 }
+/// A drawn node's bounds: its area clipped by every clip it drew under, on every side. None:
+/// nothing of it is inside them (a row a list scrolled past an edge, a panel a scroll view
+/// moved away), so it is offscreen, with no bounds.
+fn shown_at(node: &mut Node, shown: Option<makepad_a11y::Rect>) {
+    node.states.set(States::OFFSCREEN, shown.is_none());
+    node.bounds = shown.unwrap_or_default();
+}
+
 pub fn semantic_rect(rect: crate::makepad_math::Rect) -> makepad_a11y::Rect {
     makepad_a11y::Rect {
         x: rect.pos.x as f32,
@@ -971,11 +987,20 @@ mod tests {
         focus: Area,
         redraw: impl FnMut(DrawListId) -> Option<u64>,
     ) -> Vec<TreeUpdate> {
+        finish_shown(b, focus, redraw, |_| None)
+    }
+    /// [`finish`] with the areas' on-screen bounds (`None`: nothing of it on screen).
+    fn finish_shown(
+        b: &mut CxA11y,
+        focus: Area,
+        redraw: impl FnMut(DrawListId) -> Option<u64>,
+        bounds: impl FnMut(Area) -> Option<makepad_a11y::Rect>,
+    ) -> Vec<TreeUpdate> {
         let mut messages = Vec::new();
         b.finish_frame(
             focus,
             redraw,
-            |_| None,
+            bounds,
             |_| None,
             |w, bytes| messages.push((w, bytes)),
         );
@@ -992,6 +1017,47 @@ mod tests {
         let mut b = CxA11y::default();
         assert!(b.set_consumers(4));
         b
+    }
+
+    /// A node drawn with nothing of it on screen (clipped away, a row scrolled past a list's
+    /// edge) is offscreen, with no bounds; scrolled back, it is on screen where it stands. So is
+    /// a part drawn as an area of its own (a list's row that is no widget), where its area
+    /// shows when the frame finishes; a part drawn as none keeps the bounds it carries.
+    #[test]
+    fn a_node_clipped_out_of_view_is_offscreen_until_it_shows() {
+        let mut pool = CxDrawListPool::default();
+        let list = pool.alloc();
+        let area = |rect_id| Area::Rect(RectArea { draw_list_id: list.id(), rect_id, redraw_id: 1 });
+        let (row, part_row) = (area(0), area(1));
+        let carried = makepad_a11y::Rect { x: 0.0, y: 90.0, w: 100.0, h: 20.0 };
+        let mut b = active();
+        let mut tree = makepad_a11y::mirror::Tree::default();
+        let frame = |b: &mut CxA11y, tree: &mut makepad_a11y::mirror::Tree, shown: Option<makepad_a11y::Rect>| {
+            b.begin_frame();
+            let r = root(b, WindowId(0, 1), 1, list.id());
+            let t = b.begin_node(2, Some(list.id()));
+            b.end_node(t, node(Role::ListItem, "Row"), row);
+            let owner = b.begin_node(3, Some(list.id()));
+            b.set_part(owner, 7, None, node(Role::ListItem, "Part row"), part_row, || unreachable!("a part id"));
+            b.set_part(owner, 8, None, Node { bounds: carried, ..node(Role::ListItem, "Own bounds") }, Area::Empty, || unreachable!("a part id"));
+            b.end_node(owner, node(Role::List, "List"), Area::Empty);
+            end_root(b, r);
+            b.finish_frame(Area::Empty, |_| Some(1), |a| if a == row || a == part_row { shown } else { None }, |_| None, |_, bytes| {
+                tree.apply(makepad_a11y::wire::decode_update(&bytes).unwrap());
+            });
+            let get = |id| tree.node(id).cloned().expect("drawn");
+            (get(NodeId::widget(2)), get(NodeId::part(3, 1)), get(NodeId::part(3, 2)))
+        };
+        let (row, part, own) = frame(&mut b, &mut tree, None);
+        assert!(row.states.contains(States::OFFSCREEN) && row.bounds.is_empty(), "clipped away: offscreen, no bounds");
+        assert!(part.states.contains(States::OFFSCREEN) && part.bounds.is_empty(), "a part's row clipped away too");
+        assert!(!own.states.contains(States::OFFSCREEN) && own.bounds == carried, "a part with no area of its own keeps its bounds");
+        let on = makepad_a11y::Rect { x: 0.0, y: 40.0, w: 100.0, h: 20.0 };
+        let (row, part, own) = frame(&mut b, &mut tree, Some(on));
+        assert!(!row.states.contains(States::OFFSCREEN), "scrolled back into view: on screen");
+        assert_eq!(row.bounds, on);
+        assert!(!part.states.contains(States::OFFSCREEN) && part.bounds == on, "the part's row where its area shows");
+        assert_eq!(own.bounds, carried);
     }
 
     #[test]
@@ -1047,7 +1113,7 @@ mod tests {
                     role: Role::TabPanel,
                     name: "Panel".into(),
                     ..Default::default()
-                }, || unreachable!("existing widget"));
+                }, Area::Empty, || unreachable!("existing widget"));
             }
             end_root(&mut builder, root);
             for update in finish(&mut builder, Area::Empty, |list| {
@@ -1087,7 +1153,7 @@ mod tests {
             role: Role::Menu,
             states: States::HIDDEN,
             ..Default::default()
-        }, || unreachable!("an existing widget needs no part id"));
+        }, Area::Empty, || unreachable!("an existing widget needs no part id"));
         end_root(&mut builder, root);
         tree.apply(finish(&mut builder, Area::Empty, |list| {
             Some(if list == main.id() { 2 } else { 1 })
@@ -1316,9 +1382,11 @@ mod tests {
             if i == 1 {
                 b.announce("Saved", Live::Assertive);
             }
-            let u = finish(&mut b, if i == 0 { Area::Empty } else { area }, |_| {
+            // the field on screen where it drew
+            let drawn = makepad_a11y::Rect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 };
+            let u = finish_shown(&mut b, if i == 0 { Area::Empty } else { area }, |_| {
                 Some(i as u64 + 1)
-            })
+            }, |a| (a == area).then_some(drawn))
             .pop()
             .unwrap();
             if i == 1 {

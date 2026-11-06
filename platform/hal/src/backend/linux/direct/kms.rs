@@ -10,6 +10,8 @@ pub(super) struct DrmConnector {
     /// Hash of the sysfs EDID (the mode list without one): a replaced monitor on the same
     /// connector changes it even though the name does not.
     pub fingerprint: u64,
+    /// The monitor's name from its EDID; empty when it names none.
+    pub monitor: String,
 }
 
 
@@ -49,18 +51,31 @@ pub(super) fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
     hash
 }
 
-/// EDID + mode list hash for one sysfs connector directory. A monitor swap
-/// on the same connector changes it; an identical replug does not (that case
-/// is covered by connector-level kernel events and the acquire watchdog).
-pub(super) fn connector_fingerprint(dir: &Path) -> u64 {
+/// EDID + mode list hash for one sysfs connector directory, and the monitor's EDID name. A
+/// monitor swap on the same connector changes the hash; an identical replug does not (that
+/// case is covered by connector-level kernel events and the acquire watchdog).
+pub(super) fn connector_identity(dir: &Path) -> (u64, String) {
     // The EDID names the monitor. The mode list is derived by the driver and can
     // change for the same monitor (e.g. once a driver has validated modes after the
     // first modeset), so it only stands in when there is no EDID.
     let hash = 0xcbf2_9ce4_8422_2325u64;
     match std::fs::read(dir.join("edid")) {
-        Ok(edid) if !edid.is_empty() => fnv1a(hash, &edid),
-        _ => std::fs::read(dir.join("modes")).map_or(hash, |modes| fnv1a(hash, &modes)),
+        Ok(edid) if !edid.is_empty() => (fnv1a(hash, &edid), edid_monitor_name(&edid)),
+        _ => (std::fs::read(dir.join("modes")).map_or(hash, |modes| fnv1a(hash, &modes)), String::new()),
     }
+}
+
+/// The monitor name descriptor (tag 0xFC) of an EDID base block: up to 13 characters,
+/// ended by a line feed and padded with spaces. Empty when there is none.
+pub(super) fn edid_monitor_name(edid: &[u8]) -> String {
+    for offset in [54usize, 72, 90, 108] {
+        let Some(d) = edid.get(offset..offset + 18) else { break };
+        if d[0] == 0 && d[1] == 0 && d[2] == 0 && d[3] == 0xfc {
+            let text: String = d[5..].iter().take_while(|&&b| b != 0x0a).map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '?' }).collect();
+            return text.trim().to_owned();
+        }
+    }
+    String::new()
 }
 
 /// Connected connectors from sysfs, in primary-preference order. sysfs only
@@ -107,12 +122,13 @@ pub(super) fn scan_drm_connectors(filter: &DrmFilter) -> Result<Vec<DrmConnector
         }) {
             continue;
         }
-        let fingerprint = connector_fingerprint(&entry.path());
+        let (fingerprint, monitor) = connector_identity(&entry.path());
         connectors.push(DrmConnector {
             card: card_path,
             name,
             id,
             fingerprint,
+            monitor,
         });
     }
     connectors.sort_by_key(|connector| connector_rank(&connector.name));
@@ -462,3 +478,18 @@ pub(super) fn choose_output_format(formats: &[vk::SurfaceFormatKHR]) -> Result<v
     ))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn the_monitor_name_comes_from_the_edid_name_descriptor() {
+        let mut edid = vec![0u8; 128];
+        // a range-limits descriptor first, then the name
+        edid[72..77].copy_from_slice(&[0, 0, 0, 0xfd, 0]);
+        edid[90..95].copy_from_slice(&[0, 0, 0, 0xfc, 0]);
+        edid[95..108].copy_from_slice(b"Monitor 27\n  ");
+        assert_eq!(edid_monitor_name(&edid), "Monitor 27");
+        assert_eq!(edid_monitor_name(&edid[..64]), "", "a short EDID names nothing");
+        assert_eq!(edid_monitor_name(&[0u8; 128]), "");
+    }
+}

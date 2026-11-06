@@ -1367,15 +1367,6 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         HalCmd::DirectDisplaySource { req, name } => {
             direct_display(gpu, s, req, crate::direct::DisplayCommand::Source(String::from_utf8_lossy(name).into_owned()));
         }
-        HalCmd::DirectDisplayOrder { req, count, names } => {
-            let order = read_strs(names, count);
-            if order.len() != count as usize {
-                s.bad();
-                s.events.direct_display_result(req, crate::cmds::cmd_tag::DirectDisplayOrder as u32, false, b"malformed display order");
-            } else {
-                direct_display(gpu, s, req, crate::direct::DisplayCommand::Order(order));
-            }
-        }
         HalCmd::DirectDisplayPacing { req, args } => {
             match crate::direct::DisplayPacing::from_args(&read_strs(args, 2)) {
                 Some(pacing) => direct_display(gpu, s, req, crate::direct::DisplayCommand::Pacing(pacing)),
@@ -1385,11 +1376,14 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 }
             }
         }
-        HalCmd::DirectDisplayArrangement { req, name } => {
-            use crate::direct::DisplayArrangement;
-            let name = String::from_utf8_lossy(name).into_owned();
-            let arrangement = if name.is_empty() { DisplayArrangement::Extended } else { DisplayArrangement::Mirror { optimise_for: name } };
-            direct_display(gpu, s, req, crate::direct::DisplayCommand::Arrangement(arrangement));
+        HalCmd::DirectDisplayArrangement { req, text } => {
+            match crate::direct::DisplayArrangement::parse(&String::from_utf8_lossy(text)) {
+                Ok(arrangement) => direct_display(gpu, s, req, crate::direct::DisplayCommand::Arrangement(arrangement)),
+                Err(error) => {
+                    s.bad();
+                    s.events.direct_display_result(req, crate::cmds::cmd_tag::DirectDisplayArrangement as u32, false, error.as_bytes());
+                }
+            }
         }
         HalCmd::DirectDisplayVirtual { req, count, args } => {
             let args = read_strs(args, count);
