@@ -187,11 +187,90 @@ fn parse_with(bytes: &[u8], max_depth: u32, last_key_wins: bool) -> Result<Value
     Ok(v)
 }
 
+/// One component of a value's path from the root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step<'a> {
+    Key(&'a str),
+    Index(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pick {
+    /// Keep the entire value, including all descendants.
+    Keep,
+    /// Visit children of a container; omit scalar values.
+    Open,
+    /// Validate and omit the entire value without allocating it.
+    Skip,
+    /// Keep a string only; validate and omit any other value.
+    KeepString,
+}
+
+/// Project selected values while validating the entire input. The callback is
+/// called at the root and each child of an opened container, once per value.
+/// Kept and skipped subtrees need no further picks. A skipped root is `Null`.
+/// Array positions in paths refer to the input, before omitted elements.
+pub fn parse_picked(
+    bytes: &[u8],
+    max_depth: u32,
+    last_key_wins: bool,
+    pick: &dyn Fn(&[Step<'_>]) -> Pick,
+) -> Result<Value, &'static str> {
+    let text = std::str::from_utf8(bytes).map_err(|_| "invalid utf-8")?;
+    let mut p = P { b: text.as_bytes(), i: 0, max_depth, last_key_wins };
+    p.skip_ws();
+    let value = p.picked(0, &[], pick)?.unwrap_or(Value::Null);
+    p.skip_ws();
+    if p.i != p.b.len() {
+        return Err("trailing data");
+    }
+    Ok(value)
+}
+
 struct P<'a> {
     b: &'a [u8],
     i: usize,
     max_depth: u32,
     last_key_wins: bool,
+}
+
+struct StringChars<'a> {
+    p: P<'a>,
+    done: bool,
+}
+
+impl Iterator for StringChars<'_> {
+    type Item = char;
+
+    fn next(&mut self) -> Option<char> {
+        if self.done { return None; }
+        let c = self.p.next().ok()?;
+        let c = match c {
+            b'"' => { self.done = true; return None; }
+            b'\\' => match self.p.next().ok()? {
+                b'"' => '"', b'\\' => '\\', b'/' => '/',
+                b'b' => '\u{08}', b'f' => '\u{0c}', b'n' => '\n', b'r' => '\r', b't' => '\t',
+                b'u' => {
+                    let hi = self.p.hex4().ok()?;
+                    let cp = if (0xd800..0xdc00).contains(&hi) {
+                        self.p.expect(b'\\').ok()?;
+                        self.p.expect(b'u').ok()?;
+                        0x10000 + ((hi - 0xd800) << 10) + (self.p.hex4().ok()? - 0xdc00)
+                    } else { hi };
+                    char::from_u32(cp)?
+                }
+                _ => return None,
+            },
+            c if c < 0x80 => c as char,
+            _ => {
+                let len = match c { 0xc0..=0xdf => 2, 0xe0..=0xef => 3, _ => 4 };
+                let start = self.p.i - 1;
+                self.p.i = start + len;
+                std::str::from_utf8(&self.p.b[start..self.p.i]).ok()?.chars().next()?
+            }
+        };
+        Some(c)
+    }
 }
 
 impl<'a> P<'a> {
@@ -252,6 +331,139 @@ impl<'a> P<'a> {
             }
             b'-' | b'0'..=b'9' => self.number(),
             _ => Err("unexpected character"),
+        }
+    }
+
+    fn picked(
+        &mut self,
+        depth: u32,
+        path: &[Step<'_>],
+        pick: &dyn Fn(&[Step<'_>]) -> Pick,
+    ) -> Result<Option<Value>, &'static str> {
+        if depth > self.max_depth {
+            return Err("nesting too deep");
+        }
+        match pick(path) {
+            Pick::Keep => return self.value(depth).map(Some),
+            Pick::KeepString if self.peek() == Some(b'"') => return self.value(depth).map(Some),
+            Pick::Open if matches!(self.peek(), Some(b'{') | Some(b'[')) => {}
+            _ => {
+                self.skip_value(depth)?;
+                return Ok(None);
+            }
+        }
+        let object = self.next()? == b'{';
+        let start = self.i;
+        let end = if object { b'}' } else { b']' };
+        let mut pairs: Vec<(usize, String, Value)> = Vec::new();
+        let mut items = Vec::new();
+        let mut index = 0;
+        self.skip_ws();
+        if self.peek() != Some(end) {
+            loop {
+                self.skip_ws();
+                let mut child_path = path.to_vec();
+                let key;
+                let key_start = self.i;
+                if object {
+                    key = self.string()?;
+                    if !self.last_key_wins && self.first_key(start, key_start, depth)?.is_some() {
+                        return Err("duplicate key");
+                    }
+                    self.skip_ws();
+                    self.expect(b':')?;
+                    child_path.push(Step::Key(&key));
+                } else {
+                    key = String::new();
+                    child_path.push(Step::Index(index));
+                }
+                self.skip_ws();
+                let value = self.picked(depth + 1, &child_path, pick)?;
+                if object {
+                    let previous = pairs.iter().position(|(_, k, _)| *k == key);
+                    match (previous, value) {
+                        (Some(i), Some(value)) => pairs[i].2 = value,
+                        (Some(i), None) => { pairs.remove(i); }
+                        (None, Some(value)) => {
+                            let first = if self.last_key_wins { self.first_key(start, key_start, depth)?.unwrap_or(key_start) } else { key_start };
+                            pairs.push((first, key, value));
+                        }
+                        (None, None) => {}
+                    }
+                } else if let Some(value) = value {
+                    items.push(value);
+                }
+                index += 1;
+                self.skip_ws();
+                if self.peek() == Some(end) {
+                    break;
+                }
+                self.expect(b',')?;
+            }
+        }
+        self.expect(end)?;
+        Ok(Some(if object {
+            pairs.sort_unstable_by_key(|(first, _, _)| *first);
+            Value::Obj(pairs.into_iter().map(|(_, key, value)| (key, value)).collect())
+        } else { Value::Arr(items) }))
+    }
+
+    /// Revisit earlier members instead of retaining skipped keys. This has
+    /// quadratic object-key cost, as does the ordinary parser's duplicate check.
+    fn first_key(&self, start: usize, key_start: usize, depth: u32) -> Result<Option<usize>, &'static str> {
+        let mut prior = P { b: self.b, i: start, max_depth: self.max_depth, last_key_wins: true };
+        prior.skip_ws();
+        while prior.i < key_start {
+            let mut left = StringChars { p: P { b: self.b, i: prior.i + 1, max_depth: 0, last_key_wins: true }, done: false };
+            let mut right = StringChars { p: P { b: self.b, i: key_start + 1, max_depth: 0, last_key_wins: true }, done: false };
+            if left.by_ref().eq(right.by_ref()) {
+                return Ok(Some(prior.i));
+            }
+            prior.scan_string(None)?;
+            prior.skip_ws();
+            prior.expect(b':')?;
+            prior.skip_ws();
+            prior.skip_value(depth + 1)?;
+            prior.skip_ws();
+            prior.expect(b',')?;
+            prior.skip_ws();
+        }
+        Ok(None)
+    }
+
+    fn skip_value(&mut self, depth: u32) -> Result<(), &'static str> {
+        if depth > self.max_depth {
+            return Err("nesting too deep");
+        }
+        match self.peek().ok_or("unexpected end")? {
+            b'"' => self.scan_string(None),
+            b'{' | b'[' => {
+                let object = self.next()? == b'{';
+                let start = self.i;
+                let end = if object { b'}' } else { b']' };
+                self.skip_ws();
+                if self.peek() != Some(end) {
+                    loop {
+                        self.skip_ws();
+                        if object {
+                            let key_start = self.i;
+                            self.scan_string(None)?;
+                            if !self.last_key_wins && self.first_key(start, key_start, depth)?.is_some() {
+                                return Err("duplicate key");
+                            }
+                            self.skip_ws();
+                            self.expect(b':')?;
+                            self.skip_ws();
+                        }
+                        self.skip_value(depth + 1)?;
+                        self.skip_ws();
+                        if self.peek() == Some(end) { break; }
+                        self.expect(b',')?;
+                    }
+                }
+                self.expect(end)
+            }
+            _ => self.value(depth).map(|_| ()),
         }
     }
 
@@ -387,21 +599,26 @@ impl<'a> P<'a> {
     }
 
     fn string(&mut self) -> Result<String, &'static str> {
-        self.expect(b'"')?;
         let mut out = String::new();
+        self.scan_string(Some(&mut out))?;
+        Ok(out)
+    }
+
+    fn scan_string(&mut self, mut out: Option<&mut String>) -> Result<(), &'static str> {
+        self.expect(b'"')?;
         loop {
             let c = self.next()?;
             match c {
-                b'"' => return Ok(out),
+                b'"' => return Ok(()),
                 b'\\' => match self.next()? {
-                    b'"' => out.push('"'),
-                    b'\\' => out.push('\\'),
-                    b'/' => out.push('/'),
-                    b'b' => out.push('\u{08}'),
-                    b'f' => out.push('\u{0c}'),
-                    b'n' => out.push('\n'),
-                    b'r' => out.push('\r'),
-                    b't' => out.push('\t'),
+                    b'"' => if let Some(out) = out.as_mut() { out.push('"'); },
+                    b'\\' => if let Some(out) = out.as_mut() { out.push('\\'); },
+                    b'/' => if let Some(out) = out.as_mut() { out.push('/'); },
+                    b'b' => if let Some(out) = out.as_mut() { out.push('\u{08}'); },
+                    b'f' => if let Some(out) = out.as_mut() { out.push('\u{0c}'); },
+                    b'n' => if let Some(out) = out.as_mut() { out.push('\n'); },
+                    b'r' => if let Some(out) = out.as_mut() { out.push('\r'); },
+                    b't' => if let Some(out) = out.as_mut() { out.push('\t'); },
                     b'u' => {
                         let hi = self.hex4()?;
                         let cp = if (0xd800..0xdc00).contains(&hi) {
@@ -417,12 +634,12 @@ impl<'a> P<'a> {
                         } else {
                             hi
                         };
-                        out.push(char::from_u32(cp).ok_or("bad escape")?);
+                        if let Some(out) = out.as_mut() { out.push(char::from_u32(cp).ok_or("bad escape")?); };
                     }
                     _ => return Err("bad escape"),
                 },
                 c if c < 0x20 => return Err("control in string"),
-                c if c < 0x80 => out.push(c as char),
+                c if c < 0x80 => if let Some(out) = out.as_mut() { out.push(c as char); },
                 c => {
                     // UTF-8 was validated upfront: copy the multi-byte
                     // sequence verbatim.
@@ -435,9 +652,9 @@ impl<'a> P<'a> {
                     for _ in 1..len {
                         self.next()?;
                     }
-                    out.push_str(
-                        std::str::from_utf8(&self.b[start..self.i]).map_err(|_| "invalid utf-8")?,
-                    );
+                    if let Some(out) = out.as_mut() {
+                        out.push_str(std::str::from_utf8(&self.b[start..self.i]).map_err(|_| "invalid utf-8")?);
+                    }
                 }
             }
         }
@@ -462,6 +679,73 @@ impl<'a> P<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picked_children_exclude_skipped_strings_and_array_members() {
+        use Step::{Index, Key};
+        let bytes = br#"{"secret":"XYZ\"}\\{\n\u0058","a":["XYZ",{"secret":"XYZ","b":{"secret":"XYZ","a":"ok"}}]}"#;
+        let calls = std::cell::Cell::new(0);
+        let value = parse_picked(bytes, 8, false, &|path| {
+            calls.set(calls.get() + 1);
+            match path {
+                [] | [Key("a")] | [Key("a"), Index(1)] | [Key("a"), Index(1), Key("b")] => Pick::Open,
+                [Key("a"), Index(1), Key("b"), Key("a")] => Pick::Keep,
+                _ => Pick::Skip,
+            }
+        }).unwrap();
+        assert_eq!(value.to_json(), r#"{"a":[{"b":{"a":"ok"}}]}"#);
+        assert!(!value.to_json().bytes().any(|b| b"XYZ".contains(&b)));
+        assert_eq!(calls.get(), 9, "one pick per visited value, including the root");
+        assert_eq!(parse_picked(bytes, 8, false, &|_| Pick::Keep), parse_depth(bytes, 8));
+        // Projected leaves are built as the ordinary parser builds them.
+        let mixed = br#"{"a":"\ud83d\ude00\n","b":1.5,"c":[-2,1e3,null,true],"secret":{"a":"XYZ"}}"#;
+        let whole = parse_depth(mixed, 8).unwrap();
+        let projected = parse_picked(mixed, 8, false, &|path| match path {
+            [] => Pick::Open,
+            [Key("a" | "b" | "c")] => Pick::Keep,
+            _ => Pick::Skip,
+        }).unwrap();
+        for key in ["a", "b", "c"] {
+            assert_eq!(projected.get(key), whole.get(key), "{key}");
+        }
+        assert!(projected.get("secret").is_none());
+        assert_eq!(parse_picked(b"true", 8, false, &|_| Pick::Open).unwrap(), Value::Null);
+        assert_eq!(parse_picked(br#"{"secret":"XYZ"}"#, 8, false, &|_| Pick::KeepString).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn skipped_values_obey_validation_and_duplicate_rules() {
+        let invalid: &[&[u8]] = &[
+            br#""\q""#, br#""\ud800""#, br#""\udc00""#, br#""\ud800\u0041""#,
+            br#""\uXXXX""#, b"\"a\x01b\"", b"\"unterminated", &[b'"', 0xff, b'"'],
+            b"01", b"1.", b"1e", b"9e999", b"1e9999", b"9223372036854775808",
+            b"[1,]", b"{\"a\":}", b"[[[[0]]]]", b"{} trailing",
+            br#"{"a":1,"\u0061":2}"#, br#"{"a":{"b":0,"b":1}}"#,
+        ];
+        for bytes in invalid {
+            let expected = parse_depth(bytes, 3);
+            assert!(expected.is_err());
+            for mode in [Pick::Skip, Pick::Open] {
+                assert_eq!(parse_picked(bytes, 3, false, &|_| mode), expected);
+            }
+        }
+        let bytes = r#"{"a":{"secret":"XYZ"},"\u0061":"ok","b":["\ud83d\ude00","é"]}"#.as_bytes();
+        let value = parse_picked(bytes, 8, true, &|path| match path {
+            [] => Pick::Open,
+            [Step::Key("a")] => Pick::KeepString,
+            _ => Pick::Skip,
+        }).unwrap();
+        assert_eq!(value.to_json(), r#"{"a":"ok"}"#);
+        assert_eq!(parse_picked(br#"{"a":"ok","a":0}"#, 8, true, &|path| {
+            if path.is_empty() { Pick::Open } else { Pick::KeepString }
+        }).unwrap().to_json(), "{}");
+        let reordered = parse_picked(br#"{"a":0,"b":"b","a":"a","a":false,"a":"last"}"#, 8, true, &|path| {
+            if path.is_empty() { Pick::Open } else { Pick::KeepString }
+        }).unwrap();
+        assert_eq!(reordered.to_json(), r#"{"a":"last","b":"b"}"#);
+        assert!(parse_picked(r#"{"\ud83d\ude00":0,"😀":1}"#.as_bytes(), 8, false, &|_| Pick::Skip).is_err());
+        assert_eq!(parse_picked(bytes, 8, true, &|_| Pick::Skip).unwrap(), Value::Null);
+    }
 
     #[test]
     fn roundtrip_basic() {
