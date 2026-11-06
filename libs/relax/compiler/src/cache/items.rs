@@ -435,11 +435,12 @@ pub(crate) fn crate_ifaces(prog: &crate::program::Program, fps: &[u128], digests
 /// `crate_ifaces` when the first crates' interfaces are `known` (a partial collected restore keeps
 /// them): only the other crates' files need digests.
 pub(crate) fn crate_ifaces_from(prog: &crate::program::Program, fps: &[u128], digests: &[Option<std::sync::Arc<FileDigest>>], known: &[u128]) -> Vec<u128> {
-    crate_ifaces_keeping(prog, fps, digests, &|c| known.get(c).copied())
+    crate_ifaces_keeping(prog, fps, digests, &[], &|c| known.get(c).copied())
 }
 
 /// `crate_ifaces` with the interfaces `known` gives kept: only the other crates' files need digests.
-pub(crate) fn crate_ifaces_keeping(prog: &crate::program::Program, fps: &[u128], digests: &[Option<std::sync::Arc<FileDigest>>], known: &dyn Fn(usize) -> Option<u128>) -> Vec<u128> {
+/// `added`: the files of modules live edits added (Program::edit_added_files), after the boot's.
+pub(crate) fn crate_ifaces_keeping(prog: &crate::program::Program, fps: &[u128], digests: &[Option<std::sync::Arc<FileDigest>>], added: &[u32], known: &dyn Fn(usize) -> Option<u128>) -> Vec<u128> {
     let nc = prog.crates.len();
     let mut per: Vec<Sip128> = (0..nc)
         .map(|c| {
@@ -452,11 +453,13 @@ pub(crate) fn crate_ifaces_keeping(prog: &crate::program::Program, fps: &[u128],
             h
         })
         .collect();
-    // the boot's files only: a program restored with the files the lazy selection skipped
-    // loaded keeps the interfaces (and code keys) of the boot that recorded its code
-    for (i, d) in digests.iter().enumerate().take(prog.boot_files) {
+    // the boot's files (a program restored with the files the lazy selection skipped loaded keeps
+    // the interfaces, and code keys, of the boot that recorded its code), and those of the
+    // modules live edits added: they are the edited text's
+    let added = added.iter().map(|&f| f as usize).filter(|&f| f >= prog.boot_files);
+    for i in (0..prog.boot_files.min(digests.len())).chain(added) {
         if prog.front_macro_fragments.contains(&i) { continue; }
-        let (Some(&c), Some(d)) = (prog.file_crate.get(i), d.as_ref()) else { continue };
+        let (Some(&c), Some(d)) = (prog.file_crate.get(i), digests.get(i).and_then(|d| d.as_ref())) else { continue };
         if let Some(h) = per.get_mut(c as usize) {
             h.str(prog.file_paths.get(i).map_or("", |p| p.as_str()));
             h.u128(d.iface);

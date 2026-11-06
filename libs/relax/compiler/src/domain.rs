@@ -633,6 +633,9 @@ struct Domain {
     compiling: bool,
     reclaiming: bool,
     cancel: bool,
+    /// `retire` ran (a quit retires twice: the HAL's stop of the domain, then hal_run's
+    /// `domain::stop`): the threads it keeps for are reported by the first
+    retired: bool,
     /// the unit whose code it runs (0: not started on one yet)
     unit: usize,
     threads: Vec<DomainThread>,
@@ -702,7 +705,7 @@ pub(crate) fn register_boot(package: &str, base: u64) {
         started: std::time::Instant::now(),
         args: Vec::new(),
         thread_done: false,
-        compiling: false, reclaiming: false, cancel: false, unit: 0, threads: Vec::new(), heap: None,
+        compiling: false, reclaiming: false, cancel: false, retired: false, unit: 0, threads: Vec::new(), heap: None,
     });
     let token = relax_domain_reserve(base);
     relax_domain_enter(base, token);
@@ -803,7 +806,7 @@ pub fn retire(id: DomainId) -> Result<(), String> {
         let mut ds = domains();
         let d = ds.iter_mut().find(|d| d.info.id == id).ok_or_else(|| format!("no domain {id}"))?;
         d.cancel = true;
-        d.threads.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
+        if std::mem::replace(&mut d.retired, true) { Vec::new() } else { d.threads.iter().map(|t| t.name.clone()).collect::<Vec<_>>() }
     };
     CHANGED.notify_all();
     teardown(id);
@@ -1354,7 +1357,7 @@ pub fn prepare(spec: &AppSpec) -> Result<DomainId, Vec<String>> {
             started: t0,
             args: spec.argv.clone().unwrap_or_else(|| std::iter::once(spec.package.clone().into_bytes()).chain(spec.args.iter().map(|a| a.clone().into_bytes())).collect()),
             thread_done: false,
-            compiling: true, reclaiming: false, cancel: false, threads: Vec::new(), unit: 0, heap: None,
+            compiling: true, reclaiming: false, cancel: false, retired: false, threads: Vec::new(), unit: 0, heap: None,
         });
         id
     };

@@ -1486,6 +1486,31 @@ mod tests {
         assert_eq!(canonical(r"C:\nowhere\tests\chain.rs"), canonical("c:/nowhere/tests/chain.rs"));
     }
 
+    /// A Windows host's overlay (a lease's tree on a drive): the test runner names a target's
+    /// source `c:\..`, the package graph `C:\..` or `c:/..`, and a verbatim `\\?\C:\..` comes from
+    /// a canonicalize. Each is the one path, under the mount and inside it: `makepad run --subject`
+    /// found no test target for makepad-git's worktree_conformance.rs on such a node (11-06).
+    #[test]
+    fn a_windows_overlay_source_has_one_spelling_per_drive_case_and_separator() {
+        let _one = EDITS_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let fixture = test_store::Fixture::new(&[("libs/git/tests/worktree_conformance.rs", b"t")]);
+        let root = r"C:\Users\u\devhub\native\lane";
+        mount(root, fixture.store.clone(), &fixture.commit).unwrap();
+        let graph = r"C:\Users\u\devhub\native\lane\libs\git\tests\worktree_conformance.rs";
+        assert!(is_virtual(graph));
+        for spelling in [
+            r"c:\Users\u\devhub\native\lane\libs\git\tests\worktree_conformance.rs",
+            "c:/Users/u/devhub/native/lane/libs/git/tests/worktree_conformance.rs",
+            "C:/Users/u/devhub/native/lane/libs/git/tests/worktree_conformance.rs",
+            r"\\?\C:\Users\u\devhub\native\lane\libs\git\tests\worktree_conformance.rs",
+            r"c:\Users\u\devhub\native\lane\libs\git\src\..\tests\worktree_conformance.rs",
+        ] {
+            assert_eq!(canonical(spelling), canonical(graph), "{spelling}");
+        }
+        assert_eq!(canonical(graph), "c:/Users/u/devhub/native/lane/libs/git/tests/worktree_conformance.rs");
+        MOUNTS.write().unwrap().retain(|m| m.root != normalize_path(root));
+    }
+
     #[test]
     fn disk_paths_are_untouched_and_mounts_resolve() {
         assert_eq!(normalize_path("/a/./b/../c/"), "/a/c");

@@ -2454,19 +2454,19 @@ impl Cache {
         };
         // (a graph whose component ids ran far is not built over: the next one starts them again)
         let stored = stored.filter(|g| g.ids_left());
-        let clean = deps::Deps::clean_crates(prog, &prog.files, &self.iface_plain, stored.as_ref());
+        let clean = deps::Deps::clean_crates(prog, &prog.files, &[], &self.iface_plain, stored.as_ref());
         let mut digested = digest(&clean, &mut self.digests);
         let t_dg = t0.elapsed();
         // the item graph lives as long as the program (a settle rebuild's new cache inherits
         // it): built in the slot arena, it never pins the cold state's compiler chunks
-        let built = crate::zone_alloc::slots_with(|| deps::Deps::build(prog, &prog.files, &self.digests, &self.iface_plain, valid, stored.as_ref()));
+        let built = crate::zone_alloc::slots_with(|| deps::Deps::build(prog, &prog.files, &[], &self.digests, &self.iface_plain, valid, stored.as_ref()));
         let over = built.is_some() && clean.iter().any(|&c| c);
         let g = match built {
             Some(g) => g,
             None => {
                 // the alias or macro names changed: every crate is walked
                 digested += digest(&[], &mut self.digests);
-                crate::zone_alloc::slots_with(|| deps::Deps::build(prog, &prog.files, &self.digests, &self.iface_plain, valid, None)).expect("a graph built from scratch")
+                crate::zone_alloc::slots_with(|| deps::Deps::build(prog, &prog.files, &[], &self.digests, &self.iface_plain, valid, None)).expect("a graph built from scratch")
             }
         };
         if self.verbose {
@@ -2476,7 +2476,7 @@ impl Cache {
         }
         if over && std::env::var("MAKEPAD_RUN_DEPS_VERIFY").is_ok_and(|v| v == "1") {
             digest(&[], &mut self.digests);
-            let scratch = deps::Deps::build(prog, &prog.files, &self.digests, &self.iface_plain, valid, None).expect("a graph built from scratch");
+            let scratch = deps::Deps::build(prog, &prog.files, &[], &self.digests, &self.iface_plain, valid, None).expect("a graph built from scratch");
             match g.same_closures(&scratch) {
                 Ok(()) => eprintln!("makepad-run cache: item graph verified: built over the stored graph = built from scratch"),
                 Err(e) => eprintln!("makepad-run cache: item graph verify FAILED: {e}"),
@@ -8697,7 +8697,8 @@ pub(crate) unsafe fn const_closures(up: *mut Unit, consts: &[DefId]) -> Vec<(Def
     let u = &*up;
     let c = &mut *c;
     // a const in a file version an earlier edit made that left the keys where they were (a body
-    // edit): the graph has no node of it until the keys follow the running text, now
+    // edit), or in a module file an edit added: the graph has no node of it until the keys follow
+    // the running text, now
     let g = c.deps_graph(u);
     if consts.iter().any(|&d| !g.has_file(&u.prog, u.prog.def(d).file)) {
         c.keys_follow_text(u);
@@ -8786,8 +8787,15 @@ impl Cache {
         };
         let need = want(&self.digests, &|c| !seeing.get(c as usize).copied().unwrap_or(false));
         items::file_digests_of(prog, &need, &mut self.digests);
-        // the text now, per boot file
-        let mut parsed: Vec<std::sync::Arc<crate::parser::ParsedFile>> = prog.files[..boot].to_vec();
+        // the modules live edits added (their files were loaded after the boot): text of the
+        // program now as much as the boot files are, under the index each was loaded at
+        let added: Vec<(u32, u32)> = prog.edit_added_files().into_iter()
+            .filter(|&(f, _)| prog.file_crate.get(f as usize).is_some_and(|&c| !atomic.get(c as usize).copied().unwrap_or(true)))
+            .collect();
+        let added_at: Vec<u32> = added.iter().map(|x| x.0).collect();
+        let len = added.iter().map(|x| x.0 as usize + 1).max().unwrap_or(0).max(boot);
+        // the text now, per file of the graph
+        let mut parsed: Vec<std::sync::Arc<crate::parser::ParsedFile>> = prog.files[..len].to_vec();
         let mut versions: HashMap<u32, u32> = HashMap::new();
         for (&b, &n) in prog.current_versions() {
             if (b as usize) < boot {
@@ -8795,27 +8803,32 @@ impl Cache {
                 versions.insert(n, b);
             }
         }
+        // (one an edit added and no edit changed since is its own version)
+        for &(f, n) in &added {
+            parsed[f as usize] = prog.files[n as usize].clone();
+            versions.insert(n, f);
+        }
         for &n in versions.keys() { let _ = self.digest_of(u, n as usize); }
         let view = |digests: &[Option<std::sync::Arc<items::FileDigest>>]| -> Vec<Option<std::sync::Arc<items::FileDigest>>> {
-            let mut v = digests[..boot].to_vec();
+            let mut v = digests[..len].to_vec();
             for (&n, &b) in &versions { v[b as usize] = digests[n as usize].clone(); }
             v
         };
         let known = |c: usize| if seeing.get(c).copied().unwrap_or(false) { None } else { self.iface_plain.get(c).copied() };
-        let mut plain = items::crate_ifaces_keeping(prog, &self.fps, &view(&self.digests), &known);
+        let mut plain = items::crate_ifaces_keeping(prog, &self.fps, &view(&self.digests), &added_at, &known);
         plain.truncate(ncr);
-        let clean = deps::Deps::clean_crates(prog, &parsed, &plain, Some(&before));
+        let clean = deps::Deps::clean_crates(prog, &parsed, &added_at, &plain, Some(&before));
         let need = want(&self.digests, &|c| clean.get(c as usize).copied().unwrap_or(false));
         items::file_digests_of(prog, &need, &mut self.digests);
         let valid = before.built_from();
-        let built = crate::zone_alloc::slots_with(|| deps::Deps::build(prog, &parsed, &view(&self.digests), &plain, valid, Some(&before)));
+        let built = crate::zone_alloc::slots_with(|| deps::Deps::build(prog, &parsed, &added_at, &view(&self.digests), &plain, valid, Some(&before)));
         let mut g = match built {
             Some(g) => g,
             None => {
                 // the alias or macro names changed: every crate is walked
                 let need = want(&self.digests, &|_| false);
                 items::file_digests_of(prog, &need, &mut self.digests);
-                crate::zone_alloc::slots_with(|| deps::Deps::build(prog, &parsed, &view(&self.digests), &plain, valid, None)).expect("a graph built from scratch")
+                crate::zone_alloc::slots_with(|| deps::Deps::build(prog, &parsed, &added_at, &view(&self.digests), &plain, valid, None)).expect("a graph built from scratch")
             }
         };
         g.file_versions = versions;

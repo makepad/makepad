@@ -740,6 +740,9 @@ pub struct Program {
     import_versions: HashMap<u32, Vec<crate::macros::ImportEdit>>,
     /// the file version whose added items are being collected (add_items)
     adding_to: Option<u32>,
+    /// the named modules live edits added (add_items: a new `mod x;` or `mod x { .. }`), in the
+    /// order made: `edit_added_files` finds the files of theirs that are not boot files
+    edit_mods: Vec<u32>,
     pub def_id_to_node_id: crate::collected::ImageMap<DefId, (u32, crate::def_collector::NodeId)>,
     pub impl_trait_in_trait_data: crate::collected::ImageMap<DefId, crate::assoc::ImplTraitInTraitData>,
     pub associated_types_for_impl_traits: crate::collected::ImageMap<DefId, Vec<DefId>>,
@@ -921,6 +924,7 @@ impl Program {
             declaration_versions: Default::default(),
             import_versions: Default::default(),
             adding_to: None,
+            edit_mods: Vec::new(),
             def_id_to_node_id: Default::default(),
             impl_trait_in_trait_data: Default::default(),
             associated_types_for_impl_traits: Default::default(),
@@ -2189,6 +2193,49 @@ impl Program {
         &self.edit_current
     }
 
+    /// The files of the modules live edits added (a new `mod x;` loaded its file after the boot,
+    /// by the edit or by the post-boot loader later) that are in the program's text now: each as
+    /// (the index it was loaded at, its version current now). With the boot files they are the
+    /// text the code cache's keys follow after an edit (cache.rs keys_follow_text).
+    pub fn edit_added_files(&self) -> Vec<(u32, u32)> {
+        let first = |f: u32| self.edit_boot.get(&f).copied().unwrap_or(f);
+        let mut out: Vec<(u32, u32)> = Vec::new();
+        for &m in &self.edit_mods {
+            let md = &self.mods[m as usize];
+            // (an inline module's file is its parent's; a module whose file is not loaded yet has
+            // none of its own)
+            let f = first(md.file);
+            if (f as usize) < self.boot_files || f as usize >= self.files.len() || f == first(self.def(md.def).file) {
+                continue;
+            }
+            if self.module_in_text(m) && !out.iter().any(|x| x.0 == f) {
+                out.push((f, self.edit_current.get(&f).copied().unwrap_or(f)));
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// Whether named module `m` is in the program's text now: the `mod` item of each module up to
+    /// one a boot file declares is in its file's current version, and binds the module there (an
+    /// edit that removed it, or was refused, unbound it).
+    fn module_in_text(&self, m: u32) -> bool {
+        let mut m = m;
+        for _ in 0..256 {
+            let md = &self.mods[m as usize];
+            let Some(parent) = md.parent_mod else { return true };
+            let d = self.def(md.def);
+            if !self.is_current_version(d.file) || self.mods[parent as usize].types.get(&d.name) != Some(&md.def) {
+                return false;
+            }
+            if (self.edit_boot.get(&d.file).copied().unwrap_or(d.file) as usize) < self.boot_files {
+                return true;
+            }
+            m = self.mods[parent as usize].normal;
+        }
+        false
+    }
+
     /// Whether file `f` is the version current now: a boot file no edit replaced, or the version
     /// an edit made current (a replaced, refused or rolled-back version is not).
     pub fn is_current_version(&self, f: u32) -> bool {
@@ -2886,6 +2933,7 @@ impl Program {
             None => idx,
         };
         if let Some(r) = self.reload.get_mut() { r.mods.entry(file).or_default().push(idx); }
+        if self.adding_to.is_some() && lexical_parent.is_none() { self.edit_mods.push(idx); }
         self.mods.push(Module {
             def,
             lexical_parent,

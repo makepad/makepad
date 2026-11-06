@@ -1157,7 +1157,11 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             Some(path) => match g.bins.iter().copied().find(|&ci| crate::vfs::canonical(&g.crates[ci].src_path) == crate::vfs::canonical(path)) {
                 Some(ci) => ci,
                 None => {
-                    eprintln!("makepad-run: --subject {path}: no test target of {package}'s graph has that source");
+                    // both spellings, as compared: a mismatch on one OS only (a Windows node) is
+                    // read off this line
+                    let targets: Vec<String> = g.bins.iter().map(|&ci| crate::vfs::canonical(&g.crates[ci].src_path)).collect();
+                    eprintln!("makepad-run: --subject {path}: no test target of {package}'s graph has that source (compared as {}; the graph's targets: {})",
+                        crate::vfs::canonical(path), if targets.is_empty() { "none".to_string() } else { targets.join(", ") });
                     return 101;
                 }
             },

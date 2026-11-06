@@ -120,7 +120,7 @@ fn main_page(st: &Style) -> String {
     p.row("run <package>", "Run an app from this workspace");
     p.row("run <git-url> <package>", "Run an app straight from a git repository");
     p.row("run --src <store> <package>", "Run an app from a packed source archive (no checkout)");
-    p.row("app <id>", "Run an app the runner set up (its launch record; macOS: from its own .app)");
+    p.row("app [--home <dir>] <id>", "Run an app the runner set up (its launch record; macOS: from its own .app)");
     p.row("fetch <git-url>", "Fetch a repository into the local store");
     p.row("export <git-url> <folder>", "Write a repository's files (and the app's edits) into a folder");
     p.row("pack-src <out> <package>...", "Pack the sources a run of these packages reads into one store");

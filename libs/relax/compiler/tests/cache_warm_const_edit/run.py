@@ -158,6 +158,12 @@ PROBES += [
     ("include_env", "src/doc_e.txt", "e", "eee", 3),
 ]
 FIRST["include_after_body"] = (V, "pub fn late_tiny() -> u64 {\n    1\n", "pub fn late_tiny() -> u64 {\n    2 - 1\n")
+# A module an edit added (its file loaded after the boot), then a const of it edited: the keys' item
+# graph was of the boot files only, the const had no node there, and every save of it said "no key
+# shows its readers there" and restarted (Fab's See-Through RAMP, 11-06).
+FIRST["const_added_module"] = (M, "// mod added_module\n#[inline(never)]\nfn added_module_read() -> u64 {\n    0\n}",
+    "mod added_module;\n#[inline(never)]\nfn added_module_read() -> u64 {\n    added_module::ADDED_K\n}")
+PROBES += [("const_added_module", "src/added_module.rs", "ADDED_K: u64 = 1;", "ADDED_K: u64 = 2;", 2)]
 # every value a probe prints, when it is more than its own
 READS = {"const_every": {"every_direct": 2, "every_fn": 2, "every_inlined": 2, "every_generic": 2, "every_closure": 2, "every_assoc": 2, "every_derived": 3, "every_late": 2}}
 READS["field_every"] = {n: 47 for n in ("fe_method", "fe_free", "fe_pattern", "fe_closure", "fe_generic", "fe_inlined", "fe_macro", "fe_update", "fe_update_self", "fe_clone", "fe_nested", "fe_dyn", "fe_late")}
@@ -187,7 +193,7 @@ MUST = {
     "field_nested": LAND, "field_const_read": EVALUATED, "field_const_fn": EVALUATED, "field_static": EVALUATED,
     "field_import": TYPE_NAMES, "field_offset": EVALUATED, "field_running_frame": STILL_RUNS, "field_blocked_frame": STILL_RUNS, "field_short_walk": STILL_RUNS,
     "const_other_new": LAND, "static_from_const": RUNS_ONCE, "static_through_fn": RUNS_ONCE, "static_through_new": RUNS_ONCE,
-    "const_after_body": LAND, "include_macro": LAND, "include_found": LAND, "include_after_body": LAND, "include_added": LAND,
+    "const_after_body": LAND, "const_added_module": LAND, "include_macro": LAND, "include_found": LAND, "include_after_body": LAND, "include_added": LAND,
     "include_env": r"makes its path from other tokens",
     # a trait object the program made holds the old method table: linked from the disk cache too
     "dyn_method_add": r"old method table", "dyn_method_add_late": r"old method table", "dyn_vtable_fresh": r"old method table", "dyn_impl_removed": LAND,

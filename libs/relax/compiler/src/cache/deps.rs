@@ -857,13 +857,19 @@ fn kind_code(k: &ItemKind) -> u32 {
     }
 }
 
+/// The files a graph is of: the boot files, then `added` (the files of modules live edits added,
+/// by the index each was loaded at: Program::edit_added_files; after every boot file).
+fn text_files<'a>(prog: &'a Program, added: &'a [u32]) -> impl Iterator<Item = usize> + 'a {
+    (0..prog.boot_files.min(prog.files.len())).chain(added.iter().map(|&f| f as usize).filter(|&f| f >= prog.boot_files && f < prog.files.len()))
+}
+
 impl Deps {
     /// Per crate: what its rows are built from, besides the crates it can see (CrateRow without its
     /// own lists and always hash).
-    fn crate_inputs(prog: &Program, parsed: &[std::sync::Arc<ParsedFile>], iface: &[u128], atomic: &[bool]) -> Vec<CrateRow> {
+    fn crate_inputs(prog: &Program, parsed: &[std::sync::Arc<ParsedFile>], added: &[u32], iface: &[u128], atomic: &[bool]) -> Vec<CrateRow> {
         let mut files: Vec<Sip128> = (0..prog.crates.len()).map(|_| { let mut h = Sip128::new(); h.str("deps-crate-files"); h }).collect();
         let mut place = vec![0u32; prog.crates.len()];
-        for f in 0..prog.boot_files.min(prog.files.len()) {
+        for f in text_files(prog, added) {
             if prog.front_macro_fragments.contains(&f) { continue; }
             let Some(&c) = prog.file_crate.get(f) else { continue };
             let Some(h) = files.get_mut(c as usize) else { continue };
@@ -887,11 +893,17 @@ impl Deps {
         }).collect()
     }
 
-    /// Per boot file: its crate, NONE for one not in the graph (Deps::files).
-    fn file_crates(prog: &Program) -> Vec<u32> {
-        (0..prog.boot_files.min(prog.files.len()))
+    /// Per file up to the last of the graph's (`text_files`): its crate, NONE for one not in the
+    /// graph (Deps::files).
+    fn file_crates(prog: &Program, added: &[u32]) -> Vec<u32> {
+        let mut out: Vec<u32> = (0..prog.boot_files.min(prog.files.len()))
             .map(|f| if prog.front_macro_fragments.contains(&f) { NONE } else { prog.file_crate.get(f).copied().unwrap_or(NONE) })
-            .collect()
+            .collect();
+        for f in text_files(prog, added).skip(out.len()) {
+            if out.len() <= f { out.resize(f + 1, NONE); }
+            if !prog.front_macro_fragments.contains(&f) { out[f] = prog.file_crate.get(f).copied().unwrap_or(NONE); }
+        }
+        out
     }
 
     /// Per crate of this program: its index in `prev` (NONE: it had none), by identity -- a load
@@ -914,13 +926,14 @@ impl Deps {
     }
 
     /// The crates whose rows a build over `prev` takes over (`build`): their files need no digests.
-    pub(crate) fn clean_crates(prog: &Program, parsed: &[std::sync::Arc<ParsedFile>], iface: &[u128], prev: Option<&Deps>) -> Vec<bool> {
+    pub(crate) fn clean_crates(prog: &Program, parsed: &[std::sync::Arc<ParsedFile>], added: &[u32], iface: &[u128], prev: Option<&Deps>) -> Vec<bool> {
         let atomic = atomic_crates(prog, iface.len());
-        Self::clean_with(prev, &Self::crate_inputs(prog, parsed, iface, &atomic), &universes(prog))
+        Self::clean_with(prev, &Self::crate_inputs(prog, parsed, added, iface, &atomic), &universes(prog))
     }
 
-    /// Builds the graph of the program's boot files, `parsed` per boot file (`prog.files`, or the
-    /// versions a live edit made current); `iface`: the crates' interface fingerprints
+    /// Builds the graph of the program's boot files and `added` (the files of modules live edits
+    /// added: `text_files`), `parsed` per file (`prog.files`, or the versions a live edit made
+    /// current); `iface`: the crates' interface fingerprints
     /// (what coarse nodes and sysroot crates are keyed by), `valid` what
     /// it is built from (Deps::valid). Over `prev` (the graph a start before this one stored), the
     /// rows of every crate that is clean (`clean_crates`) are taken over and only the other crates'
@@ -928,15 +941,15 @@ impl Deps {
     /// closures and components are known. The result is the graph a build from scratch makes (the
     /// component ids aside). None: over `prev`, the names that decide clean crates' nodes (the
     /// program's alias and macro names) changed -- build without it.
-    pub(crate) fn build(prog: &Program, parsed: &[std::sync::Arc<ParsedFile>], digests: &[Option<std::sync::Arc<super::items::FileDigest>>], iface: &[u128], valid: u128, prev: Option<&Deps>) -> Option<Deps> {
+    pub(crate) fn build(prog: &Program, parsed: &[std::sync::Arc<ParsedFile>], added: &[u32], digests: &[Option<std::sync::Arc<super::items::FileDigest>>], iface: &[u128], valid: u128, prev: Option<&Deps>) -> Option<Deps> {
         let t0 = std::time::Instant::now();
         let n_crates = prog.crates.len();
         let atomic = atomic_crates(prog, iface.len());
         let universe = universes(prog);
-        let mut crates = Self::crate_inputs(prog, parsed, iface, &atomic);
+        let mut crates = Self::crate_inputs(prog, parsed, added, iface, &atomic);
         let clean = Self::clean_with(prev, &crates, &universe);
         let prev = prev.filter(|_| clean.iter().any(|&c| c));
-        let file_crate = Self::file_crates(prog);
+        let file_crate = Self::file_crates(prog, added);
         // `prev`'s numbering to this program's: crates by identity (`at`: ours to its; `cur`: its
         // to ours, clean crates only), a clean crate's files by their places among its own
         let at: Vec<u32> = prev.map_or_else(|| vec![NONE; n_crates], |p| Self::prev_crates(p, &crates));
@@ -956,8 +969,8 @@ impl Deps {
                 }).collect()
             }
         };
-        // the files walked: boot files of the crates in the graph that are not clean
-        let files: Vec<usize> = (0..prog.boot_files.min(prog.files.len()))
+        // the files walked: the graph's files of the crates in it that are not clean
+        let files: Vec<usize> = text_files(prog, added)
             .filter(|&f| !prog.front_macro_fragments.contains(&f))
             .filter(|&f| prog.file_crate.get(f).is_some_and(|&c| !atomic.get(c as usize).copied().unwrap_or(true) && !clean[c as usize]))
             .filter(|&f| digests.get(f).is_some_and(|d| d.is_some()))

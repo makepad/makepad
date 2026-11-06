@@ -29,6 +29,14 @@ fn const_direct() -> u64 {
     values::CONST_DIRECT
 }
 
+// const_added_module: an edit declares the module (its file is there from the start, unread) and
+// reads its const here; the next edit changes the const
+// mod added_module
+#[inline(never)]
+fn added_module_read() -> u64 {
+    0
+}
+
 #[inline(never)]
 fn const_reader() -> u64 {
     values::CONST_THROUGH
@@ -467,6 +475,7 @@ fn run() {
             ("enum_insert_hash", values::hk_read()),
             ("field_copy", values::cp_read()),
             ("field_copy_frame", held_copy.a as u64 + held_copy.b),
+            ("const_added_module", added_module_read()),
         ];
         let mut line = format!("out tick {n}");
         for (name, v) in row.into_iter().chain(readers::row(late)) {

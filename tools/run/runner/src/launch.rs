@@ -12,10 +12,13 @@
 //!
 //! `makepad app <id>` reads that file, sets MAKEPAD_APP_ID=<id> (the platform names its windows
 //! and its process after it: Linux app_id / WM_CLASS `nl.makepad.<id>`) and MAKEPAD_RUN_HOME, and
-//! runs the words as if they were its own command line. The runner's pinned entries start the
-//! loader itself: a macOS bundle whose executable is a symlink to it (its Info.plist's
-//! LSEnvironment sets MAKEPAD_RUN_APP and MAKEPAD_RUN_HOME), a Linux .desktop file or a Windows
-//! shortcut with `app <id>`, so every app shares the loader and its warm JIT cache.
+//! runs the words as if they were its own command line. `makepad app --home <dir> <id>` reads the
+//! record of that home and runs with MAKEPAD_RUN_HOME=<dir>: what a start that cannot set the
+//! environment passes (a Windows shortcut). The runner's pinned entries start the loader itself: a
+//! macOS bundle whose executable is a symlink to it (its Info.plist's LSEnvironment sets
+//! MAKEPAD_RUN_APP and MAKEPAD_RUN_HOME), a Linux .desktop file (`env MAKEPAD_RUN_HOME=<home>`)
+//! with `app <id>` or a Windows shortcut with `app --home <home> <id>`, so every app shares the
+//! loader and its warm JIT cache.
 //!
 //! `makepad` with no arguments: the app MAKEPAD_RUN_APP names, otherwise the launch record
 //! `runner` (the entry scripts write it), then the host's default (the `makepad` binary: the
@@ -121,12 +124,26 @@ pub fn write(home: &Path, l: &Launch) -> Result<(), String> {
     std::fs::write(&part, format(l)).and_then(|_| std::fs::rename(&part, &p)).map_err(|e| format!("{}: {e}", p.display()))
 }
 
-/// Resolves `[exe, "app", <id>, extra...]` or no arguments. No arguments run MAKEPAD_RUN_APP
-/// when it is set (and take it out of the environment), otherwise `runner` or the host's
-/// `default`. None leaves the command line unchanged. The launch's environment and folder are
-/// applied here.
+/// `[exe, "app", ["--home", <dir>,] <id>, extra...]`: the home it names, the id and where the
+/// extra words start.
+fn app_words(raw: &[Vec<u8>]) -> Result<(Option<PathBuf>, String, usize), String> {
+    let usage = || "usage: makepad app [--home <dir>] <id>".to_string();
+    let (home, at) = match raw.get(2).map(Vec::as_slice) {
+        Some(b"--home") => (Some(raw.get(3).filter(|d| !d.is_empty()).ok_or_else(usage)?), 4),
+        _ => (None, 2),
+    };
+    let id = raw.get(at).ok_or_else(usage)?;
+    let os = |b: &Vec<u8>| PathBuf::from(String::from_utf8_lossy(b).into_owned());
+    Ok((home.map(os), String::from_utf8_lossy(id).into_owned(), at + 1))
+}
+
+/// Resolves `[exe, "app", [--home <dir>,] <id>, extra...]` or no arguments. No arguments run
+/// MAKEPAD_RUN_APP when it is set (and take it out of the environment), otherwise `runner` or the
+/// host's `default`. None leaves the command line unchanged. The launch's environment and folder
+/// are applied here.
 pub fn resolve(raw: &[Vec<u8>], default: Option<fn() -> Option<Launch>>) -> Option<Result<Vec<Vec<u8>>, String>> {
     let exe = raw.first().cloned().unwrap_or_default();
+    let mut extra = raw.len();
     let launch = match raw.get(1).map(Vec::as_slice) {
         None => {
             // a macOS bundle's: Launch Services sets it (with MAKEPAD_RUN_HOME) from the bundle's
@@ -147,10 +164,14 @@ pub fn resolve(raw: &[Vec<u8>], default: Option<fn() -> Option<Launch>>) -> Opti
                 }
             }
         }
-        Some(b"app") => match raw.get(2) {
-            Some(id) => read(&crate::fetch::home(), &String::from_utf8_lossy(id)),
-            None => Err("usage: makepad app <id>".to_string()),
-        },
+        Some(b"app") => app_words(raw).and_then(|(home, id, at)| {
+            // the run and every program it starts keep their records in this home
+            if let Some(home) = home {
+                std::env::set_var("MAKEPAD_RUN_HOME", home);
+            }
+            extra = at;
+            read(&crate::fetch::home(), &id)
+        }),
         Some(_) => return None,
     };
     let launch = match launch {
@@ -161,9 +182,7 @@ pub fn resolve(raw: &[Vec<u8>], default: Option<fn() -> Option<Launch>>) -> Opti
         let mut out = vec![exe];
         out.append(&mut words);
         // `makepad app <id> -- <program args>`: after the record's own words
-        if raw.get(1).map(Vec::as_slice) == Some(b"app") && raw.len() > 3 {
-            out.extend(raw[3..].iter().cloned());
-        }
+        out.extend(raw[extra..].iter().cloned());
         out
     }))
 }
@@ -218,6 +237,17 @@ mod tests {
             args: vec!["run".into(), "--quiet".into(), "makepad-app-calculator".into(), "--features".into(), "standalone".into()],
         };
         assert_eq!(parse("calculator", &format(&l)).unwrap(), l);
+    }
+
+    #[test]
+    fn app_words_name_a_home() {
+        let w = |s: &[&str]| s.iter().map(|a| a.as_bytes().to_vec()).collect::<Vec<_>>();
+        assert_eq!(app_words(&w(&["makepad", "app", "calculator"])).unwrap(), (None, "calculator".into(), 3));
+        let (home, id, at) = app_words(&w(&["makepad", "app", "--home", "C:\\Users\\A B\\makepad-runner", "runner", "--", "x"])).unwrap();
+        assert_eq!((home, id.as_str(), at), (Some(PathBuf::from("C:\\Users\\A B\\makepad-runner")), "runner", 5));
+        assert!(app_words(&w(&["makepad", "app"])).is_err());
+        assert!(app_words(&w(&["makepad", "app", "--home", "/h"])).is_err(), "a home without an id");
+        assert!(app_words(&w(&["makepad", "app", "--home", "", "runner"])).is_err(), "an empty home");
     }
 
     #[test]
