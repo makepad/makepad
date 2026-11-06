@@ -1,7 +1,8 @@
 //! The Windows identity a launcher gave this process (crate::app_id: MAKEPAD_APP_ID, set by
 //! `makepad app <id>`): the AppUserModelID `Makepad.<id>` -- the one the app's Start menu
 //! shortcut carries -- for the process, and per top-level window the relaunch properties the
-//! taskbar pins (command `"<makepad.exe>" app <id>`, the app's title, the icon the runner made).
+//! taskbar pins (command `"<makepad.exe>" app --home "<home>" <id>`: a pin sets no environment,
+//! so it names the loader's home, MAKEPAD_RUN_HOME; the app's title, the icon the runner made).
 //! Without one, Windows groups the windows under the executable as before.
 
 use makepad_windows_sys::core::{GUID, PWSTR};
@@ -27,6 +28,22 @@ pub(super) fn process_started() {
     let w = wide(&aumid(&id));
     if let Err(e) = unsafe { SetCurrentProcessExplicitAppUserModelID(makepad_windows_sys::core::PCWSTR(w.as_ptr())) } {
         eprintln!("[hal-win32] SetCurrentProcessExplicitAppUserModelID failed ({e:?})");
+    }
+}
+
+/// A command-line word in quotes; backslashes before the closing quote doubled (a folder's
+/// path can end in one, and no Windows path holds a quote).
+fn quoted(s: &str) -> String {
+    let tail = s.len() - s.trim_end_matches('\\').len();
+    format!("\"{s}{}\"", "\\".repeat(tail))
+}
+
+/// What the taskbar runs to start a pinned window's app again: the loader with the app's id and
+/// the home its launch record is in.
+fn relaunch_command(exe: &str, home: Option<&str>, id: &str) -> String {
+    match home {
+        Some(home) => format!("{} app --home {} {id}", quoted(exe), quoted(home)),
+        None => format!("{} app {id}", quoted(exe)),
     }
 }
 
@@ -56,7 +73,8 @@ pub(super) fn window_created(hwnd: HWND) {
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     let title = std::env::var("MAKEPAD_APP_TITLE").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| id.clone());
     set(&store, &PKEY_AppUserModel_ID, Some(&aumid(&id)));
-    set(&store, &PKEY_AppUserModel_RelaunchCommand, Some(&format!("\"{exe}\" app {id}")));
+    let home = std::env::var("MAKEPAD_RUN_HOME").ok().filter(|h| !h.is_empty());
+    set(&store, &PKEY_AppUserModel_RelaunchCommand, Some(&relaunch_command(&exe, home.as_deref(), &id)));
     set(&store, &PKEY_AppUserModel_RelaunchDisplayNameResource, Some(&title));
     if let Some(icon) = std::env::var("MAKEPAD_APP_ICON").ok().filter(|i| !i.is_empty()) {
         set(&store, &PKEY_AppUserModel_RelaunchIconResource, Some(&icon));

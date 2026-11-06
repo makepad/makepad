@@ -213,7 +213,7 @@ impl CxScriptResources {
 //       3. error
 //   - Desktop packaged (package_root is Some):
 //       1. dependency table
-//       2. packaged path: package_root/dep_path on filesystem
+//       2. package map directory for the crate, or package_root/dep_path if unmapped
 //       3. error
 //   - iOS/tvOS (always packaged, package_root = "makepad"):
 //       1. dependency table
@@ -239,7 +239,8 @@ fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
 /// Try to load a resource from the packaged location on desktop.
 /// Returns None when not in packaged mode (package_root is None).
 ///
-/// A relative `package_root` (the desktop packagers use `.` beside the executable) is searched
+/// Mapped crates are read only from their package directory. For unmapped crates, a relative
+/// `package_root` is searched
 /// both from the working directory and from the executable's own directory, because a launcher
 /// is free to start the process anywhere — see `crate::os::cx_native::exe_relative_path`.
 #[cfg(all(
@@ -249,7 +250,7 @@ fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
 ))]
 fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
     let root = cx.package_root.as_deref()?;
-    let full_path = format!("{}/{}", root, dep_path);
+    let full_path = crate::os::cx_native::packaged_resource_path(&cx.package_paths, root, dep_path);
     crate::os::cx_native::read_file_cwd_or_exe_relative(&cx.package_paths, &full_path).map(Rc::new)
 }
 

@@ -47,32 +47,33 @@ pub fn exe_relative_path(rel: impl AsRef<Path>) -> Option<PathBuf> {
     Some(exe_dir()?.join(rel))
 }
 
-/// A compile-on-device installation keeps resources in its downloaded sources.
+/// Desktop bundles and compile-on-device installations map crates to resource directories.
 /// The adjacent map contains `crate_name<TAB>relative/source/directory` rows;
 /// neither resource lookup nor the map depends on the original install path.
 /// Read once when the `Cx` is created and owned by it (`Cx::package_paths`).
 pub(crate) fn load_package_paths() -> std::collections::HashMap<String, PathBuf> {
-    use std::collections::HashMap;
+    let Some(root) = exe_dir() else { return Default::default() };
+    // The app's own map beside it. Rows are relative to the executable's folder.
+    let exe_name = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+    let text = exe_name.and_then(|n| std::fs::read_to_string(root.join(format!("{}.makepad-package-paths", n))).ok());
+    text.map(|text| parse_package_paths(root, &text)).unwrap_or_default()
+}
+
+/// Parse package directories relative to the directory containing the executable.
+fn parse_package_paths(root: &Path, text: &str) -> std::collections::HashMap<String, PathBuf> {
     use std::path::Component;
-    {
-        let mut packages = HashMap::new();
-        let Some(root) = exe_dir() else { return packages };
-        // The app's own map beside it. Rows are relative to the executable's folder.
-        let exe_name = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
-        let text = exe_name.and_then(|n| std::fs::read_to_string(root.join(format!("{}.makepad-package-paths", n))).ok());
-        let Some(text) = text else { return packages };
-        for line in text.lines() {
-            let Some((name, relative)) = line.split_once('\t') else { continue };
-            let relative = Path::new(relative);
-            if !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
-                && !relative.as_os_str().is_empty()
-                && relative.components().all(|c| matches!(c, Component::Normal(_)))
-            {
-                packages.insert(name.to_owned(), root.join(relative));
-            }
+    let mut packages = std::collections::HashMap::new();
+    for line in text.lines() {
+        let Some((name, relative)) = line.split_once('\t') else { continue };
+        let relative = Path::new(relative);
+        if !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+            && !relative.as_os_str().is_empty()
+            && relative.components().all(|c| matches!(c, Component::Normal(_)))
+        {
+            packages.insert(name.to_owned(), root.join(relative));
         }
-        packages
     }
+    packages
 }
 
 /// `crate_name/rest` resolved through the package map, when the crate is in it.
@@ -90,6 +91,72 @@ fn source_resource_path(
         resolved.push(part);
     }
     Some(resolved)
+}
+
+/// A mapped crate uses only its package directory; other crates use the package root.
+#[cfg(all(
+    not(any(target_os = "android", target_os = "ios", target_os = "tvos")),
+    not(all(target_os = "macos", apple_bundle))
+))]
+pub(crate) fn packaged_resource_path(
+    packages: &std::collections::HashMap<String, PathBuf>,
+    package_root: &str,
+    dep_path: &str,
+) -> PathBuf {
+    source_resource_path(packages, Path::new(dep_path))
+        .unwrap_or_else(|| PathBuf::from(format!("{package_root}/{dep_path}")))
+}
+
+#[cfg(all(test, unix, not(any(target_os = "android", target_os = "ios", target_os = "tvos")), not(all(target_os = "macos", apple_bundle))))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packaged_resource_aliases_resolve_in_desktop_bundles() {
+        struct Bundle(PathBuf);
+        impl Drop for Bundle {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        let bundle = Bundle(std::env::temp_dir().join(format!(
+            "makepad-package-paths-{}-{}",
+            std::process::id(),
+            crate::makepad_live_id::LiveId::unique().0,
+        )));
+        let macos = bundle.0.join("Contents/MacOS");
+        let resources = bundle.0.join("Contents/Resources");
+        std::fs::create_dir_all(&macos).unwrap();
+        std::fs::create_dir_all(resources.join("makepad_foo/resources/icons")).unwrap();
+        std::os::unix::fs::symlink("../Resources", macos.join("resources")).unwrap();
+        let file = resources.join("makepad_foo/resources/icons/x.svg");
+        let bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+        std::fs::write(&file, bytes).unwrap();
+        let map = "makepad_foo\tresources/makepad_foo\nfoo\tresources/makepad_foo\n";
+        let packages = parse_package_paths(&macos, map);
+        for name in ["foo", "makepad_foo"] {
+            let path = packaged_resource_path(&packages, "resources", &format!("{name}/resources/icons/x.svg"));
+            assert_eq!(path, macos.join("resources/makepad_foo/resources/icons/x.svg"), "{name} must use its mapped package directory");
+            assert_eq!(std::fs::canonicalize(&path).unwrap(), std::fs::canonicalize(&file).unwrap(), "{name} must resolve through the bundle symlink");
+            assert_eq!(read_file_cwd_or_exe_relative(&packages, &path).unwrap(), bytes, "{name} must read the packaged bytes");
+        }
+        assert_eq!(packaged_resource_path(&packages, "resources", "other/resources/x.svg"), PathBuf::from("resources/other/resources/x.svg"));
+        assert_eq!(packaged_resource_path(&Default::default(), "resources", "foo/resources/icons/x.svg"), PathBuf::from("resources/foo/resources/icons/x.svg"));
+
+        // The folder layout uses the same map without the macOS symlink.
+        let folder = bundle.0.join("folder");
+        std::fs::create_dir_all(folder.join("resources/makepad_foo/resources/icons")).unwrap();
+        std::fs::write(folder.join("resources/makepad_foo/resources/icons/x.svg"), bytes).unwrap();
+        let packages = parse_package_paths(&folder, map);
+        let path = packaged_resource_path(&packages, "resources", "foo/resources/icons/x.svg");
+        assert_eq!(read_file_cwd_or_exe_relative(&packages, &path).unwrap(), bytes);
+
+        // A missing mapped file must not load a copy under the package root.
+        std::fs::create_dir_all(folder.join("resources/foo/resources/icons")).unwrap();
+        std::fs::write(folder.join("resources/foo/resources/icons/missing.svg"), bytes).unwrap();
+        let path = packaged_resource_path(&packages, folder.join("resources").to_str().unwrap(), "foo/resources/icons/missing.svg");
+        assert!(read_file_cwd_or_exe_relative(&packages, path).is_none());
+    }
 }
 
 /// Reads a file at `path`, falling back to the same path resolved against the executable's
