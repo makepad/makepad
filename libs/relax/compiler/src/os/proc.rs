@@ -15,6 +15,13 @@
 
 pub use imp::*;
 
+/// `name` (a C symbol) wherever this platform's loader finds one for the process: the default
+/// search of every loaded image (`find`), then the system libraries (`find_system`). Null: none.
+pub unsafe fn find_any(name: *const u8) -> *mut u8 {
+    let p = find(name);
+    if p.is_null() { find_system(name) } else { p }
+}
+
 /// The status an embedded run (the Android host) ended with when it failed; 0: it has not.
 pub static EMBEDDED_FAILURE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 /// Whether a host owns this process (it named its library): a failed run then must not exit().
@@ -578,8 +585,11 @@ mod imp {
         dlsym(-2isize as *mut u8, name)
     }
 
-    pub unsafe fn find_system(_name: *const u8) -> *mut u8 {
-        std::ptr::null_mut()
+    /// libSystem's (libc, libm): always loaded, so `find` sees them too.
+    pub unsafe fn find_system(name: *const u8) -> *mut u8 {
+        // RTLD_NOW; from the dyld shared cache, not a file on disk
+        let h = dlopen("/usr/lib/libSystem.B.dylib\0".as_ptr(), 2);
+        if h.is_null() { std::ptr::null_mut() } else { dlsym(h, name) }
     }
 
     /// A shared library by absolute path (--allow-c's native library), its symbols global. Its handle.

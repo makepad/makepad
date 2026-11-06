@@ -625,7 +625,7 @@ relax_compiler::jit::front_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once,
 relax_compiler::jit::history::EMPTY	empty constant returned when a slot has no history (jit.rs:198)
 relax_compiler::jit::install_ice_hook::DONE	one-shot hook install
 relax_compiler::jit::interp_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
-relax_compiler::jit::is_realtime_thread::NAMES	env MAKEPAD_RUN_RT_THREADS read once, nothing sets it
+relax_compiler::jit::rt_names::NAMES	env MAKEPAD_RUN_RT_THREADS read once, nothing sets it
 relax_compiler::jit::job_rows::SINCE	rows freed by guard or TLS drop, diagnostics only
 relax_compiler::jit::job_rows::TID	rows freed by guard or TLS drop, diagnostics only
 relax_compiler::jit::loops_on::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it

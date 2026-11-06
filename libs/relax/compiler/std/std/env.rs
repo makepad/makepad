@@ -12,3 +12,5 @@ mod imp;
 mod imp;
 
 pub use imp::*;
+#[cfg(unix)]
+pub(crate) use imp::env_read_lock;

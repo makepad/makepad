@@ -265,7 +265,8 @@ impl BodyCheck {
                 if impl_check { return crate::unsafety::impl_errors(prog, tcx, d); }
                 if !strict { return Some(tcx.typeck(prog, d).errors.to_vec()); }
                 let owner = crate::borrowck::body::CheckedBody::item(prog, d).expect("prepared body owner");
-                let (mut errors, events) = body_errors(prog, tcx, &prog.session.options, &owner, true, false);
+                let (errors, events) = body_errors(prog, tcx, &prog.session.options, &owner, true, false);
+                let mut errors: Vec<String> = errors.into_iter().map(|(_, e)| e).collect();
                 errors.extend(events.iter().map(|ev| ev.error.render()));
                 Some(errors)
             })) {
@@ -702,18 +703,25 @@ pub fn collect_deep(u: &mut Unit, root: u32) -> Vec<crate::diag::Diagnostic> {
     check_crate_impl(u, root, &[root], Vec::new(), false, true).1
 }
 
-/// The shared body error pipeline. Dependency checks discard the body and leave lints off.
-fn body_errors(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, options: &crate::options::Options, owner: &crate::borrowck::body::CheckedBody, generic: bool, lints: bool) -> (Vec<String>, Vec<crate::borrowck::event::GandalfEvent>) {
+/// The shared body error pipeline. Dependency checks discard the body and leave lints off. Each
+/// error comes with where rustc reports it (check_order.rs): library stability with the attribute
+/// checks, the type check's errors, then the MIR checks' (unsafety, patterns), privacy late.
+fn body_errors(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, options: &crate::options::Options, owner: &crate::borrowck::body::CheckedBody, generic: bool, lints: bool) -> (Vec<(crate::check_order::Stage, String)>, Vec<crate::borrowck::event::GandalfEvent>) {
+    use crate::check_order::{Phase, Stage};
     let _quiet = (!lints).then(crate::lint::Suppress::new);
     let d = owner.owner;
+    let typeck = Stage::of(Phase::Typeck, 0, d);
+    let unsafety_stage = Stage::of(Phase::Mir, crate::check_order::MIR_UNSAFETY, d);
+    let patterns = Stage::of(Phase::Mir, crate::check_order::MIR_PATTERNS, d);
     // the syntax-level lints do not wait for the types (rustc runs them before analysis)
     if lints { relax_types::lint_early::check_def(prog, tcx, d); }
     let body = if lints { tcx.typeck(prog, d) } else { tcx.typeck_unstored(prog, d) };
     // library stability (E0658) of what the body names
     let gates = relax_types::feature_gate::check_stability(prog, &body);
-    let inner = || {
+    let inner = || -> (Vec<(Stage, String)>, Vec<crate::borrowck::event::GandalfEvent>) {
         if !body.errors.is_empty() {
-            return (body.errors.to_vec(), Vec::new());
+            if lints { relax_types::lint_dead::note_failed_body(prog, tcx, &body); }
+            return (staged(typeck, body.errors.to_vec()).collect(), Vec::new());
         }
         if lints {
             relax_types::lint::check_literals(prog, tcx, &body);
@@ -722,12 +730,12 @@ fn body_errors(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, options: &
         let unsafety = if lints { relax_types::unsafety::check_body(prog, tcx, &body) }
             else { relax_types::unsafety::run_body_errors(prog, tcx, &body) };
         if !unsafety.is_empty() {
-            return (unsafety, Vec::new());
+            return (staged(unsafety_stage, unsafety).collect(), Vec::new());
         }
         // rustc_privacy check_mod_privacy: the types of the body's expressions and patterns
         let privacy = relax_types::privacy_types::check_body(prog, tcx, &body);
         if !privacy.is_empty() {
-            return (privacy, Vec::new());
+            return (staged(Stage::new(Phase::Late, crate::check_order::LATE_PRIVACY), privacy).collect(), Vec::new());
         }
         // E0004 / E0005 and the pattern lints (rustc check_match: its errors stop the body
         // before borrowck); an internal failure of the analysis reports nothing, as in a check
@@ -735,7 +743,7 @@ fn body_errors(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, options: &
         // (binding conflicts of `x @ pat` do not end the checks: borrowck runs after them)
         let mut at_patterns = Vec::new();
         match pats {
-            Ok(r) if !r.errors.is_empty() => { let mut e = r.errors; e.extend(r.at_patterns); return (e, Vec::new()) }
+            Ok(r) if !r.errors.is_empty() => { let mut e = r.errors; e.extend(r.at_patterns); return (staged(patterns, e).collect(), Vec::new()) }
             Ok(r) => at_patterns = r.at_patterns,
             Err(p) if p.is::<crate::preempt::NeedsLoad>() || crate::preempt::is_preempted(&*p) => std::panic::resume_unwind(p),
             Err(_) => {
@@ -743,7 +751,7 @@ fn body_errors(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, options: &
             }
         }
         if lints && !crate::borrowck::enabled(options) {
-            return (at_patterns, Vec::new());
+            return (staged(patterns, at_patterns).collect(), Vec::new());
         }
         let v = crate::borrowck::check_body(&crate::tcx::EvalCx::new(prog, tcx, crate::tcx::TypingEnv::fully_monomorphized(prog), &crate::tcx::EvalState::new()), prog, tcx, &body);
         crate::borrowck::note_verdict(&v);
@@ -753,15 +761,18 @@ fn body_errors(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, options: &
         let args: Vec<_> = if owner.kind == crate::borrowck::body::BodyKind::Function && !generic { Vec::new() } else { body.args.to_vec() };
         let origin = if lints { crate::borrowck::event::Origin::Check } else { crate::borrowck::event::Origin::DeferredCheck };
         let events = crate::borrowck::lazy::report_checked(prog, 0, tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst), d, &args, v.errors, origin);
-        (at_patterns, events)
+        (staged(patterns, at_patterns).collect(), events)
     };
     let (mut errs, events) = inner();
-    errs.extend(gates);
+    errs.extend(staged(Stage::new(Phase::Attrs, 0), gates));
     (errs, events)
 }
 
-fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<String>, emit: bool, compile: bool) -> (i32, Vec<crate::diag::Diagnostic>) {
+fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>, emit: bool, compile: bool) -> (i32, Vec<crate::diag::Diagnostic>) {
+    use crate::check_order::{Phase, Stage};
     let t_check = std::time::Instant::now();
+    // every error with where rustc reports it (check_order.rs); the front end's come first
+    let mut errors: Vec<(Stage, String)> = staged(Stage::new(Phase::Resolve, 0), front).collect();
     // a constant that cannot be evaluated is one reported failure, not the end of the check
     jit::COMPILE_ERRORS_FATAL.store(false, std::sync::atomic::Ordering::Relaxed);
     // lints (rustc's deny-by-default ones are errors; warn-level ones are printed)
@@ -774,8 +785,10 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     }
     u.prog.own_crates = own.clone();
     let t_rsim0 = std::time::Instant::now();
-    errors.extend(u.prog.strict_import_errors(&own));
-    errors.extend(relax_types::lint::import_resolution_diags(&mut u.prog, &own));
+    // the imports that never bind in rustc (each one's error is its report): no unused imports
+    let (mut erroneous_imports, strict): (Vec<usize>, Vec<String>) = u.prog.strict_import_errors(&own).into_iter().unzip();
+    errors.extend(staged(Stage::new(Phase::Resolve, 1), strict));
+    errors.extend(staged(Stage::new(Phase::Resolve, 1), relax_types::lint::import_resolution_diags(&mut u.prog, &own)));
     let d_rsim = t_rsim0.elapsed();
     let t_sigs0 = std::time::Instant::now();
     // every checked definition's signature, on MAKEPAD_RUN_JOBS threads (queries over the shared
@@ -796,37 +809,39 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
                 e
             }))
             .unwrap_or_else(|_| vec![format!("internal compiler error while checking the signature of {} -- makepad run bug, report it", prog.def_path(d))])) {
-            errors.extend(e);
+            errors.extend(staged(Stage::new(Phase::Wf, 0), e));
         }
     }
     let d_sigs = t_sigs0.elapsed();
     let t_items0 = std::time::Instant::now();
     let mut st = StepTimes::new("item_checks");
-    errors.extend(relax_types::item_checks::duplicate_items(&u.prog, &own)); st.mark("duplicate_items");
-    errors.extend(relax_types::item_checks::duplicate_exported_macros(&u.prog, &own)); st.mark("duplicate_exported_macros");
-    errors.extend(relax_types::item_checks::super_paths(&u.prog, &own)); st.mark("super_paths");
-    errors.extend(relax_types::item_checks::impl_trait_path_privacy(&u.prog, &u.tcx, &own)); st.mark("impl_trait_path_privacy");
-    errors.extend(relax_types::item_checks::private_assoc_types(&u.prog, &u.tcx, &own)); st.mark("private_assoc_types");
-    errors.extend(relax_types::item_checks::gated_syntax(&u.prog, &own)); st.mark("gated_syntax");
-    errors.extend(relax_types::item_checks::node_attribute_targets(&u.prog, &own)); st.mark("node_attribute_targets");
-    errors.extend(relax_types::item_checks::param_attributes(&u.prog, &own)); st.mark("param_attributes");
-    errors.extend(relax_types::item_checks::foreign_blocks(&u.prog, &own)); st.mark("foreign_blocks");
-    errors.extend(relax_types::item_checks::duplicate_symbols(&u.prog, &own)); st.mark("duplicate_symbols");
+    errors.extend(staged(Stage::new(Phase::Resolve, 0), relax_types::item_checks::duplicate_items(&u.prog, &own))); st.mark("duplicate_items");
+    errors.extend(staged(Stage::new(Phase::Resolve, 0), relax_types::item_checks::duplicate_exported_macros(&u.prog, &own))); st.mark("duplicate_exported_macros");
+    errors.extend(staged(Stage::new(Phase::Resolve, 2), relax_types::item_checks::super_paths(&u.prog, &own))); st.mark("super_paths");
+    errors.extend(staged(Stage::new(Phase::Late, crate::check_order::LATE_PRIVATE_IN_PUBLIC), relax_types::item_checks::impl_trait_path_privacy(&u.prog, &u.tcx, &own))); st.mark("impl_trait_path_privacy");
+    errors.extend(staged(Stage::new(Phase::Late, crate::check_order::LATE_PRIVATE_IN_PUBLIC), relax_types::item_checks::private_assoc_types(&u.prog, &u.tcx, &own))); st.mark("private_assoc_types");
+    errors.extend(staged(Stage::new(Phase::Early, 1), relax_types::item_checks::gated_syntax(&u.prog, &own))); st.mark("gated_syntax");
+    errors.extend(staged(Stage::new(Phase::Attrs, 0), relax_types::item_checks::node_attribute_targets(&u.prog, &own))); st.mark("node_attribute_targets");
+    errors.extend(staged(Stage::new(Phase::Early, 0), relax_types::item_checks::param_attributes(&u.prog, &own))); st.mark("param_attributes");
+    errors.extend(staged(Stage::new(Phase::Early, 0), relax_types::item_checks::foreign_blocks(&u.prog, &own))); st.mark("foreign_blocks");
+    errors.extend(staged(Stage::new(Phase::Attrs, 0), relax_types::item_checks::duplicate_symbols(&u.prog, &own))); st.mark("duplicate_symbols");
     // the compiled binaries: `makepad test`'s subjects are each a test binary (cargo builds every
     // target separately); a check's are its bin crates
     let binaries: Vec<u32> = crates.iter().copied().filter(|&k| subjects_mode() != 0 || u.prog.crates[k as usize].is_bin).collect();
-    errors.extend(relax_types::item_checks::global_allocators_and_lang_items(&u.prog, &own, &binaries)); st.mark("global_allocators_and_lang_items");
-    errors.extend(relax_types::proc_macro_harness::check(&u.prog, &u.tcx, &own)); st.mark("proc_macro_harness");
+    errors.extend(staged(Stage::new(Phase::Attrs, 0), relax_types::item_checks::global_allocators_and_lang_items(&u.prog, &own, &binaries))); st.mark("global_allocators_and_lang_items");
+    errors.extend(staged(Stage::new(Phase::Early, 0), relax_types::proc_macro_harness::check(&u.prog, &u.tcx, &own))); st.mark("proc_macro_harness");
     let entry = u.prog.crates[root as usize].is_bin && !u.prog.crates[root as usize].harness && subjects_mode() != 2;
-    if entry { errors.extend(relax_types::item_checks::entry_point(&u.prog, root)); }
-    if entry { errors.extend(relax_types::item_checks::entry_symbol_conflict(&u.prog, &own, root)); }
+    if entry { errors.extend(staged(Stage::new(Phase::Attrs, 0), relax_types::item_checks::entry_point(&u.prog, root))); }
+    if entry { errors.extend(staged(Stage::new(Phase::Attrs, 0), relax_types::item_checks::entry_symbol_conflict(&u.prog, &own, root))); }
     st.mark("entry");
-    errors.extend(relax_types::lint_levels::check(&u.prog, &own)); st.mark("lint_levels");
+    errors.extend(staged(Stage::new(Phase::Early, 2), relax_types::lint_levels::check(&u.prog, &own))); st.mark("lint_levels");
     relax_types::lint_pass::check_items(&u.prog, &u.tcx, &own); st.mark("lint_pass::check_items");
     relax_types::lint_dead::reset();
-    errors.extend(u.prog.import_privacy_errors(&own)); st.mark("import_privacy");
-    errors.extend(u.prog.attribute_errors(&own)); st.mark("attribute_errors");
-    errors.extend(u.prog.ast_validation_errors(&own)); st.mark("ast_validation");
+    let privacy = u.prog.import_privacy_errors(&own);
+    erroneous_imports.extend(privacy.iter().filter_map(|(i, _)| *i));
+    errors.extend(staged(Stage::new(Phase::Resolve, 5), privacy.into_iter().map(|(_, e)| e))); st.mark("import_privacy");
+    errors.extend(staged(Stage::new(Phase::Attrs, 0), u.prog.attribute_errors(&own))); st.mark("attribute_errors");
+    errors.extend(staged(Stage::new(Phase::Early, 0), u.prog.ast_validation_errors(&own))); st.mark("ast_validation");
     let d_items = t_items0.elapsed();
     let t_wf0 = std::time::Instant::now();
     // item well-formedness (rustc wfcheck): after the signatures, and only when they are sound -- an
@@ -842,29 +857,30 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             loop {
                 let t0 = std::time::Instant::now();
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut v = relax_types::wfcheck::obligations::check_def(prog, tcx, d);
+                    let v = relax_types::wfcheck::obligations::check_def(prog, tcx, d);
                     let dt_wf = t0.elapsed();
                     // rustc_privacy check_mod_privacy: the types of the item's signature
-                    v.extend(relax_types::privacy_types::check_item(prog, tcx, d));
+                    let privacy = relax_types::privacy_types::check_item(prog, tcx, d);
                     let dt = t0.elapsed();
                     if check_times && dt.as_millis() >= 500 {
                         stderr_line!("makepad check: slow wf {:.2} s (check_def {:.2} s, tries {}): {:?} {}", dt.as_secs_f64(), dt_wf.as_secs_f64(), tries, prog.def(d).kind, prog.def_path(d));
                     }
-                    v
+                    (v, privacy)
                 }));
                 match r {
                     Ok(v) => break v,
                     Err(p) if (crate::preempt::is_preempted(&*p) || p.is::<crate::preempt::NeedsLoad>() || p.is::<crate::preempt::OwnerBusy>()) && tries < 100 => { tries += 1; std::thread::yield_now(); }
-                    Err(p) => break if let Some(fatal) = p.downcast_ref::<relax_types::infer::diagnostics::FatalError>() { vec![fatal.0.clone()] } else { vec![format!("internal compiler error while checking the well-formedness of {} ({}) -- makepad run bug, report it", prog.def_path(d),
-                        p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default())] },
+                    Err(p) => break (if let Some(fatal) = p.downcast_ref::<relax_types::infer::diagnostics::FatalError>() { vec![fatal.0.clone()] } else { vec![format!("internal compiler error while checking the well-formedness of {} ({}) -- makepad run bug, report it", prog.def_path(d),
+                        p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default())] }, Vec::new()),
                 }
             }
         }) {
-            errors.extend(e);
+            errors.extend(staged(Stage::new(Phase::Wf, 0), e.0));
+            errors.extend(staged(Stage::new(Phase::Late, crate::check_order::LATE_PRIVACY), e.1));
         }
         if errors.is_empty() && subjects_mode() != 2 {
             if let Some(main) = crate::run::find_main(&u.prog, root) {
-                if relax_types::wfcheck::obligations::is_entry_main(&u.prog, main) { errors.extend(relax_types::wfcheck::obligations::check_main(&u.prog, &u.tcx, main)); }
+                if relax_types::wfcheck::obligations::is_entry_main(&u.prog, main) { errors.extend(staged(Stage::new(Phase::Wf, 0), relax_types::wfcheck::obligations::check_main(&u.prog, &u.tcx, main))); }
             }
         }
     }
@@ -885,7 +901,8 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         let failures = relax_types::mir::build::driver::build_all(&u.prog, &u.tcx, mode == "std");
         return (if failures == 0 { 0 } else { 1 }, Vec::new());
     }
-    let console = crate::gandalf_out::Console::start(emit && crate::diag::enabled(), !emit);
+    // (the check's borrow errors are printed with its other diagnostics, in rustc's order)
+    let borrow_events = crate::gandalf_out::Collector::start();
     let mut borrow_diagnostics = Vec::new();
     let up: *mut Unit = u;
     let mut fns = Vec::new();
@@ -963,15 +980,15 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| u.tcx.const_eval_resolve(&u.prog, env, anon, &[])));
                     let _ = before;
                 }
-                errors.extend(e)
+                errors.extend(staged(Stage::of(Phase::Typeck, 0, anon), e))
             }
-            Err(_) => errors.push(format!("internal compiler error while checking {}", u.prog.def_path(anon))),
+            Err(_) => errors.push((Stage::of(Phase::Typeck, 0, anon), format!("internal compiler error while checking {}", u.prog.def_path(anon)))),
         }
     }
     // every body owner type- and borrow-checked on MAKEPAD_RUN_JOBS threads: typeck and the borrow
     // checker are queries over the shared program and type context (as the run's typeck-ahead
     // workers use them); results are merged in owner order
-    struct Outcome { errors: Vec<String>, diags: Vec<crate::diag::Diagnostic>, seed: Option<crate::program::DefId>, needs_load: bool, preempted: bool }
+    struct Outcome { errors: Vec<(Stage, String)>, diags: Vec<crate::diag::Diagnostic>, seed: Option<crate::program::DefId>, needs_load: bool, preempted: bool }
     let jobs = jobs();
     let upn = up as usize;
     let check_one = move |owner: &crate::borrowck::body::CheckedBody, generic: bool| -> Outcome {
@@ -1001,7 +1018,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             Err(_) => {
                 let def = prog.def(d);
                 let pos = prog.files[def.file as usize].ast.item(def.item).lo;
-                out.errors.push(prog.record_error(def.file, pos, "typeck", format!("internal compiler error while checking {} -- makepad run bug, report it{}", prog.def_path(d), jit::take_ice_location())));
+                out.errors.push((Stage::of(Phase::Typeck, 0, d), prog.record_error(def.file, pos, "typeck", format!("internal compiler error while checking {} -- makepad run bug, report it{}", prog.def_path(d), jit::take_ice_location()))));
             }
         }
         // an error may be a name in a file the app check left unloaded: settled with all loaded
@@ -1097,12 +1114,12 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     }
     st.mark("body anon consts");
     relax_types::lint_early::finish(&u.prog, &own); st.mark("lint_early::finish");
-    errors.extend(static_self_access(up, &own)); st.mark("static_self_access");
+    errors.extend(staged(Stage::new(Phase::Typeck, 0), static_self_access(up, &own))); st.mark("static_self_access");
     // the feature gates (E0658 and friends): items and signatures, then the loaded bodies
     for &k in crates {
-        errors.extend(relax_types::feature_gate::check_crate(unsafe { &(*up).prog }, unsafe { &(*up).tcx }, k));
-        errors.extend(relax_types::feature_gate::check_bodies(unsafe { &(*up).prog }, unsafe { &(*up).tcx }, k));
-        errors.extend(relax_types::feature_gate::check_imports(unsafe { &(*up).prog }, k));
+        errors.extend(staged(Stage::new(Phase::Early, 1), relax_types::feature_gate::check_crate(unsafe { &(*up).prog }, unsafe { &(*up).tcx }, k)));
+        errors.extend(staged(Stage::new(Phase::Early, 1), relax_types::feature_gate::check_bodies(unsafe { &(*up).prog }, unsafe { &(*up).tcx }, k)));
+        errors.extend(staged(Stage::new(Phase::Early, 1), relax_types::feature_gate::check_imports(unsafe { &(*up).prog }, k)));
     }
     st.mark("feature gates");
     // rustc_hir_analysis check_crate: every static and every non-generic, non-associated const
@@ -1112,13 +1129,20 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     // rustc_interface passes.rs analysis: an error (lint errors excluded) of the required analyses
     // -- resolution, feature gates, type and borrow checks, constant evaluation of items -- ends the
     // compilation before misc_checking_3, so check_mod_deathness (dead_code, unnameable_types)
-    // never runs: a body that failed its check reported nothing it uses as dead. Nor does
-    // check_expectations (unfulfilled_lint_expectations).
-    let analyses_ok = errors.is_empty() && borrow_diagnostics.is_empty() && unsafe { (&*up).errors.iter().all(|e| e.starts_with("compile error in ")) };
-    if analyses_ok { relax_types::lint_dead::finish(&u.prog, &u.tcx, &own, root); } st.mark("lint_dead::finish");
+    // and the late lint pass never run: a body that failed its check reported nothing it uses as
+    // dead, and no late lint is reported. Nor does check_expectations
+    // (unfulfilled_lint_expectations). misc_checking_3's own errors (privacy) do not count.
+    let analyses_ok = !errors.iter().any(|(s, _)| s.required()) && borrow_diagnostics.is_empty() && !relax_types::lint::has_hard_error()
+        && unsafe { (&*up).errors.iter().all(|e| e.starts_with("compile error in ")) };
+    relax_types::lint_dead::finish(&u.prog, &u.tcx, &own, root, analyses_ok, &erroneous_imports); st.mark("lint_dead::finish");
     // rustc_monomorphize: a program's `main` and what it reaches, instantiated -- the constants
     // generic code evaluates there (post-monomorphization E0080) -- in a check of a program
-    if options.const_fuel && !compile && errors.is_empty() && borrow_diagnostics.is_empty() && unsafe { (&*up).errors.is_empty() } { mono_check(up, &own, root); }
+    let mono = options.const_fuel && !compile && errors.is_empty() && borrow_diagnostics.is_empty() && unsafe { (&*up).errors.is_empty() };
+    // what the unit records from here on is the instances' when nothing was recorded before:
+    // rustc's collector runs after the analysis, its errors are none of the required analyses'
+    let mono_only = mono && !unsafe { (&*up).query_errors.has_errors() };
+    if mono { mono_check(up, &own, root); }
+    let unit_stage = |e: &str| if mono_only { Stage::new(Phase::Post, 0) } else { unit_stage(e) };
     st.mark("mono_check");
     let t_front = t_check.elapsed();
     // the type/borrow check's freed memory goes back before the compile starts (Stage: 4.6 GB
@@ -1131,7 +1155,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     if crate::memstat::enabled() {
         crate::memstat::print("check: type/borrow checked", &crate::memreport::unit_sizes(unsafe { &*up }));
     }
-    for e in errors.iter_mut() {
+    for (_, e) in errors.iter_mut() {
         if is_internal(unsafe { &*up }, &own, e) && !e.contains(": internal:") && !e.starts_with("internal: ") {
             *e = label_internal(e);
         }
@@ -1144,12 +1168,15 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     // what the builds reported besides their own failures: constants that could not be
     // evaluated (CTFE panics), recorded instead of ending the check
     for e in unsafe { (&(*up).errors).iter().filter(|e| !e.starts_with("compile error in ")).cloned().collect::<Vec<_>>() } {
-        errors.push(if is_internal(unsafe { &*up }, &own, &e) { label_internal(&e) } else { e });
+        let e = if is_internal(unsafe { &*up }, &own, &e) { label_internal(&e) } else { e };
+        errors.push((unit_stage(&e), e));
     }
+    let mut compile_errors = Vec::new();
     for (id, e) in failures {
         let name = unsafe { (&(*up).fns)[id as usize].name.clone() };
-        report(up, id, &name, &e, "compile", &own, &mut errors);
+        report(up, id, &name, &e, "compile", &own, &mut compile_errors);
     }
+    errors.extend(staged(Stage::new(Phase::Post, 0), compile_errors));
     // MAKEPAD_RUN_BORROWCK_INSTANCES=1: every reached instance is borrow-checked too (the background
     // checker's view: concrete type arguments, all crates)
     if crate::borrowck::enabled(options) && options.borrowck_instances {
@@ -1177,11 +1204,11 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         // rustc DiagCtxt::flush_delayed: delayed bugs are ICEs only when no error was emitted
         let explained = !errors.is_empty() || !borrow_diagnostics.is_empty() || !(*up).errors.is_empty() || (*up).query_errors.has_errors();
         for bug in (*up).query_errors.take_delayed() {
-            if !explained { errors.push(format!("internal: delayed bug at the end of the check: {}", bug)); }
+            if !explained { errors.push((Stage::new(Phase::Post, 0), format!("internal: delayed bug at the end of the check: {}", bug))); }
         }
         if !errors.is_empty() { (*up).query_errors.note_reported_error(); }
         (*up).flush_query_errors(true);
-        errors.extend_from_slice(&(*up).errors);
+        errors.extend((*up).errors.iter().map(|e| (unit_stage(e), e.clone())));
     }
     let t_compile = t_check.elapsed() - t_front;
     if crate::memstat::enabled() {
@@ -1196,29 +1223,33 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     let mut st = StepTimes::new("end:");
     if analyses_ok { relax_types::lint_levels::finish(&u.prog); }
     st.mark("lint_levels::finish");
-    let (lint_errors, mut lint_warnings) = relax_types::lint::take();
-    errors.extend(lint_errors);
-    lint_warnings.sort_by_cached_key(|e| error_position(e));
-    lint_warnings.dedup();
-    if emit && !quiet && !crate::diag::enabled() {
-        for w in &lint_warnings { stderr_line!("{}", w); }
+    use crate::check_order::{Entry, Out};
+    let reported = relax_types::lint::take_reported();
+    let borrow_events = borrow_events.finish();
+    // rustc's required analyses (lint errors aside) failed: it stops before misc_checking_3, so no
+    // late lint is reported -- counted again here, with what the queries and the builds recorded
+    // since the dead code pass ran
+    let late_ok = analyses_ok && !errors.iter().any(|(s, _)| s.required()) && !reported.iter().any(|r| r.lint.is_empty())
+        && !borrow_events.iter().any(|ev| ev.origin != crate::borrowck::event::Origin::Gate);
+    let mut entries: Vec<Entry> = Vec::with_capacity(errors.len() + reported.len());
+    for r in reported {
+        if !late_ok && relax_types::lint::is_late(r.lint) { continue; }
+        let stage = if r.lint.is_empty() { Stage::new(Phase::Attrs, 0) } else { crate::check_order::stage_of_lint(r.lint, r.def) };
+        // (a body's liveness lints keep the order its analysis reports them in: rustc's)
+        let seq = if stage.phase == Phase::Mir && stage.step == crate::check_order::MIR_LIVENESS { r.seq } else { 0 };
+        entries.push(Entry { stage, seq, out: if r.level >= relax_types::lint::Level::Deny { Out::Error(r.line) } else { Out::Warning(r.line) } });
     }
-    // rustc's order: by file, then position (a plain string sort put line 10 before line 3)
-    errors.sort_by_cached_key(|e| error_position(e));
-    errors.dedup();
     // a follow-on failure (a body or signature that could not be checked because of an error
     // already reported) is no error of its own: rustc reports only the cause
-    if errors.iter().any(|e| !is_follow_on(e)) {
-        errors.retain(|e| !is_follow_on(e));
-    }
-    for e in errors.iter().filter(|_| emit) {
-        if crate::diag::enabled() {
-            crate::diag::emit(&crate::diag::from_legacy(e, "typeck"));
-        } else { println!("{}", e); }
-    }
-    st.mark("lints and errors out");
+    let causes = errors.iter().any(|(_, e)| !is_follow_on(e)) || entries.iter().any(|e| matches!(e.out, Out::Error(_)));
+    entries.extend(errors.into_iter().filter(|(_, e)| !causes || !is_follow_on(e)).map(|(stage, e)| Entry { stage, seq: 0, out: Out::Error(e) }));
+    entries.extend(borrow_events.into_iter().map(|ev| Entry { stage: Stage::of(Phase::Mir, crate::check_order::MIR_BORROWCK, ev.error.owner), seq: 0, out: Out::Borrow(Box::new(ev)) }));
+    let entries = crate::check_order::sort(unsafe { &(*up).prog }, entries);
+    crate::check_order::print(&entries, emit, !quiet, crate::diag::enabled());
+    let errors: Vec<String> = entries.iter().filter_map(|e| match &e.out { Out::Error(s) => Some(s.clone()), _ => None }).collect();
+    let borrow_count = entries.iter().filter(|e| matches!(e.out, Out::Borrow(_))).count();
+    st.mark("diagnostics out");
     crate::borrowck::finish_check(unsafe { &(*up).prog });
-    let borrow_count = console.finish();
     st.mark("borrowck finish");
     // a clean check: every body it checked is clean (lints included: they are the check's, not
     // the body's, so only a check with no error at all says so of each)
@@ -1460,6 +1491,21 @@ fn error_position(e: &str) -> (String, u32, u32, String) {
         }
     }
     (String::new(), 0, 0, e.to_string())
+}
+
+/// The check's errors with where rustc reports them: the stage of the check that found them,
+/// unless the code says where rustc's resolver or privacy checks report it.
+fn staged(stage: crate::check_order::Stage, errors: impl IntoIterator<Item = String>) -> impl Iterator<Item = (crate::check_order::Stage, String)> {
+    errors.into_iter().map(move |e| (crate::check_order::stage_for(stage, &e), e))
+}
+
+/// Where rustc reports what the unit recorded: the queries' errors (coherence, signatures,
+/// constants that could not be evaluated -- rustc_hir_analysis check_crate evaluates them with the
+/// body owners' type checks) in the analysis, where their code puts them; an internal error after it.
+fn unit_stage(e: &str) -> crate::check_order::Stage {
+    use crate::check_order::{Phase, Stage};
+    let internal = e.starts_with("internal") || e.contains(": internal:") || e.contains("internal compiler error");
+    crate::check_order::stage_for(Stage::new(if internal { Phase::Post } else { Phase::Typeck }, 0), e)
 }
 
 /// A check that could not run because of an error reported elsewhere (typeck's cascade notes).

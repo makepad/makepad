@@ -68,6 +68,8 @@ struct Report {
     pos: u32,
     msg: String,
     scope: usize,
+    /// the unit (the body, a closure in it) that reports it
+    unit: u32,
 }
 
 struct LoopCx {
@@ -88,6 +90,8 @@ pub struct Cx<'a> {
     locals_by_name: HashMap<String, Vec<u32>>,
     scopes: Vec<Vec<Attr>>,
     reports: Vec<Report>,
+    /// each unit's (parent unit, position of its closure expression); the body is unit 0
+    units: Vec<(u32, u32)>,
     closure_memo: HashMap<u32, Vec<(u32, bool)>>,
     /// the pattern analysis context (inhabitedness of call results), made on first use
     pcx: Option<crate::pattern_analysis::Cx<'a>>,
@@ -108,6 +112,8 @@ struct Unit<'c, 'a> {
     cur_scope: usize,
     /// the closure kind: FnMut closures run again after returning
     closure: Option<ClosureInfo>,
+    /// this unit in Cx::units
+    id: u32,
     decl_scopes: HashMap<u32, usize>,
     pos0: u32,
 }
@@ -136,7 +142,7 @@ pub fn check(prog: &Program, tcx: &Tcx, body: &Body, params: &[(PatId, List<Attr
     for (i, l) in body.locals.iter().enumerate() {
         locals_by_name.entry(prog.syms.str(l.name).to_string()).or_default().push(i as u32);
     }
-    let mut cx = Cx { prog, tcx, body, ast, fmt_named, locals_by_name, scopes: vec![Vec::new()], reports: Vec::new(), closure_memo: HashMap::new(), pcx: None };
+    let mut cx = Cx { prog, tcx, body, ast, fmt_named, locals_by_name, scopes: vec![Vec::new()], reports: Vec::new(), units: Vec::new(), closure_memo: HashMap::new(), pcx: None };
     {
         let mut u = Unit::new(&mut cx, None);
         for &(p, attrs) in params {
@@ -148,16 +154,45 @@ pub fn check(prog: &Program, tcx: &Tcx, body: &Body, params: &[(PatId, List<Attr
         if let Some(e) = expr { u.expr(e); }
         u.finish();
     }
-    let mut reports = std::mem::take(&mut cx.reports);
-    reports.sort_by_key(|r| r.pos);
-    for r in reports {
+    for r in rustc_order(std::mem::take(&mut cx.reports), &cx.units) {
         lint::emit_in(prog, body.def, &cx.scopes[r.scope], r.lint, body.file, r.pos, &r.msg);
     }
 }
 
+/// The reports in rustc's order (rustc_mir_transform liveness.rs): the body's backward analysis
+/// reaches its closures from the last to the first, and each closure's check_liveness reports
+/// (its own closures first, the same way) before the body does; a unit then reports its unused
+/// variables (report_fully_unused), then its unused assignments, each in place order.
+fn rustc_order(reports: Vec<Report>, units: &[(u32, u32)]) -> Vec<Report> {
+    let mut children: Vec<Vec<u32>> = vec![Vec::new(); units.len()];
+    for (u, &(parent, _)) in units.iter().enumerate() {
+        if parent != NONE { children[parent as usize].push(u as u32); }
+    }
+    for c in &mut children { c.sort_by_key(|&u| std::cmp::Reverse(units[u as usize].1)); }
+    let mut rank = vec![0u32; units.len()];
+    let mut next = 0;
+    // (post-order: a unit after its closures; an explicit stack, closures nest deep)
+    let mut stack: Vec<(u32, usize)> = vec![(0, 0)];
+    while let Some(&mut (u, ref mut i)) = stack.last_mut() {
+        if let Some(&c) = children[u as usize].get(*i) {
+            *i += 1;
+            stack.push((c, 0));
+        } else {
+            rank[u as usize] = next;
+            next += 1;
+            stack.pop();
+        }
+    }
+    let mut reports = reports;
+    reports.sort_by_key(|r| (rank.get(r.unit as usize).copied().unwrap_or(u32::MAX), r.lint.name != lint::UNUSED_VARIABLES.name, r.pos));
+    reports
+}
+
 impl<'c, 'a> Unit<'c, 'a> {
     fn new(cx: &'c mut Cx<'a>, closure: Option<ClosureInfo>) -> Self {
-        let mut u = Unit {
+        let id = cx.units.len() as u32;
+        cx.units.push((NONE, 0));
+        let mut u = Unit { id,
             cx, vars: Vec::new(), var_of: HashMap::new(), declared: HashSet::new(), nodes: Vec::new(), accesses: Vec::new(),
             cur: None, entry: 0, exit: 0, loops: Vec::new(), scope_stack: vec![0], cur_scope: 0, closure, decl_scopes: HashMap::new(), pos0: 0,
         };
@@ -961,7 +996,9 @@ impl<'c, 'a> Unit<'c, 'a> {
         let scope = self.cur_scope;
         let pos0 = self.cx.ast.expr(e).lo;
         let res = {
+            let parent = self.id;
             let mut u = Unit::new(&mut *self.cx, Some(info));
+            u.cx.units[u.id as usize] = (parent, pos0);
             u.scope_stack = vec![scope];
             u.cur_scope = scope;
             u.pos0 = pos0;
@@ -1102,7 +1139,7 @@ impl<'c, 'a> Unit<'c, 'a> {
                 if statements.is_empty() {
                     if !referenced[v] { continue; }
                     let scope = self.decl_scope(v);
-                    reports.push(Report { lint: &lint::UNUSED_VARIABLES, pos: def_pos, msg: format!("unused variable: `{}`", var.name), scope });
+                    reports.push(Report { lint: &lint::UNUSED_VARIABLES, pos: def_pos, msg: format!("unused variable: `{}`", var.name), scope, unit: 0 });
                     continue;
                 }
                 if drop_guard() {
@@ -1110,7 +1147,7 @@ impl<'c, 'a> Unit<'c, 'a> {
                     if statements.is_empty() { continue; }
                 }
                 let scope = self.decl_scope(v);
-                reports.push(Report { lint: &lint::UNUSED_VARIABLES, pos: def_pos, msg: format!("variable `{}` is assigned to, but never used", var.name), scope });
+                reports.push(Report { lint: &lint::UNUSED_VARIABLES, pos: def_pos, msg: format!("variable `{}` is assigned to, but never used", var.name), scope, unit: 0 });
             }
             if !var.own && !ever[v] { continue; }
             // dead assignments
@@ -1123,22 +1160,23 @@ impl<'c, 'a> Unit<'c, 'a> {
                 match m.kind {
                     AccessKind::Assign => {
                         if lint::external(prog, file, m.key.0) { continue; }
-                        reports.push(Report { lint: &lint::UNUSED_ASSIGNMENTS, pos: m.key.0, msg: format!("value assigned to `{}` is never read", var.name), scope: m.scope });
+                        reports.push(Report { lint: &lint::UNUSED_ASSIGNMENTS, pos: m.key.0, msg: format!("value assigned to `{}` is never read", var.name), scope: m.scope, unit: 0 });
                     }
                     AccessKind::Param => {
                         // an unused parameter is reported as an unused variable
                         if var.own && !ever[v] { continue; }
                         if lint::external(prog, file, m.key.0) { continue; }
-                        reports.push(Report { lint: &lint::UNUSED_ASSIGNMENTS, pos: m.key.0, msg: format!("value passed to `{}` is never read", var.name), scope: m.scope });
+                        reports.push(Report { lint: &lint::UNUSED_ASSIGNMENTS, pos: m.key.0, msg: format!("value passed to `{}` is never read", var.name), scope: m.scope, unit: 0 });
                     }
                     AccessKind::Capture => {
-                        reports.push(Report { lint: &lint::UNUSED_ASSIGNMENTS, pos: self.pos0, msg: format!("value captured by `{}` is never read", var.name), scope: m.scope });
+                        reports.push(Report { lint: &lint::UNUSED_ASSIGNMENTS, pos: self.pos0, msg: format!("value captured by `{}` is never read", var.name), scope: m.scope, unit: 0 });
                     }
                 }
             }
         }
         // report in the unit's lint sink
-        self.cx.reports.extend(reports.into_iter().filter(|r| !lint::external(prog, file, r.pos)));
+        let unit = self.id;
+        self.cx.reports.extend(reports.into_iter().filter(|r| !lint::external(prog, file, r.pos)).map(|r| Report { unit, ..r }));
         // the captures
         (0..nv).filter(|&v| !self.vars[v].own).map(|v| (self.vars[v].local, !ever[v])).collect()
     }
@@ -1148,5 +1186,26 @@ impl<'c, 'a> Unit<'c, 'a> {
     /// The lint scope at the declaration of variable `v`.
     fn decl_scope(&self, v: usize) -> usize {
         self.decl_scopes.get(&(v as u32)).copied().unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// rustc's order: the closures' reports first, the later closure before the earlier one and a
+    /// closure's own closures before it, the body last; in each, unused variables before unused
+    /// assignments, each in place order.
+    #[test]
+    fn closures_report_last_first_then_the_body() {
+        let r = |unit, lint: &'static Lint, pos| Report { lint, pos, msg: String::new(), scope: 0, unit };
+        // unit 0 the body; 1 a closure at 10 with closure 3 at 12 inside; 2 a closure at 20
+        let units = [(NONE, 0), (0, 10), (0, 20), (1, 12)];
+        let reports = vec![
+            r(0, &lint::UNUSED_ASSIGNMENTS, 2), r(0, &lint::UNUSED_VARIABLES, 30), r(0, &lint::UNUSED_VARIABLES, 5),
+            r(1, &lint::UNUSED_VARIABLES, 11), r(3, &lint::UNUSED_VARIABLES, 13), r(2, &lint::UNUSED_ASSIGNMENTS, 22), r(2, &lint::UNUSED_VARIABLES, 21),
+        ];
+        let order: Vec<(u32, u32)> = rustc_order(reports, &units).iter().map(|r| (r.unit, r.pos)).collect();
+        assert_eq!(order, [(2, 21), (2, 22), (3, 13), (1, 11), (0, 5), (0, 30), (0, 2)]);
     }
 }

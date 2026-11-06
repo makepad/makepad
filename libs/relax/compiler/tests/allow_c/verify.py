@@ -77,15 +77,28 @@ run("lock-without-patches", ["cargo", "generate-lockfile", "--offline"])
 # An unused function still carries an unresolved import. Neither a library nor
 # the program defines it: the native bundle is rejected before even the
 # fixture's first println runs.
-with (fixture / "cnative" / "csrc" / "cnative.c").open("a") as source:
-    source.write('\nextern int cn_missing_native_symbol(void);\n'
-                 'int cn_unresolved(void) { return cn_missing_native_symbol(); }\n')
+c_source = fixture / "cnative" / "csrc" / "cnative.c"
+c_text = c_source.read_text()
+c_source.write_text(c_text + '\nextern int cn_missing_native_symbol(void);\n'
+                    'int cn_unresolved(void) { return cn_missing_native_symbol(); }\n')
 failed = run("unresolved", command, success=False)
 assert failed.returncode == 1, f"loader failure exit status: {failed.returncode}"
 assert not failed.stdout, "program started despite a missing native import"
 for expected in ["cannot load", "libnative.", "--allow-c native library of cnative 0.1.0", "`cn_missing_native_symbol`", "no `#[no_mangle]` fn of the program"]:
     assert expected in failed.stderr, f"missing loader diagnostic {expected!r}: {failed.stderr}"
 print("PASS loader: unresolved import reports library, crate and loader error; exit 1; no program output")
+
+# C code calling into the program while the library loads (a C constructor) runs before the
+# loader binds the callbacks: the stub reports the symbol on stderr and exits 1 (cargo's static
+# link has no such window).
+c_source.write_text(c_text + '\n__attribute__((constructor)) static void cn_init(void) { (void)cn_rust_square(3); }\n')
+early = run("constructor", command, success=False)
+assert early.returncode == 1, f"constructor callback exit status: {early.returncode}"
+assert not early.stdout, "program started after a constructor called into it"
+for expected in ["cannot load the --allow-c native library", "`cn_rust_square`", "a C constructor"]:
+    assert expected in early.stderr, f"missing constructor diagnostic {expected!r}: {early.stderr}"
+c_source.write_text(c_text)
+print("PASS constructor: a C constructor calling into Rust reports the symbol; exit 1; no program output")
 
 # --locked must reject a changed graph rather than repairing its lockfile.
 # Change the path dependency's version after resolution has a lock to read.

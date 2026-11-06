@@ -605,6 +605,80 @@ fn foreign_thread_callback_sees_domain_statics() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+// A callback native code calls through `app_call` alone, with no scope recorded where the app
+// registered it (a script VM's waker, a UI router), on a thread the program never started.
+const APP_CALL_FIXTURE: &str = r#"
+use std::sync::atomic::{AtomicU64, Ordering};
+static TAPPED: AtomicU64 = AtomicU64::new(0);
+static mut LAST: Option<Box<[u8; 4096]>> = None;
+extern "C" fn tap(n: u64) -> u64 {
+    let b = Box::new([n as u8; 4096]);
+    let at = &*b as *const [u8; 4096] as usize as u64;
+    unsafe { LAST = Some(b); }
+    TAPPED.fetch_add(n, Ordering::SeqCst);
+    at
+}
+fn fixture(p: *mut u64) {
+    let a = unsafe { &*(p as *const [AtomicU64; 4]) };
+    let f: extern "C" fn(u64) -> u64 = tap;
+    a[0].store(f as usize as u64, Ordering::SeqCst);
+    while a[1].load(Ordering::SeqCst) == 0 { std::thread::yield_now(); }
+    a[2].store(TAPPED.load(Ordering::SeqCst), Ordering::SeqCst);
+    a[3].store(unsafe { LAST.as_ref().map_or(0, |b| b[0] as u64) }, Ordering::SeqCst);
+}
+"#;
+
+/// A thread in no domain calls into the run's app: the call writes the app's static (the app's
+/// thread reads every write), its Box and an extension block are in the app's heap, and the
+/// thread is back in no domain after it.
+#[test]
+fn a_native_thread_in_no_domain_calls_into_the_runs_app() {
+    isolated_test!(a_native_thread_in_no_domain_calls_into_the_runs_app);
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut u, entry, root) = fixture_of(APP_CALL_FIXTURE, "fixture");
+    assert!(crate::zone_alloc::compiler_arena_enabled(), "premise: heaps are routed");
+    // the run's app, named before it launches (as the host does)
+    const APP: DomainId = 7;
+    crate::run::set_app_domain(APP);
+    let flags = [const { AtomicU64::new(0) }; 4];
+    let (domain, _base, main) = launch(&mut u, entry, Some(APP), &flags);
+    wait(|| flags[0].load(Ordering::SeqCst) != 0);
+    let (lo, len) = domains().iter().find(|d| d.info.id == domain).and_then(|d| d.heap.as_deref()).expect("the app's heap").range();
+    let tap = flags[0].load(Ordering::SeqCst);
+    // tap, n -> the Box's address, the extension block's
+    extern "C" fn thunk(p: *mut u8) {
+        let c = unsafe { &mut *(p as *mut [u64; 4]) };
+        let tap: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(c[0] as usize) };
+        c[2] = tap(c[1]);
+        // (JIT code reaching a value's extension block: the same call on the same thread)
+        let mut word = 0u64;
+        c[3] = crate::lower::rt_ext_get(&mut word as *mut u64 as u64, 64, 16);
+    }
+    let made = std::thread::spawn(move || {
+        (1..=3u64).map(|n| {
+            let mut c = [tap, n, 0, 0];
+            assert!(crate::jit::app_call(thunk, &mut c as *mut [u64; 4] as *mut u8));
+            assert_eq!(current(), default_base(), "the call leaves the thread in no domain");
+            assert!(crate::zone_alloc::domain::current().is_null(), "and with no heap");
+            (c[2], c[3])
+        }).collect::<Vec<_>>()
+    }).join().unwrap();
+    flags[1].store(1, Ordering::SeqCst);
+    main.join().unwrap();
+    assert_eq!(flags[2].load(Ordering::SeqCst), 6, "the app's static holds every native call's write");
+    assert_eq!(flags[3].load(Ordering::SeqCst), 3);
+    let in_heap = |a: u64| (lo as u64..(lo + len) as u64).contains(&a);
+    for (boxed, ext) in made {
+        assert!(in_heap(boxed), "Box {boxed:#x} outside the app's heap");
+        assert!(in_heap(ext), "extension block {ext:#x} outside the app's heap");
+    }
+    wait(|| info(domain).is_some_and(|i| i.threads == 0 && i.base == 0));
+    domains().retain(|d| d.info.id != domain);
+    crate::run::set_app_domain(0);
+    drop(u);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 // The program's thread-local on a thread the program never started.
 const STAYING_THREAD: &str = r#"
 use std::cell::Cell;

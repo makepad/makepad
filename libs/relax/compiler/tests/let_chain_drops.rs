@@ -1,3 +1,4 @@
+//@ edition: 2024
 // Edition 2024 (let chains): run by `makepad test` and by rustc --edition 2024 --test.
 use std::cell::RefCell;
 

@@ -1782,13 +1782,55 @@ impl Program {
                 (pf, used.unwrap(), None)
             }
         };
+        // A lookup that found no definition of the table may name one an expansion writes in a
+        // file the load reaches later or defers (`#[macro_use] mod defs;` before the call, its
+        // macro_rules! written by a macro): the crate's outline (the demand plan's expansion of
+        // its module tree) has it. Parse again with the outline's definitions of those names
+        // when one changes a lookup this parse made. They are this file's parse table only:
+        // the load publishes each definition when it reaches its file.
+        let mut parse_table = self.macros.clone();
+        let mut outline = None;
+        while !self.cur_image {
+            // (a name the crate defines already is one its textual scope does not reach here, one
+            // a `use .. as` of the crate binds resolves through that import, and a built-in's is
+            // no macro_rules!: no outline changes those, and the load does not wait for the plan)
+            let mut missing = used.failed_lookups();
+            missing.retain(|n| !parse_table.defs.get(n).is_some_and(|defs| defs.iter().any(|d| d.krate == kname)) && !used.local.iter().any(|d| &d.name == n)
+                && !parse_table.aliases.get(&kname).is_some_and(|a| a.contains_key(n))
+                && !BUILTIN_MACROS.contains(&n.as_str()) && crate::builtins::macro_def_for(&kname, n).is_none());
+            if missing.is_empty() { break; }
+            let defs = outline.get_or_insert_with(|| self.pool.as_ref().and_then(|p| p.outline_macros(self.cur_ahead)));
+            if tr { eprintln!("boot-trace-outline: {path} unresolved {missing:?}, outline {:?}", defs.as_ref().map(|d| d.iter().filter(|d| missing.contains(&d.name)).map(|d| format!("{}@{}:{}", d.name, d.def_file, d.def_pos)).collect::<Vec<_>>())); }
+            let Some(defs) = defs else { break };
+            let mut table = parse_table.clone();
+            let next = std::sync::Arc::make_mut(&mut table);
+            let mut added = false;
+            for d in defs.iter().filter(|d| missing.contains(&d.name) && d.def_file != path) {
+                if !next.defs.get(&d.name).is_some_and(|known| known.iter().any(|k| k.krate == d.krate && k.def_file == d.def_file && k.def_pos == d.def_pos)) {
+                    next.push(d.clone());
+                    added = true;
+                }
+            }
+            if !added || used.replays(&table, &kname, path) { break; }
+            let bctx = std::rc::Rc::new(crate::builtins::FileCtx::new(&kname, path, &self.cur_mod_path, &self.crates[krate as usize].cfg));
+            let (fresh, uses) = self.crates[krate as usize].context.parse_input(
+                pf.src[..pf.src_len as usize].to_vec(), None, edition,
+                Some(crate::macros::MacroScope::new(table.clone())), bctx, crate::parser::lazy_auto(),
+            )?;
+            parse_table = table;
+            pf = fresh;
+            used = uses.unwrap();
+            prep = None;
+            PARSE_AGAIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if tr { eprintln!("boot-trace-reparse: {path} (outline macros) {missing:?}"); }
+        }
         // Attribute/item expansions can export macros used by an earlier signature.
         // Revisit that parse only when publishing its own macro surface changes a
         // recorded lookup. Rebuild from the incoming table so discarded expansions
         // cannot leave stale definitions behind.
-        let mut parse_table = self.macros.clone();
+        let incoming = parse_table.clone();
         while pf.ast.tys.iter().any(|t| matches!(t, Ty::Mac(_))) {
-            let mut table = self.macros.clone();
+            let mut table = incoming.clone();
             let next = std::sync::Arc::make_mut(&mut table);
             for d in &used.local {
                 if !next.defs.get(&d.name).is_some_and(|defs| defs.iter().any(|known| std::sync::Arc::ptr_eq(known, d))) {
@@ -2132,6 +2174,12 @@ impl Program {
     /// Whether file `f` is a version a live edit committed (`edit_versions`).
     pub fn is_edit_version(&self, f: u32) -> bool {
         self.edit_versions.contains(&f)
+    }
+
+    /// Whether a live edit committed a file version, current or not (a refused or rolled-back
+    /// version stays loaded): the program's tables are no longer the boot's.
+    pub fn has_edit_versions(&self) -> bool {
+        !self.edit_versions.is_empty()
     }
 
     /// Per boot file a live edit gave a version: the version current now.
@@ -4384,8 +4432,8 @@ impl Program {
     /// Imports of the checked crates that name nothing rustc would resolve but Relax's lenient
     /// resolution accepts: a path through `alloc` without `extern crate alloc;` (not in the extern
     /// prelude), and a macro-named import through a module that does not exist. Run once the
-    /// checked crates are known; each is rustc's E0432.
-    pub fn strict_import_errors(&self, own: &[bool]) -> Vec<String> {
+    /// checked crates are known; each is rustc's E0432 (with the import's index: it counts as used).
+    pub fn strict_import_errors(&self, own: &[bool]) -> Vec<(usize, String)> {
         let mut out = Vec::new();
         let mut macro_binds: Option<crate::fxhash::HashSet<Sym>> = None;
         for i in 0..self.imports.len() {
@@ -4403,7 +4451,7 @@ impl Program {
             let p: Vec<&str> = im.segs.iter().map(|(k, s)| match k { SegKind::Crate => "crate", SegKind::SelfValue => "self", SegKind::Super => "super", _ => self.syms.str(*s) }).collect();
             let f = &self.files[im.file as usize];
             let pos = f.diagnostic_pos(im.pos).min(f.src_len);
-            out.push(self.record_error(im.file, pos, "resolve", format!("E0432: unresolved import `{}`", p.join("::"))));
+            out.push((i, self.record_error(im.file, pos, "resolve", format!("E0432: unresolved import `{}`", p.join("::")))));
         }
         out
     }
@@ -4795,7 +4843,7 @@ impl Program {
             let r = self.lookup_in_module_pass(m, name, ns_type, q);
             let stale = q.hits.iter().any(|(x, given)| q.memo.get(x).map_or(false, |fin| fin != given));
             if !stale || pass > q.prev.len() + 1 {
-                if cacheable {
+                if cacheable && !quiet_lookups() {
                     // (a final answer of the pass is there already)
                     self.glob_cache.insert_first((m, name, ns_type), r);
                 }
@@ -4842,7 +4890,7 @@ impl Program {
         // instead of walking its globs again (a miss walks every module the globs reach)
         if q.hits.len() != hits || q.taints != taints {
             q.tainted.insert(m);
-        } else if cacheable {
+        } else if cacheable && !quiet_lookups() {
             self.glob_cache.insert_first((m, name, ns_type), r);
         }
         r
@@ -5034,7 +5082,7 @@ impl Program {
             return r;
         }
         let r = self.lookup_in_scope_uncached(module, name, ns_type);
-        self.scope_cache.insert((module, name, ns_type), r);
+        if !quiet_lookups() { self.scope_cache.insert((module, name, ns_type), r); }
         r
     }
 
@@ -5611,7 +5659,26 @@ pub struct SharedParse {
 /// `makepad check` records which imports its name resolutions go through (the lint
 /// `unused_imports`); a run does not.
 static RECORD_IMPORT_USES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-pub fn record_import_uses() -> bool { RECORD_IMPORT_USES.load(std::sync::atomic::Ordering::Relaxed) }
+pub fn record_import_uses() -> bool { RECORD_IMPORT_USES.load(std::sync::atomic::Ordering::Relaxed) && !quiet_lookups() }
+
+thread_local! {
+    static QUIET_LOOKUPS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+/// Lookups that are no uses of what they find (a typo suggestion's scan of every name in scope:
+/// rustc's lookup_typo_candidate records no import use) while one lives on this thread: nothing
+/// is recorded, and nothing goes to the lookup caches (a cached answer records no use when a
+/// real lookup takes it later).
+pub struct QuietLookups(());
+impl QuietLookups {
+    pub fn begin() -> Self {
+        QUIET_LOOKUPS.with(|q| q.set(q.get() + 1));
+        QuietLookups(())
+    }
+}
+impl Drop for QuietLookups {
+    fn drop(&mut self) { QUIET_LOOKUPS.with(|q| q.set(q.get() - 1)); }
+}
+fn quiet_lookups() -> bool { QUIET_LOOKUPS.with(|q| q.get() != 0) }
 pub fn set_record_import_uses(on: bool) { RECORD_IMPORT_USES.store(on, std::sync::atomic::Ordering::Relaxed); }
 
 static SHARED_STD: relax_session::sync::Mutex<Option<HashMap<String, std::sync::Arc<SharedParse>>>> = relax_session::sync::Mutex::new(None);

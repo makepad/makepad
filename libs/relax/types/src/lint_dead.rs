@@ -390,6 +390,26 @@ fn fields(w: &mut TypeWalker, ast: &Ast, l: List<FieldDef>, pub_only: bool) {
 
 // ================================================================ body references
 
+/// A body that failed its type check: the traits of the methods it did resolve are used (rustc's
+/// method probe records a used trait import as each call resolves, an error later in the body
+/// or not), and with a method error (E0599: no item `name` found) so is every trait in scope that
+/// has an item of that name (report_method_error marks the call's in-scope traits used, which the
+/// resolver gathered by the name: the error is very possibly why the trait was not used). Its
+/// other references are not collected: with an error, no dead code is reported.
+pub fn note_failed_body(prog: &Program, tcx: &Tcx, body: &Body) {
+    if !lint::enabled() { return; }
+    let d = prog.def(body.def);
+    for m in body.methods.values() { crate::lint_imports::note_method(prog, tcx, d.krate, m.def); }
+    for r in body.res.values() {
+        if let Res::Def(x) = r { crate::lint_imports::note_method(prog, tcx, d.krate, *x); }
+    }
+    for e in body.errors.iter() {
+        let Some((_, rest)) = e.split_once(": E0599: ") else { continue };
+        let Some(name) = rest.split_once("named `").and_then(|(_, n)| n.split_once('`')).map(|(n, _)| n) else { continue };
+        crate::lint_imports::note_scope_traits(prog, d.krate, d.scope, name);
+    }
+}
+
 pub fn collect_body(prog: &Program, tcx: &Tcx, body: &Body) {
     if !lint::enabled() { return; }
     let d = prog.def(body.def);
@@ -597,7 +617,7 @@ impl<'a> BodyRefs<'a> {
         match self.body.res.get(&e.0) {
             Some(Res::Def(d)) => {
                 let d = *d;
-                crate::lint_imports::note_method(self.prog, self.tcx, d);
+                crate::lint_imports::note_method(self.prog, self.tcx, self.prog.def(self.body.def).krate, d);
                 self.handle_res(d);
                 // a trait impl's item stands for the trait's
                 if let Some(t) = self.trait_item_of(d) { self.use_def(t); }
@@ -703,7 +723,7 @@ impl<'a> Visitor<'a> for BodyRefs<'a> {
                 self.tw.generic_args(r.turbofish);
                 if let Some(m) = self.body.methods.get(&e.0) {
                     let d = m.def;
-                    crate::lint_imports::note_method(self.prog, self.tcx, d);
+                    crate::lint_imports::note_method(self.prog, self.tcx, self.prog.def(self.body.def).krate, d);
                     self.use_def(d);
                     if let Some(t) = self.trait_item_of(d) { self.use_def(t); }
                 }
@@ -793,15 +813,13 @@ fn use_leaves(ast: &Ast, t: &UseTree, prefix: &mut Vec<PathSeg>, out: &mut Vec<(
 }
 
 impl Reach {
-    fn compute(prog: &Program, tcx: &Tcx, own: &[bool]) -> Reach {
+    fn compute(prog: &Program, tcx: &Tcx, c: &CrateItems) -> Reach {
+        let own = &c.own[..];
         let mut r = Reach { own: own.to_vec(), defs: HashSet::new(), named: HashSet::new(), fields: HashSet::new() };
         let mut done: HashSet<u32> = HashSet::new();
-        for (k, c) in prog.crates.iter().enumerate() {
-            if own.get(k).copied().unwrap_or(false) { r.module(prog, c.root_mod, &mut done); }
-        }
-        // the checked crates' impls; one that is reached stays reached (`impls` keeps the others)
-        let mut impls: Vec<DefId> = (0..prog.defs.len()).map(|i| DefId(i as u32))
-            .filter(|&d| prog.def(d).kind == DefKind::Impl && own.get(prog.def(d).krate as usize).copied().unwrap_or(false)).collect();
+        r.module(prog, prog.crates[c.krate as usize].root_mod, &mut done);
+        // the crate's impls; one that is reached stays reached (`impls` keeps the others)
+        let mut impls: Vec<DefId> = c.defs.iter().copied().filter(|&d| prog.def(d).kind == DefKind::Impl).collect();
         r.impls(prog, tcx, &mut impls);
         r.named = r.defs.clone();
         // the types a reachable item mentions in its interface are reachable too; each item's
@@ -981,7 +999,7 @@ struct Dead<'a> {
     prog: &'a Program,
     tcx: &'a Tcx,
     own: &'a [bool],
-    refs: HashMap<DefId, BodyInfo>,
+    refs: &'a HashMap<DefId, BodyInfo>,
     live: HashSet<DefId>,
     /// the definitions made live since `mark_with_unsolved` last looked (the unsolved items they wake)
     live_log: Vec<DefId>,
@@ -991,7 +1009,7 @@ struct Dead<'a> {
     propagated: bool,
     /// ADTs with an ignored derived impl (Clone, Debug): the note
     ignored_derived: HashMap<DefId, Vec<String>>,
-    children: HashMap<DefId, Vec<DefId>>,
+    children: &'a HashMap<DefId, Vec<DefId>>,
 }
 
 impl<'a> Dead<'a> {
@@ -1190,42 +1208,114 @@ impl<'a> Dead<'a> {
     }
 }
 
-/// The checked crates are done: run the analysis and report.
-/// MAKEPAD_RUN_CHECK_TIMES: finish's parts of 50 ms or more
-struct PartTimes(bool, std::time::Instant);
+/// MAKEPAD_RUN_CHECK_TIMES: finish's parts of 50 ms or more, summed over the crates
+struct PartTimes {
+    on: bool,
+    t: std::time::Instant,
+    parts: Vec<(&'static str, std::time::Duration)>,
+}
 impl PartTimes {
-    fn mark(&mut self, part: &str) {
-        let dt = self.1.elapsed();
-        if self.0 && dt.as_millis() >= 50 { eprintln!("makepad check: lint_dead::finish {} {:.2} s", part, dt.as_secs_f64()); }
-        self.1 = std::time::Instant::now();
+    fn mark(&mut self, part: &'static str) {
+        if !self.on { return; }
+        let dt = self.t.elapsed();
+        match self.parts.iter_mut().find(|p| p.0 == part) {
+            Some(p) => p.1 += dt,
+            None => self.parts.push((part, dt)),
+        }
+        self.t = std::time::Instant::now();
+    }
+    fn report(&self, crates: usize) {
+        for &(part, dt) in &self.parts {
+            if dt.as_millis() >= 50 { eprintln!("makepad check: lint_dead::finish {} {:.2} s ({} crates)", part, dt.as_secs_f64(), crates); }
+        }
     }
 }
-pub fn finish(prog: &Program, tcx: &Tcx, own: &[bool], root: u32) {
+
+/// One checked crate, as its passes see it: rustc runs dead-code, reachability and the unused
+/// imports on each crate it compiles, so a crate's verdict depends on its own code and its
+/// dependencies, never on which other crates the check has.
+pub struct CrateItems<'p> {
+    pub krate: u32,
+    /// only `krate` is set: what the passes call local
+    pub own: Vec<bool>,
+    /// its definitions, modules and imports, in program order
+    pub defs: Vec<DefId>,
+    pub mods: Vec<u32>,
+    pub imports: Vec<&'p crate::program::Import>,
+    /// its imports that never bind and are reported (E0432, E0603): rustc counts them used
+    pub unresolved: Vec<&'p crate::program::Import>,
+}
+
+/// The checked crates are done: run the analysis and report, one crate at a time. `late`: the
+/// required analyses passed, so rustc's misc_checking_3 runs (dead code and the late lints);
+/// without it only the unused imports are reported (rustc's resolver and check_unused_traits
+/// report them before the analyses can fail). `erroneous`: the imports (by index) the check
+/// reported an error of that never bind in rustc, besides the ones still open.
+pub fn finish(prog: &Program, tcx: &Tcx, own: &[bool], root: u32, late: bool, erroneous: &[usize]) {
     if !lint::enabled() { return; }
-    let mut pt = PartTimes(std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some(), std::time::Instant::now());
+    let mut pt = PartTimes { on: std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some(), t: std::time::Instant::now(), parts: Vec::new() };
     let refs = BODY_REFS.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default();
+    let mut traits = crate::lint_imports::take_method_traits();
+    let n = prog.crates.len();
+    let is_own = |k: u32| own.get(k as usize).copied().unwrap_or(false);
+    let mut crates: Vec<CrateItems> = (0..n as u32).filter(|&k| is_own(k)).map(|k| {
+        let mut own = vec![false; n];
+        own[k as usize] = true;
+        CrateItems { krate: k, own, defs: Vec::new(), mods: Vec::new(), imports: Vec::new(), unresolved: Vec::new() }
+    }).collect();
+    let mut slot = vec![usize::MAX; n];
+    for (i, c) in crates.iter().enumerate() { slot[c.krate as usize] = i; }
     let mut children: HashMap<DefId, Vec<DefId>> = HashMap::new();
     for i in 0..prog.defs.len() {
-        let p = prog.defs[i].parent;
-        if p != NO_DEF { children.entry(p).or_default().push(DefId(i as u32)); }
+        let def = &prog.defs[i];
+        if def.parent != NO_DEF { children.entry(def.parent).or_default().push(DefId(i as u32)); }
+        if is_own(def.krate) { crates[slot[def.krate as usize]].defs.push(DefId(i as u32)); }
+    }
+    for (m, md) in prog.mods.iter().enumerate() {
+        if is_own(md.krate) { crates[slot[md.krate as usize]].mods.push(m as u32); }
+    }
+    let open: HashSet<usize> = prog.open_reportable_imports(0).into_iter().chain(erroneous.iter().copied()).collect();
+    for (i, im) in prog.imports_iter().enumerate() {
+        let k = prog.mods[im.module as usize].krate;
+        if !is_own(k) { continue; }
+        let c = &mut crates[slot[k as usize]];
+        c.imports.push(im);
+        if open.contains(&i) { c.unresolved.push(im); }
     }
     pt.mark("children");
-    let reach = Reach::compute(prog, tcx, own);
+    for c in &crates {
+        let t = traits.remove(&c.krate).unwrap_or_default();
+        finish_crate(prog, tcx, c, root, &refs, &children, &t, late, &mut pt);
+    }
+    pt.report(crates.len());
+}
+
+/// One checked crate's dead code and reachability lints (`late`), and its unused imports.
+#[allow(clippy::too_many_arguments)]
+fn finish_crate(prog: &Program, tcx: &Tcx, c: &CrateItems, root: u32, refs: &HashMap<DefId, BodyInfo>, children: &HashMap<DefId, Vec<DefId>>, traits: &HashSet<DefId>, late: bool, pt: &mut PartTimes) {
+    let reach = Reach::compute(prog, tcx, c);
     pt.mark("Reach::compute");
+    if late { late_lints(prog, tcx, c, root, refs, children, &reach, pt); }
+    crate::lint_imports::check(prog, tcx, c, &reach, traits);
+    pt.mark("lint_imports::check");
+}
+
+/// misc_checking_3 of one checked crate: dead code, then the late lints of its items.
+#[allow(clippy::too_many_arguments)]
+fn late_lints(prog: &Program, tcx: &Tcx, c: &CrateItems, root: u32, refs: &HashMap<DefId, BodyInfo>, children: &HashMap<DefId, Vec<DefId>>, reach: &Reach, pt: &mut PartTimes) {
+    let own = &c.own[..];
     let mut s = Dead { prog, tcx, own, refs, live: HashSet::new(), live_log: Vec::new(), live_fields: HashSet::new(), worklist: Vec::new(), scanned: HashSet::new(), propagated: false, ignored_derived: HashMap::new(), children };
     // seeds
-    let executable = is_executable(prog, root);
     let mut deferred: Vec<Work> = Vec::new();
     let mut unsolved: Vec<DefId> = Vec::new();
     // rustc_passes dead.rs create_and_seed_worklist: a binary's `main` is live. Cargo checks each
     // target as a crate of its own, so every binary of the check seeds its entry: a package's
     // `src/bin/*.rs` and `[[bin]]` targets beside the one the check is rooted at.
     let main = prog.syms.intern_late("main");
-    for (k, c) in prog.crates.iter().enumerate() {
-        if !own.get(k).copied().unwrap_or(false) { continue; }
-        let entry = if k as u32 == root { executable } else { c.is_bin && !c.harness && is_executable(prog, k as u32) };
-        if !entry { continue; }
-        if let Some(m) = prog.lookup_in_container(prog.mods[c.root_mod as usize].def, main, false) {
+    let ci = &prog.crates[c.krate as usize];
+    let executable = if c.krate == root { is_executable(prog, root) } else { ci.is_bin && !ci.harness && is_executable(prog, c.krate) };
+    if executable {
+        if let Some(m) = prog.lookup_in_container(prog.mods[ci.root_mod as usize].def, main, false) {
             if prog.def(m).kind == DefKind::Fn { s.worklist.push(Work { id: m, propagated: false, own: false }); }
         }
     }
@@ -1234,7 +1324,7 @@ pub fn finish(prog: &Program, tcx: &Tcx, own: &[bool], root: u32) {
     }
     let item_kinds = |k: DefKind| matches!(k, DefKind::Mod | DefKind::Fn | DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::Const | DefKind::Static | DefKind::Trait | DefKind::Impl
         | DefKind::TypeAlias | DefKind::AssocFn | DefKind::AssocConst | DefKind::AssocTy | DefKind::ForeignFn | DefKind::ForeignStatic | DefKind::ForeignTy);
-    let all: Vec<DefId> = (0..prog.defs.len()).map(|i| DefId(i as u32)).filter(|&d| s.local(d) && item_kinds(prog.def(d).kind)).collect();
+    let all: Vec<DefId> = c.defs.iter().copied().filter(|&d| item_kinds(prog.def(d).kind)).collect();
     for &d in &all {
         let def = prog.def(d);
         if def.kind == DefKind::Mod && def.parent == NO_DEF { continue; }
@@ -1292,22 +1382,20 @@ pub fn finish(prog: &Program, tcx: &Tcx, own: &[bool], root: u32) {
     pt.mark("mark 2");
     let _ = pre_derived;
     // report
-    let rep = Reporter { s: &s, reach: &reach };
+    let rep = Reporter { s: &s, reach };
     if executable { rep.run(&DEAD_CODE_PUB_IN_BINARY, &pre_live, true, &all); }
     rep.run(&DEAD_CODE, &s.live, false, &all);
     pt.mark("report");
-    crate::lint_late::missing_copy_implementations(prog, tcx, own, &reach);
+    crate::lint_late::missing_copy_implementations(prog, tcx, &c.defs, reach);
     pt.mark("missing_copy_implementations");
-    crate::lint_late::variant_size_differences(prog, tcx, own);
+    crate::lint_late::variant_size_differences(prog, tcx, &c.defs);
     pt.mark("variant_size_differences");
-    crate::lint_late::async_fn_in_trait(prog, own, &reach);
+    crate::lint_late::async_fn_in_trait(prog, &c.defs, reach);
     pt.mark("async_fn_in_trait");
-    crate::lint_late::repr_transparent_fields(prog, tcx, own);
+    crate::lint_late::repr_transparent_fields(prog, tcx, &c.defs);
     pt.mark("repr_transparent_fields");
-    unnameable_types(prog, own, &reach);
+    unnameable_types(prog, own, reach);
     pt.mark("unnameable_types");
-    crate::lint_imports::check(prog, tcx, own, &reach);
-    pt.mark("lint_imports::check");
 }
 
 fn is_executable(prog: &Program, root: u32) -> bool {

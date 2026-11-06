@@ -6242,10 +6242,18 @@ impl<'a> Fcx<'a> {
         // must keep its `&u8`. A coercion that fails leaves no trace; the
         // enclosing coercion site reports a real mismatch. As for match arms,
         // an unresolved, unit or unsized expectation constrains nothing.
+        // One that holds keeps its inference only: the `?`'s type stays the
+        // Continue value's, and the enclosing site adjusts it. An adjustment
+        // left on the `?` would have a later match arm (whose hint is the
+        // earlier arms' type) skip CoerceMany's coercion of it to theirs
+        // (`Some(v) => v, None => args.next()?`: `&String` to `&str`).
         if let Some(expected) = expected {
             let s = self.shallow(expected);
             if !matches!(self.tcx.tys.kind(s), TyKind::Infer(_) | TyKind::Error) && s != self.tcx.tys.unit && !self.is_unsized_ty(s) {
-                self.try_coerce_inner(output, expected, Some(e), lo, false);
+                let saved = self.save_value_adjustments(e.0);
+                if self.try_coerce_inner(output, expected, Some(e), lo, false).is_some() {
+                    self.restore_value_adjustments(e.0, saved);
+                }
             }
         }
         output
@@ -7742,8 +7750,9 @@ impl<'a> Fcx<'a> {
                 self.err(obligation.cause.span, msg);
                 continue;
             }
-            let detail = format!("{predicate:?}");
-            self.err(obligation.cause.span, format!("{code}: unsatisfied obligation {detail}"));
+            let (prog, tcx) = (self.prog, self.tcx);
+            let msg = obligation_message(prog, tcx, code, predicate, &mut |t| self.ty_str(t));
+            self.err(obligation.cause.span, msg);
         }
     }
 
@@ -8029,10 +8038,108 @@ fn normalize_clause_for_diagnostics(infcx: &crate::infer::InferCtxt<'_>, prog: &
     p
 }
 
+/// A region as rustc names one in a diagnostic: `'static`, a named parameter by its name, any
+/// other `'_`.
+pub fn region_str(prog: &Program, tcx: &Tcx, r: crate::types::RegionId) -> String {
+    use crate::types::{LateParamKind, RegionKind};
+    match tcx.tys.region_kind(r) {
+        RegionKind::ReStatic => "'static".to_string(),
+        RegionKind::ReLateParam(_, LateParamKind::Named(d)) => {
+            let n = prog.name(d);
+            if n.starts_with('\'') { n.to_string() } else { format!("'{n}") }
+        }
+        _ => "'_".to_string(),
+    }
+}
+
+/// A constant as rustc prints one in a diagnostic (pretty.rs pretty_print_const): a named
+/// constant by its path, an anonymous one by its source text, the rest as the type printer
+/// writes them.
+pub fn const_str(prog: &Program, tcx: &Tcx, c: crate::consts::Const) -> String {
+    match tcx.tys.const_kind(c) {
+        crate::consts::ConstKind::Alias(_, alias) => alias_const_str(prog, alias.kind.def_id()),
+        _ => tcx.tys.const_to_string(c),
+    }
+}
+
+fn alias_const_str(prog: &Program, d: DefId) -> String {
+    if prog.def(d).kind == DefKind::AnonConst {
+        if let Some((file, relax_front::def_collector::NodeId::AnonConst(e))) = prog.def_id_to_node_id.get(&d) {
+            let pf = &prog.files[*file as usize];
+            let ex = pf.ast.expr(*e);
+            if let Ok(text) = std::str::from_utf8(pf.bytes(ex.lo, ex.hi)) { return text.to_string(); }
+        }
+    }
+    prog.def_path(d)
+}
+
+fn generic_arg_str(prog: &Program, tcx: &Tcx, arg: &crate::consts::GenericArg, ty_str: &mut dyn FnMut(TyId) -> String) -> String {
+    match arg {
+        crate::consts::GenericArg::Type(t) => ty_str(*t),
+        crate::consts::GenericArg::Const(c) => const_str(prog, tcx, *c),
+        crate::consts::GenericArg::Lifetime(r) => region_str(prog, tcx, *r),
+    }
+}
+
+fn term_str(prog: &Program, tcx: &Tcx, t: &Term, ty_str: &mut dyn FnMut(TyId) -> String) -> String {
+    match t { Term::Ty(t) => ty_str(*t), Term::Const(c) => const_str(prog, tcx, *c) }
+}
+
+fn alias_term_str(prog: &Program, a: &AliasTerm, ty_str: &mut dyn FnMut(TyId) -> String) -> String {
+    match a { AliasTerm::Ty(t) => ty_str(*t), AliasTerm::Const(c) => alias_const_str(prog, c.kind.def_id()) }
+}
+
+/// A predicate as rustc's Display writes one (`T: Trait`, `<T as Trait>::A == U`, `a <: b`,
+/// `T well-formed` ..).
+pub fn predicate_str(prog: &Program, tcx: &Tcx, p: &Predicate, ty_str: &mut dyn FnMut(TyId) -> String) -> String {
+    match &p.kind {
+        PredicateKind::Clause(ClauseKind::Trait(t)) => {
+            let args: Vec<String> = t.trait_ref.args.iter().map(|a| generic_arg_str(prog, tcx, a, ty_str)).collect();
+            let name = prog.name(t.trait_ref.def_id);
+            let tr = if args.len() > 1 { format!("{}<{}>", name, args[1..].join(", ")) } else { name.to_string() };
+            format!("{}: {}", args.first().cloned().unwrap_or_default(), tr)
+        }
+        PredicateKind::Clause(ClauseKind::Projection(c)) => format!("{} == {}", alias_term_str(prog, &c.projection_term, ty_str), term_str(prog, tcx, &c.term, ty_str)),
+        PredicateKind::Clause(ClauseKind::RegionOutlives(a, b)) => format!("{}: {}", region_str(prog, tcx, *a), region_str(prog, tcx, *b)),
+        PredicateKind::Clause(ClauseKind::TypeOutlives(t, r)) => format!("{}: {}", ty_str(*t), region_str(prog, tcx, *r)),
+        PredicateKind::Clause(ClauseKind::WellFormed(t)) => format!("{} well-formed", term_str(prog, tcx, t, ty_str)),
+        PredicateKind::Clause(ClauseKind::ConstEvaluatable(c)) => format!("the constant `{}` can be evaluated", const_str(prog, tcx, *c)),
+        PredicateKind::Clause(ClauseKind::ConstArgHasType(c, t)) => format!("the constant `{}` has type `{}`", const_str(prog, tcx, *c), ty_str(*t)),
+        PredicateKind::DynCompatible(d) => format!("the trait `{}` is dyn-compatible", prog.name(*d)),
+        PredicateKind::Subtype(s) => format!("{} <: {}", ty_str(s.a), ty_str(s.b)),
+        PredicateKind::Coerce(c) => format!("{} -> {}", ty_str(c.a), ty_str(c.b)),
+        PredicateKind::ConstEquate(a, b) => format!("{} == {}", const_str(prog, tcx, *a), const_str(prog, tcx, *b)),
+        PredicateKind::Ambiguous => "ambiguous".to_string(),
+        PredicateKind::NormalizesTo(n) => format!("normalizes-to({}, {})", alias_term_str(prog, &n.alias, ty_str), term_str(prog, tcx, &n.term, ty_str)),
+    }
+}
+
+/// rustc's wording of an obligation that does not hold, where neither the trait-bound message nor
+/// fulfillment_message words it: a subtype or coercion that does not hold is a type mismatch
+/// (FulfillmentErrorCode::Subtype, E0308), a constant argument of another type is
+/// SelectionError::ConstArgHasWrongType, an ambiguous one needs annotations (ambiguity.rs E0284),
+/// an overflow names the requirement (E0275).
+pub(crate) fn obligation_message(prog: &Program, tcx: &Tcx, code: &str, predicate: &Predicate, ty_str: &mut dyn FnMut(TyId) -> String) -> String {
+    match (code, &predicate.kind) {
+        ("E0275", _) => format!("E0275: overflow evaluating the requirement `{}`", predicate_str(prog, tcx, predicate, ty_str)),
+        ("E0283", _) => format!("E0284: type annotations needed: cannot satisfy `{}`", predicate_str(prog, tcx, predicate, ty_str)),
+        (_, PredicateKind::Subtype(p)) => {
+            let (expected, found) = if p.a_is_expected { (p.a, p.b) } else { (p.b, p.a) };
+            format!("E0308: mismatched types: expected `{}`, found `{}`", ty_str(expected), ty_str(found))
+        }
+        (_, PredicateKind::Coerce(p)) => format!("E0308: mismatched types: expected `{}`, found `{}`", ty_str(p.b), ty_str(p.a)),
+        (_, PredicateKind::ConstEquate(a, b)) => format!("E0308: mismatched types: expected `{}`, found `{}`", const_str(prog, tcx, *a), const_str(prog, tcx, *b)),
+        (_, PredicateKind::Clause(ClauseKind::ConstArgHasType(c, t))) => format!("error: the constant `{}` is not of type `{}`", const_str(prog, tcx, *c), ty_str(*t)),
+        (_, PredicateKind::Clause(ClauseKind::WellFormed(t))) => format!("error: the type `{}` is not well-formed", term_str(prog, tcx, t, ty_str)),
+        (_, PredicateKind::Clause(ClauseKind::Projection(c))) => format!("E0271: type mismatch resolving `{} == {}`", alias_term_str(prog, &c.projection_term, ty_str), term_str(prog, tcx, &c.term, ty_str)),
+        _ => format!("{code}: the requirement `{}` is not satisfied", predicate_str(prog, tcx, predicate, ty_str)),
+    }
+}
+
 pub(crate) fn trait_error_message(prog: &Program, tcx: &Tcx, code: &str, p: &crate::next_solver::TraitClause, ty_str: &mut dyn FnMut(TyId) -> String) -> String {
     let mut args = Vec::new();
     for arg in &p.trait_ref.args {
-        args.push(match arg { crate::consts::GenericArg::Type(t) => ty_str(*t), crate::consts::GenericArg::Const(c) => tcx.tys.const_to_string(*c), crate::consts::GenericArg::Lifetime(r) => format!("{r:?}") });
+        args.push(generic_arg_str(prog, tcx, arg, ty_str));
     }
     let td = p.trait_ref.def_id;
     let name = prog.name(td).to_string();
@@ -8064,7 +8171,7 @@ pub fn ty_to_string_paths(prog: &Program, tcx: &Tcx, t: TyId) -> String {
     match tcx.tys.kind(t) {
         TyKind::Adt(d, args, _) => {
             let krate = prog.syms.str(prog.crates[prog.def(*d).krate as usize].name);
-            let mut s = format!("{}::{} (crate {}, def {})", krate, prog.def_path(*d), prog.def(*d).krate, d.0);
+            let mut s = format!("{}::{}", krate, prog.def_path(*d));
             if !args.is_empty() {
                 let a: Vec<String> = tcx.tys.list(*args).iter().map(|x| ty_to_string_paths(prog, tcx, *x)).collect();
                 s.push_str(&format!("<{}>", a.join(", ")));
@@ -8132,7 +8239,7 @@ pub fn type_name(prog: &Program, tcx: &Tcx, t: TyId) -> String {
                 format!("({})", list(tcx.tys.list(*v)))
             }
         }
-        TyKind::Array(e, n) => format!("[{}; {}]", type_name(prog, tcx, *e), tcx.tys.const_to_string(*n)),
+        TyKind::Array(e, n) => format!("[{}; {}]", type_name(prog, tcx, *e), const_str(prog, tcx, *n)),
         TyKind::Slice(e) => format!("[{}]", type_name(prog, tcx, *e)),
         TyKind::Ref(m, e, _) => format!("&{}{}", if *m { "mut " } else { "" }, type_name(prog, tcx, *e)),
         TyKind::Ptr(m, e) => format!("*{} {}", if *m { "mut" } else { "const" }, type_name(prog, tcx, *e)),
@@ -8310,8 +8417,8 @@ pub fn ty_to_string(stable_closures: bool, prog: &Program, tcx: &Tcx, t: TyId) -
             s.push(')');
             s
         }
-        TyKind::Array(e, n) => format!("[{}; {}]", ty_to_string(stable_closures, prog, tcx, *e), tcx.tys.const_to_string(*n)),
-        TyKind::Const(v) => tcx.tys.const_to_string(*v),
+        TyKind::Array(e, n) => format!("[{}; {}]", ty_to_string(stable_closures, prog, tcx, *e), const_str(prog, tcx, *n)),
+        TyKind::Const(v) => const_str(prog, tcx, *v),
         TyKind::Slice(e) => format!("[{}]", ty_to_string(stable_closures, prog, tcx, *e)),
         TyKind::Ref(m, e, _) => format!("&{}{}", if *m { "mut " } else { "" }, ty_to_string(stable_closures, prog, tcx, *e)),
         TyKind::Ptr(m, e) => format!("*{} {}", if *m { "mut" } else { "const" }, ty_to_string(stable_closures, prog, tcx, *e)),

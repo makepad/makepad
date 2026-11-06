@@ -8680,6 +8680,15 @@ pub(crate) unsafe fn rekey_after_revert(up: *mut Unit) {
     }
 }
 
+/// A crate is about to stop being edited (its files have the boot text again): when a const edit
+/// moved the keys, they follow the text now, while the crate is still walked as edited (an item
+/// edit's interface would stay in them otherwise).
+pub(crate) unsafe fn rekey_if_moved(up: *mut Unit) {
+    if let Some(c) = (&*up).cache.as_ref().map(|c| c.get()) {
+        if (*c).keys_moved != 0 { (&mut *c).keys_follow_text(&*up); }
+    }
+}
+
 impl Cache {
     /// Whether a struct's live edit reaches this slot's crates (unknown crates: it may).
     fn layout_edit_reaches(&self, id: u32) -> bool {

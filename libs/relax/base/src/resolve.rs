@@ -1622,6 +1622,77 @@ pub struct Options {
     /// their own (the lib is cfg(test) there and plain beside the bins' unit tests and the
     /// integration tests), so one graph holds either the lib test or bin and integration tests.
     pub test: Option<TestSel>,
+    /// `makepad check`'s target flags, which are cargo check's (parse_check_flags); None: none
+    /// given (the lib and every bin) or a run's or test's graph.
+    pub check: Option<CheckSel>,
+}
+
+/// `makepad check`'s target selection, read as `cargo check` reads its target flags (cargo
+/// ops/cargo_compile/compile_filter.rs): `--lib` the lib, `--bins` / `--bin <name>` the bins,
+/// `--tests` every target with `test = true` built with `--test` (the lib's unit tests, the bins'
+/// unit tests and the integration tests), `--test <name>` that integration test, in one graph.
+/// `makepad test` (parse_flags) picks test programs instead: there `--lib` is the lib's unit tests.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CheckSel {
+    pub lib: bool,
+    pub all_bins: bool,
+    pub bins: Vec<String>,
+    pub all_tests: bool,
+    pub tests: Vec<String>,
+}
+
+impl CheckSel {
+    /// A target of it is built with `--test` (the graph resolves the dev-dependencies).
+    fn tests_anything(&self) -> bool {
+        self.all_tests || !self.tests.is_empty()
+    }
+}
+
+/// `makepad check`'s flags: cargo check's target selection (CheckSel), the rest as parse_flags.
+pub fn parse_check_flags(flags: &[String]) -> Result<Options, String> {
+    let mut sel = CheckSel::default();
+    let mut any = false;
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < flags.len() {
+        let f = flags[i].as_str();
+        let value = |i: &mut usize| -> Result<String, String> {
+            *i += 1;
+            flags.get(*i).cloned().ok_or_else(|| format!("{} needs a value", f))
+        };
+        match f {
+            "--lib" => sel.lib = true,
+            "--bins" => sel.all_bins = true,
+            "--bin" => sel.bins.push(value(&mut i)?),
+            "--tests" => sel.all_tests = true,
+            "--test" => sel.tests.push(value(&mut i)?),
+            // (a flag's value is no target flag: `--features lib`)
+            "--features" | "-F" => {
+                rest.push(f.to_string());
+                rest.push(value(&mut i)?);
+                i += 1;
+                continue;
+            }
+            _ => {
+                if let Some(v) = f.strip_prefix("--bin=") {
+                    sel.bins.push(v.to_string());
+                } else if let Some(v) = f.strip_prefix("--test=") {
+                    sel.tests.push(v.to_string());
+                } else {
+                    rest.push(f.to_string());
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+        any = true;
+        i += 1;
+    }
+    let mut o = parse_flags(&rest)?;
+    if any {
+        o.check = Some(sel);
+    }
+    Ok(o)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1636,7 +1707,7 @@ pub enum TestSel {
 }
 
 pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
-    let mut o = Options { offline: false, no_default_features: false, all_features: false, features: Vec::new(), bin: None, test: None };
+    let mut o = Options { offline: false, no_default_features: false, all_features: false, features: Vec::new(), bin: None, test: None, check: None };
     let mut lib = false;
     let mut bins = false;
     let mut bin_names: Vec<String> = Vec::new();
@@ -2172,18 +2243,28 @@ pub fn unit_graph(sess: &std::sync::Arc<crate::Session>, workspace: &str, packag
 
 /// `unit_graph` with git dependencies kept in `git` (tests: a private home and pin file).
 pub fn unit_graph_with(sess: &std::sync::Arc<crate::Session>, workspace: &str, package: &str, flags: &[String], git: GitPlaces) -> Result<Units, String> {
-    let o = parse_flags(flags)?;
+    graph_of(sess, workspace, package, &parse_flags(flags)?, git)
+}
+
+/// `makepad check`'s unit graph: its target flags are cargo check's (parse_check_flags).
+pub fn check_unit_graph(sess: &std::sync::Arc<crate::Session>, workspace: &str, package: &str, flags: &[String]) -> Result<Units, String> {
+    graph_of(sess, workspace, package, &parse_check_flags(flags)?, GitPlaces::run())
+}
+
+fn graph_of(sess: &std::sync::Arc<crate::Session>, workspace: &str, package: &str, o: &Options, git: GitPlaces) -> Result<Units, String> {
     let mut r = Resolver::with(sess, workspace, git)?;
     r.offline |= o.offline;
     let root = r.find_member(package)?;
     let rk = (root, false);
-    let mut f = Feat { r: &mut r, dev_of: o.test.as_ref().map(|_| rk).into_iter().collect(), all_platforms: false, nodes: HashMap::new(), work: Vec::new(), order: Vec::new() };
+    // (the dev-dependencies are resolved for a graph with a target built with `--test`)
+    let dev = o.test.is_some() || o.check.as_ref().is_some_and(CheckSel::tests_anything);
+    let mut f = Feat { r: &mut r, dev_of: dev.then_some(rk).into_iter().collect(), all_platforms: false, nodes: HashMap::new(), work: Vec::new(), order: Vec::new() };
     f.activate(rk)?;
     let m = &f.r.manifests[root];
-    f.work.extend(feature_requests(&m.features, &m.implicit_features(), &o).into_iter().map(|req| (rk, req)));
+    f.work.extend(feature_requests(&m.features, &m.implicit_features(), o).into_iter().map(|req| (rk, req)));
     f.run()?;
     let (nodes, order) = (std::mem::take(&mut f.nodes), std::mem::take(&mut f.order));
-    emit(&r, &nodes, &order, root, &o)
+    emit(&r, &nodes, &order, root, o)
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -2212,20 +2293,27 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
     };
     // every active node with a lib gets a lib unit; the root's bins; build scripts
     let mut roots = Vec::new();
+    let check = o.check.as_ref();
     for &k in order {
         let m = &r.manifests[k.0];
-        if m.lib.is_some() {
-            if k == (root, false) && o.test == Some(TestSel::Lib) {
+        if let Some(lib) = &m.lib {
+            let check_lib_test = check.is_some_and(|c| c.all_tests && lib.test);
+            if k == (root, false) && (o.test == Some(TestSel::Lib) || check_lib_test) {
                 roots.push(add(k, UKind::LibTest, &mut units));
-                // Dependencies link the plain library, not its test harness.
-                if nodes.iter().any(|(other, node)| *other != k && node.edges.iter().any(|(di, target)| {
+                // Dependencies link the plain library, not its test harness: other packages', and
+                // a check's bins and integration tests (the lib itself when it is checked too).
+                let check_plain = check.is_some_and(|c| c.lib || c.all_bins || !c.bins.is_empty() || c.tests_anything());
+                if check_plain || nodes.iter().any(|(other, node)| *other != k && node.edges.iter().any(|(di, target)| {
                     *target == k && !r.manifests[other.0].deps[*di].build
                 })) {
-                    add(k, UKind::Lib, &mut units);
+                    let i = add(k, UKind::Lib, &mut units);
+                    if check.is_some_and(|c| c.lib) {
+                        roots.push(i);
+                    }
                 }
             } else {
                 let i = add(k, UKind::Lib, &mut units);
-                if k == (root, false) && o.test.is_none() {
+                if k == (root, false) && ((o.test.is_none() && check.is_none()) || check.is_some_and(|c| c.lib)) {
                     roots.push(i);
                 }
             }
@@ -2289,7 +2377,51 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
         _ => {}
     }
     let mut bins = Vec::new();
+    if let Some(c) = check {
+        if c.lib && rm.lib.is_none() {
+            return Err(format!("no library targets found in package `{}`", rm.name));
+        }
+        if (c.all_bins || !c.bins.is_empty()) && rm.bins.is_empty() {
+            return Err(format!("no bin target found in package `{}`", rm.name));
+        }
+        for n in &c.bins {
+            if !rm.bins.iter().any(|t| &t.name == n) {
+                return Err(format!("no bin target named `{}` in package `{}`", n, rm.name));
+            }
+        }
+        for n in &c.tests {
+            if !rm.tests.iter().any(|t| &t.name == n) {
+                return Err(format!("no test target named `{}` in package `{}`", n, rm.name));
+            }
+        }
+        for (bi, bt) in rm.bins.iter().enumerate() {
+            let named = c.bins.contains(&bt.name);
+            if (c.all_bins || named) && bt.enabled(&rn.features, named)? {
+                roots.push(add((root, false), UKind::Bin(bi), &mut units));
+            }
+            if c.all_tests && bt.test && bt.enabled(&rn.features, false)? {
+                roots.push(add((root, false), UKind::BinTest(bi), &mut units));
+            }
+        }
+        for (ti, tt) in rm.tests.iter().enumerate() {
+            let named = c.tests.contains(&tt.name);
+            if ((c.all_tests && tt.test) || named) && tt.enabled(&rn.features, named)? {
+                roots.push(add((root, false), UKind::Test(ti), &mut units));
+            }
+        }
+        // the integration tests' CARGO_BIN_EXE_<name>: every bin cargo would build for them
+        if c.tests_anything() {
+            for bt in &rm.bins {
+                if bt.enabled(&rn.features, false)? {
+                    bins.push(bt.name.clone());
+                }
+            }
+        }
+    }
     for (bi, bt) in r.manifests[root].bins.iter().enumerate() {
+        if check.is_some() {
+            break;
+        }
         if !bt.enabled(&rn.features, o.test.is_none() && o.bin.as_ref() == Some(&bt.name))? {
             continue;
         }
@@ -2559,6 +2691,58 @@ required-features = ["b", "manual"]
         assert_eq!(d.features, ["parsing", "visit"]);
         assert!(!d.default_features);
         assert_eq!(d.path.as_deref(), Some(normalize(&format!("{root}/macros/shared")).as_str()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `makepad check`'s target flags are cargo check's (cargo compile_filter.rs): `--tests` is
+    /// every target with `test = true` built with `--test` -- the lib's and the bins' unit tests
+    /// and the integration tests, a `test = false` bin left out -- beside the plain lib they link,
+    /// with the dev-dependencies; `--lib` and `--bins` are the plain targets, without them. A
+    /// `makepad check --tests` had checked the integration tests only, and so reported none of
+    /// the bins' unit tests' lints (`unused_mut` in fab's sla.rs tests, cargo check's 11-05).
+    #[test]
+    fn check_target_flags_are_cargo_checks() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let root = tree("check-targets", &[
+            ("Cargo.toml", "[workspace]\nresolver = \"2\"\nmembers = [\"app\"]\n"),
+            ("app/Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[[bin]]\nname = \"tool\"\ntest = false\n[dev-dependencies]\nhelper = { path = \"../helper\" }\n"),
+            ("app/src/lib.rs", ""),
+            ("app/src/main.rs", "fn main() {}\n"),
+            ("app/src/bin/tool.rs", "fn main() {}\n"),
+            ("app/tests/it.rs", ""),
+            ("app/tests/other.rs", ""),
+            ("helper/Cargo.toml", "[package]\nname = \"helper\"\nversion = \"0.1.0\"\n"),
+            ("helper/src/lib.rs", ""),
+        ]);
+        // each root: target name and mode; then whether the dev-dependency is in the graph
+        let check = |flags: &[&str]| -> (Vec<String>, bool) {
+            let flags: Vec<String> = flags.iter().map(|f| f.to_string()).collect();
+            let g = check_unit_graph(sess, &root, "app", &flags).unwrap_or_else(|e| panic!("{flags:?}: {e}"));
+            let mut r: Vec<String> = g.roots.iter().map(|&i| format!("{} {}", g.units[i].name, g.units[i].mode)).collect();
+            r.sort();
+            (r, g.units.iter().any(|u| u.name == "helper"))
+        };
+        assert_eq!(check(&["--tests"]), (vec!["app test".to_string(), "app test".to_string(), "it test".to_string(), "other test".to_string()], true));
+        assert_eq!(check(&["--test", "it"]), (vec!["it test".to_string()], true));
+        assert_eq!(check(&["--lib"]), (vec!["app build".to_string()], false));
+        assert_eq!(check(&["--bins"]), (vec!["app build".to_string(), "tool build".to_string()], false));
+        assert_eq!(check(&["--bin", "tool", "--tests"]), (vec!["app test".to_string(), "app test".to_string(), "it test".to_string(), "other test".to_string(), "tool build".to_string()], true));
+        assert_eq!(check(&["--lib", "--tests"]), (vec!["app build".to_string(), "app test".to_string(), "app test".to_string(), "it test".to_string(), "other test".to_string()], true));
+        // no target flag: the lib and every bin, as before
+        assert_eq!(check(&[]), (vec!["app build".to_string(), "app build".to_string(), "tool build".to_string()], false));
+        // the lib's and the bin's unit tests and the integration tests link the plain lib
+        let g = check_unit_graph(sess, &root, "app", &["--tests".to_string()]).unwrap();
+        let plain = g.units.iter().position(|u| u.name == "app" && u.mode == "build" && u.kind.iter().any(|k| k == "lib")).expect("the plain lib");
+        for &i in &g.roots {
+            let u = &g.units[i];
+            if u.kind.iter().any(|k| k == "lib") { continue; }
+            assert!(u.deps.iter().any(|(d, _)| *d == plain), "{} links the plain lib", u.name);
+        }
+        // makepad test's flags stay test programs: `--lib` is the lib's unit tests
+        let g = unit_graph(sess, &root, "app", &["--lib".to_string()]).unwrap();
+        assert_eq!(g.roots.iter().map(|&i| g.units[i].mode.as_str()).collect::<Vec<_>>(), ["test"]);
+        let e = check_unit_graph(sess, &root, "app", &["--test".to_string(), "nope".to_string()]).err().unwrap();
+        assert!(e.contains("no test target named `nope`"), "{e}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

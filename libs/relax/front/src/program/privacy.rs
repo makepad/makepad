@@ -240,10 +240,12 @@ impl Program {
         }
     }
 
-    /// E0603 for the `use` declarations of the own crates (`own[krate]`).
-    pub fn import_privacy_errors(&self, own: &[bool]) -> Vec<String> {
+    /// E0603 for the `use` declarations of the own crates (`own[krate]`). With an error, the index
+    /// of an import that never binds in rustc (a path through something private): rustc_resolve
+    /// plants a dummy binding for it and counts it used.
+    pub fn import_privacy_errors(&self, own: &[bool]) -> Vec<(Option<usize>, String)> {
         let mut out = Vec::new();
-        for im in &self.imports {
+        for (i, im) in self.imports.iter().enumerate() {
             let krate = self.mods[im.module as usize].krate;
             if !own.get(krate as usize).copied().unwrap_or(false) || im.bound & BOUND_INJECTED != 0 {
                 continue;
@@ -263,12 +265,14 @@ impl Program {
                 None
             };
             if let Some(e) = single.or_else(|| self.path_privacy(im.module, im.global, segs, ns, edition < 2018, true)).filter(|e| !e.lint) {
-                out.push(self.record_error(im.file, im.pos, "resolve", self.privacy_message(&e)));
+                // (an ambiguous name still binds: rustc reports the import unused as well)
+                out.push(((!e.ambiguous).then_some(i), self.record_error(im.file, im.pos, "resolve", self.privacy_message(&e))));
             } else if im.glob && im.bound & BOUND_PREFIX_ONLY == 0 && self.glob_of_own_module(im, segs, edition) {
-                out.push(self.record_error(im.file, im.pos, "resolve", "E0432: unresolved import -- cannot glob-import a module into itself".to_string()));
+                // (it binds nothing: rustc reports it unused as well)
+                out.push((None, self.record_error(im.file, im.pos, "resolve", "E0432: unresolved import -- cannot glob-import a module into itself".to_string())));
             } else if !im.glob && im.is_pub && !im.ext {
                 if let Some(msg) = self.cannot_reexport(im, segs, edition) {
-                    out.push(self.record_error(im.file, im.pos, "resolve", msg));
+                    out.push((None, self.record_error(im.file, im.pos, "resolve", msg)));
                 }
             }
         }

@@ -348,20 +348,30 @@ impl<W: Write> Write for LineWriter<W> {
             }
         }
     }
+    /// As real std's (LineWriterShim::write_all): a buffered start of a line goes out in one
+    /// write with the lines that end it, so `println!("x {}", v)` is one write. (Writing the
+    /// two apart let another writer of the same file -- the host's diagnostics on a stderr
+    /// merged with stdout -- land inside the program's line.)
     fn write_all(&mut self, buf: &[u8]) -> Result<()> {
-        let mut rest = buf;
-        while !rest.is_empty() {
-            match self.write(rest) {
-                Ok(0) => return Err(Error::WRITE_ALL_EOF),
-                Ok(n) => rest = &rest[n..],
-                Err(e) => {
-                    if !e.is_interrupted() {
-                        return Err(e);
-                    }
+        match buf.iter().rposition(|&b| b == b'\n') {
+            None => {
+                // a previously buffered complete line is flushed first
+                if self.inner.buffer().last() == Some(&b'\n') {
+                    self.inner.flush_buf()?;
                 }
+                self.inner.write_all(buf)
+            }
+            Some(nl) => {
+                let (lines, tail) = buf.split_at(nl + 1);
+                if self.inner.buffer().is_empty() {
+                    self.inner.inner_mut().write_all(lines)?;
+                } else {
+                    self.inner.write_all(lines)?;
+                    self.inner.flush_buf()?;
+                }
+                self.inner.write_all(tail)
             }
         }
-        Ok(())
     }
     fn flush(&mut self) -> Result<()> {
         self.inner.flush()

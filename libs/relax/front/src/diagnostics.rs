@@ -43,6 +43,8 @@ impl Program {
     pub fn suggest(&self, d: &mut Diagnostic, location: &SourceLocation<'_>, module: u32) {
         if !matches!(d.code.as_str(), "E0412" | "E0425" | "E0433" | "RR0001" | "RM0001") { return; }
         let Some(name) = d.message.split('`').nth(1) else { return };
+        // the candidates' lookups are no uses of the imports they go through
+        let _quiet = crate::program::QuietLookups::begin();
         // A path error's span identifies the unresolved leading segment; import collection
         // supplies the last segment's span. Never replace the entire qualified path.
         let span = location.span;

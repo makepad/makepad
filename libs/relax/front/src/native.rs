@@ -188,7 +188,7 @@ pub fn build(g: &Graph, seeds: &[usize], req: &Request) -> Result<Built, String>
     let flags: Vec<&String> = req.cargo_flags.iter().filter(|f| f.as_str() != "--release").collect();
 
     // ---- the key
-    let mut h = fnv(b"native-link-v11", 0xcbf29ce484222325);
+    let mut h = fnv(b"native-link-v12", 0xcbf29ce484222325);
     h = fnv(req.triple.as_bytes(), h);
     h = fnv(&selection_key(&script_pkgs, &lib_pkgs).to_le_bytes(), h);
     for f in &flags {

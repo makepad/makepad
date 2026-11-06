@@ -343,7 +343,9 @@ fn worker_main(w: Arc<Worker>) {
         // the task catches its own panics; a panic that escapes it (a result dropped in the task
         // itself) is handled the same way (its `Done` finished the task while unwinding)
         let done = std::panic::catch_unwind(AssertUnwindSafe(task)).ok();
-        if done.is_none() || TASK_PANICKED.with(|p| p.replace(false)) {
+        // (a thread the task left at the OS's idle policy cannot leave it: the next task, one a
+        // section waits for, would run below every other thread)
+        if done.is_none() || TASK_PANICKED.with(|p| p.replace(false)) || budget::thread_idle() {
             // end this worker: a fresh thread has none of the half-run task's thread-local state
             {
                 let _k = zone_alloc::kept();
@@ -381,7 +383,7 @@ fn dispatch(pool: &'static Pool, task: Task) -> Result<(), (Task, std::io::Error
         let id = pool.started.fetch_add(1, Ordering::Relaxed);
         pool.alive.fetch_add(1, Ordering::Relaxed);
         let w2 = w.clone();
-        let spawned = std::thread::Builder::new().name(format!("run-jit-{id}")).spawn(move || worker_main(w2));
+        let spawned = std::thread::Builder::new().name(format!("run-jit-{id}")).stack_size(crate::run_threads::COMPILER_STACK).spawn(move || worker_main(w2));
         (w, spawned)
     };
     match spawned {

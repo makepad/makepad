@@ -84,11 +84,12 @@ pub(super) struct CollectedBoot<'p> {
 }
 
 impl CollectedBoot<'_> {
-    /// The boot with its borrowed arrays copied: it outlives the program's locks.
-    fn into_owned(self) -> CollectedBoot<'static> {
-        let own = |w: Arc<crate::image::Writer<'_>>| Arc::new(Arc::unwrap_or_clone(w).into_owned());
-        CollectedBoot { recipe: self.recipe, program: own(self.program), types: own(self.types),
-            definitions: self.definitions, files: self.files, interfaces: self.interfaces }
+    /// The boot with its borrowed arrays copied: it outlives the program's locks. None: `stop`
+    /// said yes between two copies (image::Writer::into_owned).
+    fn into_owned(self, stop: &dyn Fn() -> bool) -> Option<CollectedBoot<'static>> {
+        let own = |w: Arc<crate::image::Writer<'_>>| Some(Arc::new(Arc::unwrap_or_clone(w).into_owned(stop)?));
+        Some(CollectedBoot { recipe: self.recipe, program: own(self.program)?, types: own(self.types)?,
+            definitions: self.definitions, files: self.files, interfaces: self.interfaces })
     }
 }
 
@@ -585,7 +586,7 @@ impl CollectedInputs {
         Encoder { mode: self.mode, dir: &self.dir, fps: &self.fps, iface_plain: &self.iface_plain,
             crate_path: &self.crate_path, crate_ident: &self.crate_ident, boot: None, committed: false,
             mapped: self.mapped.as_ref().map(|(m, n)| (m, *n)), recipe: self.recipe.as_ref() }
-            .encode_as(prog, tcx, stop, true, |boot| boot)
+            .encode_as(prog, tcx, stop, true, Some)
     }
 
     /// These inputs for a program whose crates from `boot` on were added at run time
@@ -633,7 +634,7 @@ impl Cache {
         if self.collected_committed || self.collected_boot.is_some() || self.mode == Mode::ReadOnly { return; }
         let started = std::time::Instant::now();
         let mut why = "recipe";
-        self.collected_boot = self.encoder().capture_boot(prog, tcx, &|| false, &mut why).map(CollectedBoot::into_owned);
+        self.collected_boot = self.encoder().capture_boot(prog, tcx, &|| false, &mut why).and_then(|boot| boot.into_owned(&|| false));
         if crate::preload::trace() {
             match &self.collected_boot {
                 Some(boot) => eprintln!("makepad-run collected: boot snapshot {} crates, {} definitions, {} types, {} files, {} bytes in {:.1} ms",
@@ -668,7 +669,7 @@ impl Cache {
     /// Per-crate file images are flushed first, then the complete graph is committed last.
     pub fn record_collected(&mut self, prog: &Program, tcx: &Tcx) -> Option<()> {
         // committed under the caller's quiescence: the image borrows the program's arrays
-        match self.encoder().encode_as(prog, tcx, &|| false, false, |boot| boot) {
+        match self.encoder().encode_as(prog, tcx, &|| false, false, Some) {
             CollectedRecord::Ready(dest, payload) => { Self::commit_collected(prog.session.options.verbose.then_some(self.collected_crates(prog)), dest, payload, &|| false)?; }
             CollectedRecord::Current => (),
             CollectedRecord::Yielded | CollectedRecord::Failed => return None,
@@ -690,12 +691,16 @@ impl Cache {
     /// never holds a frame or a live edit up; the caller retries later. The image owns its arrays: the
     /// store write (commit_collected) needs no lock.
     pub fn encode_collected(&self, prog: &Program, tcx: &Tcx, stop: &dyn Fn() -> bool) -> CollectedRecord<'static> {
-        self.encoder().encode_as(prog, tcx, stop, false, CollectedBoot::into_owned)
+        self.encoder().encode_as(prog, tcx, stop, false, |boot| boot.into_owned(stop))
     }
 }
 
 impl Encoder<'_> {
     fn capture_boot<'p>(&self, prog: &'p Program, tcx: &'p Tcx, stop: &dyn Fn() -> bool, why: &mut &'static str) -> Option<CollectedBoot<'p>> {
+        // a live edit's versions (a refused or undone one's too, with their definitions) are in
+        // the tables: they are no boot's (a boot captured before them still is: preserve_collected_boot)
+        *why = "the program holds a live edit's file versions";
+        if prog.has_edit_versions() { return None; }
         *why = "recipe";
         let recipe = self.recipe.or(prog.front_graph.as_ref())?;
         if recipe.crates.len() != prog.crates.len() || recipe.crates.iter().zip(&prog.crates)
@@ -741,12 +746,17 @@ impl Encoder<'_> {
             if i % 128 == 127 && stop() { return None; }
             keys.push(MappedKey::new(def_key_in(prog, tcx, self.crate_ident, &mut memo, &mut files, DefId(i as u32))));
         }
-        // per crate: its definitions by key, without the keys two of them have
+        // per crate: its definitions by key, without the keys two of them have (asked between
+        // crates and every 4096 definitions too: Fab's sorts held the owner 64-70 ms between checks)
         let mut maps: Vec<Vec<(u128, u32)>> = vec![Vec::new(); prog.crates.len()];
-        for (i, k) in keys.iter().enumerate() { maps[prog.def(DefId(i as u32)).krate as usize].push((k.get(), i as u32)); }
+        for (i, k) in keys.iter().enumerate() {
+            if i % 4096 == 4095 && stop() { return None; }
+            maps[prog.def(DefId(i as u32)).krate as usize].push((k.get(), i as u32));
+        }
         let mut image = crate::image::Writer::default();
         image.add_owned(0, &keys);
         for (c, mut map) in maps.into_iter().enumerate() {
+            if stop() { return None; }
             map.sort_unstable();
             let unique = |i: usize| (i == 0 || map[i - 1].0 != map[i].0) && map.get(i + 1).is_none_or(|n| n.0 != map[i].0);
             let (keys, defs): (Vec<MappedKey>, Vec<u32>) = (0..map.len()).filter(|&i| unique(i)).map(|i| (MappedKey::new(map[i].0), map[i].1)).unzip();
@@ -758,8 +768,9 @@ impl Encoder<'_> {
 
     /// `keep`: what a boot captured now becomes before the image takes it (CollectedBoot::into_owned
     /// for an image that outlives the program's locks; as it is for one committed under them).
+    /// None: it stopped for `stop`.
     fn encode_as<'p, 'b>(&self, prog: &'p Program, tcx: &'p Tcx, stop: &dyn Fn() -> bool, fresh: bool,
-        keep: impl FnOnce(CollectedBoot<'p>) -> CollectedBoot<'b>) -> CollectedRecord<'b> {
+        keep: impl FnOnce(CollectedBoot<'p>) -> Option<CollectedBoot<'b>>) -> CollectedRecord<'b> {
         if self.mode == Mode::ReadOnly { return CollectedRecord::Failed; }
         if self.committed && !fresh { return CollectedRecord::Current; }
         let mut why = "recipe";
@@ -776,7 +787,13 @@ impl Encoder<'_> {
         let captured;
         let boot: &CollectedBoot<'b> = match frozen {
             Some(boot) => boot,
-            None => { captured = keep(self.capture_boot(prog, tcx, stop, &mut why)?); &captured }
+            None => {
+                let boot = self.capture_boot(prog, tcx, stop, &mut why)?;
+                why = "copy";
+                crate::run::yield_section("collected copy");
+                captured = keep(boot)?;
+                &captured
+            }
         };
         check()?;
         crate::run::yield_section("collected image");

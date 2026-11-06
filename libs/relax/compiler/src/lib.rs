@@ -127,6 +127,7 @@ mod harness;
 mod test_pkg;
 pub mod tui;
 pub mod check;
+mod check_order;
 mod typeck_bg;
 mod gandalf_out;
 pub mod serve;
@@ -457,9 +458,10 @@ pub fn cli_main(sess: &std::sync::Arc<crate::Session>) {
             let code = run::cmd_run(sess, &args[2..]);
             os::proc::exit(code);
         }
-        // `makepad check [--json] [--units u.json] <package>`: type/borrow check and compile, run
-        // nothing; `--watch`: the warm session (type/borrow check only unless --deep), re-checking
-        // what each edit invalidates
+        // `makepad check [--json] [--units u.json] <package> [target flags]`: type/borrow check and
+        // compile, run nothing; the target flags are cargo check's (`--lib`, `--bins`, `--bin <name>`,
+        // `--tests`, `--test <name>`: resolve.rs parse_check_flags); `--watch`: the warm session
+        // (type/borrow check only unless --deep), re-checking what each edit invalidates
         "check" => {
             // rustc_interface util.rs `init_stack_size`: a batch compiler rejects a RUST_MIN_STACK that
             // is set (not blank) but no number of bytes, before it reads any input

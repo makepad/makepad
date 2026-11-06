@@ -380,12 +380,17 @@ pub fn errno_location() -> *mut c_int {
 
 mod c {
     extern "C" {
-        pub static environ: *const *const core::ffi::c_char;
+        pub static mut environ: *const *const core::ffi::c_char;
     }
 }
 
 pub fn environ() -> *const *const c_char {
     unsafe { c::environ }
+}
+
+/// Makes `env` this process's environment (the array is the caller's to keep alive).
+pub unsafe fn set_environ(env: *const *const c_char) {
+    c::environ = env;
 }
 
 /// glibc passes argc/argv to .init_array functions; Relax's runtime records them instead.

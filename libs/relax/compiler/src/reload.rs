@@ -657,6 +657,8 @@ pub unsafe fn rollback(up: *mut Unit, undo: Undo, why: &str) -> Vec<String> {
                 }
             }
         }
+        // (the versions before the patch's: the boot text again, for a first edit)
+        settle_edited_crates(up);
         names
     })
 }
@@ -1934,12 +1936,28 @@ fn layout_edit(u: &Unit, d: DefId, fresh: &crate::tcx::AdtT, running_discriminan
     Ok((adt, notes))
 }
 
-/// The crates of the files this session's edits changed (their code must never come from the
-/// disk cache, whose keys predate the edits).
+/// The crates whose text differs from the text the run booted from: the files of a transaction
+/// in flight, and a kept edit's (a current version of other text, an included file read anew).
+/// Their code must never come from the disk cache, whose keys predate the edits, and the run's
+/// front records wait for them (run::front_recordable). A refused edit leaves no crate edited,
+/// nor does one that puts the boot text back (settle_edited_crates).
 static EDITED_CRATES: relax_session::sync::Mutex<Vec<u32>> = relax_session::sync::Mutex::new(Vec::new());
+/// The crates a kept edit read an included file of anew: a version's text does not show what
+/// its includes held, so they stay edited.
+static INCLUDES_EDITED: relax_session::sync::Mutex<Vec<u32>> = relax_session::sync::Mutex::new(Vec::new());
+/// Live edit transactions that changed the program's tables (committed a file version, kept or
+/// not). From the first one on the tables are not the boot's, with every edit refused or undone
+/// too (the versions and definitions stay loaded): what a check began before one, or found
+/// after one, does not describe the boot.
+static PROGRAM_EDITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn edited_crates() -> Vec<u32> {
     EDITED_CRATES.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// PROGRAM_EDITS.
+pub(crate) fn program_edits() -> u64 {
+    PROGRAM_EDITS.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 fn note_edited_crates(u: &Unit, files: &[u32]) {
@@ -1950,6 +1968,31 @@ fn note_edited_crates(u: &Unit, files: &[u32]) {
                 g.push(c);
             }
         }
+    }
+}
+
+/// A transaction ended, or a patch was rolled back: a crate stays edited while a file of it has
+/// a current version whose text is not its boot version's, or a kept edit read its includes
+/// anew. Before a crate stops being edited the keys follow the text back if a const edit moved
+/// them (its walk covers the crate while it still is edited): an interface its item edit had
+/// would stay in them. On the owner thread.
+unsafe fn settle_edited_crates(up: *mut Unit) {
+    let prog = &(*up).prog;
+    let mut differ = INCLUDES_EDITED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    for (&boot, &now) in prog.current_versions() {
+        let path = &prog.file_paths[boot as usize];
+        if prog.files[now as usize].source_hash(path) != prog.files[boot as usize].source_hash(path) {
+            differ.push(prog.file_crate[boot as usize]);
+        }
+    }
+    let clean: Vec<u32> = edited_crates().into_iter().filter(|c| !differ.contains(c)).collect();
+    if clean.is_empty() { return; }
+    crate::cache::rekey_if_moved(up);
+    EDITED_CRATES.lock().unwrap_or_else(|e| e.into_inner()).retain(|c| !clean.contains(c));
+    if live_trace() {
+        let prog = &(*up).prog;
+        let names = |cs: &[u32]| cs.iter().map(|&c| prog.syms.str(prog.crates[c as usize].name).to_string()).collect::<Vec<String>>().join(", ");
+        eprintln!("makepad live: not edited (the text the run booted from): {}; edited: [{}]", names(&clean), names(&edited_crates()));
     }
 }
 
@@ -2055,14 +2098,18 @@ fn ty_adts(u: &Unit, t: TyId, out: &mut Vec<DefId>, depth: u32) {
 /// one, a `&mut self` method called on one: `addr_of_mut!((*p).f)`, `&raw mut (*p).f`,
 /// `&mut *p`, `(*u.as_mut_ptr()).f = x`, `(*p).f.write(x)`, and the `&raw const (*base).f` of
 /// `offset_of!`. Such code makes a value without writing its ext word: the memory keeps what it
-/// held there, a moved-out value's word maybe. The places' types are typeck's.
-fn raw_written(u: &Unit, d: DefId, out: &mut Vec<DefId>) {
+/// held there, a moved-out value's word maybe. The places' types are typeck's. Into `conv`: the
+/// structs whose bytes it reaches as other data, at offsets nothing checks, and those a pointer
+/// handed to inline assembly points at (`converted`).
+fn raw_written(u: &Unit, d: DefId, out: &mut Vec<DefId>, conv: &mut Vec<DefId>) {
     use crate::ast::{ExprKind, UnOp};
     use crate::types::TyKind;
     let body = u.tcx.typeck(&u.prog, d);
-    let ast = &u.prog.files[body.file as usize].ast;
+    let pf = &u.prog.files[body.file as usize];
+    let ast = &pf.ast;
     for i in 0..body.expr_ty.len() {
         let e = body.expr_at(i);
+        converted(u, &body, pf, e, conv);
         let place = match ast.expr(e).kind {
             ExprKind::AddrOf(raw, mutbl, p) if raw || mutbl => p,
             ExprKind::Assign(l, _) | ExprKind::AssignOp(_, l, _) => l,
@@ -2104,6 +2151,116 @@ fn raw_written(u: &Unit, d: DefId, out: &mut Vec<DefId>) {
     }
 }
 
+/// The struct pointer type `t` points at (a raw pointer, a reference, NonNull; through arrays and
+/// slices of it).
+fn pointee_adt(u: &Unit, t: TyId) -> Option<DefId> {
+    use crate::types::TyKind;
+    let mut x = match u.tcx.tys.kind(t) {
+        TyKind::Ptr(_, x) | TyKind::Ref(_, x, _) => *x,
+        TyKind::Adt(nn, args, _) if u.prog.name(*nn) == "NonNull" => *u.tcx.tys.list(*args).first()?,
+        _ => return None,
+    };
+    loop {
+        match u.tcx.tys.kind(x) {
+            TyKind::Array(y, _) | TyKind::Slice(y) => x = *y,
+            TyKind::Adt(a, _, _) => return Some(*a),
+            _ => return None,
+        }
+    }
+}
+
+/// Whether `t` is a raw pointer (or NonNull), a mutable view of bytes (`&mut [u8]`, `&mut [u32; 4]`),
+/// or (`ints`) an address.
+fn pointer_like(u: &Unit, t: TyId, ints: bool) -> bool {
+    use crate::types::TyKind;
+    let int = |x: TyId| matches!(u.tcx.tys.kind(x), TyKind::Int(_));
+    match u.tcx.tys.kind(t) {
+        TyKind::Ptr(..) => true,
+        TyKind::Adt(nn, ..) => u.prog.name(*nn) == "NonNull",
+        TyKind::Ref(true, x, _) => matches!(u.tcx.tys.kind(*x), TyKind::Slice(y) | TyKind::Array(y, _) if int(*y)),
+        TyKind::Int(_) => ints,
+        _ => false,
+    }
+}
+
+/// Live sessions (M10), for raw_written: the structs expression `e` of `body` reaches as other
+/// bytes -- a pointer to one made a pointer of another type, an address or a byte view, or one
+/// made from those: `as *mut u8`, `bytes.as_ptr() as *const T`, `.cast::<U>()`, `.byte_add(n)`,
+/// `.addr()`, `transmute`, a method of one returning a pointer to bytes, a call taking a pointer
+/// of one type and returning one of another (two references to structs are a field accessor's,
+/// not this) -- and the structs an `asm!` operand points at. Code writing there makes a value
+/// whose ext word nothing wrote; which code writes is not followed (a restart is cheap).
+fn converted(u: &Unit, body: &relax_types::typeck::Body, pf: &crate::parser::ParsedFile, e: crate::ast::ExprId, out: &mut Vec<DefId>) {
+    use crate::ast::ExprKind;
+    let ast = &pf.ast;
+    let mut mark = |from: Option<DefId>, to: Option<DefId>| if from != to {
+        for a in [from, to].into_iter().flatten() {
+            if !out.contains(&a) { out.push(a); }
+        }
+    };
+    let adt = |t: TyId| match u.tcx.tys.kind(t) { crate::types::TyKind::Adt(a, _, _) => Some(*a), _ => None };
+    let pointerish = |t: TyId| pointer_like(u, t, false) || pointee_adt(u, t).is_some();
+    match ast.expr(e).kind {
+        ExprKind::Cast(x, _) if body.has_expr(x) => {
+            let (from, to) = (body.ty(x), body.ty(e));
+            if pointer_like(u, from, true) && pointer_like(u, to, true) {
+                mark(pointee_adt(u, from), pointee_adt(u, to));
+            }
+        }
+        ExprKind::MethodCall(recv, row) if body.has_expr(recv) => {
+            let (from, to) = (body.ty(recv), body.ty(e));
+            if pointer_like(u, from, false) {
+                if pointer_like(u, to, true) {
+                    // (a byte offset keeps the type and moves off its fields)
+                    let bytewise = matches!(pf.text(ast.row(row).name), "byte_add" | "byte_sub" | "byte_offset" | "wrapping_byte_add" | "wrapping_byte_sub" | "wrapping_byte_offset");
+                    mark(pointee_adt(u, from), if bytewise { None } else { pointee_adt(u, to) });
+                }
+            } else if pointer_like(u, to, false) && pointee_adt(u, to).is_none() {
+                // a value's or a reference's own bytes (a container's element pointer is no conversion)
+                mark(pointee_adt(u, from).or_else(|| adt(from)), None);
+            }
+        }
+        ExprKind::Call(f, args) => {
+            let transmute = matches!(ast.expr(f).kind, ExprKind::Path(p) if ast.segs(p.segs).last().is_some_and(|s| matches!(pf.text(s.name), "transmute" | "transmute_copy")));
+            let to = body.ty(e);
+            for &x in ast.list(args) {
+                if !body.has_expr(x) {
+                    continue;
+                }
+                let from = body.ty(x);
+                if transmute {
+                    mark(pointee_adt(u, from).or_else(|| adt(from)), pointee_adt(u, to).or_else(|| adt(to)));
+                } else if (pointer_like(u, from, false) && pointerish(to)) || (pointerish(from) && pointer_like(u, to, false)) {
+                    mark(pointee_adt(u, from), pointee_adt(u, to));
+                }
+            }
+        }
+        ExprKind::Mac(m) => {
+            let m = *ast.row(m);
+            if m.args == crate::ast::NO_MAC_ARGS {
+                return;
+            }
+            let Some(asm) = ast.mac_arg(m.args).asm else { return };
+            for op in ast.list(asm.ops) {
+                for x in [op.input, op.output].into_iter().flatten() {
+                    if body.has_expr(x) {
+                        mark(pointee_adt(u, body.ty(x)), None);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether `text` converts a pointer (`as *T`, `as usize`, `.cast()`, `.byte_add()`, `.addr()`,
+/// `transmute`) or holds inline assembly: what `converted` reads, by its tokens.
+fn text_converts(text: &[&[u8]]) -> bool {
+    text.windows(2).any(|w| w[0] == b"as" && matches!(w[1], b"*" | b"usize" | b"isize" | b"u64" | b"i64" | b"u128"))
+        || text.iter().any(|t| matches!(*t, b"cast" | b"cast_mut" | b"cast_const" | b"byte_add" | b"byte_sub" | b"byte_offset" | b"wrapping_byte_add"
+            | b"wrapping_byte_sub" | b"wrapping_byte_offset" | b"addr" | b"expose_provenance" | b"transmute" | b"transmute_copy" | b"asm"))
+}
+
 /// Live sessions (M10): the structs whose running layout needs their values' ext word -- fields
 /// in the extension block (a block a stale word would share), or a dead slot to drop (a stale
 /// EXT_BUILT word would drop what the value never set).
@@ -2118,15 +2275,25 @@ fn structs_needing_ext_word(u: &Unit) -> Vec<DefId> {
 }
 
 /// Live sessions (M10): whether code can write through a raw pointer, which takes an unsafe
-/// context. Code is read by its text where the text is its code: it says `unsafe`, or it invokes
-/// a macro_rules whose text can (by name, through the macros that one invokes). Code a macro made
-/// (a derive's impl), and code invoking a function-like proc macro (whose expansion is not text to
-/// read), is read parsed, with every expansion in it (parsed_raw_write).
+/// context, or convert one (text_converts). Code is read by its text where the text is its code:
+/// it says `unsafe` (or converts), or it invokes a macro_rules whose text does (by name, through
+/// the macros that one invokes). Code a macro made (a derive's impl), and code invoking a
+/// function-like proc macro, itself or through the macro_rules it invokes (an expansion that is
+/// not text to read), is read parsed, with every expansion in it (parsed_raw_write).
 struct RawGate {
     procs: Vec<Vec<u8>>,
     /// the macro_rules by name, made at the first lookup
     macros: std::cell::OnceCell<std::collections::HashMap<Vec<u8>, Vec<DefId>>>,
-    memo: std::cell::RefCell<std::collections::HashMap<Vec<u8>, bool>>,
+    /// by macro name, each Ask's answer once known
+    memo: std::cell::RefCell<std::collections::HashMap<Vec<u8>, [Option<bool>; 3]>>,
+}
+
+/// What RawGate asks of a text: does it say `unsafe`, convert a pointer, invoke a proc macro.
+#[derive(Clone, Copy)]
+enum Ask {
+    Unsafe,
+    Converts,
+    Proc,
 }
 
 impl RawGate {
@@ -2136,38 +2303,40 @@ impl RawGate {
     }
 
     /// The names `text` invokes as macros (`name!`).
-    fn invoked<'t>(text: &[&'t [u8]]) -> Vec<&'t [u8]> {
-        text.windows(2).filter(|w| w[1] == b"!" && w[0].first().is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')).map(|w| w[0]).collect()
-    }
-
-    fn proc_call(&self, text: &[&[u8]]) -> bool {
-        Self::invoked(text).into_iter().any(|n| self.procs.iter().any(|p| p.as_slice() == n))
+    fn invoked<'a, 't: 'a>(text: &'a [&'t [u8]]) -> impl Iterator<Item = &'t [u8]> + 'a {
+        text.windows(2).filter(|w| w[1] == b"!" && w[0].first().is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')).map(|w| w[0])
     }
 
     /// Whether code `d`, whose text is `text`, is read parsed: a macro expansion made it, or it
-    /// invokes a proc macro.
+    /// invokes a proc macro, itself or through a macro_rules.
     fn read_parsed(&self, prog: &Program, d: DefId, text: &[&[u8]]) -> bool {
         let def = prog.def(d);
         let pf = &prog.files[def.file as usize];
-        pf.ast.item(def.item).lo >= pf.src_len || self.proc_call(text)
+        pf.ast.item(def.item).lo >= pf.src_len || self.text_has(prog, text, Ask::Proc)
     }
 
     /// Whether code `d`, whose text is `text`, can write through a raw pointer.
     fn can_write_raw(&self, prog: &Program, d: DefId, text: &[&[u8]]) -> bool {
-        if self.read_parsed(prog, d, text) { parsed_raw_write(prog, d) } else { self.text_unsafe(prog, text) }
+        if self.read_parsed(prog, d, text) { parsed_raw_write(prog, d) } else { self.text_has(prog, text, Ask::Unsafe) }
     }
 
-    /// Whether `text` can write through a raw pointer, read as text (a proc macro it invokes can).
-    fn text_unsafe(&self, prog: &Program, text: &[&[u8]]) -> bool {
-        text.iter().any(|t| *t == b"unsafe") || Self::invoked(text).into_iter().any(|n| self.procs.iter().any(|p| p.as_slice() == n) || self.macro_unsafe(prog, n))
+    /// Whether `text` (code read as text, read_parsed) asks `ask`: by its own tokens or the
+    /// macro_rules it invokes (a proc macro it invokes can do anything).
+    fn text_has(&self, prog: &Program, text: &[&[u8]], ask: Ask) -> bool {
+        let own = match ask {
+            Ask::Unsafe => text.iter().any(|t| *t == b"unsafe"),
+            Ask::Converts => text_converts(text),
+            Ask::Proc => false,
+        };
+        own || Self::invoked(text).any(|n| self.procs.iter().any(|p| p.as_slice() == n) || self.macro_has(prog, n, ask))
     }
 
-    fn macro_unsafe(&self, prog: &Program, name: &[u8]) -> bool {
-        if let Some(&known) = self.memo.borrow().get(name) {
+    fn macro_has(&self, prog: &Program, name: &[u8], ask: Ask) -> bool {
+        if let Some(known) = self.memo.borrow().get(name).and_then(|m| m[ask as usize]) {
             return known;
         }
         // (a macro invoking itself: no until shown otherwise)
-        self.memo.borrow_mut().insert(name.to_vec(), false);
+        self.memo.borrow_mut().entry(name.to_vec()).or_default()[ask as usize] = Some(false);
         let macros = self.macros.get_or_init(|| {
             let mut by_name: std::collections::HashMap<Vec<u8>, Vec<DefId>> = Default::default();
             for i in 0..prog.defs.len() {
@@ -2181,9 +2350,9 @@ impl RawGate {
         let found = macros.get(name).is_some_and(|defs| defs.iter().any(|&m| {
             let pf = &prog.files[prog.def(m).file as usize];
             let it = pf.ast.item(prog.def(m).item);
-            self.text_unsafe(prog, &toks(pf, it.lo, it.hi, &[]))
+            self.text_has(prog, &toks(pf, it.lo, it.hi, &[]), ask)
         }));
-        self.memo.borrow_mut().insert(name.to_vec(), found);
+        self.memo.borrow_mut().entry(name.to_vec()).or_default()[ask as usize] = Some(found);
         found
     }
 }
@@ -2191,16 +2360,35 @@ impl RawGate {
 /// Live sessions (M10): whether the parsed code of `d`, every macro expansion in it included, can
 /// write in place through a raw pointer, as raw_written reads it but by shape alone: in an unsafe
 /// context (an `unsafe` block, an `unsafe fn`), a raw or `&mut` borrow of, an assignment to, or a
-/// method call on a place reached through a deref. Code that does not parse counts as one that can.
+/// method call on a place reached through a deref; inline assembly; or, with an unsafe context
+/// anywhere in it, a pointer conversion (a cast to a pointer or an address, a method or call
+/// text_converts names). Code that does not parse counts as one that can.
 fn parsed_raw_write(prog: &Program, d: DefId) -> bool {
-    use crate::ast::{Ast, ExprId, ExprKind, ItemKind, UnOp};
+    use crate::ast::{Ast, ExprId, ExprKind, ItemKind, Ty, UnOp};
     use relax_types::ast_visit::{walk_expr, Visitor};
     struct Find<'a> {
+        pf: &'a crate::parser::ParsedFile,
         ast: &'a Ast,
         unsafe_depth: u32,
+        saw_unsafe: bool,
+        converts: bool,
         found: bool,
     }
     impl Find<'_> {
+        fn converting(&self, kind: ExprKind) -> bool {
+            let named = |n: &str| text_converts(&[n.as_bytes()]);
+            match kind {
+                ExprKind::Cast(_, t) => match *self.ast.ty(t) {
+                    Ty::Ptr(..) => true,
+                    Ty::Path(p) => self.ast.segs(p.segs).last().is_some_and(|s| matches!(self.pf.text(s.name), "usize" | "isize" | "u64" | "i64" | "u128")),
+                    _ => false,
+                },
+                ExprKind::MethodCall(_, row) => named(self.pf.text(self.ast.row(row).name)),
+                ExprKind::Call(f, _) => matches!(self.ast.expr(f).kind, ExprKind::Path(p) if self.ast.segs(p.segs).last().is_some_and(|s| named(self.pf.text(s.name)))),
+                _ => false,
+            }
+        }
+
         fn through_deref(&self, mut p: ExprId) -> bool {
             loop {
                 match self.ast.expr(p).kind {
@@ -2220,7 +2408,16 @@ fn parsed_raw_write(prog: &Program, d: DefId) -> bool {
                 return;
             }
             let kind = self.ast.expr(e).kind;
+            if let ExprKind::Mac(m) = kind {
+                let m = *self.ast.row(m);
+                if m.args != crate::ast::NO_MAC_ARGS && self.ast.mac_arg(m.args).asm.is_some() {
+                    self.found = true;
+                    return;
+                }
+            }
+            self.converts = self.converts || self.converting(kind);
             if self.unsafe_depth > 0 {
+                self.saw_unsafe = true;
                 let place = match kind {
                     ExprKind::AddrOf(raw, mutbl, p) if raw || mutbl => Some(p),
                     ExprKind::Assign(l, _) | ExprKind::AssignOp(_, l, _) => Some(l),
@@ -2239,8 +2436,9 @@ fn parsed_raw_write(prog: &Program, d: DefId) -> bool {
         }
     }
     let def = prog.def(d);
-    let ast = &prog.files[def.file as usize].ast;
-    let mut f = Find { ast, unsafe_depth: 0, found: false };
+    let pf = &prog.files[def.file as usize];
+    let ast = &pf.ast;
+    let mut f = Find { pf, ast, unsafe_depth: 0, saw_unsafe: false, converts: false, found: false };
     match ast.item(def.item).kind {
         ItemKind::Fn(sig, ..) => {
             f.unsafe_depth = ast.fn_sig(sig).unsafe_ as u32;
@@ -2257,18 +2455,20 @@ fn parsed_raw_write(prog: &Program, d: DefId) -> bool {
         },
         _ => return true,
     }
-    f.found
+    f.found || (f.saw_unsafe && f.converts)
 }
 
 /// Live sessions (M10): of the structs `need` (structs_needing_ext_word), one whose fields code
-/// writes in place through a raw pointer (raw_written), with that code. The program is read,
-/// not its compiled code: a builder compiled only after the edit counts. So does `replaced` (the
-/// earlier versions of what the edit replaces: code that may still be running). Code that can do
-/// it is type-checked: its text names one of the struct's fields (or a macro_rules that can) and
-/// can write through a raw pointer, or (code a macro made, code invoking a proc macro) its parsed
-/// code has the shape of such a write (RawGate).
-fn raw_builder(u: &Unit, need: &[DefId], replaced: &[(DefId, DefId)]) -> Option<(DefId, DefId)> {
-    if let Some(&found) = replaced.iter().find(|(s, _)| need.contains(s)) {
+/// writes in place through a raw pointer (raw_written), with that code and whether it reaches
+/// the struct's bytes as other data (its own, or a holder's: Reach). The program is read, not its
+/// compiled code: a builder compiled only after the edit counts. So does `replaced` (the earlier
+/// versions of what the edit replaces: code that may still be running). Code that can do it is
+/// type-checked: its text names one of the struct's fields (or a macro_rules that can) and can
+/// write through a raw pointer, or it converts a pointer (text_converts) in an unsafe context and
+/// names a way to one of the structs (Reach), or (code a macro made, code invoking a proc macro)
+/// its parsed code has the shape of such a write or conversion (RawGate).
+fn raw_builder(u: &Unit, need: &[DefId], replaced: &[(DefId, DefId, bool)]) -> Option<(DefId, DefId, bool)> {
+    if let Some(&found) = replaced.iter().find(|(s, _, _)| need.contains(s)) {
         return Some(found);
     }
     let prog = &u.prog;
@@ -2289,6 +2489,25 @@ fn raw_builder(u: &Unit, need: &[DefId], replaced: &[(DefId, DefId)]) -> Option<
     }
     let names = through_macros(prog, &visible, &fields);
     let names: Vec<&[u8]> = names.iter().map(|n| n.as_slice()).collect();
+    // made once code converting a pointer needs it
+    let reach_once = std::cell::OnceCell::new();
+    let reach = || reach_once.get_or_init(|| Reach::new(prog, &visible, need));
+    // the struct of `need` whose bytes code reaching `conv` as other data reaches
+    let reached = |conv: &[DefId]| conv.iter().find_map(|&c| if need.contains(&c) { Some(c) } else { reach().holds(c) });
+    for &(s, by, conv) in replaced {
+        if let Some(n) = conv.then(|| reached(&[s])).flatten() {
+            return Some((n, by, true));
+        }
+    }
+    let mut converting: Vec<(DefId, Vec<&[u8]>)> = Vec::new();
+    let check = |d: DefId| -> Option<(DefId, DefId, bool)> {
+        let (mut written, mut conv) = (Vec::new(), Vec::new());
+        raw_written(u, d, &mut written, &mut conv);
+        if let Some(&s) = written.iter().find(|w| need.contains(w)) {
+            return Some((s, d, false));
+        }
+        reached(&conv).map(|s| (s, d, true))
+    };
     for i in 0..prog.defs.len() {
         let d = DefId(i as u32);
         let def = prog.def(d);
@@ -2298,18 +2517,155 @@ fn raw_builder(u: &Unit, need: &[DefId], replaced: &[(DefId, DefId)]) -> Option<
         let pf = &prog.files[def.file as usize];
         let it = pf.ast.item(def.item);
         let text = toks(pf, it.lo, it.hi, &[]);
-        // code a macro made, or code invoking a proc macro, may name the fields where its text does not
-        let can = if gate.read_parsed(prog, d, &text) { parsed_raw_write(prog, d) } else { text.iter().any(|t| names.contains(t)) && gate.text_unsafe(prog, &text) };
+        // code a macro made, or code invoking a proc macro, may name the fields where its text does
+        // not
+        let can = if gate.read_parsed(prog, d, &text) {
+            parsed_raw_write(prog, d)
+        } else if text.iter().any(|t| names.contains(t)) {
+            gate.text_has(prog, &text, Ask::Unsafe)
+        } else {
+            // code converting a pointer, naming none of the fields: checked after the rest, when it
+            // names a way to one of the structs (`unsafe` asked first: the rarer one)
+            if gate.text_has(prog, &text, Ask::Unsafe) && gate.text_has(prog, &text, Ask::Converts) {
+                converting.push((d, text));
+            }
+            continue;
+        };
         if !can {
             continue;
         }
-        let mut written = Vec::new();
-        raw_written(u, d, &mut written);
-        if let Some(&s) = written.iter().find(|w| need.contains(w)) {
-            return Some((s, d));
+        if let Some(found) = check(d) {
+            return Some(found);
+        }
+    }
+    for (d, text) in converting {
+        if reach().named_by(d, &text) {
+            if let Some(found) = check(d) {
+                return Some(found);
+            }
         }
     }
     None
+}
+
+/// Live sessions (M10), for raw_builder: how code reaches the structs `need`, read as text (by
+/// name, as far as code asks). A type holds one when its text names one or a type holding one
+/// (a field's type, through aliases): code viewing a holder's bytes views that one's. Code gets a
+/// value of one by a name of such a type, of a field whose type names one, of a fn, static or
+/// const whose signature (or type) names one, or of a macro_rules whose text names any of these,
+/// or by `self` in an impl of one. Code naming none of them gets such a value only through
+/// generic code, whose pointers raw_written does not read anyway.
+struct Reach<'p> {
+    prog: &'p Program,
+    need: &'p [DefId],
+    /// the defs of the crates seeing the structs, by name
+    by_name: std::collections::HashMap<&'p [u8], Vec<DefId>>,
+    /// by name: the struct of `need` a type of that name holds, a name gets a value of
+    types: std::cell::RefCell<std::collections::HashMap<&'p [u8], Option<DefId>>>,
+    names: std::cell::RefCell<std::collections::HashMap<&'p [u8], Option<DefId>>>,
+}
+
+impl<'p> Reach<'p> {
+    fn new(prog: &'p Program, visible: &[bool], need: &'p [DefId]) -> Reach<'p> {
+        let mut by_name: std::collections::HashMap<&'p [u8], Vec<DefId>> = Default::default();
+        for i in 0..prog.defs.len() {
+            let d = DefId(i as u32);
+            let def = prog.def(d);
+            if visible.get(def.krate as usize).copied().unwrap_or(false) {
+                by_name.entry(prog.syms.str(def.name).as_bytes()).or_default().push(d);
+            }
+        }
+        Reach { prog, need, by_name, types: Default::default(), names: Default::default() }
+    }
+
+    fn text(&self, d: DefId) -> (&'p crate::parser::ParsedFile, u32, u32) {
+        let def = self.prog.def(d);
+        let pf = &self.prog.files[def.file as usize];
+        let it = pf.ast.item(def.item);
+        (pf, it.lo, it.hi)
+    }
+
+    /// The struct of `need` a type named `name` holds (or is).
+    fn ty(&self, name: &'p [u8]) -> Option<DefId> {
+        if let Some(&known) = self.types.borrow().get(name) {
+            return known;
+        }
+        // (a type holding itself: no until shown otherwise)
+        self.types.borrow_mut().insert(name, None);
+        let found = self.need.iter().copied().find(|&s| self.prog.syms.str(self.prog.def(s).name).as_bytes() == name).or_else(|| {
+            self.by_name.get(name)?.iter().filter(|&&d| matches!(self.prog.def(d).kind, DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::TypeAlias)).find_map(|&d| {
+                let (pf, lo, hi) = self.text(d);
+                toks(pf, lo, hi, &[]).into_iter().find_map(|t| self.ty(t))
+            })
+        });
+        self.types.borrow_mut().insert(name, found);
+        found
+    }
+
+    /// The struct of `need` code naming `name` can get a value of.
+    fn name(&self, name: &'p [u8]) -> Option<DefId> {
+        if let Some(&known) = self.names.borrow().get(name) {
+            return known;
+        }
+        self.names.borrow_mut().insert(name, None);
+        let found = self.ty(name).or_else(|| self.by_name.get(name)?.iter().find_map(|&d| {
+            let sig = match self.prog.def(d).kind {
+                DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn => true,
+                DefKind::Field | DefKind::Static | DefKind::Const | DefKind::AssocConst | DefKind::ForeignStatic | DefKind::MacroRules => false,
+                _ => return None,
+            };
+            let (pf, lo, hi) = self.text(d);
+            match self.prog.def(d).kind {
+                DefKind::Field => match struct_fields(pf, pf.ast.item(self.prog.def(d).item)).into_iter().find(|(f, _)| *f == name) {
+                    Some((_, ty)) => ty.into_iter().find_map(|t| self.ty(t)),
+                    // (a variant's or a union's: its item's text)
+                    None => toks(pf, lo, hi, &[]).into_iter().find_map(|t| self.ty(t)),
+                },
+                DefKind::MacroRules => toks(pf, lo, hi, &[]).into_iter().find_map(|t| self.name(t)),
+                _ => head_toks(pf, lo, hi, sig).into_iter().find_map(|t| self.ty(t)),
+            }
+        }));
+        self.names.borrow_mut().insert(name, found);
+        found
+    }
+
+    /// The struct of `need` type `d` holds (or is).
+    fn holds(&self, d: DefId) -> Option<DefId> {
+        if self.need.contains(&d) {
+            return Some(d);
+        }
+        let name = self.prog.syms.str(self.prog.def(d).name).as_bytes();
+        self.by_name.get(name).is_some_and(|ds| ds.contains(&d)).then(|| self.ty(name)).flatten()
+    }
+
+    /// Whether code `d`, whose text is `text`, names a way to one of the structs.
+    fn named_by(&self, d: DefId, text: &[&'p [u8]]) -> bool {
+        if text.iter().any(|t| self.name(*t).is_some()) {
+            return true;
+        }
+        // `self` in an impl of one
+        let def = self.prog.def(d);
+        def.parent != crate::program::NO_DEF && self.prog.def(def.parent).kind == DefKind::Impl && text.iter().any(|t| *t == b"self" || *t == b"Self") && {
+            let (pf, lo, hi) = self.text(def.parent);
+            head_toks(pf, lo, hi, true).into_iter().any(|t| self.ty(t).is_some())
+        }
+    }
+}
+
+/// The tokens of the text `lo..hi` of an item: (`sig`) its signature, those before its first `{`
+/// or `;`, or all.
+fn head_toks(pf: &crate::parser::ParsedFile, lo: u32, hi: u32, sig: bool) -> Vec<&[u8]> {
+    if !sig {
+        return toks(pf, lo, hi, &[]);
+    }
+    let mut out = Vec::new();
+    for t in pf.toks.iter_from(first_tok_at(&pf.toks, lo)) {
+        match pf.src.get(t.lo as usize..t.hi as usize) {
+            Some(x) if t.hi <= hi && x != b"{" && x != b";" => out.push(x),
+            _ => break,
+        }
+    }
+    out
 }
 
 fn adt_ext_field(a: &crate::tcx::AdtT, k: usize) -> bool {
@@ -2823,11 +3179,19 @@ unsafe fn apply_mode(up: *mut Unit, edits: Vec<Edit>, sources: &[Edit], partial:
             Outcome { failure: Some(makepad_remote::hot::Outcome::Panic), kept: 0, pending: false, rung: Rung::Restart, files, lines: vec![format!("internal compiler error applying the edit: {} -- makepad run bug, report it; the app restarts (a fresh process)", msg)], names: Vec::new(), changed: 0, test_changes: None, group: 0, ms: [0.0; 4], undo: None, work: [0; 5] }
         }
     };
+    if r.rung != Rung::Patch { crate::sip::restore_late_files(&late); }
+    // a kept edit that read an included file anew (its versions' text does not show it)
+    let read_anew = r.rung == Rung::Patch && (!sources.is_empty() || crate::sip::late_file_records().iter().any(|(c, n, h)| late.iter().any(|(c0, n0, h0)| c0 == c && n0 == n && h0 != h)));
+    if read_anew {
+        let mut g = INCLUDES_EDITED.lock().unwrap_or_else(|e| e.into_inner());
+        for c in edited_crates() { if !g.contains(&c) { g.push(c); } }
+    }
     crate::owner::call(crate::owner::Class::Program, || {
         (*up).reload_rir = None;
         jit::close_patch();
+        // (a panic's transaction left the tables half-made: its crates stay edited)
+        if !matches!(r.failure, Some(makepad_remote::hot::Outcome::Panic)) { settle_edited_crates(up); }
     });
-    if r.rung != Rung::Patch { crate::sip::restore_late_files(&late); }
     transaction.finish(&r);
     r
 }
@@ -2974,7 +3338,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     let visible_crates = crates_seeing_edit(&u.prog, versions.iter().map(|(v, _)| v.old));
     // the structs the code this edit replaces writes in place through raw pointers (M10): that
     // code may still be running after the commit (raw_builder)
-    let mut replaced_raw: Vec<(DefId, DefId)> = Vec::new();
+    let mut replaced_raw: Vec<(DefId, DefId, bool)> = Vec::new();
     let mut raw_gate: Option<RawGate> = None;
     for d in changes.iter().filter_map(|c| match *c { Change::Body(d) | Change::Const(d) | Change::StaticInit(d) => Some(d), _ => None })
         .chain(versions.iter().flat_map(|(_, p)| p.removed.iter().copied()))
@@ -2987,9 +3351,9 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         let it = pf.ast.item(def.item);
         let text = toks(pf, it.lo, it.hi, &[]);
         if raw_gate.get_or_insert_with(RawGate::new).can_write_raw(&u.prog, d, &text) {
-            let mut written = Vec::new();
-            raw_written(u, d, &mut written);
-            replaced_raw.extend(written.into_iter().map(|s| (s, d)));
+            let (mut written, mut conv) = (Vec::new(), Vec::new());
+            raw_written(u, d, &mut written, &mut conv);
+            replaced_raw.extend(written.into_iter().map(|s| (s, d, false)).chain(conv.into_iter().map(|s| (s, d, true))));
         }
     }
     let mut body_defs: Vec<DefId> = changes.iter().filter_map(|c| if let Change::Body(d) = c { Some(*d) } else { None }).collect();
@@ -3682,6 +4046,8 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             eprintln!("reload-front-wait: {:.1} ms (t={:.0}..{:.0} ms)", (now - wait_from) as f64 / 1e6, wait_from as f64 / 1e6, now as f64 / 1e6);
         }
         trace_stage("front_write_wait");
+        // (the tables are not the boot's from here on, kept or refused: PROGRAM_EDITS)
+        if !versions.is_empty() { PROGRAM_EDITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
         let from = u.tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst);
         trace_stage("gandalf_carry");
         for (v, plan) in versions {
@@ -3919,8 +4285,9 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         // whose running layout needs that word is built so by no code, running or to be compiled
         let need = structs_needing_ext_word(u);
         if !need.is_empty() {
-            if let Some((s, by)) = raw_builder(u, &need, &replaced_raw) {
-                layout_restart.push(format!("struct `{}`: `{}` writes its fields in place through a raw pointer, which leaves the hidden word of its live layout as the memory had it, and after this edit its values need that word (fields added live, or a removed field to drop) -- restart the app", u.prog.def_path(s), u.prog.def_path(by)));
+            if let Some((s, by, conv)) = raw_builder(u, &need, &replaced_raw) {
+                let how = if conv { "reaches its bytes as other data (a pointer cast to another type, an address, inline assembly)" } else { "writes its fields in place through a raw pointer" };
+                layout_restart.push(format!("struct `{}`: `{}` {}, which leaves the hidden word of its live layout as the memory had it, and after this edit its values need that word (fields added live, or a removed field to drop) -- restart the app", u.prog.def_path(s), u.prog.def_path(by), how));
             }
         }
         trace_sub("raw_builders");
@@ -8098,6 +8465,8 @@ pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
     host::reset_statics();
     reset(&EDITED_CRATES, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&INCLUDES_EDITED, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&PROGRAM_EDITS, std::sync::atomic::AtomicU64::new(0));
     reset(&RESTART_SUPPORTED, std::sync::atomic::AtomicBool::new(false));
     reset(&LAYOUT_GROUP, std::sync::atomic::AtomicU32::new(0));
     reset(&UNIT_SUSPECT, relax_session::sync::Mutex::new(None));

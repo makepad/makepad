@@ -6714,9 +6714,16 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                 // ... and only when the call runs less often than the slot's accesses: a flush and
                 // reload per call in the slot's own loop costs more than the memory traffic it
                 // saves (bench_rt sort_ints / shape got slower with calls inside the hot loop)
-                let nocap = depth[bi] < acc_depth[sl]
+                // A guarded inline copy's slow call (a live session) runs only after a patch of its
+                // callee: its flush and reload cost the path the copy runs nothing, at any depth,
+                // and its result buffer is no capture by construction (`Func::sret`).
+                let guard = f.guard_call(bi, k);
+                let nocap = (guard || depth[bi] < acc_depth[sl])
                     && match &f.blocks[bi].insts[k] {
-                        Inst::Call(c, args, _) => args.iter().enumerate().all(|(j, a)| at(*a).0 != sl as u32 || (at(*a).1 == 0 && sroa_nocapture(c, j))),
+                        Inst::Call(c, args, _) => args.iter().enumerate().all(|(j, a)| {
+                            let sret = guard && j == 0 && matches!(c, Callee::Fn(id) | Callee::CFn(id, _) if f.sret_callees.contains(id));
+                            at(*a).0 != sl as u32 || (at(*a).1 == 0 && (sret || sroa_nocapture(c, j)))
+                        }),
                         _ => false,
                     };
                 if nocap {

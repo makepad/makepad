@@ -626,12 +626,14 @@ impl Providers<'_> {
             let value = crate::const_eval::eval_to_valtree(self.tcx, self.prog, &key);
             // a failure the evaluator already reported (its own "evaluation panicked" ..) is reported
             // once; one it left unreported (an overflow found while lowering) gets the generic E0080
-            if let Err(ErrorHandled::Reported(error)) = &value {
-                if matches!(error, crate::const_eval::ValTreeCreationError::ErrorHandled(_)) && crate::infer::diagnostics::DiagCtxt::thread_emitted() == emitted {
+            if let Err(ErrorHandled::Reported(crate::const_eval::ValTreeCreationError::ErrorHandled(why))) = &value {
+                if crate::infer::diagnostics::DiagCtxt::thread_emitted() == emitted {
                     let d = self.prog.def(key.def);
+                    // (the evaluator's reason, never its Debug form)
+                    let what = if *why == "constant evaluation failed" { String::new() } else { format!(": {why}") };
                     self.tcx.dcx.report(crate::next_solver::fulfill::ObligationCause {
                         body_id: key.def, span: self.prog.files[d.file as usize].ast.item(d.item).lo,
-                    }, format!("E0080: constant evaluation failed: {error:?}"));
+                    }, format!("E0080: constant evaluation failed{what}"));
                 }
             }
             Ok(value)

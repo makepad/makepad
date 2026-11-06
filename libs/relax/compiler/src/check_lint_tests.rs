@@ -21,7 +21,7 @@ fn warnings_in_child(name: &str) -> Option<Vec<String>> {
         .unwrap();
     let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
-    // (warnings go to stderr, errors to stdout)
+    // (the check prints its diagnostics on stderr; stdout has the test harness's lines)
     let mut v: Vec<String> = stderr.lines().chain(stdout.lines()).filter_map(|l| match l.split_once(": warning: ") {
         Some((_, w)) => Some(w.to_string()),
         None => l.split_once(": error: ").map(|(_, e)| format!("error: {e}")),
@@ -78,11 +78,12 @@ fn check_code(lib: &str, bins: &[&str], harness: bool) -> i32 {
     }
     prog.prelude_crate = Some(core);
     prog.resolve_imports();
-    assert!(prog.errors.is_empty(), "{:?}", prog.errors);
+    // the front's errors (an import that does not resolve) go to the check, as run.rs passes them
+    let pre = std::mem::take(&mut prog.errors);
     let mut tcx = crate::tcx::Tcx::new();
     tcx.collect(&prog);
     let mut u = crate::jit::Unit::new(prog, tcx, core);
-    let code = crate::check::check_crate(&mut u, root, &crates, Vec::new(), false);
+    let code = crate::check::check_crate(&mut u, root, &crates, pre, false);
     for f in &files {
         std::fs::remove_file(f).unwrap();
     }
@@ -123,6 +124,88 @@ fn a_second_binary_targets_main_is_its_entry() {
         ]);
     };
     assert_eq!(warnings, ["function `unused_in_bin` is never used [dead_code]"]);
+}
+
+/// rustc lints each crate it compiles on its own: a binary's call of `Write::write_all` is no use
+/// of the library's `use std::io::Write;` (the check had pooled the traits every checked body calls
+/// methods of, so one crate's call hid another crate's unused trait import).
+#[test]
+fn another_crates_method_call_leaves_a_trait_import_unused() {
+    let Some(warnings) = warnings_in_child("check_lint_tests::another_crates_method_call_leaves_a_trait_import_unused") else {
+        return check_package("use std::io::Write;\npub fn f() -> u32 { 1 }\n", &[
+            "use std::io::Write;\nfn main() { let mut v: Vec<u8> = Vec::new(); v.write_all(b\"x\").unwrap(); let _ = pkg::f(); }\n",
+        ]);
+    };
+    assert_eq!(warnings, ["unused import: `std::io::Write` [unused_imports]"]);
+}
+
+/// The same for macro imports: a binary that glob-imports the library and invokes a macro of the same
+/// name (its own) does not use the library's `use m::mm;` (the names written in a module that
+/// glob-imports another had counted for the imports of a module of another crate).
+#[test]
+fn another_crates_macro_call_leaves_a_macro_import_unused() {
+    let Some(warnings) = warnings_in_child("check_lint_tests::another_crates_macro_call_leaves_a_macro_import_unused") else {
+        return check_package("mod m {\n    macro_rules! mm { () => {} }\n    pub(crate) use mm;\n    pub(crate) fn g() { mm!(); }\n}\nuse m::mm;\npub fn f() { m::g(); }\n", &[
+            "use pkg::*;\nmacro_rules! mm { () => {} }\nfn main() { mm!(); f(); }\n",
+        ]);
+    };
+    assert_eq!(warnings, ["unused import: `m::mm` [unused_imports]"]);
+}
+
+/// rustc's analysis stops before misc_checking_3 once a required analysis failed: a check with an
+/// error reports no late lint (the private fn no one calls is no dead_code warning), while the
+/// lints of the passes before it still come with the error -- the unused import, and the liveness
+/// lints of a body that type-checked (the failed one's are not reported).
+#[test]
+fn a_failed_check_reports_no_late_lints() {
+    let Some(warnings) = warnings_in_child("check_lint_tests::a_failed_check_reports_no_late_lints") else {
+        return assert_ne!(check_package_code("use std::fmt::Debug;\nuse std::collections::HashMap;\nfn never_called() {}\npub fn f() { let x = 1; }\npub fn g() -> u32 { let y = 2; \"no\" }\n", &[]), 0);
+    };
+    assert_eq!(warnings, ["unused import: `std::collections::HashMap` [unused_imports]", "unused import: `std::fmt::Debug` [unused_imports]", "unused variable: `x` [unused_variables]"]);
+}
+
+/// Beside errors the unused imports are still rustc's: an import that does not resolve is its
+/// E0432 error, never an unused import (rustc_resolve counts an erroneous import as used); a trait
+/// whose method a body that failed its check called before the error is used; an import nothing
+/// names is unused.
+#[test]
+fn a_failed_import_is_no_unused_import() {
+    let Some(warnings) = warnings_in_child("check_lint_tests::a_failed_import_is_no_unused_import") else {
+        return assert_ne!(check_package_code("use nothing_here::Foo;\nuse std::collections::HashMap;\nuse std::fmt::Write;\npub fn f(s: &mut String) -> u32 { s.write_str(\"x\").unwrap(); let n: u32 = \"no\"; n }\n", &[]), 0);
+    };
+    assert_eq!(warnings, ["unused import: `std::collections::HashMap` [unused_imports]"]);
+}
+
+/// A name that does not resolve (E0425) is reported with a typo suggestion; the names that
+/// suggestion looks at are no uses: the imports in scope that nothing names stay unused, as rustc
+/// reports them beside the error.
+#[test]
+fn a_typo_suggestion_uses_no_import() {
+    let Some(warnings) = warnings_in_child("check_lint_tests::a_typo_suggestion_uses_no_import") else {
+        return assert_ne!(check_package_code("use std::collections::HashMap;\nuse std::collections::BTreeMap;\npub fn f() -> u32 { let m: BTreeMap<u32, u32> = BTreeMap::new(); m.len() as u32 + HashMapp }\n", &[]), 0);
+    };
+    assert_eq!(warnings, ["unused import: `std::collections::HashMap` [unused_imports]"]);
+}
+
+/// An import of something private never binds in rustc (E0603; finalize_imports plants a dummy
+/// binding and counts it used): it is no unused import, while the others beside it still are.
+#[test]
+fn a_private_import_is_no_unused_import() {
+    let Some(warnings) = warnings_in_child("check_lint_tests::a_private_import_is_no_unused_import") else {
+        return assert_ne!(check_package_code("mod a { fn f() {} pub mod b { pub fn h() {} } }\nuse a::f;\nuse std::collections::HashMap;\nuse a::b::h;\npub fn g() {}\n", &[]), 0);
+    };
+    assert_eq!(warnings, ["unused import: `a::b::h` [unused_imports]", "unused import: `std::collections::HashMap` [unused_imports]"]);
+}
+
+/// A method error makes the traits in scope that have an item of its name used (rustc
+/// report_method_error: the error is very possibly why the trait was not used); a trait without
+/// one and an import of something else stay unused.
+#[test]
+fn a_method_error_uses_the_traits_in_scope() {
+    let Some(warnings) = warnings_in_child("check_lint_tests::a_method_error_uses_the_traits_in_scope") else {
+        return assert_ne!(check_package_code("use std::fmt::Write;\nuse std::ops::Add;\nuse std::collections::HashMap;\npub struct S;\npub fn g() { S.write_str(\"x\"); }\n", &[]), 0);
+    };
+    assert_eq!(warnings, ["unused import: `std::collections::HashMap` [unused_imports]", "unused import: `std::ops::Add` [unused_imports]"]);
 }
 
 /// A crate's `const _: () = assert!(cfg!(..))` (E0080 under the JIT's check only): the check evaluates every const

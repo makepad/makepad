@@ -27,6 +27,8 @@ struct Rec {
 
 static KEPT: Mutex<Vec<Box<Rec>>> = Mutex::new(Vec::new());
 
+// (the allow stays though v1 calls it: a changed attribute is a changed signature, which
+// restarts for its own reason before the raw writes are looked at)
 #[allow(dead_code)]
 fn raw(name: &str, n: u32) -> Box<Rec> {
     unsafe {

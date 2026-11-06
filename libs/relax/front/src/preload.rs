@@ -248,6 +248,10 @@ enum Work {
 }
 
 impl Pool {
+    /// The demand plan's outline macro definitions of crate `ci` (PendingPlan::outline_macros).
+    pub(crate) fn outline_macros(&self, ci: u32) -> Option<Vec<MacroRef>> {
+        self.demand_plan.as_ref()?.outline_macros(ci as usize + self.plan_offset)
+    }
     /// Set queued jobs' scope; entering the crate replaces an early snapshot with the loader's.
     pub fn start_parsing(&self, ci: u32, table: Arc<MacroTable>) {
         let mut st = self.st.lock().unwrap();
@@ -1533,7 +1537,7 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
         for worker in 0..jobs {
             let p = pool.clone();
             let sess = sess.clone();
-            if let Ok(h) = relax_base::run_threads::spawn(&format!("run-parse-{worker}"), move || { let _z = crate::zone_alloc::compiler_thread();
+            if let Ok(h) = relax_base::run_threads::spawn_sized(&format!("run-parse-{worker}"), relax_base::run_threads::COMPILER_STACK, move || { let _z = crate::zone_alloc::compiler_thread();
                 crate::macro_reg::set_in_world(in_world);
                 let _mem = crate::memstat::tag(if in_world { crate::memstat::Tag::PmHost } else { crate::memstat::Tag::Parse });
                 p.work(&sess, worker)

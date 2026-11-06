@@ -124,6 +124,12 @@ pub fn unit_graph(sess: &std::sync::Arc<crate::Session>, workspace: &str, packag
     crate::resolve::unit_graph(sess, workspace, package, cargo_flags)
 }
 
+/// `makepad check`'s graph: its target flags are cargo check's (resolve.rs parse_check_flags),
+/// `--tests` the lib's and bins' unit tests and the integration tests, `--lib` the plain lib.
+pub fn check_unit_graph(sess: &std::sync::Arc<crate::Session>, workspace: &str, package: &str, cargo_flags: &[String]) -> Result<Units, String> {
+    crate::resolve::check_unit_graph(sess, workspace, package, cargo_flags)
+}
+
 pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
     let units = &g.units;
     let roots = &g.roots;

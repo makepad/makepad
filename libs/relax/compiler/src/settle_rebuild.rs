@@ -162,7 +162,9 @@ fn compare(old: (&Program, &Tcx), new: (&Program, &Tcx)) -> Result<(), String> {
 
 /// Reasons the rebuild can never run in this process.
 fn refuse(up: *mut Unit) -> Option<String> {
-    if !crate::reload::edited_crates().is_empty() {
+    // (a refused or undone edit too: its file versions and definitions stay in the tables. The
+    // monitor thread asks: the count, not the program's tables, which the owner writes)
+    if crate::reload::program_edits() != 0 {
         return Some("a live edit was applied (the collected image no longer describes the program)".into());
     }
     if crate::sandbox::any_live() {

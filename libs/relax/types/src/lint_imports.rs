@@ -25,15 +25,22 @@ pub const UNUSED_IMPORTS: Lint = lint::lint("unused_imports");
 pub const REDUNDANT_IMPORTS: Lint = lint::lint("redundant_imports");
 pub const UNUSED_EXTERN_CRATES: Lint = lint::lint("unused_extern_crates");
 
-/// Traits one of whose methods a checked body calls (collected with the bodies).
-static METHOD_TRAITS: relax_session::sync::Mutex<Option<HashSet<DefId>>> = relax_session::sync::Mutex::new(None);
+/// Per checked crate, the traits one of whose methods its bodies call (collected with the bodies):
+/// a call in one crate is no use of another crate's import.
+static METHOD_TRAITS: relax_session::sync::Mutex<Option<HashMap<u32, HashSet<DefId>>>> = relax_session::sync::Mutex::new(None);
 
 pub fn reset() {
-    *METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()) = Some(HashSet::new());
+    *METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()) = Some(HashMap::new());
 }
 
-/// A method or associated item a body resolved to: its trait counts as used.
-pub fn note_method(prog: &Program, tcx: &Tcx, d: DefId) {
+/// The traits each checked crate's bodies call methods of, taken once the bodies are checked.
+pub fn take_method_traits() -> HashMap<u32, HashSet<DefId>> {
+    METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default()
+}
+
+/// A method or associated item a body of crate `krate` resolved to: its trait counts as used
+/// in that crate.
+pub fn note_method(prog: &Program, tcx: &Tcx, krate: u32, d: DefId) {
     let def = prog.def(d);
     if def.parent == NO_DEF { return; }
     let t = match prog.def(def.parent).kind {
@@ -41,7 +48,32 @@ pub fn note_method(prog: &Program, tcx: &Tcx, d: DefId) {
         DefKind::Impl => match tcx.impl_trait.get(&def.parent) { Some(&t) => t, None => return },
         _ => return,
     };
-    METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashSet::new).insert(t);
+    METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).entry(krate).or_default().insert(t);
+}
+
+/// The traits in scope at code of module `m` (its block scopes up to the item's module: what it
+/// binds, its `as _` imports, what its globs bring) that have an item `item` (rustc_resolve
+/// trait_may_have_item) are used by crate `krate`'s bodies.
+pub fn note_scope_traits(prog: &Program, krate: u32, m: u32, item: &str) {
+    let Some(item) = prog.syms.get(item) else { return };
+    let has_item = |t: DefId| prog.traits[prog.def(t).sub as usize].iter().any(|&v| prog.def(v).name == item);
+    let mut traits: Vec<DefId> = Vec::new();
+    let mut stack: Vec<u32> = Vec::new();
+    let mut s = Some(m);
+    while let Some(mi) = s {
+        stack.push(mi);
+        s = prog.mods[mi as usize].lexical_parent;
+    }
+    let mut seen: HashSet<u32> = HashSet::new();
+    while let Some(mi) = stack.pop() {
+        if !seen.insert(mi) { continue; }
+        let md = &prog.mods[mi as usize];
+        traits.extend(md.types.values().copied().filter(|&t| prog.def(t).kind == DefKind::Trait && has_item(t)));
+        traits.extend(md.anon_traits.iter().map(|&(t, _)| t).filter(|&t| has_item(t)));
+        for &(g, _) in &md.globs { if prog.def(g).kind == DefKind::Mod { stack.push(prog.def(g).sub); } }
+    }
+    let mut mt = METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner());
+    mt.get_or_insert_with(HashMap::new).entry(krate).or_default().extend(traits);
 }
 
 /// An identifier token of a file and where it is written.
@@ -277,14 +309,15 @@ fn macro_closure(prog: &Program, names: &mut HashSet<String>) {
     }
 }
 
-pub fn check(prog: &Program, tcx: &Tcx, own: &[bool], reach: &crate::lint_dead::Reach) {
+/// One checked crate's imports (`c`: its modules and definitions; `traits`: the traits its bodies
+/// call methods of).
+pub fn check(prog: &Program, tcx: &Tcx, c: &crate::lint_dead::CrateItems, reach: &crate::lint_dead::Reach, traits: &HashSet<DefId>) {
     if !lint::enabled() { return; }
-    let traits = METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default();
     let mut scopes: Vec<Scope> = Vec::new();
-    for (m, md) in prog.mods.iter().enumerate() {
-        if !own.get(md.krate as usize).copied().unwrap_or(false) { continue; }
+    for &m in &c.mods {
+        let md = &prog.mods[m as usize];
         if md.lexical_parent.is_some() { continue; }
-        let (file, items) = crate::lint_dead::module_items(prog, m as u32);
+        let (file, items) = crate::lint_dead::module_items(prog, m);
         let ast = &prog.files[file as usize].ast;
         let mut ranges = Vec::new();
         // each kept item's range reaches back to the end of the one before it: its attributes
@@ -301,16 +334,15 @@ pub fn check(prog: &Program, tcx: &Tcx, own: &[bool], reach: &crate::lint_dead::
             }
             prev_hi = item.hi;
         }
-        scopes.push(Scope { def: md.def, module: m as u32, block: false, file, ranges, items, ast });
+        scopes.push(Scope { def: md.def, module: m, block: false, file, ranges, items, ast });
     }
     // `use` declarations inside bodies: the block is the scope
-    for i in 0..prog.defs.len() {
-        let def = prog.defs[i];
-        if !own.get(def.krate as usize).copied().unwrap_or(false) { continue; }
+    for &d in &c.defs {
+        let def = *prog.def(d);
         if !matches!(def.kind, DefKind::Fn | DefKind::AssocFn) { continue; }
         let ast = &prog.files[def.file as usize].ast;
         let Ok(Some(b)) = prog.fn_body(def.file, def.item) else { continue };
-        collect_block_scopes(prog, DefId(i as u32), def.file, ast, b, &mut scopes);
+        collect_block_scopes(prog, d, def.file, ast, b, &mut scopes);
     }
     // token sites are call-site positions; so are the ranges (code a macro wrote has its text in the
     // file's expansion area)
@@ -337,7 +369,7 @@ pub fn check(prog: &Program, tcx: &Tcx, own: &[bool], reach: &crate::lint_dead::
         macro_closure(prog, &mut names);
         written.push(names);
     }
-    let reached = macro_reach(prog, own, &scopes, &tokens, &written);
+    let reached = macro_reach(prog, c, &scopes, &tokens, &written);
     for (si, sc) in scopes.iter().enumerate() {
         if sc.block { continue; }
         if let Some(r) = reached.get(&sc.module) { written[si].extend(r.iter().cloned()); }
@@ -366,7 +398,7 @@ pub fn check(prog: &Program, tcx: &Tcx, own: &[bool], reach: &crate::lint_dead::
             let mut ls = Vec::new();
             let start = first_pos(sc.ast, &u.tree).unwrap_or(item.lo);
             leaves(prog, sc.file, sc.ast, &u.tree, start, item.hi, &mut Vec::new(), &mut ls);
-            let ctx = Ctx { prog, sc, names, traits: &traits };
+            let ctx = Ctx { prog, sc, names, traits };
             let mut unused: Vec<(u32, u32)> = Vec::new();
             // `pub use` that leaves the crate cannot be judged (a glob of nothing exports nothing)
             let exported = matches!(item.vis, Vis::Pub) && reach.defs.contains(&sc.def);
@@ -388,6 +420,9 @@ pub fn check(prog: &Program, tcx: &Tcx, own: &[bool], reach: &crate::lint_dead::
             };
             for l in &ls {
                 if dup_glob(l) { continue; }
+                // rustc_resolve finalize_imports: an import that did not resolve counts as used (its
+                // error is the report)
+                if ctx.unresolved(l, &c.unresolved) { continue; }
                 if exported && !(l.glob && ctx.glob_imports_nothing(l)) && !l.empty {
                     // check_import_as_underscore: an exported `as _` import of anything but a
                     // trait binds nothing a user can name
@@ -459,7 +494,7 @@ fn unused_extern_crates(prog: &Program, sc: &Scope<'_>) {
 /// `m` (`use super::*`, transitively through glob re-imports), a macro call by path that resolves
 /// to `m` (`crate::kit::name!(..)`), and a `use` whose path goes through `m`
 /// (`use crate::codec::{name, ..}` reaching `pub(crate) use name;`).
-fn macro_reach(prog: &Program, own: &[bool], scopes: &[Scope<'_>], tokens: &HashMap<u32, FileTokens>, written: &[HashSet<String>]) -> HashMap<u32, HashSet<String>> {
+fn macro_reach(prog: &Program, c: &crate::lint_dead::CrateItems, scopes: &[Scope<'_>], tokens: &HashMap<u32, FileTokens>, written: &[HashSet<String>]) -> HashMap<u32, HashSet<String>> {
     use crate::ast::SegKind;
     let seg = |t: &str| -> (SegKind, crate::program::Sym) {
         let kind = match t { "self" => SegKind::SelfValue, "super" => SegKind::Super, "crate" => SegKind::Crate, _ => SegKind::Ident };
@@ -484,10 +519,9 @@ fn macro_reach(prog: &Program, own: &[bool], scopes: &[Scope<'_>], tokens: &Hash
         }
     }
     // `use` paths through a module
-    for im in prog.imports_iter() {
-        let krate = prog.mods[im.module as usize].krate;
-        if !own.get(krate as usize).copied().unwrap_or(false) || im.ext || im.glob || im.segs.len() < 2 { continue; }
-        let edition = prog.crates[krate as usize].edition;
+    let edition = prog.crates[c.krate as usize].edition;
+    for &im in &c.imports {
+        if im.ext || im.glob || im.segs.len() < 2 { continue; }
         let (last, parent) = im.segs.split_last().unwrap();
         if let Some(m) = prog.resolve_mod_path(im.module, im.global, parent, edition < 2018, true).and_then(module_of) {
             reached.entry(m).or_default().insert(prog.syms.str(last.1).to_string());
@@ -502,14 +536,15 @@ fn macro_reach(prog: &Program, own: &[bool], scopes: &[Scope<'_>], tokens: &Hash
     let mut flow: HashMap<u32, HashSet<String>> = HashMap::new();
     loop {
         let mut changed = false;
-        for (w, md) in prog.mods.iter().enumerate() {
-            if !own.get(md.krate as usize).copied().unwrap_or(false) || md.globs.is_empty() { continue; }
-            let mut from: HashSet<String> = seen.get(&(w as u32)).cloned().unwrap_or_default();
-            if let Some(f) = flow.get(&(w as u32)) { from.extend(f.iter().cloned()); }
+        for &w in &c.mods {
+            let md = &prog.mods[w as usize];
+            if md.globs.is_empty() { continue; }
+            let mut from: HashSet<String> = seen.get(&w).cloned().unwrap_or_default();
+            if let Some(f) = flow.get(&w) { from.extend(f.iter().cloned()); }
             if from.is_empty() { continue; }
             for &(g, _) in &md.globs {
                 let Some(t) = module_of(g) else { continue };
-                if t == w as u32 { continue; }
+                if t == w { continue; }
                 let into = flow.entry(t).or_default();
                 let before = into.len();
                 into.extend(from.iter().cloned());
@@ -607,6 +642,17 @@ struct Ctx<'a, 'b> {
 }
 
 impl Ctx<'_, '_> {
+    /// The import of leaf `l` is one of the crate's reported `unresolved` imports.
+    fn unresolved(&self, l: &Leaf, unresolved: &[&crate::program::Import]) -> bool {
+        let prog = self.prog;
+        let pf = &prog.files[self.sc.file as usize];
+        unresolved.iter().any(|im| !im.ext && im.module == self.sc.module && im.glob == l.glob && if l.glob {
+            im.segs.len() == l.segs.len() && im.segs.iter().zip(&l.segs).all(|((_, s), ls)| prog.syms.str(*s) == pf.text(ls.name))
+        } else {
+            l.name.as_deref().is_some_and(|n| im.bind.is_some_and(|b| prog.syms.str(b) == n))
+        })
+    }
+
     /// A glob whose target has no name the importing module may use.
     fn glob_imports_nothing(&self, l: &Leaf) -> bool {
         let prog = self.prog;

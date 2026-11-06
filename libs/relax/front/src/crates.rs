@@ -100,7 +100,7 @@ pub fn disambiguate_multi_version_crates(units: &mut [CrateUnit]) {
 /// Crates Relax provides itself (std/substitutes.txt: `<name> <version prefix> <root>`):
 /// a unit of that crate at a matching version loads the provided root instead of its sources
 /// (same name; deps become core/alloc/std only; features ignored); one at another version is
-/// compiled from its own source, and the load says so. The rustc build keeps the real crates.
+/// compiled from its own source, which a --verbose load says. The rustc build keeps the real crates.
 /// Also hands the graph to the proc-macro host (macro_reg::register_and_strip); `additive`: the
 /// graph of a program started into a running one joins the registered graph.
 pub fn apply_substitutes(sess: &std::sync::Arc<crate::Session>, units: &mut [CrateUnit], std_dir: &str, additive: bool) -> Result<(), String> {
@@ -112,7 +112,9 @@ pub fn apply_substitutes(sess: &std::sync::Arc<crate::Session>, units: &mut [Cra
         }
     };
     for line in apply_substitute_table(units, std_dir, &table) {
-        eprintln!("makepad-run: {line}");
+        if sess.options.verbose {
+            eprintln!("makepad run: {line}");
+        }
     }
     // proc-macro crates run in the JIT proc-macro host; the app graph sees them empty
     crate::macro_reg::register_and_strip(sess, units, std_dir, additive)?;

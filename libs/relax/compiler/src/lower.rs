@@ -257,6 +257,12 @@ pub struct Lcx<'a> {
     drop_flags: Vec<Option<VReg>>,
     /// scope depth a `let` declared each local at (its drop flag registers there)
     decl_depth: Vec<Option<usize>>,
+    /// an async fn's pattern parameter's bindings, declared right after the parameter's whole
+    /// argument rather than at their own number (typeck numbers them after every parameter):
+    /// binding local -> (the argument's local, its order among the pattern's bindings)
+    decl_after: HashMap<u32, (u32, u32)>,
+    /// while an async fn's pattern parameter is bound: its argument's local, the bindings so far
+    decl_follow: Option<(u32, u32)>,
     /// instructions run at function entry (drop flag initialisation)
     entry_inits: Vec<Inst>,
     /// fold branches on known constants (a check only); the registers a fold relied on, which must
@@ -527,6 +533,8 @@ impl<'a> Lcx<'a> {
             scopes: vec![Vec::new()],
             drop_flags: vec![None; n],
             decl_depth: vec![None; n],
+            decl_after: HashMap::default(),
+            decl_follow: None,
             entry_inits: Vec::new(),
             fold: u.prog.session.options.const_fuel,
             fold_regs: std::cell::RefCell::new(Vec::new()),
@@ -2516,6 +2524,9 @@ impl<'a> Lcx<'a> {
         }
         self.coro = Some(Coro { ct, env, cx, frame_off, tag, up_size: ul.size, await_slots: Vec::new(), await_tys: Vec::new(), poll_scratch: Vec::new(), call_private: Default::default(), call_sret: Default::default(), poll_ret, suspends: Vec::new(), cancel_end: Some(cancel_end), pending_ret, after_done, after_panic });
         if ce & crate::tcx::ASYNC_FN_BODY != 0 {
+            // a pattern parameter's bindings are declared right after its whole argument
+            // (rustc_ast_lowering: `let __argN = __argN; let <pat> = __argN;` parameter by
+            // parameter): they drop before it and after the parameters declared after it
             for p in self.b.param_pats.clone() {
                 if let Some(&li) = self.b.pat_local.get(&(p.0 | crate::typeck::ASYNC_ARG_KEY)) {
                     let t = self.monomorphize(self.b.locals[li as usize].ty);
@@ -2523,7 +2534,9 @@ impl<'a> Lcx<'a> {
                     let saved = (self.match_root, self.pat_path.take());
                     self.match_root = Some(MatchRoot::Local(li));
                     self.pat_path = Some(Vec::new());
+                    self.decl_follow = Some((li, 0));
                     self.bind_pat_place(p, &place, t);
+                    self.decl_follow = None;
                     self.match_root = saved.0;
                     self.pat_path = saved.1;
                 }
@@ -3783,10 +3796,16 @@ impl<'a> Lcx<'a> {
         self.drop_flags[li as usize] = Some(f);
         let top = self.scopes.len() - 1;
         let at = self.decl_depth[li as usize].filter(|d| *d <= top).unwrap_or(top);
+        if let Some((arg, n)) = self.decl_follow.filter(|&(arg, _)| arg != li) {
+            self.decl_after.insert(li, (arg, n));
+            self.decl_follow = Some((arg, n + 1));
+        }
         // a scope drops its locals in reverse declaration order, whatever order they were
         // first assigned in (`let (x, y); y = ..; x = ..;` drops y, then x); locals are
-        // numbered in declaration order
-        let pos = self.scopes[at].iter().position(|&x| x > li).unwrap_or(self.scopes[at].len());
+        // numbered in declaration order, but for an async fn's pattern bindings (decl_after)
+        let rank = |x: u32| self.decl_after.get(&x).map_or((x, 0), |&(arg, n)| (arg, 1 + n));
+        let r = rank(li);
+        let pos = self.scopes[at].iter().position(|&x| rank(x) > r).unwrap_or(self.scopes[at].len());
         self.scopes[at].insert(pos, li);
         f
     }
@@ -13383,8 +13402,8 @@ fn ext_block_made(blk: u64) {
 }
 
 /// What this module holds of a run, as a fresh process has it (`run_end`): the blocks of a run
-/// that ended went with its values, and a word of the next run's that holds one's address
-/// (what its memory held) names no block.
+/// that ended went with its heap (rt_ext_get), and a word of the next run's that holds one's
+/// address (what its memory held) names no block.
 pub(crate) unsafe fn reset_statics() {
     relax_session::reset_static(&EXT_BLOCKS, relax_session::sync::Mutex::new(None));
 }
@@ -13398,9 +13417,12 @@ rt_fn! {
     /// The extension block behind ext word `slot` (M10), allocated (zeroed) or grown to `size`
     /// (the fields it held keep their offsets); the caller sets the fields beyond its count.
     /// The header: fields set (u32), capacity (u32), alignment (u32), whether the value set its
-    /// dead slots (u32: its word was EXT_BUILT when the block was made).
+    /// dead slots (u32: its word was EXT_BUILT when the block was made). A block is the run's
+    /// (the run phase: the calling thread's domain heap), so one whose value died without its
+    /// drop goes with the run's heap, as the value's memory does.
     pub fn rt_ext_get(slot: u64, size: u64, align: u64) -> u64 {
         unsafe {
+            let _run = relax_session::phase::run();
             let slot = slot as *mut u64;
             let word = *slot;
             let cur = ext_word_block(word);
@@ -15454,6 +15476,40 @@ mod query_drop_tests {
         assert_eq!(ext_word_block(word), 0, "a block of a run that ended is no block of the next one");
         rt_ext_free(word);
         assert_eq!(ext_word_block(word), 0);
+    }
+
+    /// A run's extension blocks are in its heap, made and grown there by its threads: a value that
+    /// dies without its drop leaves no block behind, and the next run's heap holds none of them.
+    #[test]
+    fn the_next_runs_heap_holds_no_extension_blocks_of_the_run_before() {
+        isolated_test!(the_next_runs_heap_holds_no_extension_blocks_of_the_run_before);
+        use crate::zone_alloc::domain::{self, DomainHeap};
+        // (decided at the first compile; this process has not compiled)
+        assert!(crate::zone_alloc::compiler_arena_enabled(), "premise: heaps are routed");
+        let run = DomainHeap::new().expect("a domain heap");
+        let (base, size) = run.range();
+        let held = run.stats().0;
+        let at = &*run as *const DomainHeap as usize;
+        // a thread of the run: a value gets its block, which grows, and the value dies undropped
+        let (made, grown, word) = std::thread::spawn(move || unsafe {
+            domain::enter(at as *const DomainHeap);
+            let mut word = 0u64;
+            let made = rt_ext_get(&mut word as *mut u64 as u64, 32, 16);
+            let grown = rt_ext_get(&mut word as *mut u64 as u64, 4096, 16);
+            domain::enter(std::ptr::null());
+            (made, grown, word)
+        }).join().unwrap();
+        let in_run = |b: u64| (b as usize).wrapping_sub(base) < size;
+        assert!(in_run(made) && in_run(grown), "blocks {made:#x} {grown:#x} outside the run's heap {base:#x}+{size:#x}");
+        assert!(made != grown && ext_word_block(word) == grown);
+        assert!(run.stats().0 >= held + 4096, "the run's heap holds the grown block: {} -> {}", held, run.stats().0);
+        // the run ends: its blocks go with its heap
+        unsafe { reset_statics() };
+        drop(run);
+        let next = DomainHeap::new().expect("the next run's heap");
+        assert_eq!(next.stats().0, 0, "the next run's heap starts empty");
+        assert_eq!(ext_word_block(word), 0, "the old block's address names no block of the next run");
+        rt_ext_free(word);
     }
     #[test]
     fn extension_blocks_are_freed_once_for_trivial_values_and_aggregates() {

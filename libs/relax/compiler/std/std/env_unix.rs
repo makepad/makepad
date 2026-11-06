@@ -14,6 +14,12 @@ use crate::sys;
 
 static ENV_LOCK: RwLock<()> = RwLock::new(());
 
+/// Held while an exec has the new program's environment in place (real std's env_read_lock):
+/// a set_var or remove_var waits for it.
+pub(crate) fn env_read_lock() -> crate::sync::RwLockReadGuard<'static, ()> {
+    ENV_LOCK.read().unwrap_or_else(crate::sync::PoisonError::into_inner)
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum VarError {
     NotPresent,

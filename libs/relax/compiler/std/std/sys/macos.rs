@@ -184,6 +184,11 @@ pub fn environ() -> *const *const c_char {
     unsafe { *_NSGetEnviron() }
 }
 
+/// Makes `env` this process's environment (the array is the caller's to keep alive).
+pub unsafe fn set_environ(env: *const *const c_char) {
+    *_NSGetEnviron() = env;
+}
+
 /// The program's argv (`makepad run P -- a b` gives [P, a, b]), as on Linux: the process's own
 /// argv (_NSGetArgv) is Relax's command line.
 pub fn args() -> (usize, *const *const c_char) {

@@ -369,7 +369,20 @@ fn parse_cmdline(v: &str) -> CmdLine {
 }
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
-static SINK: Mutex<Vec<(Level, String)>> = Mutex::new(Vec::new());
+static SINK: Mutex<Vec<Reported>> = Mutex::new(Vec::new());
+static REPORT_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// One report of the check: its level, the lint (`""`: a hard error of the check, no lint), the
+/// definition whose scope it was reported in (its place in rustc's order: the body owner of a
+/// body's lint, the module of an item's), when it was reported (`seq`: in report order on each
+/// thread -- a body's lints are reported by one) and its line.
+pub struct Reported {
+    pub level: Level,
+    pub lint: &'static str,
+    pub def: DefId,
+    pub seq: u32,
+    pub line: String,
+}
 
 /// `makepad check` collects lints (nothing else does).
 pub fn enable() { ENABLED.store(true, Ordering::Relaxed); }
@@ -400,7 +413,8 @@ pub fn hard_error(prog: &Program, file: u32, pos: u32, msg: &str) {
     let (l, c) = prog.files[file as usize].line_col(pos);
     let line = format!("{}:{}:{}: error: {}", prog.file_paths[file as usize], l, c, msg);
     let _k = crate::zone_alloc::kept();
-    SINK.lock().unwrap_or_else(|e| e.into_inner()).push((Level::Deny, line));
+    let seq = REPORT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    SINK.lock().unwrap_or_else(|e| e.into_inner()).push(Reported { level: Level::Deny, lint: "", def: NO_DEF, seq, line });
 }
 
 /// `emit` under the attributes `inner` of a node inside `def`'s body; none given: those around
@@ -424,21 +438,38 @@ pub fn emit_in(prog: &Program, def: DefId, inner: &[Attr], lint: &Lint, file: u3
     let kind = if level >= Level::Deny { "error" } else { "warning" };
     let line = format!("{}:{}:{}: {}: {} [{}]", prog.file_paths[file as usize], l, c, kind, msg, lint.name);
     let _k = crate::zone_alloc::kept();
-    SINK.lock().unwrap_or_else(|e| e.into_inner()).push((level, line));
+    let seq = REPORT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    SINK.lock().unwrap_or_else(|e| e.into_inner()).push(Reported { level, lint: lint.name, def, seq, line });
 }
 
 /// The lints reported since the last take: (errors, warnings).
 pub fn take() -> (Vec<String>, Vec<String>) {
-    let all = std::mem::take(&mut *SINK.lock().unwrap_or_else(|e| e.into_inner()));
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
     // (a diagnostic reported twice -- a body checked again by the second borrowck -- is one)
     let mut seen = std::collections::HashSet::new();
-    for (l, s) in all {
-        if !seen.insert(s.clone()) { continue; }
-        if l >= Level::Deny { errors.push(s) } else { warnings.push(s) }
+    for r in take_reported() {
+        if !seen.insert(r.line.clone()) { continue; }
+        if r.level >= Level::Deny { errors.push(r.line) } else { warnings.push(r.line) }
     }
     (errors, warnings)
+}
+
+/// Everything reported since the last take, in report order (a report made twice is there twice).
+pub fn take_reported() -> Vec<Reported> {
+    std::mem::take(&mut *SINK.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Whether a hard error of the check (no lint) was reported since the last take.
+pub fn has_hard_error() -> bool {
+    SINK.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|r| r.lint.is_empty())
+}
+
+/// rustc's late lints: what its late lint pass and the checks after the required analyses
+/// (misc_checking_3: dead code, private interfaces, lint expectations) report. A check whose
+/// required analyses failed reports none of them (rustc_interface passes.rs analysis).
+pub fn is_late(lint: &str) -> bool {
+    crate::lint_table::LATE.binary_search(&lint).is_ok()
 }
 
 // ---------------------------------------------------------------- overflowing_literals

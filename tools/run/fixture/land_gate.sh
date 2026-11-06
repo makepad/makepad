@@ -86,6 +86,7 @@ step_checks() {
   jb=$(bash tools/run/fixture/jit_break.sh 2>&1); echo "$jb"; case "$jb" in *"jit_break: ok"*) ;; *) fail="$fail jit-break";; esac
   lt=$(bash tools/run/fixture/lazy_typeck.sh 2>&1); echo "$lt"; case "$lt" in *"lazy_typeck: ok"*) ;; *) fail="$fail lazy-typeck";; esac
   ag=$(bash tools/run/fixture/agree.sh 2>&1); echo "$ag"; case "$ag" in *"agree: ok"*) ;; *) fail="$fail agree";; esac
+  ct=$(bash tools/run/fixture/check_targets.sh 2>&1); echo "$ct"; case "$ct" in *"check_targets: ok"*) ;; *) fail="$fail check-targets";; esac
   # (the checks above built this tree's JIT)
   jit=${CARGO_TARGET_DIR:-$PWD/target}/host/makepad
   se=$(bash libs/relax/compiler/tests/strict_errors/run.sh "$jit" 2>&1); echo "$se" | grep -E 'FAILED|^strict_errors'; case "$se" in *"strict_errors: ok"*) ;; *) fail="$fail strict-errors";; esac

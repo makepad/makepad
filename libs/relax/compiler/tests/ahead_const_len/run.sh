@@ -7,6 +7,8 @@
 # failed to type-check (in makepad, then read through a null address: a segfault). Prints
 # "ahead_const_len: ok" or "ahead_const_len: FAILED ...".
 H=$(cd "$(dirname "$0")" && pwd)
+ERR=$(mktemp)
+trap 'rm -f "$ERR"' EXIT
 R=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 T=$(mktemp -d)
 export MAKEPAD_RUN_CACHE=off MAKEPAD_RUN_STD="$H/../../std" MAKEPAD_RUN_CACHE_DIR="$T/cache"
@@ -18,11 +20,12 @@ for k in 1 2 3; do
   grep -q 'makepad check: .* 0 errors' "$T/check$k.log" || bad+=("check $k: $(grep 'makepad check: .* errors' "$T/check$k.log")")
   grep -Eq 'E0080|\{error\}|segfault|could not evaluate' "$T/check$k.log" && bad+=("check $k: $(grep -Em1 'E0080|\{error\}|segfault|could not evaluate' "$T/check$k.log" | cut -c1-200)")
 done
-OUT=$(cd "$H" && ulimit -c 0 && "$R" run --quiet ahead-const-len 2>&1 | grep -v '^relax-\|^makepad \(run\|check\|live\|fix\):')
+OUT=$(cd "$H" && ulimit -c 0 && "$R" run --quiet ahead-const-len 2>>"$ERR")
 [ "$OUT" = "ahead_const_len lanes 360" ] || bad+=("run: $OUT")
 if [ ${#bad[@]} -eq 0 ]; then
   echo "ahead_const_len: ok"
 else
+  tail -5 "$ERR"
   printf 'ahead_const_len: FAILED %s (logs: %s)\n' "$(IFS='; '; echo "${bad[*]}")" "$T"
   exit 1
 fi

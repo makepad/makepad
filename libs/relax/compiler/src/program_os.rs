@@ -8,6 +8,9 @@
 //! the TEB's bounds, which GetCurrentThreadStackLimits reads). Another thread, or a thread that is
 //! not on a program stack, gets the OS answer.
 //!
+//! Thread names (pthread_setname_np, Linux): a thread that names itself as MAKEPAD_RUN_RT_THREADS
+//! lists is a live real-time thread for the JIT's queue (jit::realtime_live).
+//!
 //! Heap (glibc mallinfo2): a program thread that runs in a domain allocates in that domain's heap
 //! (zone_alloc::domain), which is what the program's memory is and what `makepad inspect` and the
 //! domain teardown account (DomainInfo::arena_in_use / arena_committed); mallinfo2 reports that heap.
@@ -22,6 +25,22 @@ extern "C" {
     fn libc_pthread_getattr_np(t: usize, attr: *mut u64) -> i32;
     fn pthread_attr_setstack(attr: *mut u64, addr: *mut u8, size: usize) -> i32;
     fn pthread_attr_setguardsize(attr: *mut u64, size: usize) -> i32;
+    #[link_name = "pthread_setname_np"]
+    fn libc_pthread_setname_np(t: usize, name: *const std::ffi::c_char) -> i32;
+}
+
+/// pthread_setname_np: a thread that takes a name MAKEPAD_RUN_RT_THREADS lists is a live real-time
+/// thread (jit::realtime_live: the tier-up builds go below it from now on).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub extern "C" fn pthread_setname_np(t: usize, name: *const std::ffi::c_char) -> i32 {
+    let r = unsafe { libc_pthread_setname_np(t, name) };
+    if r == 0 && !name.is_null() && !crate::jit::rt_live() {
+        let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().unwrap_or("");
+        if crate::jit::rt_named(name) {
+            crate::jit::realtime_live(Some(name));
+        }
+    }
+    r
 }
 
 /// pthread_getattr_np: for the calling thread on a program stack, the program stack's range

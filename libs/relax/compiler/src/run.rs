@@ -547,6 +547,8 @@ pub(crate) fn resolve_package(
     } else { None };
     let units = if let Some((_, _, units)) = pre.filter(|(p, f, _)| units_json.is_empty() && p == package && f == cargo_flags) {
         Ok(units)
+    } else if units_json.is_empty() && check_only {
+        unitgraph::check_unit_graph(sess, workspace, package, cargo_flags)
     } else if units_json.is_empty() {
         unitgraph::unit_graph(sess, workspace, package, cargo_flags)
     } else {
@@ -1759,7 +1761,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
 
     // ---- the libraries the build scripts link (#[link] blocks load on the first miss)
     let t = Instant::now();
-    let (n_link, missing, callbacks) = match link_libraries(&prog, &g.link_libs, g.native.as_ref(), 0) {
+    let (n_link, missing, callbacks) = match link_libraries(&prog, &g.link_libs, g.native.as_ref(), 0, None) {
         Ok(linked) => linked,
         Err(error) => {
             eprintln!("makepad-run: {error}");
@@ -1980,7 +1982,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         None => 0,
     });
     // the native library's C code calls into the program: its stubs go to the unit's fns
-    if let Err(error) = crate::owner::call(crate::owner::Class::Program, || bind_native_callbacks(&u, &callbacks)) {
+    if let Err(error) = crate::owner::call(crate::owner::Class::Program, || bind_native_callbacks(&u, &callbacks, None)) {
         eprintln!("makepad-run: {error}");
         return 1;
     }
@@ -2337,7 +2339,8 @@ pub(crate) fn exported_fns(prog: &crate::program::Program, prefixes: &[String]) 
 }
 
 /// native::Resolvable for this process: the libraries loaded, which of the symbols the
-/// dynamic loader binds (what a native library's import resolves to without the program).
+/// dynamic loader binds (what a native library's import resolves to without the program),
+/// searched as the program's own foreign calls are (proc::find_any).
 fn native_resolvable(names: &[String], dylibs: &[String], frameworks: &[String]) -> Vec<bool> {
     for l in dylibs {
         let _ = crate::os::proc::load_library(l, false) || crate::os::proc::load_library_versioned(l);
@@ -2347,24 +2350,55 @@ fn native_resolvable(names: &[String], dylibs: &[String], frameworks: &[String])
     }
     names.iter().map(|n| {
         let Ok(c) = std::ffi::CString::new(n.as_str()) else { return false };
-        unsafe { !crate::os::proc::lookup(std::ptr::null_mut(), c.as_ptr().cast()).is_null() || !crate::os::proc::find_system(c.as_ptr().cast()).is_null() }
+        unsafe { !crate::os::proc::find_any(c.as_ptr().cast()).is_null() }
     }).collect()
 }
 
-/// The callback stubs of an `--allow-c` native library (front native_stub.rs): per symbol its
-/// C code calls into the program, the stub's pointer slot and the `#[no_mangle]` fn it goes to.
-#[derive(Default)]
-pub(crate) struct NativeCallbacks(Vec<(usize, DefId)>);
+#[cfg(test)]
+mod native_tests {
+    /// A symbol the process provides (libc's) is no callback of the program; an unknown one is.
+    #[test]
+    fn native_resolvable_finds_process_symbols() {
+        let names = ["strlen", "malloc", "relax_native_no_such_symbol"].map(String::from);
+        assert_eq!(super::native_resolvable(&names, &[], &[]), [true, true, false]);
+    }
 
-/// The stubs of the library `handle`, each matched to the program's fn of its name; a symbol
-/// no fn of the program defines is the error a linker would report.
-fn native_callbacks(prog: &crate::program::Program, n: &crate::native::NativeLib, handle: usize) -> Result<NativeCallbacks, String> {
+    /// Domain 2 of an edited package (its `#[no_mangle]` fn another DefId) does not take the
+    /// slots live domain 1 bound; the same code, a restart and a binder that ended do.
+    #[test]
+    fn an_edited_relaunch_does_not_rebind_a_live_domains_callbacks() {
+        use crate::program::DefId;
+        let (slot, old_fn, new_fn) = (0x1000usize, DefId(7), DefId(9));
+        let owners = [(slot, Some(1), old_fn)];
+        let live = |o: Option<u32>| o == Some(1);
+        assert_eq!(super::slot_conflict(&owners, Some(2), &[(slot, new_fn)], live), Some((slot, Some(1), old_fn)));
+        assert_eq!(super::slot_conflict(&owners, Some(2), &[(slot, old_fn)], live), None);
+        assert_eq!(super::slot_conflict(&owners, Some(1), &[(slot, new_fn)], live), None);
+        assert_eq!(super::slot_conflict(&owners, Some(2), &[(slot, new_fn)], |_| false), None);
+        assert_eq!(super::slot_conflict(&owners, Some(2), &[(0x2000, new_fn)], live), None);
+    }
+}
+
+/// The callback stubs of an `--allow-c` native library (front native_stub.rs): the library and
+/// its crates, and per symbol its C code calls into the program the stub's pointer slot, the
+/// `#[no_mangle]` fn it goes to and the symbol.
+#[derive(Default)]
+pub(crate) struct NativeCallbacks {
+    lib: String,
+    crates: String,
+    slots: Vec<(usize, DefId, String)>,
+}
+
+/// The stubs of the library `handle`, each matched to the program's fn of its name (one of the
+/// loader's crates, `crates`: a domain's own, None: any); a symbol no fn defines is the error a
+/// linker would report.
+fn native_callbacks(prog: &crate::program::Program, n: &crate::native::NativeLib, handle: usize, crates: Option<&std::collections::HashSet<u32>>) -> Result<NativeCallbacks, String> {
     let names = crate::os::proc::symbol_in(handle, crate::native_stub::NAMES);
     let slots = crate::os::proc::symbol_in(handle, crate::native_stub::SLOTS);
     if names == 0 || slots == 0 {
         return Ok(NativeCallbacks::default());
     }
-    let exports = crate::global_asm::exported_fns(prog);
+    let exports = crate::global_asm::exported_fns_of(prog, |k| crates.is_none_or(|c| c.contains(&k)));
     let mut out = Vec::new();
     let mut at = names as *const std::ffi::c_char;
     loop {
@@ -2375,19 +2409,49 @@ fn native_callbacks(prog: &crate::program::Program, n: &crate::native::NativeLib
         let Some(&d) = exports.get(&name) else {
             return Err(format!("cannot load {} (--allow-c native library of {}): its C code calls `{}`, which no library and no `#[no_mangle]` fn of the program defines", n.path, n.crates.join(", "), name));
         };
-        out.push((slots + 8 * out.len(), d));
         at = unsafe { at.add(name.len() + 1) };
+        out.push((slots + 8 * out.len(), d, name));
     }
-    Ok(NativeCallbacks(out))
+    Ok(NativeCallbacks { lib: n.path.clone(), crates: n.crates.join(", "), slots: out })
+}
+
+/// Who bound each callback slot of the process's native libraries: (slot, the run (None) or a
+/// domain, the fn). The run's (`reset_statics`): its binders end with the run and its fns are the
+/// ended program's, so to the next run an entry names a domain id that may be another app's and
+/// a fn of no program it has. The slots themselves stay with the library (loaded for the process),
+/// and the next run binds them again before its first call into it.
+static SLOT_OWNERS: relax_session::sync::Mutex<Vec<(usize, Option<crate::domain::DomainId>, DefId)>> = relax_session::sync::Mutex::new(Vec::new());
+
+/// The first of `slots` (slot, fn) that `owner` must not take: one another binder that is still
+/// `live` holds with a different fn (slot, that binder, its fn). One library serves every
+/// domain, so its slots are one table: a domain of the same code binds the same fns, a restart
+/// (the same binder) and a binder that ended rebind.
+fn slot_conflict(owners: &[(usize, Option<crate::domain::DomainId>, DefId)], owner: Option<crate::domain::DomainId>, slots: &[(usize, DefId)], live: impl Fn(Option<crate::domain::DomainId>) -> bool) -> Option<(usize, Option<crate::domain::DomainId>, DefId)> {
+    slots.iter().find_map(|&(slot, d)| owners.iter().find(|o| o.0 == slot && o.1 != owner && o.2 != d && live(o.1)).copied())
 }
 
 /// Points the native library's callback stubs at the unit's fns (their callable addresses, as a
-/// fn pointer handed to C has them) before the program's first call into the library. A unit
-/// that loads the library binds them again (a restart, a domain), the last one's fns winning.
-pub(crate) fn bind_native_callbacks(u: &Unit, cb: &NativeCallbacks) -> Result<(), String> {
-    for &(slot, d) in &cb.0 {
+/// fn pointer handed to C has them) before the program's first call into the library, for
+/// `owner` (None: the run, else a domain). A domain of an edited package whose fns differ from
+/// those a live domain bound is refused: the library's C code would call the other's fns.
+pub(crate) fn bind_native_callbacks(u: &Unit, cb: &NativeCallbacks, owner: Option<crate::domain::DomainId>) -> Result<(), String> {
+    let _k = crate::zone_alloc::kept();
+    let mut owners = SLOT_OWNERS.lock().unwrap_or_else(|e| e.into_inner());
+    let slots: Vec<(usize, DefId)> = cb.slots.iter().map(|s| (s.0, s.1)).collect();
+    let live = |o: Option<crate::domain::DomainId>| o.is_none_or(|id| crate::domain::info(id).is_some_and(|i| matches!(i.state, crate::domain::DomainState::Compiling(_) | crate::domain::DomainState::Running)));
+    if let Some((slot, other, was)) = slot_conflict(&owners, owner, &slots, live) {
+        let &(_, d, ref name) = cb.slots.iter().find(|s| s.0 == slot).expect("a conflicting slot is one of these");
+        let who = |o: Option<crate::domain::DomainId>| o.map_or("the run".to_string(), |id| format!("domain {id}"));
+        return Err(format!(
+            "cannot bind {} (--allow-c native library of {}) for {}: its C code calls `{}`, which {} bound to its own `{}` (this one is `{}`); one library serves both, so restart {} to pick up the edit",
+            cb.lib, cb.crates, who(owner), name, who(other), u.prog.def_path(was), u.prog.def_path(d), who(other)
+        ));
+    }
+    for &(slot, d) in &slots {
         let addr = crate::global_asm::fn_addr(u, d)?;
         unsafe { (*(slot as *const std::sync::atomic::AtomicU64)).store(addr, Ordering::Release) };
+        owners.retain(|o| o.0 != slot);
+        owners.push((slot, owner, d));
     }
     Ok(())
 }
@@ -2396,7 +2460,8 @@ pub(crate) fn bind_native_callbacks(u: &Unit, cb: &NativeCallbacks) -> Result<()
 /// `first_file` on name: (how many, the optional ones not found, the native library's callbacks
 /// to bind once the unit is made). A native bundle's load failure is fatal, with the loader's
 /// diagnostic and the crates it carries, and so is a callback the program does not define.
-pub(crate) fn link_libraries(prog: &crate::program::Program, link_libs: &[(String, bool)], native: Option<&crate::native::NativeLib>, first_file: usize) -> Result<(usize, Vec<String>, NativeCallbacks), String> {
+/// The native library's callbacks are the fns of `crates` (a domain's; None: any).
+pub(crate) fn link_libraries(prog: &crate::program::Program, link_libs: &[(String, bool)], native: Option<&crate::native::NativeLib>, first_file: usize, crates: Option<&std::collections::HashSet<u32>>) -> Result<(usize, Vec<String>, NativeCallbacks), String> {
     let mut missing = Vec::new();
     // no-codegen mode: nothing is linked at run time -- native code is the host binary's, and
     // the program reaches only the symbols the host exports (jit.rs foreign_addr)
@@ -2409,7 +2474,7 @@ pub(crate) fn link_libraries(prog: &crate::program::Program, link_libs: &[(Strin
         let handle = crate::os::proc::load_path(&n.path).map_err(|error| {
             format!("cannot load {} (--allow-c native library of {}): {}", n.path, n.crates.join(", "), error)
         })?;
-        callbacks = native_callbacks(prog, n, handle)?;
+        callbacks = native_callbacks(prog, n, handle, crates)?;
     }
     let provided_static = |name: &str| native.is_some_and(|n| n.statics.iter().any(|s| s == name));
     for (name, fw) in link_libs {
@@ -2976,6 +3041,13 @@ fn try_settle(drops: &mut jit::SettleDrops, trim: bool) -> bool {
     retired.is_some()
 }
 
+/// The warm record's pass (start_monitor) goes once the UI thread waited on the JIT for at most
+/// RECORD_UI_WAIT_NS in the last RECORD_UI_WINDOW_NS, and does not wait now: a page's first visit
+/// waits for seconds in a row; after it a frame reaches a new fn now and then (Fab: one or two
+/// sub-ms waits a second, for seconds after its burst).
+const RECORD_UI_WINDOW_NS: u64 = 500_000_000;
+const RECORD_UI_WAIT_NS: u64 = 5_000_000;
+
 /// The background loop's reclamation pass (jit::settle_drop) runs at most this often after the
 /// first present.
 const SETTLE_DROP_EVERY_NS: u64 = 2_000_000_000;
@@ -3026,6 +3098,9 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
         // compiles (5 s after the last write), or every 10 s while compiles go on
         let (mut mid_quiet, mut mid_seen, mut mid_flushed, mut mid_last) = (0u32, u64::MAX, 0u64, 0u64);
         let mid_busy = std::sync::Arc::new(AtomicBool::new(false));
+        // (wall ns, the UI thread's JIT wait ns so far) per tick: its waits over the last
+        // RECORD_UI_WINDOW_NS, which the warm record's pass waits on
+        let mut ui_marks: std::collections::VecDeque<(u64, u64)> = std::collections::VecDeque::new();
         let mut teardown_started = false;
         let _ = MONITOR.set(std::thread::current());
         crate::run_threads::on_end(monitor_wake);
@@ -3088,20 +3163,29 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
             // also with no new code: the manifest whose window closed, the collected program
             let left = !MID_MANIFEST_DONE.load(Ordering::Relaxed) && jit::FIRST_PRESENT.load(Ordering::Acquire) && jit::wall_ns() >= jit::ORDER_UNTIL_NS.load(Ordering::Relaxed)
                 || !COLLECTED_CURRENT.load(Ordering::Relaxed) && !MID_COLLECTED_TRIED.load(Ordering::Relaxed)
-                || jit::FIRST_PRESENT.load(Ordering::Acquire) && crate::cache::front_graph_pending();
+                || jit::live_startup_done() && crate::cache::front_graph_pending();
             // the warm record (manifest, front graph, collected program) is written as soon
-            // as its pieces are ready after the first present, not after seconds of quiet
+            // as its pieces are ready after the first present (a program that never presents:
+            // once its startup went quiet, jit::live_startup_done), not after seconds of quiet
             // (a cold run compiles O2 code for long after it): users close apps quickly, and
             // a killed run that wrote nothing left every relaunch unrestored. At most once a
             // second; the collected program's encode makes a unit call only when free.
-            let record = left && jit::FIRST_PRESENT.load(Ordering::Acquire) && since >= 1_000;
+            let record = left && jit::live_startup_done() && since >= 1_000;
+            let (wall, ui_waited) = (jit::wall_ns(), crate::postframe::ui_wait_ns());
+            ui_marks.push_back((wall, ui_waited));
+            while ui_marks.len() > 1 && ui_marks[1].0 + RECORD_UI_WINDOW_NS <= wall { ui_marks.pop_front(); }
+            let ui_light = ui_marks.front().is_some_and(|&(t, w)| t + RECORD_UI_WINDOW_NS <= wall && ui_waited.saturating_sub(w) <= RECORD_UI_WAIT_NS)
+                && crate::postframe::ui_idle_ns() != 0;
             // a trickle of first compiles counts as quiet (SettleWatch: a game keeps reaching code)
             let mid_still = mid_quiet >= 20 || settle_watch.slow(jit::demand_compiled());
             let due = n != mid_flushed && ((mid_still && since >= 5_000) || since >= 10_000) || left && mid_still && since >= 5_000;
-            // not while the UI thread is in a burst of lazy compiles after the present: the
-            // write's unit calls cannot be interrupted once served (one held the owner 620 ms
-            // in front of a tab's first visit); it goes in the next pause
-            if start != 0 && (record || main_ms >= 3000 && due) && !jit::ui_burst() && !mid_busy.swap(true, Ordering::SeqCst) {
+            // not while the UI thread is in a burst of lazy compiles after the present (one write
+            // held the owner 620 ms in front of a tab's first visit): it goes in the next pause.
+            // The warm record's pass does not wait for 2 s without a UI wait (jit::ui_burst), only
+            // for the burst's end (ui_light): its owner requests stop at their checks for a
+            // waiting program request, and a frame now and then reaching a new fn held it for
+            // seconds (Fab: 10 s after the present)
+            if start != 0 && (record || main_ms >= 3000 && due) && (if record { ui_light } else { !jit::ui_burst() }) && !mid_busy.swap(true, Ordering::SeqCst) {
                 mid_flushed = n;
                 mid_last = main_ms;
                 let busy = mid_busy.clone();
@@ -3606,8 +3690,10 @@ pub(crate) fn main_start_wall() -> u64 {
 }
 
 /// Front images, crate records and the collected graph describe the sources the run booted
-/// from. A live session records them too, until its first edit: from then on the Program holds
-/// reloaded file versions that are not the crate versions its stores are named after.
+/// from. A live session records them too while no crate is edited: a kept edit's Program holds
+/// reloaded file versions that are not the crate versions its stores are named after. (A refused
+/// edit, or one that puts the boot text back, leaves no crate edited. Its versions stay in the
+/// tables: the collected program is not recorded from them, cache capture_boot.)
 pub(crate) fn front_recordable() -> bool {
     crate::reload::edited_crates().is_empty()
 }
@@ -3774,6 +3860,8 @@ static CHECK_RECORDS_COLLECTED: AtomicBool = AtomicBool::new(false);
 pub(crate) fn push_front_images(prog: &crate::program::Program, c: &mut crate::cache::Cache) -> usize {
     let mut n = 0;
     for i in 0..prog.files.len() {
+        // (a live edit's version: an eager parse, whose ids are not a boot parse's -- cache enc_file)
+        if prog.is_edit_version(i as u32) { continue; }
         let f = &prog.files[i];
         let (Some(path), Some(&krate)) = (prog.file_paths.get(i), prog.file_crate.get(i)) else { continue };
         let part = f.part.get().and_then(|p| p.image.as_ref());
@@ -3929,7 +4017,7 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
     if !front_recordable() && !MID_COLLECTED_TRIED.swap(true, Ordering::Relaxed) {
         collected_skip("the session was edited live");
     }
-    let graph_ready = jit::FIRST_PRESENT.load(Ordering::Acquire)
+    let graph_ready = jit::live_startup_done()
         && crate::cache::Cache::flush_front_graphs().is_ok();
     // the collected program, once per run and only when the program is quiet (it is encoded
     // under the unit and front-end locks): not at the exit
@@ -3944,36 +4032,44 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
         // the cache files' pages the run has resident go first (a settle's trim drops them too):
         // the record's copy of the program comes on top of what the process holds
         crate::pack::release_resident();
-        if let Some((ready, retired_boot, t)) = unit_call(wait, || {
+        if let Some((ready, retired_boot, late_spill, t)) = unit_call(wait, || {
             cprobe.start();
             yield_section("collected");
             let mut ready = None;
             let mut retired_boot = None;
+            let mut late_spill = None;
             let t = Instant::now();
-            let front = jit::front_write_within(if jit::QUIT_SEEN.load(Ordering::Relaxed) { 1000 } else { 50 });
+            // asked at each step and through the encode: a waiting program request (a frame's lazy
+            // compile, a live patch) goes first, and a later pass tries again
+            let stop = || { cprobe.tick("collected"); crate::owner::program_waiting() && !jit::QUIT_SEEN.load(Ordering::Relaxed) };
+            // the front-end lock: for at most 50 ms, and not while a program request waits for
+            // the owner thread this holds
+            let front = if jit::QUIT_SEEN.load(Ordering::Relaxed) { jit::front_write_within(1000) } else {
+                let t = Instant::now();
+                loop {
+                    if let Some(g) = jit::front_write_within(1) { break Some(g); }
+                    if stop() || t.elapsed() >= std::time::Duration::from_millis(50) { break None; }
+                }
+            };
             if front.is_none() { collected_skip("the front-end lock is busy"); }
             if let Some(_front) = front {
                 let u = unsafe { &mut *up };
                 // files the post-boot loader loaded since this write took its front images (a
                 // run that did not restore loads for seconds after present): their images are
-                // written now, under the locks, so the record can be made in this pass
+                // taken now, under the locks, so the record can be made in this pass (their store
+                // write runs after the owner thread is released, before the record's commit)
                 if wait && u.prog.files.len() != imaged_files && front_recordable() {
-                    if let Some(c) = u.cache.as_mut() {
+                    if stop() { crates_left = true; } else if let Some(c) = u.cache.as_mut() {
                         push_front_images(&u.prog, c);
-                        let stop = || crate::owner::program_waiting() && !jit::QUIT_SEEN.load(Ordering::Relaxed);
                         crates_left = !c.record_front_crates_until(&u.prog, &stop);
-                        let written = match c.spill_take() {
-                            Some(s) => s.write().is_ok(),
-                            None => true,
-                        };
-                        if written && !crates_left { imaged_files = u.prog.files.len(); }
+                        late_spill = c.spill_take();
+                        if !crates_left { imaged_files = u.prog.files.len(); }
                     }
                 }
                 if u.prog.files.len() != imaged_files {
                     collected_skip(if crates_left { "the crate records stopped for a program request" } else { "files were loaded since the front images were taken" });
                 }
                 if let Some(c) = u.cache.as_mut().filter(|_| u.prog.files.len() == imaged_files) {
-                    let stop = || { cprobe.tick("collected"); crate::owner::program_waiting() && !jit::QUIT_SEEN.load(Ordering::Relaxed) };
                     match c.encode_collected(&u.prog, &u.tcx, &stop) {
                         crate::cache::CollectedRecord::Ready(dest, payload) => { MID_COLLECTED_TRIED.store(true, Ordering::Relaxed); ready = Some((u.prog.session.options.verbose.then_some(c.collected_crates(&u.prog)), dest, payload)); }
                         crate::cache::CollectedRecord::Current => { MID_COLLECTED_TRIED.store(true, Ordering::Relaxed); COLLECTED_CURRENT.store(true, Ordering::Relaxed); retired_boot = Some(c.finish_collected()); }
@@ -3983,12 +4079,18 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
                 }
             }
             cprobe.tick("collected end");
-            (ready, retired_boot, t)
+            (ready, retired_boot, late_spill, t)
         }) {
             cprobe.report("collected record");
             verbose!("makepad-run cache: collected record held the owner {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
             drop(retired_boot);
-            if let Some((report, dest, payload)) = ready {
+            // the late files' images are in the store before the record that maps them
+            let late_written = late_spill.map_or(true, |s| s.write().is_ok());
+            if !late_written && ready.is_some() {
+                MID_COLLECTED_TRIED.store(false, Ordering::Relaxed);
+                collected_skip("the late files' front images were not written");
+            }
+            if let Some((report, dest, payload)) = ready.filter(|_| late_written) {
                 if let Some(written) = crate::cache::Cache::commit_collected(report, dest, payload, &|| false) {
                     COLLECTED_CURRENT.store(true, Ordering::Relaxed);
                     crate::zone_alloc::kept_with(|| *COLLECTED_WRITTEN.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(written.clone())));
@@ -4598,6 +4700,7 @@ pub(crate) unsafe fn reset_statics() {
     reset(&EXPORTS, relax_session::sync::Mutex::new(Vec::new()));
     reset(&HAL_RUN, AtomicBool::new(false));
     reset(&APP_DOMAIN, std::sync::atomic::AtomicU32::new(0));
+    reset(&SLOT_OWNERS, relax_session::sync::Mutex::new(Vec::new()));
     reset(&SETTLE_REQUESTED, AtomicBool::new(false));
     reset(&FIRST_PRESENT_WALL, AtomicU64::new(0));
     reset(&DOMAIN_PRESENT_WALL, AtomicU64::new(0));

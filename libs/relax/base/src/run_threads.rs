@@ -40,6 +40,12 @@ pub fn spawn<T: Send + 'static>(name: &str, f: impl FnOnce() -> T + Send + 'stat
     start(name, None, f)
 }
 
+/// The stack of a compiler thread (the owner, the check workers, the parse and pool workers): the
+/// parser, the expander, typeck and lowering recurse once per nesting level of the source, so
+/// how deep a program may nest never depends on which of them took its work. Address space
+/// only: a thread commits what it touches.
+pub const COMPILER_STACK: usize = 256 << 20;
+
 /// `spawn`, with a stack of `stack` bytes.
 pub fn spawn_sized<T: Send + 'static>(name: &str, stack: usize, f: impl FnOnce() -> T + Send + 'static) -> std::io::Result<std::thread::JoinHandle<T>> {
     start(name, Some(stack), f)

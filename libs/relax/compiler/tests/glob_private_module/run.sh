@@ -5,6 +5,7 @@
 # "glob_private_module: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
 export MAKEPAD_RUN_CACHE=off
-OUT=$(cd "$H" && MAKEPAD_RUN_STD=$H/../../std "$1" run --quiet gpm-app 2>&1 | grep -v '^relax-\|^makepad-remote:\|^makepad \(run\|check\|live\|fix\):')
+ERR=$(mktemp)
+OUT=$(cd "$H" && MAKEPAD_RUN_STD=$H/../../std "$1" run --quiet gpm-app 2>"$ERR")
 echo "$OUT"
-if [ "$OUT" = "glob private module 7" ]; then echo "glob_private_module: ok"; else echo "glob_private_module: FAILED"; exit 1; fi
+if [ "$OUT" = "glob private module 7" ]; then rm -f "$ERR"; echo "glob_private_module: ok"; else tail -5 "$ERR"; rm -f "$ERR"; echo "glob_private_module: FAILED"; exit 1; fi

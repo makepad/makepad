@@ -9,9 +9,10 @@ T=$(mktemp -d)
 WANT="block local,temp / temp,local; braces local,temp; if-let else,scrutinee / scrutinee,else; into_iter &u8 / u8; rules local,temp; 4"
 ok=1
 for run in cold warm; do
-  OUT=$(cd "$H" && MAKEPAD_RUN_STD=$H/../../std MAKEPAD_HOME=$T/home MAKEPAD_RUN_HOME=$T MAKEPAD_RUN_CACHE_DIR=$T/cache MAKEPAD_RUN_TARGET_DIR=$T/target "$1" run --quiet pmce-app 2>&1 | grep -v '^relax-\|^makepad-remote:\|^makepad \(run\|check\|live\|fix\):')
+  OUT=$(cd "$H" && MAKEPAD_RUN_STD=$H/../../std MAKEPAD_HOME=$T/home MAKEPAD_RUN_HOME=$T MAKEPAD_RUN_CACHE_DIR=$T/cache MAKEPAD_RUN_TARGET_DIR=$T/target "$1" run --quiet pmce-app 2>>"$T/err")
   echo "$run: $OUT"
   [ "$OUT" = "$WANT" ] || ok=0
 done
+[ $ok = 1 ] || tail -5 "$T/err"
 rm -rf "$T"
 if [ $ok = 1 ]; then echo "pm_call_site_edition: ok"; else echo "pm_call_site_edition: FAILED"; exit 1; fi

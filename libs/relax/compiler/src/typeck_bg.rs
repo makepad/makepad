@@ -143,9 +143,12 @@ fn run(up: *mut Unit, root: u32, main: Option<DefId>) {
             }
         }
         // a crate whose every body is loaded and checked clean: its verdict goes to the cache with
-        // the borrow checker's (the run's next cache write)
+        // the borrow checker's (the run's next cache write). Not once a live edit's versions are in
+        // the tables (a refused or undone one's too): the bodies checked were not all the boot's,
+        // which the keys name.
+        let boot = crate::reload::program_edits() == 0;
         for k in 0..todo.len() as u32 {
-            if todo[k as usize] && !failed.contains(&k) && !skipped.contains(&k) && !pending.contains(&k) && stored.insert(k) {
+            if boot && todo[k as usize] && !failed.contains(&k) && !skipped.contains(&k) && !pending.contains(&k) && stored.insert(k) {
                 if let Some(key) = keys[k as usize] { crate::borrowck::lazy::push_verdict_key(key, crate::borrowck::lazy::StoredVerdict::Clean); }
                 STATS[2].fetch_add(1, Ordering::Relaxed);
             }

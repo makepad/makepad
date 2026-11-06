@@ -73,6 +73,8 @@ pub struct PendingPlan {
     /// the stored plan of an earlier load, taken over without planning (`carried`): its inputs
     /// and probes are that load's, not this one's
     carried: bool,
+    /// planned again for its outline (outline_macros), when `plan` is a restored one
+    outlined: std::sync::OnceLock<Plan>,
 }
 impl PendingPlan {
     /// The plan an earlier load of these crates recorded (`image`), taken as it is: an edited start
@@ -80,7 +82,7 @@ impl PendingPlan {
     /// the edit (a full selection is always a sound one), so nothing is planned. Its parts stay
     /// the stored ones (the next plan validates them by their own inputs).
     pub fn carried(crates: &[PreCrate], contexts: Vec<Arc<crate::source_context::Context>>, image: Arc<DemandImage>) -> Self {
-        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts: None, carried: true };
+        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts: None, carried: true, outlined: std::sync::OnceLock::new() };
         let plan = Plan::build(&pending.pending_crates, pending.pending_contexts.clone(), Some(image), &pending.early, None);
         let _ = pending.plan.set(plan);
         pending
@@ -93,7 +95,7 @@ impl PendingPlan {
             && !crates.iter().any(|c| c.cfg.session.runtime.lazy_verify) {
             images.and_then(|i| i.demand_parts(crates, recipe_identity(crates)))
         } else { None };
-        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts, carried: false };
+        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts, carried: false, outlined: std::sync::OnceLock::new() };
         // The crates selected in full (Plan::build) are known before planning.
         pending.early.publish(selected_prefix(crates, pending.parts.as_ref()));
         if image.is_some() || !parallel {
@@ -108,6 +110,17 @@ impl PendingPlan {
         self.early.wake_all();
     }
     pub fn ready(&self) -> Option<&Plan> { self.plan.get() }
+    /// The macro definitions the outline of crate `ci` found, its expansions' included (what
+    /// the raw scan a crate's files parse against lacks). Waits for the plan. A restored plan
+    /// (an earlier load's, whose inputs the sources still match) holds no outline: the crates
+    /// are planned again for it, once, from their sources as they are now.
+    pub(crate) fn outline_macros(&self, ci: usize) -> Option<Vec<crate::macros::MacroRef>> {
+        if let Some(defs) = std::ops::Deref::deref(self).image.outline_macros(ci) {
+            return Some(defs);
+        }
+        self.outlined.get_or_init(|| Plan::build(&self.pending_crates, self.pending_contexts.clone(), None, &EarlyCrates::default(), None))
+            .image.outline_macros(ci)
+    }
     /// The crates' source contexts (the plan's own, without waiting for it).
     pub fn contexts(&self) -> &[Arc<crate::source_context::Context>] { &self.pending_contexts }
     /// The crates the plan is for (without waiting for it).

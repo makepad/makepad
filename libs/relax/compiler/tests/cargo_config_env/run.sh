@@ -7,14 +7,15 @@
 # (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
 export MAKEPAD_RUN_CACHE=off
-run() { (cd "$H" && env "$@" MAKEPAD_RUN_STD=$H/../../std "$MAKEPAD" run --quiet cce-app 2>&1 | grep -v '^relax-\|^makepad-remote:\|^makepad \(run\|check\|live\|fix\):'); }
+run() { (cd "$H" && env "$@" MAKEPAD_RUN_STD=$H/../../std "$MAKEPAD" run --quiet cce-app 2>>"$ERR"); }
 MAKEPAD=$1
+ERR=$(mktemp)
 A=$(run -u CCE_FORCED -u CCE_PLAIN)
 B=$(run CCE_FORCED="forced by process" CCE_PLAIN="plain from process")
 echo "$A"; echo "$B"
 if [ "$A" = "config env hello from data | forced by config | plain from config | script saw plain from config | override from script" ] &&
    [ "$B" = "config env hello from data | forced by config | plain from process | script saw plain from process | override from script" ]; then
-  echo "cargo_config_env: ok"
+  rm -f "$ERR"; echo "cargo_config_env: ok"
 else
-  echo "cargo_config_env: FAILED"; exit 1
+  tail -5 "$ERR"; rm -f "$ERR"; echo "cargo_config_env: FAILED"; exit 1
 fi

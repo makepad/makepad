@@ -1,8 +1,9 @@
 //! Consumers of the lazy checker's structured event stream.
-use crate::borrowck::{event::Origin, lazy};
+use crate::borrowck::{event::{GandalfEvent, Origin}, lazy};
 use std::thread::JoinHandle;
 
-pub struct Console { id: u64, join: JoinHandle<usize> }
+/// (a run detaches the printer; a test waits for it to read what it printed)
+pub struct Console { id: u64, #[cfg(test)] join: JoinHandle<usize> }
 impl Console {
     pub fn start(json: bool, quiet: bool) -> Self {
         let _k = crate::zone_alloc::kept();
@@ -27,24 +28,44 @@ impl Console {
             }
             count
         }).expect("start gandalf-out");
-        Self { id, join }
-    }
-    pub fn finish(self) -> usize {
-        self.finish_within(u64::MAX).unwrap_or(0)
+        #[cfg(not(test))]
+        drop(join);
+        Self { id, #[cfg(test)] join }
     }
     /// Exit stops accepting events and detaches the printer, including a blocked one.
     pub fn detach(self) {
         lazy::unsubscribe(self.id);
     }
-    /// As `finish`, waiting at most `ms` for the printer (it may be blocked writing to a slow
-    /// stderr or report pipe): the process exit never waits on it. None: still printing.
-    pub fn finish_within(self, ms: u64) -> Option<usize> {
+    /// The events printed, once the printer has printed them all (a test reads its stderr).
+    #[cfg(test)]
+    pub fn finish(self) -> usize {
         lazy::unsubscribe(self.id);
-        let t0 = std::time::Instant::now();
-        while !self.join.is_finished() {
-            if t0.elapsed().as_millis() as u64 >= ms { return None; }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        Some(self.join.join().expect("join gandalf-out"))
+        self.join.join().expect("join gandalf-out")
+    }
+}
+
+/// A check's borrow errors, kept for its one ordered print (check_order.rs) instead of printed as
+/// they come: the check's threads finish in any order. The run's report gets each as it comes.
+pub struct Collector { id: u64, join: JoinHandle<Vec<GandalfEvent>> }
+impl Collector {
+    pub fn start() -> Self {
+        let _k = crate::zone_alloc::kept();
+        let (id, context) = lazy::subscribe();
+        let join = crate::run_threads::spawn("gandalf-collect", move || {
+            let mut events = Vec::new();
+            for ev in context {
+                // The test dependency check prints and reports these when the tests end.
+                if ev.origin == Origin::DeferredCheck { continue; }
+                if crate::run::reporting() { crate::run::report("borrowck", &ev.error.to_diagnostic().to_json()); }
+                events.push(ev);
+            }
+            events
+        }).expect("start gandalf-collect");
+        Self { id, join }
+    }
+    /// Every borrow error the check reported, in the order they came.
+    pub fn finish(self) -> Vec<GandalfEvent> {
+        lazy::unsubscribe(self.id);
+        self.join.join().expect("join gandalf-collect")
     }
 }

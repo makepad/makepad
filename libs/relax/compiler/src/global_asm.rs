@@ -254,9 +254,14 @@ fn veneer(arch: Arch, b: &mut Vec<u8>, target: u64) {
 
 /// The program's `#[no_mangle]` / `#[export_name]` fns by symbol.
 pub(crate) fn exported_fns(prog: &crate::program::Program) -> HashMap<String, DefId> {
+    exported_fns_of(prog, |_| true)
+}
+
+/// `exported_fns` of the crates `in_crate` keeps (a domain's own).
+pub(crate) fn exported_fns_of(prog: &crate::program::Program, in_crate: impl Fn(u32) -> bool) -> HashMap<String, DefId> {
     let mut out = HashMap::new();
     for (di, d) in prog.defs.iter().enumerate() {
-        if d.kind != DefKind::Fn {
+        if d.kind != DefKind::Fn || !in_crate(d.krate) {
             continue;
         }
         let f = &prog.files[d.file as usize];

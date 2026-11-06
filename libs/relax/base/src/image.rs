@@ -176,21 +176,37 @@ impl<'a> Writer<'a> {
     }
 
     /// Freeze borrowed arrays while keeping generated sections and nested images intact.
-    pub fn into_owned(self) -> Writer<'static> {
-        Writer { secs: self.secs.into_iter().map(|(id, es, chunks, n)| {
-            let chunks = chunks.into_iter().map(|chunk| match chunk {
-                Chunk::Borrowed(b) => Chunk::Owned(b.to_vec()),
-                Chunk::Mapped(b) => Chunk::Mapped(b),
-                Chunk::Owned(b) => Chunk::Owned(b),
-                Chunk::Shared(b) => Chunk::Shared(b),
-                Chunk::Image(image) => {
-                    // Shared builders are legal too; only that case needs an owned copy.
-                    let image = std::sync::Arc::try_unwrap(image).unwrap_or_else(|image| (*image).clone());
-                    Chunk::Image(std::sync::Arc::new(image.into_owned()))
-                }
-            }).collect();
-            (id, es, chunks, n)
-        }).collect() }
+    /// `stop` is asked before each OWN_STEP bytes copied: yes drops the copy and None comes back
+    /// (a background encode under the owner thread yields to a waiting request: copying a large
+    /// program's arrays in one go held it 48 ms).
+    pub fn into_owned(self, stop: &dyn Fn() -> bool) -> Option<Writer<'static>> {
+        const OWN_STEP: usize = 4 << 20;
+        let mut secs = Vec::with_capacity(self.secs.len());
+        for (id, es, chunks, n) in self.secs {
+            let mut owned = Vec::with_capacity(chunks.len());
+            for chunk in chunks {
+                owned.push(match chunk {
+                    Chunk::Borrowed(b) => {
+                        let mut v = Vec::with_capacity(b.len());
+                        for piece in b.chunks(OWN_STEP) {
+                            if stop() { return None; }
+                            v.extend_from_slice(piece);
+                        }
+                        Chunk::Owned(v)
+                    }
+                    Chunk::Mapped(b) => Chunk::Mapped(b),
+                    Chunk::Owned(b) => Chunk::Owned(b),
+                    Chunk::Shared(b) => Chunk::Shared(b),
+                    Chunk::Image(image) => {
+                        // Shared builders are legal too; only that case needs an owned copy.
+                        let image = std::sync::Arc::try_unwrap(image).unwrap_or_else(|image| (*image).clone());
+                        Chunk::Image(std::sync::Arc::new(image.into_owned(stop)?))
+                    }
+                });
+            }
+            secs.push((id, es, owned, n));
+        }
+        Some(Writer { secs })
     }
 
     /// The bytes the writer holds itself (generated sections, frozen copies), nested images'

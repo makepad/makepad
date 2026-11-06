@@ -2486,12 +2486,12 @@ pub const VARIANT_SIZE_DIFFERENCES: Lint = lint::lint("variant_size_differences"
 
 /// rustc_lint types.rs `VariantSizeDifferences`: a tagged enum whose largest variant is more than
 /// three times larger than the second largest (sizes without the tag).
-pub fn variant_size_differences(prog: &Program, tcx: &Tcx, own: &[bool]) {
+/// `defs`: one checked crate's definitions.
+pub fn variant_size_differences(prog: &Program, tcx: &Tcx, defs: &[DefId]) {
     if !lint::enabled() { return; }
-    for i in 0..prog.defs.len() {
-        let d = DefId(i as u32);
+    for &d in defs {
         let def = prog.def(d);
-        if def.kind != DefKind::Enum || !own.get(def.krate as usize).copied().unwrap_or(false) || lint::generated(prog, d) { continue; }
+        if def.kind != DefKind::Enum || lint::generated(prog, d) { continue; }
         let Some(adt) = tcx.adts.get(&d) else { continue };
         if adt.n_generics != 0 { continue; }
         // (rustc computes the layout of every non-generic enum here, projections in its fields normalized:
@@ -2538,7 +2538,8 @@ pub const REPR_TRANSPARENT_NON_ZST_FIELDS: Lint = lint::lint("repr_transparent_n
 
 /// rustc_hir_analysis check.rs `check_transparent`, the lint half: a zero-sized field of a
 /// `repr(transparent)` struct that contains a `repr(C)` type, next to a non-zero-sized field.
-pub fn repr_transparent_fields(prog: &Program, tcx: &Tcx, own: &[bool]) {
+/// `defs`: one checked crate's definitions.
+pub fn repr_transparent_fields(prog: &Program, tcx: &Tcx, defs: &[DefId]) {
     if !lint::enabled() { return; }
     fn contains_repr_c(prog: &Program, tcx: &Tcx, t: TyId, depth: u32) -> bool {
         if depth > 16 { return false; }
@@ -2553,10 +2554,9 @@ pub fn repr_transparent_fields(prog: &Program, tcx: &Tcx, own: &[bool]) {
             _ => false,
         }
     }
-    for i in 0..prog.defs.len() {
-        let d = DefId(i as u32);
+    for &d in defs {
         let def = prog.def(d);
-        if def.kind != DefKind::Struct || !own.get(def.krate as usize).copied().unwrap_or(false) || lint::generated(prog, d) { continue; }
+        if def.kind != DefKind::Struct || lint::generated(prog, d) { continue; }
         let pf = &prog.files[def.file as usize];
         let ast = &pf.ast;
         let item = ast.item(def.item);
@@ -2593,12 +2593,12 @@ pub fn repr_transparent_fields(prog: &Program, tcx: &Tcx, own: &[bool]) {
 pub const ASYNC_FN_IN_TRAIT: Lint = lint::lint("async_fn_in_trait");
 
 /// rustc_lint async_fn_in_trait.rs: an `async fn` in a publicly reachable trait.
-pub fn async_fn_in_trait(prog: &Program, own: &[bool], reach: &crate::lint_dead::Reach) {
+/// `defs`: one checked crate's definitions; `reach`: that crate's.
+pub fn async_fn_in_trait(prog: &Program, defs: &[DefId], reach: &crate::lint_dead::Reach) {
     if !lint::enabled() { return; }
-    for i in 0..prog.defs.len() {
-        let d = DefId(i as u32);
+    for &d in defs {
         let def = prog.def(d);
-        if def.kind != DefKind::AssocFn || !own.get(def.krate as usize).copied().unwrap_or(false) { continue; }
+        if def.kind != DefKind::AssocFn { continue; }
         if prog.def(def.parent).kind != DefKind::Trait || !reach.defs.contains(&def.parent) || lint::generated(prog, d) { continue; }
         let pf = &prog.files[def.file as usize];
         let ast = &pf.ast;
@@ -2617,15 +2617,15 @@ pub fn async_fn_in_trait(prog: &Program, own: &[bool], reach: &crate::lint_dead:
 /// rustc builtin.rs `MissingCopyImplementations`: a reachable, non-generic ADT with no
 /// destructor, no raw pointer field, no `Iterator` impl, at most 256 bytes and only `Copy`
 /// fields could implement `Copy`.
-pub fn missing_copy_implementations(prog: &Program, tcx: &Tcx, own: &[bool], reach: &crate::lint_dead::Reach) {
+/// `defs`: one checked crate's definitions; `reach`: that crate's.
+pub fn missing_copy_implementations(prog: &Program, tcx: &Tcx, defs: &[DefId], reach: &crate::lint_dead::Reach) {
     if !lint::enabled() { return; }
     let Some(copy) = tcx.copy_trait else { return };
     let iter = tcx.lang_items.get(LangItem::Iterator);
-    for i in 0..prog.defs.len() {
-        let d = DefId(i as u32);
+    for &d in defs {
         let def = prog.def(d);
         if !matches!(def.kind, DefKind::Struct | DefKind::Enum | DefKind::Union) { continue; }
-        if !own.get(def.krate as usize).copied().unwrap_or(false) || !reach.defs.contains(&d) { continue; }
+        if !reach.defs.contains(&d) { continue; }
         if lint::generated(prog, d) { continue; }
         let Some(adt) = tcx.adts.get(&d) else { continue };
         if adt.n_generics != 0 || adt.flags.contains(crate::tcx::AdtFlags::IS_VARIANT_LIST_NON_EXHAUSTIVE) { continue; }

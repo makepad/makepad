@@ -211,7 +211,7 @@ fn check_potentially_region_dependent_goals(prog: &Program, tcx: &Tcx, env: Typi
 fn report_fulfillment_errors(prog: &Program, tcx: &Tcx, infcx: &crate::infer::InferCtxt<'_>, typeck: &typeck::Body, errors: Vec<crate::next_solver::fulfill::NextSolverError>, v: &mut Verdict) {
     use crate::next_solver::fulfill::NextSolverError;
     for error in errors {
-        let (code, o) = match error {
+        let (mut code, o) = match error {
             NextSolverError::TrueError(o) => ("E0277", o),
             NextSolverError::Ambiguity(o) => ("E0283", o),
             NextSolverError::Overflow(o) => ("E0275", o),
@@ -225,7 +225,16 @@ fn report_fulfillment_errors(prog: &Program, tcx: &Tcx, infcx: &crate::infer::In
                     "future cannot be sent between threads safely".to_string()
                 } else { message }
             }
-            predicate => crate::wfcheck::obligations::fulfillment_message(infcx, prog, code, &o.goal).unwrap_or_else(|| format!("unsatisfied obligation {predicate:?}")),
+            _ => match crate::wfcheck::obligations::fulfillment_message(infcx, prog, code, &o.goal) {
+                Some(message) => message,
+                None => {
+                    // rustc's wording, as the type check words it: "CODE: message", or "error: message"
+                    let full = typeck::obligation_message(prog, tcx, code, &o.goal.predicate, &mut |t| typeck::ty_to_string(false, prog, tcx, t));
+                    let (c, message) = full.split_once(": ").unwrap_or(("error", full.as_str()));
+                    code = ["E0271", "E0275", "E0277", "E0283", "E0284", "E0308"].into_iter().find(|k| *k == c).unwrap_or("");
+                    message.to_string()
+                }
+            },
         };
         if code == "E0277" { message.push_str(&crate::next_solver::diagnostics::auto_trait_failure_notes(infcx, prog, &o.goal, Some(typeck))); }
         let span = Span { file: typeck.file, lo: o.cause.span, hi: o.cause.span };

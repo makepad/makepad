@@ -2284,8 +2284,10 @@ pub(crate) fn kick_app_callers(bases: &[u64]) -> bool {
 
 /// Native code calls JIT code through this, whatever thread it is on (`makepad_relax_api::app_call`).
 /// `thunk(data)` runs under a recovery point of its own: false when the run ended under it, and all
-/// the caller's frames go on from here with what they hold. Realtime safe: no lock, no allocation.
-/// A panic in the callback is the abort of any `extern "C"` callback.
+/// the caller's frames go on from here with what they hold. On a thread in no domain the call is
+/// the run's app's: its statics, its heap (a thread a scope put in a domain stays in that one).
+/// Realtime safe: no lock, no allocation. A panic in the callback is the abort of any `extern "C"`
+/// callback.
 pub fn app_call(thunk: unsafe extern "C" fn(*mut u8), data: *mut u8) -> bool {
     let enter = APP_ENTER.load(Ordering::Acquire);
     // (out of an op: JIT code and the runtime it calls run in the kept phase)
@@ -2296,6 +2298,13 @@ pub fn app_call(thunk: unsafe extern "C" fn(*mut u8), data: *mut u8) -> bool {
             thunk(data);
             return true;
         }
+        // a thread in no domain (native code started it: a device's, the inspect server's; a scope
+        // put none around the call) is in the compile domain (`rt_tls_block`), whose statics and
+        // heap are not the app's: the call runs in the run's app domain and leaves it after
+        let b = tls_block_if_any();
+        let here = if b == 0 { 0 } else { *(b as *const u64) };
+        let none = here == 0 || here == crate::domain::default_base();
+        let scoped = crate::domain::foreign_enter(if none { crate::domain::run_scope() } else { 0 });
         let e = END_CTX.with(|c| c.get() as *mut u64);
         let saved = [*e, *e.add(1)];
         let over = APP_CALL_OVER.with(|o| o.replace(*ctx_ptr()));
@@ -2310,6 +2319,7 @@ pub fn app_call(thunk: unsafe extern "C" fn(*mut u8), data: *mut u8) -> bool {
         APP_CALL_OVER.with(|o| o.set(over));
         *e = saved[0];
         *e.add(1) = saved[1];
+        crate::domain::foreign_leave(scoped);
         if r == LEAVE_RUN_ENDED {
             note_abandoned_frames(true);
         }
@@ -8341,6 +8351,43 @@ thread_local! {
 /// MAKEPAD_RUN_RT_THREADS names, or one with a real-time policy).
 pub(crate) extern "C" fn __relax_realtime_thread() {
     RT_THREAD.with(|t| t.set(true));
+    realtime_live(None);
+}
+
+/// A real-time thread is live in this process: from then on the queue's tier-up builds run at the
+/// OS's idle policy, below the real-time thread and the app (jit_queue::idle_tiers). For the rest of
+/// the run: a thread without CAP_SYS_NICE cannot leave that policy again.
+static RT_LIVE: AtomicBool = AtomicBool::new(false);
+
+/// A real-time thread is live: std::relax::realtime_thread marked one, a thread took a name
+/// MAKEPAD_RUN_RT_THREADS lists, or one under a real-time policy compiled lazily.
+pub(crate) fn rt_live() -> bool {
+    RT_LIVE.load(Ordering::Relaxed)
+}
+
+/// Real-time thread `name` (None: the calling thread) is live. Nothing after the first call.
+pub(crate) fn realtime_live(name: Option<&str>) {
+    if RT_LIVE.load(Ordering::Relaxed) || RT_LIVE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if crate::run::VERBOSE.load(Ordering::Relaxed) {
+        crate::zone_alloc::kept_with(|| {
+            let name = name.map_or_else(|| os::thread::name(os::thread::current()), str::to_string);
+            eprintln!("makepad-run: real-time thread `{name}` is live: tier-up builds run at idle priority from now on");
+        });
+    }
+    queue::wake_all();
+}
+
+/// The thread names MAKEPAD_RUN_RT_THREADS=name,.. lists.
+fn rt_names() -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| crate::zone_alloc::kept_with(|| std::env::var("MAKEPAD_RUN_RT_THREADS").map(|v| v.split(',').filter(|n| !n.is_empty()).map(|n| n.to_string()).collect()).unwrap_or_default()))
+}
+
+/// Thread name `name` is one MAKEPAD_RUN_RT_THREADS lists (contains one of its names).
+pub(crate) fn rt_named(name: &str) -> bool {
+    !name.is_empty() && rt_names().iter().any(|n| name.contains(n.as_str()))
 }
 
 /// The calling thread runs under a real-time policy, marked itself (std::relax::realtime_thread),
@@ -8350,13 +8397,7 @@ pub fn is_realtime_thread() -> bool {
     if RT_THREAD.with(|t| t.get()) || os::thread::realtime() {
         return true;
     }
-    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    let names = NAMES.get_or_init(|| crate::zone_alloc::kept_with(|| std::env::var("MAKEPAD_RUN_RT_THREADS").map(|v| v.split(',').filter(|n| !n.is_empty()).map(|n| n.to_string()).collect()).unwrap_or_default()));
-    if names.is_empty() {
-        return false;
-    }
-    let me = os::thread::name(os::thread::current());
-    !me.is_empty() && names.iter().any(|n| me.contains(n.as_str()))
+    !rt_names().is_empty() && rt_named(&os::thread::name(os::thread::current()))
 }
 
 unsafe fn compile_slot_on_stack(up: *mut Unit, id: u32) -> u64 {
@@ -8367,6 +8408,7 @@ unsafe fn compile_slot_on_stack(up: *mut Unit, id: u32) -> u64 {
     // everything that slot reaches is compiled at once, ahead of its next calls (and recorded
     // for the next run's mark).
     if !owner::is_owner() && is_realtime_thread() && !(&*up).fns[id as usize].compiled {
+        realtime_live(None);
         // MAKEPAD_RUN_RT_TRACE: the JIT code that called it (which code version missed it)
         let mut frames = [0u64; crate::inspect::heap::DEPTH];
         let nframes = if rt_trace() { crate::inspect::heap::capture_host(&mut frames) as usize } else { 0 };
@@ -20213,6 +20255,16 @@ pub(crate) fn live_startup_done() -> bool {
     FIRST_PRESENT.load(Ordering::Acquire)
         || LIVE_STARTUP_DONE.load(Ordering::Acquire) && !LIVE_NEEDS_PRESENT.load(Ordering::Acquire)
 }
+
+/// A program that never presents (no makepad_platform, or a batch program) reached the point a
+/// present marks for an app: its startup went quiet (live_startup_done). Its warm record (crate
+/// records and front graph, then the collected program: run.rs's mid-run writer) is written from
+/// here, on the writers' threads, as an app's is after its first present, not only at its exit.
+fn headless_started() {
+    if !FIRST_PRESENT.load(Ordering::Acquire) && live_startup_done() {
+        crate::cache::start_deferred_front();
+    }
+}
 /// A program that has not presented and made no demand compile for this long is headless:
 /// its startup phase ends (startup_main).
 const STARTUP_QUIET_NS: u64 = 2_000_000_000;
@@ -20233,6 +20285,7 @@ pub(crate) fn batch_program() {
     HEADLESS.store(true, Ordering::Release);
     live_needs_present(false);
     tier_wake_all();
+    headless_started();
 }
 static STARTUP_THREAD: std::sync::OnceLock<std::thread::Thread> = std::sync::OnceLock::new();
 
@@ -20379,6 +20432,7 @@ pub fn startup_main(presents: bool) {
             std::thread::park_timeout(std::time::Duration::from_nanos(left.max(50_000_000)));
         }
         LIVE_STARTUP_DONE.store(true, Ordering::Release);
+        headless_started();
         if !startup_phase() { return; }
         relax_codegen::fncost::mark(if FIRST_PRESENT.load(Ordering::Acquire) {
             "startup released: present"
@@ -22144,6 +22198,9 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
         // the calling thread's stack and heap as the program runs on them (program_os.rs)
         #[cfg(any(target_os = "linux", target_os = "android"))]
         b"pthread_getattr_np" => Some(crate::program_os::pthread_getattr_np as *const () as usize),
+        // a thread named as MAKEPAD_RUN_RT_THREADS lists: a real-time thread is live (program_os.rs)
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        b"pthread_setname_np" => Some(crate::program_os::pthread_setname_np as *const () as usize),
         #[cfg(target_vendor = "apple")]
         b"pthread_get_stackaddr_np" => Some(crate::program_os::pthread_get_stackaddr_np as *const () as usize),
         #[cfg(target_vendor = "apple")]
@@ -24095,7 +24152,8 @@ fn lower_ahead(f: &FrontShared, id: u32, own: bool) -> u8 {
             if f.is_built(&key) { return AF_BUILT; }
             match pending.get(&id) {
                 Some(LoweredState::Ready(_)) => return AF_OK,
-                Some(LoweredState::Running) if own && !owner::is_owner() => {
+                // (not while helpers may run at the idle policy: the front lowers it)
+                Some(LoweredState::Running) if own && !owner::is_owner() && queue::waits_on_helpers() => {
                     // the writer may need the front: hold neither lock while the helper finishes
                     drop(pending);
                     drop(r);
@@ -24668,8 +24726,9 @@ pub unsafe fn typeck_ahead_slot(up: *mut Unit, id: u32) {
         let key = (d, args.clone());
         typeck_ahead(&f, d, args, 3, false, false);
         // a helper is checking this very body: wait for its result rather than check it again
-        // under the unit lock (not while holding that lock: a constant evaluation's call)
-        if !owner::is_owner() && f.inprog.lock().unwrap_or_else(|e| e.into_inner()).contains(&key) {
+        // under the unit lock (not while holding that lock: a constant evaluation's call). Not
+        // while helpers may run at the idle policy (queue::waits_on_helpers): the front checks it
+        if !owner::is_owner() && queue::waits_on_helpers() && f.inprog.lock().unwrap_or_else(|e| e.into_inner()).contains(&key) {
             let _priority = queue::promote(up as usize, id, owner::waiter_class());
             let _budget = crate::pool::suspend();
             // (a wait for another thread: not a running job meanwhile, job_sleep's reason)
@@ -25377,8 +25436,9 @@ pub fn start_background_coherence(u: &Unit) {
             match r {
                 Ok(()) => {
                     if let Some(k) = key {
-                        // a live edit meanwhile: the key names the text this run started with
-                        if crate::infer::diagnostics::DiagCtxt::thread_emitted() == emitted && crate::reload::edited_crates().is_empty() {
+                        // no live edit's versions in the tables it read (a refused or undone
+                        // one's too): the key names the text this run started with
+                        if crate::infer::diagnostics::DiagCtxt::thread_emitted() == emitted && crate::reload::program_edits() == 0 {
                             crate::borrowck::lazy::push_verdict_key(k, crate::borrowck::lazy::StoredVerdict::Clean);
                         }
                     }
@@ -27660,6 +27720,7 @@ pub(crate) unsafe fn reset_statics() {
     reset(&CODE_CACHE_EMPTY, AtomicBool::new(false));
     reset(&MAIN_COMPILES, relax_session::sync::Mutex::new(Vec::new()));
     reset(&RT_LAZY, AtomicU64::new(0));
+    reset(&RT_LIVE, AtomicBool::new(false));
     reset(&RT_LAZY_NS, AtomicU64::new(0));
     reset(&QUIT_COMPILES, [const { AtomicU64::new(0) }; 2]);
     reset(&PENDING_RECORDS, std::sync::atomic::AtomicUsize::new(0));
