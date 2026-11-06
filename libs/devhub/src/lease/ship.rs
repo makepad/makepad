@@ -529,7 +529,7 @@ mod tests {
 
     #[test]
     fn an_atomic_writes_temp_file_never_ships() {
-        assert!(never_ships("apps/commercial/fab/toolpath/src/support.rs.tmp.81511.2d68cbffff10"));
+        assert!(never_ships("libs/demo/src/support.rs.tmp.81511.2d68cbffff10"));
         assert!(never_ships_named("src/lib.rs.tmp.7.ab"));
         for keep in ["src/a.tmp.rs", "src/tmp.1.ab", "src/a.rs.tmp.81511", "src/a.rs.tmp.x1.ab", "src/a.rs.tmp.1.xyz", "src/a.rs"] {
             assert!(!never_ships(keep), "{keep}");

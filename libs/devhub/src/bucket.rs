@@ -286,6 +286,9 @@ fn unit_lines(text: &str) -> (BTreeMap<String, Vec<String>>, BTreeSet<String>) {
     (errors, passed)
 }
 
+/// The new warnings a bucket row keeps per unit (`warn_lines`), as rustc said them.
+const WARN_LINES_KEPT: usize = 5;
+
 /// A run's units with warnings of their own (`GATEUNIT warn <unit>`, after its warning lines), by
 /// package: each warning's key and its line, and the units it took as proven, not compiled: such a
 /// run says nothing of their warnings.
@@ -552,6 +555,9 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
             .map(|(e, _)| format!("{} ({}) #{}", e.label(), e.agent, e.id)).collect::<Vec<_>>().join(", ");
         warns.insert(key.clone(), if who.is_empty() { ORIGIN_UNKNOWN.to_string() } else { who });
     }
+    // each new warning as rustc said it (file:line), by unit; one of unknown origin, all of its unit's
+    let new_lines: BTreeMap<String, Vec<String>> = warned.iter().filter(|(u, _)| warns.contains_key(*u)).map(|(u, lines)| (u.clone(), lines.iter()
+        .filter(|(k, _)| fresh.get(u).is_none_or(|new| new.contains(k))).map(|(_, l)| crate::proto::clean(l, 300)).collect())).collect();
     let rows = entries.iter().zip(&units).map(|(e, units)| obj(vec![
         ("id", Value::Int(e.id as i64)), ("label", s(&e.label())), ("agent", s(&e.agent)),
         ("land_to_verdict_ms", Value::Int(ended.saturating_sub(e.changed_ms) as i64)),
@@ -571,13 +577,12 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
         ("warned", Value::Obj(warned.iter().map(|(u, w)| (u.clone(), Value::Arr(w.iter().map(|(k, _)| s(k)).collect()))).collect())),
         ("proven", Value::Arr(proven.iter().map(s).collect())),
         ("warns", Value::Obj(warns.iter().map(|(u, who)| (u.clone(), s(who))).collect())),
+        // the first few, for `bucket status` to show the owner without a rerun
+        ("warn_lines", Value::Obj(new_lines.iter().map(|(u, l)| (u.clone(), Value::Arr(l.iter().take(WARN_LINES_KEPT).map(s).collect()))).collect())),
     ])).map_err(|e| format!("bucket ledger: {e}"))?;
     if !warns.is_empty() {
         let named = warns.iter().map(|(u, who)| if who == ORIGIN_UNKNOWN { format!("{u}: {ORIGIN_UNKNOWN} (its first look)") } else { format!("{who} changed {u}") }).collect::<Vec<_>>().join("; ");
-        // each new warning as rustc said it; one of unknown origin, all of its unit's
-        let fresh = &fresh;
-        let detail = warned.iter().filter(|(u, _)| warns.contains_key(*u)).flat_map(|(u, lines)| lines.iter()
-            .filter(move |(k, _)| fresh.get(u).is_none_or(|new| new.contains(k))).map(|(_, l)| crate::proto::clean(l, 300))).collect::<Vec<_>>();
+        let detail: Vec<String> = new_lines.values().flatten().cloned().collect();
         emit(Sev::Warn, format!("bucket {name} {} WARN new warnings in {}: {named}{}", tip.short(), warns.keys().cloned().collect::<Vec<_>>().join(", "), if warn_ambiguous { " (ambiguous)" } else { "" }), detail.join("\n"));
     }
     let latency = entries.iter().map(|e| e.changed_ms).max().map(|landed| {
@@ -930,6 +935,9 @@ mod tests {
         let rows: Vec<Value> = rows_of(&home, "fast");
         assert!(rows.iter().all(|r| r.get("ok").and_then(Value::as_bool) == Some(true)), "a warning never turns it red");
         assert_eq!(rows[0].get("warns").and_then(|w| w.get("tests f")).and_then(Value::as_str), Some(ORIGIN_UNKNOWN), "no landing in its range to name");
+        // the row keeps the new one with its file and line, for `bucket status`
+        let kept: Vec<&str> = rows[0].get("warn_lines").and_then(|w| w.get("tests f")).and_then(Value::as_arr).unwrap_or_default().iter().filter_map(Value::as_str).collect();
+        assert_eq!(kept, ["/n/tree/apps/f/tests/common/p.rs:9:1: warning: unused import: `x`"]);
         let _ = std::fs::remove_dir_all(&home);
     }
 

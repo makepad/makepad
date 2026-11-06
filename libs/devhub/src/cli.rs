@@ -886,6 +886,14 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
             _ => String::new(),
         };
         println!("{} {tip} {} {failing}{}{still}{warns}", text(&v, "bucket"), if ok { "ok" } else { "FAILED" }, if labels.is_empty() { String::new() } else { format!(": {labels}") });
+        // the warnings themselves, file:line, so the owning lane is plain without a rerun
+        if let Some(Value::Obj(units)) = v.get("warn_lines") {
+            for (unit, lines) in units {
+                for l in lines.as_arr().unwrap_or_default().iter().filter_map(Value::as_str).take(3) {
+                    println!("    {unit}: {l}");
+                }
+            }
+        }
     }
     0
 }

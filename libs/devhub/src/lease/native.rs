@@ -178,9 +178,11 @@ fn jit_runs(os: &str, arch: &str) -> bool {
 }
 
 /// The JIT command for this package instead of its native build.
-fn hint(lane: &str, b: &Built) -> String {
+fn hint(lane: &str, rev: &str, b: &Built) -> String {
     let pkg = if b.pkg == "*" { "<pkg>" } else { &b.pkg };
-    if matches!(b.verb, "test" | "bench") {
+    if matches!(b.verb, "test" | "bench") && !rev.is_empty() {
+        format!("`devhub test {lane} {pkg} --rev {rev}` runs it under the JIT at those commits alone")
+    } else if matches!(b.verb, "test" | "bench") {
         format!("`devhub test {lane} {pkg} --live` while iterating, `devhub test {lane} {pkg}` for the final check")
     } else {
         format!("`devhub live start {pkg} --visible`, then `devhub live look <id>` after each save")
@@ -279,7 +281,7 @@ fn verdict(home: &Path, a: &Ask, gated: &[Built], elsewhere: &[Built], not_over:
         } else if !reason.is_empty() {
             ("reason", Ok(format!("devhub: native build of {list} (--native \"{reason}\", logged)")))
         } else {
-            ("refused", Err(format!("native build of {list} refused: lanes iterate and check under the JIT: {}. Native runs only for the JIT's own crates, a package with an open JIT miss, a platform without a JIT, a test devhub's measured routing sends to cargo, or with --native \"<reason>\" (a native-vs-JIT baseline, a timed perf series; logged)", hint(a.lane, &gated[0]))))
+            ("refused", Err(format!("native build of {list} refused: lanes iterate and check under the JIT: {}. Native runs only for the JIT's own crates, a package with an open JIT miss, a platform without a JIT, a test devhub's measured routing sends to cargo, or with --native \"<reason>\" (a native-vs-JIT baseline, a timed perf series; logged)", hint(a.lane, a.rev, &gated[0]))))
         };
         (word, pkgs, answer)
     };
@@ -327,6 +329,9 @@ mod tests {
         let test = [built("demo-model", "test", "")];
         let refused = verdict(&home, &ask("", "", "linux"), &test, &[], "", 1).unwrap_err();
         assert!(refused.contains("`devhub test l1 demo-model --live`") && refused.contains("--native"), "{refused}");
+        // a cargo test of a landed commit is pointed at the JIT's run of those commits
+        let refused = verdict(&home, &Ask { rev: "work@0123456789", ..ask("", "", "linux") }, &test, &[], "", 1).unwrap_err();
+        assert!(refused.contains("`devhub test l1 demo-model --rev work@0123456789` runs it under the JIT at those commits alone"), "{refused}");
         assert!(verdict(&home, &ask("perf baseline", "", "linux"), &test, &[], "baseline", 2).unwrap().contains("perf baseline"));
         assert!(verdict(&home, &ask("", "native:test:other:lib", "linux"), &test, &[], "", 3).is_err(), "another package's class routes nothing");
         assert!(verdict(&home, &ask("", "native:test:demo-model:lib", "linux"), &test, &[], "", 3).unwrap().contains("cargo 2m, JIT 4m"));
@@ -336,8 +341,8 @@ mod tests {
         assert!(verdict(&home, &ask("", "", "linux"), &test, &[], "", 6).unwrap().contains("open JIT miss M7"));
         let ledger = std::fs::read_to_string(home.join(LEDGER)).unwrap();
         let verdicts: Vec<&str> = ledger.lines().map(|l| l.split("\"verdict\":\"").nth(1).unwrap().split('"').next().unwrap()).collect();
-        assert_eq!(verdicts, ["refused", "reason", "refused", "measured", "platform", "platform", "miss"]);
-        assert!(ledger.lines().nth(1).unwrap().contains(r#""not_over":"baseline""#), "{ledger}");
+        assert_eq!(verdicts, ["refused", "refused", "reason", "refused", "measured", "platform", "platform", "miss"]);
+        assert!(ledger.lines().nth(2).unwrap().contains(r#""not_over":"baseline""#), "{ledger}");
         std::fs::remove_dir_all(&home).unwrap();
     }
 

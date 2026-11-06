@@ -451,7 +451,12 @@ fn retire(ctx: &Ctx, name: &str) -> Result<String, String> {
     if let Some((_, why)) = dirty_refusal(Path::new(&l.path)).or_else(|| run_refusal(ctx, &l, &wt::live_cwds(), &land_entries(ctx))) {
         return Err(why);
     }
+    let path = Path::new(&l.path);
+    let mac = tree_bytes(path);
+    let (files, bytes) = keep_local(&path.join("local"), &ctx.repo.join("local"), name).map_err(|e| format!("its local/ was not kept, nothing removed: {e}"))?;
     let what = remove(ctx, &l, false, false)?;
+    let kept = if files == 0 { String::new() } else { format!(", local/: {files} file(s) kept in {} ({} MB)", ctx.repo.join("local").display(), bytes / 1_000_000) };
+    let what = format!("{what}, Mac {} MB{kept}", mac / 1_000_000);
     // nothing of it is left for the bot to merge into
     if !l.parked.is_empty() {
         for b in branches(&l) {
@@ -460,6 +465,71 @@ fn retire(ctx: &Ctx, name: &str) -> Result<String, String> {
     }
     finish(ctx, name, "retired", Ok(what.clone()));
     Ok(what)
+}
+
+/// Keeps what a lane's worktree holds under `local/` before a retire removes it: reports,
+/// evidence and screencaps, which git ignores, so neither the retire's check nor `git worktree
+/// remove` sees them. Each file goes to the same path under `to` (the main checkout's `local/`).
+/// One that is there with the same content is skipped. One that differs is never overwritten:
+/// the lane's copy goes beside it as `<name>.<lane>` (`.<lane>.2`, … when that one differs too).
+/// Symlinks and cargo targets (a CACHEDIR.TAG) are not copied. Returns the files and bytes copied.
+fn keep_local(from: &Path, to: &Path, lane: &str) -> Result<(usize, u64), String> {
+    let mut stack = vec![PathBuf::new()];
+    let (mut files, mut bytes) = (0, 0);
+    while let Some(rel) = stack.pop() {
+        let dir = from.join(&rel);
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let Ok(m) = std::fs::symlink_metadata(e.path()) else { continue };
+            let rel = rel.join(e.file_name());
+            if m.is_dir() {
+                if !e.path().join("CACHEDIR.TAG").exists() {
+                    stack.push(rel);
+                }
+                continue;
+            }
+            if !m.is_file() {
+                continue;
+            }
+            let src = e.path();
+            let mut dest = to.join(&rel);
+            let mut n = 1;
+            while dest.symlink_metadata().is_ok() && !same_file(&src, &dest) {
+                let name = rel.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+                dest = to.join(&rel).with_file_name(if n == 1 { format!("{name}.{lane}") } else { format!("{name}.{lane}.{n}") });
+                n += 1;
+            }
+            if dest.symlink_metadata().is_ok() {
+                continue;
+            }
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+            }
+            bytes += std::fs::copy(&src, &dest).map_err(|e| format!("{} -> {}: {e}", src.display(), dest.display()))?;
+            files += 1;
+        }
+    }
+    Ok((files, bytes))
+}
+
+/// Whether `a` and `b` are files with the same content.
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::io::Read;
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else { return false };
+    if !mb.is_file() || ma.len() != mb.len() {
+        return false;
+    }
+    let (Ok(mut fa), Ok(mut fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else { return false };
+    let (mut ba, mut bb) = (vec![0u8; 1 << 16], vec![0u8; 1 << 16]);
+    loop {
+        let (Ok(na), Ok(nb)) = (fa.read(&mut ba), fb.read(&mut bb)) else { return false };
+        if na != nb || ba[..na] != bb[..nb] {
+            return false;
+        }
+        if na == 0 {
+            return true;
+        }
+    }
 }
 
 /// A lease or job of the lane in flight, under its name or its branch (a lane's asks carry either).
@@ -647,13 +717,19 @@ fn remove(ctx: &Ctx, l: &LaneRec, drop: bool, branches: bool) -> Result<String, 
         }
     }
     let c = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(crate::proto::control_socket()), "devhub-lanes");
-    let mut freed = 0.0;
+    let mut freed: Vec<(String, f64)> = Vec::new();
     for n in ctx.leases.nodes().into_iter().filter(|n| n.up) {
         if let Ok(lines) = crate::cli::ask(&c, Some(&n.name), "disk", &format!("disk clean {}", l.name)) {
-            freed += lines.first().and_then(|x| makepad_strict_json::parse(x.as_bytes()).ok()).and_then(|v| v.get("freed_mb").and_then(crate::lease::num)).unwrap_or(0.0);
+            let mb = lines.first().and_then(|x| makepad_strict_json::parse(x.as_bytes()).ok()).and_then(|v| v.get("freed_mb").and_then(crate::lease::num)).unwrap_or(0.0);
+            if mb >= 1.0 {
+                freed.push((n.name.clone(), mb));
+            }
         }
     }
-    done.push(format!("node dirs ({freed:.0} MB)"));
+    // (from +0: an empty f64 sum is -0, which printed as "-0 MB")
+    let total = freed.iter().fold(0.0, |a, f| a + f.1);
+    let each = if freed.is_empty() { String::new() } else { format!(": {}", freed.iter().map(|(n, mb)| format!("{n} {mb:.0}")).collect::<Vec<_>>().join(", ")) };
+    done.push(format!("node dirs ({total:.0} MB{each})"));
     Ok(done.join(", "))
 }
 
@@ -2105,8 +2181,12 @@ mod tests {
         serve(&ctx, "lane new {\"name\":\"p\",\"commercial\":true}").unwrap();
         let lane = base.join("wt.noindex/p");
         std::fs::write(lane.join("b.txt"), "b").unwrap();
+        std::fs::write(lane.join(".gitignore"), "apps/commercial/\ntarget/\nlocal/\n").unwrap();
         g(&lane, &["add", "."]);
         g(&lane, &["commit", "-q", "-m", "lane work that lands elsewhere"]);
+        // its report, ignored by git, goes to the main checkout's local/ with the retire
+        std::fs::create_dir_all(lane.join("local/agent_state/p")).unwrap();
+        std::fs::write(lane.join("local/agent_state/p/report.md"), "found it").unwrap();
         let r = serve(&ctx, "lane park p finished, rc-q lands it").unwrap();
         assert!(r.contains("\"branches\":[\"rc-p\"]"), "{r}");
         assert_eq!(ctx.store.read(|d| d.held.clone()), [("rc-p".to_string(), "parked: finished, rc-q lands it".to_string())]);
@@ -2123,12 +2203,46 @@ mod tests {
         std::fs::remove_file(lane.join("apps/commercial/notes.txt")).unwrap();
         let r = serve(&ctx, "lane retire p").unwrap();
         assert!(r.contains("branch rc-p kept"), "{r}");
+        assert!(r.contains("local/: 1 file(s) kept"), "{r}");
+        assert_eq!(std::fs::read_to_string(mk.join("local/agent_state/p/report.md")).unwrap(), "found it");
         assert!(!lane.exists());
         assert_eq!(g(&mk, &["branch", "--list", "rc-p"]), "rc-p");
         assert_eq!(g(&mk.join("apps/commercial"), &["branch", "--list", "rc-p"]), "rc-p");
         assert!(ctx.store.read(|d| d.held.is_empty()));
         assert_eq!(ctx.store.read(|d| d.lanes[0].state.clone()), "retired");
         drop(ctx);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A lane's local/ is copied beside what the main checkout has, never over it, and a second
+    /// pass copies nothing.
+    #[test]
+    fn a_retired_lanes_local_files_are_kept_never_over_others() {
+        let base = std::env::temp_dir().join(format!("devhub-keep-local-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (from, to) = (base.join("lane/local"), base.join("main/local"));
+        let put = |p: &Path, s: &str| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, s).unwrap();
+        };
+        put(&from.join("agent_state/l/report.md"), "new");
+        put(&from.join("same.txt"), "same");
+        put(&to.join("same.txt"), "same");
+        put(&from.join("notes.txt"), "lane's");
+        put(&to.join("notes.txt"), "main's");
+        put(&to.join("notes.txt.l"), "an older lane l's");
+        put(&from.join("target/CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55");
+        put(&from.join("target/big.rlib"), "x");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/hosts", from.join("hosts")).unwrap();
+        assert_eq!(keep_local(&from, &to, "l").unwrap(), (2, 9));
+        let read = |p: &str| std::fs::read_to_string(to.join(p)).unwrap();
+        assert_eq!(read("agent_state/l/report.md"), "new");
+        assert_eq!(read("notes.txt"), "main's");
+        assert_eq!(read("notes.txt.l"), "an older lane l's");
+        assert_eq!(read("notes.txt.l.2"), "lane's");
+        assert!(!to.join("target").exists() && !to.join("hosts").exists() && !to.join("same.txt.l").exists());
+        assert_eq!(keep_local(&from, &to, "l").unwrap(), (0, 0), "a second pass finds everything kept");
         let _ = std::fs::remove_dir_all(&base);
     }
 

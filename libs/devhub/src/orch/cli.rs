@@ -83,7 +83,9 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N] [
                                           the inbox are cleared), `lane quiet` lists it in one row
   lane unpark <name>                      the merge bot merges into it again
   lane retire <name>                      a lane that is over without landing: its worktree pair and node dirs go,
-                                          its branches stay; refused while anything uncommitted or untracked is in it
+                                          its branches stay, its ignored local/ files are copied into the main
+                                          checkout's local/ (never over a file there); refused while anything
+                                          uncommitted or untracked is in it
   lane offers [--check]                   the lanes offered for retirement, one row each; --check reads (here) what
                                           retiring them frees on the Mac and the nodes and which refuse, by reason
   lane live <name> on|off                 the manager's mark: the user waits for this lane. Its landings take the

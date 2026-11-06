@@ -91,7 +91,9 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
   overlay selftest [--node N] [--case NAME]
                                           compare real checkouts with overlay runs on a test lease
   overlay shadow on|off|status           background tree/overlay comparisons of JIT tests; last 24 h of evidence
-  test <lane> <pkg> [--lib|--bin B|--test T|--tests] [--features F] [--needs k=v,..] [--node N] [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--native [<reason>]|--live] [--tree] [-- args...]
+  test <lane> <pkg> [--lib|--bin B|--test T|--tests] [--features F] [--needs k=v,..] [--node N] [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--native [<reason>]|--live] [--rev R] [--tree] [-- args...]
+                                          --rev R: one run at the commits R alone (a landed sha; the nested commercial
+                                          checkout's HEAD unless R names both sides), none of the worktree's uncommitted files.
                                           --live: THE lane check; one warm process per lane, package, target and args,
                                           small cost on a hot box; overlay by default, --tree opts out; only affected tests rerun,
                                           a changed file in a package of its graph the tests' program does not read starts
@@ -143,7 +145,9 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
   heap <node>|master [top]                its hub's (or the master's) heap: live, peak and resident
                                           MB, then the call sites holding the most (sampled), top 12
   desk <node> [on|off]                    the Desk Link endpoint of a JIT host (its own render, app input)
-  landed <lane> | clean <lane>            delete the lane's dirs on every node and its merged Mac worktree";
+  landed <lane> | clean <lane>            remove a landed lane as `lane remove` does: both halves' worktrees and
+                                          branches, its dirs on every node; refused while anything is unlanded,
+                                          uncommitted, untracked or running";
 
 /// Exit code of a `run`/`lease` whose lease the user cancelled (0 ok, 1 failed, 2 usage or denied).
 /// Stderr then says `LEASE CANCELLED by user on <node>: pick another node ...` (or `while queued
@@ -384,6 +388,8 @@ struct Opts {
     /// `run --patch <diff>`: the files the diffs change, as they ship in place of the worktree's
     /// (lease/patch.rs)
     patched: Vec<(String, Vec<u8>)>,
+    /// `test --rev`: the run's sources are its pinned commits alone; nothing of the worktree ships
+    commits_only: bool,
 }
 
 /// The flags shared by `lease` and `run`.
@@ -440,7 +446,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
     }
     if req.class.is_empty() && !cmd.is_empty() { req.class = super::run_class(&req.lane, kind, &cmd); }
     req.exec_profile = super::argv::ExecProfile::of(&cmd);
-    Ok(Opts { req, watch, keep, cmd, tree, native, patched: Vec::new() })
+    Ok(Opts { req, watch, keep, cmd, tree, native, patched: Vec::new(), commits_only: false })
 }
 
 /// A granted lease as the holder knows it.
@@ -878,12 +884,12 @@ pub fn pin_lane_rev(root: &Path, spec: &str, lane: &str) -> Result<String, Strin
 }
 
 /// Ships the complete uncommitted set and base blobs into the lease's source layer.
-fn ship(c: &Client, root: &Path, held: &Held, pin: &super::Pin, uncommitted: bool, patched: &[(String, Vec<u8>)]) -> Result<(), String> {
+fn ship(c: &Client, root: &Path, held: &Held, pin: &super::Pin, uncommitted: bool, commits_only: bool, patched: &[(String, Vec<u8>)]) -> Result<(), String> {
     if held.work.is_empty() {
         return Err(format!("{}: no work dir to ship to", held.id));
     }
-    let (files, deleted) = super::ship::uncommitted(root, pin)?;
-    let (files, deleted) = if uncommitted || !super::ship::is_main_checkout(root) {
+    let (files, deleted) = if commits_only { (Vec::new(), Vec::new()) } else { super::ship::uncommitted(root, pin)? };
+    let (files, deleted) = if commits_only || uncommitted || !super::ship::is_main_checkout(root) {
         (files, deleted)
     } else {
         if files.len() + deleted.len() > 0 {
@@ -932,7 +938,8 @@ fn ship(c: &Client, root: &Path, held: &Held, pin: &super::Pin, uncommitted: boo
     let done = node_one(c, &held.node, "ship-done", &format!("ship-done {} {}", held.id, makepad_network::digest::base64_encode(body.as_bytes())))?;
     let source = done.get("source").and_then(|s| s.as_str()).unwrap_or("").to_string();
     let patched_note = if patched.is_empty() { String::new() } else { format!(", {} of them patched by --patch", patched.len()) };
-    eprintln!("{} {}: sources at the worktree's HEAD, source {source}; shipped {} changed file(s){patched_note} ({} KB, {} sent) and {} deletion(s) on top in {:.1} s", held.id, held.node, paths.len(), sent.bytes >> 10, sent.sent, deleted.len(), t.elapsed().as_secs_f64());
+    let at = if commits_only { format!("{} alone (--rev)", pin.short()) } else { "the worktree's HEAD".to_string() };
+    eprintln!("{} {}: sources at {at}, source {source}; shipped {} changed file(s){patched_note} ({} KB, {} sent) and {} deletion(s) on top in {:.1} s", held.id, held.node, paths.len(), sent.bytes >> 10, sent.sent, deleted.len(), t.elapsed().as_secs_f64());
     Ok(())
 }
 
@@ -1036,7 +1043,7 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
     let pin = o.req.rev.as_deref().and_then(super::Pin::of_rev).unwrap();
     // a node hub restarting mid-ship keeps the lease (its new hub takes it back from the
     // ledger): the ship is made again once it answers
-    let shipped = through_restarts(&held.id, &mut c.clone(), |c| ship(c, &root, &held, &pin, uncommitted, &o.patched), &master);
+    let shipped = through_restarts(&held.id, &mut c.clone(), |c| ship(c, &root, &held, &pin, uncommitted, o.commits_only, &o.patched), &master);
     let ship = shipping.elapsed();
     let running = Instant::now();
     let mut tally = crate::testlog::Tally::default();
@@ -1224,7 +1231,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
             return Err(format!("`{pkg}` is not a package name"));
         }
         let (mut flags, mut select, mut args) = (Vec::new(), Vec::new(), Vec::new());
-        let (mut native, mut live, mut target) = (false, false, None::<String>);
+        let (mut native, mut live, mut target, mut rev_spec) = (false, false, None::<String>, None::<&str>);
         let mut i = 0;
         while i < rest.len() {
             let val = || rest.get(i + 1).copied().filter(|v| !v.is_empty() && !v.starts_with('-')).ok_or_else(|| format!("{} needs a value", rest[i]));
@@ -1236,6 +1243,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
                     if let Ok(reason) = val() { flags.extend(["--native", reason]); i += 1; }
                 }
                 "--live" => live = true,
+                "--rev" => { rev_spec = Some(val()?); i += 1; }
                 "--tree" => flags.push("--tree"),
                 "--needs" | "--node" | "--priority" | "--jit" | "--cost" | "--est-min" | "--class" => { flags.extend([rest[i], val()?]); i += 1; }
                 "--features" => { select.extend([rest[i], val()?]); i += 1; }
@@ -1255,9 +1263,15 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         }
         let mut o = parse("test", Some(lane), &flags)?;
         let root = o.req.repo_dir.as_deref().map(PathBuf::from).unwrap_or_else(cwd);
-        let rev = head_rev(&root, &o.req.lane)?;
+        // `--rev`: the commits alone (a landed sha, say), under the same JIT, none of the lane's
+        // uncommitted files with them (a lane reverted a file by hand to leave it out, 11-06)
+        let rev = match rev_spec { Some(spec) => pin_lane_rev(&root, spec, &o.req.lane)?, None => head_rev(&root, &o.req.lane)? };
         let pin = super::Pin::of_rev(&rev).ok_or("test: missing commit pair")?;
         o.req.rev = Some(rev);
+        o.commits_only = rev_spec.is_some();
+        if live && o.commits_only {
+            return Err("--live follows the lane's saves; --rev runs its commits once (drop one of them)".into());
+        }
         // Leave the live default to makepad test: the lib, else the package's only harness target.
         if live && (native || target.as_deref() == Some(ALL_TESTS) || select.contains(&"--features")) {
             return Err("--live selects one target (--lib, --bin B or --test T; default: the lib, else the package's only harness target); --native, --tests and --features cannot be combined with it".into());
@@ -1343,7 +1357,9 @@ fn shadow_test(c: &Client, o: &mut Opts, pkg: &str, output: &mut Vec<u8>) -> (i3
             o.tree, json_str(if o.req.cost_asked { o.req.cost.as_str() } else { "" }), optional(o.req.est_min), optional(o.req.cores), optional(o.req.ram_gb), o.req.whole, json_str(&o.req.class), json_str(o.req.priority.as_str()), json_str(o.req.loader.as_deref().unwrap_or("")),
             json_str(&o.req.needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",")), json_str(o.req.node.as_deref().unwrap_or("")), o.req.prio);
         let request = crate::proto::request_id();
-        let line = format!("job submit {{\"request_id\":\"{request}\",{}", &body[1..]);
+        // `--rev`: the master runs the job at those commits alone
+        let rev = if o.commits_only { format!("\"rev\":{},", json_str(o.req.rev.as_deref().unwrap_or(""))) } else { String::new() };
+        let line = format!("job submit {{\"request_id\":\"{request}\",{rev}{}", &body[1..]);
         let v = retry_master(|| one(c, "job", &line))?;
         let id = v.get("jobs").and_then(Value::as_arr).and_then(|a| a.first()).and_then(Value::as_str).ok_or("test: no job")?;
         let (mut off, mut generation) = (0, (String::new(), 0));
@@ -1811,19 +1827,22 @@ fn heap(c: &Client, node: &str, top: &str) -> i32 {
     }
 }
 
-/// `landed <lane>`: the lane's dirs on every node (`disk clean <lane>`), then its Mac worktree
-/// and branch when the branch is merged into `work`.
+/// `landed <lane>` / `clean <lane>`: a lane whose makepad half is in `work` has its live jobs
+/// ended, then the master removes it as `lane remove` does: both halves' worktrees and branches
+/// and its dirs on every node, refused while anything of it is unlanded, uncommitted, untracked
+/// or still running. It removed the makepad half only, and the commercial worktree's record and
+/// branch stayed (two lanes' had to be removed by name after, 11-06). A lane with nothing on
+/// the Mac has its node dirs cleaned.
 fn landed(c: &Client, lane: &str) -> i32 {
     if !makepad_devhub_conf::valid_name(lane) {
         eprintln!("makepad devhub landed <lane>");
         return 2;
     }
     let mut code = 0;
-    let repo = cwd();
     let branch = format!("rc-{lane}");
-    let merged = crate::lease::wt::in_work(&repo, &branch);
+    let repo = cwd();
     let exists = git(&repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_some();
-    if exists && !merged {
+    if exists && !crate::lease::wt::in_work(&repo, &branch) {
         eprintln!("{branch} is not merged into work: nothing deleted");
         return 1;
     }
@@ -1835,47 +1854,30 @@ fn landed(c: &Client, lane: &str) -> i32 {
         }
         Err(e) => { code = 1; println!("live jobs: {e}"); }
     }
-    for l in ask(c, None, "nodes", "nodes").unwrap_or_default() {
-        let Some(v) = json(&l) else { continue };
-        let node = s(&v, "node");
-        if v.get("up").and_then(|u| u.as_bool()) != Some(true) {
-            println!("{node}: down, skipped");
-            continue;
-        }
-        match node_one(c, &node, "disk", &format!("disk clean {lane}")) {
-            Ok(v) => println!("{node}: freed {} MB", n(&v, "freed_mb")),
-            Err(e) => {
-                code = 1;
-                println!("{node}: {e}");
+    match one(c, "lane", &format!("lane remove {lane}")) {
+        Ok(v) => println!("{lane} removed: {}", s(&v, "note")),
+        Err(e) if e == format!("no lane {lane}") => {
+            println!("{lane}: no worktree of it on the Mac");
+            for l in ask(c, None, "nodes", "nodes").unwrap_or_default() {
+                let Some(v) = json(&l) else { continue };
+                let node = s(&v, "node");
+                if v.get("up").and_then(|u| u.as_bool()) != Some(true) {
+                    println!("{node}: down, skipped");
+                    continue;
+                }
+                match node_one(c, &node, "disk", &format!("disk clean {lane}")) {
+                    Ok(v) => println!("{node}: freed {} MB", n(&v, "freed_mb")),
+                    Err(e) => {
+                        code = 1;
+                        println!("{node}: {e}");
+                    }
+                }
             }
         }
-    }
-    if !exists {
-        return code;
-    }
-    // the worktree that has the branch checked out (git refuses a dirty one)
-    let list = git(&repo, &["worktree", "list", "--porcelain"]).unwrap_or_default();
-    let mut path = None;
-    for block in list.split("\n\n") {
-        if block.lines().any(|l| l == format!("branch refs/heads/{branch}")) {
-            path = block.lines().find_map(|l| l.strip_prefix("worktree ")).map(str::to_string);
+        Err(e) => {
+            println!("{lane} kept: {e}");
+            code = 1;
         }
-    }
-    if let Some(p) = path {
-        match crate::git_exec::command().arg("-C").arg(&repo).args(["worktree", "remove", &p]).status() {
-            Ok(st) if st.success() => println!("worktree {p}: removed"),
-            _ => {
-                println!("worktree {p}: kept (git refused: local changes or nested checkouts)");
-                return 1;
-            }
-        }
-    }
-    // `-D`: the content check above (`in_work`) already proved the branch is in work; `-d` would
-    // refuse a tip that is only a merge-train "Merge work into rc-x" commit
-    if crate::git_exec::command().arg("-C").arg(&repo).args(["branch", "-D", &branch]).status().is_ok_and(|s| s.success()) {
-        println!("branch {branch}: deleted");
-    } else {
-        code = 1;
     }
     code
 }
