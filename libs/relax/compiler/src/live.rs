@@ -128,14 +128,24 @@ pub fn cmd_live(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
         let mut edits = Vec::new();
         let mut bad = None;
         let mut included = Vec::new();
+        let mut sources = Vec::new();
+        // the Rust files the code include!d: no file of the running crate, their includers' text
+        let late = crate::sip::late_files();
         for (loaded, src_path) in files {
-            if !loaded.is_empty() && !loaded.ends_with(".rs") && !loaded.ends_with(".context") {
+            let rust_included = loaded.ends_with(".rs") && !running.iter().any(|(p, _)| *p == loaded) && late.contains(&crate::vfs::normalize_path(&loaded));
+            if !loaded.is_empty() && (!loaded.ends_with(".rs") || rust_included) && !loaded.ends_with(".context") {
                 // an included file: its includers take the edit
-                if let Err(e) = crate::vfs::read(&src_path).and_then(|b| std::fs::write(&loaded, b)) {
-                    bad = Some(format!("{}: {}", src_path, e));
-                    break;
-                }
-                included.push(crate::vfs::normalize_path(&loaded));
+                let text = match crate::vfs::read(&src_path).and_then(|b| std::fs::write(&loaded, &b).map(|_| b)) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        bad = Some(format!("{}: {}", src_path, e));
+                        break;
+                    }
+                };
+                let path = crate::vfs::normalize_path(&loaded);
+                // the includer's parse registers an included Rust file's text: the edit's snapshot
+                if rust_included { sources.push(crate::reload::Edit { file: u32::MAX, path: path.clone(), src: text }); }
+                included.push(path);
                 continue;
             }
             let loaded = if loaded.is_empty() { root.clone() } else { loaded };
@@ -174,7 +184,7 @@ pub fn cmd_live(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
             let path = u.prog.file_paths[edit.file as usize].clone();
             unsafe { crate::reload::apply_stream(up, &path, edit.src) }
         } else {
-            unsafe { crate::reload::apply(up, edits) }
+            unsafe { crate::reload::apply_with_sources(up, edits, &sources) }
         };
         println!(
             "edit {}: rung={} {} changed item(s), {} fn(s) installed {:?}; parse+classify {:.3} ms, check {:.3} ms, compile {:.3} ms, install {:.3} ms",

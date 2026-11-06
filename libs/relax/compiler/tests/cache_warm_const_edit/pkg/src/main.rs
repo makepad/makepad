@@ -184,7 +184,7 @@ fn include_found() -> u64 {
     values::DOCS.iter().find(|d| d.key == "doc_b").map_or(0, |d| d.text.len() as u64)
 }
 
-// found by key through a fn pointer the program stored at its start (Fab's demo builder)
+// found by key through a fn pointer the program stored at its start (an app's demo builder)
 static FIND: std::sync::OnceLock<fn(&str) -> u64> = std::sync::OnceLock::new();
 #[inline(never)]
 fn include_added() -> u64 {
@@ -200,6 +200,23 @@ fn include_env() -> u64 {
 #[inline(never)]
 fn body_include() -> u64 {
     include_str!("body.txt").len() as u64
+}
+
+// Rust files include! reads: at the item level (its items are this file's), in a body and in a
+// const's initializer. They are no sources of the program's own (an app's main file includes the
+// files of its parts): a save of one is an edit of this file.
+include!("rs_items.rs");
+
+#[inline(never)]
+fn rs_include_body() -> u64 {
+    include!("rs_value.rs")
+}
+
+const RS_K: u64 = include!("rs_k.rs");
+
+#[inline(never)]
+fn rs_include_const() -> u64 {
+    RS_K
 }
 
 #[inline(never)]
@@ -432,6 +449,9 @@ fn run() {
             ("const_same", values::same_file()),
             ("const_include", const_include()),
             ("body_include", body_include()),
+            ("rs_include_item", rs_included()),
+            ("rs_include_body", rs_include_body()),
+            ("rs_include_const", rs_include_const()),
             ("include_macro", include_macro()),
             ("include_found", include_found()),
             ("include_added", include_added()),

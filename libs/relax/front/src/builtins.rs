@@ -853,9 +853,9 @@ pub fn include_path(current: Option<&str>, rel: &str) -> String {
     crate::vfs::normalize_path(&path)
 }
 
-/// The paths (as written) of the `include_str!("..")` / `include_bytes!("..")` calls among token
-/// texts: a plain or raw string literal argument, or `concat!` of such literals (another computed
-/// one, `env!(..)`, is not seen).
+/// The paths (as written) of the `include!("..")` / `include_str!("..")` / `include_bytes!("..")`
+/// calls among token texts: a plain or raw string literal argument, or `concat!` of such literals
+/// (another computed one, `env!(..)`, is not seen).
 pub fn include_literals<'a>(texts: &[&'a [u8]]) -> Vec<String> {
     let lit = |lit: &[u8]| -> Option<String> {
         let body = if let Some(raw) = lit.strip_prefix(b"r") {
@@ -868,7 +868,7 @@ pub fn include_literals<'a>(texts: &[&'a [u8]]) -> Vec<String> {
     };
     let mut out = Vec::new();
     for (i, w) in texts.windows(3).enumerate() {
-        if !matches!(w[0], b"include_str" | b"include_bytes") || w[1] != b"!" || w[2] != b"(" { continue; }
+        if !matches!(w[0], b"include" | b"include_str" | b"include_bytes") || w[1] != b"!" || w[2] != b"(" { continue; }
         let at = |k: usize| texts.get(i + k).copied().unwrap_or(b"");
         if at(4) == b")" {
             if let Some(s) = lit(at(3)) { out.push(s); }

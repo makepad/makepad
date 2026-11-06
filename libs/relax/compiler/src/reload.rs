@@ -826,8 +826,8 @@ fn toks<'a>(pf: &'a crate::parser::ParsedFile, lo: u32, hi: u32, holes: &[(u32, 
     // past the file's text: the expansions of its lazily parsed bodies (a part's tokens and text,
     // ParsedFile::part). The file's own text does not reach them: a range read from it there
     // panicked the live watcher and an edit's apply ("range start index 403878 out of range for
-    // slice of length 403483": the include lookup of a Fab landing looked into a parsed body's
-    // macro expansions).
+    // slice of length 403483": an app's include lookup after a landing looked into a parsed
+    // body's macro expansions).
     if lo as usize >= pf.src.len() {
         let Some(p) = pf.part_at(lo) else { return Vec::new() };
         let i0 = first_tok_at(&p.toks, lo);
@@ -1499,13 +1499,23 @@ fn changed_expanded_derives(old: &crate::parser::ParsedFile, a: &crate::ast::Ite
     ak == bk && (be.iter().any(|n| !ae.contains(n)) || ae.iter().any(|n| !be.contains(n)))
 }
 
-/// The files the program's own code included (include_str!/include_bytes!) so far: not Rust
-/// sources (a file include! reads is a source file of its own).
+/// The files the program's own code included (include!/include_str!/include_bytes!) so far. A
+/// Rust file include! reads is no source of the program's own: its text is the includer's
+/// expansion (an app's main file includes the files of its parts), and a save of it is an edit
+/// of the includer. They were left out here, so a save of one was "not one of its sources".
 fn included_files(std_dir: &str) -> Vec<String> {
-    crate::sip::late_files().into_iter().filter(|p| !p.ends_with(".rs") && own_source(p, std_dir)).collect()
+    crate::sip::late_files().into_iter().filter(|p| own_source(p, std_dir)).collect()
 }
 
-/// The files fn, const or static item `it` includes with include_str!/include_bytes! (`pf` is
+/// The files file `pf` (file `path`) names in an include!/include_str!/include_bytes! call
+/// anywhere in its text and its expansions: an item-level `include!("x.rs");` is in no item
+/// (`item_includes` looks at fns, consts and statics), the items it expands to are the file's.
+fn file_includes(pf: &crate::parser::ParsedFile, path: &str) -> Vec<String> {
+    if !pf.src.windows(8).any(|w| w == b"include!" || w == b"include_") { return Vec::new(); }
+    crate::builtins::include_literals(&toks(pf, 0, pf.src.len() as u32, &[])).iter().map(|rel| crate::builtins::include_path(Some(path), rel)).collect()
+}
+
+/// The files fn, const or static item `it` includes with include!/include_str!/include_bytes! (`pf` is
 /// file `path`'s text). Its whole text: what `classify` compares as the item, and the expansions
 /// of the macro calls in it (a macro's `include_str!(concat!($key, ".txt"))`: Fab's demo plates;
 /// a save of such a file said "patched" and the program kept the old text).
@@ -1514,7 +1524,7 @@ fn item_includes(pf: &crate::parser::ParsedFile, path: &str, it: &crate::ast::It
     use crate::ast::ItemKind;
     if !matches!(it.kind, ItemKind::Fn(..) | ItemKind::Const(..) | ItemKind::Static(..)) { return Vec::new(); }
     // (most code includes nothing: one look for the macro name first)
-    if !expanded && !pf.bytes(it.lo, it.hi).windows(8).any(|w| w == b"include_") { return Vec::new(); }
+    if !expanded && !pf.bytes(it.lo, it.hi).windows(8).any(|w| w == b"include_" || w == b"include!") { return Vec::new(); }
     let mut texts = toks(pf, it.lo, it.hi, &[]);
     if expanded {
         // the expansions whose call is in the item, or in one of these
@@ -1548,11 +1558,11 @@ fn include_base(records: &[(String, String, u128)]) -> IncludeBase {
     base
 }
 
-/// Whether the expansion text of file `pf` names include_str!/include_bytes! (`item_includes`
+/// Whether the expansion text of file `pf` names include!/include_str!/include_bytes! (`item_includes`
 /// then looks into the expansions of each item's macro calls).
 fn expansions_include(pf: &crate::parser::ParsedFile) -> bool {
     let src: &[u8] = &pf.src[..];
-    !pf.exp_map.is_empty() && src.get(pf.src_len as usize..).is_some_and(|t| t.windows(8).any(|w| w == b"include_"))
+    !pf.exp_map.is_empty() && src.get(pf.src_len as usize..).is_some_and(|t| t.windows(8).any(|w| w == b"include_" || w == b"include!"))
 }
 
 /// Whether item `it`'s code includes a file whose content is not what the running code read
@@ -1565,10 +1575,10 @@ fn includes_moved(pf: &crate::parser::ParsedFile, path: &str, it: &crate::ast::I
     }))
 }
 
-/// A live session's edits for files the program's code includes (include_str!/include_bytes!)
-/// that were saved (`changed`): each own source file whose code includes one, with its running
-/// text (`classify` finds the items whose included content moved). `skip`: the source files the
-/// batch edits already.
+/// A live session's edits for files the program's code includes (include!/include_str!/
+/// include_bytes!) that were saved (`changed`): each own source file whose code includes one, with
+/// its running text (`classify` finds the items whose included content moved, and those an
+/// include! expands to read the file anew). `skip`: the source files the batch edits already.
 pub(crate) fn include_edits(prog: &crate::program::Program, changed: &[String], skip: &[String]) -> Vec<Edit> {
     let mut out = Vec::new();
     for (path, file) in prog.current_source_files(|p| !skip.iter().any(|s| s == p)) {
@@ -1576,8 +1586,8 @@ pub(crate) fn include_edits(prog: &crate::program::Program, changed: &[String], 
         let pf = &prog.files[file as usize];
         let src = &pf.src[..pf.src_len as usize];
         let expanded = expansions_include(pf);
-        if !expanded && !src.windows(8).any(|w| w == b"include_") { continue; }
-        if pf.ast.items.iter().any(|it| item_includes(pf, &path, it, expanded).iter().any(|p| changed.contains(p))) {
+        if file_includes(pf, &path).iter().any(|p| changed.contains(p))
+            || (expanded || src.windows(8).any(|w| w == b"include_" || w == b"include!")) && pf.ast.items.iter().any(|it| item_includes(pf, &path, it, expanded).iter().any(|p| changed.contains(p))) {
             out.push(Edit { file, path, src: src.to_vec() });
         }
     }
@@ -1592,8 +1602,10 @@ pub(crate) fn include_unmatched(prog: &crate::program::Program, changed: &[Strin
         if left.is_empty() { break; }
         if !own_source_file(prog, file) { continue; }
         let pf = &prog.files[file as usize];
+        let named = file_includes(pf, &path);
+        left.retain(|p| !named.contains(p));
         let expanded = expansions_include(pf);
-        if !expanded && !pf.src[..pf.src_len as usize].windows(8).any(|w| w == b"include_") { continue; }
+        if !expanded && !pf.src[..pf.src_len as usize].windows(8).any(|w| w == b"include_" || w == b"include!") { continue; }
         for it in pf.ast.items.iter() {
             let named = item_includes(pf, &path, it, expanded);
             left.retain(|p| !named.contains(p));
@@ -3763,6 +3775,12 @@ const PRECOMPILE_SYNC: usize = 300;
 /// Applies `edits` as one transaction. The caller makes a unit call.
 pub unsafe fn apply(up: *mut Unit, edits: Vec<Edit>) -> Outcome {
     apply_mode(up, edits, &[], 1, false)
+}
+
+/// `apply`, with the texts of `sources` (files no running version has: a Rust file an include!
+/// read) as the transaction's snapshots of them.
+pub unsafe fn apply_with_sources(up: *mut Unit, edits: Vec<Edit>, sources: &[Edit]) -> Outcome {
+    apply_mode(up, edits, sources, 1, false)
 }
 
 /// A live update of a running program: keep its changed units for the JIT
@@ -8649,7 +8667,10 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 f.2 = current;
                 stalled.remove(&k);
                 moved.push(k);
-                continue;
+                // a Rust file include! read goes with the batch too, as a source of its own
+                // (apply_update): the includer's parse registers its text, and the load's snapshot
+                // of it is the old one ("source snapshot changed during load", a restart)
+                if !f.0.ends_with(".rs") { continue; }
             }
             let src = match stalled.get(&k).filter(|_| current == f.2).map(|(src, _)| Ok(src.clone())).unwrap_or_else(|| crate::vfs::read(&f.0)) {
                 Ok(s) => s,
@@ -9256,14 +9277,14 @@ mod include_part_tests {
     /// file's text (ParsedFile::part). The include lookup reads the expansions of an item's macro
     /// calls: a part's through the part. (It sliced the file's own text there: "range start index
     /// .. out of range for slice of length .." panicked the live watcher, and an edit's apply, in
-    /// Fab sessions after a landing.)
+    /// an app's live sessions after a landing.)
     #[test]
     fn an_items_include_lookup_reads_its_parsed_bodys_expansions() {
         isolated_test!(an_items_include_lookup_reads_its_parsed_bodys_expansions);
         crate::parser::LAZY_AUTO.store(true, Ordering::Relaxed);
         // an expansion at the load whose text names an include (the lookup looks into expansions
         // then), and a body with built-in macros' calls (it stays lazy): a format with arguments
-        // (Fab's `format!("the demo {} has no {project}", self.key)`) and a concat
+        // (an app's `format!("the demo {} has no {project}", self.key)`) and a concat
         let source = r#"
 macro_rules! named {
     () => { pub const include_me: usize = 1; };

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Makepad for macOS and Linux: gets Rust, compiles Makepad's loader (makepad run) from its source on
-# this computer and starts the runner, with one compact JIT build progress line on a terminal
-# (plain progress lines every ten seconds otherwise). Cargo's full output stays in the build log.
+# this computer and starts the runner. A terminal shows its steps on one screen, redrawn in place
+# (the Builder's look; makepad.bat draws the same on Windows); other output gets plain progress
+# lines. Cargo's full output stays in the build log, curl's errors in the download log.
 # Read it before you run it; it is this one file. Rust stays in its own folder; no system install.
 #
 #   curl -fsSL https://makepad.nl/runner/unix | sh
@@ -47,7 +48,8 @@ jobs=
 job_names='fetch build unpack-rustc unpack-rust-std unpack-cargo'
 prefetch_pids=
 
-say() { printf '  %s\n' "$1"; }
+# say TEXT: a line of plain output (a terminal shows the screen instead)
+say() { [ -n "${tty_out:-}" ] || printf '  %s\n' "$1"; }
 now() { date +%s; }
 # stamp NAME appends "NAME HH:MM:SS.cc" to the timing log
 stamp() {
@@ -124,12 +126,13 @@ forget_old_jobs() {
         fi
     done
 }
-# fail MESSAGE [BUILD_LOG]: error and optional build-log excerpt on stderr, exit 1
+# fail MESSAGE [LOG]: the error (on the screen below its rule, the step crossed out) and the end of
+# LOG with its path on stderr, exit 1
 fail() {
     stamp failed
     stop_jobs
-    printf '  Error: %s\n' "$1" >&2
-    if [ $# -gt 1 ]; then
+    if [ -n "${framed:-}" ]; then screen_fail "$1" "${2:-}"; else printf '  Error: %s\n' "$1" >&2; fi
+    if [ $# -gt 1 ] && [ -f "$2" ]; then
         if grep -q '^error' "$2"; then
             grep -n -B1 -A8 '^error' "$2" | tail -20 >&2
         else
@@ -169,6 +172,236 @@ loader_folder_ready() {
         *) [ "${#1}" -eq 40 ] || return 1 ;;
     esac
     [ -f "$loader_root/$1/target/host/makepad" ]
+}
+
+# --- The screen -----------------------------------------------------------------------------
+# On a terminal: one screen in the Builder's look, redrawn in place five times a second. A header
+# (the time so far on its right), a row for each step (Rust, the loader's source, its build, the
+# Runner) with a bar, sizes and speed or crates, a rule, a line saying what goes on now, the keys;
+# on a terminal wide enough the Makepad mark beside it, in a grey for the terminal's background
+# (OSC 11, or COLORFGBG). Lines longer than the terminal are cut, not wrapped, and a resized
+# terminal is drawn again. Other output (a file, a pipe) gets plain lines: one when a step changes
+# state, and every ten seconds while it works. makepad.bat draws the same screen on Windows.
+e=$(printf '\033')
+tty_out= stty_saved=
+if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ] && stty_saved=$(stty -g </dev/tty 2>/dev/null) && [ -n "$stty_saved" ]; then
+    tty_out=1
+fi
+c_dim= c_b= c_ok= c_acc= c_bacc= c_warn= c_red= c_r0=
+if [ -n "$tty_out" ]; then
+    c_dim="${e}[2m" c_b="${e}[1m" c_ok="${e}[32m" c_acc="${e}[38;2;255;92;57m" c_bacc="${e}[1;38;2;255;92;57m"
+    c_warn="${e}[33m" c_red="${e}[31m" c_r0="${e}[0m"
+fi
+rule='────────────────────────────────────────────────────────────────────────────'
+# The Makepad mark, small (30 x 9), as the Builder drew it
+logo='         ⣼⣆        ⣼⣆
+        ⣼⣿⣿⣧      ⣼⣿⣿⣧
+      ⢀⣾⣿⣿⣿⣿⣧⡀  ⢀⣾⣿⣿⣿⣿⣧
+     ⢀⣾⣿⣿⣿⣿⣿⣿⣷⡀⢀⣾⣿⣿⣿⣿⣿⣿⣷⡀
+    ⢀⣼⣿⣿⣿⣿⣿⣿⣿⣿⡇⢼⣿⣿⣿⣿⣿⣿⣿⣿⣇⡀
+   ⢠⣿⣯⣻⣿⣿⣿⣿⣿⣿⡟ ⠈⢻⣿⣿⣿⣿⣿⣿⣟⣾⣷⡀
+  ⢠⣿⣿⣿⣷⣻⣿⣿⣿⣿⡟    ⢻⣿⣿⣿⣿⢟⣾⣿⣿⣿⡄
+ ⣰⣿⣿⣿⣿⣿⣷⡿⣿⣿⠏      ⠻⣿⣿⢯⣿⣿⣿⣿⣿⣿⡄
+⣰⣿⣿⣿⣿⣿⣿⣿⣿⡽⠏        ⠹⣯⣿⣿⣿⣿⣿⣿⣿⣿⣆'
+logo_out= logo_y=2
+while IFS= read -r logo_line; do logo_out="$logo_out${e}[${logo_y};86H$logo_line"; logo_y=$((logo_y + 1)); done <<LOGO
+$logo
+LOGO
+logo_dark="${e}[38;2;44;47;52m" logo_light="${e}[38;2;226;227;229m" logo_color=$logo_dark
+row_1= row_2= row_3= row_4= info_1= info_2= info_3= info_4=
+# plain output: a row's last state and when it is said again
+last_1=next last_2=next last_3=next last_4=next next_1=9999999999 next_2=9999999999 next_3=9999999999 next_4=9999999999
+name_1="Rust $rust_version" cur_row= foot= hint='ctrl+c stops · run makepad.sh again to continue'
+note= note2= note3= where= framed= bg_asked= clock= clock_stop= t0= spin_frame=0 winched=1 term_rows=24 term_cols=80
+
+pad() { padded=$1; while [ "${#padded}" -lt "$2" ]; do padded="$padded "; done; }
+short() { case "$1" in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
+# mmss SECONDS -> mmss: m:ss, or h:mm:ss from an hour on
+mmss() {
+    mm_s=$(($1 % 60)); [ "$mm_s" -ge 10 ] || mm_s=0$mm_s
+    if [ "$1" -ge 3600 ]; then
+        mm_m=$(($1 / 60 % 60)); [ "$mm_m" -ge 10 ] || mm_m=0$mm_m
+        mmss=$(($1 / 3600)):$mm_m:$mm_s
+    else
+        mmss=$(($1 / 60)):$mm_s
+    fi
+}
+clock() { [ -n "$clock_stop" ] || { mmss $(($(now) - ${t0:-$(now)})); clock=$mmss; }; }
+# spin -> spin_c: the spinner's frame, one step a tick
+spin() {
+    case $((spin_frame % 10)) in 0) spin_c=⠋ ;; 1) spin_c=⠙ ;; 2) spin_c=⠹ ;; 3) spin_c=⠸ ;; 4) spin_c=⠼ ;; 5) spin_c=⠴ ;; 6) spin_c=⠦ ;; 7) spin_c=⠧ ;; 8) spin_c=⠇ ;; *) spin_c=⠏ ;; esac
+}
+# bar FILLED -> bar_s: FILLED of 12 in Makepad's coral, the rest dim
+bar() {
+    bar_on= bar_off= bar_i=0
+    while [ "$bar_i" -lt 12 ]; do
+        if [ "$bar_i" -lt "$1" ]; then bar_on="${bar_on}━"; else bar_off="${bar_off}─"; fi
+        bar_i=$((bar_i + 1))
+    done
+    bar_s="${c_acc}${bar_on}${c_dim}${bar_off}${c_r0} "
+}
+# tick: a fifth of a second on a terminal (the spinner moves), a second otherwise
+tick() {
+    if [ -n "$tty_out" ]; then sleep 0.2 2>/dev/null || sleep 1; else sleep 1; fi
+    spin_frame=$((spin_frame + 1))
+}
+# row N KIND STATE INFO [DONE OF]: step row N (1 Rust, 2 the loader's source, 3 its build, 4 the
+# Runner) as KIND (wait, doing, spin, ok, fail), its STATE (one column), a bar of DONE out of OF,
+# and INFO (colours included); `draw` shows it. Plain output gets it as a line when the state
+# changes, and every ten seconds while it stays.
+row() {
+    case "$2" in
+        wait) r_g="${c_dim}○" ;;
+        doing) r_g="${c_acc}●" ;;
+        spin) spin; r_g="${c_acc}${spin_c}" ;;
+        ok) r_g="${c_ok}✓" ;;
+        *) r_g="${c_red}✗" ;;
+    esac
+    pad "$3" 12
+    r_s=$padded
+    [ "$2" != wait ] || r_s="${c_dim}${padded}"
+    r_bar=
+    if [ -n "$tty_out" ] && [ $# -ge 6 ] && [ "$6" -gt 0 ]; then
+        r_fill=$(($5 * 12 / $6))
+        [ "$r_fill" -le 12 ] || r_fill=12
+        bar "$r_fill"
+        r_bar=$bar_s
+    fi
+    r_line="$r_g${c_r0} $r_s${c_r0}$r_bar$4"
+    case "$1" in
+        1) row_1=$r_line info_1=$4 r_last=$last_1 r_next=$next_1 r_name=$name_1 ;;
+        2) row_2=$r_line info_2=$4 r_last=$last_2 r_next=$next_2 r_name='Loader source' ;;
+        3) row_3=$r_line info_3=$4 r_last=$last_3 r_next=$next_3 r_name='Loader build' ;;
+        *) row_4=$r_line info_4=$4 r_last=$last_4 r_next=$next_4 r_name=Runner ;;
+    esac
+    [ -z "$tty_out" ] || return 0
+    r_now=$(now)
+    if [ "$r_last" = "$3" ] && [ "$r_now" -lt "$r_next" ]; then return 0; fi
+    r_next=$((r_now + 10))
+    case "$1" in 1) last_1=$3 next_1=$r_next ;; 2) last_2=$3 next_2=$r_next ;; 3) last_3=$3 next_3=$r_next ;; *) last_4=$3 next_4=$r_next ;; esac
+    if [ -n "$4" ]; then printf '  %s: %s · %s\n' "$r_name" "$3" "$4"; else printf '  %s: %s\n' "$r_name" "$3"; fi
+}
+# draw: the whole screen as one write (nothing flickers), each line cleared after its text, the
+# cursor parked below it; after a resize the terminal is cleared first. Every line fits 80 columns.
+draw() {
+    [ -n "$framed" ] || return 0
+    d_out=
+    if [ "$winched" = 1 ]; then
+        winched=0
+        set -- $(stty size </dev/tty 2>/dev/null)
+        term_rows=${1:-24} term_cols=${2:-80}
+        d_out="${e}[H${e}[2J"
+        # the mark's grey for this terminal, asked the first time it is wide enough to show it
+        if [ "$term_cols" -ge 116 ] && [ -z "$bg_asked" ]; then bg_asked=1; light_background; fi
+    fi
+    clock
+    d_el="elapsed $clock"
+    pad "$name_1" 15
+    d_out="$d_out${e}[2;3H${c_bacc}Makepad${c_r0}${c_b} Runner${c_r0}${e}[K${e}[2;$((80 - ${#d_el}))H${c_dim}${d_el}${c_r0}"
+    d_out="$d_out${e}[3;3H${c_dim}${where}${c_r0}${e}[K${e}[4;3H${c_dim}${rule}${c_r0}${e}[K${e}[5;1H${e}[K"
+    d_out="$d_out${e}[6;3H$padded$row_1${c_r0}${e}[K${e}[7;3HLoader source  $row_2${c_r0}${e}[K"
+    d_out="$d_out${e}[8;3HLoader build   $row_3${c_r0}${e}[K${e}[9;3HRunner         $row_4${c_r0}${e}[K"
+    d_out="$d_out${e}[10;1H${e}[K${e}[11;3H${c_dim}${rule}${c_r0}${e}[K${e}[12;3H${foot}${c_r0}${e}[K${e}[13;3H${c_dim}${hint}${c_r0}${e}[K"
+    d_out="$d_out${e}[14;3H${c_warn}${note}${c_r0}${e}[K${e}[15;3H${c_dim}${note2}${c_r0}${e}[K${e}[16;3H${c_warn}${note3}${c_r0}${e}[K"
+    if [ "$term_cols" -ge 116 ] && [ "$term_rows" -ge 18 ]; then d_out="$d_out$logo_color$logo_out$c_r0"; fi
+    printf '%s' "$d_out${e}[17;1H"
+}
+# The terminal's background (OSC 11, or COLORFGBG): a light one gets a light grey mark. Asked once,
+# when the mark first shows; dark when nobody answers within 0.3 s.
+light_background() {
+    case "${COLORFGBG:-}" in *';7' | *';15') logo_color=$logo_light; return 0 ;; *';'*) return 0 ;; esac
+    lb_reply=$(stty -echo -icanon min 0 time 3 </dev/tty 2>/dev/null && printf '%s]11;?\007' "$e" >/dev/tty && dd bs=64 count=1 </dev/tty 2>/dev/null)
+    stty -echo icanon </dev/tty 2>/dev/null || :
+    lb_rgb=$(printf '%s' "$lb_reply" | sed -n 's/.*rgb:\([0-9a-fA-F][0-9a-fA-F]\)[0-9a-fA-F]*\/\([0-9a-fA-F][0-9a-fA-F]\)[0-9a-fA-F]*\/\([0-9a-fA-F][0-9a-fA-F]\).*/\1 \2 \3/p')
+    [ -n "$lb_rgb" ] || return 0
+    set -- $lb_rgb
+    # relative luminance on a 0-255 scale: light above the middle
+    [ $(( (2126 * 0x$1 + 7152 * 0x$2 + 722 * 0x$3) / 10000 )) -le 127 ] || logo_color=$logo_light
+}
+# screen_start: the screen (keys typed meanwhile not echoed), or the folder on plain output
+screen_start() {
+    where="Folder: $(short "$root")"
+    t0=$(now)
+    foot='Looking at what is here already.'
+    for r_n in 1 2 3 4; do row $r_n wait next ''; done
+    if [ -z "$tty_out" ]; then
+        printf '  %s\n' "$where"
+        [ -z "$note" ] || printf '  %s\n' "$note"
+        [ -z "$note2" ] || printf '  %s\n' "$note2"
+        return 0
+    fi
+    stty -echo </dev/tty 2>/dev/null || :
+    printf '%s' "${e}]0;Makepad${e}\\${e}[?25l${e}[?7l"
+    framed=1
+    trap 'winched=1' WINCH
+    draw
+}
+# screen_end: the terminal as it was (keys typed meanwhile, or an answer that came late, read
+# away), the screen left standing and the cursor below it
+screen_end() {
+    [ -n "$framed" ] || return 0
+    framed=
+    stty -icanon min 0 time 0 </dev/tty 2>/dev/null && dd bs=4096 count=1 </dev/tty >/dev/null 2>&1
+    stty "$stty_saved" </dev/tty 2>/dev/null || :
+    printf '%s' "${e}[?7h${e}[?25h${e}[17;1H"
+}
+# notice TEXT: a line in yellow below the screen's keys (plain output: a line of its own)
+notice() {
+    note3="${note3:+$note3 }$1"
+    say "$1"
+}
+# ready MESSAGE: every step done, the clock stopped
+ready() {
+    clock
+    clock_stop=1
+    foot="${c_ok}✓${c_r0} Ready in $clock. $1"
+    hint=
+    draw
+    [ -n "$tty_out" ] || printf '  Ready in %s. %s\n' "$clock" "$1"
+}
+# screen_fail MESSAGE [LOG]: the current step crossed out, the message's first line below the rule
+# (and, with a LOG, that its end follows); all of it below the screen when longer than that line
+screen_fail() {
+    case "$cur_row" in
+        1) row 1 fail stopped "$info_1" ;;
+        2) row 2 fail stopped "$info_2" ;;
+        3) row 3 fail failed "$info_3" ;;
+        4) row 4 fail stopped "$info_4" ;;
+    esac
+    sf_first=${1%%"
+"*}
+    foot="${c_red}✗${c_r0} $sf_first"
+    hint=
+    [ -z "${2:-}" ] || hint='The end of its log is below.'
+    draw
+    screen_end
+    if [ "$sf_first" != "$1" ] || [ "${#sf_first}" -gt 76 ]; then printf '  %s\n' "$1" >&2; fi
+}
+screen_stopped() {
+    [ -n "$framed" ] || return 0
+    foot="${c_warn}✗${c_r0} Stopped. Run makepad.sh again to continue: what is here stays."
+    hint=
+    draw
+    screen_end
+}
+trap 'stamp stopped; stop_jobs; screen_stopped; exit 130' INT TERM
+trap 'screen_end' EXIT
+# amount BYTES TOTAL SPEED -> amount: " 43%   98 of 218 MB    12.3 MB/s" (KB below 10 MB; no
+# speed until there is one)
+amount() {
+    a_pct=0
+    [ "$2" -le 0 ] || a_pct=$(($1 * 100 / $2))
+    [ "$a_pct" -le 100 ] || a_pct=100
+    if [ "$2" -ge 10485760 ]; then a_u=MB a_d=1048576 a_w=3; else a_u=KB a_d=1024 a_w=5; fi
+    a_p=$a_pct; while [ "${#a_p}" -lt 3 ]; do a_p=" $a_p"; done
+    a_h=$(($1 / a_d)); while [ "${#a_h}" -lt "$a_w" ]; do a_h=" $a_h"; done
+    amount="$a_p%  $a_h of $(($2 / a_d)) $a_u"
+    a_t10=$(($3 * 10 / 1048576))
+    if [ "$a_t10" -gt 0 ]; then
+        a_s="$((a_t10 / 10)).$((a_t10 % 10)) MB/s"
+        while [ "${#a_s}" -lt 10 ]; do a_s=" $a_s"; done
+        amount="$amount  $a_s"
+    fi
 }
 
 # rust_check --probe MIN: read-only. Prints nothing; sets rust_sysroot, or
@@ -221,6 +454,11 @@ case "$0" in
     sh | -sh | */sh | bash | -bash | */bash | dash | */dash | zsh | */zsh) script_dir= ;;
     *) script_dir=; [ -f "$0" ] && script_dir=$(cd -P -- "$(dirname -- "$0")" && pwd -P) ;;
 esac
+# A release service of its own (a test's) installs only into a folder named for it: a run that sets
+# MAKEPAD_LOADER_SERVICE without MAKEPAD_LOADER_ROOT stops before it makes or changes anything.
+if [ -n "${MAKEPAD_LOADER_SERVICE:-}" ] && [ -z "${MAKEPAD_LOADER_ROOT:-}" ]; then
+    fail "MAKEPAD_LOADER_SERVICE is set without MAKEPAD_LOADER_ROOT: give the run a folder of its own."
+fi
 # The folder: this file's own when it is an installation already, or holds nothing else (a folder
 # made for it); else ~/makepad-runner (piped into sh, or a download among other files), where the
 # file copies itself.
@@ -239,6 +477,13 @@ downloads=$cache/downloads
 logs_dir=$cache/logs
 jobs=$cache/jobs
 forget_old_jobs
+if [ -n "${script_dir_other:-}" ]; then
+    note='This folder holds other files.'
+    note2='Makepad goes into the folder above: start makepad.sh there next time.'
+fi
+svchost=${service#*://}
+svchost=${svchost%%/*}
+screen_start
 
 case "$(uname -s)/$(uname -m)" in
     Darwin/arm64 | Darwin/aarch64) triple=aarch64-apple-darwin ;;
@@ -309,7 +554,7 @@ if [ -e "$loader_root/pending" ]; then
     atomic_line "$loader_root/rolled-back" 'the new runner did not confirm its first start' \
         || fail "Cannot write $loader_root/rolled-back"
     rm -f "$loader_root/pending" || fail "Cannot remove $loader_root/pending"
-    say "JIT: went back to $previous - the new runner did not confirm its first start"
+    notice "Went back to $(printf '%s' "$previous" | cut -c1-10): the new runner did not confirm its first start."
 fi
 active=$(cat "$loader_root/current" 2>/dev/null)
 loader_folder_ready "$active" || active=src
@@ -332,9 +577,14 @@ meta="--retry 2 -m 60"
 if [ -f "$src/.built" ] && [ -f "$cache/runner/release" ]; then meta="--connect-timeout 3 -m 6"; fi
 mkdir -p "$cache/runner" "$cache/incoming"
 if [ $# -eq 0 ] || [ ! -f "$src/.built" ]; then
+    cur_row=2
+    row 2 doing asking "${c_dim}$svchost for the latest Runner release${c_r0}"
+    foot='Asking the release service for the latest Runner.'
+    draw
     release_json=$(curl -fsS --proto "$proto" $meta "$service/public/app/runner/latest" 2>>"$logs/download.log") || release_json=
 fi
 runner_release=$(printf '%s' "$release_json" | sed -n 's/.*"release":"\([A-Za-z0-9_-]*\)".*/\1/p')
+prefetch_count=0
 if [ $# -eq 0 ] && [ -n "$runner_release" ]; then
     # one "<name> <path> <commit>" line per repository of the release
     repos=$(printf '%s\n' "$release_json" | sed 's/"loader":{[^}]*}//' | tr '{}' '\n\n' | while IFS= read -r line; do
@@ -355,6 +605,7 @@ if [ $# -eq 0 ] && [ -n "$runner_release" ]; then
                     --data-binary @- -o "$pack.part" "$service/public/git/runner/$name.git/git-upload-pack" \
                 && mv -f "$pack.part" "$pack" ) >/dev/null 2>>"$logs/download.log" &
             prefetch_pids="$prefetch_pids $!"
+            prefetch_count=$((prefetch_count + 1))
         done
     fi
 fi
@@ -364,15 +615,19 @@ need_rust=
 rust_release=$rust_version
 if [ "$(cat "$rust_own/.toolchain-version" 2>/dev/null)" = "$rust_version $triple" ] \
     && [ -x "$rust_own/bin/cargo" ] && [ -x "$rust_own/bin/rustc" ]; then
-    say "Rust: ready"
+    row 1 ok ready "${c_dim}in rust/${c_r0}"
 elif rust_check --probe "$rust_version"; then
     rust=$rust_sysroot
     rust_release=$rc_version
-    say "Rust $rust_release: using the one installed at $rust"
+    name_1="Rust $rust_release"
+    row 1 ok ready "${c_dim}installed, $(short "$rust")${c_r0}"
 else
     need_rust=1
     [ "$rust_reason" = 'No installed Rust was found on PATH.' ] \
-        || say "Rust: $rust_reason Downloading $rust_version into this folder"
+        || notice "$rust_reason Rust $rust_version goes into this folder."
+    rust_mb=0
+    for part in $part_names; do rust_mb=$((rust_mb + $(part_field $part 2) / 1048576)); done
+    row 1 wait 'to download' "${c_dim}$rust_mb MB from static.rust-lang.org${c_r0}"
 fi
 # The loader ZIP's SHA-256 names the source version, independent of the runner's commit.
 # Offline, or with arguments, use the version recorded with the source already here.
@@ -383,7 +638,9 @@ loader_version=$(printf '%s' "$archive" | cut -s -d' ' -f3)
 loader_built_sha256=$(cat "$src/.loader-sha256" 2>/dev/null)
 [ -n "$loader_version" ] || loader_version=$loader_built_sha256
 [ -n "$loader_version" ] || loader_version=$(cat "$src/.version" 2>/dev/null)
-[ -n "$loader_version" ] || fail "Could not reach the release service ($service) and no loader is here yet. Check the connection, then run this again."
+cur_row=2
+[ -n "$loader_version" ] || fail "No answer from $svchost, and no loader is here yet. Check the connection, then run this again."
+loader_short=$(printf '%s' "$loader_version" | cut -c1-10)
 built="$loader_version $rust_release $triple"
 need_build=
 [ -x "$makepad" ] && [ -x "$src/target/host/makepad-launcher" ] && [ "$loader_built_sha256" = "$loader_version" ] \
@@ -397,14 +654,18 @@ if [ -n "$need_zip" ]; then
     loader_bytes=$(printf '%s' "$archive" | cut -d' ' -f2)
     loader_sha256=$(printf '%s' "$archive" | cut -d' ' -f3)
     zip=$downloads/$loader_name
+    row 2 wait 'to download' "${c_dim}$loader_name, $((loader_bytes / 1024)) KB${c_r0}"
+else
+    row 2 ok 'up to date' "${c_dim}$loader_short${c_r0}"
 fi
-[ -n "$need_zip" ] || say "Loader source: ready"
+draw
 
 # --- 1 + 2. Rust's pieces and the loader's source, all at once ------------------------------
 cfg=$downloads/fetch.curl
 rm -f "$cfg"
 rust_total=0
 rust_base=0
+rust_pieces=0
 # pieces PART SIZE adds the pieces of PART not yet here to the curl config
 pieces() {
     idx=0 from=0
@@ -418,6 +679,7 @@ pieces() {
             [ ! -f "$cfg" ] || echo next >> "$cfg"
             printf 'url = "%s"\noutput = "%s"\nrange = %s-%s\nproto = =https\nfail\nlocation\nretry = 3\n' \
                 "$dist/$1-$rust_version-$triple.tar.gz" "$(cfgq "$file")" $from $to >> "$cfg"
+            rust_pieces=$((rust_pieces + 1))
         fi
         idx=$((idx + 1))
         from=$((to + 1))
@@ -443,38 +705,64 @@ if [ -n "$need_zip" ]; then
 fi
 # the summed size of the Rust pieces here
 pieces_sum() { ls -ln "$downloads" | awk '$9 ~ /\.tar\.gz\.[0-9]+$/ { s += $5 } END { print s + 0 }'; }
+# fetched: the bytes here of each download (r_b Rust, z_b the loader's source)
+fetched() {
+    r_b=0 z_b=0
+    [ -z "$need_rust" ] || r_b=$((rust_base + $(pieces_sum)))
+    [ -z "$need_zip" ] || [ ! -f "$zip.part" ] || z_b=$(size_of "$zip.part")
+}
+fetch_t0=$(now)
 if [ -f "$cfg" ]; then
-    [ -z "$need_rust" ] || say "Rust $rust_version: downloading (once, into this folder)"
-    [ -z "$need_zip" ] || say "Loader source: downloading"
+    if [ -n "$need_rust" ] && [ -n "$need_zip" ]; then fetch_what="Downloading Rust in $rust_pieces pieces, and the loader's source"
+    elif [ -n "$need_rust" ]; then fetch_what="Downloading Rust from static.rust-lang.org in $rust_pieces pieces"
+    else fetch_what="Downloading the loader's source from $svchost"
+    fi
+    cur_row=2
+    [ -z "$need_rust" ] || cur_row=1
     job fetch curl -sS -Z --parallel-immediate --parallel-max 16 -K "$cfg" 2>"$logs/download.log"
-    fetch_ticks=0
-    while [ ! -f "$jobs/fetch.done" ]; do
-        sleep 1
-        fetch_ticks=$((fetch_ticks + 1))
-        [ "$fetch_ticks" -ge 10 ] || continue
-        fetch_ticks=0
-        [ ! -f "$jobs/fetch.done" ] || break
-        progress=
+    # each download's speed: bytes a second over the last few seconds
+    fetched
+    f_t=$fetch_t0 f_n=0 r_prev=$r_b z_prev=$z_b r_speed=0 z_speed=0
+    while :; do
+        f_done=
+        [ ! -f "$jobs/fetch.done" ] || f_done=1
+        fetched
+        f_now=$(now)
+        if [ "$f_now" -gt "$f_t" ]; then
+            f_dt=$((f_now - f_t))
+            r_i=$(((r_b - r_prev) / f_dt)); [ "$r_i" -ge 0 ] || r_i=0
+            z_i=$(((z_b - z_prev) / f_dt)); [ "$z_i" -ge 0 ] || z_i=0
+            if [ "$f_n" -eq 0 ]; then r_speed=$r_i z_speed=$z_i; else r_speed=$(((r_speed * 3 + r_i) / 4)) z_speed=$(((z_speed * 3 + z_i) / 4)); fi
+            f_n=$((f_n + 1)) f_t=$f_now r_prev=$r_b z_prev=$z_b
+        fi
+        f_left=0
         if [ -n "$need_rust" ]; then
-            rsum=$((rust_base + $(pieces_sum)))
-            pct=$((rsum * 100 / rust_total))
-            [ $pct -le 100 ] || pct=100
-            progress="Rust: $pct% ($((rsum / 1048576)) / $((rust_total / 1048576)) MB)"
+            amount "$r_b" "$rust_total" "$r_speed"
+            row 1 spin downloading "$amount" "$r_b" "$rust_total"
+            [ "$r_speed" -le 0 ] || [ $(((rust_total - r_b) / r_speed)) -le "$f_left" ] || f_left=$(((rust_total - r_b) / r_speed))
         fi
         if [ -n "$need_zip" ]; then
-            zsum=0
-            [ ! -f "$zip.part" ] || zsum=$(size_of "$zip.part")
-            progress="${progress:+$progress. }Loader source: $((zsum / 1024)) / $((loader_bytes / 1024)) KB"
+            amount "$z_b" "$loader_bytes" "$z_speed"
+            if [ "$z_b" -ge "$loader_bytes" ]; then row 2 doing downloaded "$amount" "$z_b" "$loader_bytes"; else row 2 spin downloading "$amount" "$z_b" "$loader_bytes"; fi
+            [ "$z_speed" -le 0 ] || [ $(((loader_bytes - z_b) / z_speed)) -le "$f_left" ] || f_left=$(((loader_bytes - z_b) / z_speed))
         fi
-        say "$progress"
+        foot="$fetch_what."
+        if [ "$f_n" -ge 3 ] && [ "$f_left" -gt 0 ]; then mmss "$f_left"; foot="$fetch_what · about $mmss left."; fi
+        draw
+        [ -z "$f_done" ] || break
+        tick
     done
-    [ "$(cat "$jobs/fetch.done")" = 0 ] || fail "The download stopped. Run makepad.sh again to continue it - log: $logs/download.log"
+    [ "$(cat "$jobs/fetch.done")" = 0 ] || fail "The download stopped. Run makepad.sh again to continue it." "$logs/download.log"
     rm -f "$cfg"
     stamp downloaded
 fi
 
 # --- Rust: join the pieces, check, unpack the three parts side by side ----------------------
 if [ -n "$need_rust" ]; then
+    cur_row=1
+    row 1 doing joining "${c_dim}the pieces of each archive${c_r0}"
+    foot='Joining the pieces.'
+    draw
     for part in $part_names; do
         archive_file=$downloads/$part.tar.gz
         [ -f "$archive_file" ] && continue
@@ -488,17 +776,21 @@ if [ -n "$need_rust" ]; then
         while [ -f "$archive_file.$idx" ]; do rm -f "$archive_file.$idx"; idx=$((idx + 1)); done
         mv -f "$archive_file.joined" "$archive_file"
     done
-    say "Rust: checking"
+    foot='Checking each archive against its published SHA-256.'
+    checked=0
     for part in $part_names; do
+        row 1 doing checking "$checked of 3 archives ${c_dim}· SHA-256${c_r0}"
+        draw
         if [ "$(sha256 "$downloads/$part.tar.gz")" != "$(part_field $part 3)" ]; then
             rm -f "$downloads/$part.tar.gz"
             fail "Checksum mismatch for $part.tar.gz - downloaded again on the next run"
         fi
+        checked=$((checked + 1))
     done
     stage=$cache/rust.unpack
     rm -rf "$stage"
     mkdir -p "$stage" || fail "Cannot create $stage"
-    say "Rust: unpacking"
+    foot='Unpacking Rust into rust/, the three archives side by side.'
     for part in $part_names; do
         top=$part-$rust_version-$triple
         inner=$part
@@ -509,13 +801,15 @@ if [ -n "$need_rust" ]; then
     while :; do
         unpacked=0
         for part in $part_names; do [ ! -f "$jobs/unpack-$part.done" ] || unpacked=$((unpacked + 1)); done
+        row 1 spin unpacking "$unpacked of 3 archives" "$unpacked" 3
+        draw
         [ $unpacked -lt 3 ] || break
-        sleep 1
+        tick
     done
     ready=$stage/ready
     mkdir "$ready" || fail "Cannot create $ready"
     for part in $part_names; do
-        [ "$(cat "$jobs/unpack-$part.done")" = 0 ] || fail "Unpacking $part failed - log: $logs/unpack-$part.log"
+        [ "$(cat "$jobs/unpack-$part.done")" = 0 ] || fail "Unpacking $part failed." "$logs/unpack-$part.log"
         rm -f "$stage/$part/manifest.in"
         # the parts share bin/, lib/ and share/: move each file into place
         ( cd "$stage/$part" && find . -type d -print | while IFS= read -r dir; do
@@ -523,20 +817,25 @@ if [ -n "$need_rust" ]; then
         done && find . ! -type d -print | while IFS= read -r file; do
             mv -f "$file" "$ready/$file" || exit 1
         done ) \
-            2>>"$logs/unpack-$part.log" || fail "Unpacking $part failed - log: $logs/unpack-$part.log"
+            2>>"$logs/unpack-$part.log" || fail "Unpacking $part failed: it could not be moved into place." "$logs/unpack-$part.log"
     done
     printf '%s %s' "$rust_version" "$triple" > "$ready/.toolchain-version"
     rm -rf "$rust_own"
     mv "$ready" "$rust_own" || fail "Cannot move Rust into $rust_own"
     rm -rf "$stage"
     for part in $part_names; do rm -f "$downloads/$part.tar.gz"; done
-    say "Rust: ready"
+    mmss $(($(now) - fetch_t0))
+    row 1 ok ready "${c_dim}downloaded and unpacked in $mmss${c_r0}"
+    draw
     stamp rust
 fi
 
 # --- The loader's source: check and unpack --------------------------------------------------
 if [ -n "$need_zip" ]; then
-    say "Loader source: checking"
+    cur_row=2
+    row 2 doing checking "${c_dim}$loader_name · SHA-256${c_r0}"
+    foot="Checking the loader's source against its SHA-256."
+    draw
     if [ "$(size_of "$zip.part" 2>/dev/null)" != "$loader_bytes" ]; then
         rm -f "$zip.part"
         fail "The loader's source has the wrong size - downloaded again on the next run"
@@ -548,12 +847,14 @@ if [ -n "$need_zip" ]; then
     unpack=$cache/loader/.unpack
     rm -rf "$unpack"
     mkdir -p "$unpack" || fail "Cannot create $unpack"
-    say "Loader source: unpacking"
+    row 2 doing unpacking "${c_dim}$loader_name${c_r0}"
+    foot="Unpacking the loader's source."
+    draw
     if command -v unzip >/dev/null 2>&1; then unzip -q "$zip.part" -d "$unpack" >>"$logs/download.log" 2>&1
     elif command -v bsdtar >/dev/null 2>&1; then bsdtar -xf "$zip.part" -C "$unpack" >>"$logs/download.log" 2>&1
     elif command -v python3 >/dev/null 2>&1; then python3 -m zipfile -e "$zip.part" "$unpack" >>"$logs/download.log" 2>&1
     else fail "Makepad needs unzip - install it, then run this again"
-    fi || fail "Unpacking the loader's source failed. Run this again - log: $logs/download.log"
+    fi || fail "Unpacking the loader's source failed. Run this again." "$logs/download.log"
     new=$unpack/$runner_release
     [ -f "$new/Cargo.toml" ] || fail "The loader's source has no $runner_release/Cargo.toml. Run this again later; the release service is being updated."
     if [ ! -f "$src/Cargo.toml" ]; then
@@ -562,7 +863,9 @@ if [ -n "$need_zip" ]; then
     else
         # an update: files that changed are replaced (with the time of now, so cargo sees them
         # as changed), files the new version no longer has are removed, the rest stay as they are
-        say "Loader source: updating - $(printf '%s' "$loader_version" | cut -c1-10)"
+        row 2 doing updating "${c_dim}to $loader_short, only the files that changed${c_r0}"
+        foot="Updating the loader's source: only the files that changed are replaced."
+        draw
         # one `diff -rq` names what differs (one process, not one per file)
         LC_ALL=C diff -rq -x target -x .version -x .built -x .loader-sha256 "$new" "$src" > "$unpack/changes" 2>&1
         [ $? -le 1 ] || fail "Cannot compare the loader's source with $src - $(head -1 "$unpack/changes")"
@@ -598,7 +901,8 @@ if [ -n "$need_zip" ]; then
     atomic_line "$src/.version" "$loader_version" || fail "Cannot write $src/.version"
     rm -rf "$unpack"
     rm -f "$zip.part"
-    say "Loader source: ready"
+    row 2 ok ready "${c_dim}$loader_short${c_r0}"
+    draw
     stamp source
 fi
 
@@ -606,74 +910,94 @@ fi
 # The compile sees no Rust settings from elsewhere on this computer and writes only into
 # cache/. Its flags are the runner's own (apps/commercial/runner build_work.rs RUSTFLAGS): this
 # computer's CPU and rustc's parallel frontend, which stable rustc takes under RUSTC_BOOTSTRAP=1,
-# with an empty allow list so that no #![feature] builds. Cargo's plain output stays in the log. A terminal refreshes one line every second;
-# other output gets a plain line at most every ten seconds, plus the final progress and timing.
+# with an empty allow list so that no #![feature] builds. Cargo's plain output stays in the log; the
+# build's row counts its Compiling lines against the crates cargo tree lists.
 unset RUSTUP_TOOLCHAIN RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET CARGO_BUILD_RUSTFLAGS CARGO_TARGET_DIR RUSTC_WRAPPER RUSTDOC
 export PATH="$rust/bin:$PATH" CARGO_HOME="$cache/cargo-home" RUSTC="$rust/bin/rustc" CARGO_INCREMENTAL=0
 build_loader() {
     cd "$src" && CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never RUSTFLAGS="-C target-cpu=native -Z threads=8 -Z allow-features=" RUSTC_BOOTSTRAP=1 \
         exec "$rust/bin/cargo" build --profile host --offline --locked -p makepad-run --bin makepad --bin makepad-launcher
 }
+# build_progress: the build's row (its bar, N / M crates and the crate compiling now, cut to 16)
+# and, below the rule, the time so far and, from a tenth of the crates on, about how long is left.
+# Plain output also gets the time so far and how long the crate has taken.
 build_progress() {
     build_state=$(awk '
         $1 == "Compiling" && $3 ~ /^v[0-9]/ { compiled++; current = $2 }
-        END { printf "%d %s", compiled, (current == "" ? "waiting" : current) }
+        END { printf "%d %s", compiled, current }
     ' "$build_log")
-    build_now=$(now)
+    b_now=$(now)
     if [ "$build_state" != "$build_previous" ]; then
-        crate_t0=$build_now
+        crate_t0=$b_now
         build_previous=$build_state
     fi
-    [ "$1" = show ] || return 0
-    progress="Building the JIT · ${build_state%% *}/$crates crates · $((build_now - build_t0)) s elapsed · ${build_state#* } · $((build_now - crate_t0)) s on crate"
-    if [ -n "$build_tty" ]; then printf '\r\033[K  %s' "$progress"; else say "$progress"; fi
+    compiled=${build_state%% *}
+    current=${build_state#* }
+    [ "$compiled" -le "$crates" ] || compiled=$crates
+    [ "${#current}" -le 17 ] || current="$(printf '%s' "$current" | cut -c1-16)…"
+    b_n=$compiled
+    while [ "${#b_n}" -lt "${#crates}" ]; do b_n=" $b_n"; done
+    mmss $((b_now - build_t0))
+    b_sofar=$mmss
+    foot="Compiling Makepad's loader for this processor: $b_sofar so far"
+    if [ "$compiled" -gt 0 ] && [ $((compiled * 10)) -ge "$crates" ]; then
+        mmss $(((b_now - build_t0) * (crates - compiled) / compiled))
+        foot="$foot, about $mmss left"
+    fi
+    foot="$foot."
+    b_info="$b_n / $crates crates  ${c_dim}$current${c_r0}"
+    [ -n "$tty_out" ] || b_info="$b_info · $b_sofar so far · $((b_now - crate_t0)) s on crate"
+    row 3 spin compiling "$b_info" "$compiled" "$crates"
 }
 if [ -n "$need_build" ]; then
+    cur_row=3
     build_log=$logs/build.log
     rm -f "$build_log"
+    row 3 doing counting "${c_dim}the crates to compile${c_r0}"
+    foot="Listing the loader's crates."
+    draw
     # Resolve the archive's path crates offline before compiling. Cargo writes the lock for
     # --locked below; the archive need not ship one. Count only this host's normal/build
     # dependencies, not other targets or the workspace's dev-dependency placeholders.
     if ! (cd "$src" && CARGO_TERM_COLOR=never "$rust/bin/cargo" tree --offline --target "$triple" \
         -p makepad-run --edges normal,build --prefix none --format '{p}') >"$logs/crates.log" 2>"$build_log"; then
-        fail "Cannot list the JIT's crates from the loader source." "$build_log"
+        fail "Cannot list the loader's crates from its source." "$build_log"
     fi
     crates=$(awk '!seen[$1 FS $2]++ { count++ } END { print count + 0 }' "$logs/crates.log")
-    [ "$crates" -gt 0 ] || fail "The loader source lists no JIT crates." "$build_log"
+    [ "$crates" -gt 0 ] || fail "The loader's source lists no crates." "$build_log"
     # room for the build (about 2 GB of target/), said before it starts rather than as a cargo error
     free_kb=$(df -Pk "$cache" | awk 'NR == 2 { print $4 }')
     [ "${free_kb:-0}" -ge 3000000 ] || fail "Compiling Makepad's loader needs about 3 GB free on this disk. Free some space, then run this again."
-    build_tty=
-    [ -t 1 ] && build_tty=1
     build_t0=$(now)
     crate_t0=$build_t0
     build_previous=
     # for this computer's processor ([profile.host]: opt-level 3, 16 codegen units, LTO within each crate; target-cpu=native)
     job build build_loader >"$build_log" 2>&1
-    build_ticks=0
-    build_progress show
-    while [ ! -f "$jobs/build.done" ]; do
-        sleep 1
-        build_ticks=$((build_ticks + 1))
-        [ ! -f "$jobs/build.done" ] || break
-        if [ -z "$build_tty" ] && [ "$build_ticks" -lt 10 ]; then
-            build_progress track
-            continue
-        fi
-        build_ticks=0
-        build_progress show
+    while :; do
+        b_done=
+        [ ! -f "$jobs/build.done" ] || b_done=1
+        build_progress
+        draw
+        [ -z "$b_done" ] || break
+        tick
     done
-    build_progress show
-    [ -z "$build_tty" ] || printf '\n'
     if [ "$(cat "$jobs/build.done")" != 0 ]; then
-        fail "the JIT did not compile." "$build_log"
+        row 3 fail failed "${c_dim}$compiled of $crates crates${c_r0}"
+        fail "The loader did not compile." "$build_log"
     fi
     atomic_line "$src/.built" "$built" || fail "Cannot write $src/.built"
     atomic_line "$src/.loader-sha256" "$loader_version" || fail "Cannot write $src/.loader-sha256"
-    say "Building the JIT · compiled in $(($(now) - build_t0)) s"
+    mmss $(($(now) - build_t0))
+    if [ "$compiled" -ge "$crates" ]; then
+        row 3 ok compiled "${c_dim}in $mmss · $crates crates${c_r0}"
+    else
+        row 3 ok compiled "${c_dim}in $mmss · $compiled of $crates crates, the rest kept${c_r0}"
+    fi
+    draw
     stamp built
 else
-    say "Building the JIT · up to date"
+    row 3 ok 'up to date' "${c_dim}for this processor${c_r0}"
+    draw
 fi
 
 # This script stays in the folder for the next start.
@@ -692,17 +1016,35 @@ fi
 # fetches the new release for the next start. Offline, the release recorded last.
 export MAKEPAD_LOADER_ROOT="$root" MAKEPAD_LOADER_SERVICE="$service"
 if [ $# -gt 0 ]; then
+    row 4 wait 'not started' "${c_dim}the loader runs with your arguments${c_r0}"
+    ready 'Running the loader with your arguments.'
+    screen_end
     stamp start-loader
     exec "$makepad" "$@"
 fi
+cur_row=4
 # the runner's packs downloaded alongside the build are complete before makepad run looks for them
-[ -z "$prefetch_pids" ] || wait $prefetch_pids || :
+if [ -n "$prefetch_pids" ]; then
+    foot="Downloading the Runner's code from $svchost."
+    while :; do
+        p_left=0
+        # a pack download that ended is gone, or a zombie until it is waited for
+        for pid in $prefetch_pids; do
+            case "$(ps -p "$pid" -o stat= 2>/dev/null)" in '' | *Z*) ;; *) p_left=$((p_left + 1)) ;; esac
+        done
+        row 4 spin fetching "$((prefetch_count - p_left)) of $prefetch_count repositories ${c_dim}· the Runner's code${c_r0}" $((prefetch_count - p_left)) "$prefetch_count"
+        draw
+        [ "$p_left" -gt 0 ] || break
+        tick
+    done
+    wait $prefetch_pids || :
+fi
 if [ -n "$runner_release" ]; then
     [ -n "$repos" ] || fail "The runner release names no repositories."
     { printf '%s\n' "$runner_release"; printf '%s\n' "$repos"; } > "$cache/runner/release.next" && mv -f "$cache/runner/release.next" "$cache/runner/release"
 else
-    [ -f "$cache/runner/release" ] || fail "Could not reach the release service ($service) and the runner was never fetched."
-    say "The release service did not answer; starting the runner fetched before."
+    [ -f "$cache/runner/release" ] || fail "No answer from $svchost, and the Runner was never set up here."
+    notice "No answer from $svchost: the Runner fetched before starts."
     runner_release=$(sed -n 1p "$cache/runner/release")
     repos=$(sed -n '2,$p' "$cache/runner/release")
 fi
@@ -735,10 +1077,12 @@ printf 'arg\t%s\n' "$root_repo" >> "$record.part"
 [ ! -f "$record.mounts" ] || { cat "$record.mounts" >> "$record.part"; rm -f "$record.mounts"; }
 printf 'arg\tmakepad-runner\n' >> "$record.part"
 mv -f "$record.part" "$record" || fail "Cannot write $record"
+row 4 doing starting "${c_dim}Makepad's loader opens its window${c_r0}"
+ready 'The Runner opens in a moment.'
+screen_end
 stamp start-loader
 # The loader stays in the foreground until the runner closes; its output is appended to the log.
-say "Makepad: starting - log: $logs/makepad.log"
-say "Makepad is open in its own window; closing it ends this one."
+printf '  Makepad is open in its own window; closing it ends this one.\n  %sIts log: %s%s\n' "$c_dim" "$(short "$logs/makepad.log")" "$c_r0"
 "$makepad" >>"$logs/makepad.log" 2>&1
 code=$?
 stamp "loader-exit-$code"

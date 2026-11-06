@@ -146,7 +146,7 @@ PROBES += [
 FIRST = {"const_after_body": (V, "pub fn late_tiny() -> u64 {\n    1\n", "pub fn late_tiny() -> u64 {\n    2 - 1\n")}
 PROBES += [("const_after_body", V, "CONST_DIRECT: u64 = 1;", "CONST_DIRECT: u64 = 2;", 2)]
 # An included file edited: a table of texts, one included through a macro's `concat!` path, read
-# whole and found by key (Fab's demo plates); and after a body edit of the including file. The
+# whole and found by key (an app's table of demos); and after a body edit of the including file. The
 # program prints the new text's length or the edit restarts: never "patched" with the old text.
 PROBES += [
     ("include_macro", "src/doc_a.txt", "a", "aa", 3),
@@ -158,9 +158,17 @@ PROBES += [
     ("include_env", "src/doc_e.txt", "e", "eee", 3),
 ]
 FIRST["include_after_body"] = (V, "pub fn late_tiny() -> u64 {\n    1\n", "pub fn late_tiny() -> u64 {\n    2 - 1\n")
+# A Rust file include! reads edited: the items it expands to, a body's expression, a const's value. The
+# file is no source of the program: its save is an edit of the including file, and the keys of the
+# code it expands into follow its text (a body's key named only the names its text has).
+PROBES += [
+    ("rs_include_item", "src/rs_items.rs", "    1\n", "    2\n", 2),
+    ("rs_include_body", "src/rs_value.rs", "1\n", "2\n", 2),
+    ("rs_include_const", "src/rs_k.rs", "1\n", "2\n", 2),
+]
 # A module an edit added (its file loaded after the boot), then a const of it edited: the keys' item
 # graph was of the boot files only, the const had no node there, and every save of it said "no key
-# shows its readers there" and restarted (Fab's See-Through RAMP, 11-06).
+# shows its readers there" and restarted (an app's live session).
 FIRST["const_added_module"] = (M, "// mod added_module\n#[inline(never)]\nfn added_module_read() -> u64 {\n    0\n}",
     "mod added_module;\n#[inline(never)]\nfn added_module_read() -> u64 {\n    added_module::ADDED_K\n}")
 PROBES += [("const_added_module", "src/added_module.rs", "ADDED_K: u64 = 1;", "ADDED_K: u64 = 2;", 2)]
@@ -194,6 +202,7 @@ MUST = {
     "field_import": TYPE_NAMES, "field_offset": EVALUATED, "field_running_frame": STILL_RUNS, "field_blocked_frame": STILL_RUNS, "field_short_walk": STILL_RUNS,
     "const_other_new": LAND, "static_from_const": RUNS_ONCE, "static_through_fn": RUNS_ONCE, "static_through_new": RUNS_ONCE,
     "const_after_body": LAND, "const_added_module": LAND, "include_macro": LAND, "include_found": LAND, "include_after_body": LAND, "include_added": LAND,
+    "rs_include_item": LAND, "rs_include_body": LAND,
     "include_env": r"makes its path from other tokens",
     # a trait object the program made holds the old method table: linked from the disk cache too
     "dyn_method_add": r"old method table", "dyn_method_add_late": r"old method table", "dyn_vtable_fresh": r"old method table", "dyn_impl_removed": LAND,

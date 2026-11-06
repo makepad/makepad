@@ -1,0 +1,3 @@
+# v1 saves items.rs (item-level include!) alone, v2 value.rs (include! in a body) alone: both patch
+v1 patch
+v2 patch

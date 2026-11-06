@@ -74,12 +74,21 @@ LOCK
     printf '{"release":"fx1","repositories":[{"name":"makepad","path":"makepad","commit":"%s"}],"loader":{"name":"loader.zip","bytes":%s,"sha256":"%s","commit":"%s"}}' \
         "$commit" "$bytes" "$sum" "$commit" > "$base/www/public/app/runner/latest"
 }
-# run OUTFILE: the script in a pty; its exit code in $code
+# run OUTFILE: the script in a pty (the screen); plainrun OUTFILE: its output to a file (plain
+# lines); its exit code in $code
+plainrun() {
+    [ "${MAKEPAD_LOADER_ROOT:-}" = "$base/install" ] || { echo "a run without its own MAKEPAD_LOADER_ROOT"; exit 2; }
+    env PATH="$path" sh "$base/home/makepad.sh" > "$1" 2>&1 < /dev/null
+    code=$?
+    echo "=== $1 (exit $code)"; cat "$1"
+}
 run() {
+    # every run here has a folder of its own, never the profile's
+    [ "${MAKEPAD_LOADER_ROOT:-}" = "$base/install" ] || { echo "a run without its own MAKEPAD_LOADER_ROOT"; exit 2; }
     if [ "$(uname -s)" = Darwin ]; then
-        env PATH="$path" script -q "$1" sh "$base/home/makepad.sh" > /dev/null
+        env PATH="$path" TERM=xterm-256color script -q "$1" sh "$base/home/makepad.sh" > /dev/null
     else
-        env PATH="$path" script -q -e -c "sh $base/home/makepad.sh" "$1" > /dev/null
+        env PATH="$path" TERM=xterm-256color script -q -e -c "sh $base/home/makepad.sh" "$1" > /dev/null
     fi
     code=$?
     echo "=== $1 (exit $code)"; cat "$1"
@@ -96,7 +105,7 @@ case "$mode" in
     clean)
         # a PATH of links to the system tools the script needs, and no Rust
         mkdir "$base/bin" || exit 2
-        for tool in chmod ln rmdir sort id clang nproc tee sh dash bash curl tar cc gcc ld as gzip awk sed grep cut tr wc cat ls date sleep mkdir rm mv cp kill dirname basename df head tail sha256sum shasum python3 unzip bsdtar diff find touch env uname mktemp script xcode-select xcrun git; do
+        for tool in chmod ln rmdir sort id clang nproc tee sh dash bash curl tar cc gcc ld as gzip awk sed grep cut tr wc cat ls date sleep mkdir rm mv cp kill dirname basename df head tail sha256sum shasum python3 unzip bsdtar diff find touch env uname mktemp script ps stty dd xcode-select xcrun git; do
             found=$(command -v "$tool" 2>/dev/null) && case "$found" in /*) ln -s "$found" "$base/bin/$tool" ;; esac
         done
         path=$base/bin ;;
@@ -104,19 +113,38 @@ case "$mode" in
 esac
 export MAKEPAD_LOADER_SERVICE=http://127.0.0.1:$port MAKEPAD_LOADER_ROOT=$base/install
 
+# a test service without a folder of its own stops before it makes anything (HOME a folder of the
+# test's, in case it did not)
+(unset MAKEPAD_LOADER_ROOT; HOME=$base/profile PATH=$path sh "$base/home/makepad.sh") > "$base/run0.out" 2>&1
+code=$?
+check "no loader root: refused" "$base/run0.out" "MAKEPAD_LOADER_SERVICE is set without MAKEPAD_LOADER_ROOT"
+if [ "$code" = 1 ] && [ ! -e "$base/profile" ] && [ "$(ls -A "$base/home")" = makepad.sh ]; then
+    echo "PASS no loader root: nothing made"
+else
+    echo "FAIL no loader root: exit $code, or it made something"; failures=$((failures + 1))
+fi
+
 run "$base/run1.out"; first=$code
-check "first run exits 0" "$base/run1.out" "starting"
+check "first run exits 0" "$base/run1.out" "Runner         [^ ]* starting"
 [ "$first" = 0 ] || failures=$((failures + 1))
-check "progress line" "$base/run1.out" "Building the JIT .* [0-9]*/2 crates"
+check "screen: header" "$base/run1.out" "Makepad.* Runner"
+check "screen: keys" "$base/run1.out" "ctrl+c stops · run makepad.sh again to continue"
+check "screen: ready" "$base/run1.out" "Ready in [0-9]*:[0-9][0-9]\. The Runner opens in a moment\."
+check "progress line, the real total" "$base/run1.out" "[0-9] / 2 crates"
+check "built: all crates" "$base/run1.out" "compiled *[^ ]*in [0-9]*:[0-9][0-9] · 2 crates"
+[ "$mode" != clean ] || check "rust downloaded" "$base/run1.out" "downloaded and unpacked in [0-9]*:[0-9][0-9]"
 check "loader started" "$base/install/cache/logs/makepad.log" "fixture loader: one launch record present: true"
 echo "--- sizes (KB), first run"; du -sk "$base/install/rust" "$base/install/cache/downloads" "$base/install" 2>/dev/null
 
-run "$base/run2.out"
-check "unchanged loader: no rebuild" "$base/run2.out" "up to date"
+plainrun "$base/run2.out"
+check "plain: no rebuild" "$base/run2.out" "^  Loader build: up to date · for this processor$"
+check "plain: the source" "$base/run2.out" "^  Loader source: up to date · "
+check "plain: ready" "$base/run2.out" "^  Ready in [0-9]*:[0-9][0-9]\. The Runner opens in a moment\.$"
+if grep -q "$(printf '\033')" "$base/run2.out"; then echo "FAIL plain: no escape codes"; failures=$((failures + 1)); else echo "PASS plain: no escape codes"; fi
 
 publish two
 run "$base/run3.out"
-check "changed loader: rebuilt" "$base/run3.out" "compiled in"
+check "changed loader: rebuilt" "$base/run3.out" "compiled *[^ ]*in [0-9]*:[0-9][0-9] · "
 check "changed loader: new text" "$base/install/cache/logs/makepad.log" "fixture loader: two"
 source=$base/install/cache/loader/src
 if [ -f "$source/flip/inner" ] && [ -f "$source/flop" ] && [ "$(cat "$source/.version")" = "$sum" ]; then
@@ -132,12 +160,12 @@ cp -R "$loader/src" "$loader/$hex" || exit 2
 printf '#!/bin/sh\necho hexfolder\n' > "$loader/$hex/target/host/makepad"; chmod 755 "$loader/$hex/target/host/makepad"
 printf '%s\n' src > "$loader/previous"; printf '%s\n' "$hex" > "$loader/current"
 run "$base/run5.out"
-check "current folder: up to date" "$base/run5.out" "up to date"
+check "current folder: up to date" "$base/run5.out" "Loader build   [^ ]* up to date"
 check "current folder: its binary runs" "$base/install/cache/logs/makepad.log" "hexfolder"
 # an unconfirmed switch rolls back to previous (src: current deleted) with a note
 printf '%s\n' "$hex" > "$loader/pending"
 run "$base/run6.out"
-check "rollback: line" "$base/run6.out" "JIT: went back to src"
+check "rollback: line" "$base/run6.out" "Went back to src: the new runner did not confirm its first start"
 check "rollback: src binary runs" "$base/install/cache/logs/makepad.log" "fixture loader: two"
 [ ! -e "$loader/pending" ] && [ ! -e "$loader/current" ] && [ -s "$loader/rolled-back" ] && echo "PASS rollback: pointers" || { echo "FAIL rollback: pointers"; failures=$((failures + 1)); }
 
@@ -162,7 +190,8 @@ fi
 publish three broken
 run "$base/run4.out"
 [ "$code" != 0 ] || { echo "FAIL broken loader exited 0"; failures=$((failures + 1)); }
-check "broken loader: error line" "$base/run4.out" "Error: the JIT did not compile"
+check "broken loader: error line" "$base/run4.out" "The loader did not compile\."
+check "broken loader: its row" "$base/run4.out" "Loader build   [^ ]* failed"
 check "broken loader: log path" "$base/run4.out" "Full log: .*build.log"
 check "broken loader: error text" "$base/run4.out" "error"
 

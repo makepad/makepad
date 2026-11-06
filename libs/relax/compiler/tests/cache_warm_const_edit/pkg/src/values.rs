@@ -10,7 +10,7 @@ pub const CONST_PATTERN: u64 = 1;
 pub const CONST_LEN: usize = 1;
 pub const CONST_LATE: u64 = 1;
 pub const CONST_INCLUDE: &str = include_str!("data.txt");
-// a table of included texts, one through a macro's `concat!` path (Fab's demo plates)
+// a table of included texts, one through a macro's `concat!` path (an app's demo table)
 pub struct Doc {
     pub key: &'static str,
     pub text: &'static str,

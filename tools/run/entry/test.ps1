@@ -17,12 +17,15 @@ function Check($name, $text, $pattern) {
 function Publish($text, $broken) {
     $zipdir = "$Base\zipfix"
     if (Test-Path $zipdir) { Remove-Item -Recurse -Force $zipdir }
-    New-Item -ItemType Directory -Force -Path "$zipdir\fx1\dep-a" | Out-Null
+    New-Item -ItemType Directory -Force -Path "$zipdir\fx1\dep-a", "$zipdir\fx1\tools\run\entry" | Out-Null
     $files = @{
-        'fx1/Cargo.toml' = "[package]`nname = `"makepad-run`"`nversion = `"0.1.0`"`nedition = `"2021`"`n[dependencies]`ndep-a = { path = `"dep-a`" }`n[[bin]]`nname = `"makepad`"`npath = `"main.rs`"`n[profile.host]`ninherits = `"release`"`n"
+        'fx1/Cargo.toml' = "[package]`nname = `"makepad-run`"`nversion = `"0.1.0`"`nedition = `"2021`"`n[dependencies]`ndep-a = { path = `"dep-a`" }`n[[bin]]`nname = `"makepad`"`npath = `"main.rs`"`n[[bin]]`nname = `"makepad-launcher`"`npath = `"launcher.rs`"`n[profile.host]`ninherits = `"release`"`n"
         'fx1/Cargo.lock' = "version = 4`n`n[[package]]`nname = `"dep-a`"`nversion = `"0.1.0`"`n`n[[package]]`nname = `"makepad-run`"`nversion = `"0.1.0`"`ndependencies = [`n `"dep-a`",`n]`n"
         'fx1/dep-a/Cargo.toml' = "[package]`nname = `"dep-a`"`nversion = `"0.1.0`"`nedition = `"2021`"`n[lib]`npath = `"lib.rs`"`n"
         'fx1/dep-a/lib.rs' = "pub fn text() -> &'static str { `"$text`" }`n"
+        'fx1/launcher.rs' = "fn main() {}`n"
+        # makepad.bat compiles the assembler rust-mingw's dlltool needs from the loader's source
+        'fx1/tools/run/entry/assemble.rs' = [IO.File]::ReadAllText("$here\assemble.rs")
         'fx1/main.rs' = $(if ($broken) { "fn main() { this is not rust }`n" } else { "fn main() {`n    let home = std::env::var(`"MAKEPAD_RUN_HOME`").unwrap_or_default();`n    let record = std::path::Path::new(&home).join(`"apps/runner.launch`");`n    println!(`"fixture loader: {} launch record present: {}`", dep_a::text(), record.is_file());`n}`n" })
     }
     foreach ($k in $files.Keys) { [IO.File]::WriteAllText("$zipdir\$($k.Replace('/', '\'))", $files[$k], $utf8) }
@@ -61,23 +64,37 @@ Start-Sleep 2
 $env:MAKEPAD_LOADER_SERVICE = "http://127.0.0.1:$port"
 $env:MAKEPAD_LOADER_ROOT = "$Base\install"
 function Run($name) {
+    # every run here has a folder of its own, never the profile's
+    if ($env:MAKEPAD_LOADER_ROOT -ne "$Base\install") { throw "a run without its own MAKEPAD_LOADER_ROOT" }
     $out = & cmd.exe /d /c "`"$Base\home\makepad.bat`" 2>&1" | Out-String
     $script:code = $LASTEXITCODE
     "=== $name (exit $script:code)"; $out
     return $out
 }
 try {
+    # a test service without a folder of its own stops before it makes anything (the profile a
+    # folder of the test's, in case it did not)
+    $ownProfile = $env:USERPROFILE
+    Remove-Item Env:MAKEPAD_LOADER_ROOT
+    $env:USERPROFILE = "$Base\profile"
+    try { $r0 = & cmd.exe /d /c "`"$Base\home\makepad.bat`" 2>&1" | Out-String; $code0 = $LASTEXITCODE }
+    finally { $env:USERPROFILE = $ownProfile; $env:MAKEPAD_LOADER_ROOT = "$Base\install" }
+    "=== run0 (exit $code0)"; $r0
+    Check 'no loader root: refused' $r0 'MAKEPAD_LOADER_SERVICE is set without MAKEPAD_LOADER_ROOT'
+    Check 'no loader root: nothing made' ("$code0 " + (Test-Path "$Base\profile") + ' ' + @(Get-ChildItem -Force "$Base\home").Count) '^1 False 1$'
     $r1 = Run 'run1'
     Check 'first run exits 0' "$script:code" '^0$'
-    Check 'progress line' $r1 'Building the JIT .* [1-9][0-9]*/2 crates'
+    Check 'progress line, the real total' $r1 'Loader build: compiling .+ [0-9]+ / 2 crates'
+    Check 'built: all crates' $r1 'Loader build: compiled .+in [0-9:]+ .+ 2 crates'
+    Check 'rust downloaded' $r1 'Rust 1\.98\.0: ready .+downloaded and unpacked in'
     Check 'loader started' $r1 'fixture loader: one launch record present: true'
     '--- sizes (KB), first run'
     foreach ($d in 'install\rust', 'install\cache\downloads', 'install') { '{0}  {1}' -f [int]((Get-ChildItem "$Base\$d" -Recurse -Force -File | Measure-Object Length -Sum).Sum / 1024), $d }
     $r2 = Run 'run2'
-    Check 'unchanged loader: no rebuild' $r2 'up to date'
+    Check 'unchanged loader: no rebuild' $r2 'Loader build: up to date'
     Publish 'two' $false
     $r3 = Run 'run3'
-    Check 'changed loader: rebuilt' $r3 'compiled in'
+    Check 'changed loader: rebuilt' $r3 'Loader build: compiled .+in [0-9:]+'
     Check 'changed loader: new text' $r3 'fixture loader: two'
     $loader = "$Base\install\cache\loader"
     $hex = '0123456789abcdef0123456789abcdef01234567'
@@ -85,17 +102,17 @@ try {
     Remove-Item "$loader\$hex\.loader-sha256"
     [IO.File]::WriteAllText("$loader\previous", "src`n", $utf8); [IO.File]::WriteAllText("$loader\current", "$hex`n", $utf8)
     $r5 = Run 'run5'
-    Check 'current folder: built in place' $r5 'compiled in'
+    Check 'current folder: built in place' $r5 'Loader build: compiled .+in [0-9:]+'
     Check 'current folder: stamp written there' (Test-Path "$loader\$hex\.loader-sha256") 'True'
     [IO.File]::WriteAllText("$loader\pending", "$hex`n", $utf8)
     $r6 = Run 'run6'
-    Check 'rollback: line' $r6 'JIT: went back to src'
+    Check 'rollback: line' $r6 'Went back to src: the new runner did not confirm'
     Check 'rollback: src binary runs' $r6 'fixture loader: two'
     Check 'rollback: pointers' ("" + (-not (Test-Path "$loader\pending")) + (-not (Test-Path "$loader\current")) + (Test-Path "$loader\rolled-back")) 'TrueTrueTrue'
     Publish 'three' $true
     $r4 = Run 'run4'
     Check 'broken loader: nonzero exit' "$script:code" '^[1-9]'
-    Check 'broken loader: error line' $r4 'Error: the JIT did not compile'
+    Check 'broken loader: error line' $r4 'Error: The loader did not compile'
     Check 'broken loader: log path' $r4 'Full log: .*build\.log'
     Check 'broken loader: error text' $r4 'error'
 } finally {

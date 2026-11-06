@@ -1543,10 +1543,14 @@ impl Deps {
     }
 }
 
-/// Whether `m` (a `scan` invocation entry) is a quiet built-in that reads an outside late input.
+/// Whether `m` (a `scan` invocation entry) is a built-in that reads an outside late input: its
+/// expansion's text goes into the key of the body that invokes it (`include!`'s file is no source
+/// of the program: a body's key named only the names of its text, so an edit of the file kept it).
+/// (A name's own top bit is the quiet mark's: `include_bytes`' has it, and compared whole it never
+/// matched, so a body's include_bytes! left its file out of the key.)
 pub(crate) fn late_builtin(m: Name) -> bool {
     let raw = m & !QUIET_BIT;
-    raw == name_of(b"include_str") || raw == name_of(b"include_bytes") || raw == name_of(b"env") || raw == name_of(b"option_env")
+    [&b"include"[..], b"include_str", b"include_bytes", b"env", b"option_env"].iter().any(|w| raw == name_of(w) & !QUIET_BIT)
 }
 
 /// The expansion text digest and the names of the expansion text produced by macro invocations
@@ -1598,4 +1602,24 @@ pub(super) fn region_closure(regions: &[(u32, u32, u32)], seeds: &[(u32, u32)]) 
         }
     }
     out
+}
+
+#[cfg(test)]
+mod late_input_tests {
+    use super::*;
+
+    /// The built-ins that read an outside input are found in a body as `scan` records their calls
+    /// (quiet or not), include! among them: their expansions' text goes into the body's key.
+    #[test]
+    fn a_bodys_late_builtins_are_found_as_scan_records_them() {
+        let calls = [("include!(\"v.rs\")", true), ("include_str!(\"v.txt\")", true), ("include_bytes!(\"v.bin\")", true),
+            ("env!(\"V\")", true), ("option_env!(\"V\")", true), ("concat!(\"a\")", false), ("stringify!(a)", false), ("m!(a)", false)];
+        for (call, late) in calls {
+            let src = format!("fn f() {{ {call}; }}");
+            let (mut names, mut invoked) = (Vec::new(), Vec::new());
+            scan(src.as_bytes(), &[(0, src.len() as u32)], &[], &mut names, &mut invoked);
+            assert_eq!(invoked.len(), 1, "{call}: {invoked:?}");
+            assert_eq!(late_builtin(invoked[0]), late, "{call}");
+        }
+    }
 }
