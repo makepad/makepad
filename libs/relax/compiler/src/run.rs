@@ -3518,6 +3518,12 @@ extern "C" fn at_exit() {
     // (here, not in the run summary: every exit passes this point)
     verbose!("makepad-run: {}", jit::o2_drop_census());
     finish_run("exit", EXIT_SUMMARY.get().and_then(|exit| exit.code.get().copied()));
+    // the run's exit work is done: its endpoint's socket and discovery file go now. Their own
+    // atexit cleanup was registered before this handler, so it runs after it and after every exit
+    // handler registered in between (the GPU driver's, loaded with the window), which can hold
+    // the exit for seconds: a window manager's stop killed aichat in there (SIGKILL at the end of
+    // its grace), and the node's hub read the discovery file left behind as a crash
+    makepad_remote::carrier::unix::withdraw();
 }
 
 struct ExitSummary {

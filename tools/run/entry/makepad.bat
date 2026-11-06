@@ -17,22 +17,31 @@ rem    compile again. Then `makepad` with no arguments: the runner,
 rem    from its launch record (apps\runner.launch, the release service's latest `runner` release),
 rem    which downloads the rest. With arguments, the loader runs with them instead.
 rem
-rem In its folder (this file's own when it holds nothing else, else %USERPROFILE%\makepad-runner) it
-rem creates rust\, cache\, apps\ and runner\, the same folders as makepad.sh.
+rem In its folder it creates rust\, cache\, apps\ and runner\, the same folders as makepad.sh. That is
+rem this file's own folder when it holds nothing else, like the folder Explorer's Extract All makes of
+rem makepad-runner.zip. Otherwise it is %USERPROFILE%\makepad-runner, saying so: for a download among
+rem other files, and for a temporary folder, where Windows runs a file opened inside a zip that was
+rem not extracted (and which it empties later).
 rem Under cache\loader, current selects src or a commit folder; pending rolls back to previous
 rem unless the new runner confirmed its first start. Each folder keeps its own source and binary.
 rem Run it again at any time: nothing is downloaded or compiled twice. It uses only Windows' own
 rem curl.exe, tar.exe, certutil.exe and PowerShell (for release JSON, source updates and build reports).
 setlocal EnableExtensions EnableDelayedExpansion
 
-rem The folder: this file's own when it is an installation already or holds nothing else (a folder
-rem made for it); else %USERPROFILE%\makepad-runner (a download among other files), where it copies itself.
+rem The folder: this file's own when it is an installation already, or holds nothing else (a folder
+rem made for it) and is no temporary folder; else %USERPROFILE%\makepad-runner, where it copies itself:
+rem a download among other files, or a file opened inside a zip (Windows runs it from %TEMP%).
 set "ROOT=%~dp0"
 set "ROOT=%ROOT:~0,-1%"
-if not exist "%ROOT%\cache" (
-    for /f "delims=" %%F in ('dir /b /a "%ROOT%" 2^>nul') do if /i not "%%F"=="%~nx0" if /i not "%%F"=="desktop.ini" set "ROOT=%USERPROFILE%\makepad-runner"
+set "NOT_HOME="
+if not defined MAKEPAD_LOADER_ROOT if not exist "%ROOT%\cache" (
+    for /f "delims=" %%F in ('dir /b /a "%ROOT%" 2^>nul') do if /i not "%%F"=="%~nx0" if /i not "%%F"=="desktop.ini" set "NOT_HOME=others"
+    if not defined NOT_HOME call :temporary
 )
 if defined MAKEPAD_LOADER_ROOT set "ROOT=%MAKEPAD_LOADER_ROOT%"
+if defined NOT_HOME set "ROOT=%USERPROFILE%\makepad-runner"
+if "!NOT_HOME!"=="temporary" echo   This is a temporary folder ^(a zip opened, not extracted^): Makepad goes into !ROOT!, start makepad.bat there next time.
+if "!NOT_HOME!"=="others" echo   This folder holds other files: Makepad goes into !ROOT!, start makepad.bat there next time.
 if not exist "%ROOT%" mkdir "%ROOT%" || (echo   Cannot create the folder !ROOT!. & exit /b 1)
 if /i not "%~dp0"=="%ROOT%\" copy /y "%~f0" "%ROOT%\makepad.bat" >nul
 set "RUST_VERSION=1.98.0"
@@ -293,6 +302,12 @@ if not exist "%ROOT%\apps\runner.launch" (echo   Could not reach the release ser
 echo   Makepad: starting
 "%MAKEPAD%"
 exit /b %errorlevel%
+
+rem :temporary sets NOT_HOME when ROOT is inside %TEMP% or %TMP%. GetFullPath gives each its long
+rem name, so a short 8.3 one (JOHNSM~1) matches too; PowerShell reads them, cmd expands no path.
+:temporary
+for /f %%T in ('powershell -NoProfile -Command "$h = [IO.Path]::GetFullPath($env:ROOT + '\'); foreach ($t in $env:TEMP, $env:TMP) { if ($t -and $h.StartsWith([IO.Path]::GetFullPath($t.TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) { 'temporary'; break } }"') do set "NOT_HOME=%%T"
+exit /b 0
 
 rem :loader_folder POINTER returns only a valid folder with a binary, otherwise src.
 rem Read untrusted pointer text in PowerShell so cmd never expands it as commands or paths.

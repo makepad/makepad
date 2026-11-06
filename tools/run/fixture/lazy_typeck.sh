@@ -11,7 +11,9 @@
 #   test verdict: a clean test check's verdict is reused by the next run of the same code; an edit is
 #                checked again
 # Run from the workspace root (the JIT runs through `cargo run --profile host`). Works on a copy of
-# the fixture. Prints "lazy_typeck: ok" or "lazy_typeck: FAILED <cases>"; exit 0 / 1.
+# the fixture. Prints "lazy_typeck: ok" or "lazy_typeck: FAILED <cases>"; exit 0 / 1. Each run's
+# output is a log in the scratch dir; a failure's logs go to the lease's keep dir too (keep_logs.sh),
+# which outlives the lease's scratch: the intermittent ones are chased from them.
 ROOT=$(pwd)
 J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
 # the copies live under the workspace (as agree.sh's): cargo reads .cargo/config.toml from the folder
@@ -40,6 +42,7 @@ cp -R "$dir/fx" "$dir/fx-app"
 printf '\n#[allow(dead_code)]\nfn unused() -> u32 {\n    "app"\n}\n' >> "$dir/fx-app/app/src/main.rs"
 # shellcheck disable=SC2086
 out=$(TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-app" MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN" "$dir/fx-app" $J run lazy-typeck-app 2>&1); rc=$?
+echo "$out" > "$dir/app-error.log"
 { [ $rc != 0 ] && echo "$out" | grep -q E0308 && echo "$out" | grep -q "not started" && ! echo "$out" | grep -q "main runs"; } || { fail="$fail app-error:$rc"; echo "$out" | tail -8; }
 
 # background: `broken` is reported while main runs, and the run is still up
@@ -76,6 +79,7 @@ fi
 for cmd in check test; do
   # shellcheck disable=SC2086
   out=$(TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-$cmd" perl -e "$IN" "$dir/fx-app" $J $cmd lazy-typeck-dep 2>&1); rc=$?
+  echo "$out" > "$dir/$cmd.log"
   { [ $rc != 0 ] && echo "$out" | grep -q E0308; } || { fail="$fail $cmd:$rc"; echo "$out" | tail -8; }
 done
 
@@ -86,12 +90,14 @@ if grep -q '= 10;' "$lib"; then
   for i in 1 2; do
     # shellcheck disable=SC2086
     out=$(TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-tv" MAKEPAD_RUN_VERBOSE=1 perl -e "$IN" "$dir/fx" $J test lazy-typeck-dep 2>&1); rc=$?
+    echo "$out" > "$dir/test-verdict-$i.log"
     [ $rc = 0 ] || { fail="$fail test-verdict-run$i:$rc"; echo "$out" | tail -8; }
   done
   echo "$out" | grep -q "clean verdicts are stored" || { fail="$fail test-verdict-not-reused"; echo "$out" | grep -a "test check" | tail -3; }
   sed 's/= 10;/= "ten";/' "$lib" > "$lib.new" && mv "$lib.new" "$lib"
   # shellcheck disable=SC2086
   out=$(TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-tv" perl -e "$IN" "$dir/fx" $J test lazy-typeck-dep 2>&1); rc=$?
+  echo "$out" > "$dir/test-verdict-edit.log"
   { [ $rc != 0 ] && echo "$out" | grep -q E0308; } || { fail="$fail test-verdict-stale:$rc"; echo "$out" | tail -8; }
 fi
 
@@ -99,6 +105,9 @@ if [ -z "$fail" ]; then
   echo "lazy_typeck: ok"
   rm -rf "$dir"
 else
+  # the logs and the dependency's source as the runs left it (not the homes' caches)
+  cp "$dir/fx/libs/dep/src/lib.rs" "$dir/dep-lib.rs" 2>/dev/null
+  bash "$ROOT/tools/run/fixture/keep_logs.sh" "$dir"
   echo "lazy_typeck: FAILED$fail (logs in $dir)"
   exit 1
 fi

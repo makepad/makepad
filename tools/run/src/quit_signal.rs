@@ -11,7 +11,8 @@
 //! worker starts Relax's quit write (relax_compiler::run::quit_requested) and ends the run the
 //! way closing its window does (the host loop sees QUIT: the app domain stops with QUIT, the
 //! window closes, the exit write runs). A second signal later than 250 ms forces the exit (one
-//! request delivered twice, as GNU timeout sends it to the child and its group, is one).
+//! request delivered twice, as GNU timeout sends it to the child and its group, is one); the
+//! endpoint's socket and discovery file go first (the exit's own cleanup is cut off).
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 mod native {
@@ -54,6 +55,8 @@ mod native {
         let now = (ts.sec as u64).wrapping_mul(1_000_000_000).wrapping_add(ts.nsec as u64).max(1);
         if let Err(first) = FIRST_NS.compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire) {
             if now.saturating_sub(first) >= SAME_REQUEST_NS {
+                // the exit's cleanup does not run past _exit: the endpoint's files go here
+                makepad_remote::carrier::unix::withdraw_in_signal();
                 unsafe { _exit(130) };
             }
             return;

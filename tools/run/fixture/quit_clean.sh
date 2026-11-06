@@ -1,11 +1,18 @@
 #!/bin/sh
 # Regression test: a quit of `makepad run` is clean at any time. Each case starts the app hidden and
-# muted, ends it, and requires exit status 0 and no crash, fault or leak line in its output:
+# muted, ends it, and requires exit status 0, no crash, fault or leak line in its output, and its
+# endpoint's discovery file and socket gone (its exit cleanup ran: the node's hub reads a file left
+# behind as a crash). Each case has a registry dir of its own (MAKEPAD_REMOTE_REGISTRY):
 #   boot-<s>    SIGTERM <s> seconds after the start (the boot window, the app compiling or opening)
 #   present     SIGTERM 0.5 s after the first frame
 #   swap-<s>    SIGTERM <s> seconds after the compiler-zone swap (settle)
 #   pages       clicks CLICKS (page/tab switches, "x,y;x,y;..."), then SIGTERM
 #   remote-quit `makepad-remote app <pid> quit` after the swap
+#   term-twice  SIGTERM after the swap, and again 0.4 s later, the exit work still under way: the
+#               second forces the exit (status 130 then), and the cleanup still runs
+#   term-kill   SIGTERM after the swap, and SIGKILL 1.5 s later if the process is still there, as a
+#               window manager's stop ends its apps (its grace, then SIGKILL): the run's exit work
+#               is done by then, and its endpoint gone, whatever exit handlers still run after it
 #   script-cold the HAL script `wait_frame 1` (MAKEPAD_HAL_SCRIPT) on a cold cache of its own: the
 #               app is asked to quit right after its first frame, while a cold start is still
 #               bringing things up; it must exit by itself (a run still alive 120 s after its
@@ -28,7 +35,10 @@ cases=0
 run_case() {
     pkg=$1; name=$2; when=$3; off=$4; clicks=$5
     d=$dir/$pkg-$name
-    mkdir -p "$d/home"
+    mkdir -p "$d/home" "$d/registry"
+    # (exported: makepad-remote, the client, finds the app there too)
+    export MAKEPAD_REMOTE_REGISTRY="$d/registry"
+    listening=""
     if [ "$when" = script ]; then
         printf 'wait_frame 1\n' > "$d/quit.hal"
         MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_HOME="$d/home" \
@@ -87,8 +97,20 @@ run_case() {
             sleep 0.7
         done
     fi
+    # whether the endpoint was up (an early boot case may end the run before it listens)
+    listening=""
+    [ -e "$d/registry/makepad-remote-$pid.json" ] && listening=1
     if [ "$name" = remote-quit ]; then
         $R app $pid quit >> "$d/remote.log" 2>&1
+    elif [ "$name" = term-twice ]; then
+        kill -TERM $pid
+        sleep 0.4
+        kill -TERM $pid 2>/dev/null
+    elif [ "$name" = term-kill ]; then
+        kill -TERM $pid
+        n=0
+        while kill -0 $pid 2>/dev/null && [ $n -lt 150 ]; do n=$((n + 1)); sleep 0.01; done
+        kill -KILL $pid 2>/dev/null && echo "quit_clean: $pkg $name: still there 1.5 s after SIGTERM: killed" >> "$d/run.log"
     else
         kill -TERM $pid
     fi
@@ -104,9 +126,19 @@ report_case() {
     # not a failure, said so the slow quit is visible
     leaked=$(grep -ao "leaked [0-9]* threads: .*" "$d/run.log" | cut -c1-160)
     swapped=$(grep -c "makepad-run zone: swap " "$d/run.log")
+    # the run's exit cleanup: its discovery file and its socket (makepad_remote carrier/unix.rs)
+    left=""
+    [ -e "$d/registry/makepad-remote-$pid.json" ] && left="its discovery file"
+    [ -e "/tmp/makepad-$(id -u)/makepad-remote-$pid.sock" ] && left="${left:+$left and }its socket"
+    [ -n "$left" ] && bad="${bad:+$bad
+}$left outlived the run (pid $pid): its exit cleanup did not run"
+    # the second signal forces the exit; a kill after the grace ends what is left of it
+    status=$rc
+    [ "$name" = term-twice ] && [ $rc -eq 130 ] && rc=0
+    [ "$name" = term-kill ] && [ $rc -eq 137 ] && rc=0
     cases=$((cases + 1))
     if [ $rc -eq 0 ] && [ -z "$bad" ]; then
-        echo "quit_clean: $pkg $name: ok (swaps $swapped)${leaked:+; $leaked}"
+        echo "quit_clean: $pkg $name: ok (swaps $swapped${listening:+, its endpoint up}, exit $status)${leaked:+; $leaked}"
     else
         fails=$((fails + 1))
         echo "quit_clean: $pkg $name: FAILED exit $rc (swaps $swapped) log $d/run.log"
@@ -122,5 +154,7 @@ for pkg in ${PACKAGES:-makepad-app-calculator}; do
     for s in ${OFFSETS:-0.5 2 5}; do run_case $pkg swap-$s swap $s; done
     [ -n "$CLICKS" ] && run_case $pkg pages present 1 "$CLICKS"
     run_case $pkg remote-quit swap 1
+    run_case $pkg term-twice swap 1
+    run_case $pkg term-kill swap 1
 done
 if [ $fails -eq 0 ]; then echo "quit_clean: ok ($cases cases; logs in $dir)"; else echo "quit_clean: FAILED ($fails of $cases cases; logs in $dir)"; exit 1; fi
