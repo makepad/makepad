@@ -2514,6 +2514,149 @@ pub unsafe fn vmuls_laneq_f32<const LANE: i32>(a: f32, b: float32x4_t) -> f32 {
     neon_mul_f32(a, b.0[LANE as usize])
 }
 
+// ---- zmij's digit formatting (its NEON path): widening/narrowing arithmetic, lane shuffles and
+// the reinterpretations it names. Plain lane loops, as the other non-vx intrinsics here.
+
+pub unsafe fn vcgtzq_s8(a: int8x16_t) -> uint8x16_t {
+    let mut r = [0u8; 16];
+    let mut i = 0;
+    while i < 16 {
+        r[i] = if a.0[i] > 0 { 0xff } else { 0 };
+        i += 1;
+    }
+    uint8x16_t(r)
+}
+
+pub unsafe fn vcombine_s32(a: int32x2_t, b: int32x2_t) -> int32x4_t {
+    int32x4_t([a.0[0], a.0[1], b.0[0], b.0[1]])
+}
+
+pub unsafe fn vcombine_u64(a: uint64x1_t, b: uint64x1_t) -> uint64x2_t {
+    uint64x2_t([a.0[0], b.0[0]])
+}
+
+pub unsafe fn vcreate_u64(a: u64) -> uint64x1_t {
+    uint64x1_t([a])
+}
+
+pub unsafe fn vdup_n_s32(value: i32) -> int32x2_t {
+    int32x2_t([value, value])
+}
+
+/// a + b * c (lane-wise, wrapping, as the hardware's MLA)
+pub unsafe fn vmla_n_s32(a: int32x2_t, b: int32x2_t, c: i32) -> int32x2_t {
+    int32x2_t([a.0[0].wrapping_add(b.0[0].wrapping_mul(c)), a.0[1].wrapping_add(b.0[1].wrapping_mul(c))])
+}
+
+pub unsafe fn vmlaq_n_s16(a: int16x8_t, b: int16x8_t, c: i16) -> int16x8_t {
+    let mut r = [0i16; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = a.0[i].wrapping_add(b.0[i].wrapping_mul(c));
+        i += 1;
+    }
+    int16x8_t(r)
+}
+
+pub unsafe fn vmlaq_n_s32(a: int32x4_t, b: int32x4_t, c: i32) -> int32x4_t {
+    let mut r = [0i32; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = a.0[i].wrapping_add(b.0[i].wrapping_mul(c));
+        i += 1;
+    }
+    int32x4_t(r)
+}
+
+/// Saturating doubling multiply, high half: sat((2 * a * b) >> bits); only MIN * MIN saturates.
+#[inline(always)]
+fn sqdmulh16(a: i16, b: i16) -> i16 {
+    let p = ((a as i32) * (b as i32)) >> 15;
+    if p > i16::MAX as i32 { i16::MAX } else { p as i16 }
+}
+#[inline(always)]
+fn sqdmulh32(a: i32, b: i32) -> i32 {
+    let p = ((a as i64) * (b as i64)) >> 31;
+    if p > i32::MAX as i64 { i32::MAX } else { p as i32 }
+}
+
+pub unsafe fn vqdmulh_n_s32(a: int32x2_t, b: i32) -> int32x2_t {
+    int32x2_t([sqdmulh32(a.0[0], b), sqdmulh32(a.0[1], b)])
+}
+
+pub unsafe fn vqdmulhq_n_s16(a: int16x8_t, b: i16) -> int16x8_t {
+    let mut r = [0i16; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = sqdmulh16(a.0[i], b);
+        i += 1;
+    }
+    int16x8_t(r)
+}
+
+pub unsafe fn vqdmulhq_n_s32(a: int32x4_t, b: i32) -> int32x4_t {
+    let mut r = [0i32; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = sqdmulh32(a.0[i], b);
+        i += 1;
+    }
+    int32x4_t(r)
+}
+
+#[inline(always)]
+pub unsafe fn vreinterpret_s32_u32(a: uint32x2_t) -> int32x2_t {
+    crate::ptr::read_unaligned(&a as *const uint32x2_t as *const int32x2_t)
+}
+#[inline(always)]
+pub unsafe fn vreinterpret_s32_u64(a: uint64x1_t) -> int32x2_t {
+    crate::ptr::read_unaligned(&a as *const uint64x1_t as *const int32x2_t)
+}
+#[inline(always)]
+pub unsafe fn vreinterpret_u16_s32(a: int32x2_t) -> uint16x4_t {
+    crate::ptr::read_unaligned(&a as *const int32x2_t as *const uint16x4_t)
+}
+#[inline(always)]
+pub unsafe fn vreinterpret_u32_s32(a: int32x2_t) -> uint32x2_t {
+    crate::ptr::read_unaligned(&a as *const int32x2_t as *const uint32x2_t)
+}
+#[inline(always)]
+pub unsafe fn vreinterpretq_u16_s8(a: int8x16_t) -> uint16x8_t {
+    crate::ptr::read_unaligned(&a as *const int8x16_t as *const uint16x8_t)
+}
+#[inline(always)]
+pub unsafe fn vreinterpretq_u8_s16(a: int16x8_t) -> uint8x16_t {
+    crate::ptr::read_unaligned(&a as *const int16x8_t as *const uint8x16_t)
+}
+#[inline(always)]
+pub unsafe fn vreinterpretq_u8_u64(a: uint64x2_t) -> uint8x16_t {
+    crate::ptr::read_unaligned(&a as *const uint64x2_t as *const uint8x16_t)
+}
+
+/// Reverses the bytes within each 64-bit half.
+pub unsafe fn vrev64q_u8(a: uint8x16_t) -> uint8x16_t {
+    let mut r = [0u8; 16];
+    let mut i = 0;
+    while i < 16 {
+        r[i] = a.0[(i & !7) | (7 - (i & 7))];
+        i += 1;
+    }
+    uint8x16_t(r)
+}
+
+/// Widening shift left: each u16 lane to u32, shifted by N.
+#[inline(always)]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+pub unsafe fn vshll_n_u16<const N: i32>(a: uint16x4_t) -> uint32x4_t {
+    uint32x4_t([(a.0[0] as u32) << N, (a.0[1] as u32) << N, (a.0[2] as u32) << N, (a.0[3] as u32) << N])
+}
+
+#[inline(always)]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+pub unsafe fn vshr_n_u32<const N: i32>(a: uint32x2_t) -> uint32x2_t {
+    uint32x2_t([a.0[0] >> N, a.0[1] >> N])
+}
+
 pub unsafe fn vmvnq_u32(a: uint32x4_t) -> uint32x4_t {
     let mut r = [0; 4];
     let mut i = 0;
