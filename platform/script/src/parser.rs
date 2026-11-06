@@ -1606,6 +1606,44 @@ impl ScriptParser {
         }
     }
 
+    /// The RETURN that closes a `{ }` fn body: its last statement's value, or nil when it
+    /// leaves none. A body that ends on a `for` statement returns nil as well (a `for`
+    /// statement is a loop, not the list of its values); its RETURN says so, with the
+    /// distance back to the loop, so that a caller using the result as a value is told why
+    /// it got nothing (`ScriptVm::after_for_result`).
+    fn push_fn_block_return(&mut self, last_was_sep: bool, index: u32) {
+        if !last_was_sep && self.has_pop_to_me() {
+            self.clear_pop_to_me();
+            self.push_code(Opcode::RETURN.into(), index);
+            return;
+        }
+        let args = match self.tail_for_statement() {
+            Some(for_at) => OpcodeArgs::nil_after_for(self.code_len() - for_at),
+            None => OpcodeArgs::NIL,
+        };
+        self.push_code(ScriptValue::from_opcode_args(Opcode::RETURN, args), index);
+    }
+
+    /// Where the `for` statement the code ends on starts (its FOR_1/2/3), when the last
+    /// statement is one: the code ends on that loop's FOR_END, and no branch joins there (a
+    /// loop that ends an if arm is the arm's last statement, not the body's).
+    fn tail_for_statement(&self) -> Option<u32> {
+        let end = self.code_len().checked_sub(1)?;
+        if !matches!(self.code_last().and_then(|c| c.as_opcode()), Some((Opcode::FOR_END, _)))
+            || self.code_len() == self.last_jump_target
+            || self.code_len() == self.valueless_end
+        {
+            return None;
+        }
+        // The loop's FOR jumps to just past its FOR_END; a `while` or `loop` starts with LOOP.
+        (0..end).rev().find(|&at| {
+            matches!(
+                self.opcodes[at as usize].as_opcode(),
+                Some((Opcode::FOR_1 | Opcode::FOR_2 | Opcode::FOR_3, args)) if at + args.to_u32() == end + 1
+            )
+        })
+    }
+
     fn has_pop_to_me(&self) -> bool {
         // A valueless statement if ends here: the flag on its last arm's
         // last statement is that arm's own, not the if's.
@@ -3573,15 +3611,7 @@ impl ScriptParser {
                     self.pop_code();
                     self.push_code(Opcode::RETURN.into(), index);
                 }*/
-                if !last_was_sep && self.has_pop_to_me() {
-                    self.clear_pop_to_me();
-                    self.push_code(Opcode::RETURN.into(), index);
-                } else {
-                    self.push_code(
-                        ScriptValue::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL),
-                        index,
-                    );
-                }
+                self.push_fn_block_return(last_was_sep, index);
                 self.slot_body_close();
                 self.set_opcode_args(
                     fn_slot as _,
@@ -5407,15 +5437,7 @@ impl ScriptParser {
                     last_was_sep,
                     index,
                 } => {
-                    if !last_was_sep && self.has_pop_to_me() {
-                        self.clear_pop_to_me();
-                        self.push_code(Opcode::RETURN.into(), index);
-                    } else {
-                        self.push_code(
-                            ScriptValue::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL),
-                            index,
-                        );
-                    }
+                    self.push_fn_block_return(last_was_sep, index);
                     self.set_opcode_args(
                         fn_slot as _,
                         OpcodeArgs::from_u32(self.code_len() as u32 - fn_slot),
@@ -5741,15 +5763,7 @@ impl ScriptParser {
                     last_was_sep,
                     index,
                 } => {
-                    if !last_was_sep && self.has_pop_to_me() {
-                        self.clear_pop_to_me();
-                        self.push_code(Opcode::RETURN.into(), index);
-                    } else {
-                        self.push_code(
-                            ScriptValue::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL),
-                            index,
-                        );
-                    }
+                    self.push_fn_block_return(last_was_sep, index);
                     self.set_opcode_args(
                         fn_slot as _,
                         OpcodeArgs::from_u32(self.code_len() as u32 - fn_slot),

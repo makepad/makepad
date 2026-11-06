@@ -22,6 +22,11 @@
 //!   `r <= s * gap_up` (r >= 0) or `-r < s * gap_down` (r < 0), exact
 //!   because both sides lie on the grid of `ulp(s)^2`.
 //!
+//! The tries nest, each where the one before moved the candidate, with no loop
+//! and no early return: FXC inlines every call, and compiled a kernel holding
+//! 70 of these helpers in 16 s nested against 28 s as a loop of three, though
+//! the nested code is a third larger. The GPU runs the same steps either way.
+//!
 //! Operands outside [2^-60, 2^60] (and zero, inf, NaN) keep the hardware
 //! result: the split would overflow there or the partial products underflow.
 //! Distances, lattice coordinates and blend radii of a bake live far inside.
@@ -59,6 +64,8 @@ impl Helpers {
 
 const LO: f32 = 8.673617e-19; // 2^-60
 const HI: f32 = 1.1529215e18; // 2^60
+/// Candidates a helper tries: the hardware's result and up to two neighbours on.
+const TRIES: u32 = 3;
 
 struct B {
     f: IrFunction,
@@ -119,8 +126,8 @@ impl B {
         self.and(l, h)
     }
     /// `a - q * b` exactly (for `q * b` within a factor two of `a`), into `body`. Both splits
-    /// stay here, inside the correcting loop: the divisor's hoisted before the loop measured
-    /// 0.95 ms slower in a march pass of 5.7 ms (a 24 GB GPU, Vulkan).
+    /// stay here, inside each correcting step: the divisor's, hoisted before them (then a loop),
+    /// measured 0.95 ms slower in a march pass of 5.7 ms (a 24 GB GPU, Vulkan).
     fn remainder(&mut self, a: ExprId, q: ExprId, b: ExprId, body: &mut Vec<Stmt>) -> ExprId {
         let p = self.bin(BinOp::Mul, q, b);
         let p = self.val(p, body);
@@ -138,6 +145,28 @@ impl B {
         let d = self.bin(BinOp::Sub, a, p);
         let r = self.bin(BinOp::Sub, d, err);
         self.val(r, body)
+    }
+    /// [`TRIES`] correcting steps into `body`, nested: each later one runs where the one before
+    /// moved the candidate (`step` emits one, given the flag to set where it moves it).
+    fn tries(&mut self, left: u32, body: &mut Vec<Stmt>, step: &dyn Fn(&mut B, &mut Vec<Stmt>, LocalId)) {
+        let moved = self.f.local(id!(_mp_moved), self.f.locals.len() as u32, TY_BOOL, true, LocalKind::Temp);
+        let no = self.e(ExprKind::Lit(IrLit::Bool(false)), TY_BOOL);
+        body.push(Stmt::Local(moved, no));
+        step(self, body, moved);
+        if left > 1 {
+            let mut next = Vec::new();
+            self.tries(left - 1, &mut next, step);
+            let m = self.e(ExprKind::Local(moved), TY_BOOL);
+            body.push(Stmt::If(m, next, Vec::new()));
+        }
+    }
+    /// Unless `near`: candidate `q` becomes `to`, and `moved` is set.
+    fn move_unless(&mut self, near: ExprId, q: LocalId, to: ExprId, moved: LocalId) -> Stmt {
+        let far = self.not(near);
+        let place = self.e(ExprKind::Local(q), TY_F32);
+        let flag = self.e(ExprKind::Local(moved), TY_BOOL);
+        let yes = self.e(ExprKind::Lit(IrLit::Bool(true)), TY_BOOL);
+        Stmt::If(far, vec![Stmt::Assign(place, to), Stmt::Assign(flag, yes)], Vec::new())
     }
     /// Veltkamp's split of `v` into a 12-bit high part and the rest.
     fn split(&mut self, v: ExprId, body: &mut Vec<Stmt>) -> (ExprId, ExprId) {
@@ -166,54 +195,57 @@ fn build_div() -> IrFunction {
     let q = b.bin(BinOp::Div, a, bb);
     let q = b.val(q, &mut body);
     // outside the safe range: the hardware's quotient
+    let (res, rl) = b.var(id!(_mp_res), q, &mut body);
     let ra = b.in_range(a);
     let rb = b.in_range(bb);
     let rq = b.in_range(q);
     let ok = b.and(ra, rb);
     let ok = b.and(ok, rq);
-    let out = b.not(ok);
-    body.push(Stmt::If(out, vec![Stmt::Return(q)], Vec::new()));
+    let mut fix = Vec::new();
     let aa = b.abs(a);
-    let aa = b.val(aa, &mut body);
+    let aa = b.val(aa, &mut fix);
     let ab = b.abs(bb);
-    let ab = b.val(ab, &mut body);
+    let ab = b.val(ab, &mut fix);
     let aq = b.abs(q);
-    let (qv, ql) = b.var(id!(_mp_q), aq, &mut body);
-    let counter = b.f.local(id!(_mp_i), b.f.locals.len() as u32, TY_U32, true, LocalKind::Guard);
-    let mut lp = Vec::new();
-    let r = b.remainder(aa, qv, ab, &mut lp);
-    let zero = b.f(0.0);
-    let nonneg = b.bin(BinOp::Ge, r, zero);
-    let two = b.f(2.0);
-    // r >= 0: nearest iff 2r < |b| (up(q) - q), else up
-    let mut pos = Vec::new();
-    let up = b.step(qv, true);
-    let up = b.val(up, &mut pos);
-    let gap = b.bin(BinOp::Sub, up, qv);
-    let lim = b.bin(BinOp::Mul, ab, gap);
-    let r2 = b.bin(BinOp::Mul, two, r);
-    let near = b.bin(BinOp::Lt, r2, lim);
-    let place = b.e(ExprKind::Local(ql), TY_F32);
-    pos.push(Stmt::If(near, vec![Stmt::Break], vec![Stmt::Assign(place, up)]));
-    // r < 0: nearest iff -2r < |b| (q - down(q)), else down
-    let mut neg = Vec::new();
-    let down = b.step(qv, false);
-    let down = b.val(down, &mut neg);
-    let gap = b.bin(BinOp::Sub, qv, down);
-    let lim = b.bin(BinOp::Mul, ab, gap);
-    let r2 = b.bin(BinOp::Mul, two, r);
-    let nr2 = b.e(ExprKind::Unary(UnOp::Neg, r2), TY_F32);
-    let near = b.bin(BinOp::Lt, nr2, lim);
-    let place = b.e(ExprKind::Local(ql), TY_F32);
-    neg.push(Stmt::If(near, vec![Stmt::Break], vec![Stmt::Assign(place, down)]));
-    lp.push(Stmt::If(nonneg, pos, neg));
-    let start = b.u(0);
-    let end = b.u(3);
-    body.push(Stmt::For(counter, start, end, lp));
+    let (_, ql) = b.var(id!(_mp_q), aq, &mut fix);
+    b.tries(TRIES, &mut fix, &|b, body, moved| {
+        let qv = b.e(ExprKind::Local(ql), TY_F32);
+        let r = b.remainder(aa, qv, ab, body);
+        let zero = b.f(0.0);
+        let nonneg = b.bin(BinOp::Ge, r, zero);
+        let two = b.f(2.0);
+        // r >= 0: nearest iff 2r < |b| (up(q) - q), else up
+        let mut pos = Vec::new();
+        let up = b.step(qv, true);
+        let up = b.val(up, &mut pos);
+        let gap = b.bin(BinOp::Sub, up, qv);
+        let lim = b.bin(BinOp::Mul, ab, gap);
+        let r2 = b.bin(BinOp::Mul, two, r);
+        let near = b.bin(BinOp::Lt, r2, lim);
+        let moving = b.move_unless(near, ql, up, moved);
+        pos.push(moving);
+        // r < 0: nearest iff -2r < |b| (q - down(q)), else down
+        let mut neg = Vec::new();
+        let down = b.step(qv, false);
+        let down = b.val(down, &mut neg);
+        let gap = b.bin(BinOp::Sub, qv, down);
+        let lim = b.bin(BinOp::Mul, ab, gap);
+        let r2 = b.bin(BinOp::Mul, two, r);
+        let nr2 = b.e(ExprKind::Unary(UnOp::Neg, r2), TY_F32);
+        let near = b.bin(BinOp::Lt, nr2, lim);
+        let moving = b.move_unless(near, ql, down, moved);
+        neg.push(moving);
+        body.push(Stmt::If(nonneg, pos, neg));
+    });
     // the sign of the quotient (an exact multiply by -1 / 1)
+    let zero = b.f(0.0);
     let neg_q = b.bin(BinOp::Lt, q, zero);
+    let qv = b.e(ExprKind::Local(ql), TY_F32);
     let nq = b.e(ExprKind::Unary(UnOp::Neg, qv), TY_F32);
-    let res = b.e(ExprKind::Select(neg_q, nq, qv), TY_F32);
+    let signed = b.e(ExprKind::Select(neg_q, nq, qv), TY_F32);
+    let place = b.e(ExprKind::Local(rl), TY_F32);
+    fix.push(Stmt::Assign(place, signed));
+    body.push(Stmt::If(ok, fix, Vec::new()));
     body.push(Stmt::Return(res));
     b.f.body = body;
     b.f
@@ -228,40 +260,39 @@ fn build_sqrt() -> IrFunction {
     let s = b.e(ExprKind::Builtin(Builtin::Sqrt, vec![x]), TY_F32);
     let s = b.val(s, &mut body);
     // zero, negative, inf, NaN and the ends of the range: the hardware's root
+    let (sv, sl) = b.var(id!(_mp_s), s, &mut body);
     let rx = b.in_range(x);
     let zero = b.f(0.0);
     let posx = b.bin(BinOp::Gt, x, zero);
     let ok = b.and(rx, posx);
-    let out = b.not(ok);
-    body.push(Stmt::If(out, vec![Stmt::Return(s)], Vec::new()));
-    let (sv, sl) = b.var(id!(_mp_s), s, &mut body);
-    let counter = b.f.local(id!(_mp_i), b.f.locals.len() as u32, TY_U32, true, LocalKind::Guard);
-    let mut lp = Vec::new();
-    let r = b.remainder(x, sv, sv, &mut lp);
-    let nonneg = b.bin(BinOp::Ge, r, zero);
-    // r >= 0: nearest iff r <= s (up(s) - s), else up
-    let mut pos = Vec::new();
-    let up = b.step(sv, true);
-    let up = b.val(up, &mut pos);
-    let gap = b.bin(BinOp::Sub, up, sv);
-    let lim = b.bin(BinOp::Mul, sv, gap);
-    let near = b.bin(BinOp::Le, r, lim);
-    let place = b.e(ExprKind::Local(sl), TY_F32);
-    pos.push(Stmt::If(near, vec![Stmt::Break], vec![Stmt::Assign(place, up)]));
-    // r < 0: nearest iff -r < s (s - down(s)), else down
-    let mut neg = Vec::new();
-    let down = b.step(sv, false);
-    let down = b.val(down, &mut neg);
-    let gap = b.bin(BinOp::Sub, sv, down);
-    let lim = b.bin(BinOp::Mul, sv, gap);
-    let nr = b.e(ExprKind::Unary(UnOp::Neg, r), TY_F32);
-    let near = b.bin(BinOp::Lt, nr, lim);
-    let place = b.e(ExprKind::Local(sl), TY_F32);
-    neg.push(Stmt::If(near, vec![Stmt::Break], vec![Stmt::Assign(place, down)]));
-    lp.push(Stmt::If(nonneg, pos, neg));
-    let start = b.u(0);
-    let end = b.u(3);
-    body.push(Stmt::For(counter, start, end, lp));
+    let mut fix = Vec::new();
+    b.tries(TRIES, &mut fix, &|b, body, moved| {
+        let sv = b.e(ExprKind::Local(sl), TY_F32);
+        let r = b.remainder(x, sv, sv, body);
+        let zero = b.f(0.0);
+        let nonneg = b.bin(BinOp::Ge, r, zero);
+        // r >= 0: nearest iff r <= s (up(s) - s), else up
+        let mut pos = Vec::new();
+        let up = b.step(sv, true);
+        let up = b.val(up, &mut pos);
+        let gap = b.bin(BinOp::Sub, up, sv);
+        let lim = b.bin(BinOp::Mul, sv, gap);
+        let near = b.bin(BinOp::Le, r, lim);
+        let moving = b.move_unless(near, sl, up, moved);
+        pos.push(moving);
+        // r < 0: nearest iff -r < s (s - down(s)), else down
+        let mut neg = Vec::new();
+        let down = b.step(sv, false);
+        let down = b.val(down, &mut neg);
+        let gap = b.bin(BinOp::Sub, sv, down);
+        let lim = b.bin(BinOp::Mul, sv, gap);
+        let nr = b.e(ExprKind::Unary(UnOp::Neg, r), TY_F32);
+        let near = b.bin(BinOp::Lt, nr, lim);
+        let moving = b.move_unless(near, sl, down, moved);
+        neg.push(moving);
+        body.push(Stmt::If(nonneg, pos, neg));
+    });
+    body.push(Stmt::If(ok, fix, Vec::new()));
     body.push(Stmt::Return(sv));
     b.f.body = body;
     b.f

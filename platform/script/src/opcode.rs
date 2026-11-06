@@ -75,6 +75,19 @@ impl OpcodeArgs {
         self.0 & Self::TYPE_MASK == Self::TYPE_NIL
     }
 
+    /// RETURN's argument at the end of a fn body whose last statement is a `for` statement:
+    /// nil like every valueless return, and the distance back to that loop's FOR opcode.
+    #[inline]
+    pub fn nil_after_for(distance: u32) -> Self {
+        Self(Self::TYPE_NIL | (distance & 0x0fff_ffff))
+    }
+
+    /// The distance [`Self::nil_after_for`] holds, 0 for any other argument.
+    #[inline]
+    pub fn after_for(&self) -> u32 {
+        if self.is_nil() { self.0 & 0x0fff_ffff } else { 0 }
+    }
+
     #[inline]
     pub fn is_u32(&self) -> bool {
         self.0 & Self::TYPE_MASK == Self::TYPE_NUMBER

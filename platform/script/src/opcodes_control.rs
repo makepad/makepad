@@ -54,6 +54,16 @@ impl<'a> ScriptVm<'a> {
             self.bail("calls empty in handle_return");
             return;
         };
+        // A fn that ended on a `for` statement: the fn (its args scope's proto, read before
+        // the frame frees that scope) and where its loop is.
+        let after_for = match opargs.after_for() {
+            0 => None,
+            back => {
+                let at = self.bx.threads.cur_ref().trap.ip;
+                let f = self.bx.threads.cur_ref().scopes.get(call.bases.scope).and_then(|&args| self.bx.heap.proto(args).as_object());
+                Some((f, ScriptIp { body: at.body, index: at.index - back }))
+            }
+        };
         self.bx.threads.cur().slot_base = call.prev_slot_base;
         // A body run's last scope holds everything the body defined after
         // a shadowing let; keep it for host->script lookups. Only a body
@@ -71,6 +81,9 @@ impl<'a> ScriptVm<'a> {
         if let Some(ret) = call.return_ip {
             self.bx.threads.cur().trap.ip = ret;
             self.bx.threads.cur().push_stack_unchecked(value);
+            if let Some((f, loop_at)) = after_for {
+                self.after_for_result(f, loop_at, ret, call.args.is_pop_to_me());
+            }
             if !self.bx.threads.cur_ref().has_execution_limit_exceeded() && call.args.is_pop_to_me()
             {
                 self.pop_to_me();
@@ -82,6 +95,82 @@ impl<'a> ScriptVm<'a> {
                 .trap
                 .set_on(Some(ScriptTrapOn::Return(value)));
         }
+    }
+
+    /// A fn whose last statement is a `for` statement returned nil to `ret` (its RETURN
+    /// carried `OpcodeArgs::nil_after_for`): a `for` statement is a loop, not the list of its
+    /// values. Nothing to say when the caller discards the result; when it uses it as a value,
+    /// an error at that use names the fn `f` and its loop (at `loop_at`). `pops`: whether the
+    /// call pops its result to `me`.
+    #[cold]
+    #[inline(never)]
+    fn after_for_result(&mut self, f: Option<ScriptObject>, loop_at: ScriptIp, ret: ScriptIp, pops: bool) {
+        let Some(use_at) = self.result_use(ret, pops) else { return };
+        let name = f.and_then(|f| self.fn_name(f));
+        let what = name.map_or_else(|| "this fn".to_string(), |n| format!("`{n}`"));
+        let at = self.bx.code.ip_to_loc_plain(loop_at).map_or_else(String::new, |l| format!(" at {}:{}", l.file, l.line));
+        let message = format!(
+            "{what} returns nothing: its last statement is the `for`{at}, and a `for` statement is a loop, not a value. \
+             Its result is used here; end it with `return for ..` to return the loop's list"
+        );
+        self.bx.threads.cur_ref().trap.push_err(ScriptValue::script_err_type_mismatch(use_at), &message, file!(), line!());
+    }
+
+    /// Where the value a call just returned to `ret` gets used, as the call it came from
+    /// (the CALL just before a return ip); None when it is discarded. It is used unless it
+    /// only passes on: over an if arm's jump to the join, as a fn's result to that fn's
+    /// caller, or popped to `me` where there is none or `me` is an object body (a nil adds
+    /// nothing to it). Popped into a call's args, a list or a pod, it is used.
+    fn result_use(&self, mut ret: ScriptIp, mut pops: bool) -> Option<ScriptIp> {
+        let thread = self.bx.threads.cur_ref();
+        let bodies = self.bx.code.bodies.borrow();
+        // The value is in frame `level - 1`, returned by the call just before `ret`.
+        let mut level = thread.calls.len();
+        let mut call_at = ScriptIp { body: ret.body, index: ret.index - 1 };
+        loop {
+            if pops {
+                let lo = level.checked_sub(1).and_then(|f| thread.calls.get(f)).map_or(0, |c| c.bases.mes);
+                let hi = thread.calls.get(level).map_or(thread.mes.len(), |c| c.bases.mes);
+                return match thread.mes.get(lo..hi).and_then(|m| m.last()) {
+                    None | Some(ScriptMe::Object(_)) => None,
+                    Some(_) => Some(call_at),
+                };
+            }
+            let code = bodies.get(ret.body as usize).and_then(|b| b.parser.opcodes.get(ret.index as usize));
+            match code.and_then(|c| c.as_opcode()) {
+                Some((Opcode::IF_ELSE, args)) => ret.index += args.to_u32(),
+                Some((Opcode::POP_TO_ME, _)) => pops = true,
+                Some((Opcode::RETURN, args)) if args.is_nil() => return None,
+                Some((Opcode::RETURN, _)) => {
+                    // The frame returns it; to the host, the host decides.
+                    let frame = thread.calls.get(level.checked_sub(1)?)?;
+                    ret = frame.return_ip?;
+                    pops = frame.args.is_pop_to_me();
+                    call_at = ScriptIp { body: ret.body, index: ret.index - 1 };
+                    level -= 1;
+                }
+                _ => return Some(call_at),
+            }
+        }
+    }
+
+    /// A name `f` is bound to: in the scopes the caller sees, else where `f` was made.
+    fn fn_name(&self, f: ScriptObject) -> Option<LiveId> {
+        let heap = &self.bx.heap;
+        let starts = [self.bx.threads.cur_ref().scopes.last().copied(), heap.proto(f).as_object()];
+        for start in starts.into_iter().flatten() {
+            let mut scope = Some(start);
+            while let Some(s) = scope {
+                let object = &heap.objects[s];
+                let named = |key: ScriptValue, value: ScriptValue| (value.as_object() == Some(f)).then(|| key.as_id()).flatten();
+                let found = object.vec.iter().find_map(|kv| named(kv.key, kv.value)).or_else(|| object.map_iter_ret(named));
+                if found.is_some() {
+                    return found;
+                }
+                scope = heap.proto(s).as_object();
+            }
+        }
+        None
     }
 
     pub(crate) fn handle_return_if_err(&mut self, _opargs: OpcodeArgs) -> bool {
