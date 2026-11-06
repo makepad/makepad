@@ -459,13 +459,40 @@ fn legacy_records(changes: Vec<TreeChange>) -> Vec<ChangeTuple> {
     }).collect()
 }
 
-fn this_repository_pairs(repo: &mut Repository) -> Vec<(ObjectId, ObjectId)> {
+/// A history built with the API itself, 27 commits on `main`: each step adds a file in one of
+/// five nested crates, changes a shared file and deletes the file three steps old; at step 12 a
+/// side branch merges in (`--no-ff`).
+fn build_history(repo: &mut Repository, dir: &Path) {
+    for step in 0..26u32 {
+        let src = dir.join(format!("crates/c{}/src", step % 5));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join(format!("f{step}.rs")), format!("pub fn f{step}() {{}}\n")).unwrap();
+        fs::write(dir.join("Cargo.toml"), format!("[workspace] # step {step}\n")).unwrap();
+        if step >= 3 {
+            fs::remove_file(dir.join(format!("crates/c{}/src/f{}.rs", (step - 3) % 5, step - 3))).unwrap();
+        }
+        commit_all(repo, dir, &format!("step {step}"));
+        if step == 12 {
+            checkout_new_branch(repo, "side");
+            fs::create_dir_all(dir.join("side/deep/er")).unwrap();
+            fs::write(dir.join("side/deep/er/side.rs"), "pub fn side() {}\n").unwrap();
+            fs::write(dir.join("crates/c0/src/f10.rs"), "pub fn f10() { /* side */ }\n").unwrap();
+            commit_all(repo, dir, "side");
+            repo.checkout_branch("main").unwrap();
+            merge_no_ff(repo, "side", "merge side");
+        }
+    }
+}
+
+/// 24 first-parent steps back from HEAD, their whole span both ways, and a merge's first parent
+/// to it.
+fn history_pairs(repo: &mut Repository) -> Vec<(ObjectId, ObjectId)> {
     let head = repo.head_oid().unwrap();
     let mut target = head;
     let mut pairs = Vec::new();
     for _ in 0..24 {
         let commit = repo.read_commit(&target).unwrap();
-        let parent = commit.first_parent().expect("this repository must have 24 first-parent pairs");
+        let parent = commit.first_parent().expect("the built history has 24 first-parent pairs");
         pairs.push((parent, target));
         target = parent;
     }
@@ -473,18 +500,19 @@ fn this_repository_pairs(repo: &mut Repository) -> Vec<(ObjectId, ObjectId)> {
     pairs.push((target, head));
     pairs.push((head, target));
     let history = repo.log(&head, usize::MAX).unwrap();
-    if let Some((oid, commit)) = history.iter().find(|(_, commit)| commit.parents.len() > 1) {
-        pairs.push((commit.parents[0], *oid));
-        eprintln!("bounded-tree real merge: {oid}, first parent {}", commit.parents[0]);
-    }
-    eprintln!("bounded-tree real repository: HEAD={head}, history={}, pairs={}", history.len(), pairs.len());
+    let (oid, commit) = history.iter().find(|(_, commit)| commit.parents.len() > 1).expect("the built history has a merge");
+    pairs.push((commit.parents[0], *oid));
+    eprintln!("bounded-tree history: HEAD={head}, history={}, pairs={}", history.len(), pairs.len());
     pairs
 }
 
 #[test]
-fn bounded_tree_diff_matches_real_repository_commits() {
-    let mut repo = Repository::open(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
-    let pairs = this_repository_pairs(&mut repo);
+fn bounded_tree_diff_matches_the_full_diff_over_a_history() {
+    let dir = test_support::tempdir().unwrap();
+    init_layout(dir.path());
+    let mut repo = Repository::open(dir.path()).unwrap();
+    build_history(&mut repo, dir.path());
+    let pairs = history_pairs(&mut repo);
     assert!(pairs.len() >= 24);
     let account = memory::MemoryAccount::new(64 * 1024 * 1024);
     let limits = TreeDiffLimits::default();
@@ -512,7 +540,7 @@ fn bounded_tree_diff_matches_real_repository_commits() {
         drop(bounded);
         assert_eq!(account.reserved(), 0);
     }
-    eprintln!("bounded-tree real totals: records={records}, counters={total:?}, account_peak={}, time_ms={:.3}, blob_reads={}", account.peak(), elapsed.as_secs_f64() * 1000.0, repo.read_stats().blob_reads);
+    eprintln!("bounded-tree totals: records={records}, counters={total:?}, account_peak={}, time_ms={:.3}, blob_reads={}", account.peak(), elapsed.as_secs_f64() * 1000.0, repo.read_stats().blob_reads);
 }
 
 #[test]

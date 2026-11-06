@@ -632,6 +632,20 @@ impl Repository {
         }
     }
 
+    /// The index as status compares it with the worktree: its file's stat taken before it is
+    /// read, its racily clean entries smudged ([`worktree::smudge_racily_clean`]). Status never
+    /// writes it.
+    fn index_for_status(&self) -> Result<Index, GitError> {
+        let path = self.git_dir.join("index");
+        let before = fs::metadata(&path);
+        let mut index = self.read_index()?;
+        // (no index then: one made since is no older than its entries' read)
+        if let Ok(stat) = before.or_else(|_| fs::metadata(&path)) {
+            worktree::smudge_racily_clean(&mut index, &stat);
+        }
+        Ok(index)
+    }
+
     /// Write the index.
     pub fn write_index(&self, index: &Index) -> Result<(), GitError> {
         write_index(&self.git_dir, index)
@@ -977,7 +991,7 @@ impl Repository {
         cancel: &dyn Fn() -> bool,
     ) -> Result<worktree::Status, GitError> {
         self.ensure_object_sources()?;
-        let index = self.read_index()?;
+        let index = self.index_for_status()?;
 
         // Try to build HEAD tree file map. If HEAD objects are missing locally
         // (e.g. partial clones), fall back to index/worktree-only status.
@@ -1051,7 +1065,7 @@ impl Repository {
         if path.is_empty() {
             return Ok(None);
         }
-        let index = self.read_index()?;
+        let index = self.index_for_status()?;
         let options = worktree::StatusOptions {
             skip_hidden: true,
             skip_target_dirs: true,
@@ -1098,7 +1112,7 @@ impl Repository {
     /// under `GIT_OPTIONAL_LOCKS=0`.
     pub fn status_of_paths(&mut self, paths: &[String]) -> Result<Vec<worktree::PathStatus>, GitError> {
         self.ensure_object_sources()?;
-        let index = self.read_index()?;
+        let index = self.index_for_status()?;
         let staged: HashMap<&str, &IndexEntry> = index.entries.iter().filter(|e| e.stage() == 0).map(|e| (e.path.as_str(), e)).collect();
         let unmerged: std::collections::HashSet<&str> = index.entries.iter().filter(|e| e.stage() != 0).map(|e| e.path.as_str()).collect();
         let root = match self.head_oid() {

@@ -519,3 +519,40 @@ fn walk_head_tree_preserves_executable_and_symlink_modes() {
     assert_eq!(by_path["subdir/file.txt"].0, 0o100644);
     assert_eq!(by_path["subdir/file.txt"].1, b"nested\n");
 }
+
+/// A file rewritten in place with its size and its mtime second kept is modified: by its
+/// nanoseconds where its entry has them, and by git's racy-git rule where it was staged in the
+/// index's own second or later (there its whole stat can be kept). Status said such a file clean,
+/// so a lane's edit shipped as its committed text.
+#[test]
+fn an_in_place_edit_keeping_size_and_mtime_second_is_modified() {
+    use std::io::Write;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let base = tempdir().unwrap();
+    let dir = base.path();
+    let mut repo = init_repo(dir);
+    let write = |name: &str, text: &str, at: SystemTime| {
+        let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).open(dir.join(name)).unwrap();
+        f.write_all(text.as_bytes()).unwrap();
+        f.set_modified(at).unwrap();
+    };
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let (past, future) = (UNIX_EPOCH + Duration::from_secs(now - 100), UNIX_EPOCH + Duration::from_secs(now + 100));
+    let ms = Duration::from_millis;
+    write("old.rs", "fn a() {}\n", past + ms(100));
+    write("racy.rs", "fn b() {}\n", future + ms(100));
+    write("same.rs", "fn c() {}\n", future + ms(100));
+    for name in ["old.rs", "racy.rs", "same.rs"] {
+        repo.stage_file(name).unwrap();
+    }
+    repo.commit("base\n", sig()).unwrap();
+    let modified = |repo: &mut Repository| {
+        let mut paths: Vec<String> = repo.status().unwrap().entries.into_iter().filter(|e| e.status == FileStatus::Modified).map(|e| e.path).collect();
+        paths.sort();
+        paths
+    };
+    assert!(modified(&mut repo).is_empty(), "racily clean files of the same text are clean");
+    write("old.rs", "fn x() {}\n", past + ms(200));
+    write("racy.rs", "fn y() {}\n", future + ms(100));
+    assert_eq!(modified(&mut repo), ["old.rs", "racy.rs"]);
+}

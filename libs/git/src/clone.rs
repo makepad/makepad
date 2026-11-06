@@ -211,7 +211,7 @@ pub fn local_clone_depth1(
                             ctime_sec: metadata.mtime() as u32,
                             ctime_nsec: 0,
                             mtime_sec: metadata.mtime() as u32,
-                            mtime_nsec: 0,
+                            mtime_nsec: metadata.mtime_nsec() as u32,
                             dev: metadata.dev() as u32,
                             ino: metadata.ino() as u32,
                             mode: fe.mode,
