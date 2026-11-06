@@ -864,7 +864,17 @@ impl<'a> TextCx<'a> {
             Builtin::Normalize => "normalize",
             Builtin::Pow => "pow",
             Builtin::Radians => "radians",
-            Builtin::Round => "round",
+            // halfway cases to even on every target, as WGSL's and HLSL's round and SPIR-V's
+            // RoundEven: MSL's round goes away from zero and GLSL's is either
+            Builtin::Round => {
+                if self.metal() {
+                    "rint"
+                } else if glsl {
+                    "roundEven"
+                } else {
+                    "round"
+                }
+            }
             Builtin::Sign => "sign",
             Builtin::Sin => "sin",
             Builtin::Sinh => "sinh",
