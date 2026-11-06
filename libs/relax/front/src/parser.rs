@@ -918,7 +918,41 @@ impl<'a> Parser<'a> {
             if crate::lexer::validation_enabled() { self.meta_frags_in_attr(toks)?; self.attr_shape_now_or_later(toks)?; }
             v.push(Attr { inner: false, toks });
         }
-        Ok(self.expand_cfg_attrs(v))
+        let mut v = self.expand_cfg_attrs(v);
+        self.literal_attr_values(&mut v)?;
+        Ok(v)
+    }
+
+    /// `#[link_name = concat!(..)]`, `#[export_name = ..]`, `#[link_section = ..]`: the value is a
+    /// macro call (ring's `prefixed_extern!` names every C symbol through `concat!(prefix!(),
+    /// stringify!(..))`), expanded eagerly to the string literal it denotes, so every later reader
+    /// of the attribute (the symbol name of a foreign item, an exported name) sees `name = "lit"`
+    /// (rustc_expand expand.rs: fully_expand_fragment visits attribute value expressions).
+    fn literal_attr_values(&mut self, attrs: &mut [Attr]) -> PResult<()> {
+        for a in attrs.iter_mut() {
+            let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
+            if hi <= lo + 3 || hi > self.toks.len() || self.toks.at(lo + 1).kind != T::Eq { continue; }
+            let name = self.tok_text(self.toks.at(lo)).to_vec();
+            if !matches!(name.as_slice(), b"link_name" | b"export_name" | b"link_section") { continue; }
+            if matches!(self.toks.at(lo + 2).kind, T::Str | T::RawStr) { continue; }
+            let save = self.pos;
+            self.pos = lo + 2;
+            let call = self.mac_ahead();
+            self.pos = save;
+            if !call { continue; }
+            let call_lo = self.toks.at(lo + 2).lo;
+            let value = self.eager_macro_arg(TokRange { lo: (lo + 2) as u32, hi: hi as u32 })?;
+            if value.lo as usize == lo + 2 && value.hi as usize == hi { continue; }
+            // Not a string after all: leave the tokens for the attribute's own diagnostics.
+            let Ok((s, true)) = crate::builtins::eval_lit_range(self, value.lo as usize, value.hi as usize) else { continue; };
+            let text = format!("{} = \"{}\"", String::from_utf8_lossy(&name), s.escape_default());
+            let mut toks = Vec::new();
+            if crate::lexer::lex(text.as_bytes(), self.edition, &mut toks).is_err() { continue; }
+            toks.retain(|t| t.kind != T::Eof);
+            let start = self.expand_toks(&text, &toks, call_lo);
+            a.toks = TokRange { lo: start as u32, hi: (start + toks.len()) as u32 };
+        }
+        Ok(())
     }
 
     /// The shape of `cfg`, `cfg_attr` and `derive` attributes (rustc_attr_parsing cfg.rs
@@ -1167,7 +1201,9 @@ impl<'a> Parser<'a> {
             if crate::lexer::validation_enabled() { self.meta_frags_in_attr(toks)?; self.attr_shape_now_or_later(toks)?; }
             new.push(Attr { inner: true, toks });
         }
-        v.extend(self.expand_cfg_attrs(new));
+        let mut new = self.expand_cfg_attrs(new);
+        self.literal_attr_values(&mut new)?;
+        v.extend(new);
         Ok(())
     }
 
