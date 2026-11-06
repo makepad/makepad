@@ -53,6 +53,16 @@ use makepad_widgets::makepad_platform::linux_input::{
     natural_scroll, pointer_speed, POINTER_SPEED_MAX, POINTER_SPEED_MIN,
 };
 
+/// What a monitor's chip shows in the arrangement diagram.
+struct OutputChip<'a> {
+    name: &'a str,
+    rate: &'a str,
+    size: &'a (String, bool),
+    optimised: bool,
+    picked: bool,
+    faded: bool,
+}
+
 const DEVICE_ROWS: usize = 5;
 /// The launch default (`-scale=1.3`) shown until the platform reports the
 /// window's actual scale.
@@ -1144,7 +1154,10 @@ impl ShellPanel {
                     },
                     None => ("not connected".to_string(), true),
                 };
-                self.draw_output_chip(cx, r, name, &rate, &size, mirrored && chosen, selected.as_deref() == Some(name.as_str()), lifted);
+                self.draw_output_chip(cx, r, &OutputChip {
+                    name, rate: &rate, size: &size, optimised: mirrored && chosen,
+                    picked: selected.as_deref() == Some(name.as_str()), faded: lifted,
+                });
             }
             self.display_drops.push((DropAt::Screen(i), column));
             self.hits.push((Hit::DisplayBox(i), column));
@@ -1170,8 +1183,8 @@ impl ShellPanel {
     /// (or what failed, `size.1`). The monitor a mirror is optimised for
     /// carries an "optimised" tag on its first line. A press picks it or
     /// starts dragging it.
-    #[allow(clippy::too_many_arguments)]
-    fn draw_output_chip(&mut self, cx: &mut Cx2d, r: Rect, name: &str, rate: &str, size: &(String, bool), optimised: bool, picked: bool, faded: bool) {
+    fn draw_output_chip(&mut self, cx: &mut Cx2d, r: Rect, chip: &OutputChip<'_>) {
+        let OutputChip { name, rate, size, optimised, picked, faded } = *chip;
         let tok = self.tokens;
         let fg = tok.popups.text;
         let dim = darker(fg, 1.4);
