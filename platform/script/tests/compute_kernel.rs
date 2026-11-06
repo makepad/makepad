@@ -353,3 +353,56 @@ fn cooperative_matrices_validate_and_reject_invalid_operands() {
         }
     }
 }
+
+#[test]
+fn sampled_textures_in_kernels() {
+    // two textures and three samplers (clamped linear, nearest, repeating), a read-only and a
+    // writable buffer and a storage image beside them, as a simulation step reads its last state
+    let body = "workgroup_size: 8\n workgroup_size_y: 8\n state: shader.texture_2d(float)\n image: shader.texture_2d(float)\n weights: shader.buffer(f32)\n out: shader.buffer_rw(vec4f)\n next: shader.texture_2d_rw(@rgba16f)\n size: shader.uniform(vec2u)\n main: fn() {\n let p = global_id().xy\n if p.x < self.size.x && p.y < self.size.y {\n let uv = (vec2(f32(p.x), f32(p.y)) + vec2(0.5, 0.5)) / vec2(f32(self.size.x), f32(self.size.y))\n let a = self.state.sample_lod(uv, 0.0)\n let b = self.image.sample_nearest(uv)\n let c = self.state.sample_repeat(uv + vec2(0.5, 0.0))\n let v = a * self.weights[0] + b + c\n self.out[p.y * self.size.x + p.x] = v\n self.next.write(p, v)\n }\n }";
+    let hlsl = kernel_target(body, ComputeTarget::Hlsl).unwrap();
+    // HLSL: textures in the t registers after the read-only buffer, samplers at s0..
+    assert_eq!(hlsl.layout.textures.iter().map(|t| t.index).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(hlsl.layout.samplers, vec![ComputeSampler { filter: 1, address: 1 }, ComputeSampler { filter: 0, address: 1 }, ComputeSampler { filter: 1, address: 0 }]);
+    assert!(hlsl.code.as_text().unwrap().contains("Texture2D<float4> tex_state : register(t1);"));
+    validate_text(&hlsl, "sampled-textures");
+    let msl = kernel_target(body, ComputeTarget::Msl).unwrap();
+    // Metal: textures after the storage image, samplers declared in the kernel
+    assert_eq!(msl.layout.textures.iter().map(|t| t.index).collect::<Vec<_>>(), vec![1, 2]);
+    let text = msl.code.as_text().unwrap();
+    assert!(text.contains("constexpr sampler _s2(filter::linear, mip_filter::linear, address::repeat"), "{text}");
+    assert!(text.contains("texture2d<float> tex_image [[texture(2)]]"), "{text}");
+    validate_text(&msl, "sampled-textures");
+    // an implicit sample has no derivatives in a kernel: it reads the top level
+    let implicit = "workgroup_size: 8\n t: shader.texture_2d(float)\n out: shader.buffer_rw(vec4f)\n main: fn() { self.out[global_id().x] = self.t.sample(vec2(0.5, 0.5)) }";
+    assert!(kernel_target(implicit, ComputeTarget::Msl).unwrap().code.as_text().unwrap().contains("level(0.0)"));
+    validate_text(&kernel_target(implicit, ComputeTarget::Hlsl).unwrap(), "sampled-implicit");
+    validate(&kernel_target(implicit, ComputeTarget::Spirv).unwrap());
+    // Vulkan: the textures bind after the storage image (0), the samplers after them (3..=5)
+    let spirv = kernel_target(body, ComputeTarget::Spirv).unwrap();
+    assert_eq!(spirv.layout.textures.iter().map(|t| t.index).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!((spirv.layout.samplers.len(), spirv.layout.param_binding), (3, None));
+    validate(&spirv);
+}
+
+#[test]
+fn params_past_the_push_constants() {
+    // a buffer address and ten vec4 params (176 bytes): past the 128 bytes of Vulkan push
+    // constants, every target takes them in a parameter block; past 4096 bytes none does
+    let params = |n: usize| (0..n).map(|i| format!(" p{i}: shader.uniform(vec4f)\n")).collect::<String>();
+    // (a param the kernel does not read is not in its block: it reads them all)
+    let sum = |n: usize| (0..n).map(|i| format!("self.p{i} + ")).collect::<String>();
+    let body = |n: usize| format!("workgroup_size: 8\n t: shader.texture_2d(float)\n out: shader.buffer_rw(vec4f)\n{}\n main: fn() {{ self.out[global_id().x] = {}self.t.sample_lod(vec2(0.5, 0.5), 0.0) }}", params(n), sum(n));
+    let spirv = kernel_target(&body(10), ComputeTarget::Spirv).unwrap();
+    // the block binds after the texture and its sampler
+    assert_eq!((spirv.layout.push_size, spirv.layout.param_binding), (176, Some(2)));
+    validate(&spirv);
+    let msl = kernel_target(&body(10), ComputeTarget::Msl).unwrap();
+    assert_eq!(msl.layout.param_binding, Some(1));
+    validate_text(&msl, "params-block");
+    let hlsl = kernel_target(&body(10), ComputeTarget::Hlsl).unwrap();
+    assert_eq!((hlsl.layout.param_binding, hlsl.layout.param_binding_size), (Some(0), 176));
+    validate_text(&hlsl, "params-block");
+    for target in [ComputeTarget::Spirv, ComputeTarget::Msl, ComputeTarget::Hlsl] {
+        assert!(kernel_target(&body(256), target).unwrap_err().contains("over the 4096"), "{target:?}");
+    }
+}

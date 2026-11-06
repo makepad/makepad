@@ -41,10 +41,14 @@ pub fn ir_to_spirv(m: &IrModule, entry: FuncId, xr: bool) -> Result<Vec<u32>, St
     if cooperative && stage != IrStage::Compute {
         return err("cooperative matrices exist only in compute kernels");
     }
+    // a kernel's params past the push constants every device has: a storage buffer instead
+    let param_block = compute.as_ref().filter(|l| stage == IrStage::Compute && l.push_size > crate::shader_ir_compute::MAX_PUSH_PARAMS)
+        .map(|_| crate::shader_ir_compute::kernel_spirv_binding(m, None));
     let mut g = Gen {
         m,
         b: SpvBuilder::new(),
         compute,
+        param_block,
         pc_var: 0,
         builtin_vars: Vec::new(),
         buffer_wrappers: Vec::new(),
@@ -167,6 +171,9 @@ struct Gen<'a> {
     f: FnCx,
     /// A compute kernel's push-constant block (buffer addresses, params).
     compute: Option<ComputeLayout>,
+    /// The binding of the storage buffer that holds that block instead, when its params are
+    /// past the push constants' 128 bytes.
+    param_block: Option<u32>,
     pc_var: u32,
     /// Compute builtin input variables, by builtin.
     builtin_vars: Vec<(u32, u32)>,
@@ -517,8 +524,10 @@ impl<'a> Gen<'a> {
             }
         };
         if sc != SC_PRIVATE {
+            // a kernel's textures and samplers bind after its storage images
+            let binding = if self.stage == IrStage::Compute { crate::shader_ir_compute::kernel_spirv_binding(self.m, Some(g)) } else { glob.binding.unwrap_or(0) };
             self.b.decorate(id, DECO_DESCRIPTOR_SET, &[0]);
-            self.b.decorate(id, DECO_BINDING, &[glob.binding.unwrap_or(0)]);
+            self.b.decorate(id, DECO_BINDING, &[binding]);
         }
         if matches!(glob.kind, IrGlobalKind::ViewId) {
             self.uses_view_index = true;
@@ -532,7 +541,8 @@ impl<'a> Gen<'a> {
         let ty = self.m.globals[g as usize].ty;
         if sc == SC_PUSH_CONSTANT {
             let (pc, member) = self.push_constant_member(g);
-            let p = self.ptr_ty(SC_PUSH_CONSTANT, ty);
+            let sc = self.block_sc();
+            let p = self.ptr_ty(sc, ty);
             let k = self.b.const_u32(member);
             let id = self.ins_id(OP_ACCESS_CHAIN, p, &[pc, k]);
             return Ptr { id, ty, sc };
@@ -542,7 +552,7 @@ impl<'a> Gen<'a> {
             let (pc, member) = self.push_constant_member(g);
             let writable = self.m.globals[g as usize].kind == IrGlobalKind::Io(IrIo::Storage(true));
             let (wrapper_ptr, _) = self.buffer_pointer_ty(ty, writable);
-            let pp = self.b.type_pointer(SC_PUSH_CONSTANT, wrapper_ptr);
+            let pp = self.b.type_pointer(self.block_sc(), wrapper_ptr);
             let k = self.b.const_u32(member);
             let at = self.ins_id(OP_ACCESS_CHAIN, pp, &[pc, k]);
             let base = self.ins_id(OP_LOAD, wrapper_ptr, &[at]);
@@ -592,6 +602,11 @@ impl<'a> Gen<'a> {
         (self.b.type_pointer(SC_PHYSICAL_STORAGE_BUFFER, wrapper), wrapper)
     }
 
+    /// Where the push-constant block lives: push constants, or the parameter block's buffer.
+    fn block_sc(&self) -> u32 {
+        if self.param_block.is_some() { SC_STORAGE_BUFFER } else { SC_PUSH_CONSTANT }
+    }
+
     /// The push-constant block variable and the member index of global `g`.
     fn push_constant_member(&mut self, g: GlobalId) -> (u32, u32) {
         let layout = self.compute.clone().unwrap_or_default();
@@ -618,8 +633,14 @@ impl<'a> Gen<'a> {
             for (k, slot) in layout.slots.iter().enumerate() {
                 self.b.member_decorate(st, k as u32, DECO_OFFSET, &[slot.offset]);
             }
-            let p = self.b.type_pointer(SC_PUSH_CONSTANT, st);
-            self.pc_var = self.b.global_variable(p, SC_PUSH_CONSTANT, 0);
+            let sc = self.block_sc();
+            let p = self.b.type_pointer(sc, st);
+            self.pc_var = self.b.global_variable(p, sc, 0);
+            if let Some(binding) = self.param_block {
+                self.b.decorate(self.pc_var, DECO_DESCRIPTOR_SET, &[0]);
+                self.b.decorate(self.pc_var, DECO_BINDING, &[binding]);
+                self.b.decorate(self.pc_var, DECO_NON_WRITABLE, &[]);
+            }
         }
         let member = layout.slots.iter().position(|s| s.global == g).unwrap_or(0) as u32;
         (self.pc_var, member)
@@ -1961,7 +1982,8 @@ impl<'a> Gen<'a> {
         let f32t = self.b.type_f32();
         let r = match s.kind {
             SampleKind::Implicit => {
-                if self.stage == IrStage::Vertex {
+                // only a fragment has derivatives: a vertex or a kernel reads the top level
+                if self.stage != IrStage::Fragment {
                     let zero = self.b.const_f32(0.0);
                     self.ins_id(OP_IMAGE_SAMPLE_EXPLICIT_LOD, v4, &[si, coord, IMAGE_OPERAND_LOD, zero])
                 } else {

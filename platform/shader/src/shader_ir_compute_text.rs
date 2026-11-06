@@ -65,6 +65,28 @@ pub fn compute_text(m: &IrModule, entry: FuncId, layout: &ComputeLayout) -> Resu
             writeln!(out, "RWTexture2D<{unorm}{scalar}{lanes}> {name} : register(u{});", tex.index).ok();
         }
     }
+    // sampled textures, read through the kernel's samplers (Metal declares them in the
+    // kernel, HLSL takes them at s0.. from the host)
+    for t in &layout.textures {
+        let name = cx.plain_global_name(t.global);
+        if metal {
+            let decl = format!("texture2d<float> {name}");
+            writeln!(fields, "    {decl};").ok();
+            resources.push(format!("{decl} [[texture({})]]", t.index));
+            writeln!(fill, "    _mp.{name} = {name};").ok();
+        } else {
+            writeln!(out, "Texture2D<float4> {name} : register(t{});", t.index).ok();
+        }
+    }
+    for (i, smp) in layout.samplers.iter().enumerate() {
+        if metal {
+            let filter = if smp.filter == 0 { "nearest" } else { "linear" };
+            let address = match smp.address { 0 => "repeat", 1 => "clamp_to_edge", 2 => "clamp_to_zero", _ => "mirrored_repeat" };
+            writeln!(out, "constexpr sampler _s{i}(filter::{filter}, mip_filter::linear, address::{address}, coord::normalized);").ok();
+        } else {
+            writeln!(out, "SamplerState _s{i} : register(s{i});").ok();
+        }
+    }
     for (name, ty, attr, semantic) in [
         ("global_id", "uint3", "thread_position_in_grid", "SV_DispatchThreadID"),
         ("local_id", "uint3", "thread_position_in_threadgroup", "SV_GroupThreadID"),

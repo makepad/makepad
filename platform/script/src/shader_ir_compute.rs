@@ -22,7 +22,7 @@
 //! and every target resource binding; no backend infers offsets from source.
 
 pub use makepad_shader::shader_ir_compute::*;
-use makepad_shader::shader_ir::{CooperativeMatrix, FuncId, IrModule};
+use makepad_shader::shader_ir::{CooperativeMatrix, FuncId, IrGlobalKind, IrModule, IrTy};
 use crate::{
     shader::{ShaderMode, ShaderType},
     shader_lower::IrFnCompiler,
@@ -65,6 +65,8 @@ impl CompiledKernelResult {
                 text: k.code.as_text().unwrap_or(""),
                 buffers: &k.layout.buffers,
                 storage_textures: &k.layout.storage_textures,
+                textures: &k.layout.textures,
+                samplers: &k.layout.samplers,
                 param_binding: k.layout.param_binding,
                 param_binding_size: k.layout.param_binding_size,
                 group_count_offset: k.layout.group_count_offset,
@@ -91,6 +93,8 @@ pub struct CompiledKernelView<'a> {
     pub text: &'a str,
     pub buffers: &'a [ComputeBufferBinding],
     pub storage_textures: &'a [StorageTextureBinding],
+    pub textures: &'a [SampledTextureBinding],
+    pub samplers: &'a [ComputeSampler],
     pub param_binding: Option<u32>,
     pub param_binding_size: u32,
     pub group_count_offset: Option<u32>,
@@ -118,6 +122,8 @@ impl CompiledKernelView<'_> {
                 target: self.target,
                 buffers: self.buffers.to_vec(),
                 storage_textures: self.storage_textures.to_vec(),
+                textures: self.textures.to_vec(),
+                samplers: self.samplers.to_vec(),
                 param_binding: self.param_binding,
                 param_binding_size: self.param_binding_size,
                 group_count_offset: self.group_count_offset,
@@ -166,6 +172,19 @@ fn size_field(vm: &ScriptVm, kernel: ScriptObject, name: LiveId) -> Result<u32, 
     }
 }
 
+/// The samplers a kernel's texture samples use, in `_s<i>` order.
+fn compute_samplers(samplers: &[makepad_shader::shader_output::ShaderSampler]) -> Result<Vec<ComputeSampler>, String> {
+    use makepad_shader::shader_output::{SamplerAddress, SamplerCoord, SamplerFilter};
+    samplers.iter().map(|s| {
+        if s.compare || s.is_video || s.coord != SamplerCoord::Normalized {
+            return Err("a kernel samples textures with plain samplers only (no depth compare, video or pixel coordinates)".to_string());
+        }
+        let filter = match s.filter { SamplerFilter::Nearest => 0, SamplerFilter::Linear => 1 };
+        let address = match s.address { SamplerAddress::Repeat => 0, SamplerAddress::ClampToEdge => 1, SamplerAddress::ClampToZero => 2, SamplerAddress::MirroredRepeat => 3 };
+        Ok(ComputeSampler { filter, address })
+    }).collect()
+}
+
 /// Compiles `kernel` (an object with a `main` fn) to the explicit target.
 pub fn compile_compute_kernel(vm: &mut ScriptVm, kernel: ScriptObject, target: ComputeTarget) -> Result<CompiledKernel, String> {
     let workgroup = [
@@ -191,14 +210,31 @@ pub fn compile_compute_kernel(vm: &mut ScriptVm, kernel: ScriptObject, target: C
     let ir = &mut output.compiled.ir;
     ir.workgroup = workgroup;
     ir.precise = vm.bx.heap.value(kernel, id!(precise_math).into(), NoTrap).as_bool().unwrap_or(false);
-    compile_compute_ir(ir, main, target)
+    let samplers = compute_samplers(&output.samplers)?;
+    compile_compute_ir_sampled(&mut output.compiled.ir, main, target, samplers)
 }
 
 /// Compiles a kernel already in shader IR (`main`: its body, no params, void; the module's
 /// workgroup and precision set) to the explicit target.
 pub fn compile_compute_ir(ir: &mut IrModule, main: FuncId, target: ComputeTarget) -> Result<CompiledKernel, String> {
+    compile_compute_ir_sampled(ir, main, target, Vec::new())
+}
+
+/// [`compile_compute_ir`] for a kernel whose texture samples use `samplers` (`_s<i>` order).
+fn compile_compute_ir_sampled(ir: &mut IrModule, main: FuncId, target: ComputeTarget, samplers: Vec<ComputeSampler>) -> Result<CompiledKernel, String> {
     let entry = build_compute_entry(ir, main);
-    let layout = compute_target_layout(ir, target)?;
+    if target == ComputeTarget::Spirv {
+        // SPIR-V binds the samples' samplers as globals (the text targets name `_s<i>` in the text)
+        let ty = ir.ty(IrTy::Sampler(false));
+        for i in 0..samplers.len() as u32 { ir.global(IrGlobalKind::Sampler(i), LiveId(i as u64), ty); }
+    }
+    let mut layout = compute_target_layout(ir, target)?;
+    layout.samplers = samplers;
+    if target == ComputeTarget::Hlsl {
+        let read = layout.buffers.iter().filter(|b| !b.writable).count() + layout.textures.len();
+        if read > 128 { return Err(format!("D3D11 has 128 shader-resource slots; the kernel reads {read} buffers and textures")); }
+        if layout.samplers.len() > 16 { return Err(format!("D3D11 has 16 sampler slots; the kernel samples with {}", layout.samplers.len())); }
+    }
     makepad_shader::shader_ir_precise::lower_precise(ir, target != ComputeTarget::Msl);
     let code = match target {
         ComputeTarget::Spirv => KernelCode::Spirv(makepad_shader::shader_ir_spirv::ir_to_spirv(ir, entry, false)?),
