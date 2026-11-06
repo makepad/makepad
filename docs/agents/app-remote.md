@@ -80,6 +80,7 @@ is a quoted shell argument. There is no HTTP, no status code and no POST body.
 | `ui speak [since=N] [node=ID]` / `ui lint` | Announcement stream or accessibility findings |
 | `mouse k=click x=X y=Y` | Mouse input; kinds also include move, down, up, scroll; `k=drag` sends its moves in one burst, which coalesce into one (a value field reads that as the start of a drag and does not change: use `ui act ... drag`) |
 | `click x=X y=Y` | Click alias |
+| `move x=X y=Y` | Mouse move alias (hover) |
 | `key k=press c=KeyA` | Key input; down/up are also supported |
 | `text t=TEXT`, `key t=TEXT` | Text/IME input |
 | `drop path=ABSOLUTE_PATH x=X y=Y` | One file through native drag, drop, and drag-end events |

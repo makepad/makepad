@@ -22,17 +22,22 @@ fn tile_words(output: &Output) -> Vec<u32> {
     }
 }
 
-/// Waits for the next version of output `name`.
-fn next_output(session: &Session, name: &str, after: u64) -> Output {
+/// Waits until what the session posted so far has what `has` finds. One `wait` hands over all
+/// the program posted since the last (a value and an output, two outputs): `seen` keeps it all,
+/// merged, so what came beside the one looked for is there for the next look.
+fn wait_for<T>(session: &Session, seen: &mut Updates, has: impl Fn(&Updates) -> Option<T>) -> T {
     loop {
-        let u = session.wait();
-        if let Some(Err(e)) = &u.end {
-            panic!("the program ended: {e}");
+        if let Some(t) = has(seen) {
+            return t;
         }
-        if let Some(o) = u.output(name).filter(|o| o.version > after) {
-            return o.clone();
-        }
+        assert!(seen.end.is_none(), "the program ended: {:?}", seen.end);
+        seen.merge(session.wait());
     }
+}
+
+/// Waits for a version of output `name` newer than `after`.
+fn next_output(session: &Session, seen: &mut Updates, name: &str, after: u64) -> Output {
+    wait_for(session, seen, |u| u.output(name).filter(|o| o.version > after).cloned())
 }
 
 /// A tile message: `at` is the top-left corner and the texel step.
@@ -57,13 +62,14 @@ fn tile(slot: u32, at: [f64; 3], res: usize, kind: u32, power: u32, max_iter: u3
 fn render(backend: Backend, tiles: &[Value]) -> Vec<Vec<u32>> {
     let session = open("fractal.splash", FRACTAL, SessionConfig { backend, ..SessionConfig::default() });
     let mut versions = [0u64; 2];
+    let mut seen = Updates::default();
     let out = tiles
         .iter()
         .enumerate()
         .map(|(k, t)| {
             let slot = k % 2;
             let rev = session.send("tile", t.clone());
-            let o = next_output(&session, ["tile0", "tile1"][slot], versions[slot]);
+            let o = next_output(&session, &mut seen, ["tile0", "tile1"][slot], versions[slot]);
             versions[slot] = o.version;
             assert_eq!(o.rev, rev, "the tile of its own message");
             tile_words(&o)
@@ -103,18 +109,17 @@ fn fractal_tiles_are_the_same_bits_native_and_interpreted_for_every_kind() {
 #[test]
 fn the_next_fractal_tile_waits_while_one_renders() {
     let session = open("fractal.splash", FRACTAL, SessionConfig::default());
+    let mut seen = Updates::default();
     let a = session.send("tile", tile(0, [-2.0, -1.25, 0.1], 16, 0, 2, 300, false, false));
-    // `took` says the program has the tile: the next one can wait in its inbox.
-    loop {
-        let u = session.wait();
-        if u.value("took") == Some(&Value::Number(a as f64)) {
-            break;
-        }
-        assert!(u.end.is_none(), "{:?}", u.end);
-    }
+    // `took` says the program has the tile: the next one can wait in its inbox. (The tile itself
+    // may come in the same update: `seen` keeps it.)
+    wait_for(&session, &mut seen, |u| (u.value("took") == Some(&Value::Number(a as f64))).then_some(()));
     let b = session.send("tile", tile(1, [-1.0, -0.5, 0.05], 16, 1, 2, 300, false, false));
-    let t0 = next_output(&session, "tile0", 0);
-    let t1 = next_output(&session, "tile1", 0);
+    // A late look: by now both tiles may be in one update (the CI sweep hung here, the looker
+    // waiting for tile1 after the update that carried it and tile0 was gone).
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let t0 = next_output(&session, &mut seen, "tile0", 0);
+    let t1 = next_output(&session, &mut seen, "tile1", 0);
     assert_eq!((t0.rev, t1.rev), (a, b));
     assert_eq!(tile_words(&t0).len(), 256);
     session.send("stop", true.into());
