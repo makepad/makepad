@@ -176,6 +176,17 @@ pub fn files_at(dir: &Path, at: &str) -> Result<std::collections::BTreeMap<Strin
     .unwrap_or_else(|| Err(format!("{}: no repository", dir.display())))
 }
 
+/// A reader of the blobs of the repository `dir` is in, its paths and shared repository found
+/// once: [`blob`] finds them for each blob, and a gate-proof check of a landed tree reads
+/// thousands (two of its five seconds after a master restart, 11-06).
+pub fn blob_reader(dir: &Path) -> Option<impl Fn(&str) -> Result<Vec<u8>, String> + Send + Sync> {
+    let repo = shared(&paths(dir)?.common_dir)?;
+    Some(move |oid: &str| {
+        let oid = ObjectId::from_hex(oid).map_err(|e| format!("blob {oid}: {e}"))?;
+        repo.lock().unwrap_or_else(|e| e.into_inner()).read_blob(&oid).map_err(|e| format!("blob {}: {e}", oid.to_hex()))
+    })
+}
+
 /// The bytes of blob `oid` in the repository of `dir` (`git cat-file blob`).
 pub fn blob(dir: &Path, oid: &str) -> Result<Vec<u8>, String> {
     let oid = ObjectId::from_hex(oid).map_err(|e| format!("blob {oid}: {e}"))?;

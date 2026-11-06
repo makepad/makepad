@@ -177,7 +177,10 @@ pub struct Where {
 fn git(dir: &Path, env: &[(String, String)], args: &[&str]) -> (bool, String, String) {
     let mut cmd = crate::git_exec::command();
     cmd.arg("-c").arg("core.hooksPath=/dev/null").args(args).current_dir(dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    cmd.env("GIT_TERMINAL_PROMPT", "0").env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env_remove("GIT_INDEX_FILE");
+    // git reads the repository `dir` is in, as the in-process reader does: no inherited variable
+    // points it at another one (a gate's or a hook's object store)
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE"] { cmd.env_remove(var); }
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -186,6 +189,16 @@ fn git(dir: &Path, env: &[(String, String)], args: &[&str]) -> (bool, String, St
         Err(e) => (false, String::new(), format!("git: {e}")),
     }
 }
+
+/// A git lock another git process holds (the lane's own commit, an editor): normal for a moment.
+fn git_lock(err: &str) -> bool {
+    err.contains(".lock") && (err.contains("File exists") || err.contains("cannot lock ref"))
+}
+
+/// The first round a lane half's worktree is locked waits (said as info); a second in a row
+/// fails, with a warning. A lane's own `git commit` held its index.lock as a round fast-forwarded,
+/// and the warning stood alone though the next round merged 31 s later (11-06).
+const LOCKED: &str = "its git is locked (retried next round): ";
 
 fn first_err(err: &str) -> String {
     let l: Vec<&str> = err.lines().map(str::trim).filter(|l| !l.is_empty()).take(3).collect();
@@ -794,6 +807,7 @@ impl Lanes {
                 // the lane committed while the merge was computed: the next round merges its new head
                 let raced = git(&h.wt, &self.env, &["rev-parse", "HEAD"]).1.trim() != h.head;
                 let why = if raced { "the lane committed meanwhile".to_string() } else { format!("fast-forward to the merge: {}", first_err(&err)) };
+                let locked_before = prevs[*i].as_ref().is_some_and(|p| matches!(&p.outcome, Outcome::Waiting(w) if w.starts_with(LOCKED)));
                 for j in &moved {
                     let b = &unit[*j];
                     let merge = &merges.iter().find(|(i, _)| i == j).unwrap().1.0;
@@ -802,7 +816,7 @@ impl Lanes {
                         out[*j] = Some(Outcome::Failed(format!("half-moved pair kept for reconciliation after the {} half refused: {}", h.repo, first_err(&e))));
                     }
                 }
-                out[*i] = Some(if raced { Outcome::Waiting(why) } else { Outcome::Failed(why) });
+                out[*i] = Some(if raced { Outcome::Waiting(why) } else if git_lock(&err) && !locked_before { Outcome::Waiting(format!("{LOCKED}{why}")) } else { Outcome::Failed(why) });
                 for (j, _) in &merges {
                     if out[*j].is_none() {
                         out[*j] = Some(Outcome::Waiting(format!("its {} half could not move: the pair merges together", h.repo)));
@@ -1241,8 +1255,17 @@ mod tests {
     impl Fix {
         fn new(name: &str) -> Fix {
             static N: AtomicU64 = AtomicU64::new(0);
-            let dir = std::env::temp_dir().join(format!("devhub-lanes-{name}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
-            let _ = std::fs::remove_dir_all(&dir);
+            // a directory of its own, made here and never taken over: one left by an earlier
+            // process of the same pid stays its own (a fixture that removed what it found could
+            // remove another's repository under its reads)
+            let dir = loop {
+                let dir = std::env::temp_dir().join(format!("devhub-lanes-{name}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+                match std::fs::create_dir(&dir) {
+                    Ok(()) => break dir,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => panic!("{}: {e}", dir.display()),
+                }
+            };
             let repo = dir.join("makepad");
             let root = dir.join("wt");
             std::fs::create_dir_all(&repo).unwrap();
@@ -1387,6 +1410,31 @@ mod tests {
         assert_eq!(f.g(&wt, &["status", "--porcelain"]), "");
         let (is_old, _, _) = git(&wt, &[], &["merge-base", "--is-ancestor", &lane_tip, "HEAD"]);
         assert!(!is_old);
+    }
+
+    #[test]
+    fn a_locked_worktree_waits_a_round_before_it_warns() {
+        let f = Fix::new("locked");
+        let wt = f.lane("a");
+        f.write(&wt, "lane.txt", "lane\n");
+        f.commit(&wt, "lane work");
+        f.write(&f.repo, "b.txt", "landed\n");
+        f.commit(&f.repo, "landed");
+        let lock = PathBuf::from(f.g(&wt, &["rev-parse", "--absolute-git-dir"])).join("index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let bot = f.bot();
+        let warns = || f.events.lock().unwrap().iter().filter(|(sev, _)| *sev == Sev::Warn).count();
+        bot.pass(&f.w()).unwrap();
+        assert!(matches!(f.result(&bot, "rc-a"), Outcome::Waiting(w) if w.starts_with(LOCKED)), "{:?}", bot.list());
+        assert_eq!(warns(), 0, "one round under a lane's own git is no warning");
+        bot.pass(&f.w()).unwrap();
+        assert!(matches!(f.result(&bot, "rc-a"), Outcome::Failed(w) if w.contains("index.lock")), "{:?}", bot.list());
+        assert_eq!(warns(), 1, "a second round locked warns");
+        bot.pass(&f.w()).unwrap();
+        assert_eq!(warns(), 1, "and says it once");
+        std::fs::remove_file(&lock).unwrap();
+        bot.pass(&f.w()).unwrap();
+        assert!(matches!(f.result(&bot, "rc-a"), Outcome::Merged(_)), "{:?}", bot.list());
     }
 
     #[test]

@@ -123,13 +123,19 @@ fn linked_dirs(repo: &Path, pkg: &str) -> Result<BTreeSet<String>, String> {
         return Err(crate::proto::clean(&String::from_utf8_lossy(&o.stderr), 300));
     }
     let root = repo.canonicalize().map_err(|e| format!("{}: {e}", repo.display()))?;
-    Ok(tree_dirs(&String::from_utf8_lossy(&o.stdout), &root.to_string_lossy()))
+    Ok(tree_dirs(&String::from_utf8_lossy(&o.stdout), &root.to_string_lossy(), std::path::MAIN_SEPARATOR))
 }
 
-/// The crates under `root` of a `cargo tree --prefix none` listing, relative to it.
-fn tree_dirs(listing: &str, root: &str) -> BTreeSet<String> {
+/// The crates under `root` of a `cargo tree --prefix none` listing, as repo paths. `sep` is the
+/// platform's: cargo prints a Windows path with `\`, where `root` canonicalizes to a verbatim
+/// `\\?\C:\` path cargo never prints.
+fn tree_dirs(listing: &str, root: &str, sep: char) -> BTreeSet<String> {
+    let slashed = |s: &str| if sep == '/' { s.to_string() } else { s.replace(sep, "/") };
+    let root = slashed(root);
+    let root = root.strip_prefix("//?/").filter(|r| r.as_bytes().get(1) == Some(&b':')).unwrap_or(&root);
     let marker = format!(" ({}/", root.trim_end_matches('/'));
     listing.lines().filter_map(|l| {
+        let l = slashed(l);
         let rest = &l[l.find(&marker)? + marker.len()..];
         Some(rest[..rest.find(')')?].to_string())
     }).collect()
@@ -894,7 +900,11 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
             done(&caps().unwrap_or_default());
             return RollEnd::NoRestart;
         }
-        let line = if svc == "devhub" { format!("hub-restart {deploy}") } else { format!("service-restart {svc}") };
+        // a hub build granted fewer cores than it measured (it started now on its box's free
+        // ones) builds on that many jobs; an older hub compares the whole word with its
+        // deployment, so it gets the sha alone
+        let jobs = room.as_ref().filter(|_| caps().is_some_and(|c| c.hub_proto >= crate::lease::HUB_JOBS_PROTO)).and_then(|held| ctx.leases.hub_build_jobs(&held.id));
+        let line = if svc == "devhub" { format!("hub-restart {deploy}{}", jobs.map_or(String::new(), |j| format!(" jobs={j}"))) } else { format!("service-restart {svc}") };
         let answer = if present { Ok(vec![format!("{{\"err\":\"waits: a user is at {node}\"}}")]) } else { crate::cli::ask(&ctl, Some(node), word, &line) };
         if answer.is_ok() { down = None; }
         match answer {
@@ -1387,8 +1397,12 @@ mod tests {
     #[test]
     fn a_service_rolls_for_what_cargo_builds_of_it() {
         let listing = "makepad-devhub v0.1.0 (/repo/libs/devhub)\nmakepad-remote v0.1.0 (/repo/libs/remote) (*)\nmacro-thing v0.1.0 (proc-macro) (/repo/libs/macro/impl)\nlibc v0.2.1\nother v0.1.0 (/elsewhere/other)\n";
-        let dirs: Vec<String> = super::tree_dirs(listing, "/repo").into_iter().collect();
+        let dirs: Vec<String> = super::tree_dirs(listing, "/repo", '/').into_iter().collect();
         assert_eq!(dirs, ["libs/devhub", "libs/macro/impl", "libs/remote"]);
+        // on Windows: backslashes, and a verbatim root cargo does not print
+        let listing = "makepad-devhub v0.1.0 (C:\\wt\\repo\\libs\\devhub)\nmacro-thing v0.1.0 (proc-macro) (C:\\wt\\repo\\libs\\macro\\impl)\nother v0.1.0 (C:\\wt\\other)\n";
+        let dirs: Vec<String> = super::tree_dirs(listing, "\\\\?\\C:\\wt\\repo", '\\').into_iter().collect();
+        assert_eq!(dirs, ["libs/devhub", "libs/macro/impl"]);
         for file in ["src/lib.rs", "src/tests/a.rs", "Cargo.toml", "build.rs", ""] {
             assert!(super::builds(file), "{file}");
         }

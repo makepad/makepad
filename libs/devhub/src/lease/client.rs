@@ -72,12 +72,16 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
                                           when a timed run is past twice its estimate while a timed ask waits on its
                                           box (it says who); a timed series or bench checks it between steps and, once
                                           it exists, stops after the current step with its partial results and releases
-  run <lane> <kind> [--node N|--needs ..] [--with-uncommitted] [--tree]
+  run <lane> <kind> [--node N|--needs ..] [--with-uncommitted] [--tree] [--patch <diff> ..]
         [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--whole]
         [--class name] [--priority interactive|background] [--jit key] [--native <reason>] -- cmd...
                                           JIT commands of kinds test, screen, gpu, long and build use overlays by default;
                                           --tree uses the work tree. CI, gates, timed and non-JIT commands always use trees.
                                           Main checkout edits need --with-uncommitted.
+                                          --patch <diff>: the files a diff (`git diff`) changes ship patched, for
+                                          this lease only (a rig's instrumentation): never in the worktree or a
+                                          node's tree, which gets every shipped file back at release. A run that
+                                          edits tracked files itself names them in DEVHUB_ALSO: undone the same way.
                                           JIT first: a lane command (or job, or test --native) that cargo-builds a package
                                           is refused unless it is the JIT's own crate, has an open JIT miss, targets a
                                           platform no JIT runs on, or says --native <reason> (native-vs-JIT baseline, timed
@@ -127,6 +131,8 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
                                           wait per class
   stats cores                             each box's cores as charged past its cores in the last hour
                                           (share of samples over, peak)
+  stats calls                             the last day's live calls as their boxes metered them, per
+                                          class: launches and calls, peak cores p50/p90/max, mean, wall
   queue | leases [--all]                  live and waiting leases, positions and reasons
   why-queued <lease>                     each candidate box's start blocker and reservation expiry
   nodes                                   capabilities, dev switch and leases per node
@@ -205,12 +211,15 @@ fn node_restarting(e: &str) -> bool {
 fn through_restarts<T>(id: &str, c: &mut Client, mut f: impl FnMut(&Client) -> Result<T, String>, up: &dyn Fn() -> Result<Client, String>) -> Result<T, String> {
     let mut down: Option<Instant> = None;
     let mut back: Option<Instant> = None;
+    // what went away: the master, or the lease's node hub (its self-update restart); said as
+    // that when it is back (a hub's roll read "the master is back", 11-06)
+    let mut gone = "the master";
     let mut wait = Duration::from_millis(500);
     loop {
         let e = match f(c) {
             Ok(v) => {
                 if down.take().is_some() {
-                    eprintln!("{id}: the master is back; re-attached");
+                    eprintln!("{id}: {gone} is back; re-attached");
                 }
                 return Ok(v);
             }
@@ -238,6 +247,7 @@ fn through_restarts<T>(id: &str, c: &mut Client, mut f: impl FnMut(&Client) -> R
                     }
                     (None, _) if node_restarting(&e) => {
                         eprintln!("{id}: its node does not answer ({e}); its hub restarts? re-attaching when it is back");
+                        gone = "its node's hub";
                         down = Some(Instant::now());
                         back = Some(Instant::now());
                     }
@@ -256,6 +266,7 @@ fn through_restarts<T>(id: &str, c: &mut Client, mut f: impl FnMut(&Client) -> R
             Err(_) => {
                 back = None;
                 wait = BEAT;
+                gone = "the master";
                 if down.is_none() {
                     eprintln!("master not reachable: waiting");
                     down = Some(Instant::now());
@@ -297,7 +308,11 @@ fn one(c: &Client, service: &str, line: &str) -> Result<Value, String> {
 
 /// One request to a node service through the master's router.
 fn node_one(c: &Client, node: &str, service: &str, line: &str) -> Result<Value, String> {
-    let lines = ask(c, Some(node), service, line)?;
+    first_of(node, service, ask(c, Some(node), service, line)?)
+}
+
+/// A node's answer: its first line, an `err` one as `Err`.
+fn first_of(node: &str, service: &str, lines: Vec<String>) -> Result<Value, String> {
     let first = lines.first().ok_or_else(|| format!("{node} {service}: no answer"))?;
     let v = json(first).ok_or_else(|| format!("{node} {service}: bad answer"))?;
     match v.get("err").and_then(|e| e.as_str()) {
@@ -366,6 +381,9 @@ struct Opts {
     tree: bool,
     /// `--native "<reason>"`: why this command builds natively (lease/native.rs)
     native: String,
+    /// `run --patch <diff>`: the files the diffs change, as they ship in place of the worktree's
+    /// (lease/patch.rs)
+    patched: Vec<(String, Vec<u8>)>,
 }
 
 /// The flags shared by `lease` and `run`.
@@ -421,7 +439,8 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
         req.rev = Some(pin_lane_rev(Path::new(dir), spec, &req.lane)?);
     }
     if req.class.is_empty() && !cmd.is_empty() { req.class = super::run_class(&req.lane, kind, &cmd); }
-    Ok(Opts { req, watch, keep, cmd, tree, native })
+    req.exec_profile = super::argv::ExecProfile::of(&cmd);
+    Ok(Opts { req, watch, keep, cmd, tree, native, patched: Vec::new() })
 }
 
 /// A granted lease as the holder knows it.
@@ -644,20 +663,33 @@ fn start_there(c: &mut Client, held: &Held, service: &str, line: &str) -> Result
     }
 }
 
+/// How long a follower of a run's output waits for more once it has all of it: the run's next
+/// lines come with its next look. Asked again at once, a run that writes all the time had its log
+/// asked tens of times a second, each a route through the master's hub (11-06).
+pub(crate) const FOLLOW_PACE: Duration = Duration::from_millis(100);
+
 fn follow_there(c: &Client, held: &Held, run: u64, out: &mut dyn Write) -> Result<i32, String> {
     let mut c = c.clone();
     let mut off = 0u64;
+    let mut logs = crate::cli::NodeAsks::new(&held.node, "lease-log");
     loop {
         let v = through_restarts(&held.id, &mut c, |c| {
             held.beat.check(&held.id)?;
-            node_one(c, &held.node, "lease-log", &format!("lease-log {} {run} {off}", held.id))
+            first_of(&held.node, "lease-log", logs.ask(c, &format!("lease-log {} {run} {off}", held.id))?)
         }, &master)?;
         let data = b64_decode(&s(&v, "data")).ok_or("lease-log: bad data")?;
         let _ = out.write_all(&data);
         let _ = out.flush();
+        if !data.is_empty() && data.len() < super::exec::LOG_CHUNK {
+            std::thread::sleep(FOLLOW_PACE);
+        }
         off = v.get("off").and_then(super::num).map_or(off + data.len() as u64, |x| x as u64);
         if data.is_empty() {
             if let Some(code) = v.get("exit").filter(|e| !e.is_null()).and_then(super::num) {
+                // the node ended it for memory: the run's exit is that verdict, said with its why
+                if let Some(why) = v.get("memory").and_then(|m| m.as_str()) {
+                    return Err(format!("{} on {} ended (memory): {why}", held.id, held.node));
+                }
                 return Ok(code as i32);
             }
             std::thread::sleep(Duration::from_millis(300));
@@ -762,7 +794,7 @@ fn finish(c: &Client, held: &Held, r: Result<i32, String>) -> i32 {
         return CANCELLED_EXIT;
     }
     // a verdict on the command, not a lost box: run again, it hangs again
-    if let Some(how) = ended.as_deref().filter(|h| matches!(*h, "hung" | "disk")) {
+    if let Some(how) = ended.as_deref().filter(|h| matches!(*h, "hung" | "disk" | "memory")) {
         return fail(format!("{} on {} ended ({how}): {}", held.id, held.node, end.as_ref().map_or(String::new(), |v| s(v, "reason"))));
     }
     let (exit, code) = match r {
@@ -846,7 +878,7 @@ pub fn pin_lane_rev(root: &Path, spec: &str, lane: &str) -> Result<String, Strin
 }
 
 /// Ships the complete uncommitted set and base blobs into the lease's source layer.
-fn ship(c: &Client, root: &Path, held: &Held, pin: &super::Pin, uncommitted: bool) -> Result<(), String> {
+fn ship(c: &Client, root: &Path, held: &Held, pin: &super::Pin, uncommitted: bool, patched: &[(String, Vec<u8>)]) -> Result<(), String> {
     if held.work.is_empty() {
         return Err(format!("{}: no work dir to ship to", held.id));
     }
@@ -879,26 +911,79 @@ fn ship(c: &Client, root: &Path, held: &Held, pin: &super::Pin, uncommitted: boo
     }
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     entries.dedup_by(|a, b| a.path == b.path);
+    // a patched file ships patched, from a staging copy, whatever else would ship it
+    entries.retain(|e| !patched.iter().any(|(p, _)| *p == e.path));
+    let deleted: Vec<String> = deleted.into_iter().filter(|d| !patched.iter().any(|(p, _)| p == d)).collect();
     let t = Instant::now();
     let sent = if entries.is_empty() { Ok(super::ship::Shipped::default()) } else { super::ship::send(c, &held.node, &held.id, root, &entries, false) };
-    let sent = sent?;
-    let paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
+    let mut sent = sent?;
+    let mut paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
+    if !patched.is_empty() {
+        let stage = std::env::temp_dir().join(format!("devhub-patch-{}-{}", held.id, std::process::id()));
+        let staged = stage_patched(root, &stage, patched).and_then(|staged| super::ship::send(c, &held.node, &held.id, &stage, &staged, false));
+        let _ = std::fs::remove_dir_all(&stage);
+        let staged = staged?;
+        (sent.files, sent.sent, sent.bytes) = (sent.files + staged.files, sent.sent + staged.sent, sent.bytes + staged.bytes);
+        paths.extend(patched.iter().map(|(p, _)| p.clone()));
+    }
     let list = |v: &[String]| v.iter().map(|p| makepad_remote::json_str(p)).collect::<Vec<_>>().join(",");
     let bases = super::ship::bases_json(root, pin, &paths.iter().chain(&deleted).cloned().collect::<Vec<_>>())?;
     let body = format!("{{\"shipped\":[{}],\"deleted\":[{}],\"bases\":{bases}}}", list(&paths), list(&deleted));
     let done = node_one(c, &held.node, "ship-done", &format!("ship-done {} {}", held.id, makepad_network::digest::base64_encode(body.as_bytes())))?;
     let source = done.get("source").and_then(|s| s.as_str()).unwrap_or("").to_string();
-    eprintln!("{} {}: sources at the worktree's HEAD, source {source}; shipped {} changed file(s) ({} KB, {} sent) and {} deletion(s) on top in {:.1} s", held.id, held.node, paths.len(), sent.bytes >> 10, sent.sent, deleted.len(), t.elapsed().as_secs_f64());
+    let patched_note = if patched.is_empty() { String::new() } else { format!(", {} of them patched by --patch", patched.len()) };
+    eprintln!("{} {}: sources at the worktree's HEAD, source {source}; shipped {} changed file(s){patched_note} ({} KB, {} sent) and {} deletion(s) on top in {:.1} s", held.id, held.node, paths.len(), sent.bytes >> 10, sent.sent, deleted.len(), t.elapsed().as_secs_f64());
     Ok(())
+}
+
+/// The patched files under `stage` at their paths, with their worktree file's mode: what ships.
+fn stage_patched(root: &Path, stage: &Path, patched: &[(String, Vec<u8>)]) -> Result<Vec<super::ship::Entry>, String> {
+    let mut entries = Vec::new();
+    for (path, text) in patched {
+        if !super::ship::inside(path) || super::ship::never_ships(path) {
+            return Err(format!("--patch: {path} never ships"));
+        }
+        let to = stage.join(path);
+        let e = |e: std::io::Error| format!("--patch: staging {path}: {e}");
+        std::fs::create_dir_all(to.parent().unwrap()).map_err(e)?;
+        std::fs::write(&to, text).map_err(e)?;
+        if let Ok(m) = std::fs::metadata(root.join(path)) { std::fs::set_permissions(&to, m.permissions()).map_err(e)?; }
+        super::ship::entries(stage, path, &mut entries)?;
+    }
+    Ok(entries)
+}
+
+/// `--patch <diff>` flags before the command, out of `rest`: each diff applied to the worktree's
+/// files (lease/patch.rs), the files they change.
+fn take_patches(root: Option<&Path>, rest: &mut Vec<&str>) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut patched: Vec<(String, Vec<u8>)> = Vec::new();
+    while let Some(i) = rest.iter().take_while(|a| **a != "--").position(|a| *a == "--patch") {
+        let file = rest.get(i + 1).copied().filter(|f| *f != "--").ok_or("--patch needs a diff file")?;
+        let root = root.ok_or("--patch: run it from inside the lane's worktree")?;
+        let diff = std::fs::read_to_string(file).map_err(|e| format!("--patch {file}: {e}"))?;
+        for (path, text) in super::patch::apply_in(root, &diff).map_err(|e| format!("--patch {file}: {e}"))? {
+            if patched.iter().any(|(p, _)| *p == path) { return Err(format!("--patch {file}: {path} is in another patch too")); }
+            patched.push((path, text));
+        }
+        rest.drain(i..i + 2);
+    }
+    Ok(patched)
 }
 
 /// `run <lane> <kind> … -- cmd`: pin HEAD, select the source layer, ship, run and release.
 fn run(lane: &str, kind: &str, rest: &[&str]) -> i32 {
     let flags = rest.iter().position(|a| *a == "--").unwrap_or(rest.len());
     let uncommitted = rest[..flags].contains(&"--with-uncommitted");
-    let rest: Vec<&str> = rest.iter().enumerate().filter(|(i, a)| *i >= flags || **a != "--with-uncommitted").map(|(_, a)| *a).collect();
+    let mut rest: Vec<&str> = rest.iter().enumerate().filter(|(i, a)| *i >= flags || **a != "--with-uncommitted").map(|(_, a)| *a).collect();
+    let patched = match take_patches(lane_root().as_ref().map(|(root, _)| root.as_path()), &mut rest) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("makepad devhub run: {e}");
+            return 2;
+        }
+    };
     let o = match parse(kind, Some(lane), &rest) {
-        Ok(o) if !o.cmd.is_empty() => o,
+        Ok(o) if !o.cmd.is_empty() => Opts { patched, ..o },
         Ok(_) => {
             eprintln!("makepad devhub run <lane> <kind> [--node N|--needs ..] [--tree] -- cmd...");
             return 2;
@@ -935,6 +1020,7 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
             return (2, false);
         }
     }
+    o.req.exec_profile = super::argv::ExecProfile::of(&o.cmd);
     o.req.src = Src::for_run(o.req.kind, &o.cmd, o.tree);
     let c = match retry_master(master) {
         Ok(c) => c,
@@ -950,7 +1036,7 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
     let pin = o.req.rev.as_deref().and_then(super::Pin::of_rev).unwrap();
     // a node hub restarting mid-ship keeps the lease (its new hub takes it back from the
     // ledger): the ship is made again once it answers
-    let shipped = through_restarts(&held.id, &mut c.clone(), |c| ship(c, &root, &held, &pin, uncommitted), &master);
+    let shipped = through_restarts(&held.id, &mut c.clone(), |c| ship(c, &root, &held, &pin, uncommitted, &o.patched), &master);
     let ship = shipping.elapsed();
     let running = Instant::now();
     let mut tally = crate::testlog::Tally::default();
@@ -986,10 +1072,25 @@ impl Write for Tee<'_> {
     }
 }
 
-fn test_miss(o: &Opts, pkg: &str, args: &[String], verb: &str, errors: &[String]) -> Result<Value, String> {
-    let repo = o.req.repo_dir.clone().or_else(|| lane_root().map(|(root, _)| root.to_string_lossy().into_owned())).unwrap_or_default();
-    let req = format!("{{\"pkg\":{},\"target\":{},\"lane\":{},\"rev\":{},\"repo\":{},\"error\":[{}]}}", makepad_remote::json_str(pkg), makepad_remote::json_str(&crate::jit_misses::target(args)), makepad_remote::json_str(&o.req.lane), makepad_remote::json_str(o.req.rev.as_deref().unwrap_or("")), makepad_remote::json_str(&repo), errors.iter().take(5).map(|e| makepad_remote::json_str(e)).collect::<Vec<_>>().join(","));
+fn test_miss(o: &Opts, pkg: &str, args: &[String], verb: &str, errors: &[String], inputs: Option<&str>) -> Result<Value, String> {
+    let req = format!("{{\"pkg\":{},\"target\":{},\"lane\":{},\"rev\":{},\"repo\":{},\"error\":[{}],\"inputs\":{}}}", makepad_remote::json_str(pkg), makepad_remote::json_str(&crate::jit_misses::target(args)), makepad_remote::json_str(&o.req.lane), makepad_remote::json_str(o.req.rev.as_deref().unwrap_or("")), makepad_remote::json_str(&miss_repo(o)), errors.iter().take(5).map(|e| makepad_remote::json_str(e)).collect::<Vec<_>>().join(","), inputs.map_or("null".to_string(), makepad_remote::json_str));
     retry_master(|| master().and_then(|c| one(&c, "jit", &format!("jit misses {verb} {req}"))))
+}
+
+/// The lane's worktree a miss of its tests is looked up and keyed in.
+fn miss_repo(o: &Opts) -> String {
+    o.req.repo_dir.clone().or_else(|| lane_root().map(|(root, _)| root.to_string_lossy().into_owned())).unwrap_or_default()
+}
+
+/// What a JIT run of `pkg` reads of the lane's trees ([`crate::jit_misses::inputs_at`]), read off
+/// the caller's thread as the run ships: a miss it records is keyed by these, never by the trees
+/// once cargo has answered. M64's lane edited its crate in the 7 s between the JIT's failure and
+/// the miss's record (11-06): read then, the edit would have been the miss's.
+type MissInputs = std::thread::JoinHandle<Option<String>>;
+
+fn miss_inputs(o: &Opts, pkg: &str) -> MissInputs {
+    let (repo, rev, pkg) = (miss_repo(o), o.req.rev.clone().unwrap_or_default(), pkg.to_string());
+    std::thread::spawn(move || crate::jit_misses::inputs_at(&repo, &rev, &pkg))
 }
 
 /// Cargo's build-finished event distinguishes a compile error from a test binary's failure,
@@ -1018,7 +1119,7 @@ fn cargo_output(log: &str) -> (Option<bool>, String) {
     (built, out)
 }
 
-fn cargo_test(mut o: Opts, pkg: &str, args: &[String], errors: &[String], known: Option<Value>) -> i32 {
+fn cargo_test(mut o: Opts, pkg: &str, args: &[String], errors: &[String], known: Option<Value>, inputs: Option<MissInputs>) -> i32 {
     if let Some(miss) = &known { println!("{}", crate::jit_misses::notice(miss)); }
     else { eprintln!("devhub test: JIT compile/resolve failure on {pkg} {}; checking with cargo on a pool box", crate::jit_misses::target(args)); }
     let _ = std::io::stdout().flush();
@@ -1061,7 +1162,8 @@ fn cargo_test(mut o: Opts, pkg: &str, args: &[String], errors: &[String], known:
     if let (None, Some(base)) = (&known, &behind) {
         eprintln!("devhub test: not a JIT miss: this lane's JIT is older than work's (work changed the JIT since the lane's base {}), and its code may use what landed since: merge work and run it again; this verdict is cargo's: {}", &base[..base.len().min(10)], errors.first().map_or("", String::as_str));
     } else if known.is_none() {
-        match test_miss(&o, pkg, args, "record", errors) {
+        let inputs = inputs.and_then(|h| h.join().ok().flatten());
+        match test_miss(&o, pkg, args, "record", errors, inputs.as_deref()) {
             Ok(miss) => println!("{}", crate::jit_misses::notice(&miss)),
             Err(e) => eprintln!("devhub test: JIT miss on {pkg} {} (recording failed: {e}): {}; this verdict is cargo's", crate::jit_misses::target(args), errors.first().map_or("", String::as_str)),
         }
@@ -1200,15 +1302,16 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         if let Err(code) = retry_master(master).map_err(fail).and_then(|c| native_gate(&c, &o)) { return code; }
         return run_worktree(o, false, Some(pkg));
     }
-    match test_miss(&o, pkg, &test_args, "lookup", &[]) {
+    match test_miss(&o, pkg, &test_args, "lookup", &[], None) {
         Ok(miss) if !miss.is_null() => {
             let errors = miss.get("error").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
-            return cargo_test(o, pkg, &test_args, &errors, Some(miss));
+            return cargo_test(o, pkg, &test_args, &errors, Some(miss), None);
         }
         Ok(_) => {}
         Err(e) => return fail(e),
     }
-    if live { return live_test(o, pkg, &test_args); }
+    let inputs = miss_inputs(&o, pkg);
+    if live { return live_test(o, pkg, &test_args, inputs); }
     let c = match retry_master(master) { Ok(c) => c, Err(e) => return fail(e) };
     let shadow = match one(&c, "overlay-shadow", "overlay-shadow enabled") {
         Ok(v) => v.get("on").and_then(Value::as_bool) == Some(true),
@@ -1222,7 +1325,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
     };
     let log = String::from_utf8_lossy(&output);
     let errors = crate::jit_misses::compile_errors(&log);
-    if completed && code != CANCELLED_EXIT && !errors.is_empty() { return cargo_test(o, pkg, &test_args, &errors, None); }
+    if completed && code != CANCELLED_EXIT && !errors.is_empty() { return cargo_test(o, pkg, &test_args, &errors, None, Some(inputs)); }
     print!("{log}");
     code
 }
@@ -1294,7 +1397,7 @@ fn overlay_selftest(args: &[&str]) -> i32 {
     finish(&c, &held, r)
 }
 
-fn live_test(mut o: Opts, pkg: &str, args: &[String]) -> i32 {
+fn live_test(mut o: Opts, pkg: &str, args: &[String], inputs: MissInputs) -> i32 {
     let started = Instant::now();
     let result = (|| -> Result<crate::state::Live, String> {
         let (root, _) = lane_root().ok_or("test --live: run it inside the lane's worktree")?;
@@ -1360,7 +1463,7 @@ fn live_test(mut o: Opts, pkg: &str, args: &[String]) -> i32 {
                     // closing the ledger later must create a fresh JIT rather than reuse it.
                     if let Err(e) = retry_master(|| master().and_then(|c| one(&c, "live", &format!("live release {}", x.id)))) { return fail(e); }
                     o.req.rev = Some(x.rev.clone());
-                    return cargo_test(o, pkg, args, &errors, None);
+                    return cargo_test(o, pkg, args, &errors, None, Some(inputs));
                 }
             }
             print!("{}", x.test_result(started.elapsed().as_secs_f64()));
@@ -1450,7 +1553,12 @@ pub(crate) fn kept_line(id: &str, dst: &Path, r: &Result<Vec<(PathBuf, u64)>, St
 /// [`fetch`]'s copy, none an empty list; `inside`: `rel`'s own folder is left out of the paths
 /// written under `dst`.
 fn fetch_under(c: &Client, node: &str, lane: &str, lease: &str, rel: &str, dst: &Path, inside: bool) -> Result<Vec<(PathBuf, u64)>, String> {
-    let list = ask(c, Some(node), "get-ls", &format!("get-ls {lane} {lease} {rel}")).map_err(|e| format!("{node}: {e}"))?;
+    fetch_from(&|service, line| ask(c, Some(node), service, line), node, lane, lease, rel, dst, inside)
+}
+
+/// The same lease-file protocol through either a client router or the master's node link.
+pub(super) fn fetch_from(ask: &dyn Fn(&str, &str) -> Result<Vec<String>, String>, node: &str, lane: &str, lease: &str, rel: &str, dst: &Path, inside: bool) -> Result<Vec<(PathBuf, u64)>, String> {
+    let list = ask("get-ls", &format!("get-ls {lane} {lease} {rel}")).map_err(|e| format!("{node}: {e}"))?;
     let mut files = Vec::new();
     for l in list {
         let Some(v) = json(&l) else { continue };
@@ -1468,7 +1576,10 @@ fn fetch_under(c: &Client, node: &str, lane: &str, lease: &str, rel: &str, dst: 
         }
         let mut data = Vec::new();
         loop {
-            let v = node_one(c, node, "get-read", &format!("get-read {lane} {lease} {} {r}", data.len()))?;
+            let lines = ask("get-read", &format!("get-read {lane} {lease} {} {r}", data.len()))?;
+            let first = lines.first().ok_or_else(|| format!("{node} get-read: no answer"))?;
+            let v = json(first).ok_or_else(|| format!("{node} get-read: bad answer"))?;
+            if let Some(e) = v.get("err").and_then(Value::as_str) { return Err(format!("{node}: {e}")); }
             let chunk = b64_decode(&s(&v, "data")).ok_or("get-read: bad data")?;
             data.extend_from_slice(&chunk);
             if v.get("eof").and_then(|e| e.as_bool()) != Some(false) || chunk.is_empty() {
@@ -1627,6 +1738,11 @@ fn inspect(target: &str, rest: &[&str]) -> Option<i32> {
         }
         Err(e) => fail(e),
     })
+}
+
+/// Who sets a node's lease.conf, for its event (` by=<DEVHUB_AGENT>`).
+fn conf_by() -> String {
+    std::env::var("DEVHUB_AGENT").ok().filter(|a| !a.is_empty() && !a.contains(char::is_whitespace)).map_or(String::new(), |a| format!(" by={a}"))
 }
 
 /// `node <n> [role R | set k=v..]`: the node's lease.conf, set by the master (persisted on the
@@ -1850,11 +1966,11 @@ pub fn cli(args: &[&str]) -> Option<i32> {
             Ok(v) => { print!("{}", s(&v, "text")); 0 }
             Err(e) => fail(e),
         },
-        ["stats", "cores"] => match one(&c, "stats", "stats cores") {
+        ["stats", word @ ("cores" | "calls")] => match one(&c, "stats", &format!("stats {word}")) {
             Ok(v) => { print!("{}", s(&v, "text")); 0 }
             Err(e) => fail(e),
         },
-        ["stats", ..] => { eprintln!("makepad devhub stats queue [--hour] | stats cores"); 2 },
+        ["stats", ..] => { eprintln!("makepad devhub stats queue [--hour] | stats cores | stats calls"); 2 },
         ["jit", "stats", rest @ ..] if rest.is_empty() || rest == ["--day"] => match one(&c, "jit", &format!("jit stats {}", rest.join(" "))) {
             Ok(v) => { print!("{}", s(&v, "text")); 0 }
             Err(e) => fail(e),
@@ -1960,8 +2076,8 @@ pub fn cli(args: &[&str]) -> Option<i32> {
             Err(e) => fail(e),
         },
         ["node", node] => node_conf(&c, node, ""),
-        ["node", node, "role", role] => node_conf(&c, node, &format!("set role={role}")),
-        ["node", node, "set", kvs @ ..] if !kvs.is_empty() => node_conf(&c, node, &format!("set {}", kvs.join(" "))),
+        ["node", node, "role", role] => node_conf(&c, node, &format!("set role={role}{}", conf_by())),
+        ["node", node, "set", kvs @ ..] if !kvs.is_empty() => node_conf(&c, node, &format!("set {}{}", kvs.join(" "), conf_by())),
         ["disk", node, rest @ ..] => disk(&c, node, rest.contains(&"--dry-run")),
         ["heap", node, rest @ ..] => heap(&c, node, rest.first().copied().unwrap_or("12")),
         ["desk", node, rest @ ..] => match rest {
@@ -2047,6 +2163,39 @@ mod restart_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `run --patch` flags before the command come out of it and give the patched files; the
+    /// command's own `--patch` stays. The staged copy keeps the worktree file's mode.
+    #[test]
+    fn a_runs_patches_come_out_of_its_flags_and_stage_with_the_files_mode() {
+        let dir = std::env::temp_dir().join(format!("devhub-run-patch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("wt");
+        std::fs::create_dir_all(root.join("tools")).unwrap();
+        std::fs::write(root.join("tools/rig.sh"), "echo one\necho two\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.join("tools/rig.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let diff = dir.join("probe.diff");
+        std::fs::write(&diff, "--- a/tools/rig.sh\n+++ b/tools/rig.sh\n@@ -1,2 +1,3 @@\n echo one\n+echo probe\n echo two\n").unwrap();
+        let diff = diff.to_string_lossy().into_owned();
+        let mut rest = vec!["--patch", diff.as_str(), "--cores", "2", "--", "bash", "--patch", "x"];
+        let patched = take_patches(Some(&root), &mut rest).unwrap();
+        assert_eq!(rest, ["--cores", "2", "--", "bash", "--patch", "x"]);
+        assert_eq!(patched, [("tools/rig.sh".to_string(), b"echo one\necho probe\necho two\n".to_vec())]);
+        let mut twice = vec!["--patch", diff.as_str(), "--patch", diff.as_str(), "--", "x"];
+        assert!(take_patches(Some(&root), &mut twice).unwrap_err().ends_with("tools/rig.sh is in another patch too"));
+        let stage = dir.join("stage");
+        let staged = stage_patched(&root, &stage, &patched).unwrap();
+        assert_eq!(staged.iter().map(|e| (e.path.as_str(), e.size)).collect::<Vec<_>>(), [("tools/rig.sh", 29)]);
+        assert_eq!(std::fs::read(stage.join("tools/rig.sh")).unwrap(), patched[0].1);
+        #[cfg(unix)]
+        assert!(staged[0].exec, "the staged script keeps its mode");
+        assert!(stage_patched(&root, &stage, &[("local/x.sh".into(), Vec::new())]).unwrap_err().contains("never ships"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_cancel_names_its_node_or_says_it_was_still_queued() {

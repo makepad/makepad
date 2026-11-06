@@ -48,7 +48,19 @@ call $DH; a landing's CLI goes live when its rebuild finishes
 pub(crate) fn control() -> Result<Client, String> {
     let c = Client::new(Target::Unix(proto::control_socket()), "observe");
     c.conn().map_err(|e| format!("no devhub master at {} (connect: {e}); `makepad devhub master start` starts one", proto::control_socket().display()))?;
+    agent_seen(&c);
     Ok(c)
+}
+
+/// Once a process: tells the master this agent (`DEVHUB_AGENT`) made a devhub call, the mark
+/// `lane quiet` holds an overdue lease's agent to ([`crate::lease::master::LeaseMaster::silent_overdue`]).
+/// A call that stays open (`job wait`, a test's wait for its lease) is the one call it began as.
+fn agent_seen(c: &Client) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some(agent) = std::env::var("DEVHUB_AGENT").ok().filter(|a| makepad_devhub_conf::valid_name(a)) else { return };
+    if has(c, "agent-seen") && !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let _ = ask(c, None, "agent-seen", &format!("agent-seen {agent}"));
+    }
 }
 
 /// Submission waits out master restarts; application errors still stand.
@@ -88,6 +100,33 @@ pub(crate) fn retry_master_wait<T>(mut call: impl FnMut() -> Result<T, String>, 
 /// Sends one line to a lines service and collects the answer.
 pub fn ask(c: &Client, target: Option<&str>, service: &str, line: &str) -> Result<Vec<String>, String> {
     ask_lines(c, target, service, line).map_err(|e| older(target, service, e))
+}
+
+/// Asks of one node's service, one at a time, on one routed channel ([`ask`] routes each one:
+/// [`makepad_remote::hub::Asking`]), opened at the first ask and again after an error.
+pub struct NodeAsks {
+    node: String,
+    service: &'static str,
+    ch: Option<hub::Asking>,
+}
+
+impl NodeAsks {
+    pub fn new(node: &str, service: &'static str) -> NodeAsks {
+        NodeAsks { node: node.to_string(), service, ch: None }
+    }
+
+    /// [`ask`] of the node's service through `c`, on this channel.
+    pub fn ask(&mut self, c: &Client, line: &str) -> Result<Vec<String>, String> {
+        let older = |e: String| older(Some(&self.node), self.service, e);
+        let ch = match self.ch.take() {
+            Some(ch) => ch,
+            None => hub::Asking::open(c, &self.node, self.service).map_err(older)?,
+        };
+        let mut got = Vec::new();
+        ch.ask(line, &mut |l| got.push(l.to_string())).map_err(older)?;
+        self.ch = Some(ch);
+        Ok(got)
+    }
 }
 
 /// A refusal of a service this client knows means the other side runs older code: say so, and
@@ -628,6 +667,8 @@ fn lines_out(r: Result<Vec<String>, String>, text: bool) -> i32 {
 
 /// `serve [--node <conf>]`: the hub core without a window or tray (tests, ssh sessions).
 fn serve(args: &[&str]) -> i32 {
+    // (no process the hub starts shows an error window on the box's desktop)
+    crate::os::quiet_errors();
     crate::procinfo::reap_inherited();
     let log: crate::trust::Log = std::sync::Arc::new(|l: &str| eprintln!("{l}"));
     let trust = |name: &str| -> Option<std::sync::Arc<dyn crate::trust::Trust>> {

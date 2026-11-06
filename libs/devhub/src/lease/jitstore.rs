@@ -430,8 +430,7 @@ mod tests {
 
     /// The id of a process that has ended.
     fn ended_pid() -> u32 {
-        let mut c = if cfg!(windows) { let mut c = std::process::Command::new("cmd"); c.args(["/c", "exit"]); c } else { std::process::Command::new("true") };
-        let mut c = c.spawn().unwrap();
+        let mut c = std::process::Command::new(if cfg!(windows) { "hostname" } else { "true" }).stdout(std::process::Stdio::null()).spawn().unwrap();
         let pid = c.id();
         c.wait().unwrap();
         pid

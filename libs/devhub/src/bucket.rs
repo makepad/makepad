@@ -230,7 +230,10 @@ fn unit_key(unit: &str) -> String {
 }
 
 /// A compile error line as `<file>: <message>`: rustc's `<path>:<line>:<col>: ` gives way to the
-/// file's name (the node's tree path, or an edit shifting the line, is no new error).
+/// file's name (the node's tree path, or an edit shifting the line, is no new error). The message
+/// ends at a tab: a present's summary line carries the error as a tab-separated record whose next
+/// field changes from run to run, and each run after a break named the landing of its own bucket
+/// as the breaker (a missing field broke Fab's build at #1926, then #1927-#1931 were named, 11-06).
 fn error_key(line: &str) -> Option<String> {
     let digits = |s: &str| s.bytes().take_while(u8::is_ascii_digit).count();
     let mut from = 0;
@@ -243,12 +246,17 @@ fn error_key(line: &str) -> Option<String> {
             let n = digits(col);
             if n > 0 && col[n..].starts_with(": ") {
                 let path = &line[..at];
-                return Some(format!("{}: {}", path.rsplit('/').next().unwrap_or(path), &col[n + 2..]));
+                return Some(format!("{}: {}", path.rsplit('/').next().unwrap_or(path), message(&col[n + 2..])));
             }
         }
         from = at + 1;
     }
     None
+}
+
+/// An error's message as [`error_key`] keeps it: up to a tab. Rows from before kept what followed.
+fn message(text: &str) -> &str {
+    text.split('\t').next().unwrap_or(text).trim_end()
 }
 
 /// A run's failing units with their compile errors (each unit's own output: the lines after the
@@ -357,7 +365,7 @@ fn carried_since(rows: &[Value], failing: &[String], errors: &BTreeMap<String, V
             };
             let listed = row.get("failing").and_then(Value::as_arr).is_some_and(|f| f.iter().any(|u| u.as_str().is_some_and(|u| unit_key(u) == key)));
             if failed.is_none() && !listed { continue; }
-            let before: Vec<&str> = failed.and_then(|(_, b)| b.as_arr()).unwrap_or_default().iter().filter_map(Value::as_str).collect();
+            let before: Vec<&str> = failed.and_then(|(_, b)| b.as_arr()).unwrap_or_default().iter().filter_map(Value::as_str).map(message).collect();
             if row.get("errors").is_none() || now.iter().all(|e| before.contains(&e.as_str())) {
                 out.insert(unit.clone(), origin(rows, &key));
             }
@@ -442,12 +450,42 @@ pub fn status(home: &Path) -> Vec<String> {
     out
 }
 
+/// No verdict finishes the attempt without a ledger row; other errors leave it adoptable.
+#[derive(Debug)]
+enum JudgeError {
+    NoVerdict(String),
+    Other(String),
+}
+
+impl From<String> for JudgeError {
+    fn from(error: String) -> Self { Self::Other(error) }
+}
+
+impl std::fmt::Display for JudgeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self { Self::NoVerdict(why) | Self::Other(why) => f.write_str(why) }
+    }
+}
+
+/// Both a newly run and an adopted attempt retire their sidecar when no verdict is possible.
+fn finish_run(log: &Path, result: Result<(), JudgeError>) -> Result<(), JudgeError> {
+    if matches!(&result, Err(JudgeError::NoVerdict(_))) {
+        let sidecar = log.with_extension("log.run");
+        match std::fs::remove_file(&sidecar) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(JudgeError::Other(format!("removing bucket run {}: {e}", sidecar.display()))),
+        }
+    }
+    result
+}
+
 /// Bucket `name`'s verdict on `tip`, from the outcome `run` reaches from the base (the last tip it
 /// judged, else the oldest base of the last hour's landings): the landings since the base named
 /// for the units they changed, a ledger row and a feed line (`emit`). Err: no verdict.
 #[allow(clippy::too_many_arguments)]
 fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev, String, String), started: u64, base: Option<Pair>, tip: &Pair,
-    run: impl FnOnce(Option<&Pair>) -> Result<Outcome, String>) -> Result<(), String> {
+    run: impl FnOnce(Option<&Pair>) -> Result<Outcome, String>) -> Result<(), JudgeError> {
     let history = store.history("land")?.iter().filter_map(|v| Entry::parse(&v.to_json())).filter(|e| e.state == St::Landed).collect::<Vec<_>>();
     let entries = || history.clone();
     let base = base.or_else(|| {
@@ -459,7 +497,7 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
     let mut outcome = run(base.as_ref())?;
     if let Some(why) = &outcome.no_verdict {
         emit(Sev::Warn, format!("bucket {name} {}: no verdict: {why} ({}); it runs again at its next turn", tip.short(), outcome.log), String::new());
-        return Err(format!("no verdict on {}: {why}", tip.short()));
+        return Err(JudgeError::NoVerdict(format!("no verdict on {}: {why}", tip.short())));
     }
     let ended = wall_ms();
     let (entries, attribution_error) = match &base {
@@ -567,7 +605,7 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
 /// listing's output and its `GATEUNIT` line; `base` is the previous prebuild's tip.
 pub fn prebuild(home: &Path, repo: &Path, store: &Store, started: u64, base: Option<Pair>, tip: &Pair, outcome: Outcome) -> Result<(), String> {
     let emit = |sev: Sev, line: String, detail: String| store.event("bucket", sev, line, Some(detail));
-    judge("prebuild", home, repo, store, &emit, started, base, tip, |_| Ok(outcome))
+    judge("prebuild", home, repo, store, &emit, started, base, tip, |_| Ok(outcome)).map_err(|e| e.to_string())
 }
 
 /// Each bucket owns one timer and runs synchronously on its own thread.
@@ -585,14 +623,15 @@ pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: 
         let mut last_start = latest.as_ref().and_then(|v| v.get("started_ms")?.as_u64()).unwrap_or(0);
         let logs = home.join("bucket-logs");
         let emit = |sev: Sev, line: String, detail: String| publish(hub_record(&machine, "", 0, "bucket", sev, line, detail));
-        let record = |started: u64, base: Option<Pair>, tip: Pair, log: PathBuf| -> Result<Pair, String> {
-            judge(&name, &home, &repo, &store, &emit, started, base, &tip, |base| match base {
+        let record = |started: u64, base: Option<Pair>, tip: Pair, log: PathBuf| -> Result<Pair, JudgeError> {
+            let result = judge(&name, &home, &repo, &store, &emit, started, base, &tip, |base| match base {
                 Some(base) => {
                     std::fs::create_dir_all(&logs).map_err(|e| format!("bucket logs: {e}"))?;
                     Ok(run(Some(base), &tip, &log))
                 }
                 None => Ok(Outcome { ok: true, failing: Vec::new(), log: String::new(), summary: "baseline".into(), no_verdict: None }),
-            })?;
+            });
+            finish_run(&log, result)?;
             Ok(tip)
         };
         let prefix = format!("{name}-");
@@ -755,6 +794,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_no_verdict_run_retires_its_sidecar_but_other_errors_keep_it() {
+        let home = std::env::temp_dir().join(format!("devhub-bucket-no-verdict-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let log = home.join("ci-1.log");
+        let sidecar = log.with_extension("log.run");
+        let store = Store::open_quiet(&home, "").unwrap();
+        let tip = Pair::new(&"a".repeat(40), "");
+        save_run(&log, 1, 1, &tip, &tip).unwrap();
+        let error = "no verdict on a: unavailable".to_string();
+        assert!(finish_run(&log, Err(JudgeError::Other(error))).is_err());
+        assert!(sidecar.exists(), "an ordinary error keeps the run even with no-verdict text");
+        let outcome = Outcome { ok: false, failing: Vec::new(), log: log.display().to_string(), summary: "incomplete".into(), no_verdict: Some("unavailable".into()) };
+        let result = judge("ci", &home, &home, &store, &|_, _, _| {}, 1, None, &tip, |_| Ok(outcome));
+        assert!(matches!(finish_run(&log, result), Err(JudgeError::NoVerdict(_))));
+        assert!(!sidecar.exists(), "a no-verdict end must never be adopted again");
+        assert!(rows_of(&home, "ci").is_empty(), "no verdict writes no ledger row");
+        assert!(matches!(finish_run(&log, Err(JudgeError::NoVerdict("unavailable".into()))), Err(JudgeError::NoVerdict(_))), "an absent sidecar is already retired");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
     fn a_lost_lease_runs_the_gate_once_more_and_lost_again_is_no_verdict() {
         let lost_exit = Ok(Some(crate::lease::client::LOST_EXIT));
         assert!(again(&lost_exit, "why\nL1 test@node-a: granted\n"));
@@ -798,6 +858,14 @@ mod tests {
         assert!(carried_since(&[broke], &failing(&more), &more).is_empty());
         assert_eq!(error_key("no position: here"), None);
         assert_eq!(error_key("C:/t/a.rs:1:2: warning: unused").as_deref(), Some("a.rs: warning: unused"));
+        // a present's summary carries the error in a tab-separated record whose next field
+        // changes per run: the same break, run after run, and against a row that kept the field
+        let present = |n: u32| format!("app: no present (failed before its first frame: error\t/n/tree/app/src/sla.rs:690:23: E0063: missing field `stack`\t{n} )error\t/n/tree/app/src/sla.rs:690:23: E0063: missing field `stack`\t{n} ; its last log lines:\n/n/tree/app/src/sla.rs:690:23: E0063: missing field `stack`\nGATEUNIT fail present app\n");
+        let (first, _) = unit_lines(&present(7435));
+        assert_eq!(first["present app"], vec!["sla.rs: E0063: missing field `stack`".to_string()]);
+        let old = obj(vec![("errors", obj(vec![("present app", Value::Arr(vec![s("sla.rs: E0063: missing field `stack`\t7435 )error\t/n/tree/app/src/sla.rs:690:23: E0063: missing field `stack`\t7435 ; its last log lines:")]))])), ("broke", obj(vec![("present app", s("rc-b (B) #1926"))]))]);
+        let (next, _) = unit_lines(&present(1030));
+        assert_eq!(carried_since(&[old], &failing(&next), &next).get("present app").map(String::as_str), Some("rc-b (B) #1926"), "the breaker, not the next lander");
     }
 
     /// Zero warnings is the rule: a test target's new warning is a WARN to who brought it, the bucket

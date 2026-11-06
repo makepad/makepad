@@ -646,7 +646,7 @@ impl Sync {
         // start is a no-op `cargo run` (a node's compiled 13 s behind a package-cache lock while its
         // hub refused connections, 11-02). A hub that does not build keeps the WM and this hub.
         #[cfg(feature = "checkout")]
-        crate::lease::exec::build_hub(&self.conf.checkout).map_err(|e| failed(format!("the hub does not build at this deployment ({e}): the WM is not restarted, this hub keeps running")))?;
+        crate::lease::exec::build_hub(&self.conf.checkout, None).map_err(|e| failed(format!("the hub does not build at this deployment ({e}): the WM is not restarted, this hub keeps running")))?;
         crate::lease::exec::with_no_lease_starting(|| {
             let blockers = restart_blockers();
             if !blockers.is_empty() {
@@ -654,6 +654,9 @@ impl Sync {
             }
             let _ = std::fs::create_dir_all(proto::home().join("sync"));
             let _ = std::fs::write(Self::marker(), format!("{} {why}\n", proto::wall_ms()));
+            // the WM session's own apps it ends end by it, no crash (each deploy's WM restart
+            // filed the WM's aichat as one, 11-06)
+            crate::lease::exec::note_stopped_pids(&format!("by the WM restart ({why})"), super::jits::list().into_iter().filter(|j| wm_own(&j.app)).map(|j| j.pid).collect());
             self.event(Sev::Info, format!("sync: restarting the WM ({svc}): {why}"), String::new());
             let st = makepad_remote::group::command("sudo").args(["-n", "/usr/bin/systemctl", "restart", &svc]).stdin(std::process::Stdio::null()).output().map_err(|e| failed(format!("sudo: {e}")))?;
             if !st.status.success() {
@@ -778,12 +781,17 @@ fn restart_blockers() -> Vec<String> {
     // a WM restart ends every app in its session: it never takes a user's app with it (it
     // killed Fab on a pool box, 3 min after the last input, 2026-10-30)
     // (a headless lease's JIT runs on through it: its lease is not on the WM)
-    out.extend(super::jits::list().into_iter().filter(|j| !WM_SERVICES.iter().any(|s| j.app == *s || j.app == format!("makepad-app-{s}")) && !crate::lease::exec::in_headless_lease(j.pid)).map(|j| format!("{} runs (pid {}): close it to let the WM update", j.app, j.pid)));
+    out.extend(super::jits::list().into_iter().filter(|j| !wm_own(&j.app) && !crate::lease::exec::in_headless_lease(j.pid)).map(|j| format!("{} runs (pid {}): close it to let the WM update", j.app, j.pid)));
     out
 }
 
 /// What the WM's session runs by itself: not a user's apps.
 const WM_SERVICES: [&str; 4] = ["wm", "aichat", "aihub", "devhub"];
+
+/// Whether `app` is one of [`WM_SERVICES`].
+fn wm_own(app: &str) -> bool {
+    WM_SERVICES.iter().any(|s| app == *s || app == format!("makepad-app-{s}"))
+}
 
 /// A makepad checkout dir that holds only the nested commercial checkout (a fresh tree whose
 /// commercial side came first).

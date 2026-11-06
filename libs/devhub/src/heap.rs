@@ -18,7 +18,7 @@ use std::backtrace::Backtrace;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// About one allocation per this many bytes allocated is sampled.
 pub const SAMPLE: usize = 8 << 20;
@@ -28,11 +28,19 @@ pub const SLOTS: usize = 1 << 14;
 const WAYS: usize = 8;
 const LINE_BITS: u32 = (SLOTS / WAYS).trailing_zeros();
 
-// signed: a free of memory this allocator did not count (a JIT host's) must not wrap it
-static LIVE: AtomicIsize = AtomicIsize::new(0);
-static PEAK: AtomicIsize = AtomicIsize::new(0);
-/// The live heap's high mark since the last [`trim`]: a burst's peak, however short.
-static MARK: AtomicIsize = AtomicIsize::new(0);
+/// The heap's byte counts: the allocator's are [`COUNTS`]. A test keeps its own: the process's
+/// move with every other test's allocations and trims (a parallel test's allocations took a freed
+/// burst under its size between the free and the check, 11-06).
+struct Counts {
+    // signed: a free of memory this allocator did not count (a JIT host's) must not wrap it
+    live: AtomicIsize,
+    peak: AtomicIsize,
+    /// The live heap's high mark since the last trim: a burst's peak, however short.
+    mark: AtomicIsize,
+    trims: AtomicUsize,
+}
+
+static COUNTS: Counts = Counts::new();
 static SAMPLING: AtomicBool = AtomicBool::new(false);
 static DROPPED: AtomicUsize = AtomicUsize::new(0);
 static TAKEN: AtomicUsize = AtomicUsize::new(0);
@@ -41,8 +49,15 @@ static TAKEN: AtomicUsize = AtomicUsize::new(0);
 struct Line([AtomicUsize; WAYS]);
 #[allow(clippy::declare_interior_mutable_const)]
 const EMPTY_LINE: Line = Line([const { AtomicUsize::new(0) }; WAYS]);
-static TABLE: [Line; SLOTS / WAYS] = [EMPTY_LINE; SLOTS / WAYS];
-static SAMPLES: Mutex<Option<HashMap<usize, Sampled>>> = Mutex::new(None);
+
+/// Sampled addresses (eight to a cache line) and their samples: the heap's own is [`SAMPLED`]. A
+/// test keeps one of its own, out of reach of the allocator's hooks and the other tests.
+struct Table {
+    lines: [Line; SLOTS / WAYS],
+    samples: Mutex<Option<HashMap<usize, Sampled>>>,
+}
+
+static SAMPLED: Table = Table::new();
 
 thread_local! {
     /// this thread is inside the sampler (its own allocations only count)
@@ -54,15 +69,116 @@ thread_local! {
 struct Sampled {
     weight: usize,
     at_ms: u64,
-    trace: Backtrace,
+    /// shared with a [`report`] that resolves it while the allocation may be freed
+    trace: Arc<Backtrace>,
 }
 
 /// The counting allocator.
 pub struct Counted;
 
-fn line_of(p: usize) -> &'static Line {
-    // Fibonacci hashing of the address (its low bits are alignment): the product's top bits
-    &TABLE[p.wrapping_mul(0x9E37_79B9_7F4A_7C15_u64 as usize) >> (usize::BITS - LINE_BITS)]
+impl Counts {
+    const fn new() -> Counts {
+        Counts { live: AtomicIsize::new(0), peak: AtomicIsize::new(0), mark: AtomicIsize::new(0), trims: AtomicUsize::new(0) }
+    }
+
+    fn grew(&self, n: usize) {
+        let live = self.live.fetch_add(n as isize, Ordering::Relaxed) + n as isize;
+        // the mark is at most the peak: one load when neither moves
+        if live > self.mark.load(Ordering::Relaxed) {
+            self.mark.fetch_max(live, Ordering::Relaxed);
+            if live > self.peak.load(Ordering::Relaxed) {
+                self.peak.fetch_max(live, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn shrank(&self, n: usize) {
+        self.live.fetch_sub(n as isize, Ordering::Relaxed);
+    }
+
+    /// The allocator gave its free pages back: the mark comes down to the live heap.
+    fn trimmed(&self) {
+        self.trims.fetch_add(1, Ordering::Relaxed);
+        self.mark.store(self.live.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+
+    fn burst_freed(&self) -> usize {
+        (self.mark.load(Ordering::Relaxed) - self.live.load(Ordering::Relaxed)).max(0) as usize
+    }
+
+    fn live(&self) -> usize {
+        self.live.load(Ordering::Relaxed).max(0) as usize
+    }
+
+    fn peak(&self) -> usize {
+        self.peak.load(Ordering::Relaxed).max(0) as usize
+    }
+}
+
+impl Table {
+    const fn new() -> Table {
+        Table { lines: [EMPTY_LINE; SLOTS / WAYS], samples: Mutex::new(None) }
+    }
+
+    fn line_of(&self, p: usize) -> &Line {
+        // Fibonacci hashing of the address (its low bits are alignment): the product's top bits
+        &self.lines[p.wrapping_mul(0x9E37_79B9_7F4A_7C15_u64 as usize) >> (usize::BITS - LINE_BITS)]
+    }
+
+    /// Samples the allocation at `p` (made here, now).
+    fn note(&self, p: *mut u8, size: usize) {
+        guarded(|| {
+            let s = Sampled { weight: size.max(SAMPLE), at_ms: crate::proto::wall_ms(), trace: Arc::new(Backtrace::force_capture()) };
+            self.keep(p as usize, s);
+        });
+    }
+
+    /// Files a sample under `p` (inside the guard).
+    fn keep(&self, p: usize, s: Sampled) {
+        if !self.line_of(p).0.iter().any(|slot| slot.compare_exchange(0, p, Ordering::AcqRel, Ordering::Relaxed).is_ok()) {
+            DROPPED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.samples.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(p, s);
+    }
+
+    /// Takes the sample of `p` out, if it has one: before `p` is freed (so an allocation that
+    /// reuses the address is not taken for it).
+    fn forget(&self, p: *mut u8) -> Option<Sampled> {
+        let p = p as usize;
+        let slot = self.line_of(p).0.iter().find(|s| s.load(Ordering::Acquire) == p)?;
+        let mut gone = None;
+        guarded(|| {
+            gone = self.samples.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|m| m.remove(&p));
+            slot.store(0, Ordering::Release);
+        });
+        gone
+    }
+
+    /// Every sample now (weight, when, its trace shared): the table keeps them all, so a free
+    /// while a report resolves the traces still takes its sample out and its bytes leave. (A
+    /// report took them out meanwhile: a realloc then lost its sample, 11-06.)
+    fn snapshot(&self) -> Vec<(usize, u64, Arc<Backtrace>)> {
+        let mut out = Vec::new();
+        guarded(|| out = self.samples.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or_else(Vec::new, |m| m.values().map(|s| (s.weight, s.at_ms, s.trace.clone())).collect()));
+        out
+    }
+}
+
+/// The samples' sites: (bytes, samples, the oldest's ms). Resolving takes the backtrace lock,
+/// which a thread printing a backtrace may hold while it frees: never under the table's lock.
+fn sites(snapshot: Vec<(usize, u64, Arc<Backtrace>)>) -> HashMap<String, (usize, usize, u64)> {
+    let mut sites = HashMap::new();
+    guarded(|| {
+        for (weight, at_ms, trace) in &snapshot {
+            let g = sites.entry(site_of(&format!("{trace:?}"))).or_insert((0, 0, u64::MAX));
+            g.0 += weight;
+            g.1 += 1;
+            g.2 = g.2.min(*at_ms);
+        }
+        drop(snapshot);
+    });
+    sites
 }
 
 /// Whether this allocation is sampled: always from [`SAMPLE`] up, else when the thread's
@@ -96,58 +212,13 @@ fn guarded(f: impl FnOnce()) {
     }
 }
 
-/// Samples the allocation at `p` (made here, now).
-fn note(p: *mut u8, size: usize) {
-    guarded(|| {
-        let s = Sampled { weight: size.max(SAMPLE), at_ms: crate::proto::wall_ms(), trace: Backtrace::force_capture() };
-        keep(p as usize, s);
-    });
-}
-
-/// Files a sample under `p` (inside the guard).
-fn keep(p: usize, s: Sampled) {
-    if !line_of(p).0.iter().any(|slot| slot.compare_exchange(0, p, Ordering::AcqRel, Ordering::Relaxed).is_ok()) {
-        DROPPED.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-    SAMPLES.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(p, s);
-}
-
-/// Takes the sample of `p` out, if it has one: before `p` is freed (so an allocation that
-/// reuses the address is not taken for it).
-fn forget(p: *mut u8) -> Option<Sampled> {
-    let p = p as usize;
-    let slot = line_of(p).0.iter().find(|s| s.load(Ordering::Acquire) == p)?;
-    let mut gone = None;
-    guarded(|| {
-        gone = SAMPLES.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|m| m.remove(&p));
-        slot.store(0, Ordering::Release);
-    });
-    gone
-}
-
-fn grew(n: usize) {
-    let live = LIVE.fetch_add(n as isize, Ordering::Relaxed) + n as isize;
-    // the mark is at most the peak: one load when neither moves
-    if live > MARK.load(Ordering::Relaxed) {
-        MARK.fetch_max(live, Ordering::Relaxed);
-        if live > PEAK.load(Ordering::Relaxed) {
-            PEAK.fetch_max(live, Ordering::Relaxed);
-        }
-    }
-}
-
-fn shrank(n: usize) {
-    LIVE.fetch_sub(n as isize, Ordering::Relaxed);
-}
-
 unsafe impl GlobalAlloc for Counted {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let p = unsafe { System.alloc(layout) };
         if !p.is_null() {
-            grew(layout.size());
+            COUNTS.grew(layout.size());
             if take(layout.size()) {
-                note(p, layout.size());
+                SAMPLED.note(p, layout.size());
             }
         }
         p
@@ -156,9 +227,9 @@ unsafe impl GlobalAlloc for Counted {
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         let p = unsafe { System.alloc_zeroed(layout) };
         if !p.is_null() {
-            grew(layout.size());
+            COUNTS.grew(layout.size());
             if take(layout.size()) {
-                note(p, layout.size());
+                SAMPLED.note(p, layout.size());
             }
         }
         p
@@ -166,33 +237,33 @@ unsafe impl GlobalAlloc for Counted {
 
     unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
         // the backtrace frees inside the guard, so its frees are not looked up
-        let gone = forget(p);
+        let gone = SAMPLED.forget(p);
         guarded(|| drop(gone));
         unsafe { System.dealloc(p, layout) };
-        shrank(layout.size());
+        COUNTS.shrank(layout.size());
     }
 
     unsafe fn realloc(&self, p: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // a sample moves with its allocation (where it was first made stays its site)
-        let was = forget(p);
+        let was = SAMPLED.forget(p);
         let q = unsafe { System.realloc(p, layout, new_size) };
         if q.is_null() {
             if let Some(s) = was {
-                guarded(|| keep(p as usize, s));
+                guarded(|| SAMPLED.keep(p as usize, s));
             }
             return q;
         }
         if new_size >= layout.size() {
-            grew(new_size - layout.size());
+            COUNTS.grew(new_size - layout.size());
         } else {
-            shrank(layout.size() - new_size);
+            COUNTS.shrank(layout.size() - new_size);
         }
         match was {
             Some(mut s) => {
                 s.weight = new_size.max(SAMPLE);
-                guarded(|| keep(q as usize, s));
+                guarded(|| SAMPLED.keep(q as usize, s));
             }
-            None if take(new_size.saturating_sub(layout.size()).max(if new_size >= SAMPLE { SAMPLE } else { 0 })) => note(q, new_size),
+            None if take(new_size.saturating_sub(layout.size()).max(if new_size >= SAMPLE { SAMPLE } else { 0 })) => SAMPLED.note(q, new_size),
             None => {}
         }
         q
@@ -212,7 +283,6 @@ pub fn sample() {
     SAMPLING.store(true, Ordering::Relaxed);
 }
 
-static TRIMS: AtomicUsize = AtomicUsize::new(0);
 static WARNED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Gives the allocator's free pages back to the system (a node hub at every lease end, the master
@@ -222,13 +292,12 @@ static WARNED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 pub fn trim() -> Option<String> {
     #[cfg(feature = "checkout")]
     relax_base::memstat::trim();
-    TRIMS.fetch_add(1, Ordering::Relaxed);
-    MARK.store(LIVE.load(Ordering::Relaxed), Ordering::Relaxed);
+    COUNTS.trimmed();
     let live = live();
     if live == 0 {
         return None;
     }
-    let peak = PEAK.load(Ordering::Relaxed).max(0) as usize;
+    let peak = COUNTS.peak();
     let rss = crate::procinfo::proc(std::process::id()).map_or(0, |p| p.rss_bytes as usize);
     let now = crate::proto::wall_ms();
     let quiet = now.saturating_sub(WARNED_MS.load(Ordering::Relaxed)) < 3_600_000;
@@ -241,12 +310,12 @@ pub fn trim() -> Option<String> {
 
 /// Heap bytes freed since the last [`trim`]'s high mark: what a burst of work left to give back.
 pub fn burst_freed() -> usize {
-    (MARK.load(Ordering::Relaxed) - LIVE.load(Ordering::Relaxed)).max(0) as usize
+    COUNTS.burst_freed()
 }
 
 /// Live heap bytes (0 in a binary that does not install [`Counted`]).
 pub fn live() -> usize {
-    LIVE.load(Ordering::Relaxed).max(0) as usize
+    COUNTS.live()
 }
 
 /// The answer to `heap`: live and peak heap bytes, the process's resident bytes (what the
@@ -258,40 +327,19 @@ pub fn report(top: usize) -> Vec<String> {
         return vec!["{\"err\":\"this process does not count its heap\"}".into()];
     }
     let rss = crate::procinfo::proc(std::process::id()).map_or(0, |p| p.rss_bytes as usize);
-    // The samples come out of the table to resolve (resolving takes the backtrace lock, which a
-    // thread printing a backtrace may hold while it frees), then go back, those whose
-    // allocation was freed meanwhile (their address left the table) dropped.
-    let mut out_of = HashMap::new();
-    guarded(|| out_of = SAMPLES.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default());
-    let mut sites: HashMap<String, (usize, usize, u64)> = HashMap::new();
-    guarded(|| {
-        for s in out_of.values() {
-            let g = sites.entry(site_of(&format!("{:?}", s.trace))).or_insert((0, 0, u64::MAX));
-            g.0 += s.weight;
-            g.1 += 1;
-            g.2 = g.2.min(s.at_ms);
-        }
-        let mut g = SAMPLES.lock().unwrap_or_else(|e| e.into_inner());
-        let m = g.get_or_insert_with(HashMap::new);
-        for (p, s) in out_of {
-            if !m.contains_key(&p) && line_of(p).0.iter().any(|slot| slot.load(Ordering::Acquire) == p) {
-                m.insert(p, s);
-            }
-        }
-    });
-    let mut sites: Vec<(String, (usize, usize, u64))> = sites.into_iter().collect();
+    let mut sites: Vec<(String, (usize, usize, u64))> = sites(SAMPLED.snapshot()).into_iter().collect();
     sites.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
     let mb = |b: usize| b as f64 / 1048576.0;
     let now = crate::proto::wall_ms();
     let mut out = vec![format!(
         "{{\"live_mb\":{:.0},\"peak_mb\":{:.0},\"rss_mb\":{:.0},\"sampled_mb\":{:.0},\"sites\":{},\"dropped\":{},\"trims\":{}}}",
         mb(live),
-        mb(PEAK.load(Ordering::Relaxed).max(0) as usize),
+        mb(COUNTS.peak()),
         mb(rss),
         mb(sites.iter().map(|s| s.1 .0).sum()),
         sites.len(),
         DROPPED.load(Ordering::Relaxed),
-        TRIMS.load(Ordering::Relaxed)
+        COUNTS.trims.load(Ordering::Relaxed)
     )];
     for (site, (bytes, n, oldest)) in sites.into_iter().take(top) {
         out.push(format!("{{\"mb\":{:.0},\"samples\":{n},\"oldest_s\":{},\"at\":{}}}", mb(bytes), now.saturating_sub(oldest) / 1000, makepad_remote::json_str(&site)));
@@ -325,34 +373,46 @@ mod tests {
     #[global_allocator]
     static TEST_HEAP: Counted = Counted;
 
-    /// The weight sampled at `p` (read inside the guard: this thread's allocations must not take
-    /// the table's lock while it holds it).
-    fn weight_at(p: usize) -> Option<usize> {
+    /// The weight sampled at `p` in `t` (read inside the guard: this thread's allocations must
+    /// not take the table's lock while it holds it).
+    fn weight_at(t: &Table, p: usize) -> Option<usize> {
         let mut w = None;
-        guarded(|| w = SAMPLES.lock().unwrap().as_ref().and_then(|m| m.get(&p).map(|s| s.weight)));
+        guarded(|| w = t.samples.lock().unwrap().as_ref().and_then(|m| m.get(&p).map(|s| s.weight)));
         w
     }
 
     /// A buffer held shows in the live heap and as a sampled site of its size; freed, its sample
-    /// leaves the table.
+    /// leaves the table. (The process's counts and table are every test's: only what this
+    /// buffer alone decides is asserted on them.)
     #[test]
     fn a_held_buffer_shows_in_the_report() {
         sample();
         let num = |l: &str, k: &str| makepad_strict_json::parse(l.as_bytes()).ok().and_then(|v| v.get(k).and_then(crate::lease::num)).unwrap_or(0.0);
         let held = vec![7u8; 256 << 20];
         let p = held.as_ptr() as usize;
-        assert_eq!(weight_at(p), Some(256 << 20), "sampled");
+        assert_eq!(weight_at(&SAMPLED, p), Some(256 << 20), "sampled");
         let during = report(64);
         assert!(num(&during[0], "live_mb") >= 256.0, "{during:?}");
         assert!(during[1..].iter().any(|l| num(l, "mb") >= 256.0), "{during:?}");
-        let trims = TRIMS.load(Ordering::Relaxed);
         drop(held);
-        assert_eq!(weight_at(p), None, "its sample went with it");
-        // freed, it is a burst's to give back (unless a lease's end elsewhere trimmed meanwhile)
-        assert!(burst_freed() >= 256 << 20 || TRIMS.load(Ordering::Relaxed) != trims);
-        let _ = trim();
-        assert!(burst_freed() < 256 << 20, "a trim moves the mark down to the live heap");
-        assert!(!line_of(p).0.iter().any(|s| s.load(Ordering::Relaxed) == p));
+        // (another test's allocation may reuse the address, sampled at its own size)
+        assert_ne!(weight_at(&SAMPLED, p), Some(256 << 20), "its sample went with it");
+    }
+
+    /// A burst freed since the last trim is the mark over the live heap; a trim brings the mark
+    /// down to it. (In counts of its own: the process's move with every test's allocations.)
+    #[test]
+    fn a_trim_takes_the_burst_mark_down_to_the_live_heap() {
+        let own = Counts::new();
+        own.grew(64 << 20);
+        own.grew(256 << 20);
+        own.shrank(256 << 20);
+        assert_eq!((own.live(), own.peak(), own.burst_freed()), (64 << 20, 320 << 20, 256 << 20), "freed, a burst is there to give back");
+        own.trimmed();
+        assert_eq!((own.burst_freed(), own.trims.load(Ordering::Relaxed)), (0, 1), "a trim moves the mark down to the live heap");
+        own.grew(8 << 20);
+        own.shrank(16 << 20);
+        assert_eq!((own.live(), own.peak(), own.burst_freed()), (56 << 20, 320 << 20, 16 << 20), "the peak stays; the next burst counts from the trim");
     }
 
     /// A backtrace's own frames name the site: workspace frames only, hashes off, innermost first.
@@ -366,16 +426,30 @@ mod tests {
     }
 
     /// A sampled address is found by its free and leaves the table; one never sampled is not.
+    /// (In a table of its own: in the heap's, a report another test asked for took every sample
+    /// out while it resolved them, and the free meanwhile found none, 11-06.)
     #[test]
     fn a_sample_lives_as_long_as_its_allocation() {
+        static OWN: Table = Table::new();
         let p = 0x7f00_dead_b000_usize as *mut u8;
-        note(p, SAMPLE);
-        assert!(line_of(p as usize).0.iter().any(|s| s.load(Ordering::Relaxed) == p as usize));
-        assert_eq!(weight_at(p as usize), Some(SAMPLE));
-        assert!(forget(p).is_some_and(|s| s.weight == SAMPLE));
-        assert!(!line_of(p as usize).0.iter().any(|s| s.load(Ordering::Relaxed) == p as usize));
-        assert!(forget(p).is_none(), "once");
-        assert_eq!(weight_at(p as usize), None);
+        OWN.note(p, SAMPLE);
+        assert!(OWN.line_of(p as usize).0.iter().any(|s| s.load(Ordering::Relaxed) == p as usize));
+        assert_eq!(weight_at(&OWN, p as usize), Some(SAMPLE));
+        assert!(OWN.forget(p).is_some_and(|s| s.weight == SAMPLE));
+        assert!(!OWN.line_of(p as usize).0.iter().any(|s| s.load(Ordering::Relaxed) == p as usize));
+        assert!(OWN.forget(p).is_none(), "once");
+        assert_eq!(weight_at(&OWN, p as usize), None);
+        // freed while a report resolves its traces: the free takes its sample, its bytes leave
+        let q = 0x7f00_beef_c000_usize as *mut u8;
+        OWN.note(p, SAMPLE);
+        OWN.note(q, 2 * SAMPLE);
+        let during = OWN.snapshot();
+        assert!(OWN.forget(p).is_some_and(|s| s.weight == SAMPLE), "a free during a report finds its sample");
+        let total = |sites: &HashMap<String, (usize, usize, u64)>| sites.values().map(|s| s.0).sum::<usize>();
+        assert_eq!(total(&sites(during)), 3 * SAMPLE, "the report shows what it read");
+        assert_eq!(total(&sites(OWN.snapshot())), 2 * SAMPLE, "the next one no longer has the freed bytes");
+        assert!(OWN.forget(q).is_some());
+        assert!(OWN.snapshot().is_empty());
         sample();
         assert!(take(SAMPLE), "an allocation of SAMPLE bytes or more is always sampled");
     }

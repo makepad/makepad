@@ -198,6 +198,12 @@ impl Monitor {
         self.inner.lock().unwrap().trees.get(&t).map_or(0, |t| t.last_ms)
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_last_event_ms(&self, tree: &Path, at: u64) {
+        let root = tree.canonicalize().unwrap();
+        self.inner.lock().unwrap().trees.entry(root).or_default().last_ms = at;
+    }
+
     /// Stops following a tree (it was removed).
     pub fn forget(&self, tree: &Path) {
         let t = tree.canonicalize().unwrap_or_else(|_| tree.to_path_buf());

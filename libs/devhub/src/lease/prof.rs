@@ -101,6 +101,7 @@ impl Phases {
 /// Normalize the scheduler's reasons, not the rendered lease tag or its eventual node.
 pub fn blocker(reason: &str) -> String {
     let r = reason.split_once(": ").filter(|(prefix, _)| !prefix.contains(' ') && !matches!(*prefix, "budget" | "self-update" | "class")).map_or(reason, |(_, r)| r);
+    if r.starts_with("behind ") && r.contains("'s own prebuild ") { return "box prebuild".into(); }
     if let Some(held) = r.strip_prefix("held by ") {
         let kind = held.split_once('(').map_or(held, |(_, k)| k).split_whitespace().next().unwrap_or("lease");
         return format!("held by {kind}");
@@ -405,6 +406,32 @@ fn split(phases: &Phases, start: u64, end: u64) -> ([u64; 4], BTreeMap<String, u
     ([get("queued"), get("sync"), get("jit"), get("run") + get("report") + get("unattributed")], blocked)
 }
 
+/// One `job wait` from `start`: each job's end and its lease (asked, phases). The wait lasts to
+/// its last job's end and counts its critical path: the job that ended last, then, before its
+/// lease was asked, the job asked earlier that ended latest (the one it ran `--after`), and so on
+/// back to the start, each lease's phases as `split` counts them. What no lease on the path
+/// covers (dispatch, a snapshot, the hop to the next job) is the queue before its lease; jobs
+/// beside the path count nothing. One wait on 14 chained jobs had counted as 14 waits from its
+/// start, each one's wait for the jobs before it as queue before its lease: 132 agent-min in an
+/// hour of 21 wall-min (11-06).
+fn wait_path(start: u64, jobs: Vec<(u64, Option<(u64, Phases)>)>) -> (u64, [u64; 4], BTreeMap<String, u64>) {
+    let end = jobs.iter().map(|j| j.0).max().unwrap_or(start);
+    let mut leases: Vec<(u64, u64, Phases)> = jobs.into_iter().filter_map(|(end, l)| l.map(|(asked, p)| (asked, end, p))).collect();
+    let (mut parts, mut blocked) = ([0u64; 4], BTreeMap::<String, u64>::new());
+    let mut t = end;
+    while t > start {
+        let Some(i) = (0..leases.len()).filter(|&i| leases[i].0 < t).max_by_key(|&i| leases[i].1) else { break };
+        let (asked, _, phases) = leases.swap_remove(i);
+        let from = asked.max(start);
+        let (p, b) = split(&phases, from, t);
+        for (sum, p) in parts.iter_mut().zip(p) { *sum += p; }
+        for (b, ms) in b { *blocked.entry(b).or_default() += ms; }
+        t = from;
+    }
+    parts[0] += (end - start).saturating_sub(parts.iter().sum());
+    (end - start, parts, blocked)
+}
+
 fn ago(ms: u64) -> String {
     if ms < 90_000 { format!("{} s", ms.div_ceil(1000)) } else { format!("{:.1} min", ms as f64 / 60_000.0) }
 }
@@ -439,24 +466,22 @@ pub fn agent(home: &Path, leases: &[Lease], hours: u64, lane: Option<&str>, now:
         let (parts, blocked) = split(&Phases::parse(v.get("phases")), asked, end);
         waits.push(AgentWait { lane: s(v, "lane").into(), ms: end - asked, parts, blocked });
     }
+    // a `job wait` stamps every job it names with its start: one wait, however many jobs
+    let mut jobs = BTreeMap::<(String, u64), Vec<(u64, Option<(u64, Phases)>)>>::new();
     read(&home.join("waits.jsonl"), |v| {
         let (start, end) = (n(&v, "start_ms"), n(&v, "end_ms"));
         if end < since || end < start || lane.is_some_and(|l| s(&v, "lane") != l) { return; }
-        let ms = end - start;
-        let (parts, blocked) = match s(&v, "kind") {
-            "live" => ([0, n(&v, "sync_ms"), n(&v, "jit_ms"), n(&v, "run_ms")], BTreeMap::new()),
-            _ => match records.get(s(&v, "lease")) {
-                Some(l) => {
-                    let (mut p, b) = split(&Phases::parse(l.get("phases")), start, end);
-                    // before its lease (dependencies, its snapshot) the job waited too
-                    p[0] += ms.saturating_sub(p.iter().sum());
-                    (p, b)
-                }
-                None => ([ms, 0, 0, 0], BTreeMap::new()),
-            },
-        };
-        waits.push(AgentWait { lane: s(&v, "lane").into(), ms, parts, blocked });
+        if s(&v, "kind") == "live" {
+            waits.push(AgentWait { lane: s(&v, "lane").into(), ms: end - start, parts: [0, n(&v, "sync_ms"), n(&v, "jit_ms"), n(&v, "run_ms")], blocked: BTreeMap::new() });
+            return;
+        }
+        let lease = records.get(s(&v, "lease")).map(|l| (n(l, "asked_ms"), Phases::parse(l.get("phases"))));
+        jobs.entry((s(&v, "lane").into(), start)).or_default().push((end, lease));
     })?;
+    for ((lane, start), jobs) in jobs {
+        let (ms, parts, blocked) = wait_path(start, jobs);
+        waits.push(AgentWait { lane, ms, parts, blocked });
+    }
     let stats = |w: &[&AgentWait]| {
         let mut ms: Vec<u64> = w.iter().map(|w| w.ms).collect();
         ms.sort_unstable();
@@ -468,7 +493,7 @@ pub fn agent(home: &Path, leases: &[Lease], hours: u64, lane: Option<&str>, now:
             for (i, p) in PARTS.iter().enumerate().skip(1) { *c.entry((*p).into()).or_default() += w.parts[i]; }
             let queued: u64 = w.blocked.values().sum();
             for (b, ms) in &w.blocked { *c.entry(format!("queue: {b}")).or_default() += ms; }
-            // a job's wait before its lease
+            // a job wait's time on no lease of its path
             if w.parts[0] > queued { *c.entry("queue: before its lease".into()).or_default() += w.parts[0] - queued; }
         }
         let mut c: Vec<_> = c.into_iter().filter(|(_, ms)| *ms > 0).collect();
@@ -515,6 +540,31 @@ mod tests {
         assert!(out.contains("  b: native 2 (--native 0, measured 0, no JIT platform 1, JIT miss 1; app), refused 0; live saves 1\n"), "{out}");
         assert!(out.contains("  jit: native 4 (--native 4, measured 0, no JIT platform 0, JIT miss 0; app), refused 1; baseline 1; jit crate 3; live saves 0\n    --native \"one of its own\" (app)\n"), "the JIT's own work is no OVER, and only the rest is listed: {out}");
         assert!(!out.contains("old"), "{out}");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// One `job wait` on three chained jobs is one wait, its time on each lease's phases along
+    /// its path and only the dispatch and the hops between jobs before a lease; of two jobs run
+    /// side by side, the one that ended last is the wait.
+    #[test]
+    fn a_job_wait_on_chained_jobs_is_one_wait_along_its_path() {
+        let home = std::env::temp_dir().join(format!("devhub-prof-path-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let span = |phase: &str, blocker: &str, a: u64, b: u64| format!("{{\"phase\":\"{phase}\",\"blocker\":\"{blocker}\",\"start_ms\":{a},\"end_ms\":{b}}}");
+        let lease = |id: &str, lane: &str, asked: u64, phases: &[String]| format!("{{\"id\":\"{id}\",\"lane\":\"{lane}\",\"kind\":\"test\",\"asked_ms\":{asked},\"phases\":[{}]}}\n", phases.join(","));
+        let wait = |lane: &str, lease: &str, start: u64, end: u64| format!("{{\"kind\":\"job\",\"lane\":\"{lane}\",\"lease\":\"{lease}\",\"start_ms\":{start},\"end_ms\":{end}}}\n");
+        std::fs::write(home.join("leases.jsonl"), [
+            lease("L1", "a", 1_010_000, &[span("queued", "held by timed", 1_010_000, 1_070_000), span("run", "", 1_070_000, 1_370_000)]),
+            lease("L2", "a", 1_372_000, &[span("queued", "held by test", 1_372_000, 1_402_000), span("run", "", 1_402_000, 1_702_000)]),
+            lease("L3", "a", 1_702_000, &[span("run", "", 1_702_000, 2_002_000)]),
+            lease("L4", "b", 3_000_000, &[span("run", "", 3_000_000, 3_600_000)]),
+            lease("L5", "b", 3_000_000, &[span("queued", "node busy", 3_000_000, 3_300_000), span("run", "", 3_300_000, 3_500_000)]),
+        ].concat()).unwrap();
+        std::fs::write(home.join("waits.jsonl"), [wait("a", "L1", 1_000_000, 1_372_000), wait("a", "L2", 1_000_000, 1_702_000), wait("a", "L3", 1_000_000, 2_002_000), wait("b", "L4", 3_000_000, 3_600_000), wait("b", "L5", 3_000_000, 3_500_000)].concat()).unwrap();
+        let out = super::agent(&home, &[], 1, None, 4_000_000, true).unwrap();
+        assert!(out.starts_with("agent wait (1h): 2 waits;"), "{out}");
+        assert!(out.contains("  causes (agent-min):\n    run: 25.0\n    queue: held by timed: 1.0\n    queue: held by test: 0.5\n    queue: before its lease: 0.2\n  lanes"), "{out}");
+        assert!(out.contains("    a: 1; 16.7 min / 16.7 min / 16.7 min; run 15.0 min\n    b: 1; 10.0 min / 10.0 min / 10.0 min; run 10.0 min\n"), "{out}");
         std::fs::remove_dir_all(&home).unwrap();
     }
 

@@ -5,6 +5,56 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 
+/// Exec limits measured on this node, also published in its caps.
+pub fn exec_limits() -> Result<Option<super::ExecLimits>, String> {
+    extern "C" {
+        fn sysconf(name: i32) -> std::os::raw::c_long;
+    }
+    #[cfg(target_os = "macos")]
+    const SC_ARG_MAX: i32 = 1;
+    #[cfg(not(target_os = "macos"))]
+    const SC_ARG_MAX: i32 = 0;
+    // SAFETY: sysconf takes a constant selector and no pointers.
+    let max = unsafe { sysconf(SC_ARG_MAX) };
+    if max <= 0 { return Err("this box could not report its exec argument and env limit".into()); }
+    let max = max as usize;
+    #[cfg(target_os = "macos")]
+    let one: Option<usize> = None;
+    #[cfg(not(target_os = "macos"))]
+    let one = {
+        const SC_PAGESIZE: i32 = 30;
+        // SAFETY: Linux's page-size selector takes no pointers.
+        let page = unsafe { sysconf(SC_PAGESIZE) };
+        if page <= 0 { return Err("this box could not report its exec page-size limit".into()); }
+        Some(32 * page as usize)
+    };
+    Ok(Some(super::ExecLimits { total: max, per_string: one }))
+}
+
+/// Check an exec's words and explicit environment (the caller has cleared inheritance).
+pub fn exec_over(cmd: &Command) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
+    let limits = match exec_limits() { Ok(Some(limits)) => limits, Ok(None) => return None, Err(e) => return Some(e) };
+    let pointer = std::mem::size_of::<*const u8>();
+    let check = |label: String, bytes: usize| limits.word_over(&label, bytes, pointer);
+    let program = Path::new(cmd.get_program()).file_name().unwrap_or(cmd.get_program()).to_string_lossy();
+    let mut total = 2 * pointer; // the argv and env pointer arrays' terminating NULLs
+    for (i, arg) in std::iter::once(cmd.get_program()).chain(cmd.get_args()).enumerate() {
+        let bytes = arg.as_bytes().len() + 1;
+        // (named by its start: its index is the wrapped command's, not the one the lane wrote)
+        let start: String = arg.to_string_lossy().chars().take(40).collect();
+        if let Some(over) = check(if i == 0 { format!("the program {program}") } else { format!("the argument `{start}...`") }, bytes) { return Some(over); }
+        total += bytes + pointer;
+    }
+    for (key, value) in cmd.get_envs() {
+        let Some(value) = value else { continue };
+        let bytes = key.as_bytes().len() + 1 + value.as_bytes().len() + 1;
+        if let Some(over) = check(format!("env value {}", key.to_string_lossy()), bytes) { return Some(over); }
+        total += bytes + pointer;
+    }
+    limits.total_over(total)
+}
+
 /// What keeps a run's processes together beyond its pid: nothing on Unix (the process group is
 /// named by the leader's pid).
 #[derive(Default)]
@@ -39,21 +89,21 @@ pub fn own_nice() -> i32 {
 }
 
 /// The argv a lease run executes: the scope (collected even on failure), nice and pinning wrappers, then `argv`.
-/// `share`: a shared lease's cost, whose cores become its scope's CPU weight (100 per core): its
+/// `weight`: a shared lease's scope CPU weight ([`crate::lease::Priority::cpu_weight`]): its
 /// share of the box under contention, the whole box when idle. Never a CPU quota: a quota of the
 /// lease's cores throttled a live Fab (measured at one core) to one CPU, and its pools and JIT
 /// sized themselves to that one CPU.
 /// `ram_max_gb`: the RAM the lease asked for itself (`--ram-gb`), the only hard memory cap; a
 /// measured ask only schedules, never kills a run that needs more than it measured.
-pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, nice: i32, cpus: &str, share: Option<crate::lease::Cost>, ram_max_gb: Option<f64>) -> Vec<String> {
+pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, nice: i32, cpus: &str, weight: Option<u32>, ram_max_gb: Option<f64>) -> Vec<String> {
     let mut full: Vec<String> = Vec::new();
     if let Some(u) = unit {
         // the command's words stay its own: left to expand, systemd takes `$$` for `$` and `${X}`
         // for its value before the shell they are written for sees them
         full.extend(["systemd-run", "--user", "--scope", "--collect", "--quiet", "--expand-environment=no"].map(String::from));
         full.push(format!("--unit={u}"));
-        if let Some(cost) = share.filter(|_| cfg!(target_os = "linux")) {
-            full.extend(["-p".into(), format!("CPUWeight={}", (cost.cores * 100.0).round().clamp(1.0, 10_000.0) as u32)]);
+        if let Some(weight) = weight.filter(|_| cfg!(target_os = "linux")) {
+            full.extend(["-p".into(), format!("CPUWeight={weight}")]);
             if let Some(gb) = ram_max_gb { full.extend(["-p".into(), format!("MemoryMax={}G", gb * 1.5)]); }
         }
         full.push("--".into());
@@ -76,6 +126,17 @@ pub fn hub_program(program: &str, path: &std::ffi::OsStr) -> Result<std::path::P
         .find(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
         .ok_or_else(|| format!("{program}: not on the hub's PATH ({})", path.to_string_lossy()))
 }
+
+/// A run's scope (`unit`, Linux) takes CPU weight `weight` now: kept by systemd, a reload
+/// leaves it so.
+pub fn set_cpu_weight(unit: &str, weight: u32) -> Result<(), String> {
+    let out = Command::new("systemctl").args(["--user", "set-property", "--runtime", &format!("{unit}.scope"), &format!("CPUWeight={weight}")])
+        .stdin(std::process::Stdio::null()).output().map_err(|e| format!("systemctl: {e}"))?;
+    if out.status.success() { Ok(()) } else { Err(format!("systemctl set-property {unit}.scope CPUWeight={weight}: {}", String::from_utf8_lossy(&out.stderr).trim())) }
+}
+
+/// Error windows are Windows' alone ([`crate::os`]'s Windows `quiet_errors`).
+pub fn quiet_errors() {}
 
 /// Clear failed transient units left by earlier hubs; an unloaded unit is harmless.
 pub fn reset_failed_units(pattern: &str) {

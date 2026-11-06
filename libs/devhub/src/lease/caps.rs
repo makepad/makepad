@@ -144,6 +144,19 @@ fn valid_cpus(v: &str) -> bool {
     !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit() || b == b',' || b == b'-')
 }
 
+/// The CPUs a taskset list names (`8-15,24-31`: 16); 0 for none or one taskset would refuse.
+pub fn cpu_count(list: &str) -> u32 {
+    let mut n = 0;
+    for part in list.split(',') {
+        let (a, b) = part.split_once('-').unwrap_or((part, part));
+        match (a.parse::<u32>(), b.parse::<u32>()) {
+            (Ok(a), Ok(b)) if a <= b => n += b - a + 1,
+            _ => return 0,
+        }
+    }
+    n
+}
+
 /// Measures this machine now (`node`: its devhub name; `apply`: DEVHUB2's applier kind).
 /// PATH with the user's rustup toolchain first (`$CARGO_HOME/bin`, else `~/.cargo/bin`) when it has
 /// one: a box whose system Rust sits in /usr/bin builds with the fleet's rustup stable. None: as is.
@@ -194,6 +207,7 @@ pub fn other_wire() -> Option<String> {
 
 pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
     let mut c = os::hardware();
+    c.exec_limits = crate::os::exec_limits().ok().flatten();
     c.node = node.to_string();
     let (free, total) = disk_space(&conf.work).unwrap_or((0, 0));
     c.disk_free_gb = free as f64 / GB;
@@ -216,6 +230,8 @@ pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
     c.hub_building = super::exec::hub_building();
     c.jit_store = Some(std::sync::Arc::new(super::jitstore::Store::new(&conf.work).snapshot()));
     c.native_trees = conf.native_trees;
+    c.cpus_shared = cpu_count(&conf.cpus_shared);
+    c.cpus_timed = cpu_count(&conf.cpus_timed);
     #[cfg(feature = "checkout")]
     { c.native = super::tree::natives(&conf.work).into_iter().map(|(lane, _)| lane).collect(); }
     c
@@ -892,6 +908,7 @@ mod tests {
         assert_eq!(c.work, PathBuf::from("/home/me/scratch/dh"));
         assert_eq!(c.cpus_shared, "8-15,24-31");
         assert_eq!(c.cpus_timed, "");
+        assert_eq!((cpu_count(&c.cpus_shared), cpu_count("3"), cpu_count("0-3,8"), cpu_count(""), cpu_count("5-2"), cpu_count("1,,2")), (16, 1, 5, 0, 0, 0));
         let s = c.slots(0);
         assert!(s.contains(&(Kind::Build, 1)) && s.contains(&(Kind::Test, 6)) && s.contains(&(Kind::Timed, 0)) && s.contains(&(Kind::Gpu, 0)));
     }

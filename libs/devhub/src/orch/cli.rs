@@ -712,10 +712,13 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
         ["wait", id, "verdict", rest @ ..] => match retry_master(|| one(c, "live", &format!("{lv} wait {id} verdict {}", rest.join(" ")))) {
             Ok(v) => {
                 let x = crate::state::live_from(&v);
-                if json { println!("{}", v.to_json()); }
-                else if x.state != "running" { print!("{}", super::live::render(&x)); }
-                else if let Some(p) = &x.patch { print!("{}", super::live::verdict(p)); }
-                else { print!("{}", super::live::render(&x)); }
+                if json { println!("{}", v.to_json()); } else {
+                    print!("{}", room_line(&v));
+                    match &x.patch {
+                        Some(p) if x.state == "running" => print!("{}", super::live::verdict(p)),
+                        _ => print!("{}", super::live::render(&x)),
+                    }
+                }
                 if let Some(n) = v.get("unshipped").and_then(|n| n.as_u64()).filter(|n| *n > 0) {
                     eprintln!("makepad devhub: {n} saved file(s) are not in this verdict: `devhub live sync {id}` ships them and answers their verdict");
                 }
@@ -723,7 +726,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
             }
             Err(e) => { eprintln!("makepad devhub: {e}"); 1 }
         },
-        ["wait", id, what, rest @ ..] => done(retry_master(|| one(c, "live", &format!("{lv} wait {id} {what} {}", rest.join(" ")))), json, &render),
+        ["wait", id, what, rest @ ..] => done(retry_master(|| one(c, "live", &format!("{lv} wait {id} {what} {}", rest.join(" ")))), json, &|v| format!("{}{}", room_line(v), render(v))),
         [verb @ ("sync" | "release"), id] => done(retry_master(|| one(c, "live", &format!("{lv} {verb} {id}"))), json, &flat),
         ["again", id] => done(one(c, "live", &format!("{lv} again {id}")), json, &flat),
         ["list", rest @ ..] | ["ls", rest @ ..] => done(one(c, "live", if rest.contains(&"--all") { "live list all" } else { "live list" }), json, &|v| {
@@ -741,55 +744,31 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
     }
 }
 
+/// A call's wait for room, from its reply's `room`, as its first line (a look's, a wait's and a
+/// sync's said nothing, 11-06); `live act`'s lines carry it already.
+fn room_line(v: &Value) -> String {
+    v.get("room").and_then(Value::as_str).map_or(String::new(), |l| format!("{l}\n"))
+}
+
 /// `live look <id> [timeout_s]`: one look after a save: the newest edit patched (before any edit:
 /// the app up), a frame drawn, a grab copied to `local/screencap/<lane>/<id>-<n>.png`; prints the
 /// edit's line and the file.
 fn look(c: &Client, lv: &str, id: &str, timeout: &str) -> i32 {
     let fail = |e: String| { eprintln!("makepad devhub live look: {e}"); 1 };
-    // the reads and waits go on through a master restart, as `live wait` does; the grab is sent once
-    let mut x = match retry_master(|| one(c, "live", &format!("live get {id}"))) {
-        Ok(v) => crate::state::live_from(&v),
-        Err(e) => return fail(e),
-    };
-    if x.test { return fail(format!("{id} runs tests: live wait {id} verdict")); }
-    // "patched" with no edit yet too: a save just made may not be heard yet (its first edit's
-    // look grabbed the frame from before it, 11-05)
-    for what in ["patched", "frame"] {
-        x = match retry_master(|| one(c, "live", &format!("{lv} wait {id} {what} {timeout}"))) {
-            Ok(v) => crate::state::live_from(&v),
-            Err(e) => return fail(e),
-        };
-        if x.state != "running" {
-            print!("{}", super::live::render(&x));
-            return 1;
-        }
-    }
-    let v = match one(c, "live", &format!("{lv} act {id} grab")) {
+    // A restart retries the whole look, including a fresh grab, under the new master's hold.
+    let v = match retry_master(|| one(c, "live", &format!("{lv} look {id} {timeout}"))) {
         Ok(v) => v,
         Err(e) => return fail(e),
     };
-    let s = |k: &str| v.get("png").and_then(|p| p.get(k)).and_then(Value::as_str).unwrap_or("").to_string();
-    let (node, lease, rel) = (s("node"), s("lease"), s("rel"));
-    if rel.is_empty() {
-        let said: Vec<&str> = v.get("lines").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).collect();
-        return fail(format!("the grab named no file: {}", said.join(" | ")));
-    }
-    let dir = super::repo().join("local/screencap").join(&x.lane);
-    let got = match crate::lease::client::fetch(c, &node, &x.lane, &lease, &rel, &dir) {
-        Ok(files) => files,
-        Err(e) => return fail(e),
-    };
-    let n = std::fs::read_dir(&dir).map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&format!("{id}-"))).count()).unwrap_or(0);
-    // the frame it was drawn in and the live patches applied by then
-    let drawn = v.get("png").and_then(|p| Some(format!("-f{}-p{}", crate::lease::num(p.get("frame")?)? as u64, crate::lease::num(p.get("patch")?)? as u64))).unwrap_or_default();
-    let png = dir.join(format!("{id}-{}{drawn}.png", n + 1));
-    if let Err(e) = std::fs::rename(&got[0].0, &png) { return fail(format!("{}: {e}", png.display())); }
-    print!("{}", super::live::render(&x));
+    let Some(live) = v.get("live") else { return fail("look named no session".into()) };
+    let x = crate::state::live_from(live);
+    print!("{}{}", room_line(&v), super::live::render(&x));
     // what the grab says about its frame: one from before an edit, or one it cannot vouch for
     for l in v.get("lines").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).filter(|l| l.starts_with("STALE:") || l.starts_with("unverified:")) {
         println!("{l}");
     }
-    println!("look: {}", png.display());
+    let Some(path) = v.get("path").and_then(Value::as_str) else { return 1 };
+    println!("look: {path}");
     0
 }
 
@@ -967,14 +946,8 @@ fn lane(c: &Client, words: &[&str], json: bool) -> i32 {
             format!("sweep started{}: `devhub lane sweep status` (report {})\n", if v.get("dry").and_then(|d| d.as_bool()).unwrap_or(false) { " (dry run, nothing deleted)" } else { "" }, v.get("report").and_then(|r| r.as_str()).unwrap_or(""))
         }),
         // read here, in process (no master, no git): the master's view would hold its control thread
-        ["audit"] => match super::lane::audit(&super::repo(), json) {
-            Ok(text) => {
-                print!("{text}");
-                if json {
-                    println!();
-                }
-                0
-            }
+        ["audit"] => match super::lane::audit(&super::repo(), json, &mut std::io::stdout().lock()) {
+            Ok(()) => 0,
             Err(e) => {
                 eprintln!("makepad devhub lane audit: {e}");
                 1

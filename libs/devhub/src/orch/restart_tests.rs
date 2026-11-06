@@ -49,7 +49,7 @@ fn restart_role_nodes() {
         let work = work_dir(&base, name);
         let ci = if NODES[..2].contains(&name) { "slots.ci = 1\n" } else { "" };
         let conf = crate::lease::caps::LeaseConf::parse(&format!("work = {}\nrole = pool\ndisk_floor_gb = 0\ndisk_warn_gb = 0\n{ci}", work.display()), &dir);
-        let x = Exec::new(name, conf, dir.join("leases"), Opts { scopes: Some(false), no_beat: NO_BEAT, tick: Duration::from_millis(100), ..Opts::default() }, Arc::new(|_| {}));
+        let x = Exec::new(name, conf, dir.join("leases"), Opts { watch_memory: false, scopes: Some(false), no_beat: NO_BEAT, tick: Duration::from_millis(100), ..Opts::default() }, Arc::new(|_| {}));
         let ep = Endpoint::new(name);
         for &word in WORDS {
             let e = x.clone();

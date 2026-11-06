@@ -29,6 +29,8 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, SetHandleInformation_raw, FILETIME, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT};
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+use windows::Win32::System::Diagnostics::Debug::{GetErrorMode, SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX, THREAD_ERROR_MODE};
+use windows::Win32::System::ErrorReporting::{WerSetFlags, WER_FAULT_REPORTING, WER_FAULT_REPORTING_NO_UI};
 use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, Thread32First, Thread32Next, PROCESSENTRY32W, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
@@ -41,6 +43,33 @@ use windows::Win32::System::Threading::{
     GetProcessTimes, GetSystemTimes, OpenProcess, OpenThread, QueryFullProcessImageNameW, ResumeThread, BELOW_NORMAL_PRIORITY_CLASS, CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
     PROCESS_TERMINATE, THREAD_SUSPEND_RESUME,
 };
+
+/// The error modes no process the hub starts may leave out: no window for a fault, a missing
+/// DLL or an unreadable drive.
+const QUIET: u32 = SEM_FAILCRITICALERRORS.0 | SEM_NOGPFAULTERRORBOX.0 | SEM_NOOPENFILEERRORBOX.0;
+
+/// This process and every process it starts from now show no error window: a fault ends its
+/// program with the fault's code, a missing DLL or drive fails the call that wanted it. The
+/// error mode is inherited by each child; the system's error report shows no window for this
+/// process either. A test's access violation left its window on the person's desktop for two
+/// days (11-04 to 11-06), and a fault waiting in that window holds its program until someone
+/// clicks it away.
+pub fn quiet_errors() {
+    unsafe {
+        SetErrorMode(THREAD_ERROR_MODE(GetErrorMode() | QUIET));
+        let _ = WerSetFlags(WER_FAULT_REPORTING(WER_FAULT_REPORTING_NO_UI));
+    }
+}
+
+/// Windows command-line limits are not advertised for submission checks yet.
+pub fn exec_limits() -> Result<Option<super::ExecLimits>, String> { Ok(None) }
+
+/// Windows limits the command line alone; its separate environment does not count.
+pub fn exec_over(cmd: &Command) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    let units: usize = std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|arg| arg.encode_wide().count() + 3).sum();
+    (units > 32767).then(|| format!("the command line is {units} UTF-16 units, and Windows execs at most 32767 UTF-16 units"))
+}
 
 /// A handle closed on drop.
 struct Owned(HANDLE);
@@ -187,8 +216,13 @@ fn job_name(exit: &Path) -> Vec<u16> {
 }
 
 /// The argv a lease run executes: as given (priority is the creation class; no pinning).
-pub fn lease_argv(argv: Vec<String>, _unit: Option<&str>, _nice: i32, _cpus: &str, _share: Option<crate::lease::Cost>, _ram_max_gb: Option<f64>) -> Vec<String> {
+pub fn lease_argv(argv: Vec<String>, _unit: Option<&str>, _nice: i32, _cpus: &str, _weight: Option<u32>, _ram_max_gb: Option<f64>) -> Vec<String> {
     argv
+}
+
+/// No scopes on Windows: no run has a unit to weigh.
+pub fn set_cpu_weight(_unit: &str, _weight: u32) -> Result<(), String> {
+    Ok(())
 }
 
 /// The handles this process got from its parent stay its own: none is inheritable from here on,
@@ -270,8 +304,8 @@ static WRAPPER: extern "C" fn() = before_main;
 extern "C" fn before_main() {
     let mut args = std::env::args_os().skip(1);
     match args.next() {
-        Some(first) if first == WRAP => wrapper(args),
-        Some(first) if first == LOG => log_start(args),
+        Some(first) if first == WRAP => { quiet_errors(); wrapper(args) }
+        Some(first) if first == LOG => { quiet_errors(); log_start(args) }
         _ => {}
     }
 }
@@ -695,6 +729,29 @@ mod tests {
         let _ = child.wait();
         // STATUS_ACCESS_VIOLATION
         assert_eq!(code, Some(0xC000_0005u32 as i32), "after {:?}", t0.elapsed());
+    }
+
+    /// Every process the hub starts inherits its error mode ([`quiet_errors`]): a program that
+    /// faults outside any run's job ends at once with its fault's code, and no window waits for
+    /// someone on the desktop (a test's access violation left one there for two days, 11-04). This
+    /// test's program is the one that faults: the system's own handling is what is tested.
+    #[test]
+    fn a_child_that_faults_shows_no_window() {
+        const FAULT: &str = "DEVHUB_TEST_PLAIN_FAULT";
+        if std::env::var_os(FAULT).is_some() {
+            println!("error mode {}", unsafe { GetErrorMode() });
+            unsafe { (8usize as *mut u8).write_volatile(1) };
+        }
+        if no_image_roles() {
+            return;
+        }
+        quiet_errors();
+        let out = Command::new(std::env::current_exe().unwrap()).args(["a_child_that_faults_shows_no_window", "--nocapture"]).env(FAULT, "1").stderr(std::process::Stdio::null()).output().unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        // STATUS_ACCESS_VIOLATION, and the mode it ran with
+        assert_eq!(out.status.code(), Some(0xC000_0005u32 as i32), "{said}");
+        let mode: Option<u32> = said.lines().find_map(|l| l.trim().strip_prefix("error mode ")).and_then(|m| m.trim().parse().ok());
+        assert_eq!(mode.map(|m| m & QUIET), Some(QUIET), "{said}");
     }
 
     /// The node's start (`--makepad-devhub-log <file> <args..>`): this image runs with `<args..>`,

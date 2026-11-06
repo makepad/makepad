@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(old.rev(&c.repo, "work"), Some(base.clone()), "one pass keeps its ref snapshot");
         assert!(cond_met(&c, &cond, 0).0.is_some(), "next pass sees the moved ref");
         g(&c.repo, &["update-ref", "refs/heads/work-old-test", &own]);
-        let live = crate::state::Live { tree: c.repo.to_string_lossy().into(), rev: format!("rc-query@{base}"), ..Default::default() };
+        let live = crate::state::Live { id: "W-quiet".into(), lane: "quiet".into(), lease: "L700".into(), tree: c.repo.to_string_lossy().into(), rev: format!("rc-query@{base}"), ..Default::default() };
         assert!(g(&c.repo, &["status", "--porcelain", "--untracked-files=no"]).is_empty(), "fixture is clean including normalized CRLF text");
         let broken = c.repo.join(".git/refs/heads/work-old-aaa");
         std::fs::write(&broken, format!("{}\n", "ab".repeat(20))).unwrap();
@@ -394,6 +394,42 @@ mod tests {
             assert_eq!(pass.retired_holds(&c.repo, &own), Some(true), "a broken retired ref must not hide a later match");
         }
         assert_eq!(crate::git_exec::on_this_thread(), before, "repeated readiness ticks must launch zero git commands");
+        let now = wall_ms();
+        let old = now - 6 * 60_000;
+        let landed = || super::super::live::lane_landed(&c, &live, &mut crate::gitread::Pass::default());
+        c.store.update(|d| d.lives.push(crate::state::Live { id: "W-other".into(), lane: live.lane.clone(), touched_ms: now, ..Default::default() })).unwrap();
+        assert_eq!(landed(), None, "a recent call on another session keeps the lane working");
+        c.store.update(|d| d.lives.last_mut().unwrap().touched_ms = old).unwrap();
+        assert_eq!(landed(), Some(own.clone()), "old calls are quiet");
+        c.store.update(|d| d.jobs.push(crate::state::Job { id: "J-quiet".into(), lane: live.lane.clone(), state: "queued".into(), ..Default::default() })).unwrap();
+        for state in ["queued", "leasing", "running", "paused"] {
+            c.store.update(|d| d.jobs.last_mut().unwrap().state = state.into()).unwrap();
+            assert_eq!(landed(), None, "a {state} job keeps the lane working");
+        }
+        c.store.update(|d| { let j = d.jobs.last_mut().unwrap(); j.state = "ok".into(); j.ended_ms = now; }).unwrap();
+        assert_eq!(landed(), None, "a recently ended job keeps the lane working");
+        c.store.update(|d| d.jobs.last_mut().unwrap().ended_ms = old).unwrap();
+        assert_eq!(landed(), Some(own.clone()));
+        c.leases.test_sched(|s| {
+            let req = crate::lease::sched::Req::new(&live.lane, crate::lease::Kind::Build);
+            s.restore(&format!("{{\"id\":\"L700\",\"node\":\"test-node\",\"req\":{}}}", req.to_json()), old).unwrap();
+        });
+        assert_eq!(landed(), Some(own.clone()), "the session's own lease does not keep the lane busy");
+        let mut lease = String::new();
+        c.leases.test_sched(|s| { lease = s.request(crate::lease::sched::Req::new(&live.lane, crate::lease::Kind::Build), old); });
+        assert_eq!(landed(), None, "a queued lease keeps the lane working");
+        c.leases.test_sched(|s| {
+            s.release(&lease, "released", old);
+            let req = crate::lease::sched::Req::new(&live.lane, crate::lease::Kind::Build);
+            s.restore(&format!("{{\"id\":\"L702\",\"node\":\"test-node\",\"req\":{}}}", req.to_json()), old).unwrap();
+        });
+        assert_eq!(landed(), None, "a live lease keeps the lane working");
+        c.leases.test_sched(|s| { s.release("L702", "released", old); });
+        assert_eq!(landed(), Some(own.clone()), "old lease ends are quiet");
+        c.monitor.set_last_event_ms(&c.repo, now);
+        assert_eq!(landed(), None, "a recent file event keeps even a clean tree working");
+        c.monitor.set_last_event_ms(&c.repo, old);
+        assert_eq!(landed(), Some(own.clone()), "old file events are quiet");
         std::fs::remove_file(&broken).unwrap();
         // %s joins the first paragraph, preserving meaningful leading space.
         let mut commit = crate::gitread::with(&c.repo, |_, repo| repo.read_commit(&makepad_git::ObjectId::from_hex(&own).unwrap()).unwrap()).unwrap();

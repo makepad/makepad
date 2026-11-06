@@ -204,15 +204,17 @@ impl Tree {
             blobs.extend(crate::gitread::files_at(&com, &pair.main)?.into_iter().map(|(p, h)| (format!("{COMMERCIAL}/{p}"), h)));
         }
         let files = blobs.keys().cloned().collect();
-        let (oids, repo) = (blobs.clone(), repo.to_path_buf());
+        let oids = blobs.clone();
+        let (main_blobs, com_blobs) = (crate::gitread::blob_reader(repo), if has_com { crate::gitread::blob_reader(&com) } else { None });
+        let com_prefix = format!("{COMMERCIAL}/");
         Ok(Tree {
             id: format!("{},{}", pair.work, pair.main),
             cache: Mutex::new(BTreeMap::new()),
             files,
             blobs,
             read: Box::new(move |p| {
-                let dir = if p.starts_with(&format!("{COMMERCIAL}/")) { &com } else { &repo };
-                crate::gitread::blob(dir, oids.get(p)?).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+                let read = if p.starts_with(&com_prefix) { com_blobs.as_ref() } else { main_blobs.as_ref() }?;
+                read(oids.get(p)?).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
             }),
         })
     }
@@ -974,28 +976,37 @@ fn digest_kind(section: &str) -> &'static str {
     match section { "app" => "app", "tests" => "tests", _ => "job" }
 }
 
-/// Whether a Rust source of `tree` under `krate` names `file` ([`makepad_ci_merge::names`]).
-fn named_in(tree: &Tree, krate: &str, file: &str) -> bool {
-    let name = file.rsplit('/').next().unwrap_or(file).to_string();
+/// Of `files`, documents of the crate at `krate` ([`makepad_ci_merge::inert`]), the ones a Rust
+/// source of `tree` under it names ([`makepad_ci_merge::names`]). Each source is read once for
+/// all of them: read for each document before, every source of a crate was read as many times as
+/// the crate had documents, half the master's gate-proof time after a restart (11-06).
+fn named_in(tree: &Tree, krate: &str, files: &[&str]) -> BTreeSet<String> {
     let prefix = if krate.is_empty() { String::new() } else { format!("{krate}/") };
+    let mut left: Vec<(&str, String)> = files.iter().map(|f| (*f, f.rsplit('/').next().unwrap_or(f).to_string())).collect();
+    let mut named = BTreeSet::new();
     for (path, oid) in tree.blobs.range(prefix.clone()..).take_while(|(p, _)| p.starts_with(&prefix)).filter(|(p, _)| p.ends_with(".rs")) {
-        let key = (oid.clone(), name.clone());
-        let known = NAMES.lock().unwrap().get(&key).copied();
-        let hit = match known {
-            Some(hit) => hit,
-            None => {
-                let hit = (tree.read)(path).is_some_and(|text| makepad_ci_merge::names(&text, file));
-                let mut kept = NAMES.lock().unwrap();
-                if kept.len() >= NAMES_KEPT { kept.clear(); }
-                kept.insert(key, hit);
-                hit
-            }
-        };
-        if hit {
-            return true;
+        if left.is_empty() {
+            break;
         }
+        let known: Vec<Option<bool>> = {
+            let kept = NAMES.lock().unwrap();
+            left.iter().map(|(_, name)| kept.get(&(oid.clone(), name.clone())).copied()).collect()
+        };
+        let text = if known.iter().any(Option::is_none) { (tree.read)(path) } else { None };
+        let mut kept = NAMES.lock().unwrap();
+        if kept.len() >= NAMES_KEPT { kept.clear(); }
+        let mut known = known.into_iter();
+        left.retain(|(file, name)| {
+            let hit = known.next().flatten().unwrap_or_else(|| {
+                let hit = text.as_deref().is_some_and(|t| makepad_ci_merge::names(t, file));
+                kept.insert((oid.clone(), name.clone()), hit);
+                hit
+            });
+            if hit { named.insert(file.to_string()); }
+            !hit
+        });
     }
-    false
+    named
 }
 
 /// One tree walk per repo, shared by discovery and every unit; no per-app git processes.
@@ -1012,6 +1023,13 @@ impl Digests {
     }
 
     pub(crate) fn with_lock(tree: &Tree, units: &[Unit], text: String) -> Result<Digests, String> {
+        Self::with_lock_by(tree, units, text, &named_in, &|input| makepad_ci_merge::digest_platforms(input, [Os::Linux, Os::Macos, Os::Windows].map(Os::as_str)), true)
+    }
+
+    /// [`Self::with_lock`], the documents a crate's sources name found by `named` ([`named_in`]),
+    /// a unit's input hashed for Linux, macOS and Windows by `hash`, and the digests a pair's
+    /// tree had kept by it when `kept`.
+    fn with_lock_by(tree: &Tree, units: &[Unit], text: String, named: &dyn Fn(&Tree, &str, &[&str]) -> BTreeSet<String>, hash: &dyn Fn(&str) -> [String; 3], kept: bool) -> Result<Digests, String> {
         if units.is_empty() { return Ok(Digests { lock: text, hashes: BTreeMap::new(), closures: BTreeMap::new() }); }
         let lock_id = if tree.id.is_empty() { String::new() } else { hex_digest(text.as_bytes()) };
         let lock = Lock::parse(text)?;
@@ -1027,7 +1045,7 @@ impl Digests {
         for unit in units.iter().collect::<BTreeSet<_>>() {
             let key = (unit.dir.clone(), digest_kind(&unit.section));
             let kept_key = (tree.id.clone(), lock_id.clone(), unit.dir.clone(), digest_kind(&unit.section));
-            if !tree.id.is_empty() {
+            if kept && !tree.id.is_empty() {
                 if let Some((h, dirs)) = DIGESTS.lock().unwrap().get(&kept_key) {
                     for (os, hash) in [Os::Linux, Os::Macos, Os::Windows].into_iter().zip(h) {
                         hashes.insert((unit.clone(), os), hash.clone());
@@ -1071,19 +1089,19 @@ impl Digests {
             // a document (and a test's ci.splash) is no input unless a source of its crate names it
             let crates: BTreeSet<String> = dirs.iter().map(|d| d.trim_end_matches('/').to_string()).collect();
             for (krate, inert) in makepad_ci_merge::inert_by_crate(files.keys().map(|p| p.as_str()), &crates, unit.section == "tests") {
-                for file in inert.into_iter().map(str::to_string).collect::<Vec<_>>() {
-                    if !named_in(tree, &krate, &file) {
-                        files.remove(&file);
-                    }
+                let inert: Vec<String> = inert.into_iter().map(str::to_string).collect();
+                let named = named(tree, &krate, &inert.iter().map(String::as_str).collect::<Vec<_>>());
+                for file in inert.iter().filter(|f| !named.contains(*f)) {
+                    files.remove(file);
                 }
             }
             let lines = files.iter().map(|(p, h)| format!("100644 blob {h}\t{p}\n")).collect::<String>();
             let input = digest_input(&lines, &external);
-            let h = [Os::Linux, Os::Macos, Os::Windows].map(|os| digest_platform(&input, os));
+            let h = hash(&input);
             for (os, hash) in [Os::Linux, Os::Macos, Os::Windows].into_iter().zip(&h) {
                 hashes.insert((unit.clone(), os), hash.clone());
             }
-            if !tree.id.is_empty() {
+            if kept && !tree.id.is_empty() {
                 let mut kept = DIGESTS.lock().unwrap();
                 if kept.len() >= DIGESTS_KEPT { kept.clear(); }
                 kept.insert(kept_key, (h, dirs.clone()));
@@ -1434,6 +1452,11 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
     if tree.has("tools/run/fixture/edit_undone_warm.py") {
         push("live:edit-undone".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/edit_undone_warm.py"])], Judge::Exit, 120.0, None);
     }
+    // a patch reaches the O1 code a warm start placed from the startup image: the code holding an
+    // unguarded copy of the patched body is built again
+    if tree.has("tools/run/fixture/warm_image_patch.py") {
+        push("live:warm-image-patch".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/warm_image_patch.py"])], Judge::Exit, 30.0, None);
+    }
     // a failed hot load is a warm restart and a ledger report, never a parked panic
     if tree.has("tools/run/fixture/hot_fail.py") {
         push("live:hot-fail".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/hot_fail.py"])], Judge::Exit, 60.0, None);
@@ -1658,7 +1681,17 @@ fn step_name(step: &[String]) -> String {
 
 // ---------------------------------------------------------------- the run
 
-/// A box the run can use: its name, OS, arch and whether it shows windows.
+/// The work a CI box lends to a run, in addition to its OS and capabilities.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BoxWork {
+    All,
+    /// Bench boxes reserve their quiet windows for timed work, lending only cross-target checks.
+    ChecksOnly,
+    /// Hot boxes lend only their OS's smoke and GUI shards.
+    DisplayOnly,
+}
+
+/// A box the run can use: its OS, arch, display, GPU and the work its role lends.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoxInfo {
     pub node: String,
@@ -1669,9 +1702,8 @@ pub struct BoxInfo {
     pub gpu: bool,
     /// it takes a lease on the separate CI tree
     pub ci: bool,
-    /// a bench box (its quiet windows go to timed work): it lends the run only the cross-target
-    /// checks, the shards of its OS no pool box can take (a Mac's Apple targets)
-    pub checks_only: bool,
+    /// All work, cross-target checks on a bench box, or display shards on a hot box.
+    pub work: BoxWork,
 }
 
 impl BoxInfo {
@@ -1680,7 +1712,12 @@ impl BoxInfo {
     }
 
     pub fn fits(&self, s: &Shard) -> bool {
-        (!self.checks_only || s.id.starts_with("check:")) && (s.kind != Kind::Ci || self.ci) && (s.os == Os::Any || s.os == self.os) && (!Self::needs_gui(s) || self.gui) && (s.os != Os::Any || self.os != Os::Windows) && (!s.gpu || self.gpu)
+        let lends = match self.work {
+            BoxWork::All => true,
+            BoxWork::ChecksOnly => s.id.starts_with("check:"),
+            BoxWork::DisplayOnly => Self::needs_gui(s),
+        };
+        lends && (s.kind != Kind::Ci || self.ci) && (s.os == Os::Any || s.os == self.os) && (!Self::needs_gui(s) || self.gui) && (s.os != Os::Any || self.os != Os::Windows) && (!s.gpu || self.gpu)
     }
 
     fn needs(&self, s: &Shard) -> String {
@@ -1703,13 +1740,13 @@ fn takes_ci(n: &crate::lease::sched::NodeView) -> bool {
 
 /// The allowed CI boxes that are up, dev on, with capabilities.
 pub fn boxes(ctx: &Ctx) -> Vec<BoxInfo> {
-    ci_boxes(ctx, true)
+    ci_boxes(ctx, BoxAvailability::Ready)
 }
 
-/// The CI boxes that are down (their caps as last heard): a shard only they could take does not
-/// run this round ([`no_box`]).
+/// CI boxes that can return soon: down (caps as last heard), or awaiting the fleet toolchain.
+/// A shard only they can take waits for them ([`no_box`]).
 fn down_boxes(ctx: &Ctx) -> Vec<BoxInfo> {
-    ci_boxes(ctx, false)
+    ci_boxes(ctx, BoxAvailability::Soon)
 }
 
 /// Whether `node` is up for CI work now: a worker asks nothing of a box that is down (its asks
@@ -1718,25 +1755,36 @@ fn box_up(ctx: &Ctx, node: &str) -> bool {
     ctx.leases.nodes().iter().any(|n| n.name == node && n.up && n.dev)
 }
 
-fn ci_boxes(ctx: &Ctx, up: bool) -> Vec<BoxInfo> {
+enum BoxAvailability { Ready, Soon, DevOff }
+
+fn ci_boxes(ctx: &Ctx, availability: BoxAvailability) -> Vec<BoxInfo> {
     ctx.leases
         .nodes()
         .into_iter()
-        .filter(|n| n.up == up && n.dev && takes_ci(n))
+        .filter(takes_ci)
         .filter_map(|n| {
             let c = n.caps?;
             if c.role().users() {
                 return None;
             }
             let os = Os::of(&c.os);
-            // a box on another toolchain than the fleet's takes no shard
-            if super::fleet_rustc(ctx, &c.os).is_some_and(|f| !c.rustc.is_empty() && c.rustc != f) {
-                return None;
-            }
+            // A box updating its toolchain counts as future capacity, just like a down box.
+            let ready = n.up && !super::fleet_rustc(ctx, &c.os).is_some_and(|f| !c.rustc.is_empty() && c.rustc != f);
+            let include = match availability {
+                BoxAvailability::Ready => n.dev && ready,
+                BoxAvailability::Soon => n.dev && !ready,
+                BoxAvailability::DevOff => !n.dev,
+            };
+            if !include { return None; }
+            let work = match c.role() {
+                crate::lease::Role::Bench => BoxWork::ChecksOnly,
+                crate::lease::Role::Hot => BoxWork::DisplayOnly,
+                _ => BoxWork::All,
+            };
             // Reject older nodes' generic Wayland capability too: Linux boots belong to the
             // real WM session, even while the fleet is updating its capability probe.
             let gui = c.display.as_deref().is_some_and(|d| os != Os::Linux || d.strip_prefix("wm:makepad-wm-").is_some_and(|n| n.parse::<u32>().is_ok()));
-            (os != Os::Any).then(|| BoxInfo { node: n.name.clone(), os, arch: c.arch.clone(), gui, gpu: !c.gpus.is_empty(), ci: crate::lease::sched::slots(&c, Kind::Ci) > 0, checks_only: c.role() == crate::lease::Role::Bench })
+            (os != Os::Any).then(|| BoxInfo { node: n.name.clone(), os, arch: c.arch.clone(), gui, gpu: !c.gpus.is_empty(), ci: crate::lease::sched::slots(&c, Kind::Ci) > 0, work })
         })
         .collect()
 }
@@ -1765,11 +1813,24 @@ struct Pool {
 
 impl Pool {
     fn finished(&self, i: usize) -> bool {
-        matches!(self.state[i].state.as_str(), "ok" | "fail" | "incomplete")
+        matches!(self.state[i].state.as_str(), "ok" | "fail" | "incomplete" | crate::state::NOT_RUN)
     }
 
     fn all_done(&self) -> bool {
         (0..self.state.len()).all(|i| self.finished(i))
+    }
+
+    /// Shards no box can take do not void the others' verdict, but a run none of whose shards ran
+    /// proves nothing: it has no verdict.
+    fn verdict(&self) -> Verdict {
+        let not_run = |s: &CiShard| s.state == crate::state::NOT_RUN;
+        if self.state.iter().any(|s| s.state == "fail") {
+            Verdict::Fail
+        } else if self.stopped || self.state.iter().any(|s| s.state != "ok" && !not_run(s)) || (!self.state.is_empty() && self.state.iter().all(not_run)) {
+            Verdict::Incomplete
+        } else {
+            Verdict::Ok
+        }
     }
 
     /// Whether shard `i` may go to this box: it fits, was not lost there too often, the box is still
@@ -1868,12 +1929,12 @@ fn close_span(s: &mut CiShard, node: &str) {
     s.granted_ms = 0;
 }
 
-/// What becomes of a shard no box can take, with nothing else left to run: a state and a summary,
-/// or None while it waits. `here`: the boxes of its kind in the run now. `waited`: how long nothing
-/// else has been running, `heard`: whether this master has heard its nodes, `gone`: a box of the
-/// fleet is away now (it may be the one that can).
-fn no_box(shard: &Shard, s: &CiShard, here: &[&BoxInfo], down: &[&str], out: &[String], waited: Duration, heard: bool, gone: bool) -> Option<(&'static str, String)> {
-    let kind = format!("{}{}", shard.os.as_str(), if shard.gui { " with a display" } else { "" });
+/// What becomes of a shard no box can take: a state and a summary, or None while it waits. `here`:
+/// the boxes of its kind in the run now. `down`: those down or updating. `off`: those with dev off.
+/// `waited`: how long nothing else has been running, `heard`: whether this master has heard its
+/// nodes, `gone`: a box that fits it is away now (it may be the one that can).
+fn no_box(shard: &Shard, s: &CiShard, here: &[&BoxInfo], down: &[&str], off: &[&str], out: &[String], waited: Duration, heard: bool, gone: bool) -> Option<(&'static str, String)> {
+    let kind = format!("{}{}", shard.os.as_str(), if BoxInfo::needs_gui(shard) { " with a display" } else { "" });
     if !heard {
         return None;
     }
@@ -1900,7 +1961,8 @@ fn no_box(shard: &Shard, s: &CiShard, here: &[&BoxInfo], down: &[&str], out: &[S
     if !down.is_empty() {
         return (waited >= NO_BOX_WAIT).then(|| ("incomplete", format!("box down: {} (not back in {} min)", down.join(", "), NO_BOX_WAIT.as_secs() / 60)));
     }
-    (waited >= NO_BOX_WAIT).then(|| ("incomplete", format!("no box of {kind} came in {} min", NO_BOX_WAIT.as_secs() / 60)))
+    let why = if off.is_empty() { "none is set up".to_string() } else { format!("{} dev off", off.join(", ")) };
+    Some((crate::state::NOT_RUN, format!("no CI box takes {kind}: {why}")))
 }
 
 /// A run's shard states for the state document.
@@ -2039,7 +2101,7 @@ impl Inputs {
             let docs: Vec<&String> = changed.iter().filter(|p| read_by_jit(p) && doc(p)).collect();
             !docs.is_empty() && Tree::at(repo, to).map_or(true, |tree| {
                 let crates: BTreeSet<String> = jit.iter().map(|d| d.trim_end_matches('/').to_string()).collect();
-                makepad_ci_merge::inert_by_crate(docs.iter().map(|p| p.as_str()), &crates, false).iter().any(|(krate, files)| files.iter().any(|f| named_in(&tree, krate, f)))
+                makepad_ci_merge::inert_by_crate(docs.iter().map(|p| p.as_str()), &crates, false).iter().any(|(krate, files)| !named_in(&tree, krate, files).is_empty())
             })
         };
         Some(Inputs { changed, jit_changed })
@@ -2190,9 +2252,9 @@ fn leg_digests(ctx: &Ctx, run: &Pair, dir: &Path, units: &[Unit], state: &[CiSha
     }
 }
 
-/// A finished rolling run of `tip` with a verdict that started at or after `since`.
+/// A finished rolling run of `tip` started at or after `since`, unless its master ended it.
 fn judged<'a>(ci: &'a Ci, tip: &Pair, since: u64) -> Option<&'a CiRun> {
-    ci.runs.iter().rev().find(|r| rolling(r) && r.pair == *tip && r.started_ms >= since && matches!(r.verdict.as_str(), "ok" | "fail"))
+    ci.runs.iter().rev().find(|r| rolling(r) && r.pair == *tip && r.started_ms >= since && r.ended_ms > 0 && r.critical != ENDED_WITH_MASTER && matches!(r.verdict.as_str(), "ok" | "fail" | "incomplete"))
 }
 
 /// One full CI run on the bucket's tip, waiting for any manual or resumed run first. A bucket run
@@ -2215,7 +2277,7 @@ pub fn ci(repo: PathBuf) -> crate::bucket::Run {
         // The shared slot stays locked through the verdict and proof publication.
         let (verdict, legs) = {
             let one = run_slot(false).lock().unwrap_or_else(|e| e.into_inner());
-            match since.and_then(|since| ctx.store.read(|d| judged(&d.ci, tip, since).map(|r| (if r.verdict == "ok" { Verdict::Ok } else { Verdict::Fail }, r.shards.iter().map(CiShard::leg).collect::<Vec<_>>())))) {
+            match since.and_then(|since| ctx.store.read(|d| judged(&d.ci, tip, since).map(|r| (match r.verdict.as_str() { "ok" => Verdict::Ok, "fail" => Verdict::Fail, _ => Verdict::Incomplete }, r.shards.iter().map(CiShard::leg).collect::<Vec<_>>())))) {
                 Some(judged) => judged,
                 None => {
                     run_stop(false).store(false, std::sync::atomic::Ordering::SeqCst);
@@ -2613,8 +2675,8 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
                 cv.notify_all();
                 break;
             }
-            // a shard no box can take waits while anything else runs, and then for a box to come
-            // back (a master just started has not heard its boxes yet: that is no box gone)
+            // After hearing its nodes, finish impossible shards; recoverable capacity waits
+            // until other work finishes, then gets time to come back.
             let bs = boxes(ctx);
             let now_ended = (0..g.state.len()).filter(|&i| g.finished(i)).count();
             if now_ended != ended {
@@ -2655,22 +2717,26 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
             let takeable = |g: &Pool, i: usize| bs.iter().any(|b| g.can(b, i));
             let stuck: Vec<usize> = (0..g.shards.len()).filter(|&i| g.state[i].state == "wait" && g.reserved[i].is_none() && !takeable(&g, i)).collect();
             let others = (0..g.shards.len()).any(|i| g.state[i].state == "wait" && takeable(&g, i));
-            if busy || others || stuck.is_empty() {
-                nothing_left = None;
-            } else {
-                let waited = nothing_left.get_or_insert_with(Instant::now).elapsed();
+            let idle = !busy && !others;
+            if !idle || stuck.is_empty() { nothing_left = None; }
+            if !stuck.is_empty() {
+                let waited = if idle { nothing_left.get_or_insert_with(Instant::now).elapsed() } else { Duration::ZERO };
                 let out: Vec<String> = bs.iter().filter(|b| g.out(&b.node)).map(|b| b.node.clone()).collect();
-                let gone = ctx.leases.nodes().iter().any(|n| !n.up || !n.dev);
                 let downs = down_boxes(ctx);
+                let offs = ci_boxes(ctx, BoxAvailability::DevOff);
                 for i in stuck {
                     let here: Vec<&BoxInfo> = bs.iter().filter(|b| b.fits(&g.shards[i])).collect();
                     let down: Vec<&str> = downs.iter().filter(|b| b.fits(&g.shards[i])).map(|b| b.node.as_str()).collect();
-                    match no_box(&g.shards[i], &g.state[i], &here, &down, &out, waited, master_t0.elapsed() >= HEAR, gone) {
+                    let off: Vec<&str> = offs.iter().filter(|b| b.fits(&g.shards[i])).map(|b| b.node.as_str()).collect();
+                    // Impossible shards end as soon as the nodes are heard, even while others run.
+                    // Recoverable capacity and attempted shards keep the existing idle wait.
+                    if !idle && (!here.is_empty() || !down.is_empty() || !g.state[i].failed_on.is_empty()) { continue; }
+                    match no_box(&g.shards[i], &g.state[i], &here, &down, &off, &out, waited, master_t0.elapsed() >= HEAR, !down.is_empty()) {
                         Some((state, summary)) => {
                             g.state[i].state = state.into();
                             g.state[i].summary = summary;
                         }
-                        None if here.is_empty() && !down.is_empty() => g.state[i].summary = format!("waits for {} to come back (box down, {} s)", down.join(", "), waited.as_secs()),
+                        None if here.is_empty() && !down.is_empty() => g.state[i].summary = format!("waits for {} to come back (box down or updating, {} s)", down.join(", "), waited.as_secs()),
                         None if here.is_empty() => g.state[i].summary = format!("waits for a box of {} ({} s)", g.shards[i].os.as_str(), waited.as_secs()),
                         None => {}
                     }
@@ -2750,13 +2816,15 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
             }
         }
     }
-    let mut verdict = if g.state.iter().any(|s| s.state == "fail") {
-        Verdict::Fail
-    } else if g.stopped || g.state.iter().any(|s| s.state != "ok") {
-        Verdict::Incomplete
-    } else {
-        Verdict::Ok
-    };
+    let mut verdict = g.verdict();
+    // Report impossible shards before still-waiting shards are converted to NOT_RUN.
+    let mut gaps: BTreeMap<&str, usize> = BTreeMap::new();
+    for st in g.state.iter().filter(|s| s.state == crate::state::NOT_RUN) {
+        *gaps.entry(&st.summary).or_default() += 1;
+    }
+    for (summary, n) in gaps {
+        ctx.store.event("ci", Sev::Warn, format!("ci {}: {n} shards did not run: {summary}", pair.short()), None);
+    }
     let ended = wall_ms();
     let (crit, mut boxes, fleet) = critical(&g.state, started, ended);
     for (node, line) in &g.tools {
@@ -4118,6 +4186,55 @@ pub fn cli(args: &[&str]) -> Option<i32> {
 mod tests {
     use super::*;
 
+    /// A unit's digests on this checkout's last three tips are what they were before each source
+    /// was read once for all of its crate's documents, from repositories found once, and its
+    /// input hashed once for every OS: each document's sources read again from the repository
+    /// found again for each blob, the input and its OS line hashed whole by another SHA-256 (the
+    /// network crate's). A digest that changed would prove a unit on sources it never ran (11-06).
+    #[test]
+    fn digests_of_real_tips_are_as_before() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+        let com = repo.join(COMMERCIAL);
+        let main = if com.join(".git").exists() { crate::gitread::rev(&com, "HEAD").unwrap() } else { String::new() };
+        let tips = crate::gitread::with(&repo, |p, r| {
+            let mut tip = crate::gitread::resolve(p, r, "HEAD").unwrap();
+            let mut tips = vec![tip];
+            while tips.len() < 3 {
+                tip = r.read_commit(&tip).unwrap().first_parent().unwrap();
+                tips.push(tip);
+            }
+            tips.into_iter().map(|t| t.to_hex()).collect::<Vec<_>>()
+        }).unwrap();
+        let lock = std::fs::read_to_string(repo.join("Cargo.lock")).unwrap();
+        let oses = [Os::Linux, Os::Macos, Os::Windows];
+        let texts: Mutex<HashMap<String, Option<String>>> = Mutex::new(HashMap::new());
+        let read_per_blob = |tree: &Tree, krate: &str, files: &[&str]| -> BTreeSet<String> {
+            let prefix = if krate.is_empty() { String::new() } else { format!("{krate}/") };
+            files.iter().filter(|file| tree.blobs.range(prefix.clone()..).take_while(|(p, _)| p.starts_with(&prefix)).filter(|(p, _)| p.ends_with(".rs")).any(|(path, oid)| {
+                let dir = if path.starts_with(&format!("{COMMERCIAL}/")) { &com } else { &repo };
+                let text = texts.lock().unwrap().entry(oid.clone()).or_insert_with(|| crate::gitread::blob(dir, oid).ok().map(|b| String::from_utf8_lossy(&b).into_owned())).clone();
+                text.is_some_and(|t| makepad_ci_merge::names(&t, file))
+            })).map(|f| f.to_string()).collect()
+        };
+        let hashed_whole = |input: &str| oses.map(|os| hex_digest(format!("{input}platform={}\n", os.as_str()).as_bytes()));
+        for tip in &tips {
+            let tree = Tree::at(&repo, &Pair::new(tip, &main)).unwrap();
+            // devhub's tests, two examples, one commercial app: the apps with the JIT's crates
+            let crates = |under: &str| tree.files.iter().filter_map(|f| f.strip_prefix(under)?.strip_suffix("/Cargo.toml").filter(|d| !d.contains('/')).map(|d| format!("{under}{d}"))).collect::<Vec<_>>();
+            let mut units = vec![Unit { dir: "libs/devhub".into(), section: "tests".into() }];
+            units.extend(crates("examples/").into_iter().take(2).chain(crates(&format!("{COMMERCIAL}/")).into_iter().take(1)).map(|dir| Unit { dir, section: "app".into() }));
+            assert!(units.len() >= 3, "{tip}: {units:?}");
+            let now = Digests::with_lock(&tree, &units, lock.clone()).unwrap();
+            let before = Digests::with_lock_by(&tree, &units, lock.clone(), &read_per_blob, &hashed_whole, false).unwrap();
+            for unit in &units {
+                for os in oses {
+                    assert!(!now.of(unit, os).is_empty(), "{tip} {unit:?} {os:?}");
+                    assert_eq!(now.of(unit, os), before.of(unit, os), "{tip} {unit:?} {os:?}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn gate_and_sweep_publish_and_resume_independently() {
         let run = |id: &str, sweep| CiRun {
@@ -4370,7 +4487,7 @@ mod tests {
     /// crate whose own files changed goes before longer ones whose dependencies alone changed.
     #[test]
     fn each_box_pulls_its_own_shard_and_changed_crates_go_first() {
-        let bx = |n: &str, os: Os| BoxInfo { node: n.into(), os, arch: "x86_64".into(), gui: false, gpu: true, ci: true, checks_only: false };
+        let bx = |n: &str, os: Os| BoxInfo { node: n.into(), os, arch: "x86_64".into(), gui: false, gpu: true, ci: true, work: BoxWork::All };
         let (lin, win) = (bx("l", Os::Linux), bx("w", Os::Windows));
         let shard = |id: &str, os: Os, est: f64| Shard { id: id.into(), kind: Kind::Test, os, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Tests, est, dirs: None, whole: false, cores: None };
         let shards = vec![shard("wtest:a", Os::Windows, 60.0), shard("test:deps", Os::Linux, 300.0), shard("test:own", Os::Linux, 20.0), shard("test:new", Os::Linux, 10.0)];
@@ -4392,6 +4509,22 @@ mod tests {
         assert_eq!(p.next_for(&lin), Some(3), "then a crate with no proof");
         p.state[3].state = "ok".into();
         assert_eq!(p.next_for(&lin), Some(1));
+        assert!(!p.all_done());
+        assert_eq!(p.verdict(), Verdict::Incomplete, "waiting shards still prevent a verdict");
+        p.state[0].state = crate::state::NOT_RUN.into();
+        p.state[1].state = "ok".into();
+        assert!(p.all_done(), "an impossible shard is finished");
+        assert_eq!(p.verdict(), Verdict::Ok, "impossible shards do not void passing work");
+        let none: Vec<CiShard> = p.state.iter().map(|s| CiShard { state: crate::state::NOT_RUN.into(), ..s.clone() }).collect();
+        let ran = std::mem::replace(&mut p.state, none);
+        assert_eq!(p.verdict(), Verdict::Incomplete, "a run none of whose shards ran proves nothing");
+        p.state.clear();
+        assert_eq!(p.verdict(), Verdict::Ok, "a run with nothing left to prove passes");
+        p.state = ran;
+        p.stopped = true;
+        assert_eq!(p.verdict(), Verdict::Incomplete, "a stopped run stays incomplete");
+        p.state[1].state = "fail".into();
+        assert_eq!(p.verdict(), Verdict::Fail, "a failure wins over stopped and impossible shards");
     }
 
     /// Run 146: one leg failed and 18 never ran, all 19 read as failed; only the one is.
@@ -4414,7 +4547,7 @@ mod tests {
 
     #[test]
     fn a_shard_that_could_not_get_its_box_goes_behind_the_rest() {
-        let lin = BoxInfo { node: "l".into(), os: Os::Linux, arch: "x86_64".into(), gui: false, gpu: true, ci: true, checks_only: false };
+        let lin = BoxInfo { node: "l".into(), os: Os::Linux, arch: "x86_64".into(), gui: false, gpu: true, ci: true, work: BoxWork::All };
         let shard = |id: &str, est: f64| Shard { id: id.into(), kind: Kind::Test, os: Os::Linux, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Tests, est, dirs: None, whole: false, cores: None };
         let shards = vec![shard("whole", 300.0), shard("small", 20.0)];
         let state = shards.iter().map(|s| CiShard { id: s.id.clone(), state: "wait".into(), ..Default::default() }).collect();
@@ -4499,7 +4632,7 @@ mod tests {
 
     #[test]
     fn a_failure_asks_a_second_box_and_a_box_failing_several_is_out() {
-        let bx = |n: &str, os: Os| BoxInfo { node: n.into(), os, arch: "x86_64".into(), gui: true, gpu: true, ci: true, checks_only: false };
+        let bx = |n: &str, os: Os| BoxInfo { node: n.into(), os, arch: "x86_64".into(), gui: true, gpu: true, ci: true, work: BoxWork::All };
         let boxes = [bx("a", Os::Linux), bx("b", Os::Linux), bx("m", Os::Macos)];
         let shard = |id: &str| Shard { id: id.into(), kind: Kind::Test, os: Os::Any, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Exit, est: 1.0, dirs: None, whole: false, cores: None };
         let n = BOX_OUT + 1;
@@ -4594,13 +4727,20 @@ mod tests {
         let skipped = arm_plan(&Tree::mem(Vec::new()), &mut shards, &super::super::arm::Decision { required: false, full: false, summary: String::new() });
         assert_eq!(skipped.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["mjit"]);
         assert_eq!(shards.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["check:aarch64-apple-ios", "test:a:lib"]);
-        let bench = BoxInfo { node: "m".into(), os: Os::Macos, arch: "aarch64".into(), gui: true, gpu: true, ci: true, checks_only: true };
+        let bench = BoxInfo { node: "m".into(), os: Os::Macos, arch: "aarch64".into(), gui: true, gpu: true, ci: true, work: BoxWork::ChecksOnly };
         let sh = |id: &str, kind: Kind| Shard { id: id.into(), kind, os: Os::Macos, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Cargo, est: 1.0, dirs: None, whole: false, cores: None };
         assert!(bench.fits(&sh("check:aarch64-apple-ios", Kind::Build)));
         for other in ["smoke:macos:apps/x", "test:a:lib", "mjit"] {
             assert!(!bench.fits(&sh(other, Kind::Test)), "{other}");
         }
-        assert!(BoxInfo { checks_only: false, ..bench.clone() }.fits(&sh("test:a:lib", Kind::Test)));
+        assert!(BoxInfo { work: BoxWork::All, ..bench.clone() }.fits(&sh("test:a:lib", Kind::Test)));
+        let hot = BoxInfo { work: BoxWork::DisplayOnly, ..bench };
+        assert!(hot.fits(&sh("smoke:macos:apps/x", Kind::Test)));
+        assert!(hot.fits(&Shard { gui: true, ..sh("gui:a", Kind::Test) }));
+        assert!(!hot.fits(&Shard { os: Os::Linux, gui: true, ..sh("gui:a", Kind::Test) }));
+        for other in ["check:aarch64-apple-ios", "mjit", "test:a:lib"] {
+            assert!(!hot.fits(&sh(other, Kind::Build)), "{other}");
+        }
     }
 
     #[test]
@@ -4621,8 +4761,8 @@ mod tests {
 
     #[test]
     fn boxes_take_what_fits_and_the_critical_path_is_the_last_box() {
-        let lin = BoxInfo { node: "node-a".into(), os: Os::Linux, arch: "x86_64".into(), gui: false, gpu: true, ci: true, checks_only: false };
-        let win = BoxInfo { node: "node-b".into(), os: Os::Windows, arch: "x86_64".into(), gui: true, gpu: true, ci: true, checks_only: false };
+        let lin = BoxInfo { node: "node-a".into(), os: Os::Linux, arch: "x86_64".into(), gui: false, gpu: true, ci: true, work: BoxWork::All };
+        let win = BoxInfo { node: "node-b".into(), os: Os::Windows, arch: "x86_64".into(), gui: true, gpu: true, ci: true, work: BoxWork::All };
         let sh = |os, gui| Shard { id: "s".into(), kind: Kind::Build, os, gui, gpu: false, steps: Vec::new(), judge: Judge::Exit, est: 1.0, dirs: None, whole: false, cores: None };
         assert!(lin.fits(&sh(Os::Linux, false)) && !lin.fits(&sh(Os::Any, true)) && !win.fits(&sh(Os::Any, true)) && win.fits(&sh(Os::Windows, false)));
         let shard = |id: &str, spans: Vec<(&str, u64, u64, u64)>| CiShard { id: id.into(), spans: spans.into_iter().map(|(n, a, g, e)| CiSpan { node: n.into(), asked_ms: a, granted_ms: g, ended_ms: e }).collect(), ..Default::default() };
@@ -4643,28 +4783,30 @@ mod tests {
     #[test]
     fn a_shard_no_box_can_take_waits_or_says_why() {
         let sh = Shard { id: "s".into(), kind: Kind::Build, os: Os::Macos, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Exit, est: 1.0, dirs: None, whole: false, cores: None };
-        let mac = BoxInfo { node: "node-d".into(), os: Os::Macos, arch: "aarch64".into(), gui: true, gpu: true, ci: true, checks_only: false };
+        let mac = BoxInfo { node: "node-d".into(), os: Os::Macos, arch: "aarch64".into(), gui: true, gpu: true, ci: true, work: BoxWork::All };
         let wait = CiShard::default();
         // a master that just started has not heard its boxes: no box is gone
-        assert_eq!(no_box(&sh, &wait, &[], &[], &[], Duration::from_secs(3600), false, false), None);
-        // heard, none of its kind here: it waits, within a bound
-        assert_eq!(no_box(&sh, &wait, &[], &[], &[], Duration::from_secs(60), true, false), None);
-        let (state, why) = no_box(&sh, &wait, &[], &[], &[], NO_BOX_WAIT, true, false).unwrap();
-        assert_eq!((state, why.as_str()), ("incomplete", "no box of macos came in 15 min"));
+        assert_eq!(no_box(&sh, &wait, &[], &[], &[], &[], Duration::from_secs(3600), false, false), None);
+        // Heard, no fitting capacity now or soon: no wait, and the gap is explicit.
+        let (state, why) = no_box(&sh, &wait, &[], &[], &[], &[], Duration::ZERO, true, false).unwrap();
+        assert_eq!((state, why.as_str()), (crate::state::NOT_RUN, "no CI box takes macos: none is set up"));
+        let display = Shard { id: "smoke:macos:apps/x".into(), ..sh.clone() };
+        let (state, why) = no_box(&display, &wait, &[], &[], &["node-d", "node-e"], &[], Duration::ZERO, true, false).unwrap();
+        assert_eq!((state, why.as_str()), (crate::state::NOT_RUN, "no CI box takes macos with a display: node-d, node-e dev off"));
         // every box of its kind said it cannot run it: a failure that names them
         let unfit = CiShard { summary: "unfit: xcheck x: no nightly".into(), lost: vec![("node-d".into(), LOST_TRIES)], ..Default::default() };
-        let (state, why) = no_box(&sh, &unfit, &[&mac], &[], &[], Duration::ZERO, true, false).unwrap();
+        let (state, why) = no_box(&sh, &unfit, &[&mac], &[], &[], &[], Duration::ZERO, true, false).unwrap();
         assert_eq!((state, why.as_str()), ("fail", "no box can run it (node-d): unfit: xcheck x: no nightly"));
         // ... unless a box that may be able to is away: it gets its time
-        assert_eq!(no_box(&sh, &unfit, &[&mac], &[], &[], Duration::ZERO, true, true), None);
-        assert_eq!(no_box(&sh, &unfit, &[&mac], &[], &[], NO_BOX_WAIT, true, true).unwrap().0, "fail");
+        assert_eq!(no_box(&sh, &unfit, &[&mac], &[], &[], &[], Duration::ZERO, true, true), None);
+        assert_eq!(no_box(&sh, &unfit, &[&mac], &[], &[], &[], NO_BOX_WAIT, true, true).unwrap().0, "fail");
         // the box is out of the run, or the shard's first failure has no second box
-        assert_eq!(no_box(&sh, &wait, &[&mac], &[], &["node-d".to_string()], Duration::ZERO, true, false).unwrap().0, "incomplete");
+        assert_eq!(no_box(&sh, &wait, &[&mac], &[], &[], &["node-d".to_string()], Duration::ZERO, true, false).unwrap().0, "incomplete");
         let failed = CiShard { failed_on: "node-d".into(), failed_why: "exit 1".into(), ..Default::default() };
-        assert_eq!(no_box(&sh, &failed, &[], &[], &[], Duration::ZERO, true, false), Some(("fail", "exit 1".to_string())));
+        assert_eq!(no_box(&sh, &failed, &[], &[], &[], &[], Duration::ZERO, true, false), Some(("fail", "exit 1".to_string())));
         // the box of its kind is down: it waits for it a while, then does not run this round
-        assert_eq!(no_box(&sh, &wait, &[], &["node-d"], &[], Duration::from_secs(60), true, true), None);
-        let (state, why) = no_box(&sh, &wait, &[], &["node-d"], &[], NO_BOX_WAIT, true, true).unwrap();
+        assert_eq!(no_box(&sh, &wait, &[], &["node-d"], &[], &[], Duration::from_secs(60), true, true), None);
+        let (state, why) = no_box(&sh, &wait, &[], &["node-d"], &[], &[], NO_BOX_WAIT, true, true).unwrap();
         assert_eq!((state, why.as_str()), ("incomplete", "box down: node-d (not back in 15 min)"));
         let dir = std::env::temp_dir().join(format!("devhub-ci-box-down-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -4765,7 +4907,9 @@ mod tests {
         assert!(judged(&d.ci, &pair("d"), 401).is_none(), "a run before the bucket's ask is not its");
         assert!(judged(&d.ci, &pair("a"), 0).is_some() && judged(&d.ci, &pair("b"), 0).is_none());
         d.ci.runs.push(run("130", &pair("e"), 500, "incomplete"));
-        assert!(judged(&d.ci, &pair("e"), 0).is_none(), "incomplete is no verdict: the bucket runs it");
+        assert_eq!(judged(&d.ci, &pair("e"), 0).map(|r| r.id.as_str()), Some("130"), "incomplete finishes the adopted attempt");
+        d.ci.runs.push(CiRun { critical: ENDED_WITH_MASTER.into(), ..run("131", &pair("f"), 600, "incomplete") });
+        assert!(judged(&d.ci, &pair("f"), 0).is_none(), "a run ended with its master runs again");
     }
 
     /// The JIT legs and a lane's JIT pin skip a pair whose JIT inputs did not change: a document no

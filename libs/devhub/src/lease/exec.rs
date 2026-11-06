@@ -71,7 +71,7 @@ use makepad_remote::discovery::LEASE_ENV;
 /// box's end of that lease finds what they left too, though they carry their own hub's mark in
 /// their own session (a killed test's busy loop burned a core for four hours, 11-04).
 const LEASE_OUTER_ENV: &str = "MAKEPAD_DEVHUB_LEASE_OUTER";
-const LOG_CHUNK: usize = 64 << 10;
+pub(crate) const LOG_CHUNK: usize = 64 << 10;
 /// The value of [`LEASE_ENV`]: this hub's ledger dir and the lease (the same after a hub restart).
 fn lease_mark(state: &Path, id: &str) -> String {
     format!("{}/{id}", state.display())
@@ -80,6 +80,9 @@ const RECOVER_CHUNK: usize = 256 << 10;
 /// `get-read` chunk and `get-ls` limit (results, not trees: big artifacts stay on the node)
 const GET_CHUNK: usize = 256 << 10;
 const GET_MAX_FILES: usize = 20_000;
+/// How far a file's time may read behind the wall clock: the kernel stamps it from a coarse clock
+/// one tick old at most (Linux: a jiffy, 1 to 10 ms; Windows: 15.6 ms).
+const STAMP_GRAIN_MS: u64 = 20;
 /// The new hub's build at a deployment commit, made before this hub exits for it.
 #[cfg(feature = "checkout")]
 #[derive(Default)]
@@ -104,13 +107,15 @@ pub struct Opts {
     pub grace: Duration,
     /// run under `systemd-run --user --scope` (None: when the user bus exists)
     pub scopes: Option<bool>,
+    /// Watch Linux memory pressure and end the lease that exceeded its weight.
+    pub watch_memory: bool,
     /// the PATH a launch's wrappers are found on ([`Exec::launch`]; None: the hub's own)
     pub path: Option<std::ffi::OsString>,
 }
 
 impl Default for Opts {
     fn default() -> Opts {
-        Opts { tree: None, no_beat: Duration::from_secs(60), tick: Duration::from_secs(5), grace: Duration::from_secs(10), scopes: None, path: None }
+        Opts { tree: None, no_beat: Duration::from_secs(60), tick: Duration::from_secs(5), grace: Duration::from_secs(10), scopes: None, watch_memory: true, path: None }
     }
 }
 
@@ -260,6 +265,21 @@ struct RunCommand {
     notices: Vec<String>,
 }
 
+/// The largest interpreter script word, its file, and a small replacement that keeps -c mode.
+/// Only the run's inner argv is inspected: never spill a metering or warm-up wrapper.
+fn script_spill(argv: &[String], stem: &Path) -> Option<(usize, PathBuf, String)> {
+    let (i, shell) = super::argv::script_word(argv)?;
+    let path = stem.with_extension(if shell { "sh" } else { "py" });
+    let p = path.to_str()?;
+    let word = if shell {
+        format!(". '{}'", p.replace('\'', "'\\''"))
+    } else {
+        let p = format!("'{}'", p.replace('\\', "\\\\").replace('\'', "\\'"));
+        format!("exec(compile(open({p},'rb').read(),{p},'exec'))")
+    };
+    Some((i, path, word))
+}
+
 struct Lease {
     id: String,
     /// An old overlay resolution must not start work for a replacement lease with the same id.
@@ -278,9 +298,20 @@ struct Lease {
     cost: super::Cost,
     /// the RAM the lease asked for itself (`--ram-gb`): its run's hard memory cap (none otherwise)
     ram_max_gb: Option<f64>,
+    /// The scheduler's RAM weight before the box's budget cut, and its class's raw peak.
+    weighed_gb: f64,
+    peak_gb: Option<f64>,
+    /// The node's verdict survives a restart and reaches the holder before the master's beat.
+    memory_end: Option<String>,
     /// a live session (an app or a warm test process that stays up): its JIT sizes its own
     /// threads from the box, never from the lease's cores ([`job_env`])
     live: bool,
+    /// interactive or background, as the master granted it: its runs' scope CPU weight
+    /// ([`Lease::cpu_weight`])
+    priority: super::Priority,
+    /// a live session between calls, as the master last said (`lease-weight`): its runs weigh
+    /// as background work then
+    idle: bool,
     first_run: String,
     shipped: bool,
     phases: super::prof::Phases,
@@ -306,10 +337,23 @@ struct Lease {
     /// Since when its live runs have done nothing ([`busy`]), and what they had done by then.
     /// None: no live run, or one this box cannot measure.
     quiet: Option<(Instant, os::Activity)>,
+    /// A live session's call under way, as its box meters it ([`CallMeter`]); none between calls.
+    meter: Option<CallMeter>,
 }
 
 impl Lease {
     fn tree_lane(&self) -> &str { self.warms.as_deref().unwrap_or(&self.lane) }
+
+    /// Its runs' scope CPU weight: a live session's at interactive weight in a call, whatever it
+    /// was asked as, and at background weight between calls.
+    fn cpu_weight(&self) -> u32 {
+        let priority = match (self.live, self.idle) {
+            (true, false) => super::Priority::Interactive,
+            (true, true) => super::Priority::Background,
+            (false, _) => self.priority,
+        };
+        priority.cpu_weight(self.cost.cores)
+    }
 
     /// Its directories, and whether each is its own: CI's tree and target and the overlays'
     /// target (under `work`, the box's work dir) belong to every lease that builds in them, so
@@ -390,7 +434,7 @@ impl Lease {
         #[cfg(not(feature = "checkout"))]
         let resolution = "";
         let warms = self.warms.as_deref().map_or(String::new(), |lane| format!(",\"warms\":{}", json_str(lane)));
-        format!("{{{resolution}\"id\":{},\"lane\":{}{warms},\"kind\":\"{}\",\"src\":\"{}\",\"loader\":{},\"cost\":{{\"cores\":{},\"ram_gb\":{},\"ram_max_gb\":{}}},\"live\":{},\"peak_ram_bytes\":{},\"held_bytes\":{},\"first_run\":{},\"shipped\":{},\"phases\":{},\"pin\":{},\"overlay\":[{}],\"source\":\"{source}\",\"fresh_put\":[{}],\"fresh_gone\":[{}],\"runs\":[{}],{}", json_str(&self.id), json_str(&self.lane), self.kind.as_str(), self.src.as_str(), self.loader.as_deref().map_or("null".into(), json_str), self.cost.cores, self.cost.ram_gb, self.ram_max_gb.map_or("null".into(), |g| g.to_string()), self.live, self.peak_ram_bytes.map_or("null".into(), |n| n.to_string()), self.held_bytes.map_or("null".into(), |n| n.to_string()), json_str(&self.first_run), self.shipped, self.phases.json(), self.pin.as_deref().map_or("null".into(), json_str), self.overlay.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","), self.fresh_put.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","), self.fresh_gone.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","), runs.join(","), &a[1..])
+        format!("{{{resolution}\"id\":{},\"lane\":{}{warms},\"kind\":\"{}\",\"src\":\"{}\",\"loader\":{},\"cost\":{{\"cores\":{},\"ram_gb\":{},\"ram_max_gb\":{},\"weighed_gb\":{},\"peak_gb\":{}}},\"memory_end\":{},\"live\":{},\"priority\":\"{}\",\"idle\":{},\"peak_ram_bytes\":{},\"held_bytes\":{},\"first_run\":{},\"shipped\":{},\"phases\":{},\"pin\":{},\"overlay\":[{}],\"source\":\"{source}\",\"fresh_put\":[{}],\"fresh_gone\":[{}],\"runs\":[{}],{}", json_str(&self.id), json_str(&self.lane), self.kind.as_str(), self.src.as_str(), self.loader.as_deref().map_or("null".into(), json_str), self.cost.cores, self.cost.ram_gb, self.ram_max_gb.map_or("null".into(), |g| g.to_string()), self.weighed_gb, self.peak_gb.map_or("null".into(), |g| g.to_string()), self.memory_end.as_deref().map_or("null".into(), json_str), self.live, self.priority.as_str(), self.idle, self.peak_ram_bytes.map_or("null".into(), |n| n.to_string()), self.held_bytes.map_or("null".into(), |n| n.to_string()), json_str(&self.first_run), self.shipped, self.phases.json(), self.pin.as_deref().map_or("null".into(), json_str), self.overlay.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","), self.fresh_put.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","), self.fresh_gone.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","), runs.join(","), &a[1..])
     }
 
     fn from_ledger(text: &str) -> Option<Lease> {
@@ -409,6 +453,8 @@ impl Lease {
                 .filter_map(|r| Some(Arc::new(Run { request: s(r, "request_id").unwrap_or_default(), started_ms: n(r, "started_ms"), spawned_ms: n(r, "spawned_ms").max(n(r, "started_ms")), ended_ms: AtomicU64::new(0), n: n(r, "n") as u32, pid: n(r, "pid") as u32, start: n(r, "start"), unit: s(r, "unit"), log: s(r, "log")?.into(), exit: Mutex::new(None), ours: false, detachable: r.get("detachable").and_then(|v| v.as_bool()).unwrap_or(false), hold: os::Hold::none(), exit_file: PathBuf::new(), cache: Mutex::new(None), usage: Mutex::new(Usage::default()), stopped: AtomicBool::new(false) })))
                 .collect()
         });
+        let kind = Kind::parse(&s(&v, "kind")?)?;
+        let cost = lease_cost(&v, kind);
         Some(Lease {
             id: s(&v, "id")?,
             #[cfg(feature = "checkout")]
@@ -423,12 +469,17 @@ impl Lease {
             selftest: None,
             lane: s(&v, "lane")?,
             warms: s(&v, "warms"),
-            kind: Kind::parse(&s(&v, "kind")?)?,
+            kind,
             src: s(&v, "src").as_deref().and_then(Src::parse).unwrap_or_default(),
             loader: s(&v, "loader"),
-            cost: lease_cost(&v, Kind::parse(&s(&v, "kind")?)?),
+            cost,
             ram_max_gb: lease_ram_max(&v),
+            weighed_gb: lease_ram_weight(&v).unwrap_or(cost.ram_gb),
+            peak_gb: lease_ram_peak(&v),
+            memory_end: s(&v, "memory_end"),
             live: live_of(&v),
+            priority: priority_of(&v),
+            idle: v.get("idle").and_then(|x| x.as_bool()).unwrap_or(false),
             first_run: s(&v, "first_run").unwrap_or_default(),
             shipped: v.get("shipped").and_then(|v| v.as_bool()).unwrap_or(false),
             phases: super::prof::Phases::parse(v.get("phases")),
@@ -446,6 +497,7 @@ impl Lease {
             held_bytes: v.get("held_bytes").and_then(|v| v.as_u64()),
             beat: Instant::now(),
             quiet: None,
+            meter: None,
         })
     }
 }
@@ -455,9 +507,23 @@ fn live_of(v: &makepad_strict_json::Value) -> bool {
     v.get("live").and_then(|x| x.as_bool()).unwrap_or(false)
 }
 
+fn priority_of(v: &makepad_strict_json::Value) -> super::Priority {
+    v.get("priority").and_then(|x| x.as_str()).and_then(super::Priority::parse).unwrap_or_default()
+}
+
 /// The lease's own RAM ask (`cost.ram_max_gb`): its hard cap; a measured one is no cap.
 fn lease_ram_max(v: &makepad_strict_json::Value) -> Option<f64> {
     v.get("cost").and_then(|c| c.get("ram_max_gb")).and_then(super::num).filter(|n| n.is_finite() && *n > 0.0)
+}
+
+/// An older master sends only its allocation; zero is a valid weight for an uncharged lease.
+fn lease_ram_weight(v: &makepad_strict_json::Value) -> Option<f64> {
+    v.get("cost").and_then(|c| c.get("weighed_gb")).and_then(super::num).filter(|n| n.is_finite() && *n >= 0.0)
+}
+
+/// The raw class peak, if the master had one when it weighed this lease.
+fn lease_ram_peak(v: &makepad_strict_json::Value) -> Option<f64> {
+    v.get("cost").and_then(|c| c.get("peak_gb")).and_then(super::num).filter(|n| n.is_finite() && *n >= 0.0)
 }
 
 /// Numeric allocation sent by the master; kind defaults also describe direct node requests.
@@ -484,6 +550,16 @@ fn job_env(kind: Kind, cost: super::Cost, live: bool) -> Vec<(&'static str, u32)
     [("MAKEPAD_RUN_JOBS", jobs)].into_iter().filter(|_| !live).chain([("CARGO_BUILD_JOBS", jobs), ("RUST_TEST_THREADS", jobs)]).collect()
 }
 
+/// `lease-conf set`'s `key=value` pairs, and who asked (`by=<agent>`, no lease.conf key).
+fn conf_set_args<'a>(words: impl Iterator<Item = &'a str>) -> (Vec<(String, String)>, Option<String>) {
+    let mut by = None;
+    let mut pairs = Vec::new();
+    for (k, v) in words.filter_map(|kv| kv.split_once('=')) {
+        if k == "by" { by = Some(v.to_string()); } else { pairs.push((k.to_string(), v.to_string())); }
+    }
+    (pairs, by)
+}
+
 fn overlay_lane(kind: Kind, lane: &str, pin_key: &str) -> String {
     if kind == Kind::Ci {
         // the whole pin: two pairs at one makepad commit and different commercial ones differ
@@ -503,6 +579,8 @@ pub struct Exec {
     state: PathBuf,
     opts: Opts,
     scopes: bool,
+    /// its systemd units' tag ([`unit_tag`])
+    units: String,
     dev: AtomicBool,
     /// a flip asked for on this node itself, until the master's policy push answers it (0 none, 1 on, 2 off)
     dev_req: std::sync::atomic::AtomicU8,
@@ -524,6 +602,9 @@ pub struct Exec {
     noise: Mutex<std::collections::HashMap<String, Noise>>,
     /// the lease that took the disk, and why ([`lease_over_disk`]): its master ends it
     over_disk: Mutex<Option<(String, String)>>,
+    /// Unexplained pressure is reported once until memory recovers above the floor.
+    #[cfg(target_os = "linux")]
+    memory_unexplained: AtomicBool,
     /// a person at the node, as its WM saw them ([`super::user`])
     user: Mutex<super::user::UserTrack>,
     /// `hub-restart` was answered: this hub exits in a moment and starts no run before it does
@@ -966,6 +1047,65 @@ struct DiskUse {
     first_own_mb: Option<u64>,
 }
 
+/// How often a live call's meter looks at its session's CPU ([`call_loop`]).
+pub(super) const CALL_WINDOW: Duration = Duration::from_secs(1);
+
+/// A live session's call as its box meters it, from when the master said it started (its
+/// launch: from its run's spawn) to when it said it ended ([`Exec::weigh`]): its runs' CPU, by
+/// [`CALL_WINDOW`]. What a call uses is no lease's mean: the mean over a session's life is mostly
+/// its idle time (1 to 2 cores), and a call compiles on many. Its end is a sample of its class's
+/// call charge (`devhub stats calls`).
+#[derive(Clone, Copy, Debug)]
+struct CallMeter {
+    launch: bool,
+    since: Instant,
+    /// its last look, and the CPU its runs used since its start
+    last: (Instant, os::Activity),
+    used_us: u64,
+    /// the most cores a window took
+    peak: Option<f64>,
+}
+
+impl CallMeter {
+    fn new(launch: bool, now: Instant, at: os::Activity) -> Self {
+        CallMeter { launch, since: now, last: (now, at), used_us: 0, peak: None }
+    }
+
+    /// A look at its runs' CPU. A window shorter than half of [`CALL_WINDOW`] (a call's last)
+    /// counts in its use only: on `/proc`'s 10 ms ticks a short window's rate is mostly noise.
+    /// A run that ended took its CPU out of the sum: the window starts again from there.
+    fn look(&mut self, now: Instant, at: os::Activity) {
+        let (then, was) = self.last;
+        self.last = (now, at);
+        let Some(used) = at.cpu_us.checked_sub(was.cpu_us) else { return };
+        self.used_us += used;
+        let secs = now.saturating_duration_since(then).as_secs_f64();
+        if secs >= CALL_WINDOW.as_secs_f64() / 2.0 {
+            let cores = used as f64 / 1e6 / secs;
+            self.peak = Some(self.peak.map_or(cores, |p| p.max(cores)));
+        }
+    }
+
+    /// The call's sample at its end, its last look `at` (None: its runs could not be read then):
+    /// `{"launch","ms","peak","mean"}`, cores. A call shorter than a window peaked at its mean.
+    fn end(mut self, now: Instant, at: Option<os::Activity>) -> String {
+        if let Some(at) = at { self.look(now, at); }
+        let secs = now.saturating_duration_since(self.since).as_secs_f64();
+        let mean = if secs > 0.0 { self.used_us as f64 / 1e6 / secs } else { 0.0 };
+        format!("{{\"launch\":{},\"ms\":{},\"peak\":{:.2},\"mean\":{mean:.2}}}", self.launch, (secs * 1000.0) as u64, self.peak.unwrap_or(mean))
+    }
+}
+
+/// The live calls' meter: each [`CALL_WINDOW`], what the runs of every live session in a call
+/// have used ([`CallMeter::look`]).
+fn call_loop(w: Weak<Exec>) {
+    loop {
+        std::thread::sleep(CALL_WINDOW);
+        let Some(x) = w.upgrade() else { return };
+        x.meter_calls();
+    }
+}
+
 /// What the live ones of `runs` hold now, bytes: a scoped run its scope's anonymous and shared
 /// memory ([`os::scope_now`]), any other what its process group holds ([`os::groups_held`]: the
 /// resident set, on macOS the footprint). None: none is live, or this look could not tell (on
@@ -1119,15 +1259,28 @@ pub(crate) fn user_bus() -> bool {
     rt.is_some_and(|r| r.join("bus").exists()) && on_path("systemd-run") && on_path("systemctl")
 }
 
+/// The tag of a hub's systemd units, from its ledger folder: the same hub's across its restarts
+/// (a run's unit is kept in its ledger anyway), another hub's never. Test hubs on one box named
+/// their runs' scopes alike (`devhub-lease-L1-1`): a second start beside the first failed, or one
+/// lease's end stopped the other's scope (lease::exec tests in two processes at once, 11-06).
+fn unit_tag(state: &Path) -> String {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in state.to_string_lossy().bytes() {
+        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+    }
+    format!("{h:08x}")
+}
+
 impl Exec {
     /// The executor over `conf.work`, its ledger in `state`; leases left in the ledger by a
     /// previous hub are taken back (the watchdog ends them unless the master still beats them).
     pub fn new(machine: &str, conf: LeaseConf, state: PathBuf, opts: Opts, publish: Publish) -> Arc<Exec> {
         let guard = Guard::new(machine, Roots::of(&conf.work), conf.disk_floor_gb, conf.disk_warn_gb, conf.role.users(), publish.clone());
         let scopes = opts.scopes.unwrap_or_else(user_bus);
-        if scopes { os::reset_failed_units("devhub-jit-*"); }
-        let x = Arc::new_cyclic(|_this| Exec { #[cfg(feature = "checkout")] this: _this.clone(), machine: machine.to_string(), publish, dev: AtomicBool::new(true), dev_req: Default::default(), conf: std::sync::RwLock::new(conf), state, opts, scopes, leases: crate::held::Held::new("leases", BTreeMap::new()),
-            starting: crate::held::Held::new("lease start", ()), cleaning: Default::default(), endings: Mutex::new(BTreeMap::new()), over_disk: Mutex::new(None), orphans: Default::default(), guard, disk_use: Default::default(), #[cfg(unix)] noise: Default::default(), user: Default::default(), restarting: AtomicBool::new(false), #[cfg(feature = "checkout")] hub_build: Default::default(), last_resident_gb: Mutex::new(0.0), trouble: Mutex::new(String::new()), master_seen: Mutex::new(Instant::now()), master_away_said: AtomicBool::new(false) });
+        let units = unit_tag(&state);
+        if scopes { os::reset_failed_units(&format!("devhub-jit-{units}-*")); }
+        let x = Arc::new_cyclic(|_this| Exec { #[cfg(feature = "checkout")] this: _this.clone(), machine: machine.to_string(), publish, dev: AtomicBool::new(true), dev_req: Default::default(), conf: std::sync::RwLock::new(conf), state, opts, scopes, units, leases: crate::held::Held::new("leases", BTreeMap::new()),
+            starting: crate::held::Held::new("lease start", ()), cleaning: Default::default(), endings: Mutex::new(BTreeMap::new()), over_disk: Mutex::new(None), #[cfg(target_os = "linux")] memory_unexplained: AtomicBool::new(false), orphans: Default::default(), guard, disk_use: Default::default(), #[cfg(unix)] noise: Default::default(), user: Default::default(), restarting: AtomicBool::new(false), #[cfg(feature = "checkout")] hub_build: Default::default(), last_resident_gb: Mutex::new(0.0), trouble: Mutex::new(String::new()), master_seen: Mutex::new(Instant::now()), master_away_said: AtomicBool::new(false) });
         #[cfg(all(windows, feature = "checkout"))]
         drop_aside();
         // what a hub that stopped left in the trash
@@ -1202,6 +1355,13 @@ impl Exec {
         let _ = std::thread::Builder::new().name("devhub-lease-watchdog".into()).spawn(move || watchdog(w, tick));
         let w = Arc::downgrade(&x);
         let _ = std::thread::Builder::new().name("devhub-disk".into()).spawn(move || disk_loop(w));
+        let w = Arc::downgrade(&x);
+        let _ = std::thread::Builder::new().name("devhub-calls".into()).spawn(move || call_loop(w));
+        #[cfg(target_os = "linux")]
+        if x.opts.watch_memory {
+            let w = Arc::downgrade(&x);
+            let _ = std::thread::Builder::new().name("devhub-mem".into()).spawn(move || memory_loop(w));
+        }
         #[cfg(unix)]
         {
             let w = Arc::downgrade(&x);
@@ -1232,12 +1392,12 @@ impl Exec {
         self.conf.read().unwrap().clone()
     }
 
-    /// `lease-conf` (show) or `lease-conf set k=v ...`: the master sets this node's role and
-    /// budgets; written to `lease.conf` (kept across restarts) and in force at once.
+    /// `lease-conf` (show) or `lease-conf set k=v ... [by=<agent>]`: the master sets this node's
+    /// role and budgets; written to `lease.conf` (kept across restarts) and in force at once.
     fn lease_conf(&self, rest: &str) -> String {
         let mut w = rest.split_whitespace();
         if w.next() == Some("set") {
-            let pairs: Vec<(String, String)> = w.filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            let (pairs, by) = conf_set_args(w);
             if pairs.is_empty() {
                 return err("lease-conf set <key=value>...");
             }
@@ -1257,7 +1417,8 @@ impl Exec {
             self.guard.set_policy(conf.disk_floor_gb, conf.disk_warn_gb, conf.role.users());
             *self.conf.write().unwrap() = conf;
             let what: Vec<String> = pairs.iter().map(|(k, v)| format!("{k}={v}")).collect();
-            self.emit("lease", Sev::Info, format!("lease: {} lease.conf set {}", self.machine, what.join(" ")));
+            // in the inbox, with who asked: nobody could say who had set a pool box to bench (11-06)
+            self.emit("lease", Sev::Warn, format!("lease: {} lease.conf set {} by {}", self.machine, what.join(" "), by.as_deref().unwrap_or("a caller without DEVHUB_AGENT")));
         }
         let apply = if crate::sync::store::source_store().is_some() { "store" } else { "checkout" };
         let mut c = caps::measure(&self.machine, &self.conf(), apply);
@@ -1364,6 +1525,43 @@ impl Exec {
         *self.over_disk.lock().unwrap() = found;
     }
 
+    /// Under Linux memory pressure, stop the lease furthest past its weight before the kernel
+    /// chooses a process from any lease. Process walks run outside the lease table lock.
+    #[cfg(target_os = "linux")]
+    fn look_over_memory(&self, total: u64, avail: u64) {
+        let floor = (total as f64 * super::sched::RAM_MARGIN_SHARE) as u64;
+        if avail >= floor {
+            self.memory_unexplained.store(false, Ordering::Release);
+            return;
+        }
+        let leases: Vec<_> = self.leases.lock().unwrap().values().filter(|l| l.memory_end.is_none()).map(|l| {
+            (MemTook { id: l.id.clone(), lane: l.lane.clone(), kind: l.kind, held: 0, weighed: l.weighed_gb, peak: l.peak_gb, asked: l.ram_max_gb.is_some() }, l.runs.clone())
+        }).collect();
+        let took: Vec<_> = leases.iter().filter_map(|(l, runs)| held_now(runs).map(|held| MemTook { held, ..l.clone() })).collect();
+        let Some((id, why)) = lease_over_memory(&self.machine, avail, floor, &took) else {
+            if !self.memory_unexplained.swap(true, Ordering::AcqRel) {
+                let gb = (1u64 << 30) as f64;
+                self.emit("lease", Sev::Warn, format!("{} has {:.1} GB free, under its {:.1} GB floor, but no lease holds more than it was weighed at", self.machine, avail as f64 / gb, floor as f64 / gb));
+            }
+            return;
+        };
+        let mut current = self.leases.lock().unwrap();
+        let Some(l) = current.get_mut(&id).filter(|l| l.memory_end.is_none()) else { return };
+        let runs = &leases.iter().find(|(l, _)| l.id == id).unwrap().1;
+        if !runs.iter().any(|r| l.runs.iter().any(|now| Arc::ptr_eq(r, now))) { return; }
+        let held = took.iter().find(|l| l.id == id).unwrap().held;
+        l.peak_ram_bytes = Some(l.peak_ram_bytes.unwrap_or(0).max(held));
+        l.held_bytes = Some(l.held_bytes.unwrap_or(0).max(held));
+        l.memory_end = Some(why.clone());
+        for r in &l.runs {
+            if r.pid != 0 && os::group_alive(r.pid, r.start, &r.hold) {
+                os::signal_group(r.pid, true, &r.hold);
+            }
+        }
+        self.emit("lease", Sev::Err, why);
+        self.save(l);
+    }
+
     /// What is in use now (for the disk guard).
     pub fn live(&self) -> Live {
         let mut leases = Vec::new();
@@ -1390,6 +1588,7 @@ impl Exec {
             "lease-start" | "lease-run" if self.restarting.load(Ordering::Acquire) => vec![err(format!("restarting: {}'s hub restarts for its self-update; try again", self.machine))],
             "lease-start" => vec![self.start(rest)],
             "lease-run" => vec![self.run(rest)],
+            "lease-weight" => vec![self.weigh(rest)],
             "lease-log" => vec![self.log(rest)],
             "lease-end" => vec![with_load(self.end_cmd(rest), super::caps::load_now)],
             "lease-beat" => vec![self.beat(rest)],
@@ -1655,7 +1854,7 @@ impl Exec {
             resolution: None,
             #[cfg(feature = "checkout")]
             selftest: None,
-            id: id.clone(), lane: lane.clone(), warms, kind, src, loader, cost, ram_max_gb: lease_ram_max(&v), live, first_run: String::new(), shipped: false, phases: Default::default(), work: work.clone(), target, tmp, env, pin, overlay: Vec::new(), source: String::new(), fresh_put: Vec::new(), fresh_gone: Vec::new(), runs: Vec::new(), peak_ram_bytes: None, held_bytes: None, beat: Instant::now(), quiet: None
+            id: id.clone(), lane: lane.clone(), warms, kind, src, loader, cost, ram_max_gb: lease_ram_max(&v), weighed_gb: lease_ram_weight(&v).unwrap_or(cost.ram_gb), peak_gb: lease_ram_peak(&v), memory_end: None, live, priority: priority_of(&v), idle: false, first_run: String::new(), shipped: false, phases: Default::default(), work: work.clone(), target, tmp, env, pin, overlay: Vec::new(), source: String::new(), fresh_put: Vec::new(), fresh_gone: Vec::new(), runs: Vec::new(), peak_ram_bytes: None, held_bytes: None, beat: Instant::now(), quiet: None, meter: None
         };
         let a = l.answer();
         // A lease-end that came before it was in the table (its holder gave it up as the master
@@ -1716,6 +1915,58 @@ impl Exec {
     #[cfg(not(feature = "checkout"))]
     fn take_tree(&self, _id: &str, _tree_lane: &str, _kind: Kind, _sha: Option<&str>, _commercial: Option<&str>) -> Result<(PathBuf, PathBuf, Option<String>, String), String> {
         Err("this host has no git stores: leases with a rev need a desktop node".into())
+    }
+
+    /// `lease-weight <id> call|idle`: a live session's runs weigh as interactive work in a call,
+    /// as background work between calls ([`Lease::cpu_weight`]); its live runs' scopes take the
+    /// weight now, its next runs at their start. `{"weight":N,"scopes":n}`.
+    fn weigh(&self, rest: &str) -> String {
+        let (id, idle) = match rest.split_once(' ') {
+            Some((id, "call")) => (id, false),
+            Some((id, "idle")) => (id, true),
+            _ => return err(format!("lease-weight {rest}: wants `<id> call|idle`")),
+        };
+        let (weight, units, turned, ended, runs) = {
+            let mut leases = self.leases.lock().unwrap();
+            let Some(l) = leases.get_mut(id) else { return err(format!("lease-weight: no lease {id}")) };
+            if !l.live { return err(format!("lease-weight: {id} is no live session")); }
+            let turned = l.idle != idle;
+            if turned {
+                l.idle = idle;
+                self.save(l);
+            }
+            let units: Vec<(String, Arc<Run>)> = l.runs.iter().filter(|r| r.pid != 0 && r.ended() == 0).filter_map(|r| Some((r.unit.clone()?, r.clone()))).collect();
+            let ended = if turned && idle { l.meter.take() } else { None };
+            (l.cpu_weight(), units, turned, ended, l.runs.clone())
+        };
+        // the call's meter: its first look as it starts, its sample as it ends (off the lock: no
+        // process walks under it)
+        let at = turned.then(|| activity_now(&runs)).flatten();
+        let call = match (turned, idle, ended) {
+            (true, false, _) => {
+                if let Some(at) = at {
+                    if let Some(l) = self.leases.lock().unwrap().get_mut(id).filter(|l| !l.idle && l.meter.is_none()) { l.meter = Some(CallMeter::new(false, Instant::now(), at)); }
+                }
+                None
+            }
+            (_, _, Some(m)) => Some(m.end(Instant::now(), at)),
+            _ => None,
+        };
+        for (unit, run) in &units {
+            // (a run that ended meanwhile took its scope with it)
+            if let Err(e) = os::set_cpu_weight(unit, weight).or_else(|e| if run.ended() > 0 { Ok(()) } else { Err(e) }) { return err(format!("lease-weight {id}: {e}")); }
+        }
+        format!("{{\"weight\":{weight},\"scopes\":{}{}}}", units.len(), call.map_or(String::new(), |c| format!(",\"call\":{c}")))
+    }
+
+    /// Each in-call live session's look ([`call_loop`]): its runs read off the lease table's lock.
+    fn meter_calls(&self) {
+        let calls: Vec<(String, Vec<Arc<Run>>)> = self.leases.lock().unwrap().values().filter(|l| l.meter.is_some()).map(|l| (l.id.clone(), l.runs.clone())).collect();
+        let looks: Vec<(String, Instant, Option<os::Activity>)> = calls.into_iter().map(|(id, runs)| { let at = activity_now(&runs); (id, Instant::now(), at) }).collect();
+        let mut leases = self.leases.lock().unwrap();
+        for (id, now, at) in looks {
+            if let (Some(m), Some(at)) = (leases.get_mut(&id).and_then(|l| l.meter.as_mut()), at) { m.look(now, at); }
+        }
     }
 
     fn run(&self, rest: &str) -> String {
@@ -1874,7 +2125,7 @@ impl Exec {
         let id = l.id.clone();
         let n = l.runs.len() as u32 + 1;
         let log = l.tmp.join(format!("run-{n}.log"));
-        let unit = self.scopes.then(|| format!("devhub-lease-{id}-{n}"));
+        let unit = self.scopes.then(|| format!("devhub-lease-{}-{id}-{n}", self.units));
         let conf = self.conf();
         let cpus = if l.kind == Kind::Timed { &conf.cpus_timed } else { &conf.cpus_shared };
         // a lease in the work tree: the JIT binary of exactly what the tree holds, when this box
@@ -1909,7 +2160,7 @@ impl Exec {
             use std::io::Write as _;
             let _ = writeln!(out, "{line}");
         }
-        let argv = if l.src == Src::Overlay {
+        let mut argv = if l.src == Src::Overlay {
             argv
         } else { match loader.as_ref().and_then(|(k, p)| super::loaders::cargo_run_args(&argv).map(|a| (k, p, a))) {
             Some((k, p, args)) => {
@@ -1927,13 +2178,16 @@ impl Exec {
                 argv
             }
         } };
+        // a Windows run is plain argv: never cmd, and a PowerShell script runs from its file
+        let mut plain_env = Vec::new();
+        if cfg!(windows) {
+            if let Some(plain) = super::argv::windows_plain(&argv, &l.tmp.join(format!("run-{n}-script"))).map_err(|e| format!("lease-run {id}: {e}"))? {
+                std::fs::write(&plain.script, plain.text.as_bytes()).map_err(|e| format!("lease-run {id}: {}: {e}", plain.script.display()))?;
+                argv = plain.argv;
+                plain_env = plain.env.into_iter().filter(|(k, _)| !run_env.iter().any(|(own, _)| own.eq_ignore_ascii_case(k))).collect();
+            }
+        }
         let jit = overlay_loader.as_deref().or_else(|| loader.as_ref().map(|(_, p)| p.as_path()));
-        let argv = match jit.filter(|_| l.kind == Kind::Timed && cfg!(target_os = "macos")) {
-            Some(jit) => warmed_up(argv, jit, &exit_file(&self.state, &id, n).with_extension("warmup")),
-            None => argv,
-        };
-        let argv = os::metered_argv(argv, unit.as_deref(), &exit_file(&self.state, &id, n).with_extension("usage"));
-        let full = os::lease_argv(argv, unit.as_deref(), l.kind.nice(), cpus, l.kind.shared().then_some(l.cost), l.ram_max_gb);
         let err_out = match out.try_clone() {
             Ok(f) => f,
             Err(e) => return Err(e.to_string()),
@@ -1944,16 +2198,45 @@ impl Exec {
         if !dir.is_dir() {
             return Err(format!("lease-run {id}: the lease's tree has no {} (the directory the run was asked from: run it from inside the lane's worktree, at a tracked path)", rel.display()));
         }
-        let mut cmd = std::process::Command::new(&full[0]);
-        cmd.args(&full[1..]).current_dir(dir).stdin(std::process::Stdio::null()).stdout(out).stderr(err_out);
-        self.run_env(&mut cmd, l, run_env, unset, overlay_loader.as_deref().or_else(|| loader.as_ref().map(|(_, p)| p.as_path())));
+        let build = |argv: Vec<String>| {
+            let argv = match jit.filter(|_| l.kind == Kind::Timed && cfg!(target_os = "macos")) {
+                Some(jit) => warmed_up(argv, jit, &exit_file(&self.state, &id, n).with_extension("warmup")),
+                None => argv,
+            };
+            let argv = os::metered_argv(argv, unit.as_deref(), &exit_file(&self.state, &id, n).with_extension("usage"));
+            let full = os::lease_argv(argv, unit.as_deref(), l.kind.nice(), cpus, l.kind.shared().then(|| l.cpu_weight()), l.ram_max_gb);
+            let mut cmd = std::process::Command::new(&full[0]);
+            cmd.args(&full[1..]).current_dir(&dir);
+            self.run_env(&mut cmd, l, run_env, unset, jit);
+            cmd.envs(plain_env.iter().map(|(k, v)| (k, v)));
+            cmd
+        };
+        let mut cmd = build(argv.clone());
+        if os::exec_over(&cmd).is_some() {
+            if let Some((i, path, word)) = script_spill(&argv, &l.tmp.join(format!("run-{n}-script"))) {
+                std::fs::write(&path, argv[i].as_bytes()).map_err(|e| format!("lease-run {id}: {}: {e}", path.display()))?;
+                argv[i] = word;
+                cmd = build(argv);
+            }
+            if let Some(over) = os::exec_over(&cmd) {
+                return Err(format!("lease-run {id}: {}", os::exec_refusal(&over)));
+            }
+        }
+        cmd.stdin(std::process::Stdio::null()).stdout(out).stderr(err_out);
+        // before the spawn: the child may write before this thread runs again, and what it wrote
+        // is matched to the run by time ([`Exec::virtual_root_written`])
+        let started_ms = crate::proto::wall_ms();
         let (mut child, hold) = match os::lease_spawn(&mut cmd, Some(&exit_file(&self.state, &id, n))) {
             Ok(c) => c,
-            Err(e) => return Err(format!("lease-run {id}: {}: {e}", full[0])),
+            Err(e) => return Err(format!("lease-run {id}: {}: {e}", cmd.get_program().to_string_lossy())),
         };
         let pid = child.id();
-        let run = Arc::new(Run { request: request.to_string(), started_ms: crate::proto::wall_ms(), spawned_ms: crate::proto::wall_ms(), ended_ms: AtomicU64::new(0), n, pid, start: os::proc_start(pid).unwrap_or(0), unit, log, exit: Mutex::new(None), ours: true, detachable, hold, exit_file: exit_file(&self.state, &id, n), cache: Mutex::new(cache), usage: Mutex::new(Usage::default()), stopped: AtomicBool::new(false) });
+        let run = Arc::new(Run { request: request.to_string(), started_ms, spawned_ms: crate::proto::wall_ms(), ended_ms: AtomicU64::new(0), n, pid, start: os::proc_start(pid).unwrap_or(0), unit, log, exit: Mutex::new(None), ours: true, detachable, hold, exit_file: exit_file(&self.state, &id, n), cache: Mutex::new(cache), usage: Mutex::new(Usage::default()), stopped: AtomicBool::new(false) });
         l.runs.push(run.clone());
+        // a live session's launch is its first call, from its run's spawn (nothing used yet)
+        if l.live && !l.idle && l.meter.is_none() && l.runs.iter().filter(|r| r.pid != 0 && r.ended() == 0).count() == 1 {
+            l.meter = Some(CallMeter::new(true, Instant::now(), os::Activity::default()));
+        }
         // it runs whatever the ledger says, so its holder hears that it runs (a refusal here left
         // it running unseen: 0 GB free, 11-04); the lease's next save writes it down
         self.save(l);
@@ -2027,7 +2310,7 @@ impl Exec {
         let pid_file = tmp.join("cargo.pid");
         join_recorded_build(&pid_file, active, &|pid| self.emit("lease", Sev::Info, format!("dev JIT {id}: joining the build pid {pid} an earlier hub started")))?;
         let log = tmp.join("cargo.log");
-        let unit = self.scopes.then(|| format!("devhub-jit-{id}"));
+        let unit = self.scopes.then(|| format!("devhub-jit-{}-{id}", self.units));
         let argv = std::iter::once(build.get_program()).chain(build.get_args()).map(|s| s.to_string_lossy().into_owned()).collect();
         let full = os::lease_argv(argv, unit.as_deref(), Kind::Build.nice(), &conf.cpus_shared, None, None);
         let out = std::fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
@@ -2067,12 +2350,12 @@ impl Exec {
         if self.restarting.load(Ordering::Acquire) { return Err(format!("restarting: {}'s hub restarts for its self-update; try again", self.machine)); }
         let n = l.runs.len() as u32 + 1;
         let log = tmp.join(format!("run-{n}.log"));
-        let unit = self.scopes.then(|| format!("devhub-lease-{id}-{n}"));
+        let unit = self.scopes.then(|| format!("devhub-lease-{}-{id}-{n}", self.units));
         let conf = self.conf();
         let cpus = if l.kind == Kind::Timed { &conf.cpus_timed } else { &conf.cpus_shared };
         let argv = std::iter::once(build.get_program()).chain(build.get_args()).map(|s| s.to_string_lossy().into_owned()).collect();
         let argv = os::metered_argv(argv, unit.as_deref(), &exit_file(&self.state, &id, n).with_extension("usage"));
-        let full = os::lease_argv(argv, unit.as_deref(), l.kind.nice(), cpus, l.kind.shared().then_some(l.cost), l.ram_max_gb);
+        let full = os::lease_argv(argv, unit.as_deref(), l.kind.nice(), cpus, l.kind.shared().then(|| l.cpu_weight()), l.ram_max_gb);
         let out = std::fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
         let mut cmd = std::process::Command::new(&full[0]);
         cmd.args(&full[1..]).current_dir(build.get_current_dir().ok_or("lease worker process has no cwd")?)
@@ -2122,7 +2405,7 @@ impl Exec {
         if self.restarting.load(Ordering::Acquire) { return Err(format!("restarting: {}'s hub restarts for its self-update; try again", self.machine)); }
         let n = l.runs.len() as u32 + 1;
         let exit = exit_file(&self.state, id, n);
-        let unit = self.scopes.then(|| format!("devhub-lease-{id}-{n}"));
+        let unit = self.scopes.then(|| format!("devhub-lease-{}-{id}-{n}", self.units));
         let conf = self.conf();
         let cpus = if l.kind == Kind::Timed { &conf.cpus_timed } else { &conf.cpus_shared };
         let mut argv: Vec<String> = std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|s| s.to_string_lossy().into_owned()).collect();
@@ -2134,7 +2417,7 @@ impl Exec {
             None => {}
         }
         let argv = os::metered_argv(argv, unit.as_deref(), &exit.with_extension("usage"));
-        let full = os::lease_argv(argv, unit.as_deref(), l.kind.nice(), cpus, l.kind.shared().then_some(l.cost), l.ram_max_gb);
+        let full = os::lease_argv(argv, unit.as_deref(), l.kind.nice(), cpus, l.kind.shared().then(|| l.cpu_weight()), l.ram_max_gb);
         let wrapper = os::hub_program(&full[0], &hub_path).map_err(|e| format!("launch under {id}: {e}"))?;
         let mut run_cmd = std::process::Command::new(wrapper);
         run_cmd.args(&full[1..]).stdin(std::process::Stdio::null()).stdout(out.try_clone().map_err(|e| e.to_string())?).stderr(out);
@@ -2196,7 +2479,13 @@ impl Exec {
     /// keeps it (the WM's supervisor, the Mac's LaunchAgent, Windows' start script) starts it
     /// again through `cargo run` in the deployment tree: the new code, compiled already.
     /// `at`: the deployment commit the master judged; a newer apply waits for its next look.
-    fn hub_restart(&self, at: &str) -> String {
+    fn hub_restart(&self, rest: &str) -> String {
+        // `<deployment sha> [jobs=N]`: the build's jobs, the cores of its room ([`super::HUB_JOBS_PROTO`])
+        let mut words = rest.split_whitespace();
+        let at = words.next().unwrap_or("");
+        let jobs = words.find_map(|w| w.strip_prefix("jobs=")).and_then(|n| n.parse::<u32>().ok()).filter(|n| *n > 0);
+        #[cfg(not(feature = "checkout"))]
+        let _ = jobs;
         // Finish saving an arriving lease before exiting; it must survive in the ledger too.
         let _starting = self.starting.lock().unwrap();
         let leases = self.leases.lock().unwrap();
@@ -2222,7 +2511,7 @@ impl Exec {
         #[cfg(feature = "checkout")]
         let timed = leases.values().any(|l| l.kind == Kind::Timed);
         #[cfg(feature = "checkout")]
-        match self.hub_built(&root, &now, timed) {
+        match self.hub_built(&root, &now, timed, jobs) {
             Some(Ok(())) => {}
             Some(Err(why)) => return err(format!("the new hub does not build at {}: {why}; {} keeps running its hub at {}", &now[..now.len().min(10)], self.machine, &super::caps::hub_rev()[..super::caps::hub_rev().len().min(10)])),
             None if timed => return err(format!("waits: a timed lease runs on {}: its new hub at {} builds after it", self.machine, &now[..now.len().min(10)])),
@@ -2283,7 +2572,7 @@ impl Exec {
     /// that moves under the build drops the result (the next ask builds again). `timed`: a timed
     /// lease runs here (read by the caller, which holds the leases).
     #[cfg(feature = "checkout")]
-    fn hub_built(&self, root: &Path, at: &str, timed: bool) -> Option<Result<(), String>> {
+    fn hub_built(&self, root: &Path, at: &str, timed: bool, jobs: Option<u32>) -> Option<Result<(), String>> {
         let mut b = self.hub_build.lock().unwrap();
         match &*b {
             HubBuild::Done { at: a, ok } if a == at => return Some(ok.clone()),
@@ -2301,7 +2590,7 @@ impl Exec {
         self.emit("hub", Sev::Info, format!("hub: {} builds its new hub at {} before it restarts", self.machine, &at[..at.len().min(10)]));
         let (state, root, at, emit, machine) = (self.hub_build.clone(), root.to_path_buf(), at.to_string(), self.emitter(), self.machine.clone());
         let _ = std::thread::Builder::new().name("devhub-hub-build".into()).spawn(move || {
-            let ok = build_hub(&root);
+            let ok = build_hub(&root, jobs);
             let now = super::tree::deploy(&root).map(|p| p.makepad).unwrap_or_default();
             let secs = match &*state.lock().unwrap() { HubBuild::Running { since, .. } => since.elapsed().as_secs(), _ => 0 };
             // (the master says a failure loudly, once for the fleet)
@@ -2414,7 +2703,8 @@ impl Exec {
             }
         }
         let exit = if end >= len { exit.map_or("null".to_string(), |c| c.to_string()) } else { "null".into() };
-        format!("{{\"data\":\"{}\",\"off\":{end},\"exit\":{exit}}}", makepad_network::digest::base64_encode(&buf))
+        let memory = self.leases.lock().unwrap().get(*id).and_then(|l| l.memory_end.as_deref()).map_or(String::new(), |why| format!(",\"memory\":{}", json_str(why)));
+        format!("{{\"data\":\"{}\",\"off\":{end},\"exit\":{exit}{memory}}}", makepad_network::digest::base64_encode(&buf))
     }
 
     /// The master's beat at `now`, naming the leases it holds here. Back after an absence
@@ -2517,7 +2807,11 @@ impl Exec {
         }
         let end = self.over_disk.lock().unwrap().take().filter(|(id, _)| ids().any(|i| i == id));
         let end = end.map_or(String::new(), |(id, why)| format!(",\"end\":{{\"id\":{},\"why\":{}}}", json_str(&id), json_str(&why)));
-        format!("{{\"live\":[{}],\"unknown\":[{}],\"info\":{{{}}}{end}}}", live.join(","), unknown.join(","), info.join(","))
+        // every lease the master beat here that the memory watch ended, until the master ends
+        // it (a second end before the next beat is not lost; a repeat ends nothing more there)
+        let memory: Vec<String> = ids().filter_map(|id| leases.get(id)?.memory_end.as_deref().map(|why| format!("{{\"id\":{},\"why\":{}}}", json_str(id), json_str(why)))).collect();
+        let memory = if memory.is_empty() { String::new() } else { format!(",\"memory\":[{}]", memory.join(",")) };
+        format!("{{\"live\":[{}],\"unknown\":[{}],\"info\":{{{}}}{end}{memory}}}", live.join(","), unknown.join(","), info.join(","))
     }
 
     /// A lease's disk use in MB, measured at most every 2 min on a thread of its own (a target
@@ -2678,6 +2972,8 @@ impl Exec {
         }
         killed.extend(strays);
         leak.extend(stray_leak);
+        // what it wrote under the overlay's virtual tree on the real disk goes before the next lease
+        let wrote_root = self.virtual_root_written(&l);
         #[cfg(feature = "checkout")]
         let mut l = {
             let mut l = l;
@@ -2757,9 +3053,42 @@ impl Exec {
         let noise = self.noise.lock().unwrap().remove(&l.id).filter(|n| n.samples > 0).map_or(String::new(), |n| format!(",\"box\":{}", n.json()));
         #[cfg(not(unix))]
         let noise = "";
-        let receipt = format!("{},\"source\":{},\"class\":{},\"phases\":{},\"peak_ram_gb\":{},\"cpu_seconds\":{},\"abnormal\":{abnormal},\"failed_tests\":{failed},\"tail\":{cut}{inspect}{noise}}}", line.trim_end_matches('}'), json_str(&l.source), json_str(&l.first_run), profile.json(), l.peak_ram_bytes.map_or("null".into(), |n| (n as f64 / (1u64 << 30) as f64).to_string()), cpu.map_or("null".into(), |n| n.to_string()));
+        let receipt = format!("{},\"source\":{},\"class\":{},\"phases\":{},\"peak_ram_gb\":{},\"cpu_seconds\":{},\"abnormal\":{abnormal},\"failed_tests\":{failed},\"tail\":{cut},\"memory\":{},\"virtual_root\":{}{inspect}{noise}}}", line.trim_end_matches('}'), json_str(&l.source), json_str(&l.first_run), profile.json(), l.peak_ram_bytes.map_or("null".into(), |n| (n as f64 / (1u64 << 30) as f64).to_string()), cpu.map_or("null".into(), |n| n.to_string()), l.memory_end.as_deref().map_or("null".into(), json_str), wrote_root.as_deref().map_or("null".into(), json_str));
         if let Err(e) = self.save_end(&l.id, &receipt) { return err(e); }
         receipt
+    }
+
+    /// The overlay's virtual root (`<work>/dev/src`, [`super::relaxgit::prepare`]) as a real folder
+    /// on this box: a run's process wrote under the virtual tree with real file calls (a native
+    /// baseline build's target and log, a Linux node, 11-06), and the box refused every overlay lease after
+    /// it until someone removed it by hand. At each lease's end, its processes stopped, the folder
+    /// goes and the leases whose runs were going when it was last written are named. The ending
+    /// lease, when it is the one alone, wrote it: why it fails. None: no such folder, or not its.
+    fn virtual_root_written(&self, ending: &Lease) -> Option<String> {
+        let root = self.conf().work.join("dev/src");
+        let meta = std::fs::symlink_metadata(&root).ok()?;
+        let at = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64);
+        let mut files: Vec<String> = Vec::new();
+        let mut dirs = vec![root.clone()];
+        while let Some(d) = dirs.pop().filter(|_| files.len() < 4) {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if e.file_type().is_ok_and(|t| t.is_dir()) { dirs.push(p); } else if files.len() < 4 { files.push(p.strip_prefix(&root).unwrap_or(&p).to_string_lossy().into_owned()); }
+            }
+        }
+        let gone = if meta.is_dir() { std::fs::remove_dir_all(&root) } else { std::fs::remove_file(&root) };
+        let ran = |l: &Lease| l.runs.iter().any(|r| r.started_ms <= at + STAMP_GRAIN_MS && { let end = r.ended_ms.load(Ordering::Acquire); end == 0 || end >= at });
+        let mut by: Vec<String> = self.leases.lock().unwrap().values().filter(|l| ran(l)).map(|l| format!("{} ({})", l.id, l.lane)).collect();
+        let mine = ran(ending);
+        if mine { by.insert(0, format!("{} ({})", ending.id, ending.lane)); }
+        let why = format!("wrote under the overlay's virtual root {} on the disk of {} ({}), which refuses every overlay lease of the box while it stands; {}", root.display(), self.machine, if files.is_empty() { "no files".to_string() } else { files.join(", ") }, match gone { Ok(()) => "removed".to_string(), Err(e) => format!("its removal failed: {e}") });
+        let who = match &by[..] {
+            [] => "no lease's run (one that ended before its write was seen, or the box's own processes)".to_string(),
+            [one] => one.clone(),
+            many => format!("one of {}", many.join(", ")),
+        };
+        self.emit("lease", Sev::Err, format!("lease: {who} {why}"));
+        (mine && by.len() == 1).then_some(why)
     }
 
     /// The lease lets go of the node's tree (the last one bundles what it left there): the bundles.
@@ -3210,7 +3539,53 @@ impl Exec {
             self.emit("lease", Sev::Warn, format!("lease: {}: {} pid {pid} of lease {id}, which is no longer here", self.machine, if hard { "killed" } else { "stopped" }));
         }
         *seen = now.into_iter().map(|(p, _)| p).collect();
+        drop(seen);
+        #[cfg(windows)]
+        self.end_gone_jobs();
     }
+
+    /// Windows marks no process: a run is its job, named for its exit file, and the wrapper's pid
+    /// file stays beside it until its lease's end removes both. One whose lease this hub no
+    /// longer has went unattended (L215689 on Windows, 11-02, before runs had jobs): its job
+    /// ends, and its files go. (On Unix a pid file's pid may be another process's by now: the
+    /// sweep there goes by the lease's mark.)
+    #[cfg(windows)]
+    fn end_gone_jobs(&self) {
+        // (one lock at a time)
+        let here = || {
+            let mut ids: Vec<String> = self.leases.lock().unwrap().keys().cloned().collect();
+            ids.extend(self.endings.lock().unwrap().keys().cloned());
+            ids
+        };
+        for (id, exit) in gone_runs(&self.state, &here) {
+            let hold = os::Hold::taken_back(&exit);
+            let pids = os::job_pids(&hold);
+            if let Some(&pid) = pids.first() {
+                os::signal_group(pid, true, &hold);
+                self.emit("lease", Sev::Warn, format!("lease: {}: ended the job of a run of lease {id}, which is no longer here: pid(s) {pids:?}", self.machine));
+            }
+            for ext in ["exit", "usage", "usage.pid", "usage.cgroup", "time", "cpu", "warmup"] {
+                let _ = std::fs::remove_file(exit.with_extension(ext));
+            }
+        }
+    }
+}
+
+/// The runs whose wrapper's pid file (`<id>-<n>.usage.pid`) is still in the hub's state dir while
+/// their lease is neither here nor ending (`here`: those leases, read after the folder, so a lease
+/// that started meanwhile is one of them): (lease, the run's exit file, which names its job).
+#[cfg(any(windows, test))]
+fn gone_runs(state: &Path, here: &dyn Fn() -> Vec<String>) -> Vec<(String, PathBuf)> {
+    let runs: Vec<(String, u32)> = std::fs::read_dir(state).into_iter().flatten().flatten().filter_map(|e| {
+        let name = e.file_name().into_string().ok()?;
+        let (id, n) = name.strip_suffix(".usage.pid")?.rsplit_once('-')?;
+        let n: u32 = n.parse().ok()?;
+        valid_name(id).then(|| (id.to_string(), n))
+    }).collect();
+    let here = here();
+    let mut gone: Vec<(String, PathBuf)> = runs.into_iter().filter(|(id, _)| !here.contains(id)).map(|(id, n)| { let exit = exit_file(state, &id, n); (id, exit) }).collect();
+    gone.sort();
+    gone
 }
 
 /// How often a box proves it can link.
@@ -3268,6 +3643,51 @@ fn disk_loop(w: Weak<Exec>) {
         x.guard.check(&|| x.live(), x.timed_live());
         x.look_over_disk();
     }
+}
+
+/// Linux can kill another lease's process when this box runs out of RAM. A Mac instead swaps,
+/// and its pressure already stops grants, so this watch runs only on Linux.
+#[cfg(target_os = "linux")]
+fn memory_loop(w: Weak<Exec>) {
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let Some(x) = w.upgrade() else { return };
+        if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
+            let (total, avail) = caps::parse_meminfo(&text);
+            let gb = (1u64 << 30) as f64;
+            x.look_over_memory((total * gb) as u64, (avail * gb) as u64);
+        }
+    }
+}
+
+/// What a live lease holds, and the source of the RAM weight sent with its grant.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone)]
+struct MemTook {
+    id: String,
+    lane: String,
+    kind: Kind,
+    held: u64,
+    weighed: f64,
+    peak: Option<f64>,
+    asked: bool,
+}
+
+/// Pressure alone is not a verdict: only a lease holding more than its weight can be ended.
+#[cfg(any(target_os = "linux", test))]
+fn lease_over_memory(machine: &str, avail: u64, floor: u64, leases: &[MemTook]) -> Option<(String, String)> {
+    if avail >= floor { return None; }
+    let gb = |b: u64| b as f64 / (1u64 << 30) as f64;
+    let excess = |l: &MemTook| gb(l.held) - l.weighed;
+    let l = leases.iter().filter(|l| excess(l) > 0.0).max_by(|a, b| excess(a).total_cmp(&excess(b)))?;
+    let source = if l.asked {
+        "its own --ram-gb ask".to_string()
+    } else if let Some(peak) = l.peak {
+        format!("its class's measured peak {peak:.1} GB and a fifth")
+    } else {
+        "its class had no measured peak yet: its kind's default".to_string()
+    };
+    Some((l.id.clone(), format!("{} ({} of {}) ended on {machine} for memory: it held {:.1} GB, past the {:.1} GB it was weighed at ({source}); {machine} had {:.1} GB free, under its {:.1} GB floor. Ended before the kernel's OOM killer would pick a process, maybe another lease's; its peak is its class's measure now.", l.id, l.kind.as_str(), l.lane, gb(l.held), l.weighed, gb(avail), gb(floor))))
 }
 
 /// What a lease put on its box's disk.
@@ -3739,6 +4159,11 @@ pub fn note_stopped(by: &str, socket: &Path) {
     note(Stopped { by: by.to_string(), socket: Some(socket.to_path_buf()), lease: None, pids: Vec::new(), at: 0 });
 }
 
+/// Says that `by` (`by the WM restart`) stops the processes `pids`.
+pub fn note_stopped_pids(by: &str, pids: Vec<u32>) {
+    note(Stopped { by: by.to_string(), socket: None, lease: None, pids, at: 0 });
+}
+
 fn note(mut s: Stopped) {
     s.at = crate::proto::wall_ms();
     let mut stopped = STOPPED.lock().unwrap();
@@ -3836,12 +4261,15 @@ const HUB_BUILD_LOOK: Duration = Duration::from_secs(5);
 /// start the same package, profile and features), in this hub's environment, which is the
 /// keeper's (`cargo run` passed it on), so that start compiles nothing. Its first error if not.
 #[cfg(feature = "checkout")]
-pub(crate) fn build_hub(root: &Path) -> Result<(), String> {
+pub(crate) fn build_hub(root: &Path, jobs: Option<u32>) -> Result<(), String> {
     #[cfg(windows)]
     let aside = image_aside();
     let mut cmd = os::background(makepad_app_registry::cargo_bin().as_os_str());
     // (rustup counts nested proxies in RUST_RECURSION_COUNT and refuses past 20)
-    cmd.args(["build", "--release", "-p", "makepad-app-devhub"]).current_dir(root).env_remove("RUST_RECURSION_COUNT").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+    cmd.args(["build", "--release", "-p", "makepad-app-devhub"]);
+    // the cores its room was granted, when fewer than cargo would take
+    if let Some(j) = jobs { cmd.arg("-j").arg(j.to_string()); }
+    cmd.current_dir(root).env_remove("RUST_RECURSION_COUNT").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
     let since = crate::proto::wall_ms();
     HUB_BUILD.lock().unwrap_or_else(|e| e.into_inner()).0 = Some(since);
     let measured = measured_build(&mut cmd);
@@ -3950,6 +4378,13 @@ fn drop_aside() {
 mod tests {
     use super::*;
 
+    /// Who set a node's lease.conf comes with the pairs, never as a key of its own.
+    #[test]
+    fn a_conf_set_says_who_asked_apart_from_its_keys() {
+        assert_eq!(conf_set_args("role=pool slots.timed=0 by=MAIN".split_whitespace()), (vec![("role".into(), "pool".into()), ("slots.timed".into(), "0".into())], Some("MAIN".into())));
+        assert_eq!(conf_set_args("role=bench".split_whitespace()), (vec![("role".into(), "bench".into())], None));
+    }
+
     /// A timed lease's box report: the outside CPU's mean and peak over the looks, and the busiest
     /// outside processes by their mean.
     #[cfg(unix)]
@@ -3980,6 +4415,15 @@ mod tests {
         assert_eq!(mark_id(state, "L248709"), None);
     }
 
+    /// The WM session's own apps a WM restart ends were stopped by it ([`note_stopped_pids`]), no
+    /// crash: each deploy's WM restart filed the WM's aichat as one (11-06).
+    #[test]
+    fn an_app_a_wm_restart_ends_was_stopped_by_it() {
+        note_stopped_pids("by the WM restart (the build replaced the WM binary)", vec![7_311_001, 7_311_002]);
+        assert_eq!(stopped_with(7_311_002, None, "/tmp/makepad-1000/makepad-remote-7311002.sock").as_deref(), Some("by the WM restart (the build replaced the WM binary)"));
+        assert_eq!(stopped_with(7_311_003, None, "/tmp/makepad-1000/makepad-remote-7311003.sock"), None, "one it did not end: a crash stays a crash");
+    }
+
     /// A Windows run's processes are its job's: the run's leader and what that started (a JIT
     /// under cargo or a shell). A lease's end records them as stopped by it, a stall's capture
     /// finds its JITs among them, and a kill of one (`lease-kill`) ends that one, not the job.
@@ -3989,7 +4433,7 @@ mod tests {
         let mut cmd = std::process::Command::new(SLEEP[0]);
         cmd.args(&SLEEP[1..]);
         let (mut child, hold) = os::lease_spawn(&mut cmd, None).unwrap();
-        // cmd's ping joins the job as cmd starts it
+        // the shell's ping joins the job as the shell starts it
         let pids = loop {
             let pids = os::job_pids(&hold);
             if pids.len() >= 2 {
@@ -4008,7 +4452,7 @@ mod tests {
         while os::job_pids(&hold).contains(&leader) {
             std::thread::sleep(Duration::from_millis(20));
         }
-        // (a console host of cmd's may be in it beside its ping)
+        // (a console host of the shell's may be in it beside its ping)
         let left = os::job_pids(&hold);
         assert!(!left.is_empty() && !left.contains(&leader), "{left:?}");
         os::signal_group(ping, true, &hold);
@@ -4026,15 +4470,15 @@ mod tests {
     #[cfg(unix)]
     const SLEEP_LABEL: &str = "sleep 300";
     #[cfg(windows)]
-    const ECHO_HI: &[&str] = &["cmd", "/c", "echo hi"];
+    const ECHO_HI: &[&str] = &["powershell", "-NoProfile", "-Command", "Write-Output hi"];
     #[cfg(windows)]
-    const ENV: &[&str] = &["cmd", "/c", "set"];
+    const ENV: &[&str] = &["powershell", "-NoProfile", "-Command", "Get-ChildItem env: | ForEach-Object { \"$($_.Name)=$($_.Value)\" }"];
     #[cfg(windows)]
-    const FAIL: &[&str] = &["cmd", "/c", "exit 1"];
+    const FAIL: &[&str] = &["powershell", "-NoProfile", "-Command", "exit 1"];
     #[cfg(windows)]
-    const SLEEP: &[&str] = &["cmd", "/c", "ping -n 300 127.0.0.1 >nul"];
+    const SLEEP: &[&str] = &["powershell", "-NoProfile", "-Command", "ping -n 300 127.0.0.1 | Out-Null"];
     #[cfg(windows)]
-    const SLEEP_LABEL: &str = "cmd.exe";
+    const SLEEP_LABEL: &str = "powershell.exe";
 
     fn b64(argv: &[&str]) -> String {
         makepad_network::digest::base64_encode(argv.join("\0").as_bytes())
@@ -4089,14 +4533,119 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    fn test_exec(name: &str, opts: Opts) -> (TestHub, PathBuf, Arc<Mutex<Vec<String>>>) {
+    fn test_exec(name: &str, mut opts: Opts) -> (TestHub, PathBuf, Arc<Mutex<Vec<String>>>) {
         let base = std::env::temp_dir().join(format!("devhub-exec-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let conf = LeaseConf::parse(&format!("work = {}\n", base.join("devhub").display()), &base);
         let events = Arc::new(Mutex::new(Vec::new()));
         let ev = events.clone();
+        opts.watch_memory = false;
         let x = Exec::new("t", conf, base.join("leases"), opts, Arc::new(move |r: crate::proto::Record| ev.lock().unwrap().push(r.line)));
         (TestHub(Some(x)), base, events)
+    }
+
+    /// A run that writes under the overlay's virtual root on the real disk fails its lease at its
+    /// end, named, and the folder goes: it refused every overlay lease of its box after it (a native
+    /// baseline build's log, a Linux node, 11-06). A lease whose runs were not going then is not its writer.
+    #[cfg(unix)]
+    #[test]
+    fn a_run_that_writes_under_the_virtual_root_fails_its_lease_and_the_folder_goes() {
+        let (x, base, events) = test_exec("vroot", Opts { scopes: Some(false), ..Opts::default() });
+        let root = x.conf().work.join("dev/src");
+        x.handle("lease-start", r#"{"id":"V1","lane":"writer","kind":"test","rev":null}"#);
+        x.handle("lease-start", r#"{"id":"V2","lane":"bystander","kind":"test","rev":null}"#);
+        let script = format!("mkdir -p '{0}/libs/x/target' && echo log > '{0}/libs/x/target/build.log'", root.display());
+        let r = x.handle("lease-run", &format!("V1 . {}", b64(&["sh", "-c", &script])));
+        assert_eq!(log_until_exit(&x, "V1", field(&r[0], "n").and_then(|v| super::super::num(&v)).unwrap() as u32).1, 0);
+        assert!(root.join("libs/x/target/build.log").is_file());
+        let end = x.handle("lease-end", "V1 released");
+        let why = field(&end[0], "virtual_root").and_then(|v| v.as_str().map(str::to_string)).expect(&end[0]);
+        assert!(why.contains("wrote under the overlay's virtual root") && why.contains("libs/x/target/build.log") && why.ends_with("removed"), "{why}");
+        assert!(std::fs::symlink_metadata(&root).is_err(), "the folder is gone");
+        assert!(events.lock().unwrap().iter().any(|e| e.contains("V1 (writer) wrote under")), "named");
+        // the next end finds nothing, and a lease that ran nothing then is no writer
+        std::fs::create_dir_all(&root).unwrap();
+        let end = x.handle("lease-end", "V2 released");
+        assert_eq!(field(&end[0], "virtual_root").map(|v| v.to_json()), Some("null".to_string()), "{}", end[0]);
+        assert!(std::fs::symlink_metadata(&root).is_err());
+        assert!(events.lock().unwrap().iter().any(|e| e.contains("no lease's run")));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Past its log's end, `lease-log` says a run's exit alone, with no bytes: what a closed live
+    /// watch asks for its app (W3683, 11-06).
+    #[test]
+    #[cfg(unix)]
+    fn a_runs_exit_is_said_past_its_logs_end() {
+        let (x, base, _events) = test_exec("exit-past-end", Opts { scopes: Some(false), ..Opts::default() });
+        x.handle("lease-start", r#"{"id":"E1","lane":"exitx","kind":"test","rev":null}"#);
+        let r = x.handle("lease-run", &format!("E1 . {}", b64(&["sh", "-c", "echo bye; exit 3"])));
+        let n = field(&r[0], "n").and_then(|v| super::super::num(&v)).unwrap() as u32;
+        assert_eq!(log_until_exit(&x, "E1", n).1, 3);
+        let a = x.handle("lease-log", &format!("E1 {n} {}", u64::MAX >> 1));
+        assert_eq!((field(&a[0], "data").and_then(|v| v.as_str().map(str::to_string)).as_deref(), field(&a[0], "exit").and_then(|v| v.as_i64())), (Some(""), Some(3)), "{a:?}");
+        x.handle("lease-end", "E1 released");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A live session's box meters its calls ([`CallMeter`]): its launch from its run's spawn to
+    /// its first idle, each later call from its start to its end. The end's answer says the most
+    /// cores one window took and the call's mean; a word that changes nothing says none.
+    #[test]
+    #[cfg(unix)]
+    fn a_live_sessions_calls_are_metered_by_its_box() {
+        let (x, base, _events) = test_exec("calls", Opts { scopes: Some(false), ..Opts::default() });
+        x.handle("lease-start", r#"{"id":"V1","lane":"livex","kind":"test","rev":null,"live":true}"#);
+        // a core's work for 2 s, then nothing
+        let r = x.handle("lease-run", &format!("V1 . {}", b64(&["sh", "-c", "yes > /dev/null & sleep 2; kill $!; sleep 30"])));
+        assert!(field(&r[0], "n").is_some(), "{r:?}");
+        let said = |x: &Exec, word: &str| {
+            let a = x.handle("lease-weight", &format!("V1 {word}"));
+            field(&a[0], "call").map(|c| {
+                let n = |k| c.get(k).and_then(super::super::num).unwrap();
+                (c.get("launch").and_then(|v| v.as_bool()).unwrap(), n("ms"), n("peak"), n("mean"))
+            })
+        };
+        std::thread::sleep(Duration::from_millis(1600));
+        let (launch, ms, peak, mean) = said(&x, "idle").expect("the launch's sample");
+        assert!(launch && ms >= 1550.0 && peak > 0.25 && peak < 1.6 && mean > 0.1 && mean <= peak + 0.05, "{launch} {ms} {peak} {mean}");
+        assert_eq!(said(&x, "idle"), None, "no call ended");
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(said(&x, "call"), None);
+        std::thread::sleep(Duration::from_millis(1200));
+        let (launch, ms, peak, _) = said(&x, "idle").expect("the call's sample");
+        assert!(!launch && ms >= 1150.0 && peak < 0.3, "{launch} {ms} {peak}");
+        x.handle("lease-end", "V1 released");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A run's pid file whose lease the hub no longer has, and that is not ending, is a gone run:
+    /// its job is ended by name (Windows) and its files go.
+    #[test]
+    fn a_run_left_by_a_gone_lease_is_found_by_its_pid_file() {
+        let state = std::env::temp_dir().join(format!("devhub-gone-runs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        std::fs::create_dir_all(&state).unwrap();
+        for f in ["L1-1.usage.pid", "L2-1.usage.pid", "L2-2.usage.pid", "L3-1.usage.pid", "L4-1.exit", "L5-x.usage.pid", "notes.usage.pid"] {
+            std::fs::write(state.join(f), "1").unwrap();
+        }
+        // L1 is here and L3 ending
+        let here = || vec!["L1".to_string(), "L3".to_string()];
+        assert_eq!(gone_runs(&state, &here), vec![("L2".to_string(), state.join("L2-1.exit")), ("L2".to_string(), state.join("L2-2.exit"))]);
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    /// Two hubs on one box (two test processes, or two tests) name their runs' units apart; a
+    /// hub's tag is its ledger folder's, the same after its restart.
+    #[test]
+    fn hubs_on_one_box_name_their_units_apart() {
+        let (a, base_a, _) = test_exec("units-a", Opts::default());
+        let (b, base_b, _) = test_exec("units-b", Opts::default());
+        assert_ne!(a.units, b.units);
+        assert_eq!(unit_tag(&base_a.join("leases")), a.units, "a restarted hub's tag is the same");
+        drop((a, b));
+        let _ = std::fs::remove_dir_all(&base_a);
+        let _ = std::fs::remove_dir_all(&base_b);
     }
 
     /// A landed lane's dirs go without holding up any lease but its own: a clean that sized and
@@ -4152,10 +4701,11 @@ mod tests {
 
     impl TestHub {
         /// The hub gone as at its self-update, its runs left running: the next one, on its state.
-        fn restart(mut self, opts: Opts) -> TestHub {
+        fn restart(mut self, mut opts: Opts) -> TestHub {
             let x = self.0.take().unwrap();
             let (conf, state) = (x.conf(), x.state.clone());
             drop(x);
+            opts.watch_memory = false;
             TestHub(Some(Exec::new("t", conf, state, opts, Arc::new(|_| {}))))
         }
     }
@@ -4392,10 +4942,92 @@ mod tests {
         let ledger = x.leases.lock().unwrap()["L1"].ledger();
         assert!(Lease::from_ledger(&ledger).is_some_and(|l| l.live), "{ledger}");
         // its scope: a weight from its cores, never a quota (a quota of one core held a live Fab to one CPU)
-        let cost = super::super::Cost { cores: 1.0, ram_gb: 4.0, disk_gb: 1.0, gpus: 0 };
-        let unit = os::lease_argv(vec!["x".into()], Some("u"), 10, "", Some(cost), None);
+        let weight = x.leases.lock().unwrap()["L1"].cpu_weight();
+        let unit = os::lease_argv(vec!["x".into()], Some("u"), 10, "", Some(weight), None);
         assert!(!unit.iter().any(|a| a.starts_with("CPUQuota")), "{unit:?}");
         assert_eq!(unit.iter().any(|a| a == "CPUWeight=100"), cfg!(target_os = "linux"), "{unit:?}");
+    }
+
+    /// A background lease's runs weigh a hundredth of an interactive one's or a live session's in
+    /// a call a core: past its charge it yields the box to them (live calls waited 96-125 s
+    /// behind a prebuild and a gate running past theirs, 11-06). A restarted hub keeps the weight.
+    #[test]
+    fn a_background_lease_yields_the_box_to_interactive_work() {
+        let (x, _base, _events) = test_exec("weights", Opts::default());
+        for (id, lane, extra) in [("B1", "bgx", r#""priority":"background""#), ("I1", "fgx", r#""priority":"interactive""#), ("V1", "livex", r#""priority":"background","live":true"#), ("N1", "nonex", r#""live":false"#)] {
+            let a = x.handle("lease-start", &format!(r#"{{"id":"{id}","lane":"{lane}","kind":"test","rev":null,{extra},"cost":{{"cores":8}}}}"#));
+            assert!(!a[0].starts_with("{\"err\""), "{a:?}");
+        }
+        let weights = |x: &Exec| ["B1", "I1", "V1", "N1"].map(|id| x.leases.lock().unwrap()[id].cpu_weight());
+        assert_eq!(weights(&x), [8, 800, 800, 8]);
+        let saved: Vec<Lease> = ["B1", "I1"].iter().map(|id| Lease::from_ledger(&x.leases.lock().unwrap()[*id].ledger()).unwrap()).collect();
+        assert_eq!(saved.iter().map(Lease::cpu_weight).collect::<Vec<_>>(), [8, 800]);
+        assert_eq!(super::super::Priority::Background.cpu_weight(0.25), 1);
+        // a live session weighs as background work between calls, as interactive work in one:
+        // an idle session that spins slows no gate beside it; a restarted hub keeps the word
+        assert_eq!(x.handle("lease-weight", "V1 idle"), ["{\"weight\":8,\"scopes\":0}"]);
+        assert_eq!(Lease::from_ledger(&x.leases.lock().unwrap()["V1"].ledger()).unwrap().cpu_weight(), 8);
+        assert_eq!(x.handle("lease-weight", "V1 call"), ["{\"weight\":800,\"scopes\":0}"]);
+        assert!(x.handle("lease-weight", "B1 idle")[0].contains("B1 is no live session"));
+        assert!(x.handle("lease-weight", "V1 later")[0].contains("wants `<id> call|idle`"));
+        assert_eq!(weights(&x), [8, 800, 800, 8]);
+    }
+
+    #[test]
+    fn interpreter_script_words_keep_c_mode() {
+        let stem = Path::new("scratch/a'b\\c-script");
+        let shell_word = ". 'scratch/a'\\''b\\c-script.sh'";
+        let python_word = "exec(compile(open('scratch/a\\'b\\\\c-script.py','rb').read(),'scratch/a\\'b\\\\c-script.py','exec'))";
+        for (args, index, extension, word) in [
+            (vec!["sh", "-c", "code", "name", "one"], 2, "sh", shell_word),
+            (vec!["/bin/bash", "-lc", "code"], 2, "sh", shell_word),
+            (vec!["dash", "-ec", "code"], 2, "sh", shell_word),
+            (vec!["zsh", "-euc", "code"], 2, "sh", shell_word),
+            (vec!["ksh", "-c", "code"], 2, "sh", shell_word),
+            (vec!["ash", "-c", "code"], 2, "sh", shell_word),
+            (vec!["bash", "-o", "pipefail", "-c", "code"], 4, "sh", shell_word),
+            (vec!["python", "-c", "code"], 2, "py", python_word),
+            (vec!["python3", "-uc", "code", "one"], 2, "py", python_word),
+            (vec!["python3.12", "-Bc", "code"], 2, "py", python_word),
+        ] {
+            let mut argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            let (i, path, replacement) = script_spill(&argv, stem).expect("script slot");
+            assert_eq!((i, path, replacement.as_str()), (index, stem.with_extension(extension), word), "{args:?}");
+            argv[i] = replacement;
+            for j in 0..argv.len() {
+                if j != i { assert_eq!(argv[j], args[j], "non-script word {j} of {args:?}"); }
+            }
+        }
+        for args in [vec!["echo", "-c", "code"], vec!["python3", "-cu", "code"], vec!["python-tool", "-c", "code"], vec!["sh", "--command", "code"], vec!["sh", "-c1", "code"], vec!["sh", "script.sh"]] {
+            let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            assert!(script_spill(&argv, stem).is_none(), "not a script slot: {args:?}");
+        }
+        let argv = ["sh", "-c", "small", "-c", "largest script"].map(String::from);
+        assert_eq!(script_spill(&argv, stem).unwrap().0, 4, "only the largest candidate spills");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn large_script_runs_from_a_file_and_large_env_starts_no_run() {
+        let (x, base, _) = test_exec("large-script", Opts::default());
+        let a = x.handle("lease-start", r#"{"id":"L1","lane":"large-script","kind":"test","rev":null}"#);
+        assert_eq!(field(&a[0], "ok").and_then(|v| super::super::num(&v)), Some(1.0), "{a:?}");
+        let tmp = PathBuf::from(field(&a[0], "tmp").unwrap().as_str().unwrap());
+        let script = format!("#{}\nprintf '%s %s\\n' \"$0\" \"$1\"\nprintf 'large-script-done\\n'\n", "x".repeat(1536 * 1024));
+        let r = x.handle("lease-run", &format!("L1 . {}", b64(&["sh", "-c", &script, "name", "one"])));
+        let n = field(&r[0], "n").and_then(|v| super::super::num(&v)).expect(&r[0]) as u32;
+        let (text, code) = log_until_exit(&x, "L1", n);
+        assert_eq!((text.as_str(), code), ("name one\nlarge-script-done\n", 0), "sourcing preserves the shell's positional parameters");
+        assert_eq!(std::fs::read(tmp.join(format!("run-{n}-script.sh"))).unwrap(), script.as_bytes(), "the file preserves every script byte");
+        let count = x.leases.lock().unwrap()["L1"].runs.len();
+        let big = format!("BIG={}", "x".repeat(1536 * 1024));
+        let r = x.handle("lease-run", &format!("L1 . {}", b64(&["env", &big, "true"])));
+        let error = field(&r[0], "err").unwrap();
+        let error = error.as_str().unwrap();
+        assert!(error.starts_with("lease-run L1: env value BIG") && error.contains("at most") && error.contains("pass it in a file"), "{error}");
+        assert_eq!(x.leases.lock().unwrap()["L1"].runs.len(), count, "refusing an oversized env starts no run");
+        drop(x);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -4416,6 +5048,7 @@ mod tests {
         let n = field(&r[0], "n").and_then(|v| super::super::num(&v)).expect(&r[0]) as u32;
         let (text, code) = log_until_exit(&x, "L1", n);
         assert_eq!((text.trim(), code), ("hi", 0));
+        assert!(!tmp.join(format!("run-{n}-script.sh")).exists(), "a command that fits has no spill file");
         // the env reaches the program; a failing one reports its code
         let r = x.handle("lease-run", &format!("lease-run L1 . {}", b64(ENV)));
         let (env, _) = log_until_exit(&x, "L1", field(&r[0], "n").and_then(|v| super::super::num(&v)).unwrap() as u32);
@@ -4434,6 +5067,19 @@ mod tests {
         assert!(env.lines().all(|l| !l.starts_with("CARGO_PKG_") && (!l.starts_with("RUST_TEST_") || l == "RUST_TEST_THREADS=4")), "{env}");
         let r = x.handle("lease-run", &format!("L1 . {}", b64(FAIL)));
         assert_eq!(log_until_exit(&x, "L1", field(&r[0], "n").and_then(|v| super::super::num(&v)).unwrap() as u32).1, 1);
+        // a Windows run is plain argv: its PowerShell script runs from a file, its process under
+        // RemoteSigned, under -Command's exit (a failed last step fails it), and cmd is refused,
+        // saying why
+        #[cfg(windows)]
+        {
+            let r = x.handle("lease-run", &format!("L1 . {}", b64(&["powershell", "-NoProfile", "-Command", "Write-Output \"from-file $(Get-ExecutionPolicy)\"; where.exe devhub-no-such-program"])));
+            let n = field(&r[0], "n").and_then(|v| super::super::num(&v)).expect(&r[0]) as u32;
+            let (text, code) = log_until_exit(&x, "L1", n);
+            assert!(text.contains("from-file RemoteSigned") && code == 1, "{code} {text}");
+            assert!(std::fs::read_to_string(tmp.join(format!("run-{n}-script.ps1"))).unwrap().contains("where.exe devhub-no-such-program"));
+            let r = x.handle("lease-run", &format!("L1 . {}", b64(&["cmd", "/c", "echo hi"])));
+            assert!(r[0].contains("never cmd"), "{r:?}");
+        }
         assert!(x.handle("lease-run", &format!("L1 ../x {}", b64(&["true"])))[0].contains("err"));
         // asked from a directory the tree lacks (a shell in an ignored folder): that, not the program
         let missing = x.handle("lease-run", &format!("L1 local/shots {}", b64(&["true"])));
@@ -4789,6 +5435,64 @@ mod tests {
         let tail = log_tail(&log, TAIL_LINES);
         let _ = std::fs::remove_file(&log);
         assert!(tail.starts_with("line 11\n") && tail.ends_with("line 30") && tail.lines().count() == 20, "{tail}");
+    }
+
+    #[test]
+    fn the_lease_furthest_past_its_memory_weight_ends_first() {
+        const GB: u64 = 1 << 30;
+        let took = |id: &str, held: u64, weighed: f64| MemTook { id: id.into(), lane: "lane-x".into(), kind: Kind::Screen, held: held * GB, weighed, peak: None, asked: false };
+        let pick = |avail, leases: &[MemTook]| lease_over_memory("box-a", avail, 3 * GB, leases);
+        let leases = [took("L7", 22, 4.0), took("L8", 24, 24.0)];
+        assert_eq!(pick(3 * GB, &leases), None, "at the floor no lease ends");
+        assert_eq!(pick(4 * GB, &leases), None, "above the floor no lease ends");
+        let (id, why) = pick(2 * GB, &leases).unwrap();
+        assert_eq!(id, "L7", "the lease within its weight is never picked, even if it holds more");
+        assert!(why.contains("L7 (screen of lane-x) ended on box-a") && why.contains("held 22.0 GB") && why.contains("4.0 GB it was weighed at") && why.contains("box-a had 2.0 GB free, under its 3.0 GB floor"), "the verdict names the lease, box, held RAM, weight and pressure: {why}");
+        assert!(why.contains("its class had no measured peak yet: its kind's default"), "an unmeasured class names the kind default: {why}");
+        assert_eq!(pick(2 * GB, &[took("L1", 4, 4.0), took("L2", 3, 4.0)]), None, "none past its weight means no verdict");
+        assert_eq!(pick(2 * GB, &[]), None, "no leases means no verdict");
+        assert_eq!(pick(2 * GB, &[took("L1", 22, 20.0), took("L2", 12, 4.0)]).unwrap().0, "L2", "the largest excess wins, not the largest resident set");
+        let mut measured = took("L3", 10, 9.0);
+        measured.peak = Some(7.5);
+        assert!(pick(2 * GB, &[measured.clone()]).unwrap().1.contains("its class's measured peak 7.5 GB and a fifth"), "a measured weight names its raw peak and margin");
+        measured.asked = true;
+        assert!(pick(2 * GB, &[measured]).unwrap().1.contains("its own --ram-gb ask"), "an explicit ask takes precedence over its class's peak");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_memory_end_kills_the_run_and_tells_its_holder_and_master() {
+        const GB: u64 = 1 << 30;
+        let (x, base, events) = test_exec("memory", Opts { scopes: Some(false), ..Opts::default() });
+        let ok = |l: &[String]| !l[0].starts_with("{\"err\"");
+        assert!(ok(&x.handle("lease-start", r#"{"id":"L7","lane":"lane-x","kind":"screen","rev":null,"cost":{"weighed_gb":0,"peak_gb":7.5}}"#)), "the lease starts with an explicit zero weight");
+        let saved = Lease::from_ledger(&x.leases.lock().unwrap()["L7"].ledger()).unwrap();
+        assert_eq!((saved.weighed_gb, saved.peak_gb), (0.0, Some(7.5)), "the weight and raw peak survive the ledger");
+        x.handle("lease-run", &format!("L7 . {}", b64(&["/bin/sleep", "30"])));
+        let n = 1;
+        // (a look before the run's process is there measures nothing and ends nothing)
+        let ended = (0..100).any(|_| {
+            x.look_over_memory(16 * GB, GB);
+            x.leases.lock().unwrap()["L7"].memory_end.is_some() || { std::thread::sleep(Duration::from_millis(50)); false }
+        });
+        assert!(ended, "a lease past its weight under the floor is ended for memory");
+        let (_, code) = log_until_exit(&x, "L7", n);
+        assert_ne!(code, 0, "the memory watch kills the sleeping run");
+        let answer = x.handle("lease-beat", "L7");
+        let memory = field(&answer[0], "memory").and_then(|m| m.as_arr().and_then(|a| a.first()).cloned()).expect("the master gets the memory verdict");
+        assert_eq!(memory.get("id").and_then(|v| v.as_str()), Some("L7"), "the beat names the ended lease");
+        let log = x.handle("lease-log", &format!("L7 {n} 0"));
+        assert_eq!(field(&log[0], "memory").and_then(|v| v.as_str().map(str::to_string)), memory.get("why").and_then(|v| v.as_str()).map(str::to_string), "the holder gets the same reason without waiting for the master");
+        let saved = Lease::from_ledger(&x.leases.lock().unwrap()["L7"].ledger()).unwrap();
+        assert!(saved.memory_end.is_some() && saved.peak_ram_bytes.is_some_and(|p| p > 0), "the reason and observed peak survive a hub restart");
+        x.look_over_memory(16 * GB, GB);
+        assert_eq!(events.lock().unwrap().iter().filter(|s| s.contains("ended on") && s.contains("for memory:")).count(), 1, "a second look does not pick the ended lease again");
+        let beat = x.handle("lease-beat", "L7");
+        assert_eq!(field(&beat[0], "memory").and_then(|m| m.as_arr().map(|a| a.len())), Some(1), "the beat says it again until the master ends the lease: {beat:?}");
+        let receipt = x.handle("lease-end", "L7 released");
+        assert_eq!(field(&receipt[0], "memory").and_then(|v| v.as_str().map(str::to_string)), memory.get("why").and_then(|v| v.as_str()).map(str::to_string), "the end's receipt carries the memory end, so a release that came first still records it: {receipt:?}");
+        drop(x);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -5255,7 +5959,7 @@ mod tests {
         #[cfg(unix)]
         let (exit7, job_cmd, gate_cmd): (&[&str], &[&str], &[&str]) = (&["sh", "-c", "exit 7"], &["sh", "-c", "sleep 1; echo done; exit 7"], &["sh", "-c", "sleep 1; echo gate; exit 0"]);
         #[cfg(windows)]
-        let (exit7, job_cmd, gate_cmd): (&[&str], &[&str], &[&str]) = (&["cmd", "/c", "exit 7"], &["cmd", "/c", "ping -n 2 127.0.0.1 >nul & echo done& exit 7"], &["cmd", "/c", "ping -n 2 127.0.0.1 >nul & echo gate& exit 0"]);
+        let (exit7, job_cmd, gate_cmd): (&[&str], &[&str], &[&str]) = (&["powershell", "-NoProfile", "-Command", "exit 7"], &["powershell", "-NoProfile", "-Command", "ping -n 2 127.0.0.1 | Out-Null; Write-Output done; exit 7"], &["powershell", "-NoProfile", "-Command", "ping -n 2 127.0.0.1 | Out-Null; Write-Output gate; exit 0"]);
         let (x, base, _) = test_exec("handover", Opts { scopes: Some(false), ..Opts::default() });
         // the wrapper alone records an exit, whoever waits for it
         std::fs::create_dir_all(&base).unwrap();
@@ -5277,7 +5981,7 @@ mod tests {
         #[cfg(windows)]
         {
             x.handle("lease-start", r#"{"id":"K4","lane":"k","kind":"test","rev":null}"#);
-            x.handle("lease-run", &format!("K4 . {}", b64(&["cmd", "/c", "start /b ping -n 300 127.0.0.1 >nul & ping -n 300 127.0.0.1 >nul"])));
+            x.handle("lease-run", &format!("K4 . {}", b64(&["powershell", "-NoProfile", "-Command", "Start-Process ping -ArgumentList '-n','300','127.0.0.1' -NoNewWindow; ping -n 300 127.0.0.1 | Out-Null"])));
         }
         // a restart waits for nothing (on Windows, for its runs' wrappers to start: moments)
         let t = Instant::now();

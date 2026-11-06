@@ -19,7 +19,12 @@ use makepad_remote::watch::WatchSink;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How often the master asks a node for the JIT's hot records past the ones it has (and at once
+/// after its link came back). It asked once for each record the node's feed brought, a route
+/// through its own hub each time: about 100 routes a second, 2.8k threads in 25 s (11-06).
+const HOT_LOOK: Duration = Duration::from_secs(2);
 
 /// Where records go besides the control feed (the inbox, the tray).
 pub type OnRecord = Arc<dyn Fn(&Record) + Send + Sync>;
@@ -431,6 +436,7 @@ impl Master {
         let mut feed = Client::routed(&me, &host).watch();
         let mut up = false;
         let mut hot_cursor = 0usize;
+        let (mut hot, mut hot_asked) = (crate::cli::NodeAsks::new(&host, "hot"), None::<Instant>);
         loop {
             if !self.hosts().hosts.iter().any(|h| h.name == host) {
                 // another name of a machine followed under its nodes.conf name
@@ -439,23 +445,26 @@ impl Master {
             }
             // The durable JIT channel is independent of the lossy event ring.
             // Replay after reconnect/start; identical record ids are idempotent.
-            let mut next_cursor = hot_cursor;
-            let mut imported = true;
-            let replay = makepad_remote::hub::ask(&me, &host, "hot", "", &format!("records {hot_cursor}"), &mut |line| {
-                if let Some(mut hot) = makepad_remote::hot::Record::parse(line) {
-                    hot.node = host.clone();
-                    match crate::hot::ingest(hot.clone()) {
-                        Ok(true) => self.publish(crate::proto::from_hot(&hot)),
-                        Ok(false) => {},
-                        Err(e) => { eprintln!("devhub hot: {e}"); imported = false; },
+            if hot_asked.is_none_or(|t| t.elapsed() >= HOT_LOOK) {
+                hot_asked = Some(Instant::now());
+                let mut next_cursor = hot_cursor;
+                let mut imported = true;
+                let replay = hot.ask(&me, &format!("records {hot_cursor}"));
+                for line in replay.iter().flatten() {
+                    if let Some(mut hot) = makepad_remote::hot::Record::parse(line) {
+                        hot.node = host.clone();
+                        match crate::hot::ingest(hot.clone()) {
+                            Ok(true) => self.publish(crate::proto::from_hot(&hot)),
+                            Ok(false) => {},
+                            Err(e) => { eprintln!("devhub hot: {e}"); imported = false; },
+                        }
+                    } else if let Ok(v) = makepad_strict_json::parse(line.as_bytes()) {
+                        if let Some(cursor) = v.get("cursor").and_then(|v| v.as_u64()) { next_cursor = cursor as usize; }
+                        if v.get("err").is_some() { imported = false; }
                     }
-                } else if let Ok(v) = makepad_strict_json::parse(line.as_bytes()) {
-                    if let Some(cursor) = v.get("cursor").and_then(|v| v.as_u64()) { next_cursor = cursor as usize; }
-                    if v.get("err").is_some() { imported = false; }
                 }
-                true
-            });
-            if replay.is_ok() && imported { hot_cursor = next_cursor; }
+                if replay.is_ok() && imported { hot_cursor = next_cursor; }
+            }
             match feed.next(Duration::from_secs(2), 1) {
                 Ok(Some((_, line))) => {
                     if !up {
@@ -482,6 +491,7 @@ impl Master {
                     }
                     std::thread::sleep(Duration::from_secs(15));
                     feed = Client::routed(&me, &host).watch();
+                    hot_asked = None;
                 }
             }
         }

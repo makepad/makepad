@@ -22,6 +22,7 @@ pub mod overlay_selftest;
 pub mod shadow;
 #[cfg(feature = "checkout")]
 pub mod relaxgit;
+pub mod argv;
 pub mod caps;
 pub mod client;
 pub mod jit;
@@ -31,6 +32,7 @@ pub mod master;
 #[cfg(feature = "checkout")]
 pub mod native;
 pub mod panel;
+pub mod patch;
 pub mod prof;
 pub mod sched;
 pub mod ship;
@@ -139,6 +141,17 @@ pub enum Priority { #[default] Background, Interactive }
 impl Priority {
     pub fn as_str(self) -> &'static str { match self { Self::Background => "background", Self::Interactive => "interactive" } }
     pub fn parse(s: &str) -> Option<Self> { match s { "background" => Some(Self::Background), "interactive" => Some(Self::Interactive), _ => None } }
+
+    /// A shared lease's scope CPU weight (Linux) for its `cores`: 100 a core for interactive work
+    /// and live sessions, 1 a core for background work. A background run past its charge then
+    /// yields the box to them under contention, and still takes all of it while they idle. A
+    /// weight, not a nice level: each run has its own scope, a sibling of a live session's, and
+    /// nice orders threads only inside one. Live calls waited 96-125 s behind a prebuild charged
+    /// 4 and a gate charged 8 that ran past their charges (11-06).
+    pub fn cpu_weight(self, cores: f64) -> u32 {
+        let per_core = match self { Self::Background => 1.0, Self::Interactive => 100.0 };
+        (cores * per_core).round().clamp(1.0, 10_000.0) as u32
+    }
 }
 
 /// Placement class from measured walls, estimates or kind defaults.
@@ -288,11 +301,19 @@ pub fn native_lane(lane: &str, kind: Kind, role: Role) -> bool {
 /// A node's capabilities and health, as its hub measures them (`caps` service).
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Caps {
+    /// None on older hubs and Windows; measured by the node, never inferred by the master.
+    pub exec_limits: Option<crate::os::ExecLimits>,
     pub node: String,
     pub arch: String,
     pub os: String,
     pub cpu: String,
     pub cores: u32,
+    /// The CPUs its lease.conf pins shared kinds (`cpus.shared`) and timed leases (`cpus.timed`)
+    /// to, counted (0: not pinned, all of `cores`): what a lease of each can use
+    /// ([`Caps::cores_for`]). Budgeted at all 32 cores, a box's shared leases were charged 32 on the
+    /// 16 CPUs they are pinned to: load 66 with 70 threads runnable (11-06).
+    pub cpus_shared: u32,
+    pub cpus_timed: u32,
     pub load1: f64,
     pub ram_gb: f64,
     pub ram_avail_gb: f64,
@@ -446,9 +467,12 @@ impl UserSense {
 /// older hubs lack (2: overlay sources and base blobs; 3: per-lane native trees; 4: detachable
 /// live runs; 5: compiled-file dev JIT inputs, a dep-info mismatch never fails; 6: its restart
 /// ends nothing, so it restarts for its update at once; 7: warm leases use another lane's native
-/// tree and target). Only requests needing a newer facility wait for its self-update; other
-/// leases keep using the hub.
-pub const HUB_PROTO: u32 = 8;
+/// tree and target; 9: a hub build takes the jobs its room was granted, `hub-restart <sha> jobs=N`).
+/// Only requests needing a newer facility wait for its self-update; other leases keep using the hub.
+pub const HUB_PROTO: u32 = 9;
+/// The first protocol whose hub builds itself with the jobs its room was granted
+/// ([`crate::lease::sched::Req::hub_build`]): its build may start on fewer cores than it measured.
+pub const HUB_JOBS_PROTO: u32 = 9;
 /// In a box's refusal of a timed lease's start: something builds there, and the master places the
 /// lease again on a new look at the box.
 pub const TIMED_AFTER: &str = "timed work starts after it";
@@ -458,6 +482,12 @@ pub const HANDOVER_PROTO: u32 = 6;
 impl Caps {
     pub fn role(&self) -> Role {
         self.role.unwrap_or(Role::Pool)
+    }
+
+    /// The cores a lease of `kind` runs on: the CPUs its kind is pinned to, else all of them.
+    pub fn cores_for(&self, kind: Kind) -> u32 {
+        let pinned = if kind == Kind::Timed { self.cpus_timed } else { self.cpus_shared };
+        if pinned > 0 { pinned.min(self.cores) } else { self.cores }
     }
 
     pub fn slots(&self, kind: Kind) -> u32 {
@@ -474,15 +504,18 @@ impl Caps {
                 format!("{{\"name\":{},\"vram_gb\":{v:.1}{busy}}}", json_str(n))
             })
             .collect();
+        let exec_limits = self.exec_limits.map_or("null".into(), |l| l.to_json());
         let slots: Vec<String> = self.slots.iter().map(|(k, n)| format!("\"{}\":{n}", k.as_str())).collect();
         format!(
-            "{{\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"mem_pressure\":{},\"trouble\":{},\"wm_wire\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"hub_proto\":{}{},\"services\":{{{}}},\"user\":{}}}",
+            "{{\"exec_limits\":{exec_limits},\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"cpus_shared\":{},\"cpus_timed\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"mem_pressure\":{},\"trouble\":{},\"wm_wire\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"hub_proto\":{}{},\"services\":{{{}}},\"user\":{}}}",
             json_str(&self.rustc),
             json_str(&self.node),
             json_str(&self.arch),
             json_str(&self.os),
             json_str(&self.cpu),
             self.cores,
+            self.cpus_shared,
+            self.cpus_timed,
             self.cpu_pct.map_or("null".to_string(), |p| format!("{p:.1}")),
             self.load1,
             self.ram_gb,
@@ -526,11 +559,14 @@ impl Caps {
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
         let f = |k: &str| v.get(k).and_then(num).unwrap_or(0.0);
         let mut c = Caps {
+            exec_limits: v.get("exec_limits").and_then(crate::os::ExecLimits::parse),
             node: s("node"),
             arch: s("arch"),
             os: s("os"),
             cpu: s("cpu"),
             cores: f("cores") as u32,
+            cpus_shared: f("cpus_shared") as u32,
+            cpus_timed: f("cpus_timed") as u32,
             cpu_pct: v.get("cpu_pct").and_then(num),
             load1: f("load1"),
             ram_gb: f("ram_gb"),
@@ -770,11 +806,14 @@ mod tests {
     #[test]
     fn caps_round_trip() {
         let c = Caps {
+            exec_limits: Some(crate::os::ExecLimits { total: 2 * 1024 * 1024, per_string: Some(128 * 1024) }),
             node: "node-a".into(),
             arch: "x86_64".into(),
             os: "linux".into(),
             cpu: "CPU-B".into(),
             cores: 16,
+            cpus_shared: 8,
+            cpus_timed: 6,
             load1: 3.5,
             ram_gb: 60.0,
             ram_avail_gb: 40.0,
@@ -818,6 +857,9 @@ mod tests {
         };
         assert_eq!(Caps::parse(&c.to_json()), Some(c.clone()));
         let none = Caps { desk_link: None, user: None, ..c };
-        assert_eq!(Caps::parse(&none.to_json()), Some(none));
+        assert_eq!(Caps::parse(&none.to_json()), Some(none.clone()));
+        assert_eq!((none.cores_for(Kind::Build), none.cores_for(Kind::Test), none.cores_for(Kind::Timed)), (8, 8, 6), "each kind runs on the CPUs it is pinned to");
+        let unpinned = Caps { cpus_shared: 0, cpus_timed: 0, ..none };
+        assert_eq!((unpinned.cores_for(Kind::Build), unpinned.cores_for(Kind::Timed)), (16, 16), "an unpinned box's leases use all its cores");
     }
 }

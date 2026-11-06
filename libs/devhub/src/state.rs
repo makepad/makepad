@@ -763,6 +763,12 @@ pub struct Live {
     pub ended_ms: u64,
     /// the last edit: files, when saved, shipped, patched (or refused), the first frame after
     pub patch: Option<LivePatch>,
+    /// when a save first waited for a restart (0: none waits), how many have since and why the
+    /// last: the app runs the code before them until a relaunch. A lane that kept saving into such a session
+    /// measured code that was not running, 20 min and five saves of it (11-06)
+    pub restart_since_ms: u64,
+    pub restart_saves: u64,
+    pub restart_why: String,
     pub panic: Option<JobPanic>,
     pub log: String,
     pub note: String,
@@ -1644,6 +1650,9 @@ fn live_state_value(x: &Live) -> Value {
         ("touched_ms", int(x.touched_ms)),
         ("ended_ms", int(x.ended_ms)),
         ("patch", patch),
+        ("restart_since_ms", int(x.restart_since_ms)),
+        ("restart_saves", int(x.restart_saves)),
+        ("restart_why", s(&x.restart_why)),
         ("panic", panic_value(&x.panic)),
         ("log", s(&x.log)),
         ("note", s(&x.note)),
@@ -1697,6 +1706,9 @@ fn live_state_from(v: &Value) -> Live {
         touched_ms: uint(o, "touched_ms"),
         ended_ms: uint(o, "ended_ms"),
         patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), called_ms: uint(Some(p), "called_ms"), queued_ms: uint(Some(p), "queued_ms"), behind: text(Some(p), "behind"), shipped_ms: uint(Some(p), "shipped_ms"), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: String::new(), output_ref: TextRef::from_value(p.get("output_ref")), reason_ref: TextRef::from_value(p.get("reason_ref")), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), reason: String::new() }),
+        restart_since_ms: uint(o, "restart_since_ms"),
+        restart_saves: uint(o, "restart_saves"),
+        restart_why: text(o, "restart_why"),
         panic: panic_from(v.get("panic")),
         log: text(o, "log"),
         note: text(o, "note"),
@@ -2148,9 +2160,15 @@ impl Store {
         };
         let mut entries = std::collections::BTreeMap::new();
         let key = |v: &Value| if section == "land" { uint(Some(v), "id").to_string() } else { format!("{}/{}", text(Some(v), "repo"), text(Some(v), "branch")) };
+        // a line names its section before its record ([`Self::update`]): only the section's lines
+        // are parsed (the land queue's 2.6k of 232k lines, 1.3 of 82 MB: parsing every line took
+        // 1.1 s of the master's CPU at each bucket verdict, 11-06)
+        let named = format!(",\"section\":{}", s(section).to_json());
         match std::fs::File::open(self.path.with_file_name("history.jsonl")) {
             Ok(file) => for line in std::io::BufReader::new(file.take(history_len)).lines() {
                 let line = line.map_err(|e| e.to_string())?;
+                let Some((head, _)) = line.split_once(",\"record\":") else { return Err(format!("invalid workflow history: no record in {}", line.chars().take(80).collect::<String>())) };
+                if !head.ends_with(&named) { continue; }
                 let v = makepad_strict_json::parse_depth(line.as_bytes(), 16).map_err(|e| format!("invalid workflow history: {e:?}"))?;
                 if v.get("section").and_then(Value::as_str) == Some(section) {
                     if let Some(record) = v.get("record") { entries.insert(key(record), record.clone()); }

@@ -478,6 +478,39 @@ mod read_tests {
         assert_ne!(mtime, listed[0].mtime_us, "not the listing's");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A file rewritten in place with its size and its mtime second kept ships its new text at
+    /// once: by its nanoseconds, and where git staged it in its index's second or later (there
+    /// its whole stat can be kept), by its content. Status went by the size and the second, so
+    /// such an edit stayed the committed text on the node (11-06).
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn an_in_place_edit_keeping_size_and_mtime_second_ships() {
+        use std::io::Write;
+        use std::time::Duration;
+        let repo = std::env::temp_dir().join(format!("devhub-ship-racy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| crate::orch::git(&repo, &[&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"][..], args].concat()).unwrap().trim().to_string();
+        let write = |p: &str, text: &str, at: std::time::SystemTime| {
+            let mut f = std::fs::File::create(repo.join(p)).unwrap();
+            f.write_all(text.as_bytes()).unwrap();
+            f.set_modified(at).unwrap();
+        };
+        let now = crate::proto::wall_ms() / 1000;
+        let at = |secs: u64, ms: u64| UNIX_EPOCH + Duration::from_secs(secs) + Duration::from_millis(ms);
+        write("old.rs", "fn a() {}\n", at(now - 100, 100));
+        write("racy.rs", "fn b() {}\n", at(now + 100, 100));
+        git(&["init", "-q", "-b", "work"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        let pin = crate::lease::Pin { makepad: git(&["rev-parse", "HEAD"]), commercial: None };
+        assert_eq!(uncommitted(&repo, &pin).unwrap(), (vec![], vec![]), "racily clean files of their text are clean");
+        write("old.rs", "fn x() {}\n", at(now - 100, 200));
+        write("racy.rs", "fn y() {}\n", at(now + 100, 100));
+        assert_eq!(uncommitted(&repo, &pin).unwrap().0, ["old.rs", "racy.rs"]);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 }
 
 #[cfg(test)]

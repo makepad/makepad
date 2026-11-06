@@ -25,6 +25,7 @@ use crate::state::LaneRec;
 use makepad_git::{ObjectId, Reach, Repository};
 use makepad_remote::json_str;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -617,6 +618,8 @@ fn drop_lane(ctx: &Ctx, name: &str) -> Result<String, String> {
 
 /// One worktree half as `lane audit` finds it.
 struct HalfAudit {
+    path: PathBuf,
+    nested: bool,
     branch: String,
     /// Ok: landed; Err: why not
     landed: Result<(), String>,
@@ -628,15 +631,22 @@ struct HalfAudit {
 }
 
 impl View {
-    fn audit(&mut self, path: &Path, branch: &str, head: ObjectId, check_own: bool, nested: bool) -> HalfAudit {
+    fn audit_commits(&mut self, path: &Path, branch: &str, head: ObjectId, check_own: bool, nested: bool) -> HalfAudit {
         let landed = self.landed(branch, path, check_own);
         let unlanded = self.unlanded(branch, head);
+        HalfAudit { path: path.to_path_buf(), nested, branch: branch.to_string(), landed, unlanded, tracked: Vec::new(), untracked: Vec::new() }
+    }
+}
+
+impl HalfAudit {
+    /// The filesystem walk is independent of the shared history view.
+    fn read_status(&mut self) {
         let (mut tracked, mut untracked) = (Vec::new(), Vec::new());
-        match makepad_git::repository_paths(path).ok().flatten().map(crate::gitread::worktree) {
+        match makepad_git::repository_paths(&self.path).ok().flatten().map(crate::gitread::worktree) {
             Some(Ok(mut r)) => match r.status() {
                 Ok(st) => {
                     for e in st.entries {
-                        if nested && e.path.starts_with("apps/commercial/") {
+                        if self.nested && e.path.starts_with("apps/commercial/") {
                             continue;
                         }
                         if e.status == makepad_git::FileStatus::Untracked { untracked.push(e.path) } else { tracked.push(e.path) }
@@ -647,15 +657,21 @@ impl View {
             },
             _ => tracked.push("(no git dir)".into()),
         }
-        HalfAudit { branch: branch.to_string(), landed, unlanded, tracked, untracked }
+        self.tracked = tracked;
+        self.untracked = untracked;
     }
 }
+
+type AuditLane = (String, PathBuf, Option<(String, String, bool)>, Vec<(&'static str, HalfAudit)>);
 
 /// `lane audit [--json]`: every worktree under the lanes root (both repos, registered or not):
 /// whether each half landed (work / main, or a retired chain of them), its commits that landed
 /// nowhere, its uncommitted tracked and untracked files, and what to do. Read in process (no git),
 /// here (no master needed). Removes nothing.
-pub fn audit(repo: &Path, json: bool) -> Result<String, String> {
+pub fn audit(repo: &Path, json: bool, out: &mut dyn Write) -> Result<(), String> {
+    let write_line = |out: &mut dyn Write, line: &str| -> Result<(), String> {
+        writeln!(out, "{line}").and_then(|_| out.flush()).map_err(|e| format!("audit output: {e}"))
+    };
     let root = wt::root_of(repo).canonicalize().map_err(|e| format!("lanes root: {e}"))?;
     // (git's paths have no Windows `\\?\` in front)
     let root = root.to_str().and_then(|r| r.strip_prefix(r"\\?\")).map_or_else(|| root.clone(), PathBuf::from);
@@ -676,16 +692,20 @@ pub fn audit(repo: &Path, json: bool) -> Result<String, String> {
     };
     let mk_list = list(&mk)?;
     let mut com_list = match &com { Some(c) => list(c)?, None => Vec::new() };
+    let total = mk_list.len() + com_list.iter().filter(|c| !mk_list.iter().any(|m| m.0.join("apps/commercial") == c.0)).count();
+    if !json {
+        write_line(out, &format!("{total} lane worktree(s) under {}:", root.display()))?;
+    }
     // (name, path, registered note, kept, halves)
-    let mut lanes: Vec<(String, PathBuf, Option<(String, String, bool)>, Vec<(&'static str, HalfAudit)>)> = Vec::new();
+    let mut lanes: Vec<AuditLane> = Vec::new();
     for (path, branch, head) in mk_list {
         let name = path.strip_prefix(&root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         let nested = path.join("apps/commercial");
-        let mut halves = vec![("makepad", mk.audit(&path, &branch, head, true, nested.join(".git").exists()))];
+        let mut halves = vec![("makepad", mk.audit_commits(&path, &branch, head, true, nested.join(".git").exists()))];
         if let Some(i) = com_list.iter().position(|c| c.0 == nested) {
             let (cp, cb, ch) = com_list.swap_remove(i);
             if let Some(c) = com.as_mut() {
-                halves.push(("commercial", c.audit(&cp, &cb, ch, false, false)));
+                halves.push(("commercial", c.audit_commits(&cp, &cb, ch, false, false)));
             }
         }
         let reg = registered.get(&path).cloned();
@@ -694,11 +714,13 @@ pub fn audit(repo: &Path, json: bool) -> Result<String, String> {
     for (path, branch, head) in com_list {
         let name = path.strip_prefix(&root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         if let Some(c) = com.as_mut() {
-            let h = c.audit(&path, &branch, head, true, false);
+            let h = c.audit_commits(&path, &branch, head, true, false);
             lanes.push((name, path.clone(), registered.get(&path).cloned(), vec![("commercial", h)]));
         }
     }
     lanes.sort_by(|a, b| a.0.cmp(&b.0));
+    // (the header's count came before the halves were read; the streaming waits for these)
+    let count = lanes.len();
     // the class of each lane: what keeps it, most serious first
     let class = |halves: &[(&str, HalfAudit)]| -> &'static str {
         if halves.iter().any(|(_, h)| h.unlanded > 0) {
@@ -715,39 +737,75 @@ pub fn audit(repo: &Path, json: bool) -> Result<String, String> {
     };
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     let mut rows = Vec::new();
-    let mut text_rows: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    for (name, path, reg, halves) in &lanes {
-        let c = class(halves);
-        *counts.entry(c).or_default() += 1;
-        let hs: Vec<String> = halves.iter().map(|(repo, h)| format!(
-            "{{\"repo\":\"{repo}\",\"branch\":{},\"landed\":{},\"why\":{},\"unlanded\":{},\"tracked\":{},\"untracked\":{},\"untracked_files\":[{}]}}",
-            json_str(&h.branch), h.landed.is_ok(), json_str(h.landed.as_ref().err().map_or("", |s| s.as_str())), h.unlanded, h.tracked.len(), h.untracked.len(),
-            h.untracked.iter().take(20).map(|f| json_str(f)).collect::<Vec<_>>().join(","))).collect();
-        rows.push(format!("{{\"name\":{},\"path\":{},\"class\":\"{c}\",\"registered\":{},\"keep\":{},\"note\":{},\"halves\":[{}]}}",
-            json_str(name), json_str(&path.to_string_lossy()), reg.is_some(), reg.as_ref().is_some_and(|r| r.2), json_str(reg.as_ref().map_or("", |r| r.1.as_str())), hs.join(",")));
-        let detail: Vec<String> = halves.iter().map(|(repo, h)| {
-            let mut d = format!("{repo} {}", if h.branch.is_empty() { "(detached)" } else { &h.branch });
-            if h.unlanded > 0 { d.push_str(&format!(" {} unlanded commit(s)", h.unlanded)); }
-            if !h.tracked.is_empty() { d.push_str(&format!(" {} uncommitted tracked", h.tracked.len())); }
-            if !h.untracked.is_empty() { d.push_str(&format!(" {} untracked ({})", h.untracked.len(), h.untracked.iter().take(3).cloned().collect::<Vec<_>>().join(", "))); }
-            if let Err(w) = &h.landed { if h.unlanded == 0 { d.push_str(&format!(" [{w}]")); } }
-            d
-        }).collect();
-        text_rows.entry(c).or_default().push(format!("  {name:<28} {}{}", detail.join("; "), if reg.is_none() { " (unregistered)" } else if reg.as_ref().is_some_and(|r| r.2) { " (keep)" } else { "" }));
-    }
-    if json {
-        return Ok(format!("{{\"lanes\":[{}]}}", rows.join(",")));
-    }
-    let mut out = format!("{} lane worktree(s) under {}: {}\n", lanes.len(), root.display(), counts.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", "));
-    for (c, rows) in &text_rows {
-        out.push_str(&format!("\n{c} ({}):\n", rows.len()));
-        for r in rows {
-            out.push_str(r);
-            out.push('\n');
+    let mut removable = Vec::new();
+    let workers = std::thread::available_parallelism().map_err(|e| format!("audit workers: {e}"))?.get().min(4).min(count);
+    let (tasks, jobs) = std::sync::mpsc::sync_channel::<(usize, AuditLane)>(workers);
+    let jobs = Mutex::new(jobs);
+    let (results, finished) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| -> Result<(), String> {
+        for _ in 0..workers {
+            let jobs = &jobs;
+            let results = results.clone();
+            scope.spawn(move || loop {
+                let job = jobs.lock().unwrap().recv();
+                let Ok((index, mut lane)) = job else { break };
+                for (_, half) in &mut lane.3 {
+                    half.read_status();
+                }
+                if results.send((index, lane)).is_err() { break; }
+            });
         }
+        drop(results);
+        // At most one window of work is outstanding, including completed results waiting for
+        // an earlier name. Slow worktrees apply backpressure instead of growing the buffer.
+        let tasks = tasks;
+        let mut pending = lanes.into_iter().enumerate();
+        for job in pending.by_ref().take(workers) {
+            tasks.send(job).map_err(|e| format!("audit worker: {e}"))?;
+        }
+        let mut ready = BTreeMap::new();
+        let mut next = 0;
+        while next < count {
+            let (index, lane) = finished.recv().map_err(|e| format!("audit worker: {e}"))?;
+            ready.insert(index, lane);
+            while let Some((name, path, reg, halves)) = ready.remove(&next) {
+                let (name, path, reg, halves) = (&name, &path, &reg, &halves);
+                let c = class(halves);
+                *counts.entry(c).or_default() += 1;
+                if json {
+                    let hs: Vec<String> = halves.iter().map(|(repo, h)| format!(
+                        "{{\"repo\":\"{repo}\",\"branch\":{},\"landed\":{},\"why\":{},\"unlanded\":{},\"tracked\":{},\"untracked\":{},\"untracked_files\":[{}]}}",
+                        json_str(&h.branch), h.landed.is_ok(), json_str(h.landed.as_ref().err().map_or("", |s| s.as_str())), h.unlanded, h.tracked.len(), h.untracked.len(),
+                        h.untracked.iter().take(20).map(|f| json_str(f)).collect::<Vec<_>>().join(","))).collect();
+                    rows.push(format!("{{\"name\":{},\"path\":{},\"class\":\"{c}\",\"registered\":{},\"keep\":{},\"note\":{},\"halves\":[{}]}}",
+                        json_str(name), json_str(&path.to_string_lossy()), reg.is_some(), reg.as_ref().is_some_and(|r| r.2), json_str(reg.as_ref().map_or("", |r| r.1.as_str())), hs.join(",")));
+                } else {
+                    let detail: Vec<String> = halves.iter().map(|(repo, h)| {
+                        let mut d = format!("{repo} {}", if h.branch.is_empty() { "(detached)" } else { &h.branch });
+                        if h.unlanded > 0 { d.push_str(&format!(" {} unlanded commit(s)", h.unlanded)); }
+                        if !h.tracked.is_empty() { d.push_str(&format!(" {} uncommitted tracked", h.tracked.len())); }
+                        for error in h.tracked.iter().filter(|p| p.starts_with("(status failed:") || p.as_str() == "(no git dir)") { d.push_str(&format!(" {error}")); }
+                        if !h.untracked.is_empty() { d.push_str(&format!(" {} untracked ({})", h.untracked.len(), h.untracked.iter().take(3).cloned().collect::<Vec<_>>().join(", "))); }
+                        if let Err(w) = &h.landed { if h.unlanded == 0 { d.push_str(&format!(" [{w}]")); } }
+                        d
+                    }).collect();
+                    write_line(out, &format!("{name}  {c}: {}{}", detail.join("; "), if reg.is_none() { " (unregistered)" } else if reg.as_ref().is_some_and(|r| r.2) { " (keep)" } else { "" }))?;
+                }
+                if c == "landed and clean" { removable.push(name.clone()); }
+                next += 1;
+                if let Some(job) = pending.next() {
+                    tasks.send(job).map_err(|e| format!("audit worker: {e}"))?;
+                }
+            }
+        }
+        Ok(())
+    })?;
+    if json {
+        return write_line(out, &format!("{{\"lanes\":[{}]}}", rows.join(",")));
     }
-    out.push_str("\nlanded and clean: `makepad devhub lane remove <name>` removes each (worktrees, branches, node dirs). Nothing here was removed.\n");
-    Ok(out)
+    write_line(out, &format!("Summary: {}", counts.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ")))?;
+    write_line(out, &format!("landed and clean ({}): {}", removable.len(), removable.join(", ")))?;
+    write_line(out, "landed and clean: `makepad devhub lane remove <name>` removes each (worktrees, branches, node dirs). Nothing here was removed.")
 }
 
 /// `lane adopt`: registers the live worktrees under the lanes root; lists the landed ones.
@@ -1278,14 +1336,21 @@ const QUIET_MS: u64 = 15 * 60_000;
 const QUIET_LISTED_MS: u64 = 12 * 3_600_000;
 
 /// `lane quiet`: for the manager's check-in, the live lanes that may be waiting on a run that is
-/// over (a watcher that stayed silent left two lanes idle, 11-04). Some just work on code.
+/// over (a watcher that stayed silent left two lanes idle, 11-04), the leases far over their
+/// measure whose agent went silent ([`crate::lease::master::LeaseMaster::silent_overdue`]), and
+/// the live sessions whose restart waited past 5 min ([`super::live::restarts_pending`]). Some
+/// just work on code.
 fn quiet(ctx: &Ctx) -> Result<String, String> {
     let lanes: Vec<LaneRec> = ctx.store.read(|d| d.lanes.iter().filter(|l| l.ended_ms == 0).cloned().collect());
     let ended = ended_runs(ctx, &lanes);
     let mut busy: HashSet<String> = ctx.leases.view().iter().filter(|x| !matches!(x.state, crate::lease::sched::State::Ended(_))).map(|x| x.req.lane.clone()).collect();
     ctx.store.read(|d| busy.extend(d.jobs.iter().filter(|j| !j.done()).map(|j| j.lane.clone())));
     let landed: Vec<(String, String, u64)> = ctx.store.history("land")?.iter().filter_map(|v| crate::land::Entry::parse(&v.to_json())).map(|e| (e.branch, e.cbranch, e.asked_ms)).collect();
-    let rows = quiet_lanes(&lanes, &ended, &busy, &landed, wall_ms());
+    let now = wall_ms();
+    // a lane busy with a lease far over its measure whose agent went silent, then the idle ones
+    let mut rows = ctx.leases.silent_overdue(now);
+    rows.extend(super::live::restarts_pending(ctx, now));
+    rows.extend(quiet_lanes(&lanes, &ended, &busy, &landed, now));
     Ok(if rows.is_empty() { "no lane is quiet\n".to_string() } else { rows.join("\n") + "\n" })
 }
 
@@ -1533,6 +1598,70 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    #[test]
+    fn audit_streams_header_sorted_worktrees_then_summary() {
+        struct Lines {
+            pending: Vec<u8>,
+            flushed: Vec<String>,
+        }
+        impl Write for Lines {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.pending.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                let line = String::from_utf8(std::mem::take(&mut self.pending)).unwrap();
+                assert!(line.ends_with('\n'), "flush ends a line: {line:?}");
+                assert_eq!(line.lines().count(), 1, "each line is flushed separately");
+                self.flushed.push(line);
+                Ok(())
+            }
+        }
+        let base = std::env::temp_dir().join(format!("devhub-lane-audit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mk = base.join("makepad");
+        repo(&mk, "work");
+        let root = base.join("wt.noindex");
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["gamma", "alpha", "beta"] {
+            let path = root.join(name);
+            g(&mk, &["worktree", "add", "-q", "-b", &format!("rc-{name}"), &path.to_string_lossy(), "work"]);
+            if name == "gamma" {
+                std::fs::write(path.join("a.txt"), "changed").unwrap();
+            } else {
+                g(&path, &["commit", "-q", "--allow-empty", "-m", "lane work"]);
+                if name == "alpha" {
+                    g(&mk, &["merge", "-q", "--no-ff", "-m", "land", "rc-alpha"]);
+                }
+            }
+        }
+        let mut out = Lines { pending: Vec::new(), flushed: Vec::new() };
+        audit(&mk, false, &mut out).unwrap();
+        assert!(out.pending.is_empty(), "no buffered output remains");
+        let lines = &out.flushed;
+        assert_eq!(lines.len(), 7, "header, three worktrees, summary, removable names and hint");
+        assert!(lines[0].starts_with("3 lane worktree(s) under "), "header first: {lines:?}");
+        for (line, expected) in lines[1..4].iter().zip([
+            "alpha  landed and clean:", "beta  unlanded commits:", "gamma  uncommitted changes:",
+        ]) {
+            assert!(line.starts_with(expected) && line.contains("(unregistered)"), "sorted worktree and class: {line}");
+        }
+        assert!(lines[4].starts_with("Summary: ") && lines[4].contains("1 landed and clean") && lines[4].contains("1 unlanded commits") && lines[4].contains("1 uncommitted changes"), "counts last: {lines:?}");
+        assert_eq!(lines[5], "landed and clean (1): alpha\n");
+        assert!(lines[6].contains("makepad devhub lane remove <name>") && lines[6].contains("Nothing here was removed."));
+        let mut json = Lines { pending: Vec::new(), flushed: Vec::new() };
+        audit(&mk, true, &mut json).unwrap();
+        assert_eq!(json.flushed.len(), 1, "JSON remains one document");
+        let doc = makepad_strict_json::parse(json.flushed[0].as_bytes()).unwrap();
+        let lanes = doc.get("lanes").unwrap().as_arr().unwrap();
+        for (lane, name) in lanes.iter().zip(["alpha", "beta", "gamma"]) {
+            assert_eq!(lane.get("name").unwrap().as_str(), Some(name));
+            assert!(root.join(name).join(".git").exists(), "audit removes nothing");
+        }
+        assert_eq!(lanes.len(), 3);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// new, a landing, the cleanup (after its grace) and a drop, on throwaway repos.
     #[test]
     fn lanes_are_made_cleaned_after_landing_and_dropped() {
@@ -1578,8 +1707,10 @@ mod tests {
         std::fs::write(lane.join("wip.txt"), "w").unwrap();
         cleanup(&ctx);
         assert!(ctx.store.read(|d| d.lanes[0].note.clone()).contains("uncommitted"));
-        let a = audit(&mk, false).unwrap();
-        assert!(a.contains("landed, untracked files only (1):") && a.contains("1 untracked (wip.txt)"), "{a}");
+        let mut out = Vec::new();
+        audit(&mk, false, &mut out).unwrap();
+        let a = String::from_utf8(out).unwrap();
+        assert!(a.contains("x  landed, untracked files only:") && a.contains("1 untracked (wip.txt)"), "{a}");
         std::fs::remove_file(lane.join("wip.txt")).unwrap();
         // clean: first seen landed, then removed once the grace passed with no activity
         cleanup(&ctx);

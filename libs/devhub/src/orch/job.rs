@@ -22,7 +22,7 @@ use crate::state::{Job, JobPanic};
 use makepad_remote::json_str;
 use makepad_remote::link::{Client, Target};
 use makepad_strict_json::Value;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 /// A paused job with no agent action for this long releases its box: past the JIT's own 600 s
@@ -51,12 +51,16 @@ pub fn start(ctx: Arc<Ctx>) {
     let held = |j: &Job| super::leg::lease_held(&ctx, &j.lease) && (j.run_n > 0 || j.granted_ms > 0 && j.shipped_ms >= j.granted_ms);
     let (back, moved, stray): (Vec<Job>, Vec<Job>, Vec<String>) = ctx.store.update(|d| {
         let (mut back, mut moved, mut stray) = (Vec::new(), Vec::new(), Vec::new());
+        let pending: std::collections::HashSet<String> = d.jobs.iter().filter(|j| matches!(j.state.as_str(), "queued" | "leasing"))
+            .flat_map(|j| j.after.iter().cloned()).collect();
         for j in d.jobs.iter_mut() {
             match j.state.as_str() {
                 "leasing" => {
                     j.state = "queued".into();
                     j.attempts = j.attempts.saturating_sub(1);
                 }
+                // A restart between finish and release resumes the handoff, not the run.
+                "ok" if j.kind == "timed" && (held(j) || pending.contains(&j.id)) => back.push(j.clone()),
                 "running" | "paused" if held(j) => back.push(j.clone()),
                 "running" | "paused" => {
                     if j.run_n == 0 {
@@ -93,11 +97,6 @@ pub fn start(ctx: Arc<Ctx>) {
     for j in moved {
         event(&ctx, Sev::Warn, format!("job {}: {}", j.id, j.note), Some(&j));
     }
-    for j in back {
-        event(&ctx, Sev::Info, format!("job {}: the master restarted; its run on {} goes on", j.id, j.node), Some(&j));
-        let c = ctx.clone();
-        let _ = std::thread::Builder::new().name("devhub-job".into()).spawn(move || reattach(&c, &j));
-    }
     prune_logs(&ctx);
     crate::lease::shadow::start(ctx.clone());
     // (its own thread: it asks the boxes, and a box slow to answer holds no dispatch)
@@ -106,10 +105,29 @@ pub fn start(ctx: Arc<Ctx>) {
         runs_on(&c, &holds_parked);
         std::thread::sleep(TICK);
     });
-    let _ = std::thread::Builder::new().name("devhub-jobs".into()).spawn(move || loop {
-        dispatch(&ctx);
-        idle(&ctx);
-        ctx.store.wait(TICK);
+    let _ = std::thread::Builder::new().name("devhub-jobs".into()).spawn(move || {
+        // Recover every completed handoff before any other dispatcher can take its successors.
+        // No new recovery state: the successful job, its lease and asked_ms are already durable.
+        let asked = {
+            let _dispatch = DISPATCH.lock().unwrap();
+            let following: Vec<String> = back.iter().filter(|j| j.state == "ok").flat_map(|j| chain_successors(&ctx, &j.id)).collect();
+            dispatch_following(&ctx, &following)
+        };
+        for next in asked { let _ = next.recv(); }
+        for j in back {
+            if j.state == "ok" {
+                if super::leg::lease_held(&ctx, &j.lease) { Held::attach(&j.lease, &j.node).release(Some(0)); }
+                continue;
+            }
+            event(&ctx, Sev::Info, format!("job {}: the master restarted; its run on {} goes on", j.id, j.node), Some(&j));
+            let c = ctx.clone();
+            let _ = std::thread::Builder::new().name("devhub-job".into()).spawn(move || reattach(&c, &j));
+        }
+        loop {
+            dispatch(&ctx);
+            idle(&ctx);
+            ctx.store.wait(TICK);
+        }
     });
 }
 
@@ -146,8 +164,18 @@ fn prune_logs(ctx: &Ctx) {
     }
 }
 
+// Serialize dispatch with a timed completion so the periodic dispatcher cannot take its
+// successors before their place and first-ask notifications have been assigned.
+static DISPATCH: Mutex<()> = Mutex::new(());
+
 /// Starts every queued job whose dependencies ended ok; skips those whose did not.
 fn dispatch(ctx: &Arc<Ctx>) {
+    let _dispatch = DISPATCH.lock().unwrap();
+    dispatch_following(ctx, &[]);
+}
+
+fn dispatch_following(ctx: &Arc<Ctx>, following: &[String]) -> Vec<mpsc::Receiver<()>> {
+    let mut asked = Vec::new();
     let (go, skip): (Vec<String>, Vec<(String, String)>) = ctx.store.read(|d| {
         let state = |id: &str| d.jobs.iter().find(|j| j.id == id).map(|j| j.state.clone());
         let (mut go, mut skip) = (Vec::new(), Vec::new());
@@ -182,10 +210,28 @@ fn dispatch(ctx: &Arc<Ctx>) {
             None => false,
         }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         if ok {
+            let notify = following.contains(&id).then(|| {
+                let (send, recv) = mpsc::channel();
+                asked.push(recv);
+                send
+            });
             let c = ctx.clone();
-            let _ = std::thread::Builder::new().name("devhub-job".into()).spawn(move || run(&c, &id));
+            let _ = std::thread::Builder::new().name("devhub-job".into()).spawn(move || run(&c, &id, notify));
         }
     }
+    asked
+}
+
+/// Ready timed successors in the same lane inherit the chain's first ask, once.
+fn chain_successors(ctx: &Ctx, id: &str) -> Vec<String> {
+    ctx.store.update(|d| {
+        let Some(j) = d.jobs.iter().find(|j| j.id == id && j.kind == "timed" && j.state == "ok") else { return Vec::new() };
+        let (lane, asked) = (j.lane.clone(), j.asked_ms);
+        let ready: Vec<String> = d.jobs.iter().filter(|j| j.state == "queued" && j.kind == "timed" && j.lane == lane && j.after.iter().any(|a| a == id)
+            && j.after.iter().all(|a| d.jobs.iter().any(|dep| dep.id == *a && dep.state == "ok"))).map(|j| j.id.clone()).collect();
+        for j in d.jobs.iter_mut().filter(|j| ready.contains(&j.id) && j.asked_ms == 0) { j.asked_ms = asked; }
+        ready
+    }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Vec::new() })
 }
 
 fn get(ctx: &Ctx, id: &str) -> Option<Job> {
@@ -318,7 +364,7 @@ pub(super) fn ship_snap(ctx: &Ctx, held: &Held, snap: &str) -> Result<String, St
 pub const ATTEMPTS: u32 = 3;
 
 /// One job: lease, ship its snapshot, run, release, result.
-fn run(ctx: &Arc<Ctx>, id: &str) {
+fn run(ctx: &Arc<Ctx>, id: &str, notify: Option<mpsc::Sender<()>>) {
     let Some(j) = set(ctx, id, |j| j.attempts += 1) else { return };
     let dir = ctx.logs("jobs");
     let _ = std::fs::create_dir_all(&dir);
@@ -332,28 +378,28 @@ fn run(ctx: &Arc<Ctx>, id: &str) {
     }).map_or(0, |j| j.asked_ms);
     let spec = Spec { since_ms: (asked > 0).then_some(asked), lane: if j.shadow_of.is_empty() { j.lane.clone() } else { format!("shadow-{}", j.id) }, agent: j.agent.clone(), kind, needs: j.needs.clone(), prio: j.prio, rev: j.rev.clone(), repo_dir: j.repo_dir.clone(), node: (!j.node_pref.is_empty()).then(|| j.node_pref.clone()) };
     let cancelled = || get(ctx, id).is_none_or(|j| j.state == "cancelled");
-    let configure = |r: &mut crate::lease::sched::Req| {
-        r.run_options(Src::parse(&j.src).unwrap_or(Src::Tree), CostClass::parse(&j.cost), j.est_min, &j.class, &j.cmd);
-        r.priority = Priority::parse(&j.priority).unwrap_or_default();
-        r.loader = (!j.loader.is_empty()).then(|| j.loader.clone());
-        r.cores = j.cores;
-        r.ram_gb = j.ram_gb;
-        r.whole = j.whole;
-        r.holder = j.holder;
-    };
+    let configure = |r: &mut crate::lease::sched::Req| configure_request(r, &j);
     // what it waits for shows in the job (a job waited 23 min on its lane's own lease, its queue
     // reason in no output its lane read, 11-05)
     let said = std::cell::RefCell::new(String::new());
+    let notify = std::cell::RefCell::new(notify);
+    let asked = || { if let Some(send) = notify.borrow_mut().take() { let _ = send.send(()); } };
     let mut waiting = |line: &str| {
+        asked();
         let line = crate::proto::clean(line, 400);
         set(ctx, id, |j| j.note = line.clone());
         *said.borrow_mut() = line;
     };
-    let held = match Held::acquire_with(&spec, &configure, &mut waiting, &cancelled) {
+    let acquired = Held::acquire_with(&spec, &configure, &mut waiting, &cancelled);
+    asked();
+    let held = match acquired {
         Ok(h) => h,
         // the master's socket or a box's link went away: no verdict on the job
         Err(e) if crate::lease::master::unreachable(&e) && again(ctx, id, &format!("no lease ({})", crate::proto::clean(&e, 160))) => return,
-        Err(e) => return finish(ctx, id, Err(e), &log),
+        Err(e) => {
+            ended_by_hand(ctx, id, &e);
+            return finish(ctx, id, Err(e), &log);
+        }
     };
     let class = j.shadow.then(|| ctx.leases.nodes().into_iter().find(|n| n.name == held.node)).flatten().and_then(|n| {
         n.caps.as_ref().map(|c| [("arch".to_string(), c.arch.clone()), ("os".into(), c.os.clone()), ("role".into(), n.role().as_str().into())])
@@ -466,12 +512,24 @@ fn reattach(ctx: &Arc<Ctx>, j: &Job) {
 
 /// A job's run is over: its lease goes, and it has its result, or (the box lost under it, no exit)
 /// it is placed again from its snapshot.
-fn ended(ctx: &Ctx, id: &str, held: Held, r: Result<i32, String>, log: &std::path::Path) {
+fn ended(ctx: &Arc<Ctx>, id: &str, held: Held, r: Result<i32, String>, log: &std::path::Path) {
     if let Some(j) = get(ctx, id).filter(|j| j.waited_ms > 0) {
         crate::lease::prof::log_wait(&ctx.home, &format!("{{\"kind\":\"job\",\"lane\":{},\"id\":{},\"lease\":{},\"start_ms\":{},\"end_ms\":{}}}", json_str(&j.lane), json_str(id), json_str(&j.lease), j.waited_ms, wall_ms()));
     }
+    let finished = matches!(r, Ok(0)) && get(ctx, id).is_some_and(|j| j.kind == "timed");
+    if finished {
+        let asked = {
+            let _dispatch = DISPATCH.lock().unwrap();
+            finish(ctx, id, Ok(0), log);
+            let following = chain_successors(ctx, id);
+            dispatch_following(ctx, &following)
+        };
+        // The first on_wait (including "held back") or acquire_with's return ends the
+        // handoff. No grant wait: that grant needs this lease to end. No timeout.
+        for next in asked { let _ = next.recv(); }
+    }
     let node = held.node.clone();
-    held.release(r.as_ref().ok().copied());
+    let fault = held.release(r.as_ref().ok().copied());
     if get(ctx, id).is_some_and(|j| !j.shadow_of.is_empty()) {
         let lane = format!("shadow-{id}");
         let cleaned = ask(&ctl(), Some(&node), "disk", &format!("disk clean {lane}"));
@@ -479,20 +537,31 @@ fn ended(ctx: &Ctx, id: &str, held: Held, r: Result<i32, String>, log: &std::pat
             ctx.store.event("shadow", Sev::Warn, format!("shadow {id} cleanup on {node}: {e}"), None);
         }
     }
+    // what it did to its box is its result, whatever its run said (it wrote under the overlay's
+    // virtual root, and the box refused every overlay lease after it: a Linux node, 11-06)
+    if let Some(why) = fault.filter(|_| !finished) {
+        return finish(ctx, id, Err(why), log);
+    }
     // (a run the node refused is the job's result: another box refuses it too)
     if let Some(e) = r.as_ref().err().filter(|e| !e.starts_with(super::leg::REFUSED)) {
-        // someone ended its lease (`devhub cancel L..`, what the hung warning says): the job ends
-        // with it. Placed again, a hung job came straight back and hung again (J6015, 11-04)
-        if e.ends_with("ended (cancelled)") {
-            set(ctx, id, |j| j.state = "cancelled".into());
-        } else if !e.contains(" ended (disk): ") {
+        if !ended_by_hand(ctx, id, e) && !e.contains(" ended (disk): ") && !e.contains(" ended (memory): ") {
             let node = get(ctx, id).map_or(String::new(), |j| j.node);
             if again(ctx, id, &format!("box {node} lost ({})", crate::proto::clean(e, 160))) {
                 return;
             }
         }
     }
-    finish(ctx, id, r, log);
+    if !finished { finish(ctx, id, r, log); }
+}
+
+/// Someone ended the job's lease by hand (`devhub cancel L..` or `devhub release L..`, what the
+/// hung warning says), granted or still asked: the job ends with it, cancelled. Placed again, a
+/// hung job came straight back and hung again (J6015, 11-04), and a released one asked again on a
+/// box with dev off and waited there unseen (J8832, 11-06). Whether it was so.
+fn ended_by_hand(ctx: &Ctx, id: &str, e: &str) -> bool {
+    if !super::leg::ended_by_hand(e) { return false; }
+    set(ctx, id, |j| if !j.done() { j.state = "cancelled".into(); });
+    true
 }
 
 /// Back to the queue, with what happened as its note, if it has placements left; whether it went.
@@ -569,7 +638,7 @@ fn finish(ctx: &Ctx, id: &str, r: Result<i32, String>, log: &std::path::Path) {
     let what = match j.state.as_str() {
         "ok" => format!("job {id} ok in {secs} s on {}", j.node),
         "panicked" => format!("job {id} panicked: {}", j.panic.as_ref().map_or(String::new(), |p| format!("{} at {}", p.message, p.location))),
-        "cancelled" => format!("job {id} cancelled"),
+        "cancelled" => format!("job {id} cancelled{}", r.as_ref().err().map_or(String::new(), |e| format!(": {}", crate::proto::clean(e, 160)))),
         "jit-error" => j.note.clone(),
         _ => format!("job {id} failed{} in {secs} s on {}: {}", j.exit.map_or(String::new(), |e| format!(" exit={e}")), j.node, fail_reason(&j, ended_by_exit)),
     };
@@ -749,7 +818,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
                 return Err("job lease-log L<id>".into());
             }
             let path = ctx.logs(LEASE_LOGS).join(format!("{rest}.log"));
-            let bytes = std::fs::read(&path).map_err(|_| format!("{rest} kept no output: a lease released normally keeps none, unless a test run failed or a run ended abnormally"))?;
+            let bytes = std::fs::read(&path).map_err(|_| format!("{rest} kept no output: a lease released normally keeps none, unless it stalled, a test run failed or a run ended abnormally"))?;
             Ok(format!("{{\"text\":{},\"path\":{}}}", json_str(&String::from_utf8_lossy(&bytes)), json_str(&path.display().to_string())))
         }
         "output" => {
@@ -988,6 +1057,32 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// A job command that is a devhub command (`makepad devhub test <lane> ..`, past an `env` prefix,
+/// through `cargo run .. --bin makepad --`, or the devhub binary itself): its direct form. It
+/// would ask the master for a box of its own from inside the job's, on a box with no makepad
+/// checkout above it (J8486 failed so in 1 s, 11-06).
+fn nested_devhub(cmd: &[String]) -> Option<String> {
+    let command = crate::lease::loaders::command_of(cmd);
+    let program = std::path::Path::new(command.first()?).file_name()?.to_str()?;
+    let args = match program {
+        "makepad-devhub" => return Some(crate::proto::clean(&format!("makepad devhub {}", command[1..].join(" ")), 300)),
+        "makepad" => &command[1..],
+        _ => crate::lease::loaders::cargo_run_args(cmd)?,
+    };
+    (args.first()? == "devhub").then(|| crate::proto::clean(&format!("makepad {}", args.join(" ")), 300))
+}
+
+/// Keep submission's capability check and the later lease ask on the same command and cost.
+fn configure_request(r: &mut crate::lease::sched::Req, j: &Job) {
+    r.run_options(Src::parse(&j.src).unwrap_or(Src::Tree), CostClass::parse(&j.cost), j.est_min, &j.class, &j.cmd);
+    r.priority = Priority::parse(&j.priority).unwrap_or_default();
+    r.loader = (!j.loader.is_empty()).then(|| j.loader.clone());
+    r.cores = j.cores;
+    r.ram_gb = j.ram_gb;
+    r.whole = j.whole;
+    r.holder = j.holder;
+}
+
 /// `submit {"tree","rev"?,"batch","jobs":[{kind,needs,node,prio,lane,agent,cmd,after}]}`: ids at
 /// once. Without `rev` the jobs run at the worktree's snapshot (HEAD + its dirty files), with one
 /// at those commits alone; a main checkout's dirty files only with `with_uncommitted`. `after` names jobs (`J3`) or earlier jobs of this request (`@1`).
@@ -1017,6 +1112,9 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         if cmd.is_empty() || cmd[0].is_empty() {
             return Err(format!("job {}: no command", i + 1));
         }
+        if let Some(direct) = nested_devhub(&cmd) {
+            return Err(format!("job {}: its command is itself a devhub command, which asks the master for its own box and has no makepad checkout to run from on the job's box: run it directly instead: `{direct}`", i + 1));
+        }
         let lane = makepad_devhub_conf::lane_name(&s(r, "lane"));
         if !makepad_devhub_conf::valid_name(&lane) {
             return Err(format!("job {}: lane `{lane}` is not a name", i + 1));
@@ -1040,6 +1138,15 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         let note = crate::lease::native::check(&ctx.home, &gate, wall_ms()).map_err(|e| format!("job {}: {e}", i + 1))?;
         if !note.is_empty() { notes.push(note); }
         jobs.push(Job { cwd, holder, shadow, priority: priority.as_str().into(), loader: s(r, "loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, whole, class: s(r, "class"), kind, needs: s(r, "needs"), node_pref: s(r, "node"), prio, repo_dir: tree.to_string_lossy().into_owned(), lane, agent: s(r, "agent"), cmd, after: list(r, "after"), state: "queued".into(), ..Default::default() });
+    }
+    for (i, j) in jobs.iter().enumerate() {
+        let mut req = crate::lease::sched::Req::new(&j.lane, Kind::parse(&j.kind).unwrap());
+        req.needs = crate::lease::sched::parse_needs(&j.needs);
+        req.node = (!j.node_pref.is_empty()).then(|| j.node_pref.clone());
+        req.master = true;
+        configure_request(&mut req, j);
+        req.normalize_kind();
+        if let Some(never) = ctx.leases.never_places(&req) { return Err(format!("job {}: no box could ever take it: {never}", i + 1)); }
     }
     // the base and the snapshot: one for the whole request
     let lane = jobs[0].lane.clone();
@@ -1184,6 +1291,70 @@ mod tests {
     use crate::state::Store;
 
     #[test]
+    fn submit_refuses_a_nested_devhub_command_with_its_direct_form() {
+        let c = ctx("nested-devhub");
+        let words = |w: &str| w.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+        for (cmd, direct) in [
+            ("makepad devhub test lane-a pkg --lib", Some("makepad devhub test lane-a pkg --lib")),
+            ("/some/where/target/host/makepad devhub run lane-a build -- true", Some("makepad devhub run lane-a build -- true")),
+            ("env A=1 makepad devhub test lane-a pkg", Some("makepad devhub test lane-a pkg")),
+            ("cargo run --profile host -q -p makepad-run --bin makepad -- devhub test lane-a pkg", Some("makepad devhub test lane-a pkg")),
+            ("makepad-devhub lane audit", Some("makepad devhub lane audit")),
+            ("makepad test pkg --lib", None),
+            ("cargo test -p makepad-devhub", None),
+        ] {
+            assert_eq!(nested_devhub(&words(cmd)).as_deref(), direct, "{cmd}");
+        }
+        let nested = r#"{"kind":"test","lane":"lane1","agent":"a","cmd":["makepad","devhub","test","lane1","pkg"],"after":[]}"#.to_string();
+        let e = submit_line(&c, "", true, &[nested]).unwrap_err();
+        assert!(e.starts_with("job 1: its command is itself a devhub command") && e.ends_with("`makepad devhub test lane1 pkg`"), "{e}");
+        assert_eq!(c.store.read(|d| d.jobs.len()), 0, "nothing queued");
+        std::fs::remove_dir_all(&c.home).unwrap();
+    }
+
+    #[test]
+    fn submit_refuses_impossible_argv_before_writing_any_job() {
+        let mut c = ctx("exec-size");
+        c.leases = Arc::new(LeaseMaster::new("node-a", c.home.clone(), Arc::new(|_: &str, service: &str, _: &str| {
+            if service != "caps" { return Ok(vec!["{}".into()]); }
+            Ok(vec![crate::lease::Caps {
+                arch: "x86_64".into(), os: "linux".into(), cores: 16, ram_gb: 64.0,
+                exec_limits: Some(crate::os::ExecLimits { total: 2 * 1024 * 1024, per_string: Some(128 * 1024) }),
+                ..Default::default()
+            }.to_json()])
+        }), Arc::new(|_| {}), Arc::new(|| 1), None, true));
+        c.leases.refresh(&[("node-a".into(), "192.0.2.1".into()), ("node-b".into(), "192.0.2.2".into())]);
+        let word = format!("X={}", "x".repeat(200 * 1024));
+        let bad = req("env", &["@1"]).replace("\"cmd\":[\"env\"]", &format!("\"cmd\":[\"env\",{},\"true\"]", json_str(&word)));
+        let error = submit_line(&c, "", true, &[req("true", &[]), bad]).unwrap_err();
+        assert!(error.contains("Linux execs at most 128 KiB"), "{error}");
+        assert!(error.contains("pass it in a file the run reads"), "{error}");
+        assert_eq!(c.store.read(|d| (d.jobs.len(), d.jobs_next, d.batches_next)), (0, 0, 0), "the whole batch is refused before any row or id is written");
+        assert!(c.leases.view().is_empty(), "no lease queued, even for an --after job");
+        assert!(!c.home.join("jobs").exists(), "no job output created");
+        std::fs::remove_dir_all(&c.home).unwrap();
+    }
+
+    /// A job no box could ever take is refused at submission with its lease's denial: one pinned
+    /// to a Mac without os=macos waited its lane's turn, then was denied (11-06).
+    #[test]
+    fn submit_refuses_a_job_no_box_could_ever_take() {
+        let mut c = ctx("never-places");
+        c.leases = Arc::new(LeaseMaster::new("node-a", c.home.clone(), Arc::new(|node: &str, service: &str, _: &str| {
+            if service != "caps" { return Ok(vec!["{}".into()]); }
+            let os = if node == "node-m" { "macos" } else { "linux" };
+            Ok(vec![crate::lease::Caps { arch: "x86_64".into(), os: os.into(), cores: 16, ram_gb: 64.0, timed: true, ..Default::default() }.to_json()])
+        }), Arc::new(|_| {}), Arc::new(|| 1), None, true));
+        c.leases.refresh(&[("node-a".into(), "192.0.2.1".into()), ("node-m".into(), "192.0.2.2".into())]);
+        let pinned = req("true", &[]).replace("\"cmd\":", "\"node\":\"node-m\",\"cmd\":");
+        let error = submit_line(&c, "", true, &[pinned]).unwrap_err();
+        assert!(error.contains("no box could ever take it: a Mac: the Macs take only work that requires macOS"), "{error}");
+        assert_eq!(c.store.read(|d| (d.jobs.len(), d.jobs_next)), (0, 0), "nothing is written");
+        assert!(submit_line(&c, "", true, &[req("true", &[])]).is_ok(), "unpinned, a Linux box takes it");
+        std::fs::remove_dir_all(&c.home).unwrap();
+    }
+
+    #[test]
     fn an_idle_lease_wakes_its_jobs_wait_once() {
         let c = ctx("idle");
         c.store.update(|d| d.jobs.push(Job { id: "J1".into(), state: "running".into(), lease: "L1".into(), ..Default::default() })).unwrap();
@@ -1202,6 +1373,27 @@ mod tests {
         let behind = |_: &str| Some(("L9".to_string(), "L10 waits behind L9".to_string()));
         assert_eq!(told_idle(&c, &ids, &word, &behind).unwrap(), r#"[{"id":"J1","queued":true,"word":"L10 waits behind L9"}]"#);
         assert_eq!(told_idle(&c, &ids, &word, &behind).unwrap(), "[]");
+        let _ = std::fs::remove_dir_all(&c.home);
+    }
+
+    /// A lease someone ended ends its job, granted or still asked: a `devhub release L..` of a
+    /// running job's lease placed it again, on a box with dev off, where it waited unseen (J8832,
+    /// 11-06). A box lost under it still places it again.
+    #[test]
+    fn a_lease_ended_by_hand_ends_its_job() {
+        let c = ctx("byhand");
+        c.store.update(|d| for id in ["J1", "J2", "J3"] { d.jobs.push(Job { id: id.into(), state: "running".into(), lease: "L1".into(), node: "box-a".into(), attempts: 1, ..Default::default() }) }).unwrap();
+        let log = c.home.join("J.log");
+        for (id, e) in [("J1", "L1 ended (released)"), ("J2", "L2 ended (cancelled): cancelled by user")] {
+            assert!(ended_by_hand(&c, id, e));
+            finish(&c, id, Err(e.into()), &log);
+            let j = get(&c, id).unwrap();
+            assert_eq!((j.state.as_str(), j.note.as_str()), ("cancelled", e));
+            assert!(!again(&c, id, "box box-a lost"), "an ended job stays ended");
+        }
+        assert!(!ended_by_hand(&c, "J3", "L1 ended (expired)"));
+        assert!(again(&c, "J3", "box box-a lost (L1 ended (expired))"));
+        assert_eq!(get(&c, "J3").unwrap().state, "queued");
         let _ = std::fs::remove_dir_all(&c.home);
     }
 
@@ -1387,6 +1579,30 @@ mod tests {
         let home = c.repo.parent().unwrap().to_path_buf();
         drop(c);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_timed_successor_inherits_the_chains_first_ask_once_ready() {
+        let c = ctx("timed-chain");
+        let timed = |cmd: &str, after: &[&str]| req(cmd, after).replace("\"kind\":\"test\"", "\"kind\":\"timed\"");
+        submit_line(&c, "", true, &[
+            timed("first", &[]), timed("next", &["@1"]), timed("last", &["@2"]),
+            req("plain", &["@1"]), timed("other", &["@1"]).replace("lane1", "lane2"),
+            timed("blocked", &["@1", "@3"]),
+        ]).unwrap();
+        set(&c, "J1", |j| { j.asked_ms = 10; j.state = "running".into(); });
+        assert!(chain_successors(&c, "J1").is_empty(), "not before a successful finish");
+        finish(&c, "J1", Ok(0), &c.logs("missing.log"));
+        assert_eq!(chain_successors(&c, "J1"), vec!["J2"]);
+        assert_eq!(get(&c, "J2").unwrap().asked_ms, 10);
+        assert!(c.store.read(|d| d.jobs[2..].iter().all(|j| j.asked_ms == 0)), "only ready timed successors in this lane inherit");
+        set(&c, "J1", |j| j.asked_ms = 20);
+        chain_successors(&c, "J1");
+        assert_eq!(get(&c, "J2").unwrap().asked_ms, 10, "an assigned place never changes");
+        finish(&c, "J2", Ok(0), &c.logs("missing.log"));
+        assert_eq!(chain_successors(&c, "J2"), vec!["J3"]);
+        assert_eq!(get(&c, "J3").unwrap().asked_ms, 10, "the whole chain keeps the first ask");
+        std::fs::remove_dir_all(&c.home).unwrap();
     }
 
     #[test]

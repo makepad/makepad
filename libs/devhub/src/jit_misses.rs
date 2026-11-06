@@ -124,6 +124,9 @@ struct Miss {
     closed_ms: u64,
     /// how to see it again, for one filed by hand (`jit miss add --repro`)
     repro: String,
+    /// what its package's build read when the JIT last failed on it ([`crate_inputs`]): other
+    /// inputs, another JIT try
+    inputs: String,
 }
 
 impl Miss {
@@ -134,6 +137,7 @@ impl Miss {
             ("lane", s(&self.lane)), ("pair", obj(vec![("work", s(&self.pair.work)), ("main", s(&self.pair.main))])),
             ("first_ms", Value::Int(self.first_ms as i64)), ("last_ms", Value::Int(self.last_ms as i64)),
             ("count", Value::Int(self.count as i64)), ("closed_ms", Value::Int(self.closed_ms as i64)), ("repro", s(&self.repro)),
+            ("inputs", s(&self.inputs)),
         ])
     }
 
@@ -145,7 +149,7 @@ impl Miss {
         }
         let n = |k| v.get(k).and_then(Value::as_u64).unwrap_or(0);
         let pair = v.get("pair").map(|p| crate::state::Pair::new(text(p, "work"), text(p, "main"))).unwrap_or_default();
-        Ok(Self { id: id.into(), pkg: text(v, "pkg").into(), target: text(v, "target").into(), error: errors, lane: text(v, "lane").into(), pair, first_ms: n("first_ms"), last_ms: n("last_ms"), count: n("count"), closed_ms: n("closed_ms"), repro: text(v, "repro").into() })
+        Ok(Self { id: id.into(), pkg: text(v, "pkg").into(), target: text(v, "target").into(), error: errors, lane: text(v, "lane").into(), pair, first_ms: n("first_ms"), last_ms: n("last_ms"), count: n("count"), closed_ms: n("closed_ms"), repro: text(v, "repro").into(), inputs: text(v, "inputs").into() })
     }
 
     fn touch(&mut self, req: &Value, now: u64, set_pair: bool) -> Result<(), String> {
@@ -238,6 +242,43 @@ pub(crate) fn behind_work_jit(repo: &Path, pin: &crate::state::Pair) -> Option<S
 #[cfg(not(feature = "checkout"))]
 pub(crate) fn behind_work_jit(_: &Path, _: &crate::state::Pair) -> Option<String> { None }
 
+/// What a package's build reads of the lane's trees, as one key (its miss's, [`Miss::inputs`]):
+/// each file under its own and its path dependencies' dirs ([`crate::orch::roll::crate_dirs_from`])
+/// and the workspace's root manifests, by git blob id, as the commits of `pin` hold them with the
+/// lane's edits on top ([`crate::lease::ship::uncommitted`]: what ships with its runs). An edit
+/// and its commit key the same. Err: the trees or the package cannot be read.
+#[cfg(feature = "checkout")]
+pub(crate) fn crate_inputs(repo: &Path, pin: &crate::lease::Pin, pkg: &str) -> Result<String, String> {
+    use crate::orch::ci::{package_dirs, Tree};
+    let pair = crate::state::Pair::new(&pin.makepad, pin.commercial.as_deref().unwrap_or(""));
+    let tree = Tree::at(repo, &pair)?;
+    let dir = package_dirs(&tree).remove(pkg).ok_or_else(|| format!("no package {pkg} at {}", pair.short()))?;
+    let dirs = crate::orch::roll::crate_dirs_from(&dir, &|p| tree.read(p));
+    let under = |p: &str| ["Cargo.toml", ".cargo/config.toml"].contains(&p) || dirs.iter().any(|d| d.is_empty() || p.strip_prefix(d.as_str()).is_some_and(|rest| rest.starts_with('/')));
+    let (edited, deleted) = crate::lease::ship::uncommitted(repo, pin)?;
+    let mut files: std::collections::BTreeMap<String, String> = tree.files.iter().filter(|f| under(f)).map(|f| (f.clone(), tree.blob(f).unwrap_or("").to_string())).collect();
+    for f in deleted.iter().filter(|f| under(f)) { files.remove(f); }
+    for f in edited.into_iter().filter(|f| under(f)) {
+        let path = repo.join(&f);
+        let bytes = match std::fs::symlink_metadata(&path) {
+            Ok(m) if m.file_type().is_symlink() => std::fs::read_link(&path).map(|t| t.to_string_lossy().into_owned().into_bytes()),
+            _ => std::fs::read(&path),
+        }.map_err(|e| format!("{}: {e}", path.display()))?;
+        files.insert(f, makepad_git::oid::hash_object("blob", &bytes).to_hex());
+    }
+    let text: String = files.iter().map(|(f, blob)| format!("{f}\t{blob}\n")).collect();
+    Ok(makepad_network::digest::sha256_hash(text.as_bytes())[..8].iter().map(|b| format!("{b:02x}")).collect())
+}
+#[cfg(not(feature = "checkout"))]
+pub(crate) fn crate_inputs(_: &Path, _: &crate::lease::Pin, _: &str) -> Result<String, String> { Ok(String::new()) }
+
+/// [`crate_inputs`] of `pkg` in the lane's worktree `repo` at its pin `rev`; None: no worktree or
+/// pin, or they cannot be read.
+pub(crate) fn inputs_at(repo: &str, rev: &str, pkg: &str) -> Option<String> {
+    let pin = crate::lease::Pin::of_rev(rev).filter(|_| !repo.is_empty())?;
+    crate_inputs(Path::new(repo), &pin, pkg).ok()
+}
+
 /// Whether the JIT's inputs differ between the pair of a miss's last JIT failure and the
 /// requester's (the JIT id changed): CI's own JIT-input rule. Commits git cannot compare
 /// count as changed (one JIT attempt, and a real miss reopens its row); no repo: unchanged.
@@ -289,7 +330,7 @@ pub(crate) fn serve(home: &Path, line: &str, now: u64, event: &dyn Fn(&str, &Val
             if pkg.is_empty() || error.is_empty() { return Err("jit miss add <pkg> \"<error line>\" [--repro \"<cmd>\"]".into()); }
             let i = entries.iter().position(|m| m.pkg == pkg && m.target == "manual" && m.closed_ms == 0 && m.error.first().map(String::as_str) == Some(error)).unwrap_or_else(|| {
                 let id = entries.iter().filter_map(|m| m.id[1..].parse::<u64>().ok()).max().unwrap_or(0) + 1;
-                entries.push(Miss { id: format!("M{id}"), pkg: pkg.into(), target: "manual".into(), error: vec![error.into()], lane: String::new(), pair: Default::default(), first_ms: now, last_ms: now, count: 0, closed_ms: 0, repro: String::new() });
+                entries.push(Miss { id: format!("M{id}"), pkg: pkg.into(), target: "manual".into(), error: vec![error.into()], lane: String::new(), pair: Default::default(), first_ms: now, last_ms: now, count: 0, closed_ms: 0, repro: String::new(), inputs: String::new() });
                 entries.len() - 1
             });
             let m = &mut entries[i];
@@ -311,7 +352,11 @@ pub(crate) fn serve(home: &Path, line: &str, now: u64, event: &dyn Fn(&str, &Val
                 if let Some(i) = existing {
                     if let Some(pin) = crate::lease::Pin::of_rev(text(&req, "rev")) {
                         let to = crate::state::Pair::new(&pin.makepad, pin.commercial.as_deref().unwrap_or(""));
-                        if jit_changed(text(&req, "repo"), &entries[i].pair, &to) {
+                        // the JIT's inputs changed, or the package's: the miss was the JIT's
+                        // failure on others (M64 kept a crate's E0700 on cargo after its line
+                        // changed, 11-06)
+                        let repo = text(&req, "repo");
+                        if jit_changed(repo, &entries[i].pair, &to) || (!repo.is_empty() && crate_inputs(Path::new(repo), &pin, pkg).ok().as_deref() != Some(entries[i].inputs.as_str())) {
                             entries[i].closed_ms = now;
                             write_ledger(home, &path, &entries)?;
                             let value = entries[i].value();
@@ -331,12 +376,19 @@ pub(crate) fn serve(home: &Path, line: &str, now: u64, event: &dyn Fn(&str, &Val
             if errors.is_empty() { return Err("jit misses: error lines required".into()); }
             let i = entries.iter().position(|m| m.pkg == pkg && m.target == target && m.error.first() == errors.first()).unwrap_or_else(|| {
                 let id = entries.iter().filter_map(|m| m.id[1..].parse::<u64>().ok()).max().unwrap_or(0) + 1;
-                entries.push(Miss { id: format!("M{id}"), pkg: pkg.into(), target: target.into(), error: errors.clone(), lane: String::new(), pair: Default::default(), first_ms: now, last_ms: now, count: 0, closed_ms: 0, repro: String::new() });
+                entries.push(Miss { id: format!("M{id}"), pkg: pkg.into(), target: target.into(), error: errors.clone(), lane: String::new(), pair: Default::default(), first_ms: now, last_ms: now, count: 0, closed_ms: 0, repro: String::new(), inputs: String::new() });
                 entries.len() - 1
             });
             let action = if verb == "lookup" && existing.is_some() { "used" } else { "recorded" };
             entries[i].touch(&req, now, action == "recorded")?;
             entries[i].error = errors;
+            if action == "recorded" {
+                // a record's: those its failing JIT run read, as its client read them when the run
+                // shipped, never the lane's once cargo has answered (M64's lane edited its crate
+                // in between); a miss a lookup seeds from CI's error, the lane's now. None
+                // (unreadable) equals no lookup's: the next one tries the JIT.
+                entries[i].inputs = if verb == "record" { text(&req, "inputs").to_string() } else { inputs_at(text(&req, "repo"), text(&req, "rev"), pkg).unwrap_or_default() };
+            }
             (i, action)
         }
         _ => return Err("jit misses [--all] | close <id>".into()),
@@ -382,6 +434,63 @@ mod tests {
         git(&repo, &["commit", "-qam", "std"]);
         assert_eq!(behind_work_jit(&repo, &pin).as_deref(), Some(pin.work.as_str()));
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// A miss is the JIT's failure on its package's inputs: an edit to the package or a crate it
+    /// depends on by path (committed or not) tries the JIT again; an edit elsewhere does not, and
+    /// a commit of the same edit is the same inputs.
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn a_miss_is_retried_once_its_crates_inputs_change() {
+        let repo = std::env::temp_dir().join(format!("devhub-miss-inputs-{}", std::process::id()));
+        let home = repo.with_extension("home");
+        let _ = (std::fs::remove_dir_all(&repo), std::fs::remove_dir_all(&home));
+        let git = |args: &[&str]| crate::orch::git(&repo, &[&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"][..], args].concat()).unwrap().trim().to_string();
+        let write = |p: &str, text: &str| { let f = repo.join(p); std::fs::create_dir_all(f.parent().unwrap()).unwrap(); std::fs::write(f, text).unwrap(); };
+        write("Cargo.toml", "[workspace]\nmembers = [\"tools/run\", \"libs/relax\", \"apps/a\", \"libs/b\", \"apps/c\"]\n");
+        write("tools/run/Cargo.toml", "[package]\nname = \"makepad-run\"\n[dependencies]\nrelax = { path = \"../../libs/relax\" }\n");
+        write("libs/relax/Cargo.toml", "[package]\nname = \"relax\"\n");
+        write("apps/a/Cargo.toml", "[package]\nname = \"a\"\n[dependencies]\nb = { path = \"../../libs/b\" }\n");
+        write("apps/a/src/lib.rs", "pub fn f() -> impl Sized { b::g() }\n");
+        write("libs/b/Cargo.toml", "[package]\nname = \"b\"\n");
+        write("libs/b/src/lib.rs", "pub fn g() {}\n");
+        write("apps/c/Cargo.toml", "[package]\nname = \"c\"\n");
+        write("apps/c/src/lib.rs", "\n");
+        git(&["init", "-q", "-b", "work"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        let events = Mutex::new(Vec::new());
+        let dir = repo.to_string_lossy().into_owned();
+        // a record carries the inputs its JIT run shipped, as the client reads them then
+        let ask = |verb: &str, sha: &str, now: u64, inputs: Option<&str>| {
+            let req = format!(r#"{{"pkg":"a","target":"--lib","lane":"l","rev":"work@{sha}","repo":{},"error":["apps/a/src/lib.rs:1:15: error[E0700]: hidden type captures lifetime"],"inputs":{}}}"#, makepad_remote::json_str(&dir), inputs.map_or("null".to_string(), makepad_remote::json_str));
+            serve(&home, &format!("misses {verb} {req}"), now, &|action, _| events.lock().unwrap().push(action.to_string())).unwrap()
+        };
+        let shipped = |sha: &str| inputs_at(&dir, &format!("work@{sha}"), "a");
+        let base = git(&["rev-parse", "HEAD"]);
+        assert!(ask("record", &base, 1, shipped(&base).as_deref()).contains("\"id\":\"M1\""));
+        assert!(ask("lookup", &base, 2, None).contains("\"id\":\"M1\""), "the same inputs: cargo's verdict stands");
+        write("apps/c/src/lib.rs", "pub fn h() {}\n");
+        assert!(ask("lookup", &base, 3, None).contains("\"id\":\"M1\""), "a crate it does not build");
+        write("libs/b/src/lib.rs", "pub fn g() -> u8 { 1 }\n");
+        assert_eq!(ask("lookup", &base, 4, None), "null", "a crate it builds changed: the JIT tries again");
+        assert_eq!(events.lock().unwrap().last().map(String::as_str), Some("retried"));
+        // the JIT failed again on these: the miss reopens, at them
+        assert!(ask("record", &base, 5, shipped(&base).as_deref()).contains("\"closed_ms\":0"));
+        assert!(ask("lookup", &base, 6, None).contains("\"id\":\"M1\""));
+        git(&["commit", "-qam", "b"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        assert!(ask("lookup", &head, 7, None).contains("\"id\":\"M1\""), "its edit committed: the same inputs");
+        // M64: the lane edits its crate between the JIT's failure and cargo's answer; the miss is
+        // keyed by what the JIT read, so the next lookup tries the edit on it
+        let before_edit = shipped(&head);
+        write("libs/b/src/lib.rs", "pub fn g() -> u16 { 2 }\n");
+        assert!(ask("record", &head, 8, before_edit.as_deref()).contains("\"closed_ms\":0"));
+        assert_eq!(ask("lookup", &head, 9, None), "null", "the edit the JIT never read is tried");
+        // a client that could not read them keys it by none, which no lookup's are
+        assert!(ask("record", &head, 10, None).contains("\"closed_ms\":0"));
+        assert_eq!(ask("lookup", &head, 11, None), "null");
+        let _ = (std::fs::remove_dir_all(&repo), std::fs::remove_dir_all(&home));
     }
 
     #[test]
