@@ -2156,7 +2156,6 @@ mod test {
         CompressionStrategy, CompressorOxide, TDEFLFlush, TDEFLStatus, DEFAULT_FLAGS,
     };
     use crate::decompress::deflate_decompress_vec;
-    use std::vec;
 
     #[test]
     fn u16_to_slice() {

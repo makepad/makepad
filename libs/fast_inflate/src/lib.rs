@@ -130,6 +130,25 @@ mod part_tests {
         }
         assert_eq!(super::inflate::decompress_to_vec(&z).unwrap(), data);
     }
+
+    /// The same flushed parts, stored and compressed, repeated in any order and ended by an
+    /// empty last part, inflate byte for byte to their inputs in that order. A part compressed
+    /// once can stand in for every run of the same bytes (a layer image's empty rows).
+    #[test]
+    fn repeated_stored_and_flushed_parts_inflate_byte_exact() {
+        let zeros = vec![0u8; 2401 * 64];
+        let row: Vec<u8> = (0..2401u32).map(|i| (i * 37 % 251) as u8).collect();
+        let parts: [(&[u8], u8); 4] = [(&zeros, 6), (&row, 0), (&row, 6), (&zeros[..2401], 1)];
+        let made: Vec<Vec<u8>> = parts.iter().map(|(p, level)| super::deflate::compress_part_to_vec(p, *level, false)).collect();
+        let order = [0usize, 0, 1, 3, 2, 2, 0, 1, 3, 3, 0];
+        let (mut z, mut want) = (Vec::new(), Vec::new());
+        for &k in &order {
+            z.extend_from_slice(&made[k]);
+            want.extend_from_slice(parts[k].0);
+        }
+        z.extend(super::deflate::compress_part_to_vec(&[], 6, true));
+        assert_eq!(super::inflate::decompress_to_vec(&z).unwrap(), want);
+    }
 }
 
 #[cfg(test)]
