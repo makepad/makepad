@@ -12,8 +12,10 @@
 use std::path::Path;
 
 /// The files `diff` changes or adds, each with its content after the patch, in the diff's order.
-/// `read` gives a path's content before it (None: there is no such file).
-pub fn apply(diff: &str, read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Vec<(String, Vec<u8>)>, String> {
+/// `read` gives a path's content before it (None: there is no such file). A path that is not one
+/// inside the worktree (absolute, or with `..` in it) is refused before anything is read: `+++
+/// /abs/x` read a file from outside it, and a hunk that did not fit printed its line (11-06).
+pub fn apply(diff: &str, read: &dyn Fn(&str) -> Result<Option<Vec<u8>>, String>) -> Result<Vec<(String, Vec<u8>)>, String> {
     let lines: Vec<&str> = diff.split_inclusive('\n').collect();
     let mut out: Vec<(String, Vec<u8>)> = Vec::new();
     let mut i = 0;
@@ -29,6 +31,9 @@ pub fn apply(diff: &str, read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Vec<(
         let new = lines.get(i + 1).and_then(|l| l.strip_prefix("+++ ")).ok_or_else(|| format!("line {}: `--- {}` without its `+++` line", i + 1, old.trim_end()))?;
         let (old, new) = (path_of(old, "a/"), path_of(new, "b/"));
         let path = new.ok_or_else(|| format!("deletes {}: a debug patch only changes or adds files", old.unwrap_or("?")))?;
+        if let Some(p) = [old, Some(path)].into_iter().flatten().find(|p| !super::ship::inside(p)) {
+            return Err(format!("{p}: not a path inside the worktree (absolute, or with `..` or `.` in it)"));
+        }
         if old.is_some_and(|o| o != path) {
             return Err(format!("renames {} to {path}: a debug patch only changes or adds files", old.unwrap_or("?")));
         }
@@ -36,9 +41,9 @@ pub fn apply(diff: &str, read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Vec<(
             return Err(format!("{path}: twice in one patch"));
         }
         let before = match old {
-            None if read(path).is_some() => return Err(format!("adds {path}, which the worktree has")),
+            None if read(path)?.is_some() => return Err(format!("adds {path}, which the worktree has")),
             None => Vec::new(),
-            Some(_) => read(path).ok_or_else(|| format!("{path}: not in the worktree"))?,
+            Some(_) => read(path)?.ok_or_else(|| format!("{path}: not in the worktree"))?,
         };
         let text = String::from_utf8(before).map_err(|_| format!("{path}: not text"))?;
         i += 2;
@@ -78,9 +83,22 @@ pub fn apply(diff: &str, read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Vec<(
     Ok(out)
 }
 
-/// [`apply`] with each file's content as the worktree at `root` holds it.
+/// [`apply`] with each file's content as the worktree at `root` holds it. A path through a symlink
+/// is refused: a ship sends a link as a link, and what it points at may be outside the worktree.
 pub fn apply_in(root: &Path, diff: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
-    apply(diff, &|p| std::fs::read(root.join(p)).ok())
+    apply(diff, &|p| {
+        let mut at = root.to_path_buf();
+        for part in p.split('/') {
+            at.push(part);
+            match std::fs::symlink_metadata(&at) {
+                Ok(m) if m.file_type().is_symlink() => return Err(format!("{p}: through the symlink {}, which a ship sends as a link", at.strip_prefix(root).unwrap_or(&at).display())),
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(format!("{p}: {e}")),
+            }
+        }
+        std::fs::read(&at).map(Some).map_err(|e| format!("{p}: {e}"))
+    })
 }
 
 /// A diff line's path without its `a/` or `b/` (None: /dev/null).
@@ -152,7 +170,7 @@ mod tests {
 
     fn run(files: &[(&str, &str)], diff: &str) -> Result<Vec<(String, String)>, String> {
         let files: HashMap<String, Vec<u8>> = files.iter().map(|(p, t)| (p.to_string(), t.as_bytes().to_vec())).collect();
-        Ok(apply(diff, &|p| files.get(p).cloned())?.into_iter().map(|(p, t)| (p, String::from_utf8(t).unwrap())).collect())
+        Ok(apply(diff, &|p| Ok(files.get(p).cloned()))?.into_iter().map(|(p, t)| (p, String::from_utf8(t).unwrap())).collect())
     }
 
     const SRC: &str = "fn a() {\n    one();\n}\n\nfn b() {\n    two();\n}\n";
@@ -187,6 +205,47 @@ mod tests {
         let missing = "--- a/src/y.rs\n+++ b/src/y.rs\n@@ -1 +1 @@\n-a\n+b\n";
         assert_eq!(run(&[("src/x.rs", SRC)], missing).unwrap_err(), "src/y.rs: not in the worktree");
         assert_eq!(run(&[], "just words\n").unwrap_err(), "no file in it");
+    }
+
+    /// A path that leaves the worktree, absolute or through `..`, is refused before any file is
+    /// read: `+++ /abs/x` read, and would have shipped, a file from outside it (11-06).
+    #[test]
+    fn a_path_outside_the_worktree_is_refused_unread() {
+        let reads = std::cell::Cell::new(0);
+        for (diff, path) in [
+            ("--- /etc/x.conf\n+++ /etc/x.conf\n@@ -1 +1 @@\n-a\n+b\n", "/etc/x.conf"),
+            ("--- a/../x.rs\n+++ b/../x.rs\n@@ -1 +1 @@\n-a\n+b\n", "../x.rs"),
+            ("--- /dev/null\n+++ b/src/../../x.rs\n@@ -0,0 +1 @@\n+a\n", "src/../../x.rs"),
+            ("--- /dev/null\n+++ /var/tmp/new.rs\n@@ -0,0 +1 @@\n+a\n", "/var/tmp/new.rs"),
+            ("--- a/src/./x.rs\n+++ b/src/./x.rs\n@@ -1 +1 @@\n-a\n+b\n", "src/./x.rs"),
+        ] {
+            let e = apply(diff, &|_| { reads.set(reads.get() + 1); Ok(Some(b"a\n".to_vec())) }).unwrap_err();
+            assert_eq!(e, format!("{path}: not a path inside the worktree (absolute, or with `..` or `.` in it)"));
+        }
+        assert_eq!(reads.get(), 0, "nothing outside was read");
+    }
+
+    /// In a real worktree a path through a symlink is refused (a ship sends the link, never what it
+    /// points at); a file of the worktree itself patches.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_through_a_symlink_is_refused_in_a_worktree() {
+        let base = std::env::temp_dir().join(format!("devhub-patch-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (root, outside) = (base.join("wt"), base.join("outside"));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("src/x.rs"), SRC).unwrap();
+        std::fs::write(outside.join("y.rs"), "a\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
+        std::os::unix::fs::symlink(outside.join("y.rs"), root.join("src/y.rs")).unwrap();
+        for path in ["out/y.rs", "src/y.rs"] {
+            let e = apply_in(&root, &format!("--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-a\n+b\n")).unwrap_err();
+            assert!(e.starts_with(&format!("{path}: through the symlink ")), "{e}");
+        }
+        let fine = apply_in(&root, "--- a/src/x.rs\n+++ b/src/x.rs\n@@ -2 +2 @@\n-    one();\n+    uno();\n").unwrap();
+        assert_eq!(fine[0].0, "src/x.rs");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A last line without a newline keeps it so, on either side.

@@ -199,6 +199,41 @@ mod tests {
         }
     }
 
+    /// A node's number used as its machine's name is one: "<N>'s", "<N>, <date>", "<N> sat", and in
+    /// parentheses with a date. Seven such comments reached work through the hooks (11-06). An exit
+    /// code, a count, a lease or a line number is none, and without the untracked file's numbers
+    /// the shapes are off. Fake numbers here, defined as the untracked file defines the real ones;
+    /// the tree scan takes the same rules.
+    #[cfg(unix)]
+    #[test]
+    fn a_node_number_as_a_machine_is_one_and_a_count_is_not() {
+        let staged = Staged::new().unwrap();
+        let defs = staged.0.join("fake-patterns");
+        std::fs::write(&defs, "define node-number 90[1-7]\n").unwrap();
+        let scan = |dir: &Path, patterns: &Path, args: &[&str], input: &str| {
+            let mut child = Command::new("sh").arg(staged.0.join("scan.sh")).args(args).current_dir(dir).env("MAKEPAD_PRIVATE_PATTERNS", patterns).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+            child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+            String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+        };
+        let hit = |s: &str| scan(&root(), &defs, &["text", "t"], &format!("{s}\n")).contains("t:1: node-number");
+        for s in ["(a build's target and log, 901, 11-06)", "(903 sat as a bench box, 11-06)", "an override ended L515981, 905's lease", "(L515981, 905's, 11-06)", "the baseline: 901, 2026-11-06)", "(902, the bench box, 11-06)", "(11-06, 904)", "(11-06 on 901 and 902)", "906 crashed twice", "the build log 905's tail"] {
+            assert!(hit(s), "{s}");
+        }
+        for s in ["exit 901", "took(\"L2\", 902, 8)", "(exit 901, 11-06)", "L901's lease", "W903 sat", "#905's", "a.rs:901, 11-06", "line 902 is short", "903 ms (11-06)", "(11-06, 905 ms)", "test result: ok. 905 passed; 0 failed", "exit code 901 was its panic", "(took 902 ms, 11-06)", "v1.903's", "(901 ms, 11-06)", "the 9015's", "height: 904 is_multiline", "// 901 is indivisible by 3", "field 901 has trailing bytes"] {
+            assert!(!hit(s), "{s}");
+        }
+        let none = staged.0.join("no-patterns");
+        std::fs::write(&none, "").unwrap();
+        assert_eq!(scan(&root(), &none, &["text", "t"], "(901, 11-06)\n"), "", "no numbers defined: the shapes are off");
+        // the tree scan: its candidate lines come from the same rules, defines put in
+        let repo = staged.0.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("a.txt"), "exit 903\n(903 sat, 11-06)\n").unwrap();
+        let git = |args: &[&str]| crate::git_exec::command().arg("-C").arg(&repo).args(args).output().unwrap();
+        assert!(git(&["init", "-q", "--template="]).status.success() && git(&["add", "a.txt"]).status.success());
+        assert_eq!(scan(&repo, &defs, &["tree"], "").lines().next(), Some("a.txt:2: node-number"));
+    }
+
     /// A lane's commit with a private shape in its message is refused as it is written, in both
     /// repositories; a clean one goes in, and the hook stays as it is when installed again.
     #[test]
