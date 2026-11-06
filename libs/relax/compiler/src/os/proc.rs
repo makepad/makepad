@@ -312,7 +312,11 @@ mod imp {
     /// A shared library by absolute path (--allow-c's native library), its symbols global.
     pub fn load_path(path: &str) -> bool {
         // RTLD_NOW | RTLD_GLOBAL
-        unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 0x100).is_null() }
+        let ok = unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 0x100).is_null() };
+        if ok {
+            crate::os::hidden::note_native_lib(path);
+        }
+        ok
     }
 
     pub fn load_library(name: &str, framework: bool) -> bool {
@@ -476,7 +480,11 @@ mod imp {
     /// A shared library by absolute path (--allow-c's native library), its symbols global.
     pub fn load_path(path: &str) -> bool {
         // RTLD_NOW | RTLD_GLOBAL
-        unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 0x100).is_null() }
+        let ok = unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 0x100).is_null() };
+        if ok {
+            crate::os::hidden::note_native_lib(path);
+        }
+        ok
     }
 
     pub fn load_library(name: &str, framework: bool) -> bool {
@@ -542,7 +550,11 @@ mod imp {
     /// A shared library by absolute path (--allow-c's native library), its symbols global.
     pub fn load_path(path: &str) -> bool {
         // RTLD_NOW | RTLD_GLOBAL
-        unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 8).is_null() }
+        let ok = unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 8).is_null() };
+        if ok {
+            crate::os::hidden::note_native_lib(path);
+        }
+        ok
     }
 
     pub fn load_library(name: &str, framework: bool) -> bool {

@@ -5782,6 +5782,11 @@ impl Unit {
         if p.is_null() {
             p = unsafe { os::proc::find_system(name.as_ptr()) };
         }
+        if p.is_null() {
+            // a symbol the native library keeps hidden (C built with -fvisibility=hidden, asm
+            // with .private_extern): its symbol table still places it
+            p = os::hidden::find_hidden(link.as_bytes());
+        }
         if !p.is_null() {
             return Some(p as u64);
         }
