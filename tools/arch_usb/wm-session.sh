@@ -26,14 +26,15 @@ if test ! -x target/release/makepad-app-aihub || test "${MAKEPAD_WM_BUILD:-0}" =
     cargo run --offline --release -p makepad-app-wm --bin makepad-wm-build -- "${wm_flags[@]}" -- hub sandbox
 fi
 
-# The saved display arrangement (order, per-screen modes, render-on GPU):
-# ${XDG_CONFIG_HOME:-$HOME/.config}/makepad/wm/display-layout, migrated
-# from the legacy display-gpu file for one release when display-layout
-# does not exist yet. See tools/linux/display-layout-env.sh (and
-# apps/wm/src/shell/display_layout.rs, the pure model) for the file
-# format and the exact resolution rule. Never fatal: a missing or
-# malformed file falls back to the renderer's automatic choices, logged
-# to stderr.
+# The saved display layout (each set of monitors' screens, mirrors, modes
+# and main screen, read by the renderer itself; the render-on GPU and the
+# virtual display): ${XDG_CONFIG_HOME:-$HOME/.config}/makepad/wm/display-layout,
+# the render-on GPU migrated from the legacy display-gpu file for one
+# release when display-layout does not exist yet. The renderer finds the
+# file itself; see tools/linux/display-layout-env.sh for what this
+# exports. Never fatal: a
+# missing or malformed file falls back to the renderer's automatic
+# choices, logged to stderr.
 if test -r "$MAKEPAD_WM_ROOT/tools/linux/display-layout-env.sh"; then
     . "$MAKEPAD_WM_ROOT/tools/linux/display-layout-env.sh"
 fi

@@ -3,30 +3,36 @@
 //! The Display dropdown is about what the screens show, packed tight so
 //! the whole of it fits a short screen without scrolling:
 //!
-//! * The title row carries the arrangement switch: "Extended" (one wide
-//!   desktop) or "Mirror" (one desktop on every screen). In Mirror an
-//!   "Optimise for" row picks the screen the desktop is sized for; it gets
-//!   its native mode, the others show the same picture scaled to fit.
-//! * One compact block per screen, left to right: its title ("Built-in ·
-//!   eDP-1", "HDMI · 3840×2160") with move and main-screen buttons, then a
-//!   resolution picker (the screen's modes, native marked) and a refresh
-//!   picker (the rates of the chosen resolution). A picker unfolds as a
-//!   grid of chips under its screen.
-//! * Extended / Mirror and "Optimise for" switch at once (no output is
-//!   reinitialised) and are saved when the renderer takes them; a refusal
-//!   is noted under the switch.
+//! * The arrangement diagram: the screens side by side, as the desktop has
+//!   them, each box its screen at one scale for all, with the chips of the
+//!   monitors it shows (the monitor's name, its connector, its mode) inside
+//!   it, or under it when the boxes are too small for them. A screen of two
+//!   or more monitors is a mirror ("Mirrored ×2"): rendered once at the
+//!   size of the monitor it is optimised for (its chip says "optimised")
+//!   and scaled to the others ("scaled from W×H"). The main screen says
+//!   Main.
+//! * Drag a chip onto a screen to mirror it, into a gap or the New screen
+//!   slot for a screen of its own, or onto the Off strip; drag a screen
+//!   into a gap to move it. The title row says what the drop does and
+//!   the target lights up.
+//! * A click picks a monitor; its details follow the Off strip: its mode
+//!   (the resolution and refresh pickers, unfolding as chips), its screen
+//!   (Make main and, in a mirror, Optimise for) and Move to (each screen,
+//!   New screen, Off).
+//! * Every edit goes into a draft and Apply sends all of it at once. One
+//!   that reinitialises no monitor (a move, optimise for, main) is saved
+//!   as soon as it shows; one that does (a mode, a monitor on or off) asks
+//!   "Keep these settings? Reverting in 15 s" with Keep and Revert. A
+//!   failure is noted under the row and the previous settings are sent
+//!   again (`shell::display_menu`).
 //! * The Desktop row chooses where the desktop's resolution comes from:
-//!   "Panel" (the screens' own modes, as above) or "Virtual" (one fixed
-//!   virtual desktop the panels show scaled to fit, or not at all). Virtual
-//!   adds its Size (follow the Desk Link viewer, a preset, or a custom
-//!   size) and Panels (Mirror (scaled) / Off) rows; the scale slider is
-//!   then the virtual desktop's. Extended / Mirror and Pace by do not
-//!   apply while Virtual.
-//! * Every resolution or refresh change is tried first: "Keep this mode?
-//!   Reverting in 15 s" with Keep and Revert under the controls. A change
-//!   that fails shows the renderer's error there and the previous one is
-//!   sent again; the controls stay usable, so another mode can be tried at
-//!   once. Only kept changes are saved (`shell::display_menu`).
+//!   "Panel" (the monitors, as above) or "Virtual" (one fixed virtual
+//!   desktop the panels show scaled to fit, or not at all). Virtual adds
+//!   its Size (follow the Desk Link viewer, a preset, or a custom size)
+//!   and Panels (Mirror (scaled) / Off) rows in place of the diagram; the
+//!   scale slider is then the virtual desktop's.
+//! * Pace by picks the rate frames follow while several monitors show; it
+//!   applies at once.
 //! * Scale: one slider, live while dragged and saved on release, snapping
 //!   to the multiples (ticks). It is one value for every screen: the
 //!   desktop is one window with one scale, so a per-screen scale is not
@@ -35,13 +41,14 @@
 use super::*;
 use super::super::ui::HAlign;
 use crate::linux_controls::ControlAction;
-use crate::shell::display_layout::{screen_rows, screens_span_gpus, swap_neighbour};
+use crate::shell::display_layout::{connector_suffix, screens_span_gpus};
 use crate::shell::display_menu::{
-    is_virtual, mode_for, step_custom, virtual_mode_label, virtual_size_choices, virtual_size_label, CustomField, native_resolution, rate_after_resolution, rate_label, rates_for, resolution_label, resolutions, screen_title,
-    shown_mode, pacing_choices, pacing_label, Change, Phase, ARRANGEMENT_SLOT,
+    mode_for, monitor_label, native_resolution, output_failure, pacing_choices, pacing_label, rate_after_resolution, rate_label, rates_for,
+    resolution_label, resolutions, shown_mode, step_custom, virtual_mode_label, virtual_size_choices, virtual_size_label, CustomField, DisplayConfig, Phase,
+    Place,
 };
 use crate::shell::system_linux::{Availability, BatteryStatus, GpuInfo, SystemCommand, DISPLAY_SCALE_MAX, DISPLAY_SCALE_MIN};
-use makepad_widgets::makepad_platform::linux_display::{DisplayArrangement, DisplayPacing, LinuxDisplayOutput, VirtualPanels};
+use makepad_widgets::makepad_platform::linux_display::{DisplayPacing, LinuxDisplayOutput, VirtualPanels};
 use makepad_widgets::makepad_platform::linux_input::{
     natural_scroll, pointer_speed, POINTER_SPEED_MAX, POINTER_SPEED_MIN,
 };
@@ -51,16 +58,34 @@ const DEVICE_ROWS: usize = 5;
 /// window's actual scale.
 const DPI_FALLBACK_HUNDREDTHS: u32 = 130;
 // The Display dropdown's metrics, in logical points.
-/// The title row with the Extended | Mirror switch.
+/// The title row.
 const TITLE_H: f64 = 30.0;
 /// A separator between sections.
 const SEP_H: f64 = 9.0;
-/// A screen's title line.
+/// The picked monitor's title line.
 const SCREEN_LINE_H: f64 = 22.0;
 /// A row of controls (pickers, chips, Keep/Revert).
 const CONTROL_H: f64 = 28.0;
-/// Between two screen blocks.
-const SCREEN_GAP: f64 = 6.0;
+/// The arrangement diagram: its padding, the gap between two screens (a
+/// drop target: a new screen there, or a screen moved there), the New
+/// screen slot, the tallest screen's box, the header over each box, a
+/// monitor's chip and its narrowest, the gap between chips and a chip's
+/// inset inside a box.
+const DIAGRAM_PAD: f64 = 8.0;
+const DIAGRAM_GAP: f64 = 14.0;
+const NEW_SLOT_W: f64 = 56.0;
+const BOX_MAX_H: f64 = 150.0;
+const BOX_HEAD_H: f64 = 20.0;
+const OUTPUT_CHIP_H: f64 = 48.0;
+const CHIP_MIN_W: f64 = 92.0;
+const CHIP_GAP: f64 = 3.0;
+const CHIP_INSET: f64 = 4.0;
+/// A screen with no mode yet is drawn this size.
+const UNSIZED_SCREEN: (f64, f64) = (1920.0, 1080.0);
+/// The Off strip under the diagram.
+const OFF_ROW_H: f64 = 32.0;
+/// How far a press on the diagram moves before it is a drag.
+const DRAG_START: f64 = 4.0;
 /// One line of a note (an error takes two).
 const NOTE_LINE_H: f64 = 16.0;
 /// A chip of an unfolded picker.
@@ -137,6 +162,149 @@ pub(crate) enum Chooser {
     Rate,
 }
 
+/// Changes made in the Display menu and not applied yet, made from `base`
+/// (what ran then): a draft whose base no longer runs is dropped.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DisplayDraft {
+    pub base: DisplayConfig,
+    pub config: DisplayConfig,
+}
+
+/// What a press on the arrangement diagram holds: a monitor's chip or a
+/// screen's box.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum DragItem {
+    Output(String),
+    Screen(usize),
+}
+
+/// A press on the diagram: a click until the pointer has moved
+/// `DRAG_START`, a drag after. `grab` is where in `origin` (the pressed
+/// rect) it was taken, so the carried chip stays under the hand.
+#[derive(Clone, Debug)]
+pub(crate) struct DisplayDrag {
+    pub item: DragItem,
+    pub start: Vec2d,
+    pub at: Vec2d,
+    pub grab: Vec2d,
+    pub origin: Rect,
+    pub active: bool,
+}
+
+/// Where a drag can land: on screen `i` (a monitor mirrors it), into the
+/// gap before screen `i` (`i` = the screen count: the New screen slot), or
+/// on the Off strip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DropAt {
+    Screen(usize),
+    Insert(usize),
+    Off,
+}
+
+/// Where one screen sits in the arrangement diagram, relative to its area.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ScreenSlot {
+    /// All of it, top to bottom of the diagram: the drop target, and what a
+    /// press drags.
+    pub column: Rect,
+    /// Its number and badges, over the box.
+    pub head: Rect,
+    /// The screen itself, to scale.
+    pub screen: Rect,
+    /// Its monitors' chips, top to bottom.
+    pub chips: Vec<Rect>,
+    /// The chips sit inside the box (else under it).
+    pub inside: bool,
+}
+
+/// The arrangement diagram for screens of `screens` (their size in pixels
+/// and how many monitors each shows), left to right along their top edges,
+/// in an area `width` wide; and the area's height. One scale for every
+/// screen, width and height alike, as large as the width allows with the
+/// tallest box at most `BOX_MAX_H`. When every box then holds its chips,
+/// they go inside; otherwise each screen's chips go under its box, in a
+/// column at least `CHIP_MIN_W` wide (narrower only when the screens are
+/// too many for that), and the scale shrinks until those columns fit.
+fn diagram_layout(screens: &[((f64, f64), usize)], width: f64) -> (Vec<ScreenSlot>, f64) {
+    let stack = |chips: usize| chips as f64 * (OUTPUT_CHIP_H + CHIP_GAP) - CHIP_GAP;
+    let n = screens.len();
+    if n == 0 {
+        return (Vec::new(), DIAGRAM_PAD * 2.0 + BOX_HEAD_H + OUTPUT_CHIP_H);
+    }
+    let size: Vec<(f64, f64)> = screens.iter().map(|((w, h), _)| if *w >= 1.0 && *h >= 1.0 { (*w, *h) } else { UNSIZED_SCREEN }).collect();
+    let room = (width - DIAGRAM_GAP * (n + 1) as f64 - NEW_SLOT_W - DIAGRAM_PAD).max(n as f64);
+    let chip_w = CHIP_MIN_W.min(room / n as f64);
+    let cap = BOX_MAX_H / size.iter().map(|s| s.1).fold(1.0, f64::max);
+    let widest = (room / size.iter().map(|s| s.0).sum::<f64>()).min(cap);
+    let inside = size
+        .iter()
+        .zip(screens)
+        .all(|((w, h), (_, chips))| w * widest >= chip_w + CHIP_INSET * 2.0 && h * widest >= stack(*chips) + CHIP_INSET * 2.0);
+    let scale = if inside {
+        widest
+    } else {
+        // A box narrower than a chip gets a chip-wide column; the others
+        // share what is left, at one scale.
+        let mut floored = vec![false; n];
+        let mut scale = room / size.iter().map(|s| s.0).sum::<f64>();
+        loop {
+            let short: Vec<usize> = (0..n).filter(|&i| !floored[i] && size[i].0 * scale < chip_w).collect();
+            if short.is_empty() {
+                break;
+            }
+            for i in short {
+                floored[i] = true;
+            }
+            let free: f64 = (0..n).filter(|&i| !floored[i]).map(|i| size[i].0).sum();
+            if free <= 0.0 {
+                break;
+            }
+            scale = (room - chip_w * floored.iter().filter(|f| **f).count() as f64) / free;
+        }
+        scale.min(cap)
+    };
+    let top = DIAGRAM_PAD;
+    let box_top = top + BOX_HEAD_H;
+    let mut x = DIAGRAM_GAP;
+    let mut slots = Vec::with_capacity(n);
+    let mut bottom: f64 = box_top;
+    for ((w, h), (_, chips)) in size.iter().zip(screens) {
+        let (bw, bh) = ((w * scale).floor().max(1.0), (h * scale).round().max(1.0));
+        let cw = if inside { bw } else { bw.max(chip_w.floor()) };
+        let screen = rect(x + ((cw - bw) * 0.5).floor(), box_top, bw, bh);
+        let chip_rects: Vec<Rect> = (0..*chips)
+            .map(|k| {
+                let step = k as f64 * (OUTPUT_CHIP_H + CHIP_GAP);
+                if inside {
+                    rect(screen.pos.x + CHIP_INSET, screen.pos.y + CHIP_INSET + step, bw - CHIP_INSET * 2.0, OUTPUT_CHIP_H)
+                } else {
+                    rect(x, box_top + bh + CHIP_INSET + step, cw, OUTPUT_CHIP_H)
+                }
+            })
+            .collect();
+        bottom = bottom.max(chip_rects.last().map_or(box_top + bh, |r| r.pos.y + r.size.y)).max(box_top + bh);
+        slots.push(ScreenSlot { column: rect(x, top, cw, 0.0), head: rect(x, top, cw, BOX_HEAD_H), screen, chips: chip_rects, inside });
+        x += cw + DIAGRAM_GAP;
+    }
+    let bottom = bottom.ceil();
+    for slot in &mut slots {
+        slot.column.size.y = bottom - top;
+    }
+    (slots, bottom + DIAGRAM_PAD)
+}
+
+/// A row of two buttons on the right: (its text, the left button, the
+/// right button, what is left below).
+fn button_row(rest: Rect) -> (Rect, Rect, Rect, Rect) {
+    let button_w = 76.0;
+    let (row, rest) = cut_top(rest, CONTROL_H);
+    let inner = rect(row.pos.x, row.pos.y + 2.0, row.size.x, row.size.y - 4.0);
+    let right = rect(inner.pos.x + inner.size.x - button_w, inner.pos.y, button_w, inner.size.y);
+    let left = rect(right.pos.x - 4.0 - button_w, inner.pos.y, button_w, inner.size.y);
+    let text = rect(inner.pos.x + 2.0, row.pos.y, (left.pos.x - inner.pos.x - 8.0).max(0.0), row.size.y);
+    (text, left, right, rest)
+}
+
 impl ShellPanel {
     pub(super) fn audio_height(&self) -> f64 {
         let rows = match self.device_picker {
@@ -176,12 +344,6 @@ impl ShellPanel {
         self.restart_confirm = false;
     }
 
-    /// The screen drawn at `row`, while the renderer still lists it.
-    fn screen_at(&self, row: usize) -> Option<LinuxDisplayOutput> {
-        let name = self.screen_targets.get(row)?;
-        self.display_snapshot.outputs.iter().find(|o| o.name == *name).cloned()
-    }
-
     pub(super) fn system_press(&mut self, cx: &mut Cx, hit: Hit) {
         match hit {
             Hit::DevicePicker(input) => {
@@ -198,28 +360,9 @@ impl ShellPanel {
                 self.device_picker = None;
             }
             Hit::InputMute => self.system_action(cx, ControlAction::Command(SystemCommand::ToggleInputMute)),
-            Hit::ScreenMove(row, dir) => {
-                // The left-to-right order that was drawn, with this screen
-                // swapped with its neighbour. Only placed screens move.
-                let placed = &self.screen_targets[..self.screen_placed.min(self.screen_targets.len())];
-                let order = (row < placed.len()).then(|| swap_neighbour(placed, row, dir)).flatten();
-                self.close_display_lists();
-                if let Some(order) = order {
-                    self.system_action(cx, ControlAction::DisplayOrder(order));
-                }
-            }
-            Hit::ScreenMain(row) => {
-                // The name drawn on that row, while the renderer still
-                // drives it; the renderer confirms it through `primary`.
-                let name = self.screen_at(row).filter(|o| o.active && self.in_desktop(o)).map(|o| o.name);
-                self.close_display_lists();
-                if let Some(name) = name {
-                    self.system_action(cx, ControlAction::DisplaySource(name));
-                }
-            }
-            Hit::ScreenResolution(row) | Hit::ScreenRate(row) => {
-                let kind = if matches!(hit, Hit::ScreenRate(_)) { Chooser::Rate } else { Chooser::Resolution };
-                let name = self.screen_targets.get(row).cloned();
+            Hit::OutputResolution | Hit::OutputRate => {
+                let kind = if hit == Hit::OutputRate { Chooser::Rate } else { Chooser::Resolution };
+                let name = self.display_selected(&self.display_config());
                 let open = name.as_ref().is_some_and(|name| self.chooser.as_ref() != Some(&(name.clone(), kind)));
                 self.close_display_lists();
                 if open {
@@ -229,37 +372,47 @@ impl ShellPanel {
             Hit::ChooserItem(index) => {
                 let change = self.chooser_changes.get(index).cloned();
                 self.close_display_lists();
-                if let Some(change) = change {
-                    self.system_action(cx, ControlAction::DisplayTry(change));
+                if let Some((name, mode)) = change {
+                    self.edit_display(|c| c.set_mode(&name, mode));
                 }
             }
-            Hit::Arrangement(mirror) => {
-                let snapshot = &self.display_snapshot;
-                let now = self.display_trials.selected_arrangement(&snapshot.arrangement).clone();
-                let wanted = if !mirror {
-                    Some(DisplayArrangement::Extended)
-                } else if matches!(now, DisplayArrangement::Mirror { .. }) {
-                    None
-                } else {
-                    // Sized for the main screen, else the first one shown.
-                    snapshot
-                        .outputs
-                        .iter()
-                        .find(|o| o.primary)
-                        .or_else(|| snapshot.outputs.iter().find(|o| o.active))
-                        .map(|o| DisplayArrangement::Mirror { optimise_for: o.name.clone() })
-                };
+            Hit::DisplayOptimise(index) => {
+                let name = self.display_optimise.get(index).cloned();
                 self.close_display_lists();
-                if let Some(wanted) = wanted.filter(|wanted| *wanted != now) {
-                    self.system_action(cx, ControlAction::DisplayArrangement(wanted));
+                if let Some(name) = name {
+                    self.edit_display(|c| match c.place_of(&name) {
+                        Some(Place::Screen(screen)) => c.set_optimise_for(screen, &name),
+                        _ => false,
+                    });
                 }
             }
-            Hit::OptimiseFor(row) => {
-                let name = self.screen_at(row).map(|o| o.name);
+            Hit::DisplayMakeMain => {
+                let config = self.display_config();
+                let screen = self.display_selected(&config).and_then(|name| config.place_of(&name));
                 self.close_display_lists();
-                if let Some(optimise_for) = name {
-                    self.system_action(cx, ControlAction::DisplayArrangement(DisplayArrangement::Mirror { optimise_for }));
+                if let Some(Place::Screen(screen)) = screen {
+                    self.edit_display(|c| c.set_main(screen));
                 }
+            }
+            Hit::DisplayMoveTo(index) => {
+                let to = self.display_moves.get(index).copied();
+                let name = self.display_selected(&self.display_config());
+                self.close_display_lists();
+                if let (Some(to), Some(name)) = (to, name) {
+                    self.edit_display(|c| c.move_output(&name, to));
+                }
+            }
+            Hit::DisplayApply => {
+                let draft = self.display_drafted().cloned();
+                self.close_display_lists();
+                self.display_draft = None;
+                if let Some(draft) = draft {
+                    self.system_action(cx, ControlAction::DisplayApply(draft.config));
+                }
+            }
+            Hit::DisplayDiscard => {
+                self.close_display_lists();
+                self.display_draft = None;
             }
             Hit::PacePicker => {
                 let open = !self.pace_open;
@@ -489,40 +642,14 @@ impl ShellPanel {
         if !s.direct {
             return "Managed by the desktop".into();
         }
-        let placed = s.outputs.iter().filter(|o| o.desktop_position.is_some()).count();
-        let shown = if placed > 0 { placed } else { s.outputs.iter().filter(|o| o.active).count() };
-        match (s.outputs.len(), shown) {
-            (0, _) => "No outputs".into(),
-            (_, 0) => "No active output".into(),
-            (_, 1) => "One screen".into(),
+        let mirrored = s.screens.iter().filter(|screen| screen.outputs.len() > 1).count();
+        let screens = match (s.outputs.len(), s.screens.len()) {
+            (0, _) => return "No outputs".into(),
+            (_, 0) => return "No active output".into(),
+            (_, 1) => "One screen".to_string(),
             (_, n) => format!("{n} screens"),
-        }
-    }
-
-    /// A screen's status and whether it is a problem: nothing for a screen
-    /// of the desktop, the renderer's own status for one outside it
-    /// (failed, another GPU's screen still to join, …).
-    fn screen_status(&self, output: &LinuxDisplayOutput) -> (String, bool) {
-        if self.in_desktop(output) {
-            (String::new(), false)
-        } else if output.status.is_empty() {
-            ("Inactive".into(), false)
-        } else {
-            (output.status.clone(), true)
-        }
-    }
-
-    /// Part of the desktop: placed, or active while nothing is placed yet.
-    /// An active screen left out by the GPU's limits is not.
-    /// In Mirror only the screen the desktop is sized for is placed; every
-    /// other active screen shows the same desktop, so it counts too.
-    fn in_desktop(&self, output: &LinuxDisplayOutput) -> bool {
-        let mirror = self.display_snapshot.arrangement != DisplayArrangement::Extended;
-        output.desktop_position.is_some() || (output.active && (mirror || !self.any_placed()))
-    }
-
-    fn any_placed(&self) -> bool {
-        self.display_snapshot.outputs.iter().any(|o| o.desktop_position.is_some())
+        };
+        if mirrored > 0 { format!("{screens} \u{b7} {mirrored} mirrored") } else { screens }
     }
 
     /// The GPU driving `output`: the sysfs label of the card with its PCI
@@ -536,28 +663,16 @@ impl ShellPanel {
             .unwrap_or_else(|| output.card.clone())
     }
 
-    /// Whether row `row` (of `screen_rows`, `placed` of them in the
-    /// desktop) can move left and right.
-    fn screen_moves(&self, row: usize, placed: usize) -> (bool, bool) {
-        let direct = self.display_snapshot.direct && !self.mirror_shown();
-        (direct && row > 0 && row < placed, direct && row + 1 < placed)
-    }
-
-    /// The arrangement the switch shows: the one being tried, else the
-    /// renderer's.
-    fn arrangement_shown(&self) -> DisplayArrangement {
-        self.display_trials.selected_arrangement(&self.display_snapshot.arrangement).clone()
-    }
-
-    /// The arrangement switch's Mirror: never while the desktop is virtual,
-    /// where Extended / Mirror do not apply.
-    fn mirror_shown(&self) -> bool {
-        !self.virtual_desktop() && matches!(self.arrangement_shown(), DisplayArrangement::Mirror { .. })
-    }
-
     /// The desktop is the virtual display (chosen, or the renderer shows it).
     fn virtual_desktop(&self) -> bool {
         self.virtual_saved.is_some() || self.display_snapshot.virtual_display.is_some()
+    }
+
+    /// The arrangement diagram and its details show: the WM drives the
+    /// monitors, the desktop is theirs (not the virtual display) and one
+    /// of them is on a screen.
+    fn arranging(&self) -> bool {
+        self.display_snapshot.direct && !self.virtual_desktop() && !self.display_config().arrangement.screens.is_empty()
     }
 
     /// The Desktop block: the switch, and while virtual the Size row (its
@@ -581,47 +696,146 @@ impl ShellPanel {
         h + SEP_H
     }
 
-    /// The mode the controls of `output` show (`None` is automatic).
-    fn mode_shown<'a>(&'a self, output: &'a LinuxDisplayOutput) -> Option<&'a str> {
-        self.display_trials.selected_mode(&output.name, output.mode_override.as_deref())
+    // ---- the configuration ---------------------------------------------
+
+    /// What the renderer runs, or the configuration being tried or restored.
+    fn display_running(&self) -> DisplayConfig {
+        self.display_trials.shown(DisplayConfig::running(&self.display_snapshot))
+    }
+
+    /// The configuration the menu shows: the draft, else what runs.
+    pub(super) fn display_config(&self) -> DisplayConfig {
+        let running = self.display_running();
+        match &self.display_draft {
+            Some(draft) if draft.base == running => draft.config.clone(),
+            _ => running,
+        }
+    }
+
+    /// The draft that still applies: made from what runs now.
+    fn display_drafted(&self) -> Option<&DisplayDraft> {
+        let running = self.display_running();
+        self.display_draft.as_ref().filter(|d| d.base == running)
+    }
+
+    /// `config` is the draft; one that is what runs is no draft.
+    fn set_display_draft(&mut self, config: DisplayConfig) {
+        let base = self.display_running();
+        self.display_draft = (config != base).then_some(DisplayDraft { base, config });
+    }
+
+    /// One edit of the configuration shown; kept as the draft when it
+    /// changed something.
+    fn edit_display(&mut self, edit: impl FnOnce(&mut DisplayConfig) -> bool) {
+        let mut config = self.display_config();
+        if edit(&mut config) {
+            self.set_display_draft(config);
+        }
+    }
+
+    /// The monitor whose details show: the one picked, else the main
+    /// screen's first.
+    fn display_selected(&self, config: &DisplayConfig) -> Option<String> {
+        self.display_selected
+            .clone()
+            .filter(|name| config.place_of(name).is_some())
+            .or_else(|| config.main.clone())
+            .or_else(|| config.arrangement.screens.first().and_then(|s| s.outputs.first().cloned()))
+    }
+
+    /// What dropping `item` on `on` makes of `config`: `None` when it
+    /// changes nothing (a monitor dropped where it is, a screen next to
+    /// itself, the last monitor turned off).
+    fn display_drop_result(config: &DisplayConfig, item: &DragItem, on: DropAt) -> Option<DisplayConfig> {
+        let mut out = config.clone();
+        let changed = match (item, on) {
+            (DragItem::Output(name), DropAt::Screen(i)) => out.move_output(name, Place::Screen(i)),
+            (DragItem::Output(name), DropAt::Insert(k)) => out.move_output(name, Place::NewScreen(k)),
+            (DragItem::Output(name), DropAt::Off) => out.move_output(name, Place::Off),
+            (DragItem::Screen(i), DropAt::Insert(k)) => out.move_screen(*i, k),
+            (DragItem::Screen(_), _) => false,
+        };
+        changed.then_some(out)
+    }
+
+    /// The drop target under `p` for the drag in progress, when dropping
+    /// there would change something. A screen dropped on another lands on
+    /// the nearer side of it.
+    fn display_drop_at(&self, config: &DisplayConfig, p: Vec2d) -> Option<DropAt> {
+        let drag = self.display_drag.as_ref().filter(|d| d.active)?;
+        let (on, r) = self.display_drops.iter().find(|(_, r)| contains(*r, p)).copied()?;
+        let on = match (&drag.item, on) {
+            (DragItem::Screen(_), DropAt::Screen(i)) => DropAt::Insert(if p.x < r.pos.x + r.size.x * 0.5 { i } else { i + 1 }),
+            (_, on) => on,
+        };
+        Self::display_drop_result(config, &drag.item, on).map(|_| on)
     }
 
     // ---- heights -------------------------------------------------------
 
-    /// What a slot (a screen, or the arrangement) adds under its controls:
-    /// the Keep / Revert row while a change of it is tried, then its note
-    /// (an error gets two lines).
-    fn slot_extra_height(&self, slot: &str) -> f64 {
-        let trial = if self.display_trials.trial_for(slot).is_some() { CONTROL_H } else { 0.0 };
-        let note = match self.display_trials.note_for(slot) {
+    /// The chips of `output`'s unfolded picker: how many rows they take.
+    fn chooser_rows(&self, output: &LinuxDisplayOutput, mode: Option<&str>) -> usize {
+        if self.chooser.as_ref().is_none_or(|(name, _)| *name != output.name) {
+            return 0;
+        }
+        match self.chooser.as_ref().map(|(_, kind)| *kind) {
+            Some(Chooser::Resolution) => resolutions(&output.modes, native_resolution(output)).len().div_ceil(RESOLUTION_CHIPS),
+            Some(Chooser::Rate) => {
+                let (w, h, _) = shown_mode(output, mode).unwrap_or_default();
+                rates_for(&output.modes, w, h).len().div_ceil(RATE_CHIPS)
+            }
+            None => 0,
+        }
+    }
+
+    /// The diagram's screens for `config` in a body `width` wide, and its height.
+    fn diagram_plan(&self, config: &DisplayConfig, width: f64) -> (Vec<ScreenSlot>, f64) {
+        let snapshot = &self.display_snapshot;
+        let screens: Vec<((f64, f64), usize)> = config
+            .arrangement
+            .screens
+            .iter()
+            .enumerate()
+            .map(|(i, screen)| {
+                let (w, h) = config.screen_size(snapshot, i);
+                ((w as f64, h as f64), screen.outputs.len())
+            })
+            .collect();
+        diagram_layout(&screens, width)
+    }
+
+    /// The Off strip, the separator and the picked monitor's details.
+    fn details_height(&self, config: &DisplayConfig) -> f64 {
+        let mut h = OFF_ROW_H + SEP_H;
+        let Some(name) = self.display_selected(config) else { return h };
+        let Some(output) = self.display_snapshot.output(&name) else { return h };
+        h += SCREEN_LINE_H + CONTROL_H + self.chooser_rows(output, config.mode(&name)) as f64 * CHIP_H;
+        if let Some(Place::Screen(i)) = config.place_of(&name) {
+            h += CONTROL_H;
+            if config.arrangement.screens[i].outputs.len() > 1 {
+                h += CONTROL_H;
+            }
+        }
+        h + CONTROL_H
+    }
+
+    /// The trial's Keep / Revert row, the draft's Apply row, then the note.
+    fn apply_height(&self) -> f64 {
+        let mut h = 0.0;
+        if self.display_trials.trial.is_some() {
+            h += CONTROL_H;
+        }
+        if self.display_drafted().is_some() {
+            h += CONTROL_H;
+        }
+        h + match &self.display_trials.note {
             Some(note) if note.error => NOTE_LINE_H * 2.0,
             Some(_) => NOTE_LINE_H,
             None => 0.0,
-        };
-        trial + note
-    }
-
-    /// The chips of `output`'s unfolded picker: how many rows they take.
-    fn chooser_rows(&self, output: &LinuxDisplayOutput) -> usize {
-        let Some((name, kind)) = self.chooser.as_ref().filter(|(name, _)| *name == output.name) else { return 0 };
-        let _ = name;
-        match kind {
-            Chooser::Resolution => resolutions(&output.modes, native_resolution(output)).len().div_ceil(RESOLUTION_CHIPS),
-            Chooser::Rate => {
-                let (w, h, _) = shown_mode(output, self.mode_shown(output)).unwrap_or_default();
-                rates_for(&output.modes, w, h).len().div_ceil(RATE_CHIPS)
-            }
         }
     }
 
-    fn screen_block_height(&self, output: &LinuxDisplayOutput) -> f64 {
-        if is_virtual(output) {
-            return SCREEN_LINE_H;
-        }
-        SCREEN_LINE_H + CONTROL_H + self.chooser_rows(output) as f64 * CHIP_H + self.slot_extra_height(&output.name)
-    }
-
-    /// Pace by is offered while more than one screen shows.
+    /// Pace by is offered while more than one monitor shows.
     fn pace_shown(&self) -> bool {
         self.display_snapshot.direct
             && !self.virtual_desktop()
@@ -644,26 +858,20 @@ impl ShellPanel {
         self.display_snapshot.direct && !self.system.gpus.is_empty()
     }
 
-    /// The card height the Display dropdown asks for: exactly what
-    /// `draw_monitor` lays out.
-    pub(super) fn monitor_height(&self) -> f64 {
+    /// The card height the Display dropdown asks for in a body `width`
+    /// wide: exactly what `draw_monitor` lays out.
+    pub(super) fn monitor_height(&self, width: f64) -> f64 {
         if self.pointer_settings {
             return self.pointer_settings_height();
         }
-        let snapshot = &self.display_snapshot;
-        let mut h = TITLE_H;
-        if snapshot.direct && self.mirror_shown() {
-            h += CONTROL_H;
-        }
-        h += self.slot_extra_height(ARRANGEMENT_SLOT) + SEP_H;
-        h += self.desktop_height();
-        if snapshot.outputs.is_empty() {
+        let mut h = TITLE_H + SEP_H;
+        if self.arranging() {
+            let config = self.display_config();
+            h += self.diagram_plan(&config, width).1 + self.details_height(&config);
+        } else {
             h += SCREEN_LINE_H;
         }
-        for output in &snapshot.outputs {
-            h += self.screen_block_height(output) + SCREEN_GAP;
-        }
-        h += self.pace_height();
+        h += self.apply_height() + SEP_H + self.desktop_height() + self.pace_height();
         h += SEP_H + CAPTION_H + SCALE_SLIDER_H + SEP_H + PICKER_ROW_H;
         h += self.gpu_items() as f64 * LIST_ITEM_H;
         if self.gpu_status_shown() {
@@ -703,25 +911,55 @@ impl ShellPanel {
         let tok = self.tokens;
         let fg = tok.popups.text;
         let snapshot = self.display_snapshot.clone();
-        let (order, placed) = screen_rows(&snapshot);
-        self.screen_targets = order.iter().map(|&i| snapshot.outputs[i].name.clone()).collect();
-        self.screen_placed = placed;
         self.chooser_changes.clear();
-        if self.chooser.as_ref().is_some_and(|(name, _)| !self.screen_targets.contains(name)) {
-            // Its screen went away: nothing left to pick for.
+        self.display_chips.clear();
+        self.display_moves.clear();
+        self.display_optimise.clear();
+        if self.display_draft.is_some() && self.display_drafted().is_none() {
+            // What runs changed under the draft (a monitor came or went,
+            // a change was applied): it no longer says what to change.
+            self.display_draft = None;
+        }
+        let config = self.display_config();
+        if self.chooser.as_ref().is_some_and(|(name, _)| config.place_of(name).is_none()) {
             self.chooser = None;
         }
-        let mirror = snapshot.direct && self.mirror_shown();
+        if self.display_drag.as_ref().is_some_and(|d| match &d.item {
+            DragItem::Output(name) => config.place_of(name).is_none(),
+            DragItem::Screen(i) => *i >= config.arrangement.screens.len(),
+        }) {
+            self.display_drag = None;
+        }
+        let arranging = self.arranging();
+        // Where the drag would land, against the drop targets drawn last
+        // frame (nothing moves under a drag: only the drop changes it).
+        let target = self.display_drag.as_ref().filter(|d| d.active).and_then(|d| self.display_drop_at(&config, d.at));
+        self.display_drops.clear();
 
         let (title, mut rest) = cut_top(body, TITLE_H);
-        self.draw_title_row(cx, title);
-        if mirror {
-            let (row, next) = cut_top(rest, CONTROL_H);
+        self.draw_title_row(cx, title, &config, target);
+        let (sep, next) = cut_top(rest, SEP_H);
+        rest = next;
+        self.d.separator(cx, sep, fg, 0.12);
+        if arranging {
+            let (plan, height) = self.diagram_plan(&config, body.size.x);
+            let (area, next) = cut_top(rest, height);
             rest = next;
-            self.draw_optimise_for(cx, row, &order);
+            self.draw_diagram(cx, area, &config, &plan, target);
+            rest = self.draw_details(cx, rest, &config, target);
+        } else {
+            let (row, next) = cut_top(rest, SCREEN_LINE_H);
+            rest = next;
+            let line = match snapshot.virtual_display {
+                Some(mode) if snapshot.direct => format!("Virtual display \u{b7} {} \u{b7} panels {}", virtual_mode_label(&mode),
+                    if mode.panels == VirtualPanels::Off { "off" } else { "mirror the desktop" }),
+                _ if snapshot.direct && self.virtual_desktop() => "Virtual display".to_string(),
+                _ if snapshot.direct => "No connected screen".to_string(),
+                _ => "The desktop owns the screens; the scale below still applies".to_string(),
+            };
+            self.unavailable(cx, row, &line);
         }
-        // A switch takes no confirm; only a refusal is noted here.
-        rest = self.draw_slot_extra(cx, rest, ARRANGEMENT_SLOT, "");
+        rest = self.draw_apply(cx, rest);
         let (sep, next) = cut_top(rest, SEP_H);
         rest = next;
         self.d.separator(cx, sep, fg, 0.12);
@@ -736,19 +974,6 @@ impl ShellPanel {
             self.virtual_size_open = false;
             self.virtual_size_targets.clear();
         }
-
-        if order.is_empty() {
-            let (row, next) = cut_top(rest, SCREEN_LINE_H);
-            rest = next;
-            self.unavailable(cx, row, if snapshot.direct { "No connected screen" }
-                else { "The desktop owns the screens; the scale below still applies" });
-        }
-        for (row, &index) in order.iter().enumerate() {
-            let output = &snapshot.outputs[index];
-            let (block, next) = cut_top(rest, self.screen_block_height(output));
-            rest = cut_top(next, SCREEN_GAP).1;
-            self.draw_screen_block(cx, block, row, output, placed, mirror);
-        }
         if self.pace_shown() {
             let (area, next) = cut_top(rest, self.pace_height());
             rest = next;
@@ -757,7 +982,6 @@ impl ShellPanel {
             self.pace_open = false;
             self.pace_targets.clear();
         }
-
         let (sep, next) = cut_top(rest, SEP_H);
         rest = next;
         self.d.separator(cx, sep, fg, 0.12);
@@ -771,97 +995,428 @@ impl ShellPanel {
             let (row, _) = cut_top(rest, NOTICE_H);
             self.d.label_elided(cx, row, false, tok.font.caption, fg, HAlign::Left, &notice);
         }
+        if arranging {
+            self.draw_drag_ghost(cx, body);
+        }
     }
 
-    /// `[▭] Display · 2 screens        [Extended | Mirror]`.
-    fn draw_title_row(&mut self, cx: &mut Cx2d, row: Rect) {
+    /// `[▭] Display · 3 screens · 1 mirrored`; while a monitor or a screen
+    /// is dragged, what dropping it where it is would do.
+    fn draw_title_row(&mut self, cx: &mut Cx2d, row: Rect, config: &DisplayConfig, target: Option<DropAt>) {
         let tok = self.tokens;
         let fg = tok.popups.text;
         let dim = darker(fg, 1.4);
-        let direct = self.display_snapshot.direct;
-        let switch_w = if direct && !self.virtual_desktop() { 168.0 } else { 0.0 };
         self.d.icon_centered(cx, Ico::Monitor, rect(row.pos.x, row.pos.y, 22.0, row.size.y), 16.0, fg);
         let title_x = row.pos.x + 28.0;
         let title_w = self.d.measure(cx, true, tok.font.body, "Display");
         self.d.label(cx, rect(title_x, row.pos.y, title_w, row.size.y), true, tok.font.body, fg, HAlign::Left, "Display");
-        let status = self.display_status();
-        let status_x = title_x + title_w + 8.0;
-        let status_w = (row.pos.x + row.size.x - switch_w - 8.0 - status_x).max(0.0);
-        self.d.label_elided(cx, rect(status_x, row.pos.y, status_w, row.size.y), false, tok.font.caption, dim, HAlign::Left, &status);
-        if switch_w == 0.0 {
-            return;
-        }
-        let mirror = self.mirror_shown();
-        let can_mirror = self.display_snapshot.outputs.iter().filter(|o| o.active).count() >= 2 || mirror;
-        let inner = rect(row.pos.x + row.size.x - switch_w, row.pos.y + 2.0, switch_w, row.size.y - 4.0);
-        let half = (inner.size.x / 2.0).floor();
-        let extended = rect(inner.pos.x, inner.pos.y, half, inner.size.y);
-        let mirrored = rect(inner.pos.x + half, inner.pos.y, inner.size.x - half, inner.size.y);
-        self.small_button(cx, extended, (mirror).then_some(Hit::Arrangement(false)), !mirror, None, "Extended");
-        self.small_button(cx, mirrored, (!mirror && can_mirror).then_some(Hit::Arrangement(true)), mirror, None, "Mirror");
-    }
-
-    /// `Optimise for  [Built-in · eDP-1] [HDMI · 3840×2160]`.
-    fn draw_optimise_for(&mut self, cx: &mut Cx2d, row: Rect, order: &[usize]) {
-        let tok = self.tokens;
-        let dim = darker(tok.popups.text, 1.4);
-        let caption_w = 84.0;
-        self.d.label(cx, rect(row.pos.x, row.pos.y, caption_w, row.size.y), false, tok.font.body_small, dim, HAlign::Left, "Optimise for");
-        let target = match self.arrangement_shown() {
-            DisplayArrangement::Mirror { optimise_for } => Some(optimise_for),
-            DisplayArrangement::Extended => None,
+        let (status, color) = match self.display_drag.as_ref().filter(|d| d.active) {
+            Some(drag) => (self.drop_hint(config, &drag.item, target), tok.bar.active),
+            None => (self.display_status(), dim),
         };
-        let screens: Vec<(usize, LinuxDisplayOutput)> = order
-            .iter()
-            .enumerate()
-            .map(|(row, &i)| (row, self.display_snapshot.outputs[i].clone()))
-            .filter(|(_, o)| !o.modes.is_empty())
-            .collect();
-        if screens.is_empty() {
-            return;
-        }
-        let x0 = row.pos.x + caption_w;
-        let gap = 4.0;
-        let w = ((row.pos.x + row.size.x - x0) - gap * (screens.len() - 1) as f64) / screens.len() as f64;
-        for (i, (screen_row, output)) in screens.iter().enumerate() {
-            let r = rect(x0 + i as f64 * (w + gap), row.pos.y + 2.0, w, row.size.y - 4.0);
-            let selected = target.as_deref() == Some(output.name.as_str());
-            self.small_button(cx, r, (!selected).then_some(Hit::OptimiseFor(*screen_row)), selected, None, &screen_title(output));
+        let status_x = title_x + title_w + 8.0;
+        self.d.label_elided(cx, rect(status_x, row.pos.y, (row.pos.x + row.size.x - status_x).max(0.0), row.size.y),
+            false, tok.font.caption, color, HAlign::Left, &status);
+    }
+
+    /// What dropping `item` on `on` does, in words.
+    fn drop_hint(&self, config: &DisplayConfig, item: &DragItem, on: Option<DropAt>) -> String {
+        let screens = config.arrangement.screens.len();
+        let title = |name: &str| self.display_snapshot.output(name).map_or_else(|| connector_suffix(name), monitor_label);
+        match (item, on) {
+            (DragItem::Output(name), Some(DropAt::Screen(i))) => format!("{} will mirror screen {}", title(name), i + 1),
+            (DragItem::Output(name), Some(DropAt::Insert(k))) if k >= screens => format!("{} on a new screen at the right", title(name)),
+            (DragItem::Output(name), Some(DropAt::Insert(k))) => format!("{} on a new screen left of screen {}", title(name), k + 1),
+            (DragItem::Output(name), Some(DropAt::Off)) => format!("Turn {} off", title(name)),
+            (DragItem::Screen(i), Some(DropAt::Insert(k))) if k >= screens => format!("Screen {} to the right end", i + 1),
+            (DragItem::Screen(i), Some(DropAt::Insert(k))) => format!("Screen {} left of screen {}", i + 1, k + 1),
+            (DragItem::Output(_), _) => "Drop on a screen to mirror it, in a gap for a new screen".into(),
+            (DragItem::Screen(_), _) => "Drop in a gap between screens to move it".into(),
         }
     }
 
-    /// The Keep / Revert row while a change of `slot` is tried, then its
-    /// note. Returns what is left below.
-    fn draw_slot_extra(&mut self, cx: &mut Cx2d, rest: Rect, slot: &str, question: &str) -> Rect {
+    /// The arrangement diagram: the screens to scale, left to right along
+    /// their top edges as the desktop has them, each under its number and
+    /// badges, with the chips of the monitors it shows inside it or under
+    /// it (`diagram_layout`), and a New screen slot at the right end. A
+    /// screen's column takes a monitor (mirroring it); the gaps between
+    /// columns take a monitor (a new screen there) or a screen (moved
+    /// there).
+    fn draw_diagram(&mut self, cx: &mut Cx2d, area: Rect, config: &DisplayConfig, plan: &[ScreenSlot], target: Option<DropAt>) {
         let tok = self.tokens;
         let fg = tok.popups.text;
         let dim = darker(fg, 1.4);
-        let mut rest = rest;
-        if let Some(trial) = self.display_trials.trial_for(slot).cloned() {
+        let accent = tok.bar.active;
+        let snapshot = self.display_snapshot.clone();
+        let selected = self.display_selected(config);
+        let main = config.main_screen();
+        let drag = self.display_drag.clone().filter(|d| d.active);
+        let at = |r: Rect| rect(area.pos.x + r.pos.x, area.pos.y + r.pos.y, r.size.x, r.size.y);
+        let n = plan.len();
+        let top = area.pos.y + DIAGRAM_PAD;
+        let tall = (area.size.y - DIAGRAM_PAD * 2.0).max(0.0);
+        self.d.bordered(cx, area, alpha(fg, 0.03), alpha(fg, 0.08), alpha(fg, 0.08), 0.0, 1.0);
+
+        // The gaps: a bar marks where the drop lands.
+        for k in 0..=n {
+            let left = if k == 0 { area.pos.x } else { at(plan[k - 1].column).pos.x + plan[k - 1].column.size.x };
+            let right = if k == n { left + DIAGRAM_GAP } else { at(plan[k].column).pos.x };
+            let gap = rect(left, top, (right - left).max(1.0), tall);
+            self.display_drops.push((DropAt::Insert(k), gap));
+            if target == Some(DropAt::Insert(k)) && k < n {
+                self.d.solid(cx, rect(gap.pos.x + gap.size.x * 0.5 - 1.5, gap.pos.y, 3.0, gap.size.y), accent);
+            }
+        }
+        // The New screen slot.
+        let slot_x = plan.last().map_or(area.pos.x, |slot| at(slot.column).pos.x + slot.column.size.x) + DIAGRAM_GAP;
+        let slot = rect(slot_x, top, (area.pos.x + area.size.x - DIAGRAM_PAD - slot_x).max(0.0), tall);
+        let hot = target == Some(DropAt::Insert(n));
+        let (fill, line) = if hot { (alpha(accent, 0.16), accent) } else { (alpha(fg, 0.02), alpha(fg, 0.16)) };
+        self.d.bordered(cx, slot, fill, line, line, 0.0, if hot { 2.0 } else { 1.0 });
+        let text = if hot { accent } else { dim };
+        self.d.label(cx, rect(slot.pos.x, slot.pos.y + slot.size.y * 0.5 - 20.0, slot.size.x, 18.0), false, tok.font.body, text, HAlign::Center, "+");
+        let words = self.d.wrap(cx, false, tok.font.caption, "New screen", (slot.size.x - 4.0).max(1.0), 2);
+        for (i, word) in words.iter().enumerate() {
+            let r = rect(slot.pos.x, slot.pos.y + slot.size.y * 0.5 + i as f64 * 13.0 - 2.0, slot.size.x, 13.0);
+            self.d.label(cx, r, false, tok.font.caption, text, HAlign::Center, word);
+        }
+        self.display_drops.push((DropAt::Insert(n), slot));
+
+        let dragged_screen = drag.as_ref().and_then(|d| match d.item {
+            DragItem::Screen(i) => Some(i),
+            DragItem::Output(_) => None,
+        });
+        for (i, screen) in config.arrangement.screens.iter().enumerate() {
+            let Some(place) = plan.get(i) else { break };
+            let column = at(place.column);
+            let b = at(place.screen);
+            let mirrored = screen.outputs.len() > 1;
+            let is_main = main == Some(i);
+            let drop_here = target == Some(DropAt::Screen(i));
+            let picked = selected.as_ref().is_some_and(|s| screen.outputs.contains(s));
+            let lifted = dragged_screen == Some(i);
+            let fade: f32 = if lifted { 0.4 } else { 1.0 };
+            if drop_here {
+                // The whole column takes the drop: box, header and chips.
+                self.d.bordered(cx, inset(column, -3.0), alpha(accent, 0.14), accent, accent, 0.0, 2.0);
+            }
+            let base = alpha(fg, if is_main { 0.12 } else { 0.07 });
+            let (line, width) = if picked { (alpha(accent, 0.8), 1.5) } else { (alpha(fg, 0.28), 1.0) };
+            self.d.bordered(cx, b, alpha(base, base.w * fade), alpha(line, line.w * fade), alpha(line, line.w * fade), 0.0, width);
+            // The header: the screen's number, Main, and the mirror's badge.
+            let head = at(place.head);
+            let number = format!("{}", i + 1);
+            let number_w = self.d.measure(cx, true, tok.font.body_small, &number) + 6.0;
+            self.d.label(cx, rect(head.pos.x, head.pos.y, number_w, head.size.y), true, tok.font.body_small, alpha(fg, fg.w * fade), HAlign::Left, &number);
+            let right = head.pos.x + head.size.x;
+            let mut x = head.pos.x + number_w;
+            if is_main {
+                x = self.draw_badge(cx, x, head, right, "Main", fg, true);
+            }
+            if mirrored {
+                self.draw_badge(cx, x, head, right, &format!("Mirrored \u{d7}{}", screen.outputs.len()), fg, false);
+            }
+            // The monitors it shows; in a mirror the one it is optimised
+            // for gives the size, the others scale it.
+            let (screen_w, screen_h) = config.screen_size(&snapshot, i);
+            if !place.inside && screen_w > 0 && b.size.y >= 14.0 {
+                // The box is the screen: its size, in the middle.
+                let size = resolution_label(screen_w, screen_h);
+                self.d.label_elided(cx, inset(b, 3.0), false, tok.font.caption, alpha(dim, dim.w * fade), HAlign::Center, &size);
+            }
+            let optimise = config.optimise_for(&snapshot, i).map(str::to_string);
+            for (k, name) in screen.outputs.iter().enumerate() {
+                let Some(r) = place.chips.get(k).map(|r| at(*r)) else { break };
+                let chosen = optimise.as_deref() == Some(name.as_str());
+                let connector = connector_suffix(name);
+                let shown = snapshot.output(name).and_then(|o| shown_mode(o, config.mode(name)));
+                let rate = match shown {
+                    Some((_, _, hz)) => format!("{connector} \u{b7} {}", rate_label(hz)),
+                    None => connector,
+                };
+                let size = match snapshot.output(name) {
+                    Some(o) => match output_failure(o) {
+                        Some(reason) => (reason.to_string(), true),
+                        None if mirrored && !chosen && config.output_size(&snapshot, name) != (screen_w, screen_h) => {
+                            (format!("scaled from {}", resolution_label(screen_w, screen_h)), false)
+                        }
+                        None => (shown.map_or_else(|| "Automatic".to_string(), |(w, h, _)| resolution_label(w, h)), false),
+                    },
+                    None => ("not connected".to_string(), true),
+                };
+                self.draw_output_chip(cx, r, name, &rate, &size, mirrored && chosen, selected.as_deref() == Some(name.as_str()), lifted);
+            }
+            self.display_drops.push((DropAt::Screen(i), column));
+            self.hits.push((Hit::DisplayBox(i), column));
+        }
+    }
+
+    /// A pill in a box's header at `x`, when it fits before `right`; the x
+    /// after it.
+    fn draw_badge(&mut self, cx: &mut Cx2d, x: f64, head: Rect, right: f64, text: &str, color: Vec4f, strong: bool) -> f64 {
+        let tok = self.tokens;
+        let w = self.d.measure(cx, strong, tok.font.caption, text) + 12.0;
+        if x + w > right {
+            return x;
+        }
+        let pill = rect(x, head.pos.y + 3.0, w, head.size.y - 5.0);
+        self.d.bordered(cx, pill, alpha(color, 0.16), alpha(color, 0.5), alpha(color, 0.5), 0.0, 1.0);
+        self.d.label(cx, pill, strong, tok.font.caption, color, HAlign::Center, text);
+        x + w + 4.0
+    }
+
+    /// A monitor's chip, three lines: its name; its connector and rate;
+    /// its resolution, or "scaled from W×H" in a mirror sized for another
+    /// (or what failed, `size.1`). The monitor a mirror is optimised for
+    /// carries an "optimised" tag on its first line. A press picks it or
+    /// starts dragging it.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_output_chip(&mut self, cx: &mut Cx2d, r: Rect, name: &str, rate: &str, size: &(String, bool), optimised: bool, picked: bool, faded: bool) {
+        let tok = self.tokens;
+        let fg = tok.popups.text;
+        let dim = darker(fg, 1.4);
+        let index = self.display_chips.len();
+        self.display_chips.push(name.to_string());
+        let hit = Hit::DisplayChip(index);
+        let lifted = faded || self.display_drag.as_ref().is_some_and(|d| d.active && d.item == DragItem::Output(name.to_string()));
+        let state = if picked { CtrlState::Selected } else if self.hot == Some(hit) { CtrlState::Hover } else { CtrlState::Normal };
+        if lifted {
+            // Its place while it is carried: an outline.
+            self.d.bordered(cx, r, alpha(fg, 0.02), alpha(fg, 0.25), alpha(fg, 0.25), 0.0, 1.0);
+        } else {
+            self.d.control(cx, r, &tok.controls, state);
+        }
+        let fade: f32 = if lifted { 0.35 } else { 1.0 };
+        let mut title_right = r.pos.x + r.size.x - 6.0;
+        if optimised {
+            // The screen takes this monitor's size and rate.
+            let text = "optimised";
+            let w = self.d.measure(cx, false, tok.font.caption, text) + 10.0;
+            let tag = rect(title_right - w, r.pos.y + 4.0, w, 14.0);
+            let color = alpha(fg, fg.w * fade);
+            self.d.bordered(cx, tag, alpha(fg, 0.10 * fade), alpha(fg, 0.40 * fade), alpha(fg, 0.40 * fade), 0.0, 1.0);
+            self.d.label(cx, tag, false, tok.font.caption, color, HAlign::Center, text);
+            title_right = tag.pos.x - 4.0;
+        }
+        let x = r.pos.x + 7.0;
+        let title = self.display_snapshot.output(name).map_or_else(|| connector_suffix(name), monitor_label);
+        self.d.label_elided(cx, rect(x, r.pos.y + 3.0, (title_right - x).max(0.0), 15.0), true, tok.font.body_small, alpha(fg, fg.w * fade), HAlign::Left, &title);
+        let text_w = (r.size.x - 14.0).max(0.0);
+        self.d.label_elided(cx, rect(x, r.pos.y + 18.0, text_w, 13.0), false, tok.font.caption, alpha(dim, dim.w * fade), HAlign::Left, rate);
+        let color = if size.1 { tok.bar.active } else { dim };
+        self.d.label_elided(cx, rect(x, r.pos.y + 31.0, text_w, 13.0), false, tok.font.caption, alpha(color, color.w * fade), HAlign::Left, &size.0);
+        self.hits.push((hit, r));
+    }
+
+    /// The Off strip (the monitors not driven; a drop target), then the
+    /// picked monitor's details: its mode, its screen (main, optimise for)
+    /// and where it can go (Move to: the chip's menu).
+    fn draw_details(&mut self, cx: &mut Cx2d, rest: Rect, config: &DisplayConfig, target: Option<DropAt>) -> Rect {
+        let tok = self.tokens;
+        let fg = tok.popups.text;
+        let dim = darker(fg, 1.4);
+        let accent = tok.bar.active;
+        let caption_w = 84.0;
+        let snapshot = self.display_snapshot.clone();
+        let carrying = self.display_drag.as_ref().is_some_and(|d| d.active && matches!(d.item, DragItem::Output(_)));
+        let selected = self.display_selected(config);
+
+        // Off.
+        let (strip, mut rest) = cut_top(rest, OFF_ROW_H);
+        let strip = rect(strip.pos.x, strip.pos.y + 4.0, strip.size.x, strip.size.y - 4.0);
+        let hot = target == Some(DropAt::Off);
+        if carrying {
+            let (fill, line) = if hot { (alpha(accent, 0.16), accent) } else { (alpha(fg, 0.03), alpha(fg, 0.18)) };
+            self.d.bordered(cx, strip, fill, line, line, 0.0, if hot { 2.0 } else { 1.0 });
+        }
+        self.d.label(cx, rect(strip.pos.x + 6.0, strip.pos.y, 36.0, strip.size.y), false, tok.font.body_small, dim, HAlign::Left, "Off");
+        let off = config.arrangement.off.clone();
+        let chips_x = strip.pos.x + 44.0;
+        let chips_w = (strip.pos.x + strip.size.x - 4.0 - chips_x).max(0.0);
+        if off.is_empty() {
+            self.d.label_elided(cx, rect(chips_x, strip.pos.y, chips_w, strip.size.y), false, tok.font.caption,
+                if hot { accent } else { dim }, HAlign::Left, "Drag a monitor here to turn it off");
+        } else {
+            let w = (chips_w / off.len().max(2) as f64 - 4.0).max(40.0);
+            for (k, name) in off.iter().enumerate() {
+                let r = rect(chips_x + k as f64 * (w + 4.0), strip.pos.y + 2.0, w, strip.size.y - 4.0);
+                self.draw_off_chip(cx, r, name, selected.as_deref() == Some(name.as_str()));
+            }
+        }
+        self.display_drops.push((DropAt::Off, strip));
+        let (sep, next) = cut_top(rest, SEP_H);
+        rest = next;
+        self.d.separator(cx, sep, fg, 0.12);
+
+        let Some(name) = selected else { return rest };
+        let Some(output) = snapshot.output(&name).cloned() else { return rest };
+        let place = config.place_of(&name);
+
+        // The monitor: its name, connector, GPU and where it is.
+        let (line, next) = cut_top(rest, SCREEN_LINE_H);
+        rest = next;
+        self.d.icon_centered(cx, Ico::Monitor, rect(line.pos.x, line.pos.y, 22.0, line.size.y), 14.0, fg);
+        let title = monitor_label(&output);
+        let name_x = line.pos.x + 28.0;
+        let name_w = self.d.measure(cx, true, tok.font.body_small, &title).min(line.size.x * 0.5);
+        self.d.label_elided(cx, rect(name_x, line.pos.y, name_w, line.size.y), true, tok.font.body_small, fg, HAlign::Left, &title);
+        let mut detail = vec![connector_suffix(&name)];
+        if screens_span_gpus(&snapshot) {
+            detail.push(self.screen_gpu_label(&output));
+        }
+        detail.push(match place {
+            Some(Place::Screen(i)) if config.arrangement.screens[i].outputs.len() > 1 => {
+                format!("screen {}, mirrored \u{d7}{}", i + 1, config.arrangement.screens[i].outputs.len())
+            }
+            Some(Place::Screen(i)) => format!("screen {}", i + 1),
+            _ => "off".to_string(),
+        });
+        let detail_x = name_x + name_w + 8.0;
+        self.d.label_elided(cx, rect(detail_x, line.pos.y, (line.pos.x + line.size.x - detail_x).max(0.0), line.size.y),
+            false, tok.font.caption, dim, HAlign::Left, &detail.join(" \u{b7} "));
+
+        // Its mode: today's resolution and refresh pickers.
+        let (row, next) = cut_top(rest, CONTROL_H);
+        rest = next;
+        self.d.label(cx, rect(row.pos.x, row.pos.y, caption_w, row.size.y), false, tok.font.body_small, dim, HAlign::Left, "Mode");
+        let inner = rect(row.pos.x + caption_w, row.pos.y + 2.0, (row.size.x - caption_w).max(0.0), row.size.y - 4.0);
+        let mode = config.mode(&name).map(str::to_string);
+        let shown = shown_mode(&output, mode.as_deref());
+        let enabled = !output.modes.is_empty();
+        let res_w = (inner.size.x * 0.6).floor();
+        let res = rect(inner.pos.x, inner.pos.y, res_w - 4.0, inner.size.y);
+        let rate = rect(inner.pos.x + res_w, inner.pos.y, inner.size.x - res_w, inner.size.y);
+        let native = native_resolution(&output);
+        let (res_text, rate_text) = match shown {
+            Some((w, h, hz)) => (
+                if native == Some((w, h)) { format!("{} \u{b7} native", resolution_label(w, h)) } else { resolution_label(w, h) },
+                rate_label(hz),
+            ),
+            None => (mode.clone().unwrap_or_else(|| "Automatic".into()), String::new()),
+        };
+        let open = |kind| self.chooser.as_ref().is_some_and(|(n, k)| *n == name && *k == kind);
+        let (res_open, rate_open) = (open(Chooser::Resolution), open(Chooser::Rate));
+        self.picker_face(cx, res, enabled.then_some(Hit::OutputResolution), res_open, &res_text);
+        self.picker_face(cx, rate, (enabled && shown.is_some()).then_some(Hit::OutputRate), rate_open, &rate_text);
+        if res_open || rate_open {
+            rest = self.draw_chooser(cx, rest, &output, shown, if res_open { Chooser::Resolution } else { Chooser::Rate });
+        }
+
+        // Its screen: main, and in a mirror the monitor it is optimised for.
+        if let Some(Place::Screen(i)) = place {
             let (row, next) = cut_top(rest, CONTROL_H);
             rest = next;
-            let inner = rect(row.pos.x, row.pos.y + 2.0, row.size.x, row.size.y - 4.0);
-            let button_w = 64.0;
-            let keep = rect(inner.pos.x + inner.size.x - button_w, inner.pos.y, button_w, inner.size.y);
-            let revert = rect(keep.pos.x - 4.0 - button_w, inner.pos.y, button_w, inner.size.y);
-            let text = match trial.phase {
-                Phase::Applying { .. } => "Applying\u{2026}".to_string(),
-                Phase::Confirming { .. } => {
-                    let left = self.display_trials.seconds_left(self.display_now).unwrap_or(0);
-                    format!("{question} Reverting in {left} s")
+            self.d.label(cx, rect(row.pos.x, row.pos.y, caption_w, row.size.y), false, tok.font.body_small, dim, HAlign::Left, &format!("Screen {}", i + 1));
+            let button = rect(row.pos.x + caption_w, row.pos.y + 2.0, 128.0, row.size.y - 4.0);
+            if config.main_screen() == Some(i) {
+                self.small_button(cx, button, None, true, Some(Ico::Check), "Main screen");
+            } else {
+                self.small_button(cx, button, Some(Hit::DisplayMakeMain), false, None, "Make main");
+            }
+            let (w, h) = config.screen_size(&snapshot, i);
+            let size_x = button.pos.x + button.size.x + 8.0;
+            self.d.label_elided(cx, rect(size_x, row.pos.y, (row.pos.x + row.size.x - size_x).max(0.0), row.size.y),
+                false, tok.font.caption, dim, HAlign::Left, &format!("desktop {}", resolution_label(w, h)));
+            let screen = config.arrangement.screens[i].clone();
+            if screen.outputs.len() > 1 {
+                let (row, next) = cut_top(rest, CONTROL_H);
+                rest = next;
+                self.d.label(cx, rect(row.pos.x, row.pos.y, caption_w, row.size.y), false, tok.font.body_small, dim, HAlign::Left, "Optimise for");
+                let chosen = config.optimise_for(&snapshot, i).map(str::to_string);
+                let x0 = row.pos.x + caption_w;
+                let gap = 4.0;
+                let count = screen.outputs.len() as f64;
+                let w = ((row.pos.x + row.size.x - x0) - gap * (count - 1.0)) / count;
+                for (k, o) in screen.outputs.iter().enumerate() {
+                    let r = rect(x0 + k as f64 * (w + gap), row.pos.y + 2.0, w, row.size.y - 4.0);
+                    let label = snapshot.output(o).map_or_else(|| connector_suffix(o), monitor_label);
+                    let current = chosen.as_deref() == Some(o.as_str());
+                    let index = self.display_optimise.len();
+                    self.display_optimise.push(o.clone());
+                    self.small_button(cx, r, (!current).then_some(Hit::DisplayOptimise(index)), current, None, &label);
                 }
-            };
-            let confirming = matches!(trial.phase, Phase::Confirming { .. });
-            self.d.label_elided(cx, rect(inner.pos.x + 2.0, row.pos.y, (revert.pos.x - inner.pos.x - 8.0).max(0.0), row.size.y),
-                confirming, tok.font.body_small, if confirming { tok.bar.active } else { dim }, HAlign::Left, &text);
-            self.small_button(cx, revert, Some(Hit::TrialRevert), false, None, "Revert");
-            self.small_button(cx, keep, confirming.then_some(Hit::TrialKeep), false, Some(Ico::Check), "Keep");
+            }
         }
-        if let Some(note) = self.display_trials.note_for(slot).cloned() {
+
+        // Move to: the chip's menu.
+        let (row, next) = cut_top(rest, CONTROL_H);
+        rest = next;
+        self.d.label(cx, rect(row.pos.x, row.pos.y, caption_w, row.size.y), false, tok.font.body_small, dim, HAlign::Left, "Move to");
+        let screens = config.arrangement.screens.len();
+        let mut items: Vec<(String, Place)> = (0..screens).map(|j| (format!("Screen {}", j + 1), Place::Screen(j))).collect();
+        items.push(("New screen".into(), Place::NewScreen(screens)));
+        items.push(("Off".into(), Place::Off));
+        let x0 = row.pos.x + caption_w;
+        let gap = 4.0;
+        let count = items.len() as f64;
+        let w = ((row.pos.x + row.size.x - x0) - gap * (count - 1.0)) / count;
+        for (k, (label, to)) in items.into_iter().enumerate() {
+            let r = rect(x0 + k as f64 * (w + gap), row.pos.y + 2.0, w, row.size.y - 4.0);
+            let current = place == Some(to);
+            let can = !current && config.clone().move_output(&name, to);
+            let index = self.display_moves.len();
+            self.display_moves.push(to);
+            self.small_button(cx, r, can.then_some(Hit::DisplayMoveTo(index)), current, None, &label);
+        }
+        rest
+    }
+
+    /// An off monitor's chip, one line; dragged onto a screen to turn it on.
+    fn draw_off_chip(&mut self, cx: &mut Cx2d, r: Rect, name: &str, picked: bool) {
+        let tok = self.tokens;
+        let dim = darker(tok.popups.text, 1.4);
+        let index = self.display_chips.len();
+        self.display_chips.push(name.to_string());
+        let hit = Hit::DisplayChip(index);
+        let lifted = self.display_drag.as_ref().is_some_and(|d| d.active && d.item == DragItem::Output(name.to_string()));
+        let state = if picked { CtrlState::Selected } else if self.hot == Some(hit) { CtrlState::Hover } else { CtrlState::Normal };
+        self.d.control(cx, r, &tok.controls, state);
+        let title = self.display_snapshot.output(name).map_or_else(|| connector_suffix(name), monitor_label);
+        let text = format!("{title} \u{b7} {}", connector_suffix(name));
+        self.d.label_elided(cx, rect(r.pos.x + 6.0, r.pos.y, (r.size.x - 12.0).max(0.0), r.size.y), false, tok.font.caption,
+            alpha(dim, dim.w * if lifted { 0.4 } else { 1.0 }), HAlign::Left, &text);
+        self.hits.push((hit, r));
+    }
+
+    /// The trial's Revert / Keep with the countdown, the draft's Discard /
+    /// Apply, then the note.
+    fn draw_apply(&mut self, cx: &mut Cx2d, rest: Rect) -> Rect {
+        let tok = self.tokens;
+        let fg = tok.popups.text;
+        let dim = darker(fg, 1.4);
+        let accent = tok.bar.active;
+        let mut rest = rest;
+        if let Some(trial) = self.display_trials.trial.clone() {
+            let (text_r, left, right, next) = button_row(rest);
+            rest = next;
+            let confirming = matches!(trial.phase, Phase::Confirming { .. });
+            let text = if confirming {
+                let left = self.display_trials.seconds_left(self.display_now).unwrap_or(0);
+                format!("Keep these settings? Reverting in {left} s")
+            } else {
+                "Applying\u{2026}".to_string()
+            };
+            self.d.label_elided(cx, text_r, confirming, tok.font.body_small, if confirming { accent } else { dim }, HAlign::Left, &text);
+            self.small_button(cx, left, Some(Hit::TrialRevert), false, None, "Revert");
+            self.small_button(cx, right, confirming.then_some(Hit::TrialKeep), false, Some(Ico::Check), "Keep");
+        }
+        if let Some(draft) = self.display_drafted().cloned() {
+            let (text_r, left, right, next) = button_row(rest);
+            rest = next;
+            let text = if draft.config.modesets(&draft.base) {
+                "Not applied yet \u{b7} you'll be asked to keep it"
+            } else {
+                "Not applied yet"
+            };
+            self.d.label_elided(cx, text_r, false, tok.font.body_small, dim, HAlign::Left, text);
+            self.small_button(cx, left, Some(Hit::DisplayDiscard), false, None, "Discard");
+            self.small_button(cx, right, Some(Hit::DisplayApply), true, Some(Ico::Check), "Apply");
+        }
+        if let Some(note) = self.display_trials.note.clone() {
             let lines = if note.error { 2 } else { 1 };
             let (area, next) = cut_top(rest, NOTE_LINE_H * lines as f64);
             rest = next;
-            let color = if note.error { tok.bar.active } else { dim };
+            let color = if note.error { accent } else { dim };
             let wrapped = self.d.wrap(cx, false, tok.font.caption, &note.text, area.size.x, lines);
             for (i, line) in wrapped.iter().enumerate() {
                 let r = rect(area.pos.x, area.pos.y + i as f64 * NOTE_LINE_H, area.size.x, NOTE_LINE_H);
@@ -871,100 +1426,86 @@ impl ShellPanel {
         rest
     }
 
-    /// `[▭] Built-in · eDP-1  Intel · xe          [◀][▶] [Main]`, then
-    /// `[2560×1600 · native ▾] [240 Hz ▾]` (Mirror: what the screen shows),
-    /// the unfolded chips, the Keep / Revert row and the note.
-    fn draw_screen_block(&mut self, cx: &mut Cx2d, area: Rect, row: usize, output: &LinuxDisplayOutput, placed: usize, mirror: bool) {
+    /// What is carried, under the pointer: a monitor's chip or a screen's
+    /// box, kept inside the panel so its name stays readable. Drawn last,
+    /// over the rest; it takes no hits.
+    fn draw_drag_ghost(&mut self, cx: &mut Cx2d, body: Rect) {
+        let Some(drag) = self.display_drag.clone().filter(|d| d.active) else { return };
         let tok = self.tokens;
         let fg = tok.popups.text;
-        let dim = darker(fg, 1.4);
-        let direct = self.display_snapshot.direct;
-        let in_desktop = self.in_desktop(output);
-        let text = if in_desktop { fg } else { dim };
-
-        // Line one: the title, the GPU, then move and main.
-        let (line, rest) = cut_top(area, SCREEN_LINE_H);
-        let icon_w = 22.0;
-        self.d.icon_centered(cx, Ico::Monitor, rect(line.pos.x, line.pos.y, icon_w, line.size.y), 14.0, text);
-        let mut right = line.pos.x + line.size.x;
-        let virtual_row = is_virtual(output);
-        if direct && !mirror && !virtual_row && !self.virtual_desktop() {
-            let main_w = 80.0;
-            let main = rect(right - main_w, line.pos.y + 1.0, main_w, line.size.y - 2.0);
-            if output.primary {
-                self.small_button(cx, main, None, true, Some(Ico::Check), "Main");
-            } else {
-                let can = output.active && in_desktop;
-                self.small_button(cx, main, can.then_some(Hit::ScreenMain(row)), false, None, "Make main");
-            }
-            let (left_ok, right_ok) = self.screen_moves(row, placed);
-            if placed > 1 && row < placed {
-                let move_w = 22.0;
-                let r = rect(main.pos.x - 4.0 - move_w, main.pos.y, move_w, main.size.y);
-                let l = rect(r.pos.x - 2.0 - move_w, main.pos.y, move_w, main.size.y);
-                self.small_button(cx, l, left_ok.then_some(Hit::ScreenMove(row, -1)), false, Some(Ico::ChevronLeft), "");
-                self.small_button(cx, r, right_ok.then_some(Hit::ScreenMove(row, 1)), false, Some(Ico::ChevronRight), "");
-                right = l.pos.x - 8.0;
-            } else {
-                right = main.pos.x - 8.0;
-            }
-        }
-        let title = screen_title(output);
-        let name_x = line.pos.x + icon_w + 6.0;
-        let name_w = self.d.measure(cx, true, tok.font.body_small, &title).min((right - name_x).max(0.0));
-        self.d.label_elided(cx, rect(name_x, line.pos.y, name_w, line.size.y), true, tok.font.body_small, text, HAlign::Left, &title);
-        let (status, problem) = self.screen_status(output);
-        let detail = if virtual_row {
-            match self.display_snapshot.virtual_display {
-                Some(mode) => format!("{} \u{b7} panels {}", virtual_mode_label(&mode),
-                    if mode.panels == VirtualPanels::Off { "off" } else { "mirror the desktop" }),
-                None => status,
-            }
-        } else if !status.is_empty() {
-            status
-        } else if mirror {
-            let target = matches!(self.arrangement_shown(), DisplayArrangement::Mirror { optimise_for } if optimise_for == output.name);
-            if target { "mirror size".into() } else { "scaled to fit".into() }
-        } else {
-            self.screen_gpu_label(output)
+        let accent = tok.bar.active;
+        let (w, h) = (drag.origin.size.x.min(body.size.x), drag.origin.size.y.min(OUTPUT_CHIP_H));
+        let x = (drag.at.x - drag.grab.x).clamp(body.pos.x, body.pos.x + body.size.x - w);
+        let y = (drag.at.y - drag.grab.y.min(h)).clamp(body.pos.y, (body.pos.y + body.size.y - h).max(body.pos.y));
+        let r = rect(x, y, w, h);
+        // Draw calls of its own, after everything else: the box and its text
+        // would otherwise join the earlier ones and the chips' text would
+        // show through it.
+        self.d.chrome.new_draw_call(cx);
+        self.d.text_bold.new_draw_call(cx);
+        self.d.bordered(cx, r, tok.popups.bg(), accent, accent, 0.0, 1.5);
+        let text = match &drag.item {
+            DragItem::Output(name) => self.display_snapshot.output(name).map_or_else(|| connector_suffix(name), monitor_label),
+            DragItem::Screen(i) => format!("Screen {}", i + 1),
         };
-        let detail_x = name_x + name_w + 8.0;
-        self.d.label_elided(cx, rect(detail_x, line.pos.y, (right - detail_x).max(0.0), line.size.y),
-            false, tok.font.caption, if problem { tok.bar.active } else { dim }, HAlign::Left, &detail);
+        self.d.label_elided(cx, rect(r.pos.x + 7.0, r.pos.y, (r.size.x - 14.0).max(0.0), r.size.y), true, tok.font.body_small, fg, HAlign::Left, &text);
+    }
 
-        if virtual_row {
-            return;
+    // ---- pointer -------------------------------------------------------
+
+    /// A press on a monitor's chip or a screen's box: a click, or a drag
+    /// once the pointer moves.
+    pub(super) fn display_press(&mut self, hit: Hit, p: Vec2d) {
+        let Some(origin) = self.hits.iter().find(|(h, _)| *h == hit).map(|(_, r)| *r) else { return };
+        let item = match hit {
+            Hit::DisplayChip(i) => match self.display_chips.get(i) {
+                Some(name) => DragItem::Output(name.clone()),
+                None => return,
+            },
+            Hit::DisplayBox(i) => DragItem::Screen(i),
+            _ => return,
+        };
+        self.display_drag = Some(DisplayDrag { item, start: p, at: p, grab: dvec2(p.x - origin.pos.x, p.y - origin.pos.y), origin, active: false });
+    }
+
+    /// The press follows the pointer; past a few points it is a drag.
+    pub(super) fn display_drag_to(&mut self, cx: &mut Cx, p: Vec2d) {
+        let Some(drag) = self.display_drag.as_mut() else { return };
+        drag.at = p;
+        if !drag.active && (p.x - drag.start.x).hypot(p.y - drag.start.y) > DRAG_START {
+            drag.active = true;
+            self.close_display_lists();
         }
-        // Line two: the pickers, or in Mirror what the screen shows.
-        let (controls, mut rest) = cut_top(rest, CONTROL_H);
-        let inner = rect(controls.pos.x + icon_w + 6.0, controls.pos.y + 2.0,
-            (controls.size.x - icon_w - 6.0).max(0.0), controls.size.y - 4.0);
-        let shown = shown_mode(output, self.mode_shown(output));
-        // Every screen keeps its own resolution and refresh in Mirror too:
-        // the mirror is rendered at the optimised screen's mode (changing it
-        // resizes the mirror), the others scale it into theirs.
-        {
-            let enabled = direct && !output.modes.is_empty();
-            let res_w = (inner.size.x * 0.6).floor();
-            let res = rect(inner.pos.x, inner.pos.y, res_w - 4.0, inner.size.y);
-            let rate = rect(inner.pos.x + res_w, inner.pos.y, inner.size.x - res_w, inner.size.y);
-            let native = native_resolution(output);
-            let (res_text, rate_text) = match shown {
-                Some((w, h, hz)) => (
-                    if native == Some((w, h)) { format!("{} \u{b7} native", resolution_label(w, h)) } else { resolution_label(w, h) },
-                    rate_label(hz),
-                ),
-                None => (self.mode_shown(output).unwrap_or("Automatic").to_string(), String::new()),
-            };
-            let open = |kind| self.chooser.as_ref().is_some_and(|(name, k)| *name == output.name && *k == kind);
-            let (res_open, rate_open) = (open(Chooser::Resolution), open(Chooser::Rate));
-            self.picker_face(cx, res, enabled.then_some(Hit::ScreenResolution(row)), res_open, &res_text);
-            self.picker_face(cx, rate, (enabled && shown.is_some()).then_some(Hit::ScreenRate(row)), rate_open, &rate_text);
-            if res_open || rate_open {
-                rest = self.draw_chooser(cx, rest, output, shown, if res_open { Chooser::Resolution } else { Chooser::Rate });
+        if self.display_drag.as_ref().is_some_and(|d| d.active) {
+            self.redraw(cx);
+        }
+    }
+
+    /// The press ends: a click picks the monitor (a box's, unless one of
+    /// it is picked already); a drag drops onto what is under it.
+    pub(super) fn display_release(&mut self, cx: &mut Cx, p: Vec2d) {
+        let Some(drag) = self.display_drag.clone() else { return };
+        let config = self.display_config();
+        let on = self.display_drop_at(&config, p);
+        self.display_drag = None;
+        if !drag.active {
+            self.close_display_lists();
+            match &drag.item {
+                DragItem::Output(name) => self.display_selected = Some(name.clone()),
+                DragItem::Screen(i) => {
+                    let on_it = self.display_selected(&config).is_some_and(|s| config.place_of(&s) == Some(Place::Screen(*i)));
+                    if !on_it {
+                        self.display_selected = config.arrangement.screens.get(*i).and_then(|s| s.outputs.first().cloned());
+                    }
+                }
+            }
+        } else if let Some(changed) = on.and_then(|on| Self::display_drop_result(&config, &drag.item, on)) {
+            self.set_display_draft(changed);
+            if let DragItem::Output(name) = &drag.item {
+                self.display_selected = Some(name.clone());
             }
         }
-        self.draw_slot_extra(cx, rest, &output.name, "Keep this mode?");
+        self.redraw(cx);
     }
 
     /// A picker's face: the value and a chevron; no hit when disabled.
@@ -1012,13 +1553,13 @@ impl ShellPanel {
         let per_row = if kind == Chooser::Resolution { RESOLUTION_CHIPS } else { RATE_CHIPS };
         let rows = items.len().div_ceil(per_row);
         let (area, rest) = cut_top(rest, rows as f64 * CHIP_H);
-        let x0 = area.pos.x + 28.0;
+        let x0 = area.pos.x + 84.0;
         let gap = 4.0;
         let w = ((area.pos.x + area.size.x - x0) - gap * (per_row - 1) as f64) / per_row as f64;
         for (i, (label, mode, current, native)) in items.into_iter().enumerate() {
             let r = rect(x0 + (i % per_row) as f64 * (w + gap), area.pos.y + (i / per_row) as f64 * CHIP_H + 2.0, w, CHIP_H - 4.0);
             let index = self.chooser_changes.len();
-            self.chooser_changes.push(Change::Mode { name: output.name.clone(), mode });
+            self.chooser_changes.push((output.name.clone(), mode));
             self.small_button(cx, r, (!current).then_some(Hit::ChooserItem(index)), current, None, &label);
             if native {
                 // The screen's own resolution: a dot in the chip's corner.
@@ -1548,41 +2089,46 @@ impl ShellPanel {
             }
         }
         // The Display dropdown: the actual window scale, the saved settings,
-        // the renderer's snapshot as shown, the change being tried and the
-        // notes, with the screen rows and the chips as drawn.
+        // the renderer's snapshot, the configuration shown (the draft, else
+        // what runs), the trial and its note, and the diagram as drawn.
         let d = &self.display_snapshot;
         let t = &self.display_trials;
+        let running = self.display_running();
+        let config = self.display_config();
+        let draft = self.display_drafted();
         text.push_str(&format!(
-            "\ndpi={:.2} dpi_hundredths={} dpi_saved={:?} display_settings_loaded={} display_direct={} display_outputs={} display_status={} arrangement={:?} arrangement_shown={:?}",
-            self.current_dpi, self.dpi_hundredths(), s.dpi_scale, s.display_settings_loaded,
-            d.direct, d.outputs.len(), self.display_status(), d.arrangement, self.arrangement_shown()
+            "\ndpi={:.2} dpi_hundredths={} dpi_saved={:?} display_settings_loaded={} display_direct={} display_outputs={} display_status={} arrangement={} running={} shown={} main={:?} main_screen={:?}",
+            self.current_dpi, self.dpi_hundredths(), s.dpi_scale, s.display_settings_loaded, d.direct, d.outputs.len(), self.display_status(),
+            d.arrangement.text(), running.arrangement.text(), config.arrangement.text(), config.main, config.main_screen()
         ));
         text.push_str(&format!(
-            "\ntrial={:?} seconds_left={:?} restoring={:?} notes={:?}",
-            t.trial.as_ref().map(|t| (&t.change, &t.previous, &t.phase)), t.seconds_left(self.display_now), t.restoring, t.notes
+            "\ndraft={} draft_modesets={} trial={:?} seconds_left={:?} restoring={} note={:?}",
+            draft.is_some(), draft.is_some_and(|d| d.config.modesets(&d.base)),
+            t.trial.as_ref().map(|t| (t.config.arrangement.text(), t.previous.arrangement.text(), t.modeset, &t.phase)),
+            t.seconds_left(self.display_now), t.restoring.is_some(), t.note
         ));
         text.push_str(&format!(
             "\npacing={:?} paced_by={:?} pace_label={:?} pace_shown={} pace_open={} pace_targets={:?}",
             d.pacing, d.paced_by, pacing_label(&d.pacing, d), self.pace_shown(), self.pace_open, self.pace_targets
         ));
         text.push_str(&format!(
-            "\nmain={:?} main_pending={:?} main_saved={:?} screen_rows={:?} screens_placed={} screens_span_gpus={} chooser={:?} chooser_changes={:?}",
-            d.outputs.iter().find(|o| o.primary).map(|o| o.name.as_str()),
-            self.display_source_pending.as_ref().map(|(name, _)| name.as_str()),
-            s.display_layout.main_name(d), self.screen_targets, self.screen_placed, screens_span_gpus(d),
-            self.chooser, self.chooser_changes
+            "\nselected={:?} drag={:?} screens_span_gpus={} chooser={:?} chooser_changes={:?}",
+            self.display_selected(&config), self.display_drag.as_ref().map(|d| (&d.item, d.active)), screens_span_gpus(d), self.chooser, self.chooser_changes
         ));
-        let (order, placed) = screen_rows(d);
-        for (row, &index) in order.iter().enumerate() {
-            let output = &d.outputs[index];
-            let (status, _) = self.screen_status(output);
-            let (left, right) = self.screen_moves(row, placed);
-            let shown = shown_mode(output, self.mode_shown(output));
+        for (i, screen) in config.arrangement.screens.iter().enumerate() {
+            let (w, h) = config.screen_size(d, i);
             text.push_str(&format!(
-                "\nscreen: {row} {} title={:?} gpu={} status={:?} position={:?} main={} move_left={} move_right={} shown={:?} mode_shown={:?} mode_override={:?} resolutions={} rates_here={}",
-                output.name, screen_title(output), self.screen_gpu_label(output), status, output.desktop_position, output.primary,
-                left, right, shown, self.mode_shown(output), output.mode_override, resolutions(&output.modes, native_resolution(output)).len(),
-                shown.map_or(0, |(w, h, _)| rates_for(&output.modes, w, h).len())
+                "\nscreen: {} outputs={:?} optimise_for={:?} size={w}x{h} main={}",
+                i + 1, screen.outputs, config.optimise_for(d, i), config.main_screen() == Some(i)
+            ));
+        }
+        for name in config.arrangement.screens.iter().flat_map(|s| s.outputs.iter()).chain(config.arrangement.off.iter()) {
+            let Some(output) = d.output(name) else { continue };
+            let shown = shown_mode(output, config.mode(name));
+            text.push_str(&format!(
+                "\nmonitor: {name} title={:?} gpu={} place={:?} mode={:?} shown={:?} failure={:?} resolutions={} rates_here={}",
+                monitor_label(output), self.screen_gpu_label(output), config.place_of(name), config.mode(name), shown, output_failure(output),
+                resolutions(&output.modes, native_resolution(output)).len(), shown.map_or(0, |(w, h, _)| rates_for(&output.modes, w, h).len())
             ));
         }
         text.push_str(&format!(
@@ -1602,8 +2148,8 @@ impl ShellPanel {
         }
         for output in &d.outputs {
             text.push_str(&format!(
-                "\ndisplay: {} {}x{} @ {:.2} Hz primary={} active={} status={}",
-                output.name, output.width, output.height, output.refresh_hz, output.primary, output.active, output.status
+                "\ndisplay: {} {}x{} @ {:.2} Hz main={} active={} status={}",
+                output.name, output.width, output.height, output.refresh_hz, d.screen_of(&output.name).is_some_and(|s| s.primary), output.active, output.status
             ));
         }
         // Native hit geometry makes the custom dropdown accessible to the
@@ -1631,17 +2177,17 @@ mod tests {
         let gpu = GpuInfo {
             card: "card1".into(),
             pci: "0000:01:00.0".into(),
-            vendor: "10de".into(),
-            device: "2b85".into(),
+            vendor: "1234".into(),
+            device: "5678".into(),
             driver: "nvidia".into(),
             connected: Vec::new(),
         };
         assert!(saved_gpu_present(None, &[]));
-        assert!(saved_gpu_present(Some("0000:01:00.0 10de:2b85"), std::slice::from_ref(&gpu)));
+        assert!(saved_gpu_present(Some("0000:01:00.0 1234:5678"), std::slice::from_ref(&gpu)));
         // Moved card or another model at that address: the next start
         // falls back to Auto, so a restart would change nothing.
-        assert!(!saved_gpu_present(Some("0000:02:00.0 10de:2b85"), std::slice::from_ref(&gpu)));
-        assert!(!saved_gpu_present(Some("0000:01:00.0 10de:2b84"), &[gpu]));
+        assert!(!saved_gpu_present(Some("0000:02:00.0 1234:5678"), std::slice::from_ref(&gpu)));
+        assert!(!saved_gpu_present(Some("0000:01:00.0 1234:5679"), &[gpu]));
     }
 
     #[test]
@@ -1666,5 +2212,140 @@ mod tests {
         assert_eq!(snap_dpi(128), 125);
         assert_eq!(dpi_at(1195.0, 1000.0, 400.0), 200);
         assert_eq!(dpi_at(1180.0, 1000.0, 400.0), 190);
+    }
+
+    /// Every box is its screen at one scale (to the pixels it was rounded
+    /// to), and the columns fit the area left to right with the New
+    /// screen slot after them.
+    fn assert_to_scale(slots: &[ScreenSlot], sizes: &[(f64, f64)], width: f64) {
+        let widest = (0..sizes.len()).max_by(|a, b| sizes[*a].0.total_cmp(&sizes[*b].0)).unwrap();
+        let scale = slots[widest].screen.size.x / sizes[widest].0;
+        for (slot, (w, h)) in slots.iter().zip(sizes) {
+            assert!((slot.screen.size.x - w * scale).abs() <= 2.0, "{w}x{h} at {scale}: {:?}", slot.screen);
+            assert!((slot.screen.size.y - h * scale).abs() <= 2.0, "{w}x{h} at {scale}: {:?}", slot.screen);
+            assert!(slot.screen.pos.x >= slot.column.pos.x && slot.screen.pos.x + slot.screen.size.x <= slot.column.pos.x + slot.column.size.x);
+        }
+        for pair in slots.windows(2) {
+            let gap = pair[1].column.pos.x - (pair[0].column.pos.x + pair[0].column.size.x);
+            assert!(gap >= DIAGRAM_GAP, "a drop gap between every two screens: {gap}");
+            assert_eq!(pair[0].screen.pos.y, pair[1].screen.pos.y, "top-aligned, as the desktop lays them out");
+        }
+        assert!(slots[0].column.pos.x >= DIAGRAM_GAP, "a gap before the first screen too");
+        let last = slots.last().unwrap().column;
+        assert!(last.pos.x + last.size.x + DIAGRAM_GAP + NEW_SLOT_W <= width + 0.5, "the New screen slot fits after the last: {last:?}");
+        assert!(slots.iter().all(|s| s.screen.size.y <= BOX_MAX_H));
+    }
+
+    #[test]
+    fn the_diagram_shows_the_users_screens_to_scale_with_room_for_their_chips() {
+        // [B] [A] [C+D]: 1920×1080, 2560×1440, and a 4K mirror of two.
+        let width = 558.0;
+        let sizes = [(1920.0, 1080.0), (2560.0, 1440.0), (3840.0, 2160.0)];
+        let (slots, height) = diagram_layout(&[(sizes[0], 1), (sizes[1], 1), (sizes[2], 2)], width);
+        assert_eq!(slots.len(), 3);
+        assert_to_scale(&slots, &sizes, width);
+        let ratio = slots[2].screen.size.x / slots[0].screen.size.x;
+        assert!((ratio - 2.0).abs() < 0.03, "3840 over 1920: {ratio}");
+        assert!(slots[2].screen.size.x > 180.0, "the room goes to the screens: {:?}", slots[2].screen);
+        // At the menu's width every box holds its chips.
+        for slot in &slots {
+            assert!(slot.inside, "{slot:?}");
+            for chip in &slot.chips {
+                assert!(chip.pos.x >= slot.screen.pos.x && chip.pos.x + chip.size.x <= slot.screen.pos.x + slot.screen.size.x);
+                assert!(chip.pos.y >= slot.screen.pos.y && chip.pos.y + chip.size.y <= slot.screen.pos.y + slot.screen.size.y);
+            }
+        }
+        assert_eq!(slots[2].chips.len(), 2);
+        assert_eq!(height, (slots[2].screen.pos.y + slots[2].screen.size.y).ceil() + DIAGRAM_PAD);
+        assert!(slots.iter().all(|s| s.column.size.y == slots[0].column.size.y), "every column the diagram's height");
+
+        // Narrower, B's box is too small for its chip: every chip goes under
+        // its box, in a column at least a chip wide.
+        let width = 460.0;
+        let (slots, height) = diagram_layout(&[(sizes[0], 1), (sizes[1], 1), (sizes[2], 2)], width);
+        assert_to_scale(&slots, &sizes, width);
+        for slot in &slots {
+            assert!(!slot.inside);
+            assert!(slot.column.size.x >= CHIP_MIN_W);
+            for chip in &slot.chips {
+                assert!(chip.pos.y >= slot.screen.pos.y + slot.screen.size.y, "under the box");
+                assert_eq!((chip.pos.x, chip.size.x), (slot.column.pos.x, slot.column.size.x));
+            }
+        }
+        let last = slots[2].chips[1];
+        assert_eq!(height, (last.pos.y + last.size.y).ceil() + DIAGRAM_PAD);
+    }
+
+    #[test]
+    fn few_screens_hold_their_chips_inside() {
+        let width = 558.0;
+        let sizes = [(1920.0, 1080.0), (2560.0, 1440.0)];
+        let (slots, _) = diagram_layout(&[(sizes[0], 1), (sizes[1], 2)], width);
+        assert_to_scale(&slots, &sizes, width);
+        for slot in &slots {
+            assert!(slot.inside, "{slot:?}");
+            for chip in &slot.chips {
+                assert!(chip.pos.x >= slot.screen.pos.x && chip.pos.x + chip.size.x <= slot.screen.pos.x + slot.screen.size.x);
+                assert!(chip.pos.y >= slot.screen.pos.y && chip.pos.y + chip.size.y <= slot.screen.pos.y + slot.screen.size.y);
+            }
+        }
+    }
+
+    #[test]
+    fn many_or_odd_screens_still_fit_the_menu() {
+        let width = 558.0;
+        // Six equal screens: equal columns, narrower chips.
+        let six = [((1920.0, 1080.0), 1); 6];
+        let (slots, _) = diagram_layout(&six, width);
+        assert_to_scale(&slots, &[(1920.0, 1080.0); 6], width);
+        assert!(slots.iter().all(|s| s.column.size.x == slots[0].column.size.x), "equal screens, equal columns");
+        // A small screen next to a huge one keeps its proportion; only its
+        // column widens for its chip.
+        let sizes = [(800.0, 480.0), (7680.0, 4320.0)];
+        let (slots, _) = diagram_layout(&[(sizes[0], 1), (sizes[1], 1)], width);
+        assert_to_scale(&slots, &sizes, width);
+        assert!(slots[0].screen.size.x < 40.0 && slots[0].column.size.x >= CHIP_MIN_W, "{:?}", slots[0]);
+        // A portrait screen of three under the height cap, and one with no
+        // mode yet drawn at a common size.
+        let (slots, _) = diagram_layout(&[((0.0, 0.0), 1), ((2160.0, 3840.0), 3)], width);
+        assert_to_scale(&slots, &[UNSIZED_SCREEN, (2160.0, 3840.0)], width);
+        assert_eq!(slots[1].screen.size.y, BOX_MAX_H);
+        assert_eq!(slots[1].chips.len(), 3);
+        // A narrow panel shrinks the whole diagram, still to scale.
+        let narrow = 300.0;
+        let sizes = [(1920.0, 1080.0), (2560.0, 1440.0), (3840.0, 2160.0)];
+        let (slots, _) = diagram_layout(&[(sizes[0], 1), (sizes[1], 1), (sizes[2], 2)], narrow);
+        assert_to_scale(&slots, &sizes, narrow);
+    }
+
+    #[test]
+    fn a_drop_changes_the_draft_only_where_it_lands() {
+        use crate::shell::display_menu::gallery_fixture;
+        let (snap, _) = gallery_fixture();
+        let running = DisplayConfig::running(&snap);
+        let (a, b, c, d) = ("card0-DP-1", "card0-DP-2", "card0-DP-3", "card0-DP-4");
+        let drop = |item: &DragItem, on| ShellPanel::display_drop_result(&running, item, on);
+        // D off the mirror into a screen of its own at the right: four screens.
+        let alone = drop(&DragItem::Output(d.into()), DropAt::Insert(3)).unwrap();
+        assert_eq!(alone.arrangement.text(), format!("{b},{a},{c},{d}"));
+        // B onto A's screen: A mirrored on B, three screens become two.
+        let mirrored = drop(&DragItem::Output(b.into()), DropAt::Screen(1)).unwrap();
+        assert_eq!(mirrored.arrangement.text(), format!("{a}+{b},{c}+{d}"));
+        assert_eq!(mirrored.main_screen(), Some(0), "the main screen goes with A");
+        // C off: the mirror is D alone.
+        let off = drop(&DragItem::Output(c.into()), DropAt::Off).unwrap();
+        assert_eq!(off.arrangement.text(), format!("{b},{a},{d},off:{c}"));
+        assert!(off.modesets(&running), "an output turned off asks to be kept");
+        // The mirror screen to the far left; the main screen stays A.
+        let moved = drop(&DragItem::Screen(2), DropAt::Insert(0)).unwrap();
+        assert_eq!(moved.arrangement.text(), format!("{c}+{d},{b},{a}"));
+        assert_eq!((moved.main.as_deref(), moved.main_screen()), (Some(a), Some(2)));
+        assert!(!moved.modesets(&running), "a move lays the desktop out again, no modeset");
+        // Where they are already: nothing to apply.
+        assert!(drop(&DragItem::Output(d.into()), DropAt::Screen(2)).is_none());
+        assert!(drop(&DragItem::Output(b.into()), DropAt::Insert(0)).is_none(), "B is alone at the left already");
+        assert!(drop(&DragItem::Output(b.into()), DropAt::Insert(1)).is_none());
+        assert!(drop(&DragItem::Screen(1), DropAt::Insert(1)).is_none() && drop(&DragItem::Screen(1), DropAt::Insert(2)).is_none());
+        assert!(drop(&DragItem::Screen(0), DropAt::Off).is_none(), "a screen is not turned off whole");
     }
 }

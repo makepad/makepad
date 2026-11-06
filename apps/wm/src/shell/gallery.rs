@@ -179,10 +179,12 @@ impl ShellGallery {
             use super::wifi_linux::{WifiEvent, WifiSnapshot};
             self.bar_panel.wifi.apply(WifiEvent::Snapshot(WifiSnapshot::fixture()));
             let (displays, trials) = super::display_menu::gallery_fixture();
-            self.panel.display_snapshot = displays;
-            self.panel.display_trials = trials;
-            self.panel.current_dpi = 2.0;
-            self.panel.display_now = 3.0;
+            for panel in [&mut self.panel, &mut self.bar_panel] {
+                panel.display_snapshot = displays.clone();
+                panel.display_trials = trials.clone();
+                panel.current_dpi = 2.0;
+                panel.display_now = 3.0;
+            }
         }
         self.osd.show = Some(OsdShow::volume(62, false));
         // The gallery's OSD never times out — it is a picture of one.
@@ -543,6 +545,13 @@ impl Widget for ShellGallery {
         self.keys.handle_event(cx, event, scope);
         self.panel.handle_event(cx, event, scope);
         self.bar_panel.handle_event(cx, event, scope);
+        // The flyout draws into the gallery's area, so its own redraws (a hover, a
+        // pick, a drag in the Display menu) are the gallery's to make.
+        if self.bar_panel.open.is_some()
+            && matches!(event, Event::MouseMove(_) | Event::MouseDown(_) | Event::MouseUp(_) | Event::KeyDown(_) | Event::Scroll(_))
+        {
+            self.redraw(cx);
+        }
         self.notes.handle_event(cx, event, scope);
         self.bar.handle_event(cx, event, scope);
         self.osd.handle_event(cx, event, scope);
@@ -565,6 +574,33 @@ impl Widget for ShellGallery {
 }
 
 impl ShellGallery {
+    /// The Display menu's Apply, Keep and Revert against the fixture: the
+    /// stand-in renderer shows what is sent at once, so the menu goes
+    /// through the same try → keep steps as on the real monitors.
+    #[cfg(target_os = "linux")]
+    fn gallery_display(&mut self, cx: &mut Cx, action: crate::linux_controls::ControlAction) {
+        use crate::linux_controls::ControlAction;
+        use super::display_menu::{gallery_shows, DisplayConfig, TrialOut};
+        let panel = &mut self.bar_panel;
+        let now = panel.display_now;
+        let running = DisplayConfig::running(&panel.display_snapshot);
+        let mut outs = match action {
+            ControlAction::DisplayApply(config) => panel.display_trials.apply(config, running, 0, now),
+            ControlAction::DisplayKeep => panel.display_trials.keep(),
+            ControlAction::DisplayRevert => panel.display_trials.revert(now),
+            _ => return,
+        };
+        for _ in 0..2 {
+            for out in std::mem::take(&mut outs) {
+                if let TrialOut::Send { to, .. } = out {
+                    panel.display_snapshot = gallery_shows(&panel.display_snapshot, &to);
+                }
+            }
+            outs = panel.display_trials.observe(&panel.display_snapshot, 1, now);
+        }
+        self.redraw(cx);
+    }
+
     /// Route the actions the surfaces raise — the bar opens panels, the
     /// menu prints what it would run, the panels move the demo values.
     pub fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
@@ -586,7 +622,14 @@ impl ShellGallery {
                     }
                     if let Some(kind) = PanelKind::for_module(module) {
                         let anchor = self.bar.module_rect(seg, module).unwrap_or_default();
+                        // The Display menu shows the fixture's monitors, not this machine's.
+                        #[cfg(target_os = "linux")]
+                        let displays = self.bar_panel.display_snapshot.clone();
                         self.bar_panel.toggle(cx, kind, anchor);
+                        #[cfg(target_os = "linux")]
+                        {
+                            self.bar_panel.display_snapshot = displays;
+                        }
                         self.bar.data.open_panel = self.bar_panel.open.map(|k| k.module());
                     }
                     if module == BarModule::Menu {
@@ -632,7 +675,9 @@ impl ShellGallery {
                 }
                 ShellPanelAction::None => {}
                 #[cfg(target_os = "linux")]
-                ShellPanelAction::Wifi(_) | ShellPanelAction::System(_) => {}
+                ShellPanelAction::System(action) => self.gallery_display(cx, action),
+                #[cfg(target_os = "linux")]
+                ShellPanelAction::Wifi(_) => {}
             }
             match wa.cast::<ShellMenuAction>() {
                 ShellMenuAction::Activate(target) => {

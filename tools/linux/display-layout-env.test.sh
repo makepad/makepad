@@ -6,19 +6,15 @@
 # layout-env.test.sh` (from anywhere; paths below are resolved from this
 # file's own location). Exit 0 = pass.
 #
-# Scenarios: a happy-path layout; cards renumbered (same pci, different
-# cardN than a hypothetical earlier boot); a screen whose card is missing
-# this boot; a malformed file (bad render-on, a too-short screen line, an
-# unknown keyword, a duplicate screen key, an invalid mode=); a pre-set
-# env var winning over the file for each of the three variables, and the
-# per-variable MAKEPAD_WM_ORDER_FROM_SAVED/MAKEPAD_WM_MODES_FROM_SAVED
-# markers that go with MAKEPAD_DISPLAY_ORDER/MAKEPAD_DRM_MODES (set only
-# when *this* var was set from the file, cleared when it was left alone,
-# and never left stale from a previous process even when the caller's
-# environment already carried one); the legacy display-gpu fallback,
-# both when it should apply (no display-layout file at all) and when it
-# must not (display-layout exists, even without a render-on line); and
-# an unreadable-but-present display-layout read as empty rather than
+# Scenarios: a happy-path layout (the profiles file handed to the
+# platform, the render-on GPU resolved); cards renumbered (the render-on
+# GPU found by its PCI address on another card number); a render-on GPU
+# that is not present; a malformed file (bad render-on, an unknown
+# keyword, WM lines after the profiles); a pre-set env var winning over
+# the file for each variable; the legacy display-gpu fallback, both when
+# it should apply (no display-layout file at all) and when it must not
+# (display-layout exists, even without a render-on line); and an
+# unreadable-but-present display-layout read as empty rather than
 # falling back.
 
 set -u
@@ -84,12 +80,13 @@ write_gpu() {
 # Sources the helper in a brand-new, otherwise-empty bash process (so no
 # variable from this test script, or from a previous case, can leak in)
 # and prints the production code's variables, one per line, each
-# `<unset>` when the helper left it alone: the three the platform reads,
-# and the three from-saved markers (one for the GPU, one each for order
-# and modes). Stderr (the `display-layout:` log lines) is captured to
-# $run_stderr for the few cases that check it, and the subshell's own
-# exit status is captured to $run_status (expected 0 always: the helper
-# must never fail the caller).
+# `<unset>` when the helper left it alone: the layout file's override
+# (never set here: the backend finds the file itself), the two the
+# platform reads and the two from-saved markers (the GPU's and the virtual display's).
+# Stderr (the `display-layout:` log lines) is captured to $run_stderr for
+# the few cases that check it, and the subshell's own exit status is
+# captured to $run_status (expected 0 always: the helper must never fail
+# the caller).
 run_stdout=""
 run_stderr=""
 run_status=0
@@ -108,149 +105,116 @@ run_case() {
         bash -c '
             set -eu
             . "$HELPER"
-            printf "%s\n" "${MAKEPAD_DISPLAY_ORDER:-<unset>}"
-            printf "%s\n" "${MAKEPAD_DRM_MODES:-<unset>}"
+            printf "%s\n" "${MAKEPAD_DISPLAY_LAYOUT:-<unset>}"
             printf "%s\n" "${MAKEPAD_VULKAN_COMPOSITOR_PCI:-<unset>}"
             printf "%s\n" "${MAKEPAD_WM_GPU_FROM_SAVED:-<unset>}"
-            printf "%s\n" "${MAKEPAD_WM_ORDER_FROM_SAVED:-<unset>}"
-            printf "%s\n" "${MAKEPAD_WM_MODES_FROM_SAVED:-<unset>}"
             printf "%s\n" "${MAKEPAD_VIRTUAL_DISPLAY:-<unset>}"
             printf "%s\n" "${MAKEPAD_WM_VIRTUAL_FROM_SAVED:-<unset>}"
         ' 2>"$stderr_file")
     run_status=$?
     run_stderr=$(cat "$stderr_file")
     rm -f "$stderr_file"
-    IFS=$'\n' read -r -d '' field_order field_modes field_pci field_fromsaved \
-        field_order_fromsaved field_modes_fromsaved field_virtual field_virtual_fromsaved <<<"$run_stdout"
+    IFS=$'\n' read -r -d '' field_layout field_pci field_fromsaved field_virtual field_virtual_fromsaved <<<"$run_stdout"
 }
 
+# A layout as the WM writes it: its own lines, then one profile.
+layout_text='makepad-display-layout 2
+render-on 0000:01:00.0 1234:5678
+profile 00000000000000a1,00000000000000b2
+screen main
+output 0000:01:00.0 DP-1 00000000000000a1 mode=2560x1440@144
+screen
+output 0000:01:00.0 DP-2 00000000000000b2
+pace auto
+'
+
 # ---------------------------------------------------------------------
-# 1. Happy path: two screens, one with a mode, a render-on GPU.
+# 1. Happy path: the profiles file is handed to the platform as it is,
+#    and the render-on GPU resolves.
 # ---------------------------------------------------------------------
 s=$(new_scratch)
 add_card "$s" 0 0000:00:02.0 8086 a780
-add_card "$s" 1 0000:01:00.0 10de 2b85
-write_layout "$s" 'makepad-display-layout 1
-render-on 0000:01:00.0 10de:2b85
-screen 0000:00:02.0 HDMI-A-2 mode=3840x2160@30
-screen 0000:01:00.0 HDMI-A-1 main
-'
+add_card "$s" 1 0000:01:00.0 1234 5678
+write_layout "$s" "$layout_text"
 run_case "$s"
 assert_eq "happy-path" "status" "0" "$run_status"
-assert_eq "happy-path" "order" "card0-HDMI-A-2,card1-HDMI-A-1" "$field_order"
-assert_eq "happy-path" "modes" "card0-HDMI-A-2=3840x2160@30" "$field_modes"
+assert_eq "happy-path" "layout (not exported)" "<unset>" "$field_layout"
 assert_eq "happy-path" "pci" "0000:01:00.0" "$field_pci"
 assert_eq "happy-path" "from_saved" "1" "$field_fromsaved"
-assert_eq "happy-path" "order_from_saved" "1" "$field_order_fromsaved"
-assert_eq "happy-path" "modes_from_saved" "1" "$field_modes_fromsaved"
 rm -rf "$s"
 
 # ---------------------------------------------------------------------
-# 2. Cards renumbered: the same pci addresses as case 1, but assigned to
-#    different card numbers this boot. Resolution must follow pci, not
-#    any assumption about which cardN a screen had last time.
+# 2. Cards renumbered: the render-on GPU is found by its PCI address,
+#    whichever cardN it is this boot.
 # ---------------------------------------------------------------------
 s=$(new_scratch)
-add_card "$s" 7 0000:01:00.0 10de 2b85
+add_card "$s" 7 0000:01:00.0 1234 5678
 add_card "$s" 3 0000:00:02.0 8086 a780
-write_layout "$s" 'makepad-display-layout 1
-render-on 0000:01:00.0 10de:2b85
-screen 0000:00:02.0 HDMI-A-2 mode=3840x2160@30
-screen 0000:01:00.0 HDMI-A-1 main
-'
+write_layout "$s" "$layout_text"
 run_case "$s"
 assert_eq "renumbered" "status" "0" "$run_status"
-assert_eq "renumbered" "order" "card3-HDMI-A-2,card7-HDMI-A-1" "$field_order"
-assert_eq "renumbered" "modes" "card3-HDMI-A-2=3840x2160@30" "$field_modes"
 assert_eq "renumbered" "pci" "0000:01:00.0" "$field_pci"
 rm -rf "$s"
 
 # ---------------------------------------------------------------------
-# 3. A missing card: the saved HDMI-A-1 screen's GPU is not present this
-#    boot. It must be dropped (never matched by connector alone), the
-#    other screen still resolves, and the helper does not fail.
+# 3. The render-on GPU is not present this boot: the automatic GPU, a
+#    note on stderr, and the profiles still go to the platform.
 # ---------------------------------------------------------------------
 s=$(new_scratch)
 add_card "$s" 0 0000:00:02.0 8086 a780
-write_layout "$s" 'makepad-display-layout 1
-screen 0000:00:02.0 HDMI-A-2 mode=3840x2160@30
-screen 0000:01:00.0 HDMI-A-1 main
-'
+write_layout "$s" "$layout_text"
 run_case "$s"
-assert_eq "missing-card" "status" "0" "$run_status"
-assert_eq "missing-card" "order" "card0-HDMI-A-2" "$field_order"
-assert_eq "missing-card" "modes" "card0-HDMI-A-2=3840x2160@30" "$field_modes"
+assert_eq "missing-gpu" "status" "0" "$run_status"
+assert_eq "missing-gpu" "pci" "<unset>" "$field_pci"
+assert_eq "missing-gpu" "layout (not exported)" "<unset>" "$field_layout"
 case "$run_stderr" in
-    *"0000:01:00.0 HDMI-A-1 not present this boot"*) pass ;;
-    *) fail "missing-card: expected a stderr note about the dropped screen, got: $run_stderr" ;;
+    *"0000:01:00.0 1234:5678 is not present"*) pass ;;
+    *) fail "missing-gpu: expected a stderr note about the missing GPU, got: $run_stderr" ;;
 esac
 rm -rf "$s"
 
 # ---------------------------------------------------------------------
-# 4. A malformed file: a bad render-on (odd token count), a too-short
-#    screen line, an unknown keyword, a duplicate screen key (the
-#    second copy's mode must lose to the first's), an invalid mode=,
-#    and ordinary comments/blank lines all mixed in with valid lines.
-#    None of this may abort the helper.
+# 4. A malformed file: a bad render-on (odd token count), an unknown
+#    keyword, comments and blank lines, and a WM line after the first
+#    profile (the profiles' part, never the WM's). None of this may
+#    abort the helper.
 # ---------------------------------------------------------------------
 s=$(new_scratch)
-add_card "$s" 0 0000:00:02.0 8086 a780
-add_card "$s" 1 0000:01:00.0 10de 2b85
+add_card "$s" 1 0000:01:00.0 1234 5678
 write_layout "$s" '# a comment
-makepad-display-layout 1
+makepad-display-layout 2
 
 render-on only-one-token
 some-unknown-keyword with args here
-screen
-screen 0000:00:02.0 HDMI-A-2 mode=3840x2160@30
-screen 0000:00:02.0 HDMI-A-2 mode=1920x1080
-screen 0000:01:00.0 HDMI-A-1 mode=not-a-mode
+profile 00000000000000a1
+screen main
+output 0000:01:00.0 DP-1 00000000000000a1
+render-on 0000:01:00.0 1234:5678
+virtual 1920x1080@60
 '
 run_case "$s"
 assert_eq "malformed" "status" "0" "$run_status"
-assert_eq "malformed" "order" "card0-HDMI-A-2,card1-HDMI-A-1" "$field_order"
-assert_eq "malformed" "modes (first screen wins over its duplicate)" "card0-HDMI-A-2=3840x2160@30" "$field_modes"
 assert_eq "malformed" "pci (bad render-on leaves it unset)" "<unset>" "$field_pci"
+assert_eq "malformed" "virtual (after the profiles: not the WM's)" "<unset>" "$field_virtual"
 rm -rf "$s"
 
 # ---------------------------------------------------------------------
-# 5. A pre-set env var wins over the file, for each of the three
-#    variables independently.
+# 5. A pre-set env var wins over the file, for each variable.
 # ---------------------------------------------------------------------
 s=$(new_scratch)
-add_card "$s" 0 0000:00:02.0 8086 a780
-add_card "$s" 1 0000:01:00.0 10de 2b85
-write_layout "$s" 'makepad-display-layout 1
-render-on 0000:01:00.0 10de:2b85
-screen 0000:00:02.0 HDMI-A-2 mode=3840x2160@30
-screen 0000:01:00.0 HDMI-A-1 main
-'
-run_case "$s" MAKEPAD_DISPLAY_ORDER=keep-me
-assert_eq "preset-order" "order" "keep-me" "$field_order"
-assert_eq "preset-order" "order_from_saved stays unset (not our export)" "<unset>" "$field_order_fromsaved"
-assert_eq "preset-order" "modes still applied" "card0-HDMI-A-2=3840x2160@30" "$field_modes"
-assert_eq "preset-order" "modes_from_saved still set (independent of the order pin)" "1" "$field_modes_fromsaved"
-assert_eq "preset-order" "pci still applied" "0000:01:00.0" "$field_pci"
-
-run_case "$s" MAKEPAD_DRM_MODES=keep-me
-assert_eq "preset-modes" "modes" "keep-me" "$field_modes"
-assert_eq "preset-modes" "modes_from_saved stays unset (not our export)" "<unset>" "$field_modes_fromsaved"
-assert_eq "preset-modes" "order still applied" "card0-HDMI-A-2,card1-HDMI-A-1" "$field_order"
-assert_eq "preset-modes" "order_from_saved still set (independent of the modes pin)" "1" "$field_order_fromsaved"
-
-# A caller whose environment already carries a stale from-saved marker
-# (e.g. inherited from an earlier, unrelated process) must not have it
-# survive once the var itself is externally pinned: both markers are
-# unset first, before either var is even looked at.
-run_case "$s" MAKEPAD_DISPLAY_ORDER=keep-me MAKEPAD_WM_ORDER_FROM_SAVED=1
-assert_eq "preset-order-stale-marker" "order_from_saved is cleared, not left stale" "<unset>" "$field_order_fromsaved"
-run_case "$s" MAKEPAD_DRM_MODES=keep-me MAKEPAD_WM_MODES_FROM_SAVED=1
-assert_eq "preset-modes-stale-marker" "modes_from_saved is cleared, not left stale" "<unset>" "$field_modes_fromsaved"
+add_card "$s" 1 0000:01:00.0 1234 5678
+write_layout "$s" "$layout_text"
+# A set MAKEPAD_DISPLAY_LAYOUT names the file read instead (tests).
+printf '%s' "${layout_text/0000:01:00.0 1234:5678/0000:02:00.0 1234:5678}" >"$s/other-layout"
+add_card "$s" 2 0000:02:00.0 1234 5678
+run_case "$s" MAKEPAD_DISPLAY_LAYOUT="$s/other-layout"
+assert_eq "preset-layout" "layout" "$s/other-layout" "$field_layout"
+assert_eq "preset-layout" "pci from that file" "0000:02:00.0" "$field_pci"
 
 run_case "$s" MAKEPAD_VULKAN_COMPOSITOR_PCI=keep-me
 assert_eq "preset-pci" "pci" "keep-me" "$field_pci"
 assert_eq "preset-pci" "from_saved stays unset (not our export)" "<unset>" "$field_fromsaved"
-assert_eq "preset-pci" "order still applied" "card0-HDMI-A-2,card1-HDMI-A-1" "$field_order"
+assert_eq "preset-pci" "layout (not exported)" "<unset>" "$field_layout"
 
 run_case "$s" MAKEPAD_VULKAN_COMPOSITOR_UUID=deadbeefdeadbeefdeadbeefdeadbeef
 assert_eq "preset-uuid" "pci left unset when UUID is externally pinned" "<unset>" "$field_pci"
@@ -261,8 +225,8 @@ rm -rf "$s"
 #    exist at all.
 # ---------------------------------------------------------------------
 s=$(new_scratch)
-add_card "$s" 1 0000:01:00.0 10de 2b85
-write_gpu "$s" '0000:01:00.0 10de:2b85'
+add_card "$s" 1 0000:01:00.0 1234 5678
+write_gpu "$s" '0000:01:00.0 1234:5678'
 run_case "$s"
 assert_eq "legacy-fallback" "status" "0" "$run_status"
 assert_eq "legacy-fallback" "pci (from display-gpu)" "0000:01:00.0" "$field_pci"
@@ -272,9 +236,9 @@ rm -rf "$s"
 # display-layout exists (even with nothing useful in it) -> the legacy
 # file must be ignored even though it names a present, valid GPU.
 s=$(new_scratch)
-add_card "$s" 1 0000:01:00.0 10de 2b85
-write_gpu "$s" '0000:01:00.0 10de:2b85'
-write_layout "$s" 'makepad-display-layout 1
+add_card "$s" 1 0000:01:00.0 1234 5678
+write_gpu "$s" '0000:01:00.0 1234:5678'
+write_layout "$s" 'makepad-display-layout 2
 '
 run_case "$s"
 assert_eq "layout-supersedes-legacy" "status" "0" "$run_status"
@@ -284,10 +248,10 @@ rm -rf "$s"
 # An unreadable-but-present display-layout reads as empty: no legacy
 # fallback either (the file's presence, not its readability, decides).
 s=$(new_scratch)
-add_card "$s" 1 0000:01:00.0 10de 2b85
-write_gpu "$s" '0000:01:00.0 10de:2b85'
-write_layout "$s" 'makepad-display-layout 1
-render-on 0000:01:00.0 10de:2b85
+add_card "$s" 1 0000:01:00.0 1234 5678
+write_gpu "$s" '0000:01:00.0 1234:5678'
+write_layout "$s" 'makepad-display-layout 2
+render-on 0000:01:00.0 1234:5678
 '
 chmod 000 "$s/cfg/makepad/wm/display-layout"
 if [ -r "$s/cfg/makepad/wm/display-layout" ]; then
@@ -301,15 +265,17 @@ chmod 600 "$s/cfg/makepad/wm/display-layout"
 rm -rf "$s"
 
 # ---------------------------------------------------------------------
-# 7. No display-layout and no display-gpu: must not fail, nothing set.
+# 7. No display-layout and no display-gpu: must not fail; the profiles
+#    file is still named (the WM writes it on the first change, and the
+#    platform reads it whenever the monitors change), nothing else set.
 # ---------------------------------------------------------------------
 s=$(new_scratch)
 add_card "$s" 0 0000:00:02.0 8086 a780
 run_case "$s"
 assert_eq "nothing-saved" "status" "0" "$run_status"
-assert_eq "nothing-saved" "order" "<unset>" "$field_order"
-assert_eq "nothing-saved" "modes" "<unset>" "$field_modes"
+assert_eq "nothing-saved" "layout (not exported)" "<unset>" "$field_layout"
 assert_eq "nothing-saved" "pci" "<unset>" "$field_pci"
+assert_eq "nothing-saved" "virtual" "<unset>" "$field_virtual"
 rm -rf "$s"
 
 # ---------------------------------------------------------------------
@@ -318,12 +284,10 @@ rm -rf "$s"
 # ---------------------------------------------------------------------
 s=$(new_scratch)
 rm -rf "$s/sysfs"
-write_layout "$s" 'makepad-display-layout 1
-screen 0000:00:02.0 HDMI-A-2
-'
+write_layout "$s" "$layout_text"
 run_case "$s"
 assert_eq "no-sysfs" "status" "0" "$run_status"
-assert_eq "no-sysfs" "order" "<unset>" "$field_order"
+assert_eq "no-sysfs" "pci" "<unset>" "$field_pci"
 rm -rf "$s"
 
 # ---------------------------------------------------------------------
@@ -332,7 +296,7 @@ rm -rf "$s"
 #    wins and clears the marker; absent = unset.
 # ---------------------------------------------------------------------
 s=$(new_scratch)
-write_layout "$s" 'makepad-display-layout 1
+write_layout "$s" 'makepad-display-layout 2
 virtual 7680x2160@120 panels=off scale=200 follow=on
 virtual 1920x1080@60
 '
@@ -346,7 +310,7 @@ assert_eq "virtual-pinned" "marker cleared" "<unset>" "$field_virtual_fromsaved"
 rm -rf "$s"
 
 s=$(new_scratch)
-write_layout "$s" 'makepad-display-layout 1
+write_layout "$s" 'makepad-display-layout 2
 virtual banana
 virtual 5120x1440@59.94
 '
@@ -355,7 +319,7 @@ assert_eq "virtual-default-panels" "env" "5120x1440@59.94 mirror" "$field_virtua
 rm -rf "$s"
 
 s=$(new_scratch)
-write_layout "$s" 'makepad-display-layout 1
+write_layout "$s" 'makepad-display-layout 2
 '
 run_case "$s"
 assert_eq "virtual-absent" "env" "<unset>" "$field_virtual"

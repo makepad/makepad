@@ -5275,22 +5275,32 @@ impl App {
             // tick and WindowGeomChange): a DPI change does not bump the
             // generation, and the reconcile key is cheap to compare.
             // Elsewhere they are read once, when the gate changes.
-            // `MAKEPAD_WM_FAKE_SCREENS=name:x,y,w,h;name:x,y,w,h` (tests only): the
+            // `MAKEPAD_WM_FAKE_SCREENS=name:x,y,w,h;*name:x,y,w,h` (tests only): the
             // per-screen desk of the Linux direct backend, under a nested window.
+            // `*` marks the main screen (the dock's); without one it is the first.
             if let Some(spec) = std::env::var("MAKEPAD_WM_FAKE_SCREENS").ok().filter(|s| !s.is_empty()) {
                 let mut names = Vec::new();
                 let mut geoms = Vec::new();
+                let mut main_name = None;
                 for part in spec.split(';') {
                     let Some((name, r)) = part.split_once(':') else { continue };
                     let v: Vec<f64> = r.split(',').filter_map(|x| x.trim().parse().ok()).collect();
                     if v.len() == 4 {
+                        let name = match name.strip_prefix('*') {
+                            Some(main) => {
+                                main_name = Some(main.to_string());
+                                main
+                            }
+                            None => name,
+                        };
                         names.push(name.to_string());
                         geoms.push(LRect::new(v[0], v[1], v[2], v[3]));
                     }
                 }
                 if !names.is_empty() && !self.gallery {
+                    let main_name = main_name.or_else(|| names.first().cloned());
                     let state = self.state_mut();
-                    state.screen_source = desk::ScreenSource { per_screen: true, main_name: names.first().cloned(), geoms, names, generation };
+                    state.screen_source = desk::ScreenSource { per_screen: true, main_name, geoms, names, generation };
                     self.sync_geometry(cx);
                     self.drain_screens_changed(cx);
                     return;

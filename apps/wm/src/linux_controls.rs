@@ -9,24 +9,18 @@
 //!   tile follows). The saved value is applied once at start-up, when the
 //!   window exists, unless the person has set a scale this session.
 //! * The display layout (`display-layout`, see `shell::display_layout`):
-//!   screen order, main screen, per-screen modes, mirror and the render-on
-//!   GPU. The WM keeps a working copy; every edit updates it and queues the
-//!   whole file for saving (one slot, newest intent). A screen's mode
-//!   is tried first (`shell::display_menu`): sent at once, then kept by the
-//!   person within 15 s or reverted; a failure is reported under its screen
-//!   and the previous one sent again. Only a kept one reaches the layout.
-//!   Extended / Mirror reinitialises no output: it applies at once and is
-//!   saved when the renderer takes it. At start-up the
-//!   saved layout is restored as a safety net behind the session script's
-//!   environment (`restore_plan`): order and modes once, on the first
-//!   display generation that has a laid-out desktop; the main screen
-//!   through `Cx::linux_set_display_source` as soon as that screen is
-//!   active (or at once when it is a peer GPU's screen that has not joined
-//!   yet, which the renderer accepts early), else after a bounded wait.
-//!   Once the person changes order, main or mode this session the restore
-//!   stops, so it never undoes them. The renderer's snapshot (`primary`)
-//!   is the only word on which screen is main, so a request stays
-//!   "pending" until it is observed there, and is reported if it never is.
+//!   the render-on GPU, the virtual desktop and one profile per set of
+//!   connected monitors (screens, mirrors, modes, main screen, pacing). The
+//!   renderer applies the profiles itself, at start-up and whenever the
+//!   monitors change; the WM only saves them. The WM keeps a working copy;
+//!   every edit updates it and queues the whole file for saving (one slot,
+//!   newest intent). The Display menu's Apply sends a whole configuration
+//!   (`shell::display_menu`): one that reinitialises no output is saved as
+//!   soon as the renderer shows it, one that does is kept by the person
+//!   within 15 s or reverted; a failure is reported under the Apply row and
+//!   the previous configuration sent again. Pacing applies at once and is
+//!   saved when the renderer takes it. The saved virtual desktop is
+//!   restored once at start-up unless the environment pins it.
 //! * Pointer speed: each drag goes to `linux_input::set_pointer_speed`
 //!   (process-wide, mouse and touchpad separately). The saved values are
 //!   applied once at start-up unless the person already set that device
@@ -36,29 +30,17 @@ use makepad_widgets::*;
 use makepad_widgets::makepad_platform::linux_input::{
     set_pointer_speed, POINTER_SPEED_MAX, POINTER_SPEED_MIN,
 };
-use makepad_widgets::makepad_platform::linux_display::LinuxDisplaySnapshot;
-use makepad_widgets::makepad_platform::linux_display::{
-    DisplayArrangement, DisplayPacing, LinuxDisplayCommand, VirtualPanels,
-};
-use shell::display_layout::{
-    env_restore_plan, fill_slots, is_joining, restore_plan, restore_waiting, screen_key, screen_rows,
-    virtual_env_pinned, DisplayLayout, RestoreOp, SavedPace, SavedVirtual, ScreenEntry, ScreenKey, VirtualSize,
-};
-use shell::display_menu::{Change, DisplayTrials, TrialOut};
+use makepad_widgets::makepad_platform::linux_display::display_profiles::ProfileSettings;
+use makepad_widgets::makepad_platform::linux_display::{DisplayPacing, LinuxDisplayCommand, LinuxDisplaySnapshot, VirtualPanels};
+use shell::display_layout::{virtual_env_pinned, virtual_restore, DisplayLayout, SavedVirtual, VirtualSize};
+use shell::display_menu::{DisplayConfig, DisplayTrials, TrialOut};
 use shell::panels::{PanelKind, ShellPanel};
 use shell::system_linux::{
-    validate_display_source, validate_gpu_choice, BatteryStatus, CommandResult, GpuInfo, Seq,
+    validate_gpu_choice, BatteryStatus, CommandResult, GpuInfo, Seq,
     SystemCommand, SystemController, DISPLAY_SCALE_MAX, DISPLAY_SCALE_MIN,
 };
 use std::collections::VecDeque;
 
-/// How long a requested source may go unconfirmed by the renderer's
-/// snapshot before the panel stops calling it pending and says so.
-const SOURCE_PENDING_TIMEOUT: f64 = 5.0;
-/// How long a saved source whose output is listed but not presenting yet
-/// (`active` means a frame was shown) may wait for its first frame at
-/// start-up before the renderer's default is kept.
-const SOURCE_RESTORE_TIMEOUT: f64 = 10.0;
 /// How long a confirmed restart may wait for its `SaveDisplayLayout` to be
 /// confirmed before it is abandoned (a wedged worker thread: alive by
 /// `worker_alive()`'s own test, `!is_finished()`, but not answering).
@@ -73,20 +55,11 @@ pub enum ControlAction {
     DpiScale(u32),
     /// The scale slider while dragged: applied, not saved.
     DpiScaleLive(u32),
-    /// Make screen `name` the main screen (where the dock goes): a
-    /// connector name from the renderer's inventory.
-    DisplaySource(String),
-    /// The screens of the desktop in this new left-to-right order
-    /// (connector names, a neighbour swap of the drawn order): applied
-    /// through `linux_set_display_order` and saved.
-    DisplayOrder(Vec<String>),
-    /// Try a screen's mode: sent at once, saved only once kept
-    /// (`DisplayKeep`), reverted by `DisplayRevert` or after 15 s.
-    DisplayTry(Change),
-    /// Extended, or Mirror sized for a screen: it reinitialises no output,
-    /// so it is sent at once with no confirm and saved once the renderer
-    /// takes it.
-    DisplayArrangement(DisplayArrangement),
+    /// The Display menu's Apply: the whole configuration (screens, mirrors,
+    /// modes, main screen) at once. Saved once shown; one that reinitialises
+    /// an output only once kept (`DisplayKeep`), reverted by
+    /// `DisplayRevert` or after 15 s.
+    DisplayApply(DisplayConfig),
     DisplayKeep,
     DisplayRevert,
     /// Which screen paces the frames: applied at once (no modeset, so no
@@ -157,10 +130,6 @@ pub struct LinuxControls {
     /// This session edited the layout (any part); once the start-up read
     /// is merged in, the merged layout is queued for saving again.
     layout_edited: bool,
-    /// The person changed order, main screen or a mode this session: the
-    /// start-up restore must not override them, and a late read keeps
-    /// their screens.
-    layout_user_set: bool,
     /// The person chose a render-on GPU this session; a late read keeps it.
     gpu_user_set: bool,
     /// The person chose the desktop (Panel / Virtual and its choices) this
@@ -173,22 +142,9 @@ pub struct LinuxControls {
     /// The normal display scale (the saved or last chosen one), put back
     /// when the desktop goes from Virtual to Panel.
     panel_scale: Option<u32>,
-    /// The saved order and modes have been restored (or deliberately
+    /// The saved virtual desktop has been restored (or deliberately
     /// skipped) once.
-    layout_restore_done: bool,
-    /// The display generation the order/mode restore last looked at; the
-    /// plan is computed once per new generation until it is done.
-    layout_restore_generation: Option<u64>,
-    /// Order and mode requests already sent by the restore: one identical
-    /// request is never sent twice, so waiting for a joining screen does
-    /// not loop through rescans.
-    layout_restore_sent: Vec<RestoreOp>,
-    /// The saved main screen, still joining, has been asked for early once.
-    main_early_tried: bool,
-    /// The display generation and time the restore last sent an order or
-    /// mode request: the reacquire it starts can outlast the main screen's
-    /// 5 s confirm, so the confirm waits for it (`main_restore_confirms`).
-    layout_restore_sent_at: Option<(u64, f64)>,
+    virtual_restore_done: bool,
     /// Newest unsent pointer speed per device (0 mouse, 1 touchpad).
     pointer_save: [Option<u32>; 2],
     /// The person set that device's speed this session; a start-up read
@@ -197,12 +153,6 @@ pub struct LinuxControls {
     /// The start-up read has been applied (or deliberately skipped) once
     /// per device.
     pointer_loaded_applied: [bool; 2],
-    /// The saved main screen has been asked for (or deliberately skipped)
-    /// once.
-    source_loaded_applied: bool,
-    /// When the start-up restoration first saw an inventory to decide on;
-    /// the bounded wait for a not-yet-presenting output counts from here.
-    source_restore_since: Option<f64>,
     /// Armed by a main-window geometry change: the frame after it, the open
     /// flyout re-reads its bar module's rect, which the bar has re-laid out.
     reanchor_frame: NextFrame,
@@ -223,8 +173,8 @@ pub struct LinuxControls {
     /// The sequence of the `SaveDisplayLayout` a restart (or an ordinary
     /// edit) is waiting on, until its outcome (success or failure) lands.
     layout_save_seq: Option<Seq>,
-    /// The mode change being tried, a pending Extended / Mirror switch and the notes under the
-    /// Display menu's controls.
+    /// The configuration being tried and the note under the Display menu's
+    /// Apply row.
     trials: DisplayTrials,
 }
 
@@ -233,21 +183,6 @@ pub struct LinuxControls {
 /// the file held.
 fn take_layout_save(loaded: bool, slot: &mut Option<DisplayLayout>) -> Option<DisplayLayout> {
     if loaded { slot.take() } else { None }
-}
-
-/// Whether the start-up restore's main-screen request gets the bounded
-/// pending confirm. Not while an order or mode request the restore sent
-/// (at generation `sent.0`, time `sent.1`) may still be reacquiring: the
-/// renderer has to have moved past that generation and the confirm's own
-/// span has to have passed since the send, else a slow reacquire would
-/// show a false "did not switch" notice.
-fn main_restore_confirms(sent: Option<(u64, f64)>, generation: u64, now: f64) -> bool {
-    match sent {
-        None => true,
-        Some((sent_generation, sent_time)) => {
-            generation > sent_generation && now - sent_time > SOURCE_PENDING_TIMEOUT
-        }
-    }
 }
 
 fn valid_dpi(dpi: f64) -> bool {
@@ -266,8 +201,7 @@ fn restart_gate(saved: Option<&str>, gpus: &[GpuInfo]) -> bool {
 
 /// Whether an armed restart, confirmed at `since`, has waited too long at
 /// `now` for its `SaveDisplayLayout`'s outcome to land: past
-/// `RESTART_SAVE_TIMEOUT`, the same bounded-wait shape as
-/// `SOURCE_PENDING_TIMEOUT` elsewhere in this file. A wedged worker thread
+/// `RESTART_SAVE_TIMEOUT`. A wedged worker thread
 /// (alive by `worker_alive()`'s own test but never answering) would
 /// otherwise leave the restart waiting forever with no feedback.
 fn restart_timed_out(since: f64, now: f64) -> bool {
@@ -285,14 +219,9 @@ pub(crate) fn exit_code(restart_requested: bool) -> i32 {
 }
 
 impl LinuxControls {
-    /// Edit the working layout and queue the whole file for saving. With a
-    /// snapshot, every live screen is made part of the layout first, so an
-    /// edit of one that was not saved yet is not lost.
-    fn edit_layout(&mut self, displays: Option<&LinuxDisplaySnapshot>, edit: impl FnOnce(&mut DisplayLayout)) {
+    /// Edit the working layout and queue the whole file for saving.
+    fn edit_layout(&mut self, edit: impl FnOnce(&mut DisplayLayout)) {
         let layout = self.layout.get_or_insert_with(DisplayLayout::default);
-        if let Some(displays) = displays {
-            layout.include_snapshot(displays);
-        }
         edit(layout);
         self.layout_edited = true;
         self.layout_save = Some(layout.clone());
@@ -303,97 +232,6 @@ impl LinuxControls {
     #[cfg(test)]
     fn take_layout_save(&mut self) -> Option<DisplayLayout> {
         take_layout_save(self.layout_loaded, &mut self.layout_save)
-    }
-
-    /// One poll of the start-up order/mode restore: the requests to send
-    /// now. On each new display generation whose desktop is laid out, the
-    /// plan's order and mode requests not sent before go out (one identical
-    /// request is never sent twice, so no rescan loop). The restore ends
-    /// only on a pass where the arrangement can be judged and holds: laid
-    /// out, nothing joining or overlapping (`restore_waiting`), no order or
-    /// mode left in the plan, and settled past the last request (the
-    /// renderer's generation moved and the confirm span passed,
-    /// `main_restore_confirms`), so a mode's reacquire that briefly takes a
-    /// screen out of the desktop cannot end it before the order is checked
-    /// again. Otherwise it gives up `SOURCE_RESTORE_TIMEOUT` after the
-    /// first inventory or the last request, whichever is later.
-    ///
-    /// `order_env`/`modes_env` are the externally pinned (non-empty,
-    /// not-from-saved) `MAKEPAD_DISPLAY_ORDER`/`MAKEPAD_DRM_MODES` this
-    /// process started with (`SystemSnapshot::order_env`/`modes_env`),
-    /// if any: the plan is filtered through `env_restore_plan` first, so
-    /// an `Order`/`Mode` the file wants but the env already pins at this
-    /// boot is neither sent nor counted as outstanding — the restore can
-    /// still end on the env's arrangement, matching the global
-    /// constraint "an externally set non-empty env var always wins over
-    /// the file" — previously this only held at session start (the
-    /// session helper's own `MAKEPAD_WM_*_FROM_SAVED` deferral); this
-    /// extends it to the WM's own runtime restore.
-    fn order_restore_step(
-        &mut self,
-        layout: &DisplayLayout,
-        displays: &LinuxDisplaySnapshot,
-        generation: u64,
-        now: f64,
-        since: f64,
-        order_env: Option<&str>,
-        modes_env: Option<&str>,
-    ) -> Vec<RestoreOp> {
-        let mut send = Vec::new();
-        if self.layout_restore_done {
-            return send;
-        }
-        let mut plan = env_restore_plan(restore_plan(layout, displays), order_env, modes_env);
-        let virtual_pinned = virtual_env_pinned(
-            std::env::var("MAKEPAD_VIRTUAL_DISPLAY").ok().as_deref(),
-            std::env::var("MAKEPAD_WM_VIRTUAL_FROM_SAVED").ok().as_deref(),
-        );
-        if virtual_pinned {
-            plan.retain(|op| !matches!(op, RestoreOp::Virtual(_)));
-        }
-        let waiting = restore_waiting(layout, displays);
-        let laid_out = displays.outputs.iter().any(|o| o.desktop_position.is_some());
-        if self.layout_restore_generation != Some(generation) && laid_out {
-            self.layout_restore_generation = Some(generation);
-            let mut held = Vec::new();
-            for op in &plan {
-                if matches!(op, RestoreOp::Main(_)) {
-                    continue;
-                }
-                if self.layout_restore_sent.contains(op) {
-                    held.push(op);
-                    continue;
-                }
-                self.layout_restore_sent.push(op.clone());
-                self.layout_restore_sent_at = Some((generation, now));
-                send.push(op.clone());
-            }
-            let has_order = plan.iter().any(|op| matches!(op, RestoreOp::Order(_)));
-            log!(
-                "wm: display layout restore, generation {generation}: order {}{}, sending {}, already sent {}",
-                if has_order { "needed" } else { "in place" },
-                if waiting { " (a saved screen is joining or the desktop is settling)" } else { "" },
-                send.len(),
-                held.len()
-            );
-        }
-        // Pacing is sent once like the rest but never holds the restore open:
-        // it changes no screen's place.
-        let outstanding = plan.iter().any(|op| !matches!(op, RestoreOp::Main(_) | RestoreOp::Pacing(_)));
-        let settled = main_restore_confirms(self.layout_restore_sent_at, generation, now);
-        let last = self.layout_restore_sent_at.map_or(since, |(_, sent)| sent.max(since));
-        if laid_out && !waiting && !outstanding && settled {
-            log!("wm: saved display order and modes are in place");
-            self.layout_restore_done = true;
-        } else if now - last > SOURCE_RESTORE_TIMEOUT {
-            log!(
-                "wm: saved display order/modes not confirmed in time ({}); keeping what is laid out",
-                if !laid_out { "nothing laid out" } else if waiting { "a saved screen did not join" }
-                    else if outstanding { "the arrangement still differs" } else { "not settled" }
-            );
-            self.layout_restore_done = true;
-        }
-        send
     }
 
     /// The virtual desktop's scale: the followed viewer's while one has
@@ -411,21 +249,13 @@ impl LinuxControls {
     /// The person chose the desktop: the start-up restore is over.
     fn virtual_set_by_person(&mut self) {
         self.virtual_user_set = true;
-        self.layout_restore_done = true;
-    }
-
-    /// The person changed order, main screen or a mode: the start-up
-    /// restore is over for this session.
-    fn layout_set_by_person(&mut self) {
-        self.layout_user_set = true;
-        self.layout_restore_done = true;
-        self.source_loaded_applied = true;
+        self.virtual_restore_done = true;
     }
 
     /// The worker's start-up read: the working copy unless this session
     /// already edited it first, in which case it is merged in
     /// (`DisplayLayout::merge_loaded`: the person's edits stand, every
-    /// other saved screen and an untouched render-on come from the read).
+    /// other saved profile and an untouched render-on come from the read).
     /// Marks the read as taken in; a layout edited before it is queued
     /// again, merged, so the whole-file save keeps what the file held.
     fn adopt_loaded_layout(&mut self, loaded: &DisplayLayout) {
@@ -433,7 +263,7 @@ impl LinuxControls {
         match self.layout.as_mut() {
             None => self.layout = Some(loaded.clone()),
             Some(layout) => {
-                layout.merge_loaded(loaded, self.layout_user_set, self.gpu_user_set, self.virtual_user_set)
+                layout.merge_loaded(loaded, self.gpu_user_set, self.virtual_user_set)
             }
         }
         if self.layout_edited {
@@ -493,7 +323,7 @@ impl App {
     /// Save `saved` as the virtual desktop's choices.
     fn save_virtual(&mut self, saved: SavedVirtual) {
         self.linux_controls.virtual_set_by_person();
-        self.linux_controls.edit_layout(None, |layout| layout.virtual_display = Some(saved));
+        self.linux_controls.edit_layout(|layout| layout.virtual_display = Some(saved));
     }
 
     /// The Desk Link viewer's window: device pixels, its display refresh
@@ -518,32 +348,6 @@ impl App {
             self.apply_dpi_scale(cx, scale);
         }
         self.redraw_all(cx);
-    }
-
-    /// Ask the renderer for a source. `Ok` means the request is queued,
-    /// not that the source changed: with `confirm` the flyout shows the
-    /// name as pending until the snapshot's `primary` says it is the one.
-    /// A peer GPU's screen that has not joined yet becomes `primary` only
-    /// once it starts, however long that takes, so its start-up restore
-    /// goes without the bounded confirmation.
-    fn request_display_source(&mut self, cx: &mut Cx, name: &str, confirm: bool) -> bool {
-        match cx.linux_set_display_source(name) {
-            Ok(()) => {
-                if confirm {
-                    let panel = self.ui.widget(cx, ids!(shell_panel));
-                    if let Some(mut p) = panel.borrow_mut::<ShellPanel>() {
-                        p.display_source_pending = Some((name.to_string(), Cx::monotonic_now()));
-                        p.redraw(cx);
-                    };
-                }
-                true
-            }
-            Err(message) => {
-                self.linux_controls.notice = format!("Make main {name}: {message}");
-                log!("wm: display source {name} refused: {message}");
-                false
-            }
-        }
     }
 
     /// "Restart desktop now", confirmed. The panel re-checked the saved
@@ -654,69 +458,11 @@ impl App {
                 self.redraw_all(cx);
                 return;
             }
-            ControlAction::DisplaySource(name) => {
+            ControlAction::DisplayApply(config) => {
                 self.linux_controls.notice.clear();
-                match validate_display_source(&name) {
-                    // Persist only what the renderer accepted to try, as
-                    // the layout's main screen (keyed by PCI address and
-                    // connector, not this boot's card number).
-                    Ok(name) if self.request_display_source(cx, name, true) => {
-                        self.linux_controls.layout_set_by_person();
-                        let displays = cx.linux_display_snapshot();
-                        match displays.outputs.iter().find(|o| o.name == name).and_then(screen_key) {
-                            Some(key) => self.linux_controls.edit_layout(Some(&displays), |layout| {
-                                if !layout.screens.iter().any(|entry| entry.key == key) {
-                                    layout.screens.push(ScreenEntry { key: key.clone(), main: false, mode: None });
-                                }
-                                layout.set_main(&key);
-                            }),
-                            None => log!("wm: main screen {name} not saved: its card has no PCI address"),
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(message) => self.linux_controls.notice = format!("Make main: {message}"),
-                }
-                self.poll_linux_controls(cx);
-                self.redraw_all(cx);
-                return;
-            }
-            ControlAction::DisplayOrder(order) => {
-                self.linux_controls.notice.clear();
-                self.apply_display_order(cx, order);
-                self.poll_linux_controls(cx);
-                self.redraw_all(cx);
-                return;
-            }
-            ControlAction::DisplayTry(change) => {
-                self.linux_controls.notice.clear();
-                let displays = cx.linux_display_snapshot();
-                let running = match &change {
-                    Change::Mode { name, .. } => Change::Mode {
-                        name: name.clone(),
-                        mode: displays.outputs.iter().find(|o| o.name == *name).and_then(|o| {
-                            self.linux_controls.trials.selected_mode(name, o.mode_override.as_deref()).map(str::to_string)
-                        }),
-                    },
-                };
-                let out = self.linux_controls.trials.begin(change, running, cx.linux_display_generation(), Cx::monotonic_now());
+                let running = DisplayConfig::running(&cx.linux_display_snapshot());
+                let out = self.linux_controls.trials.apply(config, running, cx.linux_display_generation(), Cx::monotonic_now());
                 self.apply_trial_out(cx, out);
-                self.poll_linux_controls(cx);
-                self.redraw_all(cx);
-                return;
-            }
-            ControlAction::DisplayArrangement(arrangement) => {
-                self.linux_controls.notice.clear();
-                let displays = cx.linux_display_snapshot();
-                if self.linux_controls.trials.switch_arrangement(arrangement.clone(), &displays.arrangement) {
-                    // Saved once the renderer takes it (`display_result`).
-                    match cx.linux_set_display_arrangement(&arrangement) {
-                        Ok(()) => log!("wm: display arrangement {arrangement:?} asked"),
-                        Err(message) => {
-                            log!("wm: display arrangement {arrangement:?} refused: {message}");
-                            self.linux_controls.trials.arrangement_refused(&arrangement, &message, &displays);
-                        }
-                    }
-                }
                 self.poll_linux_controls(cx);
                 self.redraw_all(cx);
                 return;
@@ -738,7 +484,7 @@ impl App {
                     match cx.linux_set_virtual_display(None) {
                         Ok(()) => {
                             self.linux_controls.virtual_set_by_person();
-                            self.linux_controls.edit_layout(None, |layout| layout.virtual_display = None);
+                            self.linux_controls.edit_layout(|layout| layout.virtual_display = None);
                             if let Some(scale) = self.linux_controls.panel_scale {
                                 self.linux_controls.dpi_user_set = true;
                                 self.linux_controls.dpi_loaded_applied = true;
@@ -846,9 +592,8 @@ impl App {
                 if let Some(message) = choice.as_deref().and_then(|identity| validate_gpu_choice(identity).err()) {
                     self.linux_controls.notice = format!("Render on: {message}");
                 } else {
-                    let displays = cx.linux_display_snapshot();
                     self.linux_controls.gpu_user_set = true;
-                    self.linux_controls.edit_layout(Some(&displays), |layout| layout.render_on = choice);
+                    self.linux_controls.edit_layout(|layout| layout.render_on = choice);
                     self.linux_controls.notice = "GPU choice saved; restart the desktop to apply it".into();
                 }
                 self.poll_linux_controls(cx);
@@ -885,10 +630,7 @@ impl App {
                 ControlAction::InputVolume(value) => { controller.set_input_volume(value); }
                 ControlAction::DpiScale(_)
                 | ControlAction::DpiScaleLive(_)
-                | ControlAction::DisplaySource(_)
-                | ControlAction::DisplayOrder(_)
-                | ControlAction::DisplayTry(_)
-                | ControlAction::DisplayArrangement(_)
+                | ControlAction::DisplayApply(_)
                 | ControlAction::DisplayKeep
                 | ControlAction::DisplayRevert
                 | ControlAction::DisplayPacing(_)
@@ -1046,11 +788,6 @@ impl App {
             }
             if !state.layout_loaded {
                 state.adopt_loaded_layout(&snapshot.display_layout);
-                if snapshot.display_layout.screens.is_empty() && snapshot.display_layout.virtual_display.is_none() {
-                    // Nothing saved to arrange: the renderer's defaults stand.
-                    state.layout_restore_done = true;
-                    state.source_loaded_applied = true;
-                }
             }
         }
         if let Some(snapshot) = snapshot.as_ref().filter(|s| s.display_settings_loaded) {
@@ -1065,9 +802,7 @@ impl App {
                 }
             }
         }
-        let restore_pending = snapshot.as_ref().is_some_and(|s| s.display_settings_loaded)
-            && !state.layout_user_set
-            && (!state.layout_restore_done || !state.source_loaded_applied);
+        let restore_pending = state.layout_loaded && !state.virtual_restore_done;
         if let Some(snapshot) = snapshot.as_ref().filter(|s| s.input_settings_loaded) {
             for i in 0..2 {
                 if !state.pointer_loaded_applied[i] {
@@ -1082,10 +817,10 @@ impl App {
             }
         }
         let panel = self.ui.widget(cx, ids!(shell_panel));
-        let (adjusting, monitor_open, pending) = panel
+        let (adjusting, monitor_open) = panel
             .borrow::<ShellPanel>()
-            .map(|p| (p.dpi_adjusting(), p.open == Some(PanelKind::Monitor), p.display_source_pending.clone()))
-            .unwrap_or((false, false, None));
+            .map(|p| (p.dpi_adjusting(), p.open == Some(PanelKind::Monitor)))
+            .unwrap_or((false, false));
         if let Some(value) = initial_scale {
             // Not under a drag: a saved value landing mid-drag would move the
             // window under the slider. It waits for the next poll.
@@ -1106,22 +841,18 @@ impl App {
             }
         }
         // The renderer's inventory, whenever something here needs it: the
-        // open Display panel, a saved source to ask for, a request to
-        // confirm. Immutable cached snapshots, no lock, no Vulkan, no
-        // filesystem. GPU identity is only for the open Display readout.
+        // open Display panel, the saved virtual desktop to restore, a
+        // configuration being tried. Immutable cached snapshots, no lock, no
+        // Vulkan, no filesystem. GPU identity is only for the open Display readout.
         let trying = self.linux_controls.trials.trial.is_some() || self.linux_controls.trials.restoring.is_some();
-        let displays = (monitor_open || restore_pending || pending.is_some() || trying)
-            .then(|| cx.linux_display_snapshot());
+        let displays = (monitor_open || restore_pending || trying).then(|| cx.linux_display_snapshot());
         if let (true, Some(displays)) = (restore_pending, displays.as_ref()) {
-            let order_env = snapshot.as_ref().and_then(|s| s.order_env.as_deref());
-            let modes_env = snapshot.as_ref().and_then(|s| s.modes_env.as_deref());
-            changed |= self.restore_display_layout(cx, displays, order_env, modes_env);
+            changed |= self.restore_virtual(cx, displays);
         }
-        // The change being tried: up, failed, or out of time.
+        // The configuration being tried: up, failed, or out of time.
         if let Some(displays) = displays.as_ref() {
             let before = self.linux_controls.trials.clone();
             let out = self.linux_controls.trials.observe(displays, cx.linux_display_generation(), Cx::monotonic_now());
-            self.linux_controls.trials.forget_missing(displays);
             self.apply_trial_out(cx, out);
             changed |= self.linux_controls.trials != before;
         }
@@ -1138,23 +869,6 @@ impl App {
             if let Some(displays) = displays {
                 if panel.display_snapshot != displays {
                     panel.display_snapshot = displays;
-                    changed = true;
-                }
-                // A request is confirmed only by the renderer naming that
-                // output as the primary; one that never is gets reported.
-                let observed = panel.display_source_pending.as_ref().is_some_and(|(name, _)| {
-                    panel.display_snapshot.outputs.iter().any(|o| o.primary && o.name == *name)
-                });
-                let expired = panel.display_source_pending.as_ref()
-                    .is_some_and(|(_, since)| Cx::monotonic_now() - *since > SOURCE_PENDING_TIMEOUT);
-                if observed {
-                    panel.display_source_pending = None;
-                    changed = true;
-                } else if expired {
-                    if let Some((name, _)) = panel.display_source_pending.take() {
-                        state.notice = format!("Make main {name}: the renderer did not switch to it");
-                        log!("wm: {}", state.notice);
-                    }
                     changed = true;
                 }
             }
@@ -1217,315 +931,113 @@ impl App {
         self.reanchor_shell_panel(cx);
     }
 
-    /// A new left-to-right order from the panel: a permutation of the
-    /// screens in the desktop now (else the inventory changed under the
-    /// click and nothing happens). The renderer gets the whole order, the
-    /// screens outside the desktop keeping their places; the layout keeps
-    /// its other saved screens where they were.
-    fn apply_display_order(&mut self, cx: &mut Cx, order: Vec<String>) {
-        let displays = cx.linux_display_snapshot();
-        let (rows, placed) = screen_rows(&displays);
-        let mut now: Vec<&str> = rows[..placed].iter().map(|&i| displays.outputs[i].name.as_str()).collect();
-        let mut asked: Vec<&str> = order.iter().map(String::as_str).collect();
-        now.sort_unstable();
-        asked.sort_unstable();
-        if now != asked || order.len() < 2 {
-            log!("wm: display order {} not applied: the screens changed", order.join(","));
-            return;
-        }
-        let mut layout = self.linux_controls.layout.clone().unwrap_or_default();
-        layout.include_snapshot(&displays);
-        let full = fill_slots(&layout.order_names(&displays), &order);
-        match cx.linux_set_display_order(&full) {
-            Ok(()) => {
-                log!("wm: display order {}", full.join(","));
-                self.linux_controls.layout_set_by_person();
-                let keys: Vec<ScreenKey> = order
-                    .iter()
-                    .filter_map(|name| displays.outputs.iter().find(|o| o.name == *name).and_then(screen_key))
-                    .collect();
-                self.linux_controls.edit_layout(Some(&displays), |layout| layout.reorder(&keys));
-            }
-            Err(message) => {
-                self.linux_controls.notice = format!("Arrange screens: {message}");
-                log!("wm: display order refused: {message}");
-            }
-        }
-    }
-
-    /// Carry out what the Display menu's trials ask for: send a change to
-    /// the renderer (a refusal goes back to the trials, which may ask for
-    /// the previous one), or save a kept one in the layout.
+    /// Carry out what the Display menu's trials ask for: send a
+    /// configuration to the renderer (a refusal goes back to the trials,
+    /// which send the previous one), or save one that is in place.
     fn apply_trial_out(&mut self, cx: &mut Cx, out: Vec<TrialOut>) {
         let mut queue: std::collections::VecDeque<TrialOut> = out.into();
         while let Some(step) = queue.pop_front() {
             match step {
-                TrialOut::Send(change) => {
-                    let sent = match &change {
-                        Change::Mode { name, mode } => cx.linux_set_display_mode(name, mode.as_deref()),
-                    };
-                    match sent {
-                        Ok(()) => log!("wm: display: trying {change:?}"),
-                        Err(message) => {
-                            log!("wm: display: {change:?} refused: {message}");
-                            let displays = cx.linux_display_snapshot();
-                            queue.extend(self.linux_controls.trials.refused(&change, &message, &displays, Cx::monotonic_now()));
+                TrialOut::Send { to, from } => {
+                    for command in to.commands(&from) {
+                        let sent = match &command {
+                            LinuxDisplayCommand::Mode { name, mode } => cx.linux_set_display_mode(name, mode.as_deref()),
+                            LinuxDisplayCommand::Arrangement(arrangement) => cx.linux_set_display_arrangement(arrangement),
+                            LinuxDisplayCommand::Source(name) => cx.linux_set_display_source(name),
+                            LinuxDisplayCommand::Pacing(_) | LinuxDisplayCommand::Virtual(_) => Ok(()),
+                        };
+                        match sent {
+                            Ok(()) => log!("wm: display: asking {command:?}"),
+                            Err(message) => {
+                                log!("wm: display: {command:?} refused: {message}");
+                                queue.extend(self.linux_controls.trials.refused(&message, Cx::monotonic_now()));
+                                break;
+                            }
                         }
                     }
                 }
-                TrialOut::Save(change) => self.save_kept_change(cx, change),
-            }
-        }
-    }
-
-    /// A kept mode goes into the layout and is saved.
-    fn save_kept_change(&mut self, cx: &mut Cx, change: Change) {
-        log!("wm: display: kept {change:?}");
-        let displays = cx.linux_display_snapshot();
-        self.linux_controls.layout_set_by_person();
-        match change {
-            Change::Mode { name, mode } => match displays.outputs.iter().find(|o| o.name == name).and_then(screen_key) {
-                Some(key) => self.linux_controls.edit_layout(Some(&displays), |layout| {
-                    if !layout.screens.iter().any(|entry| entry.key == key) {
-                        layout.screens.push(ScreenEntry { key: key.clone(), main: false, mode: None });
-                    }
-                    layout.set_mode(&key, mode);
-                }),
-                None => log!("wm: mode for {name} not saved: it is no longer listed or its card has no PCI address"),
-            },
-        }
-    }
-
-    /// An arrangement the renderer took goes into the layout and is saved.
-    fn save_arrangement(&mut self, cx: &mut Cx, arrangement: &DisplayArrangement) {
-        log!("wm: display arrangement {arrangement:?}");
-        let displays = cx.linux_display_snapshot();
-        self.linux_controls.layout_set_by_person();
-        match arrangement {
-            DisplayArrangement::Extended => self.linux_controls.edit_layout(Some(&displays), |layout| layout.mirror = None),
-            DisplayArrangement::Mirror { optimise_for } => {
-                match displays.outputs.iter().find(|o| o.name == *optimise_for).and_then(screen_key) {
-                    Some(key) => self.linux_controls.edit_layout(Some(&displays), |layout| layout.mirror = Some(key)),
-                    None => log!("wm: mirror for {optimise_for} not saved: it is no longer listed or its card has no PCI address"),
+                TrialOut::Save(config) => {
+                    log!("wm: display: in place {}", config.arrangement.text());
+                    let displays = cx.linux_display_snapshot();
+                    let settings = ProfileSettings {
+                        arrangement: config.arrangement,
+                        modes: config.modes,
+                        main: config.main,
+                        pacing: displays.pacing.clone(),
+                    };
+                    self.save_profile(&settings, &displays);
                 }
             }
         }
     }
 
-    /// A pacing the renderer took goes into the layout and is saved.
+    /// `settings` become the saved profile of the monitors connected now.
+    fn save_profile(&mut self, settings: &ProfileSettings, displays: &LinuxDisplaySnapshot) {
+        let mut saved = false;
+        self.linux_controls.edit_layout(|layout| saved = layout.save_profile(settings, displays));
+        if !saved {
+            log!("wm: display profile not saved: no monitor's card has a PCI address");
+        }
+    }
+
+    /// A pacing the renderer took goes into the profile and is saved, with
+    /// the kept configuration (the one a trial would go back to).
     fn save_pacing(&mut self, cx: &mut Cx, pacing: &DisplayPacing) {
         log!("wm: display pacing {pacing:?}");
         let displays = cx.linux_display_snapshot();
-        let pace = match pacing {
-            DisplayPacing::Auto => Some(SavedPace::Auto),
-            DisplayPacing::Slowest => Some(SavedPace::Slowest),
-            DisplayPacing::Fastest => Some(SavedPace::Fastest),
-            DisplayPacing::Screen(name) => {
-                displays.outputs.iter().find(|o| o.name == *name).and_then(screen_key).map(SavedPace::Screen)
-            }
-        };
-        match pace {
-            Some(pace) => self.linux_controls.edit_layout(Some(&displays), |layout| layout.pace = pace),
-            None => log!("wm: pacing {pacing:?} not saved: the screen is gone or its card has no PCI address"),
-        }
+        let config = self.linux_controls.trials.trial.as_ref().map(|t| t.previous.clone())
+            .unwrap_or_else(|| DisplayConfig::running(&displays));
+        let settings = ProfileSettings { arrangement: config.arrangement, modes: config.modes, main: config.main, pacing: pacing.clone() };
+        self.save_profile(&settings, &displays);
     }
 
-    /// The renderer's answer to a display request: a refused try goes back
-    /// to the trials.
+    /// The renderer's answer to a display request: a refused part of a
+    /// configuration being tried undoes it.
     fn display_result(&mut self, cx: &mut Cx, command: &LinuxDisplayCommand, result: &Result<(), String>) {
-        if let LinuxDisplayCommand::Pacing(pacing) = command {
-            match result {
-                Ok(()) => self.save_pacing(cx, pacing),
-                Err(message) => {
-                    self.linux_controls.notice = format!("Pace by: {message}");
-                    log!("wm: display pacing {pacing:?} refused: {message}");
-                }
+        match (command, result) {
+            (LinuxDisplayCommand::Pacing(pacing), Ok(())) => self.save_pacing(cx, pacing),
+            (LinuxDisplayCommand::Pacing(pacing), Err(message)) => {
+                self.linux_controls.notice = format!("Pace by: {message}");
+                log!("wm: display pacing {pacing:?} refused: {message}");
             }
-            self.poll_linux_controls(cx);
-            self.redraw_all(cx);
-            return;
-        }
-        if let LinuxDisplayCommand::Arrangement(arrangement) = command {
-            match result {
-                Ok(()) => self.save_arrangement(cx, arrangement),
-                Err(message) => {
-                    log!("wm: display arrangement {arrangement:?} refused: {message}");
-                    let displays = cx.linux_display_snapshot();
-                    self.linux_controls.trials.arrangement_refused(arrangement, message, &displays);
-                }
-            }
-            self.poll_linux_controls(cx);
-            self.redraw_all(cx);
-            return;
-        }
-        if let LinuxDisplayCommand::Virtual(_) = command {
-            if let Err(message) = result {
+            (LinuxDisplayCommand::Virtual(_), Err(message)) => {
                 self.linux_controls.notice = format!("Desktop: {message}");
                 log!("wm: virtual display refused: {message}");
-                self.poll_linux_controls(cx);
-                self.redraw_all(cx);
             }
-            return;
+            (LinuxDisplayCommand::Mode { .. } | LinuxDisplayCommand::Arrangement(_) | LinuxDisplayCommand::Source(_), Err(message)) => {
+                log!("wm: display: {command:?} refused: {message}");
+                let out = self.linux_controls.trials.refused(message, Cx::monotonic_now());
+                self.apply_trial_out(cx, out);
+            }
+            (_, Ok(())) => return,
         }
-        let Err(message) = result else { return };
-        let change = match command {
-            LinuxDisplayCommand::Mode { name, mode } => Change::Mode { name: name.clone(), mode: mode.clone() },
-            LinuxDisplayCommand::Arrangement(_)
-            | LinuxDisplayCommand::Source(_)
-            | LinuxDisplayCommand::Order(_)
-            | LinuxDisplayCommand::Virtual(_)
-            | LinuxDisplayCommand::Pacing(_) => return,
-        };
-        let displays = cx.linux_display_snapshot();
-        let out = self.linux_controls.trials.refused(&change, message, &displays, Cx::monotonic_now());
-        self.apply_trial_out(cx, out);
         self.poll_linux_controls(cx);
         self.redraw_all(cx);
     }
 
-    /// The start-up restore of the saved layout, against this poll's
-    /// display inventory. Returns whether it asked the renderer for
-    /// anything. Order and modes: on each new display generation whose
-    /// desktop is laid out, the requests not sent before (the renderer
-    /// stores both before a peer GPU's screen joins, so it joins as saved),
-    /// until no saved screen is still joining or `SOURCE_RESTORE_TIMEOUT`
-    /// has passed since the first inventory. The main screen is asked for
-    /// once it is active, or at once while it is joining (another GPU's
-    /// screen, which the renderer accepts early); otherwise it gets the
-    /// same bounded wait.
-    ///
-    /// `order_env`/`modes_env`: see `order_restore_step`, which this
-    /// passes them to unchanged.
-    fn restore_display_layout(
-        &mut self,
-        cx: &mut Cx,
-        displays: &LinuxDisplaySnapshot,
-        order_env: Option<&str>,
-        modes_env: Option<&str>,
-    ) -> bool {
+    /// The saved virtual desktop, once at start-up, unless the environment
+    /// pins it or the person chose the desktop first. Returns whether it
+    /// asked the renderer for anything.
+    fn restore_virtual(&mut self, cx: &mut Cx, displays: &LinuxDisplaySnapshot) -> bool {
         if displays.outputs.is_empty() {
-            // No inventory yet (the empty snapshot before the first one also
-            // reads as not direct). Wait; nothing is decided or logged until then.
+            // No inventory yet: wait.
             return false;
         }
-        if !displays.direct {
-            // The desktop owns the outputs: nothing to arrange.
-            log!("wm: saved display layout not applied: the desktop owns the outputs");
-            self.linux_controls.layout_restore_done = true;
-            self.linux_controls.source_loaded_applied = true;
-            return false;
-        }
+        self.linux_controls.virtual_restore_done = true;
+        let pinned = virtual_env_pinned(
+            std::env::var("MAKEPAD_VIRTUAL_DISPLAY").ok().as_deref(),
+            std::env::var("MAKEPAD_WM_VIRTUAL_FROM_SAVED").ok().as_deref(),
+        );
         let layout = self.linux_controls.layout.clone().unwrap_or_default();
-        let plan = restore_plan(&layout, displays);
-        let now = Cx::monotonic_now();
-        let since = *self.linux_controls.source_restore_since.get_or_insert(now);
-        let timed_out = now - since > SOURCE_RESTORE_TIMEOUT;
-        let mut asked = false;
-        let generation = cx.linux_display_generation();
-        for op in self.linux_controls.order_restore_step(
-            &layout, displays, generation, now, since, order_env, modes_env,
-        ) {
-            match &op {
-                RestoreOp::Order(order) => {
-                    log!("wm: applying saved display order {}", order.join(","));
-                    if let Err(message) = cx.linux_set_display_order(order) {
-                        log!("wm: saved display order refused: {message}");
-                    }
-                }
-                RestoreOp::Mode(name, mode) => {
-                    let label = mode.as_deref().unwrap_or("automatic");
-                    log!("wm: applying saved mode {label} for {name}");
-                    if let Err(message) = cx.linux_set_display_mode(name, mode.as_deref()) {
-                        log!("wm: saved mode {label} for {name} refused: {message}");
-                    }
-                }
-                RestoreOp::Arrangement(arrangement) => {
-                    log!("wm: applying saved arrangement {arrangement:?}");
-                    if let Err(message) = cx.linux_set_display_arrangement(arrangement) {
-                        log!("wm: saved arrangement {arrangement:?} refused: {message}");
-                    }
-                }
-                RestoreOp::Virtual(_) => {
-                    if let Some(saved) = layout.virtual_display {
-                        log!("wm: applying saved virtual display");
-                        if let Err(message) = self.send_virtual(cx, &saved) {
-                            log!("wm: saved virtual display refused: {message}");
-                        }
-                    }
-                }
-                RestoreOp::Pacing(pacing) => {
-                    log!("wm: applying saved pacing {pacing:?}");
-                    if let Err(message) = cx.linux_set_display_pacing(pacing) {
-                        log!("wm: saved pacing {pacing:?} refused: {message}");
-                    }
-                }
-                RestoreOp::Main(_) => {}
-            }
-            asked = true;
+        if !displays.direct || pinned || self.linux_controls.virtual_user_set || virtual_restore(&layout, displays).is_none() {
+            return false;
         }
-        if !self.linux_controls.source_loaded_applied {
-            let request = plan.iter().find_map(|op| match op {
-                RestoreOp::Main(name) => Some(name.as_str()),
-                _ => None,
-            });
-            let handled = match (request, layout.main_name(displays)) {
-                (_, None) => {
-                    if layout.screens.iter().any(|entry| entry.main) {
-                        log!("wm: saved main screen is not connected; keeping the renderer's default");
-                    }
-                    true
-                }
-                (None, Some(name)) => {
-                    log!("wm: saved main screen {name} is already the main screen");
-                    true
-                }
-                (Some(name), _) => match displays.outputs.iter().find(|o| o.name == name) {
-                    Some(output) if output.active => {
-                        log!("wm: applying saved main screen {name}");
-                        // Not confirmed against the 5 s bound while an order
-                        // or mode change the restore sent may still be
-                        // reacquiring: that can take longer.
-                        let confirm = main_restore_confirms(
-                            self.linux_controls.layout_restore_sent_at,
-                            generation,
-                            now,
-                        );
-                        self.request_display_source(cx, name, confirm);
-                        asked = true;
-                        true
-                    }
-                    Some(output) if is_joining(output) && !self.linux_controls.main_early_tried => {
-                        // Another GPU's screen on its way: the renderer
-                        // takes the name before it presents, and it turns
-                        // primary only when it does, so no bounded confirm.
-                        // A refusal (a screen of this GPU not ready yet)
-                        // falls back to the wait below.
-                        self.linux_controls.main_early_tried = true;
-                        match cx.linux_set_display_source(name) {
-                            Ok(()) => {
-                                log!("wm: applying saved main screen {name} (joining)");
-                                asked = true;
-                                true
-                            }
-                            Err(message) => {
-                                log!("wm: saved main screen {name} not accepted yet ({message}); waiting for it");
-                                false
-                            }
-                        }
-                    }
-                    Some(_) if timed_out => {
-                        log!("wm: saved main screen {name} did not become usable; keeping the renderer's default");
-                        true
-                    }
-                    Some(_) => false,
-                    None => true,
-                },
-            };
-            if handled {
-                self.linux_controls.source_loaded_applied = true;
-            }
+        let Some(saved) = layout.virtual_display else { return false };
+        log!("wm: applying saved virtual display");
+        if let Err(message) = self.send_virtual(cx, &saved) {
+            log!("wm: saved virtual display refused: {message}");
         }
-        asked
+        true
     }
 
     pub(crate) fn shutdown_linux_controls(&mut self) {
@@ -1556,7 +1068,6 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_widgets::makepad_platform::linux_display::LinuxDisplayOutput;
 
     fn layout(text: &str) -> DisplayLayout {
         DisplayLayout::parse(text)
@@ -1573,18 +1084,18 @@ mod tests {
         let gpu = GpuInfo {
             card: "card1".into(),
             pci: "0000:01:00.0".into(),
-            vendor: "10de".into(),
-            device: "2b85".into(),
+            vendor: "1234".into(),
+            device: "5678".into(),
             driver: "nvidia".into(),
             connected: Vec::new(),
         };
         // Auto is always present: a restart cannot be stuck on a GPU.
         assert!(restart_gate(None, &[]));
-        assert!(restart_gate(Some("0000:01:00.0 10de:2b85"), std::slice::from_ref(&gpu)));
+        assert!(restart_gate(Some("0000:01:00.0 1234:5678"), std::slice::from_ref(&gpu)));
         // A moved card or another model at that address: the next start
         // would only fall back to Auto, so the restart is refused.
-        assert!(!restart_gate(Some("0000:02:00.0 10de:2b85"), std::slice::from_ref(&gpu)));
-        assert!(!restart_gate(Some("0000:01:00.0 10de:2b84"), &[gpu]));
+        assert!(!restart_gate(Some("0000:02:00.0 1234:5678"), std::slice::from_ref(&gpu)));
+        assert!(!restart_gate(Some("0000:01:00.0 1234:5679"), &[gpu]));
     }
 
     #[test]
@@ -1602,196 +1113,21 @@ mod tests {
         let mut controls = LinuxControls::default();
         // A GPU switch committed before the worker's read landed.
         controls.gpu_user_set = true;
-        controls.edit_layout(None, |l| l.render_on = Some("0000:01:00.0 10de:2b85".to_string()));
+        controls.edit_layout(|l| l.render_on = Some("0000:01:00.0 1234:5678".to_string()));
         assert_eq!(controls.take_layout_save(), None);
-        let saved = layout("render-on 0000:00:02.0 8086:a780\nscreen 0000:00:02.0 HDMI-A-2 mode=3840x2160@30\n");
+        let saved = layout("render-on 0000:00:02.0 8086:a780\nvirtual 1920x1080@60\n");
         controls.adopt_loaded_layout(&saved);
         let queued = controls.take_layout_save().expect("merged layout re-queued");
-        assert_eq!(queued.render_on, Some("0000:01:00.0 10de:2b85".to_string()));
-        assert_eq!(queued.screens, saved.screens);
+        assert_eq!(queued.render_on, Some("0000:01:00.0 1234:5678".to_string()));
+        assert_eq!(queued.virtual_display, saved.virtual_display);
         assert_eq!(controls.take_layout_save(), None);
-    }
-
-    #[test]
-    fn early_main_pick_save_keeps_the_files_other_screens() {
-        let mut controls = LinuxControls::default();
-        // The person picked a main screen before the read landed.
-        controls.layout_set_by_person();
-        controls.edit_layout(None, |l| *l = layout("screen 0000:00:02.0 eDP-1 main\n"));
-        assert_eq!(controls.take_layout_save(), None);
-        controls.adopt_loaded_layout(&layout(
-            "screen 0000:01:00.0 DP-3 main mode=2560x1440@144\nscreen 0000:00:02.0 eDP-1\n",
-        ));
-        let queued = controls.take_layout_save().expect("merged layout re-queued");
-        assert_eq!(queued.screens.len(), 2);
-        assert!(queued.screens[0].main);
-        assert_eq!(queued.screens[1].key.connector, "DP-3");
-        assert_eq!(queued.screens[1].mode, Some("2560x1440@144".to_string()));
-        assert!(!queued.screens[1].main);
-    }
-
-    #[test]
-    fn main_restore_confirm_waits_for_a_sent_reacquire() {
-        assert!(main_restore_confirms(None, 3, 1.0));
-        // Order sent at generation 4, t = 10: no confirm on the same
-        // generation, nor before the confirm span has passed.
-        assert!(!main_restore_confirms(Some((4, 10.0)), 4, 20.0));
-        assert!(!main_restore_confirms(Some((4, 10.0)), 6, 12.0));
-        assert!(main_restore_confirms(Some((4, 10.0)), 6, 16.0));
     }
 
     #[test]
     fn untouched_read_is_not_saved_back() {
         let mut controls = LinuxControls::default();
-        controls.adopt_loaded_layout(&layout("screen 0000:00:02.0 HDMI-A-2\n"));
+        controls.adopt_loaded_layout(&layout("render-on 0000:00:02.0 8086:a780\n"));
         assert_eq!(controls.take_layout_save(), None);
-        assert_eq!(controls.layout, Some(layout("screen 0000:00:02.0 HDMI-A-2\n")));
-    }
-
-    fn screen(name: &str, pci: &str, position: Option<(u32, u32)>, primary: bool) -> LinuxDisplayOutput {
-        LinuxDisplayOutput {
-            name: name.to_string(),
-            card: name.split('-').next().unwrap_or_default().to_string(),
-            pci: Some(pci.to_string()),
-            width: 3840,
-            height: 2160,
-            desktop_position: position,
-            active: position.is_some(),
-            status: if position.is_some() { "active".to_string() } else { String::new() },
-            primary,
-            ..Default::default()
-        }
-    }
-
-    /// Two-card layout: the AMD card (0c:00.0) is a peer, the NVIDIA card renders (main).
-    const TWO_GPU_LAYOUT: &str =
-        "screen 0000:0c:00.0 HDMI-A-2 mode=3840x2160@30\nscreen 0000:01:00.0 HDMI-A-1 main\n";
-
-    /// One poll of the order/mode restore against `snap`, no env pin.
-    fn step(c: &mut LinuxControls, layout: &DisplayLayout, snap: &LinuxDisplaySnapshot, generation: u64, now: f64) -> Vec<RestoreOp> {
-        c.order_restore_step(layout, snap, generation, now, 0.0, None, None)
-    }
-
-    fn sent_order(ops: &[RestoreOp]) -> bool {
-        ops.iter().any(|op| matches!(op, RestoreOp::Order(_)))
-    }
-
-    #[test]
-    fn order_restore_outlives_a_mode_reacquire_of_a_peer() {
-        let layout = layout(TWO_GPU_LAYOUT);
-        let mut c = LinuxControls::default();
-        let own = screen("card1-HDMI-A-1", "0000:01:00.0", Some((0, 0)), true);
-        // Generation 1: the peer cannot show its fastest mode yet (failed,
-        // not joining), so only its mode is asked for.
-        let mut peer = screen("card0-HDMI-A-2", "0000:0c:00.0", None, false);
-        peer.status = "failed: no free display plane can present the selected mode".to_string();
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![peer.clone(), own.clone()], ..Default::default() };
-        let ops = step(&mut c, &layout, &snap, 1, 1.0);
-        assert_eq!(ops, vec![RestoreOp::Mode("card0-HDMI-A-2".to_string(), Some("3840x2160@30".to_string()))]);
-        assert!(!c.layout_restore_done, "done before the mode it asked for was seen");
-        // Generation 2: retired, reacquiring with the new mode.
-        peer.mode_override = Some("3840x2160@30".to_string());
-        peer.status = "retired: reacquiring after hotplug event".to_string();
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![peer.clone(), own.clone()], ..Default::default() };
-        // Joining again: the order is seeded so it rejoins on its side.
-        let mut sent = step(&mut c, &layout, &snap, 2, 2.0);
-        assert!(!c.layout_restore_done);
-        // Generation 3: back at 4K30, but on the right.
-        let mut placed_peer = screen("card0-HDMI-A-2", "0000:0c:00.0", Some((3840, 0)), false);
-        placed_peer.mode_override = Some("3840x2160@30".to_string());
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![placed_peer.clone(), own.clone()], ..Default::default() };
-        sent.extend(step(&mut c, &layout, &snap, 3, 3.0));
-        assert!(sent_order(&sent), "the order must still be sent: {sent:?}");
-        assert!(!c.layout_restore_done, "the arrangement still differs");
-        // Generation 4: on its saved side; done once settled past the send.
-        placed_peer.desktop_position = Some((0, 0));
-        let mut own_right = own.clone();
-        own_right.desktop_position = Some((3840, 0));
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![placed_peer, own_right], ..Default::default() };
-        assert!(step(&mut c, &layout, &snap, 4, 4.0).is_empty());
-        assert!(!c.layout_restore_done, "not settled 1 s after the send");
-        assert!(step(&mut c, &layout, &snap, 4, 9.0).is_empty());
-        assert!(c.layout_restore_done);
-    }
-
-    #[test]
-    fn order_restore_sends_order_after_a_peer_placed_on_top_reacquires() {
-        // Peer placed (at 4K60, still at (0, 0) before its slice) -> mode
-        // sent -> unplaced while reacquiring -> placed again on the right:
-        // the order is still sent and the restore ends only once it holds.
-        let layout = layout(TWO_GPU_LAYOUT);
-        let mut c = LinuxControls::default();
-        let own = screen("card1-HDMI-A-1", "0000:01:00.0", Some((0, 0)), true);
-        let mut peer = screen("card0-HDMI-A-2", "0000:0c:00.0", Some((0, 0)), false);
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![peer.clone(), own.clone()], ..Default::default() };
-        let ops = step(&mut c, &layout, &snap, 1, 1.0);
-        assert!(ops.contains(&RestoreOp::Mode("card0-HDMI-A-2".to_string(), Some("3840x2160@30".to_string()))));
-        assert!(!c.layout_restore_done);
-        peer.mode_override = Some("3840x2160@30".to_string());
-        peer.desktop_position = None;
-        peer.active = false;
-        peer.status = "retired: reacquiring after hotplug event".to_string();
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![peer.clone(), own.clone()], ..Default::default() };
-        step(&mut c, &layout, &snap, 2, 2.0);
-        assert!(!c.layout_restore_done);
-        let mut back = screen("card0-HDMI-A-2", "0000:0c:00.0", Some((3840, 0)), false);
-        back.mode_override = Some("3840x2160@30".to_string());
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![back.clone(), own.clone()], ..Default::default() };
-        let mut sent = c.layout_restore_sent.clone();
-        sent.extend(step(&mut c, &layout, &snap, 3, 3.0));
-        assert!(sent_order(&sent), "the order was never sent: {sent:?}");
-        // Still on the wrong side 10 s after the last request: give up.
-        step(&mut c, &layout, &snap, 3, 14.0);
-        assert!(c.layout_restore_done);
-    }
-
-    // The runtime half of the same rule: an externally pinned
-    // MAKEPAD_DISPLAY_ORDER / MAKEPAD_DRM_MODES must not be overridden by
-    // the file, the same way the session helper already defers to it at
-    // session start.
-
-    #[test]
-    fn order_restore_step_skips_order_pinned_by_an_external_env() {
-        // Two plain screens, reversed from their saved order: without a
-        // pin this sends Order; with one, it must not, and the restore
-        // still ends because nothing else is outstanding.
-        let layout = layout("screen 0000:00:02.0 DP-1 main\nscreen 0000:01:00.0 DP-2\n");
-        // 3840 apart (each screen's own width, from the `screen` helper)
-        // so the two rects do not overlap and "still settling" never
-        // masks the order mismatch this test wants to see.
-        let dp1 = screen("card0-DP-1", "0000:00:02.0", Some((3840, 0)), true);
-        let dp2 = screen("card1-DP-2", "0000:01:00.0", Some((0, 0)), false);
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![dp2, dp1], ..Default::default() };
-        // Sanity: unpinned, the file and the running order disagree.
-        let mut unpinned = LinuxControls::default();
-        let ops = unpinned.order_restore_step(&layout, &snap, 1, 1.0, 0.0, None, None);
-        assert!(sent_order(&ops), "sanity: the running order should need fixing: {ops:?}");
-        // Pinned: Order is withheld and the restore ends on what is
-        // already laid out, not on the file.
-        let mut c = LinuxControls::default();
-        let ops = c.order_restore_step(&layout, &snap, 1, 1.0, 0.0, Some("card1-DP-2,card0-DP-1"), None);
-        assert!(ops.is_empty(), "order must not be sent while the env pins it: {ops:?}");
-        assert!(c.layout_restore_done, "nothing else was outstanding, so the restore can still end");
-    }
-
-    #[test]
-    fn order_restore_step_skips_a_mode_pinned_by_an_external_env_for_its_screen_only() {
-        let layout = layout(TWO_GPU_LAYOUT);
-        let own = screen("card1-HDMI-A-1", "0000:01:00.0", Some((0, 0)), true);
-        let mut peer = screen("card0-HDMI-A-2", "0000:0c:00.0", None, false);
-        peer.status = "failed: no free display plane can present the selected mode".to_string();
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![peer.clone(), own.clone()], ..Default::default() };
-        // A pin naming a different screen leaves this one's Mode alone.
-        let mut other_pinned = LinuxControls::default();
-        let ops =
-            other_pinned.order_restore_step(&layout, &snap, 1, 1.0, 0.0, None, Some("card9-DP-9=1920x1080"));
-        assert_eq!(ops, vec![RestoreOp::Mode("card0-HDMI-A-2".to_string(), Some("3840x2160@30".to_string()))]);
-        assert!(!other_pinned.layout_restore_done);
-        // Pinned for this screen: no Mode op, and the restore ends (the
-        // peer's failed status is not "joining", so nothing else waits).
-        let mut c = LinuxControls::default();
-        let ops = c.order_restore_step(&layout, &snap, 1, 1.0, 0.0, None, Some("card0-HDMI-A-2=1920x1080"));
-        assert!(ops.is_empty(), "mode must not be sent for the env-pinned screen: {ops:?}");
-        assert!(c.layout_restore_done);
+        assert_eq!(controls.layout, Some(layout("render-on 0000:00:02.0 8086:a780\n")));
     }
 }

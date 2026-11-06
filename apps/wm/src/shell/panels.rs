@@ -53,7 +53,7 @@ use {std::sync::Arc, super::system_linux::SystemSnapshot};
 #[cfg(target_os = "linux")]
 use makepad_widgets::makepad_platform::linux_display::LinuxDisplaySnapshot;
 #[cfg(target_os = "linux")]
-use {linux::{Chooser, DpiDrag}, super::display_menu::{Change, CustomField, DisplayTrials}, makepad_widgets::makepad_platform::linux_display::DisplayPacing};
+use {linux::{Chooser, DisplayDraft, DisplayDrag, DpiDrag, DropAt}, super::display_menu::{CustomField, DisplayTrials, Place}, makepad_widgets::makepad_platform::linux_display::DisplayPacing};
 #[cfg(target_os = "linux")]
 use super::display_layout::{SavedVirtual, VirtualSize};
 
@@ -196,11 +196,11 @@ impl PanelKind {
         }
     }
 
-    /// `contentWidth` — 560 for the calendar, 520 for the temperature graphs, 300 for a tray
-    /// menu, 380 for the rest.
+    /// `contentWidth` — 560 for the calendar and the Display menu (its arrangement
+    /// diagram), 520 for the temperature graphs, 300 for a tray menu, 380 for the rest.
     pub fn content_width(self) -> f64 {
         match self {
-            PanelKind::Clock => 560.0,
+            PanelKind::Clock | PanelKind::Monitor => 560.0,
             PanelKind::Temps => 520.0,
             PanelKind::Tray(_) => 300.0,
             _ => 380.0,
@@ -391,24 +391,30 @@ enum Hit {
     /// The scale slider: live while dragged, saved on release.
     #[cfg(target_os = "linux")]
     DpiScaleSlider,
-    /// The arrangement switch: `false` Extended, `true` Mirror.
+    /// The arrangement diagram: a monitor's chip (`display_chips`) and a
+    /// screen's box, pressed to pick or dragged; the optimise-for choice of
+    /// a mirror (`display_optimise`).
     #[cfg(target_os = "linux")]
-    Arrangement(bool),
-    /// In Mirror, the screen (row) the desktop is sized for.
+    DisplayChip(usize),
     #[cfg(target_os = "linux")]
-    OptimiseFor(usize),
-    /// A screen row's move button: the row (left to right) and the
-    /// direction, -1 left or +1 right.
+    DisplayBox(usize),
     #[cfg(target_os = "linux")]
-    ScreenMove(usize, i32),
-    /// A screen row's "Make main".
+    DisplayOptimise(usize),
+    /// The picked monitor's details: Make main, a Move to choice
+    /// (`display_moves`), its resolution and refresh pickers.
     #[cfg(target_os = "linux")]
-    ScreenMain(usize),
-    /// A screen row's resolution and refresh pickers.
+    DisplayMakeMain,
     #[cfg(target_os = "linux")]
-    ScreenResolution(usize),
+    DisplayMoveTo(usize),
     #[cfg(target_os = "linux")]
-    ScreenRate(usize),
+    OutputResolution,
+    #[cfg(target_os = "linux")]
+    OutputRate,
+    /// Send the draft, or drop it.
+    #[cfg(target_os = "linux")]
+    DisplayApply,
+    #[cfg(target_os = "linux")]
+    DisplayDiscard,
     /// A chip of the unfolded picker (`chooser_changes`).
     #[cfg(target_os = "linux")]
     ChooserItem(usize),
@@ -586,25 +592,42 @@ pub struct ShellPanel {
     #[cfg(target_os = "linux")]
     #[rust]
     anchor_screen: Rect,
-    /// The connector names behind the drawn screen rows (left to right,
-    /// then the screens outside the desktop), so a click lands on the
-    /// screen that was shown, never on whatever a fresh inventory put at
-    /// that index.
+    /// The Display menu's changes not applied yet (`linux::DisplayDraft`).
     #[cfg(target_os = "linux")]
     #[rust]
-    screen_targets: Vec<String>,
-    /// How many of `screen_targets` are in the desktop (the movable ones).
+    display_draft: Option<DisplayDraft>,
+    /// The monitor whose details show, by connector (`None`: the main
+    /// screen's).
     #[cfg(target_os = "linux")]
     #[rust]
-    screen_placed: usize,
-    /// The screen whose picker is unfolded, by name, and which picker.
+    display_selected: Option<String>,
+    /// A press on the arrangement diagram: a click, or a drag under way.
+    #[cfg(target_os = "linux")]
+    #[rust]
+    display_drag: Option<DisplayDrag>,
+    /// What each drawn diagram hit stands for, bound at draw time, so a
+    /// press lands on what was shown: the chips' monitors, the drop
+    /// targets, the Move to choices and the optimise-for choices.
+    #[cfg(target_os = "linux")]
+    #[rust]
+    display_chips: Vec<String>,
+    #[cfg(target_os = "linux")]
+    #[rust]
+    display_drops: Vec<(DropAt, Rect)>,
+    #[cfg(target_os = "linux")]
+    #[rust]
+    display_moves: Vec<Place>,
+    #[cfg(target_os = "linux")]
+    #[rust]
+    display_optimise: Vec<String>,
+    /// The monitor whose picker is unfolded, by name, and which picker.
     #[cfg(target_os = "linux")]
     #[rust]
     chooser: Option<(String, Chooser)>,
-    /// The change behind each drawn `Hit::ChooserItem`, bound at draw time.
+    /// The monitor and mode behind each drawn `Hit::ChooserItem`.
     #[cfg(target_os = "linux")]
     #[rust]
-    chooser_changes: Vec<Change>,
+    chooser_changes: Vec<(String, Option<String>)>,
     /// The change being tried and the notes, as the WM last polled them,
     /// and when (`Cx::monotonic_now`), for the revert countdown.
     #[cfg(target_os = "linux")]
@@ -667,12 +690,6 @@ pub struct ShellPanel {
     #[cfg(target_os = "linux")]
     #[rust]
     pointer_settings: bool,
-    /// A source the renderer was asked for and has not yet named as the
-    /// primary, with when it was asked. The WM clears it on observation
-    /// or reports it after a bounded wait.
-    #[cfg(target_os = "linux")]
-    #[rust]
-    pub display_source_pending: Option<(String, f64)>,
     /// Escape cancelled a scale preview: its key-up is taken too, so no
     /// tile sees half a key press.
     #[cfg(target_os = "linux")]
@@ -819,6 +836,10 @@ impl ShellPanel {
             self.device_scroll = 0;
             self.chooser = None;
             self.chooser_changes.clear();
+            // An unapplied draft goes with the menu; it opens on what runs.
+            self.display_draft = None;
+            self.display_selected = None;
+            self.display_drag = None;
             self.pace_open = false;
             self.pace_targets.clear();
             self.virtual_size_open = false;
@@ -969,7 +990,10 @@ impl ShellPanel {
             PanelKind::Clock => 470.0,
             PanelKind::Audio => self.audio_height(),
             PanelKind::Power => 300.0,
-            PanelKind::Monitor => self.monitor_height(),
+            PanelKind::Monitor => {
+                let body = self.card_rect(screen, kind, 0.0).size.x - (pad + tok.popups.border_width) * 2.0;
+                self.monitor_height(body)
+            }
             PanelKind::Network => self.network_height(),
             PanelKind::Bluetooth => 150.0,
             #[cfg(target_os = "linux")]
@@ -2420,6 +2444,7 @@ impl ShellPanel {
             || self.pace_open
             || self.virtual_size_open
             || self.dpi_drag.is_some()
+            || self.display_drag.is_some()
             || self.restart_confirm
             || self.gpu_picker
 
@@ -2451,7 +2476,14 @@ impl ShellPanel {
                 return true;
             }
         }
-        // Escape folds a screen's picker, or drops a restart confirm; the
+        // Escape drops what the diagram carries where it was.
+        if e.key_code == KeyCode::Escape && self.display_drag.is_some() {
+            self.display_drag = None;
+            self.swallow_escape_up = true;
+            self.redraw(cx);
+            return true;
+        }
+        // Escape folds a monitor's picker, or drops a restart confirm; the
         // Display panel stays.
         if e.key_code == KeyCode::Escape && (self.chooser.is_some() || self.pace_open || self.virtual_size_open || self.restart_confirm) {
             self.close_chooser();
@@ -2539,7 +2571,7 @@ impl ShellPanel {
 #[cfg(not(target_os = "linux"))]
 impl ShellPanel {
     fn audio_height(&self) -> f64 { 300.0 }
-    fn monitor_height(&self) -> f64 { 240.0 }
+    fn monitor_height(&self, _width: f64) -> f64 { 240.0 }
     fn network_height(&self) -> f64 {
         150.0
     }
@@ -2575,6 +2607,8 @@ impl Widget for ShellPanel {
             }
         }
         match event {
+            #[cfg(target_os = "linux")]
+            Event::MouseMove(e) if self.display_drag.is_some() => self.display_drag_to(cx, e.abs),
             Event::MouseMove(e) => {
                 if let Some(hit) = self.dragging {
                     let v = self.slider_value(hit, e.abs);
@@ -2642,13 +2676,14 @@ impl Widget for ShellPanel {
                     }
                     #[cfg(target_os = "linux")]
                     Some(hit @ (Hit::DevicePicker(_) | Hit::Device(_, _) | Hit::InputMute
-                        | Hit::Arrangement(_) | Hit::OptimiseFor(_)
-                        | Hit::ScreenMove(..) | Hit::ScreenMain(_) | Hit::ScreenResolution(_) | Hit::ScreenRate(_)
-                        | Hit::ChooserItem(_) | Hit::TrialKeep | Hit::TrialRevert | Hit::PacePicker | Hit::PaceItem(_)
+                        | Hit::DisplayOptimise(_) | Hit::DisplayMakeMain | Hit::DisplayMoveTo(_) | Hit::OutputResolution | Hit::OutputRate
+                        | Hit::DisplayApply | Hit::DisplayDiscard | Hit::ChooserItem(_) | Hit::TrialKeep | Hit::TrialRevert | Hit::PacePicker | Hit::PaceItem(_)
                         | Hit::Desktop(_) | Hit::VirtualSizePicker | Hit::VirtualSizeItem(_) | Hit::VirtualCustom(..) | Hit::VirtualPanels(_)
                         | Hit::RestartDesktop | Hit::RestartConfirm | Hit::RestartCancel
                         | Hit::GpuPicker
                         | Hit::Gpu(_) | Hit::PointerSettings | Hit::NaturalScroll(_))) => self.system_press(cx, hit),
+                    #[cfg(target_os = "linux")]
+                    Some(hit @ (Hit::DisplayChip(_) | Hit::DisplayBox(_))) => self.display_press(hit, e.abs),
                     #[cfg(target_os = "linux")]
                     Some(Hit::DpiScaleSlider) => self.dpi_drag_begin(cx, e.abs),
                     #[cfg(target_os = "linux")]
@@ -2703,9 +2738,10 @@ impl Widget for ShellPanel {
                     None => {}
                 }
             }
-            Event::MouseUp(_) => {
+            Event::MouseUp(_up) => {
                 #[cfg(target_os = "linux")]
                 {
+                    self.display_release(cx, _up.abs);
                     self.dpi_drag_end(cx);
                     self.headset_release(cx);
                 }
@@ -2805,5 +2841,6 @@ mod tests {
         assert_eq!(PanelKind::for_module(BarModule::Menu), None);
         assert_eq!(PanelKind::Clock.content_width(), 560.0);
         assert_eq!(PanelKind::Audio.content_width(), 380.0);
+        assert_eq!(PanelKind::Monitor.content_width(), 560.0);
     }
 }

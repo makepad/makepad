@@ -355,13 +355,13 @@ mod native {
             #[cfg(target_os = "linux")]
             let primary = {
                 let mut primary = 0;
+                // The desktop's screens: a mirror is one screen, however many monitors show it.
                 let snapshot = cx.linux_display_snapshot();
-                for o in snapshot.outputs.iter().filter(|o| o.active && o.width > 0) {
-                    let Some((x, y)) = o.desktop_position else { continue };
-                    if o.primary {
+                for s in snapshot.screens.iter().filter(|s| s.width > 0 && s.height > 0) {
+                    if s.primary {
                         primary = out.len();
                     }
-                    out.push(ScreenInfo { name: o.name.clone(), x, y, width: o.width, height: o.height });
+                    out.push(ScreenInfo { name: s.name.clone(), x: s.x, y: s.y, width: s.width, height: s.height });
                 }
                 primary
             };
@@ -383,8 +383,10 @@ mod native {
             let (screens, _) = self.screens(cx);
             #[cfg(target_os = "linux")]
             if let Some(s) = screens.get(self.screen) {
+                // A screen runs at the rate of the monitor it is optimised for.
                 let snapshot = cx.linux_display_snapshot();
-                if let Some(o) = snapshot.outputs.iter().find(|o| o.name == s.name && o.refresh_hz >= 1.0) {
+                let output = snapshot.screens.iter().find(|screen| screen.name == s.name).and_then(|screen| snapshot.output(&screen.optimise_for));
+                if let Some(o) = output.filter(|o| o.refresh_hz >= 1.0) {
                     fps = fps.min(o.refresh_hz.round() as u32);
                 }
             }
@@ -406,7 +408,9 @@ mod native {
             let (screens, _) = self.screens(cx);
             #[cfg(target_os = "linux")]
             if let Some(s) = screens.get(self.screen) {
-                return cx.linux_display_snapshot().outputs.iter().find(|o| o.name == s.name && o.refresh_hz >= 1.0).map(|o| o.refresh_hz);
+                let snapshot = cx.linux_display_snapshot();
+                let screen = snapshot.screens.iter().find(|screen| screen.name == s.name);
+                return screen.and_then(|screen| snapshot.output(&screen.optimise_for)).filter(|o| o.refresh_hz >= 1.0).map(|o| o.refresh_hz);
             }
             let _ = screens;
             None

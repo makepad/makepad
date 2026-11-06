@@ -2,26 +2,25 @@
 #
 # Sourced by a window manager session script (e.g.
 # tools/arch_usb/wm-session.sh) before `target/release/makepad-app-wm` is
-# exec'd, to turn the saved
+# exec'd, to hand the WM's own lines of the saved
 #   ${XDG_CONFIG_HOME:-$HOME/.config}/makepad/wm/display-layout
-# file into the env vars the platform reads before Event::Startup
-# (platform/src/os/linux/vulkan_linux.rs:new_direct, called before the WM's
-# own `Event::Startup`, so the WM cannot set these for its own process):
+# file to the platform, which reads these before Event::Startup (the
+# direct backend starts before the WM's own `Event::Startup`, so the WM
+# cannot set them for its own process):
 #
-#   MAKEPAD_DISPLAY_ORDER            this-boot output names, left to right
-#   MAKEPAD_DRM_MODES                per-screen modes
 #   MAKEPAD_VULKAN_COMPOSITOR_PCI    the render-on GPU's PCI address
 #   MAKEPAD_VIRTUAL_DISPLAY          "WxH@Hz panels" from the `virtual` line
 #                                    (the virtual desktop's fallback size and
 #                                    what the panels show: mirror or off)
 #
-# File format and the screen-key resolution rule are in
-# apps/wm/src/shell/display_layout.rs (the pure model). A screen's
-# key is (card PCI address, connector name without its `cardN-` prefix);
-# resolving it to this boot's name means finding the card whose PCI
-# address (the basename of `readlink -f /sys/class/drm/cardN/device`)
-# matches, then using `cardN-<connector>` as the name. A screen key that
-# does not resolve this boot is dropped, never matched by connector alone.
+# The file format is in apps/wm/src/shell/display_layout.rs (the WM's
+# lines: `render-on`, `virtual`, before the first `profile`) and
+# platform/hal/src/display_profiles.rs (the profiles). The direct backend
+# reads the profiles from the same file itself (`layout_path` there), with
+# or without this script: they are keyed by the monitors' EDID
+# fingerprints and their cards' PCI addresses, never by this boot's card
+# numbers. A set `MAKEPAD_DISPLAY_LAYOUT` names another file, for tests;
+# this reads that one too.
 #
 # Safe to source with `set -e`/`set -u` active in the caller: this file
 # never calls `exit`, copes with a missing or unreadable `display-layout`
@@ -36,10 +35,10 @@
 # build the `pci -> cardN` map, overridable so this can be tested against
 # a fake tree (see tools/linux/display-layout-env.test.sh).
 #
-# Each of the three env vars above is exported only when it is currently
+# Each of the two env vars above is exported only when it is currently
 # unset or empty -- an externally set, non-empty value always wins over
-# the file, matching the rule the WM's own runtime restore applies
-# (apps/wm/src/shell/display_layout.rs:env_restore_plan).
+# the file. `MAKEPAD_DISPLAY_ARRANGEMENT` and `MAKEPAD_DRM_MODES` set from outside
+# pin the arrangement and modes over any profile (the backend's rule).
 #
 # `render-on` is read from `display-layout` when that file exists (even
 # if it has no `render-on` line, meaning "Auto": no fallback then). When
@@ -51,23 +50,6 @@
 # (system_linux.rs) does not mistake the saved choice for a true external
 # override; that flag is always unset first so a stale one from the
 # caller's environment cannot persist by accident.
-#
-# `MAKEPAD_DISPLAY_ORDER` and `MAKEPAD_DRM_MODES` get the same treatment,
-# but with one marker each -- `MAKEPAD_WM_ORDER_FROM_SAVED=1` /
-# `MAKEPAD_WM_MODES_FROM_SAVED=1` -- rather than a single combined flag,
-# because the two variables are independent exports that can disagree
-# about which one this helper set from the file and which one was
-# already pinned from outside (e.g. a caller that only pins the order).
-# A single marker could not tell the two cases apart; the worker reads
-# both into `SystemSnapshot::order_env`/`modes_env` (`system_linux.rs`),
-# and its runtime restore of the saved layout
-# (`display_layout::env_restore_plan`, `linux_controls.rs`) skips the
-# Order op entirely while `order_env` is pinned, and a screen's Mode op
-# while that screen's name appears in a pinned `modes_env` -- the same
-# "an externally set env var always wins" rule this helper already
-# applies at session start, also honoured by the WM's own safety-net
-# restore. Both markers are always unset first, same reason as the GPU
-# one.
 #
 # `MAKEPAD_VIRTUAL_DISPLAY` follows the same rules, with the marker
 # `MAKEPAD_WM_VIRTUAL_FROM_SAVED=1`: `virtual WxH@Hz panels=mirror|off ...`
@@ -93,12 +75,6 @@ _mdl_is_pci_ids() {
     [[ "$1" =~ ^[0-9a-f]{4}:[0-9a-f]{4}$ ]]
 }
 
-# Mirrors `mode_string_is_valid` (vulkan_linux.rs): `WxH`, `WxH@Hz` or
-# `WxH-Hz`, digits only.
-_mdl_mode_is_valid() {
-    [[ "$1" =~ ^[0-9]+x[0-9]+([@-][0-9]+)?$ ]]
-}
-
 # Prints one `<pci> <vendor:device> <cardN>` line per usable card under
 # $1 (the sysfs DRM root): a `cardN` entry (not a `cardN-<connector>`
 # status directory) whose `device` symlink resolves. Glob-dependent, so
@@ -118,20 +94,6 @@ _mdl_build_card_table() {
         dev=$(cat "$card_dir/device/device" 2>/dev/null); dev=${dev#0x}
         printf '%s %s:%s %s\n' "$pci" "$ven" "$dev" "$card"
     done
-}
-
-# Prints the `cardN` whose row in $1 (the card table) has pci $2; empty
-# and a non-zero return when there is none.
-_mdl_card_for_pci() {
-    local table="$1" want_pci="$2" row_pci row_ids row_card
-    while IFS=' ' read -r row_pci row_ids row_card; do
-        [ -n "$row_pci" ] || continue
-        if [ "$row_pci" = "$want_pci" ]; then
-            printf '%s\n' "$row_card"
-            return 0
-        fi
-    done <<<"$table"
-    return 1
 }
 
 # True when $1 (the card table) has a row matching both pci $2 and
@@ -190,19 +152,17 @@ _mdl_main() {
     local cfg_root layout_file gpu_file sysfs_root
     local layout_exists=0 layout_readable=0
     local render_on_pci="" render_on_ids=""
-    local order_list="" modes_list=""
     local virtual_mode="" virtual_panels="mirror"
     local card_table=""
     local had_noglob=0
-    local line keyword pci connector token mode value name card
-    local seen_keys=$'\x01'
+    local line keyword token
 
     cfg_root=${XDG_CONFIG_HOME:-}
     case "$cfg_root" in
         /*) ;;
         *) cfg_root=${HOME:-}/.config ;;
     esac
-    layout_file="$cfg_root/makepad/wm/display-layout"
+    layout_file=${MAKEPAD_DISPLAY_LAYOUT:-$cfg_root/makepad/wm/display-layout}
     gpu_file="$cfg_root/makepad/wm/display-gpu"
     sysfs_root=${MAKEPAD_SYSFS_DRM:-/sys/class/drm}
 
@@ -228,6 +188,8 @@ _mdl_main() {
             case "$keyword" in
                 '#'*) continue ;;
                 makepad-display-layout) continue ;;
+                # The profiles follow, for the backend: the WM's own lines are done.
+                profile) break ;;
                 render-on)
                     if [ -n "$render_on_pci" ]; then
                         continue
@@ -260,72 +222,10 @@ _mdl_main() {
                         esac
                     done
                     ;;
-                screen)
-                    if [ "$#" -lt 3 ]; then
-                        echo "display-layout: malformed screen line; skipped" >&2
-                        continue
-                    fi
-                    pci=$2
-                    connector=$3
-                    case "$seen_keys" in
-                        *"${pci}|${connector}"$'\x01'*)
-                            continue
-                            ;;
-                    esac
-                    seen_keys="${seen_keys}${pci}|${connector}"$'\x01'
-                    shift 3
-                    mode=""
-                    for token in "$@"; do
-                        case "$token" in
-                            mode=*)
-                                value=${token#mode=}
-                                if _mdl_mode_is_valid "$value"; then
-                                    mode="$value"
-                                fi
-                                ;;
-                        esac
-                    done
-                    card=$(_mdl_card_for_pci "$card_table" "$pci") || card=""
-                    if [ -z "$card" ]; then
-                        echo "display-layout: screen $pci $connector not present this boot; dropped" >&2
-                        continue
-                    fi
-                    name="${card}-${connector}"
-                    if [ -z "$order_list" ]; then
-                        order_list="$name"
-                    else
-                        order_list="$order_list,$name"
-                    fi
-                    if [ -n "$mode" ]; then
-                        if [ -z "$modes_list" ]; then
-                            modes_list="$name=$mode"
-                        else
-                            modes_list="$modes_list,$name=$mode"
-                        fi
-                    fi
-                    ;;
                 *) continue ;;
             esac
         done <"$layout_file"
         [ "$had_noglob" = 1 ] || set +f
-    fi
-
-    unset MAKEPAD_WM_ORDER_FROM_SAVED
-    if [ -n "$order_list" ]; then
-        if _mdl_set_env MAKEPAD_DISPLAY_ORDER "$order_list" "from display-layout"; then
-            export MAKEPAD_WM_ORDER_FROM_SAVED=1
-        fi
-    else
-        echo "display-layout: no resolvable screen order; MAKEPAD_DISPLAY_ORDER left to the platform" >&2
-    fi
-
-    unset MAKEPAD_WM_MODES_FROM_SAVED
-    if [ -n "$modes_list" ]; then
-        if _mdl_set_env MAKEPAD_DRM_MODES "$modes_list" "from display-layout"; then
-            export MAKEPAD_WM_MODES_FROM_SAVED=1
-        fi
-    else
-        echo "display-layout: no saved modes; MAKEPAD_DRM_MODES left to the platform" >&2
     fi
 
     unset MAKEPAD_WM_VIRTUAL_FROM_SAVED
@@ -373,5 +273,4 @@ if ! _mdl_main; then
 fi
 
 unset -f _mdl_main _mdl_set_env _mdl_legacy_gpu_choice _mdl_table_has_match \
-    _mdl_card_for_pci _mdl_build_card_table _mdl_mode_is_valid _mdl_virtual_mode_is_valid _mdl_is_pci_ids \
-    _mdl_is_pci_address
+    _mdl_build_card_table _mdl_virtual_mode_is_valid _mdl_is_pci_ids _mdl_is_pci_address
