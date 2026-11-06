@@ -16,14 +16,13 @@ use std::process::Command;
 pub const DIRECT_SHELL_ENV: &[&str] = &[
     "MAKEPAD_VULKAN_COMPOSITOR_PCI",
     "MAKEPAD_VULKAN_COMPOSITOR_UUID",
-    "MAKEPAD_DISPLAY_ORDER",
+    "MAKEPAD_DISPLAY_ARRANGEMENT",
+    "MAKEPAD_DISPLAY_LAYOUT",
     "MAKEPAD_DRM_DEVICE",
     "MAKEPAD_DRM_CONNECTOR",
     "MAKEPAD_DRM_MODE",
     "MAKEPAD_DRM_MODES",
     "MAKEPAD_WM_GPU_FROM_SAVED",
-    "MAKEPAD_WM_ORDER_FROM_SAVED",
-    "MAKEPAD_WM_MODES_FROM_SAVED",
 ];
 
 /// What makes a process one particular hosted client of its host.

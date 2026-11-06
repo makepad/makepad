@@ -5208,7 +5208,7 @@ mod tests {
         let token = builder.begin_node(1, None);
         builder.begin_window(WindowId(0, 1));
         for i in 0..count {
-            builder.set_part(token, i as u64, None, Node { role: Role::MenuItem, name: format!("Item {i}"), value: i.to_string(), states: if i % 2 == 0 { States::SELECTED } else { States::empty() }, bounds: a11y_tree::Rect { x: i as f32, y: 20.0, w: 60.0, h: 24.0 }, ..Default::default() }, || WidgetUid::new().0);
+            builder.set_part(token, i as u64, None, Node { role: Role::MenuItem, name: format!("Item {i}"), value: i.to_string(), states: if i % 2 == 0 { States::SELECTED } else { States::empty() }, bounds: a11y_tree::Rect { x: i as f32, y: 20.0, w: 60.0, h: 24.0 }, ..Default::default() }, Area::Empty, || WidgetUid::new().0);
         }
         builder.end_node(token, Node { role: Role::Window, states: if hidden { States::HIDDEN } else { States::empty() }, ..Default::default() }, Area::Empty);
         builder.end_window();

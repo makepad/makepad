@@ -437,6 +437,14 @@ pub trait Widget: WidgetNode {
     /// redraws and reordering; the builder supplies the wire id and routes actions to this widget.
     fn semantics_parts(&self, _cx: &Cx, _out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {}
 
+    /// The area part `key` (of [`Widget::semantics_parts`]) drew as, when it drew as one of its
+    /// own (a list's row): the builder then takes its bounds from that area once the frame's
+    /// turtles finish, clipped by every clip it drew under, and reports it offscreen when
+    /// nothing of it shows. Empty (the default): the part's node carries its own bounds.
+    fn semantics_part_area(&self, _key: u64) -> Area {
+        Area::Empty
+    }
+
     fn handle_action(
         &mut self,
         _cx: &mut Cx,
@@ -2539,7 +2547,7 @@ fn semantic_draw(widget: &mut (dyn Widget + 'static), source: Option<&ScriptObje
     let mut parts = Vec::new();
     widget.semantics_parts(cx, &mut parts);
     for (key, parent, part) in parts {
-        cx.a11y.set_part(token, key, parent, part, || WidgetUid::new().0);
+        cx.a11y.set_part(token, key, parent, part, widget.semantics_part_area(key), || WidgetUid::new().0);
     }
     cx.a11y.end_node(token, node, widget.area());
     step

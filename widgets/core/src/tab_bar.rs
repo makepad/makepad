@@ -615,7 +615,7 @@ impl TabBar {
             self.semantics(cx, &mut node);
             let mut parts = Vec::new();
             self.semantics_parts(cx, &mut parts);
-            for (key, parent, part) in parts { cx.a11y.set_part(token, key, parent, part, || WidgetUid::new().0); }
+            for (key, parent, part) in parts { cx.a11y.set_part(token, key, parent, part, self.semantics_part_area(key), || WidgetUid::new().0); }
             cx.a11y.end_node(token, node, self.area());
         }
 
