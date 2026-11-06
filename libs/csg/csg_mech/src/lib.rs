@@ -23,7 +23,7 @@ pub mod runner;
 pub mod sim;
 pub mod weave;
 
-pub use check::{Gap, LayerReport, Risk};
+pub use check::{Found, Gap, LayerReport, Risk, Tack, Turned};
 pub use geom::{Prim, Solid, P3};
 pub use joint::{AnchorDecl, BallDecl, Extent, HingeDecl, JointDecl, JointGeom, Material, Measured, Note, PartBox, Profile};
 
@@ -139,14 +139,92 @@ pub struct JointCheck {
     pub geometry: Geometry,
     pub notes: Vec<Note>,
     pub millis: f64,
-    /// (gap, layers, limits) milliseconds.
+    /// (gap, layers, limits) milliseconds; the layers' include those sliced ahead of the gap
+    /// search.
     pub phases: (f64, f64, f64),
+    /// Where each way of the sweep stopped and where the parts touch there (a hinge's two ways,
+    /// a ball's four).
+    pub turns: Vec<Turned>,
+    /// Why it is not free as printed, worst first: empty when [`JointCheck::ok`].
+    pub binds: Vec<Bind>,
 }
 
 impl JointCheck {
     /// Free to move as printed: no fused verdict and a positive range.
     pub fn ok(&self) -> bool {
-        self.risk < Risk::High && self.gap.gap > 0.5 * self.clearance && self.effective.1 - self.effective.0 > 2f64.to_radians() && self.retention.map_or(true, |r| r >= 0.2)
+        self.risk < Risk::High && self.gap.gap >= GAP_TOL && self.gap.gap > 0.5 * self.clearance && self.effective.1 - self.effective.0 > 2f64.to_radians() && self.retention.map_or(true, |r| r >= 0.2)
+    }
+}
+
+/// What keeps a joint from moving as printed (see [`JointCheck::binds`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Bind {
+    /// The parts overlap (or touch) at `at`: the gap there, mm.
+    Fused { gap: f64, at: P3 },
+    /// They come closer than half the clearance the joint was built with, at `at`.
+    Tight { gap: f64, at: P3 },
+    /// One part's beads print over the other's in this layer, with `empty` layers between (none:
+    /// straight onto it).
+    Tacks(Tack),
+    /// In the layer at height `z` the two parts' sections come this close (mm): too close for
+    /// the slicer to keep them apart.
+    Sections { gap: f64, z: f64 },
+    /// It turns through less than two degrees (radians).
+    Range { range: f64 },
+    /// The pin holds the parts by this little (mm).
+    Loose { retention: f64 },
+    /// As printed: support is printed between the two parts.
+    Supports,
+}
+
+/// The gap search's tolerance (mm): parts closer than this touch, as far as it can tell.
+pub const GAP_TOL: f64 = 0.02;
+
+/// Layers [`check_joints`] slices ahead of a joint's gap search, to time its layer check by.
+pub const LAYERS_AHEAD: usize = 3;
+
+/// Why a joint checked like this is not free, by the same tests as [`JointCheck::ok`] (a check
+/// as printed adds [`Bind::Supports`] where support bridges the parts).
+pub fn binds(gap: &Gap, layers: &LayerReport, score: f64, clearance: f64, c_xy: f64, effective: (f64, f64), retention: Option<f64>) -> Vec<Bind> {
+    let mut out = Vec::new();
+    if gap.gap < GAP_TOL {
+        out.push(Bind::Fused { gap: gap.gap, at: gap.at });
+    } else if gap.gap <= 0.5 * clearance {
+        out.push(Bind::Tight { gap: gap.gap, at: gap.at });
+    }
+    // the layer whose beads weigh most in the score: straight onto the other part first
+    let weight = [3.0, 1.0, 0.3, 0.05];
+    let worst = |onto: bool| layers.tacks.iter().filter(|t| !onto || t.empty == 0).max_by(|a, b| (weight[a.empty] * a.area).total_cmp(&(weight[b.empty] * b.area))).copied();
+    if layers.tack[0] > 0.5 {
+        out.extend(worst(true).map(Bind::Tacks));
+    } else if score > 40.0 {
+        out.extend(worst(false).map(Bind::Tacks));
+    }
+    if layers.layer_gap < 0.7 * c_xy {
+        out.push(Bind::Sections { gap: layers.layer_gap, z: layers.layer_gap_at });
+    }
+    if effective.1 - effective.0 <= 2f64.to_radians() {
+        out.push(Bind::Range { range: effective.1 - effective.0 });
+    }
+    if let Some(r) = retention.filter(|r| *r < 0.2) {
+        out.push(Bind::Loose { retention: r });
+    }
+    out
+}
+
+/// Where a running check reports to, from its threads (joints are checked in parallel; one
+/// joint's steps come in order). A closure `Fn() -> bool` is a sink that only cancels.
+pub trait CheckSink: Sync {
+    /// Joint `joint`'s check found this.
+    fn found(&self, joint: usize, found: Found);
+    /// Stop: polled at every step, so a check stops within one.
+    fn cancelled(&self) -> bool;
+}
+
+impl<F: Fn() -> bool + Sync> CheckSink for F {
+    fn found(&self, _: usize, _: Found) {}
+    fn cancelled(&self) -> bool {
+        self()
     }
 }
 
@@ -156,45 +234,57 @@ pub fn bed_level(parts: &[FinalPart], up: P3) -> f64 {
     parts.iter().flat_map(|p| p.vertices.iter()).map(|v| dot(*v, up)).fold(f64::INFINITY, f64::min)
 }
 
-/// Check every joint on the parts' fields (in parallel; `cancelled` is polled between joints).
-pub fn check_joints(plan: &Plan, parts: &[FinalPart], geometry: Geometry, cancelled: &(dyn Fn() -> bool + Sync)) -> Vec<JointCheck> {
+/// Check every joint on the parts' fields (in parallel), telling `sink` every step and stopping
+/// within one once it cancels: a cancelled joint is left out. A closure `|| false` checks them
+/// all and reports nothing.
+pub fn check_joints(plan: &Plan, parts: &[FinalPart], geometry: Geometry, sink: &dyn CheckSink) -> Vec<JointCheck> {
     let up = norm(plan.profile.up);
     let bed = bed_level(parts, up);
     let c_xy = plan.profile.c_xy();
     let one = |i: usize| -> Option<JointCheck> {
-        if cancelled() {
+        if sink.cancelled() {
             return None;
         }
+        let step = &mut |f: Found| {
+            sink.found(i, f);
+            !sink.cancelled()
+        };
         let started = std::time::Instant::now();
         let g = &plan.joints[i];
         let (a, b) = plan.decls[i].parts();
         let (fa, fb) = (parts[a].field, parts[b].field);
         let (lo, hi) = g.region();
-        let gap = check::min_gap(fa, fb, lo, hi, 0.02);
-        let t_gap = started.elapsed().as_secs_f64() * 1000.0;
-        let layers = check::layer_check(fa, fb, lo, hi, up, plan.profile.layer, 0.05, bed);
+        // a few layers first, so a bar knows the layer check's time while the gap search runs
+        let slicer = check::Slicer::new(fa, fb, lo, hi, up, plan.profile.layer, 0.05, bed);
+        let ahead = slicer.ahead(LAYERS_AHEAD, step)?;
+        let t_ahead = started.elapsed().as_secs_f64() * 1000.0;
+        let gap = check::min_gap_steps(fa, fb, lo, hi, GAP_TOL, step)?;
+        let t_gap = started.elapsed().as_secs_f64() * 1000.0 - t_ahead;
+        let layers = slicer.check(ahead, step)?;
         let t_layers = started.elapsed().as_secs_f64() * 1000.0 - t_gap;
         let (risk, risk_score) = check::risk(gap.gap, layers.layer_gap, &layers.tack, c_xy);
         let (pivot, axis) = g.pivot();
         let pi = std::f64::consts::PI;
+        let mut turns = Vec::new();
         let (kind, declared, field, effective) = match g {
             JointGeom::Hinge { limits, .. } => {
-                let up_lim = check::sweep_limit(fa, fb, pivot, axis, 1.0, lo, hi, 0.02, pi);
-                let dn_lim = check::sweep_limit(fa, fb, pivot, axis, -1.0, lo, hi, 0.02, pi);
+                for (k, dir) in [1.0, -1.0].into_iter().enumerate() {
+                    turns.push(check::sweep_steps(fa, fb, pivot, axis, dir, lo, hi, 0.02, pi, (k, 2), step)?);
+                }
+                let (up_lim, dn_lim) = (turns[0].angle.abs(), turns[1].angle.abs());
                 let (l, u) = limits.unwrap_or((-pi, pi));
                 ("hinge", *limits, (dn_lim, up_lim), (l.max(-dn_lim), u.min(up_lim)))
             }
             JointGeom::Ball { cone, .. } => {
                 let (u, v) = basis(axis);
-                let mut m: f64 = pi;
-                for t in [u, v] {
-                    for dir in [1.0, -1.0] {
-                        m = m.min(check::sweep_limit(fa, fb, pivot, t, dir, lo, hi, 0.02, pi * 0.5));
-                    }
+                for (k, (t, dir)) in [(u, 1.0), (u, -1.0), (v, 1.0), (v, -1.0)].into_iter().enumerate() {
+                    turns.push(check::sweep_steps(fa, fb, pivot, t, dir, lo, hi, 0.02, pi * 0.5, (k, 4), step)?);
                 }
+                let m = turns.iter().map(|t| t.angle.abs()).fold(pi, f64::min);
                 ("ball", Some((0.0, *cone)), (0.0, m), (0.0, cone.min(m)))
             }
         };
+        let binds = binds(&gap, &layers, risk_score, g.clearance(), c_xy, effective, g.retention());
         Some(JointCheck {
             joint: i,
             kind,
@@ -213,6 +303,8 @@ pub fn check_joints(plan: &Plan, parts: &[FinalPart], geometry: Geometry, cancel
             notes: plan.notes[i].clone(),
             millis: started.elapsed().as_secs_f64() * 1000.0,
             phases: (t_gap, t_layers, started.elapsed().as_secs_f64() * 1000.0 - t_gap - t_layers),
+            turns,
+            binds,
         })
     };
     let n = plan.joints.len();
@@ -313,13 +405,16 @@ pub fn assembly(plan: &Plan, parts: &[FinalPart], checks: &[JointCheck], fill: f
         .map(|(i, (g, d))| {
             let (a, b) = d.parts();
             let (pivot, axis) = g.pivot();
-            let eff = checks.iter().find(|c| c.joint == i).map(|c| c.effective);
-            let kind = match g {
+            let declared = match g {
                 JointGeom::Hinge { limits, .. } => {
-                    let (l, u) = eff.unwrap_or(limits.unwrap_or((-std::f64::consts::PI, std::f64::consts::PI)));
+                    let (l, u) = limits.unwrap_or((-std::f64::consts::PI, std::f64::consts::PI));
                     sim::JointKind::Revolute { lower: l, upper: u }
                 }
-                JointGeom::Ball { cone, twist, .. } => sim::JointKind::Spherical { cone: eff.map(|e| e.1).unwrap_or(*cone), twist: *twist },
+                JointGeom::Ball { cone, twist, .. } => sim::JointKind::Spherical { cone: *cone, twist: *twist },
+            };
+            let kind = match checks.iter().find(|c| c.joint == i) {
+                Some(c) => declared.measured(c.effective),
+                None => declared,
             };
             sim::JointSpec { name: format!("{}-{}", parts[a].name, parts[b].name), a, b, pivot, axis, kind, friction: sim::Friction { mu, radius: g.bearing_radius(), torque: 0.0 } }
         })

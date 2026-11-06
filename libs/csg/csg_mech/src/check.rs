@@ -21,6 +21,67 @@ pub struct Gap {
     pub evals: u64,
 }
 
+/// What a running check has found so far, step by step: the progress a bar shows and the live
+/// view's marks (where it searches, the closest the parts come, the layers a bead could tack
+/// them together in, the moving part's turn). Points are in the parts' frame (mm).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Found {
+    /// A few layers sliced first, spread over the joint's box, to time the layer check by (the
+    /// check takes them as they are): `sliced` of `of` done (0: about to start), in `secs`, of
+    /// the `layers` the box spans.
+    Ahead { sliced: usize, of: usize, layers: usize, secs: f64 },
+    /// The layer being sliced (ahead, or the next in turn): `share` of its raster done.
+    Rows { share: f64 },
+    /// The gap search: the share of it done (0 to 1, in its time: the time so far of that and the
+    /// time its roots left take at the rate its roots took so far; it never goes back), and the
+    /// smallest gap so far (mm; negative: the parts overlap; infinite: none seen yet) and where.
+    Gap { searched: f64, gap: f64, at: P3 },
+    /// Layer `k` of `n` sliced (1-based), at height `z` along up.
+    Layer { k: usize, n: usize, z: f64 },
+    /// A layer where one part's beads print over the other's.
+    Tack(Tack),
+    /// Turn `turn` of `turns` (a hinge's two ways, a ball's four) tests the moving part turned by
+    /// `angle` (radians, signed) about `axis` (unit, through the joint's pivot); it goes up to
+    /// `max` either way.
+    Turn { turn: usize, turns: usize, axis: P3, angle: f64, max: f64 },
+    /// That turn stops at `angle` (the last angle free), the parts touching at `contact`; None:
+    /// it is free all the way to `max`.
+    Stop(Turned),
+}
+
+/// Beads of one part printed over the other's with `empty` layers between (0: straight onto
+/// it, fused) in the layer at height `z` along up (layer `layer` from the bed): `area` mm²,
+/// centred at `at`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tack {
+    pub layer: usize,
+    pub z: f64,
+    pub empty: usize,
+    pub area: f64,
+    pub at: P3,
+}
+
+/// Where a turn of a sweep stopped (see [`Found::Stop`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Turned {
+    pub turn: usize,
+    pub turns: usize,
+    pub axis: P3,
+    pub angle: f64,
+    pub contact: Option<P3>,
+}
+
+/// A check's step callback: told what was found at each step, it answers whether to go on.
+pub type Steps<'a> = &'a mut dyn FnMut(Found) -> bool;
+
+/// A step callback that never stops and drops what it is told.
+fn on(_: Found) -> bool {
+    true
+}
+
+/// Gap search cells between two reports.
+const GAP_REPORT: u64 = 64;
+
 const SQ3: f64 = 1.7320508075688772;
 
 #[derive(Default)]
@@ -67,22 +128,152 @@ fn split(c: P3, h: f64, stack: &mut Vec<(P3, f64)>) {
     }
 }
 
+/// How far a gap search has got, in its time. With the roots nearest both parts searched first
+/// ([`nearest_first`]), the smallest gap is found at once, and what a root takes from then on goes
+/// by how much nearer than that gap both parts come to its centre: a root farther than the gap by
+/// its half-diagonal is one cell, one nearer is split down to the tolerance around the gap's
+/// level, nearest the most. The roots not searched yet are counted by those bands up front (their
+/// distances are the order's); each band's time is the mean of its roots searched so far (a band
+/// none of whose roots is done yet takes the band nearer's). The share done is the time so far, of
+/// that and the time left, and grows with every report by its share of the time left: it never
+/// goes back and never sits still.
+struct GapWork {
+    /// Per root, in the stack's order: the larger of both parts' distances at its centre (as
+    /// [`nearest_first`] tells them, up to three half-sizes), farthest first.
+    near: Vec<f64>,
+    /// The roots' half-size.
+    h: f64,
+    /// Roots not started yet: the bottom `unstarted` of the stack.
+    unstarted: usize,
+    /// The root being searched: its band and when it started (s).
+    current: Option<(usize, f64)>,
+    /// Per band: roots done and their time (s).
+    done: [(u32, f64); BANDS],
+    started: std::time::Instant,
+    /// The share told last and when (s).
+    told: (f64, f64),
+}
+
+/// [`GapWork`]'s bands, by how much nearer than the gap so far both parts come to a root's centre,
+/// in half-sizes: less than half the half-diagonal, less than the half-diagonal, farther (one cell).
+const BANDS: usize = 3;
+
+impl GapWork {
+    fn new(near: Vec<f64>, h: f64) -> GapWork {
+        GapWork { unstarted: near.len(), near, h, current: None, done: [(0, 0.0); BANDS], started: std::time::Instant::now(), told: (0.0, 0.0) }
+    }
+
+    /// The band a root `near` its centre falls in with `best` the smallest gap so far (half, as the
+    /// search keeps it).
+    fn band(&self, near: f64, best: f64) -> usize {
+        let x = (near - best) / self.h;
+        if x < 0.5 * SQ3 {
+            0
+        } else if x < SQ3 {
+            1
+        } else {
+            2
+        }
+    }
+
+    /// A cell came off the stack, `left` cells under it: the roots are at its bottom, so one at
+    /// the bottom's top starts a root.
+    fn popped(&mut self, left: usize, best: f64) {
+        if left < self.unstarted {
+            let now = self.started.elapsed().as_secs_f64();
+            if let Some((band, since)) = self.current.take() {
+                self.done[band].0 += 1;
+                self.done[band].1 += now - since;
+            }
+            self.unstarted = left;
+            self.current = Some((self.band(self.near[left], best), now));
+        }
+    }
+
+    /// The share of the search done, 0 to 1 (see [`GapWork`]).
+    fn share(&mut self, best: f64) -> f64 {
+        let now = self.started.elapsed().as_secs_f64();
+        // a band's mean time, else the nearer band's; none done yet: no time to go by
+        let mut mean = [None; BANDS];
+        for band in 0..BANDS {
+            let (n, t) = self.done[band];
+            mean[band] = if n > 0 { Some(t / n as f64) } else if band > 0 { mean[band - 1] } else { None };
+        }
+        let Some(_) = mean[0].or(mean[1]).or(mean[2]) else { return self.told.0 };
+        let mean = |band: usize| mean[band].or(mean.iter().flatten().next().copied()).unwrap_or(0.0);
+        // the roots not started, by band: `near` grows down the stack's bottom, so each band's
+        // roots are a run of it
+        let roots = &self.near[..self.unstarted];
+        let edge = |x: f64| roots.partition_point(|n| *n >= best + x * self.h);
+        let (far, mid) = (edge(SQ3), edge(0.5 * SQ3));
+        let mut left = far as f64 * mean(2) + (mid - far) as f64 * mean(1) + (roots.len() - mid) as f64 * mean(0);
+        if let Some((band, since)) = self.current {
+            left += (mean(band) - (now - since)).max(0.0);
+        }
+        let (share, then) = self.told;
+        let since = now - then;
+        let share = if since + left > 0.0 { share + (1.0 - share) * since / (since + left) } else { share };
+        self.told = (share.min(1.0), now);
+        self.told.0
+    }
+}
+
+/// Puts the roots nearest both parts on top of the stack, so they are searched first: the search
+/// then finds its smallest gap at once, and cuts every cell that cannot beat it. Searched in the
+/// lattice's order, it finds smaller gaps one root at a time, and splits the cells around each of
+/// those down to `tol` before the next. A root's nearness is the larger of both parts' distances at
+/// its centre, told up to three half-sizes (farther ones keep the lattice's order); those are
+/// returned in the stack's new order.
+fn nearest_first(a: Field, b: Field, roots: &mut Vec<(P3, f64)>) -> Vec<f64> {
+    let reach = 3.0 * roots.first().map_or(0.0, |r| r.1);
+    let (mut qa, mut qb) = (Query::default(), Query::default());
+    let mut keyed: Vec<(f64, (P3, f64))> = roots
+        .iter()
+        .map(|&(c, h)| {
+            let da = qa.at(a, c, f64::NEG_INFINITY, reach);
+            (if da >= reach { reach } else { da.max(qb.at(b, c, f64::NEG_INFINITY, reach)) }, (c, h))
+        })
+        .collect();
+    // the stack pops from its end: the nearest last
+    keyed.sort_by(|x, y| y.0.total_cmp(&x.0));
+    *roots = keyed.iter().map(|k| k.1).collect();
+    keyed.into_iter().map(|k| k.0).collect()
+}
+
 /// The smallest gap between `a` and `b` inside the box `lo..hi`, found to within `tol` (the result may
 /// overstate the true gap by up to 1.8 tol, never more).
 pub fn min_gap(a: Field, b: Field, lo: P3, hi: P3, tol: f64) -> Gap {
+    min_gap_steps(a, b, lo, hi, tol, &mut on).expect("a search that never stops ends")
+}
+
+/// [`min_gap`], telling `step` how far it has searched ([`Found::Gap`]) every few cells and at
+/// the end; None when `step` stops it.
+pub fn min_gap_steps(a: Field, b: Field, lo: P3, hi: P3, tol: f64, step: Steps) -> Option<Gap> {
     let mut best = f64::INFINITY;
     let mut at = lo;
     let mut evals = 0u64;
     let (mut qa, mut qb) = (Query::default(), Query::default());
     let s0 = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).min(1.0).max(tol * 4.0);
     let mut stack = roots(lo, hi, s0);
+    let near = nearest_first(a, b, &mut stack);
+    let mut work = GapWork::new(near, stack.first().map_or(1.0, |r| r.1));
+    let mut cells = 0u64;
     while let Some((c, h)) = stack.pop() {
+        work.popped(stack.len(), best);
+        cells += 1;
+        if cells % GAP_REPORT == 0 && !step(Found::Gap { searched: work.share(best), gap: 2.0 * best, at }) {
+            return None;
+        }
         let cutoff = (best + h * SQ3 - tol * 0.25).next_up();
         let da = qa.at(a, c, f64::NEG_INFINITY, cutoff);
         evals += 1;
-        if da == cutoff { continue; }
+        if da == cutoff {
+            continue;
+        }
         let db = qb.at(b, c, da, cutoff);
-        if db == cutoff { continue; }
+        if db == cutoff {
+            continue;
+        }
         let g = da.max(db);
         if g < best {
             best = g;
@@ -92,7 +283,10 @@ pub fn min_gap(a: Field, b: Field, lo: P3, hi: P3, tol: f64) -> Gap {
             split(c, h, &mut stack);
         }
     }
-    Gap { gap: 2.0 * best, at, evals }
+    if !step(Found::Gap { searched: 1.0, gap: 2.0 * best, at }) {
+        return None;
+    }
+    Some(Gap { gap: 2.0 * best, at, evals })
 }
 
 /// Whether `a` and `b` come closer than `gap` anywhere in the box (early out on the first hit).
@@ -195,8 +389,9 @@ impl<'a> SweepSearch<'a> {
     }
 
     // Ok: no sampled hit, with a lower bound on min(max(dA,dB)) over
-    // every cell. Err: an upper bound at a witness below target.
-    fn clearance(&mut self, angle: f64, target: f64) -> Result<f64, f64> {
+    // every cell. Err: an upper bound at a witness below target, and the
+    // witness (the cell's centre: where the parts touch).
+    fn clearance(&mut self, angle: f64, target: f64) -> Result<f64, (f64, P3)> {
         let posed = posed(self.b, self.pivot, self.axis, angle * self.dir);
         let mut qb = Query::default();
         let mut stack: Vec<usize> = (0..self.roots).collect();
@@ -231,7 +426,7 @@ impl<'a> SweepSearch<'a> {
                 self.cells[i].b = Some((angle, bl, bu));
             }
             if da.max(bu) < target {
-                return Err(da.max(bu));
+                return Err((da.max(bu), cell.center));
             }
             let bound = da.max(bl) - radius;
             if bound >= target || cell.half <= 0.01 {
@@ -264,36 +459,56 @@ impl<'a> SweepSearch<'a> {
 /// with seven bisections. Skip lattice sites only when the clearance bound
 /// certifies the entire angular interval as contact-free.
 pub fn sweep_limit(a: Field, b: Field, pivot: P3, axis: P3, dir: f64, lo: P3, hi: P3, contact: f64, max: f64) -> f64 {
-    let step = 3f64.to_radians();
+    sweep_steps(a, b, pivot, axis, dir, lo, hi, contact, max, (0, 1), &mut on).expect("a sweep that never stops ends").angle.abs()
+}
+
+/// [`sweep_limit`] as turn `turn.0` of `turn.1`, telling `step` each angle it tests
+/// ([`Found::Turn`]) and where it stops ([`Found::Stop`]: the angle, signed, and where the parts
+/// touch there); None when `step` stops it.
+#[allow(clippy::too_many_arguments)]
+pub fn sweep_steps(a: Field, b: Field, pivot: P3, axis: P3, dir: f64, lo: P3, hi: P3, contact: f64, max: f64, turn: (usize, usize), step: Steps) -> Option<Turned> {
+    let (n, turns) = turn;
+    let sweep = 3f64.to_radians();
     let target = contact * 0.5;
     let mut search = SweepSearch::new(a, b, pivot, axis, dir, lo, hi);
+    let test = |search: &mut SweepSearch, ang: f64, step: &mut dyn FnMut(Found) -> bool| {
+        if step(Found::Turn { turn: n, turns, axis, angle: dir * ang, max }) { Some(search.clearance(ang, target)) } else { None }
+    };
     let mut prev = 0.0;
-    let mut ang = step;
+    let mut ang = sweep;
     while ang <= max + 1e-9 {
-        match search.clearance(ang, target) {
-            Err(_) => {
-                let (mut l, mut h) = (prev, ang);
+        match test(&mut search, ang, step)? {
+            Err((_, at)) => {
+                let (mut l, mut h, mut touch) = (prev, ang, at);
                 for _ in 0..7 {
                     let m = 0.5 * (l + h);
-                    if search.clearance(m, target).is_err() { h = m; } else { l = m; }
+                    match test(&mut search, m, step)? {
+                        Err((_, at)) => {
+                            h = m;
+                            touch = at;
+                        }
+                        Ok(_) => l = m,
+                    }
                 }
-                return l;
+                let stop = Turned { turn: n, turns, axis, angle: dir * l, contact: Some(touch) };
+                return step(Found::Stop(stop)).then_some(stop);
             }
             Ok(lower) => {
                 let safe = if search.radius > 0.0 { (lower - target) / search.radius } else { 0.0 };
                 let until = ang + safe;
                 prev = ang;
-                ang += step;
+                ang += sweep;
                 // Keep the original additions and last three-degree bracket.
                 // This loop visits no fields, and never steps past max.
-                while ang + step < until && ang + step <= max + 1e-9 {
+                while ang + sweep < until && ang + sweep <= max + 1e-9 {
                     prev = ang;
-                    ang += step;
+                    ang += sweep;
                 }
             }
         }
     }
-    max
+    let stop = Turned { turn: n, turns, axis, angle: dir * max, contact: None };
+    step(Found::Stop(stop)).then_some(stop)
 }
 
 /// The slicer's view of a joint region.
@@ -307,27 +522,93 @@ pub struct LayerReport {
     pub tack: [f64; 4],
     /// Layers looked at.
     pub layers: usize,
+    /// Where `tack` is: each layer's beads printed over the other part, by layer and by how many
+    /// empty layers lie between, bottom up.
+    pub tacks: Vec<Tack>,
 }
 
 /// Rasterise both parts per layer inside the box, in layers of `layer` along `up`, at `res` in plane.
 pub fn layer_check(a: Field, b: Field, lo: P3, hi: P3, up: P3, layer: f64, res: f64, bed: f64) -> LayerReport {
-    let up = norm(up);
-    let (u, v) = basis(up);
-    let corners: Vec<P3> = (0..8).map(|i| [if i & 1 == 0 { lo[0] } else { hi[0] }, if i & 2 == 0 { lo[1] } else { hi[1] }, if i & 4 == 0 { lo[2] } else { hi[2] }]).collect();
-    let range = |d: P3| corners.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), c| (l.min(dot(*c, d)), h.max(dot(*c, d))));
-    let (u0, u1) = range(u);
-    let (v0, v1) = range(v);
-    let (z0, z1) = range(up);
-    let nx = ((u1 - u0) / res).ceil().max(1.0) as usize;
-    let ny = ((v1 - v0) / res).ceil().max(1.0) as usize;
-    // layers on the bed's grid: layer k spans bed + k*layer .. bed + (k+1)*layer along up
-    let k0 = ((z0 - bed) / layer).floor().max(0.0) as i64;
-    let k1 = ((z1 - bed) / layer).ceil() as i64;
-    let mut occ: Vec<Vec<u8>> = Vec::new();
-    for k in k0..k1.max(k0) {
-        let z = bed + (k as f64 + 0.5) * layer;
+    layer_check_steps(a, b, lo, hi, up, layer, res, bed, &mut on).expect("a check that never stops ends")
+}
+
+/// [`layer_check`], telling `step` each layer it slices ([`Found::Layer`]) and each tack it
+/// finds ([`Found::Tack`]); None when `step` stops it.
+#[allow(clippy::too_many_arguments)]
+pub fn layer_check_steps(a: Field, b: Field, lo: P3, hi: P3, up: P3, layer: f64, res: f64, bed: f64, step: Steps) -> Option<LayerReport> {
+    Slicer::new(a, b, lo, hi, up, layer, res, bed).check(Ahead::default(), step)
+}
+
+/// The layers a box around a joint prints in, each sliced into a raster of both parts' sections:
+/// what [`layer_check`] looks at.
+pub struct Slicer<'a> {
+    a: Field<'a>,
+    b: Field<'a>,
+    up: P3,
+    u: P3,
+    v: P3,
+    u0: f64,
+    v0: f64,
+    nx: usize,
+    ny: usize,
+    /// The box's first layer on the bed's grid, and how many it spans.
+    k0: i64,
+    n: usize,
+    layer: f64,
+    res: f64,
+    bed: f64,
+}
+
+/// A few layers a [`Slicer`] sliced ahead, spread over its box, to time the rest by: by layer (from
+/// the box's first), and the seconds they took.
+#[derive(Default)]
+pub struct Ahead {
+    rows: Vec<(usize, Vec<u8>)>,
+    pub secs: f64,
+}
+
+impl Ahead {
+    /// Layers sliced.
+    pub fn sliced(&self) -> usize {
+        self.rows.len()
+    }
+}
+
+impl<'a> Slicer<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(a: Field<'a>, b: Field<'a>, lo: P3, hi: P3, up: P3, layer: f64, res: f64, bed: f64) -> Slicer<'a> {
+        let up = norm(up);
+        let (u, v) = basis(up);
+        let corners: Vec<P3> = (0..8).map(|i| [if i & 1 == 0 { lo[0] } else { hi[0] }, if i & 2 == 0 { lo[1] } else { hi[1] }, if i & 4 == 0 { lo[2] } else { hi[2] }]).collect();
+        let range = |d: P3| corners.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), c| (l.min(dot(*c, d)), h.max(dot(*c, d))));
+        let (u0, u1) = range(u);
+        let (v0, v1) = range(v);
+        let (z0, z1) = range(up);
+        let nx = ((u1 - u0) / res).ceil().max(1.0) as usize;
+        let ny = ((v1 - v0) / res).ceil().max(1.0) as usize;
+        // layers on the bed's grid: layer k spans bed + k*layer .. bed + (k+1)*layer along up
+        let k0 = ((z0 - bed) / layer).floor().max(0.0) as i64;
+        let k1 = ((z1 - bed) / layer).ceil() as i64;
+        Slicer { a, b, up, u, v, u0, v0, nx, ny, k0, n: (k1.max(k0) - k0) as usize, layer, res, bed }
+    }
+
+    /// The layers the box spans.
+    pub fn layers(&self) -> usize {
+        self.n
+    }
+
+    /// The middle of layer `kk` of the box along up.
+    fn z(&self, kk: usize) -> f64 {
+        self.bed + ((self.k0 + kk as i64) as f64 + 0.5) * self.layer
+    }
+
+    /// Layer `kk` of the box sliced: each raster cell 1 inside part a, 2 inside b, else 0; told to
+    /// `step` row by row of blocks ([`Found::Rows`]), None when it stops it.
+    fn row(&self, kk: usize, step: Steps) -> Option<Vec<u8>> {
+        let (a, b, res, nx, ny) = (self.a, self.b, self.res, self.nx, self.ny);
+        let z = self.z(kk);
         let mut row = vec![0u8; nx * ny];
-        let at = |i: f64, j: f64| v3(add(add(scale(u, u0 + i * res), scale(v, v0 + j * res)), scale(up, z)));
+        let at = |i: f64, j: f64| v3(add(add(scale(self.u, self.u0 + i * res), scale(self.v, self.v0 + j * res)), scale(self.up, z)));
         let class = |q| if a.distance(q) < 0.0 { 1 } else if b.distance(q) < 0.0 { 2 } else { 0 };
         // Blocks of 8 x 8 cells: one sample at the block centre classifies the whole block when both fields are
         // farther than the block's half diagonal from their surfaces (1-Lipschitz), else every cell is sampled.
@@ -353,94 +634,153 @@ pub fn layer_check(a: Field, b: Field, lo: P3, hi: P3, up: P3, layer: f64, res: 
                     }
                 }
             }
+            if bj + B < ny && !step(Found::Rows { share: (bj + B) as f64 / ny as f64 }) {
+                return None;
+            }
         }
-        occ.push(row);
+        Some(row)
     }
-    let mut layer_gap = f64::INFINITY;
-    let mut layer_gap_at = 0.0;
-    let reach = (1.0 / res).ceil() as isize;
-    for (kk, row) in occ.iter().enumerate() {
-        let edge = |m: u8| -> Vec<(isize, isize)> {
-            let mut out = Vec::new();
-            for j in 0..ny {
-                for i in 0..nx {
-                    if row[j * nx + i] != m {
-                        continue;
-                    }
-                    let on_edge = [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)].iter().any(|(di, dj)| {
-                        let (ii, jj) = (i as isize + di, j as isize + dj);
-                        ii < 0 || jj < 0 || ii >= nx as isize || jj >= ny as isize || row[jj as usize * nx + ii as usize] != m
-                    });
-                    if on_edge {
-                        out.push((i as isize, j as isize));
+
+    /// `count` layers sliced ahead, spread over the box (the middles of its `count` equal
+    /// spans), told to `step` before the first and as each is done ([`Found::Ahead`]);
+    /// [`Slicer::check`] slices them no more. None when `step` stops it.
+    pub fn ahead(&self, count: usize, step: Steps) -> Option<Ahead> {
+        let count = count.min(self.n);
+        let started = std::time::Instant::now();
+        let mut ahead = Ahead::default();
+        if count > 0 && !step(Found::Ahead { sliced: 0, of: count, layers: self.n, secs: 0.0 }) {
+            return None;
+        }
+        for i in 0..count {
+            let kk = (2 * i + 1) * self.n / (2 * count);
+            let row = self.row(kk, step)?;
+            ahead.rows.push((kk, row));
+            ahead.secs = started.elapsed().as_secs_f64();
+            if !step(Found::Ahead { sliced: i + 1, of: count, layers: self.n, secs: ahead.secs }) {
+                return None;
+            }
+        }
+        Some(ahead)
+    }
+
+    /// The layer check (see [`layer_check_steps`]), with the layers sliced `ahead` taken as
+    /// they are.
+    pub fn check(&self, ahead: Ahead, step: Steps) -> Option<LayerReport> {
+        let (nx, ny, res, layer, bed, k0, n) = (self.nx, self.ny, self.res, self.layer, self.bed, self.k0, self.n);
+        let (u, v, up, u0, v0) = (self.u, self.v, self.up, self.u0, self.v0);
+        let mut ahead = ahead.rows;
+        let mut occ: Vec<Vec<u8>> = Vec::new();
+        for kk in 0..n {
+            let row = match ahead.iter().position(|(k, _)| *k == kk) {
+                Some(i) => ahead.swap_remove(i).1,
+                None => self.row(kk, step)?,
+            };
+            occ.push(row);
+            if !step(Found::Layer { k: occ.len(), n, z: self.z(kk) }) {
+                return None;
+            }
+        }
+        let mut layer_gap = f64::INFINITY;
+        let mut layer_gap_at = 0.0;
+        let reach = (1.0 / res).ceil() as isize;
+        for (kk, row) in occ.iter().enumerate() {
+            let edge = |m: u8| -> Vec<(isize, isize)> {
+                let mut out = Vec::new();
+                for j in 0..ny {
+                    for i in 0..nx {
+                        if row[j * nx + i] != m {
+                            continue;
+                        }
+                        let on_edge = [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)].iter().any(|(di, dj)| {
+                            let (ii, jj) = (i as isize + di, j as isize + dj);
+                            ii < 0 || jj < 0 || ii >= nx as isize || jj >= ny as isize || row[jj as usize * nx + ii as usize] != m
+                        });
+                        if on_edge {
+                            out.push((i as isize, j as isize));
+                        }
                     }
                 }
+                out
+            };
+            let ea = edge(1);
+            let eb = edge(2);
+            if ea.is_empty() || eb.is_empty() {
+                continue;
             }
-            out
-        };
-        let ea = edge(1);
-        let eb = edge(2);
-        if ea.is_empty() || eb.is_empty() {
-            continue;
-        }
-        let mut buckets: std::collections::HashMap<(isize, isize), Vec<(isize, isize)>> = Default::default();
-        for c in &eb {
-            buckets.entry((c.0 / reach, c.1 / reach)).or_default().push(*c);
-        }
-        for &(i, j) in &ea {
-            for di in -1..=1 {
-                for dj in -1..=1 {
-                    if let Some(l) = buckets.get(&(i / reach + di, j / reach + dj)) {
-                        for &(bi, bj) in l {
-                            let d = ((((bi - i) * (bi - i) + (bj - j) * (bj - j)) as f64).sqrt() - 1.0) * res;
-                            if d < layer_gap {
-                                layer_gap = d;
-                                layer_gap_at = (k0 + kk as i64) as f64 * layer;
+            let mut buckets: std::collections::HashMap<(isize, isize), Vec<(isize, isize)>> = Default::default();
+            for c in &eb {
+                buckets.entry((c.0 / reach, c.1 / reach)).or_default().push(*c);
+            }
+            for &(i, j) in &ea {
+                for di in -1..=1 {
+                    for dj in -1..=1 {
+                        if let Some(l) = buckets.get(&(i / reach + di, j / reach + dj)) {
+                            for &(bi, bj) in l {
+                                let d = ((((bi - i) * (bi - i) + (bj - j) * (bj - j)) as f64).sqrt() - 1.0) * res;
+                                if d < layer_gap {
+                                    layer_gap = d;
+                                    layer_gap_at = (k0 + kk as i64) as f64 * layer;
+                                }
                             }
                         }
                     }
                 }
             }
         }
-    }
-    let mut tack = [0.0f64; 4];
-    let lat = (layer / res).round().max(1.0) as isize;
-    for kk in 1..occ.len() {
-        for j in 0..ny {
-            for i in 0..nx {
-                let m = occ[kk][j * nx + i];
-                if m == 0 {
-                    continue;
-                }
-                let mut supported = false;
-                'n: for dj in -lat..=lat {
-                    for di in -lat..=lat {
-                        let (ii, jj) = (i as isize + di, j as isize + dj);
-                        if ii >= 0 && jj >= 0 && (ii as usize) < nx && (jj as usize) < ny && occ[kk - 1][jj as usize * nx + ii as usize] == m {
-                            supported = true;
-                            break 'n;
+        let mut tack = [0.0f64; 4];
+        let mut tacks = Vec::new();
+        let lat = (layer / res).round().max(1.0) as isize;
+        for kk in 1..occ.len() {
+            // this layer's tacked cells by empty layers below: their area and the sum of their places
+            let mut here = [(0.0f64, [0.0f64; 3]); 4];
+            for j in 0..ny {
+                for i in 0..nx {
+                    let m = occ[kk][j * nx + i];
+                    if m == 0 {
+                        continue;
+                    }
+                    let mut supported = false;
+                    'n: for dj in -lat..=lat {
+                        for di in -lat..=lat {
+                            let (ii, jj) = (i as isize + di, j as isize + dj);
+                            if ii >= 0 && jj >= 0 && (ii as usize) < nx && (jj as usize) < ny && occ[kk - 1][jj as usize * nx + ii as usize] == m {
+                                supported = true;
+                                break 'n;
+                            }
+                        }
+                    }
+                    if supported {
+                        continue;
+                    }
+                    let mut empty = 0usize;
+                    let mut k = kk as isize - 1;
+                    while k >= 0 && occ[k as usize][j * nx + i] == 0 && empty < 4 {
+                        empty += 1;
+                        k -= 1;
+                    }
+                    if k >= 0 && empty < 4 {
+                        let below = occ[k as usize][j * nx + i];
+                        if below != 0 && below != m {
+                            tack[empty] += res * res;
+                            let z = bed + ((k0 + kk as i64) as f64 + 0.5) * layer;
+                            let p = add(add(scale(u, u0 + (i as f64 + 0.5) * res), scale(v, v0 + (j as f64 + 0.5) * res)), scale(up, z));
+                            here[empty].0 += res * res;
+                            here[empty].1 = add(here[empty].1, p);
                         }
                     }
                 }
-                if supported {
-                    continue;
+            }
+            for (empty, (area, sum)) in here.into_iter().enumerate().filter(|(_, (a, _))| *a > 0.0) {
+                let cells = area / (res * res);
+                let t = Tack { layer: (k0 + kk as i64) as usize, z: bed + ((k0 + kk as i64) as f64 + 0.5) * layer, empty, area, at: scale(sum, 1.0 / cells) };
+                if !step(Found::Tack(t)) {
+                    return None;
                 }
-                let mut empty = 0usize;
-                let mut k = kk as isize - 1;
-                while k >= 0 && occ[k as usize][j * nx + i] == 0 && empty < 4 {
-                    empty += 1;
-                    k -= 1;
-                }
-                if k >= 0 && empty < 4 {
-                    let below = occ[k as usize][j * nx + i];
-                    if below != 0 && below != m {
-                        tack[empty] += res * res;
-                    }
-                }
+                tacks.push(t);
             }
         }
+        Some(LayerReport { layer_gap, layer_gap_at, tack, layers: occ.len(), tacks })
     }
-    LayerReport { layer_gap, layer_gap_at, tack, layers: occ.len() }
 }
 
 /// How likely a joint is to print fused.

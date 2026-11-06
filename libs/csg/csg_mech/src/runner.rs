@@ -6,7 +6,7 @@
 //! the events (hard contacts, limit hits) for haptics.
 
 use crate::geom::*;
-use crate::sim::{Assembly, BodyAction, MechWorld, Pose};
+use crate::sim::{Assembly, BodyAction, JointKind, MechWorld, Pose};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -66,6 +66,9 @@ pub enum Command {
     Step,
     /// Do something to these bodies only.
     Bodies { bodies: Vec<usize>, action: BodyAction },
+    /// These joints take these limits (a check's measured ranges, [`JointKind::measured`]) where
+    /// they are now; a Reset keeps them.
+    Limits(Vec<(usize, JointKind)>),
 }
 
 /// Something the user should feel or hear.
@@ -215,7 +218,7 @@ impl Drop for Runner {
     }
 }
 
-fn run(asm: Assembly, gravity: P3, floor: Option<f64>, mut w: MechWorld, rx: Receiver<Command>, latest: Arc<Mutex<Arc<Snapshot>>>, events: Arc<Mutex<Vec<Event>>>, stop: Arc<AtomicBool>) {
+fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, mut w: MechWorld, rx: Receiver<Command>, latest: Arc<Mutex<Arc<Snapshot>>>, events: Arc<Mutex<Vec<Event>>>, stop: Arc<AtomicBool>) {
     let dt = 1.0 / HZ;
     let mut running = false;
     let mut speed = 1.0;
@@ -299,6 +302,13 @@ fn run(asm: Assembly, gravity: P3, floor: Option<f64>, mut w: MechWorld, rx: Rec
                 }
                 Command::Step => single = true,
                 Command::Bodies { bodies, action } => w.apply(&bodies, &action),
+                Command::Limits(limits) => {
+                    let n = asm.joints.len();
+                    for (j, kind) in limits.into_iter().filter(|(j, _)| *j < n) {
+                        w.set_limits(j, &kind);
+                        asm.joints[j].kind = kind;
+                    }
+                }
             }
         }
         let now = Instant::now();

@@ -174,6 +174,15 @@ impl JointKind {
         matches!(self, JointKind::Revolute { lower, upper } if upper - lower >= 2.0 * std::f64::consts::PI - 1e-9)
     }
 
+    /// This joint with the range a check measured ([`crate::JointCheck::effective`]: a hinge's
+    /// lower and upper angle, a ball's cone as the second).
+    pub fn measured(&self, effective: (f64, f64)) -> JointKind {
+        match self {
+            JointKind::Revolute { .. } => JointKind::Revolute { lower: effective.0, upper: effective.1 },
+            JointKind::Spherical { twist, .. } => JointKind::Spherical { cone: effective.1, twist: *twist },
+        }
+    }
+
     /// Within a degree of a limit at this angle (a revolute angle, a ball's cone angle).
     pub fn near_limit(&self, angle: f64) -> bool {
         let d = 1f64.to_radians();
@@ -665,6 +674,21 @@ impl MechWorld {
 
     pub fn rest_com(&self, body: usize) -> P3 {
         self.rest[body]
+    }
+
+    /// Joint `j` takes these limits (its kind's own) at once, where it is now: a hinge's range,
+    /// none for a whole turn ([`JointKind::turns_freely`]), a ball's cone.
+    pub fn set_limits(&mut self, j: usize, kind: &JointKind) {
+        let id = self.joints[j];
+        match kind {
+            JointKind::Revolute { lower, upper } => {
+                revolute_joint_enable_limit(&mut self.world, id, !kind.turns_freely());
+                revolute_joint_set_limits(&mut self.world, id, *lower as f32, *upper as f32);
+            }
+            // as a joint is built with one: up to a quarter turn
+            JointKind::Spherical { cone, .. } => spherical_joint_set_cone_limit(&mut self.world, id, cone.clamp(0.0, 0.5 * std::f64::consts::PI) as f32),
+        }
+        joint_wake_bodies(&mut self.world, id);
     }
 
     /// Joint angles: revolute angle, or a spherical joint's cone angle (radians).

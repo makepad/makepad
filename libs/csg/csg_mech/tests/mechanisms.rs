@@ -282,3 +282,130 @@ fn runner_publishes_poses_and_takes_a_grab() {
     }
     let _ = r.take_events();
 }
+
+/// A two-link hinge (`clearance`: its in-layer and axial clearance, None: the profile's).
+fn hinge_pair(clearance: Option<f64>) -> (Plan, Built) {
+    let profile = Profile::default();
+    let mut g = Graph::new();
+    let pitch = 12.0;
+    let nodes: Vec<NodeId> = (0..2).map(|i| boxed(&mut g, [i as f64 * pitch, 0.0, -2.5], [(i + 1) as f64 * pitch, 6.0, 2.5])).collect();
+    let boxes: Vec<PartBox> = (0..2).map(|i| PartBox { min: [i as f64 * pitch, 0.0, -2.5], max: [(i + 1) as f64 * pitch, 6.0, 2.5] }).collect();
+    let decls = vec![JointDecl::Hinge(HingeDecl { a: 0, b: 1, at: [pitch, 0.0, 0.0], axis: [0.0, 1.0, 0.0], limits: None, pin: None, plate: None, clearance, clearance_axial: clearance })];
+    let plan = plan(&boxes, &decls, &[], &profile).unwrap();
+    let built = build(g, &nodes, &["link[0]", "link[1]"], &plan);
+    (plan, built)
+}
+
+/// A sink that keeps every step, and cancels once it has seen `cancel_after` of them.
+struct Recorder {
+    seen: std::sync::Mutex<Vec<(usize, Found)>>,
+    cancel_after: usize,
+}
+
+impl CheckSink for Recorder {
+    fn found(&self, joint: usize, found: Found) {
+        self.seen.lock().unwrap().push((joint, found));
+    }
+    fn cancelled(&self) -> bool {
+        self.seen.lock().unwrap().len() >= self.cancel_after
+    }
+}
+
+/// A check's steps arrive in order and reach the end: the gap search's share searched rises to
+/// all of it, every layer is sliced in turn, each way of the sweep tests rising angles and
+/// stops. What they show is what the check measured (the closest gap and where, each tack, each
+/// stop and its contact), and the answers are the same as a check that reports nothing. A
+/// cancel stops it within one step, in every phase. A hinge printed with no clearance is not
+/// free, and says why.
+#[test]
+fn a_check_reports_each_step_in_order_and_stops_within_one() {
+    let (plan, built) = hinge_pair(None);
+    let fs = fields(&built, &plan);
+    let parts = finals(&built, &fs);
+    let quiet = check_joints(&plan, &parts, Geometry::Design, &|| false);
+    let sink = Recorder { seen: Default::default(), cancel_after: usize::MAX };
+    let told = check_joints(&plan, &parts, Geometry::Design, &sink);
+    let seen = sink.seen.into_inner().unwrap();
+    assert_eq!(quiet.len(), 1);
+    assert_eq!(told.len(), 1);
+    let (q, c) = (&quiet[0], &told[0]);
+    let answers = |c: &JointCheck| (c.gap, c.layers.clone(), c.risk, c.field, c.effective, c.turns.clone(), c.binds.clone());
+    assert_eq!(answers(q), answers(c), "a check that reports its steps answers the same");
+    assert!(c.ok() && c.binds.is_empty(), "the hinge is free: {:?}", c.binds);
+    // in order: a few layers ahead, the gap, the layers, then each turn
+    let phase = |f: &Found| match f {
+        Found::Ahead { .. } | Found::Rows { .. } => 0,
+        Found::Gap { .. } => 1,
+        Found::Layer { .. } | Found::Tack(_) => 2,
+        Found::Turn { turn, .. } | Found::Stop(Turned { turn, .. }) => 3 + turn,
+    };
+    assert!(seen.iter().all(|(j, _)| *j == 0));
+    // (a layer's rows come in the phase they slice for)
+    let phased: Vec<&Found> = seen.iter().map(|(_, f)| f).filter(|f| !matches!(f, Found::Rows { .. })).collect();
+    assert!(phased.windows(2).all(|w| phase(w[0]) <= phase(w[1])), "the phases run in order");
+    let mut rows = 0.0;
+    for (_, f) in &seen {
+        match f {
+            Found::Rows { share } => {
+                assert!(*share > rows && *share < 1.0, "a layer's rows rise: {share} after {rows}");
+                rows = *share;
+            }
+            _ => rows = 0.0,
+        }
+    }
+    let ahead: Vec<(usize, usize, usize, f64)> = seen.iter().filter_map(|(_, f)| if let Found::Ahead { sliced, of, layers, secs } = f { Some((*sliced, *of, *layers, *secs)) } else { None }).collect();
+    let of = LAYERS_AHEAD.min(c.layers.layers);
+    assert_eq!(ahead.iter().map(|a| (a.0, a.1, a.2)).collect::<Vec<_>>(), (0..=of).map(|k| (k, of, c.layers.layers)).collect::<Vec<_>>(), "the layers ahead, each in turn");
+    assert!(ahead.windows(2).all(|w| w[0].3 <= w[1].3), "and their time only grows");
+    let gaps: Vec<(f64, f64, P3)> = seen.iter().filter_map(|(_, f)| if let Found::Gap { searched, gap, at } = f { Some((*searched, *gap, *at)) } else { None }).collect();
+    assert!(gaps.windows(2).all(|w| w[0].0 <= w[1].0 && w[1].1 <= w[0].1), "the share searched rises and the gap found only shrinks");
+    let last = gaps.last().expect("the gap search reports");
+    assert_eq!((last.0, last.1, last.2), (1.0, c.gap.gap, c.gap.at), "it ends having searched it all, at the gap it measured");
+    let layers: Vec<(usize, usize)> = seen.iter().filter_map(|(_, f)| if let Found::Layer { k, n, .. } = f { Some((*k, *n)) } else { None }).collect();
+    assert_eq!(layers, (1..=c.layers.layers).map(|k| (k, c.layers.layers)).collect::<Vec<_>>(), "every layer in turn");
+    let tacks: Vec<Tack> = seen.iter().filter_map(|(_, f)| if let Found::Tack(t) = f { Some(*t) } else { None }).collect();
+    assert_eq!(tacks, c.layers.tacks, "the tacks shown are the check's");
+    for e in 0..4 {
+        let sum: f64 = c.layers.tacks.iter().filter(|t| t.empty == e).map(|t| t.area).sum();
+        assert!((sum - c.layers.tack[e]).abs() < 1e-9, "the tacks over {e} empty layers add up to the check's area: {sum} vs {}", c.layers.tack[e]);
+    }
+    for (k, t) in c.turns.iter().enumerate() {
+        let angles: Vec<f64> = seen.iter().filter_map(|(_, f)| if let Found::Turn { turn, angle, .. } = f { (*turn == k).then_some(*angle) } else { None }).collect();
+        assert!(!angles.is_empty(), "turn {k} tests angles");
+        // the lattice rises, then the bisection closes in below the first contact
+        let first_hit = angles.iter().position(|a| a.abs() > t.angle.abs() + 1e-12).unwrap_or(angles.len());
+        assert!(angles[..first_hit].windows(2).all(|w| w[1].abs() > w[0].abs()), "turn {k} rises: {angles:?}");
+        let stops: Vec<Turned> = seen.iter().filter_map(|(_, f)| if let Found::Stop(s) = f { (s.turn == k).then_some(*s) } else { None }).collect();
+        assert_eq!(stops, vec![*t], "turn {k} stops once, where the check says");
+        if let Some(p) = t.contact {
+            // where they touch lies in the joint's region
+            let (lo, hi) = plan.joints[0].region();
+            assert!((0..3).all(|i| p[i] >= lo[i] - 1.0 && p[i] <= hi[i] + 1.0), "turn {k} touches at {p:?}, outside {lo:?}..{hi:?}");
+        }
+    }
+    assert!(matches!(seen.last(), Some((_, Found::Stop(Turned { turn: 1, turns: 2, .. })))), "the last step is the last turn's stop");
+    // a cancel in each phase: no step after the one it was raised on, and the joint left out
+    let first_of = |p: usize| seen.iter().position(|(_, f)| phase(f) == p).unwrap() + 1;
+    for at in [3, first_of(1), first_of(2), first_of(3) + 2] {
+        let sink = Recorder { seen: Default::default(), cancel_after: at };
+        let out = check_joints(&plan, &parts, Geometry::Design, &sink);
+        assert!(out.is_empty(), "a cancelled check leaves its joint out");
+        assert_eq!(sink.seen.into_inner().unwrap().len(), at, "it stops on the step it was cancelled on");
+    }
+    // printed with no clearance: not free, and why
+    let (plan, built) = hinge_pair(Some(0.0));
+    let fs = fields(&built, &plan);
+    let parts = finals(&built, &fs);
+    let fused = check_joints(&plan, &parts, Geometry::Design, &|| false);
+    report_checks(&fused);
+    let f = &fused[0];
+    println!("  binds: {:?}", f.binds);
+    assert!(!f.ok(), "no clearance prints fused");
+    assert_eq!(f.ok(), f.binds.is_empty(), "the binds say why");
+    assert!(f.binds.iter().any(|b| matches!(b, Bind::Fused { .. })), "touching parts are fused: {:?}", f.binds);
+    for b in &f.binds {
+        if let Bind::Tacks(t) = b {
+            assert!(f.layers.tacks.contains(t), "a tack it names is one it found");
+        }
+    }
+}
