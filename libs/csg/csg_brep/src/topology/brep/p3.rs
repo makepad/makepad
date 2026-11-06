@@ -1241,7 +1241,9 @@ fn seed_records_once(
 /// Lends the kernel context's notify callbacks and identity domain to a stand-in
 /// context for `run` (`Context::lend_notify`; upstream notifies through the B-rep's
 /// context, which a `&mut Kernel` edit cannot also borrow) and gives them back
-/// afterwards, whatever `run` returns.
+/// afterwards, whatever `run` returns, and when it unwinds: a cancel unwinds the work
+/// (`limits::probe`), and a kernel kept for the next build would otherwise stay lent,
+/// refusing every later edit as nested.
 ///
 /// # Errors
 ///
@@ -1251,11 +1253,20 @@ pub(crate) fn with_lent_context<R>(
     k: &mut Kernel,
     run: impl FnOnce(&mut Kernel, &mut Context) -> R,
 ) -> Result<R> {
+    /// Gives the stand-in's callbacks and domain back to the kernel context.
+    struct GiveBack<'a> {
+        kernel: &'a mut Kernel,
+        ctx: Context,
+    }
+    impl Drop for GiveBack<'_> {
+        fn drop(&mut self) {
+            self.kernel.context.install_lease(self.ctx.take_lease());
+        }
+    }
     let mut ctx = Context::default();
     ctx.install_lease(k.context.lend_notify()?);
-    let r = run(k, &mut ctx);
-    k.context.install_lease(ctx.take_lease());
-    Ok(r)
+    let mut lent = GiveBack { kernel: k, ctx };
+    Ok(run(lent.kernel, &mut lent.ctx))
 }
 
 /// Runs `edit` of `b` for a caller without identities of its own, notified through
@@ -4912,6 +4923,26 @@ mod tests {
         let (mut b2, [a2, _, _], [e2, _]) = test_support::wire_chain(true);
         with_kernel_callbacks(&mut k, &mut b2, |k, b, env| squeeze_edge(k, b, env, e2, a2))
             .unwrap();
+    }
+
+    /// An edit that unwinds (a cancel: `limits::probe`) gives the lent callbacks back:
+    /// the kernel context is not left lent, so the next edit is not refused as nested.
+    #[test]
+    fn a_lent_context_comes_back_when_its_edit_unwinds() {
+        let mut k = Kernel::default();
+        let seen = Seen::default();
+        k.context
+            .set_user_notify_callback(Some(Box::new(Rec(std::sync::Arc::clone(&seen)))));
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_lent_context(&mut k, |_, _| {
+                std::panic::resume_unwind(Box::new(()));
+            })
+        }));
+        assert!(unwound.is_err());
+        assert!(k.context.user_notify_callback().is_some(), "the callbacks came back");
+        let (mut b, [a, _, _], [e0, _]) = test_support::wire_chain(true);
+        with_kernel_callbacks(&mut k, &mut b, |k, b, env| squeeze_edge(k, b, env, e0, a)).unwrap();
+        assert!(!seen.lock().unwrap().is_empty());
     }
 
     /// P2b: the documented boundary (stores belong to one identity domain). Two
