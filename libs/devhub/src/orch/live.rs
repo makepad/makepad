@@ -100,7 +100,7 @@ fn call<'a>(ctx: &'a Ctx, id: &'a str) -> Result<Option<Call<'a>>, String> {
         calls.count += 1;
     }
     let call = Call(ctx, id, r);
-    admit(ctx, id, &call.2)?;
+    admit(ctx, id, &call.2, makepad_remote::lines::asked_on())?;
     Ok(Some(call))
 }
 
@@ -126,25 +126,39 @@ const ADMIT_LOOK: Duration = Duration::from_millis(100);
 /// A call takes its session's full charge back, admitted like a lease: it runs once that fits its
 /// box, never past the box's cores. Taken anyway (an edit at once, a call after 30 s), calls kept
 /// a box over its cores 30% of an hour (11-05). Its box keeps room for one call of its largest
-/// idle session (`Sched::call_room`): a call waits beside another call or on a box measured busy,
-/// and says so, with its box, its wait and why (`live call <id> waited <ms> ms for room on
-/// <node>: ...`). Err: its session parks meanwhile, or its client has gone.
-fn admit(ctx: &Ctx, id: &str, r: &Running) -> Result<(), String> {
+/// idle session (`Sched::call_room`): a call waits beside another call or on a box measured busy.
+/// A wait says so as it starts (`live call <id> waits for room on <node>: waiting for N cores (..),
+/// held by ..: <why>`) and once it ends (`.. waited <ms> ms ..`). No clock ends it: its session
+/// parking or ending does, or the client it answers going (`client`: the request's connection; an
+/// edit's ship answers none, its session's state alone ends its wait).
+fn admit(ctx: &Ctx, id: &str, r: &Running, client: Option<makepad_remote::Conn>) -> Result<(), String> {
     let t = Instant::now();
-    let mut why = String::new();
-    loop {
-        match ctx.leases.live_admit(&r.lease) {
-            Ok(()) => break,
-            Err(e) => why = e,
-        }
-        if let Some(note) = &r.calls.lock().unwrap().park { return Err(format!("{id}: {note}")); }
-        if makepad_remote::lines::client_gone() { return Err(format!("{id}: this call's client has gone")); }
-        std::thread::sleep(ADMIT_LOOK);
-    }
-    if !why.is_empty() {
+    let ended = || {
+        if let Some(note) = &r.calls.lock().unwrap().park { return Some(format!("{id}: {note}")); }
+        if get(ctx, id).is_none_or(|x| !x.active()) { return Some(format!("{id}: the session ended while its call waited for room")); }
+        client.as_ref().filter(|c| c.is_closed()).map(|_| format!("{id}: this call's client has gone"))
+    };
+    let waited = wait_for_room(&mut || ctx.leases.live_admit(&r.lease), &ended, &mut |why| {
+        event(ctx, Sev::Info, format!("live call {id} waits for room on {}: {why}", r.node), None);
+    })?;
+    if let Some(why) = waited {
         event(ctx, Sev::Info, format!("live call {id} waited {} ms for room on {}: {why}", t.elapsed().as_millis(), r.node), None);
     }
     Ok(())
+}
+
+/// [`admit`]'s wait: `try_admit` until it lets the call in (Ok: the first refusal, if it waited),
+/// `ended` saying why the wait ends otherwise (Err), `waits` told the first refusal at once.
+fn wait_for_room(try_admit: &mut dyn FnMut() -> Result<(), String>, ended: &dyn Fn() -> Option<String>, waits: &mut dyn FnMut(&str)) -> Result<Option<String>, String> {
+    let mut first: Option<String> = None;
+    loop {
+        match try_admit() {
+            Ok(()) => return Ok(first),
+            Err(why) => if first.is_none() { waits(&why); first = Some(why); },
+        }
+        if let Some(why) = ended() { return Err(why); }
+        std::thread::sleep(ADMIT_LOOK);
+    }
 }
 
 /// No call runs and no edit is on its way: the session's box charges it its resident share.
@@ -492,7 +506,7 @@ pub fn start(ctx: Arc<Ctx>) {
                     let called = wall_ms();
                     // the box charges the session as active again before the edit runs: beside the
                     // ship, an edit ran past its box's cores (11-05). A session parking ships no more.
-                    if admit(&c2, &id2, &r).is_err() { return; }
+                    if admit(&c2, &id2, &r, None).is_err() { return; }
                     ship_edit(&c2, &id2, &r, files.into_iter().collect(), edit_ms, called, None, None);
                 });
             }
@@ -1584,7 +1598,7 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
                 if begin_call(r) {
                     r.resuming.store(true, std::sync::atomic::Ordering::SeqCst);
                     // a session parking meanwhile restarts nothing: the fault is its edit's answer
-                    if admit(ctx, id, r).is_err() {
+                    if admit(ctx, id, r, None).is_err() {
                         r.resuming.store(false, std::sync::atomic::Ordering::SeqCst);
                         (p.tests, p.outcome, p.reason, p.verdict_ms) = (None, "failed".into(), reason, wall_ms());
                         set_patch(ctx, id, &p);
@@ -1708,6 +1722,29 @@ mod owner_tests {
         assert_eq!(super::grab_file(&lines(r#"{"png":"/h/devhub/tmp/L7/g/a.png"}"#), "L7").as_deref(), Some("g/a.png"));
         assert_eq!(super::grab_file(&lines(r#"{"png":"C:\\Users\\u\\devhub\\tmp\\L7\\g\\a.png"}"#), "L7").as_deref(), Some("g/a.png"));
         assert_eq!(super::grab_file(&lines(r#"{"png":"/h/devhub/tmp/L70/g/a.png"}"#), "L7"), None);
+    }
+
+    /// A call's wait for room ends when its client leaves, however long the box stays full: no
+    /// clock ends it, and it says at once what it waits for and who holds it. The wait read its
+    /// client from a thread-local that an edit's ship thread never has, and said nothing (11-05).
+    #[test]
+    fn a_call_waiting_for_room_ends_when_its_client_leaves() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let gone = std::sync::Arc::new(AtomicBool::new(false));
+        let leaves = gone.clone();
+        let client = std::thread::spawn(move || { std::thread::sleep(std::time::Duration::from_millis(300)); leaves.store(true, Ordering::SeqCst); });
+        let full = "a: waiting for 6 cores (14 of 16 in use), held by L1 (test, 8): the box measured busy";
+        let (mut tries, mut said) = (0, Vec::new());
+        let r = super::wait_for_room(&mut || { tries += 1; Err(full.to_string()) },
+            &|| gone.load(Ordering::SeqCst).then(|| "W1: this call's client has gone".to_string()), &mut |why| said.push(why.to_string()));
+        client.join().unwrap();
+        assert_eq!(r, Err("W1: this call's client has gone".to_string()));
+        assert_eq!(said, [full], "said once, as it started");
+        assert!(tries > 1, "it asked again until its client left");
+        // room at once: in, nothing said; room after refusals: the first is what it waited for
+        assert_eq!(super::wait_for_room(&mut || Ok(()), &|| None, &mut |_| panic!("no wait")), Ok(None));
+        let mut n = 0;
+        assert_eq!(super::wait_for_room(&mut || { n += 1; if n < 3 { Err(format!("full {n}")) } else { Ok(()) } }, &|| None, &mut |_| {}), Ok(Some("full 1".to_string())));
     }
 
     #[test]
@@ -2136,7 +2173,7 @@ fn test_call(ctx: &Arc<Ctx>, id: &str) -> Result<Option<String>, String> {
             } else {
                 let queued = behind.take().map(|b| (wall_ms().saturating_sub(called), b));
                 let _inflight = Inflight(ctx, id, &r);
-                admit(ctx, id, &r)?;
+                admit(ctx, id, &r, makepad_remote::lines::asked_on())?;
                 let mut x = get(ctx, id).ok_or("live job disappeared")?;
                 let fault = r.fault.lock().unwrap().clone();
                 if let Some(reason) = fault {

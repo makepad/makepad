@@ -36,7 +36,7 @@ pub struct Spec {
     /// `arch=x64,os=linux,role=pool`
     pub needs: String,
     pub prio: i32,
-    /// the pair's `--rev` (pinned here)
+    /// the pair's `--rev` (pinned here); empty: none, a lease nothing runs under (a hub build's room)
     pub rev: String,
     pub repo_dir: String,
     /// the node it runs on (it waits for it)
@@ -234,7 +234,7 @@ impl Held {
         req.prio = spec.prio;
         req.node = spec.node.clone();
         req.repo_dir = Some(spec.repo_dir.clone());
-        req.rev = Some(crate::lease::pin_revs(std::path::Path::new(&spec.repo_dir), &spec.rev)?);
+        req.rev = if spec.rev.is_empty() { None } else { Some(crate::lease::pin_revs(std::path::Path::new(&spec.repo_dir), &spec.rev)?) };
         // the master's own ask (no holder pid): a restart keeps it once granted, and asks again
         // for it while queued (Sched::restore drops the dead ask)
         req.master = true;

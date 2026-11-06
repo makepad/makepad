@@ -1429,6 +1429,11 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
     if tree.has("tools/run/fixture/restart_statics.py") {
         push("live:restart-statics".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/restart_statics.py"])], Judge::Exit, 5.0, None);
     }
+    // a live edit that is refused, or puts the boot text back, leaves no crate edited, and the
+    // next start restores what the run recorded
+    if tree.has("tools/run/fixture/edit_undone_warm.py") {
+        push("live:edit-undone".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/edit_undone_warm.py"])], Judge::Exit, 120.0, None);
+    }
     // a failed hot load is a warm restart and a ledger report, never a parked panic
     if tree.has("tools/run/fixture/hot_fail.py") {
         push("live:hot-fail".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/hot_fail.py"])], Judge::Exit, 60.0, None);

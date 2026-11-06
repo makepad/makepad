@@ -14,7 +14,8 @@
 //!   it first, stated on each box as `stalled: master older than protocol N`. The deployment gets
 //!   the code (the auto-sync, kicked; a push for the boxes outside it, which a timed run there makes
 //!   wait: an update wait, said once) while leases keep using the work tree. Once `caps.deploy` has
-//!   the code, the master asks for `hub-restart`; the hub
+//!   the code, the master takes the room of its build there (a lease of class `hub-build`, granted
+//!   in its turn beside the box's work, held until the hub restarts) and asks for `hub-restart`; the hub
 //!   builds its new self first (`waits:` meanwhile) and refuses a deployment it does not build at
 //!   (said once per commit, loudly; the box is not asked again until its deployment moves), then
 //!   restarts at once: a restart ends nothing (runs and live apps go on,
@@ -840,7 +841,24 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
         }
         std::thread::sleep(Duration::from_secs(5));
     }
+    // the hub builds itself on its box's cores like any build: in the room of a lease of its class
+    // there, granted in its turn beside the work granted there, held until the hub answers that it
+    // restarts on what it built (two Macs' hubs built beside their work at 12 and 14 of their 10
+    // cores, 11-05)
+    let mut room = None;
     if svc == "devhub" {
+        match hub_build_room(ctx, node, &has_it, &|line| updating(Some(&format!("its hub build waits for room ({line})")))) {
+            Ok(held) => room = Some(held),
+            Err(_) if has_it() => {
+                done(&caps().unwrap_or_default());
+                return RollEnd::NoRestart;
+            }
+            Err(e) => {
+                event(ctx, Sev::Warn, format!("update: {node}'s hub build got no room: {e}"));
+                return RollEnd::NoRestart;
+            }
+        }
+        updating(None);
         // A hub before handover (protocol 6) restarts only between runs: it drains, once.
         let old = caps().is_some_and(|c| c.hub_proto < crate::lease::HANDOVER_PROTO);
         if old { ctx.leases.set_updating(node, Some(&format!("its hub updates to {short}; an older hub: no new leases until it restarts")), true); }
@@ -944,6 +962,8 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
         }
     }
     drop(waits);
+    // its build is done (or it will not build): the room is the box's again
+    drop(room);
     // back: the hub reports the new commit; a service a newer start that answers again (its slot
     // is held till then: a new start takes seconds, its build and load minutes, and a roll that
     // went on at the new start had every box's AI hub down at once)
@@ -966,6 +986,15 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
     }
     event(ctx, Sev::Err, format!("update: {node} {svc} did not come back in 25 min (its log on the node)"));
     RollEnd::Late
+}
+
+/// The room `node`'s hub builds itself in ([`crate::lease::sched::Req::hub_build`]): the master's
+/// own lease of its class there, granted in its turn (its wait on the box's line). `gone`: the
+/// hub has the code another way, and the ask is given up.
+fn hub_build_room(ctx: &Ctx, node: &str, gone: &dyn Fn() -> bool, waits: &dyn Fn(&str)) -> Result<super::leg::Held, String> {
+    use crate::lease::sched::{DEFAULT_PRIO, HUB_BUILD};
+    let spec = super::leg::Spec { lane: format!("{HUB_BUILD}-{node}"), agent: "devhub-roll".into(), kind: crate::lease::Kind::Build, needs: String::new(), prio: DEFAULT_PRIO, rev: String::new(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: Some(node.to_string()), since_ms: None };
+    super::leg::Held::acquire_with(&spec, &|r| r.class = HUB_BUILD.into(), &mut |line| waits(line), gone)
 }
 
 /// How a box's roll ended. Only a restart that was asked for goes on the record: a service that

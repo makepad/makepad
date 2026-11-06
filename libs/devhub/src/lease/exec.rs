@@ -3821,8 +3821,8 @@ pub fn register(ep: &Endpoint, ctx: &crate::sync::NodeCtx) -> Arc<Exec> {
 /// its measure ([`build_hub`]).
 static HUB_BUILD: Mutex<(Option<u64>, Option<super::HubMeasure>)> = Mutex::new((None, None));
 
-/// Whether the hub builds itself now (its caps say so: the master charges a running build like a
-/// build lease of its class's measured size).
+/// Whether the hub builds itself now (its caps say so: no timed lease starts beside it; its
+/// cores are the self-update's lease of its class, [`super::sched::Req::hub_build`]).
 pub(crate) fn hub_building() -> bool {
     HUB_BUILD.lock().unwrap_or_else(|e| e.into_inner()).0.is_some()
 }

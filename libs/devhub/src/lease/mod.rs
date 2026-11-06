@@ -339,8 +339,8 @@ pub struct Caps {
     pub deploy: String,
     /// a sync apply moves and builds the deployment now: no timed lease starts until it ends
     pub applying: bool,
-    /// the hub builds itself now ([`exec::build_hub`]): the master charges it like a build lease of
-    /// its measured size
+    /// the hub builds itself now ([`exec::build_hub`]): no timed lease starts beside it (its cores
+    /// are the self-update's lease, [`sched::Req::hub_build`])
     pub hub_building: bool,
     /// the commit the node's hub was started from (empty: a hub from before it said so)
     pub hub_rev: String,

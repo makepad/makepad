@@ -669,9 +669,10 @@ impl LeaseMaster {
                 Action::Profile { .. } => {}
                 Action::Event(r) => (self.publish)(r),
                 Action::Grant { id, node } => {
-                    let inspect = self.sched.lock().unwrap().get(&id).is_some_and(|l| !l.req.on_node());
+                    let inspect = self.sched.lock().unwrap().get(&id).is_some_and(|l| !l.req.set_up_on_node());
                     if inspect {
-                        // nothing to set up: an inspect lease is the right to talk to a JIT
+                        // nothing to set up: an inspect lease is the right to talk to a JIT, a
+                        // hub build's the room its box's hub builds itself in
                         self.sched.lock().unwrap().started(&id, "{}");
                         self.save_live();
                     } else {
@@ -896,7 +897,7 @@ impl LeaseMaster {
         let (mut teardown, mut cleanup_ok, mut freed_early) = (0u64, true, false);
         if let (Some(node), Some(l)) = (node, l.as_ref()) {
             // an inspect lease that changed nothing has nothing to undo
-            if l.req.on_node() || marks.as_ref().is_some_and(|m| m.paused || !m.breaks.is_empty() || !m.probes.is_empty()) {
+            if l.req.set_up_on_node() || marks.as_ref().is_some_and(|m| m.paused || !m.breaks.is_empty() || !m.probes.is_empty()) {
                 let wire_how = match how {
                     "released" | "expired" | "holder-dead" | "denied" => how,
                     "lost" => "expired",
@@ -1014,7 +1015,8 @@ impl LeaseMaster {
             l.phases.push("report", report_start, reported);
             l.reported_ms = Some(reported);
             if l.req.class.is_empty() { l.req.class = run_class; }
-            if !cost_recorded { self.ended_cost(&l, how, "", None); }
+            // (a hub build's measure is its hub's, from its restart answer: [`Self::ledger_hub_build`])
+            if !cost_recorded && !l.req.hub_build() { self.ended_cost(&l, how, "", None); }
             let path = self.home.join("leases.jsonl");
             let _ = std::fs::create_dir_all(&self.home);
             let line = format!("{}\n", l.ledger_line());
@@ -1112,7 +1114,7 @@ impl LeaseMaster {
     }
 
     /// A hub build that finished on `node` (its restart answer said it) goes to the master's
-    /// ledger as its class's measure ([`super::sched::HUB_BUILD`]): what a running one is charged.
+    /// ledger as its class's measure ([`super::sched::HUB_BUILD`]): what its next lease asks.
     pub fn ledger_hub_build(&self, node: &str, b: &super::HubMeasure) {
         // (one build, one record: a restart asked again answers the same build)
         if self.hub_seen.lock().unwrap().insert(node.to_string(), b.end_ms) == Some(b.end_ms) { return; }
@@ -2088,6 +2090,33 @@ mod tests {
         let mut r = Req::new("devhub", Kind::Build);
         r.class = super::super::sched::HUB_BUILD.into();
         assert!(m.sched.lock().unwrap().measured_ram(&r).is_some_and(|gb| (gb - 3.6).abs() < 1e-9), "its peak and a fifth");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A box's hub build lease is room there and nothing on the node: its grant sends no
+    /// `lease-start`, the box's beat does not name it, its end sends no `lease-end` and leaves no
+    /// cost row (its class's measure is its hub's restart answer).
+    #[test]
+    fn a_hub_build_lease_is_room_on_its_box_and_nothing_on_the_node() {
+        let dir = std::env::temp_dir().join(format!("devhub-lease-hub-room-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (m, node, _clock, _recs) = master(&dir);
+        m.refresh(&[("node-a".to_string(), "192.0.2.89:8797".to_string())]);
+        let mut r = Req::new(&format!("{}-node-a", super::super::sched::HUB_BUILD), Kind::Build);
+        r.class = super::super::sched::HUB_BUILD.into();
+        r.master = true;
+        r.node = Some("node-a".into());
+        let l = serve(&m, "lease", &r.to_json());
+        assert!(l.contains("\"state\":\"granted\""), "{l}");
+        let id = l.split("\"id\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+        m.beat_node("node-a");
+        assert!(serve(&m, "release", &id).contains(&id));
+        let calls = node.calls.lock().unwrap().clone();
+        assert!(!calls.iter().any(|c| matches!(c.1.as_str(), "lease-start" | "lease-end") || (c.1 == "lease-beat" && c.2.contains(&id))), "{calls:?}");
+        let costs = std::fs::read_to_string(dir.join("costs.jsonl")).unwrap_or_default();
+        assert!(!costs.contains(super::super::sched::HUB_BUILD), "{costs}");
+        assert!(std::fs::read_to_string(dir.join("leases.jsonl")).unwrap().contains(&format!("\"id\":\"{id}\"")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
