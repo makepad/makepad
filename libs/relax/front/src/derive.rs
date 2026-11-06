@@ -164,7 +164,34 @@ impl<'a> Parser<'a> {
             g.punct(T::Gt);
             g.punct(T::Gt);
         } else {
+            // The parser splits a compound token in place (`break_and_eat`): `<-25` lexes as
+            // `<-` `25`, and reading the generic arguments leaves the buffer with a `-` token that
+            // begins one byte after the previous token ends, the `<` being the byte in the gap.
+            // The same holds for `<<`, `<=`, `<<=`, `&&`, `&=`, `||`, `|=` and `+=`. A copied
+            // field type must give that byte back, or `X<-25, 25>` comes out as `X -25, 25>`.
+            if let Some(k) = self.split_before(i) {
+                g.punct(k);
+            }
             g.put(t.kind, &String::from_utf8_lossy(self.tok_text(t)));
+        }
+    }
+
+    /// The first half of a compound token the parser split at `i`, if any: see `copy_tok`.
+    fn split_before(&self, i: usize) -> Option<T> {
+        if i == 0 {
+            return None;
+        }
+        let t = self.toks.at(i);
+        let prev_hi = self.toks.at(i - 1).hi;
+        if t.lo != prev_hi + 1 {
+            return None;
+        }
+        match (self.bytes(t.lo - 1, t.lo), t.kind) {
+            (b"<", T::Minus | T::Lt | T::Eq | T::Le) => Some(T::Lt),
+            (b"&", T::And | T::Eq) => Some(T::And),
+            (b"|", T::Or | T::Eq) => Some(T::Or),
+            (b"+", T::Eq) => Some(T::Plus),
+            _ => None,
         }
     }
 
