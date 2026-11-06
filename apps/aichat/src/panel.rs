@@ -965,9 +965,29 @@ pub struct AiChatPanel {
     /// The engine generation last written to the chat file.
     #[rust]
     chat_written: Option<u64>,
+    /// What [`Self::publish_unsaved`] last told the platform.
+    #[rust]
+    unsaved_published: Option<String>,
 }
 
 impl AiChatPanel {
+    /// A draft or picture not sent yet, or a reply still coming, is unsaved work
+    /// (`restart::set_unsaved`, per panel): a restart that ends this app waits for it, the WM
+    /// session's restart for a deploy among them (one ended two chats with the WM, 11-06).
+    fn publish_unsaved(&mut self, cx: &mut Cx) {
+        let replying = self.engine.as_ref().is_some_and(|e| matches!(e.state().status, Status::Thinking | Status::Streaming | Status::WaitingForTool));
+        let typed = !self.view.text_input(cx, ids!(input)).text().trim().is_empty() || !self.attachments.is_empty();
+        let what = if replying { Some("an AI chat reply still coming") } else if typed { Some("an AI chat message not sent") } else { None };
+        if what != self.unsaved_published.as_deref() {
+            self.unsaved_published = what.map(str::to_string);
+            makepad_widgets::makepad_platform::restart::set_unsaved(&self.unsaved_key(), what);
+        }
+    }
+
+    fn unsaved_key(&self) -> String {
+        format!("aichat-{}", self.widget_uid().0)
+    }
+
     /// The registry a host plugs in-process links into.
     pub fn registry(&self) -> &ServiceRegistry {
         &self.registry
@@ -1681,6 +1701,10 @@ impl Drop for AiChatPanel {
             engine.shutdown();
         }
         self.bus.relay_down(&self.registry);
+        // a closed panel holds no restart
+        if self.unsaved_published.is_some() {
+            makepad_widgets::makepad_platform::restart::set_unsaved(&self.unsaved_key(), None);
+        }
     }
 }
 
@@ -1802,6 +1826,7 @@ impl Widget for AiChatPanel {
         }
         self.view.handle_event(cx, event, scope);
         self.widget_match_event(cx, event, scope);
+        self.publish_unsaved(cx);
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
