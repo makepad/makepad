@@ -348,13 +348,14 @@ impl Device {
             plane444.p_next = std::ptr::null_mut();
             if plane444.ycbcr2plane444_formats != 0 { wanted.push(vk::EXT_YCBCR_2PLANE_444_FORMATS_NAME); }
         }
-        // QP delta maps for the encoder (a QP per region of the picture)
+        // QP delta maps for the encoder (a QP per region of the picture); below Vulkan 1.3 (the
+        // device runs 1.1) the extension requires VK_KHR_format_feature_flags2 enabled with it
         let mut qp_map = vk::PhysicalDeviceVideoEncodeQuantizationMapFeaturesKHR::default();
-        if video_family.is_some() && supported(vk::KHR_VIDEO_ENCODE_QUANTIZATION_MAP_NAME) {
+        if video_family.is_some() && supported(vk::KHR_VIDEO_ENCODE_QUANTIZATION_MAP_NAME) && supported(vk::KHR_FORMAT_FEATURE_FLAGS_2_NAME) {
             let mut query = vk::PhysicalDeviceFeatures2::default().next_physical_device_video_encode_quantization_map_features_khr(&mut qp_map);
             unsafe { instance.get_physical_device_features2(physical, &mut query); }
             qp_map.p_next = std::ptr::null_mut();
-            if qp_map.video_encode_quantization_map != 0 { wanted.push(vk::KHR_VIDEO_ENCODE_QUANTIZATION_MAP_NAME); }
+            if qp_map.video_encode_quantization_map != 0 { wanted.extend([vk::KHR_VIDEO_ENCODE_QUANTIZATION_MAP_NAME, vk::KHR_FORMAT_FEATURE_FLAGS_2_NAME]); }
         }
         let has_qp_map = qp_map.video_encode_quantization_map != 0;
         // fragment density maps (an XR runtime's foveation of its swapchains)

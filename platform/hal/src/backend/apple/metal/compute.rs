@@ -43,6 +43,8 @@ impl Metal {
         let source = match std::str::from_utf8(blob.code) { Ok(s) => s.to_owned(), Err(e) => return PipeStatus::Failed(e.to_string()) };
         let precise = layout.desc.precise_math != 0;
         let invocations = layout.desc.workgroup.iter().map(|n| *n as u64).product::<u64>();
+        // the kernel's name on its pipeline: what Metal's validation and GPU tools report
+        let label = s.string(blob.desc.name).unwrap_or("compute").to_string();
         let state = Arc::new(State(OnceLock::new()));
         self.compute.insert((s.id, id.index), Pipe { gen: id.gen, layout, state: state.clone(), announced: false });
         let device = RcObjcId::from_unowned(NonNull::new(self.dev.device).unwrap());
@@ -74,7 +76,7 @@ impl Metal {
                 let answer = answer.clone();
                 // the function, held until its pipeline is made
                 let kept = function.clone();
-                let made = objc_block!(move |pipe: ObjcId, error: ObjcId| {
+                let made = objc_block!(move |pipe: ObjcId, _reflection: ObjcId, error: ObjcId| {
                     let _ = &kept;
                     let result = match NonNull::new(pipe) {
                         None => Err(super::pipeline::describe_error(error, "no compute pipeline")),
@@ -86,7 +88,13 @@ impl Metal {
                     };
                     answer(result);
                 });
-                unsafe { let _: () = msg_send![callback_device.as_id(), newComputePipelineStateWithFunction: function.as_id() completionHandler: &made]; }
+                unsafe {
+                    let descriptor = RcObjcId::from_owned(NonNull::new(msg_send![class!(MTLComputePipelineDescriptor), new]).expect("compute pipeline descriptor"));
+                    let _: () = msg_send![descriptor.as_id(), setComputeFunction: function.as_id()];
+                    let _: () = msg_send![descriptor.as_id(), setLabel: str_to_nsstring(&label)];
+                    // MTLPipelineOptionNone
+                    let _: () = msg_send![callback_device.as_id(), newComputePipelineStateWithDescriptor: descriptor.as_id() options: 0u64 completionHandler: &made];
+                }
             });
             unsafe { let _: () = msg_send![device.as_id(), newLibraryWithSource: str_to_nsstring(&source) options: options.as_id() completionHandler: &completion]; }
         }));

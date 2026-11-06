@@ -1024,7 +1024,12 @@ impl Metal {
                     Ok(index) => {
                         indices.extend(index);
                         s.stats.passes += 1;
-                        if let Some(b) = self.batch.as_mut() { b.passes.push((s.string(pass.name).unwrap_or("compute").to_string(), Vec::new())); }
+                        // the pass's kernels in order (a run of one kernel once), for the hang
+                        // watchdog's diagnostic
+                        let mut kernels: Vec<String> = crate::compute::records::<Dispatch>(view.arena, pass.dispatches).unwrap_or_default().iter()
+                            .map(|d| s.pipelines.get(s.id, d.pipeline).ok().and_then(|p| s.string(p.val.desc.name)).unwrap_or("?").to_string()).collect();
+                        kernels.dedup();
+                        if let Some(b) = self.batch.as_mut() { b.passes.push((s.string(pass.name).unwrap_or("compute").to_string(), kernels)); }
                     }
                     Err(e) => { eprintln!("[hal-metal] {e}"); s.bad(); }
                 }
