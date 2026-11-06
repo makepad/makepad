@@ -283,7 +283,7 @@ fn badge_moved(world: &mut World, id: Id, geom: Option<[f32; 4]>) {
     }
 }
 
-/// A frame's compute passes used the buffers and storage textures they bind: the ledger's last use
+/// A frame's compute passes used the buffers and the storage and sampled textures they bind: the ledger's last use
 /// (the backends mark what draws bind), so a resource only kernels read or write is not reported
 /// as never used.
 fn touch_compute(s: &mut Session, packet: u32, view: &CmdView, frame: u64, now: u64) {
@@ -300,7 +300,8 @@ fn touch_compute(s: &mut Session, packet: u32, view: &CmdView, frame: u64, now: 
             for id in buffers.into_iter().chain(Some(d.indirect_buffer).filter(|i| !i.is_none())) {
                 s.ledger.touch(Kind::Buffer, id.index, id.gen, frame, now);
             }
-            for id in crate::compute::ids(view.arena, d.textures).unwrap_or_default() {
+            let sampled = crate::compute::ids(view.arena, d.sampled).unwrap_or_default();
+            for id in crate::compute::ids(view.arena, d.textures).unwrap_or_default().into_iter().chain(sampled) {
                 s.ledger.touch(Kind::Texture, id.index, id.gen, frame, now);
             }
         }

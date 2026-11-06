@@ -989,7 +989,7 @@ impl Cx {
 
     /// The HAL texture a draw samples: a vec texture is brought up to date; a render target is
     /// there once its pass created it; what the HAL cannot hold samples as the fallback (`NONE`).
-    fn fb_sampled(&mut self, fb: &mut FrameBuilder, id: TextureId) -> Id {
+    pub(crate) fn fb_sampled(&mut self, fb: &mut FrameBuilder, id: TextureId) -> Id {
         // a surface lent by a child domain: the HAL's id as it is (it skips the draw once the child's window is gone)
         if let Some((gen, surface)) = fb.lent.get(&id.0) {
             if *gen == id.generation() {

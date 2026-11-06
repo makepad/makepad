@@ -3,7 +3,7 @@ use crate::{backend::exec::PipeStatus, buffers::{CmdView, PipelineBlob}, compute
 use makepad_windows_sys::Win32::Graphics::Direct3D11::*;
 use std::sync::{Arc, OnceLock};
 
-pub(super) struct Program { layout: KernelLayout, shader: ID3D11ComputeShader }
+pub(super) struct Program { layout: KernelLayout, shader: ID3D11ComputeShader, samplers: Vec<Option<ID3D11SamplerState>> }
 pub(super) struct Pipe { pub gen: u32, state: Arc<OnceLock<Result<Program, String>>>, pub announced: bool }
 impl Pipe {
     /// What its compile job is queued under (`CompilePool::hurry`).
@@ -27,6 +27,9 @@ impl D3d11 {
         if layout.buffers.iter().any(|b| b.index >= if b.writable != 0 { 8 } else { 128 }) || layout.textures.iter().any(|t| t.index >= 8) {
             return PipeStatus::Failed("D3D11.0 compute permits eight UAV slots".into());
         }
+        if layout.sampled.iter().any(|t| t.index >= 128) || layout.samplers.len() > 16 {
+            return PipeStatus::Failed("D3D11 compute permits 128 shader-resource and 16 sampler slots".into());
+        }
         if let Err(e) = layout.validate_device(&self.info) { return PipeStatus::Failed(e); }
         let source = match std::str::from_utf8(blob.code) { Ok(s) => s.to_owned(), Err(e) => return PipeStatus::Failed(e.to_string()) };
         let state = Arc::new(OnceLock::new());
@@ -35,7 +38,11 @@ impl D3d11 {
         let dev = self.dev.clone(); let wake = self.mailbox.wake.clone();
         self.compilers.push(Arc::as_ptr(&state) as usize, move || {
             let t0 = std::time::Instant::now();
-            let result = super::pipeline::build_compute(&dev, &source, layout.desc.precise_math != 0, &name).map(|shader| Program { layout, shader });
+            let result = super::pipeline::build_compute(&dev, &source, layout.desc.precise_math != 0, &name).and_then(|shader| {
+                let samplers = layout.samplers.iter().map(|s| super::pipeline::sampler_state(&dev,
+                    &crate::spirv::SpirvSampler { filter: s.filter, address: s.address, compare: false, pixel: false })).collect::<Result<Vec<_>, _>>()?;
+                Ok(Program { layout, shader, samplers })
+            });
             // as a draw pipeline's: a slow FXC compile is named with its time
             if super::win32::log_enabled() || t0.elapsed() > std::time::Duration::from_secs(2) {
                 eprintln!("[hal-d3d11] compiled `{name}` in {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
@@ -58,6 +65,7 @@ impl D3d11 {
         let empty: [Option<ID3D11UnorderedAccessView>; 8] = Default::default();
         self.dev.ctx.CSSetUnorderedAccessViews(0, 8, Some(empty.as_ptr()), None);
         self.dev.ctx.CSSetShaderResources(0, Some(&[const { None }; 128]));
+        self.dev.ctx.CSSetSamplers(0, Some(&[const { None }; 16]));
     } }
     pub(super) fn encode_compute(&mut self, s: &mut Session, pass: &Pass, view: &CmdView, mut timer: Option<&mut super::complete::Timer>) -> Result<(), String> {
         let dispatches = compute::records::<Dispatch>(view.arena, pass.dispatches).ok_or("invalid dispatch records")?;
@@ -71,6 +79,8 @@ impl D3d11 {
         let result = (|| {
             for d in dispatches {
                 self.unbind_compute();
+                let sampled = compute::ids(view.arena, d.sampled).ok_or("invalid sampled textures")?.into_iter()
+                    .map(|id| self.resolve(s, id).ok_or("missing sampled texture")).collect::<Result<Vec<_>, _>>()?;
                 let pipe = self.compute.get(&(s.id, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen).ok_or("stale compute pipeline")?;
                 let p = pipe.state.get().ok_or("compute pipeline pending")?.as_ref().map_err(|e| e.clone())?;
                 p.layout.validate_dispatch(s, &d, view.arena)?;
@@ -88,6 +98,15 @@ impl D3d11 {
                     let texture = &self.tex.get(&(s.id, id.index)).filter(|t| t.gen == id.gen).ok_or("stale storage texture")?.tex;
                     if texture.desc.format != binding.format { return Err("storage image format mismatch".into()); }
                     uavs[binding.index as usize] = Some(texture.uav.clone().ok_or("image lacks UAV")?);
+                }
+                // sampled textures: render targets, uploaded images, storage images written by
+                // an earlier dispatch (the UAV unbinding after each dispatch lets them be read)
+                for (texture, binding) in sampled.iter().zip(&p.layout.sampled) {
+                    let srv = texture.view(super::resources::shape::TEX2D)?;
+                    unsafe { self.dev.ctx.CSSetShaderResources(binding.index, Some(&[Some(srv)])); }
+                }
+                if !p.samplers.is_empty() {
+                    unsafe { self.dev.ctx.CSSetSamplers(0, Some(&p.samplers)); }
                 }
                 let indirect = if d.indirect_buffer.is_none() { None } else {
                     let buffer = self.buf.get(&(s.id, d.indirect_buffer.index)).filter(|b| b.gen == d.indirect_buffer.gen).ok_or("stale indirect buffer")?.buf.clone();

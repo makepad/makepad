@@ -43,6 +43,8 @@ struct Record {
     drawn: Area,
     label_for: NodeId,
     generated_labels: Vec<NodeId>,
+    /// The node's name is its tip's text (a nameless control in a tooltip).
+    named_by_tip: bool,
     parts: HashMap<u64, NodeId>,
     drawn_parts: Vec<NodeId>,
     /// Where the node's area stood when its text geometry (absolute line boxes and glyph
@@ -59,6 +61,8 @@ struct WindowTree {
     full: bool,
     ids: Vec<NodeId>,
     walk: Vec<(NodeId, NodeId, usize)>,
+    /// (control, tip) pairs the frame's tips may name (scratch, reused).
+    tipped: Vec<(NodeId, NodeId)>,
     update: TreeUpdate,
     bytes: Vec<u8>,
 }
@@ -248,7 +252,14 @@ impl CxA11y {
         f.window
             .and_then(|w| self.windows.get_mut(&w))
             .and_then(|w| w.records.get_mut(&f.id))
-            .map(|r| std::mem::take(&mut r.next))
+            .map(|r| {
+                let mut node = std::mem::take(&mut r.next);
+                // The widget names its node itself; a tip's name is given again after the frame.
+                if r.named_by_tip {
+                    node.name.clear();
+                }
+                node
+            })
             .unwrap_or_default()
     }
     pub fn end_node(&mut self, token: u32, mut node: Node, area: Area) {
@@ -414,7 +425,12 @@ impl CxA11y {
                 rec.alive = rec.seen == self.frame || redraw.is_some_and(|r| r == rec.redraw);
                 if rec.seen != self.frame && rec.annotated != self.frame {
                     reuse_node(&mut rec.next, &rec.node);
+                    // A name a tip gave is given again below, from the tip as it is now.
+                    if rec.named_by_tip {
+                        rec.next.name.clear();
+                    }
                 }
+                rec.named_by_tip = false;
                 if rec.alive {
                     if !rec.owner.is_none() {
                         // Parts carry their own bounds, but focus belongs to the owner's real
@@ -504,6 +520,24 @@ impl CxA11y {
                 if let Some(field) = tree.records.get_mut(&target).filter(|r| r.reachable) {
                     if !field.next.relations.labelled_by.contains(id) { field.next.relations.labelled_by.push(*id); field.generated_labels.push(*id); }
                 }
+            }
+            // A control with no name of its own inside a tip is named by the tip's text (a
+            // tooltip is a name's last resort, as an HTML `title` is): what a pointer reads on
+            // hover is what a screen reader hears, from one source.
+            tree.tipped.clear();
+            for id in &tree.ids {
+                let Some(tip) = tree.records.get(id).filter(|r| r.reachable && r.next.role == Role::Tooltip && !r.next.description.is_empty()) else { continue };
+                tree.tipped.extend(tip.next.children.iter().map(|child| (*child, *id)));
+            }
+            for &(child, tip) in &tree.tipped {
+                if !tree.records.get(&child).is_some_and(|r| r.next.name.is_empty() && r.next.role.is_interactive()) {
+                    continue;
+                }
+                let text = std::mem::take(&mut tree.records.get_mut(&tip).unwrap().next.description);
+                let rec = tree.records.get_mut(&child).unwrap();
+                set_string(&mut rec.next.name, &text);
+                rec.named_by_tip = true;
+                tree.records.get_mut(&tip).unwrap().next.description = text;
             }
             let next_focus = if tree.records.get(&self.requested_focus).is_some_and(|r| r.reachable && r.area == focus && emits(&r.next)) {
                 self.requested_focus
@@ -1129,6 +1163,40 @@ mod tests {
         }
     }
 
+    /// An icon button wrapped in a tip has no name of its own: the tip's text names it, and a
+    /// control with a name keeps it. A frame that redraws nothing keeps the tip's name; a new
+    /// tip text renames the control.
+    #[test]
+    fn a_nameless_control_in_a_tip_is_named_by_the_tip() {
+        let mut pool = CxDrawListPool::default();
+        let main = pool.alloc();
+        let content = pool.alloc();
+        let mut builder = active();
+        let mut tree = Tree::new();
+        let frame = |builder: &mut CxA11y, tree: &mut Tree, frame: u64, tip: Option<&str>, content_redraw: u64| {
+            builder.begin_frame();
+            let root = root(builder, WindowId(0, 1), 1, main.id());
+            if let Some(text) = tip {
+                for (tip, control, name) in [(2, 3, ""), (4, 5, "Open")] {
+                    let t = builder.begin_node(tip, Some(content.id()));
+                    let c = builder.begin_node(control, Some(content.id()));
+                    builder.end_node(c, node(Role::Button, name), Area::Empty);
+                    builder.end_node(t, Node { role: Role::Tooltip, description: text.into(), ..Default::default() }, Area::Empty);
+                }
+            }
+            end_root(builder, root);
+            for update in finish(builder, Area::Empty, |list| Some(if list == main.id() { frame } else { content_redraw })) {
+                tree.apply(update);
+            }
+            let name = |uid| tree.node(NodeId::widget(uid)).expect("drawn").name.clone();
+            (name(3), name(5))
+        };
+        let named = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(frame(&mut builder, &mut tree, 1, Some("Fit the whole map"), 1), named("Fit the whole map", "Open"));
+        assert_eq!(frame(&mut builder, &mut tree, 2, None, 1), named("Fit the whole map", "Open"), "cached: the tip's name stays");
+        assert_eq!(frame(&mut builder, &mut tree, 3, Some("Home"), 2), named("Home", "Open"), "a new tip text renames it");
+    }
+
     #[test]
     fn hiding_a_cached_popup_prunes_its_cached_children() {
         let mut pool = CxDrawListPool::default();
@@ -1655,6 +1723,16 @@ mod allocation_tests {
             node.role = Role::Button;
             set_string(&mut node.name, "Save");
             builder.end_node(child, node, Area::Empty);
+            // an icon button its tip names
+            let tip = builder.begin_node(3, Some(list.id()));
+            let icon = builder.begin_node(4, Some(list.id()));
+            let mut node = builder.take_node(icon);
+            node.role = Role::Button;
+            builder.end_node(icon, node, Area::Empty);
+            let mut node = builder.take_node(tip);
+            node.role = Role::Tooltip;
+            set_string(&mut node.description, "Fit the whole map");
+            builder.end_node(tip, node, Area::Empty);
             let mut node = builder.take_node(token);
             node.role = Role::Window;
             set_string(&mut node.name, "Test");

@@ -262,20 +262,25 @@ impl Program {
                 out.xr_fragment = out.dev.raw.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&out.code.xr_fragment), None).map_err(error)?;
             }
             for s in &out.code.samplers {
-                let filter = if s.filter == 0 { vk::Filter::NEAREST } else { vk::Filter::LINEAR };
-                let address = match s.address { 0 => vk::SamplerAddressMode::REPEAT, 1 => vk::SamplerAddressMode::CLAMP_TO_EDGE,
-                    2 => vk::SamplerAddressMode::CLAMP_TO_BORDER, _ => vk::SamplerAddressMode::MIRRORED_REPEAT };
-                if s.pixel && (s.compare || !matches!(s.address, 1 | 2)) { return Err("invalid unnormalized sampler".into()); }
-                out.samplers.push(out.dev.raw.create_sampler(&vk::SamplerCreateInfo::default().mag_filter(filter).min_filter(filter)
-                    .mipmap_mode(if s.pixel { vk::SamplerMipmapMode::NEAREST } else { vk::SamplerMipmapMode::LINEAR })
-                    .address_mode_u(address).address_mode_v(address).address_mode_w(address)
-                    .border_color(vk::BorderColor::FLOAT_TRANSPARENT_BLACK).unnormalized_coordinates(s.pixel)
-                    .compare_enable(s.compare).compare_op(vk::CompareOp::LESS_OR_EQUAL).min_lod(0.0)
-                    .max_lod(if s.pixel { 0.0 } else { vk::LOD_CLAMP_NONE }), None).map_err(error)?);
+                out.samplers.push(sampler(&out.dev, s)?);
             }
         }
         Ok(Arc::new(out))
     }
+}
+
+/// The sampler a draw's or a kernel's sampler `s` describes.
+pub(super) fn sampler(dev: &Device, s: &crate::spirv::SpirvSampler) -> Result<vk::Sampler, String> {
+    let filter = if s.filter == 0 { vk::Filter::NEAREST } else { vk::Filter::LINEAR };
+    let address = match s.address { 0 => vk::SamplerAddressMode::REPEAT, 1 => vk::SamplerAddressMode::CLAMP_TO_EDGE,
+        2 => vk::SamplerAddressMode::CLAMP_TO_BORDER, _ => vk::SamplerAddressMode::MIRRORED_REPEAT };
+    if s.pixel && (s.compare || !matches!(s.address, 1 | 2)) { return Err("invalid unnormalized sampler".into()); }
+    unsafe { dev.raw.create_sampler(&vk::SamplerCreateInfo::default().mag_filter(filter).min_filter(filter)
+        .mipmap_mode(if s.pixel { vk::SamplerMipmapMode::NEAREST } else { vk::SamplerMipmapMode::LINEAR })
+        .address_mode_u(address).address_mode_v(address).address_mode_w(address)
+        .border_color(vk::BorderColor::FLOAT_TRANSPARENT_BLACK).unnormalized_coordinates(s.pixel)
+        .compare_enable(s.compare).compare_op(vk::CompareOp::LESS_OR_EQUAL).min_lod(0.0)
+        .max_lod(if s.pixel { 0.0 } else { vk::LOD_CLAMP_NONE }), None) }.map_err(error)
 }
 
 impl Drop for Program {

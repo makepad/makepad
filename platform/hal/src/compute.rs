@@ -16,30 +16,44 @@ impl Wire for StorageImageBinding {
     fn write(&self, out: &mut Vec<u8>) { words(out, &[self.index, self.format]); }
     fn read(b: &[u8]) -> Self { Self { index: word(b, 0), format: word(b, 4) } }
 }
+impl Wire for SampledImageBinding {
+    const SIZE: usize = 4;
+    fn write(&self, out: &mut Vec<u8>) { words(out, &[self.index]); }
+    fn read(b: &[u8]) -> Self { Self { index: word(b, 0) } }
+}
+impl Wire for ComputeSamplerDesc {
+    const SIZE: usize = 8;
+    fn write(&self, out: &mut Vec<u8>) { words(out, &[self.filter, self.address]); }
+    fn read(b: &[u8]) -> Self { Self { filter: word(b, 0), address: word(b, 4) } }
+}
 impl Wire for ComputeDesc {
-    const SIZE: usize = 48;
+    const SIZE: usize = 64;
     fn write(&self, out: &mut Vec<u8>) {
         words(out, &[self.buffers.off, self.buffers.len, self.textures.off, self.textures.len,
             self.push_size, self.param_binding, self.param_binding_size, self.group_count_offset,
-            self.workgroup[0], self.workgroup[1], self.workgroup[2], self.precise_math]);
+            self.workgroup[0], self.workgroup[1], self.workgroup[2], self.precise_math,
+            self.sampled.off, self.sampled.len, self.samplers.off, self.samplers.len]);
     }
     fn read(b: &[u8]) -> Self {
         Self { buffers: range(b, 0), textures: range(b, 8), push_size: word(b, 16), param_binding: word(b, 20),
             param_binding_size: word(b, 24), group_count_offset: word(b, 28),
-            workgroup: [word(b, 32), word(b, 36), word(b, 40)], precise_math: word(b, 44) }
+            workgroup: [word(b, 32), word(b, 36), word(b, 40)], precise_math: word(b, 44),
+            sampled: range(b, 48), samplers: range(b, 56) }
     }
 }
 impl Wire for Dispatch {
-    const SIZE: usize = 64;
+    const SIZE: usize = 72;
     fn write(&self, out: &mut Vec<u8>) {
         words(out, &[self.pipeline.index, self.pipeline.gen, self.groups[0], self.groups[1], self.groups[2],
             self.indirect_buffer.index, self.indirect_buffer.gen]);
         out.extend_from_slice(&self.indirect_offset.to_le_bytes());
-        words(out, &[self.params.off, self.params.len, self.buffers.off, self.buffers.len, self.textures.off, self.textures.len, self.timer]);
+        words(out, &[self.params.off, self.params.len, self.buffers.off, self.buffers.len, self.textures.off, self.textures.len, self.timer,
+            self.sampled.off, self.sampled.len]);
     }
     fn read(b: &[u8]) -> Self {
         Self { pipeline: id(b, 0), groups: [word(b, 8), word(b, 12), word(b, 16)], indirect_buffer: id(b, 20),
-            indirect_offset: u64::from_le_bytes(b[28..36].try_into().unwrap()), params: range(b, 36), buffers: range(b, 44), textures: range(b, 52), timer: word(b, 60) }
+            indirect_offset: u64::from_le_bytes(b[28..36].try_into().unwrap()), params: range(b, 36), buffers: range(b, 44), textures: range(b, 52),
+            timer: word(b, 60), sampled: range(b, 64) }
     }
 }
 
@@ -63,21 +77,28 @@ pub struct KernelLayout {
     pub desc: ComputeDesc,
     pub buffers: Vec<StorageBinding>,
     pub textures: Vec<StorageImageBinding>,
+    pub sampled: Vec<SampledImageBinding>,
+    pub samplers: Vec<ComputeSamplerDesc>,
 }
 impl KernelLayout {
     pub fn parse(blob: &PipelineBlob<'_>) -> Result<Self, String> {
         let b = bytes(blob.raw, blob.desc.compute).filter(|b| b.len() == ComputeDesc::SIZE).ok_or("invalid compute descriptor")?;
         let desc = ComputeDesc::read(b);
-        if desc.push_size > 128 || desc.param_binding_size < desc.push_size || desc.param_binding_size > 128
+        // push constants (no parameter binding) hold 128 bytes, a parameter block 4096
+        let most = if desc.param_binding == u32::MAX { 128 } else { 4096 };
+        if desc.push_size > most || desc.param_binding_size < desc.push_size || desc.param_binding_size > most
             || desc.workgroup.contains(&0) || (desc.group_count_offset != u32::MAX && desc.group_count_offset.checked_add(12).is_none_or(|end| end > desc.push_size)) {
             return Err("invalid compute parameter/workgroup layout".into());
         }
         let buffers: Vec<StorageBinding> = records(blob.raw, desc.buffers).ok_or("invalid compute buffers")?;
         let textures: Vec<StorageImageBinding> = records(blob.raw, desc.textures).ok_or("invalid storage textures")?;
+        let sampled: Vec<SampledImageBinding> = records(blob.raw, desc.sampled).ok_or("invalid sampled textures")?;
+        let samplers: Vec<ComputeSamplerDesc> = records(blob.raw, desc.samplers).ok_or("invalid compute samplers")?;
+        if samplers.iter().any(|s| s.filter > 1 || s.address > 3) { return Err("invalid compute sampler".into()); }
         if buffers.iter().any(|b| b.writable > 1 || b.offset % 8 != 0 || b.offset.checked_add(8).is_none_or(|end| end > desc.push_size)) {
             return Err("invalid compute buffer binding".into());
         }
-        Ok(Self { desc, buffers, textures })
+        Ok(Self { desc, buffers, textures, sampled, samplers })
     }
 }
 
@@ -99,7 +120,18 @@ impl KernelLayout {
         if bytes(arena, d.params).is_none_or(|b| b.len() != self.desc.push_size as usize) { return Err("invalid compute parameters".into()); }
         let buffers = ids(arena, d.buffers).ok_or("invalid buffer list")?;
         let textures = ids(arena, d.textures).ok_or("invalid texture list")?;
-        if buffers.len() != self.buffers.len() || textures.len() != self.textures.len() { return Err("compute binding count mismatch".into()); }
+        let sampled = ids(arena, d.sampled).ok_or("invalid sampled texture list")?;
+        if buffers.len() != self.buffers.len() || textures.len() != self.textures.len() || sampled.len() != self.sampled.len() { return Err("compute binding count mismatch".into()); }
+        for id in &sampled {
+            // a texture is never read and written by one dispatch (D3D11 would null the view)
+            if textures.contains(id) { return Err("a dispatch samples a texture it writes".into()); }
+            // the session's own single-layer 2D textures of a float format, made to be sampled
+            // (a child's lent window would need the child's frame ordered before the kernel)
+            if !s.textures.get(s.id, *id).is_ok_and(|t| t.val.depth <= 1 && t.val.usage & usage::SAMPLED != 0 && t.val.usage & usage::ARRAY == 0
+                && t.val.lent.is_none() && t.val.format < format::COUNT && t.val.format != format::R32UINT) {
+                return Err("invalid sampled texture: a kernel samples its session's own single-layer float textures".into());
+            }
+        }
         for id in buffers {
             if !s.buffers.get(s.id, id).is_ok_and(|b| b.val.kind & buffer_kind::KIND_MASK == buffer_kind::STORAGE) { return Err("invalid storage buffer".into()); }
         }
@@ -129,12 +161,19 @@ fn append<T: Wire>(out: &mut Vec<u8>, records: &[T]) -> Range {
     Range { off, len: out.len() as u32 - off }
 }
 impl CmdWriter {
-    pub fn compute_pipeline_blob(mut pipeline: PipelineDesc, code: &[u8], mut desc: ComputeDesc,
+    pub fn compute_pipeline_blob(pipeline: PipelineDesc, code: &[u8], desc: ComputeDesc,
         buffers: &[StorageBinding], textures: &[StorageImageBinding]) -> Vec<u8> {
+        Self::compute_pipeline_blob_sampled(pipeline, code, desc, buffers, textures, &[], &[])
+    }
+    /// A kernel that also samples textures (`sampled`, through `samplers`).
+    pub fn compute_pipeline_blob_sampled(mut pipeline: PipelineDesc, code: &[u8], mut desc: ComputeDesc,
+        buffers: &[StorageBinding], textures: &[StorageImageBinding], sampled: &[SampledImageBinding], samplers: &[ComputeSamplerDesc]) -> Vec<u8> {
         let mut out = Self::pipeline_blob(pipeline, code, &[], &[]);
         pipeline = PipelineDesc::read(&out);
         desc.buffers = append(&mut out, buffers);
         desc.textures = append(&mut out, textures);
+        desc.sampled = append(&mut out, sampled);
+        desc.samplers = append(&mut out, samplers);
         pipeline.compute = append(&mut out, &[desc]);
         let mut header = Vec::new(); pipeline.write(&mut header);
         out[..header.len()].copy_from_slice(&header);

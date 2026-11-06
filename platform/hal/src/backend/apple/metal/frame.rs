@@ -219,7 +219,7 @@ fn load_action(load: u8) -> MTLLoadAction {
 
 /// The storage of a texture a pass uses. A transient target whose storage was given back is made
 /// again (the app was told and produces its content).
-fn texture_obj(tex: &mut FastMap<(u32, u32), Tex>, device: ObjcId, s: &mut Session, id: Id, seq: u64) -> Option<ObjcId> {
+pub(super) fn texture_obj(tex: &mut FastMap<(u32, u32), Tex>, device: ObjcId, s: &mut Session, id: Id, seq: u64) -> Option<ObjcId> {
     let sid = s.id;
     if let Some(t) = tex.get_mut(&(sid, id.index)).filter(|t| t.gen == id.gen) {
         t.last_bound = seq;

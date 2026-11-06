@@ -9,9 +9,14 @@ pub(super) struct Program {
     pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
     descriptors: vk::DescriptorSetLayout,
+    /// Set 0, by binding: the storage images, the sampled textures, the samplers, the parameter block.
+    bindings: Vec<(u32, vk::DescriptorType)>,
+    /// The kernel's samplers, bound after its sampled textures in their order.
+    samplers: Vec<vk::Sampler>,
 }
 impl Drop for Program {
     fn drop(&mut self) { unsafe {
+        for s in self.samplers.drain(..) { self.dev.raw.destroy_sampler(s, None); }
         self.dev.raw.destroy_pipeline(self.pipeline, None);
         self.dev.raw.destroy_pipeline_layout(self.pipeline_layout, None);
         self.dev.raw.destroy_descriptor_set_layout(self.descriptors, None);
@@ -19,13 +24,33 @@ impl Drop for Program {
 }
 impl Program {
     fn new(dev: Arc<Device>, layout: KernelLayout, code: &[u32]) -> Result<Arc<Self>, String> {
-        let bindings: Vec<_> = layout.textures.iter().map(|t| vk::DescriptorSetLayoutBinding::default().binding(t.index)
-            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE)).collect();
-        let mut p = Self { dev, layout, pipeline: vk::Pipeline::null(), pipeline_layout: vk::PipelineLayout::null(), descriptors: vk::DescriptorSetLayout::null() };
+        let mut bindings: Vec<_> = layout.textures.iter().map(|t| (t.index, vk::DescriptorType::STORAGE_IMAGE)).collect();
+        bindings.extend(layout.sampled.iter().map(|t| (t.index, vk::DescriptorType::SAMPLED_IMAGE)));
+        let sampler_base = (layout.textures.len() + layout.sampled.len()) as u32;
+        bindings.extend((0..layout.samplers.len() as u32).map(|i| (sampler_base + i, vk::DescriptorType::SAMPLER)));
+        let block = layout.desc.param_binding != u32::MAX && layout.desc.push_size != 0;
+        if block { bindings.push((layout.desc.param_binding, vk::DescriptorType::STORAGE_BUFFER)); }
+        bindings.sort_by_key(|b| b.0);
+        if bindings.windows(2).any(|b| b[0].0 == b[1].0) { return Err("overlapping Vulkan kernel descriptor bindings".into()); }
+        let limits = &dev.properties.limits;
+        let count = |ty: vk::DescriptorType| bindings.iter().filter(|b| b.1 == ty).count() as u32;
+        for (ty, max, what) in [(vk::DescriptorType::STORAGE_IMAGE, limits.max_per_stage_descriptor_storage_images, "storage images"),
+            (vk::DescriptorType::SAMPLED_IMAGE, limits.max_per_stage_descriptor_sampled_images, "sampled images"),
+            (vk::DescriptorType::SAMPLER, limits.max_per_stage_descriptor_samplers, "samplers")] {
+            if count(ty) > max { return Err(format!("the kernel binds {} {what}, the device allows {max}", count(ty))); }
+        }
+        if bindings.len() as u32 > limits.max_per_stage_resources { return Err(format!("the kernel binds {} resources, the device allows {}", bindings.len(), limits.max_per_stage_resources)); }
+        let set: Vec<_> = bindings.iter().map(|(binding, ty)| vk::DescriptorSetLayoutBinding::default().binding(*binding)
+            .descriptor_type(*ty).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE)).collect();
+        let mut p = Self { dev, layout, pipeline: vk::Pipeline::null(), pipeline_layout: vk::PipelineLayout::null(), descriptors: vk::DescriptorSetLayout::null(), bindings, samplers: Vec::new() };
+        for s in &p.layout.samplers {
+            p.samplers.push(super::pipeline::sampler(&p.dev, &crate::spirv::SpirvSampler { filter: s.filter, address: s.address, compare: false, pixel: false })?);
+        }
         unsafe {
-            p.descriptors = p.dev.raw.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None).map_err(error)?;
+            p.descriptors = p.dev.raw.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&set), None).map_err(error)?;
             let sets = [p.descriptors];
-            let ranges: Vec<_> = (p.layout.desc.push_size != 0).then(|| vk::PushConstantRange::default().stage_flags(vk::ShaderStageFlags::COMPUTE).size(p.layout.desc.push_size)).into_iter().collect();
+            // params in push constants (at most the 128 bytes every device has), else in the block
+            let ranges: Vec<_> = (p.layout.desc.push_size != 0 && !block).then(|| vk::PushConstantRange::default().stage_flags(vk::ShaderStageFlags::COMPUTE).size(p.layout.desc.push_size)).into_iter().collect();
             p.pipeline_layout = p.dev.raw.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&sets).push_constant_ranges(&ranges), None).map_err(error)?;
             let module = p.dev.raw.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(code), None).map_err(error)?;
             let stage = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(module).name(c"kernel_main");
@@ -98,7 +123,9 @@ impl Vulkan {
             let params = compute::bytes(view.arena, d.params).ok_or("invalid params")?;
             let ids = compute::ids(view.arena, d.buffers).ok_or("invalid buffers")?;
             let textures = compute::ids(view.arena, d.textures).ok_or("invalid images")?;
-            if params.len() != p.layout.desc.push_size as usize || ids.len() != p.layout.buffers.len() || textures.len() != p.layout.textures.len() { return Err("compute resource count mismatch".into()); }
+            let sampled = compute::ids(view.arena, d.sampled).ok_or("invalid sampled textures")?;
+            if params.len() != p.layout.desc.push_size as usize || ids.len() != p.layout.buffers.len() || textures.len() != p.layout.textures.len()
+                || sampled.len() != p.layout.sampled.len() { return Err("compute resource count mismatch".into()); }
             let mut params = params.to_vec();
             for (id, binding) in ids.iter().zip(&p.layout.buffers) {
                 let buffer = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).ok_or("stale compute buffer")?.buffer.clone();
@@ -109,22 +136,46 @@ impl Vulkan {
                 batch.buffers.push(buffer);
             }
             unsafe { self.dev.raw.cmd_bind_pipeline(batch.cb, vk::PipelineBindPoint::COMPUTE, p.pipeline); }
-            if !textures.is_empty() {
+            let block = p.layout.desc.param_binding != u32::MAX && !params.is_empty();
+            if !p.bindings.is_empty() {
                 let mut images = Vec::new();
                 for (id, binding) in textures.iter().zip(&p.layout.textures) {
                     let image = self.resolve(s, *id).ok_or("stale storage image")?;
                     if image.desc.format != binding.format || image.desc.usage & crate::usage::STORAGE == 0 { return Err("storage image format/usage mismatch".into()); }
                     image.transition(batch.cb, vk::ImageLayout::GENERAL);
-                    images.push(vk::DescriptorImageInfo::default().image_view(image.view).image_layout(vk::ImageLayout::GENERAL));
+                    images.push((binding.index, vk::DescriptorType::STORAGE_IMAGE, vk::DescriptorImageInfo::default().image_view(image.view).image_layout(vk::ImageLayout::GENERAL)));
                     batch.images.push(image);
                 }
-                let sizes = [vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(images.len() as u32)];
+                // what a draw samples is readied the same way: its layout changes only after a
+                // write, and that barrier orders the write before this dispatch's reads
+                for (id, binding) in sampled.iter().zip(&p.layout.sampled) {
+                    let image = self.resolve(s, *id).ok_or("missing sampled texture")?;
+                    let view = image.sample_view(0)?;
+                    image.to_sampled(batch.cb);
+                    images.push((binding.index, vk::DescriptorType::SAMPLED_IMAGE, vk::DescriptorImageInfo::default().image_view(view).image_layout(image.sampled_layout())));
+                    batch.images.push(image);
+                }
+                let sampler_base = (p.layout.textures.len() + p.layout.sampled.len()) as u32;
+                for (i, sampler) in p.samplers.iter().enumerate() {
+                    images.push((sampler_base + i as u32, vk::DescriptorType::SAMPLER, vk::DescriptorImageInfo::default().sampler(*sampler)));
+                }
+                let mut blocks = Vec::new();
+                if block {
+                    let (buffer, offset) = batch.put(&params)?;
+                    blocks.push((p.layout.desc.param_binding, vk::DescriptorBufferInfo::default().buffer(buffer.buffer).offset(offset).range(params.len() as u64)));
+                }
+                let mut sizes: Vec<vk::DescriptorPoolSize> = Vec::new();
+                for (_, ty) in &p.bindings {
+                    match sizes.iter_mut().find(|s| s.ty == *ty) { Some(s) => s.descriptor_count += 1, None => sizes.push(vk::DescriptorPoolSize::default().ty(*ty).descriptor_count(1)) }
+                }
                 let pool = unsafe { self.dev.raw.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes), None) }.map_err(error)?;
                 let pool = Descriptors { dev: self.dev.clone(), pool };
                 let layouts = [p.descriptors];
                 let sets = unsafe { self.dev.raw.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool.pool).set_layouts(&layouts)) }.map_err(error)?;
-                let writes: Vec<_> = images.iter().zip(&p.layout.textures).map(|(image, binding)| vk::WriteDescriptorSet::default().dst_set(sets[0]).dst_binding(binding.index)
-                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE).image_info(std::slice::from_ref(image))).collect();
+                let mut writes: Vec<_> = images.iter().map(|(binding, ty, info)| vk::WriteDescriptorSet::default().dst_set(sets[0]).dst_binding(*binding)
+                    .descriptor_type(*ty).image_info(std::slice::from_ref(info))).collect();
+                writes.extend(blocks.iter().map(|(binding, info)| vk::WriteDescriptorSet::default().dst_set(sets[0]).dst_binding(*binding)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(std::slice::from_ref(info))));
                 unsafe { self.dev.raw.update_descriptor_sets(&writes, &[]); self.dev.raw.cmd_bind_descriptor_sets(batch.cb, vk::PipelineBindPoint::COMPUTE, p.pipeline_layout, 0, &sets, &[]); }
                 batch.compute_descriptors.push(pool);
             }
@@ -136,7 +187,7 @@ impl Vulkan {
                 Some(q)
             } else { None };
             unsafe {
-                if !params.is_empty() { self.dev.raw.cmd_push_constants(batch.cb, p.pipeline_layout, vk::ShaderStageFlags::COMPUTE, 0, &params); }
+                if !params.is_empty() && !block { self.dev.raw.cmd_push_constants(batch.cb, p.pipeline_layout, vk::ShaderStageFlags::COMPUTE, 0, &params); }
                 if d.indirect_buffer.is_none() { self.dev.raw.cmd_dispatch(batch.cb, d.groups[0], d.groups[1], d.groups[2]); }
                 else {
                     let buffer = self.buf.get(&(s.id, d.indirect_buffer.index)).filter(|b| b.gen == d.indirect_buffer.gen).ok_or("stale indirect buffer")?.buffer.clone();

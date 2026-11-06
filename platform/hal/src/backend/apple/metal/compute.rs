@@ -34,6 +34,11 @@ impl Metal {
 
     pub(super) fn create_compute(&mut self, s: &mut Session, id: Id, blob: &PipelineBlob) -> PipeStatus {
         let layout = match KernelLayout::parse(blob) { Ok(l) => l, Err(e) => return PipeStatus::Failed(e) };
+        // the argument table a kernel binds into: 31 buffers (its own and the params) and 31 textures
+        if layout.buffers.iter().any(|b| b.index >= 31) || (layout.desc.push_size != 0 && layout.desc.param_binding >= 31)
+            || layout.textures.iter().any(|t| t.index >= 31) || layout.sampled.iter().any(|t| t.index >= 31) {
+            return PipeStatus::Failed("Metal compute permits 31 buffer and 31 texture slots".into());
+        }
         if let Err(e) = layout.validate_device(&self.info) { return PipeStatus::Failed(e); }
         let source = match std::str::from_utf8(blob.code) { Ok(s) => s.to_owned(), Err(e) => return PipeStatus::Failed(e.to_string()) };
         let precise = layout.desc.precise_math != 0;
@@ -172,6 +177,13 @@ impl Metal {
                     let t = self.tex.get_mut(&(s.id, id.index)).filter(|t| t.gen == id.gen).ok_or("missing storage image")?;
                     t.last_bound = seq;
                     unsafe { let _: () = msg_send![encoder, setTexture: t.obj.as_id() atIndex: binding.index as u64]; }
+                }
+                // sampled textures after the storage images, resolved as a draw's are (storage a
+                // transient target gave back is made again); the kernel declares its samplers
+                let sampled = compute::ids(view.arena, d.sampled).ok_or("invalid compute sampled textures")?;
+                for (id, binding) in sampled.iter().zip(&p.layout.sampled) {
+                    let obj = super::frame::texture_obj(&mut self.tex, self.dev.device, s, *id, seq).ok_or("missing sampled texture")?;
+                    unsafe { let _: () = msg_send![encoder, setTexture: obj atIndex: binding.index as u64]; }
                 }
                 if !params.is_empty() { unsafe { let _: () = msg_send![encoder, setBytes: params.as_ptr() as *const std::ffi::c_void length: params.len() as u64 atIndex: p.layout.desc.param_binding as u64]; } }
                 let [x, y, z] = p.layout.desc.workgroup;

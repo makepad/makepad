@@ -1,7 +1,7 @@
 //! Native compute resources and per-frame recording. GPU compilation and readback are asynchronous.
 use crate::{Cx, Texture, TextureFormat, DrawPassId, makepad_live_id::LiveId, makepad_script::{ScriptVm, ScriptObject}, script::vm::ScriptVmCx};
 use crate::makepad_script::shader_ir_compute::{self as compiler, ComputeLayout, ComputeTarget, ComputeSlotKind, CompiledKernel};
-use makepad_hal::{self as hal, Id, CmdWriter, StorageBinding, StorageImageBinding};
+use makepad_hal::{self as hal, Id, CmdWriter, StorageBinding, StorageImageBinding, SampledImageBinding, ComputeSamplerDesc};
 use hal::codec::ArenaSink;
 use std::{cell::{Cell, RefCell}, rc::{Rc, Weak}};
 
@@ -83,6 +83,16 @@ impl ComputeKernel {
     /// instead of one after the other. A sequence, not a cycle; every other pipeline stays lazy.
     pub fn followed_by(&self, next: &ComputeKernel) { self.0.next.borrow_mut().push(next.clone()); }
     pub fn layout(&self) -> &ComputeLayout { &self.0.compiled.layout }
+    /// Whether the HAL has built the kernel's pipeline, asking for it the first time. A pass
+    /// that a dispatch of a kernel still compiling runs before waits for it, so an app that
+    /// would rather keep drawing dispatches once this says true. A failed one is never ready.
+    pub fn is_ready(&self, cx: &mut Cx) -> bool {
+        let mut fb = std::mem::take(&mut cx.hal.frames);
+        let id = self.pipeline(&mut fb);
+        let ready = fb.pipeline_is_ready(id.index as usize);
+        cx.hal.frames = fb;
+        ready
+    }
     pub fn params(&self) -> ComputeParams { ComputeParams { kernel: self.clone(), bytes: vec![0; self.layout().push_size as usize] } }
     fn pipeline(&self, fb: &mut crate::frame_build::FrameBuilder) -> Id {
         if !self.0.pipeline.get().is_none() { return self.0.pipeline.get(); }
@@ -94,8 +104,10 @@ impl ComputeKernel {
         let buffers: Vec<_> = l.buffers.iter().map(|b| StorageBinding { index: b.index, offset: b.offset, writable: b.writable as u32 }).collect();
         let textures: Vec<_> = l.storage_textures.iter().map(|t| StorageImageBinding { index: t.index, format: storage_format(t.format) }).collect();
         let desc = hal::ComputeDesc { push_size: l.push_size, param_binding: l.param_binding.unwrap_or(u32::MAX), param_binding_size: l.param_binding_size, group_count_offset: l.group_count_offset.unwrap_or(u32::MAX), workgroup: l.workgroup, precise_math: l.precise_math as u32, ..Default::default() };
+        let sampled: Vec<_> = l.textures.iter().map(|t| SampledImageBinding { index: t.index }).collect();
+        let samplers: Vec<_> = l.samplers.iter().map(|s| ComputeSamplerDesc { filter: s.filter, address: s.address }).collect();
         let name = fb.intern(&self.0.name);
-        let blob = CmdWriter::compute_pipeline_blob(hal::PipelineDesc { name, ..Default::default() }, &code, desc, &buffers, &textures);
+        let blob = CmdWriter::compute_pipeline_blob_sampled(hal::PipelineDesc { name, ..Default::default() }, &code, desc, &buffers, &textures, &sampled, &samplers);
         let id = fb.compute_pipeline(&self.0.name, &blob);
         self.0.pipeline.set(id);
         for next in self.0.next.borrow().iter() { next.pipeline(fb); }
@@ -116,13 +128,23 @@ impl ComputeParams {
     pub fn set_u32(&mut self, name: LiveId, value: u32) -> Result<&mut Self, String> { self.set(name, &value.to_le_bytes()) }
     pub fn set_f32(&mut self, name: LiveId, value: f32) -> Result<&mut Self, String> { self.set(name, &value.to_le_bytes()) }
 }
-struct Recorded { kernel: ComputeKernel, timer: Option<String>, groups: [u32; 3], indirect: Option<(GpuBuffer, u64)>, params: ComputeParams, buffers: Vec<GpuBuffer>, textures: Vec<Texture> }
+struct Recorded { kernel: ComputeKernel, timer: Option<String>, groups: [u32; 3], indirect: Option<(GpuBuffer, u64)>, params: ComputeParams, buffers: Vec<GpuBuffer>, textures: Vec<Texture>, sampled: Vec<Texture> }
 /// `before` attaches compute to a draw dependency; None progresses independently of paint.
 pub struct ComputePass { name: String, before: Option<DrawPassId>, dispatches: Vec<Recorded> }
 impl ComputePass {
     pub fn new(name: impl Into<String>, before: Option<DrawPassId>) -> Self { Self { name: name.into(), before, dispatches: Vec::new() } }
     pub fn dispatch(&mut self, kernel: &ComputeKernel, groups: [u32; 3], params: &ComputeParams, buffers: &[GpuBuffer], textures: &[Texture]) -> Result<(), String> {
-        if !Rc::ptr_eq(&kernel.0, &params.kernel.0) || buffers.len() != kernel.layout().buffers.len() || textures.len() != kernel.layout().storage_textures.len() { return Err("compute bindings do not match kernel reflection".into()); }
+        self.dispatch_sampled(kernel, groups, params, buffers, textures, &[])
+    }
+    /// A dispatch of a kernel that also samples textures (`sampled`, in the order the kernel
+    /// declares its `shader.texture_2d`s): any 2D texture, a render target an earlier pass
+    /// drew or a storage image an earlier dispatch wrote, never one of `textures`. A pass with a
+    /// dispatch whose sampled texture the GPU does not hold yet (a render target whose pass has
+    /// not drawn) is left out whole, and the log names the texture once.
+    pub fn dispatch_sampled(&mut self, kernel: &ComputeKernel, groups: [u32; 3], params: &ComputeParams, buffers: &[GpuBuffer], textures: &[Texture], sampled: &[Texture]) -> Result<(), String> {
+        if !Rc::ptr_eq(&kernel.0, &params.kernel.0) || buffers.len() != kernel.layout().buffers.len() || textures.len() != kernel.layout().storage_textures.len()
+            || sampled.len() != kernel.layout().textures.len() { return Err("compute bindings do not match kernel reflection".into()); }
+        if sampled.iter().any(|s| textures.contains(s)) { return Err("a dispatch samples a texture it writes".into()); }
         let layout = kernel.layout();
         for (i, (buffer, binding)) in buffers.iter().zip(&layout.buffers).enumerate() {
             if buffer.hal_id().is_none() || buffer.size() % binding.alignment as u64 != 0 { return Err("invalid storage buffer binding".into()); }
@@ -139,7 +161,7 @@ impl ComputePass {
                 return Err(format!("kernel {}: one storage texture is bound to both {} and {}", kernel.0.name, other.name, binding.name));
             }
         }
-        self.dispatches.push(Recorded { kernel: kernel.clone(), timer: None, groups, indirect: None, params: params.clone(), buffers: buffers.to_vec(), textures: textures.to_vec() });
+        self.dispatches.push(Recorded { kernel: kernel.clone(), timer: None, groups, indirect: None, params: params.clone(), buffers: buffers.to_vec(), textures: textures.to_vec(), sampled: sampled.to_vec() });
         Ok(())
     }
     /// Measure this dispatch without splitting the pass or its submission.
@@ -182,6 +204,8 @@ pub(crate) struct ComputeState {
     passes: Vec<ComputePass>,
     retained: Vec<ComputePass>,
     kernels: Vec<(Rc<Cell<Id>>, Weak<KernelInner>)>,
+    /// Textures a pass was left out for (not on the GPU yet), each named once in the log.
+    sampled_warned: std::collections::HashSet<usize>,
 }
 pub(crate) fn storage_format(format: compiler::StorageTextureFormat) -> u32 {
     use compiler::StorageTextureFormat as F;
@@ -247,10 +271,29 @@ impl Cx {
             if pass.before != before { self.hal.compute.passes.push(pass); continue; }
             // A packet per pass gives the existing FrameDone timing path its own
             // span and name. Submission order still places it before its draw dependency.
+            // What the dispatches sample, before any of the pass is written. A texture the GPU
+            // does not hold yet (a render target whose pass has not drawn, a video without a frame)
+            // leaves the whole pass out this time: its dispatches depend on each other, and a pass
+            // missing one of them would run on what that one did not produce.
+            let mut sampled = Vec::with_capacity(pass.dispatches.len());
+            let mut missing = None;
+            for d in &pass.dispatches {
+                let ids: Vec<Id> = d.sampled.iter().map(|t| self.fb_sampled(fb, t.texture_id())).collect();
+                if let Some(i) = ids.iter().position(Id::is_none) { missing = Some((d.kernel.0.name.clone(), d.sampled[i].texture_id())); break; }
+                sampled.push(ids);
+            }
+            if let Some((kernel, tid)) = missing {
+                if self.hal.compute.sampled_warned.insert(tid.0) {
+                    crate::warning!("compute pass `{}` is left out: kernel `{kernel}` samples a texture the GPU does not hold yet (made at {})",
+                        pass.name, self.textures[tid].origin.site.as_deref().unwrap_or("?"));
+                }
+                self.hal.compute.retained.push(pass);
+                continue;
+            }
             let serial = self.textures.1.serials.submit();
             fb.w.frame_begin(serial, hal::FrameMeta::default());
             let mut dispatches = Vec::new();
-            for d in &pass.dispatches {
+            for (d, sampled) in pass.dispatches.iter().zip(&sampled) {
                 let mut textures = Vec::new();
                 for texture in &d.textures {
                     let tid = texture.texture_id();
@@ -258,10 +301,10 @@ impl Cx {
                     textures.push(self.fb_attachment(fb, tid, width, height, false));
                 }
                 let buffers: Vec<_> = d.buffers.iter().map(GpuBuffer::hal_id).collect();
-                let b = fb.w.put_ids(&buffers); let t = fb.w.put_ids(&textures);
+                let b = fb.w.put_ids(&buffers); let t = fb.w.put_ids(&textures); let st = fb.w.put_ids(sampled);
                 let params = fb.w.put_bytes(&d.params.bytes);
                 let timer = d.timer.as_ref().map_or(0, |name| fb.intern(name));
-                dispatches.push(hal::Dispatch { pipeline: d.kernel.0.pipeline.get(), timer, groups: d.groups, indirect_buffer: d.indirect.as_ref().map_or(Id::NONE, |a| a.0.hal_id()), indirect_offset: d.indirect.as_ref().map_or(0, |a| a.1), params, buffers: hal::Range { off: b.off * 8, len: b.len * 8 }, textures: hal::Range { off: t.off * 8, len: t.len * 8 } });
+                dispatches.push(hal::Dispatch { pipeline: d.kernel.0.pipeline.get(), timer, groups: d.groups, indirect_buffer: d.indirect.as_ref().map_or(Id::NONE, |a| a.0.hal_id()), indirect_offset: d.indirect.as_ref().map_or(0, |a| a.1), params, buffers: hal::Range { off: b.off * 8, len: b.len * 8 }, textures: hal::Range { off: t.off * 8, len: t.len * 8 }, sampled: hal::Range { off: st.off * 8, len: st.len * 8 } });
             }
             let name = fb.intern(&pass.name);
             fb.w.compute_pass(name, name, &dispatches);
