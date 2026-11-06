@@ -238,6 +238,14 @@ impl<T> [T] {
     pub const fn split_at_mut(&mut self, mid: usize) -> (&mut [T], &mut [T]) {
         super::split_at_mut(self, mid)
     }
+    /// `split_at` with the bound unchecked: the caller guarantees `mid <= len`.
+    pub const unsafe fn split_at_unchecked(&self, mid: usize) -> (&[T], &[T]) {
+        (&self[..mid], &self[mid..])
+    }
+    /// `split_at_mut` with the bound unchecked: the caller guarantees `mid <= len`.
+    pub const unsafe fn split_at_mut_unchecked(&mut self, mid: usize) -> (&mut [T], &mut [T]) {
+        super::split_at_mut(self, mid)
+    }
     pub const fn split_at_checked(&self, mid: usize) -> Option<(&[T], &[T])> {
         if mid > self.len() {
             None

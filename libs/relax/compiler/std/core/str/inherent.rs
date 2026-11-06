@@ -6,6 +6,18 @@ use super::*;
 use crate::string::String;
 
 impl str {
+    /// `core::str::from_utf8`, reachable as `str::from_utf8` (an associated function since 1.87).
+    pub const fn from_utf8(v: &[u8]) -> Result<&str, crate::str::Utf8Error> {
+        crate::str::from_utf8(v)
+    }
+    /// `core::str::from_utf8_unchecked` as an associated function.
+    pub const unsafe fn from_utf8_unchecked(v: &[u8]) -> &str {
+        crate::str::from_utf8_unchecked(v)
+    }
+    /// `core::str::from_utf8_unchecked_mut` as an associated function.
+    pub const unsafe fn from_utf8_unchecked_mut(v: &mut [u8]) -> &mut str {
+        crate::str::from_utf8_unchecked_mut(v)
+    }
     pub fn into_string(self: crate::boxed::Box<str>) -> crate::string::String {
         let len = (*self).len();
         let p = crate::boxed::Box::into_raw(self) as *mut u8;
