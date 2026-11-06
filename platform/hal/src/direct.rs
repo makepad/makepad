@@ -575,7 +575,7 @@ mod tests {
         let groups = a.group(&connected);
         let names: Vec<_> = groups.iter().map(|g| (g.name.as_str(), g.outputs.clone(), g.optimise_for)).collect();
         assert_eq!(names, vec![("B", vec![1], None), ("A", vec![0], None), ("C", vec![2, 3], Some(3)), ("F", vec![5], None)],
-            "the user's [B] [A] [C+D], E off, a new F extends on the right");
+            "a [B] [A] [C+D] layout, E off, a new F extends on the right");
         // C unplugged: the mirror keeps going on D under the same name; D unplugged too: the screen goes
         let groups = a.group(&["A", "B", "D"]);
         assert_eq!((groups[2].name.as_str(), groups[2].outputs.clone(), groups[2].optimise_for), ("C", vec![2], Some(2)));

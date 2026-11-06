@@ -2119,6 +2119,11 @@ impl Drop for FanOutParent<'_> {
     }
 }
 impl TaskPool {
+    /// Spread indices over the pool while the caller helps. The caller's job takes the
+    /// enclosing job's static label, so a long item in the CPU budget's report names the work
+    /// it belongs to (the caller checkpoints before every item). Helpers stay `fan_out`: they
+    /// give their permit back by leaving at an item boundary, never through the budget's
+    /// checkpoint, so their reported span is how long they helped, not how long an item ran.
     pub fn fan_out<F: Fn(usize) + Sync>(&self, len: usize, f: F) {
         if len == 0 {
             return;
@@ -2131,13 +2136,13 @@ impl TaskPool {
             return;
         }
         let class = current_class().unwrap_or(Class::Background);
-        let (ticket, token) = JOB.with(|j| {
+        let (label, ticket, token) = JOB.with(|j| {
             j.borrow()
                 .as_ref()
-                .map(|j| (j.ticket.clone(), j.token.clone()))
-                .unwrap_or_else(|| (Ticket::none(), CancellationToken::new()))
+                .map(|j| (Some(j.label), j.ticket.clone(), j.token.clone()))
+                .unwrap_or_else(|| (None, Ticket::none(), CancellationToken::new()))
         });
-        let _context = JobGuard::enter(class, "fan_out caller", ticket, token, None);
+        let _context = JobGuard::enter(class, label.unwrap_or("fan_out caller"), ticket, token, None);
         let shared = Arc::new(FanOutShared {
             f: &f as *const F as *const (),
             call: fan_out_call::<F>,

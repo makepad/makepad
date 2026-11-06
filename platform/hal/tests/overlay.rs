@@ -333,7 +333,10 @@ fn a_window_layer_leaves_input_with_the_app_and_needs_its_texture() {
         w.window_event(sid, RawEvent::key_up(APP_WINDOW, 1, 0), &[]);
     });
     assert!(take(&hal, HOST).is_empty(), "under a window layer input stays with the app");
-    assert_eq!(take(&hal, sid)[0].0.tag, tag::KeyUp);
+    // (the layer is composed through the window's badge layer: the app is asked for a frame first,
+    // which lands under it)
+    let tags: Vec<_> = take(&hal, sid).iter().map(|e| e.0.tag).collect();
+    assert_eq!(tags, [tag::Redraw, tag::KeyUp]);
     // session 0's frames go on while the app keeps drawing; neither replaces the other's record
     frame(&hal, HOST, HOST_WINDOW, 101, target::WINDOW);
     frame(&hal, sid, APP_WINDOW, 12, target::WINDOW);

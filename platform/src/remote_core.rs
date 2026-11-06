@@ -798,6 +798,7 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "gq", args: "[scale=1] [w=ID]", answers: "client side: FINISH HERE: grab every window, then quit. {\"png\":[paths],\"quit\":1}", service: "ui", risk: CmdRisk::Destructive, params: makepad_remote::params::GQ, required: &[], positional: &[] },
     Command { words: "mouse", args: "k=move|down|up|click|scroll|pinch|touch x= y= [b=0] [dx= dy=] [scale= phase=begin|update|end] [scroll phase=touched|began|changed|ended|momentum|momentum_ended: a touchpad scroll] [touch phase=start|move|stop|cancel id=N: one finger] [time=] [hw=1] [native=1: AppKit primary click] [shift=1 ctrl=1 alt=1 logo=1] [w=ID] [wait=1]", answers: "inject a mouse event through the real event path", service: "ui", risk: CmdRisk::Act, params: "\"k\":{\"type\":\"string\",\"enum\":[\"move\",\"down\",\"up\",\"click\",\"scroll\",\"pinch\",\"touch\"]},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"b\":{\"type\":\"integer\"},\"dx\":{\"type\":\"number\"},\"dy\":{\"type\":\"number\"},\"scale\":{\"type\":\"number\"},\"phase\":{\"type\":\"string\",\"enum\":[\"begin\",\"update\",\"end\",\"touched\",\"began\",\"changed\",\"ended\",\"momentum\",\"momentum_ended\",\"start\",\"move\",\"stop\",\"cancel\"]},\"id\":{\"type\":\"integer\"},\"time\":{\"type\":\"number\"},\"hw\":{\"type\":\"boolean\"},\"native\":{\"type\":\"boolean\"},\"shift\":{\"type\":\"boolean\"},\"ctrl\":{\"type\":\"boolean\"},\"alt\":{\"type\":\"boolean\"},\"logo\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"x1\":{\"type\":\"number\"},\"y1\":{\"type\":\"number\"},\"steps\":{\"type\":\"integer\"},\"back\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &["k"], positional: &[] },
     Command { words: "click", args: "x= y= [b=0] [w=ID] [wait=1]", answers: "mouse k=click", service: "ui", risk: CmdRisk::Act, params: "\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"b\":{\"type\":\"integer\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"shift\":{\"type\":\"boolean\"},\"ctrl\":{\"type\":\"boolean\"},\"alt\":{\"type\":\"boolean\"},\"logo\":{\"type\":\"boolean\"},\"hw\":{\"type\":\"boolean\"},\"native\":{\"type\":\"boolean\"},\"time\":{\"type\":\"number\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &["x", "y"], positional: &[] },
+    Command { words: "move", args: "x= y= [hw=1] [w=ID] [wait=1]", answers: "mouse k=move", service: "ui", risk: CmdRisk::Act, params: "\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"shift\":{\"type\":\"boolean\"},\"ctrl\":{\"type\":\"boolean\"},\"alt\":{\"type\":\"boolean\"},\"logo\":{\"type\":\"boolean\"},\"hw\":{\"type\":\"boolean\"},\"time\":{\"type\":\"number\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &["x", "y"], positional: &[] },
     Command { words: "key", args: "t=TEXT | c=KeyA [k=down|up|press] [shift=1 ...] [w=ID] [wait=1]", answers: "type text or press a key (Escape ReturnKey Tab Backspace ArrowLeft F1 Key1 ..)", service: "ui", risk: CmdRisk::Act, params: "\"t\":{\"type\":\"string\",\"description\":\"text to type\"},\"c\":{\"type\":\"string\",\"description\":\"a key code: Escape ReturnKey Tab Backspace ArrowLeft F1 KeyA Key1 ..\"},\"k\":{\"type\":\"string\",\"enum\":[\"down\",\"up\",\"press\"]},\"shift\":{\"type\":\"boolean\"},\"ctrl\":{\"type\":\"boolean\"},\"alt\":{\"type\":\"boolean\"},\"logo\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "text", args: "t=TEXT [w=ID] [wait=1]", answers: "type text", service: "ui", risk: CmdRisk::Act, params: "\"t\":{\"type\":\"string\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &["t"], positional: &[] },
     Command { words: "drop", args: "path=ABS x= y= [w=ID] [wait=1]", answers: "drop one absolute file path through Drag/Drop/DragEnd", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &["path"], positional: &[] },
@@ -874,7 +875,17 @@ pub fn resolve(words: &[String]) -> Result<Resolved, String> {
     }
     match COMMANDS.iter().find(|c| c.words == first) {
         Some(c) => Ok(Resolved { key: c.words, sub: None, used: 1 }),
-        None => Err(format!("unknown command `{first}` (try `help`)")),
+        None => {
+            let mut names = Vec::new();
+            for command in COMMANDS {
+                if let Some(name) = command.words.split_whitespace().next() {
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+            }
+            Err(format!("unknown command `{first}`: the commands are {} (`help` describes each)", names.join(", ")))
+        }
     }
 }
 
@@ -2028,6 +2039,7 @@ mod tests {
             ("activity", 1),
             ("mouse", 1),
             ("click", 1),
+            ("move", 1),
             ("key", 1),
             ("text", 1),
             ("drop", 1),
@@ -2078,6 +2090,11 @@ mod tests {
             assert!(resolve(&words(removed)).unwrap_err().contains("unknown command"));
         }
         assert!(resolve(&words("nope")).unwrap_err().contains("unknown command"));
+        let unknown = resolve(&words("m")).unwrap_err();
+        assert!(unknown.starts_with("unknown command `m`: the commands are "), "{unknown}");
+        assert!(unknown.contains("mouse, click, move"), "{unknown}");
+        assert_eq!(unknown.matches("cap").count(), 1, "{unknown}");
+        assert!(unknown.ends_with("(`help` describes each)"), "{unknown}");
         // the table has no command the test above does not know of
         // design, and the four client-side ones
         assert_eq!(COMMANDS.len(), routes.len() + 1 + CLIENT_SIDE.len(), "COMMANDS and the route list disagree");

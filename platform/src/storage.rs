@@ -622,6 +622,45 @@ pub fn volume_available_bytes(_path: &std::path::Path) -> Result<u64, StorageErr
     ))
 }
 
+/// A mounted volume: where its root is, its name, and its file system as the
+/// operating system names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Volume {
+    pub root: std::path::PathBuf,
+    pub name: String,
+    pub file_system: String,
+}
+
+impl Volume {
+    /// A FAT volume (FAT12, FAT16 or FAT32), as USB sticks and memory cards
+    /// for devices mostly are: macOS names them msdos, Linux vfat, Windows FAT
+    /// and FAT32.
+    pub fn is_fat(&self) -> bool {
+        matches!(self.file_system.as_str(), "msdos" | "vfat" | "FAT" | "FAT32")
+    }
+}
+
+/// The volumes mounted besides the system's own, as a desktop mounts
+/// removable media and disk images: on macOS those under /Volumes, on Linux
+/// those under /media and /run/media (never the system's own partitions,
+/// such as its boot partition), on Windows the removable drives with a volume
+/// in them (USB sticks and memory cards, never a fixed disk). On macOS and
+/// Linux it reads the system's mount table only, so a volume that doesn't
+/// answer never holds it up; on Windows each removable drive is asked for its
+/// volume's name and file system.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn mounted_volumes() -> Result<Vec<Volume>, StorageError> {
+    native::mounted_volumes()
+}
+
+/// The browser shows no volumes.
+#[cfg(target_arch = "wasm32")]
+pub fn mounted_volumes() -> Result<Vec<Volume>, StorageError> {
+    Err(StorageError::Unsupported(
+        "the browser shows no mounted volumes".into(),
+    ))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod native {
     use {
@@ -764,6 +803,104 @@ pub(crate) mod native {
         Ok(total)
     }
 
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "tvos"))))]
+    pub fn mounted_volumes() -> Result<Vec<Volume>, StorageError> {
+        let table = fs::read_to_string("/proc/self/mounts").map_err(|e| io_error("list volumes", e))?;
+        Ok(mount_table(&table))
+    }
+
+    /// The volumes of a mount table in /proc/self/mounts' form (per line the device, the
+    /// mount point and the file system, separated by spaces, a space in a field written as
+    /// `\040`) that are mounted where a desktop mounts removable media.
+    #[cfg(any(test, all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "tvos")))))]
+    pub(crate) fn mount_table(table: &str) -> Vec<Volume> {
+        let unescape = |field: &str| -> String {
+            let b = field.as_bytes();
+            let mut out = Vec::with_capacity(b.len());
+            let mut i = 0;
+            while i < b.len() {
+                let octal = b[i] == b'\\' && i + 3 < b.len() && b[i + 1..i + 4].iter().all(|d| (b'0'..=b'7').contains(d));
+                if octal {
+                    out.push((b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0'));
+                    i += 4;
+                } else {
+                    out.push(b[i]);
+                    i += 1;
+                }
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        };
+        table
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split(' ');
+                let (_device, at, file_system) = (fields.next()?, fields.next()?, fields.next()?);
+                let root = PathBuf::from(unescape(at));
+                if !["/media", "/run/media"].iter().any(|under| root.starts_with(under) && root != Path::new(under)) {
+                    return None;
+                }
+                let name = root.file_name()?.to_string_lossy().into_owned();
+                Some(Volume { root, name, file_system: file_system.to_string() })
+            })
+            .collect()
+    }
+
+    #[cfg(windows)]
+    pub fn mounted_volumes() -> Result<Vec<Volume>, StorageError> {
+        unsafe extern "system" {
+            fn GetLogicalDriveStringsW(length: u32, buffer: *mut u16) -> u32;
+            fn GetDriveTypeW(root: *const u16) -> u32;
+            fn GetVolumeInformationW(root: *const u16, name: *mut u16, name_size: u32, serial: *mut u32, longest_name: *mut u32, flags: *mut u32, file_system: *mut u16, file_system_size: u32) -> i32;
+            fn SetThreadErrorMode(mode: u32, old: *mut u32) -> i32;
+        }
+        const DRIVE_REMOVABLE: u32 = 2;
+        // an empty card reader's slot answers "not ready" without the system's dialog
+        const SEM_FAILCRITICALERRORS: u32 = 0x1;
+        let mut buffer = vec![0u16; 128];
+        loop {
+            let length = unsafe { GetLogicalDriveStringsW(buffer.len() as u32, buffer.as_mut_ptr()) } as usize;
+            if length == 0 {
+                return Err(io_error("list volumes", std::io::Error::last_os_error()));
+            }
+            if length < buffer.len() {
+                buffer.truncate(length);
+                break;
+            }
+            buffer = vec![0u16; length + 1];
+        }
+        let mut old_mode = 0;
+        unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, &mut old_mode) };
+        let volumes = drive_roots(&buffer)
+            .filter_map(|root| {
+                let wide: Vec<u16> = root.encode_utf16().chain(Some(0)).collect();
+                if unsafe { GetDriveTypeW(wide.as_ptr()) } != DRIVE_REMOVABLE {
+                    return None;
+                }
+                let (mut label, mut file_system) = ([0u16; 261], [0u16; 261]);
+                let asked = unsafe { GetVolumeInformationW(wide.as_ptr(), label.as_mut_ptr(), label.len() as u32, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), file_system.as_mut_ptr(), file_system.len() as u32) };
+                let text = |w: &[u16]| String::from_utf16_lossy(&w[..w.iter().position(|c| *c == 0).unwrap_or(w.len())]);
+                (asked != 0).then(|| drive_volume(&root, &text(&label), &text(&file_system)))
+            })
+            .collect();
+        unsafe { SetThreadErrorMode(old_mode, std::ptr::null_mut()) };
+        Ok(volumes)
+    }
+
+    /// The drives' roots (`E:\`) in the system's list of them: each one ended by a zero.
+    #[cfg(any(test, windows))]
+    pub(crate) fn drive_roots(list: &[u16]) -> impl Iterator<Item = String> + '_ {
+        list.split(|c| *c == 0).filter(|root| !root.is_empty()).map(String::from_utf16_lossy)
+    }
+
+    /// A drive's volume, named as Windows shows it: its label and drive letter, the letter
+    /// alone when it has no label.
+    #[cfg(any(test, windows))]
+    pub(crate) fn drive_volume(root: &str, label: &str, file_system: &str) -> Volume {
+        let letter = root.trim_end_matches('\\');
+        let name = if label.is_empty() { letter.to_string() } else { format!("{label} ({letter})") };
+        Volume { root: PathBuf::from(root), name, file_system: file_system.to_string() }
+    }
+
     #[cfg(all(
         unix,
         target_pointer_width = "64",
@@ -804,34 +941,78 @@ pub(crate) mod native {
             * stat.blocks_available)
     }
 
+    /// The system's `struct statfs` (the 64-bit inode layout).
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+    #[repr(C)]
+    struct StatFs {
+        block_size: u32,
+        io_size: i32,
+        blocks: u64,
+        blocks_free: u64,
+        blocks_available: u64,
+        files: u64,
+        files_free: u64,
+        filesystem_id: [i32; 2],
+        owner: u32,
+        filesystem_type: u32,
+        flags: u32,
+        filesystem_subtype: u32,
+        filesystem_type_name: [u8; 16],
+        mount_on_name: [u8; 1024],
+        mount_from_name: [u8; 1024],
+        flags_ext: u32,
+        reserved: [u32; 7],
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+    unsafe extern "C" {
+        // on x86_64 the plain names are the 32-bit inode layout's
+        #[cfg_attr(target_arch = "x86_64", link_name = "statfs$INODE64")]
+        fn statfs(path: *const std::ffi::c_char, out: *mut StatFs) -> std::ffi::c_int;
+        #[cfg_attr(target_arch = "x86_64", link_name = "getfsstat$INODE64")]
+        fn getfsstat(out: *mut StatFs, size: std::ffi::c_int, mode: std::ffi::c_int) -> std::ffi::c_int;
+    }
+
+    /// The text of a NUL-terminated field.
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+    fn field_text(field: &[u8]) -> String {
+        let end = field.iter().position(|b| *b == 0).unwrap_or(field.len());
+        String::from_utf8_lossy(&field[..end]).into_owned()
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+    pub fn mounted_volumes() -> Result<Vec<Volume>, StorageError> {
+        // the mount table as the system has it cached: no volume is asked
+        const MNT_NOWAIT: std::ffi::c_int = 2;
+        let size = std::mem::size_of::<StatFs>();
+        let count = unsafe { getfsstat(std::ptr::null_mut(), 0, MNT_NOWAIT) };
+        if count < 0 {
+            return Err(io_error("list volumes", std::io::Error::last_os_error()));
+        }
+        // room for volumes mounted between the two calls
+        let mut table: Vec<StatFs> = (0..count as usize + 8).map(|_| unsafe { std::mem::zeroed() }).collect();
+        let bytes = std::ffi::c_int::try_from(table.len() * size).map_err(|_| StorageError::Io("the mount table is too large".into()))?;
+        let got = unsafe { getfsstat(table.as_mut_ptr(), bytes, MNT_NOWAIT) };
+        if got < 0 {
+            return Err(io_error("list volumes", std::io::Error::last_os_error()));
+        }
+        table.truncate(got as usize);
+        let mut volumes: Vec<Volume> = table
+            .iter()
+            .filter_map(|stat| {
+                let root = PathBuf::from(field_text(&stat.mount_on_name));
+                let name = root.strip_prefix("/Volumes").ok()?.to_str()?.to_string();
+                (!name.is_empty() && !name.contains('/')).then(|| Volume { name, file_system: field_text(&stat.filesystem_type_name), root })
+            })
+            .collect();
+        volumes.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(volumes)
+    }
+
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
     pub fn volume_available_bytes(path: &Path) -> Result<u64, StorageError> {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
-
-        #[repr(C)]
-        struct StatFs {
-            block_size: u32,
-            io_size: i32,
-            blocks: u64,
-            blocks_free: u64,
-            blocks_available: u64,
-            files: u64,
-            files_free: u64,
-            filesystem_id: [i32; 2],
-            owner: u32,
-            filesystem_type: u32,
-            flags: u32,
-            filesystem_subtype: u32,
-            filesystem_type_name: [u8; 16],
-            mount_on_name: [u8; 1024],
-            mount_from_name: [u8; 1024],
-            flags_ext: u32,
-            reserved: [u32; 7],
-        }
-        unsafe extern "C" {
-            fn statfs(path: *const std::ffi::c_char, out: *mut StatFs) -> std::ffi::c_int;
-        }
 
         let path = CString::new(path.as_os_str().as_bytes())
             .map_err(|_| StorageError::Io("storage estimate path contains NUL".into()))?;
@@ -1041,6 +1222,39 @@ pub(crate) mod native {
     mod tests {
         use super::*;
         use std::time::{SystemTime, UNIX_EPOCH};
+
+        /// A mount table's removable media are the mounts under /media and /run/media, each
+        /// with its root, name and file system, an escaped space in a mount point read back as
+        /// a space; the system's own mounts (its root, its FAT boot partition) aren't among them.
+        #[test]
+        fn a_mount_tables_volumes_are_its_removable_media() {
+            let table = "/dev/sda2 / ext4 rw,relatime 0 0\nproc /proc proc rw 0 0\n/dev/sda1 /boot/efi vfat rw 0 0\n/dev/sdb1 /media/PRINT\\040STICK vfat rw,uid=1000 0 0\n/dev/sdc1 /run/media/user/CARD exfat rw 0 0\n";
+            let v = mount_table(table);
+            assert_eq!(v.len(), 2, "{v:?}");
+            assert_eq!((v[0].root.as_path(), v[0].name.as_str(), v[0].file_system.as_str(), v[0].is_fat()), (Path::new("/media/PRINT STICK"), "PRINT STICK", "vfat", true));
+            assert_eq!((v[1].name.as_str(), v[1].is_fat()), ("CARD", false));
+            #[cfg(target_os = "linux")]
+            assert!(mounted_volumes().expect("the mount table").iter().all(|v| v.root.starts_with("/media") || v.root.starts_with("/run/media")), "removable media only");
+        }
+
+        /// Windows' list of drives is split into their roots, and a drive's volume is named by
+        /// its label and letter as Explorer shows it (the letter alone without a label); its FAT
+        /// file systems are FAT ones, exFAT and NTFS aren't. On Windows the drives listed are
+        /// removable ones with a volume in them: never the system's drive.
+        #[test]
+        fn a_drive_lists_removable_volumes_are_named_by_label_and_letter() {
+            let list: Vec<u16> = "C:\\\0E:\\\0F:\\\0\0".encode_utf16().collect();
+            assert_eq!(drive_roots(&list).collect::<Vec<_>>(), ["C:\\", "E:\\", "F:\\"]);
+            let stick = drive_volume("E:\\", "PRINTS", "FAT32");
+            assert_eq!((stick.root.as_path(), stick.name.as_str(), stick.is_fat()), (Path::new("E:\\"), "PRINTS (E:)", true));
+            assert_eq!(drive_volume("F:\\", "", "FAT").name, "F:");
+            assert!(drive_volume("F:\\", "", "FAT").is_fat() && !drive_volume("F:\\", "", "exFAT").is_fat() && !drive_volume("F:\\", "", "NTFS").is_fat());
+            #[cfg(windows)]
+            {
+                let system = std::env::var("SystemDrive").expect("the system drive");
+                assert!(mounted_volumes().expect("the drives").iter().all(|v| !v.root.to_string_lossy().starts_with(&system)), "never the system's drive");
+            }
+        }
 
         struct TempDir(PathBuf);
 

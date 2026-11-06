@@ -23,18 +23,25 @@ pub fn memory(a: &mut Answer) {
     // domains' arenas; resident estimates (an arena's touched pages, not what it reserved)
     let arena_res = sp("compiler_arena_touched_mb") + sp("compiler_arena_large_mb");
     let slots_res = sp("slots_arena_touched_mb") + sp("slots_arena_large_mb");
+    // a hosted app's heap is its domain's arena: malloc then holds makepad run's own blocks and its
+    // provided crates'
+    let hosted = split.as_ref().is_some_and(|x| s(x, "program_heap").starts_with("domain"));
+    let (heap_name, held_note) = if hosted { ("malloc (makepad run, provided crates), in use", "freed, kept by malloc") } else { ("program heap (malloc, in use)", "freed by the program, kept by malloc") };
     let mut parts: Vec<(String, f64, String)> = vec![
-        ("program heap (malloc, in use)".into(), in_use, if tracked > 0.0 { format!("{} tracked by `heap start`", mb(tracked)) } else { "the program's live allocations (`heap start` splits them by stack)".into() }),
-        ("malloc: freed, held".into(), held, "freed by the program, kept by malloc".into()),
+        (heap_name.into(), in_use, if tracked > 0.0 { format!("{} tracked by `heap start`", mb(tracked)) } else if hosted { "the program allocates in its domain's arena".into() } else { "the program's live allocations (`heap start` splits them by stack)".into() }),
+        ("malloc: freed, held".into(), held, held_note.into()),
         ("makepad run: compiler arena".into(), arena_res, format!("touched pages; {} reserved", mb(sp("compiler_arena_committed_mb")))),
         ("makepad run: slot arena".into(), slots_res, format!("touched pages; {} reserved", mb(sp("slots_arena_committed_mb")))),
         ("makepad run: burst arena".into(), sp("burst_arena_committed_mb"), "committed".into()),
         ("makepad run: JIT code + data".into(), sp("jit_code_mb") + sp("jit_ro_data_mb"), String::new()),
     ];
+    // a domain arena by its resident pages (what the footprint counts): its committed bytes are address
+    // space made writable a chunk at a time
     for d in &domains {
         let used = f(d, "arena_in_use_bytes") / 1048576.0;
         if used >= 1.0 {
-            parts.push((format!("app domain {} arena ({})", f(d, "domain"), s(d, "package")), used, format!("in use; {} committed, {} threads", mb(f(d, "arena_committed_bytes") / 1048576.0), f(d, "threads"))));
+            let resident = f(d, "arena_resident_bytes") / 1048576.0;
+            parts.push((format!("app domain {} arena ({})", f(d, "domain"), s(d, "package")), resident, format!("resident; {} in use, {} committed address space, {} threads", mb(used), mb(f(d, "arena_committed_bytes") / 1048576.0), f(d, "threads"))));
         }
     }
     parts.retain(|p| p.1 >= 0.05);
@@ -52,7 +59,11 @@ pub fn memory(a: &mut Answer) {
     if let Some(p) = parts.first() {
         head.push_str(&format!(". Largest part: {} {}.", p.0, mb(p.1)));
     }
-    head.push_str(&format!(" Program malloc heap {} (in use + held free) vs makepad run's own {} (arenas + JIT code).", mb(prog), mb(runtime)));
+    if hosted {
+        head.push_str(&format!(" Program heap ({}) {} resident, {} in use; malloc {} (in use + held free) and makepad run's arenas + JIT code {} are the host's.", s(split.as_ref().unwrap(), "program_heap"), mb(sp("program_heap_resident_mb")), mb(sp("program_heap_in_use_mb")), mb(prog), mb(runtime)));
+    } else {
+        head.push_str(&format!(" Program malloc heap {} (in use + held free) vs makepad run's own {} (arenas + JIT code).", mb(prog), mb(runtime)));
+    }
     if let Some(t) = &trims {
         head.push_str(&format!(" Allocator trims: {} (last at {}).", f(t, "trims"), super::ms(f(t, "last_trim_ms"))));
     }

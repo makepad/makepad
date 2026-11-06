@@ -225,10 +225,12 @@ impl Vulkan {
     /// The image a badge layer frame of host window `key` draws into: the window's retained
     /// image copied into a free composed image of its size (one a presentation or a snapshot
     /// still holds is not reused). `None`: nothing rendered yet.
-    fn begin_compose(&mut self, key: (u32, Id), batch: &mut Batch) -> Option<Arc<Image>> {
+    /// `covered`: an opaque panel or window layer covers the frame, which may be older than the
+    /// one last shown.
+    fn begin_compose(&mut self, key: (u32, Id), covered: bool, batch: &mut Batch) -> Option<Arc<Image>> {
         // the retained image is an older frame than the one last shown (the newest went straight
         // to the shell's target): nothing to compose over until the app's next frame lands in it
-        if self.retained_stale.contains(&key.1.index) { return None; }
+        if !covered && self.retained_stale.contains(&key.1.index) { return None; }
         let base = self.win.get(&(key.0, key.1.index)).filter(|t| t.gen == key.1.gen)?.image.clone();
         let badged = self.badged.get_mut(&key.1.index)?;
         badged.last = None;
@@ -247,6 +249,52 @@ impl Vulkan {
         badged.last = Some(image.clone());
         self.copy_image("badge layer copy", &base, &image, batch);
         Some(image)
+    }
+
+    /// The retained image of host window `window` (at `size`) takes back the newest frame, which
+    /// went straight to the shell's own target while no badge layer was on: a panel or window
+    /// layer that comes on mid-run (a parked app, a UI wait) composes over it and starts from it.
+    /// The shell's host copies each frame out on arrival and gives the image back; until then
+    /// (false) nothing renders into it either. Taken at the latest when the shell hands that
+    /// image out again, before session 0's frame lands in it.
+    /// (A take-back that fails, the retained image not made, leaves the frame where it is.)
+    fn take_back(&mut self, s: &mut Session, window: Id, size: [u32; 2], batch: &mut Batch, now: u64) -> bool {
+        if !self.retained_stale.contains(&window.index) { return true }
+        let Some(direct) = self.direct_frame.get(&window.index).cloned() else { return true };
+        if batch.may_read(&direct).is_err() { return false }
+        match self.offscreen(s, window, size, now) {
+            Ok(retained) if retained.desc.format == direct.desc.format => {
+                self.copy_image("window take-back copy", &direct, &retained, batch);
+                self.retained_stale.remove(&window.index);
+                self.direct_frame.remove(&window.index);
+            }
+            Ok(_) => eprintln!("[hal-vulkan] window take-back: the shell's target and the window image differ in format"),
+            Err(e) => eprintln!("[hal-vulkan] window take-back: {e}"),
+        }
+        true
+    }
+
+    /// A composed window layer's texture `layer` takes the borrower's newest frame of host window
+    /// `window` (`Gpu::layer_copy`): the retained image, after it took back a frame that went to
+    /// the shell's own target before the layer came on. False while the shell has that frame.
+    pub(super) fn copy_into_layer(&mut self, s: &mut Session, window: Id, layer: Id, now: u64) -> bool {
+        let Some(image) = self.resolve(s, layer) else { return true };
+        // (no command buffer now: again at the next frame)
+        if self.ensure_batch().is_err() { return false }
+        let mut batch = self.batch.take().expect("batch");
+        let taken = self.take_back(s, window, [image.desc.w, image.desc.h], &mut batch, now);
+        // (a failed take-back: still the shell's target, which the shell has given back)
+        let source = if !taken { None } else if self.retained_stale.contains(&window.index) {
+            self.direct_frame.get(&window.index).cloned()
+        } else {
+            self.win.get(&(HOST, window.index)).filter(|t| t.gen == window.gen).map(|t| t.image.clone())
+        };
+        if let Some(source) = source.filter(|i| i.desc.format == image.desc.format && !Arc::ptr_eq(i, &image)) {
+            self.copy_image("window layer copy", &source, &image, &mut batch);
+            image.transition(batch.cb, image.sampled_layout());
+        }
+        self.batch = Some(batch);
+        taken
     }
 
     /// The shell gets an immutable complete image. Window readback and later render passes
@@ -377,18 +425,22 @@ impl Vulkan {
         let layered = is_window && !pick && layer_key.0 == HOST && self.badged.contains_key(&layer_key.1.index);
         let badges = layered && kind & target::BADGES != 0;
         if badges {
-            self.compose = self.begin_compose(layer_key, &mut batch);
-            // an opaque panel (`target::OVERLAY`) needs nothing under it: with no frame of the
-            // window kept yet (an app parked before it drew under the layer) the window's
-            // retained image is made at the panel's size and composed over as it is
-            if self.compose.is_none() && kind & target::OVERLAY != 0 {
+            // an opaque panel or window layer (`target::OVERLAY`) needs nothing under it: the
+            // retained image first takes back the frame last shown, if the shell has given it
+            // back; with no frame of the window kept yet (an app parked before it drew under the
+            // layer) the retained image is made at the panel's size and composed over as it is
+            let covered = kind & target::OVERLAY != 0;
+            // (the window pass's: the one with no texture of its own; a layer's frame first blurs)
+            let size = view.passes[pr.clone()].iter().find(|p| p.color.iter().all(|c| c.is_none())).map(|p| p.viewport)
+                .map(|v| [(v[0] + v[2]).ceil().max(1.0) as u32, (v[1] + v[3]).ceil().max(1.0) as u32]);
+            if let Some(size) = size.filter(|_| covered) {
+                self.take_back(s, target, size, &mut batch, now);
+            }
+            self.compose = self.begin_compose(layer_key, covered, &mut batch);
+            if let Some(size) = size.filter(|_| covered && self.compose.is_none()) {
                 // (whatever the retained image holds is covered)
-                self.retained_stale.remove(&layer_key.1.index);
-                if let Some(v) = view.passes[pr.clone()].first().map(|p| p.viewport) {
-                    let size = [(v[0] + v[2]).ceil().max(1.0) as u32, (v[1] + v[3]).ceil().max(1.0) as u32];
-                    if self.offscreen(s, target, size, now).is_ok() {
-                        self.compose = self.begin_compose(layer_key, &mut batch);
-                    }
+                if self.offscreen(s, target, size, now).is_ok() {
+                    self.compose = self.begin_compose(layer_key, covered, &mut batch);
                 }
             }
             if self.compose.is_none() {
@@ -493,6 +545,13 @@ impl Vulkan {
                         // A shell's own target goes to its presenter as rendered: nothing reuses it
                         // before the shell's host has released it.
                         let shared = badges.then(|| self.windows.source.target(key.0, key.1, [image.desc.w, image.desc.h])).flatten();
+                        // the shell gave back the image of the frame last shown since this frame
+                        // began: the retained image takes that frame back before this one replaces it
+                        if shared.as_ref().is_some_and(|i| self.direct_frame.get(&key.1.index).is_some_and(|d| Arc::ptr_eq(d, i))) {
+                            self.take_back(s, target, [image.desc.w, image.desc.h], &mut batch, now);
+                            // (a failed one: the frame is gone with this one)
+                            self.direct_frame.remove(&key.1.index);
+                        }
                         let scanout = if let Some(shared) = shared {
                             // the composed image into the host's next shared image
                             self.copy_image("host image copy", &image, &shared, &mut batch);

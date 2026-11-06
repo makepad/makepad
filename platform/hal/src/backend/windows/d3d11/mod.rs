@@ -139,7 +139,7 @@ impl D3d11 {
             msaa: 1,
             dpi: shell.map_or_else(win32::system_dpi, |s| s.dpi()),
             // offscreen too: a badge layer is composed into the retained image's copy either way
-            flags: info_flags::GPU_TIMESTAMPS | info_flags::WINDOW_BADGES | info_flags::COMPUTE | info_flags::DRAW_STORAGE_BUFFERS | info_flags::DEVICE_RESET,
+            flags: info_flags::GPU_TIMESTAMPS | info_flags::WINDOW_BADGES | info_flags::WINDOW_LAYERS | info_flags::COMPUTE | info_flags::DRAW_STORAGE_BUFFERS | info_flags::DEVICE_RESET,
             max_workgroup_size: [1024, 1024, 64],
             max_workgroup_invocations: 1024,
             storage_formats: (0..format::COUNT).filter(|f| device::dxgi(*f).is_some_and(|fmt| unsafe { dev.device.CheckFormatSupport(fmt.resource) }.unwrap_or(0) & 0x02000000 != 0)).fold(0, |bits, f| bits | (1u64 << f)),
@@ -598,6 +598,7 @@ impl Gpu for D3d11 {
     }
 
     fn badges(&self) -> bool { true }
+    fn layer_copy(&mut self, s: &mut Session, window: Id, layer: Id, _now: u64) -> bool { self.copy_into_layer(s, window, layer) }
     fn badge_layer(&mut self, window: Id, on: bool) {
         if on { self.badged.entry(window.index).or_insert(None); } else { self.badged.remove(&window.index); }
     }
@@ -653,6 +654,11 @@ impl Gpu for D3d11 {
     }
     fn buffer_create(&mut self, s: &mut Session, id: Id, b: &mut BufferObj) -> Result<(), String> {
         let buf = Buffer::new(self.dev.clone(), b.kind, b.size)?;
+        // A retained buffer reads as zero where nothing wrote it, as on Vulkan and Metal. D3D11
+        // leaves a new buffer's bytes undefined (the driver hands out memory the process freed),
+        // so a storage buffer is cleared on the GPU here; the other kinds are read only where
+        // uploaded (a uniform buffer is written whole).
+        if let Some(uav) = &buf.uav { unsafe { self.dev.ctx.ClearUnorderedAccessViewUint(uav, &[0; 4]) } }
         b.bytes = buf.bytes;
         self.buf.insert((s.id, id.index), Buf { gen: id.gen, buf, evictable: b.evictable });
         Ok(())

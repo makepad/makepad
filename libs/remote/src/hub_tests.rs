@@ -112,6 +112,31 @@ fn cmd_goes_to_the_endpoint() {
     }
 }
 
+/// Requests in a row on one routed channel ([`crate::hub::Asking`]) take one route for all of
+/// them, which ends with the channel: a route for each took two threads in the hub, and a master
+/// following its runs' logs spawned 1.4k threads in 25 s (11-06).
+#[test]
+fn requests_in_a_row_on_one_channel_take_one_route() {
+    let (_, _) = shared();
+    let hub = Hub::new(&hosts());
+    let _relay_conn = link(&hub, &relay_endpoint());
+    let c = client(&hub);
+    let me = std::process::id();
+    let asking = crate::hub::Asking::on(c.open("route", &format!("d:{me} cmd ")).unwrap());
+    for _ in 0..5 {
+        let mut reply = Vec::new();
+        assert_eq!(asking.ask("ping", &mut |l| reply.push(l.to_string())), Ok(false));
+        assert!(reply.len() == 1 && reply[0].starts_with("{\"pong\":1"), "{reply:?}");
+        assert_eq!(hub.routes(), 1);
+    }
+    drop(asking);
+    let t = std::time::Instant::now();
+    while hub.routes() > 0 {
+        assert!(t.elapsed() < WAIT, "the route outlived its channel");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// An app's AI tools through the hub, as `devhub inspect <node>/<pid> call ..` and `live act`
 /// ask them (both sent `call` to `cmd`, which knows no such command, 11-05).
 #[test]

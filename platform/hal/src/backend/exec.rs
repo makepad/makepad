@@ -202,6 +202,18 @@ pub trait Gpu {
     /// (`target::BADGES | target::OVERLAY`) and the borrower's frames stay in the retained image.
     /// A backend with neither has no panels: the borrower keeps the window and its input.
     fn overlays(&self) -> bool { false }
+    /// The backend composes session 0's window layers (`window_overlay` with a layer texture)
+    /// itself. Otherwise the executor composes them as it does panels, through the window's
+    /// badge layer, and before each of session 0's frames of the window after a new borrower
+    /// frame has the backend copy that frame into the layer's texture (`layer_copy`).
+    fn layers(&self) -> bool { false }
+    /// A composed window layer's texture `layer` (session 0's) takes the newest frame the
+    /// borrower of session 0's window `window` drew (its retained image under the badge layer,
+    /// or the frame that went to the window system before the layer came on), over the area both
+    /// have; the rest keeps what it had. Recorded ahead of session 0's next frame, which samples it.
+    /// False: that frame is still with the window system, which gives it back within a frame of
+    /// its own; the executor asks again before session 0's next frame.
+    fn layer_copy(&mut self, _s: &mut Session, _window: Id, _layer: Id, _now: u64) -> bool { true }
     /// Mobile shells lend their permanent host window even without an explicit adopt flag.
     fn auto_adopt(&self) -> bool { false }
     /// The backend composes session 0's badge layers (`target::BADGES`) into the frames its
@@ -893,10 +905,10 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 s.bad();
                 return;
             }
-            // an opaque panel the backend does not compose itself: the executor composes it
-            // through the window's layer, or, without one, there is no panel (the app keeps the
-            // window and its input; nothing would show what the input went to)
-            let composed = layer.is_none() && !gpu.overlays();
+            // a panel or window layer the backend does not compose itself: the executor composes
+            // it through the window's badge layer, or, without one, there is none (the app keeps
+            // the window and its input; nothing would show what the input went to)
+            let composed = if layer.is_none() { !gpu.overlays() } else { !gpu.layers() };
             if on && composed && !gpu.badges() {
                 s.stats.overlay_unsupported += 1;
                 return;
@@ -907,7 +919,8 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 return;
             }
             let was_composed = w.val.overlay.as_ref().is_some_and(|o| o.composed);
-            w.val.overlay = next.map(|(rect, layer)| WindowOverlay { rect, frame: None, layer, input, composed: on && composed });
+            // (a new layer takes the app's newest frame before its first frame)
+            w.val.overlay = next.map(|(rect, layer)| WindowOverlay { rect, frame: None, layer, input, composed: on && composed, fresh: true });
             gpu.window_overlay(s, id, on.then_some(rect), layer, now);
             if was_composed || composed {
                 sync_layer(gpu, world, id);
@@ -972,6 +985,19 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             // image (it is opaque: nothing of the app shows) and presented; the borrower's frames
             // under it only render into the retained image
             if overlay && covered { kind |= target::BADGES; }
+            // a composed window layer samples the borrower's newest frame: copied into its
+            // texture first, once per borrower frame (a frame the window system still has: at
+            // the next frame)
+            let fresh_layer = if overlay && covered {
+                s.windows.get(sid, target).ok().and_then(|w| w.val.overlay.as_ref())
+                    .filter(|o| o.fresh && !o.layer.is_none()).map(|o| o.layer)
+            } else {
+                None
+            };
+            if let Some(layer) = fresh_layer {
+                let taken = gpu.layer_copy(s, target, layer, now);
+                if let Some(o) = s.windows.get_mut(sid, target).ok().and_then(|w| w.val.overlay.as_mut()) { o.fresh = !taken; }
+            }
             // Adoption may race the owner's last draw. Once the borrower encodes
             // a window frame, only it may replace that image. Uploads remain valid.
             if sid == HOST && kind & !target::FLAGS == target::WINDOW
@@ -1072,6 +1098,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             if let Some(id) = host {
                 if let Some(w) = world.session_mut(HOST).and_then(|s| s.windows.get_mut(HOST, id).ok()) {
                     w.val.borrower_frame = true;
+                    if let Some(o) = w.val.overlay.as_mut() { o.fresh = true; }
                 }
             }
             // the window's badge layer over the frame it now shows

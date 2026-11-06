@@ -649,10 +649,17 @@ impl Renderer {
 
     /// Copies a whole image into another of its size and format.
     pub fn copy(&mut self, token: Token, from: u64, to: u64, req: u32, rect: [u32; 4]) {
-        let (Some(src), Some(dst)) = (self.textures.get(&from), self.textures.get(&to)) else {
+        if !self.blit(from, to, [rect[2], rect[3]]) {
             self.mailbox.push(token, Event::Readback { req, rect, status: readback::FAILED, pixels: Vec::new() });
             return;
-        };
+        }
+        self.after_gpu(Then::Copy { token, req, rect });
+    }
+
+    /// Copies the top-left `size` texels of image `from` into image `to` (level 0, layer 0 of
+    /// both, which hold the same colour layout). False: one of them is gone.
+    pub fn blit(&mut self, from: u64, to: u64, size: [u32; 2]) -> bool {
+        let (Some(src), Some(dst)) = (self.textures.get(&from), self.textures.get(&to)) else { return false };
         self.bind_read(src);
         let gl = &self.ctx.gl;
         unsafe {
@@ -660,12 +667,15 @@ impl Renderer {
             attach(gl, sys::DRAW_FRAMEBUFFER, sys::COLOR_ATTACHMENT0, dst, 0);
             (gl.glDrawBuffers)(1, &sys::COLOR_ATTACHMENT0);
             (gl.glDisable)(sys::SCISSOR_TEST);
-            let (w, h) = (rect[2] as i32, rect[3] as i32);
+            let (w, h) = (size[0] as i32, size[1] as i32);
             (gl.glBlitFramebuffer)(0, 0, w, h, 0, 0, w, h, sys::COLOR_BUFFER_BIT, sys::NEAREST);
+            // the copy framebuffer keeps no image: an attached one outlives its deletion (a
+            // badge layer's composed image after the layer went)
+            (gl.glFramebufferTexture2D)(sys::DRAW_FRAMEBUFFER, sys::COLOR_ATTACHMENT0, sys::TEXTURE_2D, 0, 0);
             (gl.glBindFramebuffer)(sys::READ_FRAMEBUFFER, 0);
             (gl.glBindFramebuffer)(sys::DRAW_FRAMEBUFFER, 0);
         }
-        self.after_gpu(Then::Copy { token, req, rect });
+        true
     }
 
     /// The window's image goes to its surface. Ok(false): nothing is on screen for it.

@@ -166,6 +166,7 @@ mod imp {
             "activity" => reply_to_answer(ask(Cmd::Activity, ACTIVITY_WAIT_SECS)),
             "mouse" => route_mouse(p, None),
             "click" => route_mouse(p, Some("click")),
+            "move" => route_mouse(p, Some("move")),
             "key" => route_key(p),
             "text" => route_text(p),
             "drop" => route_drop(p),
@@ -3079,7 +3080,9 @@ mod imp {
             }
             assert!(help.contains("\"tool\":\"ui.cap_start\""), "help names each command's tool");
             assert!(help.contains("\"cmd\":\"gpu top\""), "help lists the GPU ledger's commands");
-            assert!(run("frobnicate").contains("unknown command `frobnicate`"));
+            let unknown = run("frobnicate");
+            assert!(unknown.contains("unknown command `frobnicate`"), "{unknown}");
+            assert!(unknown.contains(", move, "), "{unknown}");
             assert!(run("grab").contains("client-side"));
             assert!(run("ping").contains("\"pid\""));
             // the words of a command arrive as positional words or inside a JSON `cmd`

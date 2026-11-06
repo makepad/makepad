@@ -190,7 +190,7 @@ impl Vulkan {
     #[cfg(target_os = "linux")]
     pub fn on_shell(flags: u32, sessions: super::SessionNotify, shell: &'static super::linux::Shared) -> Result<Self, String> {
         let mut backend = Self::with_sources(flags, sessions, super::linux::surface_source(shell), Box::new(NativeImages::default()))?;
-        backend.info.flags |= info_flags::DISPLAY_CLOCK | info_flags::WINDOW_BADGES;
+        backend.info.flags |= info_flags::DISPLAY_CLOCK | info_flags::WINDOW_BADGES | info_flags::WINDOW_LAYERS;
         if shell.client_chrome() { backend.info.flags |= info_flags::CLIENT_CHROME; }
         if shell.window_manager() { backend.info.flags |= info_flags::WM_HOSTED; }
         if shell.direct_display() { backend.info.flags |= info_flags::DIRECT_DISPLAY; }
@@ -881,6 +881,7 @@ impl Gpu for Vulkan {
     }
     #[cfg(target_os = "linux")]
     fn badges(&self) -> bool { self.shell.is_some() }
+    fn layer_copy(&mut self, s: &mut Session, window: Id, layer: Id, now: u64) -> bool { self.copy_into_layer(s, window, layer, now) }
     fn badge_layer(&mut self, window: Id, on: bool) {
         if on { self.badged.entry(window.index).or_default(); } else { self.badged.remove(&window.index); }
     }

@@ -170,3 +170,24 @@ fn why_slow_says_the_ui_wakes_apart_from_its_frames() {
     let r = render("why-slow", &lines(&format!("{finding}\n{}", r#"{"ui_frames_drew":180,"wakes_drew_nothing":90,"woken_by":[["platform-ops",60],["Timer",4]],"s":3.0}"#)));
     assert!(r.contains("UI in 3 s: 180 frames drew, 90 wakes drew nothing (the last 64 woken by platform-ops 60, Timer 4)"), "{}", r);
 }
+
+#[test]
+fn a_hosted_apps_heap_is_its_domain_arena_by_resident_pages() {
+    // a hosted app: the domain arena's committed bytes (whole chunks made writable) are 4x its
+    // resident pages; malloc holds makepad run's own blocks
+    let r = render(
+        "memory",
+        &lines(r#"{"freed_by_domain_teardown_bytes":0}
+{"domain":1,"package":"makepad-calc","state":"Running","arena_in_use_bytes":305500000,"arena_resident_bytes":302900000,"arena_committed_bytes":1244921856,"arena_touched_small_bytes":112027216,"arena_live_slot_bytes":83978032,"arena_large_bytes":227803136,"static_committed_bytes":163840,"threads":19,"thread_names":["domain-1-makepad-calc"]}
+{"measured":"memory now","at_ms":1,"source":"x","partial":[]}
+{"rss_mb":2271.8,"peak_rss_mb":5398.2,"footprint_mb":1690.2,"peak_footprint_mb":4218.0,"compressed_mb":0.0,"malloc_in_use_mb":372.3,"malloc_held_free_mb":103.6}
+{"trims":57,"last_trim_ms":221295}
+{"split":{"routing":"compiler arena","program_heap":"domain 1 arena","program_heap_in_use_mb":291.4,"program_heap_held_free_mb":0.0,"program_heap_resident_mb":288.9,"compiler_arena_committed_mb":1929.8,"compiler_arena_touched_mb":927.6,"compiler_arena_large_mb":191.8,"slots_arena_committed_mb":271.7,"slots_arena_touched_mb":98.1,"slots_arena_large_mb":61.7,"jit_code_mb":47.4,"jit_ro_data_mb":4.5,"burst_arena_committed_mb":24.0}}
+{"findings":[],"more":[]}"#),
+    );
+    assert!(r.contains("Program heap (domain 1 arena) 289 MB resident, 291 MB in use"), "{}", r);
+    assert!(r.contains("| app domain 1 arena (makepad-calc) | 289 |"), "{}", r);
+    assert!(r.contains("resident; 291 MB in use, 1.16 GB committed address space, 19 threads"), "{}", r);
+    assert!(r.contains("| malloc (makepad run, provided crates), in use | 372 |"), "{}", r);
+    assert!(!r.contains("program heap (malloc"), "{}", r);
+}

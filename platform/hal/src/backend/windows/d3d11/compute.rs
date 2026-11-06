@@ -1,4 +1,4 @@
-use super::{D3d11, device::hr, resources::Buffer, complete::{Batch, Ticket}};
+use super::{D3d11, resources::Buffer, complete::{Batch, Ticket}};
 use crate::{backend::exec::PipeStatus, buffers::{CmdView, PipelineBlob}, compute::{self, KernelLayout}, session::{Session, World}, types::*};
 use makepad_windows_sys::Win32::Graphics::Direct3D11::*;
 use std::sync::{Arc, OnceLock};
@@ -31,14 +31,15 @@ impl D3d11 {
         let source = match std::str::from_utf8(blob.code) { Ok(s) => s.to_owned(), Err(e) => return PipeStatus::Failed(e.to_string()) };
         let state = Arc::new(OnceLock::new());
         self.compute.insert((s.id, id.index), Pipe { gen: id.gen, state: state.clone(), announced: false });
+        let name = s.string(blob.desc.name).unwrap_or("").to_owned();
         let dev = self.dev.clone(); let wake = self.mailbox.wake.clone();
         self.compilers.push(Arc::as_ptr(&state) as usize, move || {
-            let result = (|| {
-                let bytes = super::pipeline::compile_stage("cs_5_0", "kernel_main", &source, layout.desc.precise_math != 0)?;
-                let mut shader = None;
-                unsafe { dev.device.CreateComputeShader(&bytes, None, Some(&mut shader)) }.map_err(|e| hr("CreateComputeShader", e))?;
-                Ok(Program { layout, shader: shader.ok_or("no compute shader")? })
-            })();
+            let t0 = std::time::Instant::now();
+            let result = super::pipeline::build_compute(&dev, &source, layout.desc.precise_math != 0, &name).map(|shader| Program { layout, shader });
+            // as a draw pipeline's: a slow FXC compile is named with its time
+            if super::win32::log_enabled() || t0.elapsed() > std::time::Duration::from_secs(2) {
+                eprintln!("[hal-d3d11] compiled `{name}` in {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
+            }
             let _ = state.set(result); wake();
         });
         PipeStatus::Pending

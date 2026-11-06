@@ -192,8 +192,8 @@ pub struct PipelineObj {
     pub blob: std::sync::Arc<[u8]>,
 }
 
-/// An opaque host panel. Its pixels and the application's pixels have separate
-/// lifetimes; an idle or parked application need not redraw to show or dismiss it.
+/// An opaque host panel, or a window layer. Its pixels and the application's pixels have
+/// separate lifetimes; an idle or parked application need not redraw to show or dismiss it.
 #[derive(Clone, Debug)]
 pub struct WindowOverlay {
     pub rect: [f32; 4],
@@ -202,10 +202,15 @@ pub struct WindowOverlay {
     pub layer: Id,
     /// a window layer that takes the window's input from the borrower (a panel always does)
     pub input: bool,
-    /// The executor composes this opaque panel as the window's layer (`Gpu::overlays` false: the
-    /// backend draws no panels itself): while it is up the borrower's frames render into the
-    /// window's retained image and never reach the window; only the panel's frames present.
+    /// The executor composes this panel or window layer as the window's badge layer
+    /// (`Gpu::overlays` / `Gpu::layers` false: the backend composes neither itself): while it is
+    /// up the borrower's frames render into the window's retained image and never reach the
+    /// window; only session 0's frames of the window present.
     pub composed: bool,
+    /// A composed window layer: its texture has not taken the borrower's newest frame yet (a new
+    /// frame, or one still with the window system); `Gpu::layer_copy` before session 0's next
+    /// frame of the window.
+    pub fresh: bool,
 }
 
 impl WindowObj {
@@ -967,6 +972,10 @@ impl World {
         let Some(wid) = wid else { return };
         let Some(host) = self.sessions.get_mut(&HOST) else { return };
         let Ok(w) = host.windows.get_mut(HOST, wid) else { return };
+        // session 0's frames of a window under its panel or layer are the overlay's (`target::OVERLAY`),
+        // not the window's presentations: they neither open the first-frame gate nor count as the
+        // app's frames (a backend reports them by window, not kind)
+        if sid == HOST && w.val.overlay.is_some() { return; }
         w.val.presentations += 1;
         if w.lent_to == sid && sid != HOST { w.val.borrower_presented = true; }
         // The owner reads the presentation record above. Do not give its native Cx

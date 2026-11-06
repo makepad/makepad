@@ -8,6 +8,12 @@
 //! Wayland shells present through EGL window surfaces; offscreen windows (hidden runs, tests) use
 //! the surfaceless platform. Images keep their top row first as on the other backends: every
 //! vertex shader of the dialect flips clip-space Y and the present blit flips it back.
+//!
+//! Every window frame renders into the window's retained image, which the surface shows a copy
+//! of. Under a badge layer of session 0's (`Gpu::badge_layer`: badges, panels and window layers
+//! the executor composes) a frame stays there; the layer's frame copies it into the window's
+//! composed image, draws the layer over it and presents that. The copies, as all GL work, are
+//! jobs of the render thread, queued ahead of the frame that reads them.
 
 pub(crate) mod egl;
 mod frame;
@@ -20,7 +26,7 @@ use super::exec::{self, Gpu, PipeStatus};
 use super::{Backend, Pixels};
 use crate::buffers::{CmdView, PipelineBlob};
 use crate::glsl::GlslPipeline;
-use crate::ledger::{Kind, LedgerEntry, Pools};
+use crate::ledger::{Charge, Kind, LedgerEntry, Pools};
 use crate::session::*;
 use crate::types::*;
 use render::{Caps, Event, Mailbox, Queue, ReadFormat, Token};
@@ -95,6 +101,13 @@ struct Pipe {
     epoch: u64,
     announced: bool,
 }
+/// A host window's composed image under its badge layer (`Gpu::badge_layer`): the retained image
+/// with the layer drawn over, what the window presents.
+pub(crate) struct Composed {
+    gen: u32,
+    obj: Arc<TexObj>,
+    _charge: Charge,
+}
 
 pub struct GlBackend {
     shell: Option<&'static super::linux::Shared>,
@@ -115,6 +128,11 @@ pub struct GlBackend {
     /// the id target of each window's newest pick frame, and the targets missing a draw
     pick_ids: HashMap<(u32, Id), Id>,
     pick_pending: HashSet<(u32, Id)>,
+    /// session 0's windows with a badge layer (by index), and the image each last presented: its
+    /// retained image with the layer over it
+    badged: HashMap<u32, Option<Composed>>,
+    /// the composed image the badge frame being encoded draws into
+    compose: Option<Arc<TexObj>>,
     mailbox: Mailbox,
     /// video, audio, MIDI, camera, dialogs (`backend/linux/media`)
     media: super::linux::media::Media,
@@ -144,14 +162,17 @@ impl GlBackend {
         let mailbox = Mailbox::new(wake);
         let pools = Arc::new(Pools::default());
         let (queue, caps, thread) = render::start(source, mailbox.clone(), pools.clone())?;
-        let mut info = HalInfo { backend: backend_id::GL, dialect: dialect::GLSL, formats: caps.formats, msaa: 1, dpi: 1.0, flags: 0,
+        // offscreen too: a badge layer is composed into the retained image's copy either way
+        let mut info = HalInfo { backend: backend_id::GL, dialect: dialect::GLSL, formats: caps.formats, msaa: 1, dpi: 1.0,
+            flags: info_flags::WINDOW_BADGES | info_flags::WINDOW_LAYERS,
             max_texture: caps.max_texture, max_window: [caps.max_texture; 2],
             device_kind: if caps.software { device_kind::SOFTWARE } else { device_kind::UNKNOWN }, ..Default::default() };
         info.set_device_name(&caps.renderer);
         if super::log_enabled() { eprintln!("[hal-gl] {} offscreen={} software={}", caps.renderer, shell.is_none(), caps.software); }
         Ok(Self { shell, info, caps, queue, thread: Some(thread), next_key: 1, pools,
             tex: HashMap::new(), buf: HashMap::new(), pipe: HashMap::new(), programs: HashMap::new(), win: HashMap::new(),
-            aliases: HashMap::new(), pick_ids: HashMap::new(), pick_pending: HashSet::new(), mailbox, media: Default::default() })
+            aliases: HashMap::new(), pick_ids: HashMap::new(), pick_pending: HashSet::new(), badged: HashMap::new(), compose: None,
+            mailbox, media: Default::default() })
     }
 
     /// A software rasterizer (llvmpipe): the default selection prefers hardware Vulkan and GL.
@@ -352,6 +373,7 @@ impl Backend for GlBackend {
         self.aliases.retain(|k, _| k.0 != sid);
         self.pick_ids.retain(|k, _| k.0 != sid);
         self.pick_pending.retain(|k| k.0 != sid);
+        if sid == HOST { self.badged.clear(); }
         self.programs.retain(|_, state| state.strong_count() > 0);
         exec::free_session(world, sid);
         if let Some(shell) = self.shell { shell.session_closed(sid); }
@@ -532,9 +554,15 @@ impl Gpu for GlBackend {
     }
     fn window_closed(&mut self, sid: u32, id: Id) {
         self.win.remove(&(sid, id.index));
+        if sid == HOST { self.badged.remove(&id.index); }
         self.pick_ids.remove(&(sid, id));
         self.queue.push(move |r| r.ctx.close((sid, id)));
     }
+    fn badges(&self) -> bool { true }
+    fn badge_layer(&mut self, window: Id, on: bool) {
+        if on { self.badged.entry(window.index).or_insert(None); } else { self.badged.remove(&window.index); }
+    }
+    fn layer_copy(&mut self, s: &mut Session, window: Id, layer: Id, _now: u64) -> bool { self.copy_into_layer(s, window, layer) }
     fn window_lent(&mut self, sid: u32, id: Id, host: Id, attach: bool) {
         if let Some(shell) = self.shell { shell.lend(host, if attach { sid } else { HOST }, if attach { id } else { host }); }
         if attach {

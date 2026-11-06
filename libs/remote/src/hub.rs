@@ -629,6 +629,38 @@ pub fn ask(client: &Client, target: &str, service: &str, args: &str, line: &str,
     }
 }
 
+/// One routed channel to `target`'s `service` for a run of requests, one at a time: [`ask`] routes
+/// each request, which takes two threads in the hub and the service's thread at the far end. A
+/// master following the logs of its leases' runs that way spawned 1.4k threads in 25 s (11-06).
+pub struct Asking(Channel);
+
+impl Asking {
+    pub fn open(client: &Client, target: &str, service: &str) -> Result<Asking, String> {
+        client.open("route", &format!("{target} {service} ")).map(Asking).map_err(|e| e.to_string())
+    }
+
+    /// On a `route` channel already open (`<target> <service> `).
+    pub fn on(ch: Channel) -> Asking {
+        Asking(ch)
+    }
+
+    /// One request: `each` gets every answer line but the `end` line. `Ok(true)` when the answer
+    /// held an `err` line; `Err`: the channel ended or was refused (open another).
+    pub fn ask(&self, line: &str, each: &mut dyn FnMut(&str)) -> Result<bool, String> {
+        self.0.send(line.as_bytes().to_vec()).map_err(|e| e.to_string())?;
+        let mut had_err = false;
+        loop {
+            let Some(event) = self.0.recv() else { return Err("the hub connection ended".into()) };
+            if let Some(done) = answer_event(event, &mut had_err, &mut |l| {
+                each(l);
+                true
+            }) {
+                return done;
+            }
+        }
+    }
+}
+
 /// One request of `target`'s `app` service (its AI tools: `list`, `call <service>.<tool>\n<json>`,
 /// [`crate::app::app_request_of`]) through the hub: `each` gets its answer lines, which end with
 /// the channel. `Ok(true)` when the answer held an `err` line; `Err` the hub's or the far side's

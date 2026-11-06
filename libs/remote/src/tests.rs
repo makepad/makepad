@@ -754,19 +754,33 @@ fn a_request_past_its_timeout_is_closed_and_the_connection_goes_on() {
     assert_eq!(client.cmd("slow").unwrap().next().unwrap().unwrap(), "{\"late\":1}");
 }
 
-/// The fds this process holds now (Linux).
+/// The served ends of connections to the Unix socket at `path` this process holds (Linux): an
+/// accepted socket carries its listener's path in /proc/net/unix, and this process holds it when
+/// one of its descriptors names its inode. A served end closes on its client's EOF: one still
+/// open is a descriptor this side kept, or one its client did.
 #[cfg(target_os = "linux")]
-fn open_fds() -> usize {
-    std::fs::read_dir("/proc/self/fd").map(|d| d.count()).unwrap_or(0)
+fn served_on(path: &std::path::Path) -> usize {
+    const ACCEPTING: u32 = 1 << 16; // __SO_ACCEPTCON: the listener itself
+    let held: std::collections::HashSet<String> = std::fs::read_dir("/proc/self/fd").unwrap().flatten()
+        .filter_map(|e| std::fs::read_link(e.path()).ok()?.to_str()?.strip_prefix("socket:[")?.strip_suffix(']').map(str::to_string))
+        .collect();
+    std::fs::read_to_string("/proc/net/unix").unwrap().lines().skip(1).filter(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        f.len() >= 8 && f[7] == path.to_str().unwrap() && u32::from_str_radix(f[3], 16).is_ok_and(|flags| flags & ACCEPTING == 0) && held.contains(f[6])
+    }).count()
 }
 
 /// The master's control socket serves thousands of short requests (a lease client's beat, the
-/// CLI): every connection's descriptors must go when the client does.
+/// CLI): every connection's descriptors must go when the client does. Counted on a socket of its
+/// own, never the process's descriptors, which every test running beside it opens and closes:
+/// that count failed with no descriptor of this test kept (11-06).
 #[cfg(target_os = "linux")]
 #[test]
 fn served_connections_release_their_descriptors() {
-    let (_, _) = shared();
-    let sock = crate::carrier::unix::paths(std::process::id()).0;
+    let ep = Endpoint::new("makepad-remote-fd-test");
+    ep.register_cmd(app_dispatch);
+    let sock = std::env::temp_dir().join(format!("mpr-fd-{}.sock", std::process::id()));
+    crate::carrier::unix::listen_at(&ep, &sock).unwrap();
     let round = |n: usize| {
         for _ in 0..n {
             let c = Client::new(Target::Unix(sock.clone()), "fd-test");
@@ -776,17 +790,23 @@ fn served_connections_release_their_descriptors() {
             drop(c);
         }
     };
-    round(50); // thread and allocator warm-up
-    std::thread::sleep(Duration::from_millis(500));
-    let before = open_fds();
+    let closed = || {
+        // the server side closes on the peer's EOF, on its own threads
+        let t = std::time::Instant::now();
+        while served_on(&sock) > 0 && t.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        served_on(&sock)
+    };
+    // a connection held open is counted, and its end goes with it
+    let held = Client::new(Target::Unix(sock.clone()), "fd-test");
+    assert!(held.cmd("ping").unwrap().next().unwrap().unwrap().starts_with("{\"pong\":1"));
+    assert_eq!(served_on(&sock), 1, "an open connection's served end");
+    drop(held);
+    assert_eq!(closed(), 0, "one request");
     round(3000);
-    // the server side closes on the peer's EOF, on its own threads
-    let t = std::time::Instant::now();
-    while open_fds() > before + 8 && t.elapsed() < Duration::from_secs(20) {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let after = open_fds();
-    assert!(after <= before + 8, "fds before {before}, after 3000 requests {after}");
+    assert_eq!(closed(), 0, "3000 requests");
+    let _ = std::fs::remove_file(&sock);
 }
 
 #[test]

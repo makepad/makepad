@@ -3,7 +3,7 @@ use crate::{Cx, Texture, TextureFormat, DrawPassId, makepad_live_id::LiveId, mak
 use crate::makepad_script::shader_ir_compute::{self as compiler, ComputeLayout, ComputeTarget, ComputeSlotKind, CompiledKernel};
 use makepad_hal::{self as hal, Id, CmdWriter, StorageBinding, StorageImageBinding};
 use hal::codec::ArenaSink;
-use std::{cell::Cell, rc::{Rc, Weak}};
+use std::{cell::{Cell, RefCell}, rc::{Rc, Weak}};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GpuBufferFlags { pub indirect: bool, pub readback: bool }
@@ -53,7 +53,7 @@ impl GpuBuffer {
     }
 }
 
-struct KernelInner { name: String, compiled: CompiledKernel, pipeline: Rc<Cell<Id>> }
+struct KernelInner { name: String, compiled: CompiledKernel, pipeline: Rc<Cell<Id>>, next: RefCell<Vec<ComputeKernel>> }
 #[derive(Clone)]
 pub struct ComputeKernel(Rc<KernelInner>);
 impl ComputeKernel {
@@ -73,10 +73,15 @@ impl ComputeKernel {
         Ok(Self::install(cx, compiled, name))
     }
     fn install(cx: &mut Cx, compiled: CompiledKernel, name: &str) -> Self {
-        let inner = Rc::new(KernelInner { name: name.into(), compiled, pipeline: Rc::new(Cell::new(Id::NONE)) });
+        let inner = Rc::new(KernelInner { name: name.into(), compiled, pipeline: Rc::new(Cell::new(Id::NONE)), next: RefCell::new(Vec::new()) });
         cx.hal.compute.kernels.push((inner.pipeline.clone(), Rc::downgrade(&inner)));
         Self(inner)
     }
+    /// Declares that a dispatch of this kernel is always followed by one of `next` (a family's
+    /// fixed sequence, as a count pass's fill): this kernel's pipeline, requested at its first
+    /// dispatch, requests next's with it, so the two compile at once on the HAL's workers
+    /// instead of one after the other. A sequence, not a cycle; every other pipeline stays lazy.
+    pub fn followed_by(&self, next: &ComputeKernel) { self.0.next.borrow_mut().push(next.clone()); }
     pub fn layout(&self) -> &ComputeLayout { &self.0.compiled.layout }
     pub fn params(&self) -> ComputeParams { ComputeParams { kernel: self.clone(), bytes: vec![0; self.layout().push_size as usize] } }
     fn pipeline(&self, fb: &mut crate::frame_build::FrameBuilder) -> Id {
@@ -93,6 +98,7 @@ impl ComputeKernel {
         let blob = CmdWriter::compute_pipeline_blob(hal::PipelineDesc { name, ..Default::default() }, &code, desc, &buffers, &textures);
         let id = fb.compute_pipeline(&self.0.name, &blob);
         self.0.pipeline.set(id);
+        for next in self.0.next.borrow().iter() { next.pipeline(fb); }
         id
     }
 }
@@ -117,8 +123,21 @@ impl ComputePass {
     pub fn new(name: impl Into<String>, before: Option<DrawPassId>) -> Self { Self { name: name.into(), before, dispatches: Vec::new() } }
     pub fn dispatch(&mut self, kernel: &ComputeKernel, groups: [u32; 3], params: &ComputeParams, buffers: &[GpuBuffer], textures: &[Texture]) -> Result<(), String> {
         if !Rc::ptr_eq(&kernel.0, &params.kernel.0) || buffers.len() != kernel.layout().buffers.len() || textures.len() != kernel.layout().storage_textures.len() { return Err("compute bindings do not match kernel reflection".into()); }
-        for (buffer, binding) in buffers.iter().zip(&kernel.layout().buffers) {
+        let layout = kernel.layout();
+        for (i, (buffer, binding)) in buffers.iter().zip(&layout.buffers).enumerate() {
             if buffer.hal_id().is_none() || buffer.size() % binding.alignment as u64 != 0 { return Err("invalid storage buffer binding".into()); }
+            // D3D11 binds a resource once per dispatch and silently drops its other view (the
+            // reads see zeros, the writes vanish), so one buffer in two slots is refused on
+            // every backend unless both only read it.
+            if let Some((_, other)) = buffers[..i].iter().zip(&layout.buffers).find(|(b, o)| *b == buffer && (o.writable || binding.writable)) {
+                return Err(format!("kernel {}: one buffer is bound to both {} and {}, and one of them writes it", kernel.0.name, other.name, binding.name));
+            }
+        }
+        // every storage texture binding writes
+        for (i, (texture, binding)) in textures.iter().zip(&layout.storage_textures).enumerate() {
+            if let Some((_, other)) = textures[..i].iter().zip(&layout.storage_textures).find(|(t, _)| *t == texture) {
+                return Err(format!("kernel {}: one storage texture is bound to both {} and {}", kernel.0.name, other.name, binding.name));
+            }
         }
         self.dispatches.push(Recorded { kernel: kernel.clone(), timer: None, groups, indirect: None, params: params.clone(), buffers: buffers.to_vec(), textures: textures.to_vec() });
         Ok(())

@@ -387,6 +387,18 @@ impl D3d11 {
         Some(composed)
     }
 
+    /// A composed window layer's texture `layer` takes the borrower's newest frame of host window
+    /// `window` (`Gpu::layer_copy`): the window's retained image (every frame renders into it),
+    /// over the area both have.
+    pub(super) fn copy_into_layer(&mut self, s: &mut Session, window: Id, layer: Id) -> bool {
+        let Some(source) = self.win.get(&(HOST, window.index)).filter(|t| t.gen == window.gen).map(|t| t.tex.clone()) else { return true };
+        let Some(image) = self.resolve(s, layer) else { return true };
+        if source.desc.format != image.desc.format || Arc::ptr_eq(&source, &image) { return true }
+        let area = D3D11_BOX { left: 0, top: 0, front: 0, right: source.desc.w.min(image.desc.w), bottom: source.desc.h.min(image.desc.h), back: 1 };
+        unsafe { self.dev.ctx.CopySubresourceRegion(image.res.as_ID3D11Resource(), 0, 0, 0, 0, source.res.as_ID3D11Resource(), 0, Some(&area)) };
+        true
+    }
+
     /// A 1x1 texture of a shape, sampled where a draw names no texture.
     fn fallback(&mut self, shape: u32) -> Result<Arc<Texture>, String> {
         if let Some(t) = self.fallback.get(&shape) {
@@ -445,11 +457,12 @@ impl D3d11 {
         let badges = layered && kind & target::BADGES != 0;
         if badges {
             self.compose = self.begin_compose(key);
-            // an opaque panel (`target::OVERLAY`) needs nothing under it: with no frame of the
-            // window kept yet (an app parked before it drew under the layer) the window's
-            // retained image is made at the panel's size and composed over as it is
+            // an opaque panel or a window layer (`target::OVERLAY`) needs nothing under it: with
+            // no frame of the window kept yet (an app parked before it drew under the layer) the
+            // window's retained image is made at the window pass's size and composed over as it is
             if self.compose.is_none() && kind & target::OVERLAY != 0 {
-                if let Some(v) = view.passes[pr.clone()].first().map(|p| p.viewport) {
+                let window_pass = view.passes[pr.clone()].iter().find(|p| p.kind != crate::types::pass_kind::COMPUTE && p.color.iter().all(|c| c.is_none()));
+                if let Some(v) = window_pass.map(|p| p.viewport) {
                     let size = [(v[0] + v[2]).ceil().max(1.0) as u32, (v[1] + v[3]).ceil().max(1.0) as u32];
                     if self.window_storage(s, target, size, now).is_ok() {
                         self.compose = self.begin_compose(key);
