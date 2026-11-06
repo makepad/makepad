@@ -316,7 +316,7 @@ impl JobBoard {
             id
         };
         wake();
-        JobHandle { reporter: JobReporter { id, cancel }, ended: false }
+        JobHandle { reporter: JobReporter { id, cancel, part: None }, ended: false }
     }
 
     /// Changes whenever anything a view shows has changed.
@@ -459,6 +459,30 @@ impl JobBoard {
 pub struct JobReporter {
     id: JobId,
     cancel: Arc<AtomicBool>,
+    /// The share of the job this reporter's work is ([`JobReporter::part`]), else the whole.
+    part: Option<Arc<Part>>,
+}
+
+/// A share of a job: `lo..hi` of the whole, its work named `stage`.
+struct Part {
+    lo: f32,
+    hi: f32,
+    stage: String,
+}
+
+impl Part {
+    fn fraction(&self, f: f32) -> f32 {
+        self.lo + f.clamp(0.0, 1.0) * (self.hi - self.lo)
+    }
+
+    /// The whole job's fraction for this part's `fraction` (none: where the bar is now, if it
+    /// is in this part, else the part's start).
+    fn place(&self, fraction: Option<f32>, now: Option<f32>) -> f32 {
+        match fraction {
+            Some(f) => self.fraction(f),
+            None => now.filter(|n| (self.lo..=self.hi).contains(n)).unwrap_or(self.lo),
+        }
+    }
 }
 
 impl JobReporter {
@@ -499,13 +523,39 @@ impl JobReporter {
         });
     }
 
+    /// A reporter for one share of this job's work, `lo..hi` of the whole (of this
+    /// reporter's share, for a part of a part), that work named `stage`. What deep code reports
+    /// through it, a kernel's own stages and fractions, lands in place: "building the frame 2/5"
+    /// then "building the frame 2/5 · fillets 3/7", the fraction within `lo..hi`, so the whole
+    /// job's bar never runs back. The share starts at `lo`, its stage shown.
+    pub fn part(&self, lo: f32, hi: f32, stage: impl Into<String>) -> JobReporter {
+        let (lo, hi) = (lo.clamp(0.0, 1.0), hi.clamp(0.0, 1.0).max(lo.clamp(0.0, 1.0)));
+        let stage = stage.into();
+        let part = match &self.part {
+            Some(outer) => Part { lo: outer.fraction(lo), hi: outer.fraction(hi), stage: if outer.stage.is_empty() { stage } else if stage.is_empty() { outer.stage.clone() } else { format!("{} · {stage}", outer.stage) } },
+            None => Part { lo, hi, stage },
+        };
+        let reporter = JobReporter { id: self.id, cancel: self.cancel.clone(), part: Some(Arc::new(part)) };
+        reporter.stage("", None, Some(0.0));
+        reporter
+    }
+
     /// A new stage. `step` is this stage's place in its count (fillet 3 of
     /// 7, stage 2 of 4), when there is one. `fraction` is how far the whole
-    /// job is, when known.
+    /// job is (of this reporter's [`part`](Self::part)), when known.
     pub fn stage(&self, stage: impl Into<String>, step: Option<(u32, u32)>, fraction: Option<f32>) {
         let stage = stage.into();
-        let fraction = fraction.map(|f| f.clamp(0.0, 1.0));
+        // a part's stage follows its own
+        let stage = match &self.part {
+            Some(part) if stage.is_empty() => part.stage.clone(),
+            Some(part) if !part.stage.is_empty() => format!("{} · {stage}", part.stage),
+            _ => stage,
+        };
         board().edit(self.id, |snap| {
+            let fraction = match &self.part {
+                Some(part) => Some(part.place(fraction, snap.fraction)),
+                None => fraction.map(|f| f.clamp(0.0, 1.0)),
+            };
             if snap.stage == stage && snap.step == step && snap.fraction == fraction {
                 return false;
             }
@@ -523,6 +573,10 @@ impl JobReporter {
             if snap.step == Some((i, n)) {
                 return false;
             }
+            let fraction = match &self.part {
+                Some(part) => Some(part.place(fraction, snap.fraction)),
+                None => fraction,
+            };
             snap.step = Some((i, n));
             snap.fraction = fraction;
             true
@@ -532,8 +586,11 @@ impl JobReporter {
     /// How far, 0..=1, or `None` for a moving bar. Changes too small to see
     /// (under half a percent) are stored without waking the UI.
     pub fn fraction(&self, fraction: Option<f32>) {
-        let fraction = fraction.map(|f| f.clamp(0.0, 1.0));
         board().edit(self.id, |snap| {
+            let fraction = match &self.part {
+                Some(part) => Some(part.place(fraction, snap.fraction)),
+                None => fraction.map(|f| f.clamp(0.0, 1.0)),
+            };
             let visible = match (snap.fraction, fraction) {
                 (Some(a), Some(b)) => (a - b).abs() >= 0.005 || (b >= 1.0 && a < 1.0),
                 (None, None) => false,
@@ -658,5 +715,38 @@ impl Drop for JobHandle {
             JobEnd::Failed { reason: "stopped without finishing".to_string(), retry: true }
         };
         board().end(self.reporter.id, end);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_part_reports_in_its_share_of_the_job_and_its_bar_never_runs_back() {
+        let job = JobSpec::new("Opening the plate").start();
+        let shown = |words: &str, fraction: f32| {
+            let j = board().get(job.id()).expect("on the board");
+            assert_eq!(j.stage_words(), words);
+            assert!(j.fraction.is_some_and(|f| (f - fraction).abs() < 1e-5), "{words}: {:?}, not {fraction}", j.fraction);
+        };
+        let frame = job.part(0.2, 0.6, "building the frame 2/5");
+        shown("building the frame 2/5", 0.2);
+        // a kernel's own stage and fraction, in place
+        frame.stage("fillets", Some((3, 7)), Some(0.5));
+        shown("building the frame 2/5 · fillets 3/7", 0.4);
+        // no fraction: the bar stays where it is
+        frame.stage("meshing", None, None);
+        shown("building the frame 2/5 · meshing", 0.4);
+        frame.step(3, 4);
+        shown("building the frame 2/5 · meshing 3/4", 0.5);
+        // a part of a part takes its share of its share
+        let pin = frame.part(0.5, 1.0, "the pin");
+        pin.fraction(Some(0.5));
+        shown("building the frame 2/5 · the pin", 0.5);
+        // the whole job reports as ever
+        job.stage("preparing the view", None, Some(0.9));
+        shown("preparing the view", 0.9);
+        job.done();
     }
 }

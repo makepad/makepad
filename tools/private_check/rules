@@ -2,6 +2,7 @@
 #
 # <rule> <ERE>         a line the POSIX extended regex matches, case-insensitively, breaks <rule>
 # except <rule> <ERE>  a match of <rule> this regex matches in full is fine (placeholders)
+# define <name> <ERE>  `@<name>@` in a rule stands for (<ERE>); a rule naming one no file defines is off
 #
 # Only the ERE subset grep, git grep and awk share: no \b \d \s \w, no {m,n}, no backreferences.
 # Always fine: the documentation ranges 192.0.2/24, 198.51.100/24 and 203.0.113/24, the hotspot subnet
@@ -30,3 +31,15 @@ except home-path .?/[a-z]/users/(me|you|[a-z]|name|user|username|someone|public)
 # a GPU model on the same line as an address or a node: a machine's inventory
 gpu-near-host (rtx|gtx|quadro|titan)[ -]?(pro[ -]?)?[0-9][0-9][0-9]|radeon[ -](rx|pro)|geforce|apple m[1-9]|(^|[^a-z0-9])m[1-9] (pro|max|ultra)
 and gpu-near-host [0-9][0-9]?[0-9]?\.[0-9][0-9]?[0-9]?\.[0-9][0-9]?[0-9]?\.[0-9][0-9]?[0-9]?|(node|box|host|machine)[ #-]?[0-9]
+
+# a node's number as its machine's name, for the numbers the untracked patterns give as
+# `define node-number <ERE>` (none there: these are off): "<N>'s", "<N>, <date>", "<N> sat" (the
+# subject of a verb), "(<N>, ... <date>)", "(<date>, ... <N>)". Seven comments such as "(<N>, 11-06)"
+# and "<N>'s" reached work through the hooks (11-06). The number after a word that makes it a code,
+# a count or a place in something (`exit <N>`, `line <N> is`) is none, nor one inside a name.
+node-number (^|[^0-9a-z.#_:/=-])([a-z]+ +)?@node-number@'s([^a-z0-9_]|$)
+node-number (^|[^0-9a-z.#_:/=-])([a-z]+ +)?@node-number@, (20[0-9][0-9]-)?[01][0-9]-[0-3][0-9]([^0-9]|$)
+node-number (^|[^0-9a-z.#_:/=-])([a-z]+ +)?@node-number@ (sat|sits|ran|runs|took|takes|showed|shows|saw|sees|lost|loses|kept|keeps|went|goes|booted|boots|rebooted|reboots|crashed|crashes|hung|hangs|stalled|stalls|froze|freezes|died|dies|answered|answers|refused|refuses|restarted|restarts|stopped|stops|served|serves|built|builds|rebuilt|rebuilds|rolled|rolls|woke|wakes|slept|sleeps|swapped|swaps|panicked|idled|idles|shipped|ships)([^a-z0-9_]|$)
+node-number \(([^()]*[^0-9a-z.#_:/=-])?([a-z]+ +)?@node-number@(,|;| and | or )([^()]*[^0-9])?(20[0-9][0-9]-)?[01][0-9]-[0-3][0-9]([^0-9)][^()]*)?\)
+node-number \(([^()]*[^0-9])?(20[0-9][0-9]-)?[01][0-9]-[0-3][0-9][^0-9)]([^()]*[^0-9a-z.#_:/=-])?([a-z]+ +)?@node-number@(\)|(,|;| and | or )[^()]*\))
+except node-number (.*[^a-z])?(exit|code|codes|status|signal|errno|rc|returns|returned|error|errors|line|lines|col|column|row|page|item|items|step|steps|frame|frames|byte|bytes|seq|id|pid|port|lease|job|issue|pr|version|test|tests|case|cases|count|took|value|len|size|width|height|offset|index|slot|round|rounds|attempt|tries) +@node-number@.*

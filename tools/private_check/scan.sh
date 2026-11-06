@@ -18,7 +18,9 @@
 # (untracked, the exact private tokens; MAKEPAD_PRIVATE_PATTERNS names another file; missing means
 # the generic rules alone). Each is `<rule> <ERE>`: a line the POSIX extended regex matches,
 # case-insensitively, breaks <rule>; `and <rule> <ERE>`: ...and the line also matches this one;
-# `except <rule> <ERE>`: a match of <rule> this regex matches in full is fine (placeholders).
+# `except <rule> <ERE>`: a match of <rule> this regex matches in full is fine (placeholders);
+# `define <name> <ERE>`: `@<name>@` in any of them stands for (<ERE>), so a tracked rule's shape
+# can take its private tokens from the untracked file. A rule that names one no file defines is off.
 # A real exception is a `<path or dir/> <rule> <reason>` line in tools/private_check/allow.
 # local/ is never scanned. A hit prints `<file>:<line>: <rule>`, never the text, and a last line
 # `private: <N> hit(s): ...` sums them up. Exit 0 clean, 1 hits, 2 a usage or git error.
@@ -40,16 +42,43 @@ function load(f,   line, kind, name, re) {
         if (line ~ /^[ \t]*(#|$)/) continue
         kind = line; sub(/[ \t].*$/, "", kind)
         re = line; sub(/^[^ \t]+[ \t]+/, "", re)
-        if (kind == "except" || kind == "and") {
+        if (kind == "except" || kind == "and" || kind == "define") {
             name = re; sub(/[ \t].*$/, "", name)
             sub(/^[^ \t]+[ \t]+/, "", re)
-            if (kind == "except") ex[name] = (name in ex) ? ex[name] "|" tolower(re) : tolower(re)
+            if (kind == "define") def[name] = tolower(re)
+            else if (kind == "except") { nex[name]++; exre[name, nex[name]] = tolower(re) }
             else { na2[name]++; andre[name, na2[name]] = tolower(re) }
             continue
         }
         n++; rname[n] = kind; rre[n] = tolower(re)
     }
     close(f)
+}
+# re with each @name@ as its define in a group; "" when a name has none (what holds it is off)
+function expand(re,   out, name) {
+    out = ""
+    while (match(re, /@[a-z0-9_-]+@/)) {
+        name = substr(re, RSTART + 1, RLENGTH - 2)
+        if (!(name in def)) return ""
+        out = out substr(re, 1, RSTART - 1) "(" def[name] ")"
+        re = substr(re, RSTART + RLENGTH)
+    }
+    return out re
+}
+# the rules once every file is read: the defines put in, the rules that name a missing one off
+function resolve(   i, k, name, re) {
+    for (i = 1; i <= n; i++) rre[i] = expand(rre[i])
+    for (name in na2)
+        for (k = 1; k <= na2[name]; k++) {
+            andre[name, k] = expand(andre[name, k])
+            if (andre[name, k] == "") off[name] = 1
+        }
+    for (name in nex)
+        for (k = 1; k <= nex[name]; k++) {
+            re = expand(exre[name, k])
+            if (re != "") ex[name] = (name in ex) ? ex[name] "|" re : re
+        }
+    for (i = 1; i <= n; i++) live[i] = rre[i] != "" && !(rname[i] in off)
 }
 function allowed(path, rule,   i) {
     for (i = 1; i <= nal; i++)
@@ -75,7 +104,12 @@ function also(i, s,   k) {
     return 1
 }
 BEGIN {
-    load(rules); load(private)
+    load(rules); load(private); resolve()
+    # list: the regex of every live rule, one per line (the candidate patterns of a tree scan)
+    if (list) {
+        for (i = 1; i <= n; i++) if (live[i]) print rre[i]
+        exit
+    }
     while ((getline line < allow) > 0) {
         sub(/\r$/, "", line)
         if (line ~ /^[ \t]*(#|$)/) continue
@@ -87,8 +121,11 @@ BEGIN {
 {
     t = index($0, "\t"); path = substr($0, 1, t - 1); rest = substr($0, t + 1)
     t = index(rest, "\t"); ln = substr(rest, 1, t - 1); text = tolower(substr(rest, t + 1))
+    split("", said)
     for (i = 1; i <= n; i++) {
-        if (!match(text, rre[i]) || !also(i, text) || excused(i, text) || allowed(path, rname[i])) continue
+        if (!live[i] || (rname[i] in said) || !match(text, rre[i]) || !also(i, text) || excused(i, text) || allowed(path, rname[i])) continue
+        # a line breaks a rule once, whichever of its regexes match
+        said[rname[i]] = 1
         printf "%s:%s: %s\n", path, ln, rname[i]
         hits++
     }
@@ -162,11 +199,11 @@ tree)
     cd "$top" || exit 2
     pats=$(mktemp "${TMPDIR:-/tmp}/private-check.XXXXXX") || exit 2
     trap 'rm -f -- "$pats"' EXIT
-    # the rules' own patterns pick the candidate lines, the awk side decides. grep, not git grep:
+    # the live rules' own patterns pick the candidate lines, the awk side decides. grep, not git grep:
     # GNU grep runs the patterns as one DFA (a Linux node: about a second of one core for the
     # whole tree; git grep: minutes of CPU). One grep at a time: parallel ones interleave lines.
     # LC_ALL=C: only a NUL makes a file binary. -d skip: a symlinked directory or a submodule.
-    cat "$rules" ${private:+"$private"} | awk '!/^[ \t]*(#|$)/ && $1 != "except" && $1 != "and" { sub(/^[^ \t]+[ \t]+/, ""); print }' > "$pats"
+    awk -v rules="$rules" -v private="$private" -v allow="$allow" -v list=1 "$prog" < /dev/null > "$pats" || exit 2
     git ls-files -z -- . ':(exclude)local/' |
         LC_ALL=C xargs -0 grep -s -d skip -I -n -H --null -i -E -f "$pats" |
         tr '\0' '\t' |
