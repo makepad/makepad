@@ -108,7 +108,7 @@ pub struct LeaseMaster {
 /// [`LeaseMaster::silent_overdue`]: a lease this many times over its measure...
 const OVERDUE_TIMES: u64 = 5;
 /// ...whose agent made no devhub call for this long.
-const AGENT_SILENT_MS: u64 = 15 * 60_000;
+pub const AGENT_SILENT_MS: u64 = 15 * 60_000;
 
 /// How long a lease's start waits for its box's hub to come back (a restart for its update takes
 /// seconds) before the lease goes back to the queue.
@@ -1700,6 +1700,11 @@ impl LeaseMaster {
             let silent = now.saturating_sub(seen.get(agent).copied().unwrap_or(0).max(l.asked_ms));
             (silent > AGENT_SILENT_MS).then(|| format!("{}: {} {}@{} running {} against {against} ({}x), its agent {agent} made no devhub call for {} min: `devhub cancel {}` frees the box", l.req.lane, l.id, l.req.kind.as_str(), l.node.as_deref().unwrap_or("?"), super::sched::dur(ran), ran / measure.max(1), silent / 60_000, l.id))
         }).collect()
+    }
+
+    /// When `agent` last made a devhub call (0: not since this master started).
+    pub fn agent_seen_ms(&self, agent: &str) -> u64 {
+        self.agents_seen.lock().unwrap().get(agent).copied().unwrap_or(0)
     }
 
     /// One control service request (the line may repeat the service word, like `ps`).

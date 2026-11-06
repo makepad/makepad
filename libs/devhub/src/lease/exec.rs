@@ -61,7 +61,7 @@ fn with_load(answer: String, load: impl FnOnce() -> Option<(f64, f64)>) -> Strin
     }
 }
 
-pub const WORDS: &[&str] = &["overlay-selftest", "overlay-status", "overlay-why", "lease-start", "lease-run", "lease-log", "lease-end", "lease-beat", "lease-jits", "lease-yield", "lease-kill", "lease-why", "ship-have", "ship-put", "ship-link", "ship-done", "lease-owns", "hub-restart", "service-restart", "service-health", "get-ls", "get-read", "policy", "lease-conf", "caps", "disk", "heap", "recover-get", "recover-del"];
+pub const WORDS: &[&str] = &["overlay-selftest", "overlay-status", "overlay-why", "lease-start", "lease-run", "lease-log", "lease-end", "lease-beat", "lease-jits", "lease-yield", "lease-kill", "lease-why", "ship-have", "ship-put", "ship-link", "ship-done", "lease-owns", "hub-restart", "service-restart", "service-health", "get-ls", "get-read", "policy", "lease-conf", "caps", "disk", "lane-dirs", "heap", "recover-get", "recover-del"];
 
 /// Marks every process a lease's runs start ([`lease_mark`]): a process that moved to its own session (a
 /// WM's apps, a detached helper) is still stopped with the lease. One that outlives its lease on
@@ -1652,6 +1652,8 @@ impl Exec {
                 let lines = { let mut lines = lines; lines.insert(1, super::relaxgit::counters()); lines };
                 lines
             }
+            // its own word: an older hub's `disk` takes any other words for a reclaim
+            "lane-dirs" => vec![self.lane_sizes()],
             "recover-get" => vec![self.recover_get(rest)],
             "recover-del" => vec![self.recover_del(rest)],
             _ => vec![err(format!("unknown service {word}"))],
@@ -3473,6 +3475,24 @@ impl Exec {
         self.guard.touch();
         (self.publish)(crate::proto::hub_record(&self.machine, "", 0, "disk", crate::proto::Sev::Info, format!("disk: lane {lane} landed: {} dirs removed, {} MB freed", removed.len(), freed >> 20), String::new()));
         format!("{{\"cleaned\":{},\"removed\":[{}],\"freed_mb\":{}}}", json_str(lane), removed.join(","), freed >> 20)
+    }
+
+    /// `lane-dirs`: the bytes on disk of each lane's dirs here (the ones `disk clean <lane>`
+    /// removes), as `{"lanes":{"<lane>":<bytes>}}`. Reads only.
+    fn lane_sizes(&self) -> String {
+        let w = self.conf().work;
+        let mut sizes: BTreeMap<String, u64> = BTreeMap::new();
+        let dirs = [(w.join("dev/lane"), ""), (w.join("dev/overlay"), ""), (w.join("dev/lane-jit"), ""), (w.join("lane"), ""), (w.join("target"), "lane-"), (w.join("native"), ""), (w.join("native-target"), ""), (caps::home_dir().join("rc/pool"), "")];
+        for (dir, prefix) in dirs {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let Some(lane) = name.strip_prefix(prefix).map(|l| l.strip_suffix(".last").unwrap_or(l)) else { continue };
+                if makepad_devhub_conf::valid_name(lane) {
+                    *sizes.entry(lane.to_string()).or_default() += super::disk::dir_size(&e.path()).0;
+                }
+            }
+        }
+        format!("{{\"lanes\":{{{}}}}}", sizes.iter().map(|(l, b)| format!("{}:{b}", json_str(l))).collect::<Vec<_>>().join(","))
     }
 
     /// A landed lane's dirs leave for the trash; the ones that left, as JSON strings.

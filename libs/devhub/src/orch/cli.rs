@@ -73,9 +73,19 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N] [
   lane drop <name>                        abandon a lane: unlanded commits (uncommitted work committed first) are
                                           bundled into ~/.makepad/devhub/dropped, then worktrees, branches, node dirs go
   lane stop <name>                        end its live and queued leases; it may take new leases at once
-  lane quiet                              lanes whose last job or lease ended over 15 min ago, nothing newer from them
+  lane quiet                              lanes whose last job or lease ended over 15 min ago, nothing newer from them;
+                                          then the ones with nothing for 6 h and their agent gone (offered for
+                                          retirement), and the parked ones in one row
   timeline <lane>                         the lane's time: thinking, queueing, gating, booting, running
   lane keep|unkeep <name>                 exempt a lane from the cleanup after landing (or not)
+  lane park <name> [why]                  the lane waits (finished, or for another lane): the merge bot leaves its
+                                          branches alone (said once, never a warning; its merge warnings already in
+                                          the inbox are cleared), `lane quiet` lists it in one row
+  lane unpark <name>                      the merge bot merges into it again
+  lane retire <name>                      a lane that is over without landing: its worktree pair and node dirs go,
+                                          its branches stay; refused while anything uncommitted or untracked is in it
+  lane offers [--check]                   the lanes offered for retirement, one row each; --check reads (here) what
+                                          retiring them frees on the Mac and the nodes and which refuse, by reason
   lane live <name> on|off                 the manager's mark: the user waits for this lane. Its landings take the
                                           fast path (clean merge + check of the changed app, ahead of the queue; the
                                           boot at `devhub show`, the tests after landing)
@@ -886,6 +896,10 @@ fn push_answer(v: &Value) -> String {
         let shown = areas.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
         let more = if areas.len() > 6 { format!(" and {} more", areas.len() - 6) } else { String::new() };
         out.push_str(&format!("{:2} {} {} [{} files, +{} -{}] {shown}{more}\n", i + 1, super::short(&s(c, "sha")), s(c, "title"), n(c, "files"), n(c, "added"), n(c, "removed")));
+        let credits = words(c, "co_authors");
+        if !credits.is_empty() {
+            out.push_str(&format!("   co-authored by {}\n", credits.join(", ")));
+        }
     }
     if !dry {
         return out;
@@ -934,13 +948,45 @@ fn lane(c: &Client, words: &[&str], json: bool) -> i32 {
             let req = format!("{{\"name\":{},\"from\":{},\"commercial\":{commercial}}}", json_str(name), json_str(&from));
             done(one(c, "lane", &format!("lane new {req}")), json, &|v| format!("{}\n", v.get("path").and_then(|p| p.as_str()).unwrap_or("")))
         }
-        [verb @ ("drop" | "remove" | "keep" | "unkeep"), name] => done(one(c, "lane", &format!("lane {verb} {name}")), json, &flat),
+        [verb @ ("drop" | "remove" | "retire" | "keep" | "unkeep" | "unpark"), name] => done(one(c, "lane", &format!("lane {verb} {name}")), json, &flat),
+        ["park", name, why @ ..] => {
+            let r = one(c, "lane", &format!("lane park {name} {}", why.join(" ")));
+            // what the merge bot warned about it before goes: a parked lane says nothing more
+            let cleared = r.as_ref().map_or(0, |v| clear_merge_warnings(c, v));
+            done(r, json, &|v| {
+                let why = v.get("why").and_then(|w| w.as_str()).unwrap_or("");
+                format!("{name} parked ({why}){}\n", if cleared > 0 { format!("; {cleared} merge warning(s) of it cleared from the inbox") } else { String::new() })
+            })
+        }
         ["stop", name] => done(one(c, "stop", name), json, &|v| {
             let n = match v.get("ended") { Some(Value::Obj(o)) => o.len(), _ => 0 };
             format!("{name} stopped: {n} lease(s) ended\n")
         }),
         ["live", name, on @ ("on" | "off")] => done(one(c, "lane", &format!("lane live {name} {on}")), json, &flat),
         ["quiet"] => done(one(c, "lane", "lane quiet"), json, &|v| v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string()),
+        ["offers"] => done(one(c, "lane", "lane offers"), json, &|v| {
+            let rows: Vec<String> = v.get("lanes").and_then(|l| l.as_arr()).unwrap_or(&[]).iter().map(|l| {
+                let why = l.get("refused").and_then(|r| r.as_str()).unwrap_or("");
+                format!("{}{}\n", l.get("row").and_then(|r| r.as_str()).unwrap_or(""), if why.is_empty() { String::new() } else { format!(" [refused now: {why}]") })
+            }).collect();
+            if rows.is_empty() { "no lane is offered for retirement\n".into() } else { rows.concat() }
+        }),
+        // read here, in process: each worktree's status and size (the master's control thread never
+        // walks 300 worktrees), and each node's lane dirs
+        ["offers", "--check"] => match one(c, "lane", "lane offers") {
+            Ok(v) => {
+                let nodes: Vec<(String, Result<Value, String>)> = ask(c, None, "nodes", "nodes").unwrap_or_default().iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).filter(|n| n.get("up").and_then(|u| u.as_bool()) == Some(true)).filter_map(|n| n.get("node").and_then(|x| x.as_str()).map(str::to_string)).map(|node| {
+                    let r = ask(c, Some(&node), "lane-dirs", "lane-dirs").and_then(|l| l.first().and_then(|x| makepad_strict_json::parse_depth(x.as_bytes(), 4).ok()).ok_or_else(|| "no answer".to_string()));
+                    (node, r)
+                }).collect();
+                print!("{}", super::lane::check_offers(&v, &nodes));
+                0
+            }
+            Err(e) => {
+                eprintln!("makepad devhub lane offers: {e}");
+                1
+            }
+        },
         ["sweep", "status"] => done(one(c, "lane", "lane sweep status"), json, &|v| v.get("report").and_then(|r| r.as_str()).unwrap_or("").to_string()),
         ["sweep", rest @ ..] if rest.is_empty() || rest == ["--dry"] => done(one(c, "lane", &format!("lane sweep {}", rest.first().unwrap_or(&""))), json, &|v| {
             format!("sweep started{}: `devhub lane sweep status` (report {})\n", if v.get("dry").and_then(|d| d.as_bool()).unwrap_or(false) { " (dry run, nothing deleted)" } else { "" }, v.get("report").and_then(|r| r.as_str()).unwrap_or(""))
@@ -981,10 +1027,22 @@ fn lane(c: &Client, words: &[&str], json: bool) -> i32 {
             out
         }),
         _ => {
-            eprintln!("makepad devhub lane new <name> [--from work] [--no-commercial] | drop <name> | stop <name> | keep|unkeep <name> | live <name> on|off | adopt | remove <name> | sweep [--dry] | sweep status | dormant");
+            eprintln!("makepad devhub lane new <name> [--from work] [--no-commercial] | drop <name> | stop <name> | keep|unkeep <name> | park <name> [why] | unpark <name> | retire <name> | offers [--check] | live <name> on|off | adopt | remove <name> | sweep [--dry] | sweep status | dormant");
             2
         }
     }
+}
+
+/// Clears the inbox's merge bot entries of a parked lane's branches (`v`: `lane park`'s answer);
+/// how many went.
+fn clear_merge_warnings(c: &Client, v: &Value) -> usize {
+    let branches: Vec<&str> = v.get("branches").and_then(|b| b.as_arr()).unwrap_or(&[]).iter().filter_map(|b| b.as_str()).collect();
+    let entries = ask(c, None, "inbox", "list all").unwrap_or_default();
+    let ids: Vec<String> = entries.iter().filter_map(|e| makepad_strict_json::parse(e.as_bytes()).ok()).filter(|e| {
+        let line = e.get("line").and_then(|l| l.as_str()).unwrap_or("");
+        branches.iter().any(|b| line.contains(&format!("lanes: {b} (")))
+    }).filter_map(|e| e.get("id").and_then(|i| i.as_str()).map(str::to_string)).collect();
+    ids.iter().filter(|id| ask(c, None, "inbox", &format!("clear {id}")).is_ok()).count()
 }
 
 fn lanes(c: &Client, json: bool) -> i32 {
@@ -998,7 +1056,7 @@ fn lanes(c: &Client, json: bool) -> i32 {
             let s = |k: &str| l.get(k).and_then(|y| y.as_str()).unwrap_or("").to_string();
             let tip = s("tip");
             out.push_str(&format!(
-                "{:<20} {}@{} dirty={} merge={} land={} job={}{}{}{}\n      {}\n",
+                "{:<20} {}@{} dirty={} merge={} land={} job={}{}{}{}{}\n      {}\n",
                 s("name"),
                 s("branch"),
                 super::short(&tip),
@@ -1008,6 +1066,7 @@ fn lanes(c: &Client, json: bool) -> i32 {
                 s("job"),
                 if l.get("keep").and_then(|k| k.as_bool()) == Some(true) { " keep" } else { "" },
                 if l.get("waited").and_then(|k| k.as_bool()) == Some(true) { " LIVE" } else { "" },
+                if s("parked").is_empty() { String::new() } else { format!(" parked ({})", s("parked")) },
                 if s("note").is_empty() { String::new() } else { format!(" ({})", s("note")) },
                 s("path")
             ));

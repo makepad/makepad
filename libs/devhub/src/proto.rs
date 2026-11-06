@@ -106,7 +106,8 @@ impl Sev {
 /// One event, as it travels from a node to the master and out of `makepad observe stream`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Record {
-    /// `<machine>.<pid>.<jit seq>`, or `<machine>.hub.<n>` for the hub's own
+    /// `<machine>.<pid>.<jit seq>.<jit clock ms>` (a JIT event, known by its run), an engine
+    /// request's own id, or `<machine>.hub.<ms>.<n>` for the hub's own
     pub id: String,
     pub at_ms: u64,
     pub machine: String,
@@ -230,10 +231,13 @@ pub fn from_jit_event(machine: &str, app: &str, pid: u32, json: &str, hitch_ms: 
         "drop" => ("hub", Sev::Info, format!("hub: {} events of this JIT were lost (feed gap)", num(&v, "lost").unwrap_or(0.0)), false),
         _ => return None,
     };
-    // an engine request is known by its own id (stable across hubs and restarts: replies name it)
+    // an engine request is known by its own id (stable across hubs and restarts: replies name it);
+    // any other event by its run: a run started again in place keeps its pid and counts its seq
+    // from 1 again, on a new clock (`at_ms`: ms since its start)
+    let at = v.get("at_ms").and_then(|a| a.as_u64()).unwrap_or(0);
     let id = match (kind, v.get("id").and_then(|i| i.as_str())) {
         ("engine_request", Some(rid)) if !rid.is_empty() && rid.len() <= 128 => clean(rid, 128),
-        _ => format!("{machine}.{pid}.{seq}"),
+        _ => format!("{machine}.{pid}.{seq}.{at}"),
     };
     Some(Record { id, at_ms: wall_ms(), machine: machine.to_string(), app, pid, kind: kind.to_string(), sev, line, detail: json.to_string(), untrusted })
 }
@@ -276,7 +280,7 @@ mod tests {
     fn panic_event_becomes_an_answer_first_line() {
         let ev = r#"{"event":"panic","seq":31,"pid":4412,"app":"foo","at_ms":5,"verified":true,"id":"P1","kind":"panic","message":"index out of bounds","location":"game/ai.rs:88","thread":"main","frames":[],"more":["stacks"]}"#;
         let r = from_jit_event("node-a", "foo", 4412, ev, HITCH_MS).unwrap();
-        assert_eq!(r.id, "node-a.4412.31");
+        assert_eq!(r.id, "node-a.4412.31.5");
         assert_eq!(r.sev, Sev::Err);
         assert_eq!(r.line, "panic: index out of bounds at game/ai.rs:88 [main]");
         let back = Record::parse(&r.to_json()).unwrap();

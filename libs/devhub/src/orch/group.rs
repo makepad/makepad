@@ -81,6 +81,8 @@ pub struct Groups {
     pub root: String,
     root_entry: Option<Entry>,
     pub manifests: Manifests,
+    /// Each block's `Co-authored-by` trailers ([`Self::credit`]; empty: none).
+    pub co_authors: Vec<Vec<String>>,
 }
 
 /// `*` matches anything, `/` too; everything else is literal.
@@ -116,6 +118,43 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
         }
     }
     blocks
+}
+
+/// The `Co-authored-by` trailers of each block's commit (`held`: the blocks with one). `log` is
+/// `git log --no-merges --format=%x01%an%x02%ae --name-only` of the commits a set carries. Each by
+/// an author other than `own` (by email, in any case) is named, as its commit has it, once in each
+/// block holding a file it changed, or in the last commit when none of those has one (its change
+/// came and went).
+pub fn co_author_lines(blocks: &[Block], held: &[bool], log: &str, own: &str) -> Vec<Vec<String>> {
+    let mut out: Vec<BTreeSet<String>> = vec![BTreeSet::new(); blocks.len()];
+    let last = held.iter().rposition(|h| *h);
+    let mut credit = |who: &Option<String>, files: &[&str]| {
+        let Some(who) = who else { return };
+        let mut placed = false;
+        for f in files {
+            let b = block_of(blocks, f);
+            if held.get(b) == Some(&true) {
+                out[b].insert(who.clone());
+                placed = true;
+            }
+        }
+        if let (false, Some(l)) = (placed, last) {
+            out[l].insert(who.clone());
+        }
+    };
+    let (mut who, mut files): (Option<String>, Vec<&str>) = (None, Vec::new());
+    for line in log.lines() {
+        if let Some(head) = line.strip_prefix('\u{1}') {
+            credit(&who, &files);
+            files.clear();
+            let (name, email) = head.split_once('\u{2}').unwrap_or((head, ""));
+            who = (!email.trim().eq_ignore_ascii_case(own.trim()) && !email.trim().is_empty()).then(|| format!("Co-authored-by: {} <{}>", name.trim(), email.trim()));
+        } else if !line.trim().is_empty() {
+            files.push(line);
+        }
+    }
+    credit(&who, &files);
+    out.into_iter().map(|s| s.into_iter().collect()).collect()
 }
 
 pub fn block_of(blocks: &[Block], path: &str) -> usize {
@@ -360,7 +399,7 @@ impl Groups {
             stat.files.sort_by(|a, b| a.path.cmp(&b.path));
         }
         let manifests = manifests_at(dir, tip, "")?;
-        Ok(Groups { base: base.to_string(), tip: tip.to_string(), base_tree, tip_tree, blocks, stats, binaries, diff, root, root_entry, manifests })
+        Ok(Groups { base: base.to_string(), tip: tip.to_string(), base_tree, tip_tree, blocks, stats, binaries, diff, root, root_entry, manifests, co_authors: Vec::new() })
     }
 
     /// No file differs.
@@ -397,7 +436,20 @@ impl Groups {
             named.push_str(&format!(" and {} more", areas.len() - AREAS));
         }
         let note = note.map_or(String::new(), |n| format!("{n}\n\n"));
-        format!("{}\n\n{} files, +{} -{}. Areas: {named}.\n\n{note}{}\n", block.title, stat.files.len(), stat.added, stat.removed, super::push::TRAILER)
+        let credits: String = self.co_authors.get(at).map_or(String::new(), |c| c.iter().map(|l| format!("{l}\n")).collect());
+        format!("{}\n\n{} files, +{} -{}. Areas: {named}.\n\n{note}{}\n{credits}", block.title, stat.files.len(), stat.added, stat.removed, super::push::TRAILER)
+    }
+
+    /// Credits the authors of the commits the set carries (`since..tip`; `since`: the work commit
+    /// origin's tip was pushed from) who are not this repository's identity: [`co_author_lines`],
+    /// for [`Self::message`]. The area commits are written under our identity, and an outside
+    /// contributor's authorship was lost (PR #1390, 11-06).
+    pub fn credit(&mut self, dir: &Path, since: &str) -> Result<(), String> {
+        let own = identity(dir)?.email;
+        let log = super::git(dir, &["-c", "core.quotePath=false", "log", "--no-merges", "--format=%x01%an%x02%ae", "--name-only", &format!("{since}..{}", self.tip)])?;
+        let held: Vec<bool> = self.stats.iter().map(|s| !s.files.is_empty()).collect();
+        self.co_authors = co_author_lines(&self.blocks, &held, &log, &own);
+        Ok(())
     }
 
     /// Writes the commits on the base, one per block with changes: (block, sha), in order. The last
@@ -513,6 +565,19 @@ mod tests {
         let who = Signature { name: "t".into(), email: "t@t".into(), timestamp: 1, tz_offset: "+0000".into() };
         let commit = Commit { tree, parents: parent.into_iter().collect(), author: who.clone(), committer: who, message: "m\n".into() };
         (repo.write_commit(&commit).unwrap(), tree)
+    }
+
+    /// An outside author's commit is credited in each area commit holding a file it changed,
+    /// once, as its commit names them; our own identity never is; a change that came and went
+    /// is credited in the last commit.
+    #[test]
+    fn outside_authors_are_credited_in_the_area_commits_holding_their_changes() {
+        let blocks = parse_blocks("block First\nlibs/a/*\nblock Second\nlibs/b/*\nblock Third\nlibs/c/*\nblock Rest\n*\n");
+        let held = [true, true, false, true];
+        let log = "\u{1}Ana Outside\u{2}ana@example.org\n\nlibs/a/x.rs\nlibs/b/y.rs\n\u{1}Us\u{2}US@example.com\n\nlibs/a/z.rs\n\u{1}Ana Outside\u{2}ana@example.org\n\nlibs/a/w.rs\n\u{1}Bo Gone\u{2}bo@example.net\n\nlibs/c/gone.rs\n";
+        let lines = co_author_lines(&blocks, &held, log, "us@example.com");
+        let ana = "Co-authored-by: Ana Outside <ana@example.org>".to_string();
+        assert_eq!(lines, vec![vec![ana.clone()], vec![ana], vec![], vec!["Co-authored-by: Bo Gone <bo@example.net>".to_string()]]);
     }
 
     #[test]

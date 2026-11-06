@@ -1250,6 +1250,14 @@ fn capture(tree: &Path, changed: &[String], deleted: &[String], old: &BTreeMap<S
     let mut sources = BTreeMap::new();
     for path in changed {
         let src = tree.join(path);
+        // gone since the save was heard (a file that came and went, renamed away): a deletion when
+        // it shipped before, else nothing of it ships
+        if std::fs::symlink_metadata(&src).is_err() {
+            if old.get(path).is_some_and(|h| h != "-") {
+                sources.insert(path.clone(), "-".into());
+            }
+            continue;
+        }
         let (hash, bytes, entry) = source_of(tree, path)?;
         if old.get(path) != Some(&hash) {
             let dst = dir.join(path);
@@ -1973,6 +1981,25 @@ mod join_tests {
 
 #[cfg(test)]
 mod owner_tests {
+    /// A save whose file is gone by the ship (an editor's temp file, renamed onto the final one)
+    /// ships nothing; one that shipped before and is gone ships as a deletion (W3766 shipped a
+    /// renamed temp file and its edit failed, 11-06).
+    #[test]
+    fn a_file_gone_since_its_save_ships_nothing_new() {
+        let base = std::env::temp_dir().join(format!("devhub-live-capture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let tree = base.join("tree");
+        std::fs::create_dir_all(tree.join("src")).unwrap();
+        std::fs::write(tree.join("src/a.rs"), "fn a() {}\n").unwrap();
+        let old = std::collections::BTreeMap::from([("src/was.rs".to_string(), "false:false:00".to_string())]);
+        let changed = ["src/a.rs", "src/a.rs.swp", "src/was.rs"].map(String::from);
+        let sources = super::capture(&tree, &changed, &[], &old, &base.join("ship")).unwrap();
+        assert_eq!(sources.keys().map(String::as_str).collect::<Vec<_>>(), ["src/a.rs", "src/was.rs"]);
+        assert_eq!(sources["src/was.rs"], "-");
+        assert!(base.join("ship/src/a.rs").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// Saves that wait for a restart are counted from the first; from the third the hint leads
     /// with their count, past 5 min the check-in lists the session, and a restart clears it all (a
     /// lane saved into stale code for 20 min, 11-06).

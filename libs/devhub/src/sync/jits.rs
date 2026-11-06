@@ -188,6 +188,26 @@ impl Ticker {
     }
 }
 
+/// Asks the JIT `pid` for `session relaunch`: the edits waiting for a restart apply (the app
+/// starts again in place). Its answer, or why not.
+pub fn relaunch(pid: u32) -> Result<String, String> {
+    let client = Client::connect(&pid.to_string()).map_err(|e| format!("JIT {pid}: {e}"))?;
+    client.set_timeout(Some(Duration::from_secs(5)));
+    let answer = client.cmd("session relaunch").map_err(|e| format!("JIT {pid}: {e}")).and_then(|lines| {
+        let mut said = Vec::new();
+        for l in lines {
+            let l = l.map_err(|e| format!("JIT {pid}: {e}"))?;
+            if l.starts_with("{\"err\":") {
+                return Err(format!("JIT {pid}: {}", crate::proto::clean(&l, 200)));
+            }
+            said.push(l);
+        }
+        Ok(crate::proto::clean(&said.join(" "), 200))
+    });
+    client.close();
+    answer
+}
+
 pub fn tick_of(line: &str) -> Option<u64> {
     let v = makepad_strict_json::parse(line.as_bytes()).ok()?;
     if let Some(t) = v.get("tick").and_then(|t| t.as_u64()) {

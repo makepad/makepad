@@ -513,13 +513,23 @@ impl Sync {
                     if f.restarting.is_none() && matches!(e.rung.as_str(), "patch" | "partial" | "restart" | "refuse" | "incomplete") {
                         let tick = ticker.as_ref().filter(|(p, _)| *p == j.pid).and_then(|(_, t)| t.read().ok());
                         let at = tick.map_or(String::new(), |t| format!(" at session {session} tick {t}"));
+                        let own = restarts_with_the_landing(&j.app, &e.rung, crate::lease::exec::user_present());
                         let (sev, what) = match e.rung.as_str() {
                             "patch" | "partial" => (Sev::Info, format!("patched {} fns in {:.0} ms", e.fns, e.ms)),
+                            "restart" if own => match jits::relaunch(j.pid) {
+                                Ok(how) => (Sev::Info, format!("restarted for the landing (the WM's AI pane, a node service): {}; it answered {how}", e.reasons)),
+                                Err(err) => (Sev::Warn, format!("needs a restart: {}; asking it for one failed: {err}", e.reasons)),
+                            },
                             "restart" => (Sev::Warn, format!("needs a restart: {}", e.reasons)),
                             _ => (Sev::Warn, format!("refused the edit: {}", e.reasons)),
                         };
                         self.jit_event(sev, &j.app, j.pid, format!("sync: {}#{} {what}{at}", j.app, j.pid), e.raw.clone());
                         out.push(format!("{{\"jit\":{},\"pid\":{},\"rung\":{},\"fns\":{},\"ms\":{},\"tick\":{}}}", json_str(&j.app), j.pid, json_str(&e.rung), e.fns, e.ms, tick.map_or("null".into(), |t| t.to_string())));
+                        // no toast: nobody is at the box to see it
+                        if own {
+                            done = true;
+                            break;
+                        }
                     }
                     match outcome {
                         Some(Outcome::Live) if news.is_some() => {
@@ -793,6 +803,15 @@ fn wm_own(app: &str) -> bool {
     WM_SERVICES.iter().any(|s| app == *s || app == format!("makepad-app-{s}"))
 }
 
+/// Whether the sync restarts `app` itself for an edit at `rung`: the WM's AI pane child (aichat)
+/// on a box nobody uses (`person`: someone does) is a node service, not a person's app, so an edit
+/// it can take only by a restart is applied at once (its JIT's `session relaunch`). It waited for
+/// a click nobody makes, and every sync said "needs a restart" again on five boxes (11-06). The
+/// WM itself restarts only when nothing is lost by it (`Sync::wm_restart`).
+fn restarts_with_the_landing(app: &str, rung: &str, person: bool) -> bool {
+    rung == "restart" && !person && wm_own(app) && matches!(app.trim_start_matches("makepad-app-"), "aichat")
+}
+
 /// A makepad checkout dir that holds only the nested commercial checkout (a fresh tree whose
 /// commercial side came first).
 pub(crate) fn only_commercial(dir: &std::path::Path) -> bool {
@@ -821,4 +840,21 @@ fn push_factory(sync: Arc<Sync>) -> Factory {
             .map(|_| ())
             .map_err(|e| (CLOSE_REFUSED, format!("cannot start the push thread: {e}")))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The AI pane's restart is the sync's on a box nobody uses; a person's app, the WM itself
+    /// and a box in use keep their offer.
+    #[test]
+    fn the_ai_panes_restart_is_taken_by_the_sync_on_an_unused_box() {
+        assert!(restarts_with_the_landing("makepad-app-aichat", "restart", false));
+        assert!(restarts_with_the_landing("aichat", "restart", false));
+        assert!(!restarts_with_the_landing("makepad-app-aichat", "restart", true), "a person uses the box");
+        assert!(!restarts_with_the_landing("makepad-app-aichat", "patch", false));
+        assert!(!restarts_with_the_landing("makepad-app-wm", "restart", false), "the WM restarts by its own rules");
+        assert!(!restarts_with_the_landing("makepad-app-fab", "restart", false), "a person's app");
+    }
 }

@@ -501,28 +501,13 @@ impl Lanes {
     }
 
     pub fn hold(&self, branch: &str, why: &str) -> Result<(), String> {
-        if !crate::sync::git::valid_branch(branch) {
-            return Err(format!("`{branch}` is not a branch name"));
-        }
-        let why = if why.trim().is_empty() { "held".to_string() } else { proto::clean(why.trim(), 200) };
-        self.store.update(|d| {
-            if let Some((_, held_why)) = d.held.iter_mut().find(|(b, _)| b == branch) {
-                *held_why = why.clone();
-            } else {
-                d.held.push((branch.to_string(), why.clone()));
-                d.held.sort_by(|a, b| a.0.cmp(&b.0));
-            }
-        })?;
+        let why = hold_in(&self.store, branch, why)?;
         (self.publish)(hub_record(&self.machine, "", 0, "lanes", Sev::Info, format!("lanes: {branch} held ({why}): the master merges nothing into it"), String::new()));
         Ok(())
     }
 
     pub fn unhold(&self, branch: &str) -> Result<(), String> {
-        if !self.store.update(|d| {
-            let len = d.held.len();
-            d.held.retain(|(b, _)| b != branch);
-            len != d.held.len()
-        })? {
+        if !unhold_in(&self.store, branch)? {
             return Err(format!("{branch} is not held"));
         }
         (self.publish)(hub_record(&self.machine, "", 0, "lanes", Sev::Info, format!("lanes: {branch} no longer held"), String::new()));
@@ -1026,6 +1011,32 @@ fn only_bot_merges<'a>(mut subjects: impl Iterator<Item = &'a str>, tip_branch: 
     let (pre, post) = (format!("Merge {tip_branch} ("), format!(") into {branch}"));
     let bot = |s: &str| s.starts_with(&pre) && s.ends_with(&post);
     subjects.next().is_some_and(bot) && subjects.all(bot)
+}
+
+/// Puts `branch` on the master's held list (the bot merges nothing into it): its why as kept.
+pub fn hold_in(store: &crate::state::Store, branch: &str, why: &str) -> Result<String, String> {
+    if !crate::sync::git::valid_branch(branch) {
+        return Err(format!("`{branch}` is not a branch name"));
+    }
+    let why = if why.trim().is_empty() { "held".to_string() } else { proto::clean(why.trim(), 200) };
+    store.update(|d| {
+        if let Some((_, held_why)) = d.held.iter_mut().find(|(b, _)| b == branch) {
+            *held_why = why.clone();
+        } else {
+            d.held.push((branch.to_string(), why.clone()));
+            d.held.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+    })?;
+    Ok(why)
+}
+
+/// Takes `branch` off the held list: false when it was not on it.
+pub fn unhold_in(store: &crate::state::Store, branch: &str) -> Result<bool, String> {
+    store.update(|d| {
+        let len = d.held.len();
+        d.held.retain(|(b, _)| b != branch);
+        len != d.held.len()
+    })
 }
 
 /// One lane half as (sev word, its line) for the panel and the CLI.

@@ -24,7 +24,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 /// Paths that never leave their machine in a ship, whoever asks: agent configuration (`.claude`),
-/// build output (`target`, `__pycache__`), at any depth, and `local/` at the root of either repo.
+/// build output (`target`, `__pycache__`), at any depth, an atomic write's temp file, and `local/`
+/// at the root of either repo.
 /// Files git ignores are not in a dirty set to begin with, but the commercial repo does not share
 /// the root's `.gitignore`, so this holds for it too.
 pub fn never_ships(path: &str) -> bool {
@@ -33,9 +34,18 @@ pub fn never_ships(path: &str) -> bool {
 }
 
 /// What never ships even when a run names it (`DEVHUB_ALSO`): `local/` does then (a lane's
-/// bench scripts), build output and agent state never.
+/// bench scripts), build output, agent state and atomic writes' temp files never.
 pub fn never_ships_named(path: &str) -> bool {
-    path.split('/').any(|c| matches!(c, ".claude" | "target" | "__pycache__"))
+    path.split('/').any(|c| matches!(c, ".claude" | "target" | "__pycache__")) || path.rsplit('/').next().is_some_and(atomic_temp)
+}
+
+/// The temp file of an atomic write, `<name>.tmp.<pid>.<hex>`, renamed onto `<name>` once written:
+/// the final file ships, never it. A live session shipped `support.rs.tmp.81511.<hex>` after its
+/// rename, and the edit failed on its box (W3766, 11-06).
+fn atomic_temp(name: &str) -> bool {
+    let Some((base, tail)) = name.rsplit_once(".tmp.") else { return false };
+    let Some((pid, hex)) = tail.split_once('.') else { return false };
+    !base.is_empty() && !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) && !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// The repo's main checkout rather than a linked worktree (a lane's): the work uncommitted there is
@@ -516,6 +526,15 @@ mod read_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_atomic_writes_temp_file_never_ships() {
+        assert!(never_ships("apps/commercial/fab/toolpath/src/support.rs.tmp.81511.2d68cbffff10"));
+        assert!(never_ships_named("src/lib.rs.tmp.7.ab"));
+        for keep in ["src/a.tmp.rs", "src/tmp.1.ab", "src/a.rs.tmp.81511", "src/a.rs.tmp.x1.ab", "src/a.rs.tmp.1.xyz", "src/a.rs"] {
+            assert!(!never_ships(keep), "{keep}");
+        }
+    }
 
     #[test]
     fn have_put_link_on_a_work_dir() {

@@ -324,7 +324,11 @@ fn keep_previous(dir: &std::path::Path, name: &str, path: &std::path::Path) {
 
 /// Starts the show on its device.
 fn launch(ctx: &Arc<Ctx>, x: &Show) {
-    set(ctx, &x.id, |s| s.launch_ms = wall_ms());
+    set(ctx, &x.id, |s| {
+        s.launch_ms = wall_ms();
+        // a new log, and nothing said of it yet
+        (s.log_read, s.log_said, s.events_said) = (0, Vec::new(), Vec::new());
+    });
     let sha = crate::gitread::rev(&ctx.repo, "refs/heads/work").unwrap_or_default();
     let main = crate::gitread::rev(&ctx.commercial(), "refs/heads/main").unwrap_or_default();
     let r = match x.device.as_str() {
@@ -595,31 +599,60 @@ fn failure_lines(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// How far each running show's log was read, and the failures it already said.
-static LOG_SEEN: Mutex<Option<HashMap<String, (u64, std::collections::HashSet<String>)>>> = Mutex::new(None);
+/// The kinds of failure line, and the app records, a show remembers it said (the oldest go).
+const SAID_MAX: usize = 64;
+/// How far a show's log read runs ahead of what its record keeps: a master started again (each
+/// landing re-execs it) reads up to this much again, and the kinds its record says it said keep
+/// that quiet; the record is written only when this much was read or a failure was said.
+const LOG_KEPT_EVERY: u64 = 256 * 1024;
+
+fn remember(said: &mut Vec<String>, key: String) {
+    said.push(key);
+    let over = said.len().saturating_sub(SAID_MAX);
+    said.drain(..over);
+}
+
+/// A kind of failure line as the show's record keeps it: the line without its numbers, hashed
+/// (FNV-1a: the same in every process and build).
+fn line_kind(line: &str) -> String {
+    let h = line.bytes().filter(|b| !b.is_ascii_digit()).fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+    format!("{h:016x}")
+}
 
 /// The running app's own output, through and after its startup: what the JIT's events do not carry
-/// (a compile error, an internal compiler error) reaches the manager too. Each kind of line once.
+/// (a compile error, an internal compiler error) reaches the manager too. Each kind of line once
+/// per launch, by what the show's record keeps: a master started again reads on from there.
 fn watch_log(ctx: &Ctx, x: &Show) {
     use std::io::{Read, Seek, SeekFrom};
     if x.log.is_empty() {
         return;
     }
-    let mut seen = LOG_SEEN.lock().unwrap();
-    let (at, said) = seen.get_or_insert_with(HashMap::new).entry(x.id.clone()).or_default();
     let Ok(mut f) = std::fs::File::open(&x.log) else { return };
+    // (a log shorter than what was read is a new one: read from its start)
+    let from = if f.metadata().map_or(0, |m| m.len()) < x.log_read { 0 } else { x.log_read };
     let mut bytes = Vec::new();
-    if f.seek(SeekFrom::Start(*at)).is_err() || f.read_to_end(&mut bytes).is_err() {
+    if f.seek(SeekFrom::Start(from)).is_err() || f.read_to_end(&mut bytes).is_err() {
         return;
     }
     // whole lines only: the rest comes with the next look
     let Some(end) = bytes.iter().rposition(|b| *b == b'\n') else { return };
-    *at += end as u64 + 1;
+    let at = from + end as u64 + 1;
+    let mut said = x.log_said.clone();
+    let mut new = Vec::new();
     for line in failure_lines(&String::from_utf8_lossy(&bytes[..end])) {
-        let kind: String = line.chars().filter(|c| !c.is_ascii_digit()).collect();
-        if said.insert(kind) {
-            failed(ctx, x, line);
+        let kind = line_kind(&line);
+        if !said.contains(&kind) {
+            remember(&mut said, kind);
+            new.push(line);
         }
+    }
+    if new.is_empty() && at.abs_diff(x.log_read) < LOG_KEPT_EVERY {
+        return;
+    }
+    // (the same launch: a relaunch starts its log and its marks again)
+    let Some(x) = set(ctx, &x.id, |s| if s.launch_ms == x.launch_ms { (s.log_read, s.log_said) = (at, said); }).filter(|s| s.launch_ms == x.launch_ms) else { return };
+    for line in new {
+        failed(ctx, &x, line);
     }
 }
 
@@ -757,6 +790,18 @@ pub fn on_record(ctx: &Ctx, r: &Record) {
     let dev = if r.machine == ctx.machine { "mac".to_string() } else { r.machine.clone() };
     let hit = ctx.store.read(|d| d.shows.iter().find(|x| matches!(x.state.as_str(), "running" | "paused") && x.device == dev && (x.pid == r.pid || same_app(&r.app, &x.app))).cloned());
     let Some(x) = hit else { return };
+    // each record once per show, across re-execs: by its id, which names a JIT event's run, so the
+    // same event heard again (a hub or master that follows the JIT again) says nothing while a run
+    // started again in place (same pid, its seq from 1 again) does
+    let key = r.id.clone();
+    let mut fresh = false;
+    let Some(x) = set(ctx, &x.id, |s| if !s.events_said.contains(&key) {
+        fresh = true;
+        remember(&mut s.events_said, key.clone());
+    }) else { return };
+    if !fresh {
+        return;
+    }
     if r.kind != "panic" {
         // a hang, a deadlock, a patch or script error: the app runs on; said, not a state
         return failed(ctx, &x, r.line.clone());
@@ -949,6 +994,60 @@ mod tests {
         })).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         assert_eq!(serve(&ctx, "show list").unwrap(), "[]");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A shown app's failure is said once, across a re-exec of the master between two looks (each
+    /// landing re-execs it): what its log was read to and what was said, of the log and of the
+    /// app's records, is in the show's record, not in the process. A panic of the morning was said
+    /// again at about 20 shows after (11-06).
+    #[test]
+    fn a_failure_is_said_once_across_a_master_re_exec() {
+        use std::io::Write as _;
+        let base = std::env::temp_dir().join(format!("devhub-show-reexec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let log = base.join("app.log");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(&log, "starting\nthread 'main' panicked at src/a.rs:10:5:\nboom\n").unwrap();
+        let said: Arc<Mutex<Vec<String>>> = Default::default();
+        // a master on `home`: its state as the disk holds it
+        let master = |home: &std::path::Path| {
+            let said = said.clone();
+            let store = Store::open(home, "mac", Arc::new(move |r: Record| { if r.kind == "show_failed" { said.lock().unwrap().push(r.line.clone()); } 0 })).unwrap();
+            let leases = Arc::new(LeaseMaster::new("mac", home.to_path_buf(), Arc::new(|_: &str, _: &str, _: &str| Err("no nodes".to_string())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
+            Arc::new(Ctx { store, leases, machine: "mymac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: home.to_path_buf(), home: home.to_path_buf() })
+        };
+        let count = || said.lock().unwrap().len();
+        let first = base.join("first");
+        let ctx = master(&first);
+        ctx.store.update(|d| d.shows.push(Show { id: "V1".into(), app: "makepad-foo".into(), device: "mac".into(), state: "running".into(), pid: 4242, log: log.to_string_lossy().into(), launch_ms: 1, ..Default::default() })).unwrap();
+        let show = |ctx: &Ctx| ctx.store.read(|d| d.shows[0].clone());
+        let record = |seq: u64, clock: u64| Record { id: format!("mymac.4242.{seq}.{clock}"), at_ms: 1, machine: "mymac".into(), app: "makepad-foo".into(), pid: 4242, kind: "scripterr".into(), sev: Sev::Warn, line: "scripterr: x not found".into(), detail: format!("{{\"event\":\"scripterr\",\"seq\":{seq},\"pid\":4242,\"at_ms\":{clock},\"error\":\"x not found\"}}"), untrusted: false };
+        watch_log(&ctx, &show(&ctx));
+        on_record(&ctx, &record(1, 5120));
+        assert_eq!(count(), 2, "{:?}", said.lock().unwrap());
+        // (the record holds it: no process keeps it)
+        let x = show(&ctx);
+        assert_eq!((x.log_read, x.log_said.len(), x.events_said.as_slice()), (std::fs::metadata(&log).unwrap().len(), 1, &["mymac.4242.1.5120".to_string()][..]));
+        // the re-exec: a new process, with nothing but what the disk holds
+        drop(ctx);
+        let second = base.join("second");
+        std::fs::create_dir_all(&second).unwrap();
+        for f in ["state.json", "state.journal"] {
+            if first.join(f).exists() { std::fs::copy(first.join(f), second.join(f)).unwrap(); }
+        }
+        let ctx = master(&second);
+        watch_log(&ctx, &show(&ctx));
+        on_record(&ctx, &record(1, 5120));
+        assert_eq!(count(), 2, "nothing is said again: {:?}", said.lock().unwrap());
+        // the same kind of line again (numbers apart) stays quiet; a new kind and a run started
+        // again in place (its seq from 1 again, on a new clock) are said
+        std::fs::OpenOptions::new().append(true).open(&log).unwrap().write_all(b"thread 'main' panicked at src/a.rs:12:9:\nerror: a new kind\n").unwrap();
+        watch_log(&ctx, &show(&ctx));
+        on_record(&ctx, &record(1, 830));
+        assert_eq!(count(), 4, "{:?}", said.lock().unwrap());
+        assert!(said.lock().unwrap()[2].contains("error: a new kind"), "{:?}", said.lock().unwrap());
+        drop(ctx);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -143,7 +143,8 @@ fn commit_rows(groups: &Groups, set: &[(usize, String)]) -> String {
         .map(|(at, sha)| {
             let stat = &groups.stats[*at];
             let areas: Vec<String> = groups.areas(*at).iter().map(|a| json_str(a)).collect();
-            format!("{{\"sha\":{},\"title\":{},\"files\":{},\"added\":{},\"removed\":{},\"areas\":[{}]}}", json_str(sha), json_str(&groups.blocks[*at].title), stat.files.len(), stat.added, stat.removed, areas.join(","))
+            let credits: Vec<String> = groups.co_authors.get(*at).map_or(Vec::new(), |c| c.iter().map(|l| json_str(l.trim_start_matches("Co-authored-by: "))).collect());
+            format!("{{\"sha\":{},\"title\":{},\"files\":{},\"added\":{},\"removed\":{},\"areas\":[{}],\"co_authors\":[{}]}}", json_str(sha), json_str(&groups.blocks[*at].title), stat.files.len(), stat.added, stat.removed, areas.join(","), credits.join(","))
         })
         .collect();
     rows.join(",")
@@ -174,7 +175,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let sha = tip.work.clone();
     git(repo, &["fetch", "-q", "origin", "work"])?;
     let origin = git(repo, &["rev-parse", "refs/remotes/origin/work"])?;
-    let groups = Groups::between(repo, &origin, &sha)?;
+    let mut groups = Groups::between(repo, &origin, &sha)?;
     if groups.is_empty() {
         return Ok(format!("{{\"pushed\":false,\"why\":\"origin/work already has the tree of {}\",\"origin\":{}}}", super::short(&sha), json_str(&origin)));
     }
@@ -195,6 +196,10 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     if groups.commits() > HOOK_COMMITS {
         return Err(format!("push: {} groups, the pre-push hook takes {HOOK_COMMITS} commits: join blocks in {}", groups.commits(), group::BLOCKS_FILE));
     }
+    // the commits it carries: since the work commit origin's tip was pushed from (all of
+    // origin..tip when no push of ours made it)
+    let since = ctx.store.read(|d| d.pushes.iter().rev().find(|p| p.commit == origin).map(|p| p.pair.work.clone())).unwrap_or_else(|| origin.clone());
+    groups.credit(repo, &since)?;
     let message = st("message");
     let from = format!("work tip {} (with commercial {})", super::short(&sha), super::short(&tip.main));
     let note = |n: usize, of: usize| Some(format!("Part {n} of {of} of {from}.{}", message.as_deref().map_or(String::new(), |m| format!("\n\n{m}"))));
