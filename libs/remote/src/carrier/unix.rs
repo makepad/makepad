@@ -49,6 +49,36 @@ extern "C" fn cleanup() {
     let _ = std::fs::remove_file(disc);
 }
 
+/// Removes this process's socket and discovery file now, its exit's own work done: the atexit
+/// cleanup runs after every exit handler registered after it (a GPU driver's teardown, which can
+/// take seconds), and a process killed during those (a window manager's stop gives its apps a
+/// grace, then SIGKILL) left its discovery file behind, which the node's hub reads as a crash.
+pub fn withdraw() {
+    cleanup();
+}
+
+/// This process's socket and discovery file as C strings, made when it listened: what
+/// [`withdraw_in_signal`] removes.
+#[cfg(unix)]
+static C_PATHS: std::sync::OnceLock<(std::ffi::CString, std::ffi::CString)> = std::sync::OnceLock::new();
+
+/// Removes this process's socket and discovery file now, from a signal handler about to end the
+/// process with `_exit` (a second quit signal forces the exit): the atexit cleanup does not run
+/// there, and a discovery file left behind reads as a crash to the node's hub. Async-signal-safe:
+/// an atomic load and unlink(2) of paths made when the endpoint listened.
+#[cfg(unix)]
+pub fn withdraw_in_signal() {
+    extern "C" {
+        fn unlink(path: *const std::ffi::c_char) -> i32;
+    }
+    if let Some((sock, disc)) = C_PATHS.get() {
+        unsafe {
+            unlink(sock.as_ptr());
+            unlink(disc.as_ptr());
+        }
+    }
+}
+
 #[cfg(unix)]
 mod imp {
     use super::*;
@@ -176,6 +206,13 @@ mod imp {
         let _ = crate::cmd::now_ms();
         let (sock, disc) = paths(std::process::id());
         let served = serve_announced(ep, extra, &sock, &disc, own_dir);
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).ok();
+            if let (Some(s), Some(d)) = (c(&sock), c(&disc)) {
+                let _ = C_PATHS.set((s, d));
+            }
+        }
         extern "C" {
             fn atexit(f: extern "C" fn()) -> i32;
         }

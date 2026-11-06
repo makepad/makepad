@@ -112,6 +112,8 @@ mod native {
             let now = (ts.sec as u64).wrapping_mul(1_000_000_000).wrapping_add(ts.nsec as u64).max(1);
             if let Err(first) = FIRST_SIGNAL_NS.compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire) {
                 if now.saturating_sub(first) >= SAME_REQUEST_NS {
+                    // the exit's cleanup does not run past _exit: the endpoint's files go here
+                    makepad_remote::carrier::unix::withdraw_in_signal();
                     unsafe { _exit(130) };
                 }
             }

@@ -832,7 +832,7 @@ fn a_run_with_a_deep_tmpdir_is_reached() {
         ep.register_cmd(dispatch);
         let sock = ep.listen_unix("").unwrap();
         println!("deep socket {}", sock.display());
-        // serves until the parent closes its stdin
+        // serves until the parent says so (a line, or its stdin's end)
         let _ = std::io::stdin().read_line(&mut String::new());
         return;
     }
@@ -850,17 +850,60 @@ fn a_run_with_a_deep_tmpdir_is_reached() {
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let mut out = std::io::BufReader::new(child.stdout.take().unwrap()).lines().map_while(Result::ok);
-    let said = out.by_ref().find_map(|l| l.strip_prefix("deep socket ").map(str::to_string));
-    let sock = std::path::PathBuf::from(said.expect("the child listens"));
+    // every wait on the child has a deadline: a hang is a failure that says where (one held a lane's
+    // test lease idle until it was cancelled). Its lines come over a thread of their own.
+    let (lines_to, lines) = std::sync::mpsc::channel::<String>();
+    let stdout = child.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        for l in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+            if lines_to.send(l).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let said = loop {
+        match lines.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+            // (after libtest's "test <name> ... ", on the same line: the child runs with one thread)
+            Ok(l) => match l.split_once("deep socket ") {
+                Some((_, s)) => break Some(s.to_string()),
+                None => continue,
+            },
+            Err(_) => break None,
+        }
+    };
+    let Some(said) = said else {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("the child named no socket within 60 s");
+    };
+    let sock = std::path::PathBuf::from(said);
     assert!(!sock.starts_with(&deep) && sock.starts_with(crate::carrier::unix::socket_dir()), "{}", sock.display());
     let app = crate::discovery::apps_in(&registry).into_iter().find(|a| a.pid == child.id()).expect("its discovery file");
     assert_eq!((app.socket.as_str(), app.unreachable()), (sock.to_str().unwrap(), None));
     let lines: Vec<String> = Client::new(Target::Unix(sock.clone()), "deep-test").cmd("ping").unwrap().map_while(Result::ok).collect();
     assert_eq!(lines.first().map(String::as_str), Some("{\"pong\":1}"));
-    drop(child.stdin.take());
-    out.for_each(drop);
-    assert!(child.wait().unwrap().success());
+    // a line ends it, not the pipe's end alone: a process another test spawned meanwhile can hold a
+    // copy of the pipe's write end until it execs
+    let mut stdin = child.stdin.take().unwrap();
+    let _ = writeln!(stdin, "end");
+    drop(stdin);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let Some(status) = status else {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("the child still ran 30 s after it was told to end");
+    };
+    assert!(status.success());
     assert!(!sock.exists(), "its socket goes with it");
     std::fs::remove_dir_all(&base).unwrap();
 }
