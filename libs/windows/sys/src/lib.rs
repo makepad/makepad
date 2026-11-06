@@ -18648,6 +18648,11 @@ impl ::core::ops::BitAnd for CONTEXT_FLAGS { type Output = Self; fn bitand(self,
 impl ::core::ops::BitXor for CONTEXT_FLAGS { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
 impl ::core::ops::Not for CONTEXT_FLAGS { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
 pub const CONTEXT_INTEGER_AMD64: crate::Win32::System::Diagnostics::Debug::CONTEXT_FLAGS = crate::Win32::System::Diagnostics::Debug::CONTEXT_FLAGS(1048578u64 as _);
+mod import_GetErrorMode { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetErrorMode"] pub fn call() -> u32; } }
+pub use import_GetErrorMode::call as GetErrorMode_raw;
+#[inline]
+pub unsafe fn GetErrorMode() -> u32 {
+import_GetErrorMode::call()}
 mod import_GetThreadContext { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetThreadContext"] pub fn call(hThread: crate::Win32::Foundation::HANDLE,lpContext: *mut crate::Win32::System::Diagnostics::Debug::CONTEXT) -> crate::core::BOOL; } }
 pub use import_GetThreadContext::call as GetThreadContext_raw;
 #[inline]
@@ -18670,6 +18675,14 @@ pub unsafe fn ReadProcessMemory(hProcess: crate::Win32::Foundation::HANDLE,lpBas
 let hr__ = import_ReadProcessMemory::call(hProcess,lpBaseAddress,lpBuffer,nSize,lpNumberOfBytesRead.unwrap_or(::core::ptr::null_mut())); hr__.ok()?;
 Ok(())
 }
+pub const SEM_FAILCRITICALERRORS: crate::Win32::System::Diagnostics::Debug::THREAD_ERROR_MODE = crate::Win32::System::Diagnostics::Debug::THREAD_ERROR_MODE(1u64 as _);
+pub const SEM_NOGPFAULTERRORBOX: crate::Win32::System::Diagnostics::Debug::THREAD_ERROR_MODE = crate::Win32::System::Diagnostics::Debug::THREAD_ERROR_MODE(2u64 as _);
+pub const SEM_NOOPENFILEERRORBOX: crate::Win32::System::Diagnostics::Debug::THREAD_ERROR_MODE = crate::Win32::System::Diagnostics::Debug::THREAD_ERROR_MODE(32768u64 as _);
+mod import_SetErrorMode { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "SetErrorMode"] pub fn call(uMode: crate::Win32::System::Diagnostics::Debug::THREAD_ERROR_MODE) -> crate::Win32::System::Diagnostics::Debug::THREAD_ERROR_MODE; } }
+pub use import_SetErrorMode::call as SetErrorMode_raw;
+#[inline]
+pub unsafe fn SetErrorMode(uMode: crate::Win32::System::Diagnostics::Debug::THREAD_ERROR_MODE) -> crate::Win32::System::Diagnostics::Debug::THREAD_ERROR_MODE {
+import_SetErrorMode::call(uMode)}
 mod import_SetThreadErrorMode { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "SetThreadErrorMode"] pub fn call(dwNewMode: crate::Win32::System::Diagnostics::Debug::THREAD_ERROR_MODE,lpOldMode: *mut crate::Win32::System::Diagnostics::Debug::THREAD_ERROR_MODE) -> crate::core::BOOL; } }
 pub use import_SetThreadErrorMode::call as SetThreadErrorMode_raw;
 #[inline]
@@ -18790,6 +18803,28 @@ pub unsafe fn Thread32Next(hSnapshot: crate::Win32::Foundation::HANDLE,lpte: *mu
 let hr__ = import_Thread32Next::call(hSnapshot,lpte); hr__.ok()?;
 Ok(())
 }
+}
+}
+pub mod ErrorReporting {
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct WER_FAULT_REPORTING(pub u32);
+impl WER_FAULT_REPORTING { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for WER_FAULT_REPORTING { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for WER_FAULT_REPORTING { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for WER_FAULT_REPORTING {}
+impl ::core::fmt::Debug for WER_FAULT_REPORTING { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for WER_FAULT_REPORTING { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for WER_FAULT_REPORTING { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for WER_FAULT_REPORTING { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for WER_FAULT_REPORTING { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const WER_FAULT_REPORTING_NO_UI: u32 = 32;
+mod import_WerSetFlags { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "WerSetFlags"] pub fn call(dwFlags: crate::Win32::System::ErrorReporting::WER_FAULT_REPORTING) -> crate::core::HRESULT; } }
+pub use import_WerSetFlags::call as WerSetFlags_raw;
+#[inline]
+pub unsafe fn WerSetFlags(dwFlags: crate::Win32::System::ErrorReporting::WER_FAULT_REPORTING) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_WerSetFlags::call(dwFlags); hr__.ok()?;
+Ok(())
 }
 }
 pub mod IO {

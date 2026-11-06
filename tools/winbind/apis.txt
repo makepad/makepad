@@ -1046,6 +1046,13 @@ Windows.Win32.System.Console.ClosePseudoConsole
 Windows.Win32.System.Console.CreatePseudoConsole
 Windows.Win32.System.Console.HPCON
 Windows.Win32.System.Diagnostics.Debug.SetThreadErrorMode
+Windows.Win32.System.Diagnostics.Debug.GetErrorMode
+Windows.Win32.System.Diagnostics.Debug.SetErrorMode
+Windows.Win32.System.Diagnostics.Debug.SEM_FAILCRITICALERRORS
+Windows.Win32.System.Diagnostics.Debug.SEM_NOGPFAULTERRORBOX
+Windows.Win32.System.Diagnostics.Debug.SEM_NOOPENFILEERRORBOX
+Windows.Win32.System.ErrorReporting.WerSetFlags
+Windows.Win32.System.ErrorReporting.WER_FAULT_REPORTING_NO_UI
 Windows.Win32.System.Diagnostics.ToolHelp.CreateToolhelp32Snapshot
 Windows.Win32.System.Diagnostics.ToolHelp.Process32FirstW
 Windows.Win32.System.Diagnostics.ToolHelp.Process32NextW

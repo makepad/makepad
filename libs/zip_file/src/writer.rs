@@ -91,6 +91,8 @@ struct Entry {
     compressed_size: u32,
     uncompressed_size: u32,
     local_header_offset: u32,
+    /// Whole extra-field records (id, length, data) for its central directory header.
+    central_extra: Vec<u8>,
 }
 
 /// Builds a zip archive, in memory by default or into any sink.
@@ -174,6 +176,45 @@ impl<W: Write> ZipWriter<W> {
         self.member(name, data, packed.crc, Some(&packed.deflated))
     }
 
+    /// A member of `size` bytes deflated ahead of time as `packed`, written deflated whatever
+    /// its size (some readers take no other method), with `central_extra` in its central
+    /// directory header only. `central_extra` is whole extra-field records: each a u16 id, a
+    /// u16 length and that many bytes of data.
+    pub fn add_deflated(&mut self, name: &str, size: u64, packed: &Packed, central_extra: &[u8]) -> Result<(), ZipWriteError> {
+        self.check_name(name)?;
+        if size > u32::MAX as u64 || packed.deflated.len() > u32::MAX as usize || self.offset > u32::MAX as u64 || central_extra.len() > u16::MAX as usize {
+            return Err(ZipWriteError::TooLarge);
+        }
+        let local_header_offset = self.offset as u32;
+        self.local_header(name, VERSION_DEFLATE, COMPRESS_METHOD_DEFLATED, packed.crc, packed.deflated.len() as u32, size as u32)?;
+        self.push_bytes(&packed.deflated)?;
+        self.entries.push(Entry {
+            name: name.to_string(),
+            method: COMPRESS_METHOD_DEFLATED,
+            crc: packed.crc,
+            compressed_size: packed.deflated.len() as u32,
+            uncompressed_size: size as u32,
+            local_header_offset,
+            central_extra: central_extra.to_vec(),
+        });
+        Ok(())
+    }
+
+    fn local_header(&mut self, name: &str, version: u16, method: u16, crc: u32, compressed: u32, size: u32) -> Result<(), ZipWriteError> {
+        self.push_u32(LOCAL_FILE_HEADER_SIGNATURE)?;
+        self.push_u16(version)?;
+        self.push_u16(0)?; // general purpose flags: none
+        self.push_u16(method)?;
+        self.push_u16(DOS_TIME)?;
+        self.push_u16(DOS_DATE)?;
+        self.push_u32(crc)?;
+        self.push_u32(compressed)?;
+        self.push_u32(size)?;
+        self.push_u16(name.len() as u16)?;
+        self.push_u16(0)?; // extra field length
+        self.push_bytes(name.as_bytes())
+    }
+
     fn member(&mut self, name: &str, data: &[u8], crc: u32, deflated: Option<&[u8]>) -> Result<(), ZipWriteError> {
         // Fall back to Store when deflate does not pay: a stored member is
         // cheaper to read back and never larger than the input.
@@ -192,18 +233,7 @@ impl<W: Write> ZipWriter<W> {
             VERSION_STORE
         };
 
-        self.push_u32(LOCAL_FILE_HEADER_SIGNATURE)?;
-        self.push_u16(version)?;
-        self.push_u16(0)?; // general purpose flags: none
-        self.push_u16(method_code)?;
-        self.push_u16(DOS_TIME)?;
-        self.push_u16(DOS_DATE)?;
-        self.push_u32(crc)?;
-        self.push_u32(payload.len() as u32)?;
-        self.push_u32(data.len() as u32)?;
-        self.push_u16(name.len() as u16)?;
-        self.push_u16(0)?; // extra field length
-        self.push_bytes(name.as_bytes())?;
+        self.local_header(name, version, method_code, crc, payload.len() as u32, data.len() as u32)?;
         self.push_bytes(payload)?;
 
         self.entries.push(Entry {
@@ -213,6 +243,7 @@ impl<W: Write> ZipWriter<W> {
             compressed_size: payload.len() as u32,
             uncompressed_size: data.len() as u32,
             local_header_offset,
+            central_extra: Vec::new(),
         });
         Ok(())
     }
@@ -246,7 +277,7 @@ impl<W: Write> ZipWriter<W> {
             self.push_u32(e.compressed_size)?;
             self.push_u32(e.uncompressed_size)?;
             self.push_u16(e.name.len() as u16)?;
-            self.push_u16(0)?; // extra field
+            self.push_u16(e.central_extra.len() as u16)?;
             self.push_u16(0)?; // comment
             self.push_u16(0)?; // disk number
             self.push_u16(0)?; // internal attributes
@@ -255,6 +286,7 @@ impl<W: Write> ZipWriter<W> {
             self.push_u32(0)?;
             self.push_u32(e.local_header_offset)?;
             self.push_bytes(e.name.as_bytes())?;
+            self.push_bytes(&e.central_extra)?;
         }
 
         let central_size = self.offset - central_start;
@@ -378,6 +410,39 @@ mod tests {
             COMPRESS_METHOD_UNCOMPRESSED
         );
         assert_eq!(dir.file_headers[0].extract(&mut cursor).unwrap(), data);
+    }
+
+    /// A member added deflated stays deflated even where storing would be smaller, and carries
+    /// its extra field in the central directory only: the local header has none, and the
+    /// archive reads back whole.
+    #[test]
+    fn a_deflated_member_keeps_its_method_and_its_central_extra() {
+        let mut noise = Vec::new();
+        let mut x: u32 = 0x9e37_79b9;
+        for _ in 0..512 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            noise.push(x as u8);
+        }
+        let extra = [0x51, 0x1a, 2, 0, 0xab, 0xcd];
+        let mut w = ZipWriter::new();
+        w.add_deflated("noise.bin", noise.len() as u64, &Packed::new(&noise), &extra).unwrap();
+        w.add("after.txt", b"after", ZipMethod::Deflate).unwrap();
+        let bytes = w.finish().unwrap();
+        let mut cursor = Cursor::new(&bytes);
+        let dir = zip_read_central_directory(&mut cursor).unwrap();
+        let h = &dir.file_headers[0];
+        assert_eq!(h.compression_method, COMPRESS_METHOD_DEFLATED, "deflated although it grows");
+        assert_eq!(h.extract(&mut cursor).unwrap(), noise);
+        assert_eq!(dir.file_headers[1].extract(&mut cursor).unwrap(), b"after");
+        // the local header: no extra field
+        assert_eq!(u16::from_le_bytes([bytes[28], bytes[29]]), 0);
+        // the first central header: its extra field's length, then the field after its name
+        let at = bytes.windows(4).position(|w| w == CENTRAL_DIR_FILE_HEADER_SIGNATURE.to_le_bytes()).unwrap();
+        assert_eq!(u16::from_le_bytes([bytes[at + 30], bytes[at + 31]]), extra.len() as u16);
+        let name_end = at + 46 + "noise.bin".len();
+        assert_eq!(&bytes[name_end..name_end + extra.len()], &extra);
     }
 
     #[test]
