@@ -1722,6 +1722,8 @@ impl u8 {
     pub const fn is_ascii_uppercase(&self) -> bool { matches!(*self, b'A'..=b'Z') }
     pub const fn is_ascii_lowercase(&self) -> bool { matches!(*self, b'a'..=b'z') }
     pub const fn is_ascii_alphanumeric(&self) -> bool { matches!(*self, b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z') }
+    /// The byte as an ASCII escape sequence (`\xNN`, `\n`, `\'`...), as `core::ascii::escape_default`.
+    pub fn escape_ascii(self) -> crate::ascii::EscapeDefault { crate::ascii::escape_default(self) }
     pub const fn is_ascii_digit(&self) -> bool { matches!(*self, b'0'..=b'9') }
     pub const fn is_ascii_octdigit(&self) -> bool { matches!(*self, b'0'..=b'7') }
     pub const fn is_ascii_hexdigit(&self) -> bool { matches!(*self, b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f') }

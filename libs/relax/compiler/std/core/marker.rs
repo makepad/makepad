@@ -56,6 +56,16 @@ impl<T: PointeeSized> crate::cmp::PartialEq for PhantomData<T> {
     }
 }
 impl<T: PointeeSized> crate::cmp::Eq for PhantomData<T> {}
+impl<T: PointeeSized> crate::cmp::PartialOrd for PhantomData<T> {
+    fn partial_cmp(&self, _other: &PhantomData<T>) -> Option<crate::cmp::Ordering> {
+        Some(crate::cmp::Ordering::Equal)
+    }
+}
+impl<T: PointeeSized> crate::cmp::Ord for PhantomData<T> {
+    fn cmp(&self, _other: &PhantomData<T>) -> crate::cmp::Ordering {
+        crate::cmp::Ordering::Equal
+    }
+}
 impl<T: PointeeSized> crate::hash::Hash for PhantomData<T> {
     fn hash<H: crate::hash::Hasher>(&self, _state: &mut H) {}
 }

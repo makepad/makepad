@@ -439,6 +439,11 @@ impl<B: BufRead> Iterator for Lines<B> {
 
 // ---- impls for references, boxes, slices and Vec
 
+impl<S: Seek + ?Sized> Seek for alloc::boxed::Box<S> {
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+        (**self).seek(pos)
+    }
+}
 impl<R: Read + ?Sized> Read for &mut R {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         (**self).read(buf)

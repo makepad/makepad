@@ -403,6 +403,11 @@ pub unsafe fn vld1q_u8(a: *const u8) -> uint8x16_t {
     vx::vx_load(a as *const u8)
 }
 
+/// Two consecutive 16-byte vectors.
+pub unsafe fn vld1q_u8_x2(a: *const u8) -> uint8x16x2_t {
+    uint8x16x2_t(vld1q_u8(a), vld1q_u8(a.add(16)))
+}
+
 #[inline(always)]
 pub unsafe fn vmaxq_s16(a: int16x8_t, b: int16x8_t) -> int16x8_t {
     vx::vx_binary(a, b, 14, 16)
