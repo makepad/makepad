@@ -538,7 +538,7 @@ fn stmt_attrs_around(prog: &Program, owner: DefId, file: u32, item: crate::ast::
     }
     let od = prog.def(owner);
     let ast = &prog.files[od.file as usize].ast;
-    if od.file != file { return Vec::new(); }
+    if od.file != file || !ast.has_item(od.item) { return Vec::new(); }
     let mut f = Find { ast, item, stack: Vec::new(), found: None };
     match ast.item(od.item).kind {
         ItemKind::Fn(..) => {
@@ -577,6 +577,7 @@ pub fn attrs_at_call(prog: &Program, owner: DefId, file: u32, call: u32) -> Vec<
     if od.file != file || od.item.0 == u32::MAX { return Vec::new(); }
     let pf = &prog.files[od.file as usize];
     let ast = &pf.ast;
+    if !ast.has_item(od.item) { return Vec::new(); }
     let mut f = Find { ast, pf, call: pf.diagnostic_pos(call), stack: Vec::new(), found: None };
     match ast.item(od.item).kind {
         ItemKind::Fn(..) => {
@@ -624,6 +625,8 @@ pub fn attrs_at_binding(prog: &Program, owner: DefId, pos: u32) -> Vec<Attr> {
     }
     let od = prog.def(owner);
     let ast = &prog.files[od.file as usize].ast;
+    // (an owner whose item sits in a body part nothing has parsed yet has no attributes to read)
+    if !ast.has_item(od.item) { return Vec::new(); }
     let mut f = Find { ast, pos, stack: Vec::new(), found: None };
     match ast.item(od.item).kind {
         ItemKind::Fn(sig, _, _) => {
