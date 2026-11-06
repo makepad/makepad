@@ -199,6 +199,7 @@ workspace.members = [
     "examples/cad",
     "examples/box3d",
     "examples/hello_world",
+    "examples/hello_3d",
     "examples/render_to_texture",
     "examples/depth_mix",
     "examples/sdf_atlas",
