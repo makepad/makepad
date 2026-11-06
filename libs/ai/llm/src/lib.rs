@@ -22,6 +22,7 @@ pub mod qwen35_runtime;
 pub mod qwen35moe;
 pub mod qwen35moe_runtime;
 pub mod runtime;
+mod sampler;
 mod session;
 pub mod lanes;
 pub mod slots;

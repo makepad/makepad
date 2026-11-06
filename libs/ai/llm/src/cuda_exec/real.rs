@@ -32,7 +32,7 @@ use makepad_ai_cuda::llm_ops::{
     mmv_quant, mmv_quant_q81, mmv_quant_q81_swiglu, mul_mat_batched, norm, quant_kind_block_bytes,
     quant_kind_bytes_per_256, quant_kind_is_official_only, quant_kind_mmq_ds4, quant_kind_routes,
     layer_norm, quantize_mmq_d4, quantize_mmq_ds4, quantize_q81, quantize_q81_batched,
-    dequant_q8_0_f16, rms_norm_mul, rope_multi, rope_vision, set_rows, softmax_mask, ssm_conv, unary, unary_mul,
+    dequant_q8_0_f16, rms_norm_mul, rope_multi, rope_vision, sample_weigh, set_rows, softmax_mask, ssm_conv, unary, unary_mul,
     upscale_bilinear, im2col_1d_f32, UNARY_COS, UNARY_SIN, UNARY_SQR,
 
     QUANT_IQ3S as MKLLM_QUANT_IQ3S, QUANT_IQ4NL as MKLLM_QUANT_IQ4NL,
@@ -58,6 +58,7 @@ use crate::runtime::{
     HybridDecodeBatchLayout, HybridDecodeGraph, HybridDecodeOutputConfig, HybridDecodeRun,
     HybridDecodeSpec, HybridSharedCacheTensorIds, ImportedHybridGraphContext, LogitsProbeInput,
 };
+use crate::sampler::{needs_all, RowOut, RowReadout, RowWeights, WEIGH_CANDIDATES, WEIGH_CHUNK};
 use crate::weights::LoadedGgufWeights;
 
 // cudaMemcpyKind::cudaMemcpyDeviceToDevice. Official ggml-cuda cpy.cu:418.
@@ -292,6 +293,11 @@ struct DeviceState {
     // llama-context.cpp:1943-1950: logits land in the device host buffer
     // (pinned) so D2H is DMA, not a WDDM bounce through a fresh Vec.
     scratch_host: RefCell<HostScratch>,
+    // The sampler's weighing: its own device scratch (no captured graph holds
+    // these pointers, so growing it invalidates nothing) and its own pinned
+    // staging, so weighing never waits on the graph inputs' staged copies.
+    sampler_dev: RefCell<Scratch>,
+    sampler_host: RefCell<HostScratch>,
     last_q81_src: Cell<*const f32>,
     last_q81_k: Cell<usize>,
     last_q81_m: Cell<usize>,
@@ -395,6 +401,14 @@ impl Drop for DeviceState {
             let host = self.scratch_host.get_mut();
             if !host.ptr.is_null() {
                 cudaFreeHost(host.ptr);
+            }
+            let sampler = self.sampler_dev.get_mut();
+            if !sampler.ptr.is_null() {
+                cudaFree(sampler.ptr);
+            }
+            let sampler_host = self.sampler_host.get_mut();
+            if !sampler_host.ptr.is_null() {
+                cudaFreeHost(sampler_host.ptr);
             }
             for ev in [self.split_ev0.get(), self.split_ev1.get(), self.split_ev2.get()] {
                 if !ev.is_null() {
@@ -581,6 +595,15 @@ impl Runtime {
                         epoch: ScratchEpoch::default(),
                     }),
                     scratch_host: RefCell::new(HostScratch {
+                        ptr: std::ptr::null_mut(),
+                        size: 0,
+                    }),
+                    sampler_dev: RefCell::new(Scratch {
+                        ptr: std::ptr::null_mut(),
+                        size: 0,
+                        epoch: ScratchEpoch::default(),
+                    }),
+                    sampler_host: RefCell::new(HostScratch {
                         ptr: std::ptr::null_mut(),
                         size: 0,
                     }),
@@ -2592,6 +2615,260 @@ impl RawSession {
     }
 }
 
+/// Byte offsets of the sampler's scratch, laid out once per call.
+struct SamplerLayout {
+    w: usize,
+    cmax: usize,
+    csum: usize,
+    /// The inputs, one contiguous block in the same order on both sides:
+    /// temperatures, logit-row map, penalty offsets, tokens, values.
+    inputs: usize,
+    input_bytes: usize,
+    out: usize,
+    out_stride: usize,
+    device_bytes: usize,
+}
+
+fn align_256(bytes: usize) -> usize {
+    bytes.next_multiple_of(256)
+}
+
+/// Hand back the rows of a device logits tensor as `readout` asks.
+///
+/// Weighed rows go through `mkllm_sample_weigh` (one launch for all of them)
+/// and come back as their heaviest tokens; a row whose nucleus reaches past
+/// those, by the reference's own test, also brings every weight back. Raw rows
+/// are copied as they are. Everything is queued behind the forward and the
+/// host waits once.
+fn read_rows(
+    state: &DeviceState,
+    logits: *const c_void,
+    vocab: usize,
+    stride: usize,
+    readout: &[RowReadout],
+) -> Result<Vec<RowOut>> {
+    let stream = state.stream;
+    let weighed: Vec<(usize, &crate::sampler::WeighSpec)> = readout
+        .iter()
+        .enumerate()
+        .filter_map(|(row, out)| match out {
+            RowReadout::Weights(spec) => Some((row, spec)),
+            RowReadout::Logits => None,
+        })
+        .collect();
+    let raw: Vec<usize> = readout
+        .iter()
+        .enumerate()
+        .filter_map(|(row, out)| matches!(out, RowReadout::Logits).then_some(row))
+        .collect();
+    let n = weighed.len();
+    let nchunks = vocab.div_ceil(WEIGH_CHUNK);
+    let cap = WEIGH_CANDIDATES.min(vocab);
+    let penalties: usize = weighed.iter().map(|(_, spec)| spec.penalties.len()).sum();
+    let out_stride = 16 + 8 * WEIGH_CANDIDATES;
+    let mut cursor = 0usize;
+    let mut take = |bytes: usize| {
+        let at = cursor;
+        cursor = align_256(cursor + bytes);
+        at
+    };
+    let w = take(n * vocab * 4);
+    let cmax = take(n * nchunks * 4);
+    let csum = take(n * nchunks * 4);
+    let input_bytes = 4 * (n + n + (n + 1) + 2 * penalties);
+    let inputs = take(input_bytes);
+    let out = take(n * out_stride);
+    let layout = SamplerLayout {
+        w,
+        cmax,
+        csum,
+        inputs,
+        input_bytes,
+        out,
+        out_stride,
+        device_bytes: cursor,
+    };
+    let raw_bytes = raw.len() * vocab * 4;
+    let host_out = align_256(layout.input_bytes);
+    let host_raw = align_256(host_out + n * out_stride);
+    let pinned = state
+        .sampler_host
+        .borrow_mut()
+        .ensure((host_raw + raw_bytes).max(1), stream, "sampler host staging")?;
+    let device = if n > 0 {
+        state
+            .sampler_dev
+            .borrow_mut()
+            .ensure(layout.device_bytes, "sampler device scratch")? as *mut u8
+    } else {
+        std::ptr::null_mut()
+    };
+    unsafe {
+        if n > 0 {
+            // Inputs: temperatures, row map, CSR offsets, tokens, values.
+            let mut words: Vec<u32> = Vec::with_capacity(layout.input_bytes / 4);
+            words.extend(weighed.iter().map(|(_, spec)| spec.temperature.to_bits()));
+            words.extend(weighed.iter().map(|&(row, _)| row as u32));
+            let mut offset = 0u32;
+            words.push(0);
+            for (_, spec) in &weighed {
+                offset += spec.penalties.len() as u32;
+                words.push(offset);
+            }
+            for (_, spec) in &weighed {
+                words.extend(spec.penalties.iter().map(|&(token, _)| token));
+            }
+            for (_, spec) in &weighed {
+                words.extend(spec.penalties.iter().map(|&(_, value)| value.to_bits()));
+            }
+            debug_assert_eq!(words.len() * 4, layout.input_bytes);
+            std::ptr::copy_nonoverlapping(
+                words.as_ptr() as *const u8,
+                pinned,
+                layout.input_bytes,
+            );
+            check(
+                cudaMemcpyAsync(
+                    device.add(layout.inputs) as *mut c_void,
+                    pinned as *const c_void,
+                    layout.input_bytes,
+                    CUDA_MEMCPY_HOST_TO_DEVICE,
+                    stream,
+                ),
+                "sampler inputs",
+            )?;
+            let temps = device.add(layout.inputs) as *const f32;
+            let row_idx = temps.add(n) as *const i32;
+            let pen_off = row_idx.add(n);
+            let pen_tok = pen_off.add(n + 1) as *const u32;
+            let pen_val = pen_tok.add(penalties) as *const f32;
+            check(
+                sample_weigh(
+                    logits,
+                    stride,
+                    row_idx,
+                    vocab as i32,
+                    n as i32,
+                    pen_off,
+                    pen_tok,
+                    pen_val,
+                    temps,
+                    device.add(layout.w) as *mut f32,
+                    vocab,
+                    device.add(layout.cmax) as *mut f32,
+                    device.add(layout.csum) as *mut f32,
+                    cap as i32,
+                    device.add(layout.out) as *mut c_void,
+                    layout.out_stride,
+                    stream,
+                ),
+                "sampler weighing",
+            )?;
+            check(
+                cudaMemcpyAsync(
+                    pinned.add(host_out) as *mut c_void,
+                    device.add(layout.out) as *const c_void,
+                    n * out_stride,
+                    CUDA_MEMCPY_DEVICE_TO_HOST,
+                    stream,
+                ),
+                "sampler readback",
+            )?;
+        }
+        for (index, &row) in raw.iter().enumerate() {
+            check(
+                cudaMemcpyAsync(
+                    pinned.add(host_raw + index * vocab * 4) as *mut c_void,
+                    (logits as *const u8).add(row * stride * 4) as *const c_void,
+                    vocab * 4,
+                    CUDA_MEMCPY_DEVICE_TO_HOST,
+                    stream,
+                ),
+                "logit row readback",
+            )?;
+        }
+        check(cudaStreamSynchronize(stream), "sampled rows sync")?;
+    }
+    let mut outs: Vec<Option<RowOut>> = (0..readout.len()).map(|_| None).collect();
+    let mut wide: Vec<(usize, usize)> = Vec::new();
+    for (k, &(row, spec)) in weighed.iter().enumerate() {
+        let record = unsafe { std::slice::from_raw_parts(pinned.add(host_out + k * out_stride), out_stride) };
+        let word = |at: usize| u32::from_le_bytes([record[at], record[at + 1], record[at + 2], record[at + 3]]);
+        let sum = f32::from_bits(word(0));
+        let max = f32::from_bits(word(4));
+        let count = word(8) as usize;
+        if !max.is_finite() {
+            return Err(LlamaError::format("logits contain no finite value"));
+        }
+        if count != cap {
+            return Err(LlamaError::format(format!(
+                "the device weighed {count} candidates where {cap} were asked for"
+            )));
+        }
+        let top: Vec<(u32, f32)> = (0..count)
+            .map(|j| {
+                let at = 16 + 8 * j;
+                let key = u64::from_le_bytes(record[at..at + 8].try_into().expect("8 bytes"));
+                (u32::MAX - key as u32, f32::from_bits((key >> 32) as u32))
+            })
+            .collect();
+        if needs_all(&top, sum, vocab, spec) {
+            wide.push((k, row));
+        }
+        outs[row] = Some(RowOut::Weights(RowWeights {
+            vocab,
+            sum,
+            top,
+            all: None,
+        }));
+    }
+    for (index, &row) in raw.iter().enumerate() {
+        let bytes = unsafe { std::slice::from_raw_parts(pinned.add(host_raw + index * vocab * 4), vocab * 4) };
+        let values = bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        outs[row] = Some(RowOut::Logits(values));
+    }
+    if !wide.is_empty() {
+        // The nucleus reaches past the candidates: fetch these rows' weights
+        // exactly, from the scratch the weighing just wrote.
+        let bytes = wide.len() * vocab * 4;
+        let pinned = state
+            .sampler_host
+            .borrow_mut()
+            .ensure(bytes, stream, "sampler wide rows")?;
+        unsafe {
+            for (index, &(k, _)) in wide.iter().enumerate() {
+                check(
+                    cudaMemcpyAsync(
+                        pinned.add(index * vocab * 4) as *mut c_void,
+                        device.add(layout.w + k * vocab * 4) as *const c_void,
+                        vocab * 4,
+                        CUDA_MEMCPY_DEVICE_TO_HOST,
+                        stream,
+                    ),
+                    "sampler wide row",
+                )?;
+            }
+            check(cudaStreamSynchronize(stream), "sampler wide rows sync")?;
+        }
+        for (index, &(_, row)) in wide.iter().enumerate() {
+            let bytes = unsafe { std::slice::from_raw_parts(pinned.add(index * vocab * 4), vocab * 4) };
+            let all = bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            if let Some(RowOut::Weights(weights)) = outs[row].as_mut() {
+                weights.all = Some(all);
+            }
+        }
+    }
+    outs.into_iter()
+        .map(|out| out.ok_or_else(|| LlamaError::format("a sampled row was not read back")))
+        .collect()
+}
+
 pub(super) struct Compiled {
     state: Rc<DeviceState>,
     arena: ArenaRef,
@@ -2648,7 +2925,7 @@ impl Compiled {
         let outputs = if self.graph_disabled.get() {
             view.run(&writes, wanted_read)?
         } else {
-            Self::execute_with_graph(self, &view, &writes, wanted_read)?
+            Self::execute_with_graph(self, &view, &writes, Some(wanted_read))?
         };
 
         if skip_logits {
@@ -2700,11 +2977,61 @@ impl Compiled {
         Ok(run)
     }
 
+    /// Run the graph and hand back its output rows as `readout` asks: raw
+    /// logits, or weighed for the sampler on the device. One stream sync for
+    /// the lot, after the weighing.
+    pub(super) fn execute_rows(
+        &mut self,
+        input: LogitsProbeInput<'_>,
+        layout: &HybridDecodeBatchLayout,
+        readout: &[RowReadout],
+    ) -> Result<Vec<RowOut>> {
+        validate_hybrid_decode_layout(&self.ctx, &self.spec, &self.decode, layout)?;
+        let writes = build_hybrid_decode_writes(&self.ctx, &self.spec, &self.decode, input, layout)?;
+        let view = ExecView {
+            state: &self.state,
+            arena: &self.arena,
+            ctx: &self.ctx,
+            plan: &self.plan,
+        };
+        if self.graph_disabled.get() {
+            view.write_inputs(&writes)?;
+            view.dispatch_all()?;
+        } else {
+            Self::execute_with_graph(self, &view, &writes, None)?;
+        }
+        let logits = view.tensor(self.decode.result_logits)?;
+        if logits.desc.ty != TensorType::F32
+            || logits.nb[0] != 4
+            || logits.nb[1] % 4 != 0
+            || logits.ne[2] != 1
+            || logits.ne[3] != 1
+        {
+            return Err(LlamaError::format("sampled rows need f32 logits rows of contiguous floats"));
+        }
+        let vocab = usize::try_from(logits.ne[0])
+            .map_err(|_| LlamaError::format("logit row width does not fit in usize"))?;
+        let rows = usize::try_from(logits.ne[1])
+            .map_err(|_| LlamaError::format("logit row count does not fit in usize"))?;
+        let stride = logits.nb[1] / 4;
+        if readout.len() != rows {
+            return Err(LlamaError::format(format!(
+                "{} row readouts for a forward of {rows} logit rows",
+                readout.len()
+            )));
+        }
+        let base = view.ptr_of(self.decode.result_logits)?;
+        read_rows(&self.state, base, vocab, stride, readout)
+    }
+
+    /// Run the graph through its capture. With `wanted`, those tensors are
+    /// read back; with `None`, nothing is read back and the host does not
+    /// wait for the device.
     fn execute_with_graph(
         &self,
         view: &ExecView<'_>,
         writes: &[(TensorId, Vec<u8>)],
-        wanted: &[TensorId],
+        wanted: Option<&[TensorId]>,
     ) -> Result<BTreeMap<TensorId, Vec<u8>>> {
         let split = host_split_enabled();
         let ev0 = self.state.split_ev0.get();
@@ -2877,6 +3204,9 @@ impl Compiled {
                 }
             }
         }
+        let Some(wanted) = wanted else {
+            return Ok(BTreeMap::new());
+        };
         let after_copy = if can_events && replayed {
             Some(ev2)
         } else {
@@ -5504,5 +5834,208 @@ mod touch_index_tests {
             resident_hits > 100 && planned_hits > 100 && deep_hits > 5,
             "resident {resident_hits} planned {planned_hits} deep {deep_hits}"
         );
+    }
+}
+
+#[cfg(test)]
+mod sampler_weigh_tests {
+    //! The device weighs a row exactly as the sampler's reference does: the
+    //! same sum, the same heaviest tokens with the same weights in the same
+    //! order, and every weight, bit for bit, whenever the reference says the
+    //! nucleus may reach past them. Raw rows come back as they went in.
+    use std::ffi::c_void;
+
+    use super::{
+        check, cudaFree, cudaMalloc, cudaMemcpyAsync, cudaStreamSynchronize, read_rows, Runtime,
+        CUDA_MEMCPY_HOST_TO_DEVICE,
+    };
+    use crate::sampler::{weigh_row, RowOut, RowReadout, RowWeights, WeighSpec};
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn unit(&mut self) -> f32 {
+            (self.next() >> 40) as f32 / (1u32 << 24) as f32
+        }
+    }
+
+    /// Logit rows shaped like the cases the sampler meets.
+    fn shaped(kind: usize, vocab: usize, rng: &mut Rng) -> Vec<f32> {
+        match kind {
+            // A model's row: a broad hump and a handful of strong tokens.
+            0 => {
+                let mut row: Vec<f32> = (0..vocab)
+                    .map(|_| 6.0 * (rng.unit() + rng.unit() + rng.unit() - 1.5))
+                    .collect();
+                for _ in 0..8 {
+                    row[rng.next() as usize % vocab] = 12.0 + 4.0 * rng.unit();
+                }
+                row
+            }
+            // Flat: a nucleus far wider than the candidates.
+            1 => (0..vocab).map(|t| ((t * 37) % 101) as f32 * 0.05).collect(),
+            // Coarse values: ties everywhere, at the threshold too.
+            2 => (0..vocab).map(|_| (rng.next() % 9) as f32 * 0.5).collect(),
+            // Masked: a third of the row is -inf.
+            3 => (0..vocab)
+                .map(|t| if t % 3 == 1 { f32::NEG_INFINITY } else { 4.0 * rng.unit() })
+                .collect(),
+            // Fewer finite tokens than candidates: the rest weigh 0 and are
+            // taken in token order.
+            4 => {
+                let mut row = vec![f32::NEG_INFINITY; vocab];
+                for _ in 0..10 {
+                    row[rng.next() as usize % vocab] = 3.0 * rng.unit();
+                }
+                row
+            }
+            // One finite token.
+            _ => {
+                let mut row = vec![f32::NEG_INFINITY; vocab];
+                row[rng.next() as usize % vocab] = 0.25;
+                row
+            }
+        }
+    }
+
+    fn bits(weights: &RowWeights) -> (usize, u32, Vec<(u32, u32)>, Option<Vec<u32>>) {
+        (
+            weights.vocab,
+            weights.sum.to_bits(),
+            weights.top.iter().map(|&(token, w)| (token, w.to_bits())).collect(),
+            weights.all.as_ref().map(|all| all.iter().map(|w| w.to_bits()).collect()),
+        )
+    }
+
+    #[test]
+    fn device_weights_equal_the_reference_bit_for_bit() {
+        let runtime = Runtime::new().expect("a CUDA device");
+        let state = &*runtime.state;
+        let mut rng = Rng(0x5a3e_1d27);
+        let mut checked = 0usize;
+        let mut wide = 0usize;
+        let mut narrow = 0usize;
+        // The served vocabulary (not a multiple of the chunk), one below a
+        // chunk, exactly one chunk, and a few chunks.
+        for vocab in [248_320usize, 1000, 1024, 5000] {
+            let stride = vocab + 7;
+            let kinds = 6;
+            // Every kind once, plus a raw row in the middle so the weighed
+            // rows have to find their logits through the row map.
+            let rows = kinds + 1;
+            let raw_row = 3;
+            let mut host = vec![0.0f32; rows * stride];
+            let mut readout = Vec::with_capacity(rows);
+            let mut kind = 0;
+            for row in 0..rows {
+                let logits = if row == raw_row {
+                    shaped(0, vocab, &mut rng)
+                } else {
+                    let logits = shaped(kind, vocab, &mut rng);
+                    kind += 1;
+                    logits
+                };
+                host[row * stride..row * stride + vocab].copy_from_slice(&logits);
+                if row == raw_row {
+                    readout.push(RowReadout::Logits);
+                    continue;
+                }
+                let strongest = (0..vocab)
+                    .max_by(|&a, &b| logits[a].total_cmp(&logits[b]).then(b.cmp(&a)))
+                    .unwrap() as u32;
+                // Penalties on the row's maximum (so m moves), on tokens
+                // nearby, and past the vocabulary (ignored).
+                let mut penalties = vec![(strongest, 1.5f32)];
+                for _ in 0..(row % 4) * 5 {
+                    penalties.push((rng.next() as u32 % vocab as u32, 0.25 + rng.unit()));
+                }
+                penalties.push((vocab as u32 + 3, 2.0));
+                penalties.sort_unstable_by_key(|&(token, _)| token);
+                penalties.dedup_by_key(|&mut (token, _)| token);
+                let (temperature, top_k, top_p) = match row % 4 {
+                    0 => (0.7, 0, 0.9),
+                    1 => (1.0, 0, 0.99),
+                    2 => (0.6, 20, 0.95),
+                    _ => (1.3, 0, 1.0),
+                };
+                readout.push(RowReadout::Weights(WeighSpec::new(
+                    temperature,
+                    top_k,
+                    top_p,
+                    penalties,
+                )));
+            }
+            let bytes = host.len() * 4;
+            let mut device: *mut c_void = std::ptr::null_mut();
+            let got = unsafe {
+                check(cudaMalloc(&mut device, bytes), "test logits").unwrap();
+                check(
+                    cudaMemcpyAsync(
+                        device,
+                        host.as_ptr() as *const c_void,
+                        bytes,
+                        CUDA_MEMCPY_HOST_TO_DEVICE,
+                        state.stream,
+                    ),
+                    "test logits upload",
+                )
+                .unwrap();
+                check(cudaStreamSynchronize(state.stream), "test logits sync").unwrap();
+                let got = read_rows(state, device, vocab, stride, &readout);
+                cudaFree(device);
+                got.unwrap()
+            };
+            assert_eq!(got.len(), rows);
+            for (row, (out, asked)) in got.iter().zip(&readout).enumerate() {
+                let logits = &host[row * stride..row * stride + vocab];
+                match (out, asked) {
+                    (RowOut::Logits(back), RowReadout::Logits) => {
+                        let back: Vec<u32> = back.iter().map(|v| v.to_bits()).collect();
+                        let sent: Vec<u32> = logits.iter().map(|v| v.to_bits()).collect();
+                        assert!(back == sent, "vocab {vocab} row {row}: the raw row changed");
+                    }
+                    (RowOut::Weights(device), RowReadout::Weights(spec)) => {
+                        let reference = weigh_row(logits, spec).unwrap();
+                        let (dv, ds, dt, da) = bits(device);
+                        let (rv, rs, rt, ra) = bits(&reference);
+                        assert_eq!(dv, rv, "vocab {vocab} row {row}: vocab");
+                        assert_eq!(
+                            ds, rs,
+                            "vocab {vocab} row {row}: sum {} vs reference {}",
+                            device.sum, reference.sum
+                        );
+                        if let Some(at) = dt.iter().zip(&rt).position(|(a, b)| a != b) {
+                            panic!(
+                                "vocab {vocab} row {row}: candidate {at} is {:?}, reference {:?}",
+                                device.top[at], reference.top[at]
+                            );
+                        }
+                        assert_eq!(dt.len(), rt.len(), "vocab {vocab} row {row}: candidates");
+                        assert_eq!(da.is_some(), ra.is_some(), "vocab {vocab} row {row}: wide");
+                        if let (Some(da), Some(ra)) = (&da, &ra) {
+                            let differ = da.iter().zip(ra).filter(|(a, b)| a != b).count();
+                            assert_eq!(differ, 0, "vocab {vocab} row {row}: {differ} weights differ");
+                            wide += 1;
+                        } else {
+                            narrow += 1;
+                        }
+                        checked += 1;
+                    }
+                    _ => panic!("vocab {vocab} row {row}: came back as the wrong kind"),
+                }
+            }
+        }
+        // The cases have to reach both halves of the readback.
+        assert_eq!(checked, 24);
+        assert!(wide >= 4 && narrow >= 4, "wide {wide} narrow {narrow}");
     }
 }

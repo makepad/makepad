@@ -176,4 +176,13 @@ impl Compiled {
     ) -> Result<HybridDecodeRun> {
         match *self {}
     }
+
+    pub(super) fn execute_rows(
+        &mut self,
+        _input: LogitsProbeInput<'_>,
+        _layout: &HybridDecodeBatchLayout,
+        _readout: &[crate::sampler::RowReadout],
+    ) -> Result<Vec<crate::sampler::RowOut>> {
+        match *self {}
+    }
 }

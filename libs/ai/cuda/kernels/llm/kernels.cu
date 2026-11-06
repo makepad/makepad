@@ -5021,3 +5021,270 @@ extern "C" cudaError_t mkllm_fattn_vec(
     return cudaErrorInvalidValue;
 #undef MKLLM_FATTN_VEC_ARGS
 }
+
+// ---------------------------------------------------------------------------
+// Sampler weighing: the device half of libs/ai/llm/src/sampler.rs, which
+// defines it. Same operations in the same order, so the same bits: the
+// penalties come off the logits (f32 subtract), m is the penalised maximum,
+// every weight is mks_exp((l - m) / T) with the reference's constants and
+// explicit fma/mul/rint, each 1024-token chunk is summed by halving strides
+// and the chunk sums are added in order. The heaviest `cap` tokens come back
+// as rank keys (weight bits << 32 | ~token), heaviest first.
+//
+// logits f32 [vocab] rows `logits_stride` floats apart, weighed row r reading
+// logits row row_idx[r]; per-row temperature;
+// penalties as CSR (pen_off[rows + 1], pen_tok, pen_val), each token once per
+// row. Scratch: w [rows][w_stride] floats, cmax/csum [rows][nchunks]. out row
+// r at r * out_stride bytes: f32 sum, f32 max, u32 count, u32 0, then `count`
+// u64 keys.
+// ---------------------------------------------------------------------------
+
+#define MKS_CHUNK 1024
+#define MKS_MAX_CAP 1024
+
+static __device__ __forceinline__ float mks_exp(float x) {
+    if (!(x >= -87.0f)) return 0.0f;
+    const float k = rintf(__fmul_rn(x, __int_as_float(0x3FB8AA3B)));
+    float r = __fmaf_rn(-k, __int_as_float(0x3F317200), x);
+    r = __fmaf_rn(-k, __int_as_float(0x35BFBE8E), r);
+    float p = __int_as_float(0x3AB60B61);
+    p = __fmaf_rn(p, r, __int_as_float(0x3C088889));
+    p = __fmaf_rn(p, r, __int_as_float(0x3D2AAAAB));
+    p = __fmaf_rn(p, r, __int_as_float(0x3E2AAAAB));
+    p = __fmaf_rn(p, r, 0.5f);
+    p = __fmaf_rn(p, r, 1.0f);
+    p = __fmaf_rn(p, r, 1.0f);
+    const float scale = __int_as_float(((int) k + 127) << 23);
+    return __fmul_rn(p, scale);
+}
+
+// grid (nchunks, rows), block 256: penalised logits into w, chunk maxima.
+static __global__ void mks_prep_kernel(
+        const float * __restrict__ logits, size_t logits_stride, const int * __restrict__ row_idx, int vocab,
+        const int * __restrict__ pen_off, const unsigned * __restrict__ pen_tok,
+        const float * __restrict__ pen_val,
+        float * __restrict__ w, size_t w_stride, float * __restrict__ cmax, int nchunks) {
+    const int c = blockIdx.x;
+    const int row = blockIdx.y;
+    const int t = threadIdx.x;
+    __shared__ float s[MKS_CHUNK];
+    __shared__ float red[256];
+    const int base = c * MKS_CHUNK;
+    const float * l = logits + (size_t) row_idx[row] * logits_stride;
+    for (int j = t; j < MKS_CHUNK; j += 256) {
+        const int i = base + j;
+        s[j] = i < vocab ? l[i] : -INFINITY;
+    }
+    __syncthreads();
+    for (int e = pen_off[row] + t; e < pen_off[row + 1]; e += 256) {
+        const unsigned tok = pen_tok[e];
+        if (tok >= (unsigned) base && tok < (unsigned) (base + MKS_CHUNK) && tok < (unsigned) vocab) {
+            s[tok - base] = __fsub_rn(s[tok - base], pen_val[e]);
+        }
+    }
+    __syncthreads();
+    float best = -INFINITY;
+    float * wr = w + (size_t) row * w_stride;
+    for (int j = t; j < MKS_CHUNK; j += 256) {
+        const int i = base + j;
+        if (i < vocab) {
+            wr[i] = s[j];
+            best = fmaxf(best, s[j]);
+        }
+    }
+    red[t] = best;
+    __syncthreads();
+    for (int off = 128; off > 0; off >>= 1) {
+        if (t < off) red[t] = fmaxf(red[t], red[t + off]);
+        __syncthreads();
+    }
+    if (t == 0) cmax[(size_t) row * nchunks + c] = red[0];
+}
+
+// grid (nchunks, rows), block 256: weights in place in w, chunk tree sums.
+static __global__ void mks_exp_kernel(
+        float * __restrict__ w, size_t w_stride, int vocab,
+        const float * __restrict__ cmax, int nchunks, const float * __restrict__ temps,
+        float * __restrict__ csum) {
+    const int c = blockIdx.x;
+    const int row = blockIdx.y;
+    const int t = threadIdx.x;
+    __shared__ float red[256];
+    float m = -INFINITY;
+    for (int j = t; j < nchunks; j += 256) m = fmaxf(m, cmax[(size_t) row * nchunks + j]);
+    red[t] = m;
+    __syncthreads();
+    for (int off = 128; off > 0; off >>= 1) {
+        if (t < off) red[t] = fmaxf(red[t], red[t + off]);
+        __syncthreads();
+    }
+    m = red[0];
+    __syncthreads();
+    const float temp = temps[row];
+    float * wr = w + (size_t) row * w_stride;
+    const int base = c * MKS_CHUNK;
+    float v[4];
+    #pragma unroll
+    for (int q = 0; q < 4; q++) {
+        const int i = base + t + q * 256;
+        float x = 0.0f;
+        if (i < vocab) {
+            x = mks_exp(__fdiv_rn(__fsub_rn(wr[i], m), temp));
+            wr[i] = x;
+        }
+        v[q] = x;
+    }
+    // Thread t holds chunk positions t, t+256, t+512, t+768. Stride 512 adds
+    // t+512 into t and t+768 into t+256; stride 256 adds t+256 into t.
+    const float sum = __fadd_rn(__fadd_rn(v[0], v[2]), __fadd_rn(v[1], v[3]));
+    red[t] = sum;
+    __syncthreads();
+    for (int off = 128; off >= 32; off >>= 1) {
+        if (t < off) red[t] = __fadd_rn(red[t], red[t + off]);
+        __syncthreads();
+    }
+    if (t < 32) {
+        float x = red[t];
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) x = __fadd_rn(x, __shfl_down_sync(0xffffffffu, x, off));
+        if (t == 0) csum[(size_t) row * nchunks + c] = x;
+    }
+}
+
+static __device__ __forceinline__ unsigned long long mks_key(unsigned bits, int token) {
+    return ((unsigned long long) bits << 32) | (unsigned long long) (0xFFFFFFFFu - (unsigned) token);
+}
+
+// grid (rows), block 1024: the row's sum and maximum, and its heaviest `cap`
+// tokens by a radix select on the weight bits, ties at the threshold taken in
+// token order, then a bitonic sort of the keys.
+static __global__ void mks_select_kernel(
+        const float * __restrict__ w, size_t w_stride, int vocab,
+        const float * __restrict__ cmax, const float * __restrict__ csum, int nchunks, int cap,
+        unsigned char * __restrict__ out, size_t out_stride) {
+    const int row = blockIdx.x;
+    const int t = threadIdx.x;
+    const int lane = t & 31;
+    const int warp = t >> 5;
+    const unsigned * wb = (const unsigned *) (w + (size_t) row * w_stride);
+    __shared__ unsigned hist[256];
+    __shared__ unsigned long long keys[MKS_MAX_CAP];
+    __shared__ unsigned warp_counts[32];
+    __shared__ unsigned prefix_s, need_s, gt_s, taken_s, total_s;
+    unsigned char * o = out + (size_t) row * out_stride;
+    const int take = cap < vocab ? cap : vocab;
+    if (t == 0) {
+        float sum = 0.0f;
+        float m = -INFINITY;
+        for (int j = 0; j < nchunks; j++) {
+            sum = __fadd_rn(sum, csum[(size_t) row * nchunks + j]);
+            m = fmaxf(m, cmax[(size_t) row * nchunks + j]);
+        }
+        ((float *) o)[0] = sum;
+        ((float *) o)[1] = m;
+        ((unsigned *) o)[2] = (unsigned) take;
+        ((unsigned *) o)[3] = 0u;
+    }
+    unsigned prefix = 0u;
+    unsigned need = (unsigned) take;
+    for (int pass = 3; pass >= 0; pass--) {
+        const int shift = pass * 8;
+        const unsigned hi_mask = pass == 3 ? 0u : (0xFFFFFFFFu << (shift + 8));
+        if (t < 256) hist[t] = 0u;
+        __syncthreads();
+        for (int i = t; i < vocab; i += 1024) {
+            const unsigned b = wb[i];
+            if ((b & hi_mask) == (prefix & hi_mask)) atomicAdd(&hist[(b >> shift) & 255u], 1u);
+        }
+        __syncthreads();
+        if (t == 0) {
+            unsigned above = 0u;
+            int d = 255;
+            for (; d > 0; d--) {
+                if (above + hist[d] >= need) break;
+                above += hist[d];
+            }
+            prefix_s = prefix | ((unsigned) d << shift);
+            need_s = need - above;
+        }
+        __syncthreads();
+        prefix = prefix_s;
+        need = need_s;
+        __syncthreads();
+    }
+    const unsigned tau = prefix;
+    if (t == 0) {
+        gt_s = 0u;
+        taken_s = 0u;
+    }
+    for (int j = t; j < MKS_MAX_CAP; j += 1024) keys[j] = 0ull;
+    __syncthreads();
+    for (int i = t; i < vocab; i += 1024) {
+        const unsigned b = wb[i];
+        if (b > tau) keys[atomicAdd(&gt_s, 1u)] = mks_key(b, i);
+    }
+    __syncthreads();
+    const unsigned gt = gt_s;
+    // The `need` lowest-id tokens at the threshold, in token order.
+    for (int base = 0; base < vocab; base += 1024) {
+        const unsigned taken = taken_s;
+        if (taken >= need) break;
+        const int i = base + t;
+        const bool flag = i < vocab && wb[i] == tau;
+        const unsigned mask = __ballot_sync(0xffffffffu, flag);
+        if (lane == 0) warp_counts[warp] = __popc(mask);
+        __syncthreads();
+        if (t == 0) {
+            unsigned run = 0u;
+            for (int k = 0; k < 32; k++) {
+                const unsigned count = warp_counts[k];
+                warp_counts[k] = run;
+                run += count;
+            }
+            total_s = run;
+        }
+        __syncthreads();
+        if (flag) {
+            const unsigned pos = taken + warp_counts[warp] + __popc(mask & ((1u << lane) - 1u));
+            if (pos < need) keys[gt + pos] = mks_key(tau, i);
+        }
+        __syncthreads();
+        if (t == 0) taken_s = taken + total_s;
+        __syncthreads();
+    }
+    // Bitonic sort, descending, over the whole key array (zeros sort last).
+    for (unsigned k = 2; k <= MKS_MAX_CAP; k <<= 1) {
+        for (unsigned j = k >> 1; j > 0; j >>= 1) {
+            const unsigned ixj = (unsigned) t ^ j;
+            if (ixj > (unsigned) t) {
+                const unsigned long long a = keys[t];
+                const unsigned long long b = keys[ixj];
+                const bool desc = ((unsigned) t & k) == 0;
+                if (desc ? (a < b) : (a > b)) {
+                    keys[t] = b;
+                    keys[ixj] = a;
+                }
+            }
+            __syncthreads();
+        }
+    }
+    unsigned long long * ok = (unsigned long long *) (o + 16);
+    for (int j = t; j < take; j += 1024) ok[j] = keys[j];
+}
+
+extern "C" cudaError_t mkllm_sample_weigh(
+        const void * logits, size_t logits_stride, const int * row_idx, int vocab, int rows,
+        const int * pen_off, const unsigned * pen_tok, const float * pen_val,
+        const float * temps, float * w, size_t w_stride, float * cmax, float * csum,
+        int cap, void * out, size_t out_stride, cudaStream_t stream) {
+    if (vocab <= 0 || rows <= 0 || cap <= 0 || cap > MKS_MAX_CAP) return cudaErrorInvalidValue;
+    const int nchunks = (vocab + MKS_CHUNK - 1) / MKS_CHUNK;
+    dim3 grid(nchunks, rows);
+    mks_prep_kernel<<<grid, 256, 0, stream>>>(
+        (const float *) logits, logits_stride, row_idx, vocab, pen_off, pen_tok, pen_val,
+        w, w_stride, cmax, nchunks);
+    mks_exp_kernel<<<grid, 256, 0, stream>>>(w, w_stride, vocab, cmax, nchunks, temps, csum);
+    mks_select_kernel<<<rows, 1024, 0, stream>>>(
+        w, w_stride, vocab, cmax, csum, nchunks, cap, (unsigned char *) out, out_stride);
+    return cudaGetLastError();
+}

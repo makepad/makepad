@@ -1482,19 +1482,26 @@ impl LaneExecutor {
                 {
                     events.extend(self.speculative_batch(&plan, depth)?);
                 } else {
+                    let mut readout = Vec::with_capacity(plan.slots.len());
+                    for step in &plan.slots {
+                        let params = self.params_for(step.slot);
+                        let sampler = self.samplers[step.slot]
+                            .get_or_insert_with(|| crate::LlamaSamplerState::new(params.seed));
+                        readout.push(sampler.readout(params));
+                    }
                     let rows = self
                         .session
-                        .step_slots(&plan, &tokens)
+                        .step_slots_rows(&plan, &tokens, &readout)
                         .map_err(|e| format!("batched decode: {e}"))?;
                     let mut sampled = Vec::with_capacity(rows.len());
-                    for (row, step) in rows.iter().zip(&plan.slots) {
+                    for (row, step) in rows.into_iter().zip(&plan.slots) {
                         let lane = step.slot;
                         let params = self.params_for(lane);
                         let sampler = self.samplers[lane]
                             .get_or_insert_with(|| crate::LlamaSamplerState::new(params.seed));
                         sampled.push(
                             sampler
-                                .sample_logits(row, params)
+                                .sample_row(row, params)
                                 .map_err(|e| format!("lane {lane} sample: {e}"))?,
                         );
                     }

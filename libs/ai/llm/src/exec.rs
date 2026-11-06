@@ -489,6 +489,27 @@ impl CompiledHybridDecode {
         }
     }
 
+    /// Run the graph and hand back each output row as `readout` asks: raw
+    /// logits, or weighed for the sampler. CUDA weighs on the device; every
+    /// other backend, and CUDA when `weigh_on_host` asks for the reference
+    /// arm, reads the logits back and weighs them with the reference itself.
+    /// The weights are the same bits either way.
+    pub(crate) fn execute_rows_with_layout(
+        &mut self,
+        input: LogitsProbeInput<'_>,
+        layout: &HybridDecodeBatchLayout,
+        readout: &[crate::sampler::RowReadout],
+        weigh_on_host: bool,
+    ) -> Result<Vec<crate::sampler::RowOut>> {
+        if let Self::Cuda(compiled) = self {
+            if !weigh_on_host {
+                return compiled.execute_rows_with_layout(input, layout, readout);
+            }
+        }
+        let run = self.execute_logits_only_with_layout(input, layout)?;
+        crate::sampler::rows_on_host(&run.logits, run.vocab_size, readout)
+    }
+
     pub fn execute_with_layout(
         &mut self,
         input: LogitsProbeInput<'_>,

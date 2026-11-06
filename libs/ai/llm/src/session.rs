@@ -8,6 +8,7 @@ use crate::exec::{CompiledHybridDecode, ExecContextBuffers, ExecRuntime};
 use crate::draft_vocab::DraftVocab;
 use crate::model::LlamaModel;
 use crate::plan::ModelExecutionPlan;
+use crate::sampler::{self, Distribution, RowOut, RowReadout, RowWeights, WeighSpec};
 use crate::slots::MROPE_COMPONENTS;
 use crate::runtime::{
     allocate_hybrid_shared_cache_tensors, HybridCacheLayout, HybridCacheShape, HybridCacheTypes,
@@ -48,6 +49,10 @@ pub struct LlamaSessionConfig {
     /// Execute logits-producing graphs without copying logits back to the
     /// host. Intended for fixed-token throughput measurements.
     pub skip_logits_readback: bool,
+    /// Weigh sampled rows on the host even where the backend weighs them on
+    /// the device: the reference arm of the sampler gate. The weights are the
+    /// same bits either way, so only the time differs.
+    pub weigh_on_host: bool,
 }
 
 impl Default for LlamaSessionConfig {
@@ -63,6 +68,7 @@ impl Default for LlamaSessionConfig {
             extra_activation_bytes: DEFAULT_EXTRA_ACTIVATION_BYTES,
             spec_draft_max: 0,
             skip_logits_readback: false,
+            weigh_on_host: false,
         }
     }
 }
@@ -341,6 +347,8 @@ struct MtpRuntime {
     draft_nanos: u64,
     verify_nanos: u64,
     catchup_nanos: u64,
+    weighed_rows: u64,
+    wide_rows: u64,
 }
 
 /// Counters for a speculative run: how many draft tokens were proposed, how
@@ -355,6 +363,10 @@ pub struct SpeculativeStats {
     pub draft_nanos: u64,
     pub verify_nanos: u64,
     pub catchup_nanos: u64,
+    /// Sampled rows the forwards weighed, and how many of them had a nucleus
+    /// wider than the weighed candidates, so every weight came back.
+    pub weighed_rows: u64,
+    pub wide_rows: u64,
 }
 
 impl SpeculativeStats {
@@ -1090,6 +1102,36 @@ impl LlamaSession {
         plan: &crate::slots::StepPlan,
         tokens: &[i32],
     ) -> Result<Vec<Vec<f32>>> {
+        let run = self.slots_step(plan, tokens, None)?.into_run()?;
+        split_run_logits(run, plan.slots.len())
+    }
+
+    /// [`Self::step_slots`] with each slot's row handed back as `readout`
+    /// asks: weighed for a sampled lane, raw for a greedy one.
+    pub(crate) fn step_slots_rows(
+        &mut self,
+        plan: &crate::slots::StepPlan,
+        tokens: &[i32],
+        readout: &[RowReadout],
+    ) -> Result<Vec<RowOut>> {
+        if readout.len() != plan.slots.len() {
+            return Err(LlamaError::format(format!(
+                "step plan has {} slots but {} row readouts",
+                plan.slots.len(),
+                readout.len()
+            )));
+        }
+        let rows = self.slots_step(plan, tokens, Some(readout))?.into_rows()?;
+        self.count_weighed(&rows);
+        Ok(rows)
+    }
+
+    fn slots_step(
+        &mut self,
+        plan: &crate::slots::StepPlan,
+        tokens: &[i32],
+        readout: Option<&[RowReadout]>,
+    ) -> Result<Forward> {
         if plan.slots.is_empty() {
             return Err(LlamaError::format("a decode step needs at least one slot"));
         }
@@ -1131,17 +1173,21 @@ impl LlamaSession {
                 .collect(),
             None => Vec::new(),
         };
-        let run = {
-            let compiled = self
-                .graphs
-                .graph_for_mut(graph_params)
-                .ok_or_else(|| LlamaError::format("compiled batched graph was not cached"))?;
-            if compiled.decode().input_hidden_write_rows.is_some() {
-                layout.hidden_write_rows = dump_rows;
+        let on_host = self.config.weigh_on_host;
+        let compiled = self
+            .graphs
+            .graph_for_mut(graph_params)
+            .ok_or_else(|| LlamaError::format("compiled batched graph was not cached"))?;
+        if compiled.decode().input_hidden_write_rows.is_some() {
+            layout.hidden_write_rows = dump_rows;
+        }
+        let input = LogitsProbeInput::TokenIds(tokens);
+        Ok(match readout {
+            None => Forward::Run(compiled.execute_logits_only_with_layout(input, &layout)?),
+            Some(readout) => {
+                Forward::Rows(compiled.execute_rows_with_layout(input, &layout, readout, on_host)?)
             }
-            compiled.execute_logits_only_with_layout(LogitsProbeInput::TokenIds(tokens), &layout)?
-        };
-        split_run_logits(run, width)
+        })
     }
 
     pub fn remaining_context(&self) -> usize {
@@ -1730,6 +1776,8 @@ impl LlamaSession {
             draft_nanos: 0,
             verify_nanos: 0,
             catchup_nanos: 0,
+            weighed_rows: 0,
+            wide_rows: 0,
         });
 
         Ok(Self {
@@ -2142,33 +2190,6 @@ fn speculative_acceptance(target: f32, draft: f32) -> f32 {
     }
 }
 
-/// The normalised residual `max(0, p - q)` a rejected draft is replaced from,
-/// with the proposal `q` given sparsely as `(token, probability)` over real
-/// token ids — the draft head may cover only part of the vocabulary.
-/// Together with `speculative_acceptance` this makes the emitted token exactly
-/// `p`-distributed (Leviathan et al. / Chen et al. speculative sampling).
-/// Degenerate case: when `q == p` everywhere the residual is empty, and the
-/// only way to get there is `p(x)/q(x) == 1` for the drafted token, i.e. the
-/// draft was already accepted — so falling back to `p` is unreachable in
-/// practice and merely keeps the function total.
-fn speculative_residual(target: &[f32], draft: &[(u32, f32)]) -> Vec<f32> {
-    let mut residual: Vec<f32> = target.to_vec();
-    for &(token, q) in draft {
-        if let Some(slot) = residual.get_mut(token as usize) {
-            *slot = (*slot - q).max(0.0);
-        }
-    }
-    let total: f32 = residual.iter().sum();
-    if total > 0.0 {
-        for value in residual.iter_mut() {
-            *value /= total;
-        }
-        residual
-    } else {
-        target.to_vec()
-    }
-}
-
 /// A degenerate logit vector whose argmax and softmax both concentrate on
 /// `token`; used to hand an already-sampled token to the next round without a
 /// second forward.
@@ -2223,8 +2244,7 @@ impl LlamaSamplingParams {
 
     /// Whether the penalties can change any logit. Both a zero window and two
     /// zero strengths mean "not configured", and the sampler then skips the
-    /// whole path rather than copying a 248320-entry row to subtract nothing
-    /// from it.
+    /// whole path.
     fn penalises(&self) -> bool {
         self.penalty_last_n > 0
             && (self.presence_penalty != 0.0 || self.frequency_penalty != 0.0)
@@ -2315,11 +2335,39 @@ impl LlamaSamplerState {
                 None => argmax_token_id(logits)?,
             }
         } else {
-            let probs = sampling_probabilities(logits, params, self.recent())?;
-            sample_from(&probs, &mut self.rng)?
+            let distribution = host_distribution(logits, params, self.recent())?;
+            draw(&distribution, &mut self.rng)?
         };
         self.remember(token, params);
         Ok(token)
+    }
+
+    /// How a forward hands back the row this stream samples next: raw for a
+    /// greedy stream, which takes an argmax, otherwise weighed.
+    pub(crate) fn readout(&self, params: LlamaSamplingParams) -> RowReadout {
+        if params.is_greedy() {
+            RowReadout::Logits
+        } else {
+            RowReadout::Weights(weigh_spec(params, self.recent()))
+        }
+    }
+
+    /// Draw one token from a row read back as [`Self::readout`] asked,
+    /// advancing this stream: the token [`Self::sample_logits`] draws from
+    /// that row's logits.
+    pub(crate) fn sample_row(&mut self, row: RowOut, params: LlamaSamplingParams) -> Result<i32> {
+        match row {
+            RowOut::Logits(logits) => self.sample_logits(&logits, params),
+            RowOut::Weights(_) if params.is_greedy() => {
+                Err(LlamaError::format("a greedy row came back weighed"))
+            }
+            RowOut::Weights(weights) => {
+                let distribution = sampler::finish(&weights, &weigh_spec(params, self.recent()))?;
+                let token = draw(&distribution, &mut self.rng)?;
+                self.remember(token, params);
+                Ok(token)
+            }
+        }
     }
 }
 
@@ -2347,110 +2395,61 @@ impl Xorshift64 {
     }
 }
 
-/// Turn logits into the probability vector the sampler actually draws from:
-/// temperature, then top-k, then top-p, then renormalise. Entries outside the
-/// kept set are exactly zero, which is what makes the speculative residual
-/// `max(0, p - q)` well defined over the whole vocabulary.
-fn sampling_probabilities(
+/// The sampler's row spec for `params` under the penalty window `recent`.
+/// See [`crate::sampler`] for what it defines.
+fn weigh_spec(params: LlamaSamplingParams, recent: &[i32]) -> WeighSpec {
+    let penalties = penalty_window(params, recent)
+        .map(|window| {
+            window
+                .into_iter()
+                .filter_map(|(token, penalty)| u32::try_from(token).ok().map(|token| (token, penalty)))
+                .collect()
+        })
+        .unwrap_or_default();
+    WeighSpec::new(params.temperature, params.top_k, params.top_p, penalties)
+}
+
+/// The specs of one lane's verify rows: row `i` is shaped by the window
+/// `recent ++ [first] ++ drafts[..i]`, the tokens it follows.
+fn round_specs(
+    params: LlamaSamplingParams,
+    recent: &[i32],
+    first: i32,
+    drafts: &[i32],
+) -> Vec<WeighSpec> {
+    let mut window: Vec<i32> = recent.to_vec();
+    window.push(first);
+    let mut specs = Vec::with_capacity(drafts.len() + 1);
+    for index in 0..=drafts.len() {
+        specs.push(weigh_spec(params, &window));
+        if let Some(&drafted) = drafts.get(index) {
+            window.push(drafted);
+        }
+    }
+    specs
+}
+
+/// The distribution a host logit row samples from.
+fn host_distribution(
     logits: &[f32],
     params: LlamaSamplingParams,
     recent: &[i32],
-) -> Result<Vec<f32>> {
-    if logits.is_empty() {
-        return Err(LlamaError::format("cannot sample from empty logits"));
-    }
-    let temperature = params.temperature.max(1e-6);
-    let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    if !max_logit.is_finite() {
-        return Err(LlamaError::format("logits contain no finite value"));
-    }
-    let mut probs: Vec<f32> = logits
-        .iter()
-        .map(|logit| ((logit - max_logit) / temperature).exp())
-        .collect();
-    // The penalties fold in here as a rescale rather than as a second pass over
-    // a copied logit row: `exp((l - p - max) / T) == exp((l - max) / T) *
-    // exp(-p / T)`, exactly, so touching the handful of penalised entries is
-    // the same arithmetic as penalising the whole row would have been. Using
-    // the UNPENALISED max as the stability offset stays valid because a penalty
-    // only ever subtracts — nothing can exceed the offset and overflow.
-    if let Some(penalties) = penalty_window(params, recent) {
-        for (index, penalty) in penalties {
-            if let Some(value) = probs.get_mut(index) {
-                *value *= (-penalty / temperature).exp();
-            }
-        }
-    }
-    let sum: f32 = probs.iter().sum();
-    if !(sum > 0.0) {
-        return Err(LlamaError::format("logit softmax underflowed to zero"));
-    }
-    for value in probs.iter_mut() {
-        *value /= sum;
-    }
+) -> Result<Distribution> {
+    sampler::distribution(logits, &weigh_spec(params, recent))
+}
 
-    // Rank once, then apply top-k and top-p on the same ordering. Sorting the
-    // whole vocabulary is not affordable here: it is 248320 entries on
-    // Qwen3.8 and the speculative path ranks `n_draft + n_verify` rows per
-    // round, which costs more than the forward passes themselves. A nucleus
-    // wide enough to matter is tiny, so partition to a candidate cap first
-    // (O(V)) and sort only that; if the nucleus genuinely needs more than the
-    // cap, fall back to the exact full ranking.
-    const CANDIDATE_CAP: usize = 1024;
-    let mut order: Vec<u32> = (0..probs.len() as u32).collect();
-    let by_prob = |probs: &[f32], a: &u32, b: &u32| probs[*b as usize].total_cmp(&probs[*a as usize]);
-    let mut keep = if params.top_k > 0 {
-        params.top_k.min(probs.len())
-    } else {
-        probs.len()
-    };
-    let top_p = params.top_p.clamp(0.0, 1.0);
-    let mut capped = false;
-    if top_p < 1.0 {
-        let cap = keep.min(CANDIDATE_CAP);
-        if cap < keep {
-            capped = true;
-            keep = cap;
-        }
-    }
-    if keep < probs.len() {
-        order.select_nth_unstable_by(keep - 1, |a, b| by_prob(&probs, a, b));
-        order.truncate(keep);
-    }
-    order.sort_unstable_by(|a, b| by_prob(&probs, a, b));
-    if capped && order.iter().map(|token| probs[*token as usize]).sum::<f32>() < top_p {
-        // The nucleus is wider than the cap — redo exactly.
-        order = (0..probs.len() as u32).collect();
-        order.sort_unstable_by(|a, b| by_prob(&probs, a, b));
-    }
+/// One draw from `distribution`, advancing `rng`.
+fn draw(distribution: &Distribution, rng: &mut Xorshift64) -> Result<i32> {
+    let token = distribution.draw(rng.next_f32())?;
+    i32::try_from(token).map_err(|_| LlamaError::format("sampled token does not fit in i32"))
+}
 
-    let mut cumulative = 0.0f32;
-    let mut cut = order.len();
-    if top_p < 1.0 {
-        for (index, token) in order.iter().enumerate() {
-            cumulative += probs[*token as usize];
-            if cumulative >= top_p {
-                cut = index + 1;
-                break;
-            }
-        }
+/// The weights of a row that was read back weighed.
+fn weighed(out: RowOut) -> Result<RowWeights> {
+    match out {
+        RowOut::Weights(weights) => Ok(weights),
+        RowOut::Logits(_) => Err(LlamaError::format("a sampled row came back as raw logits")),
     }
-    let kept: BTreeSet<u32> = order[..cut.min(order.len())].iter().copied().collect();
-    let mut total = 0.0f32;
-    for (token, value) in probs.iter_mut().enumerate() {
-        if kept.contains(&(token as u32)) {
-            total += *value;
-        } else {
-            *value = 0.0;
-        }
-    }
-    if !(total > 0.0) {
-        return Err(LlamaError::format("sampling kept no probability mass"));
-    }
-    for value in probs.iter_mut() {
-        *value /= total;
-    }
-    Ok(probs)
 }
 
 /// Push the tokens a generation keeps returning to back down the logit row.
@@ -2471,13 +2470,9 @@ fn sampling_probabilities(
 /// frequency — subtracted from the raw logit before temperature, so the
 /// strength means the same thing whatever the temperature is.
 ///
-/// It never copies the logit row. `sampling_probabilities` already allocates
-/// two vocabulary-sized vectors per call, and the runbook records that ranking
-/// this vocabulary "costs more than the forward passes themselves" — so a third
-/// 1 MB copy per sampled token per lane is not a cost this path can absorb for
-/// a feature that is about to be on by default. At most `penalty_last_n`
-/// entries change, so the caller is handed those and applies them where it is
-/// already touching the data.
+/// It never copies the logit row. At most `penalty_last_n` entries change, so
+/// the sampler is handed those and subtracts them where it already reads the
+/// row, on the host or on the device.
 ///
 /// Returns `None` when nothing is configured, which is the whole feature
 /// switched off with no work done at all.
@@ -2530,27 +2525,6 @@ fn argmax_penalized(logits: &[f32], penalties: &BTreeMap<usize, f32>) -> Result<
     i32::try_from(index).map_err(|_| LlamaError::format("sampled token does not fit in i32"))
 }
 
-/// Inverse-CDF draw from a normalised probability vector.
-fn sample_from(probs: &[f32], rng: &mut Xorshift64) -> Result<i32> {
-    let target = rng.next_f32();
-    let mut cumulative = 0.0f32;
-    let mut last = None;
-    for (token, &value) in probs.iter().enumerate() {
-        if value <= 0.0 {
-            continue;
-        }
-        last = Some(token);
-        cumulative += value;
-        if cumulative >= target {
-            return i32::try_from(token)
-                .map_err(|_| LlamaError::format("sampled token does not fit in i32"));
-        }
-    }
-    // Rounding can leave the cumulative just short of 1.0.
-    let token = last.ok_or_else(|| LlamaError::format("probability vector is all zeros"))?;
-    i32::try_from(token).map_err(|_| LlamaError::format("sampled token does not fit in i32"))
-}
-
 /// MTP speculative decoding: draft with the `blk.N` nextn head, verify the
 /// whole draft in one batched forward, keep the longest matching prefix.
 ///
@@ -2572,6 +2546,8 @@ impl LlamaSession {
             draft_nanos: mtp.draft_nanos,
             verify_nanos: mtp.verify_nanos,
             catchup_nanos: mtp.catchup_nanos,
+            weighed_rows: mtp.weighed_rows,
+            wide_rows: mtp.wide_rows,
         })
     }
 
@@ -2678,8 +2654,8 @@ impl LlamaSession {
             let logits = self.last_logits().ok_or_else(|| {
                 LlamaError::format("session has no logits yet; append context tokens first")
             })?;
-            let probs = sampling_probabilities(logits, params, state.recent())?;
-            let next_token = sample_from(&probs, &mut state.rng)?;
+            let distribution = host_distribution(logits, params, state.recent())?;
+            let next_token = draw(&distribution, &mut state.rng)?;
             if let Some(reason) = self.stop_reason_for(next_token) {
                 stop_reason = reason;
                 break;
@@ -2737,8 +2713,8 @@ impl LlamaSession {
             let logits = self.last_logits().ok_or_else(|| {
                 LlamaError::format("session has no logits yet; append context tokens first")
             })?;
-            let probs = sampling_probabilities(logits, params, state.recent())?;
-            sample_from(&probs, &mut state.rng)?
+            let distribution = host_distribution(logits, params, state.recent())?;
+            draw(&distribution, &mut state.rng)?
         };
         if let Some(reason) = self.stop_reason_for(first) {
             return Ok(Some(reason));
@@ -2768,11 +2744,21 @@ impl LlamaSession {
                 self.carry_scratch_row(&mtp)
             };
             let started = std::time::Instant::now();
-            let logits = self.run_mtp_draft_logits(token, position, read_row)?;
+            let draft_spec = weigh_spec(params, &[]);
+            let mut rows = self.run_mtp_draft_rows(
+                token,
+                position,
+                read_row,
+                &[RowReadout::Weights(draft_spec.clone())],
+            )?;
             if let Some(mtp) = self.mtp.as_mut() {
                 mtp.draft_nanos += started.elapsed().as_nanos() as u64;
             }
-            let (drafted, proposal) = self.draft_proposal(&logits, params, &mut state.rng)?;
+            let weights = weighed(rows.pop().ok_or_else(|| {
+                LlamaError::format("a draft step returned no row")
+            })?)?;
+            let distribution = sampler::finish(&weights, &draft_spec)?;
+            let (drafted, proposal) = self.draft_proposal(&distribution, &mut state.rng)?;
             token = drafted;
             drafts.push(token);
             draft_probs.push(proposal);
@@ -2781,68 +2767,50 @@ impl LlamaSession {
         let mut batch = Vec::with_capacity(drafts.len() + 1);
         batch.push(first);
         batch.extend_from_slice(&drafts);
-        let started = std::time::Instant::now();
-        let run = self.run_verify_batch(&batch)?;
-        if let Some(mtp) = self.mtp.as_mut() {
-            mtp.verify_nanos += started.elapsed().as_nanos() as u64;
-        }
-
-        let vocab_size = run.vocab_size;
-        if vocab_size == 0 || run.logits.len() != vocab_size * batch.len() {
-            return Err(LlamaError::format(format!(
-                "speculative verify produced {} logits for {} rows of vocab {}",
-                run.logits.len(),
-                batch.len(),
-                vocab_size
-            )));
-        }
-
         // The penalty window advances WITHIN the round. The target row at
         // position `i` is the distribution for the token that follows `first`
         // and `drafts[..i]`, so those tokens belong in the window that shapes
         // it — exactly as they would if the round had been i+1 separate decode
         // steps. Speculation is not allowed to change the distribution it
         // samples from, and the part of that distribution the penalty owns is
-        // no exception.
-        let mut window: Vec<i32> = state.recent().to_vec();
-        window.push(first);
+        // no exception. Row `i` is only read once `drafts[..i]` were all
+        // accepted, so its window is known before the verify runs.
+        let specs = round_specs(params, state.recent(), first, &drafts);
+        let readout: Vec<RowReadout> = specs.iter().cloned().map(RowReadout::Weights).collect();
+        let started = std::time::Instant::now();
+        let rows = self.run_verify_rows(&batch, &readout)?;
+        if let Some(mtp) = self.mtp.as_mut() {
+            mtp.verify_nanos += started.elapsed().as_nanos() as u64;
+        }
+        let rows = rows.into_iter().map(weighed).collect::<Result<Vec<_>>>()?;
+        let vocab_size = rows.first().map(|row| row.vocab).unwrap_or(0);
 
         let mut accepted = 0usize;
         let mut bonus = None;
         for index in 0..drafts.len() {
-            let target = sampling_probabilities(
-                &run.logits[index * vocab_size..(index + 1) * vocab_size],
-                params,
-                &window,
-            )?;
-            let drafted = drafts[index] as usize;
+            let target = sampler::finish(&rows[index], &specs[index])?;
+            let drafted = drafts[index] as u32;
             let q = draft_probs[index]
                 .iter()
-                .find(|(token, _)| *token as usize == drafted)
+                .find(|(token, _)| *token == drafted)
                 .map(|(_, probability)| *probability)
                 .unwrap_or(0.0);
-            let p = target[drafted];
-            let ratio = speculative_acceptance(p, q);
+            let ratio = speculative_acceptance(target.prob(drafted), q);
             if state.rng.next_f32() < ratio {
                 accepted += 1;
-                window.push(drafts[index]);
                 continue;
             }
             // Rejected: draw the replacement from the normalised residual so
             // the overall distribution stays exactly `p`.
-            let residual = speculative_residual(&target, &draft_probs[index]);
-            bonus = Some(sample_from(&residual, &mut state.rng)?);
+            let residual = target.residual(&draft_probs[index]);
+            bonus = Some(draw(&residual, &mut state.rng)?);
             break;
         }
         let bonus = match bonus {
             Some(token) => token,
             None => {
-                let target = sampling_probabilities(
-                    &run.logits[accepted * vocab_size..(accepted + 1) * vocab_size],
-                    params,
-                    &window,
-                )?;
-                sample_from(&target, &mut state.rng)?
+                let target = sampler::finish(&rows[accepted], &specs[accepted])?;
+                draw(&target, &mut state.rng)?
             }
         };
 
@@ -2873,7 +2841,7 @@ impl LlamaSession {
             hidden: Vec::new(),
             logits: one_hot_logits(bonus, vocab_size)?,
             n_tokens: 1,
-            hidden_size: run.hidden_size,
+            hidden_size: 0,
             vocab_size,
             selected_experts: Vec::new(),
         });
@@ -3067,20 +3035,29 @@ impl LlamaSession {
     /// correctly.
     fn draft_proposal(
         &self,
-        logits: &[f32],
-        params: LlamaSamplingParams,
+        distribution: &Distribution,
         rng: &mut Xorshift64,
     ) -> Result<(i32, Vec<(u32, f32)>)> {
-        let probs = sampling_probabilities(logits, params, &[])?;
-        let drafted = sample_from(&probs, rng)?;
-        let mut sparse = Vec::new();
-        for (index, &probability) in probs.iter().enumerate() {
-            if probability > 0.0 {
-                let token = self.draft_token(index as i32)?;
-                sparse.push((token as u32, probability));
-            }
+        let drafted = draw(distribution, rng)?;
+        let mut sparse = Vec::with_capacity(distribution.entries().len());
+        for &(index, probability) in distribution.entries() {
+            let token = self.draft_token(index as i32)?;
+            sparse.push((token as u32, probability));
         }
         Ok((self.draft_token(drafted)?, sparse))
+    }
+
+    /// Count rows a forward had weighed, and how many of them came back with
+    /// every weight because their nucleus was wider than the candidates.
+    fn count_weighed(&mut self, rows: &[RowOut]) {
+        if let Some(mtp) = self.mtp.as_mut() {
+            for row in rows {
+                if let RowOut::Weights(weights) = row {
+                    mtp.weighed_rows += 1;
+                    mtp.wide_rows += u64::from(weights.all.is_some());
+                }
+            }
+        }
     }
 
     /// One autoregressive draft step, returning the draft head's logits.
@@ -3090,44 +3067,81 @@ impl LlamaSession {
         position: usize,
         read_row: i32,
     ) -> Result<Vec<f32>> {
-        let mtp = self
-            .mtp
-            .ok_or_else(|| LlamaError::format("draft step without an MTP head"))?;
-        let cache_tokens = position + 1;
-        let params = SessionGraphParams::mtp_draft(1, self.graph_key_count(cache_tokens));
-        self.ensure_compiled_graph(params)?;
-        let scratch_row = self.carry_scratch_row(&mtp);
+        let params = self.mtp_draft_graph(position)?;
+        let layout = self.mtp_draft_layout(position, read_row)?;
         let compiled = self
             .graphs
             .graph_for_mut(params)
             .ok_or_else(|| LlamaError::format("compiled mtp graph params were not cached"))?;
-        let positions = [i32::try_from(position)
-            .map_err(|_| LlamaError::format("draft position does not fit in i32"))?];
-        let mut layout =
-            HybridDecodeBatchLayout::from_contiguous_positions_and_outputs(
-                &positions,
-                cache_tokens,
-                &[0],
-            )?;
-        layout.recurrent_state_rows.clear();
-        layout.hidden_read_rows = vec![read_row];
-        layout.hidden_write_rows = vec![scratch_row];
         let run =
             compiled.execute_logits_only_with_layout(LogitsProbeInput::TokenIds(&[token]), &layout)?;
         Ok(run.logits)
     }
 
+    /// One autoregressive draft step, its row read back as `readout` asks.
+    fn run_mtp_draft_rows(
+        &mut self,
+        token: i32,
+        position: usize,
+        read_row: i32,
+        readout: &[RowReadout],
+    ) -> Result<Vec<RowOut>> {
+        let params = self.mtp_draft_graph(position)?;
+        let layout = self.mtp_draft_layout(position, read_row)?;
+        let on_host = self.config.weigh_on_host;
+        let compiled = self
+            .graphs
+            .graph_for_mut(params)
+            .ok_or_else(|| LlamaError::format("compiled mtp graph params were not cached"))?;
+        let rows = compiled.execute_rows_with_layout(
+            LogitsProbeInput::TokenIds(&[token]),
+            &layout,
+            readout,
+            on_host,
+        )?;
+        self.count_weighed(&rows);
+        Ok(rows)
+    }
+
+    /// The draft graph a step at `position` runs, compiled.
+    fn mtp_draft_graph(&mut self, position: usize) -> Result<SessionGraphParams> {
+        let params = SessionGraphParams::mtp_draft(1, self.graph_key_count(position + 1));
+        self.ensure_compiled_graph(params)?;
+        Ok(params)
+    }
+
+    fn mtp_draft_layout(&self, position: usize, read_row: i32) -> Result<HybridDecodeBatchLayout> {
+        let mtp = self
+            .mtp
+            .ok_or_else(|| LlamaError::format("draft step without an MTP head"))?;
+        let positions = [i32::try_from(position)
+            .map_err(|_| LlamaError::format("draft position does not fit in i32"))?];
+        let mut layout = HybridDecodeBatchLayout::from_contiguous_positions_and_outputs(
+            &positions,
+            position + 1,
+            &[0],
+        )?;
+        layout.recurrent_state_rows.clear();
+        layout.hidden_read_rows = vec![read_row];
+        layout.hidden_write_rows = vec![self.carry_scratch_row(&mtp)];
+        Ok(layout)
+    }
+
+
+    /// The verify forward with its rows read back as `readout` asks.
+    fn run_verify_rows(&mut self, tokens: &[i32], readout: &[RowReadout]) -> Result<Vec<RowOut>> {
+        let tokens_owned = self.token_ids.clone();
+        let lane = self.solo_verify_lane(tokens, &tokens_owned)?;
+        let rows = self
+            .slot_verify(&[lane], tokens, tokens.len(), Some(readout))?
+            .into_rows()?;
+        self.count_weighed(&rows);
+        Ok(rows)
+    }
 
     /// The verify forward: `tokens.len()` positions, logits for every one.
     fn run_verify_batch(&mut self, tokens: &[i32]) -> Result<HybridDecodeRun> {
-        let mtp = self
-            .mtp
-            .ok_or_else(|| LlamaError::format("verify batch without an MTP head"))?;
         let batch_size = tokens.len();
-        if batch_size == 0 {
-            return Err(LlamaError::format("a verify batch needs at least one token"));
-        }
-        self.ensure_capacity(batch_size)?;
         // ONE verify implementation, driven here as a single lane.
         //
         // The single-stream path used to build its own layout beside the
@@ -3144,7 +3158,20 @@ impl LlamaSession {
         // `[resume, 0..n-1]`, and the hidden rows are lane 0's ring. Same
         // graph key, same layout, same bytes.
         let tokens_owned = self.token_ids.clone();
-        let lane = SpecLane {
+        let lane = self.solo_verify_lane(tokens, &tokens_owned)?;
+        self.run_slot_verify_batch(&[lane], tokens, batch_size)
+    }
+
+    /// The session's own sequence as lane 0 of a verify batch.
+    fn solo_verify_lane<'a>(&self, tokens: &[i32], history: &'a [i32]) -> Result<SpecLane<'a>> {
+        let mtp = self
+            .mtp
+            .ok_or_else(|| LlamaError::format("verify batch without an MTP head"))?;
+        let first = *tokens
+            .first()
+            .ok_or_else(|| LlamaError::format("a verify batch needs at least one token"))?;
+        self.ensure_capacity(tokens.len())?;
+        Ok(SpecLane {
             lane: 0,
             kv_base: 0,
             state_base: 0,
@@ -3152,10 +3179,9 @@ impl LlamaSession {
                 .map_err(|_| LlamaError::format("committed checkpoint row is negative"))?,
             fill: self.token_ids.len(),
             mtp_filled: mtp.mtp_filled,
-            tokens: &tokens_owned,
-            first: tokens[0],
-        };
-        self.run_slot_verify_batch(&[lane], tokens, batch_size)
+            tokens: history,
+            first,
+        })
     }
 
     /// Run the draft head over the tokens the main model has already consumed
@@ -3253,6 +3279,28 @@ impl LlamaSession {
 /// Tokens per MTP catch-up call. Large enough that a long prompt costs only a
 /// handful of the draft head's ~1 GB LM-head reads.
 const MTP_PREFILL_CHUNK: usize = 512;
+
+/// What a step or verify forward handed back.
+enum Forward {
+    Run(HybridDecodeRun),
+    Rows(Vec<RowOut>),
+}
+
+impl Forward {
+    fn into_run(self) -> Result<HybridDecodeRun> {
+        match self {
+            Self::Run(run) => Ok(run),
+            Self::Rows(_) => Err(LlamaError::format("a logits forward came back as rows")),
+        }
+    }
+
+    fn into_rows(self) -> Result<Vec<RowOut>> {
+        match self {
+            Self::Rows(rows) => Ok(rows),
+            Self::Run(_) => Err(LlamaError::format("a row forward came back as one run")),
+        }
+    }
+}
 
 /// One lane's facts for a batched speculative round.
 ///
@@ -3420,14 +3468,19 @@ impl LlamaSession {
                     }
                 })
                 .collect();
+            let draft_specs: Vec<WeighSpec> =
+                params.iter().map(|&params| weigh_spec(params, &[])).collect();
+            let readout: Vec<RowReadout> =
+                draft_specs.iter().cloned().map(RowReadout::Weights).collect();
             let started = std::time::Instant::now();
-            let rows = self.run_slot_draft_step(lanes, &fed, step, &read_rows)?;
+            let rows = self.run_slot_draft_step(lanes, &fed, step, &read_rows, &readout)?;
             if let Some(mtp) = self.mtp.as_mut() {
                 mtp.draft_nanos += started.elapsed().as_nanos() as u64;
             }
-            for (index, row) in rows.iter().enumerate() {
+            for (index, row) in rows.into_iter().enumerate() {
+                let distribution = sampler::finish(&weighed(row)?, &draft_specs[index])?;
                 let (drafted, proposal) =
-                    self.draft_proposal(row, params[index], &mut samplers[index].rng)?;
+                    self.draft_proposal(&distribution, &mut samplers[index].rng)?;
                 fed[index] = drafted;
                 drafts[index].push(drafted);
                 draft_probs[index].push(proposal);
@@ -3443,24 +3496,38 @@ impl LlamaSession {
             batch.push(lane.first);
             batch.extend_from_slice(&drafts[index]);
         }
+        let mut specs: Vec<WeighSpec> = Vec::with_capacity(width * per_lane);
+        for (index, lane) in lanes.iter().enumerate() {
+            specs.extend(round_specs(
+                params[index],
+                samplers[index].recent(),
+                lane.first,
+                &drafts[index],
+            ));
+        }
+        let readout: Vec<RowReadout> = specs.iter().cloned().map(RowReadout::Weights).collect();
         let started = std::time::Instant::now();
-        let run = self.run_slot_verify_batch(lanes, &batch, per_lane)?;
+        let rows = self
+            .slot_verify(lanes, &batch, per_lane, Some(&readout))?
+            .into_rows()?;
         if let Some(mtp) = self.mtp.as_mut() {
             mtp.verify_nanos += started.elapsed().as_nanos() as u64;
         }
-        let rows = split_run_logits(run, width * per_lane)?;
+        self.count_weighed(&rows);
+        let rows = rows.into_iter().map(weighed).collect::<Result<Vec<_>>>()?;
 
         let mut outcomes = Vec::with_capacity(width);
         for (index, lane) in lanes.iter().enumerate() {
-            let rows = &rows[index * per_lane..(index + 1) * per_lane];
+            let span = index * per_lane..(index + 1) * per_lane;
             outcomes.push(self.commit_slot_round(
                 lane,
-                &batch[index * per_lane..(index + 1) * per_lane],
+                &batch[span.clone()],
                 &drafts[index],
                 &draft_probs[index],
-                rows,
-                params[index],
+                &rows[span.clone()],
+                &specs[span],
                 &mut samplers[index],
+                params[index],
             )?);
         }
         if let Some(mtp) = self.mtp.as_mut() {
@@ -3493,43 +3560,37 @@ impl LlamaSession {
         batch: &[i32],
         drafts: &[i32],
         draft_probs: &[Vec<(u32, f32)>],
-        rows: &[Vec<f32>],
-        params: LlamaSamplingParams,
+        rows: &[RowWeights],
+        specs: &[WeighSpec],
         sampler: &mut LlamaSamplerState,
+        params: LlamaSamplingParams,
     ) -> Result<SpecRoundOutcome> {
-        // This lane's window, advanced within the round exactly as the
-        // single-stream path advances its own — `batch[0]` is the token the
-        // round starts from, and each accepted draft joins the window before
-        // the next target row is shaped.
-        let mut window: Vec<i32> = sampler.recent().to_vec();
-        if let Some(&first) = batch.first() {
-            window.push(first);
-        }
+        // Row `i` was weighed under this lane's window advanced by `batch[0]`
+        // (the token the round starts from) and `drafts[..i]`, exactly as the
+        // single-stream path shapes its own.
         let mut accepted = 0usize;
         let mut bonus = None;
         for index in 0..drafts.len() {
-            let target = sampling_probabilities(&rows[index], params, &window)?;
-            let drafted = drafts[index] as usize;
+            let target = sampler::finish(&rows[index], &specs[index])?;
+            let drafted = drafts[index] as u32;
             let q = draft_probs[index]
                 .iter()
-                .find(|(token, _)| *token as usize == drafted)
+                .find(|(token, _)| *token == drafted)
                 .map(|(_, probability)| *probability)
                 .unwrap_or(0.0);
-            let p = target.get(drafted).copied().unwrap_or(0.0);
-            if sampler.rng.next_f32() < speculative_acceptance(p, q) {
+            if sampler.rng.next_f32() < speculative_acceptance(target.prob(drafted), q) {
                 accepted += 1;
-                window.push(drafts[index]);
                 continue;
             }
-            let residual = speculative_residual(&target, &draft_probs[index]);
-            bonus = Some(sample_from(&residual, &mut sampler.rng)?);
+            let residual = target.residual(&draft_probs[index]);
+            bonus = Some(draw(&residual, &mut sampler.rng)?);
             break;
         }
         let bonus = match bonus {
             Some(token) => token,
             None => {
-                let target = sampling_probabilities(&rows[accepted], params, &window)?;
-                sample_from(&target, &mut sampler.rng)?
+                let target = sampler::finish(&rows[accepted], &specs[accepted])?;
+                draw(&target, &mut sampler.rng)?
             }
         };
 
@@ -3682,7 +3743,8 @@ impl LlamaSession {
         fed: &[i32],
         step: usize,
         read_rows: &[i32],
-    ) -> Result<Vec<Vec<f32>>> {
+        readout: &[RowReadout],
+    ) -> Result<Vec<RowOut>> {
         let mtp = self
             .mtp
             .ok_or_else(|| LlamaError::format("draft step without an MTP head"))?;
@@ -3708,6 +3770,7 @@ impl LlamaSession {
             .unwrap_or(1);
         let key_count = self.slot_key_count(span)?;
         let graph_params = SessionGraphParams::mtp_draft_batched(width, key_count);
+        let on_host = self.config.weigh_on_host;
         self.ensure_compiled_graph(graph_params)?;
         let scratch_rows: Vec<i32> = lanes
             .iter()
@@ -3734,9 +3797,14 @@ impl LlamaSession {
         layout.recurrent_state_rows.clear();
         layout.hidden_read_rows = read_rows.to_vec();
         layout.hidden_write_rows = scratch_rows;
-        let run =
-            compiled.execute_logits_only_with_layout(LogitsProbeInput::TokenIds(fed), &layout)?;
-        split_run_logits(run, width)
+        let rows = compiled.execute_rows_with_layout(
+            LogitsProbeInput::TokenIds(fed),
+            &layout,
+            readout,
+            on_host,
+        )?;
+        self.count_weighed(&rows);
+        Ok(rows)
     }
 
     /// The verify forward across every lane: `per_lane` positions each, logits
@@ -3752,6 +3820,18 @@ impl LlamaSession {
         batch: &[i32],
         per_lane: usize,
     ) -> Result<HybridDecodeRun> {
+        self.slot_verify(lanes, batch, per_lane, None)?.into_run()
+    }
+
+    /// The batched verify forward, its rows read back as `readout` asks, or
+    /// as one logits run when `readout` is `None`.
+    fn slot_verify(
+        &mut self,
+        lanes: &[SpecLane<'_>],
+        batch: &[i32],
+        per_lane: usize,
+        readout: Option<&[RowReadout]>,
+    ) -> Result<Forward> {
         // Guard only: a verify graph exists only alongside a draft head, and
         // the hidden rows below are the draft head's to read.
         self.mtp
@@ -3822,6 +3902,7 @@ impl LlamaSession {
             })
             .collect::<Result<Vec<_>>>()?;
         let lower_bounds = slot_lower_bounds_per_token(lanes, per_lane)?;
+        let on_host = self.config.weigh_on_host;
         let compiled = self
             .graphs
             .graph_for_mut(graph_params)
@@ -3835,7 +3916,14 @@ impl LlamaSession {
         layout.attention_key_lower_bounds = lower_bounds;
         layout.recurrent_state_rows = state_rows;
         layout.hidden_write_rows = hidden_write_rows;
-        compiled.execute_logits_only_with_layout(LogitsProbeInput::TokenIds(batch), &layout)
+        match readout {
+            None => compiled
+                .execute_logits_only_with_layout(LogitsProbeInput::TokenIds(batch), &layout)
+                .map(Forward::Run),
+            Some(readout) => compiled
+                .execute_rows_with_layout(LogitsProbeInput::TokenIds(batch), &layout, readout, on_host)
+                .map(Forward::Rows),
+        }
     }
 
     /// Bucket an absolute arena span into a compiled graph's key count.
@@ -4328,11 +4416,34 @@ pub(crate) fn collapse_last_token_run(run: HybridDecodeRun) -> Result<HybridDeco
 #[cfg(test)]
 mod tests {
     use super::{
-        argmax_penalized, argmax_token_id, draft_head_fill_after, mtp_carry_ring, penalty_window,
-        sample_from, sampling_probabilities, slot_lower_bounds, slot_lower_bounds_per_token,
-        speculative_acceptance, speculative_residual, LlamaSamplerState, LlamaSamplingParams,
-        LlamaSession, SpecLane, Xorshift64,
+        argmax_penalized, argmax_token_id, draft_head_fill_after, draw, host_distribution,
+        mtp_carry_ring, penalty_window, slot_lower_bounds, slot_lower_bounds_per_token,
+        speculative_acceptance, LlamaSamplerState, LlamaSamplingParams, LlamaSession, SpecLane,
+        Xorshift64,
     };
+    use crate::sampler::Distribution;
+    use crate::Result;
+
+    /// The production sampler's distribution, densely over the row.
+    fn dense_probabilities(
+        logits: &[f32],
+        params: LlamaSamplingParams,
+        recent: &[i32],
+    ) -> Result<Vec<f32>> {
+        Ok(host_distribution(logits, params, recent)?.to_dense(logits.len()))
+    }
+
+    /// One production draw from a distribution given densely.
+    fn draw_dense(probs: &[f32], rng: &mut Xorshift64) -> Result<i32> {
+        draw(&Distribution::from_dense(probs), rng)
+    }
+
+    /// The production residual of a dense target against a sparse draft.
+    fn dense_residual(target: &[f32], draft: &[(u32, f32)]) -> Vec<f32> {
+        Distribution::from_dense(target)
+            .residual(draft)
+            .to_dense(target.len())
+    }
 
     fn params(temperature: f32, top_p: f32, top_k: usize) -> LlamaSamplingParams {
         LlamaSamplingParams {
@@ -4345,9 +4456,9 @@ mod tests {
     }
 
     #[test]
-    fn sampling_probabilities_normalise_and_respect_top_k() {
+    fn probabilities_normalise_and_respect_top_k() {
         let logits = [1.0f32, 2.0, 3.0, 4.0];
-        let probs = sampling_probabilities(&logits, params(1.0, 1.0, 2), &[]).unwrap();
+        let probs = dense_probabilities(&logits, params(1.0, 1.0, 2), &[]).unwrap();
         assert_eq!(probs.len(), 4);
         assert!(probs[0] == 0.0 && probs[1] == 0.0, "{probs:?}");
         assert!((probs.iter().sum::<f32>() - 1.0).abs() < 1e-5, "{probs:?}");
@@ -4359,7 +4470,7 @@ mod tests {
     #[test]
     fn top_p_keeps_the_smallest_prefix_reaching_the_mass() {
         let logits = [0.0f32, 10.0, 0.0, 0.0];
-        let probs = sampling_probabilities(&logits, params(1.0, 0.9, 0), &[]).unwrap();
+        let probs = dense_probabilities(&logits, params(1.0, 0.9, 0), &[]).unwrap();
         assert_eq!(probs[1], 1.0);
         assert!(probs.iter().enumerate().all(|(i, p)| i == 1 || *p == 0.0));
     }
@@ -4367,7 +4478,7 @@ mod tests {
     #[test]
     fn low_temperature_collapses_onto_the_argmax() {
         let logits = [0.0f32, 1.0, 0.5];
-        let probs = sampling_probabilities(&logits, params(0.01, 1.0, 0), &[]).unwrap();
+        let probs = dense_probabilities(&logits, params(0.01, 1.0, 0), &[]).unwrap();
         assert!(probs[1] > 0.999, "{probs:?}");
     }
 
@@ -4377,9 +4488,9 @@ mod tests {
     #[test]
     fn an_unconfigured_penalty_changes_nothing() {
         let logits = [1.0f32, 2.0, 3.0, 4.0];
-        let plain = sampling_probabilities(&logits, params(1.0, 1.0, 0), &[]).unwrap();
+        let plain = dense_probabilities(&logits, params(1.0, 1.0, 0), &[]).unwrap();
         let with_history =
-            sampling_probabilities(&logits, params(1.0, 1.0, 0), &[3, 3, 3, 2]).unwrap();
+            dense_probabilities(&logits, params(1.0, 1.0, 0), &[3, 3, 3, 2]).unwrap();
         assert_eq!(plain, with_history, "no window configured, so no penalty");
 
         // Configured strength but a zero window is still off, and so is a
@@ -4391,7 +4502,7 @@ mod tests {
             ..params(1.0, 1.0, 0)
         };
         assert_eq!(
-            sampling_probabilities(&logits, no_window, &[3, 3, 3]).unwrap(),
+            dense_probabilities(&logits, no_window, &[3, 3, 3]).unwrap(),
             plain
         );
         let no_strength = LlamaSamplingParams {
@@ -4401,7 +4512,7 @@ mod tests {
             ..params(1.0, 1.0, 0)
         };
         assert_eq!(
-            sampling_probabilities(&logits, no_strength, &[3, 3, 3]).unwrap(),
+            dense_probabilities(&logits, no_strength, &[3, 3, 3]).unwrap(),
             plain
         );
     }
@@ -4417,12 +4528,12 @@ mod tests {
             penalty_last_n: 64,
             ..params(1.0, 1.0, 0)
         };
-        let plain = sampling_probabilities(&logits, penalised, &[]).unwrap();
+        let plain = dense_probabilities(&logits, penalised, &[]).unwrap();
         assert!(plain[3] > 0.85, "token 3 dominates before any penalty: {plain:?}");
 
         // Token 3 five times over: presence once, frequency five times.
         let looped = [3i32, 3, 3, 3, 3];
-        let after = sampling_probabilities(&logits, penalised, &looped).unwrap();
+        let after = dense_probabilities(&logits, penalised, &looped).unwrap();
         assert!(after[3] < plain[3], "the loop's token must lose mass");
         assert!(after[0] > plain[0], "the mass has to go somewhere");
         // 3.0 - (1.0 + 0.5 * 5) = -0.5, now BELOW the untouched entries, so
@@ -4442,8 +4553,8 @@ mod tests {
             penalty_last_n: 64,
             ..params(1.0, 1.0, 0)
         };
-        let once = sampling_probabilities(&logits, presence_only, &[1]).unwrap();
-        let twenty = sampling_probabilities(&logits, presence_only, &[1; 20]).unwrap();
+        let once = dense_probabilities(&logits, presence_only, &[1]).unwrap();
+        let twenty = dense_probabilities(&logits, presence_only, &[1; 20]).unwrap();
         assert_eq!(once, twenty, "presence is flat by definition");
 
         let frequency_only = LlamaSamplingParams {
@@ -4452,8 +4563,8 @@ mod tests {
             penalty_last_n: 64,
             ..params(1.0, 1.0, 0)
         };
-        let once = sampling_probabilities(&logits, frequency_only, &[1]).unwrap();
-        let twenty = sampling_probabilities(&logits, frequency_only, &[1; 20]).unwrap();
+        let once = dense_probabilities(&logits, frequency_only, &[1]).unwrap();
+        let twenty = dense_probabilities(&logits, frequency_only, &[1; 20]).unwrap();
         assert!(twenty[1] < once[1], "frequency has to keep counting");
     }
 
@@ -4472,11 +4583,11 @@ mod tests {
             penalty_last_n: 3,
             ..params(1.0, 1.0, 0)
         };
-        let plain = sampling_probabilities(&logits, short_window, &[]).unwrap();
+        let plain = dense_probabilities(&logits, short_window, &[]).unwrap();
 
         // Token 1 is old news: three newer tokens have pushed it out.
         let stale = [1i32, 2, 2, 2];
-        let after = sampling_probabilities(&logits, short_window, &stale).unwrap();
+        let after = dense_probabilities(&logits, short_window, &stale).unwrap();
         assert!(
             after[1] >= plain[1],
             "token 1 left the window and must not be penalised: {after:?}"
@@ -4484,20 +4595,18 @@ mod tests {
 
         // Inside the window it is penalised, so the test is not vacuous.
         let fresh = [2i32, 2, 1];
-        let inside = sampling_probabilities(&logits, short_window, &fresh).unwrap();
+        let inside = dense_probabilities(&logits, short_window, &fresh).unwrap();
         assert!(inside[1] < plain[1] * 0.5, "{inside:?}");
     }
 
-    /// The rescale IS the penalty, to floating-point tolerance.
+    /// The window's penalties ARE penalising the row, bit for bit.
     ///
-    /// `sampling_probabilities` never builds a penalised logit row — it folds
-    /// the penalty in as `exp(-p / T)` on the handful of affected entries,
-    /// because copying a 248320-entry row per sampled token per lane is a cost
-    /// this path cannot absorb. That identity is the one thing holding the
-    /// optimisation up, so it is asserted against the obvious implementation
-    /// rather than trusted.
+    /// The sampler never copies the logit row: it is handed the window's few
+    /// penalties and subtracts each where it reads that logit. That has to be
+    /// exactly the obvious implementation — subtract from a copy, then sample
+    /// it unpenalised — so it is asserted against it rather than trusted.
     #[test]
-    fn the_rescale_equals_penalising_the_row() {
+    fn the_window_equals_penalising_the_row() {
         let logits = [0.5f32, 3.0, -1.0, 2.25, 0.0, 4.5];
         let recent = [1i32, 3, 1, 5, 1];
         for temperature in [0.2f32, 0.7, 1.0, 1.8] {
@@ -4513,14 +4622,9 @@ mod tests {
                 by_hand[index] -= penalty;
             }
             let expected =
-                sampling_probabilities(&by_hand, params(temperature, 1.0, 0), &[]).unwrap();
-            let actual = sampling_probabilities(&logits, penalised, &recent).unwrap();
-            for (index, (a, b)) in actual.iter().zip(expected.iter()).enumerate() {
-                assert!(
-                    (a - b).abs() < 1e-5,
-                    "T={temperature} entry {index}: rescale {a} vs penalised row {b}"
-                );
-            }
+                dense_probabilities(&by_hand, params(temperature, 1.0, 0), &[]).unwrap();
+            let actual = dense_probabilities(&logits, penalised, &recent).unwrap();
+            assert_eq!(actual, expected, "T={temperature}");
         }
     }
 
@@ -4609,8 +4713,8 @@ mod tests {
             penalty_last_n: 8,
             ..params(1.0, 1.0, 0)
         };
-        let plain = sampling_probabilities(&logits, penalised, &[]).unwrap();
-        let junk = sampling_probabilities(&logits, penalised, &[-1, 9999, i32::MIN]).unwrap();
+        let plain = dense_probabilities(&logits, penalised, &[]).unwrap();
+        let junk = dense_probabilities(&logits, penalised, &[-1, 9999, i32::MIN]).unwrap();
         assert_eq!(plain, junk);
     }
 
@@ -4634,7 +4738,7 @@ mod tests {
         let single: Vec<i32> = {
             let mut state = LlamaSamplerState::new(7);
             (0..TOTAL)
-                .map(|_| sample_from(&probs, &mut state.rng).unwrap())
+                .map(|_| draw_dense(&probs, &mut state.rng).unwrap())
                 .collect()
         };
 
@@ -4644,7 +4748,7 @@ mod tests {
             while out.len() < TOTAL {
                 let want = CHUNK.min(TOTAL - out.len());
                 for _ in 0..want {
-                    out.push(sample_from(&probs, &mut state.rng).unwrap());
+                    out.push(draw_dense(&probs, &mut state.rng).unwrap());
                 }
             }
             out
@@ -4661,7 +4765,7 @@ mod tests {
                 let mut state = LlamaSamplerState::new(7);
                 let want = CHUNK.min(TOTAL - out.len());
                 for _ in 0..want {
-                    out.push(sample_from(&probs, &mut state.rng).unwrap());
+                    out.push(draw_dense(&probs, &mut state.rng).unwrap());
                 }
             }
             out
@@ -4678,12 +4782,12 @@ mod tests {
     }
 
     #[test]
-    fn sample_from_follows_the_distribution() {
+    fn a_draw_follows_the_distribution() {
         let probs = [0.25f32, 0.0, 0.75];
         let mut rng = Xorshift64::new(11);
         let mut counts = [0u32; 3];
         for _ in 0..20_000 {
-            counts[sample_from(&probs, &mut rng).unwrap() as usize] += 1;
+            counts[draw_dense(&probs, &mut rng).unwrap() as usize] += 1;
         }
         assert_eq!(counts[1], 0);
         let share = counts[2] as f32 / 20_000.0;
@@ -4706,7 +4810,7 @@ mod tests {
                 .enumerate()
                 .map(|(token, probability)| (token as u32, *probability))
                 .collect();
-            let residual = speculative_residual(&target, &sparse);
+            let residual = dense_residual(&target, &sparse);
             let accept_total: f32 = (0..4)
                 .map(|token| draft[token] * speculative_acceptance(target[token], draft[token]))
                 .sum();
@@ -4735,7 +4839,7 @@ mod tests {
             vec![(0u32, 1.0f32)],
             vec![(1u32, 0.9f32), (0, 0.1)],
         ] {
-            let residual = speculative_residual(&target, &draft);
+            let residual = dense_residual(&target, &draft);
             let accept_total: f32 = draft
                 .iter()
                 .map(|(token, q)| q * speculative_acceptance(target[*token as usize], *q))
@@ -4887,7 +4991,7 @@ mod argmax_tests {
 
 #[cfg(test)]
 mod nucleus_tests {
-    use super::{sampling_probabilities, LlamaSamplingParams};
+    use super::{host_distribution, LlamaSamplingParams};
 
     fn params(top_p: f32) -> LlamaSamplingParams {
         LlamaSamplingParams {
@@ -4899,14 +5003,22 @@ mod nucleus_tests {
         }
     }
 
+    fn dense_probabilities(
+        logits: &[f32],
+        params: LlamaSamplingParams,
+        recent: &[i32],
+    ) -> crate::Result<Vec<f32>> {
+        Ok(host_distribution(logits, params, recent)?.to_dense(logits.len()))
+    }
+
     /// The candidate cap must not change the answer: a nucleus wider than the
     /// cap has to fall back to the exact ranking. A near-uniform vocabulary
-    /// larger than CANDIDATE_CAP with top_p 0.99 is exactly that case.
+    /// larger than the sampler's candidates with top_p 0.99 is exactly that case.
     #[test]
     fn wide_nucleus_falls_back_to_the_exact_ranking() {
         let vocab = 4096;
         let logits: Vec<f32> = (0..vocab).map(|i| (i % 7) as f32 * 1e-3).collect();
-        let probs = sampling_probabilities(&logits, params(0.99), &[]).unwrap();
+        let probs = dense_probabilities(&logits, params(0.99), &[]).unwrap();
         let kept = probs.iter().filter(|p| **p > 0.0).count();
         assert!(kept > 1024, "kept {kept}, expected the full nucleus");
         assert!((probs.iter().sum::<f32>() - 1.0).abs() < 1e-4);
@@ -4918,7 +5030,7 @@ mod nucleus_tests {
         logits[10] = 24.0;
         logits[20] = 23.0;
         logits[30] = 22.0;
-        let probs = sampling_probabilities(&logits, params(0.9), &[]).unwrap();
+        let probs = dense_probabilities(&logits, params(0.9), &[]).unwrap();
         // The three peaks carry all the mass, so the nucleus is just them and
         // it fits well inside the candidate cap.
         assert!(probs[10] > 0.0 && probs[20] > 0.0);

@@ -33,8 +33,14 @@
 //!     [--offset N]       first corpus token lane 0 reads (default 0)
 //!     [--temp T]         sample at T with --seed instead of greedy
 //!     [--seed S]         sampler seed (default 7)
+//!     [--top-p P]        nucleus mass when sampling (default the served 0.9)
+//!     [--top-k K]        top-k when sampling, 0 for none (default 0)
 //!     [--repeat N]       timed repetitions in this process (default 1)
 //!     [--label TEXT]     tag printed on every row
+//!     [--force-depth N]  batched lanes speculate at depth N whatever the cost
+//!                        model says (diagnostic: reaches the batched round)
+//!     [--weigh-on-host]  weigh sampled rows on the host, the sampler's
+//!                        reference, instead of on the device
 //!
 //! llama-decode-bench --ab [--rounds N] [--require-identical]
 //!     --arm NAME=BINARY [--arm NAME=BINARY ...] [--arm-args NAME=ARGS ...]
@@ -53,8 +59,8 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use makepad_ai_llm::{
-    LaneEvent, LaneExecutor, LaneRequest, LaneScheduler, LlamaModel, LlamaSamplingParams,
-    LlamaSession, LlamaSessionConfig, LlamaVocab, TensorType,
+    LaneEvent, LaneExecutor, LaneRequest, LaneScheduler, LaneSpeculationOptions, LlamaModel,
+    LlamaSamplingParams, LlamaSession, LlamaSessionConfig, LlamaVocab, TensorType,
 };
 
 struct Args {
@@ -69,15 +75,20 @@ struct Args {
     offset: usize,
     temp: f32,
     seed: u64,
+    top_p: f32,
+    top_k: usize,
     repeat: usize,
     label: String,
+    weigh_on_host: bool,
+    force_depth: Option<usize>,
 }
 
 fn usage() -> ! {
     eprintln!(
         "usage: llama-decode-bench <model.gguf> --corpus FILE [--corpus FILE ...] [--kv q8|f16]\n\
          \x20      [--lanes N] [--fill N] [--tokens N] [--context N] [--spec N] [--offset N]\n\
-         \x20      [--temp T] [--seed S] [--repeat N] [--label TEXT]"
+         \x20      [--temp T] [--seed S] [--top-p P] [--top-k K] [--repeat N] [--label TEXT]\n\
+         \x20      [--force-depth N] [--weigh-on-host]"
     );
     std::process::exit(2);
 }
@@ -99,8 +110,12 @@ fn parse_args() -> Args {
         offset: 0,
         temp: 0.0,
         seed: 7,
+        top_p: LlamaSamplingParams::default().top_p,
+        top_k: LlamaSamplingParams::default().top_k,
         repeat: 1,
         label: String::new(),
+        weigh_on_host: false,
+        force_depth: None,
     };
     let mut i = 1;
     while i < argv.len() {
@@ -126,8 +141,12 @@ fn parse_args() -> Args {
             "--offset" => args.offset = number(value(&mut i)),
             "--temp" => args.temp = value(&mut i).parse().unwrap_or_else(|_| usage()),
             "--seed" => args.seed = value(&mut i).parse().unwrap_or_else(|_| usage()),
+            "--top-p" => args.top_p = value(&mut i).parse().unwrap_or_else(|_| usage()),
+            "--top-k" => args.top_k = number(value(&mut i)),
             "--repeat" => args.repeat = number(value(&mut i)).max(1),
             "--label" => args.label = value(&mut i),
+            "--weigh-on-host" => args.weigh_on_host = true,
+            "--force-depth" => args.force_depth = Some(number(value(&mut i))),
             other => {
                 eprintln!("llama-decode-bench: unknown argument {other:?}");
                 usage();
@@ -201,10 +220,17 @@ fn run_once(
     let scheduler = LaneScheduler::new(table, 8).with_prefill_chunk(prefill_chunk);
     let sampling = LlamaSamplingParams {
         temperature: args.temp,
+        top_p: args.top_p,
+        top_k: args.top_k,
         seed: args.seed,
         ..LlamaSamplingParams::default()
     };
-    let mut exec = LaneExecutor::new(session, scheduler, sampling);
+    let mut exec = LaneExecutor::new(session, scheduler, sampling).with_speculation_options(
+        LaneSpeculationOptions {
+            forced_depth: args.force_depth,
+            force_round: false,
+        },
+    );
     for (index, prompt) in prompts.iter().enumerate() {
         exec.scheduler()
             .submit(LaneRequest {
@@ -475,6 +501,7 @@ fn main() {
         attention_k_type: args.kv,
         attention_v_type: args.kv,
         spec_draft_max: args.spec,
+        weigh_on_host: args.weigh_on_host,
         ..LlamaSessionConfig::default()
     };
     let mut session = LlamaSession::from_model(&model, config).unwrap_or_else(|e| {
@@ -514,7 +541,7 @@ fn main() {
         println!(
             "label={} rep={} kv={} lanes={} fill={} temp={} prefill_s={:.2} window_tokens={} \
              window_s={:.3} tok_s={:.1} per_lane={:.1} solo_rounds={} accept={:.3} \
-             draft_ms_round={:.2} verify_ms_round={:.2} hashes={}",
+             draft_ms_round={:.2} verify_ms_round={:.2} weighed_rows={} wide_rows={} hashes={}",
             args.label,
             rep,
             if args.kv == TensorType::F16 { "f16" } else { "q8" },
@@ -534,6 +561,8 @@ fn main() {
             },
             after.draft_nanos.saturating_sub(before.draft_nanos) as f64 / rounds / 1e6,
             after.verify_nanos.saturating_sub(before.verify_nanos) as f64 / rounds / 1e6,
+            after.weighed_rows.saturating_sub(before.weighed_rows),
+            after.wide_rows.saturating_sub(before.wide_rows),
             hashes.join(",")
         );
     }

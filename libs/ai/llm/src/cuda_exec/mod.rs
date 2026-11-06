@@ -375,6 +375,17 @@ impl CompiledHybridDecodeCuda {
         self.imp
             .execute(input, layout, false, skip_logits_readback)
     }
+
+    /// Run the graph and hand back each output row as `readout` asks, sampled
+    /// rows weighed on the device.
+    pub(crate) fn execute_rows_with_layout(
+        &mut self,
+        input: LogitsProbeInput<'_>,
+        layout: &HybridDecodeBatchLayout,
+        readout: &[crate::sampler::RowReadout],
+    ) -> Result<Vec<crate::sampler::RowOut>> {
+        self.imp.execute_rows(input, layout, readout)
+    }
 }
 
 #[cfg(makepad_llama_cuda_kernels)]
