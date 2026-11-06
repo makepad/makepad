@@ -289,6 +289,58 @@ fn a_hinge_holds_its_limits_hung_and_pulled() {
     }
 }
 
+/// The slabs in a solid (a slot under a hinge's cut is three).
+fn slabs(s: &Solid) -> usize {
+    match s {
+        Solid::Part(_) | Solid::Prim(Prim::Sphere { .. } | Prim::Frustum { .. }) => 0,
+        Solid::Prim(Prim::Slab { .. }) => 1,
+        Solid::Union(l) | Solid::Inter(l) => l.iter().map(slabs).sum(),
+        Solid::Diff(a, l) => slabs(a) + l.iter().map(slabs).sum::<usize>(),
+    }
+}
+
+/// Two leaves flat on the bed, end to end, hinged on a pin across up: low over the bed, the
+/// hinge's cuts cross the leaves' floors, so they run on straight down through them (no edge as
+/// thin as nothing left on the bed beside the pin), the fork's plates keep their footing, and
+/// it checks free. Over a taller pair, clear of the floor, the cuts are as they were.
+#[test]
+fn a_hinge_low_over_the_bed_is_slotted_down_to_it() {
+    let profile = Profile::default();
+    let jointed = |height: f64| {
+        let mut g = Graph::new();
+        let spans = [(0.0, 12.0), (12.0, 24.0)];
+        let nodes: Vec<NodeId> = spans.iter().map(|&(a, b)| boxed(&mut g, [a, 0.0, -4.0], [b, height, 4.0])).collect();
+        let boxes: Vec<PartBox> = spans.iter().map(|&(a, b)| PartBox { min: [a, 0.0, -4.0], max: [b, height, 4.0] }).collect();
+        let decls = vec![JointDecl::Hinge(HingeDecl { a: 0, b: 1, at: [12.0, 0.5 * height, 0.0], axis: [0.0, 0.0, 1.0], limits: None, pin: None, plate: None, clearance: None, clearance_axial: None, brake: None })];
+        let plan = plan(&boxes, &decls, &[], &[], &profile).unwrap();
+        let built = build(g, &nodes, &["leaf[0]", "leaf[1]"], &plan);
+        (plan, built)
+    };
+    let (low, built) = jointed(6.0);
+    let JointGeom::Hinge { r_plate, c_r, .. } = low.joints[0] else { panic!("a hinge") };
+    let reach = r_plate + c_r;
+    assert!(reach > 3.0, "the cut ({reach:.2}) crosses the floor 3 mm under the pin");
+    assert!(built.watertight.iter().all(|w| *w), "closed");
+    let fs = fields(&built, &low);
+    // on the first layer, a millimetre short of the cut's reach: the round cut leaves the leaf there
+    let x = reach - 1.0;
+    let at = |part: usize, p: P3| fs[part].distance(geom::v3(p));
+    assert!(x > (reach * reach - 2.9f64.powi(2)).sqrt(), "the round cut alone leaves the floor there");
+    assert!(at(0, [12.0 - x, 0.1, 0.0]) > 0.0, "the fork's slot runs down to the bed");
+    assert!(at(1, [12.0 + x, 0.1, -3.4]) > 0.0, "the eye's leaf is slotted down to the bed round the plate");
+    assert!(at(0, [12.0 - x, 0.1, -3.4]) < 0.0, "the fork keeps its footing beside its plate");
+    assert!(at(1, [12.0 + x, 0.1, 0.0]) < 0.0, "the eye's leaf is whole round the eye");
+    assert_eq!(low.solids.iter().map(slabs).collect::<Vec<_>>(), [3, 6], "a slot under the fork's cut and each plate's");
+    let parts = finals(&built, &fs);
+    let checks = check_joints(&low, &parts, Geometry::Design, &|| false);
+    report_checks(&checks);
+    assert!(checks.iter().all(|c| c.ok()), "the slotted hinge checks free");
+    let (tall, _) = jointed(16.0);
+    let JointGeom::Hinge { r_plate, c_r, .. } = tall.joints[0] else { panic!("a hinge") };
+    assert!(r_plate + c_r < 8.0, "the taller pair's cut clears its floor");
+    assert!(tall.solids.iter().all(|s| slabs(s) == 0), "clear of the floor, no slot");
+}
+
 /// A slider and a bearing print as they stand: every part on the bed, the moving one held in by
 /// a chevron ridge in the other's groove (each flank at most 45 degrees, so nothing needs
 /// support), and they slide and turn as printed. A slider's carriage stops at the rail's end

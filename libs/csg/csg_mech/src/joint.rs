@@ -420,6 +420,10 @@ pub enum JointGeom {
         c_z: f64,
         limits: Option<(f64, f64)>,
         brake: Option<Brake>,
+        /// Print up, and A's and B's floors along it: a cut about a pin across up that crosses
+        /// its part's floor runs on straight down through it ([`JointGeom::slot`]).
+        up: P3,
+        floors: [f64; 2],
     },
     Ball {
         c: P3,
@@ -509,7 +513,9 @@ pub fn size_hinge(d: &HingeDecl, a: &PartBox, b: &PartBox, p: &Profile, notes: &
         }
         None => None,
     };
-    Ok(JointGeom::Hinge { at: d.at, axis, s0, s1, r_pin, r_plate, t_plate, c_r, c_z, limits: d.limits, brake })
+    let up = norm(p.up);
+    let floors = [a.extent([0.0; 3], up).lo, b.extent([0.0; 3], up).lo];
+    Ok(JointGeom::Hinge { at: d.at, axis, s0, s1, r_pin, r_plate, t_plate, c_r, c_z, limits: d.limits, brake, up, floors })
 }
 
 /// Size a hinge's brake: grooves a squeeze plus a clearance (along the flanks) deep, the teeth's
@@ -640,6 +646,37 @@ impl JointGeom {
         madd(at, axis, s)
     }
 
+    /// A hinge's cut about a pin across up (radius `r`, over `span` along the pin) that crosses
+    /// its part's `floor` leaves the part an edge as thin as nothing on the bed each side of the
+    /// pin, where the cut's round meets the floor. This is the box that runs the cut on straight
+    /// down through the floor, a slot open underneath with walls square to the bed. None where
+    /// the cut over `within` (the part's own share of the span) clears the floor, so those cuts
+    /// are as they were.
+    fn slot(at: P3, axis: P3, up: P3, span: (f64, f64), within: (f64, f64), r: f64, floor: f64) -> Option<Solid> {
+        let along = dot(axis, up);
+        let sin = (1.0 - along * along).max(0.0).sqrt();
+        if sin < 10f64.to_radians().sin() {
+            return None;
+        }
+        let height = |s: f64| dot(Self::p(at, axis, s), up);
+        let (lo, hi) = (span.0.max(within.0), span.1.min(within.1));
+        if height(lo).min(height(hi)) - r * sin >= floor {
+            return None;
+        }
+        // square to the pin: `rise` the way up, `across` along the bed
+        let rise = norm(sub(up, scale(axis, along)));
+        let across = cross(axis, rise);
+        // its ends a hair past the cut's and its walls a hair inside the cut's widest (no face
+        // of the one lands on the other's); from the pin down till all of it is under the floor
+        let (lo, hi) = (span.0 - EPS, span.1 + EPS);
+        let w = r - EPS;
+        let depth = (height(lo).max(height(hi)) - floor) / sin + 1.0;
+        let c = madd(Self::p(at, axis, 0.5 * (lo + hi)), rise, -0.5 * depth);
+        let half = (0.25 * (hi - lo) * (hi - lo) + w * w + 0.25 * depth * depth).sqrt();
+        let slab = |n: P3, h: f64| Solid::Prim(Prim::Slab { n, lo: dot(c, n) - h, hi: dot(c, n) + h, c, half });
+        Some(Solid::Inter(vec![slab(axis, 0.5 * (hi - lo)), slab(across, w), slab(rise, 0.5 * depth)]))
+    }
+
     /// The smallest gap the joint is built with.
     pub fn clearance(&self) -> f64 {
         match self {
@@ -715,7 +752,7 @@ impl JointGeom {
     /// A's solid with this joint's half.
     pub fn apply_a(&self, a: Solid) -> Solid {
         match *self {
-            JointGeom::Hinge { at, axis, s0, s1, r_pin, r_plate, t_plate, c_r, c_z, ref brake, .. } => {
+            JointGeom::Hinge { at, axis, s0, s1, r_pin, r_plate, t_plate, c_r, c_z, ref brake, up, floors, .. } => {
                 let p = |s: f64| Self::p(at, axis, s);
                 // a braked pin is grooved where the teeth print
                 let pin = Solid::Prim(Prim::cyl(p(s0), p(s1), r_pin));
@@ -723,8 +760,11 @@ impl JointGeom {
                     Some(b) => Solid::diff(pin, b.grooves(at, axis, c_z)),
                     None => pin,
                 };
+                let span = (s0 + t_plate - EPS, s1 - t_plate + EPS);
+                let mut cuts = vec![Solid::Prim(Prim::cyl(p(span.0), p(span.1), r_plate + c_r))];
+                cuts.extend(Self::slot(at, axis, up, span, (s0, s1), r_plate + c_r, floors[0]));
                 Solid::Union(vec![
-                    Solid::diff(a, vec![Solid::Prim(Prim::cyl(p(s0 + t_plate - EPS), p(s1 - t_plate + EPS), r_plate + c_r))]),
+                    Solid::diff(a, cuts),
                     // flush with the parts' outer faces (a hair inset leaves the mesh boolean slivers it cannot close)
                     Solid::Prim(Prim::cyl(p(s0), p(s0 + t_plate), r_plate)),
                     Solid::Prim(Prim::cyl(p(s1 - t_plate), p(s1), r_plate)),
@@ -768,11 +808,16 @@ impl JointGeom {
     /// B's solid with this joint's half.
     pub fn apply_b(&self, b: Solid) -> Solid {
         match *self {
-            JointGeom::Hinge { at, axis, s0, s1, r_pin, r_plate, t_plate, c_r, c_z, ref brake, .. } => {
+            JointGeom::Hinge { at, axis, s0, s1, r_pin, r_plate, t_plate, c_r, c_z, ref brake, up, floors, .. } => {
                 let p = |s: f64| Self::p(at, axis, s);
                 let (e0, e1) = (s0 + t_plate + c_z, s1 - t_plate - c_z);
                 let rr = r_plate + c_r;
-                let body = Solid::diff(b, vec![Solid::Prim(Prim::cyl(p(s0 - 1.0), p(e0 + EPS), rr)), Solid::Prim(Prim::cyl(p(e1 - EPS), p(s1 + 1.0), rr))]);
+                let mut plates = Vec::new();
+                for span in [(s0 - 1.0, e0 + EPS), (e1 - EPS, s1 + 1.0)] {
+                    plates.push(Solid::Prim(Prim::cyl(p(span.0), p(span.1), rr)));
+                    plates.extend(Self::slot(at, axis, up, span, (s0, s1), rr, floors[1]));
+                }
+                let body = Solid::diff(b, plates);
                 let mut cuts = vec![Solid::Prim(Prim::cyl(p(s0 - 1.0), p(s1 + 1.0), r_pin + c_r))];
                 // the shoes print in pockets of the eye, fused to it
                 if let Some(b) = brake {

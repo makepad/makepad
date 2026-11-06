@@ -70,7 +70,7 @@ fn same_solid(a: &TriMesh, b: &TriMesh) {
 fn hinge(x: f64, b: usize) -> (JointGeom, JointDecl) {
     let (at, axis) = ([x, 0.0, 0.0], [0.0, 0.0, 1.0]);
     (
-        JointGeom::Hinge { at, axis, s0: -2.0, s1: 2.0, r_pin: 0.5, r_plate: 1.0, t_plate: 0.8, c_r: 0.2, c_z: 0.2, limits: None, brake: None },
+        JointGeom::Hinge { at, axis, s0: -2.0, s1: 2.0, r_pin: 0.5, r_plate: 1.0, t_plate: 0.8, c_r: 0.2, c_z: 0.2, limits: None, brake: None, up: [0.0, 1.0, 0.0], floors: [-1.5, -3.0] },
         JointDecl::Hinge(HingeDecl { a: 0, b, at, axis, limits: None, pin: None, plate: None, clearance: None, clearance_axial: None, brake: None }),
     )
 }
