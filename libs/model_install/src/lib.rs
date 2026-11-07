@@ -295,7 +295,9 @@ mod tests {
     #[test]
     fn the_checkout_root_is_the_repository_local_tree() {
         assert!(cache_root().ends_with("libs/model_install/../../local"));
-        assert!(cache_root().join("../libs/model_install/Cargo.toml").is_file());
+        // through its parent, not through `local/..`: `local/` is ignored, and a fresh tree (a
+        // test bucket's) has none, so a path through it does not resolve
+        assert!(cache_root().parent().unwrap().join("libs/model_install/Cargo.toml").is_file());
     }
 
     #[test]

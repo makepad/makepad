@@ -512,8 +512,8 @@ fn run() -> Result<(), String> {
     const ORACLE_DECODE_MS: f64 = 5020.0;
     const ORACLE_E2E_MS: f64 = ORACLE_ENCODE_MS + 671.0 + ORACLE_DECODE_MS;
     rows.push(format!(
-        "warm_stage_ms        te={:.1} encode={:.1} denoise={:.1} decode={:.1} png={:.1} total={:.1}",
-        warm.te_ms, warm.encode_ms, warm.warm_ms, warm.decode_ms, warm.png_ms, warm.total_ms
+        "warm_stage_ms        te={:.1} encode={:.1} denoise={:.1} decode={:.1} total={:.1}",
+        warm.te_ms, warm.encode_ms, warm.warm_ms, warm.decode_ms, warm.total_ms
     ));
     {
         let ok = warm.decode_ms <= ORACLE_DECODE_MS;
@@ -549,7 +549,9 @@ fn run() -> Result<(), String> {
         println!("  {row}");
     }
     let out = dumps.join("native_decoded.png");
-    std::fs::write(&out, &result.png).ok();
+    if let Ok(png) = result.png() {
+        std::fs::write(&out, png).ok();
+    }
     println!("  wrote {}", out.display());
     if failed > 0 {
         return Err(format!("{failed} gate(s) failed"));

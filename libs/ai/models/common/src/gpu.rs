@@ -2105,6 +2105,20 @@ mod imp {
 
     const GPU_UNAVAILABLE: &str = "CUDA device tensor backend is unavailable";
 
+    /// Without CUDA no wait spins: nothing to set.
+    pub fn gpu_set_blocking_sync() -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn gpu_memory_info() -> Result<(usize, usize), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    /// Without CUDA there is no context to destroy.
+    pub fn gpu_device_reset() -> Result<(), String> {
+        Ok(())
+    }
+
     pub fn gpu_device_available() -> bool {
         #[cfg(target_os = "macos")]
         {

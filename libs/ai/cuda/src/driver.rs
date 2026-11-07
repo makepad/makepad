@@ -96,6 +96,8 @@ cuda_ffi! {
     pub fn cudaGetDeviceCount(count: *mut c_int) -> cudaError_t;
     pub fn cudaMemGetInfo(free: *mut usize, total: *mut usize) -> cudaError_t;
     pub fn cudaSetDevice(device: c_int) -> cudaError_t;
+    pub fn cudaSetDeviceFlags(flags: c_uint) -> cudaError_t;
+    pub fn cudaDeviceReset() -> cudaError_t;
     pub fn cudaGetDevice(device: *mut c_int) -> cudaError_t;
     pub fn cudaMalloc(dev_ptr: *mut *mut c_void, size: usize) -> cudaError_t;
     pub fn cudaFree(dev_ptr: *mut c_void) -> cudaError_t;
@@ -387,6 +389,32 @@ pub fn current_device() -> Result<i32, CudaError> {
 
 pub fn set_device(device: i32) -> Result<(), CudaError> {
     unsafe { check(cudaSetDevice(device)) }
+}
+
+/// `cudaDeviceScheduleBlockingSync`: a host thread waiting for the device
+/// sleeps on a sync primitive instead of spinning.
+const CUDA_DEVICE_SCHEDULE_BLOCKING_SYNC: c_uint = 0x04;
+
+/// Waits for the device block (sleep) instead of spinning a CPU core: for a
+/// process that runs models beside other realtime work (a renderer, an
+/// audio engine) and wants its cores back while the GPU computes. Call it
+/// before the first CUDA work of the process; it sets the device's flags.
+pub fn set_blocking_sync() -> Result<(), CudaError> {
+    unsafe { check(cudaSetDeviceFlags(CUDA_DEVICE_SCHEDULE_BLOCKING_SYNC)) }
+}
+
+/// Destroys this process's context on the current device, and with it every
+/// allocation, stream and handle in it: the device memory the context held
+/// is back, and the next CUDA call makes a fresh context (its flags as
+/// set before it, the default otherwise). Only for a process whose every
+/// CUDA user has finished, and whose threads holding CUDA state have ended.
+///
+/// The reset acts on the context the calling thread has current: from a
+/// thread that has made no CUDA call it returns success and resets nothing
+/// (measured). The device is made current first, so any thread can call it.
+pub fn device_reset() -> Result<(), CudaError> {
+    set_device(current_device()?)?;
+    unsafe { check(cudaDeviceReset()) }
 }
 
 pub fn create_non_blocking_stream() -> Result<cudaStream_t, CudaError> {

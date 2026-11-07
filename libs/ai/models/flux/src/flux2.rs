@@ -403,6 +403,36 @@ impl Flux2PackedLatents {
             data,
         })
     }
+
+    /// Each channel's mean and spread (standard deviation) over the plane.
+    pub fn channel_stats(&self) -> Vec<(f32, f32)> {
+        let plane = self.token_count();
+        self.data
+            .chunks_exact(plane.max(1))
+            .map(|p| {
+                let mean = p.iter().sum::<f32>() / p.len() as f32;
+                let var = p.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / p.len() as f32;
+                (mean, var.sqrt())
+            })
+            .collect()
+    }
+
+    /// Each channel moved to `target`'s mean and spread (`channel_stats` of
+    /// another frame). A frame fed back into the sampler again and again
+    /// drifts a little each time in these (its colour, saturation and
+    /// contrast compound until it blows out); held to its first frame's,
+    /// it keeps that frame's look however long it runs.
+    pub fn match_channel_stats(&mut self, target: &[(f32, f32)]) {
+        let plane = self.token_count().max(1);
+        for (p, &(to_mean, to_spread)) in self.data.chunks_exact_mut(plane).zip(target) {
+            let mean = p.iter().sum::<f32>() / p.len() as f32;
+            let spread = (p.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / p.len() as f32).sqrt();
+            let scale = if spread > 1e-6 { to_spread / spread } else { 1.0 };
+            for v in p.iter_mut() {
+                *v = (*v - mean) * scale + to_mean;
+            }
+        }
+    }
 }
 
 /// Pack a mean-only 32-channel latent plane into the 128-channel 2x2 layout
@@ -1080,6 +1110,15 @@ impl Flux2TextEncoderWeights {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matched_latents_take_the_targets_mean_and_spread_per_channel() {
+        let mut latents = Flux2PackedLatents { width: 2, height: 1, channels: 2, data: vec![1.0, 3.0, 5.0, 5.0] };
+        assert_eq!(latents.channel_stats(), vec![(2.0, 1.0), (5.0, 0.0)]);
+        latents.match_channel_stats(&[(0.0, 2.0), (1.0, 4.0)]);
+        assert_eq!(latents.data, vec![-2.0, 2.0, 1.0, 1.0], "a flat channel keeps flat, moved to the mean");
+        assert_eq!(latents.channel_stats(), vec![(0.0, 2.0), (1.0, 0.0)]);
+    }
 
     #[test]
     fn dev_config_invariants() {

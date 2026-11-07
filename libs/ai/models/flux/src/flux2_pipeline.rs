@@ -60,14 +60,19 @@ pub struct Flux2KleinPipeline {
 pub struct Flux2Img2Img {
     pub image: Flux2VaeImage,
     pub strength: f32,
+    /// The image's encoding when the caller has it: a frame fed back into
+    /// the next is the latents it was decoded from, and is not encoded again.
+    pub latents: Option<Flux2PackedLatents>,
 }
 
 /// Resolve the img2img start: `(start_step, sample)`. `noise` is the full
 /// sigma-1 noise (`[gen_tokens, 128]` token-major); `sigmas` the full
-/// `steps + 1` schedule.
+/// `steps + 1` schedule. `encoded` is the init's latents when the caller
+/// already has them (the init is also the reference): no second encode.
 fn flux2_img2img_start(
     vae: &Flux2VaeWeights,
     init: &Flux2Img2Img,
+    encoded: Option<&Flux2PackedLatents>,
     noise: Vec<f32>,
     sigmas: &[f32],
     steps: usize,
@@ -93,7 +98,14 @@ fn flux2_img2img_start(
     if start == 0 {
         return Ok((0, noise));
     }
-    let packed = flux2_vae_encode(vae, &init.image)?;
+    let fresh;
+    let packed = match encoded {
+        Some(packed) => packed,
+        None => {
+            fresh = flux2_vae_encode(vae, &init.image)?;
+            &fresh
+        }
+    };
     if packed.width != packed_w || packed.height != packed_h || packed.channels != 128 {
         return Err(DiffusionError::workflow(format!(
             "flux2 img2img init encoded to {}x{}x{}, expected {packed_w}x{packed_h}x128",
@@ -144,7 +156,6 @@ pub struct Flux2EditRequest {
 #[derive(Clone, Debug)]
 pub struct Flux2EditResult {
     pub image: Flux2VaeImage,
-    pub png: Vec<u8>,
     pub packed_latents: Flux2PackedLatents,
     pub ref_packed: Flux2PackedLatents,
     pub input_ids: Vec<u32>,
@@ -159,8 +170,20 @@ pub struct Flux2EditResult {
     pub te_ms: f64,
     pub encode_ms: f64,
     pub decode_ms: f64,
-    pub png_ms: f64,
     pub total_ms: f64,
+}
+
+impl Flux2EditResult {
+    /// The image as a PNG, made when asked: a live loop that shows the
+    /// pixels never pays for the encode.
+    pub fn png(&self) -> Result<Vec<u8>> {
+        let rgb = flux2_image_to_rgb_u8(&self.image);
+        encode_png_rgb(
+            &planar_rgb_to_whcb(&rgb, self.image.width, self.image.height),
+            self.image.width,
+            self.image.height,
+        )
+    }
 }
 
 impl Flux2KleinPipeline {
@@ -264,8 +287,15 @@ impl Flux2KleinPipeline {
         let sigmas = flux2_schedule(request.steps, gen_tokens)?;
         let start_step = match &request.init {
             Some(init) => {
+                // A feed's init is its reference too: that encode serves both.
+                let encoded = match request.references.as_slice() {
+                    _ if init.latents.is_some() => init.latents.as_ref(),
+                    [only] if request.teacher_ref_tokens.is_none() && only.width == init.image.width
+                        && only.height == init.image.height && only.data == init.image.data => Some(&ref_packed[0].2),
+                    _ => None,
+                };
                 let (start, mixed) =
-                    flux2_img2img_start(&self.vae, init, sample, &sigmas, request.steps, packed_w, packed_h)?;
+                    flux2_img2img_start(&self.vae, init, encoded, sample, &sigmas, request.steps, packed_w, packed_h)?;
                 sample = mixed;
                 start
             }
@@ -298,17 +328,8 @@ impl Flux2KleinPipeline {
         let decode_started = std::time::Instant::now();
         let image = flux2_vae_decode(&self.vae, &packed)?;
         let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
-        let png_started = std::time::Instant::now();
-        let rgb = flux2_image_to_rgb_u8(&image);
-        let png = encode_png_rgb(
-            &planar_rgb_to_whcb(&rgb, image.width, image.height),
-            image.width,
-            image.height,
-        )?;
-        let png_ms = png_started.elapsed().as_secs_f64() * 1000.0;
         Ok(Flux2EditResult {
             image,
-            png,
             packed_latents: packed,
             ref_packed: ref_packed[0].2.clone(),
             input_ids: tokenized.token_ids,
@@ -320,7 +341,6 @@ impl Flux2KleinPipeline {
             te_ms,
             encode_ms,
             decode_ms,
-            png_ms,
             total_ms: total_started.elapsed().as_secs_f64() * 1000.0,
         })
     }
@@ -641,7 +661,7 @@ impl Flux2DevPipeline {
             }
             Some(init) => {
                 let (start, mixed) =
-                    flux2_img2img_start(&self.vae, init, sample, &sigmas, request.steps, packed_w, packed_h)?;
+                    flux2_img2img_start(&self.vae, init, None, sample, &sigmas, request.steps, packed_w, packed_h)?;
                 sample = mixed;
                 start
             }
@@ -853,7 +873,7 @@ impl Flux2DevPipeline {
         let start_step = match &request.init {
             Some(init) => {
                 let (start, mixed) =
-                    flux2_img2img_start(&self.vae, init, sample, &sigmas, request.steps, packed_w, packed_h)?;
+                    flux2_img2img_start(&self.vae, init, None, sample, &sigmas, request.steps, packed_w, packed_h)?;
                 sample = mixed;
                 start
             }
@@ -896,17 +916,8 @@ impl Flux2DevPipeline {
         }
         let image = flux2_vae_decode(&self.vae, &packed)?;
         let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
-        let png_started = std::time::Instant::now();
-        let rgb = flux2_image_to_rgb_u8(&image);
-        let png = encode_png_rgb(
-            &planar_rgb_to_whcb(&rgb, image.width, image.height),
-            image.width,
-            image.height,
-        )?;
-        let png_ms = png_started.elapsed().as_secs_f64() * 1000.0;
         Ok(Flux2EditResult {
             image,
-            png,
             packed_latents: packed,
             ref_packed: ref_packed[0].2.clone(),
             input_ids,
@@ -918,7 +929,6 @@ impl Flux2DevPipeline {
             te_ms,
             encode_ms,
             decode_ms,
-            png_ms,
             total_ms: total_started.elapsed().as_secs_f64() * 1000.0,
         })
     }

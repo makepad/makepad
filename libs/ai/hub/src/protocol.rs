@@ -111,6 +111,14 @@ pub struct ActivityJson {
     /// The node's compute mode as its hosting WM set it (`auto`, `ui-first`,
     /// `ai-first`, `unavailable`). Missing on older services.
     pub mode: Option<String>,
+    /// Who holds the machine quiet now (a timed run, as its lease hub names
+    /// it; `crate::activity::ActivityGate::set_quiet`). Missing when nobody
+    /// does, and on older services.
+    pub quiet: Option<String>,
+    /// In the answer that ended a quiet: how many requests it refused, and
+    /// the first of them by route and caller.
+    pub refused: Option<u64>,
+    pub refused_said: Option<Vec<String>>,
 }
 
 /// What a box advertises about its concurrent decode capacity.

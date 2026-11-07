@@ -872,8 +872,15 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
 /// The `kernel` domain (`crate::kernel_wire`): compute programs on this node, for the callers
 /// [`kernel_caller`] takes. `GET /kernel` is the node's info; the programs run over the stream.
 fn route_kernel(shared: &Arc<ServiceShared>, headers: &HttpServerHeaders, response_sender: mpsc::Sender<HttpServerResponse>) {
-    if kernel_caller(shared, headers).is_none() {
+    let Some(caller) = kernel_caller(shared, headers) else {
         let _ = response_sender.send(error_json(401, "compute programs need this machine's token or a fleet machine credential".into()));
+        return;
+    };
+    // a machine held quiet runs no programs: a client that asks finds the node busy and goes
+    // to another (or its own cores)
+    if let Some(reason) = quiet_refusal(shared) {
+        shared.activity.refused(&format!("GET /kernel from {}", caller.client_id));
+        let _ = response_sender.send(error_json(503, reason));
         return;
     }
     let path = headers.path.split('?').next().unwrap_or_default();
@@ -899,12 +906,24 @@ fn route_kernel_stream(shared: &Arc<ServiceShared>, headers: &HttpServerHeaders,
     let caller = kernel_caller(shared, headers);
     #[cfg(feature = "kernel")]
     if let Some(caller) = caller {
+        if quiet_refusal(shared).is_some() {
+            shared.activity.refused(&format!("kernel stream from {}", caller.client_id));
+            let _ = response_sender.send(Vec::new());
+            return;
+        }
         crate::program_serve::service().stream_open(web_socket_id, &caller.client_id, response_sender);
         return;
     }
     #[cfg(not(feature = "kernel"))]
     let _ = (caller, web_socket_id);
     let _ = response_sender.send(Vec::new());
+}
+
+/// The refusal while a timed run holds the machine quiet ([`crate::activity::ActivityGate::set_quiet`]):
+/// compute programs, which the AI admission gate does not take part in otherwise, stop then too.
+fn quiet_refusal(shared: &ServiceShared) -> Option<String> {
+    let holder = shared.activity.quiet_holder();
+    (!holder.is_empty()).then(|| format!("local-use: timed-lease ({holder})"))
 }
 
 /// Who may run compute programs here: an app on this machine, by the machine token on the
@@ -987,7 +1006,10 @@ pub fn control_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> Res
 /// the hosting WM's report (`crate::activity::ComputeMode`). Closing admission goes the way
 /// of all local use: running jobs are cancelled as `local-use: …` (their clients reroute),
 /// queued ones wait or reroute, and the model worker unloads. AI First drops the UI reserve:
-/// it never yields GPU memory.
+/// it never yields GPU memory. `"quiet": "<holder>"` is the machine's lease hub instead: a timed
+/// run holds the box, admission closes whatever the mode and the compute programs' streams end
+/// (their clients go to other nodes); `"quiet": ""` ends it, and the answer says what it refused
+/// meanwhile (`refused`, `refused_said`). A field left out is left as it is.
 fn control_local_use(shared: &Arc<ServiceShared>, body: &[u8]) -> HttpServerResponse {
     let Ok(value) = json::parse(body) else {
         return error_json(400, "need {\"mode\": \"auto\"|\"ui-first\"|\"ai-first\"|\"unavailable\", \"use\": \"gaming\"|\"\"}".to_string());
@@ -1005,13 +1027,36 @@ fn control_local_use(shared: &Arc<ServiceShared>, body: &[u8]) -> HttpServerResp
         Some("") => false,
         Some(other) => return error_json(400, format!("unknown local use {other:?}")),
     };
+    let quiet = match value.get("quiet") {
+        None => None,
+        Some(v) => match v.as_str() {
+            Some(holder) => Some(holder.trim().to_string()),
+            None => return error_json(400, "\"quiet\" is who holds the machine quiet, or \"\"".to_string()),
+        },
+    };
     let (was_mode, was_gaming) = (shared.activity.mode(), shared.activity.gaming());
     shared.activity.set_local_use(mode, gaming);
+    let was_quiet = shared.activity.quiet_holder();
+    let ended = quiet.as_deref().and_then(|holder| shared.activity.set_quiet(holder));
     if mode == crate::activity::ComputeMode::AiFirst {
         crate::gpu_yield::set_ui_reserve_mb(0);
     }
     shared.jobs.with(|store| store.interrupt_for_activity());
-    let snap = shared.activity.snapshot();
+    if let Some(holder) = quiet.as_deref().filter(|h| !h.is_empty() && *h != was_quiet) {
+        #[cfg(feature = "kernel")]
+        let streams = crate::program_serve::service().end_all();
+        #[cfg(not(feature = "kernel"))]
+        let streams = 0;
+        eprintln!("[local-use] {holder} holds this machine quiet: admission closed, {streams} compute program stream(s) ended");
+    }
+    if let Some(e) = &ended {
+        eprintln!("[local-use] the quiet of {} is over: it refused {} request(s){}", e.holder, e.refused, if e.said.is_empty() { String::new() } else { format!(" ({})", e.said.join("; ")) });
+    }
+    let mut snap = shared.activity.snapshot();
+    if let Some(e) = ended {
+        snap.refused = Some(e.refused);
+        snap.refused_said = Some(e.said);
+    }
     if (was_mode, was_gaming) != (mode, gaming) {
         eprintln!(
             "[local-use] mode {} {}: admission {} ({})",
@@ -1845,6 +1890,7 @@ fn route_post_by(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::f
     }
     if matches!(path, "/generate" | "/jobs" | "/realtime") {
         if let Some(reason) = shared.activity.refusal() {
+            shared.activity.refused(&format!("POST {path} from {}", caller.client_id));
             return generate_refused(&AssetAiError::Unavailable(reason));
         }
     }
@@ -2116,7 +2162,10 @@ fn generate_refused(refused: &AssetAiError) -> HttpServerResponse {
 /// admits an ordinary job (same FIFO / `queue_policy=reject` gate); see the
 /// "Realtime session wire protocol" doc block in `protocol.rs`.
 fn route_realtime_post(shared: &Arc<ServiceShared>, body: &[u8]) -> HttpServerResponse {
-    if let Some(reason) = shared.activity.refusal() { return generate_refused(&AssetAiError::Unavailable(reason)); }
+    if let Some(reason) = shared.activity.refusal() {
+        shared.activity.refused("POST /realtime");
+        return generate_refused(&AssetAiError::Unavailable(reason));
+    }
     let text = match std::str::from_utf8(body) {
         Ok(text) => text,
         Err(_) => return error_json(400, "request body is not utf-8".to_string()),

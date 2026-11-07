@@ -4,7 +4,11 @@
 //! The window manager that hosts the hub is the second source: it sees games
 //! (a fullscreen client, an active gamepad) where an OS probe cannot, and it
 //! owns the node's compute mode (`POST /control/local-use`, [`ComputeMode`]).
-//! Both feed the same published code, so closing admission, unloading and
+//! The machine's lease hub is the third: while a timed run holds the box (a
+//! benchmark that counts every other process as noise) it asks for quiet
+//! (`"quiet"`: who holds it), which closes admission in every mode, and what
+//! is refused meanwhile is counted for its end ([`ActivityGate::set_quiet`]).
+//! All feed the same published code, so closing admission, unloading and
 //! rerouting run through the one path below.
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::time::{Duration, Instant};
@@ -101,6 +105,7 @@ const CONTROLLER:u64=4; const GPU:u64=5; const QUIET:u64=6; const SESSION_ERROR:
 const FULLSCREEN_ERROR:u64=8; const CONTROLLER_ERROR:u64=9; const GPU_ERROR:u64=10;
 const CONFIG_ERROR:u64=11; const DISABLED:u64=12; const UNSUPPORTED:u64=13; const STALE:u64=14; const RETIRING:u64=15;
 const GAMING:u64=16; const UNAVAILABLE:u64=17; const UI_FIRST:u64=18; const AI_FIRST:u64=19; const RESTARTING:u64=20;
+const TIMED_LEASE:u64=21;
 fn reason(code:u64)->(&'static str,&'static str) { match code {
     IDLE=>("idle","quiet"), INPUT=>("busy","recent-input"), FULLSCREEN=>("busy","fullscreen"),
     CONTROLLER=>("busy","controller-active"), GPU=>("busy","foreign-gpu-load"), QUIET=>("busy","quiet-hysteresis"),
@@ -110,13 +115,15 @@ fn reason(code:u64)->(&'static str,&'static str) { match code {
     UNSUPPORTED=>("unsupported","platform-unsupported"), STALE=>("unknown","monitor-stale"),
     RETIRING=>("busy","releasing-models"), GAMING=>("busy","gaming"),
     UNAVAILABLE=>("busy","operator-unavailable"), UI_FIRST=>("disabled","ui-first"), AI_FIRST=>("disabled","ai-first"),
-    RESTARTING=>("busy","restarting"),
+    RESTARTING=>("busy","restarting"), TIMED_LEASE=>("busy","timed-lease"),
     _=>("unknown","monitor-starting"),
 }}
 fn permits(code:u64, config:&Config)->bool { code==IDLE || code==DISABLED || code==UI_FIRST || code==AI_FIRST || (code==UNSUPPORTED && !config.enabled) }
-/// What the WM's mode and local-use report make of the OS probe's code.
-fn combine(os:u64, mode:ComputeMode, gaming:bool, stopping:bool)->u64 {
+/// What the WM's mode and local-use report and a timed run's quiet make of the
+/// OS probe's code: the quiet wins over every mode (a forced one too).
+fn combine(os:u64, mode:ComputeMode, gaming:bool, stopping:bool, quiet:bool)->u64 {
     if stopping { return RESTARTING; }
+    if quiet { return TIMED_LEASE; }
     match mode {
         ComputeMode::Unavailable=>UNAVAILABLE, ComputeMode::AiFirst=>AI_FIRST, ComputeMode::UiFirst=>UI_FIRST,
         ComputeMode::Automatic=>if gaming {GAMING} else {os},
@@ -190,13 +197,26 @@ pub struct ActivityGate {
     /// The OS probe's last sample (code, idle, gpu), republished with a new WM report.
     /// Held for the whole publication: the monitor and a WM report never interleave.
     os:Mutex<(u64,Option<u64>,Option<f64>)>,
+    /// A timed run's quiet ([`ActivityGate::set_quiet`]).
+    quiet:Mutex<Quiet>,
 }
+
+/// While a timed run holds the machine: who holds it, and what it refused meanwhile.
+#[derive(Debug, Default)]
+struct Quiet { holder:String, refused:u64, said:Vec<String> }
+
+/// What a quiet that ended refused: how many requests, and the first [`QUIET_SAID`] of them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QuietEnded { pub holder:String, pub refused:u64, pub said:Vec<String> }
+
+/// The refused requests a quiet keeps by name (the rest are counted).
+const QUIET_SAID: usize = 20;
 impl ActivityGate {
     pub fn new(config:Config)->Arc<Self> {
         let code=if config.invalid {CONFIG_ERROR} else if !config.supported {UNSUPPORTED} else if !config.enabled {DISABLED} else {START};
         Arc::new(Self { config,clock:Instant::now(),sequence:AtomicU64::new(0),code:AtomicU64::new(code),
             sampled_ms:AtomicU64::new(0),idle:AtomicU64::new(u64::MAX),gpu:AtomicU64::new(f64::NAN.to_bits()),epoch:AtomicU64::new(0),retiring:AtomicBool::new(false),probe_error:Mutex::new(None),
-            mode:AtomicU64::new(0),gaming:AtomicBool::new(false),stopping:AtomicBool::new(false),os:Mutex::new((code,None,None)) })
+            mode:AtomicU64::new(0),gaming:AtomicBool::new(false),stopping:AtomicBool::new(false),os:Mutex::new((code,None,None)),quiet:Mutex::new(Quiet::default()) })
     }
     pub fn epoch(&self)->u64 {self.epoch.load(Ordering::SeqCst)}
     fn now(&self)->u64 {self.clock.elapsed().as_millis() as u64}
@@ -226,7 +246,37 @@ impl ActivityGate {
         let os=self.os.lock().unwrap();
         self.mode.store(mode.to_u64(),Ordering::SeqCst);
         self.gaming.store(gaming,Ordering::SeqCst);
-        self.publish(combine(os.0,mode,gaming,self.stopping.load(Ordering::SeqCst)),os.1,os.2);
+        self.publish(combine(os.0,mode,gaming,self.stopping.load(Ordering::SeqCst),self.quieted()),os.1,os.2);
+    }
+    /// The lease hub's quiet (`POST /control/local-use {"quiet": …}`), effective at once like a
+    /// game: `holder` (the timed run, as the hub names it) closes admission in every mode, and
+    /// the requests refused from then on are counted ([`ActivityGate::refused`]); empty ends it.
+    /// Returns the quiet that ended (None: none did).
+    pub fn set_quiet(&self, holder:&str)->Option<QuietEnded> {
+        let os=self.os.lock().unwrap();
+        let ended={
+            let mut q=self.quiet.lock().unwrap();
+            if q.holder==holder { return None; }
+            let was=std::mem::replace(&mut *q, Quiet { holder:holder.to_string(), ..Quiet::default() });
+            (!was.holder.is_empty()).then_some(QuietEnded { holder:was.holder, refused:was.refused, said:was.said })
+        };
+        self.publish(combine(os.0,self.mode(),self.gaming(),self.stopping.load(Ordering::SeqCst),!holder.is_empty()),os.1,os.2);
+        ended
+    }
+    /// Who holds the machine quiet now (empty: nobody).
+    pub fn quiet_holder(&self)->String { self.quiet.lock().unwrap().holder.clone() }
+    fn quieted(&self)->bool { !self.quiet.lock().unwrap().holder.is_empty() }
+    /// A request this gate turned away (`what`: the route and who asked): while a quiet holds,
+    /// counted for its end; the first of each kind is kept by name and said in the log with the
+    /// holder (a client that asks again every few seconds is one line).
+    pub fn refused(&self, what:&str) {
+        let mut q=self.quiet.lock().unwrap();
+        if q.holder.is_empty() { return; }
+        q.refused+=1;
+        if q.said.len()<QUIET_SAID && !q.said.iter().any(|s| s==what) {
+            q.said.push(what.to_string());
+            eprintln!("[local-use] refused {what}: {} holds this machine quiet", q.holder);
+        }
     }
     /// The process is about to exit (a restart): admission closes for good, running jobs see
     /// `local-use: restarting` and their clients reroute; the fleet routes elsewhere meanwhile.
@@ -239,13 +289,13 @@ impl ActivityGate {
     fn publish_os(&self,code:u64,idle:Option<u64>,gpu:Option<f64>) {
         let mut os=self.os.lock().unwrap();
         *os=(code,idle,gpu);
-        self.publish(combine(code,self.mode(),self.gaming(),self.stopping.load(Ordering::SeqCst)),idle,gpu);
+        self.publish(combine(code,self.mode(),self.gaming(),self.stopping.load(Ordering::SeqCst),self.quieted()),idle,gpu);
     }
     pub fn refusal(&self)->Option<String> {let code=self.read().0; (!permits(code,&self.config)).then(||format!("local-use: {}",reason(code).1))}
     pub fn snapshot(&self)->ActivityJson {
         let (code,age,idle,gpu)=self.read();let (state,why)=reason(code);
         ActivityJson {version:1, enabled:self.config.enabled, state:state.into(), reason:why.into(),idle_seconds:idle,
-            mode:Some(self.mode().name().into()),
+            mode:Some(self.mode().name().into()), quiet:Some(self.quiet_holder()).filter(|h| !h.is_empty()), refused:None, refused_said:None,
             foreign_gpu_percent:gpu,admission_open:permits(code,&self.config),idle_threshold_seconds:self.config.idle_seconds,
             quiet_seconds:self.config.quiet_seconds,gpu_threshold_percent:self.config.gpu_percent,sample_age_ms:age,
             probe_error:if state=="unknown" {self.probe_error.lock().ok().and_then(|e|*e).map(String::from)} else {None}}
@@ -407,6 +457,30 @@ mod tests {
         g.set_local_use(ComputeMode::AiFirst,true);assert!(g.allows_work());assert_eq!(g.snapshot().mode.as_deref(),Some("ai-first"));
         g.set_local_use(ComputeMode::Unavailable,false);assert!(!g.allows_work());
         assert_eq!(g.refusal().as_deref(),Some("local-use: operator-unavailable"));
+    }
+    #[test] fn a_timed_runs_quiet_closes_admission_in_every_mode_and_counts_what_it_refused() {
+        let g=ActivityGate::new(Config{enabled:false,supported:false,..Config::default()});
+        g.set_local_use(ComputeMode::AiFirst,false);assert!(g.allows_work());
+        // a refusal outside a quiet is no quiet's
+        g.refused("nothing");
+        let epoch=g.epoch();
+        assert_eq!(g.set_quiet("timed lease L1 of lanea"),None);
+        assert!(!g.allows_work());assert_eq!(g.refusal().as_deref(),Some("local-use: timed-lease"));
+        assert_ne!(g.epoch(),epoch,"running jobs see the close");
+        assert_eq!(g.quiet_holder(),"timed lease L1 of lanea");
+        // a WM report (a game ends, another mode) does not reopen it
+        g.set_local_use(ComputeMode::UiFirst,false);assert!(!g.allows_work());assert_eq!(g.snapshot().reason,"timed-lease");
+        for n in 0..25 { g.refused(&format!("POST /generate from client-{n}")); }
+        // one that asks again is counted, not kept twice
+        g.refused("POST /generate from client-0");
+        // the same holder again changes nothing
+        assert_eq!(g.set_quiet("timed lease L1 of lanea"),None);
+        let ended=g.set_quiet("").unwrap();
+        assert_eq!((ended.holder.as_str(),ended.refused,ended.said.len()),("timed lease L1 of lanea",26,QUIET_SAID));
+        assert_eq!(ended.said[0],"POST /generate from client-0");
+        g.retirement_finished();
+        assert!(g.allows_work());assert_eq!(g.snapshot().reason,"ui-first");
+        assert_eq!(g.set_quiet(""),None);
     }
     #[test] fn a_stopping_hub_closes_admission_whatever_the_mode() {
         let g=ActivityGate::new(Config{enabled:false,supported:false,..Config::default()});

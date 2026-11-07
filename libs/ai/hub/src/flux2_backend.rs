@@ -15,7 +15,7 @@ use makepad_ai_flux::flux2_pipeline::{
     Flux2GenerateRequest, Flux2Img2Img, Flux2KleinPipeline, FLUX2_DEV_DEFAULT_GUIDANCE,
     FLUX2_DEV_DEFAULT_SIZE, FLUX2_DEV_DEFAULT_STEPS,
 };
-use makepad_ai_flux::flux2_vae::flux2_image_from_rgb_u8;
+use makepad_ai_flux::flux2_vae::{flux2_image_from_rgb_u8, flux2_image_to_rgb_u8};
 use makepad_zune_core::options::DecoderOptions;
 use makepad_zune_png::PngDecoder;
 use std::io::BufReader;
@@ -233,7 +233,7 @@ impl ContentBackend for Flux2Backend {
                 Ok(vec![ArtifactData {
                     content_type: "image/png",
                     ext: "png",
-                    bytes: result.png,
+                    bytes: result.png().map_err(|err| AssetAiError::Backend(format!("flux2 png: {err}")))?,
                 }])
             }
             Flux2Pipeline::Dev(pipe) => {
@@ -336,7 +336,7 @@ impl ContentBackend for Flux2Backend {
                 Ok(vec![ArtifactData {
                     content_type: "image/png",
                     ext: "png",
-                    bytes: result.png,
+                    bytes: result.png().map_err(|err| AssetAiError::Backend(format!("flux2 png: {err}")))?,
                 }])
             }
         }
@@ -445,6 +445,7 @@ impl ContentBackend for Flux2Backend {
                 image: flux2_image_from_rgb_u8(&init.data, init.width as usize, init.height as usize)
                     .map_err(|err| AssetAiError::Backend(format!("flux2 live init: {err}")))?,
                 strength: config.strength.clamp(0.0, 1.0),
+                latents: None,
             }),
             _ => None,
         };
@@ -491,7 +492,7 @@ impl ContentBackend for Flux2Backend {
             }
         }
         cancel.check()?;
-        let (rgb, width, height) = crate::testpattern::decode_png_rgb8(&result.png)?;
+        let (rgb, width, height) = rgb8_of(&result.image);
         Ok(LiveFrameOut {
             image: RgbImage { width, height, data: rgb },
             aux_json: None,
@@ -499,6 +500,18 @@ impl ContentBackend for Flux2Backend {
             text_encode_ms: if embeds_cached { 0.0 } else { result.te_ms },
         })
     }
+}
+
+/// The pipeline's planar `[-1, 1]` image as interleaved RGB8, straight
+/// from the decode: no PNG between the model and the wire.
+fn rgb8_of(image: &makepad_ai_flux::flux2_vae::Flux2VaeImage) -> (Vec<u8>, u32, u32) {
+    let planar = flux2_image_to_rgb_u8(image);
+    let plane = image.width * image.height;
+    let mut rgb = Vec::with_capacity(plane * 3);
+    for i in 0..plane {
+        rgb.extend_from_slice(&[planar[i], planar[plane + i], planar[2 * plane + i]]);
+    }
+    (rgb, image.width as u32, image.height as u32)
 }
 
 /// FLUX.2 [dev] edit-mode reference-image area cap (diffusers
@@ -608,7 +621,7 @@ fn flux2_img2img_init(
     let (rgb, width, height) = fit_cover_rgb(rgb, width, height, out_w, out_h);
     let image = flux2_image_from_rgb_u8(&rgb, width, height)
         .map_err(|err| AssetAiError::Backend(format!("flux2 img2img init: {err}")))?;
-    Ok(Some(Flux2Img2Img { image, strength }))
+    Ok(Some(Flux2Img2Img { image, strength, latents: None }))
 }
 
 /// Resize so the image COVERS `dw x dh` (aspect preserved), then center-crop

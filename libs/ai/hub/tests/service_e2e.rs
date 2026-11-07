@@ -112,6 +112,52 @@ fn poll_until_terminal(provider: &LocalService, job_id: &str) -> String {
     }
 }
 
+/// A timed run on this machine (its lease hub: `"quiet"`) closes admission whatever the mode,
+/// a WM report does not reopen it, and its end says what it refused meanwhile.
+#[test]
+fn a_timed_runs_quiet_refuses_work_and_says_what_it_refused() {
+    let handle = start_service(ServiceConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        cache_dir: test_dir("quiet"),
+        registry: test_registry(),
+        downloader: Downloader::new("http://127.0.0.1:1", None).unwrap(),
+        peer: peer_off(),
+        fleet: makepad_ai_hub::discovery::DEFAULT_FLEET.to_string(),
+    })
+    .unwrap();
+    host_admits_work(&handle);
+    let shared = handle.shared.clone();
+    let provider = LocalService::new(&format!("http://{}", handle.addr));
+    std::mem::forget(handle);
+    let request = || GenerateRequestJson { model: "testpattern".to_string(), prompt: Some("a dot".to_string()), width: Some(8), height: Some(8), ..Default::default() };
+    let activity = |said: String| makepad_ai_hub::protocol::ActivityJson::deserialize_json(&said).unwrap();
+    let snap = activity(control_post(&shared, "/control/local-use", br#"{"quiet":"timed lease L1 of lanea"}"#).unwrap());
+    assert_eq!((snap.reason.as_str(), snap.admission_open, snap.quiet.as_deref()), ("timed-lease", false, Some("timed lease L1 of lanea")));
+    let err = provider.request(Domain::Image, &request()).unwrap_err();
+    assert!(format!("{err:?}").contains("local-use: timed-lease"), "{err:?}");
+    // the WM's report (another mode, no game) leaves it closed
+    control_post(&shared, "/control/local-use", br#"{"mode":"ai-first","use":""}"#).unwrap();
+    assert!(provider.request(Domain::Image, &request()).is_err());
+    let snap = activity(control_post(&shared, "/control/local-use", br#"{"quiet":""}"#).unwrap());
+    assert!(snap.quiet.is_none());
+    assert!(snap.refused.is_some_and(|n| n >= 2), "{:?}", snap.refused);
+    let said = snap.refused_said.unwrap_or_default();
+    assert!(said.len() == 1 && said[0].starts_with("POST /generate from "), "one caller and route, said once: {said:?}");
+    // open again once the models it held were let go
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let job_id = loop {
+        match provider.request(Domain::Image, &request()) {
+            Ok(id) => break id,
+            Err(e) => {
+                assert!(Instant::now() < deadline, "admission did not open again: {e:?}");
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    };
+    assert_eq!(poll_until_done(&provider, &job_id).len(), 1);
+}
+
 #[test]
 fn health_and_models() {
     let provider = start_test_service("health");

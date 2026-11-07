@@ -5357,6 +5357,24 @@ mod imp {
         is_available()
     }
 
+    /// Waits for the device sleep instead of spin (see
+    /// [`crate::driver::set_blocking_sync`]); before the first CUDA work.
+    pub fn gpu_set_blocking_sync() -> Result<(), String> {
+        crate::driver::set_blocking_sync().map_err(|error| error.to_string())
+    }
+
+    /// The device's (free, total) memory in bytes.
+    pub fn gpu_memory_info() -> Result<(usize, usize), String> {
+        crate::driver::mem_get_info().map_err(|error| error.to_string())
+    }
+
+    /// This process's GPU context destroyed, everything in it given back
+    /// (see [`crate::driver::device_reset`]): for a process whose every GPU
+    /// user has finished and whose threads with GPU state have ended.
+    pub fn gpu_device_reset() -> Result<(), String> {
+        crate::driver::device_reset().map_err(|error| error.to_string())
+    }
+
     pub fn gpu_cudnn_available() -> bool {
         crate::cudnn::available()
     }

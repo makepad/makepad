@@ -527,6 +527,22 @@ impl ProgramService {
         self.inner.sessions.lock().unwrap().get(&id).filter(|s| s.owner == owner).cloned()
     }
 
+    /// Every stream ends now, its sessions with it (a timed run holds the machine quiet: its
+    /// clients see their streams close and go to other nodes, or their own cores). Returns how
+    /// many streams there were.
+    pub fn end_all(&self) -> usize {
+        let streams: Vec<(u64, Push)> = self.inner.streams.lock().unwrap().drain().map(|(socket, (_, push))| (socket, push)).collect();
+        let ended: Vec<Arc<Served>> = self.inner.sessions.lock().unwrap().values().filter(|s| streams.iter().any(|(socket, _)| *socket == s.socket)).cloned().collect();
+        for s in ended {
+            s.session.cancel();
+        }
+        for (_, push) in &streams {
+            // (an empty frame closes the websocket)
+            let _ = push.tx.send(Vec::new());
+        }
+        streams.len()
+    }
+
     /// A stream closed: its sessions end.
     pub fn stream_closed(&self, socket: u64) {
         if self.inner.streams.lock().unwrap().remove(&socket).is_none() {
@@ -628,6 +644,18 @@ mod tests {
 
     fn words(n: usize) -> Arc<[u32]> {
         vec![7; n].into()
+    }
+
+    /// A machine held quiet ends every stream: each is closed (an empty frame) and none is left.
+    #[test]
+    fn a_quiet_ends_every_stream() {
+        let service = service();
+        let (tx, rx) = std::sync::mpsc::channel();
+        service.stream_open(9_000_001, "client-a", tx);
+        assert!(service.is_stream(9_000_001));
+        assert!(service.end_all() >= 1);
+        assert!(!service.is_stream(9_000_001));
+        assert_eq!(rx.try_recv().ok(), Some(Vec::new()), "its websocket is closed");
     }
 
     /// A slot keeps its last open's inputs: a later open names them by hash, what the slot held

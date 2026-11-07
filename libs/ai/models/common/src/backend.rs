@@ -106,7 +106,7 @@ pub use crate::gpu::{
     gpu_splat_repo3d_tables, gpu_splat_rope_pairs_per_head,
     gpu_swiglu_gate_first, gpu_swiglu_value_gate, gpu_to_f16, gpu_upload, gpu_wavenet_gate,
     gpu_quant_linear_type_supported,
-    gpu_release_cached, gpu_runtime_trim, gpu_upload_into, gpu_upload_u32, gpu_weight_cache_ensure,
+    gpu_release_cached, gpu_runtime_trim, gpu_set_blocking_sync, gpu_memory_info, gpu_device_reset, gpu_upload_into, gpu_upload_u32, gpu_weight_cache_ensure,
     gpu_weight_cache_ensure_quant, gpu_weight_cache_ensure_bf16_keyed,
     gpu_weight_cache_evict_prefix, gpu_weight_cache_evict_prefix_if_loaded,
     gpu_weight_cache_protect_prefixes,
