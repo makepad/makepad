@@ -254,6 +254,8 @@ pub struct Fleet {
     pub inbox_list: Vec<InboxEntry>,
     /// the job whose detail is open, with its output's tail
     pub detail: Option<JobDetail>,
+    /// the apps shown on the person's devices (`devhub shows`): the running ones and the recent
+    pub shows: Vec<makepad_devhub::state::Show>,
     /// since when each node has said it self-updates (seen by this panel)
     pub updating_since: HashMap<String, u64>,
     /// when the panel last found its master again after losing it (a master restart)
@@ -373,6 +375,7 @@ pub struct Merge {
 /// The master's other services, as they last answered.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Side {
+    pub shows: Vec<makepad_devhub::state::Show>,
     pub land: Vec<LandEntry>,
     pub buckets: Vec<Bucket>,
     pub inbox: Option<InboxCounts>,
@@ -391,6 +394,7 @@ impl Side {
         f.jobs = self.jobs.clone();
         f.lanes = self.lanes.clone();
         f.detail = self.detail.clone();
+        f.shows = self.shows.clone();
     }
 }
 

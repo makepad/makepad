@@ -21,11 +21,14 @@ const AAC_RATES: [u32; 2] = [44_100, 48_000];
 /// Videos kept in the cache (the newest).
 const CACHE_KEEP: usize = 12;
 
-/// What a video is drawn with, taken from the UI when the drag starts.
-#[derive(Clone, Debug, Default)]
+/// What a video is drawn with, taken from the UI when the drag starts, and where the made ones
+/// are kept: [`cache_dir`] in the app, a test's own folder in a test (a shared one served a
+/// second run from the first's videos).
+#[derive(Clone, Debug)]
 pub struct Kit {
     pub fonts: Fonts,
     pub look: Look,
+    pub cache: PathBuf,
 }
 
 /// How a video was made: the timings the report and the tests read.
@@ -56,7 +59,7 @@ pub fn write_song_video(src: &Path, dest: &Path, name: &str, kit: &Kit) -> Resul
     kit.look.hash(&mut hasher);
     kit.fonts.hash(&mut hasher);
     lyric_video::STYLE_VERSION.hash(&mut hasher);
-    let dir = cache_dir();
+    let dir = &kit.cache;
     let cached = dir.join(format!("{:016x}.mp4", hasher.finish()));
     if cached.is_file() && hand_over(&cached, dest).is_ok() {
         return Ok(Made { cached: true, total_ms: ms(started), ..Made::default() });
@@ -68,7 +71,7 @@ pub fn write_song_video(src: &Path, dest: &Path, name: &str, kit: &Kit) -> Resul
     let (rate, channels, pcm) = aac_ready(audio.rate, audio.channels, &audio.pcm_interleaved_f32)?;
     drop(audio);
     let decode_ms = ms(started);
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::create_dir_all(dir);
     static PARTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let part = cached.with_extension(format!("{}-{}.part", std::process::id(), PARTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     let mut made = write_video(&part, rate, channels, &pcm, &song, kit)?;
@@ -78,7 +81,7 @@ pub fn write_song_video(src: &Path, dest: &Path, name: &str, kit: &Kit) -> Resul
         let _ = std::fs::remove_file(&part);
         write_video(dest, rate, channels, &pcm, &song, kit)?;
     }
-    prune(&dir);
+    prune(dir);
     made.total_ms = ms(started);
     Ok(made)
 }

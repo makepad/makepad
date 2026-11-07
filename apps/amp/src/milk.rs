@@ -12,12 +12,16 @@
 //! while sound arrives on a visible view. Silence, a paused player, the
 //! equalizer off or another page freeze the last frame. The next worker
 //! message (a playback poll, a local file starting) looks again.
+//!
+//! The view follows the music's beat (`makepad-beat`, inside the view's
+//! analyzer): the automatic change waits for a bar line, and a lamp by the
+//! preset's name flashes on the beats, brighter on the one.
 
 use crate::layout::{self, HwStageWidgetRefExt};
 use crate::model::Page;
 use crate::worker::Setting;
 use crate::App;
-use makepad_milkdrop::{MilkdropBrowserAction, MilkdropBrowserWidgetRefExt, MilkdropViewWidgetRefExt, PresetPick};
+use makepad_milkdrop::{AutoChange, BeatFrame, MilkdropBrowserAction, MilkdropBrowserWidgetRefExt, MilkdropViewWidgetRefExt, PresetPick};
 use makepad_widgets::*;
 
 /// Samples arrive and the view animates for this long after the last
@@ -134,8 +138,11 @@ pub struct Milk {
     written: u64,
     /// When sound last arrived, in app seconds.
     fresh_at: Option<f64>,
-    /// When the current preset was loaded, for the automatic change.
-    loaded_at: f64,
+    /// The automatic change: counts from the current preset's load and
+    /// waits for a bar line.
+    auto: AutoChange,
+    /// The beat lamps' light as last set.
+    lamp: f64,
     /// Samples read this frame.
     buffer: Vec<f32>,
     frame: NextFrame,
@@ -184,19 +191,38 @@ impl App {
             self.milk.playing = sounding;
             view.set_playing(cx, sounding);
         }
+        let beat = if sounding { view.beat() } else { BeatFrame::default() };
+        self.milk_beat_lamps(cx, &beat);
         if sounding {
-            self.milk_auto_change(cx, now);
+            self.milk_auto_change(cx, now, &beat);
             self.milk.frame = cx.new_next_frame();
         }
     }
 
-    /// Change preset when the automatic change is due.
-    fn milk_auto_change(&mut self, cx: &mut Cx, now: f64) {
+    /// Change preset when the automatic change is due: its time is up and
+    /// a bar starts (or the music has no beat to wait for).
+    fn milk_auto_change(&mut self, cx: &mut Cx, now: f64, beat: &BeatFrame) {
         let secs = AUTO_CHOICES[self.milk.settings.auto];
-        if secs == 0 || self.milk.settings.locked || !self.milk.loaded || now - self.milk.loaded_at < secs as f64 {
+        let due = self.milk.auto.due(now, secs as f64, beat);
+        if !due || self.milk.settings.locked || !self.milk.loaded {
             return;
         }
         self.visual_random(cx);
+    }
+
+    /// The beat lamps by the preset's name (the wing's and the deck's): a
+    /// flash on every beat the view follows, a brighter one on the bar's
+    /// first, dark while it follows none. Stepped, so a lamp redraws only
+    /// when its light shows a change.
+    fn milk_beat_lamps(&mut self, cx: &mut Cx, beat: &BeatFrame) {
+        let lit = ((0.55 * beat.beat_pulse).max(beat.bar_pulse) as f64 * 16.0).round() / 16.0;
+        if lit == self.milk.lamp {
+            return;
+        }
+        self.milk.lamp = lit;
+        for id in [ids!(milk_beat_lamp), ids!(deck_beat_lamp)] {
+            self.ui.relief_view(cx, id).set_lit(cx, lit);
+        }
     }
 
     /// No pack on disk: the built-in presets are the list.
@@ -237,7 +263,7 @@ impl App {
         let Some((name, source)) = BUILTIN.get(at) else { return };
         self.milk.builtin = Some(at);
         self.milk.loaded = true;
-        self.milk.loaded_at = cx.seconds_since_app_start();
+        self.milk.auto.restart(cx.seconds_since_app_start());
         self.ui.milkdrop_view(cx, ids!(milk)).load_preset_source(cx, name, source);
         self.set_label(cx, live_id!(milk_now), ids!(milk_now), name);
         self.update_milk(cx);
@@ -249,7 +275,7 @@ impl App {
         let Some(pick) = pick else { return };
         self.milk.builtin = None;
         self.milk.loaded = true;
-        self.milk.loaded_at = cx.seconds_since_app_start();
+        self.milk.auto.restart(cx.seconds_since_app_start());
         self.ui.milkdrop_view(cx, ids!(milk)).load_preset(cx, &pick.path);
         self.set_label(cx, live_id!(milk_now), ids!(milk_now), &pick.line());
         self.update_milk(cx);
@@ -466,7 +492,7 @@ impl App {
         }
         if let Some(at) = self.ui.drop_down(cx, ids!(milk_auto)).selected(actions) {
             self.milk.settings.auto = at.min(AUTO_CHOICES.len() - 1);
-            self.milk.loaded_at = cx.seconds_since_app_start();
+            self.milk.auto.restart(cx.seconds_since_app_start());
             changed = true;
         }
         if changed {

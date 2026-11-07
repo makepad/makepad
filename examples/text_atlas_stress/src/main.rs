@@ -15,12 +15,14 @@
 //! HAL font service a kept run kept the placeholders of glyphs that were still
 //! on their way when it was shaped, so Sandbox's HUD drew 'STRIKE' as 'STR  E').
 //!
-//! `churn` (button) animates for `CHURN_FRAMES` frames in its own draw list
+//! `churn` (button) animates in its own draw list
 //! while the `still` row (the code face, which nothing else on the page uses)
 //! sits in another list that is never redrawn: first
 //! `QUIET_FRAMES` frames of glyphs it already has (no glyph requests, so nothing
 //! redraws the still row: past the glyph client's 600-frame idle sweep), then
-//! fresh glyph/size pairs every frame (with a small `MAKEPAD_TEXT_ATLAS_SIZE`
+//! fresh glyph/size pairs every frame, at least `FRESH_FRAMES` of them and until
+//! `churn` is pressed again (a test samples what frames it needs, however slow
+//! its box, then presses it) (with a small `MAKEPAD_TEXT_ATLAS_SIZE`
 //! the host evicts and reuses slots). No frame may show a churn cell blank,
 //! and the still row must not change (2026-10-13, Stage's code pane beside an
 //! animated slide: the pane's glyphs were released as idle, their slots given
@@ -330,10 +332,11 @@ impl Widget for KeptRun {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 }
 
-/// Frames the churn runs: past the glyph client's 600-frame idle sweep.
-const CHURN_FRAMES: u64 = 1000;
-/// Churn frames that draw only glyphs already held (no requests).
+/// Churn frames that draw only glyphs already held (no requests): past the glyph client's
+/// 600-frame idle sweep.
 const QUIET_FRAMES: u64 = 760;
+/// Fresh churn frames at least, before a second press ends the churn.
+const FRESH_FRAMES: u64 = 240;
 /// Cells per churn frame, `CHURN_CELL` points apart.
 pub const CHURN_CELLS: usize = 8;
 pub const CHURN_CELL: f64 = 64.0;
@@ -350,6 +353,8 @@ fn churn_char(i: usize) -> char {
 #[derive(Clone, Debug, Default)]
 pub enum ChurnAction {
     Frame(u64),
+    /// Its last frame drawn.
+    Done,
     #[default]
     None,
 }
@@ -368,6 +373,8 @@ pub struct Churn {
     #[rust] area: Area,
     #[rust] frame: u64,
     #[rust] active: bool,
+    /// Pressed again: it ends once it has drawn its fresh frames.
+    #[rust] stop: bool,
     #[rust] next_frame: NextFrame,
 }
 
@@ -411,10 +418,11 @@ impl Widget for Churn {
             }
             if self.active {
                 cx.widget_action(self.widget_uid(), ChurnAction::Frame(self.frame));
-                if self.frame < CHURN_FRAMES {
+                if self.frame < QUIET_FRAMES + FRESH_FRAMES || !self.stop {
                     self.next_frame = cx.new_next_frame();
                 } else {
                     self.active = false;
+                    cx.widget_action(self.widget_uid(), ChurnAction::Done);
                 }
             }
         }
@@ -477,25 +485,26 @@ impl MatchEvent for App {
             }
         }
         for action in actions {
-            if let ChurnAction::Frame(frame) = action.as_widget_action().cast::<ChurnAction>() {
-                // the status changes only at the switch to fresh glyphs and at the end: a
-                // label change redraws the window's main list, the still row must stay idle
-                let text = if frame >= CHURN_FRAMES {
-                    format!("churn done blank_frames={}", cx.blank_glyph_frames())
-                } else if frame == QUIET_FRAMES + 1 {
-                    "churn fresh".to_string()
-                } else {
-                    continue;
-                };
-                log!("atlas-stress: {text}");
-                self.ui.label(cx, ids!(churn_status)).set_text(cx, &text);
-            }
+            // the status changes only at the switch to fresh glyphs and at the end: a label
+            // change redraws the window's main list, the still row must stay idle
+            let text = match action.as_widget_action().cast::<ChurnAction>() {
+                ChurnAction::Frame(frame) if frame == QUIET_FRAMES + 1 => "churn fresh".to_string(),
+                ChurnAction::Done => format!("churn done blank_frames={}", cx.blank_glyph_frames()),
+                _ => continue,
+            };
+            log!("atlas-stress: {text}");
+            self.ui.label(cx, ids!(churn_status)).set_text(cx, &text);
         }
         if self.ui.button(cx, ids!(churn)).clicked(actions) {
             if let Some(mut churn) = self.ui.widget(cx, ids!(churn_row)).borrow_mut::<Churn>() {
-                churn.active = true;
-                churn.frame = 0;
-                churn.area.redraw(cx);
+                if churn.active {
+                    churn.stop = true;
+                } else {
+                    churn.active = true;
+                    churn.stop = false;
+                    churn.frame = 0;
+                    churn.area.redraw(cx);
+                }
             }
         }
         if self.ui.button(cx, ids!(stress)).clicked(actions) {

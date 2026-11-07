@@ -400,12 +400,15 @@ script_mod! {
                                             flow: Down
                                             spacing: 10
                                             align: Align{y: 0.5}
-                                            // The picture's name, whole, in a window of its own.
+                                            // The picture's name, whole, in a window of its own,
+                                            // under the lamp that flashes on the music's beats.
                                             milk_now_window := mod.widgets.HwLabelWindow{
                                                 height: Fit
                                                 flow: Down
+                                                spacing: 6
                                                 align: Align{x: 0.5 y: 0.5}
                                                 padding: Inset{left: 10 right: 10 top: 9 bottom: 9}
+                                                milk_beat_lamp := mod.widgets.HwLed{width: 14 height: 14 inset: 3}
                                                 milk_now := mod.widgets.HwDisplayText{width: Fill align: Align{x: 0.5} max_lines: 3 text_overflow: TextOverflow.Ellipsis text: "Visualizer" draw_text +: {text_style: theme.font_regular{font_size: 10.5}}}
                                             }
                                             ornament := mod.widgets.HwOrnament{}
@@ -772,9 +775,14 @@ script_mod! {
                                     deck_auto_icon_cap := mod.widgets.HwKey{visible: false width: 42 height: 34 inset: 3 draw_bg +: {role: 50.0} deck_auto_icon := mod.widgets.HwKeyButton{text: "\u{f017}"}}
                                     // A narrow deck: the rest of its keys in one menu.
                                     deck_more_cap := mod.widgets.HwKey{visible: false width: 42 height: 34 inset: 3 draw_bg +: {role: 51.0} deck_more := mod.widgets.HwKeyButton{text: "\u{f141}"}}
+                                    // The preset's name, after the lamp that flashes on
+                                    // the music's beats.
                                     deck_name_window := mod.widgets.HwLabelWindow{
                                         width: Fill
                                         height: 30
+                                        flow: Right
+                                        spacing: 7
+                                        deck_beat_lamp := mod.widgets.HwLed{width: 14 height: 14 inset: 3}
                                         deck_name := mod.widgets.HwMarquee{speed: 18.0}
                                     }
                                     deck_presets_cap := mod.widgets.HwKey{width: Fit height: 34 inset: 3 draw_bg +: {has_led: 1.0 critical: 1.0 role: 16.0} deck_presets := mod.widgets.HwKeyText{text: "PRESETS" width: Fit padding: Inset{left: 16 right: 11} draw_text +: {text_style: theme.font_bold{font_size: 9.5}}}}

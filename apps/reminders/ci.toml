@@ -2,10 +2,10 @@
 
 [app.linux]
 capture = ""
-date = "2026-11-05"
-digest = "c0e8d5097e863dde41d59742552ba59ec5969ef8d48cc9c3455fcb33f439e795"
-main = "71832f8fa1c5a3f6f589b89749c6a99c189e3e8e"
-work = "5300f14ac2c7b3d5aa16bd89d98d789111fbbeb8"
+date = "2026-11-07"
+digest = "cc169bb8ee50f3f152cd6e37ac8bbf4db38d80a953165b58b7cd8281e72f7f97"
+main = "4f8bf6f5c74eec138e10a4c72c10c8579cc3e40c"
+work = "f846b2047215349aa13ba2a265f13f3305635e8f"
 
 [app.windows]
 capture = ""

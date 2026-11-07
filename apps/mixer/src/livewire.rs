@@ -70,6 +70,41 @@ fn drain_until<F: FnMut(&Evt) -> bool>(
     got
 }
 
+/// Drains the client's events until `pred` holds, through at most `reports` of the session's
+/// health reports: it reports at most once a pass and goes on with its work between, so the
+/// bound is one in the session's own progress, which a loaded box does not shorten. Fails with
+/// `what` past it.
+fn drain_reports<F: FnMut(&Evt) -> bool>(
+    client: &Client,
+    reports: usize,
+    what: &str,
+    mut pred: F,
+) -> Vec<Evt> {
+    let mut got = Vec::new();
+    let mut seen = 0;
+    loop {
+        let e = client.evt_rx.recv().expect("the session thread ended");
+        let done = pred(&e);
+        seen += matches!(e, Evt::Health { .. }) as usize;
+        got.push(e);
+        if done {
+            return got;
+        }
+        assert!(seen <= reports, "{what} (through {seen} health reports)");
+    }
+}
+
+/// Drains until the fake has answered the sweep's last GET: it takes them in order, so it has
+/// taken the whole sweep. The session sends a batch of the sweep between any two of its reports,
+/// so the sweep ends within as many reports as it has GETs.
+fn drain_sweep(client: &Client) -> Vec<Evt> {
+    let sweep = Param::surface_sweep();
+    let last = *sweep.last().unwrap();
+    drain_reports(client, sweep.len(), "the fake never answered the sweep's last GET", |e| {
+        matches!(e, Evt::Param(p, _) if *p == last)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // The deny list, exercised at the socket boundary.
 // ---------------------------------------------------------------------------
@@ -433,11 +468,18 @@ fn stage1_session_wire_is_reads_and_subscribes_only() {
     let fake = FakeMixer::spawn(FakeConfig { animate: true, ..Default::default() }).unwrap();
     let client = Client::start_jailed(Arc::new(|| {})).unwrap();
     client.cmd(Cmd::Connect { addr: fake.addr });
-    wait_ms(1200);
+    drain_sweep(&client);
     client.cmd(Cmd::Set(Param::LrMixFader, PVal::F(0.9))); // must be dropped
     client.cmd(Cmd::Set(Param::ChMixOn(Ch::new(1).unwrap()), PVal::I(0)));
-    wait_ms(400);
-    let rx = fake.received.lock().unwrap();
+    // the session takes its commands at the top of each pass: each Set is dropped with its note
+    // before the session's next report but one
+    let mut dropped = 0;
+    drain_reports(&client, 2, "the Sets were not dropped with a note", |e| {
+        dropped += matches!(e, Evt::Note(n) if n.starts_with("view-only mode")) as usize;
+        dropped == 2
+    });
+    // a copy: a failed assert must not poison the lock the fake still takes
+    let rx = fake.received.lock().unwrap().clone();
     assert!(rx.len() > 700, "sweep ran");
     for m in rx.iter() {
         assert!(
@@ -461,10 +503,8 @@ fn hostile_mixer_input_never_causes_a_transmission() {
     let fake = FakeMixer::spawn(FakeConfig { animate: false, ..Default::default() }).unwrap();
     let client = Client::start_jailed(Arc::new(|| {})).unwrap();
     client.cmd(Cmd::Connect { addr: fake.addr });
-    // wait until the initial GET sweep has fully drained
-    drain_until(&client, Duration::from_secs(10), |e| {
-        matches!(e, Evt::Health { sweep_left: 0, .. })
-    });
+    // wait until the fake has taken the whole initial GET sweep
+    drain_sweep(&client);
     wait_ms(200);
     let baseline = fake.received_count();
 

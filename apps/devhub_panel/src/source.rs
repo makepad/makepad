@@ -11,7 +11,8 @@
 //!   `job output <id> -16384` every 5 s (its log's last 16 KB, the most the pane shows);
 //! - the landing train every 5 s (all of it once per connection, then what is open or recent);
 //! - the inbox counts every 10 s and its unseen entries every 15 s;
-//! - the bucket ledger every 30 s and the lanes' branches every 60 s.
+//! - the bucket ledger every 30 s and the lanes' branches every 60 s;
+//! - the shows (`show list`) every 5 s: a held one's row says why it stays at its pair.
 //!
 //! A lost master (its restart) is redialled every 2 s, and the panel's header says so meanwhile.
 //! The UI gets a new fleet only when something it shows changed (not the clock, not a holder's
@@ -324,6 +325,7 @@ fn session(m: &mut Merge, side: &mut Side, ask: &Ask, reconnected_ms: &mut Optio
     let job = open("job")?;
     let lanes = open("lanes")?;
     let bucket = open("bucket")?;
+    let show = open("show")?;
     if was_lost {
         *reconnected_ms = Some(wall_ms());
     }
@@ -368,6 +370,11 @@ fn session(m: &mut Merge, side: &mut Side, ask: &Ask, reconnected_ms: &mut Optio
         }
         if let Some(l) = lanes.as_ref().filter(|_| n % 60 == 0) {
             side.lanes = l.ask("lanes list").map_err(lost)?.iter().filter_map(|l| LaneBrief::parse(l)).collect();
+        }
+        if let Some(s) = show.as_ref().filter(|_| n % 5 == 0) {
+            let lines = s.ask("show list").map_err(lost)?;
+            let list = lines.first().and_then(|l| makepad_strict_json::parse_depth(l.as_bytes(), 16).ok());
+            side.shows = list.as_ref().and_then(|v| v.as_arr()).unwrap_or(&[]).iter().map(makepad_devhub::state::show_from).collect();
         }
         if let Some(b) = bucket.as_ref().filter(|_| n % 30 == 0) {
             let mut v: Vec<Bucket> = b.ask("status").map_err(lost)?.iter().filter_map(|l| Bucket::parse(l)).collect();

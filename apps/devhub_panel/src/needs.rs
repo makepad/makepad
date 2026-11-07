@@ -43,6 +43,8 @@ pub enum What {
     Landing,
     Quiet,
     Inbox,
+    Held,
+    Restart,
 }
 
 impl What {
@@ -59,6 +61,8 @@ impl What {
             What::Landing => "LANDING",
             What::Quiet => "QUIET",
             What::Inbox => "INBOX",
+            What::Held => "HELD",
+            What::Restart => "RESTART",
         }
     }
 }
@@ -221,6 +225,22 @@ pub fn needs(f: &Fleet) -> Vec<Need> {
         n.act = vec![format!("{DH} lane list"), format!("{DH} land status {}", l.branch)];
         v.push(n);
     }
+    // a show held at its pair while the checkout's tip is not proven for its app: its row says
+    // why, once, and goes when it takes the tip (never a popup)
+    for x in f.shows.iter().filter(|x| x.active() && !x.held.is_empty()) {
+        let app = x.app.strip_prefix("makepad-app-").or_else(|| x.app.strip_prefix("makepad-")).unwrap_or(&x.app);
+        let mut n = need(Sev::Info, What::Held, format!("show {app} on {}", x.device), x.held.clone(), 0);
+        n.act = vec![format!("{DH} shows")];
+        v.push(n);
+    }
+    // a show whose JIT holds landed edits for the person's restart (devhub never restarts it):
+    // its row says since which sha and what waits, once
+    for x in f.shows.iter().filter(|x| x.active() && !x.restart.is_empty()) {
+        let app = x.app.strip_prefix("makepad-app-").or_else(|| x.app.strip_prefix("makepad-")).unwrap_or(&x.app);
+        let mut n = need(Sev::Info, What::Restart, format!("show {app} on {}", x.device), x.restart.clone(), 0);
+        n.act = vec![format!("{DH} shows")];
+        v.push(n);
+    }
     // the inbox's recent errors and warnings that name nothing above
     let named: Vec<String> = v.iter().filter_map(|n| n.lease.clone()).collect();
     for e in f.inbox_list.iter().filter(|e| now.saturating_sub(e.last_ms) <= INBOX_RECENT_MS) {
@@ -264,5 +284,29 @@ mod tests {
         assert!(v.iter().all(|n| !n.act.is_empty() && n.act.iter().all(|a| a.starts_with(DH))), "each says what to run");
         let stalled = v.iter().find(|n| n.what == What::Stalled).unwrap();
         assert!(stalled.lease.as_deref().and_then(|l| f.row(l)).is_some_and(|r| r.ended_ms.is_none()), "a stall names its running lease");
+    }
+
+    /// A show held at its pair says why in its row, a quiet one; one that took the tip or ended says nothing.
+    #[test]
+    fn a_held_show_says_why_in_its_row() {
+        use makepad_devhub::state::Show;
+        let held = "held at aaaaaaaaaa,ffffffffff: tip bbbbbbbbbb,ffffffffff waits for the fast bucket (its run of it since 22:10)";
+        let show = |id: &str, app: &str, state: &str, held: &str| Show { id: id.into(), app: app.into(), device: "mac".into(), state: state.into(), held: held.into(), ..Default::default() };
+        let f = Fleet { shows: vec![show("V1", "makepad-app-synth", "running", held), show("V2", "makepad-app-notes", "running", ""), show("V3", "makepad-app-paint", "closed", held)], ..Default::default() };
+        let v: Vec<Need> = needs(&f).into_iter().filter(|n| n.what == What::Held).collect();
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!((v[0].sev, v[0].title.as_str(), v[0].detail.as_str()), (Sev::Info, "show synth on mac", held));
+    }
+
+    /// A show whose JIT holds landed edits for a restart says so in its row, a quiet one.
+    #[test]
+    fn a_show_with_a_restart_pending_says_so_in_its_row() {
+        use makepad_devhub::state::Show;
+        let restart = "restart pending since b518cd2ffb: 2 landed edits not running (first: 1 files changed: band.rs: the type alias `Found` changed)";
+        let show = |id: &str, state: &str, restart: &str| Show { id: id.into(), app: "makepad-app-synth".into(), device: "boxa".into(), state: state.into(), restart: restart.into(), ..Default::default() };
+        let f = Fleet { shows: vec![show("V1", "running", restart), show("V2", "running", ""), show("V3", "closed", restart)], ..Default::default() };
+        let v: Vec<Need> = needs(&f).into_iter().filter(|n| n.what == What::Restart).collect();
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!((v[0].sev, v[0].title.as_str(), v[0].detail.as_str()), (Sev::Info, "show synth on boxa", restart));
     }
 }

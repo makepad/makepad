@@ -67,7 +67,7 @@ fn video_kit(cx: &mut Cx, theme: &crate::Theme) -> drop_video::Kit {
         .unwrap_or_default();
     let c = |v: Vec4f| [v.x, v.y, v.z];
     let look = Look { background: c(theme.background), text: c(theme.foreground), muted: c(theme.muted), accent: c(theme.accent), caps: theme.caps };
-    drop_video::Kit { fonts, look }
+    drop_video::Kit { fonts, look, cache: drop_video::cache_dir() }
 }
 
 /// A file the in-tree decoders read (and so can turn into a video or an MP3).
@@ -201,12 +201,13 @@ mod tests {
         src
     }
 
-    /// The UI fonts from the checkout, as `video_kit` resolves them in the app, and Amp's colours.
-    fn test_kit() -> drop_video::Kit {
+    /// The UI fonts from the checkout, as `video_kit` resolves them in the app, and Amp's colours;
+    /// the videos kept in the test's own `dir`.
+    fn test_kit(dir: &Path) -> drop_video::Kit {
         use crate::lyric_video::{Fonts, Look, BOLD_FONTS, ITALIC_FONTS, REGULAR_FONTS};
         let widgets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../widgets");
         let paths = |logical: &[&str]| logical.iter().map(|l| widgets.join(l.strip_prefix("makepad_widgets/").unwrap())).collect();
-        drop_video::Kit { fonts: Fonts { bold: paths(&BOLD_FONTS), regular: paths(&REGULAR_FONTS), italic: paths(&ITALIC_FONTS) }, look: Look::default() }
+        drop_video::Kit { fonts: Fonts { bold: paths(&BOLD_FONTS), regular: paths(&REGULAR_FONTS), italic: paths(&ITALIC_FONTS) }, look: Look::default(), cache: dir.join("video-cache") }
     }
 
     /// The whole drop of a song as video: the promise's producer, the platform's completion
@@ -222,7 +223,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("receiver")).unwrap();
         let secs = 5.5;
         let src = tagged_ogg(&dir, secs);
-        let DragOutItem::Promise(promise) = item(src.to_string_lossy().into_owned(), &DropFormat::Video(test_kit())) else {
+        let DragOutItem::Promise(promise) = item(src.to_string_lossy().into_owned(), &DropFormat::Video(test_kit(&dir))) else {
             panic!("an Ogg song drops as a promise")
         };
         assert_eq!(promise.name, "Night Drive.mp4");
@@ -252,35 +253,24 @@ mod tests {
         let info = video.info().clone();
         let duration = info.duration_100ns as f64 / 1e7;
         assert_eq!((info.width, info.height), (drop_video::WIDTH, drop_video::HEIGHT));
-        // The GStreamer reader names no codec and no audio track, and its writer cannot end the
-        // movie at the audio's end (it ends a frame later): the full check is the Apple one.
-        let apple = cfg!(target_vendor = "apple");
-        if apple {
-            assert_eq!(info.video_codec, Some(makepad_video::VideoFileCodec::H264));
-            assert!(info.has_audio && info.audio_sample_rate == 44_100 && info.audio_channels == 2, "{info:?}");
-            assert!((duration - secs as f64).abs() < 0.2, "duration {duration} s, the song is {secs} s");
-        }
+        assert_eq!(info.video_codec, Some(makepad_video::VideoFileCodec::H264));
+        assert!(info.has_audio && info.audio_sample_rate == 44_100 && info.audio_channels == 2, "{info:?}");
+        assert!((duration - secs as f64).abs() < 0.2, "duration {duration} s, the song is {secs} s");
         let frame = video.next_frame().unwrap().expect("a picture");
         let rgb = frame.to_rgb8();
         let lit = rgb.chunks(3).filter(|p| p[0] > 200 && p[1] > 200 && p[2] > 200).count();
         let dark = rgb.chunks(3).filter(|p| p[0] < 80 && p[1] < 80 && p[2] < 80).count();
         assert!(lit > 2_000 && dark > rgb.len() / 3 / 2, "the card has its text on the dark ground: {lit} lit, {dark} dark");
         let (mut frames, mut energy) = (0usize, 0f64);
-        match makepad_video::VideoFileDecoder::open_audio(&path) {
-            Ok(mut audio) => {
-                while let Ok(Some(chunk)) = audio.next_audio() {
-                    frames += chunk.samples.len() / chunk.channels as usize;
-                    energy += chunk.samples.iter().map(|s| (*s as f64 / 32768.0).powi(2)).sum::<f64>();
-                }
-            }
-            Err(e) => assert!(!apple, "the sound opens: {e}"),
+        let mut audio = makepad_video::VideoFileDecoder::open_audio(&path).expect("the sound opens");
+        while let Ok(Some(chunk)) = audio.next_audio() {
+            frames += chunk.samples.len() / chunk.channels as usize;
+            energy += chunk.samples.iter().map(|s| (*s as f64 / 32768.0).powi(2)).sum::<f64>();
         }
         let audio_secs = frames as f64 / 44_100.0;
         let rms = (energy / (frames * 2).max(1) as f64).sqrt();
-        if apple || frames > 0 {
-            assert!((audio_secs - secs as f64).abs() < 0.2, "{audio_secs} s of sound");
-            assert!(rms > 0.1 && rms < 0.4, "the song's sound (sines at 0.3: rms 0.21), got {rms}");
-        }
+        assert!((audio_secs - secs as f64).abs() < 0.2, "{audio_secs} s of sound");
+        assert!(rms > 0.1 && rms < 0.4, "the song's sound (sines at 0.3: rms 0.21), got {rms}");
         eprintln!(
             "DROP-MP4: {} bytes, {duration:.3} s, video H.264 {}x{}, AAC {} Hz x{} ({audio_secs:.3} s decoded, rms {rms:.3}), made in {made_ms} ms, card {lit} lit px",
             bytes.len(), info.width, info.height, info.audio_sample_rate, info.audio_channels
@@ -308,8 +298,8 @@ mod tests {
         let m4a = dir.join("x.m4a");
         std::fs::write(&m4a, b"....ftypM4A ").unwrap();
         // no in-tree decoder: the file itself, whatever the format
-        assert!(matches!(item(m4a.to_string_lossy().into_owned(), &DropFormat::Video(test_kit())), DragOutItem::File(_)));
-        assert!(matches!(item(mp3.to_string_lossy().into_owned(), &DropFormat::Video(test_kit())), DragOutItem::Promise(_)));
+        assert!(matches!(item(m4a.to_string_lossy().into_owned(), &DropFormat::Video(test_kit(&dir))), DragOutItem::File(_)));
+        assert!(matches!(item(mp3.to_string_lossy().into_owned(), &DropFormat::Video(test_kit(&dir))), DragOutItem::Promise(_)));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -420,7 +410,7 @@ mod tests {
             ("TRANSLATION", LATIN_EN),
             ("TRANSLATION_LANGUAGE", "English"),
         ]);
-        let kit = test_kit();
+        let kit = test_kit(&dir);
         let dest = dir.join("out.mp4");
         let made = match drop_video::write_song_video(&src, &dest, "Alea Iacta Lux Est", &kit) {
             Ok(made) => made,
@@ -429,21 +419,14 @@ mod tests {
         assert!(!made.cached && made.lyric_lines == 3, "{made:?}");
         let info = makepad_video::VideoFileDecoder::open(&dest.to_string_lossy()).unwrap().info().clone();
         assert_eq!((info.width, info.height), (drop_video::WIDTH, drop_video::HEIGHT));
-        if cfg!(target_vendor = "apple") {
-            let duration = info.duration_100ns as f64 / 1e7;
-            assert!(info.has_audio && (duration - secs as f64).abs() < 0.2, "{duration} s {info:?}");
-        }
-        if !cfg!(target_vendor = "apple") {
-            // the GStreamer reader's frames are not checked here: the full check is the Apple one
-            std::fs::remove_dir_all(&dir).unwrap();
-            return;
-        }
+        let duration = info.duration_100ns as f64 / 1e7;
+        assert!(info.has_audio && (duration - secs as f64).abs() < 0.2, "{duration} s {info:?}");
         let bytes = std::fs::read(&dest).unwrap();
         let moov = bytes.windows(4).position(|w| w == b"moov").unwrap();
         let mdat = bytes.windows(4).position(|w| w == b"mdat").unwrap();
         assert!(moov < mdat, "fast start: the index before the media");
         assert_eq!(made.frames as i64, (secs as f64 * crate::lyric_video::FPS as f64).ceil() as i64, "a frame every tick");
-                let shots = frames_at(&dest, &[0.5, 1.8, 2.7, 4.2, 9.3, 11.2]);
+        let shots = frames_at(&dest, &[0.5, 1.8, 2.7, 4.2, 9.3, 11.2]);
         let [title, coming, two_lit, all_lit, gap, chorus] = [0, 1, 2, 3, 4, 5].map(|i| &shots[i].1);
         assert!(accent_px(coming) < 450, "nothing lit before it is sung (the header's mark only): {}", accent_px(coming));
         assert!(accent_px(two_lit) > accent_px(coming) + 700, "two words lit: {}", accent_px(two_lit));
@@ -476,7 +459,8 @@ mod tests {
             ("TRANSLATION".to_string(), LATIN_EN.to_string()),
         ];
         let song = Song::from_tags(&tags, "x");
-        let kit = test_kit();
+        // (the painter keeps no videos)
+        let kit = test_kit(&std::env::temp_dir().join(format!("amp-paint-{}", std::process::id())));
         let mut painter = Painter::new(&song, &kit.look, &kit.fonts);
         let mut nv12 = Vec::new();
         let started = std::time::Instant::now();

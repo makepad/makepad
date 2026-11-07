@@ -1,10 +1,9 @@
 #![cfg(not(target_arch = "wasm32"))]
 
-use makepad_ai_hub::download::Downloader;
-use makepad_ai_hub::registry::{Domain, ModelSpec, Registry};
-use makepad_ai_hub::server::{start_service, ServiceConfig, ServiceHandle};
 use makepad_flow::client::{Endpoints, FlowClient};
 use makepad_flow::host::{FlowServer, FlowServerConfig};
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -31,57 +30,44 @@ impl Drop for TempRoot {
     }
 }
 
-fn peer_off() -> makepad_ai_hub::peer_serve::PeerOptions {
-    makepad_ai_hub::peer_serve::PeerOptions {
-        serve: Some(false),
-        sources: Some(Vec::new()),
-        ..Default::default()
-    }
+/// What a hub serving `testpattern` (image) and `qwen-test` (an LLM, advertised for chat and
+/// for text) tells the fleet probe.
+const HEALTH: &str = r#"{"service":"makepad-ai-hub","version":"test","models_loaded":[]}"#;
+const MODELS: &str = r#"{"models":[
+    {"id":"testpattern","domain":"image","backend":"testpattern","available":true,"gated":false,"vram_gb":0.0,"state":"ready"},
+    {"id":"qwen-test","domain":"chat","backend":"llm","available":true,"gated":false,"vram_gb":0.0,"state":"ready"},
+    {"id":"qwen-test","domain":"text","backend":"llm","available":true,"gated":false,"vram_gb":0.0,"state":"ready"}
+]}"#;
+
+/// A hub node that answers the probe at once with [`HEALTH`] and [`MODELS`]: the probe's budget
+/// never comes into it, however loaded the box (a whole hub's answer is work a loaded box can
+/// take past the budget, and the node then reads as unhealthy). Its base url.
+fn start_node() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || answer(stream));
+        }
+    });
+    base_url
 }
 
-fn start_hub(root: &Path) -> ServiceHandle {
-    let service = start_service(ServiceConfig {
-        host: "127.0.0.1".to_string(),
-        port: 0,
-        cache_dir: root.join("hub"),
-        registry: Registry {
-            models: vec![
-                ModelSpec {
-                    id: "testpattern".to_string(),
-                    domain: Domain::Image,
-                    backend: "testpattern".to_string(),
-                    available: true,
-                    gated: false,
-                    vram_gb: Some(0.0),
-                    min_vram_gb: None,
-                    min_compute_cap: None,
-                    note: None,
-                    license: None,
-                    files: Vec::new(),
-                },
-                ModelSpec {
-                    id: "qwen-test".to_string(),
-                    domain: Domain::Text,
-                    backend: "llm".to_string(),
-                    available: true,
-                    gated: false,
-                    vram_gb: Some(0.0),
-                    min_vram_gb: None,
-                    min_compute_cap: None,
-                    note: None,
-                    license: None,
-                    files: Vec::new(),
-                },
-            ],
-        },
-        downloader: Downloader::new("http://127.0.0.1:1", None).unwrap(),
-        peer: peer_off(),
-        fleet: makepad_ai_hub::discovery::DEFAULT_FLEET.to_string(),
-    });
-    match service {
-        Ok(handle) => handle,
-        Err(error) => panic!("start test hub: {error}"),
+fn answer(mut stream: TcpStream) {
+    let (mut request, mut buf) = (Vec::new(), [0u8; 1024]);
+    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => request.extend_from_slice(&buf[..n]),
+        }
     }
+    let head = String::from_utf8_lossy(&request);
+    let (status, body) = match head.split_whitespace().nth(1) {
+        Some("/health") => ("200 OK", HEALTH),
+        Some("/models") => ("200 OK", MODELS),
+        _ => ("404 Not Found", "{}"),
+    };
+    let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
 }
 
 fn start_flow(root: &Path, fleet_hint: Vec<String>) -> FlowServer {
@@ -111,8 +97,7 @@ fn client(server: &FlowServer) -> FlowClient {
 #[test]
 fn models_lists_testpattern_and_filters_by_domain() {
     let root = TempRoot::new("live");
-    let hub = start_hub(&root.0);
-    let base_url = format!("http://{}", hub.addr);
+    let base_url = start_node();
     let server = start_flow(&root.0, vec![base_url.clone()]);
     let client = client(&server);
 
@@ -150,7 +135,6 @@ fn models_lists_testpattern_and_filters_by_domain() {
     assert!(image.models.iter().any(|model| model == "testpattern"));
 
     server.shutdown();
-    std::mem::forget(hub);
 }
 
 #[test]
