@@ -68,7 +68,7 @@ script_mod! {
                         // the headset: its state, PIN pairing, the stream's numbers and settings
                         xr_caption := XrCaptionButton{app: "xr-example" margin: Inset{right: 8}}
                         // the headset's view (never seen on the desktop)
-                        xr_demo := XrDemo{}
+                        xr_demo := mod.widgets.XrDemo{}
                     }
                 }
                 body +: {
@@ -477,7 +477,8 @@ impl Widget for XrDemo {
         if self.xr.is_none() && cx.cx.xr_display() {
             self.activate(cx.cx);
         }
-        if self.xr.is_some() {
+        // the headset's view only for its frames: a desktop frame never renders it again
+        if self.xr.is_some() && cx.cx.drawing_xr_frame() {
             if let Some(doc) = scope.data.get::<Doc>() {
                 self.draw_xr(cx, doc);
             }

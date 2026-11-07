@@ -62,6 +62,8 @@ pub const REFRESH_RATES: [u32; 4] = [72, 80, 90, 120];
 pub struct ServerStats {
     pub window: u64,
     pub fps: u32,
+    /// The headset's poses that came, and the frames the app built for them (per s).
+    pub poses_per_s: f64,
     pub built_per_s: f64,
     pub sent_mbps: f64,
     /// The rate controller's rate and the app's cap (Mbit/s).
@@ -69,6 +71,9 @@ pub struct ServerStats {
     pub cap_mbps: f64,
     /// Pose to picture built, the GPU's part (render + pack), the encode (ms).
     pub render_ms: f64,
+    /// Of the render: the pose waiting for the app to ask for it (it came while the app still
+    /// built the frame before; ms).
+    pub app_wait_ms: f64,
     pub gpu_ms: f64,
     pub encode_ms: f64,
     /// The encoded picture to written to the socket (ms).
@@ -78,17 +83,25 @@ pub struct ServerStats {
     pub trip_base_ms: f64,
     /// The app waited for the headset (too many pictures in flight), per second.
     pub waited_per_s: f64,
+    /// Pictures a frame or more later than the median, per second: on the host (its pose's
+    /// arrival to written to the socket) and on the link (its round trip over the idle link's).
+    pub host_late_per_s: f64,
+    pub link_late_per_s: f64,
 }
 
 /// The app's load while a headset streams, per second over the last few seconds: the GPU time
 /// of its passes by what they draw for (the headset's eyes, the desktop's windows, passes under
-/// no window such as the stream's picture pack) and its draws' CPU time.
+/// no window such as the stream's picture pack), its draws' CPU time, and its UI thread's whole
+/// time outside the idle wait with the frame builds and submits in it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct HostLoad {
     pub eyes_gpu_ms_s: f64,
     pub desktop_gpu_ms_s: f64,
     pub other_gpu_ms_s: f64,
     pub draw_ms_s: f64,
+    pub busy_ms_s: f64,
+    pub build_ms_s: f64,
+    pub submit_ms_s: f64,
     /// The backend reported the passes' GPU times (some backends report none).
     pub timed: bool,
 }
@@ -99,12 +112,16 @@ pub(crate) const HOST_LOAD_SECONDS: usize = 5;
 impl HostLoad {
     fn of<'a>(samples: impl Iterator<Item = &'a PassLoadSample>) -> Option<HostLoad> {
         let (mut secs, mut gpu, mut draw, mut timed, mut passes) = (0.0, [0.0f64; 3], 0.0, 0u32, 0u32);
+        let (mut busy, mut build, mut submit) = (0.0, 0.0, 0.0);
         for s in samples {
             secs += s.secs;
             for i in 0..3 {
                 gpu[i] += s.gpu_ms[i];
             }
             draw += s.draw_ms;
+            busy += s.busy_ms;
+            build += s.build_ms;
+            submit += s.submit_ms;
             passes += s.passes.iter().sum::<u32>();
             timed += s.passes.iter().sum::<u32>().saturating_sub(s.untimed);
         }
@@ -113,6 +130,9 @@ impl HostLoad {
             desktop_gpu_ms_s: gpu[PassClass::Desktop as usize] / secs,
             other_gpu_ms_s: gpu[PassClass::Offscreen as usize] / secs,
             draw_ms_s: draw / secs,
+            busy_ms_s: busy / secs,
+            build_ms_s: build / secs,
+            submit_ms_s: submit / secs,
             timed: passes > 0 && timed * 2 >= passes,
         })
     }
@@ -308,6 +328,13 @@ impl ServerShared {
                 l.flow.encoded_tiles.fetch_add(l.tiles as u64, Ordering::AcqRel);
                 false
             }
+        }
+    }
+
+    /// A pose came for the app's next frame (the stats' poses per second).
+    pub(crate) fn note_pose(&self) {
+        if let Some(l) = self.live.lock().unwrap().as_ref() {
+            l.flow.poses.fetch_add(1, Ordering::AcqRel);
         }
     }
 

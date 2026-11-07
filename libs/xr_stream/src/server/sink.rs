@@ -332,6 +332,7 @@ struct Packed {
     slot: usize,
     display_ns: u64,
     built_at: Instant,
+    asked: Option<Instant>,
     rendered: Option<RenderedPose>,
     focus_m: f32,
 }
@@ -369,6 +370,9 @@ pub struct XrPack {
     /// The next pose waits for room.
     #[rust]
     owed: bool,
+    /// When the app last asked for a pose (`hal_xr_remote_drawn`).
+    #[rust]
+    asked_at: Option<Instant>,
     /// The server's wake (its `Signal`s are this sink's).
     #[rust]
     signal: Option<SignalToUI>,
@@ -584,7 +588,7 @@ impl XrPack {
             self.chain_foveation(cx, slot, fxaa_on);
             self.slots[slot].busy.store(true, Ordering::Release);
             self.counts.packed += 1;
-            self.packed = Some(Packed { slot, display_ns, built_at: Instant::now(), rendered, focus_m });
+            self.packed = Some(Packed { slot, display_ns, built_at: Instant::now(), asked: self.asked_at, rendered, focus_m });
             if let Some(signal) = &self.signal {
                 signal.set();
             }
@@ -640,7 +644,7 @@ impl XrPack {
         self.chain_foveation_to(cx, first, fxaa_on);
         self.slots[slot].busy.store(true, Ordering::Release);
         self.counts.packed += 1;
-        self.packed = Some(Packed { slot, display_ns, built_at: Instant::now(), rendered, focus_m });
+        self.packed = Some(Packed { slot, display_ns, built_at: Instant::now(), asked: self.asked_at, rendered, focus_m });
         if let Some(signal) = &self.signal {
             signal.set();
         }
@@ -777,6 +781,7 @@ impl XrPack {
         if self.owed && self.room() {
             self.owed = false;
             self.counts.asked += 1;
+            self.asked_at = Some(Instant::now());
             makepad_widgets::makepad_platform::makepad_hal::xr_remote::hal_xr_remote_drawn();
         } else if self.owed {
             self.counts.waited += 1;
@@ -842,6 +847,7 @@ impl XrPack {
             held: Box::new(Held(busy.clone())),
             display_ns: p.display_ns,
             built_at: p.built_at,
+            asked: p.asked,
             focus_m: p.focus_m,
             rendered: p.rendered,
         };
@@ -918,7 +924,7 @@ impl Counts {
         // the host's frame by what its passes draw for, per frame packed (the last seconds)
         let per = r(self.packed).max(1.0);
         let load = match super::HostLoad::of(shared.host_load.lock().unwrap().iter()) {
-            Some(l) => format!(" · per frame: draw {:.1} ms, GPU eyes {:.1} desktop {:.1} other {:.1} ms{}", l.draw_ms_s / per, l.eyes_gpu_ms_s / per, l.desktop_gpu_ms_s / per, l.other_gpu_ms_s / per, if l.timed { "" } else { " (untimed)" }),
+            Some(l) => format!(" · per frame: UI thread {:.1} ms (draw {:.1}, build {:.1}, submit {:.1}), GPU eyes {:.1} desktop {:.1} other {:.1} ms{}", l.busy_ms_s / per, l.draw_ms_s / per, l.build_ms_s / per, l.submit_ms_s / per, l.eyes_gpu_ms_s / per, l.desktop_gpu_ms_s / per, l.other_gpu_ms_s / per, if l.timed { "" } else { " (untimed)" }),
             None => String::new(),
         };
         log!("xr serve: draws {:.0}/s · new XR frames {:.0}/s · packed {:.0}/s · handed {:.0}/s · poses asked {:.0}/s · waited for room {} · not streamed (empty) {} · desktop painted {:.1}/s · frozen {} ({:.0}/s, active={}){load}", r(self.draws), r(self.frames), r(self.packed), r(self.handed), r(self.asked), self.waited, if skipped.is_empty() { "0".to_string() } else { skipped.join(", ") }, painted as f64 / secs, self.frozen, r(self.frozen), shared.interaction.load(Ordering::Acquire));

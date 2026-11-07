@@ -35,6 +35,9 @@ pub(crate) struct Picture {
     pub held: Box<dyn Send + Sync>,
     pub display_ns: u64,
     pub built_at: Instant,
+    /// When the app last asked for a pose before it drew this one (`hal_xr_remote_drawn`): a
+    /// pose that came before waited for the app until then.
+    pub asked: Option<Instant>,
     /// What the view centres on (m), for reprojection without per-pixel depth.
     pub focus_m: f32,
     pub rendered: Option<RenderedPose>,
@@ -55,7 +58,9 @@ pub(crate) struct Flow {
     pub(crate) decoded_tiles: AtomicU64,
     /// Pictures that never reach the headset (an encode that failed): out of flight.
     pub(crate) lost: AtomicU64,
-    /// This window's (the stats line).
+    /// This window's (the stats line): the headset's poses that came for the app, the frames
+    /// it built.
+    pub(crate) poses: AtomicU64,
     pub(crate) built: AtomicU64,
     pub(crate) skipped: AtomicU64,
     /// The app asked for room and the headset had too many pictures in flight (this window).
@@ -66,6 +71,9 @@ pub(crate) struct Flow {
     /// Eye pictures the encoder dropped (it gave no access unit: VideoToolbox's real-time mode
     /// under load), this window: the headset never gets that picture whole.
     pub(crate) dropped: AtomicU64,
+    /// Per picture built this window: how long its pose waited for the app to ask for it (µs;
+    /// it came while the app still built the frame before).
+    pub(crate) app_wait_us: Mutex<Vec<u32>>,
 }
 
 impl Flow {
@@ -272,6 +280,7 @@ fn take_pose(shared: &ServerShared, poses: &Mutex<VecDeque<(u64, Arrived)>>, seq
         return true;
     }
     shared.pose_ns.store(makepad_hal::clock_ns(), Ordering::Release);
+    shared.note_pose();
     let frame = masked.as_deref().unwrap_or(frame);
     if shared.external.load(Ordering::Acquire) {
         let Some(frame) = makepad_hal::buffers::read_items::<makepad_hal::XrFrame>(frame, 1).next() else { return false };
@@ -430,7 +439,7 @@ impl Core {
         // the app's pictures: matched to their poses, fanned out to the eyes
         let (tx, rx) = sync_channel::<Picture>(4);
         {
-            let (poses, rate, ending, keyframe, log) = (poses.clone(), rate.clone(), ending.clone(), keyframe.clone(), log.clone());
+            let (poses, rate, ending, keyframe, log, flow) = (poses.clone(), rate.clone(), ending.clone(), keyframe.clone(), log.clone(), flow.clone());
             let dump = std::env::var_os("MAKEPAD_XR_REMOTE_DUMP");
             std::thread::Builder::new()
                 .name("xr-host-pictures".into())
@@ -452,6 +461,13 @@ impl Core {
                             Some(a) => (a.seq, a.eyes, p.built_at.saturating_duration_since(a.at).as_micros() as u32),
                             None => (0, [XrRenderEye::default(); 2], 0),
                         };
+                        // of the render: the pose waiting for the app to ask for it
+                        if let (Some(a), Some(asked)) = (&pose, p.asked) {
+                            let mut waits = flow.app_wait_us.lock().unwrap();
+                            if waits.len() < 4096 {
+                                waits.push(asked.saturating_duration_since(a.at).as_micros() as u32);
+                            }
+                        }
                         let (seq, eyes, render_us) = match p.rendered {
                             Some(r) => (r.seq, r.eyes, p.built_at.saturating_duration_since(r.arrived).as_micros() as u32),
                             None => (seq, eyes, render_us),

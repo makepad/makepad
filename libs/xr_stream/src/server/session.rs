@@ -474,6 +474,8 @@ pub(crate) struct PumpStats {
     pictures: u64,
     bytes: u64,
     stages_us: [Vec<u32>; 4],
+    /// Per picture: its pose's arrival to written to the socket (the stages' sum, µs).
+    desk_us: Vec<u32>,
     write_us: Vec<u32>,
     decode_us: Vec<u32>,
     /// Per tile: from its last byte written to the headset's report that it took it, less the
@@ -512,7 +514,7 @@ fn median_ms(v: &mut [u32]) -> f64 {
 
 impl PumpStats {
     pub(crate) fn new() -> Self {
-        PumpStats { at: Instant::now(), poses: 0, refused_poses: 0, pictures: 0, bytes: 0, stages_us: Default::default(), write_us: Vec::new(), decode_us: Vec::new(), trip_us: Vec::new(), unreported: Default::default(), bricks: 0, brick_bytes: 0, rate: RateWindow::new() }
+        PumpStats { at: Instant::now(), poses: 0, refused_poses: 0, pictures: 0, bytes: 0, stages_us: Default::default(), desk_us: Vec::new(), write_us: Vec::new(), decode_us: Vec::new(), trip_us: Vec::new(), unreported: Default::default(), bricks: 0, brick_bytes: 0, rate: RateWindow::new() }
     }
 
     pub(crate) fn sent(&mut self, head: &VideoHead, bytes: usize, write: Duration) {
@@ -520,6 +522,7 @@ impl PumpStats {
         if head.tile == 0 {
             self.pictures += 1;
             self.rate.pictures += 1;
+            self.desk_us.push(head.stages.iter().sum());
         }
         self.bytes += bytes as u64;
         self.rate.bytes += bytes as u64;
@@ -590,7 +593,15 @@ impl PumpStats {
         if self.bricks > 0 {
             log(&format!("xr host: room field {} bricks ({:.1} KB/s) from the headset", self.bricks, self.brick_bytes as f64 / secs / 1000.0));
         }
+        // pictures a frame or more later than the median (the ones a headset's lead misses): the
+        // host's (pose to written) and the link's (its round trip over the idle link's)
+        let period_us = 1e6 / core.fps.max(1) as f64;
+        let desk_median = median_ms(&mut self.desk_us) * 1000.0;
+        let host_late = self.desk_us.iter().filter(|d| **d as f64 > desk_median + period_us).count();
+        let trip_base_us = core.rate.base_ms() * 1000.0;
+        let link_late = self.trip_us.iter().filter(|t| **t as f64 > trip_base_us + period_us).count() / core.tiles.max(1) as usize;
         let held = core.flow.held.swap(0, Ordering::AcqRel);
+        let app_wait_ms = median_ms(&mut std::mem::take(&mut *core.flow.app_wait_us.lock().unwrap()));
         let dropped = core.flow.dropped.swap(0, Ordering::AcqRel);
         if dropped > 0 {
             log(&format!("xr host: the encoder dropped {dropped} eye pictures ({:.1}/s): those pictures never reach the headset whole", dropped as f64 / secs));
@@ -603,17 +614,21 @@ impl PumpStats {
             *stats = super::ServerStats {
                 window: stats.window + 1,
                 fps: core.fps,
+                poses_per_s: core.flow.poses.swap(0, Ordering::AcqRel) as f64 / secs,
                 built_per_s: built as f64 / secs,
                 sent_mbps: self.bytes as f64 * 8.0 / secs / 1e6,
                 rate_mbps: kbps as f64 / 1000.0,
                 cap_mbps: sh.bitrate_kbps.load(Ordering::Acquire) as f64 / 1000.0,
                 render_ms: median_ms(render),
+                app_wait_ms,
                 gpu_ms: median_ms(gpu),
                 encode_ms: median_ms(encode),
                 send_ms: median_ms(send),
                 trip_ms,
                 trip_base_ms: core.rate.base_ms(),
                 waited_per_s: held as f64 / secs,
+                host_late_per_s: host_late as f64 / secs,
+                link_late_per_s: link_late as f64 / secs,
             };
         }
         let rate = std::mem::replace(&mut self.rate, RateWindow::new());

@@ -811,6 +811,8 @@ impl Widget for XrStatsView {
 /// The stages of a picture as rows (ms per frame against the frame budget, a tick at the
 /// budget): the long pole stands out (green inside 80% of the budget, amber near it, red over).
 /// The stages run in parallel on different pictures: each has the whole budget, they do not add.
+/// Below them the motion-to-photon time as one picture lives it, stage after stage: each row
+/// starts where the one above ends, so the rows add up to the whole and nothing hides between them.
 #[derive(Script, ScriptHook, Widget)]
 pub struct XrStageBars {
     #[uid]
@@ -836,6 +838,12 @@ pub struct XrStageBars {
     bars: Vec<StageTime>,
     #[rust]
     budget_ms: f64,
+    #[rust]
+    m2p: Vec<StageTime>,
+    #[rust]
+    m2p_ms: f64,
+    #[rust]
+    lead_ms: f64,
 }
 
 /// A stage row's height, the names' column.
@@ -844,10 +852,13 @@ const STAGE_NAME_W: f64 = 84.0;
 const STAGE_VALUE_W: f64 = 48.0;
 
 impl XrStageBars {
-    fn set_bars(&mut self, cx: &mut Cx, bars: Vec<StageTime>, budget_ms: f64) {
-        if bars != self.bars || budget_ms != self.budget_ms {
+    fn set_bars(&mut self, cx: &mut Cx, bars: Vec<StageTime>, budget_ms: f64, m2p: Vec<StageTime>, m2p_ms: f64, lead_ms: f64) {
+        if bars != self.bars || budget_ms != self.budget_ms || m2p != self.m2p || m2p_ms != self.m2p_ms || lead_ms != self.lead_ms {
             self.bars = bars;
             self.budget_ms = budget_ms;
+            self.m2p = m2p;
+            self.m2p_ms = m2p_ms;
+            self.lead_ms = lead_ms;
             self.draw_bar.redraw(cx);
         }
     }
@@ -856,7 +867,9 @@ impl XrStageBars {
 impl Widget for XrStageBars {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let rows = self.bars.len();
+        let m2p_rows = if rows == 0 { 0 } else { self.m2p.len() };
         let h = if rows == 0 { 0.0 } else { (rows + 1) as f64 * STAGE_ROW_H };
+        let h = if m2p_rows == 0 { h } else { h + (m2p_rows + 1) as f64 * STAGE_ROW_H + STAGE_ROW_H * 0.5 };
         let rect = cx.walk_turtle(Walk { height: Size::Fixed(h), ..walk });
         if rows == 0 {
             return DrawStep::done();
@@ -882,6 +895,27 @@ impl Widget for XrStageBars {
             self.draw_bar.draw_abs(cx, Rect { pos: dvec2(budget_x, y + 1.0), size: dvec2(1.0, 12.0) });
             let value = if b.measured { format!("{:.1}", b.ms) } else { "-".to_string() };
             self.draw_text.draw_abs(cx, dvec2(x0 + width + 6.0, y + 1.0), &value);
+        }
+        if m2p_rows > 0 {
+            let top = rect.pos.y + (rows as f64 + 1.5) * STAGE_ROW_H;
+            let total = self.m2p_ms.max(0.1);
+            let lead = if self.lead_ms > 0.0 { format!(", poses predicted {:.0} ms ahead", self.lead_ms) } else { String::new() };
+            self.draw_text.draw_abs(cx, dvec2(rect.pos.x, top), &format!("Motion to photon {total:.0} ms, stage after stage{lead}"));
+            let mut at = 0.0;
+            for (i, b) in self.m2p.iter().enumerate() {
+                let y = top + (i + 1) as f64 * STAGE_ROW_H;
+                self.draw_text.draw_abs(cx, dvec2(rect.pos.x, y + 1.0), b.name);
+                self.draw_bar.color = self.color_track;
+                self.draw_bar.draw_abs(cx, Rect { pos: dvec2(x0, y + 3.0), size: dvec2(width, 8.0) });
+                if b.measured && b.ms > 0.0 {
+                    self.draw_bar.color = if b.ms > budget { self.color_near } else { self.color_ok };
+                    let from = x0 + width * (at / total).min(1.0);
+                    self.draw_bar.draw_abs(cx, Rect { pos: dvec2(from, y + 3.0), size: dvec2((width * b.ms / total).clamp(1.0, x0 + width - from), 8.0) });
+                    at += b.ms;
+                }
+                let value = if b.measured { format!("{:.1}", b.ms) } else { "-".to_string() };
+                self.draw_text.draw_abs(cx, dvec2(x0 + width + 6.0, y + 1.0), &value);
+            }
         }
         DrawStep::done()
     }
@@ -920,12 +954,17 @@ fn evidence(server: &XrServer) -> Option<Evidence> {
         net_ms: v(r::NET_MS),
         decode_ms: v(r::DECODE_MS),
         client_gpu_ms: v(r::CLIENT_GPU_MS),
+        m2p_ms: v(r::M2P_MS),
+        queue_ms: v(r::WAIT_MS),
+        lead_ms: v(r::LEAD_MS),
         ..Default::default()
     };
     let s = server.stats();
     if s.window > 0 {
+        e.poses_per_s = s.poses_per_s;
         e.built_per_s = s.built_per_s;
         e.render_ms = s.render_ms;
+        e.app_wait_ms = s.app_wait_ms;
         e.gpu_ms = s.gpu_ms;
         e.encode_ms = s.encode_ms;
         e.send_ms = s.send_ms;
@@ -934,12 +973,17 @@ fn evidence(server: &XrServer) -> Option<Evidence> {
         e.sent_mbps = s.sent_mbps;
         e.cap_mbps = s.cap_mbps;
         e.waited_per_s = s.waited_per_s;
+        e.host_late_per_s = s.host_late_per_s;
+        e.link_late_per_s = s.link_late_per_s;
     }
     if let Some(h) = server.host_load() {
         e.eyes_gpu_ms_s = h.eyes_gpu_ms_s;
         e.desktop_gpu_ms_s = h.desktop_gpu_ms_s;
         e.other_gpu_ms_s = h.other_gpu_ms_s;
         e.draw_ms_s = h.draw_ms_s;
+        e.busy_ms_s = h.busy_ms_s;
+        e.build_ms_s = h.build_ms_s;
+        e.submit_ms_s = h.submit_ms_s;
         e.host_timed = h.timed;
     }
     Some(e)
@@ -960,8 +1004,8 @@ fn raw_stats_text(server: &XrServer) -> String {
         lines.push(format!("uplink {:.0} poses/s ±{:.2} ms · env depth age {:.0} ms · headset GPU {:.1} of {:.1} ms, eye buffers {:.0}%", v(r::UPLINK), v(r::UPLINK_SD_MS), v(r::ENV_AGE_MS), v(r::CLIENT_GPU_MS), 1000.0 / v(r::DISPLAY).max(1.0), v(r::EYE_SCALE_PCT)));
         lines.push(format!("{} · AA {}", server.server_line(), server.aa().name));
         if let Some(h) = server.host_load() {
-            lines.push(format!("host app per s: GPU eyes {:.0} ms · desktop windows {:.0} ms · stream passes {:.0} ms{} · draws (CPU) {:.0} ms",
-                h.eyes_gpu_ms_s, h.desktop_gpu_ms_s, h.other_gpu_ms_s, if h.timed { "" } else { " (GPU times not reported)" }, h.draw_ms_s));
+            lines.push(format!("host app per s: GPU eyes {:.0} ms · desktop windows {:.0} ms · stream passes {:.0} ms{} · UI thread {:.0} ms (draws {:.0}, frame builds {:.0}, submits {:.0})",
+                h.eyes_gpu_ms_s, h.desktop_gpu_ms_s, h.other_gpu_ms_s, if h.timed { "" } else { " (GPU times not reported)" }, h.busy_ms_s, h.draw_ms_s, h.build_ms_s, h.submit_ms_s));
         }
         lines.push(if v(r::AUDIO_RECEIVED) > 0.0 {
             format!("audio {:.0} ms (net {:.1} buffer {:.0}/{:.0} device {:.0}; pictures {:.0}) · lost {:.0} · underruns {:.0} · drift {:+.0} ppm",
@@ -1496,9 +1540,9 @@ impl XrCaptionButton {
             self.content(ids!(verdict)).as_label().set_text(cx, &line);
             self.content(ids!(hint)).as_label().set_text(cx, &hint);
             let mean = self.verdict.mean();
-            let bars = if live && self.verdict.shown().is_some() { mean.stage_times() } else { Vec::new() };
+            let (bars, m2p) = if live && self.verdict.shown().is_some() { (mean.stage_times(), mean.m2p_rows()) } else { (Vec::new(), Vec::new()) };
             if let Some(mut stages) = self.content(ids!(stages)).borrow_mut::<XrStageBars>() {
-                stages.set_bars(cx, bars, mean.budget_ms());
+                stages.set_bars(cx, bars, mean.budget_ms(), m2p, mean.m2p_ms, mean.lead_ms);
             }
             let points = reports.iter().map(|rep| (report_value(rep, r::SHOWN) / report_value(rep, r::DISPLAY).max(1.0), report_value(rep, r::M2P_MS) / 150.0)).collect();
             if let Some(mut spark) = self.content(ids!(spark)).borrow_mut::<XrSparkline>() {
