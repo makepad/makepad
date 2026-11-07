@@ -543,7 +543,7 @@ impl Cx {
                 let window_id = window_id(window);
                 if self.windows.is_valid(window_id) {
                     let geom = self.windows[window_id].window_geom.clone();
-                    let state = if geom.is_fullscreen { window_state::FULLSCREEN } else { window_state::RESTORE };
+                    let state = if geom.is_fullscreen { window_state::FULLSCREEN } else if geom.is_maximized { window_state::MAXIMIZE } else { window_state::RESTORE };
                     // the layout geometry back to what the OS reported (`native_window_geom_to_layout` inverse)
                     let scale = geom.dpi_factor / self.windows[window_id].native_dpi_factor();
                     self.hal_window_geom(window_id, geom.position, geom.inner_size * scale, dpi as f64, state);
@@ -1123,6 +1123,7 @@ impl Cx {
         new_geom.dpi_factor = dpi;
         // A hosted window is fullscreen when its host window manager says so (`HostedFullscreen`).
         new_geom.is_fullscreen = state == window_state::FULLSCREEN || self.windows[window_id].hosted_fullscreen;
+        new_geom.is_maximized = state == window_state::MAXIMIZE;
         let safe = self.hal.safe_area;
         let window = &mut self.windows[window_id];
         window.os_dpi_factor = Some(dpi);

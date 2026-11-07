@@ -37,10 +37,11 @@ pub struct WindowGeom {
     pub dpi_factor: f64,
     pub can_fullscreen: bool,
     pub xr_is_presenting: bool,
-    /// Maximize-or-fullscreen, not true fullscreen: only macOS reports real
-    /// fullscreen here, Windows and X11 report maximized, Wayland reports
-    /// either. Don't hide window chrome off this without checking the platform.
+    /// Fullscreen, as the backend or the host window manager (`HostedFullscreen`)
+    /// reports it. A maximized window is `is_maximized` instead.
     pub is_fullscreen: bool,
+    /// Maximized, as the backend reports it.
+    pub is_maximized: bool,
     pub is_topmost: bool,
     pub position: Vec2d,
     pub inner_size: Vec2d,

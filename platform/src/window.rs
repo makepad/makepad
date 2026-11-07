@@ -654,7 +654,7 @@ impl WindowHandle {
     }
     /// Startup-only: seeds what `CxOsOp::CreateWindow` builds the native window from.
     ///
-    /// `is_fullscreen` is the legacy maximize-or-fullscreen flag `window_geom` reports.
+    /// `is_fullscreen` is the legacy maximize-or-fullscreen flag.
     /// x11/Wayland/Win32 create maximized for it, macOS creates fullscreen. See
     /// `WindowRef::configure_window` for the full contract.
     pub fn configure_window(
@@ -762,6 +762,10 @@ impl WindowHandle {
         cx.windows[self.window_id()].window_geom.is_fullscreen
     }
 
+    pub fn is_maximized(&self, cx: &Cx) -> bool {
+        cx.windows[self.window_id()].window_geom.is_maximized
+    }
+
     /// Whether this window is using Makepad-drawn decorations: Wayland
     /// client-side decorations, or an X11 window created after
     /// `Cx::set_linux_custom_window_chrome(true)`.
@@ -770,7 +774,7 @@ impl WindowHandle {
     }
 
     /// Whether this Wayland window is in true compositor fullscreen, as
-    /// distinct from the legacy `is_fullscreen` maximize-or-fullscreen flag.
+    /// `is_fullscreen` reports too (a maximized window is `is_maximized`).
     pub fn is_wayland_fullscreen(&self, cx: &Cx) -> bool {
         cx.windows[self.window_id()].wayland_is_fullscreen
     }
