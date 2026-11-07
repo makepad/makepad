@@ -7,6 +7,9 @@
 //!   `env NAME=value` for a setting the app reads from its environment (a printer conf name).
 //! - `<makepad home>/wm/jit.env`: `NAME=value` lines every JIT run on this machine gets (how a
 //!   node debugs its JIT apps: `MAKEPAD_RUN_VERBOSE=1`, an on-disk `TMPDIR`).
+//! - `<makepad home>/apps/local.json`: this machine's own apps, rows of the shared table's shape
+//!   (`apps.json`) for checkouts of other repositories it runs (table.rs). The WM's dock and
+//!   menus list them; `<makepad home>/wm/apps.splash` picks how each runs, as for any app.
 //!
 //! What a launcher's own environment carries from where it was started (a lane's target dir, a
 //! test's hidden or LAN-off switches, a lane's test badge) never reaches a registry launch:
@@ -31,6 +34,11 @@ pub fn makepad_home() -> PathBuf {
 /// This machine's settings file for app `id`.
 pub fn app_conf_path(id: &str) -> PathBuf {
     makepad_home().join("apps").join(format!("{id}.conf"))
+}
+
+/// This machine's own apps: rows of the shared table's shape (table.rs).
+pub fn local_apps_path() -> PathBuf {
+    makepad_home().join("apps").join("local.json")
 }
 
 /// The machine-wide environment of JIT runs.

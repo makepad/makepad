@@ -8,13 +8,17 @@
 //! ([`DrawNv12::set_planes`]: luma R8, interleaved chroma RG8 at half size, imported
 //! over the picture's memory with `Cx::import_picture_plane`), drawn the same way.
 //!
+//! A still that is drawn many times (a picture on a wall) is converted once instead
+//! ([`DrawNv12::draw_picture`]): into a texture of its own whose mip chain the GPU builds, so
+//! only the NV12 bytes are uploaded and no CPU converts or shrinks a pixel.
+//!
 //! The conversion is the frame's own colour (`VideoColor`: matrix, range,
 //! primaries, transfer; see `mod.draw.VideoColor`). Each byte is read at its
 //! texel centre and recovered exactly, the 2x2 chroma block's nearest sample
 //! is used, and an SDR frame of BT.709 primaries goes through the CPU
 //! converters' integer maths, so it is bit-exact with them at its own size.
 
-use crate::{makepad_platform::video_file::VideoColor, makepad_platform::*, shader::draw_quad::DrawQuad};
+use crate::{cx_2d::Cx2d, makepad_platform::video_file::VideoColor, makepad_platform::*, render_target::PicturePasses, shader::draw_quad::DrawQuad};
 
 script_mod! {
     use mod.pod.*
@@ -202,6 +206,24 @@ impl DrawNv12 {
         self.planar = 1.0;
         self.nv12_size = vec2(width as f32, height as f32);
         self.src = vec4(0.0, 0.0, width as f32, height as f32);
+    }
+
+    /// The frame `width` x `height` in `texture` (from `Texture::new_nv12`) in `color` made a
+    /// picture of its own: display RGB in a new texture, its mip chain built on the GPU, by a
+    /// pass `passes` lends for this frame (see [`PicturePasses`]). Sample the returned texture
+    /// like any mipped picture from this frame on; `texture` may go once this frame is drawn.
+    /// Each picture pixel is converted from its own source pixel (as the CPU converters do).
+    pub fn draw_picture(&mut self, cx: &mut Cx2d, passes: &mut PicturePasses, texture: &Texture, width: u32, height: u32, color: VideoColor) -> Texture {
+        let picture = passes.begin(cx, (width, height), "nv12 picture");
+        self.set_nv12(texture, width, height, color, None);
+        let sharp = std::mem::replace(&mut self.sharp, 2.0);
+        self.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2(width as f64, height as f64) });
+        self.sharp = sharp;
+        // the draw call holds the frame now: this shader does not keep it alive
+        self.draw_vars.empty_texture(0);
+        self.draw_vars.empty_texture(1);
+        passes.end(cx);
+        picture
     }
 
     fn set_color(&mut self, color: VideoColor) {

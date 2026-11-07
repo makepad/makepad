@@ -25,6 +25,7 @@ use crate::library::{ItemId, Library};
 use crate::pack::{pack, Packing};
 use crate::store::{self, StoreEvent, StoreHandle};
 use crate::tape::{fit_dims, Planes, FullFrame, PageGeometry, LEVELS, PYRAMID_LEVELS, SLOT};
+use makepad_video::VideoColor;
 use makepad_widgets_core::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -287,7 +288,31 @@ struct PageTex {
     bytes: usize,
 }
 
+/// A full picture made RGB on the GPU, resident once it is painted whole
+/// ([`TileGrid::land_fulls`]).
+struct FullConverting {
+    item: ItemId,
+    px: u32,
+    finest: bool,
+    tex: Texture,
+    /// Its texture's bytes: BGRA with the mip chain.
+    bytes: usize,
+}
+
+/// A full picture decoded and uploaded as it came (NV12), made RGB at the next draw
+/// ([`TileGrid::land_fulls`]).
+struct FullArrival {
+    item: ItemId,
+    px: u32,
+    finest: bool,
+    nv12: Texture,
+    width: u32,
+    height: u32,
+    color: VideoColor,
+}
+
 struct FullTex {
+    /// Display RGB with its mip chain, both made on the GPU (`DrawNv12::draw_picture`).
     tex: Texture,
     arrived: f64,
     last_used: u64,
@@ -358,6 +383,11 @@ pub struct TileGrid {
     #[redraw]
     #[live]
     draw_tile: DrawTile,
+    /// Makes arrived full pictures display RGB with their mips ([`TileGrid::land_fulls`]).
+    #[live]
+    draw_picture: DrawNv12,
+    #[rust]
+    picture_passes: PicturePasses,
     /// Library root to open at startup; empty resolves the default
     /// (`IMAGE_TILES_HOME`, else the nearest `local/image-tiles`).
     #[live]
@@ -458,6 +488,12 @@ pub struct TileGrid {
     shard_views: HashMap<i64, ShardView>,
     #[rust]
     full: HashMap<ItemId, FullTex>,
+    /// Full pictures decoded since the last draw, oldest first.
+    #[rust]
+    full_arrived: Vec<FullArrival>,
+    /// Full pictures drawn into their textures and not yet painted whole, oldest first.
+    #[rust]
+    full_converting: Vec<FullConverting>,
     #[rust]
     requested: HashSet<PageKey>,
     #[rust]
@@ -516,6 +552,8 @@ impl TileGrid {
         self.items.clear();
         self.pages.clear();
         self.full.clear();
+        self.full_arrived.clear();
+        self.full_converting.clear();
         self.shard_views.clear();
         self.requested.clear();
         self.full_requested.clear();
@@ -1106,31 +1144,43 @@ impl TileGrid {
     }
 
     fn on_full(&mut self, cx: &mut Cx, item: ItemId, px: u32, finest: bool, frame: FullFrame) {
-        let now = self.time();
         self.full_requested.remove(&item);
-        // A frame never replaces a finer one already resident: decodes come
-        // back in whatever order the pool finishes them.
-        if let Some(have) = self.full.get(&item) {
-            if have.px > px {
-                return;
+        let nv12 = Texture::new_nv12(cx, frame.width, frame.height, frame.nv12);
+        self.full_arrived.push(FullArrival { item, px, finest, nv12, width: frame.width, height: frame.height, color: frame.color });
+    }
+
+    /// The full pictures that arrived since the last draw, made display RGB with their mip
+    /// chains on the GPU (a pass each, run before this draw's pass), and those painted whole
+    /// made resident. Only their NV12 bytes went up (1.5 a pixel, against 5.3 for a BGRA mip
+    /// chain), and no CPU converted or shrank a pixel of them. A picture is drawn once it is
+    /// whole, never while its first paint waits on a pipeline.
+    fn land_fulls(&mut self, cx: &mut Cx2d) {
+        self.picture_passes.next_frame(cx);
+        for FullArrival { item, px, finest, nv12, width, height, color } in std::mem::take(&mut self.full_arrived) {
+            // A frame never replaces a finer one already resident: decodes come
+            // back in whatever order the pool finishes them.
+            if self.full.get(&item).is_some_and(|have| have.px > px) {
+                continue;
             }
+            let tex = self.draw_picture.draw_picture(cx, &mut self.picture_passes, &nv12, width, height, color);
+            let bytes = width as usize * height as usize * 4 * 4 / 3;
+            self.full_converting.push(FullConverting { item, px, finest, tex, bytes });
         }
-        // Only a picture's FIRST frame fades in; a finer one swaps in where
-        // the fade already stands, or the tile bounces sharp-soft-sharp.
-        let arrived = self.full.get(&item).map_or(now, |have| have.arrived);
-        let bytes = frame.bgra.len() * 4;
-        let tex = Texture::new_with_format(
-            cx,
-            TextureFormat::VecMipBGRAu8_32 {
-                width: frame.width as usize,
-                height: frame.height as usize,
-                data: Some(frame.bgra),
-                max_level: Some(frame.max_level),
-                wrap: TextureWrap::ClampToEdge,
-                updated: TextureUpdated::Full,
-            },
-        );
-        self.full.insert(item, FullTex { tex, arrived, last_used: self.frame, bytes, px, finest });
+        let now = self.time();
+        for converting in std::mem::take(&mut self.full_converting) {
+            if !self.picture_passes.painted(cx, &converting.tex) {
+                self.full_converting.push(converting);
+                continue;
+            }
+            let FullConverting { item, px, finest, tex, bytes } = converting;
+            if self.full.get(&item).is_some_and(|have| have.px > px) {
+                continue;
+            }
+            // Only a picture's FIRST frame fades in; a finer one swaps in where
+            // the fade already stands, or the tile bounces sharp-soft-sharp.
+            let arrived = self.full.get(&item).map_or(now, |have| have.arrived);
+            self.full.insert(item, FullTex { tex, arrived, last_used: self.frame, bytes, px, finest });
+        }
     }
 
     fn evict(&mut self) {
@@ -1254,7 +1304,9 @@ impl Widget for TileGrid {
             }
             let animating = self.pages.values().any(|p| now - p.arrived < FADE_SECS)
                 || self.full.values().any(|f| now - f.arrived < FADE_SECS);
-            if moving || animating || tweening || self.resize_settle_at.is_some() {
+            // Pictures being made on the GPU land in a draw once painted whole.
+            let converting = !self.full_converting.is_empty();
+            if moving || animating || tweening || converting || self.resize_settle_at.is_some() {
                 self.next_frame = cx.new_next_frame();
             }
             // A settle beat exists to ask for the settled camera's tiles;
@@ -1275,7 +1327,7 @@ impl Widget for TileGrid {
                 let ratio_ok = if self.pushed_all { ratio > 0.25 && ratio < 4.0 } else { ratio > 0.9 && ratio < 4.0 };
                 ratio_ok && (self.pushed_all || (d.x.abs() < view_world * 0.09 && d.y.abs() < view_world * 0.09))
             });
-            if !beat_due && !tweening && (moving || animating) && self.items.len() > UNIFORM_ONLY_MIN_TILES && within_pad {
+            if !beat_due && !tweening && !converting && (moving || animating) && self.items.len() > UNIFORM_ONLY_MIN_TILES && within_pad {
                 // Re-present the retained draw calls under fresh camera
                 // uniforms: no draw_walk, no instance re-upload.
                 let center = self.view_center();
@@ -1284,7 +1336,7 @@ impl Widget for TileGrid {
                 dv.set_uniform_on_draw_list(cx, area, id!(cam_pos), &[self.cam_pos.x as f32, self.cam_pos.y as f32]);
                 dv.set_uniform_on_draw_list(cx, area, id!(cam_scale), &[self.cam_scale as f32]);
                 dv.set_uniform_on_draw_list(cx, area, id!(view_center), &[center.x as f32, center.y as f32]);
-            } else if moving || animating || tweening || beat_due {
+            } else if moving || animating || tweening || converting || beat_due {
                 self.area.redraw(cx);
             }
         }
@@ -1352,6 +1404,7 @@ impl Widget for TileGrid {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.land_fulls(cx);
         cx.begin_turtle(walk, self.layout);
         let rect = cx.turtle().rect();
         let first = self.view_rect.size.x < 1.0 && rect.size.x >= 1.0;

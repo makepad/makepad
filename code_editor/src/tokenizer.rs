@@ -7,6 +7,21 @@ use makepad_code_language::{
     lexical_provider, provider_for_detection, Detection, LanguageId, LexContinuation, TokenRole,
 };
 
+thread_local! {
+    /// The lines this thread lexed: those a tokenizer scanned, not those its cache kept.
+    static LINES_LEXED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The lines this thread has lexed so far: a diagnostic, how a test tells tokenising from attaching what a
+/// worker tokenised (counted where a clock would vary with the box's load).
+pub fn lines_lexed() -> u64 {
+    LINES_LEXED.with(|n| n.get())
+}
+
+fn lexed_a_line() {
+    LINES_LEXED.with(|n| n.set(n.get() + 1));
+}
+
 /// One line of provider-owned continuation. Rust keeps its richer editor
 /// lexer in this slot; every other language uses `LexContinuation`.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -124,6 +139,7 @@ impl Tokenizer {
                     (state, attribute_depth) = *end_state;
                 }
                 _ => {
+                    lexed_a_line();
                     let start_state = (state, attribute_depth);
                     let mut new_tokens = Vec::new();
                     let mut cursor = Cursor::new(&text.as_lines()[line]);
@@ -194,6 +210,7 @@ impl Tokenizer {
                     state = end.clone();
                 }
                 _ => {
+                    lexed_a_line();
                     let start = state.clone();
                     let spans = provider.lex_line(&text.as_lines()[line], &mut state);
                     let mut new_tokens = Vec::new();

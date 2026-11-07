@@ -110,6 +110,13 @@ pub struct Graphemes<'a> {
     string: &'a str,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The graphemes stepped over on this thread: tests bound the work of a
+    /// text walk with it.
+    pub static GRAPHEME_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl<'a> Iterator for Graphemes<'a> {
     type Item = &'a str;
 
@@ -117,6 +124,8 @@ impl<'a> Iterator for Graphemes<'a> {
         if self.string.is_empty() {
             return None;
         }
+        #[cfg(test)]
+        GRAPHEME_STEPS.with(|steps| steps.set(steps.get() + 1));
         let mut end = 1;
         while !self.string.is_char_boundary(end) {
             end += 1;

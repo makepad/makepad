@@ -13,7 +13,7 @@
 //!   fits, never the archival frame plus a rescale.
 //! - `tmp/` — scratch for the baker.
 
-use crate::tape::{read_frame, Planes, PYRAMID_LEVELS};
+use crate::tape::{read_full_frame, FullFrame, PYRAMID_LEVELS};
 use std::path::{Path, PathBuf};
 
 pub type ItemId = i64;
@@ -112,7 +112,7 @@ pub fn mark_no_pyramid(library: &Library, id: ItemId) {
 /// archival frame only when nothing smaller will do. The second value says
 /// whether this is as fine as it gets — a viewer that cannot tell will never
 /// ask for sharper.
-pub fn display_frame(library: &Library, item: ItemId, want_px: u32) -> Result<(Planes, bool), String> {
+pub fn display_frame(library: &Library, item: ItemId, want_px: u32) -> Result<(FullFrame, bool), String> {
     let mut pick: Option<u32> = None;
     for px in PYRAMID_LEVELS {
         if px >= want_px && library.pyramid_path(item, px).exists() {
@@ -123,9 +123,9 @@ pub fn display_frame(library: &Library, item: ItemId, want_px: u32) -> Result<(P
         Some(px) => {
             let finer = PYRAMID_LEVELS.iter().any(|p| *p > px && library.pyramid_path(item, *p).exists())
                 || library.full_path(item).exists();
-            read_frame(&library.pyramid_path(item, px)).map(|p| (p, !finer))
+            read_full_frame(&library.pyramid_path(item, px)).map(|p| (p, !finer))
         }
-        None => read_frame(&library.full_path(item)).map(|p| (p, true)),
+        None => read_full_frame(&library.full_path(item)).map(|p| (p, true)),
     }
 }
 

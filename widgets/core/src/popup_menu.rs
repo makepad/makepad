@@ -281,8 +281,9 @@ script_mod! {
 
         menu_item: mod.widgets.PopupMenuItem{}
 
-        /** The scroll area of a menu whose owner caps its height (the
-        dropdown's `popup_max_height`). A menu without a cap never draws it. */
+        /** The scroll area the items stand in. Its bar shows only when the
+        items are taller than the room the window has for the menu, or than
+        the owner's cap (the dropdown's `popup_max_height`). */
         scroll_bars: mod.widgets.ScrollBars{show_scroll_x: false show_scroll_y: true}
 
         draw_bg +: {
@@ -477,28 +478,37 @@ pub struct PopupMenu {
     /// every dropdown on the same template and only some of them have icons.
     #[rust]
     pub icon_column: bool,
-    /// The tallest the menu may be, in points; 0 is no cap, and a menu
-    /// without one draws every item exactly as it always did. Past the cap
-    /// the items scroll inside the menu. Set per open by whoever fills the
-    /// menu, alongside `icon_column`, for the same reason: one menu instance
-    /// serves every dropdown on the same template.
+    /// The tallest the menu may be, in points; 0 is no cap of the owner's
+    /// own. Either way the menu is no taller than the room the window has
+    /// for it, and past that its items scroll inside it. Set per open by
+    /// whoever fills the menu, alongside `icon_column`, for the same reason:
+    /// one menu instance serves every dropdown on the same template.
     #[rust]
     pub max_height: f64,
-    /// The scroll area a capped menu holds its items in.
+    /// The scroll area the items stand in.
     #[live]
     scroll_bars: ScrollBars,
-    /// Whether the last draw put the items in the scroll area, for the
-    /// event side.
+    /// Where this draw hangs the menu, which sets its room.
     #[rust]
-    scrolling: bool,
-    /// While a capped menu draws: where its items begin in the align list,
-    /// so the end of the draw can move them as one.
+    place: PopupMenuPlace,
+    /// The opening control's rect where the last frame settled it, which is
+    /// what this draw places the menu against (see `begin`).
+    #[rust]
+    trigger: Rect,
+    /// While the menu draws: where its items begin in the align list, so
+    /// the end of the draw can move them as one.
     #[rust]
     scroll_content_start: Option<usize>,
-    /// The item to bring into view on the next draw: the chosen one, as the
-    /// menu opens.
+    /// The item to bring into view on the next draw: the chosen one as the
+    /// menu opens, or the one the keys moved to.
     #[rust]
     reveal: Option<PopupMenuItemId>,
+    /// The next draw is the one that opens the menu.
+    #[rust]
+    opening: bool,
+    /// How many rows the menu shows at once, for a page key.
+    #[rust]
+    page_rows: usize,
     /// That item's rect this draw, from the top of the scrolled content.
     #[rust]
     reveal_rect: Option<Rect>,
@@ -514,6 +524,57 @@ pub struct PopupMenu {
 
 /// The least a menu keeps clear of the pass's edges.
 const MENU_MARGIN: f64 = 4.0;
+
+/// Where an open menu hangs off the control that opened it, which sets how
+/// much of the window it may take.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum PopupMenuPlace {
+    /// With one of its rows over the control (`end_at_item`): the menu may
+    /// take the window's whole height, and is pulled inside it.
+    #[default]
+    OnItem,
+    /// Under `anchor`, the control's rect in the pass, or over it when the
+    /// rows do not fit below and there is more room above.
+    Below { anchor: Rect },
+}
+
+impl PopupMenuPlace {
+    /// The room under and over the anchor in a pass of `pass`.
+    fn rooms(anchor: Rect, pass: Vec2d) -> (f64, f64) {
+        let below = pass.y - MENU_MARGIN - (anchor.pos.y + anchor.size.y);
+        let above = anchor.pos.y - MENU_MARGIN;
+        (below, above)
+    }
+
+    /// The tallest the menu may be in a pass of `pass`.
+    fn room(self, pass: Vec2d) -> f64 {
+        match self {
+            PopupMenuPlace::OnItem => pass.y - MENU_MARGIN * 2.0,
+            PopupMenuPlace::Below { anchor } => {
+                let (below, above) = Self::rooms(anchor, pass);
+                below.max(above)
+            }
+        }
+        .max(0.0)
+    }
+
+    /// Where a menu of `height` wants its top, given `want`, the top its
+    /// owner asked for: a menu hung below whose rows do not fit there goes
+    /// over the control instead when there is more room above.
+    fn top(self, want: f64, height: f64, pass: Vec2d) -> f64 {
+        match self {
+            PopupMenuPlace::OnItem => want,
+            PopupMenuPlace::Below { anchor } => {
+                let (below, above) = Self::rooms(anchor, pass);
+                if height > below + 0.5 && above > below {
+                    anchor.pos.y - height
+                } else {
+                    want
+                }
+            }
+        }
+    }
+}
 
 impl ScriptHook for PopupMenu {
     fn on_after_apply(
@@ -692,7 +753,17 @@ impl PopupMenu {
         &self.scroll_bars
     }
 
-    pub fn begin(&mut self, cx: &mut Cx2d) {
+    /// Start drawing the menu, hung at `place` off `trigger`, the opening
+    /// control's rect as the last frame settled it (an anchor in `place` is
+    /// taken from the same rect). Not the rect the control has in this draw:
+    /// a control is drawn before its parents align it, so inside a layout
+    /// aligned to the bottom (a panel at the foot of a window) it stands a
+    /// whole panel too high until its parents end. Placed against that, a
+    /// menu low in the window found room below that was not there, and ran
+    /// past the bottom edge once the panel came down. The menu still moves
+    /// with the control's final rect in this draw; only the room and the
+    /// fit are judged from where it settled.
+    pub fn begin(&mut self, cx: &mut Cx2d, place: PopupMenuPlace, trigger: Rect) {
         let list = cx.draw_list_stack.last().copied();
         self.semantic_token = cx.a11y.on.then(|| cx.a11y.begin_node(self.uid.0, list));
         self.draw_list.begin_popup_overlay(cx);
@@ -703,33 +774,41 @@ impl PopupMenu {
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.count = 0;
 
-        // A capped menu holds its items in a scroll area no taller than the
-        // cap, nor than the pass: a menu taller than the window would leave
-        // its last rows past an edge no scroll could bring them over.
-        self.scrolling = self.max_height > 0.0;
+        // The items stand in a scroll area no taller than the menu's room in
+        // the window, nor than the owner's cap: a menu taller than the window
+        // would leave its last rows past an edge nothing could bring them
+        // over. Rows that fit draw as they would without it, and no bar shows.
+        self.place = place;
+        self.trigger = trigger;
         self.reveal_rect = None;
-        if self.scrolling {
-            let room = self.max_height.min(size.y - MENU_MARGIN * 2.0);
-            let padding = self.layout.padding;
-            let walk = Walk::new(
-                if self.walk.width.is_fit() { Size::fit() } else { Size::fill() },
-                Size::Fit {
-                    min: None,
-                    max: Some(FitBound::Abs((room - padding.top - padding.bottom).max(0.0))),
-                },
-            );
-            let layout = Layout {
-                flow: self.layout.flow,
-                spacing: self.layout.spacing,
-                align: self.layout.align,
-                ..Layout::default()
-            };
-            self.scroll_bars.begin(cx, walk, layout);
-            self.scroll_content_start = Some(cx.align_list_len());
+        let mut room = place.room(size);
+        if self.max_height > 0.0 {
+            room = room.min(self.max_height);
         }
+        let padding = self.layout.padding;
+        let walk = Walk::new(
+            if self.walk.width.is_fit() { Size::fit() } else { Size::fill() },
+            Size::Fit {
+                min: None,
+                max: Some(FitBound::Abs((room - padding.top - padding.bottom).max(0.0))),
+            },
+        );
+        let layout = Layout {
+            flow: self.layout.flow,
+            spacing: self.layout.spacing,
+            align: self.layout.align,
+            ..Layout::default()
+        };
+        self.scroll_bars.begin(cx, walk, layout);
+        self.scroll_content_start = Some(cx.align_list_len());
     }
 
-    /// Close a capped menu's scroll area. The items were laid out at the
+    /// How many rows the menu showed at once on its last draw.
+    pub fn page_rows(&self) -> usize {
+        self.page_rows.max(1)
+    }
+
+    /// Close the menu's scroll area. The items were laid out at the
     /// offset the last draw left, before this draw's total was known; now it
     /// is, so the offset is settled here (kept inside the new total, and
     /// moved just far enough to show the item asked for, if one was) and the
@@ -760,8 +839,11 @@ impl PopupMenu {
             self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(0.0, to));
         }
         self.scroll_bars.end(cx);
+        if total > 0.0 {
+            self.page_rows = (self.count as f64 * visible / total).floor() as usize;
+        }
         // The draw after `init_select_item` is the opening one.
-        if self.reveal.is_some() {
+        if self.opening {
             self.opened_scroll = to;
         }
         was - self.opened_scroll
@@ -798,8 +880,11 @@ impl PopupMenu {
             }
             widest = widest.max(width.ceil() + item.layout.padding.width() + item.walk.margin.width());
         }
+        // The rows stand in the scroll area, whose used width counts from
+        // its own (unpadded) left edge.
         let height = cx.turtle().used_height();
-        cx.turtle_mut().set_used(widest + self.layout.padding.left, height);
+        let left = cx.turtle().padding().left;
+        cx.turtle_mut().set_used(widest + left, height);
     }
 
     pub fn end(&mut self, cx: &mut Cx2d, shift_area: Area, shift: Vec2d) {
@@ -820,6 +905,7 @@ impl PopupMenu {
         let past_opened = self.end_scroll(cx);
         self.draw_bg.end(cx);
         self.reveal = None;
+        self.opening = false;
         let shift = match item_pos {
             Some(item_pos) => shift - item_pos - dvec2(0.0, past_opened),
             None => shift,
@@ -828,16 +914,17 @@ impl PopupMenu {
         // The caller's shift is a WANT, not an answer. The turtle translates
         // the menu by trigger.pos + shift and never asks whether the result
         // is still on screen, so a dropdown low in a window opened a menu
-        // whose last rows fell past the bottom edge — not merely clipped,
-        // unreachable, since a menu without a cap has no scroll and never
-        // flips. Pull the span back inside the pass on both axes first.
+        // whose last rows fell past the bottom edge. A menu hung below its
+        // control goes over it when its rows do not fit below and there is
+        // more room above (its room was the larger of the two, so it fits
+        // there), and the span is pulled back inside the pass on both axes.
         let menu = self.draw_bg.area().rect(cx);
-        let trigger = shift_area.rect(cx);
         let pass = cx.current_pass_size();
-        let want = menu.pos + trigger.pos + shift;
+        let want = menu.pos + self.trigger.pos + shift;
+        let top = self.place.top(want.y, menu.size.y, pass);
         let placed = dvec2(
             span_inboard(want.x, menu.size.x, MENU_MARGIN, pass.x - MENU_MARGIN * 2.0),
-            span_inboard(want.y, menu.size.y, MENU_MARGIN, pass.y - MENU_MARGIN * 2.0),
+            span_inboard(top, menu.size.y, MENU_MARGIN, pass.y - MENU_MARGIN * 2.0),
         );
         let shift = shift + (placed - want);
 
@@ -929,7 +1016,7 @@ impl PopupMenu {
         // Through the widget seam, so the item counts as its own nesting level
         // and the design tweaker's plane pick lands on it.
         item.draw_all(cx, &mut Scope::empty());
-        if self.scroll_content_start.is_some() && self.reveal == Some(item_id) {
+        if self.reveal == Some(item_id) {
             let rect = item.area().rect(cx);
             let origin = cx.turtle().origin();
             self.reveal_rect = Some(Rect { pos: rect.pos - origin, size: rect.size });
@@ -946,7 +1033,16 @@ impl PopupMenu {
     pub fn init_select_item(&mut self, which_id: PopupMenuItemId) {
         self.init_select_item = Some(which_id);
         self.reveal = Some(which_id);
+        self.opening = true;
         self.first_tap = true;
+    }
+
+    /// Show `which_id` as the row the keys are on, without choosing it, and
+    /// bring it into view on the next draw. The menu stays where it opened.
+    pub fn key_to_item(&mut self, cx: &mut Cx, which_id: PopupMenuItemId) {
+        self.reveal = Some(which_id);
+        self.select_item_state(cx, which_id);
+        self.draw_list.redraw(cx);
     }
 
     fn select_item_state(&mut self, cx: &mut Cx, which_id: PopupMenuItemId) {
@@ -971,22 +1067,19 @@ impl PopupMenu {
         sweep_area: Area,
         dispatch_action: &mut dyn FnMut(&mut Cx, PopupMenuAction),
     ) {
-        if self.scrolling {
-            // The bar hit-tests with plain `hits`, which the owner's lock on
-            // `sweep_area` (held while the menu is open) turns away, so it is
-            // lifted around the bar, as a Popover lifts its own around its
-            // content. Only a lock on top is the owner's to lift; the stored
-            // handle follows the owner's area through every redraw. The bar
-            // goes first so a press on it is the bar's, not the row it lies
-            // over.
-            let lifted = cx.sweep_lock_area() == Some(sweep_area);
-            if lifted {
-                cx.sweep_unlock(sweep_area);
-            }
-            self.scroll_bars.handle_event(cx, event, &mut Scope::empty());
-            if lifted {
-                cx.sweep_lock(sweep_area);
-            }
+        // The bar hit-tests with plain `hits`, which the owner's lock on
+        // `sweep_area` (held while the menu is open) turns away, so it is
+        // lifted around the bar, as a Popover lifts its own around its
+        // content. Only a lock on top is the owner's to lift; the stored
+        // handle follows the owner's area through every redraw. The bar goes
+        // first so a press on it is the bar's, not the row it lies over.
+        let lifted = cx.sweep_lock_area() == Some(sweep_area);
+        if lifted {
+            cx.sweep_unlock(sweep_area);
+        }
+        self.scroll_bars.handle_event(cx, event, &mut Scope::empty());
+        if lifted {
+            cx.sweep_lock(sweep_area);
         }
         let mut actions = Vec::new();
         for (item_id, node) in self.menu_items.iter_mut() {

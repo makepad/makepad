@@ -4,7 +4,7 @@
 //! it), so a host never starts a binary older than its sources; an installation (no
 //! checkout) starts the built binary, building it first when allowed.
 
-use crate::{build_argv, built_binary, has_sources, run_argv, AppEntry, AppTarget, MAKEPAD_RUN};
+use crate::{build_argv_features, built_binary, has_sources, run_argv_features, AppEntry, AppTarget, MAKEPAD_RUN};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
@@ -199,7 +199,7 @@ impl AppLaunch {
     }
 
     /// The arguments of the started process: the app's (`--stdin-loop`, registry, host), or the
-    /// tool's `run <package>` with the app's after `--`.
+    /// tool's `run <package> --bin <bin>` with the app's after `--`.
     fn process_args(&self) -> Vec<String> {
         let app_args = self.app.args.iter().map(|arg| arg.to_string()).chain(self.extra.iter().cloned());
         match self.runner {
@@ -209,7 +209,9 @@ impl AppLaunch {
                 // the way a native child is, over the host's wire
                 let hosted = (!cfg!(target_os = "linux")).then(|| "--stdin-loop".to_string());
                 let app_args: Vec<String> = hosted.into_iter().chain(app_args).collect();
-                let mut args = vec!["run".to_string(), self.app.package.to_string()];
+                // the app's own binary, as a native launch's `cargo run --bin` names it (a
+                // package may hold several)
+                let mut args = vec!["run".to_string(), self.app.package.to_string(), "--bin".to_string(), self.app.bin.to_string()];
                 if !app_args.is_empty() {
                     args.push("--".to_string());
                     args.extend(app_args);
@@ -217,6 +219,12 @@ impl AppLaunch {
                 args
             }
         }
+    }
+
+    /// The cargo features its build adds: the app's own (`AppEntry::build_features`); the JIT
+    /// tool's build none.
+    fn features(&self) -> String {
+        if self.runner == Runner::Native { self.app.build_features() } else { String::new() }
     }
 
     fn command(&self) -> Result<Command, String> {
@@ -230,13 +238,13 @@ impl AppLaunch {
             (loader.clone(), self.process_args())
         } else if self.run {
             let root = self.root.as_deref().ok_or("no checkout to run from")?;
-            run_argv(&target, root, &self.process_args())
+            run_argv_features(&target, root, &self.features(), &self.process_args())
         } else if self.building {
             let root = self.root.as_deref().ok_or("no checkout to build from")?;
             if !has_sources(&target, root) {
                 return Err(format!("sources not found: {}", target.dir));
             }
-            build_argv(&target, root)
+            build_argv_features(&target, root, &self.features())
         } else if self.runner == Runner::Native {
             launch_argv(self.app, self.root.as_deref(), &self.extra)?
         } else {
@@ -435,7 +443,7 @@ mod tests {
         seen.expect("start spawned")
     }
 
-    /// Under the JIT a checkout launch is `run <package>` with the app's arguments after `--` (on
+    /// Under the JIT a checkout launch is `run <package> --bin <bin>` with the app's arguments after `--` (on
     /// Linux no `--stdin-loop`: the HAL finds the WM by its socket), given to the loader this host
     /// runs under (`MAKEPAD_RUN_LOADER`), else to `cargo run` of the makepad tool.
     #[test]
@@ -444,7 +452,7 @@ mod tests {
         let (args, kind) = started("terminal", Runner::Jit, &root);
         assert_eq!(kind, LaunchKind::Run);
         let hosted: &[&str] = if cfg!(target_os = "linux") { &[] } else { &["--stdin-loop"] };
-        let run = [&["run", "makepad-app-terminal", "--"], hosted, &["--x"]].concat();
+        let run = [&["run", "makepad-app-terminal", "--bin", "makepad-app-terminal", "--"], hosted, &["--x"]].concat();
         if std::env::var_os("MAKEPAD_RUN_LOADER").is_some_and(|l| Path::new(&l).is_file()) {
             assert_eq!(args, run);
         } else {
@@ -510,7 +518,7 @@ mod tests {
             let loader = std::env::var_os("MAKEPAD_RUN_LOADER").map(PathBuf::from).filter(|p| p.is_file());
             if let Some(loader) = loader.filter(|_| runner == Runner::Jit) {
                 assert_eq!(run.get_program(), loader.as_os_str());
-                let mut expected_args = vec!["run".to_string(), entry.package.to_string()];
+                let mut expected_args = vec!["run".to_string(), entry.package.to_string(), "--bin".to_string(), entry.bin.to_string()];
                 let mut app_args = Vec::new();
                 if !cfg!(target_os = "linux") { app_args.push("--stdin-loop".to_string()); }
                 app_args.extend(entry.args.iter().map(|arg| arg.to_string()));
@@ -519,7 +527,7 @@ mod tests {
                     expected_args.extend(app_args);
                 }
                 assert_eq!(run_args, expected_args, "{id}");
-                let (program, expected_args) = build_argv(&MAKEPAD_RUN, &root);
+                let (program, expected_args) = crate::build_argv(&MAKEPAD_RUN, &root);
                 assert_eq!(build.get_program(), program.as_os_str());
                 assert_eq!(build_args, expected_args, "{id}");
                 let mut expected = Command::new(&loader);

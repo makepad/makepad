@@ -4,7 +4,7 @@ use {
         inlays::{BlockInlay, InlineInlay},
         selection::Affinity,
         session::SessionLayout,
-        str::StrExt,
+        str::{Graphemes, StrExt},
         text::{Position, Text},
         widgets::{BlockWidget, InlineWidget},
         wrap::WrapData,
@@ -354,6 +354,24 @@ impl<'a> Line<'a> {
         panic!()
     }
 
+    /// The grid position of every grapheme start of the line and then of its
+    /// end, in byte order, from one pass over the line: `(byte_index,
+    /// row_index, column_index)`, each what `logical_to_grid_position(byte_index,
+    /// Affinity::After)` gives. A lookup per grapheme walks the line from its
+    /// start each time, which is quadratic in the line length.
+    pub fn grid_positions(&self) -> GridPositions<'a> {
+        GridPositions {
+            elements: self.wrapped_elements(),
+            graphemes: "".graphemes(),
+            byte_index: 0,
+            row_index: 0,
+            column_index: 0,
+            tab_column_count: self.tab_column_count,
+            wrap_indent_column_count: self.wrap_indent_column_count(),
+            at_end: false,
+        }
+    }
+
     pub fn grid_to_logical_position(
         &self,
         row_index: usize,
@@ -572,6 +590,60 @@ pub enum WrappedElement<'a> {
     Text { is_inlay: bool, text: &'a str },
     Widget(InlineWidget),
     Wrap,
+}
+
+/// See `Line::grid_positions`.
+#[derive(Clone, Debug)]
+pub struct GridPositions<'a> {
+    elements: WrappedElements<'a>,
+    graphemes: Graphemes<'a>,
+    byte_index: usize,
+    row_index: usize,
+    column_index: usize,
+    tab_column_count: usize,
+    wrap_indent_column_count: usize,
+    at_end: bool,
+}
+
+impl<'a> Iterator for GridPositions<'a> {
+    type Item = (usize, usize, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(grapheme) = self.graphemes.next() {
+                let position = (self.byte_index, self.row_index, self.column_index);
+                self.byte_index += grapheme.len();
+                self.column_index +=
+                    grapheme.column_count_at(self.column_index, self.tab_column_count);
+                return Some(position);
+            }
+            if self.at_end {
+                return None;
+            }
+            match self.elements.next() {
+                Some(WrappedElement::Text {
+                    is_inlay: false,
+                    text,
+                }) => self.graphemes = text.graphemes(),
+                Some(WrappedElement::Text {
+                    is_inlay: true,
+                    text,
+                }) => {
+                    self.column_index +=
+                        text.column_count_at(self.column_index, self.tab_column_count);
+                }
+                Some(WrappedElement::Widget(widget)) => self.column_index += widget.column_count,
+                Some(WrappedElement::Wrap) => {
+                    self.row_index += 1;
+                    self.column_index = self.wrap_indent_column_count;
+                }
+                None => {
+                    self.at_end = true;
+                    return Some((self.byte_index, self.row_index, self.column_index));
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

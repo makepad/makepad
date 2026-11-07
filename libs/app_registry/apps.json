@@ -160,6 +160,11 @@
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
   },
   {
+    "id": "arch-installer", "label": "Install Makepad", "package": "makepad-arch-installer",
+    "dir": "tools/arch_installer", "bin": "makepad-arch-installer", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
+  },
+  {
     "id": "devhub", "label": "devhub", "package": "makepad-app-devhub",
     "dir": "apps/devhub", "bin": "makepad-app-devhub", "manifest": null, "args": [],
     "policy": "or_focus", "menu_visible": false, "wm_launchable": true, "features": [], "mobile": false

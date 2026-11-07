@@ -1289,3 +1289,115 @@ fn syntax_colours_are_the_themes_and_read_on_its_ground() {
         });
     }
 }
+
+/// The accessibility line boxes and char positions of the visible lines, from
+/// a grid lookup per char: what `semantics` gave before it walked each line once.
+fn per_char_semantics(editor: &CodeEditor, session: &CodeSession) -> (Vec<a11y_tree::LineBox>, Vec<f32>) {
+    let layout = session.layout();
+    let lines = layout.as_text().as_lines();
+    let (mut boxes, mut glyph_x) = (Vec::<a11y_tree::LineBox>::new(), Vec::new());
+    let mut line_offset = 0;
+    for (index, content) in lines.iter().enumerate() {
+        if editor.visible_lines().contains(&index) && layout.view_line_range().contains(&index) {
+            let line = layout.line(index);
+            let bytes = layout.line_byte_range(index);
+            let mut last_row = None;
+            for byte in (bytes.start..=bytes.end).filter(|byte| content.is_char_boundary(*byte)) {
+                let (row, column) = line.logical_to_grid_position(byte, Affinity::After);
+                let rect = editor.grid_rect(line, row, column, 1).translate(editor.unscrolled_rect.pos);
+                if last_row != Some(row) {
+                    if last_row.is_some() {
+                        glyph_x.push(rect.pos.x as f32);
+                    }
+                    boxes.push(a11y_tree::LineBox {
+                        start: (line_offset + byte) as u32,
+                        rect: makepad_platform::a11y::semantic_rect(rect),
+                        baseline: (rect.pos.y + rect.size.y) as f32,
+                    });
+                    last_row = Some(row);
+                }
+                let last = boxes.last_mut().unwrap();
+                last.rect.w = (rect.pos.x + rect.size.x) as f32 - last.rect.x;
+                glyph_x.push(rect.pos.x as f32);
+            }
+            if index + 1 < lines.len() {
+                glyph_x.push(*glyph_x.last().unwrap());
+            }
+        }
+        line_offset += content.len() + 1;
+    }
+    (boxes, glyph_x)
+}
+
+/// The accessibility geometry is the per-char lookups' with tabs, multi-byte
+/// and wide chars, a combining mark, inline inlays, wraps, and a view range
+/// that starts and ends inside lines.
+#[test]
+fn semantics_geometry_matches_per_char_grid_lookups() {
+    use crate::inlays::InlineInlay;
+    use crate::widgets::InlineWidget;
+    let (cx, mut editor) = measured_editor();
+    let text = "a\tb界c d\n\te\u{301}x 😀 y\tq\n日本\tz w\tv\n\nlast";
+    let document = doc(text);
+    document.set_inline_inlays(vec![
+        (1, 2, InlineInlay::Widget(InlineWidget { column_count: 2 })),
+        (2, 6, InlineInlay::Text("ab".into())),
+    ]);
+    let mut session = CodeSession::new(document.clone());
+    session.relayout_inline();
+    session.set_wrap_column(Some(6));
+    let line_count = text.split('\n').count();
+    editor.line_start = 0;
+    editor.line_end = line_count;
+    {
+        let layout = session.layout();
+        assert!((0..line_count).any(|index| layout.line(index).row_count() > 1), "the text wraps");
+        for (index, content) in text.split('\n').enumerate() {
+            let line = layout.line(index);
+            let per_char: Vec<_> = (0..=content.len())
+                .filter(|byte| content.is_char_boundary(*byte))
+                .map(|byte| {
+                    let (row, column) = line.logical_to_grid_position(byte, Affinity::After);
+                    (byte, row, column)
+                })
+                .collect();
+            assert_eq!(line.grid_positions().collect::<Vec<_>>(), per_char, "line {index}");
+        }
+    }
+    let check = |session: &CodeSession, what: &str| {
+        let mut node = a11y_tree::Node::default();
+        editor.semantics(&cx, session, &mut node);
+        let text = node.text.unwrap();
+        let (boxes, glyph_x) = per_char_semantics(&editor, session);
+        assert!(!boxes.is_empty(), "{what}: lines are visible");
+        assert_eq!(&text.lines[..boxes.len()], &boxes[..], "{what}: line boxes");
+        assert_eq!(text.glyph_x, glyph_x, "{what}: char positions");
+    };
+    check(&session, "whole text");
+    session.set_view_range(Some(AnchorRange {
+        start: document.create_anchor(pos(1, 2), Drift::Before),
+        end: document.create_anchor(pos(2, 9), Drift::After),
+    }));
+    check(&session, "view range");
+}
+
+/// One visible line of about 100k chars costs work linear in its length: a
+/// grid lookup per char walked the line from its start each time, seconds a
+/// frame while an accessibility client listened.
+#[test]
+fn semantics_of_a_long_line_is_linear_in_its_length() {
+    use crate::str::GRAPHEME_STEPS;
+    let (cx, mut editor) = measured_editor();
+    let line: String = (0..7400).map(|i| format!("[{i}.5,{i}],")).collect();
+    let char_count = line.chars().count();
+    assert!(char_count > 100_000);
+    let session = CodeSession::new(doc(&line));
+    editor.line_start = 0;
+    editor.line_end = 1;
+    let mut node = a11y_tree::Node::default();
+    let before = GRAPHEME_STEPS.with(|steps| steps.get());
+    editor.semantics(&cx, &session, &mut node);
+    let steps = GRAPHEME_STEPS.with(|steps| steps.get()) - before;
+    assert_eq!(node.text.unwrap().glyph_x.len(), char_count + 1, "every char and the line end have a position");
+    assert!(steps <= 2 * char_count, "{steps} grapheme steps for a {char_count}-char line");
+}

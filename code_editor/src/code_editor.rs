@@ -1086,12 +1086,12 @@ impl CodeEditor {
                 let line = layout.line(index);
                 let bytes = layout.line_byte_range(index);
                 let mut last_row = None;
-                for (byte, _) in content[bytes.clone()]
-                    .char_indices()
-                    .map(|(b, c)| (bytes.start + b, c))
-                    .chain(std::iter::once((bytes.end, '\0')))
+                // One pass over the line gives every char's grid position.
+                for (byte, row, col) in line
+                    .grid_positions()
+                    .skip_while(|&(byte, _, _)| byte < bytes.start)
+                    .take_while(|&(byte, _, _)| byte <= bytes.end)
                 {
-                    let (row, col) = line.logical_to_grid_position(byte, Affinity::After);
                     let rect = self
                         .grid_rect(line, row, col, 1)
                         .translate(self.unscrolled_rect.pos);

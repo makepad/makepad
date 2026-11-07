@@ -79,6 +79,9 @@ pub struct AppEntry {
     /// Runs on a phone: starts, draws and is usable by touch at phone size (checked on the Pixel).
     /// The phone WM's home, drawer and app lists offer only these; the desktop ignores it.
     pub mobile: bool,
+    /// A row of this machine's own apps (`machine::local_apps_path`), not the shared table:
+    /// every launch of it builds with its `features` (added to the package's defaults).
+    pub local: bool,
 }
 
 mod table;
@@ -92,6 +95,12 @@ impl AppEntry {
     /// What the checkout helpers need to know about it.
     pub fn target(&self) -> AppTarget<'static> {
         AppTarget { id: self.id, package: self.package, dir: self.dir, bin: self.bin, manifest: self.manifest, profile: "release" }
+    }
+
+    /// The cargo features a build of its own binary adds to the package's defaults: a machine's
+    /// own app's (`local`), none for the shared table's.
+    pub fn build_features(&self) -> String {
+        if self.local { self.features.join(",") } else { String::new() }
     }
 }
 
@@ -422,7 +431,7 @@ pub fn is_available(entry: &AppEntry) -> bool {
 /// outside a checkout.
 pub fn build_command(entry: &AppEntry) -> Option<Command> {
     let root = repo_root()?;
-    let (program, args) = build_argv(&entry.target(), &root);
+    let (program, args) = build_argv_features(&entry.target(), &root, &entry.build_features());
     Some(cargo_command(&program, &args, &root))
 }
 

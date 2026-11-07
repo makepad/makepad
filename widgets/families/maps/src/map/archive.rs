@@ -191,10 +191,13 @@ pub struct FileByteSource {
     workers: ArchiveWorkerPool,
     shard_files: Arc<Mutex<ShardFileCache>>,
     token_states: HashMap<ReadToken, Arc<AtomicU8>>,
+    /// A test's hold on a read: the worker meets the first barrier once it has read, waits at
+    /// the second, and says on the channel when its completion is sent.
     #[cfg(test)]
     completion_barriers: Option<(
         Arc<std::sync::Barrier>,
         Arc<std::sync::Barrier>,
+        std::sync::mpsc::Sender<ReadToken>,
     )>,
 }
 
@@ -264,12 +267,16 @@ impl ByteSource for FileByteSource {
                         .ok_or_else(|| "mkmap root exceeds byte limit".to_string())
                 });
             #[cfg(test)]
-            if let Some((reached, release)) = completion_barriers {
+            if let Some((reached, release, _)) = &completion_barriers {
                 reached.wait();
                 release.wait();
             }
             let result = complete_file_read(&state).then_some(result);
             let _ = sender.send(FileReadEvent { token, result });
+            #[cfg(test)]
+            if let Some((_, _, sent)) = completion_barriers {
+                let _ = sent.send(token);
+            }
         }) {
             Ok(()) => {}
             Err(error) => {
@@ -320,12 +327,16 @@ impl ByteSource for FileByteSource {
                 &shard_files,
             );
             #[cfg(test)]
-            if let Some((reached, release)) = completion_barriers {
+            if let Some((reached, release, _)) = &completion_barriers {
                 reached.wait();
                 release.wait();
             }
             let result = complete_file_read(&state).then_some(result);
             let _ = sender.send(FileReadEvent { token, result });
+            #[cfg(test)]
+            if let Some((_, _, sent)) = completion_barriers {
+                let _ = sent.send(token);
+            }
         }) {
             Ok(()) => {}
             Err(error) => {
@@ -2998,9 +3009,12 @@ mod tests {
 
         let reached = Arc::new(std::sync::Barrier::new(2));
         let release = Arc::new(std::sync::Barrier::new(2));
+        let (sent, completion_sent) = std::sync::mpsc::channel();
         let mut source = FileByteSource::new(&dir, workers);
-        source.completion_barriers = Some((reached.clone(), release.clone()));
+        source.completion_barriers = Some((reached.clone(), release.clone(), sent));
         source.request_range(&mut cx, 0, 0, 4, token, 0, None);
+        // the read's job holds the only sender: one dropped unrun ends the wait below
+        source.completion_barriers = None;
         reached.wait();
         source.cancel(&mut cx, token);
         assert_eq!(
@@ -3008,14 +3022,9 @@ mod tests {
             FileReadState::Cancelled as u8
         );
         release.wait();
-        for _ in 0..2_000 {
-            let completions = source.poll(&mut cx, &Event::Startup);
-            assert!(completions.is_empty());
-            if source.token_states.is_empty() {
-                break;
-            }
-            std::thread::yield_now();
-        }
+        // the worker's completion of the cancelled read is sent: the next poll takes it
+        assert_eq!(completion_sent.recv(), Ok(token), "the read's job ended without sending its completion");
+        assert!(source.poll(&mut cx, &Event::Startup).is_empty());
         assert!(source.poll(&mut cx, &Event::Startup).is_empty());
         assert!(source.token_states.is_empty());
         std::fs::remove_dir_all(dir).unwrap();

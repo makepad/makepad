@@ -127,6 +127,15 @@ impl std::fmt::Debug for RemoteClient {
     }
 }
 
+/// CPU time an app ran: a thread that waits (for a core on a loaded box, for the JIT to compile
+/// code it runs for the first time, for an event) spends none.
+pub(crate) struct AppCpu {
+    pub(crate) main: Duration,
+    /// The whole process's but what its threads serving remote peers ran (answering a test's
+    /// snapshots and log reads among it): the app's own work.
+    pub(crate) own: Duration,
+}
+
 impl RemoteClient {
     /// Dials the app's makepad-remote Unix socket (the path of its startup line).
     pub fn connect(socket: impl AsRef<Path>) -> TestResult<Self> {
@@ -167,6 +176,28 @@ impl RemoteClient {
             }
         }
         None
+    }
+
+    /// The app's CPU so far (`uicounts`): its main thread's, and its whole process's but what
+    /// serving remote peers ran.
+    pub(crate) fn cpu(&self) -> TestResult<AppCpu> {
+        let json = self.get_json("uicounts", &[])?;
+        let ns = |key: &str| {
+            json_f64(json.key(key))
+                .map(|ns| Duration::from_nanos(ns as u64))
+                .ok_or_else(|| TestError::new(format!("app remote uicounts: no {key}: {json:?}")))
+        };
+        Ok(AppCpu { main: ns("cpu_ns")?, own: ns("process_cpu_ns")?.saturating_sub(ns("served_cpu_ns")?) })
+    }
+
+    /// Nothing would change the app if time moved on (`settled`): no frame, redraw or load is
+    /// pending.
+    pub(crate) fn settled(&self) -> TestResult<bool> {
+        let json = self.get_json("settled", &[])?;
+        match json.key("settled") {
+            Some(JsonValue::Bool(settled)) => Ok(*settled),
+            _ => Err(TestError::new(format!("app remote settled: no answer: {json:?}"))),
+        }
     }
 
     /// The socket path this client dials, for diagnostics.

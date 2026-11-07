@@ -27,7 +27,15 @@ pub struct Splash {
     uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
-    #[deref]
+    /// The slot the host gives the body (`Splash{width: Fill height: Fill}`): the host's
+    /// promise about the space the Splash takes, kept whatever the body's root view says.
+    #[walk]
+    walk: Walk,
+    /// The body's root view. Once the body has run, the isolate made it and everything in it,
+    /// in its own heap, and applies it in its own VM; the host's applies (a live edit walks
+    /// the host's tree in the host's VM) reach only the fields around it. Before a body runs,
+    /// and after [`Self::stop`], an empty view of the host's.
+    #[new]
     pub view: View,
     #[live]
     body: ArcStringMut,
@@ -359,9 +367,7 @@ impl Splash {
                 }
                 let view = if !value.is_err() && !value.is_nil() {
                     if preserve {
-                        let walk=self.view.walk;
                         self.view.script_apply(vm,&Apply::ScriptReapply,&mut Scope::empty(),value);
-                        self.view.walk=walk;
                         None
                     } else {Some(View::script_from_value(vm, value))}
                 } else {
@@ -390,14 +396,7 @@ impl Splash {
             .filter(|id| !timers_before.contains(id))
             .collect();
 
-        if let Some(mut view) = new_view {
-            // The HOST owns this widget's slot in its tree: `Splash{width: Fill
-            // height: Fill}` is a promise about the space the Splash occupies,
-            // and rebuilding the body from script must not silently take it
-            // away. Without this the freshly-minted view arrives with the
-            // Splash type-default walk (Fill/Fit) and a host asking for a
-            // full-height Splash gets a zero-height one that draws nothing.
-            view.walk = self.view.walk;
+        if let Some(view) = new_view {
             // Cache the body index for host->script calls (call_script_fn etc).
             self.body_id = cx.with_script_vm_id(vm_id, |vm| vm.body_by_module_path(&body_key));
             // Redraw where the OLD view was drawn: the new view has no area yet,
@@ -426,12 +425,7 @@ impl Splash {
         if self.vm_id == MAIN_SPLASH_VM_ID {
             return; // nothing running
         }
-        // The host's walk stays (`Splash{height: Fit}` in a scroll view): the
-        // next body's view takes it from here, and a blank default would make
-        // it Fill, the scroll view's height, so nothing past it could scroll.
-        let walk = self.view.walk;
         self.view = cx.with_vm(|vm| View::script_from_value(vm, NIL.into()));
-        self.view.walk = walk;
         self.body_id = None;
         self.startup_timers.clear();
         self.body_modules.clear();
@@ -632,8 +626,8 @@ impl WidgetNode for Splash {
         self.uid
     }
 
-    fn walk(&mut self, cx: &mut Cx) -> Walk {
-        self.view.walk(cx)
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        self.walk
     }
 
     fn area(&self) -> Area {
@@ -1130,6 +1124,66 @@ mod style_tests {
         // The re-run's redefined `fn` works against the restored state.
         assert!(splash.call_script_fn(&mut cx, id!(bump), &[]));
         assert_eq!(count(&mut cx, &mut splash), Some(2.0));
+        splash.stop(&mut cx);
+    }
+}
+
+#[cfg(test)]
+mod live_edit_tests {
+    use super::*;
+
+    /// The host's live edit, as `app_main` makes it: the edited source evaluated again in
+    /// reload mode and applied to the tree with `Apply::Reload`, in the host's VM.
+    fn live_edit(cx: &mut Cx, host: &WidgetRef, value: fn(&mut ScriptVm) -> ScriptValue) {
+        cx.reload_generation += 1;
+        cx.with_vm(|vm| {
+            let value = vm.with_reload(value);
+            host.clone().script_apply(vm, &Apply::Reload, &mut Scope::empty(), value);
+        });
+    }
+
+    fn child(view: &View, id: LiveId) -> WidgetRef {
+        view.children.iter().find(|(child, _)| *child == id).unwrap().1.clone()
+    }
+
+    /// A live edit walks the host's tree in the host's VM. A Splash in it holds a tree its
+    /// isolate made, in the isolate's heap: the walk updates the Splash's own fields (the
+    /// slot its host gives it), and the isolate takes the edit in its own VM, running its
+    /// body again on its next draw.
+    #[test]
+    fn a_live_edit_stops_at_the_splash_and_the_isolate_takes_it_in_its_own_vm() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let host = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = vm.eval(makepad_script::script! {
+                use mod.prelude.widgets.* View{surface := Splash{width: Fill height: Fit}}
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let surface = child(&host.borrow::<View>().unwrap(), id!(surface));
+        surface.set_text(&mut cx, "field := TextInput{text: \"original\"}");
+        let field = child(&surface.borrow::<Splash>().unwrap().view, id!(field));
+        let uid = field.widget_uid();
+        field.clone().set_text(&mut cx, "edited");
+        let isolate_heap = surface.borrow_mut::<Splash>().unwrap().isolate_heap_key(&mut cx).unwrap();
+        assert_eq!(field.script_source_heap_key(), isolate_heap, "premise: the isolate made the body's widgets");
+
+        live_edit(&mut cx, &host, |vm| {
+            vm.eval(makepad_script::script! {
+                use mod.prelude.widgets.* View{surface := Splash{width: Fill height: Fill}}
+            })
+        });
+        let mut splash = surface.borrow_mut::<Splash>().unwrap();
+        assert_eq!(splash.walk(&mut cx).height, Size::fill(), "the edit reaches the Splash's own fields");
+        assert_ne!(splash.reloaded_at, cx.reload_generation, "its next draw runs the body again");
+
+        // What its draw does after the pass.
+        splash.eval_styled_body(&mut cx, true);
+        assert_eq!(splash.walk(&mut cx).height, Size::fill(), "the body's run keeps the host's slot");
+        let field = child(&splash.view, id!(field));
+        assert_eq!(field.widget_uid(), uid, "the isolate's tree is the one it had");
+        assert_eq!(field.text(), "edited", "runtime state survives the edit");
+        assert_eq!(field.script_source_heap_key(), isolate_heap, "and the isolate applied it");
         splash.stop(&mut cx);
     }
 }

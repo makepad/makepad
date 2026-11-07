@@ -9,7 +9,7 @@
 //! current truth, cancelling queued decodes that are no longer visible.
 
 use crate::library::{display_frame, ItemId, Library};
-use crate::tape::{full_frame, read_frame, FullFrame, Planes};
+use crate::tape::{read_frame, FullFrame, Planes};
 use makepad_widgets_core::makepad_platform::thread::{
     CancellationToken, Class, TaskHandle, TaskPool, ToUIReceiver, ToUISender,
 };
@@ -18,7 +18,7 @@ use std::collections::HashMap;
 pub enum StoreEvent {
     /// A sealed shard's page at one level, hardware decoded from tape.
     Page { shard: i64, level: usize, planes: Planes },
-    /// A picture at full resolution, mipmapped.
+    /// A picture at full resolution, as decoded (made RGB and mipmapped on the GPU).
     Full { item: ItemId, px: u32, finest: bool, frame: FullFrame },
     /// A page decode that did not come back; without this the widget's
     /// "already asked" mark would stand for ever. `reason` is the decoder's
@@ -138,9 +138,9 @@ fn decode(library: &Library, work: Work) -> StoreEvent {
             Err(reason) => StoreEvent::PageFailed { shard, level, reason },
         },
         Work::DecodeFull { item, px } => match display_frame(library, item, px) {
-            Ok((planes, finest)) => {
-                let got = planes.width.max(planes.height);
-                StoreEvent::Full { item, px: got, finest, frame: full_frame(&planes) }
+            Ok((frame, finest)) => {
+                let got = frame.width.max(frame.height);
+                StoreEvent::Full { item, px: got, finest, frame }
             }
             Err(reason) => StoreEvent::FullFailed { item, reason },
         }

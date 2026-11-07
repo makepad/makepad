@@ -248,6 +248,110 @@ impl Nv12Target {
     }
 }
 
+/// A pass [`PicturePasses`] lends for a frame.
+struct PictureSlot {
+    pass: DrawPass,
+    list: DrawList2d,
+    /// The picture it last recorded, and `Cx::repaint_id` right after the recording.
+    picture: Option<(TextureId, u64)>,
+    /// Lent in the frame being drawn, or still painting the picture it recorded.
+    used: bool,
+}
+
+impl PictureSlot {
+    /// Its picture is recorded and not yet painted whole (a pipeline it draws with compiling).
+    fn painting(&self, cx: &Cx) -> bool {
+        self.picture.is_some_and(|(_, repaint)| !self.pass.painted_whole_since(cx, repaint))
+    }
+}
+
+/// Pictures drawn once into textures of their own and sampled from then on like uploaded
+/// ones: a decoded still made display RGB on the GPU (`DrawNv12::draw_picture`).
+///
+/// [`PicturePasses::begin`] makes the picture's texture and lends it a pass. The texture is kept
+/// (never transient: nothing draws it again) and carries a mip chain the GPU builds from what
+/// the pass drew, so it samples minified like a mipped upload. The pass is a child of the one
+/// being drawn and paints before it. A picture is whole once [`PicturePasses::painted`] says so:
+/// its first paint can leave its draw out while the draw's pipeline compiles, and until it is
+/// painted whole [`PicturePasses::next_frame`] keeps its pass attached, so the same recording
+/// paints when the pipeline is ready. A pass free for a whole frame is dropped, with the picture
+/// it names and the sources its draw list holds: the caller is a picture's only owner.
+#[derive(Default)]
+pub struct PicturePasses {
+    slots: Vec<PictureSlot>,
+    /// The slot between `begin` and `end`.
+    open: Option<usize>,
+}
+
+impl PicturePasses {
+    /// Start a frame, in the draw of the pass that samples the pictures: a pass still painting
+    /// its picture stays attached; of the others, those lent in the last frame are free again
+    /// and the rest are dropped.
+    pub fn next_frame(&mut self, cx: &mut Cx2d) {
+        self.slots.retain_mut(|slot| {
+            if slot.painting(cx.cx) {
+                cx.make_child_pass(&slot.pass);
+                slot.used = true;
+                return true;
+            }
+            std::mem::take(&mut slot.used)
+        });
+    }
+
+    /// Whether `picture` is whole: painted, every draw of it drawn, on the GPU.
+    pub fn painted(&self, cx: &Cx, picture: &Texture) -> bool {
+        !self.slots.iter().any(|slot| slot.picture.is_some_and(|(id, _)| id == picture.texture_id()) && slot.painting(cx))
+    }
+
+    /// The passes alive now (lent this frame or the last, or painting).
+    pub fn passes(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Begin drawing a new picture of `size` pixels (dpi 1), cleared to transparent black; its
+    /// texture is returned. Draw it, then [`PicturePasses::end`].
+    pub fn begin(&mut self, cx: &mut Cx2d, size: (u32, u32), name: &'static str) -> Texture {
+        let (width, height) = (size.0.max(1) as usize, size.1.max(1) as usize);
+        let picture = Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 {
+            size: TextureSize::Fixed { width, height },
+            initial: true,
+        })
+        .label(cx, name);
+        picture.set_render_mips(cx, true);
+        picture.set_retained_render_target(cx, true);
+        let index = match self.slots.iter().position(|slot| !slot.used) {
+            Some(index) => index,
+            None => {
+                self.slots.push(PictureSlot { pass: DrawPass::new_with_name(cx, name), list: DrawList2d::new(cx), picture: None, used: false });
+                self.slots.len() - 1
+            }
+        };
+        let slot = &mut self.slots[index];
+        slot.used = true;
+        slot.picture = Some((picture.texture_id(), 0));
+        let size = dvec2(width as f64, height as f64);
+        slot.pass.set_size(cx, size);
+        slot.pass.set_color_texture(cx, &picture, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+        cx.make_child_pass(&slot.pass);
+        cx.begin_pass(&slot.pass, Some(1.0));
+        slot.list.begin_always(cx);
+        cx.begin_root_turtle(size, Layout::flow_overlay());
+        self.open = Some(index);
+        picture
+    }
+
+    pub fn end(&mut self, cx: &mut Cx2d) {
+        let slot = &mut self.slots[self.open.take().expect("PicturePasses::end without begin")];
+        cx.end_pass_sized_turtle();
+        slot.list.end(cx);
+        cx.end_pass(&slot.pass);
+        let repaint = cx.cx.repaint_id();
+        if let Some((_, at)) = &mut slot.picture {
+            *at = repaint;
+        }
+    }
+}
+
 struct Pooled {
     target: RenderTarget,
     /// Taken in the frame being drawn.
@@ -363,6 +467,59 @@ mod tests {
         // A new size allocates anew: still kept.
         assert!(kept.ensure_kept(&mut cx, (16, 8), RenderTargetFormat::Bgra8));
         assert!(!kept.texture.is_transient(&cx));
+    }
+
+    /// A picture is a texture of its caller's (kept: nothing draws it again, so it must not come
+    /// back empty), drawn by a pass that is a child of the pass being drawn. Until it is painted
+    /// whole (here never: no GPU paints it) its pass stays and is lent to no other picture. The
+    /// GPU side (painted, then the pass dropped) is `tests/nv12_picture.rs`.
+    #[test]
+    fn a_picture_keeps_its_pass_until_it_is_painted() {
+        use crate::cx_draw::CxDraw;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root_pass = DrawPass::new(&mut cx);
+        let mut passes = PicturePasses::default();
+        let frame = |cx: &mut Cx, passes: &mut PicturePasses, pictures: usize| -> Vec<Texture> {
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            draw.begin_pass(&root_pass, Some(1.0));
+            let mut made = Vec::new();
+            {
+                let mut cx = Cx2d::new(&mut draw);
+                cx.begin_root_turtle(dvec2(64.0, 64.0), Layout::default());
+                passes.next_frame(&mut cx);
+                for n in 0..pictures {
+                    made.push(passes.begin(&mut cx, (16 + n as u32, 8), "picture"));
+                    assert_eq!(cx.current_dpi_factor(), 1.0, "a picture is pixel-addressed");
+                    passes.end(&mut cx);
+                }
+                while !cx.turtles.is_empty() {
+                    cx.end_turtle();
+                }
+            }
+            draw.end_pass(&root_pass);
+            made
+        };
+        let pictures = frame(&mut cx, &mut passes, 2);
+        assert_eq!(passes.passes(), 2);
+        for picture in &pictures {
+            assert!(!picture.is_transient(&cx), "a picture is sampled in frames that do not draw it");
+            assert!(!passes.painted(&cx, picture), "recorded is not painted");
+        }
+        assert_ne!(pictures[0].texture_id(), pictures[1].texture_id(), "each picture is its own texture");
+        // Still painting: both passes stay, and a new picture gets a pass of its own.
+        let third = frame(&mut cx, &mut passes, 1);
+        assert_eq!(passes.passes(), 3);
+        assert!(!passes.painted(&cx, &third[0]));
+        frame(&mut cx, &mut passes, 0);
+        assert_eq!(passes.passes(), 3, "a pass still painting its picture is kept");
+        for picture in pictures.iter().chain(&third) {
+            assert_eq!(
+                cx.passes.id_iter().filter(|id| cx.passes[*id].color_textures.iter().any(|c| c.texture.texture_id() == picture.texture_id())).count(),
+                1,
+                "each picture is attached to one pass"
+            );
+        }
     }
 
     /// A window's content drawn into a pass nested under a pixel-addressed target keeps the

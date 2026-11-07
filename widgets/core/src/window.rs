@@ -72,6 +72,8 @@ pub enum WindowDoubleClick {
     Maximize = 0,
     /// Fullscreen on the window's screen, over bars and dock, no caption (a presenter's
     /// output on a second screen); a double click while fullscreen restores it exactly.
+    /// Under the makepad WM a double click on a caption maximises and the green button is the
+    /// full screen; a drag-anywhere window keeps this double click there too.
     Fullscreen = 1,
 }
 
@@ -737,8 +739,9 @@ impl ScriptHook for Window {
         self.caption_has_content = None;
         self.caption_window_gap = None;
         self.caption_centering_inputs = None;
-        // A host window manager reads it from the drag query's answer.
-        self.window.handle.set_double_click_fullscreen(vm.cx_mut(), self.double_click == WindowDoubleClick::Fullscreen);
+        // A host window manager reads it from the drag query's answer. Its captions maximise on a
+        // double click; only a window that drags by its content keeps its own.
+        self.window.handle.set_double_click_fullscreen(vm.cx_mut(), self.double_click == WindowDoubleClick::Fullscreen && self.drag == WindowDrag::Window);
         if !self.create_on_start && !self.initial_create_policy_applied {
             apply_initial_create_policy(vm.cx_mut(), &self.window.handle, false);
             self.initial_create_policy_applied = true;
@@ -1171,6 +1174,14 @@ impl Window {
         let content = label_content || bar_content;
         self.caption_has_content = Some(content);
         content
+    }
+
+    /// One line per click on a caption button, saying whose it was: input injected by a command
+    /// (its agent and process) or the window system's (the person's pointer, or a remote viewer's).
+    /// Apps closed by their caption's button and nothing said who clicked it.
+    fn say_caption_click(&self, cx: &Cx, button: &str) {
+        let by = cx.injected_by().map_or_else(|| "the window system's input".to_string(), |who| format!("a click injected by {who}"));
+        log!("window {}: its caption's {button} button: {by}", self.window.window_id().id());
     }
 
     /// `ask`: the caption's close button (the app is asked, as by a native close button);
@@ -3453,12 +3464,15 @@ impl Widget for Window {
                 let clicked = |button: &WidgetRef| actions.find_widget_action(button.widget_uid())
                     .is_some_and(|action| matches!(action.cast(), crate::button::ButtonAction::Clicked(_)));
                 if clicked(&self.hosted_min) {
+                    self.say_caption_click(cx, "minimize");
                     self.window.handle.minimize(cx);
                 }
                 if clicked(&self.hosted_max) {
+                    self.say_caption_click(cx, "maximize");
                     self.window.handle.maximize(cx);
                 }
                 if clicked(&self.hosted_close) {
+                    self.say_caption_click(cx, "close");
                     self.close_after_recording(cx, true);
                 }
             }
@@ -3473,12 +3487,14 @@ impl Widget for Window {
                 .desktop_button(cx, ids!(windows_buttons.min))
                 .clicked(&actions)
             {
+                self.say_caption_click(cx, "minimize");
                 self.window.handle.minimize(cx);
             }
             if self
                 .desktop_button(cx, ids!(windows_buttons.max))
                 .clicked(&actions)
             {
+                self.say_caption_click(cx, "maximize");
                 if self.window.handle.is_fullscreen(cx) {
                     self.window.handle.restore(cx);
                 } else {
@@ -3489,6 +3505,7 @@ impl Widget for Window {
                 .desktop_button(cx, ids!(windows_buttons.close))
                 .clicked(&actions)
             {
+                self.say_caption_click(cx, "close");
                 if self.screen_cap.is_managed() {
                     log!("[makepad-remote] user closed window {}; finalizing Studio recording", self.window.window_id().id());
                 }

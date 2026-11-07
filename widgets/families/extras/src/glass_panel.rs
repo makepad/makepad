@@ -1263,6 +1263,18 @@ impl Widget for GlassLayer {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
+        // The layer's panes stand over what is drawn under them, and a wheel
+        // over one is the pane's whether anything in it scrolled or not. Left
+        // unmarked it went on to the content beneath, which zoomed or
+        // scrolled behind a panel the pointer was on. Only the panes: the
+        // layer itself spans the window, and the wheel over the gaps between
+        // its panes is the content's.
+        if let Event::Scroll(e) = event {
+            if self.view.visible && Self::pane_at(cx, &self.view, e.abs) {
+                event.set_scroll_handled(Vec2Index::X);
+                event.set_scroll_handled(Vec2Index::Y);
+            }
+        }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
@@ -1286,6 +1298,26 @@ impl Widget for GlassLayer {
 
         self.draw_list.as_mut().unwrap().end(cx);
         DrawStep::done()
+    }
+}
+
+impl GlassLayer {
+    /// Whether one of the shown panes under `view` covers `abs`. A pane is
+    /// anything drawn: a view that draws no background is only a box that
+    /// lays its children out (with padding round them, and gaps between),
+    /// so its children are looked at instead.
+    fn pane_at(cx: &Cx, view: &View, abs: Vec2d) -> bool {
+        let mut over = false;
+        view.children(&mut |_, child| {
+            if over || !child.visible() || !child.area().clipped_rect(cx).contains(abs) {
+                return;
+            }
+            over = match child.borrow::<View>() {
+                Some(inner) if !inner.show_bg => Self::pane_at(cx, &inner, abs),
+                _ => true,
+            };
+        });
+        over
     }
 }
 
@@ -4509,6 +4541,96 @@ mod tests {
         let f = surface();
         assert_eq!(f.grip_at(dvec2(100.0, 175.0), 0.0), grip(true, false, false, false));
         assert!(f.grip_at(dvec2(101.0, 175.0), 0.0).is_empty());
+        });
+    }
+
+    /// A wheel over a pane of a glass layer is the pane's: both axes come
+    /// back marked used, so nothing drawn under the layer (a picture wall
+    /// that zooms on the wheel) takes it too. Over the layer's open window,
+    /// where no pane is, the wheel stays free, and so it does over the
+    /// padding of a box that only lays the pane out, and over a pane that
+    /// is hidden.
+    #[test]
+    fn a_wheel_over_a_glass_pane_stays_out_of_what_lies_under_it() {
+        use crate::makepad_draw::makepad_platform::event::{ScrollEvent, ScrollPhase};
+        crate::on_test_cx(|| {
+            let mut cx = test_cx();
+            let root = cx.with_vm(|vm| {
+                crate::script_mod(vm);
+                let value = crate::script_eval!(vm, {
+                    use mod.prelude.widgets.*
+                    use mod.widgets.*
+                    View{
+                        width: Fill
+                        height: Fill
+                        flow: Overlay
+                        glass.Layer{
+                            width: Fill
+                            height: Fill
+                            align: Align{x: 0.0, y: 1.0}
+                            View{
+                                width: Fit
+                                height: Fit
+                                padding: Inset{left: 18, right: 0, top: 0, bottom: 26}
+                                pane := View{width: 200. height: 100. show_bg: true}
+                            }
+                        }
+                    }
+                });
+                WidgetRef::script_from_value(vm, value)
+            });
+            let pass = DrawPass::new(&mut cx);
+            let mut list = DrawList2d::new(&mut cx);
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            let draw = |cx: &mut Cx, list: &mut DrawList2d| {
+                pass.set_size(cx, PANE);
+                let event = DrawEvent::default();
+                let mut draw = CxDraw::new(cx, &event);
+                let mut cx2d = Cx2d::new(&mut draw);
+                cx2d.begin_pass(&pass, None);
+                list.begin_always(&mut cx2d);
+                overlay.begin(&mut cx2d);
+                cx2d.begin_root_turtle(PANE, Layout::flow_down());
+                root.draw_all(&mut cx2d, &mut Scope::empty());
+                cx2d.end_pass_sized_turtle();
+                overlay.end(&mut cx2d);
+                list.end(&mut cx2d);
+                cx2d.end_pass(&pass);
+            };
+            let wheel = |at: DVec2| {
+                Event::Scroll(ScrollEvent {
+                    window_id: WindowId(1, 1),
+                    scroll: dvec2(0.0, 40.0),
+                    abs: at,
+                    modifiers: KeyModifiers::default(),
+                    handled_x: Cell::new(false),
+                    handled_y: Cell::new(false),
+                    is_mouse: true,
+                    time: 0.0,
+                    phase: ScrollPhase::None,
+                })
+            };
+            let used = |cx: &mut Cx, at: DVec2| {
+                let event = wheel(at);
+                root.handle_event(cx, &event, &mut Scope::empty());
+                [event.scroll_handled(Vec2Index::X), event.scroll_handled(Vec2Index::Y)]
+            };
+            draw(&mut cx, &mut list);
+
+            let pane = root.widget(&mut cx, ids!(pane)).area().rect(&cx);
+            assert!(
+                pane.size.y > 0.0 && (pane.pos.y + pane.size.y + 26.0 - PANE.y).abs() < 0.01,
+                "the pane {pane:?} is not at the foot of the layer"
+            );
+            let on_pane = pane.pos + pane.size * 0.5;
+            assert_eq!(used(&mut cx, on_pane), [true, true], "a wheel over the pane went on under it");
+            assert_eq!(used(&mut cx, dvec2(PANE.x - 20.0, 20.0)), [false, false], "the layer took a wheel where no pane is");
+            let on_padding = dvec2(on_pane.x, PANE.y - 10.0);
+            assert_eq!(used(&mut cx, on_padding), [false, false], "the padding round the pane took the wheel");
+
+            root.widget(&mut cx, ids!(pane)).set_visible(&mut cx, false);
+            draw(&mut cx, &mut list);
+            assert_eq!(used(&mut cx, on_pane), [false, false], "a hidden pane took the wheel");
         });
     }
 }

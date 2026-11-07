@@ -12,8 +12,9 @@
 //! - One HEVC intra frame per file ([`write_frame`] / [`read_frame`]):
 //!   hardware encoded, hardware decoded, written atomically. An atlas level
 //!   is one such frame; a full-resolution picture is another.
-//! - The BGRA mip chain a full-resolution frame becomes on its way to a
-//!   `VecMipBGRAu8_32` texture ([`full_frame`]).
+//! - A full-resolution picture as it was decoded ([`read_full_frame`]): its
+//!   NV12 bytes are uploaded as they are and made display RGB, with their
+//!   mip chain, on the GPU (`DrawNv12::draw_picture`).
 //!
 //! No JPEGs or PNGs ever touch the disk: sources are decoded in memory and
 //! kept only as hardware-decodable HEVC.
@@ -309,53 +310,26 @@ pub fn read_frame(path: &Path) -> Result<Planes, String> {
     Planes::from_nv12(frame.width, frame.height, &frame.nv12)
 }
 
-/// A full-resolution picture as a BGRA mip chain, ready for a
-/// `VecMipBGRAu8_32` texture: level 0 first, each level halving, so the GPU
-/// samples it trilinearly and it stays sharp at any zoom.
+/// A full-resolution picture as it was decoded: tight NV12 (the Y rows, then the
+/// interleaved CbCr rows at half size; even dimensions) in its stream's colour. It goes to the
+/// GPU as it is (`Texture::new_nv12`), 1.5 bytes a pixel, and becomes display RGB with its mip
+/// chain there (`DrawNv12::draw_picture`).
 pub struct FullFrame {
     pub width: u32,
     pub height: u32,
-    pub bgra: Vec<u32>,
-    pub max_level: usize,
+    pub nv12: Vec<u8>,
+    pub color: VideoColor,
 }
 
-/// Decoded NV12 -> BGRA with a full mip chain (2x2 box per level).
-pub fn full_frame(planes: &Planes) -> FullFrame {
-    let (w, h) = (planes.width as usize, planes.height as usize);
-    let mut level0 = Vec::new();
-    nv12::nv12_to_bgra_u32(&planes.to_nv12(), planes.width, planes.height, VideoColor::BT709, &mut level0);
-    let mut chain = level0;
-    let (mut lw, mut lh) = (w, h);
-    let mut max_level = 0usize;
-    let mut src_start = 0usize;
-    while lw > 1 || lh > 1 {
-        let (nw, nh) = ((lw / 2).max(1), (lh / 2).max(1));
-        let src = &chain[src_start..src_start + lw * lh];
-        let mut next = Vec::with_capacity(nw * nh);
-        for y in 0..nh {
-            let y0 = (y * 2).min(lh - 1);
-            let y1 = (y * 2 + 1).min(lh - 1);
-            for x in 0..nw {
-                let x0 = (x * 2).min(lw - 1);
-                let x1 = (x * 2 + 1).min(lw - 1);
-                let px = [src[y0 * lw + x0], src[y0 * lw + x1], src[y1 * lw + x0], src[y1 * lw + x1]];
-                let mut acc = [0u32; 4];
-                for p in px {
-                    acc[0] += (p >> 24) & 0xff;
-                    acc[1] += (p >> 16) & 0xff;
-                    acc[2] += (p >> 8) & 0xff;
-                    acc[3] += p & 0xff;
-                }
-                next.push(((acc[0] / 4) << 24) | ((acc[1] / 4) << 16) | ((acc[2] / 4) << 8) | (acc[3] / 4));
-            }
-        }
-        src_start += lw * lh;
-        chain.extend_from_slice(&next);
-        lw = nw;
-        lh = nh;
-        max_level += 1;
+/// The first frame of a container as a [`FullFrame`], hardware decoded.
+pub fn read_full_frame(path: &Path) -> Result<FullFrame, String> {
+    let text = path.to_string_lossy().to_string();
+    let frame = decode_first_frame_from_file(&text).map_err(|e| format!("decode {text}: {e:?}"))?;
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    if w % 2 != 0 || h % 2 != 0 || frame.nv12.len() != w * h * 3 / 2 {
+        return Err(format!("decode {text}: {}x{} picture with {} NV12 bytes (an even size, {} bytes, expected)", w, h, frame.nv12.len(), w * h * 3 / 2));
     }
-    FullFrame { width: planes.width, height: planes.height, bgra: chain, max_level }
+    Ok(FullFrame { width: frame.width, height: frame.height, nv12: frame.nv12, color: frame.color })
 }
 
 #[cfg(test)]

@@ -18,6 +18,11 @@ use std::time::{Duration, Instant};
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(600);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// How often a wait looks at what the app has spent ([`Budget`]).
+const LOOK: Duration = Duration::from_secs(1);
+/// A process using under this share of one core (1/n) for its own work (not serving remote
+/// peers), with nothing pending, is idle.
+const IDLE_SHARE: u32 = 20;
 const DRAG_STEPS: usize = 6;
 /// How long a held drag rests at its end before letting go, which keeps it from flinging.
 const DRAG_HOLD: Duration = Duration::from_millis(300);
@@ -47,6 +52,8 @@ pub struct TestConfig {
     pub visible: bool,
     /// Native startup after the build. JIT startup includes compilation and is uncapped.
     pub startup_timeout: Duration,
+    /// What a wait may spend ([`Budget`]): this much of the app's main thread's CPU, or this
+    /// long with the app idle.
     pub action_timeout: Duration,
     pub poll_interval: Duration,
     pub startup_pause: Duration,
@@ -345,17 +352,57 @@ impl TestApp {
     }
 
     pub fn try_wait_for_log_contains(&self, needle: &str) -> TestResult<()> {
-        let deadline = Instant::now() + self.action_timeout();
+        let mut budget = Budget::start(self, self.action_timeout())?;
         loop {
             self.ensure_running()?;
             let tail = self.client().log_since(0)?;
             if tail.lines.iter().any(|line| line.contains(needle)) {
                 return Ok(());
             }
-            if Instant::now() >= deadline {
-                return Err(TestError::new(format!(
-                    "timed out waiting for log containing `{needle}`"
-                )));
+            if budget.look_due() {
+                if let Some(spent) = budget.spent(self)? {
+                    return Err(TestError::new(format!(
+                        "timed out waiting for log containing `{needle}`: {spent}"
+                    )));
+                }
+            }
+            thread::sleep(self.poll_interval());
+        }
+    }
+
+    /// Waits until `pending` answers `None`. While it answers `Some(what)`, what is still missing
+    /// in words, the wait goes on (asked every poll interval), and once the app has spent the
+    /// wait's [`Budget`] without it, the wait fails with the last `what`. For what a locator
+    /// cannot say (several nodes together, the app's log, files the app writes), waited for as a
+    /// locator waits.
+    pub fn wait_until(&self, pending: impl FnMut() -> Option<String>) {
+        if let Err(err) = self.try_wait_until(pending) {
+            panic_for_error(err);
+        }
+    }
+
+    pub fn try_wait_until(&self, pending: impl FnMut() -> Option<String>) -> TestResult<()> {
+        self.try_wait_until_within(self.action_timeout(), pending)
+    }
+
+    /// [`Self::wait_until`] for what takes the app long (a slice, a restart): the wait may spend
+    /// `budget` of the app's main thread's CPU instead of `action_timeout`. The idle rule stays
+    /// `action_timeout`: an app that sits idle with nothing pending fails the wait as soon.
+    pub fn wait_until_within(&self, budget: Duration, pending: impl FnMut() -> Option<String>) {
+        if let Err(err) = self.try_wait_until_within(budget, pending) {
+            panic_for_error(err);
+        }
+    }
+
+    pub fn try_wait_until_within(&self, budget: Duration, mut pending: impl FnMut() -> Option<String>) -> TestResult<()> {
+        let mut budget = Budget::start(self, budget)?;
+        loop {
+            self.ensure_running()?;
+            let Some(what) = pending() else { return Ok(()) };
+            if budget.look_due() {
+                if let Some(spent) = budget.spent(self)? {
+                    return Err(TestError::new(format!("{what}: {spent}")));
+                }
             }
             thread::sleep(self.poll_interval());
         }
@@ -1046,14 +1093,26 @@ impl Locator {
     fn act(&self, action: &str, extra: &[(&str,&str)]) -> TestResult<()> {
         self.command(&format!("ui act {action}"), extra)
     }
+    /// The app's `ui wait`, a look at a time: it ends on what it waits for, or once the app
+    /// has spent the wait's [`Budget`].
     fn wait_query(&self, extra: &str, options: &[(&str,&str)]) -> TestResult<()> {
         self.app.ensure_running()?;
         let q = format!("{} {extra}", self.selector.as_query());
-        let timeout = self.app.action_timeout().as_millis().to_string();
-        let mut args = vec![("q",q.as_str()),("json","1"),("timeout_ms",timeout.as_str())];
+        let look = LOOK.as_millis().to_string();
+        let mut args = vec![("q",q.as_str()),("json","1"),("timeout_ms",look.as_str())];
         if let Some(w) = self.selector.window_arg() { args.push(("w",w)); }
         args.extend_from_slice(options);
-        self.app.client().get_json("ui wait", &args).map(|_| ())
+        let mut budget = Budget::start(&self.app, self.app.action_timeout())?;
+        loop {
+            match self.app.client().get_json("ui wait", &args) {
+                Err(err) if err.message().contains("ui wait timed out") => {
+                    if let Some(spent) = budget.spent(&self.app)? {
+                        return Err(TestError::new(format!("app remote ui wait: `{q}` did not come: {spent}")));
+                    }
+                }
+                done => return done.map(|_| ()),
+            }
+        }
     }
     pub fn press(self) -> Self { self.click() }
     pub fn focus(self) -> Self { if let Err(e) = self.act("focus", &[]) { panic_for_error(e); } self }
@@ -1183,6 +1242,61 @@ pub fn run_current_package_test<F, R>(
     };
     if let Err(err) = run_with_config(config, test) {
         panic_for_error(err);
+    }
+}
+
+/// What a wait may spend before it fails: `limit` of the app's main thread's CPU (`action_timeout`,
+/// or a long wait's own), or `action_timeout` with the app idle. A loaded box spends neither for
+/// the app: a thread that waits for a core, or for the JIT to compile code it runs for the first
+/// time, runs no CPU of its own and is not idle (the JIT's compiles are its process's CPU). An
+/// app with nothing running (its process under 1/[`IDLE_SHARE`] of a core, not counting what
+/// its threads serving remote peers run: the wait's own asks cost the app CPU) and nothing pending
+/// (`settled`) has nothing left that would bring what the wait waits for: `action_timeout` of
+/// that ends the wait.
+struct Budget {
+    /// The main thread's CPU the wait may spend.
+    limit: Duration,
+    /// How long the app may sit idle.
+    idle_limit: Duration,
+    /// The main thread's CPU when the wait began.
+    main: Duration,
+    /// When the app was last looked at, and its own CPU then (the process's but serving).
+    last: (Instant, Duration),
+    /// How long the app has been idle, to the last look.
+    idle: Duration,
+}
+
+impl Budget {
+    fn start(app: &TestApp, limit: Duration) -> TestResult<Budget> {
+        let cpu = app.client().cpu()?;
+        Ok(Budget { limit, idle_limit: app.action_timeout(), main: cpu.main, last: (Instant::now(), cpu.own), idle: Duration::ZERO })
+    }
+
+    fn look_due(&self) -> bool {
+        self.last.0.elapsed() >= LOOK
+    }
+
+    /// Looks at the app: once it has spent the whole budget, what it spent, in words.
+    fn spent(&mut self, app: &TestApp) -> TestResult<Option<String>> {
+        let cpu = app.client().cpu()?;
+        let now = Instant::now();
+        let main = cpu.main.saturating_sub(self.main);
+        if main >= self.limit {
+            return Ok(Some(format!("its main thread ran {:.1} s of CPU (budget {:.0} s)", main.as_secs_f64(), self.limit.as_secs_f64())));
+        }
+        let (then, own) = self.last;
+        let over = now - then;
+        let idle = cpu.own.saturating_sub(own) * IDLE_SHARE < over && app.client().settled()?;
+        self.idle = if idle { self.idle + over } else { Duration::ZERO };
+        self.last = (now, cpu.own);
+        Ok((self.idle >= self.idle_limit).then(|| {
+            format!(
+                "it sat idle for {:.1} s (budget {:.0} s), nothing running and nothing pending (its main thread ran {:.1} s of CPU)",
+                self.idle.as_secs_f64(),
+                self.idle_limit.as_secs_f64(),
+                main.as_secs_f64()
+            )
+        }))
     }
 }
 

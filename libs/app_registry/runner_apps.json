@@ -351,5 +351,14 @@
     "binary": "makepad-app-wm-all",
     "workspace": "makepad/apps/wm-all",
     "features": []
+  },
+  {
+    "id": "arch-installer",
+    "title": "Install Makepad",
+    "package": "makepad-arch-installer",
+    "binary": "makepad-arch-installer",
+    "workspace": "makepad/tools/arch_installer",
+    "features": [],
+    "menu": "other"
   }
 ]

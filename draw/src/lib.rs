@@ -41,7 +41,7 @@ pub use crate::{
     nav::{NavItem, NavOrder, NavRole, NavScrollIndex, NavStop},
     native_layer::NativeLayerDraw,
     overlay::Overlay,
-    render_target::{RenderTarget, RenderTargetFormat, RenderTargetPool},
+    render_target::{PicturePasses, RenderTarget, RenderTargetFormat, RenderTargetPool},
     scene_3d::{SceneDrawCallAnchor, SceneScope3D, SceneState3D},
     vector::{pack_pair_f16, pack_unorm8x4},
     scene_sun::{
