@@ -147,9 +147,14 @@ fn if_as_the_value_of_a_fn_or_block() {
             assert_eq!(nil_or_number(&code, name), None, "{name} k={k}");
         }
     }
-    // A loop as the last statement of a fn body leaves no value.
-    let tail_loop = "fn g() { let n = 0 for i in 0..3 { n += 1 } }\nlet r = g() if r == nil { 1 } else { 0 }";
-    assert_eq!(number(tail_loop, "tail_loop"), 1.0);
+    // A loop as the last statement of a fn body leaves no value: a call as a statement leaves
+    // nothing behind, and one whose result is used returns nil and is reported there, naming
+    // the fn and its loop (for_tail_value.rs).
+    let tail_loop = "fn g() { let n = 0 for i in 0..3 { n += 1 } }\n";
+    assert_eq!(number(&format!("{tail_loop}g()\n1"), "tail_loop_statement"), 1.0);
+    let (value, errs, _vm) = run("tail_loop", &format!("{tail_loop}let r = g() if r == nil {{ 1 }} else {{ 0 }}"));
+    assert_eq!(value.as_number(), Some(1.0), "the call returns nil: {value:?}");
+    assert!(errs.len() == 1 && errs[0].contains("`g` returns nothing") && errs[0].contains("the `for` at if_for_else_tail_loop:0"), "{errs:?}");
 }
 
 #[test]

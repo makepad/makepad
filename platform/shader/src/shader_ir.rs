@@ -307,8 +307,6 @@ pub enum Builtin {
     Max,
     Min,
     Mix,
-    /// Splash's `modf(x, y)`: the float remainder (`x % y`).
-    FMod,
     Normalize,
     Pow,
     Radians,
@@ -385,7 +383,7 @@ impl Builtin {
         match self {
             Abs | Acos | Acosh | Asin | Asinh | Atan | Atanh | Atan2 | Ceil | Clamp | Cos | Cosh | Cross
             | Degrees | Distance | Dot | Exp | Exp2 | Floor | Fma | Fract | Inverse | InverseSqrt | Length
-            | Log | Log2 | Max | Min | Mix | FMod | Normalize | Pow | Radians | Round | Sign | Sin | Sinh
+            | Log | Log2 | Max | Min | Mix | Normalize | Pow | Radians | Round | Sign | Sin | Sinh
             | Smoothstep | Sqrt | Step | Tan | Tanh | Trunc | Dpdx | Dpdy | Unpack2f16 | Unpack4u8
             | Unpack2x16Float | Unpack2x16Unorm | Unpack2x16Snorm | Unpack4x8Unorm | Unpack4x8Snorm
             | GlobalId | LocalId | GroupId | GroupCount | LocalIndex | SubgroupSize | SubgroupLane
@@ -428,7 +426,6 @@ impl Builtin {
             id!(max) => Builtin::Max,
             id!(min) => Builtin::Min,
             id!(mix) => Builtin::Mix,
-            id!(modf) => Builtin::FMod,
             id!(normalize) => Builtin::Normalize,
             id!(pow) => Builtin::Pow,
             id!(radians) => Builtin::Radians,

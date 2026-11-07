@@ -893,7 +893,6 @@ impl<'a> RustPrinter<'a> {
             Builtin::Log => format!("({}).ln()", x),
             Builtin::Log2 => format!("({}).log2()", x),
             Builtin::Mix => format!("{{ let _a = {}; _a + ({} - _a) * {} }}", x, a[1], a[2]),
-            Builtin::FMod => format!("{{ let _x = {}; let _y = {}; _x - _y * (_x / _y).floor() }}", x, a[1]),
             Builtin::Pow => format!("({}).powf({})", x, a[1]),
             Builtin::Round => format!("({}).round()", x),
             Builtin::Sin => format!("({}).sin()", x),

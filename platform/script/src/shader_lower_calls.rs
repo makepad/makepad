@@ -38,6 +38,13 @@ impl IrFnCompiler {
                 return;
             }
             let value = vm.bx.heap.scope_value(self.script_scope, name.into(), self.trap.pass());
+            // `mod(x, y)` is the modulo, as in script functions; `mod` itself
+            // stays the module root (`define_mod_call`).
+            if value == vm.bx.heap.modules.into() {
+                self.mes.push(IrMe::BuiltinCall { name: id!(mod), args: Vec::new() });
+                self.maybe_pop_to_me(vm, output, opargs);
+                return;
+            }
             if let Some(pod_ty) = vm.bx.heap.pod_type(value) {
                 self.handle_pod_type_call(vm, output, opargs, pod_ty, name);
                 return;
@@ -532,6 +539,9 @@ impl IrFnCompiler {
             }
             return;
         }
+        if name == id!(mod) || name == id!(modf) {
+            return self.lower_mod(vm, output, name, args);
+        }
         let builtins = vm.bx.code.builtins.pod.clone();
         if name == id!(instance_index) {
             if output.mode != ShaderMode::Vertex || !args.is_empty() {
@@ -638,6 +648,84 @@ impl IrFnCompiler {
         let rt = Self::ir_ty(vm, output, ret);
         let e = self.expr(ExprKind::Builtin(op, exprs), rt);
         self.push(ShaderType::Pod(ret), e);
+    }
+
+    /// `mod(x, y)`, the floored modulo of shading languages,
+    /// `x - y * floor(x / y)` (the result takes y's sign), and `modf(x, y)`,
+    /// the truncating remainder `x - y * trunc(x / y)` (x's sign), on floats
+    /// and float vectors (a scalar beside a vector applies to every lane),
+    /// as in script functions (`define_mod_call`, `x % y`). Both are lowered
+    /// to that arithmetic, so every backend computes the same thing (GLSL's
+    /// own `mod` floors, WGSL's `%`, HLSL's and Metal's `fmod` and SPIR-V's
+    /// OpFRem truncate); literals fold.
+    fn lower_mod(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, name: LiveId, args: Vec<(ShaderType, ExprId)>) {
+        let pods = vm.bx.code.builtins.pod.clone();
+        let floored = name == id!(mod);
+        if args.len() != 2 {
+            let message = format!("{name}(x, y) takes two arguments, not {}", args.len());
+            output.push_error(message.clone());
+            script_err_shader!(self.trap, "{}", message);
+            return self.push(ShaderType::Error(NIL), NO_EXPR);
+        }
+        if args.iter().any(|(_, e)| *e == NO_EXPR) {
+            return self.push(ShaderType::Error(NIL), NO_EXPR);
+        }
+        for (ty, _) in &args {
+            let float = match ty {
+                ShaderType::AbstractInt | ShaderType::AbstractFloat => true,
+                ShaderType::Pod(pt) => crate::shader_lower_ops::is_float_pod(&pods, *pt),
+                _ => false,
+            };
+            if !float {
+                let message = format!("{name}(x, y) takes floats or float vectors; integers use %");
+                output.push_error(message.clone());
+                script_err_shader!(self.trap, "{}", message);
+                return self.push(ShaderType::Error(NIL), NO_EXPR);
+            }
+        }
+        let number = |l: Option<IrLit>| match l {
+            Some(IrLit::AbstractInt(i)) => Some(i as f32),
+            Some(IrLit::AbstractFloat(f)) => Some(f as f32),
+            _ => None,
+        };
+        if let (Some(x), Some(y)) = (number(self.lit_of(args[0].1)), number(self.lit_of(args[1].1))) {
+            // In f32, as the GPU computes it (shader_lower_ops' `fold`).
+            let q = if floored { (x / y).floor() } else { (x / y).trunc() };
+            let e = self.expr(ExprKind::Lit(IrLit::AbstractFloat((x - y * q) as f64)), TY_AFLOAT);
+            return self.push(ShaderType::AbstractFloat, e);
+        }
+        // Each operand is read twice: a plain read is repeated, anything
+        // else is computed once into a temporary.
+        let mut reads = Vec::new();
+        for (ty, e) in args {
+            let expr = &self.f.exprs[e as usize];
+            let (kind, ir_ty) = (expr.kind.clone(), expr.ty);
+            let kind = match kind {
+                ExprKind::Lit(_) | ExprKind::Local(_) | ExprKind::Param(_) | ExprKind::Global(_) => kind,
+                _ => {
+                    let tmp = self.f.local(id!(_mp_mod), 0, ir_ty, false, LocalKind::Temp);
+                    self.emit(Stmt::Local(tmp, e));
+                    ExprKind::Local(tmp)
+                }
+            };
+            reads.push((ty, kind, ir_ty));
+        }
+        let read = |this: &mut Self, i: usize| {
+            let (ty, kind, ir_ty) = reads[i].clone();
+            (ty, this.expr(kind, ir_ty))
+        };
+        let (x0, y0) = (read(self, 0), read(self, 1));
+        let (qt, q) = self.arithmetic(vm, output, BinOp::Div, false, x0, y0);
+        if q == NO_EXPR {
+            return self.push(ShaderType::Error(NIL), NO_EXPR);
+        }
+        let round = if floored { Builtin::Floor } else { Builtin::Trunc };
+        let whole = self.expr(ExprKind::Builtin(round, vec![q]), self.f.ty_of(q));
+        let y1 = read(self, 1);
+        let m = self.arithmetic(vm, output, BinOp::Mul, false, y1, (qt, whole));
+        let x1 = read(self, 0);
+        let (ty, e) = self.arithmetic(vm, output, BinOp::Sub, false, x1, m);
+        self.push(ty, e);
     }
 
     fn handle_texture_builtin(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, method_id: LiveId, tex_type: TextureType, tex: ExprId, args: Vec<(ShaderType, ExprId)>) {

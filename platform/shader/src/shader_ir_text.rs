@@ -851,16 +851,6 @@ impl<'a> TextCx<'a> {
             Builtin::Max => "max",
             Builtin::Min => "min",
             Builtin::Mix => "mix",
-            Builtin::FMod => {
-                let a = self.arg_as(f, args[0], ty);
-                let b = self.arg_as(f, args[1], ty);
-                // Each backend keeps its own float remainder: GLSL's
-                // floor-based mod, WGSL's truncating %.
-                if glsl {
-                    return format!("mod({}, {})", a, b);
-                }
-                return format!("({} % {})", a, b);
-            }
             Builtin::Normalize => "normalize",
             Builtin::Pow => "pow",
             Builtin::Radians => "radians",
@@ -1289,11 +1279,6 @@ impl<'a> TextCx<'a> {
                 let a = self.expr(f, args[0]);
                 return Some(format!("(({})sign({}))", self.ty_name(ty), a));
             }
-            Builtin::FMod => {
-                let a = self.arg_as(f, args[0], ty);
-                let b = self.arg_as(f, args[1], ty);
-                return Some(format!("fmod({}, {})", a, b));
-            }
             Builtin::Asinh => {
                 let a = self.expr(f, args[0]);
                 return Some(format!("_mp_asinh({})", a));
@@ -1388,7 +1373,7 @@ impl<'a> TextCx<'a> {
                     }
                 }
             }
-            ExprKind::Builtin(op, args) => return self.metal_builtin(f, *op, args, ty),
+            ExprKind::Builtin(op, args) => return self.metal_builtin(f, *op, args),
             ExprKind::Select(c, t, fl) => {
                 let ct = f.exprs[*c as usize].ty;
                 let cs = self.expr(f, *c);
@@ -1491,17 +1476,12 @@ impl<'a> TextCx<'a> {
         })
     }
 
-    fn metal_builtin(&mut self, f: &IrFunction, op: Builtin, args: &[ExprId], ty: TyId) -> Option<String> {
+    fn metal_builtin(&mut self, f: &IrFunction, op: Builtin, args: &[ExprId]) -> Option<String> {
         let name = match op {
             Builtin::InverseSqrt => "rsqrt",
             Builtin::Dpdx => "dfdx",
             Builtin::Dpdy => "dfdy",
             Builtin::Inverse => "_mp_inverse",
-            Builtin::FMod => {
-                let a = self.arg_as(f, args[0], ty);
-                let b = self.arg_as(f, args[1], ty);
-                return Some(format!("fmod({}, {})", a, b));
-            }
             Builtin::Unpack2f16 | Builtin::Unpack4u8 => {
                 let a = self.expr(f, args[0]);
                 let at = f.exprs[args[0] as usize].ty;

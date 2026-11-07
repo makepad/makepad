@@ -83,14 +83,16 @@ pub fn ir_to_wgsl(m: &IrModule, entries: &[FuncId], xr: bool) -> String {
         };
         writeln!(entry_text, "struct {}In {{", base).ok();
         for io in &entry.inputs {
-            writeln!(entry_text, "    {} {}: {},", io_attr(io.binding), io.name, cx.ty_name(io.ty)).ok();
+            let flat = entry.stage == IrStage::Fragment && int_location(m, io);
+            writeln!(entry_text, "    {}{} {}: {},", io_attr(io.binding), if flat { " @interpolate(flat)" } else { "" }, io.name, cx.ty_name(io.ty)).ok();
         }
         entry_text.push_str("}\n");
         let has_out = !entry.outputs.is_empty();
         if has_out {
             writeln!(entry_text, "struct {}Out {{", base).ok();
             for io in &entry.outputs {
-                writeln!(entry_text, "    {} {}: {},", io_attr(io.binding), io.name, cx.ty_name(io.ty)).ok();
+                let flat = entry.stage == IrStage::Vertex && int_location(m, io);
+                writeln!(entry_text, "    {}{} {}: {},", io_attr(io.binding), if flat { " @interpolate(flat)" } else { "" }, io.name, cx.ty_name(io.ty)).ok();
             }
             entry_text.push_str("}\n");
         }
@@ -160,6 +162,12 @@ pub fn ir_to_wgsl(m: &IrModule, entries: &[FuncId], xr: bool) -> String {
     out.push_str(&bodies);
     out.push_str(&entry_text);
     out
+}
+
+/// An integer user-defined varying (a vertex output or fragment input at a
+/// location): WGSL requires it flat.
+fn int_location(m: &IrModule, io: &IrEntryIo) -> bool {
+    matches!(io.binding, IrIoBinding::Location(_)) && matches!(m.scalar_of(io.ty), Some(IrScalar::I32 | IrScalar::U32))
 }
 
 fn io_attr(b: IrIoBinding) -> String {

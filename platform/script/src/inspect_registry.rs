@@ -112,6 +112,29 @@ static ERROR_HOOK: AtomicUsize = AtomicUsize::new(0);
 /// the hooks cost one relaxed load (a native build never pays more)
 static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+std::thread_local! {
+    /// this thread runs an evaluation whose errors are its answer ([`unreported`])
+    static UNREPORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `f`, with the errors of the evaluations this thread runs in it kept out of the registry and
+/// the error hook: an evaluation whose errors are its answer (a file read only to say why it does
+/// not read) is no run's error. Its capture still gets them.
+pub fn unreported<R>(f: impl FnOnce() -> R) -> R {
+    struct Back(bool);
+    impl Drop for Back {
+        fn drop(&mut self) {
+            UNREPORTED.with(|u| u.set(self.0));
+        }
+    }
+    let _back = Back(UNREPORTED.with(|u| u.replace(true)));
+    f()
+}
+
+fn reported() -> bool {
+    ENABLED.load(Relaxed) && !UNREPORTED.with(|u| u.get())
+}
+
 /// Live counts (allocated slots) and the retained slot bytes of the object, string and array
 /// tables: slots * size_of the table element (heap-owned buffers inside elements not counted).
 fn counts(heap: &ScriptHeap) -> (u64, u64, u64, u64) {
@@ -213,7 +236,7 @@ pub(crate) fn gc_done(heap: &ScriptHeap, ns: u64) {
 
 /// An error was drained on this VM; `line` formats it only when a hook is set.
 pub(crate) fn error(base: &ScriptVmBase, line: impl FnOnce() -> String) {
-    if !ENABLED.load(Relaxed) {
+    if !reported() {
         return;
     }
     let text = line();
@@ -231,7 +254,7 @@ pub(crate) fn error(base: &ScriptVmBase, line: impl FnOnce() -> String) {
 /// A host diagnostic at script site `at` (vm_ctl ERR_PUSH_DIAGNOSTIC / _ERROR): counted on every call, the
 /// error hook (the `scripterr` event) only at a site's `first` report.
 pub(crate) fn diagnostic(base: &ScriptVmBase, at: Option<(&str, u32)>, text: &str, first: bool) {
-    if !ENABLED.load(Relaxed) {
+    if !reported() {
         return;
     }
     let addr = base as *const ScriptVmBase as usize;

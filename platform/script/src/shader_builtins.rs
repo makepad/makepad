@@ -1537,7 +1537,7 @@ pub fn type_table_builtin(
             return builtins.pod_vec4f;
         }
         // Float 2 arguments
-        id!(atan2) | id!(pow) | id!(modf) => {
+        id!(atan2) | id!(pow) => {
             if args.len() != 2 {
                 script_err_invalid_args!(
                     trap,

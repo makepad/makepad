@@ -614,12 +614,13 @@ impl ScriptNetworkEvent {
     }
 
     /// The owner callback builds the payload only when a handler exists.
-    /// Panics restore the VM and propagate before any request/socket removal.
+    /// A panic of the handler restores the VM and returns before any
+    /// request/socket removal; the caller resumes it (`resume_if_panicked`).
     #[inline]
     #[relax_api]
     pub fn dispatch(&self, host: &mut ScriptHostContext, payload: &mut crate::ScriptVmCall) {
-        if !self.handler.is_nil() {
-            vm::with_vm_and_async_with(host, payload);
+        if !self.handler.is_nil() && vm::with_vm_and_async_with(host, payload) {
+            return;
         }
         if self.remove {
             if self.websocket {

@@ -107,46 +107,74 @@ const TAKEN_MSG: &str = "re-entrant script VM access: the VM is already `take()`
              use `vm.with_cx_mut(|cx| ...)` so the VM is parked back onto `Cx` first.";
 
 /// Borrowed caller-owned closure; its trampoline stays with the caller.
+///
+/// A panic in the closure never unwinds out of `call`: the trampoline
+/// catches it on the caller's side and hands it back as a pointer, which
+/// [`ScriptVmCall::resume_if_panicked`] resumes there once the VM is back
+/// on the host. Under makepad run the ops taking a `ScriptVmCall` are this
+/// provided crate's compiled code while the closure is JIT code: a JIT
+/// panic cannot unwind through a compiled frame, it leaves to the JIT's
+/// nearest catch above it, past `run_parked`, and the VM was lost with the
+/// frame that held it (every later entry then read as re-entrant).
 #[relax_api(plain)]
 #[repr(C)]
 pub struct ScriptVmCall<'a> {
     context: *mut u8,
-    call: unsafe extern "C-unwind" fn(*mut u8, &mut ScriptVm),
+    /// Runs the closure; null when it returned, else its panic (a
+    /// `Box<Box<dyn Any + Send>>` of the caller's side).
+    call: unsafe extern "C-unwind" fn(*mut u8, &mut ScriptVm) -> *mut u8,
+    /// The panic the last `invoke` caught, until `resume_if_panicked`.
+    panic: *mut u8,
     borrow: std::marker::PhantomData<&'a mut u8>,
 }
 impl<'a> ScriptVmCall<'a> {
     #[inline]
     pub fn new<F: FnMut(&mut ScriptVm)>(f: &'a mut F) -> Self {
-        unsafe extern "C-unwind" fn call<F: FnMut(&mut ScriptVm)>(p: *mut u8, vm: &mut ScriptVm) {
-            (&mut *p.cast::<F>())(vm);
+        unsafe extern "C-unwind" fn call<F: FnMut(&mut ScriptVm)>(p: *mut u8, vm: &mut ScriptVm) -> *mut u8 {
+            match catch_unwind(AssertUnwindSafe(|| (&mut *p.cast::<F>())(vm))) {
+                Ok(()) => std::ptr::null_mut(),
+                Err(payload) => Box::into_raw(Box::new(payload)).cast(),
+            }
         }
         Self {
             context: f as *mut F as *mut u8,
             call: call::<F>,
+            panic: std::ptr::null_mut(),
             borrow: std::marker::PhantomData,
         }
     }
+    /// Runs the closure; true when it panicked (the panic waits in `self`).
     #[inline]
-    fn invoke(&mut self, vm: &mut ScriptVm) {
-        unsafe { (self.call)(self.context, vm) }
+    fn invoke(&mut self, vm: &mut ScriptVm) -> bool {
+        self.panic = unsafe { (self.call)(self.context, vm) };
+        !self.panic.is_null()
+    }
+    /// Continues the closure's panic, if it had one, on the caller's side
+    /// (`resume_unwind`: the panic hook does not run a second time).
+    #[inline]
+    pub fn resume_if_panicked(&mut self) {
+        if !self.panic.is_null() {
+            let payload = unsafe { Box::from_raw(self.panic.cast::<Box<dyn std::any::Any + Send>>()) };
+            self.panic = std::ptr::null_mut();
+            resume_unwind(*payload)
+        }
     }
 }
 
 /// Run `f` on `bx` as the host's VM and put `bx` back on the host whether
-/// `f` returns or unwinds.
+/// `f` returns or panics; true when `f` panicked (its panic waits in `f`
+/// for the caller, [`ScriptVmCall::resume_if_panicked`]).
 ///
-/// A drop guard cannot do this: the `ScriptVm` owns the host borrow AND
-/// the base for the whole call, so nothing else can hold either to restore
-/// them. The unwind is caught instead, the VM parked, and the panic resumed
-/// as it was (`resume_unwind` runs no hook a second time). A catcher higher
-/// up — a platform's event catcher, a host isolating a guest — then finds
-/// the host exactly as it was before the call, where letting the frame go
-/// dropped the whole heap and left every later entry re-entrant.
+/// `f` catches its own panic (see [`ScriptVmCall`]). What can still unwind
+/// here is this crate's own code (`drain_errors`): that unwind is caught,
+/// the VM parked, and the panic resumed as it was. A drop guard cannot do
+/// this: the `ScriptVm` owns the host borrow AND the base for the whole
+/// call, so nothing else can hold either to restore them.
 ///
 /// The slot is never overwritten on the way out of a panic: `with_cx_mut`
 /// parks the real VM on the host itself while its closure runs, and the
 /// `ScriptVm` then holds a placeholder — if that closure is where the
-/// unwind began and the placeholder came back here, the slot already has
+/// panic began and the placeholder came back here, the slot already has
 /// the VM and the placeholder is dropped.
 ///
 /// Not generic: the `with_vm` family's shells below move their closure and
@@ -157,41 +185,44 @@ fn run_parked(
     bx: Box<ScriptVmBase>,
     f: &mut ScriptVmCall,
     drain: bool,
-) {
+) -> bool {
     let mut vm = ScriptVm {
         host: host.reborrow(),
         bx,
     };
     let out = catch_unwind(AssertUnwindSafe(|| {
-        f.invoke(&mut vm);
-        if drain {
+        let panicked = f.invoke(&mut vm);
+        if drain && !panicked {
             vm.drain_errors();
         }
+        panicked
     }));
     let ScriptVm { mut host, bx } = vm;
+    if matches!(out, Ok(false)) || host.vm_base().is_none() {
+        host.restore_vm(bx);
+    }
     match out {
-        Ok(()) => {
-            host.restore_vm(bx);
-        }
-        Err(payload) => {
-            if host.vm_base().is_none() {
-                host.restore_vm(bx);
-            }
-            resume_unwind(payload)
-        }
+        Ok(panicked) => panicked,
+        Err(payload) => resume_unwind(payload),
     }
 }
 
+/// True when `f` panicked: its panic waits in `f`, and the script tasks
+/// were not run.
 #[inline]
 #[relax_api]
-pub fn with_vm_and_async_with(host: &mut ScriptHostContext, f: &mut ScriptVmCall) {
+pub fn with_vm_and_async_with(host: &mut ScriptHostContext, f: &mut ScriptVmCall) -> bool {
     let mut bx = host.take_vm().expect(TAKEN_MSG);
     bx.select_first_unpaused_thread();
-    run_parked(host, bx, f, false);
+    if run_parked(host, bx, f, false) {
+        return true;
+    }
     task::handle_script_tasks(host);
+    false
 }
 
-/// False only when try_ is set and the VM is already held.
+/// False only when try_ is set and the VM is already held. A panic of `f`
+/// waits in `f` (`resume_if_panicked`).
 #[inline]
 #[relax_api]
 pub fn with_vm_with(host: &mut ScriptHostContext, try_: bool, f: &mut ScriptVmCall) -> bool {
@@ -205,6 +236,7 @@ pub fn with_vm_with(host: &mut ScriptHostContext, try_: bool, f: &mut ScriptVmCa
     true
 }
 
+/// A panic of `f` waits in `f` (`resume_if_panicked`).
 #[inline]
 #[relax_api]
 pub fn with_vm_thread_with(
@@ -214,7 +246,7 @@ pub fn with_vm_thread_with(
 ) {
     let mut bx = host.take_vm().expect(TAKEN_MSG);
     bx.select_thread(thread_id);
-    run_parked(host, bx, f, false)
+    run_parked(host, bx, f, false);
 }
 
 #[inline]
@@ -224,10 +256,10 @@ pub fn with_vm_and_async<F: FnOnce(&mut ScriptVm) -> R, R>(
 ) -> R {
     let mut f = Some(f);
     let mut out = None;
-    with_vm_and_async_with(
-        host,
-        &mut ScriptVmCall::new(&mut |vm: &mut ScriptVm| out = Some((f.take().unwrap())(vm))),
-    );
+    let mut call = |vm: &mut ScriptVm| out = Some((f.take().unwrap())(vm));
+    let mut call = ScriptVmCall::new(&mut call);
+    with_vm_and_async_with(host, &mut call);
+    call.resume_if_panicked();
     out.unwrap()
 }
 #[inline]
@@ -242,11 +274,10 @@ fn try_with_vm_inner<F: FnOnce(&mut ScriptVm) -> R, R>(
 ) -> Option<R> {
     let mut f = Some(f);
     let mut out = None;
-    with_vm_with(
-        host,
-        try_,
-        &mut ScriptVmCall::new(&mut |vm: &mut ScriptVm| out = Some((f.take().unwrap())(vm))),
-    );
+    let mut call = |vm: &mut ScriptVm| out = Some((f.take().unwrap())(vm));
+    let mut call = ScriptVmCall::new(&mut call);
+    with_vm_with(host, try_, &mut call);
+    call.resume_if_panicked();
     out
 }
 #[inline]
@@ -264,11 +295,10 @@ pub fn with_vm_thread<F: FnOnce(&mut ScriptVm) -> R, R>(
 ) -> R {
     let mut f = Some(f);
     let mut out = None;
-    with_vm_thread_with(
-        host,
-        thread_id,
-        &mut ScriptVmCall::new(&mut |vm: &mut ScriptVm| out = Some((f.take().unwrap())(vm))),
-    );
+    let mut call = |vm: &mut ScriptVm| out = Some((f.take().unwrap())(vm));
+    let mut call = ScriptVmCall::new(&mut call);
+    with_vm_thread_with(host, thread_id, &mut call);
+    call.resume_if_panicked();
     out.unwrap()
 }
 #[relax_api]

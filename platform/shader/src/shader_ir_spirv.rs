@@ -1735,10 +1735,6 @@ impl<'a> Gen<'a> {
                     sum
                 }
             }
-            Builtin::FMod => {
-                let ids = self.uniform_args(args, rs, rn)?;
-                self.ins_id(OP_F_REM, t, &ids)
-            }
             Builtin::Inverse => {
                 let v = self.value(args[0])?;
                 self.ext_id(GL_MATRIX_INVERSE, t, &[v])

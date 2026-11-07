@@ -30,58 +30,60 @@ pub fn dispatch_network_response(host: &mut ScriptHostContext, response: &Networ
         ),
     };
     let event = ScriptNetworkEvent::begin(host, kind, id);
-    event.dispatch(
-        host,
-        &mut ScriptVmCall::new(&mut |vm: &mut ScriptVm| {
-            let value = match response {
-                NetworkResponse::HttpResponse { response, .. }
-                | NetworkResponse::HttpStreamChunk { response, .. }
-                | NetworkResponse::HttpStreamComplete { response, .. } => {
-                    let builder = ScriptHttpResponseValue::begin(
-                        vm,
-                        response.metadata_id,
-                        response.status_code,
-                    );
-                    for (name, values) in &response.headers {
-                        let header = builder.start_header(vm, name);
-                        for value in values {
-                            header.append_value(vm, value);
-                        }
-                        builder.finish_header(vm, header);
+    // A panic of the handler comes back from `dispatch` (the VM back on the
+    // host, the request kept) and goes on here, on the caller's side.
+    let mut handle = |vm: &mut ScriptVm| {
+        let value = match response {
+            NetworkResponse::HttpResponse { response, .. }
+            | NetworkResponse::HttpStreamChunk { response, .. }
+            | NetworkResponse::HttpStreamComplete { response, .. } => {
+                let builder = ScriptHttpResponseValue::begin(
+                    vm,
+                    response.metadata_id,
+                    response.status_code,
+                );
+                for (name, values) in &response.headers {
+                    let header = builder.start_header(vm, name);
+                    for value in values {
+                        header.append_value(vm, value);
                     }
-                    // Reuse C3's borrowed scalar/body view. Header groups were
-                    // streamed above, including groups with zero values.
-                    let view = NetworkResponseView {
-                        kind,
-                        id,
-                        metadata_id: response.metadata_id,
-                        status_code: response.status_code,
-                        headers: &[],
-                        has_body: response.body.is_some(),
-                        body: response.body.as_deref().unwrap_or_default(),
-                        message: "",
-                        loaded: 0,
-                        total: 0,
-                    };
-                    builder.finish(vm, &view)
+                    builder.finish_header(vm, header);
                 }
-                NetworkResponse::HttpError { .. } => {
-                    response.with_view(|view| http_error_value(vm, view))
-                }
-                NetworkResponse::WsMessage {
-                    message: WsMessage::Binary(bytes),
-                    ..
-                } => vm.heap_mut().new_array_from_slice_u8(bytes).into(),
-                NetworkResponse::WsMessage {
-                    message: WsMessage::Text(text),
-                    ..
-                }
-                | NetworkResponse::WsError { message: text, .. } => vm.new_string(text),
-                _ => NIL,
-            };
-            event.call(vm, value);
-        }),
-    );
+                // Reuse C3's borrowed scalar/body view. Header groups were
+                // streamed above, including groups with zero values.
+                let view = NetworkResponseView {
+                    kind,
+                    id,
+                    metadata_id: response.metadata_id,
+                    status_code: response.status_code,
+                    headers: &[],
+                    has_body: response.body.is_some(),
+                    body: response.body.as_deref().unwrap_or_default(),
+                    message: "",
+                    loaded: 0,
+                    total: 0,
+                };
+                builder.finish(vm, &view)
+            }
+            NetworkResponse::HttpError { .. } => {
+                response.with_view(|view| http_error_value(vm, view))
+            }
+            NetworkResponse::WsMessage {
+                message: WsMessage::Binary(bytes),
+                ..
+            } => vm.heap_mut().new_array_from_slice_u8(bytes).into(),
+            NetworkResponse::WsMessage {
+                message: WsMessage::Text(text),
+                ..
+            }
+            | NetworkResponse::WsError { message: text, .. } => vm.new_string(text),
+            _ => NIL,
+        };
+        event.call(vm, value);
+    };
+    let mut call = ScriptVmCall::new(&mut handle);
+    event.dispatch(host, &mut call);
+    call.resume_if_panicked();
 }
 
 #[inline(always)]

@@ -125,7 +125,7 @@ fn draw_sources(output: &mut ShaderOutput, types: &impl crate::shader_types::Sha
     }
     for io in &entry.outputs {
         if let IrIoBinding::Location(_) = io.binding {
-            writeln!(vertex, "out {};", cx.decl(io.ty, &io.name)).ok();
+            writeln!(vertex, "{}out {};", flat(&ir, io), cx.decl(io.ty, &io.name)).ok();
         }
     }
     for f in callees_first(&ir, &[vertex_main]) {
@@ -151,7 +151,7 @@ fn draw_sources(output: &mut ShaderOutput, types: &impl crate::shader_types::Sha
     for io in &entry.inputs {
         // gl_FragCoord (the depth output's default) is built in
         if let IrIoBinding::Location(_) = io.binding {
-            writeln!(fragment, "in {};", cx.decl(io.ty, &io.name)).ok();
+            writeln!(fragment, "{}in {};", flat(&ir, io), cx.decl(io.ty, &io.name)).ok();
         }
     }
     for io in &entry.outputs {
@@ -334,6 +334,14 @@ fn textures(cx: &TextCx, output: &ShaderOutput, fragment: bool, out: &mut String
             }
             writeln!(out, "uniform {} tex_{};", cx.glsl_sampler_type(tt), io.name).ok();
         }
+    }
+}
+
+/// An integer varying's qualifier: GLSL requires it flat.
+fn flat(m: &IrModule, io: &IrEntryIo) -> &'static str {
+    match m.scalar_of(io.ty) {
+        Some(IrScalar::I32 | IrScalar::U32) => "flat ",
+        _ => "",
     }
 }
 

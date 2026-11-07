@@ -17,7 +17,7 @@ fn is_uint_pod(b: &crate::mod_pod::ScriptPodBuiltins, t: ScriptPodType) -> bool 
     t == b.pod_u32 || t == b.pod_vec2u || t == b.pod_vec3u || t == b.pod_vec4u
 }
 
-fn is_float_pod(b: &crate::mod_pod::ScriptPodBuiltins, t: ScriptPodType) -> bool {
+pub(crate) fn is_float_pod(b: &crate::mod_pod::ScriptPodBuiltins, t: ScriptPodType) -> bool {
     t == b.pod_f32
         || t == b.pod_f16
         || t == b.pod_vec2f
@@ -91,7 +91,7 @@ impl IrFnCompiler {
         }
     }
 
-    fn lit_of(&self, e: ExprId) -> Option<IrLit> {
+    pub(crate) fn lit_of(&self, e: ExprId) -> Option<IrLit> {
         if e == NO_EXPR {
             return None;
         }
@@ -376,11 +376,18 @@ impl IrFnCompiler {
             self.pop_resolved(vm, output)
         };
         let (t1, e1) = self.pop_resolved(vm, output);
+        let (ty, e) = self.arithmetic(vm, output, op, is_int, (t1, e1), (t2, e2));
+        self.push(ty, e);
+    }
+
+    /// `a op b`, typed and folded as the operator is.
+    pub(crate) fn arithmetic(&mut self, vm: &ScriptVm, output: &mut ShaderOutput, op: BinOp, is_int: bool, a: (ShaderType, ExprId), b: (ShaderType, ExprId)) -> (ShaderType, ExprId) {
+        let ((t1, e1), (t2, e2)) = (a, b);
         let (t1, e1) = self.adapt_lifted(vm, output, t1, e1, &t2);
         let (t2, e2) = self.adapt_lifted(vm, output, t2, e2, &t1);
         if let (Some(a), Some(b)) = (self.lit_of(e1), self.lit_of(e2)) {
-            if let Some((ty, e)) = self.fold(op, a, b) {
-                return self.push(ty, e);
+            if let Some(folded) = self.fold(op, a, b) {
+                return folded;
             }
         }
         let pods = vm.bx.code.builtins.pod.clone();
@@ -398,7 +405,7 @@ impl IrFnCompiler {
             None => TY_VOID,
         };
         let e = self.expr(ExprKind::Binary(op, e1, e2), it);
-        self.push(ty, e);
+        (ty, e)
     }
 
     /// `place op= value`, checked as `place = place op value`.
