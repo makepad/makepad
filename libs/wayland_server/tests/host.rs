@@ -38,12 +38,14 @@ fn host_thread_roundtrip_and_shutdown() {
         }
     }
     assert!(got_gone);
-    assert!(woke.load(Ordering::SeqCst) > 0);
     // a command reaches the server thread without error even for unknown surfaces
     host.send(Command::KeyboardFocus(None));
     host.send(Command::FrameDone { surface: (1, 99), time_ms: 1 });
     drop(s);
     drop(host); // joins the thread
+    // The server thread wakes the host after it queues a batch of events, so SurfaceGone can be
+    // read before its wake has run: the wake is certain only once the thread is joined.
+    assert!(woke.load(Ordering::SeqCst) > 0);
     assert!(!path.exists());
     std::fs::remove_dir_all(&dir).unwrap();
 }

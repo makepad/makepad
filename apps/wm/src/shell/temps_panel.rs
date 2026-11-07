@@ -195,8 +195,10 @@ impl ShellPanel {
         // the hero: the hottest reading (or what is too hot), and the range chips on the right
         let (hero, mut rest) = cut_top(body, HERO_H);
         let hot: Vec<String> = temps.sensors.iter().enumerate().filter(|(i, _)| temps.alarmed(*i)).map(|(i, s)| format!("{} {}", s.name(true), s.unit.format(temps.now[i]))).collect();
-        let meta = if !hot.is_empty() {
+        let meta = if !hot.is_empty() && !temps.quiet {
             format!("Too hot: {}", hot.join(", "))
+        } else if !hot.is_empty() {
+            format!("Over its limit: {}", hot.join(", "))
         } else {
             temps.sensors.iter().zip(&temps.now).filter(|(s, v)| s.unit == Unit::Celsius && s.limit.is_some() && !v.is_nan())
                 .max_by(|a, b| (a.1 - a.0.limit.unwrap()).total_cmp(&(b.1 - b.0.limit.unwrap())))
@@ -206,6 +208,8 @@ impl ShellPanel {
         if self.temps_view.back > 0.5 {
             chips.insert(0, (Hit::TempsLive, "Live".to_string(), false));
         }
+        // the warning's switch, apart from the ranges: selected while it warns
+        chips.insert(0, (Hit::TempsWarn, "Warnings".to_string(), !temps.quiet));
         let px = tok.font.caption;
         let mut x = hero.pos.x + hero.size.x;
         let chip_h = 22.0;
@@ -218,7 +222,7 @@ impl ShellPanel {
             x -= 3.0;
         }
         let trailing = hero.pos.x + hero.size.x - x + 8.0;
-        let hero_fg = if hot.is_empty() { fg } else { err };
+        let hero_fg = if hot.is_empty() || temps.quiet { fg } else { err };
         self.d.panel_hero(cx, hero, &tok, hero_fg, Ico::Thermometer, "Temperatures", &meta, trailing);
         for (hit, r, label, selected) in chip_rects {
             let state = if selected { CtrlState::Selected } else if self.hot == Some(hit) { CtrlState::Hover } else { CtrlState::Normal };
@@ -462,7 +466,7 @@ impl ShellPanel {
         }
     }
 
-    /// A press in the temperature panel: a range chip, Live, or the start of a pan.
+    /// A press in the temperature panel: a range chip, Live, Warnings, or the start of a pan.
     pub(super) fn temps_press(&mut self, cx: &mut Cx, hit: Hit, p: Vec2d) {
         match hit {
             Hit::TempsRange(i) => {
@@ -470,6 +474,10 @@ impl ShellPanel {
                 self.temps_clamp_pan();
             }
             Hit::TempsLive => self.temps_view.back = 0.0,
+            Hit::TempsWarn => {
+                let quiet = !self.temps.quiet;
+                self.temps.set_quiet(quiet);
+            }
             Hit::TempsPlot(_) => {
                 let s_per_px = self.temps_view.plots.iter().find(|(r, _)| contains(*r, p)).map_or(1.0, |(r, s)| (s.t1 - s.t0) / r.size.x.max(1.0));
                 self.temps_view.drag = Some((p.x, self.temps_view.back, s_per_px));

@@ -158,6 +158,9 @@ runuser -u arch -- git -C /home/arch/makepad lfs install --local
 
 stage 'Installing the direct Vulkan WM launcher'
 install -d /etc/makepad
+if test -f /home/arch/makepad/tools/arch_installer/install-helper.sh; then
+    bash /home/arch/makepad/tools/arch_installer/install-helper.sh /
+fi
 install -m 0755 "$seed/wm-session.sh" /usr/local/bin/makepad-wm-session
 install -m 0644 "$seed/wm.env" /etc/makepad/wm.env
 install -m 0644 "$seed/makepad-wm.service" /etc/systemd/system/makepad-wm.service

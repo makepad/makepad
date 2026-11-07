@@ -371,9 +371,11 @@ enum Hit {
     DeskLinkDisconnect(u32),
     /// An enabled item of the open tray menu (its id).
     TrayItem(u64),
-    /// The temperature panel's range chip (`temps_view::RANGES`), its Live chip, a graph (pan).
+    /// The temperature panel's range chip (`temps_view::RANGES`), its Live chip, a graph (pan),
+    /// and its Warnings chip (the over-limit warning on or off).
     TempsRange(usize),
     TempsLive,
+    TempsWarn,
     TempsPlot(usize),
     #[cfg(target_os = "linux")]
     PairXbox(usize),
@@ -2704,7 +2706,7 @@ impl Widget for ShellPanel {
                                 super::system_linux::SystemCommand::PairXbox(receiver.id.clone()))));
                         }
                     }
-                    Some(hit @ (Hit::TempsRange(_) | Hit::TempsLive | Hit::TempsPlot(_))) => self.temps_press(cx, hit, e.abs),
+                    Some(hit @ (Hit::TempsRange(_) | Hit::TempsLive | Hit::TempsWarn | Hit::TempsPlot(_))) => self.temps_press(cx, hit, e.abs),
                     Some(Hit::DeskLinkDisconnect(session)) => {
                         cx.widget_action(self.uid, ShellPanelAction::DeskLinkDisconnect(session));
                     }

@@ -20,11 +20,16 @@
 //! under it; the card itself sits right-aligned in the strip, an opaque
 //! ground with a 2 px edge on its RIGHT. Open, the pane takes the pointer
 //! inside its card and the keyboard; closed, the strip is zero and the
-//! card sits just off the desk's left edge, still drawn and ticking (the
-//! child's frame-paced Ticks, the module's engine), so the assistant — started
-//! with the desktop, never on the first F10 — is configured, presenting
-//! and answering before the pane ever slides in, and a turn in flight
-//! finishes behind a hidden one.
+//! card sits just off the desk's left edge, still drawn, so the assistant —
+//! started with the desktop, never on the first F10 — is configured,
+//! presenting and answering before the pane ever slides in, and a turn in
+//! flight finishes behind a hidden one. Closed at rest, once the app has
+//! drawn its own frame, its client is told it is hidden (`HostedVisible`):
+//! it keeps answering but holds its drawing, so an off-screen card no longer
+//! keeps the whole desktop drawing at the app's frame rate. An open tells it
+//! it shows again and starts the slide with its next frame (`BodyShown`):
+//! the picture it held meanwhile may be hours old, and the slide's first
+//! frame already shows a quarter of the card.
 
 use crate::desk::ease_out_quint;
 use makepad_app_host::ClientId;
@@ -95,6 +100,69 @@ impl PaneStrip {
     }
 }
 
+/// What the pane's body is told of its showing, testable without a `Cx`
+/// (the module doc): hidden while the pane is closed at rest, and an open
+/// that told a hidden client it shows waits for its fresh frame.
+#[derive(Default)]
+struct BodyShown {
+    /// The body's presents when its client was last told it is hidden. A
+    /// present since is a client that does not know (a new image of its
+    /// process): it is told again.
+    told_hidden: Option<u64>,
+    /// An open waits for a present past this one before the slide starts.
+    opening_after: Option<u64>,
+}
+
+/// What the body's showing asks for now ([`BodyShown::step`]).
+#[derive(Debug, PartialEq)]
+enum BodyStep {
+    Rest,
+    /// Tell the client it is hidden.
+    Hide,
+    /// The fresh frame an open waited for came: start the slide.
+    Slide,
+}
+
+impl BodyShown {
+    /// The pane opens: true when its client was told it is hidden, so it
+    /// must be told it shows and the slide wait ([`Self::shown_at`]).
+    fn opening(&mut self) -> bool {
+        self.told_hidden.take().is_some()
+    }
+
+    /// The client was told it shows with `presents` frames made: the slide
+    /// waits for the next.
+    fn shown_at(&mut self, presents: u64) {
+        self.opening_after = Some(presents);
+    }
+
+    /// The client was told it is hidden with `presents` frames made.
+    fn hidden_at(&mut self, presents: u64) {
+        self.told_hidden = Some(presents);
+    }
+
+    /// The pane closes: an open's wait is over.
+    fn cancel(&mut self) {
+        self.opening_after = None;
+    }
+
+    /// What to do with the card `showing` (open, or sliding), the app having
+    /// `drawn` its own frame, the body at `presents` frames.
+    fn step(&mut self, showing: bool, drawn: bool, presents: u64) -> BodyStep {
+        if let Some(after) = self.opening_after {
+            if presents <= after {
+                return BodyStep::Rest;
+            }
+            self.opening_after = None;
+            return BodyStep::Slide;
+        }
+        if showing || !drawn || self.told_hidden == Some(presents) {
+            return BodyStep::Rest;
+        }
+        BodyStep::Hide
+    }
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct ShellAiPane {
     #[source]
@@ -134,6 +202,9 @@ pub struct ShellAiPane {
     /// name on the first open, kept for the life of the desk.
     #[rust]
     overlay: Option<WidgetRef>,
+    /// What the body's client was told of its showing.
+    #[rust]
+    shown: BodyShown,
 }
 
 impl ShellAiPane {
@@ -253,8 +324,15 @@ impl ShellAiPane {
             return;
         }
         self.open = open;
-        self.anim_started = Some((cx.seconds_since_app_start(), self.t, open));
-        self.next_frame = cx.new_next_frame();
+        self.shown.cancel();
+        if open && self.shown.opening() {
+            if let Some(Some(presents)) = self.with_body(cx, |cx, b| b.set_visible(cx, true).then(|| b.presents())) {
+                // The slide starts with its next frame (`sync_body`).
+                self.shown.shown_at(presents);
+                return;
+            }
+        }
+        self.slide(cx);
         if !open {
             // A hidden pane must not keep the keyboard: typing would go on
             // reaching the chat behind nothing.
@@ -269,8 +347,47 @@ impl ShellAiPane {
         self.redraw(cx);
     }
 
+    /// Slide toward `open` from where the card is now.
+    fn slide(&mut self, cx: &mut Cx) {
+        self.anim_started = Some((cx.seconds_since_app_start(), self.t, self.open));
+        self.next_frame = cx.new_next_frame();
+    }
+
+    /// The body that has a client to tell what shows of it: the child's run
+    /// view, or a HAL domain's view. None for a module root (it draws in
+    /// this process).
+    fn with_body<R>(&mut self, cx: &mut Cx, f: impl FnOnce(&mut Cx, &mut dyn TileHost) -> R) -> Option<R> {
+        match self.overlay.clone() {
+            Some(overlay) => {
+                let mut view = overlay.borrow_mut::<MpDomainView>()?;
+                Some(f(cx, &mut *view))
+            }
+            None => self.with_run_view(cx, |cx, v| f(cx, v)),
+        }
+    }
+
+    /// Tell the body's client what shows of it ([`BodyShown`]), and start an
+    /// open's slide once the frame it waited for came.
+    fn sync_body(&mut self, cx: &mut Cx) {
+        let showing = self.showing();
+        let Some((drawn, presents)) = self.with_body(cx, |_, b| (b.app_drawn(), b.presents())) else { return };
+        match self.shown.step(showing, drawn, presents) {
+            BodyStep::Rest => {}
+            BodyStep::Slide => {
+                self.slide(cx);
+                self.redraw(cx);
+            }
+            BodyStep::Hide => {
+                if self.with_body(cx, |cx, b| b.set_visible(cx, false)) == Some(true) {
+                    self.shown.hidden_at(presents);
+                }
+            }
+        }
+    }
+
     /// The child is gone: no client, no picture, pane shut.
     pub fn reset(&mut self, cx: &mut Cx) {
+        self.shown = BodyShown::default();
         self.client = None;
         self.with_run_view(cx, |cx, v| v.clear_run_target(cx));
         self.set_open(cx, false);
@@ -356,6 +473,10 @@ impl Widget for ShellAiPane {
             Some(overlay) => overlay.handle_event(cx, event, scope),
             None => self.view.handle_event(cx, event, scope),
         }
+        // A frame arrives with an event of its own, never with input.
+        if !(pointer || keys) {
+            self.sync_body(cx);
+        }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
@@ -363,7 +484,7 @@ impl Widget for ShellAiPane {
         // the desk row lays the desk out after it. The card is drawn
         // right-aligned in the strip — off the row's left edge while
         // hidden, where a child process still keeps a real rect (so it is
-        // configured, gets a swapchain and presents its frames) and a
+        // configured, gets a swapchain and presents its first frame) and a
         // module root keeps a live picture: the first slide-in shows the
         // assistant already running, not a "starting…" wash.
         cx.begin_turtle(walk, Layout::default());
@@ -392,6 +513,43 @@ impl Widget for ShellAiPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_closed_pane_hides_its_client_and_an_open_waits_for_its_fresh_frame() {
+        let mut s = BodyShown::default();
+        // Not before the app's own frame: the first open needs its picture.
+        assert_eq!(s.step(false, false, 3), BodyStep::Rest);
+        assert_eq!(s.step(false, true, 4), BodyStep::Hide);
+        s.hidden_at(4);
+        // Closed at rest nothing more is said, however often it is asked.
+        for _ in 0..100 {
+            assert_eq!(s.step(false, true, 4), BodyStep::Rest);
+        }
+        // A frame while hidden: a client that does not know it (a new image
+        // of its process) is told again.
+        assert_eq!(s.step(false, true, 5), BodyStep::Hide);
+        s.hidden_at(5);
+        // An open tells it it shows, and the slide waits for its next frame.
+        assert!(s.opening());
+        s.shown_at(5);
+        assert_eq!(s.step(true, true, 5), BodyStep::Rest, "the old picture never slides in");
+        assert_eq!(s.step(true, true, 6), BodyStep::Slide);
+        assert_eq!(s.step(true, true, 7), BodyStep::Rest, "open, it draws freely");
+        // Closed again, it is hidden once the slide-out has ended.
+        assert_eq!(s.step(true, true, 9), BodyStep::Rest, "sliding out");
+        assert_eq!(s.step(false, true, 9), BodyStep::Hide);
+        s.hidden_at(9);
+        // A close while an open waits ends the wait; the client, told it
+        // shows, is hidden again at rest.
+        assert!(s.opening());
+        s.shown_at(9);
+        s.cancel();
+        assert_eq!(s.step(false, true, 9), BodyStep::Hide);
+        // An open of a client never told it is hidden slides at once.
+        let mut fresh = BodyShown::default();
+        assert!(!fresh.opening());
+        assert_eq!(fresh.step(true, false, 0), BodyStep::Rest);
+    }
 
     #[test]
     fn the_card_width_follows_the_row_within_its_bounds() {

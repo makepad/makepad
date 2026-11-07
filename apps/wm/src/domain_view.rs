@@ -68,6 +68,8 @@ pub struct MpDomainView {
     #[rust(1.0f32)] fade: f32,
     #[rust(true)] takes_key_focus: bool,
     #[rust] serial: u64,
+    /// The child's frames so far (`TileHost::presents`): `serial` also moves on a new window.
+    #[rust] frames: u64,
     /// The app ended: its card has the desk's title bar (`WmDesk::set_own_chrome`).
     #[rust] desk_chrome: bool,
     #[rust] chrome_press: ChromePresses,
@@ -156,6 +158,7 @@ impl MpDomainView {
             self.tell_visible(cx, false);
         }
         self.first_frame.get_or_insert_with(crate::host::now);
+        self.frames += 1;
         self.serial += 1;
         self.redraw(cx);
     }
@@ -233,6 +236,7 @@ impl TileHost for MpDomainView {
     fn set_close_crop(&mut self, crop: Option<(Vec2d, Vec2d)>) { self.crop = crop; }
     fn set_fade(&mut self, fade: f32) { self.fade = fade; }
     fn content_serial(&self) -> Option<u64> { self.has_frame().then_some(self.serial) }
+    fn presents(&self) -> u64 { self.frames }
     /// The same `HostedVisible` a process child gets, as an app message to the domain's window:
     /// a covered domain holds its frames (except for a remote request that needs one).
     fn set_visible(&mut self, cx: &mut Cx, visible: bool) -> bool {

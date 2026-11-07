@@ -17,7 +17,7 @@ if test ! -x target/release/makepad-app-wm || test "${MAKEPAD_WM_BUILD:-0}" = 1;
     cargo build --offline --release -p makepad-app-wm
 fi
 # The WM's own flags (which apps run under the JIT); the prebuild below reads the same ones.
-wm_flags=(--jit sandbox)
+wm_flags=(--jit sandbox --jit arch-installer)
 # The AI Hub app and the JIT tool are built the way the WM starts them: `makepad-wm-build` runs
 # the WM's own start command of each (`cargo run --release -p makepad-app-aihub --features
 # <features>`, hub_app.rs; `cargo run --release -p makepad-run --bin makepad`) with `build`, in

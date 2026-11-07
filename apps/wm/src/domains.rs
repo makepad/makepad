@@ -294,26 +294,22 @@ impl App {
                             self.begin_drag_on(cx, client, abs, false, false);
                         }
                     }
+                    // The window's caption buttons and requests: the rules of every window
+                    // (own_chrome.rs), the green button full screen.
                     ChildWindowAction::State(state) => {
                         use makepad_hal::window_state as ws;
-                        match *state {
-                            ws::CLOSE => self.request_close(cx, client),
-                            ws::MINIMIZE => self.minimize_desktop(cx, client),
-                            ws::MAXIMIZE => {
-                                if self.state_mut().layout_of(client).is_fullscreen_space(client) {
-                                    self.fullscreen_request(cx, client, false);
-                                } else {
-                                    let maximised = self.state_mut().layout_of(client).is_maximised(client);
-                                    self.fullscreen_request(cx, client, !maximised);
-                                }
-                            }
-                            ws::RESTORE => {
-                                if self.state_mut().layout_of(client).is_fullscreen_space(client) {
-                                    self.fullscreen_request(cx, client, false);
-                                } else if self.state_mut().layout_of(client).is_maximised(client) { self.fullscreen_request(cx, client, false); }
-                            }
-                            ws::FULLSCREEN => self.fullscreen_request(cx, client, true),
-                            _ => {}
+                        use makepad_studio_protocol::window_op;
+                        let op = match *state {
+                            ws::CLOSE => Some(window_op::CLOSE),
+                            ws::MINIMIZE => Some(window_op::MINIMIZE),
+                            ws::MAXIMIZE => Some(window_op::MAXIMIZE),
+                            ws::RESTORE => Some(window_op::RESTORE),
+                            ws::FULLSCREEN => Some(makepad_hal::window_controls::WINDOW_OP_FULLSCREEN),
+                            _ => None,
+                        };
+                        let state = self.own_chrome_state(client);
+                        if let Some(action) = op.and_then(|op| own_chrome::route_window_op(&makepad_studio_protocol::HostedWindowOp { op }, state)) {
+                            self.window_action(cx, client, action);
                         }
                     }
                 }

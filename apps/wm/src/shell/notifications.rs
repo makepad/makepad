@@ -92,6 +92,20 @@ struct Live {
     hovered: bool,
 }
 
+impl Live {
+    /// Its countdown runs: it has a lifetime and no pointer over it.
+    fn ticking(&self) -> bool {
+        self.lifetime > 0.0 && !self.hovered
+    }
+}
+
+/// The stack wants frames only while a toast counts down: a toast that never expires (a
+/// "restart to apply" one, a critical one) or a hovered one draws once and rests. One sticky
+/// toast kept the WM at a frame per display refresh, 120 a second, for as long as it stood (11-07).
+fn counting_down(live: &[Live]) -> bool {
+    live.iter().any(Live::ticking)
+}
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
@@ -412,7 +426,7 @@ impl Widget for ShellNotifications {
             let mut busy = false;
             for entry in self.live.iter_mut() {
                 // Hovering pauses the countdown (`ticking: !card.hovered`).
-                if entry.lifetime > 0.0 && !entry.hovered {
+                if entry.ticking() {
                     entry.left -= dt;
                     busy = true;
                 }
@@ -423,13 +437,14 @@ impl Widget for ShellNotifications {
             if before != self.live.len() || busy {
                 self.redraw(cx);
             }
-            if !self.live.is_empty() {
+            if counting_down(&self.live) {
                 self.next_frame = cx.new_next_frame();
             }
         }
         match event {
             Event::MouseMove(e) => {
                 let rects = self.card_rects.clone();
+                let was = counting_down(&self.live);
                 let mut changed = false;
                 for entry in self.live.iter_mut() {
                     let over = rects
@@ -444,6 +459,11 @@ impl Widget for ShellNotifications {
                 }
                 if changed {
                     self.redraw(cx);
+                }
+                // the pointer left a card: its countdown goes on from where it paused
+                if !was && counting_down(&self.live) {
+                    self.last_time = 0.0;
+                    self.next_frame = cx.new_next_frame();
                 }
             }
             Event::MouseDown(e) => {
@@ -506,6 +526,20 @@ pub fn fixtures() -> Vec<Notification> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_counting_down_toast_asks_for_frames() {
+        let live = |urgency: Urgency, hovered: bool| {
+            let mut note = fixtures()[0].clone();
+            note.urgency = urgency;
+            let lifetime = note.lifetime();
+            Live { note, lifetime, left: lifetime, hovered }
+        };
+        assert!(!counting_down(&[]));
+        assert!(!counting_down(&[live(Urgency::Critical, false)]), "a toast that never expires rests");
+        assert!(!counting_down(&[live(Urgency::Normal, true)]), "a hovered one waits for the pointer");
+        assert!(counting_down(&[live(Urgency::Critical, false), live(Urgency::Normal, false)]));
+    }
 
     #[test]
     fn lifetimes_follow_duration_for() {

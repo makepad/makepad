@@ -2175,7 +2175,7 @@ impl App {
         // its tile goes when the app says the window is gone.
         if let Some((owner, window_id)) = self.client_windows.owner(client) {
             if let Some(sender) = self.state_mut().clients.get(&owner).and_then(|slot| slot.sender.clone()) {
-                let ask = makepad_platform::ime::HostedWindow::new(window_id, makepad_platform::ime::hosted_window_op::CLOSE_REQUEST);
+                let ask = makepad_hal::window_controls::HostedWindow::new(window_id, makepad_hal::window_controls::hosted_window_op::CLOSE_REQUEST);
                 send_to_app(&sender, vec![StudioToApp::Custom(ask.to_json())]);
             } else {
                 self.remove_client(cx, client);
@@ -3500,9 +3500,27 @@ impl App {
         }
     }
 
+    /// Where `client`'s window stands, for the rules an app cannot see (own_chrome.rs).
+    pub(crate) fn own_chrome_state(&mut self, client: ClientId) -> own_chrome::WindowState {
+        let layout = self.state_mut().layout_of(client);
+        own_chrome::WindowState { maximised: layout.is_maximised(client), fullscreen: layout.is_fullscreen_space(client) }
+    }
+
+    /// Does what a caption button, a double click or an app's window op asked for `client`.
+    pub(crate) fn window_action(&mut self, cx: &mut Cx, client: ClientId, action: own_chrome::WindowAction) {
+        match action {
+            own_chrome::WindowAction::Close => self.request_close(cx, client),
+            own_chrome::WindowAction::Minimize => self.minimize_desktop(cx, client),
+            own_chrome::WindowAction::Show => self.restore_desktop(cx, client),
+            own_chrome::WindowAction::Maximise(_) => self.maximise_toggle(cx, client),
+            own_chrome::WindowAction::LeaveFullscreen => self.fullscreen_request(cx, client, false),
+            own_chrome::WindowAction::EnterFullscreen => self.fullscreen_request(cx, client, true),
+        }
+    }
+
     /// The app `client` closed one of its later windows, or asked something of it.
-    fn later_window_op(&mut self, cx: &mut Cx, client: ClientId, window: makepad_platform::ime::HostedWindow) {
-        use makepad_platform::ime::hosted_window_op as op;
+    fn later_window_op(&mut self, cx: &mut Cx, client: ClientId, window: makepad_hal::window_controls::HostedWindow) {
+        use makepad_hal::window_controls::hosted_window_op as op;
         // Any window's asked size, the app's first window included.
         if window.op == op::SIZE {
             let tile = self.client_windows.route(client, window.window_id);
@@ -3533,11 +3551,22 @@ impl App {
         if tile == client || !self.state_mut().clients.contains_key(&tile) {
             return;
         }
+        // What the app asks of a later window follows the rules of its first (own_chrome.rs).
+        let asked = match window.op {
+            op::MINIMIZE => Some(makepad_studio_protocol::window_op::MINIMIZE),
+            op::MAXIMIZE => Some(makepad_studio_protocol::window_op::MAXIMIZE),
+            op::FULLSCREEN => Some(makepad_hal::window_controls::WINDOW_OP_FULLSCREEN),
+            op::RESTORE => Some(makepad_studio_protocol::window_op::RESTORE),
+            _ => None,
+        };
+        if let Some(asked) = asked {
+            let state = self.own_chrome_state(tile);
+            if let Some(action) = own_chrome::route_window_op(&makepad_studio_protocol::HostedWindowOp { op: asked }, state) {
+                self.window_action(cx, tile, action);
+            }
+            return;
+        }
         match window.op {
-            op::MINIMIZE => self.minimize_desktop(cx, tile),
-            op::MAXIMIZE => self.maximise_toggle(cx, tile),
-            op::FULLSCREEN => self.fullscreen_request(cx, tile, true),
-            op::RESTORE => self.fullscreen_request(cx, tile, false),
             op::MOVE => self.move_later_window(cx, client, tile, dvec2(window.x, window.y)),
             op::TITLE => {
                 if let Some(slot) = self.state_mut().clients.get_mut(&tile) {
@@ -3911,28 +3940,16 @@ impl App {
                     return;
                 }
                 // One of the app's later windows: closed by the app, or what it asked of it.
-                if let Some(window) = makepad_platform::ime::HostedWindow::parse(&json) {
+                if let Some(window) = makepad_hal::window_controls::HostedWindow::parse(&json) {
                     self.later_window_op(cx, client, window);
                     return;
                 }
                 // The app's own caption buttons (own_chrome.rs): the desk does
                 // what its own close / minimise / maximise would.
                 if let Some(op) = makepad_studio_protocol::HostedWindowOp::parse(&json) {
-                    let state = {
-                        let layout = self.state_mut().layout_of(client);
-                        own_chrome::WindowState { maximised: layout.is_maximised(client), fullscreen: layout.is_fullscreen_space(client) }
-                    };
-                    match own_chrome::route_window_op(&op, state) {
-                        Some(own_chrome::WindowAction::Close) => self.request_close(cx, client),
-                        Some(own_chrome::WindowAction::Minimize) => self.minimize_desktop(cx, client),
-                        Some(own_chrome::WindowAction::Show) => self.restore_desktop(cx, client),
-                        // The app's maximise button toggles maximise, as a double click on its
-                        // caption does (the window keeps its caption; fullscreen is the app's
-                        // own fullscreen request).
-                        Some(own_chrome::WindowAction::Maximise(_)) => self.maximise_toggle(cx, client),
-                        Some(own_chrome::WindowAction::LeaveFullscreen) => self.fullscreen_request(cx, client, false),
-                        Some(own_chrome::WindowAction::EnterFullscreen) => self.fullscreen_request(cx, client, true),
-                        None => {}
+                    let state = self.own_chrome_state(client);
+                    if let Some(action) = own_chrome::route_window_op(&op, state) {
+                        self.window_action(cx, client, action);
                     }
                     return;
                 }
@@ -3960,17 +3977,10 @@ impl App {
                         });
                         if double {
                             self.title_press = None;
-                            // What the window declared (`double_click` on its `Window`):
-                            // maximise in place, or fullscreen on its screen (an output window).
-                            let state = {
-                                let layout = self.state_mut().layout_of(client);
-                                own_chrome::WindowState { maximised: layout.is_maximised(client), fullscreen: layout.is_fullscreen_space(client) }
-                            };
-                            match own_chrome::caption_double_click(answer.double_click, state) {
-                                own_chrome::WindowAction::EnterFullscreen => self.fullscreen_request(cx, client, true),
-                                own_chrome::WindowAction::LeaveFullscreen => self.fullscreen_request(cx, client, false),
-                                _ => self.maximise_toggle(cx, client),
-                            }
+                            // Maximise in place, as on every caption (out of full screen); a
+                            // picture window that drags by its content keeps its own double click.
+                            let state = self.own_chrome_state(client);
+                            self.window_action(cx, client, own_chrome::drag_double_click(answer.double_click, state));
                         } else {
                             self.title_press = Some((client, now, abs));
                             if let own_chrome::CaptionPress::Drag(abs) = press {
@@ -4784,9 +4794,10 @@ impl App {
         }
     }
 
-    /// The bar takes the current readings and redraws on its own when what it shows changed
-    /// (true then): the second's tick, where a new clock minute or meter reading changes the
-    /// bar and nothing else, so the rest of the desktop and the scene's cached content stay.
+    /// The bar takes the current readings and redraws on its own when what it draws changed
+    /// (true then, `ShellBar::show`): the second's tick, where a new clock minute or meter
+    /// reading changes the bar and nothing else, so the rest of the desktop and the scene's
+    /// cached content stay.
     fn refresh_bar(&mut self, cx: &mut Cx) -> bool {
         self.sync_bar_placement(cx);
         if let Some(clock)=self.bar_sample.clock.split_whitespace().find(|s|s.contains(':')).map(str::to_string) {
@@ -4850,18 +4861,10 @@ impl App {
         }
         self.bar_shown = shown;
         let bar = self.ui.widget(cx, ids!(shell_bar));
-        {
-            let mut borrowed = bar.borrow_mut::<shell::bar::ShellBar>();
-            if let Some(b) = borrowed.as_mut() {
-                b.data = data;
-                b.segments = segments;
-                // The direct-display session has no outer window to control.
-                b.window_controls = window_controls;
-                b.launcher = launcher;
-            }
-        }
-        bar.redraw(cx);
-        true
+        let mut borrowed = bar.borrow_mut::<shell::bar::ShellBar>();
+        // The direct-display session has no outer window to control.
+        let drawn = borrowed.as_mut().is_some_and(|b| b.show(cx, data, segments, window_controls, launcher));
+        drawn
     }
 
     /// Put the bar where `shell::bar::bar_placement` says: on one screen
@@ -5174,6 +5177,9 @@ impl App {
                 Ok((rx, worker)) => {
                     self.temps_rx = Some(rx);
                     self.temps_worker = Some(worker);
+                    if let Some(mut p) = self.ui.widget(cx, ids!(shell_panel)).borrow_mut::<shell::panels::ShellPanel>() {
+                        p.temps.quiet = shell::temps::quiet_saved();
+                    }
                 }
                 Err(error) => {
                     log!("wm: could not start the temperature sampler: {error}");
@@ -5198,7 +5204,7 @@ impl App {
             if open == Some(shell::panels::PanelKind::Temps) {
                 p.redraw(cx);
             }
-            (badge, open, alarm, p.temps.any_alarm())
+            (badge, open, alarm, p.temps.warns())
         };
         self.bar_sample.temps = badge;
         // never over another open flyout (a password being typed, a scale being tried): the

@@ -1,7 +1,7 @@
 //! A hosted app's windows after its first (Stage's output window, a second view): each is
 //! a window of its own on the desk, with its own tile, frame, focus and close. Its slot has
 //! no process of its own: messages go to its app's process, and the app's frames, input and
-//! window ops for it carry its `window_id` (`ime::HostedWindow`).
+//! window ops for it carry its `window_id` (`window_controls::HostedWindow`).
 //!
 //! This is the bookkeeping: which desk client shows which window of which app.
 

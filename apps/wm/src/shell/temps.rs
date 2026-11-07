@@ -13,7 +13,9 @@
 //! The warning: a temperature at or over its sensor's limit for [`SUSTAIN_S`] turns the badge red
 //! and opens the panel once per episode (until every alarm has cleared, [`HYSTERESIS`] under its
 //! limit). Limits come from the sensor's own critical point when it reports one, else from the
-//! kind of part ([`limit_for`]).
+//! kind of part ([`limit_for`]). The person can turn the warning off for a machine whose parts
+//! run hot by design ([`Temps::quiet`], kept in `~/.makepad/wm/temps-quiet`): the readings, the
+//! limits and the alarms in the panel stay, only the red badge and the panel opening go.
 
 // Only Linux reads sensors yet: elsewhere the history and warning are compiled but never fed.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -308,6 +310,8 @@ pub struct Temps {
     peak_from: Option<f64>,
     alarms: Vec<Alarm>,
     episode: bool,
+    /// The warning is off: no red or warm badge and no panel opening (the alarms are still kept).
+    pub quiet: bool,
     pub badge: Badge,
     /// the latest reading of each sensor
     pub now: Vec<f32>,
@@ -325,6 +329,22 @@ impl Temps {
 
     pub fn any_alarm(&self) -> bool {
         self.alarms.iter().any(|a| a.on)
+    }
+
+    /// An alarm the person is warned about: one is on and the warning is not turned off.
+    pub fn warns(&self) -> bool {
+        !self.quiet && self.any_alarm()
+    }
+
+    /// Turns the warning off or on; the badge follows at once and the choice is kept.
+    pub fn set_quiet(&mut self, quiet: bool) {
+        self.quiet = quiet;
+        self.badge = self.compute_badge();
+        let path = quiet_path();
+        let saved = if quiet { std::fs::write(&path, "off\n") } else { std::fs::remove_file(&path).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) };
+        if let Err(e) = saved {
+            makepad_widgets::log!("wm: the temperature warning setting is not kept ({}): {e}", path.display());
+        }
     }
 
     fn set_sensors(&mut self, sensors: Arc<Vec<Sensor>>) {
@@ -374,7 +394,7 @@ impl Temps {
             }
         }
         let any = self.any_alarm();
-        let episode_started = started && !self.episode;
+        let episode_started = started && !self.episode && !self.quiet;
         self.episode = any;
         self.now = values;
         self.last_at = at;
@@ -385,7 +405,7 @@ impl Temps {
     }
 
     fn compute_badge(&self) -> Badge {
-        let mut heat = if self.any_alarm() { Heat::Alarm } else { Heat::Normal };
+        let mut heat = if self.warns() { Heat::Alarm } else { Heat::Normal };
         let mut level = 0.0f32;
         for (s, v) in self.sensors.iter().zip(&self.now) {
             let (Some(limit), false) = (s.limit, v.is_nan()) else { continue };
@@ -393,7 +413,7 @@ impl Temps {
                 continue;
             }
             level = level.max(((v - 30.0) / (limit - 30.0).max(1.0)).clamp(0.0, 1.0));
-            if heat == Heat::Normal && *v >= limit - WARM_MARGIN {
+            if !self.quiet && heat == Heat::Normal && *v >= limit - WARM_MARGIN {
                 heat = Heat::Warm;
             }
         }
@@ -407,7 +427,7 @@ impl Temps {
         }
         let mut tooltip = if parts.is_empty() { "Temperatures".to_string() } else { parts.join(" \u{b7} ") };
         let hot: Vec<String> = self.sensors.iter().enumerate().filter(|(i, _)| self.alarmed(*i)).map(|(_, s)| s.name(true)).collect();
-        if !hot.is_empty() {
+        if !hot.is_empty() && !self.quiet {
             tooltip = format!("Too hot: {} \u{2014} {}", hot.join(", "), tooltip);
         }
         Badge { heat, level, tooltip }
@@ -510,6 +530,16 @@ impl Temps {
 /// Spawn the lifetime sampler worker: one [`Frame`] a second. Dropping the receiver ends it.
 /// Linux only for now: elsewhere no sensor is read and the bar shows no thermometer.
 #[allow(clippy::type_complexity)]
+/// Where the turned-off warning is kept: the file exists while it is off.
+fn quiet_path() -> std::path::PathBuf {
+    crate::theme::makepad_home().join("wm").join("temps-quiet")
+}
+
+/// Whether the person turned the warning off (read once, when sampling starts).
+pub fn quiet_saved() -> bool {
+    quiet_path().exists()
+}
+
 pub fn start_sampler(
     spawner: &makepad_widgets::makepad_platform::thread::ThreadSpawner,
 ) -> Result<
@@ -1036,6 +1066,25 @@ mod tests {
         assert_eq!(t.badge.heat, Heat::Warm);
         assert!(t.badge.level > 0.8 && t.badge.level < 1.0);
         assert!(t.badge.tooltip.contains("CPU 89"));
+    }
+
+    #[test]
+    fn a_turned_off_warning_keeps_the_alarm_but_neither_reddens_nor_opens() {
+        let s = Arc::new(vec![sensor("Tctl", Kind::CpuPackage, Some(95.0))]);
+        let mut t = Temps { quiet: true, ..Temps::default() };
+        let mut opened = 0;
+        for k in 0..=8 {
+            opened += t.push(frame(k as f64, if k == 0 { Some(s.clone()) } else { None }, &[98.0])).episode_started as u32;
+        }
+        assert!(t.any_alarm() && !t.warns());
+        assert_eq!(opened, 0, "no panel opens while the warning is off");
+        assert_eq!(t.badge.heat, Heat::Normal);
+        assert!(!t.badge.tooltip.contains("Too hot"));
+        // turned back on (as `set_quiet` does, without the saved file): the badge is red at once
+        t.quiet = false;
+        t.badge = t.compute_badge();
+        assert!(t.warns());
+        assert_eq!(t.badge.heat, Heat::Alarm);
     }
 
     #[test]

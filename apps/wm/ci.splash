@@ -112,7 +112,7 @@ ci.step("a hosted window presents and grabs through maximise, restore and resize
     ci.sleep(1.5)
     ci.check(width() < big - 50.0, "restore did not shrink the window")
     grabs("restored")
-    calc.cmd("resize w=520 h=640 wait=1")
+    calc.cmd("resize w=520 h=640")
     ci.sleep(1.5)
     let resized = width()
     ci.check(resized < normal - 20.0 || resized > normal + 20.0, "resize changed nothing: " + normal + " -> " + resized)

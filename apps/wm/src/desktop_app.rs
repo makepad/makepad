@@ -717,7 +717,11 @@ impl App {
                         match control {
                             ChromeHit::Close => self.request_close(cx, client),
                             ChromeHit::Minimize => self.minimize_desktop(cx, client),
-                            ChromeHit::Maximize => self.fullscreen_toggle(cx, client),
+                            // The green button: full screen, as on every window (own_chrome.rs).
+                            ChromeHit::Maximize => {
+                                let state = self.own_chrome_state(client);
+                                self.window_action(cx, client, crate::own_chrome::green_button(state));
+                            }
                             _ => {}
                         }
                     }
@@ -798,7 +802,9 @@ impl App {
                             });
                             self.title_press = if parked { None } else { Some((client, e.time, p)) };
                             if double {
-                                self.maximise_toggle(cx, client);
+                                // Maximise in place, as on every caption (own_chrome.rs).
+                                let state = self.own_chrome_state(client);
+                                self.window_action(cx, client, crate::own_chrome::caption_double_click(state));
                             } else {
                                 self.begin_drag_on(cx, client, p, false, false);
                             }

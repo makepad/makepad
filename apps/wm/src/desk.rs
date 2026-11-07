@@ -301,6 +301,12 @@ struct Visibility {
     unseen_since: Option<f64>,
 }
 
+/// In how many seconds the soonest window still to hide is past [`HIDE_AFTER_SECS`]: None when
+/// none waits for it.
+fn next_hide_check<'a>(visibility: impl Iterator<Item = &'a Visibility>, now: f64) -> Option<f64> {
+    visibility.filter(|v| !v.hidden).filter_map(|v| v.unseen_since).map(|since| since + HIDE_AFTER_SECS - now).filter(|left| *left > 0.0).reduce(f64::min)
+}
+
 /// `inner` lies within `outer` (a sliver of tolerance for rounding).
 fn lrect_contains(outer: LRect, inner: LRect) -> bool {
     const EPS: f64 = 0.5;
@@ -1264,6 +1270,8 @@ pub struct WmDesk {
     /// Per client: what its tile was last told about being shown, and since
     /// when it has been unseen (see `update_visibility`).
     #[rust] visibility: HashMap<ClientId, Visibility>,
+    /// When the next window waiting out [`HIDE_AFTER_SECS`] is looked at again.
+    #[rust] hide_timer: Timer,
     /// Every tab `draw_tile` drew, in screen coordinates.
     #[rust]
     tab_hits: Vec<TabHit>,
@@ -2283,9 +2291,13 @@ impl WmDesk {
             }
         }
         self.visibility.retain(|c, _| self.items.contains_key(c));
-        // A window waiting out `HIDE_AFTER_SECS` is looked at again next frame.
-        if self.visibility.values().any(|v| v.unseen_since.is_some() && !v.hidden) {
-            cx.redraw_area(self.area);
+        // The window waiting out `HIDE_AFTER_SECS` soonest is looked at again then; one past it
+        // that could not be hidden (no frame of its own yet) waits for the desk's next draw. A
+        // redraw each frame while any waited kept the WM drawing at the display's rate for as
+        // long as a service's run view, which is never laid out, waited to hide (11-07).
+        cx.stop_timer(self.hide_timer);
+        if let Some(left) = next_hide_check(self.visibility.values(), now) {
+            self.hide_timer = cx.start_timeout(left);
         }
     }
     /// The rect the child is configured at for a window whose settled desk
@@ -3185,6 +3197,9 @@ impl Widget for WmDesk {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.hide_timer.is_event(event).is_some() {
+            cx.redraw_area(self.area);
+        }
         if scope.data.get_mut::<WmState>().is_some_and(|s|s.style.target.mobile()) {
             self.handle_phone_event(cx,event,scope);
             return;
@@ -3374,6 +3389,16 @@ pub fn fullscreen_caption_wanted(open: bool, y: f64, h: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_to_hide_is_looked_at_once_when_its_wait_ends() {
+        let v = |hidden: bool, since: Option<f64>| Visibility { hidden, unseen_since: since };
+        assert_eq!(next_hide_check([].iter(), 10.0), None);
+        assert_eq!(next_hide_check([v(false, None), v(true, Some(9.9))].iter(), 10.0), None, "seen, or hidden already");
+        let left = next_hide_check([v(false, Some(9.8)), v(false, Some(9.7))].iter(), 10.0).unwrap();
+        assert!((left - 0.1).abs() < 1e-9, "the soonest: {left}");
+        assert_eq!(next_hide_check([v(false, Some(1.0))].iter(), 10.0), None, "past its wait and not hidden (no frame of its own yet): no poll");
+    }
 
     #[test]
     fn the_plain_fullscreen_caption_comes_at_the_top_edge_and_goes_when_the_pointer_does() {

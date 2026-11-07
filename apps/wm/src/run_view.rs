@@ -842,6 +842,10 @@ impl crate::tile::TileHost for MpRunView {
         self.app_drawn
     }
 
+    fn presents(&self) -> u64 {
+        self.present_serial
+    }
+
     fn arrival_fade(&self) -> f32 {
         MpRunView::arrival_fade(self)
     }

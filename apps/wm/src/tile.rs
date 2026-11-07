@@ -48,6 +48,11 @@ pub trait TileHost {
     fn set_visible(&mut self, _cx: &mut Cx, _visible: bool) -> bool {
         false
     }
+    /// Frames the app has presented to this tile so far: a client told it shows again has drawn
+    /// afresh once this moves. 0 for a host that cannot be told (`set_visible` false).
+    fn presents(&self) -> u64 {
+        0
+    }
     /// Changes whenever the tile's content does, and None while it cannot
     /// say (always repaint): a parked window is only re-captured when this
     /// moved.

@@ -259,7 +259,6 @@ impl Widget for DeskCapture {
 
 #[cfg(test)]
 mod tests {
-    use makepad_widgets::makepad_draw::makepad_platform::makepad_script::script_eval;
     use makepad_widgets::*;
 
     /// The capture shaders compile on every backend: a shader that does not draws nothing, and

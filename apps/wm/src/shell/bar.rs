@@ -762,12 +762,58 @@ pub struct ShellBar {
     /// One wheel action per scroll gesture (touchpad flicks and momentum).
     #[rust]
     wheel: ScrollGesture,
+    /// The last draw's dpi factor: what a device pixel is ([`Self::show`]).
+    #[rust]
+    dpi: f64,
+    /// The thermometer column's drawn height in device pixels, held while readings stay near
+    /// it ([`hold_column`]).
+    #[rust]
+    column: Option<f64>,
 }
 
 impl ShellBar {
     pub fn set_data(&mut self, cx: &mut Cx, data: BarData) {
         self.data = data;
         self.redraw(cx);
+    }
+
+    /// What the WM shows in the bar (`refresh_bar`): true when that changes what the bar draws,
+    /// and only then it redraws. A thermometer reading moves its column only past a device
+    /// pixel, and a tooltip only a hover shows (the thermometer's, a tray's) shows only while
+    /// hovered: each second's reading changed the bar's data and redrew an idle desktop once a
+    /// second (11-07). The data goes in either way, for the next draw and the a11y names.
+    pub fn show(&mut self, cx: &mut Cx, data: BarData, segments: Vec<BarSegment>, window_controls: bool, launcher: bool) -> bool {
+        let before = self.drawn_key();
+        let canvas = self.canvas_px();
+        self.column = data.temps.as_ref().map(|b| hold_column(self.column, b.level, canvas));
+        self.data = data;
+        self.segments = segments;
+        self.window_controls = window_controls;
+        self.launcher = launcher;
+        let after = self.drawn_key();
+        let changed = after != before;
+        if changed {
+            // MAKEPAD_TRACE=bar: what changed in what the bar draws, at each redraw
+            if makepad_error_log::trace_enabled("bar") {
+                log!("bar redraw: {}", key_change(&before, &after));
+            }
+            self.redraw(cx);
+        }
+        changed
+    }
+
+    /// An icon's size in device pixels, at the last draw's dpi.
+    fn canvas_px(&self) -> f64 {
+        self.tokens.bar.icon_canvas * if self.dpi > 0.0 { self.dpi } else { 1.0 }
+    }
+
+    /// What a draw of the current data shows, as text to compare ([`drawn_part`]).
+    fn drawn_key(&self) -> String {
+        let hovered = |seg: usize| self.hover.filter(|(s, _)| *s == seg).map(|(_, m)| m);
+        let segments: Vec<String> = self.segments.iter().enumerate()
+            .map(|(i, s)| format!("{} {} {} {} {}", s.x0, s.x1, s.active, s.hidden, drawn_part(&s.data, self.column, hovered(i))))
+            .collect();
+        format!("{} {segments:?} {} {}", drawn_part(&self.data, self.column, hovered(0)), self.window_controls, self.launcher)
     }
 
     fn icon_slot(&self) -> f64 {
@@ -1124,8 +1170,11 @@ impl ShellBar {
                 self.d.icon(cx, Ico::Thermometer, g, color);
                 // the svg is 16 units: the tube's inside runs from 3.2 to the bulb at 11
                 let u = canvas / 16.0;
-                let level = badge.level.clamp(0.12, 1.0) as f64;
-                let top = 11.0 - level * (11.0 - 3.2);
+                let dpi = cx.current_dpi_factor();
+                let top = match self.column {
+                    Some(px) if u > 0.0 && dpi > 0.0 => 11.2 - px / (u * dpi),
+                    _ => column_top(badge.level),
+                };
                 self.d.solid(cx, rect(g.pos.x + 7.35 * u, g.pos.y + top * u, 1.3 * u, (11.2 - top) * u), color);
                 self.hits.push((seg, *module, cell));
                 continue;
@@ -1307,6 +1356,7 @@ impl Widget for ShellBar {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.dpi = cx.current_dpi_factor();
         cx.begin_turtle(walk, self.layout);
         let r = cx.turtle().rect();
         self.draw_bar(cx, r);
@@ -1378,6 +1428,50 @@ impl Widget for ShellBar {
     }
 }
 
+/// Where two drawn keys part: the text around the first difference, before and after.
+fn key_change(before: &str, after: &str) -> String {
+    let at = before.char_indices().zip(after.chars()).find(|((_, a), b)| a != b).map_or(before.len().min(after.len()), |((i, _), _)| i);
+    let from = before[..at].char_indices().rev().nth(40).map_or(0, |(i, _)| i);
+    let part = |s: &str| s.get(from..).unwrap_or("").chars().take(120).collect::<String>();
+    format!("{:?} -> {:?}", part(before), part(after))
+}
+
+/// The thermometer column's top in the icon's 16 units: the tube's inside runs from 3.2 to the
+/// bulb at 11, never emptier than the bulb's stub.
+fn column_top(level: f32) -> f64 {
+    11.0 - (level.clamp(0.12, 1.0) as f64) * (11.0 - 3.2)
+}
+
+/// The thermometer column's height in device pixels for `level` in a `canvas` device px icon:
+/// whole pixels, and the `held` one while the reading stays within 0.75 px of it. A temperature
+/// on a pixel's edge flipped the column between two heights every second (11-07).
+fn hold_column(held: Option<f64>, level: f32, canvas: f64) -> f64 {
+    let exact = (11.2 - column_top(level)) * canvas / 16.0;
+    match held {
+        Some(h) if (exact - h).abs() < 0.75 => h,
+        _ => exact.round(),
+    }
+}
+
+/// `data` as a draw shows it, as text: the thermometer's `column` (device pixels) for its
+/// level, and the hover-only tooltips (the thermometer's, a tray's) of the `hovered` module
+/// alone.
+fn drawn_part(data: &BarData, column: Option<f64>, hovered: Option<BarModule>) -> String {
+    let mut d = data.clone();
+    if let Some(b) = d.temps.as_mut() {
+        b.level = column.unwrap_or(-1.0) as f32;
+        if hovered != Some(BarModule::Temps) {
+            b.tooltip.clear();
+        }
+    }
+    for (i, t) in d.tray.iter_mut().enumerate() {
+        if hovered != Some(BarModule::Tray(i)) {
+            t.tooltip.clear();
+        }
+    }
+    format!("{d:?}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1391,6 +1485,37 @@ mod tests {
         let (with, x_with) = left_cluster(0, r, 0.0, 16.0, 4, true);
         assert_eq!(with.len(), 5);
         assert!(x_with > x);
+    }
+
+    #[test]
+    fn a_reading_redraws_the_bar_only_where_a_draw_shows_it() {
+        use super::super::temps::{Badge, Heat};
+        let with = |level: f32, tooltip: &str| BarData {
+            temps: Some(Badge { heat: Heat::Normal, level, tooltip: tooltip.into() }),
+            tray: vec![BarTray { glyph: None, tooltip: "devhub · 0 JITs".into() }],
+            ..BarData::default()
+        };
+        // a 40 px icon (16 px at 2.5x): its column moves one pixel per 1/19.5 of the level
+        let column = |held, level| Some(hold_column(held, level, 40.0));
+        let key = |d: &BarData, hovered| drawn_part(d, column(None, d.temps.as_ref().unwrap().level), hovered);
+        let idle = key(&with(0.400, "CPU 52°C"), None);
+        assert_eq!(key(&with(0.401, "CPU 53°C"), None), idle, "a new reading within the pixel, its tooltip not shown");
+        assert_ne!(key(&with(0.46, "CPU 53°C"), None), idle, "the column moved a pixel");
+        // a reading on a pixel's edge (8.5 px at 0.4385) holds the column where it is
+        let mut held = column(None, 0.430);
+        for level in [0.4385, 0.441, 0.436, 0.4385, 0.44] {
+            assert_eq!(column(held, level), held, "level {level}");
+            held = column(held, level);
+        }
+        assert_ne!(column(held, 0.48), held, "a move of a pixel and more shows");
+        assert_ne!(key(&with(0.400, "CPU 53°C"), Some(BarModule::Temps)), key(&with(0.400, "CPU 52°C"), Some(BarModule::Temps)), "hovered, its tooltip shows");
+        let mut tray = with(0.400, "CPU 52°C");
+        tray.tray[0].tooltip = "devhub · 1 JITs".into();
+        assert_eq!(key(&tray, None), idle, "a tray's tooltip shows only hovered");
+        assert_ne!(key(&tray, Some(BarModule::Tray(0))), key(&with(0.400, "CPU 52°C"), Some(BarModule::Tray(0))));
+        let mut clock = with(0.400, "CPU 52°C");
+        clock.clock = "Saturday 03:41".into();
+        assert_ne!(key(&clock, None), idle, "what the bar draws as text still counts");
     }
 
     #[test]
