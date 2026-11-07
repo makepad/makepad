@@ -1,0 +1,10 @@
+[package]
+name = "makepad-arch-installer"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+default-run = "makepad-arch-installer"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-strict-json = { path = "../../libs/strict_json" }

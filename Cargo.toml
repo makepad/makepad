@@ -1,4 +1,5 @@
 workspace.members = [
+    "tools/arch_installer",
     "tools/ci_merge",
     "tools/private_check",
     "tools/uv_unwrap_corpus",
@@ -317,6 +318,7 @@ workspace.members = [
     "libs/relax/types",
     "tools/run/fixture",
     "tools/run/fixture/park_view",
+    "tools/run/fixture/tray_app",
     "tools/run/fixture/script_ops",
     "libs/relax/lex",
     "libs/system_speech",

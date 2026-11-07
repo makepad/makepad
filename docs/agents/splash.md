@@ -227,8 +227,11 @@ the widget path and file:line: add the missing template to that widget's
 - Texture declarations use `texture_2d(float)`.
 - Shader functions use `pixel: fn() {...}` and method calls use `.`, not
   Rust `::`. Chained `color.mix(other, amount)` is a useful styling idiom.
-- Use `modf(a, b)` for float modulo and `atan2(y, x)` for the two-argument
-  arctangent. `atan(x)` and `fract(x)` are also available.
+- Use `mod(a, b)` for float modulo (floored: the result takes b's sign) and
+  `modf(a, b)` for the truncating remainder (a's sign), the same on every
+  backend and as in script functions; both take floats and float vectors,
+  and a scalar beside a vector applies to every lane. `atan2(y, x)` is the
+  two-argument arctangent; `atan(x)` and `fract(x)` are also available.
 - Animator states use id values such as `default: @off`. Use the current
   Button implementation for state definitions and transition constructors.
 - Prefer enum `match` with a catch-all. A failure in supported shader enum
