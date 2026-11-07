@@ -1,6 +1,7 @@
 //! What a test run's output says it ran: libtest's `test result:` lines (cargo's and the JIT
-//! harness's) and the JIT's `harness = false` targets. A run that executed no test is no pass
-//! (a filter that matched nothing passed silently, 11-03).
+//! harness's) and the `harness = false` targets (the JIT names them; under cargo, a target that
+//! ran and said nothing of libtest's is one). A run that executed no test is no pass (a filter
+//! that matched nothing passed silently, 11-03).
 
 /// The tally of one run's output, fed line by line (a stream) or whole.
 #[derive(Default, Debug, PartialEq)]
@@ -11,6 +12,10 @@ pub struct Tally {
     pub executed: u64,
     /// `harness = false` targets that ran (programs of their own: what they test is unknown)
     pub plain: u64,
+    /// a target cargo said it runs (`Running <target> (<binary>)`) that said nothing of libtest's
+    /// yet: a `harness = false` program, once the next target starts or the output ends (cargo
+    /// does not name them: a scope test that printed no `test result:` was "no test ran", 11-07)
+    quiet_target: bool,
     partial: Vec<u8>,
 }
 
@@ -35,11 +40,22 @@ impl Tally {
     }
 
     fn line(&mut self, line: &str) {
-        if line.ends_with("(harness = false)") && line.starts_with("Running ") {
-            self.plain += 1;
+        if line.starts_with("Running ") || line.starts_with("Doc-tests ") {
+            self.plain += u64::from(std::mem::take(&mut self.quiet_target));
+            if line.ends_with("(harness = false)") {
+                self.plain += 1;
+            } else {
+                self.quiet_target = line.starts_with("Running ");
+            }
+            return;
+        }
+        // libtest's first line of a target (`running 3 tests`, `running 1 test`)
+        if line.strip_prefix("running ").and_then(|r| r.strip_suffix(" tests").or_else(|| r.strip_suffix(" test"))).is_some_and(|n| n.parse::<u64>().is_ok()) {
+            self.quiet_target = false;
             return;
         }
         let Some(rest) = line.strip_prefix("test result: ") else { return };
+        self.quiet_target = false;
         let count = |word: &str| rest.split([';', '.']).filter_map(|p| p.trim().strip_suffix(word)?.trim().parse::<u64>().ok()).next();
         if let (Some(passed), Some(failed)) = (count(" passed"), count(" failed")) {
             self.results += 1;
@@ -52,7 +68,8 @@ impl Tally {
     pub fn no_pass(&self, cmd: &[String]) -> Option<String> {
         let at = test_word(cmd)?;
         let args = cmd[at..].iter().position(|w| w == "--").map_or(&[][..], |p| &cmd[at + p + 1..]);
-        if self.executed > 0 || self.plain > 0 || args.iter().any(|a| a == "--list") { return None; }
+        let plain = self.plain + u64::from(self.quiet_target);
+        if self.executed > 0 || plain > 0 || args.iter().any(|a| a == "--list") { return None; }
         // libtest's options that take a value: the value is no filter
         let valued = ["--skip", "--test-threads", "--format", "--color", "--logfile", "-Z", "--shuffle-seed"];
         let filter = args.iter().enumerate().any(|(i, a)| !a.starts_with('-') && (i == 0 || !valued.contains(&args[i - 1].as_str())));
@@ -113,6 +130,16 @@ mod tests {
         // the JIT's own single-file summary, and a harness = false target
         assert_eq!(Tally::of("test result: 10 passed; 0 failed. compiled 185 fns (35708 bytes)\n").executed, 10);
         assert_eq!(Tally::of("     Running tests/bench.rs (harness = false)\n").no_pass(&args("makepad test x")), None);
+        // cargo's harness = false target: a target that ran and said nothing of libtest's, before
+        // the next target or at the end; a libtest target that ran no test is none
+        let cargo = |tail: &str| format!("     Running unittests src/lib.rs (target/release/deps/x-0123)\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n{tail}");
+        let close = cargo("     Running tests/scope_close.rs (target/release/deps/scope_close-4567)\nscope close: 12 checks ok\n");
+        assert_eq!(Tally::of(&close).no_pass(&args("cargo test -p x")), None);
+        let between = format!("{close}   Doc-tests x\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n");
+        assert_eq!((Tally::of(&between).plain, Tally::of(&between).no_pass(&args("cargo test -p x"))), (1, None));
+        assert_eq!(Tally::of(&cargo("")).no_pass(&args("cargo test -p x")).as_deref(), Some("no test ran"));
+        let one = "     Running tests/a.rs (target/release/deps/a-1)\n\nrunning 1 test\ntest t ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
+        assert_eq!((Tally::of(one).plain, Tally::of(one).executed), (0, 1));
         // fed in pieces, as a stream
         let mut t = Tally::default();
         for piece in ["test res", "ult: FAILED. 0 passed; 2 fa", "iled; 0 ignored\n"] { t.feed(piece.as_bytes()); }

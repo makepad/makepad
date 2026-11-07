@@ -74,6 +74,8 @@ pub struct Detail {
     pub panics: u32,
     /// edits that wait for a restart (`session pending`)
     pub restart_pending: u32,
+    /// the oldest of them, as the JIT says it (`pending`; a JIT before it names none)
+    pub restart_first: String,
 }
 
 struct State {
@@ -102,7 +104,12 @@ pub struct Local {
     ai_hub: Mutex<Option<String>>,
     stop: AtomicBool,
     hot_ready: AtomicBool,
+    /// Run on each scan tick until each says it is done ([`Local::on_scan`]).
+    scan_tasks: Mutex<Vec<ScanTask>>,
 }
+
+/// Work the scan does on its tick until it says it is done.
+pub type ScanTask = Box<dyn FnMut() -> bool + Send>;
 
 fn registry_file(pid: u32) -> PathBuf {
     discovery::registry_dir().join(format!("makepad-remote-{pid}.json"))
@@ -121,6 +128,7 @@ impl Local {
             ai_hub: Mutex::new(ai_hub_endpoint().map(|_| AiHub { why: "health probe pending".into(), ..AiHub::default() }.to_json())),
             stop: AtomicBool::new(false),
             hot_ready: AtomicBool::new(false),
+            scan_tasks: Mutex::new(Vec::new()),
         });
         let l = local.clone();
         let _ = std::thread::Builder::new().name("devhub-scan".into()).spawn(move || l.scan_loop());
@@ -130,6 +138,12 @@ impl Local {
     }
 
     pub fn ready(&self) { self.hot_ready.store(true, Ordering::Release); }
+
+    /// `task` on each tick of the scan ([`SCAN`]) until it says it is done: the hub's own tick, no
+    /// thread or sleep of its own (the node's LAN listener waiting for the machine's address).
+    pub fn on_scan(&self, task: ScanTask) {
+        self.scan_tasks.lock().unwrap().push(task);
+    }
 
     /// Publishes a JIT's record and keeps it in that JIT's recent list (the explorer's events).
     fn emit(&self, r: Record) {
@@ -201,6 +215,7 @@ impl Local {
         // it is listed only when it changed (a JIT starting or ending adds or removes its file)
         let (mut seen_mtime, mut last_read) = (None, Instant::now());
         while !self.stop.load(Ordering::Acquire) {
+            self.scan_tasks.lock().unwrap().retain_mut(|task| !task());
             if self.hot_ready.load(Ordering::Acquire) {
                 if !hot_replayed {
                     match crate::hot::replay_failures(&|r| self.emit(r)) {
@@ -400,7 +415,7 @@ impl Local {
                 .unwrap_or_default();
             let opt = |v: Option<f64>| v.map_or("null".to_string(), |x| format!("{x:.1}"));
             out.push(format!(
-                "{{\"pid\":{},\"app\":{},\"up_s\":{},\"cpu_pct\":{},\"rss_mb\":{},\"threads\":{},\"jit\":{},\"observe\":{},\"run\":{},\"state\":{},\"session\":{},\"fps\":{},\"warm\":{},\"code_mb\":{},\"panics\":{},\"restart_pending\":{},\"exe_replaced\":{},\"recent\":[{}]}}",
+                "{{\"pid\":{},\"app\":{},\"up_s\":{},\"cpu_pct\":{},\"rss_mb\":{},\"threads\":{},\"jit\":{},\"observe\":{},\"run\":{},\"state\":{},\"session\":{},\"fps\":{},\"warm\":{},\"code_mb\":{},\"panics\":{},\"restart_pending\":{},\"restart_first\":{},\"exe_replaced\":{},\"recent\":[{}]}}",
                 j.pid,
                 json_str(&j.app),
                 now.saturating_sub(j.started_ms) / 1000,
@@ -417,6 +432,7 @@ impl Local {
                 opt(d.code_mb),
                 d.panics,
                 d.restart_pending,
+                json_str(&d.restart_first),
                 exe_replaced(j.pid),
                 recent.join(",")
             ));
@@ -444,7 +460,9 @@ impl Local {
         d.fps = jit.iter().find_map(|l| l.strip_prefix("frames: ")).and_then(|r| r.split_whitespace().next()).and_then(|f| f.parse().ok());
         d.code_mb = ask("code n=0").iter().find_map(|l| l.strip_prefix("code installed ")).and_then(|r| r.split_whitespace().next()).and_then(|m| m.parse().ok());
         d.panics = ask("panics").iter().filter(|l| l.starts_with('{') && !l.starts_with("{\"err\"")).count() as u32;
-        d.restart_pending = ask("session").iter().find_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()?.get("restart_pending")?.as_u64()).unwrap_or(0) as u32;
+        let session = ask("session").iter().find_map(|l| makepad_strict_json::parse(l.as_bytes()).ok().filter(|v| v.get("restart_pending").is_some()));
+        d.restart_pending = session.as_ref().and_then(|v| v.get("restart_pending")?.as_u64()).unwrap_or(0) as u32;
+        d.restart_first = session.as_ref().and_then(|v| v.get("pending")?.as_arr()?.first()?.as_str().map(str::to_string)).unwrap_or_default();
         self.state.lock().unwrap().jit_state.insert(j.pid, (Instant::now(), d.clone()));
         d
     }
@@ -507,6 +525,41 @@ fn ai_hub_config(text: &str) -> AiHubEndpoint {
     endpoint
 }
 
+/// Where this node's AI hub's fleet front listens: its settings' host, else the primary
+/// outgoing interface's address.
+fn ai_hub_host(host: Option<String>) -> io::Result<String> {
+    host.map(Ok).unwrap_or_else(|| {
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+        // UDP connect sends nothing; TEST-NET-1 selects the primary outgoing interface.
+        socket.connect("192.0.2.1:9")?;
+        socket.local_addr().map(|addr| addr.ip().to_string())
+    })
+}
+
+/// Has this node's AI hub hold the machine quiet for a timed run (`holder`, as the lease hub
+/// names it) or end that (`""`): `POST /control/local-use {"quiet": …}` through its fleet front
+/// as this machine, the route its WM reports games on. Ok(its activity answer: `reason`
+/// `timed-lease` once it holds; `refused`, `refused_said` in the answer that ended one), or
+/// Ok(None) when there is nothing to hold: no AI hub is set up here, or its front is not up (a
+/// hub with networking off, or stopped, takes no remote work).
+pub fn ai_hub_quiet(holder: &str) -> Result<Option<Value>, String> {
+    use makepad_network::fleet::id::connect;
+    use makepad_network::SocketStream;
+    let Some(endpoint) = ai_hub_endpoint() else { return Ok(None) };
+    let deadline = Instant::now() + AI_HUB_TIMEOUT;
+    let host = ai_hub_host(endpoint.host).map_err(|e| format!("its address: {e}"))?;
+    let port = endpoint.port;
+    let (stream, _, authorization) = match ai_hub_remaining(deadline).and_then(|_| connect(&host, &port.to_string())) {
+        Ok(c) => c,
+        Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => return Ok(None),
+        Err(e) => return Err(format!("its fleet front: {}", proto::clean(&e.to_string(), 300))),
+    };
+    let authority = if host.contains(':') && !host.starts_with('[') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
+    let body = format!("{{\"quiet\":{}}}", json_str(holder));
+    let request = format!("POST /control/local-use HTTP/1.0\r\nHost: {authority}\r\nAuthorization: {authorization}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+    ai_hub_get(stream, &request, deadline, SocketStream::set_read_timeout, SocketStream::set_write_timeout).map(Some).map_err(|e| proto::clean(&e.to_string(), 300))
+}
+
 fn ai_hub_remaining(deadline: Instant) -> io::Result<Duration> {
     deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()).ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "health probe timed out"))
 }
@@ -542,8 +595,9 @@ fn ai_hub_get<S: Read + Write>(
         if body.is_none() {
             if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
                 let headers = std::str::from_utf8(&bytes[..end]).map_err(|_| invalid())?;
-                if headers.lines().next().and_then(|s| s.split_whitespace().nth(1)) != Some("200") {
-                    return Err(invalid());
+                let status = headers.lines().next().and_then(|s| s.split_whitespace().nth(1));
+                if status != Some("200") {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, format!("the hub answered {}", status.unwrap_or("no status"))));
                 }
                 for line in headers.lines().skip(1) {
                     if let Some((key, value)) = line.split_once(':') {
@@ -582,12 +636,7 @@ fn probe_ai_hub(endpoint: AiHubEndpoint) -> AiHub {
 
     let deadline = Instant::now() + AI_HUB_TIMEOUT;
     let fleet_failed = |e: io::Error| AiHub { why: format!("fleet probe failed: {}", proto::clean(&e.to_string(), 300)), ..AiHub::default() };
-    let host = match endpoint.host.map(Ok).unwrap_or_else(|| {
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
-        // UDP connect sends nothing; TEST-NET-1 selects the primary outgoing interface.
-        socket.connect("192.0.2.1:9")?;
-        socket.local_addr().map(|addr| addr.ip().to_string())
-    }) {
+    let host = match ai_hub_host(endpoint.host) {
         Ok(host) => host,
         Err(e) => return fleet_failed(e),
     };

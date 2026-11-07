@@ -154,6 +154,12 @@ impl Master {
             return Err(format!("a devhub already serves {}", proto::control_socket().display()));
         }
         let niced = start_level()?;
+        // stored pins and revs in the named form, once, before anything reads them
+        match crate::lease::pre_nested::master(&proto::home()) {
+            Ok(0) => {}
+            Ok(n) => eprintln!("devhub: {n} record file(s) moved to named pins"),
+            Err(e) => eprintln!("devhub: moving records to named pins: {e}"),
+        }
         // Validate and retain the shared state before starting any master services.
         let _state = crate::state::Store::open_quiet(&proto::home(), name)?;
         crate::os::raise_fd_limit();
@@ -250,6 +256,10 @@ impl Master {
             s.emit(&r.to_json());
             o(&r);
         }));
+        // every inspect, grab and act on a node's app routes through here: a lane's screen run
+        // of the app is in use
+        let l = leases.clone();
+        hub.set_route_seen(Arc::new(move |node, spec, service| l.app_touched(node, spec, service)));
         // the workflow jobs (verify, after, allapps, push) and their state
         #[cfg(feature = "checkout")]
         {
@@ -272,15 +282,35 @@ impl Master {
             s.emit(&r.to_json());
             o(&r);
         }));
+        // a landing holds what reaches a Mac show until its tip is proven (orch/show.rs)
+        #[cfg(feature = "checkout")]
+        land.before_ff(Arc::new(crate::orch::show::before_landing));
         #[cfg(feature = "checkout")]
         {
             let home = proto::home();
             let repo = crate::lease::wt::default_repo();
             let proofs = Arc::new(crate::gateproof::Store::open(&home));
-            let run = crate::bucket::fast(repo.clone(), home.clone(), proofs);
+            let run = crate::bucket::fast(repo.clone(), home.clone(), proofs.clone());
+            let (s, o) = (sink.clone(), on_record.clone());
+            let timing = crate::bucket::Timing::pipelined();
+            crate::bucket::spawn("fast", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
+                s.emit(&r.to_json());
+                o(&r);
+            }), run, |_| None);
+            // the reached test targets under the JIT, after landing and in the background
+            let run = crate::bucket::tests(repo.clone(), home.clone(), proofs.clone());
             let (s, o) = (sink.clone(), on_record.clone());
             let timing = crate::bucket::Timing::after(Duration::from_secs(60), Duration::from_secs(10 * 60));
-            crate::bucket::spawn("fast", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
+            crate::bucket::spawn("tests", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
+                s.emit(&r.to_json());
+                o(&r);
+            }), run, |_| None);
+            // every package's tests, no proof reused: once a day at 17:00 on this Mac's clock, done
+            // before the daily push review (19:13) reads its red list, and on demand
+            let run = crate::bucket::full(repo.clone(), home.clone(), proofs);
+            let (s, o) = (sink.clone(), on_record.clone());
+            let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO, daily: Some(17) };
+            crate::bucket::spawn(crate::bucket::FULL, timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
             }), run, |_| None);
@@ -299,8 +329,11 @@ impl Master {
                 s.emit(&r.to_json());
                 o(&r);
             }), run, crate::orch::ci::last_rolling);
-            ep.register("bucket", 1, makepad_remote::lines::service("bucket", Arc::new(move |_, out| {
-                out.extend(crate::bucket::status(&home));
+            ep.register("bucket", 1, makepad_remote::lines::service("bucket", Arc::new(move |line, out| {
+                match line.split_whitespace().skip_while(|w| *w == "bucket").collect::<Vec<_>>()[..] {
+                    ["run", name] => out.push(crate::bucket::kick(&home, name)),
+                    _ => out.extend(crate::bucket::status(&home)),
+                }
             })));
         }
         // `jitcache plan|clear`: this Mac's JIT caches (a node's through `route <node> jitcache`)

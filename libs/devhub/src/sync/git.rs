@@ -34,8 +34,22 @@ pub fn valid_branch(s: &str) -> bool {
         && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/'))
 }
 
+/// A store's name: makepad, or a nested repository's ([`crate::nested::valid`]).
 pub fn valid_repo(s: &str) -> bool {
-    matches!(s, "makepad" | "commercial")
+    s == "makepad" || crate::nested::valid(s)
+}
+
+/// The stores this node holds, by name: makepad's, and each nested repository's a sync or a
+/// lease pushed.
+pub fn store_names() -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(stores_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.strip_suffix(".git").filter(|n| valid_repo(n)).map(str::to_string))
+        .collect();
+    out.sort();
+    out
 }
 
 /// `~/devhub/git` (DESIGN.md §10.12), next to the lease worktrees and targets.

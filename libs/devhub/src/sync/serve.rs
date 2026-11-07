@@ -79,14 +79,18 @@ impl Sync {
     /// 2026-11-02; caps reports no display meanwhile): restarted onto the deployed one as soon as
     /// nothing is lost by it ([`Self::wm_restart`] waits for apps, viewers and the person). Never
     /// on a box a person used in the last 12 h (their session is theirs to restart), and at most
-    /// once in 6 h.
+    /// once in 6 h. Before that, the WM restart that the hub before this one waited for goes on
+    /// waiting ([`Self::resume_wm_restart`]).
     #[cfg(target_os = "linux")]
     fn roll_other_wire(self: &Arc<Self>) {
         let me = self.clone();
         let _ = std::thread::Builder::new().name("devhub-wm-wire".into()).spawn(move || {
             let mut last: Option<Instant> = None;
+            let mut nap = Duration::from_secs(5);
             loop {
-                std::thread::sleep(Duration::from_secs(60));
+                std::thread::sleep(nap);
+                nap = Duration::from_secs(60);
+                me.resume_wm_restart();
                 let Some(answer) = crate::lease::caps::other_wire() else { continue };
                 if crate::lease::exec::person_within(12 * 3_600_000) || last.is_some_and(|t| t.elapsed() < Duration::from_secs(6 * 3600)) || !crate::lease::exec::writes_allowed() {
                     continue;
@@ -108,7 +112,9 @@ impl Sync {
 
     fn status(&self, out: &mut Vec<String>) {
         let mut repos = Vec::new();
-        for repo in ["makepad", "commercial"] {
+        // makepad, the paired nested repository the sync deploys, and every store a lease pushed
+        let names: std::collections::BTreeSet<String> = ["makepad", crate::state::PAIRED].into_iter().map(str::to_string).chain(git::store_names()).collect();
+        for repo in names.iter().map(String::as_str) {
             let Ok(store) = Store::open(repo) else { continue };
             let cur = self.current(&store, repo);
             let refs: Vec<String> = store.refs().iter().map(|(r, sha)| format!("{{\"ref\":{},\"sha\":{}}}", json_str(r), json_str(sha))).collect();
@@ -210,7 +216,8 @@ impl Sync {
         if self.conf.jit_app().is_some() && o.get("build") != Some("off") {
             let at = |repo| o.get(repo).map(str::to_string).or_else(|| git::fleet_revision(&self.conf.checkout, repo));
             if let Some(mp) = at("makepad") {
-                *BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()) = Some((mp, at("commercial")));
+                let pin = crate::lease::Pin::at(&mp);
+                *BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()) = Some(match at(crate::state::PAIRED) { Some(c) => pin.with(crate::state::PAIRED, &c), None => pin });
             }
         }
         let t0 = Instant::now();
@@ -329,7 +336,8 @@ impl Sync {
             git::write_fleet_revision(&self.conf.checkout, mp, cm.as_deref());
             let conf = crate::lease::caps::LeaseConf::load();
             if conf.slots(0).iter().any(|(k, n)| k.writes() && *n > 0) {
-                let pin = crate::lease::Pin { makepad: mp.clone(), commercial: cm.clone() };
+                let pin = crate::lease::Pin::at(mp);
+                let pin = match &cm { Some(c) => pin.with(crate::state::PAIRED, c), None => pin };
                 match crate::lease::tree::sync(&conf.work, &pin) {
                     Ok(Some(t)) => {
                         for b in t.cleared.bundles {
@@ -397,7 +405,11 @@ impl Sync {
         let stale: Vec<jits::Jit> = jits::list().into_iter().filter(|j| jits::runs_from(j.pid, &self.conf.checkout) && jits::exe_replaced(j.pid)).collect();
         match restart {
             "wm" => self.restart_or_refuse("the order asks for it", out),
-            "auto" if wm_replaced => self.restart_or_refuse("the build replaced the WM binary", out),
+            "auto" => {
+                if let Some(why) = auto_wm_restart(wm_replaced, &stale) {
+                    self.restart_or_refuse(why, out);
+                }
+            }
             "apps" => {
                 for j in &stale {
                     if super::launch::ledger(j.pid).is_none() {
@@ -614,11 +626,16 @@ impl Sync {
             return Ok(format!("{{\"wm_restart\":\"waiting\",\"for\":{}}}", json_str(&list)));
         }
         self.event(Sev::Warn, format!("sync: the WM restart ({why}) waits for: {list}"), String::new());
+        // the hub that takes over from this one goes on waiting ([`Self::resume_wm_restart`])
+        let _ = std::fs::create_dir_all(proto::home().join("sync"));
+        let _ = std::fs::write(Self::waiting_marker(), &why);
         let me = self.clone();
         let why = why.to_string();
         let spawned = std::thread::Builder::new().name("devhub-wm-restart-wait".into()).spawn(move || {
             loop {
-                std::thread::sleep(Duration::from_secs(30));
+                // (a WM on another wire drains its box meanwhile, [`wm_drain`]: the restart follows the
+                // last lease's end; one that still hosts every app restarts in the next gap)
+                std::thread::sleep(Duration::from_secs(10));
                 if !restart_blockers().is_empty() {
                     continue;
                 }
@@ -632,13 +649,43 @@ impl Sync {
                     }
                 }
             }
+            let _ = std::fs::remove_file(Self::waiting_marker());
             WM_RESTART_WAITING.store(false, std::sync::atomic::Ordering::Release);
         });
         if let Err(e) = spawned {
+            let _ = std::fs::remove_file(Self::waiting_marker());
             WM_RESTART_WAITING.store(false, std::sync::atomic::Ordering::Release);
             return Err(format!("cannot wait for the restart: {e}"));
         }
         Ok(format!("{{\"wm_restart\":\"waiting\",\"for\":{}}}", json_str(&list)))
+    }
+
+    /// A WM restart this node waits for: why, while the waiting hub lives and across its own
+    /// restarts.
+    fn waiting_marker() -> PathBuf {
+        proto::home().join("sync").join("wm-restart.waiting")
+    }
+
+    /// Takes over the WM restart that the hub before this one waited for, when the WM still runs
+    /// what it waited to replace. The wait lived only in that hub and ended with its self-update,
+    /// so until the next landing's apply the box took screen leases again, undrained. Devhub
+    /// landings roll every hub, and two busy boxes' WMs went hours without restarting (11-07).
+    #[cfg(target_os = "linux")]
+    fn resume_wm_restart(self: &Arc<Self>) {
+        // (not before this hub has its leases back, nor while its dev switch is off: a WM restart waits on them)
+        if WM_RESTART_WAITING.load(std::sync::atomic::Ordering::Acquire) || !crate::lease::exec::writes_allowed() {
+            return;
+        }
+        let Ok(why) = std::fs::read_to_string(Self::waiting_marker()) else { return };
+        let _ = std::fs::remove_file(Self::waiting_marker());
+        let stale: Vec<jits::Jit> = jits::list().into_iter().filter(|j| jits::runs_from(j.pid, &self.conf.checkout) && jits::exe_replaced(j.pid)).collect();
+        if auto_wm_restart(false, &stale).is_none() && crate::lease::caps::other_wire().is_none() {
+            return;
+        }
+        let _busy = self.busy.lock().unwrap();
+        if let Err(e) = self.wm_restart(why.trim()) {
+            self.event(Sev::Warn, format!("sync: WM restart refused: {e}"), String::new());
+        }
     }
 
     /// Restarts the WM (and with it the AI Hub it starts) through its systemd service, with the
@@ -761,13 +808,14 @@ pub fn applying() -> bool {
     APPLYING.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// The commits (makepad, commercial) whose JIT this node's apply is building now.
-static BUILDING_JIT: std::sync::Mutex<Option<(String, Option<String>)>> = std::sync::Mutex::new(None);
+/// The commits (makepad, and the paired nested repository's) whose JIT this node's apply is
+/// building now.
+static BUILDING_JIT: std::sync::Mutex<Option<crate::lease::Pin>> = std::sync::Mutex::new(None);
 
 /// This node's apply is building the JIT of exactly these commits (kept for its tree leases
 /// once built: a lease of them waits for it rather than build it again).
-pub fn building_jit(makepad: &str, commercial: Option<&str>) -> bool {
-    BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|(m, c)| m == makepad && c.as_deref() == commercial)
+pub fn building_jit(pin: &crate::lease::Pin) -> bool {
+    BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()).as_ref() == Some(pin)
 }
 
 /// A WM restart is waiting on this node (`Sync::wm_restart`).
@@ -791,8 +839,68 @@ fn restart_blockers() -> Vec<String> {
     // a WM restart ends every app in its session: it never takes a user's app with it (it
     // killed Fab on a pool box, 3 min after the last input, 2026-10-30)
     // (a headless lease's JIT runs on through it: its lease is not on the WM)
-    out.extend(super::jits::list().into_iter().filter(|j| !wm_own(&j.app) && !crate::lease::exec::in_headless_lease(j.pid)).map(|j| format!("{} runs (pid {}): close it to let the WM update", j.app, j.pid)));
+    out.extend(apps_on_the_wm().into_iter().map(|(app, pid, leased)| if leased { format!("{app} (pid {pid}) of a lease") } else { format!("{app} runs (pid {pid}): close it to let the WM update") }));
     out
+}
+
+/// The apps a WM restart waits for, with whether a lease runs each: (app, pid, leased). Not the
+/// WM's own, not a headless lease's (it runs on through the restart), and not one an ended
+/// lease left behind (nothing waits for it, and the restart ends it).
+fn apps_on_the_wm() -> Vec<(String, u32, bool)> {
+    use crate::lease::exec::{app_lease, in_headless_lease, AppLease};
+    super::jits::list().into_iter().filter(|j| !wm_own(&j.app) && !in_headless_lease(j.pid)).filter_map(|j| match app_lease(j.pid) {
+        AppLease::Left => None,
+        lease => Some((j.app, j.pid, lease != AppLease::Nobody)),
+    }).collect()
+}
+
+/// What the box's waiting WM restart waits on when only leases hold it ([`drain_said`]), for its
+/// caps: the master starts no new lease there the restart would wait for, so it restarts in the
+/// gap. Back-to-back landings kept four boxes' WMs waiting for hours: each landing's sync apply
+/// held the waiter while the next tests run took the box (11-07).
+pub fn wm_drain() -> String {
+    if !WM_RESTART_WAITING.load(std::sync::atomic::Ordering::Acquire) {
+        return String::new();
+    }
+    let mut people = crate::lease::exec::user_blockers();
+    if crate::lease::exec::user_watching() {
+        people.push("a Desk Link viewer shows this node".into());
+    }
+    #[cfg(target_os = "linux")]
+    let wire = crate::lease::caps::other_wire().is_some();
+    #[cfg(not(target_os = "linux"))]
+    let wire = false;
+    drain_said(&people, &crate::lease::exec::on_the_wm(), &apps_on_the_wm(), wire)
+}
+
+/// A waiting WM restart's drain: what it waits on (`leases`, and the apps it would end: app, pid,
+/// whether a lease runs it) when only leases hold it; empty when a person's reason does (`people`:
+/// at the box, unsaved work, a viewer) or an app no lease runs (a person's): those it waits for
+/// with the box at work, never drained for.
+///
+/// Only a WM on another hosted wire than the box's build (`wire`) is drained for: no app starts
+/// under it, so the screen work the drain keeps off could not run there anyway. A WM whose binary
+/// was only replaced still hosts every app; drained for, a box kept every new screen lease off
+/// while a lane's open-ended screen session held its restart: the Source Library lanes' screens
+/// waited on two boxes for one session that had no end (11-07). It restarts in a gap instead.
+fn drain_said(people: &[String], leases: &[String], apps: &[(String, u32, bool)], wire: bool) -> String {
+    if !wire || !people.is_empty() || apps.iter().any(|(_, _, leased)| !leased) {
+        return String::new();
+    }
+    let mut on: Vec<String> = leases.to_vec();
+    on.extend(apps.iter().map(|(app, pid, _)| format!("{app} (pid {pid}) of a lease")));
+    on.join("; ")
+}
+
+/// Why an `auto` sync restarts the WM: this build replaced its binary, or an earlier one did and
+/// the WM still runs the old one. A waiting restart lives in the hub that waits, and goes with it
+/// when that hub updates itself: a node's WM ran its replaced binary 4 h through one devhub
+/// landing after another, none of which replaced it again (11-07).
+fn auto_wm_restart(wm_replaced: bool, stale: &[super::jits::Jit]) -> Option<&'static str> {
+    if wm_replaced {
+        return Some("the build replaced the WM binary");
+    }
+    stale.iter().any(|j| j.app == "wm" || j.app == "makepad-app-wm").then_some("an earlier build replaced the WM binary, and it still runs the old one")
 }
 
 /// What the WM's session runs by itself: not a user's apps.
@@ -801,6 +909,28 @@ const WM_SERVICES: [&str; 4] = ["wm", "aichat", "aihub", "devhub"];
 /// Whether `app` is one of [`WM_SERVICES`].
 fn wm_own(app: &str) -> bool {
     WM_SERVICES.iter().any(|s| app == *s || app == format!("makepad-app-{s}"))
+}
+
+/// What of the WM's own apps keeps the box busy now, if anything: a timed lease starts after it
+/// (`Exec::builds_here`). A WM restart starts its AI pane again, and the pane's JIT compiles for a
+/// while: a 12 s timed lease granted as it began ran beside `makepad` at 107% of a core (11-06).
+pub fn wm_apps_busy() -> Option<String> {
+    let own: Vec<(String, u32)> = super::jits::list().into_iter().filter(|j| wm_own(&j.app)).map(|j| (j.app, j.pid)).collect();
+    if own.is_empty() {
+        return None;
+    }
+    let pids: Vec<u32> = own.iter().map(|o| o.1).collect();
+    busy_wm_apps(&own, &crate::top::cpu_of(&pids))
+}
+
+/// [`wm_apps_busy`]'s verdict on the WM's own apps (`own`: app, pid) at their CPU (pid, % of a
+/// core): those at [`crate::lease::master::NOISY_CPU_PCT`] or more, which a timed run beside them
+/// would count as noise.
+fn busy_wm_apps(own: &[(String, u32)], cpu: &[(u32, f64)]) -> Option<String> {
+    let busy: Vec<String> = cpu.iter().filter(|(_, c)| *c >= crate::lease::master::NOISY_CPU_PCT)
+        .filter_map(|(pid, c)| own.iter().find(|o| o.1 == *pid).map(|(app, _)| format!("{app}#{pid} at {c:.0}% of a core")))
+        .collect();
+    (!busy.is_empty()).then(|| format!("the WM's own {} (starting, or taking a landing)", busy.join(", ")))
 }
 
 /// Whether the sync restarts `app` itself for an edit at `rung`: the WM's AI pane child (aichat)
@@ -846,8 +976,45 @@ fn push_factory(sync: Arc<Sync>) -> Factory {
 mod tests {
     use super::*;
 
+    /// A waiting WM restart drains its box only when leases alone hold it and its WM speaks another
+    /// wire: a person at it, unsaved work, a viewer, an app no lease runs, or a WM that still hosts
+    /// every app keep the box at work while it waits.
+    #[test]
+    fn a_wm_restart_drains_only_for_leases() {
+        let leases = vec!["test lease L7 of landq-tests (a landing)".to_string()];
+        let leased = vec![("makepad-sqlite".to_string(), 41, true)];
+        assert_eq!(super::drain_said(&[], &leases, &leased, true), "test lease L7 of landq-tests (a landing); makepad-sqlite (pid 41) of a lease");
+        assert_eq!(super::drain_said(&[], &leases, &[], true), "test lease L7 of landq-tests (a landing)");
+        assert_eq!(super::drain_said(&[], &leases, &leased, false), "", "a WM on the build's wire hosts every app: no drain");
+        assert_eq!(super::drain_said(&["a user is at the node".into()], &leases, &leased, true), "", "a person: no drain");
+        let mine = vec![("makepad-fab".to_string(), 42, false), leased[0].clone()];
+        assert_eq!(super::drain_said(&[], &leases, &mine, true), "", "a person's app: no drain");
+        assert_eq!(super::drain_said(&[], &[], &[], true), "", "nothing holds it: it restarts now");
+    }
+
+    /// An `auto` sync restarts a WM whose binary this build replaced, or an earlier one did (its
+    /// waiting restart went with the hub that updated itself); a stale JIT app is no reason.
+    #[test]
+    fn a_wm_an_earlier_build_replaced_restarts_at_the_next_sync() {
+        let jit = |app: &str| super::super::jits::Jit { pid: 7, app: app.into() };
+        assert_eq!(auto_wm_restart(true, &[]), Some("the build replaced the WM binary"));
+        assert_eq!(auto_wm_restart(false, &[jit("makepad-app-wm")]), Some("an earlier build replaced the WM binary, and it still runs the old one"));
+        assert_eq!(auto_wm_restart(false, &[jit("makepad-app-aichat"), jit("makepad-fab")]), None);
+        assert_eq!(auto_wm_restart(false, &[]), None);
+    }
+
     /// The AI pane's restart is the sync's on a box nobody uses; a person's app, the WM itself
     /// and a box in use keep their offer.
+    /// A timed lease waits while the WM's own apps are busy (its AI pane compiling after a WM
+    /// restart), not for their idle hum, and never for an app that is not the WM's.
+    #[test]
+    fn a_busy_wm_app_holds_a_timed_start() {
+        let own = [("makepad-app-wm".to_string(), 10), ("makepad-app-aichat".to_string(), 11)];
+        assert_eq!(busy_wm_apps(&own, &[(10, 15.0), (11, 107.0)]).as_deref(), Some("the WM's own makepad-app-aichat#11 at 107% of a core (starting, or taking a landing)"));
+        assert_eq!(busy_wm_apps(&own, &[(10, 15.0), (11, 4.0)]), None, "the WM's idle hum");
+        assert_eq!(busy_wm_apps(&own, &[(99, 300.0)]), None, "not the WM's");
+    }
+
     #[test]
     fn the_ai_panes_restart_is_taken_by_the_sync_on_an_unused_box() {
         assert!(restarts_with_the_landing("makepad-app-aichat", "restart", false));

@@ -188,9 +188,26 @@ pub fn lock_tree(store: &Store, path: &Path, id: &str, active: &dyn Fn() -> Resu
     Ok(f)
 }
 
+/// A store's binary is `<work>/dev/jit/<BINARY_PREFIX><id>`.
+pub const BINARY_PREFIX: &str = "makepad.jit-";
+
+/// The bytes of a JIT's copy one `jit-read` / `jit-put` moves ([`Store::read`], [`Store::put`]).
+pub const COPY_CHUNK: usize = 256 << 10;
+
+/// What a chunk of a JIT's copy did on the box it goes to ([`Store::put`]).
+#[derive(Debug, PartialEq)]
+pub enum Put {
+    /// the box holds it already: nothing more goes
+    Held,
+    /// the next chunk starts here
+    More(u64),
+    /// its last byte: the store keeps it
+    Kept,
+}
+
 impl Store {
     pub fn new(work: &Path) -> Self { Self { root: work.join("dev/jit") } }
-    fn binary(&self, id: &str) -> PathBuf { self.root.join(format!("makepad.jit-{id}")) }
+    fn binary(&self, id: &str) -> PathBuf { self.root.join(format!("{BINARY_PREFIX}{id}")) }
     fn stats(&self, id: &str) -> Stats {
         std::fs::read(self.root.join(format!("{id}.json"))).ok().and_then(|b| makepad_strict_json::parse(&b).ok()).map(|v| Stats::parse(&v)).unwrap_or_else(|| Stats { id: id.into(), ..Default::default() })
     }
@@ -273,6 +290,16 @@ impl Store {
         result.unwrap_or_else(|e| { eprintln!("devhub: JIT store: {e}"); None })
     }
 
+    /// The binary of `id` held for `lease` until it ends: a lease's explicit `--jit`, which
+    /// placement gives only a box that holds it; missing, the error names what the box holds.
+    pub fn held(&self, id: &str, lease: &str) -> Result<PathBuf, String> {
+        self.hold(id, lease)?;
+        self.lookup(id).ok_or_else(|| {
+            let ids = self.snapshot().ids;
+            format!("JIT {id} is not in this box's store ({})", if ids.is_empty() { "it holds none".to_string() } else { format!("it holds {}", ids.join(" ")) })
+        })
+    }
+
     /// A binary cargo built for `id` outside the store (a native tree's run).
     pub fn keep(&self, id: &str, binary: &Path) -> Result<(), String> {
         if !Self::valid(id) { return Err(format!("invalid JIT key {id}")); }
@@ -287,6 +314,60 @@ impl Store {
         self.save(&s)?;
         self.prune();
         Ok(())
+    }
+
+    /// A chunk of `id`'s binary from `off` (at most [`COPY_CHUNK`] bytes) and the binary's size:
+    /// for a box of the same platform that lacks it ([`Self::put`] there).
+    pub fn read(&self, id: &str, off: u64) -> Result<(Vec<u8>, u64), String> {
+        use std::io::{Read, Seek, SeekFrom};
+        if !Self::valid(id) { return Err(format!("invalid JIT key {id}")); }
+        let p = self.binary(id);
+        let mut f = File::open(&p).map_err(|e| format!("JIT {id} is not in this box's store ({e})"))?;
+        let size = f.metadata().map_err(|e| format!("{}: {e}", p.display()))?.len();
+        let mut buf = Vec::new();
+        f.seek(SeekFrom::Start(off)).and_then(|_| f.take(COPY_CHUNK as u64).read_to_end(&mut buf)).map_err(|e| format!("{}: {e}", p.display()))?;
+        Ok((buf, size))
+    }
+
+    /// A chunk of `id`'s binary copied in from a box that holds it, `size` bytes in all, the
+    /// chunks in order: after its last byte the store keeps it as if built here. At its first
+    /// chunk a store that holds `id` takes nothing (the key names the same binary).
+    pub fn put(&self, id: &str, off: u64, size: u64, data: &[u8]) -> Result<Put, String> {
+        use std::io::{Seek, SeekFrom, Write};
+        if !Self::valid(id) { return Err(format!("invalid JIT key {id}")); }
+        if off == 0 && self.binary(id).is_file() { return Ok(Put::Held); }
+        let end = off + data.len() as u64;
+        if size == 0 || end > size { return Err(format!("JIT {id}: a chunk to {end} of a {size} byte binary")); }
+        let part = self.root.join("copies").join(id);
+        // a chunk past what the part holds: a copy whose start this box did not see (its hub
+        // restarted under it) is copied again from its start, never kept with a gap
+        let held = std::fs::metadata(&part).map_or(0, |m| m.len());
+        if off > 0 && held != off { return Err(format!("JIT {id}: its copy here holds {held} bytes, the chunk starts at {off}: copy it again from its start")); }
+        let written = std::fs::create_dir_all(self.root.join("copies"))
+            .and_then(|_| OpenOptions::new().write(true).create(true).truncate(off == 0).open(&part))
+            .and_then(|mut f| f.seek(SeekFrom::Start(off)).and_then(|_| f.write_all(data)));
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&part);
+            return Err(format!("{}: {e}", part.display()));
+        }
+        if end < size { return Ok(Put::More(end)); }
+        #[cfg(unix)]
+        let kept = {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o755)).map_err(|e| format!("{}: {e}", part.display())).and_then(|_| self.keep(id, &part))
+        };
+        #[cfg(not(unix))]
+        let kept = self.keep(id, &part);
+        let _ = std::fs::remove_file(&part);
+        kept.map(|_| Put::Kept)
+    }
+
+    /// Copies a hub left unfinished when it ended: the master's copy ended with its link.
+    pub fn clear_copies(&self) {
+        let dir = self.root.join("copies");
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            if e.kind() != std::io::ErrorKind::NotFound { eprintln!("devhub: JIT store {}: {e}", dir.display()); }
+        }
     }
 
     /// A waiting requester sees the first builder's result, including its error. `warn` reaches
@@ -441,6 +522,65 @@ mod tests {
     fn ensure(store: &Store, heard: &Heard, build: impl FnOnce(&Path, &dyn Fn() -> Result<(), String>, &dyn Fn(&str)) -> Result<(), String>) -> Result<PathBuf, String> {
         let cancelled = Arc::new(AtomicBool::new(false));
         store.ensure(ID, "L1", &|_| {}, &|l| heard.pending.borrow_mut().push(l.to_string()), &|l| heard.warned.borrow_mut().push(l.to_string()), &|| Ok(()), &cancelled, build)
+    }
+
+    /// A lease's explicit `--jit`: the binary, held while the lease lasts; one the box lacks is
+    /// an error naming what it holds.
+    #[test]
+    fn an_asked_jit_is_held_for_its_lease_or_named_missing() {
+        let w = work("held");
+        let store = Store::new(&w);
+        assert_eq!(store.held(ID, "L1"), Err(format!("JIT {ID} is not in this box's store (it holds none)")));
+        let built = w.join("built");
+        std::fs::write(&built, b"jit").unwrap();
+        store.keep(OTHER, &built).unwrap();
+        assert_eq!(store.held(ID, "L1"), Err(format!("JIT {ID} is not in this box's store (it holds {OTHER})")));
+        let p = store.held(OTHER, "L2").unwrap();
+        assert!(p.is_file());
+        assert!(store.root.join("leases/L2").join(OTHER).is_file(), "held for its lease");
+        store.release("L2").unwrap();
+        assert!(!store.root.join("leases/L2").exists());
+        let _ = std::fs::remove_dir_all(&w);
+    }
+
+    /// A JIT copied from a box that holds it ([`Store::read`] there, [`Store::put`] here), chunk
+    /// by chunk: kept by its key once whole, runnable; a store that holds it takes nothing; a
+    /// chunk past what the copy here holds (its start went with a hub restart) is refused, never
+    /// kept with a gap.
+    #[test]
+    fn a_jit_copied_chunk_by_chunk_is_kept_by_its_key() {
+        let (wa, wb) = (work("copy-from"), work("copy-to"));
+        let (from, to) = (Store::new(&wa), Store::new(&wb));
+        let bytes: Vec<u8> = (0..COPY_CHUNK * 2 + 17).map(|i| (i * 7) as u8).collect();
+        std::fs::write(wa.join("built"), &bytes).unwrap();
+        from.keep(ID, &wa.join("built")).unwrap();
+        assert!(to.read(ID, 0).unwrap_err().starts_with(&format!("JIT {ID} is not in this box's store")));
+        let mut off = 0;
+        let last = loop {
+            let (data, size) = from.read(ID, off).unwrap();
+            assert_eq!(size, bytes.len() as u64);
+            match to.put(ID, off, size, &data).unwrap() {
+                Put::More(end) => off = end,
+                done => break done,
+            }
+        };
+        assert_eq!(last, Put::Kept);
+        let kept = to.lookup(ID).expect("kept by its key");
+        assert_eq!(std::fs::read(&kept).unwrap(), bytes);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&kept).unwrap().permissions().mode() & 0o111, 0o111, "runnable");
+        }
+        assert!(!wb.join("dev/jit/copies").join(ID).exists(), "the part goes");
+        assert_eq!(to.put(ID, 0, bytes.len() as u64, &bytes[..COPY_CHUNK]), Ok(Put::Held));
+        assert!(to.put(OTHER, COPY_CHUNK as u64, bytes.len() as u64, &bytes[..COPY_CHUNK]).unwrap_err().contains("its copy here holds 0 bytes, the chunk starts at 262144"));
+        assert_eq!(to.put(OTHER, 0, bytes.len() as u64, &bytes[..COPY_CHUNK]), Ok(Put::More(COPY_CHUNK as u64)));
+        to.clear_copies();
+        assert!(to.put(OTHER, COPY_CHUNK as u64, bytes.len() as u64, &bytes[COPY_CHUNK..COPY_CHUNK * 2]).is_err(), "a hub restart cleared it");
+        assert_eq!(to.lookup(OTHER), None);
+        let _ = std::fs::remove_dir_all(&wa);
+        let _ = std::fs::remove_dir_all(&wb);
     }
 
     /// The lock taken over with a build's note still there: that build died without an outcome

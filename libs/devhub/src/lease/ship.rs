@@ -25,12 +25,12 @@ use std::time::UNIX_EPOCH;
 
 /// Paths that never leave their machine in a ship, whoever asks: agent configuration (`.claude`),
 /// build output (`target`, `__pycache__`), at any depth, an atomic write's temp file, and `local/`
-/// at the root of either repo.
-/// Files git ignores are not in a dirty set to begin with, but the commercial repo does not share
+/// at the root of makepad or of a nested repository (`apps/<name>/local`, [`crate::nested`]).
+/// Files git ignores are not in a dirty set to begin with, but a nested repository does not share
 /// the root's `.gitignore`, so this holds for it too.
 pub fn never_ships(path: &str) -> bool {
-    let rel = path.strip_prefix("apps/commercial/").unwrap_or(path);
-    rel == "local" || rel.starts_with("local/") || never_ships_named(path)
+    let rel = path.strip_prefix("apps/").and_then(|r| r.split_once('/')).map_or(path, |(_, rest)| rest);
+    path == "local" || path.starts_with("local/") || rel == "local" || rel.starts_with("local/") || never_ships_named(path)
 }
 
 /// What never ships even when a run names it (`DEVHUB_ALSO`): `local/` does then (a lane's
@@ -289,6 +289,118 @@ fn make_link(_dst: &Path, _target: &str) -> Result<String, String> {
     Ok("{\"skipped\":\"symlink\"}".into())
 }
 
+// ---- job inputs: archives a run reads (a test corpus), kept per box by their hash
+
+/// `--input NAME=<archive>`: a tar archive (any compression `tar -xf` reads) on the client, whose
+/// unpacked folder the run finds at `$NAME`. It goes to a box by its content's hash, once: the box
+/// keeps it in `<work>/inputs/<hash>` for the next lease that names it, a cache the disk guard
+/// reclaims when no lease uses it. The rustc tests/ui corpus was a folder on one node only, so
+/// every ui job waited for that node while others were free (11-07).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Input {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+impl Input {
+    pub fn parse(spec: &str) -> Result<Input, String> {
+        let (name, path) = spec.split_once('=').ok_or("--input is NAME=<archive>")?;
+        let env_name = !name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        if !env_name { return Err(format!("--input {name}=..: NAME is the run's environment variable (letters, digits and _)")); }
+        let path = PathBuf::from(path);
+        if !path.is_file() { return Err(format!("--input {name}: {} is not a file", path.display())); }
+        Ok(Input { name: name.to_string(), path })
+    }
+}
+
+/// The name an input goes by: its archive's sha256, in hex.
+pub fn input_hash(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut h = makepad_network::digest::Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| format!("{}: {e}", path.display()))?;
+        if n == 0 { break; }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalise().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+pub(crate) fn is_hash(h: &str) -> bool {
+    h.len() == 64 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Where a box keeps input `hash`, unpacked.
+pub fn input_dir(work: &Path, hash: &str) -> PathBuf {
+    work.join("inputs").join(hash)
+}
+
+/// `input-have <id> <hash>`: the input's folder when the box holds it.
+pub fn input_have(work: &Path, hash: &str) -> Result<Option<PathBuf>, String> {
+    if !is_hash(hash) { return Err(format!("input-have: bad hash `{hash}`")); }
+    let dir = input_dir(work, hash);
+    Ok(dir.is_dir().then_some(dir))
+}
+
+/// `input-put <id> <hash> <off> <size> <data b64>`: a chunk of the archive into the lease's `tmp`.
+/// After its last byte the archive is checked against its hash, unpacked beside it and moved
+/// into the box's inputs whole (two leases shipping it at once: the first move wins). The
+/// input's folder once it is in place.
+pub fn input_put(work: &Path, tmp: &Path, rest: &str) -> Result<Option<PathBuf>, String> {
+    let mut w: Vec<&str> = rest.splitn(4, ' ').collect();
+    if w.len() == 3 {
+        w.push("");
+    }
+    let [hash, off, size, data] = w[..] else { return Err("usage: input-put <id> <hash> <off> <size> <data b64>".into()) };
+    if !is_hash(hash) { return Err(format!("input-put: bad hash `{hash}`")); }
+    let (Ok(off), Ok(size)) = (off.parse::<u64>(), size.parse::<u64>()) else { return Err("input-put: bad numbers".into()) };
+    let data = unb64(data.trim()).ok_or("input-put: data is not base64")?;
+    if off + data.len() as u64 > size {
+        return Err(format!("input-put {hash}: past its size"));
+    }
+    std::fs::create_dir_all(tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    let part = tmp.join(format!("input-{hash}.part"));
+    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(off == 0).open(&part).map_err(|e| format!("{}: {e}", part.display()))?;
+    f.seek(SeekFrom::Start(off)).and_then(|_| f.write_all(&data)).map_err(|e| format!("{}: {e}", part.display()))?;
+    drop(f);
+    if off + (data.len() as u64) < size {
+        return Ok(None);
+    }
+    let placed = place_input(work, tmp, hash, &part, size);
+    let _ = std::fs::remove_file(&part);
+    placed.map(Some)
+}
+
+fn place_input(work: &Path, tmp: &Path, hash: &str, part: &Path, size: u64) -> Result<PathBuf, String> {
+    let len = std::fs::metadata(part).map_err(|e| format!("{}: {e}", part.display()))?.len();
+    let got = input_hash(part)?;
+    if len != size || got != hash {
+        return Err(format!("input {hash}: its {len} bytes hash to {got}: the archive changed while it shipped"));
+    }
+    let unpack = tmp.join(format!("input-{hash}"));
+    let _ = std::fs::remove_dir_all(&unpack);
+    std::fs::create_dir_all(&unpack).map_err(|e| format!("{}: {e}", unpack.display()))?;
+    let out = std::process::Command::new("tar").arg("-xf").arg(part).arg("-C").arg(&unpack).output().map_err(|e| format!("input {hash}: tar: {e}"))?;
+    if !out.status.success() {
+        let _ = std::fs::remove_dir_all(&unpack);
+        return Err(format!("input {hash}: `tar -xf` of it failed ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    let dir = input_dir(work, hash);
+    if let Some(d) = dir.parent() {
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    match std::fs::rename(&unpack, &dir) {
+        Ok(()) => Ok(dir),
+        // another lease's ship of it moved first
+        Err(_) if dir.is_dir() => {
+            let _ = std::fs::remove_dir_all(&unpack);
+            Ok(dir)
+        }
+        Err(e) => Err(format!("{}: {e}", dir.display())),
+    }
+}
+
 // ---- the client side
 
 /// Requests on one routed channel to a node service, up to [`WINDOW`] in flight; each answer is
@@ -464,6 +576,72 @@ fn put_bytes(p: &mut Pipe, id: &str, path: &str, bytes: &[u8], mtime_us: u64, ex
     }
 }
 
+/// An input as its run finds it on the box.
+#[derive(Debug, PartialEq)]
+pub struct Placed {
+    pub name: String,
+    pub hash: String,
+    /// its folder on the box
+    pub dir: String,
+    /// the archive bytes this ship sent (0: the box held it)
+    pub sent: u64,
+}
+
+/// Ships each input lease `id`'s box does not hold yet ([`input_put`]): where each one is there.
+pub fn send_inputs(c: &Client, node: &str, id: &str, inputs: &[Input]) -> Result<Vec<Placed>, String> {
+    use std::io::Read;
+    let path_of = |lines: &[String]| lines.first().and_then(|l| makepad_strict_json::parse(l.as_bytes()).ok()).and_then(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string));
+    let mut out = Vec::new();
+    for i in inputs {
+        let hash = input_hash(&i.path)?;
+        let mut held = None;
+        let mut look = |_: &str, lines: &[String]| { held = path_of(lines); Ok(()) };
+        Pipe::open(c, node, "input-have").and_then(|mut have| {
+            have.send(format!("input-have {id} {hash}"), &mut look)?;
+            have.drain(&mut look)
+        }).map_err(|e| if e.contains("unsupported service") { format!("{e} (its hub is from before job inputs: it takes them once it updates)") } else { e })?;
+        if let Some(dir) = held {
+            out.push(Placed { name: i.name.clone(), hash, dir, sent: 0 });
+            continue;
+        }
+        let mut f = std::fs::File::open(&i.path).map_err(|e| format!("{}: {e}", i.path.display()))?;
+        let size = f.metadata().map_err(|e| format!("{}: {e}", i.path.display()))?.len();
+        let mut put = Pipe::open(c, node, "input-put")?;
+        let mut placed = None;
+        let mut done = |_: &str, lines: &[String]| { if let Some(p) = path_of(lines) { placed = Some(p); } Ok(()) };
+        let mut buf = vec![0u8; CHUNK];
+        let mut off = 0u64;
+        loop {
+            let mut n = 0;
+            while n < CHUNK {
+                match f.read(&mut buf[n..]).map_err(|e| format!("{}: {e}", i.path.display()))? {
+                    0 => break,
+                    k => n += k,
+                }
+            }
+            put.send(format!("input-put {id} {hash} {off} {size} {}", b64(&buf[..n])), &mut done)?;
+            off += n as u64;
+            if n == 0 || off >= size {
+                break;
+            }
+        }
+        put.drain(&mut done)?;
+        let dir = placed.ok_or_else(|| format!("{node}: input {} ({}) is not in place after its last byte", i.name, &hash[..12]))?;
+        out.push(Placed { name: i.name.clone(), hash, dir, sent: off });
+    }
+    Ok(out)
+}
+
+/// `cmd` with the placed inputs in its environment, as a `lease-run` takes one (`env K=V cmd`).
+pub fn with_inputs(cmd: &[String], placed: &[Placed]) -> Vec<String> {
+    if placed.is_empty() {
+        return cmd.to_vec();
+    }
+    let vars = placed.iter().map(|p| format!("{}={}", p.name, p.dir));
+    let rest = if cmd.first().is_some_and(|c| c == "env") { &cmd[1..] } else { cmd };
+    std::iter::once("env".to_string()).chain(vars).chain(rest.iter().cloned()).collect()
+}
+
 #[cfg(test)]
 mod read_tests {
     use super::*;
@@ -514,7 +692,7 @@ mod read_tests {
         git(&["init", "-q", "-b", "work"]);
         git(&["add", "-A"]);
         git(&["commit", "-qm", "base"]);
-        let pin = crate::lease::Pin { makepad: git(&["rev-parse", "HEAD"]), commercial: None };
+        let pin = crate::lease::Pin::at(&git(&["rev-parse", "HEAD"]));
         assert_eq!(uncommitted(&repo, &pin).unwrap(), (vec![], vec![]), "racily clean files of their text are clean");
         write("old.rs", "fn x() {}\n", at(now - 100, 200));
         write("racy.rs", "fn y() {}\n", at(now + 100, 100));
@@ -531,7 +709,8 @@ mod tests {
     fn an_atomic_writes_temp_file_never_ships() {
         assert!(never_ships("libs/demo/src/support.rs.tmp.81511.2d68cbffff10"));
         assert!(never_ships_named("src/lib.rs.tmp.7.ab"));
-        for keep in ["src/a.tmp.rs", "src/tmp.1.ab", "src/a.rs.tmp.81511", "src/a.rs.tmp.x1.ab", "src/a.rs.tmp.1.xyz", "src/a.rs"] {
+        assert!(never_ships("local/bench.sh") && never_ships("apps/commercial/local/a") && never_ships("apps/source-library/local"));
+        for keep in ["src/a.tmp.rs", "src/tmp.1.ab", "src/a.rs.tmp.81511", "src/a.rs.tmp.x1.ab", "src/a.rs.tmp.1.xyz", "src/a.rs", "apps/source-library/src/local.rs", "apps/local.rs"] {
             assert!(!never_ships(keep), "{keep}");
         }
     }
@@ -622,14 +801,14 @@ mod tests {
 }
 
 /// The repositories of a tree pinned at `pin`: (dir, commit, path prefix in the tree).
-fn pinned_repos(root: &Path, pin: &super::Pin) -> Vec<(PathBuf, String, &'static str)> {
-    std::iter::once((root.to_path_buf(), pin.makepad.clone(), "")).chain(pin.commercial.clone().map(|s| (root.join("apps/commercial"), s, "apps/commercial/"))).collect()
+fn pinned_repos(root: &Path, pin: &super::Pin) -> Vec<(PathBuf, String, String)> {
+    pin.repos().into_iter().map(|(name, sha, prefix)| (if prefix.is_empty() { root.to_path_buf() } else { root.join(crate::nested::dir(name)) }, sha.to_string(), prefix)).collect()
 }
 
 /// Whether `path` (in the tree) belongs to the repository with `prefix` under `pin`: the makepad
-/// side leaves a pinned nested commercial checkout's paths to it.
+/// side leaves each pinned nested repository's paths to it.
 fn in_repo(pin: &super::Pin, prefix: &str, path: &str) -> bool {
-    if prefix.is_empty() { !(pin.commercial.is_some() && path.starts_with("apps/commercial/")) } else { path.starts_with(prefix) }
+    if prefix.is_empty() { pin.repo_of(path).0 == "makepad" } else { path.starts_with(prefix) }
 }
 
 /// The blob of the file at `path` in `tree` (a file or a symlink; None for nothing, a folder or a
@@ -653,7 +832,7 @@ fn blob_at(repo: &mut makepad_git::Repository, tree: &makepad_git::ObjectId, pat
 fn pin_blobs(root: &Path, pin: &super::Pin, paths: &[String]) -> Result<std::collections::HashMap<String, String>, String> {
     let mut blobs = std::collections::HashMap::new();
     for (dir, sha, prefix) in pinned_repos(root, pin) {
-        let mine: Vec<&String> = paths.iter().filter(|p| in_repo(pin, prefix, p)).collect();
+        let mine: Vec<&String> = paths.iter().filter(|p| in_repo(pin, &prefix, p)).collect();
         if mine.is_empty() { continue; }
         let found = crate::gitread::with(&dir, |p, repo| -> Result<Vec<Option<makepad_git::ObjectId>>, String> {
             let commit = crate::gitread::resolve(p, repo, &sha).ok_or_else(|| format!("{}: no commit {sha}", dir.display()))?;
@@ -714,7 +893,7 @@ fn uncommitted_with(root: &Path, pin: &super::Pin, dirty: impl Fn(&Path) -> Resu
                 makepad_git::TreeChange::Added { path, .. } | makepad_git::TreeChange::Modified { path, .. } | makepad_git::TreeChange::Deleted { path, .. } => path,
             }));
         }
-        paths.extend(rel.into_iter().map(|p| format!("{prefix}{p}")).filter(|p| in_repo(pin, prefix, p) && !never_ships(p)));
+        paths.extend(rel.into_iter().map(|p| format!("{prefix}{p}")).filter(|p| in_repo(pin, &prefix, p) && !never_ships(p)));
     }
     let (mut changed, mut gone) = (Vec::new(), Vec::new());
     for p in paths {

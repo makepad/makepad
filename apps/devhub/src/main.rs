@@ -176,11 +176,7 @@ struct NodeCore {
 
 impl NodeCore {
     fn lan(&self) -> String {
-        match (&self.node.addr, &self.node.lan_off) {
-            (Some(a), _) => format!("LAN {a}"),
-            (None, Some(w)) => w.clone(),
-            (None, None) => "local only".into(),
-        }
+        makepad_devhub::node::lan_said(&self.node.lan)
     }
 
     /// this machine's JITs (the scan's list: no JIT is asked)
@@ -355,11 +351,7 @@ fn start_node(conf_path: PathBuf) -> Result<Option<NodeCore>, String> {
         "devhub: node {} up; control {}; {}",
         node.conf.name,
         proto::control_socket().display(),
-        match (&node.addr, &node.lan_off) {
-            (Some(a), _) => format!("LAN {a}"),
-            (None, Some(why)) => why.clone(),
-            (None, None) => "local only".into(),
-        }
+        makepad_devhub::node::lan_said(&node.lan)
     ));
     Ok(Some(NodeCore { node, conf_path, cache: Arc::new(Mutex::new(Default::default())) }))
 }
@@ -451,7 +443,7 @@ impl App {
                 let g = glance.cloned().unwrap_or_default();
                 (g.glyph(), format!("master {} \u{b7} {} \u{b7} {}", m.master.name, g.word(), g.lines().first().cloned().unwrap_or_default()))
             }
-            Some(Core::Node(n)) => (if n.node.addr.is_some() { glyph::Glyph::Quiet } else { glyph::Glyph::Off }, format!("node {} \u{b7} {} JITs \u{b7} {}", n.node.conf.name, n.jit_count(), n.lan())),
+            Some(Core::Node(n)) => (if n.node.lan.lock().unwrap().is_ok() { glyph::Glyph::Quiet } else { glyph::Glyph::Off }, format!("node {} \u{b7} {} JITs \u{b7} {}", n.node.conf.name, n.jit_count(), n.lan())),
             None => (glyph::Glyph::Off, "off".into()),
         }
     }

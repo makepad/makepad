@@ -15,6 +15,12 @@
 //! (a WM restart) while its input is under [`VIEWER_HOLDS_MIN`] old; it takes no box out of the
 //! pool. A tab merely connected holds nothing: the viewer keeps tabs on many nodes (two nodes'
 //! WM restarts waited on one for good, 11-02).
+//!
+//! A person whose last input came through Desk Link is at the node only while a viewer shows it:
+//! once its tab goes elsewhere the node takes work at once, not `user_idle_min` later (the user
+//! drove a pool box from the Mac's viewer, moved on, and the box stood idle with 20 leases queued,
+//! 11-07). And the person can hand the node back (`devhub node <n> back`,
+//! [`UserTrack::hand_back`]): the input so far no longer holds it; new input does again.
 
 use super::UserSense;
 
@@ -35,6 +41,10 @@ pub struct UserTrack {
     /// a Desk Link viewer attached at the last answer (at wall ms `watched_now`)
     viewers: bool,
     watched_now: u64,
+    /// the last input came through a Desk Link viewer
+    desk_link: bool,
+    /// wall ms up to which the input was handed back ([`Self::hand_back`])
+    handed_back_ms: Option<u64>,
 }
 
 /// A change worth an event.
@@ -57,19 +67,21 @@ impl UserTrack {
                         self.last_input_ms = Some(at);
                         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
                         self.what = format!("{} from its {}", s("what"), s("origin"));
+                        self.desk_link = s("origin") == "desk link";
                     }
                 }
                 let idle_ms = self.last_input_ms.map(|l| now.saturating_sub(l));
                 self.viewers = v.get("viewers").and_then(super::num).unwrap_or(0.0) > 0.0;
                 self.watched_now = now;
-                let present = idle_ms.is_some_and(|i| i < idle_min as u64 * 60_000);
+                let present = self.person(now, idle_min);
                 self.sense = Some(UserSense { present, idle_ms, what: self.what.clone(), idle_min });
             }
             // no WM (none of ours, or it restarts): what was seen still holds until it times out
             None => {
+                let present = self.person(now, idle_min);
                 self.sense = self.sense.take().and_then(|mut s| {
                     s.idle_ms = self.last_input_ms.map(|l| now.saturating_sub(l));
-                    s.present = s.idle_ms.is_some_and(|i| i < idle_min as u64 * 60_000);
+                    s.present = present;
                     s.idle_min = idle_min;
                     s.present.then_some(s)
                 });
@@ -80,6 +92,24 @@ impl UserTrack {
             (true, false) => Some(Flip::Idle),
             _ => None,
         }
+    }
+
+    /// A person at the node at wall ms `now`: input under `idle_min` old that was not handed
+    /// back, and for Desk Link input, a viewer still showing the node.
+    fn person(&self, now: u64, idle_min: u32) -> bool {
+        self.last_input_ms.is_some_and(|l| now.saturating_sub(l) < idle_min as u64 * 60_000 && self.handed_back_ms.is_none_or(|b| l > b))
+            && (!self.desk_link || self.viewers)
+    }
+
+    /// The person hands the node back at wall ms `now` (`devhub node <n> back`, on their say-so):
+    /// the input so far no longer holds it, new input does again. Whether they were present.
+    pub fn hand_back(&mut self, now: u64) -> bool {
+        let was = self.present();
+        self.handed_back_ms = Some(now);
+        if let Some(s) = self.sense.as_mut() {
+            s.present = false;
+        }
+        was
     }
 
     /// A viewer showing the node, with input recent enough to mean someone is watching.
@@ -163,5 +193,33 @@ mod tests {
         let mut n = UserTrack::default();
         assert_eq!(n.update(MIN, Err("no WM".into()), 3), None);
         assert!(n.sense.is_none());
+    }
+
+    #[test]
+    fn a_desk_link_person_holds_the_node_while_their_viewer_shows_it() {
+        let link = |ms: u64, viewers: u32| format!("{{\"input_ms\":{ms},\"seq\":3,\"origin\":\"desk link\",\"what\":\"pointer\",\"viewers\":{viewers}}}");
+        let mut t = UserTrack::default();
+        assert_eq!(t.update(MIN, Ok(&link(0, 1)), 3), Some(Flip::Present));
+        assert_eq!(t.update(MIN + 2000, Ok(&link(2000, 1)), 3), None);
+        // the viewer's tab goes to another node: the node takes work at once, not 3 min later
+        assert_eq!(t.update(MIN + 4000, Ok(&link(4000, 0)), 3), Some(Flip::Idle));
+        assert_eq!(t.update(MIN + 6000, Ok(&link(6000, 1)), 3), Some(Flip::Present), "back on its tab, within the minutes");
+        // a device's input keeps its minutes, whatever the viewers
+        let mut d = UserTrack::default();
+        assert_eq!(d.update(MIN, Ok(&input(0)), 3), Some(Flip::Present));
+        assert_eq!(d.update(2 * MIN, Ok(&input(MIN)), 3), None);
+        assert!(d.present());
+    }
+
+    #[test]
+    fn a_node_handed_back_takes_work_until_new_input() {
+        let mut t = UserTrack::default();
+        t.update(MIN, Ok(&input(0)), 3);
+        assert!(t.hand_back(MIN + 1000));
+        assert!(!t.present());
+        assert_eq!(t.update(MIN + 2000, Ok(&input(2000)), 3), None, "the same input, handed back");
+        assert!(!t.present());
+        assert_eq!(t.update(MIN + 4000, Ok(&input(500)), 3), Some(Flip::Present), "new input counts again");
+        assert!(!UserTrack::default().hand_back(MIN), "nobody to hand back");
     }
 }

@@ -62,7 +62,7 @@ pub(crate) fn compile_errors(log: &str) -> Vec<String> {
         }
         if line.starts_with("makepad live:") || line.contains("restart the app") { continue; }
         // A run's crash report (a test's panic, a fault): the program's verdict, never a build's.
-        if line.starts_with("report: {") || line.contains(" report: {") { continue; }
+        if line.starts_with("report: {") || line.contains(" report: {") || line.starts_with("report (caught): {") { continue; }
         if let Ok(v) = makepad_strict_json::parse(line.as_bytes()) {
             if text(&v, "severity") == "error" {
                 let file = text(&v, "file");
@@ -84,6 +84,8 @@ pub(crate) fn compile_errors(log: &str) -> Vec<String> {
             || line.ends_with("restart the app") // A live restart notice, not a build error.
         {
             continue;
+        } else if located_note(line) {
+            continue;
         } else if line.starts_with("error:") || line.starts_with("error[")
             || line.contains(": error:") || line.contains(": error[")
             || line.split_once(".rs:").is_some_and(|(_, rest)| {
@@ -95,6 +97,22 @@ pub(crate) fn compile_errors(log: &str) -> Vec<String> {
         }
     }
     if errors.is_empty() { summary } else { errors }
+}
+
+/// A located diagnostic that is no error: `<file>.rs:<line>:<col>: warning|note|help: ..`. A JIT
+/// warning (`unused imports`) read as a compile error sent a failing test run to cargo as a JIT
+/// miss (M71, 11-07).
+fn located_note(line: &str) -> bool {
+    let Some((_, rest)) = line.split_once(".rs:") else { return false };
+    let mut text = rest;
+    for _ in 0..2 {
+        match text.split_once(':') {
+            Some((n, after)) if n.trim().parse::<u64>().is_ok() => text = after,
+            _ => break,
+        }
+    }
+    let text = text.trim_start();
+    ["warning", "note", "help"].iter().any(|k| text.strip_prefix(k).is_some_and(|after| after.starts_with(':') || after.starts_with('[')))
 }
 
 /// The spelling distinguishes `--lib` from a test target actually named `lib`.
@@ -154,7 +172,7 @@ impl Miss {
 
     fn touch(&mut self, req: &Value, now: u64, set_pair: bool) -> Result<(), String> {
         let pin = crate::lease::Pin::of_rev(text(req, "rev")).ok_or("jit misses: missing commit pair")?;
-        if set_pair { self.pair = crate::state::Pair::new(&pin.makepad, pin.commercial.as_deref().unwrap_or("")); }
+        if set_pair { self.pair = pin.pair(); }
         self.lane = text(req, "lane").into();
         self.last_ms = now;
         self.count += 1;
@@ -165,7 +183,9 @@ impl Miss {
 
 pub(crate) fn notice(v: &Value) -> String {
     let error = v.get("error").and_then(Value::as_arr).and_then(|a| a.first()).and_then(Value::as_str).unwrap_or("");
-    format!("devhub test: JIT miss on {} {} (recorded {}): {error}; this verdict is cargo's", text(v, "pkg"), text(v, "target"), text(v, "id"))
+    // (the line is the JIT's; cargo's part is that the package builds: "this verdict is cargo's"
+    // after the JIT's line read as cargo printing it, 11-07)
+    format!("devhub test: JIT miss on {} {} (recorded {}): the JIT said {error}; cargo builds it", text(v, "pkg"), text(v, "target"), text(v, "id"))
 }
 
 /// Whether a package is JIT-own; an empty repo uses the local checkout.
@@ -250,7 +270,7 @@ pub(crate) fn behind_work_jit(_: &Path, _: &crate::state::Pair) -> Option<String
 #[cfg(feature = "checkout")]
 pub(crate) fn crate_inputs(repo: &Path, pin: &crate::lease::Pin, pkg: &str) -> Result<String, String> {
     use crate::orch::ci::{package_dirs, Tree};
-    let pair = crate::state::Pair::new(&pin.makepad, pin.commercial.as_deref().unwrap_or(""));
+    let pair = pin.pair();
     let tree = Tree::at(repo, &pair)?;
     let dir = package_dirs(&tree).remove(pkg).ok_or_else(|| format!("no package {pkg} at {}", pair.short()))?;
     let dirs = crate::orch::roll::crate_dirs_from(&dir, &|p| tree.read(p));
@@ -351,7 +371,7 @@ pub(crate) fn serve(home: &Path, line: &str, now: u64, event: &dyn Fn(&str, &Val
             let errors = if verb == "lookup" {
                 if let Some(i) = existing {
                     if let Some(pin) = crate::lease::Pin::of_rev(text(&req, "rev")) {
-                        let to = crate::state::Pair::new(&pin.makepad, pin.commercial.as_deref().unwrap_or(""));
+                        let to = pin.pair();
                         // the JIT's inputs changed, or the package's: the miss was the JIT's
                         // failure on others (M64 kept a crate's E0700 on cargo after its line
                         // changed, 11-06)
@@ -521,6 +541,18 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         let error = "/tree/src/b.rs:1:2: E0308: mismatched types";
         log.push_str(error);
         assert_eq!(compile_errors(&log), vec![error.to_string()]);
+    }
+
+    /// A JIT warning or note at a source line is no compile error: M71 recorded a test run's
+    /// `unused imports` warning as its JIT miss (11-07).
+    #[test]
+    fn a_located_warning_or_note_is_no_compile_error() {
+        let warn = "/tree/libs/video/tests/color.rs:20:94: warning: unused imports: `VideoMatrix` and `VideoRange` [unused_imports]";
+        let log = format!("{warn}\n/tree/src/a.rs:3:1: warning[W1]: x\n/tree/src/a.rs:4:1: note: y\n/tree/src/a.rs:5: help: z\nmakepad test: 1 warning\n");
+        assert!(compile_errors(&log).is_empty(), "{:?}", compile_errors(&log));
+        let error = "/tree/src/b.rs:1:2: E0308: mismatched types";
+        assert_eq!(compile_errors(&format!("{log}{error}\n")), vec![error.to_string()]);
+        assert_eq!(compile_errors("/tree/src/b.rs:9:3: error: expected `;`\n"), vec!["/tree/src/b.rs:9:3: error: expected `;`".to_string()]);
     }
 
     #[test]

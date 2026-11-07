@@ -252,11 +252,37 @@ fn join(monitor: &crate::monitor::Monitor, id: &str, r: Arc<Running>) {
     if !r.test { due(&r.pending, []); }
 }
 
-/// The monitor follows `tree` and its nested commercial tree.
+/// The monitor follows `tree` and each nested repository's tree in it ([`crate::nested`]).
 fn follow(monitor: &crate::monitor::Monitor, tree: &Path) {
     let _ = monitor.dirty(tree);
-    let nested = tree.join("apps/commercial");
-    if nested.join(".git").exists() { let _ = monitor.dirty(&nested); }
+    for name in crate::nested::names(tree) {
+        let _ = monitor.dirty(&tree.join(crate::nested::dir(&name)));
+    }
+}
+
+/// A save the monitor heard in `root` at `rel`, as a path of the session's `tree`: its own files,
+/// and each nested repository's from that repository's tree (`<tree>/apps/<name>`; the makepad
+/// tree's event for a nested path is that tree's to say). None: not this session's.
+fn saved_path(tree: &Path, root: &Path, rel: &str) -> Option<String> {
+    if root == tree {
+        let nested = rel.starts_with("apps/") && crate::nested::split(rel, crate::nested::names(tree).iter().map(String::as_str)).is_some();
+        return (!nested).then(|| rel.to_string());
+    }
+    let mut parts = root.strip_prefix(tree).ok()?.components().map(|c| c.as_os_str().to_str());
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(Some("apps")), Some(Some(name)), None) if crate::nested::valid(name) => Some(format!("{}{rel}", crate::nested::prefix(name))),
+        _ => None,
+    }
+}
+
+/// The dirty paths of each nested repository in `tree`, as tree paths.
+fn nested_dirty(ctx: &Ctx, tree: &Path) -> Result<Vec<String>, String> {
+    let mut files = Vec::new();
+    for name in crate::nested::names(tree) {
+        let (d, prefix) = (ctx.monitor.dirty(&tree.join(crate::nested::dir(&name)))?, crate::nested::prefix(&name));
+        files.extend(d.changed.into_iter().chain(d.deleted).map(|p| format!("{prefix}{p}")));
+    }
+    Ok(files)
 }
 
 /// A session's saves: (paths in the tree, when the first was saved, when the last was).
@@ -503,10 +529,7 @@ pub fn start(ctx: Arc<Ctx>) {
     ctx.monitor.listen(Arc::new(|root: &Path, rel: &str| {
         let list: Vec<Arc<Running>> = RUNNING.lock().unwrap().as_ref().map(|m| m.values().cloned().collect()).unwrap_or_default();
         for r in list {
-            let path = if root == r.tree { rel.to_string() } else if root == r.tree.join("apps/commercial") { format!("apps/commercial/{rel}") } else { continue };
-            if root == r.tree && rel.starts_with("apps/commercial/") {
-                continue;
-            }
+            let Some(path) = saved_path(&r.tree, root, rel) else { continue };
             due(&r.pending, [path]);
         }
     }));
@@ -767,22 +790,25 @@ fn terminal(p: &LivePatch) -> bool {
 }
 
 /// An edit the session's JIT cannot take in place because the JIT itself must be rebuilt (the
-/// Splash VM or other provided sources changed). On a node that JIT is the loader store's
-/// binary, which cannot rebuild itself through cargo: a new run resolves the JIT from the
-/// published overlay again and the store builds it (47 sessions ran on stale code, 11-03..05).
-/// A session pinned to a JIT (`--jit`) keeps it: its lane chose that build, and the refusal says so.
+/// Splash VM, other provided sources or makepad run's own changed). On a node that JIT is one
+/// devhub picked by its inputs' content, the store's or the box's, which cannot rebuild itself
+/// through cargo: a new run resolves the JIT again, an overlay's from the published overlay
+/// (47 sessions ran on stale code, 11-03..05), a tree's from the lane's tree, and the lane's own
+/// is built when its edits changed the JIT's inputs. A tree's relaunch went to its JIT, which
+/// rebuilt the box's checkout for 79 s and ran the same binary (W3752, 11-06). A session pinned
+/// to a JIT (`--jit`) keeps it: its lane chose that build, and the refusal says so.
 fn needs_devhub_rebuild(x: &Live, p: &LivePatch) -> bool {
-    x.src == Src::Overlay.as_str() && x.loader.is_empty() && p.reason.contains("needs a JIT rebuild:")
+    x.loader.is_empty() && p.reason.contains("needs a JIT rebuild:")
 }
 
 fn rebuild_tests(x: &Live, p: &LivePatch) -> bool {
     x.test && p.tests.is_none() && needs_devhub_rebuild(x, p)
 }
 
-/// A relaunch devhub serves itself: an app session on a node's store JIT, which its host cannot
+/// A relaunch devhub serves itself: an app session on a JIT devhub picked, which its host cannot
 /// rebuild ([`needs_devhub_rebuild`]); one pinned to a JIT goes to its host.
 fn devhub_relaunch(x: &Live, command: &str) -> bool {
-    !x.test && x.src == Src::Overlay.as_str() && x.loader.is_empty() && command.split_whitespace().eq(["session", "relaunch"])
+    !x.test && x.loader.is_empty() && command.split_whitespace().eq(["session", "relaunch"])
 }
 
 /// One warm retry on the held box, with the same published overlay.
@@ -1698,7 +1724,9 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
     let snapshot = (|| -> Result<_, String> {
         let head = ctx.monitor.dirty(&tree)?.head;
         let mut rev = format!("{}@{head}", x.lane);
-        if tree.join("apps/commercial/.git").exists() { rev.push_str(&format!(",{}@{}", x.lane, ctx.monitor.dirty(&tree.join("apps/commercial"))?.head)); }
+        for name in crate::nested::names(&tree) {
+            rev.push_str(&format!(",{name}={}@{}", x.lane, ctx.monitor.dirty(&tree.join(crate::nested::dir(&name)))?.head));
+        }
         let pin = crate::lease::Pin::of_rev(&rev).ok_or("live: missing pin")?;
         let (mut changed, deleted) = crate::lease::ship::uncommitted(&tree, &pin)?;
         changed.extend(also_files(&tree, &x.also)?);
@@ -1718,6 +1746,7 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
     let src = Src::for_run(spec.kind, &argv, x.src == "tree");
     let configure = |r: &mut crate::lease::sched::Req| {
         r.run_options(src, CostClass::parse(&x.cost), x.est_min, &x.class, &argv);
+        r.cores = x.cores;
         r.live = true;
         r.priority = Priority::parse(&x.priority).unwrap_or(Priority::Interactive);
         r.loader = (!x.loader.is_empty()).then(|| x.loader.clone());
@@ -1977,6 +2006,27 @@ mod join_tests {
         let _ = std::fs::remove_dir_all(&base);
         assert!(got, "a save in a joined session's tree reaches the live sessions");
     }
+
+    /// A save in any nested repository's tree is the session's, at its path in the tree; the
+    /// makepad tree's own event for it is left to that tree.
+    #[test]
+    fn a_save_in_a_nested_repository_is_the_sessions_at_its_tree_path() {
+        let base = std::env::temp_dir().join(format!("devhub-live-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let tree = base.join("lane");
+        for d in ["apps/source-library/.git", "apps/commercial/.git", "apps/plain/src"] {
+            std::fs::create_dir_all(tree.join(d)).unwrap();
+        }
+        let saved = |root: &Path, rel: &str| super::saved_path(&tree, root, rel);
+        assert_eq!(saved(&tree, "src/a.rs").as_deref(), Some("src/a.rs"));
+        assert_eq!(saved(&tree, "apps/plain/src/a.rs").as_deref(), Some("apps/plain/src/a.rs"), "a makepad app");
+        assert_eq!(saved(&tree, "apps/source-library/src/a.rs"), None, "its own tree says it");
+        assert_eq!(saved(&tree.join("apps/source-library"), "src/a.rs").as_deref(), Some("apps/source-library/src/a.rs"));
+        assert_eq!(saved(&tree.join("apps/commercial"), "fab/a.rs").as_deref(), Some("apps/commercial/fab/a.rs"));
+        assert_eq!(saved(&base.join("other"), "src/a.rs"), None, "another tree's");
+        assert_eq!(saved(&tree.join("apps/source-library/src"), "a.rs"), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
 
 #[cfg(test)]
@@ -2153,9 +2203,13 @@ mod owner_tests {
         x.test = true;
         x.patch.as_mut().unwrap().outcome = "refused".into();
         assert!(super::rebuild_tests(&x, x.patch.as_ref().unwrap()), "a refused provided-source edit restarts tests without waiting for a verdict from stale code");
+        // a tree's JIT is the box's binary for the lane tree's inputs: its own rebuild built the
+        // box's checkout, never the lane's tree
         x.src = "tree".into();
-        assert!(!super::rebuild_tests(&x, x.patch.as_ref().unwrap()), "a cargo tree keeps its host's rebuild path");
-        assert!(!super::devhub_relaunch(&x, "session relaunch"));
+        assert!(super::rebuild_tests(&x, x.patch.as_ref().unwrap()), "a tree's picked JIT is resolved again for the lane's tree");
+        x.test = false;
+        assert!(super::devhub_relaunch(&x, "session relaunch"), "a lane tree's relaunch resolves its JIT for the tree");
+        x.test = true;
         x.src = "overlay".into();
         x.loader = "0123456789abcdef01234567".into();
         assert!(!super::rebuild_tests(&x, x.patch.as_ref().unwrap()), "a session pinned to a JIT keeps it");
@@ -2462,9 +2516,10 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             if !cost.is_empty() && CostClass::parse(&cost).is_none() { return Err("cost is small, medium or large".into()); }
             let est_min = v.get("est_min").filter(|v| !v.is_null()).map(|v| crate::lease::num(v).filter(|m| m.is_finite() && *m >= 0.0).ok_or("est_min is a nonnegative number")).transpose()?;
             if verb == "test" && ((!cost.is_empty() && cost != "small") || est_min.is_some()) { return Err("test --live uses small cost on a hot box".into()); }
+            let cores = v.get("cores").filter(|v| !v.is_null()).map(|v| crate::lease::num(v).filter(|n| n.is_finite() && *n > 0.0).ok_or("cores is a positive number")).transpose()?;
             let x = ctx.store.update(|d| {
                 d.lives_next += 1;
-                let x = Live { id: format!("W{}", d.lives_next), priority: priority.as_str().into(), loader: s("loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, class: s("class"), app: app.clone(), test, test_args, env, also, lane: lane.clone(), agent: s("agent"), tree: tree.clone(), needs: s("needs"), pin: s("node"), visible: v.get("visible").and_then(|b| b.as_bool()).unwrap_or(false), state: "starting".into(), touched_ms: wall_ms(), ..Default::default() };
+                let x = Live { id: format!("W{}", d.lives_next), priority: priority.as_str().into(), loader: s("loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, class: s("class"), app: app.clone(), test, test_args, env, also, lane: lane.clone(), agent: s("agent"), tree: tree.clone(), needs: s("needs"), pin: s("node"), visible: v.get("visible").and_then(|b| b.as_bool()).unwrap_or(false), state: "starting".into(), touched_ms: wall_ms(), ..Default::default() };
                 d.lives.push(x.clone());
                 x
             })?;
@@ -2496,10 +2551,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             let mut files = Vec::new();
             let d = ctx.monitor.dirty(&tree)?;
             files.extend(d.changed.into_iter().chain(d.deleted));
-            if tree.join("apps/commercial/.git").exists() {
-                let c = ctx.monitor.dirty(&tree.join("apps/commercial"))?;
-                files.extend(c.changed.into_iter().chain(c.deleted).map(|p| format!("apps/commercial/{p}")));
-            }
+            files.extend(nested_dirty(ctx, &tree)?);
             let n = files.len();
             due(&r.pending, files);
             Ok(with_room(format!("{{\"id\":{},\"queued\":{n}}}", json_str(id)), room_of(&held)))
@@ -2516,9 +2568,9 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             let strs = |v: &[String]| format!("[{}]", v.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(","));
             let env = x.env.iter().map(|(k, v)| format!("[{},{}]", json_str(k), json_str(v))).collect::<Vec<_>>().join(",");
             let req = format!(
-                "{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"visible\":{},\"test\":{},\"test_args\":{},\"env\":[{env}],\"also\":{},\"priority\":{},\"cost\":{},\"est_min\":{},\"class\":{},\"loader\":{}}}",
+                "{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"visible\":{},\"test\":{},\"test_args\":{},\"env\":[{env}],\"also\":{},\"priority\":{},\"cost\":{},\"est_min\":{},\"cores\":{},\"class\":{},\"loader\":{}}}",
                 json_str(&x.app), json_str(&x.tree), x.src == Src::Tree.as_str(), json_str(&x.lane), json_str(&x.agent), json_str(&x.needs), json_str(&x.pin), x.visible, x.test,
-                strs(&x.test_args), strs(&x.also), json_str(&x.priority), json_str(&x.cost), x.est_min.map_or("null".to_string(), |m| m.to_string()), json_str(&x.class), json_str(&x.loader),
+                strs(&x.test_args), strs(&x.also), json_str(&x.priority), json_str(&x.cost), x.est_min.map_or("null".to_string(), |m| m.to_string()), x.cores.map_or("null".to_string(), |n| n.to_string()), json_str(&x.class), json_str(&x.loader),
             );
             serve(ctx, &format!("live {} {req}", if x.test { "test" } else { "start" }))
         }
@@ -2578,10 +2630,7 @@ fn call_saves(ctx: &Ctx, r: &Running, x: &Live) -> Result<(Vec<String>, u64, (Ve
     let mut files: BTreeSet<String> = x.sources.keys().cloned().collect();
     let d = ctx.monitor.dirty(&r.tree)?;
     files.extend(d.changed.into_iter().chain(d.deleted));
-    if r.tree.join("apps/commercial/.git").exists() {
-        let d = ctx.monitor.dirty(&r.tree.join("apps/commercial"))?;
-        files.extend(d.changed.into_iter().chain(d.deleted).map(|p| format!("apps/commercial/{p}")));
-    }
+    files.extend(nested_dirty(ctx, &r.tree)?);
     let edit_ms = {
         let mut pending = r.pending.lock().unwrap();
         let edit_ms = if pending.0.is_empty() { wall_ms() } else { pending.1 };

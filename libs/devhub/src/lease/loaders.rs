@@ -34,9 +34,14 @@ use std::sync::OnceLock;
 
 /// What a build leaves in the tree's target to have its binary published.
 pub const MARK: &str = "host/makepad.publish";
-/// Binaries a box keeps, newest first.
+/// Binaries a box keeps, newest first, beside those a lease holds.
 const KEEP: usize = 4;
 const PREFIX: &str = "makepad.jit-";
+/// `<target>/host/makepad.jit-holds/<lease>/<key>`: the binaries leases run, which a prune leaves.
+/// A run picks its binary once, and every run after it of a long lease starts that path again: a
+/// tests shard ran one 33 min while the box's sync published four newer ones, and its last 15
+/// packages found it gone (exit 127, 11-07).
+const HOLDS: &str = "makepad.jit-holds";
 
 #[track_caller]
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
@@ -352,8 +357,9 @@ pub(crate) fn commit_ids(repo: &Path, sha: &str, compilers: &[String]) -> Result
 pub fn tree_id(root: &Path) -> Option<String> {
     let mut index = std::collections::BTreeMap::new();
     let mut changed = HashSet::new();
-    let commercial = root.join("apps/commercial/.git").exists();
-    for (dir, prefix) in std::iter::once((root.to_path_buf(), "")).chain(commercial.then(|| (root.join("apps/commercial"), "apps/commercial/"))) {
+    let nested = crate::nested::names(root);
+    let sides = std::iter::once((root.to_path_buf(), String::new())).chain(nested.iter().map(|n| (root.join(crate::nested::dir(n)), crate::nested::prefix(n))));
+    for (dir, prefix) in sides {
         let mut files = blobs(&git(&dir, &["ls-files", "-s", "-z"]).ok()?);
         let dirty = git(&dir, &["diff", "--name-only", "-z"]).ok()?;
         let added = git(&dir, &["ls-files", "--others", "--exclude-standard", "-z"]).ok()?;
@@ -363,7 +369,7 @@ pub fn tree_id(root: &Path) -> Option<String> {
             files.insert(p.into(), String::new());
             changed.insert(format!("{prefix}{p}"));
         }
-        index.extend(files.into_iter().filter(|(p, _)| !prefix.is_empty() || !commercial || !p.starts_with("apps/commercial/")).map(|(p, oid)| (format!("{prefix}{p}"), oid)));
+        index.extend(files.into_iter().filter(|(p, _)| !prefix.is_empty() || crate::nested::split(p, nested.iter().map(String::as_str)).is_none()).map(|(p, oid)| (format!("{prefix}{p}"), oid)));
     }
     let inputs = inputs(&index, &|p| std::fs::read(root.join(p)).map_err(|e| e.to_string())).ok()?;
     if compiler().is_empty() { return None; }
@@ -444,6 +450,10 @@ pub fn find_overlay(work: &Path, lane: &str, edits: &Path, lease: &str, pin: &su
             own = Some((id, tree.files, changed, Edits { dir: edits.dir.clone(), write: edits.edited.into_iter().collect(), remove: edits.deleted.into_iter().collect() }));
         }
     }
+    // asked for the pin's own JIT by id (`--jit`), the lease runs that one even when its edits
+    // change the JIT's inputs, and builds it here when the box lacks it: placement counted on that
+    // (sched's gets_jit)
+    let own = own.filter(|_| requested != Some(pinned.as_str()));
     let (id, files, mut changed, apply) = match own { Some((id, files, changed, e)) => (id, files, changed, Some(e)), None => (pinned, inputs.files, Vec::new(), None) };
     changed.sort();
     if !changed.is_empty() {
@@ -539,12 +549,17 @@ fn applied_edits(base: &Path) -> Vec<(bool, String)> {
 /// The pin's own files again at `paths` (tracked: its blobs; untracked: gone).
 #[cfg(feature = "checkout")]
 fn restore(root: &Path, paths: &[&(bool, String)]) -> Result<(), String> {
-    let (mut makepad, mut commercial) = (Vec::new(), Vec::new());
+    let nested = crate::nested::names(root);
+    let mut by_repo: std::collections::BTreeMap<Option<&str>, Vec<&str>> = Default::default();
     for (tracked, p) in paths {
         if !tracked { let _ = std::fs::remove_file(root.join(p)); continue; }
-        match p.strip_prefix("apps/commercial/") { Some(c) => commercial.push(c), None => makepad.push(p.as_str()) }
+        match crate::nested::split(p, nested.iter().map(String::as_str)) {
+            Some((name, rest)) => by_repo.entry(Some(name)).or_default().push(rest),
+            None => by_repo.entry(None).or_default().push(p.as_str()),
+        }
     }
-    for (dir, paths) in [(root.to_path_buf(), makepad), (root.join("apps/commercial"), commercial)] {
+    for (repo, paths) in by_repo {
+        let dir = repo.map_or_else(|| root.to_path_buf(), |n| root.join(crate::nested::dir(n)));
         for chunk in paths.chunks(200) {
             git(&dir, &["--literal-pathspecs", "checkout", "-f", "HEAD", "--"].into_iter().chain(chunk.iter().copied()).collect::<Vec<_>>())?;
         }
@@ -628,22 +643,24 @@ fn build_dev(jits: &super::jitstore::Store, base: &Path, pin: &super::Pin, input
     step(&format!("checking out {}", pin.short()));
     let root = base.join("tree");
     let target = base.join("target");
-    let commercial = root.join("apps/commercial");
-    for dir in [&root, &commercial] { if dir.join(".git").exists() { clear_dead_locks(dir)?; } }
+    let side = |repo: &str| if repo == "makepad" { root.clone() } else { root.join(crate::nested::dir(repo)) };
+    let present = crate::nested::names(&root);
+    for dir in std::iter::once(root.clone()).chain(present.iter().map(|n| side(n.as_str()))) { if dir.join(".git").exists() { clear_dead_locks(&dir)?; } }
     // the edits the tree holds stay where the next ones cover them on the same pin
     let head = |dir: &Path| dir.join(".git").exists().then(|| git(dir, &["rev-parse", "HEAD"]).ok()).flatten().map(|h| h.trim().to_string());
-    let at_pin = head(&root).as_deref() == Some(pin.makepad.as_str()) && head(&commercial) == pin.commercial;
+    let at_pin = head(&root).as_deref() == Some(pin.makepad.as_str()) && pin.nested.keys().chain(&present).all(|n| head(&side(n.as_str())).as_ref() == pin.nested.get(n));
     let covered: HashSet<&str> = edits.filter(|_| at_pin).map(|(e, _)| e.write.iter().chain(&e.remove).map(String::as_str).collect()).unwrap_or_default();
     let applied = applied_edits(base);
     restore_uncovered(base, &root, &applied, &covered)?;
     let kept: HashSet<&str> = applied.iter().filter(|(t, p)| *t && covered.contains(p.as_str())).map(|(_, p)| p.as_str()).collect();
-    if pin.commercial.is_none() && commercial.join(".git").exists() {
-        let store = Store::open("commercial")?;
-        if store.admin_of(&commercial).is_none() { return Err("dev JIT: commercial tree is not owned by the bare store".into()); }
-        run(None, Some(&store.git_dir), &[], &["worktree", "remove", &commercial.to_string_lossy()])?;
+    // a nested repository the pin does not name leaves the tree
+    for name in present.iter().filter(|n| !pin.nested.contains_key(*n)) {
+        let (store, dir) = (Store::open(name)?, side(name.as_str()));
+        if store.admin_of(&dir).is_none() { return Err(format!("dev JIT: {name} tree is not owned by the bare store")); }
+        run(None, Some(&store.git_dir), &[], &["worktree", "remove", &dir.to_string_lossy()])?;
     }
-    for (repo, sha, dir, prefix) in std::iter::once(("makepad", pin.makepad.as_str(), root.clone(), "")).chain(pin.commercial.as_deref().map(|s| ("commercial", s, commercial.clone(), "apps/commercial/"))) {
-        let store = Store::open(repo)?;
+    for (repo, sha, prefix) in pin.repos() {
+        let (store, dir) = (Store::open(repo)?, side(repo));
         let dirty = |dir: &Path| -> Result<Option<String>, String> {
             Ok(run(Some(dir), None, &[], &["diff", "--name-only", "HEAD"])?.lines().map(str::trim).find(|p| !p.is_empty() && !kept.contains(format!("{prefix}{p}").as_str())).map(str::to_string))
         };
@@ -858,8 +875,35 @@ fn write_inputs(target: &Path, key: &str, text: &str) -> Result<(), String> {
     std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &p)).map_err(|e| format!("{}: {e}", p.display()))
 }
 
+/// `lease` runs the binary `key` of `target` until [`release`].
+pub fn hold(target: &Path, key: &str, lease: &str) -> Result<(), String> {
+    if !valid_key(key) || !super::exec::valid_name(lease) {
+        return Err(format!("invalid JIT key or lease: {key} {lease}"));
+    }
+    let dir = target.join("host").join(HOLDS).join(lease);
+    std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(key), "")).map_err(|e| format!("{}: {e}", dir.join(key).display()))
+}
+
+/// `lease` ended with its processes: its binaries of `target` may go.
+pub fn release(target: &Path, lease: &str) -> Result<(), String> {
+    let dir = target.join("host").join(HOLDS).join(lease);
+    match std::fs::remove_dir_all(&dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {e}", dir.display())),
+        _ => Ok(()),
+    }
+}
+
+/// The keys of `target` some lease holds.
+fn held(target: &Path) -> HashSet<String> {
+    std::fs::read_dir(target.join("host").join(HOLDS)).into_iter().flatten().flatten()
+        .flat_map(|lease| std::fs::read_dir(lease.path()).into_iter().flatten().flatten())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
 fn prune(target: &Path) {
-    for k in keys(target).into_iter().skip(KEEP) {
+    let held = held(target);
+    for k in keys(target).into_iter().skip(KEEP).filter(|k| !held.contains(k)) {
         let p = path(target, &k);
         let _ = std::fs::remove_file(p.with_file_name(format!("{PREFIX}{k}.inputs")));
         let _ = std::fs::remove_file(p);
@@ -1047,6 +1091,38 @@ mod tests {
     /// A binary is found for the tree it was built from and for no edit of it; publishing refuses a
     /// tree that moved on after the build.
     #[test]
+    fn a_held_binary_outlives_newer_publishes_until_its_lease_releases_it() {
+        let d = std::env::temp_dir().join(format!("devhub-loaders-holds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let target = d.join("target");
+        std::fs::create_dir_all(target.join("host")).unwrap();
+        let key = |i: usize| format!("{i:024x}");
+        let at = std::time::SystemTime::now() - std::time::Duration::from_secs(1000);
+        let publish = |i: usize| {
+            std::fs::write(path(&target, &key(i)), "bin").unwrap();
+            write_inputs(&target, &key(i), "f.rs\n").unwrap();
+            let inputs = path(&target, &key(i)).with_file_name(format!("{PREFIX}{}.inputs", key(i)));
+            std::fs::File::options().append(true).open(inputs).unwrap().set_modified(at + std::time::Duration::from_secs(i as u64)).unwrap();
+            prune(&target);
+        };
+        publish(0);
+        hold(&target, &key(0), "L7").unwrap();
+        for i in 1..=KEEP + 2 {
+            publish(i);
+        }
+        assert!(path(&target, &key(0)).is_file(), "the run's binary stays while L7 holds it");
+        assert!(!path(&target, &key(1)).is_file() && !path(&target, &key(2)).is_file(), "older ones nobody holds go");
+        assert_eq!(keys(&target).len(), KEEP + 1);
+        release(&target, "L7").unwrap();
+        release(&target, "L7").unwrap();
+        prune(&target);
+        assert!(!path(&target, &key(0)).is_file(), "released, it goes at the next prune");
+        assert_eq!(keys(&target), (3..=KEEP + 2).rev().map(key).collect::<Vec<_>>());
+        assert!(hold(&target, "../x", "L7").is_err() && hold(&target, &key(3), "../L7").is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn publish_then_find_follows_the_tree() {
         let d = std::env::temp_dir().join(format!("devhub-loaders-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -1097,13 +1173,15 @@ mod tests {
         let kept = own.store.lookup(key).unwrap();
         assert_eq!(std::fs::read_to_string(&kept).unwrap(), "bin built");
         assert!(own.store.snapshot().ids.iter().any(|i| i == key), "pruning sees it");
-        // a file written after the key was read: the build is not what the key says
+        // a file written after the key was read: the build is not what the key says (the read
+        // just before that write: a read at a moment counted back from now came after it when the
+        // tests bucket's load slowed the steps between, 11-07)
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(root.join("f4.rs"), "edit during the build").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        let written = std::fs::metadata(root.join("f4.rs")).unwrap().modified().unwrap();
         std::fs::remove_file(built_binary(&target)).unwrap();
         std::fs::write(built_binary(&target), "bin of either").unwrap();
-        let late = TreeBuild { store: own.store, key: "89abcdef0123456789abcdef".to_string(), asked: std::time::SystemTime::now() - std::time::Duration::from_millis(30) };
+        let late = TreeBuild { store: own.store, key: "89abcdef0123456789abcdef".to_string(), asked: written - std::time::Duration::from_millis(10) };
         std::fs::write(target.join(MARK), "").unwrap();
         assert!(publish(&root, &target, Some(&late)).unwrap_err().contains("f4.rs"));
         assert!(late.store.lookup(&late.key).is_none());

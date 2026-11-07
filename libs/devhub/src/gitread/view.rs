@@ -49,15 +49,15 @@ fn queries(common: &Path) -> Option<Arc<Mutex<Queries>>> {
     drop(q);
     Some(query)
 }
-/// Where a commit that does not read should be, for its error to say what was missing: its
-/// loose file, the pack directory's indexes, the store itself (a flaky test's commit "did not
-/// read" with no path in its error, 11-03..06).
-fn store_state(common: &Path, oid: &ObjectId) -> String {
+/// Where a commit that does not read should be, for its error to say what was missing: the
+/// reader that read it, its loose file, the pack directory's indexes, the store itself, as they
+/// are on a second look (a flaky test's commit "did not read" with no path in its error, 11-03..07).
+pub(crate) fn store_state(common: &Path, oid: &ObjectId) -> String {
     let objects = common.join("objects");
     let (dir, file) = oid.loose_path_components();
-    if !objects.is_dir() { return format!(" ({} is gone)", objects.display()); }
+    if !objects.is_dir() { return format!(" (through the shared reader of {}; {} is gone)", common.display(), objects.display()); }
     let packs = std::fs::read_dir(objects.join("pack")).map(|d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "idx")).count());
-    format!(" (loose {}: {}; packs: {})", objects.join(&dir).join(&file).display(), if objects.join(&dir).join(&file).exists() { "present" } else { "absent" }, packs.map_or_else(|e| e.to_string(), |n| n.to_string()))
+    format!(" (through the shared reader of {}; now loose {}: {}; packs: {})", common.display(), objects.join(&dir).join(&file).display(), if objects.join(&dir).join(&file).exists() { "present" } else { "absent" }, packs.map_or_else(|e| e.to_string(), |n| n.to_string()))
 }
 struct View {
     repo: Arc<Mutex<Repository>>,

@@ -214,7 +214,7 @@ pub struct Ask<'a> {
 /// The commits a lane's command runs: its pin, else its worktree's HEAD.
 fn pair_of(repo_dir: &Path, rev: &str) -> Result<crate::state::Pair, String> {
     if let Some(pin) = super::Pin::of_rev(rev) {
-        return Ok(crate::state::Pair::new(&pin.makepad, pin.commercial.as_deref().unwrap_or("")));
+        return Ok(pin.pair());
     }
     let o = crate::git_exec::command().args(["rev-parse", "HEAD"]).current_dir(repo_dir).output().map_err(|e| format!("git: {e}"))?;
     Ok(crate::state::Pair::new(String::from_utf8_lossy(&o.stdout).trim(), ""))

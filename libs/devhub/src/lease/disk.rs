@@ -12,9 +12,10 @@
 //! jit-cache `<run home>/target/*` (the newest is current) + `cache` + `flightrec`; weights
 //! `~/.makepad/weights`; desk-link `~/.makepad/wm/desk-link`; screencaps
 //! `~/makepad/local/screencap`; logs `~/.makepad/{devhub,wm}/*.log` and their rotations
-//! `*.log.<n>`; homes-tmp `<work>/tmp/*` of ended leases + `/tmp/landgate.*`.
+//! `*.log.<n>`; homes-tmp `<work>/tmp/*` of ended leases + `/tmp/landgate.*`; job inputs `<work>/inputs/*`
+//! (lease/ship.rs [`super::ship::Input`]).
 //!
-//! Reclaim order (stops at floor + 10 GB): 1 targets and native trees no lease or process uses (LRU), 2 JIT
+//! Reclaim order (stops at floor + 10 GB): 1 targets, native trees and job inputs no lease or process uses (LRU), 2 JIT
 //! target caches that are not current, 3 ended leases' tmp + orphaned gate dirs, 4 rotated logs,
 //! 5 (work nodes only) the current JIT cache, 6 (work nodes only, no lease on the box) the target of
 //! deployment and work trees. Never automatic: retired trees, worktrees (lease end owns them,
@@ -48,9 +49,10 @@ pub enum Cat {
     Screencaps,
     Logs,
     HomesTmp,
+    Inputs,
 }
 
-pub const CATS: [Cat; 12] = [Cat::Worktrees, Cat::Native, Cat::Targets, Cat::DeployTarget, Cat::WorkTarget, Cat::RetiredTree, Cat::JitCache, Cat::Weights, Cat::DeskLink, Cat::Screencaps, Cat::Logs, Cat::HomesTmp];
+pub const CATS: [Cat; 13] = [Cat::Worktrees, Cat::Native, Cat::Targets, Cat::DeployTarget, Cat::WorkTarget, Cat::RetiredTree, Cat::JitCache, Cat::Weights, Cat::DeskLink, Cat::Screencaps, Cat::Logs, Cat::HomesTmp, Cat::Inputs];
 
 impl Cat {
     pub fn as_str(self) -> &'static str {
@@ -67,6 +69,7 @@ impl Cat {
             Cat::Screencaps => "screencaps",
             Cat::Logs => "logs",
             Cat::HomesTmp => "homes-tmp",
+            Cat::Inputs => "job inputs",
         }
     }
 }
@@ -230,6 +233,7 @@ pub fn list(r: &Roots, live: &Live) -> Vec<Item> {
     for p in [dev.join("git"), dev.join("jit"), dev.join("tree")] { add(Cat::Worktrees, p, None, false, "dev store: its owner reclaims it"); }
     for p in children(&dev.join("overlay")).into_iter().chain(children(&dev.join("lane"))) { add(Cat::Worktrees, p, None, false, "lane state: explicit lane cleanup owns it"); }
     for p in children(&dev.join("tmp")) { add(Cat::HomesTmp, p, Some(3), false, "tmp of an ended overlay lease"); }
+    for p in children(&r.work.join("inputs")) { add(Cat::Inputs, p, Some(1), false, "a job input: the next lease that names it ships it again"); }
     for p in children(&r.home.join("rc/pool")) {
         add(Cat::Targets, p.join("target"), Some(1), false, "legacy pool target");
     }
@@ -596,14 +600,14 @@ mod tests {
         let base = std::env::temp_dir().join(format!("devhub-disk-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let r = Roots { home: base.join("home"), work: base.join("home/devhub"), deploy: Some(base.join("home/makepad")), run_home: base.join("home/.makepad-run"), tmp: base.join("tmp") };
-        for d in ["home/makepad/target", "home/devhub/ci-target", "home/devhub/tree/target", "home/devhub/target/abc/release", "home/devhub/target/lane-x", "home/devhub/tmp/L1", "home/devhub/wt/x-L2", "home/.makepad/wm", "home/.makepad-run/target/0001", "tmp/landgate.Q1"] {
+        for d in ["home/makepad/target", "home/devhub/ci-target", "home/devhub/tree/target", "home/devhub/target/abc/release", "home/devhub/target/lane-x", "home/devhub/tmp/L1", "home/devhub/wt/x-L2", "home/.makepad/wm", "home/.makepad-run/target/0001", "tmp/landgate.Q1", "home/devhub/inputs/aa/ui", "home/devhub/inputs/bb/ui"] {
             std::fs::create_dir_all(base.join(d)).unwrap();
         }
         std::fs::write(base.join("home/devhub/target/abc/release/bin"), vec![1u8; 100_000]).unwrap();
         std::fs::write(base.join("home/devhub/target/lane-x.last"), "abc").unwrap();
         std::fs::write(base.join("home/.makepad/wm/ai-hub.log"), "x").unwrap();
         std::fs::write(base.join("home/.makepad/wm/ai-hub.log.2"), "x").unwrap();
-        let live = Live { leases: vec![(base.join("home/devhub/target/lane-x"), "L9".into())], cwds: vec![] };
+        let live = Live { leases: vec![(base.join("home/devhub/target/lane-x"), "L9".into()), (base.join("home/devhub/inputs/bb"), "L8".into())], cwds: vec![] };
         let items = list(&r, &live);
         let find = |p: &str| items.iter().find(|i| i.path == base.join(p)).unwrap_or_else(|| panic!("{p}: {items:?}"));
         assert_eq!(find("home/makepad/target").cat, Cat::DeployTarget);
@@ -622,6 +626,10 @@ mod tests {
         assert_eq!(find("tmp/landgate.Q1").step, Some(3));
         assert_eq!(find("home/devhub/wt/x-L2").step, None);
         assert_eq!(find("home/.makepad-run/target/0001").step, Some(5));
+        // a job input is a cache: reclaimed first, unless a lease reads it
+        assert_eq!((find("home/devhub/inputs/aa").cat, find("home/devhub/inputs/aa").step), (Cat::Inputs, Some(1)));
+        assert_eq!(find("home/devhub/inputs/bb").step, None);
+        assert!(find("home/devhub/inputs/bb").note.contains("L8"));
         assert!(rotated_log("x.log.10") && rotated_log("x.log.1.gz") && !rotated_log("x.log") && !rotated_log("x.logs"));
         let _ = std::fs::remove_dir_all(&base);
     }

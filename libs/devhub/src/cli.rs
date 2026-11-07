@@ -43,6 +43,7 @@ call $DH; a landing's CLI goes live when its rebuild finishes
   land wait <branch>                      until it lands, fails or conflicts; prints its status (exit 0 landed)
   land hold <branch> [reason] | unhold <branch> | retry <branch> | drop <branch>
   bucket [status]                        the last 10 post-land bucket runs and attributed lanes
+  bucket run <fast|tests|hot|ci|full>    that bucket's run now, of the tip then (full: every package's tests)
   land pause [reason] | resume | paused  the whole train: no new round while paused (the menu bar's Pause landing)";
 
 pub(crate) fn control() -> Result<Client, String> {
@@ -333,12 +334,15 @@ fn inspect(c: &Client, target: &str, words: &[String]) -> i32 {
     };
     // the app's AI tools (`tools`, `call <service>.<tool> ..`) are its `app` service, not a command
     let request = makepad_remote::app::app_request_of(&line);
+    // a grab and the other commands read from the app's frames are answered here, on a client of
+    // the app (through the hub when it runs elsewhere): the app has none of them
+    let here = request.is_some() || makepad_remote::app::client_side(words);
     let r = if let Some(Err(usage)) = &request {
         Err(usage.clone())
     } else if machine == local_name(c) {
         // this machine: the JIT's own socket, exactly `makepad inspect`
         match Client::connect(app) {
-            Ok(j) if request.is_some() => makepad_remote::app::run(&j, words, &mut print).map(|_| ()).map_err(|e| e.to_string()),
+            Ok(j) if here => makepad_remote::app::run(&j, words, &mut print).map(|_| ()).map_err(|e| e.to_string()),
             Ok(j) => j.cmd(&line).map_err(|e| e.to_string()).map(|lines| {
                 for l in lines {
                     match l {
@@ -356,6 +360,8 @@ fn inspect(c: &Client, target: &str, words: &[String]) -> i32 {
         }
     } else if let Some(Ok(request)) = &request {
         hub::ask_app(c, &format!("{machine}:{app}"), request, &mut print).map(|_| ())
+    } else if here {
+        makepad_remote::app::run(&Client::routed(c, &format!("{machine}:{app}")), words, &mut print).map(|_| ()).map_err(|e| e.to_string())
     } else {
         hub::ask(c, &format!("{machine}:{app}"), "cmd", "", &line, &mut print).map(|_| ())
     };
@@ -695,7 +701,7 @@ fn serve(args: &[&str]) -> i32 {
             let t = trust(&conf.name);
             match crate::node::Node::start(conf, t, log) {
                 Ok(n) => {
-                    eprintln!("devhub: node {} up; {}", n.conf.name, n.addr.map_or_else(|| n.lan_off.clone().unwrap_or_default(), |a| format!("LAN {a}")));
+                    eprintln!("devhub: node {} up; {}", n.conf.name, crate::node::lan_said(&n.lan));
                     loop {
                         std::thread::park();
                     }
@@ -845,8 +851,19 @@ fn cache_fleet(c: &Client) {
 
 #[cfg(feature = "checkout")]
 fn bucket(c: &Client, args: &[&str]) -> i32 {
+    if let ["run", name] = args {
+        let lines = match ask(c, None, "bucket", &format!("run {name}")) {
+            Ok(lines) => lines,
+            Err(e) => { eprintln!("makepad devhub bucket: {e}"); return 2; }
+        };
+        let v = lines.first().and_then(|l| makepad_strict_json::parse(l.as_bytes()).ok());
+        return match v.as_ref().and_then(|v| v.get("said")).and_then(Value::as_str) {
+            Some(said) => { println!("{said}"); 0 }
+            None => { eprintln!("makepad devhub bucket: {}", v.as_ref().and_then(|v| v.get("error")).and_then(Value::as_str).unwrap_or("no answer")); 2 }
+        };
+    }
     if !matches!(args, [] | ["status"]) {
-        eprintln!("makepad devhub bucket [status]");
+        eprintln!("makepad devhub bucket [status] | bucket run <bucket>");
         return 2;
     }
     let lines = match ask(c, None, "bucket", "status") {
@@ -887,11 +904,23 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
         };
         println!("{} {tip} {} {failing}{}{still}{warns}", text(&v, "bucket"), if ok { "ok" } else { "FAILED" }, if labels.is_empty() { String::new() } else { format!(": {labels}") });
         // the warnings themselves, file:line, so the owning lane is plain without a rerun
-        if let Some(Value::Obj(units)) = v.get("warn_lines") {
-            for (unit, lines) in units {
-                for l in lines.as_arr().unwrap_or_default().iter().filter_map(Value::as_str).take(3) {
+        // and the command that shows a unit's own lines alone, for its lane to run
+        let repro = |unit: &str| v.get("repro").and_then(|r| r.get(unit)).and_then(Value::as_str);
+        let warned: &[(String, Value)] = match v.get("warn_lines") { Some(Value::Obj(units)) => units, _ => &[] };
+        for (unit, lines) in warned {
+            for l in lines.as_arr().unwrap_or_default().iter().filter_map(Value::as_str).take(3) {
+                println!("    {unit}: {l}");
+            }
+            if let Some(cmd) = repro(unit) { println!("    {}", crate::bucket::repro_said(unit, cmd)); }
+        }
+        // a failing unit's own lines (its errors, the tests a hung one still ran), then its command
+        let errors: &[(String, Value)] = match v.get("errors") { Some(Value::Obj(units)) => units, _ => &[] };
+        if let Some(Value::Obj(units)) = v.get("repro") {
+            for (unit, cmd) in units.iter().filter(|(u, _)| !warned.iter().any(|(w, _)| w == u)) {
+                for l in errors.iter().filter(|(e, _)| crate::bucket::unit_key(e) == *unit).flat_map(|(_, l)| l.as_arr().unwrap_or_default()).filter_map(Value::as_str).take(3) {
                     println!("    {unit}: {l}");
                 }
+                if let Some(cmd) = cmd.as_str() { println!("    {}", crate::bucket::repro_said(unit, cmd)); }
             }
         }
     }
@@ -1048,7 +1077,6 @@ fn land(c: &Client, a: &[&str]) -> i32 {
                     let wait_key = s("label").unwrap_or(key);
                     let included = s("included").map(|b| format!(" (+ {b} from the lane)")).unwrap_or_default();
                     println!("queued #{} {label}{included} ({} open; `makepad devhub land wait {wait_key}`)", n("id"), n("pos"));
-                    println!("landed without checks: you must have run the thing you changed (or its test) yourself (`devhub test <lane> <pkg> --live -- <filter>`, `devhub live start <app>`)");
                     let Some(app) = chain_app else { return 0 };
                     let by = std::env::var("DEVHUB_AGENT").ok().filter(|x| !x.is_empty()).unwrap_or_else(|| key.to_string());
                     let j = makepad_remote::json_str;

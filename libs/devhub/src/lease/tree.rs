@@ -1,6 +1,7 @@
 //! Each box has a deployment tree, a shared work tree and bounded native lane trees:
 //! - Deployment: the sync checkout and its target. The WM, dock apps, node hub and AI hub run
-//!   from it. Only sync apply moves it, to landed work + commercial main; leases never hold it.
+//!   from it. Only sync apply moves it, to landed work + the paired nested repository's main
+//!   ([`crate::state::PAIRED`]); leases never hold it.
 //!   A sync checkout that is someone's own clone ([`ours`] is false) is not a deployment tree.
 //! - Work: `<work>/ci-tree` + `<work>/ci-target`. CI, gates and user boxes keep this detached
 //!   worktree.
@@ -8,7 +9,8 @@
 //!   one lane at one pin shared its native tree, and a script patching a file left the other's
 //!   build half-patched, 11-03).
 //! - Native: `<work>/native/<lane>` + `<work>/native-target/<lane>`. Other pinned lane leases
-//!   hold only their lane's tree. All trees share the bare stores' objects. Native moves use
+//!   hold only their lane's tree. Each nested repository a pin names ([`crate::nested`]) is a
+//!   worktree of its store at `apps/<name>`. All trees share the bare stores' objects. Native moves use
 //!   `read-tree -m -u`, preserving unchanged files' mtimes. At the configured cap, the oldest
 //!   unheld tree and its target go first; if all are held, the request waits.
 //!
@@ -26,9 +28,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-/// Who holds the tree now: lease id -> its pin.
+/// Who holds the tree now: lease id -> its pin; and which of them share it ([`take_native`]).
 #[derive(Default)]
-pub struct Holders(BTreeMap<String, Pin>);
+pub struct Holders(BTreeMap<String, Pin>, std::collections::BTreeSet<String>);
 
 static TREE: Mutex<BTreeMap<PathBuf, Holders>> = Mutex::new(BTreeMap::new());
 
@@ -42,6 +44,18 @@ impl Holders {
         let other: Vec<&String> = self.0.keys().filter(|held| *held != id).collect();
         let first = other.first()?;
         Some(format!("the tree is at {} for {}: one lease at a time in a tree", self.0[*first].short(), other.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")))
+    }
+
+    /// A sharing lease `id` at `pin` may join the tree as it is: it is held, and only by sharing
+    /// leases at that pin.
+    fn joins(&self, id: &str, pin: &Pin) -> bool {
+        let mut other = self.0.iter().filter(|(held, _)| *held != id).peekable();
+        other.peek().is_some() && other.all(|(held, at)| at == pin && self.1.contains(held))
+    }
+
+    fn insert(&mut self, id: &str, pin: &Pin, shares: bool) {
+        self.0.insert(id.to_string(), pin.clone());
+        if shares { self.1.insert(id.to_string()); }
     }
 }
 
@@ -88,14 +102,40 @@ pub fn deploy(root: &Path) -> Option<Pin> {
     if !ours(root) {
         return None;
     }
-    let at = |repo: &str| Store::open(repo).ok().and_then(|s| s.rev(CHECKOUT_REF)).or_else(|| fleet_revision(root, repo));
-    Some(Pin { makepad: at("makepad")?, commercial: at("commercial") })
+    synced(root, CHECKOUT_REF)
 }
 
 /// The last synced tips, used for a CI lease that names no pin.
 pub fn shared(root: &Path) -> Option<Pin> {
-    let at = |repo: &str| Store::open(repo).ok().and_then(|s| s.rev(SYNCED_REF)).or_else(|| fleet_revision(root, repo));
-    Some(Pin { makepad: at("makepad")?, commercial: at("commercial") })
+    synced(root, SYNCED_REF)
+}
+
+/// The commits the sync left at store ref `r`: makepad's, and the paired nested repository's
+/// when it has one (the repositories a sync deploys).
+fn synced(root: &Path, r: &str) -> Option<Pin> {
+    let at = |repo: &str| Store::open(repo).ok().and_then(|s| s.rev(r)).or_else(|| fleet_revision(root, repo));
+    let pin = Pin::at(&at("makepad")?);
+    Some(match at(crate::state::PAIRED) {
+        Some(sha) => pin.with(crate::state::PAIRED, &sha),
+        None => pin,
+    })
+}
+
+/// Repository `repo`'s side of the tree at `root`: makepad's is the root, a nested one's
+/// `apps/<name>`.
+fn side(root: &Path, repo: &str) -> PathBuf {
+    if repo == "makepad" { root.to_path_buf() } else { root.join(crate::nested::dir(repo)) }
+}
+
+/// What repository `repo`'s paths start with in the tree: makepad's nothing, a nested one's
+/// `apps/<name>/`.
+fn prefix(repo: &str) -> String {
+    if repo == "makepad" { String::new() } else { crate::nested::prefix(repo) }
+}
+
+/// The repositories the tree at `root` holds: its nested ones, then makepad.
+fn repos_in(root: &Path) -> Vec<String> {
+    crate::nested::names(root).into_iter().chain(["makepad".to_string()]).collect()
 }
 
 fn head(dir: &Path) -> Option<String> {
@@ -108,30 +148,33 @@ fn head(dir: &Path) -> Option<String> {
 /// The work tree's detached HEADs (`caps.tree`).
 pub fn current(root: &Path) -> Option<Pin> {
     let _h = lock();
-    Some(Pin { makepad: head(root)?, commercial: head(&root.join("apps/commercial")) })
+    let pin = Pin::at(&head(root)?);
+    Some(crate::nested::names(root).into_iter().fold(pin, |pin, name| match head(&side(root, &name)) {
+        Some(sha) => pin.with(&name, &sha),
+        None => pin,
+    }))
 }
 
 fn prepare(id: &str, pin: &Pin, root: &Path, out: &Path, native: bool) -> Result<Taken, String> {
     let mut taken = Taken { root: root.to_path_buf(), moved: Vec::new(), cleared: Released::default() };
-    // A makepad-only native pin must not inherit a previous pin's commercial workspace.
-    // Recover its edits and remove the nested worktree before scrubbing the containing tree.
-    let commercial = root.join("apps/commercial");
-    if native && pin.commercial.is_none() && commercial.join(".git").exists() {
-        let store = Store::open("commercial")?;
-        if store.admin_of(&commercial).is_none() { return Err(format!("{} is not this node's worktree", commercial.display())); }
-        scrub("commercial", root, head(&commercial).as_deref(), id, out, &format!("{id}-start"), &mut taken.cleared)?;
-        run(None, Some(&store.git_dir), &[], &["worktree", "remove", "--force", &commercial.to_string_lossy()])?;
-        taken.cleared.removed.push("apps/commercial/".into());
+    // A native pin must not inherit a previous pin's workspace of a nested repository it does not
+    // name. Recover its edits and remove the nested worktree before scrubbing the containing tree.
+    for name in crate::nested::names(root).into_iter().filter(|n| native && !pin.nested.contains_key(n)) {
+        let dir = side(root, &name);
+        let store = Store::open(&name)?;
+        if store.admin_of(&dir).is_none() { return Err(format!("{} is not this node's worktree", dir.display())); }
+        scrub(&name, root, head(&dir).as_deref(), id, out, &format!("{id}-start"), &mut taken.cleared)?;
+        run(None, Some(&store.git_dir), &[], &["worktree", "remove", "--force", &dir.to_string_lossy()])?;
+        taken.cleared.removed.push(prefix(&name));
     }
-    for (repo, to) in [("makepad", Some(&pin.makepad)), ("commercial", pin.commercial.as_ref())] {
-        let Some(to) = to else { continue };
-        let dir = if repo == "makepad" { root.to_path_buf() } else { root.join("apps/commercial") };
+    for (repo, to, _) in pin.repos() {
+        let dir = side(root, repo);
         let store = Store::open(repo)?;
         if dir.join(".git").exists() && store.admin_of(&dir).is_none() {
             return Err(format!("{} is not this node's worktree", dir.display()));
         }
         let from = head(&dir);
-        if from.as_ref() == Some(to) {
+        if from.as_deref() == Some(to) {
             crate::ci_merge::install_merge_driver(&dir, root)?;
             taken.moved.push((repo.to_string(), 0));
             continue;
@@ -187,12 +230,21 @@ pub fn take(id: &str, pin: &Pin, root: &Path, out: &Path) -> Result<Taken, Strin
 
 /// Take a lane's native tree; capacity and disk pressure are retryable waits, never fallback
 /// to the shared work tree. The same lock protects creation, holds, scrub and disk reclaim.
-pub fn take_native(id: &str, pin: &Pin, work: &Path, lane: &str, limit: usize, floor: u64) -> Result<Taken, String> {
+/// `shares`: the lease reads the tree at its pin beside others that do, the shards of one tests
+/// bucket run ([`super::sched::tests_shard`]): one joins the tree as its sharing holders keep it,
+/// untouched, and the last one's release scrubs it.
+pub fn take_native(id: &str, pin: &Pin, work: &Path, lane: &str, limit: usize, floor: u64, shares: bool) -> Result<Taken, String> {
     if !super::exec::valid_name(lane) { return Err("invalid native lane".into()); }
     std::fs::create_dir_all(work).map_err(|e| e.to_string())?;
     let root = native_root(work, lane);
     let out = work.join("recovered");
     let mut h = lock();
+    if let Some(held) = h.get_mut(&root).filter(|held| shares && held.joins(id, pin)) {
+        held.insert(id, pin, true);
+        touch_native(&root);
+        let moved = pin.repos().into_iter().map(|(repo, _, _)| (repo.to_string(), 0)).collect();
+        return Ok(Taken { root, moved, cleared: Released::default() });
+    }
     if let Some(why) = h.get(&root).and_then(|h| h.conflict(id)) { return Err(why); }
     let mut cleared = Released::default();
     if !root.exists() {
@@ -215,7 +267,7 @@ pub fn take_native(id: &str, pin: &Pin, work: &Path, lane: &str, limit: usize, f
     t.cleared.bundles.extend(cleared.bundles);
     t.cleared.removed.extend(cleared.removed);
     if super::caps::disk_space(work).map_or(0, |(free, _)| free) < floor { return Err("native trees busy: disk below its floor after checkout".into()); }
-    h.entry(root.clone()).or_default().0.insert(id.to_string(), pin.clone());
+    h.entry(root.clone()).or_default().insert(id, pin, shares);
     touch_native(&root);
     Ok(t)
 }
@@ -225,9 +277,10 @@ fn remove_native_idle(work: &Path, lane: &str) -> Result<Released, String> {
     let r = scrub_tree(&root, "reclaim", &work.join("recovered"), &format!("{lane}-reclaim-{}", crate::proto::wall_ms()));
     if !r.unclean.is_empty() { return Err(r.unclean.join("; ")); }
     let mut stores = Vec::new();
-    for (repo, dir) in [("commercial", root.join("apps/commercial")), ("makepad", root.clone())] {
+    for repo in repos_in(&root) {
+        let dir = side(&root, &repo);
         if !dir.join(".git").exists() { continue; }
-        let store = Store::open(repo)?;
+        let store = Store::open(&repo)?;
         if store.admin_of(&dir).is_none() { return Err(format!("{} is not this node's worktree", dir.display())); }
         stores.push(store);
     }
@@ -256,7 +309,7 @@ pub fn remove_native(work: &Path, lane: &str) -> Result<Released, String> {
         let mut h = lock();
         let holds = h.entry(root.clone()).or_default();
         if !holds.0.is_empty() { return Err(format!("native tree {lane} is held")); }
-        holds.0.insert(REMOVING.to_string(), Pin { makepad: String::new(), commercial: None });
+        holds.0.insert(REMOVING.to_string(), Pin::default());
     }
     let r = remove_native_idle(work, lane);
     lock().remove(&root);
@@ -281,7 +334,7 @@ pub fn sync(work: &Path, pin: &Pin) -> Result<Option<Taken>, String> {
 /// worktree is touched: a dir that is not this store's worktree is left alone.
 fn scrub(repo: &str, root: &Path, at: Option<&str>, id: &str, out: &Path, tag: &str, r: &mut Released) -> Result<(), String> {
     let store = Store::open(repo)?;
-    let (dir, prefix) = if repo == "makepad" { (root.to_path_buf(), "") } else { (root.join("apps").join("commercial"), "apps/commercial/") };
+    let (dir, prefix) = (side(root, repo), prefix(repo));
     if !dir.join(".git").exists() {
         return Ok(());
     }
@@ -312,33 +365,31 @@ pub fn scrub_if_idle(root: &Path, out: &Path) -> Released {
 
 fn scrub_tree(root: &Path, id: &str, out: &Path, tag: &str) -> Released {
     let mut r = Released::default();
-    for repo in ["commercial", "makepad"] {
-        let dir = if repo == "makepad" { root.to_path_buf() } else { root.join("apps/commercial") };
-        if let Err(e) = scrub(repo, root, head(&dir).as_deref(), id, out, tag, &mut r) {
+    for repo in repos_in(root) {
+        if let Err(e) = scrub(&repo, root, head(&side(root, &repo)).as_deref(), id, out, tag, &mut r) {
             r.unclean.push(format!("{repo}: {e}"));
         }
     }
     r
 }
 
-/// Undoes what `devhub run` shipped on top of `pin` (`paths` from the tree's root; commercial ones
-/// under `apps/commercial/`): files the pin tracks get its version back (deleted ones too), the
-/// others (new files of the lane's worktree) go, with the dirs they leave empty. The count.
+/// Undoes what `devhub run` shipped on top of `pin` (`paths` from the tree's root; a nested
+/// repository's under `apps/<name>/`): files the pin tracks get its version back (deleted ones
+/// too), the others (new files of the lane's worktree) go, with the dirs they leave empty. The count.
 pub fn undo_overlay(root: &Path, pin: &Pin, paths: &[String]) -> Result<usize, String> {
     let mut n = 0;
-    for (repo, sha) in [("makepad", Some(&pin.makepad)), ("commercial", pin.commercial.as_ref())] {
-        let prefix = if repo == "makepad" { "" } else { "apps/commercial/" };
-        let mine: Vec<&str> = paths
-            .iter()
-            .filter(|p| if repo == "makepad" { !p.starts_with("apps/commercial/") } else { p.starts_with(prefix) })
-            .map(|p| &p[prefix.len()..])
-            .collect();
-        if mine.is_empty() {
-            continue;
-        }
-        let dir = if repo == "makepad" { root.to_path_buf() } else { root.join("apps").join("commercial") };
+    let names: std::collections::BTreeSet<String> = pin.nested.keys().cloned().chain(crate::nested::names(root)).collect();
+    let mut by_repo: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for p in paths {
+        let (repo, rest) = crate::nested::split(p, names.iter().map(String::as_str)).unwrap_or(("makepad", p.as_str()));
+        by_repo.entry(repo).or_default().push(rest);
+    }
+    for (repo, mine) in by_repo {
+        let dir = side(root, repo);
+        let sha = if repo == "makepad" { Some(pin.makepad.as_str()) } else { pin.nested.get(repo).map(String::as_str) };
         let Some(sha) = sha else {
-            // a lease that pinned no commercial shipped commercial files: they are untracked here
+            // a lease that pinned none of this nested repository shipped its files: they are
+            // untracked here
             for p in &mine {
                 n += remove_shipped(&dir, p) as usize;
             }
@@ -347,13 +398,13 @@ pub fn undo_overlay(root: &Path, pin: &Pin, paths: &[String]) -> Result<usize, S
         let g = |args: &[&str]| crate::sync::git::run(Some(&dir), None, &[], args);
         let mut tracked = std::collections::HashSet::new();
         for chunk in mine.chunks(500) {
-            let mut args = vec!["ls-tree", "-r", "-z", "--name-only", sha.as_str(), "--"];
+            let mut args = vec!["ls-tree", "-r", "-z", "--name-only", sha, "--"];
             args.extend(chunk.iter().copied());
             tracked.extend(g(&args)?.split('\0').filter(|s| !s.is_empty()).map(str::to_string));
         }
         let (back, gone): (Vec<&str>, Vec<&str>) = mine.iter().partition(|p| tracked.contains(**p));
         for chunk in back.chunks(500) {
-            let mut args = vec!["checkout", "-q", sha.as_str(), "--"];
+            let mut args = vec!["checkout", "-q", sha, "--"];
             args.extend(chunk.iter().copied());
             g(&args)?;
             n += chunk.len();
@@ -383,8 +434,8 @@ fn remove_shipped(dir: &Path, rel: &str) -> bool {
 }
 
 /// A hub that restarted takes its leases' holds back from its ledger (the tree is where they left it).
-pub fn hold(id: &str, pin: &Pin, root: &Path) {
-    lock().entry(root.to_path_buf()).or_default().0.insert(id.to_string(), pin.clone());
+pub fn hold(id: &str, pin: &Pin, root: &Path, shares: bool) {
+    lock().entry(root.to_path_buf()).or_default().insert(id, pin, shares);
 }
 
 /// What scrubbing recovered, removed, or could not clear.
@@ -399,6 +450,7 @@ pub struct Released {
 pub fn release(id: &str, root: &Path, out: &Path, tag: &str) -> Released {
     let mut h = lock();
     let Some(holders) = h.get_mut(root) else { return Released::default() };
+    holders.1.remove(id);
     if holders.0.remove(id).is_none() || !holders.0.is_empty() {
         return Released::default();
     }
@@ -413,7 +465,11 @@ mod tests {
     use super::*;
 
     fn pin(m: char, c: Option<char>) -> Pin {
-        Pin { makepad: m.to_string().repeat(40), commercial: c.map(|c| c.to_string().repeat(40)) }
+        let pin = Pin::at(&m.to_string().repeat(40));
+        match c {
+            Some(c) => pin.with("commercial", &c.to_string().repeat(40)),
+            None => pin,
+        }
     }
 
     #[test]
@@ -424,12 +480,49 @@ mod tests {
         assert_eq!(Pin::parse(&a.key()), Some(a.clone()));
         assert_eq!(Pin::parse(&pin('b', None).key()), Some(pin('b', None)));
         assert_eq!(Pin::parse("xyz"), None);
-        assert_eq!(Pin::of_rev(&format!("rc-x@{},main@{}", "a".repeat(40), "c".repeat(40))), Some(a.clone()));
+        assert_eq!(Pin::of_rev(&format!("rc-x@{},commercial=main@{}", "a".repeat(40), "c".repeat(40))), Some(a.clone()));
+        assert_eq!(Pin::of_rev(&format!("rc-x@{},main@{}", "a".repeat(40), "c".repeat(40))), None, "a nested side names its repository");
+        assert_eq!(Pin::parse(&format!("{},{}", "a".repeat(40), "c".repeat(40))), None, "so does a nested sha in a key");
+        // any nested repository by name, in name order
+        let (c, e, f) = ("c".repeat(40), "e".repeat(40), "f".repeat(40));
+        let two = Pin::at(&"a".repeat(40)).with("source-library", &e).with("commercial", &c);
+        assert_eq!(two.key(), format!("{},commercial={c},source-library={e}", "a".repeat(40)));
+        assert_eq!(Pin::parse(&two.key()), Some(two.clone()));
+        assert_eq!(Pin::parse(&format!("{},commercial={c},commercial={c}", "a".repeat(40))), None, "one side per repository");
+        assert!(two.fits(&a) && a.fits(&two) && !two.fits(&Pin::at(&"a".repeat(40)).with("source-library", &f)));
+        assert_eq!(two.repo_of("apps/source-library/src/lib.rs"), ("source-library", e.as_str(), "src/lib.rs"));
+        assert_eq!(two.repo_of("apps/source-library-x/a.rs"), ("makepad", "a".repeat(40).as_str(), "apps/source-library-x/a.rs"));
+        assert_eq!(two.short(), format!("aaaaaaaaaa,commercial=cccccccccc,source-library={}", &e[..10]));
+        assert_eq!(two.pair(), crate::state::Pair::new(&"a".repeat(40), &c), "the ledgers' pair: makepad and the paired one");
         let mut h = Holders::default();
         h.0.insert("L1".into(), a.clone());
         assert_eq!(h.conflict("L1"), None, "its own hold");
         let why = h.conflict("L2").unwrap();
-        assert!(why.contains("aaaaaaaaaa,cccccccccc") && why.contains("L1") && why.contains("one lease at a time"), "{why}");
+        assert!(why.contains("aaaaaaaaaa,commercial=cccccccccc") && why.contains("L1") && why.contains("one lease at a time"), "{why}");
+        assert!(!h.joins("L2", &a), "a holder that does not share keeps it alone");
+        // the shards of one tests bucket run: each joins the others' tree at their pin
+        let mut s = Holders::default();
+        assert!(!s.joins("S1", &a), "a tree nobody holds is taken, not joined");
+        s.insert("S1", &a, true);
+        assert!(s.joins("S2", &a));
+        assert!(!s.joins("S2", &pin('b', Some('c'))), "at another pin it waits");
+        s.insert("S2", &a, true);
+        s.insert("L3", &a, false);
+        assert!(!s.joins("S4", &a), "beside one that does not share it waits");
+    }
+
+    /// A shard's release leaves its siblings the tree as it is (the last one's scrubs it).
+    #[test]
+    fn a_sharing_holders_release_leaves_the_tree_to_the_others() {
+        let root = std::env::temp_dir().join(format!("devhub-tree-share-{}", std::process::id()));
+        let a = pin('a', Some('c'));
+        hold("S1", &a, &root, true);
+        hold("S2", &a, &root, true);
+        assert!(lock().get(&root).is_some_and(|h| h.joins("S3", &a)));
+        let r = release("S1", &root, &root.join("recovered"), "t");
+        assert!(r.bundles.is_empty() && r.removed.is_empty() && r.unclean.is_empty(), "{r:?}");
+        assert!(held(&root) && lock().get(&root).is_some_and(|h| h.joins("S3", &a) && !h.1.contains("S1")), "S2 keeps it");
+        lock().remove(&root);
     }
 
     /// One lease at a time, at its pin too; release and startup scrub without moving the pin or its target.
@@ -460,7 +553,7 @@ mod tests {
         let bundle = base.join("b.bundle");
         g(&["bundle", "create", "-q", &bundle.to_string_lossy(), "refs/heads/work"]);
         store.fetch_bundle(&bundle, "work").unwrap();
-        let at = |c: &str| Pin { makepad: c.to_string(), commercial: None };
+        let at = Pin::at;
         store.move_checkout(&deployment, None, &one).unwrap();
         store.set_ref(SYNCED_REF, &one).unwrap();
         assert_eq!(deploy(&deployment), Some(at(&one)));
@@ -509,7 +602,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(target.join("release/makepad")).unwrap(), "jit");
 
         // ledger holds protect running leases from startup scrub too
-        hold("L4", &at(&one), &root);
+        hold("L4", &at(&one), &root, false);
         std::fs::write(root.join("a.rs"), "in flight").unwrap();
         assert!(take("L5", &at(&two), &root, &out).is_err());
         assert!(scrub_if_idle(&root, &out).bundles.is_empty());

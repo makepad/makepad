@@ -1003,12 +1003,11 @@ fn dirty_set(ctx: &Ctx, tree: &std::path::Path, lane: &str) -> Result<(String, V
     let d = ctx.monitor.dirty(tree)?;
     let mut rev = format!("{}@{}", label(&d.branch, lane), d.head);
     let (mut changed, mut deleted) = (d.changed, d.deleted);
-    let nested = tree.join("apps/commercial");
-    if nested.join(".git").exists() {
-        let c = ctx.monitor.dirty(&nested)?;
-        rev = format!("{rev},{}@{}", label(&c.branch, lane), c.head);
-        changed.extend(c.changed.into_iter().map(|p| format!("apps/commercial/{p}")));
-        deleted.extend(c.deleted.into_iter().map(|p| format!("apps/commercial/{p}")));
+    for name in crate::nested::names(tree) {
+        let (c, prefix) = (ctx.monitor.dirty(&tree.join(crate::nested::dir(&name)))?, crate::nested::prefix(&name));
+        rev = format!("{rev},{name}={}@{}", label(&c.branch, lane), c.head);
+        changed.extend(c.changed.into_iter().map(|p| format!("{prefix}{p}")));
+        deleted.extend(c.deleted.into_iter().map(|p| format!("{prefix}{p}")));
     }
     changed.retain(|p| !crate::lease::ship::never_ships(p));
     deleted.retain(|p| !crate::lease::ship::never_ships(p));
@@ -1072,6 +1071,34 @@ fn nested_devhub(cmd: &[String]) -> Option<String> {
     (args.first()? == "devhub").then(|| crate::proto::clean(&format!("makepad {}", args.join(" ")), 300))
 }
 
+/// The fields of a submitted job this master reads ([`submit`]): one it does not know is refused,
+/// never dropped (a job's `--jit` was dropped on its way and the job ran without its JIT, 11-07).
+const JOB_FIELDS: &[&str] = &["after", "agent", "class", "cmd", "cores", "cost", "cwd", "est_min", "holder", "kind", "lane", "lane_from", "loader", "native", "needs", "node", "prio", "priority", "ram_gb", "shadow", "tree", "whole"];
+
+/// Why a job that asks for no JIT (`--jit`) is refused: its command, or a file it names (the
+/// script it runs, in its tree), names a binary of a box's JIT store
+/// ([`crate::lease::jitstore::BINARY_PREFIX`]). A store keeps a few JITs and evicts the rest, so
+/// such a run found its binary gone and failed in 0 s ("no JIT binary": three of a lane's timed
+/// jobs, 11-07). `--jit <id>` places it on a box that holds that JIT and holds it for the lease,
+/// at `$MAKEPAD_LOADER`.
+fn reads_jit_store(dir: &std::path::Path, cmd: &[String]) -> Option<String> {
+    let prefix = crate::lease::jitstore::BINARY_PREFIX;
+    let named = |text: &str| text.contains(prefix);
+    let file = |w: &str| {
+        let rel = std::path::Path::new(w);
+        if w.starts_with('-') || rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            return None;
+        }
+        let path = dir.join(rel);
+        std::fs::metadata(&path).ok().filter(|m| m.is_file() && m.len() <= 1 << 20)?;
+        std::fs::read(&path).ok().filter(|b| named(&String::from_utf8_lossy(b))).map(|_| w.to_string())
+    };
+    let by = cmd.iter().find(|w| named(w)).map(|_| "its command".to_string())
+        .or_else(|| cmd.iter().find_map(|w| file(w)).map(|f| format!("its script {f}")))?;
+    let key = cmd.iter().find(|w| w.len() == 24 && w.bytes().all(|b| b.is_ascii_hexdigit())).map_or("<id>", String::as_str);
+    Some(format!("{by} reads a box's JIT store by hand ({prefix}<id>), and a store evicts all but its newest JITs: ask with `--jit {key}`, which places the job where that JIT is and holds it for the run, and run it as $MAKEPAD_LOADER"))
+}
+
 /// Keep submission's capability check and the later lease ask on the same command and cost.
 fn configure_request(r: &mut crate::lease::sched::Req, j: &Job) {
     r.run_options(Src::parse(&j.src).unwrap_or(Src::Tree), CostClass::parse(&j.cost), j.est_min, &j.class, &j.cmd);
@@ -1102,7 +1129,13 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
     }
     let mut jobs = Vec::new();
     let mut notes = Vec::new();
+    // where each job's lane came from (`--lane`, DEVHUB_LANE or the worktree), said as it queues
+    let mut lane_from = Vec::new();
     for (i, r) in reqs.iter().enumerate() {
+        let fields: &[(String, Value)] = match r { Value::Obj(pairs) => pairs, _ => &[] };
+        if let Some(field) = fields.iter().map(|(k, _)| k.as_str()).find(|k| !JOB_FIELDS.contains(k)) {
+            return Err(format!("job {}: this master predates its field `{field}` and would run the job without it: submit again once the master runs the newest landed devhub", i + 1));
+        }
         let kind = s(r, "kind");
         match Kind::parse(&kind) {
             Some(Kind::Inspect) | None => return Err(format!("job {}: kind `{kind}` (build test screen long timed gpu gate)", i + 1)),
@@ -1115,10 +1148,16 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         if let Some(direct) = nested_devhub(&cmd) {
             return Err(format!("job {}: its command is itself a devhub command, which asks the master for its own box and has no makepad checkout to run from on the job's box: run it directly instead: `{direct}`", i + 1));
         }
+        if s(r, "loader").is_empty() {
+            if let Some(why) = reads_jit_store(&tree.join(s(r, "cwd")), &cmd) {
+                return Err(format!("job {}: {why}", i + 1));
+            }
+        }
         let lane = makepad_devhub_conf::lane_name(&s(r, "lane"));
         if !makepad_devhub_conf::valid_name(&lane) {
             return Err(format!("job {}: lane `{lane}` is not a name", i + 1));
         }
+        lane_from.push(s(r, "lane_from"));
         let prio = r.get("prio").and_then(|p| p.as_i64()).unwrap_or(crate::lease::sched::DEFAULT_PRIO as i64) as i32;
         let src = Src::for_run(Kind::parse(&kind).unwrap(), &cmd, r.get("tree").and_then(|v| v.as_bool()).unwrap_or(false));
         let cwd = s(r, "cwd");
@@ -1221,11 +1260,19 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
     if main_checkout && !snap.is_empty() {
         event(ctx, Sev::Warn, format!("job {}: {snap} ships {files} uncommitted file(s) of the main checkout {} (--with-uncommitted)", out[0].id, tree.display()), Some(&out[0]));
     }
-    for j in &out {
+    for (j, from) in out.iter().zip(&lane_from) {
         let after = if j.after.is_empty() { String::new() } else { format!(" after {}", j.after.join(",")) };
-        event(ctx, Sev::Info, format!("job {} queued{}: {} {}{after} ({}, {})", j.id, if j.batch.is_empty() { String::new() } else { format!(" in {}", j.batch) }, j.kind, crate::proto::clean(&spec_cmd(j), 160), j.lane, if j.snap.is_empty() { "commits only".to_string() } else { format!("{} with {} file(s)", j.snap, j.snap_files) }), Some(j));
+        event(ctx, Sev::Info, format!("job {} queued{}: {} {}{after} ({}, {})", j.id, if j.batch.is_empty() { String::new() } else { format!(" in {}", j.batch) }, j.kind, crate::proto::clean(&spec_cmd(j), 160), lane_said(&j.lane, from, &j.agent), if j.snap.is_empty() { "commits only".to_string() } else { format!("{} with {} file(s)", j.snap, j.snap_files) }), Some(j));
     }
     Ok(reply)
+}
+
+/// A queued job's lane as its line says it: where the lane came from and whose job it is, so a
+/// job filed under another lane's cap shows why.
+fn lane_said(lane: &str, from: &str, agent: &str) -> String {
+    let from = if from.is_empty() { String::new() } else { format!(" from {from}") };
+    let by = if agent.is_empty() { String::new() } else { format!(", by {agent}") };
+    format!("lane {lane}{from}{by}")
 }
 
 /// `rerun <id>`: the job again, exactly: its base, snapshot, command and placement wishes.
@@ -1254,7 +1301,10 @@ pub fn render(j: &Job, tail: bool) -> String {
     };
     let at = if j.node.is_empty() { String::new() } else { format!(" {}@{} {}", j.kind, j.node, j.lease) };
     let exit = j.exit.map_or(String::new(), |e| format!(" exit={e}"));
-    let mut out = format!("{} {}{exit}{secs}{at}: {}\n", j.id, j.state, crate::proto::clean(&spec_cmd(j), 160));
+    // its lane: `job list` has every lane's open jobs (another lane's job was read as one's own
+    // and as what held one's lane cap, 11-06)
+    let lane = if j.lane.is_empty() { String::new() } else { format!(" @{}", j.lane) };
+    let mut out = format!("{} {}{exit}{secs}{at}{lane}: {}\n", j.id, j.state, crate::proto::clean(&spec_cmd(j), 160));
     if let Some(p) = &j.panic {
         out.push_str(&format!("  panic {}: {} at {} [{}] pid {} ({} ago)\n", p.id, p.message, p.location, p.thread, p.pid, age(p.at_ms)));
         if j.state == "paused" {
@@ -1288,7 +1338,52 @@ pub fn render(j: &Job, tail: bool) -> String {
 mod tests {
     use super::*;
     use crate::lease::master::LeaseMaster;
+
+    /// A job that reads a box's JIT store by hand and asks for no JIT is refused at the ask, said
+    /// with what to ask instead: the store had evicted the binary, and it failed in 0 s (11-07).
+    /// A job field the master does not read is refused at submit, never dropped (the job would
+    /// run without it), and so is a script reading the JIT store by hand without `--jit`.
+    #[test]
+    fn a_job_field_the_master_does_not_know_is_refused() {
+        let c = ctx("unknown-field");
+        let with = |field: &str, job: String| job.replacen('{', &format!("{{\"{field}\":\"0123456789abcdef01234567\","), 1);
+        let e = submit_line(&c, "", false, &[with("jit", req("check", &[]))]).unwrap_err();
+        assert!(e.starts_with("job 1: this master predates its field `jit`"), "{e}");
+        std::fs::write(c.repo.join("by_hand.sh"), "\"$HOME/devhub/dev/jit/makepad.jit-$1\" run app\n").unwrap();
+        let script = req("bash", &[]).replace("\"cmd\":[\"bash\"]", "\"cmd\":[\"bash\",\"by_hand.sh\",\"0123456789abcdef01234567\"]");
+        let e = submit_line(&c, "", false, std::slice::from_ref(&script)).unwrap_err();
+        assert!(e.starts_with("job 1: its script by_hand.sh reads a box's JIT store by hand"), "{e}");
+        assert!(submit_line(&c, "", false, &[with("loader", script)]).is_ok(), "with --jit it runs that JIT");
+        std::fs::remove_dir_all(&c.home).unwrap();
+    }
+
+    #[test]
+    fn a_job_reading_the_jit_store_by_hand_is_refused_with_its_jit_to_ask_for() {
+        let dir = std::env::temp_dir().join(format!("devhub-jit-by-hand-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("zz")).unwrap();
+        std::fs::write(dir.join("zz/by_hand.sh"), "KEY=$1\nJ=\"$HOME/devhub/dev/jit/makepad.jit-$KEY\"\n\"$J\" run app\n").unwrap();
+        std::fs::write(dir.join("zz/loader.sh"), "\"$MAKEPAD_LOADER\" run app\n").unwrap();
+        let cmd = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let key = "0123456789abcdef01234567";
+        let why = reads_jit_store(&dir, &cmd(&["bash", "zz/by_hand.sh", key, "2"])).expect("refused");
+        assert!(why.starts_with("its script zz/by_hand.sh reads a box's JIT store by hand") && why.contains(&format!("`--jit {key}`")) && why.contains("$MAKEPAD_LOADER"), "{why}");
+        let why = reads_jit_store(&dir, &cmd(&["env", "A=1", "/home/x/devhub/dev/jit/makepad.jit-abc", "run"])).expect("refused");
+        assert!(why.starts_with("its command reads") && why.contains("`--jit <id>`"), "{why}");
+        assert_eq!(reads_jit_store(&dir, &cmd(&["bash", "zz/loader.sh", key])), None, "$MAKEPAD_LOADER is the JIT it asked for");
+        assert_eq!(reads_jit_store(&dir, &cmd(&["bash", "../zz/by_hand.sh"])), None, "only files in its tree");
+        assert_eq!(reads_jit_store(&dir, &cmd(&["cargo", "test", "-p", "x"])), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use crate::state::Store;
+
+    #[test]
+    fn a_queued_jobs_line_says_where_its_lane_came_from_and_whose_it_is() {
+        assert_eq!(lane_said("lanea", "the worktree /w/lanea", "LANEA"), "lane lanea from the worktree /w/lanea, by LANEA");
+        assert_eq!(lane_said("laneb", "DEVHUB_LANE", ""), "lane laneb from DEVHUB_LANE");
+        // (a request from a CLI that does not say)
+        assert_eq!(lane_said("lanec", "", ""), "lane lanec");
+    }
 
     #[test]
     fn submit_refuses_a_nested_devhub_command_with_its_direct_form() {
@@ -1536,7 +1631,7 @@ mod tests {
         let r = submit_line(&c, "", true, &[req("check", &[]), req("test", &["@1"]), req("present", &["@1", "@2"])]).unwrap();
         let (head, chead) = (g(&tree, &["rev-parse", "HEAD"]), g(&tree.join("apps/commercial"), &["rev-parse", "HEAD"]));
         assert!(r.starts_with("{\"batch\":\"B1\",\"jobs\":[\"J1\",\"J2\",\"J3\"]"), "{r}");
-        assert!(r.contains(&format!("\"rev\":\"rc-t@{head},rc-t@{chead}\"")) && r.contains("\"snap\":\"S1\",\"files\":4"), "{r}");
+        assert!(r.contains(&format!("\"rev\":\"rc-t@{head},commercial=rc-t@{chead}\"")) && r.contains("\"snap\":\"S1\",\"files\":4"), "{r}");
         // submit says what it ships, and warns when that is the landed checkout's
         let note = super::super::cli::shipped_note(&makepad_strict_json::parse(r.as_bytes()).unwrap());
         assert!(!note.contains(".claude") && !note.contains("local/") && note.starts_with("WARNING: this is a main checkout") && note.contains("  new.rs\n") && note.contains("  apps/commercial/a.rs\n") && note.contains("  deleted gone.rs\n"), "{note}");
@@ -1551,8 +1646,10 @@ mod tests {
         // the commits alone with a rev; one naming only the makepad side gets the nested
         // commercial HEAD too (a commercial package was missing from the overlay without it)
         let r = submit_line(&c, "rc-t", false, &[req("x", &[])]).unwrap();
-        assert!(r.contains(&format!("\"rev\":\"rc-t@{head},rc-t@{chead}\",\"snap\":\"\"")), "{r}");
-        assert_eq!(crate::lease::client::pin_lane_rev(&tree, &format!("rc-t,rc-t@{}", &chead[..10]), "lane1").unwrap(), format!("rc-t@{head},rc-t@{chead}"));
+        assert!(r.contains(&format!("\"rev\":\"rc-t@{head},commercial=rc-t@{chead}\",\"snap\":\"\"")), "{r}");
+        assert_eq!(crate::lease::client::pin_lane_rev(&tree, &format!("rc-t,commercial=rc-t@{}", &chead[..10]), "lane1").unwrap(), format!("rc-t@{head},commercial=rc-t@{chead}"));
+        let old = crate::lease::client::pin_lane_rev(&tree, "rc-t,rc-t", "lane1").unwrap_err();
+        assert!(old.contains("write `<name>=<branch>`, as in `work,commercial=main`"), "an old-form rev is refused in one line: {old}");
         // bad requests change nothing
         assert!(submit_line(&c, "", false, &[req("x", &["@1"])]).unwrap_err().contains("no earlier job"));
         assert!(submit_line(&c, "", false, &[req("x", &["J9"])]).unwrap_err().contains("no job J9"));
@@ -1639,6 +1736,9 @@ mod tests {
         assert!(render(&j, false).contains("job resume J1 P1 retry|restart|unwind"));
         let j = Job { id: "J2".into(), state: "failed".into(), log: "/h/jobs/J2.log".into(), ..Default::default() };
         assert!(render(&j, false).contains("whole log: /h/jobs/J2.log"));
+        // its first line names its lane (`job list` has every lane's)
+        let j = Job { id: "J3".into(), state: "running".into(), kind: "test".into(), node: "boxa".into(), lease: "L9".into(), lane: "lanea".into(), cmd: vec!["bash".into(), "x.sh".into()], ..Default::default() };
+        assert_eq!(render(&j, false).lines().next(), Some("J3 running test@boxa L9 @lanea: bash x.sh"));
     }
 
     /// A pause lasts while the panic stays parked, and the job's verdict is its own exit: a released

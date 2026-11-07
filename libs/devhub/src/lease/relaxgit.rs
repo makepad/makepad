@@ -182,7 +182,8 @@ pub fn prepare(work: &Path, lane: &str, lease: &str, pin: &Pin) -> Result<Vec<(S
     let root = work.join("dev/src");
     if std::fs::symlink_metadata(&root).is_ok() { return Err(format!("overlay: virtual root {} must not exist on disk", root.display())); }
     let mut mounts = String::new();
-    for (repo, sha, at) in std::iter::once(("makepad", pin.makepad.as_str(), root.clone())).chain(pin.commercial.as_deref().map(|sha| ("commercial", sha, root.join("apps/commercial")))) {
+    for (repo, sha, prefix) in pin.repos() {
+        let at = if prefix.is_empty() { root.clone() } else { root.join(crate::nested::dir(repo)) };
         feed(work, repo, sha, lane)?;
         mounts.push_str(&format!("{}\t{}\t{sha}\n", at.display(), path(work, repo).display()));
     }
@@ -205,12 +206,13 @@ pub fn pin(work: &Path, lane: &str) -> Result<Pin, String> {
     Pin::parse(text.trim()).ok_or_else(|| format!("overlay {lane}: no pinned commits"))
 }
 
-/// Release a stopped lane's retained refs; other readers and pins keep their objects.
+/// Release a stopped lane's retained refs in each repository's dev store; other readers and pins
+/// keep their objects.
 pub fn forget(work: &Path, lane: &str) -> Result<(), String> {
     let key = format!("devhub:{lane}");
-    for repo in ["makepad", "commercial"] {
-        let dst = path(work, repo);
-        if !dst.exists() { continue; }
+    let stores = std::fs::read_dir(work.join("dev/git")).into_iter().flatten().flatten();
+    for repo in stores.filter_map(|e| e.file_name().to_str()?.strip_suffix(".relaxgit").filter(|r| git::valid_repo(r)).map(str::to_string)) {
+        let dst = path(work, &repo);
         let _lock = super::jitstore::lock(&dst.with_extension("feed-lock"))?;
         let Some(held) = open_counted(&dst, &|_| false).map_err(io)? else { continue };
         let Some(reference) = held.index.refs.iter().find(|r| r.key == key).cloned() else { continue };
@@ -219,30 +221,23 @@ pub fn forget(work: &Path, lane: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn repo_path<'a>(pin: &'a Pin, path: &'a str) -> (&'static str, &'a str, &'a str) {
-    match (pin.commercial.as_deref(), path.strip_prefix("apps/commercial/")) {
-        (Some(sha), Some(rel)) => ("commercial", sha, rel),
-        _ => ("makepad", &pin.makepad, path),
-    }
-}
-
 /// The store with the pin's path table only.
 fn open(work: &Path, repo: &str, sha: &str) -> Result<Store, String> {
     let oid = store::from_hex(sha).ok_or("invalid pin")?;
     open_counted(&path(work, repo), &|c| *c == oid).map_err(|e| layer(repo, sha, "RELAXGIT open", e))?.ok_or_else(|| layer(repo, sha, "RELAXGIT open", "missing store"))
 }
 
-/// The pin's blob of each tree path `keep` takes (the commercial store's under `apps/commercial/`).
+/// The pin's blob of each tree path `keep` takes (a nested repository's store's under `apps/<name>/`).
 /// A ship-done asks about the paths it ships: building every path's entry (~20k) each time was
 /// most of a live edit's ship-done on the node (11-04).
 pub fn bases(work: &Path, pin: &Pin, keep: &dyn Fn(&str) -> bool) -> Result<BTreeMap<String, String>, String> {
     let mut out = BTreeMap::new();
-    for (repo, sha, prefix) in std::iter::once(("makepad", pin.makepad.as_str(), "")).chain(pin.commercial.as_deref().map(|s| ("commercial", s, "apps/commercial/"))) {
+    for (repo, sha, prefix) in pin.repos() {
         let s = open(work, repo, sha)?;
         let oid = store::from_hex(sha).ok_or("invalid pin")?;
         let table = s.index.table(&oid).ok_or_else(|| layer(repo, sha, "RELAXGIT table", "commit not kept"))?;
-        let mut full = prefix.to_string();
-        for e in table.iter().filter(|e| e.mode != 0o160000 && !(repo == "makepad" && pin.commercial.is_some() && e.path.starts_with("apps/commercial/"))) {
+        let mut full = prefix.clone();
+        for e in table.iter().filter(|e| e.mode != 0o160000 && !(repo == "makepad" && pin.repo_of(&e.path).0 != "makepad")) {
             full.truncate(prefix.len());
             full.push_str(&e.path);
             if keep(&full) { out.insert(full.clone(), store::hex(&e.oid)); }
@@ -254,18 +249,19 @@ pub fn bases(work: &Path, pin: &Pin, keep: &dyn Fn(&str) -> bool) -> Result<BTre
 /// Keep each store index open while reading the pin's manifests.
 pub struct Blobs {
     pin: Pin,
-    makepad: Store,
-    commercial: Option<Store>,
+    /// each repository of the pin's store, by name
+    stores: BTreeMap<String, Store>,
 }
 
 impl Blobs {
     pub fn open(work: &Path, pin: &Pin) -> Result<Self, String> {
-        Ok(Self { pin: pin.clone(), makepad: open(work, "makepad", &pin.makepad)?, commercial: pin.commercial.as_deref().map(|sha| open(work, "commercial", sha)).transpose()? })
+        let stores = pin.repos().into_iter().map(|(repo, sha, _)| -> Result<(String, Store), String> { Ok((repo.to_string(), open(work, repo, sha)?)) }).collect::<Result<BTreeMap<_, _>, String>>()?;
+        Ok(Self { pin: pin.clone(), stores })
     }
 
     pub fn read(&self, path: &str, oid: &str) -> Result<Vec<u8>, String> {
-        let (repo, sha, _) = repo_path(&self.pin, path);
-        let s = if repo == "commercial" { self.commercial.as_ref().ok_or("missing commercial store")? } else { &self.makepad };
+        let (repo, sha, _) = self.pin.repo_of(path);
+        let s = self.stores.get(repo).ok_or_else(|| format!("missing {repo} store"))?;
         let oid = store::from_hex(oid).ok_or("invalid blob")?;
         s.object(&oid).map_err(io)?.map(|(_, b)| b).ok_or_else(|| layer(repo, sha, "RELAXGIT blob", path))
     }
@@ -374,7 +370,7 @@ pub fn why(work: &Path, lane: &str, rel: &str) -> Result<Vec<String>, String> {
 
 fn why_at_pin(work: &Path, lane: &str, rel: &str) -> Result<String, String> {
     let pin = pin(work, lane)?;
-    let (repo, sha, path) = repo_path(&pin, rel);
+    let (repo, sha, path) = pin.repo_of(rel);
     let s = open(work, repo, sha)?;
     let oid = store::from_hex(sha).ok_or("invalid pin")?;
     let table = s.index.table(&oid).ok_or_else(|| layer(repo, sha, "RELAXGIT table", "commit not kept"))?;
@@ -385,7 +381,7 @@ fn why_at_pin(work: &Path, lane: &str, rel: &str) -> Result<String, String> {
 
 pub fn status(work: &Path, lane: &str) -> Result<Vec<String>, String> {
     let pin = pin(work, lane)?;
-    let mut out = vec![format!("{lane}: makepad {}{}", pin.makepad, pin.commercial.as_ref().map_or(String::new(), |s| format!(", commercial {s}")))];
+    let mut out = vec![format!("{lane}: {}", pin.repos().iter().map(|(repo, sha, _)| format!("{repo} {sha}")).collect::<Vec<_>>().join(", "))];
     let held = super::jitstore::Store::new(work).snapshot().ids;
     let (selected, _) = super::loaders::overlay_id(work, &pin)?;
     out.push(format!("dev JIT keys: {}", if held.is_empty() { "none".into() } else { held.join(", ") }));
@@ -405,7 +401,7 @@ fn status_of(pin: &Pin, dir: &Path, out: &mut Vec<String>) -> Result<(), String>
     for p in &paths { out.push(format!("overlay {p} sha256 {}", hash(&content(&dir.join(p))?))); }
     let deleted = whiteouts(dir);
     for p in &deleted { out.push(format!("whiteout {p}")); }
-    for (repo, sha, prefix) in std::iter::once(("makepad", pin.makepad.as_str(), "")).chain(pin.commercial.as_deref().map(|s| ("commercial", s, "apps/commercial/"))) {
+    for (repo, sha, prefix) in pin.repos() {
         let work_tip = run(repo, &["rev-parse", "--verify", git::SYNCED_REF])?;
         out.push(format!("diff vs work {repo} {}", work_tip.trim()));
         let diff = run(repo, &["diff", "--name-status", "--no-renames", "-z", work_tip.trim(), sha])?;
@@ -413,7 +409,7 @@ fn status_of(pin: &Pin, dir: &Path, out: &mut Vec<String>) -> Result<(), String>
         let words: Vec<_> = diff.split('\0').filter(|s| !s.is_empty()).collect();
         for pair in words.chunks_exact(2) {
             let p = format!("{prefix}{}", pair[1]);
-            if repo_path(pin, &p).0 == repo { effective.insert(p, pair[0].into()); }
+            if pin.repo_of(&p).0 == repo { effective.insert(p, pair[0].into()); }
         }
         let work_blobs = run(repo, &["ls-tree", "-r", "-z", work_tip.trim()])?;
         let index: BTreeMap<_, _> = work_blobs.split('\0').filter_map(|s| {
@@ -422,7 +418,7 @@ fn status_of(pin: &Pin, dir: &Path, out: &mut Vec<String>) -> Result<(), String>
             let mode = u32::from_str_radix(words.next()?, 8).ok()?;
             Some((format!("{prefix}{p}"), (mode, words.nth(1)?.to_string())))
         }).collect();
-        for p in paths.iter().chain(&deleted).filter(|p| repo_path(pin, p).0 == repo) {
+        for p in paths.iter().chain(&deleted).filter(|p| pin.repo_of(p).0 == repo) {
             let old = index.get(p);
             let code = if deleted.contains(p) { old.map(|_| "D") } else {
                 let bytes = content(&dir.join(p))?;

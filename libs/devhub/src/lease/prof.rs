@@ -101,7 +101,7 @@ impl Phases {
 /// Normalize the scheduler's reasons, not the rendered lease tag or its eventual node.
 pub fn blocker(reason: &str) -> String {
     let r = reason.split_once(": ").filter(|(prefix, _)| !prefix.contains(' ') && !matches!(*prefix, "budget" | "self-update" | "class")).map_or(reason, |(_, r)| r);
-    if r.starts_with("behind ") && r.contains("'s own prebuild ") { return "box prebuild".into(); }
+    if r.starts_with("in a gap of ") { return "timed gap".into(); }
     if let Some(held) = r.strip_prefix("held by ") {
         let kind = held.split_once('(').map_or(held, |(_, k)| k).split_whitespace().next().unwrap_or("lease");
         return format!("held by {kind}");

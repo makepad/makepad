@@ -281,7 +281,8 @@ pub fn crate_dirs_from(pkg: &str, read: &dyn Fn(&str) -> Option<String>) -> BTre
             let rel = if let Some(p) = path_of(t) {
                 Some(normalize(&format!("{dir}/{p}")))
             } else if t.contains("workspace = true") || t.contains("workspace=true") {
-                t.split_once('=').and_then(|(n, _)| ws.get(n.trim()).cloned())
+                // `x = { workspace = true }`, or `x.workspace = true`
+                t.split_once('=').and_then(|(n, _)| ws.get(n.trim().trim_end_matches(".workspace").trim_end()).cloned())
             } else {
                 None
             };
@@ -293,11 +294,16 @@ pub fn crate_dirs_from(pkg: &str, read: &dyn Fn(&str) -> Option<String>) -> BTre
     out
 }
 
-/// `path = "x"` in a toml line.
+/// `path = "x"` in a toml line: the key, not a `path` in a dependency's name. The first `path`
+/// of `makepad-pathkit = { path = "../pathkit" }` is the name's, so no crate that used it held it
+/// among its inputs: their proofs held across a change to it, and a bucket named only an
+/// unrelated landing for a call that change broke (11-07).
 fn path_of(line: &str) -> Option<String> {
-    let i = line.find("path")?;
-    let rest = line[i + 4..].trim_start().strip_prefix('=')?.trim_start().strip_prefix('"')?;
-    Some(rest[..rest.find('"')?].to_string())
+    line.match_indices("path").find_map(|(i, _)| {
+        if !line[..i].chars().next_back().is_none_or(|c| c == '{' || c == ',' || c.is_whitespace()) { return None; }
+        let rest = line[i + 4..].trim_start().strip_prefix('=')?.trim_start().strip_prefix('"')?;
+        Some(rest[..rest.find('"')?].to_string())
+    })
 }
 
 /// `a/b/../c` -> `a/c`.
@@ -373,6 +379,9 @@ pub fn start(ctx: Arc<Ctx>) {
         let busy: Arc<Mutex<BTreeSet<String>>> = Arc::new(Mutex::new(BTreeSet::new()));
         // node -> the deployment its new hub did not build at: no roll again until it moves
         let broken: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        // node -> the deployment its node refused to move from: no roll of any service there until
+        // its tree changes (a refused apply is refused the same way every time)
+        let refused: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
         // (box, service) that said it runs the deployment's build already, at which last change and
         // deployment: asked again when one of them moves, not every tick
         let current: Arc<Mutex<HashMap<(String, String), (u64, String)>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -415,7 +424,7 @@ pub fn start(ctx: Arc<Ctx>) {
             let Some(work) = crate::gitread::rev(&ctx.repo, "refs/heads/work") else { continue };
             // where a box catches up to, and how far behind one is
             if let Some(main) = crate::gitread::rev(&ctx.repo.join("apps/commercial"), "refs/heads/main") {
-                let tips = format!("{work},{main}");
+                let tips = crate::state::Pair::new(&work, &main).pin_key();
                 if tips != tips_at {
                     ctx.leases.set_tips(&tips, landed_since(&ctx, wall_ms().saturating_sub(LANDINGS_KNOWN.as_millis() as u64)));
                     tips_at = tips;
@@ -447,7 +456,7 @@ pub fn start(ctx: Arc<Ctx>) {
             let mine = crate::lease::caps::hub_rev();
             for n in ctx.leases.nodes().into_iter().filter(|n| n.up && !matches!(n.role(), crate::lease::Role::Device)) {
                 let Some(c) = n.caps.clone() else { continue };
-                if busy.lock().unwrap().contains(&n.name) {
+                if busy.lock().unwrap().contains(&n.name) || refused.lock().unwrap().get(&n.name).map(String::as_str) == Some(c.deploy.split(',').next().unwrap_or("")) {
                     continue;
                 }
                 // the hub
@@ -496,7 +505,7 @@ pub fn start(ctx: Arc<Ctx>) {
                     "its code changed after it started".to_string()
                 };
                 let why = closures_why.as_ref().map_or(why.clone(), |c| format!("{c}: {why}"));
-                let (c2, b2, d2, node, br, cur) = (ctx.clone(), busy.clone(), drains.clone(), n.name.clone(), broken.clone(), current.clone());
+                let (c2, b2, d2, node, br, rf, cur) = (ctx.clone(), busy.clone(), drains.clone(), n.name.clone(), broken.clone(), refused.clone(), current.clone());
                 let (at, deploy) = (changed.get(svc).copied().unwrap_or(0), c.deploy.clone());
                 let _ = std::thread::Builder::new().name("devhub-update-node".into()).spawn(move || {
                     let end = roll_node(&c2, &node, svc, &dirs, &target, d2, &|| note_roll(&node, svc, &[("from", &from), ("to", &target), ("why", &why)]));
@@ -506,6 +515,7 @@ pub fn start(ctx: Arc<Ctx>) {
                         RollEnd::Back if svc == "devhub" => Some(format!("runs {}", super::short(&now))),
                         RollEnd::Back => Some("restarted".to_string()),
                         RollEnd::Late => Some("did not come back in 25 min".to_string()),
+                        RollEnd::Refused(_) => Some("its node refused the deployment".to_string()),
                         RollEnd::Current | RollEnd::NoRestart => None,
                     };
                     if let Some(ended) = ended {
@@ -514,9 +524,13 @@ pub fn start(ctx: Arc<Ctx>) {
                     if matches!(end, RollEnd::Current) {
                         cur.lock().unwrap().insert((node.clone(), svc.to_string()), (at, deploy));
                     }
-                    match end {
-                        RollEnd::Broke(at) => br.lock().unwrap().insert(node.clone(), at),
+                    match &end {
+                        RollEnd::Broke(at) => br.lock().unwrap().insert(node.clone(), at.clone()),
                         _ => br.lock().unwrap().remove(&node),
+                    };
+                    match end {
+                        RollEnd::Refused(at) => rf.lock().unwrap().insert(node.clone(), at),
+                        _ => rf.lock().unwrap().remove(&node),
                     };
                     c2.leases.set_updating(&node, None, false);
                     b2.lock().unwrap().remove(&node);
@@ -720,7 +734,7 @@ fn landed_since(ctx: &Ctx, since: u64) -> Vec<(String, u64)> {
     use crate::land::{Entry, St};
     let history = ctx.store.history("land").unwrap_or_default();
     let mut landed: Vec<(String, u64)> = history.iter().filter_map(|v| Entry::parse(&v.to_json())).filter(|e| e.state == St::Landed && e.changed_ms >= since)
-        .filter_map(|e| { let pair = crate::bucket::entry_pair(&e.landed)?; Some((format!("{},{}", pair.work, pair.main), e.changed_ms)) }).collect();
+        .filter_map(|e| { let pair = crate::bucket::entry_pair(&e.landed)?; Some((pair.pin_key(), e.changed_ms)) }).collect();
     landed.sort_by_key(|(_, ms)| *ms);
     landed
 }
@@ -770,7 +784,10 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
     let mut kicked = false;
     // the pin holds the deployment until that ask starts (said once while it does)
     let mut held = false;
+    let mut proof_said: Option<String> = None;
     let mut said = false;
+    // a failed push is said once while it fails the same way
+    let mut failed: Option<String> = None;
     let t = Instant::now();
     let mut slot = Slot { drains, held: false };
     let updating = |stall: Option<&str>| if svc == "devhub" {
@@ -784,6 +801,11 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
         let c = caps().unwrap_or_default();
         if has_it() {
             done(&c);
+            return RollEnd::NoRestart;
+        }
+        // made a device while its roll ran: its tree is the person's, never a deploy target
+        if c.role() == crate::lease::Role::Device {
+            event(ctx, Sev::Info, format!("update: {node} is a device now: its tree is its own, and the roll to {short} leaves it"));
             return RollEnd::NoRestart;
         }
         // Older hubs share the sync checkout with leases: wait for apply without draining them.
@@ -806,6 +828,13 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
         if held {
             updating(None);
             held = false;
+        }
+        // the user's WM node takes only proven tips: its deployment holds for the proof (said as
+        // the roll's stall while it does)
+        let proof = crate::sync::deploy_held(node);
+        if proof != proof_said {
+            updating(proof.as_deref());
+            proof_said = proof;
         }
         let pin = match to {
             DeployTo::Pin(at) => Some(at),
@@ -838,11 +867,21 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
                 None => {}
             }
             if code != 0 {
-                event(ctx, Sev::Warn, format!("update: pushing {node}'s deployment to {short} failed: {}", lines.iter().rev().find(|l| l.contains("err")).cloned().unwrap_or_default()));
+                let err = lines.iter().rev().find(|l| l.contains("err")).cloned().unwrap_or_default();
+                // the node refused the order itself: the same push is refused the same way every
+                // 5 s (a self-contained box whose tree is no fleet deployment: 90 warnings, 11-07)
+                if err.contains("apply refused: ") {
+                    event(ctx, Sev::Err, format!("update: {node}'s deployment cannot move to {short}: {err}; no roll moves it until its tree changes (a box whose tree is its own: `devhub node {node} role device` keeps it out of the rolls)"));
+                    return RollEnd::Refused(c.deploy.split(',').next().unwrap_or("").to_string());
+                }
+                if failed.as_deref() != Some(err.as_str()) {
+                    event(ctx, Sev::Warn, format!("update: pushing {node}'s deployment to {short} failed: {err}"));
+                    failed = Some(err);
+                }
             }
         }
         if !said && t.elapsed() > DRAIN_SAY {
-            event(ctx, Sev::Warn, format!("update: {node}'s deployment waits for {short} (at {})", if at.is_empty() { "?" } else { super::short(at) }));
+            event(ctx, Sev::Warn, format!("update: {node}'s deployment waits for {short} (at {}{})", if at.is_empty() { "?" } else { super::short(at) }, proof_said.as_ref().map(|p| format!("; {p}")).unwrap_or_default()));
             said = true;
         }
         std::thread::sleep(Duration::from_secs(5));
@@ -1016,6 +1055,8 @@ enum RollEnd {
     Late,
     /// its new hub does not build at this commit
     Broke(String),
+    /// its node refused its deployment's apply, at this deployment: no roll until that changes
+    Refused(String),
     /// the service runs the deployment's build already
     Current,
     /// nothing to do any more, or it would not: said in the update's events
@@ -1151,7 +1192,13 @@ fn cargo_bin() -> PathBuf {
 /// caller runs the old build or the new one, never a missing or half-written file. A background
 /// build ([`crate::os::background`]: background QoS on the person's Mac) on 4 jobs, the master's
 /// own restart too: the running master beats on while it builds, and only the exec's gap counts.
+/// One build at a time, its swap included: cargo on macOS copies the binary up out of `deps`
+/// (no hard link), removing the old copy first even when nothing rebuilt, so the swap of a build
+/// that ended while another one's cargo ran found no file (11-07: the CLI's rebuild and the
+/// master's restart at one landing; the master stayed behind for its retry pause).
 pub fn build_devhub(repo: &Path) -> Result<(), String> {
+    static BUILDING: Mutex<()> = Mutex::new(());
+    let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
     let mut cmd = crate::os::background(cargo_bin().as_os_str());
     cmd.args(["build", "-j4", "--profile", "host", "-p", "makepad-devhub", "--bin", "makepad-devhub", "--target-dir"]).arg(repo.join("target/devhub")).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null());
     match cmd.output() {
@@ -1163,11 +1210,9 @@ pub fn build_devhub(repo: &Path) -> Result<(), String> {
     swap_in(&repo.join("target/devhub/host").join(&name), &repo.join("target/host").join(&name))
 }
 
-/// Copies `built` beside `live` and renames it over: `live` is always a whole binary. One swap
-/// at a time (the CLI's rebuild and the master's restart share the file beside it).
+/// Copies `built` beside `live` and renames it over: `live` is always a whole binary (one at a
+/// time: [`build_devhub`] holds its build to one).
 fn swap_in(built: &Path, live: &Path) -> Result<(), String> {
-    static SWAP: Mutex<()> = Mutex::new(());
-    let _one = SWAP.lock().unwrap_or_else(|e| e.into_inner());
     let next = live.with_extension("next");
     std::fs::create_dir_all(live.parent().unwrap_or(Path::new("."))).map_err(|e| format!("{}: {e}", live.display()))?;
     std::fs::copy(built, &next).and_then(|_| std::fs::rename(&next, live)).map(|_| ()).map_err(|e| format!("swapping {} in at {}: {e}", built.display(), live.display()))
@@ -1476,5 +1521,40 @@ mod tests {
         assert!(!d.contains("apps/wm"));
         assert_eq!(super::normalize("apps/devhub/../../libs/devhub"), "libs/devhub");
         assert_eq!(super::path_of(r#"makepad-remote = { path = "../remote", optional = true }"#).as_deref(), Some("../remote"));
+    }
+
+    /// A dependency's path is its `path` key's, wherever else "path" (or another key's name)
+    /// stands in the line: in the dependency's name, a feature or a value. The name's "path" was
+    /// read as the key, and no crate that used such a dependency held it among its inputs (11-07).
+    #[test]
+    fn a_dependency_path_is_its_key_not_a_word_of_its_name() {
+        for (line, want) in [
+            (r#"makepad-pathkit = { path = "../pathkit" }"#, Some("../pathkit")),
+            (r#"pathfinder = { path="../pathfinder", version = "0.1" }"#, Some("../pathfinder")),
+            (r#"version-path = { version = "1", features = ["path"], path = "../vp" }"#, Some("../vp")),
+            (r#"features-xpath = { features = ["xpath", "version"], optional = true, path = "../fx" }"#, Some("../fx")),
+            (r#"path-features-version = {path = "../pfv",features = ["path"]}"#, Some("../pfv")),
+            (r#"path = "src/lib.rs""#, Some("src/lib.rs")),
+            (r#"makepad-pathkit.workspace = true"#, None),
+            (r#"makepad-pathkit = { workspace = true }"#, None),
+            (r#"xpath = { version = "1", features = ["path"] }"#, None),
+            (r#"classpath = "x""#, None),
+        ] {
+            assert_eq!(super::path_of(line).as_deref(), want, "{line}");
+        }
+        // the closure follows each of them
+        let dep = |name: &str, dir: &str| format!("[package]\nname = \"{name}\"\n[dependencies]\n{name}-dep = {{ version = \"1\", features = [\"path\"], path = \"../{dir}\" }}\n");
+        let files = std::collections::BTreeMap::from([
+            ("Cargo.toml".to_string(), "[workspace.dependencies]\nmakepad-pathkit = { path = \"pathkit\" }\n".to_string()),
+            ("a/Cargo.toml".to_string(), "[package]\nname = \"a\"\n[dependencies]\nmakepad-pathkit = { path = \"../pathkit\" }\nversion-path = { version = \"1\", path = \"../vp\" }\n".to_string()),
+            ("pathkit/Cargo.toml".to_string(), dep("makepad-pathkit", "features-path")),
+            ("vp/Cargo.toml".to_string(), "[package]\nname = \"version-path\"\n".to_string()),
+            ("features-path/Cargo.toml".to_string(), "[package]\nname = \"features-path\"\n".to_string()),
+            ("b/Cargo.toml".to_string(), "[package]\nname = \"b\"\n[dependencies]\nmakepad-pathkit.workspace = true\n".to_string()),
+        ]);
+        let read = |p: &str| files.get(p).cloned();
+        let dirs = |pkg: &str| super::crate_dirs_from(pkg, &read).into_iter().collect::<Vec<_>>();
+        assert_eq!(dirs("a"), ["a", "features-path", "pathkit", "vp"]);
+        assert_eq!(dirs("b"), ["b", "features-path", "pathkit"]);
     }
 }

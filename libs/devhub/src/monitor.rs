@@ -2,7 +2,7 @@
 //! inotify on Linux, ReadDirectoryChangesW on Windows), so a job submit or `devhub lanes` knows
 //! what a worktree holds on top of its HEAD without scanning it.
 //!
-//! A tree (a worktree root; a nested `apps/commercial` is a tree of its own) is baselined once
+//! A tree (a worktree root; a nested repository's `apps/<name>` is a tree of its own) is baselined once
 //! with a status (makepad-git, in process) when it is first asked about and again when its HEAD
 //! moves (HEAD is read from the files under `.git`); from then on every file event under it joins
 //! its touched set. Its dirty set is the baseline plus what was touched, minus ignored paths and
@@ -275,7 +275,7 @@ impl Monitor {
     }
 
     /// The tree's dirty set now (`tree`: a worktree root; for the makepad tree, paths under a
-    /// nested `apps/commercial` belong to that tree and are left out).
+    /// nested repository's `apps/<name>` belong to that tree and are left out).
     pub fn dirty(&self, tree: &Path) -> Result<Dirty, String> {
         let root = tree.canonicalize().map_err(|e| format!("{}: {e}", tree.display()))?;
         let (head, branch) = read_head(&root).ok_or_else(|| format!("{}: not a git worktree", root.display()))?;
@@ -300,11 +300,11 @@ impl Monitor {
                 t.based = true;
             }
         }
-        let nested = root.join("apps/commercial/.git").exists();
+        let nested = crate::nested::names(&root);
         let (cands, asked_at): (Vec<String>, u64) = {
             let g = self.inner.lock().unwrap();
             let t = g.trees.get(&root).ok_or("the tree was forgotten")?;
-            let all: Vec<String> = t.base.iter().chain(t.touched.keys()).collect::<BTreeSet<_>>().into_iter().filter(|p| !(nested && p.starts_with("apps/commercial/"))).cloned().collect();
+            let all: Vec<String> = t.base.iter().chain(t.touched.keys()).collect::<BTreeSet<_>>().into_iter().filter(|p| crate::nested::split(p, nested.iter().map(String::as_str)).is_none()).cloned().collect();
             (all, t.seq)
         };
         let mut d = Dirty { head, branch, ..Default::default() };

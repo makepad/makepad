@@ -198,6 +198,17 @@ pub(super) fn display() -> Option<String> {
     os::display()
 }
 
+/// Why a WM's `status` answer (its windows) shows nothing: its one window is 0x0, which it is
+/// when no output is attached or live, and every window opened under it then times out on its
+/// first frame (fourteen gui and screen leases on one node in 3 h, 11-07). Empty when a window
+/// has a size, or the answer says nothing of them.
+pub fn dark_of(status: &str) -> String {
+    let Ok(v) = makepad_strict_json::parse(status.as_bytes()) else { return String::new() };
+    let Some(windows) = v.get("w").and_then(|w| w.as_arr()).filter(|w| !w.is_empty()) else { return String::new() };
+    let empty = |w: &makepad_strict_json::Value| w.get("sz").and_then(|s| s.as_arr()).is_some_and(|s| s.iter().all(|n| super::num(n).is_some_and(|n| n <= 0.0)));
+    if windows.iter().all(empty) { "its WM's window is 0x0: no output shows it".into() } else { String::new() }
+}
+
 /// The box's WM answered on another hosted wire at the last caps measure (its socket and
 /// answer): no display for gui work until it restarts (`sync::serve` rolls that restart).
 #[cfg(target_os = "linux")]
@@ -228,6 +239,8 @@ pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
     c.hub_proto = super::HUB_PROTO;
     c.services = services();
     c.hub_building = super::exec::hub_building();
+    #[cfg(feature = "checkout")]
+    { c.wm_drain = crate::sync::serve::wm_drain(); }
     c.jit_store = Some(std::sync::Arc::new(super::jitstore::Store::new(&conf.work).snapshot()));
     c.native_trees = conf.native_trees;
     c.cpus_shared = cpu_count(&conf.cpus_shared);
@@ -264,22 +277,35 @@ pub fn mac_pressure(level: u32) -> Option<&'static str> {
     }
 }
 
-/// The WM-supervised services of this node (`~/.makepad/wm/<name>.state`, written at each start):
-/// name and start time.
+/// The WM-supervised services that run on this node (`~/.makepad/wm/<name>.state`, written at
+/// each start): name and start time.
 pub fn services() -> Vec<(String, u64)> {
-    let dir = makepad_network::fleet::makepad_home().join("wm");
-    let mut out: Vec<(String, u64)> = std::fs::read_dir(&dir)
+    services_in(&makepad_network::fleet::makepad_home().join("wm"), &crate::procinfo::alive)
+}
+
+/// [`services`] of the state files in `dir`, a service running when `alive` says so of the pid
+/// its file records. A state file outlives its service, and the update roll asked a node to
+/// restart an AI hub that no longer ran there at each change of its code, the node answering
+/// that it does not run it (11-07).
+fn services_in(dir: &Path, alive: &dyn Fn(u32) -> bool) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().strip_suffix(".state")?.to_string();
+            state_pid(&std::fs::read_to_string(e.path()).ok()?).filter(|p| alive(*p))?;
             let t = e.metadata().ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64;
             Some((name, t))
         })
         .collect();
     out.sort();
     out
+}
+
+/// The pid a service's state file records (its `pid = ` line).
+pub(super) fn state_pid(text: &str) -> Option<u32> {
+    text.lines().find_map(|l| l.strip_prefix("pid = ").and_then(|p| p.trim().parse::<u32>().ok()))
 }
 
 /// Why this box's toolchain cannot link, from its last probe (see [`probe_toolchain`]).
@@ -520,6 +546,7 @@ mod os {
             display: display(),
             // read after display(): its probe leaves the answer of a WM on another wire
             wm_wire: OTHER_WIRE.lock().unwrap().clone().unwrap_or_default(),
+            wm_dark: wm_dark(),
             battery: battery(),
             ..Default::default()
         }
@@ -556,6 +583,17 @@ mod os {
     }
 
     pub(super) static OTHER_WIRE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+    /// Why the box's WM shows nothing ([`super::dark_of`] of its `status`), asked as any inspect
+    /// client asks it; empty when it shows something, or does not answer.
+    fn wm_dark() -> String {
+        let Ok(wm) = makepad_remote::link::Client::connect("makepad-app-wm") else { return String::new() };
+        wm.set_timeout(Some(std::time::Duration::from_secs(3)));
+        match wm.cmd("status").ok().and_then(|mut lines| lines.next()) {
+            Some(Ok(line)) => super::dark_of(&line),
+            _ => String::new(),
+        }
+    }
 
     /// Whether the WM at `path` takes today's apps, asked the way an app asks it
     /// (platform/hal wm_socket): `hello2` first; a WM from before that closes it unanswered and
@@ -848,6 +886,25 @@ mod os {
 
 #[cfg(test)]
 mod tests {
+    /// A service runs where its state file's pid is alive: a file left by one that ended, or one
+    /// with no pid, is no service of the node, and the update roll asks it to restart none.
+    #[test]
+    fn a_service_whose_state_outlived_it_is_none() {
+        let dir = std::env::temp_dir().join(format!("devhub-caps-services-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("devhub.state"), "pid = 11\nidentity = hub\n").unwrap();
+        std::fs::write(dir.join("ai-hub.state"), "pid = 12\nidentity = aihub\n").unwrap();
+        std::fs::write(dir.join("desk-link.state"), "identity = no pid\n").unwrap();
+        std::fs::write(dir.join("ai-hub.log"), "pid = 11\n").unwrap();
+        let names = |alive: &dyn Fn(u32) -> bool| super::services_in(&dir, alive).into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+        assert_eq!(names(&|p| p == 11 || p == 12), ["ai-hub", "devhub"]);
+        assert_eq!(names(&|p| p == 11), ["devhub"], "the AI hub ended: its state file is no service");
+        assert_eq!(super::state_pid("identity = x\npid = 42\n"), Some(42));
+        assert_eq!(super::state_pid("pid = x\n"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Only a git error that is the box's takes it out of rotation: one about the request (a
     /// commit it does not have) is the request's.
     #[test]
@@ -871,6 +928,18 @@ mod tests {
         assert!(matches!(c.mem_pressure, 1 | 2 | 4), "{}", c.mem_pressure);
     }
     use super::*;
+
+    /// A WM whose one window is 0x0 shows nothing; one with a size, or an answer without
+    /// windows, says nothing against the box (the status of a node whose WM had no output, 11-07).
+    #[test]
+    fn a_wm_window_of_0x0_is_a_dark_display() {
+        let dark = r#"{"app":"makepad-app-wm","pid":7,"w":[{"i":0,"t":"makepad-wm","sz":[0,0],"px":[0,0],"dpi":2.43,"pos":[0,0]}]}"#;
+        let lit = r#"{"app":"makepad-app-wm","pid":7,"w":[{"i":0,"t":"makepad-wm","sz":[1920,1080],"px":[3840,2160],"dpi":2,"pos":[0,0]}]}"#;
+        assert_eq!(dark_of(dark), "its WM's window is 0x0: no output shows it");
+        assert_eq!(dark_of(lit), "");
+        assert_eq!(dark_of(r#"{"app":"makepad-app-wm","pid":7,"w":[]}"#), "");
+        assert_eq!(dark_of("not json"), "");
+    }
 
     #[test]
     fn cpuinfo_meminfo_loadavg_nvidia_battery() {

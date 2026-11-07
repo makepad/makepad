@@ -33,6 +33,7 @@ pub mod master;
 pub mod native;
 pub mod panel;
 pub mod patch;
+pub mod pre_nested;
 pub mod prof;
 pub mod sched;
 pub mod ship;
@@ -55,10 +56,15 @@ pub const PREBUILD_LANE_PREFIX: &str = "prebuild-";
 pub const KEEP_DIR: &str = "keep";
 
 /// The file in a lease's tmp its node makes when its run is to stop at its next step
-/// (`DEVHUB_YIELD`: a timed run past twice its estimate while a timed ask waits on its box,
-/// [`sched::Sched::say_overruns`]). It holds why. A timed series or bench checks it between steps
+/// (`DEVHUB_YIELD`: a timed run past twice its estimate while a timed ask waits on its box, or a
+/// long one while a short one waits there, [`sched::Sched::say_overruns`]). It holds why. A timed series or bench checks it between steps
 /// and, once it exists, stops after the current step with its partial results and releases.
 pub const YIELD_FILE: &str = "yield";
+
+/// The file in a lease's tmp its node appends the lease's holder's lines to (`DEVHUB_TOLD`,
+/// `lease-tell`): a tests shard's answers from the run's dealer, each unit of the run's one queue
+/// it is to run next (bucket.rs [`crate::bucket`] `Dealer`, land_gate.sh GATE_QUEUE).
+pub const TOLD_FILE: &str = "told";
 
 /// What a lease guards (DESIGN.md §10.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -194,6 +200,22 @@ pub fn run_class(lane: &str, kind: Kind, argv: &[String]) -> String {
     };
     let class = std::iter::once(kind.as_str().to_string()).chain(words).collect::<Vec<_>>().join(" ");
     lane.map_or(class.clone(), |lane| format!("{class} @{lane}"))
+}
+
+/// What a JIT run's class adds when its box keeps no binary of its tree and cargo builds the JIT
+/// first: that build is its job then, minutes, where the kept binary's run of the same command is
+/// a fraction of a second. One class for both held CI's JIT pre-build, `ci makepad --version`,
+/// building for 6 min, to its warm runs' 0 s, and called it stalled (11-07).
+pub const JIT_BUILD_RUN: &str = " +jit-build";
+
+/// The class a lease is measured by: the one it asked, else its first run's ([`run_class`]); and
+/// when its box said cargo builds its JIT first ([`JIT_BUILD_RUN`]), that job.
+pub fn lease_class(asked: &str, run: &str) -> String {
+    match asked {
+        "" => run.to_string(),
+        asked if run.ends_with(JIT_BUILD_RUN) && !asked.ends_with(JIT_BUILD_RUN) => format!("{asked}{JIT_BUILD_RUN}"),
+        asked => asked.to_string(),
+    }
 }
 
 /// A run class without the lane [`run_class`] measures it under: what tables across lanes group by.
@@ -334,6 +356,14 @@ pub struct Caps {
     /// what a WM of ours there answered on another hosted wire (its probe): it hosts no app of
     /// today, so the box takes no screen or gui lease until that WM restarts; empty: none such
     pub wm_wire: String,
+    /// why the box's live WM shows nothing ([`caps::dark_of`]): every window opened there times
+    /// out on its first frame, so the box takes no screen or gui lease until it shows one; empty:
+    /// it shows one, or could not say
+    pub wm_dark: String,
+    /// what the box's waiting WM restart waits on when only leases hold it: it drains, taking no
+    /// new lease the restart would wait for until it has restarted ([`sched::Req::cut_by_wm_restart`]);
+    /// empty: none waits, or a person's reason holds it (it never drains for those)
+    pub wm_drain: String,
     /// percent and charging, on devices with a battery
     pub battery: Option<(u32, bool)>,
     pub role: Option<Role>,
@@ -467,12 +497,32 @@ impl UserSense {
 /// older hubs lack (2: overlay sources and base blobs; 3: per-lane native trees; 4: detachable
 /// live runs; 5: compiled-file dev JIT inputs, a dep-info mismatch never fails; 6: its restart
 /// ends nothing, so it restarts for its update at once; 7: warm leases use another lane's native
-/// tree and target; 9: a hub build takes the jobs its room was granted, `hub-restart <sha> jobs=N`).
+/// tree and target; 9: a hub build takes the jobs its room was granted, `hub-restart <sha> jobs=N`;
+/// 10: the shards of one tests bucket run share their native tree; 11: `lease-tell`, the lease's
+/// `$DEVHUB_TOLD` file, the tests run's queue; 12: an explicit `--jit` is the run's JIT for any
+/// command, held for it at `$MAKEPAD_LOADER`; 13: `jit-read` / `jit-put`, a `--jit` copied to the
+/// box a lease is granted on; 14: a rev names any nested repository, [`NESTED_PROTO`]).
 /// Only requests needing a newer facility wait for its self-update; other leases keep using the hub.
-pub const HUB_PROTO: u32 = 9;
+pub const HUB_PROTO: u32 = 14;
+/// The first protocol whose hub takes every nested repository a lease's rev names (its store, its
+/// tree, its overlay); hubs before took makepad and the ledger's paired one
+/// ([`crate::state::PAIRED`]) only.
+pub const NESTED_PROTO: u32 = 14;
 /// The first protocol whose hub builds itself with the jobs its room was granted
 /// ([`crate::lease::sched::Req::hub_build`]): its build may start on fewer cores than it measured.
 pub const HUB_JOBS_PROTO: u32 = 9;
+/// The first protocol whose hub tells a lease's run what its holder says (`lease-tell`, its
+/// `$DEVHUB_TOLD` file, [`TOLD_FILE`]): a tests shard takes its units from the run's queue so, and
+/// waits for it (its hub also shares the native tree of the shards of one run at its pin,
+/// lease/tree.rs [`tree::take_native`], since protocol 10).
+pub const TELL_PROTO: u32 = 11;
+/// The first protocol whose hub runs any command of a lease that asks for a JIT by id (`--jit`)
+/// on that JIT, held for the lease at `$MAKEPAD_LOADER`: an older one ran it without (11-07).
+pub const JIT_ASK_PROTO: u32 = 12;
+/// The first protocol whose hub serves its store's JITs to the master (`jit-read`) and takes one
+/// copied in (`jit-put`): a lease's `--jit` goes to any box of its platform, copied there at its
+/// grant from a box that holds it ([`sched::Sched::jit_source`]).
+pub const JIT_COPY_PROTO: u32 = 13;
 /// In a box's refusal of a timed lease's start: something builds there, and the master places the
 /// lease again on a new look at the box.
 pub const TIMED_AFTER: &str = "timed work starts after it";
@@ -507,7 +557,7 @@ impl Caps {
         let exec_limits = self.exec_limits.map_or("null".into(), |l| l.to_json());
         let slots: Vec<String> = self.slots.iter().map(|(k, n)| format!("\"{}\":{n}", k.as_str())).collect();
         format!(
-            "{{\"exec_limits\":{exec_limits},\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"cpus_shared\":{},\"cpus_timed\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"mem_pressure\":{},\"trouble\":{},\"wm_wire\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"hub_proto\":{}{},\"services\":{{{}}},\"user\":{}}}",
+            "{{\"exec_limits\":{exec_limits},\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"cpus_shared\":{},\"cpus_timed\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"mem_pressure\":{},\"trouble\":{},\"wm_wire\":{},\"wm_dark\":{},\"wm_drain\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"hub_proto\":{}{},\"services\":{{{}}},\"user\":{}}}",
             json_str(&self.rustc),
             json_str(&self.node),
             json_str(&self.arch),
@@ -544,6 +594,8 @@ impl Caps {
             self.mem_pressure,
             json_str(&self.trouble),
             json_str(&self.wm_wire),
+            json_str(&self.wm_dark),
+            json_str(&self.wm_drain),
             json_str(&self.hub_rev),
             self.hub_rss_mb,
             self.hub_heap_mb,
@@ -598,6 +650,8 @@ impl Caps {
             trouble: s("trouble"),
             stalls: v.get("stalls").and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
             wm_wire: s("wm_wire"),
+            wm_dark: s("wm_dark"),
+            wm_drain: s("wm_drain"),
             rustc: s("rustc"),
             hub_proto: f("hub_proto") as u32,
             jit_store: v.get("jit_store").filter(|v| !v.is_null()).map(|v| std::sync::Arc::new(jitstore::Snapshot::parse(v))),
@@ -647,52 +701,79 @@ pub fn cli(args: &[&str]) -> Option<i32> {
     client::cli(args)
 }
 
-/// The commits a lease runs at: makepad, and commercial when it named one.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The commits a lease runs at: makepad, and each nested repository it named
+/// ([`crate::nested`]), by name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Pin {
     pub makepad: String,
-    pub commercial: Option<String>,
+    pub nested: std::collections::BTreeMap<String, String>,
 }
 
 impl Pin {
-    /// A tree at this pin serves a lease at `other` without moving: the same makepad commit, and
-    /// the same commercial one when both name one (a lease without commercial takes the tree's as
-    /// it is).
-    pub fn fits(&self, other: &Pin) -> bool {
-        self.makepad == other.makepad && (self.commercial.is_none() || other.commercial.is_none() || self.commercial == other.commercial)
+    /// makepad at `makepad`, no nested repository.
+    pub fn at(makepad: &str) -> Pin {
+        Pin { makepad: makepad.to_string(), nested: Default::default() }
     }
 
-    /// `<makepad sha>[,<commercial sha>]` (the ledger's and caps' form).
+    /// The pin with nested repository `name` at `sha`.
+    pub fn with(mut self, name: &str, sha: &str) -> Pin {
+        self.nested.insert(name.to_string(), sha.to_string());
+        self
+    }
+
+    /// A tree at this pin serves a lease at `other` without moving: the same makepad commit, and
+    /// the same commit of each nested repository both name (a lease that names none of one takes
+    /// the tree's as it is).
+    pub fn fits(&self, other: &Pin) -> bool {
+        self.makepad == other.makepad && self.nested.iter().all(|(name, sha)| other.nested.get(name).is_none_or(|o| o == sha))
+    }
+
+    /// `<makepad sha>[,<name>=<sha>]...` (the ledger's and caps' form).
     pub fn key(&self) -> String {
-        match &self.commercial {
-            Some(c) => format!("{},{c}", self.makepad),
-            None => self.makepad.clone(),
-        }
+        self.nested.iter().fold(self.makepad.clone(), |k, (name, sha)| format!("{k},{name}={sha}"))
     }
 
     pub fn parse(key: &str) -> Option<Pin> {
         let mut it = key.split(',');
-        let makepad = it.next().filter(|s| hex40(s))?.to_string();
-        let commercial = match it.next() {
-            Some(c) if hex40(c) => Some(c.to_string()),
-            Some(_) => return None,
-            None => None,
-        };
-        Some(Pin { makepad, commercial })
+        let mut pin = Pin::at(it.next().filter(|s| hex40(s))?);
+        for side in it {
+            let (name, sha) = side.split_once('=')?;
+            if !crate::nested::valid(name) || !hex40(sha) || pin.nested.insert(name.to_string(), sha.to_string()).is_some() {
+                return None;
+            }
+        }
+        Some(pin)
     }
 
-    /// The commits of a pinned `--rev` (`branch@sha[,branch@sha]`, [`pin_revs`]).
+    /// The commits of a pinned `--rev` (`branch@sha[,<name>=branch@sha]...`, [`pin_revs`]).
     pub fn of_rev(spec: &str) -> Option<Pin> {
-        let (mk, com) = parse_pinned(spec).ok()?;
-        Some(Pin { makepad: mk.sha, commercial: com.map(|c| c.sha) })
+        let (mk, nested) = parse_pinned(spec).ok()?;
+        Some(Pin { makepad: mk.sha, nested: nested.into_iter().map(|(name, side)| (name, side.sha)).collect() })
     }
 
     pub fn short(&self) -> String {
         let s = |x: &str| x[..10.min(x.len())].to_string();
-        match &self.commercial {
-            Some(c) => format!("{},{}", s(&self.makepad), s(c)),
-            None => s(&self.makepad),
+        self.nested.iter().fold(s(&self.makepad), |k, (name, sha)| format!("{k},{name}={}", s(sha)))
+    }
+
+    /// Each repository of the pin: its name, its commit and what its paths start with in the tree
+    /// (makepad's nothing, a nested one's `apps/<name>/`).
+    pub fn repos(&self) -> Vec<(&str, &str, String)> {
+        std::iter::once(("makepad", self.makepad.as_str(), String::new())).chain(self.nested.iter().map(|(name, sha)| (name.as_str(), sha.as_str(), crate::nested::prefix(name)))).collect()
+    }
+
+    /// The repository of the pin a tree path is in, its commit and the path inside it.
+    pub fn repo_of<'a>(&'a self, path: &'a str) -> (&'a str, &'a str, &'a str) {
+        match crate::nested::split(path, self.nested.keys().map(String::as_str)) {
+            Some((name, rest)) => (name, self.nested[name].as_str(), rest),
+            None => ("makepad", self.makepad.as_str(), path),
         }
+    }
+
+    /// The bucket and CI ledgers' pair of the pin ([`crate::state::Pair`]: makepad, and the nested
+    /// repository it pairs).
+    pub fn pair(&self) -> crate::state::Pair {
+        crate::state::Pair::new(&self.makepad, self.nested.get(crate::state::PAIRED).map_or("", String::as_str))
     }
 }
 
@@ -710,18 +791,20 @@ pub struct RevPin {
     pub sha: String,
 }
 
-/// Pins `--rev <branch>[@<sha>][,<commercial branch>[@<sha>]]` once, at order time, in the lane's
-/// repo (`repo_dir`; the commercial side in its `apps/commercial`): every branch name becomes
-/// `branch@<full sha>`. The master then ships exactly those commits, so a branch that another
-/// landing moves while this lease queues or ships can neither mismatch the bundle nor pair a
-/// makepad commit with a later commercial one.
+/// Pins `--rev <branch>[@<sha>][,<name>=<branch>[@<sha>]]...` once, at order time, in the lane's
+/// repo (`repo_dir`; nested repository `name`'s side in its `apps/<name>`): every branch name
+/// becomes `branch@<full sha>`. The master then ships exactly those commits, so a branch that
+/// another landing moves while this lease queues or ships can neither mismatch the bundle nor
+/// pair a makepad commit with a later nested one.
 pub fn pin_revs(repo_dir: &std::path::Path, spec: &str) -> Result<String, String> {
     let mut out = Vec::new();
+    let mut named = std::collections::BTreeSet::new();
     for (i, part) in spec.split(',').enumerate() {
-        let dir = if i == 0 { repo_dir.to_path_buf() } else { repo_dir.join("apps/commercial") };
-        if i > 1 {
-            return Err(format!("--rev `{spec}`: at most a makepad and a commercial side"));
+        let (name, part) = if i == 0 { (None, part) } else { let (name, side) = nested_side(spec, part)?; (Some(name), side) };
+        if let Some(name) = name.filter(|n| !named.insert(*n)) {
+            return Err(format!("--rev `{spec}`: {name} twice"));
         }
+        let dir = name.map_or_else(|| repo_dir.to_path_buf(), |n| repo_dir.join(crate::nested::dir(n)));
         let (branch, sha) = part.split_once('@').map_or((part, None), |(b, s)| (b, Some(s)));
         if branch.is_empty() || branch.starts_with('-') || branch.contains(char::is_whitespace) {
             return Err(format!("--rev `{spec}`: `{branch}` is not a branch name"));
@@ -731,10 +814,11 @@ pub fn pin_revs(repo_dir: &std::path::Path, spec: &str) -> Result<String, String
             Some(s) => return Err(format!("--rev `{spec}`: `{s}` is not a commit id")),
             None => format!("refs/heads/{branch}^{{commit}}"),
         };
+        let side = |full: String| name.map_or_else(|| format!("{branch}@{full}"), |n| format!("{n}={branch}@{full}"));
         // a branch or a full id: read in-process; only an abbreviated id asks git to expand it
         if sha.is_none_or(|s| s.len() == 40) {
             let full = crate::gitread::rev(&dir, &what).ok_or_else(|| format!("--rev: {} has no {}", dir.display(), sha.map_or(format!("branch {branch}"), |s| format!("commit {s}"))))?;
-            out.push(format!("{branch}@{full}"));
+            out.push(side(full));
             continue;
         }
         let o = crate::git_exec::command()
@@ -748,13 +832,23 @@ pub fn pin_revs(repo_dir: &std::path::Path, spec: &str) -> Result<String, String
         if !o.status.success() || full.len() != 40 {
             return Err(format!("--rev: {} has no {}", dir.display(), sha.map_or(format!("branch {branch}"), |s| format!("commit {s}"))));
         }
-        out.push(format!("{branch}@{full}"));
+        out.push(side(full));
     }
     Ok(out.join(","))
 }
 
-/// The pinned sides of a `--rev` ([`pin_revs`]'s output): the makepad side and the commercial one.
-pub fn parse_pinned(spec: &str) -> Result<(RevPin, Option<RevPin>), String> {
+/// A nested side of a `--rev` (`<name>=<branch>[@<sha>]`): the repository's name and the side.
+fn nested_side<'a>(spec: &str, part: &'a str) -> Result<(&'a str, &'a str), String> {
+    match part.split_once('=') {
+        Some((name, side)) if crate::nested::valid(name) => Ok((name, side)),
+        Some((name, _)) => Err(format!("--rev `{spec}`: `{name}` is not a nested repository's name")),
+        None => Err(format!("--rev `{spec}`: `{part}` names no nested repository: write `<name>=<branch>`, as in `work,commercial=main`")),
+    }
+}
+
+/// The pinned sides of a `--rev` ([`pin_revs`]'s output): makepad's, and each nested repository's
+/// by name.
+pub fn parse_pinned(spec: &str) -> Result<(RevPin, Vec<(String, RevPin)>), String> {
     let one = |p: &str| {
         let (branch, sha) = p.split_once('@').ok_or_else(|| format!("rev `{p}` names no commit (branch@sha): the CLI pins it at order time"))?;
         if branch.is_empty() || sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
@@ -764,11 +858,15 @@ pub fn parse_pinned(spec: &str) -> Result<(RevPin, Option<RevPin>), String> {
     };
     let mut it = spec.split(',');
     let mk = one(it.next().unwrap_or(""))?;
-    let com = it.next().map(one).transpose()?;
-    if it.next().is_some() {
-        return Err(format!("rev `{spec}`: at most a makepad and a commercial side"));
+    let mut nested: Vec<(String, RevPin)> = Vec::new();
+    for part in it {
+        let (name, side) = nested_side(spec, part)?;
+        if nested.iter().any(|(n, _)| n == name) {
+            return Err(format!("rev `{spec}`: {name} twice"));
+        }
+        nested.push((name.to_string(), one(side)?));
     }
-    Ok((mk, com))
+    Ok((mk, nested))
 }
 
 #[cfg(test)]
@@ -797,6 +895,13 @@ mod tests {
         assert_eq!(run_class("lane", Kind::Build, &argv(&["env", "FOO_MUTE=1", "makepad", "check", "makepad-bar"])), "build makepad check makepad-bar", "lanes share what names its package");
         assert_eq!(run_class("lane", Kind::Build, &argv(&["makepad", "--version"])), "build makepad --version");
         assert_ne!(cargo(&["test", "makepad-baz"]), cargo(&["run", "makepad-app-foo"]), "a CI shard and a session are measured apart");
+        // a run cargo builds its JIT for is that job, whether its lease asked a class or not
+        let built = format!("ci makepad --version{JIT_BUILD_RUN}");
+        assert_eq!(lease_class("", &built), built);
+        assert_eq!(lease_class("", "ci makepad --version"), "ci makepad --version");
+        assert_eq!(lease_class("timed makepad run makepad-foo", &format!("timed makepad run makepad-foo{JIT_BUILD_RUN}")), format!("timed makepad run makepad-foo{JIT_BUILD_RUN}"));
+        assert_eq!(lease_class(&built, &built), built, "said once");
+        assert_eq!(lease_class("test cargo test", "test git rev-parse HEAD"), "test cargo test", "otherwise the asked class stays");
         // and the JIT past an env prefix runs on the overlay, never a native checkout's build
         let jit = argv(&["env", "MAKEPAD_RUN_O3=1", "cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "live", "a"]);
         assert_eq!(Src::for_run(Kind::Test, &jit, false), Src::Overlay);
@@ -834,10 +939,10 @@ mod tests {
             apply: "checkout".into(),
             desk_link: Some(crate::embed::DeskLinkState { on: true, port: 8790, note: "listens on 192.0.2.85:8790".into() }),
             dev_req: Some(true),
-            tree: format!("{},{}", "a".repeat(40), "c".repeat(40)),
+            tree: format!("{},commercial={}", "a".repeat(40), "c".repeat(40)),
             native: vec!["lane-a".into()],
             native_trees: caps::NATIVE_TREES,
-            deploy: format!("{},{}", "b".repeat(40), "d".repeat(40)),
+            deploy: format!("{},commercial={}", "b".repeat(40), "d".repeat(40)),
             applying: true,
             hub_building: true,
             rustc: "1.97.1".into(),
@@ -850,6 +955,8 @@ mod tests {
             trouble: "devhub on node-a could not run for 12 s (2 tries): exited (signal: 9 (SIGKILL))".into(),
             stalls: vec!["lease/exec.rs:1184 (makepad-remote-7) waits on lease start held by lease/exec.rs:1763 (makepad-remote-3) (for 12 s)".into()],
             wm_wire: "makepad-wm-0 answered \"makepad-wm mismatch 0123\"".into(),
+            wm_dark: "its WM's window is 0x0: no output shows it".into(),
+            wm_drain: "test lease L9 of landq-tests (a landing)".into(),
             hub_proto: HUB_PROTO,
             jit_store: None,
             services: vec![("ai-hub".into(), 1_700_000_000_000)],

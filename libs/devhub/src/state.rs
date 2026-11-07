@@ -52,6 +52,9 @@ pub const KEEP: usize = 200;
 /// How many finished jobs it keeps.
 pub const JOBS_KEEP: usize = 500;
 
+/// The nested repository ([`crate::nested`]) a [`Pair`] holds beside makepad: its `main`.
+pub const PAIRED: &str = "commercial";
+
 /// A makepad `work` commit and the commercial `main` commit landed with it: what verify, allapps
 /// and push name.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
@@ -70,9 +73,20 @@ impl Pair {
         format!("{},{}", short(&self.work), short(&self.main))
     }
 
-    /// The lease `--rev` of the pair: `work@<sha>,main@<sha>`.
+    /// The lease `--rev` of the pair: `work@<sha>,commercial=main@<sha>`.
     pub fn rev(&self) -> String {
-        if self.main.is_empty() { format!("work@{}", self.work) } else { format!("work@{},main@{}", self.work, self.main) }
+        if self.main.is_empty() { format!("work@{}", self.work) } else { format!("work@{},{PAIRED}=main@{}", self.work, self.main) }
+    }
+
+    /// The pair as a pin's key ([`crate::lease::Pin::key`]): `<work>[,commercial=<main>]`, the form
+    /// of a node's caps (`deploy`, `tree`), the roll's tips and a timed ask's deployment pin.
+    pub fn pin_key(&self) -> String {
+        if self.main.is_empty() { self.work.clone() } else { format!("{},{PAIRED}={}", self.work, self.main) }
+    }
+
+    /// The pair a pin's key names ([`Pair::pin_key`]).
+    pub fn of_pin_key(key: &str) -> Option<Pair> {
+        crate::lease::Pin::parse(key).map(|p| p.pair())
     }
 
     pub fn valid(&self) -> bool {
@@ -667,6 +681,10 @@ pub struct LaneRec {
     /// `devhub lane live <name> on`: the user waits for this lane (the manager's mark): its
     /// landings take the fast path (merge + check; the boot at `devhub show`, the tests after)
     pub waited: bool,
+    /// `devhub lane first <name>.. on`: the user's priority now: the lane's leases go first,
+    /// ahead of every other lane's and of the land queue's, at interactive priority
+    /// (`Sched::first_lanes`)
+    pub first: bool,
     /// `devhub lane park <name> [why]`: why it waits (empty: not parked); its branches are held
     pub parked: String,
     pub ended_ms: u64,
@@ -693,6 +711,14 @@ pub struct Show {
     pub pid: u32,
     /// the landed commit it runs (work at launch; a landing while it runs patches it live)
     pub sha: String,
+    /// and the commercial `main` with it
+    pub main: String,
+    /// a Mac show takes only proven tips: while the checkout's tip is not proven for its app,
+    /// why it stays at its pair (`held at <sha>: tip <sha2> <reason>`); empty: not held
+    pub held: String,
+    /// the fast bucket's red units (`check <pkg>`) when it took its pair: one of them red at a
+    /// later tip is no new break of the app
+    pub took_red: Vec<String>,
     pub added_ms: u64,
     pub started_ms: u64,
     pub ended_ms: u64,
@@ -703,6 +729,12 @@ pub struct Show {
     pub note: String,
     /// `devhub show pin`: an operation runs on it: no landing or edit reaches it, it does not restart
     pub pinned: bool,
+    /// landed edits its JIT could not apply live, waiting for the person's restart (never
+    /// devhub's): `restart pending since <sha>: N landed edit(s) not running (first: <why>)`, its
+    /// `sha` then no longer what it wholly runs; empty: none wait
+    pub restart: String,
+    /// the sha it was listed at when the first of them was seen (kept while any waits)
+    pub restart_since: String,
     /// when its launch began (its --after met)
     pub launch_ms: u64,
     /// what the launch took, stage by stage (`box 3 s, jit reused, first frame 6 s, settle 8 s`)
@@ -742,6 +774,8 @@ pub struct Live {
     pub src: String,
     pub cost: String,
     pub est_min: Option<f64>,
+    /// `--cores`: what it asks, past its class's measure
+    pub cores: Option<f64>,
     pub class: String,
     pub priority: String,
     pub loader: String,
@@ -1294,7 +1328,7 @@ impl Doc {
             ci: ci_from(v.get("ci")),
             lanes: arr(Some(v), "lanes").iter().map(|l| {
                 let o = Some(l);
-                LaneRec { name: text(o, "name"), path: text(o, "path"), branch: text(o, "branch"), cbranch: text(o, "cbranch"), created_ms: uint(o, "created_ms"), adopted: flag(o, "adopted", false), state: text(o, "state"), landed_ms: uint(o, "landed_ms"), keep: flag(o, "keep", false), waited: flag(o, "waited", false), parked: text(o, "parked"), ended_ms: uint(o, "ended_ms"), note: text(o, "note") }
+                LaneRec { name: text(o, "name"), path: text(o, "path"), branch: text(o, "branch"), cbranch: text(o, "cbranch"), created_ms: uint(o, "created_ms"), adopted: flag(o, "adopted", false), state: text(o, "state"), landed_ms: uint(o, "landed_ms"), keep: flag(o, "keep", false), waited: flag(o, "waited", false), first: flag(o, "first", false), parked: text(o, "parked"), ended_ms: uint(o, "ended_ms"), note: text(o, "note") }
             }).collect(),
             shows: arr(Some(v), "shows").iter().map(show_from).collect(),
             shows_next: uint(Some(v), "shows_next"),
@@ -1586,6 +1620,7 @@ pub fn lane_value(l: &LaneRec) -> Value {
         ("landed_ms", int(l.landed_ms)),
         ("keep", Value::Bool(l.keep)),
         ("waited", Value::Bool(l.waited)),
+        ("first", Value::Bool(l.first)),
         ("parked", s(&l.parked)),
         ("ended_ms", int(l.ended_ms)),
         ("note", s(&l.note)),
@@ -1644,6 +1679,7 @@ fn live_state_value(x: &Live) -> Value {
         ("src", s(&x.src)),
         ("cost", s(&x.cost)),
         ("est_min", x.est_min.map_or(Value::Null, Value::F64)),
+        ("cores", x.cores.map_or(Value::Null, Value::F64)),
         ("class", s(&x.class)),
         ("priority", s(&x.priority)),
         ("loader", s(&x.loader)),
@@ -1700,6 +1736,7 @@ fn live_state_from(v: &Value) -> Live {
         src: text(o, "src"),
         cost: text(o, "cost"),
         est_min: v.get("est_min").and_then(crate::lease::num),
+        cores: v.get("cores").and_then(crate::lease::num),
         class: text(o, "class"),
         priority: text(o, "priority"),
         loader: text(o, "loader"),
@@ -1739,6 +1776,11 @@ pub fn show_value(x: &Show) -> Value {
         ("cond", x.cond.to_value()),
         ("pid", int(x.pid as u64)),
         ("sha", s(&x.sha)),
+        ("main", s(&x.main)),
+        ("held", s(&x.held)),
+        ("restart", s(&x.restart)),
+        ("restart_since", s(&x.restart_since)),
+        ("took_red", strs(&x.took_red)),
         ("added_ms", int(x.added_ms)),
         ("started_ms", int(x.started_ms)),
         ("ended_ms", int(x.ended_ms)),
@@ -1767,6 +1809,11 @@ pub fn show_from(v: &Value) -> Show {
         cond: Cond::from_value(v.get("cond")),
         pid: uint(o, "pid") as u32,
         sha: text(o, "sha"),
+        main: text(o, "main"),
+        held: text(o, "held"),
+        restart: text(o, "restart"),
+        restart_since: text(o, "restart_since"),
+        took_red: strs_from(o, "took_red"),
         added_ms: uint(o, "added_ms"),
         started_ms: uint(o, "started_ms"),
         ended_ms: uint(o, "ended_ms"),
@@ -2474,8 +2521,8 @@ mod tests {
                 Job { id: "J1".into(), batch: "B1".into(), lane: "l".into(), kind: "test".into(), prio: 5, cmd: vec!["cargo".into(), "test".into()], after: vec!["J0".into()], state: "paused".into(), snap: "S2".into(), snap_files: 3, attempts: 1, granted_ms: 5, shipped_ms: 6, first_out_ms: 7, exit: None, panic: Some(JobPanic { id: "P1".into(), pid: 9, message: "index".into(), thread: "main".into(), location: "a.rs:1".into(), at_ms: 3 }), ..Default::default() },
                 Job { id: "J2".into(), state: "failed".into(), exit: Some(101), errors: vec!["error[E1]".into()], tail: vec!["x".into()], prio: 9, ..Default::default() },
             ],
-            lanes: vec![LaneRec { name: "x".into(), path: "/w/x".into(), branch: "rc-x".into(), cbranch: "rc-x".into(), created_ms: 1, adopted: true, state: "live".into(), landed_ms: 4, keep: true, waited: true, parked: "waits".into(), ended_ms: 0, note: "n".into() }],
-            shows: vec![Show { id: "V1".into(), app: "makepad-foo".into(), args: vec!["--plate".into(), "a b.foo".into()], device: "mac".into(), state: "paused".into(), cond: Cond::Landed { branch: "rc-x".into(), repo: "makepad".into(), sha: String::new() }, pid: 4, sha: "s".into(), exit: Some(0), panic: Some(JobPanic { id: "P2".into(), ..Default::default() }), ..Default::default() }],
+            lanes: vec![LaneRec { name: "x".into(), path: "/w/x".into(), branch: "rc-x".into(), cbranch: "rc-x".into(), created_ms: 1, adopted: true, state: "live".into(), landed_ms: 4, keep: true, waited: true, first: true, parked: "waits".into(), ended_ms: 0, note: "n".into() }],
+            shows: vec![Show { id: "V1".into(), app: "makepad-foo".into(), args: vec!["--plate".into(), "a b.foo".into()], device: "mac".into(), state: "paused".into(), cond: Cond::Landed { branch: "rc-x".into(), repo: "makepad".into(), sha: String::new() }, pid: 4, sha: "s".into(), main: "m".into(), held: "held at s: tip t waits".into(), restart: "restart pending since s: 1 landed edit not running".into(), restart_since: "s".into(), took_red: vec!["check a".into()], exit: Some(0), panic: Some(JobPanic { id: "P2".into(), ..Default::default() }), ..Default::default() }],
             shows_next: 1,
             lives: vec![Live { id: "W1".into(), app: "makepad-app-calculator".into(), state: "running".into(), visible: true, pid: 7, ask: "18a-7-1".into(), patch: Some(LivePatch { files: vec!["a.rs".into()], edit_ms: 1, shipped_ms: 2, outcome: "patched".into(), outcome_ms: 3, frame_ms: 4, reason: String::new(), ..Default::default() }), ..Default::default() }],
             lives_next: 1,

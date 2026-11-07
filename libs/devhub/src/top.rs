@@ -262,6 +262,12 @@ fn owner(rows: &std::collections::HashMap<u32, &ProcRow>, r: &ProcRow, me: u32, 
     None
 }
 
+/// The CPU (% of one core, a half-second look) of each of `pids` that runs.
+pub fn cpu_of(pids: &[u32]) -> Vec<(u32, f64)> {
+    let (_, rows) = sample();
+    rows.into_iter().filter(|r| pids.contains(&r.pid)).map(|r| (r.pid, r.cpu_pct)).collect()
+}
+
 /// What else the box ran: its load and the processes outside the timed lease's (`whose` says ""
 /// for its groups and their children) and this hub, using at least 1% of a core, by CPU (% of
 /// one core), the busiest first, each with its owner when known: another lease, or the hub's own

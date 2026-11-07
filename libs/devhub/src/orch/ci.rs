@@ -231,6 +231,9 @@ pub struct Krate {
     pub lib: bool,
     /// integration tests: `tests/*.rs` and `[[test]]` names
     pub tests: Vec<String>,
+    /// the features a `[[bin]]` or `[[test]]` target requires (`required-features`), by
+    /// `bin:<name>` / `test:<name>`: selecting it without them is an error, not a skip
+    pub required: BTreeMap<String, Vec<String>>,
 }
 
 fn dir_of(path: &str) -> &str {
@@ -278,7 +281,17 @@ pub fn krate(tree: &Tree, manifest: &str) -> Option<Krate> {
             }
         }
     }
-    Some(Krate { package, dir, bins, lib, tests: tests.into_iter().collect() })
+    let mut required = BTreeMap::new();
+    for (kind, default) in [("bin", Some(package.as_str())), ("test", None)] {
+        for t in doc.root.get(kind).and_then(Toml::as_array_of_tables).unwrap_or(&[]) {
+            let Some(name) = t.get("name").and_then(Toml::as_str).or(default) else { continue };
+            let features: Vec<String> = t.get("required-features").and_then(Toml::as_array).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+            if !features.is_empty() {
+                required.insert(format!("{kind}:{name}"), features);
+            }
+        }
+    }
+    Some(Krate { package, dir, bins, lib, tests: tests.into_iter().collect(), required })
 }
 
 fn skipped(package: &str, dir: &str) -> bool {
@@ -1456,6 +1469,45 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
     // unguarded copy of the patched body is built again
     if tree.has("tools/run/fixture/warm_image_patch.py") {
         push("live:warm-image-patch".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/warm_image_patch.py"])], Judge::Exit, 30.0, None);
+    }
+    // a landing devhub holds back in a show's JIT waits, and the person's own saves apply live meanwhile
+    if tree.has("tools/run/fixture/landing_hold.py") {
+        push("live:landing-hold".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/landing_hold.py"])], Judge::Exit, 30.0, None);
+    }
+    // the window manager at rest draws nothing: a sticky toast, a window waiting to be hidden, the
+    // closed AI pane's client and the bar's thermometer each kept every node's WM drawing (11-07)
+    if tree.has("tools/run/fixture/wm_rest.py") {
+        push("live:wm-rest".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/wm_rest.py"])], Judge::Exit, 120.0, None);
+    }
+    // a boot that panics after its unit is published ends with the panic's code and message, cold
+    // and warm, and the run's exit work never walks a freed program
+    if tree.has("tools/run/fixture/boot_panic.sh") {
+        push("live:boot-panic".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["sh", "tools/run/fixture/boot_panic.sh"])], Judge::Exit, 60.0, None);
+    }
+    // a build script's run and its package's test (a load that records lint uses) on one cache
+    // share the std code they have in common: no miss, no failed link, no internal compiler error
+    if tree.has("tools/run/fixture/shared_std.py") {
+        push("live:shared-std".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/shared_std.py"])], Judge::Exit, 120.0, None);
+    }
+    // a landing that moves one of makepad's inputs and the program's sources at once: the sources
+    // patch, the input waits for the offered restart
+    if tree.has("tools/run/fixture/landing_whole.py") {
+        push("live:landing-whole".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/landing_whole.py"])], Judge::Exit, 90.0, None);
+    }
+    // an edit's restart-only items wait alone, the rest patches; `inspect live` says what waits
+    // and which commit the run loaded
+    if tree.has("tools/run/fixture/hold_back.py") {
+        push("live:hold-back".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/hold_back.py"])], Judge::Exit, 90.0, None);
+    }
+    // `makepad test` prints the warnings `cargo test` does, and no import it reads (through a
+    // fn's `use X as Y`, through a test's macro call) as unused
+    if tree.has("libs/relax/compiler/tests/test_warnings/run.py") {
+        push("live:test-warnings".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/test_warnings/run.py"])], Judge::Exit, 120.0, None);
+    }
+    // a panic the program catches has its report tagged `(caught)`; a failed unit's summary lists
+    // only the panics that ended a thread or a test
+    if tree.has("tools/run/fixture/caught_report.py") {
+        push("live:caught-report".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/caught_report.py"])], Judge::Exit, 60.0, None);
     }
     // a failed hot load is a warm restart and a ledger report, never a parked panic
     if tree.has("tools/run/fixture/hot_fail.py") {

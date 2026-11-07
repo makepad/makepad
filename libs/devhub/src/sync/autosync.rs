@@ -15,6 +15,11 @@
 //! and no further. That move is not part of a round: a round's batches each wait for their nodes'
 //! builds, minutes per batch, and an ask whose box had nothing to do but this one update sat
 //! behind them ([`follow_pins`]).
+//!
+//! The user's WM node (role `user-wm`) takes only proven tips, as the Mac's shows do: its
+//! deployment moves to the newest tip the fast bucket proved ([`crate::bucket::proven_tip`]), never
+//! back, and holds what it has until then ([`held`]: said in its shows' rows). What reaches its
+//! running apps is the apply's as ever: patched live, and a change that needs a restart offered.
 use super::cli::{ask_local, branch_sha, fleet_nodes, push_and_apply};
 use super::git::valid_sha;
 use crate::lease::sched::{deploy_to, DeployTo};
@@ -27,6 +32,20 @@ use std::time::{Duration, Instant};
 
 /// How soon a node that answered `waits:` is asked again.
 const WAITS_RETRY_S: u64 = 5;
+
+/// The user's WM nodes that hold their deployment for a tip the fast bucket has not proven: why.
+static HELD: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+/// Why `node`'s deployment holds where it is (a user's WM node, for a tip not proven yet).
+pub fn held(node: &str) -> Option<String> {
+    HELD.lock().unwrap_or_else(|e| e.into_inner()).get(node).cloned()
+}
+
+/// The holds are these (one that moves, is at the tips, pinned or no longer followed holds for
+/// no proof).
+fn set_held(held: BTreeMap<String, String>) {
+    *HELD.lock().unwrap_or_else(|e| e.into_inner()) = held;
+}
 
 /// A landing's kick: the wall-clock ms of the newest landing not taken by a round yet.
 static KICK: (Mutex<Option<u64>>, Condvar) = (Mutex::new(None), Condvar::new());
@@ -143,6 +162,25 @@ fn nodes_to_apply(nodes: &[String], status: &[String], tips: &str) -> (Vec<Strin
     }
     let todo = nodes.iter().filter(|n| deploys.get(*n).map(String::as_str) != Some(tips)).cloned().collect();
     (todo, idle, deploys)
+}
+
+/// The nodes of role `user-wm` among the `nodes` lines: the user's WMs, which take only proven tips.
+fn user_wms(status: &[String]) -> BTreeSet<String> {
+    status.iter().filter_map(|line| {
+        let v = makepad_strict_json::parse(line.as_bytes()).ok()?;
+        let caps = crate::lease::Caps::parse(&v.get("caps")?.to_json())?;
+        (caps.role == Some(crate::lease::Role::UserWm)).then(|| v.get("node")?.as_str().map(str::to_string))?
+    }).collect()
+}
+
+/// Where a user's WM node at `deploy` moves ([`crate::bucket::proven_tip`]): Ok(the tip's pin key,
+/// [`crate::state::Pair::pin_key`]), or Err(why it holds what it has).
+fn proven_move(home: &Path, repo: &Path, deploy: &str) -> Result<String, String> {
+    let at = |t: &crate::state::Pair| t.pin_key();
+    match crate::bucket::proven_tip(home, &|t| deploy == at(t) || super::deploy_has(repo, deploy, &at(t))) {
+        crate::bucket::Proven::Move(t) => Ok(at(&t)),
+        crate::bucket::Proven::Stay(why) => Err(format!("held at {}: {why}", crate::state::Pair::of_pin_key(deploy).map_or_else(|| deploy.to_string(), |p| p.short()))),
+    }
 }
 
 /// Says to the scheduler which nodes' applies a timed run made wait (`Some(why)`) and when one
@@ -287,7 +325,7 @@ struct PinMoves {
     report: Report,
 }
 
-/// A node's move to a pin (`makepad,commercial`): the revisions it applied, or why not.
+/// A node's move to a pin (a pin key, [`crate::lease::Pin::key`]): the revisions it applied, or why not.
 type MoveTo<'a> = Arc<dyn Fn(&str, &str) -> Result<(String, String), String> + Send + Sync + 'a>;
 
 /// One look at the pinned nodes (node, its pin): a node that holds its pin waits for no update,
@@ -313,9 +351,9 @@ fn pin_pass<'s>(scope: &'s std::thread::Scope<'s, '_>, follow: &'s Follow, moves
                 let apply = apply.clone();
                 scope.spawn(move || {
                     let result = apply(&node, &at);
-                    let (mp, cm) = at.split_once(',').unwrap_or((&at, ""));
+                    let to = crate::state::Pair::of_pin_key(&at).unwrap_or_default();
                     let mut m = moves.lock().unwrap_or_else(|e| e.into_inner());
-                    let answer = follow.answer(&mut m.report, &node, (mp, cm), "", result);
+                    let answer = follow.answer(&mut m.report, &node, (to.work.as_str(), to.main.as_str()), "", result);
                     m.not_before.remove(&node);
                     match answer {
                         Answer::Applied => { m.moved.insert(node.clone(), at.clone()); }
@@ -405,6 +443,7 @@ pub fn start(control_socket: PathBuf, say_waits: SayWaits, pin_of: PinOf) {
                 interval_s = conf.interval_s;
                 if !conf.enabled {
                     follow.waits().keep(&[]);
+                    set_held(BTreeMap::new());
                     return Ok(());
                 }
                 if conf.repo.as_os_str().is_empty() {
@@ -417,16 +456,31 @@ pub fn start(control_socket: PathBuf, say_waits: SayWaits, pin_of: PinOf) {
                 };
                 if nodes.is_empty() {
                     follow.waits().keep(&[]);
+                    set_held(BTreeMap::new());
                     return Ok(());
                 }
                 let status = ask_local(&c, "nodes", "nodes").unwrap_or_default();
-                let (todo, idle, deploys) = nodes_to_apply(&nodes, &status, &format!("{},{}", shas.0, shas.1));
+                let (todo, idle, deploys) = nodes_to_apply(&nodes, &status, &crate::state::Pair::new(&shas.0, &shas.1).pin_key());
+                let users = user_wms(&status);
                 // a node a timed ask pinned moves to its pin ([`follow_pins`]), or holds it until
-                // the ask starts
+                // the ask starts; the user's WM node moves to the newest proven tip, or holds
                 let mut pinned: Vec<String> = Vec::new();
+                let mut proven: BTreeMap<String, String> = BTreeMap::new();
+                let mut holding: BTreeMap<String, String> = BTreeMap::new();
                 let todo: Vec<String> = todo.into_iter().filter(|n| {
                     let deploy = deploys.get(n).map_or("", String::as_str);
                     match deploy_to(pin_of(n), deploy, |d, a| super::deploy_has(&conf.repo, d, a)) {
+                        DeployTo::Tips if users.contains(n) => match proven_move(&home, &conf.repo, deploy) {
+                            Ok(at) => {
+                                proven.insert(n.clone(), at);
+                                true
+                            }
+                            Err(why) => {
+                                report.say(n, why.clone());
+                                holding.insert(n.clone(), why);
+                                false
+                            }
+                        },
                         DeployTo::Tips => true,
                         DeployTo::Pin(_) => {
                             pinned.push(n.clone());
@@ -435,6 +489,7 @@ pub fn start(control_socket: PathBuf, say_waits: SayWaits, pin_of: PinOf) {
                         DeployTo::Held { .. } => false,
                     }
                 }).collect();
+                set_held(holding);
                 // at the tips, held at a pin, or no longer followed: its apply waits for nothing
                 follow.waits().keep(&todo.iter().chain(pinned.iter()).cloned().collect::<Vec<_>>());
                 let suits = |n: &String| conf.prewarm && idle.get(n).copied().unwrap_or(false);
@@ -451,8 +506,14 @@ pub fn start(control_socket: PathBuf, say_waits: SayWaits, pin_of: PinOf) {
                     let next = (0..nodes.len()).map(|i| &nodes[(first + i) % nodes.len()]).find(|n| todo.contains(n));
                     next.map(|n| vec![n.clone()]).into_iter().collect()
                 };
+                // a user's WM node goes alone, to its proven tip
+                let batches: Vec<(Vec<String>, Option<String>)> = batches.into_iter().flat_map(|batch| {
+                    let (own, rest): (Vec<String>, Vec<String>) = batch.into_iter().partition(|n| proven.contains_key(n));
+                    let own: Vec<(Vec<String>, Option<String>)> = own.into_iter().map(|n| { let at = proven.get(&n).cloned(); (vec![n], at) }).collect();
+                    own.into_iter().chain((!rest.is_empty()).then_some((rest, None)))
+                }).collect();
                 let extra = landed.map_or(String::new(), |ms| format!(" landed={ms}"));
-                for batch in batches {
+                for (batch, at) in batches {
                     // a timed ask that got first in line since the round began: its pin's
                     let batch: Vec<String> = batch.into_iter().filter(|n| pin_of(n).is_none()).collect();
                     if batch.is_empty() {
@@ -461,13 +522,15 @@ pub fn start(control_socket: PathBuf, say_waits: SayWaits, pin_of: PinOf) {
                     last_node = batch.last().cloned();
                     let prewarm = batch.iter().all(|n| suits(n));
                     let mut lines = BTreeMap::<String, Vec<String>>::new();
-                    let code = push_and_apply(&c, &conf.repo, "work", Some("main"), None, &batch, "on", "auto", prewarm, &extra, &mut |n, l| lines.entry(n.to_string()).or_default().push(l.to_string()));
+                    let code = push_and_apply(&c, &conf.repo, "work", Some("main"), at.as_deref(), &batch, "on", "auto", prewarm, &extra, &mut |n, l| lines.entry(n.to_string()).or_default().push(l.to_string()));
+                    let to = at.as_deref().and_then(crate::state::Pair::of_pin_key).unwrap_or_else(|| crate::state::Pair::new(&shas.0, &shas.1));
+                    let to = (to.work.as_str(), to.main.as_str());
                     for node in &batch {
                         let mine = lines.remove(node).unwrap_or_default();
                         // a batch's exit code is every node's: one node's is its own error lines
                         let code = if batch.len() == 1 { code } else { mine.iter().any(|l| l.starts_with("{\"err\":")) as i32 };
                         let after = landed.map_or(String::new(), |ms| format!(" ({} ms after the landing)", proto::wall_ms().saturating_sub(ms)));
-                        waiting |= follow.answer(&mut report, node, (&shas.0, &shas.1), &after, apply_result(code, &mine)) == Answer::Waits;
+                        waiting |= follow.answer(&mut report, node, to, &after, apply_result(code, &mine)) == Answer::Waits;
                     }
                 }
                 Ok(())
@@ -512,8 +575,9 @@ mod tests {
 
     #[test]
     fn deployment_follows_tips_while_the_work_tree_is_held() {
-        let tips = format!("{},{}", "a".repeat(40), "c".repeat(40));
-        let old = format!("{},{}", "b".repeat(40), "d".repeat(40));
+        let tips = crate::state::Pair::new(&"a".repeat(40), &"c".repeat(40)).pin_key();
+        let old = crate::state::Pair::new(&"b".repeat(40), &"d".repeat(40)).pin_key();
+        assert_eq!(tips, format!("{},commercial={}", "a".repeat(40), "c".repeat(40)), "the tips in a node's caps' form");
         let status = |node: &str, deploy: &str, tree: &str, leases: u32, user: bool| {
             let caps = crate::lease::Caps { deploy: deploy.into(), tree: tree.into(), cores: 16, ram_gb: 64.0, ram_avail_gb: 40.0, ..Default::default() };
             format!("{{\"node\":\"{node}\",\"up\":true,\"dev\":true,\"leases\":{leases},\"user\":{user},\"caps\":{}}}", caps.to_json())
@@ -541,8 +605,8 @@ mod tests {
             applied: Mutex::new(Applied { path: dir.join("autosync.state"), revs: BTreeMap::new(), dirty: false }),
         };
         let moves = Mutex::new(PinMoves::default());
-        let (pin, later) = (format!("{},{}", "a".repeat(40), "c".repeat(40)), format!("{},{}", "b".repeat(40), "c".repeat(40)));
-        let revs = |at: &str| at.split_once(',').map(|(m, c)| (m.to_string(), c.to_string())).unwrap();
+        let (pin, later) = (format!("{},commercial={}", "a".repeat(40), "c".repeat(40)), format!("{},commercial={}", "b".repeat(40), "c".repeat(40)));
+        let revs = |at: &str| crate::state::Pair::of_pin_key(at).map(|p| (p.work, p.main)).unwrap();
         let on = || follow.waits().on.contains("node-a");
         let (order_tx, order_rx) = std::sync::mpsc::channel::<String>();
         let (answer_tx, answer_rx) = std::sync::mpsc::channel::<Result<(String, String), String>>();
@@ -626,5 +690,29 @@ mod tests {
         assert_eq!(c.repo, repo);
         assert_eq!(c.interval_s, 30);
         assert_eq!(c.nodes, Some(Vec::new()));
+    }
+
+    #[test]
+    fn the_users_wm_node_moves_to_the_newest_proven_tip_and_says_why_it_holds() {
+        let line = |node: &str, role: crate::lease::Role| format!("{{\"node\":\"{node}\",\"up\":true,\"caps\":{}}}", crate::lease::Caps { role: Some(role), ..Default::default() }.to_json());
+        let status = [line("box-wm", crate::lease::Role::UserWm), line("box-pool", crate::lease::Role::Pool), "{\"node\":\"box-new\",\"caps\":null}".to_string()];
+        assert_eq!(user_wms(&status), BTreeSet::from(["box-wm".to_string()]));
+        let home = std::env::temp_dir().join(format!("devhub-autosync-proven-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let at = |c: char| format!("{},commercial={}", c.to_string().repeat(40), "f".repeat(40));
+        let row = |c: char, failing: &str| {
+            let (w, m) = (c.to_string().repeat(40), "f".repeat(40));
+            format!("{{\"bucket\":\"fast\",\"tip\":{{\"work\":\"{w}\",\"main\":\"{m}\"}},\"started_ms\":1,\"failing\":[{failing}],\"passed\":[],\"log\":\"l-{c}\"}}\n")
+        };
+        // (no checkout: a deployment holds only the tip it is at)
+        let none = Path::new("/nonexistent-devhub-repo");
+        std::fs::write(home.join("buckets.jsonl"), row('a', "") + &row('b', "") + &row('c', "\"check pkg-x\"")).unwrap();
+        assert_eq!(proven_move(&home, none, &at('a')), Ok(at('b')), "b proven, c has a new red unit");
+        let held = proven_move(&home, none, &at('b')).unwrap_err();
+        let (b, c, f) = ("b".repeat(10), "c".repeat(10), "f".repeat(10));
+        assert!(held.starts_with(&format!("held at {b},{f}: tip {c},{f} has check pkg-x failing")) && held.ends_with("(log l-c)"), "{held}");
+        assert_eq!(proven_move(&home, none, ""), Ok(at('c')), "a box new to the rule starts at the newest run");
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

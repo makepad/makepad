@@ -37,7 +37,7 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N] [
   job inspect <id> <cmd..> | job resume <id> <P1> retry|restart|unwind | job release <id>
                                           a job paused on a parked panic keeps its box: look, resume or let go
                                           (while the panic stays parked; 10 min with no action release it)
-  live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--env K=V ..] [--bin B] [-- args...]
+  live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--cores N] [--env K=V ..] [--bin B] [-- args...]
         [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key]
                                           the app under the JIT on a box (headless, or visible on a screen box), held
                                           for this lane: every file saved in this worktree ships to it as it comes and
@@ -91,6 +91,9 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N] [
   lane live <name> on|off                 the manager's mark: the user waits for this lane. Its landings take the
                                           fast path (clean merge + check of the changed app, ahead of the queue; the
                                           boot at `devhub show`, the tests after landing)
+  lane first <name>.. on | [<name>..] off  the user's priority now: these lanes' leases go first, ahead of every
+                                          other lane's and of the land queue's, at interactive priority (a box's
+                                          hub build still heads its box); `lane first off` clears every lane's
   lane adopt                              register the existing live worktrees; list the landed ones (removes nothing)
   lane audit [--json]                     every worktree under the lanes root: landed (or on a retired chain),
                                           unlanded commits, uncommitted and untracked files, by class (removes nothing)
@@ -391,7 +394,15 @@ fn job_req(words: &[String], base: &[(String, String)]) -> Result<String, String
         return Err("no command (`-- cmd...`)".into());
     }
     let get = |k: &str| f.iter().rev().find(|(x, _)| x == k).map(|(_, v)| v.clone());
-    let lane = get("lane").or_else(|| std::env::var("DEVHUB_LANE").ok().filter(|l| !l.is_empty())).or_else(|| tree().and_then(|t| t.file_name().map(|n| n.to_string_lossy().to_lowercase()))).unwrap_or_default();
+    // (where the lane came from goes with it: the master says it with the queued job)
+    let (lane, lane_from) = match (get("lane"), std::env::var("DEVHUB_LANE").ok().filter(|l| !l.is_empty())) {
+        (Some(l), _) => (l, "--lane".to_string()),
+        (None, Some(l)) => (l, "DEVHUB_LANE".to_string()),
+        (None, None) => match tree() {
+            Some(t) => (t.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default(), format!("the worktree {}", t.display())),
+            None => (String::new(), String::new()),
+        },
+    };
     let after: Vec<String> = get("after").map(|a| a.split(',').filter(|x| !x.is_empty()).map(|x| json_str(x)).collect()).unwrap_or_default();
     let tree = get("tree").is_some();
     let whole = get("whole").is_some();
@@ -415,9 +426,11 @@ fn job_req(words: &[String], base: &[(String, String)]) -> Result<String, String
         Some(p) => p.parse::<i32>().map_err(|_| "--prio takes a number")?.to_string(),
         None => crate::lease::sched::DEFAULT_PRIO.to_string(),
     };
-    let loader = if crate::lease::loaders::cargo_run_args(&cmd).is_some() { get("loader").unwrap_or_default() } else { String::new() };
+    // `--jit` goes with any command: the run's MAKEPAD_LOADER, held for it on its box (it went
+    // only with a JIT cargo run, and a script's `--jit` was dropped here unsaid, 11-07)
+    let loader = get("loader").unwrap_or_default();
     Ok(format!(
-        "{{\"loader\":{},\"priority\":{},\"cost\":{},\"est_min\":{est_min},\"cores\":{cores},\"ram_gb\":{ram_gb},\"whole\":{whole},\"class\":{},\"tree\":{tree},\"kind\":{},\"needs\":{},\"node\":{},\"prio\":{prio},\"lane\":{},\"agent\":{},\"native\":{},\"cmd\":[{}],\"after\":[{}]}}",
+        "{{\"loader\":{},\"priority\":{},\"cost\":{},\"est_min\":{est_min},\"cores\":{cores},\"ram_gb\":{ram_gb},\"whole\":{whole},\"class\":{},\"tree\":{tree},\"kind\":{},\"needs\":{},\"node\":{},\"prio\":{prio},\"lane\":{},\"lane_from\":{},\"agent\":{},\"native\":{},\"cmd\":[{}],\"after\":[{}]}}",
         json_str(&loader),
         json_str(&priority),
         json_str(&cost),
@@ -426,6 +439,7 @@ fn job_req(words: &[String], base: &[(String, String)]) -> Result<String, String
         json_str(&get("needs").unwrap_or_default()),
         json_str(&get("node").unwrap_or_default()),
         json_str(&lane),
+        json_str(&lane_from),
         json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()),
         json_str(&get("native").unwrap_or_default()),
         cmd.iter().map(|x| json_str(x)).collect::<Vec<_>>().join(","),
@@ -642,6 +656,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
         ["start", app, rest @ ..] => {
             let (mut needs, mut visible, mut lane, mut node) = (String::new(), false, None::<String>, String::new());
             let (mut use_tree, mut cost, mut est_min, mut class) = (false, String::new(), "null".to_string(), String::new());
+            let mut cores = "null".to_string();
             let mut priority = "interactive";
             let mut loader = None;
             let (mut test, mut test_args, mut selected) = (false, Vec::new(), false);
@@ -678,6 +693,11 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
                         let Some(n) = n.parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.0) else { eprintln!("--est-min is a nonnegative number"); return 2 };
                         est_min = n.to_string(); i += 1;
                     }
+                    // the cores it asks, past its class's measure (a session's median: `Sched::measured_cores`)
+                    ("--cores", Some(n)) => {
+                        let Some(n) = n.parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0) else { eprintln!("--cores is a positive number"); return 2 };
+                        cores = n.to_string(); i += 1;
+                    }
                     ("--test", next) if !test && next.is_none_or(|a| a.starts_with('-')) => test = true,
                     // without --test, `--bin` runs that bin: it ran the bin's unit tests, none, and
                     // looked like a success that did nothing (11-04)
@@ -693,7 +713,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
                     }
                     ("--", _) => { test_args.extend_from_slice(&rest[i..]); break; }
                     (w, _) => {
-                        eprintln!("makepad devhub live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--env K=V ..] [--bin B] [--test [--lib|--bin B|--test T]] [-- args...]: invalid `{w}`");
+                        eprintln!("makepad devhub live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--cores N] [--env K=V ..] [--bin B] [--test [--lib|--bin B|--test T]] [-- args...]: invalid `{w}`");
                         return 2;
                     }
                 }
@@ -709,7 +729,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
             };
             let lane = lane.or_else(|| std::env::var("DEVHUB_LANE").ok().filter(|l| !l.is_empty())).unwrap_or_else(|| tree.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default());
             let loader = loader.unwrap_or_default();
-            let req = format!("{{\"loader\":{},\"priority\":{},\"cost\":{},\"class\":{},\"est_min\":{est_min},\"tree\":{use_tree},\"app\":{},\"repo_dir\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"visible\":{visible},\"test\":{test},\"test_args\":[{}],\"env\":[{}],\"also\":[{}]}}", json_str(&loader), json_str(priority), json_str(&cost), json_str(&class), json_str(app), json_str(&tree.to_string_lossy()), json_str(&lane), json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()), json_str(&needs), json_str(&node), test_args.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","), env.join(","), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","));
+            let req = format!("{{\"loader\":{},\"priority\":{},\"cost\":{},\"class\":{},\"est_min\":{est_min},\"cores\":{cores},\"tree\":{use_tree},\"app\":{},\"repo_dir\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"visible\":{visible},\"test\":{test},\"test_args\":[{}],\"env\":[{}],\"also\":[{}]}}", json_str(&loader), json_str(priority), json_str(&cost), json_str(&class), json_str(app), json_str(&tree.to_string_lossy()), json_str(&lane), json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()), json_str(&needs), json_str(&node), test_args.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","), env.join(","), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","));
             done(retry_master(|| one(c, "live", &format!("live start {req}"))), json, &flat)
         }
         ["act", id, cmd @ ..] if !cmd.is_empty() => done(one(c, "live", &format!("{lv} act {id} {}", makepad_remote::app::typed_line(&cmd.iter().map(|w| w.to_string()).collect::<Vec<_>>()))), json, &|v| {
@@ -849,11 +869,15 @@ fn shows(c: &Client, all: bool, json: bool) -> i32 {
             .map(|x| {
                 let ran = if x.started_ms == 0 { String::new() } else { format!(" {}s", (if x.ended_ms > 0 { x.ended_ms } else { crate::proto::wall_ms() }).saturating_sub(x.started_ms) / 1000) };
                 let panic = x.panic.as_ref().map_or(String::new(), |p| format!(" panic {}: {} at {}", p.id, p.message, p.location));
-                let wait = if x.state == "waiting" { format!(" for {}", x.cond.describe()) } else { String::new() };
+                let wait = if x.state == "waiting" && x.cond != crate::state::Cond::None { format!(" for {}", x.cond.describe()) } else { String::new() };
                 let pinned = if x.pinned { " PINNED" } else { "" };
                 let args = if x.args.is_empty() { String::new() } else { format!(" args={}", x.args.join(" ")) };
                 let stages = if x.stages.is_empty() { String::new() } else { format!("\n           stages: {}", x.stages) };
-                format!("{:<10} {:<24} {}{pinned}{wait}{args} pid={} sha={}{ran}{panic}{}{stages}\n", x.device, x.app, x.state, x.pid, super::short(&x.sha), if x.note.is_empty() { String::new() } else { format!(" ({})", x.note) })
+                // a show that takes only proven tips: why it stays where it is
+                let held = if x.held.is_empty() || !x.active() { String::new() } else { format!("\n           {}", x.held) };
+                // landed edits its JIT holds for the person's restart: its sha is not all it runs
+                let restart = if x.restart.is_empty() || !x.active() { String::new() } else { format!("\n           {}", x.restart) };
+                format!("{:<10} {:<24} {}{}{pinned}{wait}{args} pid={} sha={}{ran}{panic}{}{held}{restart}{stages}\n", x.device, x.app, x.state, if x.held.is_empty() || !x.active() { "" } else { " HELD" }, x.pid, super::short(&x.sha), if x.note.is_empty() { String::new() } else { format!(" ({})", x.note) })
             })
             .collect()
     })
@@ -965,6 +989,10 @@ fn lane(c: &Client, words: &[&str], json: bool) -> i32 {
             format!("{name} stopped: {n} lease(s) ended\n")
         }),
         ["live", name, on @ ("on" | "off")] => done(one(c, "lane", &format!("lane live {name} {on}")), json, &flat),
+        ["first", rest @ ..] if matches!(rest.last(), Some(&("on" | "off"))) => done(one(c, "lane", &format!("lane first {}", rest.join(" "))), json, &|v| {
+            let names: Vec<&str> = v.get("first").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|n| n.as_str()).collect();
+            if names.is_empty() { "no lane goes first\n".to_string() } else { format!("first: {}\n", names.join(" ")) }
+        }),
         ["quiet"] => done(one(c, "lane", "lane quiet"), json, &|v| v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string()),
         ["offers"] => done(one(c, "lane", "lane offers"), json, &|v| {
             let rows: Vec<String> = v.get("lanes").and_then(|l| l.as_arr()).unwrap_or(&[]).iter().map(|l| {
@@ -1201,6 +1229,8 @@ mod tests {
         let v = makepad_strict_json::parse(r.as_bytes()).unwrap();
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
         assert_eq!((s("kind"), s("lane")), ("test".to_string(), "l1".to_string()));
+        // where the lane came from goes with it (the master says it with the queued job)
+        assert_eq!(s("lane_from"), "--lane");
         assert_eq!(v.get("after").unwrap().to_json(), "[\"@1\",\"J4\"]");
         assert_eq!(v.get("cmd").unwrap().to_json(), "[\"cargo\",\"test\",\"-p\",\"x\"]");
         // a line without flags is all command
@@ -1211,6 +1241,11 @@ mod tests {
         // a flag's value is never the separator or the next flag
         assert_eq!(job_req(&words_of("--node m1 --needs -- cargo test"), &base), Err("--needs needs a value".to_string()));
         assert_eq!(submit_flags(&words_of("--needs -- cargo test")).0, Vec::<(String, String)>::new());
+        // `--jit` goes with a script too: its run's $MAKEPAD_LOADER
+        let r = job_req(&words_of("--jit 0123456789abcdef01234567 -- bash zz/x.sh"), &base).unwrap();
+        assert!(r.contains("\"loader\":\"0123456789abcdef01234567\""), "{r}");
+        let (common, ..) = submit_flags(&words_of("--jit 0123456789abcdef01234567 -- bash zz/x.sh"));
+        assert!(job_req(&words_of("bash zz/x.sh"), &common).unwrap().contains("\"loader\":\"0123456789abcdef01234567\""));
     }
 
     #[test]

@@ -270,7 +270,13 @@ pub struct Train {
     paused: Mutex<String>,
     /// a hand-in came: look now
     kicked: AtomicBool,
+    /// told each landing's pairs (the checkout's, the landing's) under the fast-forward lock, just
+    /// before the checkout moves: the Mac's shows hold what reaches them until the tip is proven
+    before_ff: Mutex<Option<BeforeFf>>,
 }
+
+/// [`Train::before_ff`]'s hook: (the checkout's pair now, the pair it moves to).
+pub type BeforeFf = Arc<dyn Fn(&crate::state::Pair, &crate::state::Pair) + Send + Sync>;
 
 /// The open entries by state, for a glance (the menu bar).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -291,6 +297,11 @@ impl Train {
         let (list, paused) = self.store().read(|d| (d.land.iter().filter_map(|v| Entry::parse(&v.to_json())).collect::<Vec<_>>(), d.land_paused.clone()));
         *self.st.lock().unwrap() = list;
         *self.paused.lock().unwrap() = paused;
+    }
+
+    /// Runs `hook` before each fast-forward of the checkout ([`BeforeFf`]).
+    pub fn before_ff(&self, hook: BeforeFf) {
+        *self.before_ff.lock().unwrap() = Some(hook);
     }
 
     /// Why the train is paused; None while it runs.
@@ -570,6 +581,10 @@ impl Train {
                 self.set(e.id, |e| {
                     e.state = St::Landed;
                     e.landed = format!("work {w0} main {m0}");
+                    // it moved nothing: what was just before is what it landed, so no bucket names
+                    // it for what a range broke (a re-land of a landed branch was named for a
+                    // warning in a file it never touched, 11-06)
+                    e.pre = e.landed.clone();
                     e.detail.clear();
                 }, Some((Sev::Info, format!("land landed {} ({why})", e.label()))));
                 continue;
@@ -671,6 +686,12 @@ impl Train {
         if !over.is_empty() {
             return wait(format!("the user's uncommitted files the ff would touch: {}", over.join(" ")));
         }
+        if tm != w || tc != m {
+            let hook = self.before_ff.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(&crate::state::Pair::new(&w, &m), &crate::state::Pair::new(&tm, &tc));
+            }
+        }
         if tm != w && !git(r, &["merge", "-q", "--ff-only", &tm]).0 {
             return wait("ff of work failed (nothing landed)".into());
         }
@@ -741,6 +762,7 @@ pub fn register(ep: &makepad_remote::Endpoint, machine: &str, publish: Publish) 
         clock: crate::proto::wall_ms,
         paused: Mutex::new(String::new()),
         kicked: AtomicBool::new(false),
+        before_ff: Mutex::new(None),
     });
     t.load();
     let t2 = t.clone();
@@ -843,6 +865,7 @@ mod tests {
             clock: crate::proto::wall_ms,
             paused: Mutex::new(String::new()),
             kicked: AtomicBool::new(false),
+            before_ff: Mutex::new(None),
         })
     }
 
@@ -889,6 +912,13 @@ mod tests {
         let exe = Path::new("/usr/bin/true");
         let events = Arc::new(Mutex::new(Vec::new()));
         let t = train(&home, &r, exe, events.clone());
+        // each landing tells its pairs before the checkout moves (the Mac's shows hold first)
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let (told2, r2) = (told.clone(), r.clone());
+        t.before_ff(Arc::new(move |from: &crate::state::Pair, to: &crate::state::Pair| {
+            assert_eq!(rev(&r2, "refs/heads/work").as_deref(), Some(from.work.as_str()), "told before the fast-forward");
+            told2.lock().unwrap().push((from.clone(), to.clone()));
+        }));
         let ask = |line: &str| {
             let mut out = Vec::new();
             t.serve(line, &mut out);
@@ -913,6 +943,10 @@ mod tests {
         assert!(is_ancestor(&r, &rev(&r, "rc-x").unwrap(), &work) && is_ancestor(&r, &rev(&r, "rc-y").unwrap(), &work));
         assert!(is_ancestor(&c, &rev(&c, "rc-y").unwrap(), &rev(&c, "refs/heads/main").unwrap()));
         assert!(r.join("x").exists() && r.join("y").exists() && c.join("sy").exists());
+        let told = told.lock().unwrap().clone();
+        assert_eq!(told.len(), 3, "rc-x, rc-y and rc-bad: {told:?}");
+        assert!(told.windows(2).all(|w| w[0].1 == w[1].0), "each from the last one's tip: {told:?}");
+        assert_eq!(told.last().map(|t| t.1.work.clone()), Some(work.clone()));
         // nothing changed: the conflict waits for its branch to move, the held entry for its unhold
         assert!(!t.start_ready());
         // the queue survives a restart
@@ -941,6 +975,13 @@ mod tests {
         }
         assert!(ask("drop rc-z")[0].contains("ok"));
         assert_eq!(ask("status all").len(), 4);
+        // a branch already in work lands nothing: it is just before what it landed
+        g(&r, &["branch", "rc-in", "work"]);
+        assert!(ask("add rc-in")[0].contains("\"id\":6"));
+        t.start_ready();
+        let e = st("rc-in");
+        assert_eq!((e.state, e.pre.clone()), (St::Landed, e.landed.clone()), "{e:?}");
+        assert!(!e.landed.is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

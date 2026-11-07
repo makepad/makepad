@@ -29,6 +29,8 @@ pub struct JitRow {
     pub code_mb: Option<f64>,
     pub panics: u32,
     pub restart_pending: u32,
+    /// the oldest of them, as its JIT says it (empty: a JIT before it says none)
+    pub restart_first: String,
     /// its binary was rebuilt since it started
     pub exe_replaced: bool,
     /// (kind, line, age s), newest first
@@ -83,10 +85,18 @@ impl JitRow {
     pub fn stale(&self) -> Option<String> {
         match (self.exe_replaced, self.restart_pending) {
             (true, _) => Some("binary rebuilt: restart to run it".into()),
-            (false, n) if n > 0 => Some(format!("{n} edits wait for a restart")),
+            (false, n) if n > 0 && self.restart_first.is_empty() => Some(format!("{n} edits wait for a restart")),
+            (false, n) if n > 0 => Some(format!("{n} edits wait for a restart (first: {})", pending_said(&self.restart_first))),
             _ => None,
         }
     }
+}
+
+/// What an edit that waits for a restart is, without the JIT's how-to (`; restart `makepad run
+/// ..` ..`, `; needs a JIT rebuild: ..`): the files and why they cannot apply live.
+pub fn pending_said(why: &str) -> String {
+    let what = ["; restart `", "; needs a JIT rebuild"].iter().filter_map(|cut| why.find(cut)).min().map_or(why, |at| &why[..at]);
+    crate::proto::clean(what, 200)
 }
 
 /// Unknown fields stay unknown when an older hub or an incomplete probe cannot report them.
@@ -223,6 +233,7 @@ pub fn parse_ps(name: &str, lines: &[String]) -> MachineRow {
                 code_mb: v.get("code_mb").filter(|x| !x.is_null()).map(|_| num(&v, "code_mb")),
                 panics: num(&v, "panics") as u32,
                 restart_pending: num(&v, "restart_pending") as u32,
+                restart_first: text(&v, "restart_first"),
                 exe_replaced: v.get("exe_replaced").and_then(|x| x.as_bool()).unwrap_or(false),
                 recent: v.get("recent").and_then(|a| a.as_arr()).map_or_else(Vec::new, |a| a.iter().map(|e| (text(e, "kind"), text(e, "line"), num(e, "age_s") as u64)).collect()),
             });

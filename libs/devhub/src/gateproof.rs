@@ -152,14 +152,21 @@ impl Store {
 
 /// Input keys do not need the proof ledger.
 pub(crate) fn keys(repo: &Path, pair: &Pair, units: &[String]) -> BTreeMap<String, Option<String>> {
-    let mut keys: BTreeMap<String, Option<String>> = units.iter().map(|u| (u.clone(), None)).collect();
+    blame_keys(repo, pair, units).into_iter().map(|(unit, k)| (unit, k.map(|(key, _)| key))).collect()
+}
+
+/// Each unit's key and its key without the gate's scripts ([`GATE_SCRIPTS`]): a landing that moved
+/// only the first changed the gate every unit runs under, not the unit's own inputs.
+pub(crate) fn blame_keys(repo: &Path, pair: &Pair, units: &[String]) -> BTreeMap<String, Option<(String, String)>> {
+    let mut keys: BTreeMap<String, Option<(String, String)>> = units.iter().map(|u| (u.clone(), None)).collect();
     if units.is_empty() { return keys; }
     let Ok(tree) = Tree::at(repo, pair) else { return keys };
     let dirs = package_dirs(&tree);
     let Ok(digests) = digests(repo, &tree, &dirs, units, false) else { return keys };
     for (unit, key) in &mut keys {
         let Some(app) = app_unit(&dirs, unit) else { continue };
-        *key = key_digest(&tree, &app.dir, unit, digests.of(&app, Os::Linux));
+        let digest = digests.of(&app, Os::Linux);
+        *key = key_text(&tree, &app.dir, unit, digest, true).zip(key_text(&tree, &app.dir, unit, digest, false));
     }
     keys
 }
@@ -179,10 +186,20 @@ fn digests(repo: &Path, tree: &Tree, dirs: &BTreeMap<String, String>, units: &[S
     Digests::with_lock(tree, &apps, lock)
 }
 
+/// The gate's scripts: in every unit's key, as a proof holds for the gate that ran it.
+const GATE_SCRIPTS: [&str; 2] = ["tools/run/fixture/land_gate.sh", "tools/run/fixture/affected.py"];
+
 fn key_digest(tree: &Tree, dir: &str, unit: &str, digest: &str) -> Option<String> {
+    key_text(tree, dir, unit, digest, true)
+}
+
+/// A unit's key, with the gate's scripts (`gate`) or without.
+fn key_text(tree: &Tree, dir: &str, unit: &str, digest: &str, gate: bool) -> Option<String> {
     if digest.is_empty() { return None; }
     let mut text = format!("gate-proof-v1\n{unit}\n{digest}\nCargo.toml {}\n", tree.blob("Cargo.toml")?);
-    for path in [".cargo/config.toml", "tools/run/fixture/land_gate.sh", "tools/run/fixture/affected.py", &format!("{dir}/Cargo.lock")] {
+    let lock = format!("{dir}/Cargo.lock");
+    let paths = std::iter::once(".cargo/config.toml").chain(GATE_SCRIPTS.into_iter().filter(|_| gate)).chain(std::iter::once(lock.as_str()));
+    for path in paths {
         text.push_str(&format!("{path} {}\n", tree.blob(path).unwrap_or("-")));
     }
     Some(makepad_ci_merge::sha256(text.as_bytes()))
@@ -200,4 +217,19 @@ fn same_config(repo: &Path, tree: &Tree, work: &str) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    /// A unit's key holds the gate's scripts (a proof holds for the gate that ran it); the key of
+    /// its own inputs does not.
+    #[test]
+    fn a_units_own_key_leaves_the_gate_scripts_out() {
+        let tree = |gate: &str| super::Tree::mem(vec![("Cargo.toml", "[workspace]\n"), ("tools/run/fixture/land_gate.sh", gate), ("a/Cargo.lock", "x\n")]);
+        let (one, two) = (tree("echo 1\n"), tree("echo 2\n"));
+        let key = |t: &super::Tree, gate: bool| super::key_text(t, "a", "tests a", "d1", gate).unwrap();
+        assert_ne!(key(&one, true), key(&two, true));
+        assert_eq!(key(&one, false), key(&two, false));
+        assert_eq!(super::key_digest(&one, "a", "tests a", "d1"), Some(key(&one, true)));
+    }
 }

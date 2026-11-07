@@ -9,6 +9,8 @@
 //! [`worktree`] per use. No other devhub code opens a repository (a test holds it to that).
 mod view;
 pub use view::Pass;
+#[cfg(feature = "checkout")]
+pub(crate) use view::store_state;
 
 use makepad_git::memory::MemoryAccount;
 use makepad_git::{refs, GitError, ObjectId, Repository, RepositoryPaths};
@@ -307,6 +309,46 @@ pub fn files_differing_under<'a>(dir: &Path, from: &str, to: &str, paths: impl I
     .flatten()
 }
 
+/// Every file that differs between commits `from` and `to` (`git diff --name-only from to`), for
+/// the repository of `dir`. None: a commit is not known here.
+pub fn files_differing(dir: &Path, from: &str, to: &str) -> Option<Vec<String>> {
+    with(dir, |p, repo| {
+        let f = resolve(p, repo, from)?;
+        let t = resolve(p, repo, to)?;
+        let (f, t) = (repo.read_commit(&f).ok()?.tree, repo.read_commit(&t).ok()?.tree);
+        if f == t { return Some(Vec::new()); }
+        let changes = repo.diff_trees(&f, &t).ok()?;
+        Some(changes.into_iter().map(|c| match c {
+            makepad_git::TreeChange::Added { path, .. } | makepad_git::TreeChange::Deleted { path, .. } | makepad_git::TreeChange::Modified { path, .. } => path,
+        }).collect())
+    })
+    .flatten()
+}
+
+/// The commit that last changed `path` in the history of `from`, as `<short id> <subject>` (`git
+/// log -1 --format='%h %s' from -- path`): down the parent whose `path` is the same (a merge's
+/// change came in from that side), to the commit no parent of which has it so. None: `path` is
+/// not in `from`'s tree, or a commit is not known here.
+pub fn last_touch(dir: &Path, from: &str, path: &str) -> Option<String> {
+    with(dir, |p, repo| {
+        let mut at = resolve(p, repo, from)?;
+        let mut commit = repo.read_commit(&at).ok()?;
+        let here = repo.entry_at(&commit.tree, path).ok().flatten()?;
+        loop {
+            let mut same = None;
+            for parent in commit.parents.clone() {
+                let c = repo.read_commit(&parent).ok()?;
+                if repo.entry_at(&c.tree, path).ok().flatten() == Some(here) { same = Some((parent, c)); break; }
+            }
+            match same {
+                Some((parent, c)) => (at, commit) = (parent, c),
+                None => return Some(format!("{} {}", &at.to_hex()[..10], commit.message.lines().next().unwrap_or("").trim())),
+            }
+        }
+    })
+    .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -530,6 +572,40 @@ mod tests {
         let read = super::with(&d, |_, repo| repo.read_stats().pack_bytes_read).unwrap();
         println!("SOAK peak {peak} MB, {} MB of the {} MB pack read", read >> 20, pack >> 20);
         assert!(peak < 512 && read < pack / 4, "peak {peak} MB, {read} bytes read: a pack was read whole");
+    }
+
+    /// The commit that last changed a file, as `git log -1 -- <file>` names it: through a merge,
+    /// the side commit that brought the change; and a diff's files, as `git diff --name-only`.
+    #[test]
+    fn names_the_commit_that_last_touched_a_file_as_git_log_does() {
+        let d = std::env::temp_dir().join(format!("devhub-gitread-touch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("tests/common")).unwrap();
+        g(&d, &["init", "-q", "-b", "work"]);
+        std::fs::write(d.join("tests/common/p.rs"), "fn model() {}\n").unwrap();
+        g(&d, &["add", "-A"]);
+        g(&d, &["commit", "-q", "-m", "first"]);
+        g(&d, &["checkout", "-q", "-b", "rc-lane"]);
+        std::fs::write(d.join("tests/common/p.rs"), "fn model() {}\nfn more() {}\n").unwrap();
+        g(&d, &["commit", "-q", "-am", "lane: a profile"]);
+        let side = g(&d, &["rev-parse", "HEAD"]);
+        g(&d, &["checkout", "-q", "work"]);
+        std::fs::write(d.join("other.rs"), "\n").unwrap();
+        g(&d, &["add", "-A"]);
+        g(&d, &["commit", "-q", "-m", "elsewhere"]);
+        g(&d, &["merge", "-q", "--no-ff", "-m", "Merge branch 'rc-lane' into work", "rc-lane"]);
+        let merged = g(&d, &["rev-parse", "HEAD"]);
+        std::fs::write(d.join("other.rs"), "fn x() {}\n").unwrap();
+        g(&d, &["commit", "-q", "-am", "later"]);
+        let tip = g(&d, &["rev-parse", "HEAD"]);
+        let before = crate::git_exec::on_this_thread();
+        assert_eq!(super::last_touch(&d, &tip, "tests/common/p.rs"), Some(format!("{} lane: a profile", &side[..10])));
+        assert_eq!(super::last_touch(&d, &tip, "other.rs").map(|t| t.ends_with(" later")), Some(true));
+        assert_eq!(super::last_touch(&d, &tip, "tests/common/gone.rs"), None, "not in the tree");
+        assert_eq!(super::files_differing(&d, &merged, &tip), Some(vec!["other.rs".to_string()]));
+        assert_eq!(super::files_differing(&d, &tip, &tip), Some(Vec::new()));
+        assert_eq!(crate::git_exec::on_this_thread(), before, "a read started git");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Devhub opens repositories only here: anything else would read packs whole again.

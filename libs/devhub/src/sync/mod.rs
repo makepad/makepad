@@ -95,8 +95,8 @@ pub fn autosync_covers(home: &std::path::Path, node: &str) -> bool {
 }
 
 /// Moves `node`'s tree to the tips of work and commercial main, with no build and no restart (a
-/// node the auto-sync does not follow: the self-update brings its code itself), or to `at`
-/// (`makepad,commercial`: a timed ask's pin). Returns the exit code and the node's lines.
+/// node the auto-sync does not follow: the self-update brings its code itself), or to `at` (a
+/// timed ask's pin, [`crate::state::Pair::pin_key`]). Returns the exit code and the node's lines.
 #[cfg(feature = "checkout")]
 pub fn push_tree(control: &makepad_remote::Client, repo: &std::path::Path, node: &str, at: Option<&str>) -> (i32, Vec<String>) {
     let mut lines = Vec::new();
@@ -104,11 +104,13 @@ pub fn push_tree(control: &makepad_remote::Client, repo: &std::path::Path, node:
     (code, lines)
 }
 
-/// Whether deployment `deploy` holds `at` (both `makepad,commercial`; the commercial checkout
-/// sits in `repo`'s apps/commercial): a move there would be none, or one back.
+/// Whether deployment `deploy` holds `at` (both pins' keys, [`crate::lease::Pin::key`]; each
+/// nested repository's checkout sits in `repo`'s apps/<name>): a move there would be none, or one
+/// back.
 pub fn deploy_has(repo: &std::path::Path, deploy: &str, at: &str) -> bool {
-    let (Some((dm, dc)), Some((am, ac))) = (deploy.split_once(','), at.split_once(',')) else { return false };
-    crate::gitread::is_ancestor(repo, am, dm) && crate::gitread::is_ancestor(&repo.join("apps/commercial"), ac, dc)
+    let (Some(d), Some(a)) = (crate::lease::Pin::parse(deploy), crate::lease::Pin::parse(at)) else { return false };
+    crate::gitread::is_ancestor(repo, &a.makepad, &d.makepad)
+        && a.nested.iter().all(|(name, sha)| d.nested.get(name).is_some_and(|has| crate::gitread::is_ancestor(&repo.join(crate::nested::dir(name)), sha, has)))
 }
 
 /// The node's bare store of `repo` (`~/devhub/git/<repo>.git`): where lease worktrees come from.
@@ -139,6 +141,18 @@ pub fn register_control(ep: &Endpoint, _hub: &makepad_remote::hub::Hub) {
     );
     #[cfg(not(feature = "checkout"))]
     let _ = ep;
+}
+
+/// Why the auto-sync holds `node`'s deployment where it is: a user's WM node, for a tip the fast
+/// bucket has not proven (None: it follows the tips, or moves).
+pub fn deploy_held(node: &str) -> Option<String> {
+    #[cfg(feature = "checkout")]
+    return autosync::held(node);
+    #[cfg(not(feature = "checkout"))]
+    {
+        let _ = node;
+        None
+    }
 }
 
 /// A landing happened (`landed_ms`): the master's auto-sync starts a round now.

@@ -1529,9 +1529,9 @@ const RETIRE_OFFER_MS: u64 = 6 * 3_600_000;
 
 /// `lane quiet`: for the manager's check-in, the live lanes that may be waiting on a run that is
 /// over (a watcher that stayed silent left two lanes idle, 11-04), the leases far over their
-/// measure whose agent went silent ([`crate::lease::master::LeaseMaster::silent_overdue`]), and
-/// the live sessions whose restart waited past 5 min ([`super::live::restarts_pending`]). Some
-/// just work on code. Then the lanes offered for retirement ([`retire_offers`]) and the parked
+/// measure whose agent went silent ([`crate::lease::master::LeaseMaster::silent_overdue`]), the
+/// live sessions whose restart waited past 5 min ([`super::live::restarts_pending`]) and the tests
+/// run's units far over their measure ([`crate::bucket::slow_units`]). Some just work on code. Then the lanes offered for retirement ([`retire_offers`]) and the parked
 /// ones, in one row.
 fn quiet(ctx: &Ctx) -> Result<String, String> {
     let lanes: Vec<LaneRec> = ctx.store.read(|d| d.lanes.iter().filter(|l| l.ended_ms == 0).cloned().collect());
@@ -1542,6 +1542,13 @@ fn quiet(ctx: &Ctx) -> Result<String, String> {
     // a lane busy with a lease far over its measure whose agent went silent, then the idle ones
     let mut rows = ctx.leases.silent_overdue(now);
     rows.extend(super::live::restarts_pending(ctx, now));
+    let (leases, nodes) = (ctx.leases.view(), ctx.leases.nodes());
+    let shard_box = |id: &str| {
+        let node = leases.iter().find(|l| l.id == id && !matches!(l.state, crate::lease::sched::State::Ended(_)))?.node.clone()?;
+        let caps = nodes.iter().find(|n| n.name == node).map(|n| (n.up, n.caps.as_ref()));
+        Some(crate::bucket::ShardBox { up: caps.is_some_and(|(up, _)| up), load: caps.and_then(|(_, c)| c).map_or(0.0, |c| c.load1), cores: caps.and_then(|(_, c)| c).map_or(0, |c| c.cores), node })
+    };
+    rows.extend(crate::bucket::slow_units(&ctx.home, now, &shard_box));
     let offers = offered(ctx, &lanes, &ended, &busy, now);
     let waiting: Vec<LaneRec> = lanes.iter().filter(|l| l.parked.is_empty() && !offers.iter().any(|o| o.name == l.name)).cloned().collect();
     rows.extend(quiet_lanes(&waiting, &ended, &busy, &landed, now));
@@ -1848,6 +1855,33 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
             let l = try_set(ctx, name, |l| l.waited = on)?.ok_or_else(|| format!("no live lane {name}"))?;
             event(ctx, Sev::Info, format!("lane {name}: {}", if on { "live: the user waits for it; its landings take the fast path (merge + check)" } else { "not live: its landings gate before landing" }), Some(&l));
             Ok(format!("{{\"name\":{},\"live\":{on}}}", json_str(name)))
+        }
+        // The user's priority now ("prioritise right now all the work on the source library
+        // app", 11-07): these lanes' leases go first. `lane first off` clears it for every lane.
+        "first" => {
+            let words: Vec<&str> = rest.split_whitespace().collect();
+            let (names, on) = match words.split_last() {
+                Some((&"on", names)) if !names.is_empty() => (names, true),
+                Some((&"off", names)) => (names, false),
+                _ => return Err("lane first <name>.. on | lane first [<name>..] off".into()),
+            };
+            if let Some(n) = names.iter().find(|n| ctx.store.read(|d| !d.lanes.iter().any(|l| l.name == **n && l.state == "live"))) {
+                return Err(format!("no live lane {n}"));
+            }
+            let changed = ctx.store.update(|d| {
+                let mut changed = Vec::new();
+                for l in d.lanes.iter_mut().filter(|l| l.state == "live" && l.first != on && (names.is_empty() || names.contains(&l.name.as_str()))) {
+                    l.first = on;
+                    changed.push(l.name.clone());
+                }
+                changed
+            })?;
+            let first: Vec<String> = ctx.store.read(|d| d.lanes.iter().filter(|l| l.state == "live" && l.first).map(|l| l.name.clone()).collect());
+            if !changed.is_empty() {
+                let now = if first.is_empty() { "no lane goes first now".to_string() } else { format!("first now: {}", first.join(" ")) };
+                event(ctx, Sev::Warn, format!("lane first {}: {} ({now})", if on { "on" } else { "off" }, changed.join(" ")), None);
+            }
+            Ok(format!("{{\"first\":[{}]}}", first.iter().map(|n| json_str(n)).collect::<Vec<_>>().join(",")))
         }
         "adopt" => adopt(ctx),
         "sweep" => match rest {

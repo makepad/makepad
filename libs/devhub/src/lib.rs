@@ -43,6 +43,7 @@ pub mod private_check;
 pub mod ci_merge;
 pub mod git_exec;
 pub mod gitread;
+pub mod nested;
 pub mod jitcache;
 mod jit_misses;
 pub mod state;

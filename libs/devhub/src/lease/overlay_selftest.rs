@@ -113,7 +113,8 @@ impl<'a> Rig<'a> {
         g(&repo, &["add", "."])?;
         let committed = commit(&repo, "committed edit")?;
         if import(&repo, lease)? != committed { return Err("fixture bundle imported a different commit".into()); }
-        let pin = Pin { makepad: Store::open("makepad")?.rev(git::SYNCED_REF).ok_or("selftest: box has no synced makepad pin")?, commercial: Store::open("commercial")?.rev(git::SYNCED_REF) };
+        let pin = Pin::at(&Store::open("makepad")?.rev(git::SYNCED_REF).ok_or("selftest: box has no synced makepad pin")?);
+        let pin = match Store::open(crate::state::PAIRED)?.rev(git::SYNCED_REF) { Some(c) => pin.with(crate::state::PAIRED, &c), None => pin };
         let lane = format!("overlay-selftest-{lease}");
         relaxgit::prepare(work, &lane, lease, &pin)?;
         let empty = makepad_strict_json::Value::Obj(Vec::new());
@@ -156,7 +157,7 @@ impl<'a> Rig<'a> {
             "base" | "build-env" => {}
             _ => return Err(format!("unknown case {case}")),
         }
-        let pin = Pin { makepad: sha.clone(), commercial: None };
+        let pin = Pin::at(&sha);
         let mut env = relaxgit::prepare(&self.work, lane, &self.lease, &pin)?;
         let (shipped, deleted) = super::ship::uncommitted(&tree, &pin)?;
         let bases = super::ship::bases_json(&tree, &pin, &shipped.iter().chain(&deleted).cloned().collect::<Vec<_>>())?;

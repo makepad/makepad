@@ -254,8 +254,11 @@ struct Half {
     tip_branch: &'static str,
 }
 
+/// (with the shared reader of the half's store and the store on a second look,
+/// [`crate::gitread::store_state`]: a lane's commits read as a bare IO error now and then, 11-07)
 fn unread_why(h: &Half, e: &makepad_git::GitError) -> String {
-    format!("its own commits do not read ({} at {}): {e}", h.branch, &h.head[..h.head.len().min(10)])
+    let at = makepad_git::repository_paths(&h.dir).ok().flatten().map_or_else(String::new, |p| crate::gitread::store_state(&p.common_dir, &h.head_id));
+    format!("its own commits do not read ({} at {}): {e}{at}", h.branch, &h.head[..h.head.len().min(10)])
 }
 
 /// A pair with a half whose last use did not read: that half failed, the other waits for it.
@@ -629,10 +632,13 @@ impl Lanes {
             // the lane's last use: its own newest commit (looked up when its head moved), a lease or
             // a job of it; a pair is as active as its busier half. A half whose commits do not read
             // has no last use this round: it fails (said, retried next round) and is never called
-            // dormant for it (a lane listed dormant is one the user may drop)
+            // dormant for it (a lane listed dormant is one the user may drop). A failed half's last
+            // use is read again, not taken from its record: a read that failed kept 0 there (11-07:
+            // a lane's commits read as an IO error once; the next round, its head unmoved, took that
+            // 0 and called the lane dormant)
             let active: Vec<Result<u64, String>> = unit.iter().zip(&prevs).map(|(h, p)| {
                 let name = h.branch.strip_prefix("rc-").unwrap_or(&h.branch);
-                let own = match p.as_ref().filter(|p| p.tip == h.head) {
+                let own = match p.as_ref().filter(|p| p.tip == h.head && !matches!(p.outcome, Outcome::Failed(_))) {
                     Some(p) => p.active_ms,
                     None => self.own_commit_ms(graphs, h)?,
                 };
@@ -1397,6 +1403,24 @@ mod tests {
         let moved = execs(&bot);
         assert!(matches!(f.result(&bot, "rc-fresh0"), Outcome::Merged(_)) && matches!(f.result(&bot, "rc-landed0"), Outcome::Landed));
         assert_eq!((execs(&bot), f.result(&bot, "rc-dirty0").word()), (0, "dirty"), "after {moved} for two merges");
+    }
+
+    #[test]
+    fn a_lane_whose_commits_did_not_read_is_read_again_not_called_dormant() {
+        let f = Fix::new("unread");
+        let wt = f.lane("a");
+        f.write(&wt, "a1.txt", "new\n");
+        let head = f.commit(&wt, "lane work");
+        // its commit's loose file away for one round: its own commits do not read
+        let loose = f.repo.join(".git").join("objects").join(&head[..2]).join(&head[2..]);
+        let aside = loose.with_extension("aside");
+        std::fs::rename(&loose, &aside).unwrap();
+        let bot = f.bot();
+        bot.pass(&f.w()).unwrap();
+        assert!(matches!(f.result(&bot, "rc-a"), Outcome::Failed(_)), "{:?}", bot.list());
+        std::fs::rename(&aside, &loose).unwrap();
+        bot.pass(&f.w()).unwrap();
+        assert_eq!(f.result(&bot, "rc-a"), Outcome::UpToDate, "{:?}", bot.list());
     }
 
     #[test]
