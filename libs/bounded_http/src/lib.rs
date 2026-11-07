@@ -534,8 +534,11 @@ impl Conn {
 
     /// Decide whether the connection can be kept alive after a response, and
     /// drain a small unread Length remainder if that is all that blocks it.
+    /// A request that closes its connection has what came of its body read
+    /// away first ([`Conn::drain_arrived`]).
     pub fn finish_request(&mut self, head: &mut Head) -> bool {
         if head.close {
+            self.drain_arrived(head);
             return false;
         }
         if head.body.consumed() {
@@ -560,6 +563,34 @@ impl Conn {
             }
             _ => false,
         }
+    }
+
+    /// Reads away what has come of an unread Length body, buffered or in the
+    /// socket, and waits for none of the rest: a connection that closes over
+    /// unread bytes closes with a reset ([`Conn::drain_remaining`]), so the
+    /// client may never read the response, while a body that has not come
+    /// (one that timed out) is not waited for again.
+    fn drain_arrived(&mut self, head: &mut Head) {
+        if head.continue_pending {
+            return;
+        }
+        let BodyState::Length { remaining, .. } = &mut head.body else { return };
+        let buffered = ((self.buf.len() - self.pos) as u64).min(*remaining);
+        self.consume(buffered as usize);
+        *remaining -= buffered;
+        if *remaining == 0 || self.stream.set_nonblocking(true).is_err() {
+            return;
+        }
+        let mut sink = [0u8; 16 * 1024];
+        while *remaining > 0 {
+            let want = (*remaining).min(sink.len() as u64) as usize;
+            match self.stream.read(&mut sink[..want]) {
+                Ok(n) if n > 0 => *remaining -= n as u64,
+                // the peer closed, or nothing more has come (WouldBlock)
+                _ => break,
+            }
+        }
+        let _ = self.stream.set_nonblocking(false);
     }
 
     pub fn write_resp(&mut self, is_head: bool, resp: &Resp) -> std::io::Result<()> {
@@ -1154,6 +1185,32 @@ mod tests {
         assert_eq!(parse_range(Some("bytes=a-b"), 100), RangeSpec::None);
         assert_eq!(parse_range(Some("bites=0-1"), 100), RangeSpec::None);
         assert_eq!(parse_range(Some("bytes=5-2"), 100), RangeSpec::None);
+    }
+
+    /// A request that closes its connection is answered before its body is read (a refusal of
+    /// its target): the body is read away first, so the close is clean and the client reads the
+    /// whole response, not a reset.
+    #[test]
+    fn a_closing_request_answered_before_its_body_closes_cleanly() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let unread = server.try_clone().unwrap();
+        let mut conn = Conn::new(server, 5000, 5000).unwrap();
+        client.write_all(b"PUT /x HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\n").unwrap();
+        let Ok(mut head) = conn.next_request(5000, 5000, &AtomicBool::new(false)) else { panic!("the head never came") };
+        // the body comes after the head was read: it waits in the socket, unread
+        client.write_all(b"hello").unwrap();
+        let mut seen = [0u8; 8];
+        while !matches!(unread.peek(&mut seen), Ok(5)) {}
+        drop(unread);
+        assert!(!conn.finish_request(&mut head), "a closing request kept its connection");
+        conn.write_resp(false, &Resp::bytes(400, "text/plain; charset=utf-8", b"bad name".to_vec()).closing()).unwrap();
+        drop(conn);
+        let mut bytes = Vec::new();
+        client.read_to_end(&mut bytes).expect("the close reset the connection");
+        assert!(bytes.starts_with(b"HTTP/1.1 400"), "{}", String::from_utf8_lossy(&bytes));
     }
 
     #[test]

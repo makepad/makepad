@@ -66,7 +66,7 @@ pub fn read_loose_object(git_dir: &Path, oid: &ObjectId) -> Result<Object, GitEr
         if e.kind() == std::io::ErrorKind::NotFound {
             GitError::ObjectNotFound(oid.to_hex())
         } else {
-            GitError::Io(e)
+            GitError::io_at("read loose object", &path, e)
         }
     })?;
 

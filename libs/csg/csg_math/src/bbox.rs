@@ -21,12 +21,14 @@ impl BBox3d {
         BBox3d { min, max }
     }
 
+    /// The box of `points`. Like every box made here its zero bounds are +0.0 ([`Self::canonical`]).
     pub fn from_points(points: &[Vec3d]) -> BBox3d {
         let mut b = BBox3d::empty();
         for &p in points {
-            b.expand(p);
+            b.min = b.min.min(p);
+            b.max = b.max.max(p);
         }
-        b
+        b.canonical()
     }
 
     pub fn from_triangle(a: Vec3d, b: Vec3d, c: Vec3d) -> BBox3d {
@@ -34,17 +36,32 @@ impl BBox3d {
             min: a.min(b).min(c),
             max: a.max(b).max(c),
         }
+        .canonical()
     }
 
     pub fn expand(&mut self, point: Vec3d) {
-        self.min = self.min.min(point);
-        self.max = self.max.max(point);
+        *self = BBox3d {
+            min: self.min.min(point),
+            max: self.max.max(point),
+        }
+        .canonical();
     }
 
     pub fn union(self, other: BBox3d) -> BBox3d {
         BBox3d {
             min: self.min.min(other.min),
             max: self.max.max(other.max),
+        }
+        .canonical()
+    }
+
+    /// This box with its zero bounds +0.0 (`x + 0.0` is `x`, but +0.0 for -0.0). `min` and `max`
+    /// tie +0.0 and -0.0 by operand order, which a vectorised loop picks by its width, so a box
+    /// of points with zeros of both signs would otherwise differ from machine to machine.
+    fn canonical(self) -> BBox3d {
+        BBox3d {
+            min: self.min + 0.0,
+            max: self.max + 0.0,
         }
     }
 
@@ -137,6 +154,46 @@ mod tests {
         ]);
         assert_eq!(b.min, dvec3(-1.0, -2.0, -3.0));
         assert_eq!(b.max, dvec3(1.0, 2.0, 3.0));
+    }
+
+    /// A box's zero bounds are +0.0 whatever the zeros' signs and whatever order and count the
+    /// points come in (the counts cross every vector width and remainder a loop may run at).
+    #[test]
+    fn a_zero_bound_is_plus_zero_in_any_order() {
+        let mut s: u64 = 0x9e37_79b9_7f4a_7c15;
+        // x: zeros and negatives (its max a zero); y: only zeros; z: zeros and positives (its min a zero)
+        let mut ps = vec![dvec3(-0.0, -0.0, -0.0), dvec3(0.0, 0.0, 0.0)];
+        for _ in 0..5000 {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let r = (s >> 33) as u32;
+            let zero = if r & 1 == 0 { 0.0 } else { -0.0 };
+            let mag = ((r >> 8) % 50) as f64 + 1.0;
+            ps.push(dvec3(if r & 2 == 0 { zero } else { -mag }, -zero, if r & 4 == 0 { zero } else { mag }));
+        }
+        let plus = |v: f64| v.to_bits() == 0;
+        let bits = |b: BBox3d| [b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z].map(f64::to_bits);
+        for n in [1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 257, 1000, 4097, 5002] {
+            let forward = ps[..n].to_vec();
+            let mut back = forward.clone();
+            back.reverse();
+            let mut turned = forward.clone();
+            turned.rotate_left(n / 2);
+            for pts in [forward, back, turned] {
+                let b = BBox3d::from_points(std::hint::black_box(&pts));
+                assert!(plus(b.max.x) && plus(b.min.y) && plus(b.max.y) && plus(b.min.z), "{n} points: {b:?}");
+                let mut grown = BBox3d::empty();
+                for &p in &pts {
+                    grown.expand(p);
+                }
+                assert_eq!(bits(grown), bits(b), "{n} points expanded one by one");
+            }
+        }
+        let t = BBox3d::from_triangle(dvec3(-0.0, 0.0, -0.0), dvec3(0.0, -0.0, -0.0), dvec3(-0.0, -0.0, -0.0));
+        assert_eq!(bits(t), [0; 6], "a triangle's box");
+        let a = BBox3d::from_min_max(dvec3(-0.0, 0.0, -0.0), dvec3(-0.0, 0.0, 1.0));
+        let b = BBox3d::from_min_max(dvec3(0.0, -0.0, -0.0), dvec3(0.0, -0.0, 2.0));
+        assert_eq!(bits(a.union(b))[..5], [0; 5], "a union");
+        assert_eq!(bits(b.union(a))[..5], [0; 5], "a union the other way");
     }
 
     #[test]

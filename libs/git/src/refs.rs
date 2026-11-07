@@ -41,7 +41,7 @@ fn ref_dir<'a>(git_dir: &'a Path, common_dir: &'a Path, name: &str) -> &'a Path 
 /// Read HEAD — returns Symbolic("refs/heads/main") or Direct(oid).
 pub fn read_head(git_dir: &Path) -> Result<RefTarget, GitError> {
     let head_path = git_dir.join("HEAD");
-    let content = fs::read_to_string(&head_path)?;
+    let content = fs::read_to_string(&head_path).map_err(|e| GitError::io_at("read HEAD", &head_path, e))?;
     let content = content.trim_end();
 
     if let Some(rest) = content.strip_prefix("ref: ") {
@@ -68,7 +68,7 @@ pub fn read_ref_in(
     // Try loose ref first
     let loose_path = ref_dir(git_dir, common_dir, name).join(name);
     if loose_path.is_file() {
-        let content = fs::read_to_string(&loose_path)?;
+        let content = fs::read_to_string(&loose_path).map_err(|e| GitError::io_at("read loose ref", &loose_path, e))?;
         let content = content.trim_end();
         if let Some(rest) = content.strip_prefix("ref: ") {
             return Ok(Some(RefTarget::Symbolic(rest.to_string())));
@@ -198,7 +198,7 @@ fn collect_refs_under(
     if prefix_path.is_dir() {
         collect_loose_refs(&prefix_path, prefix, result)?;
     } else if prefix_path.is_file() && !prefix.is_empty() {
-        let content = fs::read_to_string(&prefix_path)?;
+        let content = fs::read_to_string(&prefix_path).map_err(|e| GitError::io_at("read loose ref", &prefix_path, e))?;
         let content = content.trim_end();
         let target = if let Some(rest) = content.strip_prefix("ref: ") {
             RefTarget::Symbolic(rest.to_string())
@@ -229,7 +229,7 @@ pub fn read_packed_refs(git_dir: &Path) -> Result<Arc<HashMap<String, ObjectId>>
     let key = match fs::metadata(&packed_path) {
         Ok(meta) => PackedKey::of(&meta),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Arc::default()),
-        Err(e) => return Err(GitError::Io(e)),
+        Err(e) => return Err(GitError::io_at("stat packed refs", &packed_path, e)),
     };
     if let Some((k, refs)) = PARSED.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&packed_path)) {
         if *k == key {
@@ -242,7 +242,7 @@ pub fn read_packed_refs(git_dir: &Path) -> Result<Arc<HashMap<String, ObjectId>>
     let content = match fs::read_to_string(&packed_path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Arc::default()),
-        Err(e) => return Err(GitError::Io(e)),
+        Err(e) => return Err(GitError::io_at("read packed refs", &packed_path, e)),
     };
 
     for line in content.lines() {
@@ -332,11 +332,11 @@ fn collect_loose_refs(
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(GitError::Io(e)),
+        Err(e) => return Err(GitError::io_at("list refs", dir, e)),
     };
 
     for entry in entries {
-        let entry = entry?;
+        let entry = entry.map_err(|e| GitError::io_at("list refs", dir, e))?;
         let path = entry.path();
         // Ref names are `/`-separated on every platform, so the name is
         // built from the components walked, never from the OS path.
@@ -359,7 +359,7 @@ fn collect_loose_refs(
             let content = match fs::read_to_string(&path) {
                 Ok(c) => c,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(GitError::Io(e)),
+                Err(e) => return Err(GitError::io_at("read loose ref", &path, e)),
             };
             let content = content.trim_end();
             let target = if let Some(rest) = content.strip_prefix("ref: ") {

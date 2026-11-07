@@ -914,25 +914,26 @@ mod tests {
     }
 
     /// The UI-thread law (4b): a prepared snapshot is admitted by attaching
-    /// the worker's allocations — an order of magnitude under the
-    /// preparation itself, which is the tokenisation and layout.
+    /// the worker's allocations: the preparation tokenises every line, the
+    /// admission none (counted in lines lexed, not timed).
     #[test]
     fn a_prepared_snapshot_is_admitted_without_tokenising() {
         use crate::document_worker::prepare_snapshot;
-        use std::time::Instant;
+        use makepad_code_editor::tokenizer::lines_lexed;
         let text: String = (0..20_000).map(|i| format!("fn item_{i}(x: u32) -> u32 {{ let y = x * {i}; if y > 10 {{ y }} else {{ 0 }} }} // line {i}\n")).collect();
         assert!(text.len() < MAX_FILE_BYTES);
-        let started = Instant::now();
+        let before = lines_lexed();
         let prepared = prepare_snapshot(&text).with_revision(1);
-        let prepare_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let prepare_lexed = lines_lexed() - before;
         let mut s = FileSnapshot { requested_path: PathBuf::from("/x/prepared.rs"), path: PathBuf::from("/x/prepared.rs"), revision: 1, text: Some(Arc::new(text.clone())), error: None, observed: None };
         let mut registry = DocumentRegistry::default();
-        let started = Instant::now();
+        let before = lines_lexed();
         let handle = registry.apply_prepared(&s, Some(prepared)).unwrap();
-        let apply_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let apply_lexed = lines_lexed() - before;
         assert_eq!(handle.current_text(), text);
-        eprintln!("record=prepared_admission lines=20000 bytes={} prepare_ms={prepare_ms:.2} apply_ms={apply_ms:.2}", text.len());
-        assert!(apply_ms * 10.0 < prepare_ms, "admission ({apply_ms:.2} ms) is not an order of magnitude under the preparation ({prepare_ms:.2} ms): it tokenised on the UI thread");
+        eprintln!("record=prepared_admission lines=20000 bytes={} prepare_lexed={prepare_lexed} apply_lexed={apply_lexed}", text.len());
+        assert!(prepare_lexed >= 20_000, "the preparation lexed {prepare_lexed} of the 20000 lines");
+        assert_eq!(apply_lexed, 0, "the admission lexed {apply_lexed} lines: it tokenised on the UI thread");
         // a second snapshot of the same file takes the delta path unchanged
         s.revision = 2;
         s.text = Some(Arc::new(format!("{text}// tail\n")));

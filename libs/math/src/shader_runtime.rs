@@ -425,8 +425,10 @@ pub fn inverse(m: Mat4f) -> Mat4f {
     m.invert()
 }
 
+/// Splash's `modf(x, y)`: the truncating remainder (x's sign), as shaders
+/// compute it on every backend; `mod(x, y)` floors.
 pub fn modf(x: f32, y: f32) -> f32 {
-    x - y * (x / y).floor()
+    x - y * (x / y).trunc()
 }
 
 pub fn atan2(y: f32, x: f32) -> f32 {

@@ -315,7 +315,7 @@ pub(crate) fn object_sources(common_dir: &Path) -> Result<ObjectSources, GitErro
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(GitError::Io(e)),
+        Err(e) => return Err(GitError::io_at("read alternates", &alt_file, e)),
     }
     Ok(ObjectSources {
         loose_dirs,
@@ -433,7 +433,7 @@ impl Repository {
             Err(GitError::ObjectNotFound(_)) => {}
             Err(e) => return Err(e),
         }
-        packed?;
+        neither(packed, oid)?;
 
         // Try alternates (loose + packs)
         self.ensure_alternates()?;
@@ -512,7 +512,7 @@ impl Repository {
             Err(GitError::ObjectNotFound(_)) => {}
             Err(e) => return Err(e),
         }
-        packed?;
+        neither(packed, oid)?;
         if let Some(alt_dirs) = &self.alternates {
             for alt_dir in alt_dirs {
                 match read_loose_object_from_objects_dir(alt_dir, oid) {
@@ -1710,6 +1710,15 @@ impl Repository {
     }
 }
 
+/// The packs' error when they did not open and the object is no loose one either: both said
+/// (the packs' error alone named neither the loose file's absence nor what it read, 11-07).
+fn neither(packed: Result<(), GitError>, oid: &ObjectId) -> Result<(), GitError> {
+    packed.map_err(|e| match e {
+        GitError::Io(io) => GitError::Io(std::io::Error::new(io.kind(), format!("{io}; and {} is no loose object", oid.to_hex()))),
+        e => e,
+    })
+}
+
 fn normalize_rel_path(path: &str) -> String {
     let mut path = path.replace('\\', "/");
     while let Some(stripped) = path.strip_prefix("./") {
@@ -1732,7 +1741,7 @@ pub(crate) fn read_loose_object_from_objects_dir(
         if e.kind() == std::io::ErrorKind::NotFound {
             GitError::ObjectNotFound(oid.to_hex())
         } else {
-            GitError::Io(e)
+            GitError::io_at("read loose object", &path, e)
         }
     })?;
 

@@ -16,6 +16,14 @@ pub enum GitError {
     CorruptPack(String),
 }
 
+impl GitError {
+    /// An IO error that names what it did to which file: a bare `No such file or directory`
+    /// named neither (a devhub test's fresh commits did not read, now and then, 11-03..07).
+    pub fn io_at(op: &str, path: &std::path::Path, e: io::Error) -> GitError {
+        GitError::Io(io::Error::new(e.kind(), format!("{op} {}: {e}", path.display())))
+    }
+}
+
 impl fmt::Display for GitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
