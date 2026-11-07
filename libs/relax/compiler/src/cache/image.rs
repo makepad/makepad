@@ -164,7 +164,7 @@ impl Cache {
         e.u32(tab.crates.len() as u32);
         for &c in &tab.crates {
             e.u128(self.crate_ident[c as usize]);
-            e.u128(self.fps[c as usize]);
+            e.u128(self.fp_now(c as usize).unwrap_or(0));
         }
         for t in [&tab.keys, &tab.syms, &tab.files] {
             e.u32(t.list.len() as u32);
@@ -1789,7 +1789,7 @@ impl Linker {
         let Some((img, store)) = self.cache().image.as_ref().map(|i| (i.bytes(), i._store.clone())) else { return 0 };
         let parsed = {
             let c = self.cache();
-            parse_image(img, store.clone(), |ident, fp| c.crate_by_ident.get(&ident).map_or(false, |&k| c.fps.get(k as usize) == Some(&fp)))
+            parse_image(img, store.clone(), |ident, fp| c.crate_by_ident.get(&ident).map_or(false, |&k| c.fp_now(k as usize) == Some(fp)))
         };
         let Some(mut im) = parsed else {
             self.cache().image_rewrite = true;

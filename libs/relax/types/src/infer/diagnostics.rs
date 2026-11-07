@@ -13,6 +13,8 @@ pub struct Diagnostic { pub cause: ObligationCause, pub message: String }
 /// after an ahead check of it, or its own retry once the skipped files loaded) had only "type
 /// checking failed due to previous errors", and its real error was reported by nothing.
 struct Emitted { diagnostic: Diagnostic, thread: u32, delivered: bool, echo: bool }
+/// The thread of an error no check takes (`report_unowned`): conc::thread_id counts from 1.
+const UNOWNED: u32 = 0;
 #[derive(Default)]
 struct DiagCtxtInner {
     errors: Vec<Emitted>,
@@ -80,9 +82,21 @@ impl DiagCtxt {
     /// a check that ran on one thread compares it before and after to know it found nothing.
     pub fn thread_emitted() -> u64 { THREAD_EMITTED.with(|c| c.get()) }
     fn emit(log: &mut Vec<Emitted>, cause: ObligationCause, message: String) {
+        Self::emit_as(log, cause, message, crate::conc::thread_id());
+    }
+    fn emit_as(log: &mut Vec<Emitted>, cause: ObligationCause, message: String, thread: u32) {
         THREAD_EMITTED.with(|c| c.set(c.get() + 1));
         if log.iter().any(|d| d.diagnostic.cause == cause && d.diagnostic.message == message) { return; }
-        log.push(Emitted { diagnostic: Diagnostic { cause, message }, thread: crate::conc::thread_id(), delivered: false, echo: false });
+        log.push(Emitted { diagnostic: Diagnostic { cause, message }, thread, delivered: false, echo: false });
+    }
+    /// An error of no check: rustc reports it while it resolves names, before any inference
+    /// context exists, so it taints none. Only the session's drain takes it (no thread is
+    /// `UNOWNED`): where it is printed does not depend on which body or signature first asked, on
+    /// its thread, for the lazy query that reported it.
+    pub fn report_unowned(&self, cause: ObligationCause, message: String) {
+        let mut data = self.data.lock().unwrap();
+        data.reported_error = true;
+        Self::emit_as(&mut data.errors, cause, message, UNOWNED);
     }
     /// [`Self::emit`] of an error: one the session has from another check is this check's too (an
     /// echo of it), once per check.

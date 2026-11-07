@@ -41,6 +41,23 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) { REUSE.with(|s| *s.borrow_mut() = None); }
 }
+/// A proc macro's run, outside the parse that expands it (macro_reg's runner calls). The run may
+/// build the proc-macro world on this thread: a reload after the load freed the world rebuilds it
+/// there (pmhost world_inner). That load parses the macro crates' files and outline-expands them
+/// with reuse sessions of their own. They must not meet the calling parse's session, which used
+/// to panic with "nested reload parse" and refuse the edit. They must not read or fill its reuse
+/// maps either: those hold one file's previous expansions, made under its own crate graph's
+/// macros. The calling parse's session is back in place when the run ends.
+pub struct Outside(Option<Reusing>);
+pub fn outside() -> Outside {
+    Outside(REUSE.with(|s| s.borrow_mut().take()))
+}
+impl Drop for Outside {
+    fn drop(&mut self) {
+        let held = self.0.take();
+        REUSE.with(|s| *s.borrow_mut() = held);
+    }
+}
 /// Exact source bytes (including trivia), not a hash or item identity. Context-sensitive
 /// expansions additionally include their source position and line/column, module, cfg and
 /// file context. A moved hosted input is deliberately a miss: macros can observe spans.
@@ -245,5 +262,58 @@ mod tests {
         assert!(s.parse(b"fn broken(".to_vec()).is_err());
         // A failed parse must release its thread-local session.
         s.parse(b"fn recovered() {}".to_vec()).unwrap();
+    }
+
+    /// A reload's parse runs a proc macro whose world is gone (freed after the load): the run
+    /// builds it on the parse's thread, and that load parses and outline-expands the macro
+    /// crates' files (live edits refused with "nested reload parse"). Here the parse of `a.rs`
+    /// holds its session as ParseSnapshot::parse does over the parser, and the macro run
+    /// (macro_reg's runner calls, parse_work::outside) parses another file and expands an outline.
+    #[test]
+    fn a_macro_run_inside_a_reload_parse_parses_other_files_on_their_own_sessions() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let snapshot = |path: &str| {
+            let mut table = crate::macros::MacroTable::default();
+            table.s2_fmt = true;
+            crate::program::ParseSnapshot {
+                old: 0, path: path.into(), edition: 2021,
+                kname: "test".into(), mod_path: "test".into(), dir: "/tmp".into(), root: path.into(), together: Vec::new(),
+                cfg: crate::cfg::CfgSet::host(sess, &[]), macros: std::sync::Arc::new(table),
+                reuse: Default::default(), previous: None,
+                context: crate::source_context::Context::new(path, Default::default(), sess),
+            }
+        };
+        let text = "#[derive(Debug, Clone, Copy, PartialEq)] struct S { x: u32 }\nmacro_rules! m { ($x:literal) => { $x + 1 }; }\nfn f() -> u32 { m!(2) }";
+        // a.rs's previous version: the expansions its next parse may reuse
+        let a = snapshot("/tmp/relax-nested-a.rs");
+        let previous = a.parse(text.as_bytes().to_vec()).unwrap().reuse;
+        assert!(!previous.expansions.is_empty() || !previous.rules.is_empty());
+        let outer = super::Session::new(previous.clone());
+        {
+            let _run = super::outside();
+            // the world's load: a file of the macro crates, with the same text, on a session of
+            // its own that starts empty (a.rs's expansions are not this crate graph's)
+            let world = snapshot("/tmp/relax-nested-world.rs");
+            let v = world.parse(text.as_bytes().to_vec()).unwrap();
+            assert!(!v.reuse.expansions.is_empty() || !v.reuse.rules.is_empty());
+            // and its outline expansion (lazy.rs's demand plan)
+            let mut toks = Vec::new();
+            assert!(crate::lexer::lex(text.as_bytes(), 2021, &mut toks).is_ok());
+            let cfg = crate::cfg::CfgSet::host(sess, &[]);
+            let ctx = std::rc::Rc::new(crate::builtins::FileCtx::new("test", "/tmp/relax-nested-world.rs", "test", &cfg));
+            let surface = crate::parser::rs_expand::expand(text.as_bytes(), toks, 2021, ctx, Default::default());
+            assert!(surface.unknown.is_empty(), "{:?}", surface.unknown);
+        }
+        // a.rs's parse goes on with its own session: its previous expansions, nothing recorded
+        // by the macro run
+        super::REUSE.with(|s| {
+            let s = s.borrow();
+            let s = s.as_ref().expect("the reload parse's session is back after the macro run");
+            assert!(std::sync::Arc::ptr_eq(&s.previous, &previous));
+            assert_eq!(s.hits, 0);
+            assert!(s.next.expansions.is_empty() && s.next.rules.is_empty());
+        });
+        drop(outer.finish());
+        assert!(super::REUSE.with(|s| s.borrow().is_none()));
     }
 }

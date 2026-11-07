@@ -1,0 +1,6 @@
+# v1: an item macro's argument and an item its cfg leaves out, inside an inline module
+v1 patch
+# v2: a nested module made public and called from outside it; a test fn added to a test module
+v2 patch
+# v3: the module private again: the paths through it are not checked again live
+v3 restart note=is less visible than before

@@ -410,12 +410,25 @@ fn read_at(f: &File, buf: &mut [u8], off: u64) -> std::io::Result<usize> {
     Ok(n)
 }
 
+/// A read that meets an append's lock waits for it: Windows keeps every other handle from reading
+/// a range another holds locked (ERROR_LOCK_VIOLATION, where POSIX locks are advisory), and a lease
+/// that read its JIT's sources while another fed the box's store failed at once with it (11-06).
 #[cfg(windows)]
 fn read_at(f: &File, buf: &mut [u8], off: u64) -> std::io::Result<usize> {
     use std::os::windows::fs::FileExt;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
     let mut n = 0;
     while n < buf.len() {
-        let k = f.seek_read(&mut buf[n..], off + n as u64)?;
+        let k = match f.seek_read(&mut buf[n..], off + n as u64) {
+            Ok(k) => k,
+            Err(e) if e.raw_os_error() == Some(ERROR_LOCK_VIOLATION) => {
+                f.lock_shared()?;
+                let read = f.seek_read(&mut buf[n..], off + n as u64);
+                let _ = f.unlock();
+                read?
+            }
+            Err(e) => return Err(e),
+        };
         if k == 0 {
             break;
         }
@@ -728,6 +741,26 @@ pub fn folders(entries: &[Entry]) -> BTreeMap<String, Vec<(String, bool)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reader of a store that an append holds locked waits for the append (Windows refuses the
+    /// read of a locked range outright; elsewhere the lock is advisory and the read goes on).
+    #[test]
+    fn a_read_waits_for_an_append_that_holds_the_store() {
+        let path = std::env::temp_dir().join(format!("relax-gitstore-locked-{}", std::process::id()));
+        std::fs::write(&path, b"0123456789").unwrap();
+        let writer = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        writer.lock().unwrap();
+        let reader = File::open(&path).unwrap();
+        let held = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            writer.unlock().unwrap();
+        });
+        let mut buf = [0u8; 4];
+        assert_eq!(read_at(&reader, &mut buf, 3).unwrap(), 4);
+        assert_eq!(&buf, b"3456");
+        held.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
     use std::sync::Arc;
 
     fn obj(kind: &str, data: &[u8]) -> Oid {

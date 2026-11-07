@@ -434,6 +434,84 @@ pub(crate) fn crate_ifaces_keeping(prog: &crate::program::Program, fps: &[u128],
     out
 }
 
+/// Whether file `f` (any version of it) is one the boot's file selection skipped: loaded after the
+/// boot by the post-boot loader, and not by an edit that added its module (whose files the item
+/// graph has: deps.rs text_files).
+pub(crate) fn outside_boot_text(prog: &crate::program::Program, f: u32) -> bool {
+    let b = prog.first_version(f);
+    (b as usize) >= prog.boot_files && (b as usize) < prog.files.len() && !prog.front_macro_fragments.contains(&(b as usize))
+        && !prog.edit_added_files().iter().any(|x| x.0 == b)
+}
+
+/// Per crate: the text of its files the boot's file selection skipped (0: none) -- those the
+/// post-boot loader loaded since, as their versions now are, and those it has still to load, as
+/// on disk (a restored image holds the first kind past its boot files, a cold boot has only the
+/// second: the same files). The item graph and the interfaces are of the boot's files only, so
+/// the code keys take this in whole (`late_views`) and the fingerprint checks with it
+/// (Cache::fp_now): a warm run of an edit of such a file never links the old text's code.
+/// `memo`: the hash of each loaded file version so far.
+pub(crate) fn late_texts(prog: &crate::program::Program, memo: &mut std::collections::HashMap<u32, u128>) -> Vec<u128> {
+    let mut per: Vec<Vec<(&str, u128)>> = vec![Vec::new(); prog.crates.len()];
+    let added = prog.edit_added_files();
+    for f in prog.boot_files.min(prog.files.len())..prog.files.len() {
+        let f32 = f as u32;
+        if prog.is_edit_version(f32) || prog.front_macro_fragments.contains(&f) || added.iter().any(|x| x.0 == f32) { continue; }
+        let Some(&c) = prog.file_crate.get(f) else { continue };
+        let Some(path) = prog.file_paths.get(f) else { continue };
+        let now = prog.current_versions().get(&f32).copied().unwrap_or(f32);
+        let h = *memo.entry(now).or_insert_with(|| {
+            let pf = &prog.files[now as usize];
+            crate::crate_image::file_hash(path, &pf.src[..(pf.src_len as usize).min(pf.src.len())])
+        });
+        if let Some(v) = per.get_mut(c as usize) { v.push((path.as_str(), h)); }
+    }
+    for (m, (path, _, _)) in &prog.skipped_files {
+        let Some(md) = prog.mods.get(*m as usize) else { continue };
+        // (an unreadable file: its absence is the input, its load reports it)
+        let h = crate::vfs::read(path).map_or(0, |src| crate::crate_image::file_hash(path, &src));
+        if let Some(v) = per.get_mut(md.krate as usize) { v.push((path.as_str(), h)); }
+    }
+    per.into_iter().map(|mut v| {
+        if v.is_empty() { return 0; }
+        v.sort_unstable();
+        v.dedup();
+        let mut h = Sip128::new();
+        h.str("late-text");
+        for (p, x) in v { h.str(p); h.u128(x); }
+        h.finish128()
+    }).collect()
+}
+
+/// Per crate: the late text (`late_texts`) of it and of every crate it depends on, which its code
+/// can name (0: none has any -- that crate's keys are as without it).
+pub(crate) fn late_views(prog: &crate::program::Program, late: &[u128]) -> Vec<u128> {
+    let nc = prog.crates.len();
+    let mut out = vec![0u128; nc];
+    let mut done = vec![false; nc];
+    fn go(c: usize, prog: &crate::program::Program, late: &[u128], out: &mut Vec<u128>, done: &mut Vec<bool>, depth: u32) -> u128 {
+        if done[c] || depth > 512 {
+            return out[c];
+        }
+        let mut deps: Vec<u128> = prog.crates[c].deps.iter().filter(|&&(_, d)| d as usize != c).map(|&(_, d)| go(d as usize, prog, late, out, done, depth + 1)).filter(|&x| x != 0).collect();
+        let own = late.get(c).copied().unwrap_or(0);
+        out[c] = if own == 0 && deps.is_empty() { 0 } else {
+            deps.sort_unstable();
+            deps.dedup();
+            let mut h = Sip128::new();
+            h.str("late-view");
+            h.u128(own);
+            for d in deps { h.u128(d); }
+            h.finish128()
+        };
+        done[c] = true;
+        out[c]
+    }
+    for c in 0..nc {
+        go(c, prog, late, &mut out, &mut done, 0);
+    }
+    out
+}
+
 /// Per crate: its view -- what its code's keys take from the crate itself besides its items
 /// (deps.rs): its name, root, edition, cfg and proc-macro-ness, its dependencies by alias with
 /// their views, and the interface fingerprint (`ifaces`: a proc-macro crate's is its whole
@@ -451,6 +529,12 @@ pub(crate) fn crate_views(prog: &crate::program::Program, ifaces: &[u128], atomi
         let ci = &prog.crates[c];
         let mut h = crate::crate_image::fingerprint_head(prog.syms.str(ci.name), ci.root_path(), ci.edition, ci.proc_macro, &ci.cfg.set);
         h.str("view");
+        // its structs and enums take live layouts (a struct's extension word, an enum's tag without
+        // a niche): code built for them is another crate's code, and the app scope that decides it
+        // is in no other key (a crate in one app's scope and outside another's)
+        if crate::layout::live_laid(prog, c as u32) {
+            h.str("live-laid");
+        }
         if atomic.get(c).copied().unwrap_or(true) {
             h.u128(ifaces.get(c).copied().unwrap_or(0));
         }

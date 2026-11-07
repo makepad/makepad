@@ -419,3 +419,25 @@ fn lowering_cycles_are_reported_by_their_declaration_check() {
     assert!(errors[0].contains("cycle detected when computing the default of generic parameter `typing::Foo`"), "{errors:?}");
     assert!(errors[1].contains("cycle detected when expanding type alias `typing::A`"), "{errors:?}");
 }
+
+#[test]
+fn opaque_auto_trait_cycle_is_one_error_whichever_body_is_checked_first() {
+    // (tests/ui impl-trait/auto-trait-leakage/auto-trait-leak.rs: each body asks whether the other's
+    // hidden type is Auto; the check that meets the cycle carries the E0391, named by the cycle's
+    // first opaque, so two threads checking the bodies at once report what one thread does)
+    let source = br#"#![no_std]
+        #![feature(auto_traits, negative_impls)]
+        auto trait Auto {}
+        struct No; impl !Auto for No {}
+        trait Tr {} impl Tr for No {}
+        fn need<T: Auto>(_: T) {}
+        fn cycle1() -> impl Tr { need(cycle2()); No }
+        fn cycle2() -> impl Tr { need(cycle1()); No }
+    "#;
+    for order in [["cycle1", "cycle2"], ["cycle2", "cycle1"]] {
+        let (prog, tcx) = program(source);
+        let errors: Vec<String> = order.iter().flat_map(|n| tcx.typeck(&prog, named(&prog, n)).errors.to_vec()).collect();
+        assert_eq!(errors.len(), 1, "{order:?}: {errors:?}");
+        assert!(errors[0].contains("E0391: cycle detected when computing type of opaque `typing::cycle1::{opaque#0}`"), "{order:?}: {errors:?}");
+    }
+}

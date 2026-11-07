@@ -182,6 +182,7 @@ makepad_run::hal_run::COMPILE	the compile closure of this process, the same for 
 makepad_run::hal_run::ENVIRONMENT	safe area, appearance and a11y of the host shell, kept current, not the app (hal_run.rs:410, lib.rs:96)
 makepad_run::hal_run::GEOMETRY	path of the window's place: a restart runs the same workspace
 makepad_run::hal_run::LEFT	restart_begins sets false before waiting (hal_run.rs:859)
+makepad_run::hal_run::NEXT_RUN	next_run's latch: set from a run's end until its compile thread has gone, then cleared
 makepad_run::hal_run::PUMP	run-window thread stays
 makepad_run::hal_run::RETRY	condvar
 makepad_run::hal_run::RUN	next_run, through state(); the window stays
@@ -401,6 +402,7 @@ relax_compiler::boundary::REQUESTED	`--boundary` audit mode, no in-place restart
 relax_compiler::cache::FRONT_GRAPH_WRITER	lock
 relax_compiler::cache::PATHS	cache path memo
 relax_compiler::cache::RECORDS	monotone, spill_cache::SEEN compares against it
+relax_compiler::cache::RECORD_NOW_NS	cfg(test) only: the recording time a unit test sets (0 in every run)
 relax_compiler::cache::SPILL_IO	IO lock
 relax_compiler::cache::collected::new::ON	env MAKEPAD_RUN_COLLECTED_TRACE read once, nothing sets it
 relax_compiler::cache::dump_filter::F	env MAKEPAD_RUN_CACHE_DUMP read once, nothing sets it
@@ -780,6 +782,7 @@ relax_compiler::reload::watch_events::native::flush::N	flush marker counter neve
 relax_compiler::reload::watch_events::native::kick_fd::FD	eventfd of the process
 relax_compiler::reload::watch_events::native::port::PORT	OS completion port; cfg-off: windows
 relax_compiler::run::APP_START	set only in cmd_run_app, which restart skips
+relax_compiler::run::BOOTING	the boot gate: the restart that ends a run sets it for the next run's boot, which clears it (run_end)
 relax_compiler::run::CHECK_RECORDS_COLLECTED	`makepad check` only
 relax_compiler::run::HARNESS_RUN	`makepad test` only, the harness restarts by exec
 relax_compiler::run::HOSTED_RUN	set only in cmd_run, which restart skips

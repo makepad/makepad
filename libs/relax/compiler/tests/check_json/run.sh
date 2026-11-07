@@ -39,13 +39,11 @@ with open(out,'a') as f:
 PY
 done
 cat > "$T/expected" <<'EXPECTED'
-{"severity":"error","code":"RR0001","message":"unresolved import `crate::Widgte`","file":"main.rs","line":3,"col":12,"end_line":3,"end_col":18,"phase":"resolve","notes":[],"suggestion":{"message":"did you mean `Widget`?","replacement":["main.rs",3,12,3,18,"Widget"]}}
+{"severity":"error","code":"E0432","message":"unresolved import `crate::Widgte`","file":"main.rs","line":3,"col":12,"end_line":3,"end_col":18,"phase":"resolve","notes":[],"suggestion":{"message":"did you mean `Widget`?","replacement":["main.rs",3,12,3,18,"Widget"]}}
+{"severity":"error","code":"RM0001","message":"cannot find macro `greetign` in this scope","file":"main.rs","line":9,"col":1,"end_line":9,"end_col":9,"phase":"macro","notes":[],"suggestion":null}
 {"severity":"error","code":"E0412","message":"cannot find type `Widgte` in this scope","file":"main.rs","line":4,"col":11,"end_line":4,"end_col":17,"phase":"typeck","notes":[],"suggestion":{"message":"did you mean `Widget`?","replacement":["main.rs",4,11,4,17,"Widget"]}}
-{"severity":"error","code":"RT0006","message":"signature has unresolved types","file":"main.rs","line":4,"col":1,"end_line":4,"end_col":3,"phase":"typeck","notes":["fix the signature errors first"],"suggestion":null}
 {"severity":"error","code":"E0412","message":"cannot find type `Missing` in this scope","file":"main.rs","line":6,"col":1,"end_line":6,"end_col":7,"phase":"typeck","notes":[],"suggestion":null}
-{"severity":"error","code":"RT0006","message":"signature has unresolved types","file":"main.rs","line":6,"col":1,"end_line":6,"end_col":7,"phase":"typeck","notes":["fix the signature errors first"],"suggestion":null}
-{"severity":"error","code":"RM0001","message":"cannot find macro `greetign` in this scope","file":"main.rs","line":9,"col":1,"end_line":9,"end_col":9,"phase":"macro","notes":[],"suggestion":{"message":"did you mean `greeting`?","replacement":["main.rs",9,1,9,9,"greeting"]}}
-{"type":"summary","errors":6,"warnings":0,"ms":0}
+{"type":"summary","errors":4,"warnings":0,"ms":0}
 {"type":"summary","errors":0,"warnings":0,"ms":0}
 EXPECTED
 if ! diff -u "$T/expected" "$T/actual"; then
@@ -53,4 +51,5 @@ if ! diff -u "$T/expected" "$T/actual"; then
   echo "check_json: FAILED (artifacts: $T)"
   exit 1
 fi
+rm -rf "$T"
 echo "check_json: ok"

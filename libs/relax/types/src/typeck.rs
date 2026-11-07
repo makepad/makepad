@@ -4911,6 +4911,8 @@ impl<'a> Fcx<'a> {
                 Stmt::Item(_) | Stmt::Attrs(..) => {}
                 Stmt::Expr(e, semi) => {
                     let is_tail = i == n - 1 && !*semi;
+                    // (the tail's expectation is as much a hint as the block's)
+                    self.soft = is_tail && soft;
                     let t = self.check_expr(*e, if is_tail { expected } else { None });
                     if self.diverges {
                         diverged = true;
@@ -5073,7 +5075,10 @@ impl<'a> Fcx<'a> {
                 }
                 t
             }
-            ExprKind::Paren(x) => self.check_expr(*x, expected),
+            ExprKind::Paren(x) => {
+                self.soft = soft;
+                self.check_expr(*x, expected)
+            }
             ExprKind::Unary(op, x) => match op {
                 // rustc_hir_typeck/src/expr.rs check_expr_unary and op.rs:960-1080.
                 UnOp::Neg | UnOp::Not => {
@@ -5955,7 +5960,31 @@ impl<'a> Fcx<'a> {
                     }
                     None => None,
                 };
+                // (the operand's expectation is as much a hint as the `&`'s)
+                self.soft = soft;
                 let t = self.check_expr(*x, exp_inner);
+                // A sized referent is ExpectHasType for a value operand, and a `?` is a match
+                // whose Continue arm coerces to it (_match.rs CoerceMany). So the `?`'s value must
+                // coerce to the referent itself, even where the `&` would deref-coerce at the
+                // enclosing site (`Vec::clone(&rc_result?)` is E0308). check_try takes its
+                // expectation as a hint (relax hints binary operands, rustc does not), so the `&`
+                // demands the coercion here. A soft expectation demands nothing.
+                let mut operand = *x;
+                while let ExprKind::Paren(i) = self.ast().expr(operand).kind {
+                    operand = i;
+                }
+                let t = match exp_inner {
+                    Some(i) if !soft && matches!(self.ast().expr(operand).kind, ExprKind::Try(_)) => {
+                        let si = self.shallow(i);
+                        if matches!(self.tcx.tys.kind(si), TyKind::Infer(_) | TyKind::Error) || si == unit || self.is_unsized_ty(si) {
+                            t
+                        } else {
+                            self.coerce_or_unify(t, i, Some(operand), self.ast().expr(operand).lo);
+                            i
+                        }
+                    }
+                    _ => t,
+                };
                 if *raw {
                     // expr.rs check_named_place_expr: `&raw const <temporary>` (E0745)
                     if self.tcx.validates(self.prog, self.file) && !self.is_named_place(*x) {
@@ -6420,6 +6449,10 @@ impl<'a> Fcx<'a> {
                         return r;
                     }
                 }
+                // a reference's type is only a hint: rustc gives the right operand a fresh
+                // variable, which the impls for `&A` (`PartialEq<&B>`, `<&mut B>`) leave open
+                // (`&n == &code?` with i32: PartialEq<Code>)
+                self.soft = prim_ref;
                 let tb = self.check_expr(b, Some(ta));
                 // A scalar left operand can implement a comparison against a local
                 // non-scalar right operand (for example `impl PartialEq<Code> for u16`).

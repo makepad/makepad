@@ -3735,48 +3735,84 @@ pub fn finish(prog: &Program, own: &[bool]) {
 fn unused_macros(prog: &Program, own: &[bool]) {
     let (defs, used) = crate::macros::uses::take();
     if defs.is_empty() { return; }
+    let own_file = |i: usize| own.get(prog.file_crate.get(i).copied().unwrap_or(u32::MAX) as usize).copied().unwrap_or(false);
     // Bodies nothing demanded are never expanded, so an invocation inside one leaves no record:
-    // a macro whose `name!` is written anywhere in the checked crates counts as used.
-    let written = |name: &str| -> bool {
-        let n = name.as_bytes();
+    // a macro whose `name!` is written anywhere in the checked crates counts as used: its name
+    // after no word byte, then spaces and a `!` that is not `!=`.
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    fn src(f: &ParsedFile) -> &[u8] { &f.src[..(f.src_len as usize).min(f.src.len())] }
+    let bang_at = |s: &[u8], mut j: usize| { while j < s.len() && s[j].is_ascii_whitespace() { j += 1; } j < s.len() && s[j] == b'!' && s.get(j + 1) != Some(&b'=') };
+    let written_at = |n: &[u8]| -> bool {
         prog.files.iter().enumerate().any(|(i, f)| {
-            if !own.get(prog.file_crate.get(i).copied().unwrap_or(u32::MAX) as usize).copied().unwrap_or(false) { return false; }
-            let s = &f.src[..(f.src_len as usize).min(f.src.len())];
+            if !own_file(i) { return false; }
+            let s = src(f);
             let mut from = 0;
             while let Some(k) = s[from..].windows(n.len()).position(|w| w == n) {
                 let at = from + k;
                 from = at + 1;
-                if at > 0 && (s[at - 1].is_ascii_alphanumeric() || s[at - 1] == b'_') { continue; }
-                let mut j = at + n.len();
-                while j < s.len() && s[j].is_ascii_whitespace() { j += 1; }
-                if j < s.len() && s[j] == b'!' && s.get(j + 1) != Some(&b'=') { return true; }
+                if at > 0 && word(s[at - 1]) { continue; }
+                if bang_at(s, at + n.len()) { return true; }
             }
             false
         })
     };
+    // For an ASCII name (`r#` and all for a raw one) the same answer from the set of the names
+    // written so, one pass over the checked crates' text when a macro first asks: every word at a
+    // word start followed by the `!`, with its `r#` too when one stands before it at a word start.
+    let mut written: Option<std::collections::HashSet<&[u8]>> = None;
+    let written_names = || {
+        let mut set = std::collections::HashSet::new();
+        for (i, f) in prog.files.iter().enumerate() {
+            if !own_file(i) { continue; }
+            let s = src(f);
+            let mut at = 0;
+            while at < s.len() {
+                if !word(s[at]) || (at > 0 && word(s[at - 1])) { at += 1; continue; }
+                let mut end = at;
+                while end < s.len() && word(s[end]) { end += 1; }
+                if bang_at(s, end) {
+                    set.insert(&s[at..end]);
+                    if at >= 2 && &s[at - 2..at] == b"r#" && (at == 2 || !word(s[at - 3])) { set.insert(&s[at - 2..end]); }
+                }
+                at = end;
+            }
+        }
+        set
+    };
+    // each macro's file (the first of its path), and the `macro_rules!` definitions by (file, name position)
+    let mut file_of: HashMap<&str, usize> = HashMap::new();
+    for (i, p) in prog.file_paths.iter().enumerate() { file_of.entry(p.as_str()).or_insert(i); }
+    let mut rules_def: HashMap<(u32, u32), DefId> = HashMap::new();
+    for i in 0..prog.defs.len() {
+        let x = prog.def(DefId(i as u32));
+        if x.kind != DefKind::MacroRules { continue; }
+        let Some(pf) = prog.files.get(x.file as usize).filter(|_| x.item.0 != u32::MAX) else { continue };
+        rules_def.entry((x.file, pf.ast.item(x.item).name.lo)).or_insert(DefId(i as u32));
+    }
     for d in defs {
         if d.exported || d.file.is_empty() || d.name.starts_with('_') { continue; }
-        let Some(file) = prog.file_paths.iter().position(|p| *p == d.file) else { continue };
+        let Some(&file) = file_of.get(d.file.as_str()) else { continue };
         let krate = prog.file_crate.get(file).copied().unwrap_or(u32::MAX);
         if !own.get(krate as usize).copied().unwrap_or(false) { continue; }
         let pf = &prog.files[file];
         // the definition's own node gives the lint level (a macro written by a macro has none:
-        // the enclosing definition does)
-        let def = (0..prog.defs.len()).map(|i| DefId(i as u32)).find(|&i| {
-            let x = prog.def(i);
-            x.kind == DefKind::MacroRules && x.file == file as u32 && pf.ast.item(x.item).name.lo == d.pos
-        }).unwrap_or_else(|| enclosing_def(prog, file as u32, d.pos, krate));
+        // the enclosing definition does), looked up for a report only
+        let def = || rules_def.get(&(file as u32, d.pos)).copied().unwrap_or_else(|| enclosing_def(prog, file as u32, d.pos, krate));
         let resolved = used.contains(&(d.file.clone(), d.pos, crate::macros::uses::RESOLVED));
         let any_rule = (0..d.rules.len() as u32).any(|i| used.contains(&(d.file.clone(), d.pos, i)));
         if !resolved && !any_rule {
-            if written(&d.name) { continue; }
+            let n = d.name.as_bytes();
+            let plain = n.strip_prefix(b"r#").unwrap_or(n);
+            let is_written = if !plain.is_empty() && plain.iter().all(|&b| word(b)) { written.get_or_insert_with(written_names).contains(n) } else { written_at(n) };
+            if is_written { continue; }
             if pf.expansion_kind(d.pos) == crate::parser::ExpnKind::ExternalRules { continue; }
-            emit(prog, def, &UNUSED_MACROS, file as u32, d.pos, &format!("unused macro definition: `{}`", d.name));
+            emit(prog, def(), &UNUSED_MACROS, file as u32, d.pos, &format!("unused macro definition: `{}`", d.name));
             continue;
         }
+        let mut at = None;
         for (i, (pos, compile_error)) in d.rules.iter().enumerate() {
             if *compile_error || used.contains(&(d.file.clone(), d.pos, i as u32)) { continue; }
-            emit(prog, def, &UNUSED_MACRO_RULES, file as u32, *pos, &format!("rule #{} of macro `{}` is never used", i + 1, d.name));
+            emit(prog, *at.get_or_insert_with(&def), &UNUSED_MACRO_RULES, file as u32, *pos, &format!("rule #{} of macro `{}` is never used", i + 1, d.name));
         }
     }
 }

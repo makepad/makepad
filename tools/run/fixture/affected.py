@@ -17,7 +17,10 @@ since: selected whatever the diff reaches, as a diff that never reaches it says 
 `gone <unit>` line: its package left the tree. A `suite <package>` line: a JIT suite failing since.
 A `tests <package> <dir>` line: a package whose test targets the diff reaches, the changed packages
 and every package that uses one (a dev-dependency too), in both repos: the gate type-checks them in
-one `cargo check --tests` ([`tested`]). `--tests` prints only those lines, in any cargo workspace.
+one `cargo check --tests` ([`tested`]). `--tests` prints only those lines, in any cargo workspace: the
+tests bucket runs each one's tests under the JIT (land_gate.sh testrun), so there a diff that reaches the JIT
+or a workspace-wide input reaches every package with tests; GATE_FULL=1 (the full bucket) reaches them all, whatever
+the diff.
 """
 import json
 import os
@@ -37,6 +40,10 @@ GATE_PACKAGES = SMOKE + ("makepad-example-counter", "makepad-platform", "makepad
 # A fixed set that stands for the rest (the smoke set's commercial apps for a commercial app)
 JIT_CHECKS = ("makepad-widgets-core", "makepad-platform", "makepad-draw", "makepad-example-counter", "makepad-story-web-export")
 CALC = "makepad-app-calculator"
+# GPU guards, (package, test filter): render tests of a user-visible effect that broke more than once with every
+# test green. The hot bucket runs one on its node's real GPU under the JIT after every landing that reaches its
+# package (land_gate.sh step_guards): the map's zoom into text, its phosphor lens (11-06)
+GUARDS = (("makepad-scope", "gpu_guard"),)
 # the JIT binary; devhub's binary
 JIT_PACKAGE = "makepad-run"
 DEVHUB_PACKAGE = "makepad-devhub"
@@ -113,7 +120,8 @@ def tested(packages, members, touched, retry):
     has_tests = {d for d in members if any(t.get("test", True) for t in packages[d]["targets"])}
     names = {packages[d]["name"] for d in reached & has_tests}
     by_name = {p["name"]: d for d, p in packages.items()}
-    names |= {words[1] for words in retry if words[0] == "tests" and by_name.get(words[1]) in has_tests}
+    # a test-target check (`tests <pkg>`) or a run of the tests (`test <pkg>`, the tests bucket) red since
+    names |= {words[1] for words in retry if words[0] in ("tests", "test") and by_name.get(words[1]) in has_tests}
     return sorted((name, by_name[name]) for name in names)
 
 
@@ -159,10 +167,28 @@ def local(root, meta, packages):
     return out
 
 
+def built_from(packages, name):
+    """The directories a package's binary is built from: it and the path crates it uses (normal and
+    build edges), or none when the tree has no such package."""
+    forward = {directory: {Path(d["path"]).resolve() for d in pkg["dependencies"] if d.get("path") and d["kind"] != "dev"}
+               for directory, pkg in packages.items()}
+    top = next((d for d, p in packages.items() if p["name"] == name), None)
+    return closure({top}, forward) if top else set()
+
+
+def workspace_wide(compiled):
+    """Whether the diff changed a resolver/patch/profile input of every member."""
+    return any(p in ("Cargo.toml", "Cargo.lock", ".cargo/config", ".cargo/config.toml") for p in compiled)
+
+
 def tests_only(root, base, cbase):
     packages = {}
     members = local(root, metadata(root / "Cargo.toml"), packages)
-    _, touched = owners(root, packages, changed(root, base, cbase))
+    compiled, touched = owners(root, packages, changed(root, base, cbase))
+    # every test runs under the tree's JIT (`makepad test`): a change to what the JIT is built from can break
+    # any of them, whichever crates they use; the full bucket runs them all
+    if os.environ.get("GATE_FULL") == "1" or workspace_wide(compiled) or touched & built_from(packages, JIT_PACKAGE):
+        touched = set(members)
     for name, directory in tested(packages, members, touched, retried()):
         print(f"tests {name} {directory.relative_to(root)}")
 
@@ -196,21 +222,16 @@ def main():
     compiled, touched = owners(root, packages, files)
     affected = closure(touched, reverse)
     by_name = {p["name"]: d for d, p in packages.items()}
-    missing = [name for name in SMOKE + JIT_CHECKS if name not in by_name]
+    missing = [name for name in SMOKE + JIT_CHECKS + tuple(name for name, _ in GUARDS) if name not in by_name]
     if missing:
         raise RuntimeError("smoke or JIT check packages missing from metadata: " + " ".join(missing))
 
     # What the JIT binary and devhub's are built from.
-    forward = {}
-    for directory, pkg in packages.items():
-        forward[directory] = {Path(d["path"]).resolve() for d in pkg["dependencies"]
-                              if d.get("path") and d["kind"] != "dev"}
-    jit_dir = by_name.get(JIT_PACKAGE)
-    jit_code = closure({jit_dir}, forward) if jit_dir else set()
+    jit_code = built_from(packages, JIT_PACKAGE)
     devhub_dir = by_name.get(DEVHUB_PACKAGE)
-    devhub_code = closure({devhub_dir}, forward) if devhub_dir else set()
+    devhub_code = built_from(packages, DEVHUB_PACKAGE)
     # Workspace-wide resolver/patch/profile inputs apply to every member.
-    workspace = any(p in ("Cargo.toml", "Cargo.lock", ".cargo/config", ".cargo/config.toml") for p in compiled)
+    workspace = workspace_wide(compiled)
     retry = retried()
     gone = [words for words in retry if words[1] not in by_name or (words[0] == "present" and words[1] not in PRESENT_ARGS)]
     live = [words for words in retry if words not in gone]
@@ -243,6 +264,12 @@ def main():
         for name in SMOKE:
             if name in selected:
                 print(" ".join(["present", name, str(by_name[name].relative_to(root)), *PRESENT_ARGS[name]]))
+        # a guard runs under the JIT: a JIT change reaches it as much as one of its package's crates; a guard
+        # red since runs whatever the diff reaches, until it passes
+        retry_guards = {words[1] for words in live if words[0] == "guard"}
+        for name, test in GUARDS:
+            if workspace or by_name[name] in affected or touched & jit_code or name in retry_guards:
+                print(f"guard {name} {by_name[name].relative_to(root)} {test}")
         return
     if workspace:
         affected.update(packages)

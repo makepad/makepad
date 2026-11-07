@@ -1,0 +1,2 @@
+# v1: only the included files are saved; GUIDE, TEXTURE_LIB and their readers patch
+v1 patch

@@ -2,7 +2,7 @@
 # check_platforms.sh [pkg...]: `cargo check --release` of a few small packages for every target we ship, in ONE cargo
 # invocation (cargo checks the targets in parallel; no linking, no running). Run from the root of the tree under test
 # on the Mac mini, which has every target's std (land.sh, blocking, next to the x64 gate:
-# `makepad devhub lease build --node mini --lane landplat --rev <branch>,<commercial> -- bash
+# `makepad devhub lease build --node mini --lane landplat --rev <branch>,commercial=<branch> -- bash
 # tools/run/fixture/check_platforms.sh`). Any lane before hand-in, from its worktree:
 # `makepad devhub run <lane> build --node mini -- bash tools/run/fixture/check_platforms.sh`.
 #   default packages: counter (the smallest app: platform + draw + widgets), calculator, clock (network + AI hub client),

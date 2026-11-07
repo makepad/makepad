@@ -848,7 +848,7 @@ fn gandalf_scope_uses_package_source_and_project_boundaries() {
 fn app_scope_live_layout_edits() {
     const CHILD: &str = "MAKEPAD_RUN_APP_LAYOUT_TEST";
     let Ok(case) = std::env::var(CHILD) else {
-        for case in ["app_lib", "path_crate", "framework", "embedded", "generic_embedded", "pointer", "bound_template", "bound_template_embedded", "derive_default"] {
+        for case in ["app_lib", "path_crate", "framework", "embedded", "generic_embedded", "pointer", "bound_template", "bound_template_embedded", "derive_default", "live_crate"] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "lazy_reload_tests::app_scope_live_layout_edits", "--nocapture", "--test-threads=1"])
                 .env(CHILD, case).output().unwrap();
@@ -902,8 +902,11 @@ fn app_scope_live_layout_edits() {
     let value = def("value", lib);
     let name = def("name", lib);
     let mut roots = vec![bin_path.to_string_lossy().into_owned()];
-    if case != "framework" { roots.push(path.to_string_lossy().into_owned()); }
+    if case != "framework" && case != "live_crate" { roots.push(path.to_string_lossy().into_owned()); }
     crate::borrowck::event::set_app_scope(roots);
+    // a crate outside the scope that an earlier run of the session handed on (a refused layout
+    // edit of it: the "framework" case below) takes live layouts: its edits patch
+    if case == "live_crate" { crate::layout::set_live_crates(vec![path.to_string_lossy().into_owned()]); }
     crate::layout::set_root_crate(bin);
     crate::layout::LIVE_SESSION.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut tcx = crate::tcx::Tcx::new();
@@ -981,7 +984,12 @@ fn app_scope_live_layout_edits() {
     // framework type (`Holder`, like the platform's `Option<App>`) patches: its first layout stays.
     if case == "framework" {
         assert_eq!(patch.rung, Rung::Restart, "{:?}", patch.lines);
-        assert!(patch.lines.iter().any(|l| l.contains("in the app scope") && l.contains("restart the app")), "{:?}", patch.lines);
+        assert!(patch.lines.iter().any(|l| l.contains("`app_lib` is outside the app scope") && l.contains("restart the app")), "{:?}", patch.lines);
+        // the refusal hands the crate to the session's next run, which lays it out for live edits
+        let root = crate::vfs::normalize_path(&path.to_string_lossy());
+        assert_eq!(crate::reload::live_crates_next(), vec![root.clone()]);
+        let next = crate::reload::next_run_env(None).unwrap();
+        assert!(next.iter().any(|(k, v)| *k == "MAKEPAD_RUN_LIVE_CRATES" && v.as_deref() == Some(std::ffi::OsStr::new(&root))), "{next:?}");
         call(value, old_value.as_mut_ptr() as u64);
     } else {
         assert_eq!(patch.rung, Rung::Patch, "{:?}", patch.lines);
@@ -1986,4 +1994,82 @@ pub fn value(out: &mut u32) {{
     assert_eq!(u.forward_of(previous), Some((first, false)), "edit 5's closure forwards to the cell");
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A type alias in a fn body is part of that body: its edit is the body's edit (the alias
+/// goes and a new one comes with the body). An alias a nested item names restarts as before:
+/// the nested item would keep the old type.
+#[test]
+fn body_type_aliases_are_part_of_their_body() {
+    use crate::reload::{classify, Change};
+    let session = Arc::new(crate::Session::default());
+    let cfg = crate::cfg::CfgSet::host(&session, &[]);
+    let dir = std::env::temp_dir().join(format!("relax-body-aliases-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let a_src = "pub fn f() -> u64 {\n    type Found = (u64, u64);\n    let p: Found = (1, 2);\n    p.0 + p.1\n}\npub struct S;\nimpl S {\n    pub fn g(&self) -> u64 {\n        type Pair = [u64; 2];\n        fn first(p: Pair) -> u64 { p[0] }\n        first([3, 4])\n    }\n}\n";
+    let a_path = dir.join("a.rs");
+    std::fs::write(&a_path, a_src).unwrap();
+    let a_path = a_path.to_str().unwrap().to_string();
+    let mut p = Program::new(&session);
+    let a = p.load_crate("body_aliases", &a_path, 2021, cfg, vec![]).unwrap();
+    p.resolve_imports();
+    let file = p.mods[p.crates[a as usize].root_mod as usize].file;
+    let plan_of = |src: String| {
+        let v = p.parse_snapshot(file, &a_path).parse(src.into_bytes()).unwrap();
+        classify(&p, file, &v.pf, &a_path, &Default::default())
+    };
+    let body = plan_of(a_src.replace("type Found = (u64, u64);\n    let p: Found = (1, 2);", "type Found = (u64, u64, u64);\n    let p: Found = (1, 2, 3);")).unwrap_or_else(|why| panic!("{why:?}"));
+    let names: Vec<String> = body.changes.iter().map(|c| match c { Change::Body(d) => p.name(*d).to_string(), c => format!("{c:?}") }).collect();
+    assert_eq!(names, ["f"], "the holder's body edit");
+    assert!(body.added.is_empty() && body.removed.is_empty(), "the alias comes and goes with the body");
+    let named = plan_of(a_src.replace("type Pair = [u64; 2];", "type Pair = [u64; 3];").replace("first([3, 4])", "first([3, 4, 5])")).err().expect("a nested fn names the alias");
+    assert!(named.iter().any(|w| w.contains("type alias `Pair` changed")), "{named:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// An inline module's body is its items, classified one by one as a file's are: an edit of the
+/// text between them (an item macro's arguments, an item its cfg leaves out, a test fn added to
+/// a test module) patches, and so does a module made more visible. A module made less visible,
+/// or given other attributes, restarts and says so (each said "a module's item list changed").
+#[test]
+fn module_bodies_classify_by_item() {
+    use crate::reload::{classify, Change};
+    let session = Arc::new(crate::Session::default());
+    let mut cfg = crate::cfg::CfgSet::host(&session, &[]);
+    cfg.set.push("test".into());
+    let dir = std::env::temp_dir().join(format!("relax-module-bodies-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let a_src = "mod other;\nmacro_rules! mk { ($n:ident, $v:expr) => { pub fn $n() -> u32 { $v } } }\npub fn f() -> u32 { 1 }\npub mod inner {\n    pub fn g() -> u32 { 2 }\n    mk!(h, 3);\n    #[cfg(any())]\n    fn off() -> u32 { 4 }\n    thread_local! { static T: u32 = 5; }\n}\n#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    fn one() { assert_eq!(f(), 1); }\n}\n";
+    let a_path = dir.join("a.rs");
+    std::fs::write(&a_path, a_src).unwrap();
+    std::fs::write(dir.join("other.rs"), "pub fn o() -> u32 { 9 }\n").unwrap();
+    let a_path = a_path.to_str().unwrap().to_string();
+    let mut p = Program::new(&session);
+    let a = p.load_crate("module_bodies", &a_path, 2021, cfg, vec![]).unwrap();
+    p.resolve_imports();
+    let file = p.mods[p.crates[a as usize].root_mod as usize].file;
+    let plan_of = |src: String| {
+        let v = p.parse_snapshot(file, &a_path).parse(src.into_bytes()).unwrap();
+        classify(&p, file, &v.pf, &a_path, &Default::default())
+    };
+    let name = |c: &Change| match c { Change::Body(d) | Change::Const(d) | Change::StaticInit(d) | Change::Vis(d) => p.name(*d).to_string(), _ => String::new() };
+    let patched = |what: &str, src: String| plan_of(src).unwrap_or_else(|why| panic!("{what}: {why:?}"));
+    let macro_arg = patched("an item macro's argument", a_src.replace("mk!(h, 3)", "mk!(h, 33)"));
+    assert_eq!(macro_arg.changes.iter().map(name).collect::<Vec<_>>(), ["h"], "the macro's fn has a new body");
+    let off = patched("an item its cfg leaves out", a_src.replace("{ 4 }", "{ 44 }"));
+    assert!(off.changes.is_empty() && off.added.is_empty() && off.removed.is_empty());
+    let tls = patched("a thread_local! initializer", a_src.replace("= 5;", "= 55;"));
+    assert!(!tls.changes.is_empty());
+    let test = patched("a test fn added to a test module", a_src.replace("    fn one() { assert_eq!(f(), 1); }\n", "    fn one() { assert_eq!(f(), 1); }\n    #[test]\n    fn two() { assert_eq!(f(), 1); }\n"));
+    assert_eq!((test.added.len(), test.changes.len()), (1, 0));
+    let wider = patched("a module in a file of its own made public", a_src.replace("mod other;", "pub mod other;"));
+    assert_eq!(wider.changes.iter().map(name).collect::<Vec<_>>(), ["other"]);
+    assert!(matches!(wider.changes[0], Change::Vis(_)));
+    let restart = |what: &str, src: String, says: &str| {
+        let why = plan_of(src).err().unwrap_or_else(|| panic!("{what}: patched"));
+        assert!(why.len() == 1 && why[0].contains(says), "{what}: {why:?}");
+    };
+    restart("a module made less visible", a_src.replace("pub mod inner {", "pub(crate) mod inner {"), "mod `inner` is less visible than before (`pub` to `pub(crate)`)");
+    restart("a module given an attribute", a_src.replace("pub mod inner {", "#[allow(dead_code)]\npub mod inner {"), "mod `inner` changed: its attributes changed");
+    std::fs::remove_dir_all(&dir).unwrap();
 }

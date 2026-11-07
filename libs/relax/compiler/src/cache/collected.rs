@@ -146,8 +146,8 @@ impl FrontImages {
     /// (`base`: the stored graph's crates in its order, load_order) takes the plan with its crate
     /// positions moved to this load's: a plan names crates by position only (its files, its
     /// reached set, its parts; DemandPart::read takes a part at any position).
-    fn carried_demand(&self, graph: &crate::crate_image::GraphImage, pre: &[crate::preload::PreCrate], base: Option<&[crate::preload::PreCrate]>) -> Option<Arc<crate::preload::DemandImage>> {
-        let no = |why: &str| { if crate::preload::trace() { eprintln!("makepad-run collected: demand plan not carried: {why}"); } None };
+    pub(super) fn carried_demand(&self, graph: &crate::crate_image::GraphImage, pre: &[crate::preload::PreCrate], base: Option<&[crate::preload::PreCrate]>) -> Option<Arc<crate::preload::DemandImage>> {
+        let no = |why: &str| { if crate::preload::trace() { eprintln!("makepad-run front: demand plan not carried: {why}"); } None };
         if pre.iter().any(|c| c.cfg.session.runtime.lazy_verify) { return no("verify"); }
         let Some(stored) = graph.demand_image.clone() else { return no("no stored plan") };
         let last = pre.len().checked_sub(1)?;

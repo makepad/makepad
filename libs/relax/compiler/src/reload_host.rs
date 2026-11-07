@@ -14,7 +14,8 @@
 //! click would do before it ([`route`]).
 //!
 //! One rebuild at a time; a change during it builds once more after it. The new binary is the
-//! one cargo leaves at the loader's own path. Its codegen identity (codegen_id.rs) keys every cache
+//! one cargo leaves at the loader's own path, which a JIT devhub picked by its inputs' content has
+//! not ([`picked`]): its run picks again. Its codegen identity (codegen_id.rs) keys every cache
 //! it uses: a rebuild that changed what generates code starts from no stored code; one that changed
 //! only the rest of the binary (devhub, platform glue) keeps every stored build.
 use relax_session::sync::Mutex;
@@ -79,6 +80,15 @@ pub(crate) fn target_dir(exe: &Path) -> Option<PathBuf> {
     layout(exe).map(|l| l.0)
 }
 
+/// A JIT devhub picked by the content of its inputs for the tree it runs (`makepad.jit-<key>`:
+/// lease/loaders.rs, lease/jitstore.rs). Cargo never writes that file, and the checkout its
+/// target builds is not that tree: a lane's session on the box's binary rebuilt the box's
+/// checkout for 79 s and ran the same binary again, its lane's own JIT sources never built
+/// (W3752, 11-06). It cannot rebuild itself; the run that picked it picks again for the tree.
+pub(crate) fn picked(exe: &Path) -> bool {
+    exe.file_name().is_some_and(|n| n.to_string_lossy().starts_with("makepad.jit-"))
+}
+
 /// How a build of the loader runs.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Priority {
@@ -105,6 +115,9 @@ fn command(priority: Priority) -> Result<(std::process::Command, String), String
         return Err("this platform cannot replace a running makepad binary".into());
     }
     let exe = loader().ok_or("the makepad binary's path is unknown")?;
+    if picked(&exe) {
+        return Err(format!("{} was picked for this tree by its inputs' content: cargo never writes it, and its run picks the JIT again", exe.display()));
+    }
     let (package, manifest) = PACKAGE.lock().unwrap_or_else(|e| e.into_inner()).ok_or("no loader package")?;
     let (target, profile, triple) = layout(&exe).ok_or_else(|| format!("{} is not in a cargo target directory", exe.display()))?;
     if !Path::new(manifest).is_file() {
@@ -129,7 +142,7 @@ fn command(priority: Priority) -> Result<(std::process::Command, String), String
     };
     let line: Vec<&str> = low.iter().copied().chain(args.iter().map(String::as_str)).collect();
     let mut cmd = std::process::Command::new(line[0]);
-    cmd.args(&line[1..]).env_remove("MAKEPAD_RUN_RESTORE").env_remove("MAKEPAD_RUN_RESTART_T0").stdin(std::process::Stdio::null());
+    cmd.args(&line[1..]).env_remove("MAKEPAD_RUN_RESTORE").env_remove("MAKEPAD_RUN_RESTART_T0").env_remove("MAKEPAD_RUN_LIVE_CRATES").stdin(std::process::Stdio::null());
     Ok((cmd, shown))
 }
 
@@ -739,7 +752,6 @@ fn build_loop() {
         // build), so there is nothing to restart into
         if STATE.lock().unwrap_or_else(|e| e.into_inner()).provided.is_none()
             && LOADED.get().copied().flatten().is_some_and(|id| identity(&loader).is_some_and(|now| now == id)) {
-            eprintln!("makepad live: {why}: makepad is unchanged (built in {secs:.0} s); no restart");
             let what = "rebuild produced no change: cargo left the makepad this process runs as it was (the edit is not in what makepad is built from, or was undone)".to_string();
             // a live test session's tests already ran on this binary: no run answers it but this
             if crate::harness::live::enabled() { super::patch_refused_event(&why, true, std::slice::from_ref(&what)); }
@@ -749,10 +761,21 @@ fn build_loop() {
             if st.again { drop(st); continue; }
             st.phase = Phase::Idle;
             st.since = Some(Instant::now());
-            RESTART_AFTER_BUILD.store(false, std::sync::atomic::Ordering::SeqCst);
+            let asked = RESTART_AFTER_BUILD.swap(false, std::sync::atomic::Ordering::SeqCst);
             drop(st);
-            // the offer the click answered: nothing is left to update to
-            super::clear_restart_pending();
+            // makepad's own change: nothing is left to update to. The edits that wait for the
+            // app's restart still wait (a struct's layout, a const in a type).
+            super::drop_restart_pending(&why);
+            if !asked {
+                eprintln!("makepad live: {why}: makepad is unchanged (built in {secs:.0} s); no restart");
+                return;
+            }
+            // the relaunch the person asked for restarts the app, as one with no makepad change
+            let rest = super::restart_pending().join("; ");
+            let rest = if rest.is_empty() { "session relaunch".to_string() } else { rest };
+            eprintln!("makepad live: {why}: makepad is unchanged (built in {secs:.0} s); restarting the app as asked ({rest})");
+            drop(at_the_run);
+            if let Err(e) = super::restart_in_place(rest) { fail(format!("the relaunch cannot restart the app: {e}")); }
             return;
         }
         super::live_log(&format!("{{\"event\":\"host_rebuild\",\"ok\":true,\"s\":{secs:.1}}}"));
@@ -871,6 +894,9 @@ fn restart(h: Handover, state: Option<&[u8]>) {
         }
         let reason = super::RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()).clone();
         cmd.env("MAKEPAD_RUN_RESTART_T0", super::RESTART_SAVED_MS.load(std::sync::atomic::Ordering::Relaxed).to_string());
+        // the session's crates laid out for live edits beyond the app scope (live_crates_next)
+        let live = super::live_crates_next();
+        if live.is_empty() { cmd.env_remove("MAKEPAD_RUN_LIVE_CRATES"); } else { cmd.env("MAKEPAD_RUN_LIVE_CRATES", live.join("\n")); }
         super::restart_begins();
         // the run ends as at exit (exec skips the exit handlers); fd 2 goes back to the terminal
         // now (the transcript tee is a thread of this process: the new one starts its own), so

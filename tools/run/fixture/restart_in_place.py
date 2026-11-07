@@ -20,12 +20,15 @@ cannot take it: the Restart rung). It passes when:
 The restart is offered (the Restart rung) and taken as a person would, by `session relaunch`.
 Then the app panics for real and `resume P<n> restart` starts the next run: same process and window,
 its state not kept. The same for a stale access. A failed hot load (a call of a fn whose build fails)
-is a warm restart: same process and window, nothing parked, both on the ledger.
+parks the call and never restarts the app by itself; `resume P<n> restart` is the next run, in the
+same process and window, nothing left parked, both on the ledger.
 GPU work in flight at a run's end (a compute job of about a second) leaves the next run in the same
 process and window with a GPU that does its work right, and the ended run's read unanswered.
 Then ROUNDS more relaunches: what a run's end leaves in the process's statics
 (MAKEPAD_RUN_LEFTOVERS: a heap that went stays unmapped, so a word still pointing there is a fault
 too) must be a row of process_statics.tsv, and threads and resident memory must not grow.
+Last, a relaunch that lands while the next run boots (no unit in yet) waits the boot out: the run
+after it comes up in this process and window, with the state the booting run was started with.
 Prints the restart's times (the run's end to the new run's first frame, the relaunch request to it)
 and "restart_in_place: OK ..." or "restart_in_place: FAIL ..."; exit 1 on FAIL.
 """
@@ -399,8 +402,9 @@ if not fails:
 if not fails:
     park_and_restart("stale", stale_file)
 # a failed hot load (the app's main thread calls a fn whose build fails, so it cannot hand over its
-# state): the warm restart is the next run, in the same process and window; nothing parks; the ledger
-# has the failure and its restart
+# state): the call parks for the person, and the app is never restarted by itself (a landing
+# restarted the person's app in place); `resume P<n> restart` is the next run, in the same process
+# and window; nothing stays parked; the ledger has the failure and its restart
 if not fails:
     n_out, n_err = len(out), len(err)
     src = open(app_src).read()
@@ -411,9 +415,19 @@ if not fails:
     with open(app_src + ".new", "w") as f:
         f.write(src)
     os.rename(app_src + ".new", app_src)
-    if not wait(lambda: any(tick_of(l) < 5 for _, l in ticks(n_out)), 120):
-        fails.append("hot-fail-no-next-run")
+    wait(lambda: parked() is not None, 120)
+    panic = parked()
+    if panic is None:
+        fails.append("hot-fail-not-parked")
         stuck(pid)
+    else:
+        if any("run's threads stayed" in l for _, l in err[n_err:]):
+            fails.append("hot-fail-restarted-by-itself")
+        reply = ask(pid, ["resume", panic, "restart"])
+        print("restart_in_place: hot-fail: resume %s restart: %s" % (panic, reply[:200]))
+        if not wait(lambda: any(tick_of(l) < 5 for _, l in ticks(n_out)), 120):
+            fails.append("hot-fail-no-next-run")
+            stuck(pid)
     def outcomes():
         found = []
         for name in os.listdir(ledger_dir) if os.path.isdir(ledger_dir) else []:
@@ -491,6 +505,35 @@ if not fails:
     if left:
         fails.append("leftovers")
         print("restart_in_place: left of a run in statics no row of process_statics.tsv names:\n  " + "\n  ".join(left))
+# a relaunch that comes while the next run boots, before its unit is in (the restart's end read
+# that missing unit and the process died, 11-07): the end waits the boot out, and the run after it
+# comes up in this process and window with the state the booting run was started with. Asked
+# again until one relaunch lands in a boot.
+if not fails:
+    hit = False
+    n_boot = len(err)
+    for attempt in range(3):
+        n_out, n_err = len(out), len(err)
+        ends = lambda: [t for t, l in err[n_err:] if "run's threads stayed" in l]
+        ask(pid, ["session", "relaunch"])
+        if not wait(lambda: len(ends()) >= 1, 60):
+            fails.append("boot-no-run-end")
+            stuck(pid)
+            break
+        ask(pid, ["session", "relaunch"])
+        restored_after = lambda: len(ends()) >= 2 and any(t > ends()[1] and l.startswith("out restored") for t, l in out[n_out:])
+        if not wait(lambda: restored_after() and len(ticks(n_out)) > 5, 120):
+            fails.append("boot-no-next-run" if len(ends()) >= 2 else "boot-relaunch-lost")
+            stuck(pid)
+            break
+        hit = any("the restart waits for the run's boot" in l for _, l in err[n_err:])
+        if hit:
+            break
+    if not fails:
+        print("restart_in_place: boot: a relaunch %s the next run's boot" % ("landed in" if hit else "never landed in"))
+        if not hit:
+            fails.append("boot-not-hit")
+        stayed("boot", n_boot)
 stop()
 if fails:
     if "no-start" in fails:

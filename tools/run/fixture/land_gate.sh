@@ -1,5 +1,5 @@
 #!/bin/bash
-# land_gate.sh <fast <base> <cbase>|hot <base> <cbase>|tests <base> <cbase>|checks <base> <cbase>|full|full-a|full-b|full-t|stage>: checks under a devhub lease.
+# land_gate.sh <fast <base> <cbase>|hot <base> <cbase>|testrun <base> <cbase>|tests <base> <cbase>|checks <base> <cbase>|full|full-a|full-b|full-t|stage>: checks under a devhub lease.
 # The fast and hot buckets check a landed work/main tip against their previous tip. They never block landing.
 #   full  : build (0 warnings), rustc-check, relax-compiler libtest build, x64 relax tests, tier fuzzer (fixed
 #           seeds block, random batch never), makepad check of the 7 gate packages + Stage, headless Calc+Stage
@@ -16,8 +16,15 @@
 #           GATE_PROVEN skips units whose inputs already passed. GATE_RETRY (fast and hot; units joined by ;) names
 #           what failed earlier and has not passed since: gated whatever the diff reaches, until it passes.
 #   hot   : boot the directly touched apps and always Calculator (one small drawing app: a broken draw path
-#           fails every app) on a Linux node's warm JIT, then settle for 3 s.
+#           fails every app) on a Linux node's warm JIT, then settle for 3 s; then the GPU guards of the packages
+#           the landing reaches (affected.py GUARDS, step_guards).
 #   stage : build, makepad check makepad-stage, headless Stage present (commercial-only branches)
+#   testrun: the tests bucket: the test targets the landings reach (affected.py's `tests` lines: the changed
+#           packages and their users, dev-dependents too, both repos) run under the tree's JIT (`makepad test
+#           <pkg>`), one unit `test <pkg>` each, slowest first (GATE_TIMES); with GATE_QUEUE=1 a shard of the
+#           run (one lease and box each) takes them a unit at a time from the queue its shards share (next_told).
+#           GATE_PROVEN skips a package whose inputs passed; GATE_RETRY runs what failed until it passes;
+#           GATE_FULL=1 runs every package's (the full bucket). After landing; it gates nothing.
 #   tests : the fast bucket's test-target check alone (step_testcheck), in any cargo workspace (merge_break.sh)
 #   checks: the fast bucket's JIT checks alone (affected.py's check lines, step_qcheck) with the tree's own JIT, in
 #           any cargo workspace holding the gate's packages (jit_break.sh)
@@ -88,9 +95,14 @@ step_checks() {
   lt=$(bash tools/run/fixture/lazy_typeck.sh 2>&1); echo "$lt"; case "$lt" in *"lazy_typeck: ok"*) ;; *) fail="$fail lazy-typeck";; esac
   ag=$(bash tools/run/fixture/agree.sh 2>&1); echo "$ag"; case "$ag" in *"agree: ok"*) ;; *) fail="$fail agree";; esac
   ct=$(bash tools/run/fixture/check_targets.sh 2>&1); echo "$ct"; case "$ct" in *"check_targets: ok"*) ;; *) fail="$fail check-targets";; esac
+  tr=$(bash tools/run/fixture/test_run.sh 2>&1); echo "$tr"; case "$tr" in *"test_run: ok"*) ;; *) fail="$fail test-run";; esac
+  gu=$(bash tools/run/fixture/guard_units.sh 2>&1); echo "$gu"; case "$gu" in *"guard_units: ok"*) ;; *) fail="$fail guard-units";; esac
+  cu=$(bash tools/run/fixture/cargo_units.sh 2>&1); echo "$cu"; case "$cu" in *"cargo_units: ok"*) ;; *) fail="$fail cargo-units";; esac
   # (the checks above built this tree's JIT)
   jit=${CARGO_TARGET_DIR:-$PWD/target}/host/makepad
   se=$(bash libs/relax/compiler/tests/strict_errors/run.sh "$jit" 2>&1); echo "$se" | grep -E 'FAILED|^strict_errors'; case "$se" in *"strict_errors: ok"*) ;; *) fail="$fail strict-errors";; esac
+  # `makepad check --json`'s rows: codes, phases and suggestions as the producers recorded them
+  cj=$(bash libs/relax/compiler/tests/check_json/run.sh "$jit" 2>&1); echo "$cj" | grep -E '^[-+]\{|^unexpected|^check_json' | cut -c1-230; case "$cj" in *"check_json: ok"*) ;; *) fail="$fail check-json";; esac
   lc=$(python3 libs/relax/compiler/tests/live/run_cases.py --makepad "$jit" 2>&1) || fail="$fail live-cases"; echo "$lc" | grep -E '^(FAIL|XPASS|live cases)|^         v[0-9]' | cut -c1-230
   # the real-time case beside two more copies of itself: their compiles stay off its thread's cores
   # (its failure names the copies that failed and each one's longest call: `rt-lock-copies[1:5289us,3:5056us]`)
@@ -183,7 +195,7 @@ step_jit_suites() { # library test suites under the JIT, which pass under rustc:
           if [ "$suite_status" = 0 ]; then unit_line ok "suite $p"
           else fail="$fail jit-suite:$p"; unit_line fail "suite $p"; fi
         fi;;
-      *) fail="$fail jit-suite:$p"; grep -E ' FAILED$|panicked|error|^  report: ' "$log/suite-$p" | head -8 | cut -c1-500
+      *) fail="$fail jit-suite:$p"; test_failures "$log/suite-$p"
          [ "$mode" != fast ] || unit_line fail "suite $p";;
     esac
   done
@@ -295,10 +307,10 @@ step_devhub() { # devhub's own binary when the bucket diff touches it (0 warning
   CARGO_INCREMENTAL=0 cargo build --profile host -p makepad-devhub --bin makepad-devhub -j8 > "$log/devhub" 2>&1 || { fail="$fail devhub-build"; tail -20 "$log/devhub"; unit_line fail "devhub makepad-devhub"; return 1; }
   if grep -E "^(warning|error)" "$log/devhub" | grep -qv sandbox; then grep -E "^(warning|error)" "$log/devhub" | grep -v sandbox | head -20; fail="$fail devhub-warnings"; unit_line fail "devhub makepad-devhub"; return 1; fi
   # and its tests: the master restarts into this code, a break there stops the orchestration
-  $B test makepad-devhub --lib > "$log/devhub-test" 2>&1 || { fail="$fail devhub-tests"; grep -E "FAILED|panicked|^error|test result|^  report: " "$log/devhub-test" | cut -c1-500 | head -40; unit_line fail "devhub makepad-devhub"; return 1; }
+  $B test makepad-devhub --lib > "$log/devhub-test" 2>&1 || { fail="$fail devhub-tests"; test_failures "$log/devhub-test"; unit_line fail "devhub makepad-devhub"; return 1; }
   grep -E "^test result" "$log/devhub-test" | head -2
   # the build a phone's JIT host embeds (no checkout: tools/run/android_host)
-  $B test makepad-devhub --lib --no-default-features > "$log/devhub-test-bare" 2>&1 || { fail="$fail devhub-tests-no-checkout"; grep -E "FAILED|panicked|^error|test result|^  report: " "$log/devhub-test-bare" | cut -c1-500 | head -40; unit_line fail "devhub makepad-devhub"; return 1; }
+  $B test makepad-devhub --lib --no-default-features > "$log/devhub-test-bare" 2>&1 || { fail="$fail devhub-tests-no-checkout"; test_failures "$log/devhub-test-bare"; unit_line fail "devhub makepad-devhub"; return 1; }
   grep -E "^test result" "$log/devhub-test-bare" | head -1
   unit_line ok "devhub makepad-devhub"
 }
@@ -308,31 +320,51 @@ step_affected() {
   grep '^why' "$log/affected"; sum="$sum $(grep -c '^check' "$log/affected") checks $(grep -c '^present' "$log/affected") presents $(grep -c '^cargo' "$log/affected") cargo checks $(grep -c '^tests' "$log/affected") test checks"
   return 0
 }
+# reap_one: waits for one of at_once's runs still going (`running`: its unit by pid) to end, takes it off and says
+# so (GATEEND <unit>). Their pids alone: bash keeps an ended job's status and a `wait -n` given its pid again
+# returns at once, so the throttle, given every pid it had started, spun a core through each gate's whole run (the
+# fast gate's checks, the tests shards' units: 39 sleeps in 20 min, 11-07). A wait that names no pid: none of them
+# is a job of this shell, none runs.
+reap_one() {
+  local reaped="" p
+  wait -n -p reaped "${!running[@]}" 2>/dev/null
+  if [ -n "$reaped" ]; then set -- "$reaped"; else set -- "${!running[@]}"; fi
+  for p; do echo "GATEEND ${running[$p]}"; unset "running[$p]"; done
+}
 # fast: the affected apps' checks and presents all at once on this one warm box, on its one JIT cache; each in its
 # own subshell, so its output and failures are gathered here in affected.py's order
-at_once() { # at_once <fn> <lines file> [at most N]: runs `<fn> <fields of a line>` per line in parallel
-  i=0; local max=${3:-0} pids=() outs=() p live o
-  while read -r -a f; do
+# Each run's start and end are said live (GATESTART <unit> <epoch s>, GATEEND <unit>), beside the runs' own output,
+# which comes once they all ended: the master's check-in lists a unit running far over its last measure (bucket.rs
+# slow_units). A test that hung busy (a stalled GStreamer pipeline polled at 4 % of a core) is no HUNG, and held
+# its shard 73 min with nothing said (11-07).
+# A line is taken once a run's slot is free: from the file, or from a next fn (into `f`, false at the end: the
+# tests run's queue, next_told).
+at_once() { # at_once <fn> <lines file> [at most N] [next fn]: runs `<fn> <fields of a line>` per line in parallel
+  i=0; local max=${3:-0} next=${4:-next_line} running=() outs=() o f lines n_line=0
+  mapfile -t lines < "$2"
+  while :; do
+    while [ "$max" -gt 0 ] && [ "${#running[@]}" -ge "$max" ]; do reap_one; done
+    "$next" || break
     i=$((i + 1))
     # each run's files by its step and package (qcheck-4-makepad-widgets.out): numbered alone, the presents' runs
     # wrote over the checks' par-N files, and a failed check's output was gone from the kept logs (11-05)
     o="$log/${1%_one}-$i-${f[1]}"; outs+=("$o")
-    while [ "$max" -gt 0 ]; do
-      live=0; for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && live=$((live + 1)); done
-      [ "$live" -lt "$max" ] && break
-      wait -n "${pids[@]}" 2>/dev/null || sleep 0.2
-    done
     # both files open here: present's own `for i` loop changed $i inside the subshell, so its failures
     # went to another run's .fail and the verdict passed with GATEUNIT fail lines
     ( fail=""; "$1" "${f[@]}" 3>&-; printf '%s' "$fail" >&3 ) > "$o.out" 2>&1 3> "$o.fail" &
-    pids+=($!)
-  done < "$2"
+    running[$!]=$(unit_of "${f[@]}")
+    echo "GATESTART ${running[$!]} $(date +%s)"
+  done
   # only its own: a bare wait also reaped the depcheck running beside it, whose `wait` then found no
   # child (11-03)
-  [ "${#pids[@]}" = 0 ] || wait "${pids[@]}"
+  while [ "${#running[@]}" -gt 0 ]; do reap_one; done
   for o in "${outs[@]}"; do
     cat "$o.out"; fail="$fail$(cat "$o.fail" 2>/dev/null)"
   done
+}
+next_line() { # at_once's next line of its file
+  [ "$n_line" -lt "${#lines[@]}" ] || return 1
+  read -r -a f <<< "${lines[n_line]}"; n_line=$((n_line + 1))
 }
 filter_units() {
   local unit f
@@ -343,15 +375,16 @@ filter_units() {
     else printf '%s\n' "${f[*]}" >> "$2"; fi
   done < <(grep "^$1 " "$log/affected")
 }
+# a unit that fails says the command that shows it alone (GATEREPRO), for the lane to run
 qcheck_one() {
   local unit=$(unit_of "$@")
   check_pkg "$2" "$2" "$3" "${@:4}"
-  if [ -z "$fail" ]; then unit_line ok "$unit"; else unit_line fail "$unit"; fi
+  if [ -z "$fail" ]; then unit_line ok "$unit"; else echo "GATEREPRO $unit :: cd $3 && makepad check${4:+ ${*:4}} $2"; unit_line fail "$unit"; fi
 }
 qpresent_one() {
   local unit=$(unit_of "$@")
   pkg=$2; dir=$3; shift 3; present "$pkg" "$dir" "$pkg" "$@"
-  if [ -z "$fail" ]; then unit_line ok "$unit"; else unit_line fail "$unit"; fi
+  if [ -z "$fail" ]; then unit_line ok "$unit"; else echo "GATEREPRO $unit :: cd $dir && makepad run $pkg${*:+ $*}"; unit_line fail "$unit"; fi
 }
 # the checks side by side on the lease's cores (MAKEPAD_RUN_JOBS), less the depcheck's while it runs beside them:
 # at most one per CHECK_CORES of them, each on CHECK_CORES threads. Four a core, each on all the lease's threads, ran
@@ -381,20 +414,26 @@ step_qcheck() {
 # steps' cargo (host). A package fails when cargo could not compile it, or at `warnings` on a warning of its own
 # (short-format lines under its directory); one it never reached (one it uses failed first) has no verdict. At
 # `errors` a warning of its own is a `GATEUNIT warn` line, no failure.
+# Each error or warning line is the package's whose directory holds its file most closely: the members package at
+# apps/commercial took every Fab test's warning under its own name, and the command its name says (`cargo check
+# --tests -p makepad-commercial-members`) compiles none of them (11-06). A unit that warns or fails says the command
+# that shows it alone (GATEREPRO), for the lane to run.
 # cargo_units <lines file> <LABEL> <failing step word> <errors|warnings> [cargo check args]
 cargo_units() {
-  local list=$1 label=$2 word=$3 level=$4 f out code unit own named=0 pkgs=(); shift 4
+  local list=$1 label=$2 word=$3 level=$4 f out code unit own owned repro named=0 pkgs=(); shift 4
   while read -r -a f; do pkgs+=(-p "${f[1]}"); done < "$list"
   out=$(CARGO_TARGET_DIR=$T nice -n 10 cargo check --release --message-format short -j $(( (${MAKEPAD_RUN_JOBS:-8} + 1) / 2 )) "$@" "${pkgs[@]}" 2>&1); code=$?
+  owned=$(echo "$out" | owner_of "$list")
   while read -r -a f; do
     unit=$(unit_of "${f[@]}")
-    own=$(echo "$out" | grep -E "^${f[2]}/[^:]+:[0-9]+:[0-9]+: (error|warning)")
+    own=$(echo "$owned" | awk -F '\t' -v p="${f[1]}" '$1 == p { sub(/^[^\t]*\t/, ""); print }')
+    repro="GATEREPRO $unit :: cargo check --release${*:+ $*} -p ${f[1]}"
     if echo "$out" | grep -qF "could not compile \`${f[1]}\`" || { [ "$level" = warnings ] && [ -n "$own" ]; }; then
-      echo "$own" | head -40; echo "${f[1]}: cargo check failed"; unit_line fail "$unit"; fail="$fail ${f[1]}"; named=$((named + 1))
+      echo "$own" | head -40; echo "${f[1]}: cargo check failed"; echo "$repro"; unit_line fail "$unit"; fail="$fail ${f[1]}"; named=$((named + 1))
     else
       # at `errors`, its own warnings (each once: its lib and its test build both say it) before a warn line:
       # the bucket names who brought a new one, and the unit stays green
-      if [ -n "$own" ]; then echo "$own" | awk '!seen[$0]++' | head -40; unit_line warn "$unit"; fi
+      if [ -n "$own" ]; then echo "$own" | awk '!seen[$0]++' | head -40; echo "$repro"; unit_line warn "$unit"; fi
       if [ "$code" = 0 ]; then unit_line ok "$unit"; fi
     fi
   done < "$list"
@@ -405,6 +444,16 @@ cargo_units() {
     # none to blame: none of them passed, and a later diff that reaches none of them is no pass
     while read -r -a f; do unit_line fail "$(unit_of "${f[@]}")"; done < "$list"
   fi
+}
+# cargo's short-format error and warning lines (stdin) as `<package>\t<line>`: the package of a lines file
+# (`<word> <package> <dir>`) whose directory holds the line's file most closely (`.`: the root's, below every other)
+owner_of() {
+  awk -v list="$1" 'BEGIN { while ((getline l < list) > 0) { split(l, f, " "); dirs[f[3]] = f[2] } }
+    /^[^ :]+:[0-9]+:[0-9]+: (error|warning)/ {
+      file = substr($0, 1, index($0, ":") - 1); best = ""; most = -1
+      for (d in dirs) { n = (d == ".") ? 0 : length(d); if ((d == "." || index(file, d "/") == 1) && n > most) { best = d; most = n } }
+      if (most >= 0) print dirs[best] "\t" $0
+    }'
 }
 # the other repo's crates that use a changed crate (affected.py `cargo` lines), their libs and bins (0 warnings)
 step_depcheck() {
@@ -420,6 +469,27 @@ step_testcheck() {
   [ -s "$log/tests" ] || return 0
   cargo_units "$log/tests" TESTCHECK tests-check errors --tests
 }
+# the GPU guards (affected.py `guard` lines): render tests of user-visible effects that broke more than once with
+# every test green, on this node's real GPU under the JIT, after every landing that reaches their package or the
+# JIT. A filter that matches no test fails: a renamed guard is no pass. One unit `guard <pkg>` each: the bucket
+# names the landing that changed its inputs, not every landing of the run.
+step_guards() {
+  local status r bad
+  while read -r _ pkg dir filter; do
+    (cd "$dir" && exec $B test "$pkg" --lib -- "$filter") > "$log/guard-$pkg" 2>&1
+    status=$?
+    r=$(grep -E '^test result:' "$log/guard-$pkg" | tail -1)
+    echo "guard $pkg $filter: ${r:-no result}"
+    bad=1
+    case "$r" in
+      "test result: ok. 0 passed"*) echo "guard $pkg: no test matches $filter";;
+      "test result: ok."*) [ "$status" = 0 ] && bad=0;;
+      *) test_failures "$log/guard-$pkg";;
+    esac
+    if [ "$bad" = 0 ]; then unit_line ok "guard $pkg"
+    else fail="$fail guard-$pkg"; echo "GATEREPRO guard $pkg :: makepad test $pkg --lib -- $filter"; unit_line fail "guard $pkg"; fi
+  done < "$log/guards"
+}
 # a cold present takes about PRESENT_CORES cores (its JIT compiling, its first pipelines): five side by side on
 # a gate's 8 cores ran a pool box to load 31 and missed their first frames; so at most a present per
 # PRESENT_CORES of the lease's cores runs at once, and they split the lease's cores (MAKEPAD_RUN_JOBS)
@@ -429,6 +499,338 @@ step_qpresent() {
   PRESENT_JOBS=$(( cores / at ))
   at_once qpresent_one "$log/presents" "$at"
 }
+# A unit hangs when its processes (its session) do nothing for HUNG_QUIET s by the node's own idle look (devhub
+# lease/exec.rs `busy`: under IDLE_PCT % of a core, past 0.2 s, and under 1 MB of I/O since the quiet began, or
+# a process gone with what it had done): its stacks are kept, its processes stopped, and it fails HUNG while the
+# other units go on. No time cap: a unit that works runs as long as it works. 9 min, a minute under its lease's
+# own look (sched.rs QUIET_STALL_MS, 10 min): a hung test fails as itself and never makes its lease look hung
+# and hold its box (a makepad-app-amp test sat in a GStreamer pipeline, its lease idle 10 min with hundreds of
+# packages to go, holding its box's WM restart until it was cancelled, 11-07).
+HUNG_QUIET=${HUNG_QUIET:-540} HUNG_LOOK=${HUNG_LOOK:-10} IDLE_PCT=5
+# unit_activity <session>: its processes' CPU in µs (/proc stat utime, stime, cutime, cstime at 100 Hz), I/O
+# bytes (io rchar + wchar, where readable: a JIT is not dumpable) and peak RSS in KB (status VmHWM: each one's
+# own peak, between looks too) into ua_cpu, ua_io and ua_rss, without a fork
+unit_activity() {
+  local p s f k v
+  ua_cpu=0; ua_io=0; ua_rss=0
+  for p in /proc/[0-9]*; do
+    read -r s 2>/dev/null < "$p/stat" || continue
+    s=${s##*) }; read -r -a f <<< "$s"
+    [ "${f[3]}" = "$1" ] || continue
+    ua_cpu=$((ua_cpu + (f[11] + f[12] + f[13] + f[14]) * 10000))
+    while read -r k v; do case $k in rchar:|wchar:) ua_io=$((ua_io + v));; esac; done 2>/dev/null < "$p/io"
+    while read -r k v _; do case $k in VmHWM:) ua_rss=$((ua_rss + v)); break;; esac; done 2>/dev/null < "$p/status"
+  done
+}
+# unit_watch <session> <out>: beside a run, until it is stopped: a run idle for HUNG_QUIET s gets its JIT stacks
+# in <out>.hung, and its processes stopped. Its processes' summed peak RSS, the most at any look, in MB in
+# <out>.peak (the tests run's GATEPEAK)
+unit_watch() {
+  local since=$SECONDS c0 i0 over p nap peak=0 out=$2
+  trap '[ -z "$nap" ] || kill "$nap" 2>/dev/null; echo $((peak / 1024)) > "$out.peak"; exit 0' TERM
+  unit_activity "$1"; c0=$ua_cpu; i0=$ua_io; peak=$ua_rss
+  while :; do
+    sleep "$HUNG_LOOK" & nap=$!; wait "$nap"; nap=""
+    unit_activity "$1"; over=$(( (SECONDS - since) * 1000000 ))
+    [ "$ua_rss" -le "$peak" ] || peak=$ua_rss
+    if [ "$ua_cpu" -lt "$c0" ] || [ "$ua_io" -lt "$i0" ] || [ $((ua_cpu - c0)) -gt $(( over * IDLE_PCT / 100 > 200000 ? over * IDLE_PCT / 100 : 200000 )) ] || [ $((ua_io - i0)) -gt 1048576 ]; then
+      since=$SECONDS; c0=$ua_cpu; i0=$ua_io; continue
+    fi
+    [ $((SECONDS - since)) -ge "$HUNG_QUIET" ] && break
+  done
+  echo $((peak / 1024)) > "$out.peak"
+  { echo "== its processes did nothing (under $IDLE_PCT% of a core, no I/O) for $((SECONDS - since)) s; their JIT stacks"
+    for p in /proc/[0-9]*; do
+      read -r s 2>/dev/null < "$p/stat" || continue
+      s=${s##*) }; read -r -a f <<< "$s"
+      [ "${f[3]}" = "$1" ] || continue
+      p=${p#/proc/}
+      echo "-- pid $p: why-hung"; $B inspect "$p" why-hung 2>&1 | head -c 200000
+      echo "-- pid $p: stacks"; $B inspect "$p" stacks thread=all depth=48 2>&1 | head -c 400000
+    done; } > "$2.hung" 2>&1
+  # its processes only: the session started for it
+  for p in /proc/[0-9]*; do
+    read -r s 2>/dev/null < "$p/stat" || continue
+    s=${s##*) }; read -r -a f <<< "$s"
+    [ "${f[3]}" = "$1" ] && kill -KILL "${p#/proc/}" 2>/dev/null
+  done
+}
+# watched <out> <cmd...>: the command in a session of its own (a background job of this shell leads no group:
+# setsid execs in place) with unit_watch beside it; its exit code, and <out>.hung when it hung
+watched() {
+  local out=$1 pid watcher code
+  shift
+  setsid "$@" > "$out" 2>&1 < /dev/null &
+  pid=$!
+  unit_watch "$pid" "$out" &
+  watcher=$!
+  wait "$pid"; code=$?
+  kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
+  return "$code"
+}
+# hung_tests <run log> <--list log>: the tests the unit's last target started and did not finish: that target's
+# tests (its --list section: the run's targets in the same order) less those it reported
+hung_tests() {
+  awk -v run="$1" 'BEGIN { while ((getline l < run) > 0) {
+        if (l ~ /^running [0-9]+ tests?$/) { k++; delete done; open = 1 }
+        else if (l ~ /^test result:/) open = 0
+        else if (match(l, /^test .* \.\.\. /)) done[substr(l, 6, RLENGTH - 10)] = 1 } }
+    open && /^[0-9]+ tests, [0-9]+ benchmarks$/ { s++; next }
+    open && s == k - 1 && /: test$/ { name = substr($0, 1, length($0) - 6); if (!(name in done)) print name }' "$2"
+}
+# test_failures <log>: a test run's failures as the bucket log keeps them: every failing test named in full, each
+# with its first panics whole (where, and the message's first line), then the rest that says why (errors, the
+# runner's own lines, its failed results), that middle cut to 12 lines of 400 characters (`head -20 | cut -c1-400`
+# dropped the third failing test's name and every long assertion, 11-07). A panic is a test's when its thread
+# is named for the test, else (a JIT report, a thread of its own) when it came after the run's last test status
+# line before the test's FAILED; one test's panics once per place, a resumed unwind's `Box<dyn Any>` only alone
+test_failures() {
+  awk '
+  # a JSON string field of a report line, its first line, unescaped
+  function jstr(s, key,    i, v) {
+    i = index(s, "\"" key "\":\""); if (!i) return ""
+    s = substr(s, i + length(key) + 4)
+    if (!match(s, /^([^"\\]|\\.)*/)) return ""
+    v = substr(s, 1, RLENGTH); gsub(/\\\\/, "\001", v)
+    i = index(v, "\\n"); if (i) v = substr(v, 1, i - 1)
+    gsub(/\\"/, "\"", v); gsub(/\\t/, "\t", v)
+    # (an awk gsub writes a backslash its own way: one awk doubled it)
+    while ((i = index(v, "\001")) > 0) v = substr(v, 1, i - 1) "\\" substr(v, i + 1)
+    return v
+  }
+  function add(name, loc, msg,    k) {
+    k = name SUBSEP loc; if (k in seen) return; seen[k] = 1
+    if (msg == "Box<dyn Any>") { if (!(name in boxed)) boxed[name] = loc " -- " msg; return }
+    np[name]++; pan[name, np[name]] = loc " -- " msg
+  }
+  function failed(name) { if (!(name in isfail)) { isfail[name] = 1; nf++; order[nf] = name } }
+  function loose(loc, msg) { ns++; sl[ns] = loc; sm[ns] = msg; last_loc = loc; last_msg = msg; have_last = 1 }
+  { sub(/\r$/, "") }
+  want { want = 0; if (wname != "") add(wname, wloc, $0); else loose(wloc, $0); next }
+  /^thread '\''.*'\''( \([0-9]+\))? panicked at .*:$/ {
+    t = $0; sub(/^thread '\''/, "", t); sub(/'\''( \([0-9]+\))? panicked at .*$/, "", t)
+    wloc = $0; sub(/^.* panicked at /, "", wloc); sub(/:$/, "", wloc)
+    wname = (t == "main" || t == "<unnamed>") ? "" : t; want = 1; next
+  }
+  /^  report: \{"kind":"panic"/ { loose(jstr($0, "location"), jstr($0, "message")); next }
+  /^test .* \.\.\. FAILED$/ {
+    name = substr($0, 6, length($0) - 16); failed(name)
+    for (i = 1; i <= ns; i++) add(name, sl[i], sm[i])
+    if (!ns && !np[name] && !(name in boxed) && have_last) add(name, last_loc, last_msg)
+    ns = 0; next
+  }
+  /^test .* \.\.\. (ok|ignored)/ { ns = 0; next }
+  /^failures:$/ { list = 1; next }
+  /^---- .* stdout ----$/ { list = 0; next }
+  list && /^    [^ ]+$/ { failed(substr($0, 5)); next }
+  /^test result:/ { list = 0 }
+  /^error|^makepad test: |^makepad: |^test result: FAILED/ { nr++; if (nr <= 12) rest[nr] = substr($0, 1, 400) }
+  END {
+    for (i = 1; i <= nf; i++) {
+      name = order[i]; print "FAILED " name
+      for (j = 1; j <= np[name] && j <= 3; j++) print "  panicked at " pan[name, j]
+      if (np[name] > 3) print "  (and " np[name] - 3 " more of its panics in the log)"
+      if (!np[name] && (name in boxed)) print "  panicked at " boxed[name]
+    }
+    if (!nf) for (i = 1; i <= ns && i <= 3; i++) print "panicked at " sl[i] " -- " sm[i]
+    for (i = 1; i <= nr && i <= 12; i++) print rest[i]
+    if (nr > 12) print "(and " nr - 12 " more such lines in the log)"
+  }' "$1"
+}
+# one package's test targets under the JIT, as `cargo test -p <pkg>` runs them (doc tests aside): its failing
+# tests and panics, or HUNG and the tests it still ran, and the command that runs it alone (GATEREPRO)
+testrun_one() {
+  # (a split package's target: `test <pkg> <dir> --lib`, its unit `test <pkg> --lib`, its log its own)
+  local unit code r hung run name=$2${4:+-${*:4}}
+  unit=$(unit_of "$@"); name=${name// /-}
+  run=(env ${TEST_JOBS:+MAKEPAD_RUN_JOBS=$TEST_JOBS} MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 $B test "$2" "${@:4}")
+  local t0=$SECONDS
+  watched "$log/testrun-$name" "${run[@]}"; code=$?
+  # its seconds, which the next run deals the slowest units out by (GATE_TIMES); a hung unit's are no measure:
+  # one stopped after 78 min took a shard of its own in the next run's deal, and every unit not measured yet with
+  # it (as the slowest measured), 11-07
+  [ "$code" != 0 ] && [ -s "$log/testrun-$name.hung" ] || echo "GATETIME $unit $((SECONDS - t0))"
+  # its peak RSS, which the next run's shards start it by (GATE_PEAKS)
+  [ -s "$log/testrun-$name.peak" ] && echo "GATEPEAK $unit $(< "$log/testrun-$name.peak")"
+  r=$(grep -E '^test result:' "$log/testrun-$name" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^(passed|failed);?$/) s[$i] += $(i - 1) } END { printf "%d passed, %d failed", s["passed;"], s["failed;"] }')
+  # (a unit that ended by itself as its watch said HUNG: it ended)
+  if [ "$code" != 0 ] && [ -s "$log/testrun-$name.hung" ]; then
+    # inside a target: its tests, listed (watched too), less those it reported
+    if awk '/^running [0-9]+ tests?$/ { o = 1 } /^test result:/ { o = 0 } END { exit !o }' "$log/testrun-$name"; then
+      watched "$log/testrun-$name.list" "${run[@]}" -- --list
+      hung=$(hung_tests "$log/testrun-$name" "$log/testrun-$name.list" | paste -sd' ' -)
+    fi
+    echo "$unit: HUNG ($(head -1 "$log/testrun-$name.hung" | sed 's/^== //; s/; their JIT stacks$//'): stopped; $r before it)"
+    echo "HUNG: ${hung:-no test of a target: between its targets or before them}; its stacks: testrun-$name.hung in the run's kept logs"
+    grep -E '"verdict"' "$log/testrun-$name.hung" | head -4 | cut -c1-400
+    echo "GATEREPRO $unit :: makepad test $2${4:+ ${*:4}}${hung:+ -- $hung --exact}"
+    unit_line fail "$unit"; fail="$fail test:$name"; return
+  fi
+  if [ "$code" = 0 ]; then echo "$unit: ok ($r, $(grep -c '^test result:' "$log/testrun-$name") targets)"; unit_line ok "$unit"; return; fi
+  echo "$unit: FAILED (exit $code; $r)"
+  test_failures "$log/testrun-$name"
+  echo "GATEREPRO $unit :: makepad test $2${4:+ ${*:4}}"
+  unit_line fail "$unit"; fail="$fail test:$name"
+}
+# shard_units <runs file>: the run's units, slowest first (GATE_TIMES: `<unit>=<s>` by `;`, each one's last
+# measured seconds; one not measured yet as the median measured, at least 60 s: as the slowest, one hung unit's
+# 4694 s made each new unit a shard's worth, 11-07). Every shard of a run makes the same list (the same tree,
+# GATE_PROVEN, GATE_RETRY and GATE_TIMES): the queue they share (next_told). A package measured over GATE_SPLIT_S
+# (its targets' sum once split) runs as one unit per test target (`test <pkg> --lib`, `--bin <name>`,
+# `--test <name>`): makepad-fab's 25 targets in series took 1650 s, one unit longer than a shard's share (11-07).
+shard_units() {
+  python3 -I - "$1" "${GATE_TIMES:-}" "${GATE_PROVEN:-}" "${GATE_SPLIT_S:-600}" <<'PY'
+import json, statistics, subprocess, sys
+path, times, proven, split = sys.argv[1:5]
+secs = {}
+for t in times.split(";"):
+    unit, _, s = t.rpartition("=")
+    if unit:
+        secs[unit] = float(s)
+unknown = max(60.0, statistics.median(secs.values())) if secs else 60.0
+proven = set(proven.split(";"))
+def unit(w):
+    return " ".join([w[0], w[1], *w[3:]])
+def measure(pkg):
+    parts = [s for u, s in secs.items() if u.startswith(f"test {pkg} ")]
+    return sum(parts) if parts else secs.get(f"test {pkg}", 0.0)
+metas = {}
+def default_features(p):
+    """The features `makepad test <pkg>` builds with (resolve.rs enabled_features of `default`)."""
+    feats = p.get("features", {})
+    hidden = {v[4:] for vs in feats.values() for v in vs if v.startswith("dep:")}
+    implicit = {d.get("rename") or d["name"] for d in p.get("dependencies", []) if d.get("optional")} - hidden
+    on, work = set(), ["default"]
+    while work:
+        r = work.pop()
+        if r.startswith("dep:"):
+            continue
+        if "/" in r:
+            dep = r.split("/", 1)[0]
+            if dep in implicit:
+                work.append(dep)
+            continue
+        if r in on:
+            continue
+        if r in feats:
+            on.add(r)
+            work.extend(feats[r])
+        elif r in implicit:
+            on.add(r)
+    return on
+def targets(pkg, d):
+    """The package's test targets as `makepad test <pkg>` runs them (cargo test's: its lib, bins and tests, less
+    those whose required features its default ones lack: named alone, such a target is an error)."""
+    found = [p for m in metas.values() for p in m if p["name"] == pkg]
+    if not found:
+        meta = json.loads(subprocess.run(["cargo", "metadata", "--no-deps", "--offline", "--format-version", "1", "--manifest-path", f"{d}/Cargo.toml"], check=True, capture_output=True, text=True).stdout)
+        metas[meta["workspace_root"]] = meta["packages"]
+        found = [p for p in meta["packages"] if p["name"] == pkg]
+    p = found[0]
+    on = default_features(p)
+    out = []
+    for t in p["targets"]:
+        if not t.get("test", True) or not set(t.get("required-features", [])) <= on:
+            continue
+        kinds = set(t["kind"])
+        if kinds & {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}:
+            out.append(["--lib"])
+        elif "bin" in kinds:
+            out.append(["--bin", t["name"]])
+        elif "test" in kinds:
+            out.append(["--test", t["name"]])
+    return sorted(out)
+lines = []
+for l in open(path).read().splitlines():
+    w = l.split()
+    if not w:
+        continue
+    if len(w) == 3 and measure(w[1]) > float(split):
+        for sel in targets(w[1], w[2]):
+            u = unit(w + sel)
+            if u in proven:
+                print(f"{u}: proven")
+                print(f"GATEUNIT proven {u}")
+            else:
+                lines.append(" ".join(w + sel))
+    else:
+        lines.append(l)
+def took(line):
+    return secs.get(unit(line.split()), unknown)
+lines.sort(key=lambda l: (-took(l), l))
+open(path, "w").write("".join(l + "\n" for l in lines))
+print(f"testrun: {len(lines)} units, {sum(took(l) for l in lines):.0f} s of their last measures, the slowest first")
+PY
+}
+# next_told: at_once's next unit for a free slot, from the queue the run's shards share (GATE_QUEUE=1; every shard's
+# $log/runs is the same, its digest said once: GATEQUEUE <lease> <units> <digest>). It asks the run's dealer (the
+# master's tests run, bucket.rs Dealer: GATEWANT <lease> <n>, this lease's n-th ask) and waits for the answer in
+# the lease's $DEVHUB_TOLD (`<n> <index> <digest>`: the queue's line <index>; `<n> -`: none left). A shard on a slow
+# or busy box asks less often: a deal fixed at the start left the run's wall to the shard beside lane work, 1.20x
+# its share (11-07).
+next_told() {
+  local said
+  wants=$((wants + 1)); echo "GATEWANT ${DEVHUB_LEASE:-none} $wants"
+  until said=$(grep -m1 "^$wants " "$DEVHUB_TOLD" 2>/dev/null); do sleep 0.2; done
+  set -- $said
+  [ "$2" != - ] || return 1
+  if [ "$3" != "$queue_digest" ]; then
+    echo "testrun: the dealer's queue $3 is not this shard's $queue_digest"; fail="$fail queue"; return 1
+  fi
+  read -r -a f <<< "$(sed -n "$(($2 + 1))p" "$log/runs")"
+  got=$((got + 1))
+  ram_room "$(unit_of "${f[@]}")"
+}
+# ram_room <unit>: waits (its units ending) until the units this shard runs and <unit> fit the RAM its lease got
+# (DEVHUB_RAM_MB), each at its last peak (GATE_PEAKS; one not measured yet at an even share of it); alone it
+# starts anyway. Three units at once peaked at 27-36 GB, so a shard asked 42.7 GB, which only an empty 60 GB box
+# beside a resident lane had (11-07).
+ram_room() {
+  [ -n "${DEVHUB_RAM_MB:-}" ] || return 0
+  local u sum
+  while [ "${#running[@]}" -gt 0 ]; do
+    sum=${PEAK_MB[$1]:-$((DEVHUB_RAM_MB / at))}
+    for u in "${running[@]}"; do sum=$((sum + ${PEAK_MB[$u]:-$((DEVHUB_RAM_MB / at))})); done
+    [ "$sum" -gt "$DEVHUB_RAM_MB" ] || return 0
+    reap_one
+  done
+}
+# the runs side by side on the lease's cores: at most one per TEST_CORES of them, each with that many JIT jobs
+step_testrun() {
+  local cores=${MAKEPAD_RUN_JOBS:-8} at
+  at=$(( cores / ${TEST_CORES:-4} )); [ "$at" -ge 1 ] || at=1
+  TEST_JOBS=$(( cores / at ))
+  if [ "${GATE_QUEUE:-}" = 1 ]; then
+    echo "testrun: units of the run's queue, at most $at at once"
+    at_once testrun_one "$log/runs" "$at" next_told
+  else
+    echo "testrun: $(grep -c . "$log/runs") units, at most $at at once"
+    at_once testrun_one "$log/runs" "$at"; got=$(grep -c . "$log/runs")
+  fi
+}
+if [ "$mode" = testrun ]; then
+  QBASE=${2:?testrun <base sha> <commercial base sha|->}; QCBASE=${3:--}
+  python3 -I "$here/affected.py" --tests "$QBASE" "$QCBASE" > "$log/affected" 2> "$log/affected.err" || { tail -5 "$log/affected.err"; echo "NODEGATE-FAIL: affected"; exit 1; }
+  : > "$log/runs"
+  while read -r -a f; do
+    if proven "test ${f[1]}"; then echo "test ${f[1]}: proven"; unit_line proven "test ${f[1]}"
+    else printf 'test %s %s\n' "${f[1]}" "${f[2]}" >> "$log/runs"; fi
+  done < <(grep '^tests ' "$log/affected")
+  shard_units "$log/runs" || { echo "NODEGATE-FAIL: shard"; exit 1; }
+  declare -A PEAK_MB=()
+  IFS=';' read -r -a peaks <<< "${GATE_PEAKS:-}"
+  for pk in "${peaks[@]}"; do [ -z "$pk" ] || PEAK_MB[${pk%=*}]=${pk##*=}; done
+  got=0; wants=0
+  if [ "${GATE_QUEUE:-}" = 1 ]; then
+    [ -n "${DEVHUB_TOLD:-}" ] || { echo "NODEGATE-FAIL: queue (no \$DEVHUB_TOLD: no devhub lease of a hub that tells one)"; exit 1; }
+    queue_digest=$(git hash-object "$log/runs" | cut -c1-12)
+    echo "GATEQUEUE ${DEVHUB_LEASE:-none} $(grep -c . "$log/runs") $queue_digest"
+  fi
+  if [ -s "$log/runs" ] && timed step_jit; then timed step_testrun; fi
+  who="[lease ${DEVHUB_LEASE:-none} lane ${MAKEPAD_TEST_LANE:-none} at $(git rev-parse --short=10 HEAD 2>/dev/null || echo unknown) in $PWD]"
+  if [ -n "$fail" ]; then echo "NODEGATE-FAIL:$fail $who"; exit 1; fi
+  echo "NODEGATE-OK testrun $got packages $who"; exit 0
+fi
 if [ "$mode" = tests ]; then
   QBASE=${2:?tests <base sha> <commercial base sha|->}; QCBASE=${3:--}
   python3 -I "$here/affected.py" --tests "$QBASE" "$QCBASE" > "$log/affected" 2> "$log/affected.err" || { tail -5 "$log/affected.err"; echo "NODEGATE-FAIL: affected"; exit 1; }
@@ -453,7 +855,11 @@ if [ "$mode" = hot ]; then
   export PRESENT_WARM=1 PRESENT_WAIT=240 SETTLE=3  # the wait: see fast below
   if HOT=1 timed step_affected; then
     grep '^present ' "$log/affected" > "$log/presents"
-    if timed step_jit; then timed step_qpresent; fi
+    grep '^guard ' "$log/affected" > "$log/guards"
+    if timed step_jit; then
+      timed step_qpresent
+      [ ! -s "$log/guards" ] || timed step_guards
+    fi
   fi
   who="[lease ${DEVHUB_LEASE:-none} lane ${MAKEPAD_TEST_LANE:-none} at $(git rev-parse --short=10 HEAD 2>/dev/null || echo unknown) in $PWD]"
   if [ -n "$fail" ]; then echo "NODEGATE-FAIL:$fail $who"; exit 1; fi

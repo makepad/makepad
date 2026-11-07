@@ -10,12 +10,15 @@
 #   read and grown (ScriptTokenizer.tokens: makepad-script-test's main);
 # - driver: compute_program's driver running a program (a Fab Force study's in-process session):
 #   every makepad-script call it makes from JIT code;
+# - vm_call: a panic in a with_vm closure (makepad-script-std bound): the trampoline boxes it on
+#   the caller's side, ScriptVmCall::resume_if_panicked frees the box there and resumes it;
 # and a field whose bytes are rustc's alone stays refused, naming the field
-# (relax-provided-fixture-guard: `Registry.by_name`, rustc's HashMap).
+# (relax-provided-fixture-guard: `Registry.by_name`, rustc's HashMap), as does an unmarked fn
+# counting rustc's Arc of a type that crosses the boundary (relax-provided-fixture-arc-guard).
 # Run from the workspace root after `cargo build --release -p makepad-run`. TARGET (default
 # target/release); BINS (default: every bin).
 T=${TARGET:-${CARGO_TARGET_DIR:-target}/release}
-BINS=${BINS:-"relax-provided-script-ops fields driver"}
+BINS=${BINS:-"relax-provided-script-ops fields driver vm_call"}
 dir=$(mktemp -d "${TMPDIR:-/tmp}/provided_script.XXXXXX") || exit 1
 mkdir -p "$dir/home" "$dir/tmp" "$dir/reg"
 # not a live session, a registry of its own, no unwatched park: a refusal (the guard, a regression)
@@ -37,6 +40,8 @@ for bin in $BINS; do
 done
 guard=$(jit relax-provided-fixture --bin relax-provided-fixture-guard)
 echo "$guard" | grep -q 'a field of `relax_provided_fixture::Registry` (`by_name: ' || echo "$guard" | grep -q 'a field of `Registry` (`by_name: ' || { fail="$fail guard"; echo "--- guard:"; echo "$guard" | tail -6 | cut -c1-600; }
+arc=$(jit relax-provided-fixture --bin relax-provided-fixture-arc-guard)
+echo "$arc" | grep -q 'shared_registry_retain` calls `[a-z:]*increment_strong_count` in JIT-compiled code' || { fail="$fail arc-guard"; echo "--- arc-guard:"; echo "$arc" | tail -6 | cut -c1-600; }
 rm -rf "$dir"
 if [ -z "$fail" ]; then
     echo "provided_script: ok"

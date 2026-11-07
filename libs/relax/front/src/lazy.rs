@@ -75,6 +75,8 @@ pub struct PendingPlan {
     carried: bool,
     /// planned again for its outline (outline_macros), when `plan` is a restored one
     outlined: std::sync::OnceLock<Plan>,
+    /// the planning thread panicked (`complete`): no plan comes from it, and its waiters fail
+    failed: std::sync::atomic::AtomicBool,
 }
 impl PendingPlan {
     /// The plan an earlier load of these crates recorded (`image`), taken as it is: an edited start
@@ -82,7 +84,7 @@ impl PendingPlan {
     /// the edit (a full selection is always a sound one), so nothing is planned. Its parts stay
     /// the stored ones (the next plan validates them by their own inputs).
     pub fn carried(crates: &[PreCrate], contexts: Vec<Arc<crate::source_context::Context>>, image: Arc<DemandImage>) -> Self {
-        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts: None, carried: true, outlined: std::sync::OnceLock::new() };
+        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts: None, carried: true, outlined: std::sync::OnceLock::new(), failed: Default::default() };
         let plan = Plan::build(&pending.pending_crates, pending.pending_contexts.clone(), Some(image), &pending.early, None);
         let _ = pending.plan.set(plan);
         pending
@@ -91,11 +93,19 @@ impl PendingPlan {
     pub fn new(crates: &[PreCrate], contexts: Vec<Arc<crate::source_context::Context>>, images: Option<&dyn crate::crate_image::CrateImages>, parallel: bool) -> Self {
         let image = if crates.iter().any(|c| c.cfg.session.runtime.lazy_verify) { None }
             else { images.and_then(|images| images.demand_image(crates, recipe_identity(crates))) };
+        // an edited start whose stored plan selected everything: that plan, not a new closure
+        // over every crate (nor its parts encoded again)
+        if image.is_none() && !crates.iter().any(|c| c.cfg.session.runtime.lazy_verify) {
+            if let Some(stored) = images.and_then(|images| images.carried_demand_image(crates)) {
+                if trace() { eprintln!("boot-trace: demand plan carried: its inputs changed, it selected every file"); }
+                return Self::carried(crates, contexts, stored);
+            }
+        }
         let parts = if image.is_none() && crates.first().is_some_and(|c| c.cfg.session.options.rs_lazy)
             && !crates.iter().any(|c| c.cfg.session.runtime.lazy_verify) {
             images.and_then(|i| i.demand_parts(crates, recipe_identity(crates)))
         } else { None };
-        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts, carried: false, outlined: std::sync::OnceLock::new() };
+        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts, carried: false, outlined: std::sync::OnceLock::new(), failed: Default::default() };
         // The crates selected in full (Plan::build) are known before planning.
         pending.early.publish(selected_prefix(crates, pending.parts.as_ref()));
         if image.is_some() || !parallel {
@@ -104,11 +114,25 @@ impl PendingPlan {
         }
         pending
     }
+    /// Plans on this thread (the pool's planning thread). A panic here is the plan's failure:
+    /// its waiters are woken and fail (`failed`), none waits for a plan nobody makes.
     pub fn complete(&self) {
+        struct Failing<'a>(&'a PendingPlan);
+        impl Drop for Failing<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    self.0.failed.store(true, std::sync::atomic::Ordering::Release);
+                    self.0.early.wake_all();
+                }
+            }
+        }
+        let _failing = Failing(self);
         let _reads = self.pending_contexts.first().map(|c| c.bind_source_reads());
         let _ = std::ops::Deref::deref(self);
         self.early.wake_all();
     }
+    /// The planning thread panicked (`complete`).
+    pub fn failed(&self) -> bool { self.failed.load(std::sync::atomic::Ordering::Acquire) }
     pub fn ready(&self) -> Option<&Plan> { self.plan.get() }
     /// The macro definitions the outline of crate `ci` found, its expansions' included (what
     /// the raw scan a crate's files parse against lacks). Waits for the plan. A restored plan
@@ -132,6 +156,7 @@ impl PendingPlan {
     pub fn wait_progress(&self, seen: usize) {
         let mut g = self.early.wake.0.lock().unwrap_or_else(|e| e.into_inner());
         while self.ready().is_none() && self.early_prefix() <= seen {
+            if self.failed() { panic!("the demand plan failed on its thread: the selection past its first {seen} crates never comes"); }
             // (re-checked now and then: a plan made by another dereference wakes nobody)
             g = self.early.wake.1.wait_timeout(g, std::time::Duration::from_millis(20)).unwrap_or_else(|e| e.into_inner()).0;
         }
@@ -288,18 +313,29 @@ impl Plan {
                         let _reads = contexts[job.ci].bind_source_reads();
                         let (path, module, scan) = job.inputs[i].lock().unwrap().take().expect("each input is expanded once");
                         let _profile = crate::load_profile::span(profile, "rust-demand-outline-worker", &path);
-                        let ctx = std::rc::Rc::new(crate::builtins::FileCtx::new(&c.name, &path, &module, &c.cfg));
-                        let surface = {
+                        let expanded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            #[cfg(test)]
+                            if failure_tests::OUTLINE_PANICS.lock().unwrap().iter().any(|p| path.ends_with(p.as_str())) {
+                                panic!("test: the outline expansion of {path} panics");
+                            }
+                            let ctx = std::rc::Rc::new(crate::builtins::FileCtx::new(&c.name, &path, &module, &c.cfg));
                             let src = &scan.src[..];
                             let mut toks = crate::parser::lazy_bodies::Toks::from(&scan.toks[..]);
                             if !toks.last().is_some_and(|t| t.kind == T::Eof) {
                                 toks.push(Tok { kind: T::Eof, lo: src.len() as u32, hi: src.len() as u32 });
                             }
-                            Some(crate::parser::rs_expand::expand(src, toks, c.edition, ctx, job.base.clone()))
-                        };
-                        let surface = surface.map(|surface| OutlineIndexes::new(surface, &scan.src, profile, &path));
+                            let surface = crate::parser::rs_expand::expand(src, toks, c.edition, ctx, job.base.clone());
+                            Some(OutlineIndexes::new(surface, &scan.src, profile, &path))
+                        }));
                         drop(scan);
-                        job.ready.0.lock().unwrap().insert((path.clone(), module.clone()), surface);
+                        match expanded {
+                            Ok(surface) => { job.ready.0.lock().unwrap_or_else(|e| e.into_inner()).surfaces.insert((path.clone(), module.clone()), surface); }
+                            Err(panic) => {
+                                job.ready.0.lock().unwrap_or_else(|e| e.into_inner()).failed.get_or_insert(path.clone());
+                                job.ready.1.notify_all();
+                                std::panic::resume_unwind(panic);
+                            }
+                        }
                         job.ready.1.notify_all();
                     }
                 });
@@ -419,10 +455,15 @@ impl Plan {
                     let take = |key: (String, String)| {
                         if !expected.contains(&key) { return None; }
                         let _profile = crate::load_profile::span(profile, "rust-demand-outline-wait", &key.0);
-                        let mut map = job.ready.0.lock().unwrap();
+                        let mut map = job.ready.0.lock().unwrap_or_else(|e| e.into_inner());
                         loop {
-                            if let Some(surface) = map.remove(&key) { return surface; }
-                            map = crate::pool::wait(&job.ready.1, &job.ready.0, map).unwrap();
+                            if let Some(surface) = map.surfaces.remove(&key) { return surface; }
+                            if let Some(file) = map.failed.clone() {
+                                // (not under the lock: the job's other workers still hand theirs in)
+                                drop(map);
+                                panic!("the demand plan's outline expansion of {file} (crate {}) panicked on its worker: the plan cannot complete", c.name);
+                            }
+                            map = crate::pool::wait(&job.ready.1, &job.ready.0, map).unwrap_or_else(|e| e.into_inner());
                         }
                     };
                     let mut directories = BTreeMap::new();
@@ -1060,14 +1101,22 @@ struct OutlineJob {
     /// publication then owns the scan alone (Arc::make_mut, no copy).
     inputs: Vec<relax_session::sync::Mutex<Option<(String, String, Arc<Scanned>)>>>,
     next: std::sync::atomic::AtomicUsize,
-    ready: (relax_session::sync::Mutex<BTreeMap<(String, String), Option<OutlineIndexes>>>, relax_session::sync::Condvar),
+    ready: (relax_session::sync::Mutex<OutlineReady>, relax_session::sync::Condvar),
+}
+/// An outline job's expanded files, and the file whose expansion panicked on its worker: that
+/// worker is gone with the job's inputs it would have expanded, so no surface of the job is
+/// awaited any more (publication fails at once instead of waiting for work nobody owns).
+#[derive(Default)]
+struct OutlineReady {
+    surfaces: BTreeMap<(String, String), Option<OutlineIndexes>>,
+    failed: Option<String>,
 }
 impl OutlineJob {
     fn new(ci: usize, base: Arc<crate::macros::MacroTable>, scans: &[part::Scan]) -> Arc<Self> {
         let inputs = scans.iter().filter_map(|(path, module, _, scan, ..)| scan.as_ref().map(|scan|
             relax_session::sync::Mutex::new(Some((path.clone(), module.clone(), scan.clone()))))).collect();
         Arc::new(Self { ci, base, inputs, next: std::sync::atomic::AtomicUsize::new(0),
-            ready: (relax_session::sync::Mutex::new(BTreeMap::new()), relax_session::sync::Condvar::new()) })
+            ready: (relax_session::sync::Mutex::new(OutlineReady::default()), relax_session::sync::Condvar::new()) })
     }
 }
 
@@ -1637,4 +1686,47 @@ fn forced_deferral(path: &str) -> bool {
     static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| std::env::var("MAKEPAD_RUN_LAZY_DEFER").map(|v| v.split(',').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect()).unwrap_or_default())
         .iter().any(|suffix| path.ends_with(suffix.as_str()))
+}
+
+#[cfg(test)]
+pub(crate) mod failure_tests {
+    /// Files whose outline expansion panics on its worker (path suffixes; a test's own files).
+    pub(crate) static OUTLINE_PANICS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    /// An outline worker that panics takes the job's inputs it would have expanded with it: the
+    /// plan, and the load waiting for its crate (Pool::take_ahead), fail at once with the reason
+    /// instead of waiting for surfaces nobody makes (relax-front's own deferred load test hung
+    /// 545 s, every thread idle, after its expansion ended that way under the JIT).
+    #[test]
+    fn a_panicked_outline_worker_fails_the_load_at_once() {
+        let dir = std::env::temp_dir().join(format!("relax-outline-panic-{}-{}", std::process::id(), crate::clock::wall_ns()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lib.rs"), "pub mod later;\npub fn f() -> u32 { later::g() + 1 }\n").unwrap();
+        std::fs::write(dir.join("later.rs"), "pub fn g() -> u32 { 2 }\n").unwrap();
+        let root = dir.join("lib.rs").to_string_lossy().into_owned();
+        OUTLINE_PANICS.lock().unwrap().push(dir.join("later.rs").to_string_lossy().into_owned());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let load_root = root.clone();
+        std::thread::spawn(move || {
+            let r = std::panic::catch_unwind(move || {
+                let mut session = crate::Session::default();
+                session.options.rs_lazy = true;
+                let session = std::sync::Arc::new(session);
+                let cfg = crate::cfg::CfgSet::host(&session, &[]);
+                let mut p = crate::program::Program::new(&session);
+                p.preload(vec![crate::preload::PreCrate {
+                    name: "outline_panic".into(), root: load_root.clone(), edition: 2021, cfg: cfg.clone(), deps: Vec::new(),
+                    proc_macro: false, image_deps: Vec::new(), image_dep_names: Vec::new(),
+                }]);
+                let _ = p.load_crate("outline_panic", &load_root, 2021, cfg, Vec::new());
+            });
+            let _ = tx.send(r.err().map(|e| e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()));
+        });
+        // (the bound only turns a hang into a failure; a working load fails in milliseconds)
+        let got = rx.recv_timeout(std::time::Duration::from_secs(120)).expect("the load still waits for an outline worker that panicked");
+        let why = got.expect("the load completed although its outline expansion panicked");
+        assert!(why.contains("panicked"), "{why}");
+        OUTLINE_PANICS.lock().unwrap().retain(|p| !p.starts_with(&*dir.to_string_lossy()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

@@ -1676,7 +1676,7 @@ impl<'a> Parser<'a> {
         let mut full_path = mpath.clone();
         full_path.push(name.clone());
         let prelude_shadowed = STD_PRELUDE_MACROS.contains(&name.as_str())
-            && (m.builtin_macro_path(&self.krate, &module, &full_path, &mut Default::default()).is_some()
+            && (m.builtin_macro(&self.krate, &module, &full_path).is_some()
                 || (qual.is_none() && !path.global() && self.no_prelude == 0 && !self.name_imported(&name, self.pos)));
         let bdef = if prelude_shadowed {
             crate::builtins::builtin_macro_def(&name)
@@ -2069,24 +2069,17 @@ impl<'a> Parser<'a> {
         if trailing && def.builtin == 0 && crate::macros::uses::recording() {
             // a macro call ending a block is an expression (rustc_expand flat_map_stmt
             // `is_trailing_mac`): its expansion's `;` after the one expression is linted
-            let save = self.pos;
-            self.pos = start;
             // the shape of the expansion only, without expanding the calls in it (rustc's
             // is_trailing_mac parse does not either): with macros on, every nested call of the
             // expansion was expanded here and again by the statement parse below, 3^depth
             // expansions for statement macros nested through blocks (nom's alt_trait_inner! /
             // succ! chains of depth 21 took every byte of memory under `makepad check`)
             let macros = self.macros.take();
-            let undo = self.tok_undo.len();
-            let one_expr = self.outer_attrs().is_ok() && self.expr().is_ok() && self.kind() == T::Semi && self.nth(1) == T::Eof;
+            let (one_expr, semi) = self.look_ahead(|p| {
+                p.pos = start;
+                (p.outer_attrs().is_ok() && p.expr().is_ok() && p.kind() == T::Semi && p.nth(1) == T::Eof, p.lo())
+            });
             self.macros = macros;
-            let semi = self.lo();
-            self.pos = save;
-            // the `>>` / `>=` this look-ahead split are whole again for the real parse below
-            while self.tok_undo.len() > undo {
-                let (k, t) = self.tok_undo.pop().unwrap();
-                self.toks.edit(k as usize, |x| *x = t);
-            }
             if one_expr {
                 let file = self.bctx.as_ref().map_or("", |c| c.path.as_str()).to_string();
                 crate::macros::uses::trailing_semi(&file, semi, lo, &def.def_file);
@@ -2098,6 +2091,80 @@ impl<'a> Parser<'a> {
         let r = r?;
         self.parse_cfg_select_rest(rest, if as_expr { 1 } else { 2 })?;
         Ok(Some(r))
+    }
+
+    /// A parse that leaves no trace (a lint's look at a construct's shape): the cursor, the
+    /// tokens it split, the tree and the parser's stacks, lists and flags are as they were
+    /// before it, whatever it parsed or wherever it failed. The tree above all: what a look
+    /// parsed stayed in the arenas, so a load that records lints (`makepad check` / `test`)
+    /// numbered every later node of the file differently from a run's (a trailing macro call's
+    /// expansion parsed twice: 707 exprs against 356 for std's io/error/repr_bitpacked.rs), with
+    /// a second copy of every item the expansion holds. It runs on this parser, not a scratch
+    /// one: it reads the token array as split so far, the fragment and interpolation tables
+    /// keyed by token index, the edition and origin tables and the file's cfg context. A test
+    /// build compares the whole parser (Parser::trace) before and after each look.
+    fn look_ahead<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        #[cfg(test)]
+        let before = self.trace();
+        let (pos, undo, mark) = (self.pos, self.tok_undo.len(), self.ast.mark());
+        let lens = (self.item_start.len(), self.lazy_mods.len(), self.mod_stack.len(), self.scope_stack.len(), self.rule_scopes.len(), self.extra_items.len(), self.extra_assoc_items.len(), self.pending_shape.len());
+        let flags = (self.next_scope, self.no_prelude, self.in_assoc, self.in_trait, self.stmt_ctx, self.range_dots, self.include_as_expr, self.foreign_abi, self.cfg_out, self.expansion_semi, self.exp_depth);
+        let (pending_inner, cfg_select_rest) = (self.pending_inner.clone(), self.cfg_select_rest.borrow().clone());
+        let r = f(self);
+        self.pos = pos;
+        // the `>>` / `>=` it split are whole again
+        while self.tok_undo.len() > undo {
+            let (k, t) = self.tok_undo.pop().unwrap();
+            self.toks.edit(k as usize, |x| *x = t);
+        }
+        self.ast.undo_to(&mark);
+        self.item_start.truncate(lens.0);
+        self.lazy_mods.truncate(lens.1);
+        self.mod_stack.truncate(lens.2);
+        self.scope_stack.truncate(lens.3);
+        self.rule_scopes.truncate(lens.4);
+        self.extra_items.truncate(lens.5);
+        self.extra_assoc_items.truncate(lens.6);
+        self.pending_shape.truncate(lens.7);
+        (self.next_scope, self.no_prelude, self.in_assoc, self.in_trait, self.stmt_ctx, self.range_dots, self.include_as_expr, self.foreign_abi, self.cfg_out, self.expansion_semi, self.exp_depth) = flags;
+        self.pending_inner = pending_inner;
+        *self.cfg_select_rest.borrow_mut() = cfg_select_rest;
+        #[cfg(test)]
+        assert_eq!(before, self.trace(), "Parser::look_ahead left a trace");
+        r
+    }
+
+    /// The whole parser as text, for a test's look at whether a parse left a trace (look_ahead).
+    /// Every field by name, no `..`: a field added to the parser does not compile here until it
+    /// says what it shows.
+    #[cfg(test)]
+    fn trace(&self) -> String {
+        let Parser {
+            // shared and read only: the session, the file's text, its source snapshots and context
+            session: _, src: _, sources: _, bctx: _,
+            // caches of answers that do not change once found: the recursion limit, the token scan
+            // of the file's imports
+            rec_limit: _, import_summary: _,
+            toks, pos, edition, ast, item_start, lazy_bodies, lazy_auto, lazy_part, lazy_mods, macros, krate,
+            ext, exp_map, tok_origin, token_origins, token_input, exp_depth, rules_exp, body_origin,
+            pm_editions, tok_undo, frag_groups, ty_frags, path_frags, meta_frags, block_frags, synth_parens,
+            mod_stack, scope_stack, no_prelude, range_dots, next_scope, rule_scopes, interp, extra_items,
+            extra_assoc_items, pending_inner, in_assoc, in_trait, stmt_ctx, cfg_select_rest,
+            include_as_expr, foreign_abi, cfg_out, expansion_semi, pending_shape,
+        } = self;
+        fn sorted<T: Ord>(mut v: Vec<T>) -> Vec<T> { v.sort(); v }
+        let toks: Vec<Tok> = (0..toks.len()).map(|i| toks.at(i)).collect();
+        let frags = (sorted(frag_groups.iter().collect::<Vec<_>>()), sorted(ty_frags.iter().collect::<Vec<_>>()), sorted(path_frags.iter().collect::<Vec<_>>()),
+            sorted(meta_frags.iter().collect::<Vec<_>>()), sorted(block_frags.iter().collect::<Vec<_>>()), sorted(synth_parens.iter().collect::<Vec<_>>()));
+        let interp = sorted(interp.iter().map(|(k, e)| (*k, e.0)).collect::<Vec<_>>());
+        let tables = (ext.len(), exp_map.len(), tok_origin.len(), token_origins.len(), rules_exp.len(), body_origin.len(), pm_editions.len());
+        let shapes: Vec<_> = pending_shape.iter().map(|(r, e)| (*r, e.as_ref().map(|e| (e.pos, e.msg.clone())))).collect();
+        format!("toks {toks:?}\npos {pos} edition {edition} lazy {lazy_bodies} {lazy_auto} {lazy_part} {lazy_mods:?} macros {} krate {krate}\n\
+            tables {tables:?} token_input {token_input} exp_depth {exp_depth} tok_undo {tok_undo:?} frags {frags:?} interp {interp:?}\n\
+            mods {mod_stack:?} scopes {scope_stack:?} {next_scope} {rule_scopes:?} no_prelude {no_prelude} range_dots {range_dots}\n\
+            items {item_start:?} {extra_items:?} {extra_assoc_items:?} {pending_inner:?} {in_assoc} {in_trait} {foreign_abi:?}\n\
+            stmt {stmt_ctx} {include_as_expr} {expansion_semi} cfg {cfg_out} {:?} shapes {shapes:?}\nast {ast:?}",
+            macros.is_some(), cfg_select_rest.borrow())
     }
 
     /// After the one expression of an `include!` in expression position: tokens left are the
@@ -5726,6 +5793,8 @@ pub struct ParsedFile {
     pub src_len: u32,
     /// Cached path/source identity, shared by file metadata and front-image lookups.
     pub source_hash: std::sync::OnceLock<(String, u128)>,
+    /// How this parse numbers the file (ParsedFile::numbering): on its first use, or its image's.
+    pub numbering: std::sync::OnceLock<u128>,
     /// substituted fragment tokens -> their origin (Parser::tok_origin)
     pub tok_origin: Table<Maps>,
     pub token_origins: Table<Origins>,
@@ -5941,6 +6010,32 @@ impl ParsedFile {
     pub fn source_hash(&self, path: &str) -> u128 {
         let (cached_path, hash) = self.source_hash.get_or_init(|| (path.to_string(), crate::crate_image::file_hash(path, &self.src[..self.src_len as usize])));
         if cached_path == path { *hash } else { crate::crate_image::file_hash(path, &self.src[..self.src_len as usize]) }
+    }
+
+    /// How this parse numbered the file's expressions, patterns, blocks and the rest (the ids a
+    /// closure slot, a site or a type names): the arena ends of its tree, the fn bodies it
+    /// skipped, and what parsing those (ParsedFile::part) takes besides the file and its crate:
+    /// the part numbers them after the tree's ends, in source order. The same text is not
+    /// always parsed the same way: which macro calls a load expands into the tree and which
+    /// bodies it skips depend on the load (a demand load's outline, the macro names in scope),
+    /// so two programs can number one text differently. An id is only meaningful with the
+    /// numbering it was made in.
+    pub fn numbering(&self) -> u128 {
+        *self.numbering.get_or_init(|| {
+            let mut h = crate::sip::Sip128::new();
+            h.str("parse-numbering");
+            for end in self.ast.ends() { h.u32(end); }
+            for it in self.ast.items.iter() {
+                if let ItemKind::Fn(sig, None, _) = it.kind {
+                    if let Some(r) = self.ast.fn_sig(sig).lazy_body { h.u32(r.lo); h.u32(r.hi); }
+                }
+            }
+            match self.lazy.as_ref() {
+                Some(ctx) => { h.u8(1); h.u8(ctx.s2_fmt as u8); }
+                None => h.u8(0),
+            }
+            h.finish128()
+        })
     }
 
     /// An impl item's header text (up to its first item, whitespace dropped) and its ordinal
@@ -6447,7 +6542,7 @@ pub(crate) fn parse_owned_input(sess: &std::sync::Arc<crate::Session>, mut src: 
     };
     src.reserve_exact(ext.len());
     src.extend_from_slice(&ext);
-    let mut pf = ParsedFile { src: src.into(), toks: toks.into(), ast, edition, exp_map: Table::from_rows(&exp_map), line_starts: std::sync::OnceLock::new(), src_len, source_hash: Default::default(), tok_origin: Table::from_rows(&tok_origin), token_origins: Table::from_rows(&token_origins), token_input, sources, rules_exp: Table::from_rows(&rules_exp), body_origin: Table::from_rows(&body_origin), pm_editions: Table::from_rows(&pm_editions), lazy: lazy.into(), part: std::sync::OnceLock::new(), impl_heads: std::sync::OnceLock::new(), image: None, sink: None };
+    let mut pf = ParsedFile { src: src.into(), toks: toks.into(), ast, edition, exp_map: Table::from_rows(&exp_map), line_starts: std::sync::OnceLock::new(), src_len, source_hash: Default::default(), numbering: Default::default(), tok_origin: Table::from_rows(&tok_origin), token_origins: Table::from_rows(&token_origins), token_input, sources, rules_exp: Table::from_rows(&rules_exp), body_origin: Table::from_rows(&body_origin), pm_editions: Table::from_rows(&pm_editions), lazy: lazy.into(), part: std::sync::OnceLock::new(), impl_heads: std::sync::OnceLock::new(), image: None, sink: None };
     pf.shrink();
     Ok((pf, used))
 }
@@ -6628,6 +6723,43 @@ mod diagnostic_tests {
         let call = source.windows(9).rposition(|s| s == b"outer!();").unwrap() as u32;
         let result = parse_owned_ctx(sess, source,None,2021,Some(crate::macros::MacroScope::new(std::sync::Arc::new(crate::macros::MacroTable::default()))),"test",None,false);
         match result { Err((pos,_)) => assert_eq!(pos,call), Ok(_) => panic!("expected a parse error") }
+    }
+
+    #[test]
+    fn a_load_that_records_lints_numbers_a_file_as_a_run_does() {
+        // std's io/error/repr_bitpacked.rs kind_from_prim: a block ending in a call of a body-local
+        // macro whose expansion holds an item. A load that records lints (`makepad check` / `test`)
+        // first looks at the expansion's shape (the trailing-semicolon lint). What that look parsed
+        // stayed in the tree: the file numbered differently from a run's (707 exprs against 356),
+        // its cached code was another program's numbering, and the expansion's item was there twice.
+        // (In a test build the look itself checks the whole parser before and after: look_ahead.)
+        let src = b"fn kind(k: u32) -> Option<u32> {\n    let k = k + 0;\n    macro_rules! pick {\n        ($($v:literal),*) => {{\n            const _: fn(u32) = |x| match x { $($v => (),)* _ => () };\n            match k { $(n if n == $v => Some($v),)* _ => None }\n        }};\n    }\n    pick!(1, 2, 3)\n}\n";
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let parse = || match parse_owned_ctx(sess, src.to_vec(), None, 2021, Some(crate::macros::MacroScope::new(std::sync::Arc::new(crate::macros::MacroTable::default()))), "test", None, false) {
+            Ok((pf, _)) => pf,
+            Err((at, m)) => panic!("parse error at {at}: {m}"),
+        };
+        crate::macros::uses::record(true);
+        let linted = parse();
+        crate::macros::uses::record(false);
+        let run = parse();
+        let consts = |pf: &ParsedFile| pf.ast.items.iter().filter(|it| matches!(it.kind, ItemKind::Const(..))).count();
+        assert_eq!((consts(&linted), consts(&run)), (1, 1), "the expansion's const item, once");
+        assert_eq!(linted.ast.ends(), run.ast.ends());
+        assert_eq!(linted.numbering(), run.numbering());
+    }
+
+    #[test]
+    #[should_panic(expected = "Parser::look_ahead left a trace")]
+    fn a_look_ahead_that_leaves_any_field_changed_fails() {
+        // the whole-parser check a test build makes around every look: a field look_ahead does not
+        // take back (a parse without expansion adds no fragment) changed inside it
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let src = b"fn f() {}\n".to_vec();
+        let mut toks = Vec::new();
+        assert!(crate::lexer::lex(&src, 2021, &mut toks).is_ok());
+        let mut p = Parser::new(sess, &src, toks, 2021);
+        p.look_ahead(|p| { p.ty_frags.insert(7); });
     }
 }
 

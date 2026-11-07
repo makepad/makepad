@@ -838,6 +838,11 @@ mod imp {
 mod x64_walk {
     use super::{Raw, MAX_FRAMES};
 
+    /// Why a walk ends at a frame whose return address is no code it can step: a program running
+    /// under the JIT walking its own threads sees its own frames so (its JIT code is the running
+    /// compiler's, not a unit of its own)
+    pub const NOT_CODE: &str = "its return address is in neither JIT code nor a module with unwind tables";
+
     /// Each step is proven or the walk ends there, saying why (`raw.stop`): a JIT frame by its
     /// frame record (JIT code keeps one in rbp; where rbp is not known, at its unwind info's
     /// distance above sp), a host frame by its module's unwind tables, the stack switch
@@ -854,7 +859,7 @@ mod x64_walk {
             let look = if top { r.rip } else { r.rip.wrapping_sub(1) };
             let jit = crate::jit::in_jit_code(look);
             if !top && !jit && !cfi::covers(look) {
-                raw.stop = Some("its return address is in neither JIT code nor a module with unwind tables");
+                raw.stop = Some(NOT_CODE);
                 break;
             }
             raw.pcs[raw.n] = r.rip;
@@ -1134,7 +1139,7 @@ mod imp {
 /// pointer is needed and says so (a libc built with them).
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 mod tests {
-    use super::{capture, imp::BLOCKED_NO_FP, list, Raw};
+    use super::{capture, imp::BLOCKED_NO_FP, list, x64_walk::NOT_CODE, Raw};
     use std::io::Write;
     use std::os::fd::AsRawFd;
     use std::sync::atomic::{AtomicU64, Ordering::{Acquire, Release}};
@@ -1213,9 +1218,17 @@ mod tests {
             super::super::symbols::host_symbol(if i == 0 { pc } else { pc - 1 }).map_or(format!("{pc:#x}"), |s| s.0)
         }).collect();
         assert!(!names.iter().any(|n| n.contains("fake_caller")), "a caller guessed from stack contents: {names:?}");
-        let reached = names.iter().any(|n| n.contains("park_in_poll"));
-        assert!(reached || raw.stop == Some(BLOCKED_NO_FP), "the walk neither reached park_in_poll nor said why it stopped: {names:?} {:?}", raw.stop);
-        assert!(raw.n >= 1);
+        if cfg!(relax) {
+            // under the JIT, `park_in_poll` is code of the compiler that runs this test, which no
+            // unit of the compiler under test knows: the walk steps libc's frames by their CFI and
+            // ends at poll's return address, saying so
+            assert_eq!(raw.stop, Some(NOT_CODE), "{names:?}");
+            assert!(names.last().is_some_and(|n| n.contains("poll")), "the walk's last frame is poll: {names:?}");
+        } else {
+            let reached = names.iter().any(|n| n.contains("park_in_poll"));
+            assert!(reached || raw.stop == Some(BLOCKED_NO_FP), "the walk neither reached park_in_poll nor said why it stopped: {names:?} {:?}", raw.stop);
+            assert!(raw.n >= 1);
+        }
     }
 }
 

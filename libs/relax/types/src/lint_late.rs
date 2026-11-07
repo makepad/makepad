@@ -1669,16 +1669,24 @@ pub const TEXT_DIRECTION_CODEPOINT_IN_COMMENT: Lint = lint::lint("text_direction
 pub const TEXT_DIRECTION_CODEPOINT_IN_LITERAL: Lint = lint::lint("text_direction_codepoint_in_literal");
 
 /// Item-level passes over the definitions of the checked crates marked in `own`.
-pub fn check_items(prog: &Program, tcx: &Tcx, own: &[bool]) {
+pub(crate) fn check_items(prog: &Program, tcx: &Tcx, own: &[bool], pt: &mut crate::lint_dead::PartTimes) {
     if !lint::enabled() { return; }
     text_direction(prog, own);
+    pt.mark("lint_late text_direction");
     improper_ctypes(prog, tcx, own);
+    pt.mark("lint_late improper_ctypes");
     crate::lint_nonlocal::check(prog, tcx, own);
+    pt.mark("lint_late lint_nonlocal");
     crate::lint_late2::check_items(prog, own);
+    pt.mark("lint_late lint_late2::check_items");
     crate::lint_late2::check_eq_impls(prog, tcx, own);
+    pt.mark("lint_late check_eq_impls");
     crate::lint_late2::check_use_deprecations(prog, tcx, own);
+    pt.mark("lint_late check_use_deprecations");
     crate::lint_late2::check_signature_deprecations(prog, tcx, own);
+    pt.mark("lint_late check_signature_deprecations");
     crate::lint_late2::check_refining_impls(prog, tcx, own);
+    pt.mark("lint_late check_refining_impls");
 }
 
 /// rustc_ast::util::unicode TEXT_FLOW_CONTROL_CHARS.
@@ -2303,70 +2311,73 @@ fn improper_ctypes(prog: &Program, tcx: &Tcx, own: &[bool]) {
             let _ = ii;
         }
     }
-    for i in 0..prog.defs.len() {
-        let def = prog.defs[i];
-        if !own.get(def.krate as usize).copied().unwrap_or(false) { continue; }
-        let d = DefId(i as u32);
-        if lint::generated(prog, d) { continue; }
-        let file = &prog.files[def.file as usize];
-        let ast = &file.ast;
-        match def.kind {
-            DefKind::ForeignFn => {
-                let abi = foreign_abi.get(&(def.file, def.item.0)).copied().flatten();
-                let rust = abi.is_some_and(|a| file.text(a).trim_matches('"') == "Rust");
-                if !rust { ip.check_foreign_fn(d, CItemKind::Declaration); } else { ip.check_fn_fnptrs(d, CItemKind::Declaration); }
-            }
-            DefKind::ForeignStatic => {
-                let abi = foreign_abi.get(&(def.file, def.item.0)).copied().flatten();
-                let rust = abi.is_some_and(|a| file.text(a).trim_matches('"') == "Rust");
-                if rust { continue; }
-                if let ItemKind::Static(_, ty, _) = ast.item(def.item).kind {
-                    if let Some(t) = tcx.const_ty(prog, d) {
-                        let mut f = Ffic { prog, tcx, env: ip.env(d), krate: def.krate, cache: Default::default(), base_ty: t, base_mode: CItemKind::Declaration, adt_env: Default::default() };
-                        f.base_ty = f.norm(t);
-                        let res = f.check_type(VState::static_entry(), t);
-                        ip.emit(d, &f, ast_ty_pos(ast, ty).unwrap_or(ast.item(def.item).name.lo), res, CItemKind::Declaration);
-                    }
-                }
-            }
-            DefKind::Fn | DefKind::AssocFn => {
-                let ItemKind::Fn(fsig, body, _) = ast.item(def.item).kind else { continue };
-                let fsig = *ast.fn_sig(fsig);
-                // required trait methods have no body and are not visited (`check_fn`)
-                if body.is_none() && fsig.lazy_body.is_none() { continue; }
-                let rust = match fsig.abi { None => true, Some(None) => false, Some(Some(a)) => file.text(a).trim_matches('"') == "Rust" };
-                if !rust { ip.check_foreign_fn(d, CItemKind::Definition); } else { ip.check_fn_fnptrs(d, CItemKind::Definition); }
-            }
-            DefKind::Struct | DefKind::Union | DefKind::Enum => {
-                // `check_field_def`: extern fn pointers in the fields
-                let Some(a) = tcx.adts.get(&d) else { continue };
-                let groups: Vec<List<FieldDef>> = match ast.item(def.item).kind {
-                    ItemKind::Struct(r) => match ast.row(r).data { VariantData::Struct(l) | VariantData::Tuple(l) => vec![l], VariantData::Unit => vec![] },
-                    ItemKind::Union(r) => vec![ast.row(r).fields],
-                    ItemKind::Enum(r) => ast.list(ast.row(r).variants).iter().filter_map(|v| match v.data { VariantData::Struct(l) | VariantData::Tuple(l) => Some(l), VariantData::Unit => None }).collect(),
-                    _ => vec![],
-                };
-                let mut vi = 0;
-                let mut vars = a.variants.iter().filter(|v| !v.fields.is_empty());
-                let _ = &mut vi;
-                for l in groups {
-                    let Some(v) = vars.next() else { break };
-                    for (fd, ft) in ast.list(l).iter().zip(v.fields.iter()) {
-                        ip.check_fnptrs(d, fd.ty, ft.ty, VState::static_entry(), CItemKind::Definition);
-                    }
-                }
-            }
-            DefKind::Static | DefKind::Const | DefKind::TypeAlias => {
-                let ty_id = match ast.item(def.item).kind {
-                    ItemKind::Static(_, ty, _) => Some(ty),
-                    ItemKind::Const(ty, _) => ty.get(),
-                    ItemKind::TypeAlias(r) => ast.row(r).ty,
-                    _ => None,
-                };
-                if let (Some(ty_id), Some(t)) = (ty_id, if def.kind == DefKind::TypeAlias { tcx.type_of(prog, d).ok() } else { tcx.const_ty(prog, d) }) { ip.check_fnptrs(d, ty_id, t, VState::static_entry(), CItemKind::Definition); }
-            }
-            _ => {}
+    // (each definition on its own: their lints are their own, and the check's sort orders them)
+    let defs: Vec<DefId> = (0..prog.defs.len() as u32).map(DefId).filter(|&d| own.get(prog.def(d).krate as usize).copied().unwrap_or(false) && !lint::generated(prog, d)).collect();
+    lint::par_each(&defs, |&d| improper_ctypes_def(&ip, &foreign_abi, d));
+}
+
+/// The improper_ctypes passes over one definition (`foreign_abi`: the ABI of each foreign block's items).
+fn improper_ctypes_def(ip: &Improper, foreign_abi: &std::collections::HashMap<(u32, u32), Option<crate::ast::Ident>>, d: DefId) {
+    let (prog, tcx) = (ip.prog, ip.tcx);
+    let def = *prog.def(d);
+    let file = &prog.files[def.file as usize];
+    let ast = &file.ast;
+    match def.kind {
+        DefKind::ForeignFn => {
+            let abi = foreign_abi.get(&(def.file, def.item.0)).copied().flatten();
+            let rust = abi.is_some_and(|a| file.text(a).trim_matches('"') == "Rust");
+            if !rust { ip.check_foreign_fn(d, CItemKind::Declaration); } else { ip.check_fn_fnptrs(d, CItemKind::Declaration); }
         }
+        DefKind::ForeignStatic => {
+            let abi = foreign_abi.get(&(def.file, def.item.0)).copied().flatten();
+            let rust = abi.is_some_and(|a| file.text(a).trim_matches('"') == "Rust");
+            if rust { return; }
+            if let ItemKind::Static(_, ty, _) = ast.item(def.item).kind {
+                if let Some(t) = tcx.const_ty(prog, d) {
+                    let mut f = Ffic { prog, tcx, env: ip.env(d), krate: def.krate, cache: Default::default(), base_ty: t, base_mode: CItemKind::Declaration, adt_env: Default::default() };
+                    f.base_ty = f.norm(t);
+                    let res = f.check_type(VState::static_entry(), t);
+                    ip.emit(d, &f, ast_ty_pos(ast, ty).unwrap_or(ast.item(def.item).name.lo), res, CItemKind::Declaration);
+                }
+            }
+        }
+        DefKind::Fn | DefKind::AssocFn => {
+            let ItemKind::Fn(fsig, body, _) = ast.item(def.item).kind else { return };
+            let fsig = *ast.fn_sig(fsig);
+            // required trait methods have no body and are not visited (`check_fn`)
+            if body.is_none() && fsig.lazy_body.is_none() { return; }
+            let rust = match fsig.abi { None => true, Some(None) => false, Some(Some(a)) => file.text(a).trim_matches('"') == "Rust" };
+            if !rust { ip.check_foreign_fn(d, CItemKind::Definition); } else { ip.check_fn_fnptrs(d, CItemKind::Definition); }
+        }
+        DefKind::Struct | DefKind::Union | DefKind::Enum => {
+            // `check_field_def`: extern fn pointers in the fields
+            let Some(a) = tcx.adts.get(&d) else { return };
+            let groups: Vec<List<FieldDef>> = match ast.item(def.item).kind {
+                ItemKind::Struct(r) => match ast.row(r).data { VariantData::Struct(l) | VariantData::Tuple(l) => vec![l], VariantData::Unit => vec![] },
+                ItemKind::Union(r) => vec![ast.row(r).fields],
+                ItemKind::Enum(r) => ast.list(ast.row(r).variants).iter().filter_map(|v| match v.data { VariantData::Struct(l) | VariantData::Tuple(l) => Some(l), VariantData::Unit => None }).collect(),
+                _ => vec![],
+            };
+            let mut vi = 0;
+            let mut vars = a.variants.iter().filter(|v| !v.fields.is_empty());
+            let _ = &mut vi;
+            for l in groups {
+                let Some(v) = vars.next() else { break };
+                for (fd, ft) in ast.list(l).iter().zip(v.fields.iter()) {
+                    ip.check_fnptrs(d, fd.ty, ft.ty, VState::static_entry(), CItemKind::Definition);
+                }
+            }
+        }
+        DefKind::Static | DefKind::Const | DefKind::TypeAlias => {
+            let ty_id = match ast.item(def.item).kind {
+                ItemKind::Static(_, ty, _) => Some(ty),
+                ItemKind::Const(ty, _) => ty.get(),
+                ItemKind::TypeAlias(r) => ast.row(r).ty,
+                _ => None,
+            };
+            if let (Some(ty_id), Some(t)) = (ty_id, if def.kind == DefKind::TypeAlias { tcx.type_of(prog, d).ok() } else { tcx.const_ty(prog, d) }) { ip.check_fnptrs(d, ty_id, t, VState::static_entry(), CItemKind::Definition); }
+        }
+        _ => {}
     }
 }
 

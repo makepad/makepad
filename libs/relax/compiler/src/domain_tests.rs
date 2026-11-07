@@ -1236,19 +1236,41 @@ fn end_process(pid: u32) {
     }
 }
 
-/// What the process has open now.
-fn open_count() -> usize {
+/// What the process has open now: each descriptor and the file it names ("" for a pipe or a
+/// socket where the system names none), but the listing's own; on Windows, one row per handle.
+fn open_now() -> Vec<(u64, String)> {
     #[cfg(target_os = "linux")]
-    return std::fs::read_dir("/proc/self/fd").unwrap().count();
+    return std::fs::read_dir("/proc/self/fd").unwrap().filter_map(|e| e.ok()).map(|e| {
+        (e.file_name().to_string_lossy().parse().unwrap_or(u64::MAX), std::fs::read_link(e.path()).map(|t| t.to_string_lossy().into_owned()).unwrap_or_default())
+    }).filter(|(_, file)| *file != format!("/proc/{}/fd", std::process::id())).collect();
     #[cfg(target_vendor = "apple")]
-    return std::fs::read_dir("/dev/fd").unwrap().count();
+    {
+        extern "C" {
+            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        }
+        const F_GETPATH: i32 = 50;
+        return std::fs::read_dir("/dev/fd").unwrap().filter_map(|e| e.ok()).filter_map(|e| e.file_name().to_string_lossy().parse::<i32>().ok()).map(|fd| {
+            let mut buf = [0u8; 1024];
+            let named = unsafe { fcntl(fd, F_GETPATH, buf.as_mut_ptr()) } == 0;
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(0);
+            (fd as u64, if named { String::from_utf8_lossy(&buf[..end]).into_owned() } else { String::new() })
+        }).filter(|(_, file)| file != "/dev/fd").collect();
+    }
     #[cfg(windows)]
     {
         use crate::os::win32::{GetCurrentProcess, GetProcessHandleCount};
         let mut n = 0;
         unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut n) };
-        n as usize
+        (0..n as u64).map(|i| (i, String::new())).collect()
     }
+}
+
+/// A file the compiler has open for itself: a source file a lazy compile read (kept for the rest
+/// of the process), a cache store (any generation) or a store write in progress. Under load the
+/// compiler's work for the first round lands in a later one, and so do these
+fn the_compilers(file: &str) -> bool {
+    let name = file.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(file);
+    name.ends_with(".rs") || name.contains(".rcs")
 }
 
 /// The run's end gives back what the run held, though it never did: the next run binds the same
@@ -1257,13 +1279,13 @@ fn open_count() -> usize {
 fn a_run_ends_with_what_it_held_given_back() {
     isolated_test!(a_run_ends_with_what_it_held_given_back);
     let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let mut counts = Vec::new();
+    let (mut counts, mut lefts) = (Vec::new(), Vec::new());
     for _ in 0..3 {
         let (mut u, entry, root) = fixture_of(HOLDS, "fixture");
         u.tier1 = None;
         let up = &mut *u as *mut Unit;
         let flags: [AtomicU64; 4] = Default::default();
-        let open_before = open_count();
+        let open_before = open_now();
         let (domain, _base, main) = launch(&mut u, entry, None, &flags);
         wait(|| {
             if let Some(DomainState::Crashed(why)) = state(domain) { panic!("the fixture crashed: {why}"); }
@@ -1302,14 +1324,17 @@ fn a_run_ends_with_what_it_held_given_back() {
             }
             assert_eq!(unsafe { signal(SIGUSR2, 0) }, 0, "the run's handler stayed");
         }
-        counts.push(open_count() as i64 - open_before as i64);
+        // what the round left open, by what it names: not a count of the whole process
+        let left: Vec<_> = open_now().into_iter().filter(|f| !open_before.contains(f) && !the_compilers(&f.1)).collect();
+        counts.push(left.len());
+        lefts.push(left);
         domains().retain(|d| d.info.id != domain);
         drop(u);
         std::fs::remove_dir_all(root).unwrap();
     }
     eprintln!("left open by each round: {counts:?}");
     // (the first round's lazy compiles open what stays open for the whole process)
-    assert_eq!(&counts[1..], &[0, 0], "left open: {counts:?}");
+    assert_eq!(&counts[1..], &[0, 0], "left open: {lefts:?}");
 }
 
 const NATIVE_FAULT: &str = r#"
@@ -1409,4 +1434,15 @@ fn a_fault_deeper_in_native_code_ends_the_process_at_once() {
     assert_eq!(status.code(), Some(0xc000_0005u32 as i32), "{told}");
     #[cfg(unix)]
     assert!(std::os::unix::process::ExitStatusExt::signal(&status).is_some(), "{status:?}\n{told}");
+}
+
+/// A run whose boot ended before its unit was in (its build failed) has no code and no program
+/// threads: its end, for a restart asked meanwhile (`session relaunch`), ends nothing and reads no
+/// unit (the end read through the missing unit and the process died, 11-07).
+#[test]
+fn a_run_with_no_unit_ends_with_nothing_to_end() {
+    isolated_test!(a_run_with_no_unit_ends_with_nothing_to_end);
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let end = end_run(std::ptr::null_mut(), Duration::from_millis(100));
+    assert_eq!((end.threads, end.left.len()), (0, 0), "{}", end.line());
 }

@@ -201,6 +201,7 @@ pub fn start(app: &str) {
 pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("session", "view [open|dismiss]", "the run's view over the app (compile errors, a parked panic, the JIT's state): what it shows, or open / dismiss it (the caption's JIT ring is display only)"),
     ("pin", "[on|off]", "pin the running app while an operation runs: no edit or landing reaches it and it does not restart; off: it catches up"),
+    ("hold", "[files=<path>=<blob id or ->, one a line> | take dir=<dir> files=... | off]", "hold back a landing (devhub's show, until its tip is proven): while a file says what the landing wrote (its git blob id, - when it removes the file) its change waits; every other save applies at once; take: the held files move to a proven tip's text (<dir>/<path>, of that blob id; -: gone), the rest stays held; off: the landing goes in; no words: how many files are held"),
     ("inputs", "[match=<path substring>] [of=<paths, one per line>]", "the live session's reload source files, workspace-relative, one path per line and a count; unloaded sources are excluded; of= answers only which of those paths are inputs, and which others lie in no package of the graph (`outside`)"),
     ("session", "relaunch", "apply the edits waiting for a restart: the process starts again (an app that restarts itself, std::relax::restart_supported, with its state and window frames)"),
     ("why-hung", "[probe_ms=200]", "is it stuck and why: verdict (deadlock / blocked / busy / idle), the wait chain or cycle, stacks of the threads in it"),
@@ -317,7 +318,7 @@ fn dispatch_command(req: &Req, out: &mut Out) {
     }
     match req.cmd.as_str() {
         "session" => match req.pos.first().map(String::as_str) {
-            Some("relaunch") => match crate::reload::relaunch_pending() {
+            Some("relaunch") => match crate::reload::relaunch_pending(&crate::reload::inspect_asker()) {
                 // the waiting edits stay noted until a run loads them (the app may postpone it)
                 Ok(how) => {
                     out.line(&format!("{{\"relaunch\":\"queued\",\"as\":\"{}\",\"pid\":{}}}", how, std::process::id()))
@@ -325,8 +326,18 @@ fn dispatch_command(req: &Req, out: &mut Out) {
                 Err(e) => out.err(&e),
             },
             None | Some("pending") => {
+                // and what each one is, oldest first (devhub's shows say the first beside the sha
+                // the show is listed at, which it does not wholly run)
                 let p = crate::reload::restart_pending();
-                out.line(&format!("{{\"restart_pending\":{},\"note\":\"edits that cannot apply live wait here; the app runs the code before them until `session relaunch`\"}}", p.len()));
+                out.line(&format!("{{\"restart_pending\":{},\"pending\":[{}],\"note\":\"edits that cannot apply live wait here; the app runs the code before them until `session relaunch`\"}}", p.len(), p.iter().map(|w| json_str(w)).collect::<Vec<_>>().join(",")));
+                // in one line, what the app does not run yet, and what it does
+                if let Some((since, why)) = crate::reload::restart_pending_since() {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                    let secs = now.saturating_sub(since) / 1000;
+                    out.line(&format!("{{\"waiting\":{}}}", json_str(&format!("{} edit{} wait{} for a restart since {} s ago (oldest: {}); the app runs the code before {}",
+                        p.len(), if p.len() == 1 { "" } else { "s" }, if p.len() == 1 { "s" } else { "" }, secs, why, if p.len() == 1 { "it" } else { "them" }))));
+                }
+                out.line(&format!("{{{}}}", runs_what()));
                 {
                     use crate::reload::host;
                     let (phase, since) = host::status();
@@ -379,6 +390,27 @@ fn dispatch_command(req: &Req, out: &mut Out) {
                 Some(_) => return out.err("pin [on|off]"),
             };
             out.line(&format!("{{\"pinned\":{on}}}"));
+        }
+        "hold" => {
+            // (held, taken: Some for a take)
+            let held = match (req.pos.first().map(String::as_str), req.get("files")) {
+                (Some("off"), None) => {
+                    crate::reload::release_landing();
+                    Ok((0, None))
+                }
+                (None, Some(list)) => hold_files(list).and_then(|files| crate::reload::hold_landing(&files)).map(|n| (n, None)),
+                (Some("take"), Some(list)) => match req.get("dir") {
+                    Some(dir) => hold_files(list).and_then(|files| crate::reload::take_landing(dir, &files)).map(|(n, t)| (n, Some(t))),
+                    None => Err("hold take dir=<dir> files=<path>=<blob id or ->, one a line".to_string()),
+                },
+                (None, None) => Ok((crate::reload::landing_held(), None)),
+                _ => Err("hold files=<path>=<blob id or ->, one a line | hold take dir=<dir> files=... | hold off".to_string()),
+            };
+            match held {
+                Ok((n, None)) => out.line(&format!("{{\"held\":{n}}}")),
+                Ok((n, Some(t))) => out.line(&format!("{{\"held\":{n},\"took\":{t}}}")),
+                Err(e) => out.err(&e),
+            }
         }
         "help" => help(req, out),
         "inputs" => {
@@ -524,6 +556,18 @@ pub(crate) fn owner_loading<T>(ms: u64, mut f: impl FnMut() -> Result<Result<T, 
             }
         }
     }
+}
+
+/// `hold files=`: one `<path>=<blob id>` a line (`-`: the landing removes the file).
+fn hold_files(list: &str) -> Result<Vec<(String, Option<[u8; 20]>)>, String> {
+    list.lines().filter(|l| !l.trim().is_empty()).map(|l| {
+        let (path, id) = l.trim().rsplit_once('=').ok_or_else(|| format!("hold files: `{l}` is no <path>=<blob id>"))?;
+        let id = match id {
+            "-" => None,
+            hex => Some(crate::gitstore::from_hex(hex).ok_or_else(|| format!("hold files: `{hex}` is no blob id"))?),
+        };
+        Ok((path.to_string(), id))
+    }).collect()
 }
 
 /// `req` with `word` put in front of its positional words (an alias for a subcommand).
@@ -1342,11 +1386,12 @@ fn cmd_live(req: &Req, out: &mut Out) {
         None => flightrec::frames_head(),
     };
     out.line(&format!(
-        "{{\"now_ms\":{:.1},\"frames\":{frames},\"patches\":{},\"frame_patch\":{},\"restart_pending\":{},\"lazy\":{},\"ahead\":{},\"o2\":{},\"o3\":{},\"linked\":{},\"q\":[{},{},{}],\"ui_wait_ms\":{},\"next\":{next},\"ft\":[{ft}]}}",
+        "{{\"now_ms\":{:.1},\"frames\":{frames},\"patches\":{},\"frame_patch\":{},\"restart_pending\":{},{},\"lazy\":{},\"ahead\":{},\"o2\":{},\"o3\":{},\"linked\":{},\"q\":[{},{},{}],\"ui_wait_ms\":{},\"next\":{next},\"ft\":[{ft}]}}",
         now as f64 / 1e6,
         crate::reload::patches_installed(),
         crate::postframe::FRAME_PATCH.load(Relaxed),
         crate::reload::restart_pending().len(),
+        runs_what(),
         a.demand(),
         a.ahead_done,
         a.o2_done,
@@ -1357,6 +1402,20 @@ fn cmd_live(req: &Req, out: &mut Out) {
         a.o3 + a.o3_running,
         a.ui_wait_ns / 1_000_000
     ));
+}
+
+/// What the run runs, for `live` (devhub's shows report it): `loaded_sha`/`loaded_ms`, the
+/// checkout's commit its sources were read at (its start or last restart) and when (unix ms);
+/// `loaded_heads`, each repository its sources are in (worktree and commit, the workspace's own
+/// first, whose commit is the sha); the oldest edit waiting for a restart (`pending_since_ms`,
+/// `pending_why`). A run outside git, or one that read its sources during a git operation, has no
+/// loaded_sha.
+fn runs_what() -> String {
+    let h = crate::reload::loaded_heads();
+    let sha = h.as_ref().and_then(|(v, _)| v.first()).map_or("null".to_string(), |(_, s)| json_str(s));
+    let all = h.as_ref().map_or(String::new(), |(v, _)| v.iter().map(|(r, s)| format!("[{},{}]", json_str(r), json_str(s))).collect::<Vec<_>>().join(","));
+    let (since, why) = crate::reload::restart_pending_since().unwrap_or((0, String::new()));
+    format!("\"loaded_sha\":{sha},\"loaded_ms\":{},\"loaded_heads\":[{all}],\"pending_since_ms\":{since},\"pending_why\":{}", h.as_ref().map_or(0, |(_, t)| *t), json_str(&why))
 }
 
 /// The `jit` answer from two looks `ms` apart.
@@ -1674,6 +1733,20 @@ pub extern "C" fn relax_register_inspect(name: *const u8, len: usize, query: Pro
     p.push((name, query, scope));
 }
 
+/// Who sent the command the program answers now on this thread (`cmd_provided` runs it on the
+/// endpoint's thread): the agent and the process ([`makepad_remote::cmd::asked_by`]), written into
+/// `buf` as far as `cap` bytes reach; its whole length (0: not known). The program's injected
+/// input says it with what it reaches (a window's close or caption button).
+pub extern "C" fn relax_inspect_asker(buf: *mut u8, cap: usize) -> usize {
+    let Some(who) = makepad_remote::cmd::asked_by() else { return 0 };
+    let n = who.len().min(cap);
+    if n > 0 && !buf.is_null() {
+        // SAFETY: the program passes a buffer of `cap` writable bytes
+        unsafe { std::ptr::copy_nonoverlapping(who.as_ptr(), buf, n) };
+    }
+    who.len()
+}
+
 fn provider(cmd: &str) -> Option<(ProgramQuery, crate::domain::Callback)> {
     PROVIDERS.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|x| x.0 == cmd).min_by_key(|x| x.2.domain()).map(|x| (x.1, x.2))
 }
@@ -1950,6 +2023,18 @@ mod tests {
             let req = super::Req::parse(line);
             assert!(req.validate_params(makepad_remote::params::jit(&req.cmd, req.pos.first().map(String::as_str).unwrap_or("")).unwrap()).is_ok(), "{line}");
         }
+    }
+
+    /// `hold files=`: one `<path>=<blob id>` a line, `-` for a file the landing removes.
+    #[test]
+    fn a_held_landing_names_each_file_with_its_blob_id() {
+        let id = "0123456789abcdef0123456789abcdef01234567";
+        let files = super::hold_files(&format!("apps/fab/src/a.rs={id}\n\napps/commercial/x=y/b.rs=-\n")).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!((files[0].0.as_str(), files[0].1.map(|o| crate::gitstore::hex(&o))), ("apps/fab/src/a.rs", Some(id.to_string())));
+        assert_eq!((files[1].0.as_str(), files[1].1), ("apps/commercial/x=y/b.rs", None), "a path may hold `=`; `-`: removed");
+        assert!(super::hold_files("apps/fab/src/a.rs").unwrap_err().contains("no <path>=<blob id>"));
+        assert!(super::hold_files("apps/fab/src/a.rs=xyz").unwrap_err().contains("no blob id"));
     }
 
     /// `inputs of=`: a saved path names an input at a whole path component, either separator.

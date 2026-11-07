@@ -120,7 +120,7 @@ class Verifier:
         directory = self.runs / f"{stamp().replace(':', '')}-{os.getpid()}-{self.serial}"
         directory.mkdir()
         (directory / "pair.txt").write_text(" ".join(pair) + "\n")
-        rev = f"work@{pair[0]},main@{pair[1]}"
+        rev = f"work@{pair[0]},commercial=main@{pair[1]}"
         # Runtime legs contain timing assertions: exclusive timed leases give
         # each half a different Linux node while they overlap. Platform checks
         # have no runtime timings. ARM64 diff runs under a timed Mac lease.

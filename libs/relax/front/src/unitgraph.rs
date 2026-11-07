@@ -167,8 +167,9 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
             match s.as_str() {
                 "lib" | "rlib" => lib = true,
                 "proc-macro" => pm = true,
-                // an integration test target: a root like a bin (its harness runs its tests)
-                "bin" | "test" => bin = true,
+                // an integration test target: a root like a bin (its harness runs its tests); an
+                // example (`--example`) is one too
+                "bin" | "test" | "example" => bin = true,
                 "custom-build" => build = true,
                 _ => {}
             }

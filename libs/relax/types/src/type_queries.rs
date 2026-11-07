@@ -577,7 +577,7 @@ impl Providers<'_> {
         }, &|id| self.force(id))
     }
 
-    fn typeck(&self, def: DefId) -> Result<std::sync::Arc<crate::typeck::Body>, QueryError> {
+    pub(crate) fn typeck(&self, def: DefId) -> Result<std::sync::Arc<crate::typeck::Body>, QueryError> {
         let q = &self.tcx.queries;
         let (_, body) = q.typeck.get(&q.engine, def, &mut |def| {
             q.read_owner(self.prog, def)?;
@@ -755,6 +755,10 @@ impl Tcx {
     /// rustc_hir_typeck/src/lib.rs:84-101: closures share their typeck root.
     pub fn typeck(&self, prog: &Program, def: DefId) -> std::sync::Arc<crate::typeck::Body> {
         let def = typeck_root_def_id(prog, def);
+        // an anonymous constant's type comes from its holder's lowering, which a warm run may not
+        // have done (feed_anon_const_from_holder): done before the query, which a holder's body
+        // evaluating the constant enters
+        self.feed_anon_const_from_holder(prog, def);
         match (Providers { tcx: self, prog }).typeck(def) {
             Ok(body) => body,
             // rustc_query_system cycle_error: E0391, the query's error value
@@ -774,6 +778,7 @@ impl Tcx {
     /// one, else the check done without storing its body (Providers::typeck_unstored).
     pub fn typeck_unstored(&self, prog: &Program, def: DefId) -> std::sync::Arc<crate::typeck::Body> {
         let def = typeck_root_def_id(prog, def);
+        self.feed_anon_const_from_holder(prog, def);
         (Providers { tcx: self, prog }).typeck_unstored(def)
     }
 

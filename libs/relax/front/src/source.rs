@@ -331,6 +331,8 @@ impl SourceLocation<'_> {
     pub fn diagnostic(&self, phase: &'static str, msg: String) -> crate::diag::Diagnostic {
         let (l, c) = self.source.line_col(self.span.lo);
         let (el, ec) = self.source.line_col(self.span.hi);
+        // (an error rustc words without a code is marked so in its line, not in its message)
+        let msg = match msg.strip_prefix(crate::diagnostics::UNCODED_PREFIX) { Some(m) => m.to_string(), None => msg };
         let mut d = crate::diag::Diagnostic::new(phase, self.source.path(), l as u32, c as u32, msg);
         d.end_line = el as u32;
         d.end_col = ec as u32;

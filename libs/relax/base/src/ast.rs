@@ -1408,6 +1408,16 @@ pub const ARENAS: usize = 49;
 /// The features whose syntax the parser records in `Ast::gated_syntax`.
 pub const GATED_SYNTAX: &[&str] = &["default_field_values", "async_trait_bounds", "stmt_expr_attributes", "closure_track_caller", "coroutines"];
 
+/// Where a tree being built stood (Ast::mark), for Ast::undo_to.
+#[derive(Debug, Clone, Copy)]
+pub struct AstMark {
+    ends: [u32; ARENAS],
+    root_attrs: usize,
+    root_items: usize,
+    stmt_attrs: usize,
+    gated_syntax: usize,
+}
+
 /// Ast::base (an array of more than 32 entries has no Default).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bases(pub [u32; ARENAS]);
@@ -1850,6 +1860,82 @@ impl Ast {
             self.base[47] + self.foreign_mods.len() as u32,
             self.base[48] + self.vis_paths.len() as u32,
         ]
+    }
+    /// Where this tree stands while it is built: a look-ahead parse is undone to it (undo_to).
+    pub fn mark(&self) -> AstMark {
+        AstMark { ends: self.ends(), root_attrs: self.root_attrs.len(), root_items: self.root_items.len(), stmt_attrs: self.stmt_attrs.len(), gated_syntax: self.gated_syntax.len() }
+    }
+    /// Takes away everything added since `m` (a parse that must leave no trace): every arena
+    /// ends where it ended then, so what is parsed next gets the ids it would have had.
+    pub fn undo_to(&mut self, m: &AstMark) {
+        let mut n = [0usize; ARENAS];
+        for (i, k) in n.iter_mut().enumerate() { *k = (m.ends[i] - self.base[i]) as usize; }
+        // every field by name, no `..`: a field added to the tree does not compile here until it
+        // says how a look-ahead's additions to it go (the ids are Ast::ends order)
+        let Ast {
+            exprs, pats, tys, items, blocks, root_attrs, root_items, mac_args, path_segs, stmts, expr_lists,
+            pat_lists, ty_lists, field_exprs, arms, closure_params, field_pats, qselfs, generic_args,
+            fn_ptrs, generic_arg_lists, bounds, generic_params, ident_lists, attrs, asm_ops, fn_sigs, params,
+            field_defs, variants, use_trees, item_lists, where_preds, method_calls, for_exprs, closure_exprs,
+            struct_exprs, mac_calls, while_exprs, let_stmts, attrs_stmts, use_items, struct_items,
+            union_items, enum_items, alias_items, trait_items, trait_alias_items, impl_items, foreign_mods,
+            vis_paths, stmt_attrs, gated_syntax, base: _, part: _,
+        } = self;
+        // (the bases name where this tree's ids start; the lazily parsed part is made after the tree)
+        exprs.truncate(n[0]);
+        pats.truncate(n[1]);
+        tys.truncate(n[2]);
+        blocks.truncate(n[3]);
+        mac_args.truncate(n[4]);
+        path_segs.truncate(n[5]);
+        stmts.truncate(n[6]);
+        expr_lists.truncate(n[7]);
+        pat_lists.truncate(n[8]);
+        ty_lists.truncate(n[9]);
+        field_exprs.truncate(n[10]);
+        arms.truncate(n[11]);
+        closure_params.truncate(n[12]);
+        field_pats.truncate(n[13]);
+        qselfs.truncate(n[14]);
+        generic_args.truncate(n[15]);
+        fn_ptrs.truncate(n[16]);
+        generic_arg_lists.truncate(n[17]);
+        bounds.truncate(n[18]);
+        generic_params.truncate(n[19]);
+        ident_lists.truncate(n[20]);
+        attrs.truncate(n[21]);
+        asm_ops.truncate(n[22]);
+        items.truncate(n[23]);
+        fn_sigs.truncate(n[24]);
+        params.truncate(n[25]);
+        field_defs.truncate(n[26]);
+        variants.truncate(n[27]);
+        use_trees.truncate(n[28]);
+        item_lists.truncate(n[29]);
+        where_preds.truncate(n[30]);
+        method_calls.truncate(n[31]);
+        for_exprs.truncate(n[32]);
+        closure_exprs.truncate(n[33]);
+        struct_exprs.truncate(n[34]);
+        mac_calls.truncate(n[35]);
+        while_exprs.truncate(n[36]);
+        let_stmts.truncate(n[37]);
+        attrs_stmts.truncate(n[38]);
+        use_items.truncate(n[39]);
+        struct_items.truncate(n[40]);
+        union_items.truncate(n[41]);
+        enum_items.truncate(n[42]);
+        alias_items.truncate(n[43]);
+        trait_items.truncate(n[44]);
+        trait_alias_items.truncate(n[45]);
+        impl_items.truncate(n[46]);
+        foreign_mods.truncate(n[47]);
+        vis_paths.truncate(n[48]);
+        root_attrs.truncate(m.root_attrs);
+        root_items.truncate(m.root_items);
+        stmt_attrs.truncate(m.stmt_attrs);
+        gated_syntax.truncate(m.gated_syntax);
+        assert_eq!(self.ends(), m.ends, "Ast::undo_to: an arena not taken back");
     }
     #[cold]
     #[inline(never)]

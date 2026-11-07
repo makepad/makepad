@@ -42,14 +42,14 @@ pub trait Source: Sync {
 
 /// Starts a queue drain on the same cache used by scopes. The source controls admission
 /// and the number of drains; no compiler job or queue representation leaks into base.
-pub fn drain(source: &'static dyn Source) {
+/// Err: no idle worker, and the OS refused a new thread (a memory limit counts each worker's
+/// stack): the source decides what its drains do without it.
+pub fn drain(source: &'static dyn Source) -> std::io::Result<()> {
     let task: Task = zone_alloc::kept_with(|| Box::new(move || {
         source.run();
         Done(None)
     }));
-    if let Err((_, error)) = dispatch(&POOL, task) {
-        panic!("failed to start JIT pool worker: {error}");
-    }
+    dispatch(&POOL, task).map_err(|(_, error)| error)
 }
 
 /// Shared with a waiter. Its short lock protects permit replacement at checkpoints;

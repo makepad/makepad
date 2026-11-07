@@ -10,8 +10,8 @@ use crate::{
 };
 use std::sync::Arc;
 
-// Macro definitions record the invocation position that orders a generated definition.
-pub const VERSION: u32 = 25;
+// A file's metadata records how its parse numbered it (FileMeta::numbering).
+pub const VERSION: u32 = 26;
 
 pub(crate) mod strings;
 
@@ -427,6 +427,10 @@ pub struct FileMeta {
     pub path: String,
     pub module: String,
     pub hash: u128,
+    /// how the parse this metadata was captured from numbered the file (ParsedFile::numbering):
+    /// its lazy bodies and prepared blocks hold that parse's ids, so it is restored over an
+    /// image of that parse only (front.rs restore)
+    pub numbering: u128,
     pub shared: bool,
     pub edition: u16,
     pub src_len: u32,
@@ -438,7 +442,7 @@ pub struct FileMeta {
     /// crate's unchanged file takes its image when they replay in the loader's scope
     pub replay: Blob,
 }
-fields!(FileMeta, path, module, hash, shared, edition, src_len, token_input, lazy, used, prep, replay);
+fields!(FileMeta, path, module, hash, numbering, shared, edition, src_len, token_input, lazy, used, prep, replay);
 
 /// Bytes, encoded as a length and the bytes (one copy, not a decode per byte)
 #[derive(Clone, Default)]
@@ -459,6 +463,7 @@ pub fn file_meta(path: &str, module: &str, pf: &ParsedFile, used: &MacroUse, pre
     path.to_string().put(&mut w);
     module.to_string().put(&mut w);
     pf.source_hash(path).put(&mut w);
+    pf.numbering().put(&mut w);
     shared.put(&mut w);
     pf.edition.put(&mut w);
     pf.src_len.put(&mut w);
@@ -537,9 +542,9 @@ pub struct Record {
     pub ahead: CrateAhead,
     pub files: Vec<FileMeta>,
     pub selection_hash: u128,
-    /// proc_fps of the program when it was recorded (None: one was not known): an edited
-    /// dependency changes dep_fps, but a file's parse depends on it only through its macro lookups
-    /// (replayed) and proc macros (this)
+    /// proc_fps of the program's crates loaded when it was recorded (None: one was not known): an
+    /// edited dependency changes dep_fps, but a file's parse depends on it only through its macro
+    /// lookups (replayed) and proc macros (this)
     pub proc_fps: Option<u128>,
 }
 // The fields a restore validates come first (RecordHead): the files' paths and hashes, then the
@@ -648,15 +653,20 @@ pub trait CrateImages {
     fn begin_load(&self, _crates: &[crate::preload::PreCrate]) {}
     fn end_load(&self) {}
     fn demand_image(&self, _crates: &[crate::preload::PreCrate], _graph: u128) -> Option<Arc<crate::preload::DemandImage>> { None }
+    /// The demand plan an earlier load of these crates recorded, when this load can take it as it
+    /// is although its inputs changed (PendingPlan::carried): it selected every file of the last
+    /// crate and its module probes hold.
+    fn carried_demand_image(&self, _crates: &[crate::preload::PreCrate]) -> Option<Arc<crate::preload::DemandImage>> { None }
     fn take_demand_plan(&self, _crates: &[crate::preload::PreCrate]) -> Option<Arc<crate::preload::DemandPlan>> { None }
     fn demand_parts(&self, _crates: &[crate::preload::PreCrate], _graph: u128) -> Option<DemandParts> { None }
     fn crate_image(&self, c: &crate::preload::PreCrate, dep_fps: &[u128]) -> Option<CrateImage>;
     /// A crate that is parsed (no valid image): the images of its files from an earlier record
     /// made with the same identity and dependency fingerprints (`dep_fps`; None: a dependency is
     /// parsed in this load too), with their macro lookups to replay. None: no such record.
-    /// `proc_fps`: proc_fps of its dependencies now (None: not known): a record whose dependency
-    /// fingerprints differ is taken when that is the same.
-    fn previous_files(&self, _c: &crate::preload::PreCrate, _dep_fps: Option<&[u128]>, _proc_fps: Option<u128>) -> Option<PreviousFiles> { None }
+    /// `proc_fps`: proc_fps values a record of it can hold now, each over proc-macro crates that
+    /// include all it can reach (empty: none known): a record whose dependency fingerprints
+    /// differ is taken when its proc_fps is one of them.
+    fn previous_files(&self, _c: &crate::preload::PreCrate, _dep_fps: Option<&[u128]>, _proc_fps: &[u128]) -> Option<PreviousFiles> { None }
     /// The proc-macro crates a partial restore kept (not in this load), by name and fingerprint
     fn retained_proc_macros(&self) -> Vec<(String, u128)> { Vec::new() }
     fn crate_image_selected(&self, c: &crate::preload::PreCrate, dep_fps: &[u128], plan: u128, deferred: &[String]) -> Option<CrateImage> {

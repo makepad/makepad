@@ -1443,6 +1443,8 @@ pub struct MacroScope {
     uses_log: std::cell::RefCell<Vec<((Name, Name), Vec<Name>)>>,
     memo: std::cell::RefCell<LookupMemo>,
     forwarders: std::cell::RefCell<HashMap<(String, String, String), MacroRef>>,
+    /// `builtin_macro`'s answers, by (crate, module, path), for the table they were read from
+    builtin_paths: std::cell::RefCell<Option<(std::sync::Arc<MacroTable>, HashMap<(String, String, Vec<String>), Option<String>>)>>,
 }
 
 /// Deferred contexts share these bindings; individual lookups only retain a
@@ -1601,11 +1603,11 @@ impl MacroScope {
     }
 
     pub fn from_context(ctx: &MacroContext) -> Self {
-        Self { table: ctx.table.clone(), local: ctx.local.clone(), local_uses: std::cell::RefCell::new(ctx.uses.clone()), looked: Default::default(), uses_base: ctx.uses.clone(), uses_log: Default::default(), memo: Default::default(), forwarders: Default::default() }
+        Self { table: ctx.table.clone(), local: ctx.local.clone(), local_uses: std::cell::RefCell::new(ctx.uses.clone()), looked: Default::default(), uses_base: ctx.uses.clone(), uses_log: Default::default(), memo: Default::default(), forwarders: Default::default(), builtin_paths: Default::default() }
     }
 
     pub fn new(table: std::sync::Arc<MacroTable>) -> MacroScope {
-        MacroScope { table, local: Vec::new(), looked: Default::default(), local_uses: Default::default(), uses_base: Default::default(), uses_log: Default::default(), memo: Default::default(), forwarders: Default::default() }
+        MacroScope { table, local: Vec::new(), looked: Default::default(), local_uses: Default::default(), uses_base: Default::default(), uses_log: Default::default(), memo: Default::default(), forwarders: Default::default(), builtin_paths: Default::default() }
     }
 
     pub(crate) fn define_tokens(&mut self, name: &str, krate: &str, edition: u16, file: &str, module: &str, pos: u32, scope_pos: Option<u32>, exported: bool, local_inner: bool, tokens: &[MTok]) -> Result<(), String> {
@@ -1764,6 +1766,25 @@ impl MacroScope {
         let r = Res { table: &self.table };
         let (k, m) = if prefix.is_empty() { (cur, module) } else { r.resolve_mod(cur, module, prefix)? };
         self.proc_macro_in(k, m, name, kind, k != cur, seen)
+    }
+
+    /// `builtin_macro_path` of a lookup of its own (no walk in progress): the answer reads only
+    /// the table, so each (crate, module, path) is walked once per table.
+    pub(crate) fn builtin_macro(&self, cur: &str, module: &str, path: &[String]) -> Option<String> {
+        let key = (cur.to_string(), module.to_string(), path.to_vec());
+        if let Some((table, known)) = self.builtin_paths.borrow().as_ref() {
+            if std::sync::Arc::ptr_eq(table, &self.table) {
+                if let Some(r) = known.get(&key) { return r.clone(); }
+            }
+        }
+        let r = self.builtin_macro_path(cur, module, path, &mut Default::default());
+        let mut memo = self.builtin_paths.borrow_mut();
+        let (_, known) = match &mut *memo {
+            Some(m) if std::sync::Arc::ptr_eq(&m.0, &self.table) => m,
+            m => m.insert((self.table.clone(), HashMap::default())),
+        };
+        known.insert(key, r.clone());
+        r
     }
 
     /// Follow standard macro re-exports as well as re-exported library modules.

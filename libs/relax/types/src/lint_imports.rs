@@ -26,7 +26,8 @@ pub const REDUNDANT_IMPORTS: Lint = lint::lint("redundant_imports");
 pub const UNUSED_EXTERN_CRATES: Lint = lint::lint("unused_extern_crates");
 
 /// Per checked crate, the traits one of whose methods its bodies call (collected with the bodies):
-/// a call in one crate is no use of another crate's import.
+/// a call in one crate is no use of another crate's import. None outside a check (from its
+/// `reset` to its take): a body linted then (a live save's) adds nothing.
 static METHOD_TRAITS: relax_session::sync::Mutex<Option<HashMap<u32, HashSet<DefId>>>> = relax_session::sync::Mutex::new(None);
 
 pub fn reset() {
@@ -48,7 +49,7 @@ pub fn note_method(prog: &Program, tcx: &Tcx, krate: u32, d: DefId) {
         DefKind::Impl => match tcx.impl_trait.get(&def.parent) { Some(&t) => t, None => return },
         _ => return,
     };
-    METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).entry(krate).or_default().insert(t);
+    if let Some(m) = METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() { m.entry(krate).or_default().insert(t); }
 }
 
 /// The traits in scope at code of module `m` (its block scopes up to the item's module: what it
@@ -72,8 +73,7 @@ pub fn note_scope_traits(prog: &Program, krate: u32, m: u32, item: &str) {
         traits.extend(md.anon_traits.iter().map(|&(t, _)| t).filter(|&t| has_item(t)));
         for &(g, _) in &md.globs { if prog.def(g).kind == DefKind::Mod { stack.push(prog.def(g).sub); } }
     }
-    let mut mt = METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner());
-    mt.get_or_insert_with(HashMap::new).entry(krate).or_default().extend(traits);
+    if let Some(m) = METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() { m.entry(krate).or_default().extend(traits); }
 }
 
 /// An identifier token of a file and where it is written.
@@ -311,8 +311,11 @@ fn macro_closure(prog: &Program, names: &mut HashSet<String>) {
 
 /// One checked crate's imports (`c`: its modules and definitions; `traits`: the traits its bodies
 /// call methods of).
+///
+/// Only when the program recorded its import uses (`import_uses_recorded`): a check whose load
+/// did not (a test's run of its own binary, a run) has no unused import to tell.
 pub fn check(prog: &Program, tcx: &Tcx, c: &crate::lint_dead::CrateItems, reach: &crate::lint_dead::Reach, traits: &HashSet<DefId>) {
-    if !lint::enabled() { return; }
+    if !lint::enabled() || !prog.import_uses_recorded() { return; }
     let mut scopes: Vec<Scope> = Vec::new();
     for &m in &c.mods {
         let md = &prog.mods[m as usize];
@@ -323,13 +326,16 @@ pub fn check(prog: &Program, tcx: &Tcx, c: &crate::lint_dead::CrateItems, reach:
         // each kept item's range reaches back to the end of the one before it: its attributes
         // (`#[derive(Widget)]`) and doc comments are part of the scope
         let mut prev_hi = if md.parent_mod.is_none() { 0 } else { ast_item_lo(prog, md.def) };
+        let test_build = prog.crates[md.krate as usize].cfg.set.iter().any(|s| s == "test");
         for &it in &items {
             let item = ast.item(it);
             match item.kind {
                 // child modules have scopes of their own; `use` items are checked, not scanned
                 ItemKind::Mod(_) | ItemKind::Use(_) => {}
-                // a `#[test]` fn is not part of the program outside a test build
-                ItemKind::Fn(..) if lint::has_attr(prog, file, ast.list(item.attrs), "test") => {}
+                // a `#[test]` fn is part of the program only in a test build: there the macros it
+                // calls are uses of their imports (`use ..::script_eval;` read only by a test's
+                // `script_eval!(..)`; a test run called it unused)
+                ItemKind::Fn(..) if !test_build && lint::has_attr(prog, file, ast.list(item.attrs), "test") => {}
                 _ => ranges.push((prev_hi.min(item.lo), item.hi)),
             }
             prev_hi = item.hi;

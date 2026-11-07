@@ -9,6 +9,8 @@
 # 2. The copy sits in a cargo target directory, as on a person's machine (cargo run), and the
 #    rebuild's cargo is this fixture's ($CARGO): a failing rebuild ends refused with the build's
 #    errors, one that builds nothing new ends refused "rebuild produced no change".
+# 3. A relaunch asked while the rebuild runs ("rebuild makepad, then restart"), and the rebuild
+#    builds nothing new: the restart still happens (it used to end at "no restart", silently).
 set -u
 H=$(cd "$(dirname "$0")" && pwd)
 R=$(cd "$H/../../../../.." && pwd)
@@ -103,6 +105,8 @@ touch "$T/mac/target/CACHEDIR.TAG"
 cat > "$T/cargo" <<EOF
 #!/bin/bash
 # the rebuild's cargo: fails, or builds nothing new (the binary stays as it is)
+# (slow: a build that takes a while, which a relaunch can reach)
+[ "\$(cat "$T/cargo_mode")" = slow ] && sleep 6
 if [ "\$(cat "$T/cargo_mode")" = fail ]; then
     echo "error[E0599]: no method named forced found (live_provided_edit's failing rebuild)" >&2
     echo "  --> tools/run/src/main.rs:1:1" >&2
@@ -121,4 +125,22 @@ echo noop > "$T/cargo_mode"
 edit 's/pub added: u64,/pub added: u32,/'
 verdict "unchanged rebuild" "$t0" 'rebuild produced no change'
 kill -0 "$pid" 2>/dev/null || fail "the session ended"
+
+# 3. the relaunch asked during a rebuild that builds nothing new restarts
+echo slow > "$T/cargo_mode"
+builds=$(grep -c 'it builds first in the background' "$S/log")
+perl -pi -e 's/pub added: u32,/pub added: u16,/' "$lib"
+for _ in $(seq 1 60); do
+    [ "$(grep -c 'it builds first in the background' "$S/log")" -gt "$builds" ] && break
+    sleep 0.5
+done
+[ "$(grep -c 'it builds first in the background' "$S/log")" -gt "$builds" ] || fail "relaunch: the save started no rebuild"
+asked=$("$MP" inspect "$jit" session relaunch 2>&1)
+echo "$asked" | grep -q 'rebuild makepad, then restart' || fail "relaunch: not taken by the rebuild: $asked"
+for _ in $(seq 1 120); do
+    grep -q '^makepad live: restarting (' "$S/log" && break
+    sleep 0.5
+done
+grep -q 'restarting the app as asked' "$S/log" || fail "relaunch: the unchanged rebuild did not go on to the restart"
+grep -q '^makepad live: restarting (' "$S/log" || fail "relaunch: no restart in 60 s"
 echo "live_provided_edit: ok"

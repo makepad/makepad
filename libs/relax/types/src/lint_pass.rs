@@ -16,8 +16,7 @@ pub fn check_items(prog: &Program, tcx: &Tcx, own: &[bool]) {
     if !lint::enabled() { return; }
     crate::lint_early::check_items(prog, tcx, own);
     let mut pt = crate::lint_dead::PartTimes::new("lint_pass::check_items");
-    crate::lint_late::check_items(prog, tcx, own);
-    pt.mark("lint_late::check_items");
+    crate::lint_late::check_items(prog, tcx, own, &mut pt);
     let defs: Vec<DefId> = (0..prog.defs.len() as u32).map(DefId).filter(|&d| own.get(prog.def(d).krate as usize).copied().unwrap_or(false) && !lint::generated(prog, d)).collect();
     lint::par_each(&defs, |&d| nonstandard_style_item(prog, d));
     pt.mark("nonstandard_style");

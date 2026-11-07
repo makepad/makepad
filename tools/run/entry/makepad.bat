@@ -206,7 +206,8 @@ for %%P in (%PARTS%) do (
 if exist "%CFG%" (
     type nul >"!FETCHLOG!"
     set "FETCHWHAT=Downloading Rust from static.rust-lang.org in !COUNT! pieces"
-    start "" /b cmd /d /c call "%SELF%" :fetch_job <nul >nul 2>&1
+    set "JOB_ARGS=/d /c call "!SELF!" :fetch_job <nul >nul 2>&1" & set "JOB_EACH="
+    call :job || (set "T=The download of Rust could not start." & goto :fail)
     call :fetching
     set "FETCH_RESULT=none"
     set /p FETCH_RESULT=<"%FETCHED%"
@@ -242,8 +243,9 @@ if exist "%STAGE%" rmdir /s /q "%STAGE%"
 mkdir "%STAGE%" || (set "T=Cannot create the folder !STAGE!." & goto :fail)
 for %%P in (%PARTS%) do (
     mkdir "%STAGE%\%%P" || (set "T=Cannot create the folder !STAGE!\%%P." & goto :fail)
-    start "" /b cmd /d /c call "%SELF%" :unpack_job %%P <nul >nul 2>&1
 )
+set "JOB_ARGS=/d /c call "!SELF!" :unpack_job <each> <nul >nul 2>&1" & set "JOB_EACH=%PARTS%"
+call :job || (set "T=Unpacking Rust could not start." & goto :fail)
 set "FOOT=Unpacking Rust into rust\, the four archives side by side."
 :unpacking
 set "WAITING=" & set "UNPACKED=0"
@@ -416,7 +418,9 @@ rem Expand the exit code in the child, after cargo. Publish the complete done-fi
 rem Delayed expansion is off in the parent here; the child's variable values are not rescanned.
 setlocal DisableDelayedExpansion
 set "ERRORLEVEL="
-start "" /b cmd /d /v:on /c "cargo.exe build --profile host --offline -p makepad-run --bin makepad --bin makepad-launcher >"!LOG!" 2>&1 <nul & >"!BUILD_DONE!.code" echo !errorlevel!& move /y "!BUILD_DONE!.code" "!BUILD_DONE!" >nul"
+set JOB_ARGS=/d /v:on /c "cargo.exe build --profile host --offline -p makepad-run --bin makepad --bin makepad-launcher >"!LOG!" 2>&1 <nul & >"!BUILD_DONE!.code" echo !errorlevel!& move /y "!BUILD_DONE!.code" "!BUILD_DONE!" >nul"
+set "JOB_EACH="
+call :job
 endlocal & set "BUILD_START=%errorlevel%"
 popd
 if not "!BUILD_START!"=="0" goto :build_failed
@@ -431,6 +435,7 @@ set "BUILD="
 set /p BUILD=<"!BUILD_DONE!"
 del "!BUILD_DONE!" 2>nul
 set "RUSTFLAGS="
+if "!BUILD!"=="-1073741510" goto :build_stopped
 if not "!BUILD!"=="0" goto :build_failed
 >"!SRC!\.built.part" echo !BUILT!|| exit /b 1
 move /y "!SRC!\.built.part" "!SRC!\.built" >nul || exit /b 1
@@ -442,6 +447,13 @@ if !COMPILED! geq !CRATES! (set "INFO=%D%in !DUR! · !CRATES! crates%N%") else s
 set "K=ok" & set "S=compiled"
 call :put 3
 goto :have_loader
+rem ctrl+c stopped cargo (0xC000013A) and the script went on (N to cmd's question)
+:build_stopped
+set "K=fail" & set "S=stopped" & set "INFO=%D%!COMPILED! of !CRATES! crates%N%"
+call :put 3
+set "T=The build stopped."
+set "T2=Run makepad.bat again to continue it: the crates compiled so far stay."
+goto :fail
 :build_failed
 set "RUSTFLAGS="
 set "K=fail" & set "S=failed" & set "INFO=%D%!COMPILED! of !CRATES! crates%N%"
@@ -744,7 +756,8 @@ del "!CFG!" "!FETCHED!" "!FETCHED!.part" 2>nul
 set "TOTAL=%ZIPBYTES%"
 set "PIECES="!ZIP!""
 set "FETCHWHAT=Downloading the loader's source from !SVCHOST!"
-start "" /b cmd /d /c call "%SELF%" :fetch_job <nul >nul 2>&1
+set "JOB_ARGS=/d /c call "!SELF!" :fetch_job <nul >nul 2>&1" & set "JOB_EACH="
+call :job || (set "T=The download of the loader's source could not start." & exit /b 1)
 call :fetching
 set "FETCH_RESULT=none"
 set /p FETCH_RESULT=<"!FETCHED!"
@@ -789,6 +802,16 @@ if /i "%GOT%"=="%~2" exit /b 0
 exit /b 1
 
 rem --- The jobs ---------------------------------------------------------------------------------
+rem :job starts cmd.exe with JOB_ARGS beside the screen, or once for each word of JOB_EACH in place of
+rem <each>. Not with start /b, which starts a program with ctrl+c ignored: a download, an unpacking or
+rem the build ran on unseen after ctrl+c had stopped the script. Started by PowerShell's Start-Process
+rem in this console, a job takes ctrl+c like any program run here, and stops with the script; the
+rem job's own cmd reads no answer to "Terminate batch job (Y/N)?" from nul, goes on, and writes that
+rem its step failed.
+:job
+powershell -NoProfile -Command "$each = @(''); if ($env:JOB_EACH) { $each = $env:JOB_EACH -split ' ' }; foreach ($e in $each) { Start-Process cmd.exe -ArgumentList $env:JOB_ARGS.Replace('<each>', $e) -NoNewWindow -ErrorAction Stop }" <nul >nul 2>&1 || exit /b 1
+exit /b 0
+
 rem Every transfer of the config at once, over as many connections; FETCHED says ok or failed.
 :fetch_job
 curl.exe -sS -Z --parallel-immediate --parallel-max 16 -K "%CFG%" 2>>"%FETCHLOG%" && (set "RESULT=ok") || (set "RESULT=failed")

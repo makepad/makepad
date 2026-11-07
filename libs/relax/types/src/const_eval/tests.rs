@@ -225,3 +225,34 @@ fn tainted_body_is_not_evaluated() {
     assert_eq!(value, Err(ErrorHandled::Reported(crate::const_eval::ValTreeCreationError::Tainted)));
     assert_eq!(tcx.dcx.err_count(), reported, "the evaluation reports nothing of its own");
 }
+
+/// An anonymous constant typed before anything lowered its holder: a warm `makepad run` takes the
+/// holder's code and the constant's from the disk cache, and then the checker types the constant
+/// (gandalf after a relaunch: once a panic, "anonymous const type of `..` (its holder never fed
+/// it)", a static's array length). The holder is lowered then: a static's declared type, a fn's
+/// signature, the body whose path holds a const argument.
+#[test]
+fn an_anonymous_constant_typed_before_its_holder_is_lowered() {
+    use crate::def_collector::NodeId;
+    use crate::program::DefKind;
+    let src = br#"#![no_std]
+        pub const fn len(n: usize) -> usize { n + 1 }
+        pub fn take<const N: usize>() -> usize { N }
+        pub static S: [u8; len(3)] = [7; 4];
+        pub fn sig() -> [u8; len(2)] { [1; 3] }
+        pub fn body() -> usize { take::<{ len(5) }>() }
+    "#;
+    for holder in ["S", "sig", "body"] {
+        let (prog, tcx) = program(src);
+        let owner = named(&prog, holder);
+        // its constant that calls `len` (the repeat counts are literals of the bodies)
+        let consts: Vec<DefId> = prog.def_id_to_node_id.iter()
+            .filter(|(d, (_, n))| matches!(n, NodeId::AnonConst(_)) && prog.def(**d).kind == DefKind::AnonConst
+                && !prog.repeat_expr_counts.contains(*d) && crate::borrowck::body::root_owner(&prog, **d) == owner)
+            .map(|(d, _)| *d).collect();
+        assert_eq!(consts.len(), 1, "{holder}: {consts:?}");
+        let body = tcx.typeck(&prog, consts[0]);
+        assert!(body.errors.is_empty(), "{holder}: {:?}", body.errors);
+        assert_eq!(tcx.const_ty(&prog, consts[0]), Some(tcx.tys.usize_), "{holder}: the type its holder gives it");
+    }
+}

@@ -51,7 +51,8 @@ pub fn started_in_place() -> bool {
 }
 
 /// # Safety
-/// `up` is the running unit; nothing of the run is called after this.
+/// `up` is the running unit, or null for a run whose boot ended without one (its build failed);
+/// nothing of the run is called after this.
 pub unsafe fn end(up: *mut Unit, grace: Duration) -> Ended {
     let t = Instant::now();
     let mut ms = [0.0; 5];
@@ -157,12 +158,21 @@ pub fn restart(why: String, state: Option<&[u8]>) -> Result<(), String> {
     let spawned = std::thread::Builder::new().name("run-restart".into()).spawn(move || {
         eprintln!("makepad live: restarting ({why})");
         let t = Instant::now();
+        let mut next = next;
+        if wait_boot() {
+            eprintln!("makepad live: the run's boot is over after {:.0} ms: the restart ends the run now", t.elapsed().as_secs_f64() * 1e3);
+            // its program barely began: the state it was started with is the next run's, when
+            // this restart has none of its own
+            crate::reload::carry_restore(&mut next);
+        }
         crate::reload::restart_begins();
         let up = crate::run::running_unit();
         let ended = unsafe { end(up, PROGRAM_GRACE) };
         eprintln!("makepad-run: {} ; run's threads stayed: {:?}; {:.0} ms in all: end {:.0}, cache {:.0}, threads {:.0}, unit {:.0}, statics {:.0}", ended.program.line(), ended.stayed, t.elapsed().as_secs_f64() * 1e3, ended.ms[0], ended.ms[1], ended.ms[2], ended.ms[3], ended.ms[4]);
         // what the next run reads (run_input)
         *HANDED.lock().unwrap_or_else(|e| e.into_inner()) = Some(next);
+        // the next run's boot is due before another restart can be asked for
+        crate::run::boot_begins();
         RESTARTING.store(false, Ordering::Release);
         crate::run::host_next_run();
     });
@@ -171,6 +181,23 @@ pub fn restart(why: String, state: Option<&[u8]>) -> Result<(), String> {
         std::process::abort();
     }
     Ok(())
+}
+
+/// How often a restart looks whether the run's boot is over (`wait_boot`).
+const BOOT_LOOK: Duration = Duration::from_millis(2);
+
+/// A restart's end waits for the run's boot (`run::booting`): until the boot hands the run to its
+/// program, or returns without one, there is no program to end and the boot still builds the unit
+/// the end takes away. True: it waited.
+fn wait_boot() -> bool {
+    if !crate::run::booting() {
+        return false;
+    }
+    eprintln!("makepad live: the restart waits for the run's boot: its program has not started yet");
+    while crate::run::booting() {
+        std::thread::sleep(BOOT_LOOK);
+    }
+    true
 }
 
 /// A thread of the program in a host call, the restart it waits for asked: it leaves the run when
@@ -349,5 +376,28 @@ pub mod leftovers {
                 c = c.add(size);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A restart asked while the run boots (its program not started, its unit maybe not in yet)
+    /// ends the run only once the boot is over: before, there is nothing to end, and the boot still
+    /// builds what the end takes away (a relaunch 3 s into a restarted run killed it, 11-07). A boot
+    /// that panics is over too: the host shows its panic, and the restart goes on.
+    #[test]
+    fn a_restart_waits_out_the_runs_boot() {
+        assert!(!super::wait_boot(), "no boot: the end goes on at once");
+        let boot = crate::run::Boot::on();
+        let restart = std::thread::spawn(super::wait_boot);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!restart.is_finished(), "the end waits while the run boots");
+        drop(boot);
+        assert!(restart.join().unwrap(), "the boot is over: the end goes on, and it waited");
+        let panicked = std::panic::catch_unwind(|| {
+            let _boot = crate::run::Boot::on();
+            panic!("the boot's own panic");
+        });
+        assert!(panicked.is_err() && !crate::run::booting(), "a boot that panicked is over");
     }
 }

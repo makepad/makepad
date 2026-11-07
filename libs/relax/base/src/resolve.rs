@@ -23,7 +23,9 @@
 //!   dev-dependencies are not part of a build;
 //! - targets: `[lib]` (name, path, proc-macro, crate-type, edition), `[[bin]]` plus discovered
 //!   bins (src/main.rs, src/bin/*.rs, src/bin/*/main.rs) unless `autobins = false`, bins whose
-//!   `required-features` are off are skipped; build scripts (`build = ..` or build.rs): a compile
+//!   `required-features` are off are skipped; `[[example]]` plus discovered examples
+//!   (examples/*.rs, examples/*/main.rs) unless `autoexamples = false`, one of which `--example`
+//!   runs as a bin with the package's dev-dependencies (as `cargo run --example` builds it); build scripts (`build = ..` or build.rs): a compile
 //!   unit on the host side (deps = build-dependencies) and a run unit that the lib depends on
 //!   (deps = the compile unit and the run units of dependencies with `links`).
 //! - registry packages neither vendored nor in $CARGO_HOME: fetched from crates.io (registry.rs:
@@ -229,6 +231,8 @@ struct Manifest {
     bins: Vec<Target>,
     /// integration test targets: `[[test]]` plus discovered tests/*.rs, tests/*/main.rs
     tests: Vec<Target>,
+    /// examples: `[[example]]` plus discovered examples/*.rs, examples/*/main.rs
+    examples: Vec<Target>,
     features: BTreeMap<String, Vec<String>>,
     deps: Vec<Dep>,
     /// the keys of a registry package's dev-dependencies, which are not read (never built): a
@@ -815,6 +819,52 @@ impl Resolver {
                 }
             }
         }
+        // [[example]] + discovered examples (cargo's target discovery: examples/*.rs and
+        // examples/*/main.rs unless `autoexamples = false`, as for tests). A `crate-type` other
+        // than `bin` is a library example: no program to run.
+        let mut examples: Vec<Target> = Vec::new();
+        let explicit_examples = t.get("example").and_then(|b| b.as_array_of_tables()).map(|v| v.to_vec()).unwrap_or_default();
+        for et in &explicit_examples {
+            let Some(ename) = s(et, "name") else { continue };
+            let path = match s(et, "path") {
+                Some(p) => join(&dir, &p),
+                None => {
+                    let cands = [format!("{}/examples/{}.rs", dir, ename), format!("{}/examples/{}/main.rs", dir, ename)];
+                    match cands.iter().find(|c| crate::vfs::is_file(c)) {
+                        Some(p) => p.clone(),
+                        None => continue,
+                    }
+                }
+            };
+            let types = strs(et, "crate-type");
+            let kind = if types.is_empty() || types.iter().any(|t| t == "bin") { vec!["example".to_string()] } else { types };
+            examples.push(Target { name: ename, path, edition: s(et, "edition").unwrap_or_else(|| edition.clone()), kind, required_features: strs(et, "required-features"), harness: b(et, "harness").unwrap_or(true), test: b(et, "test").unwrap_or(false), doctest: false });
+        }
+        let autoexamples = match b(pkg, "autoexamples") {
+            Some(v) => v,
+            None => edition != "2015" || explicit_examples.is_empty(),
+        };
+        if autoexamples {
+            let mut found: Vec<(String, String)> = Vec::new();
+            if let Ok(rd) = crate::vfs::read_dir(format!("{}/examples", dir)) {
+                for (n, is_dir) in rd {
+                    if is_dir {
+                        let p = format!("{}/examples/{}/main.rs", dir, n);
+                        if crate::vfs::is_file(&p) {
+                            found.push((n, p));
+                        }
+                    } else if let Some(stem) = n.strip_suffix(".rs") {
+                        found.push((stem.to_string(), format!("{}/examples/{}", dir, n)));
+                    }
+                }
+            }
+            found.sort();
+            for (n, p) in found {
+                if !examples.iter().any(|x| x.name == n || x.path == p) {
+                    examples.push(Target { name: n, path: p, edition: edition.clone(), kind: vec!["example".to_string()], required_features: Vec::new(), harness: true, test: false, doctest: false });
+                }
+            }
+        }
         // [features]
         let mut features = BTreeMap::new();
         if let Some(f) = table(&t, "features") {
@@ -915,7 +965,7 @@ impl Resolver {
             }
         }
         let i = self.manifests.len();
-        self.manifests.push(Manifest { dir: dir.clone(), name, version, edition, links, build, lib, bins, tests, features, deps, dev_keys, proc_macro, source });
+        self.manifests.push(Manifest { dir: dir.clone(), name, version, edition, links, build, lib, bins, tests, examples, features, deps, dev_keys, proc_macro, source });
         self.by_dir.insert(dir, i);
         Ok(i)
     }
@@ -1617,6 +1667,8 @@ pub struct Options {
     pub all_features: bool,
     pub features: Vec<String>,
     pub bin: Option<String>,
+    /// `--example <name>`: that example is the program (a bin built with the dev-dependencies)
+    pub example: Option<String>,
     /// `--lib`, `--bins`, `--bin <name>`, `--tests`, `--test <name>` (cargo test's target
     /// selection): the graph of the package's test harness. The lib's unit tests are a program of
     /// their own (the lib is cfg(test) there and plain beside the bins' unit tests and the
@@ -1707,7 +1759,7 @@ pub enum TestSel {
 }
 
 pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
-    let mut o = Options { offline: false, no_default_features: false, all_features: false, features: Vec::new(), bin: None, test: None, check: None };
+    let mut o = Options { offline: false, no_default_features: false, all_features: false, features: Vec::new(), bin: None, example: None, test: None, check: None };
     let mut lib = false;
     let mut bins = false;
     let mut bin_names: Vec<String> = Vec::new();
@@ -1728,6 +1780,7 @@ pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
             }
             "--bins" => bins = true,
             "--bin" => bin_names.push(value(&mut i)?),
+            "--example" => o.example = Some(value(&mut i)?),
             "--lib" => lib = true,
             "--tests" => {
                 tests.get_or_insert_with(Vec::new);
@@ -1743,6 +1796,8 @@ pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
                     o.features.extend(v.split(|c: char| c == ',' || c.is_whitespace()).filter(|x| !x.is_empty()).map(str::to_string));
                 } else if let Some(v) = f.strip_prefix("--bin=") {
                     bin_names.push(v.to_string());
+                } else if let Some(v) = f.strip_prefix("--example=") {
+                    o.example = Some(v.to_string());
                 } else if let Some(v) = f.strip_prefix("--test=") {
                     tests.get_or_insert_with(Vec::new).push(v.to_string());
                 } else {
@@ -1751,6 +1806,10 @@ pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
             }
         }
         i += 1;
+    }
+    // (cargo run takes one target: a bin or an example)
+    if o.example.is_some() && (bins || !bin_names.is_empty() || lib || tests.is_some()) {
+        return Err("unit graph: `--example` runs one example; it takes no other target flag (--bin, --bins, --lib, --tests, --test)".to_string());
     }
     let bins = if bins {
         Some(bin_names)
@@ -2257,7 +2316,7 @@ fn graph_of(sess: &std::sync::Arc<crate::Session>, workspace: &str, package: &st
     let root = r.find_member(package)?;
     let rk = (root, false);
     // (the dev-dependencies are resolved for a graph with a target built with `--test`)
-    let dev = o.test.is_some() || o.check.as_ref().is_some_and(CheckSel::tests_anything);
+    let dev = o.test.is_some() || o.example.is_some() || o.check.as_ref().is_some_and(CheckSel::tests_anything);
     let mut f = Feat { r: &mut r, dev_of: dev.then_some(rk).into_iter().collect(), all_platforms: false, nodes: HashMap::new(), work: Vec::new(), order: Vec::new() };
     f.activate(rk)?;
     let m = &f.r.manifests[root];
@@ -2277,6 +2336,8 @@ enum UKind {
     BinTest(usize),
     /// the root's integration test target
     Test(usize),
+    /// the root's example (`--example`): a bin with the dev-dependencies
+    Example(usize),
     BuildCompile,
     BuildRun,
 }
@@ -2418,8 +2479,22 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
             }
         }
     }
+    if let Some(e) = &o.example {
+        let rm = &r.manifests[root];
+        let Some(ei) = rm.examples.iter().position(|t| &t.name == e) else {
+            let names: Vec<&str> = rm.examples.iter().map(|t| t.name.as_str()).collect();
+            return Err(if names.is_empty() { format!("no example targets found in package `{}`", rm.name) }
+                else { format!("no example target named `{}` in package `{}` (available: {})", e, rm.name, names.join(", ")) });
+        };
+        let et = &rm.examples[ei];
+        if et.kind.iter().all(|k| k != "example") {
+            return Err(format!("example target `{}` is a library and cannot be executed", e));
+        }
+        et.enabled(&rn.features, true)?;
+        roots.push(add((root, false), UKind::Example(ei), &mut units));
+    }
     for (bi, bt) in r.manifests[root].bins.iter().enumerate() {
-        if check.is_some() {
+        if check.is_some() || o.example.is_some() {
             break;
         }
         if !bt.enabled(&rn.features, o.test.is_none() && o.bin.as_ref() == Some(&bt.name))? {
@@ -2461,6 +2536,10 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
                 let b = &m.bins[*bi];
                 (b.kind.clone(), b.name.clone(), b.path.clone(), b.edition.clone(), if matches!(u, UKind::BinTest(_)) { "test" } else { "build" })
             }
+            UKind::Example(ei) => {
+                let e = &m.examples[*ei];
+                (e.kind.clone(), e.name.clone(), e.path.clone(), e.edition.clone(), "build")
+            }
             UKind::BuildCompile | UKind::BuildRun => {
                 let p = m.build.clone().unwrap();
                 let stem = p.rsplit('/').next().unwrap_or("build.rs").trim_end_matches(".rs").to_string();
@@ -2470,8 +2549,9 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
         };
         // dependencies
         let mut deps: Vec<(usize, String)> = Vec::new();
-        // dev-dependencies: only the test targets' (the plain lib of a test graph has none)
-        let dev = matches!(u, UKind::LibTest | UKind::BinTest(_) | UKind::Test(_));
+        // dev-dependencies: only the test targets' and an example's (the plain lib of a test
+        // graph has none)
+        let dev = matches!(u, UKind::LibTest | UKind::BinTest(_) | UKind::Test(_) | UKind::Example(_));
         let normal_edges = |deps: &mut Vec<(usize, String)>, build: bool| {
             for (di, tk) in &node.edges {
                 let d = &m.deps[*di];
@@ -2493,7 +2573,7 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
                     deps.push((bi, "build_script_build".to_string()));
                 }
             }
-            UKind::Bin(_) | UKind::BinTest(_) | UKind::Test(_) => {
+            UKind::Bin(_) | UKind::BinTest(_) | UKind::Test(_) | UKind::Example(_) => {
                 if let Some(&li) = index.get(&(*k, UKind::Lib)) {
                     deps.push((li, lib_name(k.0)));
                 }
@@ -2743,6 +2823,54 @@ required-features = ["b", "manual"]
         assert_eq!(g.roots.iter().map(|&i| g.units[i].mode.as_str()).collect::<Vec<_>>(), ["test"]);
         let e = check_unit_graph(sess, &root, "app", &["--test".to_string(), "nope".to_string()]).err().unwrap();
         assert!(e.contains("no test target named `nope`"), "{e}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `--example <name>` (cargo run --example): the example is the root, a bin that links the
+    /// package's lib and its dev-dependencies (the plain lib has none); explicit `[[example]]`
+    /// targets and discovered examples/*.rs, examples/*/main.rs; a library example, an unknown
+    /// name and another target flag beside it are errors.
+    #[test]
+    fn an_example_runs_as_a_bin_with_the_dev_dependencies() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let root = tree("examples", &[
+            ("Cargo.toml", "[workspace]\nresolver = \"2\"\nmembers = [\"app\"]\n"),
+            ("app/Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[[example]]\nname = \"named\"\npath = \"demo/named.rs\"\n[[example]]\nname = \"plugin\"\ncrate-type = [\"cdylib\"]\n[dev-dependencies]\nhelper = { path = \"../helper\" }\n"),
+            ("app/src/lib.rs", ""),
+            ("app/src/main.rs", "fn main() {}\n"),
+            ("app/examples/smoke.rs", "fn main() {}\n"),
+            ("app/examples/multi/main.rs", "fn main() {}\n"),
+            ("app/examples/plugin.rs", ""),
+            ("app/demo/named.rs", "fn main() {}\n"),
+            ("helper/Cargo.toml", "[package]\nname = \"helper\"\nversion = \"0.1.0\"\n"),
+            ("helper/src/lib.rs", ""),
+        ]);
+        let graph = |flags: &[&str]| unit_graph(sess, &root, "app", &flags.iter().map(|f| f.to_string()).collect::<Vec<_>>());
+        for (name, path) in [("smoke", "examples/smoke.rs"), ("multi", "examples/multi/main.rs"), ("named", "demo/named.rs")] {
+            for flags in [vec!["--example", name], vec![]] {
+                let flags: Vec<String> = if flags.is_empty() { vec![format!("--example={name}")] } else { flags.iter().map(|f| f.to_string()).collect() };
+                let g = unit_graph(sess, &root, "app", &flags).unwrap_or_else(|e| panic!("{flags:?}: {e}"));
+                let ex: Vec<usize> = g.roots.iter().copied().filter(|&i| g.units[i].kind.iter().any(|k| k == "example")).collect();
+                assert_eq!(ex.len(), 1, "{flags:?}: one example root");
+                let u = &g.units[ex[0]];
+                assert_eq!((u.name.as_str(), u.mode.as_str()), (name, "build"));
+                assert!(u.src_path.replace('\\', "/").ends_with(path), "{}", u.src_path);
+                // no bin of the package is a root
+                assert!(!g.roots.iter().any(|&i| g.units[i].kind.iter().any(|k| k == "bin")), "{flags:?}");
+                let lib = g.units.iter().position(|x| x.name == "app" && x.kind.iter().any(|k| k == "lib")).expect("the lib");
+                let helper = g.units.iter().position(|x| x.name == "helper").expect("the dev-dependency");
+                assert!(u.deps.iter().any(|(d, _)| *d == lib) && u.deps.iter().any(|(d, _)| *d == helper), "{name} links the lib and the dev-dependency");
+                assert!(!g.units[lib].deps.iter().any(|(d, _)| *d == helper), "the plain lib has no dev-dependency");
+            }
+        }
+        // a plain run: the bin, without the dev-dependencies
+        let g = graph(&[]).unwrap();
+        assert!(!g.units.iter().any(|u| u.name == "helper" || u.kind.iter().any(|k| k == "example")));
+        let e = |flags: &[&str]| graph(flags).err().unwrap_or_else(|| panic!("{flags:?}: no error"));
+        assert!(e(&["--example", "plugin"]).contains("is a library and cannot be executed"));
+        let unknown = e(&["--example", "nope"]);
+        assert!(unknown.contains("no example target named `nope`") && unknown.contains("smoke"), "{unknown}");
+        assert!(e(&["--example", "smoke", "--bin", "app"]).contains("takes no other target flag"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

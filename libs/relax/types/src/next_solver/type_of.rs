@@ -176,11 +176,37 @@ impl crate::type_queries::Providers<'_> {
             q.read_def_declarations(self.prog, def)?;
             let owner = self.prog.opaque_owner(def);
             if !self.tcx.defining_opaques(self.tcx.opaque_types_defined_by(self.prog, owner)).contains(&def) { return Ok(Ok(self.tcx.tys.error)); }
-            let body = self.tcx.typeck(self.prog, owner);
+            let body = match self.typeck(crate::type_queries::typeck_root_def_id(self.prog, owner)) {
+                Ok(body) => body,
+                Err(crate::query::QueryError::Cycle(cycle)) => {
+                    self.report_opaque_cycle(def, &cycle);
+                    return Ok(Ok(self.tcx.tys.error));
+                }
+                Err(e) => return Err(e),
+            };
             if !body.errors.is_empty() { return Ok(Ok(self.tcx.tys.error)); }
             // Under the next solver every defining owner publishes a hidden type or
             // reports an error (opaque.rs:256-266).
             Ok(Ok(*body.hidden_types.get(&def).expect("defining owner published no hidden type")))
         }, &|id| self.force(id))
+    }
+
+    /// rustc_middle/src/query/mod.rs type_of_opaque (cycle_stash) and
+    /// rustc_trait_selection/src/error_reporting/traits/fulfillment_errors.rs
+    /// report_opaque_type_auto_trait_leakage: the owner's typeck is in progress below this
+    /// request (an auto trait of the opaque asked for while its own owner is checked): E0391, the
+    /// hidden type an error. The error goes to the check that asked (this thread's), so its own
+    /// opaques are errors too (tainted_by_errors), as rustc's cycle taints the typeck that
+    /// emitted it. Which thread closes a cycle of two bodies is timing: the cycle is named by its
+    /// first opaque in definition order (what a check in that order meets first), so the one
+    /// error is the same whichever body carries it.
+    fn report_opaque_cycle(&self, def: DefId, cycle: &crate::query::Cycle) {
+        let q = &self.tcx.queries;
+        // (kind 9: opaque_hidden_type, Providers::force)
+        let first = cycle.stack.iter().filter(|id| id.kind == 9).filter_map(|id| q.opaque_hidden_type.key(id.key)).fold(def, DefId::min);
+        let d = self.prog.def(first);
+        let pos = self.prog.files[d.file as usize].ast.item(d.item).lo;
+        self.tcx.dcx.report(super::fulfill::ObligationCause { span: pos, body_id: first },
+            format!("E0391: cycle detected when computing type of opaque `{}`", self.prog.def_path(first)));
     }
 }

@@ -431,13 +431,52 @@ impl Takes {
     }
 }
 static THREADS: OnceLock<Vec<Sleeper>> = OnceLock::new();
-static START: std::sync::Once = std::sync::Once::new();
 static NEXT_WORKER: AtomicUsize = AtomicUsize::new(0);
 /// The workers leave at their next pick (`stop_workers`).
 static WORKERS_STOP: AtomicBool = AtomicBool::new(false);
-/// Drains started and drains that came back.
-static DRAINS: AtomicUsize = AtomicUsize::new(0);
+/// The workers' drains (`start`), and the drains that came back.
+static DRAINS: Drains = Drains::new();
 static DRAINS_BACK: AtomicUsize = AtomicUsize::new(0);
+/// The drains the first start asks the pool for, one per core. One the pool cannot start (no idle
+/// worker, and the OS refused a thread: a limit on the process's memory counts each worker's stack)
+/// leaves the workers the start has, which take every job; with none the start fails, and the
+/// next one asks again. A failed start leaves nothing a later one trips over: a Once its refused
+/// thread poisoned once failed every later push ("Once instance has previously been poisoned",
+/// on whichever thread pushed next).
+struct Drains {
+    /// the drains are started (the fast path of every push)
+    started: AtomicBool,
+    /// held by the start that starts them
+    starting: relax_session::sync::Mutex<()>,
+    /// drains started: `stop_workers` waits for as many to come back
+    count: AtomicUsize,
+}
+#[derive(Debug, PartialEq)]
+enum Started { Already, All, Short(usize, String) }
+impl Drains {
+    const fn new() -> Drains {
+        Drains { started: AtomicBool::new(false), starting: relax_session::sync::Mutex::new(()), count: AtomicUsize::new(0) }
+    }
+    /// `init` once, then `drain` until `want` drains run. Err: not one started (the OS's answer).
+    fn start(&self, want: usize, init: impl FnOnce(), mut drain: impl FnMut() -> std::io::Result<()>) -> std::io::Result<Started> {
+        if self.started.load(Ordering::Acquire) { return Ok(Started::Already); }
+        let _starting = self.starting.lock().unwrap_or_else(|e| e.into_inner());
+        if self.started.load(Ordering::Acquire) { return Ok(Started::Already); }
+        init();
+        while self.count.load(Ordering::SeqCst) < want {
+            // counted before it starts: stop_workers never sees a running drain uncounted
+            self.count.fetch_add(1, Ordering::SeqCst);
+            if let Err(e) = drain() {
+                let have = self.count.fetch_sub(1, Ordering::SeqCst) - 1;
+                if have == 0 { return Err(e); }
+                self.started.store(true, Ordering::Release);
+                return Ok(Started::Short(have, e.to_string()));
+            }
+        }
+        self.started.store(true, Ordering::Release);
+        Ok(Started::All)
+    }
+}
 struct CompilerSource;
 static SOURCE: CompilerSource = CompilerSource;
 pub(super) fn queue() -> &'static relax_session::sync::Mutex<Queue> {
@@ -466,20 +505,25 @@ fn lock() -> QueueGuard {
     QueueGuard { guard, acquired: Instant::now() }
 }
 pub(super) fn start() {
-    START.call_once(|| {
+    if DRAINS.started.load(Ordering::Acquire) { return; }
+    let _kept = crate::zone_alloc::kept();
+    let want = budget::cores() as usize;
+    let init = || {
         crate::pool::thread_start(ensure_altstack);
-        let _kept = crate::zone_alloc::kept();
-        THREADS.get_or_init(|| (0..budget::cores()).map(|_| Sleeper { thread: OnceLock::new(), waiting: AtomicBool::new(false), idle: AtomicBool::new(false) }).collect());
-        DRAINS.store(budget::cores() as usize, Ordering::SeqCst);
-        for _ in 0..budget::cores() { crate::pool::drain(&SOURCE); }
-    });
+        THREADS.get_or_init(|| (0..want).map(|_| Sleeper { thread: OnceLock::new(), waiting: AtomicBool::new(false), idle: AtomicBool::new(false) }).collect());
+    };
+    match DRAINS.start(want, init, || crate::pool::drain(&SOURCE)) {
+        Ok(Started::Already | Started::All) => {}
+        Ok(Started::Short(have, e)) => eprintln!("makepad-run: the JIT compiles on {have} of its {want} workers: the OS refused another thread ({e})"),
+        Err(e) => panic!("failed to start JIT pool worker: {e}"),
+    }
 }
 /// The workers leave at their next pick, a job in hand ending first (what compiles was told to stop
 /// by then: `jit::stop_compiling`). False: some were still in a job when `give_up` ran out.
 pub(super) fn stop_workers(give_up: std::time::Duration) -> bool {
     WORKERS_STOP.store(true, Ordering::SeqCst);
     let t = Instant::now();
-    while DRAINS_BACK.load(Ordering::SeqCst) < DRAINS.load(Ordering::SeqCst) {
+    while DRAINS_BACK.load(Ordering::SeqCst) < DRAINS.count.load(Ordering::SeqCst) {
         if t.elapsed() >= give_up {
             return false;
         }
@@ -974,6 +1018,32 @@ mod tests {
         assert_eq!(q.ahead_len, 0, "removals balance bucket accounting");
     }
 
+    /// A drain the OS refuses a thread (a memory limit on the process: a tests/ui check under the
+    /// sweep's data limit) leaves the workers started, and no later start fails for it; a start
+    /// that got none, or panicked, is asked again by the next.
+    #[test]
+    fn a_refused_worker_thread_poisons_no_later_start() {
+        let refused = || std::io::Error::from_raw_os_error(11);
+        let d = Drains::new();
+        let mut asked = 0;
+        let got = d.start(4, || {}, || { asked += 1; if asked <= 2 { Ok(()) } else { Err(refused()) } }).unwrap();
+        assert!(matches!(got, Started::Short(2, _)), "the two drains that started work: {got:?}");
+        assert_eq!(d.count.load(Ordering::SeqCst), 2, "stop_workers waits for the two, not four");
+        assert_eq!(d.start(4, || panic!("init again"), || panic!("asked again")).unwrap(), Started::Already, "the next push finds them started");
+
+        let d = Drains::new();
+        assert!(d.start(4, || {}, || Err(refused())).is_err(), "no drain at all: the start fails");
+        assert_eq!(d.count.load(Ordering::SeqCst), 0);
+        assert_eq!(d.start(4, || {}, || Ok(())).unwrap(), Started::All, "the next start asks again, and gets them");
+        assert_eq!(d.count.load(Ordering::SeqCst), 4);
+
+        let d = Drains::new();
+        let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| d.start(4, || panic!("a panic in the first start"), || Ok(()))));
+        assert!(first.is_err());
+        assert_eq!(d.start(4, || {}, || Ok(())).unwrap(), Started::All, "a start after a panicked one runs, poisoned by nothing");
+        assert_eq!(d.count.load(Ordering::SeqCst), 4);
+    }
+
     /// While a real-time thread is live, a worker at the idle policy starts tier-ups only, and one
     /// that may not go there any more everything else (idle_tiers).
     #[test]
@@ -1026,11 +1096,10 @@ pub(crate) unsafe fn reset_statics() {
     reset(&COUNTS, [const { AtomicUsize::new(0) }; TIERS]);
     reset(&RUNNING, [const { AtomicUsize::new(0) }; TIERS]);
     reset(&THREADS, OnceLock::new());
-    reset(&START, std::sync::Once::new());
     reset(&NEXT_WORKER, AtomicUsize::new(0));
     reset(&IDLE_WORKERS, AtomicUsize::new(0));
     reset(&WORKERS_STOP, AtomicBool::new(false));
-    reset(&DRAINS, AtomicUsize::new(0));
+    reset(&DRAINS, Drains::new());
     reset(&DRAINS_BACK, AtomicUsize::new(0));
     reset(&LOCK_MAX_NS, AtomicU64::new(0));
     reset(&AHEAD_INBOX, relax_session::sync::Mutex::new(Vec::new()));

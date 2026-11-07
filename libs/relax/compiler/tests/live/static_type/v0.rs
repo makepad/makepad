@@ -1,5 +1,7 @@
 // 3.11: a static's type changes (AtomicU32 -> AtomicU64) while it holds a value: new code must
-// never read the old-sized storage. Target: the value migrates by name (7 -> 8 as u64).
+// never read the old-sized storage. The edit takes the restart rung, its reason naming the static
+// and both types (a value migration is not built: a static's type change is rare, and a restart
+// is the safe answer); the running code keeps counting (7, then 8).
 use std::sync::atomic::{AtomicU32, Ordering};
 
 static COUNT: AtomicU32 = AtomicU32::new(5);

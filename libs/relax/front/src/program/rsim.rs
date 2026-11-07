@@ -198,8 +198,7 @@ impl Program {
     /// errors Relax's own resolution found (see the module comment); the glob ambiguities it
     /// found become the answer of `glob_ambiguity` for the checked modules.
     pub fn run_import_sim(&mut self, own: &[bool]) {
-        let prev = record_import_uses();
-        set_record_import_uses(false);
+        let prev = super::pause_import_uses();
         let (out, amb, macros) = {
             let mut sim = Sim::new(self, own);
             sim.init(false);
@@ -208,10 +207,11 @@ impl Program {
             sim.init(true);
             sim.resolve_imports();
             let out = sim.finalize_imports();
-            (out, sim.ambiguity_table(), sim.macro_table())
+            let chains = sim.chain_summaries();
+            (out, sim.ambiguity_table(&chains), sim.macro_table(&chains))
         };
         self.sim_macros = Some(macros);
-        set_record_import_uses(prev);
+        super::resume_import_uses(prev);
         self.sim_ambiguity = Some(amb);
         self.sim_diags = Some(out);
         self.glob_amb_cache.clear();
@@ -560,24 +560,26 @@ impl<'a> Sim<'a> {
     }
 
     fn resolution_mut(&mut self, key: (u32, Sym, usize)) -> &mut NameRes {
-        if !self.res.contains_key(&key) {
-            self.order.entry(key.0).or_default().push((key.1, key.2));
-            self.res.insert(key, NameRes::default());
+        match self.res.entry(key) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                self.order.entry(key.0).or_default().push((key.1, key.2));
+                e.insert(NameRes::default())
+            }
         }
-        self.res.get_mut(&key).unwrap()
     }
 
     /// `update_local_resolution`: `f` changes the resolution; a new or changed determined declaration
     /// is defined in the module's glob importers.
     fn update_local_resolution<T>(&mut self, module: u32, name: Sym, ns: usize, warn: bool, f: impl FnOnce(&mut Self, &mut NameRes) -> T) -> T {
         let key = (module, name, ns);
-        self.resolution_mut(key);
-        let mut r = self.res.remove(&key).unwrap();
+        // (taken out while `f` runs: none of them reads the resolutions)
+        let mut r = std::mem::take(self.resolution_mut(key));
         let old_decl = r.determined_decl();
         let old_vis = old_decl.map(|d| self.dvis(d));
         let t = f(self, &mut r);
         let new_decl = r.determined_decl();
-        self.res.insert(key, r);
+        *self.res.get_mut(&key).expect("the resolution taken out above") = r;
         let binding = match new_decl {
             Some(b) if old_decl != Some(b) || old_vis != Some(self.dvis(b)) => b,
             _ => return t,
@@ -647,6 +649,11 @@ impl<'a> Sim<'a> {
     fn init(&mut self, expanded: bool) {
         let p = self.p;
         let nmods = p.mods.len() as u32;
+        // (a resolution per item name of the checked modules at least: room for them up front)
+        if !expanded {
+            let names: usize = (0..nmods).filter(|&m| self.local(m)).map(|m| { let md = &p.mods[m as usize]; md.types.len() + md.values.len() + md.macros.len() }).sum();
+            self.res.reserve(names);
+        }
         // items
         for m in 0..nmods {
             if !self.local(m) { continue; }
@@ -1408,13 +1415,27 @@ impl<'a> Sim<'a> {
     // ------------------------------------------------------------------ finalization
 
     /// The ambiguities recorded on the glob declarations of the modules: (module, name, type ns).
-    fn ambiguity_table(&self) -> HashMap<(u32, Sym, bool), u8> {
-        let mut t = HashMap::default();
+    /// `chain_ambiguities` of every declaration summed up: 0 none, 1 one with no warning flag at or
+    /// before it in the chain, 2 each after one. One pass: an import declaration's source was
+    /// allocated before it.
+    fn chain_summaries(&self) -> Vec<u8> {
+        // (an ambiguity in the chain, one with no warning flag at or before it)
+        let mut s: Vec<(bool, bool)> = Vec::with_capacity(self.decls.len());
+        for d in &self.decls {
+            let amb = d.ambiguity.is_some();
+            let (any, none) = d.import.map_or((false, false), |(_, src)| s[src as usize]);
+            s.push((amb || any, !d.warn_ambiguity && (amb || none)));
+        }
+        s.into_iter().map(|(any, none)| if !any { 0 } else if none { 1 } else { 2 }).collect()
+    }
+
+    fn ambiguity_table(&self, chains: &[u8]) -> HashMap<(u32, Sym, bool), u8> {
+        let mut t = HashMap::with_capacity_and_hasher(self.res.len(), Default::default());
         for (&(m, name, ns), r) in &self.res {
             if ns == 2 { continue; }
             // low bits: what a use of the name finds (a name a module binds directly -- an item or a
             // single import -- has no glob ambiguity); bits 2..: the glob declaration's own
-            let glob = r.glob.map_or(0, |g| { let amb = self.chain_ambiguities(g); if amb.is_empty() { 0 } else if amb.iter().any(|w| w.is_none()) { 1 } else { 2 } });
+            let glob = r.glob.map_or(0, |g| chains[g as usize]);
             if r.non_glob.is_none() && r.glob.is_none() { continue; }
             t.insert((m, name, ns_type(ns)), (if r.non_glob.is_some() { 0 } else { glob }) | (glob << 2));
         }
@@ -1430,11 +1451,11 @@ impl<'a> Sim<'a> {
     }
 
     /// The macro namespace of the checked modules for the macro-call check (lint.rs `macro_call_ambiguities`).
-    fn macro_table(&self) -> HashMap<(u32, Sym), MacBinding> {
+    fn macro_table(&self, chains: &[u8]) -> HashMap<(u32, Sym), MacBinding> {
         let mut t = HashMap::default();
         for (&(m, name, ns), r) in &self.res {
             if ns != 2 { continue; }
-            let glob_amb = r.glob.map_or(0, |g| { let amb = self.chain_ambiguities(g); if amb.is_empty() { 0 } else if amb.iter().any(|w| w.is_none()) { 1 } else { 2 } });
+            let glob_amb = r.glob.map_or(0, |g| chains[g as usize]);
             let b = MacBinding { non_glob: r.non_glob.and_then(|d| self.mac_res(d)), glob: r.glob.and_then(|d| self.mac_res(d)), glob_amb,
                 non_glob_vis: r.non_glob.and_then(|d| self.decls[d as usize].vis), glob_vis: r.glob.and_then(|d| self.decls[d as usize].vis) };
             if b.non_glob.is_some() || b.glob.is_some() { t.insert((m, name), b); }

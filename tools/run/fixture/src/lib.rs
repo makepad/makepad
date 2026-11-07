@@ -167,6 +167,24 @@ pub fn by_name_peek<T>(r: &Registry, _t: T) -> usize {
     r.by_name.len()
 }
 
+/// One strong reference to a registry rustc shares, handed over as an address (`Arc::into_raw`).
+#[relax_api]
+pub fn shared_registry() -> usize {
+    std::sync::Arc::into_raw(std::sync::Arc::new(Registry::new())) as usize
+}
+
+/// Not an op: compiled by Relax, it would count rustc's `ArcInner` by Relax's layout of it. A
+/// `Registry` crosses the boundary (rustc made this one), so Relax refuses it (provided.rs
+/// check_provided_ownership; relax-provided-fixture-arc-guard). The strong count after one more.
+pub fn shared_registry_retain(at: usize) -> usize {
+    let p = at as *const Registry;
+    unsafe {
+        std::sync::Arc::increment_strong_count(p);
+        let a = std::mem::ManuallyDrop::new(std::sync::Arc::from_raw(p));
+        std::sync::Arc::strong_count(&a)
+    }
+}
+
 /// Option<usize> by value (tag + payload in registers on Relax's side)
 #[relax_api]
 pub fn maybe(x: u32) -> Option<usize> {

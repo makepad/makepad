@@ -20,6 +20,8 @@ pub enum Kind {
     Layout = 4,
     /// a named constant folded without running code (const_eval::fold_without_execution): (def, 0)
     Fold = 5,
+    /// an opaque type's bounds lowered where it is written (Tcx::lower_opaque): (opaque def, 0)
+    OpaqueBounds = 6,
 }
 
 pub struct Guard { kind: u8, a: u32, b: u32 }

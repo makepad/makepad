@@ -509,7 +509,8 @@ mod imp {
 
     // The stack's last frame, what `RtlUserThreadStart` is to a thread's stack and `BaseFiberStart`
     // to a fiber's: `relax_stack_last_frame(data, f)` calls `f(data)`, and what no frame below it
-    // handles goes to `last_frame`. The system's search never reaches the switch's frame: it
+    // handles goes to `relax_stack_last_frame_handler` (by its symbol: rustc does not count a
+    // `sym` operand of `global_asm!` as a use). The system's search never reaches the switch's frame: it
     // cannot unwind that one, it reads above the segment, that fault is dispatched and searched
     // the same way, deeper each time, and the thread never comes back. (Its frame record is the
     // usual one: walkers go on through its return address, `SWITCH_RETURN`.)
@@ -517,7 +518,7 @@ mod imp {
         ".globl relax_stack_last_frame",
         "relax_stack_last_frame:",
         ".seh_proc relax_stack_last_frame",
-        ".seh_handler {handler}, @except",
+        ".seh_handler relax_stack_last_frame_handler, @except",
         "push rbp",
         ".seh_pushreg rbp",
         "sub rsp, 32",
@@ -531,7 +532,6 @@ mod imp {
         "pop rbp",
         "ret",
         ".seh_endproc",
-        handler = sym last_frame,
     );
     extern "C" {
         fn relax_stack_last_frame(data: *mut u8, f: extern "C" fn(*mut u8));
@@ -539,7 +539,8 @@ mod imp {
 
     /// As the system's frame at the end of a thread: the process's unhandled exception filter
     /// (`SetUnhandledExceptionFilter`), and the process ends with the code unless it resumes.
-    unsafe extern "system" fn last_frame(record: *mut ExceptionRecord, _frame: *mut u8, context: *mut Context, _dispatch: *mut u8) -> u32 {
+    #[no_mangle]
+    unsafe extern "system" fn relax_stack_last_frame_handler(record: *mut ExceptionRecord, _frame: *mut u8, context: *mut Context, _dispatch: *mut u8) -> u32 {
         const CONTINUE_EXECUTION: u32 = 0;
         let mut pointers = ExceptionPointers { record, context };
         if UnhandledExceptionFilter(&mut pointers) == EXCEPTION_CONTINUE_EXECUTION {

@@ -31,7 +31,7 @@ impl Program {
         let f = &self.files[file as usize];
         let location = self.source_location(file, pos);
         let mut d = location.diagnostic(phase, msg);
-        if !matches!(d.code.as_str(), "E0412" | "E0425" | "E0433" | "RR0001" | "RM0001") { return d; }
+        if !matches!(d.code.as_str(), "E0412" | "E0425" | "E0432" | "E0433" | "RR0001" | "RM0001") { return d; }
         let module = self.defs.iter().filter(|d| d.file == file && d.item.0 != u32::MAX).filter_map(|d| {
             let it = f.ast.items.get(d.item.0 as usize)?;
             (it.lo <= pos && pos <= it.hi).then_some((it.hi.saturating_sub(it.lo), d.scope))
@@ -41,7 +41,7 @@ impl Program {
     }
 
     pub fn suggest(&self, d: &mut Diagnostic, location: &SourceLocation<'_>, module: u32) {
-        if !matches!(d.code.as_str(), "E0412" | "E0425" | "E0433" | "RR0001" | "RM0001") { return; }
+        if !matches!(d.code.as_str(), "E0412" | "E0425" | "E0432" | "E0433" | "RR0001" | "RM0001") { return; }
         let Some(name) = d.message.split('`').nth(1) else { return };
         // the candidates' lookups are no uses of the imports they go through
         let _quiet = crate::program::QuietLookups::begin();

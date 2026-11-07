@@ -39,22 +39,111 @@ pub fn hook_fn() -> Option<fn(&PanicInfo<'_>)> {
     unsafe { HOOK }
 }
 
+/// The message as the runtime's report gets it, in a fixed stack buffer (no allocation). One
+/// that does not fit keeps its head and its end, and names the bytes cut between them: the end
+/// of a long message is often what it is about (a child process's failure after its log).
 struct StackBuf {
     buf: [u8; 4096],
+    /// bytes of `buf` in use: the message so far, or, once it is cut, the head, the room for
+    /// the mark and the tail
     len: usize,
+    /// whether the message is cut (the head is `buf[..head]`, the tail `buf[HEAD + MARK..len]`)
+    cut: bool,
+    head: usize,
+    /// the bytes left out between the head and the tail
+    dropped: usize,
+}
+
+/// A cut message's head, and the room after it for the mark that names the cut.
+const HEAD: usize = 1024;
+const MARK: usize = 48;
+
+impl StackBuf {
+    const fn new() -> Self {
+        StackBuf { buf: [0; 4096], len: 0, cut: false, head: 0, dropped: 0 }
+    }
+
+    /// The message: as written, or its head, the mark and its tail.
+    fn finish(&mut self) -> &[u8] {
+        if !self.cut {
+            return &self.buf[..self.len];
+        }
+        // the tail starts at a character
+        let mut t = HEAD + MARK;
+        while t < self.len && (self.buf[t] & 0xc0) == 0x80 {
+            t += 1;
+            self.dropped += 1;
+        }
+        let mut mark = [0u8; MARK];
+        let mut n = 0;
+        for &c in b"\n[... " {
+            mark[n] = c;
+            n += 1;
+        }
+        let (mut digits, mut d, mut v) = ([0u8; 20], 0, self.dropped);
+        loop {
+            digits[d] = b'0' + (v % 10) as u8;
+            d += 1;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        while d > 0 {
+            d -= 1;
+            mark[n] = digits[d];
+            n += 1;
+        }
+        for &c in b" bytes cut ...]\n" {
+            mark[n] = c;
+            n += 1;
+        }
+        let h = self.head;
+        self.buf[h..h + n].copy_from_slice(&mark[..n]);
+        self.buf.copy_within(t..self.len, h + n);
+        self.len = h + n + (self.len - t);
+        &self.buf[..self.len]
+    }
 }
 
 impl fmt::Write for StackBuf {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        let b = s.as_bytes();
-        let room = self.buf.len() - self.len;
-        let mut n = if b.len() < room { b.len() } else { room };
-        // never cut a UTF-8 sequence
-        while n > 0 && n < b.len() && (b[n] & 0xc0) == 0x80 {
-            n -= 1;
+        let mut b = s.as_bytes();
+        let cap = self.buf.len();
+        if !self.cut {
+            let room = cap - self.len;
+            if b.len() <= room {
+                self.buf[self.len..self.len + b.len()].copy_from_slice(b);
+                self.len += b.len();
+                return Ok(());
+            }
+            // a full buffer: its head ends at a character, the bytes after the mark's room
+            // start the tail
+            self.buf[self.len..].copy_from_slice(&b[..room]);
+            self.len = cap;
+            b = &b[room..];
+            let mut h = HEAD;
+            while h > 0 && (self.buf[h] & 0xc0) == 0x80 {
+                h -= 1;
+            }
+            self.dropped += HEAD + MARK - h;
+            self.cut = true;
+            self.head = h;
         }
-        self.buf[self.len..self.len + n].copy_from_slice(&b[..n]);
-        self.len += n;
+        // the tail is the last bytes written
+        let room = cap - HEAD - MARK;
+        if b.len() > room {
+            self.dropped += b.len() - room;
+            b = &b[b.len() - room..];
+        }
+        let over = (self.len + b.len()).saturating_sub(cap);
+        if over > 0 {
+            self.buf.copy_within(HEAD + MARK + over..self.len, HEAD + MARK);
+            self.len -= over;
+            self.dropped += over;
+        }
+        self.buf[self.len..self.len + b.len()].copy_from_slice(b);
+        self.len += b.len();
         Ok(())
     }
 }
@@ -93,13 +182,14 @@ pub const fn panic_at(args: fmt::Arguments<'_>, loc: &Location<'_>) -> ! {
         crate::intrinsics_rt::abort();
         #[cfg(not(relax_web))]
         {
-        let mut sb = StackBuf { buf: [0; 4096], len: 0 };
+        let mut sb = StackBuf::new();
         let _ = fmt::write(&mut sb, args);
         depth_step(-1);
+        let message = sb.finish();
         let file = loc.file();
         crate::intrinsics_rt::panic_impl(
-            sb.buf.as_ptr(),
-            sb.len,
+            message.as_ptr(),
+            message.len(),
             file.as_ptr(),
             file.len(),
             loc.line(),

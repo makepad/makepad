@@ -95,7 +95,7 @@ fn anon_consts(prog: &Program, tcx: &Tcx, krate: u32, inside: bool) -> Vec<DefId
     out
 }
 
-fn in_body(prog: &Program, owner: DefId, file: u32, lo: u32) -> bool {
+pub(crate) fn in_body(prog: &Program, owner: DefId, file: u32, lo: u32) -> bool {
     let d = prog.def(owner);
     if d.file != file || !matches!(d.kind, DefKind::Fn | DefKind::AssocFn | DefKind::Const | DefKind::AssocConst | DefKind::Static) { return false; }
     let pf = &prog.files[file as usize];

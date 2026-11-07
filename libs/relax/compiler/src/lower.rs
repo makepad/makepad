@@ -653,8 +653,9 @@ impl<'a> Lcx<'a> {
     /// A provided crate's own fn compiled here (it has no shim) that calls std's raw ownership
     /// operations (Arc/Rc reference counts through raw pointers, Box/Arc/Rc::from_raw) works
     /// objects rustc allocated with Relax's std, whose layouts differ (KernelRef::clone was
-    /// Arc::increment_strong_count on rustc's ArcInner: Stage aborted). Such a fn must be marked
-    /// `#[relax_api]` (an op), so it runs on the compiled side.
+    /// Arc::increment_strong_count on rustc's ArcInner: Stage aborted), when the object's type
+    /// crosses the boundary. Such a fn must be marked `#[relax_api]` (an op), so it runs on the
+    /// compiled side.
     fn check_provided_ownership(&mut self, callee: u32) {
         let crate::jit::FnKey::Inst(d, args) = self.u.fns[self.cur_fn as usize].key.clone() else { return };
         let krate = self.u.prog.def(d).krate;
@@ -684,6 +685,13 @@ impl<'a> Lcx<'a> {
         ];
         let std_owner = path.starts_with("alloc::") || path.starts_with("std::") || path.starts_with("core::");
         if std_owner && RAW.iter().any(|r| path.ends_with(r)) {
+            // an object of a type no bound fn's signature reaches is JIT code's own, as a value of
+            // it built here is (check_provided_built): rustc's side never hands one over. The
+            // panic a caller-side trampoline boxed (a `Box<dyn Any + Send>` behind a `*mut u8`)
+            // is freed by the caller's side (script std's ScriptVmCall::resume_if_panicked).
+            if cargs.first().is_some_and(|t| self.relax_only_instance(*t)) {
+                return;
+            }
             let key = crate::provided::key(&self.u.prog, &self.u.tcx, d);
             self.provided_err(krate, format!("`{}` calls `{}` in JIT-compiled code, but `{}` lives in a provided crate: it works an object rustc allocated with makepad run's std, whose layout differs: mark it #[relax_api] (an op), or make it generic over the type JIT code allocates (an instance of a generic fn is compiled for its caller's type)", key, path, key));
         }

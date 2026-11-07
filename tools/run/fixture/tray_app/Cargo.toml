@@ -1,0 +1,10 @@
+[package]
+name = "relax-tray-app"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "A tray app that shows no window (TRAY_APP_OPEN=<s>: it opens one that many seconds in), for the run's load screen of an app that never takes the run's window (tools/run/fixture/tray_app.sh)"
+
+[dependencies]
+makepad-widgets = { path = "../../../../widgets", version = "2.0.0", default-features = false }

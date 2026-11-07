@@ -1,2 +1,3 @@
-# the static's type changes (AtomicU32 -> AtomicU64): migrated by name (7 -> 8 as u64)
-v1 reinst out=file
+# the static's type changes (AtomicU32 -> AtomicU64): a restart naming the static and both types;
+# the running code is unchanged (its next run counts on: 8)
+v1 restart out=file note=static `COUNT` changed its type from `AtomicU32` to `AtomicU64`

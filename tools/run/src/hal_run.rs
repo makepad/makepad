@@ -69,8 +69,9 @@ enum Work {
         choice: String,
         value: String,
     },
-    /// The person asked for the restart that waits (the JIT ring's Update ready notice).
-    Relaunch,
+    /// The person asked for the restart that waits (the JIT ring's Update ready notice): how,
+    /// for the log's line of who asked.
+    Relaunch(String),
 }
 
 static RUN: Mutex<Option<Run>> = Mutex::new(None);
@@ -454,6 +455,15 @@ fn post(update: Update) {
     Hal::global().wake_session(HOST);
 }
 
+/// The run ends, said once with why: every way it ends names itself here (a quit signal with its
+/// sender, the app's exit, a failure no window shows). A run that ended silently left only its
+/// app's "the last window closed", read as the person's close (Scope on the Mac, 11-06).
+fn end_run(why: &str) {
+    if !QUIT.swap(true, Ordering::AcqRel) {
+        eprintln!("makepad-run: the run ends: {why}");
+    }
+}
+
 /// MAKEPAD_RUN_QUIT_TRACE=1: each step of the run's end on stderr (thread, ms since the quit
 /// began): where a quit that never exits stops.
 fn quit_trace(step: &str) {
@@ -507,15 +517,19 @@ pub fn end_app() {
     }
 }
 
-/// A run ended in place (`relax_compiler::run_end`): the next one starts, in the same window.
-pub fn next_run() {
+/// A run ended in place (`relax_compiler::run_end`): its compile thread has returned, or waits for
+/// the window's retry of a failed build (it returns now: the next run is the retry), and the next
+/// run starts in the same window. False: there is no run window to start it in.
+pub fn next_run() -> bool {
+    end_retry_wait();
     let thread = COMPILE_THREAD.lock().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(thread) = thread {
         let _ = thread.join();
     }
+    NEXT_RUN.store(false, Ordering::Release);
     {
         let mut guard = state();
-        let Some(run) = guard.as_mut() else { return };
+        let Some(run) = guard.as_mut() else { return false };
         run.spec = None;
         run.initial_failed = false;
         run.retry = false;
@@ -528,6 +542,21 @@ pub fn next_run() {
     post(Update::NextRun { start_screen });
     post(Update::Begin);
     start_compile_thread();
+    true
+}
+
+/// A run ended in place, and its compile thread is to return rather than wait for a retry
+/// (`next_run`): set from that end until the thread has gone.
+static NEXT_RUN: AtomicBool = AtomicBool::new(false);
+
+/// A run ended in place: a failed build's compile thread that waits for the window's retry
+/// returns ([`wait_for_retry`]); the next run is the retry.
+fn end_retry_wait() {
+    {
+        let _run = state();
+        NEXT_RUN.store(true, Ordering::Release);
+    }
+    RETRY.notify_all();
 }
 
 fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>) {
@@ -543,10 +572,13 @@ fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>) {
         if relax_compiler::run_end::restarting() {
             return;
         }
+        // (a compiler panic's line: the hook keeps a build's panics quiet, they become its compile
+        // error, so a run that ends on one says it here or nowhere)
+        let cause = panicked.as_ref().map_or(String::new(), |line| format!(" (the compiler panicked: {line})"));
         let mut guard = state();
         let Some(run) = guard.as_mut() else {
             EXIT.store(code, Ordering::Release);
-            QUIT.store(true, Ordering::Release);
+            end_run(&format!("the program returned {code}{cause} with no run window"));
             makepad_hal::stop_main_loop();
             return;
         };
@@ -566,7 +598,7 @@ fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>) {
             // A hidden window (MAKEPAD_HIDE_WINDOWS) shows the failure to nobody and nobody
             // retries from it: the run ends with the code instead of waiting for a retry
             // forever (a hidden Sandbox boot whose provided crates differed sat idle 4.6 h).
-            QUIT.store(true, Ordering::Release);
+            end_run(&format!("the program's run ended with {code}{cause} and no window can retry it"));
             Hal::global().wake_session(HOST);
             if PUMP.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
                 makepad_hal::stop_main_loop();
@@ -589,21 +621,29 @@ fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>) {
             if run.spec.is_some() {
                 return;
             }
-            while !QUIT.load(Ordering::Acquire) && !guard.as_ref().is_some_and(|r| r.retry)
-            {
-                guard = RETRY.wait(guard).unwrap_or_else(|e| e.into_inner());
-            }
-            if QUIT.load(Ordering::Acquire) {
+            if !wait_for_retry(guard) {
                 return;
             }
-            if let Some(run) = guard.as_mut() {
-                run.retry = false;
-                run.initial_failed = false;
-            }
-            drop(guard);
             post(Update::Begin);
         }
     }
+}
+
+/// A build that failed before the app started waits for the window's retry. True: it compiles
+/// again. False: the run goes instead (the window closed, or a restart ended the run and its
+/// next run is the retry: `next_run`).
+fn wait_for_retry(mut guard: MutexGuard<'static, Option<Run>>) -> bool {
+    while !QUIT.load(Ordering::Acquire) && !NEXT_RUN.load(Ordering::Acquire) && !guard.as_ref().is_some_and(|r| r.retry) {
+        guard = RETRY.wait(guard).unwrap_or_else(|e| e.into_inner());
+    }
+    if QUIT.load(Ordering::Acquire) || NEXT_RUN.load(Ordering::Acquire) {
+        return false;
+    }
+    if let Some(run) = guard.as_mut() {
+        run.retry = false;
+        run.initial_failed = false;
+    }
+    true
 }
 
 pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
@@ -621,10 +661,10 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
     // ends as closing its window ends it. Its worker thread (handle, name, result packet, closure)
     // waits for the whole run: it lives in the kept heap, not in the compiler generation the
     // settle swap destroys (it then faulted on its own packet as the signal woke it)
-    relax_compiler::zone_alloc::kept_with(|| crate::quit_signal::install(|| {
+    relax_compiler::zone_alloc::kept_with(|| crate::quit_signal::install(|signal| {
         let _at_the_run = relax_compiler::run_threads::process_work();
         relax_compiler::run::quit_requested();
-        QUIT.store(true, Ordering::Release);
+        end_run(&signal);
         RETRY.notify_all();
         Hal::global().wake_session(HOST);
     }));
@@ -633,7 +673,7 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
         makepad_hal::run_main_loop();
     }
     quit_trace("the main loop returned");
-    QUIT.store(true, Ordering::Release);
+    end_run("the window system's main loop returned");
     RETRY.notify_all();
     Hal::global().wake_session(HOST);
     let mut code = None;
@@ -851,6 +891,7 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
                 impl Drop for StopLoop {
                     fn drop(&mut self) {
                         quit_trace("the window pump ends: stop_main_loop");
+                        end_run("the run window's thread ended");
                         makepad_hal::stop_main_loop();
                     }
                 }
@@ -1005,17 +1046,25 @@ pub fn observe(id: u32, next: &DomainState) {
     }
 }
 
+/// A click on the ring's dot, for the log's line of who asked for the restart: how long the dot
+/// had shown and that the press began on it (the only press the dot takes), and whether the remote
+/// endpoint fed it rather than a person (`input::MOD_INJECTED`).
+fn dot_click(injected: bool, shown: Duration) -> String {
+    let by = if injected { "a click the remote endpoint injected on the ring's dot (Update ready), no person's" } else { "a click on the ring's dot (Update ready)" };
+    format!("{by}, pressed on the dot itself {:.1} s after it showed", shown.as_secs_f64())
+}
+
 /// The run window's Restart: a build that failed before the app started compiles again; a crashed
 /// app's next run starts; a running app restarts as `session relaunch` does (with its state when
 /// it restarts itself).
-fn retry(crashed: bool) -> Result<(), String> {
+fn retry(crashed: bool, keyed: bool) -> Result<(), String> {
     if retry_failed_build()? {
         return Ok(());
     }
     if crashed {
         return relax_compiler::reload::restart_run("restart after the app crashed");
     }
-    relax_compiler::reload::relaunch_pending().map(|_| ())
+    relax_compiler::reload::relaunch_pending(if keyed { "the R key in the run window" } else { "a click on the run window's Restart" }).map(|_| ())
 }
 
 /// A build that failed before the app started compiles again (true: no app runs, nothing of it to
@@ -1024,6 +1073,8 @@ fn retry_failed_build() -> Result<bool, String> {
     let mut guard = state();
     let r = guard.as_mut().ok_or("no run window")?;
     if r.initial_failed {
+        // (its boot is due from here: a restart asked meanwhile waits for it)
+        relax_compiler::run::boot_begins();
         r.retry = true;
         RETRY.notify_one();
         return Ok(true);
@@ -1142,8 +1193,8 @@ fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Doc
             }
             // the waiting edits stay noted until a run loads them (`domain_loaded`, or the new
             // process): the app may postpone the restart (unsaved work), a rebuild may come first
-            Work::Relaunch => {
-                if let Err(e) = relax_compiler::reload::relaunch_pending() {
+            Work::Relaunch(who) => {
+                if let Err(e) = relax_compiler::reload::relaunch_pending(&who) {
                     post(Update::Message(e));
                 }
                 post(Update::Relaunched);
@@ -1238,7 +1289,7 @@ impl Work {
             Work::Save(path, _) => format!("a save of {}", path.display()),
             Work::OpenFile { .. } => "an open-file request".into(),
             Work::Resume { .. } => "a resume".into(),
-            Work::Relaunch => "a restart".into(),
+            Work::Relaunch(_) => "a restart".into(),
         }
     }
 }
@@ -1258,9 +1309,44 @@ fn enqueue(queue: &mut VecDeque<Work>, work: Work) {
                 }
             }
         }
-        Work::Resume { .. } | Work::OpenFile { .. } | Work::Relaunch => {}
+        Work::Resume { .. } | Work::OpenFile { .. } | Work::Relaunch(_) => {}
     }
     queue.push_back(work);
+}
+
+/// What became of the run's window when the run let it go ([`close_run_window`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WindowGone {
+    Closed,
+    /// a WM's tile, which cannot close without ending the process
+    Tile,
+    /// lent to the app, which draws in it: the app's window now
+    Apps,
+}
+
+/// The run's window goes and the run stays (`Boot::close_window`), for `why`, said in the log:
+/// from here on the run is one without a window: nobody answers a parked panic from it, and a
+/// failure ends the run. A WM's tile stays, and so does a window lent to the app: only the app
+/// or the person closes the window the app draws in. (A program the run took for a batch program
+/// lost the window it drew in, and with its last window it ended: Scope, 28-109 s after each
+/// start, 11-06.)
+fn close_run_window(host: &mut HostWindow, why: &str) -> WindowGone {
+    let lent = host.window().is_some_and(|window| {
+        Hal::global().with_world(|w| w.session(HOST).and_then(|s| s.windows.get(HOST, window).ok()).is_some_and(|e| e.lent_to != 0))
+    });
+    if lent {
+        eprintln!("makepad-run: the run's window stays ({why}): the app draws in it");
+        return WindowGone::Apps;
+    }
+    if !host.close_window() {
+        return WindowGone::Tile;
+    }
+    eprintln!("makepad-run: the run's window closes: {why}");
+    relax_compiler::inspect::events::run_state_available(false);
+    if let Some(r) = state().as_mut() {
+        r.window = Id::NONE;
+    }
+    WindowGone::Closed
 }
 
 fn pump(
@@ -1343,6 +1429,8 @@ fn pump(
     let mut inspect_open = false;
     // what the view over the app showed last (its `session view` answer and the log line)
     let mut view_shown: Option<String> = None;
+    // a WM's tile hidden for a tray app (`Boot::hide_window`): back once it has something to show
+    let mut window_hidden = false;
     relax_compiler::inspect::run_view::set_wake(|| Hal::global().wake_session(HOST));
     let mut warm_up_at: Option<Instant> = None;
     // a sustained UI wait's look over the app came on at (the log says how long it stayed)
@@ -1360,7 +1448,7 @@ fn pump(
         };
         if (unseen || !has_window) && relax_compiler::hot_failure::has_error() {
             EXIT.store(makepad_remote::hot::JIT_ERROR_EXIT, Ordering::Release);
-            QUIT.store(true, Ordering::Release);
+            end_run("a JIT error that no window shows");
         }
         if let Some(probe) = &mut probe {
             probe.turn(active, &data);
@@ -1418,7 +1506,7 @@ fn pump(
                     eprintln!("makepad: {message}");
                     let code = relax_compiler::hot_failure::verdict(101).code();
                     let _ = EXIT.compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire);
-                    QUIT.store(true, Ordering::Release);
+                    end_run("its failure (above) has no window to show it");
                 }
                 Update::Failure(message) => {
                     diagnostics.push(Diagnostic::new("run", "", 0, 0, message));
@@ -1434,15 +1522,9 @@ fn pump(
                     overlay_dismissed = false;
                     action_failed = true;
                 }
-                // from here on the run is one without a window: nobody answers a parked panic
-                // from it, and a failure ends the run
                 Update::Batch => {
-                    if host.close_window() {
+                    if close_run_window(&mut host, "the program went quiet without starting an app: a batch program draws no frame") == WindowGone::Closed {
                         has_window = false;
-                        relax_compiler::inspect::events::run_state_available(false);
-                        if let Some(r) = state().as_mut() {
-                            r.window = Id::NONE;
-                        }
                     }
                 }
                 Update::Document(document) => host.reload(document),
@@ -1491,14 +1573,14 @@ fn pump(
                     // that code); a crash is what the run window stays up for
                     DomainState::Exited(code) => {
                         EXIT.store(code, Ordering::Release);
-                        QUIT.store(true, Ordering::Release);
+                        end_run(&format!("the app exited ({code})"));
                     }
                     // a run that is no live session takes no fix: it ends as a rustc build's
                     // panic does (101), with the message on stderr
                     DomainState::Crashed(message) if !relax_compiler::run::live_session() => {
                         eprintln!("makepad: {message}");
                         EXIT.store(relax_compiler::hot_failure::verdict(101).code(), Ordering::Release);
-                        QUIT.store(true, Ordering::Release);
+                        end_run("the app crashed (above), and no live session restarts it");
                     }
                     DomainState::Crashed(message) => post(Update::Failure(message)),
                     DomainState::Stopped => {}
@@ -1660,6 +1742,49 @@ fn pump(
                 dirty = true;
             }
         }
+        // The app showed itself without the run's window (a tray app: its first present was its
+        // tray, or a window of its own such as a dropdown): nothing will take the load screen
+        // over, so it goes now, as a batch program's does. A window the app opens later is one of
+        // its own. A WM's tile cannot close without ending the process: it is hidden (the WM
+        // shows a minimised tile, as for a tray app's closed window) and comes back below.
+        if active && !lent_to_app && domain != 0 {
+            if let Some(ago) = relax_compiler::domain::presented_ago(domain) {
+                active = false;
+                failed = false;
+                stage = Stage::Running;
+                data.domain = "Running".into();
+                EXIT.store(0, Ordering::Release);
+                let (path, contents) = progress.finish(data.warm);
+                enqueue(&mut work_pending, Work::Save(path, contents));
+                dirty = true;
+                let gone = if !has_window {
+                    "had no window"
+                } else {
+                    match close_run_window(&mut host, "the app showed itself without it (a tray app)") {
+                        WindowGone::Closed => {
+                            has_window = false;
+                            "closes"
+                        }
+                        WindowGone::Tile => {
+                            host.hide_window(true);
+                            window_hidden = true;
+                            "hides (a WM's tile)"
+                        }
+                        WindowGone::Apps => "stays: the app draws in it",
+                    }
+                };
+                eprintln!(
+                    "makepad-run: the app showed itself without the run's window (a tray app), {:.0} ms ago: the load screen {gone}",
+                    ago.as_secs_f64() * 1000.0
+                );
+            }
+        }
+        // the hidden tile comes back with something to show: the app's window (the app took it),
+        // a failure, or a new start
+        if window_hidden && (lent_to_app || failed || active) {
+            host.hide_window(false);
+            window_hidden = false;
+        }
         // the view over an app whose UI thread is parked stays: nothing else answers its window
         let ui_parked = data.parked.as_ref().is_some_and(|p| p.thread == "main");
         match relax_compiler::inspect::run_view::take() {
@@ -1718,8 +1843,10 @@ fn pump(
             )
         });
         let drawn = if !overlay { "null" } else if host.layers() { "\"layer\"" } else { "\"panel\"" };
+        // the run's window: on the screen, hidden (a WM's tile for a tray app) or closed
+        let window_is = if !has_window { "closed" } else if window_hidden { "hidden" } else { "open" };
         let shown = format!(
-            "\"over_app\":{},\"why\":{},\"dismissed\":{},\"drawn\":{}{},\"pid\":{},\"patch_failed\":{},\"patch_notice\":{}",
+            "\"over_app\":{},\"why\":{},\"dismissed\":{},\"drawn\":{}{},\"pid\":{},\"patch_failed\":{},\"patch_notice\":{},\"window\":\"{window_is}\"",
             overlay,
             why.map_or("null".to_string(), |w| format!("\"{w}\"")),
             overlay_dismissed,
@@ -1973,8 +2100,15 @@ fn pump(
         }
         let hold = !visible && !layered && host.hold();
         host.offscreen(hold);
-        let draw = (visible || hold || layered) && Instant::now() >= next_frame;
-        let timeout = if visible || hold || layered {
+        // paced by the display (the window is lent): the frames draw on its beats, which the
+        // boot asks for and which wake this loop; else on the clock below
+        let paced = host.paced();
+        let frames = visible || hold || layered;
+        let draw = frames && (paced || Instant::now() >= next_frame);
+        if let Some(wait) = host.frame_wait().filter(|_| frames) {
+            wake_in = Some(wake_in.map_or(wait, |w: Duration| w.min(wait)));
+        }
+        let timeout = if frames && !paced {
             next_frame
                 .saturating_duration_since(Instant::now())
                 .as_nanos() as u64
@@ -2003,13 +2137,13 @@ fn pump(
                 probe.window(window);
             }
             probe.parts(host.turn_parts());
-            if draw {
+            if host.turn_drew() {
                 probe.frame(&data);
             }
             probe.latencies(host.take_latencies(), &data);
         }
         if !alive {
-            QUIT.store(true, Ordering::Release);
+            end_run("the run window ended (above)");
             break;
         }
         // until this window's first present: what it waits for (a frame drawn and not presented
@@ -2019,7 +2153,7 @@ fn pump(
                 host.first_frame_waits().unwrap_or("its frame is drawn; the window system has presented none"),
             ));
         }
-        if draw {
+        if draw && !paced {
             // frames on a fixed 60 Hz schedule: the time a turn takes is not added to every
             // interval; a turn that fell behind starts the schedule again from now
             let period = Duration::from_nanos(host.frame_period_ns());
@@ -2034,14 +2168,16 @@ fn pump(
         }
         let mut close = false;
         for event in host.events() {
+            // (the log names a restart's key apart from a click)
+            let keyed = matches!(event, BootEvent::KeyDown(_));
             let action = match event {
                 // a click on the ring's dot acts on what it shows
-                BootEvent::RingPressed => {
+                BootEvent::RingPressed { injected, shown } => {
                     match alert {
                         // the restart a waiting change asks for (the paused view's Restart):
                         // with the app's state where it restarts with it, never without the click
                         Some(RingAlert::UpdateReady) => {
-                            enqueue(&mut work_pending, Work::Relaunch);
+                            enqueue(&mut work_pending, Work::Relaunch(dot_click(injected, shown)));
                             // the dot answers now: the circle in the next frame, which is the
                             // next pass of this loop
                             ring_clicked = true;
@@ -2164,9 +2300,9 @@ fn pump(
             // Both input paths use these checks and the existing action worker.
             match action {
                 Some(Action::Restart) if update_ready => {
-                    enqueue(&mut work_pending, Work::Relaunch);
+                    enqueue(&mut work_pending, Work::Relaunch(if keyed { "the R key in the update view" } else { "a click on the update view's Restart" }.into()));
                 }
-                Some(Action::Restart) if data.can_retry || data.can_restart => match retry(failed) {
+                Some(Action::Restart) if data.can_retry || data.can_restart => match retry(failed, keyed) {
                     Ok(()) => failed = false,
                     Err(error) => post(Update::Message(error)),
                 },
@@ -2257,8 +2393,7 @@ fn pump(
             }
         }
         if close {
-            eprintln!("makepad-run: the boot window ends: its close button");
-            QUIT.store(true, Ordering::Release);
+            end_run("the boot window's close button");
             break;
         }
         while let Some(work) = work_pending.pop_front() {
@@ -2279,9 +2414,8 @@ fn pump(
                 }
                 Err(std::sync::mpsc::TrySendError::Disconnected(work)) => {
                     work_pending.push_front(work);
-                    eprintln!("makepad: run action worker stopped; closing the run");
                     EXIT.store(101, Ordering::Release);
-                    QUIT.store(true, Ordering::Release);
+                    end_run("the run's action worker stopped");
                     break;
                 }
             }
@@ -2335,8 +2469,17 @@ fn pump(
 
 #[cfg(test)]
 mod ring_tip_tests {
-    use super::{click_says, restart_says};
+    use super::{click_says, dot_click, restart_says};
     use relax_compiler::reload::host::{BuildProgress, Phase, Route};
+
+    /// A restart from the ring's dot says how long the dot had shown, that the press began on
+    /// it, and whether a person or the remote endpoint pressed it.
+    #[test]
+    fn a_click_on_the_dot_says_how_long_it_showed_and_whose_it_was() {
+        let shown = std::time::Duration::from_millis(2400);
+        assert_eq!(dot_click(false, shown), "a click on the ring's dot (Update ready), pressed on the dot itself 2.4 s after it showed");
+        assert_eq!(dot_click(true, shown), "a click the remote endpoint injected on the ring's dot (Update ready), no person's, pressed on the dot itself 2.4 s after it showed");
+    }
 
     #[test]
     fn a_click_that_builds_the_jit_never_reads_as_a_plain_restart() {
@@ -2361,14 +2504,19 @@ mod ring_tip_tests {
 
 #[cfg(test)]
 mod crash_offer_tests {
-    use super::{sources_changed_after_failure, state, AfterFailure, Run};
+    use super::{end_retry_wait, sources_changed_after_failure, state, wait_for_retry, AfterFailure, Run, NEXT_RUN};
     use makepad_hal::Id;
+    use std::sync::atomic::Ordering;
+
+    /// The run state is the process's: one of these tests at a time sets it.
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// A crashed app's sources change (the person's save, or a landing in the checkout): its next
     /// run is offered and waits for the person's Restart, it is not started (a landing restarted a
     /// crashed app on its own). A build that failed before the app started compiles again.
     #[test]
     fn a_crashed_apps_changed_sources_wait_for_its_restart() {
+        let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
         let home = std::env::temp_dir().join(format!("makepad-run-crash-offer-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         let log = home.join("live.jsonl");
@@ -2390,5 +2538,25 @@ mod crash_offer_tests {
         assert!(sources_changed_after_failure().is_err(), "no app has started");
         *state() = None;
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A build that failed before the app started waits for the window's retry, and a restart that
+    /// ends the run meanwhile (a `session relaunch`) ends that wait: its compile thread returns, so
+    /// the restart's next run starts instead of waiting for that thread forever.
+    #[test]
+    fn a_restart_ends_a_failed_builds_wait_for_its_retry() {
+        let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+        let run = |retry| Some(Run { window: Id::NONE, spec: None, domain: 0, initial_failed: true, retry, unnamed: false });
+        *state() = run(true);
+        assert!(wait_for_retry(state()), "the window's retry compiles again");
+        assert!(state().as_ref().is_some_and(|r| !r.retry && !r.initial_failed), "the retry is taken");
+        *state() = run(false);
+        let waiting = std::thread::spawn(|| wait_for_retry(state()));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!waiting.is_finished(), "it waits for the retry");
+        end_retry_wait();
+        assert!(!waiting.join().unwrap(), "the restart's next run is the retry: the build does not compile again in this thread");
+        NEXT_RUN.store(false, Ordering::Release);
+        *state() = None;
     }
 }

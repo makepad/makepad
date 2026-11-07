@@ -28,6 +28,10 @@ impl Program {
     /// E0433 / "cannot find attribute" for the attributes of the own crates' files.
     pub fn attribute_errors(&self, own: &[bool]) -> Vec<String> {
         let mut out = Vec::new();
+        // the helper attributes of a derive, by crate, module and path: the macro table answers
+        // them, the same for every file
+        let scope = crate::macros::MacroScope::new(self.macros.clone());
+        let mut derive_helpers: HashMap<(&str, String, Vec<String>), Vec<String>> = HashMap::default();
         let mut by_file: Vec<Vec<DefId>> = vec![Vec::new(); self.files.len()];
         for (i, d) in self.defs.iter().enumerate() {
             if own.get(d.krate as usize).copied().unwrap_or(false) && (d.file as usize) < by_file.len() {
@@ -48,7 +52,6 @@ impl Program {
             // none: they define nothing)
             let mut ranges: Vec<Attr> = f.ast.root_attrs.iter().copied().collect();
             let n_root = ranges.len();
-            let scope = crate::macros::MacroScope::new(self.macros.clone());
             let mut retained_helpers = crate::fxhash::HashSet::default();
             // what each attribute is on: 0 the crate, 1 a struct / enum / union, 2 another item, 3 a field or variant
             let mut targets: Vec<u8> = vec![0; n_root];
@@ -61,21 +64,23 @@ impl Program {
                 let tgt = if matches!(def.kind, DefKind::Struct | DefKind::Enum | DefKind::Union) { 1 } else { 2 };
                 let attrs_start = ranges.len();
                 let kname = self.syms.str(self.crates[krate as usize].name);
-                let mname = self.def_path(self.mods[self.mods[def.scope as usize].normal as usize].def);
+                // (the module's path only for an item with a derive: most have none)
+                let mut mname: Option<String> = None;
                 let mut custom_helpers = Vec::new();
                 for a in f.ast.list(it.attrs) {
                     let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
                     if hi <= lo || text(lo as u32) != "derive" { continue; }
+                    let mname = mname.get_or_insert_with(|| self.def_path(self.mods[self.mods[def.scope as usize].normal as usize].def));
                     let mut path = Vec::new();
                     for i in lo + 2..hi {
                         match f.tok(i as u32).kind {
                             T::Ident | T::RawIdent | T::KwCrate | T::KwSelfValue | T::KwSuper => path.push(text(i as u32).to_string()),
                             T::PathSep if path.is_empty() => path.push(String::new()),
                             T::Comma | T::CloseParen => {
-                                if let Some(entry) = scope.proc_macro_path(kname, &mname, &path, crate::macro_reg::Kind::Derive, &mut Default::default()) {
-                                    custom_helpers.extend(crate::macro_reg::derive_helpers(&entry));
-                                }
-                                path.clear();
+                                let helpers = derive_helpers.entry((kname, mname.clone(), std::mem::take(&mut path))).or_insert_with_key(|(_, _, path)| {
+                                    scope.proc_macro_path(kname, mname, path, crate::macro_reg::Kind::Derive, &mut Default::default()).map_or_else(Vec::new, |entry| crate::macro_reg::derive_helpers(&entry))
+                                });
+                                custom_helpers.extend(helpers.iter().cloned());
                             }
                             _ => {}
                         }

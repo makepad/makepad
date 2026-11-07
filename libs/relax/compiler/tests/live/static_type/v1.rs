@@ -1,8 +1,7 @@
-// G8 / 3.11: statics across edits.
-//  v1: the initializer is edited: the static KEEPS its value, and the live driver says so (never a
-//      silent no-op).
-//  v2: the static's type changes (AtomicU64 -> AtomicU64): new code must not read the old-sized
-//      storage; the value migrates by name (8 -> 8) or the edit takes the restart rung.
+// 3.11: a static's type changes (AtomicU32 -> AtomicU64) while it holds a value: new code must
+// never read the old-sized storage. The edit takes the restart rung, its reason naming the static
+// and both types (a value migration is not built: a static's type change is rare, and a restart
+// is the safe answer); the running code keeps counting (7, then 8).
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNT: AtomicU64 = AtomicU64::new(100);

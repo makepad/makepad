@@ -28,6 +28,10 @@ holds restarts (MUST), naming the running fn.
 A stored entry can be older than the manifest of the run that reads it: the edited text's first run,
 reaching none of the late readers, writes its own manifest (its keys are "unchanged" from then on),
 and the next run's first late reads must still see that the entries they find are of the old text.
+fewer_definitions: a session whose crate has fewer definitions than the cache's image (a module the
+fill had is gone): the image's types still name the old crate's, past the program's; edits land.
+const_skipped, skipped_offline: a module the boot skips (MAKEPAD_RUN_LAZY_DEFER, every run) edited,
+live or between runs: the new text's runs show the new value.
 --cold: the same sessions with the disk cache off, for comparison.
 --window: the same program with a window (hidden), so a restart keeps the process and the window: the
 new value must show in the same pid.
@@ -172,12 +176,19 @@ PROBES += [
 FIRST["const_added_module"] = (M, "// mod added_module\n#[inline(never)]\nfn added_module_read() -> u64 {\n    0\n}",
     "mod added_module;\n#[inline(never)]\nfn added_module_read() -> u64 {\n    added_module::ADDED_K\n}")
 PROBES += [("const_added_module", "src/added_module.rs", "ADDED_K: u64 = 1;", "ADDED_K: u64 = 2;", 2)]
+# A const of a module the boot skipped (an app's lazy selection skips the modules its boot does not
+# need; the loader brings them in after it, and a restored image holds its file past the boot's):
+# the code keys had none of that file's text, so the relaunch and a fresh run linked the old
+# value's code. They take it in whole now: the edit restarts (MUST), saying why, and the new text's
+# runs show the new value.
+PROBES += [("const_skipped", "src/skipped.rs", "SKIPPED_K: u64 = 1;", "SKIPPED_K: u64 = 2;", 2)]
 # every value a probe prints, when it is more than its own
 READS = {"const_every": {"every_direct": 2, "every_fn": 2, "every_inlined": 2, "every_generic": 2, "every_closure": 2, "every_assoc": 2, "every_derived": 3, "every_late": 2}}
 READS["field_every"] = {n: 47 for n in ("fe_method", "fe_free", "fe_pattern", "fe_closure", "fe_generic", "fe_inlined", "fe_macro", "fe_update", "fe_update_self", "fe_clone", "fe_nested", "fe_dyn", "fe_late")}
 READS["field_every"].update(fe_eq=1, fe_debug=4, fe_write=48, fe_held=40, fe_rest=3)
 READS["const_after_body"] = {"const_direct": 2}
 READS["include_after_body"] = {"const_include": 2}
+READS["const_skipped"] = {"const_skipped": 2, "skipped_own": 2}
 # (a new run makes the held value with the new layout)
 FRESH_READS = dict(READS, field_every=dict(READS["field_every"], fe_held=47))
 LAND = "landed"
@@ -201,7 +212,7 @@ MUST = {
     "field_nested": LAND, "field_const_read": EVALUATED, "field_const_fn": EVALUATED, "field_static": EVALUATED,
     "field_import": TYPE_NAMES, "field_offset": EVALUATED, "field_running_frame": STILL_RUNS, "field_blocked_frame": STILL_RUNS, "field_short_walk": STILL_RUNS,
     "const_other_new": LAND, "static_from_const": RUNS_ONCE, "static_through_fn": RUNS_ONCE, "static_through_new": RUNS_ONCE,
-    "const_after_body": LAND, "const_added_module": LAND, "include_macro": LAND, "include_found": LAND, "include_after_body": LAND, "include_added": LAND,
+    "const_after_body": LAND, "const_added_module": LAND, "const_skipped": r"a module the boot skipped", "include_macro": LAND, "include_found": LAND, "include_after_body": LAND, "include_added": LAND,
     "rs_include_item": LAND, "rs_include_body": LAND,
     "include_env": r"makes its path from other tokens",
     # a trait object the program made holds the old method table: linked from the disk cache too
@@ -209,6 +220,9 @@ MUST = {
     # a variant inserted before a held one: lands; restarts when code that ran read the numbers it moves
     "enum_insert": LAND, "field_copy": LAND, "field_copy_frame": r"is running: its frame may hold", "enum_insert_cast": r"read them as numbers", "enum_insert_hash": r"derived `Hash`",
 }
+# (--cold: the session compiled that module's code itself, so its readers are known: it lands)
+if cold:
+    MUST["const_skipped"] = LAND
 # A second edit in the same session: the first one's evaluations must not read as a type's.
 SECOND = {"field_nested": ("pub v: [u64; 3],\n}\nimpl Inner {\n    pub fn new() -> Inner {\n        Inner { v: [5; 3] }", "pub v: [u64; 4],\n}\nimpl Inner {\n    pub fn new() -> Inner {\n        Inner { v: [5; 4] }", 45), "const_nonliteral": ("CONST_NONLIT: u64 = 2 + 0;", "CONST_NONLIT: u64 = 3 + 0;", 3), "const_direct": ("CONST_DIRECT: u64 = 2;", "CONST_DIRECT: u64 = 3;", 3)}
 if window:
@@ -236,6 +250,8 @@ if window:
     env.update(MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1", SANDBOX_MUTE="1", MUSIC_MUTE="1")
 for k in ("MAKEPAD_RUN_CACHE", "MAKEPAD_RUN_PRELINK", "WARM_EDIT_ONCE", "WARM_EDIT_LATE"):
     env.pop(k, None)
+# (every run: the image's selection is the boot's)
+env["MAKEPAD_RUN_LAZY_DEFER"] = "src/skipped.rs"
 if cold:
     env["MAKEPAD_RUN_CACHE"] = "0"
 cmd = [relax, "run", "--verbose", "cache-warm-const-edit"] + (["--features", "window"] if window else [])
@@ -418,6 +434,63 @@ def older_than_manifest():
         save(path, base)
 
 
+def skipped_offline():
+    """The file the boot skipped edited between runs (no live session): the next warm run, and the
+    one after it (from the image the first recorded), print the new value."""
+    path = os.path.join(pkg, "src/skipped.rs")
+    base = open(path).read()
+    old, new = "SKIPPED_K: u64 = 1;", "SKIPPED_K: u64 = 2;"
+    assert base.count(old) == 1
+    save(path, base.replace(old, new))
+    try:
+        wrong = []
+        for tag in ("skipped-offline", "skipped-offline-again"):
+            p = once(tag, "1")
+            line = next((l for l in p.stdout.splitlines() if l.startswith("out tick ")), "")
+            wrong += ["%s: %s=%s want 2" % (tag, n, value(line, n)) for n in ("const_skipped", "skipped_own") if value(line, n) != 2]
+        return ", ".join(wrong)
+    finally:
+        save(path, base)
+
+
+def fewer_definitions():
+    """A session that starts with fewer definitions than the cache's image: the fill's crate had
+    `mod ballast;` (300 definitions, its fn called), this text has neither. The restore keeps the
+    dependencies and collects the edited crate again, while the image's types, kept with their ids,
+    still name the old crate's definitions: its closures' owners sit past this program's. A body
+    edit, then a const edit, land as in any session; an ICE (the old crate's types read as this
+    program's) is the failure."""
+    path = os.path.join(pkg, M)
+    base = open(path).read()
+    call = "    black_box(ballast::ballast());\n"
+    assert base.count("mod ballast;\n") == 1 and base.count(call) == 1
+    save(path, base.replace("mod ballast;\n", "").replace(call, ""))
+    try:
+        row, err = session("const_after_body", V, "CONST_DIRECT: u64 = 1;", "CONST_DIRECT: u64 = 2;", 2)
+    finally:
+        save(path, base)
+    if not any(re.search(r"collected: retained \d+ crates; rebuilding", l) for l in err):
+        return "the session did not start from the image with the dependencies kept: " + next((l for l in err if "collected: restored" in l or "not restored" in l), "")[:200]
+    ice = next((l for l in err if "internal compiler error" in l), None)
+    if ice:
+        if "-v" in args:
+            for l in err:
+                if "panicked at" in l or re.search(r"^\s+\d+: ", l):
+                    print("    | " + l[:300])
+        return ice[:300]
+    if row["outcome"] != "landed":
+        return "%s %s" % (row["outcome"], row["patch"])
+    return ""
+
+
+if not cold and (not only or "fewer_definitions" in only):
+    why = fewer_definitions()
+    print("%-23s %s" % ("fewer_definitions", why or "ok"))
+    fails += 1 if why else 0
+if not cold and (not only or "skipped_offline" in only):
+    why = skipped_offline()
+    print("%-23s %s" % ("skipped_offline", why or "ok"))
+    fails += 1 if why else 0
 if not cold and (not only or "older_than_manifest" in only):
     why = older_than_manifest()
     print("%-23s %s" % ("older_than_manifest", why or "ok"))

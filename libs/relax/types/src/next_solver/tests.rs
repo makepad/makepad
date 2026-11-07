@@ -1381,14 +1381,17 @@ fn round41_preempted_typeck_can_be_checked_later() {
 }
 
 /// The panic of a check that reaches an anonymous const nobody fed names it: this message is the
-/// reason of the ledger's checker_panic record.
+/// reason of the ledger's checker_panic record. A const parameter's path (`[u8; N]`) lowers to the
+/// parameter, and its holder's lowering feeds nothing (an anonymous const of a static's type, typed
+/// before anything lowered the static, is fed by lowering it: const_eval tests
+/// an_anonymous_constant_typed_before_its_holder_is_lowered).
 #[test]
 fn an_unfed_anonymous_const_panic_names_the_const() {
-    let (prog, tcx) = program("static NS: [u8; 2] = [0; 1 + 1];", "unfed_anon_const");
+    let (prog, tcx) = program("pub fn nf<const N: usize>() -> [u8; N] { [0; N] }", "unfed_anon_const");
     let messages: Vec<String> = (0..prog.defs.len()).map(|i| DefId(i as u32)).filter(|d| prog.def(*d).kind == crate::program::DefKind::AnonConst).filter_map(|d| {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { tcx.typeck(&prog, d); })).err().map(|p| p.downcast_ref::<String>().cloned().unwrap_or_default())
     }).collect();
-    assert!(messages.iter().any(|m| m.starts_with("anonymous const type of `unfed_anon_const::NS::{constant#") && m.contains("its holder never fed it")), "{messages:?}");
+    assert!(messages.iter().any(|m| m.starts_with("anonymous const type of `unfed_anon_const::nf::{constant#") && m.contains("its holder never fed it")), "{messages:?}");
 }
 
 #[test]

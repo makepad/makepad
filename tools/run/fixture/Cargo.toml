@@ -30,6 +30,13 @@ path = "src/main.rs"
 name = "relax-provided-fixture-guard"
 path = "src/guard.rs"
 
+# `makepad run relax-provided-fixture-arc-guard` must stop with "`shared_registry_retain` calls
+# `..increment_strong_count` in JIT-compiled code" (provided_script.sh); under rustc it prints
+# "strong 2". The panic a with_vm trampoline boxes is JIT code's own type and stays allowed (vm_call).
+[[bin]]
+name = "relax-provided-fixture-arc-guard"
+path = "src/arc_guard.rs"
+
 # statics of the lib reached from JIT-compiled code: a per-side one works, rustc's one copy is
 # refused (provided_static.sh)
 [[bin]]

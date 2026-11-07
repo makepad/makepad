@@ -25,6 +25,9 @@ const S_SOURCES: u32 = 8;
 const S_GATED: u32 = 9;
 /// `ParsedFile::pm_editions`, after the gated syntax
 const S_PM_EDITIONS: u32 = 10;
+/// `ParsedFile::numbering` of the parse the image holds (two u64 halves), after the editions: a
+/// record made over a parse (its file metadata) is restored over that parse's image only
+const S_NUMBERING: u32 = 11;
 /// tree arrays: 100 + index in AST_ARRAYS order
 const S_AST: u32 = 100;
 
@@ -86,6 +89,8 @@ pub fn image(pf: &ParsedFile) -> Writer<'_> {
     }).collect();
     w.add_owned(S_GATED, &gated);
     w.add(S_PM_EDITIONS, pf.pm_editions.bytes());
+    let n = pf.numbering();
+    w.add_owned(S_NUMBERING, &[n as u64, (n >> 64) as u64]);
     w
 }
 
@@ -495,6 +500,16 @@ fn restore_inner(meta: &mut crate::crate_image::FileMeta, img: &'static [u8], ce
     if meta.token_input {
         sources.get_or_insert_with(Default::default).register_mapped(&meta.path, &src[..meta.src_len as usize]).ok()?;
     }
+    // the record (its file metadata: lazy bodies, prepared blocks; a collected program's ids)
+    // was made over one parse of the file: an image of another parse of the same text is not it
+    let numbering = match r.slice::<u64>(10 + k, S_NUMBERING)? {
+        &[lo, hi] => lo as u128 | (hi as u128) << 64,
+        _ => return None,
+    };
+    if numbering != meta.numbering {
+        mismatch(&meta.path, "numbering");
+        return None;
+    }
     Some(ParsedFile {
         src: Arena::Mapped(src),
         toks: PackedToks::mapped(r.slice(1, S_TOKS)?)?,
@@ -502,6 +517,7 @@ fn restore_inner(meta: &mut crate::crate_image::FileMeta, img: &'static [u8], ce
         edition: meta.edition,
         src_len: meta.src_len,
         source_hash: std::sync::OnceLock::from((meta.path.clone(), meta.hash)),
+        numbering: std::sync::OnceLock::from(numbering),
         token_input: meta.token_input,
         sources,
         token_origins: origins,
@@ -638,6 +654,39 @@ mod tests {
         let restored = restore(&mut meta, image(encode(&f))).unwrap();
         assert_eq!(restored.ast.gated_syntax, f.ast.gated_syntax);
         verify_file(&restored, &f);
+    }
+
+    /// A file's record (its metadata: skipped bodies, prepared blocks, and the ids a collected
+    /// program keeps) holds one parse's numbering; an image of the same text that numbers it
+    /// another way (one load skipped a body another parsed in its tree) is refused, not restored
+    /// under the record. The image's numbering is the restored file's.
+    #[test]
+    fn a_record_is_restored_over_an_image_of_its_own_parse_only() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let cfg = crate::cfg::CfgSet::host(sess, &[]);
+        let path = "numbered.rs";
+        let parse = |lazy: bool| {
+            let ctx = std::rc::Rc::new(crate::builtins::FileCtx::new("test", path, "test", &cfg));
+            let table = std::sync::Arc::new(crate::macros::MacroTable::default());
+            let (mut f, used) = crate::parser::parse_owned_ctx(sess,
+                b"pub fn f(x: u32) -> u32 { let c = |y: u32| y + x; c(3) }\n".to_vec(), None, 2021,
+                Some(crate::macros::MacroScope::new(table)), "test", Some(ctx), lazy,
+            ).unwrap();
+            let prep = crate::program::prepare_file(&mut f, &cfg);
+            let meta = crate::crate_image::file_meta(path, "test", &f, &used.unwrap(), &prep, false);
+            (f, meta)
+        };
+        let ((skipped, skipped_meta), (eager, eager_meta)) = (parse(true), parse(false));
+        assert_ne!(skipped.numbering(), eager.numbering());
+        let (skipped_image, eager_image) = (image(encode(&skipped)), image(encode(&eager)));
+        let mut meta: crate::crate_image::FileMeta = crate::crate_image::decode(&skipped_meta).unwrap();
+        let restored = restore(&mut meta, skipped_image).unwrap();
+        assert_eq!(restored.numbering(), skipped.numbering());
+        verify_file(&restored, &skipped);
+        let mut meta: crate::crate_image::FileMeta = crate::crate_image::decode(&skipped_meta).unwrap();
+        assert!(restore(&mut meta, eager_image).is_none(), "a record restored over another parse's image");
+        let mut meta: crate::crate_image::FileMeta = crate::crate_image::decode(&eager_meta).unwrap();
+        assert!(restore_certified(&mut meta, skipped_image).is_none(), "a collected file restored over another parse's image");
     }
 
     fn lazy_file(sess: &std::sync::Arc<crate::Session>) -> (ParsedFile, crate::cfg::CfgSet) {

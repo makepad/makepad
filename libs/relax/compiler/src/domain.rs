@@ -759,6 +759,15 @@ pub fn state(id: DomainId) -> Option<DomainState> {
     domains().iter().find(|d| d.info.id == id).map(|d| d.info.state.clone())
 }
 
+/// How long ago domain `id` presented its first frame (`first_present`: a window's frame, or a
+/// tray app's first tray); None before it has. No snapshot: the run's window looks every turn.
+pub fn presented_ago(id: DomainId) -> Option<std::time::Duration> {
+    let d = domains();
+    let d = d.iter().find(|d| d.info.id == id)?;
+    let at = std::time::Duration::from_secs_f64(d.info.first_frame_ms? / 1e3);
+    Some(d.started.elapsed().saturating_sub(at))
+}
+
 pub fn info(id: DomainId) -> Option<DomainInfo> {
     let snapshot = domains().iter().find(|d| d.info.id == id).map(snapshot);
     snapshot.map(with_block_memory)
@@ -923,6 +932,9 @@ fn kick_threads(unit: usize) -> bool {
 ///
 /// A thread that does not leave within `grace` (a native wait nobody ends) does not hold up the
 /// caller: it is named and kicked on until it goes.
+///
+/// `up` null: the run's boot ended before its unit was in (its build failed), so it has no code
+/// and no program threads; nothing is ended.
 pub fn end_run(up: *mut Unit, grace: std::time::Duration) -> RunEnd {
     let unit = up as usize;
     let (threads, bases) = {
@@ -943,7 +955,9 @@ pub fn end_run(up: *mut Unit, grace: std::time::Duration) -> RunEnd {
     let start = std::time::Instant::now();
     // (first: from here a signal, a fork or a thread's exit calls nothing of the run's)
     let callbacks = crate::domain_res::take_back_callbacks(&bases);
-    unsafe { (*up).end_code() };
+    if !up.is_null() {
+        unsafe { (*up).end_code() };
+    }
     let mut backoff = std::time::Duration::from_millis(1);
     let end = |left, ms| RunEnd {
         threads,

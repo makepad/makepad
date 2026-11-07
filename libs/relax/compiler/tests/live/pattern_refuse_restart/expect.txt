@@ -1,0 +1,8 @@
+# v1: the held enum grows (a restart) and a match on `Self` misses the variant: E0004, refused
+v1 refuse note=E0004: non-exhaustive patterns
+# v2: the arm added: the layout change alone restarts
+v2 restart note=does not fit the running values' layout
+# v3: a field added to the held struct (a restart) with a type error in a body: refused
+v3 refuse note=E0308
+# v4: the type error fixed: the field alone restarts (a thread-local holds the struct)
+v4 restart note=may hold values of it in the old one

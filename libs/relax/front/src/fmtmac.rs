@@ -158,7 +158,7 @@ impl<'a> Parser<'a> {
             let mut full = Vec::new();
             if path.global() { full.push(String::new()); }
             full.extend(segs.iter().map(|s| self.seg_text(s)));
-            let Some(resolved) = self.macros.as_ref().and_then(|m| m.builtin_macro_path(&self.krate, &self.cur_module(), &full, &mut Default::default())) else {
+            let Some(resolved) = self.macros.as_ref().and_then(|m| m.builtin_macro(&self.krate, &self.cur_module(), &full)) else {
                 return Ok(None);
             };
             name = resolved;

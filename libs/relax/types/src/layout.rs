@@ -613,12 +613,12 @@ impl Layouts {
     /// What live_editable asks of a struct but its Copy impl: of the application's scope (not a
     /// provided crate's), named fields, Rust's repr, in a live session.
     pub fn live_editable_form(&self, lcx: &LayoutCx<'_>, d: crate::program::DefId, adt: &crate::tcx::AdtT) -> bool {
-        if !LIVE_SESSION.load(std::sync::atomic::Ordering::Relaxed) {
-            return false;
-        }
-        let prog = lcx.prog;
-        let krate = prog.def(d).krate;
-        if prog.crates[krate as usize].rustc_laid || !crate::borrowck::event::app_crate(prog, krate) || adt.is_enum || adt.is_union {
+        live_laid(lcx.prog, lcx.prog.def(d).krate) && Self::struct_form(adt)
+    }
+
+    /// The struct form live_editable_form asks for, its crate aside: named fields, Rust's repr.
+    pub fn struct_form(adt: &crate::tcx::AdtT) -> bool {
+        if adt.is_enum || adt.is_union {
             return false;
         }
         if adt.repr_c || adt.repr_packed != 0 || adt.repr_align != 0 || adt.repr_int.is_some() || adt.no_niche || adt.valid_start.is_some() || adt.valid_end.is_some() {
@@ -633,15 +633,19 @@ impl Layouts {
         Some(tcx.type_implements_trait(lcx.prog, crate::tcx::TypingEnv::fully_monomorphized(lcx.prog), TraitRef { def_id: c, args: vec![GenericArg::Type(t)] }).may_apply())
     }
 
-    /// Live sessions (M10): an enum of the program's own crate with Rust's repr, which variants
-    /// may be added to in place (tagged layout, no niche).
+    /// Live sessions (M10): an enum of the program's own crates (the program's crate, a crate of
+    /// the app scope, or one an earlier run of the session laid out for live edits: `live_laid`)
+    /// with Rust's repr, which variants may be added to in place (tagged layout, no niche).
     pub fn live_editable_enum(&self, lcx: &LayoutCx<'_>, d: crate::program::DefId, adt: &crate::tcx::AdtT) -> bool {
-        if !LIVE_SESSION.load(std::sync::atomic::Ordering::Relaxed) || !adt.is_enum {
-            return false;
-        }
         let prog = lcx.prog;
         let krate = prog.def(d).krate;
-        krate == root_crate() && !prog.crates[krate as usize].rustc_laid && !adt.repr_c && adt.repr_int.is_none() && adt.repr_align == 0 && adt.repr_packed == 0 && !adt.no_niche
+        adt.is_enum && (live_laid(prog, krate) || (krate == root_crate() && LIVE_SESSION.load(std::sync::atomic::Ordering::Relaxed) && !prog.crates[krate as usize].rustc_laid))
+            && Self::enum_form(adt)
+    }
+
+    /// The enum form live_editable_enum asks for, its crate aside: Rust's repr, a niche to give.
+    pub fn enum_form(adt: &crate::tcx::AdtT) -> bool {
+        !adt.repr_c && adt.repr_int.is_none() && adt.repr_align == 0 && adt.repr_packed == 0 && !adt.no_niche
     }
 
     /// Is `t` 4 GiB or larger (its layout saturated)?
@@ -1510,9 +1514,43 @@ pub fn set_root_crate(c: u32) {
     ROOT_CRATE.store(c, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Crates outside the app scope whose structs and enums this run lays out for live edits (as
+/// their normalized root paths): a layout edit an earlier run of the live session refused only
+/// because its crate was outside the scope (a library's struct the app's work edits) hands the
+/// crate to the next run (MAKEPAD_RUN_LIVE_CRATES), whose edits of it then apply live. Set at the
+/// run's boot, before anything is laid out.
+static LIVE_CRATES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_live_crates(roots: Vec<String>) {
+    let _k = crate::zone_alloc::kept();
+    let roots = roots.iter().map(|r| crate::vfs::normalize_path(r)).collect();
+    *LIVE_CRATES.lock().unwrap_or_else(|e| e.into_inner()) = roots;
+}
+
+/// The crates set_live_crates named.
+pub fn live_crates() -> Vec<String> {
+    LIVE_CRATES.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Whether crate `krate`'s structs and enums take live layouts (M10: a struct's hidden extension
+/// word, an enum's tag without a niche): a live session, not a provided crate's (`rustc_laid`:
+/// its values are rustc's bytes), and of the app scope or set_live_crates. What a crate's code is
+/// built for (its cache key holds it: crate_views).
+pub fn live_laid(prog: &crate::program::Program, krate: u32) -> bool {
+    if !LIVE_SESSION.load(std::sync::atomic::Ordering::Relaxed) || prog.crates[krate as usize].rustc_laid {
+        return false;
+    }
+    if crate::borrowck::event::app_crate(prog, krate) {
+        return true;
+    }
+    let crates = LIVE_CRATES.lock().unwrap_or_else(|e| e.into_inner());
+    !crates.is_empty() && crates.contains(&crate::vfs::normalize_path(prog.crates[krate as usize].root_path()))
+}
+
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
 pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
     reset(&LIVE_SESSION, std::sync::atomic::AtomicBool::new(false));
     reset(&ROOT_CRATE, std::sync::atomic::AtomicU32::new(0));
+    reset(&LIVE_CRATES, std::sync::Mutex::new(Vec::new()));
 }

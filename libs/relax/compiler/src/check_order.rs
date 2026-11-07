@@ -53,17 +53,18 @@ impl Stage {
 }
 
 /// The resolver's errors by the step that reports them (rustc_resolve resolve_crate:
-/// build_reduced_graph during expansion, finalize_imports, late_resolve_crate, report_errors),
-/// and the codes misc_checking_3 reports; wherever the check finds them.
+/// build_reduced_graph during expansion, finalize_imports, finalize_macro_resolutions (step 2,
+/// `stage_of_uncoded`), late_resolve_crate, report_errors), and the codes misc_checking_3
+/// reports; wherever the check finds them.
 pub(crate) fn stage_of_code(code: &str) -> Option<Stage> {
     let (phase, step) = match code {
         "E0428" => (Phase::Resolve, 0),
         "E0252" | "E0254" | "E0255" | "E0259" | "E0260" | "E0430" | "E0431" | "E0432" => (Phase::Resolve, 1),
-        "E0106" | "E0261" | "E0401" | "E0403" | "E0408" | "E0409" | "E0415" | "E0416" | "E0426" | "E0433" | "E0434" | "E0435" | "E0437" | "E0438" | "E0637" => (Phase::Resolve, 2),
+        "E0106" | "E0261" | "E0401" | "E0403" | "E0408" | "E0409" | "E0415" | "E0416" | "E0426" | "E0433" | "E0434" | "E0435" | "E0437" | "E0438" | "E0637" => (Phase::Resolve, 3),
         // (use_injections: the smart-resolve errors are reported once resolution is done)
-        "E0404" | "E0405" | "E0411" | "E0412" | "E0422" | "E0423" | "E0424" | "E0425" | "E0531" | "E0532" | "E0573" | "E0574" | "E0575" | "E0576" => (Phase::Resolve, 3),
-        "E0659" => (Phase::Resolve, 4),
-        "E0603" => (Phase::Resolve, 5),
+        "E0404" | "E0405" | "E0411" | "E0412" | "E0422" | "E0423" | "E0424" | "E0425" | "E0531" | "E0532" | "E0573" | "E0574" | "E0575" | "E0576" => (Phase::Resolve, 4),
+        "E0659" => (Phase::Resolve, 5),
+        "E0603" => (Phase::Resolve, 6),
         "E0446" => (Phase::Late, LATE_PRIVATE_IN_PUBLIC),
         "E0451" => (Phase::Late, LATE_PRIVACY),
         _ => return None,
@@ -80,10 +81,18 @@ fn floor_of_code(code: &str) -> Option<Stage> {
     }
 }
 
+/// Where rustc reports an error it words without a code (`path:l:c: error: ..`): a macro path
+/// that names no macro, in finalize_macro_resolutions.
+fn stage_of_uncoded(e: &str) -> Option<Stage> {
+    let first = e.lines().next().unwrap_or("");
+    let at = first.find(": error: ")?;
+    first[at + 9..].starts_with("cannot find macro ").then_some(Stage::new(Phase::Resolve, 2))
+}
+
 /// Where rustc reports error `e` that the check found at `stage`.
 pub(crate) fn stage_for(stage: Stage, e: &str) -> Stage {
     let code = code_of(e);
-    let s = stage_of_code(code).map_or(stage, |c| Stage { group: stage.group, ..c });
+    let s = stage_of_code(code).or_else(|| stage_of_uncoded(e)).map_or(stage, |c| Stage { group: stage.group, ..c });
     match floor_of_code(code) {
         Some(f) if (s.phase, s.step) < (f.phase, f.step) => Stage { group: s.group, ..f },
         _ => s,

@@ -1011,6 +1011,11 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
     jit::set_program_args(pa);
     let t0 = Instant::now();
     let path = workspace_file_path(root);
+    // the `unused_imports` / `unused_macros` lints of the check below need the load's import and
+    // macro uses, as the package form records them (run.rs test_lints): without them every
+    // import of the file was reported unused
+    relax_types::macros::uses::record(true);
+    relax_front::program::set_record_import_uses(true);
     let (mut prog, core, krate) = match load_with_std(sess, &path, "test_crate", true) {
         Ok(x) => x,
         Err(e) => {
@@ -1051,7 +1056,10 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
         for error in enum_errors { eprintln!("error: {}", error); }
         return 1;
     }
-    let check_errors = run::check_test_subjects(&mut u, krate, &[krate], true);
+    let check_errors = run::check_test_subjects(&mut u, krate, &[krate], true, false);
+    // (what the tests' own code resolves and expands from now on is no lint's input)
+    relax_types::macros::uses::record(false);
+    relax_front::program::set_record_import_uses(false);
     if check_errors > 0 {
         eprintln!("error: could not compile `{root}` (test) due to {check_errors} previous error{}: no test ran", if check_errors == 1 { "" } else { "s" });
         return 101;

@@ -3522,8 +3522,10 @@ impl<'a> Gen<'a> {
                 self.a.movzx8(rd, rd);
                 self.fin_i(*d, rd);
             }
-            // min/max with a constant that is not NaN: x86 minsd/maxsd return their second operand
-            // when either is NaN, which is then the constant -- Rust's answer -- in one instruction
+            // min/max with a constant that is not NaN: x86 minsd/maxsd return their second
+            // operand when either is NaN, which is then the constant -- Rust's answer -- in one
+            // instruction. Equal operands (`0.0` and `-0.0`) give the constant too, on either side,
+            // as rustc's code does (it moves a constant second and gives it on a tie)
             Inst::FBin(op @ (FOp::Min | FOp::Max), f64_, d, a, b) if self.mem_const.is_none() && (self.non_nan_const(*a, *f64_) || self.non_nan_const(*b, *f64_)) => {
                 let (x, c) = if self.non_nan_const(*b, *f64_) { (*a, *b) } else { (*b, *a) };
                 let xo = self.use_f(x, XS);
@@ -3544,7 +3546,9 @@ impl<'a> Gen<'a> {
                 self.fin_f(*d, xd);
             }
             Inst::FBin(op @ (FOp::Min | FOp::Max), f64_, d, a, b) => {
-                // Rust semantics: if one operand is NaN the other is returned
+                // Rust semantics: if one operand is NaN the other is returned; equal operands
+                // (`0.0` and `-0.0`) give b, as rustc's code does for two values it knows nothing
+                // of (the `MinLt` rewrite of a never-NaN b agrees: codegen opt min_max_non_nan)
                 let xa = self.use_f(*a, XS);
                 let xb = self.use_f(*b, XS2);
                 let pfx = if *f64_ { 0xf2 } else { 0xf3 };

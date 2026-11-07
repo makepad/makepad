@@ -339,7 +339,7 @@ impl Session {
                                 // crate recollection is the conservative transitive invalidation.
                                 dirty.insert(d); rebuild.insert(krate);
                             }
-                            Change::Layout(_) => { rebuild.insert(krate); }
+                            Change::Layout(_) | Change::Vis(_) => { rebuild.insert(krate); }
                             Change::Macro(_) => { rebuild.insert(krate); macro_rebuild = true; }
                         }
                     }

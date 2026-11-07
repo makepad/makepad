@@ -9,5 +9,7 @@ default-run = "relax-provided-script-ops"
 
 [dependencies]
 makepad-script = { path = "../../../../platform/script", version = "1.0.0" }
+# with_vm's panic round trip (bin `vm_call`): JIT closures under the bound makepad-script-std
+makepad-script-std = { path = "../../../../platform/script/std", version = "1.0.0" }
 # compute_program's driver (bin `driver`): JIT code over the bound makepad-script
 makepad-compute-program = { path = "../../../../libs/compute_program", version = "1.0.0" }

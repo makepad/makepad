@@ -301,6 +301,12 @@ impl ClosureOwners {
         for i in self.seen..end {
             let TyKind::Closure(file, _, a) = tcx.tys.kind(TyId(i as u32)) else { continue };
             let TyKind::FnDef(d, ..) = tcx.tys.kind(a.parent_args) else { continue };
+            // A warm start that collected the edited crate again keeps the image's types, ids and
+            // all (Tcx::retain_collected_prefix): a closure of the old text of a crate that now has
+            // fewer definitions names an owner past this program's. No code of this program has
+            // that type (one whose owner is in range at most adds an owner the caller's file check
+            // drops).
+            if d.0 as usize >= prog.defs.len() { continue; }
             let mut d = *d;
             while prog.def(d).kind == DefKind::Closure { d = prog.def(d).parent; }
             self.by_file.entry(*file).or_default().insert(d);
@@ -3656,12 +3662,27 @@ pub(crate) fn rt_thread_run(entry: u64, arg: u64) -> u64 {
 }
 }
 
+thread_local! {
+    /// The next recovery point this thread enters is std's catch_unwind (relax_catch_caught).
+    static CATCH_CAUGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `__relax_catch_caught`, which std's catch_unwind calls just before its recovery point: the
+/// panic that point catches goes back to the program, and its report line says so
+/// (`report (caught):`). A panic that ends a thread or a test keeps `report:`, and a log's readers
+/// (land_gate.sh's test_failures, jit_misses) count only those: untagged, a test run's deliberate
+/// panics read as its failures (11-07).
+pub extern "C" fn relax_catch_caught() {
+    let _ = CATCH_CAUGHT.try_with(|c| c.set(true));
+}
+
 rt_fn! {
 /// core::intrinsics_rt::catch_panic: `f(data)` under a recovery point (std::panic::
 /// catch_unwind, std::thread's start routine). The panic message itself was printed by
 /// std's hook; the report adds where it happened.
 pub(crate) fn rt_catch_panic(f: u64, data: u64) -> u64 {
     ensure_altstack();
+    let caught = CATCH_CAUGHT.try_with(|c| c.replace(false)).unwrap_or(false);
     let u = cur_unit();
     match unsafe { call_jit_nested(u, f, data) } {
         Ok(_) => 0,
@@ -3675,7 +3696,7 @@ pub(crate) fn rt_catch_panic(f: u64, data: u64) -> u64 {
             let r = owner::call(owner::Class::Job, || unsafe { (&*u).report(&p) });
             fatal_compile_error(&p, &r);
             // std's hook already printed the panic message (as rustc's does); add where
-            eprintln!("  report: {}", r);
+            eprintln!("  report{}: {}", if caught { " (caught)" } else { "" }, r);
             1
         }
     }
@@ -10831,12 +10852,15 @@ unsafe fn settle_final(u: &Unit, id: u32) -> bool {
 /// earlier run stored for that code (Cache::tier_verdict), not one made again from this run's
 /// start -- a warm launch's faster code crossed the O3 bar where the run that stored it had not,
 /// and its counted builds parked them again (warm Fab: ~150 slots, the launch never settled).
-/// Parked: final, its loops included (STORED_PARKED). Queued (and no verdict since): its counted
-/// build now (Q_STORED). Neither (it counted and never turned hot): final. Baseline code without a
-/// parked verdict counts on: it gets its O2 build by running (base_running, the settle sweep), and
-/// that install applies the verdict. Final code counts again when the settled state re-arms
-/// (settle_tier_tick), and without a parked verdict when one of its loops turns hot (rt_loop_hot).
-/// Unit lock held.
+/// Parked: final, its loops included (STORED_PARKED). Neither queued nor parked (it counted and
+/// never turned hot): final. Queued (and no verdict since): it counts as this run's code does,
+/// and this run's counts queue it. (Queued at link, every slot an earlier run had queued was built
+/// whether this run ran it or not: a short process -- a test -- ends before that backlog is built,
+/// so each launch queued the backlogs of all before it, and the compiler's test children waited
+/// behind them for their own builds, 11-07.) Baseline code without a parked verdict counts on: it
+/// gets its O2 build by running (base_running, the settle sweep), and that install applies the
+/// verdict. Final code counts again when the settled state re-arms (settle_tier_tick), and without
+/// a parked verdict when one of its loops turns hot (rt_loop_hot). Unit lock held.
 unsafe fn stored_tier_verdict(u: &Unit, id: u32, v: crate::cache::TierVerdict, base: bool) {
     use crate::cache::TierVerdict;
     match v {
@@ -10847,11 +10871,10 @@ unsafe fn stored_tier_verdict(u: &Unit, id: u32, v: crate::cache::TierVerdict, b
                 w5.fetch_and(!STORED_PARKED, Ordering::Relaxed);
             }
         }
-        _ if base => {}
-        TierVerdict::Queued(rate) => queue_now(u, id, Q_STORED, rate),
-        TierVerdict::None => {
+        TierVerdict::None if !base => {
             settle_final(u, id);
         }
+        _ => {}
     }
 }
 
@@ -14181,6 +14204,19 @@ unsafe fn build_rir_lowered_as(up: *mut Unit, id: u32) -> Result<relax_backend::
                 ensure_parent_body(up, *parent, *cfile, 0)?;
             }
             let u = &mut *up;
+            // the closure's expression is in this parse of its file: in a body the load skipped,
+            // the file's skipped bodies are parsed now (the parent's own body may have been in
+            // the load's tree, its closure's code named from elsewhere); an id this parse does
+            // not have is refused, never read past the tree
+            if let FnKey::Closure(_, ce, _) = &key {
+                if !closure_in_parse(u, *cfile, *ce) {
+                    u.prog.part_idents(*cfile);
+                }
+                if !closure_in_parse(u, *cfile, *ce) {
+                    return Err(format!("{}: names expression {} of {}, which this parse of the file does not have (code made from another numbering of the file)",
+                        u.fns[id as usize].name, ce & !crate::tcx::ASYNC_FN_BODY, u.prog.file_paths.get(*cfile as usize).map_or("?", |p| p.as_str())));
+                }
+            }
             // a cache entry linked this run named this expression as a closure with another
             // identity (made from another parse of the file): refuse it rather than build
             // whatever the id names here
@@ -14293,6 +14329,17 @@ unsafe fn build_rir_lowered_as(up: *mut Unit, id: u32) -> Result<relax_backend::
         }
     }
     Ok(func)
+}
+
+/// Closure slot `ce` (an expression id, or an async body's block with ASYNC_FN_BODY) is in the
+/// parse of `file` this program has, its lazily parsed part included.
+fn closure_in_parse(u: &Unit, file: u32, ce: u32) -> bool {
+    let Some(pf) = u.prog.files.get(file as usize) else { return false };
+    if ce & crate::tcx::ASYNC_FN_BODY != 0 {
+        pf.ast.has_block(crate::ast::BlockId(ce & !crate::tcx::ASYNC_FN_BODY))
+    } else {
+        pf.ast.has_expr(crate::ast::ExprId(ce))
+    }
 }
 
 /// Bodies the owner type-checked or lowered itself before the first present (no lowering ahead to
@@ -14640,9 +14687,9 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut relax_backend::r
     if cfg.fold {
         relax_codegen::opt::fold_post_increments(func);
     }
-    // Rust min/max with an operand that is never NaN: one minss/maxss (bounding boxes)
+    // Rust min/max whose second operand is never NaN: one minss/maxss (bounding boxes)
     if cfg.fold {
-        relax_codegen::opt::min_max_non_nan(func);
+        relax_codegen::opt::min_max_non_nan(options, func);
     }
     // compares value ranges decide (bounds checks of masked / branch-limited indices)
     if cfg.fold && relax_codegen::ranges::fold_ranges(options, func) {
@@ -16028,7 +16075,7 @@ pub(crate) static TIER1_ENABLED: std::sync::atomic::AtomicBool = std::sync::atom
 static TIER_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Queues slot `id` for its O3 build now, ahead of its counts (if it is still counting): marked
-/// `#[relax(O3)]` (Q_MARKED, rate 0) or by its stored verdict (Q_STORED, the rate it was queued at).
+/// `#[relax(O3)]` (Q_MARKED, rate 0).
 unsafe fn queue_now(u: &Unit, id: u32, why: u8, rate: u64) {
     let rec = tier_rec(&u.slots, id);
     let code = (*rec.add(1)).load(Ordering::Relaxed);
@@ -16887,8 +16934,9 @@ fn drain_tier_inbox() {
 
 /// Slot `id`, queued for O3 by its calls or loops at cost rate `rate`, stays queued: a worker took
 /// it for its build, or the run ends with it queued and not gone cold (record_queued_at_exit). Its
-/// queued verdict goes into the cache: a later launch that links its code builds it at once
-/// (stored_tier_verdict), unless a verdict after this one parked it or its O3 code was stored.
+/// queued verdict goes into the cache: a later launch that links its code counts it rather than
+/// making it final (stored_tier_verdict), unless a verdict after this one parked it or its O3 code
+/// was stored.
 /// Unit lock held.
 unsafe fn record_queued(up: *mut Unit, id: u32, rate: u64) {
     let u = &mut *up;
@@ -16962,15 +17010,12 @@ const Q_RETIER: u8 = 2;
 const Q_MARKED: u8 = 3;
 /// PGO: a counted build's window is over (pgo_poll)
 const Q_PROFILED: u8 = 4;
-/// an earlier run queued the code linked from the cache and stored no verdict after (Cache::
-/// tier_verdict): its counted build at once, as Q_CALLS's, never counted again (tier_revalidate)
-const Q_STORED: u8 = 5;
-const Q_WHY: [&str; 6] = ["calls", "loop", "retier", "marked", "profiled", "stored"];
+const Q_WHY: [&str; 5] = ["calls", "loop", "retier", "marked", "profiled"];
 
-/// Queued by how the slot runs (rt_hot: its calls, its loops) or by its stored verdict: its O2
-/// build (o2_hot), then its counted build
+/// Queued by how the slot runs (rt_hot: its calls, its loops): its O2 build (o2_hot), then its
+/// counted build
 fn queued_hot(why: u8) -> bool {
-    matches!(why, Q_CALLS | Q_LOOP | Q_STORED)
+    matches!(why, Q_CALLS | Q_LOOP)
 }
 
 fn prep_verify() -> bool {
@@ -17800,11 +17845,11 @@ pub(crate) mod busy {
     /// an O3 queue push: + its reason (Q_*)
     pub const PUSH: usize = 2;
     /// O3 code installed
-    pub const O3: usize = 8;
+    pub const O3: usize = 7;
     /// an O2 or verified-O1 build finished (background: counted, but it does not restart the quiet)
-    pub const O2: usize = 9;
-    const KINDS: usize = 10;
-    const NAMES: [&str; KINDS] = ["lazy", "spec", "push calls", "push loop", "push retier", "push marked", "push profiled", "push stored", "O3 installed", "O2 built (no restart)"];
+    pub const O2: usize = 8;
+    const KINDS: usize = 9;
+    const NAMES: [&str; KINDS] = ["lazy", "spec", "push calls", "push loop", "push retier", "push marked", "push profiled", "O3 installed", "O2 built (no restart)"];
     const SECS: usize = 128;
     static AT: [[AtomicU32; KINDS]; SECS] = [const { [const { AtomicU32::new(0) }; KINDS] }; SECS];
     /// every event so far that restarts the quiet (the latch compares it tick to tick)
@@ -19166,14 +19211,11 @@ fn run_o3(entry: (u32, u8, u64, u64)) {
         if queued_hot(why) {
             owner::publish(|| unsafe {
                 o2_hot(up, id);
-                // taken for its build: its queued verdict (a stored one's is in the cache)
-                if why != Q_STORED {
-                    record_queued(up, id, rate);
-                }
+                // taken for its build: its queued verdict
+                record_queued(up, id, rate);
             });
             // a threshold's cost that came slower than CALL_FAST_NS into code bigger than SMALL_CODE:
-            // lukewarm until its counts show the work (a hot loop under it queues it as Q_LOOP instead;
-            // a stored verdict's rate is the one an earlier run queued it at)
+            // lukewarm until its counts show the work (a hot loop under it queues it as Q_LOOP instead)
             let lukewarm = why != Q_LOOP && unsafe {
                 let u = &*up;
                 let threshold = u.tier1.as_ref().map_or(0, |t| t.threshold);
@@ -20571,6 +20613,17 @@ pub(crate) static FIRST_PRESENT: AtomicBool = AtomicBool::new(false);
 /// when it goes quiet without starting an app (`batch_program`).
 static HEADLESS: AtomicBool = AtomicBool::new(false);
 
+/// The program presented a frame (`relax_first_present`): it is an app, never a batch program.
+pub(crate) fn presented() -> bool {
+    FIRST_PRESENT.load(Ordering::Acquire)
+}
+
+/// Whether the program was taken for a batch program (`batch_program`).
+#[cfg(test)]
+pub(crate) fn past_startup_headless() -> bool {
+    HEADLESS.load(Ordering::Acquire)
+}
+
 /// Past startup: the first present, or the main of a headless program. Tier-up (O3 burst workers, O2
 /// full builds, prebuilt callees) and the cheapest-code rule for lazy compiles follow it.
 pub(crate) fn past_startup() -> bool {
@@ -20605,6 +20658,15 @@ fn headless_started() {
 /// A program that has not presented and made no demand compile for this long is headless:
 /// its startup phase ends (startup_main).
 const STARTUP_QUIET_NS: u64 = 2_000_000_000;
+
+/// The demand (foreground) compiles' last sign of progress: whether one runs now, and the ns since
+/// the last one finished or the open stretch of them began, whichever is later (first_frame: a
+/// start that is still compiling is not hung).
+pub(crate) fn demand_compile_age() -> (bool, u64) {
+    let running = DEMAND_COMPILES.load(Ordering::SeqCst) != 0;
+    let last = DEMAND_LAST.load(Ordering::SeqCst).max(if running { DEMAND_SINCE.load(Ordering::SeqCst) } else { 0 });
+    (running, wall_ns().saturating_sub(last))
+}
 
 /// What is left (ns) of the quiet that counts from `from` (a `wall_ns`): 0 once no demand compile
 /// has run for STARTUP_QUIET_NS.
@@ -20693,6 +20755,7 @@ pub extern "C" fn relax_first_present() {
     crate::jit::host_boundary("relax_first_present", move || {
         crate::domain::first_present();
         if !FIRST_PRESENT.swap(true, Ordering::AcqRel) {
+            crate::first_frame::presented();
             if EXEC_CHECK.load(Ordering::Relaxed) {
                 exec_check_now("first frame");
             }
@@ -22496,6 +22559,7 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"__relax_probe_sample" => Some(crate::inspect::probes::relax_probe_sample as *const () as usize),
         b"__relax_probe_pause" => Some(crate::inspect::probes::relax_probe_pause as *const () as usize),
         b"relax_register_inspect" => Some(crate::inspect::relax_register_inspect as *const () as usize),
+        b"relax_inspect_asker" => Some(crate::inspect::relax_inspect_asker as *const () as usize),
         b"relax_register_remote_service" => Some(crate::inspect::relax_register_remote_service as *const () as usize),
         b"relax_gpu_span" => Some(crate::inspect::timeline::relax_gpu_span as *const () as usize),
         b"relax_flight_mark" => Some(crate::inspect::flightrec::relax_flight_mark as *const () as usize),
@@ -22521,6 +22585,7 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"__relax_domain_id" => Some(crate::domain::relax_domain_id as *const () as usize),
         b"__relax_thread_spawn" => Some(crate::domain_threads::spawn as *const () as usize),
         b"__relax_domain_name" => Some(crate::domain::relax_domain_name as *const () as usize),
+        b"__relax_catch_caught" => Some(relax_catch_caught as *const () as usize),
         b"__relax_test_inherit" => Some(crate::harness::reach::inherit as *const () as usize),
         b"__relax_test_adopt" => Some(crate::harness::reach::adopt as *const () as usize),
         b"__relax_test_cancel" => Some(crate::harness::reach::cancel as *const () as usize),

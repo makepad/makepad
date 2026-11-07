@@ -79,7 +79,7 @@ pub const REFUSE_TAKE: u8 = 1;
 pub const REFUSE_PROFILE_GONE: u8 = 2;
 pub const REFUSE_WHY: [&str; 3] = ["not allowed (borrow-check verdict pending, or a patch without a clean verdict)", "its snapshot bailed (a front could not be made off the owner)", "its counted profile is gone (patched or rebuilt)"];
 
-pub const Q_WHY: [&str; 6] = ["calls", "loop", "retier", "marked", "profiled", "stored"];
+pub const Q_WHY: [&str; 5] = ["calls", "loop", "retier", "marked", "profiled"];
 
 /// One decision.
 #[derive(Clone, Copy, Default)]

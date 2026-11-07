@@ -304,6 +304,37 @@ fn whiteout(path: &str) -> bool {
     deleted_paths(&dir).contains(&rel)
 }
 
+/// The files of a landing the JIT holds back (`inspect hold`, the compiler's reload.rs): path
+/// (normalized) -> what a read of it gives meanwhile, the file as it was before the landing (None:
+/// it was not there). A module the app loads while the landing is held, and an include a save
+/// reads again, read what the running app was built from, never the landed text.
+static LANDING_READS: relax_session::sync::Mutex<BTreeMap<String, Option<Arc<[u8]>>>> = relax_session::sync::Mutex::new(BTreeMap::new());
+static ANY_LANDING_READ: AtomicBool = AtomicBool::new(false);
+
+/// While a landing holds `path` back, its reads give `before` (None: not there).
+pub fn hold_read(path: &str, before: Option<Arc<[u8]>>) {
+    let _k = crate::zone_alloc::kept();
+    let mut reads = LANDING_READS.lock().unwrap();
+    reads.insert(normalize_path(path), before);
+    ANY_LANDING_READ.store(true, Ordering::Release);
+}
+
+/// `path`'s reads (every held file's, None) give the disk's again.
+pub fn release_read(path: Option<&str>) {
+    let mut reads = LANDING_READS.lock().unwrap();
+    match path {
+        Some(p) => { reads.remove(&normalize_path(p)); }
+        None => reads.clear(),
+    }
+    ANY_LANDING_READ.store(!reads.is_empty(), Ordering::Release);
+}
+
+/// What a read of `path` gives while a landing holds it back ([`hold_read`]).
+fn landing_read(path: &std::path::Path) -> Option<Option<Arc<[u8]>>> {
+    if !ANY_LANDING_READ.load(Ordering::Acquire) { return None; }
+    LANDING_READS.lock().unwrap().get(&normalize_path(&path.to_string_lossy())).cloned()
+}
+
 /// Whether virtual files are writable (an edits folder is set).
 pub fn edits_enabled() -> bool {
     EDITS.read().unwrap().is_some()
@@ -463,6 +494,7 @@ fn read_disk(path: &std::path::Path, entry: Option<&ReadEntry>) -> io::Result<Ve
 /// that keep authored sources need not copy the snapshot into another Arc.
 pub fn read_shared(path: impl AsRef<std::path::Path>) -> io::Result<Arc<[u8]>> {
     let path = path.as_ref();
+    if let Some(held) = landing_read(path) { return held.ok_or_else(|| not_found(&path.to_string_lossy())); }
     if whiteout(&path.to_string_lossy()) { return Err(not_found(&path.to_string_lossy())); }
     let result = if let Some(snapshot) = read_snapshot() {
         snapshot.read_shared(path)
@@ -473,8 +505,15 @@ pub fn read_shared(path: impl AsRef<std::path::Path>) -> io::Result<Arc<[u8]>> {
     result
 }
 
-/// The file's bytes.
+/// The file's bytes (a held landing's file: as it was before the landing, [`hold_read`]).
 pub fn read(path: impl AsRef<std::path::Path>) -> io::Result<Vec<u8>> {
+    let path = path.as_ref();
+    if let Some(held) = landing_read(path) { return held.map(|b| b.to_vec()).ok_or_else(|| not_found(&path.to_string_lossy())); }
+    read_unheld(path)
+}
+
+/// The file's bytes as they are, a held landing's too (the live watch compares them with it).
+pub fn read_unheld(path: impl AsRef<std::path::Path>) -> io::Result<Vec<u8>> {
     let path = path.as_ref();
     if whiteout(&path.to_string_lossy()) { return Err(not_found(&path.to_string_lossy())); }
     let result = if let Some(snapshot) = read_snapshot() { snapshot.read_shared(path).map(|bytes| bytes.to_vec()) } else { read_uncached(path, None) };
@@ -609,6 +648,7 @@ pub fn exists(path: impl AsRef<std::path::Path>) -> bool {
 }
 
 fn exists_inner(path: &std::path::Path) -> bool {
+    if let Some(held) = landing_read(path) { return held.is_some(); }
     if whiteout(&path.to_string_lossy()) { return false; }
     if !ANY.load(Ordering::Acquire) {
         return path.exists();
@@ -629,6 +669,7 @@ pub fn is_file(path: impl AsRef<std::path::Path>) -> bool {
 }
 
 fn is_file_inner(path: &std::path::Path) -> bool {
+    if let Some(held) = landing_read(path) { return held.is_some(); }
     if whiteout(&path.to_string_lossy()) { return false; }
     if !ANY.load(Ordering::Acquire) {
         return path.is_file();
@@ -1040,7 +1081,7 @@ fn save_seeded(dir: &std::path::Path, s: &BTreeMap<String, Oid>) -> io::Result<(
 }
 
 /// git's blob id of `data`.
-fn blob_oid(data: &[u8]) -> Oid {
+pub fn blob_oid(data: &[u8]) -> Oid {
     let mut bytes = format!("blob {}\0", data.len()).into_bytes();
     bytes.extend_from_slice(data);
     store::sha1(&bytes)
@@ -1378,6 +1419,34 @@ mod tests {
     /// them run one at a time.
     static EDITS_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// A held landing's files read as they were before it: changed, removed (still there) and
+    /// added (not there yet) alike, through every read; the live watch reads them as they are; a
+    /// release gives the disk back.
+    #[test]
+    fn a_held_landings_files_read_as_they_were_before_it() {
+        let dir = std::env::temp_dir().join(format!("relax-vfs-landing-hold-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (changed, removed, added) = (dir.join("changed.rs"), dir.join("removed.rs"), dir.join("added.rs"));
+        let s = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        std::fs::write(&changed, "landed").unwrap();
+        std::fs::write(&added, "new").unwrap();
+        hold_read(&s(&changed), Some(Arc::from(&b"before"[..])));
+        hold_read(&s(&removed), Some(Arc::from(&b"was here"[..])));
+        hold_read(&format!("{}/./added.rs", s(&dir)), None);
+        assert_eq!(read(&changed).unwrap(), b"before");
+        assert_eq!(&*read_shared(&changed).unwrap(), b"before");
+        assert_eq!(read_to_string(&removed).unwrap(), "was here");
+        assert!(exists(&removed) && is_file(&removed), "a file the landing removed is still there");
+        assert!(!exists(&added) && !is_file(&added) && read(&added).is_err(), "one it added is not there yet (a normalized path)");
+        assert_eq!(read_unheld(&changed).unwrap(), b"landed", "the watch reads the disk");
+        release_read(Some(&s(&changed)));
+        assert_eq!(read(&changed).unwrap(), b"landed");
+        assert_eq!(read(&removed).unwrap(), b"was here", "one release, one file");
+        release_read(None);
+        assert!(!exists(&removed) && read(&added).unwrap() == b"new");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn seeded_files_follow_the_release_until_edited() {
         let _one = EDITS_TEST.lock().unwrap_or_else(|e| e.into_inner());
@@ -1664,4 +1733,6 @@ mod tests {
 pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
     reset(&HELD, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&LANDING_READS, relax_session::sync::Mutex::new(BTreeMap::new()));
+    reset(&ANY_LANDING_READ, AtomicBool::new(false));
 }

@@ -262,6 +262,13 @@ pub fn fval(bits: u64, w: bool) -> f64 {
 }
 
 pub fn fold_fbin(op: FOp, w: bool, a: u64, b: u64) -> u64 {
+    // min/max of equal operands (`0.0` and `-0.0`): what the back end's instruction gives, never
+    // the choice of the compiler that built this one -- x64's general form gives b (minsd a, b:
+    // x64.rs), AArch64's fminnm orders -0.0 below 0.0 -- so a folded min/max answers as the
+    // same one run does (Rust leaves the sign unspecified; the tiers must not differ)
+    if matches!(op, FOp::Min | FOp::Max) && fval(a, w) == fval(b, w) {
+        return if cfg!(target_arch = "aarch64") { if op == FOp::Min { a | b } else { a & b } } else { b };
+    }
     // select forms return an operand's exact bits
     if op == FOp::MinLt || op == FOp::MaxGt {
         let (x, y) = (fval(a, w), fval(b, w));

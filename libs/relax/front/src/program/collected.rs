@@ -272,7 +272,7 @@ impl Program {
                 || d.scope as usize >= self.mods.len() || d.file as usize >= self.files.len()
                 || (d.parent != NO_DEF && d.parent.0 as usize >= self.defs.len())) { return None; }
         let mut w = Vec::new();
-        5u32.put(&mut w);
+        6u32.put(&mut w);
         let late = self.syms.late.lock().unwrap_or_else(|e| e.into_inner());
         late.1.len().put(&mut w);
         for s in &late.1 { s.to_string().put(&mut w); }
@@ -301,6 +301,8 @@ impl Program {
         for (i, f) in self.files.iter().enumerate() {
             if i % 256 == 255 && stop() { return None; }
             f.source_hash(&self.file_paths[i]).put(&mut w);
+            // the ids of the tables above are this parse's: a restore maps an image of it only
+            f.numbering().put(&mut w);
             f.edition.put(&mut w); f.src_len.put(&mut w); f.token_input.put(&mut w);
             // length-prefixed: a restore keeps it encoded until a body parse needs it
             let lazy = crate::crate_image::encode(&f.lazy);
@@ -375,7 +377,7 @@ impl Program {
         };
         let image = crate::image::Reader::new(bytes)?;
         let mut r = Decode::new(image.bytes(0, 0)?);
-        if u32::get(&mut r)? != 5 { return None; }
+        if u32::get(&mut r)? != 6 { return None; }
         let mut p = Program::new(session);
         p.syms = Interner::from_image(&image, 3, 3)?;
         for s in Vec::<String>::get(&mut r)? { p.syms.intern_late(&s); }
@@ -422,7 +424,7 @@ impl Program {
         p.files.reserve(n);
         for i in 0..n {
             let mut meta = FileMeta {
-                path: p.file_paths[i].clone(), module: String::new(), hash: Codec::get(&mut r)?,
+                path: p.file_paths[i].clone(), module: String::new(), hash: Codec::get(&mut r)?, numbering: Codec::get(&mut r)?,
                 edition: Codec::get(&mut r)?, src_len: Codec::get(&mut r)?, token_input: Codec::get(&mut r)?,
                 lazy: { let n = usize::get(&mut r)?; crate::parser::FileLazy::mapped(r.take(n)?) }, shared: false,
                 used: crate::macros::MacroUse::from_image(Default::default(), Default::default()),

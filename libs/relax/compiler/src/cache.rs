@@ -63,9 +63,10 @@ const KIND_BORROWCK: u32 = 4;
 pub const BORROWCK_VERSION: u32 = 2;
 /// the coherence check's own version: bump when its rules change
 const COHERENCE_VERSION: u32 = 2;
-/// `makepad test`'s up-front body check (check_body_key): bump when what a body's verdict rests
-/// on changes
-const CHECK_BODY_VERSION: u32 = 1;
+/// the whole-crate checks' verdicts (crate_check_key, dep_check_key): bump when what a crate's
+/// verdict rests on changes (2: a test check's clean verdict means no warnings -- one with
+/// warnings stores them, KIND_TEST_WARNINGS)
+const CRATE_CHECK_VERSION: u32 = 2;
 
 /// Immutable driver view for Gandalf's generic owner discovery. No Unit/cache
 /// callbacks under the front read lock, and no need to construct an instance key
@@ -166,9 +167,13 @@ const KIND_WARM_OUTCOME: u32 = 10;
 /// payload: its counted window showed too little work for O3, jit.rs pgo_poll) or queued for O3
 /// (TIER_QUEUED_SALT, payload: the cost rate it was queued at, 8 bytes LE: jit.rs tier_drain). A
 /// launch that links the entry starts from that decision (jit.rs stored_tier_verdict) instead of
-/// making it again from its own start: parked -> final, queued -> its counted build at once, no
-/// verdict (it counted and never turned hot) -> final
+/// making it again from its own start: parked -> final, queued -> it counts as fresh code does
+/// (never final at link), no verdict (it counted and never turned hot) -> final
 const KIND_TIER: u32 = 20;
+/// `makepad test`'s check of its crates under test that passed with warnings (run.rs
+/// check_test_subjects): the warnings it printed, under the key of their check keys together
+/// (test_warnings_key). The crates' clean verdicts are not stored then: a rerun prints these.
+const KIND_TEST_WARNINGS: u32 = 21;
 const TIER_PARKED_SALT: u128 = 0x7469_6572_2d76_6572_6469_6374_2d70_6b64;
 const TIER_QUEUED_SALT: u128 = 0x7469_6572_2d71_7565_7565_642d_7261_7465;
 /// stores a front image was mapped from: kept for the rest of the process (the arrays point
@@ -680,6 +685,12 @@ pub struct Cache {
     /// per crate: its view (items.rs crate_views, bound crates folded in): what code keys and
     /// store names take from the crate besides its items
     view: Vec<u128>,
+    /// per crate: the text of its files the boot's selection skipped (items.rs late_texts), and
+    /// that of it and its dependencies (late_views: what its code keys take in); 0: none
+    late: Vec<u128>,
+    late_view: Vec<u128>,
+    /// the hash of each file version late_texts took in
+    late_memo: HashMap<u32, u128>,
     /// the program's item graph (cache/deps.rs), built on the first key that needs it
     deps: Option<std::sync::Arc<deps::Deps>>,
     /// the crates the loader binds, as they went into `iface` and `view`
@@ -757,8 +768,12 @@ pub struct Cache {
     data_addr: HashMap<u128, u64>,
     /// data object key -> its per-domain copy this run (link_symbol tag 10)
     const_copy: HashMap<u128, u64>,
-    /// data object index -> its entry key (None: cannot be stored)
-    data_key: HashMap<u32, Option<u128>>,
+    /// (data object index, the crate whose store the entry naming it goes to) -> its entry key
+    /// (None: cannot be stored). Per crate: the data entry goes where that crate's readers find it
+    /// (`data_reaches`), and its pointer words' objects with it
+    data_key: HashMap<(u32, u32), Option<u128>>,
+    /// data entry key -> the crates whose stores this run recorded it to
+    data_crates: HashMap<u128, Vec<u32>>,
     /// why a data object cannot be stored (memo of data_entry's reason)
     data_why: HashMap<u32, &'static str>,
     /// slots whose code came from the cache this run (not recorded again)
@@ -1047,6 +1062,9 @@ impl Cache {
             iface: Vec::new(),
             iface_plain: Vec::new(),
             view: Vec::new(),
+            late: Vec::new(),
+            late_view: Vec::new(),
+            late_memo: HashMap::new(),
             deps: None,
             bound: Vec::new(),
             keys_moved: 0,
@@ -1089,6 +1107,7 @@ impl Cache {
             data_addr: HashMap::new(),
             const_copy: HashMap::new(),
             data_key: HashMap::new(),
+            data_crates: HashMap::new(),
             data_why: HashMap::new(),
             linked: HashSet::new(),
             missed: HashSet::new(),
@@ -1171,6 +1190,11 @@ impl Cache {
         let mut view = items::crate_views(prog, &c.iface_plain, &deps::atomic_crates(prog, ncr));
         view.truncate(ncr);
         c.view = items::apply_bound(prog, &view, &provided);
+        // and the text the boot's selection skipped (a restored image's files past its boot's)
+        c.late = items::late_texts(prog, &mut c.late_memo);
+        c.late.truncate(ncr);
+        c.late_view = items::late_views(prog, &c.late);
+        c.late_view.truncate(ncr);
         c.stats.iface_ns = t_if.elapsed().as_nanos() as u64;
         // MAKEPAD_RUN_CACHE_IFACE=<file>: every file's interface hash and crate's interface
         // fingerprint (which file made an edit's crate recompile)
@@ -1641,7 +1665,8 @@ impl Cache {
                 // crates, and rules that depend on the crate (the live layout of the root crate's
                 // enums) make their code differ. The owner is part of the identity.
                 let owner = u.prog.file_crate.get(file as usize).and_then(|&c| self.crate_ident.get(c as usize)).copied().unwrap_or(0);
-                e.u128(file_ident(p, u.prog.files[file as usize].source_hash(p), owner));
+                let pf = &u.prog.files[file as usize];
+                e.u128(file_ident(p, pf.source_hash(p), owner, pf.numbering()));
             }
             None => e.u128(0),
         }
@@ -1697,7 +1722,8 @@ impl Cache {
                 let p = &u.prog.file_paths[i];
                 // the first file with this content keeps the key (later identical copies are the same text)
                 let owner = u.prog.file_crate.get(i).and_then(|&c| self.crate_ident.get(c as usize)).copied().unwrap_or(0);
-                self.file_ids.entry(file_ident(p, u.prog.files[i].source_hash(p), owner)).or_insert(i as u32);
+                let pf = &u.prog.files[i];
+                self.file_ids.entry(file_ident(p, pf.source_hash(p), owner, pf.numbering())).or_insert(i as u32);
             }
             self.file_ids_n = u.prog.file_paths.len();
         }
@@ -2425,6 +2451,11 @@ impl Cache {
                 for &c in &crates {
                     h.u128(*self.view.get(c as usize)?);
                     h.u128(g.always(c));
+                    // the text of its and its dependencies' files the boot skipped, whole
+                    if let Some(&late) = self.late_view.get(c as usize).filter(|l| **l != 0) {
+                        h.str("late");
+                        h.u128(late);
+                    }
                 }
                 // the items the identity names (the definition, the types of its arguments): what
                 // they reach of the program's interfaces; one with no node (an item a fn body
@@ -2779,82 +2810,56 @@ impl Cache {
         Some(h.finish128())
     }
 
-    /// `makepad test`'s up-front check (check.rs check_subjects): what every body verdict of subject
-    /// crate `c` rests on besides the body's own text -- the Relax build and options (cfg), the
-    /// check's mode, the crate as rustc is invoked on it (name, root, edition, cfg with
-    /// cfg(test) and features, its context: env and the macros' outside inputs), its dependencies
-    /// whole (their fingerprints, which cover theirs), and its own text outside the fn bodies
-    /// that are holes (items.rs), every file of it: the check loaded the ones the boot skipped,
-    /// so this is not the boot-only interface fingerprint. None: a file without a digest.
-    pub fn check_crate_inputs(&mut self, u: &Unit, c: u32, mode: u8) -> Option<u128> {
-        let prog = &u.prog;
-        let ci = prog.crates.get(c as usize)?;
-        let mut h = Sip128::new();
-        h.str("check-crate");
-        h.u32(CHECK_BODY_VERSION);
-        h.u128(self.cfg);
-        h.u8(mode);
-        h.u128(crate::crate_image::fingerprint_head(prog.syms.str(ci.name), ci.root_path(), ci.edition, ci.proc_macro, &ci.cfg.set).finish128());
-        h.u128(ci.context.fingerprint());
-        let mut deps: Vec<u128> = Vec::new();
-        for &(_, d) in &ci.deps {
-            if d != c { deps.push(*self.fps.get(d as usize)?); }
-        }
-        deps.sort_unstable();
-        deps.dedup();
-        h.u32(deps.len() as u32);
-        for d in deps { h.u128(d); }
-        for f in 0..prog.files.len() {
-            if prog.file_crate.get(f) != Some(&c) || prog.front_macro_fragments.contains(&f) { continue; }
-            let dg = self.digest_of(u, f)?;
-            h.str(prog.file_paths.get(f).map_or("", |p| p.as_str()));
-            h.u128(dg.iface);
-        }
-        Some(h.finish128())
-    }
-
-    /// The key of body owner `d`'s verdict in `makepad test`'s up-front check: its crate's inputs
-    /// (`check_crate_inputs`), its identity, and its body's text when the body is a hole (else
-    /// the body is in the crate's text outside the holes, in the inputs already). A clean
-    /// verdict under it is a borrowck-kind entry (record_borrowck), in its crate's store.
-    pub fn check_body_key(&mut self, u: &Unit, inputs: u128, d: DefId) -> Option<u128> {
-        let def = u.prog.def(d);
-        let (file, item, krate) = (def.file, def.item, def.krate);
-        let dg = self.digest_of(u, file as usize)?;
-        let mut h = Sip128::new();
-        h.str("check-body");
-        h.u128(inputs);
-        h.u128(self.def_key(u, d));
-        match items::body_hash(&u.prog.files[file as usize], &dg, item) {
-            Some(b) => { h.u8(1); h.u128(b); }
-            None => h.u8(0),
-        }
-        let k = h.finish128();
-        self.key_crate.insert(k, krate);
-        Some(k)
-    }
-
     /// A whole-crate check's clean verdict for crate `c`: `mode` 0, `makepad run`'s type check of
     /// its every body (run.rs up front for the app's crates, typeck_bg.rs after the first present
     /// for the others); 1 and 2, `makepad test`'s up-front check of a test subject (check.rs
     /// subjects_mode: a plain program, a libtest harness; run.rs check_test_subjects). The test
     /// dependency check keys by its dependencies' interfaces instead (`dep_check_key`). The key:
-    /// the Relax build and options (cfg), the crate's fingerprint, which covers its loaded files
-    /// and its dependencies' fingerprints, as the code keys rest on, and `skipped`, the text of
-    /// its files the boot's selection did not load (check.rs skipped_text_hash): every file of
-    /// it. A borrowck-kind entry (record_borrowck).
+    /// the Relax build and options (cfg), the crate's fingerprint with the text of the files the
+    /// boot skipped (fp_now: its loaded files, those a restored image holds past its boot's, and
+    /// its dependencies'), as the code keys rest on, and `skipped`, the text of its files this
+    /// boot's selection did not load (check.rs skipped_text_hash): every file of it. A
+    /// borrowck-kind entry (record_borrowck).
     pub fn crate_check_key(&mut self, c: u32, skipped: u128, mode: u8) -> Option<u128> {
-        let fp = *self.fps.get(c as usize)?;
+        let fp = self.fp_now(c as usize)?;
         let mut h = Sip128::new();
         h.str(if mode == 0 { "run-typeck-crate" } else { "test-check-crate" });
         h.u8(mode);
-        h.u32(CHECK_BODY_VERSION);
+        h.u32(CRATE_CHECK_VERSION);
         h.u128(self.cfg);
         h.u128(fp);
         h.u128(skipped);
         let k = h.finish128();
         self.key_crate.insert(k, c);
         Some(k)
+    }
+
+    /// The key of the warnings of `makepad test`'s check of the crates whose check keys
+    /// (crate_check_key) are `keys`, in the order checked.
+    fn test_warnings_key(keys: &[u128]) -> u128 {
+        let mut h = Sip128::new();
+        h.str("test-check-warnings");
+        for &k in keys { h.u128(k); }
+        h.finish128()
+    }
+
+    /// Records the warnings of a passing test check of the crates whose check keys are `keys`.
+    pub fn record_test_warnings(&mut self, keys: &[u128], lines: &[String]) {
+        let key = Self::test_warnings_key(keys);
+        if !self.pending_keys.insert(key) { return; }
+        let mut e = E::default();
+        e.u32(lines.len() as u32);
+        for l in lines { e.str(l); }
+        let kc = keys.first().and_then(|k| self.key_crate.get(k)).copied().unwrap_or(0);
+        self.push_pending(kc, NewEntry { key, kind: KIND_TEST_WARNINGS, payload: e.0 });
+    }
+
+    /// The warnings a passing test check of the crates whose check keys are `keys` printed
+    /// (record_test_warnings); None: no such check is stored.
+    pub fn test_warnings(&self, keys: &[u128]) -> Option<Vec<String>> {
+        let Some((KIND_TEST_WARNINGS, p)) = self.get(Self::test_warnings_key(keys)) else { return None };
+        let mut d = D { b: p, p: 0 };
+        (0..d.u32()?).map(|_| d.str().map(str::to_owned)).collect()
     }
 
     /// The test dependency check's clean verdict for crate `c` (every body type- and
@@ -2871,7 +2876,7 @@ impl Cache {
     pub fn dep_check_key(&mut self, c: u32, own: u128, skipped: u128, closure: impl Iterator<Item = (u32, u128)>) -> Option<u128> {
         let mut h = Sip128::new();
         h.str("test-deps-check-crate");
-        h.u32(CHECK_BODY_VERSION);
+        h.u32(CRATE_CHECK_VERSION);
         h.u128(self.cfg);
         h.u128(own);
         h.u128(skipped);
@@ -3043,7 +3048,8 @@ impl Cache {
     /// The content key of data object `idx` (bytes, alignment, pointer words), recording its
     /// entry; None when it cannot be stored (mutable, opaque, unattributed pointers).
     fn data_entry(&mut self, u: &Unit, idx: u32) -> Option<u128> {
-        if let Some(&k) = self.data_key.get(&idx) {
+        let memo = (idx, self.cur_crate);
+        if let Some(&k) = self.data_key.get(&memo) {
             if k.is_none() {
                 let w = self.data_why.get(&idx).copied().unwrap_or("data object: cycle");
                 self.why(w);
@@ -3051,7 +3057,7 @@ impl Cache {
             return k;
         }
         // a cycle through this object (only statics can be cyclic; they are not data objects)
-        self.data_key.insert(idx, None);
+        self.data_key.insert(memo, None);
         let r = (|| {
             let (start, len, align, mutable) = u.syms.obj_info(idx)?;
             if mutable {
@@ -3114,8 +3120,10 @@ impl Cache {
                     eprintln!("makepad-run cache: DATA {} key {:032x} ptrs {:?} enc {}", n, key, ws, hex);
                 }
             }
-            if self.mode != Mode::ReadOnly && !self.has_index(&key) && self.pending_keys.insert(key) {
-                let kc = self.cur_crate;
+            let kc = self.cur_crate;
+            if self.mode != Mode::ReadOnly && !self.data_reaches(key, kc) {
+                self.pending_keys.insert(key);
+                self.data_crates.entry(key).or_default().push(kc);
                 self.push_pending(kc, NewEntry { key, kind: KIND_DATA, payload: e.0 });
             }
             Some(key)
@@ -3123,8 +3131,28 @@ impl Cache {
         if r.is_none() && !self.data_why.contains_key(&idx) {
             self.data_why.insert(idx, self.last_why);
         }
-        self.data_key.insert(idx, r);
+        self.data_key.insert(memo, r);
         r
+    }
+
+    /// Whether data entry `key` is where every program that links crate `kc`'s code entries finds
+    /// it: in the store of `kc` or of a crate `kc` depends on (a program that has `kc` opens
+    /// theirs), on disk or recorded by this run. Not only where this program finds it: an object
+    /// a build script's own code named first went to that script's store, and the std code naming
+    /// it after failed to link in every other program
+    fn data_reaches(&self, key: u128, kc: u32) -> bool {
+        let closure = self.crate_closure.get(kc as usize).map_or(&[][..], |set| &set[..]);
+        let reaches = |c: usize| closure.get(c / 64).is_some_and(|w| w >> (c % 64) & 1 == 1);
+        if self.data_crates.get(&key).is_some_and(|cs| cs.iter().any(|&c| reaches(c as usize))) {
+            return true;
+        }
+        // where the index has it (one store of those holding it), or `kc`'s own store
+        let store_crate = |p: u32| self.code_path.iter().position(|cp| *cp == self.stores[p as usize].path);
+        if self.index_at(key).is_some_and(|(p, _)| store_crate(p).is_some_and(reaches)) {
+            return true;
+        }
+        let own = self.code_path.get(kc as usize);
+        self.stores.iter().any(|st| Some(&st.path) == own && st.index.binary_search_by(|e| { let k = e.key; k.cmp(&key) }).is_ok())
     }
 
     /// Records slot `id`'s freshly compiled O1 code (on the owner thread).
@@ -3430,7 +3458,7 @@ impl Cache {
         for i in idents {
             let c = *self.crate_by_ident.get(i)?;
             h.u128(*i);
-            h.u128(*self.fps.get(c as usize)?);
+            h.u128(self.fp_now(c as usize)?);
             // a const edit reached it: no entry's hash matches, read or written, and each
             // key the entry names is compared
             if self.keys_moved_crates.get(c as usize) == Some(&true) {
@@ -3676,10 +3704,28 @@ impl Cache {
         let mut h = Sip128::new();
         h.str("sources");
         h.u128(self.cfg);
-        for &fp in &self.fps {
-            h.u128(fp);
+        for c in 0..self.fps.len() {
+            h.u128(self.fp_now(c).unwrap_or(0));
         }
         h.finish128()
+    }
+
+    /// Crate `c`'s fingerprint (of the files the boot loaded and its dependencies') with the text
+    /// of its and their files the boot's selection skipped (late_view): what says whether code
+    /// keys recorded earlier hold -- the startup manifest's sources, the image's crates, a
+    /// certificate's fast path. The fingerprint itself when there is no such text.
+    pub(super) fn fp_now(&self, c: usize) -> Option<u128> {
+        let fp = *self.fps.get(c)?;
+        Some(match self.late_view.get(c).copied().unwrap_or(0) {
+            0 => fp,
+            late => {
+                let mut h = Sip128::new();
+                h.str("fp-late");
+                h.u128(fp);
+                h.u128(late);
+                h.finish128()
+            }
+        })
     }
 
     /// The settle rebuild's new cache (opened as a warm start opens it, from the same stores) takes
@@ -3692,6 +3738,7 @@ impl Cache {
         self.data_addr = old.data_addr.clone();
         self.const_copy = old.const_copy.clone();
         self.data_key = old.data_key.clone();
+        self.data_crates = old.data_crates.clone();
         self.linked = old.linked.clone();
         self.linked_key = old.linked_key.clone();
         self.base_linked = old.base_linked.clone();
@@ -3752,7 +3799,7 @@ impl Cache {
                     let crates = if same { Some(None) } else {
                         self.image.as_ref().and_then(|im| image::image_crates(im.bytes())).map(|recorded| {
                             let recorded: HashMap<u128, u128> = recorded.into_iter().collect();
-                            Some(self.crate_ident.iter().zip(&self.fps).map(|(id, fp)| recorded.get(id) == Some(fp)).collect())
+                            Some(self.crate_ident.iter().enumerate().map(|(c, id)| recorded.get(id).is_some_and(|fp| self.fp_now(c) == Some(*fp))).collect())
                         })
                     };
                     if let Some(crates) = crates.filter(|_| missing == 0 && self.mode != Mode::Verify) {
@@ -4937,14 +4984,16 @@ pub(crate) fn closure_identity_ok(u: &Unit, file: u32, expr: u32) -> bool {
 
 /// Reads the nounwind inputs and the dependency certificate; returns the nounwind section (for
 /// verification).
-/// A file version's identity in an entry: a hash of its path, source and owning crate (one
-/// 16-byte id where the path string and two hashes were stored per file and entry).
-fn file_ident(path: &str, source: u128, owner: u128) -> u128 {
+/// A file version's identity in an entry: a hash of its path, source, owning crate and how its
+/// parse numbered it (one 16-byte id where the path string and two hashes were stored per file
+/// and entry).
+fn file_ident(path: &str, source: u128, owner: u128, numbering: u128) -> u128 {
     let mut h = Sip128::new();
     h.str("file-ident");
     h.str(path);
     h.u128(source);
     h.u128(owner);
+    h.u128(numbering);
     h.finish128()
 }
 
@@ -5170,6 +5219,25 @@ fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> 
     out.into_iter().map(|r| r.into_inner().unwrap().expect("par_map result")).collect()
 }
 
+/// Where a test puts the time a graph's stats are recorded at (0: the clock's). The racy rule
+/// measures from it, so a test places a recording a known distance from an edit, whatever the
+/// load before the recording took
+#[cfg(test)]
+static RECORD_NOW_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The time a graph's input stats are recorded at: an input changed within `STAT_RACY_NS` of it
+/// gets no stat (source_context::input_stamp)
+fn record_now_ns() -> u64 {
+    #[cfg(test)]
+    {
+        let t = RECORD_NOW_NS.load(std::sync::atomic::Ordering::Relaxed);
+        if t != 0 {
+            return t;
+        }
+    }
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
+}
+
 fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
     let _profile = crate::load_profile::span(job.profile, "front-graph-write", "graph writer");
     // MAKEPAD_RUN_BOOT_TRACE: where a graph write's time goes (one line per recorded graph)
@@ -5217,7 +5285,7 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
     let _stamps = crate::load_profile::span(job.profile, "front-graph-stamps", "graph writer");
     // each input's stat, taken only where the recorded hash is the file's hash right now and the
     // file has been quiet for a while: validation then trusts an equal stat (see begin_load)
-    let now_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    let now_ns = record_now_ns();
     // read and hashed on the loader's worker count (1600 Calculator inputs: 0.2 s on one)
     graph.stamps = par_map(&graph.inputs, |(p, h)| crate::source_context::input_stamp(p, *h, now_ns));
     graph.probes = probes.into_iter().collect();
@@ -5342,7 +5410,7 @@ pub(crate) fn record_added_crates(prog: &crate::program::Program, dir: &std::pat
     let mut probes: std::collections::BTreeMap<String, bool> = base.probes.iter().cloned().collect();
     for (p, exists) in &prog.module_probes { probes.entry(p.clone()).or_insert(*exists); }
     // the added inputs' stats (the boot's are its graph's)
-    let now_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    let now_ns = record_now_ns();
     let fresh: Vec<(String, u128)> = inputs.iter().filter(|(p, _)| base.inputs.binary_search_by(|(q, _)| q.as_str().cmp(p.as_str())).is_err())
         .map(|(p, (h, _))| (p.clone(), *h)).collect();
     for ((p, _), stamp) in fresh.iter().zip(par_map(&fresh, |(p, h)| crate::source_context::input_stamp(p, *h, now_ns))) {
@@ -5648,11 +5716,11 @@ impl FrontImages {
     /// (a file recorded without it is parsed). Taking one maps it as a crate image's file is
     /// (its lazily parsed part is not taken: the bodies are parsed on demand in this crate's
     /// scope). The record's late inputs are noted for the crate's next record.
-    fn previous_files_of(&self, c: &crate::preload::PreCrate, deps: Option<&[u128]>, proc_fps: Option<u128>) -> Option<crate::crate_image::PreviousFiles> {
+    fn previous_files_of(&self, c: &crate::preload::PreCrate, deps: Option<&[u128]>, proc_fps: &[u128]) -> Option<crate::crate_image::PreviousFiles> {
         use crate::crate_image::{decode, FileMeta, Record};
         let tr = |path: &std::path::Path, why: &str| if crate::preload::trace() { eprintln!("boot-trace: {}: earlier record {} not taken: {}", c.name, path.display(), why); };
         let deps = deps.and_then(|d| self.full_deps(c, d));
-        if deps.is_none() && proc_fps.is_none() {
+        if deps.is_none() && proc_fps.is_empty() {
             tr(&self.dir, "dependency fingerprints");
             return None;
         }
@@ -5674,13 +5742,13 @@ impl FrontImages {
             let Some((KIND_FRONT_CRATE, b)) = st.get(front_crate_key(&c.name, &c.root)) else { continue };
             let Some(rec) = decode::<Record>(b) else { tr(&path, "decode"); continue };
             let same = rec.name == c.name && rec.root == c.root && rec.edition == c.edition && rec.cfg == cfg && rec.proc_macro == c.proc_macro
-                && rec.deps == c.image_dep_names && (deps.as_ref().is_some_and(|d| rec.dep_fps == *d) || proc_fps.is_some() && rec.proc_fps == proc_fps) && rec.lazy_auto == crate::parser::lazy_auto()
+                && rec.deps == c.image_dep_names && (deps.as_ref().is_some_and(|d| rec.dep_fps == *d) || rec.proc_fps.is_some_and(|p| proc_fps.contains(&p))) && rec.lazy_auto == crate::parser::lazy_auto()
                 && rec.parse_options == crate::crate_image::parse_options(options) && rec.ahead.complete;
             if !same {
                 if crate::preload::trace() {
                     let checks = [rec.name == c.name, rec.root == c.root, rec.edition == c.edition, rec.cfg == cfg, rec.proc_macro == c.proc_macro, rec.deps == c.image_dep_names,
-                        deps.as_ref().is_some_and(|d| rec.dep_fps == *d), proc_fps.is_some() && rec.proc_fps == proc_fps, rec.lazy_auto == crate::parser::lazy_auto(), rec.ahead.complete];
-                    eprintln!("boot-trace: {}: earlier record {} not taken: identity {:?} (proc {:?} recorded {:?})", c.name, path.display(), checks, proc_fps.map(|x| x as u64), rec.proc_fps.map(|x| x as u64));
+                        deps.as_ref().is_some_and(|d| rec.dep_fps == *d), rec.proc_fps.is_some_and(|p| proc_fps.contains(&p)), rec.lazy_auto == crate::parser::lazy_auto(), rec.ahead.complete];
+                    eprintln!("boot-trace: {}: earlier record {} not taken: identity {:?} (proc {:?} recorded {:?})", c.name, path.display(), checks, proc_fps.iter().map(|&x| x as u64).collect::<Vec<_>>(), rec.proc_fps.map(|x| x as u64));
                 }
                 continue;
             }
@@ -5893,6 +5961,12 @@ impl crate::crate_image::CrateImages for FrontImages {
         for (c, kind, name, _, content) in late { crate::sip::note_late_input(c, kind, name, content.as_deref()); }
         Some(image)
     }
+    fn carried_demand_image(&self, crates: &[crate::preload::PreCrate]) -> Option<std::sync::Arc<crate::preload::DemandImage>> {
+        let recipe = crate::crate_image::GraphRecipe::new(crates);
+        let saved = self.front_graph(recipe.identity)?;
+        if saved.identity != recipe.identity || saved.crates.iter().map(|(key, _)| key).ne(recipe.crates.iter()) { return None; }
+        self.carried_demand(&saved, crates, None)
+    }
     fn take_demand_plan(&self, crates: &[crate::preload::PreCrate]) -> Option<std::sync::Arc<crate::preload::DemandPlan>> {
         let (identity, plan) = self.pending_plan.lock().unwrap().take()?;
         (identity == crate::crate_image::GraphRecipe::new(crates).identity).then_some(plan)
@@ -5988,7 +6062,7 @@ impl crate::crate_image::CrateImages for FrontImages {
     fn crate_image(&self, c: &crate::preload::PreCrate, deps: &[u128]) -> Option<crate::crate_image::CrateImage> {
         self.selected_image(c, deps, None)
     }
-    fn previous_files(&self, c: &crate::preload::PreCrate, deps: Option<&[u128]>, proc_fps: Option<u128>) -> Option<crate::crate_image::PreviousFiles> {
+    fn previous_files(&self, c: &crate::preload::PreCrate, deps: Option<&[u128]>, proc_fps: &[u128]) -> Option<crate::crate_image::PreviousFiles> {
         self.previous_files_of(c, deps, proc_fps)
     }
     fn retained_proc_macros(&self) -> Vec<(String, u128)> {
@@ -6572,6 +6646,14 @@ mod cold_tests {
         std::fs::write(&root, "mod called; pub use called::value;").unwrap();
         let called = dir.join("called.rs");
         std::fs::write(&called, "pub fn value() -> u32 { 7 }").unwrap();
+        // an hour old, as a checkout leaves it: an edit that restores this mtime is racy by its
+        // change time alone
+        let mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&called).unwrap().set_modified(mtime).unwrap();
+        // each recording's time is set a known distance from the files' changes, however long
+        // the load before it takes
+        let record_at = |ns: u64| RECORD_NOW_NS.store(ns, std::sync::atomic::Ordering::Relaxed);
+        let epoch_ns = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
         let pre = vec![crate::preload::PreCrate {  name: "quiet".into(), root, edition: 2021, cfg,
             deps: vec![], proc_macro: false, image_deps: vec![], image_dep_names: vec![] }];
         let store = std::env::temp_dir().join(format!("relax-stat-graph-cache-{}-{}", std::process::id(), crate::clock::wall_ns()));
@@ -6587,8 +6669,8 @@ mod cold_tests {
             prog.resolve_imports();
             prog
         };
-        // the files must be older than the racy window when the graph is recorded
-        std::thread::sleep(std::time::Duration::from_millis(2300));
+        // every file changed more than the racy window before the graph is recorded
+        record_at(epoch_ns(std::time::SystemTime::now()) + crate::vfs::STAT_RACY_NS + 1_000_000_000);
         let mut cold = load(None, true);
         ColdFront::default().finish_in(&mut cold, store.clone());
         let identity = cold.front_graph.as_ref().unwrap().identity;
@@ -6600,7 +6682,6 @@ mod cold_tests {
         assert_eq!(images.content_hashes.load(std::sync::atomic::Ordering::Relaxed), 0, "an unchanged warm start hashes no file");
         // same size, mtime restored: the stat alone differs only in ctime (and the inode when
         // an editor replaces the file), so it is still caught
-        let mtime = std::fs::metadata(&called).unwrap().modified().unwrap();
         std::fs::write(&called, "pub fn value() -> u32 { 8 }").unwrap();
         std::fs::File::options().write(true).open(&called).unwrap().set_modified(mtime).unwrap();
         let edited = load(Some(&images), false);
@@ -6608,7 +6689,11 @@ mod cold_tests {
         let parsed = |p: &crate::program::Program| p.files.iter().zip(&p.file_paths).find(|(_, path)| path.ends_with("called.rs")).is_some_and(|(f, _)| !f.src.is_mapped());
         assert!(parsed(&edited), "an edit with the same size and mtime is detected");
         assert!(images.content_hashes.load(std::sync::atomic::Ordering::Relaxed) > 0);
-        // a graph recorded within the racy window of the edit carries no stat for that file
+        // a graph recorded within the racy window of the edit (its change time: the mtime is an
+        // hour old) carries no stat for that file
+        let edit = crate::vfs::file_stat(&called.to_string_lossy()).unwrap();
+        assert!(edit.mtime_ns + crate::vfs::STAT_RACY_NS < edit.ctime_ns, "{edit:?}");
+        record_at(edit.ctime_ns + crate::vfs::STAT_RACY_NS / 2);
         let mut edited = edited;
         ColdFront::default().finish_in(&mut edited, store.clone());
         let racy = read_front_graph(&store, identity).unwrap();
@@ -7160,6 +7245,39 @@ mod cold_tests {
         assert_fingerprints(&cold, &warm);
         for (a, b) in prog.files.iter().zip(&warm.files) { crate::front::verify_file(a, b); }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// One text, two parses that number it differently (one skipped a body the other parsed in
+    /// its tree): their ids name other expressions, so the file's identity in an entry differs
+    /// and an entry made from one is never decoded by a program with the other (a warm std entry
+    /// named `{closure#802}` of a file whose body this program had in its tree: lowering read past
+    /// the tree, "its lazily parsed body part is missing"). The same parse twice: one identity.
+    #[test]
+    fn a_files_identity_holds_how_its_parse_numbered_it() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let path = "/numbering/lib.rs";
+        let text = b"pub fn f(x: u32) -> u32 { let c = |y: u32| y + x; c(3) }\npub fn g() -> u32 { let d = || 4; d() }\n".to_vec();
+        let cfg = crate::cfg::CfgSet::host(sess, &[]);
+        let ctx = std::rc::Rc::new(crate::builtins::FileCtx::new("test", path, "test", &cfg));
+        let parse = |lazy: bool| {
+            let table = std::sync::Arc::new(crate::macros::MacroTable::default());
+            let (mut f, _) = crate::parser::parse_owned_ctx(sess, text.clone(), None, 2021,
+                Some(crate::macros::MacroScope::new(table)), "test", Some(ctx.clone()), lazy).unwrap();
+            crate::program::prepare_file(&mut f, &cfg);
+            f
+        };
+        let (skipped, eager) = (parse(true), parse(false));
+        assert!(skipped.lazy.is_some() && eager.lazy.is_none());
+        assert_eq!(skipped.numbering(), parse(true).numbering());
+        assert_ne!(skipped.numbering(), eager.numbering());
+        let ident = |pf: &crate::parser::ParsedFile| file_ident(path, pf.source_hash(path), 7, pf.numbering());
+        assert_eq!(skipped.source_hash(path), eager.source_hash(path));
+        assert_ne!(ident(&skipped), ident(&eager));
+        // a parse whose skipped bodies were parsed before its identity was first taken numbers
+        // the file as one whose bodies are not parsed yet: one identity either way
+        let parted = parse(true);
+        assert!(parted.part(&cfg).is_some());
+        assert_eq!(ident(&parted), ident(&skipped));
     }
 
     #[test]
@@ -8188,9 +8306,11 @@ mod data_tests {
         assert_eq!(linked_ptrs[0].1.off, 2);
         assert_eq!(&linked_ptrs[1..], &[(9, rt), (17, static_sym), (25, thunk), (33, foreign)]);
         assert!(matches!(crate::syms::read_obj(&u, Sym { id: u.data_sym(linked).id, off: 1 }, 8), relax_backend::passes::RoRead::Ptr(s) if s == linked_ptrs[0].1));
-        // Force recording instead of returning a memoized key / existing disk entry.
+        // Force recording instead of returning a memoized key / existing disk entry / this run's
+        // record of it for the crate.
         c.index.clear();
         c.pending_keys.clear();
+        c.data_crates.clear();
         assert_eq!(c.data_entry(&u, linked_idx), Some(key));
         assert_eq!(c.pending.iter().find(|(_, e)| e.key == key).unwrap().1.payload, expected);
         drop(c);
@@ -8786,7 +8906,23 @@ pub(crate) unsafe fn const_closures(up: *mut Unit, consts: &[DefId]) -> Vec<(Def
         c.keys_follow_text(u);
     }
     let g = c.deps_graph(u);
-    consts.iter().map(|&d| (d, g.def_closure(&u.prog, d))).collect()
+    let out: Vec<(DefId, Option<u128>)> = consts.iter().map(|&d| (d, g.def_closure(&u.prog, d))).collect();
+    if crate::reload::reload_trace() {
+        for &(d, k) in &out {
+            if k.is_some() { continue; }
+            let def = u.prog.def(d);
+            eprintln!("reload-trace: const {} has no node: file {} {:?} (boot files {}, in the graph's files {}, edit-added {:?}), crate {} in the graph {}",
+                u.prog.def_path(d), def.file, u.prog.file_paths.get(def.file as usize), u.prog.boot_files, g.has_file(&u.prog, def.file),
+                u.prog.edit_added_files(), def.krate, g.in_graph(&u.prog, d));
+        }
+    }
+    out
+}
+
+/// Whether definition `d` is in a file the boot's selection skipped (loaded after the boot): the
+/// item graph has no node of it, and the code keys take that file's text in whole.
+pub(crate) fn in_skipped_file(prog: &crate::program::Program, d: DefId) -> bool {
+    items::outside_boot_text(prog, prog.def(d).file)
 }
 
 /// What a const edit's re-key found.
@@ -8920,6 +9056,14 @@ impl Cache {
         self.deps = Some(crate::zone_alloc::slots_with(|| std::sync::Arc::new(g)));
         self.iface = items::apply_bound(prog, &plain, &self.bound);
         self.iface_plain = plain;
+        // and the text of the files the boot skipped, as it is now
+        let mut late = items::late_texts(prog, &mut self.late_memo);
+        late.truncate(ncr);
+        if late != self.late {
+            self.late_view = items::late_views(prog, &late);
+            self.late_view.truncate(ncr);
+            self.late = late;
+        }
         self.name_memo.clear();
         self.body_names.clear();
         self.def_bodies.clear();
@@ -9099,7 +9243,7 @@ impl Cache {
         if self.pending_keys.contains(&key) || (self.has_index(&key) && !self.const_stale.contains(&key)) { return Some(()); }
         let SymKind::Data(idx) = u.syms.kind(u.data_sym(addr).id)? else { return None; };
         // A recursive compile can inspect this object before its initializer finishes.
-        self.data_key.remove(&idx);
+        self.data_key.retain(|&(i, _), _| i != idx);
         self.data_why.remove(&idx);
         let previous = self.cur_crate;
         self.cur_crate = krate;

@@ -179,10 +179,16 @@ pub(crate) struct Reuse {
     files: Vec<(String, u128)>,
     /// the hits' late inputs
     late: Vec<(String, u8, String, u128)>,
+    /// `record` stored a verdict of every crate that did not hit, and the run record: the next
+    /// check of the same inputs reuses all (`Early`: its output can be stored now)
+    complete: bool,
+    /// the diagnostics of the verdicts `record` stored
+    recorded: Vec<Stored>,
 }
 
 /// What a check's crates' keys rest on beyond the crates: the Relax build and options, the
-/// variables that steer the check.
+/// variables that steer the check (every `MAKEPAD_RUN_*` one but those naming the run a check
+/// runs under, run.rs RUN_STATE_VARS).
 fn env_key(prog: &Program) -> u128 {
     let mut h = Sip128::new();
     h.str("relax-check-env");
@@ -191,7 +197,7 @@ fn env_key(prog: &Program) -> u128 {
     h.u128(prog.session.options.fingerprint());
     let mut vars: Vec<(String, String)> = std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.to_string_lossy().into_owned())))
-        .filter(|(k, _)| k.starts_with("MAKEPAD_RUN_"))
+        .filter(|(k, _)| k.starts_with("MAKEPAD_RUN_") && !crate::run::RUN_STATE_VARS.contains(&k.as_str()))
         .collect();
     vars.sort();
     h.u32(vars.len() as u32);
@@ -391,7 +397,7 @@ impl Reuse {
             stored: Vec::new(), run_key, run_hit: false, idents, texts, heads, ifaces, cur, table_stored: vec![false; n],
             digests, tables: (0..n).map(|_| None).collect(), deps, restore: Vec::new(), store_entries: 0, sig_clean: false, t_keys: Default::default(),
             skipped: (skipped.iter().filter(|s| is_checked[s.0 as usize]).count(), skipped.iter().filter(|s| !is_checked[s.0 as usize]).count()),
-            files: Vec::new(), late: Vec::new(),
+            files: Vec::new(), late: Vec::new(), complete: false, recorded: Vec::new(),
         };
         r.restore = vec![false; r.checked.len()];
         // MAKEPAD_RUN_CHECK_REUSE_TRACE: each crate's key parts (two checks' traces diff to what changed)
@@ -464,7 +470,7 @@ impl Reuse {
             }
             r.run_hit = matches!(store.get_checked(r.run_key), Some((KIND_RUN, _)));
         }
-        if r.full() { r.files = text_files.into_iter().flatten().collect(); }
+        r.files = text_files.into_iter().flatten().collect();
         r.t_keys = t0.elapsed();
         r
     }
@@ -516,10 +522,14 @@ impl Reuse {
         }).collect()
     }
 
-    /// A check whose every crate is unchanged (`full`): the stored diagnostics in the order the
-    /// check that stored them printed them (`print_reused_texts` prints them).
+    /// A check whose every crate is unchanged (`full`), or one that stored the verdicts of all
+    /// the others (`complete`): the stored diagnostics in the order the check that stored them
+    /// printed them (`print_reused_texts` prints them).
     pub(crate) fn reused_texts(&self, prog: &Program) -> Vec<String> {
-        crate::check_order::sort(prog, self.replayed(true, true)).into_iter()
+        let all = self.stored.iter().chain(&self.recorded).map(|s| Entry {
+            stage: Stage::new(s.phase, s.step), seq: s.seq, out: Out::Warning(s.text.clone()), group_at: Some(s.group.clone()),
+        }).collect();
+        crate::check_order::sort(prog, all).into_iter()
             .filter_map(|e| match e.out { Out::Warning(s) => Some(s), _ => None }).collect()
     }
 
@@ -592,7 +602,9 @@ impl Reuse {
                 Some(Stored { phase: e.stage.phase, step: e.stage.step, flags: flags[i], seq: e.seq, group: groups[i].clone(), text: text.clone() })
             }).collect();
             let late = mine.into_iter().cloned().collect();
-            new.push(crate::pack::NewEntry { key: self.keys[j], kind: KIND_CRATE, payload: encode(&Verdict { late, refs, deps: self.deps[j].clone(), names: written, entries }) });
+            let v = Verdict { late, refs, deps: self.deps[j].clone(), names: written, entries };
+            new.push(crate::pack::NewEntry { key: self.keys[j], kind: KIND_CRATE, payload: encode(&v) });
+            self.recorded.extend(v.entries);
         }
         // a hit checked against interfaces that changed since: stored with today's
         for j in 0..self.checked.len() {
@@ -625,8 +637,12 @@ impl Reuse {
         let dir = self.path.parent().unwrap_or(Path::new("."));
         let r = dir.parent().map_or(Ok(()), crate::pack::ensure_private_dir).and_then(|_| crate::pack::ensure_private_dir(dir))
             .and_then(|_| crate::store::append(&self.path, new, drop_all).map_err(|e| e.to_string()));
+        self.complete = r.is_ok() && self.sig_clean;
         if verbose { eprintln!("makepad check: verdicts stored ({:?})", r.err()); }
     }
+
+    /// `record` stored every verdict and the run record (`complete`).
+    pub(crate) fn complete(&self) -> bool { self.complete }
 }
 
 /// What changed in the interfaces that verdicts checked against older ones of saw (module doc):

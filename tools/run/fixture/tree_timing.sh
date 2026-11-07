@@ -1,6 +1,6 @@
 #!/bin/bash
 # tree_timing.sh [n]: times the git steps of a devhub tree move/restore in the node's tree (run it under a rev lease:
-# `makepad devhub lease test --node <node> --rev <branch>,main -- bash tools/run/fixture/tree_timing.sh`). Per repo:
+# `makepad devhub lease test --node <node> --rev <branch>,commercial=main -- bash tools/run/fixture/tree_timing.sh`). Per repo:
 # the dirty check (status), the index refresh, a refresh after a full index rebuild (on a copy of the index: what a
 # move pays when HEAD and the checkout ref disagree), and a real move of the tree by the last <n> commits (default 30)
 # and back with update-index --refresh + read-tree -m -u (what lease-start and the restore run). The tree ends where

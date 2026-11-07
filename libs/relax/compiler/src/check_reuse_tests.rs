@@ -320,7 +320,8 @@ fn early_child() {
 
 /// The early record (check_reuse.rs Early) stands only while the load's graph certificate does:
 /// a check after an edit that keeps the file's size and mtime prints a fresh verdict, as does one
-/// after a late input (an include_str! file) changed; with nothing changed the record is printed.
+/// after a late input (an include_str! file) changed; with nothing changed the record is printed,
+/// the one a check that checked crates and stored all their verdicts left (cold, after an edit).
 #[test]
 fn an_edit_keeping_size_and_mtime_gets_a_fresh_verdict() {
     if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() { return; }
@@ -343,9 +344,7 @@ fn an_edit_keeping_size_and_mtime_gets_a_fresh_verdict() {
     let named = |diags: &[String], name: &str| diags.iter().any(|d| d.contains(name));
     let cold = check();
     assert!(cold.0 == Some(0) && named(&cold.1, "unused_a") && !cold.2, "{}", cold.3);
-    // every verdict reused: that output is stored as the early record
-    let warm = check();
-    assert!(warm.0 == Some(0) && warm.1 == cold.1 && !warm.2 && warm.3.contains("their verdicts reused"), "{}", warm.3);
+    // the cold check stored every verdict: its output is the early record
     let early = check();
     assert!(early.0 == Some(0) && early.1 == cold.1 && early.2, "the early record is printed: {}", early.3);
     // a late input changed: checked again (the assertion fails)
@@ -363,5 +362,8 @@ fn an_edit_keeping_size_and_mtime_gets_a_fresh_verdict() {
     assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, lib.len());
     let fresh = check();
     assert!(fresh.0 == Some(0) && !fresh.2 && named(&fresh.1, "unused_b") && !named(&fresh.1, "unused_a"), "a fresh verdict: {}", fresh.3);
+    // the check after the edit stored its output as the early record
+    let again = check();
+    assert!(again.0 == Some(0) && again.1 == fresh.1 && again.2, "the edit's early record is printed: {}", again.3);
     std::fs::remove_dir_all(&dir).unwrap();
 }

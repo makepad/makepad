@@ -172,7 +172,7 @@ impl BoundVarContext<'_> {
     fn emit_opaque_capture_errors(&mut self) {
         let spans = std::mem::take(&mut self.capture_errors);
         for span in spans {
-            self.tcx.dcx.report(self.cause(span), "opaque type captures a higher-ranked lifetime".into());
+            self.tcx.dcx.report_unowned(self.cause(span), "opaque type captures a higher-ranked lifetime".into());
         }
     }
 
@@ -213,7 +213,7 @@ impl BoundVarContext<'_> {
                         let ast = &self.prog.files[self.file as usize].ast;
                         let async_fn = matches!(ast.item(def.item).kind, ItemKind::Fn(sig, _, _) if ast.fn_sig(sig).asyncness);
                         if !async_fn {
-                            self.tcx.dcx.report(self.cause(span), "anonymous lifetimes in impl Trait are unstable".into());
+                            self.tcx.dcx.report_unowned(self.cause(span), "E0658: anonymous lifetimes in `impl Trait` are unstable".into());
                             return;
                         }
                     }
@@ -228,13 +228,13 @@ impl BoundVarContext<'_> {
             let mut arg = self.remap_opaque_captures(&captures, arg, span);
             if let ResolvedArg::LateBound(_, _, id) = arg {
                 if let Some(what) = boundary {
-                    self.tcx.dcx.report(self.cause(span), format!("cannot capture late-bound lifetime in {what}"));
+                    self.tcx.dcx.report_unowned(self.cause(span), format!("cannot capture late-bound lifetime in {what}"));
                     arg = ResolvedArg::Error;
                 } else if let Some(body) = body { arg = ResolvedArg::Free(body, id); }
             }
             self.map_use(key, arg);
         } else if self.scopes.iter().any(|scope| matches!(scope, Scope::Binder { apit: true, .. })) {
-            self.tcx.dcx.report(self.cause(span), "lifetime is not accessible in this impl Trait bound".into());
+            self.tcx.dcx.report_unowned(self.cause(span), "lifetime is not accessible in this impl Trait bound".into());
         } else {
             self.tcx.dcx.delayed_bug(self.cause(span), "could not resolve lifetime in bound-variable scope".into());
         }
@@ -313,11 +313,11 @@ impl BoundVarContext<'_> {
                 _ => continue,
             };
             if lifetime && first_non_lifetime {
-                self.tcx.dcx.report(self.cause(pos), format!("lifetime parameter `{}` must be listed before non-lifetime parameters", name));
+                self.tcx.dcx.report_unowned(self.cause(pos), format!("lifetime parameter `{}` must be listed before non-lifetime parameters", name));
             }
             if !lifetime { first_non_lifetime = true; }
             if seen.contains(&name) {
-                self.tcx.dcx.report(self.cause(pos), format!("cannot capture parameter `{}` twice", name));
+                self.tcx.dcx.report_unowned(self.cause(pos), format!("cannot capture parameter `{}` twice", name));
             }
             seen.push(name);
         }
@@ -774,7 +774,7 @@ impl BoundVarContext<'_> {
                     self.push_binder(BinderId::Trait(path.segs.lo), binders, scope_type, false);
                     for param in ast.list(hrtb) {
                         if !matches!(param.kind, GenericParamKind::Lifetime(_)) {
-                            self.tcx.dcx.report(self.cause(param.name.lo), "non-lifetime binders are unstable".into());
+                            self.tcx.dcx.report_unowned(self.cause(param.name.lo), "non-lifetime binders are unstable".into());
                         }
                     }
                     self.visit_path(&path, false);
@@ -788,11 +788,11 @@ impl BoundVarContext<'_> {
                                     match self.rbv.names.uses[&LifetimeKey::Named(lt.lo, lt.hi)] {
                                         LifetimeRes::Param(_) => self.named_lifetime(lt),
                                         LifetimeRes::Error => {},
-                                        _ => self.tcx.dcx.report(self.cause(lt.lo), "precise capture must name a lifetime parameter".into()),
+                                        _ => self.tcx.dcx.report_unowned(self.cause(lt.lo), "precise capture must name a lifetime parameter".into()),
                                     }
                                 }
                                 GenericArg::Type(ty) => self.visit_precise_capturing_param(ty),
-                                _ => self.tcx.dcx.report(self.cause(0), "precise capture must name a type or const parameter".into()),
+                                _ => self.tcx.dcx.report_unowned(self.cause(0), "precise capture must name a type or const parameter".into()),
                             }
                         }
                     }
@@ -807,7 +807,7 @@ impl BoundVarContext<'_> {
     fn visit_precise_capturing_param(&self, ty: ast::TyId) {
         let ast = &self.prog.files[self.file as usize].ast;
         let ast::Ty::Path(path) = ast.ty(ty) else {
-            self.tcx.dcx.report(self.cause(0), "precise capture must name a type or const parameter".into());
+            self.tcx.dcx.report_unowned(self.cause(0), "precise capture must name a type or const parameter".into());
             return;
         };
         let segments = ast.segs(path.segs);
@@ -815,9 +815,9 @@ impl BoundVarContext<'_> {
         let symbol = self.prog.syms.get(self.prog.files[self.file as usize].text(segment.name));
         let parameter = path.no_qself() && segments.len() == 1 && segment.args().is_none() && symbol.is_some_and(|name| self.tcx.lifetime_path_is_parameter(self.prog, self.owner, name));
         if segment.kind() == SegKind::SelfType && !parameter {
-            self.tcx.dcx.report(self.cause(segment.name.lo), "precise capture cannot name the Self alias of an impl".into());
+            self.tcx.dcx.report_unowned(self.cause(segment.name.lo), "precise capture cannot name the Self alias of an impl".into());
         } else if !parameter {
-            self.tcx.dcx.report(self.cause(segment.name.lo), "precise capture must name a type or const parameter".into());
+            self.tcx.dcx.report_unowned(self.cause(segment.name.lo), "precise capture must name a type or const parameter".into());
         }
     }
 
@@ -838,7 +838,7 @@ impl BoundVarContext<'_> {
                 let pointer = ast.fn_ptr(pointer);
                 self.push_binder(BinderId::FnPointer(ty.0), Vec::new(), BinderScopeType::Normal, false);
                 for param in ast.list(pointer.hrtb) {
-                    if !matches!(param.kind, GenericParamKind::Lifetime(_)) { self.tcx.dcx.report(self.cause(param.name.lo), "late-bound type or const parameter not allowed on function pointers".into()); }
+                    if !matches!(param.kind, GenericParamKind::Lifetime(_)) { self.tcx.dcx.report_unowned(self.cause(param.name.lo), "late-bound type or const parameter not allowed on function pointers".into()); }
                 }
                 // resolve_bound_vars.rs:720-749: a fn pointer adds only its binder; the
                 // enclosing object lifetime default reaches its inputs and output.

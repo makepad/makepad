@@ -7593,14 +7593,25 @@ mod slot_layout_tests {
     }
 }
 
-/// Rust `min`/`max` (`FOp::Min`/`Max`: a NaN operand yields the other) with one operand that is
-/// never NaN become `a < b ? a : b` / `a > b ? a : b` (`MinLt`/`MaxGt`) with that operand second:
-/// `minss` returns its second operand when either is NaN, which is then the right answer -- one
-/// instruction instead of the five of the general NaN fix-up. Never NaN: non-NaN constants,
-/// integer conversions, and (to a fixpoint over every definition, loop-carried ones included)
-/// moves, negations / absolute values of such values and min/max results with such an operand
-/// (a bounding box's running `lo = lo.min(p)` from `f32::MAX`). Returns whether anything changed.
-pub fn min_max_non_nan(f: &mut Func) -> bool {
+/// x86-64: Rust `min`/`max` (`FOp::Min`/`Max`: a NaN operand yields the other) whose second
+/// operand is never NaN become `a < b ? a : b` / `a > b ? a : b` (`MinLt`/`MaxGt`): `minss`
+/// returns its second operand when either is NaN, which is then the right answer -- one
+/// instruction instead of the general NaN fix-up. Never NaN: non-NaN constants, integer
+/// conversions, and (to a fixpoint over every definition, loop-carried ones included) moves,
+/// negations / absolute values of such values and min/max results with such an operand (`p.min(lo)`
+/// of a bounding box's running `lo` from `f32::MAX`). A non-NaN constant first operand goes
+/// second (`c.min(x)` as `x < c ? x : c`). Returns whether anything changed.
+///
+/// Equal operands (`0.0` and `-0.0`) give the second operand of the rewrite: the general form's
+/// second (x64.rs), or the constant, as the back end's constant form and rustc's code give it.
+/// Only those: `lo.min(p)` with only `lo` known, a value that is no constant, stays general --
+/// `p < lo ? p : lo` would give `lo` where the general form gives `p` (a mesh's bounds got `-0.0`
+/// or `0.0` depending on the tier, and rustc gives `p` for a running minimum). Never on AArch64,
+/// whose general form (fminnm) orders `-0.0` below `0.0`, which a compare and select does not.
+pub fn min_max_non_nan(options: &relax_session::Options, f: &mut Func) -> bool {
+    if !options.target.starts_with("x86_64") {
+        return false;
+    }
     let nv = f.vregs.len();
     // candidates: vregs all of whose definitions are of a kind that can be non-NaN
     let mut non_nan = vec![false; nv];
@@ -7619,26 +7630,33 @@ pub fn min_max_non_nan(f: &mut Func) -> bool {
     if !any_minmax {
         return false;
     }
+    // constants: one definition, a non-NaN Fconst
+    let mut konst = vec![false; nv];
     for p in &f.params {
         seen[p.0 as usize] = true; // params: unknown
     }
     for b in &f.blocks {
         for i in &b.insts {
-            let ok = match i {
+            let (ok, k_) = match i {
                 Inst::Fconst(_, bits, f64_) => {
-                    if *f64_ { !f64::from_bits(*bits).is_nan() } else { !f32::from_bits(*bits as u32).is_nan() }
+                    let n = if *f64_ { !f64::from_bits(*bits).is_nan() } else { !f32::from_bits(*bits as u32).is_nan() };
+                    (n, n)
                 }
-                Inst::Conv(Conv::IntToF(..), ..) => true,
-                Inst::Mov(..) | Inst::FUnary(FUn::Neg | FUn::Abs, ..) | Inst::FBin(FOp::Min | FOp::Max | FOp::MinLt | FOp::MaxGt, ..) => true,
-                _ => false,
+                Inst::Conv(Conv::IntToF(..), ..) => (true, false),
+                Inst::Mov(..) | Inst::FUnary(FUn::Neg | FUn::Abs, ..) | Inst::FBin(FOp::Min | FOp::Max | FOp::MinLt | FOp::MaxGt, ..) => (true, false),
+                _ => (false, false),
             };
             for_defs(i, |d| {
                 let k = d.0 as usize;
                 if !seen[k] {
                     seen[k] = true;
                     non_nan[k] = ok;
-                } else if !ok {
-                    non_nan[k] = false;
+                    konst[k] = k_;
+                } else {
+                    konst[k] = false;
+                    if !ok {
+                        non_nan[k] = false;
+                    }
                 }
             });
         }
@@ -7668,11 +7686,11 @@ pub fn min_max_non_nan(f: &mut Func) -> bool {
         for i in &mut b.insts {
             if let Inst::FBin(op @ (FOp::Min | FOp::Max), w, d, a, b2) = *i {
                 let lt = if op == FOp::Min { FOp::MinLt } else { FOp::MaxGt };
-                if non_nan[b2.0 as usize] {
-                    *i = Inst::FBin(lt, w, d, a, b2);
-                    any = true;
-                } else if non_nan[a.0 as usize] {
+                if konst[a.0 as usize] && !konst[b2.0 as usize] {
                     *i = Inst::FBin(lt, w, d, b2, a);
+                    any = true;
+                } else if non_nan[b2.0 as usize] {
+                    *i = Inst::FBin(lt, w, d, a, b2);
                     any = true;
                 }
             }
@@ -7681,6 +7699,58 @@ pub fn min_max_non_nan(f: &mut Func) -> bool {
     any
 }
 
+
+#[cfg(test)]
+mod min_max_non_nan_tests {
+    use super::*;
+
+    /// `min_max_non_nan` on a loop `b1` (b0 jumps in, b1 loops on `c` or returns through b2):
+    /// b0 sets a running minimum `acc = f64::INFINITY` and a constant `k = 0.0`; b1 loads `x` and
+    /// computes `acc = acc.min(x)`, `x.min(k)` and `k.min(x)`. Returns b1's three min/max and
+    /// the vregs acc, k, x, y, z.
+    fn rewrite(target: &str) -> (Vec<Inst>, [VReg; 5]) {
+        let mut f = Func::new("mm".into(), 0);
+        let (p, c) = (f.vreg(Cls::I), f.vreg(Cls::I));
+        f.params.extend([p, c]);
+        let (acc, k, x, y, z) = (f.vreg(Cls::F64), f.vreg(Cls::F64), f.vreg(Cls::F64), f.vreg(Cls::F64), f.vreg(Cls::F64));
+        for _ in 0..3 {
+            f.block();
+        }
+        f.blocks[0].insts = vec![Inst::Fconst(acc, f64::INFINITY.to_bits(), true), Inst::Fconst(k, 0f64.to_bits(), true)];
+        f.blocks[0].term = Term::Jump(1);
+        f.blocks[1].insts = vec![
+            Inst::Load(Mem::F64, x, p, 0),
+            Inst::FBin(FOp::Min, true, acc, acc, x),
+            Inst::FBin(FOp::Min, true, y, x, k),
+            Inst::FBin(FOp::Min, true, z, k, x),
+        ];
+        f.blocks[1].term = Term::Branch(c, 1, 2);
+        f.blocks[2].term = Term::Ret(vec![]);
+        for b in &mut f.blocks {
+            b.pos = vec![0; b.insts.len()];
+        }
+        let mut options = relax_session::Options::default();
+        options.target = target.into();
+        min_max_non_nan(&options, &mut f);
+        (f.blocks[1].insts[1..].to_vec(), [acc, k, x, y, z])
+    }
+
+    #[test]
+    fn a_running_minimum_stays_general_and_a_constant_goes_second() {
+        let (r, [acc, k, x, y, z]) = rewrite("x86_64-unknown-linux-gnu");
+        // `acc` is never NaN (its definitions: INFINITY and min results), but rustc's code gives
+        // `x` for equal zeros there, as the general form does; `x < acc ? x : acc` would give `acc`
+        assert_eq!(r[0], Inst::FBin(FOp::Min, true, acc, acc, x));
+        // a constant gives itself for equal zeros on either side, as the back end's constant
+        // form and rustc's code do: it goes second
+        assert_eq!(r[1], Inst::FBin(FOp::MinLt, true, y, x, k));
+        assert_eq!(r[2], Inst::FBin(FOp::MinLt, true, z, x, k));
+        // AArch64's general form (fminnm) orders -0.0 below 0.0: nothing is rewritten
+        let (r, _) = rewrite("aarch64-apple-darwin");
+        assert_eq!(r[1], Inst::FBin(FOp::Min, true, y, x, k));
+        assert_eq!(r[2], Inst::FBin(FOp::Min, true, z, k, x));
+    }
+}
 
 /// Slots whose addresses are used only as (a) bases of loads / stores / vector accesses at
 /// constant offsets, copy operands and constant derivations -- what `slot_scan` follows -- and

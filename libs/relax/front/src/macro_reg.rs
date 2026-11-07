@@ -434,6 +434,7 @@ pub fn run_bang_in(sess: &std::sync::Arc<crate::Session>, krate: &str, i: usize,
         return Err("a proc macro used while the macro world itself is being built".to_string());
     }
     let _krate = with_call_krate(krate);
+    let _outside = crate::parse_work::outside();
     match RUNNER.get() {
         Some(r) if declaring() => r.declare(sess, &e, None, &input, call_span),
         Some(r) => r.call(sess, &e, &input, call_span),
@@ -755,6 +756,7 @@ pub fn run_attr(sess: &std::sync::Arc<crate::Session>, krate: &str, e: &Entry, a
         return Err("an attribute macro used while the macro world itself is being built".to_string());
     }
     let _krate = with_call_krate(krate);
+    let _outside = crate::parse_work::outside();
     match RUNNER.get() {
         Some(r) if declaring() => r.declare(sess, e, Some(attr), item, call_span),
         Some(r) => r.call_attr(sess, e, attr, item, call_span),
@@ -1034,6 +1036,7 @@ pub(crate) fn run_derive_entry(sess: &std::sync::Arc<crate::Session>, krate: &st
     let native = RUNNER.get().map_or(false, |r| r.native(e));
     let _profile = crate::load_profile::span(sess.runtime.profile, if native { "derive-native" } else { "derive-jit" }, name);
     let _krate = with_call_krate(krate);
+    let _outside = crate::parse_work::outside();
     match RUNNER.get() {
         Some(r) if declaring() => r.declare(sess, e, None, item, call_span),
         Some(r) => r.call(sess, e, item, call_span),

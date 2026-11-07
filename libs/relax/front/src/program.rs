@@ -614,6 +614,9 @@ pub struct Program {
     /// glob target) a name resolution went through (rustc_resolve `record_use`); recorded only
     /// while `record_import_uses` is on (`makepad check`)
     import_used: relax_session::sync::Mutex<crate::fxhash::HashSet<(u32, Sym, bool)>>,
+    /// the stretch of `record_import_uses` this program was made in (RECORD_STRETCH), None when
+    /// it was off then: its uses are whole only while that stretch lasts (`import_uses_recorded`)
+    uses_stretch: Option<u64>,
     glob_used: relax_session::sync::Mutex<crate::fxhash::HashSet<(u32, DefId)>>,
     /// extern prelude entries (crate, name) a path resolved through (recorded like `import_used`)
     extern_used: relax_session::sync::Mutex<crate::fxhash::HashSet<(u32, Sym)>>,
@@ -956,6 +959,7 @@ impl Program {
             glob_used: Default::default(),
             extern_used: Default::default(),
             body_memos: Default::default(),
+            uses_stretch: RECORD_IMPORT_USES.load(std::sync::atomic::Ordering::Relaxed).then(|| RECORD_STRETCH.load(std::sync::atomic::Ordering::Relaxed)),
             trait_bind_cache: Default::default(),
             prelexed: Default::default(),
             ahead: Default::default(),
@@ -2085,7 +2089,7 @@ impl Program {
                         ItemKind::Mac(m) => f.ast.segs(f.ast.row(*m).path.segs).last().map(|sg| f.text(sg.name).to_string()).unwrap_or_default(),
                         _ => String::new(),
                     };
-                    self.errors.push(self.record_error(file, it.lo, "macro", format!("cannot find macro `{}` in this scope", name)));
+                    self.errors.push(self.record_uncoded_error(file, it.lo, "macro", format!("cannot find macro `{}` in this scope", name)));
                 }
                 return;
             }
@@ -2234,6 +2238,12 @@ impl Program {
             m = self.mods[parent as usize].normal;
         }
         false
+    }
+
+    /// The file an edit's version `f` is a version of: the one loaded first (a boot file, or one
+    /// loaded after the boot); `f` itself when no edit made it.
+    pub fn first_version(&self, f: u32) -> u32 {
+        self.edit_boot.get(&f).copied().unwrap_or(f)
     }
 
     /// Whether file `f` is the version current now: a boot file no edit replaced, or the version
@@ -2884,9 +2894,12 @@ impl Program {
                     renames.push((DefId(di as u32), self.syms.intern(&n)));
                 }
             }
+            // a module's visibility is its text's (an edit may widen it: reload::classify)
+            let vis_pub = (d.kind == DefKind::Mod && matches!(it.kind, ItemKind::Mod(_))).then(|| !matches!(it.vis, Vis::Private));
             let d = &mut self.defs[di];
             d.file = to;
             d.item = ItemId(ni);
+            if let Some(p) = vis_pub { d.is_pub = p; }
         }
         if !renames.is_empty() { self.scope_cache.clear(); }
         for (d, name) in renames {
@@ -4211,11 +4224,13 @@ impl Program {
                 } else {
                     std::str::from_utf8(&f.src[source_pos as usize..end as usize]).ok().and_then(|s| s.rfind(name)).map_or(source_pos, |n|source_pos+n as u32)
                 };
-                let mut d = self.diagnostic(im.file, pos, "resolve", format!("unresolved import `{}`", p));
-                self.suggest(&mut d, &self.source_location(im.file, pos), im.module);
-                let location = self.source_location(im.file, im.pos);
-                let (line, _) = location.source.line_col(location.span.lo);
-                let human = format!("{}:{}: unresolved import `{}`", location.source.path(), line, p);
+                let mut d = self.diagnostic(im.file, pos, "resolve", format!("E0432: unresolved import `{}`", p));
+                let location = self.source_location(im.file, pos);
+                self.suggest(&mut d, &location, im.module);
+                // (where rustc puts it: the segment that does not resolve, with rustc's code -- a
+                // line without a code is a makepad run bug to the check, check.rs is_internal)
+                let (line, col) = location.source.line_col(location.span.lo);
+                let human = format!("{}:{}:{}: E0432: unresolved import `{}`", location.source.path(), line, col, p);
                 self.errors.push(crate::diag::record(human,d));
             }
         }
@@ -4550,6 +4565,13 @@ impl Program {
         } else {
             Some(md.normal)
         }
+    }
+
+    /// Whether this program's name resolutions recorded every import use they went through:
+    /// it was made while `record_import_uses` was on, and it has been on since. The lints that
+    /// read the uses (`unused_imports`) run only then: without them every import reads unused.
+    pub fn import_uses_recorded(&self) -> bool {
+        RECORD_IMPORT_USES.load(std::sync::atomic::Ordering::Relaxed) && self.uses_stretch == Some(RECORD_STRETCH.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Whether a resolution went through the import binding `name` of module `m`.
@@ -5791,6 +5813,9 @@ pub struct SharedParse {
 /// `makepad check` records which imports its name resolutions go through (the lint
 /// `unused_imports`); a run does not.
 static RECORD_IMPORT_USES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The stretches of recording, counted: each switch of `set_record_import_uses` from off to on
+/// starts one. A program made in one has every use of its name resolutions while it lasts.
+static RECORD_STRETCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub fn record_import_uses() -> bool { RECORD_IMPORT_USES.load(std::sync::atomic::Ordering::Relaxed) && !quiet_lookups() }
 
 thread_local! {
@@ -5811,7 +5836,13 @@ impl Drop for QuietLookups {
     fn drop(&mut self) { QUIET_LOOKUPS.with(|q| q.set(q.get() - 1)); }
 }
 fn quiet_lookups() -> bool { QUIET_LOOKUPS.with(|q| q.get() != 0) }
-pub fn set_record_import_uses(on: bool) { RECORD_IMPORT_USES.store(on, std::sync::atomic::Ordering::Relaxed); }
+pub fn set_record_import_uses(on: bool) {
+    if !RECORD_IMPORT_USES.swap(on, std::sync::atomic::Ordering::Relaxed) && on { RECORD_STRETCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+}
+/// The import replay's own lookups are no uses (rsim.rs run_import_sim): it holds the recording
+/// back while it runs, within the stretch. Returns whether it was on, for `resume_import_uses`.
+fn pause_import_uses() -> bool { RECORD_IMPORT_USES.swap(false, std::sync::atomic::Ordering::Relaxed) }
+fn resume_import_uses(was: bool) { RECORD_IMPORT_USES.store(was, std::sync::atomic::Ordering::Relaxed); }
 
 static SHARED_STD: relax_session::sync::Mutex<Option<HashMap<String, std::sync::Arc<SharedParse>>>> = relax_session::sync::Mutex::new(None);
 
@@ -6634,6 +6665,7 @@ mod deferred_load_tests {
 pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
     reset(&RECORD_IMPORT_USES, std::sync::atomic::AtomicBool::new(false));
+    reset(&RECORD_STRETCH, std::sync::atomic::AtomicU64::new(0));
     reset(&SHARED_STD, relax_session::sync::Mutex::new(None));
     reset(&SHARING, std::sync::atomic::AtomicBool::new(false));
     reset(&WORLD_WAITERS, std::sync::atomic::AtomicUsize::new(0));

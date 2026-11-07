@@ -179,7 +179,8 @@ fn run_one(d: &Desc, fault: usize, reach: usize, verbose: bool) -> Outcome {
     let began = verbose.then(crate::time::Instant::now);
     let body_begin = crate::cell::Cell::new(None);
     let body_end = crate::cell::Cell::new(None);
-    let r = crate::panic::catch_unwind(crate::panic::AssertUnwindSafe(|| unsafe {
+    // a test's panic fails it, unless it should panic: that one the test expects
+    let body = crate::panic::AssertUnwindSafe(|| unsafe {
         if verbose { body_begin.set(Some(crate::time::Instant::now())); }
         if start == 0 {
             let f: fn() = crate::mem::transmute(run);
@@ -189,7 +190,8 @@ fn run_one(d: &Desc, fault: usize, reach: usize, verbose: bool) -> Outcome {
             f(run)
         }
         if verbose { body_end.set(Some(crate::time::Instant::now())); }
-    }));
+    });
+    let r = if d.should_panic != 0 { crate::panic::catch_unwind(body) } else { crate::panic::catch_boundary(body) };
     let caught = verbose.then(crate::time::Instant::now);
     let faulted = if fault != 0 {
         let fault: extern "C" fn() -> u32 = unsafe { crate::mem::transmute(fault) };
@@ -361,7 +363,7 @@ fn run(t: &mut Tests, opts: &Opts, descs: Arc<Vec<Desc>>, filtered_out: usize) -
             };
             // A panic before recording must finish the run with unknown reach.
             let o = if live {
-                match crate::panic::catch_unwind(crate::panic::AssertUnwindSafe(run)) {
+                match crate::panic::catch_boundary(crate::panic::AssertUnwindSafe(run)) {
                     Ok(o) => o,
                     Err(_) => Outcome::Failed(Some(String::from("test thread panicked outside the test body"))),
                 }

@@ -1,6 +1,7 @@
 # First-run test of makepad.bat in a fresh folder against a local release service serving tiny
-# fixture loaders (the same fixture as test.sh): first run, unchanged run (no rebuild), changed
-# loader (rebuild), broken loader (error, log excerpt and path).
+# fixture loaders (the same fixture as test.sh): ctrl+c while Rust downloads (in a pseudo console),
+# first run, unchanged run (no rebuild), changed loader (rebuild), broken loader (error, log excerpt
+# and path).
 # Usage: powershell -NoProfile -File test.ps1 BASE_DIR   (BASE_DIR: a new, empty folder)
 # Never run it against an existing installation or on a machine someone works on.
 param([Parameter(Mandatory = $true)][string]$Base)
@@ -71,6 +72,142 @@ function Run($name) {
     "=== $name (exit $script:code)"; $out
     return $out
 }
+# ctrl+c in a console (a pseudo console, as Windows Terminal hosts) while Rust downloads: the jobs
+# beside the screen stop with the script, whatever cmd's "Terminate batch job (Y/N)?" is answered.
+# Y ends it; N goes on to a screen that says the download stopped (a key closes it). Afterwards no
+# process names the test's folder, the pieces downloaded stop growing, and the download's done file
+# does not say ok: a download that ran on unseen ends ok there, however fast the line is.
+Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Text;
+using System.Threading;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public class Con {
+    [StructLayout(LayoutKind.Sequential)] public struct COORD { public short X; public short Y; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct STARTUPINFO {
+        public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
+        public int dwX; public int dwY; public int dwXSize; public int dwYSize; public int dwXCountChars; public int dwYCountChars;
+        public int dwFillAttribute; public int dwFlags; public short wShowWindow; public short cbReserved2; public IntPtr lpReserved2;
+        public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError;
+    }
+    [StructLayout(LayoutKind.Sequential)] public struct STARTUPINFOEX { public STARTUPINFO StartupInfo; public IntPtr lpAttributeList; }
+    [StructLayout(LayoutKind.Sequential)] public struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool CreatePipe(out SafeFileHandle r, out SafeFileHandle w, IntPtr sa, int size);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern int CreatePseudoConsole(COORD size, SafeFileHandle input, SafeFileHandle output, uint flags, out IntPtr pc);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern void ClosePseudoConsole(IntPtr pc);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attr, IntPtr value, IntPtr size, IntPtr prev, IntPtr ret);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool CreateProcessW(string app, string cmd, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string cwd, ref STARTUPINFOEX si, out PROCESS_INFORMATION pi);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern uint WaitForSingleObject(IntPtr h, uint ms);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetConsoleCtrlHandler(IntPtr handler, bool add);
+
+    IntPtr pc, list;
+    FileStream input;
+    Thread reader;
+    PROCESS_INFORMATION pi;
+    readonly StringBuilder seen = new StringBuilder();
+    public int Pid { get { return pi.dwProcessId; } }
+    public string Seen { get { lock (seen) { return seen.ToString(); } } }
+
+    // cmd in a pseudo console of cols x rows; what it shows collects in Seen. It starts with ctrl+c on,
+    // as from a terminal: this test may run under a parent that ignores ctrl+c, which every process
+    // started from here would inherit (cmd's start /b turns it back on for cmd as it goes).
+    public static Con Start(string cmd, string cwd, short cols, short rows) {
+        var c = new Con();
+        SafeFileHandle inR, inW, outR, outW;
+        if (!CreatePipe(out inR, out inW, IntPtr.Zero, 0)) throw new Exception("CreatePipe");
+        if (!CreatePipe(out outR, out outW, IntPtr.Zero, 0)) throw new Exception("CreatePipe");
+        COORD size; size.X = cols; size.Y = rows;
+        int hr = CreatePseudoConsole(size, inR, outW, 0, out c.pc);
+        if (hr != 0) throw new Exception("CreatePseudoConsole " + hr);
+        inR.Dispose(); outW.Dispose();
+        IntPtr bytes = IntPtr.Zero;
+        InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref bytes);
+        c.list = Marshal.AllocHGlobal(bytes);
+        if (!InitializeProcThreadAttributeList(c.list, 1, 0, ref bytes)) throw new Exception("InitializeProcThreadAttributeList");
+        if (!UpdateProcThreadAttribute(c.list, 0, (IntPtr)0x00020016, c.pc, (IntPtr)IntPtr.Size, IntPtr.Zero, IntPtr.Zero)) throw new Exception("UpdateProcThreadAttribute");
+        var si = new STARTUPINFOEX();
+        si.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEX));
+        si.StartupInfo.dwFlags = 0x100;
+        si.lpAttributeList = c.list;
+        SetConsoleCtrlHandler(IntPtr.Zero, false);
+        if (!CreateProcessW(null, cmd, IntPtr.Zero, IntPtr.Zero, false, 0x00080000, IntPtr.Zero, cwd, ref si, out c.pi))
+            throw new Exception("CreateProcess " + Marshal.GetLastWin32Error());
+        c.input = new FileStream(inW, FileAccess.Write);
+        c.reader = new Thread(() => {
+            var stream = new FileStream(outR, FileAccess.Read);
+            var buf = new byte[65536];
+            while (true) {
+                int n;
+                try { n = stream.Read(buf, 0, buf.Length); } catch { break; }
+                if (n <= 0) break;
+                lock (c.seen) { c.seen.Append(Encoding.UTF8.GetString(buf, 0, n)); }
+            }
+        });
+        c.reader.IsBackground = true;
+        c.reader.Start();
+        return c;
+    }
+    public bool WaitFor(string text, int ms) {
+        var t0 = DateTime.UtcNow;
+        while ((DateTime.UtcNow - t0).TotalMilliseconds < ms) { if (Seen.Contains(text)) return true; Thread.Sleep(100); }
+        return false;
+    }
+    public void Send(string text) { var b = Encoding.UTF8.GetBytes(text); input.Write(b, 0, b.Length); input.Flush(); }
+    public bool Exited(int ms) { return WaitForSingleObject(pi.hProcess, (uint)ms) == 0; }
+    public uint Code() { uint code; GetExitCodeProcess(pi.hProcess, out code); return code; }
+    public void Close() { ClosePseudoConsole(pc); reader.Join(5000); }
+}
+'@
+function Stop-Tree([int]$id) {
+    foreach ($c in @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $id")) { Stop-Tree $c.ProcessId }
+    Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+}
+# the processes whose command line names the test's folder (the jobs' do), but for this test itself
+function Ours { @(Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.IndexOf($Base, [StringComparison]::OrdinalIgnoreCase) -ge 0 }) }
+function Pieces { [long](Get-ChildItem "$Base\install\cache\downloads" -Filter '*.tar.gz*' -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum }
+function CtrlC($answer) {
+    if ($env:MAKEPAD_LOADER_ROOT -ne "$Base\install") { throw "a run without its own MAKEPAD_LOADER_ROOT" }
+    $c = [Con]::Start("cmd.exe /d /c `"$Base\home\makepad.bat`"", "$Base\home", 100, 30)
+    try {
+        Check "ctrl+c ($answer): Rust downloads" "$($c.WaitFor('downloading', 180000))" 'True'
+        Start-Sleep -Milliseconds 700
+        $curls = @(Ours | Where-Object { $_.Name -eq 'curl.exe' }).Count
+        $c.Send([string][char]3)
+        Check "ctrl+c ($answer): cmd asks" "$($c.WaitFor('Terminate batch job', 15000))" 'True'
+        Start-Sleep 1
+        $c.Send("$answer`r")
+        if ($answer -eq 'N') {
+            Check "ctrl+c (N): the screen says so" "$($c.WaitFor('press a key to close', 60000))" 'True'
+            Check "ctrl+c (N): the download stopped" $c.Seen 'The download stopped\.'
+            $c.Send("`r")
+        }
+        Check "ctrl+c ($answer): the script ended" "$($c.Exited(30000))" 'True'
+        Start-Sleep 3
+        $left = @(Ours)
+        $grown = Pieces
+        Start-Sleep 3
+        $grown = (Pieces) - $grown
+        $done = "$(Get-Content -Raw "$Base\install\cache\downloads\rust.done" -ErrorAction SilentlyContinue)".Trim()
+        "ctrl+c ($answer): $curls curl.exe before, $($left.Count) processes of the folder after, $grown bytes more 3 s later, rust.done '$done'"
+        foreach ($p in $left) { "  left: $($p.Name) $($p.ProcessId) $($p.CommandLine)" }
+        $text = $c.Seen -replace ([string][char]27 + '\[[0-9;?]*[A-Za-z]'), ' ' -replace '\s+', ' '
+        "  the screen's end: " + $text.Substring([Math]::Max(0, $text.Length - 400))
+        Check "ctrl+c ($answer): curl.exe ran" "$curls" '^[1-9]'
+        Check "ctrl+c ($answer): nothing left running" "$($left.Count)" '^0$'
+        Check "ctrl+c ($answer): no download goes on" "$grown" '^0$'
+        Check "ctrl+c ($answer): the download did not finish unseen" "rust.done: $done" '^rust\.done: (failed)?$'
+    } finally {
+        foreach ($p in (Ours)) { Stop-Tree $p.ProcessId }
+        if (-not $c.Exited(0)) { Stop-Tree $c.Pid }
+        $c.Close()
+    }
+}
 try {
     # a test service without a folder of its own stops before it makes anything (the profile a
     # folder of the test's, in case it did not)
@@ -82,6 +219,8 @@ try {
     "=== run0 (exit $code0)"; $r0
     Check 'no loader root: refused' $r0 'MAKEPAD_LOADER_SERVICE is set without MAKEPAD_LOADER_ROOT'
     Check 'no loader root: nothing made' ("$code0 " + (Test-Path "$Base\profile") + ' ' + @(Get-ChildItem -Force "$Base\home").Count) '^1 False 1$'
+    CtrlC 'Y'
+    CtrlC 'N'
     $r1 = Run 'run1'
     Check 'first run exits 0' "$script:code" '^0$'
     Check 'progress line, the real total' $r1 'Loader build: compiling .+ [0-9]+ / 2 crates'

@@ -390,6 +390,31 @@ pub fn enabled() -> bool { ENABLED.load(Ordering::Relaxed) && !SUPPRESSED.with(|
 
 thread_local! {
     static SUPPRESSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// while `capture` runs on this thread: its reports, kept out of the sink
+    static CAPTURED: std::cell::RefCell<Option<Vec<Reported>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A report to the sink, or to this thread's `capture`.
+fn sink(r: Reported) {
+    let r = CAPTURED.with(|c| match c.borrow_mut().as_mut() {
+        Some(v) => { v.push(r); None }
+        None => Some(r),
+    });
+    if let Some(r) = r { SINK.lock().unwrap_or_else(|e| e.into_inner()).push(r); }
+}
+
+/// `f`, and what it reported on this thread, kept out of the sink: a live save's lints of the
+/// bodies it changed, while other threads' reports go on to it.
+pub fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<Reported>) {
+    struct Restore(Option<Option<Vec<Reported>>>);
+    impl Drop for Restore {
+        fn drop(&mut self) { if let Some(prev) = self.0.take() { CAPTURED.with(|c| *c.borrow_mut() = prev); } }
+    }
+    let mut restore = Restore(Some(CAPTURED.with(|c| c.replace(Some(Vec::new())))));
+    let r = f();
+    let prev = restore.0.take().unwrap_or_default();
+    let got = CAPTURED.with(|c| c.replace(prev)).unwrap_or_default();
+    (r, got)
 }
 
 /// Errors-only checks leave other threads' lint collection alone.
@@ -414,7 +439,7 @@ pub fn hard_error(prog: &Program, file: u32, pos: u32, msg: &str) {
     let line = format!("{}:{}:{}: error: {}", prog.file_paths[file as usize], l, c, msg);
     let _k = crate::zone_alloc::kept();
     let seq = REPORT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    SINK.lock().unwrap_or_else(|e| e.into_inner()).push(Reported { level: Level::Deny, lint: "", def: NO_DEF, seq, line });
+    sink(Reported { level: Level::Deny, lint: "", def: NO_DEF, seq, line });
 }
 
 /// `emit` under the attributes `inner` of a node inside `def`'s body; none given: those around
@@ -439,7 +464,7 @@ pub fn emit_in(prog: &Program, def: DefId, inner: &[Attr], lint: &Lint, file: u3
     let line = format!("{}:{}:{}: {}: {} [{}]", prog.file_paths[file as usize], l, c, kind, msg, lint.name);
     let _k = crate::zone_alloc::kept();
     let seq = REPORT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    SINK.lock().unwrap_or_else(|e| e.into_inner()).push(Reported { level, lint: lint.name, def, seq, line });
+    sink(Reported { level, lint: lint.name, def, seq, line });
 }
 
 /// `f` on each of `items` on the pool's workers (MAKEPAD_RUN_JOBS), the next free worker taking

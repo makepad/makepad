@@ -21,8 +21,9 @@
 //! window's right edge (macOS), vertically centred. It is a badge of the window
 //! (`window_kind::BADGE` with `window_style::BADGE_HOVER`): the HAL composes it over the app's
 //! frames, which neither wait for it nor pay for it; session 0 sees the pointer hover over it,
-//! and a press on it while a dot shows (`window_style::BADGE_PRESS`); other input stays the
-//! app's. The tooltip draws in the same badge layer while hovered. Every value eases on this
+//! and a press on the dot once the dot shows fully (`window_style::BADGE_PRESS`, on the dot's
+//! square alone; a new dot fades in, and a press as it comes is the app's under it); other input
+//! stays the app's, a drag that crosses the dot and a press that began elsewhere too. The tooltip draws in the same badge layer while hovered. Every value eases on this
 //! session's clock; the ring is the boot document's `jit_ring_px` (GPU), one quad.
 use makepad_hal::{AppCaption, Id};
 use std::time::{Duration, Instant};
@@ -48,6 +49,9 @@ const BLEND: f32 = 0.3;
 const PACE: f32 = 0.4;
 const SHOW: f32 = 0.12;
 const HIDE: f32 = 0.15;
+/// the ring or its dot shows fully at this opacity (it eases there from nothing in about half a
+/// second)
+const SHOWN: f32 = 0.99;
 /// the head's turns a second with work the program waits for and with background work, at a
 /// trickle; up to twice that as the build rate rises to RATE_TOP builds a second (logarithmic);
 /// reduce motion: a third of it, still moving
@@ -129,6 +133,30 @@ pub struct Look {
     pub hover: f32,
 }
 
+impl Look {
+    /// What its pixels show, to 1/1024 of each value: the dot (`mode` 2 or 3) stands still, so its
+    /// frames differ only by its mode, opacity and hover; the ring's head turns every frame.
+    pub fn pixels(&self) -> [i32; 5] {
+        let q = |v: f32| (v * 1024.0).round() as i32;
+        let dot = self.mode >= 1.5;
+        [q(self.mode), q(self.opacity), q(self.hover), if dot { 0 } else { q(self.spin.fract()) }, if dot { 0 } else { q(self.fill) }]
+    }
+}
+
+/// What a frame of the ring's badge showed (`Ring::shown`): a frame that would show the same is
+/// not drawn.
+#[derive(Clone, PartialEq)]
+pub struct Shown {
+    pub badge: Id,
+    pub look: [i32; 5],
+    pub ring: [f32; 4],
+    /// the tooltip's text and place, while it shows
+    pub tip: Option<(String, [f32; 4])>,
+    pub dark: bool,
+    pub dpi: f32,
+    pub viewport: [f32; 2],
+}
+
 pub struct Ring {
     /// the ring's badge (its place for the pointer) while it shows, and the slot it reuses (a
     /// new generation each time); the ring and its tooltip draw in the window's badge layer
@@ -154,8 +182,16 @@ pub struct Ring {
     /// the last alert, and whether the dot is what shows (it fades out as the dot)
     last_alert: Alert,
     dot: bool,
+    /// the dot that shows now came at this time (it fades in from nothing then)
+    dot_since: Option<Instant>,
     last: Instant,
     pub next_frame: Instant,
+    /// what the badge's last frame showed
+    pub shown: Option<Shown>,
+    /// paced by the display: the beat the ring last looked at, and whether its frame then
+    /// showed something new (it moves: the next beat is asked for)
+    pub beat: u64,
+    pub moving: bool,
 }
 
 fn ease(x: f32, target: f32, dt: f32, rise: f32, fall: f32) -> f32 {
@@ -182,8 +218,12 @@ impl Ring {
             hovered: None,
             last_alert: Alert::Panic,
             dot: false,
+            dot_since: None,
             last: Instant::now(),
             next_frame: Instant::now(),
+            shown: None,
+            beat: 0,
+            moving: false,
         }
     }
 
@@ -202,10 +242,19 @@ impl Ring {
             self.next_frame = Instant::now();
         }
         if let Some(alert) = alert {
+            if self.alert != Some(alert) {
+                // a new dot fades in from nothing, over a busy ring too: a press as it comes was
+                // aimed at what was there before it (`takes_press`)
+                self.dot_since = Some(Instant::now());
+                self.opacity = 0.0;
+            }
             self.last_alert = alert;
             self.dot = true;
-        } else if want.is_some() {
-            self.dot = false;
+        } else {
+            self.dot_since = None;
+            if want.is_some() {
+                self.dot = false;
+            }
         }
         self.want = want;
         self.alert = alert;
@@ -218,6 +267,39 @@ impl Ring {
     /// The ring has faded out and nothing is wanted: it can go.
     pub fn done(&self) -> bool {
         !self.wanted() && self.opacity < 0.004
+    }
+
+    /// The dot shows fully: it has faded all the way in.
+    pub fn dot_shown(&self) -> bool {
+        self.alert.is_some() && self.opacity >= SHOWN
+    }
+
+    /// How long the dot that shows now has been there.
+    pub fn dot_age(&self) -> Option<Duration> {
+        self.dot_since.filter(|_| self.alert.is_some()).map(|t| t.elapsed())
+    }
+
+    /// The badge takes a press (`window_style::BADGE_PRESS`): a dot once it shows fully (while it
+    /// fades in, a press is the app's under it: one as the dot came was aimed at the app), or the
+    /// ring of the restart the person asked for (a repeat click does nothing, and never reaches
+    /// the caption under it).
+    pub fn takes_press(&self, restart_asked: bool) -> bool {
+        self.dot_shown() || restart_asked
+    }
+
+    /// The dot's own square in the ring's badge placed at `placed`: where a badge that takes
+    /// presses takes them (the caption around the dot stays the app's).
+    pub fn dot_rect(placed: [f32; 4]) -> [f32; 4] {
+        let (cx, cy) = (placed[0] + placed[2] * 0.5, placed[1] + placed[3] * 0.5);
+        [cx - RING * 0.5, cy - RING * 0.5, RING, RING]
+    }
+
+    /// A press at `p` (window points) on the badge placed at `placed` landed on the dot itself,
+    /// not in the corners of its square.
+    pub fn on_dot(placed: [f32; 4], p: [f32; 2]) -> bool {
+        let (cx, cy) = (placed[0] + placed[2] * 0.5, placed[1] + placed[3] * 0.5);
+        let (dx, dy) = (p[0] - cx, p[1] - cy);
+        dx * dx + dy * dy <= RING * RING * 0.25
     }
 
     /// The tooltip shows: the pointer has rested on the ring.
@@ -436,6 +518,55 @@ mod tests {
         assert!(ring.pace > SPIN_FG, "{}", ring.pace);
         ring.set(None, Some(Alert::Stale));
         assert_eq!(ring.look(false).mode, 2.0);
+    }
+
+    /// Steps the ring's look `n` times 50 ms apart (the wish set as it is).
+    fn age(ring: &mut Ring, n: usize) {
+        for _ in 0..n {
+            ring.last -= Duration::from_millis(50);
+            ring.look(false);
+        }
+    }
+
+    /// A dot takes a press only once it shows fully: it fades in from nothing, over a busy ring
+    /// too, and a press while it does is the app's under it (a click the moment the dot came was
+    /// aimed at the app, and restarted it).
+    #[test]
+    fn a_dot_takes_a_press_only_once_it_shows_fully() {
+        let mut ring = Ring::new();
+        ring.window = Some(Id::new(1, 1));
+        let busy = Want { lazy: true, ..Default::default() };
+        run(&mut ring, busy, 40);
+        assert!(!ring.takes_press(false), "a busy ring leaves input with the app");
+        ring.set(Some(busy), Some(Alert::UpdateReady));
+        assert!(!ring.takes_press(false), "the dot has just come");
+        assert!(ring.dot_age().is_some_and(|a| a < Duration::from_secs(1)));
+        age(&mut ring, 4);
+        assert!(!ring.takes_press(false), "200 ms in, the dot still fades in: {}", ring.opacity);
+        age(&mut ring, 8);
+        assert!(ring.takes_press(false), "600 ms in, it shows fully: {}", ring.opacity);
+        // the same dot set again does not fade in again
+        ring.set(Some(busy), Some(Alert::UpdateReady));
+        assert!(ring.takes_press(false));
+        // the dot goes (the person asked: the restart's ring takes the repeat click)
+        ring.set(Some(Want { restart_asked: true, ..busy }), None);
+        assert!(!ring.dot_shown() && ring.dot_age().is_none());
+        assert!(ring.takes_press(true));
+    }
+
+    /// Only a press on the dot itself is the dot's: the badge takes presses on the dot's square
+    /// alone (around it the caption is the app's), and of that square only the dot.
+    #[test]
+    fn a_press_counts_only_on_the_dot() {
+        let placed = Ring::place([900.0, 600.0], None);
+        let (cx, cy) = (placed[0] + SIDE * 0.5, placed[1] + SIDE * 0.5);
+        let dot = Ring::dot_rect(placed);
+        assert_eq!(dot, [cx - RING * 0.5, cy - RING * 0.5, RING, RING]);
+        assert!(dot[0] > placed[0] && dot[0] + dot[2] < placed[0] + placed[2], "inside the ring's badge");
+        assert!(Ring::on_dot(placed, [cx, cy]));
+        assert!(Ring::on_dot(placed, [cx + RING * 0.5 - 0.5, cy]));
+        assert!(!Ring::on_dot(placed, [placed[0] + 1.0, placed[1] + 1.0]), "the badge's corner");
+        assert!(!Ring::on_dot(placed, [cx + RING * 0.5 + 1.0, cy]));
     }
 
     #[test]

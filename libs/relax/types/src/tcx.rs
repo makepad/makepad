@@ -292,6 +292,9 @@ pub struct Tcx {
     future_defs: std::sync::OnceLock<Option<(DefId, DefId)>>,
     /// Return-position `impl Trait` declarations keyed by their opaque DefId.
     pub opaques: crate::conc::ShardMap<DefId, OpaqueDecl>,
+    /// The errors of lowering an opaque's bounds where it is written (E0412 ..), reported again by
+    /// every later lowering of it (`lower_opaque`).
+    opaque_lowering_errors: crate::conc::ShardMap<DefId, Vec<String>>,
     /// rustc `inferred_outlives_of` (a query there): the outlives requirements an ADT's fields put on its own
     /// parameters, computed once per ADT; cleared whenever declarations change.
     pub inferred_outlives: crate::conc::ShardMap<DefId, std::sync::Arc<Vec<outlives::OutlivesPredicate>>>,
@@ -460,6 +463,7 @@ impl Tcx {
             async_fns: crate::conc::MemoMap::with_bits(10),
             future_defs: Default::default(),
             opaques: Default::default(),
+            opaque_lowering_errors: Default::default(),
             inferred_outlives: Default::default(),
             inferred_outlives_overflow: Default::default(),
             trait_closure: Default::default(),
@@ -1168,6 +1172,7 @@ impl Tcx {
         self.const_tys.remove_all(&gone);
         for impls in self.trait_impls_of.values_mut() { impls.retain(|d| !gone.contains(d)); }
         self.opaques.retain(|k, _| !gone.contains(k));
+        self.opaque_lowering_errors.retain(|k, _| !gone.contains(k));
         self.publish_collected();
     }
 
@@ -2290,6 +2295,32 @@ impl Tcx {
         }
     }
 
+    /// An anonymous constant's type is fed by the lowering that meets it (lower_const_arg, as
+    /// hir_ty_lowering's feed_anon_const_type): its holder's declared type, signature or body,
+    /// which a cold run lowers before anything types the constant. A warm `makepad run` takes
+    /// the holder's code and the constant's from the disk cache, and nothing need lower the
+    /// holder before the checker types the constant (gandalf after a relaunch: "anonymous const
+    /// type of `app::MAKEPAD_FONT_ASSETS_V1::{constant#0}` (its holder never fed it)", a static's
+    /// array length). Lowers the holder of anonymous constant `d` whose type was not fed: the
+    /// body that holds it, else the declared type of the const or static, or the fn's signature
+    /// and clauses. Before the constant's typeck query starts (Tcx::typeck), so a body that
+    /// evaluates the constant meets no cycle.
+    pub(crate) fn feed_anon_const_from_holder(&self, prog: &Program, d: DefId) {
+        use crate::def_collector::NodeId;
+        if prog.def(d).kind != DefKind::AnonConst || self.const_tys.fed_type(&d).is_some() { return; }
+        let Some(&(file, NodeId::AnonConst(e))) = prog.def_id_to_node_id.get(&d) else { return };
+        let owner = crate::borrowck::body::root_owner(prog, d);
+        if crate::borrowck::body::in_body(prog, owner, file, prog.files[file as usize].ast.expr(e).lo) {
+            let _ = self.typeck(prog, owner);
+            return;
+        }
+        match prog.def(owner).kind {
+            DefKind::Const | DefKind::AssocConst | DefKind::Static => { let _ = self.const_ty(prog, owner); }
+            DefKind::Fn | DefKind::AssocFn => { let _ = self.fn_item_sig(prog, owner); let _ = self.clauses_of(prog, owner); }
+            _ => {}
+        }
+    }
+
     /// The region contract of a const/static item's declared type (None: not one, or no type).
     pub fn const_region_contract(&self, prog: &Program, d: DefId) -> Option<&outlives::RegionContract> {
         let cell = self.const_tys.declaration(&d)?;
@@ -2535,10 +2566,17 @@ impl Tcx {
         let bs = prog.files[file as usize].ast.list(bounds);
         let opaque_def = prog.node_id_to_def_id[&(file, relax_front::def_collector::NodeId::OpaqueTy(t))];
         let me = self.lower_opaque_ty(prog, opaque_def);
+        // (the errors of lowering its bounds are reported by every lowering of it: a signature's
+        // errors, and what its body's check skips for them, must not depend on what lowered the
+        // opaque first -- another thread's lint pass, say)
         if self.opaques.contains_key(&opaque_def) {
+            for e in self.opaque_lowering_errors.get(&opaque_def).unwrap_or_default() { self.reraise_error(cx, e); }
             return me;
         }
-        self.opaques.insert(opaque_def, OpaqueDecl::default());
+        // (its own bounds naming it again: the lowering in progress on this thread covers them; a
+        // lowering in progress on another thread is done again here, as init_once computes a cell)
+        let Ok(_lowering) = crate::cycle::enter(crate::cycle::Kind::OpaqueBounds, opaque_def.0, 0) else { return me };
+        let outer = cx.state.errors.replace(Some(Vec::new()));
         let f = &prog.files[file as usize];
         let mut decl = OpaqueDecl::default();
         decl.region_contract = self.region_contract(cx,prog,opaque_def,env);
@@ -2580,7 +2618,11 @@ impl Tcx {
                 decl.bounds.push((td, targs));
             }
         }
+        let errors = cx.state.errors.replace(outer).unwrap_or_default();
+        // (the errors before the declaration: a reader that finds the declaration finds them)
+        self.opaque_lowering_errors.insert(opaque_def, errors.clone());
         self.opaques.insert(opaque_def, decl);
+        for e in errors { self.reraise_error(cx, e); }
         me
     }
 

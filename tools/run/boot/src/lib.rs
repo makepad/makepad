@@ -127,8 +127,14 @@ pub enum Event {
     Input(RawEvent, Vec<u8>),
     DocumentErrors(Vec<Diagnostic>),
     /// A click on the JIT ring's dot (what the program is stopped on, or waits for): the run acts
-    /// on the alert it shows.
-    RingPressed,
+    /// on the alert it shows. Only a press that began on the dot itself, once it showed fully,
+    /// is one (the HAL gives the app a press while another that began elsewhere is down, a drag).
+    RingPressed {
+        /// the remote endpoint fed it (`input::MOD_INJECTED`), no person did
+        injected: bool,
+        /// how long the dot had shown
+        shown: Duration,
+    },
 }
 
 pub fn diagnostic_text(diagnostic: &Diagnostic) -> String {
@@ -233,6 +239,8 @@ pub struct Boot {
     latencies: Option<Vec<(u16, u64)>>,
     /// the last turn: ns its pump took beyond the asked timeout, ns its present took
     turn_parts: (u64, u64),
+    /// the last turn drew the window's frame
+    turn_drew: bool,
     dump: Option<dump::Dump>,
     /// the app has the window: the field is drawn offscreen (a dump with `MAKEPAD_RUN_BOOT_HOLD`)
     offscreen: bool,
@@ -242,9 +250,26 @@ pub struct Boot {
     layers: bool,
     /// the window system composites badges over the window (`info_flags::WINDOW_BADGES`)
     badges: bool,
+    /// the window system paces the window's frames (`info_flags::DISPLAY_CLOCK`)
+    display_clock: bool,
+    /// the window is lent to the app (as of the last turn)
+    lent: bool,
+    /// the window's display beats so far (its `FrameReady`s, asked for by `ask_beat`), and when
+    /// the next one was asked for; the last turn brought a beat
+    beats: u64,
+    beat_asked: Option<Instant>,
+    beat_fresh: bool,
+    /// the soonest the window's next frame (`present`) draws while paced
+    layer_next: Instant,
+    /// the beat the start screen over the app (`veil`) last drew on
+    veil_beat: u64,
+    /// a badge frame that may show with the app's frame (it rides it), until its `FrameDone`:
+    /// the beats go on until it showed
+    unshown: Option<u64>,
     /// the JIT ring in the running app's caption
     ring: ring::Ring,
-    /// the ring's badge takes a click (`window_style::BADGE_PRESS`): while it shows a dot
+    /// the ring's badge takes a click (`window_style::BADGE_PRESS`): while a dot shows fully
+    /// (`Ring::takes_press`)
     ring_button: bool,
     /// this run goes on from the start screen of the run before it (`continues_start_screen`)
     continues: bool,
@@ -293,11 +318,20 @@ impl Boot {
             environment: Environment::default(),
             latencies: None,
             turn_parts: (0, 0),
+            turn_drew: false,
             dump: dump::Dump::from_env(),
             offscreen: false,
             gpu: std::env::var_os("MAKEPAD_RUN_BOOT_STATS").is_some(),
             layers: info.flags & info_flags::WINDOW_LAYERS != 0,
             badges: info.flags & info_flags::WINDOW_BADGES != 0,
+            display_clock: info.flags & info_flags::DISPLAY_CLOCK != 0,
+            lent: false,
+            beats: 0,
+            beat_asked: None,
+            beat_fresh: false,
+            layer_next: Instant::now(),
+            veil_beat: 0,
+            unshown: None,
             ring: ring::Ring::new(),
             ring_button: false,
             continues: false,
@@ -425,6 +459,18 @@ impl Boot {
         writer.window_close(window);
         Hal::global().submit(&writer.buf());
         true
+    }
+
+    /// Hides the window, or shows it again: a WM's tile the run keeps for a tray app (`close_window`
+    /// cannot close it), which the WM shows as a minimised tile while it is hidden.
+    pub fn hide_window(&mut self, hidden: bool) {
+        if hidden {
+            self.layer(None, 0, false);
+        }
+        let Some(window) = self.window else { return };
+        let mut writer = CmdWriter::new(HOST);
+        writer.window_state(window, if hidden { window_state::HIDE } else { window_state::SHOW });
+        Hal::global().submit(&writer.buf());
     }
 
     pub fn events(&mut self) -> Vec<Event> {
@@ -756,6 +802,12 @@ impl Boot {
             }
         }
         let hal = Hal::global();
+        // paced by the display: the window's frame draws on a beat, the first once it is due
+        let paced = self.paced();
+        if present && paced && self.presents().is_some() && Instant::now() >= self.layer_next {
+            self.ask_beat();
+        }
+        let beats = self.beats;
         // Pump backend completions, then take session 0's owned queue. A zero-cap
         // pump leaves the events queued. Taking the arena avoids truncating large
         // diagnostics/pastes at an arbitrary EventStore capacity.
@@ -773,6 +825,7 @@ impl Boot {
         );
         let over = (pumped.elapsed().as_nanos() as u64).saturating_sub(timeout_ns);
         self.turn_parts = (over, 0);
+        self.turn_drew = false;
         let mut queue = std::mem::take(&mut self.queue);
         let live = hal.with_world(|world| {
             let Some(session) = world.session_mut(HOST) else {
@@ -833,10 +886,15 @@ impl Boot {
                     }
                     self.events.push(Event::Input(raw, payload.to_vec()));
                 }
-                HalEvent::MouseDown { window, .. } if Some(window) == self.ring.window => {
+                HalEvent::MouseDown { window, x, y, mods, .. } if Some(window) == self.ring.window => {
                     // the ring answers the click in its next frame, now
                     self.ring.next_frame = Instant::now();
-                    self.events.push(Event::RingPressed)
+                    if ring::Ring::on_dot(self.ring.placed, [x as f32, y as f32]) {
+                        let shown = self.ring.dot_age().unwrap_or_default();
+                        self.events.push(Event::RingPressed { injected: mods & input::MOD_INJECTED != 0, shown })
+                    } else {
+                        eprintln!("makepad-run: a press beside the ring's dot, not on it: nothing happens");
+                    }
                 }
                 HalEvent::MouseMove { window, .. } | HalEvent::MouseLeave { window, .. }
                     if Some(window) == self.ring.window =>
@@ -946,6 +1004,15 @@ impl Boot {
                         dump.ready(req, rect, pixels);
                     }
                 }
+                HalEvent::FrameReady { window, .. } if Some(window) == self.window => {
+                    self.beats += 1;
+                    self.beat_asked = None;
+                }
+                HalEvent::FrameDone { window, frame, .. } if Some(window) == self.window => {
+                    if self.unshown.is_some_and(|serial| frame >= serial) {
+                        self.unshown = None;
+                    }
+                }
                 HalEvent::CloseRequested { window } if Some(window) == self.window => {
                     eprintln!("makepad-run: the boot window ends: the window was asked to close");
                     alive = false
@@ -1000,12 +1067,69 @@ impl Boot {
                 }
             }
         }
-        if present {
+        self.lent = self.window.is_some_and(|window| hal.with_world(|w| w.lent_to(window).is_some()));
+        self.beat_fresh = self.beats != beats;
+        // (paced: on a beat this turn brought, once the frame is due)
+        let due = !paced || (self.beat_fresh && Instant::now() >= self.layer_next);
+        if present && due {
             let presented = Instant::now();
+            if paced && self.presents().is_some() {
+                self.layer_next = presented + Duration::from_nanos(self.frame_period_ns());
+            }
             self.present();
             self.turn_parts.1 = presented.elapsed().as_nanos() as u64;
+            self.turn_drew = true;
         }
         true
+    }
+
+    /// The last turn drew the window's frame (`present`).
+    pub fn turn_drew(&self) -> bool {
+        self.turn_drew
+    }
+
+    /// Session 0's frames of the window are paced by its display: it is lent to the app and on a
+    /// display (not drawn offscreen). The ring, the start screen over the app and the window's
+    /// layer then draw on the display's beats (`FrameReady`, the ones the app draws with), not
+    /// on a clock of their own; a badge frame then shows with the app's frame of the beat.
+    pub fn paced(&self) -> bool {
+        self.display_clock && self.lent && !self.offscreen
+    }
+
+    /// Paced: a badge frame (the ring's, the start screen's over the app) draws now. On a new
+    /// beat (`drew`: the beat it last drew on) unless the last one waits to ride the app's frame;
+    /// or as soon as the last one showed, when the next rides the app's next frame: it is drawn
+    /// a frame ahead of the app's, so the two show together (`World::badge_rides`).
+    fn badge_due(&self, drew: u64) -> bool {
+        let Some(window) = self.window else { return false };
+        let (rides, waits) = Hal::global().with_world(|w| {
+            let waits = w.session(HOST).and_then(|s| s.windows.get(HOST, window).ok()).is_some_and(|w| w.val.ride.is_some());
+            (w.badge_rides(window), waits)
+        });
+        (self.beat_fresh && drew != self.beats && !waits) || (self.unshown.is_none() && rides)
+    }
+
+    /// The window's next display beat is asked for: once, and again when none came for
+    /// `REASK` (as the app asks again).
+    fn ask_beat(&mut self) {
+        let Some(window) = self.window else { return };
+        if self.beat_asked.is_some_and(|at| at.elapsed() < REASK) {
+            return;
+        }
+        let mut writer = CmdWriter::new(HOST);
+        writer.frame_request(window);
+        Hal::global().submit(&writer.buf());
+        self.beat_asked = Some(Instant::now());
+    }
+
+    /// Paced: how long until the window's next frame wants its beat asked for (`None`: it
+    /// wants none). Once asked, the beat wakes the run; `REASK` bounds the wait.
+    pub fn frame_wait(&self) -> Option<Duration> {
+        if !self.paced() || self.presents().is_none() {
+            return None;
+        }
+        let wait = self.layer_next.saturating_duration_since(Instant::now());
+        Some(if wait.is_zero() { REASK } else { wait })
     }
 
     /// The last turn: how long its pump took beyond the asked timeout and its present took (ns).
@@ -1013,40 +1137,46 @@ impl Boot {
         self.turn_parts
     }
 
-    fn present(&mut self) {
+    /// What a frame of the window (`present`) draws now: the field (it moves, every frame),
+    /// the halted view (when something changed: it never animates, the field is frozen) or
+    /// nothing.
+    fn presents(&self) -> Option<Presents> {
         if !self.geometry[2..].iter().all(|v| v.is_finite() && *v > 0.0) {
-            return;
+            return None;
         }
-        let Some(window) = self.window else { return };
+        self.window?;
         if self.offscreen && !self.field_mode() {
-            return;
+            return None;
         }
-        let halted_caption = self.caption();
-        let Some(renderer) = &mut self.renderer else {
-            return;
-        };
-        if renderer.active.is_none() {
-            return;
-        }
+        let renderer = self.renderer.as_ref()?;
+        renderer.active.as_ref()?;
         // (the start screen over the app draws at its own pace: `veil`)
         if self.veil.is_some() {
-            return;
+            return None;
         }
         if renderer.layer.on && !renderer.layer.paused() {
-            self.present_field();
-            return;
+            return Some(Presents::Field);
         }
         if self.state.mode == Mode::Boot
             && self.state.diagnostics.is_empty()
             && self.state.parked.is_none()
         {
+            return Some(Presents::Field);
+        }
+        (renderer.redraw || renderer.dirty).then_some(Presents::View)
+    }
+
+    fn present(&mut self) {
+        let Some(presents) = self.presents() else { return };
+        if presents == Presents::Field {
             self.present_field();
             return;
         }
-        // the halted view: drawn when something changed, never animated (the field is frozen)
-        if !renderer.redraw && !renderer.dirty {
+        let Some(window) = self.window else { return };
+        let halted_caption = self.caption();
+        let Some(renderer) = &mut self.renderer else {
             return;
-        }
+        };
         let caption = halted_caption;
         let focus = self.focused as u8 as f32;
         if renderer.dirty {
@@ -1310,8 +1440,9 @@ impl Boot {
             r.layer.on && !matches!(r.layer.want(), None | Some(LayerWant::Boot))
         });
         if over_app {
-            // the fades over the app, and the app's own frames shown through us
-            16_666_667
+            // the fades over the app, and the app's own frames shown through us: on every beat
+            // of the display (paced), as the app draws
+            if self.paced() { 0 } else { 16_666_667 }
         } else if self.field_mode() {
             33_333_333
         } else {
@@ -1467,7 +1598,7 @@ impl Boot {
         // busy ring leaves input with the app: its badge is made anew, and the ring goes on in the
         // new one (a dot that goes fades out in it; its layer is cleared once faded, never left
         // drawn without a badge)
-        let button = (alert.is_some() || want.is_some_and(|w| w.restart_asked)) && shows;
+        let button = self.ring.takes_press(want.is_some_and(|w| w.restart_asked)) && shows;
         let remade = self.ring.window.is_some() && self.ring_button != button;
         if let Some(badge) = self.ring.window.filter(|_| remade) {
             let mut writer = CmdWriter::new(HOST);
@@ -1480,6 +1611,10 @@ impl Boot {
         let size = [self.geometry[2], self.geometry[3]];
         let caption = self.app_caption();
         let place = ring::Ring::place(size, caption);
+        // a badge that takes presses takes them on the dot alone: the caption around it stays the
+        // app's (a drag begun beside the dot moves the window); one that takes none sees the
+        // pointer over the whole ring for its tooltip
+        let input = if button { ring::Ring::dot_rect(place) } else { place };
         let mut writer = CmdWriter::new(HOST);
         match self.ring.window {
             Some(badge) if self.ring.done() || !shows => {
@@ -1502,14 +1637,14 @@ impl Boot {
             }
             Some(badge) => {
                 if self.ring.placed != place {
-                    writer.window_geom(badge, place);
+                    writer.window_geom(badge, input);
                     self.ring.placed = place;
                 }
             }
             None if shows && (self.ring.wanted() || (remade && !self.ring.done())) => {
                 // the ring's place for the pointer's hover; its pixels are the window's badge layer
                 let badge = next_badge(&mut self.ring.slot);
-                writer.window_create(badge, window_kind::BADGE | window_style::BADGE_HOVER | if button { window_style::BADGE_PRESS } else { 0 }, window, place, false);
+                writer.window_create(badge, window_kind::BADGE | window_style::BADGE_HOVER | if button { window_style::BADGE_PRESS } else { 0 }, window, input, false);
                 self.ring.window = Some(badge);
                 self.ring.placed = place;
             }
@@ -1540,7 +1675,7 @@ impl Boot {
                 let run = renderer.text.shape(&text, ring::TIP_FONT, 1.0e4, ring::TIP_H);
                 self.ring.tip_placed = ring::Ring::place_tip(place, run.width, size);
                 self.ring.tip = true;
-                Some(run)
+                Some((run, text))
             }
             _ => {
                 if self.ring.tip {
@@ -1554,8 +1689,25 @@ impl Boot {
         };
         Hal::global().submit(&writer.buf());
         let now = Instant::now();
+        let dark = caption.map_or(self.environment.dark.unwrap_or(true), |c| c.dark);
+        if self.paced() {
+            // on the display's beats: a frame on a new beat when it shows something new, or one
+            // for the app's next frame as soon as the last showed (`badge_due`). The next beat is
+            // asked for while the ring moves (its head turns, it fades), while what it would show
+            // is not what it showed (a hover, a new look), and until its last frame showed (it
+            // may ride the app's frame)
+            let text = tip.as_ref().map(|(_, text)| text.clone());
+            if self.badge_due(self.ring.beat) {
+                self.ring.beat = self.beats;
+                self.ring.moving = self.present_ring(window, tip, dark);
+            }
+            let shows = self.ring_shows(text, dark).map(|(_, shown)| shown);
+            if self.ring.moving || self.unshown.is_some() || shows != self.ring.shown {
+                self.ask_beat();
+            }
+            return Some(self.ring.tip_due().map_or(REASK, |due| due.min(REASK)));
+        }
         if now >= self.ring.next_frame {
-            let dark = caption.map_or(self.environment.dark.unwrap_or(true), |c| c.dark);
             self.present_ring(window, tip, dark);
             self.ring.next_frame = now + ring::FRAME;
         }
@@ -1615,12 +1767,26 @@ impl Boot {
         }
         self.veil = Some(opacity);
         let now = Instant::now();
-        if now >= self.veil_next && self.renderer.as_ref().is_some_and(|r| r.active.is_some()) {
+        // paced: a fade on every beat of the display (`badge_due`)
+        let paced = self.paced();
+        let beat = !paced || self.badge_due(self.veil_beat);
+        if now >= self.veil_next && beat && self.renderer.as_ref().is_some_and(|r| r.active.is_some()) {
             self.present_field();
+            self.veil_beat = self.beats;
             // (a still start screen is the field at its own pace)
-            self.veil_next = now + if opacity >= 1.0 { self.frame_period_ns_field() } else { VEIL_FRAME };
+            self.veil_next = match (opacity >= 1.0, paced) {
+                (true, _) => now + self.frame_period_ns_field(),
+                (false, true) => now,
+                (false, false) => now + VEIL_FRAME,
+            };
         }
-        Some(self.veil_next.saturating_duration_since(Instant::now()))
+        let wait = self.veil_next.saturating_duration_since(Instant::now());
+        if paced && (wait.is_zero() || self.unshown.is_some()) {
+            // (the beat wakes the run)
+            self.ask_beat();
+            return Some(if wait.is_zero() { REASK } else { wait.min(REASK) });
+        }
+        Some(wait)
     }
 
     /// Where the ring's badge is in the window (points), while there is one.
@@ -1646,17 +1812,37 @@ impl Boot {
         self.ring.next_frame = Instant::now();
     }
 
-    /// One frame of the ring (one quad), and of its tooltip (a plate and its line) when it
-    /// shows, in `window`'s badge layer. `dark`: the caption under them is dark.
-    fn present_ring(&mut self, window: Id, tip: Option<Arc<text::Shaped>>, dark: bool) {
+    /// What a frame of the ring would show now (its look eased to now), with the tooltip's
+    /// line `tip`; `None`: no ring.
+    fn ring_shows(&mut self, tip: Option<String>, dark: bool) -> Option<(ring::Look, ring::Shown)> {
+        let badge = self.ring.window?;
+        let look = self.ring.look(self.environment.reduce_motion);
+        let shown = ring::Shown {
+            badge,
+            look: look.pixels(),
+            ring: self.ring.placed,
+            tip: tip.map(|text| (text, self.ring.tip_placed)),
+            dark,
+            dpi: self.dpi,
+            viewport: [self.geometry[2], self.geometry[3]],
+        };
+        Some((look, shown))
+    }
+
+    /// One frame of the ring (one quad), and of its tooltip (a plate and its line, with the
+    /// line's text) when it shows, in `window`'s badge layer. `dark`: the caption under them is
+    /// dark. A frame that would show what the badge's last one showed is not drawn: a still dot
+    /// (or a ring faded in all the way and hovered alike) presents the window once, not at the
+    /// ring's frame rate. True: it drew one.
+    fn present_ring(&mut self, window: Id, tip: Option<(Arc<text::Shaped>, String)>, dark: bool) -> bool {
         let reduce_motion = self.environment.reduce_motion;
         let dpi = self.dpi;
-        let look = self.ring.look(reduce_motion);
+        let Some((look, mut shown)) = self.ring_shows(tip.as_ref().map(|(_, text)| text.clone()), dark) else { return false };
         let tip_rect = self.ring.tip_placed;
         let ring_rect = self.ring.placed;
         let viewport = [self.geometry[2], self.geometry[3]];
-        let Some(renderer) = self.renderer.as_mut() else { return };
-        let Some(program) = renderer.active.as_ref() else { return };
+        let Some(renderer) = self.renderer.as_mut() else { return false };
+        let Some(program) = renderer.active.as_ref() else { return false };
         let ink = dark as u8 as f32;
         let band = &program.pipes[ERROR_BAND];
         let quad = |rect: [f32; 4], accent: f32| {
@@ -1685,7 +1871,7 @@ impl Boot {
         // the tooltip's line, its glyphs pinned (the HAL draws the layer again over app frames)
         let mut glyphs = Vec::new();
         let mut tip_ready = false;
-        if let Some(run) = &tip {
+        if let Some((run, _)) = &tip {
             renderer.text.begin_pinned();
             let mut requests = Vec::new();
             let color = if dark { [0.925, 0.902, 1.0, look.opacity] } else { [0.165, 0.149, 0.22, look.opacity] };
@@ -1697,6 +1883,13 @@ impl Boot {
             let mut writer = CmdWriter::new(HOST);
             tip_ready = renderer.text.finish_pinned(&mut writer, &requests);
             Hal::global().submit(&writer.buf());
+        }
+        // (the tooltip's line draws once its glyphs are in: that frame shows something new)
+        if !tip_ready {
+            shown.tip = None;
+        }
+        if self.ring.shown.as_ref() == Some(&shown) {
+            return false;
         }
         let (ring_uniforms, ring_data) = quad(ring_rect, RING);
         let tip_draws = tip_ready.then(|| {
@@ -1726,6 +1919,9 @@ impl Boot {
             }
         });
         Hal::global().submit(&writer.buf());
+        self.ring.shown = Some(shown);
+        self.unshown = Some(self.frame);
+        true
     }
 
     /// The layer has faded out (the ready lift): the run may take it away.
@@ -2034,6 +2230,10 @@ impl Boot {
             if let Some(req) = snapshot {
                 writer.snapshot(window, req);
             }
+            // (the start screen over the app is a badge frame: it may ride the app's frame)
+            if veil.is_some() {
+                self.unshown = Some(self.frame);
+            }
         }
         Hal::global().submit(&writer.buf());
         drop(kept);
@@ -2125,8 +2325,20 @@ fn badge_frame(writer: &mut CmdWriter, frame: &mut u64, dump: Option<&mut dump::
     }
 }
 
-/// The start screen's frames while it fades over the app (`Boot::veil`).
+/// The start screen's frames while it fades over the app (`Boot::veil`), off a display's
+/// beats.
 const VEIL_FRAME: Duration = Duration::from_nanos(16_666_667);
+
+/// A display beat asked for and not come for this long is asked for again (`Boot::ask_beat`),
+/// as the app asks again.
+const REASK: Duration = Duration::from_millis(500);
+
+/// What a frame of the window draws (`Boot::presents`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Presents {
+    Field,
+    View,
+}
 
 /// A badge id of `slot` (one slot per badge, made on first use), a new generation each time.
 fn next_badge(slot: &mut Option<Id>) -> Id {

@@ -32,6 +32,10 @@ pub struct Inputs {
     graph: Option<ResolvedGraph>,
     /// the folders of the graph's packages, downloaded ones aside
     packages: BTreeSet<String>,
+    /// the checkouts the inputs are in, each with the commit its HEAD named when they were
+    /// stamped (the workspace's own first: Repositories::heads), and when (unix ms): the
+    /// sources the run reads are these (None outside git, or during a git operation)
+    pub(super) heads: Option<(Vec<(String, String)>, u64)>,
 }
 
 /// Whether `path` lies in another OS's source tree (`src/backend/linux/..`, `src/os/windows/..`):
@@ -124,6 +128,9 @@ impl Inputs {
         let mut files = Vec::new();
         crate::srchash::files(Path::new(std_dir), "", &mut files);
         for (_, path) in files { inputs.protected(&path, Path::new(std_dir), Kind::Std); }
+        let mut repos = super::git::Repositories::default();
+        repos.include(inputs.paths.keys().map(String::as_str));
+        inputs.heads = repos.heads(workspace).map(|h| (h, super::unix_ms(std::time::SystemTime::now()) as u64));
         inputs
     }
 
@@ -185,21 +192,20 @@ impl Inputs {
         crate::unitgraph::unit_graph(sess, &g.workspace, &g.package, &g.flags).map_or(true, |units| graph_shape(&units) != g.shape)
     }
 
-    /// The loader binary's own sources (cargo's dep-info `<exe>.d` next to it, which lists every
-    /// file the binary was built from; none for a binary not built by cargo). Outside the
-    /// target directory only. A file newer than the binary has no stamp: the binary is already
-    /// older than it, so the first scan sees it as changed. Read once per process.
+    /// The loader binary's own sources ([`runner_paths`]). Outside the target directory only. A
+    /// file newer than the binary has no stamp: the binary is already older than it, so the first
+    /// scan sees it as changed. Read once per process.
     pub(super) fn add_runner(&mut self) {
         static RUNNER: std::sync::OnceLock<Vec<(String, Stamp)>> = std::sync::OnceLock::new();
+        let workspace = self.graph.as_ref().map(|g| g.workspace.clone()).unwrap_or_else(crate::run::workspace_dir);
         let runner = RUNNER.get_or_init(|| {
             let _k = crate::zone_alloc::kept();
             let Some(exe) = super::host::loader() else { return Vec::new() };
             let built = std::fs::metadata(&exe).and_then(|m| m.modified()).ok();
             let target = super::host::target_dir(&exe);
-            let picked = exe.file_name().is_some_and(|n| n.to_string_lossy().starts_with("makepad.jit-"));
-            let Ok(text) = std::fs::read_to_string(exe.with_extension("d")) else { return Vec::new() };
+            let picked = super::host::picked(&exe);
             let mut out = Vec::new();
-            for path in dep_info_paths(&text) {
+            for path in runner_paths(&exe, &workspace) {
                 if target.as_ref().is_some_and(|t| Path::new(&path).starts_with(t)) { continue; }
                 // the devhub linked into the binary (its CLI) is no part of a running app: no
                 // "Update ready" on every app for a devhub landing
@@ -225,12 +231,16 @@ impl Inputs {
         self.paths.iter().filter(|(p, (_, k))| !matches!(k, Kind::Source | Kind::SourceDirectory(_)) && keep(p)).map(|(p, _)| p.clone()).collect()
     }
 
+    /// The folder workspace-relative paths start at (the graph's workspace, else the run's).
+    pub(super) fn workspace(&self) -> String {
+        crate::vfs::normalize_path(&self.graph.as_ref().map(|g| g.workspace.clone()).unwrap_or_else(crate::run::workspace_dir))
+    }
+
     /// Files that can produce a reload event: unloaded sources are read only when loaded.
     /// Keep absent inputs too (a deleted source or a lockfile that has not been created yet).
     /// `keep` picks paths before any is looked at (a live session asks about its few saves).
     pub(super) fn source_paths(&self, loaded: impl Iterator<Item = String>, keep: &dyn Fn(&str) -> bool) -> Vec<String> {
-        let workspace = self.graph.as_ref().map(|g| g.workspace.clone()).unwrap_or_else(crate::run::workspace_dir);
-        let workspace = crate::vfs::normalize_path(&workspace);
+        let workspace = self.workspace();
         let roots: Vec<_> = Path::new(&workspace).ancestors().map(|p| p.to_string_lossy().into_owned()).collect();
         let paths = self.process_paths(keep).into_iter().chain(loaded).chain(crate::native_macros::paths().into_iter().filter(|p| keep(p)));
         paths.filter(|p| !crate::vfs::is_dir(p)).map(|p| {
@@ -244,8 +254,7 @@ impl Inputs {
     /// Whether a workspace-relative path lies in no package of the app's graph, nor in std: no
     /// crate's own folder holds it (a lane's scratch file in its worktree).
     pub(super) fn outside_packages(&self, rel: &str, std_dir: &str) -> bool {
-        let workspace = self.graph.as_ref().map(|g| g.workspace.clone()).unwrap_or_else(crate::run::workspace_dir);
-        let path = format!("{workspace}/{rel}");
+        let path = format!("{}/{rel}", self.workspace());
         !self.packages.iter().map(String::as_str).chain([std_dir]).any(|dir| crate::vfs::relative_path(&path, dir).is_some())
     }
 
@@ -276,6 +285,21 @@ impl Inputs {
         // size alone is never a reason to refuse a source transaction.
         reason
     }
+}
+
+/// The files the loader `exe` runs: for a cargo build, its dep-info `<exe>.d` (every file the
+/// binary was built from); for a JIT devhub picked by its inputs' content ([`super::host::picked`]),
+/// its `<exe>.inputs` (repo-relative, lease/loaders.rs) in the workspace it was picked for. The
+/// `makepad.d` beside a picked binary is another build's, of another checkout: a lane's session
+/// watched the box's checkout, and its lane's own JIT sources were no input of it (W3752,
+/// 11-06). None for a binary with neither.
+fn runner_paths(exe: &Path, workspace: &str) -> Vec<String> {
+    if super::host::picked(exe) {
+        let Some(name) = exe.file_name() else { return Vec::new() };
+        let Ok(text) = std::fs::read_to_string(exe.with_file_name(format!("{}.inputs", name.to_string_lossy()))) else { return Vec::new() };
+        return text.lines().filter(|l| !l.is_empty()).map(|rel| crate::vfs::normalize_path(&format!("{workspace}/{rel}"))).collect();
+    }
+    std::fs::read_to_string(exe.with_extension("d")).map(|text| dep_info_paths(&text)).unwrap_or_default()
 }
 
 /// The prerequisites of a cargo dep-info file (`target: a b\ c ...`; `\ ` is a space in a
@@ -322,6 +346,25 @@ mod tests {
             inputs.insert(Path::new("changed"), kind);
             assert!(inputs.restart_reason(["changed"].into_iter()).is_some());
         }
+    }
+
+    #[test]
+    fn a_picked_jit_runs_the_sources_of_the_tree_it_was_picked_for() {
+        let dir = std::env::temp_dir().join(format!("relax-runner-paths-{}", std::process::id()));
+        let host = dir.join("target/host");
+        std::fs::create_dir_all(&host).unwrap();
+        // the target's own build is of the box's checkout; the picked binary is the lane tree's
+        std::fs::write(host.join("makepad.d"), format!("{}/makepad: /box/libs/relax/base/src/vfs.rs\n", host.display())).unwrap();
+        std::fs::write(host.join("makepad.jit-0123456789abcdef01234567.inputs"), "libs/relax/base/src/vfs.rs\ntools/run/src/main.rs\n").unwrap();
+        let picked = host.join("makepad.jit-0123456789abcdef01234567");
+        assert!(super::super::host::picked(&picked));
+        assert_eq!(runner_paths(&picked, "/lane"), ["/lane/libs/relax/base/src/vfs.rs", "/lane/tools/run/src/main.rs"]);
+        let built = host.join("makepad");
+        assert!(!super::super::host::picked(&built));
+        assert_eq!(runner_paths(&built, "/lane"), ["/box/libs/relax/base/src/vfs.rs"], "cargo's own build runs what its dep-info names");
+        // a store's binary keeps no inputs file: it names none
+        assert!(runner_paths(&dir.join("makepad.jit-89abcdef0123456789abcdef"), "/lane").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
