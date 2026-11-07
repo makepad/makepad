@@ -60,6 +60,15 @@ pub const CONTACT_HERTZ: f64 = 240.0;
 /// higher to that), as stiff as it holds steadily: at [`JOINT_SUBSTEPS`] a slider's end stop holds
 /// a firm grab within a print gap.
 pub const JOINT_HERTZ: f64 = f32::MAX as f64;
+/// A flex's joint stiffness (Hz): the step rate ([`crate::runner::HZ`]), a sixteenth of the
+/// substep rate at [`JOINT_SUBSTEPS`]. Every other joint is as stiff as box3d holds, a quarter of
+/// it ([`JOINT_HERTZ`]): that is for an end stop holding a grab, and a flex has none. It also makes
+/// the soft step unstable round a light hub: the quarter-rate cap holds one joint on its own, but
+/// several joints locking a hub lighter than the parts they hold turn it faster (by the root of how
+/// many and how much lighter). A flower's heart on six one-way ribbons blew up from rest at the cap,
+/// and a bare hub on six hinges at half of it; at the step rate both hold and every flex springs
+/// back (`a_heart_on_four_flat_ribbons_springs_back`).
+pub const FLEX_HERTZ: f64 = crate::runner::HZ;
 /// Solver substeps of a jointed assembly's step: its joints are as stiff as a quarter of the substep
 /// rate, 960 Hz at a 240 Hz step. At half that a firm grab pulled a hinge 2 degrees past its limit
 /// and a head swinging on a light collar 4 past, more than a hinge's clearance gives; at this they
@@ -673,6 +682,7 @@ impl MechWorld {
                         d.enable_spring = true;
                         d.hertz = hertz;
                         d.damping_ratio = *damping as f32;
+                        d.base.constraint_hertz = FLEX_HERTZ as f32;
                         create_revolute_joint(&mut world, &d)
                     } else {
                         let mut d = default_spherical_joint_def();
@@ -680,6 +690,7 @@ impl MechWorld {
                         d.enable_spring = true;
                         d.hertz = hertz;
                         d.damping_ratio = *damping as f32;
+                        d.base.constraint_hertz = FLEX_HERTZ as f32;
                         create_spherical_joint(&mut world, &d)
                     }
                 }

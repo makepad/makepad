@@ -748,3 +748,53 @@ fn blocks_bonded_to_a_tpu_ribbon_bend_about_it() {
     let (_, at) = sag(&asm);
     assert!(makepad_csg_mech::geom::len(makepad_csg_mech::geom::sub(at, rest)) < 0.2, "welded, it does not sag: {at:?} from {rest:?}");
 }
+
+/// A small heart with four petals round it, each held by a flat ribbon (thin in Y) that bends
+/// about a level axis across its run: each is a one-way flex (a hinge with a spring), so the
+/// heart's turning is locked by four of them at once. Every petal bent and let go, with no
+/// gravity, springs back.
+#[test]
+fn a_heart_on_four_flat_ribbons_springs_back() {
+    use makepad_csg_mech::flex;
+    use makepad_csg_mech::sim::{JointKind, Scenario, SimOptions};
+    let profile = Profile::default();
+    // the heart 10 mm across; each petal 30 mm long from 6 mm out; each ribbon 1.2 mm thin and
+    // 4 mm wide, from inside the heart to inside its petal (the four stay clear of each other)
+    let heart = PartBox { min: [-5.0, 0.0, -5.0], max: [5.0, 6.0, 5.0] };
+    let turn = |min: P3, max: P3, k: usize| -> PartBox {
+        // a quarter turn about Y, k times: (x, z) -> (-z, x)
+        let mut b = PartBox { min, max };
+        for _ in 0..k {
+            b = PartBox { min: [-b.max[2], b.min[1], b.min[0]], max: [-b.min[2], b.max[1], b.max[0]] };
+        }
+        b
+    };
+    let petals: Vec<PartBox> = (0..4).map(|k| turn([11.0, 0.0, -6.0], [41.0, 6.0, 6.0], k)).collect();
+    let ribbons: Vec<PartBox> = (0..4).map(|k| turn([2.5, 2.4, -2.0], [40.0, 3.6, 2.0], k)).collect();
+    let boxes: Vec<PartBox> = std::iter::once(heart).chain(petals.iter().copied()).chain(ribbons.iter().copied()).collect();
+    let mut g = Graph::new();
+    let nodes: Vec<NodeId> = boxes.iter().map(|b| boxed(&mut g, b.min, b.max)).collect();
+    let bonds: Vec<BondDecl> = (0..4).map(|k| BondDecl { to: 5 + k, parts: vec![0, 1 + k], flexible: true }).collect();
+    let anchors = vec![AnchorDecl { part: 0, at: [0.0, 3.0, 0.0], hole: None }];
+    let p = plan(&boxes, &[], &bonds, &anchors, &profile).unwrap();
+    let names = ["heart", "petal 0", "petal 1", "petal 2", "petal 3", "ribbon 0", "ribbon 1", "ribbon 2", "ribbon 3"];
+    let built = build(g, &nodes, &names, &p);
+    let fs = fields(&built, &p);
+    let parts = finals(&built, &fs);
+    let mut flexed = p.clone();
+    flexed.flexes = flex::measure_all(&p.bonds, &parts).unwrap();
+    let asm = assembly(&flexed, &parts, &[], 1.0);
+    let flex: Vec<bool> = asm.joints.iter().map(|j| matches!(j.kind, JointKind::Flex { .. })).collect();
+    for j in asm.joints.iter().filter(|j| matches!(j.kind, JointKind::Flex { .. })) {
+        println!("  {}: {:?} about {:.2?}", j.name, j.kind, j.axis);
+        assert!(matches!(j.kind, JointKind::Flex { one_way: true, .. }) && j.axis[1].abs() < 0.01, "a flat ribbon bends one way, about a level axis: {} {:?} about {:?}", j.name, j.kind, j.axis);
+    }
+    assert_eq!(flex.iter().filter(|f| **f).count(), 4, "a flex on each ribbon");
+    let bend = 10f64.to_radians();
+    let angles: Vec<f64> = flex.iter().enumerate().map(|(j, f)| if !f { 0.0 } else if j % 2 == 0 { bend } else { -bend }).collect();
+    let opts = SimOptions { scenario: Scenario::Pose(angles), seconds: 8.0, gravity: Some([0.0; 3]), ..SimOptions::default() };
+    let r = simulate(&asm, &opts, &|| false).unwrap();
+    let held: Vec<String> = r.joints.iter().zip(&flex).filter(|(_, f)| **f).map(|(j, _)| format!("{} at {:.2} deg (most {:.1})", j.name, j.last.to_degrees(), j.min.abs().max(j.max.abs()).to_degrees())).collect();
+    println!("  let go: {held:?}");
+    assert!(r.joints.iter().zip(&flex).all(|(j, f)| !*f || j.last.abs() < 2f64.to_radians()), "bent and let go, each petal springs back: {held:?}");
+}

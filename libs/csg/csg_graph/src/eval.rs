@@ -4,7 +4,7 @@ use crate::*;
 use makepad_csg_cad as cad;
 use makepad_csg_cad::Region;
 use makepad_csg_math::{dvec3, Vec3d};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const SANS: &[u8] = include_bytes!("../../../../widgets/resources/IBMPlexSans-SemiBold.ttf");
 const MONO: &[u8] = include_bytes!("../../../../widgets/resources/LiberationMono-Regular.ttf");
@@ -206,6 +206,120 @@ impl Evaluator {
         self.built += 1;
         self.cache.insert((node.key, draft), (m.clone(), self.round));
         Ok(m)
+    }
+
+    /// Builds the meshes [`Self::mesh`] would build for `ids` side by side, and keeps them as it
+    /// would: the nodes below each id not kept yet, in groups that build none in common, each on an
+    /// evaluator of its own (these settings, the kept meshes it reads), the caller building groups
+    /// too while the CSG pool's workers take the others. `mesh` then finds them, the same meshes
+    /// it builds itself. An id that builds an exact body is left to `mesh` (the B-rep engine
+    /// reports on the thread that asks), and so is a mesh that fails.
+    pub fn mesh_ahead(&mut self, g: &Graph, ids: &[NodeId], cancelled: Option<&dyn Fn() -> bool>) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Mutex};
+        let workers = makepad_csg_math::thread_pool::thread_count();
+        if workers < 2 || cancelled.is_some_and(|c| c()) {
+            return;
+        }
+        // per id: the meshes it would build, and the kept ones they read
+        struct Group {
+            ids: Vec<NodeId>,
+            builds: HashSet<(Key, u64)>,
+            reads: HashMap<(Key, u64), (Arc<TriMesh>, u64)>,
+        }
+        let mut groups: Vec<Group> = Vec::new();
+        'ids: for &id in ids {
+            let mut group = Group { ids: vec![id], builds: HashSet::new(), reads: HashMap::new() };
+            let mut stack = vec![id];
+            while let Some(n) = stack.pop() {
+                let node = g.node(n);
+                let at = (node.key, if self.drafted(g, n) { (self.draft_scale() * self.brep_chord).to_bits() } else { 0 });
+                if let Some(kept) = self.cache.get(&at) {
+                    group.reads.insert(at, kept.clone());
+                } else if matches!(node.op, Op::Brep { .. }) {
+                    continue 'ids;
+                } else if group.builds.insert(at) {
+                    stack.extend(node.op.inputs());
+                }
+            }
+            if group.builds.is_empty() {
+                continue;
+            }
+            // ids that build a mesh in common are one group
+            for other in std::mem::take(&mut groups) {
+                if other.builds.is_disjoint(&group.builds) {
+                    groups.push(other);
+                } else {
+                    group.ids.splice(0..0, other.ids);
+                    group.builds.extend(other.builds);
+                    group.reads.extend(other.reads);
+                }
+            }
+            groups.push(group);
+        }
+        let total = groups.len();
+        if total < 2 {
+            return;
+        }
+        let (tolerance, draft, finest_cell, round, brep_chord) = (self.tolerance, self.draft, self.finest_cell, self.round, self.brep_chord);
+        let build = move |g: &Graph, group: Group, cancelled: &dyn Fn() -> bool| {
+            let mut e = Evaluator { tolerance, draft, finest_cell, cache: group.reads, round, built: 0, brep: None, brep_chord };
+            for id in group.ids {
+                if e.mesh(g, id, Some(cancelled)).is_err() {
+                    break;
+                }
+            }
+            e
+        };
+        let graph = Arc::new(g.clone());
+        let stop = Arc::new(AtomicBool::new(false));
+        let queue = Arc::new(Mutex::new(groups));
+        let (done, finished) = mpsc::channel::<Option<Evaluator>>();
+        for _ in 1..total.min(workers) {
+            let (graph, stop, queue, done) = (graph.clone(), stop.clone(), queue.clone(), done.clone());
+            makepad_csg_math::thread_pool::spawn(move || loop {
+                let Some(group) = queue.lock().unwrap().pop() else { break };
+                // a panic is `mesh`'s to meet again; the caller hears the group is done
+                let e = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(&graph, group, &|| stop.load(Ordering::Relaxed))));
+                if done.send(e.ok()).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(done);
+        let mut merge = |e: Option<Evaluator>| {
+            if let Some(e) = e {
+                self.built += e.built;
+                self.cache.extend(e.cache);
+            }
+        };
+        // the caller's groups, with its cancel (which stops the others too)
+        let watch = || {
+            let c = cancelled.is_some_and(|c| c());
+            if c {
+                stop.store(true, Ordering::Relaxed);
+            }
+            c
+        };
+        let mut merged = 0;
+        loop {
+            let Some(group) = queue.lock().unwrap().pop() else { break };
+            merge(Some(build(g, group, &watch)));
+            merged += 1;
+        }
+        // then the ones the workers took
+        while merged < total {
+            match finished.recv_timeout(std::time::Duration::from_millis(2)) {
+                Ok(e) => {
+                    merge(e);
+                    merged += 1;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    watch();
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
     }
 
     /// An exact body's mesh at `chord` (mm), whatever `brep_chord` is: what a view shows it at.

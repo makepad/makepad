@@ -106,6 +106,10 @@ pub struct FrameUniforms {
     pub progress: f32,
     pub audio: [f32; 4],
     pub audio_att: [f32; 4],
+    /// The beat as `BeatFrame::uniforms` packs it: (beat_pulse, bar_pulse,
+    /// beat_pos, bar_pos) and (tempo, beat_conf, onset, beat_in_bar).
+    pub beat: [f32; 4],
+    pub tempo: [f32; 4],
     pub aspect: (f32, f32),
     pub mesh: (usize, usize),
     pub pixels: (usize, usize),
@@ -116,6 +120,8 @@ pub fn set_uniforms(dv: &mut DrawVars, cx: &Cx, u: &FrameUniforms, p: &FramePara
     dv.set_uniform(cx, live_id!(u_time), &[u.time, u.fps, u.frame, u.progress]);
     dv.set_uniform(cx, live_id!(u_audio), &u.audio);
     dv.set_uniform(cx, live_id!(u_audio_att), &u.audio_att);
+    dv.set_uniform(cx, live_id!(u_beat), &u.beat);
+    dv.set_uniform(cx, live_id!(u_tempo), &u.tempo);
     dv.set_uniform(cx, live_id!(u_aspect), &[ax, ay, 1.0 / ax.max(1e-6), 1.0 / ay.max(1e-6)]);
     const Q: [LiveId; 8] = [
         live_id!(u_q0),

@@ -8,8 +8,15 @@
 //! near 1 for music at any loudness and jump on hits; the `_att` values are
 //! the same ratio of a smoothed energy. All rates are per second, so the
 //! values do not depend on the frame rate.
+//!
+//! The same samples feed the beat tracker (`makepad_beat::BeatPulse`), so a
+//! frame also carries the beat: what the equations read as `beat_pos`,
+//! `bar_pos`, `beat_phase`, `bar_phase`, `tempo`, `beat_conf`,
+//! `beat_pulse`, `bar_pulse` and `onset`, and the bar lines the automatic
+//! preset change waits for ([`crate::AutoChange`]).
 
 use makepad_audio_picture::fft::Fft;
+use makepad_beat::{BeatFrame, BeatPulse};
 
 /// Waveform samples per channel handed to waves and per-point code.
 pub const WAVE_SAMPLES: usize = 576;
@@ -27,6 +34,9 @@ const SILENT_ENERGY: f32 = 1e-12;
 /// Band edges in Hz: bass, mid, treble.
 const BANDS: [(f32, f32); 3] = [(20.0, 250.0), (250.0, 2000.0), (2000.0, 11000.0)];
 
+/// Frames down-mixed for the beat tracker at a time (on the stack).
+const MONO_BLOCK: usize = 512;
+
 #[derive(Clone, Debug)]
 pub struct AudioFrame {
     /// The newest waveform, oldest first, per channel (left, right), in
@@ -42,6 +52,8 @@ pub struct AudioFrame {
     pub mid_att: f32,
     pub treb_att: f32,
     pub vol_att: f32,
+    /// The beat at this frame.
+    pub beat: BeatFrame,
 }
 
 impl Default for AudioFrame {
@@ -57,6 +69,7 @@ impl Default for AudioFrame {
             mid_att: 1.0,
             treb_att: 1.0,
             vol_att: 1.0,
+            beat: BeatFrame::default(),
         }
     }
 }
@@ -72,6 +85,7 @@ pub struct AudioAnalyzer {
     att: [f32; 3],
     long: [f32; 3],
     primed: bool,
+    beat: BeatPulse,
 }
 
 impl AudioAnalyzer {
@@ -85,6 +99,7 @@ impl AudioAnalyzer {
             att: [0.0; 3],
             long: [0.0; 3],
             primed: false,
+            beat: BeatPulse::new(),
         }
     }
 
@@ -96,12 +111,19 @@ impl AudioAnalyzer {
     /// feeds both sides; more than 2 keeps the first two).
     pub fn push_interleaved(&mut self, samples: &[f32], channels: usize) {
         let channels = channels.max(1);
-        for frame in samples.chunks_exact(channels) {
-            let l = frame[0];
-            let r = if channels > 1 { frame[1] } else { l };
-            self.ring[0][self.head] = l;
-            self.ring[1][self.head] = r;
-            self.head = (self.head + 1) % RING;
+        let mut mono = [0.0f32; MONO_BLOCK];
+        for block in samples.chunks(MONO_BLOCK * channels) {
+            let mut n = 0;
+            for frame in block.chunks_exact(channels) {
+                let l = frame[0];
+                let r = if channels > 1 { frame[1] } else { l };
+                self.ring[0][self.head] = l;
+                self.ring[1][self.head] = r;
+                self.head = (self.head + 1) % RING;
+                mono[n] = 0.5 * (l + r);
+                n += 1;
+            }
+            self.beat.push(&mono[..n], self.rate as f64);
         }
     }
 
@@ -118,6 +140,7 @@ impl AudioAnalyzer {
     /// seconds.
     pub fn frame(&mut self, dt: f32, out: &mut AudioFrame) {
         let dt = dt.clamp(0.0, 0.25);
+        out.beat = self.beat.frame(dt as f64);
         for ch in 0..2 {
             let mut wave = std::mem::take(&mut out.wave[ch]);
             wave.resize(WAVE_SAMPLES, 0.0);
@@ -224,6 +247,47 @@ mod tests {
         a.push_interleaved(&tone(80.0, 44100.0, 1024, 0.002), 1);
         a.frame(1.0 / 60.0, &mut f);
         assert!(f.bass > 2.0, "quiet hit reads as silence: bass {}", f.bass);
+    }
+
+    #[test]
+    fn a_kick_track_reaches_the_equations_as_a_beat() {
+        use crate::parse::Preset;
+        use crate::state::{Engine, FrameInput, FrameParams};
+        use std::sync::Arc;
+        // A kick every half second (120 BPM) with an off-beat hat, played
+        // a 60 Hz frame at a time.
+        let rate = 48_000.0f32;
+        let mut track = vec![0.0f32; (rate * 12.0) as usize];
+        let mut seed = 0x1234_5678u32;
+        for beat in 0..23 {
+            let at = ((0.3 + beat as f32 * 0.5) * rate) as usize;
+            for i in 0..(0.2 * rate) as usize {
+                let t = i as f32 / rate;
+                track[at + i] += 0.6 * (-20.0 * t).exp() * (std::f32::consts::TAU * (60.0 * t + 3.6 * (1.0 - (-25.0 * t).exp()))).sin();
+            }
+            for i in 0..(0.02 * rate) as usize {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                track[at + (0.25 * rate) as usize + i] += 0.1 * (-150.0 * i as f32 / rate).exp() * ((seed >> 8) as f32 / 8_388_608.0 - 1.0);
+            }
+        }
+        let mut a = AudioAnalyzer::new(rate);
+        let mut f = AudioFrame::default();
+        for frame in track.chunks(800) {
+            a.push_interleaved(frame, 1);
+            a.frame(frame.len() as f32 / rate, &mut f);
+        }
+        assert!(f.beat.locked && (f.beat.tempo - 120.0).abs() < 2.0, "{:?}", f.beat);
+
+        let preset = Arc::new(Preset::parse(b"per_frame_1=q1 = tempo; q2 = beat_conf; q3 = beat_pos; q4 = beat_phase + beat_pulse + bar_pulse + onset;\n"));
+        let mut engine = Engine::new(preset, 1);
+        let input = FrameInput { time: 12.0, fps: 60.0, frame: 0, progress: 0.0, audio: &f, width: 64.0, height: 64.0, mesh: (8, 8) };
+        let mut params = FrameParams::default();
+        engine.frame(&input, &mut params);
+        let b = f.beat;
+        assert_eq!(params.q[0], b.tempo);
+        assert_eq!(params.q[1], b.confidence);
+        assert_eq!(params.q[2], b.beat_pos as f32);
+        assert_eq!(params.q[3], b.beat_phase + b.beat_pulse + b.bar_pulse + b.onset);
     }
 
     #[test]

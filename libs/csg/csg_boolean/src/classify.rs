@@ -112,13 +112,9 @@ impl InsideTest {
         let points = [at([0.3183, 0.5772, 0.6931]), at([0.7071, 0.3679, 0.4142]), at([0.4472, 0.8284, 0.2361])];
         let dirs = RAY_DIRECTIONS;
         let inv = dirs.map(|d| dvec3(1.0 / d.x, 1.0 / d.y, 1.0 / d.z));
-        // One pass over the whole mesh for the nine rays, each hit test as the tree's leaf test.
-        let mut counts = [[0u32; 3]; 3];
-        for ti in 0..mesh.triangle_count() {
-            if ti % 4096 == 0 && thread_pool::cancelled() {
-                break;
-            }
-            let (a, b, c) = mesh.triangle_vertices(ti);
+        // One pass over the whole mesh for the nine rays, each hit test as the tree's leaf test: in parallel
+        // chunks of triangles, their hit counts summed.
+        let counts = ray_counts(mesh, move |(a, b, c), counts| {
             let bbox = BBox3d::from_triangle(a, b, c);
             for (k, &p) in points.iter().enumerate() {
                 for j in 0..3 {
@@ -127,7 +123,7 @@ impl InsideTest {
                     }
                 }
             }
-        }
+        });
         let refs = std::array::from_fn(|k| (points[k], counts[k].iter().filter(|&&c| c % 2 == 1).count() >= 2));
         InsideTest { ctx: near.ctx.clone(), refs: Some(refs) }
     }
@@ -146,6 +142,47 @@ impl InsideTest {
         }
         inside_votes >= 2
     }
+}
+
+/// `count` over every triangle of `mesh`, in parallel chunks, its counts summed.
+fn ray_counts(mesh: &TriMesh, count: impl Fn((Vec3d, Vec3d, Vec3d), &mut [[u32; 3]; 3]) + Send + Sync + Copy + 'static) -> [[u32; 3]; 3] {
+    // Nine slab tests a triangle, some 40 ns: chunks below 16384 cost more to hand off than they save.
+    const CHUNK: usize = 16384;
+    let n = mesh.triangle_count();
+    let chunks = n.div_ceil(CHUNK).min(thread_pool::thread_count()).max(1);
+    let size = n.div_ceil(chunks);
+    let chunk = move |vertices: &[Vec3d], triangles: &[[u32; 3]]| {
+        let mut counts = [[0u32; 3]; 3];
+        for (i, t) in triangles.iter().enumerate() {
+            if i % 4096 == 0 && thread_pool::cancelled() {
+                break;
+            }
+            count((vertices[t[0] as usize], vertices[t[1] as usize], vertices[t[2] as usize]), &mut counts);
+        }
+        counts
+    };
+    let parts = if chunks == 1 {
+        vec![chunk(&mesh.vertices, &mesh.triangles)]
+    } else {
+        let shared: Arc<(Vec<Vec3d>, Vec<[u32; 3]>)> = Arc::new((mesh.vertices.clone(), mesh.triangles.clone()));
+        thread_pool::parallel_for(
+            (0..chunks)
+                .map(|c| {
+                    let shared = shared.clone();
+                    move || chunk(&shared.0, &shared.1[(c * size).min(n)..((c + 1) * size).min(n)])
+                })
+                .collect(),
+        )
+    };
+    let mut total = [[0u32; 3]; 3];
+    for counts in parts {
+        for k in 0..3 {
+            for j in 0..3 {
+                total[k][j] += counts[k][j];
+            }
+        }
+    }
+    total
 }
 
 pub(crate) fn classify_triangles_with_coplanar(mesh_to_classify: &TriMesh, other: &InsideTest, on_boundary: &[bool], coplanar: &[Option<bool>]) -> Vec<TriLocation> {
@@ -223,6 +260,9 @@ pub(crate) fn classify_triangles_with_coplanar(mesh_to_classify: &TriMesh, other
 
 /// Connected patches of non-boundary triangles over shared edges: per
 /// triangle its patch (`u32::MAX` for boundary triangles), and the count.
+/// A union keeps the lower root, so a patch's root is its lowest triangle
+/// whichever order its shared edges join it in: the patches are numbered in
+/// the order of their lowest triangles.
 fn non_boundary_patches(mesh: &TriMesh, on_boundary: &[bool]) -> (Vec<u32>, usize) {
     let n = mesh.triangle_count();
     let mut parent: Vec<u32> = (0..n as u32).collect();
@@ -233,23 +273,44 @@ fn non_boundary_patches(mesh: &TriMesh, on_boundary: &[bool]) -> (Vec<u32>, usiz
         }
         x
     }
-    let mut edges: Vec<(u64, u32)> = Vec::with_capacity(n * 3);
-    for (ti, &[a, b, c]) in mesh.triangles.iter().enumerate() {
+    // The non-boundary triangles round each vertex.
+    let vertices = mesh.vertex_count();
+    let mut first = vec![0u32; vertices + 1];
+    for (ti, t) in mesh.triangles.iter().enumerate() {
+        if !on_boundary[ti] {
+            for &v in t {
+                first[v as usize + 1] += 1;
+            }
+        }
+    }
+    for v in 0..vertices {
+        first[v + 1] += first[v];
+    }
+    let mut next = first.clone();
+    let mut around = vec![0u32; first[vertices] as usize];
+    for (ti, t) in mesh.triangles.iter().enumerate() {
+        if !on_boundary[ti] {
+            for &v in t {
+                around[next[v as usize] as usize] = ti as u32;
+                next[v as usize] += 1;
+            }
+        }
+    }
+    let edges = |[a, b, c]: [u32; 3]| [(a, b), (b, c), (c, a)].map(|(u, v)| if u < v { (u, v) } else { (v, u) });
+    // A triangle joins each later one with an edge of its own: one round the edge's lower end.
+    for (ti, &t) in mesh.triangles.iter().enumerate() {
         if on_boundary[ti] {
             continue;
         }
-        for (u, v) in [(a, b), (b, c), (c, a)] {
-            let (lo, hi) = if u < v { (u, v) } else { (v, u) };
-            edges.push((((lo as u64) << 32) | hi as u64, ti as u32));
-        }
-    }
-    edges.sort_unstable();
-    for w in edges.windows(2) {
-        if w[0].0 == w[1].0 {
-            let (x, y) = (find(&mut parent, w[0].1), find(&mut parent, w[1].1));
-            if x != y {
-                let (lo, hi) = if x < y { (x, y) } else { (y, x) };
-                parent[hi as usize] = lo;
+        for e in edges(t) {
+            for &si in &around[first[e.0 as usize] as usize..first[e.0 as usize + 1] as usize] {
+                if si as usize > ti && edges(mesh.triangles[si as usize]).contains(&e) {
+                    let (x, y) = (find(&mut parent, ti as u32), find(&mut parent, si));
+                    if x != y {
+                        let (lo, hi) = if x < y { (x, y) } else { (y, x) };
+                        parent[hi as usize] = lo;
+                    }
+                }
             }
         }
     }

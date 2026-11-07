@@ -14,6 +14,7 @@
 //! | [`Context::doing_boolean`]                | `SmContext::GetDoingBoolean`                    |
 //! | [`IdentitySlot`], [`NotifyLease`], [`Context::take_notify_lease`], [`Context::restore_notify_lease`], [`KERNEL_KEY_BASE`], [`TOPOLOGY_KEY_BASE`], [`GEOMETRY_KEY_BASE`], [`MAX_BREP_SERIAL`], [`is_reserved_key`] | (none: kernel-issued notification identities; CO-PORTED by `topology.brep_p3`) |
 //! | `Context::share_geometry_sequence` (crate) | store-owned allocation of geometry notification keys |
+//! | `Context::continue_marks` (crate)         | (none: a renewed kernel's marks, `Kernel::renewed`) |
 //! | [`Context::doing_boolean_mut`]            | `SmContext::GetDoingBooleanRef`                 |
 //! | [`Context::set_doing_boolean`]            | `SmContext::SetDoingBoolean`                    |
 //! | [`Context::user_notify_callback`]         | `SmContext::GetUserNotifyCallback`              |
@@ -727,6 +728,14 @@ impl Context {
     #[must_use]
     pub const fn this_zone_tol_3d(&self) -> f64 {
         self.zone_tol_3d
+    }
+
+    /// Not upstream: takes `from`'s current marks (not its locks), so that every mark this
+    /// context claims from now on is past every mark `from` claimed ([`Kernel::renewed`]).
+    pub(crate) fn continue_marks(&mut self, from: &Context) {
+        for (mark, from) in self.current_marks.iter_mut().zip(&from.current_marks) {
+            *mark.get_mut() = from.load(Ordering::Relaxed);
+        }
     }
 
     /// The current value of a mark (`GetCurrentMark`): an object is marked when its

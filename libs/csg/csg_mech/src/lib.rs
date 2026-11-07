@@ -332,10 +332,11 @@ impl<F: Fn() -> bool + Sync> CheckSink for F {
     }
 }
 
-/// The lowest point of the piece along `up` (the bed under an in-place print).
+/// The lowest point of the piece along `up` (the bed under an in-place print). A bed at zero is
+/// +0.0 (`+ 0.0`), whichever sign the lowest vertex's zero has: `min` ties them by order.
 pub fn bed_level(parts: &[FinalPart], up: P3) -> f64 {
     let up = norm(up);
-    parts.iter().flat_map(|p| p.vertices.iter()).map(|v| dot(*v, up)).fold(f64::INFINITY, f64::min)
+    parts.iter().flat_map(|p| p.vertices.iter()).map(|v| dot(*v, up)).fold(f64::INFINITY, f64::min) + 0.0
 }
 
 /// What a joint's sweeps found: its kind, its declared range, where the parts touch each way

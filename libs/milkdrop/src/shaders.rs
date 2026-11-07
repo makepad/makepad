@@ -71,6 +71,10 @@ script_mod! {
         // (bass, mid, treb, vol) and the attenuated set
         u_audio: uniform(vec4(1.0, 1.0, 1.0, 1.0))
         u_audio_att: uniform(vec4(1.0, 1.0, 1.0, 1.0))
+        // The beat: (beat_pulse, bar_pulse, beat_pos, bar_pos) and
+        // (tempo, beat_conf, onset, beat_in_bar)
+        u_beat: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        u_tempo: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // (aspectx, aspecty, 1/aspectx, 1/aspecty)
         u_aspect: uniform(vec4(1.0, 1.0, 1.0, 1.0))
         u_q0: uniform(vec4(0.0, 0.0, 0.0, 0.0))

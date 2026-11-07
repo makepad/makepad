@@ -199,6 +199,9 @@ pub trait BrepEngine: Send + Sync {
     fn measure(&self, steps: Vec<BrepStep>) -> Result<BrepMeasure, BrepFailure>;
     /// Its exact (edges, faces).
     fn entities(&self, steps: Vec<BrepStep>) -> Result<(Vec<BrepEntity>, Vec<BrepEntity>), BrepFailure>;
+    /// Whether the engine holds the body of every step keyed in `keys`: a recipe of those steps
+    /// builds nothing. Answered at once, whatever the engine is building.
+    fn built(&self, keys: &[Key]) -> bool;
 }
 
 /// One operation. Positions of generators are their own frame (centred on the

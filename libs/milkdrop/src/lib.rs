@@ -8,8 +8,9 @@
 //!   makepad shader source.
 //! * [`state`] runs a frame's CPU work; [`shaders`] and [`render`] its GPU
 //!   passes; [`view`] is the widget ([`MilkdropView`]).
-//! * [`audio`] turns played samples into what the equations read; [`noise`]
-//!   makes MilkDrop's noise textures.
+//! * [`audio`] turns played samples into what the equations read, the beat
+//!   included (`makepad-beat`); [`AutoChange`] times a host's automatic
+//!   preset change to the bars; [`noise`] makes MilkDrop's noise textures.
 //! * [`library`] indexes preset folders and downloads preset packs on
 //!   demand; presets are never bundled. [`browser`] is the browsing widget
 //!   every host shares ([`MilkdropBrowser`]), with its own library worker
@@ -18,6 +19,7 @@
 pub use makepad_widgets;
 
 pub mod audio;
+pub mod auto_change;
 pub mod browser;
 pub mod eel_gpu;
 pub mod expr;
@@ -32,6 +34,8 @@ pub mod state;
 pub mod user_presets;
 pub mod view;
 
+pub use auto_change::AutoChange;
+pub use makepad_beat::BeatFrame;
 pub use parse::Preset;
 pub use browser::{MilkdropBrowser, MilkdropBrowserAction, MilkdropBrowserRef, MilkdropBrowserWidgetRefExt, PresetPick};
 pub use preset_tree::BrowserItem;

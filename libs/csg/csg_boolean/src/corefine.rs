@@ -17,6 +17,7 @@ use crate::tri_tri::{construct_edge_plane_intersection, tri_tri_intersection_ind
 use makepad_csg_math::{orient2d, thread_pool, Vec3d};
 use makepad_csg_mesh::mesh::TriMesh;
 use makepad_csg_math::fast_hash::FastMap as HashMap;
+use std::sync::Arc;
 
 /// Information about an intersection point.
 #[derive(Clone, Debug)]
@@ -95,32 +96,48 @@ pub fn corefine_in(mesh_a: &TriMesh, prep_a: &MeshAccel, mesh_b: &TriMesh, prep_
     // and both intersect the same triangle from mesh B, the intersection point
     // on that shared edge should be identical. Without deduplication, floating-
     // point differences produce two slightly different points (~1e-5 apart),
-    // creating sliver triangles and non-manifold edges. We cache each
-    // (edge, other_triangle) intersection so it's computed exactly once.
+    // creating sliver triangles and non-manifold edges. Each (edge,
+    // other_triangle) intersection is constructed exactly once, for every
+    // pair that shares it.
+    //
+    // The pairs' tests and the constructions are each a function of their own
+    // triangles alone, so they run in parallel ([`meeting_pairs`],
+    // [`edge_points`]); the shared points and segments are built from them in
+    // the pairs' order.
+    let meeting = meeting_pairs(pairs, (mesh_a, prep_a), (mesh_b, prep_b), coincidence);
+    let mut edge_slots: HashMap<EdgeIsect, u32> = HashMap::default();
+    let mut edge_jobs: Vec<EdgePlane> = Vec::new();
+    let mut slot = |eid: EdgeIsect| -> u32 {
+        *edge_slots.entry(eid).or_insert_with(|| {
+            let (mesh, tris) = if eid.mesh_id == 0 { (mesh_a, tris_b) } else { (mesh_b, tris_a) };
+            edge_jobs.push((mesh.vertices[eid.edge_v0 as usize], mesh.vertices[eid.edge_v1 as usize], tris[eid.other_tri as usize]));
+            (edge_jobs.len() - 1) as u32
+        })
+    };
+    let ends: Vec<[u32; 2]> = meeting
+        .iter()
+        .map(|(_, _, m)| match m {
+            Meeting::Crossing(eid0, eid1) => [slot(*eid0), slot(*eid1)],
+            Meeting::Coplanar(_) => [u32::MAX; 2],
+        })
+        .collect();
+    let edge_points = edge_points(edge_jobs);
+
     let mut segments: Vec<IntersectionSegment> = Vec::new();
     let mut shared_vert_grid = VertexGrid::new(1e-10);
     let mut coplanar_a = vec![Vec::new(); mesh_a.triangle_count()];
     let mut coplanar_b = vec![Vec::new(); mesh_b.triangle_count()];
-    let mut edge_cache: HashMap<EdgeIsect, Vec3d> = HashMap::default();
-
-    for &(ai, bi) in &pairs {
+    for ((ai, bi, meeting), [end0, end1]) in meeting.into_iter().zip(ends) {
         if thread_pool::cancelled() {
             break;
         }
-        let (a0, a1, a2) = tris_a[ai as usize];
-        let (b0, b1, b2) = tris_b[bi as usize];
-        let a_vi = mesh_a.triangles[ai as usize];
-        let b_vi = mesh_b.triangles[bi as usize];
-
-        let result = tri_tri_intersection_indexed_with_tolerance(a0, a1, a2, a_vi, ai, b0, b1, b2, b_vi, bi, coincidence);
-        if result.intersects {
-            if result.coplanar {
+        match meeting {
+            Meeting::Coplanar(clip_edges) => {
                 coplanar_a[ai as usize].push(bi);
                 coplanar_b[bi as usize].push(ai);
-                // Coplanar overlapping triangles: compute the boundary of their
-                // 2D intersection polygon (Sutherland-Hodgman clipping) and add
-                // each edge as a constraint segment for both triangles.
-                let clip_edges = coplanar_intersection_edges(a0, a1, a2, b0, b1, b2);
+                // Coplanar overlapping triangles: the boundary of their 2D
+                // intersection polygon (Sutherland-Hodgman clipping), each
+                // edge a constraint segment for both triangles.
                 for (p0, p1) in clip_edges {
                     if p0.distance(p1) < 1e-12 {
                         continue;
@@ -138,17 +155,9 @@ pub fn corefine_in(mesh_a: &TriMesh, prep_a: &MeshAccel, mesh_b: &TriMesh, prep_
                         });
                     }
                 }
-            } else if let (Some(_), Some((eid0, eid1))) = (result.segment, result.edge_ids) {
-                // Use cached positions for edge-centric deduplication.
-                // If this (edge, other_tri) combo was already computed from a
-                // neighboring triangle, reuse that exact position.
-                let construct = |eid: EdgeIsect| {
-                    let (mesh, tris) = if eid.mesh_id == 0 { (mesh_a, tris_b) } else { (mesh_b, tris_a) };
-                    construct_edge_plane_intersection(mesh.vertices[eid.edge_v0 as usize], mesh.vertices[eid.edge_v1 as usize], tris[eid.other_tri as usize])
-                };
-                let p0 = *edge_cache.entry(eid0).or_insert_with(|| construct(eid0));
-                let p1 = *edge_cache.entry(eid1).or_insert_with(|| construct(eid1));
-
+            }
+            Meeting::Crossing(..) => {
+                let (p0, p1) = (edge_points[end0 as usize], edge_points[end1 as usize]);
                 // Skip degenerate segments
                 if p0.distance(p1) < 1e-12 {
                     continue;
@@ -182,11 +191,11 @@ pub fn corefine_in(mesh_a: &TriMesh, prep_a: &MeshAccel, mesh_b: &TriMesh, prep_
     }
 
     // Step 5: Re-triangulate affected triangles
-    let shared_verts = shared_vert_grid.into_verts();
-    let (result_a, origin_a, boundary_a) =
-        retriangulate_mesh(mesh_a, &segments, &tri_a_segments, &shared_verts, true);
-    let (result_b, origin_b, boundary_b) =
-        retriangulate_mesh(mesh_b, &segments, &tri_b_segments, &shared_verts, false);
+    let shared_verts: Arc<[Vec3d]> = shared_vert_grid.into_verts().into();
+    let segments: Arc<[IntersectionSegment]> = segments.into();
+    let [pieces_a, pieces_b] = cut_pieces([(mesh_a, &tri_a_segments), (mesh_b, &tri_b_segments)], &segments, &shared_verts);
+    let (result_a, origin_a, boundary_a) = retriangulate_mesh(mesh_a, &tri_a_segments, pieces_a);
+    let (result_b, origin_b, boundary_b) = retriangulate_mesh(mesh_b, &tri_b_segments, pieces_b);
 
     let coplanar_a = coplanar_regions(&result_a, &origin_a, &coplanar_a, tris_a, tris_b);
     let coplanar_b = coplanar_regions(&result_b, &origin_b, &coplanar_b, tris_b, tris_a);
@@ -201,6 +210,86 @@ pub fn corefine_in(mesh_a: &TriMesh, prep_a: &MeshAccel, mesh_b: &TriMesh, prep_
         coplanar_b,
         num_segments: segments.len(),
     }
+}
+
+/// What a candidate pair's triangles share.
+enum Meeting {
+    /// They are coplanar and overlap: the edges of their overlap.
+    Coplanar(Vec<(Vec3d, Vec3d)>),
+    /// They cross: the edges their segment's ends lie on, each with the
+    /// other triangle whose plane it crosses.
+    Crossing(EdgeIsect, EdgeIsect),
+}
+
+/// An edge's ends and the plane (a triangle) it crosses.
+type EdgePlane = (Vec3d, Vec3d, (Vec3d, Vec3d, Vec3d));
+
+/// The candidate pairs whose triangles meet, with what they share, in the
+/// pairs' order. Each test depends on its two triangles alone, so they run in
+/// parallel chunks.
+fn meeting_pairs(
+    pairs: Vec<(u32, u32)>,
+    (mesh_a, prep_a): (&TriMesh, &MeshAccel),
+    (mesh_b, prep_b): (&TriMesh, &MeshAccel),
+    coincidence: f64,
+) -> Vec<(u32, u32, Meeting)> {
+    // A chunk's tests take some 0.5 ms: below that a pool hand-off costs more than it saves.
+    const CHUNK: usize = 1024;
+    let corners: Arc<(Vec<[u32; 3]>, Vec<[u32; 3]>)> = Arc::new((mesh_a.triangles.clone(), mesh_b.triangles.clone()));
+    let (prep_a, prep_b) = (prep_a.clone(), prep_b.clone());
+    parallel_chunks(pairs, CHUNK, move |chunk| {
+        let (tris_a, tris_b) = (prep_a.triangles(), prep_b.triangles());
+        let mut meeting = Vec::new();
+        for &(ai, bi) in chunk {
+            if thread_pool::cancelled() {
+                break;
+            }
+            let (a0, a1, a2) = tris_a[ai as usize];
+            let (b0, b1, b2) = tris_b[bi as usize];
+            let (a_vi, b_vi) = (corners.0[ai as usize], corners.1[bi as usize]);
+            let result = tri_tri_intersection_indexed_with_tolerance(a0, a1, a2, a_vi, ai, b0, b1, b2, b_vi, bi, coincidence);
+            if !result.intersects {
+                continue;
+            }
+            if result.coplanar {
+                meeting.push((ai, bi, Meeting::Coplanar(coplanar_intersection_edges(a0, a1, a2, b0, b1, b2))));
+            } else if let (Some(_), Some((eid0, eid1))) = (result.segment, result.edge_ids) {
+                meeting.push((ai, bi, Meeting::Crossing(eid0, eid1)));
+            }
+        }
+        meeting
+    })
+}
+
+/// Each edge's point on the plane it crosses
+/// ([`construct_edge_plane_intersection`]), in parallel chunks.
+fn edge_points(jobs: Vec<EdgePlane>) -> Vec<Vec3d> {
+    // A construction is exact arithmetic, some 10 us.
+    const CHUNK: usize = 64;
+    parallel_chunks(jobs, CHUNK, |chunk| chunk.iter().map(|&(a, b, plane)| construct_edge_plane_intersection(a, b, plane)).collect())
+}
+
+/// `work` over `items` in chunks of at least `chunk` items, as many as the
+/// pool has threads, their results concatenated in the items' order.
+fn parallel_chunks<T, R, F>(items: Vec<T>, chunk: usize, work: F) -> Vec<R>
+where
+    T: Send + Sync + 'static,
+    R: Send + 'static,
+    F: Fn(&[T]) -> Vec<R> + Send + Sync + 'static,
+{
+    let chunks = items.len().div_ceil(chunk).min(thread_pool::thread_count()).max(1);
+    if chunks == 1 {
+        return work(&items);
+    }
+    let size = items.len().div_ceil(chunks);
+    let (items, work): (Arc<[T]>, Arc<F>) = (items.into(), Arc::new(work));
+    let tasks: Vec<_> = (0..chunks)
+        .map(|c| {
+            let (items, work) = (items.clone(), work.clone());
+            move || work(&items[(c * size).min(items.len())..((c + 1) * size).min(items.len())])
+        })
+        .collect();
+    thread_pool::parallel_for(tasks).into_iter().flatten().collect()
 }
 
 /// Corefinement has already found the coplanar pairs and cut their boundaries.
@@ -300,13 +389,14 @@ impl VertexGrid {
 /// matters twice: downstream welding runs on ~6x fewer vertices, and a
 /// zero-segment corefinement can skip finishing entirely because the copied
 /// meshes are still properly indexed.
+///
+/// `pieces`: each cut triangle's new triangles ([`cut_pieces`]), in triangle order.
 fn retriangulate_mesh(
     mesh: &TriMesh,
-    segments: &[IntersectionSegment],
     tri_segments: &[Vec<usize>],
-    shared_verts: &[Vec3d],
-    is_mesh_a: bool,
+    pieces: Vec<Vec<[Vec3d; 3]>>,
 ) -> (TriMesh, Vec<u32>, Vec<bool>) {
+    let mut pieces = pieces.into_iter();
     let mut result = TriMesh::with_capacity(mesh.vertex_count(), mesh.triangle_count());
     result.vertices.extend_from_slice(&mesh.vertices);
     let mut origins: Vec<u32> = Vec::with_capacity(mesh.triangle_count());
@@ -330,9 +420,8 @@ fn retriangulate_mesh(
             origins.push(ti as u32);
             boundaries.push(false);
         } else {
-            // Triangle is intersected: re-triangulate using CDT
-            let new_tris =
-                retriangulate_triangle(v0, v1, v2, segs, segments, shared_verts, is_mesh_a);
+            // Triangle is intersected: re-triangulated using CDT
+            let new_tris = pieces.next().expect("every cut triangle has its pieces");
             for [a, b, c] in new_tris {
                 let mut map_vert = |p: Vec3d| -> u32 {
                     // Original corners come through bitwise-unchanged.
@@ -366,6 +455,38 @@ fn retriangulate_mesh(
     }
 
     (result, origins, boundaries)
+}
+
+/// The new triangles of each cut triangle (one with segments) of both meshes
+/// ([`retriangulate_triangle`]), per mesh in triangle order. Each depends on its
+/// own triangle and segments alone, so they are made in parallel chunks.
+fn cut_pieces(
+    meshes: [(&TriMesh, &[Vec<usize>]); 2],
+    segments: &Arc<[IntersectionSegment]>,
+    shared_verts: &Arc<[Vec3d]>,
+) -> [Vec<Vec<[Vec3d; 3]>>; 2] {
+    // Each cut triangle: its mesh (A first), its corners and its segments.
+    let cut: Vec<(bool, [Vec3d; 3], Vec<usize>)> = meshes
+        .iter()
+        .enumerate()
+        .flat_map(|(m, &(mesh, tri_segments))| {
+            tri_segments.iter().enumerate().filter(|(_, segs)| !segs.is_empty()).map(move |(ti, segs)| {
+                let (v0, v1, v2) = mesh.triangle_vertices(ti);
+                (m == 0, [v0, v1, v2], segs.clone())
+            })
+        })
+        .collect();
+    // A cut triangle's CDT takes some 5 us.
+    const CHUNK: usize = 64;
+    let (segments, shared_verts) = (segments.clone(), shared_verts.clone());
+    let made = parallel_chunks(cut, CHUNK, move |chunk| {
+        chunk.iter().map(|(is_a, [v0, v1, v2], segs)| (*is_a, retriangulate_triangle(*v0, *v1, *v2, segs, &segments, &shared_verts, *is_a))).collect()
+    });
+    let mut pieces = [Vec::new(), Vec::new()];
+    for (is_a, tris) in made {
+        pieces[if is_a { 0 } else { 1 }].push(tris);
+    }
+    pieces
 }
 
 /// Re-triangulate a single triangle that has intersection segments.

@@ -101,10 +101,15 @@ const FRAME_BUILTINS: &[(&str, f64)] = &[
     ("blur1_edge_darken", 0.25),
 ];
 
-/// Read-only inputs the host sets every frame.
+/// Read-only inputs the host sets every frame. After MilkDrop's own come
+/// the beat's (`makepad_beat::BeatFrame`), under names no preset of the
+/// big packs uses for its own variables (`beat`, `beats` and `bpm` are
+/// taken): positions in beats and bars, their phases, the tempo, the
+/// confidence, the pulses and the onset strength.
 const FRAME_INPUTS: &[&str] = &[
     "time", "fps", "frame", "progress", "bass", "mid", "treb", "vol", "bass_att", "mid_att", "treb_att",
-    "vol_att", "meshx", "meshy", "pixelsx", "pixelsy", "aspectx", "aspecty",
+    "vol_att", "meshx", "meshy", "pixelsx", "pixelsy", "aspectx", "aspecty", "beat_pos", "bar_pos",
+    "beat_phase", "bar_phase", "tempo", "beat_conf", "beat_pulse", "bar_pulse", "onset",
 ];
 
 /// What the host tells the engine about this frame.
@@ -587,6 +592,7 @@ impl Engine {
     /// Run one frame's CPU work into `params`.
     pub fn frame(&mut self, input: &FrameInput, params: &mut FrameParams) {
         let a = input.audio;
+        let b = &a.beat;
         let (aspect_x, aspect_y) = aspect(input.width, input.height);
         let input_values = [
             input.time,
@@ -607,6 +613,15 @@ impl Engine {
             input.height as f64,
             aspect_x as f64,
             aspect_y as f64,
+            b.beat_pos,
+            b.bar_pos,
+            b.beat_phase as f64,
+            b.bar_phase as f64,
+            b.tempo as f64,
+            b.confidence as f64,
+            b.beat_pulse as f64,
+            b.bar_pulse as f64,
+            b.onset as f64,
         ];
 
         // 1. Per-frame.

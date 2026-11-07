@@ -136,3 +136,46 @@ fn analytic_shapes_mesh_without_a_vm() {
     assert_eq!(open_edges(&m), 0);
     assert!(makepad_csg_cad::signed_volume(&m) > 4.0 / 3.0 * std::f64::consts::PI * 1000.0);
 }
+
+#[test]
+fn meshes_built_ahead_are_the_meshes_mesh_builds() {
+    let ball = |radius: f64| Op::Field { shape: SdfShape { root: SdfNode::Sphere { radius }, min: [-radius - 1.0; 3], max: [radius + 1.0; 3], materials: Vec::new() }, cell: Some(1.0) };
+    let at = |g: &mut Graph, source: NodeId, x: f64, y: f64| g.push(Op::Transform { source, at: [x, y, 0.0], rotate: [0.0; 3], scale: [1.0; 3] }).unwrap();
+    let mut g = Graph::new();
+    // two wheel-like parts: a field and a mesh made one
+    let ball_a = g.push(ball(10.0)).unwrap();
+    let axle_a = g.push(Op::Cylinder { radius: 4.0, top_radius: 4.0, height: 30.0, segments: 24 }).unwrap();
+    let wheel_a = g.push(Op::Boolean { mode: BoolMode::Union, a: ball_a, b: vec![axle_a] }).unwrap();
+    let ball_b = g.push(ball(8.0)).unwrap();
+    let axle_b = g.push(Op::Cylinder { radius: 3.0, top_radius: 3.0, height: 25.0, segments: 24 }).unwrap();
+    let union_b = g.push(Op::Boolean { mode: BoolMode::Union, a: ball_b, b: vec![axle_b] }).unwrap();
+    let wheel_b = at(&mut g, union_b, 40.0, 0.0);
+    // a part that builds the first wheel's field too (one group with it)
+    let spare = at(&mut g, ball_a, 0.0, 40.0);
+    // a part over a mesh already kept
+    let block = g.push(Op::Box { size: [20.0, 20.0, 20.0], radius: 0.0 }).unwrap();
+    let drilled = g.push(Op::Boolean { mode: BoolMode::Difference, a: block, b: vec![axle_b] }).unwrap();
+    // a field with nothing inside its box: its mesh fails
+    let empty = g.push(Op::Field { shape: SdfShape { root: SdfNode::Sphere { radius: 1.0 }, min: [20.0; 3], max: [22.0; 3], materials: Vec::new() }, cell: Some(1.0) }).unwrap();
+    let ids = [wheel_a, wheel_b, spare, drilled, empty];
+    let bits = |m: &TriMesh| {
+        let b = |v: &makepad_csg_math::Vec3d| [v.x, v.y, v.z].map(f64::to_bits);
+        (m.vertices.iter().map(b).collect::<Vec<_>>(), m.triangles.clone(), m.corner_normals.iter().map(b).collect::<Vec<_>>())
+    };
+    let mut one = Evaluator::new();
+    one.begin();
+    one.mesh(&g, block, None).unwrap();
+    let serial: Vec<_> = ids.iter().map(|id| one.mesh(&g, *id, None).map(|m| bits(&m))).collect();
+    assert!(serial[4].is_err());
+    let mut ahead = Evaluator::new();
+    ahead.begin();
+    ahead.mesh(&g, block, None).unwrap();
+    ahead.mesh_ahead(&g, &ids, None);
+    if makepad_csg_math::thread_pool::thread_count() >= 2 {
+        // all but the failing field built ahead, each once
+        assert_eq!(ahead.built, one.built);
+    }
+    let after: Vec<_> = ids.iter().map(|id| ahead.mesh(&g, *id, None).map(|m| bits(&m))).collect();
+    assert_eq!(after, serial);
+    assert_eq!(ahead.built, one.built);
+}

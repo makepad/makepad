@@ -88,23 +88,30 @@ pub enum Unwound {
     Cancelled,
 }
 
+/// How many [`probe`]s pass between two calls of an armed tick.
+const TICK_EVERY: u32 = 1024;
+
 thread_local! {
     /// The lowest address the stack may reach, 0 when nothing is armed.
     static STACK_FLOOR: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
     static CANCEL: core::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> =
         const { core::cell::RefCell::new(None) };
+    /// What [`probe`] calls every [`TICK_EVERY`] probes while armed, and the probes since.
+    static TICK: core::cell::Cell<(Option<fn()>, u32)> = const { core::cell::Cell::new((None, 0)) };
 }
 
 /// Disarms the thread's limits when dropped.
 pub struct Armed {
     floor: usize,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    tick: (Option<fn()>, u32),
 }
 
 impl Drop for Armed {
     fn drop(&mut self) {
         STACK_FLOOR.with(|f| f.set(self.floor));
         CANCEL.with(|c| *c.borrow_mut() = self.cancel.take());
+        TICK.with(|t| t.set(self.tick));
     }
 }
 
@@ -114,19 +121,22 @@ fn stack_address() -> usize {
 }
 
 /// Arms [`probe`] on this thread: it unwinds once the stack grew `budget` bytes below
-/// here, or once `cancel` is set.
+/// here, or once `cancel` is set, and calls `tick` every [`TICK_EVERY`] probes (the
+/// caller's checkpoint: a CPU budget's yield, say). `tick` may block; it must not unwind
+/// through the kernel except as [`probe`] does.
 #[must_use]
-pub fn arm(budget: usize, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Armed {
+pub fn arm(budget: usize, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>, tick: Option<fn()>) -> Armed {
     let floor = stack_address().saturating_sub(budget);
     Armed {
         floor: STACK_FLOOR.with(|f| f.replace(floor)),
         cancel: CANCEL.with(|c| c.borrow_mut().replace(cancel)),
+        tick: TICK.with(|t| t.replace((tick, 0))),
     }
 }
 
 /// Called on every recursive path of the kernel and in its hot evaluators. Unwinds with
-/// [`Unwound`] (no panic message) past the armed stack floor or after a cancel; does
-/// nothing when nothing is armed.
+/// [`Unwound`] (no panic message) past the armed stack floor or after a cancel, and calls
+/// the armed tick now and then; does nothing when nothing is armed.
 #[inline]
 pub fn probe() {
     let floor = STACK_FLOOR.with(core::cell::Cell::get);
@@ -143,5 +153,15 @@ pub fn probe() {
     });
     if cancelled {
         std::panic::resume_unwind(Box::new(Unwound::Cancelled));
+    }
+    let tick = TICK.with(|t| {
+        let (tick, probes) = t.get();
+        let tick = tick?;
+        let probes = probes + 1;
+        t.set((Some(tick), if probes < TICK_EVERY { probes } else { 0 }));
+        (probes >= TICK_EVERY).then_some(tick)
+    });
+    if let Some(tick) = tick {
+        tick();
     }
 }

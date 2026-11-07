@@ -17,6 +17,7 @@
 //! No repaint at rest: frames are requested only while playing.
 
 use crate::audio::{AudioAnalyzer, AudioFrame};
+use makepad_beat::BeatFrame;
 use crate::hlsl::{self, ShaderKind, Texture as MilkTexture};
 use crate::noise;
 use crate::parse::Preset;
@@ -113,6 +114,9 @@ struct Shared {
     noisevol_lq: Texture,
     noisevol_hq: Texture,
     stand_ins: Vec<(String, Texture)>,
+    /// The host's pictures for the named image textures (see
+    /// [`MilkdropView::set_pictures`]); empty: the stand-ins.
+    pictures: Vec<Texture>,
 }
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetRegister)]
@@ -416,6 +420,13 @@ impl MilkdropView {
         self.push_audio(samples, 1, sample_rate);
     }
 
+    /// The beat as of the last frame drawn (all zero before any audio): for
+    /// the host's automatic preset change ([`crate::AutoChange`]) and any
+    /// beat it shows.
+    pub fn beat(&self) -> BeatFrame {
+        self.audio_frame.beat
+    }
+
     /// Load the preset file at `path`, fading from the current one. The file
     /// is read and parsed on the task pool; the preset appears when that is
     /// done (a later load wins over an earlier one still in flight).
@@ -500,6 +511,17 @@ impl MilkdropView {
         Some((a, b, mix, x as f64 / y.max(1) as f64))
     }
 
+    /// Pictures of the host's for the presets' named image textures
+    /// (`sampler_<name>`): each name shows one of them, the same one for as
+    /// long as the list stays, in place of its generated stand-in. An empty
+    /// list brings the stand-ins back.
+    pub fn set_pictures(&mut self, cx: &mut Cx, pictures: Vec<Texture>) {
+        self.ensure_shared(cx);
+        if let Some(shared) = self.shared.as_mut() {
+            shared.pictures = pictures;
+        }
+    }
+
     /// Render at `scale` times the view's pixels (0.1..4); lower it to buy
     /// GPU time on large views.
     pub fn set_resolution_scale(&mut self, cx: &mut Cx, scale: f64) {
@@ -572,6 +594,7 @@ impl MilkdropView {
             noisevol_lq: tex(cx, noise::noise_volume(1, 5)),
             noisevol_hq: tex(cx, noise::noise_volume(4, 6)),
             stand_ins: Vec::new(),
+            pictures: Vec::new(),
         });
     }
 
@@ -736,6 +759,8 @@ impl MilkDeck {
             progress: 0.0,
             audio: [audio.bass, audio.mid, audio.treb, audio.vol],
             audio_att: [audio.bass_att, audio.mid_att, audio.treb_att, audio.vol_att],
+            beat: audio.beat.uniforms().0,
+            tempo: audio.beat.uniforms().1,
             aspect: aspect(size.0 as f32, size.1 as f32),
             mesh,
             pixels: size,
@@ -790,11 +815,11 @@ impl MilkDeck {
         let prev = t.seed.take().unwrap_or_else(|| t.main[t.current].texture.clone());
         let next = 1 - t.current;
         let img = |i: usize, names: &Vec<String>| -> Texture {
-            names
-                .get(i)
-                .and_then(|n| shared.stand_ins.iter().find(|(s, _)| s == n))
-                .map(|(_, t)| t.clone())
-                .unwrap_or_else(|| shared.black.clone())
+            let Some(name) = names.get(i) else { return shared.black.clone() };
+            if !shared.pictures.is_empty() {
+                return shared.pictures[picture_for(name, shared.pictures.len())].clone();
+            }
+            shared.stand_ins.iter().find(|(s, _)| s == name).map(|(_, t)| t.clone()).unwrap_or_else(|| shared.black.clone())
         };
         let warp_images: [Texture; 4] = std::array::from_fn(|i| img(i, &self.images[0]));
         let comp_images: [Texture; 4] = std::array::from_fn(|i| img(i, &self.images[1]));
@@ -1053,6 +1078,11 @@ impl MilkdropViewRef {
         }
     }
 
+    /// See [`MilkdropView::beat`].
+    pub fn beat(&self) -> BeatFrame {
+        self.borrow().map(|inner| inner.beat()).unwrap_or_default()
+    }
+
     pub fn load_preset(&self, cx: &mut Cx, path: &Path) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.load_preset(cx, path);
@@ -1109,9 +1139,22 @@ impl MilkdropViewRef {
         }
     }
 
+    pub fn set_pictures(&self, cx: &mut Cx, pictures: Vec<Texture>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_pictures(cx, pictures);
+        }
+    }
+
     pub fn shown(&self) -> Option<(Texture, Texture, f32, f64)> {
         self.borrow().and_then(|inner| inner.shown())
     }
+}
+
+/// Which of `count` pictures the named image `name` shows: a hash of the
+/// name, so a name keeps its picture while the list stays.
+fn picture_for(name: &str, count: usize) -> usize {
+    let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+    (hash % count as u64) as usize
 }
 
 /// The longest a recorded frame waits for its paint before the next one is

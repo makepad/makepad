@@ -48,7 +48,7 @@ impl AabbTree {
             };
         }
 
-        let mut entries: Vec<TriEntry> = triangles
+        let entries: Vec<TriEntry> = triangles
             .iter()
             .enumerate()
             .map(|(i, &(a, b, c))| {
@@ -62,10 +62,24 @@ impl AabbTree {
             })
             .collect();
 
-        let mut nodes = Vec::with_capacity(entries.len() * 2);
+        // A full binary tree: one leaf a triangle, 2n - 1 nodes in all (none when cancelled).
         let len = entries.len();
-        let root = build_recursive(&mut entries, &mut nodes, 0, len);
-        AabbTree { nodes, root }
+        let mut pieces = build_subtree(entries, 0, Axes::default());
+        if pieces.iter().map(|(_, p)| p.len()).sum::<usize>() != 2 * len - 1 {
+            return AabbTree { nodes: Vec::new(), root: u32::MAX };
+        }
+        // The pieces tile the positions: in order of their first, one after another.
+        pieces.sort_unstable_by_key(|(first, _)| *first);
+        let nodes = if pieces.len() == 1 {
+            pieces.swap_remove(0).1
+        } else {
+            let mut nodes = Vec::with_capacity(2 * len - 1);
+            for (_, piece) in pieces {
+                nodes.extend(piece);
+            }
+            nodes
+        };
+        AabbTree { nodes, root: 0 }
     }
 
     /// Find all pairs of overlapping triangles between this tree and another.
@@ -207,29 +221,114 @@ pub(crate) fn ray_intersects_triangle(origin: Vec3d, dir: Vec3d, v0: Vec3d, v1: 
     !sides.iter().any(|&s| s < 0.0) || !sides.iter().any(|&s| s > 0.0)
 }
 
+/// The axes a node's triangles are ordered along ([`split_order`]): its own, then the ones its
+/// parents split along, the nearest first, each once.
+#[derive(Clone, Copy, Default)]
+struct Axes {
+    axes: [usize; 3],
+    len: usize,
+}
+
+impl Axes {
+    fn as_slice(&self) -> &[usize] {
+        &self.axes[..self.len]
+    }
+
+    /// A child's: `axis` (its parent's split) first.
+    fn then(self, axis: usize) -> Axes {
+        let mut next = Axes { axes: [axis; 3], len: 1 };
+        for &a in self.as_slice() {
+            if a != axis {
+                next.axes[next.len] = a;
+                next.len += 1;
+            }
+        }
+        next
+    }
+}
+
+/// The order a node's triangles split in: by centroid along each of `axes` in turn, then by
+/// triangle. A stable sort by centroid along each node's axis, from the root down, leaves every
+/// node's triangles in this order; the node's lower half of it is its left child.
+fn split_order(axes: &[usize], a: &TriEntry, b: &TriEntry) -> std::cmp::Ordering {
+    for &axis in axes {
+        let (ca, cb) = match axis {
+            0 => (a.centroid.x, b.centroid.x),
+            1 => (a.centroid.y, b.centroid.y),
+            _ => (a.centroid.z, b.centroid.z),
+        };
+        match ca.partial_cmp(&cb) {
+            Some(std::cmp::Ordering::Equal) | None => {}
+            Some(order) => return order,
+        }
+    }
+    a.tri_idx.cmp(&b.tri_idx)
+}
+
+/// An inner node's box, and its triangles split: the lower half by centroid along the box's
+/// longest axis (ties as [`split_order`] breaks them) first, for its left child. Only which half
+/// each triangle falls in matters, so the halves are selected, not sorted. Returns the box and the
+/// children's axes.
+fn split_node(entries: &mut [TriEntry], axes: Axes) -> (BBox3d, Axes) {
+    let mut bbox = entries[0].bbox;
+    for e in &entries[1..] {
+        bbox = bbox.union(e.bbox);
+    }
+    let split = axes.then(bbox.longest_axis());
+    let half = entries.len() / 2;
+    entries.select_nth_unstable_by(half, |a, b| split_order(split.as_slice(), a, b));
+    (bbox, split)
+}
+
+/// Subtrees at least this large build their two halves in parallel.
+const PARALLEL_MIN: usize = 8192;
+
+/// The nodes of the subtree over `entries`, in preorder from its root at position `base` of the
+/// tree's nodes: a node's left child next, its right child past the left one's subtree (2k - 1
+/// nodes for k triangles). Large subtrees build their halves in parallel: the nodes come in
+/// pieces, each a run of positions from its first (fewer nodes when cancelled).
+fn build_subtree(mut entries: Vec<TriEntry>, base: u32, axes: Axes) -> Vec<(u32, Vec<AabbNode>)> {
+    let count = entries.len();
+    if count < PARALLEL_MIN || thread_pool::thread_count() < 2 {
+        let mut nodes = Vec::with_capacity(2 * count - 1);
+        build_recursive(&mut entries, &mut nodes, base, 0, count, axes);
+        return vec![(base, nodes)];
+    }
+    if thread_pool::cancelled() {
+        return Vec::new();
+    }
+    let (bbox, split) = split_node(&mut entries, axes);
+    let right_entries = entries.split_off(count / 2);
+    let (left, right) = (base + 1, base + 2 * (count / 2) as u32);
+    let (mut pieces, right_pieces) = thread_pool::parallel_do2(
+        move || build_subtree(entries, left, split),
+        move || build_subtree(right_entries, right, split),
+    );
+    pieces.extend(right_pieces);
+    pieces.push((base, vec![AabbNode { bbox, left, right, tri_idx: u32::MAX }]));
+    pieces
+}
+
+/// The node over `entries[start..end]` and the ones below it, pushed onto `nodes` (the tree's
+/// nodes from position `base` on).
 fn build_recursive(
     entries: &mut [TriEntry],
     nodes: &mut Vec<AabbNode>,
+    base: u32,
     start: usize,
     end: usize,
+    axes: Axes,
 ) -> u32 {
     if start >= end || thread_pool::cancelled() {
         return u32::MAX;
     }
-
-    // Compute bounding box of all entries in range
-    let mut bbox = entries[start].bbox;
-    for e in &entries[start + 1..end] {
-        bbox = bbox.union(e.bbox);
-    }
-
     let count = end - start;
+    let node_idx = base + nodes.len() as u32;
 
     // Leaf node
     if count == 1 {
-        let node_idx = nodes.len() as u32;
         nodes.push(AabbNode {
-            bbox,
+            bbox: entries[start].bbox,
             left: u32::MAX,
             right: u32::MAX,
             tri_idx: entries[start].tri_idx,
@@ -237,41 +336,19 @@ fn build_recursive(
         return node_idx;
     }
 
-    // Choose split axis: longest axis of the bounding box
-    let axis = bbox.longest_axis();
-
-    // Sort entries by centroid along the chosen axis
-    entries[start..end].sort_by(|a, b| {
-        let ca = match axis {
-            0 => a.centroid.x,
-            1 => a.centroid.y,
-            _ => a.centroid.z,
-        };
-        let cb = match axis {
-            0 => b.centroid.x,
-            1 => b.centroid.y,
-            _ => b.centroid.z,
-        };
-        ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let mid = start + count / 2;
-
-    // Reserve space for this node
-    let node_idx = nodes.len() as u32;
+    let (bbox, split) = split_node(&mut entries[start..end], axes);
     nodes.push(AabbNode {
         bbox,
         left: u32::MAX,
         right: u32::MAX,
         tri_idx: u32::MAX,
     });
-
-    let left = build_recursive(entries, nodes, start, mid);
-    let right = build_recursive(entries, nodes, mid, end);
-
-    nodes[node_idx as usize].left = left;
-    nodes[node_idx as usize].right = right;
-
+    let mid = start + count / 2;
+    let left = build_recursive(entries, nodes, base, start, mid, split);
+    let right = build_recursive(entries, nodes, base, mid, end, split);
+    let node = &mut nodes[(node_idx - base) as usize];
+    node.left = left;
+    node.right = right;
     node_idx
 }
 

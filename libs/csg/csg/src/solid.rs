@@ -606,7 +606,7 @@ pub fn union_all(solids: &[Solid]) -> Solid {
 pub fn union_all_with(solids: &[Solid], finish: FinishParams) -> Solid {
     // Empty solids are the identity of union.
     let items: Vec<Solid> = solids.iter().filter(|s| !s.is_empty()).cloned().collect();
-    reduce_union(items, finish)
+    reduce_union(items, finish).0
 }
 
 /// Balanced union reduction that only ever unions genuinely interacting
@@ -627,12 +627,17 @@ pub fn union_all_with(solids: &[Solid], finish: FinishParams) -> Solid {
 /// sequential fold produced. As a second net, a pair whose union fails
 /// validation is retried with the operands swapped (corefinement is not
 /// commutative in its last bits; see `union_smart` in document.rs).
-fn reduce_union(mut items: Vec<Solid>, finish: FinishParams) -> Solid {
+///
+/// Also its work: the triangles its booleans took in, both operands' at each boolean (a pair
+/// retried swapped counts once). Each level takes every triangle in once at most, so it grows
+/// as N log N in the operands where a fold grows as N², and it is none when no two meet.
+fn reduce_union(mut items: Vec<Solid>, finish: FinishParams) -> (Solid, usize) {
     use makepad_csg_math::thread_pool;
 
+    let mut took = 0;
     loop {
         if items.len() <= 1 {
-            return items.pop().unwrap_or_else(Solid::empty);
+            return (items.pop().unwrap_or_else(Solid::empty), took);
         }
 
         // Longest axis of the whole scene at this level.
@@ -683,6 +688,7 @@ fn reduce_union(mut items: Vec<Solid>, finish: FinishParams) -> Solid {
                     consumed[j] = true;
                     let a = slots[i].take().unwrap();
                     let b = slots[j].take().unwrap();
+                    took += a.triangle_count() + b.triangle_count();
                     tasks.push(move || {
                         let forward = a.union_with(&b, finish);
                         if forward.is_valid() {
@@ -708,7 +714,7 @@ fn reduce_union(mut items: Vec<Solid>, finish: FinishParams) -> Solid {
             for s in it {
                 result = result.merge(&s);
             }
-            return result;
+            return (result, took);
         }
 
         items = thread_pool::parallel_for(tasks);
@@ -797,4 +803,48 @@ pub fn intersection_all_with(solids: &[Solid], finish: FinishParams) -> Solid {
         return Solid::empty();
     }
     reduce_balanced(solids.to_vec(), |a, b, f| a.intersection_with(b, f), finish)
+}
+
+#[cfg(test)]
+mod scaling {
+    use super::*;
+
+    /// `n` spheres on a grid, `spacing` apart (0.5: each overlaps its neighbours; 2.0: none
+    /// touches another).
+    fn spheres(n: usize, spacing: f64) -> Vec<Solid> {
+        let side = (n as f64).cbrt().ceil() as usize;
+        (0..n)
+            .map(|i| {
+                let x = (i % side) as f64;
+                let y = ((i / side) % side) as f64;
+                let z = (i / (side * side)) as f64;
+                Solid::sphere(0.4, 16, 9).translate(x * spacing, y * spacing, z * spacing)
+            })
+            .collect()
+    }
+
+    /// The N-ary union scales as the balanced reduction does (PERF_REVIEW.md section 3), counted
+    /// in its work, not timed, so a loaded box cannot change it: twice the overlapping spheres
+    /// take under 2.5 times the work (a fold of each into the growing union takes 4 times), the
+    /// union is a closed manifold of the spheres' volume, and spheres that do not touch are one
+    /// concatenation with no boolean at all (the fold took 4.6 s and 5.1 s at 128).
+    #[test]
+    fn union_all_scaling() {
+        let n = 128;
+        let (half, half_work) = reduce_union(spheres(n / 2, 0.5), FinishParams::default());
+        let (over, work) = reduce_union(spheres(n, 0.5), FinishParams::default());
+        println!("{} overlapping spheres: {half_work} triangles into booleans, {n}: {work} ({:.2}x)", n / 2, work as f64 / half_work as f64);
+        assert!(half.is_valid() && over.is_valid(), "the overlapping unions are closed manifolds");
+        assert!(work * 2 < half_work * 5, "{n} overlapping spheres took {work} triangles into booleans, {} took {half_work}: the union does not scale as a balanced reduction", n / 2);
+        // the union's volume is the solid's, whatever the order it was reduced in (measured)
+        assert!((over.volume() - 19.371).abs() < 0.05, "overlapping {n}-sphere union volume {} (expected ~19.371)", over.volume());
+
+        let (disj, disj_work) = reduce_union(spheres(n, 2.0), FinishParams::default());
+        let one = Solid::sphere(0.4, 16, 9);
+        assert_eq!(disj_work, 0, "spheres that do not touch need no boolean");
+        assert!(disj.is_valid());
+        assert_eq!(disj.triangle_count(), n * one.triangle_count());
+        let vol_expected = one.volume() * n as f64;
+        assert!((disj.volume() - vol_expected).abs() < 1e-6 * vol_expected, "disjoint union volume {} != {} (sum of parts)", disj.volume(), vol_expected);
+    }
 }

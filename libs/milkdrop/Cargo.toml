@@ -19,6 +19,9 @@ repository = "https://github.com/makepad/makepad/"
 makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false, features = ["data"] }
 makepad-zip-file = { path = "../../libs/zip_file" }
 makepad-audio-picture = { path = "../../libs/audio_picture" }
+# The beat: tempo, beat and bar positions and pulses for the equations, and
+# bar lines for the automatic preset change.
+makepad-beat = { path = "../../libs/beat" }
 makepad-search = { path = "../../libs/search" }
 
 [[example]]

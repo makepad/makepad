@@ -68,10 +68,11 @@ impl CancelToken {
 }
 
 /// Runs `f` with the stack limit and `cancel` armed on this thread, whose stack is
-/// `stack` bytes. A panic, a stack limit and a cancel become errors. Call it on a thread
-/// spawned with that stack size.
-pub fn guarded<T>(stack: usize, cancel: &CancelToken, f: impl FnOnce() -> Result<T, BrepError>) -> Result<T, BrepError> {
-    let _armed = limits::arm(stack.saturating_sub(STACK_MARGIN).max(1), cancel.flag());
+/// `stack` bytes, and `tick` called now and then from inside the kernel (a checkpoint). A
+/// panic, a stack limit and a cancel become errors. Call it on a thread spawned with that
+/// stack size.
+pub fn guarded<T>(stack: usize, cancel: &CancelToken, tick: Option<fn()>, f: impl FnOnce() -> Result<T, BrepError>) -> Result<T, BrepError> {
+    let _armed = limits::arm(stack.saturating_sub(STACK_MARGIN).max(1), cancel.flag(), tick);
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(r) => r,
         Err(payload) => Err(from_panic(payload)),

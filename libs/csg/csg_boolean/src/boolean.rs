@@ -63,6 +63,17 @@ pub fn mesh_boolean_with(
     op: BoolOp,
     finish: FinishParams,
 ) -> TriMesh {
+    mesh_boolean_work(mesh_a, mesh_b, op, finish).0
+}
+
+/// [`mesh_boolean_with`], and its work: the triangles that took part, both operands' (the rest passed through).
+/// A diagnostic, the regression guard for a boolean costing what it cuts, counted where a clock would vary.
+pub fn mesh_boolean_work(
+    mesh_a: &TriMesh,
+    mesh_b: &TriMesh,
+    op: BoolOp,
+    finish: FinishParams,
+) -> (TriMesh, usize) {
     let (box_a, box_b) = (mesh_a.bounding_box(), mesh_b.bounding_box());
     let all = box_a.union(box_b);
     // The broad phase admits pairs within the plane tolerance, the weld and the T-junction repair snap within
@@ -70,7 +81,8 @@ pub fn mesh_boolean_with(
     let reach = finish.tolerance.max(crate::tri_tri::plane_tolerance(all.min, all.max, all.min, all.max, all.min, all.max));
     let a = Operand::within(mesh_a, box_b.grow(reach));
     let b = Operand::within(mesh_b, box_a.grow(reach));
-    boolean_of(&a, &b, op, finish)
+    let took = a.near.triangle_count() + b.near.triangle_count();
+    (boolean_of(&a, &b, op, finish), took)
 }
 
 /// [`mesh_boolean_with`] of prepared meshes: each operand's triangles and
