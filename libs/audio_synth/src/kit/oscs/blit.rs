@@ -95,7 +95,9 @@ pub struct BlitBuf {
 }
 
 impl Default for BlitBuf {
+    /// Builds the step kernel its steps take.
     fn default() -> Self {
+        let _ = kernel();
         BlitBuf { l: [0.0; BUF], r: [0.0; BUF], dc: [0.0; BUF], read: 0, dcacc: 0.0, y: [0.0; 2], leak: 0.0, leak_d: 0.0, leak_started: false }
     }
 }

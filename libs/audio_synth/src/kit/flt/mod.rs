@@ -344,6 +344,24 @@ pub(crate) const NC: usize = 8;
 /// State registers per unit.
 pub(crate) const NS: usize = 20;
 
+/// Whether filter type `ty` runs on a comb's line.
+pub fn wants_comb(ty: u8) -> bool {
+    matches!(ty, 8 | 25)
+}
+
+/// Comb lines made ahead, off the audio thread, for the filter units a new
+/// patch's comb types find without one ([`FilterUnit::fit`]); those left over
+/// are dropped with these, off the audio thread too.
+#[derive(Default)]
+pub struct CombLines(Vec<Box<misc::CombLine>>);
+
+impl CombLines {
+    /// `n` lines (allocates).
+    pub fn new(n: usize) -> CombLines {
+        CombLines((0..n).map(|_| Box::default()).collect())
+    }
+}
+
 /// One filter of one voice on one channel.
 #[derive(Clone, Debug)]
 pub struct FilterUnit {
@@ -400,11 +418,11 @@ impl FilterUnit {
 
     /// Once per block: type/subtype (a change resets), cutoff in notes vs
     /// A440 (unclamped), raw resonance, `fs` = the rate the unit runs at,
-    /// Allocate what type `ty` needs (the comb's line) ahead of the render
-    /// path; `set_block` then never allocates for it.
-    pub fn prepare(&mut self, ty: u8) {
-        if matches!(ty, 8 | 25) && self.comb.is_none() {
-            self.comb = Some(Box::default());
+    /// What type `ty` needs (the comb's line), taken from `lines`, made
+    /// ahead off the audio thread: `set_block` then never allocates for it.
+    pub fn fit(&mut self, ty: u8, lines: &mut CombLines) {
+        if wants_comb(ty) && self.comb.is_none() {
+            self.comb = lines.0.pop();
         }
     }
 

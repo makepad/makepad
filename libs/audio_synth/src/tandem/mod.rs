@@ -22,5 +22,5 @@ pub mod snapshots;
 pub mod voice;
 pub mod xml;
 
-pub use engine::Tandem;
+pub use engine::{Tandem, TandemInstall};
 pub use patch::{LoadMode, Patch};

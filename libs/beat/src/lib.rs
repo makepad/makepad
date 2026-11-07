@@ -9,6 +9,10 @@
 //!   (a disciplined oscillator whose position never jumps) and [`TapTempo`].
 //! * [`live`] — [`LiveTempo`], the streaming tracker steering a clock, for a
 //!   caller that just wants the beat now.
+//! * [`pulse`] — [`BeatPulse`], the same read the way a picture reads it:
+//!   once a frame a [`BeatFrame`] of tempo, beat and bar positions, beat and
+//!   bar events with a confidence, decaying pulses, onsets and auto-gained
+//!   band levels, from a room microphone or a played file alike.
 //! * [`offline`] — the whole-file mode: the same front end over a whole
 //!   record, then comb refinement, a least-squares refit, a dynamic-program
 //!   tempo map, downbeats and a confidence. For DJ decks and bakers, where
@@ -25,6 +29,7 @@
 pub mod live;
 pub mod offline;
 pub mod onset;
+pub mod pulse;
 pub mod realtime;
 pub mod tempo;
 
@@ -32,6 +37,7 @@ pub mod tempo;
 pub mod eval;
 
 pub use live::LiveTempo;
+pub use pulse::{BeatFrame, BeatPulse};
 pub use offline::{
     analyze, analyze_with, BeatAnalysis, BeatEventSource, BeatEvents, OfflineOptions, TempoMap,
     TempoSegment, TrackGrid,

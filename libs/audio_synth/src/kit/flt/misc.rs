@@ -25,7 +25,9 @@ impl Default for CombLine {
 }
 
 impl CombLine {
+    /// Builds the kernel its reads take.
     pub(crate) fn new(len: usize) -> CombLine {
+        let _ = sinc_kernel();
         CombLine { buf: vec![0.0; len + GUARD], w: 0, len }
     }
 

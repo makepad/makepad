@@ -78,6 +78,7 @@ pub struct Distortion {
 
 impl Distortion {
     pub fn new(sr: f32) -> Distortion {
+        crate::kit::shaper::ready();
         Distortion {
             sr,
             pre: Biquad::new(),

@@ -23,7 +23,8 @@ use crate::kit::analog::vca::{self, Vca, VcaBlock, VcaIx};
 use crate::kit::arp::{self, Arp, ArpEvent, ArpIx, ArpSettings};
 use crate::kit::env::{bend, Env, EnvBlock, EnvIx};
 use crate::kit::filter::{self, Filter, FilterBlock, FilterIx};
-use crate::kit::fx::{self, FxIx, Rack};
+use crate::kit::flt::{wants_comb, CombLines};
+use crate::kit::fx::{self, FreshChain, FxIx, Rack};
 use crate::kit::lfo::{self, Lfo, LfoBlock, LfoIx};
 use crate::kit::matrix::{self, N_SOURCES};
 use crate::kit::osc::{self, midi_hz, pan_gains, NoiseIx, NoiseOsc, Osc, OscBlock, OscIx, Sub, SubIx};
@@ -227,6 +228,31 @@ impl Voice {
     }
 }
 
+/// A patch made ready off the audio thread for [`Morph::install`]: the effects its chain plays,
+/// made and prepared, and the comb lines its filter types want in every voice. What the install
+/// replaces is left here, to be dropped with it off the audio thread.
+pub struct MorphInstall {
+    patch: Arc<MorphPatch>,
+    src: Arc<MorphSources>,
+    chain: FreshChain,
+    lines: CombLines,
+}
+
+impl MorphInstall {
+    /// Allocates: off the audio thread.
+    pub fn new(rate: f32, patch: Arc<MorphPatch>, src: Arc<MorphSources>) -> MorphInstall {
+        let chain = Rack::fresh_chain(rate, &patch.fx, &patch.values[..], &layout().ix.fx);
+        let combs = layout().ix.filter.iter().filter(|ix| wants_comb(FilterBlock::read(&patch.values[..], ix, 1.0, 1.0).family().0)).count();
+        // a line for each of a comb filter's two units in every voice
+        let lines = CombLines::new(combs * 2 * MAX_VOICES);
+        MorphInstall { patch, src, chain, lines }
+    }
+
+    pub fn patch(&self) -> &Arc<MorphPatch> {
+        &self.patch
+    }
+}
+
 /// The Morph engine.
 pub struct Morph {
     rate: f32,
@@ -259,17 +285,17 @@ pub struct Morph {
 
 impl Morph {
     pub fn new(rate: f32, patch: Arc<MorphPatch>, src: Arc<MorphSources>) -> Morph {
+        crate::kit::core::ready();
         let n = layout().schema.params.len();
         let voices: Box<[Voice]> = (0..MAX_VOICES).map(|i| Voice::new(i as u32 + 1, n)).collect();
-        let mut rack = Box::new(Rack::new(rate));
-        rack.set_chain(&patch.fx, &patch.values[..], &layout().ix.fx);
-        Morph {
+        let mut next = MorphInstall::new(rate, patch.clone(), src.clone());
+        let mut m = Morph {
             rate,
             patch,
             src,
             voices,
             lfo: std::array::from_fn(|i| Lfo::new(1000 + i as u32)),
-            rack,
+            rack: Box::new(Rack::new(rate)),
             arp: Arp::new(),
             arp_events: [(0.0, ArpEvent::Off(0)); 64],
             arp_was_on: false,
@@ -289,7 +315,9 @@ impl Morph {
             buf_r: [0.0; BLOCK],
             acc: vec![0.0; matrix::MAX_ROWS].into_boxed_slice(),
             out_pos: BLOCK,
-        }
+        };
+        m.install(&mut next);
+        m
     }
 
     pub fn rate(&self) -> f32 {
@@ -300,12 +328,18 @@ impl Morph {
         &self.patch
     }
 
-    /// A new patch (and its sources) from the next block; sounding voices
-    /// carry on with it.
-    pub fn set_patch(&mut self, patch: Arc<MorphPatch>, src: Arc<MorphSources>) {
-        self.rack.set_chain(&patch.fx, &patch.values[..], &layout().ix.fx);
-        self.patch = patch;
-        self.src = src;
+    /// A new patch (and its sources) from the next block, made ready off the audio thread; sounding
+    /// voices carry on with it. Only swaps: what it replaces goes to `next`.
+    pub fn install(&mut self, next: &mut MorphInstall) {
+        self.rack.take_chain(&mut next.chain);
+        for (f, ix) in layout().ix.filter.iter().enumerate() {
+            let block = FilterBlock::read(&next.patch.values[..], ix, 1.0, 1.0);
+            for v in self.voices.iter_mut() {
+                v.filter[f].fit(&block, &mut next.lines);
+            }
+        }
+        std::mem::swap(&mut self.patch, &mut next.patch);
+        std::mem::swap(&mut self.src, &mut next.src);
         let base = &self.patch.values;
         for v in self.voices.iter_mut().filter(|v| v.active) {
             v.vals.copy_from_slice(base);

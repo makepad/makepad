@@ -136,8 +136,11 @@ macro_rules! fx_types {
         }
 
         impl Fx {
-            /// May allocate (delay lines etc.).
+            /// May allocate (delay lines etc.), and builds the tables the effects read, so the
+            /// render path never does.
             pub fn new(ty: u8, sr: f32) -> Fx {
+                common::ready();
+                crate::kit::core::ready();
                 match ty {
                     $( $id => Fx::$var(Box::new($m::$t::new(sr))), )*
                     TYPE_FX_LIBRARY => Fx::FxLibrary(Box::new(fxlib::FxLibrary::new(sr))),
@@ -276,6 +279,33 @@ impl Fx {
             // The sub-effect is built here, off the render path.
             Fx::FxLibrary(a) => a.prepare(p),
             _ => {}
+        }
+    }
+
+    /// What [`Fx::prepare`] would build here for `fresh`'s values (a
+    /// Convolution's IR, a Library slot's sub-effect), taken from `fresh`, an
+    /// effect of the same type made and prepared for them off the audio
+    /// thread. Only swaps: what it replaces goes to `fresh`.
+    pub fn adopt(&mut self, fresh: &mut Fx) {
+        match (self, fresh) {
+            (Fx::Convolution(a), Fx::Convolution(b)) => a.adopt(b),
+            (Fx::FxLibrary(a), Fx::FxLibrary(b)) => a.adopt(b),
+            _ => {}
+        }
+    }
+
+    /// [`Fx::reset`] then [`Fx::adopt`], with what the reset lets go of (a
+    /// Library slot's sub-effect, an effect whose reset is a new one) going to
+    /// `fresh` too.
+    pub fn renew(&mut self, fresh: &mut Fx) {
+        match (self, fresh) {
+            (Fx::FxLibrary(a), Fx::FxLibrary(b)) => a.renew(b),
+            // their reset makes them anew: `fresh` is that
+            (a @ (Fx::Rotary(_) | Fx::Ensemble(_) | Fx::Tape(_) | Fx::Texture(_)), b) => std::mem::swap(a, b),
+            (a, b) => {
+                a.reset();
+                a.adopt(b);
+            }
         }
     }
 

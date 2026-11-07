@@ -1,37 +1,12 @@
 //! The analog components as a user meets them: picked one at a time in a
-//! Morph voice next to the kit's own, played through the engine. No
-//! allocation on the audio thread, CPU per voice, stability, and the
-//! presets' renders.
+//! Morph voice next to the kit's own, played through the engine. CPU per
+//! voice, stability, and the presets' renders (no allocation on the audio
+//! thread: `audio_thread.rs`).
 
 use makepad_audio_synth::morph::{layout, Morph, MorphPatch, PRESETS};
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::sync::Arc;
 
 const RATE: f32 = 48_000.0;
-
-struct Counting;
-
-thread_local! {
-    static COUNT: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        let _ = COUNT.try_with(|c| c.set(c.get() + 1));
-        unsafe { System.alloc(l) }
-    }
-    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        unsafe { System.dealloc(p, l) }
-    }
-    unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
-        let _ = COUNT.try_with(|c| c.set(c.get() + 1));
-        unsafe { System.realloc(p, l, n) }
-    }
-}
-
-#[global_allocator]
-static ALLOC: Counting = Counting;
 
 fn engine(text: &str) -> Morph {
     let patch = MorphPatch::parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
@@ -158,26 +133,6 @@ fn extreme_mod_rows_on_a_full_analog_voice_stay_finite() {
     for v in l.iter().chain(&r) {
         assert!(v.is_finite());
         assert!(*v == 0.0 || v.abs() > f32::MIN_POSITIVE, "{v}");
-    }
-}
-
-#[test]
-fn the_audio_thread_never_allocates() {
-    for (name, _, text) in PRESETS.iter().filter(|p| p.0.starts_with("analog_")) {
-        let mut m = engine(text);
-        let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
-        let before = COUNT.with(|c| c.get());
-        for i in 0..1000u32 {
-            if i % 50 == 0 {
-                m.note_on(40 + (i / 50 % 40) as u8, 100);
-            }
-            if i % 50 == 40 {
-                m.note_off(40 + (i / 50 % 40) as u8);
-            }
-            m.render(&mut l, &mut r);
-        }
-        let n = COUNT.with(|c| c.get()) - before;
-        assert_eq!(n, 0, "{name}: {n} allocations");
     }
 }
 

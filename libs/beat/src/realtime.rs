@@ -1056,10 +1056,19 @@ impl BeatSyncAnalyzer {
     /// Feed arbitrary callback-sized mono PCM. Non-finite samples are ignored.
     /// This method performs no heap allocation.
     pub fn push_mono(&mut self, samples: &[f32]) -> BeatSnapshot {
+        self.push_mono_with(samples, |_| {})
+    }
+
+    /// [`Self::push_mono`], handing each finished hop of the onset front
+    /// end (lane levels, flux, novelty) to `each` once the tracker has read
+    /// it, so a caller that also wants them reads this front end instead of
+    /// running a second one.
+    pub fn push_mono_with(&mut self, samples: &[f32], mut each: impl FnMut(&OnsetHop)) -> BeatSnapshot {
         for &sample in samples {
             if let Some(hop) = self.front.push(sample) {
                 self.sample_clock = hop.end_sample;
                 self.finish_hop(&hop);
+                each(&hop);
             }
         }
         self.sample_clock = self.front.sample_clock();

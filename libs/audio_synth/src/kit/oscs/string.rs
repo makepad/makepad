@@ -122,6 +122,7 @@ pub struct StringOsc {
 
 impl StringOsc {
     pub fn new(seed: u32) -> StringOsc {
+        let _ = kernel();
         StringOsc {
             rng: Rng::new(seed),
             drift: DriftLfo::default(),

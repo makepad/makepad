@@ -47,6 +47,12 @@ fn tables() -> &'static Tables {
     })
 }
 
+/// Build the conversion tables now (off the audio thread): the engines and effects that read them
+/// call it when they are made.
+pub fn ready() {
+    let _ = tables();
+}
+
 /// 2^(n/12) by the reference's tables (n clamped so n + 256 is in [1e-4, 512)).
 pub fn note_to_pitch(n: f32) -> f32 {
     let t = tables();
@@ -747,8 +753,8 @@ impl HalfBand {
     pub fn reset(&mut self) {
         for c in &mut self.ch {
             let m = c.m;
-            let ca: Vec<f32> = c.a.iter().map(|s| s.a).collect();
-            let cb: Vec<f32> = c.b.iter().map(|s| s.a).collect();
+            let ca: [f32; 6] = std::array::from_fn(|k| c.a[k].a);
+            let cb: [f32; 6] = std::array::from_fn(|k| c.b[k].a);
             *c = HbChannel { m, ..HbChannel::default() };
             for k in 0..6 {
                 c.a[k].a = ca[k];

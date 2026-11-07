@@ -418,6 +418,7 @@ pub struct Lfo {
 
 impl Lfo {
     pub fn new(seed: u32, is_scene: bool) -> Lfo {
+        let _ = sine_table();
         Lfo {
             is_scene,
             rng: Rng::new(seed.wrapping_mul(0x9e37_79b9) ^ 0x5bd1_e995),

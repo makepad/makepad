@@ -467,6 +467,32 @@ impl FxLibrary {
         self.select(p);
     }
 
+    /// What [`FxLibrary::prepare`] would build here, taken from `fresh`,
+    /// prepared for the same values off the audio thread: the sub-effect it
+    /// names, if this one runs another. The sub-effect it replaces goes to
+    /// `fresh`.
+    pub fn adopt(&mut self, fresh: &mut FxLibrary) {
+        if fresh.id != self.id {
+            self.renew(fresh);
+        }
+    }
+
+    /// [`FxLibrary::reset`] then [`FxLibrary::adopt`]: `fresh`'s sub-effect,
+    /// whichever this one runs.
+    ///
+    /// Its seeds (dither, a noise source) are drawn from `fresh`'s generator,
+    /// which starts where every new slot's does ([`FxLibrary::new`]:
+    /// `CRand::new(1)`), not from this slot's, which has drawn for its earlier
+    /// sub-effects: never from time or an address, so a patch change renders
+    /// the same every time, though not as a rebuild with this slot's own
+    /// generator did (the same noise statistics, another realization).
+    pub fn renew(&mut self, fresh: &mut FxLibrary) {
+        self.id = fresh.id;
+        self.defs = fresh.defs;
+        self.lags = fresh.lags;
+        std::mem::swap(&mut self.sub, &mut fresh.sub);
+    }
+
     fn select(&mut self, p: &[SlotValue; 12]) {
         let id = p[0].v.round() as i32;
         if id == self.id {

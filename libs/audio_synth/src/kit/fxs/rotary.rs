@@ -88,6 +88,7 @@ pub struct Rotary {
 
 impl Rotary {
     pub fn new(sr: f32) -> Rotary {
+        crate::kit::shaper::ready();
         let mut xover = Biquad::new();
         xover.lp2b(calc_omega(0.862496, sr), 0.707);
         let mut sub = Biquad::new();

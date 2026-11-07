@@ -152,8 +152,14 @@ struct Slot {
     quiet: i32,
 }
 
-/// The rack's state: the chain's effects, made when the patch changes
-/// ([`Rack::set_chain`], which allocates; [`Rack::process`] never does).
+/// The effects a patch's chain plays, made and prepared off the audio thread
+/// ([`Rack::fresh_chain`]) for [`Rack::take_chain`]; what that replaces is
+/// left here, to be dropped with it off the audio thread.
+pub struct FreshChain(Vec<Slot>);
+
+/// The rack's state: the chain's effects, made off the audio thread when the
+/// patch changes ([`Rack::fresh_chain`]) and swapped in on it
+/// ([`Rack::take_chain`]); neither that nor [`Rack::process`] allocates.
 pub struct Rack {
     rate: f32,
     slots: Vec<Slot>,
@@ -180,27 +186,41 @@ impl Rack {
         p
     }
 
-    /// Make the effects of `chain` (indices into [`KINDS`]) for the patch
-    /// values `v`; effects the rack already runs keep their state.
-    /// Allocates for new effects (and a new Library sub-effect).
-    pub fn set_chain(&mut self, chain: &[u8], v: &(impl Values + ?Sized), x: &FxIx) {
+    /// The effects of `chain` (indices into [`KINDS`]), each made new for
+    /// the patch values `v` and prepared (allocates: off the audio thread).
+    pub fn fresh_chain(rate: f32, chain: &[u8], v: &(impl Values + ?Sized), x: &FxIx) -> FreshChain {
         let mut slots = Vec::with_capacity(chain.len());
         for &kind in chain {
             let ty = family(kind);
-            if ty == 0 {
-                continue;
+            if ty != 0 {
+                slots.push(Slot { kind, fx: Fx::new(ty, rate), init: fxs::init_values(ty, false), quiet: 0 });
             }
-            let slot = match self.slots.iter().position(|u| u.kind == kind) {
-                Some(i) => self.slots.swap_remove(i),
-                None => Slot { kind, fx: Fx::new(ty, self.rate), init: fxs::init_values(ty, false), quiet: 0 },
-            };
-            slots.push(slot);
         }
         for slot in &mut slots {
             let p = Self::params(slot, v, x);
-            slot.fx.prepare(&p, self.rate, None);
+            slot.fx.prepare(&p, rate, None);
         }
-        self.slots = slots;
+        FreshChain(slots)
+    }
+
+    /// Plays `fresh`'s chain from the next block: an effect the rack already
+    /// runs keeps its state (the first of its kind, as a `swap_remove` of the
+    /// rack's own would find it), taking what its new values have prepared;
+    /// the others are `fresh`'s. Only swaps: what the rack held goes to
+    /// `fresh`.
+    pub fn take_chain(&mut self, fresh: &mut FreshChain) {
+        // the rack's slots not taken yet are its first `left`
+        let mut left = self.slots.len();
+        for new in fresh.0.iter_mut() {
+            if let Some(i) = self.slots[..left].iter().position(|u| u.kind == new.kind) {
+                self.slots.swap(i, left - 1);
+                left -= 1;
+                let kept = &mut self.slots[left];
+                kept.fx.adopt(&mut new.fx);
+                std::mem::swap(kept, new);
+            }
+        }
+        std::mem::swap(&mut self.slots, &mut fresh.0);
     }
 
     pub fn clear(&mut self) {
@@ -208,7 +228,7 @@ impl Rack {
     }
 
     /// Run `chain` over one block in place (the effects come from the
-    /// last [`Rack::set_chain`]; `beats_per_sec` is the tempo).
+    /// last [`Rack::take_chain`]; `beats_per_sec` is the tempo).
     pub fn process(&mut self, chain: &[u8], v: &(impl Values + ?Sized), x: &FxIx, beats_per_sec: f32, l: &mut [f32; BLOCK], r: &mut [f32; BLOCK]) {
         let mut ctx = FxCtx::new(self.rate);
         ctx.tsr = beats_per_sec * 0.5;

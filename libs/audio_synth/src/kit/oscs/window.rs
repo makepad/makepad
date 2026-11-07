@@ -74,6 +74,7 @@ fn bitwidth(x: i64) -> i32 {
 
 impl Window {
     pub fn new(seed: u32) -> Window {
+        let _ = (window_table(), sinc8());
         Window {
             rng: Rng::new(seed),
             v: [Voice::default(); 15],

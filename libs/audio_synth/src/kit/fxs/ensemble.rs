@@ -406,6 +406,7 @@ pub struct Ensemble {
 impl Ensemble {
     pub fn new(sr: f32) -> Ensemble {
         let srd = sr as f64;
+        let _ = current_lut();
         Ensemble {
             sr,
             lfo1: TriLfo::default(),

@@ -249,6 +249,13 @@ fn legacy() -> &'static LegacyTables {
     })
 }
 
+/// Build the tables the effects share (the legacy waveshapers, the LFO sine) now, off the audio
+/// thread: [`super::Fx::new`] calls it.
+pub fn ready() {
+    let _ = legacy();
+    let _ = sine_table();
+}
+
 /// The 1024-entry table of a waveshaper id with a legacy table (1 Soft =
 /// tanh, 2 Hard, 3 Asymmetric, 4 Sine, 5 Digital = tanh).
 pub fn legacy_table(ws: u8) -> &'static [f32; 1024] {
@@ -337,9 +344,10 @@ pub struct BlockDelay {
 }
 
 impl BlockDelay {
-    /// `len` a power of two.
+    /// `len` a power of two. Builds the "1X" table its reads take.
     pub fn new(len: usize) -> BlockDelay {
         debug_assert!(len.is_power_of_two());
+        let _ = sinc_1x();
         BlockDelay { buf: vec![0.0; len + FIR_N], len, wp: 0 }
     }
     pub fn len(&self) -> usize {
@@ -389,8 +397,10 @@ pub struct SincLine {
 }
 
 impl SincLine {
+    /// `len` a power of two. Builds the "2X" table its reads take.
     pub fn new(len: usize) -> SincLine {
         debug_assert!(len.is_power_of_two());
+        let _ = sinc_2x();
         SincLine { buf: vec![0.0; len + FIR_N], len, wp: 0 }
     }
     pub fn clear(&mut self) {

@@ -6,8 +6,8 @@
 
 use crate::event::{Event, EventKind, NoteOpts};
 use makepad_audio_synth::ironfish::{Ironfish, IronfishPatch};
-use makepad_audio_synth::morph::{Morph, MorphPatch, MorphSources};
-use makepad_audio_synth::tandem::{program::Program as TandemProgram, Tandem};
+use makepad_audio_synth::morph::{Morph, MorphInstall, MorphPatch, MorphSources};
+use makepad_audio_synth::tandem::{program::Program as TandemProgram, Tandem, TandemInstall};
 use makepad_audio_synth::instrument::{Control, Instrument as NativeInstrument};
 use makepad_audio_synth::instruments::InstrumentKind;
 use makepad_audio_synth::recipe::Recipe;
@@ -283,8 +283,14 @@ pub struct LoopEngine {
     iron_offs: Box<[(f64, u8)]>,
     /// A Morph loop's synth (its notes' ends share `iron_offs`).
     morph: Option<Box<Morph>>,
+    /// The patch a carried Morph loop takes over in [`LoopEngine::take_program`], made ready off
+    /// the audio thread; after it, what it replaced.
+    morph_next: Option<Box<MorphInstall>>,
     /// A Tandem loop's synth (its notes' ends share `iron_offs`).
     tandem: Option<Box<Tandem>>,
+    /// The program a carried Tandem loop takes over in [`LoopEngine::take_program`], made ready
+    /// off the audio thread; after it, what it replaced.
+    tandem_next: Option<Box<TandemInstall>>,
     /// A shader loop's instrument; per voice (end beat, serial); the
     /// params last set (their list's address).
     shader: Option<Box<ShaderInst>>,
@@ -372,7 +378,9 @@ impl LoopEngine {
             iron: None,
             iron_offs: Box::new([]),
             morph: None,
+            morph_next: None,
             tandem: None,
+            tandem_next: None,
             shader: None,
             shader_voices: Box::new([]),
             shader_handles: Box::new([]),
@@ -436,9 +444,17 @@ impl LoopEngine {
     /// audio thread): an Ironfish loop's synth, a choir, native instruments
     /// at `rate`. `carried`: the loop's state from the graph playing takes
     /// this one's place (same instrument), so the slow instruments are not
-    /// built again (a shader's new program still is: it takes over).
+    /// built again (a shader's new program still is, and a Morph's patch or
+    /// a Tandem's program is made ready: each takes over).
     pub fn for_inst(key: u64, inst: &Inst, rate: f32, carried: bool) -> Result<LoopEngine, String> {
         let mut engine = LoopEngine::new(key);
+        if carried {
+            match inst {
+                Inst::Morph { patch, src, .. } => engine.morph_next = Some(Box::new(MorphInstall::new(rate, patch.clone(), src.clone()))),
+                Inst::Tandem { prog, .. } => engine.tandem_next = Some(Box::new(TandemInstall::new(rate, prog.clone()))),
+                _ => {}
+            }
+        }
         if carried && !matches!(inst, Inst::Shader { .. }) {
             return Ok(engine);
         }
@@ -465,7 +481,7 @@ impl LoopEngine {
         }
         if let Inst::Tandem { prog, .. } = inst {
             let mut t = Box::new(Tandem::new(rate));
-            t.set_program(prog.clone());
+            t.set_program(&mut TandemInstall::new(rate, prog.clone()));
             engine.tandem = Some(t);
             engine.iron_offs = vec![(f64::INFINITY, 0); MAX_IRON_HELD].into_boxed_slice();
         }
@@ -491,12 +507,24 @@ impl LoopEngine {
         Ok(engine)
     }
 
-    /// Hot swap of a shader loop: `self` carried the loop's state over,
-    /// `fresh` was made for the new program. The new program takes the
-    /// sounding voices (their state carried where it matches, else a
-    /// crossfade); `fresh` keeps the old program's emptied instance, to be
-    /// dropped off the audio thread. No allocation.
+    /// Hot swap of a shader, Morph or Tandem loop: `self` carried the loop's
+    /// state over, `fresh` was made for the new program. A shader's new
+    /// program takes the sounding voices (their state carried where it
+    /// matches, else a crossfade); a Morph's new patch plays on with them; a
+    /// Tandem's new program starts over. `fresh` keeps what they replace (the
+    /// old program's emptied instance, the old patch's or program's parts),
+    /// to be dropped off the audio thread. No allocation.
     pub fn take_program(&mut self, fresh: &mut LoopEngine) {
+        if let (Some(morph), Some(next)) = (&mut self.morph, &mut fresh.morph_next) {
+            if !Arc::ptr_eq(morph.patch(), next.patch()) {
+                morph.install(next);
+            }
+        }
+        if let (Some(synth), Some(next)) = (&mut self.tandem, &mut fresh.tandem_next) {
+            if !Arc::ptr_eq(synth.program(), next.program()) {
+                synth.set_program(next);
+            }
+        }
         if let (Some(old), Some(new)) = (&mut self.shader, &mut fresh.shader) {
             if !old.shader().ptr_eq(new.shader()) {
                 new.swap_from(old);
@@ -1085,12 +1113,8 @@ impl LoopEngine {
 
     /// A Morph loop's chunk: its notes on and off on their frames (as an
     /// Ironfish loop's), on the pass's tempo.
-    #[allow(clippy::too_many_arguments)]
-    fn render_morph(&mut self, patch: &Arc<MorphPatch>, src: &Arc<MorphSources>, l: &mut [f32], r: &mut [f32], frames: usize, rate: f32, t: &Tempo) {
+    fn render_morph(&mut self, l: &mut [f32], r: &mut [f32], frames: usize, rate: f32, t: &Tempo) {
         let Some(mut morph) = self.morph.take() else { return };
-        if !Arc::ptr_eq(morph.patch(), patch) {
-            morph.set_patch(patch.clone(), src.clone());
-        }
         if t.per_frame > 0.0 {
             morph.set_tempo((t.per_frame * rate as f64) as f32);
         }
@@ -1150,11 +1174,8 @@ impl LoopEngine {
 
     /// A Tandem loop's chunk: its notes on and off on their frames (as a
     /// Morph loop's), on the pass's tempo.
-    fn render_tandem(&mut self, prog: &Arc<TandemProgram>, l: &mut [f32], r: &mut [f32], frames: usize, t: &Tempo) {
+    fn render_tandem(&mut self, l: &mut [f32], r: &mut [f32], frames: usize, t: &Tempo) {
         let Some(mut synth) = self.tandem.take() else { return };
-        if !Arc::ptr_eq(synth.program(), prog) {
-            synth.set_program(prog.clone());
-        }
         if t.per_frame > 0.0 {
             synth.set_tempo(t.per_frame * synth.sample_rate() as f64 * 60.0);
         }
@@ -1288,8 +1309,8 @@ impl LoopEngine {
         self.nacts = 0;
         match inst {
             Inst::Ironfish { patch, .. } => return self.render_iron(patch, l, r, frames, t),
-            Inst::Morph { patch, src, .. } => return self.render_morph(patch, src, l, r, frames, rate, t),
-            Inst::Tandem { prog, .. } => return self.render_tandem(prog, l, r, frames, t),
+            Inst::Morph { .. } => return self.render_morph(l, r, frames, rate, t),
+            Inst::Tandem { .. } => return self.render_tandem(l, r, frames, t),
             Inst::Shader { params, mono, .. } => return self.render_shader(params, *mono, l, r, frames, t),
             Inst::Voice { .. } => return self.render_voice(l, r, frames, rate, t),
             #[cfg(not(target_arch = "wasm32"))]
@@ -1634,6 +1655,36 @@ mod tests {
         kept.render(&b, &mut l, &mut r, 48_000.0, &Tempo::linear(8.0 * 256.0 * bpf, bpf));
         assert_eq!(kept.voices(), 1, "the note plays on in the new program");
         assert!(l.iter().any(|x| x.abs() > 1e-4));
+    }
+
+    /// A Morph or Tandem loop carried into a graph that plays it another patch or program takes it
+    /// at the swap, made ready with the graph; the old one goes back with the graph's own engine.
+    #[test]
+    fn a_carried_morph_or_tandem_loop_takes_its_new_patch_at_the_swap() {
+        let morph = |text: &str| {
+            let patch = Arc::new(MorphPatch::parse(text).unwrap());
+            let src = patch.sources([None, None, None]);
+            Inst::Morph { key: 4, patch, src }
+        };
+        let (a, b) = (morph("fx=delay"), morph("fx=reverb f1_type=comb"));
+        let mut kept = LoopEngine::for_inst(4, &a, 48_000.0, false).unwrap();
+        let mut fresh = LoopEngine::for_inst(4, &b, 48_000.0, true).unwrap();
+        kept.take_program(&mut fresh);
+        let (Inst::Morph { patch: old, .. }, Inst::Morph { patch: new, .. }) = (&a, &b) else { unreachable!() };
+        assert!(Arc::ptr_eq(kept.morph.as_ref().unwrap().patch(), new));
+        assert!(Arc::ptr_eq(fresh.morph_next.as_ref().unwrap().patch(), old));
+        let tandem = |ty: f32| {
+            let mut p = makepad_audio_synth::tandem::Patch::init();
+            assert!(p.set("fx1_type", ty));
+            Inst::Tandem { key: 5, prog: Arc::new(TandemProgram::compile(&p)) }
+        };
+        let (a, b) = (tandem(1.0), tandem(2.0));
+        let mut kept = LoopEngine::for_inst(5, &a, 48_000.0, false).unwrap();
+        let mut fresh = LoopEngine::for_inst(5, &b, 48_000.0, true).unwrap();
+        kept.take_program(&mut fresh);
+        let (Inst::Tandem { prog: old, .. }, Inst::Tandem { prog: new, .. }) = (&a, &b) else { unreachable!() };
+        assert!(Arc::ptr_eq(kept.tandem.as_ref().unwrap().program(), new));
+        assert!(Arc::ptr_eq(fresh.tandem_next.as_ref().unwrap().program(), old));
     }
 
     fn render_all(e: &mut LoopEngine, inst: &Inst, frames: usize, bpf: f64, sizes: &[usize]) -> Vec<f32> {

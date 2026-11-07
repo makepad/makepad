@@ -10,7 +10,8 @@
 //! sample, as the reference does), then [`Shaper::tick`] per sample with
 //! the linear drive.
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
+use std::sync::OnceLock;
 
 // ---- mirrored reference quirks (the mirrored path is the only behaviour) ----
 
@@ -18,7 +19,7 @@ use std::sync::{Mutex, OnceLock};
 /// types output F(x) instead of the antiderivative difference on sample 0.
 pub const QUIRK_INIT_EVERY_BLOCK: bool = true;
 /// Fuzz (24) and Fuzz Soft Clip (25) share one random stream (one generator per
-/// range value): whichever table is built second continues the first's draws.
+/// range value): whichever of the two plays second continues the first's draws.
 pub const QUIRK_FUZZ_SHARED_STREAM: bool = true;
 /// The legacy table lookup's "next" entry wraps to entry 0 at the top edge.
 pub const QUIRK_LEGACY_TABLE_WRAP: bool = true;
@@ -239,30 +240,42 @@ impl MinStd {
     }
 }
 
-fn fuzz_table(id: u8) -> &'static Pm1Table {
-    static SHARED_01: Mutex<MinStd> = Mutex::new(MinStd(MinStd::SEED));
-    static T: [OnceLock<Pm1Table>; 5] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
-    let slot = (id - 24) as usize;
-    T[slot].get_or_init(|| match id {
-        24 | 25 => {
-            let mut fresh = MinStd(MinStd::SEED);
-            let mut guard = SHARED_01.lock().unwrap_or_else(|e| e.into_inner());
-            let g: &mut MinStd = if QUIRK_FUZZ_SHARED_STREAM { &mut guard } else { &mut fresh };
-            Pm1Table::build(1024, |v| v * 0.9 + g.uniform(-0.1, 0.1))
-        }
-        26 => {
-            let mut g = MinStd(MinStd::SEED);
-            Pm1Table::build(1024, |v| v * 0.7 + g.uniform(-0.3, 0.3))
-        }
-        27 => {
-            let mut g = MinStd(MinStd::SEED);
-            Pm1Table::build(2048, |v| v + (-20.0 * v * v).exp() * g.uniform(-1.0, 1.0))
-        }
-        _ => {
-            let mut g = MinStd(MinStd::SEED);
-            Pm1Table::build(2048, |v| 0.85 * v + 0.15 * v * v * v * v * g.uniform(-1.0, 1.0))
-        }
+/// The fuzz tables, built together: Fuzz and Fuzz Soft Clip's two from their shared stream (its
+/// first draws, then its next), then Heavy Fuzz (26), 27 and 28.
+fn fuzz_tables() -> &'static [Pm1Table; 5] {
+    static T: OnceLock<[Pm1Table; 5]> = OnceLock::new();
+    T.get_or_init(|| {
+        let mut shared = MinStd(MinStd::SEED);
+        let first = Pm1Table::build(1024, |v| v * 0.9 + shared.uniform(-0.1, 0.1));
+        let next = Pm1Table::build(1024, |v| v * 0.9 + shared.uniform(-0.1, 0.1));
+        let mut g = MinStd(MinStd::SEED);
+        let heavy = Pm1Table::build(1024, |v| v * 0.7 + g.uniform(-0.3, 0.3));
+        let mut g = MinStd(MinStd::SEED);
+        let t27 = Pm1Table::build(2048, |v| v + (-20.0 * v * v).exp() * g.uniform(-1.0, 1.0));
+        let mut g = MinStd(MinStd::SEED);
+        let t28 = Pm1Table::build(2048, |v| 0.85 * v + 0.15 * v * v * v * v * g.uniform(-1.0, 1.0));
+        [first, next, heavy, t27, t28]
     })
+}
+
+fn fuzz_table(id: u8) -> &'static Pm1Table {
+    /// Which of 24 and 25 played first (0 until one has): it has the shared stream's first draws.
+    static FIRST: AtomicU8 = AtomicU8::new(0);
+    let t = fuzz_tables();
+    match id {
+        24 | 25 if QUIRK_FUZZ_SHARED_STREAM => {
+            let first = match FIRST.load(Relaxed) {
+                0 => match FIRST.compare_exchange(0, id, Relaxed, Relaxed) {
+                    Ok(_) => id,
+                    Err(f) => f,
+                },
+                f => f,
+            };
+            &t[usize::from(first != id)]
+        }
+        24 | 25 => &t[0],
+        _ => &t[(id - 24) as usize],
+    }
 }
 
 /// The definition of a trigonometric table type (29-39) at v.
@@ -300,6 +313,17 @@ fn trig_table(id: u8) -> &'static Pm1Table {
         let n = if id == 29 { 1024 } else { 2048 };
         Pm1Table::build(n, |v| trig_curve(id, v as f64) as f32)
     })
+}
+
+/// Build every table a shaper type reads now, off the audio thread: what owns shapers calls it
+/// when it is made.
+pub fn ready() {
+    let _ = legacy_table(LegacyTable::Tanh);
+    let _ = fuzz_tables();
+    for id in 29..=39 {
+        let _ = trig_table(id);
+    }
+    let _ = folder(14);
 }
 
 /// A table type's table (24-39), building it on first use.

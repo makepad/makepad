@@ -10,7 +10,9 @@ use crate::kit::tuning::Tuning;
 use super::voice::{apply_routes_with, NoteStart, Sources, VState, Voice, VoiceCtx};
 use crate::dsp::Rng;
 use crate::kit::core::{calc_omega, Biquad, HalfBand, BLOCK, BLOCK_OS};
+use crate::kit::flt::CombLines;
 use crate::kit::mods::{ControllerSmoother, Lfo, ModCtx};
+use crate::kit::oscs::Osc;
 
 pub const MAX_VOICES: usize = 64;
 
@@ -117,13 +119,14 @@ impl Scene {
     }
 
     /// A new program; `bank` is the engine's new formula bank (the old
-    /// one's instances are forgotten).
-    pub fn set_program(&mut self, prog: &Program, bank: &mut FormulaBank) {
+    /// one's instances are forgotten); `oscs` (one set a voice) and `lines`
+    /// are what [`Voice::set_program`] swaps in.
+    pub fn set_program(&mut self, prog: &Program, bank: &mut FormulaBank, oscs: &mut [[Osc; 3]], lines: &mut CombLines) {
         let s = self.index;
         self.slfo_k = std::array::from_fn(|l| bank.acquire(s, 6 + l));
-        for (i, v) in self.voices.iter_mut().enumerate() {
+        for (v, oscs) in self.voices.iter_mut().zip(oscs.iter_mut()) {
             v.drop_formulas();
-            v.set_program(prog, self.index, 0x77 ^ i as u32, self.fs);
+            v.set_program(prog, self.index, oscs, lines, self.fs);
         }
         self.eff.iter_mut().zip(prog.scene_base(self.index)).for_each(|(e, b)| *e = b);
         self.ctl[CTL_MW].snap(prog.modwheel[self.index]);

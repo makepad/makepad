@@ -341,6 +341,17 @@ impl Convolution {
         self.conv = Some([Convolver::new(&l), Convolver::new(&r)]);
     }
 
+    /// What [`Convolution::prepare`] sets, taken from `fresh`, prepared for
+    /// the same values off the audio thread; this one's convolver goes to
+    /// `fresh`.
+    pub fn adopt(&mut self, fresh: &mut Convolution) {
+        self.sr = fresh.sr;
+        self.prepared = fresh.prepared;
+        self.wanted = fresh.wanted;
+        self.ir_len = fresh.ir_len;
+        std::mem::swap(&mut self.conv, &mut fresh.conv);
+    }
+
     pub fn needs_prepare(&self) -> bool {
         self.wanted != self.prepared
     }

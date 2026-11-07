@@ -162,6 +162,7 @@ pub struct Alias {
 
 impl Alias {
     pub fn new(seed: u32) -> Alias {
+        let _ = tables();
         Alias {
             rng: Rng::new(seed),
             v: [Voice::default(); 16],

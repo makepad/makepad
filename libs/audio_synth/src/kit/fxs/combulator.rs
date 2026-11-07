@@ -63,10 +63,10 @@ pub fn ringout_blocks(_p: &[SlotValue; 12], _sr: f32) -> i32 {
     -1
 }
 
-/// (L, R) gain of a pan position from the 4096-entry table.
-fn pan_gains(pan: f32) -> [f32; 2] {
+/// The 4096-entry pan table.
+fn pan_table() -> &'static [[f32; 2]] {
     static T: OnceLock<Vec<[f32; 2]>> = OnceLock::new();
-    let t = T.get_or_init(|| {
+    T.get_or_init(|| {
         let h = std::f64::consts::FRAC_PI_2;
         (0..4096)
             .map(|i| {
@@ -74,8 +74,12 @@ fn pan_gains(pan: f32) -> [f32; 2] {
                 [((h - a) / h * a.cos()).sqrt() as f32, (a * a.sin() / h).sqrt() as f32]
             })
             .collect()
-    });
-    t[(((pan + 1.0) * 2047.0) as i32 & 4095) as usize]
+    })
+}
+
+/// (L, R) gain of a pan position from the pan table.
+fn pan_gains(pan: f32) -> [f32; 2] {
+    pan_table()[(((pan + 1.0) * 2047.0) as i32 & 4095) as usize]
 }
 
 pub struct Combulator {
@@ -99,6 +103,7 @@ pub struct Combulator {
 
 impl Combulator {
     pub fn new(sr: f32) -> Self {
+        let _ = pan_table();
         let mut combs: [[FilterUnit; 3]; 2] = Default::default();
         combs.iter_mut().flatten().for_each(|u| u.set_long_comb(true));
         Combulator {

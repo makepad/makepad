@@ -68,6 +68,7 @@ pub struct Waveshaper {
 
 impl Waveshaper {
     pub fn new(sr: f32) -> Waveshaper {
+        crate::kit::shaper::ready();
         Waveshaper {
             sr,
             pre_lp: Biquad::new(),

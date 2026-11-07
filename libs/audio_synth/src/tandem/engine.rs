@@ -7,9 +7,12 @@
 use super::catalog::{gl, sc, Catalog, N_FX, N_GLOBAL};
 use super::patch::Patch;
 use super::program::Program;
-use super::scene::{Scene, SceneCtx, CTL_AT, CTL_BREATH, CTL_EXPR, CTL_MW, CTL_PB, CTL_SUS};
+use super::scene::{Scene, SceneCtx, CTL_AT, CTL_BREATH, CTL_EXPR, CTL_MW, CTL_PB, CTL_SUS, MAX_VOICES};
+use super::voice;
 use crate::kit::core::{amp_to_linear, db_to_linear, BlockLine, SlotValue, BLOCK, BLOCK_OS};
+use crate::kit::flt::{wants_comb, CombLines};
 use crate::kit::fxs::{ringout_blocks, Fx, FxCtx};
+use crate::kit::oscs::Osc;
 use super::formula::FormulaBank;
 use crate::kit::tuning::Tuning;
 use crate::kit::mods::ModCtx;
@@ -24,10 +27,60 @@ pub const CHAIN_GLOBAL: [usize; 4] = [6, 7, 14, 15];
 /// By default MIDI channel 2 plays only scene A and channel 3 only scene B.
 pub const CHANNEL_2_3_SCENES: bool = true;
 
+/// A program made ready off the audio thread for [`Tandem::set_program`] or
+/// [`Tandem::queue_program`]: every effect slot's effect of the program's
+/// type, made and prepared; its formula runners; each scene's voices'
+/// oscillators of the program's types, seeded as the install seeds them; the
+/// comb lines its filter types want. What the install replaces is left here,
+/// to be dropped with it off the audio thread.
+pub struct TandemInstall {
+    prog: Arc<Program>,
+    fx: Vec<Fx>,
+    formulas: FormulaBank,
+    oscs: [Vec<[Osc; 3]>; 2],
+    lines: CombLines,
+}
+
+impl TandemInstall {
+    /// Allocates: off the audio thread.
+    pub fn new(fs: f32, prog: Arc<Program>) -> TandemInstall {
+        let fx = (0..N_FX)
+            .map(|s| {
+                let mut fx = Fx::new(fx_type(&prog, s), fs);
+                fx.prepare(&fx_params(&prog, s), fs, prog.fx_user[s].as_ref());
+                fx
+            })
+            .collect();
+        let formulas = FormulaBank::for_program(&prog);
+        let oscs = std::array::from_fn(|s| (0..MAX_VOICES).map(|i| std::array::from_fn(|o| Osc::new(voice::osc_type(&prog, s, o), voice::osc_seed(i, o)))).collect());
+        // a line for each of a comb filter's two units in every voice of its scene
+        let combs: usize = (0..2).map(|s| voice::filter_types(&prog, s).into_iter().filter(|t| wants_comb(*t)).count()).sum();
+        let lines = CombLines::new(combs * 2 * MAX_VOICES);
+        TandemInstall { prog, fx, formulas, oscs, lines }
+    }
+
+    pub fn program(&self) -> &Arc<Program> {
+        &self.prog
+    }
+}
+
+/// The effect type of slot `s`.
+fn fx_type(prog: &Program, s: usize) -> u8 {
+    prog.values[gl::FX + gl::FX_STRIDE * s].i().clamp(0, 31) as u8
+}
+
+/// The 12 values of slot `s`'s effect.
+fn fx_params(prog: &Program, s: usize) -> [SlotValue; 12] {
+    let b = gl::FX + gl::FX_STRIDE * s + 1;
+    std::array::from_fn(|k| prog.values[b + k])
+}
+
 pub struct Tandem {
     fs: f32,
     prog: Arc<Program>,
-    pending: Option<Arc<Program>>,
+    pending: Option<Box<TandemInstall>>,
+    /// What the last queued install left, for [`Tandem::queue_program`] to hand back.
+    spent: Option<Box<TandemInstall>>,
     scenes: [Scene; 2],
     fx: Vec<Fx>,
     ringout: [i32; N_FX],
@@ -52,6 +105,9 @@ pub struct Tandem {
     pos: usize,
     pub mpe: bool,
     held_for_retrigger: Vec<(u8, i32, f32)>,
+    /// The keys a queued program retriggers, while it does: a list of the same capacity, so the
+    /// retrigger never allocates.
+    retrigger: Vec<(u8, i32, f32)>,
     audio_in: [[f32; BLOCK]; 2],
     audio_in_os: [[f32; BLOCK_OS]; 2],
     in_hb: crate::kit::core::HalfBand,
@@ -59,11 +115,13 @@ pub struct Tandem {
 
 impl Tandem {
     pub fn new(fs: f32) -> Tandem {
+        crate::kit::core::ready();
         let prog = Arc::new(Program::compile(&Patch::init()));
         let mut t = Tandem {
             fs,
             prog: prog.clone(),
             pending: None,
+            spent: None,
             scenes: [Scene::new(0, fs), Scene::new(1, fs)],
             fx: (0..N_FX).map(|_| Fx::new(0, fs)).collect(),
             ringout: [0; N_FX],
@@ -84,11 +142,12 @@ impl Tandem {
             pos: BLOCK,
             mpe: false,
             held_for_retrigger: Vec::with_capacity(128),
+            retrigger: Vec::with_capacity(128),
             audio_in: [[0.0; BLOCK]; 2],
             audio_in_os: [[0.0; BLOCK_OS]; 2],
             in_hb: crate::kit::core::HalfBand::new(12, true),
         };
-        t.install(prog);
+        t.install(&mut TandemInstall::new(fs, prog));
         t
     }
 
@@ -113,44 +172,44 @@ impl Tandem {
     /// Load a patch now (allocates: call off the audio thread, or use
     /// [`Tandem::queue_program`]).
     pub fn load(&mut self, patch: &Patch) {
-        self.install(Arc::new(Program::compile(patch)));
+        self.install(&mut TandemInstall::new(self.fs, Arc::new(Program::compile(patch))));
     }
 
-    /// Play a compiled program from the next block (no fade).
-    pub fn set_program(&mut self, prog: Arc<Program>) {
-        self.install(prog);
+    /// Play a program made ready off the audio thread from the next block (no fade). Only swaps:
+    /// what it replaces goes to `next`.
+    pub fn set_program(&mut self, next: &mut TandemInstall) {
+        self.install(next);
     }
 
-    /// Queue a compiled program: the output fades out, the program swaps,
-    /// held keys retrigger.
-    pub fn queue_program(&mut self, prog: Arc<Program>) {
-        self.pending = Some(prog);
+    /// Queue a program made ready off the audio thread: the output fades out, the program swaps,
+    /// held keys retrigger. Hands back what the caller drops off the audio thread: a queued
+    /// program this one replaces before it played, and what the last queued one replaced.
+    pub fn queue_program(&mut self, next: Box<TandemInstall>) -> [Option<Box<TandemInstall>>; 2] {
         self.fading_out = true;
+        [self.pending.replace(next), self.spent.take()]
     }
 
-    fn install(&mut self, prog: Arc<Program>) {
-        // FX slots of a new type are made here (allocation off the render path when loading).
+    fn install(&mut self, next: &mut TandemInstall) {
+        std::mem::swap(&mut self.prog, &mut next.prog);
+        let prog = self.prog.clone();
+        // an effect of another type is the one made ready; one of the same type starts over, with
+        // what its new values prepared
         for s in 0..N_FX {
-            let ty = prog.values[gl::FX + gl::FX_STRIDE * s].i().clamp(0, 31) as u8;
-            if self.fx[s].ty() != ty {
-                self.fx[s] = Fx::new(ty, self.fs);
+            if self.fx[s].ty() != fx_type(&prog, s) {
+                std::mem::swap(&mut self.fx[s], &mut next.fx[s]);
             } else {
-                self.fx[s].reset();
+                self.fx[s].renew(&mut next.fx[s]);
             }
-            let b = gl::FX + gl::FX_STRIDE * s + 1;
-            let p: [SlotValue; 12] = std::array::from_fn(|k| prog.values[b + k]);
-            self.fx[s].prepare(&p, self.fs, prog.fx_user[s].as_ref());
             self.ringout[s] = 0;
         }
-        self.formulas = FormulaBank::for_program(&prog);
-        for sc_ in &mut self.scenes {
-            sc_.set_program(&prog, &mut self.formulas);
+        std::mem::swap(&mut self.formulas, &mut next.formulas);
+        for (sc_, oscs) in self.scenes.iter_mut().zip(next.oscs.iter_mut()) {
+            sc_.set_program(&prog, &mut self.formulas, oscs, &mut next.lines);
         }
         for m in 0..8 {
             self.macros[m] = prog.macros[m].0;
         }
         self.global_eff.iter_mut().zip(prog.global_base()).for_each(|(e, b)| *e = b);
-        self.prog = prog;
     }
 
     /// The tuning the keys play (None: standard 12-TET). How it applies
@@ -371,12 +430,16 @@ impl Tandem {
             self.fade -= 0.05;
             if self.fade <= 0.0 {
                 self.fade = 0.0;
-                if let Some(p) = self.pending.take() {
-                    self.install(p);
-                    let held = std::mem::take(&mut self.held_for_retrigger);
-                    for (c, k, v) in &held {
-                        self.note_on(*c, *k as u8, (*v * 127.0).round() as u8);
+                if let Some(mut next) = self.pending.take() {
+                    self.install(&mut next);
+                    self.spent = Some(next);
+                    // each key goes back on the held list as it retriggers
+                    std::mem::swap(&mut self.held_for_retrigger, &mut self.retrigger);
+                    for i in 0..self.retrigger.len() {
+                        let (c, k, v) = self.retrigger[i];
+                        self.note_on(c, k as u8, (v * 127.0).round() as u8);
                     }
+                    self.retrigger.clear();
                 }
                 self.fading_out = false;
             }

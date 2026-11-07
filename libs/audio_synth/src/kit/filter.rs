@@ -7,7 +7,7 @@
 
 use super::analog::vcf::{self, Vcf};
 use super::fast_tanh;
-use super::flt::FilterUnit;
+use super::flt::{CombLines, FilterUnit};
 use super::schema::{Builder, Unit::{self, Hz, Percent}, Values};
 
 /// The family id of the analog filter's wirings (subtype: the wiring).
@@ -173,6 +173,15 @@ impl Filter {
         }
         for u in &mut self.vcf {
             u.reset();
+        }
+    }
+
+    /// What the block's type needs (a comb's lines), taken from `lines`, made ahead off the audio
+    /// thread: `prepare` then never allocates for it.
+    pub fn fit(&mut self, f: &FilterBlock, lines: &mut CombLines) {
+        let (ty, _) = f.family();
+        for u in &mut self.unit {
+            u.fit(ty, lines);
         }
     }
 

@@ -9,7 +9,7 @@ use super::catalog::{sc, N_SCENE};
 use super::program::{Program, N_SOURCES};
 use crate::dsp::Rng;
 use crate::kit::core::{amp_to_linear, db_to_linear, envelope_rate_linear, glide_exp, glide_log, megapan, softclip, BlockLine, BLOCK_OS};
-use crate::kit::flt::{FilterUnit, TiltNoise};
+use crate::kit::flt::{CombLines, FilterUnit, TiltNoise};
 use crate::kit::formula::VoiceInputs;
 use crate::kit::mods::{Adsr, Lfo, ModCtx};
 use super::formula::FormulaBank;
@@ -50,6 +50,21 @@ pub enum VState {
     #[default]
     Free,
     Playing,
+}
+
+/// The type of oscillator `o` in scene `s`'s voices.
+pub fn osc_type(prog: &Program, s: usize, o: usize) -> u8 {
+    prog.scene_value(s, sc::OSC + sc::OSC_STRIDE * o).i().clamp(0, 11) as u8
+}
+
+/// The seed of oscillator `o` of a scene's voice `i`, when a program makes it.
+pub fn osc_seed(i: usize, o: usize) -> u32 {
+    (0x77 ^ i as u32).wrapping_add(o as u32 * 31)
+}
+
+/// The types of scene `s`'s two filters.
+pub fn filter_types(prog: &Program, s: usize) -> [u8; 2] {
+    [sc::F1_TYPE, sc::F2_TYPE].map(|k| prog.scene_value(s, k).i().clamp(0, 35) as u8)
 }
 
 pub struct Voice {
@@ -132,6 +147,7 @@ pub struct NoteStart {
 
 impl Voice {
     pub fn new(seed: u32) -> Voice {
+        crate::kit::shaper::ready();
         Voice {
             state: VState::Free,
             gate: false,
@@ -181,23 +197,23 @@ impl Voice {
         self.state == VState::Playing
     }
 
-    /// Make the oscillators match the patch's types (allocates on a change:
-    /// called when a program is installed, not per note).
-    pub fn set_program(&mut self, prog: &Program, s: usize, seed: u32, fs_host: f32) {
-        for o in 0..3 {
-            let ty = prog.scene_value(s, sc::OSC + sc::OSC_STRIDE * o).i().clamp(0, 11) as u8;
-            if self.oscs[o].ty() != ty {
-                self.oscs[o] = Osc::new(ty, seed.wrapping_add(o as u32 * 31));
+    /// Make the oscillators match the program's types, an oscillator of another type being the
+    /// one in `oscs` (made off the audio thread, [`osc_seed`]ed as this voice's), and take the comb
+    /// lines its filter types want from `lines`: called when a program is installed, not per note.
+    /// Only swaps: what it replaces goes to `oscs`.
+    pub fn set_program(&mut self, prog: &Program, s: usize, oscs: &mut [Osc; 3], lines: &mut CombLines, fs_host: f32) {
+        for (o, fresh) in oscs.iter_mut().enumerate() {
+            if self.oscs[o].ty() != osc_type(prog, s, o) {
+                std::mem::swap(&mut self.oscs[o], fresh);
             }
         }
-        // Filter state a type needs (the comb's line) is made here, not per block.
-        let t1 = prog.scene_value(s, sc::F1_TYPE).i().clamp(0, 35) as u8;
-        let t2 = prog.scene_value(s, sc::F2_TYPE).i().clamp(0, 35) as u8;
+        // Filter state a type needs (the comb's line) is taken here, not per block.
+        let [t1, t2] = filter_types(prog, s);
         for f in &mut self.f1 {
-            f.prepare(t1);
+            f.fit(t1, lines);
         }
         for f in &mut self.f2 {
-            f.prepare(t2);
+            f.fit(t2, lines);
         }
         self.tilt.set_sample_rate(fs_host);
         self.state = VState::Free;
