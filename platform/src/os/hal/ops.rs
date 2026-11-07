@@ -241,6 +241,7 @@ impl Cx {
     pub(crate) fn hal_handle_platform_ops(&mut self) -> bool {
         let _phase = crate::thread::ui_phase(crate::thread::UiPhase::PlatformOps);
         self.native_layer_retire();
+        let mut tray_shown = false;
         while let Some(op) = self.platform_ops.pop_front() {
             match op {
                 CxOsOp::SetOwnChrome(own) => {
@@ -266,7 +267,10 @@ impl Cx {
                 CxOsOp::RelaunchDomain(domain) => self.hal.frames.w.domain_relaunch(domain),
                 CxOsOp::ListDomains(request) => self.hal.frames.w.domain_list(request),
 
-                CxOsOp::CreateWindow(window_id) => self.hal_create_window(window_id, None),
+                CxOsOp::CreateWindow(window_id) => {
+                    self.windows[window_id].shown = true;
+                    self.hal_create_window(window_id, None)
+                }
                 CxOsOp::CreatePopupWindow { window_id, parent_window_id, position, size, grab_keyboard } => {
                     let window = &mut self.windows[window_id];
                     window.is_popup = true;
@@ -301,17 +305,17 @@ impl Cx {
                         self.hal.close_pending = Some(std::time::Instant::now());
                     }
                 }
-                CxOsOp::MinimizeWindow(w) if self.hal_hosted_extra_window(w) => Self::send_hosted_window(crate::ime::HostedWindow::new(w.id(), crate::ime::hosted_window_op::MINIMIZE)),
-                CxOsOp::MaximizeWindow(w) if self.hal_hosted_extra_window(w) => Self::send_hosted_window(crate::ime::HostedWindow::new(w.id(), crate::ime::hosted_window_op::MAXIMIZE)),
-                CxOsOp::FullscreenWindow(w) if self.hal_hosted_extra_window(w) => Self::send_hosted_window(crate::ime::HostedWindow::new(w.id(), crate::ime::hosted_window_op::FULLSCREEN)),
+                CxOsOp::MinimizeWindow(w) if self.hal_hosted_extra_window(w) => Self::send_hosted_window(makepad_hal::window_controls::HostedWindow::new(w.id(), makepad_hal::window_controls::hosted_window_op::MINIMIZE)),
+                CxOsOp::MaximizeWindow(w) if self.hal_hosted_extra_window(w) => Self::send_hosted_window(makepad_hal::window_controls::HostedWindow::new(w.id(), makepad_hal::window_controls::hosted_window_op::MAXIMIZE)),
+                CxOsOp::FullscreenWindow(w) if self.hal_hosted_extra_window(w) => Self::send_hosted_window(makepad_hal::window_controls::HostedWindow::new(w.id(), makepad_hal::window_controls::hosted_window_op::FULLSCREEN)),
                 CxOsOp::Deminiaturize(w) | CxOsOp::RestoreWindow(w) | CxOsOp::NormalizeWindow(w) if self.hal_hosted_extra_window(w) => {
-                    Self::send_hosted_window(crate::ime::HostedWindow::new(w.id(), crate::ime::hosted_window_op::RESTORE))
+                    Self::send_hosted_window(makepad_hal::window_controls::HostedWindow::new(w.id(), makepad_hal::window_controls::hosted_window_op::RESTORE))
                 }
                 CxOsOp::SetWindowTitle(w, title) if self.hal_hosted_extra_window(w) => {
-                    Self::send_hosted_window(crate::ime::HostedWindow::title(w.id(), &title))
+                    Self::send_hosted_window(makepad_hal::window_controls::HostedWindow::title(w.id(), &title))
                 }
                 CxOsOp::RepositionWindow(w, pos) if self.hal_hosted_extra_window(w) => {
-                    Self::send_hosted_window(crate::ime::HostedWindow { x: pos.x, y: pos.y, ..crate::ime::HostedWindow::new(w.id(), crate::ime::hosted_window_op::MOVE) })
+                    Self::send_hosted_window(makepad_hal::window_controls::HostedWindow { x: pos.x, y: pos.y, ..makepad_hal::window_controls::HostedWindow::new(w.id(), makepad_hal::window_controls::hosted_window_op::MOVE) })
                 }
                 CxOsOp::RepositionWindow(window_id, pos) => {
                     let s = self.windows[window_id].window_geom.inner_size;
@@ -367,8 +371,12 @@ impl Cx {
                 }
                 CxOsOp::MaximizeWindow(w) => self.hal.frames.w.window_state(hal_window_id(w), window_state::MAXIMIZE),
                 CxOsOp::FullscreenWindow(w) => self.hal.frames.w.window_state(hal_window_id(w), window_state::FULLSCREEN),
-                CxOsOp::HideWindow(w) => self.hal.frames.w.window_state(hal_window_id(w), window_state::HIDE),
+                CxOsOp::HideWindow(w) => {
+                    self.windows[w].shown = false;
+                    self.hal.frames.w.window_state(hal_window_id(w), window_state::HIDE)
+                }
                 CxOsOp::ShowWindowAtTray(w, tray, size) => {
+                    self.windows[w].shown = true;
                     // A hosted app (the makepad WM adopted it): the WM places the window under its
                     // tray item (`dropdown.rs`), the size is the app's own layout points.
                     if self.hal.hosted.is_some() {
@@ -381,6 +389,7 @@ impl Cx {
                     self.hal.frames.w.window_at_tray(hal_window_id(w), tray.0, size.x as f32, size.y as f32);
                 }
                 CxOsOp::ShowWindow(w) => {
+                    self.windows[w].shown = true;
                     self.hal.frames.w.window_state(hal_window_id(w), window_state::SHOW);
                     if self.hal.hosted.is_none() { self.hal.frames.w.activate_app(); }
                 }
@@ -403,7 +412,7 @@ impl Cx {
                 CxOsOp::SetTopmost(w, on) if self.hal.hosted.is_some() => {
                     self.windows[w].window_geom.is_topmost = on;
                     if self.windows[w].is_created {
-                        Self::send_hosted_window(crate::ime::HostedWindow::topmost(w.id(), on));
+                        Self::send_hosted_window(makepad_hal::window_controls::HostedWindow::topmost(w.id(), on));
                     }
                 }
                 CxOsOp::SetTopmost(w, on) => self.hal.frames.w.window_topmost(hal_window_id(w), on),
@@ -537,12 +546,8 @@ impl Cx {
                     fb.w.menu_set(items.len() as u32, &bytes);
                 }
                 CxOsOp::SetTray(tray) => {
-                    // A tray app shows itself with its tray: before it made a window, the first tray
-                    // the desktop shows is its first present (the launcher, the JIT's startup and its
-                    // first-frame deadline wait for one). A window app's stays its first frame.
-                    if self.trays.contains(&tray.id) && !self.windows.id_iter().any(|w| self.windows[w].is_created) {
-                        crate::startup_trace_first_present();
-                    }
+                    // (a tray the desktop shows: below)
+                    tray_shown |= self.trays.contains(&tray.id);
                     // A hosted app's tray is its host's to show (the makepad WM's tray area).
                     if self.hal.hosted.is_some() {
                         Self::send_studio_message(crate::studio::AppToStudio::Relay(crate::studio::ChildRelay::SetTray(crate::tray::relay_tray(&tray))));
@@ -695,6 +700,13 @@ impl Cx {
                 | CxOsOp::XrAdvertiseAnchor(_)
                 | CxOsOp::XrDiscoverAnchor(_) => self.hal.frames.gap("XR render scale and anchors are not on the HAL yet"),
             }
+        }
+        // A tray app shows itself with its tray: when these ops made no window, the first tray the
+        // desktop shows is its first present (the launcher, the JIT's startup and its first-frame
+        // deadline wait for one; `makepad run`'s load screen closes with it). A window app's stays
+        // its first frame, also when its window comes in the same ops as its tray, after it.
+        if tray_shown && !self.windows.id_iter().any(|w| self.windows[w].is_created) {
+            crate::startup_trace_first_present();
         }
         // A zoom queued layout geometry while handling these ops. Deliver it before the
         // next event; AppKit's moved buttons follow through the ordered Chrome/Geom pipe.

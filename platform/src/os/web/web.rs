@@ -1077,6 +1077,7 @@ impl Cx {
             || self.new_next_frames.len() != 0
             || self.demo_time_repaint
             || self.has_pending_webgl_resource_retirements()
+            || self.staged_uploads_pending()
         {
             self.os.from_wasm(FromWasmRequestAnimationFrame {});
         }
@@ -1086,6 +1087,7 @@ impl Cx {
     }
 
     pub fn handle_repaint(&mut self, time: f64) {
+        self.webgl_staged_uploads();
         let mut passes_todo = Vec::new();
 
         self.compute_pass_repaint_order(&mut passes_todo);

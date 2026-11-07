@@ -35,7 +35,7 @@ pub(crate) struct HostedClient {
     /// Geometry the host sent for windows this app had not made yet.
     early_geom: EarlyGeom,
     /// The app's first window: its main window, the one the host's tile shows. Every later
-    /// window is a window of its own on the host (`ime::HostedWindow`).
+    /// window is a window of its own on the host (`window_controls::HostedWindow`).
     pub(super) first: Option<WindowId>,
     #[cfg(target_os = "linux")]
     inbox: Option<crate::os::hosted_gpu::GpuInbox>,
@@ -167,13 +167,20 @@ impl HostedClient {
         })
     }
 
-    /// Every imported image of `window`'s swapchain is in flight or still with its host
-    /// (`can_present` false), so no frame built now could be shown. Images still being imported
-    /// do not count: until one is ready the app draws as before.
-    pub(crate) fn window_blocked(&self, window: WindowId) -> bool {
-        self.windows.get(&hal_window_id(window))
-            .is_some_and(|s| !s.images.is_empty() && s.images.iter().all(|i| i.import == ImportState::Ready))
-            && !self.can_present(window)
+    /// Every window's swapchain is blocked: each imported image is in flight or still with its
+    /// host, so no frame built now could be shown in any window. One window waiting is not
+    /// enough: its passes wait with it (`Cx::fb_pass`) while the others go on drawing.
+    pub(crate) fn all_blocked(&self) -> bool {
+        !self.windows.is_empty() && self.windows.values().all(Self::swapchain_blocked)
+    }
+
+    /// Every imported image of `swapchain` is in flight or still with its host (no
+    /// `free_image`). Images still being imported do not count: until one is ready the app draws
+    /// as before.
+    fn swapchain_blocked(swapchain: &HostedSwapchain) -> bool {
+        !swapchain.images.is_empty()
+            && swapchain.images.iter().all(|i| i.import == ImportState::Ready)
+            && Self::free_image(swapchain).is_none()
     }
 
     pub(crate) fn submitted(&mut self, window: WindowId, index: usize, frame: u64, size: [u32; 2]) {
@@ -310,14 +317,14 @@ impl Cx {
         });
         // The size the app asked for: the host opens the window at it (within its desk).
         if let Some(size) = self.windows[window].create_inner_size.filter(|s| s.x > 0.0 && s.y > 0.0) {
-            Self::send_hosted_window(crate::ime::HostedWindow { x: size.x, y: size.y, ..crate::ime::HostedWindow::new(window.id(), crate::ime::hosted_window_op::SIZE) });
+            Self::send_hosted_window(makepad_hal::window_controls::HostedWindow { x: size.x, y: size.y, ..makepad_hal::window_controls::HostedWindow::new(window.id(), makepad_hal::window_controls::hosted_window_op::SIZE) });
         }
         // A later window is a window of its own on the host: it is named by its own title.
         if self.hal_hosted_extra_window(window) {
-            Self::send_hosted_window(crate::ime::HostedWindow::title(window.id(), &self.windows[window].create_title));
+            Self::send_hosted_window(makepad_hal::window_controls::HostedWindow::title(window.id(), &self.windows[window].create_title));
         }
         if self.windows[window].window_geom.is_topmost {
-            Self::send_hosted_window(crate::ime::HostedWindow::topmost(window.id(), true));
+            Self::send_hosted_window(makepad_hal::window_controls::HostedWindow::topmost(window.id(), true));
         }
         let early = self.hal.hosted.as_mut().and_then(|hosted| hosted.early_geom.take(window.id()));
         if let Some(geom) = early {

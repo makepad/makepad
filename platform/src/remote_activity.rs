@@ -42,6 +42,9 @@ pub(crate) struct RemoteActivity {
     /// `remote::remote_input_scope`); shared so the scope guard needs no
     /// borrow of the `Cx` across the dispatch.
     pub(crate) remote_input: Rc<Cell<bool>>,
+    /// Who sent the injected input being dispatched (`remote::remote_input_scope_by`; empty: not
+    /// known, or none).
+    pub(crate) remote_by: Rc<std::cell::RefCell<String>>,
 }
 
 impl RemoteActivity {

@@ -402,6 +402,45 @@ fn a_hover_badge_sees_the_pointer_over_it_but_never_takes_input() {
     assert_eq!(app, events.iter().map(|e| (e.tag, APP_WINDOW)).collect::<Vec<_>>());
 }
 
+/// Only a press that begins on a badge that takes presses (the JIT ring's Update ready dot) is
+/// the badge's: a caption drag that crosses it, a second button pressed on it while that drag
+/// holds the first, and a press held as the badge came to take presses all stay the app's.
+#[test]
+fn a_press_that_began_elsewhere_is_never_the_badges() {
+    let (hal, sid) = setup();
+    const BADGE: Id = Id::new(9, 1);
+    let badge = |press: bool| hal.with_world(|w| {
+        let host = w.session_mut(HOST).unwrap().windows.get_mut(HOST, HOST_WINDOW).unwrap();
+        host.val.badge_hover = Some((BADGE, [960.0, 2.0, 24.0, 24.0]));
+        host.val.badge_press = press;
+    });
+    let presses = || take(&hal, HOST).iter().filter(|(e, _)| e.tag == tag::MouseDown).count();
+    badge(true);
+    let drag = [
+        RawEvent::mouse_down(APP_WINDOW, 500.0, 12.0, 1, 0),
+        RawEvent::mouse_move(APP_WINDOW, 970.0, 12.0, 0.0, 0.0, 0),
+        RawEvent::mouse_down(APP_WINDOW, 970.0, 12.0, 2, 0),
+        RawEvent::mouse_up(APP_WINDOW, 970.0, 12.0, 2, 0),
+        RawEvent::mouse_up(APP_WINDOW, 972.0, 12.0, 1, 0),
+    ];
+    hal.with_world(|w| for e in drag { w.window_event(sid, e, &[]) });
+    assert_eq!(presses(), 0, "a drag across the badge and a press during it are not the badge's");
+    let app: Vec<_> = take(&hal, sid).iter().map(|(e, _)| e.tag).collect();
+    assert_eq!(app, drag.iter().map(|e| e.tag).collect::<Vec<_>>(), "the app has the whole drag");
+    // the badge comes to take presses while a press is down on its place: the release is the app's
+    badge(false);
+    hal.with_world(|w| w.window_event(sid, RawEvent::mouse_down(APP_WINDOW, 970.0, 12.0, 1, 0), &[]));
+    badge(true);
+    hal.with_world(|w| w.window_event(sid, RawEvent::mouse_up(APP_WINDOW, 970.0, 12.0, 1, 0), &[]));
+    assert_eq!(presses(), 0, "a press held as the badge came");
+    let app: Vec<_> = take(&hal, sid).iter().map(|(e, _)| e.tag).collect();
+    assert_eq!(app, [tag::MouseDown, tag::MouseUp]);
+    // a press that begins on the badge, nothing else down: the badge's
+    hal.with_world(|w| w.window_event(sid, RawEvent::mouse_down(APP_WINDOW, 970.0, 12.0, 1, 0), &[]));
+    assert_eq!(presses(), 1);
+    assert!(take(&hal, sid).iter().all(|(e, _)| e.tag != tag::MouseDown));
+}
+
 #[test]
 fn the_apps_caption_is_the_host_windows() {
     let (hal, sid) = setup();
@@ -455,6 +494,104 @@ fn a_badge_layer_is_kept_over_every_frame_until_one_without_draws() {
     badges(&hal, 22, false);
     assert_eq!(frames_done(&take(&hal, HOST)), 1);
     assert!(hal.with_world(|w| w.session(HOST).unwrap().windows.get(HOST, HOST_WINDOW).unwrap().val.badges.is_none()));
+}
+
+fn ask_beat(hal: &Hal, sid: u32, window: Id) {
+    let mut cmd = CmdWriter::new(sid);
+    cmd.frame_request(window);
+    hal.submit(&cmd.buf());
+}
+
+/// The window system's beat of the lent window, as it reaches the borrower's alias.
+fn display_beat(hal: &Hal, sid: u32) {
+    hal.with_world(|w| w.window_event(sid, RawEvent::frame_ready(APP_WINDOW, 5), &[]));
+}
+
+fn beats(events: &[(RawEvent, Vec<u8>)]) -> Vec<Id> {
+    events.iter().filter(|(e, _)| e.tag == tag::FrameReady).map(|(e, _)| e.window).collect()
+}
+
+/// Session 0 asks for beats of its lent window (its ring and fades draw on the display's beats,
+/// as the app's frames do), the borrower for its alias: the window's one beat reaches each side
+/// that asked, and one no one asked for (a backend's own) stays the borrower's. A badge frame
+/// while the borrower has a beat it has not drawn with rides the borrower's frame: kept, not
+/// presented, shown with that frame (and done then); so does one drawn after the last showed on
+/// this beat, while the borrower asked for its next (session 0 draws it a frame ahead). One the
+/// borrower never draws presents on its own: at once when it asks again without having drawn, or
+/// when session 0 asks two beats after the ride began while the borrower draws with no beat.
+/// Without a beat of the borrower it presents at once.
+#[test]
+fn a_lent_windows_beats_reach_who_asked_and_badge_frames_ride_the_apps() {
+    let (hal, sid) = setup();
+    for (asked, host, app) in [
+        (vec![HOST], vec![HOST_WINDOW], vec![]),
+        (vec![sid], vec![], vec![APP_WINDOW]),
+        (vec![HOST, sid], vec![HOST_WINDOW], vec![APP_WINDOW]),
+        (vec![], vec![], vec![APP_WINDOW]),
+    ] {
+        for &asker in &asked {
+            ask_beat(&hal, asker, if asker == HOST { HOST_WINDOW } else { APP_WINDOW });
+        }
+        // (headless answers each request at once; the backend's beat is the one below)
+        take(&hal, HOST);
+        take(&hal, sid);
+        display_beat(&hal, sid);
+        assert_eq!((beats(&take(&hal, HOST)), beats(&take(&hal, sid))), (host, app), "asked by {asked:?}");
+    }
+    badges(&hal, 21, true);
+    frame(&hal, sid, APP_WINDOW, 12, target::WINDOW);
+    take(&hal, HOST);
+    // the app has its beat: the ring's frame of that refresh shows with the app's frame
+    ask_beat(&hal, sid, APP_WINDOW);
+    display_beat(&hal, sid);
+    badges(&hal, 22, true);
+    assert_eq!(frames_done(&take(&hal, HOST)), 0, "a riding frame presents nothing of its own");
+    frame(&hal, sid, APP_WINDOW, 13, target::WINDOW);
+    assert_eq!(shown(&hal), [(sid, APP_WINDOW, 13), (HOST, HOST_WINDOW, 22)]);
+    assert_eq!(frames_done(&take(&hal, HOST)), 1, "shown with the app's frame");
+    // the app asks for its next beat: the ring's next frame, drawn now, is that beat's and rides
+    // the app's next frame; the app asks again without having drawn with the beat: it presents
+    ask_beat(&hal, sid, APP_WINDOW);
+    badges(&hal, 23, true);
+    assert_eq!(frames_done(&take(&hal, HOST)), 0, "a frame ahead rides the app's next");
+    display_beat(&hal, sid);
+    ask_beat(&hal, sid, APP_WINDOW);
+    assert_eq!(frames_done(&take(&hal, HOST)), 1, "its beat went unused");
+    // the app goes quiet with its beat: session 0's request two beats on presents the frame
+    display_beat(&hal, sid);
+    badges(&hal, 24, true);
+    ask_beat(&hal, HOST, HOST_WINDOW);
+    display_beat(&hal, sid);
+    ask_beat(&hal, HOST, HOST_WINDOW);
+    assert_eq!(frames_done(&take(&hal, HOST)), 0, "one beat on, the app's frame may still come");
+    display_beat(&hal, sid);
+    ask_beat(&hal, HOST, HOST_WINDOW);
+    assert_eq!(frames_done(&take(&hal, HOST)), 1, "two beats on it presents alone");
+    // the app idle: the ring's frames present at once
+    display_beat(&hal, sid);
+    badges(&hal, 25, true);
+    assert_eq!(frames_done(&take(&hal, HOST)), 1);
+    // a riding frame a newer one replaces is done unseen; the newer shows
+    ask_beat(&hal, sid, APP_WINDOW);
+    display_beat(&hal, sid);
+    badges(&hal, 26, true);
+    badges(&hal, 27, true);
+    assert_eq!(frames_done(&take(&hal, HOST)), 1);
+    frame(&hal, sid, APP_WINDOW, 14, target::WINDOW);
+    assert_eq!(shown(&hal), [(sid, APP_WINDOW, 14), (HOST, HOST_WINDOW, 27)]);
+    assert_eq!(frames_done(&take(&hal, HOST)), 1);
+    // a frame ahead waits for an app slower than the display while it draws with its beat
+    ask_beat(&hal, HOST, HOST_WINDOW);
+    ask_beat(&hal, sid, APP_WINDOW);
+    badges(&hal, 28, true);
+    display_beat(&hal, sid);
+    ask_beat(&hal, HOST, HOST_WINDOW);
+    display_beat(&hal, sid);
+    ask_beat(&hal, HOST, HOST_WINDOW);
+    assert_eq!(frames_done(&take(&hal, HOST)), 0, "two beats on, the app still draws with its beat");
+    frame(&hal, sid, APP_WINDOW, 15, target::WINDOW);
+    assert_eq!(shown(&hal), [(sid, APP_WINDOW, 15), (HOST, HOST_WINDOW, 28)]);
+    assert_eq!(frames_done(&take(&hal, HOST)), 1);
 }
 
 #[test]

@@ -446,6 +446,8 @@ impl WindowHandle {
         let window = cx.windows.alloc();
         let cxwindow = &mut cx.windows[window.window_id()];
         cxwindow.is_created = false;
+        cxwindow.shown = false;
+        cxwindow.key = false;
         cxwindow.create_title = crate::window::badge_window_title("Makepad".to_string());
         cxwindow.create_inner_size = None;
         cxwindow.create_position = None;
@@ -854,11 +856,19 @@ impl WindowHandle {
     /// What the window's own close button does: the app is asked (`Event::WindowCloseRequested`,
     /// a tray app hides the window there) and the window closes when it accepts. `close` closes
     /// it without asking.
+    #[track_caller]
     pub fn request_close(&mut self, cx: &mut Cx) {
+        crate::log!("window {}: the app asks to close it at {}{}", self.window_id().id(), std::panic::Location::caller(), injected_note(cx));
         cx.push_unique_platform_op(CxOsOp::RequestCloseWindow(self.window_id()));
     }
 
+    /// Closes the window without asking; the log names the caller (a close the person did not
+    /// ask for is then the app's, 11-06).
+    #[track_caller]
     pub fn close(&mut self, cx: &mut Cx) {
+        if !cx.windows[self.window_id()].is_popup {
+            crate::log!("window {}: the app closes it at {}{}", self.window_id().id(), std::panic::Location::caller(), injected_note(cx));
+        }
         cx.push_unique_platform_op(CxOsOp::CloseWindow(self.window_id()));
     }
 
@@ -925,6 +935,12 @@ pub struct CxWindow {
     pub is_popup: bool,
     /// a tray app's dropdown (`WindowHandle::configure_dropdown`)
     pub dropdown: bool,
+    /// On screen as far as the app asked: made, shown, or shown at its tray, and not hidden since
+    /// ([`Cx::show_to_person`] opens a tray app whose windows are all hidden)
+    pub(crate) shown: bool,
+    /// It has the keyboard focus (the window system's last focus event for it): `status` says so
+    /// (`"key"`), as a shown app's start must not take it from the app the person types in
+    pub(crate) key: bool,
     pub popup_parent: Option<WindowId>,
     pub popup_position: Option<Vec2d>,
     pub popup_size: Option<Vec2d>,
@@ -969,6 +985,8 @@ impl Default for CxWindow {
             is_fullscreen: false,
             is_popup: false,
             dropdown: false,
+            shown: false,
+            key: false,
             popup_parent: None,
             popup_position: None,
             popup_size: None,
@@ -1747,4 +1765,28 @@ mod tests {
         assert!(matches!(second, CxOsOp::SetTopmost(_, true)));
         assert!(cx.platform_ops.is_empty());
     }
+
+    /// Input a command injects says who sent it to what it reaches (a window's close or caption
+    /// button), the inner scope's sender while it lasts; the window system's input says nothing.
+    #[test]
+    fn injected_input_names_its_sender() {
+        let cx = test_cx();
+        assert_eq!(cx.injected_by(), None);
+        {
+            let _outer = crate::remote::remote_input_scope_by(&cx, "agent LANE7, pid 812 makepad");
+            assert_eq!(cx.injected_by().as_deref(), Some("agent LANE7, pid 812 makepad"));
+            {
+                let _inner = crate::remote::remote_input_scope(&cx);
+                assert_eq!(cx.injected_by().as_deref(), Some("a sender its connection does not name"));
+            }
+            assert_eq!(cx.injected_by().as_deref(), Some("agent LANE7, pid 812 makepad"));
+        }
+        assert_eq!(cx.injected_by(), None);
+    }
+}
+
+/// A close log line's note of injected input: who sent the input that led to it (empty for the
+/// window system's input).
+fn injected_note(cx: &Cx) -> String {
+    cx.injected_by().map_or(String::new(), |who| format!(" (in input injected by {who})"))
 }

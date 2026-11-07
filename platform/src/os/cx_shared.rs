@@ -1214,9 +1214,9 @@ impl Cx {
                     }
                     #[cfg(target_arch = "wasm32")]
                     let _ = dropdown;
-                } else if let Some(window) = crate::ime::HostedWindow::parse(&data) {
+                } else if let Some(window) = makepad_hal::window_controls::HostedWindow::parse(&data) {
                     #[cfg(not(target_arch = "wasm32"))]
-                    if window.op == crate::ime::hosted_window_op::CLOSE_REQUEST {
+                    if window.op == makepad_hal::window_controls::hosted_window_op::CLOSE_REQUEST {
                         self.hal_hosted_close_request(window.window_id);
                     }
                     #[cfg(target_arch = "wasm32")]
@@ -1933,6 +1933,7 @@ impl Cx {
         self.drawing_start = self.redraw_id;
         self.in_draw_redraws.clear();
         self.in_draw_event = true;
+        self.drawing_xr_frame = std::mem::take(&mut self.xr_frame_due);
         crate::frame_trace::note_drawn();
         // The flag comes down whether the draw returned or unwound: a
         // platform that catches the panic and goes on must not have every
@@ -1943,6 +1944,7 @@ impl Cx {
         }));
         self.pass_load.draw_end();
         self.in_draw_event = false;
+        self.drawing_xr_frame = false;
         if let Err(payload) = drawn {
             std::panic::resume_unwind(payload);
         }

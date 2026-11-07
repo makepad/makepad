@@ -317,6 +317,22 @@ fn reclass_updates_yield_and_background_accounting() {
 }
 
 #[test]
+fn a_wait_behind_an_earlier_job_on_a_strand_is_reported_apart_from_waits_for_a_worker() {
+    let (b, _) = budget(6);
+    b.strand_waited(VISIBLE, 19_700_000_000, "strand job");
+    b.waited(VISIBLE, APP, 2_000, "strand job");
+    let text = b.report();
+    let first = text.lines().next().unwrap();
+    assert!(!first.contains("worst:"), "the pool's worst names the strand's wait: {text}");
+    assert!(text.contains("behind an earlier job on its strand: wait p50 / p95 / max  "), "{text}");
+    assert!(text.contains(", worst: visible \"strand job\" waited 19.7 s\n"), "{text}");
+    let hist = std::array::from_fn(|i| b.waits[VISIBLE as usize][i].load(Relaxed));
+    assert_eq!(percentile(&hist, 95), 2000);
+    assert_eq!(b.max_wait[VISIBLE as usize].load(Relaxed), 2_000);
+    assert_eq!(b.max_strand_wait.load(Relaxed), 19_700_000_000);
+}
+
+#[test]
 fn diagnostics_track_waits_culprit_recent_worst_and_utf8_labels() {
     let (mut b, _) = budget(6);
     Arc::get_mut(&mut b).unwrap().origin = Instant::now() - std::time::Duration::from_secs(61);

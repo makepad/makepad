@@ -170,6 +170,19 @@ pub fn run_end(client: &Client, argv: &[String], each: &mut dyn FnMut(&str) -> b
     run_inner(client, argv, each, true)
 }
 
+/// Whether this side answers `argv` itself by reading the app's `frames` service (`grab`, `gseq`,
+/// `rec` frames, `gq`, `tweak grab`, the picture of `tweak final`), as [`run`] does: the app has
+/// no command for it, so a caller that relays commands to it runs these on a client of its own
+/// ([`Client::routed`]).
+pub fn client_side(argv: &[String]) -> bool {
+    let (words, _) = split_args(argv);
+    match (words.first().map(String::as_str), words.get(1).map(String::as_str)) {
+        (Some("grab" | "gseq" | "gq"), _) | (Some("tweak"), Some("grab" | "final")) => true,
+        (Some("rec"), s) => !matches!(s, Some("save" | "status" | "mark" | "on" | "off")),
+        _ => false,
+    }
+}
+
 fn run_inner(client: &Client, argv: &[String], each: &mut dyn FnMut(&str) -> bool, want_end: bool) -> Result<(bool, Option<String>), Error> {
     let (words, kv) = split_args(argv);
     let first = words.first().map(String::as_str).unwrap_or("help");
@@ -599,7 +612,7 @@ fn tweak_final(client: &Client, words: &[String], kv: &[(String, String)], each:
 
 #[cfg(test)]
 mod tests {
-    use super::typed_line;
+    use super::{client_side, typed_line};
 
     fn words(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_string).collect()
@@ -615,5 +628,15 @@ mod tests {
         assert_eq!(typed_line(&words("vm roots top=12")), "vm roots top=12");
         let spaced = ["ui".to_string(), "find".to_string(), "q=Save as".to_string(), "nth=1".to_string()];
         assert_eq!(typed_line(&spaced), r#"{"cmd":"ui find","q":"Save as","nth":"1"}"#);
+    }
+
+    #[test]
+    fn the_commands_read_from_frames_are_the_clients_own() {
+        for line in ["grab out=a.png", "grab w=1 scale=0.5", "gseq n=4", "gq", "rec", "rec n=30", "tweak grab", "tweak final x=1"] {
+            assert!(client_side(&words(line)), "{line} is answered on the client");
+        }
+        for line in ["rec save", "rec status", "rec mark x", "ui tree", "tweak set x=1", "session", "tools", ""] {
+            assert!(!client_side(&words(line)), "{line} is the app's own");
+        }
     }
 }

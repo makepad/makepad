@@ -5,6 +5,10 @@
 //! CPU time of the app's draws. For a stream's diagnostics: "the desktop view takes 9 ms of the
 //! GPU per headset frame".
 //!
+//! The UI thread's own time too: all of it outside the loop's idle wait (events, the draws, the
+//! frame build, the submit), and of that the frame build (passes into commands) and the submit
+//! (commands to the GPU): "the host's frame is 12 ms of the UI thread, 3 of them drawing".
+//!
 //! Off until asked (`Cx::set_pass_load_enabled`); on, a pass adds one entry to a small queue
 //! that its `FrameDone` takes back.
 // (the web has no HAL frames: nothing there paints or finishes a pass through this)
@@ -37,6 +41,11 @@ pub struct PassLoadSample {
     /// The app's draws and their CPU time (ms in all).
     pub draws: u32,
     pub draw_ms: f64,
+    /// The UI thread's time outside the loop's idle wait, and of it the frame builds and the
+    /// submits (ms in all).
+    pub busy_ms: f64,
+    pub build_ms: f64,
+    pub submit_ms: f64,
 }
 
 impl PassLoadSample {
@@ -47,8 +56,37 @@ impl PassLoadSample {
 
     /// The draws' CPU ms per second.
     pub fn draw_ms_per_s(&self) -> f64 {
-        if self.secs > 0.0 { self.draw_ms / self.secs } else { 0.0 }
+        self.per_s(self.draw_ms)
     }
+
+    /// The UI thread's ms per second: busy (outside the idle wait), building frames, submitting.
+    pub fn busy_ms_per_s(&self) -> f64 {
+        self.per_s(self.busy_ms)
+    }
+
+    pub fn build_ms_per_s(&self) -> f64 {
+        self.per_s(self.build_ms)
+    }
+
+    pub fn submit_ms_per_s(&self) -> f64 {
+        self.per_s(self.submit_ms)
+    }
+
+    fn per_s(&self, ms: f64) -> f64 {
+        if self.secs > 0.0 { ms / self.secs } else { 0.0 }
+    }
+}
+
+/// A part of the UI thread's time (`PassLoad::mark` to `PassLoad::spent`).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UiTime {
+    /// Outside the loop's idle wait.
+    Busy,
+    /// The frame build: the passes into commands.
+    Build,
+    /// The submit: the commands to the GPU.
+    Submit,
 }
 
 /// Packets whose `FrameDone` is still to come, kept at most (older ones are forgotten).
@@ -118,6 +156,24 @@ impl PassLoad {
         }
     }
 
+    /// Now, to time a part of the UI thread from (None while off).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn mark(&self) -> Option<std::time::Instant> {
+        self.on.then(std::time::Instant::now)
+    }
+
+    /// The UI thread spent the time since `from` (`Self::mark`) on `part`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn spent(&mut self, part: UiTime, from: Option<std::time::Instant>) {
+        let Some(at) = from.filter(|_| self.on) else { return };
+        let ms = at.elapsed().as_secs_f64() * 1000.0;
+        match part {
+            UiTime::Busy => self.acc.busy_ms += ms,
+            UiTime::Build => self.acc.build_ms += ms,
+            UiTime::Submit => self.acc.submit_ms += ms,
+        }
+    }
+
     pub(crate) fn take(&mut self) -> PassLoadSample {
         let mut out = std::mem::take(&mut self.acc);
         #[cfg(not(target_arch = "wasm32"))]
@@ -152,5 +208,18 @@ mod tests {
         assert_eq!(s.passes, [1, 1, 1]);
         assert_eq!(s.untimed, 1);
         assert_eq!(l.take().gpu_ms, [0.0; 3], "taken: starts again");
+    }
+
+    #[test]
+    fn ui_time_lands_in_its_part() {
+        let mut l = PassLoad::default();
+        assert!(l.mark().is_none(), "off: nothing timed");
+        l.set_enabled(true);
+        let from = Some(std::time::Instant::now() - std::time::Duration::from_millis(4));
+        l.spent(UiTime::Busy, from);
+        l.spent(UiTime::Submit, from);
+        l.spent(UiTime::Build, None);
+        let s = l.take();
+        assert!(s.busy_ms >= 4.0 && s.submit_ms >= 4.0 && s.build_ms == 0.0, "{s:?}");
     }
 }

@@ -149,11 +149,18 @@ impl Endpoint {
 
     /// As [`serve`](Self::serve), refusing a peer whose HELLO does not carry `token` (when it is
     /// not empty): the loopback carrier's shared secret.
-    pub fn serve_checked(&self, mut reader: FrameReader, mut writer: Box<dyn Write + Send>, shutdown: Box<dyn Fn() + Send + Sync>, token: &str) -> Result<Conn, HandshakeError> {
+    pub fn serve_checked(&self, reader: FrameReader, writer: Box<dyn Write + Send>, shutdown: Box<dyn Fn() + Send + Sync>, token: &str) -> Result<Conn, HandshakeError> {
+        self.serve_peer(reader, writer, shutdown, token, 0)
+    }
+
+    /// As [`serve_checked`](Self::serve_checked), for a peer whose process the carrier knows
+    /// (`pid`, from a Unix socket's credentials): [`Hello::pid`] of the connection's peer, which a
+    /// command's log names as who asked ([`crate::cmd::asked_by`]).
+    pub fn serve_peer(&self, mut reader: FrameReader, mut writer: Box<dyn Write + Send>, shutdown: Box<dyn Fn() + Send + Sync>, token: &str, pid: u32) -> Result<Conn, HandshakeError> {
         reader.deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
         let own = Hello { name: self.0.app.clone(), caps: self.caps(), token: token.to_string(), ..Hello::default() };
         let peer = match hello::server_handshake(&mut reader, &mut *writer, &own) {
-            Ok(p) => p,
+            Ok(p) => Hello { pid, ..p },
             Err(e) => {
                 shutdown();
                 return Err(e);

@@ -73,6 +73,9 @@ pub struct CxScriptResources {
     /// caches a negative answer ("this resource cannot be read") keys it on
     /// this, so a resource that appears later is asked for again.
     pub generation: std::cell::Cell<u64>,
+    /// The crates whose directory was found missing ([`report_missing_crate_dir`]): each is
+    /// said once.
+    missing_crate_dirs: Vec<String>,
 }
 
 impl CxScriptResources {
@@ -256,6 +259,24 @@ fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
 
 /// Load a file directly from the filesystem (desktop/mobile only, not wasm).
 #[cfg(not(target_arch = "wasm32"))]
+/// An unpackaged native build reads a crate's resources from the directory that crate was built
+/// in (its `CARGO_MANIFEST_DIR`, fixed at compile time). A binary whose tree was moved or renamed
+/// after the build finds none of them, and its fonts, icons and images are blank without a word:
+/// that is said here, once per crate, naming the directory. `abs_path` is the crate directory
+/// joined with the file part of `dependency_path` (`crate/file`).
+#[cfg(not(target_arch = "wasm32"))]
+fn report_missing_crate_dir(reported: &mut Vec<String>, abs_path: &str, dependency_path: Option<&str>) {
+    let Some((crate_name, file)) = dependency_path.and_then(|path| path.split_once('/')) else { return };
+    let Some(dir) = abs_path.strip_suffix(file).and_then(|dir| dir.strip_suffix('/')) else { return };
+    if reported.iter().any(|name| name == crate_name) || std::path::Path::new(dir).is_dir() {
+        return;
+    }
+    reported.push(crate_name.to_string());
+    crate::error!(
+        "resources of {crate_name} are read from {dir}, which does not exist: this binary was built in a tree that has moved since; rebuild it where it runs"
+    );
+}
+
 fn load_file_direct(abs_path: &str) -> Option<Result<Rc<Vec<u8>>, String>> {
     let mut file = File::open(abs_path).ok()?;
     let mut data = Vec::new();
@@ -477,6 +498,9 @@ impl Cx {
 
             #[cfg(not(target_arch = "wasm32"))]
             {
+                if !is_packaged {
+                    report_missing_crate_dir(&mut self.script_data.resources.missing_crate_dirs, &res.abs_path, res.dependency_path.as_deref());
+                }
                 res.data = CxScriptResourceData::Error(format!(
                     "Failed to load resource: {} (dep: {:?}, packaged: {})",
                     res.abs_path, res.dependency_path, is_packaged,
@@ -717,6 +741,22 @@ mod tests {
             web_resource_base_path("/examples/splash/index.html"),
             "examples/splash"
         );
+    }
+
+    /// A crate whose build directory is gone is said once, whatever else of it fails to load;
+    /// a crate whose directory exists (a file of it is missing) is not.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_crate_built_in_a_moved_tree_is_said_once() {
+        use super::report_missing_crate_dir;
+        let mut reported = Vec::new();
+        let gone = "/nonexistent-moved-tree/widgets";
+        report_missing_crate_dir(&mut reported, &format!("{gone}/resources/font.ttf"), Some("makepad_widgets/resources/font.ttf"));
+        report_missing_crate_dir(&mut reported, &format!("{gone}/resources/icon.svg"), Some("makepad_widgets/resources/icon.svg"));
+        assert_eq!(reported, ["makepad_widgets"]);
+        let here = env!("CARGO_MANIFEST_DIR");
+        report_missing_crate_dir(&mut reported, &format!("{here}/resources/missing.ttf"), Some("makepad_platform/resources/missing.ttf"));
+        assert_eq!(reported, ["makepad_widgets"]);
     }
 }
 

@@ -166,6 +166,7 @@ pub fn jit(cmd: &str, sub: &str) -> Option<&'static str> {
     Some(match (cmd, sub) {
         ("session" | "pin" | "help" | "ping" | "threads" | "cpu" | "waits" | "vms" | "panics" | "pause" | "resume" | "rm" | "continue" | "versions" | "cache" | "frame", _) => "",
         ("inputs", _) => params!("match": "string", "of": "string"),
+        ("hold", _) => params!("files": "string", "dir": "string"),
         ("why-hung" | "hang", _) => params!("probe_ms": "integer", "depth": "integer"),
         ("capture", _) => params!("why": "string"),
         ("why-slow" | "counters" | "contention", _) => params!("s": "number", "n": "integer"),

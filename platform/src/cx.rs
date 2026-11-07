@@ -167,14 +167,25 @@ pub struct Cx {
     pub(crate) pending_camera_playbacks: Vec<PendingCameraPlayback>,
 
     pub(crate) new_next_frames: HashSet<NextFrame>,
+    /// The textures whose uploads are staged ([`crate::Texture::set_staged_upload`]): each
+    /// frame's backend sends what they wait to upload, drawn or not.
+    pub(crate) staged_textures: Vec<crate::texture::TextureId>,
     /// Frame requests made so far (`Cx::frame_requests`).
     pub(crate) frame_requests: u64,
     /// An `Event::XrUpdate` is being handled: what is redrawn now is drawn for a remote
     /// headset's frame, and paints no window (`Cx::compute_pass_repaint_order`).
     pub(crate) in_xr_update: bool,
+    /// An XR frame came (`Event::XrUpdate`) and no drawing has started since.
+    pub(crate) xr_frame_due: bool,
+    /// The drawing under way is the first since an XR frame came (`Cx::drawing_xr_frame`).
+    pub(crate) drawing_xr_frame: bool,
     /// Something other than a remote headset's frame redrew since the windows last painted (or
     /// a grab waits for them): with an offscreen XR display the windows paint only then.
     pub(crate) window_redrawn: bool,
+    /// A remote request (a `/step` frame, a grab) asked for a window's frame and no beat has drawn
+    /// since: under the virtual clock the app draws for such a request (`app_draws_now`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) remote_present_owed: bool,
     /// Repaints that painted a window, since the start (`Cx::window_paints`).
     pub(crate) window_paints: u64,
     /// A child its host says nothing shows of (`HostedVisible`: a hosted process over its
@@ -1078,9 +1089,14 @@ impl Cx {
             pending_camera_playbacks: Vec::new(),
             studio_http: "".to_string(),
             new_next_frames: Default::default(),
+            staged_textures: Vec::new(),
             frame_requests: 0,
             in_xr_update: false,
+            xr_frame_due: false,
+            drawing_xr_frame: false,
             window_redrawn: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            remote_present_owed: false,
             window_paints: 0,
             hosted_hidden: false,
 

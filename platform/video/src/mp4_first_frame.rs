@@ -267,6 +267,55 @@ fn hvcc_params(config: &[u8]) -> Result<(Vec<Vec<u8>>, usize), VideoFileError> {
 /// Demuxes the first video sample of `bytes` into one Annex-B access unit.
 pub fn first_access_unit(bytes: &[u8]) -> Result<FirstAccessUnit, VideoFileError> {
     let moov = find_box(bytes, b"moov").ok_or_else(|| err("no moov box"))?;
+    access_unit(moov, |start, len| bytes.get(start..start.checked_add(len)?).map(std::borrow::Cow::Borrowed))
+}
+
+/// [`first_access_unit`] of the file at `path`, reading only its top-level box
+/// headers, its `moov` and its first sample: a movie's media data stays on disk.
+pub fn first_access_unit_from_file(path: &str) -> Result<FirstAccessUnit, VideoFileError> {
+    use std::io::{Read, Seek, SeekFrom};
+    let io = |e: std::io::Error| err(&format!("{path}: {e}"));
+    let mut file = std::fs::File::open(path).map_err(io)?;
+    let len = file.metadata().map_err(io)?.len();
+    let mut at = 0u64;
+    let moov = loop {
+        if at + 8 > len {
+            return Err(err("no moov box"));
+        }
+        file.seek(SeekFrom::Start(at)).map_err(io)?;
+        let mut head = [0u8; 8];
+        file.read_exact(&mut head).map_err(io)?;
+        let (header, size) = match u32::from_be_bytes(head[0..4].try_into().unwrap()) {
+            // size 0: the box runs to the end of the file.
+            0 => (8, len - at),
+            1 => {
+                let mut large = [0u8; 8];
+                file.read_exact(&mut large).map_err(io)?;
+                (16, u64::from_be_bytes(large))
+            }
+            n => (8, n as u64),
+        };
+        if size < header || at + size > len {
+            return Err(err("a top-level box runs past the end of the file"));
+        }
+        if &head[4..8] == b"moov" {
+            let mut moov = vec![0u8; (size - header) as usize];
+            file.read_exact(&mut moov).map_err(io)?;
+            break moov;
+        }
+        at += size;
+    };
+    access_unit(&moov, |start, n| {
+        file.seek(SeekFrom::Start(start as u64)).ok()?;
+        let mut sample = vec![0u8; n];
+        file.read_exact(&mut sample).ok()?;
+        Some(std::borrow::Cow::Owned(sample))
+    })
+}
+
+/// The first sample of `moov`'s video track as one Annex-B access unit, the
+/// sample's bytes at (file offset, length) from `read`.
+fn access_unit<'a>(moov: &[u8], read: impl FnOnce(usize, usize) -> Option<std::borrow::Cow<'a, [u8]>>) -> Result<FirstAccessUnit, VideoFileError> {
     let track = video_track(moov)?;
     let (sets, nal_len_size) = match track.codec {
         StreamVideoCodec::H264 => avcc_params(track.config)?,
@@ -276,10 +325,11 @@ pub fn first_access_unit(bytes: &[u8]) -> Result<FirstAccessUnit, VideoFileError
         return Err(err("codec configuration carries no parameter sets"));
     }
 
-    let start = track.first_sample_offset as usize;
-    let sample = bytes
-        .get(start..start + track.first_sample_size as usize)
+    let sample = read(track.first_sample_offset as usize, track.first_sample_size as usize)
         .ok_or_else(|| err("first sample lies outside the file"))?;
+    if sample.is_empty() {
+        return Err(err("the first sample is empty"));
+    }
 
     let mut annex_b = Vec::with_capacity(sample.len() + 256);
     for set in &sets {

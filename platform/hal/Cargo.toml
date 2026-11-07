@@ -16,6 +16,9 @@ makepad-key-code = { path = "../key_code", version = "0.1.0" }
 makepad-font-core = { path = "../../libs/font_core", version = "1.0.0" }
 # FastMap (lib.rs): the object maps of the per-draw path
 fxhash = { path = "../../libs/fxhash", version = "0.2.1" }
+# window_controls.rs: the hosted window state a WM and its apps exchange (every platform builds
+# it), and the WM-hosted shell's hub protocol frames (backend/linux/wm.rs)
+makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
 
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 makepad-vulkan = { path = "../../libs/vulkan", version = "0.1.0" }
@@ -32,8 +35,6 @@ wayland-protocols = { path = "../../libs/linux/wayland-protocols", features = ["
 # WM discovery checks the hosted wire a makepad window manager speaks (wm_socket.rs), and the
 # WM-hosted shell and hosted clients share its swapchain types (hosted_ipc.rs)
 makepad-studio-protocol = { path = "../studio", version = "0.1.0" }
-# the WM-hosted shell speaks the hub protocol's binary frames (backend/linux/wm.rs)
-makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
 
 # The Metal backend and its AppKit / UIKit shells: the shared Apple bindings and the objc runtime
 [target.'cfg(target_vendor = "apple")'.dependencies]
@@ -64,6 +65,11 @@ makepad-math = { path = "../../libs/math", version = "1.0.0" }
 # The D3D11 backend and the Win32 shell (Windows): generated Win32/COM bindings
 [target.'cfg(windows)'.dependencies]
 makepad-windows-sys = { path = "../../libs/windows/sys", version = "0.1.0" }
+
+# Shows a window and clicks its close button: macOS, with a screen (a main loop of its own).
+[[test]]
+name = "close_source"
+harness = false
 
 # Real-bus Linux smoke rig; run by tools/a11y_rigs/linux_atspi.sh.
 [[test]]

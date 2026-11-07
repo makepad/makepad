@@ -539,6 +539,12 @@ impl Drop for Capture {
 #[derive(Default)]
 pub struct Camera {
     devices: Vec<Device>,
+    /// The `/dev/video*` nodes the last probe settled, cameras or not: a
+    /// webcam's metadata node is skipped, so `devices` alone never matches
+    /// the nodes there are, and the once-a-second look would probe (and log)
+    /// every node again. Empty while a node could not be read (one just
+    /// plugged in, say), so the next look tries again.
+    probed: Vec<std::path::PathBuf>,
     captures: HashMap<(u64, u64), Capture>,
     /// the last open error of each wanted camera, so a retry logs only a change
     failed: HashMap<(u64, u64), String>,
@@ -578,18 +584,21 @@ impl Camera {
             .map(|e| e.path())
             .collect();
         paths.sort();
-        if paths.len() == self.devices.len()
-            && paths
-                .iter()
-                .zip(&self.devices)
-                .all(|(p, d)| p == std::path::Path::new(&d.path))
-        {
+        if paths == self.probed {
             return self.devices.iter().map(|d| d.desc.clone()).chain(fake_desc().cloned()).collect();
         }
+        let mut unread = false;
         self.devices = paths
             .iter()
-            .filter_map(|p| Self::probe_device(&p.to_string_lossy()))
+            .filter_map(|p| match Self::probe_device(&p.to_string_lossy()) {
+                Ok(device) => device,
+                Err(()) => {
+                    unread = true;
+                    None
+                }
+            })
             .collect();
+        self.probed = if unread { Vec::new() } else { paths };
         self.captures
             .retain(|(input, _), _| self.devices.iter().any(|d| d.desc.id == *input));
         self.devices.iter().map(|d| d.desc.clone()).chain(fake_desc().cloned()).collect()
@@ -672,15 +681,17 @@ impl Camera {
             .chain(fakes)
             .collect()
     }
-    fn probe_device(path: &str) -> Option<Device> {
+    /// A node as a camera (`Ok(Some)`), a node that is not one (`Ok(None)`),
+    /// or a node that could not be read (`Err`).
+    fn probe_device(path: &str) -> Result<Option<Device>, ()> {
         unsafe {
-            let path_cstr = std::ffi::CString::new(path).ok()?;
+            let path_cstr = std::ffi::CString::new(path).map_err(|_| ())?;
             let fd = libc_sys::open(
                 path_cstr.as_ptr() as *const _,
                 libc_sys::O_RDWR | libc_sys::O_NONBLOCK,
             );
             if fd < 0 {
-                return None;
+                return Err(());
             }
 
             let result = Self::probe_device_fd(fd, path);
@@ -689,11 +700,11 @@ impl Camera {
         }
     }
 
-    unsafe fn probe_device_fd(fd: c_int, path: &str) -> Option<Device> {
+    unsafe fn probe_device_fd(fd: c_int, path: &str) -> Result<Option<Device>, ()> {
         // Query capabilities
         let mut cap: v4l2_capability = std::mem::zeroed();
         if ioctl(fd, VIDIOC_QUERYCAP, &mut cap as *mut _ as *mut c_void) < 0 {
-            return None;
+            return Err(());
         }
 
         let caps = if (cap.capabilities & V4L2_CAP_DEVICE_CAPS) != 0 {
@@ -705,7 +716,7 @@ impl Camera {
         let name = cstr_from_bytes(&cap.card);
         if let Err(why) = judge_node(&name, caps, None) {
             eprintln!("[hal-camera] {path} \"{name}\": skipped, {why}");
-            return None;
+            return Ok(None);
         }
 
         // Enumerate formats
@@ -802,7 +813,7 @@ impl Camera {
 
         if let Err(why) = judge_node(&name, caps, Some(&formats)) {
             eprintln!("[hal-camera] {path} \"{name}\": skipped, {why}");
-            return None;
+            return Ok(None);
         }
 
         let input_id = name_hash(path);
@@ -811,7 +822,7 @@ impl Camera {
             formats.len(),
             summary(&formats)
         );
-        Some(Device {
+        Ok(Some(Device {
             path: path.to_string(),
             desc: VideoInputInfo {
                 id: input_id,
@@ -819,7 +830,7 @@ impl Camera {
                 formats,
                 sensor_orientation: 0,
             },
-        })
+        }))
     }
 }
 /// Whether a V4L2 node is a camera a deck can show. `formats` is None while only the capabilities

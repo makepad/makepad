@@ -281,6 +281,7 @@ impl Cx {
         // the XR pass draws with the new eyes
         // (what is redrawn from here is for the headset's frame: it paints no window)
         let in_xr = std::mem::replace(&mut self.in_xr_update, true);
+        self.xr_frame_due = true;
         let passes: Vec<_> = self.passes.id_iter().filter(|p| matches!(self.passes[*p].parent, CxDrawPassParent::Xr)).collect();
         for pass in passes { self.redraw_pass_and_child_passes(pass); }
         self.call_event_handler(&Event::XrUpdate(XrUpdateEvent { state, last }));

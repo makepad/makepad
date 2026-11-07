@@ -11,6 +11,7 @@
 use crate::{cx::{Cx, OsType}, event::hal_intake::hal_window_id, event::Event};
 use makepad_hal::{hal_open, hal_pump, hal_submit, info_flags, open_flags, EventStore, OpenReq};
 use crate::thread::SignalToUI;
+use crate::pass_load::UiTime;
 use super::loop_watch;
 use std::{cell::RefCell, rc::Rc};
 
@@ -163,6 +164,9 @@ impl Cx {
     }
 
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
+        // a program that runs the event loop is an app, also one whose entry is written out by
+        // hand without `app_main!`'s call (the loader took such an app for a batch program)
+        crate::relax_app_main();
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().hal_run();
         // A hosted app's domain is torn down when its threads end: the Cx, which owns the senders
@@ -216,7 +220,7 @@ impl Cx {
         }
         let next_frames_due = !self.new_next_frames.is_empty() && !crate::remote::app_clock::enabled();
         self.any_passes_dirty()
-            || self.need_redrawing()
+            || (self.need_redrawing() && self.app_draws_now())
             || next_frames_due
             || self.demo_time_repaint
             || !self.screenshot_requests.is_empty()
@@ -224,6 +228,7 @@ impl Cx {
             || crate::remote::needs_ticks()
             || self.hal_software_video_active()
             || !self.pick.requests.is_empty()
+            || self.staged_uploads_pending()
     }
 
     fn hal_run(&mut self) {
@@ -330,6 +335,8 @@ impl Cx {
         let mut host_poll_due = hosted;
         // a quit came while this turn's handlers ran (hal_quit_on_its_way): the next pump takes it at once
         let mut quit_due = false;
+        // the UI thread's time outside the idle wait, from this turn's wake (`pass_load`)
+        let mut busy_from = None;
         #[cfg(target_os = "android")]
         let mut performance_hint = if hosted { None } else { makepad_hal::backend::android::performance_hint::PerformanceHint::for_this_thread() };
         'turns: loop {
@@ -376,10 +383,12 @@ impl Cx {
                 next_beat.saturating_duration_since(std::time::Instant::now()).as_nanos() as u64
             };
             loop_watch::in_pump(timeout > 0);
+            self.pass_load.spent(UiTime::Busy, busy_from.take());
             let alive = self.hal_guarded(true, |cx| cx.hal_pump_events(timeout, if gpu_wait { PumpWait::Gpu } else { PumpWait::Idle }));
+            busy_from = self.pass_load.mark();
             loop_watch::in_pump(false);
+            // (the intake said why: its last window closed, or the window system asked it to quit)
             if !alive {
-                crate::log!("hal: the last window closed");
                 break 'turns;
             }
 
@@ -434,6 +443,7 @@ impl Cx {
                     hint.mark_frame_drawn();
                 }
                 self.hal_submit_batch();
+                self.hal_xr_frame_out();
             }
             // A quit asked for while this turn's handlers ran (a window manager's DomainStop, the
             // system's quit, a termination signal) is taken before anything more is drawn: a cold
@@ -479,6 +489,10 @@ impl Cx {
                 let after_serial = self.frame_submission_serial();
                 if after_serial > before_serial {
                     in_flight.push_back((after_serial, now));
+                }
+                if xr_beat {
+                    self.hal_submit_batch();
+                    self.hal_xr_frame_out();
                 }
             }
             if !self.hal_handle_platform_ops() {
@@ -601,6 +615,12 @@ impl Cx {
 
     /// One batch to the HAL, then the memory its slices pointed at is ours again.
     pub(super) fn hal_submit_batch(&mut self) {
+        let from = self.pass_load.mark();
+        self.hal_submit_batch_now();
+        self.pass_load.spent(UiTime::Submit, from);
+    }
+
+    fn hal_submit_batch_now(&mut self) {
         let _phase = crate::thread::ui_phase(crate::thread::UiPhase::Submit);
         // Readback callbacks and pipeline readiness can enqueue compute without
         // a Draw/NextFrame event. Flush it on this turn, even with paint withheld.
@@ -643,6 +663,16 @@ impl Cx {
         }
     }
 
+    /// After an XR frame's beat is submitted: what its drawing signalled (the XR frame sink's
+    /// picture, packed) is serviced at once, so the picture goes on to its encoder and the next
+    /// pose is asked for in this turn, not after a desktop frame's turn.
+    fn hal_xr_frame_out(&mut self) {
+        if SignalToUI::any_pending() {
+            self.hal_service_signals();
+            self.hal_submit_batch();
+        }
+    }
+
     /// The frame beat (what macOS ran on its paint clock): services, next-frame callbacks, the
     /// draw event, shader compiles, then the passes into commands.
     pub(super) fn hal_beat(&mut self) -> bool {
@@ -671,6 +701,7 @@ impl Cx {
             if self.hal_software_video_active() { count("beat: video"); }
             if !self.pick.requests.is_empty() { count("beat: pick"); }
             if self.hal.compute.beat { count("beat: compute"); }
+            if self.staged_uploads_pending() { count("beat: staged upload"); }
         }
         self.hal_service_signals();
         if let Some(hosted) = self.hal.hosted.as_mut() {
@@ -733,6 +764,20 @@ impl Cx {
         trace.maybe_print(wake as f64 * 1e-9);
     }
 
+    /// Whether the app's draw walk may run on this beat. Under the virtual clock it runs for a
+    /// remote request (a `/step` frame or a grab: `remote_present_owed`; a resize or an input
+    /// that waits for its frame: `remote::frame_awaited`) and until each window shows its first
+    /// frame. A redraw asked for between two steps (an injected pointer move that waits for
+    /// nothing) waits for the next step: drawn on a beat of the HAL's own in between, it drew the
+    /// previous frame's time, and whether the next frame showed that or its own drawing went by
+    /// the machine's load.
+    fn app_draws_now(&self) -> bool {
+        !crate::remote::app_clock::enabled()
+            || self.remote_present_owed
+            || crate::remote::frame_awaited()
+            || self.windows.id_iter().any(|id| !self.hal.glyph_wait.presented.contains(&hal_window_id(id)))
+    }
+
     /// Visible frame work: hidden hosted children keep callbacks and dirty passes pending.
     fn hal_draw_frame(&mut self) -> bool {
         // the GPU device is lost: nothing is drawn until the HAL's DeviceReset (dirty passes
@@ -740,12 +785,13 @@ impl Cx {
         if self.hal.device_lost {
             return true;
         }
-        // A hosted app whose main window has no free shared image runs no frame beat at all:
+        // A hosted app none of whose windows has a free shared image runs no frame beat at all:
         // like a native swapchain acquire, it waits (next-frame callbacks and dirty passes stay
-        // pending, the Tick's demand asks the host again). `fb_pass` already holds the passes
-        // of such a window; this also skips the app's NextFrame and draw walk, which a game ran
-        // on every 240 Hz host Tick for frames nobody could see.
-        if self.hal.hosted.as_ref().is_some_and(|h| h.first.is_some_and(|w| h.window_blocked(w))) {
+        // pending, the Tick's demand asks the host again). This skips the app's NextFrame and
+        // draw walk, which a game ran on every 240 Hz host Tick for frames nobody could see.
+        // While any window can show a frame the beat runs: `fb_pass` holds the passes of a
+        // window still waiting for an image, and the other windows draw on.
+        if self.hal.hosted.as_ref().is_some_and(|h| h.all_blocked()) {
             makepad_hal::profile::count("beat: hosted images busy");
             return true;
         }
@@ -762,6 +808,8 @@ impl Cx {
             self.hal.beat_phases[1] = [next_start, makepad_hal::clock_ns()];
         }
         let walk_start = makepad_hal::clock_ns();
+        let draws = self.app_draws_now();
+        self.remote_present_owed = false;
         let mut deadline = None;
         loop {
             // A control-channel visibility message may arrive during the glyph wait.
@@ -770,7 +818,7 @@ impl Cx {
             }
             self.hal.glyph_wait.pending.clear();
             self.hal.glyph_wait.drawn_blank = 0;
-            if self.need_redrawing() {
+            if self.need_redrawing() && draws {
                 // (a frame drawn again below still paints what an earlier drawing of it recorded
                 // and this one did not: `call_draw_event` keeps it)
                 self.call_draw_event(time_now);
@@ -857,6 +905,7 @@ impl Cx {
             now
         });
         let build_phase = crate::thread::ui_phase(crate::thread::UiPhase::FrameBuild);
+        let build_from = self.pass_load.mark();
         let mut fb = std::mem::take(&mut self.hal.frames);
         let mut passes = Vec::new();
         self.compute_pass_repaint_order(&mut passes);
@@ -886,6 +935,7 @@ impl Cx {
         }
         self.hal.frames = fb;
         self.release_painted_recordings();
+        self.pass_load.spent(UiTime::Build, build_from);
         drop(build_phase);
         if let Some(start) = build_start {
             makepad_hal::profile::since(makepad_hal::profile::Metric::CpuBuild, start);

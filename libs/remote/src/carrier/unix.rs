@@ -129,11 +129,13 @@ mod imp {
         Ok(l)
     }
 
-    /// Only this user's processes may connect (the socket is 0600 too).
-    fn same_user(c: &UnixStream) -> bool {
+    /// The peer's process when it is this user's (only this user's processes may connect; the
+    /// socket is 0600 too), from the socket's credentials; 0 where they carry no pid.
+    fn own_user_peer(c: &UnixStream) -> Option<u32> {
         use std::os::unix::io::AsRawFd;
         extern "C" {
             fn getuid() -> u32;
+            fn getsockopt(fd: i32, level: i32, name: i32, val: *mut u8, len: *mut u32) -> i32;
         }
         #[cfg(target_os = "macos")]
         {
@@ -141,17 +143,21 @@ mod imp {
                 fn getpeereid(fd: i32, uid: *mut u32, gid: *mut u32) -> i32;
             }
             let (mut uid, mut gid) = (u32::MAX, 0u32);
-            unsafe { getpeereid(c.as_raw_fd(), &mut uid, &mut gid) == 0 && uid == getuid() }
+            if unsafe { getpeereid(c.as_raw_fd(), &mut uid, &mut gid) } != 0 || uid != unsafe { getuid() } {
+                return None;
+            }
+            // SOL_LOCAL 0, LOCAL_PEERPID 2
+            let (mut pid, mut len) = (0i32, 4u32);
+            let read = unsafe { getsockopt(c.as_raw_fd(), 0, 2, (&mut pid as *mut i32).cast(), &mut len) } == 0;
+            Some(if read { u32::try_from(pid).unwrap_or(0) } else { 0 })
         }
         #[cfg(not(target_os = "macos"))]
         {
-            extern "C" {
-                fn getsockopt(fd: i32, level: i32, name: i32, val: *mut u8, len: *mut u32) -> i32;
-            }
             // SOL_SOCKET 1, SO_PEERCRED 17: struct ucred { pid, uid, gid }
             let mut cred = [0u32; 3];
             let mut len = 12u32;
-            unsafe { getsockopt(c.as_raw_fd(), 1, 17, cred.as_mut_ptr() as *mut u8, &mut len) == 0 && cred[1] == getuid() }
+            let read = unsafe { getsockopt(c.as_raw_fd(), 1, 17, cred.as_mut_ptr() as *mut u8, &mut len) } == 0;
+            (read && cred[1] == unsafe { getuid() }).then_some(cred[0])
         }
     }
 
@@ -252,16 +258,14 @@ mod imp {
             (hooks.enter)();
             for conn in listener.incoming() {
                 let Ok(conn) = conn else { continue };
-                if !same_user(&conn) {
-                    continue;
-                }
+                let Some(pid) = own_user_peer(&conn) else { continue };
                 let ep = ep.clone();
                 let _ = std::thread::Builder::new().name("makepad-remote-hello".into()).spawn(move || {
                     let (hooks, keep) = (ep.hooks(), conn.try_clone());
                     (hooks.enter)();
                     let _ = conn.set_read_timeout(Some(std::time::Duration::from_secs(1)));
                     if let Ok(c) = carrier(conn) {
-                        if let Err(e) = ep.serve(c.reader, c.writer, c.shutdown) {
+                        if let Err(e) = ep.serve_peer(c.reader, c.writer, c.shutdown, "", pid) {
                             eprintln!("makepad-remote: a client was refused: {e}");
                         } else if let Ok(k) = keep {
                             settle(&k);

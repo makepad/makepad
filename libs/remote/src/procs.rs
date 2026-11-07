@@ -64,6 +64,32 @@ pub fn is_alive(pid: u32) -> bool {
     is_alive_impl(pid)
 }
 
+/// One running process: its parent and name (None once it is gone).
+pub fn process(pid: u32) -> Option<Proc> {
+    process_impl(pid)
+}
+
+/// Who a process is, for a log line that names who asked for something: its pid and name, then
+/// its parents' up to init (`pid 812 kill, from 811 zsh, from 790 node`). Natively and at once,
+/// so a short-lived sender such as a `kill` is still there to be read.
+pub fn said(pid: u32) -> String {
+    let Some(first) = process(pid) else { return format!("pid {pid} (gone already)") };
+    let mut text = format!("pid {pid} {}", first.name);
+    let mut parent = first.ppid;
+    for _ in 0..4 {
+        if parent <= 1 {
+            break;
+        }
+        let Some(p) = process(parent) else {
+            text.push_str(&format!(", from {parent}"));
+            break;
+        };
+        text.push_str(&format!(", from {parent} {}", p.name));
+        parent = p.ppid;
+    }
+    text
+}
+
 fn collect_descendants(procs: &[Proc], parent: u32, out: &mut Vec<u32>) {
     for proc in procs {
         if proc.ppid == parent && proc.pid != parent {
@@ -184,14 +210,58 @@ fn kill_pid_impl(pid: u32) -> io::Result<()> {
 fn is_alive_impl(pid: u32) -> bool {
     win::alive(pid)
 }
+#[cfg(windows)]
+fn process_impl(pid: u32) -> Option<Proc> {
+    win::list().ok()?.into_iter().find(|p| p.pid == pid)
+}
+
+/// `proc_pidinfo`'s `struct proc_bsdinfo` (136 bytes) of `pid`, None once it is gone.
+#[cfg(target_os = "macos")]
+fn bsd_info(pid: i32) -> Option<[u8; 136]> {
+    extern "C" {
+        fn proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: *mut u8, size: i32) -> i32;
+    }
+    const PROC_PIDTBSDINFO: i32 = 3;
+    let mut buf = [0u8; 136];
+    let n = unsafe { proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, buf.as_mut_ptr(), buf.len() as i32) };
+    (n == buf.len() as i32).then_some(buf)
+}
+
+/// A NUL-ended name field of `struct proc_bsdinfo`.
+#[cfg(target_os = "macos")]
+fn bsd_name(field: &[u8]) -> String {
+    let end = field.iter().position(|&c| c == 0).unwrap_or(field.len());
+    String::from_utf8_lossy(&field[..end]).into_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn process_impl(pid: u32) -> Option<Proc> {
+    let buf = bsd_info(i32::try_from(pid).ok()?)?;
+    // pbi_ppid at 16, pbi_comm[16] at 48, pbi_name[32] (the longer name, when set) at 64
+    let ppid = u32::from_ne_bytes(buf[16..20].try_into().unwrap());
+    let name = Some(bsd_name(&buf[64..96])).filter(|n| !n.is_empty()).unwrap_or_else(|| bsd_name(&buf[48..64]));
+    Some(Proc { pid, ppid, name })
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn process_impl(pid: u32) -> Option<Proc> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // `pid (comm) state ppid ...`: comm may hold spaces and parens, so it ends at the last `)`
+    let (start, end) = (stat.find('(')? + 1, stat.rfind(')')?);
+    let ppid = stat.get(end + 1..)?.split_whitespace().nth(1)?.parse().ok()?;
+    Some(Proc { pid, ppid, name: stat.get(start..end)?.to_string() })
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android", target_os = "macos"))))]
+fn process_impl(_pid: u32) -> Option<Proc> {
+    None
+}
 
 #[cfg(target_os = "macos")]
 fn list_processes_impl() -> io::Result<Vec<Proc>> {
     extern "C" {
         fn proc_listallpids(buffer: *mut i32, size: i32) -> i32;
-        fn proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: *mut u8, size: i32) -> i32;
     }
-    const PROC_PIDTBSDINFO: i32 = 3;
     // The pid list can grow between the size query and the fill, so ask with slack and retry.
     let mut pids: Vec<i32>;
     loop {
@@ -210,27 +280,7 @@ fn list_processes_impl() -> io::Result<Vec<Proc>> {
             break;
         }
     }
-    let mut out = Vec::new();
-    for pid in pids {
-        if pid <= 0 {
-            continue;
-        }
-        // struct proc_bsdinfo: 136 bytes; pbi_pid at 12, pbi_ppid at 16, pbi_comm[16] at 48
-        let mut buf = [0u8; 136];
-        let n = unsafe { proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, buf.as_mut_ptr(), buf.len() as i32) };
-        if n != buf.len() as i32 {
-            continue;
-        }
-        let ppid = u32::from_ne_bytes(buf[16..20].try_into().unwrap());
-        let comm = &buf[48..64];
-        let end = comm.iter().position(|&c| c == 0).unwrap_or(comm.len());
-        out.push(Proc {
-            pid: pid as u32,
-            ppid,
-            name: String::from_utf8_lossy(&comm[..end]).into_owned(),
-        });
-    }
-    Ok(out)
+    Ok(pids.into_iter().filter(|pid| *pid > 0).filter_map(|pid| process_impl(pid as u32)).collect())
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]

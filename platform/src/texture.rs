@@ -1694,6 +1694,24 @@ impl Texture {
         cx.textures[self.texture_id()].discard_cpu_after_upload
     }
 
+    /// Stage this `Vec*` texture's uploads: what it waits to upload (all of it once allocated, a
+    /// dirty rect after) goes up in row bands within the frame's staged-upload budget
+    /// ([`STAGED_UPLOAD_BYTES`]), on each frame whether it is drawn or not, so a large image
+    /// lands over a few frames instead of costing one. While [`Self::upload_pending`], a draw
+    /// samples a part-uploaded image: show it once that is false.
+    pub fn set_staged_upload(&self, cx: &mut Cx, staged: bool) {
+        let id = self.texture_id();
+        cx.textures[id].staged_upload = staged;
+        if staged && !cx.staged_textures.contains(&id) {
+            cx.staged_textures.push(id);
+        }
+    }
+
+    /// Whether some of this texture's data has not gone to the GPU yet.
+    pub fn upload_pending(&self, cx: &Cx) -> bool {
+        !cx.textures[self.texture_id()].updated().is_empty()
+    }
+
     /// Records that this texture holds a shrunk copy of an image (or of each frame of an
     /// animation) that's `natural_size` pixels big, so it can still be laid out at that size.
     pub fn set_natural_size(&self, cx: &mut Cx, natural_size: Option<(usize, usize)>) {
@@ -1863,8 +1881,9 @@ pub struct CxTexture {
     /// handle lives (GPU backends keep every target anyway).
     pub(crate) retained_render_target: bool,
     /// A render target that carries a mip chain, rebuilt from level 0 after
-    /// every pass that renders into it (for shaders that minify it with
-    /// `sample_grad` / `sample_lod`). Metal; other backends keep level 0 only.
+    /// every pass that renders into it (for shaders that minify it: a plain
+    /// `sample`, `sample_grad`, `sample_lod`). Every GPU backend builds the
+    /// levels on the GPU after the pass.
     pub(crate) render_mips: bool,
     /// An append-only data texture that grows by rows (the SLUG glyph
     /// atlas): a backend that updates rows in place may allocate spare rows
@@ -1884,6 +1903,28 @@ pub struct CxTexture {
     pub(crate) transient: bool,
     /// Release `Vec*` CPU pixel data (`data = None`) once the upload batch has been submitted.
     pub(crate) discard_cpu_after_upload: bool,
+    /// Uploads go up in row bands within each frame's budget ([`Texture::set_staged_upload`]).
+    pub(crate) staged_upload: bool,
+}
+
+/// The bytes staged uploads ([`Texture::set_staged_upload`]) send in one frame, all such
+/// textures together: about a millisecond of copying into upload memory on a laptop.
+pub const STAGED_UPLOAD_BYTES: usize = 4 << 20;
+
+impl Cx {
+    /// Whether a staged texture still waits to upload: the loop keeps beating until it is up.
+    pub(crate) fn staged_uploads_pending(&self) -> bool {
+        self.staged_textures.iter().any(|id| {
+            self.textures.0.is_live_generation(id.0, id.generation()) && !self.textures[*id].updated().is_empty()
+        })
+    }
+
+    /// The staged textures still alive and staged, in the order they were staged.
+    pub(crate) fn take_staged_textures(&mut self) -> Vec<TextureId> {
+        let mut ids = std::mem::take(&mut self.staged_textures);
+        ids.retain(|id| self.textures.0.is_live_generation(id.0, id.generation()) && self.textures[*id].staged_upload);
+        ids
+    }
 }
 
 #[cfg(test)]

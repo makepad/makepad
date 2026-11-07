@@ -91,7 +91,9 @@ pub fn schema(c: &Command) -> String {
                 variants.push(format!("{{\"type\":\"object\",\"properties\":{{\"op\":{{\"const\":{}}}{rest}}},\"required\":[\"op\"],\"additionalProperties\":false}}", json_str(&format!("design_{op}"))));
             }
         }
-        return format!("{{\"oneOf\":[{}]}}", variants.join(","));
+        // An argument object first, then its variants: a tool's schema is an object (the services'
+        // manifest check refuses a bare oneOf), and each variant names its op's arguments.
+        return format!("{{\"type\":\"object\",\"oneOf\":[{}]}}", variants.join(","));
     }
     let required: Vec<String> = c.required.iter().map(|r| json_str(r)).collect();
     format!("{{\"type\":\"object\",\"properties\":{{{}}},\"required\":[{}]}}", c.params, required.join(","))

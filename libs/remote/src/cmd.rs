@@ -344,6 +344,30 @@ impl Write for ChanWriter {
     }
 }
 
+std::thread_local! {
+    /// The process that sent the command this thread answers now, and the name its client gave
+    /// itself (0 and empty: not known, or none).
+    static ASKER: std::cell::RefCell<(u32, String)> = const { std::cell::RefCell::new((0, String::new())) };
+}
+
+/// How a client that an agent runs names itself (`DEVHUB_AGENT`): this, then the agent's name.
+pub const AGENT_CLIENT: &str = "client of agent ";
+
+/// Who sent the command being answered on this thread, for a log line: the agent its client says
+/// it is (`DEVHUB_AGENT`), and its process and parents, where its carrier knows them (a local
+/// client over the Unix socket: its credentials, which no client can claim), as in `agent LANE7,
+/// pid 812 makepad, from 811 zsh`.
+pub fn asked_by() -> Option<String> {
+    let (pid, name) = ASKER.with(|a| a.borrow().clone());
+    let agent = name.strip_prefix(AGENT_CLIENT).map(|a| format!("agent {a}"));
+    match (pid, agent) {
+        (0, None) => None,
+        (0, Some(agent)) => Some(format!("{agent} (its process not known)")),
+        (pid, None) => Some(crate::procs::said(pid)),
+        (pid, Some(agent)) => Some(format!("{agent}, {}", crate::procs::said(pid))),
+    }
+}
+
 /// The `cmd` service served by `dispatch`.
 pub fn service(dispatch: fn(&Req, &mut Out), end_fields: EndFields) -> Factory {
     Arc::new(move |conn, open| {
@@ -379,8 +403,10 @@ fn serve(ch: crate::conn::Channel, dispatch: fn(&Req, &mut Out), end_fields: End
             let gone: Gone = Arc::new(move || conn.is_closed());
             let mut out = Out { w: &mut w, bytes: 0, limit: if req.get("full") == Some("1") { usize::MAX } else { LIMIT }, truncated: false, ok: true, gone: Some(gone) };
             let cmd = req.cmd.clone();
+            ASKER.with(|a| *a.borrow_mut() = (ch.conn().peer().pid, ch.conn().peer().name.clone()));
             // a panic in a command (a bug in the host) answers as an error, the session goes on
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(&req, &mut out)));
+            ASKER.with(|a| *a.borrow_mut() = (0, String::new()));
             if r.is_err() {
                 out.err("internal error in this command (inspect bug)");
             }
@@ -394,6 +420,7 @@ fn serve(ch: crate::conn::Channel, dispatch: fn(&Req, &mut Out), end_fields: End
                 ch.close(CLOSE_NORMAL, "");
                 return;
             }
+            crate::served::tick();
         }
     }
 }

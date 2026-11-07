@@ -8,11 +8,54 @@
 //! backend delivers it the same way and only after `Event::Startup`.
 
 use crate::cx::Cx;
+use crate::cx_api::CxOsOp;
 use crate::event::{AppOpenEvent, AppOpenItem, AppOpenSource};
 use std::path::Path;
 
 #[derive(Debug)]
 pub(crate) struct AppOpenPosted(pub AppOpenEvent);
+
+/// A launch a person asked to see (`devhub show` sets `MAKEPAD_SHOW=1`): a launch from a
+/// background process (the devhub master) opened behind the person's windows, and a tray app
+/// showed only its icon (11-06: the devhub panel, Amp, AI Hub). Its first window comes in front
+/// without taking the keyboard (the backend), and a tray app opens its panel once it started
+/// ([`Cx::open_for_person`]): the app took the focus at its start, and keys the person typed
+/// elsewhere went to it.
+pub fn shown_for_person() -> bool {
+    static SHOWN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SHOWN.get_or_init(|| std::env::var_os("MAKEPAD_SHOW").is_some_and(|v| v == "1"))
+}
+
+impl Cx {
+    /// The person asked to see the app just now (a repeat `devhub show` through the `front`
+    /// remote command, a relaunch of a single-instance app): what [`Self::open_for_person`]
+    /// opens, and the app comes to the front with the focus. A `--remote` or hidden instance
+    /// never takes the focus (the backend's rule).
+    pub(crate) fn show_to_person(&mut self) {
+        self.open_for_person();
+        self.platform_ops.push_back(CxOsOp::ActivateApp);
+    }
+
+    /// A tray app with no window on screen gets its icon's click, so it opens what a click opens
+    /// (its dropdown panel, or its window); an app with a window on screen, nothing.
+    pub(crate) fn open_for_person(&mut self) {
+        // on screen now, or after the ops queued so far (a window made and hidden at startup is not)
+        let (windows, ops) = (&self.windows, &self.platform_ops);
+        let on_screen = windows.id_iter().any(|id| {
+            ops.iter().fold(windows[id].is_created && windows[id].shown, |shown, op| match op {
+                CxOsOp::CreateWindow(w) | CxOsOp::ShowWindow(w) | CxOsOp::ShowWindowAtTray(w, ..) if *w == id => true,
+                CxOsOp::HideWindow(w) | CxOsOp::CloseWindow(w) if *w == id => false,
+                _ => shown,
+            })
+        });
+        if let (false, Some(&tray)) = (on_screen, self.trays.first()) {
+            // not the person's input: nothing they did is in the activity ledger
+            #[cfg(not(target_arch = "wasm32"))]
+            let _not_the_person = crate::remote::remote_input_scope(self);
+            self.call_event_handler(&crate::event::Event::TrayClick(crate::tray::TrayClickEvent { tray, anchor: Default::default(), screen: Default::default() }));
+        }
+    }
+}
 
 /// Queue an `Event::AppOpen` for the UI thread. Callable from any thread
 /// once the `Cx` exists.
@@ -161,6 +204,47 @@ pub use native::{claim_single_instance, SingleInstanceServer};
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// The person asked to see the app: a tray app with no window on screen gets its icon's
+    /// click (its panel opens) and the activation; one with a window on screen only the activation.
+    #[test]
+    fn a_tray_app_shown_to_the_person_opens_what_its_click_opens() {
+        use crate::event::Event;
+        use crate::makepad_live_id::LiveId;
+        use std::{cell::RefCell, rc::Rc};
+        let clicks = Rc::new(RefCell::new(Vec::new()));
+        let seen = clicks.clone();
+        let mut cx = Cx::new(Box::new(move |_, event| {
+            if let Event::TrayClick(e) = event { seen.borrow_mut().push(e.tray); }
+        }));
+        let activations = |cx: &mut Cx| { let n = cx.platform_ops.iter().filter(|op| matches!(op, CxOsOp::ActivateApp)).count(); cx.platform_ops.clear(); n };
+        // an app with no tray: its window comes to the front
+        cx.show_to_person();
+        assert_eq!((clicks.borrow().len(), activations(&mut cx)), (0, 1));
+        let tray = LiveId(7);
+        cx.trays.push(tray);
+        cx.show_to_person();
+        assert_eq!((clicks.borrow().clone(), activations(&mut cx)), (vec![tray], 1), "no window on screen: the click");
+        // its dropdown shows: only the activation
+        let window = crate::window::WindowHandle::new(&mut cx);
+        cx.platform_ops.clear();
+        cx.windows[window.window_id()].is_created = true;
+        cx.windows[window.window_id()].shown = true;
+        cx.show_to_person();
+        assert_eq!((clicks.borrow().len(), activations(&mut cx)), (1, 1));
+        // closed to the tray: the click again
+        cx.windows[window.window_id()].shown = false;
+        cx.show_to_person();
+        assert_eq!((clicks.borrow().len(), activations(&mut cx)), (2, 1));
+        // a window made and hidden at startup, its ops not run yet, is not on screen
+        let later = crate::window::WindowHandle::new(&mut cx);
+        cx.platform_ops.push_back(CxOsOp::HideWindow(later.window_id()));
+        cx.show_to_person();
+        assert_eq!((clicks.borrow().len(), activations(&mut cx)), (3, 1));
+        // a shown launch's start opens the panel and never takes the focus
+        cx.open_for_person();
+        assert_eq!((clicks.borrow().len(), activations(&mut cx)), (4, 0));
+    }
 
     #[test]
     fn items_from_args_takes_positionals() {

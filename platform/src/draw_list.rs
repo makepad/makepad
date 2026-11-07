@@ -820,6 +820,10 @@ struct RetirementBatches<P: Send + 'static> {
     initialized: bool,
     returned_tx: crate::makepad_network::mpsc::SyncSender<Box<RetirementBatch<P>>>,
     returned_rx: crate::makepad_network::mpsc::Receiver<Box<RetirementBatch<P>>>,
+    /// The disposal jobs on workers, each carrying one of the sixteen envelopes: kept, not
+    /// detached, so whoever must see the disposal done can join them. Finished ones go at the
+    /// next poll.
+    in_flight: Vec<crate::thread::TaskHandle<()>>,
 }
 impl<P: Send + 'static> RetirementBatches<P> {
     fn new() -> Self {
@@ -830,9 +834,28 @@ impl<P: Send + 'static> RetirementBatches<P> {
             initialized: false,
             returned_tx,
             returned_rx,
+            in_flight: Vec::new(),
+        }
+    }
+    /// Waits for the workers this owner gave work to: the envelopes being prepared and every
+    /// disposal job. A join blocks only off the UI thread, so a helper thread joins.
+    #[cfg(test)]
+    fn join_workers(&mut self) {
+        fn joined<T: Send + 'static>(job: crate::thread::TaskHandle<T>) -> Result<T, crate::thread::TaskError> {
+            std::thread::spawn(move || job.join()).join().unwrap()
+        }
+        if let Some(job) = self.preparing.take() {
+            if let Ok(available) = joined(job) {
+                self.available = available;
+                self.initialized = true;
+            }
+        }
+        for job in std::mem::take(&mut self.in_flight) {
+            joined(job).unwrap();
         }
     }
     fn poll(&mut self, pool: &crate::thread::TaskPool) -> bool {
+        self.in_flight.retain(|job| !job.is_finished());
         if let Some(result) = self
             .preparing
             .as_mut()
@@ -927,6 +950,13 @@ impl CxDrawListPool {
         mut take_backend: impl FnMut(&mut CxDrawItem) -> P,
     ) -> bool {
         self.retire_free_items_with_ids(pool, frame, |_, _, os| take_backend(os))
+    }
+    /// Waits for the workers that retirement with backend payload `P` gave work to.
+    #[cfg(test)]
+    fn join_retirement_workers<P: Send + 'static>(&mut self) {
+        if let Some(batches) = self.4.get_mut(&std::any::TypeId::of::<P>()).and_then(|b| b.downcast_mut::<RetirementBatches<P>>()) {
+            batches.join_workers();
+        }
     }
     /// The HAL keeps backend allocations outside each draw item.
     /// Give it the exact physical item being retired, under the same reserved
@@ -1055,7 +1085,7 @@ impl CxDrawListPool {
                 let _ = returned.try_send(batch);
                 counter.fetch_sub(1, Ordering::AcqRel);
                 crate::thread::SignalToUI::set_internal_signal();
-            }) { handle.detach(); }
+            }) { batches.in_flight.push(handle); }
         }
         // Settlement includes rotating scans and completion/metadata debt,
         // not just the queue of freed CPU publications. Otherwise a view can
@@ -3420,7 +3450,7 @@ mod uniform_generation_tests {
         cx.draw_lists.1.copied(12, 12, std::time::Duration::ZERO);
         for frame in 0..20 {
             cx.draw_lists.retire_free_items(&pool, frame, |_| ());
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            cx.draw_lists.join_retirement_workers::<()>();
         }
         assert_eq!(cx.draw_lists.1.recordings.bytes(), bytes);
         let item = &mut cx.draw_lists[list.id()].draw_items[0];
@@ -3429,9 +3459,12 @@ mod uniform_generation_tests {
         item.retained_instance_id = publication.id();
         cx.draw_lists[list.id()].draw_items.record_consumption(0, 12);
         cx.draw_lists.1.copied(12, 12, std::time::Duration::ZERO);
-        for frame in 20..120 {
-            if !cx.draw_lists.retire_free_items(&pool, frame, |_| ()) { break; }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+        // Each frame that leaves work pending gave it to workers: join them, then the next frame.
+        // (Bounded frames of sleep lost to a loaded box: the disposal job had not run yet.)
+        let mut frame = 20;
+        while cx.draw_lists.retire_free_items(&pool, frame, |_| ()) {
+            cx.draw_lists.join_retirement_workers::<()>();
+            frame += 1;
         }
         assert!(!cx.draw_lists.has_pending_instance_retirements());
         assert_eq!(cx.draw_lists.1.recordings.bytes(), 0, "storage actually freed, not just uncharged");

@@ -315,21 +315,18 @@ fn touch_compute(s: &mut Session, packet: u32, view: &CmdView, frame: u64, now: 
 /// the `FrameDone` is held until that frame completes so completion serials never advance
 /// out of order ahead of in-flight GPU work.
 fn drop_frame(world: &mut World, sid: u32, target: Id, packet: u32, view: &CmdView, now: u64) {
-    let Some(frame) = view.frames.get(packet as usize).map(|p| p.frame).filter(|&f| f != 0) else { return };
-    if let Some(s) = world.session_mut(sid) {
-        if s.last_frame_done < s.frame {
-            s.dropped_frames.push((s.frame, target, frame, now));
-            return;
-        }
-        s.last_frame_done = s.last_frame_done.max(frame);
-    }
-    world.to_session(sid, |q| q.frame_done(target, frame, 0, now, 0.0, 0.0));
+    let Some(frame) = view.frames.get(packet as usize).map(|p| p.frame) else { return };
+    world.retire_frame(sid, target, frame, now);
 }
 
 /// Session 0's badge layer frame for its window `window`: kept on the window (one without draws
-/// ends the layer), then composed over the window's retained image and presented.
+/// ends the layer), then composed over the window's retained image and presented; or, while
+/// the borrower's frame of the beat it is for is coming (`World::badge_rides`), shown with that
+/// frame (it rides). A riding frame is done (`FrameDone`) once it showed or a newer one
+/// replaced it.
 #[allow(clippy::too_many_arguments)]
 fn badge_frame(gpu: &mut dyn Gpu, world: &mut World, sid: u32, window: Id, kind: u32, packet: u32, view: &CmdView, now: u64) {
+    let beat_rides = world.badge_rides(window);
     let Some(s) = world.session_mut(sid) else { return };
     let own = s.windows.get(sid, window).is_ok_and(|w| w.val.kind & 0xff != window_kind::BADGE && !w.val.is_hosted() && w.val.embedded.is_none());
     if sid != HOST || !gpu.badges() || kind & !target::FLAGS != target::WINDOW || kind & (target::PICK | target::CAPTURE) != 0 || !own {
@@ -351,10 +348,28 @@ fn badge_frame(gpu: &mut dyn Gpu, world: &mut World, sid: u32, window: Id, kind:
     // under a composed panel the badges are kept for later but not drawn: the panel covers the
     // window, and a badge frame presenting would show the app's retained frame between its frames
     let covered = w.val.overlay.as_ref().is_some_and(|o| o.composed);
+    let serial = kept.view().frames[0].frame;
+    // the borrower's frame of the beat this one is for is coming (`World::badge_rides`): the
+    // layer shows with that frame instead of presenting the window a second time in the refresh
+    // (a frame a snapshot reads back presents itself)
+    let rides = !ends && !covered && kind & target::SNAPSHOT == 0 && beat_rides;
+    let replaced = if rides {
+        let since = w.val.ride.map_or(w.val.beats, |(_, since)| since);
+        w.val.ride.replace((serial, since))
+    } else {
+        if !covered { w.val.shown_beat = Some(w.val.beats); }
+        w.val.ride.take()
+    };
     w.val.badges = Some(kept.clone());
     sync_layer(gpu, world, window);
+    // a riding frame this one replaces never showed: it is done
+    if let Some((frame, _)) = replaced {
+        world.retire_frame(HOST, window, frame, now);
+    }
+    if rides {
+        return;
+    }
     let Some(s) = world.session_mut(HOST) else { return };
-    let serial = kept.view().frames[0].frame;
     let prev_frame = s.frame;
     // a last frame without draws shows the window without its layer, then the layer goes
     let submitted = !covered && gpu.frame(s, HOST, window, kind, 0, &kept.view(), now).is_some();
@@ -395,12 +410,55 @@ pub(crate) fn sync_layer(gpu: &mut dyn Gpu, world: &mut World, window: Id) {
 /// panel went away and the window shows the panel's last frame until the app's next one.
 fn redraw_borrower(world: &mut World, window: Id) {
     let Some(lent) = world.lent_to(window) else { return };
-    let alias = world.session(lent).and_then(|s| {
-        s.windows.keys_of(lent).into_iter().find(|id| s.windows.get(lent, *id).is_ok_and(|e| e.val.alias_of == Some(window)))
-    });
-    if let Some(alias) = alias {
+    if let Some(alias) = alias_of(world, lent, window) {
         world.to_session(lent, |q| q.redraw(alias, false));
     }
+}
+
+/// Borrower `lent`'s id of session 0's window `window`.
+fn alias_of(world: &World, lent: u32, window: Id) -> Option<Id> {
+    let s = world.session(lent)?;
+    s.windows.keys_of(lent).into_iter().find(|id| s.windows.get(lent, *id).is_ok_and(|e| e.val.alias_of == Some(window)))
+}
+
+/// A `FrameRequest` of session 0 for its lent window `hid`, or of the borrower for its alias:
+/// noted, so the beat reaches each side that asked (`World::lent_beat`). A riding badge frame
+/// whose borrower frame will not come presents now: the borrower asks again without having drawn
+/// with its beat (it went unused), or session 0 asks two beats after the ride began while the
+/// borrower draws with none. The borrower's ask wakes session 0 when it asks beats too: its next
+/// badge frame may ride the borrower's next frame (`World::badge_rides`). Returns the borrower
+/// and its alias, by which the backend is asked for the window's beat.
+fn lent_beat_request(gpu: &mut dyn Gpu, world: &mut World, sid: u32, hid: Id, now: u64) -> Option<(u32, Id)> {
+    let lent = world.lent_to(hid).filter(|&lent| sid == HOST || sid == lent)?;
+    let alias = alias_of(world, lent, hid)?;
+    let w = world.session_mut(HOST)?.windows.get_mut(HOST, hid).ok()?;
+    let drawing = w.val.borrower_beat.is_some_and(|b| b + 1 >= w.val.beats);
+    let (missed, wake) = if sid == HOST {
+        w.val.beat_asked |= BEAT_HOST;
+        (w.val.ride.is_some_and(|(_, since)| w.val.beats >= since + 2) && !drawing, false)
+    } else {
+        let first = w.val.beat_asked & BEAT_BORROWER == 0;
+        w.val.beat_asked |= BEAT_BORROWER;
+        (w.val.borrower_beat.take().is_some() && w.val.ride.is_some(), first && w.val.beat_asked & BEAT_HOST != 0)
+    };
+    if missed {
+        present_ride(gpu, world, hid, now);
+    }
+    if wake {
+        // session 0 draws its next badge frame now, to ride the borrower's frame of the beat
+        world.to_session(HOST, |q| q.wake());
+    }
+    Some((lent, alias))
+}
+
+/// Session 0's riding badge frame of `window` presents on its own: the borrower frame it waited
+/// for did not come.
+fn present_ride(gpu: &mut dyn Gpu, world: &mut World, window: Id, now: u64) {
+    let Some(w) = world.session_mut(HOST).and_then(|s| s.windows.get_mut(HOST, window).ok()) else { return };
+    let Some((frame, _)) = w.val.ride.take() else { return };
+    w.val.shown_beat = Some(w.val.beats);
+    replay_badges(gpu, world, window, now);
+    world.retire_frame(HOST, window, frame, now);
 }
 
 /// Session 0's host window `window` shows a new frame: its badge layer is drawn over it.
@@ -1099,12 +1157,23 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             if let Some(id) = host {
                 if let Some(w) = world.session_mut(HOST).and_then(|s| s.windows.get_mut(HOST, id).ok()) {
                     w.val.borrower_frame = true;
+                    w.val.borrower_beat = None;
                     if let Some(o) = w.val.overlay.as_mut() { o.fresh = true; }
                 }
             }
-            // the window's badge layer over the frame it now shows
+            // the window's badge layer over the frame it now shows (a riding badge frame showed
+            // with it)
             if submitted.window && kind & target::PICK == 0 && (host.is_some() || sid == HOST) {
-                replay_badges(gpu, world, host.unwrap_or(target), now);
+                let window = host.unwrap_or(target);
+                replay_badges(gpu, world, window, now);
+                let ride = world.session_mut(HOST).and_then(|s| s.windows.get_mut(HOST, window).ok()).and_then(|w| {
+                    let ride = w.val.ride.take();
+                    if ride.is_some() { w.val.shown_beat = Some(w.val.beats); }
+                    ride
+                });
+                if let Some((frame, _)) = ride {
+                    world.retire_frame(HOST, window, frame, now);
+                }
             }
             if gpu.completes_inline() {
                 if submitted.window && !overlay {
@@ -1472,9 +1541,15 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 let now = world.now();
                 world.request_embedded_frame(sid, id, now);
             }
-            Ok(_) => {
-                if !os_cmd(gpu, sid, OsCmd::FrameRequest { id }) {
-                    s.events.frame_ready(id, 0);
+            Ok(e) => {
+                // a lent window's beat is asked for by the borrower's alias, the window's owner
+                // with the backend, whichever side asked (`lent_beat_request`)
+                let lent = if sid == HOST { (e.lent_to != 0).then_some(id) } else { e.val.alias_of };
+                let (owner, wid) = lent.and_then(|hid| lent_beat_request(gpu, world, sid, hid, now)).unwrap_or((sid, id));
+                if !os_cmd(gpu, owner, OsCmd::FrameRequest { id: wid }) {
+                    if let Some(s) = world.session_mut(sid) {
+                        s.events.frame_ready(id, 0);
+                    }
                 }
             }
             Err(_) => s.stale(),

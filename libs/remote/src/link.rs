@@ -106,6 +106,16 @@ impl Target {
     }
 }
 
+/// The name a local client gives itself: a client an agent runs (`DEVHUB_AGENT`) says whose it
+/// is, and the endpoint's log names the agent with the process as who asked
+/// ([`crate::cmd::asked_by`]).
+fn local_client_name() -> String {
+    match std::env::var("DEVHUB_AGENT") {
+        Ok(agent) if !agent.trim().is_empty() => format!("{}{}", crate::cmd::AGENT_CLIENT, agent.trim()),
+        _ => "client".into(),
+    }
+}
+
 impl Client {
     pub fn new(target: Target, name: &str) -> Client {
         Client(Arc::new(Inner { target, name: name.to_string(), link_id: link_id(), conn: Mutex::new(None), ever: Mutex::new(false), seqs: Mutex::new(HashMap::new()), caps: Mutex::new(Vec::new()), timeout: Mutex::new(None) }))
@@ -125,7 +135,7 @@ impl Client {
             let app = crate::discovery::find(spec, caller).map_err(|why| Error::Refused(CLOSE_LINK_LOST, why))?;
             Target::of(&app)
         };
-        let c = Client::new(target, "client");
+        let c = Client::new(target, &local_client_name());
         c.conn()?;
         Ok(c)
     }

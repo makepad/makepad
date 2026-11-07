@@ -1,6 +1,5 @@
 use crate::app_open::AppOpenPosted;
 use crate::cx::Cx;
-use crate::cx_api::CxOsOp;
 use crate::event::{AppOpenSource, Event};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::file_dialogs::{load_virtual_files_action, FileDialogAction, FileDialogLoadAction};
@@ -132,7 +131,7 @@ impl Cx {
         for open in app_opens {
             // A relaunch of a single-instance app means "show me the app".
             if open.source == AppOpenSource::SecondInstance {
-                self.platform_ops.push_back(CxOsOp::ActivateApp);
+                self.show_to_person();
             }
             self.call_event_handler(&Event::AppOpen(open));
         }

@@ -525,6 +525,7 @@ impl Cx {
                 if !self.windows.is_valid(window_id) {
                     return true;
                 }
+                self.windows[window_id].key = focused;
                 if focused {
                     self.hal.focused = Some(window_id);
                     // repaint all window passes: a window can come back without its frame
@@ -602,7 +603,7 @@ impl Cx {
                 }
                 self.hal.windows.remove(&window_id.0);
                 if self.hal_hosted_extra_window(window_id) {
-                    Self::send_hosted_window(crate::ime::HostedWindow::new(window_id.id(), crate::ime::hosted_window_op::CLOSED));
+                    Self::send_hosted_window(makepad_hal::window_controls::HostedWindow::new(window_id.id(), makepad_hal::window_controls::hosted_window_op::CLOSED));
                 }
                 if let Some(hosted) = self.hal.hosted.as_mut() {
                     hosted.window_closed(window_id);
@@ -616,6 +617,8 @@ impl Cx {
                     if user_closed {
                         crate::remote::note_user_closed_last_window();
                     }
+                    // why it closed is the backend's line before this one (makepad-hal: ...)
+                    crate::log!("hal: the last window closed ({title:?})");
                     self.call_event_handler(&Event::Shutdown);
                     return false;
                 }
@@ -713,6 +716,9 @@ impl Cx {
                 }
                 self.call_event_handler(&Event::Startup);
                 self.redraw_all();
+                if crate::app_open::shown_for_person() {
+                    self.open_for_person();
+                }
                 if self.hal.hosted.is_some() {
                     use crate::studio::AppToStudio;
                     Self::send_studio_message(AppToStudio::AfterStartup);
@@ -738,6 +744,7 @@ impl Cx {
                 _ => {
                     self.request_quit(QuitReason::App);
                     if !self.hal_handle_platform_ops() {
+                        crate::log!("hal: the app quit: the window system asked it to (lifecycle {kind})");
                         self.call_event_handler(&Event::Shutdown);
                         return false;
                     }

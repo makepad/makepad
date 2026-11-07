@@ -161,8 +161,8 @@ impl Vulkan {
                 }
                 let mut blocks = Vec::new();
                 if block {
-                    let (buffer, offset) = batch.put(&params)?;
-                    blocks.push((p.layout.desc.param_binding, vk::DescriptorBufferInfo::default().buffer(buffer.buffer).offset(offset).range(params.len() as u64)));
+                    let placed = batch.put(&params)?;
+                    blocks.push((p.layout.desc.param_binding, vk::DescriptorBufferInfo::default().buffer(placed.buffer).offset(placed.at).range(params.len() as u64)));
                 }
                 let mut sizes: Vec<vk::DescriptorPoolSize> = Vec::new();
                 for (_, ty) in &p.bindings {

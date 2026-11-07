@@ -907,3 +907,48 @@ fn a_run_with_a_deep_tmpdir_is_reached() {
     assert!(!sock.exists(), "its socket goes with it");
     std::fs::remove_dir_all(&base).unwrap();
 }
+
+/// A command over the Unix socket names who sent it: the agent its client says it is, and its
+/// process, from the socket's credentials (not from anything the client says). A `session
+/// relaunch` and a click injected into a window's caption name who asked (three apps
+/// restarted for a landing, and apps closed by their caption, and nothing said by whom, 11-06).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_command_names_the_agent_that_sent_it() {
+    fn asked(_: &Req, out: &mut Out) {
+        out.line(&crate::cmd::asked_by().unwrap_or_default());
+    }
+    let ep = Endpoint::new("makepad-remote-agent-test");
+    ep.register_cmd(asked);
+    let sock = std::env::temp_dir().join(format!("mpr-agent-{}.sock", std::process::id()));
+    crate::carrier::unix::listen_at(&ep, &sock).unwrap();
+    let me = crate::procs::said(std::process::id());
+    let agent = Client::new(Target::Unix(sock.clone()), &format!("{}LANE7", crate::cmd::AGENT_CLIENT));
+    assert_eq!(agent.cmd("who").unwrap().next().unwrap().unwrap(), format!("agent LANE7, {me}"));
+    let other = Client::new(Target::Unix(sock.clone()), "client");
+    assert_eq!(other.cmd("who").unwrap().next().unwrap().unwrap(), me);
+    assert_eq!(crate::cmd::asked_by(), None, "no command is answered on this thread");
+    assert!(me.starts_with(&format!("pid {} ", std::process::id())), "{me}");
+    drop((agent, other));
+    let _ = std::fs::remove_file(&sock);
+}
+
+/// Who a process is, natively: its name and its parents' (a quit signal's sender and an inspect
+/// client are said so), and a process that is gone says so.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_process_is_said_with_its_parents() {
+    let me = crate::procs::process(std::process::id()).expect("this process runs");
+    let exe = std::env::current_exe().unwrap();
+    let file = exe.file_name().unwrap().to_string_lossy().into_owned();
+    // (the kernel's name is the executable's file name, cut to its length)
+    assert!(!me.name.is_empty() && file.starts_with(&me.name), "{} is {file}", me.name);
+    assert_eq!(me.ppid, std::os::unix::process::parent_id());
+    let said = crate::procs::said(std::process::id());
+    assert!(said.starts_with(&format!("pid {} {}", std::process::id(), me.name)), "{said}");
+    assert!(said.contains(&format!(", from {} ", me.ppid)) || me.ppid <= 1, "its parent is named: {said}");
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let gone = child.id();
+    child.wait().unwrap();
+    assert_eq!(crate::procs::said(gone), format!("pid {gone} (gone already)"));
+}

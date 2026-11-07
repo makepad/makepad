@@ -27,6 +27,9 @@ pub struct Hello {
     /// the shared secret of a loopback carrier (in HELLO; an endpoint's own value is the one it
     /// requires)
     pub token: String,
+    /// the peer's process as its carrier's credentials say (a Unix socket's), 0 where the carrier
+    /// cannot say; never on the wire, so no peer can claim another's
+    pub pid: u32,
 }
 
 fn clean(s: &str) -> String {

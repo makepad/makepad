@@ -59,6 +59,7 @@ pub mod relay;
 pub mod ring;
 pub mod stream;
 pub mod watch;
+mod served;
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -69,3 +70,4 @@ pub use cmd::{json_str, now_ms, Out, Req};
 pub use conn::{Channel, ChannelTx, Conn, Event, Hooks};
 pub use endpoint::Endpoint;
 pub use link::Client;
+pub use served::served_cpu_ns;

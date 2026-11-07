@@ -141,8 +141,8 @@ impl Sink for Vulkan {
                     {
                         return Err("video plane byte count differs from its extent".into());
                     }
-                    let (staging, offset) = batch.put(bytes)?;
-                    copies.push((image.clone(), staging, offset));
+                    let staging = batch.put(bytes)?;
+                    copies.push((image.clone(), staging.buffer, staging.at));
                 }
             }
             for (image, staging, offset) in copies {
@@ -162,7 +162,7 @@ impl Sink for Vulkan {
                 unsafe {
                     batch.dev.raw.cmd_copy_buffer_to_image(
                         batch.cb,
-                        staging.buffer,
+                        staging,
                         image.image,
                         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                         &[copy],

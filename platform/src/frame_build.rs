@@ -25,6 +25,7 @@ use crate::{
     geometry::GeometryId,
     gpu_ledger::GpuOrigin,
     makepad_live_id::*,
+    makepad_math::{PointUsize, RectUsize, SizeUsize},
     shared_instances::PublishReceipt,
     texture::{CompressedTextureFormat, TextureCategory, Texture, TextureFormat, TextureId, TexturePixel, TextureUpdated},
     uniform_buffer::UniformBufferId,
@@ -210,6 +211,8 @@ pub(crate) struct FrameBuilder {
     /// The pass being built draws all it recorded, from whole pictures: a draw left out for a
     /// pipeline the HAL is still compiling, or a sample of an unfinished picture, clears it.
     pass_whole: bool,
+    /// What staged uploads ([`crate::Texture::set_staged_upload`]) may still send this frame.
+    staged_left: usize,
     pub(crate) stats: BuildStats,
 }
 
@@ -671,6 +674,14 @@ fn pipeline_color_format(f: DrawShaderColorFormat) -> u32 {
     }
 }
 
+/// The band of `rect` ([x, y, w, h]) a staged upload sends with `budget` bytes left this frame:
+/// its first rows, as many as fit (none once the budget is spent), and the rows left after them.
+fn staged_band([x, y, w, h]: [usize; 4], bpp: usize, budget: usize) -> ([usize; 4], Option<[usize; 4]>) {
+    let rows = (budget / (w * bpp).max(1)).min(h);
+    let rest = (rows < h).then_some([x, y + rows, w, h - rows]);
+    ([x, y, w, rows], rest)
+}
+
 /// Tightly packed rows of the `x, y, w, h` rect of an image `width` texels wide.
 fn pack_rect(bytes: &[u8], width: usize, bpp: usize, [x, y, w, h]: [usize; 4]) -> Vec<u8> {
     let mut out = Vec::with_capacity(w * h * bpp);
@@ -885,15 +896,31 @@ impl Cx {
                     }
                     _ => [0, 0, w, h],
                 };
-                let urect = rect.map(|v| v as u32);
-                if rect == [0, 0, w, h] {
-                    // SAFETY: Cx does not change it before the submit (module header)
-                    unsafe { fb.w.texture_update_borrowed(hal_id, 0, urect, 0, &bytes[..full]) };
-                    uploaded += full as u64;
+                // A staged texture sends the rows the frame's budget holds; the rest stays
+                // dirty for the next frames.
+                let (rect, rest) = if self.textures[id].staged_upload {
+                    let (band, rest) = staged_band(rect, image.bpp, fb.staged_left);
+                    fb.staged_left -= band[2] * band[3] * image.bpp;
+                    (band, rest)
                 } else {
-                    let packed = pack_rect(bytes, w, image.bpp, rect);
-                    uploaded += packed.len() as u64;
-                    fb.w.texture_update_owned(hal_id, 0, urect, 0, packed);
+                    (rect, None)
+                };
+                if rect[3] > 0 {
+                    let urect = rect.map(|v| v as u32);
+                    if rect[0] == 0 && rect[2] == w {
+                        // whole rows are one run of the image: no packing
+                        let run = &bytes[rect[1] * w * image.bpp..(rect[1] + rect[3]) * w * image.bpp];
+                        // SAFETY: Cx does not change it before the submit (module header)
+                        unsafe { fb.w.texture_update_borrowed(hal_id, 0, urect, 0, run) };
+                        uploaded += run.len() as u64;
+                    } else {
+                        let packed = pack_rect(bytes, w, image.bpp, rect);
+                        uploaded += packed.len() as u64;
+                        fb.w.texture_update_owned(hal_id, 0, urect, 0, packed);
+                    }
+                }
+                if let Some([x, y, rw, rh]) = rest {
+                    self.textures[id].set_updated(TextureUpdated::Partial(RectUsize::new(PointUsize::new(x, y), SizeUsize::new(rw, rh))));
                 }
             }
             VecLayout::Cube => {
@@ -1223,6 +1250,7 @@ impl Cx {
     /// ids built (one per pass), which `FrameDone` answers.
     pub(crate) fn fb_build(&mut self, fb: &mut FrameBuilder, passes: &[DrawPassId], time_now: f32, input_ns: u64) -> Vec<u64> {
         self.draw_owners_follow_profiler();
+        fb.staged_left = crate::texture::STAGED_UPLOAD_BYTES;
         let mut built = Vec::new();
         built.extend(self.fb_compute(fb));
         for &pass_id in passes {
@@ -1232,12 +1260,28 @@ impl Cx {
                 built.push(serial);
             }
         }
+        self.fb_staged_uploads(fb);
         self.hal_compute_readbacks(fb);
         self.fb_sweep(fb);
         if !built.is_empty() {
             self.draw_owners_frame_done();
         }
         built
+    }
+
+    /// The staged textures' uploads that no draw of this frame sent, within what is left of the
+    /// frame's budget: they land whether they are drawn or not.
+    fn fb_staged_uploads(&mut self, fb: &mut FrameBuilder) {
+        let ids = self.take_staged_textures();
+        for &id in &ids {
+            if fb.staged_left == 0 {
+                break;
+            }
+            if !self.textures[id].updated().is_empty() {
+                self.fb_vec_texture(fb, id);
+            }
+        }
+        self.staged_textures = ids;
     }
 
     /// Unattached work and its readbacks progress on HAL turns, independently
@@ -2220,6 +2264,22 @@ impl Cx {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_staged_upload_sends_the_rows_its_budget_holds_and_keeps_the_rest() {
+        // a 4096-wide one-byte page, 1 MB a frame: 256 rows go, the rest waits
+        let (band, rest) = staged_band([0, 0, 4096, 4096], 1, 1 << 20);
+        assert_eq!(band, [0, 0, 4096, 256]);
+        assert_eq!(rest, Some([0, 256, 4096, 3840]));
+        // the last band fits: nothing waits
+        let (band, rest) = staged_band([0, 3840, 4096, 256], 1, 1 << 20);
+        assert_eq!(band, [0, 3840, 4096, 256]);
+        assert_eq!(rest, None);
+        // a spent budget sends nothing and keeps all of it
+        let (band, rest) = staged_band([8, 16, 128, 64], 2, 100);
+        assert_eq!(band[3], 0);
+        assert_eq!(rest, Some([8, 16, 128, 64]));
+    }
 
     #[test]
     fn buffer_ids_reuse_a_slot_with_a_new_generation() {

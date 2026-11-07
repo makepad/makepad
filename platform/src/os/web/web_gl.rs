@@ -7,7 +7,8 @@ use crate::{
     makepad_math::*,
     makepad_wasm_bridge::*,
     os::web::from_wasm::*,
-    texture::TextureFormat,
+    os::web::CxOs,
+    texture::{CxTexturePool, TextureFormat, TextureId},
 };
 use std::collections::BTreeSet;
 
@@ -467,125 +468,7 @@ impl Cx {
                         self.passes[draw_pass_id].paint_dirty = true;
                     }
 
-                    let cxtexture = &mut self.textures[texture_id];
-                    if cxtexture.format.is_vec() {
-                        if cxtexture.alloc_vec() {}
-                        if !cxtexture.take_updated().is_empty() {
-                            match &cxtexture.format {
-                                TextureFormat::VecBGRAu8_32 {
-                                    width,
-                                    height,
-                                    data,
-                                    ..
-                                } => {
-                                    self.os.from_wasm(FromWasmAllocTextureImage2D_BGRAu8_32 {
-                                        texture_id: texture_id.0,
-                                        width: *width,
-                                        height: *height,
-                                        data: WasmPtrU32::new(match data {
-                                            Some(data) => data,
-                                            None => continue,
-                                        }),
-                                    });
-                                }
-                                // VecMipBGRAu8_32: level 0 only for now (safe, no mip chain).
-                                // Real mips (gl.generateMipmap) are a TODO for the web backend.
-                                TextureFormat::VecMipBGRAu8_32 {
-                                    width,
-                                    height,
-                                    data,
-                                    ..
-                                } => {
-                                    self.os.from_wasm(FromWasmAllocTextureImage2D_BGRAu8_32 {
-                                        texture_id: texture_id.0,
-                                        width: *width,
-                                        height: *height,
-                                        data: WasmPtrU32::new(match data {
-                                            Some(data) => data,
-                                            None => continue,
-                                        }),
-                                    });
-                                }
-                                TextureFormat::VecRu8 {
-                                    width,
-                                    height,
-                                    data,
-                                    ..
-                                } => {
-                                    self.os.from_wasm(FromWasmAllocTextureImage2D_Ru8 {
-                                        texture_id: texture_id.0,
-                                        width: *width,
-                                        height: *height,
-                                        data: WasmPtrU8::new(match data {
-                                            Some(data) => data,
-                                            None => continue,
-                                        }),
-                                    });
-                                }
-                                TextureFormat::VecRGBAf32 {
-                                    width,
-                                    height,
-                                    data,
-                                    ..
-                                } => {
-                                    self.os.from_wasm(FromWasmAllocTextureImage2D_RGBAf32 {
-                                        texture_id: texture_id.0,
-                                        width: *width,
-                                        height: *height,
-                                        data: WasmPtrF32::new(match data {
-                                            Some(data) => data,
-                                            None => continue,
-                                        }),
-                                    });
-                                }
-                                // Level 0 only, as VecMipBGRAu8_32 above: the layers'
-                                // level 0s must be contiguous (no mip chain in the data).
-                                TextureFormat::VecArrayMipBGRAu8_32 {
-                                    width,
-                                    height,
-                                    layers,
-                                    data,
-                                    max_level,
-                                    ..
-                                } => {
-                                    if max_level.unwrap_or(0) > 0 {
-                                        crate::error!("web: a 2D-array texture with mips is not uploaded (give max_level 0)");
-                                        continue;
-                                    }
-                                    self.os.from_wasm(FromWasmAllocTextureArray_BGRAu8_32 {
-                                        texture_id: texture_id.0,
-                                        width: *width,
-                                        height: *height,
-                                        layers: *layers,
-                                        data: WasmPtrU32::new(match data {
-                                            Some(data) => data,
-                                            None => continue,
-                                        }),
-                                    });
-                                }
-                                TextureFormat::VecCubeBGRAu8_32 {
-                                    width,
-                                    height,
-                                    data,
-                                    ..
-                                } => {
-                                    self.os.from_wasm(FromWasmAllocTextureCube_BGRAu8_32 {
-                                        texture_id: texture_id.0,
-                                        width: *width,
-                                        height: *height,
-                                        data: WasmPtrU32::new(match data {
-                                            Some(data) => data,
-                                            None => continue,
-                                        }),
-                                    });
-                                }
-                                _ => continue,
-                            }
-                            if self.textures[texture_id].discard_cpu_after_upload {
-                                self.textures.1.post_upload_discard.push(texture_id);
-                            }
-                        }
-                    }
+                    Self::webgl_upload_vec_texture(&mut self.textures, &mut self.os, texture_id);
                 }
 
                 let geometry_id = if let Some(geometry_id) = draw_call.geometry_id {
@@ -880,6 +763,141 @@ impl Cx {
             self.debug_draw_tree_recur(false, &mut s, view_id, 0);
             console_log(&s);
         }*/
+    }
+
+    /// A vec texture's pending data, sent to WebGL whole (a draw samples it, or it is staged).
+    fn webgl_upload_vec_texture(textures: &mut CxTexturePool, os: &mut CxOs, texture_id: TextureId) {
+        let cxtexture = &mut textures[texture_id];
+        if cxtexture.format.is_vec() {
+            if cxtexture.alloc_vec() {}
+            if !cxtexture.take_updated().is_empty() {
+                match &cxtexture.format {
+                    TextureFormat::VecBGRAu8_32 {
+                        width,
+                        height,
+                        data,
+                        ..
+                    } => {
+                        os.from_wasm(FromWasmAllocTextureImage2D_BGRAu8_32 {
+                            texture_id: texture_id.0,
+                            width: *width,
+                            height: *height,
+                            data: WasmPtrU32::new(match data {
+                                Some(data) => data,
+                                None => return,
+                            }),
+                        });
+                    }
+                    // VecMipBGRAu8_32: level 0 only for now (safe, no mip chain).
+                    // Real mips (gl.generateMipmap) are a TODO for the web backend.
+                    TextureFormat::VecMipBGRAu8_32 {
+                        width,
+                        height,
+                        data,
+                        ..
+                    } => {
+                        os.from_wasm(FromWasmAllocTextureImage2D_BGRAu8_32 {
+                            texture_id: texture_id.0,
+                            width: *width,
+                            height: *height,
+                            data: WasmPtrU32::new(match data {
+                                Some(data) => data,
+                                None => return,
+                            }),
+                        });
+                    }
+                    TextureFormat::VecRu8 {
+                        width,
+                        height,
+                        data,
+                        ..
+                    } => {
+                        os.from_wasm(FromWasmAllocTextureImage2D_Ru8 {
+                            texture_id: texture_id.0,
+                            width: *width,
+                            height: *height,
+                            data: WasmPtrU8::new(match data {
+                                Some(data) => data,
+                                None => return,
+                            }),
+                        });
+                    }
+                    TextureFormat::VecRGBAf32 {
+                        width,
+                        height,
+                        data,
+                        ..
+                    } => {
+                        os.from_wasm(FromWasmAllocTextureImage2D_RGBAf32 {
+                            texture_id: texture_id.0,
+                            width: *width,
+                            height: *height,
+                            data: WasmPtrF32::new(match data {
+                                Some(data) => data,
+                                None => return,
+                            }),
+                        });
+                    }
+                    // Level 0 only, as VecMipBGRAu8_32 above: the layers'
+                    // level 0s must be contiguous (no mip chain in the data).
+                    TextureFormat::VecArrayMipBGRAu8_32 {
+                        width,
+                        height,
+                        layers,
+                        data,
+                        max_level,
+                        ..
+                    } => {
+                        if max_level.unwrap_or(0) > 0 {
+                            crate::error!("web: a 2D-array texture with mips is not uploaded (give max_level 0)");
+                            return;
+                        }
+                        os.from_wasm(FromWasmAllocTextureArray_BGRAu8_32 {
+                            texture_id: texture_id.0,
+                            width: *width,
+                            height: *height,
+                            layers: *layers,
+                            data: WasmPtrU32::new(match data {
+                                Some(data) => data,
+                                None => return,
+                            }),
+                        });
+                    }
+                    TextureFormat::VecCubeBGRAu8_32 {
+                        width,
+                        height,
+                        data,
+                        ..
+                    } => {
+                        os.from_wasm(FromWasmAllocTextureCube_BGRAu8_32 {
+                            texture_id: texture_id.0,
+                            width: *width,
+                            height: *height,
+                            data: WasmPtrU32::new(match data {
+                                Some(data) => data,
+                                None => return,
+                            }),
+                        });
+                    }
+                    _ => return,
+                }
+                if textures[texture_id].discard_cpu_after_upload {
+                    textures.1.post_upload_discard.push(texture_id);
+                }
+            }
+        }
+    }
+
+    /// The staged textures ([`crate::Texture::set_staged_upload`]) that wait to upload, sent
+    /// whether a draw samples them or not.
+    pub(crate) fn webgl_staged_uploads(&mut self) {
+        let ids = self.take_staged_textures();
+        for &id in &ids {
+            if !self.textures[id].updated().is_empty() {
+                Self::webgl_upload_vec_texture(&mut self.textures, &mut self.os, id);
+            }
+        }
+        self.staged_textures = ids;
     }
 
     pub fn setup_render_pass(&mut self, draw_pass_id: DrawPassId, to_texture: bool) -> Vec2d {

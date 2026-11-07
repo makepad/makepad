@@ -159,6 +159,8 @@ pub struct WinInfo {
     pub pass_dpi: f64,
     pub x: f64,
     pub y: f64,
+    /// it has the keyboard focus
+    pub key: bool,
 }
 
 pub struct GrabSink {
@@ -352,6 +354,36 @@ pub struct QueuedCmd {
     pub cmd: Cmd,
     pub user_seq: Option<u64>,
     pub deadline: CommandDeadline,
+    /// who sent it ([`asked_by`]; empty: not known): the input it injects says it with what it
+    /// reaches (a window's close or caption button)
+    pub by: String,
+}
+
+/// Who sent the command being queued, on the endpoint's thread that answers it: the agent and its
+/// process (`makepad_remote::cmd::asked_by`); empty where not known. Under the JIT the host's
+/// endpoint answers, and its host says.
+#[cfg(not(relax))]
+pub fn asked_by() -> String {
+    makepad_remote::cmd::asked_by().unwrap_or_default()
+}
+
+#[cfg(all(relax, any(unix, windows)))]
+pub fn asked_by() -> String {
+    let hook = crate::cx::relax_host_symbol(c"relax_inspect_asker");
+    if hook.is_null() {
+        return String::new();
+    }
+    // SAFETY: the host's `relax_inspect_asker(buf, cap) -> len`
+    let asker = unsafe { std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn(*mut u8, usize) -> usize>(hook) };
+    let mut buf = vec![0u8; 512];
+    let n = asker(buf.as_mut_ptr(), buf.len());
+    buf.truncate(n.min(512));
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+#[cfg(all(relax, not(any(unix, windows))))]
+pub fn asked_by() -> String {
+    String::new()
 }
 
 /// Native commands expire at their deadline. A JIT command stays live while its requester
@@ -431,6 +463,8 @@ pub enum Cmd {
     /// A command built by a platform-side route (`/cap/start`, `/cursor`):
     /// its payload names platform types, so only platform's `apply` reads it.
     Platform(Box<dyn std::any::Any + Send>),
+    /// `front`: the person asked to see the app ([`crate::cx::Cx::show_to_person`]).
+    Front(Sender<Reply>),
     Close {
         window: Option<usize>,
         /// `ask=1`: the user's close (title-bar button, Cmd+W): the app is asked first
@@ -789,7 +823,7 @@ pub fn err(msg: &str) -> Answer {
 /// (`cap pause`, `tweak apply`); `design <op>` takes the designer op as its second word.
 /// `grab`, `gseq`, `gq` and `tweak grab` are client side: they open the `frames` service.
 pub const COMMANDS: &[Command] = &[
-    Command { words: "status", args: "[w=ID]", answers: "{\"app\",\"pid\",\"w\":[{\"i\":id,\"t\":title,\"sz\":[w,h],\"px\":[w,h],\"dpi\",\"pass_dpi\",\"pos\":[x,y]}],\"activity\"}", service: "ui", risk: CmdRisk::Read, params: "\"w\":{\"type\":\"integer\",\"description\":\"window id (status lists them)\"}", required: &[], positional: &[] },
+    Command { words: "status", args: "[w=ID]", answers: "{\"app\",\"pid\",\"w\":[{\"i\":id,\"t\":title,\"sz\":[w,h],\"px\":[w,h],\"dpi\",\"pass_dpi\",\"pos\":[x,y],\"key\":has the keyboard focus}],\"activity\"}", service: "ui", risk: CmdRisk::Read, params: "\"w\":{\"type\":\"integer\",\"description\":\"window id (status lists them)\"}", required: &[], positional: &[] },
     Command { words: "gamepads", args: "", answers: "connected controllers and their current input states", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "activity", args: "", answers: "native user activity: user_active, user_seq, idle_ms, quiet_ms, held, last_input, window (also in status)", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "grab", args: "[w=ID] [scale=1] [out=FILE]", answers: "client side (frames service): the window as a PNG file; prints {\"png\":path,\"w\",\"sz\",\"capture_ms\",\"encode_ms\",\"capture_kind\"}", service: "ui", risk: CmdRisk::Read, params: makepad_remote::params::GRAB, required: &[], positional: &[] },
@@ -811,7 +845,7 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "trace", args: "[topics=a,b] [off=1]", answers: "get / set the trace topics", service: "logs", risk: CmdRisk::Act, params: "\"topics\":{\"type\":\"string\"},\"off\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "step", args: "[frames=1] [fps=60] [wait_loads=1] [w=ID]", answers: "--virtual-clock only: run frames of 1/fps; answers {\"frame\",\"time\"} after the last", service: "ui", risk: CmdRisk::Act, params: "\"frames\":{\"type\":\"integer\"},\"fps\":{\"type\":\"number\"},\"wait_loads\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "settled", args: "", answers: "{\"settled\":bool,\"reasons\":[next_frame|redraw|repaint|timer|step|shaders|loads],\"loads\":{kind:n}}", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
-    Command { words: "uicounts", args: "", answers: "{\"ins\":n,\"cyc\":n,\"cpu_ns\":n} of the UI thread so far (ins/cyc: thread_counters, user mode: macOS thread_selfcounts, Linux perf_event; else 0)", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
+    Command { words: "uicounts", args: "", answers: "{\"ins\":n,\"cyc\":n,\"cpu_ns\":n,\"process_cpu_ns\":n,\"served_cpu_ns\":n} of the UI thread so far (ins/cyc: thread_counters, user mode: macOS thread_selfcounts, Linux perf_event; else 0), the CPU of all the process's threads, and of that what its threads serving remote peers ran", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "cap start", args: "path=ABS.mp4 [fps=60] [audio=1] [overwrite=1] [w=ID]", answers: "record the window in process (native pixels, H.264)", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"},\"fps\":{\"type\":\"number\"},\"audio\":{\"type\":\"boolean\"},\"overwrite\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"}", required: &["path"], positional: &[] },
     Command { words: "cap stop", args: "[hashes=1]", answers: "finalize the recording: {\"frames\",\"sz\",\"missing\",\"hash\"}", service: "ui", risk: CmdRisk::Act, params: "\"hashes\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "input record", args: "path=<file>", answers: "record the person's native pointer, wheel, key and text input as the commands that inject it (one line each: ms, presented frame, command)", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"}", required: &["path"], positional: &[] },
@@ -821,6 +855,7 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "cap pause", args: "", answers: "stop writing without stopping the clock", service: "ui", risk: CmdRisk::Act, params: "", required: &[], positional: &[] },
     Command { words: "cap resume", args: "", answers: "restart writing", service: "ui", risk: CmdRisk::Act, params: "", required: &[], positional: &[] },
     Command { words: "cursor", args: "[show=1|0] [style=arrow|hand|text|crosshair|app] [x= y=] [w=ID]", answers: "a pointer drawn into the frame, moved by injected mouse input", service: "ui", risk: CmdRisk::Act, params: "\"show\":{\"type\":\"boolean\"},\"style\":{\"type\":\"string\",\"enum\":[\"arrow\",\"hand\",\"text\",\"crosshair\",\"app\"]},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"}", required: &[], positional: &[] },
+    Command { words: "front", args: "", answers: "the person asked to see the app (a repeat `devhub show`): it comes to the front, and a tray app with no window open opens what a click on its icon opens; {\"front\":1}", service: "ui", risk: CmdRisk::Act, params: "", required: &[], positional: &[] },
     Command { words: "close", args: "[w=ID] [ask=1]", answers: "close one window the normal way; ask=1 asks the app first like the window's close button (it may keep or hide the window)", service: "ui", risk: CmdRisk::Destructive, params: "\"w\":{\"type\":\"integer\"},\"ask\":{\"type\":\"integer\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "resize", args: "w= h= [window=ID]", answers: "give the window a new inner size in layout points; answers after the frame that shows it", service: "ui", risk: CmdRisk::Act, params: "\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"window\":{\"type\":\"integer\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &["w", "h"], positional: &[] },
     Command { words: "handsoff", args: "[on=1|0]", answers: "the red hands-off frame round the window", service: "ui", risk: CmdRisk::Act, params: "\"on\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
@@ -981,7 +1016,7 @@ pub fn route_status(p: &Params) -> Answer {
         }
         index += 1;
         out.push_str(&format!(
-            "{{\"i\":{},\"t\":{},\"sz\":[{},{}],\"px\":[{},{}],\"dpi\":{},\"pass_dpi\":{},\"pos\":[{},{}]}}",
+            "{{\"i\":{},\"t\":{},\"sz\":[{},{}],\"px\":[{},{}],\"dpi\":{},\"pass_dpi\":{},\"pos\":[{},{}],\"key\":{}}}",
             window.id,
             json_str(&window.title),
             num(window.w),
@@ -992,6 +1027,7 @@ pub fn route_status(p: &Params) -> Answer {
             num(window.pass_dpi),
             num(window.x),
             num(window.y),
+            window.key,
         ));
     }
     out.push(']');
@@ -1376,6 +1412,7 @@ impl Drop for PendingGrabs {
                 cmd: Cmd::CancelGrabs(self.ids.clone()),
                 user_seq: None,
                 deadline: CommandDeadline::at(Instant::now()),
+                by: String::new(),
             });
         wake();
     }
@@ -1853,6 +1890,7 @@ where
     let pending = PendingReply(Arc::new(AtomicBool::new(true)));
     queue().lock().unwrap().push(QueuedCmd {
         cmd: make(tx),
+        by: asked_by(),
         user_seq: REQUEST_USER_SEQ.get(),
         deadline: CommandDeadline {
             at: Instant::now() + timeout,
@@ -2055,6 +2093,7 @@ mod tests {
             ("input replay", 2),
             ("input stop", 2),
             ("input status", 2),
+            ("front", 1),
             ("close", 1),
             ("resize", 1),
             ("window", 1),

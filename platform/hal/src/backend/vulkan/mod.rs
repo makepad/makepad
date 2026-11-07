@@ -10,6 +10,7 @@ mod media_gpu;
 mod capture_gpu;
 #[cfg(target_os = "linux")]
 mod native_app;
+mod blocks;
 mod device;
 mod frame;
 #[cfg(target_os = "android")]
@@ -20,6 +21,7 @@ mod prof;
 mod readback;
 pub(crate) mod resources;
 pub(crate) mod share;
+mod sets;
 mod submit;
 pub mod surface;
 pub(crate) mod tap;
@@ -96,8 +98,12 @@ pub struct Vulkan {
     compute: FastMap<(u32, u32), compute::Pipe>,
     programs: FastMap<Vec<u8>, Weak<State>>,
     /// Scratch of `prepare`: one draw's buffer and image descriptors, cleared per draw.
-    draw_bins: Vec<(u32, makepad_vulkan::vk::DescriptorType, makepad_vulkan::vk::DescriptorBufferInfo)>,
-    draw_images: Vec<(u32, makepad_vulkan::vk::DescriptorType, makepad_vulkan::vk::DescriptorImageInfo)>,
+    draw_bins: Vec<sets::BufferBinding>,
+    draw_images: Vec<sets::ImageBinding>,
+    /// What the pass's earlier draws resolved (`frame::DrawMemo`).
+    draw_memo: frame::DrawMemo,
+    /// The draws' descriptor sets, kept across frames (`sets::KeptSets`).
+    kept: sets::KeptSets,
     passes: FastMap<PassKey, Arc<RenderPass>>,
     /// Framebuffers kept across frames by (render pass, attachment views, size): on the Adreno
     /// driver vkCreateFramebuffer is a kernel round trip (GPU memory), and one made and
@@ -246,7 +252,7 @@ impl Vulkan {
         info.set_device_name(&unsafe { std::ffi::CStr::from_ptr(dev.properties.device_name.as_ptr()) }.to_string_lossy());
         crate::gpu_limits::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
-        Ok(Self { #[cfg(target_os = "linux")] native_apps: Default::default(), #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, leases: Default::default(), dev, info, tex: FastMap::default(), buf: FastMap::default(), zero_owed: Vec::new(), pipe: FastMap::default(), compute: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
+        Ok(Self { #[cfg(target_os = "linux")] native_apps: Default::default(), #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, leases: Default::default(), dev, info, tex: FastMap::default(), buf: FastMap::default(), zero_owed: Vec::new(), pipe: FastMap::default(), compute: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(), draw_memo: Default::default(), kept: Default::default(),
             #[cfg(target_os = "android")] native_layers: Default::default(),
             passes: FastMap::default(), fbs: FastMap::default(), dead_fbs: Vec::new(), sweep_at: 0, msaa: FastMap::default(), win: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), retained_stale: Default::default(), direct_frame: FastMap::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
             fallback: FastMap::default(), windows: surface::Windows::new(source), sharing,
@@ -388,7 +394,7 @@ impl Vulkan {
         // what the driver says this process holds (VK_EXT_memory_budget), `None` without it
         let device = self.dev.memory_budget(false).map(|b| b.process);
         self.dev.pools.set_count(crate::ledger::Pool::CommandBuffers, self.spares.slots());
-        self.dev.pools.set_count(crate::ledger::Pool::DescriptorPools, self.spares.descriptor_pools());
+        self.dev.pools.set_count(crate::ledger::Pool::DescriptorPools, self.kept.pools());
         if let Some(host) = world.session_mut(HOST) {
             let frame = host.frame;
             host.ledger.set_pools(&self.dev.pools, frame, now);
@@ -793,6 +799,7 @@ impl exec::DeviceReset for Vulkan {
         self.pick_ids.clear();
         self.pick_pending.clear();
         self.spares = Default::default();
+        self.kept = Default::default();
         self.windows.source.device_ready(dev.clone())?;
         #[cfg(target_os = "linux")]
         {

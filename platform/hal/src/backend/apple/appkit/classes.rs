@@ -88,9 +88,10 @@ fn define_pulse_class() -> *const Class {
 // ------------------------------------------------------------------ application, menu
 
 fn define_app_delegate() -> *const Class {
-    extern "C" fn application_should_terminate(_: &Object, _: Sel, _: ObjcId) -> isize {
+    extern "C" fn application_should_terminate(_: &Object, _: Sel, sender: ObjcId) -> isize {
         const CANCEL: isize = 0;
         const NOW: isize = 1;
+        eprintln!("makepad-hal: asked to quit (applicationShouldTerminate:): sender {}, {}", super::close_why::sender(sender), super::close_why::cause());
         app::note_exit_requested();
         // the sessions decide: each is asked to quit, the app answers with a `Quit` command
         if app().ask_sessions_to_quit() {

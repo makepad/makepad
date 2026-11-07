@@ -80,6 +80,8 @@ pub struct Device {
     /// What the backend made for itself (arenas, staging, leases, multisample and window
     /// copies): the ledger's backend rows.
     pub pools: Arc<crate::ledger::Pools>,
+    /// The device memory retained buffers take their ranges of (`Buffer::unzeroed`).
+    pub(super) blocks: Mutex<super::blocks::Blocks>,
     /// The driver reported VK_ERROR_DEVICE_LOST (or a simulated loss): the backend replaces
     /// the device. Nothing else marks a device lost; running out of memory never does.
     pub lost: AtomicBool,
@@ -488,7 +490,7 @@ impl Device {
             physical, family: family as u32, properties, memory, features, formats,
             timestamp_bits: queue.timestamp_valid_bits, calibrated, extensions, present_wait: pacing, multiview: has_multiview, compute, fdm: has_fdm, msaa, life: life.clone(),
             video_encode,
-            pools: Default::default(), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), rebar_fallback_logged: AtomicBool::new(false), budget: Mutex::new(None),
+            pools: Default::default(), blocks: Default::default(), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), rebar_fallback_logged: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: has_ycbcr, video_samplers: Mutex::new(Default::default()),
             pipeline_cache, pipeline_cache_file, pipelines_made: AtomicU32::new(0), pipeline_made_ns: AtomicU64::new(0),
         })))
@@ -646,7 +648,7 @@ impl Device {
             raw, physical, queue_lock: Mutex::new(()), family: family as u32, properties, memory, features, formats,
             // a display peer only scans out: the GPU profiler times the rendering device
             timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, multiview: false, compute: false, fdm: false, msaa: 1, life: owner.life.clone(), video_encode: None,
-            pools: Default::default(), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), rebar_fallback_logged: AtomicBool::new(false), budget: Mutex::new(None),
+            pools: Default::default(), blocks: Default::default(), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), rebar_fallback_logged: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: false, video_samplers: Mutex::new(Default::default()),
             pipeline_cache, pipeline_cache_file, pipelines_made: AtomicU32::new(0), pipeline_made_ns: AtomicU64::new(0) }))
     }
@@ -662,6 +664,7 @@ impl Drop for Device {
                 if v.conversion != vk::SamplerYcbcrConversion::null() { self.raw.destroy_sampler_ycbcr_conversion(v.conversion, None); }
             }
             if self.pipeline_cache != vk::PipelineCache::null() { self.raw.destroy_pipeline_cache(self.pipeline_cache, None); }
+            lock(&self.blocks).release(self);
             self.raw.destroy_device(None);
         }
     }

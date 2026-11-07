@@ -45,19 +45,31 @@ pub mod synthetic_cursor;
 pub(crate) struct RemoteInputScope {
     origin: std::rc::Rc<std::cell::Cell<bool>>,
     previous: bool,
+    sender: std::rc::Rc<std::cell::RefCell<String>>,
+    previous_by: String,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn remote_input_scope(cx: &crate::cx::Cx) -> RemoteInputScope {
+    remote_input_scope_by(cx, "")
+}
+
+/// [`remote_input_scope`] for a command `by` sent (`QueuedCmd::by`: the agent and process, empty
+/// where not known): what the injected input reaches says who sent it ([`crate::cx::Cx::injected_by`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn remote_input_scope_by(cx: &crate::cx::Cx, by: &str) -> RemoteInputScope {
     let origin = cx.remote_activity.remote_input.clone();
     let previous = origin.replace(true);
-    RemoteInputScope { origin, previous }
+    let sender = cx.remote_activity.remote_by.clone();
+    let previous_by = sender.replace(by.to_string());
+    RemoteInputScope { origin, previous, sender, previous_by }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for RemoteInputScope {
     fn drop(&mut self) {
         self.origin.set(self.previous);
+        self.sender.replace(std::mem::take(&mut self.previous_by));
     }
 }
 
@@ -176,9 +188,11 @@ mod imp {
             "loop" => Answer::Text(crate::os::hal::loop_watch::report()),
             "step" => route_step(p),
             "settled" => reply_to_answer(ask(Cmd::Settled, 4)),
-            "uicounts" => reply_to_answer(ask(Cmd::UiCounts, 4)),
+            // counts so far: a read waits for the UI thread through a stall and misses nothing
+            "uicounts" => reply_to_answer(ask(Cmd::UiCounts, ACTIVITY_WAIT_SECS)),
             "cap pause" => reply_to_answer(ask(|tx| Cmd::CapPause(true, tx), 4)),
             "cap resume" => reply_to_answer(ask(|tx| Cmd::CapPause(false, tx), 4)),
+            "front" => reply_to_answer(ask(Cmd::Front, 4)),
             "close" => {
                 let window = p.window();
                 let ask_app = p.flag(&["ask"]);
@@ -983,6 +997,13 @@ mod imp {
             || CAPTURE.with_borrow(|capture| capture.as_ref().is_some_and(|c| !c.virtual_clock))
     }
 
+    /// A remote request waits for the next painted frame (a resize, an input
+    /// or a tweak with `wait`): under the virtual clock the app draws for it
+    /// (`app_draws_now`).
+    pub(crate) fn frame_awaited() -> bool {
+        FRAME_WAITERS.with_borrow(|waiters| !waiters.is_empty())
+    }
+
     // ------------------------------------------------------------------
     // user-initiated window closes
     // ------------------------------------------------------------------
@@ -1640,31 +1661,6 @@ mod imp {
     const CAPTURE_SHUTDOWN_WAIT: Duration = Duration::from_secs(20);
 
     /// `/settled`: why the app would still change if time moved on.
-    /// The calling thread's CPU time (CLOCK_THREAD_CPUTIME_ID; 0 where there is none).
-    #[cfg(unix)]
-    fn thread_cpu_ns() -> u64 {
-        #[repr(C)]
-        struct Ts {
-            sec: i64,
-            nsec: i64,
-        }
-        extern "C" {
-            fn clock_gettime(id: i32, t: *mut Ts) -> i32;
-        }
-        #[cfg(target_os = "macos")]
-        const THREAD_CPUTIME: i32 = 16;
-        #[cfg(not(target_os = "macos"))]
-        const THREAD_CPUTIME: i32 = 3;
-        let mut t = Ts { sec: 0, nsec: 0 };
-        if unsafe { clock_gettime(THREAD_CPUTIME, &mut t) } != 0 {
-            return 0;
-        }
-        t.sec as u64 * 1_000_000_000 + t.nsec as u64
-    }
-    #[cfg(not(unix))]
-    fn thread_cpu_ns() -> u64 {
-        0
-    }
     fn settled_json(cx: &Cx) -> String {
         let mut reasons = Vec::new();
         if !cx.new_next_frames.is_empty() {
@@ -1775,6 +1771,7 @@ mod imp {
                     && info.pass_dpi == main_pass_dpi(cx, window_id)
                     && info.x == geom.position.x
                     && info.y == geom.position.y
+                    && info.key == window.key
             });
         if same {
             return;
@@ -1792,6 +1789,7 @@ mod imp {
                     pass_dpi: main_pass_dpi(cx, window_id),
                     x: geom.position.x,
                     y: geom.position.y,
+                    key: window.key,
                 }
             })
             .collect();
@@ -1836,7 +1834,7 @@ mod imp {
             }
         }
         let user_seq = cx.remote_activity.user_seq();
-        let _origin = super::remote_input_scope(cx);
+        let _origin = super::remote_input_scope_by(cx, &request.by);
         match request.cmd {
             Cmd::Gamepads(tx) => {
                 use crate::game_input::CxGameInputApi;
@@ -1970,6 +1968,7 @@ mod imp {
                                 let native = cx.windows[window_id].layout_vec2d_to_native_points(dvec2(x, y));
                                 let deadline = request.deadline;
                                 let input_deadline = deadline.clone();
+                                let native_by = request.by.clone();
                                 makepad_hal::backend::apple::media::native_click(sid, id, native.x, native.y,
                                     move || !input_deadline.expired() && activity::user_seq_now() == user_seq,
                                     move |result| match result {
@@ -1980,7 +1979,7 @@ mod imp {
                                             }).collect();
                                             queue().lock().unwrap().push(QueuedCmd {
                                                 cmd: Cmd::Input { window: Some(window_id.id()), inputs, wait, tx },
-                                                user_seq: Some(user_seq), deadline,
+                                                user_seq: Some(user_seq), deadline, by: native_by,
                                             });
                                             wake();
                                         }
@@ -2294,7 +2293,8 @@ mod imp {
             }
             Cmd::UiCounts(tx) => {
                 let (ins, cyc) = crate::thread_counters::read().unwrap_or((0, 0));
-                let _ = tx.send(Reply::Text(format!("{{\"ins\":{ins},\"cyc\":{cyc},\"cpu_ns\":{}}}", thread_cpu_ns())));
+                let (cpu, process, served) = (makepad_hal::clock::thread_cpu_ns(), makepad_hal::clock::process_cpu_ns(), makepad_hal::clock::served_cpu_ns());
+                let _ = tx.send(Reply::Text(format!("{{\"ins\":{ins},\"cyc\":{cyc},\"cpu_ns\":{cpu},\"process_cpu_ns\":{process},\"served_cpu_ns\":{served}}}")));
             }
             Cmd::Platform(payload) => match *payload
                 .downcast::<PlatformCmd>()
@@ -2467,6 +2467,10 @@ mod imp {
                     )));
                 }
             }
+            Cmd::Front(tx) => {
+                cx.show_to_person();
+                let _ = tx.send(Reply::Text("{\"front\":1}".into()));
+            }
             Cmd::Close { window, ask, tx } => {
                 let window_id = match resolve_window(cx, window) {
                     Ok(window_id) => window_id,
@@ -2481,10 +2485,11 @@ mod imp {
                 if ask {
                     cx.call_event_handler(&crate::event::Event::WindowCloseRequested(crate::event::WindowCloseRequestedEvent { window_id, accept_close: accept_close.clone() }));
                 }
+                let by = cx.injected_by().unwrap_or_default();
                 let line = if accept_close.get() {
-                    format!("[makepad-remote] remote closed window {}", window_id.id())
+                    format!("[makepad-remote] remote closed window {}, asked by {by}", window_id.id())
                 } else {
-                    format!("[makepad-remote] remote close of window {} declined by the app", window_id.id())
+                    format!("[makepad-remote] remote close of window {} declined by the app, asked by {by}", window_id.id())
                 };
                 println!("{line}");
                 let _ = std::io::stdout().flush();

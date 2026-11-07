@@ -51,6 +51,11 @@ pub struct Win {
     touch_began: Cell<f64>,
     touch_disqualified: Cell<bool>,
     pub retired: Cell<bool>,
+    /// AppKit asked to close it (`windowShouldClose:`), and the platform sent its close
+    /// (`WindowClose`: the person's request accepted, or the app's own close): a close
+    /// without either is AppKit's own, said in the log (close_why.rs)
+    pub close_asked: Cell<bool>,
+    pub close_sent: Cell<bool>,
     effect_view: Cell<ObjcId>,
     /// the display link of the window and whether the app asked for a frame
     pub link: Cell<ObjcId>,
@@ -129,6 +134,8 @@ impl Win {
                 touch_began: Cell::new(0.0),
                 touch_disqualified: Cell::new(false),
                 retired: Cell::new(false),
+                close_asked: Cell::new(false),
+                close_sent: Cell::new(false),
                 effect_view: Cell::new(nil),
                 link: Cell::new(nil),
                 want_frame: Cell::new(false),
@@ -298,6 +305,12 @@ impl Win {
             let () = msg_send![self.window, orderFront: nil];
         } else {
             let () = msg_send![self.window, makeKeyAndOrderFront: nil];
+            // a launch the person asked to see (`devhub show`): its first window comes in front
+            // of the other apps' windows without taking the keyboard from the app the person
+            // types in (11-06: an app took the focus at its start); their click activates it
+            if first_shown_raise() {
+                let () = msg_send![self.window, orderFrontRegardless];
+            }
             if std::env::args().any(|arg| arg == "--focus") {
                 let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
                 let () = msg_send![ns_app, activateIgnoringOtherApps: YES];
@@ -516,6 +529,14 @@ impl Win {
 
     /// `windowShouldClose:`. The app decides: the window stays until it sends `WindowClose`.
     pub fn close_requested(&self) -> bool {
+        self.ask_close("windowShouldClose:")
+    }
+
+    /// A close request (`by`: AppKit's `windowShouldClose:`, or the app's own request from its
+    /// drawn caption), said in the log with what AppKit handles then.
+    fn ask_close(&self, by: &str) -> bool {
+        eprintln!("makepad-hal: window {} asked to close ({by}): {}", self.id.get().index, super::close_why::cause());
+        self.close_asked.set(true);
         app::note_exit_requested();
         self.push(|q| q.close_requested(self.id.get()));
         false
@@ -525,6 +546,14 @@ impl Win {
     pub fn will_close(&self) {
         if self.retired.replace(true) {
             return;
+        }
+        if !self.close_sent.get() {
+            eprintln!(
+                "makepad-hal: window {} closes without the app's close{} (windowWillClose:): {}",
+                self.id.get().index,
+                if self.close_asked.get() { ", after a close request it did not answer" } else { " or a close request" },
+                super::close_why::cause()
+            );
         }
         super::a11y::drop_window(crate::a11y::window_key(self.sid.get(), self.id.get().index));
         Shared::global().unregister_layer(self.owner_sid, self.owner_id);
@@ -1000,7 +1029,7 @@ impl Win {
                 }
                 // the app-drawn caption's close: asked as the traffic light's close is
                 window_state::CLOSE => {
-                    self.close_requested();
+                    self.ask_close("the app's RequestCloseWindow");
                     return;
                 }
                 window_state::SHOW => {
@@ -1280,6 +1309,16 @@ fn event_is_press_motion(event: ObjcId) -> bool {
 fn windows_hidden() -> bool {
     static HIDDEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *HIDDEN.get_or_init(|| std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some())
+}
+
+/// The first window of a launch the person asked to see was raised ([`super::app::shown_for_person`]).
+static RAISED_FOR_SHOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True once, for the first window a launch the person asked to see shows: it comes in front
+/// without the keyboard. (A tray app's panel opens key as a click opens it: it is a non-activating
+/// panel the person dismisses with Escape or a click elsewhere.)
+pub(super) fn first_shown_raise() -> bool {
+    super::app::shown_for_person() && !RAISED_FOR_SHOW.swap(true, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Whether this process may activate itself or make a window key. An agent-driven or test

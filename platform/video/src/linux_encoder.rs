@@ -1,8 +1,9 @@
 //! Linux file encoder: GStreamer pipeline behind the same facade as the
 //! VideoToolbox / Media Foundation arms. `gst_parse_launch` builds
-//! `appsrc ! videoconvert ! x264enc ! mp4mux ! filesink`; frames are
-//! pushed as tightly packed NV12 produced by the SAME `nv12` converters
-//! the other platforms use, so colours match across arms.
+//! `appsrc ! videoconvert ! x264enc ! mp4mux ! filesink`; frames come in
+//! as tightly packed NV12 produced by the SAME `nv12` converters the other
+//! platforms use, so colours match across arms, and are pushed in the
+//! layout the appsrc caps define (rows padded to 4 bytes).
 //!
 //! Software x264 by policy of least surprise: at the sizes this seam
 //! serves (thumbnails, small clips) software encode is milliseconds, and
@@ -37,6 +38,8 @@ pub(crate) struct LinuxVideoFileEncoder {
     frame_index: u64,
     finalized: bool,
     nv12_scratch: Vec<u8>,
+    /// Where the appsrc caps put a frame's planes.
+    layout: Nv12Layout,
     color: VideoColor,
     transform: VideoTransformInfo,
 }
@@ -89,22 +92,27 @@ impl LinuxVideoFileEncoder {
                  gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly)",
             )
         })?;
-        if options.width % 4 != 0 {
-            // GStreamer's default NV12 layout pads rows to 4 bytes; the
-            // facade contract is tightly packed. Every current caller is
-            // mod-16 anyway.
-            return Err(VideoFileError::new(
-                "width must be a multiple of 4 on the Linux GStreamer arm",
-            ));
-        }
+        // The tight frames pushed are laid out as the appsrc caps say a
+        // picture is (GStreamer's default NV12 layout pads rows to 4 bytes).
+        let layout = unsafe {
+            let text = CString::new(format!("video/x-raw,format=NV12,width={},height={}", options.width, options.height)).unwrap();
+            let caps = (gst.gst_caps_from_string)(text.as_ptr());
+            let layout = gst.caps_nv12_layout(caps);
+            if !caps.is_null() {
+                (gst.gst_mini_object_unref)(caps);
+            }
+            layout.ok_or_else(|| VideoFileError::new(format!("no NV12 layout for {}x{}", options.width, options.height)))?
+        };
+        // The bitrate is set on the element once it exists, within the range
+        // it takes (x265enc tops out far below what a large still asks for).
         let kbps = (options.video_bitrate_bps / 1000).max(64);
         let gop = if options.keyframe_only { 1 } else { 60 };
         let codec = match options.codec {
             VideoFileCodec::H264 => format!(
-                "x264enc bitrate={kbps} speed-preset=veryfast key-int-max={gop} ! h264parse"
+                "x264enc name=enc speed-preset=veryfast key-int-max={gop} ! h264parse"
             ),
             VideoFileCodec::H265 | VideoFileCodec::H265Alpha => format!(
-                "x265enc bitrate={kbps} speed-preset=veryfast key-int-max={gop} ! h265parse"
+                "x265enc name=enc speed-preset=veryfast key-int-max={gop} ! h265parse"
             ),
         };
         // With an audio track the muxer is named so a second branch can feed it:
@@ -150,6 +158,16 @@ impl LinuxVideoFileEncoder {
             }
             if !err.is_null() {
                 (gst.g_error_free)(err);
+            }
+            let enc_name = CString::new("enc").unwrap();
+            let enc = (gst.gst_bin_get_by_name)(pipeline, enc_name.as_ptr());
+            let bitrate = if enc.is_null() { None } else { gst.set_uint_in_range(enc, "bitrate", kbps) };
+            if !enc.is_null() {
+                (gst.gst_object_unref)(enc as *mut c_void);
+            }
+            if bitrate.is_none() {
+                (gst.gst_object_unref)(pipeline as *mut c_void);
+                return Err(VideoFileError::new("encoder pipeline has no encoder bitrate to set"));
             }
             let name = CString::new("src").unwrap();
             let appsrc = (gst.gst_bin_get_by_name)(pipeline, name.as_ptr());
@@ -198,6 +216,7 @@ impl LinuxVideoFileEncoder {
                 frame_index: 0,
                 finalized: false,
                 nv12_scratch: Vec::new(),
+                layout,
                 color: options.color,
                 transform: VideoTransformInfo {
                     name: match options.codec {
@@ -249,20 +268,33 @@ impl LinuxVideoFileEncoder {
             if let Some(text) = self.gst.bus_error(self.bus) {
                 return Err(VideoFileError::new(format!("encoder: {text}")));
             }
-            let buffer = (self.gst.gst_buffer_new_allocate)(
-                std::ptr::null_mut(),
-                nv12_bytes.len(),
-                std::ptr::null_mut(),
-            );
+            let (w, h) = (self.width as usize, self.height as usize);
+            let tight = nv12::nv12_frame_size(self.width, self.height);
+            if nv12_bytes.len() < tight {
+                return Err(VideoFileError::new(format!("nv12 frame of {} bytes, {w}x{h} needs {tight}", nv12_bytes.len())));
+            }
+            let size = self.layout.size(self.height);
+            let buffer = (self.gst.gst_buffer_new_allocate)(std::ptr::null_mut(), size, std::ptr::null_mut());
             if buffer.is_null() {
                 return Err(VideoFileError::new("gst_buffer_new_allocate failed"));
             }
-            (self.gst.gst_buffer_fill)(
-                buffer,
-                0,
-                nv12_bytes.as_ptr() as *const c_void,
-                nv12_bytes.len(),
-            );
+            if self.layout == (Nv12Layout { luma: (0, w), chroma: (w * h, w) }) {
+                (self.gst.gst_buffer_fill)(buffer, 0, nv12_bytes.as_ptr() as *const c_void, tight);
+            } else {
+                let mut map = GstMapInfo::default();
+                if (self.gst.gst_buffer_map)(buffer, &mut map, GST_MAP_WRITE) == 0 {
+                    (self.gst.gst_mini_object_unref)(buffer);
+                    return Err(VideoFileError::new("buffer map failed"));
+                }
+                let dst = std::slice::from_raw_parts_mut(map.data, map.size);
+                let (luma, chroma) = nv12_bytes[..tight].split_at(w * h);
+                for (plane, (offset, stride)) in [(luma, self.layout.luma), (chroma, self.layout.chroma)] {
+                    for (row, src) in plane.chunks_exact(w).enumerate() {
+                        dst[offset + row * stride..][..w].copy_from_slice(src);
+                    }
+                }
+                (self.gst.gst_buffer_unmap)(buffer, &mut map);
+            }
             // Public-ABI field writes (GST_BUFFER_PTS in C is this access).
             let repr = buffer as *mut GstBufferRepr;
             (*repr).pts = (pts as u64) * 100;
@@ -407,6 +439,38 @@ mod tests {
         ] {
             assert_eq!(colorimetry_to_color(&color_to_colorimetry(c), 1920, 1080), c);
         }
+    }
+
+    /// An encode that asks for more bitrate than the encoder takes gets the most it takes,
+    /// not its default: GObject refuses an out-of-range value, and the encoder would run at
+    /// its default (2048 kbit/s for x265enc, whose range ends near 100 Mbit/s), so the two
+    /// came out the same size. A single frame overshoots a low rate, so the gap is under the
+    /// ratio of the rates.
+    #[test]
+    fn a_bitrate_past_the_encoders_range_gets_its_most_not_its_default() {
+        let (w, h) = (512u32, 512u32);
+        // Noise in the luma plane: every bit the encoder is allowed shows in the size.
+        let mut frame = vec![128u8; nv12::nv12_frame_size(w, h)];
+        let mut s = 0x9e37_79b9u32;
+        for v in &mut frame[..(w * h) as usize] {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            *v = 16 + (s % 220) as u8;
+        }
+        let path = std::env::temp_dir().join(format!("linux-enc-range-{}.mp4", std::process::id()));
+        let text = path.to_string_lossy().into_owned();
+        let size = |bps: u32| {
+            let options = VideoFileEncoderOptions { width: w, height: h, fps_num: 30, fps_den: 1, video_bitrate_bps: bps, keyframe_only: true, ..Default::default() };
+            let mut enc = LinuxVideoFileEncoder::new(&text, &options).expect("encoder");
+            enc.push_frame_nv12(&frame, Some(0)).expect("frame");
+            enc.finish().expect("finish");
+            std::fs::metadata(&path).expect("written").len()
+        };
+        let (default, past) = (size(2_048_000), size(400_000_000));
+        let _ = std::fs::remove_file(&path);
+        println!("a {w}x{h} noise frame: {default} bytes at the default bitrate, {past} asked past the range");
+        assert!(past > default * 2, "asked past the range: {past} bytes, at the default: {default}");
     }
 
     /// 24 frames of grey + one second of a 440 Hz tone, muxed to MP4: the file must

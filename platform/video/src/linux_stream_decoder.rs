@@ -7,13 +7,16 @@
 //! come out with a later push: `push_packet` returns what is ready by then
 //! (a decoder with frame threads holds a few frames: tens of milliseconds of
 //! latency, fine for a camera view; not for a sub-frame realtime stream).
-//! Rows padded to a stride are repacked tight.
+//! Planes are read where the buffer's layout puts them and repacked tight.
 
-use crate::linux_decoder::{caps_field, colorimetry_to_color};
+use crate::linux_decoder::{caps_field, colorimetry_to_color, sample_nv12, BUS_LOOK_NS};
 use crate::linux_gst_sys::*;
+use crate::mp4_first_frame::FirstAccessUnit;
 use crate::stream_decoder::{DecodedFrame, StreamVideoCodec};
 use crate::{VideoColor, VideoFileError};
 use std::ffi::{c_void, CString};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Condvar, Mutex};
 
 pub(crate) struct LinuxStreamDecoder {
     gst: &'static LibGst,
@@ -25,27 +28,13 @@ pub(crate) struct LinuxStreamDecoder {
 
 unsafe impl Send for LinuxStreamDecoder {}
 
-/// The NV12 layout GStreamer gives a `width` x `height` frame: (luma stride, chroma offset).
-fn gst_nv12_layout(width: u32, height: u32) -> (usize, usize) {
-    let stride = (width as usize + 3) & !3;
-    (stride, stride * ((height as usize + 1) & !1))
-}
-
-/// Copies an NV12 frame laid out as GStreamer pads it into tight rows.
-pub(crate) fn repack_nv12(src: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
-    let (w, h) = (width as usize, height as usize);
-    let tight = w * h + w * h.div_ceil(2);
-    if src.len() == tight { return Some(src.to_vec()); }
-    let (stride, chroma) = gst_nv12_layout(width, height);
-    if src.len() < chroma + stride * h.div_ceil(2) { return None; }
-    let mut out = Vec::with_capacity(tight);
-    for row in 0..h { out.extend_from_slice(&src[row * stride..row * stride + w]); }
-    for row in 0..h.div_ceil(2) { out.extend_from_slice(&src[chroma + row * stride..chroma + row * stride + w]); }
-    Some(out)
-}
-
 impl LinuxStreamDecoder {
     pub fn new(codec: StreamVideoCodec) -> Result<Self, VideoFileError> {
+        Self::with_decoder(codec, "decodebin")
+    }
+
+    /// A stream decoder through the `decoder` element (`decodebin`: the one it plugs).
+    fn with_decoder(codec: StreamVideoCodec, decoder: &str) -> Result<Self, VideoFileError> {
         let gst = LibGst::get().ok_or_else(|| VideoFileError::new(
             "GStreamer runtime not found (install gstreamer1.0-plugins-base, -plugins-good and -libav)",
         ))?;
@@ -56,7 +45,7 @@ impl LinuxStreamDecoder {
         let parse = match codec { StreamVideoCodec::H264 => "h264parse", StreamVideoCodec::Hevc => "h265parse" };
         let launch = format!(
             "appsrc name=src is-live=true format=time block=false max-bytes=8000000 caps=\"{caps}\" ! {parse} ! \
-             decodebin ! videoconvert ! video/x-raw,format=NV12 ! appsink name=sink sync=false max-buffers=4 drop=true"
+             {decoder} ! videoconvert ! video/x-raw,format=NV12 ! appsink name=sink sync=false max-buffers=4 drop=true"
         );
         unsafe {
             let launch_c = CString::new(launch).map_err(|_| VideoFileError::new("pipeline string contains NUL"))?;
@@ -73,6 +62,7 @@ impl LinuxStreamDecoder {
             let appsrc = (gst.gst_bin_get_by_name)(pipeline, src_name.as_ptr());
             let appsink = (gst.gst_bin_get_by_name)(pipeline, sink_name.as_ptr());
             let bus = (gst.gst_element_get_bus)(pipeline);
+            gst.give_shared_contexts(pipeline);
             let this = Self { gst, pipeline, appsrc, appsink, bus };
             if appsrc.is_null() || appsink.is_null() { return Err(VideoFileError::new("stream decoder pipeline lacks its ends")); }
             if (gst.gst_element_set_state)(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE {
@@ -85,7 +75,7 @@ impl LinuxStreamDecoder {
 
     pub fn push_packet(&mut self, annex_b: &[u8], pts_100ns: i64) -> Result<Vec<DecodedFrame>, VideoFileError> {
         unsafe {
-            if let Some(text) = self.gst.bus_error(self.bus) {
+            if let Some(text) = self.gst.bus_drain(self.bus, false) {
                 return Err(VideoFileError::new(format!("stream decoder: {text}")));
             }
             let buffer = (self.gst.gst_buffer_new_allocate)(std::ptr::null_mut(), annex_b.len(), std::ptr::null_mut());
@@ -130,26 +120,41 @@ impl LinuxStreamDecoder {
         let height: u32 = caps_field(&caps_text, "height").and_then(|v| v.parse().ok()).unwrap_or(0);
         if width == 0 || height == 0 { return Err(VideoFileError::new("stream decoder negotiated no geometry")); }
         let color: VideoColor = colorimetry_to_color(caps_field(&caps_text, "colorimetry").unwrap_or(""), width, height);
-        let buffer = (self.gst.gst_sample_get_buffer)(sample);
-        if buffer.is_null() { return Err(VideoFileError::new("sample without buffer")); }
-        let mut map = GstMapInfo::default();
-        if (self.gst.gst_buffer_map)(buffer, &mut map, GST_MAP_READ) == 0 { return Err(VideoFileError::new("buffer map failed")); }
-        let bytes = std::slice::from_raw_parts(map.data, map.size);
-        let nv12 = repack_nv12(bytes, width, height);
-        let pts = (*(buffer as *const GstBufferRepr)).pts;
-        (self.gst.gst_buffer_unmap)(buffer, &mut map);
-        let nv12 = nv12.ok_or_else(|| VideoFileError::new("stream decoder gave an unexpected NV12 layout"))?;
+        let nv12 = sample_nv12(self.gst, sample, width, height)?;
+        let pts = (*((self.gst.gst_sample_get_buffer)(sample) as *const GstBufferRepr)).pts;
         Ok(DecodedFrame { width, height, nv12, pts_100ns: if pts == GST_CLOCK_TIME_NONE { 0 } else { (pts / 100) as i64 }, gpu: None, color })
     }
 
     pub fn flush(&mut self) -> Result<Vec<DecodedFrame>, VideoFileError> {
         self.drain(20_000_000)
     }
+
+    /// Pushes one access unit and waits for its picture, the frame stamped
+    /// `pts_100ns`, however long the decoder takes. A frame stamped otherwise
+    /// (one a failed picture left behind) is dropped; an error or warning on
+    /// the bus (a decoder drops a picture it cannot decode with a warning)
+    /// fails the picture, and so does the stream's end.
+    fn decode_one(&mut self, annex_b: &[u8], pts_100ns: i64) -> Result<DecodedFrame, VideoFileError> {
+        let mut frames = self.push_packet(annex_b, pts_100ns)?;
+        loop {
+            if let Some(i) = frames.iter().position(|f| f.pts_100ns == pts_100ns) {
+                return Ok(frames.swap_remove(i));
+            }
+            if let Some(text) = self.gst.bus_drain(self.bus, true) {
+                return Err(VideoFileError::new(format!("stream decoder: {text}")));
+            }
+            if unsafe { (self.gst.gst_app_sink_is_eos)(self.appsink) } != 0 {
+                return Err(VideoFileError::new("stream decoder ended before the picture"));
+            }
+            frames = self.drain(BUS_LOOK_NS)?;
+        }
+    }
 }
 
 impl Drop for LinuxStreamDecoder {
     fn drop(&mut self) {
         unsafe {
+            self.gst.keep_shared_contexts(self.pipeline);
             (self.gst.gst_element_set_state)(self.pipeline, GST_STATE_NULL);
             if !self.appsrc.is_null() { (self.gst.gst_object_unref)(self.appsrc as *mut c_void); }
             if !self.appsink.is_null() { (self.gst.gst_object_unref)(self.appsink as *mut c_void); }
@@ -159,29 +164,95 @@ impl Drop for LinuxStreamDecoder {
     }
 }
 
+/// The stream decoders kept for stills ([`decode_still`]), by decoder element: a pipeline
+/// stands up once and decodes picture after picture whatever their sizes, where a file
+/// pipeline built and tore down a decoder session per picture (on a desktop GPU 20 ms to open
+/// and 7 ms to close one at a time, 160 ms and 150 ms with ten at once, against under 1 ms of
+/// decoding).
+///
+/// A software decoder is kept for every still decoded at once (each is a CPU's work). A
+/// hardware decoder is kept once: on that GPU one warm session decoded 5.3 ms a picture and ten
+/// 6.8 ms (the engine was never the limit), each holding about 600 MB of video memory, so
+/// a still that finds it busy waits for it.
+struct Stills {
+    idle: Vec<(String, LinuxStreamDecoder)>,
+    /// The hardware elements whose decoder is out (decoding, or being made).
+    busy: Vec<String>,
+}
+
+static STILLS: Mutex<Stills> = Mutex::new(Stills { idle: Vec::new(), busy: Vec::new() });
+static STILL_FREED: Condvar = Condvar::new();
+
+/// The timestamp of the next still: each picture's frame is told from any other by it.
+static STILL_PTS: AtomicI64 = AtomicI64::new(1);
+
+/// A hardware element's decoder out of [`STILLS`]: given back (or, failed, dropped) on drop,
+/// a panic included, so a still waiting for it is never left waiting.
+struct Out {
+    element: String,
+    hardware: bool,
+    decoder: Option<LinuxStreamDecoder>,
+}
+
+impl Drop for Out {
+    fn drop(&mut self) {
+        let mut stills = STILLS.lock().unwrap_or_else(|e| e.into_inner());
+        if self.hardware {
+            if let Some(i) = stills.busy.iter().position(|e| *e == self.element) {
+                stills.busy.swap_remove(i);
+            }
+        }
+        if let Some(decoder) = self.decoder.take() {
+            stills.idle.push((std::mem::take(&mut self.element), decoder));
+        }
+        STILL_FREED.notify_all();
+    }
+}
+
+/// One picture's access unit (a single intra frame) decoded on a kept stream decoder of the
+/// element that takes it, or a new one. The element is chosen per picture as `decodebin`
+/// would for its file (a hardware decoder's size range rules some pictures out), since a
+/// running pipeline cannot change it. A decoder that failed a picture is dropped.
+pub(crate) fn decode_still(au: &FirstAccessUnit) -> Result<DecodedFrame, VideoFileError> {
+    let gst = LibGst::get().ok_or_else(|| VideoFileError::new("GStreamer runtime not found"))?;
+    let caps = format!(
+        "{}, stream-format=(string)byte-stream, alignment=(string)au, width=(int){}, height=(int){}",
+        match au.codec { StreamVideoCodec::H264 => "video/x-h264", StreamVideoCodec::Hevc => "video/x-h265" },
+        au.width,
+        au.height
+    );
+    let (element, hardware) = gst.best_decoder(&caps).ok_or_else(|| VideoFileError::new(format!("no installed decoder takes {caps}")))?;
+    let mut out = {
+        let mut stills = STILLS.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(i) = stills.idle.iter().position(|(e, _)| *e == element) {
+                let decoder = stills.idle.swap_remove(i).1;
+                if hardware {
+                    stills.busy.push(element.clone());
+                }
+                break Out { element, hardware, decoder: Some(decoder) };
+            }
+            if !(hardware && stills.busy.contains(&element)) {
+                if hardware {
+                    stills.busy.push(element.clone());
+                }
+                break Out { element, hardware, decoder: None };
+            }
+            stills = STILL_FREED.wait(stills).unwrap_or_else(|e| e.into_inner());
+        }
+    };
+    let mut decoder = match out.decoder.take() {
+        Some(decoder) => decoder,
+        None => LinuxStreamDecoder::with_decoder(au.codec, &out.element)?,
+    };
+    let frame = decoder.decode_one(&au.annex_b, STILL_PTS.fetch_add(1, Ordering::Relaxed))?;
+    out.decoder = Some(decoder);
+    Ok(frame)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn padded_rows_repack_tight() {
-        // 6 x 3: stride 8, chroma at 8 * 4 = 32, two chroma rows.
-        let (w, h) = (6u32, 3u32);
-        let (stride, chroma) = gst_nv12_layout(w, h);
-        assert_eq!((stride, chroma), (8, 32));
-        let mut src = vec![0xEEu8; chroma + stride * 2];
-        for r in 0..3 { for c in 0..6 { src[r * stride + c] = (r * 10 + c) as u8; } }
-        for r in 0..2 { for c in 0..6 { src[chroma + r * stride + c] = (100 + r * 10 + c) as u8; } }
-        let out = repack_nv12(&src, w, h).unwrap();
-        assert_eq!(out.len(), 6 * 3 + 6 * 2);
-        assert_eq!(&out[..6], &[0, 1, 2, 3, 4, 5]);
-        assert_eq!(&out[12..18], &[20, 21, 22, 23, 24, 25]);
-        assert_eq!(&out[18..24], &[100, 101, 102, 103, 104, 105]);
-        assert!(!out.contains(&0xEE));
-        let tight = vec![1u8; 1920 * 1080 * 3 / 2];
-        assert_eq!(repack_nv12(&tight, 1920, 1080).unwrap().len(), tight.len());
-        assert!(repack_nv12(&[0; 10], 6, 3).is_none());
-    }
 
     /// Access units from GStreamer's own test source and encoder, decoded back.
     fn encoded_test_units(gst: &'static LibGst, frames: u32) -> Option<Vec<Vec<u8>>> {
@@ -222,7 +293,17 @@ mod tests {
         assert_eq!(units.len(), 30);
         let mut decoder = LinuxStreamDecoder::new(StreamVideoCodec::H264).expect("stream decoder");
         let mut frames = Vec::new();
+        // paced: a unit goes in while fewer than 4 of the pictures pushed are still to come out.
+        // The live sink keeps 4 and drops the oldest, so the 30 pushed at once lost pictures
+        // whenever a loaded box kept this thread from pulling (11-07); paced, none is lost however
+        // slow the box. (A decoder still holding 4 after 10 s quiet takes the next one anyway.)
         for (i, unit) in units.iter().enumerate() {
+            let mut quiet = 0;
+            while i.saturating_sub(frames.len()) >= 4 && quiet < 500 {
+                let more = decoder.flush().expect("flush");
+                quiet = if more.is_empty() { quiet + 1 } else { 0 };
+                frames.extend(more);
+            }
             frames.extend(decoder.push_packet(unit, i as i64 * 333_333).expect("push"));
         }
         // every picture, until the decoder has gone 10 s (500 flushes of 20 ms) without one

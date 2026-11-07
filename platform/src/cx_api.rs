@@ -1236,6 +1236,14 @@ impl Cx {
         { false }
     }
 
+    /// The drawing under way is the first since an XR frame came (`Event::XrUpdate`): the one
+    /// that draws the XR pass for it. An app that draws its XR pass from its desktop's draw walk
+    /// draws it only then, so a desktop frame (a redraw of the desktop alone, an animation,
+    /// `redraw_all`) never renders the headset's view again.
+    pub fn drawing_xr_frame(&self) -> bool {
+        self.drawing_xr_frame
+    }
+
     /// Repaints that painted a window since the start: with a remote headset streaming, what
     /// the desktop renders for itself (it renders nothing for the headset's frames alone).
     pub fn window_paints(&self) -> u64 {
@@ -1465,16 +1473,16 @@ impl Cx {
         self.platform_ops.push_back(CxOsOp::XrDiscoverAnchor(id));
     }
 
-    #[cfg_attr(target_os = "linux", track_caller)]
+    /// Ends the app; the log names the caller (an end the person did not ask for is then the
+    /// app's, 11-06).
+    #[track_caller]
     pub fn quit(&mut self) {
-        #[cfg(target_os = "linux")]
-        if std::env::var_os("MAKEPAD_HAL_LOG").is_some() {
-            eprintln!("[hal-linux] Cx::quit queued at {}", std::panic::Location::caller());
-        }
+        crate::log!("the app quits: Cx::quit at {}", std::panic::Location::caller());
         crate::cx::relax_quit_started();
         self.platform_ops.push_back(CxOsOp::Quit);
     }
 
+    #[track_caller]
     pub fn request_quit(&mut self, reason: QuitReason) -> bool {
         #[cfg(target_os = "linux")]
         if std::env::var_os("MAKEPAD_HAL_LOG").is_some() {
@@ -1488,7 +1496,9 @@ impl Cx {
             _ => false,
         };
         if !was_handled {
-            self.quit();
+            crate::log!("the app quits: asked ({reason:?}) at {}, and nothing kept it", std::panic::Location::caller());
+            crate::cx::relax_quit_started();
+            self.platform_ops.push_back(CxOsOp::Quit);
         }
         was_handled
     }
@@ -1523,6 +1533,19 @@ impl Cx {
     /// cursor pinned even when the OS quietly drops the disassociation.
     pub fn repin_mouse_pointer(&mut self) {
         self.platform_ops.push_back(CxOsOp::RepinMousePointer);
+    }
+
+    /// The input being handled now was injected (an inspect `ui` command, the HAL's automation),
+    /// not the window system's: who sent it (the agent and its process, as the command's connection
+    /// names them), for a log line of what it reached (a window's close or caption button). None:
+    /// the window system's input (the person's pointer or keys, or a viewer's such as a Desk Link).
+    pub fn injected_by(&self) -> Option<String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.remote_activity.remote_input.get() {
+            let by = self.remote_activity.remote_by.borrow();
+            return Some(if by.is_empty() { "a sender its connection does not name".to_string() } else { by.clone() });
+        }
+        None
     }
 
     /// Pin the CURRENT mouse capture for value scrubbing: the hardware
@@ -2411,6 +2434,7 @@ impl Cx {
         // an external request waits for this window's frame: it paints also while a headset
         // streams
         self.window_redrawn = true;
+        self.remote_present_owed = true;
         if let Some(pass) = self.windows[window_id].main_pass_id {
             self.repaint_pass_and_child_passes(pass);
         }
@@ -2488,7 +2512,6 @@ impl Cx {
         }
     }
 
-    #[track_caller]
     /// A redraw asked for: unless it is a remote headset's frame (`in_xr_update`), the windows
     /// paint with it.
     #[inline]
@@ -2498,6 +2521,7 @@ impl Cx {
         }
     }
 
+    #[track_caller]
     pub fn redraw_all(&mut self) {
         self.frame_requests += 1;
         crate::frame_sources::note(crate::frame_sources::Kind::Redraw, std::panic::Location::caller());

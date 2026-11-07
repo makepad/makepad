@@ -94,6 +94,8 @@ struct State {
     spans: [Span; 3],
     warnings: HashMap<String, u64>,
     worst: VecDeque<Worst>,
+    /// The longest recent waits behind an earlier job on the same strand (`strand_waited`).
+    strand_worst: VecDeque<Worst>,
     #[cfg(test)]
     changed: Option<std::sync::mpsc::Sender<()>>,
 }
@@ -124,6 +126,9 @@ struct Budget {
     queued: [[AtomicI64; 3]; 3],
     waits: [[AtomicU64; BUCKETS]; 3],
     max_wait: [AtomicU64; 3],
+    /// Waits behind an earlier job on the same strand, kept apart from the waits for a worker.
+    strand_waits: [AtomicU64; BUCKETS],
+    max_strand_wait: AtomicU64,
 }
 impl Budget {
     fn new(cores: usize, physical: usize) -> Self {
@@ -138,6 +143,7 @@ impl Budget {
                 running: 0, jit_running: 0, background: 0, visible: 0, jit_background: 0, jit_waiting: 0, waiting: 0, parked: [0; 3], admitted: [0; 3],
                 runtime: [0; 3], spans: [Span::default(); 3], warnings: HashMap::new(),
                 worst: VecDeque::new(),
+                strand_worst: VecDeque::new(),
                 #[cfg(test)]
                 changed: None,
             }),
@@ -146,6 +152,8 @@ impl Budget {
             queued: std::array::from_fn(|_| std::array::from_fn(|_| AtomicI64::new(0))),
             waits: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
             max_wait: std::array::from_fn(|_| AtomicU64::new(0)),
+            strand_waits: std::array::from_fn(|_| AtomicU64::new(0)),
+            max_strand_wait: AtomicU64::new(0),
         }
     }
     fn now(&self) -> u64 { self.origin.elapsed().as_nanos().min(u64::MAX as u128) as u64 }
@@ -454,9 +462,7 @@ impl Budget {
     }
     fn waited(&self, class: u8, client: u8, ns: u64, label: &str) {
         valid(class, client);
-        let us = ns.div_ceil(1000).max(1);
-        let bucket = (64 - (us - 1).leading_zeros() as usize).min(BUCKETS - 1);
-        self.waits[class as usize][bucket].fetch_add(1, Relaxed);
+        self.waits[class as usize][bucket(ns)].fetch_add(1, Relaxed);
         self.max_wait[class as usize].fetch_max(ns, Relaxed);
         if ns <= 100_000_000 { return; }
         let mut s = self.lock();
@@ -468,6 +474,19 @@ impl Budget {
         while s.worst.front().is_some_and(|w| now.saturating_sub(w.when) > RECENT_NS) { s.worst.pop_front(); }
         while s.worst.back().is_some_and(|w| w.ns <= ns) { s.worst.pop_back(); }
         s.worst.push_back(Worst { class, label: Label::new(label), ns, when: now, culprit });
+    }
+    /// A strand's job waited `ns` behind the strand's earlier jobs before its turn came: the
+    /// strand's own order, not a worker or a permit (its wait for those is `waited`).
+    fn strand_waited(&self, class: u8, ns: u64, label: &str) {
+        valid(class, APP);
+        self.strand_waits[bucket(ns)].fetch_add(1, Relaxed);
+        self.max_strand_wait.fetch_max(ns, Relaxed);
+        if ns <= 100_000_000 { return; }
+        let mut s = self.lock();
+        let now = self.now();
+        while s.strand_worst.front().is_some_and(|w| now.saturating_sub(w.when) > RECENT_NS) { s.strand_worst.pop_front(); }
+        while s.strand_worst.back().is_some_and(|w| w.ns <= ns) { s.strand_worst.pop_back(); }
+        s.strand_worst.push_back(Worst { class, label: Label::new(label), ns, when: now, culprit: None });
     }
     fn report(&self) -> String {
         let s = self.lock();
@@ -488,6 +507,7 @@ impl Budget {
         let total = s.running;
         let warm = self.warming();
         let worst = s.worst.iter().find(|w| now.saturating_sub(w.when) <= RECENT_NS).copied();
+        let strand_worst = s.strand_worst.iter().find(|w| now.saturating_sub(w.when) <= RECENT_NS).copied();
         let parked = s.parked;
         let admitted = s.admitted;
         let runtime = s.runtime;
@@ -515,10 +535,24 @@ impl Budget {
                 human(percentile(&hist, 50)), human(percentile(&hist, 95)), human(self.max_wait[class].load(Relaxed)),
                 parked[class], admitted[class], human(runtime[class]));
         }
+        let hist = std::array::from_fn::<_, BUCKETS, _>(|i| self.strand_waits[i].load(Relaxed));
+        if hist.iter().any(|&n| n != 0) {
+            let _ = write!(out, "behind an earlier job on its strand: wait p50 / p95 / max  {} / {} / {}",
+                human(percentile(&hist, 50)), human(percentile(&hist, 95)), human(self.max_strand_wait.load(Relaxed)));
+            if let Some(w) = strand_worst {
+                let _ = write!(out, ", worst: {} {:?} waited {}", CLASSES[w.class as usize], w.label.text(), human(w.ns));
+            }
+            out.push('\n');
+        }
         for span in spans { if span.ns > 0 { let _ = writeln!(out, "no checkpoint for: {} {}", span.label.text(), human(span.ns)); } }
         for (site, count) in warnings.into_iter().take(8) { let _ = writeln!(out, "checkpoint under lock: {site} x{count}"); }
         out
     }
+}
+/// A wait's histogram bucket: powers of two of microseconds.
+fn bucket(ns: u64) -> usize {
+    let us = ns.div_ceil(1000).max(1);
+    (64 - (us - 1).leading_zeros() as usize).min(BUCKETS - 1)
 }
 fn valid(class: u8, client: u8) { assert!(class <= BACKGROUND && client <= HAL, "invalid CPU budget class/client"); }
 fn percentile(hist: &[u64; BUCKETS], percent: u64) -> u64 {
@@ -821,6 +855,9 @@ pub fn queued(class: u8, client: u8, delta: i32) {
 }
 #[relax_api]
 pub fn waited(class: u8, client: u8, ns: u64, label: &str) { global().waited(class, client, ns, label); }
+/// A strand's job waited `ns` behind the strand's earlier jobs: reported apart from waits for a worker.
+#[relax_api]
+pub fn strand_waited(class: u8, ns: u64, label: &str) { global().strand_waited(class, ns, label); }
 #[relax_api]
 pub fn begin_warmup() { global().begin_warmup(); }
 /// Permanently restore the normal budget at first settle or real user input.

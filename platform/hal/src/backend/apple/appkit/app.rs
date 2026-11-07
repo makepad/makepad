@@ -707,25 +707,12 @@ impl App {
     }
 
     pub fn startup_focus_hack(&self) {
-        if self.focus_hack_ran.replace(true) || !focus_allowed() {
+        // a launch the person asked to see is raised without the focus: their click takes it,
+        // not a pointer passing over the raised window (keys typed elsewhere then went to it)
+        if self.focus_hack_ran.replace(true) || !focus_allowed() || shown_for_person() {
             return;
         }
-        unsafe {
-            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
-            let active: bool = msg_send![ns_app, isActive];
-            if active {
-                return;
-            }
-            let dock_array: ObjcId = msg_send![class!(NSRunningApplication), runningApplicationsWithBundleIdentifier: str_to_nsstring("com.apple.dock")];
-            let dock_count: u64 = msg_send![dock_array, count];
-            if dock_count == 0 {
-                return;
-            }
-            let dock: ObjcId = msg_send![dock_array, objectAtIndex: 0];
-            let _: BOOL = msg_send![dock, activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps];
-            let me: ObjcId = msg_send![class!(NSRunningApplication), currentApplication];
-            let () = msg_send![me, activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps];
-        }
+        activate_through_dock();
     }
 
     pub fn marked_text_attributes(&self) -> ObjcId {
@@ -1105,6 +1092,12 @@ fn command(sid: u32, cmd: OsCmd) {
         }
         OsCmd::WindowClose { id } => {
             if let Some(win) = window_of(id) {
+                // (session 0 is the host: `makepad run` closes the window it lent the app when its
+                // run ends, and says why)
+                if !win.popup && !win.dropdown {
+                    eprintln!("makepad-hal: window {} closes: session {sid}{} closed it", id.index, if sid == 0 { " (the host)" } else { "" });
+                }
+                win.close_sent.set(true);
                 unsafe {
                     let () = msg_send![win.window, close];
                 }
@@ -1189,15 +1182,24 @@ fn command(sid: u32, cmd: OsCmd) {
             if !focus_allowed() {
                 return;
             }
-            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
-            let () = msg_send![ns_app, activateIgnoringOtherApps: YES];
+            a.focus_hack_done();
+            if shown_for_person() {
+                activate_through_dock();
+            } else {
+                let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+                let () = msg_send![ns_app, activateIgnoringOtherApps: YES];
+            }
+            // its windows on screen, a minimised one back; a hidden one stays hidden (a tray app's
+            // closed window, its dismissed dropdown)
             let windows: Vec<&'static Win> = a.windows.borrow().iter().copied().filter(|w| !w.retired.get()).collect();
             for win in windows {
                 let miniaturized: BOOL = msg_send![win.window, isMiniaturized];
+                let visible: BOOL = msg_send![win.window, isVisible];
                 if miniaturized != NO {
                     let () = msg_send![win.window, deminiaturize: nil];
+                } else if visible != NO {
+                    let () = msg_send![win.window, orderFrontRegardless];
                 }
-                let () = msg_send![win.window, orderFrontRegardless];
             }
         },
         OsCmd::ImeShow { id, area, .. } => {
@@ -1725,4 +1727,34 @@ fn file_dialog(sid: u32, req: u32, kind: u32, title: &str, location: &str, filen
         bytes.extend_from_slice(p.as_bytes());
     }
     Shared::global().push(sid, |q| q.dialog_result(req, paths.len() as u32, &bytes));
+}
+
+/// A launch a person asked to see (`devhub show` sets `MAKEPAD_SHOW=1`): launched by a background
+/// process, its activation must go through the Dock, or its windows open behind the person's.
+pub(super) fn shown_for_person() -> bool {
+    static SHOWN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SHOWN.get_or_init(|| std::env::var_os("MAKEPAD_SHOW").is_some_and(|v| v == "1"))
+}
+
+/// Brings this app to the front from wherever it was launched (a background process, a terminal,
+/// an agent): through the Dock, which macOS lets take the focus from another app, as a plain
+/// `activateIgnoringOtherApps` from a process the person did not start is refused. Nothing when
+/// it is the active app already.
+fn activate_through_dock() {
+    unsafe {
+        let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        let active: bool = msg_send![ns_app, isActive];
+        if active {
+            return;
+        }
+        let dock_array: ObjcId = msg_send![class!(NSRunningApplication), runningApplicationsWithBundleIdentifier: str_to_nsstring("com.apple.dock")];
+        let dock_count: u64 = msg_send![dock_array, count];
+        if dock_count == 0 {
+            return;
+        }
+        let dock: ObjcId = msg_send![dock_array, objectAtIndex: 0];
+        let _: BOOL = msg_send![dock, activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps];
+        let me: ObjcId = msg_send![class!(NSRunningApplication), currentApplication];
+        let () = msg_send![me, activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps];
+    }
 }

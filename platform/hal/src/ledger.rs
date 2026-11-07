@@ -50,12 +50,12 @@ pub enum Pool {
     Leases,
     /// GPU timestamp sample buffers or query pools
     Timestamps,
-    /// command buffers: Vulkan's slots in flight or kept for reuse (each with its command,
-    /// descriptor and timestamp pools); on Metal the most made and not completed at once, which
+    /// command buffers: Vulkan's slots in flight or kept for reuse (each with its command and
+    /// timestamp pools); on Metal the most made and not completed at once, which
     /// the queue keeps driver memory for
     CommandBuffers,
-    /// the descriptor pools Vulkan's reset slots keep for the next frames, one per live program
-    /// each slot drew with
+    /// the descriptor pools Vulkan's kept descriptor sets come from: the one new sets come from
+    /// and older ones batches in flight still hold
     DescriptorPools,
     /// the 1x1 texture bound in an empty slot
     Fallback,
@@ -70,10 +70,13 @@ pub enum Pool {
     /// the compiled pipelines of an app session that closed, waiting for the next session to take
     /// them (a restart in place, Metal)
     KeptPipelines,
+    /// the room in the memory blocks retained buffers take ranges of (Vulkan) that no buffer
+    /// holds: the blocks' bytes beyond the handles' own
+    BufferBlocks,
 }
 
 impl Pool {
-    pub const ALL: [Pool; 12] = [
+    pub const ALL: [Pool; 13] = [
         Pool::UploadArena,
         Pool::Staging,
         Pool::Leases,
@@ -86,6 +89,7 @@ impl Pool {
         Pool::Capture,
         Pool::WordTextures,
         Pool::KeptPipelines,
+        Pool::BufferBlocks,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -101,6 +105,7 @@ impl Pool {
             Pool::Capture => "capture",
             Pool::WordTextures => "instance word textures",
             Pool::KeptPipelines => "kept pipelines",
+            Pool::BufferBlocks => "buffer block room",
         }
     }
 }
@@ -134,6 +139,12 @@ impl Pools {
 
     pub fn objects(&self, pool: Pool) -> u64 {
         self.objects[pool as usize].load(Ordering::Relaxed)
+    }
+
+    /// A pool the backend measures itself: its bytes and objects now.
+    pub fn set(&self, pool: Pool, bytes: u64, objects: u64) {
+        self.bytes[pool as usize].store(bytes, Ordering::Relaxed);
+        self.objects[pool as usize].store(objects, Ordering::Relaxed);
     }
 
     /// A pool the backend counts itself (objects whose size the API does not report).

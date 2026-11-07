@@ -4,6 +4,7 @@
 //! none in a tiling or mobile one. This is the one table of that: widgets' `resolve_chrome` reads
 //! it for an app's caption, and `makepad run`'s load screen (relax-boot, which draws with fonts and
 //! shaders only) reads [`host_window_controls`] for its caption, so the two look the same.
+use makepad_micro_serde::*;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Mutex;
 
@@ -209,5 +210,73 @@ impl HostedAppFrame {
     pub fn parse(json: &str) -> Option<Self> {
         json.split("\"makepad_app_frame\"").nth(1)?.trim_start().strip_prefix(':')?;
         Some(Self)
+    }
+}
+
+/// `window_op` (the studio protocol's `HostedWindowOp::op`) for the app's own full-screen
+/// request (`Window::fullscreen`): the host fills the screen with the window in a space of
+/// its own, and `window_op::RESTORE` leaves it. Lives here, not in the studio protocol, so
+/// that it does not change the hosted wire's fingerprint: a host that does not know it
+/// ignores it.
+pub const WINDOW_OP_FULLSCREEN: u8 = 5;
+
+/// `HostedWindow::op` values.
+pub mod hosted_window_op {
+    /// Child to host: the window is gone (closed by the app, or after a `CLOSE_REQUEST`).
+    pub const CLOSED: u8 = 0;
+    /// Host to child: the person closed the window on the desk; the app closes it
+    /// unless its `WindowCloseRequested` says no.
+    pub const CLOSE_REQUEST: u8 = 1;
+    /// Child to host: what the app asked of the window (`Window::minimize` and the like).
+    pub const MINIMIZE: u8 = 2;
+    pub const MAXIMIZE: u8 = 3;
+    pub const RESTORE: u8 = 4;
+    pub const FULLSCREEN: u8 = 5;
+    /// Child to host: put the window at `x`, `y` (the app's screen coordinates, the
+    /// `WmEvent::Screens` it was given: relative to its first window).
+    pub const MOVE: u8 = 6;
+    /// Child to host: the window's title is `title` (on its creation and when it changes).
+    pub const TITLE: u8 = 7;
+    /// Child to host, for any of its windows (the first too): the inner size the app asked
+    /// for (`window.inner_size`), `x` by `y` points. The host honours it within its desk.
+    pub const SIZE: u8 = 8;
+    /// Child to host, for any of its windows (the first too): keep the window above the
+    /// host's other windows (`x` 1) or stop (`x` 0) (`WindowHandle::set_topmost`). Sent
+    /// after the window's creation, and again on it while the window is topmost.
+    pub const TOPMOST: u8 = 9;
+}
+
+/// A hosted app's windows after its first (an output window, a second view): the host
+/// shows each as a window of its own. Both ways, as JSON in `Custom`: a hosted Cx sends
+/// them, and so does the WM-hosted shell of `makepad run` for its later windows. Lives
+/// here, not in the studio protocol, so that it is no part of the hosted wire's
+/// fingerprint.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct HostedWindow { pub window_id: usize, pub op: u8, pub x: f64, pub y: f64, pub title: String }
+#[derive(SerJson, DeJson)]
+struct HostedWindowEnvelope { makepad_hosted_window: HostedWindow }
+impl HostedWindow {
+    pub fn new(window_id: usize, op: u8) -> Self { Self { window_id, op, x: 0.0, y: 0.0, title: String::new() } }
+    pub fn topmost(window_id: usize, on: bool) -> Self { Self { x: on as u8 as f64, ..Self::new(window_id, hosted_window_op::TOPMOST) } }
+    pub fn title(window_id: usize, title: &str) -> Self { Self { title: title.to_string(), ..Self::new(window_id, hosted_window_op::TITLE) } }
+    pub fn to_json(&self) -> String { HostedWindowEnvelope { makepad_hosted_window: self.clone() }.serialize_json() }
+    pub fn parse(json: &str) -> Option<Self> {
+        if !json.contains("\"makepad_hosted_window\"") { return None; }
+        HostedWindowEnvelope::deserialize_json(json).ok().map(|e| e.makepad_hosted_window)
+    }
+}
+
+#[cfg(test)]
+mod hosted_window_tests {
+    use super::*;
+
+    /// A later window's messages survive the trip, its title included (non-ASCII too).
+    #[test]
+    fn a_hosted_window_message_round_trips() {
+        let title = HostedWindow::title(3, "Viewer — Program Output");
+        assert_eq!(HostedWindow::parse(&title.to_json()), Some(title));
+        let mv = HostedWindow { x: 1610.5, y: -2.0, ..HostedWindow::new(3, hosted_window_op::MOVE) };
+        assert_eq!(HostedWindow::parse(&mv.to_json()), Some(mv));
+        assert_eq!(HostedWindow::parse(&HostedResize { w: 1.0, h: 2.0 }.to_json()), None);
     }
 }

@@ -19,7 +19,7 @@ use crate::backend::vulkan::{Device, Image};
 use crate::dmabuf::DmaBuf;
 use crate::hosted_ipc::{self, ClientEndpoint};
 use crate::types::*;
-use crate::window_controls::{HostedAppFrame, HostedResize};
+use crate::window_controls::{hosted_window_op, HostedAppFrame, HostedResize, HostedWindow, WINDOW_OP_FULLSCREEN};
 use crate::{session, wm_socket, Id};
 use makepad_micro_serde::SerBin;
 use makepad_studio_protocol::{
@@ -1164,6 +1164,10 @@ impl Shell for App {
                         // window off the screen. It asks the process to end with it (`Kill`).
                         if tile {
                             self.window_op(window_op::CLOSE);
+                        } else {
+                            // A later window (an output window) is a tile of its own: the WM
+                            // takes it off the desk, or it stays there with its last frame.
+                            self.hub.send(vec![AppToStudio::Custom(HostedWindow::new(w.window_id, hosted_window_op::CLOSED).to_json())]);
                         }
                     }
                 }
@@ -1177,6 +1181,22 @@ impl Shell for App {
                             self.hub.send(vec![AppToStudio::Custom(HostedDropdown::new(window_id, dropdown_op::HIDE).to_json())]);
                         }
                         return;
+                    }
+                    // A later window (an output window) is a tile of its own on the desk: what
+                    // the app asks of it names it (`HostedWindow`), the tile's own ops do not.
+                    if self.tile_window() != Some(key) {
+                        let op = match state {
+                            window_state::MINIMIZE => Some(hosted_window_op::MINIMIZE),
+                            window_state::MAXIMIZE => Some(hosted_window_op::MAXIMIZE),
+                            window_state::RESTORE => Some(hosted_window_op::RESTORE),
+                            window_state::FULLSCREEN => Some(hosted_window_op::FULLSCREEN),
+                            _ => None,
+                        };
+                        if let Some(op) = op {
+                            let window_id = self.windows[&key].window_id;
+                            self.hub.send(vec![AppToStudio::Custom(HostedWindow::new(window_id, op).to_json())]);
+                            return;
+                        }
                     }
                     match state {
                         // A hidden window (a tray app's closed one) is a minimised tile.
@@ -1193,6 +1213,7 @@ impl Shell for App {
                         }
                         window_state::MAXIMIZE => self.window_op(window_op::MAXIMIZE),
                         window_state::RESTORE => self.window_op(window_op::RESTORE),
+                        window_state::FULLSCREEN => self.window_op(WINDOW_OP_FULLSCREEN),
                         // The app-drawn caption's close: the app is asked first (a tray app hides
                         // its window); the WM's own close of a main tile would end the process.
                         window_state::CLOSE => {
@@ -1725,6 +1746,7 @@ mod tests {
     /// `makepad run` under the WM draws its own caption: the WM's drag query reaches the app's
     /// window (lent to the app's domain), the app's answer goes back under the WM's id, and the
     /// caption buttons of the lent window become the WM's window ops; the app closing that window closes the tile.
+    /// A later window the app closes is said to the WM by its id, so its tile leaves the desk.
     #[test]
     fn the_caption_of_a_lent_window_answers_the_wm_and_the_wm_appearance_reaches_host_dark() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1735,7 +1757,7 @@ mod tests {
             let mut byte = [0u8];
             while !request.ends_with(b"\r\n\r\n") { stream.read_exact(&mut byte).unwrap(); request.push(byte[0]); }
             stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").unwrap();
-            (0..5).map(|_| AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0).collect::<Vec<_>>()
+            (0..9).map(|_| AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0).collect::<Vec<_>>()
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
@@ -1759,6 +1781,14 @@ mod tests {
         // the caption's buttons, sent by the app's domain on its alias of the window
         app.command(Op::Cmd(lent.0, OsCmd::WindowState { id: lent.1, state: window_state::MAXIMIZE }));
         app.command(Op::Cmd(lent.0, OsCmd::WindowState { id: lent.1, state: window_state::MINIMIZE }));
+        app.command(Op::Cmd(lent.0, OsCmd::WindowState { id: lent.1, state: window_state::FULLSCREEN }));
+        // a later window (an output window) is a tile of its own: what the app asks of it names it
+        let later = (lent.0, Id::new(5, 1));
+        app.windows.insert(later, Win { window_id: 3, recipient: later, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
+        app.command(Op::Cmd(lent.0, OsCmd::WindowState { id: later.1, state: window_state::FULLSCREEN }));
+        app.command(Op::Cmd(lent.0, OsCmd::WindowState { id: later.1, state: window_state::RESTORE }));
+        app.command(Op::Cmd(lent.0, OsCmd::WindowClose { id: later.1 }));
+        assert!(!app.windows.contains_key(&later));
         // a window this shell does not have asks nothing
         app.command(Op::Cmd(lent.0, OsCmd::WindowState { id: Id::new(9, 1), state: window_state::MAXIMIZE }));
         // the WM's dark/light reaches `host_dark` (the run's load screen reads it) and wakes it
@@ -1785,7 +1815,11 @@ mod tests {
         assert_eq!(HostedDragAnswer::parse(&sent[1]), Some(HostedDragAnswer { id: 12, response: drag_answer::CLIENT, double_click: drag_double::MAXIMISE }));
         assert_eq!(HostedWindowOp::parse(&sent[2]), Some(HostedWindowOp { op: window_op::MAXIMIZE }));
         assert_eq!(HostedWindowOp::parse(&sent[3]), Some(HostedWindowOp { op: window_op::MINIMIZE }));
-        assert_eq!(HostedWindowOp::parse(&sent[4]), Some(HostedWindowOp { op: window_op::CLOSE }));
+        assert_eq!(HostedWindowOp::parse(&sent[4]), Some(HostedWindowOp { op: WINDOW_OP_FULLSCREEN }));
+        assert_eq!(HostedWindow::parse(&sent[5]), Some(HostedWindow::new(3, hosted_window_op::FULLSCREEN)));
+        assert_eq!(HostedWindow::parse(&sent[6]), Some(HostedWindow::new(3, hosted_window_op::RESTORE)));
+        assert_eq!(HostedWindow::parse(&sent[7]), Some(HostedWindow::new(3, hosted_window_op::CLOSED)));
+        assert_eq!(HostedWindowOp::parse(&sent[8]), Some(HostedWindowOp { op: window_op::CLOSE }));
     }
 
     /// `makepad run` under the WM: the WM's style sheet and its activation of the tile arrive while

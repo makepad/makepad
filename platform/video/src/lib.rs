@@ -781,7 +781,9 @@ impl DecodedVideoFrame {
 /// file anywhere. Windows reads the container through a Media Foundation
 /// source reader over an in-RAM byte stream (hardware transforms enabled,
 /// same path as [`VideoFileDecoder::open`]); macOS demuxes the first sample
-/// with [`mp4_first_frame`] and feeds it to the VideoToolbox stream decoder.
+/// with [`mp4_first_frame`] and feeds it to the VideoToolbox stream decoder;
+/// Linux demuxes it the same way and decodes it on an idle GStreamer stream
+/// decoder (a pipeline that stays up from picture to picture).
 pub fn decode_first_frame_from_bytes(bytes: &[u8]) -> Result<DecodedVideoFrame, VideoFileError> {
     #[cfg(target_os = "windows")]
     {
@@ -811,6 +813,10 @@ pub fn decode_first_frame_from_bytes(bytes: &[u8]) -> Result<DecodedVideoFrame, 
             color: au.color,
         });
     }
+    #[cfg(target_os = "linux")]
+    {
+        return decode_still(&mp4_first_frame::first_access_unit(bytes)?);
+    }
     #[cfg(target_os = "android")]
     {
         let au = mp4_first_frame::first_access_unit(bytes)?;
@@ -820,7 +826,7 @@ pub fn decode_first_frame_from_bytes(bytes: &[u8]) -> Result<DecodedVideoFrame, 
         let nv12 = android_hevc::decode(&au.annex_b, au.width, au.height)?;
         return Ok(DecodedVideoFrame { pts_100ns: 0, width: au.width, height: au.height, nv12, color: au.color });
     }
-    #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "android")))]
+    #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "android", target_os = "linux")))]
     {
         let _ = bytes;
         Err(VideoFileError::new(
@@ -829,8 +835,23 @@ pub fn decode_first_frame_from_bytes(bytes: &[u8]) -> Result<DecodedVideoFrame, 
     }
 }
 
-/// The first video frame of a file: what a still reader wants.
+/// Linux: a single picture's access unit decoded on an idle stream decoder.
+#[cfg(target_os = "linux")]
+fn decode_still(au: &mp4_first_frame::FirstAccessUnit) -> Result<DecodedVideoFrame, VideoFileError> {
+    let frame = linux_stream_decoder::decode_still(au)?;
+    // the stream decoder delivers the stream's own range
+    Ok(DecodedVideoFrame { pts_100ns: 0, width: frame.width, height: frame.height, nv12: frame.nv12, color: au.color })
+}
+
+/// The first video frame of a file: what a still reader wants. On Linux an
+/// mp4/mov of H.264 or HEVC is demuxed here (its `moov` and first sample
+/// read, the media data left on disk) and decoded on an idle stream decoder;
+/// any other file goes through a file pipeline, whose demuxers read it.
 pub fn decode_first_frame_from_file(path: &str) -> Result<DecodedVideoFrame, VideoFileError> {
+    #[cfg(target_os = "linux")]
+    if let Ok(au) = mp4_first_frame::first_access_unit_from_file(path) {
+        return decode_still(&au);
+    }
     let mut decoder = VideoFileDecoder::open(path)?;
     decoder.next_frame()?.ok_or_else(|| VideoFileError::new(format!("no frame in {path}")))
 }
@@ -1133,6 +1154,12 @@ pub fn encode_intra_frame_mp4(
 /// and read back. It pays the container machinery the Apple path avoids,
 /// but the bytes mean the same thing to every decoder, which is what a
 /// tile tape needs — the tape format is not a platform's.
+///
+/// The frame's budget is `bitrate_bps` over `fps`. The file encoders take a
+/// rate per second, within a range made for streams (x265enc's ends at
+/// 102.4 Mbit/s, which a large still asked at 30 frames a second exceeds
+/// several times over), so the still goes in at one frame a second with its
+/// whole budget as the rate.
 #[cfg(not(any(target_vendor = "apple", target_os = "android")))]
 pub fn encode_intra_frame_mp4(
     nv12: &[u8],
@@ -1151,9 +1178,9 @@ pub fn encode_intra_frame_mp4(
         codec,
         width,
         height,
-        fps_num: fps.max(1),
+        fps_num: 1,
         fps_den: 1,
-        video_bitrate_bps: bitrate_bps,
+        video_bitrate_bps: bitrate_bps / fps.max(1),
         audio: None,
         keyframe_only: true,
         ..Default::default()
@@ -1186,39 +1213,86 @@ pub fn encode_intra_frame_mp4(
 mod intra_frame_tests {
     use super::*;
 
-    /// One frame in, one decodable frame of the same size out — on whichever
-    /// platform runs the test (the Apple session path or the file-encoder
-    /// path), so a tape baked on one machine reads on another.
+    /// One frame in, one decodable frame of the same size and pixels out — on
+    /// whichever platform runs the test (the Apple session path or the
+    /// file-encoder path), so a tape baked on one machine reads on another.
+    /// 130x66 has rows that are not a multiple of 4 bytes, which a decoder
+    /// lays out padded (GStreamer's default NV12 layout): the picture must
+    /// come back unsheared, its chroma read from where its plane starts.
     #[test]
     fn single_frame_round_trips_through_the_platform_decoder() {
-        let (w, h) = (64u32, 48u32);
-        let mut nv12 = vec![0u8; nv12::nv12_frame_size(w, h)];
+        for (w, h) in [(64u32, 48u32), (130, 66)] {
+            let wu = w as usize;
+            let mut nv12 = vec![0u8; nv12::nv12_frame_size(w, h)];
+            for y in 0..h as usize {
+                for x in 0..wu {
+                    nv12[y * wu + x] = (16 + (x * 219) / (wu - 1)) as u8;
+                }
+            }
+            for v in &mut nv12[(w * h) as usize..] {
+                *v = 128;
+            }
+            let bytes = encode_intra_frame_mp4(&nv12, w, h, 30, 2_000_000, VideoFileCodec::H265).expect("encode");
+            assert!(bytes.len() > 64, "{w}x{h}: {} bytes", bytes.len());
+            assert!(
+                bytes.windows(4).any(|b| b == b"ftyp") && bytes.windows(4).any(|b| b == b"moov"),
+                "{w}x{h}: not an mp4 container"
+            );
+            let path = std::env::temp_dir().join(format!("makepad-intra-test-{}-{w}x{h}.mp4", std::process::id()));
+            std::fs::write(&path, &bytes).expect("write");
+            let text = path.to_string_lossy().to_string();
+            let decoded = (|| {
+                let mut dec = VideoFileDecoder::open(&text)?;
+                let frame = dec.next_frame()?.ok_or_else(|| VideoFileError::new("no frame"))?;
+                let second = dec.next_frame()?;
+                Ok::<_, VideoFileError>((frame, second.is_none()))
+            })();
+            // The still readers (an idle stream decoder on Linux, the same one across both
+            // sizes) give the file pipeline's picture.
+            let from_file = decode_first_frame_from_file(&text);
+            let from_bytes = decode_first_frame_from_bytes(&bytes);
+            let _ = std::fs::remove_file(&path);
+            let (frame, single) = decoded.unwrap_or_else(|e| panic!("{w}x{h}: decode: {e:?}"));
+            for (name, still) in [("file", from_file), ("bytes", from_bytes)] {
+                let still = still.unwrap_or_else(|e| panic!("{w}x{h}: still from {name}: {e:?}"));
+                assert_eq!((still.width, still.height), (w, h), "{w}x{h}: still from {name}: size");
+                let worst = still.nv12.iter().zip(&frame.nv12).map(|(a, b)| a.abs_diff(*b)).max();
+                assert!(still.nv12.len() == frame.nv12.len() && worst <= Some(2), "{w}x{h}: still from {name} differs by up to {worst:?}");
+            }
+            assert_eq!((frame.width, frame.height), (w, h), "size");
+            assert!(single, "{w}x{h}: exactly one frame");
+            assert_eq!(frame.nv12.len(), nv12.len(), "{w}x{h}: tight NV12");
+            // Every luma row keeps the ramp (a stride error shifts each row further), and the
+            // chroma plane is neutral grey (read from the luma plane's padding it would not be).
+            let worst_luma = (0..(w * h) as usize).map(|i| frame.nv12[i].abs_diff(nv12[i])).max().unwrap();
+            assert!(worst_luma <= 12, "{w}x{h}: luma off by up to {worst_luma}");
+            let worst_chroma = frame.nv12[(w * h) as usize..].iter().map(|v| v.abs_diff(128)).max().unwrap();
+            assert!(worst_chroma <= 6, "{w}x{h}: chroma off grey by up to {worst_chroma}");
+        }
+    }
+
+    /// A still's budget is its rate over its frame rate, whatever the two: one asked at 30
+    /// frames a second (a rate several times past the encoder's range) comes out the size of
+    /// the same budget asked at one frame a second, not cut down to what the range allows.
+    #[cfg(not(any(target_vendor = "apple", target_os = "android")))]
+    #[test]
+    fn a_still_gets_its_whole_budget_at_any_frame_rate() {
+        let (w, h) = (1024u32, 768u32);
+        // Gradients under fine grain: a picture that takes every bit it is given.
+        let mut frame = vec![128u8; nv12::nv12_frame_size(w, h)];
+        let mut s = 0x2545_f491u32;
         for y in 0..h as usize {
             for x in 0..w as usize {
-                nv12[y * w as usize + x] = ((x * 255) / (w as usize - 1)) as u8;
+                s ^= s << 13;
+                s ^= s >> 17;
+                s ^= s << 5;
+                frame[y * w as usize + x] = (16 + (x * 150) / w as usize + (y * 40) / h as usize + (s % 24) as usize) as u8;
             }
         }
-        for v in &mut nv12[(w * h) as usize..] {
-            *v = 128;
-        }
-        let bytes = encode_intra_frame_mp4(&nv12, w, h, 30, 2_000_000, VideoFileCodec::H265).expect("encode");
-        assert!(bytes.len() > 64, "{} bytes", bytes.len());
-        assert!(
-            bytes.windows(4).any(|b| b == b"ftyp") && bytes.windows(4).any(|b| b == b"moov"),
-            "not an mp4 container"
-        );
-        let path = std::env::temp_dir().join(format!("makepad-intra-test-{}.mp4", std::process::id()));
-        std::fs::write(&path, &bytes).expect("write");
-        let text = path.to_string_lossy().to_string();
-        let decoded = (|| {
-            let mut dec = VideoFileDecoder::open(&text)?;
-            let frame = dec.next_frame()?.ok_or_else(|| VideoFileError::new("no frame"))?;
-            let second = dec.next_frame()?;
-            Ok::<_, VideoFileError>(((frame.width, frame.height), second.is_none()))
-        })();
-        let _ = std::fs::remove_file(&path);
-        let (size, single) = decoded.expect("decode");
-        assert_eq!(size, (w, h));
-        assert!(single, "exactly one frame");
+        let budget = 10_000_000;
+        let size = |fps: u32| encode_intra_frame_mp4(&frame, w, h, fps, budget * fps, VideoFileCodec::H265).expect("encode").len();
+        let (one, thirty) = (size(1), size(30));
+        println!("a {w}x{h} still with a {budget} bit budget: {one} bytes asked at 1 fps, {thirty} at 30 fps");
+        assert!(thirty as f64 > one as f64 * 0.85 && (thirty as f64) < one as f64 * 1.15, "1 fps: {one} bytes, 30 fps: {thirty}");
     }
 }

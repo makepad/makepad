@@ -1537,6 +1537,14 @@ struct PoolInner {
     shutdown_state: Arc<TaskState<()>>,
     ui_thread: ThreadId,
 }
+/// What a job's time from its submit to its start was, for the CPU budget's report.
+enum Turn {
+    /// waiting for a worker and a permit: the pool's wait
+    Pool,
+    /// a strand's job: until `at` it waited behind the strand's earlier jobs; from `at` its
+    /// strand's wrapper waited for a worker, and reported that as the pool's
+    Strand { at: f64 },
+}
 const POOL_OPEN: u8 = 0;
 const POOL_DRAINING: u8 = 1;
 const POOL_CANCELLED: u8 = 2;
@@ -1551,15 +1559,19 @@ impl PoolInner {
         self.wake_one();
         Ok(())
     }
-    // Strand heads were accepted before close. Drain includes their successors.
-    fn continue_strand(&self, job: PoolJob) {
-        let mut state = self.state.lock().unwrap();
-        if state.closed == POOL_CANCELLED {
-            return;
+    /// A strand's wrapper waiting in the queue takes `class`: a more urgent job is queued behind
+    /// the one it runs ([`Strand::submit`]).
+    fn raise(&self, state: &mut PoolState, token: &CancellationToken, class: Class) {
+        for from in 0..state.queues.len() {
+            if let Some(at) = state.queues[from].iter().position(|job| Arc::ptr_eq(&job.token.inner, &token.inner)) {
+                let mut job = state.queues[from].remove(at).expect("the wrapper is queued");
+                makepad_cpu_budget::queued(job.class.budget(), makepad_cpu_budget::APP, -1);
+                self.queued[from].fetch_sub(1, Ordering::Relaxed);
+                job.class = class;
+                self.push(state, job);
+                return;
+            }
         }
-        self.push(&mut state, job);
-        drop(state);
-        self.wake_one();
     }
     fn push(&self, state: &mut PoolState, job: PoolJob) {
         let index = job.class.budget() as usize;
@@ -1648,16 +1660,22 @@ impl PoolInner {
             closed
         )
     }
-    fn run_job(&self, job: PoolJob, permit: Option<u32>) {
+    fn run_job(&self, job: PoolJob, permit: Option<u32>, turn: Turn) {
         let class = job.class;
         let label = job.label;
         let _context = JobGuard::enter(class, label, job.ticket.clone(), job.token.clone(), permit);
-        makepad_cpu_budget::waited(
-            class.budget(),
-            makepad_cpu_budget::APP,
-            ((Cx::monotonic_now() - job.submitted_at).max(0.0) * 1e9) as u64,
-            label,
-        );
+        let ns = |secs: f64| (secs.max(0.0) * 1e9) as u64;
+        match turn {
+            Turn::Pool => makepad_cpu_budget::waited(
+                class.budget(),
+                makepad_cpu_budget::APP,
+                ns(Cx::monotonic_now() - job.submitted_at),
+                label,
+            ),
+            Turn::Strand { at } => {
+                makepad_cpu_budget::strand_waited(class.budget(), ns(at - job.submitted_at), label)
+            }
+        }
         #[cfg(any(target_vendor = "apple", target_os = "linux"))]
         let traced = ui_hang::relax_timeline::hooks()
             .inspect(|h| (h.begin)(label.as_ptr(), label.len()))
@@ -1715,7 +1733,7 @@ fn pool_worker(inner: Arc<PoolInner>, index: usize) {
             if job.class.budget() != waiting as u8 {
                 makepad_cpu_budget::reclass(permit, job.class.budget());
             }
-            inner.run_job(job, Some(permit));
+            inner.run_job(job, Some(permit), Turn::Pool);
             inner.state.lock().unwrap().running[index] = None;
         } else {
             makepad_cpu_budget::release(permit);
@@ -2189,7 +2207,7 @@ impl ScopedJob {
         let job = self.job.lock().unwrap().take();
         if let Some(job) = job {
             let _finished = ScopedFinished(self.finished.clone());
-            pool.run_job(job, None);
+            pool.run_job(job, None, Turn::Pool);
         }
     }
     fn cancel(&self) {
@@ -2376,6 +2394,10 @@ struct StrandState<S> {
     value: Option<S>,
     jobs: VecDeque<(Ticket, PoolJob)>,
     scheduled: bool,
+    /// The wrapper while it waits in the pool for a worker: its token and class, the most urgent
+    /// of the jobs queued. One more urgent queued behind it raises it (`submit`): the jobs before
+    /// run first, so they take its class, never leaving it to wait for what a lower class may take.
+    waiting: Option<(CancellationToken, Class)>,
 }
 struct StrandInner<S> {
     pool: TaskPool,
@@ -2402,6 +2424,7 @@ impl<S: Send + 'static> Strand<S> {
                     value: Some(value),
                     jobs: VecDeque::new(),
                     scheduled: false,
+                    waiting: None,
                 }),
             }),
         }
@@ -2437,7 +2460,7 @@ impl<S: Send + 'static> Strand<S> {
         };
         job.member = Some(member);
         let schedule = {
-            let pool = self.inner.pool.inner.state.lock().unwrap();
+            let mut pool = self.inner.pool.inner.state.lock().unwrap();
             if pool.closed != POOL_OPEN {
                 drop(pool);
                 drop(job);
@@ -2447,10 +2470,18 @@ impl<S: Send + 'static> Strand<S> {
             state.jobs.push_back((ticket, job));
             let schedule = !state.scheduled;
             state.scheduled = true;
-            schedule
+            let raise = state.waiting.as_mut().filter(|(_, waiting)| class.budget() < waiting.budget());
+            let raised = raise.is_some();
+            if let Some((token, waiting)) = raise {
+                *waiting = class;
+                self.inner.pool.inner.raise(&mut pool, token, class);
+            }
+            (schedule, raised)
         };
-        if schedule {
-            self.inner.schedule();
+        match schedule {
+            (true, _) => self.inner.schedule(),
+            (false, true) => self.inner.pool.inner.wake_one(),
+            (false, false) => {}
         }
         handle
     }
@@ -2473,32 +2504,37 @@ impl<S> Drop for StrandQueued<S> {
 }
 impl<S: Send + 'static> StrandInner<S> {
     fn schedule(self: &Arc<Self>) {
-        let class = {
-            let mut state = self.state.lock().unwrap();
-            match state.jobs.front() {
-                Some((_, job)) => job.class,
-                None => {
-                    state.scheduled = false;
-                    return;
-                }
-            }
+        // The pool's lock first, as `submit` takes them: the wrapper is in the pool's queue by
+        // the time a job submitted behind it may raise it.
+        let mut pool = self.pool.inner.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        // The front job runs first, at the class of the most urgent job queued.
+        let Some(class) = state.jobs.iter().map(|(_, job)| job.class).min_by_key(|class| class.budget()) else {
+            state.scheduled = false;
+            return;
         };
         let mut queued = StrandQueued {
             strand: self.clone(),
             armed: true,
         };
+        // The front job's turn: its wait for a worker is this wrapper's, from here.
+        let at = Cx::monotonic_now();
         let (job, handle) = task_job(
             self.pool.inner.ui_thread,
             class,
             self.label,
             Ticket::none(),
             move || {
-                let job = queued.strand.state.lock().unwrap().jobs.pop_front();
+                let job = {
+                    let mut state = queued.strand.state.lock().unwrap();
+                    state.waiting = None;
+                    state.jobs.pop_front()
+                };
                 if let Some((ticket, job)) = job {
                     if ticket.is_stale() {
                         drop(job);
                     } else {
-                        queued.strand.pool.inner.run_job(job, None);
+                        queued.strand.pool.inner.run_job(job, None, Turn::Strand { at });
                     }
                 }
                 queued.armed = false;
@@ -2507,7 +2543,19 @@ impl<S: Send + 'static> StrandInner<S> {
             false,
         );
         handle.detach();
-        self.pool.inner.continue_strand(job);
+        // Strand heads were accepted before close. Drain includes their successors.
+        if pool.closed == POOL_CANCELLED {
+            // Dropped without the locks: an armed wrapper takes the strand's lock to drop its jobs.
+            drop(state);
+            drop(pool);
+            drop(job);
+            return;
+        }
+        state.waiting = Some((job.token.clone(), class));
+        drop(state);
+        self.pool.inner.push(&mut pool, job);
+        drop(pool);
+        self.pool.inner.wake_one();
     }
 }
 
@@ -4279,6 +4327,68 @@ mod tests {
             })
             .unwrap();
         worker_join(job).unwrap();
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+    }
+
+    /// A wait as the CPU budget's report writes it (`human`), in seconds.
+    fn report_seconds(text: &str) -> f64 {
+        let (number, unit) = text.trim().split_once(' ').expect("a number and a unit");
+        let number: f64 = number.parse().expect("a number");
+        number
+            * match unit {
+                "ns" => 1e-9,
+                "us" => 1e-6,
+                "ms" => 1e-3,
+                "s" => 1.0,
+                other => panic!("unit {other}"),
+            }
+    }
+
+    #[test]
+    fn a_strand_jobs_wait_behind_an_earlier_job_is_reported_as_the_strands() {
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        let pool = test_pool(2);
+        let strand = Strand::new(&pool, "behind its strand");
+        let (started, began) = mpsc::channel();
+        let (go, wait) = mpsc::channel();
+        let first = strand.submit(Class::Visible, Ticket::none(), move |_| {
+            started.send(()).unwrap();
+            wait.recv().unwrap();
+        });
+        began.recv().unwrap();
+        let second = strand.submit(Class::Visible, Ticket::none(), |_| ());
+        // the second job's wait behind the first: this long at least
+        std::thread::sleep(Duration::from_millis(150));
+        go.send(()).unwrap();
+        worker_join(first).unwrap();
+        worker_join(second).unwrap();
+        let report = makepad_cpu_budget::report_string();
+        let line = report
+            .lines()
+            .find_map(|l| l.strip_prefix("behind an earlier job on its strand: wait p50 / p95 / max  "))
+            .unwrap_or_else(|| panic!("the report has no strand waits:\n{report}"));
+        let max = line.split(" / ").nth(2).and_then(|m| m.split(',').next()).expect("a max");
+        assert!(report_seconds(max) >= 0.15, "the strand's longest wait is {max}, the job waited 150 ms behind the first:\n{report}");
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn a_strand_job_runs_at_the_class_of_a_more_urgent_job_queued_behind_it() {
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        // Background's share is taken: a background job waits for a token, a visible one has room.
+        let held = HeldTokens::new(makepad_cpu_budget::background_limit() as usize, "background share");
+        let pool = test_pool(2);
+        let strand = Strand::new(&pool, "raised");
+        let (ran, order) = mpsc::channel();
+        let first_ran = ran.clone();
+        let first = strand.submit(Class::Background, Ticket::none(), move |_| first_ran.send("background").unwrap());
+        wait_for("the background job to wait for a token", || pool.inner.state.lock().unwrap().waiting[2]);
+        let second = strand.submit(Class::Visible, Ticket::none(), move |_| ran.send("visible").unwrap());
+        assert_eq!(order.recv_timeout(Duration::from_secs(5)), Ok("background"), "the background job ahead of a visible one runs at its class");
+        assert_eq!(order.recv_timeout(Duration::from_secs(5)), Ok("visible"));
+        worker_join(first).unwrap();
+        worker_join(second).unwrap();
+        drop(held);
         worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
     }
 

@@ -124,9 +124,15 @@ struct Inner {
     fleet: Mutex<Option<FleetDialer>>,
     /// live client -> upstream threads of routes (one per open route)
     routes_in: Arc<AtomicUsize>,
+    /// told of each route that names an app ([`Hub::set_route_seen`])
+    seen: Mutex<Option<RouteSeen>>,
 }
 
 pub type Source = Arc<dyn Fn() -> Hosts + Send + Sync>;
+
+/// A route that names an app on a known host: its host, its endpoint spec (an app name or a pid)
+/// and the service it opens.
+pub type RouteSeen = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
 
 /// Dials a `via = "fleet"` host's address: an authenticated carrier.
 pub type FleetDialer = Arc<dyn Fn(&str) -> io::Result<crate::carrier::Carrier> + Send + Sync>;
@@ -144,7 +150,7 @@ pub fn parse_target(t: &str) -> (&str, Option<String>) {
 
 impl Hub {
     pub fn new(hosts: &Hosts) -> Hub {
-        let hub = Hub(Arc::new(Inner { links: Mutex::new(Vec::new()), clients: Mutex::new(Vec::new()), source: Mutex::new(None), fleet: Mutex::new(None), routes_in: Arc::new(AtomicUsize::new(0)) }));
+        let hub = Hub(Arc::new(Inner { links: Mutex::new(Vec::new()), clients: Mutex::new(Vec::new()), source: Mutex::new(None), fleet: Mutex::new(None), routes_in: Arc::new(AtomicUsize::new(0)), seen: Mutex::new(None) }));
         hub.sync(hosts);
         hub
     }
@@ -170,6 +176,12 @@ impl Hub {
     /// Sets how `via = "fleet"` hosts are dialled (before they are added): `addr` -> carrier.
     pub fn set_fleet(&self, dial: FleetDialer) {
         *self.0.fleet.lock().unwrap() = Some(dial);
+    }
+
+    /// Tells `seen` of each route to an app (`<host>:<app|pid>`) as it opens: who looks at or
+    /// drives which app, for the owner's bookkeeping.
+    pub fn set_route_seen(&self, seen: RouteSeen) {
+        *self.0.seen.lock().unwrap() = Some(seen);
     }
 
     /// Adds the registry's hosts that have no link yet (hosts paired while the hub runs).
@@ -347,6 +359,9 @@ fn route_factory(hub: Hub) -> Factory {
             let known: Vec<&str> = links.iter().map(|l| l.host.name.as_str()).collect();
             return Err((CLOSE_REFUSED, format!("unknown host `{host}` (known: {})", if known.is_empty() { "none; see hosts.toml".to_string() } else { known.join(", ") })));
         };
+        if let (Some(spec), Some(seen)) = (spec.as_deref(), hub.0.seen.lock().unwrap().clone()) {
+            seen(host, spec, service);
+        }
         let service = service.to_string();
         let channel = open.channel;
         let live = hub.0.routes_in.clone();
