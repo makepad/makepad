@@ -158,7 +158,14 @@ impl<'a> PngEncoder<'a> {
         {
             // Effort 0: stored blocks, for an image that is decoded again
             // in the same process and never kept (a level's material maps).
-            let level = if self.options.effort() == 0 { 0 } else { 6 };
+            // Effort 1: the fastest deflate (level 1), for one decoded again
+            // that is made while a view waits (a 3D view's floor texture). Any other
+            // effort: level 6.
+            let level = match self.options.effort() {
+                0 => 0,
+                1 => 1,
+                _ => 6
+            };
             self.encoded_chunks = makepad_fast_inflate::zlib_compress(&self.filter_scanline, level);
         }
         #[cfg(not(feature = "std"))]
