@@ -22,7 +22,10 @@ ci.step("comes up", fn(){
     ci.sleep(3.0)
     app.no_errors()
     let shot = app.grab("start")
-    ci.accept(shot, "This is a screenshot of one application window. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. The application is a terminal emulator. 1. Is the whole picture one flat colour from edge to edge, such as entirely black or entirely white? expected NO 2. Is any user interface visible, such as text labels, buttons, icons, panels, lists, input fields, a toolbar, a drawing or a picture? expected YES 3. Does an error panel cover the window: a large block of text with words such as panic, error, failed, backtrace or unwrap? expected NO 4. Is a terminal visible: a large area of one flat dark or light colour with monospace text lines starting at the left edge, such as a prompt? expected YES")
+    // No "is any user interface visible" point: a terminal's interface is its text, which the
+    // terminal point asks about. Asked both of a shell's banner and prompt, the judge answered
+    // the generic one NO and the terminal one YES, and failed a terminal that came up (11-08).
+    ci.accept(shot, "This is a screenshot of one application window. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. The application is a terminal emulator. 1. Is the whole picture one flat colour from edge to edge, such as entirely black or entirely white? expected NO 2. Does an error panel cover the window: a large block of text with words such as panic, error, failed, backtrace or unwrap? expected NO 3. Is a terminal visible: a large area of one flat dark or light colour with monospace text lines starting at the left edge, such as a prompt? expected YES")
 })
 
 app.no_errors()

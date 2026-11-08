@@ -18,6 +18,7 @@ pub mod tile_plan;
 #[cfg(feature = "tiles")]
 pub mod tiles;
 pub mod xr;
+pub mod xr_capture;
 #[cfg(feature = "host")]
 pub mod xr_audio;
 #[cfg(feature = "server")]

@@ -188,6 +188,9 @@ pub mod codecs {
     /// Not a codec: the headset plays `XrServerMsg::Haptic` (a headset without it is never
     /// sent one, so older headsets keep linking).
     pub const HAPTICS: u32 = 1 << 16;
+    /// Not a codec: the headset sends its cameras' pictures when asked
+    /// (`XrServerMsg::Capture`; a headset without it is never asked).
+    pub const CAPTURE: u32 = 1 << 17;
 }
 /// `Video::codec`.
 pub const CODEC_H264: u8 = 0;
@@ -213,6 +216,10 @@ pub enum XrClientMsg {
     /// The headset's numbers of its last second ([`report`] names them), for the server's
     /// stats panel.
     Report { values: Vec<f32> },
+    /// Chunk `part` of `parts` of capture record `seq` (`crate::xr_capture`: what the cameras
+    /// see, while the server asks with `XrServerMsg::Capture`). Sent in the link's gaps, like
+    /// `World`.
+    Capture { seq: u32, part: u32, parts: u32, data: Vec<u8> },
 }
 
 /// `XrClientMsg::Report`: what each value is (index) and its label.
@@ -351,6 +358,11 @@ pub enum XrServerMsg {
     /// A short buzz on a controller (`hand` 0 left, 1 right; `amplitude` 0..1), the app's
     /// `Cx::xr_haptic`. Only to a headset whose `Hello::codecs` has [`codecs::HAPTICS`].
     Haptic { hand: u8, amplitude: f32, duration_us: u32 },
+    /// Capture the cameras (`crate::xr_capture`) or stop: a keyframe each time the head turned
+    /// `step_deg` or moved `step_m` since the last, and a preview of `preview_hz` pictures a
+    /// second (0: none). Only to a headset whose `Hello::codecs` has [`codecs::CAPTURE`];
+    /// off until asked, and off again when the link ends.
+    Capture { on: bool, step_deg: f32, step_m: f32, preview_hz: u8 },
 }
 
 /// `Video::stages`: the desktop's durations of a picture (µs).
@@ -374,6 +386,7 @@ mod tag {
     pub const KEYFRAME: u8 = 6;
     pub const WORLD: u8 = 7;
     pub const REPORT: u8 = 8;
+    pub const CAPTURE_C: u8 = 9;
     pub const WELCOME: u8 = 100;
     pub const REFUSED: u8 = 101;
     pub const VIDEO: u8 = 102;
@@ -388,6 +401,7 @@ mod tag {
     pub const UNPAIRED: u8 = 111;
     pub const HEADSET: u8 = 112;
     pub const HAPTIC: u8 = 113;
+    pub const CAPTURE_S: u8 = 114;
 }
 
 fn bad(ty: u8, side: &str) -> io::Error {
@@ -440,6 +454,11 @@ impl XrClientMsg {
                 }
                 o.done()
             }
+            XrClientMsg::Capture { seq, part, parts, data } => {
+                let mut o = Out::new(CAPTURE_C);
+                o.u32(*seq).u32(*part).u32(*parts).bytes(data);
+                o.done()
+            }
         }
     }
 
@@ -469,6 +488,7 @@ impl XrClientMsg {
                 }
                 XrClientMsg::World { voxel_size, chunk_edge, bricks }
             }
+            CAPTURE_C => XrClientMsg::Capture { seq: r.u32()?, part: r.u32()?, parts: r.u32()?, data: r.bytes()?.to_vec() },
             _ => return Err(bad(ty, "client")),
         })
     }
@@ -545,6 +565,11 @@ impl XrServerMsg {
                 o.u8(*hand).f32(*amplitude).u32(*duration_us);
                 o.done()
             }
+            XrServerMsg::Capture { on, step_deg, step_m, preview_hz } => {
+                let mut o = Out::new(CAPTURE_S);
+                o.u8(*on as u8).f32(*step_deg).f32(*step_m).u8(*preview_hz);
+                o.done()
+            }
         }
     }
 
@@ -588,6 +613,7 @@ impl XrServerMsg {
             UNPAIRED => XrServerMsg::Unpaired,
             HEADSET => XrServerMsg::Headset { foveation: r.u8()?, eye_min_pct: r.u8()?, eye_max_pct: r.u8()?, multimodal: r.u8()? != 0, occlusion: r.u8()? != 0, ahead: r.u8()? },
             HAPTIC => XrServerMsg::Haptic { hand: r.u8()?, amplitude: r.f32()?, duration_us: r.u32()? },
+            CAPTURE_S => XrServerMsg::Capture { on: r.bool()?, step_deg: r.f32()?, step_m: r.f32()?, preview_hz: r.u8()? },
             _ => return Err(bad(ty, "server")),
         })
     }
@@ -720,6 +746,44 @@ pub mod pose_datagram {
     }
 }
 
+/// The bytes of low-priority messages queued and not written yet; a sender waits on it for
+/// the link to take them (the link's thread tells each write, and its end).
+#[cfg(any(feature = "server", test))]
+#[derive(Default)]
+pub(crate) struct BulkGauge {
+    /// (bytes, the link ended)
+    state: std::sync::Mutex<(usize, bool)>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(any(feature = "server", test))]
+impl BulkGauge {
+    fn lock(&self) -> std::sync::MutexGuard<'_, (usize, bool)> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    pub(crate) fn add(&self, n: usize) {
+        self.lock().0 += n;
+    }
+    pub(crate) fn written(&self, n: usize) {
+        let mut s = self.lock();
+        s.0 = s.0.saturating_sub(n);
+        self.changed.notify_all();
+    }
+    pub(crate) fn end(&self) {
+        *self.lock() = (0, true);
+        self.changed.notify_all();
+    }
+    pub(crate) fn pending(&self) -> usize {
+        self.lock().0
+    }
+    pub(crate) fn wait_below(&self, max: usize) {
+        let mut s = self.lock();
+        while s.0 > max && !s.1 {
+            s = self.changed.wait(s).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
 #[cfg(feature = "server")]
 pub mod link {
     //! The headset's end: a TLS connection to an XR server on its own thread (TLS contexts are not
@@ -734,8 +798,10 @@ pub mod link {
 
     pub struct XrLink {
         tx: Sender<Vec<u8>>,
-        /// Low-priority messages (the room field): written only when nothing else waits.
+        /// Low-priority messages (the room field, the capture): written only when nothing else
+        /// waits, and their bytes not written yet.
         bulk: Sender<Vec<u8>>,
+        bulk_bytes: Arc<BulkGauge>,
         /// Behind a lock so a link can be shared (one reader in practice).
         rx: std::sync::Mutex<Receiver<XrServerMsg>>,
         closed: Arc<AtomicBool>,
@@ -769,16 +835,19 @@ pub mod link {
             let closed = Arc::new(AtomicBool::new(false));
             let reason = Arc::new(std::sync::Mutex::new(String::new()));
             let (closed2, reason2) = (closed.clone(), reason.clone());
+            let bulk_bytes = Arc::new(BulkGauge::default());
+            let bulk_bytes2 = bulk_bytes.clone();
             std::thread::Builder::new()
                 .name("xr-link".into())
                 .spawn(move || {
-                    let why = run(&mut stream, out_rx, bulk_rx, in_tx, &wake);
+                    let why = run(&mut stream, out_rx, bulk_rx, &bulk_bytes2, in_tx, &wake);
                     *reason2.lock().unwrap() = why;
                     closed2.store(true, Ordering::Release);
+                    bulk_bytes2.end();
                     wake();
                 })
                 .map_err(|e| e.to_string())?;
-            Ok(XrLink { tx, bulk, rx: std::sync::Mutex::new(rx), closed, reason })
+            Ok(XrLink { tx, bulk, bulk_bytes, rx: std::sync::Mutex::new(rx), closed, reason })
         }
 
         /// Queues a message (never waits; a closed link drops it).
@@ -790,7 +859,24 @@ pub mod link {
         /// link's loop and only when no other message waits (a pose is never behind it). Keep
         /// each one small (tens of KB) so a pose waits at most one such write.
         pub fn send_bulk(&self, msg: &XrClientMsg) {
-            let _ = self.bulk.send(msg.encode());
+            let bytes = msg.encode();
+            self.bulk_bytes.add(bytes.len());
+            if self.bulk.send(bytes).is_err() {
+                // (a closed link: nothing will write it)
+                self.bulk_bytes.end();
+            }
+        }
+
+        /// The bytes of low-priority messages queued and not written yet (a sender of big
+        /// payloads keeps it bounded: the link's gaps are only so wide).
+        pub fn bulk_pending(&self) -> usize {
+            self.bulk_bytes.pending()
+        }
+
+        /// Waits (a sender's thread; never the UI's) until at most `max` bytes of low-priority
+        /// messages are queued, or the link ended.
+        pub fn wait_bulk_below(&self, max: usize) {
+            self.bulk_bytes.wait_below(max);
         }
 
         pub fn try_recv(&self) -> Option<XrServerMsg> {
@@ -808,7 +894,7 @@ pub mod link {
         }
     }
 
-    fn run(stream: &mut makepad_network::SocketStream, out: Receiver<Vec<u8>>, bulk: Receiver<Vec<u8>>, inbox_tx: Sender<XrServerMsg>, wake: &Arc<dyn Fn() + Send + Sync>) -> String {
+    fn run(stream: &mut makepad_network::SocketStream, out: Receiver<Vec<u8>>, bulk: Receiver<Vec<u8>>, bulk_bytes: &BulkGauge, inbox_tx: Sender<XrServerMsg>, wake: &Arc<dyn Fn() + Send + Sync>) -> String {
         let mut inbox = Inbox::default();
         let mut buf = vec![0u8; 1 << 20];
         let mut last_heard = Instant::now();
@@ -826,7 +912,9 @@ pub mod link {
             }
             // one low-priority message in the gap (the next turn writes the poses first)
             if let Ok(bytes) = bulk.try_recv() {
-                if let Err(e) = write_all(stream, &bytes) {
+                let written = write_all(stream, &bytes);
+                bulk_bytes.written(bytes.len());
+                if let Err(e) = written {
                     return format!("write: {e}");
                 }
             }
@@ -874,6 +962,23 @@ pub mod link {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bulk_gauge_wakes_a_waiting_sender() {
+        // a sender waits until the link took enough, or the link ended; never polls
+        let g = std::sync::Arc::new(BulkGauge::default());
+        g.add(100);
+        let waiter = { let g = g.clone(); std::thread::spawn(move || { g.wait_below(50); g.pending() }) };
+        g.written(30);
+        g.written(30);
+        assert_eq!(waiter.join().unwrap(), 40);
+        g.add(100);
+        let waiter = { let g = g.clone(); std::thread::spawn(move || g.wait_below(0)) };
+        g.end();
+        waiter.join().unwrap();
+        assert_eq!(g.pending(), 0);
+        g.wait_below(0);
+    }
     use crate::Inbox;
 
     #[test]
@@ -925,6 +1030,7 @@ mod tests {
             XrClientMsg::Ping { client_ns: 5 },
             XrClientMsg::Keyframe,
             XrClientMsg::World { voxel_size: 0.02, chunk_edge: 4, bricks: vec![WorldBrick { key: [1, -2, 3], version: 7, payload: vec![1, 2, 3] }, WorldBrick { key: [0, 0, 0], version: 1, payload: Vec::new() }] },
+            XrClientMsg::Capture { seq: 3, part: 1, parts: 2, data: vec![9, 8, 7] },
         ];
         for m in client {
             let mut inbox = Inbox::default();
@@ -957,6 +1063,7 @@ mod tests {
             XrServerMsg::Unpaired,
             XrServerMsg::Headset { foveation: 2, eye_min_pct: 70, eye_max_pct: 100, multimodal: true, occlusion: true, ahead: 4 },
             XrServerMsg::Haptic { hand: 1, amplitude: 0.85, duration_us: 35_000 },
+            XrServerMsg::Capture { on: true, step_deg: 12.0, step_m: 0.04, preview_hz: 5 },
         ];
         for m in server {
             let mut inbox = Inbox::default();

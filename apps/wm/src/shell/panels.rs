@@ -1001,7 +1001,7 @@ impl ShellPanel {
             #[cfg(target_os = "linux")]
             PanelKind::Gamepad if self.headset_view => self.headset_height(),
             PanelKind::Gamepad => 136.0 + 68.0 * (self.data.game_controllers.controllers.len()
-                + self.data.game_controllers.batteries.len() + self.data.game_controllers.receivers.len()
+                + self.data.game_controllers.inputs.len() + self.data.game_controllers.batteries.len() + self.data.game_controllers.receivers.len()
                 + self.headset_list_rows()) as f64,
             PanelKind::Tray(_) => self.tray_menu_height(),
             PanelKind::DeskLink => 52.0 + makepad_desk_link_panel::VIEWER_ROW * self.data.desk_link.len().max(1) as f64,
@@ -1098,9 +1098,10 @@ impl ShellPanel {
         let fg = tok.popups.text;
         let inventory = self.data.game_controllers.clone();
         let (hero, mut rest) = cut_top(body, 52.0);
-        // The headset row comes right after the controllers.
+        // The keyboards and mice come after the controllers, then the headset row.
+        let inputs = inventory.inputs.len();
         let headsets = self.headset_list_rows();
-        let count = inventory.controllers.len() + headsets + inventory.batteries.len();
+        let count = inventory.controllers.len() + inputs + headsets + inventory.batteries.len();
         let status = if count == 0 { "No devices detected".into() } else { format!("{count} devices") };
         self.d.panel_hero(cx, hero, &tok, fg, Ico::Gamepad, "Controllers & devices", &status, 0.0);
         let rows = count + inventory.receivers.len();
@@ -1114,14 +1115,20 @@ impl ShellPanel {
             let detail = controller.battery.as_ref().map_or("Connected".into(), |b| format!("Battery: {b}"));
             self.d.panel_hero(cx, row, &tok, fg, Ico::Gamepad, &controller.name, &detail, 0.0);
         }
+        for (index, device) in inventory.inputs.iter().enumerate() {
+            if !visible.contains(&(inventory.controllers.len() + index)) { continue; }
+            let (row, next) = cut_top(rest, 68.0); rest = next;
+            let icon = if device.kind == super::game_controllers::DeviceKind::Keyboard { Ico::Keyboard } else { Ico::Mouse };
+            self.d.panel_hero(cx, row, &tok, fg, icon, &device.name, &device.detail(), 0.0);
+        }
         #[cfg(target_os = "linux")]
         for index in 0..headsets {
-            if !visible.contains(&(inventory.controllers.len() + index)) { continue; }
+            if !visible.contains(&(inventory.controllers.len() + inputs + index)) { continue; }
             let (row, next) = cut_top(rest, 68.0); rest = next;
             self.draw_headset_row(cx, row);
         }
         for (index, battery) in inventory.batteries.iter().enumerate() {
-            if !visible.contains(&(inventory.controllers.len() + headsets + index)) { continue; }
+            if !visible.contains(&(inventory.controllers.len() + inputs + headsets + index)) { continue; }
             let (row, next) = cut_top(rest, 68.0); rest = next;
             use super::game_controllers::DeviceKind;
             let icon = match battery.kind {
@@ -2786,6 +2793,7 @@ impl Widget for ShellPanel {
                 let inv = &self.data.game_controllers;
                 let mut text = String::from("Controllers & devices");
                 for c in &inv.controllers { text.push_str(&format!("\n{}: {}", c.name, c.battery.as_deref().unwrap_or("Connected"))); }
+                for d in &inv.inputs { text.push_str(&format!("\n{}: {}", d.name, d.detail())); }
                 if self.headset_rows() > 0 { text.push('\n'); text.push_str(&self.headset_text()); }
                 for b in &inv.batteries { text.push_str(&format!("\n{}: {}", b.name, b.detail)); }
                 for r in &inv.receivers { text.push_str(if r.pairing { "\nXbox receiver: Pairing" } else { "\nXbox receiver: Ready" }); }

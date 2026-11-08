@@ -526,10 +526,6 @@ impl Temps {
 // The sampler
 // ======================================================================
 
-#[cfg(target_os = "linux")]
-/// Spawn the lifetime sampler worker: one [`Frame`] a second. Dropping the receiver ends it.
-/// Linux only for now: elsewhere no sensor is read and the bar shows no thermometer.
-#[allow(clippy::type_complexity)]
 /// Where the turned-off warning is kept: the file exists while it is off.
 fn quiet_path() -> std::path::PathBuf {
     crate::theme::makepad_home().join("wm").join("temps-quiet")
@@ -540,6 +536,10 @@ pub fn quiet_saved() -> bool {
     quiet_path().exists()
 }
 
+#[cfg(target_os = "linux")]
+/// Spawn the lifetime sampler worker: one [`Frame`] a second. Dropping the receiver ends it.
+/// Linux only for now: elsewhere no sensor is read and the bar shows no thermometer.
+#[allow(clippy::type_complexity)]
 pub fn start_sampler(
     spawner: &makepad_widgets::makepad_platform::thread::ThreadSpawner,
 ) -> Result<
