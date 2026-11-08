@@ -9,6 +9,8 @@
 //!   gates the risky ones, and the session over the hub's providers.
 //! - `app_service` — the process's `app` service on its makepad-remote
 //!   endpoint: the in-process services' tools for a local agent.
+//! - [`pictures`] — the pictures a person's line carries, and the picture budget of a
+//!   tool result.
 //! - [`mcp`] — the Claude Desktop bundle writer. The bundle runs
 //!   `makepad-remote mcp` to reach the app's tools through its `app` service.
 //!
@@ -20,6 +22,7 @@ pub mod card;
 #[cfg(feature = "platform")]
 pub mod engine;
 pub mod mcp;
+pub mod pictures;
 #[cfg(feature = "platform")]
 pub mod port;
 pub mod progress_eta;

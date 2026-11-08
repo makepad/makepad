@@ -320,7 +320,7 @@ pub fn model_kind(domain: &str) -> &'static str {
         "image" | "edit" | "inpaint" | "control" | "upscale" | "matte" | "depth" | "segment"
         | "enhance" | "paint" | "garment" => "image",
         "video" => "video",
-        "mesh" | "splat" | "rig" | "motion" | "world" | "body" => "mesh",
+        "mesh" | "splat" | "rig" | "motion" | "world" | "body" | "multiview" => "mesh",
         _ => "other",
     }
 }

@@ -5,6 +5,7 @@
 //!
 //! - [`registry`] — the connected services: issues endpoints, keeps the
 //!   manifests and where each instance lives, pumps their up-frames;
+//! - [`pictures`] — the pictures the person sent, kept with the conversation;
 //! - [`core`] — the conversation: builds the system prompt from the
 //!   registry, runs the model, routes each tool call to the instance that
 //!   owns it (risk gate, deadlines, dispositions), and keeps the
@@ -21,6 +22,7 @@
 
 pub mod core;
 pub mod no_model;
+pub mod pictures;
 pub mod registry;
 
 #[cfg(feature = "engine")]
@@ -35,6 +37,7 @@ pub use core::{
     WAKE_INTERVAL_SECS,
 };
 pub use no_model::{ClaudeDesktopModel, NoModel, NoModelWithReason};
+pub use pictures::{picture_file, NewPicture, PictureWrite, SentPicture};
 pub use registry::{RegistryUp, ServiceRegistry, MAX_INSTANCES};
 
 /// One tool as the model is told about it: the canonical dotted name, a

@@ -210,8 +210,7 @@ impl LocalModels {
         let spec = self
             .registry
             .find(model_id)
-            .ok_or_else(|| AssetAiError::UnknownModel(model_id.to_string()))?
-            .clone();
+            .ok_or_else(|| AssetAiError::UnknownModel(model_id.to_string()))?;
         if !self.license_acknowledged(model_id) {
             return Err(AssetAiError::LicenseNotAcknowledged);
         }
@@ -220,6 +219,22 @@ impl LocalModels {
                 "model {} is disabled in the registry",
                 spec.id
             )));
+        }
+        self.start_fetch(model_id)
+    }
+
+    /// Downloads and verifies a model's pinned files, like
+    /// [`Self::start_install`], also while the registry disables the model:
+    /// a native port needs its pinned weights to reach the parity that
+    /// enables it. The licence must still be acknowledged.
+    pub fn start_fetch(&self, model_id: &str) -> Result<InstallHandle, AssetAiError> {
+        let spec = self
+            .registry
+            .find(model_id)
+            .ok_or_else(|| AssetAiError::UnknownModel(model_id.to_string()))?
+            .clone();
+        if !self.license_acknowledged(model_id) {
+            return Err(AssetAiError::LicenseNotAcknowledged);
         }
 
         let downloader = self.downloader.clone();
@@ -653,6 +668,39 @@ mod tests {
         );
         fs::write(&dest, b"12345678").unwrap();
         assert_eq!(models.install_state("sized"), InstallState::Installed);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disabled_model_fetches_its_pinned_files_but_never_installs() {
+        let root = temp_root("fetch");
+        let weights = b"pinned port weights";
+        let registry = Registry::parse(&format!(
+            r#"{{"models":[{{"id":"porting","domain":"multiview","backend":"multiview-native","available":false,"gated":false,"vram_gb":0.0,"note":null,"license":{{"name":"L","url":"https://example.test/l","summary":"s","restriction":"non-commercial"}},"files":[{{"role":"native-multiview","repo":"o/r","path":"model.safetensors","cache_as":"multiview/porting/model.safetensors","size":{},"sha256":"{}"}}]}}]}}"#,
+            weights.len(),
+            makepad_core_util::sha256::sha256_hex(weights)
+        ))
+        .unwrap();
+        let mut models = manager(&root, registry);
+        assert!(matches!(models.start_fetch("porting"), Err(AssetAiError::LicenseNotAcknowledged)));
+        models.acknowledge_license("porting").unwrap();
+        assert!(matches!(models.start_install("porting"), Err(AssetAiError::Unavailable(_))));
+        // On disk at its pinned identity: the fetch verifies it and needs no network.
+        let dest = models.spec("porting").unwrap().files[0].dest_path(&models.weights_dir);
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::write(&dest, weights).unwrap();
+        let fetch = models.start_fetch("porting").unwrap();
+        let mut messages = Vec::new();
+        // The worker ends every path with Finished or Cancelled.
+        while !messages.iter().any(|m| matches!(m, InstallMsg::Finished | InstallMsg::Cancelled)) {
+            messages.extend(fetch.poll());
+            std::thread::yield_now();
+        }
+        assert!(messages.iter().any(|m| matches!(m, InstallMsg::FileDone { file } if file == "multiview/porting/model.safetensors")));
+        assert!(!messages.iter().any(|m| matches!(m, InstallMsg::Failed(_))));
+        assert_eq!(models.installed_path("porting", "native-multiview"), Some(dest));
+        // Fetched files still never run while the registry disables the model.
+        assert!(matches!(models.run("porting", test_params()), Err(AssetAiError::Unavailable(_))));
         let _ = fs::remove_dir_all(root);
     }
 

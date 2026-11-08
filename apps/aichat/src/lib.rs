@@ -24,11 +24,13 @@ pub mod gen;
 pub mod feedback;
 pub mod overlay;
 pub mod panel;
+pub mod pictures;
 pub mod settings;
 
 pub use bus::ServiceBus;
 pub use overlay::{AiChatOverlay, AiTranscript};
-pub use panel::{AiChatPanel, AiChatPanelAction, ChatPictures};
+pub use panel::{AiChatPanel, AiChatPanelAction};
+pub use pictures::{ChatPictures, PictureKept};
 pub use settings::AiSettings;
 
 /// Register the panel and the overlay, and give the bridge its `/ai`

@@ -10,9 +10,10 @@
 //! maps to BFL `decoder.up.{3-i}` because construction prepends.
 
 use crate::backend::{
-    gpu_add, gpu_attention_planar_single, gpu_conv2d_planar_cached, gpu_conv2d_planar_strided,
+    gpu_add, gpu_attention_planar_single, gpu_conv2d_planar_cached, gpu_conv2d_planar_cudnn_f16,
+    gpu_conv2d_planar_strided, gpu_cudnn_require,
     gpu_device_available, gpu_download, gpu_group_norm_planar, gpu_pool_cap_override,
-    gpu_pool_clear, gpu_silu, gpu_upload, gpu_upsample_nearest2x, GpuTensor,
+    gpu_pool_phase_end, gpu_silu, gpu_upload, gpu_upsample_nearest2x, GpuTensor,
 };
 use crate::flux2::{
     flux2_pack_latents, flux2_unpack_latents, Flux2PackedLatents, Flux2VaeConfig, Flux2WeightFile,
@@ -24,10 +25,23 @@ use std::path::{Path, PathBuf};
 const VAE_GROUP_NORM_EPSILON: f32 = 1.0e-6;
 pub const FLUX2_VAE_NAMESPACE: &str = "flux2-vae";
 
+/// How the VAE's stride-1 3x3 convs run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Flux2VaeConvs {
+    /// cuBLAS GEMMs over an f16 im2col slab: needs nothing beside CUDA.
+    #[default]
+    Gemm,
+    /// cuDNN's implicit GEMM in f16, no slab: about half the time at the
+    /// decode's large planes, each conv's output stored f16. Needs cuDNN: a
+    /// load without it fails ("cuDNN not found: ..."), it never runs `Gemm`.
+    Cudnn,
+}
+
 #[derive(Clone, Debug)]
 pub struct Flux2VaeWeights {
     pub path: PathBuf,
     pub config: Flux2VaeConfig,
+    convs: Flux2VaeConvs,
     tensors: HashMap<String, Vec<f32>>,
     shapes: HashMap<String, Vec<usize>>,
     bn_mean: Vec<f32>,
@@ -49,8 +63,8 @@ struct GpuSpatial {
     channels: usize,
 }
 
-struct ConvKernel {
-    data: Vec<f32>,
+struct ConvKernel<'a> {
+    data: &'a [f32],
     kw: usize,
     kh: usize,
     in_channels: usize,
@@ -59,6 +73,18 @@ struct ConvKernel {
 
 impl Flux2VaeWeights {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        Self::load_with(path, Flux2VaeConvs::Gemm)
+    }
+
+    pub fn load_with(path: impl AsRef<Path>, convs: Flux2VaeConvs) -> Result<Self> {
+        Self::load_on(path, convs, gpu_cudnn_require)
+    }
+
+    /// [`Self::load_with`], `cudnn` saying whether cuDNN is there (asked only for its convs).
+    fn load_on(path: impl AsRef<Path>, convs: Flux2VaeConvs, cudnn: impl FnOnce() -> std::result::Result<(), String>) -> Result<Self> {
+        if convs == Flux2VaeConvs::Cudnn {
+            cudnn().map_err(DiffusionError::workflow)?;
+        }
         let path = path.as_ref();
         let file = Flux2WeightFile::load(path)?;
         let mut tensors = HashMap::new();
@@ -94,6 +120,7 @@ impl Flux2VaeWeights {
         Ok(Self {
             path: path.to_path_buf(),
             config: Flux2VaeConfig::flux2_dev(),
+            convs,
             tensors,
             shapes,
             bn_mean,
@@ -112,8 +139,8 @@ impl Flux2VaeWeights {
             .ok_or_else(|| DiffusionError::model(format!("flux2 vae missing {name}")))
     }
 
-    fn kernel(&self, name: &str) -> Result<ConvKernel> {
-        let data = self.values(name)?.to_vec();
+    fn kernel(&self, name: &str) -> Result<ConvKernel<'_>> {
+        let data = self.values(name)?;
         let shape = self
             .shapes
             .get(name)
@@ -318,7 +345,7 @@ fn encode_moments(
             image.data.len()
         )));
     }
-    gpu_pool_clear();
+    gpu_pool_phase_end();
     gpu_pool_cap_override(Some(vae_pool_cap_bytes()));
     let ns = namespace(weights);
     let mut hidden = GpuSpatial {
@@ -366,7 +393,7 @@ fn encode_moments(
     }
     let (width, height) = (hidden.width, hidden.height);
     drop(hidden);
-    gpu_pool_clear();
+    gpu_pool_phase_end();
     gpu_pool_cap_override(None);
     Ok((moments, width, height))
 }
@@ -414,7 +441,7 @@ pub fn flux2_vae_decode(
     let unpacked = flux2_unpack_latents(&denorm, z_channels)?;
     let width = packed.width * 2;
     let height = packed.height * 2;
-    gpu_pool_clear();
+    gpu_pool_phase_end();
     gpu_pool_cap_override(Some(vae_pool_cap_bytes()));
     let ns = namespace(weights);
     let mut hidden = GpuSpatial {
@@ -466,7 +493,7 @@ pub fn flux2_vae_decode(
         data,
     };
     drop(hidden);
-    gpu_pool_clear();
+    gpu_pool_phase_end();
     gpu_pool_cap_override(None);
     Ok(image)
 }
@@ -539,9 +566,13 @@ fn conv2d(
     pad_y: usize,
 ) -> Result<GpuSpatial> {
     let kernel = weights.kernel(weight_name)?;
+    let zeros;
     let bias = match weights.values(bias_name) {
-        Ok(values) => values.to_vec(),
-        Err(_) => vec![0.0f32; kernel.out_channels],
+        Ok(values) => values,
+        Err(_) => {
+            zeros = vec![0.0f32; kernel.out_channels];
+            &zeros
+        }
     };
     if kernel.in_channels != input.channels {
         return Err(DiffusionError::model(format!(
@@ -549,20 +580,33 @@ fn conv2d(
             kernel.in_channels, input.channels
         )));
     }
-    let tensor = gpu_conv2d_planar_cached(
-        &input.tensor,
-        input.width,
-        input.height,
-        ns,
-        weight_name,
-        &kernel.data,
-        &bias,
-        kernel.out_channels,
-        kernel.kw,
-        kernel.kh,
-        pad_x,
-        pad_y,
-    )
+    let three_same = (kernel.kw, kernel.kh, pad_x, pad_y) == (3, 3, 1, 1);
+    let tensor = if three_same && weights.convs == Flux2VaeConvs::Cudnn {
+        gpu_conv2d_planar_cudnn_f16(
+            &input.tensor,
+            input.width,
+            input.height,
+            &format!("{ns}::{weight_name}"),
+            kernel.data,
+            bias,
+            kernel.out_channels,
+        )
+    } else {
+        gpu_conv2d_planar_cached(
+            &input.tensor,
+            input.width,
+            input.height,
+            ns,
+            weight_name,
+            kernel.data,
+            bias,
+            kernel.out_channels,
+            kernel.kw,
+            kernel.kh,
+            pad_x,
+            pad_y,
+        )
+    }
     .map_err(DiffusionError::model)?;
     Ok(GpuSpatial {
         tensor,
@@ -582,7 +626,7 @@ fn downsample(
     // strided kernel skips out-of-bounds taps, so running it unpadded with
     // pad 0 IS the right/bottom zero-pad — no host pad round trip needed.
     let kernel = weights.kernel(&format!("{prefix}.weight"))?;
-    let bias = weights.values(&format!("{prefix}.bias"))?.to_vec();
+    let bias = weights.values(&format!("{prefix}.bias"))?;
     let out_w = input.width / 2;
     let out_h = input.height / 2;
     let tensor = gpu_conv2d_planar_strided(
@@ -593,8 +637,8 @@ fn downsample(
         out_h,
         ns,
         &format!("{prefix}.weight"),
-        &kernel.data,
-        &bias,
+        kernel.data,
+        bias,
         kernel.out_channels,
         kernel.kw,
         kernel.kh,
@@ -828,6 +872,15 @@ mod tests {
             canonicalize_vae_name("encoder.down_blocks.1.resnets.0.conv_shortcut.weight"),
             "encoder.down.1.block.0.nin_shortcut.weight"
         );
+    }
+
+    #[test]
+    fn a_vae_on_cudnn_without_cudnn_does_not_load_and_says_so() {
+        // cuDNN as if it were not installed: the VAE's file is not even read
+        let error = Flux2VaeWeights::load_on("no-such-vae.safetensors", Flux2VaeConvs::Cudnn, || Err("cuDNN not found: none here".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cuDNN not found: none here"), "{error}");
     }
 
     #[test]

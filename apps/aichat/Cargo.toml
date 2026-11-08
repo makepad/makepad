@@ -54,5 +54,7 @@ makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = 
 makepad-wm-api = { path = "../../libs/wm_api" }
 makepad-ai-services = { path = "../../libs/ai/services", default-features = false, features = ["platform"] }
 makepad-strict-json = { path = "../../libs/strict_json" }
+# The pictures the person drops, decoded (the app's one decoder).
+makepad-image-decode = { path = "../../libs/image_decode" }
 # The fleet client behind `gen`. Native only.
 makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, optional = true }

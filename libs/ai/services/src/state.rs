@@ -225,7 +225,8 @@ pub struct EventEntry {
 /// One line of the transcript.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Entry {
-    User { text: String },
+    /// A line the person sent, with the pictures it carried.
+    User { text: String, pictures: Vec<crate::pictures::PictureRef> },
     Event(EventEntry),
     /// `streaming` while deltas still arrive; the panel draws the landed
     /// text with markup and the streaming text plain.
@@ -325,11 +326,11 @@ mod tests {
     fn the_transcript_is_bounded_and_generation_moves() {
         let mut s = EngineState::default();
         for i in 0..(MAX_ENTRIES + 5) {
-            s.push(Entry::User { text: i.to_string() });
+            s.push(Entry::User { text: i.to_string(), pictures: Vec::new() });
         }
         assert_eq!(s.entries.len(), MAX_ENTRIES);
         assert_eq!(s.generation, (MAX_ENTRIES + 5) as u64);
-        assert!(matches!(&s.entries[0], Entry::User { text } if text == "5"));
+        assert!(matches!(&s.entries[0], Entry::User { text, .. } if text == "5"));
     }
 
     #[test]

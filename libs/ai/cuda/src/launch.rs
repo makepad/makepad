@@ -4292,6 +4292,43 @@ mod imp {
         CONV_SCRATCH.with(|cell| *cell.borrow_mut() = [None, None]);
     }
 
+    thread_local! {
+        static GPU_POOL_KEEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// A phase of a model's run is over (its denoise, its VAE encode or
+    /// decode): its idle working memory is freed, so the next phase's never
+    /// sits beside it, unless a [`GpuPoolKeep`] lives on this thread (a live
+    /// loop running the same phases frame after frame), when it stays for
+    /// the next frame's same phase to take again.
+    pub fn gpu_pool_phase_end() {
+        if GPU_POOL_KEEPS.with(|keeps| keeps.get()) == 0 {
+            gpu_pool_clear();
+        }
+    }
+
+    /// While it lives, the phases run on this thread keep their working
+    /// memory between them ([`gpu_pool_phase_end`]); dropped, that memory
+    /// is freed. The pool is this thread's, so the keep stays on it.
+    pub struct GpuPoolKeep(std::marker::PhantomData<*const ()>);
+
+    pub fn gpu_pool_keep() -> GpuPoolKeep {
+        GPU_POOL_KEEPS.with(|keeps| keeps.set(keeps.get() + 1));
+        GpuPoolKeep(std::marker::PhantomData)
+    }
+
+    impl Drop for GpuPoolKeep {
+        fn drop(&mut self) {
+            let left = GPU_POOL_KEEPS.with(|keeps| {
+                keeps.set(keeps.get().saturating_sub(1));
+                keeps.get()
+            });
+            if left == 0 {
+                gpu_pool_clear();
+            }
+        }
+    }
+
     /// Release every idle allocator-pool block on this thread and return the
     /// number of device bytes handed to `cudaFree`. Unlike
     /// [`gpu_pool_clear`], this lifecycle trim also drops the grow-to-max
@@ -5153,8 +5190,10 @@ mod imp {
                     ) }.map_err(|e| format!("f16acc GEMM m={m} k={k} n={width}: {e}"))?;
                 } else {
                     if bytes != width * k + 4 { return Err(format!("FP8 weight size: {key}")); }
-                    fp8_dynamic_linear_gemm(backend, weight, input.cast(), scratch,
-                        m, k, width, n, unsafe { out.device_ptr()?.add(offset) })?;
+                    fp8_dynamic_linear_gemm(backend, weight, input.cast(),
+                        scratch.fp8_scale.as_ref().ok_or("missing FP8 input scale")?.ptr.as_ptr(),
+                        scratch.fp8_workspace.as_ref().ok_or("missing FP8 workspace")?,
+                        m, k, width, n, unsafe { out.device_ptr()?.add(offset) }.cast(), crate::CUDA_R_32F)?;
                 }
                 offset += width;
             }
@@ -5377,6 +5416,15 @@ mod imp {
 
     pub fn gpu_cudnn_available() -> bool {
         crate::cudnn::available()
+    }
+
+    /// cuDNN loaded, or the error that says it is not there.
+    pub fn gpu_cudnn_require() -> Result<(), String> {
+        if crate::cudnn::available() {
+            Ok(())
+        } else {
+            Err(format!("cuDNN not found: {}", crate::cudnn::LIBRARY))
+        }
     }
 
     fn gpu_check(status: cudaError_t) -> Result<(), String> {
@@ -10431,19 +10479,21 @@ mod imp {
     // Dynamic per-tensor FP8 twin. Descriptor setup/heuristic selection is
     // deliberately included in the microbench, as in the existing scaled-mm
     // path; neither activation absmax nor a tensor crosses to the host.
+    // `input_scale` is the device f32 the input's quantization wrote; `out`
+    // is f32 or bf16 (`out_type`), `ldc` apart.
     #[allow(clippy::too_many_arguments)]
     fn fp8_dynamic_linear_gemm(
         backend: &CudaDenseLinearBackend, weight: *const c_void, input: *const c_void,
-        scratch: &GpuLinearScratch, m: usize, k: usize, n: usize, ldc: usize, out: *mut f32,
+        input_scale: *const c_void, workspace: &DeviceBuffer, m: usize, k: usize, n: usize, ldc: usize,
+        out: *mut c_void, out_type: crate::cudaDataType,
     ) -> Result<(), String> {
-        let workspace = scratch.fp8_workspace.as_ref().ok_or("missing FP8 workspace")?;
-        let b_scale = scratch.fp8_scale.as_ref().ok_or("missing FP8 input scale")?.ptr.as_ptr();
+        let b_scale = input_scale;
         let a_scale = unsafe { weight.cast::<u8>().add(n * k).cast::<c_void>() };
         let operation = crate::cublas_lt_matmul_desc_create(crate::CUBLAS_COMPUTE_32F, crate::CUDA_R_32F)
             .map_err(|e| e.to_string())?;
         let a_desc = crate::cublas_lt_matrix_layout_create(crate::CUDA_R_8F_E4M3, k as u64, n as u64, k as i64);
         let b_desc = crate::cublas_lt_matrix_layout_create(crate::CUDA_R_8F_E4M3, k as u64, m as u64, k as i64);
-        let d_desc = crate::cublas_lt_matrix_layout_create(crate::CUDA_R_32F, n as u64, m as u64, ldc as i64);
+        let d_desc = crate::cublas_lt_matrix_layout_create(out_type, n as u64, m as u64, ldc as i64);
         let preference = crate::cublas_lt_matmul_preference_create();
         let result = (|| -> Result<(), String> {
             let a = *a_desc.as_ref().map_err(|e| e.to_string())?;
@@ -10662,6 +10712,123 @@ mod imp {
             )?;
             gpu_prof(backend.stream, crate::prof::CAT_DENSE_TOTAL, prof_start, 0);
             Ok(output)
+        })
+    }
+
+    /// The Lt workspace an FP8 linear may use to pick its algorithm.
+    const FP8_LINEAR_WORKSPACE: usize = 32 * 1024 * 1024;
+
+    // Shared body of the dynamic FP8 linears from a bf16 input: the input
+    // quantizes to E4M3 by its own absmax (the scale stays on the device,
+    // after the quantized bytes), then the FP8 GEMM writes bf16 `out`.
+    fn fp8_dynamic_linear_from_bf16(
+        backend: &mut CudaDenseLinearBackend, input: *const c_void, key: &str, m: usize, k: usize,
+        n: usize, out: *mut c_void,
+    ) -> Result<(), String> {
+        let (weight, bytes) = backend.weight_ptr(key)?;
+        if bytes != n * k + 4 {
+            return Err(format!("FP8 weight {key} is {bytes} bytes, not {n}x{k} and its scale"));
+        }
+        let count = u32::try_from(m * k).map_err(|_| "FP8 linear input exceeds u32".to_string())?;
+        let quantized_bytes = (m * k).next_multiple_of(16);
+        let quantized = gpu_pool_acquire(quantized_bytes + 16)?;
+        let workspace = match gpu_pool_acquire(FP8_LINEAR_WORKSPACE) {
+            Ok(workspace) => workspace,
+            Err(err) => {
+                gpu_pool_release(quantized);
+                return Err(err);
+            }
+        };
+        let run = (|| -> Result<(), String> {
+            let bytes = quantized.ptr.as_ptr().cast::<u8>();
+            let scale = unsafe { bytes.add(quantized_bytes) };
+            gpu_check(unsafe {
+                makepad_cuda_quant_scaled_f8_e4m3(input, bytes, scale.cast(), count, 1, backend.stream)
+            })?;
+            fp8_dynamic_linear_gemm(
+                backend, weight, bytes.cast_const().cast(), scale.cast_const().cast(), &workspace,
+                m, k, n, n, out, crate::CUDA_R_16BF,
+            )
+        })();
+        gpu_pool_release(workspace);
+        gpu_pool_release(quantized);
+        run
+    }
+
+    /// A linear whose bf16 weight went to FP8 E4M3 at upload
+    /// (`gpu_weight_cache_ensure_bf16_precision_keyed` with `Fp8F32`, under
+    /// `key`), from a bf16 buffer to a bf16 buffer: the input is quantized
+    /// per call by its own absmax and the GEMM runs on FP8 tensor cores with
+    /// f32 accumulation.
+    pub fn gpu_linear_nt_cached_fp8_dynamic_from_buf_to_buf(
+        x: &GpuBf16Buf,
+        key: &str,
+        n: usize,
+    ) -> Result<GpuBf16Buf, String> {
+        let (m, k) = (x.rows, x.cols);
+        if m == 0 || k == 0 || n == 0 {
+            return Err(format!("gpu_linear_nt_cached_fp8_dynamic_from_buf_to_buf empty shape: x={m}x{k} n={n}"));
+        }
+        let prof_start = std::time::Instant::now();
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let output = GpuBf16Buf::from_pool(m, n)?;
+            fp8_dynamic_linear_from_bf16(
+                backend,
+                x.device_ptr_u16()?.cast_const().cast(),
+                key,
+                m,
+                k,
+                n,
+                output.device_ptr_u16()?.cast(),
+            )?;
+            gpu_prof(backend.stream, crate::prof::CAT_DENSE_TOTAL, prof_start, 0);
+            Ok(output)
+        })
+    }
+
+    /// `gpu_linear_nt_cached_fp8_dynamic_from_buf_to_buf` with f32 out (the
+    /// GEMM's bf16 values, expanded losslessly, like the bf16 twin).
+    pub fn gpu_linear_nt_cached_fp8_dynamic_from_buf(
+        x: &GpuBf16Buf,
+        key: &str,
+        n: usize,
+    ) -> Result<GpuTensor, String> {
+        let (m, k) = (x.rows, x.cols);
+        if m == 0 || k == 0 || n == 0 {
+            return Err(format!("gpu_linear_nt_cached_fp8_dynamic_from_buf empty shape: x={m}x{k} n={n}"));
+        }
+        let prof_start = std::time::Instant::now();
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let output_values = m
+                .checked_mul(n)
+                .ok_or_else(|| "FP8 linear output size overflow".to_string())?;
+            let output_bf16 = gpu_pool_acquire(output_values * size_of::<u16>())?;
+            let run = (|| -> Result<GpuTensor, String> {
+                let output = GpuTensor::from_pool(m, n)?;
+                fp8_dynamic_linear_from_bf16(
+                    backend,
+                    x.device_ptr_u16()?.cast_const().cast(),
+                    key,
+                    m,
+                    k,
+                    n,
+                    output_bf16.ptr.as_ptr(),
+                )?;
+                gpu_check(unsafe {
+                    makepad_cuda_bf16_to_f32(
+                        output_bf16.ptr.as_ptr().cast::<u16>(),
+                        output.device_ptr()?,
+                        output_values as u32,
+                        backend.stream,
+                    )
+                })?;
+                Ok(output)
+            })();
+            gpu_pool_release(output_bf16);
+            gpu_prof(backend.stream, crate::prof::CAT_DENSE_TOTAL, prof_start, 0);
+            run
         })
     }
 
@@ -15844,78 +16011,164 @@ mod imp {
         let prof_start = std::time::Instant::now();
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let key = (
-                1u32,
-                in_channels as u32,
-                out_channels as u32,
-                height as u32,
-                width as u32,
-                height as u32,
-                3u32,
-                1u32,
-                1u32,
-                0x30u32,
-                crate::cudnn::CUDNN_DATA_HALF as u32,
-            );
-            CUDNN_DESCS.with(|cell: &RefCell<CudnnDescMap>| {
-                let mut map = cell.borrow_mut();
-                if !map.contains_key(&key) {
-                    let desc = crate::cudnn::prepare_nchw_strided_f16(
-                        1,
-                        in_channels as i32,
-                        out_channels as i32,
-                        height as i32,
-                        width as i32,
-                        3,
-                        3,
-                        1,
-                        1,
-                        backend.stream,
-                    )?;
-                    map.insert(key, desc);
-                }
-                let desc = map.get(&key).expect("just inserted");
-                let ws_bytes = crate::cudnn::workspace_bytes(desc);
-                let ws_ptr = if ws_bytes == 0 {
-                    std::ptr::null_mut()
-                } else {
-                    CUDNN_WS.with(|ws| -> Result<*mut std::ffi::c_void, String> {
-                        let mut slot = ws.borrow_mut();
-                        let need_new = match slot.as_ref() {
-                            Some(buf) => buf.size_bytes < ws_bytes,
-                            None => true,
-                        };
-                        if need_new {
-                            *slot = Some(DeviceBuffer::new(gpu_pool_round(ws_bytes.max(1)))?);
-                        }
-                        Ok(slot.as_ref().unwrap().ptr.as_ptr())
-                    })?
-                };
-                let w_key = format!("{cache_namespace}::{weight_cache_key}::nchw16");
-                backend.cached_weight_buffer(
-                    &w_key,
-                    weights.len() * size_of::<u16>(),
-                    || Ok(pack_f16_bytes_rn(weights)),
-                )?;
-                let weight_ptr = backend
-                    .weight_buffers
-                    .get(&w_key)
-                    .ok_or_else(|| format!("missing packed conv {w_key}"))?
-                    .ptr
-                    .as_ptr();
-                let x_ptr = input.device_ptr_u16()?;
-                let y_ptr = unsafe { output.device_ptr_u16()?.add(out_row_offset * plane) };
-                crate::cudnn::convolution_forward_f16(
-                    desc,
-                    x_ptr.cast(),
-                    weight_ptr,
-                    y_ptr.cast(),
-                    ws_ptr,
+            let x_ptr = input.device_ptr_u16()?;
+            let y_ptr = unsafe { output.device_ptr_u16()?.add(out_row_offset * plane) };
+            let conv = Conv3x3 { in_channels, out_channels, width, height };
+            cudnn_conv3x3_f16(backend, conv, &format!("{cache_namespace}::{weight_cache_key}"), weights, x_ptr, y_ptr)?;
+            gpu_prof(backend.stream, crate::prof::CAT_CONV2D, prof_start, 0);
+            Ok(())
+        })
+    }
+
+    /// The shape of a stride-1 "same" 3x3 planar conv, batch 1.
+    #[derive(Clone, Copy)]
+    struct Conv3x3 {
+        in_channels: usize,
+        out_channels: usize,
+        width: usize,
+        height: usize,
+    }
+
+    // cuDNN f16 3x3 stride-1 "same" conv, batch 1 (a planar block is then a
+    // contiguous NCHW tensor), raw (biasless): `input` holds `in_channels`
+    // f16 planes, `output` gets `out_channels`. The f16 weights are cached
+    // under `{weight_key}::nchw16`, the descriptor per shape.
+    fn cudnn_conv3x3_f16(
+        backend: &mut CudaDenseLinearBackend,
+        conv: Conv3x3,
+        weight_key: &str,
+        weights: &[f32],
+        input: *const u16,
+        output: *mut u16,
+    ) -> Result<(), String> {
+        let Conv3x3 { in_channels, out_channels, width, height } = conv;
+        let key = (
+            1u32,
+            in_channels as u32,
+            out_channels as u32,
+            height as u32,
+            width as u32,
+            height as u32,
+            3u32,
+            1u32,
+            1u32,
+            0x30u32,
+            crate::cudnn::CUDNN_DATA_HALF as u32,
+        );
+        CUDNN_DESCS.with(|cell: &RefCell<CudnnDescMap>| {
+            let mut map = cell.borrow_mut();
+            if !map.contains_key(&key) {
+                let desc = crate::cudnn::prepare_nchw_strided_f16(
+                    1,
+                    in_channels as i32,
+                    out_channels as i32,
+                    height as i32,
+                    width as i32,
+                    3,
+                    3,
+                    1,
+                    1,
                     backend.stream,
                 )?;
-                gpu_prof(backend.stream, crate::prof::CAT_CONV2D, prof_start, 0);
-                Ok(())
-            })
+                map.insert(key, desc);
+            }
+            let desc = map.get(&key).expect("just inserted");
+            let ws_bytes = crate::cudnn::workspace_bytes(desc);
+            let ws_ptr = if ws_bytes == 0 {
+                std::ptr::null_mut()
+            } else {
+                CUDNN_WS.with(|ws| -> Result<*mut std::ffi::c_void, String> {
+                    let mut slot = ws.borrow_mut();
+                    let need_new = match slot.as_ref() {
+                        Some(buf) => buf.size_bytes < ws_bytes,
+                        None => true,
+                    };
+                    if need_new {
+                        *slot = Some(DeviceBuffer::new(gpu_pool_round(ws_bytes.max(1)))?);
+                    }
+                    Ok(slot.as_ref().unwrap().ptr.as_ptr())
+                })?
+            };
+            let w_key = format!("{weight_key}::nchw16");
+            backend.cached_weight_buffer(
+                &w_key,
+                weights.len() * size_of::<u16>(),
+                || Ok(pack_f16_bytes_rn(weights)),
+            )?;
+            let weight_ptr = backend
+                .weight_buffers
+                .get(&w_key)
+                .ok_or_else(|| format!("missing packed conv {w_key}"))?
+                .ptr
+                .as_ptr();
+            crate::cudnn::convolution_forward_f16(
+                desc,
+                input.cast(),
+                weight_ptr,
+                output.cast(),
+                ws_ptr,
+                backend.stream,
+            )
+        })
+    }
+
+    /// A stride-1 "same" 3x3 planar conv2d on cuDNN, f32 in and out: the
+    /// input rounds to f16 (as the GEMM path's im2col rounds it), the conv
+    /// accumulates in f32 and stores f16, and the bias is added in f32 after
+    /// it widens. Implicit GEMM: no im2col slab, half the time of
+    /// `gpu_conv2d_planar_cached` at a VAE decode's large planes. The weights
+    /// and bias are cached under `weight_key`.
+    pub fn gpu_conv2d_planar_cudnn_f16(
+        x: &GpuTensor,
+        width: usize,
+        height: usize,
+        weight_key: &str,
+        weights: &[f32],
+        bias: &[f32],
+        out_channels: usize,
+    ) -> Result<GpuTensor, String> {
+        let (in_channels, plane) = (x.rows, width * height);
+        if x.half || x.cols != plane {
+            return Err(format!("gpu_conv2d_planar_cudnn_f16 wants f32 {in_channels}x{plane}, got {}x{} half={}", x.rows, x.cols, x.half));
+        }
+        if weights.len() != out_channels * in_channels * 9 || bias.len() != out_channels {
+            return Err("gpu_conv2d_planar_cudnn_f16 weight/bias shape mismatch".into());
+        }
+        if !crate::cudnn::available() {
+            return Err("gpu_conv2d_planar_cudnn_f16 requires cuDNN".into());
+        }
+        let prof_start = std::time::Instant::now();
+        let input = gpu_to_f16(x)?;
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let output = GpuTensor::from_pool_half(out_channels, plane)?;
+            let conv = Conv3x3 { in_channels, out_channels, width, height };
+            cudnn_conv3x3_f16(backend, conv, weight_key, weights, input.device_ptr_u16()?, output.device_ptr_u16()?)?;
+            let widened = GpuTensor::from_pool(out_channels, plane)?;
+            gpu_check(unsafe {
+                makepad_cuda_f16_to_f32_precise(
+                    output.device_ptr_u16()?,
+                    widened.device_ptr()?,
+                    (out_channels * plane) as u32,
+                    backend.stream,
+                )
+            })?;
+            let bias_key = format!("{weight_key}::bias");
+            backend.cached_weight_buffer(&bias_key, bias.len() * size_of::<f32>(), || {
+                Ok(bias.iter().flat_map(|b| b.to_le_bytes()).collect())
+            })?;
+            let bias_ptr = backend
+                .weight_buffers
+                .get(&bias_key)
+                .ok_or_else(|| format!("missing cached conv bias {bias_key}"))?
+                .ptr
+                .as_ptr()
+                .cast::<f32>();
+            gpu_check(unsafe {
+                makepad_cuda_add_planes_vec_f32(widened.device_ptr()?, bias_ptr, plane as u32, out_channels as u32, backend.stream)
+            })?;
+            gpu_prof(backend.stream, crate::prof::CAT_CONV2D, prof_start, 0);
+            Ok(widened)
         })
     }
 

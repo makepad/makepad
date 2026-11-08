@@ -15,6 +15,16 @@ we do not host or redistribute them. Each is used under its licence.
 - `flux1-schnell` uses Comfy-Org's combined FP8 repack
   (https://huggingface.co/Comfy-Org/flux1-schnell).
 
+## FLUX.2 [klein] 4B (`flux2-klein-4b`)
+
+- Authors: Black Forest Labs.
+- Link: https://huggingface.co/black-forest-labs/FLUX.2-klein-4B
+- Licence: Apache License 2.0. https://www.apache.org/licenses/LICENSE-2.0
+- Files, all from that repository unmodified: the transformer (`flux-2-klein-4b.safetensors`), its
+  text encoder (`text_encoder/`, a Qwen3-4B model by the Qwen team, Apache License 2.0), its tokenizer
+  and its autoencoder (`vae/`). The hub keeps them under `flux2-klein-4b/` in the weights cache;
+  apps that run the model in-process (a live diffuser in an app) load the same files.
+
 ## FLUX VAE (shared by the split FLUX.1 bundles)
 
 - Authors: Black Forest Labs (`ae.safetensors` of FLUX.1).

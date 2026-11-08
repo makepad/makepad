@@ -23,6 +23,10 @@ pub struct ToolImage {
     pub label: String,
     pub png: std::sync::Arc<[u8]>,
 }
+/// The most pixels a tool picture may have a side: a tool fits its pictures within it (and
+/// within its byte budget) before they come here.
+pub const MAX_TOOL_IMAGE_SIDE: u32 = 1024;
+
 pub fn validate_tool_images(images:&[ToolImage])->Result<(),String>{
     if images.len()>4{return Err("too many tool images".into());}
     let mut bytes=0usize;
@@ -30,7 +34,7 @@ pub fn validate_tool_images(images:&[ToolImage])->Result<(),String>{
         bytes=bytes.saturating_add(image.png.len());
         if image.label.len()>128 || image.png.len()<24 || !image.png.starts_with(b"\x89PNG\r\n\x1a\n") {return Err("invalid tool image".into());}
         let w=u32::from_be_bytes(image.png[16..20].try_into().unwrap());let h=u32::from_be_bytes(image.png[20..24].try_into().unwrap());
-        if w==0 || h==0 || w>1024 || h>1024 {return Err("tool image dimensions exceed 1024".into());}
+        if w==0 || h==0 || w>MAX_TOOL_IMAGE_SIDE || h>MAX_TOOL_IMAGE_SIDE {return Err(format!("tool image dimensions exceed {MAX_TOOL_IMAGE_SIDE}"));}
     }
     if bytes>8*1024*1024{return Err("tool image byte budget exceeded".into());}Ok(())
 }

@@ -4,7 +4,7 @@
 //! offsets 10, 20, … → 4-step distilled Euler denoise → VAE decode.
 //! Fail-closed without CUDA.
 
-use crate::backend::gpu_device_available;
+use crate::backend::{gpu_device_available, gpu_pool_phase_end};
 use crate::flux2::{
     flux2_concat_ref_tokens, flux2_image_ids, flux2_ref_time_offset, flux2_schedule, flux2_text_ids,
     Flux2PackedLatents, Flux2PosId, Flux2WeightFile, Mistral3TextConfig, Qwen3TextConfig,
@@ -17,10 +17,10 @@ use crate::flux2_klein_text::{
 };
 use crate::flux2_tokenizer::{Flux2Tokenizer, FLUX2_MAX_SEQUENCE_LENGTH};
 use crate::flux2_transformer::{
-    flux2_dit_clear_pool, flux2_euler_step, flux2_transformer_forward, Flux2TransformerWeights,
+    flux2_euler_step, flux2_transformer_forward, Flux2MlpArithmetic, Flux2TransformerWeights,
 };
 use crate::flux2_vae::{
-    flux2_image_to_rgb_u8, flux2_vae_decode, flux2_vae_encode, Flux2VaeImage,
+    flux2_image_to_rgb_u8, flux2_vae_decode, flux2_vae_encode, Flux2VaeConvs, Flux2VaeImage,
     Flux2VaeWeights,
 };
 use crate::flux_pipeline::encode_png_rgb;
@@ -186,19 +186,40 @@ impl Flux2EditResult {
     }
 }
 
+/// How a klein pipeline runs where its arithmetic has a choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Flux2KleinArithmetic {
+    pub mlps: Flux2MlpArithmetic,
+    pub vae_convs: Flux2VaeConvs,
+}
+
+impl Flux2KleinArithmetic {
+    /// The checkpoint's own, on CUDA alone: what `load` runs.
+    pub const AS_STORED: Self = Self { mlps: Flux2MlpArithmetic::AsStored, vae_convs: Flux2VaeConvs::Gemm };
+    /// A live loop's: the DiT's MLPs in FP8 and the VAE's convs on cuDNN,
+    /// speed over the last bits.
+    pub const LIVE: Self = Self { mlps: Flux2MlpArithmetic::Fp8, vae_convs: Flux2VaeConvs::Cudnn };
+}
+
 impl Flux2KleinPipeline {
     pub fn load(paths: Flux2KleinPaths) -> Result<Self> {
+        Self::load_with(paths, Flux2KleinArithmetic::AS_STORED)
+    }
+
+    /// `load` with its arithmetic chosen (see `Flux2KleinArithmetic`).
+    pub fn load_with(paths: Flux2KleinPaths, arithmetic: Flux2KleinArithmetic) -> Result<Self> {
         if !gpu_device_available() {
             return Err(DiffusionError::workflow(
                 "flux2-klein-4b requires CUDA (MAKEPAD_GGML_REQUIRE_CUDA=1)",
             ));
         }
+        // First: what it needs beside CUDA is asked for before anything big loads.
+        let vae = Flux2VaeWeights::load_with(&paths.vae, arithmetic.vae_convs)?;
         let tokenizer = flux2_klein_tokenizer_load(&paths.tokenizer)?;
         let text_encoder = Flux2WeightFile::load(&paths.text_encoder)?;
         let text_prepared =
             Flux2KleinTextPrepared::prepare(&text_encoder, Qwen3TextConfig::flux2_klein_4b())?;
-        let vae = Flux2VaeWeights::load(&paths.vae)?;
-        let transformer = Flux2TransformerWeights::load(&paths.transformer)?;
+        let transformer = Flux2TransformerWeights::load_with(&paths.transformer, arithmetic.mlps)?;
         if transformer.config.guidance_embed {
             return Err(DiffusionError::model(
                 "flux2-klein-4b loader received a guidance_embed=true transformer",
@@ -322,7 +343,7 @@ impl Flux2KleinPipeline {
             flux2_euler_step(&mut sample, &run.prediction, sigmas[step], sigmas[step + 1])?;
         }
         let warm_ms = started.elapsed().as_secs_f64() * 1000.0;
-        flux2_dit_clear_pool();
+        gpu_pool_phase_end();
 
         let packed = Flux2PackedLatents::from_tokens(&sample, packed_w, packed_h, channels)?;
         let decode_started = std::time::Instant::now();
@@ -712,7 +733,7 @@ impl Flux2DevPipeline {
             flux2_euler_step(&mut sample, &run.prediction, sigmas[step], sigmas[step + 1])?;
         }
         let denoise_ms = denoise_started.elapsed().as_secs_f64() * 1000.0;
-        flux2_dit_clear_pool();
+        gpu_pool_phase_end();
         // Decode transients (~2-3GB at 1024px) plus the resident DiT sit at
         // the 32GB WDDM cliff; the ring slots are the cheapest headroom —
         // freed here, re-primed on the next forward.
@@ -906,7 +927,7 @@ impl Flux2DevPipeline {
             flux2_euler_step(&mut sample, &run.prediction, sigmas[step], sigmas[step + 1])?;
         }
         let warm_ms = denoise_started.elapsed().as_secs_f64() * 1000.0;
-        flux2_dit_clear_pool();
+        gpu_pool_phase_end();
         let _ = crate::backend::gpu_stream_ring_release_slots();
 
         let packed = Flux2PackedLatents::from_tokens(&sample, packed_w, packed_h, channels)?;

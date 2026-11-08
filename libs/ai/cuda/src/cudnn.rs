@@ -459,6 +459,9 @@ fn try_load_path(path: &str) -> Result<(Lib, CudnnApi), String> {
     }
 }
 
+/// The library looked for first: what a missing cuDNN is reported as.
+pub const LIBRARY: &str = if cfg!(windows) { "cudnn64_9.dll" } else { "libcudnn.so.9" };
+
 fn candidate_paths() -> Vec<String> {
     let mut out = Vec::new();
     if let Ok(p) = std::env::var("CUDNN_PATH") {

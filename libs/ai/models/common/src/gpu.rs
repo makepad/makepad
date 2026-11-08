@@ -2134,6 +2134,10 @@ mod imp {
         false
     }
 
+    pub fn gpu_cudnn_require() -> Result<(), String> {
+        Err("cuDNN not found: this build has no CUDA".to_string())
+    }
+
     pub fn gpu_act_f16_enabled() -> bool {
         false
     }
@@ -3335,6 +3339,34 @@ mod imp {
         _weight_scale: f32,
         _input_scale: Option<f32>,
     ) -> Result<GpuBf16Buf, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_conv2d_planar_cudnn_f16(
+        _x: &GpuTensor,
+        _width: usize,
+        _height: usize,
+        _weight_key: &str,
+        _weights: &[f32],
+        _bias: &[f32],
+        _out_channels: usize,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_linear_nt_cached_fp8_dynamic_from_buf_to_buf(
+        _x: &GpuBf16Buf,
+        _key: &str,
+        _n: usize,
+    ) -> Result<GpuBf16Buf, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_linear_nt_cached_fp8_dynamic_from_buf(
+        _x: &GpuBf16Buf,
+        _key: &str,
+        _n: usize,
+    ) -> Result<GpuTensor, String> {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
@@ -4778,6 +4810,14 @@ mod imp {
     }
 
     pub fn gpu_pool_clear() {}
+
+    pub fn gpu_pool_phase_end() {}
+
+    pub struct GpuPoolKeep(std::marker::PhantomData<*const ()>);
+
+    pub fn gpu_pool_keep() -> GpuPoolKeep {
+        GpuPoolKeep(std::marker::PhantomData)
+    }
 
     pub fn gpu_pool_trim() -> usize {
         0

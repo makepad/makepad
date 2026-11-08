@@ -1,11 +1,15 @@
 //! Pictures for the model: reference images a person drops into the chat,
 //! and captures a host takes of its own window. Every picture reaches the
 //! model as one still PNG of at most [`MAX_SIDE`] pixels a side, whatever
-//! it started as (PNG, JPEG or WebP; a window grab at device pixels).
+//! it started as (PNG, JPEG or WebP; a window grab at device pixels). A
+//! dropped picture is also kept as it came ([`Dropped`]): the chat keeps it,
+//! and an app's tools read it at its own size.
 //!
-//! Decoding and scaling are CPU work: hosts run [`normalize`] on the task
-//! pool, never on the UI thread.
+//! Decoding, hashing and scaling are CPU work: hosts run [`load`] and
+//! [`normalize`] on the task pool, never on the UI thread.
 
+use makepad_ai_services::engine::{picture_file, NewPicture};
+use makepad_ai_services::pictures::RgbaPicture;
 use makepad_widgets::makepad_platform::clipboard_read::{ClipboardContent, ClipboardImage};
 use makepad_widgets::*;
 use std::path::Path;
@@ -17,6 +21,27 @@ pub const MAX_SIDE: usize = 1024;
 pub const MAX_FILE_BYTES: usize = 32 * 1024 * 1024;
 /// Pixels a dropped file may decode to.
 const MAX_PIXELS: usize = 40 * 1024 * 1024;
+
+/// A picture the person dropped (or pasted, or picked): as it came, and the copy the model gets.
+#[derive(Clone, Debug)]
+pub struct Dropped {
+    /// The picture's bytes as they came (a pasted bitmap: a PNG of it).
+    pub original: Arc<[u8]>,
+    /// Its file name in the chat's pictures: the SHA-256 of `original`, and its format's extension.
+    pub file: String,
+    /// The original's pixels.
+    pub width: u32,
+    pub height: u32,
+    /// The copy for the model, with a small one for the composer's chip.
+    pub sent: Attachment,
+}
+
+impl Dropped {
+    /// The picture for the chat's next line.
+    pub fn into_new(self) -> NewPicture {
+        NewPicture { name: self.sent.name, original: self.original, file: self.file, width: self.width, height: self.height, for_model: self.sent.png }
+    }
+}
 
 /// A picture on its way to the model.
 #[derive(Clone, Debug)]
@@ -100,41 +125,76 @@ impl Source {
     }
 }
 
-/// Read, decode and bring a dropped picture down to the model's size.
-pub fn load(source: Source) -> Result<Attachment, String> {
+/// Read, decode and hash a dropped picture, and bring a copy down to the model's size.
+pub fn load(source: Source) -> Result<Dropped, String> {
     let name = source.name();
     if heic_name(&name) {
         return Err(format!("{name}: HEIC photos cannot be read here yet; save it as JPEG or PNG and drop that"));
     }
-    let bytes: Arc<[u8]> = match source {
+    let (original, ext, picture): (Arc<[u8]>, &str, RgbaPicture) = match source {
         Source::Rgba { width, height, rgba, .. } => {
             if width == 0 || height == 0 || width.saturating_mul(height) > MAX_PIXELS || rgba.len() < width * height * 4 {
                 return Err(format!("{name}: the picture is empty or too large"));
             }
-            let mut out = normalize(name.clone(), width, height, &rgba)?;
-            out.thumb = scale_to(name, width, height, &rgba, 96).ok().map(|t| t.png);
-            return Ok(out);
+            let rgba = rgba[..width * height * 4].to_vec();
+            let png = Cx::encode_rgba_as_png(width as u32, height as u32, &rgba)?;
+            (Arc::from(png), "png", RgbaPicture { width: width as u32, height: height as u32, rgba })
         }
         Source::Path(path) => {
             let meta = std::fs::metadata(&path).map_err(|e| format!("{name}: {e}"))?;
             if !meta.is_file() || meta.len() as usize > MAX_FILE_BYTES {
                 return Err(format!("{name}: not a regular image file of at most 32 MiB"));
             }
-            Arc::from(std::fs::read(&path).map_err(|e| format!("{name}: {e}"))?)
+            let bytes: Arc<[u8]> = Arc::from(std::fs::read(&path).map_err(|e| format!("{name}: {e}"))?);
+            let (ext, picture) = decode(&bytes, &name)?;
+            (bytes, ext, picture)
         }
-        Source::Bytes { bytes, .. } => bytes,
+        Source::Bytes { bytes, .. } => {
+            let (ext, picture) = decode(&bytes, &name)?;
+            (bytes, ext, picture)
+        }
     };
-    let decoded = decode_image_from_data(&bytes).map_err(|e| format!("{name}: cannot decode ({e})"))?;
-    if decoded.width == 0 || decoded.height == 0 || decoded.width.saturating_mul(decoded.height) > MAX_PIXELS {
+    let (width, height) = (picture.width as usize, picture.height as usize);
+    let mut sent = normalize(name.clone(), width, height, &picture.rgba)?;
+    sent.thumb = scale_to(name, width, height, &picture.rgba, THUMB_SIDE).ok().map(|t| t.png);
+    let file = picture_file(&original, ext);
+    Ok(Dropped { original, file, width: picture.width, height: picture.height, sent })
+}
+
+/// The side of a picture's small copy (the composer's chip, the transcript's line).
+const THUMB_SIDE: usize = 96;
+
+/// A picture's small copy for the transcript, from its bytes as they came.
+pub fn thumb(bytes: &[u8], name: &str) -> Result<Arc<[u8]>, String> {
+    let (_, picture) = decode(bytes, name)?;
+    scale_to(name.to_string(), picture.width as usize, picture.height as usize, &picture.rgba, THUMB_SIDE).map(|t| t.png)
+}
+
+/// A picture's pixels from its bytes, and the extension of the format they are in.
+pub fn decode(bytes: &[u8], name: &str) -> Result<(&'static str, RgbaPicture), String> {
+    let ext = image_ext(bytes).ok_or_else(|| format!("{name}: not a PNG, JPEG, WebP, GIF or BMP picture"))?;
+    let (width, height, rgba) = makepad_image_decode::decode_rgba(bytes).map_err(|e| format!("{name}: cannot decode ({e})"))?;
+    if width == 0 || height == 0 || width.saturating_mul(height) > MAX_PIXELS {
         return Err(format!("{name}: the picture is empty or too large"));
     }
-    let mut rgba = Vec::with_capacity(decoded.width * decoded.height * 4);
-    for p in &decoded.data[..decoded.width * decoded.height] {
-        rgba.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8, (p >> 24) as u8]);
+    Ok((ext, RgbaPicture { width: width as u32, height: height as u32, rgba }))
+}
+
+/// The extension of the picture format `bytes` start as.
+fn image_ext(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG") {
+        Some("png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("jpg")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(&b"WEBP"[..]) {
+        Some("webp")
+    } else if bytes.starts_with(b"GIF8") {
+        Some("gif")
+    } else if bytes.starts_with(b"BM") {
+        Some("bmp")
+    } else {
+        None
     }
-    let mut out = normalize(name.clone(), decoded.width, decoded.height, &rgba)?;
-    out.thumb = scale_to(name, decoded.width, decoded.height, &rgba, 96).ok().map(|t| t.png);
-    Ok(out)
 }
 
 /// RGBA pixels (top-down, tightly packed) to a model-sized PNG: a box

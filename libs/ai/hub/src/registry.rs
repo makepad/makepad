@@ -208,6 +208,11 @@ pub enum Domain {
     Sections,
     /// Image -> sewing-pattern JSON.
     Garment,
+    /// Views of one scene (images, with poses and intrinsics where known)
+    /// -> per-view metric depth, rays, poses and confidence (MapAnything).
+    /// Its own domain: a job needs every view of the scene at once, so no
+    /// single-image domain can route to it.
+    Multiview,
 }
 
 impl Domain {
@@ -242,6 +247,7 @@ impl Domain {
             "notes" => Some(Domain::Notes),
             "sections" => Some(Domain::Sections),
             "garment" => Some(Domain::Garment),
+            "multiview" => Some(Domain::Multiview),
             _ => None,
         }
     }
@@ -277,15 +283,17 @@ impl Domain {
             Domain::Notes => "notes",
             Domain::Sections => "sections",
             Domain::Garment => "garment",
+            Domain::Multiview => "multiview",
         }
     }
 
-    pub const ALL: [Domain; 29] = [
+    pub const ALL: [Domain; 30] = [
         Domain::Image, Domain::Mesh, Domain::Video, Domain::Audio, Domain::Text, Domain::Speech,
         Domain::World, Domain::Matte, Domain::Depth, Domain::Body, Domain::Segment, Domain::Rig,
         Domain::Motion, Domain::Music, Domain::Paint, Domain::Edit, Domain::Upscale, Domain::Control,
         Domain::Inpaint, Domain::Enhance, Domain::Splat, Domain::Vision, Domain::Ocr, Domain::Stt,
         Domain::Beats, Domain::Stems, Domain::Notes, Domain::Sections, Domain::Garment,
+        Domain::Multiview,
     ];
 
     /// What a job of this domain takes and what it answers with: the one
@@ -318,6 +326,8 @@ impl Domain {
         static VISION: DomainIo = io("image question", IMAGE_IN, false, Answer::Text);
         static OCR: DomainIo = io("text recognition", IMAGE_IN, false, Answer::Text);
         static GARMENT: DomainIo = io("sewing pattern", IMAGE_IN, false, Answer::Json);
+        // The first view is the primary input; the wire for the other views comes with the backend.
+        static MULTIVIEW: DomainIo = io("multi-view geometry", IMAGE_IN, false, Answer::Json);
         static VIDEO: DomainIo = io("text→video or image→video", &[port("image", Image, Primary, false),
             port("last_frame", Image, Named("last_frame"), false)], false, Answer::Video);
         static ENHANCE: DomainIo = io("video→video", &[port("video", Video, Primary, true)], false, Answer::Video);
@@ -347,7 +357,7 @@ impl Domain {
             Domain::Beats => &BEATS, Domain::Stems => &STEMS, Domain::Notes => &NOTES,
             Domain::Sections => &SECTIONS, Domain::Mesh => &MESH, Domain::Paint => &PAINT,
             Domain::Rig => &RIG, Domain::Motion => &MOTION, Domain::Splat => &SPLAT,
-            Domain::World => &WORLD, Domain::Text => &TEXT,
+            Domain::World => &WORLD, Domain::Text => &TEXT, Domain::Multiview => &MULTIVIEW,
         }
     }
 
@@ -2100,6 +2110,43 @@ mod tests {
     }
 
     #[test]
+    fn multiview_pair_is_pinned_disabled_and_behind_its_licence() {
+        use crate::catalogue::{licence_gate, LicenceGate};
+        let registry = Registry::embedded().unwrap();
+        let pins = [
+            ("mapanything", "facebook/map-anything", "a1d87e9086706fb9974f3be5a3e3a0ca5401c5aa",
+             "981f060c64664dff3272b5f5a823d350abe71a2f144444db4cfc325f3ed5a3a0", LicenseRestriction::NonCommercial,
+             LicenceGate::Confirm("non-commercial".into())),
+            ("mapanything-apache", "facebook/map-anything-apache", "00f9c245bbcb60522d1ed7f9e9d88462c6e3f38a",
+             "fa06c0fdccefc5048e072c85935d5789b1e36b307f3859033c17f9dcb9fd5201", LicenseRestriction::None,
+             LicenceGate::Open),
+        ];
+        let gpu = crate::gpu::GpuInfo::default();
+        let mut caches = Vec::new();
+        for (id, repo, revision, sha256, restriction, gate) in pins {
+            let spec = registry.find(id).unwrap();
+            assert_eq!(spec.domain, Domain::Multiview, "{id}");
+            assert_eq!(spec.backend, "multiview-native", "{id}");
+            // Disabled until the native port matches the reference parity tensors.
+            assert!(!spec.available, "{id}");
+            assert!(crate::backend::model_availability(spec, &gpu, 0).unwrap_err().contains("disabled in registry"));
+            assert_eq!(spec.license.as_ref().unwrap().restriction, restriction, "{id}");
+            assert_eq!(licence_gate(spec, false), gate, "{id}");
+            assert_eq!(spec.files.len(), 1, "{id}");
+            let weights = spec.file_by_role("native-multiview").unwrap();
+            assert_eq!(weights.repo, repo);
+            assert_eq!(weights.path, "model.safetensors");
+            assert_eq!(weights.revision.as_deref(), Some(revision));
+            assert_eq!(weights.size, Some(4_914_062_480));
+            assert_eq!(weights.sha256.as_deref(), Some(sha256));
+            assert!(weights.cache_as.starts_with("multiview/"), "{}", weights.cache_as);
+            caches.push(weights.cache_as.clone());
+        }
+        // Different weights, so never one cache file.
+        assert_ne!(caches[0], caches[1]);
+    }
+
+    #[test]
     fn local_app_domains_round_trip() {
         for (text, domain) in [
             ("beats", Domain::Beats),
@@ -2107,6 +2154,7 @@ mod tests {
             ("notes", Domain::Notes),
             ("sections", Domain::Sections),
             ("garment", Domain::Garment),
+            ("multiview", Domain::Multiview),
         ] {
             assert_eq!(Domain::parse(text), Some(domain));
             assert_eq!(domain.as_str(), text);

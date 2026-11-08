@@ -77,7 +77,7 @@ pub fn transcript_json(state: &EngineState) -> String {
         .entries
         .iter()
         .map(|entry| match entry {
-            Entry::User { text } => TranscriptRow {
+            Entry::User { text, .. } => TranscriptRow {
                 kind: "user".into(),
                 text: text.clone(),
                 title: String::new(),
@@ -204,7 +204,7 @@ mod tests {
             launchable: false,
             tool_count: 1,
         });
-        state.entries.push(Entry::User { text: "/sheets.summary {}".into() });
+        state.entries.push(Entry::User { text: "/sheets.summary {}".into(), pictures: Vec::new() });
         state.entries.push(Entry::Event(EventEntry {
             sub_id: "s1".into(),
             service_label: "Sheets".into(),

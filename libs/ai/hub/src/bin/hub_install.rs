@@ -1,4 +1,6 @@
 //! Install pinned registry artifacts through the hub's normal verified downloader.
+//! A model the registry disables still gets its pinned files (verified the
+//! same way), for the native port that has to match them before it is enabled.
 use makepad_ai_hub::local::{InstallMsg, InstallState, LocalModels};
 use std::{
     collections::BTreeMap,
@@ -54,7 +56,13 @@ fn run() -> Result<(), String> {
             .acknowledge_license(&model)
             .map_err(|e| e.to_string())?;
     }
-    let handle = models.start_install(&model).map_err(|e| e.to_string())?;
+    let handle = if spec.available {
+        models.start_install(&model)
+    } else {
+        println!("{}: disabled in the registry; fetching its pinned files only", spec.id);
+        models.start_fetch(&model)
+    }
+    .map_err(|e| e.to_string())?;
     let mut files = BTreeMap::new();
     let mut last = Instant::now();
     let mut last_bytes = 0;

@@ -12,13 +12,16 @@
 //! implementation of.
 
 use crate::card::Card;
+use crate::engine::pictures::{self as kept, NewPicture, PictureWrite, SentPicture};
 use crate::engine::registry::{RegistryUp, ServiceRegistry};
+use crate::pictures::PictureRef;
 use crate::engine::{Model, ModelEvent, ModelImage, ToolDefinition};
 use crate::state::*;
 use crate::wire::*;
 use makepad_micro_serde::*;
 use makepad_strict_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 /// The base doctrine every conversation starts with.
@@ -33,6 +36,38 @@ pub const MAX_SUBSCRIPTIONS: usize = 16;
 pub const MAX_SUBSCRIPTION_QUEUE: usize = 64;
 /// Minimum time between model wakes for one conversation.
 pub const WAKE_INTERVAL_SECS: f64 = 2.0;
+/// The conversation's own service: the pictures the person sent ([`chat_tools`]).
+pub const CHAT_SERVICE: &str = "chat";
+
+/// The tools every conversation has, whatever app it is about: a turn scoped to an app keeps them.
+fn chat_tools() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "chat.pictures".into(),
+            description: "The pictures the person sent in this conversation: each one's name, its pixel size and bytes as it was dropped, and the turns (the person's lines, counted from 1) it came with. They stay with the conversation, after a restart too. You saw each only with its own line: look again with chat.picture. A tool that takes a picture takes it by this name.".into(),
+            parameters: r#"{"type":"object","properties":{}}"#.into(),
+        },
+        ToolDefinition {
+            name: "chat.picture".into(),
+            description: "Look at a picture the person sent in this conversation, by its name (chat.pictures lists them): it comes back with this result, scaled to fit. 'rect' [x0 y0 x1 y1] (fractions of its width and height from the top left) looks at that region only, at the whole picture budget: a face or a hand up close.".into(),
+            parameters: r#"{"type":"object","properties":{"name":{"type":"string"},"rect":{"type":"array","items":{"type":"number","minimum":0,"maximum":1},"minItems":4,"maxItems":4}},"required":["name"]}"#.into(),
+        },
+    ]
+}
+
+/// `chat.picture`'s `rect`: four fractions [x0 y0 x1 y1] of the picture, x0 < x1 and y0 < y1.
+fn picture_rect(v: &Value) -> Result<[f64; 4], String> {
+    let numbers: Vec<f64> = v.as_arr().unwrap_or(&[]).iter().filter_map(|n| match n {
+        Value::Int(i) => Some(*i as f64),
+        Value::F64(f) => Some(*f),
+        _ => None,
+    }).collect();
+    match numbers[..] {
+        [x0, y0, x1, y1] if numbers.iter().all(|f| (0.0..=1.0).contains(f)) && x0 < x1 && y0 < y1 => Ok([x0, y0, x1, y1]),
+        _ => Err("'rect' is [x0 y0 x1 y1]: fractions of the picture's width and height from its top left, each 0 to 1, x0 < x1 and y0 < y1".into()),
+    }
+}
+
 /// A tool result's bytes kept in a saved chat.
 const SAVED_RESULT_BYTES: usize = 2048;
 /// The earlier conversation told to the model after a restart, at most.
@@ -52,10 +87,15 @@ struct SavedRow {
     /// A tool's canonical name.
     title: String,
     text: String,
+    /// The pictures a person's line carried.
+    pictures: Option<Vec<PictureRef>>,
 }
 
+/// The line a person's pictures make on their own: the picture is the message.
+const PICTURES_ONLY: &str = "Use the attached picture as the reference.";
+
 /// What the host should do after a `pump`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum EngineEvent {
     /// The state changed; redraw.
     Changed,
@@ -64,6 +104,14 @@ pub enum EngineEvent {
     Confirm { call_id: String },
     /// Preview only: incomplete arguments never enter dispatch or the transcript.
     ToolCallPartial { call_id: String, name: String, partial_json: String },
+    /// `chat.picture` asks for a picture the person sent, or a region of it (`rect`: fractions
+    /// [x0 y0 x1 y1], [`crate::pictures::crop`]): the host reads it, fits it to the model (off
+    /// the UI thread) and answers with [`EngineCore::picture_fitted`].
+    PictureWanted { call_id: String, picture: SentPicture, rect: Option<[f64; 4]> },
+    /// A picture the person sent is to be kept: the host runs the write on its task pool
+    /// ([`PictureWrite::run`]), never on the UI thread. Until it ends the picture is read from
+    /// memory, and what needs its file waits for it ([`SentPicture::kept_path`]).
+    KeepPicture(PictureWrite),
 }
 
 struct Pending {
@@ -207,6 +255,20 @@ pub struct EngineCore {
     next_subscription: u64,
     wake_cursor: usize,
     last_wake: Option<f64>,
+    /// The pictures the person sent in this conversation, one per file, oldest first.
+    pictures: Vec<SentPicture>,
+    /// Where this conversation's pictures are kept ([`Self::keep_chat`]); `None` keeps none.
+    pictures_dir: Option<PathBuf>,
+    /// The pictures whose files are being written: one that does not write is noted.
+    writing: Vec<SentPicture>,
+    /// The person's lines so far: the turn a picture came with.
+    lines: usize,
+    /// `chat.picture` calls the host is fitting, by call id: whether each is the console's, the
+    /// picture and the region asked.
+    fitting: HashMap<String, (bool, SentPicture, Option<[f64; 4]>)>,
+    /// Events for the host from outside a pump (a picture asked for at the console), handed
+    /// over by the next pump.
+    queued: Vec<EngineEvent>,
 }
 
 impl EngineCore {
@@ -243,6 +305,12 @@ impl EngineCore {
             next_subscription: 0,
             wake_cursor: 0,
             last_wake: None,
+            pictures: Vec::new(),
+            pictures_dir: None,
+            writing: Vec::new(),
+            lines: 0,
+            fitting: HashMap::new(),
+            queued: Vec::new(),
         }
     }
 
@@ -275,7 +343,13 @@ impl EngineCore {
     /// Whether the host should keep scheduling pumps even though the model
     /// is idle (normally because a rate-limited publication is waiting).
     pub fn needs_pump(&self) -> bool {
-        self.turn_active || !self.pending.is_empty() || self.awaiting.is_some() || self.queued_message_count() != 0 || !self.waiting_lines.is_empty()
+        self.turn_active
+            || !self.pending.is_empty()
+            || !self.fitting.is_empty()
+            || !self.queued.is_empty()
+            || self.awaiting.is_some()
+            || self.queued_message_count() != 0
+            || !self.waiting_lines.is_empty()
     }
 
     /// What the provider chip shows: the choice, the rows it may switch
@@ -309,7 +383,60 @@ impl EngineCore {
             self.console(rest.trim(), now);
             return;
         }
-        self.state.push(Entry::User { text: text.to_string() });
+        self.say(text, Vec::new());
+    }
+
+    /// The person's line with the pictures they sent along: the model looks at them with it
+    /// (each fitted to its size, labelled `reference: <name>`), and they stay with the
+    /// conversation, kept on disk when it is ([`Self::keep_chat`]). The same picture sent again
+    /// is the same picture (its file is named by its hash), under its first name; another
+    /// picture under a name the conversation has is numbered apart (`keys-2.webp`). The line
+    /// ends `[attached: <names>]`. `Err` when the model cannot look at pictures: nothing is sent.
+    pub fn send_pictures(&mut self, text: &str, pictures: Vec<NewPicture>, _now: f64) -> Result<(), String> {
+        // Each picture's name here: its own if this picture was sent before, else a free one.
+        let mut names: Vec<String> = Vec::with_capacity(pictures.len());
+        for (i, picture) in pictures.iter().enumerate() {
+            let earlier = self.pictures.iter().find(|p| p.file == picture.file).map(|p| p.name.clone());
+            let earlier = earlier.or_else(|| pictures[..i].iter().position(|p| p.file == picture.file).map(|at| names[at].clone()));
+            let name = earlier.unwrap_or_else(|| {
+                kept::free_name(&picture.name, |name| self.pictures.iter().any(|p| p.name == name) || names.iter().any(|n| n == name))
+            });
+            names.push(name);
+        }
+        let images = pictures.iter().zip(&names).map(|(p, name)| ModelImage { label: format!("reference: {name}"), png: p.for_model.clone() }).collect();
+        self.model.attach_images(images)?;
+        let turn = self.lines + 1;
+        let mut refs = Vec::with_capacity(pictures.len());
+        for (picture, name) in pictures.into_iter().zip(&names) {
+            let at = match self.pictures.iter().position(|p| p.file == picture.file) {
+                Some(at) => at,
+                None => {
+                    // Its file is written on the host's task pool: the send does not wait for it.
+                    let (sent, write) = SentPicture::sent(name.clone(), picture.file, picture.width, picture.height, picture.original, self.pictures_dir.as_deref());
+                    self.keep_picture(&sent, write);
+                    self.pictures.push(sent);
+                    self.pictures.len() - 1
+                }
+            };
+            let sent = &mut self.pictures[at];
+            if sent.turns.last() != Some(&turn) {
+                sent.turns.push(turn);
+            }
+            let reference = sent.reference();
+            if !refs.contains(&reference) {
+                refs.push(reference);
+            }
+        }
+        let text = text.trim();
+        let mut line = if text.is_empty() { PICTURES_ONLY.to_string() } else { text.to_string() };
+        line.push_str(&format!("\n[attached: {}]", refs.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ")));
+        self.say(&line, refs);
+        Ok(())
+    }
+
+    /// A line of the person's in the transcript, and to the model now or at the turn's end.
+    fn say(&mut self, text: &str, pictures: Vec<PictureRef>) {
+        self.push_user(text, pictures);
         // A line typed during a turn waits for its end: it never throws away
         // what the model is working on. Stop is what ends a turn.
         if self.turn_active {
@@ -318,6 +445,16 @@ impl EngineCore {
             return;
         }
         self.start_turn(text);
+    }
+
+    fn push_user(&mut self, text: &str, pictures: Vec<PictureRef>) {
+        self.lines += 1;
+        self.state.push(Entry::User { text: text.to_string(), pictures });
+    }
+
+    /// The pictures the person sent in this conversation, one per picture, oldest first.
+    pub fn pictures(&self) -> &[SentPicture] {
+        &self.pictures
     }
 
     /// The model gets the person's line, already in the transcript.
@@ -347,16 +484,21 @@ impl EngineCore {
             .entries
             .iter()
             .filter_map(|entry| match entry {
-                Entry::User { text } => Some(SavedRow { kind: "user".into(), title: String::new(), text: text.clone() }),
+                Entry::User { text, pictures } => Some(SavedRow {
+                    kind: "user".into(),
+                    title: String::new(),
+                    text: text.clone(),
+                    pictures: (!pictures.is_empty()).then(|| pictures.clone()),
+                }),
                 Entry::Assistant { text, streaming: false } if !text.trim().is_empty() => {
-                    Some(SavedRow { kind: "assistant".into(), title: String::new(), text: text.clone() })
+                    Some(SavedRow { kind: "assistant".into(), title: String::new(), text: text.clone(), pictures: None })
                 }
                 Entry::Tool(t) => match &t.status {
                     ToolStatus::Done { outcome, text, .. } => {
                         let mut text = text.clone();
                         truncate_to_char_boundary(&mut text, SAVED_RESULT_BYTES);
                         let kind = if matches!(outcome, ToolOutcome::Ok) { "tool" } else { "tool_failed" };
-                        Some(SavedRow { kind: kind.into(), title: canonical_name(&t.service, &t.tool), text })
+                        Some(SavedRow { kind: kind.into(), title: canonical_name(&t.service, &t.tool), text, pictures: None })
                     }
                     _ => None,
                 },
@@ -366,18 +508,73 @@ impl EngineCore {
         SavedChat { version: 1, rows }.serialize_json()
     }
 
-    /// Bring back a conversation [`Self::saved_chat`] wrote: its lines show
-    /// again, and the model is told the earlier conversation with the next
-    /// line (every provider starts fresh after a restart).
-    pub fn restore_chat(&mut self, saved: &str) -> Result<(), String> {
+    /// Keep this conversation on disk: its pictures in `dir` (beside the transcript the host
+    /// writes from [`Self::saved_chat`]), and `saved`, that transcript from before a restart (a
+    /// crash, a live-patch relaunch), brought back: its lines and its pictures show again, and
+    /// the model is told the earlier conversation with the next line (every provider starts
+    /// fresh after a restart). Pictures in `dir` no line refers to (left by a crash between a
+    /// send and the transcript's write) are removed; a saved transcript that does not read
+    /// leaves them all. Call it before anything is said.
+    pub fn keep_chat(&mut self, dir: PathBuf, saved: Option<&str>) -> Result<(), String> {
+        self.pictures_dir = Some(dir.clone());
+        // Pictures sent before the conversation was kept go with it from now on.
+        for picture in self.pictures.clone() {
+            let write = picture.keep_in(&dir);
+            self.keep_picture(&picture, write);
+        }
+        if let Some(saved) = saved {
+            self.restore_chat(saved, &dir)?;
+        }
+        let keep: HashSet<&str> = self.pictures.iter().map(|p| p.file.as_str()).collect();
+        kept::sweep(&dir, &keep);
+        Ok(())
+    }
+
+    /// The host writes a picture's file ([`EngineEvent::KeepPicture`]); a write that fails is
+    /// said in the transcript.
+    fn keep_picture(&mut self, picture: &SentPicture, write: Option<PictureWrite>) {
+        if let Some(write) = write {
+            self.writing.push(picture.clone());
+            self.queued.push(EngineEvent::KeepPicture(write));
+        }
+    }
+
+    fn restore_chat(&mut self, saved: &str, dir: &Path) -> Result<(), String> {
         let chat = SavedChat::deserialize_json(saved).map_err(|e| format!("the saved chat does not read: {e:?}"))?;
-        if chat.version != 1 || chat.rows.is_empty() {
-            return Err("no saved chat".into());
+        if chat.version != 1 {
+            return Err(format!("the saved chat is version {}, not 1", chat.version));
+        }
+        // A conversation of console lines only keeps no rows: nothing comes back.
+        if chat.rows.is_empty() {
+            return Ok(());
         }
         let mut earlier = String::new();
         for row in &chat.rows {
             match row.kind.as_str() {
-                "user" => self.state.push(Entry::User { text: row.text.clone() }),
+                "user" => {
+                    let pictures = row.pictures.clone().unwrap_or_default();
+                    self.push_user(&row.text, pictures.clone());
+                    for picture in pictures {
+                        // A name no picture file has is never read: the saved chat names files in
+                        // `dir` only, never one outside it.
+                        if !kept::is_picture_file(&picture.file) {
+                            continue;
+                        }
+                        let path = dir.join(&picture.file);
+                        // A picture whose file is gone is no longer offered; its line still names it.
+                        if !path.is_file() {
+                            continue;
+                        }
+                        let at = match self.pictures.iter().position(|p| p.file == picture.file) {
+                            Some(at) => at,
+                            None => {
+                                self.pictures.push(SentPicture::restored(picture, path));
+                                self.pictures.len() - 1
+                            }
+                        };
+                        self.pictures[at].turns.push(self.lines);
+                    }
+                }
                 "assistant" => self.state.push(Entry::Assistant { text: row.text.clone(), streaming: false }),
                 "tool" | "tool_failed" => {
                     let mut line = row.text.lines().next().unwrap_or("").to_string();
@@ -485,6 +682,7 @@ impl EngineCore {
         if line.is_empty() || line == "help" {
             let mut names: Vec<String> = self.registry.tool_definitions().into_iter().map(|t| t.name).collect();
             names.push("bus.unsubscribe".into());
+            names.extend(chat_tools().into_iter().map(|t| t.name));
             let text = if names.is_empty() {
                 "no tools: no app is connected".to_string()
             } else {
@@ -540,6 +738,10 @@ impl EngineCore {
         for call_id in parked {
             self.mark_done(&call_id, &ToolResult::denied(&call_id, "cancelled"));
         }
+        let fitting: Vec<String> = self.fitting.drain().map(|(id, _)| id).collect();
+        for call_id in fitting {
+            self.mark_done(&call_id, &ToolResult::cancelled(&call_id));
+        }
         if let Some(a) = self.awaiting.take() {
             self.mark_done(&a.call_id, &ToolResult::cancelled(&a.call_id));
         }
@@ -551,6 +753,8 @@ impl EngineCore {
         if let Some(p) = self.pending.remove(call_id) {
             self.registry.send(&p.endpoint, ServiceDown::Cancel { call_id: call_id.to_string() });
             self.finish_call(call_id, ToolResult::cancelled(call_id), p.from_console);
+        } else if let Some((from_console, _, _)) = self.fitting.remove(call_id) {
+            self.finish_call(call_id, ToolResult::cancelled(call_id), from_console);
         }
     }
 
@@ -565,11 +769,22 @@ impl EngineCore {
         Some(id)
     }
 
-    /// A new conversation: same services, same provider, empty transcript.
+    /// A new conversation: same services, same provider, empty transcript. The pictures the
+    /// person sent go with the old one: their files are removed.
     pub fn clear(&mut self, now: f64) {
         self.cancel(now);
         self.allowed.clear();
         self.resumed = None;
+        // A write under way leaves no file of a picture that went with the chat.
+        for picture in self.pictures.drain(..) {
+            picture.forget();
+        }
+        self.writing.clear();
+        self.lines = 0;
+        self.queued.clear();
+        if let Some(dir) = &self.pictures_dir {
+            kept::sweep(dir, &HashSet::new());
+        }
         self.drop_subscriptions();
         self.model.reset();
         self.state.entries.clear();
@@ -748,6 +963,21 @@ impl EngineCore {
             self.state.services = services;
             self.state.touch();
         }
+        // A picture whose file did not write is said once; it stays in memory for this run.
+        let mut unkept = Vec::new();
+        self.writing.retain(|picture| match picture.kept_now() {
+            None => true,
+            Some(Ok(_)) => false,
+            Some(Err(why)) => {
+                unkept.push(why);
+                false
+            }
+        });
+        for text in unkept {
+            self.state.push(Entry::System { text });
+        }
+        // What asks the host (a picture to fit or keep), this pump's or from outside one.
+        events.append(&mut self.queued);
         if self.state.generation != before {
             events.push(EngineEvent::Changed);
         }
@@ -791,6 +1021,7 @@ impl EngineCore {
             description: "Stop one live asynchronous subscription by its sub_id.".into(),
             parameters: r#"{"type":"object","properties":{"sub_id":{"type":"string"}},"required":["sub_id"]}"#.into(),
         });
+        tools.extend(chat_tools());
         if let Err(e) = self.model.configure(&system, &tools) {
             // Never let the table drift: restart the conversation instead.
             self.model.reset();
@@ -887,7 +1118,7 @@ impl EngineCore {
             }
             ModelEvent::Rate(r) => self.state.rate = Some(r),
             ModelEvent::TurnDone { tool_calls } => {
-                if tool_calls == 0 && self.pending.is_empty() && self.parked.is_empty() {
+                if tool_calls == 0 && self.pending.is_empty() && self.fitting.is_empty() && self.parked.is_empty() {
                     self.end_turn();
                 }
             }
@@ -917,6 +1148,8 @@ impl EngineCore {
         let (app, tool) = split_name(name);
         let label = if app == "bus" {
             "Bus".into()
+        } else if app == CHAT_SERVICE {
+            "Chat".into()
         } else {
             self.registry
                 .instances_of(app)
@@ -955,6 +1188,10 @@ impl EngineCore {
         self.state.push(Entry::Tool(self.card(&call_id, &app, name, args)));
         if app == "bus" {
             self.dispatch_bus(call_id, &tool, args, from_console);
+            return None;
+        }
+        if app == CHAT_SERVICE {
+            self.dispatch_chat(call_id, &tool, args, from_console);
             return None;
         }
         if app.is_empty() || self.registry.instances_of(&app).is_empty() {
@@ -1045,6 +1282,99 @@ impl EngineCore {
         }
         self.launch(endpoint, call, from_console, now);
         None
+    }
+
+    /// The conversation's own tools: the pictures the person sent ([`chat_tools`]).
+    fn dispatch_chat(&mut self, call_id: String, tool: &str, args: &str, from_console: bool) {
+        let fields = match makepad_strict_json::parse(args.as_bytes()) {
+            Ok(Value::Obj(fields)) => fields,
+            _ => {
+                self.finish_call(&call_id, ToolResult::refused(&call_id, "arguments must be a JSON object"), from_console);
+                return;
+            }
+        };
+        let names = || Value::Arr(self.pictures.iter().map(|p| Value::Str(p.name.clone())).collect()).to_json();
+        match tool {
+            "pictures" => {
+                let rows: Vec<Value> = self
+                    .pictures
+                    .iter()
+                    .map(|p| {
+                        Value::Obj(vec![
+                            ("name".into(), Value::Str(p.name.clone())),
+                            ("width".into(), Value::Int(p.width as i64)),
+                            ("height".into(), Value::Int(p.height as i64)),
+                            ("bytes".into(), Value::Int(p.bytes as i64)),
+                            ("turns".into(), Value::Arr(p.turns.iter().map(|&t| Value::Int(t as i64)).collect())),
+                        ])
+                    })
+                    .collect();
+                let count = rows.len();
+                let text = Value::Obj(vec![("pictures".into(), Value::Arr(rows))]).to_json();
+                let note = match count {
+                    0 => "no pictures".to_string(),
+                    1 => "1 picture".to_string(),
+                    n => format!("{n} pictures"),
+                };
+                self.finish_call(&call_id, ToolResult::ok(&call_id, text, note), from_console);
+            }
+            "picture" => {
+                let wanted = fields.iter().find(|(k, _)| k == "name").and_then(|(_, v)| v.as_str()).unwrap_or("").to_string();
+                let rect = match fields.iter().find(|(k, _)| k == "rect").map(|(_, v)| picture_rect(v)).transpose() {
+                    Ok(rect) => rect,
+                    Err(why) => {
+                        self.finish_call(&call_id, ToolResult::refused(&call_id, why), from_console);
+                        return;
+                    }
+                };
+                match self.pictures.iter().rev().find(|p| p.name == wanted).cloned() {
+                    Some(picture) => {
+                        self.fitting.insert(call_id.clone(), (from_console, picture.clone(), rect));
+                        self.queued.push(EngineEvent::PictureWanted { call_id, picture, rect });
+                    }
+                    None => {
+                        let why = format!("no picture named '{wanted}' in this conversation; its pictures are {}", names());
+                        self.finish_call(&call_id, ToolResult::refused(&call_id, why), from_console);
+                    }
+                }
+            }
+            other => {
+                let why = format!("chat has no tool '{other}'; its tools are chat.pictures and chat.picture");
+                self.finish_call(&call_id, ToolResult::refused(&call_id, why), from_console);
+            }
+        }
+    }
+
+    /// The host's answer to [`EngineEvent::PictureWanted`]: the picture as a PNG fitted to the
+    /// model (within a result's picture budget), or why it could not be. A call no longer
+    /// waiting (stopped) is ignored.
+    pub fn picture_fitted(&mut self, call_id: &str, fitted: Result<Vec<u8>, String>) {
+        let Some((from_console, picture, rect)) = self.fitting.remove(call_id) else { return };
+        let result = match fitted {
+            Ok(png) => {
+                // The size it is shown at: the PNG's header says.
+                let shown = (png.len() >= 24).then(|| [u32::from_be_bytes([png[16], png[17], png[18], png[19]]), u32::from_be_bytes([png[20], png[21], png[22], png[23]])]);
+                let mut fields = vec![
+                    ("name".to_string(), Value::Str(picture.name.clone())),
+                    ("width".to_string(), Value::Int(picture.width as i64)),
+                    ("height".to_string(), Value::Int(picture.height as i64)),
+                ];
+                if let Some(rect) = rect {
+                    let [x0, y0, x1, y1] = crate::pictures::rect_pixels(picture.width, picture.height, rect);
+                    fields.push(("rect".to_string(), Value::Arr(rect.iter().map(|&f| Value::F64(f)).collect())));
+                    fields.push(("region".to_string(), Value::Arr([x0, y0, x1, y1].iter().map(|&p| Value::Int(p as i64)).collect())));
+                }
+                if let Some([w, h]) = shown {
+                    fields.push(("shown".to_string(), Value::Arr(vec![Value::Int(w as i64), Value::Int(h as i64)])));
+                }
+                let note = format!("{} · {} × {}", picture.name, picture.width, picture.height);
+                let mut result = ToolResult::ok(call_id, Value::Obj(fields).to_json(), note);
+                result.images = vec![String::from_utf8(makepad_base64::base64_encode(&png, &makepad_base64::BASE64_STANDARD)).unwrap_or_default()];
+                result
+            }
+            Err(why) => ToolResult::failed(call_id, why),
+        };
+        self.finish_call(call_id, result, from_console);
     }
 
     fn dispatch_bus(&mut self, call_id: String, tool: &str, args: &str, from_console: bool) {
@@ -1432,7 +1762,7 @@ impl EngineCore {
         }
         self.mark_done(call_id, &result);
         // The last call is over: from here on the turn waits for the model.
-        if self.state.status == Status::WaitingForTool && self.pending.is_empty() && self.parked.is_empty() && self.awaiting.is_none() {
+        if self.state.status == Status::WaitingForTool && self.pending.is_empty() && self.fitting.is_empty() && self.parked.is_empty() && self.awaiting.is_none() {
             self.state.status = Status::Thinking;
             self.model_since = None;
         }
@@ -1677,7 +2007,7 @@ mod tests {
             assert!(system.contains("Files"), "brief in the system prompt");
             assert_eq!(
                 tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
-                vec!["files.list_dir", "files.trash", "files.export", "files.open", "bus.unsubscribe"]
+                vec!["files.list_dir", "files.trash", "files.export", "files.open", "bus.unsubscribe", "chat.pictures", "chat.picture"]
             );
         }
         core.pump(0.1);
@@ -1859,7 +2189,7 @@ mod tests {
             assert_eq!(text, "what is here", "the line is the person's own");
             assert!(context.contains("# Focus") && context.contains("Folder: ~/pics"), "{context}");
         }
-        assert!(matches!(&core.state().entries.last(), Some(Entry::User { text }) if text == "what is here"));
+        assert!(matches!(&core.state().entries.last(), Some(Entry::User { text, .. }) if text == "what is here"));
         // Setting the target focused the instance the registry picks by default
         // (no focus beats a stale one): the call goes to the same one every time.
         core.pump(1.1);
@@ -1893,7 +2223,8 @@ mod tests {
         core.set_target(Some(Target { label: "Notes".into(), app: "notes".into(), context: "".into(), selection: None }));
         core.send("two", 1.0);
         core.pump(1.1);
-        assert_eq!(names(&shared.lock().unwrap()), vec!["notes.add", "bus.unsubscribe"]);
+        // The conversation's own tools stay with a target.
+        assert_eq!(names(&shared.lock().unwrap()), vec!["notes.add", "bus.unsubscribe", "chat.pictures", "chat.picture"]);
         // A new context line for the same app does not rebind.
         let configs = shared.lock().unwrap().configured.len();
         core.set_target(Some(Target { label: "Notes".into(), app: "notes".into(), context: "page 2".into(), selection: None }));
@@ -2594,5 +2925,26 @@ mod tests {
         ));
         core.pump(3.0);
         assert_eq!(model.lock().unwrap().sends.len(), 1, "the synthetic final is emitted once");
+    }
+
+    /// A saved transcript names its pictures' files: only a picture file of its own folder comes
+    /// back, never an absolute path or a `../` name that reaches outside it.
+    #[test]
+    fn a_restored_picture_is_read_from_its_folder_only() {
+        let root = std::env::temp_dir().join(format!("ai-restore-names-{}", std::process::id()));
+        let dir = root.join("chat.pictures");
+        std::fs::create_dir_all(&dir).unwrap();
+        let own = kept::picture_file(b"own", "png");
+        std::fs::write(dir.join(&own), b"own").unwrap();
+        let outside = root.join("outside.png");
+        std::fs::write(&outside, b"outside").unwrap();
+        let picture = |name: &str, file: &str| format!(r#"{{"name":"{name}","file":"{}","width":1,"height":1,"bytes":1}}"#, file.replace('\\', "\\\\"));
+        let pictures = [picture("own.png", &own), picture("absolute.png", &outside.to_string_lossy()), picture("up.png", "../outside.png")].join(",");
+        let saved = format!(r#"{{"version":1,"rows":[{{"kind":"user","title":"","text":"look","pictures":[{pictures}]}}]}}"#);
+        let (mut core, _model, _port, _e) = setup(vec![]);
+        core.keep_chat(dir.clone(), Some(saved.as_str())).unwrap();
+        let names: Vec<&str> = core.pictures().iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["own.png"], "only the folder's own picture file");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
