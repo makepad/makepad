@@ -4,6 +4,7 @@ use crate::*;
 use makepad_csg_cad as cad;
 use makepad_csg_cad::Region;
 use makepad_csg_math::{dvec3, Vec3d};
+use makepad_csg_mesh::subdiv::{catmull_clark, Levels};
 use std::collections::{HashMap, HashSet};
 
 const SANS: &[u8] = include_bytes!("../../../../widgets/resources/IBMPlexSans-SemiBold.ttf");
@@ -52,9 +53,13 @@ pub struct Evaluator {
     pub brep_chord: f64,
 }
 
+/// The chord (mm) exact bodies and cages are meshed at for print: about how far the mesh may
+/// stray from the true surface.
+pub const PRINT_CHORD: f64 = 0.05;
+
 impl Default for Evaluator {
     fn default() -> Self {
-        Evaluator { tolerance: Tolerance::default(), draft: 1.0, finest_cell: 0.25, cache: HashMap::new(), round: 0, built: 0, brep: None, brep_chord: 0.05 }
+        Evaluator { tolerance: Tolerance::default(), draft: 1.0, finest_cell: 0.25, cache: HashMap::new(), round: 0, built: 0, brep: None, brep_chord: PRINT_CHORD }
     }
 }
 
@@ -356,10 +361,11 @@ impl Evaluator {
         if self.draft.is_finite() && self.draft > 0.0 { self.draft } else { 1.0 }
     }
 
-    /// Whether the node's mesh depends on the draft (a field or a shell below it).
+    /// Whether the node's mesh depends on the draft (a field, a shell, an exact body or a cage
+    /// below it).
     fn drafted(&self, g: &Graph, id: NodeId) -> bool {
         match &g.node(id).op {
-            Op::Field { .. } | Op::Shell { .. } | Op::Brep { .. } => true,
+            Op::Field { .. } | Op::Shell { .. } | Op::Brep { .. } | Op::Cage { .. } => true,
             op => op.inputs().into_iter().any(|i| self.drafted(g, i)),
         }
     }
@@ -555,12 +561,21 @@ impl Evaluator {
                     return Err("an SDF's bounds need min below max on every axis".into());
                 }
                 let cell = cell.unwrap_or_else(|| makepad_csg_sdf::default_cell(min, max, self.finest_cell)) * self.draft_scale();
-                nonempty(makepad_csg_sdf::mesh_field(shape.field(), min, max, cell, shape.lipschitz()), "shape (nothing inside its surface)")
+                nonempty(makepad_csg_sdf::mesh_field(shape.field(), min, max, cell, shape.clearance()), "shape (nothing inside its surface)")
             }
             Op::Mesh { mesh } => Ok((**mesh).clone()),
             // `mesh` hands these to the engine before it gets here.
             Op::Brep { .. } => Err("an exact body reached the mesh builder".into()),
             Op::Links { links, sides, .. } => nonempty(links.mesh(*sides), "links (no link has three points)"),
+            // A coarser draft (live editing) takes one level fewer; a finer one (export) a
+            // finer chord.
+            Op::Cage { points, faces, levels } => {
+                let levels = match levels {
+                    Some(n) => Levels::Steps(*n),
+                    None => Levels::Chord(self.brep_chord * self.draft_scale().min(1.0)),
+                };
+                catmull_clark(&points.iter().map(|p| v3(*p)).collect::<Vec<_>>(), faces, levels, self.draft_scale() > 1.0)
+            }
         }
     }
 }

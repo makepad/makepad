@@ -20,6 +20,7 @@
 //! Corner positions come from integer grid indices only, so a corner sampled
 //! twice has the same value: the signs the cells see are consistent.
 
+use crate::lipschitz::Clearance;
 use crate::sdf::Sdf3;
 use makepad_csg_math::Vec3d;
 use makepad_csg_mesh::mesh::TriMesh;
@@ -271,9 +272,10 @@ static MESHES_BUILT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// when the box would need more than [`MAX_CELLS`] along a side). The grid has
 /// two cells of margin round the box. Triangles are wound outwards; the result
 /// is closed and edge-manifold.
-/// `lipschitz`: the field's bound ([`crate::lipschitz`]; 1 for a distance): the culling
-/// divides the value by it, so a field steeper than a distance keeps its surface bricks.
-pub fn mesh_surface(field: Arc<dyn Sdf3 + Send + Sync>, min: Vec3d, max: Vec3d, cell: f64, lipschitz: f64) -> TriMesh {
+/// `clearance`: how far the field's values prove its surface away ([`Clearance`]; a distance's
+/// value is its own radius): the culling drops a block only where its centre's value proves its
+/// whole box clear, so a field steeper than a distance keeps its surface bricks.
+pub fn mesh_surface(field: Arc<dyn Sdf3 + Send + Sync>, min: Vec3d, max: Vec3d, cell: f64, clearance: Clearance) -> TriMesh {
     MESHES_BUILT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let size = max - min;
     let extent = size.x.max(size.y).max(size.z).max(1e-9);
@@ -311,7 +313,7 @@ pub fn mesh_surface(field: Arc<dyn Sdf3 + Send + Sync>, min: Vec3d, max: Vec3d, 
         let mut next = Vec::new();
         for ((lo, hi), d) in blocks.into_iter().zip(d) {
             let half = ((0..3).map(|k| (((hi[k] - lo[k]) * BRICK) as f64 * cell).powi(2)).sum::<f64>()).sqrt() * 0.5;
-            if d.abs() > (CULL * half + cell) * lipschitz.max(1.0) {
+            if clearance.radius(d) > CULL * half + cell {
                 continue;
             }
             if (0..3).all(|k| hi[k] - lo[k] == 1) {
@@ -547,7 +549,7 @@ mod tests {
     }
 
     fn mesh(n: SdfNode, scale: f64, lo: f64, hi: f64, cell: f64) -> TriMesh {
-        mesh_surface(Arc::new(Node(n, scale)), Vec3d::new(lo, lo, lo), Vec3d::new(hi, hi, hi), cell, 1.0)
+        mesh_surface(Arc::new(Node(n, scale)), Vec3d::new(lo, lo, lo), Vec3d::new(hi, hi, hi), cell, Clearance::uniform(1.0))
     }
 
     fn at(p: [f64; 3], of: SdfNode) -> SdfNode {
@@ -577,6 +579,25 @@ mod tests {
         // A gyroid fills its box: the box's faces close it.
         let m = mesh(SdfNode::Gyroid { period: 4.0, wall: 0.6 }, 1.0, -4.0, 4.0, 0.3);
         assert!(closed(&m));
+    }
+
+    /// A flat ellipsoid's estimate overstates how deep a point lies, by up to its radii's ratio,
+    /// most in the plane of its long radii: a brick centred there reads far more than the
+    /// distance to a small ball just over its face, which no surface leads to from elsewhere.
+    /// Culled at the shape's bound, the ball is meshed as whole as with no culling at all.
+    #[test]
+    fn a_ball_over_a_flat_ellipsoid_is_meshed() {
+        let centre = [1.0, 1.0, 1.25];
+        let ball = at(centre, SdfNode::Sphere { radius: 0.5 });
+        let root = SdfNode::Combine { op: SdfOp::Union, blend: 0.0, of: vec![SdfNode::Ellipsoid { radii: [100.0, 100.0, 0.5] }, ball] };
+        let shape = crate::SdfShape { root, min: [-100.0, -100.0, -0.5], max: [100.0, 100.0, 1.75], materials: Vec::new() };
+        // the bricks next to the ellipsoid's middle plane are centred on it
+        let near = |c: Clearance| {
+            let m = mesh_surface(shape.field(), Vec3d::new(-100.0, -100.0, -1.0), Vec3d::new(100.0, 100.0, 2.0), 0.5, c);
+            m.vertices.iter().filter(|v| (**v - Vec3d::new(centre[0], centre[1], centre[2])).length() < 1.0).count()
+        };
+        let (got, all) = (near(shape.clearance()), near(Clearance::uniform(f64::INFINITY)));
+        assert!(all > 10 && got == all, "the ball over the flat ellipsoid is meshed whole: {got} of its {all} vertices at {:?}", shape.clearance());
     }
 
     #[test]

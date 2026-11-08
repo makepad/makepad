@@ -1,10 +1,30 @@
 // Port of box3d/src/timer.c (timing portion; b3Hash lives in core.rs).
 // The C version uses platform tick counters; the port uses std::time::Instant
-// anchored at first use. Ticks are nanoseconds since the anchor.
+// anchored at first use (on the web, where std has no clock, the page's
+// `js_monotonic_now`). Ticks are nanoseconds since the anchor.
 
 /// Get the absolute number of system ticks. The value is platform specific.
 pub fn get_ticks() -> u64 {
-    (makepad_platform::Cx::monotonic_now() * 1_000_000_000.0) as u64
+    (monotonic_seconds() * 1_000_000_000.0) as u64
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn monotonic_seconds() -> f64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs_f64()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn monotonic_seconds() -> f64 {
+    #[link(wasm_import_module = "env")]
+    extern "C" {
+        fn js_monotonic_now() -> f64;
+    }
+    // SAFETY: an import every Makepad web thread provides; it takes nothing
+    // and returns a number.
+    unsafe { js_monotonic_now() }
 }
 
 /// Get the milliseconds passed from an initial tick value.

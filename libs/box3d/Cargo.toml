@@ -19,5 +19,3 @@ double-precision = []
 # hull-heavy scenes (junkyard/washer). Off by default.
 unchecked-hulls = []
 
-[dependencies]
-makepad-platform = { path = "../../platform" }

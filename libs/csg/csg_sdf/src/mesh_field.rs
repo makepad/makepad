@@ -604,6 +604,45 @@ impl MeshField {
         if inside { -d } else { d }
     }
 
+    /// [`MeshField::signed64`] where it is under `cap`, else `cap`: `signed64(p).min(cap)` bit
+    /// for bit, searched only as far as the cap needs. Under a cap past the on-face reach no box
+    /// past the cap is opened: a point whose mesh box lies past it costs one box test and its
+    /// winding number, and no triangle. Under a negative cap the sign comes first: outside and on
+    /// no face is the cap.
+    pub fn signed_under(&self, p: Vec3d, cap: f64) -> f64 {
+        if cap == f64::NEG_INFINITY {
+            return cap;
+        }
+        let at = [p.x, p.y, p.z];
+        let pf = [p.x as f32, p.y as f32, p.z as f32];
+        let moved = f64s::len(f64s::sub(at, [pf[0] as f64, pf[1] as f64, pf[2] as f64]));
+        let mut near = 0;
+        if cap < 0.0 {
+            if self.winding(pf) > 0.5 {
+                // inside: under the cap where no triangle is within -cap
+                let d = self.unsigned64(at, -cap, f64::INFINITY, &mut near);
+                return if d <= -cap { cap } else { -d };
+            }
+            // outside, unless on a face: then the distance is at least 0
+            return if self.on_face(pf, 0) { self.signed64(p).min(cap) } else { cap };
+        }
+        // A surface at least `cap` from `p` is farther than the on-face reach from the f32 point:
+        // the sign is the winding number's.
+        if !(cap > self.on_reach() + moved + 2.0 * BALL_ROUNDING) || cap == f64::INFINITY {
+            return self.signed64(p).min(cap);
+        }
+        let d = self.unsigned64(at, f64::NEG_INFINITY, cap, &mut near);
+        if d < cap {
+            let clear = d - moved - BALL_ROUNDING;
+            let inside = (clear <= self.on_reach() && self.on_face(pf, near)) || self.winding(pf) > 0.5;
+            return if inside { -d } else { d };
+        }
+        if self.winding(pf) > 0.5 {
+            return -self.unsigned64(at, f64::NEG_INFINITY, f64::INFINITY, &mut near);
+        }
+        cap
+    }
+
     /// How far from a triangle a point can lie that [`on_tri`] still puts on it, many times over
     /// (mm): 1e-5 of the mesh's largest coordinate, where f32 rounding is under 1.2e-7 of it.
     fn on_reach(&self) -> f64 {
@@ -666,6 +705,8 @@ impl MeshField {
         let mut best = f64::INFINITY;
         // A triangle's distance bounds the nearest one's from the start.
         if let Some(t) = near.checked_sub(1).filter(|t| (*t as usize) < self.data.triangles.len()) {
+            #[cfg(test)]
+            work::add(1);
             let (a, b, c) = self.tri(t);
             best = f64s::len(f64s::sub(p, f64s::closest_on_tri64(p, w(a), w(b), w(c))));
             if best <= enough {
@@ -675,11 +716,15 @@ impl MeshField {
         let mut stack = NodeStack::root();
         while let Some(i) = stack.pop() {
             let n = &self.nodes[i as usize];
+            #[cfg(test)]
+            work::add(1);
             let reach = best.min(cap) + moved;
             if (Self::box_dist2(n, pf) as f64) >= reach * reach * (1.0 + 1e-6) {
                 continue;
             }
             if n.leaf {
+                #[cfg(test)]
+                work::add(u64::from(n.right - n.left));
                 for &t in &self.order[n.left as usize..n.right as usize] {
                     let (a, b, c) = self.tri(t);
                     let q = f64s::closest_on_tri64(p, w(a), w(b), w(c));
@@ -709,6 +754,20 @@ impl MeshField {
 
 /// What a ball's radius gives up for the search's rounding (mm).
 const BALL_ROUNDING: f64 = 1e-9;
+
+/// The leaf work this thread did (mesh boxes opened, triangles measured, tube pieces read): what
+/// tests count to show a read costs little.
+#[cfg(test)]
+pub(crate) mod work {
+    std::thread_local! { static DONE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+    pub(crate) fn add(n: u64) {
+        DONE.with(|d| d.set(d.get() + n));
+    }
+    /// The work since the last take.
+    pub(crate) fn take() -> u64 {
+        DONE.with(|d| d.replace(0))
+    }
+}
 
 impl MeshField {
     /// Whether ball `b`'s sign is the sign at the f32 point `w` (in f64). The sign is taken at
@@ -838,6 +897,115 @@ mod tests {
             triangles.push([q[0], q[2], q[3]]);
         }
         MeshData { positions, triangles }
+    }
+
+    /// A ball of `rings` x `segments` (radius 1): rings of quads cut in two, a fan at each pole,
+    /// counter-clockwise seen from outside.
+    fn ball(rings: u32, segments: u32) -> MeshData {
+        let mut positions = vec![[0.0, 1.0, 0.0]];
+        for i in 1..rings {
+            let phi = std::f32::consts::PI * i as f32 / rings as f32;
+            for j in 0..segments {
+                let theta = std::f32::consts::TAU * j as f32 / segments as f32;
+                positions.push([phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin()]);
+            }
+        }
+        positions.push([0.0, -1.0, 0.0]);
+        let south = positions.len() as u32 - 1;
+        let v = |i: u32, j: u32| 1 + (i - 1) * segments + j % segments;
+        let mut triangles = Vec::new();
+        for j in 0..segments {
+            triangles.push([0, v(1, j + 1), v(1, j)]);
+            for i in 1..rings - 1 {
+                triangles.push([v(i, j), v(i + 1, j + 1), v(i + 1, j)]);
+                triangles.push([v(i, j), v(i, j + 1), v(i + 1, j + 1)]);
+            }
+            triangles.push([south, v(rings - 1, j), v(rings - 1, j + 1)]);
+        }
+        MeshData { positions, triangles }
+    }
+
+    /// A capped query is the signed distance clamped from above, to the bit: on closed and open
+    /// meshes and overlapping shells, inside and out, on faces, and under caps on either side of
+    /// the value, at it, round the on-face reach, zero, infinite and not a number.
+    #[test]
+    fn a_capped_query_is_the_signed_distance_clamped_from_above_bit_for_bit() {
+        let mut twice = cube(false);
+        let n = twice.positions.len() as u32;
+        twice.positions.extend(twice.positions.clone().iter().map(|p| [p[0] + 1.0, p[1], p[2]]));
+        twice.triangles.extend(twice.triangles.clone().iter().map(|t| [t[0] + n, t[1] + n, t[2] + n]));
+        let mut checked = [0usize; 2];
+        for (name, data) in [("cube", cube(false)), ("cup", cube(true)), ("ball", ball(12, 24)), ("twice", twice)] {
+            let f = MeshField::new(data);
+            let reach = f.on_reach();
+            let mut ps = Vec::new();
+            let k = 9;
+            for i in 0..k {
+                for j in 0..k {
+                    for l in 0..k {
+                        let c = |t: usize| -3.1 + 6.2 * t as f64 / (k - 1) as f64;
+                        ps.push(Vec3d::new(c(i), c(j), c(l) + 0.013 * c(i)));
+                    }
+                }
+            }
+            // on faces and edges, and just off them
+            for off in [0.0, 0.5 * reach, 2.0 * reach, -0.5 * reach, -2.0 * reach] {
+                ps.push(Vec3d::new(1.0 + off, 0.3, 0.2));
+                ps.push(Vec3d::new(0.1, -1.0 - off, 0.4));
+                ps.push(Vec3d::new(1.0 + off, 1.0 + off, 0.25));
+                ps.push(Vec3d::new(0.6 + off, 0.8, 0.0));
+            }
+            for p in ps {
+                let d = f.signed64(p);
+                let mut caps = vec![d, d + 1e-12, d - 1e-12, d * 1.001, d * 0.999, d + 0.1, d - 0.1, d + 3.0, d - 3.0, 0.0, -0.0, reach, -reach, 3.0 * reach, -3.0 * reach, 0.5, -0.5, 2.0, -2.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN];
+                caps.extend([d.next_up(), d.next_down()]);
+                for cap in caps {
+                    let got = f.signed_under(p, cap);
+                    assert_eq!(got.to_bits(), d.min(cap).to_bits(), "{name} at {p:?} under {cap}: {got} against {d}");
+                    checked[(d < cap) as usize] += 1;
+                }
+            }
+        }
+        assert!(checked[0] > 1000 && checked[1] > 1000, "{checked:?}");
+    }
+
+    /// A point whose mesh box lies past its cap opens no box: what it costs is the same on a mesh
+    /// of 600 triangles and on one of 37 000, and a small part of an uncapped query's.
+    #[test]
+    fn a_point_past_its_cap_costs_one_box_test_and_no_triangles() {
+        let (small, big) = (MeshField::new(ball(13, 24)), MeshField::new(ball(97, 192)));
+        assert!(big.data.triangles.len() > 60 * small.data.triangles.len());
+        // 4 to 6 from the middle: past twice the root cluster's radius, so the winding number
+        // is one dipole; the cap is under the distance to the box (3 and more)
+        let mut ps = Vec::new();
+        let mut s = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        while ps.len() < 1_000 {
+            let v = Vec3d::new(rnd() * 2.0 - 1.0, rnd() * 2.0 - 1.0, rnd() * 2.0 - 1.0);
+            let l = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
+            if l > 0.1 && l <= 1.0 {
+                let r = 4.0 + 2.0 * rnd();
+                ps.push(Vec3d::new(v.x / l * r, v.y / l * r, v.z / l * r));
+            }
+        }
+        let cap = 1.5;
+        // boxes opened and triangles measured over all the points
+        let cost = |f: &dyn Fn(Vec3d) -> f64| {
+            work::take();
+            for p in &ps {
+                assert_eq!(f(*p).min(cap), cap);
+            }
+            work::take()
+        };
+        let (whole, capped, few) = (cost(&|p| big.signed64(p)), cost(&|p| big.signed_under(p, cap)), cost(&|p| small.signed_under(p, cap)));
+        let n = ps.len() as u64;
+        assert_eq!((capped, few), (n, n), "one box test a point and no triangle, on either mesh");
+        assert!(capped * 8 < whole, "capped {capped} against uncapped {whole}");
     }
 
     #[test]

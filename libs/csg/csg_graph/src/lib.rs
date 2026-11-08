@@ -15,10 +15,11 @@ pub mod edges;
 pub mod eval;
 mod hash;
 
-pub use eval::{Evaluator, Failure};
+pub use eval::{Evaluator, Failure, PRINT_CHORD};
 pub use makepad_csg_cad::{Seg, Shape, Sketch, Tolerance};
 pub use makepad_csg_cad::bool3::disjoint_tool_bounds;
 pub use makepad_csg_mesh::mesh::TriMesh;
+pub use makepad_csg_mesh::subdiv;
 
 use hash::Hasher;
 pub use makepad_csg_sdf::{SdfKernel, SdfNode, SdfOp, SdfShape};
@@ -129,8 +130,9 @@ pub enum BrepOp {
     Extrude { sketch: Sketch, plane: Plane, height: f64, both: bool },
     /// About Y: sketch u is the radius, v the height.
     Revolve { sketch: Sketch, angle: f64 },
-    /// The sketch carried along a smooth path through `path`.
-    Sweep { sketch: Sketch, path: Vec<P3> },
+    /// The sketch carried along a smooth path through `path`, `scale[i]` times its size at
+    /// `path[i]` (empty: its own size all the way).
+    Sweep { sketch: Sketch, path: Vec<P3>, scale: Vec<f64> },
     Loft { sections: Vec<LoftSection>, plane: Plane },
     /// The first input combined with every other in order.
     Boolean { mode: BoolMode },
@@ -248,6 +250,10 @@ pub enum Op {
     /// Separate links (chains, chainmail) as tubes of `sides` facets round. Their colours are
     /// paint, not shape: a fill gives each link one material.
     Links { links: Arc<makepad_csg_sdf::Links>, sides: u32 },
+    /// The Catmull-Clark surface over a closed cage of points and faces (each face's points
+    /// counter-clockwise seen from outside): `levels` steps, or (none) as many as bring it within
+    /// an exact body's chord of its limit surface.
+    Cage { points: Vec<P3>, faces: Vec<Vec<u32>>, levels: Option<u32> },
 }
 
 impl Op {
@@ -287,6 +293,7 @@ impl Op {
             Op::Field { .. } => "sdf",
             Op::Mesh { .. } => "mesh",
             Op::Links { .. } => "links",
+            Op::Cage { .. } => "cage",
             Op::Brep { .. } => "brep",
         }
     }
@@ -502,6 +509,18 @@ impl Graph {
             Op::Links { links, sides, .. } => {
                 h.bytes(&links.key());
                 h.u(*sides as u64);
+            }
+            Op::Cage { points, faces, levels } => {
+                h.u(points.len() as u64);
+                for p in points {
+                    h.p3(*p);
+                }
+                h.u(faces.len() as u64);
+                for f in faces {
+                    h.u(f.len() as u64);
+                    f.iter().for_each(|v| h.u(*v as u64));
+                }
+                h.u(levels.map_or(0, |n| n as u64 + 1));
             }
             // Debug writes every field, floats exactly; the inputs hash by their keys.
             Op::Brep { op, inputs } => {

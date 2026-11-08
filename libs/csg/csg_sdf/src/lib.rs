@@ -5,7 +5,9 @@
 // surface-following dual-contouring mesher that converts any SDF into a
 // closed TriMesh usable with the rest of the CSG stack.
 
+mod bounded;
 pub mod bounds;
+pub mod chunks;
 mod extent;
 pub mod lipschitz;
 mod combinators;
@@ -22,10 +24,14 @@ mod splash_field;
 pub mod strokes;
 pub mod surface_mesh;
 pub mod texture;
+pub mod sketches;
+pub mod tubes;
 
-pub use bounds::{changed, cull, culls_alike, deform_bounds, node_bounds, same, tight_bounds, Bounds};
+pub use bounds::{changed, cull, culls_alike, cut, deform_bounds, node_bounds, same, slopes, tight_bounds, Bounds, Cut, Slopes};
+pub use chunks::{Chunk, Chunks};
 pub use combinators::*;
-pub use extent::{shape_bottom, shape_bounds, surface_bounds, Bottom, Extent, ProofWork};
+pub use extent::{shape_bottom, shape_bounds, shape_bounds_after, surface_bounds, Bottom, Extent, ProofWork, SideProof};
+pub use lipschitz::Clearance;
 pub use links::{LinkLoop, Links};
 pub use field_mesh::{default_cell, mesh_field, sdf_to_mesh};
 pub use surface_mesh::meshes_built;
@@ -35,3 +41,5 @@ pub use shape::{distance, distance_id, distance_many, distance_slot, part_id, tr
 pub use grid::SdfGrid;
 pub use splash_field::{SdfSplashExpr, SplashPoint, GRID_INPUT, GRID_PARAM, MAX_LIFTED};
 pub use texture::{SdfTexture, TexProject};
+pub use sketches::{Form as SketchForm, SketchSolid};
+pub use tubes::{TubeCurve, Tubes};

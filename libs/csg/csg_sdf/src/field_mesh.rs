@@ -1,5 +1,6 @@
 //! Meshing a field over a box at a cell size (see [`crate::surface_mesh`]).
 
+use crate::lipschitz::Clearance;
 use crate::sdf::Sdf3;
 use crate::surface_mesh::mesh_surface;
 use makepad_csg_math::Vec3d;
@@ -19,14 +20,14 @@ pub fn default_cell(min: Vec3d, max: Vec3d, finest: f64) -> f64 {
 }
 
 /// Mesh `field` inside `min..max` with cubic cells of `cell`: closed,
-/// edge-manifold, wound outwards. `lipschitz`: the field's bound (1 for a
-/// distance, [`crate::SdfShape::lipschitz`] for a shape with kernels).
-pub fn mesh_field(field: Arc<dyn Sdf3 + Send + Sync>, min: Vec3d, max: Vec3d, cell: f64, lipschitz: f64) -> TriMesh {
-    mesh_surface(field, min, max, cell, lipschitz)
+/// edge-manifold, wound outwards. `clearance`: how far its values prove its surface away
+/// (a distance's [`Clearance::uniform`] of 1, a shape's [`crate::SdfShape::clearance`]).
+pub fn mesh_field(field: Arc<dyn Sdf3 + Send + Sync>, min: Vec3d, max: Vec3d, cell: f64, clearance: Clearance) -> TriMesh {
+    mesh_surface(field, min, max, cell, clearance)
 }
 
 /// Mesh `sdf` inside `min..max` with `2^depth` cells along the box's largest side.
 pub fn sdf_to_mesh(sdf: impl Sdf3 + Send + Sync + 'static, min: Vec3d, max: Vec3d, depth: usize) -> TriMesh {
     let cell = extent(min, max) / (1u64 << depth.min(20)) as f64;
-    mesh_surface(Arc::new(sdf), min, max, cell, 1.0)
+    mesh_surface(Arc::new(sdf), min, max, cell, Clearance::uniform(1.0))
 }

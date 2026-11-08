@@ -4,33 +4,45 @@
 //! never to the farthest solid point a search happened to find.
 //!
 //! A side is proven by columns across it: the region beyond a column's top is covered by balls
-//! the field proves empty (a value `v` at a point clears the ball of radius `v / L` round it,
-//! `L` the field's Lipschitz bound). A ball centred on a column's axis clears the whole column
+//! the field proves empty (a value `v` at a point clears the ball of radius `v / L` round it, `L`
+//! how steep the field can be there outside its solid: along any line out of the ball the value
+//! falls from `v` to 0 before it reaches solid, all of it at positive values). A ball centred on a column's axis clears the whole column
 //! over the height its radius spans past the column's half-diagonal; centred farther out along
 //! the side's direction it reaches a flat side across a wider column, so a flat side costs its
 //! area over the square root of its gap, not over its square. A column the balls cannot take
 //! down first looks down its axis for solid (a witness: the side's goal rises with it), then
-//! splits. A side ends `tol` past a solid point once every column is down to three quarters of a
-//! `tol` past it: at most `tol` past the solid, and never past the box it started from (an exact
-//! tree box's side stays exact). Each side also reports its witness: the solid reaches at least there, so
-//! a part rests on its bottom's witness, its box's bottom at most what the proof left open below.
+//! splits. A side ends [`END`] of `tol` past a solid point once every column is down to three
+//! quarters of a `tol` past it: under `tol` past the solid (by far more than a frame's arithmetic
+//! rounds), and never past the box it started from (an exact tree box's side stays exact). Each
+//! side also reports its witness: the solid reaches at least there, so a part rests on its
+//! bottom's witness, its box's bottom at most what the proof left open below.
 //! A field steeper than a distance (`L > 1`) closes a flat side only by balls of radius about
-//! `tol / (L - 1)`, so the bottom is proven first and with the largest budget. Most such sides
-//! are a distance all the same, a kernel only carving what lies inside it: the tree without its
-//! kernels ([`outer_tree`]) clears those with its own slope of 1, and the field is read only near
-//! the solid. A tree whose kernels are grids' reads ([`crate::SdfKernel::grid_read`]) has no balls
-//! to spend on those: the grids' samples bound their solid outright ([`known_side`]).
+//! `tol / (L - 1)`. Most of such a field is far less steep all the same, a kernel only making the
+//! values near it and an ellipsoid's estimate steep only well off its surface: a ball has the
+//! radius its value has at the slope the pieces of its box prove at the values under it, all a
+//! line out of it passes before the surface ([`crate::Chunks::slopes_in`]; the field's
+//! measured `L` where a kernel or a sculpt leaves it
+//! unbounded), the tree without its kernels ([`outer_tree`]) clears what lies far from them at
+//! its own, and where the balls stall, the tree cut to a slab under the column
+//! ([`crate::bounds::cut`]) proves the slab empty when its value there is positive. A tree
+//! whose kernels are grids' reads ([`crate::SdfKernel::grid_read`]) has no balls to spend on
+//! those: the grids' samples bound their solid outright ([`known_side`]).
 
 use crate::bounds::{blend_reach, grow, meet, out_of, rot, tight_bounds, Bounds};
 use crate::lipschitz::{has_grid_read, has_kernel};
 use crate::sdf::Sdf3;
-use crate::shape::{distance, Compiled, SdfNode, SdfOp, SdfShape, P3};
+use crate::shape::{distance, SdfNode, SdfOp, SdfShape, P3};
 use crate::strokes::Strokes;
 use makepad_csg_math::Vec3d;
 use std::collections::BinaryHeap;
 
 /// Row-major affine `p' = m * p`.
 pub type Affine = [[f64; 4]; 3];
+
+/// How far past its witness a closed side ends, in `tol`: past the three quarters its columns
+/// came down to, so at least an eighth past the solid, and short of `tol` by more than any
+/// rounding, so a gap a closed proof leaves never reads as more than `tol`.
+const END: f64 = 0.875;
 
 /// Field evaluations one side may spend; past them it answers with what it proved (the highest
 /// column top left), a bound looser than `tol` but still one.
@@ -45,6 +57,12 @@ const BOTTOM_BUDGET: usize = 4 * BUDGET;
 /// what a field read does, and past that a side turned from the grid's axes (an axis's closes in
 /// a piece) gets tighter than its cells' sizes only for a price no edit should pay.
 const WALK_SHARE: usize = 64;
+
+/// How far past a ball's height over its column a read is taken, in column widths: a ball steps
+/// a column down by at most its radius, and one column steps on again for one more read, so a
+/// value past this costs reads of pieces no nearer step needs (a tree's reads stop at it:
+/// [`Sdf3::distance_bounded`]).
+const CAP: f64 = 128.0;
 
 /// Work spent by the ball proof of a side. Grid sample walks are separate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -78,11 +96,22 @@ pub struct Extent {
     pub max: P3,
     /// Per side, the solid point its proof found nearest it (a side whose proof found none: the
     /// farthest any found), so the solid spans at least this box. A side's gap to `min..max` is
-    /// what its proof left open: at most `tol` where it closed. A side no change reaches keeps
+    /// what its proof left open: under `tol` where it closed. A side no change reaches keeps
     /// both to the bit. None: no solid point found.
     pub found: Option<(P3, P3)>,
     /// Ball proof work for the negative and positive sides of each axis.
     pub work: [[ProofWork; 3]; 2],
+    /// Each side's proof, for the extent of a later shape no change of which reaches it
+    /// ([`shape_bounds_after`]).
+    pub proofs: [[Option<SideProof>; 3]; 2],
+}
+
+/// One side's proof as an extent keeps it: its direction (unit, the shape's own frame), how far
+/// along it the solid reaches at most and the solid point that reaches farthest.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SideProof {
+    dn: P3,
+    side: Side,
 }
 
 /// The axis-aligned box, in the frame `m` maps into, that holds the solid (`field <= 0`) inside
@@ -93,8 +122,9 @@ pub fn surface_bounds(field: &dyn Sdf3, min: P3, max: P3, lipschitz: f64, m: &Af
     let lip = lipschitz.max(1.0);
     let region = (min, max);
     let centres = (lip > 1.0).then_some(region);
-    let f = |p: P3| field.distance(v3(p));
-    frame_bounds(m, |dn, budget| Prover { f: &f, outer: None, lip, clip: region, centres, tol, budget }.side(dn, f64::NEG_INFINITY))
+    let hints = std::cell::RefCell::new(crate::sdf::Hints::default());
+    let f = |p: P3, cap: f64| field.distance_bounded(v3(p), -cap, cap, &mut hints.borrow_mut());
+    frame_bounds(m, |dn, budget| Prover { f: &f, outer: None, lip: &|| lip, slope: None, clip: region, centres, empty: None, tol, budget }.side(dn, f64::NEG_INFINITY))
 }
 
 /// [`surface_bounds`] of a shape's solid: each side from the shape's tree box ([`tight_bounds`];
@@ -104,6 +134,55 @@ pub fn surface_bounds(field: &dyn Sdf3, min: P3, max: P3, lipschitz: f64, m: &Af
 /// stroke over the solid point that bounds it proves it again.
 pub fn shape_bounds(shape: &SdfShape, m: &Affine, tol: f64) -> Option<Extent> {
     frame_bounds(m, shape_sides(shape, tol))
+}
+
+/// [`shape_bounds`], each side taken from an earlier proof that no difference of the shapes
+/// reaches (`before`: earlier shapes and their extents under the same `m`). Where the region the
+/// two solids may differ in ([`crate::bounds::changed`], and where their boxes differ) lies wholly
+/// under a side's bound and off its witness, no solid point of the new shape lies past the bound
+/// (none of the old did, and the new are the old's there) and the witness is solid still: the side
+/// is the old proof to the bit, at no reads. Every other side is proven anew.
+pub fn shape_bounds_after(shape: &SdfShape, m: &Affine, tol: f64, before: &[(&SdfShape, &Extent)]) -> Option<Extent> {
+    // each earlier shape's region, the first time a side asks it
+    let tight = std::cell::OnceCell::new();
+    let regions: Vec<std::cell::OnceCell<Vec<Bounds>>> = before.iter().map(|_| std::cell::OnceCell::new()).collect();
+    let mut prove = shape_sides(shape, tol);
+    frame_bounds(m, |dn, budget| {
+        let kept = before.iter().zip(&regions).find_map(|((old, e), region)| {
+            let p = e.proofs.iter().flatten().flatten().find(|p| p.dn == dn)?;
+            let w = p.side.witness?;
+            let region = region.get_or_init(|| moved(old, shape, &tight));
+            region.iter().all(|r| support(r, dn) <= p.side.bound && !inside(r, w)).then_some(Side { work: ProofWork::default(), ..p.side })
+        });
+        kept.or_else(|| prove(dn, budget))
+    })
+}
+
+/// Boxes that hold every point where the solids of `old` and `new` may differ: the trees' changed
+/// subtrees ([`crate::bounds::changed`]) and, where the shapes' boxes differ, the slabs between
+/// their sides (the solid counts inside the box) inside both trees' boxes ([`tight_bounds`]):
+/// off the changed subtrees a point is solid in both trees or in neither, and each tree's box
+/// holds its solid, so only a point inside both can count in one shape's box and not the other's.
+/// (`tight`: the new tree's box, made once for every earlier shape.)
+fn moved(old: &SdfShape, new: &SdfShape, tight: &std::cell::OnceCell<Option<Bounds>>) -> Vec<Bounds> {
+    let mut region: Vec<Bounds> = crate::bounds::changed(&old.root, &new.root).into_iter().collect();
+    if old.min == new.min && old.max == new.max {
+        return region;
+    }
+    let hull: Bounds = (std::array::from_fn(|k| old.min[k].min(new.min[k])), std::array::from_fn(|k| old.max[k].max(new.max[k])));
+    let Some(held) = [tight_bounds(&old.root), *tight.get_or_init(|| tight_bounds(&new.root))].into_iter().flatten().try_fold(hull, |b, t| meet(&b, &t)) else {
+        return region;
+    };
+    for k in 0..3 {
+        for (a, b) in [(old.min[k], new.min[k]), (old.max[k], new.max[k])] {
+            let mut slab = held;
+            (slab.0[k], slab.1[k]) = (slab.0[k].max(a.min(b)), slab.1[k].min(a.max(b)));
+            if a != b && slab.0[k] < slab.1[k] {
+                region.push(slab);
+            }
+        }
+    }
+    region
 }
 
 /// The bottom bound and solid witness in `m`, identical to [`shape_bounds`]' bottom side.
@@ -124,7 +203,7 @@ pub fn shape_bottom(shape: &SdfShape, m: &Affine, tol: f64) -> Option<Bottom> {
 }
 
 fn shape_sides(shape: &SdfShape, tol: f64) -> impl FnMut(P3, usize) -> Option<Side> + '_ {
-    let lip = std::cell::OnceCell::new();
+    let reads = std::cell::OnceCell::new();
     let within = (shape.min, shape.max);
     move |dn, budget| {
         // A tree its grids' samples bound has its side from them: no proof could close it for less.
@@ -134,12 +213,66 @@ fn shape_sides(shape: &SdfShape, tol: f64) -> impl FnMut(P3, usize) -> Option<Si
             }
             let top = k.top.min(support(&clip_of(&shape.root, &within), dn));
             return Some(match k.seed {
-                Some((s, p)) if s + 0.75 * tol >= top => Side { bound: (s + tol).min(top.max(s)), witness: Some(p), work: k.work },
+                Some((s, p)) if s + 0.75 * tol >= top => Side { bound: (s + END * tol).min(top.max(s)), witness: Some(p), work: k.work },
                 seed => Side { bound: top, witness: seed.map(|(_, p)| p), work: k.work },
             });
         }
-        let lip = *lip.get_or_init(|| shape.lipschitz().max(1.0));
-        node_side(&shape.root, within, lip, (lip > 1.0).then_some(within), dn, tol, budget)
+        let r: &Reads = reads.get_or_init(|| Reads::of_shape(shape));
+        node_side(&shape.root, r, within, &|| r.lip(), r.steep().then_some(within), dn, tol, budget)
+    }
+}
+
+/// A tree's reads for its sides' proofs, made once for all of them: the tree and its
+/// [`outer_tree`] in chunks over its box and a quarter round it ([`crate::Chunks`]: the many reads
+/// near a side make their values from only the pieces near it, bit for bit the tree's), and the
+/// bound on its slope outside its solid where its chunks prove none.
+struct Reads {
+    field: std::sync::Arc<crate::chunks::Chunks>,
+    outer: Option<crate::chunks::Chunks>,
+    /// The bound, at least 1, where the tree's pieces prove one over the chunks' box; None where
+    /// a piece proves none (a kernel, a sculpt): then measured over `measured` through the chunks,
+    /// the first time a ball needs it ([`Reads::lip`]).
+    proven: Option<f64>,
+    measured: Bounds,
+    lip: std::sync::OnceLock<f64>,
+}
+
+impl Reads {
+    /// `proven` the bound its pieces prove over the chunks' box, if any.
+    fn new(n: &SdfNode, within: &Bounds, proven: impl FnOnce(&Bounds) -> Option<f64>, measured: Bounds) -> Reads {
+        let clip = clip_of(n, within);
+        let region = grow(clip, 0.25 * extent(&clip));
+        let field = std::sync::Arc::new(chunked(n, region));
+        let proven = proven(&region);
+        // a tree without kernels is its own outer tree
+        let outer = (proven.map_or(true, |l| l > 1.0) && has_kernel(n)).then(|| outer_tree(n)).flatten().map(|t| chunked(&t, region));
+        Reads { field, outer, proven, measured, lip: std::sync::OnceLock::new() }
+    }
+
+    /// A tree's own: what its pieces prove outside its solid over the chunks' box, or measured over
+    /// `measured` through the chunks where a piece proves nothing (a kernel, a sculpt).
+    fn of_tree(n: &SdfNode, within: &Bounds, measured: Bounds) -> Reads {
+        Reads::new(n, within, |region| Some(crate::bounds::slopes(n, region).outside).filter(|s| s.is_finite()).map(|s| s.max(1.0)), measured)
+    }
+
+    /// How steep the field can be outside its solid where its chunks prove no slope.
+    fn lip(&self) -> f64 {
+        self.proven.unwrap_or_else(|| {
+            *self.lip.get_or_init(|| {
+                let f: std::sync::Arc<dyn Sdf3 + Send + Sync> = self.field.clone();
+                crate::lipschitz::measure(&f, v3(self.measured.0), v3(self.measured.1))
+            })
+        })
+    }
+
+    /// Whether the field may be steeper than a distance (a measured bound is: at least 1.1).
+    fn steep(&self) -> bool {
+        self.proven.map_or(true, |l| l > 1.0)
+    }
+
+    /// A shape's, measured over its box.
+    fn of_shape(shape: &SdfShape) -> Reads {
+        Reads::of_tree(&shape.root, &(shape.min, shape.max), (shape.min, shape.max))
     }
 }
 
@@ -175,10 +308,12 @@ fn known_side(n: &SdfNode, dn: P3, ceiling: f64, tol: f64, budget: usize, to_roo
         inside.then_some((z, p))
     };
     if !has_kernel(n) {
-        // a distance: its own proof, which its slope of 1 closes in a few reads
-        let f = |p: P3| distance(n, v3(p));
-        let prover = Prover { f: &f, outer: None, lip: 1.0, clip: tight_bounds(n)?, centres: None, tol, budget };
-        return Some(prover.side(dn, f64::NEG_INFINITY).map_or(Known { top: f64::NEG_INFINITY, seed: None, work: ProofWork::default() }, |s| Known { top: s.bound, seed: s.witness.and_then(seed), work: s.work }));
+        // its own proof, through its chunks at the slopes they prove: a distance's of 1 closes in
+        // a few reads
+        let clip = tight_bounds(n)?;
+        let reads = Reads::of_tree(n, &clip, clip);
+        let side = node_side(n, &reads, clip, &|| reads.lip(), reads.steep().then_some(clip), dn, tol, budget);
+        return Some(side.map_or(Known { top: f64::NEG_INFINITY, seed: None, work: ProofWork::default() }, |s| Known { top: s.bound, seed: s.witness.and_then(seed), work: s.work }));
     }
     let higher = |a: Option<(f64, P3)>, b: Option<(f64, P3)>| match (a, b) {
         (Some(x), Some(y)) => Some(if y.0 > x.0 { y } else { x }),
@@ -229,8 +364,10 @@ fn known_side(n: &SdfNode, dn: P3, ceiling: f64, tol: f64, budget: usize, to_roo
         SdfNode::Combine { op: SdfOp::Intersection, of, .. } => {
             let mut all = Known { top: ceiling, seed: None, work: ProofWork::default() };
             let (plain, read): (Vec<&SdfNode>, Vec<&SdfNode>) = of.iter().partition(|c| !has_kernel(c));
-            // a smooth maximum is at least either operand, so past one's ball nothing is left
-            let cleared = |p: P3, r: f64| clear(p, r) || plain.iter().any(|c| distance(c, v3(p)) > r);
+            // a smooth maximum is at least either operand, so past one's ball (at its slope outside
+            // it) nothing is left
+            let slopes: Vec<f64> = plain.iter().map(|c| crate::bounds::slopes_anywhere(c).outside.max(1.0)).collect();
+            let cleared = |p: P3, r: f64| clear(p, r) || plain.iter().zip(&slopes).any(|(c, s)| distance(c, v3(p)) > r * s);
             for c in plain.iter().chain(&read) {
                 let k = known_side(c, dn, all.top, tol, budget, to_root, solid, &cleared)?;
                 all = Known { top: all.top.min(k.top), seed: higher(all.seed, k.seed), work: all.work.add(k.work) };
@@ -239,7 +376,9 @@ fn known_side(n: &SdfNode, dn: P3, ceiling: f64, tol: f64, budget: usize, to_roo
         }
         // A cut only takes away: deep inside one nothing is left.
         SdfNode::Combine { op: SdfOp::Difference, of, .. } => {
-            let cleared = |p: P3, r: f64| clear(p, r) || of[1..].iter().any(|c| !has_kernel(c) && -distance(c, v3(p)) > r);
+            // (at its slope inside it: none deep inside an ellipsoid, whose estimate jumps at its centre)
+            let cuts: Vec<(&SdfNode, f64)> = of[1..].iter().filter(|c| !has_kernel(c)).map(|c| (c, crate::bounds::slopes_anywhere(c).inside.max(1.0))).collect();
+            let cleared = |p: P3, r: f64| clear(p, r) || cuts.iter().any(|(c, s)| -distance(c, v3(p)) > r * s);
             known_side(&of[0], dn, ceiling, tol, budget, to_root, solid, &cleared)
         }
         _ => None,
@@ -254,6 +393,7 @@ fn frame_bounds(m: &Affine, mut side: impl FnMut(P3, usize) -> Option<Side>) -> 
     // each side's witness, and the box of all of them
     let mut sides = [[None; 3]; 2];
     let mut work = [[ProofWork::default(); 3]; 2];
+    let mut proofs = [[None; 3]; 2];
     let mut all: Option<(P3, P3)> = None;
     for (axis, sign) in [(2, -1.0), (2, 1.0), (0, -1.0), (0, 1.0), (1, -1.0), (1, 1.0)] {
         let d = [m[axis][0], m[axis][1], m[axis][2]];
@@ -264,8 +404,10 @@ fn frame_bounds(m: &Affine, mut side: impl FnMut(P3, usize) -> Option<Side>) -> 
             hi[axis] = m[axis][3];
             continue;
         }
-        let s = side(d.map(|x| sign * x / len), if sign < 0.0 && axis == 2 { BOTTOM_BUDGET } else { BUDGET })?;
+        let dn = d.map(|x| sign * x / len);
+        let s = side(dn, if sign < 0.0 && axis == 2 { BOTTOM_BUDGET } else { BUDGET })?;
         work[(sign > 0.0) as usize][axis] = s.work;
+        proofs[(sign > 0.0) as usize][axis] = Some(SideProof { dn, side: s });
         let at = sign * s.bound * len + m[axis][3];
         if sign > 0.0 { hi[axis] = at } else { lo[axis] = at }
         if let Some(w) = s.witness {
@@ -275,11 +417,11 @@ fn frame_bounds(m: &Affine, mut side: impl FnMut(P3, usize) -> Option<Side>) -> 
         }
     }
     let found = all.map(|(a, b)| (std::array::from_fn(|k| sides[0][k].unwrap_or(a[k])), std::array::from_fn(|k| sides[1][k].unwrap_or(b[k]))));
-    Some(Extent { min: lo, max: hi, found, work })
+    Some(Extent { min: lo, max: hi, found, work, proofs })
 }
 
 /// One side of a solid along a unit direction.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Side {
     /// No solid point reaches past this along the direction.
     bound: f64,
@@ -290,26 +432,47 @@ struct Side {
     work: ProofWork,
 }
 
-/// Side `dn` of node `n`'s solid (`within`: where a node without a tree box has it).
-fn node_side(n: &SdfNode, within: Bounds, lip: f64, centres: Option<Bounds>, dn: P3, tol: f64, budget: usize) -> Option<Side> {
-    // Cache transform matrices for the many reads of a proof; Compiled keeps the scalar
-    // evaluator's arithmetic order, so every distance and witness stays bit-identical.
-    let field = Compiled::new(n);
-    let f = |p: P3| field.distance(v3(p));
-    let tree = (lip > 1.0).then(|| outer_tree(n)).flatten().map(|t| Compiled::new(&t));
-    let g = tree.as_ref().map(|t| move |p: P3| t.distance(v3(p)));
-    let outer = g.as_ref().map(|g| g as &dyn Fn(P3) -> f64);
+/// Side `dn` of node `n`'s solid (`within`: where a node without a tree box has it), read through
+/// `reads` (made for `n`).
+fn node_side(n: &SdfNode, reads: &Reads, within: Bounds, lip: &dyn Fn() -> f64, centres: Option<Bounds>, dn: P3, tol: f64, budget: usize) -> Option<Side> {
+    // one stream of nearby reads each, the side's
+    let hints = std::cell::RefCell::new(crate::sdf::Hints::default());
+    let f = |p: P3, cap: f64| reads.field.distance_bounded(v3(p), -cap, cap, &mut hints.borrow_mut());
+    // the outer tree's ball: its value over its slope outside its solid round the point (none
+    // where its chunks prove none)
+    let outer_hints = std::cell::RefCell::new(crate::sdf::Hints::default());
+    let g = reads.outer.as_ref().map(|t| {
+        let outer_hints = &outer_hints;
+        move |p: P3, cap: f64| {
+            let v = t.distance_bounded(v3(p), -cap, cap, &mut outer_hints.borrow_mut());
+            if v <= 0.0 {
+                return v;
+            }
+            let s = t.slopes_in(&(p.map(|x| x - v), p.map(|x| x + v)), v).outside;
+            if s.is_finite() {
+                v / s.max(1.0)
+            } else {
+                f64::NEG_INFINITY
+            }
+        }
+    });
+    let outer = g.as_ref().map(|g| g as &dyn Fn(P3, f64) -> f64);
+    let slope = |b: &Bounds, reach: f64| reads.field.slopes_in(b, reach).outside;
     // A field steeper than a distance is read only inside `within`, so a side starts no farther
     // out: no ball could bring it in from past there.
     let readable = |b: Bounds| centres.map_or(Some(b), |c| meet(&b, &c));
-    let whole = || Prover { f: &f, outer, lip, clip: readable(clip_of(n, &within))?, centres, tol, budget }.side(dn, f64::NEG_INFINITY);
+    let whole = || {
+        let clip = readable(clip_of(n, &within))?;
+        let empty = |b: &Bounds| slab_empty(|m| reads.field.above(m), &clip, b);
+        Prover { f: &f, outer, lip, slope: Some(&slope), clip, centres, empty: Some(&empty), tol, budget }.side(dn, f64::NEG_INFINITY)
+    };
     let SdfNode::Sculpt { strokes, of } = n else {
         return whole();
     };
     // Raising adds to the solid only within its tubes' reach and lowering takes away only within
     // its own: outside them the unsculpted solid stays, so its side holds while its witness is
     // out of every lowering's reach.
-    let base = match node_side(of, within, lip, centres, dn, tol, budget) {
+    let base = match node_side(of, &Reads::new(of, &within, |_| Some(lip()), within), within, lip, centres, dn, tol, budget) {
         Some(b) if b.witness.is_some_and(|w| !lowered(strokes, w, tol)) => Some(b),
         None => None,
         Some(_) => return whole(),
@@ -321,11 +484,24 @@ fn node_side(n: &SdfNode, within: Bounds, lip: f64, centres: Option<Bounds>, dn:
     if support(&raised, dn) <= floor {
         return base;
     }
-    match (Prover { f: &f, outer, lip, clip: raised, centres, tol, budget }.side(dn, floor)) {
+    let empty = |b: &Bounds| slab_empty(|m| reads.field.above(m), &raised, b);
+    match (Prover { f: &f, outer, lip, slope: Some(&slope), clip: raised, centres, empty: Some(&empty), tol, budget }.side(dn, floor)) {
         // the base's witness is solid still, should the raised proof have found none
         Some(s) if s.bound > floor => Some(Side { witness: s.witness.or(base.and_then(|b| b.witness)), ..s }),
         _ => base,
     }
+}
+
+/// `n` read in chunks of `region` ([`crate::Chunks`]): the proof's many reads near a side make
+/// their values from only the pieces near it, bit for bit the tree's.
+fn chunked(n: &SdfNode, region: Bounds) -> crate::chunks::Chunks {
+    let volume = (0..3).map(|k| region.1[k] - region.0[k]).product::<f64>();
+    crate::chunks::Chunks::new(std::sync::Arc::new(n.clone()), region, (volume / 16384.0).cbrt())
+}
+
+/// The longest side of `b`.
+fn extent(b: &Bounds) -> f64 {
+    (0..3).map(|k| b.1[k] - b.0[k]).fold(0.0, f64::max)
 }
 
 /// Whether a lowering stroke (or a crease) of `strokes` can have taken solid away at `p`.
@@ -430,25 +606,48 @@ fn outer_tree(n: &SdfNode) -> Option<SdfNode> {
 
 /// The proof of one side over a field cut to a box.
 struct Prover<'a> {
-    f: &'a dyn Fn(P3) -> f64,
-    /// [`outer_tree`]'s field: at most `f`, of slope 1, and readable anywhere.
-    outer: Option<&'a dyn Fn(P3) -> f64>,
-    /// The field's Lipschitz bound (at least 1: the cut's box is a distance).
-    lip: f64,
+    /// The field's value at a point, clamped to a cap (past it a read proves no more than the
+    /// cap: its sign is kept).
+    f: &'a dyn Fn(P3, f64) -> f64,
+    /// The radius [`outer_tree`]'s field clears at a point (its value, clamped to the cap, over
+    /// its slope there): its field is at most `f`, and readable anywhere.
+    outer: Option<&'a dyn Fn(P3, f64) -> f64>,
+    /// How steep the field can be outside its solid where `slope` proves no bound (at least 1:
+    /// the cut's box is a distance), asked only where a ball needs it.
+    lip: &'a dyn Fn() -> f64,
+    /// How steep the field can be in a box at the values from 0 to a reach (infinite: no bound
+    /// but `lip`): a ball clears its value over the slope of the box it lies in at the values
+    /// under it, all a line out of it passes before the surface. None: `lip` everywhere.
+    slope: Option<&'a dyn Fn(&Bounds, f64) -> f64>,
     /// The solid that counts: the field's inside this box.
     clip: Bounds,
     /// Where the field's value may centre a ball (None: anywhere); elsewhere only the box's
     /// distance does.
     centres: Option<Bounds>,
+    /// Whether the field is proven above 0 everywhere in a box ([`slab_empty`]: its tree's
+    /// bounds there), counted as `SLAB_COST` evaluations.
+    empty: Option<&'a dyn Fn(&Bounds) -> bool>,
     tol: f64,
     /// Field evaluations it may spend.
     budget: usize,
 }
 
+/// What a slab's bounds cost in evaluations: a tree's bounds over a box read each of its pieces
+/// once, about what a few points of its chunks do.
+const SLAB_COST: usize = 4;
+
+/// Whether a tree holds no solid in box `b` inside `clip`: `above`, its bounds over their common
+/// box ([`crate::Chunks::above`]), are above 0. A box a flat side's cutter makes, or any piece
+/// whose value its formula bounds over a box, is proven empty however near the side it comes,
+/// where a ball proves only what a point's value reaches.
+fn slab_empty(above: impl Fn(&Bounds) -> bool, clip: &Bounds, b: &Bounds) -> bool {
+    meet(b, clip).map_or(true, |m| above(&m))
+}
+
 impl Prover<'_> {
-    /// The field cut to the box: its solid is the field's inside the box.
-    fn value(&self, p: P3) -> f64 {
-        (self.f)(p).max(box_distance(&self.clip, p))
+    /// The field cut to the box, clamped to `cap`: its solid is the field's inside the box.
+    fn value(&self, p: P3, cap: f64) -> f64 {
+        (self.f)(p, cap).max(box_distance(&self.clip, p))
     }
 
     /// The most `dn · p` (unit `dn`) reaches over the solid, proven past `floor` only: a side at
@@ -475,9 +674,15 @@ impl Prover<'_> {
         let scale = (0..3).map(|k| hi[k] - lo[k]).fold(0.0f64, f64::max).max(1e-9);
         // the radius a value of slope 1 clears, and one of the field's, a little short for the rounding
         let clear = |v: f64| v * (1.0 - 1e-9) - scale * 1e-12;
-        let ball = |v: f64| clear(v / self.lip);
+        // a ball's radius by the slope round it outside the solid, `lip` where none is proven
+        let radius = |c: P3, v: f64| -> f64 {
+            // the ball lies in the box of side 2 v about its centre
+            let local = self.slope.filter(|_| v > 0.0).map_or(f64::INFINITY, |slope| slope(&(c.map(|x| x - v), c.map(|x| x + v)), v));
+            v / if local.is_finite() { local.max(1.0) } else { (self.lip)().max(1.0) }
+        };
+        let ball = |c: P3, v: f64| clear(radius(c, v));
         // a side is done once every column is down to this past the best solid point: the side
-        // then ends `tol` past that point, at least a quarter `tol` past the solid
+        // then ends `END` of `tol` past that point
         let near = 0.75 * self.tol;
         let mut best: Option<(f64, P3)> = None;
         let goal = |best: &Option<(f64, P3)>| {
@@ -514,25 +719,27 @@ impl Prover<'_> {
                 }
                 let z = col.top + lam;
                 let c = at(col.a, col.b, z);
+                let cap = lam + CAP * rho;
                 // The outer tree first: past the column's reach it answers alone, without a kernel.
                 // Nearer the solid the field may clear farther, and only it finds solid.
                 let limit = self.outer.map_or(f64::NEG_INFINITY, |g| {
                     evals += 1;
-                    g(c).max(box_distance(&self.clip, c))
+                    g(c, cap).max(box_distance(&self.clip, c))
                 });
                 let r = if limit > rho {
                     clear(limit)
                 } else if self.centres.map_or(true, |b| inside(&b, c)) {
-                    let val = self.value(c);
+                    let val = self.value(c, cap);
                     evals += 1;
                     if val <= 0.0 {
                         // solid at the column's top
                         raise(&mut best, z, c);
                         break;
                     }
-                    ball(val).max(clear(limit))
+                    ball(c, val).max(clear(limit))
                 } else {
-                    ball(box_distance(&self.clip, c)).max(clear(limit))
+                    // past the box nothing counts: its distance clears at its own slope of 1
+                    clear(box_distance(&self.clip, c)).max(clear(limit))
                 };
                 if r > rho && z - (r * r - rho * rho).sqrt() < low {
                     low = z - (r * r - rho * rho).sqrt();
@@ -540,6 +747,37 @@ impl Prover<'_> {
                 }
                 if low <= goal(&best) || col.top - low >= rho || (i > 0 && r < lam) {
                     break;
+                }
+            }
+            // Where the balls stall, slabs under the column its tree proves empty: first all of
+            // it down to the goal (a flat side closes on a witness so), then twice as deep each
+            // while they hold.
+            if let Some(empty) = self.empty.filter(|_| col.top - low < rho && low > goal(&best)) {
+                let slab = |z0: f64, z1: f64| -> Bounds {
+                    let (mut b0, mut b1) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+                    for c in 0..8 {
+                        let p = at(col.a + if c & 1 == 0 { -col.ha } else { col.ha }, col.b + if c & 2 == 0 { -col.hb } else { col.hb }, if c & 4 == 0 { z0 } else { z1 });
+                        for k in 0..3 {
+                            b0[k] = b0[k].min(p[k]);
+                            b1[k] = b1[k].max(p[k]);
+                        }
+                    }
+                    (b0, b1)
+                };
+                let floor = goal(&best);
+                evals += SLAB_COST;
+                if empty(&slab(floor, low)) {
+                    low = floor;
+                } else {
+                    let mut h = rho.max(near);
+                    while low - h > floor && evals < self.budget {
+                        evals += SLAB_COST;
+                        if !empty(&slab(low - h, low)) {
+                            break;
+                        }
+                        low -= h;
+                        h *= 2.0;
+                    }
                 }
             }
             if low <= goal(&best) {
@@ -557,13 +795,13 @@ impl Prover<'_> {
             let mut z = low;
             while z > stop && evals < self.budget {
                 let c = at(col.a, col.b, z);
-                let val = self.value(c);
+                let val = self.value(c, CAP * rho.max(near));
                 evals += 1;
                 if val <= 0.0 {
                     raise(&mut best, z, c);
                     break;
                 }
-                z -= (val / self.lip).max(0.125 * self.tol);
+                z -= radius(c, val).max(0.125 * self.tol);
             }
             if low <= goal(&best) {
                 continue;
@@ -589,7 +827,7 @@ impl Prover<'_> {
             (_, Some(top)) if top <= floor => Side { bound: floor, witness: None, work },
             (best, Some(top)) => Side { bound: top, witness: best.map(|b| b.1), work },
             // never past the box's own side, which holds the solid as it is
-            (Some((s, p)), None) if s + near >= floor => Side { bound: (s + self.tol).min(hi[2]), witness: Some(p), work },
+            (Some((s, p)), None) if s + near >= floor => Side { bound: (s + END * self.tol).min(hi[2]), witness: Some(p), work },
             (_, None) if floor > f64::NEG_INFINITY => Side { bound: floor, witness: None, work },
             (None, None) => return None,
             (Some(_), None) => unreachable!("a witness under the floor leaves the floor finite"),
@@ -603,14 +841,14 @@ mod tests {
 
     #[test]
     fn an_exhausted_side_keeps_its_open_bound_and_solid_witness() {
-        let f = |p: P3| 5.0 - p[2];
+        let f = |p: P3, cap: f64| (5.0 - p[2]).clamp(-cap, cap);
         let clip = ([-10.0, -10.0, 0.0], [10.0, 10.0, 10.0]);
-        let s = Prover { f: &f, outer: None, lip: 2.0, clip, centres: Some(clip), tol: 0.01, budget: 128 }
+        let s = Prover { f: &f, outer: None, lip: &|| 2.0, slope: None, clip, centres: Some(clip), empty: None, tol: 0.01, budget: 128 }
             .side([0.0, 0.0, -1.0], f64::NEG_INFINITY).expect("a bottom");
         let w = s.witness.expect("a solid witness");
         assert!(s.work.budget_exhausted, "this small budget must leave the flat side open");
         assert!(s.work.evaluations >= 128, "report the work spent");
-        assert!(f(w) <= 0.0, "the witness must be solid");
+        assert!(f(w, f64::INFINITY) <= 0.0, "the witness must be solid");
         assert!(-s.bound <= 5.0, "the bound must contain the flat bottom");
         assert!(w[2] + s.bound > 0.01, "the open interval must remain visible");
     }
@@ -647,10 +885,10 @@ mod tests {
     fn a_side_past_where_the_field_may_be_read_ends() {
         let root = SdfNode::Box { size: [20.0; 3], radius: 0.0 };
         let within = ([-8.0; 3], [8.0; 3]);
-        let side = node_side(&root, within, 1.4, Some(within), [0.0, 0.0, 1.0], 0.01, 5_000).expect("a solid");
+        let side = node_side(&root, &Reads::new(&root, &within, |_| Some(1.4), within), within, &|| 1.4, Some(within), [0.0, 0.0, 1.0], 0.01, 5_000).expect("a solid");
         assert!(side.bound <= 8.0 && side.bound >= 7.9, "{side:?}");
-        let f = |p: P3| distance(&root, v3(p));
-        let past = Prover { f: &f, outer: None, lip: 1.4, clip: ([-10.0; 3], [10.0; 3]), centres: Some(within), tol: 0.01, budget: 5_000 };
+        let f = |p: P3, cap: f64| distance(&root, v3(p)).clamp(-cap, cap);
+        let past = Prover { f: &f, outer: None, lip: &|| 1.4, slope: None, clip: ([-10.0; 3], [10.0; 3]), centres: Some(within), empty: None, tol: 0.01, budget: 5_000 };
         assert!(past.side([0.0, 0.0, 1.0], f64::NEG_INFINITY).is_some_and(|s| s.bound <= 10.0));
     }
 
@@ -727,6 +965,9 @@ mod tests {
         let (min, max) = crate::bounds::node_bounds(&root).expect("bounded");
         let shape = SdfShape { root, min, max, materials: Vec::new() };
         assert!(shape.lipschitz() > 1.2, "steeper than a distance");
+        // the proof's own reads of its slope, through its chunks (measured once a ball needs it)
+        reads.swap(0, std::sync::atomic::Ordering::Relaxed);
+        Reads::of_shape(&shape).lip();
         let measuring = reads.swap(0, std::sync::atomic::Ordering::Relaxed);
         let e = shape_bounds(&shape, &I, 0.01).expect("a solid");
         let proving = reads.load(std::sync::atomic::Ordering::Relaxed) - measuring;
@@ -734,6 +975,72 @@ mod tests {
         assert!((0..3).all(|k| lo[k] - e.min[k] <= 0.01 && e.max[k] - hi[k] <= 0.01), "open: {:?} {:?} found {lo:?} {hi:?}", e.min, e.max);
         assert!(proving < 5_000, "{proving} kernel reads");
         holds(&shape, e.min, e.max, 2.3, 0.37);
+    }
+
+    /// Twice a capsule's distance: a kernel twice as steep as a distance.
+    struct SteepLeg;
+    impl Sdf3 for SteepLeg {
+        fn distance(&self, p: Vec3d) -> f64 {
+            let y = p.y.clamp(3.0, 27.0);
+            2.0 * ((p.x - 4.5).hypot(p.z).hypot(p.y - y) - 2.1)
+        }
+    }
+
+    /// Feet of ellipsoids blended with a steep kernel's leg and carved flat by a box's top, as a
+    /// figure stands: the bottom closes on the carved flat, within `tol` of it, though the field
+    /// is steeper than a distance.
+    #[test]
+    fn a_carved_flat_bottom_closes_under_a_steep_kernel() {
+        let leg = SdfNode::Kernel(crate::shape::SdfKernel { key: 7, field: std::sync::Arc::new(SteepLeg), splash: None, bounds: Some(([2.0, 0.0, -3.0], [7.0, 30.0, 3.0])), solid: None });
+        let foot = |x: f64, z: f64, r: [f64; 3]| at([x, 2.0, z], SdfNode::Ellipsoid { radii: r });
+        let feet = SdfNode::Combine { op: SdfOp::Union, blend: 2.0, of: vec![foot(7.0, -9.0, [6.0, 3.8, 6.5]), foot(9.5, 1.0, [8.5, 3.2, 13.0]), foot(16.0, 11.0, [3.6, 3.0, 4.2])] };
+        let body = SdfNode::Combine { op: SdfOp::Union, blend: 1.5, of: vec![feet, leg] };
+        let root = SdfNode::Combine { op: SdfOp::Difference, blend: 0.2, of: vec![body, at([0.0, -4.7, 0.0], SdfNode::Box { size: [80.0, 10.0, 80.0], radius: 0.0 })] };
+        let (min, max) = crate::bounds::node_bounds(&root).expect("bounded");
+        let shape = SdfShape { root, min, max, materials: Vec::new() };
+        assert!(shape.lipschitz() > 1.5, "steeper than a distance");
+        // the frame stands Y up
+        let m: Affine = [[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, -1.0, 0.0], [0.0, 1.0, 0.0, 0.0]];
+        let tol = 0.01;
+        let b = shape_bottom(&shape, &m, tol).expect("a bottom");
+        let w = b.witness.expect("a solid point");
+        assert!(!b.work.budget_exhausted && b.work.evaluations < 20_000, "{b:?}");
+        assert!(b.bound <= 0.3 && b.bound >= 0.3 - tol && w >= 0.3 && w - b.bound <= tol, "{b:?}");
+    }
+
+    /// A figure as a modeller makes one, standing Y up: feet of ellipsoids blended with a steep
+    /// kernel's legs and carved flat, a tapered torso, a skirt of sixty blended lumps, arms of
+    /// capsules and a head, all in one smooth union. Its six sides close within `tol` of the
+    /// solid, none on its budget, for a few thousand reads each.
+    #[test]
+    fn a_figure_with_a_steep_kernel_closes_every_side_for_few_reads() {
+        let leg = SdfNode::Kernel(crate::shape::SdfKernel { key: 7, field: std::sync::Arc::new(SteepLeg), splash: None, bounds: Some(([2.0, 0.0, -3.0], [7.0, 30.0, 3.0])), solid: None });
+        let foot = |x: f64, z: f64, r: [f64; 3]| at([x, 2.0, z], SdfNode::Ellipsoid { radii: r });
+        let feet = SdfNode::Combine { op: SdfOp::Union, blend: 2.0, of: vec![foot(7.0, -9.0, [6.0, 3.8, 6.5]), foot(9.5, 1.0, [8.5, 3.2, 13.0]), foot(-7.0, -9.0, [6.0, 3.8, 6.5]), foot(-9.5, 1.0, [8.5, 3.2, 13.0])] };
+        let lower = SdfNode::Combine { op: SdfOp::Difference, blend: 0.2, of: vec![SdfNode::Combine { op: SdfOp::Union, blend: 1.5, of: vec![feet, leg] }, at([0.0, -4.7, 0.0], SdfNode::Box { size: [80.0, 10.0, 80.0], radius: 0.0 })] };
+        let torso = at([0.0, 48.0, 0.0], SdfNode::deform(crate::shape::SdfDeform::Taper { rate: -0.02 }, SdfNode::Box { size: [19.0, 22.0, 14.0], radius: 6.0 }));
+        let skirt = SdfNode::Combine {
+            op: SdfOp::Union,
+            blend: 1.0,
+            of: (0..60).map(|i| {
+                let a = i as f64 * 2.399_963;
+                at([14.0 * a.cos(), 22.0 + 0.25 * i as f64, 14.0 * a.sin()], SdfNode::Ellipsoid { radii: [4.0, 3.0, 3.5] })
+            }).collect(),
+        };
+        let arm = |s: f64| SdfNode::Capsule { a: [s * 10.0, 56.0, 0.0], b: [s * 24.0, 36.0, 3.0], radius: 2.0 };
+        let head = at([0.0, 80.0, 0.0], SdfNode::Ellipsoid { radii: [20.0, 19.0, 17.0] });
+        let root = SdfNode::Combine { op: SdfOp::Union, blend: 0.8, of: vec![lower, torso, skirt, arm(1.0), arm(-1.0), head] };
+        let (min, max) = crate::bounds::node_bounds(&root).expect("bounded");
+        let shape = SdfShape { root, min, max, materials: Vec::new() };
+        let m: Affine = [[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, -1.0, 0.0], [0.0, 1.0, 0.0, 0.0]];
+        let tol = 0.01;
+        let e = shape_bounds(&shape, &m, tol).expect("a solid");
+        let (lo, hi) = e.found.expect("solid points");
+        let reads: usize = e.work.iter().flatten().map(|w| w.evaluations).sum();
+        assert!(e.work.iter().flatten().all(|w| !w.budget_exhausted), "{:?}", e.work);
+        assert!((0..3).all(|k| lo[k] - e.min[k] <= tol && e.max[k] - hi[k] <= tol), "open: {:?} {:?} found {lo:?} {hi:?}", e.min, e.max);
+        assert!((e.min[2] - 0.3).abs() <= tol, "stands on its carved flat: {}", e.min[2]);
+        assert!(reads < 60_000, "{reads} reads");
     }
 
     /// A 6 mm cube as an f32 kernel computes it (points rounded to f32, f32 arithmetic).
@@ -823,6 +1130,90 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A flat ellipsoid body with a ball for an arm, the arm grown: the five sides the arm stays
+    /// short of keep their bounds and witnesses to the bit at no reads, and the side it reaches
+    /// is proven anew, as a fresh proof proves it, past no solid of a dense sample and within
+    /// `tol` of the farthest.
+    #[test]
+    fn an_edit_reproves_only_the_sides_it_reaches() {
+        let figure = |arm: f64| body_and_ball(0.0, [18.0, 0.0, 0.0], arm);
+        let (old, new) = (figure(3.0), figure(3.5));
+        let after = reproves_only(&old, &new, (1, 0));
+        // the farthest solid of a dense sample over the arm's end
+        let f = new.field();
+        let mut far = f64::NEG_INFINITY;
+        for i in 0..=200 {
+            for j in 0..=60 {
+                for k in 0..=60 {
+                    let p = Vec3d::new(21.0 + 0.0025 * i as f64, -1.5 + 0.05 * j as f64, -1.5 + 0.05 * k as f64);
+                    if f.distance(p) <= 0.0 {
+                        far = far.max(p.x);
+                    }
+                }
+            }
+        }
+        assert!(far <= after.max[0] && after.max[0] <= far + 0.01 + 0.0025, "the arm's side {} holds the farthest solid sampled {far} within tol", after.max[0]);
+    }
+
+    /// The body with a ball blended on for a foot, the foot grown: it moves the bottom and the
+    /// shape's box with it, and no other side. The blend reaches a step's width round the foot
+    /// (not the bottom's slab across the box, nor past the body's narrow sides), so the other
+    /// five sides keep their proofs to the bit, and the bottom closes on a dense sample.
+    #[test]
+    fn a_grown_foot_reproves_only_the_bottom() {
+        let figure = |foot: f64| body_and_ball(1.0, [0.0, -7.0, 0.0], foot);
+        let (old, new) = (figure(2.0), figure(2.5));
+        assert!(new.min[1] < old.min[1], "the box grew down with the foot");
+        let after = reproves_only(&old, &new, (0, 1));
+        let f = new.field();
+        let mut low = f64::INFINITY;
+        for i in 0..=400 {
+            for j in 0..=40 {
+                for k in 0..=40 {
+                    let p = Vec3d::new(-1.0 + 0.05 * j as f64, -9.75 + 0.0025 * i as f64, -1.0 + 0.05 * k as f64);
+                    if f.distance(p) <= 0.0 {
+                        low = low.min(p.y);
+                    }
+                }
+            }
+        }
+        assert!(after.min[1] <= low && low <= after.min[1] + 0.01 + 0.0025, "the foot's side {} holds the lowest solid sampled {low} within tol", after.min[1]);
+    }
+
+    /// A flat ellipsoid body and a ball at `at` in a union of `blend`, in the tree's box.
+    fn body_and_ball(blend: f64, at: [f64; 3], radius: f64) -> SdfShape {
+        let ball = SdfNode::Transform { at, rotate: [0.0; 3], scale: 1.0, of: Box::new(SdfNode::Sphere { radius }) };
+        let root = SdfNode::Combine { op: SdfOp::Union, blend, of: vec![SdfNode::Ellipsoid { radii: [10.0, 6.0, 4.0] }, ball] };
+        let (min, max) = crate::bounds::node_bounds(&root).expect("bounded");
+        SdfShape { root, min, max, materials: Vec::new() }
+    }
+
+    /// `new`'s extent after `old`'s: side `reached` (end, axis) proven anew as a fresh proof
+    /// proves it, every other kept from `old`'s to the bit at no reads; the box holds `new`.
+    fn reproves_only(old: &SdfShape, new: &SdfShape, reached: (usize, usize)) -> Extent {
+        let before = shape_bounds(old, &I, 0.01).expect("a solid");
+        let after = shape_bounds_after(new, &I, 0.01, &[(old, &before)]).expect("a solid");
+        let fresh = shape_bounds(new, &I, 0.01).expect("a solid");
+        let side = |e: &Extent, s: usize, a: usize| if s == 0 { e.min[a] } else { e.max[a] };
+        // a side's bound and witness, to the bit
+        let proof = |e: &Extent, s: usize, a: usize| e.proofs[s][a].map(|p| (p.dn.map(f64::to_bits), p.side.bound.to_bits(), p.side.witness.map(|w| w.map(f64::to_bits))));
+        let (rs, ra) = reached;
+        for s in 0..2 {
+            for a in 0..3 {
+                if (s, a) == reached {
+                    assert!(side(&after, s, a).to_bits() == side(&fresh, s, a).to_bits() && after.proofs[s][a] == fresh.proofs[s][a], "the edited side {s} {a} is proven as a fresh proof proves it");
+                    assert!(proof(&after, s, a) != proof(&before, s, a), "and differs from the old one");
+                    assert!(after.work[s][a].evaluations > 0, "and read anew");
+                } else {
+                    assert!(side(&after, s, a).to_bits() == side(&before, s, a).to_bits() && proof(&after, s, a) == proof(&before, s, a), "side {s} {a} kept: {} of {} (edited {rs} {ra})", side(&after, s, a), side(&before, s, a));
+                    assert!(after.work[s][a].evaluations == 0, "side {s} {a} read nothing");
+                }
+            }
+        }
+        holds(new, after.min, after.max, 0.25, 0.37);
+        after
     }
 
     /// Sculpted skins (raised, lowered and creased by random strokes, some over the foot and

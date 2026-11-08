@@ -118,6 +118,29 @@ fn a_field_meshes_inside_its_bounds() {
     assert!(coarse.triangles.len() < m.triangles.len());
 }
 
+/// A cage takes one level fewer at a live-editing draft, at its steps or at its chord, and
+/// the draft is part of its cache key.
+#[test]
+fn a_cage_drafts_one_level_fewer() {
+    let points = vec![[-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [1.0, 1.0, -1.0], [-1.0, 1.0, -1.0], [-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [1.0, 1.0, 1.0], [-1.0, 1.0, 1.0]];
+    let faces = vec![vec![0, 3, 2, 1], vec![4, 5, 6, 7], vec![0, 1, 5, 4], vec![2, 3, 7, 6], vec![1, 2, 6, 5], vec![0, 4, 7, 3]];
+    // Each level quadruples the quads: six faces, two triangles each.
+    let tris = |levels: u32| 12 * 4usize.pow(levels);
+    let mut g = Graph::new();
+    let steps = g.push(Op::Cage { points: points.clone(), faces: faces.clone(), levels: Some(3) }).unwrap();
+    let chord = g.push(Op::Cage { points, faces, levels: None }).unwrap();
+    // At a 0.03 chord the cube takes three levels, its points 0.012 from the limit after them
+    // and 0.048 after two.
+    let mut e = Evaluator::new();
+    e.brep_chord = 0.03;
+    assert_eq!(e.mesh(&g, chord, None).unwrap().triangles.len(), tris(3));
+    assert_eq!(e.mesh(&g, steps, None).unwrap().triangles.len(), tris(3));
+    e.draft = 2.0;
+    e.begin();
+    assert_eq!(e.mesh(&g, steps, None).unwrap().triangles.len(), tris(2));
+    assert_eq!(e.mesh(&g, chord, None).unwrap().triangles.len(), tris(2));
+}
+
 #[test]
 fn analytic_shapes_mesh_without_a_vm() {
     let shape = SdfShape {

@@ -18,6 +18,13 @@ pub trait Sdf3 {
         self.distance(p).clamp(lower, upper)
     }
 
+    /// [`Sdf3::distance_bounded`] at many points, one stream of queries in order.
+    fn distance_many_bounded(&self, ps: &[Vec3d], lower: f64, upper: f64, out: &mut [f64], hints: &mut Hints) {
+        for (p, o) in ps.iter().zip(out.iter_mut()) {
+            *o = self.distance_bounded(*p, lower, upper, hints);
+        }
+    }
+
     /// The distances at many points (a field that runs as a kernel answers them in one call).
     fn distance_many(&self, ps: &[Vec3d], out: &mut [f64]) {
         for (p, o) in ps.iter().zip(out.iter_mut()) {
@@ -95,6 +102,9 @@ impl<T: Sdf3 + ?Sized> Sdf3 for &T {
     fn distance_bounded(&self, p: Vec3d, lower: f64, upper: f64, hints: &mut Hints) -> f64 {
         (**self).distance_bounded(p, lower, upper, hints)
     }
+    fn distance_many_bounded(&self, ps: &[Vec3d], lower: f64, upper: f64, out: &mut [f64], hints: &mut Hints) {
+        (**self).distance_many_bounded(ps, lower, upper, out, hints)
+    }
     fn distance_many(&self, ps: &[Vec3d], out: &mut [f64]) {
         (**self).distance_many(ps, out)
     }
@@ -110,6 +120,9 @@ impl Sdf3 for Box<dyn Sdf3> {
     fn distance_bounded(&self, p: Vec3d, lower: f64, upper: f64, hints: &mut Hints) -> f64 {
         (**self).distance_bounded(p, lower, upper, hints)
     }
+    fn distance_many_bounded(&self, ps: &[Vec3d], lower: f64, upper: f64, out: &mut [f64], hints: &mut Hints) {
+        (**self).distance_many_bounded(ps, lower, upper, out, hints)
+    }
     fn distance_many(&self, ps: &[Vec3d], out: &mut [f64]) {
         (**self).distance_many(ps, out)
     }
@@ -124,6 +137,9 @@ impl Sdf3 for Box<dyn Sdf3 + Send + Sync> {
     }
     fn distance_bounded(&self, p: Vec3d, lower: f64, upper: f64, hints: &mut Hints) -> f64 {
         (**self).distance_bounded(p, lower, upper, hints)
+    }
+    fn distance_many_bounded(&self, ps: &[Vec3d], lower: f64, upper: f64, out: &mut [f64], hints: &mut Hints) {
+        (**self).distance_many_bounded(ps, lower, upper, out, hints)
     }
     fn distance_many(&self, ps: &[Vec3d], out: &mut [f64]) {
         (**self).distance_many(ps, out)

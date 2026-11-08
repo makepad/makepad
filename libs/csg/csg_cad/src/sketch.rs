@@ -95,6 +95,34 @@ impl Sketch {
         Sketch { shapes }
     }
 
+    /// The sketch `f` times its size, about its origin.
+    pub fn scaled(&self, f: f64) -> Sketch {
+        let p = |a: &P2| [a[0] * f, a[1] * f];
+        let seg = |s: &Seg| match s {
+            Seg::Line(a) => Seg::Line(p(a)),
+            Seg::Rel(a) => Seg::Rel(p(a)),
+            Seg::H(d) => Seg::H(d * f),
+            Seg::V(d) => Seg::V(d * f),
+            Seg::Polar { len, deg } => Seg::Polar { len: len * f, deg: *deg },
+            Seg::ArcThrough { through, to } => Seg::ArcThrough { through: p(through), to: p(to) },
+            Seg::ArcRadius { to, r, large } => Seg::ArcRadius { to: p(to), r: r * f, large: *large },
+            Seg::Tangent(a) => Seg::Tangent(p(a)),
+            Seg::Spline(points) => Seg::Spline(points.iter().map(p).collect()),
+            Seg::Fillet(r) => Seg::Fillet(r * f),
+            Seg::Chamfer(d) => Seg::Chamfer(d * f),
+        };
+        let shape = |s: &Shape| match s {
+            Shape::Rect { center, size, corner, chamfer } => Shape::Rect { center: p(center), size: p(size), corner: corner * f, chamfer: chamfer * f },
+            Shape::Circle { center, r } => Shape::Circle { center: p(center), r: r * f },
+            Shape::Ellipse { center, rx, ry } => Shape::Ellipse { center: p(center), rx: rx * f, ry: ry * f },
+            Shape::Slot { a, b, r } => Shape::Slot { a: p(a), b: p(b), r: r * f },
+            Shape::Regular { center, r, sides, deg } => Shape::Regular { center: p(center), r: r * f, sides: *sides, deg: *deg },
+            Shape::Polygon { points, fillet } => Shape::Polygon { points: points.iter().map(p).collect(), fillet: fillet * f },
+            Shape::Path { start, segs } => Shape::Path { start: p(start), segs: segs.iter().map(seg).collect() },
+        };
+        Sketch { shapes: self.shapes.iter().map(shape).collect() }
+    }
+
     pub fn loops(&self, tol: &Tolerance) -> Result<Vec<Loop>, String> {
         self.shapes.iter().enumerate().map(|(i, s)| shape_loop(s, tol).map_err(|e| format!("shape {i}: {e}"))).collect()
     }

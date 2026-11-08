@@ -494,8 +494,8 @@ impl Worker {
                 ops::check_solid(&b, "revolve")?;
                 Ok(b)
             }
-            BrepOp::Sweep { sketch, path } => {
-                let b = ops::sweep(&mut self.kernel, sketch, path)?;
+            BrepOp::Sweep { sketch, path, scale } => {
+                let b = ops::sweep(&mut self.kernel, sketch, path, scale)?;
                 ops::check_solid(&b, "sweep")?;
                 Ok(b)
             }

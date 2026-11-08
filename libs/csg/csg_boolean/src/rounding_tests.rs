@@ -61,7 +61,7 @@ fn meshed_dome_with_flush_columns() {
         at([0.0, -20.0, 0.0], SdfNode::Box { size: [400.0, 40.0, 200.0], radius: 0.0 }),
     ] };
     let shape = SdfShape { root: node, min: [-81.0, -9.0, -7.5], max: [-69.0, 9.0, 7.5], materials: vec![] };
-    let mut mesh = mesh_field(shape.field(), dvec3(-81.0, -9.0, -7.5), dvec3(-69.0, 9.0, 7.5), 0.25, shape.lipschitz());
+    let mut mesh = mesh_field(shape.field(), dvec3(-81.0, -9.0, -7.5), dvec3(-69.0, 9.0, 7.5), 0.25, shape.clearance());
     closed(&mesh);
     let hemisphere = 2.0*PI*6.0*9.0*7.5/3.0;
     assert!((mesh_volume(&mesh)-hemisphere).abs()<hemisphere*0.01);

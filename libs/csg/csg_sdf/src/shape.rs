@@ -8,7 +8,7 @@
 //! [`SdfKernel`] is a Splash `fn(p)` compiled by the kernel compiler: `key` is
 //! its program identity and `field` the compiled field.
 
-use crate::sdf::Sdf3;
+use crate::sdf::{Hints, Sdf3};
 use makepad_csg_math::Vec3d;
 use std::sync::Arc;
 
@@ -100,6 +100,10 @@ pub enum SdfNode {
     Mesh(Arc<crate::mesh_field::MeshField>),
     /// Separate links (chains, chainmail): closed polylines swept by one radius, each in its own slot.
     Links(Arc<crate::links::Links>),
+    /// Smooth tubes through points, each point with its own radius ([`crate::tubes`]).
+    Tubes(Arc<crate::tubes::Tubes>),
+    /// A sketch extruded or revolved ([`crate::sketches`]).
+    Sketch(Arc<crate::sketches::SketchSolid>),
     /// `of` in material `slot` of [`SdfShape::materials`] (0 is the default);
     /// the innermost Material wins. Slots through the other nodes: see
     /// [`distance_slot`].
@@ -242,13 +246,19 @@ impl SdfNode {
         use SdfNode::*;
         let kernel = |k: &SdfKernel| k.splash.as_ref().is_some_and(|s| s.stopped());
         match self {
-            Sphere { .. } | Box { .. } | Cylinder { .. } | Torus { .. } | Capsule { .. } | Ellipsoid { .. } | Gyroid { .. } | Mesh(_) | Links(_) => false,
+            Sphere { .. } | Box { .. } | Cylinder { .. } | Torus { .. } | Capsule { .. } | Ellipsoid { .. } | Gyroid { .. } | Mesh(_) | Links(_) | Tubes(_) | Sketch(_) => false,
             Kernel(k) => kernel(k),
             Combine { of, .. } => of.iter().any(SdfNode::loop_stopped),
             Material { within, of, .. } => of.loop_stopped() || within.as_deref().is_some_and(SdfNode::loop_stopped),
             Texture { tex, of } => kernel(&tex.kernel) || of.loop_stopped(),
             Shell { of, .. } | Round { of, .. } | Transform { of, .. } | Instance { of, .. } | Bone { of, .. } | Deform { of, .. } | Id { of, .. } | Sculpt { of, .. } => of.loop_stopped(),
         }
+    }
+
+    /// The node as a field: [`distance`] and [`distance_many`] at its points, bit for bit, and
+    /// read only as far as bounds need ([`Sdf3::distance_bounded`]).
+    pub fn field(&self) -> Arc<dyn Sdf3 + Send + Sync> {
+        Arc::new(Compiled::new(self))
     }
 
     /// `of` warped by `deform`, with its Lipschitz bound.
@@ -477,6 +487,14 @@ impl Out {
                 self.u8(18);
                 l.key().iter().for_each(|b| self.u8(*b));
             }
+            SdfNode::Tubes(t) => {
+                self.u8(21);
+                t.key().iter().for_each(|b| self.u8(*b));
+            }
+            SdfNode::Sketch(s) => {
+                self.u8(22);
+                s.key().iter().for_each(|b| self.u8(*b));
+            }
             SdfNode::Sculpt { strokes, of } => {
                 self.u8(19);
                 self.u64(strokes.shape_key());
@@ -520,7 +538,7 @@ impl SdfShape {
 
     /// The shape as a field.
     pub fn field(&self) -> Arc<dyn Sdf3 + Send + Sync> {
-        Arc::new(Compiled::new(&self.root))
+        self.root.field()
     }
 
     /// This shape sculpted by a strokes log's shape strokes (in its own frame): its solid under
@@ -545,10 +563,14 @@ impl SdfShape {
 
 /// The field evaluator owns its matrices. The public tree remains editable and its
 /// canonical encoding unchanged; constructing another field compiles its current tree.
-/// Batched kernels keep their vectorized path.
+/// Batched kernels keep their vectorized path. The leaves read under bounds are their own
+/// ([`crate::bounded`]): a mesh, numbered for its hints ([`Hints::part`]), and tubes with no
+/// fillet; a combination knows which of its operands read under bounds.
 pub(crate) enum Compiled {
     Leaf(SdfNode),
-    Combine(SdfOp, f64, Vec<Compiled>),
+    Mesh(Arc<crate::mesh_field::MeshField>, usize),
+    Tubes(Arc<crate::tubes::Tubes>),
+    Combine(SdfOp, f64, Vec<Compiled>, Vec<bool>),
     Shell(f64, Box<Compiled>),
     Round(f64, Box<Compiled>),
     Transform { at: P3, rotation: [[f64; 3]; 3], scale: f64, of: Box<Compiled> },
@@ -560,28 +582,70 @@ pub(crate) enum Compiled {
 
 impl Compiled {
     pub(crate) fn new(node: &SdfNode) -> Self {
+        Self::of(node, &mut 0)
+    }
+
+    /// `node`, its meshes numbered from `meshes` on.
+    fn of(node: &SdfNode, meshes: &mut usize) -> Self {
         match node {
-            SdfNode::Combine { op, blend, of } => Self::Combine(*op, *blend, of.iter().map(Self::new).collect()),
-            SdfNode::Shell { thickness, of } => Self::Shell(*thickness, Box::new(Self::new(of))),
-            SdfNode::Round { radius, of } => Self::Round(*radius, Box::new(Self::new(of))),
-            SdfNode::Transform { at, rotate, scale, of } => Self::Transform { at: *at, rotation: rot(*rotate), scale: *scale, of: Box::new(Self::new(of)) },
-            SdfNode::Material { of, .. } | SdfNode::Bone { of, .. } | SdfNode::Id { of, .. } => Self::new(of),
-            SdfNode::Instance { places, of } => Self::Instance(places.clone(), Box::new(Self::new(of))),
-            SdfNode::Deform { deform, lipschitz, of } => Self::Deform(*deform, *lipschitz, Box::new(Self::new(of))),
-            SdfNode::Sculpt { strokes, of } => Self::Sculpt(strokes.clone(), Box::new(Self::new(of))),
-            SdfNode::Texture { tex, of } => Self::Texture(tex.clone(), Box::new(Self::new(of))),
+            SdfNode::Combine { op, blend, of } => {
+                let of: Vec<Compiled> = of.iter().map(|c| Self::of(c, meshes)).collect();
+                let bounded = of.iter().map(Compiled::reads_bounded).collect();
+                Self::Combine(*op, *blend, of, bounded)
+            }
+            SdfNode::Shell { thickness, of } => Self::Shell(*thickness, Box::new(Self::of(of, meshes))),
+            SdfNode::Round { radius, of } => Self::Round(*radius, Box::new(Self::of(of, meshes))),
+            SdfNode::Transform { at, rotate, scale, of } => Self::Transform { at: *at, rotation: rot(*rotate), scale: *scale, of: Box::new(Self::of(of, meshes)) },
+            SdfNode::Material { of, .. } | SdfNode::Bone { of, .. } | SdfNode::Id { of, .. } => Self::of(of, meshes),
+            SdfNode::Instance { places, of } => Self::Instance(places.clone(), Box::new(Self::of(of, meshes))),
+            SdfNode::Deform { deform, lipschitz, of } => Self::Deform(*deform, *lipschitz, Box::new(Self::of(of, meshes))),
+            SdfNode::Sculpt { strokes, of } => Self::Sculpt(strokes.clone(), Box::new(Self::of(of, meshes))),
+            SdfNode::Texture { tex, of } => Self::Texture(tex.clone(), Box::new(Self::of(of, meshes))),
+            SdfNode::Mesh(m) => {
+                *meshes += 1;
+                Self::Mesh(m.clone(), *meshes - 1)
+            }
+            SdfNode::Tubes(t) if t.blend == 0.0 => Self::Tubes(t.clone()),
             SdfNode::Sphere { .. } | SdfNode::Box { .. } | SdfNode::Cylinder { .. }
             | SdfNode::Torus { .. } | SdfNode::Capsule { .. } | SdfNode::Ellipsoid { .. }
-            | SdfNode::Gyroid { .. } | SdfNode::Kernel(_) | SdfNode::Mesh(_) | SdfNode::Links(_) => Self::Leaf(node.clone()),
+            | SdfNode::Gyroid { .. } | SdfNode::Kernel(_) | SdfNode::Links(_) | SdfNode::Tubes(_) | SdfNode::Sketch(_) => Self::Leaf(node.clone()),
+        }
+    }
+
+    /// A leaf read under bounds is in it, through no sculpt or texture (they read theirs in full).
+    fn reads_bounded(&self) -> bool {
+        match self {
+            Self::Mesh(..) | Self::Tubes(_) => true,
+            Self::Combine(_, _, _, bounded) => bounded.contains(&true),
+            Self::Shell(_, of) | Self::Round(_, of) | Self::Transform { of, .. } | Self::Instance(_, of) | Self::Deform(_, _, of) => of.reads_bounded(),
+            Self::Leaf(_) | Self::Sculpt(..) | Self::Texture(..) => false,
         }
     }
 }
 
+/// A point of a [`Compiled::Transform`]'s parent into its frame: the subtraction, transpose
+/// multiply, reciprocal and scale in precisely the order of [`transform_into`].
+pub(crate) fn framed(at: &P3, r: &[[f64; 3]; 3], scale: f64, p: Vec3d) -> Vec3d {
+    let d = p - Vec3d::new(at[0], at[1], at[2]);
+    Vec3d::new(r[0][0] * d.x + r[1][0] * d.y + r[2][0] * d.z, r[0][1] * d.x + r[1][1] * d.y + r[2][1] * d.z, r[0][2] * d.x + r[1][2] * d.y + r[2][2] * d.z) * (1.0 / scale)
+}
+
 impl Sdf3 for Compiled {
+    /// Read only as far as the bounds need ([`crate::bounded`]).
+    fn distance_bounded(&self, p: Vec3d, lower: f64, upper: f64, hints: &mut Hints) -> f64 {
+        self.bounded(p, lower, upper, hints)
+    }
+
+    fn distance_many_bounded(&self, ps: &[Vec3d], lower: f64, upper: f64, out: &mut [f64], hints: &mut Hints) {
+        self.bounded_many(ps, lower, upper, out, hints)
+    }
+
     fn distance(&self, p: Vec3d) -> f64 {
         match self {
             Self::Leaf(node) => distance(node, p),
-            Self::Combine(op, blend, of) => {
+            Self::Mesh(m, _) => m.signed64(p),
+            Self::Tubes(t) => t.distance(p),
+            Self::Combine(op, blend, of, _) => {
                 let mut d = of[0].distance(p);
                 for child in &of[1..] {
                     let e = child.distance(p);
@@ -595,13 +659,7 @@ impl Sdf3 for Compiled {
             }
             Self::Shell(thickness, of) => of.distance(p).abs() - thickness,
             Self::Round(radius, of) => of.distance(p) - radius,
-            Self::Transform { at, rotation: r, scale, of } => {
-                // Keep the subtraction, transpose multiply, reciprocal and distance scale
-                // in precisely the order used by transform_into and distance.
-                let d = p - Vec3d::new(at[0], at[1], at[2]);
-                let q = Vec3d::new(r[0][0] * d.x + r[1][0] * d.y + r[2][0] * d.z, r[0][1] * d.x + r[1][1] * d.y + r[2][1] * d.z, r[0][2] * d.x + r[1][2] * d.y + r[2][2] * d.z) * (1.0 / scale);
-                of.distance(q) * scale
-            }
+            Self::Transform { at, rotation, scale, of } => of.distance(framed(at, rotation, *scale, p)) * scale,
             Self::Instance(places, of) => places.iter().map(|pl| of.distance(v3(pl.into([p.x, p.y, p.z]))) * pl.scale).fold(f64::INFINITY, f64::min),
             Self::Deform(deform, lipschitz, of) => of.distance(deform.warp(p)) / lipschitz,
             Self::Sculpt(strokes, of) => strokes.sculpt([p.x, p.y, p.z], of.distance(p), smin),
@@ -612,7 +670,17 @@ impl Sdf3 for Compiled {
     fn distance_many(&self, ps: &[Vec3d], out: &mut [f64]) {
         match self {
             Self::Leaf(n) => distance_many(n, ps, out),
-            Self::Combine(op, blend, of) => {
+            Self::Mesh(m, _) => {
+                for (p, o) in ps.iter().zip(out.iter_mut()) {
+                    *o = m.signed64(*p);
+                }
+            }
+            Self::Tubes(t) => {
+                for (p, o) in ps.iter().zip(out.iter_mut()) {
+                    *o = t.distance(*p);
+                }
+            }
+            Self::Combine(op, blend, of, _) => {
                 of[0].distance_many(ps, out);
                 let mut e = vec![0.0; ps.len()];
                 for c in &of[1..] {
@@ -634,14 +702,8 @@ impl Sdf3 for Compiled {
                 of.distance_many(ps, out);
                 out.iter_mut().for_each(|d| *d -= radius);
             }
-            Self::Transform { at, rotation: r, scale, of } => {
-                let q: Vec<Vec3d> = ps
-                    .iter()
-                    .map(|p| {
-                        let d = *p - Vec3d::new(at[0], at[1], at[2]);
-                        Vec3d::new(r[0][0] * d.x + r[1][0] * d.y + r[2][0] * d.z, r[0][1] * d.x + r[1][1] * d.y + r[2][1] * d.z, r[0][2] * d.x + r[1][2] * d.y + r[2][2] * d.z) * (1.0 / scale)
-                    })
-                    .collect();
+            Self::Transform { at, rotation, scale, of } => {
+                let q: Vec<Vec3d> = ps.iter().map(|p| framed(at, rotation, *scale, *p)).collect();
                 of.distance_many(&q, out);
                 out.iter_mut().for_each(|d| *d *= scale);
             }
@@ -742,7 +804,7 @@ pub fn distance_many(n: &SdfNode, ps: &[Vec3d], out: &mut [f64]) {
     }
 }
 
-fn v3(p: P3) -> Vec3d {
+pub(crate) fn v3(p: P3) -> Vec3d {
     Vec3d::new(p[0], p[1], p[2])
 }
 
@@ -896,6 +958,10 @@ fn slot_in(n: &SdfNode, p: Vec3d, inherit: u8) -> (f64, u8) {
             let (d, s) = l.distance_slot(p);
             (d, if s == 0 { inherit } else { s })
         }
+        SdfNode::Tubes(t) => {
+            let (d, s) = t.distance_slot(p);
+            (d, if s == 0 { inherit } else { s })
+        }
         leaf => (distance(leaf, p), inherit),
     }
 }
@@ -914,7 +980,7 @@ pub fn transform_out_of(at: P3, rotate: P3, scale: f64, q: P3) -> P3 {
     std::array::from_fn(|i| (r[i][0] * q[0] + r[i][1] * q[1] + r[i][2] * q[2]) * scale + at[i])
 }
 
-fn smin(a: f64, b: f64, k: f64) -> f64 {
+pub(crate) fn smin(a: f64, b: f64, k: f64) -> f64 {
     if k <= 0.0 {
         return a.min(b);
     }
@@ -1000,6 +1066,8 @@ pub fn distance(n: &SdfNode, p: Vec3d) -> f64 {
         SdfNode::Kernel(k) => k.field.distance(p),
         SdfNode::Mesh(m) => m.signed64(p),
         SdfNode::Links(l) => l.distance(p),
+        SdfNode::Tubes(t) => t.distance(p),
+        SdfNode::Sketch(s) => s.distance(p),
         SdfNode::Material { of, .. } | SdfNode::Bone { of, .. } | SdfNode::Id { of, .. } => distance(of, p),
         SdfNode::Instance { places, of } => places.iter().map(|pl| distance(of, v3(pl.into([p.x, p.y, p.z]))) * pl.scale).fold(f64::INFINITY, f64::min),
         SdfNode::Deform { deform, lipschitz, of } => distance(of, deform.warp(p)) / lipschitz,
@@ -1070,7 +1138,8 @@ mod tests {
             SdfNode::Material { .. } => 14, SdfNode::Instance { .. } => 15,
             SdfNode::Bone { .. } => 16, SdfNode::Deform { .. } => 17,
             SdfNode::Id { .. } => 18, SdfNode::Sculpt { .. } => 19,
-            SdfNode::Texture { .. } => 20,
+            SdfNode::Texture { .. } => 20, SdfNode::Tubes(_) => 21,
+            SdfNode::Sketch(_) => 22,
         }
     }
 
@@ -1106,11 +1175,13 @@ mod tests {
             SdfNode::deform(SdfDeform::Twist { rate: 0.2 }, *child()),
             SdfNode::Id { id: 3, of: child() },
             SdfNode::Sculpt { strokes: Arc::new(strokes), of: child() },
+            SdfNode::Tubes(Arc::new(crate::tubes::Tubes::new(vec![crate::tubes::TubeCurve { pts: vec![[-1.5, 0.0, 0.0, 0.5], [0.0, 1.0, 0.5, 0.7], [1.5, 0.5, -0.5, 0.3]], slot: 1 }], 0.0))),
+            SdfNode::Sketch(Arc::new(crate::sketches::SketchSolid::new(&[vec![vec![[0.5, -1.0], [2.0, -1.0], [1.5, 1.5]]]], crate::sketches::Form::Revolve { angle: 270.0 }).unwrap())),
         ];
         for project in [TexProject::Axis(0), TexProject::Triplanar] {
             out.push(SdfNode::Texture { tex: Arc::new(SdfTexture::new(kernel.clone(), project, 0.8, 0.2, 0.01, Some((-0.5, 0.5)), Some((-0.3, 0.7)), 1.0, 0.2)), of: child() });
         }
-        let mut covered = [false; 21];
+        let mut covered = [false; 23];
         for n in &out { covered[variant(n)] = true; }
         assert!(covered.into_iter().all(|v| v), "every node needs an independent fixture");
         out

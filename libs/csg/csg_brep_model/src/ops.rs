@@ -15,6 +15,8 @@ use makepad_csg_brep::geom::axis2_placement::Axis2Placement;
 use makepad_csg_brep::geom::object::ObjectRef;
 use makepad_csg_brep::kernel::{Kernel, UpstreamFixes};
 use makepad_csg_brep::math::{Point3, Vec3};
+use makepad_csg_brep::nurbs::b_spline_curve::BSplineCurve;
+use makepad_csg_brep::nurbs::crv_fit::p1::ParamMethod;
 use makepad_csg_brep::offset::offset_executive::p2::{offset_brep_simple, shell_brep_simple, OffsetOptions, ShellOptions};
 use makepad_csg_brep::primitive::api_curves;
 use makepad_csg_brep::primitive::api_primitives as prim;
@@ -174,22 +176,65 @@ pub fn revolve(k: &mut Kernel, sketch: &Sketch, angle: f64) -> Result<Body, Brep
     Ok(create_rotational_sweep(k, &refs(&curves), p3d([0.0; 3]), v3d([0.0, 1.0, 0.0]), angle, true)?)
 }
 
-/// Sweeps a sketch along a smooth path through `path` (at least 2 points).
-pub fn sweep(k: &mut Kernel, sketch: &Sketch, path: &[[f64; 3]]) -> Result<Body, BrepError> {
+/// Sweeps a sketch along a smooth path through `path` (at least 2 points), `scale[i]` times its
+/// size at `path[i]` (empty: its own size all the way). The path is centripetal: cubic through
+/// four or more points, a parabola through three, a line through two.
+pub fn sweep(k: &mut Kernel, sketch: &Sketch, path: &[[f64; 3]], scale: &[f64]) -> Result<Body, BrepError> {
     if path.len() < 2 {
         return Err(input("a sweep's path needs two points"));
     }
-    let frame = Frame { origin: [0.0; 3], u: [1.0, 0.0, 0.0], v: [0.0, 1.0, 0.0] };
-    let curves = flat(sketch_curves(k, sketch, &frame)?);
+    if !scale.is_empty() && scale.len() != path.len() {
+        return Err(input(format!("a sweep's scale has one size per path point: {} for {} points", scale.len(), path.len())));
+    }
+    if scale.iter().any(|s| !(s.is_finite() && *s > 0.0)) {
+        return Err(input("a sweep's scales must be above zero"));
+    }
     let points: Vec<Point3> = path.iter().map(|p| p3d(*p)).collect();
-    let path_curve = Curve::from(api_curves::create_curve(&points)?);
+    // Centripetal parameters: by the square root of each step, so a short step never loops.
+    let mut params = vec![0.0];
+    for w in points.windows(2) {
+        let step = w[0].distance(w[1]);
+        if !(step > 1e-9) {
+            return Err(input("two of a sweep's path points are in the same place"));
+        }
+        params.push(params[params.len() - 1] + step.sqrt());
+    }
+    let total = params[params.len() - 1];
+    params.iter_mut().for_each(|t| *t /= total);
+    let path_curve = Curve::from(through(&points, &params)?);
+    // The kernel sizes the section by how far a rail runs from a reference curve, relative to
+    // the rail's start: here the scales as heights over a line, at the path's parameters.
+    let rail = match scale.first() {
+        Some(first) if scale.iter().any(|s| s != first) => {
+            let heights: Vec<Point3> = scale.iter().map(|s| Point3::new(0.0, *s, 0.0)).collect();
+            let reference = Curve::from(api_curves::create_line_segment(Point3::new(-1.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0))?);
+            Some((reference, Curve::from(through(&heights, &params)?)))
+        }
+        _ => None,
+    };
+    let sketch = scale.first().map_or_else(|| sketch.clone(), |s| sketch.scaled(*s));
+    let frame = Frame { origin: [0.0; 3], u: [1.0, 0.0, 0.0], v: [0.0, 1.0, 0.0] };
+    let curves = flat(sketch_curves(k, &sketch, &frame)?);
     let options = SweepOptions {
         cap_ends: true,
         move_profile_center_to_path: true,
         orient_profile_perpendicular_to_path: true,
         ..SweepOptions::default()
     };
-    Ok(create_curve_sweep(k, &refs(&curves), Some(&path_curve), None, None, Some(&options))?.brep)
+    let (reference, rail) = match &rail {
+        Some((reference, rail)) => (Some(reference), Some(rail)),
+        None => (None, None),
+    };
+    Ok(create_curve_sweep(k, &refs(&curves), Some(&path_curve), reference, rail, Some(&options))?.brep)
+}
+
+/// The smooth curve through `points` at `params`: cubic from four points, else of one degree
+/// less than the points.
+fn through(points: &[Point3], params: &[f64]) -> Result<BSplineCurve, BrepError> {
+    if points.len() == 2 {
+        return Ok(BSplineCurve::create_line_segment(3, points[0], points[1])?);
+    }
+    Ok(BSplineCurve::interpolate_points(points, Some(params), 3.min(points.len() - 1), None, None, false, ParamMethod::Centripetal)?)
 }
 
 /// A solid through sketches each at its own frame, of `degree` along the loft.

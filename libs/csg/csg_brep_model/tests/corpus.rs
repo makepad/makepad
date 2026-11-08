@@ -204,3 +204,72 @@ fn a_background_build_gives_way_to_a_preview() {
     preview.join().unwrap();
     background.join().unwrap();
 }
+
+/// How far a point is from a mesh's surface.
+fn nearest(m: &makepad_csg_mesh::mesh::TriMesh, p: makepad_csg_math::Vec3d) -> f64 {
+    m.triangles.iter().map(|t| {
+        let (a, b, c) = (m.vertices[t[0] as usize], m.vertices[t[1] as usize], m.vertices[t[2] as usize]);
+        // The closest point of the triangle: inside it, else on one of its sides.
+        let n = (b - a).cross(c - a);
+        let side = |u: makepad_csg_math::Vec3d, v: makepad_csg_math::Vec3d| (v - u).cross(p - u).dot(n) >= 0.0;
+        if n.length() > 0.0 && side(a, b) && side(b, c) && side(c, a) {
+            return ((p - a).dot(n) / n.length()).abs();
+        }
+        [(a, b), (b, c), (c, a)].iter().map(|&(u, v)| {
+            let e = v - u;
+            let s = if e.dot(e) > 0.0 { ((p - u).dot(e) / e.dot(e)).clamp(0.0, 1.0) } else { 0.0 };
+            (p - (u + e * s)).length()
+        }).fold(f64::MAX, f64::min)
+    }).fold(f64::MAX, f64::min)
+}
+
+/// A sweep runs through every point of its path at that point's size: a tapered lock from six
+/// points, and paths of three and two points (a parabola, a line). A straight sweep from size 1
+/// to 0.5 is the cone frustum between them.
+#[test]
+fn a_sweep_runs_through_its_points_at_their_sizes() {
+    let handle = std::thread::Builder::new().stack_size(stack_size()).spawn(|| {
+        guard::guarded(stack_size(), &CancelToken::new(), None, || {
+            let r = 1.5;
+            let round = Sketch::new(vec![Shape::Circle { center: [0.0, 0.0], r }]);
+            let lock = vec![[0.0, 0.0, 0.0], [2.0, 6.0, 1.0], [6.0, 11.0, 0.0], [9.0, 17.0, -3.0], [8.0, 23.0, -6.0], [4.0, 27.0, -7.0]];
+            let paths: [(&str, Vec<[f64; 3]>, Vec<f64>); 3] = [
+                ("lock", lock, vec![1.0, 0.9, 0.75, 0.6, 0.4, 0.2]),
+                ("three points", vec![[0.0, 0.0, 0.0], [0.0, 20.0, 5.0], [10.0, 40.0, 10.0]], vec![1.2, 1.0, 0.5]),
+                ("two points", vec![[0.0, 0.0, 0.0], [0.0, 20.0, 0.0]], Vec::new()),
+            ];
+            for (name, path, scale) in paths {
+                let mut k = new_kernel();
+                let mut b = ops::sweep(&mut k, &round, &path, &scale)?;
+                let measured = query::measure(&k, &mut b)?;
+                let chord = 0.01;
+                let t = tessellate(&k, &mut b, &TessOptions { chord, ..TessOptions::default() })?;
+                let (vol, open) = mesh_check(&t.mesh);
+                assert_eq!(open, 0, "{name}: open edges");
+                assert!((vol - measured.volume).abs() <= measured.area * chord, "{name}: mesh {vol} exact {}", measured.volume);
+                // The surface's nearest point to each inner path point is that point's radius away
+                // (the end points lie on the flat end caps).
+                for (i, p) in path.iter().enumerate().take(path.len() - 1).skip(1) {
+                    let want = r * scale.get(i).copied().unwrap_or(1.0);
+                    let near = nearest(&t.mesh, makepad_csg_math::Vec3d::new(p[0], p[1], p[2]));
+                    assert!((near - want).abs() < 0.02 * r, "{name}: point {i} is {near} from the surface, its radius {want}");
+                }
+            }
+            let mut k = new_kernel();
+            let mut cone = ops::sweep(&mut k, &round, &[[0.0, 0.0, 0.0], [0.0, 20.0, 0.0]], &[1.0, 0.5])?;
+            let frustum = std::f64::consts::PI * 20.0 / 3.0 * (r * r + r * r * 0.5 + r * r * 0.25);
+            let volume = query::measure(&k, &mut cone)?.volume;
+            assert!((volume - frustum).abs() < 1e-3 * frustum, "the taper holds {volume}, a frustum {frustum}");
+            for (path, scale, why) in [
+                (vec![[0.0, 0.0, 0.0]], vec![], "one point"),
+                (vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], vec![], "two points in one place"),
+                (vec![[0.0, 0.0, 0.0], [0.0, 9.0, 0.0]], vec![1.0], "one size for two points"),
+                (vec![[0.0, 0.0, 0.0], [0.0, 9.0, 0.0]], vec![1.0, 0.0], "a size of zero"),
+            ] {
+                assert!(matches!(ops::sweep(&mut k, &round, &path, &scale), Err(BrepError::Input(_))), "{why} is not a sweep");
+            }
+            Ok(())
+        })
+    }).unwrap();
+    handle.join().unwrap().unwrap();
+}

@@ -1,6 +1,7 @@
 pub mod mesh;
 pub mod obj;
 pub mod stl;
+pub mod subdiv;
 pub mod validate;
 pub mod volume;
 
