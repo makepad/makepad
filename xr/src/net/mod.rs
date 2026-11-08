@@ -506,6 +506,8 @@ impl Default for XrNetConfig {
 #[derive(Debug)]
 pub struct XrNetNode {
     node_id: XrNetPeerId,
+    discovery_addr: SocketAddr,
+    data_addr: SocketAddr,
     pub incoming_receiver: mpsc::Receiver<XrNetIncoming>,
     udp_outgoing_sender: mpsc::Sender<XrNetUdpOutgoing>,
     sync_outgoing_sender: mpsc::Sender<XrNetSyncOutgoing>,
@@ -535,6 +537,7 @@ impl XrNetNode {
         let sync_listener = TcpListener::bind(config.sync_bind)?;
         sync_listener.set_nonblocking(true)?;
 
+        let discovery_addr = discovery_socket.local_addr()?;
         let bound_data_addr = data_socket.local_addr()?;
         let bound_sync_addr = sync_listener.local_addr()?;
         let (incoming_sender, incoming_receiver) = mpsc::channel();
@@ -567,6 +570,8 @@ impl XrNetNode {
 
         Ok(Self {
             node_id: config.node_id,
+            discovery_addr,
+            data_addr: bound_data_addr,
             incoming_receiver,
             udp_outgoing_sender,
             sync_outgoing_sender,
@@ -583,6 +588,22 @@ impl XrNetNode {
 
     pub fn node_id(&self) -> XrNetPeerId {
         self.node_id
+    }
+
+    /// The address the discovery socket is bound to: with a bind on port 0, the port the OS picked.
+    pub fn discovery_addr(&self) -> SocketAddr {
+        self.discovery_addr
+    }
+
+    /// The address the data socket is bound to (its port the OS's with a bind on port 0).
+    pub fn data_addr(&self) -> SocketAddr {
+        self.data_addr
+    }
+
+    /// Send the discovery hellos to `target` too from now on: a peer whose address is known only
+    /// once it is up (bound on port 0).
+    pub fn add_discovery_target(&mut self, target: SocketAddr) {
+        let _ = self.udp_outgoing_sender.send(XrNetUdpOutgoing::DiscoveryTarget(target));
     }
     pub fn send_state(&mut self, state: XrState) {
         let frame = XrNetStateFrame {
@@ -774,28 +795,31 @@ mod tests {
         matches
     }
 
-    fn localhost_config(
-        node_id: u64,
-        discovery_port: u16,
-        data_port: u16,
-        sync_port: u16,
-        discovery_targets: Vec<u16>,
-    ) -> XrNetConfig {
+    /// A node on loopback, every socket on a port the OS picks (parallel copies of these tests
+    /// cannot take each other's ports), no peers until they are added.
+    fn localhost_config(node_id: u64) -> XrNetConfig {
+        let any_port = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
         XrNetConfig {
             node_id: XrNetPeerId(node_id),
-            discovery_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), discovery_port),
-            data_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), data_port),
-            sync_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), sync_port),
-            discovery_targets: discovery_targets
-                .into_iter()
-                .map(|port| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))
-                .collect(),
+            discovery_bind: any_port,
+            data_bind: any_port,
+            sync_bind: any_port,
+            discovery_targets: Vec::new(),
             timing: XrNetTimingConfig {
                 discovery_interval: Duration::from_millis(20),
                 peer_timeout: Duration::from_millis(150),
                 poll_interval: Duration::from_millis(5),
             },
         }
+    }
+
+    /// Two nodes on loopback that find each other: each one's hellos go to the other's address.
+    fn loopback_pair(left_id: u64, right_id: u64) -> (XrNetNode, XrNetNode) {
+        let mut left = XrNetNode::with_config(localhost_config(left_id)).expect("left test client should bind");
+        let mut right = XrNetNode::with_config(localhost_config(right_id)).expect("right test client should bind");
+        right.add_discovery_target(left.discovery_addr());
+        left.add_discovery_target(right.discovery_addr());
+        (left, right)
     }
 
     fn make_test_state(head_position: Vec3f) -> XrState {
@@ -958,8 +982,7 @@ mod tests {
     #[test]
     fn peer_timeout_emits_leave_without_needing_more_packets() {
         let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
-        let config = localhost_config(1, 42646, 42647, 42648, Vec::new());
-        let node = XrNetNode::with_config(config).expect("node should bind localhost test ports");
+        let node = XrNetNode::with_config(localhost_config(1)).expect("node should bind localhost test ports");
 
         let discovery_socket =
             UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
@@ -970,9 +993,10 @@ mod tests {
             version: XR_NET_PROTOCOL_VERSION,
             node_id: XrNetPeerId(2),
             data_port: data_socket.local_addr().unwrap().port(),
-            sync_port: 42658,
+            // (nothing listens on port 0: the node's sync connect to this peer fails, as to a gone one)
+            sync_port: 0,
         });
-        let discovery_target = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42646);
+        let discovery_target = node.discovery_addr();
         let _ = discovery_socket.send_to(&discovery_packet.serialize_bin(), discovery_target);
 
         let join = wait_for_event(&node, |event| matches!(event, XrNetIncoming::Join { .. }))
@@ -991,7 +1015,7 @@ mod tests {
                 state: make_test_state(vec3f(0.0, 1.6, 0.0)),
             },
         };
-        let state_target = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42647);
+        let state_target = node.data_addr();
         let _ = data_socket.send_to(&state_packet.serialize_bin(), state_target);
 
         let _ = wait_for_event(&node, |event| {
@@ -1020,12 +1044,7 @@ mod tests {
     #[test]
     fn two_test_clients_align_two_cubes_via_protocol() {
         let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
-        let mut left =
-            XrNetNode::with_config(localhost_config(11, 42746, 42747, 42748, vec![42756]))
-                .expect("left test client should bind");
-        let mut right =
-            XrNetNode::with_config(localhost_config(22, 42756, 42757, 42758, vec![42746]))
-                .expect("right test client should bind");
+        let (mut left, mut right) = loopback_pair(11, 22);
 
         let left_cube_world = vec3f(-0.25, 0.82, -0.62);
         let right_cube_world = vec3f(0.21, 0.82, -0.38);
@@ -1091,11 +1110,7 @@ mod tests {
     #[test]
     fn cached_alignment_descriptor_is_sent_to_late_joiner() {
         let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
-        let mut left =
-            XrNetNode::with_config(localhost_config(101, 42846, 42847, 42848, vec![42856]))
-                .expect("left test client should bind");
-        let right = XrNetNode::with_config(localhost_config(202, 42856, 42857, 42858, vec![42846]))
-            .expect("right test client should bind");
+        let (mut left, right) = loopback_pair(101, 202);
 
         let descriptor = make_descriptor_frame();
         left.send_alignment_descriptor(descriptor.clone());
@@ -1115,11 +1130,7 @@ mod tests {
     #[test]
     fn cached_activity_is_sent_to_late_joiner() {
         let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
-        let mut left =
-            XrNetNode::with_config(localhost_config(301, 42946, 42947, 42948, vec![42956]))
-                .expect("left test client should bind");
-        let right = XrNetNode::with_config(localhost_config(302, 42956, 42957, 42958, vec![42946]))
-            .expect("right test client should bind");
+        let (mut left, right) = loopback_pair(301, 302);
 
         let sent = left.send_activity(XrActivityId(live_id!(tree_scene)), 3.5);
 
@@ -1138,11 +1149,7 @@ mod tests {
     #[test]
     fn body_spawn_is_sent_over_sync_channel() {
         let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
-        let mut left =
-            XrNetNode::with_config(localhost_config(311, 43046, 43047, 43048, vec![43056]))
-                .expect("left test client should bind");
-        let right = XrNetNode::with_config(localhost_config(312, 43056, 43057, 43058, vec![43046]))
-            .expect("right test client should bind");
+        let (mut left, right) = loopback_pair(311, 312);
 
         let _ = left.send_activity(XrActivityId(live_id!(ico_shoot_scene)), 4.0);
         let _ = wait_for_event(&right, |event| {
@@ -1191,11 +1198,7 @@ mod tests {
     #[test]
     fn shared_object_control_is_sent_over_sync_channel() {
         let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
-        let mut left =
-            XrNetNode::with_config(localhost_config(321, 43146, 43147, 43148, vec![43156]))
-                .expect("left test client should bind");
-        let right = XrNetNode::with_config(localhost_config(322, 43156, 43157, 43158, vec![43146]))
-            .expect("right test client should bind");
+        let (mut left, right) = loopback_pair(321, 322);
 
         let _ = left.send_activity(XrActivityId(live_id!(ico_shoot_scene)), 5.0);
         let _ = wait_for_event(&right, |event| {
@@ -1234,11 +1237,7 @@ mod tests {
     #[test]
     fn shared_object_state_is_sent_over_udp() {
         let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
-        let mut left =
-            XrNetNode::with_config(localhost_config(323, 43246, 43247, 43248, vec![43256]))
-                .expect("left test client should bind");
-        let right = XrNetNode::with_config(localhost_config(324, 43256, 43257, 43258, vec![43246]))
-            .expect("right test client should bind");
+        let (mut left, right) = loopback_pair(323, 324);
 
         let _ = wait_for_event(&left, |event| matches!(event, XrNetIncoming::Join { .. }))
             .expect("left test client should discover right before sending shared state");
@@ -1285,11 +1284,7 @@ mod tests {
     #[test]
     fn shared_object_state_batches_roundtrip_over_udp() {
         let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
-        let mut left =
-            XrNetNode::with_config(localhost_config(325, 43266, 43267, 43268, vec![43276]))
-                .expect("left test client should bind");
-        let right = XrNetNode::with_config(localhost_config(326, 43276, 43277, 43278, vec![43266]))
-            .expect("right test client should bind");
+        let (mut left, right) = loopback_pair(325, 326);
 
         let _ = wait_for_event(&left, |event| matches!(event, XrNetIncoming::Join { .. }))
             .expect("left test client should discover right before sending batched shared state");
@@ -1353,9 +1348,7 @@ mod tests {
     #[test]
     fn cached_shared_object_control_is_sent_to_late_joiner() {
         let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
-        let mut left =
-            XrNetNode::with_config(localhost_config(325, 43346, 43347, 43348, vec![43356]))
-                .expect("left test client should bind");
+        let mut left = XrNetNode::with_config(localhost_config(325)).expect("left test client should bind");
 
         let _ = left.send_activity(XrActivityId(live_id!(ico_shoot_scene)), 8.0);
         let sent = XrNetSharedObjectControl::XrSpawnObject {
@@ -1374,8 +1367,10 @@ mod tests {
         };
         left.send_shared_object_control(sent.clone());
 
-        let right = XrNetNode::with_config(localhost_config(326, 43356, 43357, 43358, vec![43346]))
-            .expect("right test client should bind");
+        // the late joiner: it comes up after left has sent, and each then hellos the other
+        let mut right = XrNetNode::with_config(localhost_config(326)).expect("right test client should bind");
+        right.add_discovery_target(left.discovery_addr());
+        left.add_discovery_target(right.discovery_addr());
 
         let start = Instant::now();
         let mut received_activity = None;

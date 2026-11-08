@@ -7,6 +7,7 @@ use super::{LiveHeadset, ServerShared};
 use crate::settings_types::HeadsetSettings;
 use makepad_desk_link::server::{fleet_identity, lan_address};
 use makepad_desk_link::xr::*;
+use makepad_desk_link::xr_capture::CaptureAssembler;
 use makepad_desk_link::xr_pair::{self, ServerPairing};
 use makepad_desk_link::{write_all, Inbox};
 use makepad_widgets::makepad_platform::makepad_hal::{self, xr_remote as hal};
@@ -266,6 +267,8 @@ impl Session {
     #[allow(clippy::too_many_arguments)]
     fn session(&self, stream: &mut makepad_widgets::makepad_platform::makepad_network::tls::TlsStream, mut inbox: Inbox, mut buf: Vec<u8>, name: &str, who: &str, instance: u64, paired: bool, eye: [u32; 2], refresh_mhz: u32, decodes: u32) -> Result<String, String> {
         let eye = [eye[0].clamp(64, 4096) & !3, eye[1].clamp(64, 4096) & !3];
+        // (before anything starts: a link without its own session id never runs)
+        let session = session_id(net_tls::os_random)?;
         // H.265 when both ends have it
         let codec = if decodes & codecs::HEVC != 0 && VideoStreamEncoder::caps().hevc { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
         let fps = (refresh_mhz / 1000).clamp(30, 120);
@@ -274,11 +277,6 @@ impl Session {
         // the app's XR display from now on (it presents on it at its next drawing)
         hal::hal_xr_remote_enable();
         hal::hal_xr_remote_attach(eye[0], eye[1], refresh_mhz);
-        let session = {
-            let mut b = [0u8; 8];
-            let _ = net_tls::os_random(&mut b);
-            u64::from_le_bytes(b)
-        };
         let server_instance = self.pairing.lock().unwrap().instance;
         *self.shared.live_headset.lock().unwrap() = Some(LiveHeadset { instance, name: name.to_string(), session });
         let welcome = XrServerMsg::Welcome { version: XR_VERSION, server: self.server.clone(), instance: server_instance, session, size: core.size, codec: core.codec, tiles: core.tiles as u8, encoder: core.description.clone(), eye: core.eye, fovea: core.fovea };
@@ -292,8 +290,10 @@ impl Session {
         stream.set_write_timeout(Some(Duration::from_millis(5))).map_err(|e| e.to_string())?;
         self.shared.haptics.lock().unwrap().clear();
         self.shared.haptics_ok.store(decodes & codecs::HAPTICS != 0, Ordering::Release);
-        let why = self.pump(stream, &mut inbox, &mut buf, &core, (paired, instance));
+        self.shared.capture_ok.store(decodes & codecs::CAPTURE != 0, Ordering::Release);
+        let why = self.pump(stream, &mut inbox, &mut buf, &core, (paired, instance), session);
         self.shared.haptics_ok.store(false, Ordering::Release);
+        self.shared.capture_ok.store(false, Ordering::Release);
         *self.shared.live_headset.lock().unwrap() = None;
         self.shared.reports.lock().unwrap().clear();
         audio.stop();
@@ -308,7 +308,7 @@ impl Session {
 
     /// `paired`: whether the headset (its instance id) is the one paired here: when the desktop
     /// unpairs it, it is told and the link ends.
-    fn pump(&self, stream: &mut makepad_widgets::makepad_platform::makepad_network::tls::TlsStream, inbox: &mut Inbox, buf: &mut [u8], core: &Core, paired: (bool, u64)) -> String {
+    fn pump(&self, stream: &mut makepad_widgets::makepad_platform::makepad_network::tls::TlsStream, inbox: &mut Inbox, buf: &mut [u8], core: &Core, paired: (bool, u64), session: u64) -> String {
         let mut last_heard = Instant::now();
         let mut visible = true;
         let mut stats = PumpStats::new();
@@ -318,6 +318,8 @@ impl Session {
         let mut streaming_told: Option<bool> = None;
         let mut see_through_told: Option<bool> = None;
         let mut headset_told: Option<HeadsetSettings> = None;
+        let mut capture_told = None;
+        let mut capture = CaptureAssembler::default();
         let mut flowing = false;
         loop {
             let sh = &self.shared;
@@ -348,6 +350,19 @@ impl Session {
                 }
                 (self.shared.log)(&format!("xr host: headset settings {headset:?}"));
                 headset_told = Some(headset);
+            }
+            // the app's ask of the cameras (only of a headset that captures)
+            let ask = sh.capture_ask_for(session);
+            if sh.capture_ok.load(Ordering::Acquire) && capture_told != Some(ask) {
+                let msg = match ask {
+                    Some(a) => XrServerMsg::Capture { on: true, step_deg: a.step_deg, step_m: a.step_m, preview_hz: a.preview_hz },
+                    None => XrServerMsg::Capture { on: false, step_deg: 0.0, step_m: 0.0, preview_hz: 0 },
+                };
+                if let Err(e) = write_all(stream, &msg.encode()) {
+                    return format!("write: {e}");
+                }
+                (self.shared.log)(&format!("xr host: capture {}", if ask.is_some() { "on" } else { "off" }));
+                capture_told = Some(ask);
             }
             // the app's controller buzzes (only to a headset that plays them)
             let haptics = std::mem::take(&mut *sh.haptics.lock().unwrap());
@@ -458,6 +473,15 @@ impl Session {
                         (self.world)(voxel_size, chunk_edge, bricks);
                     }
                     XrClientMsg::Report { values } => self.shared.push_report(values),
+                    XrClientMsg::Capture { seq, part, parts, data } => {
+                        stats.capture_bytes += payload.len() as u64;
+                        match capture.push(seq, part, parts, &data) {
+                            Some(Ok(record)) => self.shared.capture_record(session, record),
+                            // (the error names the record's fault, never its contents)
+                            Some(Err(e)) => (self.shared.log)(&format!("xr host: capture: {e}")),
+                            None => {}
+                        }
+                    }
                     XrClientMsg::Hello { .. } => return "a second hello".into(),
                 }
             }
@@ -486,6 +510,8 @@ pub(crate) struct PumpStats {
     /// Room-field bricks received, and their messages' bytes.
     bricks: u64,
     brick_bytes: u64,
+    /// Capture chunks' bytes received (the headset's cameras).
+    capture_bytes: u64,
     /// The rate controller's second (its own window inside this one).
     rate: RateWindow,
 }
@@ -504,6 +530,15 @@ impl RateWindow {
     }
 }
 
+/// A link's own session id, from the OS's random source. The capture ask is tied to it, so a
+/// link whose id cannot be drawn fails: ids that all came out the same would carry an ask
+/// across links.
+pub(super) fn session_id(random: impl FnOnce(&mut [u8]) -> std::io::Result<()>) -> Result<u64, String> {
+    let mut b = [0u8; 8];
+    random(&mut b).map_err(|e| format!("no session id (random source: {e})"))?;
+    Ok(u64::from_le_bytes(b))
+}
+
 fn median_ms(v: &mut [u32]) -> f64 {
     if v.is_empty() {
         return 0.0;
@@ -514,7 +549,7 @@ fn median_ms(v: &mut [u32]) -> f64 {
 
 impl PumpStats {
     pub(crate) fn new() -> Self {
-        PumpStats { at: Instant::now(), poses: 0, refused_poses: 0, pictures: 0, bytes: 0, stages_us: Default::default(), desk_us: Vec::new(), write_us: Vec::new(), decode_us: Vec::new(), trip_us: Vec::new(), unreported: Default::default(), bricks: 0, brick_bytes: 0, rate: RateWindow::new() }
+        PumpStats { at: Instant::now(), poses: 0, refused_poses: 0, pictures: 0, bytes: 0, stages_us: Default::default(), desk_us: Vec::new(), write_us: Vec::new(), decode_us: Vec::new(), trip_us: Vec::new(), unreported: Default::default(), bricks: 0, brick_bytes: 0, capture_bytes: 0, rate: RateWindow::new() }
     }
 
     pub(crate) fn sent(&mut self, head: &VideoHead, bytes: usize, write: Duration) {
@@ -592,6 +627,9 @@ impl PumpStats {
         ));
         if self.bricks > 0 {
             log(&format!("xr host: room field {} bricks ({:.1} KB/s) from the headset", self.bricks, self.brick_bytes as f64 / secs / 1000.0));
+        }
+        if self.capture_bytes > 0 {
+            log(&format!("xr host: capture {:.1} MB/s from the headset", self.capture_bytes as f64 / secs / 1e6));
         }
         // pictures a frame or more later than the median (the ones a headset's lead misses): the
         // host's (pose to written) and the link's (its round trip over the idle link's)

@@ -9,7 +9,7 @@
 
 pub use makepad_widgets;
 use makepad_widgets::*;
-use makepad_xr_stream::{DrawXrBandDepth, DrawXrStream, XrStreamClient, XrTarget};
+use makepad_xr_stream::{DrawXrBandDepth, DrawXrCamerasOn, DrawXrStream, XrStreamClient, XrTarget};
 
 app_main!(App);
 
@@ -111,6 +111,9 @@ pub struct XrRemoteView {
     draw_stream: DrawXrStream,
     #[live]
     draw_band_depth: DrawXrBandDepth,
+    /// The cameras-on mark while the computer's app captures the headset's cameras.
+    #[live]
+    draw_cameras_on: DrawXrCamerasOn,
     #[new]
     pass: DrawPass,
     /// The XR pass's own draw list (draws inside a pass need one).
@@ -197,6 +200,10 @@ impl XrRemoteView {
         // (debug `opaque` 3: nothing drawn, the pass only clears: its fixed cost)
         if let Some(client) = self.client.as_mut().filter(|c| c.opaque != 3) {
             client.draw(cx, &mut self.draw_stream);
+        }
+        // (whatever else is drawn: the wearer always sees the cameras are on)
+        if let Some(client) = self.client.as_mut() {
+            client.draw_cameras_on(cx, &mut self.draw_cameras_on);
         }
         cx.end_pass_sized_turtle_no_clip();
         self.draw_list.end(cx);

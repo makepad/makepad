@@ -25,22 +25,16 @@ fn shooter_activity_id() -> XrActivityId {
     XrActivityId(makepad_xr::live_id!(ico_shoot_scene))
 }
 
-fn localhost_config(
-    node_id: u64,
-    discovery_port: u16,
-    data_port: u16,
-    sync_port: u16,
-    discovery_targets: Vec<u16>,
-) -> XrNetConfig {
+/// A node on loopback with no peers: every socket on a port the OS picks, so parallel copies of
+/// this binary (and anything else on the box) cannot take each other's ports.
+fn localhost_config(node_id: u64) -> XrNetConfig {
+    let any_port = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
     XrNetConfig {
         node_id: XrNetPeerId(node_id),
-        discovery_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), discovery_port),
-        data_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), data_port),
-        sync_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), sync_port),
-        discovery_targets: discovery_targets
-            .into_iter()
-            .map(|port| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))
-            .collect(),
+        discovery_bind: any_port,
+        data_bind: any_port,
+        sync_bind: any_port,
+        discovery_targets: Vec::new(),
         timing: XrNetTimingConfig {
             discovery_interval: Duration::from_millis(20),
             peer_timeout: Duration::from_millis(250),
@@ -503,18 +497,6 @@ impl ShooterLoopbackApp {
                         self.projectile_linvel_z_samples.push(tracked_linvel_z);
                     }
                 }
-            } else if let Some(max_z) = active_projectile_positions
-                .iter()
-                .map(|pos| pos.z)
-                .max_by(|a, b| a.total_cmp(b))
-            {
-                let should_push = self
-                    .projectile_z_samples
-                    .last()
-                    .is_none_or(|last| (last - max_z).abs() > 0.01);
-                if should_push {
-                    self.projectile_z_samples.push(max_z);
-                }
             }
         }
         if let Some(peer_sync) = self
@@ -586,6 +568,16 @@ impl ShooterLoopbackApp {
         let Some(config) = self.config.clone() else {
             return;
         };
+        if self.synthetic_frame_index >= config.synthetic_frame_budget {
+            // All frames are in. The physics worker applies spawns a frame or more behind the
+            // frame that made them; the frames keep coming (the root steps physics on each), so
+            // the report waits for every local spawn to be through the worker.
+            self.collect_runtime_observation(cx);
+            if self.local_spawns_through_physics() {
+                self.finish_report(cx);
+            }
+            return;
+        }
         if !self.synthetic_frames_started {
             self.synthetic_frames_started = true;
             self.synthetic_time_origin = Some(Cx::time_now());
@@ -623,9 +615,21 @@ impl ShooterLoopbackApp {
             self.collect_runtime_observation(cx);
         }
 
-        if self.synthetic_frame_index >= config.synthetic_frame_budget {
+        if self.synthetic_frame_index >= config.synthetic_frame_budget && self.local_spawns_through_physics() {
             self.finish_report(cx);
         }
+    }
+
+    /// Every spawn this app made has been applied (or missed) by the physics worker.
+    fn local_spawns_through_physics(&self) -> bool {
+        self.physics_body_spawn_apply_count_peak + self.physics_body_spawn_miss_count_peak >= self.local_spawn_count
+    }
+
+    /// Its frames are all in and the report waits for the physics worker to take the last spawns.
+    fn waiting_for_physics(&self) -> bool {
+        !self.report_sent
+            && self.config.as_ref().is_some_and(|config| self.synthetic_frame_index >= config.synthetic_frame_budget)
+            && !self.local_spawns_through_physics()
     }
 
     fn finish_report(&mut self, cx: &mut Cx) {
@@ -713,7 +717,7 @@ impl ShooterLoopbackApp {
             })
             .unwrap_or_else(|| "peer_sync=missing".to_string());
         format!(
-            "network_started={} current_activity={current_activity:?} frames_started={} frame_index={} clock_synced_peak={} clock_ping_tx_peak={} clock_ping_rx_peak={} clock_pong_tx_peak={} clock_pong_rx_peak={} non_xr_draw_clock_peak={} tx_shared_state_peak={} rx_shared_state_peak={} shadow_apply_peak={} local_spawns={} remote_spawns={} local_spawn_tx={} local_spawn_tx_fail={} active_peak={} z_samples={:?} {peer_state}",
+            "network_started={} current_activity={current_activity:?} frames_started={} frame_index={} clock_synced_peak={} clock_ping_tx_peak={} clock_ping_rx_peak={} clock_pong_tx_peak={} clock_pong_rx_peak={} non_xr_draw_clock_peak={} tx_shared_state_peak={} rx_shared_state_peak={} shadow_apply_peak={} local_spawns={} spawns_through_physics={}+{} remote_spawns={} local_spawn_tx={} local_spawn_tx_fail={} active_peak={} z_samples={:?} {peer_state}",
             self.network_started,
             self.synthetic_frames_started,
             self.synthetic_frame_index,
@@ -727,6 +731,8 @@ impl ShooterLoopbackApp {
             self.peer_sync_rx_shared_object_state_count_peak,
             self.remote_shadow_apply_count_peak,
             self.local_spawn_count,
+            self.physics_body_spawn_apply_count_peak,
+            self.physics_body_spawn_miss_count_peak,
             self.remote_spawn_count,
             self.local_spawn_tx_count,
             self.local_spawn_tx_fail_count,
@@ -1126,14 +1132,15 @@ fn configure_repeated_sparse_close_open_hand(
     }
 }
 
+/// The tracked projectile flew more than 0.12 m from where it was launched (its first sample: a
+/// pooled body is in the physics' bodies only once spawned). How far it gets by the end is the
+/// physics' clock's (the draw's, not the synthetic frames'), and a pooled body can be launched
+/// again from the hand: the end is no measure.
 fn projectile_moved(report: &ShooterUiAppReport) -> bool {
-    let Some(first) = report.projectile_z_samples.first() else {
+    let Some(launch) = report.projectile_z_samples.first() else {
         return false;
     };
-    let Some(last) = report.projectile_z_samples.last() else {
-        return false;
-    };
-    (first - last).abs() > 0.12
+    report.projectile_z_samples.iter().any(|z| (z - launch).abs() > 0.12)
 }
 
 fn run_test_app(config: ShooterUiAppConfig) -> ShooterUiAppReport {
@@ -1190,10 +1197,15 @@ fn run_test_app_with_limits(
     let hal = Hal::global();
     let info = hal.open(&OpenReq { backend: backend_id::HEADLESS, ..Default::default() });
     cx.borrow_mut().hal_attach_session(info);
-    for _ in 0..draw_cycles {
+    // A turn brings a frame, so the frames a test injects are bounded in turns. The physics
+    // worker that applies their spawns runs at its own pace (a loaded box: 4 of 52 spawns still
+    // to apply 120 turns past the budget), so a wait for it is not: it ends when the app quits.
+    let mut turns = 0;
+    while turns < draw_cycles || app_ref.borrow().as_ref().is_some_and(ShooterLoopbackApp::waiting_for_physics) {
         cx.borrow_mut().redraw_all();
         if !cx.borrow_mut().hal_session_turn(0, true) { break; }
         std::thread::sleep(Duration::from_millis(1));
+        turns += 1;
     }
     hal.close(info.session);
 
@@ -1220,7 +1232,7 @@ fn single_headless_shooter_app_emits_projectiles_from_synthetic_xr_updates() {
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
         gesture_profile: ShooterGestureProfile::TipTrackedPoint,
-        net_config: localhost_config(701, 47046, 47047, 47048, vec![]),
+        net_config: localhost_config(701),
         expected_peers: 0,
         inject_local_xr_updates: true,
         local_back_wall_visible: true,
@@ -1253,7 +1265,7 @@ fn single_headless_shooter_app_emits_projectiles_from_openxr_aim_point_without_t
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
         gesture_profile: ShooterGestureProfile::AimPointWithoutTipBit,
-        net_config: localhost_config(702, 47056, 47057, 47058, vec![]),
+        net_config: localhost_config(702),
         expected_peers: 0,
         inject_local_xr_updates: true,
         local_back_wall_visible: true,
@@ -1286,7 +1298,7 @@ fn single_headless_shooter_app_reemits_after_close_open_with_sticky_grab_bit() {
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
         gesture_profile: ShooterGestureProfile::ReopenPointWithStickyGrabBit,
-        net_config: localhost_config(703, 47066, 47067, 47068, vec![]),
+        net_config: localhost_config(703),
         expected_peers: 0,
         inject_local_xr_updates: true,
         local_back_wall_visible: true,
@@ -1317,7 +1329,7 @@ fn single_headless_shooter_app_keeps_emitting_and_advancing_physics_during_long_
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
         gesture_profile: ShooterGestureProfile::LongHeldPoint,
-        net_config: localhost_config(704, 47076, 47077, 47078, vec![]),
+        net_config: localhost_config(704),
         expected_peers: 0,
         inject_local_xr_updates: true,
         local_back_wall_visible: true,
@@ -1352,7 +1364,7 @@ fn single_headless_shooter_app_keeps_emitting_when_alternating_left_and_right_ha
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
         gesture_profile: ShooterGestureProfile::AlternatingHandsWithStickyGrabBit,
-        net_config: localhost_config(705, 47086, 47087, 47088, vec![]),
+        net_config: localhost_config(705),
         expected_peers: 0,
         inject_local_xr_updates: true,
         local_back_wall_visible: true,
@@ -1386,7 +1398,7 @@ fn single_headless_shooter_app_survives_repeated_sparse_close_open_cycles() {
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
         gesture_profile: ShooterGestureProfile::RepeatedSparseCloseOpen,
-        net_config: localhost_config(706, 47096, 47097, 47098, vec![]),
+        net_config: localhost_config(706),
         expected_peers: 0,
         inject_local_xr_updates: true,
         local_back_wall_visible: true,

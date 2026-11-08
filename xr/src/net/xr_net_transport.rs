@@ -16,6 +16,8 @@ use std::{
 pub(super) enum XrNetUdpOutgoing {
     State(XrNetStateFrame),
     SharedObjectStates(Vec<XrNetSharedObjectState>),
+    /// One more address the discovery hellos go to ([`super::XrNetNode::add_discovery_target`]).
+    DiscoveryTarget(SocketAddr),
     Break,
 }
 
@@ -267,7 +269,7 @@ struct XrNetUdpWorker {
 }
 
 impl XrNetUdpWorker {
-    fn run(self) {
+    fn run(mut self) {
         let mut peers = HashMap::<XrNetPeerId, UdpWorkerPeerState>::new();
         let mut cached_state = None;
         let mut next_discovery_at = Instant::now();
@@ -321,7 +323,7 @@ impl XrNetUdpWorker {
     }
 
     fn drain_outgoing_messages(
-        &self,
+        &mut self,
         peers: &mut HashMap<XrNetPeerId, UdpWorkerPeerState>,
         cached_state: &mut Option<XrNetStateFrame>,
     ) -> bool {
@@ -340,6 +342,11 @@ impl XrNetUdpWorker {
                         for peer in peers.values() {
                             let _ = self.data_socket.send_to(buf, peer.peer.addr);
                         }
+                    }
+                }
+                Ok(XrNetUdpOutgoing::DiscoveryTarget(target)) => {
+                    if !self.discovery_targets.contains(&target) {
+                        self.discovery_targets.push(target);
                     }
                 }
                 Ok(XrNetUdpOutgoing::Break) => return true,

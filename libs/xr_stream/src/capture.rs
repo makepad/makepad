@@ -1,0 +1,524 @@
+//! The headset's cameras for the desktop app that asks (`XrServerMsg::Capture`): its
+//! passthrough cameras' calibration once, then keyframes: both cameras' pictures, lossless, each
+//! with the head pose at the middle of its exposure, and the newest environment depth image.
+//! A keyframe is taken each time the head turned or moved the asked step since the last one,
+//! from frames sharp enough (the head's turn during the exposure smears less than a pixel).
+//! Everything goes up as `crate::xr_capture` records in the link's gaps; the next keyframe waits
+//! until the link has taken most of the last.
+//!
+//! The pictures are the wearer's: they go to the app that asked and nowhere else (never to a
+//! log).
+//!
+//! Both ends use the plane codec ([`encode_plane`], [`decode_plane`]).
+
+use makepad_desk_link::xr::link::XrLink;
+use makepad_desk_link::xr_capture::*;
+use makepad_widgets::makepad_platform::makepad_hal as hal;
+use makepad_widgets::makepad_platform::permission::{Permission, PermissionResult, PermissionStatus};
+use makepad_widgets::makepad_platform::video::{CameraCalibration, CameraFrameLayout, CameraFrameRef, VideoInputId, VideoPixelFormat, MAX_VIDEO_DEVICE_INDEX};
+use makepad_widgets::*;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// The camera slots the capture reads: the platform's last two.
+const SLOTS: [usize; 2] = [MAX_VIDEO_DEVICE_INDEX - 2, MAX_VIDEO_DEVICE_INDEX - 1];
+/// One keyframe is one moment: its cameras' middles of exposure at most this far apart.
+const PAIR_NS: u64 = 8_000_000;
+/// A frame the head's turn smears by more than this during its exposure (pixels) is not taken.
+const BLUR_MAX_PX: f32 = 1.0;
+/// The next keyframe is taken once the link holds less than this of the last one.
+const QUEUED_MAX: usize = 4 << 20;
+/// miniz's fast level: the headset's core keeps up with the cameras.
+const DEFLATE_LEVEL: u32 = 1;
+/// How often the capture says how it goes.
+const STATUS_EVERY: Duration = Duration::from_secs(2);
+
+// ------------------------------------------------------------------ the plane codec
+
+/// `samples` (rows of `width * bytes_per_sample` bytes, tight) as a lossless plane
+/// (`plane_codec::DELTA_DEFLATE`).
+pub fn encode_plane(width: u32, height: u32, bytes_per_sample: u8, samples: &[u8]) -> CapturePlane {
+    let row = width as usize * bytes_per_sample as usize;
+    let bps = bytes_per_sample as usize;
+    let mut delta = vec![0u8; samples.len()];
+    for (r, (out, line)) in delta.chunks_exact_mut(row.max(1)).zip(samples.chunks_exact(row.max(1))).enumerate() {
+        for i in 0..line.len() {
+            let pred = if i >= bps { line[i - bps] } else if r > 0 { samples[(r - 1) * row + i] } else { 0 };
+            out[i] = line[i].wrapping_sub(pred);
+        }
+    }
+    CapturePlane { width, height, bytes_per_sample, codec: plane_codec::DELTA_DEFLATE, data: makepad_fast_inflate::deflate_compress(&delta, DEFLATE_LEVEL) }
+}
+
+/// A plane's samples, rows tight.
+pub fn decode_plane(p: &CapturePlane) -> Result<Vec<u8>, String> {
+    let bps = p.bytes_per_sample.max(1) as usize;
+    // (a peer's header: a size that overflows is refused, never wrapped to a small one)
+    let size = (p.width as usize).checked_mul(bps).and_then(|row| Some((row, row.checked_mul(p.height as usize)?)));
+    let Some((row, len)) = size else {
+        return Err(format!("a plane of {}x{} x{bps}: its size overflows", p.width, p.height));
+    };
+    if len > MAX_PLANE_BYTES {
+        return Err(format!("a plane of {}x{} x{bps}: over the size limit", p.width, p.height));
+    }
+    match p.codec {
+        plane_codec::RAW => {
+            if p.data.len() != len {
+                return Err(format!("raw plane of {} bytes, {len} expected", p.data.len()));
+            }
+            Ok(p.data.clone())
+        }
+        plane_codec::DELTA_DEFLATE => {
+            // (into the plane's own size: data that inflates past it is refused, never grown into)
+            let mut s = vec![0u8; len];
+            let (_, written) = makepad_fast_inflate::deflate_decompress(&p.data, &mut s).map_err(|e| format!("plane of {len} bytes: {e}"))?;
+            if written != len {
+                return Err(format!("plane of {written} bytes, {len} expected"));
+            }
+            for r in 0..p.height as usize {
+                for i in 0..row {
+                    let pred = if i >= bps { s[r * row + i - bps] } else if r > 0 { s[(r - 1) * row + i] } else { 0 };
+                    s[r * row + i] = s[r * row + i].wrapping_add(pred);
+                }
+            }
+            Ok(s)
+        }
+        c => Err(format!("plane codec {c}")),
+    }
+}
+
+// ------------------------------------------------------------------ the headset's side
+
+/// A camera's picture of a keyframe, taken from its frame (planes still raw).
+struct Taken {
+    camera: u8,
+    time_ns: u64,
+    head: hal::XrHeadAt,
+    exposure_ns: u32,
+    rolling_skew_ns: u32,
+    sensitivity: u32,
+    /// Y, U, V: (width, height, samples)
+    planes: Vec<(u32, u32, Vec<u8>)>,
+}
+
+enum Job {
+    Record(CaptureRecord),
+    Keyframe { index: u32, views: Vec<Taken>, depth: Option<makepad_widgets::makepad_platform::os::XrDepthTexels> },
+}
+
+impl Job {
+    /// What the sender sends of this job: anything while the capture is on; once it is off,
+    /// only a status (the pictures queued before the off are dropped, not sent).
+    fn admit(self, on: bool) -> Option<Job> {
+        (on || matches!(self, Job::Record(CaptureRecord::Status { .. }))).then_some(self)
+    }
+}
+
+/// What the frame callbacks share: whether a keyframe is due, the one being put together.
+struct Selector {
+    jobs: Option<Sender<Job>>,
+    ask: CaptureAsk,
+    cameras: usize,
+    /// Each camera's focal length in its frames' pixels (the blur gate).
+    focal_px: [f32; 2],
+    /// The head at the last keyframe.
+    last: Option<hal::XrHeadAt>,
+    pending: [Option<Taken>; 2],
+    index: u32,
+    in_flight: Arc<AtomicUsize>,
+    /// Since the last status: frames seen, held for blur, without an exposure time on the HAL
+    /// clock, without a tracked head then.
+    frames: u64,
+    blurred: u64,
+    untimed: u64,
+    untracked: u64,
+}
+
+fn angle_deg(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let dot = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).abs().min(1.0);
+    2.0 * dot.acos().to_degrees()
+}
+
+impl Selector {
+    /// The capture is off: no more keyframes, and the pictures and pose it held let go.
+    fn off(&mut self) {
+        self.jobs = None;
+        self.pending = [None, None];
+        self.last = None;
+    }
+
+    fn due(&self, head: &hal::XrHeadAt) -> bool {
+        let Some(last) = &self.last else { return true };
+        let d = [head.position[0] - last.position[0], head.position[1] - last.position[1], head.position[2] - last.position[2]];
+        angle_deg(head.orientation, last.orientation) >= self.ask.step_deg || (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() >= self.ask.step_m
+    }
+
+    fn on_frame(&mut self, camera: usize, frame: CameraFrameRef<'_>) {
+        if self.jobs.is_none() || camera >= self.cameras || frame.layout != CameraFrameLayout::I420 || frame.plane_count < 3 {
+            return;
+        }
+        self.frames += 1;
+        let Some(time_ns) = frame.exposure.mid_ns() else {
+            self.untimed += 1;
+            return;
+        };
+        let Some(head) = hal::hal_xr_locate_head(time_ns) else {
+            self.untracked += 1;
+            return;
+        };
+        // (the link still holds the last keyframe: the next waits)
+        if self.in_flight.load(Ordering::Acquire) > 0 || !self.due(&head) {
+            return;
+        }
+        let w = head.angular_velocity;
+        let blur = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt() * frame.exposure.exposure_ns as f32 * 1e-9 * self.focal_px[camera];
+        if blur > BLUR_MAX_PX {
+            self.blurred += 1;
+            return;
+        }
+        let planes = (0..3)
+            .map(|i| {
+                let (pw, ph) = if i == 0 { (frame.width, frame.height) } else { (frame.width.div_ceil(2), frame.height.div_ceil(2)) };
+                let p = frame.planes[i];
+                let mut out = vec![0u8; pw * ph];
+                for (r, line) in out.chunks_exact_mut(pw.max(1)).enumerate() {
+                    let at = r * p.row_stride;
+                    if p.pixel_stride == 1 {
+                        if let Some(src) = p.bytes.get(at..at + pw) {
+                            line.copy_from_slice(src);
+                        }
+                    } else {
+                        for (c, v) in line.iter_mut().enumerate() {
+                            *v = p.bytes.get(at + c * p.pixel_stride).copied().unwrap_or(0);
+                        }
+                    }
+                }
+                (pw as u32, ph as u32, out)
+            })
+            .collect();
+        let e = frame.exposure;
+        self.pending[camera] = Some(Taken { camera: camera as u8, time_ns, head, exposure_ns: e.exposure_ns, rolling_skew_ns: e.rolling_skew_ns, sensitivity: e.sensitivity, planes });
+        // a camera's picture of another moment goes (the pair starts again from this one)
+        for p in &mut self.pending {
+            if p.as_ref().is_some_and(|t| t.time_ns.abs_diff(time_ns) > PAIR_NS) {
+                *p = None;
+            }
+        }
+        if self.pending[..self.cameras].iter().all(|p| p.is_some()) {
+            let views: Vec<Taken> = self.pending.iter_mut().filter_map(|p| p.take()).collect();
+            self.last = Some(views[0].head);
+            let depth = Cx::xr_newest_depth_texels();
+            self.in_flight.fetch_add(1, Ordering::AcqRel);
+            if let Some(jobs) = &self.jobs {
+                let _ = jobs.send(Job::Keyframe { index: self.index, views, depth });
+            }
+            self.index += 1;
+        }
+    }
+}
+
+/// A capture the desktop app asked for, running while it asks and the link lasts.
+pub(crate) struct HeadsetCapture {
+    link: Arc<XrLink>,
+    jobs: Sender<Job>,
+    /// On until stopped: the sender drops what was queued before the off.
+    on: Arc<AtomicBool>,
+    selector: Arc<Mutex<Selector>>,
+    /// The cameras read (input, format size), by slot; empty until listed and opened.
+    opened: Vec<(VideoInputId, [usize; 2])>,
+    state: u8,
+    status_at: Instant,
+}
+
+fn lens(c: &CameraCalibration) -> Option<CaptureLensPose> {
+    Some(CaptureLensPose { rotation: c.lens_rotation?, translation: c.lens_translation?, reference: c.lens_reference.unwrap_or(2) })
+}
+
+impl HeadsetCapture {
+    fn start(cx: &mut Cx, link: Arc<XrLink>, ask: CaptureAsk) -> HeadsetCapture {
+        log!("xr capture: on ({:.0} deg / {:.0} mm a keyframe)", ask.step_deg, ask.step_m * 1000.0);
+        let (jobs, rx) = channel();
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let on = Arc::new(AtomicBool::new(true));
+        let spawned = {
+            let (link, in_flight, on) = (link.clone(), in_flight.clone(), on.clone());
+            std::thread::Builder::new().name("xr-capture".into()).spawn(move || send_jobs(link, rx, in_flight, on))
+        };
+        let selector = Selector { jobs: Some(jobs.clone()), ask, cameras: 0, focal_px: [0.0; 2], last: None, pending: [None, None], index: 0, in_flight, frames: 0, blurred: 0, untimed: 0, untracked: 0 };
+        let selector = Arc::new(Mutex::new(selector));
+        let mut c = HeadsetCapture { link, jobs, on, selector: selector.clone(), opened: Vec::new(), state: capture_state::OFF, status_at: Instant::now() };
+        if let Err(e) = spawned {
+            // (no sender thread: the status goes on the link from here, nothing else does)
+            log!("xr capture: no sender thread: {e}");
+            c.state = capture_state::FAILED;
+            c.on.store(false, Ordering::Release);
+            selector.lock().unwrap().off();
+            let failed = CaptureRecord::Status { state: capture_state::FAILED, text: format!("the headset could not start the capture: {e}") };
+            for chunk in capture_chunks(0, &failed.encode()) {
+                c.link.send_bulk(&chunk);
+            }
+            return c;
+        }
+        // (asked once: granted already, it is answered at once)
+        cx.request_permission(Permission::HeadsetCamera);
+        cx.xr_set_depth_tap(true);
+        // the slots' frames to the selector (camera i reads slot i; the first callback also has
+        // the platform list its cameras)
+        for (i, slot) in SLOTS.iter().enumerate() {
+            let selector = selector.clone();
+            cx.camera_frame_input(*slot, move |frame| selector.lock().unwrap().on_frame(i, frame));
+        }
+        c.status(capture_state::STARTING, "opening the cameras".into());
+        c
+    }
+
+    fn status(&mut self, state: u8, text: String) {
+        if state != self.state {
+            log!("xr capture: {text}");
+        }
+        self.state = state;
+        let _ = self.jobs.send(Job::Record(CaptureRecord::Status { state, text }));
+    }
+
+    /// The passthrough cameras opened at their largest size once the platform lists them.
+    fn open(&mut self, cx: &mut Cx) {
+        if !self.opened.is_empty() || self.state == capture_state::FAILED {
+            return;
+        }
+        let Some(descs) = cx.video_inputs() else { return };
+        let mut cams: Vec<_> = descs.iter().filter_map(|d| cx.video_input_calibration(d.input_id).filter(|c| c.passthrough).map(|c| (d.clone(), c))).collect();
+        cams.sort_by_key(|(_, c)| c.position.unwrap_or(u8::MAX));
+        cams.truncate(SLOTS.len());
+        if cams.is_empty() {
+            self.status(capture_state::FAILED, "this headset lists no passthrough cameras".into());
+            return;
+        }
+        let mut records = Vec::new();
+        for (i, (desc, calibration)) in cams.iter().enumerate() {
+            let Some(format) = desc.formats.iter().filter(|f| f.pixel_format == VideoPixelFormat::YUV420).max_by_key(|f| f.width * f.height) else {
+                self.status(capture_state::FAILED, format!("{} has no YUV format", desc.name));
+                return;
+            };
+            if let Err(e) = cx.video_input_open(SLOTS[i], desc.input_id, format.format_id).and_then(|_| cx.video_input_stream(SLOTS[i], true)) {
+                self.status(capture_state::FAILED, format!("camera {i}: {e}"));
+                return;
+            }
+            // the intrinsics count in the pre-correction array's pixels; the frames show the
+            // active array scaled to their size
+            let array = calibration.pre_correction.unwrap_or([0, 0, format.width as i32, format.height as i32]);
+            let active = calibration.active.unwrap_or(array);
+            let focal = calibration.intrinsics.map_or(0.0, |k| k[0] * format.width as f32 / active[2].max(1) as f32);
+            self.selector.lock().unwrap().focal_px[i] = focal;
+            records.push(CaptureCamera {
+                position: calibration.position.unwrap_or(i as u8),
+                size: [format.width as u32, format.height as u32],
+                intrinsics: calibration.intrinsics,
+                array,
+                active,
+                distortion: calibration.distortion,
+                lens_pose: lens(calibration),
+            });
+            self.opened.push((desc.input_id, [format.width, format.height]));
+            log!("xr capture: camera {i} ({}) at {}x{}", desc.name, format.width, format.height);
+        }
+        self.selector.lock().unwrap().cameras = self.opened.len();
+        let _ = self.jobs.send(Job::Record(CaptureRecord::Cameras(records)));
+    }
+
+    fn stop(mut self, cx: &mut Cx) {
+        for slot in SLOTS.iter().take(self.opened.len()) {
+            let _ = cx.video_input_stream(*slot, false);
+            cx.video_input_close(*slot);
+        }
+        // (the callbacks stay registered but see no frames; this ends the worker's channel, and
+        // the sender drops the pictures still queued)
+        self.on.store(false, Ordering::Release);
+        self.selector.lock().unwrap().off();
+        cx.xr_set_depth_tap(false);
+        if self.link.closed().is_none() {
+            self.status(capture_state::OFF, "capture off".into());
+        }
+        log!("xr capture: off");
+    }
+
+    fn tick(&mut self, cx: &mut Cx) {
+        self.open(cx);
+        if self.state == capture_state::FAILED || self.status_at.elapsed() < STATUS_EVERY {
+            return;
+        }
+        self.status_at = Instant::now();
+        let (frames, blurred, untimed, untracked, index) = {
+            let mut s = self.selector.lock().unwrap();
+            let v = (s.frames, s.blurred, s.untimed, s.untracked, s.index);
+            (s.frames, s.blurred, s.untimed, s.untracked) = (0, 0, 0, 0);
+            v
+        };
+        if frames == 0 {
+            self.status(capture_state::STARTING, if self.opened.is_empty() { "waiting for the camera list".into() } else { "waiting for the cameras (permission)".into() });
+        } else if untimed == frames {
+            self.status(capture_state::FAILED, "the cameras give no exposure times on the headset's clock: no head poses for them".into());
+        } else {
+            self.status(capture_state::CAPTURING, format!("{index} keyframes; last 2 s: {frames} frames, {blurred} too blurred (turn slower), {untracked} while the head was not tracked"));
+        }
+    }
+
+    pub(crate) fn permission(&mut self, result: &PermissionResult) {
+        if result.permission == Permission::HeadsetCamera && matches!(result.status, PermissionStatus::DeniedCanRetry | PermissionStatus::DeniedPermanent) {
+            self.status(capture_state::FAILED, "the headset camera permission was denied".into());
+        }
+    }
+
+    /// Runs the capture as `ask` says on `link` (from the client's housekeeping: every XR frame,
+    /// or its idle timer).
+    pub(crate) fn drive(capture: &mut Option<HeadsetCapture>, cx: &mut Cx, link: Option<&Arc<XrLink>>, ask: Option<CaptureAsk>) {
+        let same = |c: &HeadsetCapture| link.is_some_and(|l| Arc::ptr_eq(l, &c.link)) && ask.is_some();
+        if capture.as_ref().is_some_and(|c| !same(c)) {
+            capture.take().unwrap().stop(cx);
+        }
+        match (capture.as_mut(), link, ask) {
+            (None, Some(link), Some(ask)) => *capture = Some(HeadsetCapture::start(cx, link.clone(), ask)),
+            (Some(c), _, Some(ask)) => {
+                c.selector.lock().unwrap().ask = ask;
+                c.tick(cx);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The capture's sender thread: each record encoded (a keyframe's planes compressed here, off
+/// the UI thread), cut into chunks and queued in the link's gaps, in order.
+fn send_jobs(link: Arc<XrLink>, jobs: Receiver<Job>, in_flight: Arc<AtomicUsize>, on: Arc<AtomicBool>) {
+    let mut seq = 0u32;
+    while let Ok(job) = jobs.recv() {
+        if link.closed().is_some() {
+            return;
+        }
+        let is_keyframe = matches!(job, Job::Keyframe { .. });
+        let record = match job.admit(on.load(Ordering::Acquire)) {
+            Some(Job::Record(r)) => Some(r),
+            Some(Job::Keyframe { index, views, depth }) => Some(CaptureRecord::Keyframe(keyframe(index, views, depth))),
+            None => None,
+        };
+        // (off during the planes' compression: that keyframe is dropped too)
+        if let Some(record) = record.filter(|r| matches!(r, CaptureRecord::Status { .. }) || on.load(Ordering::Acquire)) {
+            for chunk in capture_chunks(seq, &record.encode()) {
+                link.send_bulk(&chunk);
+            }
+            seq = seq.wrapping_add(1);
+            if is_keyframe {
+                link.wait_bulk_below(QUEUED_MAX);
+            }
+        }
+        if is_keyframe {
+            in_flight.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+fn keyframe(index: u32, views: Vec<Taken>, depth: Option<makepad_widgets::makepad_platform::os::XrDepthTexels>) -> CaptureKeyframe {
+    let pose = |o: [f32; 4], p: [f32; 3]| CapturePose { orientation: o, position: p };
+    let views = views
+        .into_iter()
+        .map(|t| CaptureView {
+            camera: t.camera,
+            time_ns: t.time_ns,
+            head: pose(t.head.orientation, t.head.position),
+            velocity: t.head.linear_velocity,
+            angular_velocity: t.head.angular_velocity,
+            exposure_ns: t.exposure_ns,
+            rolling_skew_ns: t.rolling_skew_ns,
+            sensitivity: t.sensitivity,
+            planes: t.planes.iter().map(|(w, h, s)| encode_plane(*w, *h, 1, s)).collect(),
+        })
+        .collect();
+    let depth = depth.map(|d| {
+        let h = d.header;
+        let bytes: Vec<u8> = d.texels.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let eye = |e: &hal::XrEye| CaptureEye { pose: pose(e.pose.orientation, e.pose.position), fov: e.fov };
+        CaptureDepth { time_ns: d.display_ns, near: h.near, far: h.far, views: [eye(&h.views[0]), eye(&h.views[1])], layers: h.layers.max(1), texels: encode_plane(h.width, h.height * h.layers.max(1), 2, &bytes) }
+    });
+    CaptureKeyframe { index, views, depth }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_planes_round_trip_lossless() {
+        // a picture-like plane (gradients and texture) and 16-bit depth, odd sizes
+        let (w, h) = (37u32, 23u32);
+        let y: Vec<u8> = (0..w * h).map(|i| ((i % w) * 3 + (i / w) * 5 + (i * 2654435761u32 >> 28)) as u8).collect();
+        let p = encode_plane(w, h, 1, &y);
+        assert_eq!(p.codec, plane_codec::DELTA_DEFLATE);
+        assert_eq!(decode_plane(&p).unwrap(), y);
+        let depth: Vec<u8> = (0..w * h).flat_map(|i| ((1000 + i * 7) as u16).to_le_bytes()).collect();
+        let d = encode_plane(w, h, 2, &depth);
+        assert_eq!(decode_plane(&d).unwrap(), depth);
+        assert!(d.data.len() < depth.len() / 4, "a smooth depth ramp compresses well: {} of {}", d.data.len(), depth.len());
+        let raw = CapturePlane { width: 2, height: 1, bytes_per_sample: 1, codec: plane_codec::RAW, data: vec![1, 2] };
+        assert_eq!(decode_plane(&raw).unwrap(), vec![1, 2]);
+        assert!(decode_plane(&CapturePlane { data: vec![1], ..raw }).is_err());
+    }
+
+    #[test]
+    fn capture_plane_decode_is_bounded() {
+        // a stream that inflates far past its plane's size (64 MB of zeros as a 64x64 plane) is
+        // refused without growing into it, and so is a plane claiming a huge size
+        let bomb = CapturePlane { width: 64, height: 64, bytes_per_sample: 1, codec: plane_codec::DELTA_DEFLATE, data: makepad_fast_inflate::deflate_compress(&vec![0u8; 64 << 20], 1) };
+        assert!(bomb.data.len() < 1 << 20);
+        assert!(decode_plane(&bomb).is_err());
+        let short = CapturePlane { data: makepad_fast_inflate::deflate_compress(&[0u8; 100], 1), ..bomb.clone() };
+        assert!(decode_plane(&short).is_err());
+        let huge = CapturePlane { width: 1 << 16, height: 1 << 16, bytes_per_sample: 2, ..short };
+        assert!(decode_plane(&huge).unwrap_err().contains("size limit"));
+    }
+
+    #[test]
+    fn capture_plane_size_never_wraps() {
+        // 65536 x 65536 x 4: refused (over the limit, or overflowing where usize is 32 bits)
+        let empty = makepad_fast_inflate::deflate_compress(&[], 1);
+        let big = CapturePlane { width: 1 << 16, height: 1 << 16, bytes_per_sample: 4, codec: plane_codec::DELTA_DEFLATE, data: empty.clone() };
+        assert!(decode_plane(&big).is_err());
+        // 2^31 x 2^31 x 4 is 2^64: it wrapped to 0, passed the limit and indexed past the
+        // empty plane (a panic on the session thread); now refused, raw or deflated
+        let wraps = CapturePlane { width: 1 << 31, height: 1 << 31, ..big };
+        assert!(decode_plane(&wraps).unwrap_err().contains("overflows"));
+        let raw = CapturePlane { codec: plane_codec::RAW, data: Vec::new(), ..wraps };
+        assert!(decode_plane(&raw).unwrap_err().contains("overflows"));
+    }
+
+    #[test]
+    fn capture_off_lets_go_of_pictures() {
+        let taken = || Taken { camera: 0, time_ns: 1, head: hal::XrHeadAt::default(), exposure_ns: 1, rolling_skew_ns: 0, sensitivity: 0, planes: vec![(2, 2, vec![9; 4])] };
+        let (jobs, _rx) = channel();
+        let mut s = Selector { jobs: Some(jobs), ask: CaptureAsk { step_deg: 10.0, step_m: 0.05, preview_hz: 0 }, cameras: 2, focal_px: [500.0; 2], last: Some(hal::XrHeadAt::default()), pending: [Some(taken()), None], index: 3, in_flight: Default::default(), frames: 0, blurred: 0, untimed: 0, untracked: 0 };
+        // off: the picture held for a pair, the last pose and the way to the sender all go
+        s.off();
+        assert!(s.jobs.is_none() && s.pending.iter().all(|p| p.is_none()) && s.last.is_none());
+        // the sender: anything while on; once off, only a status (no queued picture goes)
+        let keyframe = || Job::Keyframe { index: 0, views: vec![taken()], depth: None };
+        let status = || Job::Record(CaptureRecord::Status { state: capture_state::OFF, text: "capture off".into() });
+        let cameras = || Job::Record(CaptureRecord::Cameras(Vec::new()));
+        assert!(keyframe().admit(true).is_some() && cameras().admit(true).is_some());
+        assert!(keyframe().admit(false).is_none() && cameras().admit(false).is_none());
+        assert!(matches!(status().admit(false), Some(Job::Record(CaptureRecord::Status { .. }))));
+    }
+
+    #[test]
+    fn capture_keyframe_steps() {
+        let head = |deg: f32, x: f32| {
+            let h = (deg.to_radians() * 0.5).sin_cos();
+            hal::XrHeadAt { orientation: [0.0, h.0, 0.0, h.1], position: [x, 1.5, 0.0], ..Default::default() }
+        };
+        let s = Selector { jobs: None, ask: CaptureAsk { step_deg: 10.0, step_m: 0.05, preview_hz: 0 }, cameras: 2, focal_px: [500.0; 2], last: Some(head(0.0, 0.0)), pending: [None, None], index: 0, in_flight: Default::default(), frames: 0, blurred: 0, untimed: 0, untracked: 0 };
+        assert!(!s.due(&head(9.0, 0.0)));
+        assert!(s.due(&head(10.5, 0.0)));
+        assert!(!s.due(&head(0.0, 0.04)));
+        assert!(s.due(&head(0.0, 0.051)));
+        assert!((angle_deg(head(0.0, 0.0).orientation, head(30.0, 0.0).orientation) - 30.0).abs() < 1e-3);
+    }
+}

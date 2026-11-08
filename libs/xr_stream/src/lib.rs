@@ -46,6 +46,8 @@ fn set_refresh_mhz(mhz: u32) {
 const HOLD: usize = 6;
 
 mod auto;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod capture;
 mod desktop;
 mod mirror;
 mod panel;
@@ -453,6 +455,32 @@ script_mod! {
             return vec4(mix(top, bottom, f.y) * keep, a * keep)
         }
     }
+
+    // The wearer's sign that the headset's cameras go to the computer
+    // (`XrStreamClient::draw_cameras_on`): a red dot in a white ring, up and left in the view,
+    // fixed to the head (the same direction in both eyes: it sits far away), over everything.
+    mod.draw.DrawXrCamerasOn = mod.std.set_type_default() do #(DrawXrCamerasOn::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        vertex: fn() {
+            let proj = self.draw_pass.camera_projection
+            // its direction (tangents of the view: left, up) and radius
+            let c = vec2(-0.42, 0.36)
+            let r = 0.035
+            let g = self.geom.pos
+            self.pos = g
+            // (the 2D clip in the fragment reads `world`: a point inside every clip)
+            self.world = vec4(0.0, 0.0, 0.0, 1.0)
+            return proj * vec4(c.x + (g.x * 2.0 - 1.0) * r, c.y - (g.y * 2.0 - 1.0) * r, -1.0, 1.0)
+        }
+        pixel: fn() {
+            let d = length(self.pos * 2.0 - vec2(1.0, 1.0))
+            let disc = 1.0 - smoothstep(0.55, 0.62, d)
+            let ring = (1.0 - smoothstep(0.86, 0.95, d)) * smoothstep(0.66, 0.74, d)
+            let a = max(disc, ring)
+            let rgb = mix(vec3(1.0, 1.0, 1.0), vec3(0.95, 0.15, 0.12), disc)
+            return vec4(rgb * a, a)
+        }
+    }
 }
 
 /// The band-depth copy of one eye's picture (see the shader).
@@ -469,6 +497,14 @@ pub struct DrawXrBandDepth {
 pub struct DrawXrStream {
     #[deref]
     pub draw_super: DrawNv12,
+}
+
+/// The cameras-on mark in an XR pass ([`XrStreamClient::draw_cameras_on`]; see the shader).
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawXrCamerasOn {
+    #[deref]
+    pub draw_super: DrawQuad,
 }
 
 /// One tile of a picture, decoded, waiting for the UI thread.
@@ -536,6 +572,10 @@ struct Shared {
     /// Controller buzzes from the server (`XrServerMsg::Haptic`), played on the UI thread.
     #[cfg(not(target_arch = "wasm32"))]
     haptics: Vec<makepad_widgets::makepad_platform::event::xr::XrHapticPulse>,
+    /// The server's app's ask of the cameras (`XrServerMsg::Capture`; None: off, as on every
+    /// new link).
+    #[cfg(not(target_arch = "wasm32"))]
+    capture_ask: Option<makepad_desk_link::xr_capture::CaptureAsk>,
 }
 
 /// The stats of one window (5 s).
@@ -643,6 +683,9 @@ pub struct XrStreamClient {
     blank: Option<Texture>,
     /// A stand-in for the environment depth before the headset has one.
     no_depth: Option<Texture>,
+    /// The cameras' capture while the server's app asks for it (`capture`).
+    #[cfg(not(target_arch = "wasm32"))]
+    capture: Option<capture::HeadsetCapture>,
     /// The room field sent so far on `world_link` (its brick cursor), and the frame count that
     /// paces it.
     #[cfg(not(target_arch = "wasm32"))]
@@ -686,8 +729,9 @@ pub struct XrStreamClient {
     odd_frames: u32,
     /// This display frame's code so far (`report::FRAME_*`; the worst event wins).
     frame_code: u8,
-    /// The power state applied: (stream off, VR, environment depth on); None: not yet.
-    power: Option<(bool, bool, bool)>,
+    /// The power state applied: (stream off, VR, environment depth on, XR frames paused); None:
+    /// not yet.
+    power: Option<(bool, bool, bool, bool)>,
     /// The headset's battery as last read (`hal_battery`: level | charging << 8; -1 unknown)
     /// and when.
     battery: (i64, Option<Instant>),
@@ -766,7 +810,9 @@ impl XrStreamClient {
                 XrTarget::Pair { name, .. } => name.clone(),
                 XrTarget::Address { .. } => "headset".to_string(),
             };
-            let info = HeadsetInfo { name, instance: 0, eye, refresh_mhz: (refresh_hz * 1000.0) as u32, codecs: codecs::HEVC | codecs::H264 | codecs::HAPTICS };
+            // (the cameras' capture: a headset's passthrough cameras, an Android one's)
+            let capture = if cfg!(target_os = "android") { codecs::CAPTURE } else { 0 };
+            let info = HeadsetInfo { name, instance: 0, eye, refresh_mhz: (refresh_hz * 1000.0) as u32, codecs: codecs::HEVC | codecs::H264 | codecs::HAPTICS | capture };
             let _ = std::thread::Builder::new().name("xr-stream".into()).spawn(move || worker(target, info, shared, signal, audio));
         }
         #[cfg(target_arch = "wasm32")]
@@ -781,6 +827,8 @@ impl XrStreamClient {
             shown: [None, None],
             blank: None,
             no_depth: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            capture: None,
             #[cfg(not(target_arch = "wasm32"))]
             world_link: None,
             world_cursor: 0,
@@ -856,11 +904,21 @@ impl XrStreamClient {
         self.shared.lock().unwrap().stream_off
     }
 
-    /// Nothing to show: the stream is off or no server is linked (no XR frames are drawn).
+    /// The headset's cameras go to the computer now (a capture the server's app asked for):
+    /// the view shows it ([`XrStreamClient::draw_cameras_on`]) for as long as they do.
+    pub fn cameras_on(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.capture.is_some();
+        #[cfg(target_arch = "wasm32")]
+        false
+    }
+
+    /// Nothing to show: the stream is off or no server is linked (no XR frames are drawn), and
+    /// the cameras are not on (their mark is shown in every XR frame).
     pub fn idle(&self) -> bool {
         let s = self.shared.lock().unwrap();
         #[cfg(not(target_arch = "wasm32"))]
-        return s.stream_off || s.link.is_none();
+        return (s.stream_off || s.link.is_none()) && self.capture.is_none();
         // (no link on the web)
         #[cfg(target_arch = "wasm32")]
         true
@@ -961,6 +1019,13 @@ impl XrStreamClient {
                 }
                 false
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            Event::PermissionResult(result) => {
+                if let Some(c) = self.capture.as_mut() {
+                    c.permission(result);
+                }
+                false
+            }
             // (a decoded picture: the next XR frame takes it)
             Event::Signal => {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1019,7 +1084,8 @@ impl XrStreamClient {
     fn housekeeping(&mut self, cx: &mut Cx) {
         use makepad_widgets::makepad_platform::makepad_hal as hal;
         // (no server linked: idle like the stream off, the PIN card alone)
-        let (link, room_field, off, vr) = { let s = self.shared.lock().unwrap(); (s.link.clone(), s.room_field, s.stream_off || s.link.is_none(), s.vr) };
+        let (link, room_field, off, vr, capture_ask) = { let s = self.shared.lock().unwrap(); (s.link.clone(), s.room_field, s.stream_off || s.link.is_none(), s.vr, s.capture_ask) };
+        capture::HeadsetCapture::drive(&mut self.capture, cx, link.as_ref(), capture_ask);
         if room_field != cx.xr_room_field_wanted() {
             cx.xr_set_room_field(room_field);
             // (on again: every brick anew, the server's mirror may have dropped them)
@@ -1028,17 +1094,22 @@ impl XrStreamClient {
         if let (Some(link), true) = (&link, room_field) {
             self.send_world(cx, link);
         }
-        let env = (!off && self.occlusion && !vr) || room_field;
-        let want = (off, vr, env);
+        // (a capture records the headset's depth with its pictures)
+        let env = (!off && self.occlusion && !vr) || room_field || self.capture.is_some();
+        // (the cameras on, XR frames go on with the stream off: their mark shows in each)
+        let paused = off && self.capture.is_none();
+        let want = (off, vr, env, paused);
         if self.power != Some(want) {
             let before = self.power.replace(want);
             if before.map(|b| b.0) != Some(off) {
                 log!("xr stream: stream {}", if off { "off: decoders released, the room alone" } else { "on" });
-                hal::hal_xr_stereo_paused(off);
                 if off {
                     self.shown = [None, None];
                     self.pending_show = None;
                 }
+            }
+            if before.map(|b| b.3) != Some(paused) {
+                hal::hal_xr_stereo_paused(paused);
             }
             if before.map(|b| b.1) != Some(vr) {
                 log!("xr stream: {}", if vr { "VR: the picture opaque, no passthrough" } else { "mixed reality" });
@@ -1657,6 +1728,17 @@ impl XrStreamClient {
         let _ = (cx, band);
     }
 
+    /// While the cameras are on ([`XrStreamClient::cameras_on`]), their mark into the current XR
+    /// pass, after the picture (it shows with or without one).
+    pub fn draw_cameras_on(&mut self, cx: &mut Cx2d, draw: &mut DrawXrCamerasOn) {
+        if !self.cameras_on() {
+            return;
+        }
+        // (never the XR pass's depth clip: the mark is over everything)
+        draw.depth_clip = 0.0;
+        draw.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2(1.0, 1.0) });
+    }
+
     pub fn draw(&mut self, cx: &mut Cx2d, draw: &mut DrawXrStream) {
         self.draws += 1;
         #[cfg(not(target_arch = "wasm32"))]
@@ -2042,6 +2124,7 @@ fn worker(target: XrTarget, mut info: HeadsetInfo, shared: Arc<Mutex<Shared>>, s
                     {
                         let mut s = shared.lock().unwrap();
                         s.link = Some(link.clone());
+                        s.capture_ask = None;
                         s.tiles = n;
                         s.tile_size = tile_size;
                         s.eye = eye;
@@ -2121,6 +2204,10 @@ fn worker(target: XrTarget, mut info: HeadsetInfo, shared: Arc<Mutex<Shared>>, s
                         s.haptics.push(makepad_widgets::makepad_platform::event::xr::XrHapticPulse { hand, amplitude, seconds: duration_us as f32 * 1e-6 });
                     }
                 }
+                XrServerMsg::Capture { on, step_deg, step_m, preview_hz } => {
+                    shared.lock().unwrap().capture_ask = on.then_some(makepad_desk_link::xr_capture::CaptureAsk { step_deg, step_m, preview_hz });
+                    SignalToUI::set_ui_signal();
+                }
                 XrServerMsg::Headset { foveation, eye_min_pct, eye_max_pct, multimodal, occlusion, ahead } => {
                     shared.lock().unwrap().headset = Some(HeadsetSettings { foveation, eye_min_pct, eye_max_pct, multimodal, occlusion, ahead });
                     SignalToUI::set_ui_signal();
@@ -2145,6 +2232,7 @@ fn worker(target: XrTarget, mut info: HeadsetInfo, shared: Arc<Mutex<Shared>>, s
             let mut s = shared.lock().unwrap();
             s.link = None;
             s.udp = None;
+            s.capture_ask = None;
         }
         set_status(format!("link ended: {why}; reconnecting"));
         std::thread::sleep(Duration::from_secs(1));
@@ -2362,6 +2450,23 @@ pub fn replay_track_log(dir: &str, name: &str) -> bool {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cameras_on_mark_shader_compiles() {
+        use makepad_widgets::makepad_platform::shader_pack::verify_shader_pack_entry;
+        // the wearer's cameras-on mark is a shader of its own: it must compile wherever the
+        // headset runs (a draw that fails to compile is skipped: no mark at all)
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::script_mod(vm);
+            vm.capture_errors();
+            let value = vm.eval(ScriptMod::new("", "", "test://cameras_on", 0, 0, "use mod.draw.*\nDrawXrCamerasOn{}\n", &[]));
+            let errors = vm.take_errors();
+            assert!(errors.is_empty() && !value.is_err(), "{errors:?}");
+            verify_shader_pack_entry(vm, value.as_object().unwrap()).unwrap();
+        });
+    }
 
     fn rot(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
         let (x, y, z, w) = (q[0], q[1], q[2], q[3]);

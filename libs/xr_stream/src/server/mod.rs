@@ -33,6 +33,7 @@ pub(crate) use sink::script_mod;
 use crate::settings_types::{HeadsetSettings, StreamAa, StreamView, MIN_RENDER_SCALE_PCT, STREAM_AA_MODES};
 
 use makepad_desk_link::xr::WorldBrick;
+use makepad_desk_link::xr_capture::{CaptureAsk, CaptureRecord};
 use makepad_desk_link::xr_pair::ServerPairing;
 use makepad_widgets::*;
 use makepad_widgets::makepad_platform::pass_load::{PassClass, PassLoadSample};
@@ -42,6 +43,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
+/// The headset's capture records (`XrServer::set_capture`) with the link's session id, on the
+/// session's thread. They hold the wearer's camera pictures: the sink keeps them for its app.
+pub type CaptureSink = Arc<dyn Fn(u64, CaptureRecord) + Send + Sync>;
 
 /// The pictures are NV12 textures, one per tile, the pack rendering into their planes (the
 /// encoder takes each as it lies): D3D11. Elsewhere one packed picture (BGRA8 texels holding
@@ -193,6 +197,11 @@ pub(crate) struct ServerShared {
     pub(crate) haptics: Mutex<Vec<makepad_widgets::makepad_platform::event::xr::XrHapticPulse>>,
     /// The linked headset plays haptics (`codecs::HAPTICS` in its hello).
     pub(crate) haptics_ok: AtomicBool,
+    /// The app's ask of the headset's cameras with the session it is for (None: off), whether
+    /// the linked headset captures (`codecs::CAPTURE` in its hello), and where its records go.
+    pub(crate) capture_ask: Mutex<Option<(u64, CaptureAsk)>>,
+    pub(crate) capture_ok: AtomicBool,
+    pub(crate) capture_sink: Mutex<Option<CaptureSink>>,
     pub(crate) pairing: Mutex<Option<Arc<Mutex<ServerPairing>>>>,
     pub(crate) live_headset: Mutex<Option<LiveHeadset>>,
     pub(crate) server_line: Mutex<String>,
@@ -233,6 +242,9 @@ impl ServerShared {
             headset_settings: Mutex::new(HeadsetSettings::DEFAULT),
             haptics: Mutex::new(Vec::new()),
             haptics_ok: AtomicBool::new(false),
+            capture_ask: Mutex::new(None),
+            capture_ok: AtomicBool::new(false),
+            capture_sink: Mutex::new(None),
             pairing: Mutex::new(None),
             live_headset: Mutex::new(None),
             server_line: Mutex::new(String::new()),
@@ -246,6 +258,23 @@ impl ServerShared {
     pub(crate) fn wake(&self) {
         if let Some(s) = self.wake.lock().unwrap().as_ref() {
             s.set();
+        }
+    }
+
+    /// The app's ask of the cameras of the link of `session` (another link's: none).
+    pub(crate) fn capture_ask_for(&self, session: u64) -> Option<CaptureAsk> {
+        self.capture_ask.lock().unwrap().filter(|(s, _)| *s == session).map(|(_, a)| a)
+    }
+
+    /// A capture record from the link of `session`: to the sink while the app asks that link,
+    /// else dropped (a record the app did not ask for, or one still on its way after the off).
+    pub(crate) fn capture_record(&self, session: u64, record: CaptureRecord) {
+        if self.capture_ask_for(session).is_none() {
+            return;
+        }
+        let sink = self.capture_sink.lock().unwrap().clone();
+        if let Some(sink) = sink {
+            sink(session, record);
         }
     }
 
@@ -503,6 +532,24 @@ impl XrServer {
         self.shared.room_scan.store(on, Ordering::Release);
     }
 
+    /// Ask the headset of the link `session` ([`LiveHeadset::session`]) to capture its cameras,
+    /// or stop (None). Only that link captures: another (the headset linking again, another
+    /// headset) captures nothing until the app asks for its own session. Its records go to the
+    /// sink ([`XrServer::set_capture_sink`]); records of a link not asked are dropped.
+    pub fn set_capture(&self, ask: Option<(u64, CaptureAsk)>) {
+        *self.shared.capture_ask.lock().unwrap() = ask;
+    }
+
+    /// Where the capture records go (None: dropped as they arrive).
+    pub fn set_capture_sink(&self, sink: Option<CaptureSink>) {
+        *self.shared.capture_sink.lock().unwrap() = sink;
+    }
+
+    /// The linked headset can capture its cameras (None linked: false).
+    pub fn capture_available(&self) -> bool {
+        self.shared.capture_ok.load(Ordering::Acquire)
+    }
+
     /// The display rate a streaming headset runs at (Hz, one of [`REFRESH_RATES`]; 0: its
     /// own): a change re-links it at that rate (a second without pictures).
     pub fn set_refresh_hz(&self, hz: u32) {
@@ -628,5 +675,43 @@ impl XrServer {
     /// the values), oldest first.
     pub fn headset_reports(&self) -> Vec<Vec<f32>> {
         self.shared.reports.lock().unwrap().iter().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_link_without_a_session_id_fails() {
+        // the random source failing fails the link (never session 0 for every link)
+        let failed = session::session_id(|_| Err(std::io::Error::other("no entropy")));
+        assert!(failed.unwrap_err().contains("no entropy"));
+        let drawn = session::session_id(|b| {
+            b.copy_from_slice(&7u64.to_le_bytes());
+            Ok(())
+        });
+        assert_eq!(drawn, Ok(7));
+    }
+
+    #[test]
+    fn capture_goes_only_to_the_asked_link() {
+        let shared = ServerShared::new(Arc::new(|_: &str| {}));
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink_got = got.clone();
+        *shared.capture_sink.lock().unwrap() = Some(Arc::new(move |session: u64, _: CaptureRecord| sink_got.lock().unwrap().push(session)));
+        let status = || CaptureRecord::Status { state: 2, text: String::new() };
+        let ask = CaptureAsk { step_deg: 5.0, step_m: 0.02, preview_hz: 0 };
+        // nothing asked: records are dropped
+        shared.capture_record(7, status());
+        // asked for link 7: its records go, another link's are dropped, and it is asked nothing
+        *shared.capture_ask.lock().unwrap() = Some((7, ask));
+        assert_eq!((shared.capture_ask_for(7), shared.capture_ask_for(8)), (Some(ask), None));
+        shared.capture_record(7, status());
+        shared.capture_record(8, status());
+        // off: what is still on its way is dropped
+        *shared.capture_ask.lock().unwrap() = None;
+        shared.capture_record(7, status());
+        assert_eq!(*got.lock().unwrap(), vec![7]);
     }
 }

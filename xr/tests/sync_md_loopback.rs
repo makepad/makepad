@@ -27,28 +27,31 @@ where
     None
 }
 
-fn localhost_config(
-    node_id: u64,
-    discovery_port: u16,
-    data_port: u16,
-    sync_port: u16,
-    discovery_targets: Vec<u16>,
-) -> XrNetConfig {
+/// A node on loopback, every socket on a port the OS picks (parallel copies of these tests cannot
+/// take each other's ports), no peers until they are added.
+fn localhost_config(node_id: u64) -> XrNetConfig {
+    let any_port = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
     XrNetConfig {
         node_id: XrNetPeerId(node_id),
-        discovery_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), discovery_port),
-        data_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), data_port),
-        sync_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), sync_port),
-        discovery_targets: discovery_targets
-            .into_iter()
-            .map(|port| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))
-            .collect(),
+        discovery_bind: any_port,
+        data_bind: any_port,
+        sync_bind: any_port,
+        discovery_targets: Vec::new(),
         timing: XrNetTimingConfig {
             discovery_interval: Duration::from_millis(20),
             peer_timeout: Duration::from_millis(150),
             poll_interval: Duration::from_millis(5),
         },
     }
+}
+
+/// Two nodes on loopback that find each other: each one's hellos go to the other's address.
+fn loopback_pair(left_id: u64, right_id: u64) -> (XrNetNode, XrNetNode) {
+    let mut left = XrNetNode::with_config(localhost_config(left_id)).expect("left test client should bind");
+    let mut right = XrNetNode::with_config(localhost_config(right_id)).expect("right test client should bind");
+    right.add_discovery_target(left.discovery_addr());
+    left.add_discovery_target(right.discovery_addr());
+    (left, right)
 }
 
 fn wait_for_join_pair(left: &XrNetNode, right: &XrNetNode) {
@@ -109,10 +112,7 @@ fn shooter_binding(widget_uid: WidgetUid) -> XrSpawnableObjectBinding {
 fn shooter_particle_spawn_state_and_despawn_roundtrip_over_loopback() {
     let activity_id = shooter_activity_id();
     let widget_uid = WidgetUid(101);
-    let mut left = XrNetNode::with_config(localhost_config(501, 45046, 45047, 45048, vec![45056]))
-        .expect("left test client should bind");
-    let mut right = XrNetNode::with_config(localhost_config(502, 45056, 45057, 45058, vec![45046]))
-        .expect("right test client should bind");
+    let (mut left, mut right) = loopback_pair(501, 502);
     let left_peer_id = left.node_id();
     let right_peer_id = right.node_id();
     let mut right_registry = XrSharedObjectRegistry::default();
@@ -269,10 +269,7 @@ fn shooter_particle_spawn_state_and_despawn_roundtrip_over_loopback() {
 fn shared_object_state_roundtrip_preserves_contact_dominated_and_sleeping_modes() {
     let activity_id = shooter_activity_id();
     let widget_uid = WidgetUid(111);
-    let mut left = XrNetNode::with_config(localhost_config(506, 45066, 45067, 45068, vec![45076]))
-        .expect("left test client should bind");
-    let mut right = XrNetNode::with_config(localhost_config(507, 45076, 45077, 45078, vec![45066]))
-        .expect("right test client should bind");
+    let (mut left, mut right) = loopback_pair(506, 507);
     let left_peer_id = left.node_id();
     let right_peer_id = right.node_id();
     let mut right_registry = XrSharedObjectRegistry::default();
@@ -452,10 +449,7 @@ fn shared_object_state_roundtrip_preserves_contact_dominated_and_sleeping_modes(
 fn two_clients_handoff_shared_object_back_and_forth_without_reallocating_identity() {
     let activity_id = shooter_activity_id();
     let widget_uid = WidgetUid(101);
-    let mut left = XrNetNode::with_config(localhost_config(511, 45146, 45147, 45148, vec![45156]))
-        .expect("left test client should bind");
-    let mut right = XrNetNode::with_config(localhost_config(512, 45156, 45157, 45158, vec![45146]))
-        .expect("right test client should bind");
+    let (mut left, mut right) = loopback_pair(511, 512);
     let left_peer_id = left.node_id();
     let right_peer_id = right.node_id();
 
@@ -768,10 +762,7 @@ fn two_clients_handoff_shared_object_back_and_forth_without_reallocating_identit
 
 #[test]
 fn takeover_reject_roundtrip_over_loopback_preserves_request_identity() {
-    let mut left = XrNetNode::with_config(localhost_config(521, 45246, 45247, 45248, vec![45256]))
-        .expect("left test client should bind");
-    let mut right = XrNetNode::with_config(localhost_config(522, 45256, 45257, 45258, vec![45246]))
-        .expect("right test client should bind");
+    let (mut left, mut right) = loopback_pair(521, 522);
     let object_id = xr_make_shared_object_id(left.node_id(), XrSharedObjectCounter(9)).unwrap();
 
     wait_for_sync_pair(&mut left, &mut right);
@@ -831,10 +822,7 @@ fn takeover_reject_roundtrip_over_loopback_preserves_request_identity() {
 
 #[test]
 fn contact_impulse_and_reset_controls_roundtrip_over_loopback() {
-    let mut left = XrNetNode::with_config(localhost_config(531, 45346, 45347, 45348, vec![45356]))
-        .expect("left test client should bind");
-    let mut right = XrNetNode::with_config(localhost_config(532, 45356, 45357, 45358, vec![45346]))
-        .expect("right test client should bind");
+    let (mut left, mut right) = loopback_pair(531, 532);
     let object_id = xr_make_shared_object_id(left.node_id(), XrSharedObjectCounter(11)).unwrap();
 
     wait_for_sync_pair(&mut left, &mut right);
@@ -893,10 +881,7 @@ fn contact_impulse_and_reset_controls_roundtrip_over_loopback() {
 
 #[test]
 fn clock_ping_and_pong_controls_roundtrip_over_loopback() {
-    let mut left = XrNetNode::with_config(localhost_config(541, 45446, 45447, 45448, vec![45456]))
-        .expect("left test client should bind");
-    let mut right = XrNetNode::with_config(localhost_config(542, 45456, 45457, 45458, vec![45446]))
-        .expect("right test client should bind");
+    let (mut left, mut right) = loopback_pair(541, 542);
 
     wait_for_sync_pair(&mut left, &mut right);
 
