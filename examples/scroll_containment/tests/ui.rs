@@ -583,11 +583,18 @@ fn touch_dragging_sideways_from_a_button_leaves_its_page_alone(app: TestApp) {
     assert_eq!(offsets(&app, ["tap_page"]), [page]);
 }
 
+/// A mouse press a button took becomes the page's once it drags the page's way past the tap slop,
+/// as a touch does: the page scrolls and the release clicks nothing.
 #[makepad_test]
-fn mouse_dragging_from_a_button_leaves_its_page_alone(app: TestApp) {
+fn mouse_dragging_from_a_button_scrolls_its_page_and_never_clicks_it(app: TestApp) {
     let [page] = offsets(&app, ["tap_page"]);
+    app.locator(Selector::id("tap_button")).drag_by(0.0, 0.0);
+    wait_for(&app, "tap_clicks", 1.0);
+
     app.locator(Selector::id("tap_button")).drag_by(0.0, -60.0);
-    assert_eq!(offsets(&app, ["tap_page"]), [page]);
+    let [clicks, page_after] = offsets(&app, ["tap_clicks", "tap_page"]);
+    assert_eq!(clicks, 1.0);
+    assert!(page_after >= page + 40.0, "the page followed the mouse ({page} -> {page_after})");
 }
 
 #[makepad_test]

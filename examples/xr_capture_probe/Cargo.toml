@@ -1,0 +1,11 @@
+[package]
+name = "makepad-example-xr-capture-probe"
+version = "1.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "A desktop XR server that asks a linked headset for its camera capture and checks what arrives: calibration, keyframe timing, pairing, head poses, environment depth and lossless planes, as log lines (no pictures kept)"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }
+makepad-xr-stream = { path = "../../libs/xr_stream" }
+makepad-desk-link = { path = "../../libs/desk_link", features = ["host"] }

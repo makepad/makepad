@@ -1,0 +1,9 @@
+[package]
+name = "makepad-example-camera-probe"
+version = "1.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "A device check of camera intake: each camera's frame rate, gaps, exposure results, HAL-clock times and calibration, and a headset's passthrough pair's time apart, as log lines (no pictures)"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false, features = ["media"] }

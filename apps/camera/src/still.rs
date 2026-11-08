@@ -8,7 +8,7 @@
 //! up to [`MAX_STREAM_PIXELS`], at a live frame rate.
 
 use makepad_widgets::makepad_platform::video::{
-    CameraBgraFrame, CameraColorMatrix, CameraFrameLayout, CameraFramePlaneRef, CameraFrameRef, VideoFormat, VideoInputDesc,
+    CameraBgraFrame, CameraColorMatrix, CameraExposure, CameraFrameLayout, CameraFramePlaneRef, CameraFrameRef, VideoFormat, VideoInputDesc,
     VideoPixelFormat,
 };
 
@@ -82,6 +82,7 @@ pub struct HeldFrame {
     pub layout: CameraFrameLayout,
     pub matrix: CameraColorMatrix,
     planes: Vec<(Vec<u8>, usize, usize)>,
+    exposure: CameraExposure,
 }
 
 impl HeldFrame {
@@ -97,6 +98,7 @@ impl HeldFrame {
                 .iter()
                 .map(|p| (p.bytes.to_vec(), p.row_stride, p.pixel_stride))
                 .collect(),
+            exposure: frame.exposure,
         }
     }
 
@@ -114,6 +116,7 @@ impl HeldFrame {
             matrix: self.matrix,
             plane_count: self.planes.len(),
             planes: [plane(0), plane(1), plane(2)],
+            exposure: self.exposure,
         }
     }
 }

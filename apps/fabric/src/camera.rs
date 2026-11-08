@@ -245,7 +245,7 @@ pub(crate) fn yuv_to_rgb(y: u8, u: u8, v: u8) -> [u8; 3] {
 mod tests {
     use super::*;
     use makepad_widgets::makepad_platform::video::{
-        CameraColorMatrix, CameraFramePlaneRef,
+        CameraColorMatrix, CameraExposure, CameraFramePlaneRef,
     };
 
     #[test]
@@ -291,6 +291,7 @@ mod tests {
                 },
                 CameraFramePlaneRef::empty(),
             ],
+            exposure: CameraExposure::default(),
         };
 
         let (rgb, width, height) = frame_to_rgb_max(&frame, 16).unwrap();

@@ -31,30 +31,30 @@ script_mod! {
 
     let HeadButton = ButtonFlatter{
         height: 22 margin: 0 padding: Inset{left: 9 right: 9 top: 2 bottom: 2}
-        draw_text +: {text_style: theme.font_regular{font_size: 8} color: theme.color_text}
+        draw_text +: {text_style: theme.font_regular{font_size: 8} color: theme.color_chart_ink}
     }
     let HeadText = Label{
         padding: Inset{left: 4 right: 4}
-        draw_text +: {color: mix(theme.color_bg_app, theme.color_text, 0.62) text_style: theme.font_regular{font_size: 8}}
+        draw_text +: {color: theme.color_chart_ink_dim text_style: theme.font_regular{font_size: 8}}
     }
-    let Rule = View{width: Fill height: 1 show_bg: true draw_bg +: {color: mix(theme.color_bg_app, theme.color_text, 0.12)}}
+    let Rule = View{width: Fill height: 1 show_bg: true draw_bg +: {color: mix(theme.color_chart_ground, theme.color_chart_ink, 0.12)}}
 
     mod.widgets.DevhubPanelBase = #(DevhubPanel::register_widget(vm))
     mod.widgets.DevhubPanel = set_type_default() do mod.widgets.DevhubPanelBase{
         width: Fill height: Fill flow: Down spacing: 0
         show_bg: true
-        draw_bg +: {color: theme.color_bg_app}
+        draw_bg +: {color: theme.color_chart_ground}
         View{
             width: Fill height: 32 flow: Right spacing: 2 align: Align{y: 0.5} padding: Inset{left: 10 right: 8}
             panel_title := Label{
                 padding: Inset{right: 8}
                 text: "Fleet"
-                draw_text +: {color: theme.color_text text_style: theme.font_bold{font_size: 10}}
+                draw_text +: {color: theme.color_chart_ink text_style: theme.font_bold{font_size: 10}}
             }
             panel_link := Label{
                 padding: Inset{right: 6}
                 text: "connecting to the master\u{2026}"
-                draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 8.5}}
+                draw_text +: {color: theme.color_chart_ink text_style: theme.font_regular{font_size: 8.5}}
             }
             panel_counts := HeadText{text: ""}
             View{width: Fill height: 1}
@@ -68,7 +68,7 @@ script_mod! {
         View{
             width: Fill height: Fill flow: Right spacing: 0
             panel_timeline := mod.widgets.FleetTimeline{}
-            View{width: 1 height: Fill show_bg: true draw_bg +: {color: mix(theme.color_bg_app, theme.color_text, 0.12)}}
+            View{width: 1 height: Fill show_bg: true draw_bg +: {color: mix(theme.color_chart_ground, theme.color_chart_ink, 0.12)}}
             View{
                 width: 340 height: Fill flow: Down spacing: 0
                 panel_needs := mod.widgets.NeedsList{}

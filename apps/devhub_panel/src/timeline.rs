@@ -96,33 +96,33 @@ script_mod! {
     mod.widgets.FleetTimelineBase = #(FleetTimeline::register_widget(vm))
     mod.widgets.FleetTimeline = set_type_default() do mod.widgets.FleetTimelineBase{
         width: Fill height: Fill
-        background: theme.color_bg_app
-        surface: mix(theme.color_bg_app, theme.color_text, 0.035)
-        edge: mix(theme.color_bg_app, theme.color_text, 0.13)
-        grid: mix(theme.color_bg_app, theme.color_text, 0.055)
-        ink: theme.color_text
-        muted: mix(theme.color_bg_app, theme.color_text, 0.58)
+        background: theme.color_chart_ground
+        surface: mix(theme.color_chart_ground, theme.color_chart_ink, 0.035)
+        edge: mix(theme.color_chart_ground, theme.color_chart_ink, 0.12)
+        grid: mix(theme.color_chart_ground, theme.color_chart_ink, 0.07)
+        ink: theme.color_chart_ink
+        muted: theme.color_chart_ink_dim
         accent: theme.color_focus
-        good: #3fb56a
-        warn: #e8a13c
-        bad: #e5534b
-        bar_ink: #14161b
-        tip_bg: mix(theme.color_bg_app, theme.color_text, 0.9)
-        tip_ink: theme.color_bg_app
-        c_build: #5b8def
-        c_test: #47b98a
-        c_gpu: #a77ce8
-        c_ci: #d9b04a
-        c_gate: #e5865a
-        c_long: #4cbcc4
-        c_timed: #e0607a
-        c_screen: #8fb0d6
-        c_inspect: #9aa0a6
-        draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 7.5}}
-        draw_bold +: {color: theme.color_text text_style: theme.font_bold{font_size: 7.8}}
-        draw_small +: {color: theme.color_text text_style: theme.font_regular{font_size: 6.8}}
-        draw_label +: {color: theme.color_text text_style: theme.font_regular{font_size: 6.3}}
-        draw_tip_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 7.5}}
+        good: theme.color_chart_good
+        warn: theme.color_chart_warn
+        bad: theme.color_chart_bad
+        bar_ink: theme.color_chart_ground
+        tip_bg: mix(theme.color_chart_ground, theme.color_chart_ink, 0.92)
+        tip_ink: theme.color_chart_ground
+        c_build: theme.color_chart_1
+        c_test: theme.color_chart_2
+        c_gpu: theme.color_chart_3
+        c_ci: theme.color_chart_4
+        c_gate: theme.color_chart_5
+        c_long: theme.color_chart_6
+        c_timed: theme.color_chart_7
+        c_screen: theme.color_chart_8
+        c_inspect: theme.color_chart_ink_dim
+        draw_text +: {color: theme.color_chart_ink text_style: theme.font_regular{font_size: 7.5}}
+        draw_bold +: {color: theme.color_chart_ink text_style: theme.font_bold{font_size: 7.8}}
+        draw_small +: {color: theme.color_chart_ink text_style: theme.font_regular{font_size: 6.8}}
+        draw_label +: {color: theme.color_chart_ink text_style: theme.font_regular{font_size: 6.3}}
+        draw_tip_text +: {color: theme.color_chart_ink text_style: theme.font_regular{font_size: 7.5}}
     }
 }
 
@@ -652,10 +652,11 @@ impl FleetTimeline {
         vec4(c.x, c.y, c.z, a)
     }
 
+    /// The window's six biggest blockers in the chart series' hues, the rest as one grey.
     fn blocker_color(&self, i: usize) -> Vec4f {
-        const P: [(f32, f32, f32); 6] = [(0.90, 0.52, 0.35), (0.36, 0.55, 0.94), (0.85, 0.69, 0.29), (0.65, 0.49, 0.91), (0.30, 0.74, 0.77), (0.88, 0.38, 0.48)];
-        match P.get(i) {
-            Some(&(r, g, b)) => vec4(r, g, b, 0.78),
+        let series = [self.c_gate, self.c_build, self.c_ci, self.c_gpu, self.c_long, self.c_timed];
+        match series.get(i) {
+            Some(&c) => Self::with_alpha(c, 0.85),
             None => Self::with_alpha(mix(self.background, self.ink, 0.35), 0.78),
         }
     }
@@ -974,8 +975,8 @@ impl FleetTimeline {
                     i += 1;
                     continue;
                 }
-                self.draw_area.color = Self::with_alpha(col, 0.55);
-                self.draw_area.color2 = Self::with_alpha(col, 0.55);
+                self.draw_area.color = Self::with_alpha(col, 0.7);
+                self.draw_area.color2 = Self::with_alpha(col, 0.7);
                 self.draw_area.edge = Self::with_alpha(col, 0.95);
                 self.draw_area.lo0 = lo[i];
                 self.draw_area.lo1 = lo[i + 1];
@@ -1084,7 +1085,7 @@ impl FleetTimeline {
                     self.small_right(cx, plot_x - 6.0, ry, name, muted);
                     let (cores, ram) = (c.cores, c.ram_gb);
                     let vals = Self::columns(s, t_start, t_end, f.now_ms, cols, &|x: &Sample| shares(x, cores, ram)[k]);
-                    let color_of = |v: f32| Self::with_alpha(heat[(v.clamp(0.0, 1.0) * 20.0) as usize], 0.45);
+                    let color_of = |v: f32| Self::with_alpha(heat[(v.clamp(0.0, 1.0) * 20.0) as usize], 0.6);
                     self.draw_area.series(cx, plot_x, COL_W, ry, PRESS_ROW, &vals, &color_of, 0.95);
                 }
             }
@@ -1138,7 +1139,8 @@ impl FleetTimeline {
         let ran = f.end_ms(r).saturating_sub(r.granted_ms.unwrap_or(f.now_ms));
         let over = running && !r.live && r.measured_ms.is_some_and(|m| m >= 30_000 && ran > 2 * m);
         let fresh = self.fresh.get(&r.id).is_some_and(|s| now_t - s < FRESH_S);
-        let fill = if running { Self::with_alpha(c, 0.92) } else { Self::with_alpha(mix(c, self.background, 0.35), 0.7) };
+        // opaque, so the load behind a lane never muddies a bar's hue; an ended one a deeper shade of it
+        let fill = if running { Self::with_alpha(c, 1.0) } else { Self::with_alpha(mix(c, self.background, 0.4), 1.0) };
         let selected = self.selected.as_deref() == Some(r.id.as_str());
         let flag = self.flags.get(&r.id).map(|(s, _)| *s);
         let (outline, glow) = if selected {
@@ -1173,7 +1175,7 @@ impl FleetTimeline {
         }
         // the live end: a bright cap where it meets now
         if running && rect.size.x > 6.0 && self.x_of(f.now_ms) <= rect.pos.x + rect.size.x + 1.0 {
-            let cap = mix(c, vec4(1.0, 1.0, 1.0, 1.0), 0.55);
+            let cap = mix(c, Self::with_alpha(self.ink, 1.0), 0.55);
             self.caps_later.push((Rect { pos: dvec2(rect.pos.x + rect.size.x - 2.0, rect.pos.y + 1.0), size: dvec2(1.5, BAR_H - 2.0) }, cap));
         }
         let label = match (exclusive, r.kind.as_str()) {
@@ -1257,7 +1259,7 @@ impl FleetTimeline {
             self.rect(cx, x, sy + sh, x + SPARK_W, 1.0, g);
             let me = &*self;
             let heat: Vec<Vec4f> = (0..=20).map(|i| me.heat(i as f32 / 20.0)).collect();
-            let color_of = |v: f32| Self::with_alpha(heat[(v.clamp(0.0, 1.0) * 20.0) as usize], 0.42);
+            let color_of = |v: f32| Self::with_alpha(heat[(v.clamp(0.0, 1.0) * 20.0) as usize], 0.6);
             self.draw_area.series(cx, x, COL_W, sy, sh, &vals, &color_of, 0.95);
         }
         let chip_x = x + SPARK_W + 8.0;

@@ -82,6 +82,7 @@ pub fn product(domain: Domain) -> Product {
         Domain::Notes => row(K::Data, R::Source, "data", &["notes"]),
         Domain::Sections => row(K::Data, R::Source, "data", &["sections"]),
         Domain::Garment => row(K::Data, R::Source, "data", &["garment"]),
+        Domain::Multiview => row(K::Data, R::Source, "data", &["multiview"]),
     }
 }
 

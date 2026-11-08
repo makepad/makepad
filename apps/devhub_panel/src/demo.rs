@@ -354,6 +354,7 @@ impl Demo {
                 branch: format!("rc-{lane}"),
                 cwt: String::new(),
                 cbranch: String::new(),
+                nested: Vec::new(),
                 state: if failed { St::Failed } else { St::Landed },
                 held: String::new(),
                 ms: String::new(),
@@ -363,6 +364,7 @@ impl Demo {
                 detail: if failed { vec!["error[E0599]: no method named `pack` found".into()] } else { Vec::new() },
                 agent: agent.into(),
                 proof: false,
+                wire: false,
                 asked_ms: queued_ms,
                 changed_ms: t,
             });

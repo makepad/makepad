@@ -19,19 +19,19 @@ script_mod! {
     mod.widgets.LandStripBase = #(LandStrip::register_widget(vm))
     mod.widgets.LandStrip = set_type_default() do mod.widgets.LandStripBase{
         width: Fill height: 40
-        background: mix(theme.color_bg_app, theme.color_text, 0.035)
-        edge: mix(theme.color_bg_app, theme.color_text, 0.12)
-        ink: theme.color_text
-        muted: mix(theme.color_bg_app, theme.color_text, 0.58)
-        good: #3fb56a
-        warn: #e8a13c
-        bad: #e5534b
+        background: mix(theme.color_chart_ground, theme.color_chart_ink, 0.035)
+        edge: mix(theme.color_chart_ground, theme.color_chart_ink, 0.12)
+        ink: theme.color_chart_ink
+        muted: theme.color_chart_ink_dim
+        good: theme.color_chart_good
+        warn: theme.color_chart_warn
+        bad: theme.color_chart_bad
         accent: theme.color_focus
-        tip_bg: mix(theme.color_bg_app, theme.color_text, 0.9)
-        tip_ink: theme.color_bg_app
-        draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 7.5}}
-        draw_bold +: {color: theme.color_text text_style: theme.font_bold{font_size: 8.0}}
-        draw_tip_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 7.5}}
+        tip_bg: mix(theme.color_chart_ground, theme.color_chart_ink, 0.92)
+        tip_ink: theme.color_chart_ground
+        draw_text +: {color: theme.color_chart_ink text_style: theme.font_regular{font_size: 7.5}}
+        draw_bold +: {color: theme.color_chart_ink text_style: theme.font_bold{font_size: 8.0}}
+        draw_tip_text +: {color: theme.color_chart_ink text_style: theme.font_regular{font_size: 7.5}}
     }
 }
 

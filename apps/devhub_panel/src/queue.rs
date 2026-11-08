@@ -17,18 +17,18 @@ script_mod! {
     mod.widgets.FleetQueueBase = #(FleetQueue::register_widget(vm))
     mod.widgets.FleetQueue = set_type_default() do mod.widgets.FleetQueueBase{
         width: Fill height: Fill
-        background: mix(theme.color_bg_app, theme.color_text, 0.025)
-        edge: mix(theme.color_bg_app, theme.color_text, 0.12)
-        ink: theme.color_text
-        muted: mix(theme.color_bg_app, theme.color_text, 0.58)
-        bad: #e5534b
+        background: theme.color_chart_ground
+        edge: mix(theme.color_chart_ground, theme.color_chart_ink, 0.12)
+        ink: theme.color_chart_ink
+        muted: theme.color_chart_ink_dim
+        bad: theme.color_chart_bad
         accent: theme.color_focus
-        tip_bg: mix(theme.color_bg_app, theme.color_text, 0.9)
-        tip_ink: theme.color_bg_app
-        draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 7.5}}
-        draw_bold +: {color: theme.color_text text_style: theme.font_bold{font_size: 8.5}}
-        draw_small +: {color: theme.color_text text_style: theme.font_regular{font_size: 6.8}}
-        draw_tip_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 7.5}}
+        tip_bg: mix(theme.color_chart_ground, theme.color_chart_ink, 0.92)
+        tip_ink: theme.color_chart_ground
+        draw_text +: {color: theme.color_chart_ink text_style: theme.font_regular{font_size: 7.5}}
+        draw_bold +: {color: theme.color_chart_ink text_style: theme.font_bold{font_size: 8.5}}
+        draw_small +: {color: theme.color_chart_ink text_style: theme.font_regular{font_size: 6.8}}
+        draw_tip_text +: {color: theme.color_chart_ink text_style: theme.font_regular{font_size: 7.5}}
     }
 }
 
@@ -157,6 +157,10 @@ impl FleetQueue {
             let wait = f.wait_ms(r);
             let over = wait >= LONG_WAIT_MS;
             let row = Rect { pos: dvec2(v.pos.x + 4.0, y + 2.0), size: dvec2(v.size.x - 8.0, ROW_H - 4.0) };
+            // rows part by a faint rule, not a fill
+            let e = self.edge;
+            self.draw_shape.color = vec4(e.x, e.y, e.z, 0.55);
+            self.draw_shape.draw_abs(cx, Rect { pos: dvec2(v.pos.x + 8.0, y + ROW_H - 0.5), size: dvec2(v.size.x - 16.0, 1.0) });
             let hovered = self.hover.filter(|(h, _)| *h == i);
             if over {
                 let b = self.bad;

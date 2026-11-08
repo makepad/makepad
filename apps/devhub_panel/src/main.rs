@@ -29,7 +29,7 @@ script_mod! {
             main_window := Window{
                 window.title: "devhub"
                 window.inner_size: vec2(1440, 860)
-                pass +: {clear_color: theme.color_bg_app}
+                pass +: {clear_color: theme.color_chart_ground}
                 body +: {
                     padding: 0 spacing: 0
                     panel := mod.widgets.DevhubPanel{}

@@ -20,19 +20,19 @@ script_mod! {
     mod.widgets.DetailPaneBase = #(DetailPane::register_widget(vm))
     mod.widgets.DetailPane = set_type_default() do mod.widgets.DetailPaneBase{
         width: Fill height: Fit
-        background: mix(theme.color_bg_app, theme.color_text, 0.045)
-        edge: mix(theme.color_bg_app, theme.color_text, 0.12)
-        code_bg: mix(theme.color_bg_app, theme.color_text, 0.08)
-        ink: theme.color_text
-        muted: mix(theme.color_bg_app, theme.color_text, 0.58)
+        background: theme.color_chart_ground
+        edge: mix(theme.color_chart_ground, theme.color_chart_ink, 0.12)
+        code_bg: mix(theme.color_chart_ground, theme.color_chart_ink, 0.07)
+        ink: theme.color_chart_ink
+        muted: theme.color_chart_ink_dim
         accent: theme.color_focus
-        good: #3fb56a
-        warn: #e8a13c
-        bad: #e5534b
-        draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 7.5}}
-        draw_bold +: {color: theme.color_text text_style: theme.font_bold{font_size: 8.5}}
-        draw_small +: {color: theme.color_text text_style: theme.font_regular{font_size: 6.8}}
-        draw_code +: {color: theme.color_text text_style: theme.font_code{font_size: 6.6}}
+        good: theme.color_chart_good
+        warn: theme.color_chart_warn
+        bad: theme.color_chart_bad
+        draw_text +: {color: theme.color_chart_ink text_style: theme.font_regular{font_size: 7.5}}
+        draw_bold +: {color: theme.color_chart_ink text_style: theme.font_bold{font_size: 8.5}}
+        draw_small +: {color: theme.color_chart_ink text_style: theme.font_regular{font_size: 6.8}}
+        draw_code +: {color: theme.color_chart_ink text_style: theme.font_code{font_size: 6.6}}
     }
 }
 
