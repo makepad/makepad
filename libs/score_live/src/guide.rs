@@ -287,7 +287,7 @@ Score{label: "Name" clock kit bass kick line pump verb a b arrange: [a b]}
   (loops the region until `dur` ends; 4 beats if no dur), `fit: 4` (the
   region lasts 4 beats by speed: pitch follows) or `stretch: 4` (lasts 4
   beats at its own pitch). `sample(nil, {onset: i % 4})` chops a break.
-- A note's pitch can move under it: `play(@a3, {bend: [[0 0] [1 -12]]})`
+- A note's pitch can move under it: `play(@a3, {bend: [[0, 0], [1, -12]]})`
   (semitones over beats: a slide or a fall), `vib: [5.5 0.25 0.5]` (rate
   Hz, depth semitones, starting half a beat in), `arp: [0 3 7] arp_step:
   0.0625` (a chip arpeggio, one step a 64th). Synths and samplers; a
@@ -644,5 +644,23 @@ mod tests {
             }
         }
         assert!(examples >= 2, "{examples} examples");
+    }
+
+    /// The bend example is two points of two numbers (the commas keep `-12` an item of its
+    /// own: `[1 -12]` would be one, `1 - 12`), and the parser has nothing to warn of.
+    #[test]
+    fn the_bend_example_parses_to_the_points_it_shows() {
+        let guide = super::guide();
+        let at = guide.find("`play(@a3, {bend:").unwrap() + 1;
+        let example = &guide[at..at + guide[at..].find('`').unwrap()];
+        assert!(makepad_script::parser::parse_warnings(example).is_empty(), "{example}");
+        let tree = makepad_script::syntax::parse(example).unwrap();
+        let mut counts = Vec::new();
+        tree.walk(&mut |_, node| {
+            if let makepad_script::syntax::Kind::Array { items, .. } = &node.kind {
+                counts.push(items.len());
+            }
+        });
+        assert_eq!(counts, [2, 2, 2], "{example}");
     }
 }
