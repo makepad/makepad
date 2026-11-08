@@ -42,4 +42,14 @@ node-number (^|[^0-9a-z.#_:/=-])([a-z]+ +)?@node-number@, (20[0-9][0-9]-)?[01][0
 node-number (^|[^0-9a-z.#_:/=-])([a-z]+ +)?@node-number@ (sat|sits|ran|runs|took|takes|showed|shows|saw|sees|lost|loses|kept|keeps|went|goes|booted|boots|rebooted|reboots|crashed|crashes|hung|hangs|stalled|stalls|froze|freezes|died|dies|answered|answers|refused|refuses|restarted|restarts|stopped|stops|served|serves|built|builds|rebuilt|rebuilds|rolled|rolls|woke|wakes|slept|sleeps|swapped|swaps|panicked|idled|idles|shipped|ships)([^a-z0-9_]|$)
 node-number \(([^()]*[^0-9a-z.#_:/=-])?([a-z]+ +)?@node-number@(,|;| and | or )([^()]*[^0-9])?(20[0-9][0-9]-)?[01][0-9]-[0-3][0-9]([^0-9)][^()]*)?\)
 node-number \(([^()]*[^0-9])?(20[0-9][0-9]-)?[01][0-9]-[0-3][0-9][^0-9)]([^()]*[^0-9a-z.#_:/=-])?([a-z]+ +)?@node-number@(\)|(,|;| and | or )[^()]*\))
+# "(<N>: ...)", a note the box's number leads, and "held <N> at", "on <N>.", a box held or worked on:
+# "(<N>: budget cores 16)" and "held <N> at" reached work past the shapes above (11-07). The number
+# ends the phrase there or a small word follows it, so "holds <N> bytes" or "on <N> files" is none.
+node-number \(@node-number@:([^0-9]|$)
+node-number (^|[^a-z0-9_])(held|holds|holding|hold|on|onto|to|from|beside|behind|left|leaves) +@node-number@( *([^ 0-9a-z_.]|$|\.([^0-9]|$))| +(at|and|or|in|by|for|with|while|behind|beside|until|since|before|after|when|as|is|was|its)([^a-z0-9_]|$))
+# "<word>-<N>", a job or lease named after its box ("prebuild-<N>"): two doc comments reached work
+# past the shapes above (11-08). A two-letter code ("WR-<N>"), a number inside a longer one, or a
+# field, line or test number ("field-<N>") is none.
+node-number (^|[^0-9a-z.#_:/=-])[a-z][a-z][a-z]+-@node-number@([^0-9a-z_.]|$|\.([^0-9]|$))
+except node-number (.*[^a-z])?(field|issue|line|page|item|step|frame|test|case|version|port)-@node-number@.*
 except node-number (.*[^a-z])?(exit|code|codes|status|signal|errno|rc|returns|returned|error|errors|line|lines|col|column|row|page|item|items|step|steps|frame|frames|byte|bytes|seq|id|pid|port|lease|job|issue|pr|version|test|tests|case|cases|count|took|value|len|size|width|height|offset|index|slot|round|rounds|attempt|tries) +@node-number@.*

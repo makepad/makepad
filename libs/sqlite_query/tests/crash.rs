@@ -79,9 +79,23 @@ fn crash_child() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     makepad_sqlite::pager::set_crash_after(at);
+    say_core_limit(at);
     mutate(Path::new(&path));
     // Reaching this point means the crash point was past the end of the commit.
     println!("STEPS {}", makepad_sqlite::pager::write_steps());
+}
+
+/// An armed child says its core limit before it aborts (Linux: `/proc/self/limits`): it aborts on
+/// purpose and must dump no core.
+fn say_core_limit(at: u64) {
+    use std::io::Write;
+    let limits = std::fs::read_to_string("/proc/self/limits").unwrap_or_default();
+    let soft = limits.lines().find(|l| l.starts_with("Max core file size")).and_then(|l| l.split_whitespace().nth(4));
+    if let (true, Some(soft)) = (at != 0, soft) {
+        let mut out = std::io::stdout();
+        let _ = writeln!(out, "CORE {soft}");
+        let _ = out.flush();
+    }
 }
 
 fn run_child(db: &Path, crash_at: u64) -> (bool, String) {
@@ -178,9 +192,12 @@ fn every_crash_point_leaves_a_consistent_database() {
     for at in 1..=steps {
         let path = scratch.path(&format!("crash-{at}.db"));
         std::fs::copy(&pristine, &path).unwrap();
-        let (ok, _) = run_child(&path, at);
+        let (ok, out) = run_child(&path, at);
         if !ok {
             crashed += 1;
+        }
+        if cfg!(target_os = "linux") {
+            assert!(out.lines().any(|l| l == "CORE 0"), "the child armed to crash at step {at} must dump no core (its core limit 0), it said: {out}");
         }
         let recovered = recover_and_check(&path, &scratch, &at.to_string());
         // The only two acceptable outcomes: the old state or the new one.

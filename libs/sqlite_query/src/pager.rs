@@ -29,11 +29,46 @@ use std::time::Duration;
 static CRASH_AT: AtomicU64 = AtomicU64::new(0);
 static WRITE_STEPS: AtomicU64 = AtomicU64::new(0);
 
-/// Abort the process after `n` further write steps (0 = never).
+/// Abort the process after `n` further write steps (0 = never). A process armed to abort
+/// aborts on purpose, so it dumps no core: its core limit drops to 0 here. Under the JIT the
+/// crash child is the whole JIT process, and each crash point handed the box's core dumper a
+/// process of gigabytes to compress, some 30 s a point (11-07).
 pub fn set_crash_after(n: u64) {
+    if n != 0 {
+        no_core_dump();
+    }
     CRASH_AT.store(n, Ordering::SeqCst);
     WRITE_STEPS.store(0, Ordering::SeqCst);
 }
+
+/// RLIMIT_CORE to 0, soft and hard: this process leaves no core (a piped dumper, such as
+/// systemd-coredump, reads the limit and skips it).
+#[cfg(unix)]
+fn no_core_dump() {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    type RlimT = std::os::raw::c_ulong;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    type RlimT = u64;
+    #[repr(C)]
+    struct Rlimit {
+        cur: RlimT,
+        max: RlimT,
+    }
+    extern "C" {
+        fn setrlimit(resource: std::os::raw::c_int, rlim: *const Rlimit) -> std::os::raw::c_int;
+    }
+    // RLIMIT_CORE: 4 on Linux, Android and the BSDs (macOS, iOS)
+    const RLIMIT_CORE: std::os::raw::c_int = 4;
+    let none = Rlimit { cur: 0, max: 0 };
+    // SAFETY: a plain syscall wrapper given a valid, live struct
+    unsafe {
+        setrlimit(RLIMIT_CORE, &none);
+    }
+}
+
+/// Windows writes no core files.
+#[cfg(not(unix))]
+fn no_core_dump() {}
 
 /// Journal record writes count as steps too (crate-internal hook).
 pub(crate) fn journal_write_step() {

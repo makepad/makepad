@@ -103,6 +103,8 @@ impl AndroidVariant {
                      extensions only to apps that declare these (as the old Quest manifest did) -->
                 <uses-permission android:name="com.oculus.permission.USE_SCENE" />
                 <uses-permission android:name="horizonos.permission.USE_SCENE" />
+                <!-- the passthrough cameras (asked at run time, only by an app that captures them) -->
+                <uses-permission android:name="horizonos.permission.HEADSET_CAMERA" />
                 <uses-permission android:name="com.oculus.permission.USE_ANCHOR_API" />
                 <uses-permission android:name="horizonos.permission.USE_ANCHOR_API" />
                 <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />

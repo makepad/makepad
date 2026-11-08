@@ -138,6 +138,8 @@ workspace.members = [
     "libs/bounded_http",
     # zero-dependency shared primitives (SHA-256, reuse-address UDP bind)
     "libs/core_util",
+    # pictures decoded to RGBA with no platform (the app's and headless tools' one decoder)
+    "libs/image_decode",
     "libs/strict_json",
     "libs/cell_width",
     "libs/source_slice",
@@ -177,6 +179,8 @@ workspace.members = [
     "examples/pdf",
     "examples/shader",
     "examples/frame_probe",
+    "examples/camera_probe",
+    "examples/xr_capture_probe",
     "examples/fractal_zoom",
     "examples/material_lab",
     "examples/raytrace",

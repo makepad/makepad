@@ -154,6 +154,11 @@ colors such as `#x2ecc71` and `#x1e1e2e` where a digit followed by `e` or
 For Rust action enums, use `#[derive(Default)]` and `#[default]` on the
 default variant, not the old `DefaultNone` derive.
 
+Array items may be separated by spaces, but write commas whenever an item is
+negative: `[0, 0, -30deg]`. `[0 0 -30deg]` reads as `[0, 0 - 30deg]` (two items,
+the minus a subtraction), and the parser warns about a `-` with a space before
+it and none after inside `[ ]`.
+
 In script functions, `a.b ?? d` reads an optional field: a missing field
 (or a field of nil) is `d`, where `a.b |? d` only replaces a nil value.
 `mod(a, b)` is the floored modulo of shading languages (the result takes

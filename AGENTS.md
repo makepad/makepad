@@ -121,6 +121,7 @@ and anonymisation rules are in
   cleanup; it happens at most every 10 minutes, within 5 minutes of a devhub landing even while
   landings keep coming (a wait says `stalled: <why>` in the update events). Holders just keep
   beating; `devhub master restart` forces one.
+- The whole dev loop and where its latency goes: [Dev workflow](docs/agents/dev-workflow.md).
 
 ## Clean up after work
 
