@@ -111,21 +111,13 @@ fn heap_in_use() -> u64 {
 }
 
 /// The heap check counts the whole process, so what grows it besides the fixture is settled first.
-/// Each of these is one-off process state that the cycles would otherwise create in whichever
-/// cycle first needs it, which depends on how the threads interleave (and so on machine load):
-/// lazy compiles of the fixture's code, and the symbol tables of the images a teardown stack
-/// dump names (it runs only when a thread outlives its domain's stop).
+/// The lazy compiles of the fixture's code are one-off process state that the cycles would
+/// otherwise make in whichever cycle first needs them, which depends on how the threads
+/// interleave (and so on machine load). (Nothing in the cycles reads symbol tables: a stop
+/// reports no thread that is on its way out, so no stack is dumped.)
 #[cfg(target_os = "linux")]
 fn warm_process_state(u: &mut Unit, entry: u64) {
-    extern "C" {
-        fn getpid() -> i32;
-    }
     crate::jit::precompile_reachable(u, entry);
-    assert!(crate::inspect::symbols::host_symbol(getpid as *const () as usize as u64).is_some());
-    // This test's own code is in a host image only in a rustc build: under the JIT it is JIT
-    // code, which no image's symbol table holds (a stack dump names it from the JIT's tables).
-    #[cfg(not(relax))]
-    assert!(crate::inspect::symbols::host_symbol(warm_process_state as *const () as usize as u64).is_some());
 }
 
 #[test]
@@ -224,6 +216,9 @@ fn teardown_fixture_cycles_and_retiring_thread() {
     assert!(freed_by_teardown() > freed);
     next_flags[1].store(1, Ordering::SeqCst);
     stop(replacement, Stop::Quit).unwrap();
+    // its main returned long ago, so the stop does not wait for the worker: the worker ends (its
+    // TLS destructor on the replacement's heap) before the record and that heap go
+    wait_thread_done(replacement);
     domains().retain(|d| d.info.id != domain && d.info.id != replacement);
     drop(u);
     std::fs::remove_dir_all(root).unwrap();
@@ -407,11 +402,12 @@ fn a_build_script_start_under_a_loading_domain_finishes() {
         });
         let _ = done_tx.send(status.map(|s| s.map(|s| s.success())));
     });
-    // a deadline only to report the deadlock (the threads stay stuck when it is there)
-    match done_rx.recv_timeout(Duration::from_secs(60)) {
+    // (a process start that waits for the loader's compile job, the deadlock this is about,
+    // holds the test here, a hung test)
+    match done_rx.recv() {
         Ok(Ok(Ok(true))) => {}
         Ok(r) => panic!("the build script did not run: {:?}", r.map(|r| r.map_err(|e| e.to_string()))),
-        Err(_) => panic!("a process start under a loading domain's compile job never finished (fork waits for the loader's job)"),
+        Err(_) => panic!("the process start's thread ended without an answer"),
     }
     drop(u);
     std::fs::remove_dir_all(root).unwrap();
@@ -900,7 +896,6 @@ fn a_run_ends_with_every_thread_wherever_it_is() {
     let (domain, _base, main) = launch(&mut u, entry, None, &flags);
     wait_at_place(domain, &flags);
     let end = end_run(up, Duration::from_secs(10));
-    eprintln!("{}", end.line());
     assert!(end.left.is_empty(), "left: {:?}", end.left);
     main.join().unwrap();
     wait_thread_done(domain);
@@ -911,6 +906,46 @@ fn a_run_ends_with_every_thread_wherever_it_is() {
     assert_eq!(end.called_in, 0);
     // no native frame was left behind on the way: nothing of the runtime's can stay locked
     assert_eq!(end.abandoned, Vec::new());
+    domains().retain(|d| d.info.id != domain);
+    drop(u);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// flags[0]: the thread to hold runs
+const HELD_RUN: &str = r#"
+use std::sync::atomic::{AtomicU64, Ordering};
+fn flags(a: usize) -> &'static [AtomicU64; 4] { unsafe { &*(a as *const [AtomicU64; 4]) } }
+fn fixture(p: *mut u64) {
+    let a = p as usize;
+    std::thread::Builder::new().name("held-for-good".into()).spawn(move || {
+        flags(a)[0].fetch_add(1, Ordering::SeqCst);
+        loop { std::thread::sleep(std::time::Duration::from_millis(20)); }
+    }).unwrap();
+    loop { std::thread::park(); }
+}
+"#;
+
+/// A thread held for good (a frame of it in code a layout patch replaced: stale.rs `park_held`)
+/// leaves with its run: once the run's code is gone the end lets it go, and it ends as every other
+/// thread of the run does, its domain's memory back.
+#[test]
+fn a_thread_held_for_good_leaves_with_its_run() {
+    isolated_test!(a_thread_held_for_good_leaves_with_its_run);
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut u, entry, root) = fixture_of(HELD_RUN, "fixture");
+    let up = &mut *u as *mut Unit;
+    let flags: [AtomicU64; 4] = Default::default();
+    let (domain, _base, main) = launch(&mut u, entry, None, &flags);
+    wait(|| flags[0].load(Ordering::SeqCst) == 1);
+    let held = crate::inspect::threads::list().into_iter().find(|t| t.name == "held-for-good").expect("the fixture's thread");
+    assert!(crate::inspect::instrument::hold_for_good(&held), "the thread is held");
+    let end = end_run(up, Duration::from_secs(10));
+    assert!(end.left.is_empty(), "left: {:?}", end.left);
+    main.join().unwrap();
+    wait_thread_done(domain);
+    let dead = info(domain).unwrap();
+    assert_eq!((dead.threads, dead.base), (0, 0));
+    assert_eq!(dead.state, DomainState::Stopped);
     domains().retain(|d| d.info.id != domain);
     drop(u);
     std::fs::remove_dir_all(root).unwrap();
@@ -988,7 +1023,6 @@ fn a_run_ends_with_native_frames_in_it_and_no_host_lock_stays_held() {
     });
     wait(|| flags[0].load(Ordering::SeqCst) == 1);
     let end = end_run(up, Duration::from_millis(300));
-    eprintln!("{}", end.line());
     assert!(end.left.iter().any(|l| l.1 == "in-native"), "the call is never cut off: {:?}", end.left);
     assert!(!caller.join().unwrap(), "the callback's call came back saying the run ended");
     assert!(CALLER_LOCK.try_lock().is_ok());
@@ -1292,7 +1326,6 @@ fn a_run_ends_with_what_it_held_given_back() {
             flags[0].load(Ordering::SeqCst) == 1
         });
         let end = end_run(up, Duration::from_secs(10));
-        eprintln!("{}", end.line());
         assert!(end.left.is_empty(), "left: {:?}", end.left);
         main.join().unwrap();
         wait_thread_done(domain);
@@ -1332,7 +1365,6 @@ fn a_run_ends_with_what_it_held_given_back() {
         drop(u);
         std::fs::remove_dir_all(root).unwrap();
     }
-    eprintln!("left open by each round: {counts:?}");
     // (the first round's lazy compiles open what stays open for the whole process)
     assert_eq!(&counts[1..], &[0, 0], "left open: {lefts:?}");
 }
@@ -1408,25 +1440,15 @@ fn a_fault_deeper_in_native_code_ends_the_process_at_once() {
         return;
     }
     let log = std::env::temp_dir().join(format!("relax-native-fault-{}.log", std::process::id()));
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", THIS, "--test-threads=1", "--nocapture"])
-        .env(CHILD, "1")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::fs::File::create(&log).unwrap())
-        .spawn()
-        .unwrap();
-    let since = std::time::Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        // (the fixture's compile comes first, on a loaded machine; the end is what is bounded)
-        if since.elapsed().as_secs() >= 300 {
-            child.kill().unwrap();
-            panic!("the process stayed up after its fault:\n{}", std::fs::read_to_string(&log).unwrap_or_default());
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    // (the fixture's compile comes first; a process that stayed up after its fault holds the
+    // test here, a hung test)
+    let status = crate::test_child::status(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", THIS, "--test-threads=1", "--nocapture"])
+            .env(CHILD, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&log).unwrap()),
+    );
     let told = std::fs::read_to_string(&log).unwrap();
     std::fs::remove_file(&log).unwrap();
     assert!(told.contains("the process ends"), "{status:?}\n{told}");

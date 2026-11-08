@@ -2465,7 +2465,22 @@ impl<'a> Fcx<'a> {
             Pat::Tuple(v) => {
                 let et = self.shallow(expected);
                 let elems = match *self.tcx.tys.kind(et) {
-                    TyKind::Tuple(x) => self.tcx.tys.list(x).to_vec(),
+                    TyKind::Tuple(x) => {
+                        // rustc pat.rs check_pat_tuple: the pattern's tuple (its own elements, or
+                        // the scrutinee's length with a `..`) equals the scrutinee's type; a
+                        // length mismatch is E0308 and the elements check against `{error}`
+                        let tys = self.tcx.tys.list(x).to_vec();
+                        let pats = self.ast().list(*v);
+                        let has_rest = pats.iter().any(|&q| is_rest_pat(self.ast(), q));
+                        let own = pats.len() - has_rest as usize;
+                        if own > tys.len() || (!has_rest && own < tys.len()) {
+                            let n = |k: usize| format!("{} element{}", k, if k == 1 { "" } else { "s" });
+                            self.err(self.last_lo, format!("E0308: mismatched types: expected a tuple with {}, found one with {}", n(tys.len()), n(own)));
+                            vec![self.tcx.tys.error; pats.len()]
+                        } else {
+                            tys
+                        }
+                    }
                     _ => {
                         let mut x = Vec::new();
                         for _ in 0..v.len() {

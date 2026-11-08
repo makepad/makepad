@@ -48,6 +48,12 @@ path = "src/provided_static.rs"
 name = "relax-unwind-probe"
 path = "src/unwind_probe.rs"
 
+# a JIT panic through the lib's rustc frames: rustc's drop guard runs and rustc's catch_unwind
+# catches it; prints what its rustc build prints (unwind_through.sh)
+[[bin]]
+name = "relax-unwind-through"
+path = "src/unwind_through.rs"
+
 # a native panic in a lazy compile reaches the program as a panic of the call (compile_panic.sh)
 [[bin]]
 name = "relax-compile-panic"

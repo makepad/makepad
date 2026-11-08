@@ -8,7 +8,8 @@ GATE_PACKAGES are checked when the diff reaches them, along with every changed
 package with a lib or bin target. A diff that reaches the JIT checks JIT_CHECKS too, whatever
 uses the changed crates. A diff that reaches no gate package gates
 Calculator, the one canary; a diff only in devhub's own crate gates
-its build alone. The other repo's crates that use a changed crate get a `cargo` line each: the
+its build alone. The other repo's crates that use a changed crate get a `cargo` line each, and so do
+this repo's users that nothing else here type-checks (no gate package, unchanged, no test target): the
 gate checks them all in one cargo check. Prints `jit yes|no`: whether the diff touches what the JIT binary
 is built from; `devhub yes|no`: whether it touches devhub's own binary. A `check` line may end in
 `--also=<libs>`: libs checked as that build compiles them (feature flips, below).
@@ -17,10 +18,11 @@ since: selected whatever the diff reaches, as a diff that never reaches it says 
 `gone <unit>` line: its package left the tree. A `suite <package>` line: a JIT suite failing since.
 A `tests <package> <dir>` line: a package whose test targets the diff reaches, the changed packages
 and every package that uses one (a dev-dependency too), in both repos: the gate type-checks them in
-one `cargo check --tests` ([`tested`]). `--tests` prints only those lines, in any cargo workspace: the
-tests bucket runs each one's tests under the JIT (land_gate.sh testrun), so there a diff that reaches the JIT
-or a workspace-wide input reaches every package with tests; GATE_FULL=1 (the full bucket) reaches them all, whatever
-the diff.
+one `cargo check --tests` ([`tested`]). `--tests` prints only those lines, in any cargo workspace
+(land_gate.sh tests). `--runs` prints the tests bucket's: `tests` lines of the packages whose tests it runs under
+the JIT after a landing (land_gate.sh testrun, [`run_units`]): the changed packages and the gate packages the
+diff reaches, as the fast bucket picks its checks; GATE_FULL=1 (the full bucket, daily) runs every package's,
+whatever the diff.
 """
 import json
 import os
@@ -125,6 +127,12 @@ def tested(packages, members, touched, retry):
     return sorted((name, by_name[name]) for name in names)
 
 
+def nested_bases():
+    """The other nested repositories a bucket's tip pins, each with its base commit
+    (GATE_NESTED_BASES=<name>=<base sha|->,..)."""
+    return [tuple(side.split("=", 1)) for side in os.environ.get("GATE_NESTED_BASES", "").split(",") if side]
+
+
 def changed(root, base, cbase):
     """The paths the diff changed, both repos (commercial ones under apps/commercial/)."""
     # --no-renames includes both the removed and added path; NUL keeps spaces safe.
@@ -134,6 +142,14 @@ def changed(root, base, cbase):
         if not (commercial / ".git").exists():
             raise RuntimeError("commercial base supplied but checkout is missing")
         files += ["apps/commercial/" + p for p in git(commercial, "diff", "--no-renames", "--name-only", "-z", cbase, "HEAD").split("\0") if p]
+    # each other nested repository's diff from its base under apps/<name>/; `-`: the bucket's base
+    # had none of it, so every file of it is new
+    for name, nbase in nested_bases():
+        nested = root / "apps" / name
+        if not (nested / ".git").exists():
+            raise RuntimeError(f"{name} base supplied but its checkout is missing")
+        listed = git(nested, "ls-files", "-z") if nbase == "-" else git(nested, "diff", "--no-renames", "--name-only", "-z", nbase, "HEAD")
+        files += [f"apps/{name}/" + p for p in listed.split("\0") if p]
     return files
 
 
@@ -181,22 +197,51 @@ def workspace_wide(compiled):
     return any(p in ("Cargo.toml", "Cargo.lock", ".cargo/config", ".cargo/config.toml") for p in compiled)
 
 
-def tests_only(root, base, cbase):
+def run_units(packages, members, touched, workspace, jit, retry):
+    """The packages whose tests the tests bucket runs after a landing: the changed ones, and the gate
+    packages the diff reaches (GATE_PACKAGES, through normal and build edges; every one on a workspace-wide
+    input), the smoke set and JIT_CHECKS too when it reaches the JIT or a workspace-wide input: the fast
+    bucket's selection, of the root workspace's packages with a test target; and a unit red since. Not
+    every user of a changed crate: a change to the JIT or makepad-platform reached all 547 units, and the
+    bucket held most of the pool's boxes for 78-106 min a run, a new run queued as one ended
+    (11-08). The full bucket runs every package's daily; the fast bucket type-checks every reached test
+    target ([`tested`]). Sorted (name, dir) pairs."""
+    reverse = {}
+    for directory, pkg in packages.items():
+        for dep in pkg["dependencies"]:
+            if dep.get("path") and dep["kind"] != "dev":
+                reverse.setdefault(Path(dep["path"]).resolve(), set()).add(directory)
+    by_name = {p["name"]: d for d, p in packages.items()}
+    reached = set(packages) if workspace else closure(touched, reverse)
+    gate = {by_name[name] for name in GATE_PACKAGES if by_name.get(name) in reached}
+    if workspace or jit:
+        gate |= {by_name[name] for name in SMOKE + JIT_CHECKS if name in by_name}
+    has_tests = {d for d in members if any(t.get("test", True) for t in packages[d]["targets"])}
+    names = {packages[d]["name"] for d in (touched | gate) & has_tests}
+    names |= {words[1] for words in retry if words[0] in ("tests", "test") and by_name.get(words[1]) in has_tests}
+    return sorted((name, by_name[name]) for name in names)
+
+
+def tests_only(root, base, cbase, runs):
     packages = {}
     members = local(root, metadata(root / "Cargo.toml"), packages)
     compiled, touched = owners(root, packages, changed(root, base, cbase))
-    # every test runs under the tree's JIT (`makepad test`): a change to what the JIT is built from can break
-    # any of them, whichever crates they use; the full bucket runs them all
-    if os.environ.get("GATE_FULL") == "1" or workspace_wide(compiled) or touched & built_from(packages, JIT_PACKAGE):
-        touched = set(members)
-    for name, directory in tested(packages, members, touched, retried()):
+    workspace, jit = workspace_wide(compiled), bool(touched & built_from(packages, JIT_PACKAGE))
+    if os.environ.get("GATE_FULL") == "1":
+        units = tested(packages, members, set(members), retried())
+    elif runs:
+        units = run_units(packages, members, touched, workspace, jit, retried())
+    else:
+        # the test targets the diff reaches; a JIT or workspace-wide change reaches every package's
+        units = tested(packages, members, set(members) if workspace or jit else touched, retried())
+    for name, directory in units:
         print(f"tests {name} {directory.relative_to(root)}")
 
 
 def main():
     root = Path.cwd().resolve()
-    if sys.argv[1] == "--tests":
-        return tests_only(root, *sys.argv[2:4])
+    if sys.argv[1] in ("--tests", "--runs"):
+        return tests_only(root, *sys.argv[2:4], sys.argv[1] == "--runs")
     base, cbase = sys.argv[1:3]
     files = changed(root, base, cbase)
     commercial = root / "apps/commercial"
@@ -315,10 +360,9 @@ def main():
     for t in touched:
         manifest = t / "Cargo.toml"
         rel = str(manifest.relative_to(root))
-        if rel.startswith("apps/commercial/"):
-            repo, ref, rel = commercial, cbase, rel[len("apps/commercial/"):]
-        else:
-            repo, ref = root, base
+        sides = [("commercial", cbase)] + nested_bases()
+        side = next(((root / "apps" / name, nbase, rel[len(f"apps/{name}/"):]) for name, nbase in sides if rel.startswith(f"apps/{name}/")), None)
+        repo, ref, rel = side or (root, base, rel)
         if ref == "-" or not any(p == str(manifest.relative_to(root)) for p in files):
             continue
         before = old_dep_features(repo, ref, rel, t)
@@ -375,8 +419,14 @@ def main():
     def private(d):
         return d == commercial or commercial in d.parents
     checked = selected | set(also) | alone
+    tests = tested(packages, members, touched, live)
+    # and a user in the same repo that no line here type-checks: no gate package, not changed, no test target
+    # (the test-target check builds the others' libs): every user of a changed crate is checked on its landing,
+    # not when a later diff happens to reach it
+    covered = checked | {name for name, _ in tests}
     other = {packages[d]["name"] for t in touched for d in closure({t}, users) - {t}
-             if private(d) != private(t) and has_target(d, ("lib", "rlib", "dylib", "proc-macro", "bin"))} - checked
+             if has_target(d, ("lib", "rlib", "dylib", "proc-macro", "bin"))
+             and (private(d) != private(t) or (d in members and packages[d]["name"] not in covered))} - checked
     other |= {words[1] for words in live if words[0] == "cargo"}
 
     def where(name):
@@ -401,7 +451,7 @@ def main():
         print(f"check {name} {where(name)}")
     for name in sorted(other):
         print(f"cargo {name} {where(name)}")
-    for name, directory in tested(packages, members, touched, live):
+    for name, directory in tests:
         print(f"tests {name} {directory.relative_to(root)}")
     for name in SMOKE:
         if name in PRESENT_ARGS and (name in selected or name in retry_presents):

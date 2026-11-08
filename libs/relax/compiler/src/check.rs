@@ -462,7 +462,8 @@ struct TestDeps {
 }
 static TEST_DEPS: std::sync::OnceLock<TestDeps> = std::sync::OnceLock::new();
 
-/// Selection, verdict lookup and loading all run beside the tests, on the check's thread.
+/// Selection, verdict lookup and loading all run beside the boot, on the check's thread; the
+/// tests wait for its verdict (run.rs: a dependency rustc rejects runs no test, as cargo builds it).
 pub fn start_test_deps(up: *mut Unit, select: impl FnOnce(&crate::program::Program) -> Vec<u32> + Send + 'static, mut names: Vec<(u32, String)>, runtime: &crate::options::RuntimeOptions) {
     crate::borrowck::lazy::disable_gandalf();
     let upn = up as usize;

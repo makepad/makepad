@@ -1,5 +1,5 @@
 // M10: an enum whose derived `Hash` ran (a set holds a value's hash; the derive hashes the
-// variant's position).
+// variant's discriminant, here its position).
 //  v1: a variant added after the running ones keeps their positions: applies in place, and the
 //      set still finds the held value.
 //  v2: a variant inserted before a running one moves the position its hash is made from: the

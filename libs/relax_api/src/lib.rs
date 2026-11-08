@@ -167,9 +167,35 @@ pub unsafe fn string_from_words(w: Words) -> String {
 
 thread_local! { static LAST_PANIC: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) }; }
 
-/// A wrapper's caught panic: its text is kept for [`last_panic`]; returns 1.
+/// The payload of a panic of the caller's side (Relax-compiled code) on its way through rustc's
+/// frames, which run their cleanups as for any panic: the caller's own payload stays on its
+/// side. A wrapper that catches it returns 2, and the caller's side goes on with its panic.
+/// Dropped anywhere else (a catch_unwind of rustc's ended the panic), it calls `end`, which
+/// ends the panic on the caller's side.
+#[doc(hidden)]
+pub struct CallerPanic {
+    pub end: Option<extern "C" fn()>,
+}
+
+impl Drop for CallerPanic {
+    fn drop(&mut self) {
+        if let Some(end) = self.end.take() {
+            end();
+        }
+    }
+}
+
+/// A wrapper's caught panic: its text is kept for [`last_panic`]; returns 1. A panic of the
+/// caller's side ([`CallerPanic`]) returns 2: it is the caller's to go on with.
 #[doc(hidden)]
 pub fn caught(p: Box<dyn std::any::Any + Send>) -> u32 {
+    let p = match p.downcast::<CallerPanic>() {
+        Ok(mut c) => {
+            c.end = None;
+            return 2;
+        }
+        Err(p) => p,
+    };
     let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "panic".to_string());
     LAST_PANIC.with(|l| *l.borrow_mut() = msg);
     1

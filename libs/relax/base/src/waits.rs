@@ -133,17 +133,33 @@ fn trace(begin: bool, kind: Kind, label: &'static str, object: u64) {
 /// (the owner pumping inside a wait serves requests that wait again).
 pub struct Guard {
     prev: Option<(u64, u64, u64, u64, usize, usize)>,
+    /// the timeline saw its begin (`running` is no wait: neither its begin nor its end is traced)
+    traced: bool,
+}
+
+fn saved(r: &Row) -> Option<(u64, u64, u64, u64, usize, usize)> {
+    Some((r.state.load(Relaxed), r.object.load(Relaxed), r.holder.load(Relaxed), r.since_ns.load(Relaxed), r.label.load(Relaxed), r.label_len.load(Relaxed)))
 }
 
 /// Records that this thread waits for `object` of `kind`, held by thread `holder` (0: unknown).
 #[inline]
 pub fn begin(kind: Kind, object: u64, holder: u64, label: &'static str) -> Guard {
-    let Some(r) = row() else { return Guard { prev: None } };
-    let s = r.state.load(Relaxed);
-    let prev = Some((s, r.object.load(Relaxed), r.holder.load(Relaxed), r.since_ns.load(Relaxed), r.label.load(Relaxed), r.label_len.load(Relaxed)));
+    let Some(r) = row() else { return Guard { prev: None, traced: false } };
+    let prev = saved(r);
     write(r, kind as u64, object, holder, crate::clock::wall_ns(), label.as_ptr() as usize, label.len());
     trace(true, kind, label, object);
-    Guard { prev }
+    Guard { prev, traced: true }
+}
+
+/// While alive, this thread waits for nothing; dropping it restores the wait it runs inside. The
+/// owner serving a request inside a wait of its own (a pump) runs meanwhile: its row named the
+/// pump's thread while it served that very thread's request, and the cycle detector read the two as
+/// a deadlock whenever a service outlasted its two looks.
+pub fn running() -> Guard {
+    let Some(r) = row() else { return Guard { prev: None, traced: false } };
+    let prev = saved(r);
+    write(r, Kind::None as u64, 0, 0, 0, 0, 0);
+    Guard { prev, traced: false }
 }
 
 fn write(r: &Row, kind: u64, object: u64, holder: u64, since: u64, label: usize, label_len: usize) {
@@ -162,7 +178,9 @@ impl Drop for Guard {
     #[inline]
     fn drop(&mut self) {
         let (Some((s, o, h, t, l, n)), Some(r)) = (self.prev, row()) else { return };
-        trace(false, Kind::None, "", 0);
+        if self.traced {
+            trace(false, Kind::None, "", 0);
+        }
         write(r, s & 0xff, o, h, t, l, n);
     }
 }

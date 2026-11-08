@@ -340,6 +340,14 @@ static PANIC_IDS: AtomicU64 = AtomicU64::new(0);
 /// sites that parked already with nobody watching (the next panic there does not wait again)
 static SITES_SEEN: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
 
+/// The run is one no one attends (`makepad run --unattended`): no panic parks, not even briefly.
+static UNATTENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Marks this run as one no one attends ([`UNATTENDED`]).
+pub fn unattended() {
+    UNATTENDED.store(true, Relaxed);
+}
+
 fn park_secs_unwatched() -> u64 {
     std::env::var("MAKEPAD_RUN_PANIC_PARK").ok().and_then(|v| v.parse().ok()).unwrap_or(2)
 }
@@ -359,6 +367,19 @@ pub fn panic_parked(os_id: u64) -> bool {
     PARKED.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|p| p.os_id == os_id)
 }
 
+/// A quit was asked for (a signal, the app's own quit): nothing parked waits for a decision any
+/// more, whatever its domain -- each ends as its domain's stop ends it (`release_domain`), a stale
+/// access's report resumes the program it paused -- and a program paused for an inspection goes
+/// on: the quit waits for the app's main to return, and a paused main never did (a quit waited
+/// forever behind a stale report's pause that named no domain, 11-08).
+pub fn quit_releases() {
+    for p in PARKED.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        let _ = p.decision.compare_exchange(0, 1, SeqCst, SeqCst);
+    }
+    RESUME.notify_all();
+    super::instrument::quit_resumes();
+}
+
 /// A domain is stopping: let its parked panics unwind so its ordinary cleanup can run.
 pub fn release_domain(domain: crate::domain::DomainId) {
     for p in PARKED.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|p| p.domain == Some(domain)) {
@@ -370,7 +391,7 @@ pub fn release_domain(domain: crate::domain::DomainId) {
 pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
     let unwinds = !regs.is_null();
     let _k = crate::zone_alloc::kept();
-    if !super::STARTED.load(Relaxed) || super::TEST_RUN.load(Relaxed) || crate::owner::is_owner() || super::probes::in_probe() || super::eval::in_eval() {
+    if !super::STARTED.load(Relaxed) || super::TEST_RUN.load(Relaxed) || UNATTENDED.load(Relaxed) || crate::owner::is_owner() || super::probes::in_probe() || super::eval::in_eval() {
         return;
     }
     let domain = crate::domain::current_app_domain();
@@ -777,6 +798,7 @@ pub fn start() {
         super::heap::exclude_this_thread();
         let hang_ms: u64 = std::env::var("MAKEPAD_RUN_INSPECT_HANG_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(3000);
         let mut last_cycle: Vec<u64> = Vec::new();
+        let mut last_rows: Vec<(u64, u64, u64)> = Vec::new();
         let mut base_rss = 0u64;
         let mut tick = 0u64;
         let (mut marked_main, mut marked_present) = (false, false);
@@ -809,15 +831,20 @@ pub fn start() {
             }
             // a cycle among registry waits (thread -> holder handle)
             let cycle = super::hang::registry_cycle(&waits);
-            if !cycle.is_empty() && cycle == last_cycle {
+            // each cycle thread's row: a deadlock is the same waits in both looks, not a new short
+            // wait each time that happens to close a cycle again
+            let rows: Vec<(u64, u64, u64)> = cycle.iter().filter_map(|h| waits.iter().find(|w| w.thread == *h).map(|w| (w.thread, w.object, w.since_ns))).collect();
+            if !cycle.is_empty() && cycle == last_cycle && rows == last_rows {
                 let mut list = super::threads::list();
                 super::name_handles(&mut list);
                 let names: Vec<String> = cycle.iter().map(|h| json_str(&super::thread_label(*h, &list))).collect();
+                let what: Vec<String> = cycle.iter().filter_map(|h| waits.iter().find(|w| w.thread == *h)).map(|w| json_str(&format!("{} waits: {}", super::thread_label(w.thread, &list), super::wait_text(w, &list)))).collect();
                 let mut key = cycle.clone();
                 key.sort_unstable();
-                emit("deadlock", &format!("{:?}", key), &format!("\"cycle\":[{}],\"more\":[\"why-hung\"]", names.join(",")));
+                emit("deadlock", &format!("{:?}", key), &format!("\"cycle\":[{}],\"waits\":[{}],\"more\":[\"why-hung\"]", names.join(","), what.join(",")));
             }
             last_cycle = cycle;
+            last_rows = rows;
             super::heap::expire();
             // the memory timeline and its phase markers
             let rss = crate::memstat::resident();
@@ -923,6 +950,17 @@ mod tests {
         assert!(parked(), "the stale access parked");
         release_domain(domain);
         assert_eq!(caller.join().unwrap(), StaleDecision::Ending, "its domain stops: no restart");
+        // a quit ends one of no domain too, and a program paused for its report goes on: the quit
+        // waits for the app's main (a park that named no domain outlived its domain's stop, and
+        // the quit waited for the paused main forever, 11-08)
+        let caller = std::thread::spawn(|| park_stale(1, None, "stale access: test", &[]));
+        assert!(parked(), "the stale access parked");
+        crate::inspect::instrument::pause_program();
+        assert!(crate::inspect::instrument::paused(), "paused for the report");
+        quit_releases();
+        assert_eq!(caller.join().unwrap(), StaleDecision::Ending, "a quit: no restart");
+        assert!(!crate::inspect::instrument::paused(), "a quit resumes the paused program");
+        assert!(parked_now().is_empty(), "nothing stays parked at a quit");
         let _ = std::fs::remove_dir_all(&home);
     }
 }

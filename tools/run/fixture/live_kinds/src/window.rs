@@ -1,8 +1,9 @@
 //! The partial-landing probe also presents a real app frame, so a run overlay
 //! would cover it and `session view` can assert that the frame stays available. It hands its
 //! tick over a restart (restart_state): a restarted run prints "out restored <tick>" and goes on
-//! from it (restart_in_place.py). On cue it panics, calls an unloaded module, or starts GPU work
-//! the run's end comes in the middle of. Its swatch is what the shader kinds of live_kinds.py edit.
+//! from it (restart_in_place.py). On cue it panics, calls an unloaded module, starts a thread that
+//! loops in code a layout edit rebuilds, starts GPU work the run's end comes in the middle of, or takes
+//! seconds over its first event. Its swatch is what the shader kinds of live_kinds.py edit.
 use makepad_widgets::*;
 
 script_mod! {
@@ -96,6 +97,30 @@ impl App {
     }
 }
 
+/// restart_in_place.py's held stage adds a variant: code built before that never runs again, so
+/// the patch does not install while a thread runs it.
+pub enum Held {
+    A,
+}
+
+#[inline(never)]
+fn held_mode() -> Held {
+    Held::A
+}
+
+/// A thread that never leaves this loop. A layout edit of `Held` rebuilds it and finds the
+/// thread's frame in the loop's first version: the edit offers the restart and the app runs on.
+#[inline(never)]
+fn hold_loop() {
+    println!("held: the thread runs");
+    loop {
+        match held_mode() {
+            Held::A => {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         makepad_widgets::script_mod(vm);
@@ -116,6 +141,12 @@ impl AppMain for App {
         if matches!(event, Event::Startup) {
             self.state = Some(crate::kinds::State::new());
             self.timer = cx.start_interval(0.02);
+            // (restart_in_place.py: a first event that takes seconds, before the app says it
+            // restarts with its state)
+            if std::env::var_os("RESTART_SLOW_START_FILE").is_some_and(|f| std::fs::remove_file(f).is_ok()) {
+                println!("slow start: the first event waits");
+                std::thread::sleep(std::time::Duration::from_secs(3));
+            }
         }
         if self.timer.is_event(event).is_some() {
             // (restart_in_place.py: a real panic of the app's own)
@@ -128,6 +159,10 @@ impl AppMain for App {
                 let f: fn(u64) -> u64 = module.get("f").unwrap();
                 module.unload();
                 println!("out called an unloaded module's code: {}", f(3));
+            }
+            // (and a thread that loops in code a layout edit rebuilds)
+            if std::env::var_os("RESTART_HOLD_FILE").is_some_and(|f| std::fs::remove_file(f).is_ok()) {
+                std::thread::spawn(hold_loop);
             }
             // (and GPU work in flight: the file holds the job's steps per invocation)
             let job = std::env::var_os("RESTART_GPU_FILE").and_then(|f| {

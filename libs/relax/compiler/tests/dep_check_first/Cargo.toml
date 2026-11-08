@@ -1,0 +1,12 @@
+[package]
+name = "dc-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "makepad test fixture: a path dependency rustc rejects runs no test"
+
+[dependencies]
+dc-dep = { path = "dc-dep" }
+
+# its own workspace (no registry dependencies)
+[workspace]

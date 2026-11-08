@@ -431,6 +431,8 @@ pub struct Unit {
     site_ix: relax_session::sync::Mutex<HashMap<(u32, u32, String), u64>>,
     /// std's runtime-panic entry, scoped to this unit's program.
     panic_hook: std::sync::atomic::AtomicUsize,
+    /// std's end of a panic of its program that a catch_unwind of rustc's ended (caller_panic_ended)
+    payload_end: std::sync::atomic::AtomicUsize,
     pub rt: Rt,
     /// the runtime entries as symbols (what compiled code calls; see syms.rs)
     pub rs: RtSyms,
@@ -3016,6 +3018,17 @@ fn own_frame_pointer() -> u64 {
 #[cold]
 #[inline(never)]
 pub(crate) fn rt_boundary_panic(entry: &str, p: Box<dyn std::any::Any + Send>) -> ! {
+    // this thread's own panic of JIT code, raised in native code below the JIT code that called
+    // this entry (unwind_walk's native raise of a callback the entry ran): it leaves to the
+    // recovery point, as when it was raised
+    let p = match p.downcast::<makepad_relax_api::CallerPanic>() {
+        Ok(mut c) => {
+            c.end = None;
+            drop(c);
+            leave_pending_panic()
+        }
+        Err(p) => p,
+    };
     let message = format!("internal error in the JIT runtime entry `{}`: {}", entry, payload_text(&*p));
     eprintln!("makepad-run: {}", message);
     crate::inspect::flightrec::event("rt.boundary", &message, 0, 0);
@@ -3294,28 +3307,53 @@ fn rt_resume_unwind(_a0: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, 
 }
 }
 
+/// The sp of the frame a panic trampoline's register block describes, at its call: the block's
+/// address plus this (arm64: the block is below the caller's sp; x86-64: below the return
+/// address the call pushed, and the frame's sp is above that).
+#[cfg(target_arch = "aarch64")]
+const BLOCK_CALLER_SP: u64 = 288;
+#[cfg(not(target_arch = "aarch64"))]
+const BLOCK_CALLER_SP: u64 = 13 * 8 + 8;
+
 /// Walks the JIT frames from the register block `regs` (copied: it lives in the trampoline's
 /// stack area, which a landing cuts away) to the first frame whose current call has a
-/// landing stub, and continues there; past the last JIT frame, leaves to the recovery point.
+/// landing stub, and continues there. Past the last JIT frame: a frame of native code between
+/// it and the recovery point (rustc's code that called a JIT callback, through a provided
+/// crate's op) unwinds as rustc's panics do, raised there (native_raise); else the walk leaves
+/// to the recovery point.
 unsafe fn unwind_walk(regs: *const u64) -> ! {
     let mut r = [0u64; REG_WORDS];
     std::ptr::copy_nonoverlapping(regs, r.as_mut_ptr(), REG_WORDS);
     let u = &*cur_unit();
     let tables = u.code.read().unwrap_or_else(|e| e.into_inner());
     let mut target: Option<(u64, u64, u64)> = None;
+    // the sp of the frame (fp, ret) names, at its call
+    let mut sp = regs as u64 + BLOCK_CALLER_SP;
+    let mut native = None;
     for _ in 0..100_000 {
         let (fp, ret) = (r[0], r[1]);
+        // the threaded interpreter's call boundary: a frame with a landing that hands the unwind
+        // to the interpreter (it runs the interpreted frames' cleanups, then resumes here)
+        let boundary = relax_codegen::interp::unwind_boundary(ret);
+        let entry = tables.entry_at(ret.wrapping_sub(1));
+        if boundary.is_none() && entry.is_none() {
+            // native code called the frame below (its frame pointer register is that code's own:
+            // rustc keeps none on x86-64). Below the recovery point (`enter` saved the sp of its
+            // own call, so its frame is not), its frames are between the panic and the point
+            // that catches it.
+            if cfg!(unix) && ret != 0 && sp < *ctx_ptr() && in_loader_image(ret) {
+                native = Some(sp);
+            }
+            break;
+        }
         if fp == 0 || fp & 7 != 0 {
             break;
         }
-        // the threaded interpreter's call boundary: a frame with a landing that hands the unwind
-        // to the interpreter (it runs the interpreted frames' cleanups, then resumes here)
-        if let Some((land_pc, sp_below)) = relax_codegen::interp::unwind_boundary(ret) {
+        if let Some((land_pc, sp_below)) = boundary {
             target = Some((fp, fp - sp_below, land_pc));
             break;
         }
-        let pc = ret.wrapping_sub(1);
-        let Some((start, _, _)) = tables.entry_at(pc) else { break };
+        let Some((start, _, _)) = entry else { break };
         let image_info;
         let info = match tables.unwind.get(&start) {
             Some(i) => i,
@@ -3341,9 +3379,22 @@ unsafe fn unwind_walk(regs: *const u64) -> ! {
         }
         r[1] = *((fp + 8) as *const u64);
         r[0] = *(fp as *const u64);
+        // the frame record leads the frame: the caller's sp at the call is above it
+        sp = fp + 16;
     }
     let land = u.rt.land;
     drop(tables);
+    if let Some(sp) = native {
+        // the native frame's own frame record below its sp (the JIT callee's, which is there
+        // already, or the trampoline's block, copied): native_raise's frame looks called from it
+        *((sp - 16) as *mut u64) = r[0];
+        *((sp - 8) as *mut u64) = r[1];
+        CLEANING.with(|c| c.set(0));
+        LAND_REGS.with(|b| std::ptr::copy_nonoverlapping(r.as_ptr(), b.get() as *mut u64, REG_WORDS));
+        let p = LAND_REGS.with(|b| b.get() as *mut u64 as u64);
+        let f: rt_fn_ty!(fn(u64, u64, u64, u64) -> !) = std::mem::transmute(land as usize);
+        f(p, sp - 16, sp - 16, native_raise_stub())
+    }
     match target {
         Some((fp, sp, pc)) => {
             CLEANING.with(|c| c.set(*ctx_ptr()));
@@ -3364,6 +3415,119 @@ unsafe fn unwind_walk(regs: *const u64) -> ! {
             leave(ctx_ptr(), 1)
         }
     }
+}
+
+#[cfg(target_vendor = "apple")]
+macro_rules! native_raise_sym {
+    () => {
+        "_relax_native_raise_stub"
+    };
+}
+#[cfg(not(target_vendor = "apple"))]
+macro_rules! native_raise_sym {
+    () => {
+        "relax_native_raise_stub"
+    };
+}
+
+// The native raise (unix: Windows unwinds by SEH tables, which this stub has none of; there the
+// walk leaves to the recovery point past native frames). `land` enters the stub with sp at the
+// frame record [fp, return address] of the native frame the walk stopped at, and that frame's
+// callee-saved registers restored: by its unwind info the stub was called from there, so
+// rustc's unwinder goes on in that frame as if the JIT callee it called had panicked.
+#[cfg(all(unix, target_arch = "x86_64"))]
+std::arch::global_asm!(
+    ".text",
+    ".p2align 4",
+    concat!(".globl ", native_raise_sym!()),
+    concat!(native_raise_sym!(), ":"),
+    ".cfi_startproc",
+    // DWARF registers: 6 rbp, 7 rsp, 16 the return address
+    ".cfi_def_cfa 7, 16",
+    ".cfi_offset 6, -16",
+    ".cfi_offset 16, -8",
+    "  mov rbp, rsp",
+    ".cfi_def_cfa_register 6",
+    "  call {raise}",
+    "  ud2",
+    ".cfi_endproc",
+    raise = sym native_raise,
+);
+#[cfg(all(unix, target_arch = "aarch64"))]
+std::arch::global_asm!(
+    ".text",
+    ".p2align 2",
+    concat!(".globl ", native_raise_sym!()),
+    concat!(native_raise_sym!(), ":"),
+    ".cfi_startproc",
+    // DWARF registers: 29 fp, 30 lr (the return address), 31 sp
+    ".cfi_def_cfa 31, 16",
+    ".cfi_offset 29, -16",
+    ".cfi_offset 30, -8",
+    "  mov x29, sp",
+    ".cfi_def_cfa 29, 16",
+    "  bl {raise}",
+    "  brk #1",
+    ".cfi_endproc",
+    raise = sym native_raise,
+);
+
+#[cfg(unix)]
+extern "C" {
+    fn relax_native_raise_stub();
+}
+
+/// Is `pc` code of this binary (rustc's: the runtime and the provided crates)? JIT code enters it
+/// only through an op's shim or a runtime entry, each of which catches, so a native unwind raised
+/// in it ends in a catch before it reaches JIT code. A C library's frames have no such catch:
+/// rustc's unwinder would find no handler past them and abort, so the walk leaves past those to
+/// the recovery point.
+fn in_loader_image(pc: u64) -> bool {
+    let own = os::proc::image_at_raw(native_raise_stub()).map(|i| i.1);
+    own.is_some() && os::proc::image_at_raw(pc).map(|i| i.1) == own
+}
+
+/// The native raise's entry (unwind_walk).
+#[cfg(unix)]
+fn native_raise_stub() -> u64 {
+    relax_native_raise_stub as *const () as usize as u64
+}
+#[cfg(not(unix))]
+fn native_raise_stub() -> u64 {
+    unreachable!("the walk raises no native panic here")
+}
+
+/// This thread's panic of JIT code goes on through the native frames below its recovery point
+/// as rustc's resume_unwind does (no hook): their cleanups run, and a provided op's shim hands
+/// it back to the JIT code that called the op (makepad_relax_api::caught: 2, the bridge's
+/// Term::Resume). The panic's payload stays on std's side; a catch_unwind of rustc's that ends
+/// it ends it there too (caller_panic_ended).
+#[cfg(unix)]
+extern "C-unwind" fn native_raise() -> ! {
+    let p: Box<dyn std::any::Any + Send> = {
+        let _kept = crate::zone_alloc::kept();
+        Box::new(makepad_relax_api::CallerPanic { end: Some(caller_panic_ended) })
+    };
+    std::panic::resume_unwind(p)
+}
+
+/// makepad_relax_api::CallerPanic's end: a catch_unwind of rustc's caught this thread's panic of
+/// JIT code (native_raise). The thread no longer unwinds, and std's side drops the payload it
+/// kept for a catch of its own.
+#[cfg(unix)]
+extern "C" fn caller_panic_ended() {
+    abandon_unwind();
+    let end = unsafe { (*cur_unit()).payload_end.load(Ordering::Acquire) };
+    // std registers it with its panic hook, which records every payload
+    if end != 0 {
+        let end: extern "C" fn() = unsafe { std::mem::transmute(end) };
+        end();
+    }
+}
+
+/// std's end of a panic that a catch of the native side ended (caller_panic_ended).
+extern "C" fn relax_set_payload_end(end: extern "C" fn()) {
+    unsafe { (*cur_unit()).payload_end.store(end as usize, Ordering::Release) };
 }
 
 /// makepad inspect's restart / return: a frame's unwind landing ended the panic -- this thread
@@ -4562,6 +4726,7 @@ impl Unit {
             sites: Default::default(),
             site_ix: Default::default(),
             panic_hook: std::sync::atomic::AtomicUsize::new(0),
+            payload_end: std::sync::atomic::AtomicUsize::new(0),
             rs: RtSyms { tls_base: relax_backend::rir::Sym::new(0), coverage_disabled: relax_backend::rir::Sym::new(0), fmt_str: relax_backend::rir::Sym::new(0), fmt_int: relax_backend::rir::Sym::new(0), fmt_float: relax_backend::rir::Sym::new(0), fmt_print: relax_backend::rir::Sym::new(0), panic_site: relax_backend::rir::Sym::new(0), panic_bounds: relax_backend::rir::Sym::new(0), str_eq: relax_backend::rir::Sym::new(0), fmod: relax_backend::rir::Sym::new(0), fmodf: relax_backend::rir::Sym::new(0), panic_impl: relax_backend::rir::Sym::new(0), thread_run: relax_backend::rir::Sym::new(0), catch_panic: relax_backend::rir::Sym::new(0), args: relax_backend::rir::Sym::new(0), memcpy: relax_backend::rir::Sym::new(0), memmove: relax_backend::rir::Sym::new(0), memset: relax_backend::rir::Sym::new(0), fmt_push: relax_backend::rir::Sym::new(0), fmt_pop: relax_backend::rir::Sym::new(0), resume: relax_backend::rir::Sym::new(0), land: relax_backend::rir::Sym::new(0), panicking: relax_backend::rir::Sym::new(0), rethrow: relax_backend::rir::Sym::new(0) },
             syms: crate::syms::Syms::new(syms_base, rw_base),
             cache: None,
@@ -16988,9 +17153,10 @@ pub(crate) fn stop_compiling() {
     tier_wake_all();
 }
 
-/// The compile queue's workers leave (`run_end`). False: some were still in a job after `give_up`.
-pub(crate) fn stop_queue_workers(give_up: std::time::Duration) -> bool {
-    queue::stop_workers(give_up)
+/// The compile queue's workers leave (`run_end`): returns once none is in a job, saying every
+/// `report` which jobs it waits for.
+pub(crate) fn stop_queue_workers(report: std::time::Duration) {
+    queue::stop_workers(report)
 }
 
 /// The run's unit goes: nothing of the run calls it any more (`run_end`), the owner thread still serves.
@@ -22115,10 +22281,33 @@ fn run_spec(unit: usize, id: u32) {
             // gave way to a program thread: first in line again
             Ok(false) => queue::spec(unit, id),
             Ok(true) => {}
-            Err(_) => {
+            Err(p) => {
                 SPEC_PANICS.fetch_add(1, Ordering::Relaxed);
+                spec_dropped(unit, id, || format!("a panic escaped its build: {}", payload_text(&*p)));
             }
         }
+}
+
+/// A speculative build of slot `id` ended without its code (`why`, made only when someone looks):
+/// nothing builds it again until something calls it. A flight recorder event; and (tests) the
+/// answer to a test waiting for that build at BACK_END_GATE that it will not come.
+fn spec_dropped(unit: usize, id: u32, why: impl FnOnce() -> String) {
+    #[cfg(test)]
+    if BACK_END_GATE.load(Ordering::SeqCst) == 1 {
+        BACK_END_STOPPED.0.lock().unwrap_or_else(|e| e.into_inner()).push((unit, id, why()));
+        BACK_END_STOPPED.1.notify_all();
+        return;
+    }
+    if crate::inspect::flightrec::on() {
+        crate::inspect::flightrec::event("compile.spec_dropped", &format!("#{id} {}", why()), id as u64, unit as u64);
+    }
+}
+
+/// spec_build's take gave up (take_prefronted, its reason in TAKE_DROP): counted by the reason.
+fn spec_take_dropped(unit: usize, id: u32) {
+    let (td, af, slot) = TAKE_DROP.try_with(|d| d.get()).unwrap_or((TD_ROUNDS, AF_OK, u32::MAX));
+    SPEC_TAKE_DROPS[td as usize].fetch_add(1, Ordering::Relaxed);
+    spec_dropped(unit, id, || format!("its take gave up: {} {} (slot #{})", TD_NAMES[td as usize], if td == TD_FRONT { PREFRONT_FAIL_NAMES[af as usize] } else { "" }, slot));
 }
 
 /// speculative workers stop taking work (exit summary, Unit drop)
@@ -22141,6 +22330,20 @@ pub fn stop_background_tiers() {
 }
 /// background jobs that panicked outside their build's own recovery (lock released)
 pub static SPEC_PANICS: AtomicU64 = AtomicU64::new(0);
+/// Speculative builds whose take gave up and that were dropped whole (spec_take_dropped), by the
+/// take's reason (TD_NAMES)
+pub static SPEC_TAKE_DROPS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+
+/// The run summary's count of the speculative builds that ended without their code: the takes
+/// that gave up, by reason, and the panics.
+pub fn spec_drops_summary() -> String {
+    let mut parts: Vec<String> = TD_NAMES.iter().zip(SPEC_TAKE_DROPS.iter()).map(|(name, n)| (name, n.load(Ordering::Relaxed))).filter(|(_, n)| *n > 0).map(|(name, n)| format!("take {name} {n}")).collect();
+    let panics = SPEC_PANICS.load(Ordering::Relaxed);
+    if panics > 0 {
+        parts.push(format!("panics {panics}"));
+    }
+    parts.join(", ")
+}
 
 /// The process is ending on this thread: stops the background compilers (speculative workers,
 /// O3, preemptible checks); from now on the owner serves only this thread's requests (and its
@@ -22475,6 +22678,19 @@ extern "C" fn relax_allocator_swap(phase: u32) {
     })
 }
 
+/// For a compiler this one runs (`makepad test` of relax-compiler): whether `pc` is this runtime's
+/// JIT code. That compiler's stack walks (inspect/threads.rs x64_walk) meet this code in every
+/// frame of its own, and step it as JIT code (by its frame records).
+extern "C" fn relax_host_jit_code(pc: u64) -> u32 {
+    in_jit_code(pc) as u32
+}
+
+/// For a compiler this one runs: the return address of this runtime's program stack switch
+/// (relax_base::stack), which that compiler's walks step by the switch record.
+extern "C" fn relax_host_switch_return_pc() -> u64 {
+    crate::stack::switch_return_pc()
+}
+
 /// The program's std::process::exit on Windows (Relax std process_windows.rs): the end of the
 /// process without the exiting thread's fiber-local destructors (os::proc::exit): ExitProcess ran
 /// them into JIT code whose lazy compile waited forever for the unit lock of a thread ExitProcess
@@ -22521,6 +22737,7 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"__relax_fork_exec_done" => Some(crate::forkexec::relax_fork_exec_done as *const () as usize),
         b"relax_allocator_swap" => Some(relax_allocator_swap as *const () as usize),
         b"relax_set_panic_hook" => Some(relax_set_panic_hook as *const () as usize),
+        b"relax_set_payload_end" => Some(relax_set_payload_end as *const () as usize),
         b"relax_before_first_frame" => Some(relax_before_first_frame as *const () as usize),
         b"relax_app_main" => Some(relax_app_main as *const () as usize),
         b"relax_first_present" => Some(relax_first_present as *const () as usize),
@@ -22590,6 +22807,8 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"__relax_test_adopt" => Some(crate::harness::reach::adopt as *const () as usize),
         b"__relax_test_cancel" => Some(crate::harness::reach::cancel as *const () as usize),
         b"__relax_tls_fixed" => Some(os::tls::relax_tls_fixed as *const () as usize),
+        b"__relax_host_jit_code" => Some(relax_host_jit_code as *const () as usize),
+        b"__relax_host_switch_return_pc" => Some(relax_host_switch_return_pc as *const () as usize),
         b"__relax_sstack" => Some(crate::sstack::relax_sstack as *const () as usize),
         b"__relax_sstack_grow" => Some(crate::sstack::relax_sstack_grow as *const () as usize),
         b"__relax_sstack_trim" => Some(crate::sstack::relax_sstack_trim as *const () as usize),
@@ -23224,6 +23443,11 @@ unsafe fn split_begin(up: *mut Unit, id: u32, spec: bool) -> Begin {
 static BACK_END_GATE: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 static BACK_END_THREAD: AtomicU64 = AtomicU64::new(0);
+/// (tests) A back end stopped at BACK_END_GATE, or a speculative build that will not come to it
+/// (spec_dropped: its unit, slot and why): the condvar wakes `back_end_at_gate`'s wait (the back
+/// end itself spins there, keeping its token).
+#[cfg(test)]
+static BACK_END_STOPPED: (std::sync::Mutex<Vec<(usize, u32, String)>>, std::sync::Condvar) = (std::sync::Mutex::new(Vec::new()), std::sync::Condvar::new());
 
 impl BackWork {
     /// Optimises and generates the code (any thread, no unit state).
@@ -23231,7 +23455,11 @@ impl BackWork {
         #[cfg(test)]
         if BACK_END_GATE.load(Ordering::SeqCst) == 1 {
             BACK_END_THREAD.store(me(), Ordering::SeqCst);
-            BACK_END_GATE.store(2, Ordering::SeqCst);
+            {
+                let _seen = BACK_END_STOPPED.0.lock().unwrap_or_else(|e| e.into_inner());
+                BACK_END_GATE.store(2, Ordering::SeqCst);
+            }
+            BACK_END_STOPPED.1.notify_all();
             while BACK_END_GATE.load(Ordering::SeqCst) != 0 {
                 std::thread::yield_now();
             }
@@ -23459,7 +23687,15 @@ unsafe fn spec_build(up: *mut Unit, id: u32) -> bool {
             true
         }
         Some(Begin::Done(Split::Failed(e))) if e == YIELDED => false,
-        Some(Begin::Done(_)) | None => true,
+        Some(Begin::Done(Split::Failed(e))) => {
+            spec_dropped(up as usize, id, || format!("its build failed: {e}"));
+            true
+        }
+        Some(Begin::Done(_)) => true,
+        None => {
+            spec_take_dropped(up as usize, id);
+            true
+        }
     }
 }
 
@@ -26328,14 +26564,32 @@ mod front_yield_tests {
         (job, thread)
     }
 
-    /// Waits for a state these tests' threads reach by themselves: one that does not come is a plain
-    /// failure, not a test that spins for good.
-    fn reached(what: &str, state: impl Fn() -> bool) {
-        let t0 = std::time::Instant::now();
+    /// Blocks until `state`, a state of the CPU budget (who holds a token, who waits for one) or
+    /// one that comes with a change of it, holds: looked at again at each change, never by the
+    /// clock. One that never comes holds the test (a hung test).
+    fn on_budget_change(state: impl Fn() -> bool) {
+        let mut seen = makepad_cpu_budget::changes();
         while !state() {
-            assert!(t0.elapsed().as_secs() < 60, "{what} did not come: {}", makepad_cpu_budget::report_string());
-            std::thread::yield_now();
+            seen = makepad_cpu_budget::wait_for_change(seen);
         }
+    }
+
+    /// Blocks until the speculative build of `slot` (unit `up`) queued with BACK_END_GATE at 1
+    /// stopped at its gate. One that ended without its back end (spec_dropped) fails the test with
+    /// its reason.
+    fn back_end_at_gate(up: usize, slot: u32) {
+        let mut seen = BACK_END_STOPPED.0.lock().unwrap_or_else(|e| e.into_inner());
+        while BACK_END_GATE.load(Ordering::SeqCst) != 2 {
+            if let Some((_, _, why)) = seen.iter().find(|d| d.0 == up && d.1 == slot) {
+                panic!("the speculative build of #{slot} will not come to its gate: {why}");
+            }
+            seen = BACK_END_STOPPED.1.wait(seen).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    /// The budget's rows of these tests' pool jobs (`label`), lent ones too.
+    fn pool_jobs(label: &str) -> usize {
+        makepad_cpu_budget::tokens().holders.iter().filter(|h| h.label == label).count()
     }
 
     /// As many jobs as CPU tokens, each with its token, all calling one fn whose speculative build
@@ -26350,18 +26604,16 @@ mod front_yield_tests {
         use std::sync::Arc;
         BACK_END_GATE.store(1, Ordering::SeqCst);
         queue::spec(up, slot);
-        reached("the build at its gate", || BACK_END_GATE.load(Ordering::SeqCst) == 2);
-        let (admitted, go, left) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(callers)));
+        back_end_at_gate(up, slot);
+        let (go, left) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(callers)));
         let handles = (0..jobs).map(|i| {
-            let (admitted, go, left) = (admitted.clone(), go.clone(), left.clone());
+            let (go, left) = (go.clone(), left.clone());
             std::thread::spawn(move || {
                 // (the wait's own code compiled first: under the JIT a thread waiting for a compile
                 // lends its token, and the build would get it)
-                admitted.fetch_add(0, Ordering::SeqCst);
                 let _ = go.load(Ordering::SeqCst);
                 std::thread::yield_now();
                 let permit = budget::admit(budget::VISIBLE, budget::APP, "a pool job");
-                admitted.fetch_add(1, Ordering::SeqCst);
                 while !go.load(Ordering::SeqCst) {
                     std::thread::yield_now();
                 }
@@ -26380,13 +26632,13 @@ mod front_yield_tests {
             })
         }).collect();
         // the build's token is the one the last job waits for: its first checkpoint yields it
-        reached("the last job waiting for a token", || budget::tokens().waiting.iter().any(|w| w.class == budget::VISIBLE && w.client == budget::APP));
+        on_budget_change(|| budget::tokens().waiting.iter().any(|w| w.class == budget::VISIBLE && w.client == budget::APP));
         BACK_END_GATE.store(0, Ordering::SeqCst);
-        reached("every job admitted", || admitted.load(Ordering::SeqCst) >= jobs);
+        on_budget_change(|| pool_jobs("a pool job") >= jobs);
         // (a build that no longer stops here would pass without showing anything; asked of the budget,
         // which every JIT in the process shares: under the JIT the wait hook is the loader's)
         let building = BACK_END_THREAD.load(Ordering::SeqCst);
-        reached("the build waiting for a token", || {
+        on_budget_change(|| {
             assert!(queue::running_class(up, slot).is_some(), "the build sits out its checkpoint for the last job");
             budget::tokens().waiting.iter().any(|w| w.thread == building)
         });
@@ -26408,7 +26660,6 @@ mod front_yield_tests {
     fn a_build_below_the_jit_floor_finishes_and_the_last_job_runs_after_it() {
         isolated_test!(a_build_below_the_jit_floor_finishes_and_the_last_job_runs_after_it);
         use makepad_cpu_budget as budget;
-        use std::sync::atomic::AtomicUsize;
         use std::sync::Arc;
         // (a small machine has no floor for the build to be below)
         if budget::jit_floor() < 2 {
@@ -26421,28 +26672,29 @@ mod front_yield_tests {
         let (other, _) = other_compile_job(stop.clone());
         BACK_END_GATE.store(1, Ordering::SeqCst);
         queue::spec(up, f);
-        reached("the build at its gate", || BACK_END_GATE.load(Ordering::SeqCst) == 2);
-        let (admitted, done) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
+        back_end_at_gate(up, f);
+        let done = Arc::new(AtomicBool::new(false));
         let handles: Vec<_> = (0..jobs).map(|_| {
-            let (admitted, done) = (admitted.clone(), done.clone());
+            let done = done.clone();
             std::thread::spawn(move || {
                 // (compiled before it holds a token, as in `jobs_on_every_token`)
-                admitted.fetch_add(0, Ordering::SeqCst);
                 let _ = done.load(Ordering::SeqCst);
                 std::thread::yield_now();
                 let permit = budget::admit(budget::VISIBLE, budget::APP, "a pool job");
-                admitted.fetch_add(1, Ordering::SeqCst);
                 while !done.load(Ordering::SeqCst) {
                     std::thread::yield_now();
                 }
                 budget::release(permit);
             })
         }).collect();
-        reached("the last job waiting for a token", || budget::tokens().waiting.iter().any(|w| w.class == budget::VISIBLE && w.client == budget::APP));
+        on_budget_change(|| budget::tokens().waiting.iter().any(|w| w.class == budget::VISIBLE && w.client == budget::APP));
         BACK_END_GATE.store(0, Ordering::SeqCst);
-        // (the jobs keep their tokens until the end: a build that gave its own up would stand still here)
-        reached("the build finished on its own token", || queue::running_class(up, f).is_none());
-        reached("the last job running after it", || admitted.load(Ordering::SeqCst) >= jobs);
+        // (the jobs keep their tokens until the end: a build that gave its own up would stand still
+        // here. Its worker leaves the queue's running list before it gives the build's token back,
+        // a change of the budget: with the last job waiting for one it keeps none for a next job.)
+        on_budget_change(|| queue::running_class(up, f).is_none());
+        // the last job running after it
+        on_budget_change(|| pool_jobs("a pool job") >= jobs);
         done.store(true, Ordering::SeqCst);
         for job in handles {
             job.join().unwrap();
@@ -28314,6 +28566,7 @@ pub(crate) unsafe fn reset_statics() {
     reset(&SPEC_STOP, AtomicBool::new(false));
     reset(&DRAIN_ANYWAY, AtomicBool::new(false));
     reset(&SPEC_PANICS, AtomicU64::new(0));
+    reset(&SPEC_TAKE_DROPS, [const { AtomicU64::new(0) }; 7]);
     reset(&BG_DRAINED, AtomicBool::new(false));
     reset(&BG_PAUSE, AtomicBool::new(false));
     reset(&BG_PAUSER, AtomicU64::new(0));

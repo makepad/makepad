@@ -269,6 +269,16 @@ pub fn why_hung(req: &Req, out: &mut Out) {
         let name = caps.iter().find(|c| c.t.os_id == *os_id).map(|c| c.t.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| thread.clone());
         findings.push(("parked panic", format!("P{} parked on thread {} ({}): {} at {} -- see `panics`, decide with `resume P{} panic`", id, name, super::tid_label(*os_id), super::short(message, 300), location, id)));
     }
+    // a program paused for a report or an inspection: its threads are suspended where they were,
+    // so main's frame (0% CPU anywhere) is no wait of its own
+    if crate::inspect::instrument::paused() {
+        let by = if parked.is_empty() { "by `pause`" } else { "for the parked report above" };
+        findings.push(("paused", format!("the program is paused {by}: its threads are suspended where they were -- `resume`, or decide what is parked (`panics`)")));
+    }
+    // threads held for good at a layout patch: the app runs on without them, a restart is offered
+    for line in crate::stale::held_now() {
+        findings.push(("held", line));
+    }
     // a boot window that has not presented: the app's main is not called before it does
     if let Some((_, note)) = crate::run::boot_window_note() {
         findings.push(("boot window", note));

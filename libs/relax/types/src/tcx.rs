@@ -1152,8 +1152,14 @@ impl Tcx {
     /// def_collector at the commit, never "added items"): the per-def declaration table covers
     /// them. Without it the borrow checker of the edited fn read past the table's end ("index
     /// out of bounds: the len is N but the index is N+1": a closure added by a live patch).
+    /// And it added file versions: their query inputs exist from here on, before the edit
+    /// publishes them. The edit's own checks ask about the defs in them (the declarations that
+    /// name a type it removes), and a query of such a def reads its file's input (read_owner).
+    /// Without it the edit stopped with "MissingInput(QueryId { kind: 21, .. })", and the
+    /// program it left half-made failed later compiles the same way.
     pub fn grow_to(&mut self, prog: &Program) {
         self.declarations.grow(prog.defs.len());
+        self.queries.register_files(prog.files.len());
     }
 
     pub fn invalidate_check(&mut self, gone: &[DefId]) {

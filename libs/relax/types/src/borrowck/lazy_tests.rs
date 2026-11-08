@@ -8,9 +8,9 @@ const SOURCE: &str = "#[lang = \"sized\"] trait Sized {} #[lang = \"copy\"] trai
 // The worker and event bus are process-wide, as in the compiler's settle harness.
 fn child(name: &str) -> bool {
     if std::env::var_os("GANDALF_TEST_CHILD").is_some() { return false; }
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
+    let status = crate::test_child::status(std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", &format!("borrowck::lazy::lazy_tests::{name}"), "--test-threads=1"])
-        .env("GANDALF_TEST_CHILD", "1").status().unwrap();
+        .env("GANDALF_TEST_CHILD", "1"));
     assert!(status.success()); true
 }
 fn fixture(dir: &str, source: &str) -> (Program, Tcx) {

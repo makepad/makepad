@@ -630,12 +630,17 @@ struct Domain {
     args: Vec<Vec<u8>>,
     /// the domain's main thread has returned (its block can go)
     thread_done: bool,
+    /// the main's thread token (its row in `threads`; 0: none started)
+    main: u64,
+    /// the main is held for good (a stale access's fault, a frame in code a layout patch replaced):
+    /// it leaves only at its run's end, so a stop does not wait for it to return
+    main_held: bool,
     compiling: bool,
     reclaiming: bool,
     cancel: bool,
-    /// `retire` ran (a quit retires twice: the HAL's stop of the domain, then hal_run's
-    /// `domain::stop`): the threads it keeps for are reported by the first
-    retired: bool,
+    /// the threads that still held the domain when a relaunch could not reuse it were reported
+    /// (report_retained: once)
+    reported: bool,
     /// the unit whose code it runs (0: not started on one yet)
     unit: usize,
     threads: Vec<DomainThread>,
@@ -682,6 +687,19 @@ fn domains() -> Registry {
     Registry { guard: DOMAINS.lock().unwrap_or_else(|e| e.into_inner()), _kept: kept }
 }
 
+/// The program thread `os_id` as its domain knows it -- `<package> thread-<n>`, or the name it gave
+/// itself -- for a thread the OS names by its creator (Linux: one spawned unnamed takes its
+/// creator's name, often the binary's: a deadlock read `makepad.jit-e85 (T41)`). None: no domain
+/// has it, or the registry is busy (a reader never waits for it).
+pub fn program_thread_name(os_id: u64) -> Option<String> {
+    let ds = match DOMAINS.try_lock() {
+        Ok(ds) => ds,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+    };
+    ds.iter().find_map(|d| d.threads.iter().find(|t| t.os_id == os_id && os_id != 0).map(|t| format!("{} {}", d.info.package, t.name)))
+}
+
 /// The host's callback for state changes (compiling phases, running, crashed, exited).
 pub fn set_observer(f: impl Fn(DomainId, &DomainState) + Send + Sync + 'static) {
     *OBSERVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
@@ -705,7 +723,9 @@ pub(crate) fn register_boot(package: &str, base: u64) {
         started: std::time::Instant::now(),
         args: Vec::new(),
         thread_done: false,
-        compiling: false, reclaiming: false, cancel: false, retired: false, unit: 0, threads: Vec::new(), heap: None,
+        main: 0,
+        main_held: false,
+        compiling: false, reclaiming: false, cancel: false, reported: false, unit: 0, threads: Vec::new(), heap: None,
     });
     let token = relax_domain_reserve(base);
     relax_domain_enter(base, token);
@@ -809,18 +829,31 @@ pub enum Stop {
 /// retire this run. Its thread registrations are the completion latch: the
 /// last TLS exit reclaims the mapping, never a clock or a forced termination.
 /// The host may launch a fresh id while this latch is still outstanding.
+/// The threads still there now are on their way out (a pool's worker, a thread
+/// in its TLS destructors): no report. One that holds the domain when it is
+/// wanted again is (report_retained), as is one a run's end leaves (end_run).
 pub fn retire(id: DomainId) -> Result<(), String> {
     if id == 0 { return Err("domain 0 is the process's own app".into()); }
-    let names = {
+    {
         let mut ds = domains();
         let d = ds.iter_mut().find(|d| d.info.id == id).ok_or_else(|| format!("no domain {id}"))?;
         d.cancel = true;
-        if std::mem::replace(&mut d.retired, true) { Vec::new() } else { d.threads.iter().map(|t| t.name.clone()).collect::<Vec<_>>() }
-    };
+    }
     CHANGED.notify_all();
     teardown(id);
-    if !names.is_empty() { report_teardown_threads(id, &names); }
     Ok(())
+}
+
+/// A relaunch could not reuse domain `id` (still_owned): the threads that hold its mapping since
+/// its stop are reported, once.
+pub fn report_retained(id: DomainId) {
+    let names = {
+        let mut ds = domains();
+        let Some(d) = ds.iter_mut().find(|d| d.info.id == id) else { return };
+        if std::mem::replace(&mut d.reported, true) { return; }
+        d.threads.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
+    };
+    if !names.is_empty() { report_teardown_threads(id, &names); }
 }
 
 /// The app's end at quit: admission closes, its pools and workers are cancelled (`retire`),
@@ -834,17 +867,35 @@ pub fn stop(id: DomainId, _how: Stop) -> Result<(), String> {
     Ok(())
 }
 
-/// Until the domain's main has returned and no teardown is under way (or the domain is gone).
+/// Until the domain's main has returned and no teardown is under way (or the domain is gone). A
+/// main held for good returns only at its run's end, which comes after this: it is not waited for.
+/// (A quit waited for a main held at a stale access, and the access waited for the run's end: the
+/// app ignored SIGTERM, 11-08.)
 fn wait_app_thread(id: DomainId) {
     let mut d = domains();
     loop {
         match d.iter().find(|x| x.info.id == id) {
             // (a teardown already under way, started by the last worker's exit, completes first)
-            Some(x) if x.reclaiming || !x.thread_done && (x.compiling || x.info.base != 0) => {}
+            Some(x) if x.reclaiming || !x.thread_done && !x.main_held && (x.compiling || x.info.base != 0) => {}
             _ => return,
         }
         d = d.wait();
     }
+}
+
+/// Thread `os_id` is held for good (stale.rs: a fault's thread parked until its run ends, or one
+/// held out of code a layout patch replaced): when it is a domain's main, that domain's stop no
+/// longer waits for it.
+pub(crate) fn held_for_good(os_id: u64) {
+    if os_id == 0 { return; }
+    let mut ds = domains();
+    for d in ds.iter_mut() {
+        if d.main != 0 && d.threads.iter().any(|t| t.token == d.main && t.os_id == os_id) {
+            d.main_held = true;
+        }
+    }
+    drop(ds);
+    CHANGED.notify_all();
 }
 
 /// What ending a run found (`end_run`).
@@ -957,6 +1008,9 @@ pub fn end_run(up: *mut Unit, grace: std::time::Duration) -> RunEnd {
     let callbacks = crate::domain_res::take_back_callbacks(&bases);
     if !up.is_null() {
         unsafe { (*up).end_code() };
+        // (a thread held for good at a layout patch leaves as the others do now: no frame of it
+        // can run the code it was held out of)
+        crate::inspect::instrument::release_held_for_good();
     }
     let mut backoff = std::time::Duration::from_millis(1);
     let end = |left, ms| RunEnd {
@@ -1371,7 +1425,9 @@ pub fn prepare(spec: &AppSpec) -> Result<DomainId, Vec<String>> {
             started: t0,
             args: spec.argv.clone().unwrap_or_else(|| std::iter::once(spec.package.clone().into_bytes()).chain(spec.args.iter().map(|a| a.clone().into_bytes())).collect()),
             thread_done: false,
-            compiling: true, reclaiming: false, cancel: false, retired: false, threads: Vec::new(), unit: 0, heap: None,
+            main: 0,
+            main_held: false,
+            compiling: true, reclaiming: false, cancel: false, reported: false, threads: Vec::new(), unit: 0, heap: None,
         });
         id
     };
@@ -1552,6 +1608,7 @@ fn launch_main(upn: usize, id: DomainId, base: u64, target: u64, arg: u64, root:
     let name = format!("domain-{id}-{package}");
     if let Some(d) = domains().iter_mut().find(|d| d.info.id == id) {
         d.unit = upn;
+        d.main = token;
         if let Some(t) = d.threads.iter_mut().find(|t| t.token == token) { t.name = name.clone(); }
     }
     let spawned = std::thread::Builder::new().name(name).stack_size(64 << 20).spawn(move || {
@@ -2013,6 +2070,41 @@ mod tests {
         assert!(u.errors.is_empty(), "{:?}", u.errors);
         destroy(b);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A quit's stop waits for the app's main to return. A main held for good (its stale access
+    /// parked until the run's end, which comes after that wait) never does: the stop waits no more
+    /// once it is held. (The quit waited for it and the app ignored SIGTERM, 11-08.)
+    #[test]
+    fn a_stop_does_not_wait_for_a_main_held_for_good() {
+        isolated_test!(a_stop_does_not_wait_for_a_main_held_for_good);
+        let (id, main_os_id): (DomainId, u64) = (77, 4242);
+        domains().push(Domain {
+            info: DomainInfo { id, package: "held".into(), parent: None, state: DomainState::Running, base: 0x7000_0000, crates: 0, reused: 0, loaded: 0, new_crates: Vec::new(), resolve_ms: 0.0, load_ms: 0.0, spawn_ms: 0.0, first_frame_ms: None, threads: 0, thread_names: Vec::new(), arena_in_use: 0, arena_committed: 0, arena_detail: (0, 0, 0), static_committed: 0 },
+            started: std::time::Instant::now(),
+            args: Vec::new(),
+            thread_done: false,
+            main: 9,
+            main_held: false,
+            compiling: false, reclaiming: false, cancel: false, reported: false, unit: 0,
+            threads: vec![DomainThread::new(9, "domain-77-held".into(), main_os_id, 0), DomainThread::new(10, "worker".into(), 4343, 0)],
+            heap: None,
+        });
+        let stop = std::thread::spawn(move || wait_app_thread(id));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!stop.is_finished(), "the stop waits for a main that runs");
+        // a worker held for good holds nothing up: the stop still waits for the main
+        held_for_good(4343);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!stop.is_finished(), "a held worker is not the main");
+        held_for_good(main_os_id);
+        let t0 = std::time::Instant::now();
+        while !stop.is_finished() && t0.elapsed().as_secs() < 10 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(stop.is_finished(), "the stop waits no more for a main held for good");
+        stop.join().unwrap();
+        domains().retain(|d| d.info.id != id);
     }
 }
 

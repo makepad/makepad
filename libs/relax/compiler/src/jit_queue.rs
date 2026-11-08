@@ -519,19 +519,31 @@ pub(super) fn start() {
     }
 }
 /// The workers leave at their next pick, a job in hand ending first (what compiles was told to stop
-/// by then: `jit::stop_compiling`). False: some were still in a job when `give_up` ran out.
-pub(super) fn stop_workers(give_up: std::time::Duration) -> bool {
+/// by then: `jit::stop_compiling`). Returns once every one has: a job reads the run's unit and the
+/// statics the run's end puts back, so the end never goes on past one. While a job runs on, every
+/// `report` says which.
+pub(super) fn stop_workers(report: std::time::Duration) {
     WORKERS_STOP.store(true, Ordering::SeqCst);
     let t = Instant::now();
+    let mut said = std::time::Duration::ZERO;
     while DRAINS_BACK.load(Ordering::SeqCst) < DRAINS.count.load(Ordering::SeqCst) {
-        if t.elapsed() >= give_up {
-            return false;
+        if t.elapsed() >= said + report {
+            said = t.elapsed();
+            let jobs: Vec<String> = {
+                let _kept = crate::zone_alloc::kept();
+                lock().running.iter().map(|r| match r.slot {
+                    Some((_, slot)) => format!("{} of slot #{slot}", TIER_LABELS[r.tier]),
+                    None => TIER_LABELS[r.tier].to_string(),
+                }).collect()
+            };
+            eprintln!("makepad-run: a run's end waits {:.0} s for its compile workers, {} still in a job: {}", said.as_secs_f64(), DRAINS.count.load(Ordering::SeqCst) - DRAINS_BACK.load(Ordering::SeqCst), jobs.join(", "));
         }
         wake_all();
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    true
 }
+/// The jobs of each tier (`Job::tier`), as `Job::label` names them.
+const TIER_LABELS: [&str; TIERS] = ["JIT ahead", "JIT O2", "JIT O3", "JIT spec", "JIT tick", "JIT check"];
 /// Callable from a hot stub: no queue lock, allocation or compiler work. Wakes the first parked
 /// worker: the work stays on the few workers it needs (a startup's checks ahead on as many as its
 /// width), each on its core with its caches warm, not spread over every worker in turn.
@@ -1042,6 +1054,24 @@ mod tests {
         assert!(first.is_err());
         assert_eq!(d.start(4, || {}, || Ok(())).unwrap(), Started::All, "a start after a panicked one runs, poisoned by nothing");
         assert_eq!(d.count.load(Ordering::SeqCst), 4);
+    }
+
+    /// A run's end waits out a worker still in a job however long the job takes: the job reads
+    /// the unit and the statics the end puts back next (a prefront still lowering after a 10 s
+    /// give-up read a Tcx the reset had freed: a fault outside JIT code, the app gone, 11-08).
+    #[test]
+    fn a_runs_end_waits_out_a_worker_in_a_job() {
+        isolated_test!(a_runs_end_waits_out_a_worker_in_a_job);
+        // a drain that is in its job until `back` comes
+        DRAINS.count.fetch_add(1, Ordering::SeqCst);
+        let t = Instant::now();
+        let back = std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            DRAINS_BACK.fetch_add(1, Ordering::SeqCst);
+        });
+        stop_workers(std::time::Duration::from_millis(50));
+        assert!(t.elapsed() >= std::time::Duration::from_millis(400), "the end went on while the job ran ({:?})", t.elapsed());
+        back.join().unwrap();
     }
 
     /// While a real-time thread is live, a worker at the idle policy starts tier-ups only, and one

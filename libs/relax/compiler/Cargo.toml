@@ -38,6 +38,9 @@ makepad-prof-stream = { workspace = true }
 # registry packages a program needs that are neither vendored nor in $CARGO_HOME (registry_net.rs)
 relax-light-http = { workspace = true }
 relax-native-macros = { workspace = true }
+# the payload a panic of JIT code takes through rustc's frames, which their shims recognise
+# (jit.rs native_raise, makepad_relax_api::caught)
+makepad-relax-api = { workspace = true }
 
 # inspect's stack capture on Windows (threads.rs, pe_unwind.rs): the generated Win32 bindings
 [target.'cfg(windows)'.dependencies]

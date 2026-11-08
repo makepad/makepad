@@ -121,17 +121,24 @@ pub fn hold_paused(tid: u64) -> Result<&'static HoldSlot, &'static str> {
 }
 
 /// Holds thread `tid` in its handler for good (a thread with a frame in code that never runs
-/// again: stale.rs `park_held`); a blocked thread is signalled too (it never returns from the
-/// handler, so an interrupted system call never comes back to its caller). Linux.
+/// again: stale.rs `park_held`); a blocked thread is signalled too (it leaves the handler only at
+/// the run's end, `release_held_for_good`, when no code of the run runs any more). Linux.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn hold_for_good(tid: u64) -> Result<&'static HoldSlot, &'static str> {
     imp::hold(tid, imp::HOLD_FOREVER)
 }
 
-/// A pause's hold of a thread becomes a hold for good (`release_hold` is never called for it).
+/// A pause's hold of a thread becomes a hold for good (no resume releases it: the run's end does).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn keep_held(s: &HoldSlot) {
     imp::keep(s)
+}
+
+/// The run's end, once its code is gone: every thread held for good leaves its handler (it faults
+/// out of that code at its next instruction there). Returns how many. Linux.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn release_held_for_good() -> usize {
+    imp::release_forever()
 }
 
 /// Whether thread `tid` stands still in its handler now (held by a pause or for good). Linux.
@@ -535,7 +542,7 @@ mod imp {
         /// then the pthread handle
         regs: [AtomicU64; 9],
         /// HOLD_CAPTURE (one walk, at most 5 s), HOLD_PAUSE (until `resume`, at most 10 minutes),
-        /// HOLD_FOREVER (a thread that must never run on: stale.rs `park_held`)
+        /// HOLD_FOREVER (a thread that must not run on while its run does: stale.rs `park_held`)
         mode: AtomicU32,
     }
     static HOLDS: [Slot; SLOTS] = [const { Slot { state: AtomicU32::new(0), tid: AtomicI32::new(0), regs: [const { AtomicU64::new(0) }; 9], mode: AtomicU32::new(0) } }; SLOTS];
@@ -660,6 +667,17 @@ mod imp {
     #[cfg(target_arch = "x86_64")]
     pub fn keep(slot: &Slot) {
         slot.mode.store(HOLD_FOREVER, Relaxed);
+    }
+
+    /// Lets every thread held for good go (`release_held_for_good`).
+    #[cfg(target_arch = "x86_64")]
+    pub fn release_forever() -> usize {
+        let mut n = 0;
+        for slot in HOLDS.iter().filter(|h| h.mode.load(Relaxed) == HOLD_FOREVER && h.state.load(Acquire) == 2) {
+            release(slot);
+            n += 1;
+        }
+        n
     }
 
     /// The slot holding `tid` now (a paused thread), if any.
@@ -838,10 +856,58 @@ mod imp {
 mod x64_walk {
     use super::{Raw, MAX_FRAMES};
 
-    /// Why a walk ends at a frame whose return address is no code it can step: a program running
-    /// under the JIT walking its own threads sees its own frames so (its JIT code is the running
-    /// compiler's, not a unit of its own)
+    /// Why a walk ends at a frame whose return address is no code it can step (neither JIT code,
+    /// this compiler's or the runtime's that runs it, nor a module with unwind tables)
     pub const NOT_CODE: &str = "its return address is in neither JIT code nor a module with unwind tables";
+
+    /// The runtime that runs this compiler, when one does (`cfg(relax)`: `makepad test` of
+    /// relax-compiler). Its JIT code is no unit of this compiler's and no module's, and every
+    /// program thread's frames are in it: the walk asks it what is its JIT code (stepped as JIT
+    /// code is, by frame records) and where its program stack switch returns (jit.rs
+    /// loader_symbol). A walk of the process's threads stopped at the first such frame, and every
+    /// layout patch of a unit this compiler ran there was a restart (the post-land tests bucket's
+    /// enum_reload_snapshots, 11-08).
+    pub(super) mod host {
+        #[cfg(relax)]
+        extern "C" {
+            fn __relax_host_jit_code(pc: u64) -> u32;
+            fn __relax_host_switch_return_pc() -> u64;
+        }
+
+        /// Whether `pc` is JIT code of the runtime that runs this compiler.
+        pub fn jit_code(pc: u64) -> bool {
+            #[cfg(relax)]
+            {
+                unsafe { __relax_host_jit_code(pc) != 0 }
+            }
+            #[cfg(not(relax))]
+            {
+                let _ = pc;
+                false
+            }
+        }
+
+        /// The return address of that runtime's program stack switch (0: none, or no such runtime).
+        pub fn switch_return_pc() -> u64 {
+            #[cfg(relax)]
+            {
+                unsafe { __relax_host_switch_return_pc() }
+            }
+            #[cfg(not(relax))]
+            {
+                0
+            }
+        }
+    }
+
+    /// Why a walk ends at a JIT frame whose frame pointer is no address of its stack (a garbage
+    /// rbp, as code without frame pointers leaves it, restored by a callee's unwind tables)
+    pub const FP_NOT_IN_STACK: &str = "it is JIT code and its frame pointer is not in its stack";
+
+    /// Why a walk ends at a frame of the runtime that runs this compiler when the frame pointer is
+    /// not known (a thread blocked in a syscall, walked from its sp and pc): that runtime's frame
+    /// sizes are its own, and no frame is taken from stack contents.
+    pub const HOST_NO_FP: &str = "it is JIT code of the runtime that runs this compiler, and its frame pointer is not known (a thread blocked in a syscall is walked from its sp and pc only)";
 
     /// Each step is proven or the walk ends there, saying why (`raw.stop`): a JIT frame by its
     /// frame record (JIT code keeps one in rbp; where rbp is not known, at its unwind info's
@@ -857,7 +923,8 @@ mod x64_walk {
         while raw.n < MAX_FRAMES && r.rip != 0 {
             // the lookup pc: a return address points past its call
             let look = if top { r.rip } else { r.rip.wrapping_sub(1) };
-            let jit = crate::jit::in_jit_code(look);
+            let own = crate::jit::in_jit_code(look);
+            let jit = own || host::jit_code(look);
             if !top && !jit && !cfi::covers(look) {
                 raw.stop = Some(NOT_CODE);
                 break;
@@ -866,7 +933,7 @@ mod x64_walk {
             raw.n += 1;
             // the stack switch's frame: it runs on the thread's own stack (its sp is in the
             // switch record on the segment), its callee on the segment
-            if !top && r.rip == crate::stack::switch_return_pc() {
+            if !top && (r.rip == crate::stack::switch_return_pc() || r.rip == host::switch_return_pc()) {
                 match read(r.rsp.wrapping_add(crate::stack::SWITCH_RECORD)) {
                     Some(own) => r.rsp = own,
                     None => {
@@ -886,6 +953,10 @@ mod x64_walk {
                         raw.stop = Some("it is JIT code at no call (it makes the syscall itself) and its frame pointer is not known");
                         break;
                     }
+                    if !own {
+                        raw.stop = Some(HOST_NO_FP);
+                        break;
+                    }
                     match crate::jit::frame_pointer_at(r.rip, sp0) {
                         Ok(fp) => r.rbp = fp,
                         Err(why) => {
@@ -895,7 +966,7 @@ mod x64_walk {
                     }
                 }
                 if r.rbp < sp0 || r.rbp - sp0 > 1 << 20 {
-                    raw.stop = Some("it is JIT code and its frame pointer is not in its stack");
+                    raw.stop = Some(FP_NOT_IN_STACK);
                     break;
                 }
                 let (Some(ra), Some(next)) = (read(r.rbp.wrapping_add(8)), read(r.rbp)) else {
@@ -1139,7 +1210,7 @@ mod imp {
 /// pointer is needed and says so (a libc built with them).
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 mod tests {
-    use super::{capture, imp::BLOCKED_NO_FP, list, x64_walk::NOT_CODE, Raw};
+    use super::{capture, imp::BLOCKED_NO_FP, list, x64_walk::{host, FP_NOT_IN_STACK, HOST_NO_FP}, Raw};
     use std::io::Write;
     use std::os::fd::AsRawFd;
     use std::sync::atomic::{AtomicU64, Ordering::{Acquire, Release}};
@@ -1218,12 +1289,20 @@ mod tests {
             super::super::symbols::host_symbol(if i == 0 { pc } else { pc - 1 }).map_or(format!("{pc:#x}"), |s| s.0)
         }).collect();
         assert!(!names.iter().any(|n| n.contains("fake_caller")), "a caller guessed from stack contents: {names:?}");
+        // (by address too: under the JIT the walk names no JIT code)
+        let planted = fake_caller as extern "C" fn() -> u64 as usize as u64 + 4;
+        assert!(!raw.frames().contains(&planted), "a caller guessed from stack contents: {names:?}");
         if cfg!(relax) {
-            // under the JIT, `park_in_poll` is code of the compiler that runs this test, which no
-            // unit of the compiler under test knows: the walk steps libc's frames by their CFI and
-            // ends at poll's return address, saying so
-            assert_eq!(raw.stop, Some(NOT_CODE), "{names:?}");
-            assert!(names.last().is_some_and(|n| n.contains("poll")), "the walk's last frame is poll: {names:?}");
+            // under the JIT, `park_in_poll` is JIT code of the runtime that runs this test, which
+            // the walk asks about: it steps libc's frames by their CFI, reaches `park_in_poll`, and
+            // ends there, saying why: the garbage rbp, when poll's unwind tables restore it (a poll
+            // that saves rbp), or no frame pointer at all (one that leaves it alone: a thread
+            // blocked in a syscall gives none)
+            let pcs = raw.frames();
+            assert!(raw.stop == Some(FP_NOT_IN_STACK) || raw.stop == Some(HOST_NO_FP), "{names:?} {:?}", raw.stop);
+            assert!(pcs.len() >= 2 && names[pcs.len() - 2].contains("poll"), "poll's frame comes before the last: {names:?}");
+            let last = pcs[pcs.len() - 1];
+            assert!(host::jit_code(last - 1) && last > park_in_poll as fn(i32, u64, &AtomicU64) as usize as u64, "the last frame is park_in_poll's, the runtime's JIT code: {names:?}");
         } else {
             let reached = names.iter().any(|n| n.contains("park_in_poll"));
             assert!(reached || raw.stop == Some(BLOCKED_NO_FP), "the walk neither reached park_in_poll nor said why it stopped: {names:?} {:?}", raw.stop);

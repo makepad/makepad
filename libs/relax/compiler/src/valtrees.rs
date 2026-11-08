@@ -102,12 +102,11 @@ mod tests {
     use super::*;
     #[test]
     fn jit_query_preserves_aggregate_types_and_reports_panics() {
-        isolated_test!(jit_query_preserves_aggregate_types_and_reports_panics);
         const CHILD: &str = "MAKEPAD_RUN_VALTREE_QUERY_CHILD";
         if std::env::var_os(CHILD).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
+            let status = crate::test_child::status(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "valtrees::tests::jit_query_preserves_aggregate_types_and_reports_panics", "--test-threads=1"])
-                .env(CHILD, "1").status().unwrap();
+                .env(CHILD, "1"));
             assert!(status.success()); return;
         }
         crate::borrowck::lazy::disable_gandalf();

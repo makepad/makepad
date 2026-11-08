@@ -368,7 +368,11 @@ fn dispatch_command(req: &Req, out: &mut Out) {
                         let parked = crashed && errors.as_ref().is_some_and(|e| !e.is_empty());
                         let errors = errors.map(|e| format!("[{}]", e.iter().map(|e| json_str(e)).collect::<Vec<_>>().join(",")))
                             .unwrap_or_else(|| "null".into());
-                        out.line(&format!("{{{state},\"compile_errors\":{errors},\"compile_error_parked\":{parked}}}"))
+                        // the offered restarts and why (a layout change, the Cargo graph): until one
+                        // runs, the app runs the code from before them, whatever patch_failed says
+                        // (an agent took the view's patch_failed:false for the new code, 11-08)
+                        let waiting = crate::reload::restart_pending().iter().map(|w| json_str(w)).collect::<Vec<_>>().join(",");
+                        out.line(&format!("{{{state},\"compile_errors\":{errors},\"compile_error_parked\":{parked},\"restart_waiting\":[{waiting}]}}"))
                     }
                 }
                 Some(how @ ("open" | "dismiss")) => {
@@ -641,7 +645,10 @@ fn role(name: &str, os_id: u64, handle: u64) -> &'static str {
     if handle != 0 && handle == crate::owner::owner_tid() {
         return "owner";
     }
-    let _ = os_id;
+    // a hosted run's process main thread: the host's main loop, its window
+    if os_id != 0 && os_id == crate::run::host_thread() {
+        return "host";
+    }
     match name {
         n if n.starts_with("run-inspect") || n.starts_with("makepad-remote") => "inspect",
         n if n.starts_with("run-jit-") || n.starts_with("gandalf") || n.starts_with("run-check") => "compiler",
@@ -1125,9 +1132,21 @@ pub fn thread_label(handle: u64, threads: &[threads::Thread]) -> String {
         return "?".into();
     }
     match threads.iter().find(|t| t.handle == handle) {
-        Some(t) => format!("{} ({})", if t.name.is_empty() { "-" } else { &t.name }, tid_label(t.os_id)),
+        Some(t) => format!("{} ({})", shown_name(t, threads), tid_label(t.os_id)),
         None => format!("thread {:#x}", handle),
     }
+}
+
+/// A thread's name as a report shows it. One nobody named (no name, or on Linux the one it took
+/// over from the process's first thread: the binary's, which read like the JIT's own) is the
+/// program thread its domain knows it as, when it is one, and `unnamed` otherwise.
+pub(crate) fn shown_name(t: &threads::Thread, threads: &[threads::Thread]) -> String {
+    let first = std::process::id() as u64;
+    let unnamed = t.name.is_empty() || t.os_id != first && threads.iter().any(|p| p.os_id == first && p.name == t.name);
+    if !unnamed {
+        return t.name.clone();
+    }
+    crate::domain::program_thread_name(t.os_id).unwrap_or_else(|| "unnamed".into())
 }
 
 /// The thread whose stack holds the page a mutex holder tag names (Relax std's RawMutex tag:
@@ -1160,6 +1179,10 @@ fn cmd_threads(out: &mut Out) {
         }
         if let Some(r) = jit_rows.iter().find(|r| r.os_id == t.os_id) {
             wait.push_str(&lifeline_fields(r));
+        }
+        // held by a pause (or for good: a frame in code a layout patch replaced)
+        if instrument::held_now(t.os_id) {
+            wait.push_str(",\"held\":true");
         }
         out.line(&format!(
             "{{\"id\":\"{}\",\"name\":{},\"role\":\"{}\",\"state\":\"{}\",\"cpu_ms\":{}{}}}",
@@ -2023,6 +2046,27 @@ mod tests {
             let req = super::Req::parse(line);
             assert!(req.validate_params(makepad_remote::params::jit(&req.cmd, req.pos.first().map(String::as_str).unwrap_or("")).unwrap()).is_ok(), "{line}");
         }
+    }
+
+    /// `session view` names the restarts that wait beside patch_failed: a struct's layout change
+    /// was offered as a restart while the view said patch_failed:false and patch_notice:null, and
+    /// an agent tested a tool against the code from before it (11-08).
+    #[test]
+    fn session_view_names_the_restarts_that_wait() {
+        isolated_test!(session_view_names_the_restarts_that_wait);
+        let home = std::env::temp_dir().join(format!("relax-view-restart-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("MAKEPAD_HOME", &home);
+        std::env::set_var("MAKEPAD_RUN_LIVE_LOG", home.join("live.jsonl"));
+        super::run_view::publish("\"over_app\":false,\"patch_failed\":false,\"patch_notice\":null".into());
+        let view = || String::from_utf8(makepad_remote::cmd::answer(super::dispatch_command, "session view").0).unwrap();
+        assert!(view().contains("\"restart_waiting\":[]"), "{}", view());
+        let why = "src/chat.rs: struct `Sent` changed: its layout changed; live values would be read with the old field offsets (live migration is not built yet) -- restart the app";
+        crate::reload::offer_restart(why);
+        let shown = view();
+        assert!(shown.contains(&format!("\"restart_waiting\":[{}]", super::json_str(why))), "{shown}");
+        assert!(shown.contains("\"patch_failed\":false"), "the run's own fields stay: {shown}");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// `hold files=`: one `<path>=<blob id>` a line, `-` for a file the landing removes.

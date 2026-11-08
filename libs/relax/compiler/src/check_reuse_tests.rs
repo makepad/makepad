@@ -19,7 +19,7 @@ fn check_in_child(dir: &std::path::Path, reuse: bool, env: &[(&str, &str)]) -> R
         .env(CHILD, dir).env_remove("MAKEPAD_RUN_LINT_FLAGS").env_remove("RELAX_CHECK_REUSE_STORE");
     if reuse { cmd.env("RELAX_CHECK_REUSE_STORE", dir.join("store")); }
     for (k, v) in env { cmd.env(k, v); }
-    let out = cmd.output().unwrap();
+    let out = crate::test_child::output(&mut cmd);
     let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
     let mut run = Run { diags: Vec::new(), hits: 0, full: false, code: -1 };
@@ -330,10 +330,10 @@ fn an_edit_keeping_size_and_mtime_gets_a_fresh_verdict() {
     // (a certificate records a file's stat only once the file has been quiet that long)
     std::thread::sleep(std::time::Duration::from_nanos(crate::vfs::STAT_RACY_NS + 300_000_000));
     let check = || {
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
+        let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "check_reuse_tests::early_child", "--nocapture", "--test-threads=1", "--format=terse"])
             .env(EARLY_CHILD, &dir).env("MAKEPAD_RUN_CACHE_DIR", dir.join("cache")).env("MAKEPAD_RUN_CHECK_TIMES", "1")
-            .env_remove("MAKEPAD_RUN_LINT_FLAGS").output().unwrap();
+            .env_remove("MAKEPAD_RUN_LINT_FLAGS"));
         let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
         let code = stderr.lines().find_map(|l| l.strip_prefix("early child exit ")).map(|c| c.parse::<i32>().unwrap());

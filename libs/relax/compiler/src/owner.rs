@@ -1373,6 +1373,9 @@ pub static SERVED: AtomicU64 = AtomicU64::new(0);
 fn serve(r: usize) {
     let req = unsafe { &*(r as *const Req) };
     SERVED.fetch_add(1, Ordering::Relaxed);
+    // served inside a pump, the owner runs: its row stops naming the pump's runner meanwhile (the
+    // requester's row names the owner; the two read as a cycle)
+    let _running = crate::waits::running();
     req.state.store(RUNNING, Ordering::Release);
     let was_serving = OWNER_SERVING.swap(true, Ordering::Relaxed);
     let t0 = crate::jit::wall_ns();
@@ -1890,6 +1893,55 @@ mod tests {
         // the owner's top loop serves it once the request ended
         call(Class::Program, || {});
         assert!(APP_RAN.load(Ordering::SeqCst));
+    }
+
+    /// The pool apps' deadlock reports (2026-11-08): the owner, pumping for a thread's work, served
+    /// that thread's own request, and its wait row kept naming the thread meanwhile while the
+    /// requester's named the owner: "run-owner <-> the thread", a cycle for as long as the service
+    /// ran. Serving, the owner waits for nothing; the pump's row is back once the service ended.
+    #[test]
+    fn the_owner_serving_inside_a_pump_waits_for_nothing() {
+        isolated_test!(the_owner_serving_inside_a_pump_waits_for_nothing);
+        static RUNNER: AtomicU64 = AtomicU64::new(0);
+        static DONE: AtomicBool = AtomicBool::new(false);
+        static AFTER: AtomicBool = AtomicBool::new(false);
+        // the owner's row while it served (its kind), the requester's
+        static ROWS: Mutex<Option<(Option<crate::waits::Kind>, Option<crate::waits::Kind>)>> = Mutex::new(None);
+        call(Class::Program, || {
+            let job = std::thread::spawn(|| {
+                RUNNER.store(me(), Ordering::SeqCst);
+                while !OWNER_ASLEEP.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                call(Class::Job, || {
+                    // the requester's row is written right after its push
+                    let runner = RUNNER.load(Ordering::SeqCst);
+                    let t0 = std::time::Instant::now();
+                    while crate::waits::of(runner).map(|w| w.kind) != Some(crate::waits::Kind::Owner) && t0.elapsed().as_secs() < 10 {
+                        std::thread::yield_now();
+                    }
+                    *ROWS.lock().unwrap_or_else(|e| e.into_inner()) = Some((crate::waits::of(me()).map(|w| w.kind), crate::waits::of(runner).map(|w| w.kind)));
+                    DONE.store(true, Ordering::SeqCst);
+                });
+            });
+            while RUNNER.load(Ordering::SeqCst) == 0 {
+                std::thread::yield_now();
+            }
+            let runner = RUNNER.load(Ordering::SeqCst);
+            pump_wait_for(runner, &|| {
+                // the first look after the service: the pump's row is back
+                let done = DONE.load(Ordering::SeqCst);
+                if done {
+                    AFTER.store(crate::waits::of(me()).is_some_and(|w| w.kind == crate::waits::Kind::Pump && w.holder == runner), Ordering::SeqCst);
+                }
+                done
+            });
+            job.join().unwrap();
+        });
+        let (owner, requester) = ROWS.lock().unwrap_or_else(|e| e.into_inner()).take().expect("the Job was served");
+        assert_eq!(requester, Some(crate::waits::Kind::Owner), "the requester waits for the owner");
+        assert_eq!(owner, None, "the owner serving the request waits for nothing");
+        assert!(AFTER.load(Ordering::SeqCst), "after the service the pump's row names the thread it waits for");
     }
 
     /// M55 (a crate's compute tests on the Vulkan HAL, 2026-11-03): the owner,

@@ -57,10 +57,9 @@ fn patched_callee_while_callers_run() {
     // process-global runtime state: a child process of this test binary
     const CHILD: &str = "MAKEPAD_RUN_CALLS_TEST";
     if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "calls_tests::patched_callee_while_callers_run", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0")
-            .output().unwrap();
+            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }

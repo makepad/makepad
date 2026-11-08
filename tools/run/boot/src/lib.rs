@@ -1040,7 +1040,7 @@ impl Boot {
             // answered at once: the window system starts the move only while the button is down
             let mut writer = CmdWriter::new(HOST);
             for &(window, point, _) in &drag_queries {
-                writer.drag_reply(window, input::reply::QUERY, self.drag_answer(point));
+                writer.drag_reply(window, input::reply::QUERY, self.drag_answer(point), false);
             }
             hal.submit(&writer.buf());
             if let Some(latencies) = &mut self.latencies {

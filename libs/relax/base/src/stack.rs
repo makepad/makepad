@@ -77,7 +77,12 @@ pub fn program_stack_size() -> usize {
 /// after it (callers refresh their cached stack bounds there).
 /// Without a reservation (none granted) `f` runs on the thread's own stack.
 pub fn on_program_stack<F: FnOnce()>(bounds_changed: fn(), f: F) {
-    let Some(seg) = program_stack() else {
+    on_program_stack_from(&SPARE_STACKS, bounds_changed, f)
+}
+
+/// `on_program_stack` with the stack taken from, and given back to, `spares`.
+fn on_program_stack_from<F: FnOnce()>(spares: &Spares<Segment>, bounds_changed: fn(), f: F) {
+    let Some(seg) = program_stack(spares) else {
         f();
         return;
     };
@@ -101,7 +106,7 @@ pub fn on_program_stack<F: FnOnce()>(bounds_changed: fn(), f: F) {
     STACK_LO.with(|c| c.set(old_lo));
     PROGRAM_STACK.with(|c| c.set(old_ps));
     bounds_changed();
-    program_stack_done(seg);
+    program_stack_done(spares, seg);
     if let Some(Err(e)) = job.r.take() {
         std::panic::resume_unwind(e);
     }
@@ -117,8 +122,8 @@ static SPARE_STACKS: Spares<Segment> = Spares::new();
 
 /// A program stack: a spare one, else a new reservation (`program_stack_size`, halved until the
 /// system grants one; None: not even 64 MB).
-fn program_stack() -> Option<Segment> {
-    if let Some(s) = SPARE_STACKS.take() {
+fn program_stack(spares: &Spares<Segment>) -> Option<Segment> {
+    if let Some(s) = spares.take() {
         return Some(s);
     }
     let mut len = program_stack_size();
@@ -136,10 +141,10 @@ fn program_stack() -> Option<Segment> {
 /// A thread is done with program stack `s`: it is kept for the next thread unless that thread
 /// went below its top PROGRAM_STACK_KEEP bytes (the deep pages would stay committed) or enough
 /// are kept already; else it is unmapped.
-fn program_stack_done(s: Segment) {
+fn program_stack_done(spares: &Spares<Segment>, s: Segment) {
     if imp::used_below(&s, s.top - PROGRAM_STACK_KEEP) {
         imp::free_segment(s);
-    } else if let Some(s) = SPARE_STACKS.keep(s) {
+    } else if let Some(s) = spares.keep(s) {
         imp::free_segment(s);
     }
 }
@@ -665,31 +670,36 @@ mod tests {
         if at > lo && at < hi && readable(at) { unsafe { std::ptr::read_volatile(at as *const usize) } } else { usize::MAX }
     }
 
-    /// Runs on a program stack: its bounds and what `f` returns.
-    fn on_program_stack(f: fn() -> usize) -> ((usize, usize), usize) {
+    /// Runs on a program stack from `spares`: its bounds and what `f` returns.
+    fn on_program_stack(spares: &super::Spares<super::Segment>, f: fn() -> usize) -> ((usize, usize), usize) {
         let mut r = ((0, 0), 0);
-        super::on_program_stack(|| {}, || r = (super::program_stack_bounds().unwrap(), f()));
+        super::on_program_stack_from(spares, || {}, || r = (super::program_stack_bounds().unwrap(), f()));
         r
     }
 
     /// A finished program stack is kept for the next one: the next thread runs on the same
     /// segment, its pages as the last one left them (no new mapping per thread). One a thread
     /// used deep is unmapped (its pages are not kept committed): the next one is another
-    /// segment, or a new mapping at the same place. (One test: both take the spares.)
+    /// segment, or a new mapping at the same place. (Spares of its own: the process's are
+    /// taken and given back by every test that runs on a program stack.)
     #[test]
     fn program_stacks_are_kept_unless_used_deep() {
-        let (first, at) = on_program_stack(mark::<{ (256 << 10) / WORD }>);
+        let spares = super::Spares::new();
+        let (first, at) = on_program_stack(&spares, mark::<{ (256 << 10) / WORD }>);
         assert!(at > first.0 && at < first.1);
         AT.store(at, std::sync::atomic::Ordering::Relaxed);
-        let (second, seen) = on_program_stack(peek);
+        let (second, seen) = on_program_stack(&spares, peek);
         assert_eq!(first, second, "a new program stack");
         assert_eq!(seen, MAGIC, "a new mapping at the same place");
 
-        let (first, at) = on_program_stack(mark::<{ (8 << 20) / WORD }>);
+        let (first, at) = on_program_stack(&spares, mark::<{ (8 << 20) / WORD }>);
         assert!(first.1 - at > super::PROGRAM_STACK_KEEP);
         AT.store(at, std::sync::atomic::Ordering::Relaxed);
-        let (_, seen) = on_program_stack(peek);
+        let (_, seen) = on_program_stack(&spares, peek);
         assert_ne!(seen, MAGIC, "kept with its deep pages");
+        while let Some(s) = spares.take() {
+            super::imp::free_segment(s);
+        }
     }
 
     /// A panic on a program stack comes back to the caller, on the thread's own stack.

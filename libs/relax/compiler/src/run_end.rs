@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 /// How long the run's own threads get to see the end. A compile between two of its points is what
 /// takes the time.
 const THREADS_GRACE: Duration = Duration::from_secs(10);
+/// How often the end says which compile jobs it still waits for (it waits them out: they read the
+/// unit and the statics it puts back).
+const WORKERS_REPORT: Duration = Duration::from_secs(5);
 /// How long the program's threads get.
 const PROGRAM_GRACE: Duration = Duration::from_secs(5);
 
@@ -81,10 +84,7 @@ pub unsafe fn end(up: *mut Unit, grace: Duration) -> Ended {
     crate::run::end_console();
     crate::jit::stop_compiling();
     let stayed = crate::run_threads::end_all(THREADS_GRACE);
-    let workers_stopped = crate::jit::stop_queue_workers(THREADS_GRACE);
-    if !workers_stopped {
-        eprintln!("makepad-run: a run's end: compile workers were still in a job after {THREADS_GRACE:?}");
-    }
+    crate::jit::stop_queue_workers(WORKERS_REPORT);
     crate::pool::retire_idle();
     makepad_cpu_budget::end_run();
     ms[2] = mark();
@@ -93,7 +93,7 @@ pub unsafe fn end(up: *mut Unit, grace: Duration) -> Ended {
     crate::pmhost::free_world();
     let up = crate::run::take_run_unit();
     if !up.is_null() {
-        let no_thread_in_it = stayed.is_empty() && workers_stopped;
+        let no_thread_in_it = stayed.is_empty();
         if !no_thread_in_it {
             eprintln!("makepad-run: a run's end: its unit stays in memory, threads that did not end may read it: {stayed:?}");
         }

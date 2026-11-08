@@ -331,7 +331,7 @@ impl<'a> Parser<'a> {
                     while gparams.iter().any(|g| g.1 == h) {
                         h.push('_');
                     }
-                    gen_hash(&mut body, &name, is_enum, &shapes, &h, packed)
+                    gen_hash(&mut body, &name, is_enum, &shapes, &h, &disc_ty, packed)
                 }
                 "PartialOrd" => gen_ord(&mut body, &name, is_enum, &shapes, true, &disc_ty, packed),
                 _ => gen_ord(&mut body, &name, is_enum, &shapes, false, &disc_ty, packed),
@@ -822,22 +822,25 @@ fn gen_default(g: &mut Gen, ty: &str, is_enum: bool, shapes: &[Shape]) -> bool {
     true
 }
 
-fn gen_hash(g: &mut Gen, _ty: &str, is_enum: bool, shapes: &[Shape], h: &str, packed: bool) {
+fn gen_hash(g: &mut Gen, _ty: &str, is_enum: bool, shapes: &[Shape], h: &str, disc_ty: &str, packed: bool) {
     tg!(g; fn hash < #word(h) : #core() :: hash :: Hasher > (& self , state : & mut #word(h)));
     g.open_brace();
     if is_enum && shapes.is_empty() {
         tg!(g; match * self { });
     } else {
+        if is_enum && shapes.len() > 1 {
+            // deriving/hash.rs: the discriminant's value (explicit `= n` included) as the
+            // discriminant type (`#[repr(u8)]` ..), then the variant's fields
+            tg!(g; let __sd = unsafe { #core() :: intrinsics_mem :: discriminant_value (self) } as #word(disc_ty) ;);
+            tg!(g; #core() :: hash :: Hash :: hash (& __sd , state) ;);
+        }
         tg!(g; match self);
         g.open_brace();
-        for (vi, s) in shapes.iter().enumerate() {
+        for s in shapes {
             if packed { tg!(g; _); } else { pat(g, s, "__s"); }
             tg!(g; =>);
             g.open_brace();
             if packed { packed_fields(g, s, "__s", "self"); }
-            if is_enum && shapes.len() > 1 {
-                tg!(g; #core() :: hash :: Hash :: hash (& (#int(format!("{}isize", vi))), state) ;);
-            }
             for i in 0..s.fields.len() {
                 tg!(g; #core() :: hash :: Hash :: hash (#word(&format!("__s{}", i)), state) ;);
             }

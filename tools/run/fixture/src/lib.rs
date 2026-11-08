@@ -534,3 +534,54 @@ pub fn tls_bump(v: u64) -> (u32, usize) {
     });
     (n, len)
 }
+
+// ---- a panic of the caller's side through rustc's frames (relax-unwind-through)
+
+static GUARD_DROPS: AtomicU32 = AtomicU32::new(0);
+
+/// A drop guard of rustc's frame: counts its drops.
+struct Guard;
+impl Drop for Guard {
+    fn drop(&mut self) {
+        GUARD_DROPS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// rustc's frame holding a drop guard around a call of the caller's side (`run` is an
+/// `extern "C-unwind" fn(usize) -> u32` thunk of the caller, `through_guard`).
+#[relax_api]
+pub fn guarded_call(run: usize, data: usize) -> u32 {
+    // SAFETY: `run` is the caller's thunk (through_guard)
+    let run = unsafe { std::mem::transmute::<usize, extern "C-unwind" fn(usize) -> u32>(run) };
+    let _guard = Guard;
+    run(data) + 1
+}
+
+/// rustc's catch_unwind around a call of the caller's side: true when it caught a panic.
+#[relax_api]
+pub fn caught_call(run: usize, data: usize) -> bool {
+    // SAFETY: `run` is the caller's thunk (catch_through)
+    let run = unsafe { std::mem::transmute::<usize, extern "C-unwind" fn(usize) -> u32>(run) };
+    std::panic::catch_unwind(|| run(data)).is_err()
+}
+
+/// How many of rustc's guards dropped.
+#[relax_api]
+pub fn guard_drops() -> u32 {
+    GUARD_DROPS.load(Ordering::Relaxed)
+}
+
+extern "C-unwind" fn thunk_call<F: FnMut() -> u32>(data: usize) -> u32 {
+    // SAFETY: `data` is the `&mut F` of through_guard / catch_through, live for the call
+    unsafe { (*(data as *mut F))() }
+}
+
+/// Generic, so the caller's side compiles it: `f` runs inside rustc's guarded frame.
+pub fn through_guard<F: FnMut() -> u32>(f: &mut F) -> u32 {
+    guarded_call(thunk_call::<F> as extern "C-unwind" fn(usize) -> u32 as usize, f as *mut F as usize)
+}
+
+/// Generic, so the caller's side compiles it: `f` runs inside rustc's catch_unwind.
+pub fn catch_through<F: FnMut() -> u32>(f: &mut F) -> bool {
+    caught_call(thunk_call::<F> as extern "C-unwind" fn(usize) -> u32 as usize, f as *mut F as usize)
+}

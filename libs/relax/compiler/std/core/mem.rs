@@ -64,36 +64,38 @@ pub const unsafe fn transmute_copy<T, U>(src: &T) -> U {
     im::ptr_read(src as *const T as *const U)
 }
 
-/// Opaque enum discriminant (`mem::discriminant`).
-pub struct Discriminant<T> {
-    value: i64,
-    _m: crate::marker::PhantomData<T>,
-}
+/// Opaque enum discriminant (`mem::discriminant`): library/core/src/mem/mod.rs, held as the
+/// discriminant's own type (the enum's repr int, isize by default; u8 for a type that is no
+/// enum), so its hash, comparison and size are rustc's.
+pub struct Discriminant<T>(<T as crate::marker::DiscriminantKind>::Discriminant);
 
 pub const fn discriminant<T>(v: &T) -> Discriminant<T> {
-    Discriminant { value: unsafe { im::discriminant_value(v) }, _m: crate::marker::PhantomData }
+    // the intrinsic's i64, sign-extended to the widest discriminant type: its low bytes are the
+    // value as the discriminant type (the JIT's targets are little-endian)
+    let wide = unsafe { im::discriminant_value(v) } as i128;
+    Discriminant(unsafe { transmute_copy::<i128, <T as crate::marker::DiscriminantKind>::Discriminant>(&wide) })
 }
 
 impl<T> Clone for Discriminant<T> {
     fn clone(&self) -> Discriminant<T> {
-        Discriminant { value: self.value, _m: crate::marker::PhantomData }
+        *self
     }
 }
 impl<T> Copy for Discriminant<T> {}
 impl<T> PartialEq for Discriminant<T> {
     fn eq(&self, o: &Discriminant<T>) -> bool {
-        self.value == o.value
+        self.0 == o.0
     }
 }
 impl<T> Eq for Discriminant<T> {}
 impl<T> crate::hash::Hash for Discriminant<T> {
     fn hash<H: crate::hash::Hasher>(&self, state: &mut H) {
-        self.value.hash(state)
+        self.0.hash(state)
     }
 }
 impl<T> crate::fmt::Debug for Discriminant<T> {
     fn fmt(&self, f: &mut crate::fmt::Formatter<'_>) -> crate::fmt::Result {
-        f.debug_tuple("Discriminant").field(&self.value).finish()
+        f.debug_tuple("Discriminant").field(&self.0).finish()
     }
 }
 

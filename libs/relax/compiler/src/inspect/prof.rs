@@ -159,7 +159,7 @@ mod imp {
         Map,
     }
 
-    fn open(tid: u64, hz: u64, ev: super::Ev, pages: usize) -> Result<Ring, OpenErr> {
+    fn open_event(tid: u64, hz: u64, ev: super::Ev) -> Result<i32, i64> {
         let mut attr = [0u8; 128];
         let put = |a: &mut [u8; 128], off: usize, v: &[u8]| a[off..off + v.len()].copy_from_slice(v);
         // exclude_kernel | exclude_hv
@@ -192,29 +192,83 @@ mod imp {
         put(&mut attr, 88, &STACK_COPY.to_ne_bytes());
         let fd = unsafe { syscall(298, attr.as_ptr(), tid as i32, -1i32, -1i32, 0u64) } as i32;
         if fd < 0 {
-            return Err(OpenErr::Event(std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as i64));
+            return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as i64);
         }
-        // the largest ring the locked-memory budget still gives (halved until it maps)
-        let mut pages = pages;
-        loop {
-            let len = (1 + pages) * PAGE;
-            let p = unsafe { mmap(std::ptr::null_mut(), len, 3, 1, fd, 0) };
-            if p as isize != -1 {
-                return Ok(Ring { fd, base: p as usize, os_id: tid, pages });
+        Ok(fd)
+    }
+
+    fn open(tid: u64, hz: u64, ev: super::Ev, pages: usize) -> Result<Ring, OpenErr> {
+        let fd = open_event(tid, hz, ev).map_err(OpenErr::Event)?;
+        let len = (1 + pages) * PAGE;
+        let p = unsafe { mmap(std::ptr::null_mut(), len, 3, 1, fd, 0) };
+        if p as isize == -1 {
+            unsafe { close(fd) };
+            return Err(OpenErr::Map);
+        }
+        Ok(Ring { fd, base: p as usize, os_id: tid, pages })
+    }
+
+    fn close_rings(rings: &mut Vec<Ring>) {
+        for r in rings.drain(..) {
+            unsafe {
+                munmap(r.base as *mut u8, (1 + r.pages) * PAGE);
+                close(r.fd);
             }
-            if pages <= MIN_PAGES {
-                unsafe { close(fd) };
-                return Err(OpenErr::Map);
-            }
-            pages /= 2;
         }
     }
 
+    /// Rings for `tids` (busiest first), one size for all: the largest at which each of the
+    /// first `first` (the threads seen running) gets one, then the rest at that size while the
+    /// budget lasts. Greedy 2 MB rings for the first few spent the budget on 8 of an app's ~100
+    /// threads and left its workers none. Returns the rings, the indices of the threads
+    /// whose event did not open (and the last errno) and of those left without a ring.
+    fn open_rings(tids: &[u64], first: usize, hz: u64, ev: super::Ev) -> (Vec<Ring>, Vec<usize>, i64, Vec<usize>) {
+        let (mut no_event, mut errno) = (Vec::new(), 0);
+        let mut rings = Vec::new();
+        let first = first.clamp(1, tids.len().max(1));
+        let mut pages = RING_PAGES;
+        loop {
+            no_event.clear();
+            let mut short = false;
+            for (k, &t) in tids.iter().enumerate().take(first) {
+                match open(t, hz, ev, pages) {
+                    Ok(r) => rings.push(r),
+                    Err(OpenErr::Event(e)) => {
+                        errno = e;
+                        no_event.push(k);
+                    }
+                    Err(OpenErr::Map) => {
+                        short = true;
+                        break;
+                    }
+                }
+            }
+            if !short || pages <= MIN_PAGES {
+                break;
+            }
+            close_rings(&mut rings);
+            pages /= 2;
+        }
+        let mut no_map = Vec::new();
+        let opened = rings.len() + no_event.len();
+        for (k, &t) in tids.iter().enumerate().skip(opened) {
+            match open(t, hz, ev, pages) {
+                Ok(r) => rings.push(r),
+                Err(OpenErr::Event(e)) => {
+                    errno = e;
+                    no_event.push(k);
+                }
+                Err(OpenErr::Map) => no_map.push(k),
+            }
+        }
+        (rings, no_event, errno, no_map)
+    }
+
     /// The threads worth a ring, busiest first: those whose CPU time moved in a 30-ms look (a
-    /// thread idle then is very likely idle in the run), then the rest by CPU so far. Every thread
-    /// gets one while the budget lasts; the busy ones are opened first, so a short budget is spent
-    /// on them.
-    fn by_activity(threads: &[crate::inspect::threads::Thread]) -> Vec<usize> {
+    /// thread idle then is very likely idle in the run), then the rest by CPU so far; and how many
+    /// moved. Every thread gets one while the budget lasts; the ring size is the one at which
+    /// every thread that moved gets one (open_rings).
+    fn by_activity(threads: &[crate::inspect::threads::Thread]) -> (Vec<usize>, usize) {
         let before: Vec<(u64, u64)> = threads.iter().map(|t| (t.os_id, t.cpu_ns)).collect();
         std::thread::sleep(std::time::Duration::from_millis(30));
         let now = crate::inspect::threads::list();
@@ -227,7 +281,8 @@ mod imp {
             })
             .collect();
         order.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-        order.into_iter().map(|x| x.2).collect()
+        let moved = order.iter().filter(|x| x.0 > 0).count();
+        (order.into_iter().map(|x| x.2).collect(), moved)
     }
 
     fn drain(r: &Ring, out: &mut Vec<Sample>, lost: &mut u64) {
@@ -300,18 +355,8 @@ mod imp {
     /// while sampling: (samples, lost batches, notes).
     pub fn collect_foreign(tids: &[u64], secs: f64, hz: u64, ev: super::Ev, cfi: &crate::inspect::cfi::Foreign, cancel: &dyn Fn() -> bool) -> (Vec<Sample>, u64, Vec<String>) {
         let mut notes = Vec::new();
-        let mut rings = Vec::new();
-        let mut pages = RING_PAGES;
-        let mut failed = 0;
-        for &t in tids {
-            match open(t, hz, ev, pages) {
-                Ok(r) => {
-                    pages = r.pages;
-                    rings.push(r);
-                }
-                Err(_) => failed += 1,
-            }
-        }
+        let (rings, no_event, _, no_map) = open_rings(tids, tids.len(), hz, ev);
+        let failed = no_event.len() + no_map.len();
         if failed > 0 {
             notes.push(format!("{} of {} native threads not sampled (perf_event_open or the locked-memory budget)", failed, tids.len()));
         }
@@ -376,27 +421,13 @@ mod imp {
             notes.push("wall=1 is macOS only (perf task-clock samples a thread only while it runs): CPU samples".into());
         }
         let mut ev = ev;
-        let order = by_activity(&threads);
+        let (order, moved) = by_activity(&threads);
+        let tids: Vec<u64> = order.iter().map(|&k| threads[k].os_id).collect();
         let open_all = |ev: super::Ev, notes: &mut Vec<String>| -> Vec<Ring> {
-            let mut rings = Vec::new();
-            let (mut no_event, mut no_map) = (Vec::new(), Vec::new());
-            let mut errno = 0;
-            let mut pages = RING_PAGES;
-            for &k in &order {
-                let t = &threads[k];
-                // once a ring had to shrink, the next ones start at its size
-                match open(t.os_id, hz, ev, pages) {
-                    Ok(r) => {
-                        pages = r.pages;
-                        rings.push(r);
-                    }
-                    Err(OpenErr::Event(e)) => {
-                        errno = e;
-                        no_event.push(t.name.clone());
-                    }
-                    Err(OpenErr::Map) => no_map.push(t.name.clone()),
-                }
-            }
+            let (rings, no_event, errno, no_map) = open_rings(&tids, moved, hz, ev);
+            let pages = rings.first().map_or(MIN_PAGES, |r| r.pages);
+            let names = |v: &[usize]| v.iter().map(|&i| threads[order[i]].name.clone()).collect::<Vec<_>>();
+            let (no_event, no_map) = (names(&no_event), names(&no_map));
             let list = |v: &[String]| v.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
             if !no_map.is_empty() && !rings.is_empty() {
                 notes.push(format!("{} of {} threads not sampled (the busiest {} were): the perf locked-memory budget is spent (RLIMIT_MEMLOCK + perf_event_mlock_kb, shared with this user's other perf jobs; rings of {} KB); not sampled: {}", no_map.len(), threads.len(), rings.len(), pages * PAGE / 1024, list(&no_map)));

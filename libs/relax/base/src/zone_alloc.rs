@@ -867,16 +867,31 @@ unsafe impl GlobalAlloc for RelaxAlloc {
 /// and so do the tests whose threads allocate in the compiler arena meanwhile (pool.rs: its
 /// workers are compiler threads and hand their chunks back after every task).
 #[cfg(test)]
-pub(crate) fn test_serial() -> relax_session::sync::MutexGuard<'static, ()> {
+pub(crate) fn test_serial() -> TestSerial {
     static SERIAL: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
-    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    TestSerial { _turn: SERIAL.lock().unwrap_or_else(|e| e.into_inner()) }
+}
+
+/// `test_serial`'s turn: the test's thread hands its compiler and slot chunks back before the
+/// next test's turn. The test harness does not wait for a test's thread to end, so the hand-back
+/// of its end would come during the next test, which reads the counters.
+#[cfg(test)]
+pub(crate) struct TestSerial {
+    _turn: relax_session::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for TestSerial {
+    fn drop(&mut self) {
+        compiler_hand_back();
+    }
 }
 
 #[cfg(all(test, any(target_vendor = "apple", target_os = "linux", target_os = "android", windows)))]
 mod routing_tests {
     use super::*;
 
-    fn serial() -> relax_session::sync::MutexGuard<'static, ()> {
+    fn serial() -> TestSerial {
         test_serial()
     }
 

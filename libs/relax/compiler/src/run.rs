@@ -170,7 +170,7 @@ extern "C" {
 }
 
 fn usage() -> i32 {
-    eprintln!("usage: makepad run [--units <unit-graph.json>] [--ahead=minimal|balanced|aot-max|aot-min] [--quiet] [--verbose] [--no-asm] [--allow-c] <package> [cargo flags] [-- program args]");
+    eprintln!("usage: makepad run [--units <unit-graph.json>] [--ahead=minimal|balanced|aot-max|aot-min] [--quiet] [--verbose] [--no-asm] [--allow-c] [--no-live] [--unattended] <package> [cargo flags] [-- program args]");
     2
 }
 
@@ -275,6 +275,7 @@ pub fn cmd_run(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
     let host = run_host(sess.runtime.boot_only, args).filter(|_| hosted_program(sess, args));
     let code = if let Some(host) = host {
         HOSTED_RUN.store(true, Ordering::Release);
+        HOST_THREAD.store(crate::inspect::threads::self_os_id(), Ordering::Release);
         let sess = sess.clone();
         let args = args.to_vec();
         // (due from here: the inspect endpoint takes a relaunch before the compile thread runs)
@@ -312,6 +313,7 @@ pub fn cmd_run_app(package: &str, args: Vec<String>, mut prepare: Box<dyn FnMut(
     crate::run_end::leftovers::mark();
     let start = std::time::Instant::now();
     HOSTED_RUN.store(true, Ordering::Release);
+    HOST_THREAD.store(crate::inspect::threads::self_os_id(), Ordering::Release);
     APP_START.store(true, Ordering::Release);
     let package = package.to_string();
     let words = args.clone();
@@ -981,6 +983,14 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             }
             "--quiet" => QUIET.store(true, Ordering::Relaxed),
             "--no-live" => no_live = true,
+            // a run no one attends (an app a test starts, makepad_test launch_package): no live
+            // session, and nothing parks -- a compile error is its call's panic, a panic unwinds at
+            // once, a crash ends the run -- so the test fails with the text instead of waiting
+            // for a resume that never comes (test apps parked at a compile error for an hour)
+            "--unattended" => {
+                no_live = true;
+                crate::inspect::events::unattended();
+            }
             // non-lazy Gandalf: no body runs before the borrow checker accepted it (jit::CHECK_FIRST)
             "--check-first" => jit::CHECK_FIRST.store(true, Ordering::Relaxed),
             // the parent run's relax dir (dirs.rs): a build script it runs shares it
@@ -2402,6 +2412,15 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         crate::why::event("boundary", "boot-done-before-main", 0, "", Some(crate::why::Cause::new("", 0, "boot-only", "application main has not run")));
         std::process::exit(0);
     }
+    // cargo builds every path dependency before a test runs, so a dependency rustc rejects runs no
+    // test. Its check ran beside the boot until here (check.rs start_test_deps); the tests wait for
+    // its verdict. (They ran beside it: one met a compile error in its call and the others passed on
+    // code that does not build, 11-08.)
+    // (a run that is no test started no such check: 0)
+    if crate::check::finish_test_deps(0) != 0 {
+        eprintln!("error: no test ran: a path dependency does not compile (`makepad test` fails as `cargo test` does on code rustc rejects)");
+        return 101;
+    }
     // the platform's start code runs the program's constructors before its entry (sections.rs)
     if !entry_defs.is_empty() || harness || !exports_mode && !HAL_RUN.load(Ordering::Acquire) {
         // the program's own code runs on this thread from here (its constructors, then its
@@ -2749,6 +2768,15 @@ pub(crate) fn batch_program() {
 
 static MAIN_HOST: std::sync::OnceLock<MainHost> = std::sync::OnceLock::new();
 static HOSTED_RUN: AtomicBool = AtomicBool::new(false);
+/// The host's UI thread (its OS id): the one `cmd_run` hands to the host's main loop (`MainHost::run`)
+/// in a hosted run, the process's main thread, which runs the window: its drawing, its input, the
+/// run's own screens. 0: no run is hosted.
+static HOST_THREAD: AtomicU64 = AtomicU64::new(0);
+
+/// The host's UI thread ([`HOST_THREAD`]); 0 when no run is hosted.
+pub(crate) fn host_thread() -> u64 {
+    HOST_THREAD.load(Ordering::Acquire)
+}
 /// `makepad run --harness` (`makepad test`): the program is a test harness.
 static HARNESS_RUN: AtomicBool = AtomicBool::new(false);
 
@@ -4018,6 +4046,8 @@ static ONCE: AtomicBool = AtomicBool::new(false);
 
 fn quit_mark() {
     jit::QUIT_SEEN.store(true, Ordering::Relaxed);
+    // nothing parked waits for a decision now, and a paused program goes on to its quit
+    crate::inspect::events::quit_releases();
     // the quit write and the exit's commit without waiting on the disk (store.rs Slot::tail)
     crate::store::set_exiting();
     if ONCE.swap(true, Ordering::SeqCst) || unsafe { RUN_UNIT }.is_null() { return; }
@@ -4584,9 +4614,10 @@ fn summary_inner(why: &str) {
                 }
             }
             if built > 0 || n[0] > 0.0 {
+                let dropped = jit::spec_drops_summary();
                 verbose!(
-                    "makepad-run: pipelined compile: callers front {:.0} ms locked, back {:.0} ms unlocked, relock wait {:.0} ms, in-flight waits {:.0} ms; speculative {} built ({} called, {} unused; {} expired after MAKEPAD_RUN_SPEC_TTL_MS, {:.0} MB freed), workers front {:.0} ms back {:.0} ms, {} cold calls skipped{}",
-                    n[0], n[1], n[2], n[3], built, used, built - used, jit::SPEC_EXPIRED[0].load(Ordering::Relaxed), jit::SPEC_EXPIRED[1].load(Ordering::Relaxed) as f64 / 1048576.0, n[4], n[5], jit::SPEC_COLD_SKIPPED.load(Ordering::Relaxed), if jit::spec_hot_only(options) { " (fall-through only)" } else { "" }
+                    "makepad-run: pipelined compile: callers front {:.0} ms locked, back {:.0} ms unlocked, relock wait {:.0} ms, in-flight waits {:.0} ms; speculative {} built ({} called, {} unused; {} expired after MAKEPAD_RUN_SPEC_TTL_MS, {:.0} MB freed{}), workers front {:.0} ms back {:.0} ms, {} cold calls skipped{}",
+                    n[0], n[1], n[2], n[3], built, used, built - used, jit::SPEC_EXPIRED[0].load(Ordering::Relaxed), jit::SPEC_EXPIRED[1].load(Ordering::Relaxed) as f64 / 1048576.0, if dropped.is_empty() { String::new() } else { format!("; dropped: {dropped}") }, n[4], n[5], jit::SPEC_COLD_SKIPPED.load(Ordering::Relaxed), if jit::spec_hot_only(options) { " (fall-through only)" } else { "" }
                 );
             }
         }

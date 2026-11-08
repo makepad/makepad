@@ -4,7 +4,8 @@
 //! the resolved paths, method calls, field reads, patterns, types it mentions); the signatures'
 //! and fields' references are read from the syntax (`TypeWalker`). `finish` then runs rustc's
 //! worklist: seeds are `main`, the effectively public items (`#[allow(dead_code)]` items,
-//! `#[no_mangle]` / `#[used]` / lang items, `const _`, a test build's `#[test]` fns), and
+//! `#[no_mangle]` / `#[used]` / lang items, `const _`, a test build's `#[test]` fns, what a
+//! `global_asm!`'s operands name), and
 //! whatever a live item mentions is live; trait impls and their items are live when the trait
 //! (item) and the implementing type are. What stays dead is reported per module as rustc's
 //! `check_mod_deathness` does, grouped by parent and lint level.
@@ -1351,6 +1352,23 @@ fn late_lints(cx: &CrateCx<'_>, reach: &Reach, pt: &mut PartTimes) {
     if executable {
         if let Some(m) = prog.lookup_in_container(prog.mods[ci.root_mod as usize].def, main, false) {
             if prog.def(m).kind == DefKind::Fn { s.worklist.push(Work { id: m, propagated: false, own: false }); }
+        }
+    }
+    // dead.rs: a `global_asm!` is live (DefKind::GlobalAsm seeds the worklist), and so is what
+    // its operands name: a `sym` operand's fn or static, a `const` operand's constants
+    for &(file, iid, module) in &prog.global_asms {
+        if prog.mods[module as usize].krate != c.krate { continue; }
+        let ast = &prog.files[file as usize].ast;
+        let ItemKind::Mac(m) = &ast.item(iid).kind else { continue };
+        let m = ast.row(*m);
+        if m.args == NO_MAC_ARGS { continue; }
+        let Some(spec) = ast.mac_arg(m.args).asm else { continue };
+        let mut w = TypeWalker { prog, file, ast, module, params: HashSet::new(), self_def: None, out: Vec::new() };
+        for op in ast.list(spec.ops) {
+            if let Some(x) = op.input { w.const_expr(x); }
+        }
+        for r in w.out {
+            if let Ref::Use(d) = r { s.worklist.push(Work { id: d, propagated: false, own: false }); }
         }
     }
     for &d in reach.defs.iter() {

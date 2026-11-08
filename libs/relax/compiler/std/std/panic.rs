@@ -179,7 +179,7 @@ pub(crate) fn record_payload(message: fmt::Arguments<'_>) {
     });
 }
 
-fn clear_payload() {
+pub(crate) fn clear_payload() {
     let _ = PAYLOAD.try_with(|c| {
         if let Some(p) = c.take() {
             drop(unsafe { Box::from_raw(p.as_ptr()) });

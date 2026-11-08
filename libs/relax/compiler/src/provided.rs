@@ -29,7 +29,8 @@ use std::collections::HashMap;
 use relax_session::sync::Mutex;
 
 /// A generated shim: arguments moved out of `args[i]`, the result written to `ret`; 0 = returned,
-/// 1 = panicked (the message is then read with the crate's LastPanicFn).
+/// 1 = panicked (the message is then read with the crate's LastPanicFn), 2 = the calling thread's
+/// own panic unwound through it (makepad_relax_api::CallerPanic: the caller goes on with it).
 pub type ShimFn = unsafe extern "C" fn(*const *mut u8, *mut u8) -> u32;
 /// Writes the text of the last panic a shim caught on this thread: (ptr, len), valid until the
 /// thread's next shim call.

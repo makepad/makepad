@@ -30,6 +30,9 @@ macro_rules! print {
 
 pub use relax_front::*;
 
+/// The test binary's children (tests run alone in their own process), a few at once.
+#[cfg(test)]
+mod test_child;
 pub mod types;
 pub mod instance;
 pub mod consts;

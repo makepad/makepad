@@ -64,6 +64,14 @@ type RuntimePanicHook = extern "C" fn(*const u8, usize, *const u8, usize, u32, u
 #[cfg(not(relax_web))]
 extern "C" {
     fn relax_set_panic_hook(hook: RuntimePanicHook);
+    fn relax_set_payload_end(end: extern "C" fn());
+}
+
+/// A catch of native code (a catch_unwind of a provided crate's rustc code around a callback)
+/// ended this thread's panic: the payload kept for catch_unwind / join goes.
+#[cfg(not(relax_web))]
+extern "C" fn payload_end() {
+    crate::panic::clear_payload();
 }
 
 /// Static message bytes are interned by the loader; formatted bytes live through this call.
@@ -94,7 +102,10 @@ pub fn set_panic_trampoline(f: fn(&str, &core::panic::Location<'_>)) {
         STD_HOOK = Some(f);
     }
     #[cfg(not(relax_web))]
-    unsafe { relax_set_panic_hook(runtime_panic_hook) };
+    unsafe {
+        relax_set_panic_hook(runtime_panic_hook);
+        relax_set_payload_end(payload_end);
+    }
     core::panicking::set_depth_fn(crate::panic::panic_depth_step);
     core::panicking::set_hook_fn(Some(core_hook));
 }
@@ -103,7 +114,10 @@ pub fn set_panic_trampoline(f: fn(&str, &core::panic::Location<'_>)) {
 /// count panic nesting per thread.
 pub fn install_core_hook() {
     #[cfg(not(relax_web))]
-    unsafe { relax_set_panic_hook(runtime_panic_hook) };
+    unsafe {
+        relax_set_panic_hook(runtime_panic_hook);
+        relax_set_payload_end(payload_end);
+    }
     core::panicking::set_depth_fn(crate::panic::panic_depth_step);
     if core::panicking::hook_fn().is_none() {
         core::panicking::set_hook_fn(Some(core_hook));

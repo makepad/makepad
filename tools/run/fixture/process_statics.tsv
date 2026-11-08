@@ -786,6 +786,7 @@ relax_compiler::run::BOOTING	the boot gate: the restart that ends a run sets it 
 relax_compiler::run::CHECK_RECORDS_COLLECTED	`makepad check` only
 relax_compiler::run::HARNESS_RUN	`makepad test` only, the harness restarts by exec
 relax_compiler::run::HOSTED_RUN	set only in cmd_run, which restart skips
+relax_compiler::run::HOST_THREAD	the host's main thread, set only in cmd_run, which restart skips
 relax_compiler::run::MAIN_HOST	native host, set once
 relax_compiler::run::ONE	lock
 relax_compiler::run::QUIET	from args, same next run, only ever set true

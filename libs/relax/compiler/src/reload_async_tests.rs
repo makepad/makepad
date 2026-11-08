@@ -10,10 +10,9 @@ pub(crate) fn in_child(test: &str, cases: &[&str], body: impl FnOnce(&str)) {
     const CHILD: &str = "MAKEPAD_RUN_RELOAD_LIVE_CASE";
     let Ok(case) = std::env::var(CHILD) else {
         for case in cases {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", test, "--nocapture", "--test-threads=1"])
-                .env(CHILD, case).env("MAKEPAD_RUN_GANDALF_ALL", "0")
-                .output().unwrap();
+                .env(CHILD, case).env("MAKEPAD_RUN_GANDALF_ALL", "0"));
             assert!(output.status.success(), "{case}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         }
         return;

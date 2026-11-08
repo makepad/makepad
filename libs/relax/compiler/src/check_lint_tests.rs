@@ -18,13 +18,11 @@ fn warnings_in_child_with(name: &str, env: &[(&str, &str)]) -> Option<Vec<String
     if std::env::var_os(CHILD).is_some() {
         return None;
     }
-    let out = std::process::Command::new(std::env::current_exe().unwrap())
+    let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name, "--nocapture", "--test-threads=1", "--format=terse"])
         .env(CHILD, "1")
         .env_remove("MAKEPAD_RUN_LINT_FLAGS")
-        .envs(env.iter().copied())
-        .output()
-        .unwrap();
+        .envs(env.iter().copied()));
     let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
     // (the check prints its diagnostics on stderr; stdout has the test harness's lines)
@@ -175,6 +173,23 @@ fn a_binary_built_as_a_test_keeps_its_main() {
         return assert_eq!(check_code("pub fn shared() -> u32 { 1 }", &["fn helper() -> u32 { 2 }\nfn unused_in_bin() {}\nfn main() { let _ = pkg::shared() + helper(); }\n"], true), 0);
     };
     assert_eq!(warnings, ["function `unused_in_bin` is never used [dead_code]"]);
+}
+
+/// A fn only a `global_asm!`'s `sym` operand names is used, and so is a constant of its `const`
+/// operand (rustc_passes dead.rs: the global_asm item is live, its operands' paths with it); a fn
+/// nothing names still is dead. The check had reported the unwinder's native raise (jit.rs
+/// native_raise, which only its stub calls) as never used.
+#[test]
+fn what_a_global_asm_names_is_used() {
+    let Some(warnings) = warnings_in_child("check_lint_tests::what_a_global_asm_names_is_used") else {
+        return check_package(r#"
+            extern "C" fn named_by_asm() {}
+            const ALIGN: usize = 3;
+            fn unused() {}
+            std::arch::global_asm!(".data", ".p2align {a}", ".quad {f}", ".text", f = sym named_by_asm, a = const ALIGN);
+        "#, &[]);
+    };
+    assert_eq!(warnings, ["function `unused` is never used [dead_code]"]);
 }
 
 /// WARNZERO class 6 (994 warnings in 24 packages: apps/flow's makepad-flow-server.rs:96, ai-llm's

@@ -266,13 +266,11 @@ fn settle_rebuild_covers_a_crate_added_at_run_time() {
 // Rounds 49-50: restarting leaves the running solver answers and native code intact.
 #[test]
 fn round47_const_fn_body_invalidates_solver_answer() {
-    isolated_test!(round47_const_fn_body_invalidates_solver_answer);
     const CHILD: &str = "MAKEPAD_RUN_R47_CONST_FN_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::round47_const_fn_body_invalidates_solver_answer", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0")
-            .output().unwrap();
+            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }
@@ -318,18 +316,15 @@ fn round47_const_fn_body_invalidates_solver_answer() {
 // candidate is diagnosed separately by a cold check.
 #[test]
 fn round48_const_fn_tentative_check_uses_new_body() {
-    isolated_test!(round48_const_fn_tentative_check_uses_new_body);
     const CHILD: &str = "MAKEPAD_RUN_R48_CONST_FN_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::round48_const_fn_tentative_check_uses_new_body", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0")
-            .output().unwrap();
+            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-        let cold = std::process::Command::new(std::env::current_exe().unwrap())
+        let cold = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::round48_const_fn_tentative_check_uses_new_body", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "cold").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0")
-            .output().unwrap();
+            .env(CHILD, "cold").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
         assert!(cold.status.success(), "{}\n{}", String::from_utf8_lossy(&cold.stdout), String::from_utf8_lossy(&cold.stderr));
         return;
     }
@@ -451,7 +446,6 @@ fn allocator_swap_serves_background_finish() {
 
 #[test]
 fn hot_o3_cache_roundtrip() {
-    isolated_test!(hot_o3_cache_roundtrip);
     // Tiering is process-global: the second unit is a fresh launch, sharing only disk cache.
     const CHILD: &str = "MAKEPAD_RUN_HOT_O3_CACHE_TEST";
     const DIR: &str = "MAKEPAD_RUN_HOT_O3_CACHE_TEST_DIR";
@@ -468,10 +462,9 @@ pub fn hot(out: &mut u32) {
 fn main() {}
 "#).unwrap();
         for phase in ["cold", "warm"] {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "jit::settle_tests::hot_o3_cache_roundtrip", "--nocapture", "--test-threads=1"])
-                .env(CHILD, phase).env(DIR, &dir).env("MAKEPAD_RUN_SPEC", "0")
-                .output().unwrap();
+                .env(CHILD, phase).env(DIR, &dir).env("MAKEPAD_RUN_SPEC", "0"));
             assert!(output.status.success(), "{phase}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         }
         std::fs::remove_dir_all(dir).unwrap();
@@ -565,7 +558,6 @@ fn main() {}
 
 #[test]
 fn prebuild_link_needing_initializer_bails() {
-    isolated_test!(prebuild_link_needing_initializer_bails);
     // Rule I-PUB (remote-XR Sandbox on a node: "O3 build of slot N panicked: initializer inside a
     // publish"): an O3 replacement's prebuild_callees linked a callee's stored entry inside a
     // publish; the entry names a static whose value the cache does not hold, so the link ran its
@@ -585,10 +577,9 @@ pub fn leaf(out: &mut u32) {
 fn main() {}
 "#).unwrap();
         for phase in ["cold", "warm"] {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "jit::settle_tests::prebuild_link_needing_initializer_bails", "--nocapture", "--test-threads=1"])
-                .env(CHILD, phase).env(DIR, &dir).env("MAKEPAD_RUN_SPEC", "0")
-                .output().unwrap();
+                .env(CHILD, phase).env(DIR, &dir).env("MAKEPAD_RUN_SPEC", "0"));
             assert!(output.status.success(), "{phase}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         }
         std::fs::remove_dir_all(dir).unwrap();
@@ -697,14 +688,13 @@ fn prebuild_builds_callees_that_ran_before() {
 
 #[test]
 fn settle_rebuild_pins_tier1_and_closure_history() {
-    isolated_test!(settle_rebuild_pins_tier1_and_closure_history);
     // Unit installs process-global runtime state. Cache fixtures in the same harness can
     // leave a reentrant unit lock behind; run this fixture in its own runtime process.
     const CHILD: &str = "MAKEPAD_RUN_SETTLE_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let status = crate::test_child::status(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::settle_rebuild_pins_tier1_and_closure_history", "--test-threads=1", "--nocapture"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_ICE_BT", "1").status().unwrap();
+            .env(CHILD, "1").env("MAKEPAD_RUN_ICE_BT", "1"));
         assert!(status.success());
         return;
     }
@@ -905,12 +895,11 @@ fn round23_fnptr_keys_preserve_receiver_abi() {
 
 #[test]
 fn round42_const_and_build_cancellation_are_retryable() {
-    isolated_test!(round42_const_and_build_cancellation_are_retryable);
     const CHILD: &str = "MAKEPAD_RUN_CONST_PREEMPT_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let status = crate::test_child::status(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::round42_const_and_build_cancellation_are_retryable", "--test-threads=1"])
-            .env(CHILD, "1").status().unwrap();
+            .env(CHILD, "1"));
         assert!(status.success());
         return;
     }
@@ -973,15 +962,14 @@ fn round42_const_and_build_cancellation_are_retryable() {
 
 #[test]
 fn round50_initializer_reload_policy() {
-    isolated_test!(round50_initializer_reload_policy);
     const CHILD: &str = "MAKEPAD_RUN_R50_INITIALIZER_CHILD";
     let Ok(case) = std::env::var(CHILD) else {
         // (R2, lead decision 52: a foldable const read only by an ordinary fn, and a static,
         // stay on the per-file path)
         for case in ["body", "refuse", "literal", "static", "static_unused"] {
-            let result = std::process::Command::new(std::env::current_exe().unwrap())
+            let result = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "jit::settle_tests::round50_initializer_reload_policy", "--nocapture", "--test-threads=1"])
-                .env(CHILD, case).env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0").output().unwrap();
+                .env(CHILD, case).env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
             assert!(result.status.success(), "{case}: {}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
         }
         return;
@@ -1062,12 +1050,11 @@ fn round50_initializer_reload_policy() {
 /// pile up: a patch's working state goes when it is installed.
 #[test]
 fn edit_cost_does_not_grow_with_edits() {
-    isolated_test!(edit_cost_does_not_grow_with_edits);
     const CHILD: &str = "MAKEPAD_RUN_EDIT_COST_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::edit_cost_does_not_grow_with_edits", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0").output().unwrap();
+            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }
@@ -1114,12 +1101,11 @@ fn edit_cost_does_not_grow_with_edits() {
 
 #[test]
 fn round50_opaque_body_invalidates_solver_answer() {
-    isolated_test!(round50_opaque_body_invalidates_solver_answer);
     const CHILD: &str = "MAKEPAD_RUN_R50_OPAQUE_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::round50_opaque_body_invalidates_solver_answer", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0").output().unwrap();
+            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }
@@ -1161,12 +1147,11 @@ fn round50_opaque_body_invalidates_solver_answer() {
 // T11: reload evaluates candidates with running native code; owner: codegen2.
 #[test]
 fn round50_foldable_const_with_native_dependent() {
-    isolated_test!(round50_foldable_const_with_native_dependent);
     const CHILD: &str = "MAKEPAD_RUN_R50_FOLDED_DEPENDENT_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::round50_foldable_const_with_native_dependent", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0").output().unwrap();
+            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }
@@ -1200,10 +1185,9 @@ fn round50_foldable_const_with_native_dependent() {
 // Owner: codegen2; retained separately so ordinary body checks remain enabled.
 #[test]
 fn round50_inline_const_reload() {
-    isolated_test!(round50_inline_const_reload);
-    let result = std::process::Command::new(std::env::current_exe().unwrap())
+    let result = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "jit::settle_tests::round50_initializer_reload_policy", "--nocapture", "--test-threads=1"])
-        .env("MAKEPAD_RUN_R50_INITIALIZER_CHILD", "inline_literal").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0").output().unwrap();
+        .env("MAKEPAD_RUN_R50_INITIALIZER_CHILD", "inline_literal").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
     assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
 }
 
@@ -1272,7 +1256,6 @@ fn copy_versions_move_with_the_flags_their_code_reads() {
 
 #[test]
 fn deferred_cache_record_is_dropped_when_a_source_changed() {
-    isolated_test!(deferred_cache_record_is_dropped_when_a_source_changed);
     // A deferred record (Cache::defer_record) is encoded after the install; an edit, rollback or
     // reload in between (the patch epoch moves) must drop it, never key old code by new text.
     // Control: the same record with no change in between is encoded.
@@ -1283,10 +1266,9 @@ fn deferred_cache_record_is_dropped_when_a_source_changed() {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("input.rs"), "pub fn hot(out: &mut u32) { *out = 7; }\nfn main() {}\n").unwrap();
         for phase in ["current", "stale"] {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "jit::settle_tests::deferred_cache_record_is_dropped_when_a_source_changed", "--nocapture", "--test-threads=1"])
-                .env(CHILD, phase).env(DIR, dir.join(phase)).env("MAKEPAD_RUN_SPEC", "0")
-                .output().unwrap();
+                .env(CHILD, phase).env(DIR, dir.join(phase)).env("MAKEPAD_RUN_SPEC", "0"));
             assert!(output.status.success(), "{phase}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         }
         std::fs::remove_dir_all(dir).unwrap();
@@ -1336,12 +1318,11 @@ fn deferred_cache_record_is_dropped_when_a_source_changed() {
 // the restored source.
 #[test]
 fn invalid_inliner_built_after_patch_is_in_its_group() {
-    isolated_test!(invalid_inliner_built_after_patch_is_in_its_group);
     const CHILD: &str = "MAKEPAD_RUN_INVALID_INLINER_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::invalid_inliner_built_after_patch_is_in_its_group", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0").output().unwrap();
+            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }

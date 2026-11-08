@@ -12,6 +12,8 @@ warm: one edit, and within 20 s either
   landed:   the program prints the new value, or
   restart:  the JIT offers a restart and the program keeps its old value, and `session relaunch`
             brings the new value,
+as the save's verdict says: its event (patchverified or patchrefused) and the restarts it left
+waiting (a save that patches its other items and holds its restart-only ones back for a restart),
 and in both a fresh run of the edited sources (read-only on the cache) prints the new value.
 A probe that reads late first calls its reader after the edit: that code comes from the store then.
 A const that only values read must land, and a const a type uses must restart, saying why (MUST).
@@ -37,7 +39,7 @@ live or between runs: the new text's runs show the new value.
 new value must show in the same pid.
 Prints a row per probe and exits 1 on any stale one.
 """
-import os, re, shutil, signal, subprocess, sys, tempfile, threading, time
+import json, os, re, shutil, signal, subprocess, sys, tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
@@ -218,7 +220,7 @@ MUST = {
     # a trait object the program made holds the old method table: linked from the disk cache too
     "dyn_method_add": r"old method table", "dyn_method_add_late": r"old method table", "dyn_vtable_fresh": r"old method table", "dyn_impl_removed": LAND,
     # a variant inserted before a held one: lands; restarts when code that ran read the numbers it moves
-    "enum_insert": LAND, "field_copy": LAND, "field_copy_frame": r"is running: its frame may hold", "enum_insert_cast": r"read them as numbers", "enum_insert_hash": r"derived `Hash`",
+    "enum_insert": LAND, "field_copy": LAND, "field_copy_frame": r"is running on thread .+: its frame may hold", "enum_insert_cast": r"read them as numbers", "enum_insert_hash": r"derived `Hash`",
 }
 # (--cold: the session compiled that module's code itself, so its readers are known: it lands)
 if cold:
@@ -311,6 +313,35 @@ def session(probe, rel, old, new, want):
     threading.Thread(target=pump, args=(p.stderr, err), daemon=True).start()
     def last():
         return next((l for l in reversed(out) if l.startswith("out tick ")), None)
+    def ask(*what):
+        r = subprocess.run([relax, "inspect", str(p.pid), *what, "as=json"], env=env, capture_output=True, text=True, timeout=60)
+        return r.stdout if r.returncode == 0 else ""
+    def newest():
+        return max([int(m) for m in re.findall(r'"seq":\s*(\d+)', ask("events"))] or [0])
+    def pending():
+        m = re.search(r'"restart_pending":\s*(\d+)', ask("session"))
+        return int(m.group(1)) if m else 0
+    def patch_event(since, secs):
+        a = ask("watch", "on=patchverified,patchrefused,patchreverted", "since=%d" % since, "timeout_s=%d" % secs)
+        line = next((l for l in a.splitlines() if '"event"' in l and '"event":"none"' not in l), "")
+        return json.loads(line) if line else {}
+    def verdict(since, waiting):
+        """The whole verdict of the next save after event `since`, within 20 s: its patch event
+        ({}: none) and whether it left a restart waiting (more than `waiting`). A save of a source
+        ends in its patch event, which comes after the restarts it offers (the items it held back);
+        a changed input that is no source (an included file whose path is made) only offers one."""
+        t = time.time()
+        while time.time() - t < 20:
+            event = patch_event(since, 1)
+            if event:
+                return event, pending() > waiting
+            if pending() > waiting:
+                # an offer: the save's patch event, if it has one, follows it at once
+                return patch_event(since, 2), True
+        return {}, False
+    def seq_of(event):
+        m = re.search(r"since=(\d+)", event.get("rearm", ""))
+        return int(m.group(1)) if m else 0
     row = {"probe": probe, "outcome": "no start", "value": None, "patch": "", "trace": ""}
     restore = []
     try:
@@ -328,27 +359,38 @@ def session(probe, rel, old, new, want):
             restore.append((first_path, first_base))
             if first_path == path:
                 edited = base.replace(first_old, first_new)
-            mark = len(err)
+            seen = newest()
             save(first_path, first_base.replace(first_old, first_new))
-            if not wait(lambda: any(": patched (" in l for l in err[mark:]), 20):
+            first, _ = verdict(seen, pending())
+            if first.get("event") != "patchverified":
                 row["outcome"] = "FIRST EDIT DID NOT LAND"
                 return row, err
+        seen = newest()
+        waiting = pending()
         t_save = time.time()
         mark = len(err)
         save(path, edited.replace(old, new))
+        event, offered = verdict(seen, waiting)
+        patched = event.get("event") == "patchverified"
+        # the save asked for a restart whole (a patch that held items back for one, `offered`,
+        # is a restart unless the probe's value landed with the rest)
+        restart = event.get("event") == "patchrefused" and event.get("outcome") == "restart" or offered and not patched
+        # (its line in the log, for the row: written before its event)
         said = lambda: next((l for l in err[mark:] if ": patched (" in l or "a restart applies it" in l or "REFUSED" in l), None)
-        wait(lambda: said() is not None, 20)
+        wait(lambda: said() is not None, 5 if event or offered else 0)
         line = said() or ""
-        restart = "a restart applies it" in line
         if not restart:
             # the late readers' first call, once the edit is in
             open(late, "w").close()
         # a tick from after the patch: a value the edit keeps must be read by the new code
         tick = lambda: int(last().split()[2]) if last() else -1
         since = tick()
-        landed = not restart and wait(lambda: tick() > since + 1 and shows_new(last(), probe, want), 2 if line else 0)
+        landed = not restart and wait(lambda: tick() > since + 1 and shows_new(last(), probe, want), 2 if patched else 0)
+        if not landed and offered:
+            restart = True
+            line = next((l for l in err[mark:] if "a restart applies it" in l), line)
         # the landing check: old code still on a stack a second after the patch asks for a restart
-        if not landed and not restart and line:
+        if not landed and not restart and patched:
             restart = wait(lambda: any(re.search(STILL_RUNS, l) for l in err), 5)
         row["ms"] = int((time.time() - t_save) * 1e3)
         row["value"] = stale_reads(last() or "", probe, want) or want if probe in READS else value(last() or "", probe)
@@ -358,9 +400,10 @@ def session(probe, rel, old, new, want):
         if landed and probe in SECOND:
             old2, new2, want = SECOND[probe]
             mark = len(err)
+            seen = seq_of(event)
             save(path, base.replace(old, new).replace(old2, new2))
-            wait(lambda: any(": patched (" in l or "a restart applies it" in l or "REFUSED" in l for l in err[mark:]), 20)
-            landed = wait(lambda: last() is not None and shows_new(last(), probe, want), 2)
+            second, _ = verdict(seen, pending())
+            landed = second.get("event") == "patchverified" and wait(lambda: last() is not None and shows_new(last(), probe, want), 2)
             if not landed:
                 row["outcome"], row["patch"] = "SECOND EDIT DID NOT LAND", next((l for l in err[mark:] if "a restart applies it" in l or "REFUSED" in l), "")[:96]
                 return row, err
@@ -377,8 +420,10 @@ def session(probe, rel, old, new, want):
                 row["outcome"] = "RELAUNCH NOT IN PLACE"
             row["relaunch"] = value(last() or "", probe)
             row["ms"] = int((time.time() - t_save) * 1e3)
-        elif not line:
+        elif not event and not offered:
             row["outcome"] = "no answer"
+        elif event.get("event") == "patchrefused":
+            row["outcome"] = "REFUSED"
         else:
             row["outcome"] = "STALE"
         return row, err

@@ -75,7 +75,11 @@ impl DomainHost for Host {
     }
 
     fn can_reuse_domain(&self, domain: u32) -> bool {
-        domain::still_owned(domain).is_none()
+        if domain::still_owned(domain).is_none() {
+            return true;
+        }
+        domain::report_retained(domain);
+        false
     }
 
     /// A window manager's relaunch of one of its child apps (the HAL joined the old run or gave

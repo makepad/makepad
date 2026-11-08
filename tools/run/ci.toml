@@ -1,5 +1,11 @@
 # CI (devhub ci): [ci] is hand-written settings; the other sections are proofs devhub writes.
 
+[job.arm64.macos]
+date = "2026-11-08"
+digest = "b03f4b29dc237ca8e7a1bc9aa9e9e9baa0c57c6a49f087fce3b550ca56a48698"
+main = "7a3bfa2fed356bd7323016f85ff43cae31292417"
+work = "914befad8de650b0a5abf2b720760b518aadf4f3"
+
 [job.jit_16.linux]
 date = "2026-11-04"
 digest = "5aa540ece367681055b532e41fde3bd9dc53cbb570f62a471e4b19f2edb053b5"
@@ -17,6 +23,12 @@ date = "2026-11-04"
 digest = "1dd5e9c3be01b3aaa31a496856e17f094ec6eb98fb4655b0eae516e4479703a6"
 main = "c4cb113cf08313c6be7c7c4f1946dcfd8c7e3e52"
 work = "4737f3d8ec32eaf4b7bd907fc802c6564bdf51eb"
+
+[job.nocodegen.macos]
+date = "2026-11-08"
+digest = "b03f4b29dc237ca8e7a1bc9aa9e9e9baa0c57c6a49f087fce3b550ca56a48698"
+main = "7a3bfa2fed356bd7323016f85ff43cae31292417"
+work = "914befad8de650b0a5abf2b720760b518aadf4f3"
 
 [tests.linux]
 date = "2026-11-06"

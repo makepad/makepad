@@ -65,7 +65,50 @@ macro_rules! isolated_test {
 
 #[cfg(test)]
 mod test_child {
+    use std::process::{Command, ExitStatus, Output};
+    use std::sync::{Condvar, Mutex};
+
     const CHILD: &str = "RELAX_TEST_CHILD";
+
+    /// Children of this test binary at once. Under the JIT each is a whole run of the binary, its
+    /// program loaded: 1.1 to 1.5 GB. The suite's threads started one each, up to 30 processes at
+    /// once (38 GB summed, 11-08); a slot per child keeps them to this.
+    const SLOTS: usize = 3;
+
+    static FREE: Mutex<usize> = Mutex::new(SLOTS);
+    static FREED: Condvar = Condvar::new();
+
+    /// A slot, held while its child runs.
+    pub struct Slot(());
+
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            *FREE.lock().unwrap() += 1;
+            FREED.notify_one();
+        }
+    }
+
+    /// A slot for a child of this test binary (`current_exe()`), once one is free.
+    pub fn slot() -> Slot {
+        let mut free = FREE.lock().unwrap();
+        while *free == 0 {
+            free = FREED.wait(free).unwrap();
+        }
+        *free -= 1;
+        Slot(())
+    }
+
+    /// `command` (a child of this test binary) run to its end in a slot, its output kept.
+    pub fn output(command: &mut Command) -> Output {
+        let _slot = slot();
+        command.output().unwrap()
+    }
+
+    /// `command` (a child of this test binary) run to its end in a slot.
+    pub fn status(command: &mut Command) -> ExitStatus {
+        let _slot = slot();
+        command.status().unwrap()
+    }
 
     /// True in the child (run the test body); in the parent, runs the child and returns false
     /// once it passed (a failure panics with the child's output).
@@ -75,11 +118,11 @@ mod test_child {
         if std::env::var(CHILD).is_ok_and(|t| t == test) {
             return true;
         }
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &test, "--include-ignored", "--test-threads=1", "--nocapture"])
-            .env(CHILD, &test)
-            .output()
-            .unwrap();
+        let output = output(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test, "--include-ignored", "--test-threads=1", "--nocapture"])
+                .env(CHILD, &test),
+        );
         let all = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         assert!(output.status.success() && all.contains("test result: ok. 1 passed"), "{test} in its own process:\n{all}");
         false
@@ -1331,10 +1374,10 @@ fn round18_rpit_diagnostic() {
         let sess = session_from_env(&[]);
         os::proc::exit(cmd_test(&sess, &[format!("{dir}/tests/rpit.rs")]));
     }
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+    let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "round18_rpit_diagnostic", "--nocapture", "--test-threads=1"])
         .env(CHILD, "1").env("MAKEPAD_RUN_STD", format!("{dir}/std")).env("MAKEPAD_RUN_CACHE", "off")
-        .env("MAKEPAD_HIDE_WINDOWS", "1").env("SANDBOX_MUTE", "1").output().unwrap();
+        .env("MAKEPAD_HIDE_WINDOWS", "1").env("SANDBOX_MUTE", "1"));
     let all = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     eprintln!("{all}");
     assert!(output.status.success());

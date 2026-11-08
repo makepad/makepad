@@ -7,6 +7,8 @@
 #                main runs
 #   park       : a run that calls `broken` parks at the call with the compile error and stays up; a
 #                live edit that fixes `broken` resumes the call (it returns 20) and the program ends 0
+#   unattended : the same call under `run --unattended` (an app a test starts) parks nothing: the run
+#                ends at once, non-zero, with the compile error's text
 #   check/test : `makepad check` and `makepad test` of the dependency report the error
 #   test verdict: a clean test check's verdict is reused by the next run of the same code; an edit is
 #                checked again
@@ -45,17 +47,25 @@ out=$(TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-app" MAKEPAD_HIDE_WINDOWS=1 per
 echo "$out" > "$dir/app-error.log"
 { [ $rc != 0 ] && echo "$out" | grep -q E0308 && echo "$out" | grep -q "not started" && ! echo "$out" | grep -q "main runs"; } || { fail="$fail app-error:$rc"; echo "$out" | tail -8; }
 
-# background: `broken` is reported while main runs, and the run is still up
+# background: `broken` is reported while main runs, and the run is still up. The check starts as
+# main does, so its report and main's first line come in either order (a loaded box once printed
+# the report first): both must show, and the run stays up
 # shellcheck disable=SC2086
 TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-bg" MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN" "$dir/fx" $J run lazy-typeck-app > "$dir/bg.log" 2>&1 &
 pid=$!
 if wait_for "$dir/bg.log" $pid "E0308"; then
-  grep -q "main runs" "$dir/bg.log" || fail="$fail background-before-main"
+  wait_for "$dir/bg.log" $pid "main runs" || fail="$fail background-main-never-ran"
   kill -0 $pid 2>/dev/null || fail="$fail background-run-ended"
 else
   fail="$fail background-not-reported"; tail -8 "$dir/bg.log"
 fi
 kill $pid 2>/dev/null; wait $pid 2>/dev/null
+
+# unattended: the same call in a run no one attends (`--unattended`: an app a test starts) parks
+# nothing; the run ends at once, non-zero, with the error's text (before the park case fixes it)
+# shellcheck disable=SC2086
+out=$(TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-unattended" MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN" "$dir/fx" $J run --unattended lazy-typeck-app -- call 2>&1); rc=$?
+{ [ $rc != 0 ] && echo "$out" | grep -q "compile error in lazy_typeck_dep::broken" && ! echo "$out" | grep -q "parked"; } || { fail="$fail unattended-parked:$rc"; echo "$out" | tail -8; }
 
 # park: the call of `broken` parks and reports; fixing it resumes the call
 # shellcheck disable=SC2086
