@@ -26,6 +26,7 @@ mod readback;
 mod shader;
 mod software_video;
 pub(crate) mod xr;
+pub use xr::XrDepthTexels;
 
 pub use fonts::*;
 
@@ -493,6 +494,10 @@ impl CxMediaApi for Cx {
 
     fn video_input_close(&mut self, index: usize) {
         self.hal_video_input_close(index);
+    }
+
+    fn video_input_calibration(&self, input: VideoInputId) -> Option<crate::video::CameraCalibration> {
+        self.hal_video_input_calibration(input)
     }
 }
 

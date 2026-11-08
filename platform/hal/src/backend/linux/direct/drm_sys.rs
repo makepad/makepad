@@ -16,9 +16,19 @@ extern "C" {
     /// A framebuffer's description (opaque here: only whether it still exists is read).
     pub fn drmModeGetFB(fd: c_int, buffer: u32) -> *mut std::ffi::c_void;
     pub fn drmModeFreeFB(fb: *mut std::ffi::c_void);
+    /// The connector's state as last detected (no probe; never blocks on the monitor).
+    pub fn drmModeGetConnectorCurrent(fd: c_int, connector: u32) -> *mut Connector;
+    /// A lease of `objects` (connectors, CRTCs, planes) from the master `fd`: returns the
+    /// lessee's descriptor (master of those objects only) or a negative errno.
+    pub fn drmModeCreateLease(fd: c_int, objects: *const u32, num_objects: c_int, flags: c_int, lessee_id: *mut u32) -> c_int;
+    pub fn drmModeRevokeLease(fd: c_int, lessee_id: u32) -> c_int;
     pub fn drmSetMaster(fd: c_int) -> c_int;
     pub fn drmDropMaster(fd: c_int) -> c_int;
 }
+/// `O_CLOEXEC` for `drmModeCreateLease`'s descriptor.
+pub const O_CLOEXEC: c_int = 0o2000000;
+/// `drmModeConnection::DRM_MODE_CONNECTED`.
+pub const CONNECTED: c_uint = 1;
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct Crtc {

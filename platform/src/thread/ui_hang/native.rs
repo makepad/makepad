@@ -57,6 +57,7 @@ impl State {
         let start = self.start.swap(0, Ordering::AcqRel);
         let nanos = (self.origin.elapsed().as_nanos() as u64 + 1).saturating_sub(start);
         if nanos >= self.threshold.as_nanos() as u64 {
+            backend::stall_ended();
             let report = Completion { start, nanos, phase: self.phase.load(Ordering::Relaxed) };
             if self.completions.try_send(report).is_err() {
                 self.lost.fetch_add(1, Ordering::Relaxed);
@@ -68,6 +69,7 @@ struct Registration(Arc<State>);
 impl Drop for Registration {
     fn drop(&mut self) {
         CURRENT.with(|p| p.set(std::ptr::null()));
+        backend::stall_ended();
         self.0.stop.store(true, Ordering::Release);
     }
 }
@@ -102,7 +104,22 @@ pub(super) fn initialize() {
 
 struct Sample { phase: u64, frames: Vec<usize>, count: usize }
 
-fn watch(state: Arc<State>, rx: Receiver<Completion>, target: backend::Target, mut emit: impl FnMut(String)) {
+/// What the watchdog asks of the UI thread it watches: a sample of its stack, and a frame's name.
+trait Sampler {
+    fn sample(&self) -> Vec<usize>;
+    fn symbolize(&self, pc: usize) -> String;
+}
+
+impl Sampler for backend::Target {
+    fn sample(&self) -> Vec<usize> {
+        backend::Target::sample(self)
+    }
+    fn symbolize(&self, pc: usize) -> String {
+        backend::Target::symbolize(self, pc)
+    }
+}
+
+fn watch(state: Arc<State>, rx: Receiver<Completion>, target: impl Sampler, mut emit: impl FnMut(String)) {
     let mut samples: HashMap<u64, Vec<Sample>> = HashMap::new();
     let mut ticks: HashMap<u64, usize> = HashMap::new();
     loop {
@@ -170,9 +187,36 @@ fn watch(state: Arc<State>, rx: Receiver<Completion>, target: backend::Target, m
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The real sampler, telling the test once its report holds a sample of the stall: the
+    /// watchdog asks for its next sample only after it recorded the last one (which a stall still
+    /// on keeps), so a second ask says the first is in.
+    struct Told {
+        target: backend::Target,
+        sampled: std::cell::Cell<bool>,
+        recorded: SyncSender<()>,
+    }
+
+    impl Sampler for Told {
+        fn sample(&self) -> Vec<usize> {
+            if self.sampled.get() {
+                let _ = self.recorded.try_send(());
+            }
+            let frames = self.target.sample();
+            self.sampled.set(self.sampled.get() || !frames.is_empty());
+            frames
+        }
+        fn symbolize(&self, pc: usize) -> String {
+            self.target.symbolize(pc)
+        }
+    }
+
+    /// A stall of at least 400 ms that lasts until the watchdog sampled it: on a loaded box the
+    /// watchdog can run late (a 400 ms sleep took 835 ms and the watchdog ticked once in it), and a
+    /// stall over by then has no sample to report.
     #[test]
     fn watchdog_reports_one_sleep_with_phase_and_stack() {
-        let target = backend::Target::current().expect("native stack target");
+        let (recorded, sampled) = sync_channel(1);
+        let target = Told { target: backend::Target::current().expect("native stack target"), sampled: std::cell::Cell::new(false), recorded };
         let (tx, rx) = sync_channel(16);
         let state = Arc::new(State {
             threshold: Duration::from_millis(250),
@@ -188,9 +232,10 @@ mod tests {
         }));
         state.begin();
         std::thread::sleep(Duration::from_millis(400));
+        sampled.recv().unwrap();
         state.end();
         // Only this deliberate test waits; production UI never does.
-        let line = received.recv_timeout(Duration::from_secs(3)).unwrap();
+        let line = received.recv().unwrap();
         state.stop.store(true, Ordering::Release);
         thread.thread().unpark();
         thread.join().unwrap();
@@ -198,8 +243,8 @@ mod tests {
         assert!(milliseconds >= 400.0, "{line}");
         assert!(line.contains("phase=code-page-install"), "{line}");
         assert!(!line.contains("samples=0"), "{line}");
-        // one sample may miss its stack on a busy machine (the signal's deadline, a sampler beside it)
-        assert!(line.split(" | ").any(|sample| !sample.contains("<stack unavailable>")), "{line}");
+        // every sample has its stack, however late the UI thread ran to take it
+        assert!(!line.contains("<stack unavailable>"), "{line}");
         assert!(received.try_recv().is_err(), "one report per event");
     }
 }

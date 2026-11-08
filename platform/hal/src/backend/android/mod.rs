@@ -1,6 +1,7 @@
 //! Android's Activity is host-owned; JNI callbacks never enter the HAL's world lock.
 //! Every native on MakepadNative (shell, media, network) is registered together, strictly.
 pub mod state;
+pub mod frame_results;
 #[cfg(target_os = "android")]
 mod shell;
 #[cfg(target_os = "android")]

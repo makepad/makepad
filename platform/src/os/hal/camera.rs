@@ -27,6 +27,8 @@ struct PendingCapture {
 
 pub(crate) struct CameraClient {
     descs: Vec<VideoInputDesc>,
+    /// what each listed camera tells of its optics
+    calibrations: Vec<(VideoInputId, CameraCalibration)>,
     /// the HAL has listed the cameras at least once (an empty list is a list)
     listed: bool,
     /// the (camera, format) each slot reads
@@ -90,6 +92,7 @@ impl Default for CameraClient {
     fn default() -> Self {
         Self {
             descs: Vec::new(),
+            calibrations: Vec::new(),
             listed: false,
             active: Vec::new(),
             idle: 0,
@@ -138,6 +141,10 @@ impl Cx {
 
     pub(crate) fn hal_video_inputs(&self) -> Option<Vec<VideoInputDesc>> {
         self.hal.camera.listed.then(|| self.hal.camera.descs.clone())
+    }
+
+    pub(crate) fn hal_video_input_calibration(&self, input: VideoInputId) -> Option<CameraCalibration> {
+        self.hal.camera.calibrations.iter().find(|(i, _)| *i == input).map(|(_, c)| *c)
     }
 
     fn hal_format_of(&self, slot: usize) -> Option<VideoFormat> {
@@ -327,7 +334,16 @@ impl Cx {
     pub(crate) fn hal_camera_event(&mut self, event: HalEvent<'_>) {
         match event {
             HalEvent::VideoInputs { inputs } => {
-                let descs: Vec<VideoInputDesc> = media::read_video_inputs(inputs)
+                let inputs = media::read_video_inputs(inputs);
+                self.hal.camera.calibrations = inputs
+                    .iter()
+                    .map(|i| {
+                        let c = &i.calibration;
+                        let calibration = CameraCalibration { intrinsics: c.intrinsics, distortion: c.distortion, lens_rotation: c.lens_rotation, lens_translation: c.lens_translation, lens_reference: c.lens_reference, pre_correction: c.pre_correction, active: c.active, position: c.position, passthrough: c.passthrough };
+                        (VideoInputId(LiveId(i.id)), calibration)
+                    })
+                    .collect();
+                let descs: Vec<VideoInputDesc> = inputs
                     .into_iter()
                     .map(|i| VideoInputDesc {
                         input_id: VideoInputId(LiveId(i.id)),
@@ -391,6 +407,7 @@ impl Cx {
                     matrix: match data.matrix { 0 => CameraColorMatrix::BT709, 1 => CameraColorMatrix::BT601, 2 => CameraColorMatrix::BT2020, _ => CameraColorMatrix::Unknown },
                     plane_count: data.planes.len(),
                     planes: [plane(0), plane(1), plane(2)],
+                    exposure: CameraExposure { start_ns: data.exposure.start_ns, exposure_ns: data.exposure.exposure_ns, rolling_skew_ns: data.exposure.rolling_skew_ns, frame_duration_ns: data.exposure.frame_duration_ns, sensitivity: data.exposure.sensitivity },
                 };
                 // Raw callbacks receive the native contiguous planes (including row padding).
                 // Make the aligned u32 view once per packet, shared by every selected slot.
@@ -459,6 +476,7 @@ impl Cx {
             matrix: frame.matrix,
             plane_count: frame.plane_count,
             planes: [plane(0), plane(1), plane(2)],
+            exposure: frame.exposure,
         };
         if let Some(encoder) = &*lock(&self.hal.camera.encoder[pending.slot]) {
             encoder.push_frame(frame_ref);

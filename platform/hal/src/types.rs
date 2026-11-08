@@ -1041,6 +1041,18 @@ pub struct XrPose {
     pub position: [f32; 3],
 }
 
+/// The head at a moment (`hal_xr_locate_head`): its pose in the session's reference space (as
+/// [`XrPose`]) and its motion then (m/s, rad/s in that space; zero when the runtime gave none).
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct XrHeadAt {
+    pub orientation: [f32; 4],
+    pub position: [f32; 3],
+    pub linear_velocity: [f32; 3],
+    pub angular_velocity: [f32; 3],
+}
+
 /// One eye of an `XrFrame`: where it is and its field of view (radians: left, right, up, down;
 /// left and down negative).
 #[repr(C)]

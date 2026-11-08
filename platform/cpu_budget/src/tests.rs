@@ -1,18 +1,18 @@
 use super::*;
-use std::sync::{mpsc::{self, Receiver, Sender}, Arc};
+use std::sync::{mpsc::{self, Sender}, Arc};
 
-fn budget(cores: usize) -> (Arc<Budget>, Receiver<()>) {
-    let budget = Arc::new(Budget::new(cores, cores));
-    let (tx, rx) = mpsc::channel();
-    budget.state.lock().unwrap().changed = Some(tx);
-    (budget, rx)
+fn budget(cores: usize) -> Arc<Budget> {
+    Arc::new(Budget::new(cores, cores))
 }
-fn until(b: &Budget, changes: &Receiver<()>, predicate: impl Fn(&State) -> bool) {
-    loop {
-        if predicate(&b.state.lock().unwrap()) { return; }
-        // (nothing changes for this long: the state waited for will not come, a plain failure)
-        changes.recv_timeout(std::time::Duration::from_secs(10)).expect("the budget stopped changing before the state this test waits for");
+/// Blocks until the table shows `predicate`, looking again at each of its changes (a state that
+/// never comes holds the test: a hung test).
+fn until(b: &Budget, predicate: impl Fn(&State) -> bool) {
+    let mut s = b.lock();
+    s.watchers += 1;
+    while !predicate(&s) {
+        s = b.changed.wait(s).unwrap();
     }
+    s.watchers -= 1;
 }
 fn worker(b: &Arc<Budget>, class: u8, client: u8, id: u32, entered: &Sender<u32>) -> (Sender<()>, thread::JoinHandle<()>) {
     let b = b.clone();
@@ -33,15 +33,15 @@ fn finish(worker: (Sender<()>, thread::JoinHandle<()>)) {
 
 #[test]
 fn highest_class_first_across_clients() {
-    let (b, changed) = budget(1);
+    let b = budget(1);
     let p = b.admit(INTERACTIVE, APP, "blocker");
     let (tx, rx) = mpsc::channel();
     let bg = worker(&b, BACKGROUND, HAL, 2, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 1);
+    until(&b, |s| s.waiters.len() == 1);
     let vis = worker(&b, VISIBLE, APP, 1, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 2);
+    until(&b, |s| s.waiters.len() == 2);
     let interactive = worker(&b, INTERACTIVE, HAL, 0, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 3);
+    until(&b, |s| s.waiters.len() == 3);
     b.release(p);
     assert_eq!(rx.recv().unwrap(), 0);
     finish(interactive);
@@ -53,14 +53,14 @@ fn highest_class_first_across_clients() {
 
 #[test]
 fn fifo_within_class_across_clients() {
-    let (b, changed) = budget(1);
+    let b = budget(1);
     let p = b.admit(INTERACTIVE, APP, "blocker");
     // (with a JIT job running the JIT's next waits for a token as the others do)
     let jit = b.admit(BACKGROUND, JIT, "running");
     let (tx, rx) = mpsc::channel();
     let workers: Vec<_> = (0..3).map(|i| {
         let w = worker(&b, VISIBLE, 2 - i as u8, i, &tx);
-        until(&b, &changed, |s| s.waiters.len() == i as usize + 1);
+        until(&b, |s| s.waiters.len() == i as usize + 1);
         w
     }).collect();
     b.release(p);
@@ -73,11 +73,11 @@ fn fifo_within_class_across_clients() {
 
 #[test]
 fn interactive_stops_at_cores() {
-    let (b, changed) = budget(4);
+    let b = budget(4);
     let mut held: Vec<_> = (0..4).map(|_| b.admit(INTERACTIVE, APP, "held")).collect();
     let (tx, rx) = mpsc::channel();
     let w = worker(&b, INTERACTIVE, HAL, 1, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 1);
+    until(&b, |s| s.waiters.len() == 1);
     assert!(rx.try_recv().is_err());
     assert_eq!(b.state.lock().unwrap().running, 4);
     assert!(!b.should_yield(held[0]));
@@ -89,15 +89,15 @@ fn interactive_stops_at_cores() {
 
 #[test]
 fn background_reserves_two_visible_slots_and_visible_reserves_one() {
-    let (b, changed) = budget(4);
+    let b = budget(4);
     let held: Vec<_> = (0..1).map(|_| b.admit(BACKGROUND, APP, "held")).collect();
     let (tx, rx) = mpsc::channel();
     let bg = worker(&b, BACKGROUND, HAL, 2, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 1);
+    until(&b, |s| s.waiters.len() == 1);
     let v1 = b.admit(VISIBLE, HAL, "visible one");
     let v2 = b.admit(VISIBLE, HAL, "visible two");
     let visible = worker(&b, VISIBLE, HAL, 1, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 2);
+    until(&b, |s| s.waiters.len() == 2);
     assert!(rx.try_recv().is_err());
     let interactive = b.admit(INTERACTIVE, APP, "interactive reserve");
     assert_eq!(b.state.lock().unwrap().running, 4);
@@ -115,7 +115,7 @@ fn background_reserves_two_visible_slots_and_visible_reserves_one() {
 
 #[test]
 fn visible_leaves_waiting_jit_background_its_floor() {
-    let (b, changed) = budget(16);
+    let b = budget(16);
     let held: Vec<_> = (0..15).map(|_| b.admit(VISIBLE, APP, "slice")).collect();
     assert!(!b.should_yield(held[0]), "nobody waits");
     let above = b.admit(BACKGROUND, JIT, "tier-up");
@@ -123,17 +123,17 @@ fn visible_leaves_waiting_jit_background_its_floor() {
     let (tx, rx) = mpsc::channel();
     let visible = worker(&b, VISIBLE, APP, 9, &tx);
     let second = worker(&b, BACKGROUND, JIT, 2, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 2);
+    until(&b, |s| s.waiters.len() == 2);
     assert!(b.should_yield(held[0]), "Visible gives way at its next checkpoint");
     b.release(held[0]);
     assert_eq!(rx.recv().unwrap(), 2, "ahead of the Visible job that came first");
     let third = worker(&b, BACKGROUND, JIT, 3, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 2);
+    until(&b, |s| s.waiters.len() == 2);
     assert!(b.should_yield(held[1]), "one permit left to give");
     b.release(held[1]);
     assert_eq!(rx.recv().unwrap(), 3);
     let fourth = worker(&b, BACKGROUND, JIT, 4, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 2);
+    until(&b, |s| s.waiters.len() == 2);
     assert!(!b.should_yield(held[2]), "the floor is met");
     b.release(held[2]);
     assert_eq!(rx.recv().unwrap(), 9, "past the floor Visible comes first again");
@@ -146,7 +146,7 @@ fn visible_leaves_waiting_jit_background_its_floor() {
 
 #[test]
 fn visible_is_asked_to_leave_only_when_the_jit_found_no_permit() {
-    let (b, _) = budget(16);
+    let b = budget(16);
     let held: Vec<_> = (0..12).map(|_| b.admit(VISIBLE, APP, "slice")).collect();
     let jit: Vec<_> = (0..3).map(|_| b.admit(BACKGROUND, JIT, "tier-up")).collect();
     for p in held.iter().chain(&jit) { assert!(!b.should_yield(*p), "the JIT found its permits free: nobody leaves"); }
@@ -155,12 +155,12 @@ fn visible_is_asked_to_leave_only_when_the_jit_found_no_permit() {
 
 #[test]
 fn the_jit_floor_holds_only_against_visible_work() {
-    let (b, changed) = budget(16);
+    let b = budget(16);
     let held: Vec<_> = (0..13).map(|_| b.admit(BACKGROUND, APP, "estimate")).collect();
     let above = b.admit(BACKGROUND, JIT, "tier-up");
     let (tx, rx) = mpsc::channel();
     let jit = worker(&b, BACKGROUND, JIT, 1, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 1);
+    until(&b, |s| s.waiters.len() == 1);
     assert!(rx.try_recv().is_err(), "Background's ceiling holds");
     let v = b.admit(VISIBLE, APP, "first of the slice");
     assert_eq!(rx.recv().unwrap(), 1);
@@ -172,13 +172,13 @@ fn the_jit_floor_holds_only_against_visible_work() {
 
 #[test]
 fn a_small_machine_keeps_visible_ahead_of_the_jit() {
-    let (b, changed) = budget(4);
+    let b = budget(4);
     let held: Vec<_> = (0..3).map(|_| b.admit(VISIBLE, APP, "slice")).collect();
     let above = b.admit(BACKGROUND, JIT, "tier-up");
     let (tx, rx) = mpsc::channel();
     let jit = worker(&b, BACKGROUND, JIT, 1, &tx);
     let visible = worker(&b, VISIBLE, APP, 2, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 2);
+    until(&b, |s| s.waiters.len() == 2);
     assert!(!b.should_yield(held[0]));
     b.release(held[0]);
     assert_eq!(rx.recv().unwrap(), 2);
@@ -191,7 +191,7 @@ fn a_small_machine_keeps_visible_ahead_of_the_jit() {
 
 #[test]
 fn warmup_limits_app_background_once_and_leaves_room_for_jit() {
-    let (b, changed) = budget(6);
+    let b = budget(6);
     let early = b.admit(BACKGROUND, APP, "before warm-up");
     let p = b.admit(BACKGROUND, APP, "warm seed");
     let jit = b.admit(BACKGROUND, JIT, "warm compiler");
@@ -202,7 +202,7 @@ fn warmup_limits_app_background_once_and_leaves_room_for_jit() {
     assert!(!b.should_yield(p));
     let (tx, rx) = mpsc::channel();
     let w = worker(&b, BACKGROUND, APP, 1, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 1);
+    until(&b, |s| s.waiters.len() == 1);
     assert!(rx.try_recv().is_err());
     assert!(!b.should_yield(p));
     let v = b.admit(VISIBLE, HAL, "visible during warmup");
@@ -223,14 +223,14 @@ fn warmup_limits_app_background_once_and_leaves_room_for_jit() {
 
 #[test]
 fn yield_only_to_strictly_higher_waiting_class() {
-    let (b, changed) = budget(1);
+    let b = budget(1);
     let p = b.admit(VISIBLE, APP, "visible");
     let (tx, rx) = mpsc::channel();
     let equal = worker(&b, VISIBLE, HAL, 1, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 1);
+    until(&b, |s| s.waiters.len() == 1);
     assert!(!b.should_yield(p));
     let higher = worker(&b, INTERACTIVE, HAL, 0, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 2);
+    until(&b, |s| s.waiters.len() == 2);
     assert!(b.should_yield(p));
     b.release(p);
     assert_eq!(rx.recv().unwrap(), 0);
@@ -241,7 +241,7 @@ fn yield_only_to_strictly_higher_waiting_class() {
 
 #[test]
 fn checkpoint_parks_and_retains_original_fifo_ticket() {
-    let (b, changed) = budget(1);
+    let b = budget(1);
     let (tx, rx) = mpsc::channel();
     let (checkpoint_tx, checkpoint_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -260,12 +260,12 @@ fn checkpoint_parks_and_retains_original_fifo_ticket() {
     };
     assert_eq!(rx.recv().unwrap(), 0);
     let newer = worker(&b, BACKGROUND, HAL, 3, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 1);
+    until(&b, |s| s.waiters.len() == 1);
     let higher = worker(&b, INTERACTIVE, HAL, 1, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 2);
+    until(&b, |s| s.waiters.len() == 2);
     checkpoint_tx.send(()).unwrap();
     assert_eq!(rx.recv().unwrap(), 1);
-    until(&b, &changed, |s| s.waiters.len() == 2 && s.parked[BACKGROUND as usize] == 1);
+    until(&b, |s| s.waiters.len() == 2 && s.parked[BACKGROUND as usize] == 1);
     finish(higher);
     assert_eq!(rx.recv().unwrap(), 2);
     release_tx.send(()).unwrap();
@@ -279,11 +279,11 @@ fn checkpoint_parks_and_retains_original_fifo_ticket() {
 
 #[test]
 fn checkpoint_under_lock_keeps_permit_and_reports_frequent_sites() {
-    let (b, changed) = budget(1);
+    let b = budget(1);
     let p = b.admit(BACKGROUND, APP, "locked");
     let (tx, rx) = mpsc::channel();
     let higher = worker(&b, INTERACTIVE, HAL, 1, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 1);
+    until(&b, |s| s.waiters.len() == 1);
     for i in 0..10 {
         for _ in 0..=i { assert_eq!(b.checkpoint(p, 1, &format!("lock:{i}")), p); }
     }
@@ -301,11 +301,11 @@ fn checkpoint_under_lock_keeps_permit_and_reports_frequent_sites() {
 
 #[test]
 fn reclass_updates_yield_and_background_accounting() {
-    let (b, changed) = budget(1);
+    let b = budget(1);
     let p = b.admit(BACKGROUND, APP, "promoted");
     let (tx, rx) = mpsc::channel();
     let w = worker(&b, VISIBLE, HAL, 1, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 1);
+    until(&b, |s| s.waiters.len() == 1);
     assert!(b.should_yield(p));
     b.reclass(p, INTERACTIVE);
     assert!(!b.should_yield(p));
@@ -318,7 +318,7 @@ fn reclass_updates_yield_and_background_accounting() {
 
 #[test]
 fn a_wait_behind_an_earlier_job_on_a_strand_is_reported_apart_from_waits_for_a_worker() {
-    let (b, _) = budget(6);
+    let b = budget(6);
     b.strand_waited(VISIBLE, 19_700_000_000, "strand job");
     b.waited(VISIBLE, APP, 2_000, "strand job");
     let text = b.report();
@@ -334,7 +334,7 @@ fn a_wait_behind_an_earlier_job_on_a_strand_is_reported_apart_from_waits_for_a_w
 
 #[test]
 fn diagnostics_track_waits_culprit_recent_worst_and_utf8_labels() {
-    let (mut b, _) = budget(6);
+    let mut b = budget(6);
     Arc::get_mut(&mut b).unwrap().origin = Instant::now() - std::time::Duration::from_secs(61);
     let bg = b.admit(BACKGROUND, HAL, "background culprit");
     let vis = b.admit(VISIBLE, APP, "older visible");
@@ -370,11 +370,11 @@ fn diagnostics_track_waits_culprit_recent_worst_and_utf8_labels() {
 /// back at once, whatever runs by then (it may hold a lock what runs needs), on the same permit.
 #[test]
 fn a_lent_token_runs_a_waiter_and_comes_back_at_once_on_the_same_permit() {
-    let (b, changed) = budget(2);
+    let b = budget(2);
     let p = b.admit(BACKGROUND, APP, "sleeper");
     let (tx, rx) = mpsc::channel();
     let visible = worker(&b, VISIBLE, HAL, 1, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 1);
+    until(&b, |s| s.waiters.len() == 1);
     assert!(b.should_yield(p), "the waiter wants the sleeper's token");
     assert!(b.lend());
     assert!(!b.lend(), "nothing more to lend");
@@ -432,7 +432,7 @@ fn a_wait_inside_a_wait_ends_with_the_outer_one_and_the_token_comes_back() {
 /// go on: their tokens don't depend on it.
 #[test]
 fn a_panic_under_the_budgets_lock_stays_that_threads_panic() {
-    let (b, _changed) = budget(2);
+    let b = budget(2);
     let p = b.admit(VISIBLE, APP, "released twice");
     b.release(p);
     assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.release(p))).is_err());
@@ -445,11 +445,11 @@ fn a_panic_under_the_budgets_lock_stays_that_threads_panic() {
 /// a one-token machine too, and comes back on the same permit without waiting.
 #[test]
 fn a_job_served_on_the_owner_lends_its_token_by_permit() {
-    let (b, changed) = budget(1);
+    let b = budget(1);
     let served = b.admit(BACKGROUND, JIT, "served");
     let (tx, rx) = mpsc::channel();
     let build = worker(&b, BACKGROUND, JIT, 1, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 1);
+    until(&b, |s| s.waiters.len() == 1);
     b.lend_permit(served);
     assert_eq!(rx.recv().unwrap(), 1, "the build runs on the job's token");
     b.take_back_permit(served);
@@ -463,7 +463,7 @@ fn a_job_served_on_the_owner_lends_its_token_by_permit() {
 /// keeps running whoever waits; a second waits for it. Nothing is held back while none runs.
 #[test]
 fn one_jit_job_runs_above_a_full_budget() {
-    let (b, changed) = budget(4);
+    let b = budget(4);
     let app: Vec<_> = (0..3).map(|_| b.admit(VISIBLE, APP, "busy")).collect();
     let above = b.admit(BACKGROUND, JIT, "tier-up");
     assert_eq!(b.state.lock().unwrap().running, 3, "the job takes no token from the app");
@@ -471,9 +471,9 @@ fn one_jit_job_runs_above_a_full_budget() {
     assert!(b.tokens().holders.iter().any(|h| h.above && h.label == "tier-up"));
     let (tx, rx) = mpsc::channel();
     let second = worker(&b, BACKGROUND, JIT, 1, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 1);
+    until(&b, |s| s.waiters.len() == 1);
     let more_app = worker(&b, VISIBLE, APP, 2, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 2);
+    until(&b, |s| s.waiters.len() == 2);
     assert!(!b.should_yield(above), "it holds no token anyone could want");
     assert_eq!(b.checkpoint(above, 0, ""), above);
     b.release(above);
@@ -491,12 +491,12 @@ fn one_jit_job_runs_above_a_full_budget() {
 /// passes the token on, it does not stop the JIT.
 #[test]
 fn the_only_jit_job_gives_up_its_token_and_goes_on_above_the_budget() {
-    let (b, changed) = budget(3);
+    let b = budget(3);
     let job = b.admit(BACKGROUND, JIT, "tier-up");
     let app = b.admit(VISIBLE, APP, "busy");
     let (tx, rx) = mpsc::channel();
     let waiter = worker(&b, VISIBLE, APP, 1, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 1);
+    until(&b, |s| s.waiters.len() == 1);
     assert!(b.should_yield(job));
     let job = b.checkpoint(job, 0, "");
     assert_eq!(rx.recv().unwrap(), 1, "the app's waiter has its token");
@@ -513,11 +513,11 @@ fn the_only_jit_job_gives_up_its_token_and_goes_on_above_the_budget() {
 /// One JIT job running keeps the others to the budget's limits.
 #[test]
 fn a_second_jit_job_waits_for_a_token() {
-    let (b, changed) = budget(3);
+    let b = budget(3);
     let running = b.admit(BACKGROUND, JIT, "running");
     let (tx, rx) = mpsc::channel();
     let second = worker(&b, BACKGROUND, JIT, 1, &tx);
-    until(&b, &changed, |s| s.waiters.len() == 1);
+    until(&b, |s| s.waiters.len() == 1);
     assert!(rx.try_recv().is_err(), "Background is at its limit and the JIT has a job running");
     b.release(running);
     assert_eq!(rx.recv().unwrap(), 1);
@@ -540,4 +540,15 @@ fn idle_thread_stays_below_background() {
     assert_eq!((policy, idle, class), (5, true, Some(BACKGROUND)), "SCHED_IDLE, kept by Background work");
     let ui = thread::spawn(|| { set_ui_thread(); (set_thread_idle(), thread_idle(), unsafe { sched_getscheduler(0) }) }).join().unwrap();
     assert_eq!(ui, (false, false, 0), "the UI thread stays SCHED_OTHER");
+}
+
+/// A run given fewer cores than its machine's (`MAKEPAD_CPU_CORES`) sizes the budget from them;
+/// never more than the machine's, and an unset or unreadable count is the machine's.
+#[test]
+fn a_granted_run_sizes_the_budget_from_its_grant() {
+    assert_eq!(granted_cores(16, Some("4")), 4);
+    assert_eq!(granted_cores(16, Some("64")), 16);
+    assert_eq!(granted_cores(16, None), 16);
+    assert_eq!(granted_cores(16, Some("0")), 16);
+    assert_eq!(granted_cores(16, Some("four")), 16);
 }

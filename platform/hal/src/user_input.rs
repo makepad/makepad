@@ -60,6 +60,33 @@ pub fn viewers() -> u64 {
     VIEWERS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// A keyboard, mouse, touchpad or touchscreen this process's own device reader (a WM's direct
+/// input) has open: its node `/dev/input/event<event>`, and whether it has sent a key, a button
+/// or a motion since it opened. A wireless device whose receiver is plugged in but that is off or
+/// out of range has not.
+#[makepad_relax_api::relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenDevice {
+    pub event: u32,
+    pub reported: bool,
+}
+
+/// The device reader's open devices, as it last said (`set_open`).
+static OPEN: std::sync::Mutex<Vec<OpenDevice>> = std::sync::Mutex::new(Vec::new());
+
+/// The device reader's open devices now: it says so when one opens, closes or first reports.
+#[cfg(target_os = "linux")]
+pub(crate) fn set_open(devices: Vec<OpenDevice>) {
+    *OPEN.lock().unwrap_or_else(|e| e.into_inner()) = devices;
+}
+
+/// The `index`th device this process's device reader has open, None past the last.
+#[makepad_relax_api::relax_api]
+pub fn open_device(index: usize) -> Option<OpenDevice> {
+    OPEN.lock().unwrap_or_else(|e| e.into_inner()).get(index).copied()
+}
+
 static AT_NS: AtomicU64 = AtomicU64::new(0);
 /// origin * 4 + what (0: none yet)
 static KIND: AtomicU8 = AtomicU8::new(0);

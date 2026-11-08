@@ -1,5 +1,5 @@
 //! VK_KHR_display connector/mode/plane policy from the native Vulkan direct backend.
-use super::drm_sys;
+use super::{drm_sys, heads::{Head, KmsState}};
 use makepad_vulkan::vk;
 use std::{collections::{HashMap, HashSet}, path::{Path, PathBuf}};
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,12 +78,25 @@ pub(super) fn edid_monitor_name(edid: &[u8]) -> String {
     String::new()
 }
 
-/// Connected connectors from sysfs, in primary-preference order. sysfs only
-/// tells us the cable state; whether a connector can be driven is decided by
-/// vkGetDrmDisplayEXT/vkAcquireDrmDisplayEXT and reported per output.
-pub(super) fn scan_drm_connectors(filter: &DrmFilter) -> Result<Vec<DrmConnector>, String> {
+/// Connected connectors in primary-preference order. On startup and hotplug,
+/// `probe` refreshes each connector through the owner's DRM master descriptor
+/// before reading sysfs: its status and EDID can still describe the old cable
+/// state. Ordinary periodic scans pass a no-op and only read cached metadata.
+pub(super) fn scan_drm_connectors(
+    filter: &DrmFilter,
+    probe: impl FnMut(&Path, u32),
+) -> Result<Vec<DrmConnector>, String> {
+    scan_sysfs_connectors(Path::new("/sys/class/drm"), filter, probe)
+}
+
+/// `scan_drm_connectors` over the DRM class directory `root`.
+pub(super) fn scan_sysfs_connectors(
+    root: &Path,
+    filter: &DrmFilter,
+    mut probe: impl FnMut(&Path, u32),
+) -> Result<Vec<DrmConnector>, String> {
     let entries =
-        std::fs::read_dir("/sys/class/drm").map_err(|e| format!("read DRM connectors: {e}"))?;
+        std::fs::read_dir(root).map_err(|e| format!("read DRM connectors: {e}"))?;
     let mut connectors = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| format!("read DRM connector entry: {e}"))?;
@@ -102,14 +115,6 @@ pub(super) fn scan_drm_connectors(filter: &DrmFilter) -> Result<Vec<DrmConnector
         {
             continue;
         }
-        if std::fs::read_to_string(entry.path().join("status"))
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            != Some("connected")
-        {
-            continue;
-        }
         let id = match std::fs::read_to_string(entry.path().join("connector_id"))
             .ok()
             .and_then(|id| id.trim().parse::<u32>().ok())
@@ -120,6 +125,15 @@ pub(super) fn scan_drm_connectors(filter: &DrmFilter) -> Result<Vec<DrmConnector
         if filter.connector.as_ref().is_some_and(|filter| {
             filter != &name && filter != connector && filter.parse::<u32>().ok() != Some(id)
         }) {
+            continue;
+        }
+        probe(&card_path, id);
+        if std::fs::read_to_string(entry.path().join("status"))
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            != Some("connected")
+        {
             continue;
         }
         let (fingerprint, monitor) = connector_identity(&entry.path());
@@ -175,6 +189,43 @@ pub(super) fn drm_connector_modes(fd: i32, connector_id: u32) -> (Vec<(u32, u32,
     (modes, preferred)
 }
 
+/// The card's heads as DRM shows them: what each CRTC lights, and each connector's possible
+/// CRTCs (the union of its encoders'). Reads the last detected state only.
+pub(super) fn drm_kms_state(fd: i32) -> Result<KmsState, String> {
+    let resources = unsafe { drm_sys::drmModeGetResources(fd) };
+    if resources.is_null() {
+        return Err(format!("DRM resources: {}", std::io::Error::last_os_error()));
+    }
+    let list = |ptr: *mut u32, count: i32| if ptr.is_null() || count <= 0 { &[][..] } else { unsafe { std::slice::from_raw_parts(ptr, count as usize) } };
+    let mut state = KmsState::default();
+    unsafe {
+        let r = &*resources;
+        state.heads = list(r.crtcs, r.count_crtcs).iter().map(|&crtc| Head { crtc, lights: 0, connected: false }).collect();
+        for &id in list(r.connectors, r.count_connectors) {
+            let connector = drm_sys::drmModeGetConnectorCurrent(fd, id);
+            if connector.is_null() { continue; }
+            let c = &*connector;
+            let mut possible = 0;
+            for &encoder_id in list(c.encoders, c.count_encoders) {
+                let encoder = drm_sys::drmModeGetEncoder(fd, encoder_id);
+                if encoder.is_null() { continue; }
+                possible |= (*encoder).possible_crtcs;
+                if encoder_id == c.encoder_id {
+                    if let Some(head) = state.heads.iter_mut().find(|h| h.crtc == (*encoder).crtc_id) {
+                        head.lights = id;
+                        head.connected = c.connection == drm_sys::CONNECTED;
+                    }
+                }
+                drm_sys::drmModeFreeEncoder(encoder);
+            }
+            state.possible.insert(id, possible);
+            drm_sys::drmModeFreeConnector(connector);
+        }
+        drm_sys::drmModeFreeResources(resources);
+    }
+    Ok(state)
+}
+
 pub(super) fn drm_native_resolution(fd: i32, connector_id: u32) -> Option<vk::Extent2D> {
     let connector = unsafe { drm_sys::drmModeGetConnector(fd, connector_id) };
     if connector.is_null() {
@@ -206,11 +257,7 @@ pub(super) struct DisplayMode {
     pub extent: vk::Extent2D,
     pub refresh_mhz: u32,
     /// Every mode the connector offers (width, height, refresh Hz),
-    /// deduplicated and sorted by area then refresh, both descending. Only
-    /// populated by `select_display_mode`'s own enumeration; a `DisplayMode`
-    /// rebuilt elsewhere from an already-chosen mode (a plane move, or
-    /// `direct_claim_plane`'s re-check of a live output) leaves it empty,
-    /// since those never change which modes the connector offers.
+    /// deduplicated and sorted by area then refresh, both descending.
     pub modes: Vec<(u32, u32, f64)>,
 }
 
@@ -223,13 +270,55 @@ pub(super) struct PlaneCandidate {
 }
 
 
-pub(super) fn select_display_mode(
+/// A display mode as (width, height, refresh in mHz).
+pub(super) type ModeKey = (u32, u32, u32);
+
+pub(super) fn mode_key(mode: &DisplayMode) -> ModeKey { (mode.extent.width, mode.extent.height, mode.refresh_mhz) }
+
+pub(super) fn key_label(mode: ModeKey) -> String { format!("{}x{}@{}", mode.0, mode.1, (mode.2 + 500) / 1000) }
+
+/// The mode `requested` names (`WxH`, `WxH-Hz` or `WxH@Hz`), or with none the largest mode at
+/// the native resolution at its fastest refresh.
+pub(super) fn choose_mode(modes: &[ModeKey], requested: Option<&str>, native: vk::Extent2D) -> Option<ModeKey> {
+    modes.iter().copied().filter(|&(w, h, mhz)| {
+        let Some(requested) = requested else { return true };
+        let resolution = format!("{w}x{h}");
+        let hz = (mhz + 500) / 1000;
+        requested == resolution || requested == format!("{resolution}-{hz}") || requested == format!("{resolution}@{hz}")
+    }).max_by_key(|&(w, h, mhz)| ((w, h) == (native.width, native.height), u64::from(w) * u64::from(h), mhz))
+}
+
+/// Whether `mode` is at or above `failed` on the way down: a larger area, or the same
+/// resolution at the same or a faster refresh.
+fn at_or_above(mode: ModeKey, failed: ModeKey) -> bool {
+    let area = |m: ModeKey| u64::from(m.0) * u64::from(m.1);
+    area(mode) > area(failed) || ((mode.0, mode.1) == (failed.0, failed.1) && mode.2 >= failed.2)
+}
+
+/// The modes to try, in order: `first`, then each lower refresh at its resolution, then each
+/// smaller resolution from its fastest refresh, then those of `extra` (the last mode that worked,
+/// the monitor's own) that `modes` lists. With `failed` (a mode that failed to present) every mode at or above it is
+/// left out, so a failure steps down and never comes back up.
+pub(super) fn mode_ladder(modes: &[ModeKey], first: ModeKey, extra: &[ModeKey], failed: Option<ModeKey>) -> Vec<ModeKey> {
+    let area = |m: &ModeKey| u64::from(m.0) * u64::from(m.1);
+    let mut same: Vec<_> = modes.iter().copied().filter(|m| (m.0, m.1) == (first.0, first.1) && m.2 < first.2).collect();
+    same.sort_by_key(|m| std::cmp::Reverse(m.2));
+    let mut smaller: Vec<_> = modes.iter().copied().filter(|m| area(m) < area(&first)).collect();
+    smaller.sort_by_key(|m| (std::cmp::Reverse(area(m)), std::cmp::Reverse(m.2)));
+    let mut ladder = Vec::new();
+    for mode in [first].into_iter().chain(same).chain(smaller).chain(extra.iter().copied().filter(|m| modes.contains(m))) {
+        if !ladder.contains(&mode) && !failed.is_some_and(|f| at_or_above(mode, f)) { ladder.push(mode); }
+    }
+    ladder
+}
+
+/// The display's modes with their handles, after checking it can be driven unrotated, and its
+/// physical resolution.
+fn display_modes(
     loader: &makepad_vulkan::Instance,
     device: vk::PhysicalDevice,
     display: vk::DisplayKHR,
-    requested: Option<&str>,
-    native_resolution: Option<vk::Extent2D>,
-) -> Result<DisplayMode, String> {
+) -> Result<(Vec<(ModeKey, vk::DisplayModeKHR)>, vk::Extent2D), String> {
     let properties = unsafe { loader.get_physical_device_display_properties(device) }
         .map_err(|e| format!("enumerate Vulkan displays: {e:?}"))?;
     let property = properties
@@ -244,147 +333,222 @@ pub(super) fn select_display_mode(
     }
     let modes = unsafe { loader.get_display_mode_properties(device, display) }
         .map_err(|e| format!("enumerate display modes: {e:?}"))?;
-    let selected = modes
-        .iter()
-        .filter(|mode| {
-            let Some(requested) = requested else {
-                return true;
-            };
-            let size = mode.parameters.visible_region;
-            let resolution = format!("{}x{}", size.width, size.height);
-            let hz = (mode.parameters.refresh_rate + 500) / 1000;
-            requested == resolution
-                || requested == format!("{resolution}-{hz}")
-                || requested == format!("{resolution}@{hz}")
-        })
-        .max_by_key(|mode| {
-            let size = mode.parameters.visible_region;
-            (
-                size == native_resolution.unwrap_or(property.physical_resolution),
-                u64::from(size.width) * u64::from(size.height),
-                mode.parameters.refresh_rate,
-            )
-        })
-        .ok_or_else(|| {
-            format!(
-                "Requested display mode {:?} unavailable; modes: {}",
-                requested,
-                modes
-                    .iter()
-                    .map(|mode| format!(
-                        "{}x{}-{}",
-                        mode.parameters.visible_region.width,
-                        mode.parameters.visible_region.height,
-                        (mode.parameters.refresh_rate + 500) / 1000
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
-    let extent = selected.parameters.visible_region;
-    let refresh_mhz = selected.parameters.refresh_rate;
-    eprintln!(
-        "Vulkan direct mode: {}x{} @ {:.3} Hz ({})",
-        extent.width,
-        extent.height,
-        refresh_mhz as f64 / 1000.0,
-        if requested.is_some() {
-            "explicit override"
-        } else {
-            "fastest native-resolution mode"
-        }
-    );
-    let mut all_modes: Vec<(u32, u32, f64)> = modes
-        .iter()
-        .map(|mode| {
-            let size = mode.parameters.visible_region;
-            (size.width, size.height, mode.parameters.refresh_rate as f64 / 1000.0)
-        })
-        .collect();
-    all_modes.sort_by(|a, b| {
+    let modes = modes.iter().map(|m| {
+        let size = m.parameters.visible_region;
+        ((size.width, size.height, m.parameters.refresh_rate), m.display_mode)
+    }).collect();
+    Ok((modes, property.physical_resolution))
+}
+
+/// `modes` as (width, height, Hz), deduplicated, by area then refresh, both descending.
+fn mode_list(modes: &[(ModeKey, vk::DisplayModeKHR)]) -> Vec<(u32, u32, f64)> {
+    let mut all: Vec<(u32, u32, f64)> = modes.iter().map(|((w, h, mhz), _)| (*w, *h, *mhz as f64 / 1000.0)).collect();
+    all.sort_by(|a, b| {
         let area = |m: &(u32, u32, f64)| u64::from(m.0) * u64::from(m.1);
         area(b).cmp(&area(a)).then_with(|| b.2.total_cmp(&a.2))
     });
-    all_modes.dedup();
-    Ok(DisplayMode {
-        mode: selected.display_mode,
-        extent,
-        refresh_mhz,
-        modes: all_modes,
-    })
+    all.dedup();
+    all
 }
 
-/// Every plane that can scan out `mode` on `display` at full size with a
-/// usable alpha mode. `excluded` planes are skipped outright. A plane the
-/// driver reports as currently driving another display is skipped unless it
-/// is in `owned` (one of our own outputs, which a re-match may move); the
-/// driver's `current_display` can also lag behind our own surface creation.
-pub(super) fn plane_candidates(
+fn unavailable(requested: Option<&str>, modes: &[(ModeKey, vk::DisplayModeKHR)]) -> String {
+    format!("Requested display mode {:?} unavailable; modes: {}", requested,
+        modes.iter().map(|(m, _)| format!("{}x{}-{}", m.0, m.1, (m.2 + 500) / 1000)).collect::<Vec<_>>().join(", "))
+}
+
+/// The modes to try for a connector, in `mode_ladder` order from the mode `requested` names
+/// (else, or when it lacks that mode, the fastest native-resolution mode), with `working`
+/// (the last mode that worked on it) and the native one as the last resorts, skipping
+/// everything at or above `failed`. Also returns why the first mode is not the one asked
+/// for, if it is not.
+pub(super) fn display_mode_ladder(
+    loader: &makepad_vulkan::Instance,
+    device: vk::PhysicalDevice,
+    display: vk::DisplayKHR,
+    requested: Option<&str>,
+    native_resolution: Option<vk::Extent2D>,
+    working: Option<ModeKey>,
+    failed: Option<(ModeKey, &str)>,
+) -> Result<(Vec<DisplayMode>, Option<String>), String> {
+    let (modes, physical) = display_modes(loader, device, display)?;
+    let keys: Vec<ModeKey> = modes.iter().map(|(m, _)| *m).collect();
+    let native = native_resolution.unwrap_or(physical);
+    let auto = choose_mode(&keys, None, native).ok_or("the display lists no modes")?;
+    let (first, mut why) = match requested.map(|r| choose_mode(&keys, Some(r), native)) {
+        Some(None) => (auto, Some(unavailable(requested, &modes))),
+        Some(Some(mode)) => (mode, None),
+        None => (auto, None),
+    };
+    let ladder = mode_ladder(&keys, first, &working.into_iter().chain([auto]).collect::<Vec<_>>(), failed.map(|f| f.0));
+    if let Some((mode, reason)) = failed.filter(|f| at_or_above(first, f.0)) {
+        why = Some(format!("{} failed to present ({reason})", key_label(mode)));
+    }
+    if ladder.is_empty() {
+        return Err(why.unwrap_or_else(|| "no display mode".into()));
+    }
+    let list = mode_list(&modes);
+    let ladder = ladder.into_iter().filter_map(|key| modes.iter().find(|(m, _)| *m == key).map(|(_, mode)| DisplayMode {
+        mode: *mode,
+        extent: vk::Extent2D { width: key.0, height: key.1 },
+        refresh_mhz: key.2,
+        modes: list.clone(),
+    })).collect();
+    Ok((ladder, why))
+}
+
+/// Per connector, the mode whose presentation failed: its ladder starts below it, until the
+/// monitor is replugged or replaced or a mode is picked for it. A mode that never showed a
+/// frame steps down at its first failure; one that showed frames first is rebuilt at the
+/// same mode once, and steps down if it fails again. A step happens on a failure only, never
+/// on elapsed time.
+#[derive(Default)]
+pub(super) struct Demotions { connectors: HashMap<String, Demotion> }
+#[derive(Default)]
+struct Demotion { fingerprint: u64, struck: Option<ModeKey>, failed: Option<(ModeKey, String)> }
+impl Demotions {
+    /// `mode` failed to present on `connector` (`presented`: after showing frames). Returns
+    /// whether the connector steps down below it.
+    pub fn failed(&mut self, connector: &DrmConnector, mode: ModeKey, presented: bool, reason: &str) -> bool {
+        let entry = self.connectors.entry(connector.name.clone()).or_default();
+        if entry.fingerprint != connector.fingerprint { *entry = Demotion { fingerprint: connector.fingerprint, ..Default::default() }; }
+        if presented && entry.struck != Some(mode) {
+            entry.struck = Some(mode);
+            return false;
+        }
+        entry.struck = None;
+        entry.failed = Some((mode, reason.to_owned()));
+        true
+    }
+    /// The mode the connector's ladder starts below, and why.
+    pub fn below(&self, connector: &DrmConnector) -> Option<(ModeKey, &str)> {
+        self.connectors.get(&connector.name).filter(|d| d.fingerprint == connector.fingerprint)
+            .and_then(|d| d.failed.as_ref()).map(|(m, r)| (*m, r.as_str()))
+    }
+    /// A mode was picked for the connector: everything may be tried again.
+    pub fn forget(&mut self, name: &str) { self.connectors.remove(name); }
+    /// Only connectors still connected, with the same monitor, keep theirs.
+    pub fn keep(&mut self, connectors: &[DrmConnector]) {
+        self.connectors.retain(|name, d| connectors.iter().any(|c| c.name == *name && c.fingerprint == d.fingerprint));
+    }
+}
+
+/// Per connector, the last mode that showed a frame on its monitor: a last resort of its ladder.
+/// Another monitor on the connector starts without one.
+#[derive(Default)]
+pub(super) struct Working { connectors: HashMap<String, (u64, ModeKey)> }
+impl Working {
+    /// `mode` showed a frame on `connector`.
+    pub fn showed(&mut self, connector: &DrmConnector, mode: ModeKey) {
+        self.connectors.insert(connector.name.clone(), (connector.fingerprint, mode));
+    }
+    pub fn get(&self, connector: &DrmConnector) -> Option<ModeKey> {
+        self.connectors.get(&connector.name).filter(|w| w.0 == connector.fingerprint).map(|w| w.1)
+    }
+    /// Only connectors still connected, with the same monitor, keep theirs.
+    pub fn keep(&mut self, connectors: &[DrmConnector]) {
+        self.connectors.retain(|name, w| connectors.iter().any(|c| c.name == *name && c.fingerprint == w.0));
+    }
+}
+
+/// One display plane as the driver reports it for a display at a mode.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PlaneRow {
+    pub current: vk::DisplayKHR,
+    pub stack: u32,
+    /// The alpha mode it scans `mode` out with on `display` at full size; `None` when it
+    /// cannot (the display is not among its supported ones, or the size is out of range).
+    pub alpha: Option<vk::DisplayPlaneAlphaFlagsKHR>,
+}
+
+/// Every plane of `device`, and whether it can scan out `mode` on `display` at full size with
+/// a usable alpha mode.
+pub(super) fn plane_rows(
     loader: &makepad_vulkan::Instance,
     device: vk::PhysicalDevice,
     display: vk::DisplayKHR,
     mode: &DisplayMode,
-    excluded: &HashSet<u32>,
-    owned: &HashSet<u32>,
-) -> Result<Vec<PlaneCandidate>, String> {
+) -> Result<Vec<PlaneRow>, String> {
     let planes = unsafe { loader.get_physical_device_display_plane_properties(device) }
         .map_err(|e| format!("enumerate display planes: {e:?}"))?;
     let extent = mode.extent;
-    let mut candidates = Vec::new();
+    let mut rows = Vec::new();
     for (index, plane) in planes.iter().enumerate() {
         let index = index as u32;
-        if excluded.contains(&index) {
-            continue;
-        }
-        if plane.current_display != vk::DisplayKHR::null()
-            && plane.current_display != display
-            && !owned.contains(&index)
-        {
-            continue;
-        }
+        let mut row = PlaneRow { current: plane.current_display, stack: plane.current_stack_index, alpha: None };
         let supported = unsafe { loader.get_display_plane_supported_displays(device, index) }
             .map_err(|e| format!("query plane displays: {e:?}"))?;
-        if !supported.contains(&display) {
-            continue;
+        if supported.contains(&display) {
+            let caps = unsafe { loader.get_display_plane_capabilities(device, mode.mode, index) }
+                .map_err(|e| format!("query display plane capabilities: {e:?}"))?;
+            let fits = extent.width >= caps.min_src_extent.width
+                && extent.height >= caps.min_src_extent.height
+                && extent.width <= caps.max_src_extent.width
+                && extent.height <= caps.max_src_extent.height
+                && extent.width >= caps.min_dst_extent.width
+                && extent.height >= caps.min_dst_extent.height
+                && extent.width <= caps.max_dst_extent.width
+                && extent.height <= caps.max_dst_extent.height
+                && caps.min_src_position.x <= 0
+                && caps.min_src_position.y <= 0
+                && caps.max_src_position.x >= 0
+                && caps.max_src_position.y >= 0
+                && caps.min_dst_position.x <= 0
+                && caps.min_dst_position.y <= 0
+                && caps.max_dst_position.x >= 0
+                && caps.max_dst_position.y >= 0;
+            row.alpha = fits.then(|| [
+                vk::DisplayPlaneAlphaFlagsKHR::OPAQUE,
+                vk::DisplayPlaneAlphaFlagsKHR::GLOBAL,
+                vk::DisplayPlaneAlphaFlagsKHR::PER_PIXEL,
+                vk::DisplayPlaneAlphaFlagsKHR::PER_PIXEL_PREMULTIPLIED,
+            ]
+            .into_iter()
+            .find(|alpha| caps.supported_alpha.contains(*alpha))).flatten();
         }
-        let caps = unsafe { loader.get_display_plane_capabilities(device, mode.mode, index) }
-            .map_err(|e| format!("query display plane capabilities: {e:?}"))?;
-        if extent.width < caps.min_src_extent.width
-            || extent.height < caps.min_src_extent.height
-            || extent.width > caps.max_src_extent.width
-            || extent.height > caps.max_src_extent.height
-            || extent.width < caps.min_dst_extent.width
-            || extent.height < caps.min_dst_extent.height
-            || extent.width > caps.max_dst_extent.width
-            || extent.height > caps.max_dst_extent.height
-            || caps.min_src_position.x > 0
-            || caps.min_src_position.y > 0
-            || caps.max_src_position.x < 0
-            || caps.max_src_position.y < 0
-            || caps.min_dst_position.x > 0
-            || caps.min_dst_position.y > 0
-            || caps.max_dst_position.x < 0
-            || caps.max_dst_position.y < 0
-        {
-            continue;
-        }
-        let Some(alpha) = [
-            vk::DisplayPlaneAlphaFlagsKHR::OPAQUE,
-            vk::DisplayPlaneAlphaFlagsKHR::GLOBAL,
-            vk::DisplayPlaneAlphaFlagsKHR::PER_PIXEL,
-            vk::DisplayPlaneAlphaFlagsKHR::PER_PIXEL_PREMULTIPLIED,
-        ]
-        .into_iter()
-        .find(|alpha| caps.supported_alpha.contains(*alpha)) else {
-            continue;
-        };
-        candidates.push(PlaneCandidate {
-            plane_index: index,
-            stack_index: plane.current_stack_index,
-            alpha,
-        });
+        rows.push(row);
     }
-    Ok(candidates)
+    Ok(rows)
+}
+
+/// The displays the driver lists as connected.
+pub(super) fn connected_displays(loader: &makepad_vulkan::Instance, device: vk::PhysicalDevice) -> Result<HashSet<vk::DisplayKHR>, String> {
+    let properties = unsafe { loader.get_physical_device_display_properties(device) }
+        .map_err(|e| format!("enumerate Vulkan displays: {e:?}"))?;
+    Ok(properties.iter().map(|p| p.display).collect())
+}
+
+/// The planes `display` may take, best first. Occupancy comes from the session's own book
+/// (`book`: plane -> the display we hold on it) and, for planes not in it, from the driver's
+/// `current` display:
+/// 1. the plane the book gives `display` (a rebuild keeps its plane);
+/// 2. a plane the driver already shows `display` on;
+/// 3. an empty plane, or one showing a display that is gone;
+/// 4. a plane the console shows a connected display on that we do not hold.
+///
+/// A plane the book gives another display is taken, and so is one the driver shows a display
+/// we hold on (`held`; its mode spans a second head).
+pub(super) fn plane_order(
+    rows: &[PlaneRow],
+    display: vk::DisplayKHR,
+    book: &HashMap<u32, vk::DisplayKHR>,
+    held: &HashSet<vk::DisplayKHR>,
+    connected: &HashSet<vk::DisplayKHR>,
+) -> Vec<PlaneCandidate> {
+    let mut ranked: Vec<(u8, PlaneCandidate)> = rows.iter().enumerate().filter_map(|(index, row)| {
+        let alpha = row.alpha?;
+        let index = index as u32;
+        let rank = match book.get(&index) {
+            Some(holder) if *holder == display => 0,
+            Some(_) => return None,
+            None if row.current == display => 1,
+            None if row.current == vk::DisplayKHR::null() || !connected.contains(&row.current) => 2,
+            None if held.contains(&row.current) => return None,
+            None => 3,
+        };
+        Some((rank, PlaneCandidate { plane_index: index, stack_index: row.stack, alpha }))
+    }).collect();
+    ranked.sort_by_key(|(rank, c)| (*rank, c.plane_index));
+    ranked.into_iter().map(|(_, c)| c).collect()
 }
 
 pub(super) fn create_plane_surface(
@@ -491,5 +655,68 @@ mod tests {
         assert_eq!(edid_monitor_name(&edid), "Monitor 27");
         assert_eq!(edid_monitor_name(&edid[..64]), "", "a short EDID names nothing");
         assert_eq!(edid_monitor_name(&[0u8; 128]), "");
+    }
+
+    #[test]
+    fn a_mode_that_fails_to_present_steps_down_and_never_back_up() {
+        let k4 = |hz: u32| (3840, 2160, hz * 1000);
+        let qhd = |hz: u32| (2560, 1440, hz * 1000);
+        let fhd = |hz: u32| (1920, 1080, hz * 1000);
+        let modes = [fhd(60), k4(60), qhd(144), k4(240), fhd(240), k4(120), qhd(60), k4(165), k4(144), qhd(240)];
+        let native = vk::Extent2D { width: 3840, height: 2160 };
+        let auto = choose_mode(&modes, None, native).unwrap();
+        assert_eq!(auto, k4(240), "auto: the fastest native mode");
+        assert_eq!(choose_mode(&modes, Some("2560x1440@144"), native), Some(qhd(144)));
+        assert_eq!(choose_mode(&modes, Some("1280x720"), native), None);
+        assert_eq!(mode_ladder(&modes, auto, &[], None),
+            vec![k4(240), k4(165), k4(144), k4(120), k4(60), qhd(240), qhd(144), qhd(60), fhd(240), fhd(60)],
+            "the next refresh at the same resolution, then down");
+        let monitor = DrmConnector { card: PathBuf::from("/dev/dri/card1"), name: "card1-DP-1".into(), id: 1, fingerprint: 7, monitor: String::new() };
+        let mut demotions = Demotions::default();
+        let first = |demotions: &Demotions, request: ModeKey, extra: &[ModeKey]| mode_ladder(&modes, request, extra, demotions.below(&monitor).map(|b| b.0)).first().copied();
+        // 240 Hz never shows a frame: down at once
+        assert!(demotions.failed(&monitor, k4(240), false, "ERROR_UNKNOWN"));
+        assert_eq!(demotions.below(&monitor), Some((k4(240), "ERROR_UNKNOWN")));
+        assert_eq!(first(&demotions, auto, &[k4(240)]), Some(k4(165)), "and the mode that worked before is skipped too");
+        // 165 Hz shows frames, then fails: once more at 165, then down
+        assert!(!demotions.failed(&monitor, k4(165), true, "flip stalled"));
+        assert_eq!(first(&demotions, auto, &[]), Some(k4(165)));
+        assert!(demotions.failed(&monitor, k4(165), true, "flip stalled"));
+        assert_eq!(first(&demotions, auto, &[]), Some(k4(144)));
+        // a smaller requested mode is below the failure: it stands
+        assert_eq!(first(&demotions, qhd(240), &[]), Some(qhd(240)));
+        // the same monitor stays demoted across rescans; a replaced one starts again
+        demotions.keep(std::slice::from_ref(&monitor));
+        assert!(demotions.below(&monitor).is_some());
+        let replaced = DrmConnector { fingerprint: 8, ..monitor.clone() };
+        assert_eq!(demotions.below(&replaced), None);
+        demotions.keep(std::slice::from_ref(&replaced));
+        assert_eq!(demotions.below(&monitor), None, "replaced: forgotten");
+        // a mode picked for it lets every mode be tried again
+        assert!(demotions.failed(&monitor, k4(240), false, "ERROR_UNKNOWN"));
+        demotions.forget(&monitor.name);
+        assert_eq!(first(&demotions, auto, &[]), Some(k4(240)));
+        // the smallest mode failing leaves nothing to show
+        assert!(demotions.failed(&monitor, fhd(60), false, "ERROR_UNKNOWN"));
+        assert!(mode_ladder(&modes, auto, &[], demotions.below(&monitor).map(|b| b.0)).is_empty());
+    }
+
+    /// The mode that worked on a connector belongs to its monitor: another monitor there does
+    /// not list it, and a ladder rung the display does not list panicked the display worker.
+    #[test]
+    fn a_mode_that_worked_on_another_monitor_is_not_tried() {
+        let modes = [(1920, 1080, 60_000), (1280, 720, 60_000)];
+        let old = (3840, 2160, 144_000);
+        assert_eq!(mode_ladder(&modes, modes[0], &[old, modes[1]], None), modes.to_vec(), "only the modes the display lists");
+        let monitor = DrmConnector { card: PathBuf::from("/dev/dri/card1"), name: "card1-DP-1".into(), id: 1, fingerprint: 7, monitor: String::new() };
+        let replaced = DrmConnector { fingerprint: 8, ..monitor.clone() };
+        let mut working = Working::default();
+        working.showed(&monitor, old);
+        assert_eq!(working.get(&monitor), Some(old));
+        assert_eq!(working.get(&replaced), None, "another monitor on the connector");
+        working.keep(std::slice::from_ref(&monitor));
+        assert_eq!(working.get(&monitor), Some(old), "the same monitor keeps it across rescans");
+        working.keep(std::slice::from_ref(&replaced));
+        assert_eq!(working.get(&monitor), None, "replaced: forgotten");
     }
 }

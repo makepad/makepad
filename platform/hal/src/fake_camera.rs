@@ -6,7 +6,7 @@
 //! (the close completes before the drop returns), exactly as a real device is released.
 
 use crate::media::{
-    camera_layout, name_hash, pack_camera_frame, CameraFrameData, CameraPlane, VideoFormatInfo, VideoInputInfo, VideoPixel,
+    camera_layout, name_hash, pack_camera_frame, CameraCalibration, CameraExposure, CameraFrameData, CameraPlane, VideoFormatInfo, VideoInputInfo, VideoPixel,
 };
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -30,7 +30,7 @@ pub fn listed() -> Option<VideoInputInfo> {
             pixel: VideoPixel::YUY2,
         })
         .collect();
-    Some(VideoInputInfo { id: name_hash(&format!("fake-camera:{name}")), name, sensor_orientation: 0, formats })
+    Some(VideoInputInfo { id: name_hash(&format!("fake-camera:{name}")), name, sensor_orientation: 0, formats, calibration: CameraCalibration::default() })
 }
 
 pub struct FakeCapture {
@@ -129,6 +129,7 @@ fn test_frame(format: &VideoFormatInfo, n: u64) -> Vec<u8> {
         matrix: 1,
         display_rotation: 0,
         planes: vec![CameraPlane { row_stride: (w * 2) as u32, pixel_stride: 2, bytes: &yuy2 }],
+        exposure: CameraExposure::default(),
     })
 }
 

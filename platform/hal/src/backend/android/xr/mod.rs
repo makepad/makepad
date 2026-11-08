@@ -248,6 +248,24 @@ pub fn uplink_next(timeout_ms: u32, out: &mut [u8]) -> u64 {
 
 pub(super) fn active() -> bool { ACTIVE.load(Ordering::Acquire) }
 
+/// What `locate_head` locates with while a session runs: its runtime, its reference (local)
+/// space and its head (view) space. Held across a locate, so the session's end (which clears it
+/// before destroying the spaces) waits for one in flight.
+static HEAD_LOCATOR: Mutex<Option<(Arc<Runtime>, XrSpace, XrSpace)>> = Mutex::new(None);
+
+pub fn locate_head(time_ns: u64) -> Option<crate::types::XrHeadAt> {
+    let locator = lock(&HEAD_LOCATOR);
+    let (rt, local_space, head_space) = locator.as_ref()?;
+    let mut velocity = XrSpaceVelocity::default();
+    let mut location = XrSpaceLocation { next: &mut velocity as *mut _ as *mut _, ..Default::default() };
+    unsafe { (rt.xr.xrLocateSpace)(*head_space, *local_space, XrTime::from_nanos(time_ns as i64), &mut location) }.log_error("xrLocateSpace head");
+    if !location.location_flags.contains(XrSpaceLocationFlags::ORIENTATION_VALID | XrSpaceLocationFlags::POSITION_VALID) { return None; }
+    // XR_SPACE_VELOCITY_LINEAR_VALID_BIT 1, ANGULAR 2
+    let v = |a: XrVector3f, bit: u64| if velocity.velocity_flags & bit != 0 { [a.x, a.y, a.z] } else { [0.0; 3] };
+    let (o, p) = (location.pose.orientation, location.pose.position);
+    Some(crate::types::XrHeadAt { orientation: [o.x, o.y, o.z, o.w], position: [p.x, p.y, p.z], linear_velocity: v(velocity.linear_velocity, 1), angular_velocity: v(velocity.angular_velocity, 2) })
+}
+
 /// One eye's pixels while an XR session runs (the XR window is two of them side by side).
 pub(super) fn eye_px() -> Option<[u32; 2]> { EYE_PX.get().filter(|_| active()).map(|_| eye_at(EYE_PERCENT.load(Ordering::Acquire))) }
 
@@ -1318,6 +1336,7 @@ impl CxOpenXrSession {
                 .spawn(move || track(rt, inputs, handle, local_space, head_space, stop)).map_err(|e| format!("XR tracking thread: {e}"))?
         };
         session.tracker = Some((thread, stop));
+        *lock(&HEAD_LOCATOR) = Some((rt.clone(), local_space, head_space));
         Ok(session)
     }
 
@@ -2079,6 +2098,8 @@ impl Drop for CxOpenXrSession {
         unsafe { (xr.xrPassthroughPauseFB)(self.passthrough) }.log_error("xrPassthroughPauseFB");
         unsafe { (xr.xrDestroyPassthroughFB)(self.passthrough) }.log_error("xrDestroyPassthroughFB");
         if self.depth_swap_chain.0 != 0 { unsafe { (xr.xrDestroyEnvironmentDepthSwapchainMETA)(self.depth_swap_chain) }.log_error("xrDestroyEnvironmentDepthSwapchainMETA"); }
+        // (no head locate runs into the spaces from here: one in flight is waited for)
+        *lock(&HEAD_LOCATOR) = None;
         unsafe { (xr.xrDestroySpace)(self.head_space) }.log_error("xrDestroySpace");
         unsafe { (xr.xrDestroySpace)(self.local_space) }.log_error("xrDestroySpace");
         unsafe { (xr.xrDestroySpace)(self.panel_space) }.log_error("xrDestroySpace");

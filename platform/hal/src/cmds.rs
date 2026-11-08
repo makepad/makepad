@@ -237,7 +237,10 @@ hal_commands! {
 
     /// Answers a `DragQuery` (`to` = [`input::reply::QUERY`], `answer` = a `drag_query` value) or a
     /// `DragOver` (`to` = [`input::reply::OVER`], `answer` = a `drag_response` value).
-    DragReply = 73, drag_reply { window: obj, to: u32, answer: u32 };
+    /// `fullscreen` (a `DragQuery`'s answer): a double click there makes the window fullscreen on
+    /// its screen instead of maximising it, the window's own declaration. A host window manager
+    /// reads it; window systems ignore it.
+    DragReply = 73, drag_reply { window: obj, to: u32, answer: u32, fullscreen: bool };
 
     /// The app has work for `window`: one `FrameReady` follows at the next vsync (a backend with
     /// a display clock; the others answer at once). Asked again after each frame while the app

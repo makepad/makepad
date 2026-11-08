@@ -159,3 +159,6 @@ unsafe extern "system" fn read_snapshot(process: Handle, address: u64, output: *
     if !count.is_null() { *count = read as u32; }
     ok
 }
+
+/// A stall ended: the sample is taken with the thread suspended, so no request outlives it.
+pub(super) fn stall_ended() {}

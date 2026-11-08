@@ -364,7 +364,7 @@ unsafe fn init() {
     // a minimal app menu (About, Quit with Cmd+Q) named after the bundle; an app's own menu
     // (`MenuSet`) replaces it
     install_app_menu();
-    begin_test_instance_activity();
+    begin_unseen_activity(policy == NSApplicationActivationPolicy::NSApplicationActivationPolicyAccessory);
     // the system appearance, now and whenever it changes
     read_appearance();
     let center: ObjcId = msg_send![class!(NSDistributedNotificationCenter), defaultCenter];
@@ -379,23 +379,32 @@ unsafe fn init() {
     Shared::global().publish_ready(scale as f32);
 }
 
-/// Holds an `ACTIVITY_USER_INITIATED` token so a no-focus (agent, test) instance is not
-/// App-Napped during a long rest.
-unsafe fn begin_test_instance_activity() {
-    if focus_allowed() || app().nap.get() != nil {
+/// Holds an activity token so an app that works unseen is not App-Napped (its timers coalesced,
+/// its threads and I/O throttled): a no-focus (agent, test) instance during a long rest, which
+/// also keeps the Mac from idle sleep, and a menu-bar app (`accessory`: devhub's master, the AI
+/// Hub), whose work goes on with no window shown and which lets the Mac sleep as before.
+unsafe fn begin_unseen_activity(accessory: bool) {
+    if app().nap.get() != nil {
         return;
     }
+    let (options, reason) = if !focus_allowed() {
+        (ACTIVITY_USER_INITIATED, "makepad no-focus instance")
+    } else if accessory {
+        (ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP, "makepad menu-bar app at work")
+    } else {
+        return;
+    };
     let info: ObjcId = msg_send![class!(NSProcessInfo), processInfo];
-    let reason = str_to_nsstring("makepad no-focus instance");
-    let options = ACTIVITY_USER_INITIATED | ACTIVITY_IDLE_SYSTEM_SLEEP_DISABLED;
-    let token: ObjcId = msg_send![info, beginActivityWithOptions: options reason: reason];
+    let token: ObjcId = msg_send![info, beginActivityWithOptions: options reason: str_to_nsstring(reason)];
     let () = msg_send![token, retain];
     app().nap.set(token);
 }
 
-/// Foundation `NSActivityIdleSystemSleepDisabled` (`1ULL << 20`) and `NSActivityUserInitiated`.
+/// Foundation `NSActivityIdleSystemSleepDisabled` (`1ULL << 20`), and
+/// `NSActivityUserInitiatedAllowingIdleSystemSleep` with and without it (`NSActivityUserInitiated`).
 const ACTIVITY_IDLE_SYSTEM_SLEEP_DISABLED: u64 = 1 << 20;
-const ACTIVITY_USER_INITIATED: u64 = 0x00FFFFFF | ACTIVITY_IDLE_SYSTEM_SLEEP_DISABLED;
+const ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP: u64 = 0x00FFFFFF;
+const ACTIVITY_USER_INITIATED: u64 = ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP | ACTIVITY_IDLE_SYSTEM_SLEEP_DISABLED;
 
 extern "C" {
     /// libobjc: the hook called with an exception object before it is thrown. The only place that
@@ -1251,7 +1260,7 @@ fn command(sid: u32, cmd: OsCmd) {
         // (no headset here)
         OsCmd::XrFrameEyes { .. } | OsCmd::XrPoseLead { .. } | OsCmd::XrRefreshRate { .. } | OsCmd::XrHaptic { .. } => {}
         OsCmd::FileDialog { req, kind, title, location, filename, filters } => file_dialog(sid, req, kind, &title, &location, &filename, &filters),
-        OsCmd::DragReply { id, to, answer } => {
+        OsCmd::DragReply { id, to, answer, .. } => {
             if let Some(win) = window_of(id) {
                 match to {
                     input::reply::QUERY => win.caption_answer(answer),

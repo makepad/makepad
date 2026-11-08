@@ -628,7 +628,9 @@ impl Cx {
             }
             HalEvent::DragQuery { window, x, y } => {
                 if let Some(answer) = self.hal_drag_query(window, x, y) {
-                    self.hal.frames.w.drag_reply(window, input::reply::QUERY, answer);
+                    // what a double click there does: the window's own declaration (a host WM reads it)
+                    let fullscreen = self.windows[window_id(window)].double_click_fullscreen;
+                    self.hal.frames.w.drag_reply(window, input::reply::QUERY, answer, fullscreen);
                 }
             }
             HalEvent::AppMessage { window, message } => {
@@ -665,7 +667,7 @@ impl Cx {
                     DragResponse::Link => input::drag_response::LINK,
                     DragResponse::Move => input::drag_response::MOVE,
                 };
-                self.hal.frames.w.drag_reply(window, input::reply::OVER, answer);
+                self.hal.frames.w.drag_reply(window, input::reply::OVER, answer, false);
             }
             HalEvent::DragDrop { window, x, y, dropped, count, items } => {
                 let window_id = window_id(window);

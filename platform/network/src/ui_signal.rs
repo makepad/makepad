@@ -56,8 +56,6 @@ pub fn wake_ui_loop() {
 #[derive(Clone, Debug, Default)]
 pub struct SignalToUI(Arc<AtomicBool>);
 
-static UI_SIGNAL: AtomicBool = AtomicBool::new(false);
-
 /// `MAKEPAD_FRAME_TRACE=1` or the `frame_sources` trace topic: who raised the app
 /// signal, by source line, for the platform's frame-source report (`take_signal_sources`).
 fn signal_trace_on() -> bool {
@@ -82,11 +80,58 @@ fn note_signal_source() {
 pub fn take_signal_sources() -> Vec<(&'static std::panic::Location<'static>, u32)> {
     SIGNAL_SOURCES.lock().ok().and_then(|mut sources| sources.take()).map(|m| m.into_iter().collect()).unwrap_or_default()
 }
-static INTERNAL_SIGNAL: AtomicBool = AtomicBool::new(false);
-static ACTION_SIGNAL: AtomicBool = AtomicBool::new(false);
 
-#[cfg(not(target_arch = "wasm32"))]
-static SIGNAL_RAISED_NS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+/// The UI thread's signals (`UI`, `INTERNAL`, `ACTION`) and when each was raised. The process
+/// has one (`SIGNALS`), which every sender to the UI raises.
+struct UiSignals {
+    raised: [AtomicBool; 3],
+    #[cfg(not(target_arch = "wasm32"))]
+    raised_ns: [std::sync::atomic::AtomicU64; 3],
+}
+
+const UI: usize = 0;
+const INTERNAL: usize = 1;
+const ACTION: usize = 2;
+
+static SIGNALS: UiSignals = UiSignals::new();
+
+impl UiSignals {
+    const fn new() -> Self {
+        Self {
+            raised: [const { AtomicBool::new(false) }; 3],
+            #[cfg(not(target_arch = "wasm32"))]
+            raised_ns: [const { std::sync::atomic::AtomicU64::new(0) }; 3],
+        }
+    }
+
+    /// Raises one; true when it was down (the event loop needs a wake).
+    fn raise(&self, which: usize) -> bool {
+        if self.raised[which].swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.raised_ns[which].store(signal_clock_ns(), Ordering::Relaxed);
+        true
+    }
+
+    fn check_and_clear(&self, which: usize) -> bool {
+        self.raised[which].swap(false, Ordering::AcqRel)
+    }
+
+    fn any_pending(&self) -> bool {
+        self.raised.iter().any(|raised| raised.load(Ordering::Acquire))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ages_ms(&self) -> [Option<u64>; 3] {
+        let now = signal_clock_ns();
+        std::array::from_fn(|i| {
+            self.raised[i]
+                .load(Ordering::Acquire)
+                .then(|| now.saturating_sub(self.raised_ns[i].load(Ordering::Relaxed)) / 1_000_000)
+        })
+    }
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -103,9 +148,7 @@ impl SignalToUI {
     #[track_caller]
     pub fn set_ui_signal() {
         note_signal_source();
-        if !UI_SIGNAL.swap(true, Ordering::AcqRel) {
-            #[cfg(not(target_arch = "wasm32"))]
-            SIGNAL_RAISED_NS[0].store(signal_clock_ns(), Ordering::Relaxed);
+        if SIGNALS.raise(UI) {
             wake_ui_loop();
         }
     }
@@ -114,53 +157,42 @@ impl SignalToUI {
     /// device changes, the script pump, a termination request. The next beat
     /// services those without waking every widget with an `Event::Signal`.
     pub fn set_internal_signal() {
-        if !INTERNAL_SIGNAL.swap(true, Ordering::AcqRel) {
-            #[cfg(not(target_arch = "wasm32"))]
-            SIGNAL_RAISED_NS[1].store(signal_clock_ns(), Ordering::Relaxed);
+        if SIGNALS.raise(INTERNAL) {
             wake_ui_loop();
         }
     }
 
     pub fn set_action_signal() {
-        if !ACTION_SIGNAL.swap(true, Ordering::AcqRel) {
-            #[cfg(not(target_arch = "wasm32"))]
-            SIGNAL_RAISED_NS[2].store(signal_clock_ns(), Ordering::Relaxed);
+        if SIGNALS.raise(ACTION) {
             wake_ui_loop();
         }
     }
 
     /// Whether any of the UI thread's signals is raised (without clearing).
     pub fn any_pending() -> bool {
-        UI_SIGNAL.load(Ordering::Acquire)
-            || INTERNAL_SIGNAL.load(Ordering::Acquire)
-            || ACTION_SIGNAL.load(Ordering::Acquire)
+        SIGNALS.any_pending()
     }
 
     /// Lets an inspector see a wake the event loop has slept through.
     pub fn pending_signal_ages_ms() -> [Option<u64>; 3] {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let now = signal_clock_ns();
-            std::array::from_fn(|i| {
-                [&UI_SIGNAL, &INTERNAL_SIGNAL, &ACTION_SIGNAL][i]
-                    .load(Ordering::Acquire)
-                    .then(|| now.saturating_sub(SIGNAL_RAISED_NS[i].load(Ordering::Relaxed)) / 1_000_000)
-            })
+            SIGNALS.ages_ms()
         }
         #[cfg(target_arch = "wasm32")]
         { [None; 3] }
     }
 
     pub fn check_and_clear_ui_signal() -> bool {
-        UI_SIGNAL.swap(false, Ordering::AcqRel)
+        SIGNALS.check_and_clear(UI)
     }
 
     pub fn check_and_clear_internal_signal() -> bool {
-        INTERNAL_SIGNAL.swap(false, Ordering::AcqRel)
+        SIGNALS.check_and_clear(INTERNAL)
     }
 
     pub fn check_and_clear_action_signal() -> bool {
-        ACTION_SIGNAL.swap(false, Ordering::AcqRel)
+        SIGNALS.check_and_clear(ACTION)
     }
 
     pub fn new() -> Self {
@@ -421,15 +453,17 @@ mod tests {
 
     #[test]
     fn internal_and_ui_signals_are_independent() {
-        SignalToUI::check_and_clear_ui_signal();
-        SignalToUI::check_and_clear_internal_signal();
-        SignalToUI::set_internal_signal();
-        assert!(!SignalToUI::check_and_clear_ui_signal());
-        assert!(SignalToUI::check_and_clear_internal_signal());
-        assert!(!SignalToUI::check_and_clear_internal_signal());
-        SignalToUI::set_ui_signal();
-        assert!(!SignalToUI::check_and_clear_internal_signal());
-        assert!(SignalToUI::check_and_clear_ui_signal());
+        // Signals of its own: the process's are raised by every test that sends to the UI.
+        let signals = UiSignals::new();
+        assert!(signals.raise(INTERNAL));
+        assert!(!signals.check_and_clear(UI));
+        assert!(signals.check_and_clear(INTERNAL));
+        assert!(!signals.check_and_clear(INTERNAL));
+        assert!(signals.raise(UI));
+        assert!(!signals.raise(UI), "a raised signal wakes the loop once");
+        assert!(!signals.check_and_clear(INTERNAL));
+        assert!(signals.check_and_clear(UI));
+        assert!(!signals.any_pending());
     }
 
     #[test]

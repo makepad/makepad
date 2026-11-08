@@ -100,3 +100,6 @@ fn strip_pointer(pointer: usize) -> usize {
     #[cfg(not(target_arch = "aarch64"))]
     { pointer }
 }
+
+/// A stall ended: the sample is taken with the thread suspended, so no request outlives it.
+pub(super) fn stall_ended() {}

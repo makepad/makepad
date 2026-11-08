@@ -19,6 +19,20 @@ use makepad_hal::{XR_EYE_FAR_M as EYE_FAR, XR_EYE_NEAR_M as EYE_NEAR};
 
 /// The app uses the room field (`Cx::xr_set_room_field`): the depth readback is integrated.
 pub(crate) static ROOM_FIELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The app keeps the newest environment depth image's texels (`Cx::xr_set_depth_tap`), and
+/// that image.
+pub(crate) static DEPTH_TAP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) static NEWEST_DEPTH: std::sync::Mutex<Option<XrDepthTexels>> = std::sync::Mutex::new(None);
+
+/// An environment depth image read back (`Cx::xr_newest_depth_texels`): the display time of
+/// the frame that acquired it (HAL clock, ns), its header (size, layers, range, each eye's depth
+/// camera) and its texels, the layers one after another (eye 0's first).
+#[derive(Clone, Debug)]
+pub struct XrDepthTexels {
+    pub display_ns: u64,
+    pub header: XrDepth,
+    pub texels: std::sync::Arc<[u16]>,
+}
 
 pub(crate) struct HalXr {
     /// the Cx window standing for the HAL's XR window
@@ -316,9 +330,13 @@ impl Cx {
             xr.env_depth_ns = display_ns;
             return;
         };
+        let all: Vec<u16> = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        if DEPTH_TAP.load(std::sync::atomic::Ordering::Acquire) {
+            let kept = XrDepthTexels { display_ns, header, texels: all.as_slice().into() };
+            *NEWEST_DEPTH.lock().unwrap_or_else(|e| e.into_inner()) = Some(kept);
+        }
         // (a readback still in flight when the app stopped wanting the field: dropped)
         if !ROOM_FIELD.load(std::sync::atomic::Ordering::Acquire) { return; }
-        let all: Vec<u16> = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
         let Some(xr) = self.hal.xr.as_mut() else { return };
         if xr.depth_writer.is_none() {
             match makepad_tsdf::DepthWriter::new() {

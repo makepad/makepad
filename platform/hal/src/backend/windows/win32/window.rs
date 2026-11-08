@@ -644,7 +644,7 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
                 }
             }
         }
-        OsCmd::DragReply { id, to, answer } => {
+        OsCmd::DragReply { id, to, answer, .. } => {
             if let Some(w) = target(id) {
                 match to {
                     input::reply::QUERY => query_answer(&w, answer),

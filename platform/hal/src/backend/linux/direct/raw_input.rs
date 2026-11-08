@@ -649,6 +649,7 @@ impl RawInput {
         paths.sort();
         self.denied.retain(|path| paths.contains(path));
         self.pads.retain(|path| paths.contains(path));
+        let opened = self.devices.len();
         for path in paths {
             if self.pads.contains(&path) || self.devices.iter().any(|device| device.path == path) {
                 continue;
@@ -696,10 +697,23 @@ impl RawInput {
                 }
             }
         }
+        if self.devices.len() != opened {
+            self.publish_open();
+        }
+    }
+
+    /// Says which devices are open and which have reported (`user_input::open_device`, the WM's
+    /// devices panel).
+    fn publish_open(&self) {
+        crate::user_input::set_open(self.devices.iter().filter_map(|device| {
+            let event = device.path.file_name()?.to_str()?.strip_prefix("event")?.parse().ok()?;
+            Some(crate::user_input::OpenDevice { event, reported: device.reported_input })
+        }).collect());
     }
 
     pub fn suspend(&mut self) {
         self.devices.clear();
+        self.publish_open();
         self.modifier_keys.clear();
         self.modifiers = Modifiers::default();
         self.next_scan = 0.0;
@@ -724,6 +738,7 @@ impl RawInput {
         let mut pad_out = Vec::new();
         let natural = super::preferences::natural_scroll(true);
         let tap = super::preferences::tap_to_click();
+        let (open, reported) = (self.devices.len(), self.devices.iter().filter(|d| d.reported_input).count());
         // Poll nonblocking descriptors directly. Packet state belongs to each
         // device, so a partial report never spins the UI or mixes two devices.
         self.devices.retain_mut(|device| {
@@ -789,6 +804,9 @@ impl RawInput {
             }
             true
         });
+        if self.devices.len() != open || self.devices.iter().filter(|d| d.reported_input).count() != reported {
+            self.publish_open();
+        }
         // Composite keyboards can report modifiers and keys on different
         // event nodes. Preserve kernel order, not device enumeration order.
         packets.sort_by_key(|(_, time, _)| (time.tv_sec, time.tv_usec));

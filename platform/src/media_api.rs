@@ -190,6 +190,12 @@ pub trait CxMediaApi {
 
     /// Close the camera open in `index`.
     fn video_input_close(&mut self, _index: usize) {}
+
+    /// What the camera `input` tells of its optics (None: not listed, or this platform's cameras
+    /// tell nothing).
+    fn video_input_calibration(&self, _input: VideoInputId) -> Option<CameraCalibration> {
+        None
+    }
 }
 
 /// The seam where an app's output closure is wrapped: the fence, then the

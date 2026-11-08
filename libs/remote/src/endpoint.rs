@@ -32,6 +32,8 @@ struct Inner {
     end_fields: cmd::EndFields,
     /// The discovery file this endpoint wrote: its caps follow later registrations.
     discovery: Mutex<Option<std::path::PathBuf>>,
+    /// When this endpoint began (ms since the epoch): its HELLO_OK's `serving_since_ms`.
+    since_ms: u64,
 }
 
 /// Called with every connection the endpoint accepts, once its handshake is done.
@@ -47,7 +49,7 @@ impl Endpoint {
 
     /// An endpoint whose replay ring holds `ring_bytes` of stream chunks.
     pub fn with_ring(app: &str, ring_bytes: usize) -> Endpoint {
-        Endpoint(Arc::new(Inner { app: app.to_string(), services: RwLock::new(Vec::new()), hooks: Mutex::new(Hooks::default()), ring: Arc::new(Ring::new(ring_bytes)), accept: Mutex::new(None), end_fields: Default::default(), discovery: Mutex::new(None) }))
+        Endpoint(Arc::new(Inner { app: app.to_string(), services: RwLock::new(Vec::new()), hooks: Mutex::new(Hooks::default()), ring: Arc::new(Ring::new(ring_bytes)), accept: Mutex::new(None), end_fields: Default::default(), discovery: Mutex::new(None), since_ms: cmd::wall_ms() }))
     }
 
     /// Listens on this process's Unix socket and writes the discovery file (register the services
@@ -158,7 +160,7 @@ impl Endpoint {
     /// command's log names as who asked ([`crate::cmd::asked_by`]).
     pub fn serve_peer(&self, mut reader: FrameReader, mut writer: Box<dyn Write + Send>, shutdown: Box<dyn Fn() + Send + Sync>, token: &str, pid: u32) -> Result<Conn, HandshakeError> {
         reader.deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
-        let own = Hello { name: self.0.app.clone(), caps: self.caps(), token: token.to_string(), ..Hello::default() };
+        let own = Hello { name: self.0.app.clone(), caps: self.caps(), token: token.to_string(), serving_pid: std::process::id(), serving_since_ms: self.0.since_ms, ..Hello::default() };
         let peer = match hello::server_handshake(&mut reader, &mut *writer, &own) {
             Ok(p) => Hello { pid, ..p },
             Err(e) => {

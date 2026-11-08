@@ -7,7 +7,7 @@ use crate::frame::FrameReader;
 use crate::hosts::{Host, Hosts, Via};
 use crate::hub::Hub;
 use crate::relay;
-use crate::tests::{pair, shared};
+use crate::tests::{pair, pair_served, shared};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
@@ -477,20 +477,15 @@ fn host_env_round_trips_in_hosts_toml() {
 fn closed_clients_are_let_go() {
     let hub = Hub::new(&hosts());
     let ep = hub.client_endpoint();
-    for _ in 0..5 {
-        let c = pair(&ep);
+    for n in 0..5 {
+        // the hub kept the served side when it was accepted, and lets go of the closed one
+        // before it
+        let (c, served) = pair_served(&ep);
+        assert_eq!(hub.kept_clients(), (1, 1), "client {n}");
         c.close("done");
-        c.wait_closed();
+        served.wait_closed();
+        assert_eq!(hub.kept_clients(), (1, 0), "client {n} closed");
     }
-    let t = std::time::Instant::now();
-    // the server side sees each close a moment later
-    while t.elapsed() < WAIT && hub.kept_clients().1 > 0 {
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    let _live = pair(&ep);
-    let t = std::time::Instant::now();
-    while t.elapsed() < WAIT && hub.kept_clients().1 == 0 {
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    let (_live, _served) = pair_served(&ep);
     assert_eq!(hub.kept_clients(), (1, 1));
 }

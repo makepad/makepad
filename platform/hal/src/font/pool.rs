@@ -18,7 +18,7 @@ use makepad_font_core::{
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::Instant;
 
@@ -155,13 +155,19 @@ enum ClaimResult {
     Mine,
 }
 
+/// What a worker waits on, under one lock: the pool's end is set under it, so a worker that has
+/// just found no job and no end cannot miss the end's wakeup before it waits.
+struct Queue {
+    jobs: VecDeque<Job>,
+    shutdown: bool,
+}
+
 struct Shared {
-    queue: Mutex<VecDeque<Job>>,
+    queue: Mutex<Queue>,
     cv: Condvar,
     done: Mutex<Vec<Done>>,
     done_count: AtomicUsize,
     in_flight: AtomicUsize,
-    shutdown: AtomicBool,
     known: Arc<RwLock<Known>>,
     settings: Settings,
     notify: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -180,12 +186,11 @@ pub struct Pool {
 impl Pool {
     pub fn new(settings: Settings, known: Arc<RwLock<Known>>, notify: Option<Arc<dyn Fn() + Send + Sync>>) -> Pool {
         let shared = Arc::new(Shared {
-            queue: Mutex::new(VecDeque::new()),
+            queue: Mutex::new(Queue { jobs: VecDeque::new(), shutdown: false }),
             cv: Condvar::new(),
             done: Mutex::new(Vec::new()),
             done_count: AtomicUsize::new(0),
             in_flight: AtomicUsize::new(0),
-            shutdown: AtomicBool::new(false),
             known,
             settings,
             notify: Mutex::new(notify),
@@ -203,7 +208,7 @@ impl Pool {
 
     pub fn submit(&self, job: Job) {
         self.shared.in_flight.fetch_add(1, Ordering::AcqRel);
-        lock(&self.shared.queue).push_back(job);
+        lock(&self.shared.queue).jobs.push_back(job);
         self.shared.cv.notify_one();
     }
 
@@ -233,7 +238,7 @@ impl Pool {
 
 impl Drop for Pool {
     fn drop(&mut self) {
-        self.shared.shutdown.store(true, Ordering::Release);
+        lock(&self.shared.queue).shutdown = true;
         self.shared.cv.notify_all();
         for t in self.threads.drain(..) {
             let _ = t.join();
@@ -273,10 +278,10 @@ fn worker(shared: Arc<Shared>) {
         let job = {
             let mut q = lock(&shared.queue);
             loop {
-                if shared.shutdown.load(Ordering::Acquire) {
+                if q.shutdown {
                     return;
                 }
-                if let Some(job) = q.pop_front() {
+                if let Some(job) = q.jobs.pop_front() {
                     break job;
                 }
                 q = shared.cv.wait(q).unwrap_or_else(|e| e.into_inner());

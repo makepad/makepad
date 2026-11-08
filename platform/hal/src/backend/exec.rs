@@ -79,7 +79,8 @@ pub enum OsCmd {
     ShareText { text: String },
     ClipboardActions { id: Id, show: bool, area: [f32; 4], selection: bool },
     AppIcon { w: u32, h: u32, rgba: Vec<u8> },
-    DragReply { id: Id, to: u32, answer: u32 },
+    /// `HalCmd::DragReply`.
+    DragReply { id: Id, to: u32, answer: u32, fullscreen: bool },
     FrameRequest { id: Id },
     MobileUi { op: u32, value: u32 },
     NativeAppearance { value: u32 },
@@ -1837,7 +1838,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             s.marks.push((now, t));
         }
         HalCmd::Budget { what, value } => s.budgets.push((what, value)),
-        HalCmd::DragReply { window, to, answer } => os_window(gpu, s, window, OsCmd::DragReply { id: window, to, answer }),
+        HalCmd::DragReply { window, to, answer, fullscreen } => os_window(gpu, s, window, OsCmd::DragReply { id: window, to, answer, fullscreen }),
 
         // ---- media
         HalCmd::VideoPrepare { .. } | HalCmd::VideoControl { .. } | HalCmd::AudioUse { .. } | HalCmd::AudioEntry { .. } | HalCmd::Midi { .. } | HalCmd::GameOut { .. } | HalCmd::Location { .. } | HalCmd::Permission { .. } | HalCmd::NativeLayerCreate { .. } | HalCmd::NativeLayerOp { .. } | HalCmd::NativeLayerDestroy { .. } | HalCmd::VideoInput { .. } => {

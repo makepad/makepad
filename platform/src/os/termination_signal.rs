@@ -4,9 +4,39 @@ use {
 };
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
-static REQUESTED: AtomicBool = AtomicBool::new(false);
-/// A termination was asked for at some point (never cleared).
-static SEEN: AtomicBool = AtomicBool::new(false);
+
+/// Termination requests: one asked for and not taken yet, and whether one ever was (never
+/// cleared). The process has one (`TERMINATION`), which the signal handler raises and every
+/// event loop takes.
+struct Requests {
+    requested: AtomicBool,
+    seen: AtomicBool,
+}
+
+static TERMINATION: Requests = Requests::new();
+
+impl Requests {
+    const fn new() -> Self {
+        Self { requested: AtomicBool::new(false), seen: AtomicBool::new(false) }
+    }
+
+    fn request(&self) {
+        self.seen.store(true, Ordering::Release);
+        self.requested.store(true, Ordering::Release);
+    }
+
+    fn seen(&self) -> bool {
+        self.seen.load(Ordering::Acquire)
+    }
+
+    fn take(&self) -> bool {
+        self.requested.swap(false, Ordering::AcqRel)
+    }
+
+    fn pending(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+}
 
 pub(crate) fn install() {
     if INSTALLED.swap(true, Ordering::AcqRel) {
@@ -18,8 +48,7 @@ pub(crate) fn install() {
 }
 
 fn request() {
-    SEEN.store(true, Ordering::Release);
-    REQUESTED.store(true, Ordering::Release);
+    TERMINATION.request();
     relax_quit_requested();
     SignalToUI::set_internal_signal();
 }
@@ -42,16 +71,16 @@ fn relax_quit_requested() {}
 
 /// Whether SIGTERM/SIGINT/SIGHUP (or the console's close) ever arrived.
 pub(crate) fn seen() -> bool {
-    SEEN.load(Ordering::Acquire)
+    TERMINATION.seen()
 }
 
 pub(crate) fn take_requested() -> bool {
-    REQUESTED.swap(false, Ordering::AcqRel)
+    TERMINATION.take()
 }
 
 /// A termination asked for and not yet taken (`take_requested`).
 pub(crate) fn requested() -> bool {
-    REQUESTED.load(Ordering::Acquire)
+    TERMINATION.pending()
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -237,11 +266,14 @@ mod native {
 mod tests {
     #[test]
     fn a_request_is_seen_for_good_and_taken_once() {
-        assert!(!super::seen());
-        super::request();
-        assert!(super::seen());
-        assert!(super::take_requested());
-        assert!(!super::take_requested());
-        assert!(super::seen(), "taking the request does not forget it");
+        // Requests of its own: the process's would quit the event loop of every other test
+        // running one (it takes the request as a signal's).
+        let requests = super::Requests::new();
+        assert!(!requests.seen());
+        requests.request();
+        assert!(requests.seen());
+        assert!(requests.take());
+        assert!(!requests.take());
+        assert!(requests.seen(), "taking the request does not forget it");
     }
 }

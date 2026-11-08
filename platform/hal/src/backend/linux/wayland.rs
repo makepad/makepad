@@ -832,7 +832,7 @@ impl State {
                     self.start_drag(k, crate::drag_promise::to_files(items));
                 }
             }
-            OsCmd::DragReply { id, to, answer } => {
+            OsCmd::DragReply { id, to, answer, .. } => {
                 if let Some(k) = self.resolve((sid, id)) {
                     if to == raw::reply::QUERY {
                         self.caption_answer(k, answer);

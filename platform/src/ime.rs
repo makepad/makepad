@@ -1,6 +1,6 @@
 use crate::makepad_script::*;
 use makepad_micro_serde::*;
-use makepad_hal::window_controls::HostedWindow;
+use crate::window_controls::HostedWindow;
 use makepad_studio_protocol::HostedWindowOp;
 #[cfg(test)]
 use makepad_studio_protocol::{drag_answer, drag_double, window_op, HostedDragAnswer, HostedDragQuery};

@@ -80,7 +80,11 @@ impl GameInput {
                                 }
                                 Ok(None) => { probed.insert(path); }
                                 Err(e) => {
-                                    eprintln!("[hal-gamepad] open {}: {e}", path.display());
+                                    // A new node's access comes from udev after the node itself
+                                    // (a hotplug): that change is a change of the node, which
+                                    // probes it again.
+                                    let again = if dir.is_some() { "; probed again when its access changes" } else { "" };
+                                    eprintln!("[hal-gamepad] open {}: {e}{again}", path.display());
                                     probed.insert(path);
                                 }
                             }

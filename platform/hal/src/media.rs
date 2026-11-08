@@ -303,6 +303,91 @@ pub struct VideoInputInfo {
     /// Clockwise quarter-turn rotation needed to make the delivered pixels upright.
     pub sensor_orientation: u16,
     pub formats: Vec<VideoFormatInfo>,
+    pub calibration: CameraCalibration,
+}
+
+/// What a camera tells of its optics (Android Camera2's characteristics); a platform that tells
+/// nothing leaves it empty.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CameraCalibration {
+    /// fx, fy, cx, cy, skew in pixels of `pre_correction` (LENS_INTRINSIC_CALIBRATION).
+    pub intrinsics: Option<[f32; 5]>,
+    /// Radial k1, k2, k3 and tangential p1, p2 (LENS_DISTORTION).
+    pub distortion: Option<[f32; 5]>,
+    /// The lens's rotation (x, y, z, w) and position (m) relative to `lens_reference`
+    /// (LENS_POSE_*: 0 the primary camera, 1 the gyroscope, 2 undefined).
+    pub lens_rotation: Option<[f32; 4]>,
+    pub lens_translation: Option<[f32; 3]>,
+    pub lens_reference: Option<u8>,
+    /// The sensor's arrays (left, top, width, height): the pre-correction active array the
+    /// intrinsics are in, and the active array the frames show.
+    pub pre_correction: Option<[i32; 4]>,
+    pub active: Option<[i32; 4]>,
+    /// The device's place for the camera (a headset's passthrough cameras: 0 left, 1 right).
+    pub position: Option<u8>,
+    /// A headset's passthrough camera (what the wearer's view is made from).
+    pub passthrough: bool,
+}
+
+/// What a frame's capture tells of its exposure (0: the platform does not say).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CameraExposure {
+    /// The first row's exposure start on the HAL clock (`clock::raw_ns`).
+    pub start_ns: u64,
+    pub exposure_ns: u32,
+    /// The first row's start to the last row's (a rolling shutter).
+    pub rolling_skew_ns: u32,
+    pub frame_duration_ns: u32,
+    /// ISO.
+    pub sensitivity: u32,
+}
+
+fn pack_f32s<const N: usize>(w: &mut PackW, v: Option<[f32; N]>) {
+    w.u8(v.is_some() as u8);
+    for x in v.unwrap_or([0.0; N]) {
+        w.u32(x.to_bits());
+    }
+}
+
+fn read_f32s<const N: usize>(r: &mut PackR) -> Option<[f32; N]> {
+    let has = r.u8() != 0;
+    let mut v = [0.0; N];
+    for x in &mut v {
+        *x = f32::from_bits(r.u32());
+    }
+    has.then_some(v)
+}
+
+fn pack_rect(w: &mut PackW, v: Option<[i32; 4]>) {
+    w.u8(v.is_some() as u8);
+    for x in v.unwrap_or_default() {
+        w.u32(x as u32);
+    }
+}
+
+fn read_rect(r: &mut PackR) -> Option<[i32; 4]> {
+    let has = r.u8() != 0;
+    let v = [r.u32() as i32, r.u32() as i32, r.u32() as i32, r.u32() as i32];
+    has.then_some(v)
+}
+
+fn pack_calibration(w: &mut PackW, c: &CameraCalibration) {
+    pack_f32s(w, c.intrinsics);
+    pack_f32s(w, c.distortion);
+    pack_f32s(w, c.lens_rotation);
+    pack_f32s(w, c.lens_translation);
+    w.u8(c.lens_reference.map_or(0xff, |v| v));
+    pack_rect(w, c.pre_correction);
+    pack_rect(w, c.active);
+    w.u8(c.position.map_or(0xff, |v| v)).u8(c.passthrough as u8);
+}
+
+fn read_calibration(r: &mut PackR) -> CameraCalibration {
+    let (intrinsics, distortion, lens_rotation, lens_translation) = (read_f32s(r), read_f32s(r), read_f32s(r), read_f32s(r));
+    let lens_reference = Some(r.u8()).filter(|v| *v != 0xff);
+    let (pre_correction, active) = (read_rect(r), read_rect(r));
+    let position = Some(r.u8()).filter(|v| *v != 0xff);
+    CameraCalibration { intrinsics, distortion, lens_rotation, lens_translation, lens_reference, pre_correction, active, position, passthrough: r.u8() != 0 }
 }
 
 pub fn pack_video_inputs(inputs: &[VideoInputInfo]) -> Vec<u8> {
@@ -313,6 +398,7 @@ pub fn pack_video_inputs(inputs: &[VideoInputInfo]) -> Vec<u8> {
             let (code, fourcc) = f.pixel.to_code();
             w.u64(f.id).u32(f.width).u32(f.height).u8(f.frame_rate.is_some() as u8).f64(f.frame_rate.unwrap_or(0.0)).u8(code).u32(fourcc);
         }
+        pack_calibration(&mut w, &i.calibration);
     }
     w.finish()
 }
@@ -330,10 +416,11 @@ pub fn read_video_inputs(b: &[u8]) -> Vec<VideoInputInfo> {
             let (fid, width, height, has_rate, rate, code, fourcc) = (r.u64(), r.u32(), r.u32(), r.u8() != 0, r.f64(), r.u8(), r.u32());
             formats.push(VideoFormatInfo { id: fid, width, height, frame_rate: has_rate.then_some(rate), pixel: VideoPixel::from_code(code, fourcc) });
         }
+        let calibration = read_calibration(&mut r);
         if !r.ok {
             break;
         }
-        out.push(VideoInputInfo { id, name, sensor_orientation, formats });
+        out.push(VideoInputInfo { id, name, sensor_orientation, formats, calibration });
     }
     out
 }
@@ -370,6 +457,7 @@ pub struct CameraFrameData<'a> {
     /// 0 where the platform does not turn the display under the app.
     pub display_rotation: u8,
     pub planes: Vec<CameraPlane<'a>>,
+    pub exposure: CameraExposure,
 }
 
 pub fn pack_camera_frame(f: &CameraFrameData) -> Vec<u8> {
@@ -378,6 +466,8 @@ pub fn pack_camera_frame(f: &CameraFrameData) -> Vec<u8> {
     for p in &f.planes {
         w.u32(p.row_stride).u32(p.pixel_stride).bytes(p.bytes);
     }
+    let e = &f.exposure;
+    w.u64(e.start_ns).u32(e.exposure_ns).u32(e.rolling_skew_ns).u32(e.frame_duration_ns).u32(e.sensitivity);
     w.finish()
 }
 
@@ -385,10 +475,14 @@ pub fn read_camera_frame(b: &[u8]) -> Option<CameraFrameData<'_>> {
     let mut r = PackR::new(b);
     let (timestamp_ns, width, height, layout, matrix, display_rotation, n) = (r.u64(), r.u32(), r.u32(), r.u8(), r.u8(), r.u8(), r.u8());
     let mut planes = Vec::new();
-    for _ in 0..n.min(3) {
+    if n > 3 {
+        return None;
+    }
+    for _ in 0..n {
         planes.push(CameraPlane { row_stride: r.u32(), pixel_stride: r.u32(), bytes: r.bytes() });
     }
-    r.ok.then_some(CameraFrameData { timestamp_ns, width, height, layout, matrix, display_rotation, planes })
+    let exposure = CameraExposure { start_ns: r.u64(), exposure_ns: r.u32(), rolling_skew_ns: r.u32(), frame_duration_ns: r.u32(), sensitivity: r.u32() };
+    r.ok.then_some(CameraFrameData { timestamp_ns, width, height, layout, matrix, display_rotation, planes, exposure })
 }
 
 /// What VideoToolbox can do with H.264 on this machine (`video_h264_probe`).
@@ -864,4 +958,36 @@ pub fn read_ranges(b: &[u8]) -> Vec<(f64, f64)> {
         out.push((a, e));
     }
     out
+}
+
+#[cfg(test)]
+mod camera_wire_tests {
+    use super::*;
+
+    #[test]
+    fn camera_calibration_and_exposure_round_trip() {
+        let calibration = CameraCalibration {
+            intrinsics: Some([860.0, 861.5, 640.0, 640.5, 0.0]),
+            distortion: None,
+            lens_rotation: Some([0.0, 0.0, 0.0, 1.0]),
+            lens_translation: Some([-0.032, -0.01, -0.005]),
+            lens_reference: Some(1),
+            pre_correction: Some([0, 0, 1280, 1280]),
+            active: None,
+            position: Some(1),
+            passthrough: true,
+        };
+        let format = VideoFormatInfo { id: 3, width: 1280, height: 1280, frame_rate: Some(30.0), pixel: VideoPixel::YUV420 };
+        let inputs = vec![
+            VideoInputInfo { id: 1, name: "a".into(), sensor_orientation: 90, formats: vec![format.clone()], calibration },
+            VideoInputInfo { id: 2, name: "b".into(), sensor_orientation: 0, formats: vec![format], calibration: CameraCalibration::default() },
+        ];
+        assert_eq!(read_video_inputs(&pack_video_inputs(&inputs)), inputs);
+        let y = [7u8; 16];
+        let exposure = CameraExposure { start_ns: 123_456_789, exposure_ns: 4_000_000, rolling_skew_ns: 9_000_000, frame_duration_ns: 33_333_333, sensitivity: 800 };
+        let frame = CameraFrameData { timestamp_ns: 5, width: 4, height: 4, layout: camera_layout::I420, matrix: 1, display_rotation: 0, planes: vec![CameraPlane { row_stride: 4, pixel_stride: 1, bytes: &y }], exposure };
+        let packed = pack_camera_frame(&frame);
+        let back = read_camera_frame(&packed).unwrap();
+        assert_eq!((back.timestamp_ns, back.exposure, back.planes[0].bytes), (5, exposure, &y[..]));
+    }
 }

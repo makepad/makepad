@@ -4,6 +4,7 @@ mod direct_event;
 mod drm_sys;
 mod dma_buf;
 mod gpu_bridge;
+mod heads;
 mod hotplug;
 mod kms;
 mod preferences;

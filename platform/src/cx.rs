@@ -1331,6 +1331,21 @@ mod memory_budget_tests {
 }
 
 impl Cx {
+    /// How many live patches (`std::relax::patched`) this context has taken in: it moves when
+    /// one lands, before the redraw that shows it. An app that keeps what its code made beyond
+    /// the designs the platform runs again (a cache of results) makes it again when this moves.
+    /// 0 outside Relax.
+    pub fn live_patches(&self) -> u64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.live_patches
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            0
+        }
+    }
+
     /// True while the platform is still compiling draw shaders it was handed
     /// and is therefore dropping (WebGL) their draw calls. Native backends
     /// build pipelines inside the paint that first uses them and never

@@ -1,13 +1,13 @@
 //! Whole-target Vulkan display WSI. The driver owns KMS page flips; present-wait or
 //! acquire-fence completion supplies frame credit. Idle outputs do not submit frames.
 use crate::wide_desktop;
-use super::{dma_buf, drm_sys as drm, gpu_bridge::GpuBridge, kms::*,
+use super::{dma_buf, drm_sys as drm, gpu_bridge::GpuBridge, heads::{CardDriver, Holds, KmsState, PlaneBook, NO_FREE_HEAD}, kms::*,
     Command, Frame, Key, Snapshot, State};
 use super::super::{io, lock};
 use crate::{backend::vulkan::{buffer_usage, Buffer, Device, Image}, direct::*, session::TextureObj, types::{format, usage}};
 use makepad_vulkan::vk;
 use std::{collections::{HashMap, HashSet, VecDeque}, fs::{File, OpenOptions},
-    os::fd::{AsRawFd, IntoRawFd}, path::{Path, PathBuf}, sync::{Arc, atomic::Ordering}, time::{Duration, Instant}};
+    os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd}, path::{Path, PathBuf}, sync::{Arc, atomic::Ordering}, time::{Duration, Instant}};
 
 /// A flip outstanding this long (many refresh periods at any mode) is a stalled head.
 const FLIP_STALL: Duration = Duration::from_millis(500);
@@ -38,7 +38,7 @@ fn pci(path: &Path) -> Option<String> {
 }
 
 pub(super) fn order_devices(instance: &makepad_vulkan::Instance, devices: &mut Vec<vk::PhysicalDevice>) -> Result<(), String> {
-    let connectors = scan_drm_connectors(&DrmFilter::from_env())?;
+    let connectors = scan_drm_connectors(&DrmFilter::from_env(), |_, _| {})?;
     let files: Vec<_> = connectors.iter().filter_map(|c| OpenOptions::new().read(true).write(true).open(&c.card).ok().map(|f| (c,f))).collect();
     let pin = std::env::var("MAKEPAD_VULKAN_COMPOSITOR_UUID").ok();
     if pin.as_ref().is_some_and(|s| s.len() != 32 || !s.bytes().all(|b| b.is_ascii_hexdigit())) {
@@ -83,7 +83,50 @@ fn render_rank(selected: bool, kind: vk::PhysicalDeviceType, builtin: u8, index:
 }
 
 struct SavedCrtc { crtc: drm::Crtc, connectors: Vec<u32> }
-struct Card { file: File, saved: Vec<SavedCrtc>, displays: Vec<(Arc<Device>,vk::DisplayKHR)>, mesa: bool }
+struct Card { file: File, saved: Vec<SavedCrtc>, dev: Arc<Device>, holds: Holds<KmsLease> }
+/// A DRM lease of one connector and one CRTC (with that CRTC's planes: the master does not
+/// take universal planes, so the kernel adds them). Its descriptor is master of those objects
+/// alone; the display acquired through it is granted through that descriptor only.
+struct KmsLease { lessee: u32, connector: u32, crtc: u32, file: OwnedFd }
+/// A card's DRM master descriptor and its GPU, as `Holds` drives them.
+struct Kms<'a> { file: &'a File, dev: &'a Device }
+impl CardDriver for Kms<'_> {
+    type Lease = KmsLease;
+    fn kms(&mut self) -> Result<KmsState,String> { drm_kms_state(self.file.as_raw_fd()) }
+    fn switch_off(&mut self,crtc:u32) -> Result<(),String> {
+        if unsafe { drm::drmModeSetCrtc(self.file.as_raw_fd(),crtc,0,0,0,std::ptr::null_mut(),0,std::ptr::null_mut()) } < 0 {
+            return Err(format!("switch off CRTC {crtc}: {}",std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+    fn lease(&mut self,connector:u32,crtc:u32) -> Result<KmsLease,String> {
+        let objects = [connector,crtc]; let mut lessee = 0;
+        let fd = unsafe { drm::drmModeCreateLease(self.file.as_raw_fd(),objects.as_ptr(),objects.len() as i32,drm::O_CLOEXEC,&mut lessee) };
+        if fd < 0 { return Err(format!("lease connector {connector} with CRTC {crtc}: {}",std::io::Error::from_raw_os_error(-fd))); }
+        Ok(KmsLease { lessee,connector,crtc,file:unsafe { OwnedFd::from_raw_fd(fd) } })
+    }
+    fn revoke(&mut self,lease:KmsLease) {
+        let result = if unsafe { drm::drmModeRevokeLease(self.file.as_raw_fd(),lease.lessee) } < 0 { format!(": {}",std::io::Error::last_os_error()) } else { String::new() };
+        eprintln!("[hal-direct] connector {}: DRM lease {} of CRTC {} revoked{result}",lease.connector,lease.lessee,lease.crtc);
+    }
+    fn acquire(&mut self,display:vk::DisplayKHR,lease:Option<&KmsLease>) -> Result<(),String> {
+        let dev = self.dev;
+        match lease {
+            Some(lease) => unsafe { dev.instance.acquire_drm_display(dev.physical,lease.file.as_raw_fd(),display) }.map_err(error),
+            None => {
+                // The one-descriptor WSI owns and closes the descriptor it acquires through.
+                let duplicate = self.file.try_clone().map_err(|e| e.to_string())?;
+                unsafe { dev.instance.acquire_drm_display(dev.physical,duplicate.as_raw_fd(),display) }.map_err(error)?;
+                let _ = duplicate.into_raw_fd();
+                Ok(())
+            }
+        }
+    }
+    fn release(&mut self,display:vk::DisplayKHR) {
+        let result = unsafe { (self.dev.instance.table.release_display_ext.expect("VK_EXT_direct_mode_display"))(self.dev.physical,display) };
+        if result != vk::Result::SUCCESS { eprintln!("[hal-direct] release display: {result:?}"); }
+    }
+}
 impl Card {
     fn open(path: &Path, device: &Arc<Device>) -> Result<Self,String> {
         let file = OpenOptions::new().read(true).write(true).open(path).map_err(|e| format!("{}: {e}",path.display()))?;
@@ -121,35 +164,25 @@ impl Card {
             unsafe { device.instance.get_physical_device_properties2(device.physical,&mut props); }
             driver.driver_info_as_c_str().ok().is_some_and(|s| s.to_bytes().starts_with(b"Mesa "))
         } else { false };
-        Ok(Self { file,saved,displays:Vec::new(),mesa })
+        Ok(Self { file,saved,dev:device.clone(),holds:Holds::new(mesa) })
     }
-    fn acquire(&mut self,device:Arc<Device>,display:vk::DisplayKHR) -> Result<(),String> {
-        if self.displays.iter().any(|(_,d)| *d == display) { return Ok(()); }
-        if !self.mesa { unsafe { device.instance.acquire_drm_display(device.physical,self.file.as_raw_fd(),display) }.map_err(error)?; }
-        else if self.displays.is_empty() {
-            // Mesa display WSI owns and closes one descriptor for the entire card.
-            let duplicate = self.file.try_clone().map_err(|e| e.to_string())?;
-            unsafe { device.instance.acquire_drm_display(device.physical,duplicate.as_raw_fd(),display) }.map_err(error)?;
-            let _ = duplicate.into_raw_fd();
-        }
-        self.displays.push((device,display)); Ok(())
+    /// Hold `display`; `driven`: the card's other connectors the WM drives. Returns the
+    /// turned-off displays given back for its head.
+    fn acquire(&mut self,display:vk::DisplayKHR,connector:u32,driven:&HashSet<u32>) -> Result<Vec<vk::DisplayKHR>,String> {
+        self.holds.acquire(&mut Kms { file:&self.file,dev:&self.dev },display,connector,driven)
     }
-    /// Give up one display. Mesa's acquisition covers the whole card and a release of
-    /// any display ends it, so there the card is released with its last display only.
+    /// Give up one display: its lease, if it has one, is revoked; every other display keeps its own.
     fn release_display(&mut self,display:vk::DisplayKHR) {
-        let Some(index) = self.displays.iter().position(|(_,d)| *d == display) else { return; };
-        let (dev,display) = self.displays.remove(index);
-        if !self.mesa || self.displays.is_empty() {
-            let result = unsafe { (dev.instance.table.release_display_ext.expect("VK_EXT_direct_mode_display"))(dev.physical,display) };
-            if result != vk::Result::SUCCESS { eprintln!("[hal-direct] release display: {result:?}"); }
-        }
+        self.holds.release(&mut Kms { file:&self.file,dev:&self.dev },display)
     }
     fn release(&mut self) {
-        for (index,(dev,display)) in self.displays.drain(..).enumerate() {
-            if !self.mesa || index == 0 {
-                let result = unsafe { (dev.instance.table.release_display_ext.expect("VK_EXT_direct_mode_display"))(dev.physical,display) };
-                if result != vk::Result::SUCCESS { eprintln!("[hal-direct] release display: {result:?}"); }
-            }
+        self.holds.release_all(&mut Kms { file:&self.file,dev:&self.dev })
+    }
+    /// How a held display is held, for the log: its lease and CRTC, or the card's shared descriptor.
+    fn holding(&self,display:vk::DisplayKHR) -> String {
+        match self.holds.displays.iter().find(|h| h.display == display).and_then(|h| h.lease()) {
+            Some(lease) => format!("CRTC {} through DRM lease {}",lease.crtc,lease.lessee),
+            None => "the card's shared descriptor".into(),
         }
     }
 }
@@ -160,7 +193,7 @@ impl Drop for Card {
         // NVIDIA's display release gives the heads back to the console itself; a legacy
         // SetCrtc of the saved state on top fails (EINVAL) and leaves the head mid-commit for
         // the next master (the driver's flip event timeout, then nv_flip == NULL)
-        let restore = if self.mesa { std::mem::take(&mut self.saved) } else { Vec::new() };
+        let restore = if self.holds.mesa { std::mem::take(&mut self.saved) } else { Vec::new() };
         for mut saved in restore {
             let c = &mut saved.crtc;
             // the state saved at start shows the previous master's framebuffer when that was
@@ -381,12 +414,15 @@ impl Drop for Peer {
 
 struct Output {
     dev:Arc<Device>, connector:DrmConnector, display:vk::DisplayKHR, requested:Option<String>,
-    /// Why the requested mode is not the one shown (it failed; a fallback is shown).
+    /// Why the mode shown is not the one asked for: the requested mode is unavailable or
+    /// failed, or a faster one failed to present.
     error:Option<String>, plane:u32, mode:DisplayMode, format:vk::Format,
     surface:vk::SurfaceKHR, chain:vk::SwapchainKHR, images:Vec<vk::Image>, signals:Vec<vk::Semaphore>,
     acquire:vk::Fence, acquired:Option<u32>, acquire_ready:bool, job:CopyJob, peer:Option<Peer>,
     placement:Option<wide_desktop::SliceRect>, generation:u64, serial:u64, pending:Option<u64>,
     complete:u64, last_present:u64, rebuild:bool,
+    /// Why its presentation failed (set with `rebuild`; a suboptimal swapchain sets none).
+    failure:Option<String>,
     /// The swapchain images can be copied from (`cap scanout`).
     readable:bool,
     progress:(u64,u64,Option<u32>,bool), progress_at:Instant,
@@ -397,7 +433,7 @@ impl Output {
     fn new(dev:Arc<Device>,compositor:Arc<Device>,connector:DrmConnector,display:vk::DisplayKHR,requested:Option<String>,mode:DisplayMode,plane:PlaneCandidate) -> Result<Self,String> {
         let job = CopyJob::new(dev.clone())?;
         let mut out = Self { dev,connector,display,requested,error:None,plane:plane.plane_index,mode,format:vk::Format::UNDEFINED,surface:vk::SurfaceKHR::null(),chain:vk::SwapchainKHR::null(),images:Vec::new(),signals:Vec::new(),
-            acquire:vk::Fence::null(),acquired:None,acquire_ready:false,job,peer:None,placement:None,generation:0,serial:0,pending:None,complete:0,last_present:0,rebuild:false,readable:false,
+            acquire:vk::Fence::null(),acquired:None,acquire_ready:false,job,peer:None,placement:None,generation:0,serial:0,pending:None,complete:0,last_present:0,rebuild:false,failure:None,readable:false,
             progress:(0,0,None,false),progress_at:Instant::now(),present_at:0,peer_at:0 };
         out.surface = create_plane_surface(&out.dev.instance,&out.mode,&plane)?;
         if !unsafe { out.dev.instance.get_physical_device_surface_support(out.dev.physical,out.dev.family,out.surface) }.map_err(|e| format!("surface support: {}",error(e)))? { return Err("graphics queue cannot present to the display plane".into()); }
@@ -678,9 +714,13 @@ fn arrange_screens(arrangement:&crate::direct::DisplayArrangement,names:&[&str],
 }
 
 /// A connector that could not be driven, with the request it failed under. It is
-/// retried only when the connector itself changes (replug, another monitor) or its
-/// mode request changes, never on a timer: a retry must not disturb working outputs.
-struct Failed { connector:DrmConnector, requested:Option<String>, row:LinuxDisplayOutput }
+/// retried only when the connector itself changes (replug, another monitor), its mode
+/// request changes or, when it found no free head, a head may have come free; never on a
+/// timer: a retry must not disturb working outputs.
+struct Failed { connector:DrmConnector, requested:Option<String>, row:LinuxDisplayOutput,
+    /// It found no free display head or plane: retried also when one may have come free (a
+    /// monitor unplugged or turned off).
+    wants_head:bool }
 
 fn mode_label(mode:&DisplayMode) -> String {
     format!("{}x{}@{}",mode.extent.width,mode.extent.height,(mode.refresh_mhz + 500) / 1000)
@@ -773,8 +813,12 @@ fn virtual_from_env() -> Option<VirtualDisplay> {
 struct Context {
     compositor:Arc<Device>, devices:HashMap<vk::PhysicalDevice,Arc<Device>>, physical:Vec<vk::PhysicalDevice>,
     cards:HashMap<PathBuf,Card>, outputs:Vec<Output>, failed:Vec<Failed>,
-    /// Per connector, the last mode an output was created with: the first fallback.
-    working:HashMap<String,DisplayMode>,
+    /// The display planes this session holds (plane -> display), across reconciles.
+    planes:PlaneBook,
+    /// Per connector, the last mode that showed a frame: a last resort of its mode ladder.
+    working:Working,
+    /// Per connector, the mode that failed to present: its ladder starts below it.
+    demotions:Demotions,
     /// How the outputs make up the screens (see `DisplayArrangement`), and the screens it
     /// gives over the live outputs (`layout`).
     arrangement:DisplayArrangement, screens:Vec<Screen>,
@@ -798,6 +842,30 @@ struct Context {
     virtual_head:Option<VirtualHead>,
 }
 impl Context {
+    fn scan_connectors(&self, probe: bool) -> Result<Vec<DrmConnector>, String> {
+        let mut files = HashMap::new();
+        scan_drm_connectors(&self.filter, |path, id| {
+            if !probe { return; }
+            // A fresh descriptor cannot force detection while this process's
+            // existing descriptor owns DRM master. Reuse the owner, including
+            // for disconnected connectors that have no Vulkan display yet.
+            let fd = if let Some(card) = self.cards.get(path) {
+                card.file.as_raw_fd()
+            } else {
+                let file = files.entry(path.to_owned()).or_insert_with(|| {
+                    let file = OpenOptions::new().read(true).write(true).open(path).ok()?;
+                    (unsafe { drm::drmSetMaster(file.as_raw_fd()) } == 0).then_some(file)
+                });
+                let Some(file) = file else { return; };
+                file.as_raw_fd()
+            };
+            // libdrm's non-Current query forces detection for the DRM master.
+            // This can block, so it belongs on the display worker and runs
+            // only on startup, VT resume or an actual hotplug notification.
+            let connector = unsafe { drm::drmModeGetConnector(fd, id) };
+            if !connector.is_null() { unsafe { drm::drmModeFreeConnector(connector); } }
+        })
+    }
     fn new(compositor:Arc<Device>) -> Result<Self,String> {
         let physical = unsafe { compositor.instance.enumerate_physical_devices() }.map_err(error)?;
         let mut mode = std::env::var("MAKEPAD_DRM_MODE").ok().filter(|m| !m.is_empty() && m != "auto");
@@ -811,7 +879,7 @@ impl Context {
         let profiles = crate::display_profiles::layout_path();
         let virtual_head = virtual_from_env().map(|d| VirtualHead::new(compositor.clone(),d)).transpose()?;
         Ok(Self { devices:HashMap::from([(compositor.physical,compositor.clone())]),compositor,physical,
-            cards:HashMap::new(),outputs:Vec::new(),failed:Vec::new(),working:HashMap::new(),
+            cards:HashMap::new(),outputs:Vec::new(),failed:Vec::new(),planes:PlaneBook::default(),working:Working::default(),demotions:Demotions::default(),
             arrangement_pinned:pinned.is_some(),arrangement:pinned.unwrap_or_default(),screens:Vec::new(),profiles,monitors:None,modes_pinned,
             pacing:Default::default(),connectors:Vec::new(),filter:DrmFilter::from_env(),
             modes,mode,primary:None,size:[0,0],active:true,window:None,current:None,frames:VecDeque::new(),presenting:VecDeque::new(),sequence:0,demand:false,awaiting:false,credit_due:0,
@@ -819,10 +887,9 @@ impl Context {
     }
     /// The HAL replaced its lost GPU device. The outputs' swapchains, surfaces, copy jobs and
     /// peers lived on the old device and are dropped; the cards keep DRM master and their
-    /// display acquisitions (a release would restore the console's CRTCs, and NVIDIA refuses
-    /// a display re-acquired on the same descriptor), so the next reconcile rebuilds every
-    /// output on the new device. The frames of the old device are let go (their presents
-    /// reported, so no credit is lost) and the window asks for a new one.
+    /// display acquisitions (a release would hand the heads to the console), so the next
+    /// reconcile rebuilds every output on the new device. The frames of the old device are let
+    /// go (their presents reported, so no credit is lost) and the window asks for a new one.
     fn replace_device(&mut self,device:Arc<Device>,state:&State) {
         eprintln!("[hal-direct] the render GPU device was replaced: rebuilding the outputs");
         self.outputs.clear();
@@ -830,9 +897,7 @@ impl Context {
         let now = crate::clock_ns();
         for (_,presented) in self.presenting.drain(..) { presented(now); }
         let old = self.compositor.physical;
-        for card in self.cards.values_mut() {
-            for (dev,_) in &mut card.displays { if dev.physical == old { *dev = device.clone(); } }
-        }
+        for card in self.cards.values_mut() { if card.dev.physical == old { card.dev = device.clone(); } }
         self.devices.insert(device.physical,device.clone());
         if let Some(head) = self.virtual_head.take() {
             match VirtualHead::new(device.clone(),head.display) {
@@ -846,7 +911,7 @@ impl Context {
         self.demand = self.window.is_some(); self.awaiting = false;
     }
     fn drain_outputs(&mut self) {
-        self.outputs.clear();
+        self.outputs.clear(); self.planes.clear();
         for card in self.cards.values_mut() { card.release(); }
     }
     fn pause(&mut self,state:&State) {
@@ -863,8 +928,9 @@ impl Context {
         }
         state.released.store(true,Ordering::Release); state.shared.signal();
     }
-    fn fail_row(&mut self,connector:&DrmConnector,requested:Option<String>,reason:String) {
-        eprintln!("[hal-direct] {}: {reason}; retried when the connector is replugged or its mode changes",connector.name);
+    fn fail_row(&mut self,connector:&DrmConnector,requested:Option<String>,reason:String,wants_head:bool) {
+        let retry = if wants_head { "replugged, its mode changes, or a monitor is unplugged or turned off" } else { "replugged or its mode changes" };
+        eprintln!("[hal-direct] {}: {reason}; retried when the connector is {retry}",connector.name);
         // The dropdown stays usable on a failed screen: list its DRM (EDID) modes.
         let (modes,native) = match self.cards.get(&connector.card) {
             Some(card) => drm_connector_modes(card.file.as_raw_fd(),connector.id),
@@ -873,7 +939,7 @@ impl Context {
         let row = LinuxDisplayOutput { name:connector.name.clone(),monitor:connector.monitor.clone(),fingerprint:connector.fingerprint,
             card:card_name(&connector.card),status:reason.clone(),error:Some(reason),
             requested:requested.clone(),modes,native,pci:pci(&connector.card),mode_override:self.modes.get(&connector.name).cloned(),..Default::default() };
-        self.failed.push(Failed { connector:connector.clone(),requested,row });
+        self.failed.push(Failed { connector:connector.clone(),requested,row,wants_head });
     }
     /// Drop one output and give its display back. Only this output's display goes;
     /// every other output on the card keeps its acquisition and its scanout.
@@ -887,7 +953,8 @@ impl Context {
     /// vanished or changed, its own mode request resolves to another mode, or its own
     /// presentation failed. A connector that failed is not retried on a timer; it is
     /// retried when it is replugged (or another monitor appears on it) or its mode
-    /// request changes. Returns without touching anything when nothing changed.
+    /// request changes, and one that found no free head also when a monitor is unplugged
+    /// or turned off. Returns without touching anything when nothing changed.
     fn reconcile(&mut self,connectors:Vec<DrmConnector>,state:&State) {
         self.restore_profile(&connectors);
         if self.panels_off() {
@@ -900,6 +967,7 @@ impl Context {
             if changed { self.layout(); self.publish(state); }
             return;
         }
+        self.demotions.keep(&connectors); self.working.keep(&connectors);
         let requests = connector_requests(&connectors,&self.modes,self.mode.as_deref());
         let requested = |name:&str| requests.get(name).cloned().flatten();
         let mut kept = Vec::new(); let mut retired = Vec::new();
@@ -907,7 +975,8 @@ impl Context {
             let request = requested(&output.connector.name);
             if self.arrangement.is_off(&output.connector.name) {
                 // Turned off: no swapchain, no scanout. A connector that stays keeps its display
-                // acquired (below), so turning it on again needs no new grant.
+                // held, dark, with its head and plane (parked below): turning it on again needs
+                // no new grant. Its head goes to another connector only when that finds none free.
                 eprintln!("[hal-direct] {}: turned off",output.connector.name);
                 retired.push(output); continue;
             }
@@ -917,21 +986,32 @@ impl Context {
                     // A new request that names the mode already shown (e.g. the saved
                     // layout restating the running mode at start-up) changes nothing.
                     let native = self.cards.get(&output.connector.card).and_then(|c| drm_native_resolution(c.file.as_raw_fd(),output.connector.id));
-                    let same = select_display_mode(&output.dev.instance,output.dev.physical,output.display,request.as_deref(),native)
-                        .is_ok_and(|m| m.mode == output.mode.mode);
+                    let same = display_mode_ladder(&output.dev.instance,output.dev.physical,output.display,request.as_deref(),native,None,self.demotions.below(&output.connector))
+                        .is_ok_and(|(ladder,_)| ladder[0].mode == output.mode.mode);
                     if same { output.requested = request; kept.push(output); } else { retired.push(output); }
                 }
                 Fate::Rebuild => {
-                    let reason = if output.rebuild { "its presentation failed".to_string() }
-                        else if let Some(c) = connectors.iter().find(|c| c.name == output.connector.name) { format!("connector changed ({:?} -> {:?})",(output.connector.id,output.connector.fingerprint),(c.id,c.fingerprint)) }
-                        else { "unplugged".to_string() };
+                    let reason = if !connectors.contains(&output.connector) {
+                        match connectors.iter().find(|c| c.name == output.connector.name) {
+                            Some(c) => format!("connector changed ({:?} -> {:?})",(output.connector.id,output.connector.fingerprint),(c.id,c.fingerprint)),
+                            None => "unplugged".to_string(),
+                        }
+                    } else if let Some(failure) = &output.failure {
+                        let label = mode_label(&output.mode);
+                        if self.demotions.failed(&output.connector,mode_key(&output.mode),output.last_present != 0,failure) {
+                            format!("{label} failed to present ({failure}); stepping down to the next mode")
+                        } else { format!("{label} failed to present after showing frames ({failure}); once more at {label}") }
+                    } else { "its swapchain is suboptimal".to_string() };
                     eprintln!("[hal-direct] {}: rebuilding: {reason}",output.connector.name);
                     retired.push(output)
                 }
             }
         }
         let failed_before = self.failed.len();
-        self.failed.retain(|f| connectors.contains(&f.connector) && f.requested == requested(&f.connector.name) && !self.arrangement.is_off(&f.connector.name));
+        // A monitor unplugged or turned off may free a head for a connector that found none.
+        let heads_freed = self.connectors.iter().any(|c| !connectors.contains(c)) || retired.iter().any(|o:&Output| self.arrangement.is_off(&o.connector.name));
+        self.failed.retain(|f| connectors.contains(&f.connector) && f.requested == requested(&f.connector.name) && !self.arrangement.is_off(&f.connector.name)
+            && !(f.wants_head && heads_freed));
         let pending:Vec<_> = connectors.iter().filter(|c| !kept.iter().any(|o:&Output| o.connector == **c)
             && !self.failed.iter().any(|f| f.connector == **c) && !self.arrangement.is_off(&c.name)).cloned().collect();
         self.outputs = kept;
@@ -951,17 +1031,20 @@ impl Context {
             Ok(physical) => self.physical = physical,
             Err(e) => eprintln!("[hal-direct] refresh Vulkan devices: {e:?}"),
         }
-        let mut freed:HashMap<vk::PhysicalDevice,HashSet<u32>> = HashMap::new();
         for output in retired {
-            freed.entry(output.dev.physical).or_default().insert(output.plane);
-            // A connector that stays (new mode, failed presentation) keeps its display
-            // acquired and only gets a new surface and swapchain: the NVIDIA driver
-            // cannot hand a released connector back through the same descriptor.
-            if self.connectors.contains(&output.connector) { drop(output); } else { self.retire(output); }
+            // A connector that stays (new mode, failed presentation, turned off) keeps its
+            // display held and its plane in the book; it only gets a new surface and swapchain:
+            // its head is not handed to the console in between.
+            if self.connectors.contains(&output.connector) {
+                let (card,display,off) = (output.connector.card.clone(),output.display,self.arrangement.is_off(&output.connector.name));
+                drop(output);
+                if off { if let Some(card) = self.cards.get_mut(&card) { card.holds.park(display); } }
+            } else { self.retire(output); }
         }
-        let mut busy:HashMap<vk::PhysicalDevice,HashSet<u32>> = HashMap::new();
-        for output in &self.outputs { busy.entry(output.dev.physical).or_default().insert(output.plane); }
         self.cards.retain(|path,_| self.connectors.iter().any(|c| c.card == *path));
+        // The connectors the WM drives, per card: a console on one of them is never switched off.
+        let mut driven:HashMap<PathBuf,HashSet<u32>> = HashMap::new();
+        for c in self.outputs.iter().map(|o| &o.connector).chain(&pending) { driven.entry(c.card.clone()).or_default().insert(c.id); }
         let mut plans:HashMap<vk::PhysicalDevice,Vec<(DrmConnector,vk::DisplayKHR,Option<String>,Vec<DisplayMode>,Option<String>,Vec<PlaneCandidate>)>> = HashMap::new();
         for connector in pending {
             let request = requested(&connector.name);
@@ -974,8 +1057,8 @@ impl Context {
                     self.compositor.instance.get_drm_display(*physical,probe.as_raw_fd(),connector.id).ok()
                         .filter(|d| *d != vk::DisplayKHR::null()).map(|d| (*physical,d))
                 }).ok_or("no Vulkan device owns this connector")?;
-                // Close the probe before any master open: a duplicate of a card's file
-                // would keep that file (and its master) alive across a reopen below.
+                // Close the probe before the master open: a duplicate of a card's file would
+                // keep that file (and its master) alive after the card is dropped.
                 drop(probe);
                 let device = if let Some(dev) = self.devices.get(&physical) { dev.clone() } else {
                     let dev = Device::display_peer(self.compositor.clone(),physical)?;
@@ -984,42 +1067,27 @@ impl Context {
                 if !self.cards.contains_key(&connector.card) { self.cards.insert(connector.card.clone(),Card::open(&connector.card,&device)?); }
                 let card = self.cards.get_mut(&connector.card).unwrap();
                 if unsafe { drm::drmSetMaster(card.file.as_raw_fd()) } < 0 { return Err(std::io::Error::last_os_error().to_string()); }
-                if let Err(e) = card.acquire(device.clone(),display).map_err(|e| format!("acquire: {e}")) {
-                    // The NVIDIA driver grants a connector to a DRM descriptor once; after
-                    // vkReleaseDisplayEXT the grant stays on that descriptor and acquiring
-                    // again through it fails (VK_ERROR_INITIALIZATION_FAILED). Only closing
-                    // the descriptor revokes it, so a card holding no other display is
-                    // reopened and acquired once more.
-                    if !card.displays.is_empty() { return Err(e); }
-                    eprintln!("[hal-direct] {}: {e}; reopening {} for a fresh grant",connector.name,connector.card.display());
-                    self.cards.remove(&connector.card);
-                    self.cards.insert(connector.card.clone(),Card::open(&connector.card,&device)?);
-                    self.cards.get_mut(&connector.card).unwrap().acquire(device.clone(),display).map_err(|e| format!("acquire after reopen: {e}"))?;
-                }
+                card.acquire(display,connector.id,&driven[&connector.card]).map_err(|e| format!("acquire: {e}"))?;
                 let card = &self.cards[&connector.card];
                 let native = drm_native_resolution(card.file.as_raw_fd(),connector.id);
-                // The modes to fall back to, in order: the last one that worked on this
-                // connector, then the monitor's preferred (EDID) mode. A requested mode
+                // The modes to try, in order: the requested (or fastest native) mode, each lower
+                // refresh at its resolution, each smaller resolution, then the last mode that
+                // worked here and the native one; below a mode that failed to present. A mode
                 // that is unavailable or fails never leaves the screen dark.
-                let mut modes = Vec::new();
-                let mut error = None;
-                match select_display_mode(&device.instance,physical,display,request.as_deref(),native) {
-                    Ok(mode) => modes.push(mode),
-                    Err(e) => error = Some(e),
-                }
-                if request.is_some() {
-                    if let Some(working) = self.working.get(&connector.name) { modes.push(working.clone()); }
-                    if let Ok(preferred) = select_display_mode(&device.instance,physical,display,None,native) { modes.push(preferred); }
-                }
-                let mut seen = HashSet::new();
-                modes.retain(|m| seen.insert(m.mode));
-                let first = modes.first().ok_or_else(|| error.clone().unwrap_or_else(|| "no display mode".into()))?;
-                let candidates = plane_candidates(&device.instance,physical,display,first,busy.entry(physical).or_default(),freed.entry(physical).or_default())?;
+                let (modes,error) = display_mode_ladder(&device.instance,physical,display,request.as_deref(),native,
+                    self.working.get(&connector),self.demotions.below(&connector))?;
+                let first = &modes[0];
+                // Occupancy from the session's book of the displays it holds (a display given
+                // back above leaves it), then the driver's own report.
+                self.planes.keep(|d| self.cards.values().any(|c| c.holds.holds(d)));
+                let held:HashSet<_> = self.cards.values().flat_map(|c| c.holds.displays.iter().map(|h| h.display)).collect();
+                let rows = plane_rows(&device.instance,physical,display,first)?;
+                let candidates = plane_order(&rows,display,&self.planes.of(physical),&held,&connected_displays(&device.instance,physical)?);
                 Ok::<_,String>((physical,display,modes,error,candidates))
             })();
             match result {
                 Ok((physical,display,modes,error,candidates)) => plans.entry(physical).or_default().push((connector,display,request,modes,error,candidates)),
-                Err(e) => self.fail_row(&connector,request,format!("failed: {e}")),
+                Err(e) => { let wants_head = e.contains(NO_FREE_HEAD); self.fail_row(&connector,request,format!("failed: {e}"),wants_head) }
             }
         }
         for (physical,plans) in plans {
@@ -1028,7 +1096,7 @@ impl Context {
             for ((connector,display,request,modes,mut error,candidates),plane) in plans.into_iter().zip(assignment) {
                 let Some(candidate) = plane.and_then(|plane| candidates.iter().find(|c| c.plane_index == plane)).copied() else {
                     if let Some(card) = self.cards.get_mut(&connector.card) { card.release_display(display); }
-                    self.fail_row(&connector,request,"failed: no compatible unoccupied display plane".into()); continue;
+                    self.fail_row(&connector,request,format!("failed: {NO_FREE_HEAD}: every display plane it can use shows another monitor"),true); continue;
                 };
                 let mut created = None;
                 for mode in modes {
@@ -1044,15 +1112,18 @@ impl Context {
                 match created {
                     Some(mut output) => {
                         if let Some(e) = &error {
-                            eprintln!("[hal-direct] {}: requested mode {:?} failed ({e}); showing {}",connector.name,request,mode_label(&output.mode));
+                            eprintln!("[hal-direct] {}: showing {}: {e}",connector.name,mode_label(&output.mode));
                         }
                         output.error = error;
-                        self.working.insert(connector.name.clone(),output.mode.clone());
+                        if let Some(card) = self.cards.get(&connector.card) {
+                            eprintln!("[hal-direct] {} (connector {}): display held on {}, plane {}",connector.name,connector.id,card.holding(display),output.plane);
+                        }
+                        self.planes.show(physical,output.plane,display);
                         self.outputs.push(output);
                     }
                     None => {
                         if let Some(card) = self.cards.get_mut(&connector.card) { card.release_display(display); }
-                        self.fail_row(&connector,request,format!("failed: {}",error.unwrap_or_default()));
+                        self.fail_row(&connector,request,format!("failed: {}",error.unwrap_or_default()),false);
                     }
                 }
             }
@@ -1165,7 +1236,7 @@ impl Context {
             width:o.mode.extent.width,height:o.mode.extent.height,refresh_hz:o.mode.refresh_mhz as f64 / 1000.0,
             card:card_name(&o.connector.card),active:o.last_present != 0,
             status:match (&o.error,o.last_present != 0) {
-                (Some(e),_) => format!("requested mode failed, showing {}: {e}",mode_label(&o.mode)),
+                (Some(e),_) => format!("showing {}: {e}",mode_label(&o.mode)),
                 (None,true) => "active".into(),
                 (None,false) => "ready; waiting for first frame".into(),
             },modes:o.mode.modes.clone(),
@@ -1285,7 +1356,7 @@ impl Context {
                 // output alone; the others keep presenting the retained whole frame.
                 eprintln!("[hal-direct] {}: presentation: {e}; rebuilding this output",output.connector.name);
                 if e.contains("ERROR_DEVICE_LOST") && !output.dev.lost.swap(true,Ordering::AcqRel) { state.shared.signal(); }
-                output.rebuild = true; continue;
+                output.rebuild = true; output.failure = Some(e); continue;
             }
             let progress = (output.generation,output.complete,output.acquired,output.acquire_ready);
             if progress != output.progress || !output.busy(self.current.as_ref()) {
@@ -1294,10 +1365,13 @@ impl Context {
                 // Flip watchdog: a flip (or the WSI credit after it) outstanding this long is a
                 // stalled head; the output is rebuilt (modeset again) and retries the retained
                 // complete frame, with no retry limit and no discarded input/image.
-                eprintln!("[hal-direct] {}: flip {} made no progress for {} ms; rebuilding this output",output.connector.name,output.serial,output.progress_at.elapsed().as_millis());
-                output.rebuild = true;
+                let stall = format!("flip {} made no progress for {} ms",output.serial,output.progress_at.elapsed().as_millis());
+                eprintln!("[hal-direct] {}: {stall}; rebuilding this output",output.connector.name);
+                output.rebuild = true; output.failure = Some(stall);
             }
             if output.last_present != old {
+                // The first frame shown: this mode works here.
+                if old == 0 { self.working.showed(&output.connector,mode_key(&output.mode)); }
                 first |= old == 0;
                 timing_changed = true;
                 if output.mode.refresh_mhz != 0 {
@@ -1357,6 +1431,7 @@ pub(super) fn run(state:Arc<State>,device:Arc<Device>) {
     let watch = super::hotplug::Watch::open();
     if watch.is_none() { eprintln!("[hal-direct] DRM uevent socket unavailable; keeping periodic connector discovery"); }
     let mut rescan = true;
+    let mut probe = true;
     let mut next_scan = Instant::now();
     let mut stop = false;
     while !stop {
@@ -1377,10 +1452,12 @@ pub(super) fn run(state:Arc<State>,device:Arc<Device>) {
                     }
                 }
                 Command::Pause => context.pause(&state),
-                Command::Resume => { context.active = true; state.released.store(false,Ordering::Release); rescan = true; context.demand = true; }
+                Command::Resume => { context.active = true; state.released.store(false,Ordering::Release); rescan = true; probe = true; context.demand = true; }
                 Command::Mode(name,mode) => {
                     // A mode pick on a failed screen retries it, even when it names the same mode.
                     context.failed.retain(|f| f.connector.name != name);
+                    // ...and every mode may be tried again.
+                    context.demotions.forget(&name);
                     if let Some(mode) = mode { context.modes.insert(name,mode); } else { context.modes.remove(&name); }
                     rescan = true;
                 }
@@ -1399,18 +1476,20 @@ pub(super) fn run(state:Arc<State>,device:Arc<Device>) {
             }
         }
         if stop { break; }
-        rescan |= watch.as_ref().is_some_and(|w| w.changed());
+        let hotplug = watch.as_ref().is_some_and(|w| w.changed());
+        rescan |= hotplug;
+        probe |= hotplug;
         let now = Instant::now();
         if now >= next_scan {
             next_scan = now + Duration::from_secs(1);
-            match scan_drm_connectors(&context.filter) {
+            match context.scan_connectors(false) {
                 Ok(connectors) => { rescan |= connectors != context.connectors; }
                 Err(e) => eprintln!("[hal-direct] rescan: {e}"),
             }
         }
         rescan |= context.outputs.iter().any(|o| o.rebuild);
         if rescan && context.active {
-            if let Ok(connectors) = scan_drm_connectors(&context.filter) { context.reconcile(connectors,&state); }
+            if let Ok(connectors) = context.scan_connectors(probe) { context.reconcile(connectors,&state); probe = false; }
             rescan = false;
         }
         let busy = match context.step(&state) {

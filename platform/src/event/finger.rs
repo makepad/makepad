@@ -1107,7 +1107,11 @@ impl CxFingers {
     /// other element may take a hover, focus or press-like state from that
     /// pointer on the way. A reorder carry, a scroll grab, or any other
     /// gesture that would start from the same press stands down while
-    /// another control holds the mouse. The one exception is drag and drop:
+    /// another control holds the mouse. A drag scroller may still take a
+    /// press over from a widget inside it that claimed no drag of its own,
+    /// like a button, once the press turns into a drag its way (see
+    /// [`Self::is_mouse_held_outside_drag_scroller`]); a continuously dragged
+    /// control claims its drag and stays locked. The one exception is drag and drop:
     /// there the source does NOT lock the pointer, because a global drag
     /// state must let other components light their drag-over states and
     /// accept the drop on release.
@@ -1141,6 +1145,20 @@ impl CxFingers {
         let digit_id: DigitId = live_id!(mouse).into();
         self.mouse_captures().any(|c| {
             !mine.iter().any(|m| same_owner(*m, c.area)) && !self.is_scroll_drag_holder(digit_id, c.area)
+        })
+    }
+
+    /// Like [`Self::is_mouse_held_outside_scrollers`], for a drag scroller that holds the press together with
+    /// widgets inside it (see [`Self::can_take_over_press`]): those took the press before `area` did, so their
+    /// captures, ahead of its own, are inside it. A capture taken after `area`'s still counts.
+    pub fn is_mouse_held_outside_drag_scroller(&self, area: Area) -> bool {
+        let digit_id: DigitId = live_id!(mouse).into();
+        let own = self.captures.iter().position(|c| c.digit_id == digit_id && same_owner(area, c.area));
+        self.captures.iter().enumerate().any(|(i, c)| {
+            c.digit_id == digit_id
+                && own.is_none_or(|own| i > own)
+                && !same_owner(area, c.area)
+                && !self.is_scroll_drag_holder(digit_id, c.area)
         })
     }
 

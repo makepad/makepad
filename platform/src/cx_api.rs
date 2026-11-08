@@ -1341,11 +1341,30 @@ impl Cx {
     pub fn xr_set_room_field(&mut self, on: bool) {
         #[cfg(not(target_arch = "wasm32"))]
         if crate::os::hal::xr::ROOM_FIELD.swap(on, std::sync::atomic::Ordering::AcqRel) != on {
-            makepad_hal::hal_xr_depth_readback(on);
+            makepad_hal::hal_xr_depth_readback(on || crate::os::hal::xr::DEPTH_TAP.load(std::sync::atomic::Ordering::Acquire));
             if !on { if let Some(xr) = self.hal.xr.as_mut() { xr.depth_writer = None; } }
         }
         #[cfg(target_arch = "wasm32")]
         let _ = on; // no headset on the web
+    }
+
+    /// Keep the newest environment depth image's texels for `xr_newest_depth_texels` (a capture
+    /// that records the headset's depth with its pictures). On, the depth is read back (as for
+    /// the room field, without integrating it); off, the kept image goes.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn xr_set_depth_tap(&mut self, on: bool) {
+        use crate::os::hal::xr::{DEPTH_TAP, NEWEST_DEPTH, ROOM_FIELD};
+        if DEPTH_TAP.swap(on, std::sync::atomic::Ordering::AcqRel) != on {
+            makepad_hal::hal_xr_depth_readback(on || ROOM_FIELD.load(std::sync::atomic::Ordering::Acquire));
+            if !on { *NEWEST_DEPTH.lock().unwrap_or_else(|e| e.into_inner()) = None; }
+        }
+    }
+
+    /// The newest environment depth image read back while the tap is on (`xr_set_depth_tap`);
+    /// readable from any thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn xr_newest_depth_texels() -> Option<crate::os::hal::xr::XrDepthTexels> {
+        crate::os::hal::xr::NEWEST_DEPTH.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Whether this app uses the room field (`xr_set_room_field`).

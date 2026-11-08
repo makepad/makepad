@@ -319,6 +319,52 @@ pub struct CameraFrameRef<'a> {
     pub matrix: CameraColorMatrix,
     pub plane_count: usize,
     pub planes: [CameraFramePlaneRef<'a>; 3],
+    pub exposure: CameraExposure,
+}
+
+/// What a frame's capture tells of its exposure (0: the platform does not say; Android's camera
+/// tells it).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CameraExposure {
+    /// The first row's exposure start on the HAL clock (`makepad_hal::clock_ns`; on Android the
+    /// clock OpenXR's times count in).
+    pub start_ns: u64,
+    pub exposure_ns: u32,
+    /// The first row's start to the last row's (a rolling shutter).
+    pub rolling_skew_ns: u32,
+    pub frame_duration_ns: u32,
+    /// ISO.
+    pub sensitivity: u32,
+}
+
+impl CameraExposure {
+    /// The middle of the frame's exposure (its middle row's), on the HAL clock; None when the
+    /// platform does not say.
+    pub fn mid_ns(&self) -> Option<u64> {
+        (self.start_ns != 0).then(|| self.start_ns + (self.exposure_ns as u64 + self.rolling_skew_ns as u64) / 2)
+    }
+}
+
+/// What a camera tells of its optics (`Cx::video_input_calibration`; Android's camera tells it).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CameraCalibration {
+    /// fx, fy, cx, cy, skew in pixels of `pre_correction`.
+    pub intrinsics: Option<[f32; 5]>,
+    /// Radial k1, k2, k3 and tangential p1, p2.
+    pub distortion: Option<[f32; 5]>,
+    /// The lens's rotation (x, y, z, w) and position (m) relative to `lens_reference` (0 the
+    /// primary camera, 1 the gyroscope, 2 undefined).
+    pub lens_rotation: Option<[f32; 4]>,
+    pub lens_translation: Option<[f32; 3]>,
+    pub lens_reference: Option<u8>,
+    /// The sensor's arrays (left, top, width, height): the pre-correction active array the
+    /// intrinsics are in, and the active array the frames show.
+    pub pre_correction: Option<[i32; 4]>,
+    pub active: Option<[i32; 4]>,
+    /// The device's place for the camera (a headset's passthrough cameras: 0 left, 1 right).
+    pub position: Option<u8>,
+    /// A headset's passthrough camera.
+    pub passthrough: bool,
 }
 
 impl<'a> CameraFrameRef<'a> {
@@ -335,6 +381,7 @@ impl<'a> CameraFrameRef<'a> {
                 CameraFramePlaneRef::empty(),
                 CameraFramePlaneRef::empty(),
             ],
+            exposure: CameraExposure::default(),
         }
     }
 }
@@ -863,6 +910,7 @@ pub struct CameraFrameOwned {
     pub matrix: CameraColorMatrix,
     pub plane_count: usize,
     pub planes: [CameraFramePlaneOwned; 3],
+    pub exposure: CameraExposure,
 }
 
 impl CameraFrameOwned {
@@ -873,6 +921,7 @@ impl CameraFrameOwned {
         self.layout = CameraFrameLayout::Unknown;
         self.matrix = CameraColorMatrix::Unknown;
         self.plane_count = 0;
+        self.exposure = CameraExposure::default();
         for plane in &mut self.planes {
             plane.row_stride = 0;
             plane.pixel_stride = 1;
@@ -887,6 +936,7 @@ impl CameraFrameOwned {
         self.layout = src.layout;
         self.matrix = src.matrix;
         self.plane_count = src.plane_count.min(3);
+        self.exposure = src.exposure;
 
         for i in 0..self.plane_count {
             let src_plane = src.planes[i];
@@ -1326,7 +1376,7 @@ mod camera_frame_tests {
     }
 
     fn frame<'a>(layout: CameraFrameLayout, planes: [CameraFramePlaneRef<'a>; 3], count: usize) -> CameraFrameRef<'a> {
-        CameraFrameRef { timestamp_ns: 7, width: 2, height: 2, layout, matrix: CameraColorMatrix::BT601, plane_count: count, planes }
+        CameraFrameRef { timestamp_ns: 7, width: 2, height: 2, layout, matrix: CameraColorMatrix::BT601, plane_count: count, planes, exposure: CameraExposure::default() }
     }
 
     fn channels(pixel: u32) -> (u32, u32, u32) {
@@ -1385,7 +1435,7 @@ mod camera_frame_tests {
         let latest = CameraLatest::new();
         let mut input = latest.input_fn();
         let junk = [1u8, 2, 3, 4];
-        input(CameraFrameRef { timestamp_ns: 1, width: 2, height: 2, layout: CameraFrameLayout::Mjpeg, matrix: CameraColorMatrix::Unknown, plane_count: 1, planes: [plane(&junk, 4, 1), CameraFramePlaneRef::empty(), CameraFramePlaneRef::empty()] });
+        input(CameraFrameRef { timestamp_ns: 1, width: 2, height: 2, layout: CameraFrameLayout::Mjpeg, matrix: CameraColorMatrix::Unknown, plane_count: 1, planes: [plane(&junk, 4, 1), CameraFramePlaneRef::empty(), CameraFramePlaneRef::empty()], exposure: CameraExposure::default() });
         assert!(latest.take().is_none());
         assert_eq!(latest.stats().2, 1);
     }

@@ -64,6 +64,8 @@ makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "1.0.0", optiona
 
 [target.wasm32-unknown-unknown.dependencies]
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "1.0.0" }
+# the HAL's window_controls.rs, compiled in directly here (lib.rs), derives its wire messages
+makepad-micro-serde = { path = "../libs/micro_serde", version = "1.0.0" }
 
 [target.aarch64-apple-darwin.dependencies]
 makepad-objc-sys = { path = "../libs/objc-sys", version = "1.0.0" }

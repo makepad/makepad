@@ -30,6 +30,12 @@ pub struct Hello {
     /// the peer's process as its carrier's credentials say (a Unix socket's), 0 where the carrier
     /// cannot say; never on the wire, so no peer can claim another's
     pub pid: u32,
+    /// the endpoint's own process and when its endpoint began (ms since the epoch), in HELLO_OK:
+    /// who answers a dial. A listener whose process is gone (a child that inherited it) queues
+    /// dials and answers none, so a dial that gets these reached a live endpoint, and they tell
+    /// one image from the next (an exec keeps the pid, not the start)
+    pub serving_pid: u32,
+    pub serving_since_ms: u64,
 }
 
 fn clean(s: &str) -> String {
@@ -40,6 +46,9 @@ fn encode(op: u8, h: &Hello) -> Vec<u8> {
     let mut s = format!("major={}\nminor={}\nrole={}\nname={}\nlink_id={}\n", h.major, h.minor, clean(&h.role), clean(&h.name), clean(&h.link_id));
     if op == OP_HELLO && !h.token.is_empty() {
         s.push_str(&format!("token={}\n", clean(&h.token)));
+    }
+    if op == OP_HELLO_OK {
+        s.push_str(&format!("serving_pid={}\nserving_since_ms={}\n", h.serving_pid, h.serving_since_ms));
     }
     for c in &h.caps {
         s.push_str(&format!("cap={}\n", clean(c)));
@@ -61,6 +70,8 @@ fn decode(body: &[u8]) -> Hello {
             "name" => h.name = v.into(),
             "link_id" => h.link_id = v.into(),
             "token" => h.token = v.into(),
+            "serving_pid" => h.serving_pid = v.parse().unwrap_or(0),
+            "serving_since_ms" => h.serving_since_ms = v.parse().unwrap_or(0),
             "cap" => h.caps.push(v.into()),
             _ => {}
         }

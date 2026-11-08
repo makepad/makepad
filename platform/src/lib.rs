@@ -143,6 +143,9 @@ pub mod font_policy;
 #[macro_use]
 mod app_main;
 pub mod remote;
+// The remote's commands as the AI services' manifest describes them: native, as the remote
+// (makepad-remote) is; the web has neither.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod remote_schema;
 // the profiler stream of a native build (a `makepad run` app serves it from relax inspect)
 #[cfg(all(not(relax), any(target_os = "macos", target_os = "linux")))]

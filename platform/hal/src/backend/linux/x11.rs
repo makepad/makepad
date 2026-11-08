@@ -1509,7 +1509,7 @@ impl Shell for App {
                         self.selection.start_drag(n, (sid, id), items, self.shared);
                     }
                 }
-                OsCmd::DragReply { id, to, answer } => {
+                OsCmd::DragReply { id, to, answer, .. } => {
                     if let Some(n) = self.find((sid, id)) {
                         if to == raw::reply::QUERY {
                             self.query_answer(n, answer);

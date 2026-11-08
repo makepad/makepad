@@ -1192,8 +1192,14 @@ pub fn worker_wanted() -> bool {
     let Some((class, permit)) = JOB.with(|j| j.borrow().as_ref().map(|j| (j.class, j.permit))) else {
         return false;
     };
-    permit.is_some_and(makepad_cpu_budget::should_yield)
-        || WORKER_POOL.with(|p| p.borrow().as_ref().and_then(std::sync::Weak::upgrade).is_some_and(|p| p.higher_queued(class)))
+    permit.is_some_and(makepad_cpu_budget::should_yield) || higher_queued_in_pool(class)
+}
+
+/// The pool's half of [`worker_wanted`]: a job of a higher class than `class` waits in the calling
+/// worker's pool. The permit's half answers for the whole process's CPU budget (the JIT's own
+/// compiles are in it), this one for the pool alone.
+fn higher_queued_in_pool(class: Class) -> bool {
+    WORKER_POOL.with(|p| p.borrow().as_ref().and_then(std::sync::Weak::upgrade).is_some_and(|p| p.higher_queued(class)))
 }
 
 pub fn checkpoint() -> Result<(), Stale> {
@@ -1353,20 +1359,24 @@ struct PoolJob {
     submitted_at: f64,
     ticket: Ticket,
     token: CancellationToken,
-    run: Option<Box<dyn FnOnce() + Send>>,
+    /// The work, then its handle's answer: it counts the job in `completed` between the two.
+    run: Option<Box<dyn FnOnce(&AtomicU64) + Send>>,
     cancel: Option<Box<dyn FnOnce() + Send>>,
     /// Its place in the jobs of the handle it was submitted through (`JobSet`): left once it
     /// ran or was dropped, after its handle is answered.
     member: Option<SetMember>,
 }
 impl PoolJob {
-    fn run(mut self) {
+    /// Runs the job and counts it in `completed` before its handle is answered.
+    fn run(mut self, completed: &AtomicU64) {
         if self.ticket.is_stale() || self.token.is_cancelled() {
+            completed.fetch_add(1, Ordering::Relaxed);
+            // the drop answers the handle (cancelled)
             return;
         }
         self.cancel.take();
         if let Some(run) = self.run.take() {
-            run();
+            run(completed);
         }
     }
 }
@@ -1409,7 +1419,7 @@ where
         submitted_at: Cx::monotonic_now(),
         ticket,
         token: token.clone(),
-        run: Some(Box::new(move || {
+        run: Some(Box::new(move |completed: &AtomicU64| {
             status.store(
                 if makepad_cpu_budget::set_thread_class(class.budget()) {
                     PriorityStatus::Applied
@@ -1420,6 +1430,7 @@ where
             );
             let result =
                 catch_unwind(AssertUnwindSafe(f)).map_err(|p| TaskError::Panicked(panic_report(p)));
+            completed.fetch_add(1, Ordering::Relaxed);
             run_state.complete(result);
             signal_completion(internal);
         })),
@@ -1532,6 +1543,8 @@ struct PoolInner {
     workers: Vec<WorkerSlot>,
     started: AtomicUsize,
     exited: AtomicUsize,
+    /// Jobs the workers ran, each counted before its handle is answered: whoever has a job's
+    /// result sees it here.
     completed: AtomicU64,
     handles: AtomicUsize,
     shutdown_state: Arc<TaskState<()>>,
@@ -1680,7 +1693,7 @@ impl PoolInner {
         let traced = ui_hang::relax_timeline::hooks()
             .inspect(|h| (h.begin)(label.as_ptr(), label.len()))
             .is_some();
-        if let Err(panic) = catch_unwind(AssertUnwindSafe(|| job.run())) {
+        if let Err(panic) = catch_unwind(AssertUnwindSafe(|| job.run(&self.completed))) {
             crate::error!("pool job cleanup panicked: {}", panic_report(panic).message);
         }
         #[cfg(any(target_vendor = "apple", target_os = "linux"))]
@@ -1689,7 +1702,6 @@ impl PoolInner {
                 (h.end)(label.as_ptr(), label.len());
             }
         }
-        self.completed.fetch_add(1, Ordering::Relaxed);
     }
 }
 fn pool_worker(inner: Arc<PoolInner>, index: usize) {
@@ -2273,10 +2285,11 @@ impl<'scope, 'env> TaskScope<'scope, 'env> {
         let finished = Arc::new(TaskState::default());
         let panicked = Arc::new(AtomicBool::new(false));
         let run_panicked = panicked.clone();
-        let run: Box<dyn FnOnce() + Send + 'scope> = Box::new(move || {
+        let run: Box<dyn FnOnce(&AtomicU64) + Send + 'scope> = Box::new(move |completed: &AtomicU64| {
             let result =
                 catch_unwind(AssertUnwindSafe(f)).map_err(|p| TaskError::Panicked(panic_report(p)));
             run_panicked.store(result.is_err(), Ordering::Release);
+            completed.fetch_add(1, Ordering::Relaxed);
             result_state.complete(result);
         });
         let cancel: Box<dyn FnOnce() + Send + 'scope> = Box::new(move || {
@@ -2286,9 +2299,10 @@ impl<'scope, 'env> TaskScope<'scope, 'env> {
         // can outlive it only after their borrowed job has been taken away.
         let (run, cancel) = unsafe {
             (
-                std::mem::transmute::<Box<dyn FnOnce() + Send + 'scope>, Box<dyn FnOnce() + Send>>(
-                    run,
-                ),
+                std::mem::transmute::<
+                    Box<dyn FnOnce(&AtomicU64) + Send + 'scope>,
+                    Box<dyn FnOnce(&AtomicU64) + Send>,
+                >(run),
                 std::mem::transmute::<Box<dyn FnOnce() + Send + 'scope>, Box<dyn FnOnce() + Send>>(
                     cancel,
                 ),
@@ -4086,28 +4100,36 @@ mod tests {
     /// A crew helper (a job taking task after task on a worker) learns at its task boundary that a
     /// higher-class job waits for a worker, though no permit waits: every worker is busy. Before
     /// it, an Interactive job waited 8 s behind 14 Visible helpers that checkpointed
-    /// every few ms.
+    /// every few ms. What the pool says is asked: the permit's half of `worker_wanted` answers for
+    /// the whole process's CPU budget, which on a loaded box (the JIT's compiles below their floor)
+    /// asks any job to yield, the Interactive one too.
     #[test]
     fn a_long_job_learns_a_higher_class_job_waits_for_its_worker() {
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         if makepad_cpu_budget::limit() < 2 {
             return;
         }
+        fn pool_wants_worker() -> bool {
+            current_class().is_some_and(higher_queued_in_pool)
+        }
         let pool = test_pool(1);
-        let started = Arc::new(AtomicBool::new(false));
-        let seen = started.clone();
+        let (started, on_worker) = mpsc::channel();
+        let (queued, boundary) = mpsc::channel();
         let helper = pool
             .submit(Class::Visible, move || {
-                let before = worker_wanted();
-                seen.store(true, Ordering::SeqCst);
-                // its task boundaries: it leaves once it learns of the queued job
-                wait_for("the helper to learn a higher-class job waits for its worker", worker_wanted);
-                before
+                let before = pool_wants_worker();
+                started.send(()).unwrap();
+                // its next task boundary comes after the Interactive job was queued
+                boundary.recv().unwrap();
+                (before, pool_wants_worker() && worker_wanted())
             })
             .unwrap();
-        wait_for("the helper on the only worker", || started.load(Ordering::SeqCst));
-        let interactive = pool.submit(Class::Interactive, worker_wanted).unwrap();
-        assert!(!worker_join(helper).unwrap(), "nothing waited when the helper started");
+        on_worker.recv().unwrap();
+        let interactive = pool.submit(Class::Interactive, pool_wants_worker).unwrap();
+        queued.send(()).unwrap();
+        let (before, learned) = worker_join(helper).unwrap();
+        assert!(!before, "nothing waited in the pool when the helper started");
+        assert!(learned, "the helper learns at its task boundary that a higher-class job waits for its worker");
         assert!(!worker_join(interactive).unwrap(), "the Interactive job itself is not asked to leave");
         assert!(!worker_wanted(), "off a pool worker, with no job, nothing is wanted");
         worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();

@@ -8,7 +8,7 @@
 
 use super::util::OSError;
 use super::Signal;
-use crate::media::{camera_layout, name_hash, pack_camera_frame, CameraFrameData, CameraPlane, VideoFormatInfo, VideoInputInfo, VideoPixel};
+use crate::media::{camera_layout, name_hash, pack_camera_frame, CameraCalibration, CameraExposure, CameraFrameData, CameraPlane, VideoFormatInfo, VideoInputInfo, VideoPixel};
 use makepad_apple_sys::*;
 use std::collections::{HashMap, HashSet};
 use std::os::raw::c_void;
@@ -146,6 +146,7 @@ impl CameraStreamNode {
                                 CameraPlane { row_stride: y_stride as u32, pixel_stride: 1, bytes: y_slice },
                                 CameraPlane { row_stride: uv_stride as u32, pixel_stride: 2, bytes: uv_slice },
                             ],
+                            exposure: CameraExposure::default(),
                         })
                     })
                 } else {
@@ -161,6 +162,7 @@ impl CameraStreamNode {
                             matrix: 0,
                             display_rotation: 0,
                             planes: vec![CameraPlane { row_stride: bytes_per_row as u32, pixel_stride: 2, bytes: packed }],
+                            exposure: CameraExposure::default(),
                         })
                     })
                 };
@@ -443,7 +445,7 @@ impl AvCaptureAccess {
                 }
                 inputs.push(AvVideoInput {
                     device_obj: RcObjcId::from_unowned(NonNull::new(device_obj).unwrap()),
-                    desc: VideoInputInfo { id: name_hash(&uuid), name, sensor_orientation: sensor_orientation(device_obj), formats },
+                    desc: VideoInputInfo { id: name_hash(&uuid), name, sensor_orientation: sensor_orientation(device_obj), formats, calibration: CameraCalibration::default() },
                     av_formats,
                 });
             }

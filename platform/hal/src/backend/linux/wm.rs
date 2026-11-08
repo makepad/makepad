@@ -771,14 +771,14 @@ impl App {
                     self.hub.send(vec![AppToStudio::TickDone]);
                 }
             }
-            StudioToApp::MouseDown(e) => self.pointer(|q, id| q.mouse_down(id, e.x, e.y, e.button_raw_bits, mods(&e.modifiers))),
-            StudioToApp::MouseMove(e) => self.pointer(|q, id| q.mouse_move(id, e.x, e.y, 0.0, 0.0, mods(&e.modifiers))),
-            StudioToApp::MouseUp(e) => self.pointer(|q, id| q.mouse_up(id, e.x, e.y, e.button_raw_bits, mods(&e.modifiers))),
-            StudioToApp::MouseCancel(e) => self.pointer(|q, id| q.mouse_cancel(id, e.x, e.y, e.button_raw_bits, mods(&e.modifiers))),
-            StudioToApp::Scroll(e) => self.pointer(|q, id| q.scroll(id, e.x, e.y, e.sx, e.sy, mods(&e.modifiers), !e.is_mouse, phase(e.phase))),
+            StudioToApp::MouseDown(e) => self.pointer_to(e.x, e.y, |q, id, x, y| q.mouse_down(id, x, y, e.button_raw_bits, mods(&e.modifiers))),
+            StudioToApp::MouseMove(e) => self.pointer_to(e.x, e.y, |q, id, x, y| q.mouse_move(id, x, y, 0.0, 0.0, mods(&e.modifiers))),
+            StudioToApp::MouseUp(e) => self.pointer_to(e.x, e.y, |q, id, x, y| q.mouse_up(id, x, y, e.button_raw_bits, mods(&e.modifiers))),
+            StudioToApp::MouseCancel(e) => self.pointer_to(e.x, e.y, |q, id, x, y| q.mouse_cancel(id, x, y, e.button_raw_bits, mods(&e.modifiers))),
+            StudioToApp::Scroll(e) => self.pointer_to(e.x, e.y, |q, id, x, y| q.scroll(id, x, y, e.sx, e.sy, mods(&e.modifiers), !e.is_mouse, phase(e.phase))),
             StudioToApp::Pinch(e) => {
                 let phase = match e.phase { PinchPhase::Begin => input::pinch::BEGIN, PinchPhase::Update => input::pinch::UPDATE, PinchPhase::End => input::pinch::END };
-                self.pointer(|q, id| q.pinch(id, e.x, e.y, e.scale, phase));
+                self.pointer_to(e.x, e.y, |q, id, x, y| q.pinch(id, x, y, e.scale, phase));
             }
             StudioToApp::KeyDown(e) => {
                 let m = key_mods(e.modifiers.shift, e.modifiers.control, e.modifiers.alt, e.modifiers.logo);
@@ -806,9 +806,9 @@ impl App {
             StudioToApp::Custom(json) => {
                 // A press in the window: the app's drag query says whether it is its caption.
                 if let Some(query) = HostedDragQuery::parse(&json) {
-                    if let Some(key) = self.input_recipient() {
+                    if let Some((key, x, y)) = self.pointer_at(query.x, query.y) {
                         self.drag_queries.push_back(query.id);
-                        self.state.shared.push(key, |q, id| q.drag_query(id, query.x, query.y));
+                        self.state.shared.push(key, |q, id| q.drag_query(id, x, y));
                     }
                     return;
                 }
@@ -887,6 +887,24 @@ impl App {
     fn pointer(&self, f: impl FnOnce(&mut crate::buffers::EventQueue, Id)) {
         if let Some(key) = self.input_recipient() {
             self.state.shared.push(key, f);
+        }
+    }
+
+    /// The window a pointer message at `x, y` (the child's window space, where a later window
+    /// sits at its own origin: its geometry's left and top) is for, and the point in it. A point
+    /// in no window is the first window's, as the native hosted path does (`window_id_contains`).
+    fn pointer_at(&self, x: f64, y: f64) -> Option<(Key, f64, f64)> {
+        let inside = self.windows.values().filter(|w| !w.dropdown).find_map(|w| {
+            let ([left, top, width, height], _, _) = w.geom?;
+            (x >= left && y >= top && x <= left + width && y <= top + height).then_some((w.recipient, x - left, y - top))
+        });
+        inside.or_else(|| self.input_recipient().map(|key| (key, x, y)))
+    }
+
+    /// A pointer message at `x, y` to the window it is in, with the point in that window.
+    fn pointer_to(&self, x: f64, y: f64, f: impl FnOnce(&mut crate::buffers::EventQueue, Id, f64, f64)) {
+        if let Some((key, x, y)) = self.pointer_at(x, y) {
+            self.state.shared.push(key, |q, id| f(q, id, x, y));
         }
     }
 
@@ -1244,10 +1262,12 @@ impl Shell for App {
                     let show = HostedDropdown { tray, w: w as f64, h: h as f64, ..HostedDropdown::new(window_id, dropdown_op::SHOW) };
                     self.hub.send(vec![AppToStudio::Custom(show.to_json())]);
                 }
-                OsCmd::DragReply { to: input::reply::QUERY, answer, .. } => {
+                OsCmd::DragReply { to: input::reply::QUERY, answer, fullscreen, .. } => {
                     if let Some(id) = self.drag_queries.pop_front() {
                         let response = u8::try_from(answer).unwrap_or(drag_answer::NO_ANSWER);
-                        self.hub.send(vec![AppToStudio::Custom(HostedDragAnswer { id, response, double_click: drag_double::MAXIMISE }.to_json())]);
+                        // what a double click there does is the window's own declaration
+                        let double_click = if fullscreen { drag_double::FULLSCREEN } else { drag_double::MAXIMISE };
+                        self.hub.send(vec![AppToStudio::Custom(HostedDragAnswer { id, response, double_click }.to_json())]);
                     }
                 }
                 OsCmd::FrameRequest { id } => {
@@ -1746,7 +1766,8 @@ mod tests {
     /// `makepad run` under the WM draws its own caption: the WM's drag query reaches the app's
     /// window (lent to the app's domain), the app's answer goes back under the WM's id, and the
     /// caption buttons of the lent window become the WM's window ops; the app closing that window closes the tile.
-    /// A later window the app closes is said to the WM by its id, so its tile leaves the desk.
+    /// A later window gets the presses made in it, its answer carries its own double click, and
+    /// one the app closes is said to the WM by its id, so its tile leaves the desk.
     #[test]
     fn the_caption_of_a_lent_window_answers_the_wm_and_the_wm_appearance_reaches_host_dark() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1757,7 +1778,7 @@ mod tests {
             let mut byte = [0u8];
             while !request.ends_with(b"\r\n\r\n") { stream.read_exact(&mut byte).unwrap(); request.push(byte[0]); }
             stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").unwrap();
-            (0..9).map(|_| AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0).collect::<Vec<_>>()
+            (0..10).map(|_| AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0).collect::<Vec<_>>()
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
@@ -1774,7 +1795,7 @@ mod tests {
         app.message(StudioToApp::Custom(HostedDragQuery { id: 12, x: 41.0, y: 8.0 }.to_json()));
         assert_eq!(app.drag_queries, [11, 12]);
         assert!(lock(&app.state.shared.inbox).contains_key(&lent.0), "the query goes to the session the window is lent to");
-        let reply = |answer| OsCmd::DragReply { id: lent.1, to: input::reply::QUERY, answer };
+        let reply = |answer| OsCmd::DragReply { id: lent.1, to: input::reply::QUERY, answer, fullscreen: false };
         app.command(Op::Cmd(lent.0, reply(input::drag_query::CAPTION)));
         app.command(Op::Cmd(lent.0, reply(input::drag_query::CLIENT)));
         assert!(app.drag_queries.is_empty());
@@ -1784,9 +1805,21 @@ mod tests {
         app.command(Op::Cmd(lent.0, OsCmd::WindowState { id: lent.1, state: window_state::FULLSCREEN }));
         // a later window (an output window) is a tile of its own: what the app asks of it names it
         let later = (lent.0, Id::new(5, 1));
-        app.windows.insert(later, Win { window_id: 3, recipient: later, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
+        let origin = ([100_000.0, 0.0, 300.0, 200.0], 1.0, None);
+        app.windows.insert(later, Win { window_id: 3, recipient: later, requested: false, awaiting: false, ahead: 0, geom: Some(origin), dropdown: false });
         app.command(Op::Cmd(lent.0, OsCmd::WindowState { id: later.1, state: window_state::FULLSCREEN }));
         app.command(Op::Cmd(lent.0, OsCmd::WindowState { id: later.1, state: window_state::RESTORE }));
+        // a press in it (at its origin in the child's window space) is asked of that window, at
+        // its own point, so a window that drags by its content drags
+        lock(&app.state.shared.inbox).remove(&lent.0);
+        app.message(StudioToApp::Custom(HostedDragQuery { id: 13, x: 100_040.0, y: 8.0 }.to_json()));
+        let mut asked = Vec::new();
+        if let Some(mut q) = lock(&app.state.shared.inbox).remove(&lent.0) {
+            q.drain_with(|e, payload| if let Some(crate::HalEvent::DragQuery { window, x, y }) = e.decode(payload) { asked.push((window, x, y)); });
+        }
+        assert_eq!(asked, [(later.1, 40.0, 8.0)]);
+        // it drags by its content and a double click makes it fullscreen (its own declaration)
+        app.command(Op::Cmd(lent.0, OsCmd::DragReply { id: later.1, to: input::reply::QUERY, answer: input::drag_query::CAPTION, fullscreen: true }));
         app.command(Op::Cmd(lent.0, OsCmd::WindowClose { id: later.1 }));
         assert!(!app.windows.contains_key(&later));
         // a window this shell does not have asks nothing
@@ -1818,8 +1851,9 @@ mod tests {
         assert_eq!(HostedWindowOp::parse(&sent[4]), Some(HostedWindowOp { op: WINDOW_OP_FULLSCREEN }));
         assert_eq!(HostedWindow::parse(&sent[5]), Some(HostedWindow::new(3, hosted_window_op::FULLSCREEN)));
         assert_eq!(HostedWindow::parse(&sent[6]), Some(HostedWindow::new(3, hosted_window_op::RESTORE)));
-        assert_eq!(HostedWindow::parse(&sent[7]), Some(HostedWindow::new(3, hosted_window_op::CLOSED)));
-        assert_eq!(HostedWindowOp::parse(&sent[8]), Some(HostedWindowOp { op: window_op::CLOSE }));
+        assert_eq!(HostedDragAnswer::parse(&sent[7]), Some(HostedDragAnswer { id: 13, response: drag_answer::CAPTION, double_click: drag_double::FULLSCREEN }));
+        assert_eq!(HostedWindow::parse(&sent[8]), Some(HostedWindow::new(3, hosted_window_op::CLOSED)));
+        assert_eq!(HostedWindowOp::parse(&sent[9]), Some(HostedWindowOp { op: window_op::CLOSE }));
     }
 
     /// `makepad run` under the WM: the WM's style sheet and its activation of the tile arrive while

@@ -75,6 +75,7 @@ pub struct CxScriptResources {
     pub generation: std::cell::Cell<u64>,
     /// The crates whose directory was found missing ([`report_missing_crate_dir`]): each is
     /// said once.
+    #[cfg(not(target_arch = "wasm32"))]
     missing_crate_dirs: Vec<String>,
 }
 
@@ -257,8 +258,6 @@ fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
     crate::os::cx_native::read_file_cwd_or_exe_relative(&cx.package_paths, &full_path).map(Rc::new)
 }
 
-/// Load a file directly from the filesystem (desktop/mobile only, not wasm).
-#[cfg(not(target_arch = "wasm32"))]
 /// An unpackaged native build reads a crate's resources from the directory that crate was built
 /// in (its `CARGO_MANIFEST_DIR`, fixed at compile time). A binary whose tree was moved or renamed
 /// after the build finds none of them, and its fonts, icons and images are blank without a word:
@@ -277,6 +276,8 @@ fn report_missing_crate_dir(reported: &mut Vec<String>, abs_path: &str, dependen
     );
 }
 
+/// Load a file directly from the filesystem (desktop/mobile only, not wasm).
+#[cfg(not(target_arch = "wasm32"))]
 fn load_file_direct(abs_path: &str) -> Option<Result<Rc<Vec<u8>>, String>> {
     let mut file = File::open(abs_path).ok()?;
     let mut data = Vec::new();
@@ -743,6 +744,33 @@ mod tests {
         );
     }
 
+    /// `crate_resource` of a crate the VM does not know is an error that names the crate and the
+    /// path asked for, not a nil: an app's GPU guard test's face was nil without a word, its font
+    /// family empty, and the test failed on an index far from the cause.
+    #[test]
+    fn a_resource_of_a_crate_the_vm_does_not_know_is_an_error() {
+        use super::*;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script::script_mod(vm);
+            // collected, not logged, so the test reads them
+            vm.capture_errors();
+            let unknown = vm.eval(script! { use mod.res.* crate_resource("no_such_crate:Cargo.toml") });
+            assert!(unknown.as_handle().is_none(), "{unknown:?}");
+            let errors = vm.take_errors();
+            assert!(
+                errors.len() == 1 && errors[0].contains("no_such_crate:Cargo.toml") && errors[0].contains("knows no crate no_such_crate"),
+                "{errors:?}"
+            );
+            // Once the crate is named, the same call is its resource.
+            vm.register_crate_manifest("no_such_crate", env!("CARGO_MANIFEST_DIR"));
+            let known = vm.eval(script! { use mod.res.* crate_resource("no_such_crate:Cargo.toml") });
+            assert!(known.as_handle().is_some(), "{known:?}");
+            assert!(vm.take_errors().is_empty());
+            vm.stop_capturing_errors();
+        });
+    }
+
     /// A crate whose build directory is gone is said once, whatever else of it fails to load;
     /// a crate whose directory exists (a file of it is missing) is not.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1179,6 +1207,15 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         return registered_crate_resource(vm, crate_part, file_path).unwrap_or_else(|| {
                             script_err_io!(vm.trap(), "external resources require a host request")
                         });
+                    }
+                    // A crate this VM was never told about has no directory here: its resource
+                    // would be nil without a word, and an empty font family or a blank icon
+                    // shows up far from the path that was asked for.
+                    if crate_part != "self" && vm.crate_manifest(&crate_part.replace('-', "_")).is_none() {
+                        return script_err_not_found!(
+                            vm.trap(),
+                            "crate_resource(\"{path_string}\"): this VM knows no crate {crate_part} (a crate is named to a VM by a script_mod of its own, or by register_crate_manifest)"
+                        );
                     }
                     return register_crate_resource_parts(vm, res_type, crate_part, file_path);
                 }

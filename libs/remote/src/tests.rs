@@ -48,21 +48,28 @@ fn echo() -> Factory {
 
 /// Connects a client `Conn` to `ep` over an in-process socket pair.
 pub(crate) fn pair(ep: &Endpoint) -> Conn {
+    pair_served(ep).0
+}
+
+/// As [`pair`], returning the endpoint's side as well: (client, served). The endpoint's accept
+/// hook has seen the served side by the time this returns.
+pub(crate) fn pair_served(ep: &Endpoint) -> (Conn, Conn) {
     let (a, b) = UnixStream::pair().unwrap();
     let ep = ep.clone();
-    std::thread::spawn(move || {
+    let served = std::thread::spawn(move || {
         let (r, w, s) = (a.try_clone().unwrap(), a.try_clone().unwrap(), a);
-        let _ = ep.serve(FrameReader::new(Box::new(r)), Box::new(w), Box::new(move || {
+        ep.serve(FrameReader::new(Box::new(r)), Box::new(w), Box::new(move || {
             let _ = s.shutdown(std::net::Shutdown::Both);
-        }));
+        }))
     });
     let (r, w, s) = (b.try_clone().unwrap(), b.try_clone().unwrap(), b);
     let mut reader = FrameReader::new(Box::new(r));
     let mut writer: Box<dyn Write + Send> = Box::new(w);
     let ok = hello::client_handshake(&mut reader, &mut *writer, &Hello { name: "test".into(), link_id: "t".into(), ..Hello::default() }).unwrap();
-    Conn::start(Io { reader, writer, shutdown: Box::new(move || {
+    let client = Conn::start(Io { reader, writer, shutdown: Box::new(move || {
         let _ = s.shutdown(std::net::Shutdown::Both);
-    }) }, ok, true, None, Hooks::default())
+    }) }, ok, true, None, Hooks::default());
+    (client, served.join().unwrap().unwrap())
 }
 
 fn data(ch: &Channel) -> Vec<u8> {
@@ -169,6 +176,24 @@ fn different_major_version_is_refused_with_both_versions() {
     let msg = String::from_utf8(f.payload[1..].to_vec()).unwrap();
     assert!(msg.contains("1.0") && msg.contains("9.2"), "{msg}");
     assert!(h.join().unwrap().unwrap().contains("9.2"));
+}
+
+/// A dial learns who answers it: the endpoint's process and when that endpoint began, so a
+/// client tells a live endpoint from the one before it (an exec keeps the pid, not the start).
+#[test]
+fn a_dial_is_told_which_process_answers_it() {
+    let before = crate::cmd::wall_ms();
+    let ep = Endpoint::new("t");
+    let after = crate::cmd::wall_ms();
+    let (client, served) = pair_served(&ep);
+    let who = client.peer();
+    assert_eq!(who.serving_pid, std::process::id());
+    assert!((before..=after).contains(&who.serving_since_ms), "{} not in {before}..={after}", who.serving_since_ms);
+    // the endpoint's own start, whichever connection asks
+    let (again, _) = pair_served(&ep);
+    assert_eq!(again.peer().serving_since_ms, who.serving_since_ms);
+    // a client claims no process of its own: what the endpoint knows of it is its carrier's
+    assert_eq!((served.peer().serving_pid, served.peer().serving_since_ms), (0, 0));
 }
 
 #[test]

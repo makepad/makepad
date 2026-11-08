@@ -1748,6 +1748,21 @@ pub fn hal_xr_environment_depth(on: bool) {
     let _ = on;
 }
 
+/// The head at `time_ns` (the HAL clock: OpenXR's on Android), as the runtime tracked or
+/// predicts it: a moment a little past (a camera frame's exposure) is interpolated from its
+/// history, never the newest pose. None without a running XR session, or when the runtime has
+/// no valid pose then (Android XR; elsewhere always None).
+#[relax_api]
+pub fn hal_xr_locate_head(time_ns: u64) -> Option<XrHeadAt> {
+    #[cfg(target_os = "android")]
+    return backend::android::xr::locate_head(time_ns);
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = time_ns;
+        None
+    }
+}
+
 /// The environment depth images are read back to the app for its room field (`on`; off at
 /// start: the app gets only the GPU image, no copy and no CPU work). Android XR; elsewhere
 /// nothing.

@@ -11,7 +11,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write;
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering::Relaxed};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, Thread};
 use std::time::Instant;
 
@@ -96,8 +96,10 @@ struct State {
     worst: VecDeque<Worst>,
     /// The longest recent waits behind an earlier job on the same strand (`strand_waited`).
     strand_worst: VecDeque<Worst>,
-    #[cfg(test)]
-    changed: Option<std::sync::mpsc::Sender<()>>,
+    /// How many times the table changed (`refresh`): `Budget::changed` wakes the waits for it.
+    changes: u64,
+    /// Threads in `wait_for_change`: a change with none costs no wake.
+    watchers: usize,
 }
 /// The JIT's Background jobs Visible work makes room for while they wait, counting the one JIT job that always runs:
 /// two permits. A cold slice runs on the code those jobs compile: starved of them it stays on slow code, and takes
@@ -115,6 +117,8 @@ struct Budget {
     /// JIT_FLOOR, within a quarter of the limit: on a small machine it would leave Visible nothing.
     jit_floor: usize,
     state: Mutex<State>,
+    /// Woken on each change of the table (`State::changes`, `wait_for_change`).
+    changed: Condvar,
     classes: Box<[AtomicU8]>,
     // A precomputed bit per yielding class: should_yield needs just two relaxed loads.
     yield_classes: AtomicU8,
@@ -144,9 +148,10 @@ impl Budget {
                 runtime: [0; 3], spans: [Span::default(); 3], warnings: HashMap::new(),
                 worst: VecDeque::new(),
                 strand_worst: VecDeque::new(),
-                #[cfg(test)]
-                changed: None,
+                changes: 0,
+                watchers: 0,
             }),
+            changed: Condvar::new(),
             classes: (0..ROWS).map(|_| AtomicU8::new(INTERACTIVE)).collect(),
             yield_classes: AtomicU8::new(0), contended_classes: AtomicU8::new(0), warmup: AtomicU8::new(0),
             queued: std::array::from_fn(|_| std::array::from_fn(|_| AtomicI64::new(0))),
@@ -200,8 +205,18 @@ impl Budget {
         if let Some(i) = self.first(s) {
             if self.room(s, s.waiters[i].class, s.waiters[i].client) { s.waiters[i].thread.unpark(); }
         }
-        #[cfg(test)]
-        if let Some(tx) = &s.changed { let _ = tx.send(()); }
+        s.changes = s.changes.wrapping_add(1);
+        if s.watchers > 0 { self.changed.notify_all(); }
+    }
+    /// Blocks until the table changed after it showed `seen` changes; the count then.
+    fn wait_for_change(&self, seen: u64) -> u64 {
+        let mut s = self.lock();
+        s.watchers += 1;
+        while s.changes == seen {
+            s = self.changed.wait(s).unwrap_or_else(|e| e.into_inner());
+        }
+        s.watchers -= 1;
+        s.changes
     }
     fn acquire<'a>(&'a self, mut s: MutexGuard<'a, State>, mut job: Job, desired: Option<&AtomicU8>) -> u32 {
         let key = (job.class, job.ticket);
@@ -590,10 +605,19 @@ static WAIT_HOOK: OnceLock<extern "C" fn(u8)> = OnceLock::new();
 fn global() -> &'static Budget {
     static BUDGET: OnceLock<Budget> = OnceLock::new();
     BUDGET.get_or_init(|| {
-        let cores = thread::available_parallelism().map_or(1, usize::from);
+        let cores = granted_cores(thread::available_parallelism().map_or(1, usize::from), std::env::var("MAKEPAD_CPU_CORES").ok().as_deref());
         // (a machine whose topology is not known: every CPU a core)
         Budget::new(cores, match physical_cores() { 0 => cores, n => n.min(cores) })
     })
+}
+
+/// The cores the process may use: its machine's `machine`, or fewer where its run was given
+/// fewer (`MAKEPAD_CPU_CORES`: a gate's share of its lease for each of the units it runs side by
+/// side): every pool and the JIT's workers then size from that share, not the box. A tests shard
+/// ran three units at once, each unit's pools and JIT workers sized from the whole box, and its
+/// box ran well over its cores (11-08).
+fn granted_cores(machine: usize, jobs: Option<&str>) -> usize {
+    jobs.and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0).map_or(machine, |n| n.min(machine))
 }
 
 /// The machine's cores, an SMT core's hardware threads counted once (Linux: one per distinct
@@ -785,6 +809,20 @@ pub fn lend_permit(permit: u32) { global().lend_permit(permit); }
 /// `Budget::take_back_permit`.
 #[relax_api]
 pub fn take_back_permit(permit: u32) { global().take_back_permit(permit); }
+/// How many times the budget changed so far: an admission, a release, a wait for a token begun or
+/// ended, a lend, a class's change (whatever `tokens` and `report` show moves with it).
+#[relax_api]
+pub fn changes() -> u64 { global().lock().changes }
+/// Blocks until the budget changed after `changes` said `seen`, and returns the count then: a wait
+/// for a state of the budget looks again at each change, never by the clock. A thread with a
+/// permit lends its token meanwhile (`lend`).
+#[relax_api]
+pub fn wait_for_change(seen: u64) -> u64 {
+    let lent = lend();
+    let now = global().wait_for_change(seen);
+    if lent { take_back(); }
+    now
+}
 /// One permit, as `tokens` reports it.
 pub struct Holder {
     pub thread: u64,

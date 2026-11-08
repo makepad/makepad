@@ -2,8 +2,8 @@
 use super::{libc_sys, v4l2_sys::*};
 use crate::fake_camera::{self, FakeCapture};
 use crate::media::{
-    camera_layout, name_hash, pack_camera_frame, CameraFrameData, CameraPlane, VideoFormatInfo,
-    VideoInputInfo, VideoPixel,
+    camera_layout, name_hash, pack_camera_frame, CameraCalibration, CameraExposure, CameraFrameData, CameraPlane,
+    VideoFormatInfo, VideoInputInfo, VideoPixel,
 };
 use std::{
     collections::HashMap,
@@ -509,6 +509,7 @@ impl Capture {
                     matrix: if layout == camera_layout::MJPEG { 3 } else { 1 },
                     display_rotation: 0,
                     planes,
+                    exposure: CameraExposure::default(),
                 }))
             })();
             if ioctl(self.fd, VIDIOC_QBUF, (&mut b as *mut v4l2_buffer).cast::<std::ffi::c_void>()) < 0 {
@@ -829,6 +830,7 @@ impl Camera {
                 name,
                 formats,
                 sensor_orientation: 0,
+                calibration: CameraCalibration::default(),
             },
         }))
     }

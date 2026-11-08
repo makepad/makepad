@@ -1,25 +1,44 @@
 //! SIGPROF backtrace from the interrupted context. The handler uses a bounded
 //! frame-pointer walk and kernel-validated reads, not libc's allocating/lazy
 //! loader unwinder. Symbolization happens on the watchdog after the handler.
-use std::{ffi::{c_void, c_char, CStr}, sync::{atomic::{AtomicUsize, Ordering}, OnceLock}, time::{Duration, Instant}};
+//! A sample waits for its handler however long the UI thread takes to run again: the kernel
+//! runs the handler before that thread runs anything else, so a stall cannot end before its
+//! sample is taken, however loaded the box. The one way the signal is never taken, SIGPROF
+//! blocked on the thread, is refused at registration; should it be blocked later, the stall's
+//! end cancels the request.
+use std::{ffi::{c_void, c_char, CStr}, sync::{atomic::{AtomicU32, AtomicUsize, Ordering}, OnceLock}};
 
 const SIGPROF: i32 = 27;
 #[cfg(target_arch = "x86_64")]
 const SYS_GETTID: std::ffi::c_long = 186;
 #[cfg(target_arch = "x86_64")]
 const SYS_TGKILL: std::ffi::c_long = 234;
+#[cfg(target_arch = "x86_64")]
+const SYS_FUTEX: std::ffi::c_long = 202;
 #[cfg(target_arch = "aarch64")]
 const SYS_GETTID: std::ffi::c_long = 178;
 #[cfg(target_arch = "aarch64")]
 const SYS_TGKILL: std::ffi::c_long = 131;
+#[cfg(target_arch = "aarch64")]
+const SYS_FUTEX: std::ffi::c_long = 98;
 // Other register/ABI layouts are unsupported; an invalid syscall makes
 // registration report unavailable before installing any signal handler.
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 const SYS_GETTID: std::ffi::c_long = -1;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 const SYS_TGKILL: std::ffi::c_long = -1;
-static REQUEST: AtomicUsize = AtomicUsize::new(0); // 0 idle, 1 requested, 2 sampling, 3 ready
-static THREAD: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const SYS_FUTEX: std::ffi::c_long = -1;
+const FUTEX_WAIT_PRIVATE: usize = 128;
+const FUTEX_WAKE_PRIVATE: usize = 129;
+const SIG_BLOCK: i32 = 0;
+/// The mailbox: `IDLE`, the kernel id of the thread a sample is asked of, `SAMPLING` (its
+/// handler walks) or `READY`. One word, so a handler takes only its own thread's request, and
+/// the futex the watchdog waits on.
+static REQUEST: AtomicU32 = AtomicU32::new(IDLE);
+const IDLE: u32 = 0;
+const SAMPLING: u32 = u32::MAX - 1;
+const READY: u32 = u32::MAX;
 static BOTTOM: AtomicUsize = AtomicUsize::new(0);
 static TOP: AtomicUsize = AtomicUsize::new(0);
 static LENGTH: AtomicUsize = AtomicUsize::new(0);
@@ -38,13 +57,14 @@ extern "C" {
     fn pthread_attr_getstack(attr: *const c_void, address: *mut *mut c_void, size: *mut usize) -> i32;
     fn pthread_attr_destroy(attr: *mut c_void) -> i32;
     fn sigaction(signal: i32, action: *const Action, old: *mut Action) -> i32;
+    fn pthread_sigmask(how: i32, set: *const u64, old: *mut u64) -> i32;
     fn getpid() -> i32;
     fn syscall(number: std::ffi::c_long, ...) -> std::ffi::c_long;
     fn __errno_location() -> *mut i32;
     fn dladdr(pc: *const c_void, info: *mut DlInfo) -> i32;
 }
 
-pub(super) struct Target { thread: usize, bottom: usize, top: usize }
+pub(super) struct Target { thread: u32, bottom: usize, top: usize }
 impl Target {
     pub(super) fn current() -> Option<Self> {
         // Resolve the handler's libc stubs before a signal can interrupt a
@@ -55,7 +75,12 @@ impl Target {
             let _ = getpid();
             syscall(SYS_GETTID)
         };
-        if tid <= 0 { return None; }
+        let tid = u32::try_from(tid).ok().filter(|tid| *tid != IDLE && *tid < SAMPLING)?;
+        // a thread that blocks SIGPROF would never take a request
+        let mut mask = [0u64; 16];
+        if unsafe { pthread_sigmask(SIG_BLOCK, std::ptr::null(), mask.as_mut_ptr()) } != 0 || mask[0] & (1 << (SIGPROF - 1)) != 0 {
+            return None;
+        }
         static INSTALLED: OnceLock<bool> = OnceLock::new();
         if !*INSTALLED.get_or_init(|| unsafe {
             let mut old: Action = std::mem::zeroed();
@@ -72,32 +97,43 @@ impl Target {
             let result = pthread_attr_getstack(attr.as_ptr().cast(), &mut bottom, &mut size);
             pthread_attr_destroy(attr.as_mut_ptr().cast());
             if result != 0 { return None; }
-            Some(Self { thread: tid as usize, bottom: bottom as usize, top: (bottom as usize).checked_add(size)? })
+            Some(Self { thread: tid, bottom: bottom as usize, top: (bottom as usize).checked_add(size)? })
         }
     }
     pub(super) fn sample(&self) -> Vec<usize> {
-        // Only watchdogs use this lock, never UI/handler. Multiple headless
-        // contexts cannot overwrite the fixed signal mailbox concurrently.
-        let Ok(_sampler) = SAMPLER.try_lock() else { return Vec::new(); };
-        if REQUEST.load(Ordering::Acquire) == 2 { return Vec::new(); }
-        THREAD.store(self.thread, Ordering::Relaxed);
+        self.sample_in(&SAMPLER)
+    }
+    /// A sample, `sampler` held for the mailbox. Only watchdogs take it, never the UI thread or
+    /// the handler: one request in the mailbox at a time (several headless contexts take turns).
+    /// One that finds it taken skips this sample instead of waiting: the request there waits for
+    /// its own thread, which may sit in the kernel (an uninterruptible ioctl) as long as it does.
+    /// The wait for the handler ends on events only: it ran (`READY`), or the stall ended or the
+    /// thread left first ([`stall_ended`]: `IDLE`).
+    fn sample_in(&self, sampler: &std::sync::Mutex<()>) -> Vec<usize> {
+        let _sampler = match sampler.try_lock() {
+            Ok(held) => held,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Vec::new(),
+        };
         BOTTOM.store(self.bottom, Ordering::Relaxed);
         TOP.store(self.top, Ordering::Relaxed);
-        REQUEST.store(1, Ordering::Release);
+        REQUEST.store(self.thread, Ordering::Release);
         if unsafe { syscall(SYS_TGKILL, getpid(), self.thread as i32, SIGPROF) } != 0 {
-            let _ = REQUEST.compare_exchange(1, 0, Ordering::AcqRel, Ordering::Relaxed);
+            REQUEST.store(IDLE, Ordering::Release);
             return Vec::new();
         }
-        let deadline = Instant::now() + Duration::from_millis(10);
-        while REQUEST.load(Ordering::Acquire) != 3 {
-            if Instant::now() >= deadline {
-                let _ = REQUEST.compare_exchange(1, 0, Ordering::AcqRel, Ordering::Relaxed);
-                return Vec::new();
+        loop {
+            match REQUEST.load(Ordering::Acquire) {
+                READY => break,
+                // cancelled: the stall ended before the thread took the signal
+                IDLE => return Vec::new(),
+                pending => unsafe {
+                    syscall(SYS_FUTEX, REQUEST.as_ptr(), FUTEX_WAIT_PRIVATE, pending as usize, 0usize);
+                },
             }
-            std::thread::sleep(Duration::from_micros(100));
         }
         let frames = FRAMES[..LENGTH.load(Ordering::Relaxed)].iter().map(|p| p.load(Ordering::Relaxed)).collect();
-        REQUEST.store(0, Ordering::Release);
+        REQUEST.store(IDLE, Ordering::Release);
         frames
     }
     pub(super) fn symbolize(&self, pc: usize) -> String {
@@ -110,9 +146,19 @@ impl Target {
     }
 }
 
+/// The calling UI thread's stall ended, or the thread ends: a request for it still pending is
+/// past its stall (the thread ran on without taking the signal: SIGPROF blocked since
+/// registration, or the signal still on its way), so its watchdog stops waiting for it.
+pub(super) fn stall_ended() {
+    let Ok(tid) = u32::try_from(unsafe { syscall(SYS_GETTID) }) else { return };
+    if REQUEST.compare_exchange(tid, IDLE, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+        unsafe { syscall(SYS_FUTEX, REQUEST.as_ptr(), FUTEX_WAKE_PRIVATE, i32::MAX as usize) };
+    }
+}
+
 unsafe extern "C" fn capture(_: i32, _: *mut c_void, context: *mut c_void) {
     let saved_errno = *__errno_location();
-    if syscall(SYS_GETTID) as usize != THREAD.load(Ordering::Relaxed) || REQUEST.compare_exchange(1, 2, Ordering::Acquire, Ordering::Relaxed).is_err() {
+    if REQUEST.compare_exchange(syscall(SYS_GETTID) as u32, SAMPLING, Ordering::Acquire, Ordering::Relaxed).is_err() {
         *__errno_location() = saved_errno;
         return;
     }
@@ -146,6 +192,21 @@ unsafe extern "C" fn capture(_: i32, _: *mut c_void, context: *mut c_void) {
         fp = record[0];
     }
     LENGTH.store(len, Ordering::Relaxed);
+    REQUEST.store(READY, Ordering::Release);
+    syscall(SYS_FUTEX, REQUEST.as_ptr(), FUTEX_WAKE_PRIVATE, 1usize);
     *__errno_location() = saved_errno;
-    REQUEST.store(3, Ordering::Release);
+}
+
+#[cfg(test)]
+mod tests {
+    /// A watchdog that finds the mailbox taken skips its sample: the one waiting there waits for a
+    /// thread that may not run for as long as the kernel holds it, and every watchdog waited
+    /// behind it.
+    #[test]
+    fn a_sample_while_another_waits_is_skipped() {
+        let target = super::Target::current().expect("native stack target");
+        let busy = std::sync::Mutex::new(());
+        let _waiting = busy.lock().unwrap();
+        assert!(target.sample_in(&busy).is_empty(), "skipped, not waited for");
+    }
 }

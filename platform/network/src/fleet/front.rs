@@ -533,7 +533,10 @@ mod tests {
     use super::*;
 
     /// A LAN front listens on every interface; its stop still returns: the wake-up connection
-    /// dials its loopback (Windows refuses a connect to 0.0.0.0, and accept never woke).
+    /// dials its loopback (Windows refuses a connect to 0.0.0.0, and accept never woke). Its
+    /// return is the proof the listener closed: the acceptor owned it. A dial afterwards proves
+    /// nothing: a child another test spawned holds a copy of every socket of ours until it
+    /// execs, and that copy still listens (1 run in 50 on a loaded box).
     #[test]
     fn a_front_on_every_interface_stops() {
         use super::super::id::{generate_key, point_of, Fleet, Me, Root};
@@ -559,7 +562,6 @@ mod tests {
         let bound = front.local_addr();
         assert!(bound.ip().is_unspecified());
         front.stop();
-        assert!(TcpStream::connect(crate::utils::dial_addr(bound)).is_err(), "the port is closed after stop");
         assert_eq!(crate::utils::dial_addr("[::]:7".parse().unwrap()), "[::1]:7".parse().unwrap());
     }
 

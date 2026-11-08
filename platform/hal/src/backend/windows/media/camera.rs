@@ -12,7 +12,7 @@
 //! a camera without one shows up at the next list the app asks for.
 
 use super::Signal;
-use crate::media::{camera_layout, name_hash, pack_camera_frame, CameraFrameData, CameraPlane, VideoFormatInfo, VideoInputInfo, VideoPixel};
+use crate::media::{camera_layout, name_hash, pack_camera_frame, CameraCalibration, CameraExposure, CameraFrameData, CameraPlane, VideoFormatInfo, VideoInputInfo, VideoPixel};
 use makepad_windows_sys::core::{GUID, HRESULT, PCWSTR, PWSTR};
 use makepad_windows_sys::Win32::Foundation::PROPERTYKEY;
 use makepad_windows_sys::Win32::Media::Audio::{EDataFlow, ERole, IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClientImpl, MMDeviceEnumerator, DEVICE_STATE};
@@ -222,7 +222,7 @@ unsafe fn pack_sample(sample: &IMFSample, format: &VideoFormatInfo, timestamp_ns
 fn frame_payload(bytes: &[u8], format: &VideoFormatInfo, timestamp_ns: u64) -> Option<Vec<u8>> {
     let (width, height) = (format.width, format.height);
     let (w, h) = (width as usize, height as usize);
-    let frame = |layout, matrix, planes| pack_camera_frame(&CameraFrameData { timestamp_ns, width, height, layout, matrix, display_rotation: 0, planes });
+    let frame = |layout, matrix, planes| pack_camera_frame(&CameraFrameData { timestamp_ns, width, height, layout, matrix, display_rotation: 0, planes, exposure: CameraExposure::default() });
     match format.pixel {
         VideoPixel::NV12 => {
             let uv_rows = h.div_ceil(2);
@@ -376,7 +376,7 @@ impl Worker {
             let name = allocated_string(&activate, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME).unwrap_or_default();
             match Self::formats(&activate) {
                 Ok((formats, types)) => {
-                    let info = VideoInputInfo { id: name_hash(&symlink), name, sensor_orientation: 0, formats };
+                    let info = VideoInputInfo { id: name_hash(&symlink), name, sensor_orientation: 0, formats, calibration: CameraCalibration::default() };
                     self.inputs.push(Input { info, symlink, activate, types, running: None });
                 }
                 Err(e) => eprintln!("[hal-media] camera: \"{name}\" lists no formats: {e}"),

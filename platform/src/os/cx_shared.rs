@@ -1214,9 +1214,9 @@ impl Cx {
                     }
                     #[cfg(target_arch = "wasm32")]
                     let _ = dropdown;
-                } else if let Some(window) = makepad_hal::window_controls::HostedWindow::parse(&data) {
+                } else if let Some(window) = crate::window_controls::HostedWindow::parse(&data) {
                     #[cfg(not(target_arch = "wasm32"))]
-                    if window.op == makepad_hal::window_controls::hosted_window_op::CLOSE_REQUEST {
+                    if window.op == crate::window_controls::hosted_window_op::CLOSE_REQUEST {
                         self.hal_hosted_close_request(window.window_id);
                     }
                     #[cfg(target_arch = "wasm32")]
