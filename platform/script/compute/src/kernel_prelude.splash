@@ -468,6 +468,92 @@ fn sdf_gyroid(p, period, wall) {
     abs(g) / (k * max(n, 1.0)) - wall * 0.5
 }
 
+// A cone with round ends: the hull of the ball of radius `ra` about `a` and the ball of `rb`
+// about `b` (a capsule whose radius runs from ra to rb). Exact outside, 1-Lipschitz everywhere.
+// In the plane of the axis and the point (y along a..b, x out from the axis), the side is the
+// line tangent to both balls, its outward normal (nx, ny) with ny = (ra - rb) / |b - a|: the
+// point lies off it, or off the ball a or b where its foot falls before the one tangent point or
+// past the other. When one ball nearly holds the other (|ra - rb| within 1/256 of |b - a|), the
+// larger ball stands for the hull: it is within that much of it, and the side's normal would be
+// ill-conditioned.
+fn sdf_round_cone(p, a, b, ra, rb) {
+    let ba = b - a
+    let l2 = max(dot(ba, ba), 1e-30)
+    let l = sqrt(l2)
+    let pa = p - a
+    let da = length(pa) - ra
+    let db = length(p - b) - rb
+    let dr = ra - rb
+    let ny = dr / l
+    let nx = sqrt(max(1.0 - ny * ny, 0.0))
+    let y = dot(pa, ba) / l
+    let x = length(pa - ba * (dot(pa, ba) / l2))
+    let w = nx * y - ny * x
+    let cone = if w < 0.0 { da } elif w > nx * l { db } else { nx * x + ny * y - ra }
+    let ball = if dr >= 0.0 { da } else { db }
+    if abs(dr) >= l * 0.99609375 { ball } else { cone }
+}
+
+// ---- Curves as distance fields --------------------------------------------------
+// A curve through points is a centripetal Catmull-Rom spline: each span p1..p2 (p0 and p3 its
+// neighbours) is the cubic Bezier p1, c1, c2, p2 below, with knot steps the square roots of the
+// distances between the points. Unlike the uniform spline it makes no loop or cusp inside a span,
+// however unevenly the points are spaced. A distance field samples each span into straight pieces
+// (at most 2 degrees of turn of its control polygon per piece, 1 to 64 pieces): that polyline is
+// the shape.
+
+// The knot step across d: the square root of its length.
+fn spline_knot(d) { sqrt(max(length(d), 1e-30)) }
+// A span's control points: c1 after p1, c2 before p2 (k0, k1, k2 the knot steps p0-p1, p1-p2,
+// p2-p3). Any number of lanes: a radius rides along as a fourth.
+fn spline_c1(p0, p1, p2, k0, k1) { p1 + ((p1 - p0) / k0 - (p2 - p0) / (k0 + k1) + (p2 - p1) / k1) * (k1 / 3.0) }
+fn spline_c2(p1, p2, p3, k1, k2) { p2 - ((p2 - p1) / k1 - (p3 - p1) / (k1 + k2) + (p3 - p2) / k2) * (k1 / 3.0) }
+fn spline_dir(e) { e / max(length(e), 1e-30) }
+// How many straight pieces the span a, b, c, d (a cubic Bezier) takes: its control polygon's
+// turn (each turn's chord between unit directions, at least the angle's 2 sin(a / 2)) over that
+// of 2 degrees, 1 to 64.
+fn spline_steps(a, b, c, d) {
+    let u1 = spline_dir(b - a)
+    let u2 = spline_dir(c - b)
+    let u3 = spline_dir(d - c)
+    int(clamp(ceil((length(u1 - u2) + length(u2 - u3)) * 28.653708), 1.0, 64.0))
+}
+
+// A tube along a curve through `pts`, an array of vec4(x, y, z, radius): the balls along the
+// curve, the radius following the curve with the points (never below 0), round at the ends.
+// Exact outside, 1-Lipschitz everywhere. A span whose bounding sphere is further than the nearest
+// piece so far is skipped.
+fn sdf_tube(p, pts) {
+    let n = len(pts)
+    let best = length(p - pts[0].xyz) - max(pts[0].w, 0.0)
+    for k in 0..(n - 1) {
+        let p1 = pts[k]
+        let p2 = pts[k + 1]
+        let p0 = if k > 0 { pts[k - 1] } else { p1 * 2.0 - p2 }
+        let p3 = if k + 2 < n { pts[k + 2] } else { p2 * 2.0 - p1 }
+        let k0 = spline_knot(p1.xyz - p0.xyz)
+        let k1 = spline_knot(p2.xyz - p1.xyz)
+        let k2 = spline_knot(p3.xyz - p2.xyz)
+        let c1 = spline_c1(p0, p1, p2, k0, k1)
+        let c2 = spline_c2(p1, p2, p3, k1, k2)
+        // the span's balls lie in the hull of its control balls
+        let m = (p1.xyz + p2.xyz) * 0.5
+        let centres = max(max(length(p1.xyz - m), length(c1.xyz - m)), max(length(c2.xyz - m), length(p2.xyz - m)))
+        let reach = centres + max(max(max(p1.w, c1.w), max(c2.w, p2.w)), 0.0)
+        if length(p - m) - (reach * 1.0001 + (abs(m.x) + abs(m.y) + abs(m.z)) * 0.000001) < best {
+            let ns = spline_steps(p1, c1, c2, p2)
+            let s = float(ns)
+            let prev = p1
+            for j in 0..ns {
+                let cur = bezier3(p1, c1, c2, p2, float(j + 1) / s)
+                best = min(best, sdf_round_cone(p, prev.xyz, cur.xyz, max(prev.w, 0.0), max(cur.w, 0.0)))
+                prev = cur
+            }
+        }
+    }
+    best
+}
+
 fn sdf_union(a, b) { min(a, b) }
 fn sdf_difference(a, b) { max(a, -b) }
 fn sdf_intersection(a, b) { max(a, b) }

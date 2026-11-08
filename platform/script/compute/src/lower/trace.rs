@@ -4,8 +4,11 @@
 //!
 //! A traced lowering keeps the calls and values where they can be read: it inlines every helper
 //! (none is a function of its own), lowers a helper whose one `return` is its last statement as
-//! that value (no wrapper), binds a `let` never assigned again to its value, and reads a call's
-//! value-typed places at the call. A kernel that is not traced lowers as ever.
+//! that value (no wrapper), binds a `let` never assigned again to its value (and one assigned
+//! again only by whole assignments in its own block, outside any branch, loop or function, to
+//! each value in turn, as a chain of lets would), and reads a call's value-typed places at the
+//! call, and an array of floats or vectors element by element (a local array written in the same
+//! block reads as the values written). A kernel that is not traced lowers as ever.
 use super::kernel::{Access, BufferDecl, KernelLowered, K_COUNT, K_PARAMS};
 use super::*;
 use crate::boundary::forever;
@@ -14,8 +17,8 @@ use makepad_relax_api::relax_api;
 use std::sync::Arc;
 
 /// What a value's definition is, as far as a reader of the AIR needs: a constant of the program,
-/// a read of the run's context (the same all through it), a read of memory, f32 arithmetic, or
-/// anything else (`args` are its operands).
+/// a read of the run's context (the same all through it), a read of memory, f32 arithmetic (the
+/// lesser and the greater of two among it), or anything else (`args` are its operands).
 #[relax_api(plain)]
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +31,8 @@ pub enum TraceDefKind {
     Sub,
     Mul,
     Div,
+    Min,
+    Max,
     Other,
 }
 
@@ -52,6 +57,8 @@ pub enum TraceArgKind {
     Float,
     Vector,
     Other,
+    /// An array of floats or vectors: its elements' lanes in order, as the call read them.
+    Array,
 }
 
 /// A call's argument: a literal, or its lanes' values.
@@ -96,8 +103,14 @@ struct Noted {
     name: String,
     library: bool,
     params: Vec<String>,
-    args: Vec<V>,
+    args: Vec<NotedArg>,
     value: Val,
+}
+
+/// A noted call's argument: its value, or an array's elements' lanes.
+pub(super) enum NotedArg {
+    Value(V),
+    Array(Vec<Val>),
 }
 
 /// A traced lowering's notes.
@@ -147,21 +160,39 @@ pub(super) fn returns_in(e: &Expr) -> bool {
 
 impl Lowerer {
     /// In a traced lowering: a call's arguments with its value-typed places read, and a copy to
-    /// note. None: this lowering is not traced.
-    pub(super) fn traced_args(&mut self, vals: &mut [V]) -> Option<Vec<V>> {
+    /// note, an array of floats or vectors as its elements read at the call (a word the lowering
+    /// knows the value of reads as that value). None: this lowering is not traced.
+    pub(super) fn traced_args(&mut self, vals: &mut [V]) -> Option<Vec<NotedArg>> {
         self.trace.as_ref()?;
+        let mut noted = Vec::with_capacity(vals.len());
         for v in vals.iter_mut() {
             if let V::Place(p) = v {
                 let p = p.clone();
                 *v = self.read(&p);
+                if let T::Array(el, n) = &p.ty {
+                    if matches!(**el, T::F | T::Vec(_)) {
+                        let ew = self.words(el);
+                        let mut lanes = Vec::with_capacity((ew * n) as usize);
+                        for k in 0..*n {
+                            match self.read(&Place { ty: (**el).clone(), stat: p.stat + k * ew, ..p.clone() }) {
+                                V::F(x) => lanes.push(x),
+                                V::Vec(m, l) => lanes.extend_from_slice(&l[..m as usize]),
+                                _ => unreachable!("a float or vector element reads as its value"),
+                            }
+                        }
+                        noted.push(NotedArg::Array(lanes));
+                        continue;
+                    }
+                }
             }
+            noted.push(NotedArg::Value(v.clone()));
         }
-        Some(vals.to_vec())
+        Some(noted)
     }
 
     /// Notes a call of `f` that gave `v` (not one a constant's evaluation made: its values are a
     /// throwaway builder's).
-    pub(super) fn note_call(&mut self, f: &FnDecl, args: Vec<V>, v: &V) {
+    pub(super) fn note_call(&mut self, f: &FnDecl, args: Vec<NotedArg>, v: &V) {
         let library = f.span.start >= self.prelude_base;
         if let (false, Some(scope), V::F(value)) = (self.b.scratch, self.trace.as_mut(), v) {
             let params = f.params.iter().map(|(n, _)| n.clone()).collect();
@@ -186,6 +217,8 @@ fn block_defs(b: &[IS], vals: &[Ty], out: &mut Vec<TraceDef>) {
                     Op::Bin(Bin::SubF, a, b) => (TraceDefKind::Sub, [a.0, b.0, 0], 2),
                     Op::Bin(Bin::MulF, a, b) => (TraceDefKind::Mul, [a.0, b.0, 0], 2),
                     Op::Bin(Bin::DivF, a, b) => (TraceDefKind::Div, [a.0, b.0, 0], 2),
+                    Op::Bin(Bin::MinF, a, b) => (TraceDefKind::Min, [a.0, b.0, 0], 2),
+                    Op::Bin(Bin::MaxF, a, b) => (TraceDefKind::Max, [a.0, b.0, 0], 2),
                     Op::Bin(_, a, b) | Op::CmpF(_, a, b) | Op::CmpI(_, a, b) | Op::CmpD(_, a, b) => (TraceDefKind::Other, [a.0, b.0, 0], 2),
                     Op::Sel(a, b, c) | Op::Fma(_, a, b, c) => (TraceDefKind::Other, [a.0, b.0, c.0], 3),
                 };
@@ -253,15 +286,17 @@ impl KernelTrace {
         let mut views = Vec::with_capacity(calls.len());
         for c in calls {
             let lanes: Vec<Vec<u32>> = c.args.iter().map(|a| match a {
-                V::F(x) => vec![x.0],
-                V::Vec(n, l) => l[..*n as usize].iter().map(|x| x.0).collect(),
+                NotedArg::Value(V::F(x)) => vec![x.0],
+                NotedArg::Value(V::Vec(n, l)) => l[..*n as usize].iter().map(|x| x.0).collect(),
+                NotedArg::Array(l) => l.iter().map(|x| x.0).collect(),
                 _ => Vec::new(),
             }).collect();
             let args: Vec<TraceArg<'static>> = c.args.iter().zip(&lanes).map(|(a, lanes)| {
                 let (kind, literal) = match a {
-                    V::Lit(x) => (TraceArgKind::Literal, *x),
-                    V::F(_) => (TraceArgKind::Float, 0.0),
-                    V::Vec(..) => (TraceArgKind::Vector, 0.0),
+                    NotedArg::Value(V::Lit(x)) => (TraceArgKind::Literal, *x),
+                    NotedArg::Value(V::F(_)) => (TraceArgKind::Float, 0.0),
+                    NotedArg::Value(V::Vec(..)) => (TraceArgKind::Vector, 0.0),
+                    NotedArg::Array(_) => (TraceArgKind::Array, 0.0),
                     _ => (TraceArgKind::Other, 0.0),
                 };
                 TraceArg { literal, lanes: unsafe { forever(&lanes[..]) }, kind }

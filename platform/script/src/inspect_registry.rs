@@ -7,6 +7,7 @@
 use crate::heap::ScriptHeap;
 use crate::vm::ScriptVmBase;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
+use makepad_relax_api::relax_api;
 use makepad_relax_api::sync::Mutex;
 use std::sync::Arc;
 
@@ -124,15 +125,32 @@ pub fn unreported<R>(f: impl FnOnce() -> R) -> R {
     struct Back(bool);
     impl Drop for Back {
         fn drop(&mut self) {
-            UNREPORTED.with(|u| u.set(self.0));
+            set_unreported(self.0);
         }
     }
-    let _back = Back(UNREPORTED.with(|u| u.replace(true)));
+    let _back = Back(set_unreported(true));
     f()
 }
 
+/// Sets whether this thread's evaluations are unreported ([`unreported`]) and gives what it was.
+/// This and [`is_unreported`] are ops, so under `makepad run` the flag is always the loader's
+/// thread-local, whichever side sets or reads it. [`unreported`] is generic and compiles from
+/// source there, and the VM's ops file their errors in the loader. A thread-local that either
+/// side touched itself would be that side's own copy: thread-locals are never shared across the
+/// boundary.
+#[relax_api]
+pub fn set_unreported(on: bool) -> bool {
+    UNREPORTED.with(|u| u.replace(on))
+}
+
+/// Whether this thread's evaluations are unreported ([`set_unreported`]).
+#[relax_api]
+pub fn is_unreported() -> bool {
+    UNREPORTED.with(|u| u.get())
+}
+
 fn reported() -> bool {
-    ENABLED.load(Relaxed) && !UNREPORTED.with(|u| u.get())
+    ENABLED.load(Relaxed) && !is_unreported()
 }
 
 /// Live counts (allocated slots) and the retained slot bytes of the object, string and array

@@ -325,16 +325,31 @@ impl ScriptBody {
         self.shown.clone().unwrap_or_else(|| script_mod.file.clone())
     }
 
-    /// The zero-based line the body's text starts at.
-    fn site_line0(&self, script_mod: &ScriptMod) -> u32 {
-        if self.shown.is_some() { script_mod.line.saturating_sub(1) as u32 } else { script_mod.line as u32 }
+    /// The zero-based line a text at ScriptMod line `line` starts at. Its first line is
+    /// `line`, as runtime errors count (`row + line`, [`ScriptCode::ip_to_loc`]); a text at
+    /// line 0 counts its lines from 1.
+    fn line0_of(line: usize) -> usize {
+        line.saturating_sub(1)
     }
 
-    /// The file and (line, column) offsets the body's parser reports.
+    /// The zero-based line the body's text starts at ([`Self::line0_of`]).
+    fn site_line0(&self, script_mod: &ScriptMod) -> u32 {
+        Self::line0_of(script_mod.line) as u32
+    }
+
+    /// What takes the parser's zero-based lines (from [`Self::site_line0`]) to the lines
+    /// runtime errors give: 1, or 0 for a text at line 0.
+    fn parse_line_shift(&self, script_mod: &ScriptMod) -> u32 {
+        script_mod.line as u32 - self.site_line0(script_mod)
+    }
+
+    /// The file and (line, column) offsets the body's parser reports: its `file:line:col`
+    /// text reads the line runtime errors give.
     fn parse_site(&self, script_mod: &ScriptMod) -> (String, (usize, usize)) {
+        let line0 = self.site_line0(script_mod) as usize;
         match &self.shown {
-            Some(file) => (file.clone(), (script_mod.line.saturating_sub(1), 0)),
-            None => (script_mod.file.clone(), (script_mod.line, script_mod.column)),
+            Some(file) => (file.clone(), (line0, 0)),
+            None => (script_mod.file.clone(), (line0, script_mod.column)),
         }
     }
 
@@ -909,9 +924,10 @@ impl ScriptErrorRecord {
     }
 
     /// A parse error: its formatted text and, when the parser kept it, its
-    /// structured diagnostic.
-    pub fn parse(text: String, diagnostic: Option<&crate::parser::ScriptParserDiagnostic>, file: &str) -> Self {
-        let loc = diagnostic.map(|d| ScriptErrorLoc { file: file.to_string(), line: d.line, col: d.column });
+    /// structured diagnostic, whose zero-based line `line_shift` takes to the line runtime
+    /// errors give.
+    pub fn parse(text: String, diagnostic: Option<&crate::parser::ScriptParserDiagnostic>, file: &str, line_shift: u32) -> Self {
+        let loc = diagnostic.map(|d| ScriptErrorLoc { file: file.to_string(), line: d.line + line_shift, col: d.column });
         let message = diagnostic.map_or_else(|| text.clone(), |d| d.message.clone());
         Self { loc, message, text }
     }
@@ -1315,8 +1331,9 @@ impl ScriptCode {
         }
         let text: String = chars[start..end].iter().collect();
         let (row, col) = body.tokenizer.token_start_row_col(first as u32)?;
-        let (file, line0) = match body.source.written() {
-            Some(script_mod) => (body.site_file(script_mod), body.site_line0(script_mod)),
+        // The image's line is its first row's, as runtime errors count it (`row + line`).
+        let (file, first_line) = match body.source.written() {
+            Some(script_mod) => (body.site_file(script_mod), script_mod.line as u32),
             None => ("generated".to_string(), 0),
         };
         let mut out = Vec::with_capacity(last + 1 - first);
@@ -1334,7 +1351,7 @@ impl ScriptCode {
             t.rebase(start);
             out.push(t);
         }
-        Some(ScriptFnImage::new(file, line0 + row, col, text, out, strings))
+        Some(ScriptFnImage::new(file, first_line + row, col, text, out, strings))
     }
 
     /// Where `field` is written (`field: …`, `field := …`, `field +: …`) in
@@ -2161,6 +2178,26 @@ impl<'a> ScriptVm<'a> {
     /// Some(Vec::new())` before running, then take it after.
     pub fn take_errors(&mut self) -> Vec<String> {
         self.take_error_records().into_iter().map(|e| e.text().to_owned()).collect()
+    }
+
+    /// The parser's warnings since errors were captured, as `file:line:col: message`, taken:
+    /// source that parses, but likely not as meant (`[0 0 -30]` is two items). A host shows
+    /// them with its errors and runs on.
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        self.take_warning_records().into_iter().map(|w| w.text().to_owned()).collect()
+    }
+
+    /// [`Self::take_warnings`] with each warning's location and message apart.
+    pub fn take_warning_records(&mut self) -> Vec<ScriptErrorRecord> {
+        unsafe extern "C-unwind" fn push(ctx: *mut u8, record: *const ScriptErrorRecord) {
+            (&mut *(ctx as *mut Vec<ScriptErrorRecord>)).push((&*record).clone());
+        }
+        let mut out = Vec::new();
+        let mut req = ScriptErrorsReq::new(ERR_TAKE_WARNINGS);
+        req.ctx = &mut out as *mut Vec<ScriptErrorRecord> as *mut u8;
+        req.push = push;
+        self.bx.vm_errors(&mut req);
+        out
     }
 
     /// [`Self::take_errors`] with each error's location and message apart.
@@ -3208,7 +3245,7 @@ impl<'a> ScriptVm<'a> {
                 }
                 body.tokenizer = ScriptTokenizer::adopted(&d.text, tokens);
                 body.parser = ScriptParser::keeping_numbers(self.bx.keep_numbers);
-                body.parser.parse(&body.tokenizer, &file, (d.line as usize, d.col as usize), &[]);
+                body.parser.parse(&body.tokenizer, &file, (ScriptBody::line0_of(d.line as usize), d.col as usize), &[]);
                 body.source_len = d.text.len();
                 body.content_hash = ScriptBody::content_hash_of(&d.text, &[]);
             }
@@ -3333,12 +3370,18 @@ impl<'a> ScriptVm<'a> {
             // surface them to a captured-diagnostics sink here or a validating
             // host reports success for a script that failed to parse.
             // (A file's errors stay with its body: the same text evaluated again reports them again.)
+            let shift = body.parse_line_shift(script_mod);
             let parse_errors = body.parser.parse_errors.clone();
             let parse_records: Vec<ScriptErrorRecord> = parse_errors.into_iter().enumerate()
-                .map(|(i, text)| ScriptErrorRecord::parse(text, body.parser.diagnostics.get(i), &body.parser.file)).collect();
+                .map(|(i, text)| ScriptErrorRecord::parse(text, body.parser.diagnostics.get(i), &body.parser.file, shift)).collect();
+            let warnings: Vec<ScriptErrorRecord> = body.parser.parse_warnings.iter().enumerate()
+                .map(|(i, text)| ScriptErrorRecord::parse(text.clone(), body.parser.warnings.get(i), &body.parser.file, shift)).collect();
             drop(bodies);
             if let Some(sink) = self.bx.captured_errors.as_mut() {
                 sink.extend(parse_records);
+            }
+            if self.bx.captured_errors.is_some() {
+                self.bx.captured_warnings.extend(warnings);
             }
             // lets point our thread to it
             let result = self.run_root(body_id);
@@ -3457,6 +3500,7 @@ impl<'a> ScriptVm<'a> {
 
             // Incremental parse: continue from checkpoint, auto-close for execution
             let errors_before = body.parser.parse_errors.len();
+            let warnings_before = body.parser.parse_warnings.len();
             let (site_file, site_offsets) = body.parse_site(existing_mod);
             let cp = body.parser.parse_streaming(
                 &body.tokenizer,
@@ -3473,13 +3517,20 @@ impl<'a> ScriptVm<'a> {
             // Surface structural errors before run_root rejects the body.
             // Incomplete but valid prefixes still use the parser's auto-close;
             // recovery bytecode from an actual parse error is never executed.
+            let shift = body.parse_line_shift(existing_mod);
             let from = errors_before.min(body.parser.parse_errors.len());
             let new_parse_errors: Vec<ScriptErrorRecord> = body.parser.parse_errors[from..].iter().enumerate()
-                .map(|(i, text)| ScriptErrorRecord::parse(text.clone(), body.parser.diagnostics.get(from + i), &body.parser.file)).collect();
+                .map(|(i, text)| ScriptErrorRecord::parse(text.clone(), body.parser.diagnostics.get(from + i), &body.parser.file, shift)).collect();
+            let from = warnings_before.min(body.parser.parse_warnings.len());
+            let new_warnings: Vec<ScriptErrorRecord> = body.parser.parse_warnings[from..].iter().enumerate()
+                .map(|(i, text)| ScriptErrorRecord::parse(text.clone(), body.parser.warnings.get(from + i), &body.parser.file, shift)).collect();
 
             drop(bodies);
             if let Some(sink) = &mut self.bx.captured_errors {
                 sink.extend(new_parse_errors);
+            }
+            if self.bx.captured_errors.is_some() {
+                self.bx.captured_warnings.extend(new_warnings);
             }
             // Silence runtime errors during incremental eval — incomplete code
             // will inevitably produce errors that are meaningless until the
@@ -3574,6 +3625,10 @@ pub struct ScriptVmBase {
     /// eval/call, take after, to feed diagnostics back to a host (e.g. an AI
     /// agent editing the script live).
     pub captured_errors: Option<Vec<ScriptErrorRecord>>,
+    /// The parser's warnings while errors are captured (`[0 0 -30]` reads as two items), for
+    /// the host to show beside its errors: nothing refuses on them. Taken by
+    /// [`ScriptVm::take_warnings`]; without a capture they are logged as warnings.
+    pub captured_warnings: Vec<ScriptErrorRecord>,
     /// the captures capture_errors_nested put aside
     pub captured_stash: Vec<Option<Vec<ScriptErrorRecord>>>,
     pub run_budget: Option<ScriptRunBudget>,
@@ -3666,6 +3721,7 @@ impl ScriptVmBase {
             allow_debug_output: true,
             bail_on_uncaught_error: false,
             captured_errors: None,
+            captured_warnings: Vec::new(),
             captured_stash: Vec::new(),
             run_budget: None,
             last_limit_consumed: 0,
@@ -3718,6 +3774,7 @@ impl ScriptVmBase {
             allow_debug_output: true,
             bail_on_uncaught_error: false,
             captured_errors: None,
+            captured_warnings: Vec::new(),
             captured_stash: Vec::new(),
             run_budget: None,
             last_limit_consumed: 0,

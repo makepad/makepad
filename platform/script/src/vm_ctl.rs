@@ -187,6 +187,8 @@ pub const ERR_PUSH_DIAGNOSTIC: u32 = 10;
 /// `size: [1, 2, 3]` for a vec3): into the active capture (once), where a host refuses the
 /// evaluation on it; logged once per site when nothing captures; counted like ERR_PUSH_DIAGNOSTIC.
 pub const ERR_PUSH_DIAGNOSTIC_ERROR: u32 = 11;
+/// Drains the parser's warnings captured since [`ERR_CAPTURE`] into `push`.
+pub const ERR_TAKE_WARNINGS: u32 = 12;
 
 pub type ScriptErrorPush = unsafe extern "C-unwind" fn(*mut u8, *const ScriptErrorRecord);
 
@@ -571,7 +573,15 @@ impl ScriptVmBase {
                     trap.push_err(ScriptValue::script_err_type_mismatch(trap.ip), req.text, file!(), line!());
                 }
             }
-            ERR_CAPTURE => self.captured_errors = Some(Vec::new()),
+            ERR_CAPTURE => {
+                self.captured_errors = Some(Vec::new());
+                self.captured_warnings.clear();
+            }
+            ERR_TAKE_WARNINGS => {
+                for record in std::mem::take(&mut self.captured_warnings) {
+                    unsafe { (req.push)(req.ctx, &record) };
+                }
+            }
             ERR_CAPTURE_NESTED => {
                 let prev = self.captured_errors.replace(Vec::new());
                 self.captured_stash.push(prev);

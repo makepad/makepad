@@ -121,19 +121,26 @@ const TAKEN_MSG: &str = "re-entrant script VM access: the VM is already `take()`
 pub struct ScriptVmCall<'a> {
     context: *mut u8,
     /// Runs the closure; null when it returned, else its panic (a
-    /// `Box<Box<dyn Any + Send>>` of the caller's side).
+    /// `Box<Caught>` of the caller's side).
     call: unsafe extern "C-unwind" fn(*mut u8, &mut ScriptVm) -> *mut u8,
     /// The panic the last `invoke` caught, until `resume_if_panicked`.
     panic: *mut u8,
     borrow: std::marker::PhantomData<&'a mut u8>,
 }
+/// A closure's panic as its trampoline boxed it. The box is the caller's side's own: under
+/// makepad run the trampoline (`call::<F>`, generic) and `resume_if_panicked` are both compiled
+/// for the caller. Its type is this one, which no op's signature carries, so the JIT knows the
+/// box for the caller's (a `Box<dyn Any + Send>` of its own is the same type as a payload rustc
+/// allocated where an op carries one: the JIT refused the free there).
+struct Caught(Box<dyn std::any::Any + Send>);
+
 impl<'a> ScriptVmCall<'a> {
     #[inline]
     pub fn new<F: FnMut(&mut ScriptVm)>(f: &'a mut F) -> Self {
         unsafe extern "C-unwind" fn call<F: FnMut(&mut ScriptVm)>(p: *mut u8, vm: &mut ScriptVm) -> *mut u8 {
             match catch_unwind(AssertUnwindSafe(|| (&mut *p.cast::<F>())(vm))) {
                 Ok(()) => std::ptr::null_mut(),
-                Err(payload) => Box::into_raw(Box::new(payload)).cast(),
+                Err(payload) => Box::into_raw(Box::new(Caught(payload))).cast(),
             }
         }
         Self {
@@ -154,9 +161,9 @@ impl<'a> ScriptVmCall<'a> {
     #[inline]
     pub fn resume_if_panicked(&mut self) {
         if !self.panic.is_null() {
-            let payload = unsafe { Box::from_raw(self.panic.cast::<Box<dyn std::any::Any + Send>>()) };
+            let Caught(payload) = *unsafe { Box::from_raw(self.panic.cast::<Caught>()) };
             self.panic = std::ptr::null_mut();
-            resume_unwind(*payload)
+            resume_unwind(payload)
         }
     }
 }

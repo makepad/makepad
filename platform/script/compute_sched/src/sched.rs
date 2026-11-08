@@ -886,7 +886,11 @@ impl Drop for Scheduler {
             for slot in q.drain(..) {
                 *lock(&slot.ticket) = None;
                 *lock(&slot.result) = Some(Err(JobError::Closed));
+                // under the job lock `wait` checks the state under, as a finished job's: else
+                // the wakeup can fall between a waiter's check and its wait
+                let job = lock(&slot.job);
                 slot.state.store(DONE, Ordering::Release);
+                drop(job);
                 slot.done.notify_all();
             }
         }

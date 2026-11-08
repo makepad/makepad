@@ -86,6 +86,41 @@ fn a_call_in_a_branch_has_no_definition_in_the_view() {
     assert!(view.defs.iter().all(|d| d.val != call.value));
 }
 
+/// A let assigned again only in line (whole assignments in its own block, outside any branch,
+/// loop or function) names each value in turn, as a chain of lets would, and the run still reads
+/// what the compiled kernel computes; one assigned in a branch stays a variable, read as memory.
+#[test]
+fn a_let_assigned_in_line_names_each_value() {
+    let src = "let xs = input(vec3)\nlet o = output(f32)\nfn element(i) {\n    let p = xs[i]\n    let d = sdf_round(length(p), 0.5)\n    d = sdf_round(d, 0.25)\n    d = min(d, p.x)\n    o[i] = sdf_round(d, 0.125)\n}";
+    let t = trace(src).unwrap_or_else(|e| panic!("{e:?}"));
+    let view = t.view();
+    let def = |v: u32| *view.defs.iter().find(|d| d.val == v).unwrap_or_else(|| panic!("value {v} has no definition"));
+    let rounds: Vec<_> = view.calls.iter().filter(|c| c.name == "sdf_round").collect();
+    assert_eq!(rounds.len(), 3);
+    assert_eq!(rounds[1].args[0].lanes, [rounds[0].value], "the first value");
+    let least = def(rounds[2].args[0].lanes[0]);
+    assert_eq!(least.kind, TraceDefKind::Min, "the third value, the lesser of two");
+    assert_eq!(least.args[0], rounds[1].value, "the second value");
+
+    let point = [1.0f32, 2.0, 2.0];
+    let mut values = vec![0; view.values];
+    t.run(&[], "xs", &point, &mut values);
+    let k = compile(src).unwrap_or_else(|e| panic!("{e:?}"));
+    let mut out = [0.0f32];
+    let mut call = k.call();
+    call.input("xs", &point).unwrap();
+    call.output("o", &mut out).unwrap();
+    call.run(1).unwrap();
+    assert_eq!(out[0], f32::from_bits(values[rounds[2].value as usize]));
+    assert_eq!(out[0], 0.875);
+
+    let t = trace("let o = output(f32)\nfn element(i) {\n    let v = sdf_round(float(i), 0.5)\n    if i > 0 { v = sdf_round(v, 0.25) }\n    o[i] = sdf_round(v, 0.125)\n}").unwrap_or_else(|e| panic!("{e:?}"));
+    let view = t.view();
+    let last = view.calls.iter().rev().find(|c| c.name == "sdf_round").expect("the last call");
+    let read = view.defs.iter().find(|d| d.val == last.args[0].lanes[0]).expect("its argument's definition");
+    assert_eq!(read.kind, TraceDefKind::Memory, "a variable");
+}
+
 /// Tracing changes no answer: the run reads what the compiled kernel computes.
 #[test]
 fn a_traces_run_agrees_with_the_compiled_kernel() {
@@ -104,6 +139,47 @@ fn a_traces_run_agrees_with_the_compiled_kernel() {
     call.output("o", &mut out).unwrap();
     call.run(1).unwrap();
     assert_eq!(out[0], value(view.calls[2].value) + value(view.calls[3].value));
+}
+
+/// An array argument is noted element by element: a local array written just before the call
+/// reads as the values written, each leading back to what made it.
+#[test]
+fn a_trace_reads_an_array_argument_by_its_elements() {
+    let src = "let xs = input(vec3)
+let o = output(f32)
+let amp = param(2.0)
+fn nearest(p, balls) {
+    let best = 1000.0
+    for k in 0..len(balls) { best = min(best, length(p - balls[k].xyz) - balls[k].w) }
+    best
+}
+fn element(i) {
+    let p = xs[i]
+    let fixed = [vec4(0.0, 0.0, 0.0, 1.0), vec4(amp, 1.0, 0.0, 0.5)]
+    o[i] = nearest(p, fixed) + nearest(p, [vec4(p.x, 0.0, 0.0, 1.0)])
+}";
+    let t = trace(src).unwrap_or_else(|e| panic!("{e:?}"));
+    let view = t.view();
+    let mut values = vec![0; view.values];
+    t.run(&[3.0], "xs", &[1.0, 2.0, 2.0], &mut values);
+    let value = |v: u32| f32::from_bits(values[v as usize]);
+    let def = |v: u32| *view.defs.iter().find(|d| d.val == v).unwrap_or_else(|| panic!("value {v} has no definition"));
+    let calls: Vec<_> = view.calls.iter().filter(|c| c.name == "nearest").collect();
+    assert_eq!(calls.len(), 2);
+
+    let fixed = &calls[0].args[1];
+    assert_eq!(fixed.kind, TraceArgKind::Array);
+    let lanes: Vec<f32> = fixed.lanes.iter().map(|v| value(*v)).collect();
+    assert_eq!(lanes, [0.0, 0.0, 0.0, 1.0, 3.0, 1.0, 0.0, 0.5], "every element's lanes, in order");
+    assert_eq!(def(fixed.lanes[0]).kind, TraceDefKind::Const, "a written constant reads as itself");
+    assert_eq!(def(fixed.lanes[4]).kind, TraceDefKind::Context, "the parameter");
+    assert!(view.defs.iter().any(|d| d.val == calls[0].value), "the helper's value is the block's");
+
+    let moving = &calls[1].args[1];
+    assert_eq!(moving.kind, TraceArgKind::Array);
+    assert_eq!(moving.lanes.len(), 4);
+    assert_eq!(value(moving.lanes[0]), 1.0);
+    assert_eq!(def(moving.lanes[0]).kind, TraceDefKind::Memory, "the point's x, read from the input");
 }
 
 #[test]

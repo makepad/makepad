@@ -28,6 +28,19 @@ pub struct ScriptParserDiagnostic {
 /// a malformed source as valid just because feedback was bounded.
 pub const MAX_PARSER_DIAGNOSTICS: usize = 64;
 
+/// The warnings the parser gives `source` parsed alone, nothing run (see
+/// [`ScriptParser::warnings`]): what a tool can check in text before it is evaluated.
+pub fn parse_warnings(source: &str) -> Vec<ScriptParserDiagnostic> {
+    let mut heap = crate::heap::ScriptHeap::default();
+    let mut tokenizer = ScriptTokenizer::default();
+    tokenizer.tokenize(source, &mut heap);
+    tokenizer.finish(&mut heap);
+    let mut parser = ScriptParser::default();
+    parser.set_emit_errors(false);
+    parser.parse(&tokenizer, "", (0, 0), &[]);
+    parser.warnings
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum State {
     BeginStmt {
@@ -868,6 +881,12 @@ pub struct ScriptParser {
     /// Set once `diagnostics` hit `MAX_PARSER_DIAGNOSTICS` and further errors
     /// were dropped; `had_error` still reports the failure.
     pub diagnostics_truncated: bool,
+    /// Warnings: source that parses, but likely not as its writer meant (`[0 0 -30]` is two
+    /// items, the second `0 - 30`). Formatted like `parse_errors`, bounded the same way; they
+    /// never set `had_error`.
+    pub parse_warnings: Vec<String>,
+    /// Structured form of the same warnings, like `diagnostics`.
+    pub warnings: Vec<ScriptParserDiagnostic>,
 
     state: Vec<State>,
     /// Whether `report_error` also forwards to Makepad's global log.
@@ -925,6 +944,8 @@ impl Default for ScriptParser {
             parse_errors: Default::default(),
             diagnostics: Default::default(),
             diagnostics_truncated: false,
+            parse_warnings: Default::default(),
+            warnings: Default::default(),
             emit_errors: true,
             state: vec![State::BeginStmt {
                 last_was_sep: false,
@@ -1021,6 +1042,90 @@ impl ScriptParser {
         }
         if self.emit_errors {
             log_with_level(&self.file, line, column, line, column, msg, LogLevel::Error);
+        }
+    }
+
+    /// A warning at the current token (see [`Self::warnings`]): logged as a warning with the
+    /// errors (when they are), once per place.
+    pub fn report_warning(&mut self, tokenizer: &ScriptTokenizer, msg: String) {
+        let (line, col) = tokenizer.token_index_to_row_col(self.index).unwrap_or((0, 0));
+        let line = line as u32 + self.line_offset as u32;
+        let column = col as u32 + self.col_offset as u32;
+        // A streaming parse goes over a token again after a checkpoint.
+        if self.warnings.len() >= MAX_PARSER_DIAGNOSTICS || self.warnings.iter().any(|w| w.line == line && w.column == column) {
+            return;
+        }
+        self.parse_warnings.push(format!("{}:{}:{}: {}", self.file, line as usize + 1, column as usize + 1, msg));
+        self.warnings.push(ScriptParserDiagnostic { line, column, message: msg.clone() });
+        if self.emit_errors {
+            log_with_level(&self.file, line, column, line, column, msg, LogLevel::Warning);
+        }
+    }
+
+    /// The source text of tokens `from..=to`.
+    fn tokens_text(tokenizer: &ScriptTokenizer, from: usize, to: usize) -> String {
+        let (Some(a), Some(b)) = (tokenizer.tokens.get(from), tokenizer.tokens.get(to)) else { return String::new() };
+        tokenizer.original.chars().skip(a.start()).take(b.end().saturating_sub(a.start())).collect()
+    }
+
+    /// The first token of the operand that ends at token `end`, as written: the tokens glued to
+    /// it (`a.b`, `2*3`), a bracketed group whole (`f(1, 2)`).
+    fn operand_start(tokenizer: &ScriptTokenizer, end: usize) -> usize {
+        let t = &tokenizer.tokens;
+        let mut i = end;
+        loop {
+            let closes = |k: &ScriptToken| k.is_close_round() || k.is_close_square() || k.is_close_curly();
+            let opens = |k: &ScriptToken| k.is_open_round() || k.is_open_square() || k.is_open_curly();
+            if closes(&t[i].token) {
+                let mut depth = 0usize;
+                loop {
+                    if closes(&t[i].token) {
+                        depth += 1;
+                    } else if opens(&t[i].token) {
+                        depth -= 1;
+                    }
+                    if depth == 0 || i == 0 {
+                        break;
+                    }
+                    i -= 1;
+                }
+            }
+            if i == 0 || t[i].preceded_by_space {
+                return i;
+            }
+            let before = &t[i - 1].token;
+            if opens(before) || before.separator().not_empty() {
+                return i;
+            }
+            i -= 1;
+        }
+    }
+
+    /// The last token of the operand that starts at token `start` (see [`Self::operand_start`]).
+    fn operand_end(tokenizer: &ScriptTokenizer, start: usize) -> usize {
+        let t = &tokenizer.tokens;
+        let mut i = start;
+        loop {
+            let opens = |k: &ScriptToken| k.is_open_round() || k.is_open_square() || k.is_open_curly();
+            let closes = |k: &ScriptToken| k.is_close_round() || k.is_close_square() || k.is_close_curly();
+            if opens(&t[i].token) {
+                let mut depth = 0usize;
+                while i < t.len() {
+                    if opens(&t[i].token) {
+                        depth += 1;
+                    } else if closes(&t[i].token) {
+                        depth -= 1;
+                    }
+                    if depth == 0 {
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            match t.get(i + 1) {
+                Some(next) if !next.preceded_by_space && !closes(&next.token) && !next.token.separator().not_empty() => i += 1,
+                _ => return i.min(t.len().saturating_sub(1)),
+            }
         }
     }
 
@@ -4689,6 +4794,20 @@ impl ScriptParser {
                     && self.inside_array_literal()
                 {
                     return 0;
+                }
+                // A `-` there with whitespace before it and none after still subtracts, but
+                // reads like a negative item: `[0 0 -30]` is two items, the second `0 - 30`.
+                // A warning, never an error (commas make it an item: `[0, 0, -30]`).
+                if op == id!(-)
+                    && self.index > 0
+                    && tokenizer.token_preceded_by_space(self.index)
+                    && tokenizer.tokens.get(self.index as usize + 1).is_some_and(|next| !next.preceded_by_space)
+                    && self.inside_array_literal()
+                {
+                    let at = self.index as usize;
+                    let left = Self::tokens_text(tokenizer, Self::operand_start(tokenizer, at - 1), at - 1);
+                    let right = Self::tokens_text(tokenizer, at + 1, Self::operand_end(tokenizer, at + 1));
+                    self.report_warning(tokenizer, format!("`{left} -{right}` inside [ ] reads as one value, {left} - {right}: write `{left} - {right}`, or `{left}, -{right}` for two items"));
                 }
                 if op == id!(~) {
                     return 0;
