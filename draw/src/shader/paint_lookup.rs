@@ -1,5 +1,5 @@
 //! `mod.draw.PaintLookup`: the one paint lookup every renderer spreads, over a paint atlas its
-//! host bakes. The host gives the texels: it defines
+//! host writes. The host gives the texels: it defines
 //! `paint_texel(i: f32) -> vec4` over whatever texture holds the atlas (its own, or rows after
 //! another table in a texture it already binds), so the lookup costs no texture slot of its own.
 //!
@@ -7,21 +7,22 @@
 //! footprint `px` (mm, from screen derivatives), returns (slot a, slot b, coverage of a, 1).
 //! Slot 0 is unpainted. The eight lattice corners round `p` are read; each corner's distance is
 //! signed by whether it shows the nearest corner's slot, so the interpolated value crosses zero
-//! on the boundary between the two slots, a pixel wide at any zoom. A point past the volume reads
-//! its nearest face: a part that has grown shows the paint there is until its host bakes again.
+//! on the boundary between the two slots, a pixel wide at any zoom. Where two slots meet in the
+//! cell, the value is the Catmull-Rom cubic through the 4x4x4 points round it instead of the
+//! eight's trilinear one: smooth across the cell's faces, so the edge is a smooth curve however
+//! near the view comes, not a polygon of cell-long pieces. A sample is `slot * 65536 + q`, `q`
+//! the distance over the ramp in 0..65535. A point past the volume reads its nearest face: a
+//! part that has grown shows the paint there is until its host writes the volume again.
 //!
 //! `paint_shade(hdr, p, n, px, albedo)`: `paint_albedo`'s colour and, in `.w`, its light floor
 //! over the pixel: the volume's header texel 2 `.w` (0 for none) times the share of the pixel
-//! its paint covers. A lane keeps the paint at that share of its colour, as its exposure shows
-//! it, wherever the scene's light falls short. Marks that must read on a face no light reaches
-//! (a support block's tint under an overhang) set it; colour paint leaves it 0 and keeps its
-//! lit look.
+//! its paint covers. A renderer keeps the paint at that share of its colour, as its exposure
+//! shows it, wherever the scene's light falls short. Paint that must read on a face no light
+//! reaches sets it; colour paint leaves it 0 and keeps its lit look.
 //!
-//! A header may instead be an overlay (`bake::Overlay`, first value -1): a host's values over a
-//! regular lattice, read trilinear where the surface is and coloured through its palette, and its
-//! marks per lattice cell, over the part's own paint. Refining the lattice sharpens the colour;
-//! the surface is whatever the renderer drew. The host's normal (either sign, any length, in `p`'s
-//! frame) keeps a mark to the surface it was made on: it stops at a crease, not at a cell's side.
+//! A header may instead be an overlay: values over a regular lattice, coloured through a palette,
+//! and marks per lattice cell, drawn over the part's own paint on whatever surface the renderer
+//! drew.
 //!
 //! SHADER LAW: unary minus has the lowest precedence; write `(0.0 - a) - b`.
 
@@ -55,8 +56,8 @@ script_mod! {
             let l = g - floor(g / 8.0) * 8.0
             let li = (l.z * 8.0 + l.y) * 8.0 + l.x
             let v = self.paint_pick(self.paint_texel(bases.y + e * 128.0 + floor(li / 4.0)), modf(li, 4.0))
-            let slot = floor(v / 256.0 + 0.001)
-            return vec2(slot, (v - slot * 256.0) / 255.0)
+            let slot = floor(v / 65536.0 + 0.000001)
+            return vec2(slot, (v - slot * 65536.0) / 65535.0)
         }
 
         // (slot, distance over the ramp 0..1) of lattice point g
@@ -67,6 +68,37 @@ script_mod! {
         paint_sign: fn(c: vec2, slot: f32) -> f32 {
             if abs(c.x - slot) < 0.5 { return c.y }
             return 0.0 - c.y
+        }
+
+        // the Catmull-Rom weights of the four points round t (0..1 between the middle two)
+        paint_catmull: fn(t: f32) -> vec4 {
+            let t2 = t * t
+            let t3 = t2 * t
+            return vec4(((0.0 - t3) + 2.0 * t2) - t, (3.0 * t3 - 5.0 * t2) + 2.0, ((0.0 - 3.0 * t3) + 4.0 * t2) + t, t3 - t2) * 0.5
+        }
+
+        // the distance signed by slot `a` (over the ramp), cubic through the 4x4x4 lattice points
+        // round cell g at t in it, those past the volume read at its face
+        paint_cubic: fn(g: vec3, t: vec3, a: f32, bmin: vec3, dim: vec3, bases: vec4) -> f32 {
+            let wx = self.paint_catmull(t.x)
+            let wy = self.paint_catmull(t.y)
+            let wz = self.paint_catmull(t.z)
+            let lo = bmin * 8.0
+            let hi = (bmin + dim) * 8.0 - vec3(1.0, 1.0, 1.0)
+            var v = 0.0
+            for k in 0..4 {
+                var vy = 0.0
+                for j in 0..4 {
+                    var vx = 0.0
+                    for i in 0..4 {
+                        let q = clamp(g + vec3(float(i) - 1.0, float(j) - 1.0, float(k) - 1.0), lo, hi)
+                        vx = vx + self.paint_pick(wx, float(i)) * self.paint_sign(self.paint_corner(q, bmin, dim, bases), a)
+                    }
+                    vy = vy + self.paint_pick(wy, float(j)) * vx
+                }
+                v = v + self.paint_pick(wz, float(k)) * vy
+            }
+            return v
         }
 
         // the colour of a slot of volume `bases` (linear)
@@ -127,8 +159,7 @@ script_mod! {
         }
 
         // `albedo` under the mark of an overlay's cell at q, where the surface (normal n in q's
-        // frame) runs along the one marked: each kind's colour after the palette's ramp, a
-        // picked one's (kinds 5 up) solid, the others striped
+        // frame) runs along the one marked, in its kind's colour
         overlay_mark: fn(q: vec3, n: vec3, cell: vec4, dim: vec4, at: f32, albedo: vec3) -> vec3 {
             let g = clamp(floor((q - cell.xyz) / cell.w), vec3(0.0, 0.0, 0.0), dim.xyz - vec3(1.0, 1.0, 1.0))
             let i = (g.z * dim.y + g.y) * dim.x + g.x
@@ -242,11 +273,17 @@ script_mod! {
             if abs(c011.x - a) > 0.5 { b = c011.x }
             if abs(c111.x - a) > 0.5 { b = c111.x }
             if a < 0.5 && b < 0.5 { return vec4(albedo, 0.0) }
-            let x0 = mix(self.paint_sign(c000, a), self.paint_sign(c100, a), t.x)
-            let x1 = mix(self.paint_sign(c010, a), self.paint_sign(c110, a), t.x)
-            let x2 = mix(self.paint_sign(c001, a), self.paint_sign(c101, a), t.x)
-            let x3 = mix(self.paint_sign(c011, a), self.paint_sign(c111, a), t.x)
-            let v = mix(mix(x0, x1, t.y), mix(x2, x3, t.y), t.z) * h0.y
+            var v = 0.0
+            if abs(b - a) > 0.5 {
+                // two slots meet in the cell: the cubic, smooth across its faces
+                v = self.paint_cubic(g, t, a, bmin, dim, bases) * h0.y
+            } else {
+                let x0 = mix(self.paint_sign(c000, a), self.paint_sign(c100, a), t.x)
+                let x1 = mix(self.paint_sign(c010, a), self.paint_sign(c110, a), t.x)
+                let x2 = mix(self.paint_sign(c001, a), self.paint_sign(c101, a), t.x)
+                let x3 = mix(self.paint_sign(c011, a), self.paint_sign(c111, a), t.x)
+                v = mix(mix(x0, x1, t.y), mix(x2, x3, t.y), t.z) * h0.y
+            }
             let cov = clamp(0.5 + v / max(px, cell * 0.02), 0.0, 1.0)
             var ca = albedo
             if a > 0.5 { ca = self.paint_color(bases, a) }

@@ -26,10 +26,12 @@ unicode-script = { version = "0.5.8", path = "../libs/unicode/unicode-script" }
 unicode-segmentation = { version = "1.12.0", path = "../libs/unicode/unicode-segmentation" }
 makepad-zune-png = { version = "0.5.2", path = "../libs/zune/zune-png" }
 makepad-zune-jpeg = { version = "0.5.15", path = "../libs/zune/zune-jpeg" }
-makepad-zune-bmp = { version = "0.5.2", path = "../libs/zune/zune-bmp" }
-makepad-zune-qoi = { version = "0.5.2", path = "../libs/zune/zune-qoi" }
-makepad-webp = { version = "0.2.4", path = "../libs/webp" }
-makepad-gif = { version = "0.1.0", path = "../libs/gif" }
+# Pictures decoded (PNG, JPEG, WebP, GIF, BMP, QOI, ICO): its own crate, no platform.
+makepad-image-decode = { version = "0.1.0", path = "../libs/image_decode" }
 
 [features]
 default = []
+
+[dev-dependencies]
+# The tests' GIFs.
+makepad-gif = { version = "0.1.0", path = "../libs/gif" }

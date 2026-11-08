@@ -523,6 +523,24 @@ script_mod! {
         color_lamp_off: #x1A1D22FF
         color_lamp_plain: #xEEF2F6FF
         lamp_halo: 0.25
+        // CHARTS
+        // A chart's or a dashboard's ground and ink, its categorical series in a
+        // fixed order (told apart by hue, never blended) and its status marks.
+        // A near-black ground lit in white ink and bright, saturated series.
+        color_chart_ground: #x0B0D10FF
+        color_chart_ink: #xFFFFFFFF
+        color_chart_ink_dim: #xB4BAC4FF
+        color_chart_1: #x4C8DFFFF
+        color_chart_2: #x22D3A8FF
+        color_chart_3: #xA978FFFF
+        color_chart_4: #xFFC93CFF
+        color_chart_5: #xFF7A3DFF
+        color_chart_6: #x25CBE6FF
+        color_chart_7: #xFF4F8BFF
+        color_chart_8: #xB9E05AFF
+        color_chart_good: #x4EE05AFF
+        color_chart_warn: #xFFAB24FF
+        color_chart_bad: #xFF4D4DFF
         // Surface and outline roles on the opaque ladder.
         color_surface: theme.color_bg_app
         color_surface_container: theme.color_fg_app

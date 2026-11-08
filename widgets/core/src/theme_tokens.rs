@@ -296,6 +296,21 @@ pub static THEME_TOKENS: &[TokenSpec] = &[
     color_spec("color_lamp_off", TokenGroup::ColorStatus, "An indicator lamp that is out: the dark lens it shows instead of a hole.", ALL),
     color_spec("color_lamp_plain", TokenGroup::ColorStatus, "An indicator lamp with no intent of its own, lit.", ALL),
     spec("lamp_halo", TokenGroup::Material, TokenKind::Opacity, "The halo one device pixel outside a lit lamp, as a share of the lamp's own light; a lamp holds it at 0.45 or under.", 0.0, 0.45, 0.01, ALL),
+    // Charts: a data display's ground and ink, its series and its status marks.
+    surface("color_chart_ground", "The ground a chart or a dashboard is drawn on; its rows part by faint rules and bands of its ink."),
+    surface("color_chart_ink", "Values, labels and headings on a chart's ground."),
+    surface("color_chart_ink_dim", "Secondary labels on a chart's ground: axes, units, what is quiet."),
+    accent("color_chart_1", "The first categorical series of a chart; the eight go in this order and are never blended."),
+    accent("color_chart_2", "The second categorical series of a chart."),
+    accent("color_chart_3", "The third categorical series of a chart."),
+    accent("color_chart_4", "The fourth categorical series of a chart."),
+    accent("color_chart_5", "The fifth categorical series of a chart."),
+    accent("color_chart_6", "The sixth categorical series of a chart."),
+    accent("color_chart_7", "The seventh categorical series of a chart."),
+    accent("color_chart_8", "The eighth categorical series of a chart."),
+    status("color_chart_good", "A good mark on a chart: a landing, a pass, a box that is up."),
+    status("color_chart_warn", "A mark that wants a look on a chart: a long wait, a stall."),
+    status("color_chart_bad", "A bad mark on a chart: a failure, a box that is down."),
     // Motion.
     seconds("motion_short_1", "Fifty milliseconds; a state layer appearing."),
     seconds("motion_short_2", "A tenth of a second; a hover or press."),
@@ -2292,17 +2307,20 @@ impl BlendTheme {
 
 /// Whether averaging this token with another theme's would mean anything.
 ///
-/// The fifteen `color_map_N` series with their eight shades each, and the
-/// fourteen `color_syntax_*` keys, are categorical palettes: their members are
+/// The fifteen `color_map_N` series with their eight shades each, the eight
+/// `color_chart_N` series and the fourteen `color_syntax_*` keys are
+/// categorical palettes: their members are
 /// told apart BY hue, and which hue is which carries the meaning -- the third
 /// series of a chart, a string literal, a comment. A palette half way between
 /// two palettes is not a palette: every member has drifted toward every other
 /// member and toward the mean of the lot, which is the one property a
 /// categorical palette exists to avoid. So these are not blended at all. They
 /// are taken whole from the argmax theme and read as that theme's, which is
-/// 133 of the 557 tokens a theme carries.
+/// 141 of the 634 tokens a theme carries. A chart's ground, inks and status
+/// marks (`color_chart_ground`, `_good` ...) are not series and do blend.
 pub fn is_categorical(key: &str) -> bool {
-    key.starts_with("color_map_") || key.starts_with("color_syntax_")
+    let series = key.strip_prefix("color_chart_").is_some_and(|n| n.starts_with(|c: char| c.is_ascii_digit()));
+    key.starts_with("color_map_") || key.starts_with("color_syntax_") || series
 }
 
 /// How the weights behave when one of them moves.
@@ -3295,7 +3313,7 @@ mod.theme.color_surface=#123456
         if let Some(rest) = key.strip_prefix("color_") {
             const ROLES: &[&str] = &[
                 "on_", "primary", "secondary", "tertiary", "error_", "warning_", "success", "info", "surface",
-                "outline", "inverse", "scrim", "elevation", "material", "presence", "placeholder",
+                "outline", "inverse", "scrim", "elevation", "material", "presence", "placeholder", "chart_",
             ];
             return ROLES.iter().any(|p| rest.starts_with(p));
         }
@@ -3959,7 +3977,7 @@ mod equalizer_tests {
         }
     }
 
-    /// The map and syntax palettes, and nothing else. Half the colours in a
+    /// The map, chart and syntax palettes, and nothing else. Half the colours in a
     /// theme file are `color_map_*`, which is why the exclusion is worth
     /// stating: the other four hundred tokens do blend.
     #[test]
@@ -3967,6 +3985,9 @@ mod equalizer_tests {
         assert!(is_categorical("color_map_1"));
         assert!(is_categorical("color_map_12_h"));
         assert!(is_categorical("color_syntax_string"));
+        assert!(is_categorical("color_chart_3"));
+        assert!(!is_categorical("color_chart_ground"));
+        assert!(!is_categorical("color_chart_bad"));
         assert!(!is_categorical("color_mark_active"));
         assert!(!is_categorical("color_primary"));
         assert!(!is_categorical("color_surface"));

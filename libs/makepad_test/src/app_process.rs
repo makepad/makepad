@@ -290,7 +290,9 @@ pub fn launch_package(
     if let Some(loader) = std::env::var_os("MAKEPAD_RUN_LOADER") {
         let loader = PathBuf::from(loader);
         let mut command = Command::new(&loader);
-        command.arg("run").arg(package_name);
+        // no one attends a test's app: nothing parks there (a compile error or a panic ends it,
+        // and the test fails with its text)
+        command.arg("run").arg("--unattended").arg(package_name);
         if let Some(bin_name) = bin_name {
             command.arg("--bin").arg(bin_name);
         }
@@ -645,23 +647,30 @@ mod tests {
     }
 
     /// A shell script standing in for the app binary: it prints the remote
-    /// startup line (pointing at a fixture endpoint) and then lives until
-    /// killed, ignoring shutdown requests like a wedged app would.
+    /// startup line (pointing at a fixture endpoint), then runs `script_tail`
+    /// (`exec sleep 60`: it lives until killed, ignoring shutdown requests like
+    /// a wedged app would; `when_asked(.., "quit")`: it exits when asked to quit).
     fn write_fake_app(dir: &Path, socket: &Path, script_tail: &str) -> PathBuf {
-        let path = dir.join("fake-app.sh");
-        fs::write(
-            &path,
-            format!(
+        write_script(
+            dir,
+            "fake-app.sh",
+            &format!(
                 "#!/bin/sh\necho \"[makepad-remote] pid=$$ app=fake-app socket={}\"\n{script_tail}\n",
                 socket.display()
             ),
         )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+    }
+
+    /// An executable script `dir/name` holding `text`. Every spawn forks this process, and until
+    /// the child execs it holds all our open files: a script written here could still be open for
+    /// writing in another test's child when this test runs it ("Text file busy"). So `install`, a
+    /// process of its own and waited for, writes the script from a side file: no handle that
+    /// writes it ever lives in this process.
+    fn write_script(dir: &Path, name: &str, text: &str) -> PathBuf {
+        let source = dir.join(format!("{name}.text"));
+        fs::write(&source, text).unwrap();
+        let path = dir.join(name);
+        assert!(Command::new("install").arg("-m").arg("755").arg(&source).arg(&path).status().unwrap().success());
         path
     }
 
@@ -684,6 +693,23 @@ mod tests {
             r#"{"app":"fake-app","pid":1,"w":[{"i":0,"t":"fake","sz":[10,10],"px":[10,10],"dpi":1,"pass_dpi":1,"pos":[0,0]}]}"#,
         );
         server
+    }
+
+    /// A fake app's script lines that return once the app is asked `command` (the app's own
+    /// next step, as on `quit`): they wait on a FIFO the fixture writes on the first `command`
+    /// (a later one would find no reader).
+    #[cfg(unix)]
+    fn when_asked(dir: &Path, server: &crate::fixture::FixtureServer, command: &str) -> String {
+        let fifo = dir.join(format!("{command}.fifo"));
+        assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        let asked = std::sync::atomic::AtomicBool::new(false);
+        let path = fifo.clone();
+        server.on(command, move || {
+            if !asked.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                fs::write(&path, "asked\n").unwrap();
+            }
+        });
+        format!("read _ < '{}'", fifo.display())
     }
 
     #[cfg(unix)]
@@ -728,9 +754,8 @@ mod tests {
         let dir = scratch_dir("graceful");
         let server = fixture_with_window();
         server.route("quit", r#"{"ok":1}"#);
-        // Lives just long enough for startup to complete, then exits like an
-        // app answering `/quit` would.
-        let script = write_fake_app(&dir, server.socket(), "exec sleep 0.5");
+        // Lives until it is asked to quit, then exits like an app answering `/quit` would.
+        let script = write_fake_app(&dir, server.socket(), &when_asked(&dir, &server, "quit"));
         let spec = fake_app_spec(dir.clone());
 
         let mut app = launch(&spec, &script).unwrap();
@@ -751,7 +776,7 @@ mod tests {
         let server = fixture_with_window();
         // `gq` ends in `quit`, whose answer is lost: the exiting child still counts as graceful.
         server.disconnect("quit");
-        let script = write_fake_app(&dir, server.socket(), "exec sleep 1");
+        let script = write_fake_app(&dir, server.socket(), &when_asked(&dir, &server, "quit"));
         let spec = fake_app_spec(dir.clone());
         let mut app = launch(&spec, &script).unwrap();
 
@@ -783,25 +808,40 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A JIT launch has no deadline, so the child's exit is what ends its wait. An app whose remote
+    /// came up and that then fails before its first window (an unattended run's compile error, which
+    /// does not park) fails the launch at once, with its exit status and stderr tail. A test polled
+    /// its parked app's windows every 50 ms for 64 min (11-07).
+    #[cfg(unix)]
+    #[test]
+    fn a_jit_app_that_exits_before_its_window_fails_the_launch_at_once() {
+        let dir = scratch_dir("jit-exit");
+        let server = crate::fixture::FixtureServer::start();
+        server.route("help", "makepad-remote app=fake-app");
+        server.route("status", r#"{"app":"fake-app","pid":1,"w":[]}"#);
+        // It fails once the launch has asked for its windows, as a JIT app's first frame does.
+        let fails = format!("{}\necho 'compile error in app::start: boom' >&2\nexit 101", when_asked(&dir, &server, "status"));
+        let script = write_fake_app(&dir, server.socket(), &fails);
+        let spec = fake_app_spec(dir.clone());
+        let t0 = Instant::now();
+        let err = launch_error(launch_command(&spec, &script, Command::new(&script), true));
+        assert!(err.message().contains("exited") && err.message().contains("during startup"), "{}", err.message());
+        assert!(err.message().contains("compile error in app::start: boom"), "{}", err.message());
+        assert!(server.requests().iter().any(|target| target == "status"), "it waited for a window");
+        assert!(t0.elapsed() < Duration::from_secs(5), "at once: {:?}", t0.elapsed());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_listening_line_for_another_pid_is_rejected() {
         let dir = scratch_dir("wrong-pid");
         let server = fixture_with_window();
-        let script = dir.join("fake-app.sh");
-        fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\necho \"[makepad-remote] pid=1 app=x socket={}\"\nexec sleep 60\n",
-                server.socket().display()
-            ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let script = write_script(
+            &dir,
+            "fake-app.sh",
+            &format!("#!/bin/sh\necho \"[makepad-remote] pid=1 app=x socket={}\"\nexec sleep 60\n", server.socket().display()),
+        );
         let spec = fake_app_spec(dir.clone());
         let err = launch_error(launch(&spec, &script));
         assert!(err.message().contains("pid 1"), "{}", err.message());

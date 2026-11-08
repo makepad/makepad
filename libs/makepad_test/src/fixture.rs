@@ -24,6 +24,8 @@ enum Answer {
 }
 
 type Routes = HashMap<String, Answer>;
+/// What runs when a command arrives, before its answer (`FixtureServer::on`).
+type Hooks = HashMap<String, Arc<dyn Fn() + Send + Sync>>;
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -31,6 +33,7 @@ pub struct FixtureServer {
     socket: PathBuf,
     requests: Arc<Mutex<Vec<String>>>,
     routes: Arc<Mutex<Routes>>,
+    hooks: Arc<Mutex<Hooks>>,
     conns: Arc<Mutex<Vec<Conn>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -46,16 +49,18 @@ impl FixtureServer {
         listener.set_nonblocking(true).expect("nonblocking fixture");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let routes: Arc<Mutex<Routes>> = Arc::new(Mutex::new(HashMap::new()));
+        let hooks: Arc<Mutex<Hooks>> = Arc::new(Mutex::new(HashMap::new()));
         let conns = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
 
         let endpoint = Endpoint::new(&app);
-        endpoint.register("cmd", 1, cmd_service(requests.clone(), routes.clone()));
+        endpoint.register("cmd", 1, cmd_service(requests.clone(), routes.clone(), hooks.clone()));
         endpoint.register("frames", 1, frames_service(requests.clone()));
         let mut fixture = Self {
             socket,
             requests,
             routes,
+            hooks,
             conns: conns.clone(),
             stop: stop.clone(),
             thread: None,
@@ -102,6 +107,12 @@ impl FixtureServer {
         self.requests.lock().unwrap().clone()
     }
 
+    /// Run `f` each time `command` arrives, before it is answered: what the app does on it
+    /// (a stand-in app that exits on `quit`).
+    pub fn on(&self, command: &str, f: impl Fn() + Send + Sync + 'static) {
+        self.hooks.lock().unwrap().insert(command.to_string(), Arc::new(f));
+    }
+
     /// Close the command's channel without an answer, as an exiting app may do
     /// after accepting its final shutdown command.
     pub fn disconnect(&self, command: &str) {
@@ -140,9 +151,9 @@ fn serve(endpoint: &Endpoint, stream: UnixStream, conns: &Arc<Mutex<Vec<Conn>>>)
 /// The `cmd` service: one answer per request line, `end` line last. The
 /// dispatch of the real service is a plain `fn`, so the fixture speaks the
 /// protocol itself to keep its tables per fixture.
-fn cmd_service(requests: Arc<Mutex<Vec<String>>>, routes: Arc<Mutex<Routes>>) -> Factory {
+fn cmd_service(requests: Arc<Mutex<Vec<String>>>, routes: Arc<Mutex<Routes>>, hooks: Arc<Mutex<Hooks>>) -> Factory {
     Arc::new(move |_, open| {
-        let (requests, routes) = (requests.clone(), routes.clone());
+        let (requests, routes, hooks) = (requests.clone(), routes.clone(), hooks.clone());
         thread::spawn(move || {
             let channel = open.channel;
             while let Some(event) = channel.recv() {
@@ -162,6 +173,10 @@ fn cmd_service(requests: Arc<Mutex<Vec<String>>>, routes: Arc<Mutex<Routes>>) ->
                         seen.push_str(&format!(" {key}={value}"));
                     }
                     requests.lock().unwrap().push(seen);
+                    let hook = hooks.lock().unwrap().get(&req.cmd).cloned();
+                    if let Some(hook) = hook {
+                        hook();
+                    }
                     let answer = routes.lock().unwrap().get(&req.cmd).cloned();
                     let mut reply = match answer {
                         Some(Answer::Lines(lines)) => lines,

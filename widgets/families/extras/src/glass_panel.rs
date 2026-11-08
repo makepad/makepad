@@ -4633,4 +4633,187 @@ mod tests {
             assert_eq!(used(&mut cx, on_pane), [false, false], "a hidden pane took the wheel");
         });
     }
+
+    /// A scrolling box holding a glass chip over a tall page, drawn once.
+    struct ChipPage {
+        root: WidgetRef,
+        pass: DrawPass,
+        list: DrawList2d,
+        overlay: Overlay,
+    }
+
+    impl ChipPage {
+        fn new(cx: &mut Cx) -> Self {
+            cx.init_cx_os();
+            let root = cx.with_vm(|vm| {
+                crate::script_mod(vm);
+                let value = crate::script_eval!(vm, {
+                    use mod.prelude.widgets.*
+                    use mod.widgets.*
+                    View{
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        page := ScrollYView{
+                            width: 300.
+                            height: 200.
+                            flow: Down
+                            chip := glass.GlassButton{width: 120. height: 32. text: "Show again"}
+                            View{width: Fill height: 1000.}
+                        }
+                    }
+                });
+                WidgetRef::script_from_value(vm, value)
+            });
+            let pass = DrawPass::new(cx);
+            let list = DrawList2d::new(cx);
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            let mut page = ChipPage { root, pass, list, overlay };
+            page.draw(cx);
+            page
+        }
+
+        fn draw(&mut self, cx: &mut Cx) {
+            self.pass.set_size(cx, PANE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.list.begin_always(&mut cx2d);
+            self.overlay.begin(&mut cx2d);
+            cx2d.begin_root_turtle(PANE, Layout::flow_down());
+            self.root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.overlay.end(&mut cx2d);
+            self.list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+
+        fn chip(&self, cx: &Cx) -> WidgetRef {
+            self.root.widget(cx, ids!(chip))
+        }
+
+        fn on_chip(&self, cx: &Cx) -> DVec2 {
+            let rect = self.chip(cx).area().rect(cx);
+            assert!(rect.size.y > 0.0, "the chip was not drawn");
+            rect.pos + rect.size * 0.5
+        }
+
+        fn scroll_y(&self, cx: &Cx) -> f64 {
+            self.root.widget(cx, ids!(page)).borrow::<View>().unwrap().scroll_extent().unwrap().pos.y
+        }
+
+        /// The clicks the chip sent out of these events.
+        fn clicks(&self, cx: &mut Cx, events: Vec<Event>) -> usize {
+            let chip = self.chip(cx).widget_uid();
+            let mut clicks = 0;
+            for event in events {
+                let actions = cx.capture_actions(|cx| self.root.handle_event(cx, &event, &mut Scope::empty()));
+                clicks += actions
+                    .iter()
+                    .filter_map(|action| action.as_widget_action())
+                    .filter(|action| {
+                        action.widget_uid == chip && matches!(action.cast::<GlassButtonAction>(), GlassButtonAction::Clicked)
+                    })
+                    .count();
+            }
+            clicks
+        }
+    }
+
+    fn touch(state: crate::makepad_draw::makepad_platform::event::TouchState, abs: DVec2, time: f64) -> Event {
+        use crate::makepad_draw::makepad_platform::event::{TouchPoint, TouchUpdateEvent};
+        Event::TouchUpdate(TouchUpdateEvent {
+            time,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            touches: vec![TouchPoint {
+                state,
+                abs,
+                time,
+                uid: 7,
+                rotation_angle: 0.0,
+                force: 1.0,
+                radius: dvec2(1.0, 1.0),
+                handled: Cell::new(Area::Empty),
+                sweep_lock: Cell::new(Area::Empty),
+            }],
+        })
+    }
+
+    fn mouse_move(abs: DVec2, time: f64) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: DVec2::default(),
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time,
+            handled: Cell::new(Area::Empty),
+        })
+    }
+
+    fn mouse_up(abs: DVec2, time: f64) -> Event {
+        Event::MouseUp(MouseUpEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time,
+        })
+    }
+
+    /// A finger that lands on a glass button in a scrolling box and then
+    /// drags the box is a scroll, not a press of the button: the box scrolls
+    /// with the finger and the button sends no click when the finger lifts.
+    /// The same finger lifted where it landed is a click, so the button is
+    /// not simply deaf.
+    #[test]
+    fn a_touch_drag_that_starts_on_a_glass_button_scrolls_without_clicking_it() {
+        use crate::makepad_draw::makepad_platform::event::TouchState;
+        crate::on_test_cx(|| {
+            let mut cx = test_cx();
+            let page = ChipPage::new(&mut cx);
+            let on_chip = page.on_chip(&cx);
+            let tapped = page.clicks(&mut cx, vec![touch(TouchState::Start, on_chip, 0.0), touch(TouchState::Stop, on_chip, 0.05)]);
+            assert_eq!(tapped, 1, "a tap on the chip is a click");
+
+            let up = on_chip - dvec2(0.0, 60.0);
+            let dragged = page.clicks(
+                &mut cx,
+                vec![
+                    touch(TouchState::Start, on_chip, 1.0),
+                    touch(TouchState::Move, on_chip - dvec2(0.0, 30.0), 1.05),
+                    touch(TouchState::Move, up, 1.1),
+                    touch(TouchState::Stop, up, 1.15),
+                ],
+            );
+            assert!(page.scroll_y(&cx) > 0.0, "the drag did not scroll the box");
+            assert_eq!(dragged, 0, "the drag that scrolled the box also clicked the chip it started on");
+        });
+    }
+
+    /// The same with the mouse: a press on the chip that is dragged up the
+    /// box scrolls it, and the release clicks nothing, wherever the chip
+    /// has got to under the pointer by then.
+    #[test]
+    fn a_mouse_drag_that_starts_on_a_glass_button_scrolls_without_clicking_it() {
+        crate::on_test_cx(|| {
+            let mut cx = test_cx();
+            let page = ChipPage::new(&mut cx);
+            let on_chip = page.on_chip(&cx);
+            cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WindowId(1, 1)));
+            let clicks = page.clicks(
+                &mut cx,
+                vec![
+                    press(on_chip),
+                    mouse_move(on_chip - dvec2(0.0, 6.0), 0.02),
+                    mouse_move(on_chip - dvec2(0.0, 12.0), 0.04),
+                    mouse_up(on_chip - dvec2(0.0, 12.0), 0.06),
+                ],
+            );
+            cx.fingers.first_mouse_button = None;
+            assert!(page.scroll_y(&cx) > 0.0, "the drag did not scroll the box");
+            assert_eq!(clicks, 0, "the drag that scrolled the box also clicked the chip it started on");
+        });
+    }
 }

@@ -484,6 +484,24 @@ script_mod! {
         color_lamp_off: #x3C3C3CFF
         color_lamp_plain: #x8C8C8CFF
         lamp_halo: 0.0
+        // CHARTS
+        // A chart's or a dashboard's ground and ink, its categorical series in a
+        // fixed order (told apart by hue, never blended) and its status marks.
+        // The light steps on the skeleton's grey page: a chart keeps its hues.
+        color_chart_ground: #xEEEEEEFF
+        color_chart_ink: #x1A1A1AFF
+        color_chart_ink_dim: #x555555FF
+        color_chart_1: #x2A78D6FF
+        color_chart_2: #x0F9E7CFF
+        color_chart_3: #x6250D6FF
+        color_chart_4: #xE0A800FF
+        color_chart_5: #xD9481AFF
+        color_chart_6: #x0A9FBFFF
+        color_chart_7: #xD6336CFF
+        color_chart_8: #x5F9A1AFF
+        color_chart_good: #x389457FF
+        color_chart_warn: #xC98A00FF
+        color_chart_bad: #xCC0000FF
         // Surface and outline roles, the light mapping over the ladder above.
         color_surface: #xDDDDDDFF
         color_surface_container: #xEEEEEEFF
