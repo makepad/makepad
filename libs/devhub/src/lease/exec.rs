@@ -63,6 +63,25 @@ fn with_load(answer: String, load: impl FnOnce() -> Option<(f64, f64)>) -> Strin
 
 pub const WORDS: &[&str] = &["overlay-selftest", "overlay-status", "overlay-why", "lease-start", "lease-run", "lease-weight", "lease-log", "lease-end", "lease-beat", "lease-jits", "lease-yield", "lease-tell", "lease-kill", "lease-why", "ship-have", "ship-put", "ship-link", "ship-done", "input-have", "input-put", "lease-owns", "hub-restart", "service-restart", "service-health", "get-ls", "get-read", "policy", "lease-conf", "user-back", "caps", "disk", "lane-dirs", "heap", "recover-get", "recover-del", "jit-read", "jit-put"];
 
+/// The cargo variable of this host's `target.<triple>.rustflags`: its value comes after the
+/// workspace config's flags for the host target (its `-C target-cpu=native`); empty: a host whose
+/// triple this build does not know (no build `--for` another box here).
+const HOST_RUSTFLAGS: &str = if cfg!(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")) {
+    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS"
+} else if cfg!(all(target_arch = "aarch64", target_os = "linux", target_env = "gnu")) {
+    "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS"
+} else if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
+    "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS"
+} else if cfg!(all(target_arch = "x86_64", target_os = "macos")) {
+    "CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS"
+} else if cfg!(all(target_arch = "x86_64", windows, target_env = "msvc")) {
+    "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS"
+} else if cfg!(all(target_arch = "aarch64", windows, target_env = "msvc")) {
+    "CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS"
+} else {
+    ""
+};
+
 /// Marks every process a lease's runs start ([`lease_mark`]): a process that moved to its own session (a
 /// WM's apps, a detached helper) is still stopped with the lease. One that outlives its lease on
 /// purpose (the check server) removes it.
@@ -283,6 +302,36 @@ fn script_spill(argv: &[String], stem: &Path) -> Option<(usize, PathBuf, String)
         format!("exec(compile(open({p},'rb').read(),{p},'exec'))")
     };
     Some((i, path, word))
+}
+
+/// A run's own `makepad` in `bin` (made anew), the folder its PATH starts with: the run's JIT
+/// (`jit`), else this tree's as a bare `makepad` first word runs it, cargo's build of it in
+/// `work` ([`super::loaders::cargo_form`]). A job's scripts ran `makepad` as whatever their node's
+/// PATH held, and one node's had none ("boot.sh: line 7: makepad: command not found", 11-07).
+fn job_makepad(bin: &Path, jit: Option<&Path>, work: &Path) -> Result<(), String> {
+    let io = |e: std::io::Error| format!("{}: {e}", bin.display());
+    let _ = std::fs::remove_dir_all(bin);
+    std::fs::create_dir_all(bin).map_err(io)?;
+    let manifest = work.join("Cargo.toml");
+    #[cfg(unix)]
+    {
+        if let Some(jit) = jit {
+            return std::os::unix::fs::symlink(jit, bin.join("makepad")).map_err(io);
+        }
+        use std::os::unix::fs::PermissionsExt as _;
+        let quoted = format!("'{}'", manifest.to_string_lossy().replace('\'', "'\\''"));
+        let script = bin.join("makepad");
+        std::fs::write(&script, format!("#!/bin/sh\nexec cargo run --profile host -q --manifest-path {quoted} -p makepad-run --bin makepad -- \"$@\"\n")).map_err(io)?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).map_err(io)
+    }
+    #[cfg(windows)]
+    {
+        let line = match jit {
+            Some(jit) => format!("@\"{}\" %*\r\n", jit.display()),
+            None => format!("@cargo run --profile host -q --manifest-path \"{}\" -p makepad-run --bin makepad -- %*\r\n", manifest.display()),
+        };
+        std::fs::write(bin.join("makepad.cmd"), line).map_err(io)
+    }
 }
 
 struct Lease {
@@ -1276,7 +1325,8 @@ fn next_quiet(quiet: Option<(Instant, os::Activity)>, done: Option<os::Activity>
 pub const IDLE_CPU_PCT: u64 = 5;
 
 /// Whether a lease's runs did work from `from` to `to`, `over` apart: CPU past
-/// [`IDLE_CPU_PCT`] of a core (and past 0.2 s), more than 1 MB read or written, or a process
+/// [`IDLE_CPU_PCT`] of a core (and past 0.2 s), more than 1 MB read from or written to storage
+/// (not a socket's or a pipe's traffic: os/unix.rs `proc_activity`), or a process
 /// gone with what it had done. A hung JIT waits at 0% CPU (a CI test sat 50 min so, unseen,
 /// 11-04), or polls at 1%.
 fn busy(from: os::Activity, to: os::Activity, over: Duration) -> bool {
@@ -1379,6 +1429,13 @@ fn unit_tag(state: &Path) -> String {
     format!("{h:08x}")
 }
 
+/// A lane whose leases work in the box's shared tree, not a native tree of their own
+/// ([`super::native_lane`]): CI and landings, and every lane on a user's box.
+#[cfg(feature = "checkout")]
+fn shared_tree_lane(lane: &str, role: super::Role) -> bool {
+    matches!(lane, super::sched::CI_LANE | super::sched::LANDING_LANE) || role.users()
+}
+
 impl Exec {
     /// The executor over `conf.work`, its ledger in `state`; leases left in the ledger by a
     /// previous hub are taken back (the watchdog ends them unless the master still beats them).
@@ -1400,12 +1457,6 @@ impl Exec {
         {
             let w = Arc::downgrade(&x);
             super::relaxgit::set_live(Box::new(move || w.upgrade().map(|x| x.leases.lock().unwrap().values().filter(|l| l.src == Src::Overlay).map(|l| overlay_lane(l.kind, &l.lane, l.pin.as_deref().unwrap_or(""))).collect()).unwrap_or_default()));
-        }
-        // its records' pins in the named form, once, before they are taken back
-        match super::pre_nested::node(&x.state, &x.conf().work) {
-            Ok(0) => {}
-            Ok(n) => eprintln!("devhub: {n} lease record(s) moved to named pins"),
-            Err(e) => eprintln!("devhub: moving lease records to named pins: {e}"),
         }
         let mut back = Vec::new();
         for e in std::fs::read_dir(&x.state).into_iter().flatten().flatten() {
@@ -1928,6 +1979,14 @@ impl Exec {
             Ok(p) => p,
             Err(e) => return err(format!("lease-start {id}: {e}")),
         };
+        // a build `--for` another box: that box's CPU in place of this one's (`native`). The flag
+        // comes after the workspace config's for the host target, and rustc takes the last
+        // `-C target-cpu`.
+        let cpu_target = match v.get("cpu_target").and_then(|t| t.as_str()) {
+            Some(t) if super::valid_cpu_target(t) && !HOST_RUSTFLAGS.is_empty() => Some(t.to_string()),
+            Some(t) => return err(format!("lease-start {id}: cannot build for CPU `{t}` here")),
+            None => None,
+        };
         // Only a tree write lease on a dev-on node moves the work tree.
         if src == Src::Tree && rev.is_some() && !kind.writes() {
             return err(format!("lease-start: an {} lease never moves the node's tree (no rev)", kind.as_str()));
@@ -1987,6 +2046,9 @@ impl Exec {
         } else {
             (w.join("lane").join(&lane).join("src"), w.join("target").join(format!("lane-{lane}")), None, "lane dir".to_string())
         };
+        // a build `--for` another box builds in a target dir of its own: this box's own build
+        // stays warm
+        let target = match &cpu_target { Some(t) => target.join(format!("for-{t}")), None => target };
         let keep = tmp.join(crate::lease::KEEP_DIR);
         for d in [&keep, &work, &target] {
             if let Err(e) = std::fs::create_dir_all(d) {
@@ -2028,6 +2090,7 @@ impl Exec {
         ];
         #[cfg(target_os = "linux")]
         let law: Vec<_> = law.into_iter().chain(wm_env).collect();
+        let law: Vec<_> = law.into_iter().chain(cpu_target.map(|t| (HOST_RUSTFLAGS, format!("-C target-cpu={t}")))).collect();
         // the lease's own environment wins over what was asked
         env.retain(|(k, _)| !law.iter().any(|(l, _)| l == k));
         env.extend(law.iter().map(|(k, v)| (k.to_string(), v.clone())));
@@ -2085,15 +2148,14 @@ impl Exec {
             Some(pin) => pin,
             None => super::tree::shared(&deploy).or_else(|| super::tree::current(&root)).ok_or("sync this node before its first CI lease")?,
         };
-        // Shared trees keep the nested repositories the pin does not name (the tree's commit,
-        // else the deployment's, one the store holds); a native lane has exactly its requested pin.
+        // A shared tree takes each nested repository the pin does not name at the deployment's
+        // commit (one the store holds), and goes without one the deployment has not: never the
+        // commit an earlier lease left there, which made a CI run build whatever a lane had pinned
+        // last. A native lane has exactly its requested pin.
         if !native {
-            let current = super::tree::current(&root).map(|p| p.nested).unwrap_or_default();
-            let deployed = super::tree::shared(&deploy).map(|p| p.nested).unwrap_or_default();
-            for name in current.keys().chain(deployed.keys()) {
-                if pin.nested.contains_key(name) { continue; }
-                if let Some(sha) = current.get(name).or_else(|| deployed.get(name)).filter(|c| crate::sync::git::Store::open(name).is_ok_and(|s| s.has(c))) {
-                    pin.nested.insert(name.clone(), sha.clone());
+            for (name, sha) in super::tree::shared(&deploy).map(|p| p.nested).unwrap_or_default() {
+                if !pin.nested.contains_key(&name) && crate::sync::git::Store::open(&name).is_ok_and(|s| s.has(&sha)) {
+                    pin.nested.insert(name, sha);
                 }
             }
         }
@@ -2103,6 +2165,7 @@ impl Exec {
             super::tree::take(id, &pin, &root, &conf.work.join("recovered"))?
         };
         self.report_tree(&format!("{id} on {}, before its start", self.machine), &t.cleared);
+        let pin = t.pin;
         let moved: Vec<String> = t.moved.iter().map(|(r, n)| format!("{r} {n} files")).collect();
         let what = format!("{} tree at {} ({})", if native { "native" } else { "work" }, pin.short(), if t.moved.iter().all(|(_, n)| *n == 0) { "there already".to_string() } else { format!("moved: {}", moved.join(", ")) });
         let target = if native { super::tree::native_target(&conf.work, tree_lane) } else { conf.work.join("ci-target") };
@@ -2419,6 +2482,8 @@ impl Exec {
         if !dir.is_dir() {
             return Err(format!("lease-run {id}: the lease's tree has no {} (the directory the run was asked from: run it from inside the lane's worktree, at a tracked path)", rel.display()));
         }
+        let bin = l.tmp.join(format!("run-{n}-bin"));
+        job_makepad(&bin, jit, &l.work).map_err(|e| format!("lease-run {id}: its makepad: {e}"))?;
         let build = |argv: Vec<String>| {
             let argv = match jit.filter(|_| l.kind == Kind::Timed && cfg!(target_os = "macos")) {
                 Some(jit) => warmed_up(argv, jit, &exit_file(&self.state, &id, n).with_extension("warmup")),
@@ -2429,6 +2494,9 @@ impl Exec {
             let mut cmd = std::process::Command::new(&full[0]);
             cmd.args(&full[1..]).current_dir(&dir);
             self.run_env(&mut cmd, l, run_env, unset, jit);
+            // the run's own makepad before any on the node's PATH ([`job_makepad`])
+            let path = cmd.get_envs().find(|(k, _)| k.eq_ignore_ascii_case("PATH")).and_then(|(_, v)| v.map(|v| v.to_os_string())).unwrap_or_default();
+            if let Ok(path) = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&path))) { cmd.env("PATH", path); }
             cmd.envs(plain_env.iter().map(|(k, v)| (k, v)));
             cmd
         };
@@ -3367,6 +3435,9 @@ impl Exec {
         for e in &r.unclean {
             self.emit("ws", Sev::Err, format!("ws_unclean: {who}: the tree is not clean, later leases may fail on it: {e}"));
         }
+        for k in &r.kept {
+            self.emit("ws", Sev::Warn, format!("ws_kept: {who}: {k}"));
+        }
     }
 
     #[cfg(not(feature = "checkout"))]
@@ -3625,6 +3696,9 @@ impl Exec {
     /// The folder `devhub get` reads and the prefix that names it: a live lease's work
     /// (`target/`, `tmp/`: its target and scratch), else the lane's dir (`src/`: the tree `run`
     /// ships and runs in; `target/`: the lane's warm target). Returns (root, prefix, path under root).
+    /// A lane with a native tree reads only that one: when another lane's lease took the tree
+    /// mid-copy, a sheet run's get read on in the box's shared tree and failed there with
+    /// "No such file" (11-07).
     fn get_root(&self, lane: &str, lease: &str, rel: &str) -> Result<(PathBuf, &'static str, String), String> {
         if !valid_name(lane) || !inside(rel) {
             return Err("usage: <lane> <lease|-> <relative path inside the lane's dir>".into());
@@ -3641,18 +3715,23 @@ impl Exec {
         }
         #[cfg(feature = "checkout")]
         {
-            let work = self.conf().work;
-            let root = super::tree::native_root(&work, lane);
+            let conf = self.conf();
+            let root = super::tree::native_root(&conf.work, lane);
             if root.join(".git").exists() {
+                // a get under way keeps the tree the last its box takes for another lane
+                super::tree::touch_native(&root);
                 return Ok(match (under("target"), under("src")) {
-                    (Some(r), _) => (super::tree::native_target(&work, lane), "target/", r),
+                    (Some(r), _) => (super::tree::native_target(&conf.work, lane), "target/", r),
                     (_, Some(r)) => (root, "src/", r),
                     _ => return Err("without --lease: `src/..` or `target/..`".into()),
                 });
             }
+            if self.opts.tree.is_some() && !shared_tree_lane(lane, conf.role) {
+                return Err(format!("lane {lane} has no tree on {} now: its native tree went to another lane's lease after its own ended. A run's outputs come back with `devhub run ... --keep <dir>`: what the run puts in $DEVHUB_KEEP is copied before its lease ends", self.machine));
+            }
         }
-        // no live lease: the node's tree (a lane's results that outlive its lease are in the
-        // shared target); a node without one: the lane's dir
+        // no live lease: the node's tree for a lane that works in it; a node without one: the
+        // lane's dir
         if let Some(t) = &self.opts.tree {
             return Ok(match (under("target"), under("src")) {
                 (Some(r), _) => (t.join("target"), "target/", r),
@@ -3994,6 +4073,8 @@ fn lease_over_memory(machine: &str, avail: u64, floor: u64, leases: &[MemTook]) 
     let l = leases.iter().filter(|l| excess(l) > 0.0).max_by(|a, b| excess(a).total_cmp(&excess(b)))?;
     let source = if l.asked {
         "its own --ram-gb ask".to_string()
+    } else if let Some(peak) = l.peak.filter(|peak| l.weighed + 0.05 < peak * 1.2) {
+        format!("what its box had room for, below its class's measured peak {peak:.1} GB and a fifth")
     } else if let Some(peak) = l.peak {
         format!("its class's measured peak {peak:.1} GB and a fifth")
     } else {
@@ -4267,6 +4348,12 @@ pub fn person_within(ms: u64) -> bool {
     EXEC.get().is_some_and(|x| x.user.lock().unwrap().last_input_ms().is_some_and(|at| crate::proto::wall_ms().saturating_sub(at) < ms))
 }
 
+/// A person uses this box, for what is said to them on it (a sync's toasts): its role is a user's
+/// WM, or its WM took a person's input in the last `ms` ([`person_within`]).
+pub fn person_box(ms: u64) -> bool {
+    EXEC.get().is_some_and(|x| x.conf.read().unwrap().role == super::Role::UserWm) || person_within(ms)
+}
+
 /// A Desk Link viewer attached that may be watching ([`super::user::UserTrack::watched`]).
 pub fn user_watching() -> bool {
     EXEC.get().is_some_and(|x| x.user.lock().unwrap().watched())
@@ -4304,26 +4391,18 @@ pub fn request_dev(on: bool) {
     }
 }
 
-/// The leases here whose work a WM restart would cut: a landing's (gate) while it runs, and those
-/// on the WM: a screen or CI lease, one given the WM session (`needs.gui`). Their lines, for the
-/// WM restart's wait. A headless lease (live test sessions among them) runs on through it: a
-/// node's old-wire WM waited on those while their apps could not have used it (11-02). A gate
-/// between runs has nothing there to cut: one whose holder had not released it yet held a WM
-/// restart until the master took it back (11-05).
+/// The leases here whose work a WM restart would cut: those on the WM, a screen or CI lease or
+/// one given the WM session (`needs.gui`: its env names the WM socket). Their lines, for the WM
+/// restart's wait. A headless lease runs on through it (its runs live in the hub's scopes, not the
+/// WM's session), a landing's gate, tests and hot runs among them: a node's old-wire WM waited on
+/// live test sessions whose apps could not have used it (11-02), and on a busy pool box one
+/// landing's shard followed another, so its WM ran a replaced binary, its devhub tray slot an old
+/// glyph, for as long as landings came (11-08).
 pub fn on_the_wm() -> Vec<String> {
     let Some(x) = EXEC.get() else { return Vec::new() };
-    x.leases.lock().unwrap().values().filter_map(|l| {
-        let what = if l.kind == Kind::Gate || l.lane.starts_with("land") {
-            if !l.runs.iter().any(|r| r.live()) { return None; }
-            "a landing"
-        } else if !uses_wm(l) {
-            return None;
-        } else if l.runs.iter().any(|r| r.detachable && r.live()) {
-            "a live session"
-        } else {
-            "its windows"
-        };
-        Some(format!("{} lease {} of {} ({what})", l.kind.as_str(), l.id, l.lane))
+    x.leases.lock().unwrap().values().filter(|l| uses_wm(l)).map(|l| {
+        let what = if l.runs.iter().any(|r| r.detachable && r.live()) { "a live session" } else { "its windows" };
+        format!("{} lease {} of {} ({what})", l.kind.as_str(), l.id, l.lane)
     }).collect()
 }
 
@@ -4384,7 +4463,10 @@ fn lease_kill(x: &Exec, rest: &str) -> String {
 }
 
 /// `lease-why <id>`: what a lease's processes do now and how far its last run got, on that lease:
-/// a second lease on its tree waits for this very one (three capture leases did, 11-05).
+/// a second lease on its tree waits for this very one (three capture leases did, 11-05). With
+/// `stuck`, where they wait ([`os::stuck_in`]: its command chain, pid and seconds), and `step`, its
+/// last run's last `STEP ` line (a gate's last step done, a CI leg's step running): what a hung
+/// leg's end names (lease/master.rs `capture`).
 fn lease_why(x: &Exec, id: &str) -> String {
     // no process walks under the lease table lock
     let Some(runs) = x.leases.lock().unwrap().get(id).map(|l| l.runs.clone()) else { return err(format!("no lease {id} on {}", x.machine)) };
@@ -4397,7 +4479,9 @@ fn lease_why(x: &Exec, id: &str) -> String {
     pids.sort_unstable();
     pids.dedup();
     let got = runs.last().map_or("no run yet\n".to_string(), |r| got_to(r, WHY_LINES));
-    format!("{{\"text\":{}}}", json_str(&format!("{}{got}", os::processes_view(&pids))))
+    let stuck = os::stuck_in(&pids).map_or("null".into(), |(chain, pid, s)| format!("{{\"chain\":{},\"pid\":{pid},\"s\":{s}}}", json_str(&chain)));
+    let step = runs.last().and_then(|r| log_tail(&r.log, usize::MAX).lines().rev().find(|l| l.starts_with("STEP ")).map(json_str));
+    format!("{{\"text\":{},\"stuck\":{stuck},\"step\":{}}}", json_str(&format!("{}{got}", os::processes_view(&pids))), step.unwrap_or_else(|| "null".into()))
 }
 
 /// Whose a JIT app on this node is, as far as the leases here go.
@@ -5057,6 +5141,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A run's shell finds the job's own makepad first on its PATH ([`job_makepad`]): with no JIT
+    /// built for its tree, the tree's by cargo, as a bare `makepad` first word runs it; with one,
+    /// that binary.
+    #[test]
+    #[cfg(unix)]
+    fn a_runs_shell_finds_the_jobs_own_makepad() {
+        let (x, base, _events) = test_exec("job-makepad", Opts { scopes: Some(false), ..Opts::default() });
+        x.handle("lease-start", r#"{"id":"P1","lane":"pathx","kind":"test","rev":null}"#);
+        let r = x.handle("lease-run", &format!("P1 . {}", b64(&["sh", "-c", "command -v makepad; cat \"$(command -v makepad)\""])));
+        let n = field(&r[0], "n").and_then(|v| super::super::num(&v)).unwrap_or_else(|| panic!("{r:?}")) as u32;
+        let (log, code) = log_until_exit(&x, "P1", n);
+        assert_eq!(code, 0, "{log}");
+        assert!(log.lines().any(|l| l.ends_with(&format!("run-{n}-bin/makepad"))), "{log}");
+        assert!(log.contains("exec cargo run --profile host -q --manifest-path '") && log.contains("Cargo.toml' -p makepad-run --bin makepad -- \"$@\""), "{log}");
+        x.handle("lease-end", "P1 released");
+        let bin = base.join("bin");
+        let jit = base.join("makepad.jit-test");
+        std::fs::write(&jit, "").unwrap();
+        job_makepad(&bin, Some(&jit), &base).unwrap();
+        assert_eq!(std::fs::read_link(bin.join("makepad")).unwrap(), jit);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// A JIT run with no kept binary on its box is cargo's build of it first: its lease's class
     /// names that job ([`super::super::JIT_BUILD_RUN`]), and a run of anything else keeps its own.
     /// (No cargo runs here: the JIT's run asks a folder its tree lacks, refused before its spawn.)
@@ -5637,6 +5744,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Without a lease, a lane's get reads its own native tree only: with that tree gone (another
+    /// lane's lease took it), it says so and how a run's outputs come back, and never reads the
+    /// box's shared tree, which only CI and landings work in.
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn a_lanes_get_never_reads_the_shared_tree() {
+        let base = std::env::temp_dir().join(format!("devhub-get-shared-{}", std::process::id()));
+        let (x, exec_base, _) = test_exec("getshared", Opts { tree: Some(base.join("ci-tree")), ..Opts::default() });
+        std::fs::create_dir_all(base.join("ci-tree/local/out")).unwrap();
+        std::fs::write(base.join("ci-tree/local/out/a.txt"), "a gate's").unwrap();
+        let gone = x.get_root("sheetx", "-", "src/local/out").unwrap_err();
+        assert!(gone.contains("lane sheetx has no tree on") && gone.contains("--keep <dir>") && gone.contains("$DEVHUB_KEEP"), "{gone}");
+        assert!(x.handle("get-ls", "sheetx - src/local/out")[0].contains("err"));
+        let (root, pre, sub) = x.get_root(super::super::sched::CI_LANE, "-", "src/local/out").unwrap();
+        assert_eq!((root, pre, sub.as_str()), (base.join("ci-tree"), "src/", "local/out"), "CI works in the shared tree");
+        assert!(shared_tree_lane("sheetx", super::super::Role::UserWm) && !shared_tree_lane("sheetx", super::super::Role::Pool));
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&exec_base);
+    }
+
     #[test]
     fn get_and_quiet_marks() {
         let (x, base, _) = test_exec("get", Opts::default());
@@ -6120,15 +6247,15 @@ mod tests {
         assert_eq!(tests_running(log), ["b::hung"]);
     }
 
-    /// A run that went quiet: its holder reads it on its own lease, and only a lease something else
-    /// ended keeps how far it got.
+    /// A run that went quiet: its holder reads it on its own lease (where it waits and its last
+    /// step too), and only a lease something else ended keeps how far it got.
     #[cfg(unix)]
     #[test]
     fn a_hung_run_can_be_read_and_a_cancel_keeps_its_last_lines() {
         let (x, base, _events) = test_exec("why", Opts::default());
         let hang = |id: &str| {
             assert!(x.handle("lease-start", &format!(r#"{{"id":"{id}","lane":"t","kind":"test","rev":null}}"#))[0].contains("\"ok\":1"));
-            let hung: &[&str] = &["/bin/sh", "-c", "echo 'test a::hung has been running for over 60 seconds'; exec sleep 100"];
+            let hung: &[&str] = &["/bin/sh", "-c", "echo 'STEP build 3 s [1-4]'; echo 'test a::hung has been running for over 60 seconds'; exec sleep 100"];
             let n = field(&x.handle("lease-run", &format!("{id} . {}", b64(hung)))[0], "n").and_then(|v| super::super::num(&v)).unwrap();
             loop {
                 let a = x.handle("lease-log", &format!("{id} {n} 0"));
@@ -6145,10 +6272,17 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         };
         hang("WH1");
-        let why = field(&x.handle("lease-why", "WH1")[0], "text").and_then(|v| v.as_str().map(str::to_string)).unwrap();
+        let said = x.handle("lease-why", "WH1")[0].clone();
+        let why = field(&said, "text").and_then(|v| v.as_str().map(str::to_string)).unwrap();
         assert!(why.contains("run 1: still running\nrunning for over a minute: a::hung\n"), "{why}");
+        assert_eq!(field(&said, "step").and_then(|v| v.as_str().map(str::to_string)).as_deref(), Some("STEP build 3 s [1-4]"));
         #[cfg(target_os = "linux")]
-        assert!(why.contains("sleep 100"), "{why}");
+        {
+            assert!(why.contains("sleep 100"), "{why}");
+            let stuck = field(&said, "stuck").unwrap();
+            assert!(stuck.get("chain").and_then(|c| c.as_str()).is_some_and(|c| c.ends_with("sleep 100")), "{said}");
+            assert!(stuck.get("pid").and_then(super::super::num).is_some_and(|p| p > 0.0), "{said}");
+        }
         let kept = field(&end(r#"WH1 released {"tail":true}"#), "tail").and_then(|v| v.as_str().map(str::to_string)).unwrap();
         assert!(kept.starts_with("run 1: still running\nrunning for over a minute: a::hung\n") && kept.contains("test a::hung has been"), "{kept}");
         hang("WH2");
@@ -6413,9 +6547,10 @@ mod tests {
                 Some(id) => c.env(LEASE_ENV, lease_mark(&base.join("leases"), id)),
                 None => c.env_remove(LEASE_ENV),
             };
-            c.spawn().unwrap().id()
+            c.spawn().unwrap()
         };
-        let (its, left, nobody) = (spawn(Some("S1")), spawn(Some("S0")), spawn(None));
+        let mut children = [spawn(Some("S1")), spawn(Some("S0")), spawn(None)];
+        let [its, left, nobody] = [children[0].id(), children[1].id(), children[2].id()];
         // (its environment is its own once it has started)
         let t = Instant::now();
         while x.app_lease(its) != (AppLease::Live { on_wm: false }) || x.app_lease(left) != AppLease::Left {
@@ -6424,8 +6559,11 @@ mod tests {
         }
         assert_eq!(x.app_lease(nobody), AppLease::Nobody);
         x.handle("lease-end", "S1 released");
-        for pid in [its, left, nobody] {
-            os::signal_one(pid, true);
+        // each gone before the hub's drop looks for what its leases left: a kill lands when its
+        // process next runs, and one not yet dead on a busy box read as left behind (11-07)
+        for child in &mut children {
+            os::signal_one(child.id(), true);
+            let _ = child.wait();
         }
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -111,6 +111,17 @@ pub struct Local {
 /// Work the scan does on its tick until it says it is done.
 pub type ScanTask = Box<dyn FnMut() -> bool + Send>;
 
+/// Each of `tasks` once, outside the lock: a task that asks for another ([`Local::on_scan`]) adds
+/// it for the next tick instead of waiting on the lock it runs under, and `on_scan` never waits
+/// on a task's tick.
+fn run_scan_tasks(tasks: &Mutex<Vec<ScanTask>>) {
+    let mut ran = std::mem::take(&mut *tasks.lock().unwrap());
+    ran.retain_mut(|task| !task());
+    let mut held = tasks.lock().unwrap();
+    ran.append(&mut held);
+    *held = ran;
+}
+
 fn registry_file(pid: u32) -> PathBuf {
     discovery::registry_dir().join(format!("makepad-remote-{pid}.json"))
 }
@@ -215,7 +226,7 @@ impl Local {
         // it is listed only when it changed (a JIT starting or ending adds or removes its file)
         let (mut seen_mtime, mut last_read) = (None, Instant::now());
         while !self.stop.load(Ordering::Acquire) {
-            self.scan_tasks.lock().unwrap().retain_mut(|task| !task());
+            run_scan_tasks(&self.scan_tasks);
             if self.hot_ready.load(Ordering::Acquire) {
                 if !hot_replayed {
                     match crate::hot::replay_failures(&|r| self.emit(r)) {
@@ -415,9 +426,11 @@ impl Local {
                 .unwrap_or_default();
             let opt = |v: Option<f64>| v.map_or("null".to_string(), |x| format!("{x:.1}"));
             out.push(format!(
-                "{{\"pid\":{},\"app\":{},\"up_s\":{},\"cpu_pct\":{},\"rss_mb\":{},\"threads\":{},\"jit\":{},\"observe\":{},\"run\":{},\"state\":{},\"session\":{},\"fps\":{},\"warm\":{},\"code_mb\":{},\"panics\":{},\"restart_pending\":{},\"restart_first\":{},\"exe_replaced\":{},\"recent\":[{}]}}",
+                "{{\"pid\":{},\"app\":{},\"lease\":{},\"up_s\":{},\"cpu_pct\":{},\"rss_mb\":{},\"threads\":{},\"jit\":{},\"observe\":{},\"run\":{},\"state\":{},\"session\":{},\"fps\":{},\"warm\":{},\"code_mb\":{},\"panics\":{},\"restart_pending\":{},\"restart_first\":{},\"exe_replaced\":{},\"recent\":[{}]}}",
                 j.pid,
                 json_str(&j.app),
+                // the lease that started it ("": none, a person's app or the node's own: `devhub inspect` leaves it alone)
+                json_str(j.lease.as_deref().unwrap_or("")),
                 now.saturating_sub(j.started_ms) / 1000,
                 pct.map_or("null".to_string(), |p| format!("{p:.1}")),
                 p.rss_bytes >> 20,
@@ -798,7 +811,31 @@ fn log_tail(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::ai_hub_config;
+    use super::{ai_hub_config, run_scan_tasks, ScanTask};
+    use std::sync::{Arc, Mutex};
+
+    /// A scan task that asks for another runs on, and the new one runs from the next tick: the
+    /// tick ran its tasks under the lock `on_scan` takes, so such a task hung the scan (11-07).
+    #[test]
+    fn a_scan_task_may_add_a_task() {
+        let tasks: Arc<Mutex<Vec<ScanTask>>> = Arc::new(Mutex::new(Vec::new()));
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let (t, r) = (tasks.clone(), ran.clone());
+        tasks.lock().unwrap().push(Box::new(move || {
+            r.lock().unwrap().push("first");
+            let r = r.clone();
+            t.lock().unwrap().push(Box::new(move || {
+                r.lock().unwrap().push("added");
+                true
+            }));
+            true
+        }));
+        run_scan_tasks(&tasks);
+        assert_eq!(*ran.lock().unwrap(), ["first"]);
+        run_scan_tasks(&tasks);
+        assert_eq!(*ran.lock().unwrap(), ["first", "added"]);
+        assert!(tasks.lock().unwrap().is_empty(), "each said it was done");
+    }
 
     #[test]
     fn ai_hub_config_reads_host_and_app_port() {

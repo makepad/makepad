@@ -470,6 +470,11 @@ pub fn processes_view(pids: &[u32]) -> String {
     pids.iter().map(|p| format!("pid {p}\n")).collect()
 }
 
+/// (No process table read here: unix.rs `stuck_in`.)
+pub fn stuck_in(_pids: &[u32]) -> Option<(String, u32, u64)> {
+    None
+}
+
 pub fn job_pids(hold: &Hold) -> Vec<u32> {
     hold.0.as_ref().map(Job::pids).unwrap_or_default()
 }

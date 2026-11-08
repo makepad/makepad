@@ -132,6 +132,14 @@ pub fn resolve(p: &RepositoryPaths, repo: &mut Repository, name: &str) -> Option
     repo.read_commit(&oid).ok().map(|_| oid)
 }
 
+/// The branch the checkout at `dir` is on (its HEAD's `refs/heads/<branch>`): None when it is on
+/// no branch.
+pub fn branch(dir: &Path) -> Option<String> {
+    let p = makepad_git::repository_paths(dir).ok()??;
+    let head = std::fs::read_to_string(p.git_dir.join("HEAD")).ok()?;
+    head.trim().strip_prefix("ref: refs/heads/").map(str::to_string)
+}
+
 /// [`resolve`] in the repository of `dir`, as hex.
 pub fn rev(dir: &Path, name: &str) -> Option<String> {
     with(dir, |p, repo| resolve(p, repo, name)).flatten().map(|o| o.to_hex())

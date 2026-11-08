@@ -61,6 +61,10 @@ pub struct LeaseMaster {
     /// (`devhub nodes`): the check-in showed each hub's version but not the master's, and a
     /// landing's scheduler fix read as running 15 min before the master took it (11-07)
     up_ms: u64,
+    /// The lease loop's last look at both clocks (monotonic, wall ms), from its start on
+    /// ([`Self::start`]): where the wall ran past the monotonic one, the machine slept
+    /// ([`Self::note_sleep`]). None in tests: their clock is the test's.
+    awake: Mutex<Option<(std::time::Instant, u64)>>,
     sched: Mutex<Sched>,
     ask: Ask,
     publish: Publish,
@@ -128,12 +132,33 @@ pub const AGENT_SILENT_MS: u64 = 15 * 60_000;
 /// seconds) before the lease goes back to the queue.
 const START_GRACE: Duration = Duration::from_secs(45);
 
+/// Less than this between the wall clock's advance and the monotonic clock's is no sleep: a
+/// look's own lag, the wall clock's slew.
+pub const SLEPT_MIN_MS: u64 = 2_000;
+
+/// What the machine slept between two looks at both clocks: how far the wall clock ran past the
+/// monotonic one, which stops while the machine sleeps (macOS and Linux alike) and runs on
+/// through a stall of the process; 0 under [`SLEPT_MIN_MS`]. A wall clock set forward reads so
+/// too: no silence either.
+pub fn slept_ms(wall: u64, mono: Duration) -> u64 {
+    let slept = wall.saturating_sub(mono.as_millis() as u64);
+    if slept >= SLEPT_MIN_MS { slept } else { 0 }
+}
+
 /// A node call that failed because the node's hub could not be reached (not a refusal).
 pub fn unreachable(e: &str) -> bool {
     // (a hub that exits for its self-update closes its links mid-call: "connection closed" for a
     // call reading its answer, "channel closed" for a ship writing a chunk; the TERM that stops it
     // reaches the git it runs, in its process group: "signal: 15" while it still answers)
     ["link lost", "cannot reach", "Connection refused", "not connected", "no route to", "connection closed", "channel closed", "Connection reset", "Broken pipe", "signal: 15"].iter().any(|w| e.contains(w))
+}
+
+/// A node call's error that says its host is off the network (powered down, its link gone): no
+/// host answers the connect, or its TCP stopped answering. A hub restarting for its self-update
+/// leaves its host up: the connect is refused, or the call ends "restarting: " (a pool box went with
+/// "Host is down", 11-07).
+pub fn host_gone(e: &str) -> bool {
+    ["Host is down", "No route to host", "Network is unreachable", "Operation timed out", "Connection timed out"].iter().any(|w| e.contains(w))
 }
 
 /// A registered lane's lease comes from the lane's own worktree, the one the lane registry holds
@@ -402,10 +427,13 @@ fn queue_stats(path: &Path, leases: &[Lease], now: u64) -> Result<String, String
             let n = |k| v.get(k).and_then(|v| v.as_u64());
             let (Some(id), Some(asked), Some(granted)) = (v.get("id").and_then(|v| v.as_str()), n("asked_ms"), n("granted_ms")) else { continue };
             if granted < since || granted > now || asked > granted { continue; }
+            let req = v.get("req").and_then(|r| Req::parse(&r.to_json()).ok());
             let class = v.get("cost").and_then(|v| v.as_str()).and_then(CostClass::parse)
-                .or_else(|| v.get("req").and_then(|r| Req::parse(&r.to_json()).ok()).map(|r| r.asked_cost()))
+                .or_else(|| req.as_ref().map(|r| r.asked_cost()))
                 .or_else(|| v.get("kind").and_then(|v| v.as_str()).and_then(Kind::parse).map(CostClass::default_for));
-            if let Some(class) = class { waits.insert(id.to_string(), (class, granted - asked)); }
+            // a leg devhub runs itself asks at its run's place: its wait is its time in the queue
+            let wait = match n("queued_ms") { Some(q) if req.as_ref().is_some_and(super::sched::runs_place) => q, _ => granted - asked };
+            if let Some(class) = class { waits.insert(id.to_string(), (class, wait)); }
         }
     }
     let mut counts: BTreeMap<_, Counts> = [CostClass::Small, CostClass::Medium, CostClass::Large].into_iter().map(|c| (c, Counts::default())).collect();
@@ -417,7 +445,7 @@ fn queue_stats(path: &Path, leases: &[Lease], now: u64) -> Result<String, String
             State::Ended(_) => {}
         }
         if let Some(granted) = l.granted_ms.filter(|g| *g >= since && *g <= now && l.asked_ms <= *g) {
-            waits.insert(l.id.clone(), (l.cost_class, granted - l.asked_ms));
+            waits.insert(l.id.clone(), (l.cost_class, l.waited_ms(granted)));
         }
     }
     for (class, wait) in waits.into_values() {
@@ -475,6 +503,7 @@ impl LeaseMaster {
         LeaseMaster {
             machine: machine.to_string(),
             up_ms: crate::proto::wall_ms(),
+            awake: Mutex::new(None),
             sched: Mutex::new(sched),
             ask,
             publish,
@@ -561,6 +590,18 @@ impl LeaseMaster {
 
     fn now(&self) -> u64 {
         (self.clock)()
+    }
+
+    /// The time the machine slept since the lease loop last looked, said to the scheduler before
+    /// it judges anything on time ([`Sched::master_slept`]): its tick, a box's unanswered caps.
+    /// Whichever looks first after a wake takes it, under the scheduler's lock.
+    fn note_sleep(&self, s: &mut Sched) {
+        let mut awake = self.awake.lock().unwrap();
+        let Some((mono, wall)) = *awake else { return };
+        let (mono_now, wall_now) = (std::time::Instant::now(), self.now());
+        *awake = Some((mono_now, wall_now));
+        let slept = slept_ms(wall_now.saturating_sub(wall), mono_now.saturating_duration_since(mono));
+        if slept > 0 { s.master_slept(slept, wall_now); }
     }
 
     /// `leases.live`: the granted leases, rewritten whole on every grant and end.
@@ -772,6 +813,7 @@ impl LeaseMaster {
             let mut s = self.sched.lock().unwrap();
             #[cfg(feature = "checkout")]
             { s.interactive_lanes = interactive_lanes; s.live_jobs = live_jobs; s.first_lanes = first_lanes; }
+            self.note_sleep(&mut s);
             for id in s.holders_gone(&|pid| crate::procinfo::alive(pid)) {
                 s.release(&id, "holder-dead", now);
             }
@@ -840,18 +882,53 @@ impl LeaseMaster {
         }
     }
 
-    /// A stalled lease's JITs say where they are: each captures its state (stacks with tier,
-    /// compile queue, waits, flight recording) into one report on its box, and its likely cause
-    /// and `<node>:<path>` go to the inbox as an ERR. A run with no JIT under it says so (silence
-    /// read as a capture that never ran, 11-04).
-    fn capture(&self, id: &str, node: &str, why: &str) {
+    /// A stalled lease says where it is. Its node's look at its processes and last lines
+    /// (`lease-why`) goes to its kept log (`devhub job result <id>`): a leg with no JIT under it
+    /// had nothing kept, and its hang in a fixture's stub was read by hand (L634083, 11-08). Its
+    /// JITs each capture their state (stacks with tier, compile queue, waits, flight recording)
+    /// into one report on its box, and its likely cause and `<node>:<path>` go to the inbox as an
+    /// ERR; a run with no JIT under it says so (silence read as a capture that never ran, 11-04).
+    /// Then the scheduler holds what was found ([`Sched::captured`]): where it waits, its last
+    /// step, where its capture is, which a leg devhub runs names as it ends hung
+    /// ([`Sched::end_hung_legs`]); one whose JIT it finds parked ends at once ([`Sched::end_parked`]).
+    fn capture(self: &Arc<Self>, id: &str, node: &str, why: &str) {
+        let (mut note, ended) = self.capture_on(id, node, why);
+        if !ended {
+            let log = self.lease_log(id);
+            if log.exists() { note.push(format!("its capture: devhub job result {id} ({})", log.display())); }
+            self.sched.lock().unwrap().captured(id, &note.join("; "));
+        }
+        // (its end, now or by a parked JIT, goes out and is kept at once)
+        self.pump();
+    }
+
+    /// [`Self::capture`]'s work on the node: what it found, for the hung end's line, and whether
+    /// a parked JIT ended the lease.
+    fn capture_on(self: &Arc<Self>, id: &str, node: &str, why: &str) -> (Vec<String>, bool) {
+        let mut note = Vec::new();
+        match self.ask1(node, "lease-why", &format!("lease-why {id}")) {
+            Ok(v) => {
+                if let Some(s) = v.get("stuck").filter(|s| !s.is_null()) {
+                    let chain = s.get("chain").and_then(|c| c.as_str()).unwrap_or("");
+                    let ran = s.get("s").and_then(super::num).map_or(String::new(), |s| format!(", for {}", super::sched::dur(s as u64 * 1000)));
+                    note.push(format!("it waits in `{chain}` (pid {}{ran})", s.get("pid").and_then(super::num).unwrap_or(0.0) as u64));
+                }
+                if let Some(step) = v.get("step").and_then(|s| s.as_str()) { note.push(format!("its last step line `{step}`")); }
+                let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                if let Err(e) = self.keep_log(id, &format!("== {node}: its processes and last lines when it stalled ({why})\n{text}\n")) {
+                    note.push(format!("its processes are not kept: {e}"));
+                }
+            }
+            Err(e) => note.push(format!("its processes were not read: {e}")),
+        }
         let pids: Vec<u64> = match self.ask1(node, "lease-jits", &format!("lease-jits {id}")) {
             Ok(v) => v.get("pids").and_then(|p| p.as_arr()).map(|a| a.iter().filter_map(super::num).map(|n| n as u64).collect()).unwrap_or_default(),
             // an older hub without the verb, or the lease gone meanwhile
-            Err(e) => return self.event(Sev::Info, format!("{id} on {node} stalled: no JIT capture ({e})")),
+            Err(e) => { self.event(Sev::Info, format!("{id} on {node} stalled: no JIT capture ({e})")); return (note, false); }
         };
         if pids.is_empty() {
-            return self.event(Sev::Info, format!("{id} on {node} stalled ({why}): no JIT runs under it, nothing to capture"));
+            self.event(Sev::Info, format!("{id} on {node} stalled ({why}): no JIT runs under it, nothing to capture"));
+            return (note, false);
         }
         let ask = format!("{{\"cmd\":\"capture\",\"why\":{}}}", makepad_remote::json_str(&format!("devhub: {why}")));
         for pid in pids {
@@ -862,11 +939,18 @@ impl LeaseMaster {
             });
             let stacks = self.keep_stacks(id, node, pid, why, answer.as_ref().map_or("none", |(_, path)| path.as_str()));
             match answer {
-                Ok((cause, path)) => self.event(Sev::Err, format!("{id} on {node} stalled ({why}): JIT {pid}: {cause} ({node}:{path}{stacks})")),
+                Ok((cause, path)) => {
+                    self.event(Sev::Err, format!("{id} on {node} stalled ({why}): JIT {pid}: {cause} ({node}:{path}{stacks})"));
+                    note.push(format!("JIT {pid}'s capture {node}:{path}"));
+                    if (cause.starts_with("compile error: ") || cause.starts_with("parked panic: ")) && self.sched.lock().unwrap().end_parked(id, &cause, self.now()) {
+                        return (note, true);
+                    }
+                }
                 Err(e) if e.contains("unknown command") => self.event(Sev::Info, format!("{id} on {node} stalled: JIT {pid} has no capture yet (an older JIT build{stacks})")),
                 Err(e) => self.event(Sev::Warn, format!("{id} on {node} stalled: JIT {pid}'s capture failed: {e}{stacks}")),
             }
         }
+        (note, false)
     }
 
     /// A stalled JIT's every thread's stack, once per lease and JIT, in the lease's kept log
@@ -1128,9 +1212,10 @@ impl LeaseMaster {
         };
         let needs: Vec<String> = l.req.needs.iter().map(|(k, v)| format!("{}:{}", json_str(k), json_str(v))).collect();
         let warms = l.req.warms.as_deref().map_or(String::new(), |lane| format!(",\"warms\":{}", json_str(lane)));
+        let warms = match l.req.cpu_target.as_deref() { Some(t) => format!("{warms},\"cpu_target\":{}", json_str(t)), None => warms };
         let (weighed, peak) = self.sched.lock().unwrap().ram_weighed(l);
         let peak = peak.map_or("null".to_string(), |g| g.to_string());
-        let line = format!("lease-start {{\"id\":{},\"lane\":{}{warms},\"kind\":\"{}\",\"src\":\"{}\",\"priority\":\"{}\",\"loader\":{},\"cost\":{{\"cores\":{},\"ram_gb\":{},\"ram_max_gb\":{},\"weighed_gb\":{weighed},\"peak_gb\":{peak}}},\"live\":{},\"needs\":{{{}}},\"rev\":{rev},\"env\":{{}}}}", json_str(&l.id), json_str(&l.req.lane), l.req.kind.as_str(), l.req.src.as_str(), l.priority.as_str(), l.req.loader.as_deref().map_or("null".to_string(), json_str), l.cost.cores, l.cost.ram_gb, l.req.ram_gb.map_or("null".to_string(), |g| g.to_string()), l.req.live, needs.join(","));
+        let line = format!("lease-start {{\"id\":{},\"lane\":{}{warms},\"kind\":\"{}\",\"src\":\"{}\",\"priority\":\"{}\",\"loader\":{},\"cost\":{{\"cores\":{},\"ram_gb\":{},\"ram_max_gb\":{},\"weighed_gb\":{weighed},\"peak_gb\":{peak}}},\"live\":{},\"needs\":{{{}}},\"rev\":{rev},\"env\":{{}}}}", json_str(&l.id), json_str(&l.req.lane), l.req.kind.as_str(), l.req.src.as_str(), l.priority.as_str(), l.req.loader.as_deref().map_or("null".to_string(), json_str), l.run_cores(), l.cost.ram_gb, l.req.ram_gb.map_or("null".to_string(), |g| g.to_string()), l.req.live, needs.join(","));
         let lines = (self.ask)(node, "lease-start", &line)?;
         let first = lines.into_iter().next().ok_or("lease-start: no answer")?;
         let v = makepad_strict_json::parse(first.as_bytes()).map_err(|_| "lease-start: bad answer".to_string())?;
@@ -1423,7 +1508,8 @@ impl LeaseMaster {
 
     /// A live session's call that ended, as its box metered it (`lease-weight <id> idle`'s
     /// `call`): a sample of its class's call charge in the master's ledger (`"how":"call"`),
-    /// which `devhub stats calls` and the session's why read. Nothing is charged by it yet.
+    /// which `devhub stats calls` and the session's why read, and its class's calls are charged
+    /// by (the scheduler's `call_cores`).
     fn ledger_call(&self, id: &str, node: &str, call: &makepad_strict_json::Value) {
         let Some(req) = self.sched.lock().unwrap().get(id).map(|l| l.req.clone()) else { return };
         let n = |k| call.get(k).and_then(super::num).filter(|n| n.is_finite() && *n >= 0.0);
@@ -1458,7 +1544,9 @@ impl LeaseMaster {
     }
 
     fn refresh_node(self: &Arc<Self>, name: &str) {
-        let caps = (self.ask)(name, "caps", "caps").ok().and_then(|l| l.into_iter().next()).filter(|l| !l.starts_with("{\"err\":")).and_then(|l| Caps::parse(&l));
+        let asked = (self.ask)(name, "caps", "caps");
+        let gone = asked.as_ref().err().filter(|e| host_gone(e)).cloned();
+        let caps = asked.ok().and_then(|l| l.into_iter().next()).filter(|l| !l.starts_with("{\"err\":")).and_then(|l| Caps::parse(&l));
         let now = self.now();
         match caps {
             Some(c) => {
@@ -1483,7 +1571,15 @@ impl LeaseMaster {
                     self.push_policy(name, on);
                 }
             }
-            None => self.sched.lock().unwrap().caps_missed(name, now),
+            None => {
+                // a box off the network for a minute: its leases end as lost, their holders ask again
+                let lost = {
+                    let mut s = self.sched.lock().unwrap();
+                    self.note_sleep(&mut s);
+                    s.caps_missed(name, gone.as_deref(), now)
+                };
+                if !lost.is_empty() { self.pump(); }
+            }
         }
     }
 
@@ -1588,6 +1684,7 @@ impl LeaseMaster {
     /// 2026-10-30; one node's silent hub ended leases fleet-wide on 2026-11-02).
     pub fn start(self: &Arc<Self>, hosts: Hosts, pace: Pace) {
         self.resume_starts();
+        *self.awake.lock().unwrap() = Some((std::time::Instant::now(), self.now()));
         let m = self.clone();
         let _ = std::thread::Builder::new().name("devhub-lease-sched".into()).spawn(move || loop {
             m.pump();
@@ -1867,9 +1964,13 @@ impl LeaseMaster {
             "release" | "cancel" => {
                 let mut w = line.split_whitespace();
                 let id = w.next().unwrap_or("");
-                let how = w.next().filter(|h| !h.starts_with("exit=")).unwrap_or("released");
-                // `cancel`: the user's end of one lease; the lane is kept off that node for a while
-                let by = w.clone().find_map(|x| x.strip_prefix("by=")).unwrap_or("user").to_string();
+                // `cancel`: the user's end of one lease, or a lane's or agent's (`by=`): only the
+                // user's keeps the lane off that node for a while. Read as a release's `how`, the
+                // `by=` left every agent's cancel the user's (a coordinator's cancel of a hung
+                // tests shard kept the bucket off its box 30 min, 11-08).
+                let rest: Vec<&str> = w.collect();
+                let by = rest.iter().find_map(|x| x.strip_prefix("by=")).unwrap_or("user").to_string();
+                let how = rest.first().copied().filter(|h| !h.starts_with("exit=") && !h.starts_with("by=")).unwrap_or("released");
                 let ended = if service == "cancel" { self.sched.lock().unwrap().cancel_by(id, &by, now) } else { self.sched.lock().unwrap().release(id, how, now) };
                 if ended {
                     if let Err(e) = self.persist() { out.push(err(&e)); return; }
@@ -2336,8 +2437,8 @@ mod tests {
             update_pin: None,
             latency: String::new(),
         };
-        let nodes = [view("quest", "192.0.2.85:8788", true, Some((true, 8790))), view("phone", "192.0.2.50", true, Some((true, 0))), view("off", "192.0.2.51", true, Some((false, 8790))), view("gone", "192.0.2.52", false, Some((true, 8790))), view("node-a", "192.0.2.89", true, None)];
-        assert_eq!(desk_links(&nodes), "quest 192.0.2.85:8790\n");
+        let nodes = [view("headset", "192.0.2.85:8788", true, Some((true, 8790))), view("phone", "192.0.2.50", true, Some((true, 0))), view("off", "192.0.2.51", true, Some((false, 8790))), view("gone", "192.0.2.52", false, Some((true, 8790))), view("node-a", "192.0.2.89", true, None)];
+        assert_eq!(desk_links(&nodes), "headset 192.0.2.85:8790\n");
     }
 
     /// A node that answers the node services and remembers what it was asked.
@@ -2367,6 +2468,8 @@ mod tests {
         jits: Mutex<Vec<u64>>,
         /// what its `lease-weight <id> idle` answers add (`,"call":{..}`: the call it metered)
         call_answer: Mutex<String>,
+        /// the cause its JITs' captures find (empty: a main thread that waits)
+        capture_cause: Mutex<String>,
 }
 
     impl FakeNode {
@@ -2418,7 +2521,11 @@ mod tests {
                     format!("{{\"ended\":{},\"killed\":[],\"freed_mb\":0,\"recovered\":null,\"leak\":[]{load}}}", json_str(id))
                 }
                 "lease-jits" => format!("{{\"pids\":{:?}}}", self.jits.lock().unwrap()),
-                "cmd" if line.starts_with("{\"cmd\":\"capture\"") => "{\"cause\":\"blocked: main waits\",\"path\":\"/c/a.txt\"}".into(),
+                "lease-why" => r#"{"text":"pid 7: sleep 3600\n  1x sleep S hrtimer_nanosleep\nrun 3: still running\ncheck_targets: ok\n","stuck":{"chain":"sh > bash land_gate.sh full-a > sleep 3600","pid":7,"s":590},"step":"STEP fuzz 47 s [1-2]"}"#.into(),
+                "cmd" if line.starts_with("{\"cmd\":\"capture\"") => {
+                    let cause = self.capture_cause.lock().unwrap().clone();
+                    format!("{{\"cause\":{},\"path\":\"/c/a.txt\"}}", json_str(if cause.is_empty() { "blocked: main waits" } else { &cause }))
+                }
                 "cmd" if line.starts_with("{\"cmd\":\"stacks\"") => "{\"threads\":[\"main (T1)\"],\"state\":\"S\",\"frames\":[{\"fn\":\"std::sys::os::futex_wait\"}]}".into(),
                 "cmd" => {
                     assert!(node.ends_with(":42"), "command must use the resolved instance");
@@ -2436,7 +2543,7 @@ mod tests {
     }
 
     fn master(dir: &Path) -> (Arc<LeaseMaster>, Arc<FakeNode>, Arc<AtomicU64>, Arc<Mutex<Vec<Record>>>) {
-        let node = Arc::new(FakeNode { beat_end: Default::default(), calls: Mutex::new(Vec::new()), known: Mutex::new(Vec::new()), gone: Default::default(), paused: Default::default(), breaks: Default::default(), end_answer: Default::default(), inspect_gate: Default::default(), trouble: Default::default(), cpu: Default::default(), no_gui: Default::default(), apply: Default::default(), apply_seen: Default::default(), end_load: Default::default(), jits: Default::default(), call_answer: Default::default() });
+        let node = Arc::new(FakeNode { beat_end: Default::default(), calls: Mutex::new(Vec::new()), known: Mutex::new(Vec::new()), gone: Default::default(), paused: Default::default(), breaks: Default::default(), end_answer: Default::default(), inspect_gate: Default::default(), trouble: Default::default(), cpu: Default::default(), no_gui: Default::default(), apply: Default::default(), apply_seen: Default::default(), end_load: Default::default(), jits: Default::default(), call_answer: Default::default(), capture_cause: Default::default() });
         let clock = Arc::new(AtomicU64::new(1_000));
         let recs = Arc::new(Mutex::new(Vec::new()));
         let (n, c, r) = (node.clone(), clock.clone(), recs.clone());
@@ -2677,6 +2784,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A stalled leg devhub runs whose JIT's capture finds it parked at code that did not compile
+    /// ends as hung with that cause; a lane's lease parked the same stays for its lane to edit,
+    /// and a leg whose JIT only waits stays too.
+    #[test]
+    fn a_stalled_own_leg_parked_at_a_compile_error_ends() {
+        let dir = std::env::temp_dir().join(format!("devhub-lease-parked-leg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (m, node, _clock, _recs) = master(&dir);
+        m.refresh(&[("node-a".to_string(), "192.0.2.89:8797".to_string())]);
+        let mut leg = Req::new("jitlegs-nocodegen", Kind::Test);
+        leg.agent = Some("devhub-jitlegs".into());
+        serve(&m, "lease", &leg.to_json());
+        *node.jits.lock().unwrap() = vec![42];
+        let state = |id: &str| m.sched.lock().unwrap().get(id).map(|l| (match &l.state { State::Ended(how) => format!("ended {how}"), x => x.as_str().to_string() }, l.reason.clone())).unwrap();
+        m.capture("L1", "node-a", "L1 running 9m against its measured 3m46s");
+        assert_eq!(state("L1").0, "granted", "a JIT that only waits may go on");
+        *node.capture_cause.lock().unwrap() = "compile error: a.rs:1:2: E0308: mismatched types".into();
+        m.capture("L1", "node-a", "L1 running 9m against its measured 3m46s");
+        assert_eq!(state("L1"), ("ended hung".to_string(), "its JIT parked (compile error: a.rs:1:2: E0308: mismatched types): no one edits or resumes a leg devhub runs".to_string()));
+        serve(&m, "lease", &Req::new("lane", Kind::Test).to_json());
+        assert_eq!(state("L2").0, "granted", "{:?}", state("L2"));
+        m.capture("L2", "node-a", "L2 running 9m against its measured 3m46s");
+        assert_eq!(state("L2").0, "granted", "a lane edits its own code");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stalled leg devhub runs keeps its node's look at its processes in its kept log, and ends
+    /// hung once that capture is in, naming where it waited, its last step and its capture: a
+    /// jitlegs leg's hung fixture stub was read by hand (L634083, 11-08).
+    #[test]
+    fn a_hung_leg_ends_naming_where_it_waited_and_its_capture() {
+        let dir = std::env::temp_dir().join(format!("devhub-lease-hung-leg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (m, ..) = master(&dir);
+        m.refresh(&[("node-a".to_string(), "192.0.2.89:8797".to_string())]);
+        let mut leg = Req::new("jitlegs-full-a", Kind::Test);
+        leg.agent = Some("devhub-jitlegs".into());
+        serve(&m, "lease", &leg.to_json());
+        m.sched.lock().unwrap().set_info("L1", r#"{"idle_s":600}"#, 1_000);
+        m.pump();
+        let log = dir.join("lease-logs/L1.log");
+        let (how, why) = m.sched.lock().unwrap().get("L1").map(|l| (format!("{:?}", l.state), l.reason.clone())).unwrap();
+        assert_eq!(how, format!("{:?}", State::Ended("hung".into())), "{why}");
+        assert_eq!(why, format!("every process idle (under 5% of a core, no I/O) for 10m00s; it waits in `sh > bash land_gate.sh full-a > sleep 3600` (pid 7, for 9m50s); its last step line `STEP fuzz 47 s [1-2]`; its capture: devhub job result L1 ({})", log.display()));
+        let kept = std::fs::read_to_string(&log).unwrap();
+        assert!(kept.contains("== node-a: its processes and last lines when it stalled (") && kept.contains("pid 7: sleep 3600\n"), "{kept}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A stalled lease's JIT leaves every thread's stack in the lease's kept log, once however
     /// often the stall is said, and the lease's last lines go after them at its end.
     #[test]
@@ -2709,12 +2867,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("devhub-lease-cancel-tail-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let (m, node, ..) = master(&dir);
+        let (m, node, _, recs) = master(&dir);
         m.refresh(&[("node-a".to_string(), "192.0.2.89:8797".to_string())]);
         serve(&m, "lease", &Req::new("gapx", Kind::Build).to_json());
         *node.end_answer.lock().unwrap() = Some("{\"ended\":\"L1\",\"killed\":[],\"freed_mb\":0,\"recovered\":null,\"leak\":[],\"tail\":\"run 1: still running\\nrunning for over a minute: a::hung\\n\"}".into());
         let answer = serve(&m, "cancel", "L1 by=test");
         assert!(answer.contains("\"kept_tail\":true"), "{answer}");
+        // whoever said `by=` cancelled it, not the user (whose cancel keeps the lane off the node)
+        let said: Vec<String> = recs.lock().unwrap().iter().filter(|r| r.line.contains("L1") && r.line.contains("cancelled by")).map(|r| r.line.clone()).collect();
+        assert!(!said.is_empty() && said.iter().all(|l| l.contains("cancelled by test")), "{said:?}");
         assert!(std::fs::read_to_string(dir.join("lease-logs/L1.log")).unwrap().contains("a::hung"));
         let ends = |id: &str| node.calls.lock().unwrap().iter().filter(|(_, s, l)| s == "lease-end" && l.contains(id)).map(|(_, _, l)| l.clone()).collect::<Vec<_>>();
         assert_eq!(ends("L1"), [r#"lease-end L1 released {"tail":true}"#]);
@@ -2770,7 +2931,7 @@ mod tests {
 
     /// A live call's peak cores as its box metered it go to the ledger as a sample of its class:
     /// `devhub stats calls` says them per class, its launches apart, and the scheduler reads
-    /// them back for a session's why. Nothing is charged by them: the session's cores stay.
+    /// them back: its class's next calls are charged by them, a granted session's cost stands.
     #[test]
     fn a_live_calls_metered_cores_are_kept_and_said() {
         let dir = std::env::temp_dir().join(format!("devhub-lease-calls-{}", std::process::id()));
@@ -2797,8 +2958,48 @@ mod tests {
         let s = m.sched.lock().unwrap();
         let l = s.get("L1").unwrap();
         assert_eq!((s.call_p90(&l.req, true), s.call_p90(&l.req, false)), (Some((7.5, 1)), Some((4.0, 2))));
-        assert_eq!(l.cost.cores, cores, "charged as before");
+        assert_eq!(l.cost.cores, cores, "its grant's cost stands");
         drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the machine slept between two looks at both clocks: the wall's advance past the
+    /// monotonic clock's, from 2 s on.
+    #[test]
+    fn a_wall_clock_past_the_monotonic_one_is_a_sleep() {
+        assert_eq!(slept_ms(929_000, Duration::from_millis(400)), 928_600);
+        assert_eq!(slept_ms(2_900, Duration::from_millis(1_000)), 0, "a look's lag");
+        assert_eq!(slept_ms(1_000, Duration::from_secs(30)), 0, "a stall of the process ran both clocks");
+    }
+
+    /// The master's machine asleep (the Mac's lid closed, 11-08): the lease loop's look at both
+    /// clocks says how long, and nothing of it counts against a lease. A live session beaten just
+    /// before a 15 min sleep is still granted at the wake, and the node's beat names it, so its
+    /// hub keeps it too. The same wall jump without the look (a test's clock) expires it.
+    #[test]
+    fn a_live_session_outlives_the_masters_sleep() {
+        let dir = std::env::temp_dir().join(format!("devhub-lease-sleep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (m, node, clock, _) = master(&dir);
+        m.refresh(&[("node-a".to_string(), "192.0.2.89:8797".to_string())]);
+        let mut r = Req::new("live-W1", Kind::Test);
+        (r.live, r.class) = (true, "live calc".into());
+        assert!(serve(&m, "lease", &r.to_json()).contains("\"state\":\"granted\""));
+        node.known.lock().unwrap().push("L1".into());
+        clock.store(20_000, Ordering::SeqCst);
+        assert!(serve(&m, "beat", "L1").contains("\"state\":\"granted\""));
+        *m.awake.lock().unwrap() = Some((std::time::Instant::now(), clock.load(Ordering::SeqCst)));
+        m.pump();
+        clock.store(20_000 + 900_000, Ordering::SeqCst);
+        m.pump();
+        assert!(serve(&m, "beat", "L1").contains("\"state\":\"granted\""), "it outlived the sleep");
+        m.beat_nodes();
+        assert_eq!(node.calls.lock().unwrap().iter().filter(|c| c.1 == "lease-beat").last().map(|c| c.2.clone()).as_deref(), Some("lease-beat L1"), "its hub is told the master holds it");
+        *m.awake.lock().unwrap() = None;
+        clock.store(20_000 + 1_800_000, Ordering::SeqCst);
+        m.pump();
+        assert!(serve(&m, "beat", "L1").contains("\"how\":\"expired\""), "a wall jump nothing says is sleep");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3079,6 +3280,20 @@ mod tests {
         assert!(unreachable("link lost: connection closed by the peer"));
         assert!(unreachable("node refused: lease-start L1: git worktree: signal: 15 (SIGTERM)"));
         assert!(!unreachable("shipping S1: node ship-put: no room on the disk"));
+    }
+
+    /// A host off the network is told from its hub restarting: no host answers the connect, where
+    /// a restarting hub's host refuses it or its call ends "restarting: " (11-07).
+    #[test]
+    fn a_host_off_the_network_is_no_hub_restart() {
+        let at = "link lost: cannot reach fleet hub `node-a` at 192.0.2.1:8797";
+        for gone in ["Host is down (os error 64)", "No route to host (os error 113)", "Network is unreachable (os error 101)", "Connection timed out (os error 110)", "Operation timed out (os error 60)"] {
+            let e = format!("{at}: {gone}");
+            assert!(host_gone(&e) && unreachable(&e), "{e}");
+        }
+        let refused = format!("{at}: Connection refused (os error 111)");
+        assert!(!host_gone(&refused) && unreachable(&refused));
+        assert!(!host_gone("restarting: node-a's hub restarts for its self-update; try again"));
     }
 
     /// An inspect call refused for a lease that is not an inspect lease left a mark with no pid,

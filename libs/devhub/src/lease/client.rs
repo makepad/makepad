@@ -59,9 +59,9 @@ fn timed_boxes(leases: &[Value]) -> Vec<String> {
 }
 
 pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--prio P] [--rev <branch>[@sha][,<name>=<branch>[@sha]]...]
-        [--repo-dir D] [--watch-pid P] [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--whole]
+        [--repo-dir D] [--watch-pid P] [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--ram-floor-gb N] [--whole]
         [--class name] [--priority interactive|background] [--jit key] [--native <reason>] [--keep <dir>]
-        [--input NAME=<archive> ..] [-- cmd...]
+        [--input NAME=<archive> ..] [--for <node>] [--exit-to <file>] [-- cmd...]
                                           hold a lease (kinds: build test screen long timed gpu inspect gate ci;
                                           ci: its own tree and target, beside ordinary work, never timed or user boxes;
                                           --needs gui=1: a test that opens windows, only nodes that take screen leases;
@@ -69,24 +69,35 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
                                           with a cmd: run it there and exit with its code. --node N: N or wait for
                                           it, never another box (refused, saying why, when N can never take it);
                                           --keep <dir>: what the cmd put in $DEVHUB_KEEP (a failed step's logs) is
-                                          copied into <dir> before the lease ends. --input NAME=<archive> (lease and
+                                          copied into <dir> before the lease ends. --ram-floor-gb N: the least RAM its
+                                          unasked need is cut to on a box (a tests shard's largest unit). --input NAME=<archive> (lease and
                                           run): a tar archive here (a test corpus) the cmd finds unpacked at $NAME; a
                                           box gets it once by its sha256 and keeps it for the next lease that names it
-                                          (any box can take the job). $DEVHUB_YIELD: a file that appears
+                                          (any box can take the job). --for <node> (lease and run): cargo builds
+                                          for that node's CPU (its hub's report, `nodes`), not `native`, in
+                                          <target>/for-<cpu>/, on a box of its OS and arch. --exit-to <file> (lease and
+                                          run): `<pid> <exit>` written there as the client ends, for a watcher that is
+                                          not its parent (a restarted master); nothing after a signal. $DEVHUB_YIELD: a file that appears
                                           when a timed run is past twice its estimate while a timed ask waits on its
                                           box, or runs over 10 min while one of 10 min or less waits there (it says
                                           who); a timed series or bench checks it between steps and, once
                                           it exists, stops after the current step with its partial results and releases
   run <lane> <kind> [--node N|--needs ..] [--with-uncommitted] [--tree] [--patch <diff> ..]
         [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--whole]
-        [--class name] [--priority interactive|background] [--jit key] [--native <reason>] -- cmd...
+        [--class name] [--priority interactive|background] [--jit key] [--native <reason>] [--keep <dir>]
+        [--for <node>] -- cmd...
+                                          A run's outputs (sheets, grabs, logs): the cmd writes them to $DEVHUB_KEEP and
+                                          --keep <dir> copies them into <dir> before the lease ends; a `get` after the
+                                          run can find the lane's tree already handed to another lane.
                                           JIT commands of kinds test, screen, gpu, long and build use overlays by default;
                                           --tree uses the work tree. CI, gates, timed and non-JIT commands always use trees.
                                           Main checkout edits need --with-uncommitted.
                                           --patch <diff>: the files a diff (`git diff`) changes ship patched, for
                                           this lease only (a rig's instrumentation): never in the worktree or a
-                                          node's tree, which gets every shipped file back at release. A run that
-                                          edits tracked files itself names them in DEVHUB_ALSO: undone the same way.
+                                          node's tree, which gets every shipped file back at release. Its paths are
+                                          those of the repository the run starts in (inside a nested apps/<name>
+                                          checkout, that one's). A run that edits tracked files itself names them
+                                          in DEVHUB_ALSO: undone the same way.
                                           JIT first: a lane command (or job, or test --native) that cargo-builds a package
                                           is refused unless it is the JIT's own crate, has an open JIT miss, targets a
                                           platform no JIT runs on, or says --native <reason> (native-vs-JIT baseline, timed
@@ -109,15 +120,24 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
                                           only for native-vs-JIT baselines and timed perf series (or an open JIT miss).
                                           compile/resolve misses fall back to cargo on a pool box; open misses skip the JIT;
                                           an open miss is retried once the JIT's inputs changed.
-                                          Other JIT errors: a separate event, exit 3; carry on
+                                          Other JIT errors: a separate event, exit 3; carry on.
+                                          A JIT run reads the pinned commit alone, at a root only its own process sees:
+                                          a package whose tests read the checkout itself (its history, cargo on it) says
+                                          `[package.metadata.makepad] test-tree = \"<why>\"` and its runs take the lane's tree
   get <lane> <rel> <local-dir> [--node N] [--lease L]
                                           copy results back from the lane's dir on its node (`src/..`: the tree
                                           `run` ships, which holds only tracked and ignored files once
                                           the lease ended, `target/..`: its target; with --lease: that live lease's
-                                          work, `target/..`, `tmp/..`)
+                                          work, `target/..`, `tmp/..`). Once its lease ended, the lane's tree may go to
+                                          another lane's lease at any time: a run's outputs come back with `run ...
+                                          --keep <dir>`, which copies what the cmd put in $DEVHUB_KEEP before the lease ends.
+                                          A native build is for its box's CPU: a get from a target no `--for` built
+                                          says so (`target/for-<cpu>/..`: one that did)
   release <id>                            end a lease (says how its node cleaned up)
   lease <id> cancel | cancel <id>         the user's cancel of ONE lease: its processes stop, its slot frees, the
-                                          lane is kept off that node for 30 min (unless it names it with --node);
+                                          lane is kept off that node for 30 min (unless it names it with --node;
+                                          a land queue's gate or tests shard keeps none: the next landing's is
+                                          other work);
                                           how far its last run got stays: `job result L<id> --tail`
   lease <id> why                          what a running lease does now, on that lease (a second lease on its tree
                                           waits for it): processes, threads and kernel waits, gdb's stacks where the
@@ -258,7 +278,11 @@ fn through_restarts<T>(id: &str, c: &mut Client, mut f: impl FnMut(&Client) -> R
                         back = Some(Instant::now());
                     }
                     (None, _) if node_restarting(&e) => {
-                        eprintln!("{id}: its node does not answer ({e}); its hub restarts? re-attaching when it is back");
+                        if super::master::host_gone(&e) {
+                            eprintln!("{id}: its node is off the network ({e}); the master ends its leases as lost after {} s, re-attaching if it is back first", super::sched::HOST_GONE_MS / 1000);
+                        } else {
+                            eprintln!("{id}: its node does not answer ({e}); its hub restarts? re-attaching when it is back");
+                        }
                         gone = "its node's hub";
                         down = Some(Instant::now());
                         back = Some(Instant::now());
@@ -413,6 +437,11 @@ struct Opts {
     commits_only: bool,
     /// `--input NAME=<archive>`: shipped to the box by hash before the run, unpacked at `$NAME`
     inputs: Vec<super::ship::Input>,
+    /// `--for <node>`: the box the build is for; [`for_cpu`] turns it into the lease's
+    /// [`Req::cpu_target`]
+    for_node: Option<String>,
+    /// `--exit-to <file>`: this client's exit, written there as it ends ([`write_exit`])
+    exit_to: Option<PathBuf>,
 }
 
 /// The flags shared by `lease` and `run`.
@@ -424,6 +453,8 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
     let mut tree = false;
     let mut native = String::new();
     let mut inputs = Vec::new();
+    let mut for_node = None;
+    let mut exit_to = None;
     let mut i = 0;
     let mut cmd = Vec::new();
     while i < args.len() {
@@ -439,6 +470,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
             "--est-min" => req.est_min = Some(val(i)?.parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.0).ok_or("--est-min is a nonnegative number")?),
             "--cores" => req.cores = Some(val(i)?.parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0).ok_or("--cores is a positive number")?),
             "--ram-gb" => req.ram_gb = Some(val(i)?.parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0).ok_or("--ram-gb is a positive number")?),
+            "--ram-floor-gb" => req.ram_floor_gb = Some(val(i)?.parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0).ok_or("--ram-floor-gb is a positive number")?),
             "--class" => req.class = val(i)?.to_string(),
             "--node" => req.node = Some(val(i)?.to_string()),
             "--needs" => req.needs = parse_needs(val(i)?),
@@ -452,6 +484,8 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
             "--jit" => req.loader = Some(val(i)?.to_string()),
             "--native" => native = val(i)?.to_string(),
             "--input" => inputs.push(super::ship::Input::parse(val(i)?)?),
+            "--for" => for_node = Some(val(i)?.to_string()),
+            "--exit-to" => exit_to = Some(PathBuf::from(val(i)?)),
             a => return Err(format!("unknown flag `{a}`")),
         }
         i += 2;
@@ -471,7 +505,28 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
     }
     if req.class.is_empty() && !cmd.is_empty() { req.class = super::run_class(&req.lane, kind, &cmd); }
     req.exec_profile = super::argv::ExecProfile::of(&cmd);
-    Ok(Opts { req, watch, keep, cmd, tree, native, patched: Vec::new(), commits_only: false, inputs })
+    Ok(Opts { req, watch, keep, cmd, tree, native, patched: Vec::new(), commits_only: false, inputs, for_node, exit_to })
+}
+
+/// `--for <node>`: the lease builds for that box's CPU, as its hub reports it
+/// ([`super::Caps::cpu_target`]), in place of `native`, the CPU of whichever box builds, on a box
+/// of its OS and arch (the flag is the host target's). A native release built on a box with
+/// AVX-512 died with "Illegal instruction" on a box without (11-07).
+fn for_cpu(c: &Client, o: &mut Opts) -> Result<(), String> {
+    let Some(node) = &o.for_node else { return Ok(()) };
+    let lines = retry_master(|| ask(c, None, "nodes", "nodes"))?;
+    let line = lines.iter().filter_map(|l| json(l)).find(|v| s(v, "node") == *node).ok_or_else(|| format!("--for {node}: no such node"))?;
+    let caps = line.get("caps").cloned().unwrap_or(Value::Null);
+    let target = s(&caps, "cpu_target");
+    if target.is_empty() {
+        return Err(format!("--for {node}: the node reports no CPU target (it is down, or its hub predates `--for`)"));
+    }
+    for k in ["os", "arch"] {
+        if !o.req.needs.iter().any(|(n, _)| n == k) { o.req.needs.push((k.to_string(), s(&caps, k))); }
+    }
+    eprintln!("devhub: building for {node}'s CPU, {target}, into the target dir's for-{target}/");
+    o.req.cpu_target = Some(target);
+    Ok(())
 }
 
 /// A granted lease as the holder knows it.
@@ -770,22 +825,60 @@ fn lease(args: &[&str]) -> i32 {
         eprintln!("makepad devhub lease <kind> [--node N|--needs ..] [-- cmd...]");
         return 2;
     };
-    let o = match parse(kind, None, rest) {
+    let mut o = match parse(kind, None, rest) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("makepad devhub lease: {e}");
             return 2;
         }
     };
+    let code = lease_with(&mut o);
+    write_exit(o.exit_to.as_deref(), code)
+}
+
+/// What a watcher that is not this client's parent knows of its end: `--exit-to`'s file, `<pid>
+/// <exit>`, written whole as the client ends. A bucket run's watcher is the master that started it;
+/// a master that started again (a crash, a switch-over: not an exec) adopts the run by its pid and
+/// cannot reap it, and a run that had ended before it adopted it is no process at all. Both read
+/// as "no exit status" and the run had no verdict (the tests bucket at 16:51Z, 11-08). One that
+/// ends by a signal writes nothing: its end is not known.
+fn write_exit(to: Option<&Path>, code: i32) -> i32 {
+    if let Some(path) = to {
+        let temp = path.with_extension("exit.tmp");
+        if let Err(e) = std::fs::write(&temp, format!("{} {code}\n", std::process::id())).and_then(|()| std::fs::rename(&temp, path)) {
+            eprintln!("makepad devhub: --exit-to {}: {e}", path.display());
+        }
+    }
+    code
+}
+
+/// The exit `--exit-to` wrote for the client with `pid` ([`write_exit`]); None: none, or another
+/// client's. Read by the bucket's adopted runs (the checkout's).
+#[cfg(feature = "checkout")]
+pub(crate) fn read_exit(path: &Path, pid: u32) -> Option<i32> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let (who, code) = text.trim().split_once(' ')?;
+    (who.parse::<u32>().ok()? == pid).then(|| code.parse().ok()).flatten()
+}
+
+fn lease_with(o: &mut Opts) -> i32 {
     let c = match master() {
         Ok(c) => c,
         Err(e) => return fail(e),
     };
-    if let Err(code) = native_gate(&c, &o) { return code; }
+    if let Err(e) = for_cpu(&c, o) {
+        eprintln!("makepad devhub lease: {e}");
+        return 2;
+    }
+    if let Err(code) = native_gate(&c, o) { return code; }
     let held = match acquire(&c, &o.req) {
         Ok(h) => h,
         Err(code) => return code,
     };
+    // a lease at a rev: the tree it holds, every repository's branch and commit
+    if let Some(rev) = &o.req.rev {
+        eprintln!("{} {}: sources at {}", held.id, held.node, super::rev_said(rev));
+    }
     if !o.cmd.is_empty() {
         // a lease ships nothing: its command runs on what earlier ships left in the lane's dir (a
         // script only the worktree had was "No such file" on the box, and looked like a lost tree)
@@ -924,8 +1017,10 @@ pub fn pin_lane_rev(root: &Path, spec: &str, lane: &str) -> Result<String, Strin
     super::pin_revs(root, &whole)
 }
 
-/// Ships the complete uncommitted set and base blobs into the lease's source layer.
-fn ship(c: &Client, root: &Path, held: &Held, pin: &super::Pin, uncommitted: bool, commits_only: bool, patched: &[(String, Vec<u8>)]) -> Result<(), String> {
+/// Ships the complete uncommitted set and base blobs into the lease's source layer; its line names
+/// each repository's branch and commit of the pinned `rev`.
+fn ship(c: &Client, root: &Path, held: &Held, rev: &str, uncommitted: bool, commits_only: bool, patched: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let pin = &super::Pin::of_rev(rev).ok_or_else(|| format!("{}: rev `{rev}` is not pinned", held.id))?;
     if held.work.is_empty() {
         return Err(format!("{}: no work dir to ship to", held.id));
     }
@@ -979,7 +1074,7 @@ fn ship(c: &Client, root: &Path, held: &Held, pin: &super::Pin, uncommitted: boo
     let done = node_one(c, &held.node, "ship-done", &format!("ship-done {} {}", held.id, makepad_network::digest::base64_encode(body.as_bytes())))?;
     let source = done.get("source").and_then(|s| s.as_str()).unwrap_or("").to_string();
     let patched_note = if patched.is_empty() { String::new() } else { format!(", {} of them patched by --patch", patched.len()) };
-    let at = if commits_only { format!("{} alone (--rev)", pin.short()) } else { "the worktree's HEAD".to_string() };
+    let at = if commits_only { format!("{} alone (--rev)", super::rev_said(rev)) } else { format!("the worktree's HEAD {}", super::rev_said(rev)) };
     eprintln!("{} {}: sources at {at}, source {source}; shipped {} changed file(s){patched_note} ({} KB, {} sent) and {} deletion(s) on top in {:.1} s", held.id, held.node, paths.len(), sent.bytes >> 10, sent.sent, deleted.len(), t.elapsed().as_secs_f64());
     Ok(())
 }
@@ -1002,14 +1097,20 @@ fn stage_patched(root: &Path, stage: &Path, patched: &[(String, Vec<u8>)]) -> Re
 }
 
 /// `--patch <diff>` flags before the command, out of `rest`: each diff applied to the worktree's
-/// files (lease/patch.rs), the files they change.
-fn take_patches(root: Option<&Path>, rest: &mut Vec<&str>) -> Result<Vec<(String, Vec<u8>)>, String> {
+/// files (lease/patch.rs), the files they change. `at`: the lane's root and where in it the run
+/// was started ([`lane_root`]). A diff's paths are relative to the repository the run starts in,
+/// as `git diff` writes them and `git apply` reads them there: from inside a nested checkout
+/// (`apps/<name>`, [`crate::nested`]) they are that repository's.
+fn take_patches(at: Option<(&Path, &str)>, rest: &mut Vec<&str>) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut patched: Vec<(String, Vec<u8>)> = Vec::new();
     while let Some(i) = rest.iter().take_while(|a| **a != "--").position(|a| *a == "--patch") {
         let file = rest.get(i + 1).copied().filter(|f| *f != "--").ok_or("--patch needs a diff file")?;
-        let root = root.ok_or("--patch: run it from inside the lane's worktree")?;
+        let (root, rel) = at.ok_or("--patch: run it from inside the lane's worktree")?;
+        let names = crate::nested::names(root);
+        let repo = crate::nested::split(&format!("{rel}/"), names.iter().map(String::as_str)).map_or(String::new(), |(name, _)| crate::nested::prefix(name));
         let diff = std::fs::read_to_string(file).map_err(|e| format!("--patch {file}: {e}"))?;
-        for (path, text) in super::patch::apply_in(root, &diff).map_err(|e| format!("--patch {file}: {e}"))? {
+        for (path, text) in super::patch::apply_in(&root.join(&repo), &diff).map_err(|e| format!("--patch {file}: {e}"))? {
+            let path = format!("{repo}{path}");
             if patched.iter().any(|(p, _)| *p == path) { return Err(format!("--patch {file}: {path} is in another patch too")); }
             patched.push((path, text));
         }
@@ -1023,14 +1124,14 @@ fn run(lane: &str, kind: &str, rest: &[&str]) -> i32 {
     let flags = rest.iter().position(|a| *a == "--").unwrap_or(rest.len());
     let uncommitted = rest[..flags].contains(&"--with-uncommitted");
     let mut rest: Vec<&str> = rest.iter().enumerate().filter(|(i, a)| *i >= flags || **a != "--with-uncommitted").map(|(_, a)| *a).collect();
-    let patched = match take_patches(lane_root().as_ref().map(|(root, _)| root.as_path()), &mut rest) {
+    let patched = match take_patches(lane_root().as_ref().map(|(root, rel)| (root.as_path(), rel.as_str())), &mut rest) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("makepad devhub run: {e}");
             return 2;
         }
     };
-    let o = match parse(kind, Some(lane), &rest) {
+    let mut o = match parse(kind, Some(lane), &rest) {
         Ok(o) if !o.cmd.is_empty() => Opts { patched, ..o },
         Ok(_) => {
             eprintln!("makepad devhub run <lane> <kind> [--node N|--needs ..] [--tree] -- cmd...");
@@ -1041,8 +1142,20 @@ fn run(lane: &str, kind: &str, rest: &[&str]) -> i32 {
             return 2;
         }
     };
-    if let Err(code) = retry_master(master).map_err(fail).and_then(|c| native_gate(&c, &o)) { return code; }
-    run_worktree(o, uncommitted, None)
+    let c = match retry_master(master) {
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
+    if let Err(e) = for_cpu(&c, &mut o) {
+        eprintln!("makepad devhub run: {e}");
+        return 2;
+    }
+    let exit_to = o.exit_to.clone();
+    let code = match native_gate(&c, &o) {
+        Ok(()) => run_worktree(o, uncommitted, None),
+        Err(code) => code,
+    };
+    write_exit(exit_to.as_deref(), code)
 }
 
 /// Runs at HEAD with the same overlay as `run`.
@@ -1081,10 +1194,10 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
     };
     let queue = queued.elapsed();
     let shipping = Instant::now();
-    let pin = o.req.rev.as_deref().and_then(super::Pin::of_rev).unwrap();
+    let rev = o.req.rev.clone().unwrap_or_default();
     // a node hub restarting mid-ship keeps the lease (its new hub takes it back from the
     // ledger): the ship is made again once it answers
-    let shipped = through_restarts(&held.id, &mut c.clone(), |c| ship(c, &root, &held, &pin, uncommitted, o.commits_only, &o.patched), &master);
+    let shipped = through_restarts(&held.id, &mut c.clone(), |c| ship(c, &root, &held, &rev, uncommitted, o.commits_only, &o.patched), &master);
     let ship = shipping.elapsed();
     let running = Instant::now();
     let mut tally = crate::testlog::Tally::default();
@@ -1338,9 +1451,18 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
             o.req.class = target.map_or_else(|| format!("test:{pkg}"), |t| format!("test:{pkg}:{t}"));
             if live { o.req.class = format!("live:{}", o.req.class); }
         }
+        let own = if native { false } else {
+            let (own, tree) = crate::jit_misses::test_package(&root, &pin.pair(), pkg)?;
+            // tests that read the checkout itself (its history, cargo on it) say so in their
+            // Cargo.toml, and run in the lane's tree: an overlay has neither
+            if let Some(why) = tree.filter(|_| !o.tree) {
+                eprintln!("devhub test: {pkg} runs in the lane's tree: {why} (its Cargo.toml's test-tree)");
+                o.tree = true;
+            }
+            own
+        };
         // Warm iteration always uses the JIT; measured routing is only for one-shot runs.
         if !native && !live {
-            let own = crate::jit_misses::jit_own(&root, &pin.pair(), pkg)?;
             let cargo_class = format!("native:{}", o.req.class);
             let v = retry_master(|| master().and_then(|c| one(&c, "stats", &format!("stats class {} {}\t{cargo_class}", o.req.kind.as_str(), o.req.class))))?;
             let runs = v.get("runs");
@@ -1708,7 +1830,29 @@ fn get(lane: &str, rel: &str, dst: &str, rest: &[&str]) -> i32 {
         Err(e) => return fail(e),
     };
     eprintln!("got {} ({:.1} MB) from {node} into {}", super::master::plural(count, "file", "files"), bytes as f64 / 1048576.0, dst.display());
+    if let Some(note) = cpu_note(&c, &node, lease.as_deref(), rel) { eprintln!("{note}"); }
     0
+}
+
+/// A native build is for the CPU of the box that built it (`-C target-cpu=native`): on a box
+/// without its features it dies with "Illegal instruction" (an AVX-512 build, 11-07). Said when
+/// a `get` takes files from a build target that no `--for` built.
+fn cpu_note(c: &Client, node: &str, lease: Option<&str>, rel: &str) -> Option<String> {
+    let under = rel.strip_prefix("target/")?;
+    let built_for = match lease {
+        // a live lease's `target/` is its own target dir, a `--for` lease's `for-<cpu>/`
+        Some(id) => ask(c, None, "leases", "leases").ok()?.iter().filter_map(|l| json(l)).find(|v| s(v, "id") == id)
+            .and_then(|v| v.get("start").map(|st| s(st, "target")))
+            .is_some_and(|t| Path::new(&t).file_name().is_some_and(|f| f.to_string_lossy().starts_with("for-"))),
+        None => under.starts_with("for-"),
+    };
+    if built_for { return None; }
+    let nodes = ask(c, None, "nodes", "nodes").unwrap_or_default();
+    let cpu = nodes.iter().filter_map(|l| json(l)).find(|v| s(v, "node") == node).and_then(|v| v.get("caps").map(|c| s(c, "cpu_target"))).filter(|t| !t.is_empty());
+    Some(format!(
+        "devhub get: a native build in {rel} is for {node}'s own CPU{}: it runs on boxes with that CPU's features; for another box, build with `--for <node>` and get target/for-<cpu>/..",
+        cpu.map_or(String::new(), |t| format!(" ({t})"))
+    ))
 }
 
 fn queue(c: &Client, all: bool) -> i32 {
@@ -1780,9 +1924,10 @@ fn nodes(c: &Client) -> i32 {
     }
 }
 
-/// `inspect <node>/<pid|app> [--lease L] <cmd...>` on a node: under an inspect lease, through
-/// the master's `linspect` (None: this machine's JIT or no master; plain `inspect` handles it).
-fn inspect(target: &str, rest: &[&str]) -> Option<i32> {
+/// `inspect <node>/<pid|app> [--lease L] [--read-only] <cmd...>` on a node: under an inspect
+/// lease, through the master's `linspect` (None: this machine's JIT or no master; plain `inspect`
+/// handles it). A JIT no devhub lease started is refused first ([`crate::cli::leave_alone`]).
+fn inspect(target: &str, lease: Option<&str>, read_only: bool, cmd: &[&str]) -> Option<i32> {
     let c = control().ok()?;
     if !has(&c, "linspect") {
         return None;
@@ -1791,16 +1936,20 @@ fn inspect(target: &str, rest: &[&str]) -> Option<i32> {
     if node == local_name(&c) {
         return None;
     }
-    let (lease, cmd) = match rest {
-        ["--lease", l, cmd @ ..] => (Some(l.to_string()), cmd),
-        cmd => (None, cmd),
-    };
-    if cmd.is_empty() {
-        eprintln!("makepad devhub inspect <node>/<pid|app> [--lease L] <cmd...>");
+    let Some(verb) = cmd.first() else {
+        eprintln!("makepad devhub inspect <node>/<pid|app> [--lease L] [--read-only] <cmd...>");
         return Some(2);
+    };
+    match crate::cli::whose(&c, node, false).map(|jits| crate::cli::leave_alone(&jits, node, jit, verb, read_only)) {
+        Ok(None) => {}
+        Ok(Some(why)) => {
+            eprintln!("makepad devhub inspect: {why}");
+            return Some(2);
+        }
+        Err(e) => return Some(fail(format!("whose {node}/{jit} is: {e}"))),
     }
     let (id, own) = match lease {
-        Some(l) => (l, false),
+        Some(l) => (l.to_string(), false),
         None => {
             let mut req = Req::new(&default_lane(), Kind::Inspect);
             req.node = Some(node.to_string());
@@ -1811,12 +1960,14 @@ fn inspect(target: &str, rest: &[&str]) -> Option<i32> {
             }
         }
     };
-    // A grab (or another command read from the app's frames) is answered on this side, on a
-    // client of the app through the hub. The app has no command for it, and relayed as one it
-    // was refused as "client-side", which left the lanes no grab of a pool node's app (11-07).
-    // Its file lands on this machine (`out=`, else the grab folder here).
+    // A grab (or another command read from the app's frames) and the app's AI tools are answered
+    // on this side, on a client of the app through the hub ([`crate::cli::answered_here`]). The
+    // app has no command for either: relayed as one, a grab was refused as "client-side", which
+    // left the lanes no grab of a pool node's app, and `call vis.play ..` of a Source Library a
+    // lane's screen lease ran was "unknown command `call`" (11-07). A grab's file lands on this
+    // machine (`out=`, else the grab folder here).
     let words: Vec<String> = cmd.iter().map(|w| w.to_string()).collect();
-    let r = if makepad_remote::app::client_side(&words) {
+    let r = if crate::cli::answered_here(&words) {
         let app = Client::routed(&c, &format!("{node}:{jit}"));
         let mut lines = Vec::new();
         makepad_remote::app::run(&app, &words, &mut |l| {
@@ -2009,13 +2160,9 @@ fn why(id: &str) -> i32 {
 pub fn cli(args: &[&str]) -> Option<i32> {
     let word = *args.first()?;
     if word == "inspect" {
-        // `inspect --lease L <target> <cmd...>` reads as `inspect <target> --lease L <cmd...>`
-        if let ["inspect", "--lease", l, target, cmd @ ..] = args {
-            let mut rest = vec!["--lease", *l];
-            rest.extend_from_slice(cmd);
-            return inspect(target, &rest);
-        }
-        return inspect(args.get(1)?, &args[2..]);
+        // its options before or after the target (`inspect --lease L <target> <cmd...>`)
+        let (target, lease, read_only, at) = crate::cli::inspect_words(&args[1..]);
+        return inspect(target?, lease, read_only, &args[1 + at..]);
     }
     if !matches!(word, "prof" | "stats" | "jit" | "overlay" | "lease" | "run" | "test" | "get" | "release" | "cancel" | "queue" | "leases" | "why-queued" | "nodes" | "node" | "disk" | "heap" | "desk" | "landed" | "clean" | "evict" | "unblock" | "override" | "blocked") {
         return None;
@@ -2281,11 +2428,22 @@ mod tests {
         std::fs::write(&diff, "--- a/tools/rig.sh\n+++ b/tools/rig.sh\n@@ -1,2 +1,3 @@\n echo one\n+echo probe\n echo two\n").unwrap();
         let diff = diff.to_string_lossy().into_owned();
         let mut rest = vec!["--patch", diff.as_str(), "--cores", "2", "--", "bash", "--patch", "x"];
-        let patched = take_patches(Some(&root), &mut rest).unwrap();
+        let patched = take_patches(Some((&root, ".")), &mut rest).unwrap();
         assert_eq!(rest, ["--cores", "2", "--", "bash", "--patch", "x"]);
         assert_eq!(patched, [("tools/rig.sh".to_string(), b"echo one\necho probe\necho two\n".to_vec())]);
         let mut twice = vec!["--patch", diff.as_str(), "--patch", diff.as_str(), "--", "x"];
-        assert!(take_patches(Some(&root), &mut twice).unwrap_err().ends_with("tools/rig.sh is in another patch too"));
+        assert!(take_patches(Some((&root, "tools")), &mut twice).unwrap_err().ends_with("tools/rig.sh is in another patch too"));
+        // from inside a nested checkout, its diff's paths are that repository's (as `git diff`
+        // wrote them there); a run started beside it, in makepad, reads them as makepad's
+        std::fs::create_dir_all(root.join("apps/side-app/.git")).unwrap();
+        std::fs::create_dir_all(root.join("apps/side-app/tools")).unwrap();
+        std::fs::write(root.join("apps/side-app/tools/rig.sh"), "echo one\necho two\n").unwrap();
+        for rel in ["apps/side-app", "apps/side-app/tools"] {
+            let mut rest = vec!["--patch", diff.as_str(), "--", "x"];
+            assert_eq!(take_patches(Some((&root, rel)), &mut rest).unwrap(), [("apps/side-app/tools/rig.sh".to_string(), b"echo one\necho probe\necho two\n".to_vec())], "{rel}");
+        }
+        let mut rest = vec!["--patch", diff.as_str(), "--", "x"];
+        assert_eq!(take_patches(Some((&root, "apps")), &mut rest).unwrap()[0].0, "tools/rig.sh");
         let stage = dir.join("stage");
         let staged = stage_patched(&root, &stage, &patched).unwrap();
         assert_eq!(staged.iter().map(|e| (e.path.as_str(), e.size)).collect::<Vec<_>>(), [("tools/rig.sh", 29)]);

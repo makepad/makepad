@@ -291,7 +291,7 @@ fn serve(ctx: &Arc<Ctx>, svc: &str, line: &str, out: &mut Vec<String>) {
         // self-update came first) it says so: an exec onto the same build only drops what runs
         // through it (a job's JIT build twice in 2 min, 11-02).
         "master" if line.trim() == "master restart" => git(&ctx.repo, &["rev-parse", "refs/heads/work"])
-            .and_then(|work| if work == crate::lease::caps::hub_rev() { Ok(format!("the master already runs work's tip {}: nothing to restart", short(&work))) } else { roll::restart_master(ctx, &work, "`devhub master restart`") })
+            .and_then(|work| if work == crate::lease::caps::hub_rev() { Ok(format!("the master already runs work's tip {}: nothing to restart", short(&work))) } else { roll::restart_master(ctx, &work, "`devhub master restart`", true) })
             .map(|done| format!("{{\"restart\":{}}}", json_str(&done))),
         "master" if line.trim() == "master rollback" => roll::rollback_master(ctx, "`devhub master rollback`").map(|done| format!("{{\"restart\":{}}}", json_str(&done))),
         "state" => {
@@ -343,6 +343,17 @@ pub fn snapshot(repo: &Path) -> Option<Pair> {
     let read = || Some(Pair { work: sha(&mk, "refs/heads/work")?, main: sha(&com, "refs/heads/main")? });
     let (a, b) = (read()?, read()?);
     (a == b && a.valid() && !lock.exists()).then_some(a)
+}
+
+/// The landed tips of every followed repository ([`crate::nested::branches`]): [`snapshot`]'s pair,
+/// and each other nested repository's branch tip.
+pub fn snapshot_pin(repo: &Path) -> Option<crate::lease::Pin> {
+    let pair = snapshot(repo)?;
+    let mut pin = crate::lease::Pin::at(&pair.work).with(crate::state::PAIRED, &pair.main);
+    for (name, branch) in crate::nested::branches(repo).into_iter().filter(|(n, _)| n != crate::state::PAIRED) {
+        pin.nested.insert(name.clone(), crate::gitread::rev(&repo.join(crate::nested::dir(&name)), &format!("refs/heads/{branch}"))?);
+    }
+    Some(pin)
 }
 
 /// `5s`, `3m`, `2h`, `4d` ago.

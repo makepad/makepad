@@ -273,31 +273,86 @@ pub fn control_kept() -> bool {
     }
 }
 
-/// Keeps the control socket's listener open over `cmd`'s exec of this process: [`listen_control`]
-/// in the new image serves it.
+/// Sets or clears close-on-exec on `fd`: fcntl only (F_GETFD 1, F_SETFD 2, FD_CLOEXEC 1 on Linux
+/// and macOS), so an exec's pre_exec hook may call it.
 #[cfg(unix)]
-pub fn keep_control_over_exec(cmd: &mut std::process::Command) {
-    use std::os::unix::process::CommandExt;
+fn close_on_exec(fd: i32, on: bool) -> std::io::Result<()> {
     extern "C" {
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     }
-    let fd = CONTROL.load(std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: descriptor flags only; a bad descriptor fails (EBADF)
+    let flags = unsafe { fcntl(fd, 1) };
+    if flags < 0 || unsafe { fcntl(fd, 2, if on { flags | 1 } else { flags & !1 }) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Keeps the control socket's listener open over `cmd`'s exec of this process ([`exec`]):
+/// [`listen_control`] in the new image serves it.
+#[cfg(unix)]
+pub fn keep_control_over_exec(cmd: &mut std::process::Command) {
+    keep_over_exec(cmd, CONTROL.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[cfg(unix)]
+fn keep_over_exec(cmd: &mut std::process::Command, fd: i32) {
+    use std::os::unix::process::CommandExt;
     if fd < 0 {
         cmd.env_remove(CONTROL_FD);
         return;
     }
     cmd.env(CONTROL_FD, format!("{}:{fd}", std::process::id()));
     // close-on-exec off at the exec itself (an exec runs these hooks in place, last), so no child
-    // started before it gets the listener
-    // SAFETY: fcntl only (F_GETFD 1, F_SETFD 2, FD_CLOEXEC 1 on Linux and macOS)
+    // started before it gets the listener; the new image sets it again as it takes the listener
+    // SAFETY: close_on_exec is fcntl only
     unsafe {
-        cmd.pre_exec(move || {
-            let flags = fcntl(fd, 1);
-            if flags < 0 || fcntl(fd, 2, flags & !1) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+        cmd.pre_exec(move || close_on_exec(fd, false));
+    }
+}
+
+/// Execs `cmd` in place of this process, the control listener kept over it
+/// ([`keep_control_over_exec`]). Returns only when the exec failed, with its error: the hook ran
+/// in this process, so close-on-exec is set again and no child this image starts inherits the
+/// listener.
+#[cfg(unix)]
+pub fn exec(cmd: &mut std::process::Command) -> std::io::Error {
+    exec_keeping(cmd, CONTROL.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+#[cfg(unix)]
+fn exec_keeping(cmd: &mut std::process::Command, fd: i32) -> std::io::Error {
+    let e = std::os::unix::process::CommandExt::exec(cmd);
+    if fd >= 0 {
+        if let Err(again) = close_on_exec(fd, true) {
+            return std::io::Error::new(e.kind(), format!("{e}; the control listener (fd {fd}) stays open over a child's exec: {again}"));
+        }
+    }
+    e
+}
+
+/// Who serves the control socket at `path`, once a dial there has had its answer: the process
+/// its HELLO_OK names. A listener a child inherited from a hub that is gone queues the dial and
+/// answers nothing, so it is never taken for a hub (a bare connect was: a takeover measured
+/// 0.15 s where the next master listened 24 s later, 11-08).
+pub fn who_serves(path: &std::path::Path) -> Option<Serving> {
+    let c = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(path.to_path_buf()), "probe");
+    let conn = c.conn().ok()?;
+    let who = conn.peer();
+    Some(Serving { pid: who.serving_pid, since_ms: who.serving_since_ms })
+}
+
+/// The process that answers a control socket ([`who_serves`]) and when its endpoint began (ms
+/// since the epoch): an exec keeps the pid, not the start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Serving {
+    pub pid: u32,
+    pub since_ms: u64,
+}
+
+impl std::fmt::Display for Serving {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pid={} since_ms={}", self.pid, self.since_ms)
     }
 }
 
@@ -308,13 +363,17 @@ pub fn listen_control(ep: &Endpoint) -> Result<PathBuf, String> {
     #[cfg(unix)]
     if let Some(fd) = kept_control(&path) {
         use std::os::unix::io::FromRawFd;
+        // close-on-exec again first: the exec cleared it to hand the listener over, and every
+        // child this image started inherited it, so a master that was gone still had its socket
+        // held open by its runs, and a dial there queued unanswered (11-08)
+        close_on_exec(fd, true).map_err(|e| format!("{}: the kept listener (fd {fd}): {e}", path.display()))?;
         // SAFETY: kept_control found the listening socket at `path` there, and nothing else owns it
         makepad_remote::carrier::unix::serve_listener(ep, unsafe { std::os::unix::net::UnixListener::from_raw_fd(fd) });
         CONTROL.store(fd, std::sync::atomic::Ordering::Relaxed);
         return Ok(path);
     }
-    if makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(path.clone()), "probe").conn().is_ok() {
-        return Err(format!("a devhub already serves {}", path.display()));
+    if let Some(who) = who_serves(&path) {
+        return Err(format!("a devhub ({who}) already serves {}", path.display()));
     }
     std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| format!("{}: {e}", path.display()))?;
     let listening = makepad_remote::carrier::unix::listen_at(ep, &path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -479,5 +538,35 @@ mod tests {
         assert_eq!(super::wm_client_log(&dir, 77), None, "a build's log is no client's");
         assert_eq!(super::wm_client_log(&dir, 42), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An exec that fails leaves the control listener this image's again: close-on-exec on, so no
+    /// child it starts later inherits it (the exec's hook had cleared it in this process). Its
+    /// exec runs in a child of its own: a failed exec resets the process's signal handling.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_exec_closes_the_listener_on_exec_again() {
+        use std::os::unix::io::AsRawFd;
+        let Some(base) = std::env::var_os("DEVHUB_FAILED_EXEC_BASE").map(std::path::PathBuf::from) else {
+            let base = std::env::temp_dir().join(format!("devhub-failed-exec-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+            let mut role = crate::testenv::role("node::tests::a_failed_exec_closes_the_listener_on_exec_again", &base);
+            let ran = role.args(["--nocapture", "--test-threads=1"]).env("DEVHUB_FAILED_EXEC_BASE", &base).output().unwrap();
+            let _ = std::fs::remove_dir_all(&base);
+            assert!(ran.status.success() && String::from_utf8_lossy(&ran.stdout).contains("1 passed"), "{}{}", String::from_utf8_lossy(&ran.stdout), String::from_utf8_lossy(&ran.stderr));
+            return;
+        };
+        extern "C" {
+            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        }
+        let listener = std::os::unix::net::UnixListener::bind(base.join("c.sock")).unwrap();
+        let fd = listener.as_raw_fd();
+        let mut cmd = std::process::Command::new(base.join("no-such-build"));
+        super::keep_over_exec(&mut cmd, fd);
+        let e = super::exec_keeping(&mut cmd, fd);
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "{e}");
+        // SAFETY: F_GETFD on this test's own listener
+        assert_eq!(unsafe { fcntl(fd, 1) } & 1, 1, "close-on-exec again");
     }
 }

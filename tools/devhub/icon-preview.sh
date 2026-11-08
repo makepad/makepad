@@ -11,7 +11,7 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/devhub-icon.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 b64=$(base64 < "$RES/icon_1024.png" | tr -d '\n')
 glyph() { # fill colour, x, y, scale
-  sed -n '/<g /,/<circle cx="18" cy="19"/p' "$RES/tray.svg" | sed "s/#000/$1/g" | sed "1s|^|<g transform=\"translate($2 $3) scale($4)\">|;\$s|\$|</g>|"
+  sed -n '/<g id="glyph">/,/^  <\/g>$/p' "$RES/tray.svg" | sed "s/#000/$1/g" | sed "1s|^|<g transform=\"translate($2 $3) scale($4)\">|;\$s|\$|</g>|"
 }
 cat > "$tmp/p.svg" <<SVG
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1200" height="520" viewBox="0 0 1200 520">

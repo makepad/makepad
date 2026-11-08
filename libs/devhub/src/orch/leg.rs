@@ -80,7 +80,7 @@ fn run_started_ms(agent: &str) -> Option<u64> {
 pub const OWED_PRIO: i32 = crate::lease::sched::DEFAULT_PRIO - 1;
 
 /// The agents whose leases are background work (also once owed: they count to the N-2 cap).
-const BACKGROUND_AGENTS: [&str; 4] = ["devhub-verify", "devhub-ci", "devhub-allapps", "devhub-jitlegs"];
+const BACKGROUND_AGENTS: [&str; 4] = crate::lease::sched::OWN_LEG_AGENTS;
 
 /// Background leases the master ended for waiting lane work: their legs ask again.
 static PREEMPTED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());

@@ -150,16 +150,10 @@ impl Master {
         // a second master stops before it starts anything (its landing train, its jobs): one
         // already serves the control socket
         // (one this master's previous image kept open for it answers no probe: it queues the dial)
-        if !crate::node::control_kept() && Client::new(Target::Unix(proto::control_socket()), "probe").conn().is_ok() {
-            return Err(format!("a devhub already serves {}", proto::control_socket().display()));
+        if let Some(who) = (!crate::node::control_kept()).then(|| crate::node::who_serves(&proto::control_socket())).flatten() {
+            return Err(format!("a devhub ({who}) already serves {}", proto::control_socket().display()));
         }
         let niced = start_level()?;
-        // stored pins and revs in the named form, once, before anything reads them
-        match crate::lease::pre_nested::master(&proto::home()) {
-            Ok(0) => {}
-            Ok(n) => eprintln!("devhub: {n} record file(s) moved to named pins"),
-            Err(e) => eprintln!("devhub: moving records to named pins: {e}"),
-        }
         // Validate and retain the shared state before starting any master services.
         let _state = crate::state::Store::open_quiet(&proto::home(), name)?;
         crate::os::raise_fd_limit();
@@ -589,14 +583,41 @@ mod tests {
         assert_eq!(names, vec!["n1", "n2", "node-c"]);
     }
 
+    /// The Unix sockets this process holds above stdio, by the path each is bound at: each
+    /// descriptor of its listing (/proc/self/fd on Linux, /dev/fd on macOS) whose getsockname
+    /// names a path. A listener and the connections it accepted all name its path.
+    #[cfg(unix)]
+    fn sockets_held() -> Vec<(i32, std::path::PathBuf)> {
+        use std::os::unix::io::FromRawFd;
+        let listing = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
+        let fds: Vec<i32> = std::fs::read_dir(listing).unwrap().flatten().filter_map(|e| e.file_name().to_str()?.parse().ok()).filter(|&fd| fd > 2).collect();
+        fds.into_iter()
+            .filter_map(|fd| {
+                // only looked at: ManuallyDrop leaves the descriptor open; one that is no Unix
+                // socket fails (ENOTSOCK, another family)
+                // SAFETY: getsockname on a descriptor number
+                let s = std::mem::ManuallyDrop::new(unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) });
+                Some((fd, s.local_addr().ok()?.as_pathname()?.to_path_buf()))
+            })
+            .collect()
+    }
+
     /// The role of [`a_dial_during_the_masters_exec_waits_for_the_next_build`]: a master's control
     /// socket whose "ping" names the image that answers. "before" execs into "after" as
-    /// `restart_master` does; "after" listens only once the test has dialed.
+    /// `restart_master` does; "after" listens only once the test has dialed, then starts a run
+    /// ("child"), which says which listeners it holds.
     #[cfg(unix)]
     #[test]
     fn exec_role_master() {
         let Ok(role) = std::env::var("DEVHUB_EXEC_ROLE") else { return };
         let base = std::path::PathBuf::from(std::env::var_os("DEVHUB_EXEC_BASE").unwrap());
+        let sock = base.join("home/devhub/devhub.sock");
+        let at_sock = |held: &[(i32, std::path::PathBuf)]| held.iter().filter(|(_, at)| *at == sock).count();
+        if role == "child" {
+            let held = sockets_held();
+            std::fs::write(base.join("child holds"), format!("{} of the master's\n{held:?}", at_sock(&held))).unwrap();
+            return;
+        }
         let wait_for = |f: &str| {
             while !base.join(f).exists() {
                 std::thread::sleep(std::time::Duration::from_millis(20));
@@ -612,6 +633,12 @@ mod tests {
             wait_for("dialed");
         }
         crate::node::listen_control(&ep).unwrap();
+        if role == "after" {
+            // the scan sees the master's sockets where they are: this image's own
+            assert!(at_sock(&sockets_held()) > 0, "the scan misses the kept listener: {:?}", sockets_held());
+            let mut run = crate::testenv::role("master::tests::exec_role_master", &base);
+            assert!(run.args(["--nocapture", "--test-threads=1"]).env("DEVHUB_EXEC_ROLE", "child").status().unwrap().success());
+        }
         std::fs::write(base.join(format!("{role} listens")), "").unwrap();
         if role == "before" {
             wait_for("exec");
@@ -637,6 +664,7 @@ mod tests {
         let mut role = crate::testenv::role("master::tests::exec_role_master", &base);
         role.args(["--nocapture", "--test-threads=1"]).env("DEVHUB_EXEC_ROLE", "before").env("DEVHUB_EXEC_BASE", &base).env("MAKEPAD_HOME", base.join("home")).env_remove("DEVHUB_CONTROL_FD");
         let mut child = role.stdin(std::process::Stdio::null()).stdout(std::fs::File::create(&log).unwrap()).stderr(std::process::Stdio::from(std::fs::File::options().append(true).open(&log).unwrap())).spawn().unwrap();
+        let pid = child.id();
         let mut wait_for = |f: &str| {
             while !base.join(f).exists() {
                 if let Some(st) = child.try_wait().unwrap() {
@@ -652,6 +680,8 @@ mod tests {
         };
         wait_for("before listens");
         assert_eq!(ask().unwrap(), vec!["before".to_string()]);
+        let before = crate::node::who_serves(&sock).expect("the first image answers who it is");
+        assert_eq!(before.pid, pid);
         std::fs::write(base.join("exec"), "").unwrap();
         // the next build runs and does not listen yet: it waits for "dialed"
         wait_for("execd");
@@ -662,6 +692,14 @@ mod tests {
         std::fs::write(base.join("dialed"), "").unwrap();
         assert_eq!(answer.join().unwrap().unwrap(), vec!["after".to_string()]);
         wait_for("after listens");
+        // the same process, a later image: who answers tells them apart
+        let after = crate::node::who_serves(&sock).expect("the next image answers who it is");
+        assert!(after.pid == before.pid && after.since_ms > before.since_ms, "{before} then {after}");
+        // the kept listener is the new image's alone: a run it starts holds no listener (the
+        // exec cleared close-on-exec to hand it over, and every run inherited it until the
+        // master's socket outlived the master, 11-08)
+        let held = std::fs::read_to_string(base.join("child holds")).unwrap();
+        assert!(held.starts_with("0 of the master's"), "a run holds the master's socket: {held}");
         std::fs::write(base.join("done"), "").unwrap();
         drop(queued);
         assert!(child.wait().unwrap().success(), "{}", std::fs::read_to_string(&log).unwrap_or_default());

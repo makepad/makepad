@@ -94,13 +94,23 @@ pub fn autosync_covers(home: &std::path::Path, node: &str) -> bool {
     c.enabled && c.nodes.as_ref().is_none_or(|n| n.iter().any(|x| x == node))
 }
 
-/// Moves `node`'s tree to the tips of work and commercial main, with no build and no restart (a
-/// node the auto-sync does not follow: the self-update brings its code itself), or to `at` (a
-/// timed ask's pin, [`crate::state::Pair::pin_key`]). Returns the exit code and the node's lines.
+/// The repositories the deployments follow from the checkout at `repo`, each with its branch,
+/// makepad first: makepad's `work`, then the nested ones the buckets prove
+/// ([`crate::nested::branches`]: the paired one's `main`, each other at the branch its checkout is
+/// on).
+#[cfg(feature = "checkout")]
+pub fn followed(repo: &std::path::Path) -> Vec<(String, String)> {
+    std::iter::once(("makepad".to_string(), "work".to_string())).chain(crate::nested::branches(repo)).collect()
+}
+
+/// Moves `node`'s tree to the tips of the followed repositories ([`followed`]), with no build and
+/// no restart (a node the auto-sync does not follow: the self-update brings its code itself), or
+/// to `at` (a timed ask's pin, [`crate::lease::Pin::key`]). Returns the exit code and the node's
+/// lines.
 #[cfg(feature = "checkout")]
 pub fn push_tree(control: &makepad_remote::Client, repo: &std::path::Path, node: &str, at: Option<&str>) -> (i32, Vec<String>) {
     let mut lines = Vec::new();
-    let code = cli::push_and_apply(control, repo, "work", Some("main"), at, &[node.to_string()], "off", "none", false, "", &mut |n, l| lines.push(format!("{n} {l}")));
+    let code = cli::push_and_apply(control, repo, &followed(repo), at, &[node.to_string()], "off", "none", false, "", &mut |n, l| lines.push(format!("{n} {l}")));
     (code, lines)
 }
 

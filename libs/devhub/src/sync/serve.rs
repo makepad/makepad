@@ -44,6 +44,29 @@ pub struct Sync {
     stale_said: Mutex<std::collections::BTreeSet<(u32, String)>>,
 }
 
+/// The words of an apply order that are not repositories.
+const ORDER_WORDS: [&str; 10] = ["at", "build", "jit", "landed", "prewarm", "repoint", "restart", "session", "tickcmd", "wait_ms"];
+
+/// The repositories an apply order moves, each to the commit it names: `makepad=<sha>` and each
+/// nested repository's `<name>=<sha>`, makepad first.
+fn order_repos(o: &Order) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = o.words.iter().skip(1).filter_map(|w| w.split_once('='))
+        .filter(|(k, _)| (*k == "makepad" || crate::nested::valid(k)) && !ORDER_WORDS.contains(k))
+        .map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    out.sort_by_key(|(k, _)| k != "makepad");
+    out
+}
+
+/// The deployment's pin once `moved` (repository, commit) moved it from `was` (its
+/// FLEET-REVISION.txt's): None while it holds no makepad commit.
+fn deployed_after(was: Option<crate::lease::Pin>, moved: &[(String, String)]) -> Option<crate::lease::Pin> {
+    let mut pin = was.unwrap_or_default();
+    for (repo, sha) in moved {
+        if repo == "makepad" { pin.makepad = sha.clone() } else { pin.nested.insert(repo.clone(), sha.clone()); }
+    }
+    (!pin.makepad.is_empty()).then_some(pin)
+}
+
 fn short(sha: &str) -> &str {
     &sha[..sha.len().min(10)]
 }
@@ -212,18 +235,17 @@ impl Sync {
         if let Some(timed) = timed_here() {
             return out.push(err_line(&format!("waits: {timed} runs here: the deployment moves after it")));
         }
+        let moves = order_repos(o);
         // the commits this apply builds the box's JIT of: a gate of exactly them waits for it
         if self.conf.jit_app().is_some() && o.get("build") != Some("off") {
-            let at = |repo| o.get(repo).map(str::to_string).or_else(|| git::fleet_revision(&self.conf.checkout, repo));
-            if let Some(mp) = at("makepad") {
-                let pin = crate::lease::Pin::at(&mp);
-                *BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()) = Some(match at(crate::state::PAIRED) { Some(c) => pin.with(crate::state::PAIRED, &c), None => pin });
+            if let Some(pin) = deployed_after(git::fleet_pin(&self.conf.checkout), &moves) {
+                *BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()) = Some(pin);
             }
         }
         let t0 = Instant::now();
         let mut plan: Vec<(&str, Store, Option<String>, String)> = Vec::new();
-        for repo in ["makepad", "commercial"] {
-            let Some(to) = o.get(repo) else { continue };
+        for (repo, to) in &moves {
+            let (repo, to) = (repo.as_str(), to.as_str());
             if !git::valid_sha(to) {
                 return self.refuse(out, format!("sync: apply refused: {repo}={to} is not a commit id"));
             }
@@ -253,7 +275,16 @@ impl Sync {
             plan.push((repo, store, from, to.to_string()));
         }
         if plan.is_empty() {
-            return out.push(err_line("apply names no commit (makepad=<sha> commercial=<sha>)"));
+            return out.push(err_line("apply names no commit (makepad=<sha> <nested repository>=<sha>..)"));
+        }
+        // edits in a checkout that its move would overwrite are someone's work: they stay, and no
+        // repository of the deployment moves until they are gone (no move half done, no reset)
+        for (repo, store, from, to) in &plan {
+            let Some(from) = from.as_deref().filter(|f| f != to) else { continue };
+            let dir = self.conf.repo_dir(repo).unwrap();
+            if let Err(e) = store.check_move(&dir, from, to) {
+                return self.refuse(out, format!("sync: apply waits: {} holds edits its move to {repo} {} would overwrite, kept: {e}", dir.display(), short(to)));
+            }
         }
         let session = o.get("session").unwrap_or("").to_string();
         // the JITs that run from this checkout, and where their patch records start
@@ -292,11 +323,11 @@ impl Sync {
             ticker = Some((pid, t));
         }
 
-        // what this sync brings, for the toasts of the apps it reaches (commercial first: the
-        // apps' own changes)
+        // what this sync brings, for the toasts of the apps it reaches (the nested repositories
+        // first: the apps' own changes)
         let mut news = News { subjects: Vec::new(), landed_ms: o.get("landed").and_then(|t| t.parse().ok()) };
-        for repo in ["commercial", "makepad"] {
-            if let Some((_, store, Some(from), to)) = plan.iter().find(|p| p.0 == repo) {
+        for (_, store, from, to) in plan.iter().filter(|p| p.0 != "makepad").chain(plan.iter().filter(|p| p.0 == "makepad")) {
+            if let Some(from) = from {
                 news.subjects.extend(store.subjects(from, to, 200));
             }
         }
@@ -304,7 +335,7 @@ impl Sync {
         // a running pre-warm is for the commits the deployment leaves now
         super::prewarm::cancel("a newer sync");
         let mut moved_lines = Vec::new();
-        let mut revs: (Option<String>, Option<String>) = (None, None);
+        let mut revs: Vec<(String, String)> = Vec::new();
         for (repo, store, from, to) in &plan {
             let dir = self.conf.repo_dir(repo).unwrap();
             let r = store.move_checkout(&dir, from.as_deref(), to).and_then(|m| store.set_ref(SYNCED_REF, to).map(|_| m));
@@ -317,11 +348,7 @@ impl Sync {
                 }
                 Err(e) => return self.refuse(out, format!("sync: {repo} checkout refused: {e}")),
             }
-            if *repo == "makepad" {
-                revs.0 = Some(to.clone());
-            } else {
-                revs.1 = Some(to.clone());
-            }
+            revs.push((repo.to_string(), to.clone()));
         }
         let work = crate::lease::caps::LeaseConf::load().work;
         for (repo, _, _, to) in &plan {
@@ -330,15 +357,12 @@ impl Sync {
                 Err(e) => return self.refuse(out, e),
             }
         }
-        let mp = revs.0.clone().or_else(|| git::fleet_revision(&self.conf.checkout, "makepad"));
-        let cm = revs.1.clone().or_else(|| git::fleet_revision(&self.conf.checkout, "commercial"));
-        if let Some(mp) = &mp {
-            git::write_fleet_revision(&self.conf.checkout, mp, cm.as_deref());
+        let deployed = deployed_after(git::fleet_pin(&self.conf.checkout), &revs);
+        if let Some(pin) = &deployed {
+            git::write_fleet_revision(&self.conf.checkout, pin);
             let conf = crate::lease::caps::LeaseConf::load();
             if conf.slots(0).iter().any(|(k, n)| k.writes() && *n > 0) {
-                let pin = crate::lease::Pin::at(mp);
-                let pin = match &cm { Some(c) => pin.with(crate::state::PAIRED, c), None => pin };
-                match crate::lease::tree::sync(&conf.work, &pin) {
+                match crate::lease::tree::sync(&conf.work, pin) {
                     Ok(Some(t)) => {
                         for b in t.cleared.bundles {
                             self.event(Sev::Warn, format!("sync: work tree edits recovered to {}", b.display()), String::new());
@@ -433,10 +457,11 @@ impl Sync {
                 }
             }
         }
+        // each repository it moved, by name (makepad always: null when it did not move)
+        let moved: String = revs.iter().filter(|(r, _)| r != "makepad").map(|(r, sha)| format!(",{}:{}", json_str(r), json_str(sha))).collect();
         let summary = format!(
-            "{{\"applied\":{{\"makepad\":{},\"commercial\":{},\"session\":{},\"wm_replaced\":{wm_replaced},\"stale_jits\":{},\"ms\":{}}}}}",
-            revs.0.as_deref().map_or("null".into(), json_str),
-            revs.1.as_deref().map_or("null".into(), json_str),
+            "{{\"applied\":{{\"makepad\":{}{moved},\"session\":{},\"wm_replaced\":{wm_replaced},\"stale_jits\":{},\"ms\":{}}}}}",
+            revs.iter().find(|(r, _)| r == "makepad").map_or("null".into(), |(_, sha)| json_str(sha)),
             json_str(&session),
             stale.len(),
             t0.elapsed().as_millis()
@@ -457,7 +482,7 @@ impl Sync {
             } else {
                 None
             };
-            let at = format!("{}/{}", mp.as_deref().map_or("-", short), cm.as_deref().map_or("-", short));
+            let at = deployed.as_ref().map_or("-".to_string(), crate::lease::Pin::short);
             match why_not {
                 None => super::prewarm::start(self.conf.checkout.clone(), at, self.ctx.publish.clone(), self.ctx.machine.clone()),
                 Some(w) => (self.ctx.publish)(hub_record(&self.ctx.machine, "", 0, "prewarm", Sev::Info, format!("prewarm: skipped at {at}: {w}"), String::new())),
@@ -469,7 +494,8 @@ impl Sync {
     /// (a coordinated patch also reads the session tick the edit landed at). With `news` (an
     /// ordinary sync), an edit that needs a restart is followed on to its end (the restarted run
     /// on screen, the app postponing it, makepad rebuilding itself first), and each app's outcome
-    /// is shown to the person as a toast in the WM ([`toast`]).
+    /// is logged; one the person has to act on shows as a toast in the WM on a box a person uses
+    /// ([`toast`]).
     fn follow_patches(&self, watched: Vec<(jits::Jit, PathBuf, u64)>, ticker: Option<(u32, jits::Ticker)>, session: &str, news: Option<&News>) -> Vec<String> {
         struct Follow {
             jit: jits::Jit,
@@ -486,10 +512,16 @@ impl Sync {
         let mut pending: Vec<Follow> = watched.into_iter().map(|(jit, log, at)| Follow { jit, log, at, restarting: None, settling: None }).collect();
         let shown = |j: &jits::Jit, outcome: Outcome| {
             let Some(news) = news else { return };
-            match toast::post(&j.app, j.pid, news, &outcome) {
-                Ok((text, after)) => {
+            let person = crate::lease::exec::person_box(toast::PERSON_MS);
+            match toast::post(&j.app, j.pid, news, &outcome, person) {
+                Ok((said, after)) => {
                     let timing = after.map_or(String::new(), |ms| format!(" {:.1} s after the landing", ms as f64 / 1000.0));
-                    self.jit_event(Sev::Info, &j.app, j.pid, format!("sync: shown{timing}: {text}"), String::new());
+                    let line = match said {
+                        Some(text) => format!("sync: shown{timing}: {text}"),
+                        None if outcome.asks_a_person() => format!("sync: {outcome:?}{timing}; no toast: nobody uses this box"),
+                        None => format!("sync: {outcome:?}{timing}"),
+                    };
+                    self.jit_event(Sev::Info, &j.app, j.pid, line, String::new());
                 }
                 Err(e) => self.jit_event(Sev::Warn, &j.app, j.pid, format!("sync: no toast for {}#{}: {e}", j.app, j.pid), String::new()),
             }
@@ -511,7 +543,7 @@ impl Sync {
                         ("restart", false) => None,
                         ("refuse" | "incomplete", false) => Some(Outcome::NotApplied(e.reasons.clone())),
                         ("rebuild_started", _) => {
-                            // makepad rebuilds itself first (minutes): the toast says so now
+                            // makepad rebuilds itself first (minutes): said now; the app restarts into it by itself
                             shown(j, Outcome::Rebuilding);
                             f.restarting = Some(Instant::now() + Duration::from_secs(900));
                             continue;
@@ -606,9 +638,9 @@ impl Sync {
 
     /// Restarts the WM when nothing is lost by it, else as soon as nothing is: a WM restart ends
     /// every app window on the node, so it waits while an app has unsaved work
-    /// (`makepad_app_registry::machine::unsaved_work`, what apps publish) and while a gate lease
-    /// runs here (a landing's gate must not see its node go away). The wait is reported once; one
-    /// waiter per node, which restarts the moment the node is clear.
+    /// (`makepad_app_registry::machine::unsaved_work`, what apps publish) and while a lease shows
+    /// on the WM ([`crate::lease::exec::on_the_wm`]; a headless one runs on through it). The wait
+    /// is reported once; one waiter per node, which restarts the moment the node is clear.
     fn wm_restart(self: &Arc<Self>, why: &str) -> Result<String, String> {
         if restart_blockers().is_empty() {
             match self.restart_wm_now(why) {
@@ -828,7 +860,7 @@ enum NotRestarted {
     Failed(String),
 }
 
-/// What a WM restart would cost now: the leases using the WM or landing ([`crate::lease::exec::on_the_wm`]), a user at the node,
+/// What a WM restart would cost now: the leases using the WM ([`crate::lease::exec::on_the_wm`]), a user at the node,
 /// the unsaved work of its apps ([`crate::lease::exec::user_blockers`]), a viewer watching and any
 /// user app running. Empty: it may restart.
 fn restart_blockers() -> Vec<String> {
@@ -976,15 +1008,34 @@ fn push_factory(sync: Arc<Sync>) -> Factory {
 mod tests {
     use super::*;
 
+    /// An apply moves each repository its order names, makepad first, and the deployment's
+    /// FLEET-REVISION.txt keeps every repository it holds, moved or not.
+    #[test]
+    fn an_apply_moves_each_repository_its_order_names() {
+        let (a, b, c, e) = ("a".repeat(40), "b".repeat(40), "c".repeat(40), "e".repeat(40));
+        let o = Order { words: format!("apply repo-b={e} makepad={a} commercial={c} build=on restart=auto session=s1 landed=17 prewarm=on").split(' ').map(str::to_string).collect(), signer: String::new() };
+        assert_eq!(order_repos(&o), [("makepad".to_string(), a.clone()), ("repo-b".to_string(), e.clone()), ("commercial".to_string(), c.clone())]);
+        let was = crate::lease::Pin::at(&b).with("commercial", &b);
+        assert_eq!(deployed_after(Some(was.clone()), &[("repo-b".into(), e.clone())]), Some(was.clone().with("repo-b", &e)), "what did not move stays");
+        assert_eq!(deployed_after(None, &[("commercial".into(), c.clone())]), None, "no makepad commit: no deployment pin");
+        let dir = std::env::temp_dir().join(format!("devhub-fleet-pin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pin = crate::lease::Pin::at(&a).with("commercial", &c).with("repo-b", &e);
+        git::write_fleet_revision(&dir, &pin);
+        assert_eq!(git::fleet_pin(&dir), Some(pin));
+        assert_eq!(git::fleet_revision(&dir, "repo-b"), Some(e));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A waiting WM restart drains its box only when leases alone hold it and its WM speaks another
     /// wire: a person at it, unsaved work, a viewer, an app no lease runs, or a WM that still hosts
     /// every app keep the box at work while it waits.
     #[test]
     fn a_wm_restart_drains_only_for_leases() {
-        let leases = vec!["test lease L7 of landq-tests (a landing)".to_string()];
+        let leases = vec!["screen lease L7 of lane-s (its windows)".to_string()];
         let leased = vec![("makepad-sqlite".to_string(), 41, true)];
-        assert_eq!(super::drain_said(&[], &leases, &leased, true), "test lease L7 of landq-tests (a landing); makepad-sqlite (pid 41) of a lease");
-        assert_eq!(super::drain_said(&[], &leases, &[], true), "test lease L7 of landq-tests (a landing)");
+        assert_eq!(super::drain_said(&[], &leases, &leased, true), "screen lease L7 of lane-s (its windows); makepad-sqlite (pid 41) of a lease");
+        assert_eq!(super::drain_said(&[], &leases, &[], true), "screen lease L7 of lane-s (its windows)");
         assert_eq!(super::drain_said(&[], &leases, &leased, false), "", "a WM on the build's wire hosts every app: no drain");
         assert_eq!(super::drain_said(&["a user is at the node".into()], &leases, &leased, true), "", "a person: no drain");
         let mine = vec![("makepad-fab".to_string(), 42, false), leased[0].clone()];

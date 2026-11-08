@@ -129,9 +129,9 @@ fn restart_role_master() {
     ci::start(&ctx);
     if std::env::var_os("DEVHUB_RESTART_SUBMIT").is_some() {
         let run = ci::ci(ctx.repo.clone());
-        let pair = snapshot(&ctx.repo).unwrap();
+        let pin = super::snapshot_pin(&ctx.repo).unwrap();
         let log = base.join("ci.log");
-        let _ = std::thread::spawn(move || run(None, &pair, &log));
+        let _ = std::thread::spawn(move || run(None, &pin, &log));
     }
     jitlegs::start(ctx.clone());
     allapps::start(ctx.clone());

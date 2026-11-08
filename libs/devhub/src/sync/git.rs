@@ -289,6 +289,28 @@ impl Store {
             self.set_ref(CHECKOUT_REF, to)?;
             return Ok(Moved { files: Vec::new() });
         };
+        self.at_from(work, from)?;
+        if from != to {
+            g(&["read-tree", "-m", "-u", from, to])?;
+            g(&["update-ref", "--no-deref", "HEAD", to])?;
+        }
+        let files = if from == to { Vec::new() } else { self.git(&["diff", "--name-only", "--no-renames", from, to])?.lines().map(str::to_string).collect() };
+        self.set_ref(CHECKOUT_REF, to)?;
+        Ok(Moved { files })
+    }
+
+    /// Whether [`Self::move_checkout`] from `from` to `to` would go through: Err names the edits
+    /// or untracked files the move would overwrite, which stay. Nothing in the tree changes.
+    pub fn check_move(&self, work: &Path, from: &str, to: &str) -> Result<(), String> {
+        self.at_from(work, from)?;
+        run(Some(work), None, &[], &["read-tree", "-m", "-u", "-n", from, to]).map(|_| ())
+    }
+
+    /// The checkout `work` linked to this store with its HEAD and index at `from`, what its files
+    /// hold, their stat data current: a file another process rewrote with the same content is no
+    /// edit, and a move refuses only real edits it would change.
+    fn at_from(&self, work: &Path, from: &str) -> Result<(), String> {
+        let g = |args: &[&str]| run(Some(work), None, &[], args);
         self.link(work, from)?;
         let head = g(&["rev-parse", "-q", "--verify", "HEAD"]).map(|s| s.trim().to_string()).unwrap_or_default();
         if head != from {
@@ -296,16 +318,9 @@ impl Store {
             g(&["update-ref", "--no-deref", "HEAD", from])?;
             self.read_index(work, from)?;
         }
-        if from != to {
-            // stat data current (a file another process rewrote with the same content is not an
-            // edit); exit 1 names real edits, which read-tree then refuses if the move changes them
-            let _ = g(&["update-index", "-q", "--refresh"]);
-            g(&["read-tree", "-m", "-u", from, to])?;
-            g(&["update-ref", "--no-deref", "HEAD", to])?;
-        }
-        let files = if from == to { Vec::new() } else { self.git(&["diff", "--name-only", "--no-renames", from, to])?.lines().map(str::to_string).collect() };
-        self.set_ref(CHECKOUT_REF, to)?;
-        Ok(Moved { files })
+        // (exit 1 names the edits: read-tree refuses those the move changes)
+        let _ = g(&["update-index", "-q", "--refresh"]);
+        Ok(())
     }
 
     /// Changes to tracked files in the tree. Untracked files do not count here: [`Store::clean_tree`]
@@ -362,10 +377,24 @@ pub fn fleet_revision(checkout: &Path, repo: &str) -> Option<String> {
     text.lines().find_map(|l| l.strip_prefix(&format!("{repo} ")).map(|s| s.trim().to_string())).filter(|s| valid_sha(s))
 }
 
-pub fn write_fleet_revision(checkout: &Path, makepad: &str, commercial: Option<&str>) {
-    let mut text = format!("makepad {makepad}\n");
-    if let Some(c) = commercial {
-        text.push_str(&format!("commercial {c}\n"));
+/// Every repository FLEET-REVISION.txt names (makepad's, and each nested one's): None without
+/// makepad's.
+pub fn fleet_pin(checkout: &Path) -> Option<crate::lease::Pin> {
+    let text = std::fs::read_to_string(checkout.join("FLEET-REVISION.txt")).ok()?;
+    let mut pin = crate::lease::Pin::at(&fleet_revision(checkout, "makepad")?);
+    for (name, sha) in text.lines().filter_map(|l| l.split_once(' ')) {
+        if crate::nested::valid(name) && valid_sha(sha.trim()) {
+            pin.nested.insert(name.to_string(), sha.trim().to_string());
+        }
+    }
+    Some(pin)
+}
+
+/// The deployment's commits, a `<repo> <sha>` line each, makepad first.
+pub fn write_fleet_revision(checkout: &Path, pin: &crate::lease::Pin) {
+    let mut text = String::new();
+    for (name, sha, _) in pin.repos() {
+        text.push_str(&format!("{name} {sha}\n"));
     }
     text.push_str(&format!("synced {} (devhub sync)\n", crate::proto::wall_ms() / 1000));
     let tmp = checkout.join("FLEET-REVISION.txt.new");
@@ -452,7 +481,7 @@ mod tests {
         std::fs::write(work.join("a.txt"), "a1").unwrap();
         std::fs::write(work.join("b.txt"), "b1").unwrap();
         std::fs::write(work.join("target/x.rlib"), "bin").unwrap();
-        write_fleet_revision(&work, &one, None);
+        write_fleet_revision(&work, &crate::lease::Pin::at(&one));
         let b_time = mtime(&work.join("b.txt"));
         std::thread::sleep(std::time::Duration::from_millis(20));
         let m = store.move_checkout(&work, Some(&one), &two).unwrap();
@@ -485,14 +514,23 @@ mod tests {
         sh(&src, &["fetch", "-q", &b.to_string_lossy(), "HEAD:refs/heads/recovered"]);
         assert_eq!(sh(&src, &["show", "recovered:b.txt"]), "lane edit");
 
-        // a local edit in a file the move changes: refused, nothing moves
+        // a local edit in a file the move changes: refused, nothing moves (said before any move:
+        // a deployment's other repositories wait with it); an edit the move leaves alone stays
         std::fs::write(work.join("b.txt"), "local edit").unwrap();
+        assert!(store.check_move(&work, &lane, &two).unwrap_err().contains("b.txt"));
+        assert_eq!(std::fs::read_to_string(work.join("b.txt")).unwrap(), "local edit");
         assert!(store.move_checkout(&work, Some(&lane), &two).is_err());
         assert_eq!(std::fs::read_to_string(work.join("b.txt")).unwrap(), "local edit");
         assert_eq!(store.rev(CHECKOUT_REF).as_deref(), Some(lane.as_str()));
         std::fs::write(work.join("b.txt"), "b-lane").unwrap();
+        store.check_move(&work, &lane, &two).unwrap();
         store.move_checkout(&work, Some(&lane), &two).unwrap();
         assert_eq!(std::fs::read_to_string(work.join("b.txt")).unwrap(), "b1");
+        std::fs::write(work.join("b.txt"), "kept").unwrap();
+        store.check_move(&work, &two, &one).unwrap();
+        store.move_checkout(&work, Some(&two), &one).unwrap();
+        assert_eq!((std::fs::read_to_string(work.join("a.txt")).unwrap(), std::fs::read_to_string(work.join("b.txt")).unwrap()), ("a1".to_string(), "kept".to_string()));
+        std::fs::write(work.join("b.txt"), "b1").unwrap();
 
         // a fresh tree in an empty dir; a clone of its own is never taken
         let fresh = base.join("fresh");

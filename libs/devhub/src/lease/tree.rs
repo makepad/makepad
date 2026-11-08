@@ -28,9 +28,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-/// Who holds the tree now: lease id -> its pin; and which of them share it ([`take_native`]).
+/// Who holds the tree now: lease id -> its pin; which of them share it ([`take_native`]); and the
+/// nested repositories a take left as someone left them ([`prepare`]): the release leaves them too.
 #[derive(Default)]
-pub struct Holders(BTreeMap<String, Pin>, std::collections::BTreeSet<String>);
+pub struct Holders(BTreeMap<String, Pin>, std::collections::BTreeSet<String>, std::collections::BTreeSet<String>);
 
 static TREE: Mutex<BTreeMap<PathBuf, Holders>> = Mutex::new(BTreeMap::new());
 
@@ -57,6 +58,12 @@ impl Holders {
         self.0.insert(id.to_string(), pin.clone());
         if shares { self.1.insert(id.to_string()); }
     }
+
+    /// A take asked for `asked` and holds the tree at `at`: the nested repositories `at` names
+    /// and `asked` does not stayed as someone left them.
+    fn left(&mut self, asked: &Pin, at: &Pin) {
+        self.2.extend(at.nested.keys().filter(|n| !asked.nested.contains_key(*n)).cloned());
+    }
 }
 
 /// The shared work tree for CI, gates and user boxes.
@@ -79,7 +86,7 @@ pub fn natives(work: &Path) -> Vec<(String, u64)> {
     lanes
 }
 
-fn touch_native(root: &Path) {
+pub(super) fn touch_native(root: &Path) {
     if root.parent().and_then(Path::file_name).is_some_and(|n| n == "native") {
         if let Some(lane) = root.file_name() {
             if let Err(e) = std::fs::write(root.with_file_name(format!(".last-{}", lane.to_string_lossy())), "") { eprintln!("devhub: native tree last use: {e}"); }
@@ -110,15 +117,20 @@ pub fn shared(root: &Path) -> Option<Pin> {
     synced(root, SYNCED_REF)
 }
 
-/// The commits the sync left at store ref `r`: makepad's, and the paired nested repository's
-/// when it has one (the repositories a sync deploys).
+/// The commits the sync left at store ref `r`: makepad's, the paired nested repository's when it
+/// has one, and each other nested checkout's at `root` that a store of this node holds (the
+/// repositories a sync deploys, [`crate::sync::followed`]).
 fn synced(root: &Path, r: &str) -> Option<Pin> {
     let at = |repo: &str| Store::open(repo).ok().and_then(|s| s.rev(r)).or_else(|| fleet_revision(root, repo));
-    let pin = Pin::at(&at("makepad")?);
-    Some(match at(crate::state::PAIRED) {
-        Some(sha) => pin.with(crate::state::PAIRED, &sha),
-        None => pin,
-    })
+    let mut pin = Pin::at(&at("makepad")?);
+    let stores = crate::sync::git::store_names();
+    let others = crate::nested::names(root).into_iter().filter(|n| n != crate::state::PAIRED && stores.contains(n));
+    for name in std::iter::once(crate::state::PAIRED.to_string()).chain(others) {
+        if let Some(sha) = at(&name) {
+            pin.nested.insert(name, sha);
+        }
+    }
+    Some(pin)
 }
 
 /// Repository `repo`'s side of the tree at `root`: makepad's is the root, a nested one's
@@ -156,14 +168,23 @@ pub fn current(root: &Path) -> Option<Pin> {
 }
 
 fn prepare(id: &str, pin: &Pin, root: &Path, out: &Path, native: bool) -> Result<Taken, String> {
-    let mut taken = Taken { root: root.to_path_buf(), moved: Vec::new(), cleared: Released::default() };
-    // A native pin must not inherit a previous pin's workspace of a nested repository it does not
-    // name. Recover its edits and remove the nested worktree before scrubbing the containing tree.
-    for name in crate::nested::names(root).into_iter().filter(|n| native && !pin.nested.contains_key(n)) {
+    let mut taken = Taken { root: root.to_path_buf(), pin: pin.clone(), moved: Vec::new(), cleared: Released::default() };
+    // A pin must not inherit a previous pin's checkout of a nested repository it does not name: a
+    // clean one (this node's own worktree, at its commit, no other file in it) goes. One holding
+    // anything else (edits, untracked or ignored files) is work someone left: it stays as it is,
+    // said, and the lease's pin names it at its commit.
+    for name in crate::nested::names(root).into_iter().filter(|n| !pin.nested.contains_key(n)) {
         let dir = side(root, &name);
         let store = Store::open(&name)?;
         if store.admin_of(&dir).is_none() { return Err(format!("{} is not this node's worktree", dir.display())); }
-        scrub(&name, root, head(&dir).as_deref(), id, out, &format!("{id}-start"), &mut taken.cleared)?;
+        let held = held_paths(&dir)?;
+        if !held.is_empty() {
+            let shown: Vec<&str> = held.iter().take(8).map(String::as_str).collect();
+            taken.cleared.kept.push(format!("{} stays, though the lease's pin does not name it: it holds {} uncommitted or untracked path(s): {}{}", prefix(&name), held.len(), shown.join(" "), if held.len() > shown.len() { " .." } else { "" }));
+            if let Some(sha) = head(&dir) { taken.pin.nested.insert(name, sha); }
+            continue;
+        }
+        // (--force for its build output, or a clean submodule's checkout: anything else held it above)
         run(None, Some(&store.git_dir), &[], &["worktree", "remove", "--force", &dir.to_string_lossy()])?;
         taken.cleared.removed.push(prefix(&name));
     }
@@ -207,10 +228,22 @@ fn prepare(id: &str, pin: &Pin, root: &Path, out: &Path, native: bool) -> Result
     Ok(taken)
 }
 
+/// Every path of the checkout at `dir` that is not its commit's as committed: edited (a
+/// submodule's edits too), untracked or ignored. What is untracked or ignored in its own `target/`
+/// is build output, no one's work; a tracked file there, or a `target` dir further down, may be
+/// someone's.
+fn held_paths(dir: &Path) -> Result<Vec<String>, String> {
+    let out = run(Some(dir), None, &[("LC_ALL", Path::new("C"))], &["-c", "core.quotePath=false", "status", "--porcelain", "--ignored", "--untracked-files=all", "--ignore-submodules=none"])?;
+    Ok(out.lines().filter(|l| !(l.starts_with("!! target/") || l.starts_with("?? target/"))).map(|l| l.get(3..).unwrap_or(l).to_string()).collect())
+}
+
 /// What a lease start did to the tree.
 #[derive(Debug)]
 pub struct Taken {
     pub root: PathBuf,
+    /// the pin the tree is at for the lease: the one it asked for, and a nested repository it does
+    /// not name that stayed ([`Released::kept`])
+    pub pin: Pin,
     /// files written per repo (0: it was there already)
     pub moved: Vec<(String, usize)>,
     /// what stood in the way and was cleared first
@@ -224,7 +257,9 @@ pub fn take(id: &str, pin: &Pin, root: &Path, out: &Path) -> Result<Taken, Strin
         return Err(why);
     }
     let t = prepare(id, pin, root, out, false)?;
-    h.entry(root.to_path_buf()).or_default().0.insert(id.to_string(), pin.clone());
+    let holds = h.entry(root.to_path_buf()).or_default();
+    holds.0.insert(id.to_string(), t.pin.clone());
+    holds.left(pin, &t.pin);
     Ok(t)
 }
 
@@ -243,7 +278,7 @@ pub fn take_native(id: &str, pin: &Pin, work: &Path, lane: &str, limit: usize, f
         held.insert(id, pin, true);
         touch_native(&root);
         let moved = pin.repos().into_iter().map(|(repo, _, _)| (repo.to_string(), 0)).collect();
-        return Ok(Taken { root, moved, cleared: Released::default() });
+        return Ok(Taken { root, pin: pin.clone(), moved, cleared: Released::default() });
     }
     if let Some(why) = h.get(&root).and_then(|h| h.conflict(id)) { return Err(why); }
     let mut cleared = Released::default();
@@ -267,14 +302,16 @@ pub fn take_native(id: &str, pin: &Pin, work: &Path, lane: &str, limit: usize, f
     t.cleared.bundles.extend(cleared.bundles);
     t.cleared.removed.extend(cleared.removed);
     if super::caps::disk_space(work).map_or(0, |(free, _)| free) < floor { return Err("native trees busy: disk below its floor after checkout".into()); }
-    h.entry(root.clone()).or_default().insert(id, pin, shares);
+    let holds = h.entry(root.clone()).or_default();
+    holds.insert(id, &t.pin, shares);
+    holds.left(pin, &t.pin);
     touch_native(&root);
     Ok(t)
 }
 
 fn remove_native_idle(work: &Path, lane: &str) -> Result<Released, String> {
     let root = native_root(work, lane);
-    let r = scrub_tree(&root, "reclaim", &work.join("recovered"), &format!("{lane}-reclaim-{}", crate::proto::wall_ms()));
+    let r = scrub_tree(&root, "reclaim", &work.join("recovered"), &format!("{lane}-reclaim-{}", crate::proto::wall_ms()), &Default::default());
     if !r.unclean.is_empty() { return Err(r.unclean.join("; ")); }
     let mut stores = Vec::new();
     for repo in repos_in(&root) {
@@ -360,12 +397,13 @@ pub fn scrub_if_idle(root: &Path, out: &Path) -> Released {
     let tag = if root.parent().and_then(Path::file_name).is_some_and(|n| n == "native") {
         format!("startup-{}-{}", root.file_name().unwrap().to_string_lossy(), crate::proto::wall_ms())
     } else { "startup".into() };
-    scrub_tree(root, "startup", out, &tag)
+    scrub_tree(root, "startup", out, &tag, &Default::default())
 }
 
-fn scrub_tree(root: &Path, id: &str, out: &Path, tag: &str) -> Released {
+/// Scrubs every repository of the tree but those `left` names (kept as someone left them).
+fn scrub_tree(root: &Path, id: &str, out: &Path, tag: &str, left: &std::collections::BTreeSet<String>) -> Released {
     let mut r = Released::default();
-    for repo in repos_in(root) {
+    for repo in repos_in(root).into_iter().filter(|r| !left.contains(r)) {
         if let Err(e) = scrub(&repo, root, head(&side(root, &repo)).as_deref(), id, out, tag, &mut r) {
             r.unclean.push(format!("{repo}: {e}"));
         }
@@ -444,6 +482,8 @@ pub struct Released {
     pub bundles: Vec<PathBuf>,
     pub removed: Vec<String>,
     pub unclean: Vec<String>,
+    /// what stayed in the tree because it holds someone's files, and why
+    pub kept: Vec<String>,
 }
 
 /// The last holder bundles tracked edits and removes untracked files; the pin and target stay.
@@ -454,7 +494,7 @@ pub fn release(id: &str, root: &Path, out: &Path, tag: &str) -> Released {
     if holders.0.remove(id).is_none() || !holders.0.is_empty() {
         return Released::default();
     }
-    let r = scrub_tree(root, id, out, tag);
+    let r = scrub_tree(root, id, out, tag, &holders.2);
     h.remove(root);
     touch_native(root);
     r
@@ -653,6 +693,90 @@ mod tests {
         assert_eq!(current(&root), Some(at(&two)), "an idle work tree catches up after apply");
         assert!(target.join("release/makepad").exists());
         assert!(!work.join("tree").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The shared tree holds a nested repository only at a pin that names it: a lease whose pin
+    /// does not gets the tree without it, never at the commit an earlier lease left there. Only
+    /// this node's own clean worktree goes: one holding edits or untracked files stays (said, and
+    /// the lease's pin names it), and a checkout that is not this node's is never touched.
+    #[test]
+    fn a_shared_tree_drops_a_nested_repository_its_pin_does_not_name() {
+        let _env = crate::sync::git::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("devhub-tree-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (work, stores) = (base.join("work"), base.join("stores"));
+        let (root, out) = (super::root(&work), work.join("recovered"));
+        std::env::set_var("MAKEPAD_DEVHUB_GIT", &stores);
+        let git = |dir: &Path, args: &[&str]| run(Some(dir), None, &[], &[&["-c", "user.name=t", "-c", "user.email=t@t"], args].concat()).unwrap();
+        let commit = |dir: &Path, files: &[(&str, &str)]| {
+            std::fs::create_dir_all(dir).unwrap();
+            git(dir, &["init", "-q", "-b", "main"]);
+            for (f, text) in files {
+                std::fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+                std::fs::write(dir.join(f), text).unwrap();
+            }
+            git(dir, &["add", "."]);
+            git(dir, &["commit", "-q", "-m", "one"]);
+            git(dir, &["rev-parse", "HEAD"]).trim().to_string()
+        };
+        let stored = |name: &str, dir: &Path| {
+            let bundle = base.join(format!("{name}.bundle"));
+            git(dir, &["bundle", "create", "-q", &bundle.to_string_lossy(), "refs/heads/main"]);
+            Store::open(name).unwrap().fetch_bundle(&bundle, "main").unwrap();
+        };
+        let mk = commit(&base.join("src"), &[(".gitignore", "/apps/side-app/\n/apps/user-app/\n"), ("a.rs", "1")]);
+        stored("makepad", &base.join("src"));
+        // (a tracked file in a `target` dir of its own, and a submodule)
+        let sub = commit(&base.join("sub"), &[("s.rs", "s")]);
+        commit(&base.join("side"), &[("lib.rs", "side"), ("src/target/x", "x")]);
+        git(&base.join("side"), &["update-index", "--add", "--cacheinfo", &format!("160000,{sub},sub")]);
+        git(&base.join("side"), &["commit", "-q", "-m", "two"]);
+        let side = git(&base.join("side"), &["rev-parse", "HEAD"]).trim().to_string();
+        stored("side-app", &base.join("side"));
+        let (with, without) = (Pin::at(&mk).with("side-app", &side), Pin::at(&mk));
+        let lib = root.join("apps/side-app/lib.rs");
+
+        let t = take("N1", &with, &root, &out).unwrap();
+        assert_eq!(t.moved, vec![("makepad".to_string(), 2), ("side-app".to_string(), 3)]);
+        assert_eq!((current(&root), std::fs::read_to_string(&lib).unwrap()), (Some(with.clone()), "side".to_string()));
+        std::fs::write(&lib, "edited by N1").unwrap();
+        release("N1", &root, &out, "x-N1");
+
+        // its clean worktree goes, its build output too: that is no one's work
+        std::fs::create_dir_all(root.join("apps/side-app/target/debug")).unwrap();
+        std::fs::write(root.join("apps/side-app/target/debug/side"), "built").unwrap();
+        let t = take("N2", &without, &root, &out).unwrap();
+        assert_eq!((t.cleared.removed.clone(), t.cleared.kept.clone(), t.pin.clone()), (vec!["apps/side-app/".to_string()], Vec::<String>::new(), without.clone()), "{t:?}");
+        assert_eq!((current(&root), root.join("apps/side-app").exists()), (Some(without.clone()), false));
+        release("N2", &root, &out, "x-N2");
+        let t = take("N3", &with, &root, &out).unwrap();
+        assert_eq!(t.moved, vec![("makepad".to_string(), 0), ("side-app".to_string(), 3)], "back at its pin");
+        assert_eq!(std::fs::read_to_string(&lib).unwrap(), "side");
+        release("N3", &root, &out, "x-N3");
+
+        // left with an untracked file, or an edit (in a `target` dir below its root, in its
+        // submodule), it stays as it is: said, and in the lease's pin
+        git(&base, &["clone", "-q", &base.join("sub").to_string_lossy(), &root.join("apps/side-app/sub").to_string_lossy()]);
+        for (file, text, said) in [("notes.txt", "someone's", "notes.txt"), ("lib.rs", "someone's edit", "lib.rs"), ("src/target/x", "someone's edit", "src/target/x"), ("sub/s.rs", "someone's edit", "sub")] {
+            let left = root.join("apps/side-app").join(file);
+            std::fs::write(&left, text).unwrap();
+            let t = take("N4", &without, &root, &out).unwrap();
+            assert!(t.cleared.removed.is_empty() && t.cleared.kept.len() == 1 && t.cleared.kept[0].contains("apps/side-app/ stays") && t.cleared.kept[0].ends_with(&format!(": {said}")), "{t:?}");
+            assert_eq!((t.pin.clone(), std::fs::read_to_string(&left).unwrap()), (with.clone(), text.to_string()));
+            assert!(lock().get(&root).is_some_and(|h| h.0.get("N4") == Some(&with)), "held at the pin it is at");
+            release("N4", &root, &out, "x-N4");
+            assert_eq!(std::fs::read_to_string(&left).ok().as_deref(), Some(text), "its release leaves it as someone left it too");
+            match file { "lib.rs" => std::fs::write(&left, "side").unwrap(), "src/target/x" => std::fs::write(&left, "x").unwrap(), "sub/s.rs" => std::fs::write(&left, "s").unwrap(), _ => std::fs::remove_file(&left).unwrap() }
+        }
+
+        // a checkout that is not this node's worktree (someone's clone) is refused, untouched
+        let user = root.join("apps/user-app");
+        commit(&user, &[("mine.rs", "mine")]);
+        std::fs::write(user.join("draft.txt"), "draft").unwrap();
+        let why = take("N5", &with, &root, &out).unwrap_err();
+        assert!(why.contains("is not this node's worktree"), "{why}");
+        assert_eq!((std::fs::read_to_string(user.join("mine.rs")).unwrap(), std::fs::read_to_string(user.join("draft.txt")).unwrap()), ("mine".to_string(), "draft".to_string()));
         let _ = std::fs::remove_dir_all(&base);
     }
 }

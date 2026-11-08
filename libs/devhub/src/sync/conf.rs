@@ -109,16 +109,11 @@ impl SyncConf {
         (self.build != Build::Off).then(|| self.prebuild.iter().find(|p| jit.contains(p)).cloned()).flatten()
     }
 
-    /// The nested commercial checkout.
-    pub fn commercial(&self) -> PathBuf {
-        self.checkout.join("apps").join("commercial")
-    }
-
     /// Where a repo's files live in the checkout.
     pub fn repo_dir(&self, repo: &str) -> Option<PathBuf> {
         match repo {
             "makepad" => Some(self.checkout.clone()),
-            "commercial" => Some(self.commercial()),
+            name if crate::nested::valid(name) => Some(self.checkout.join(crate::nested::dir(name))),
             _ => None,
         }
     }

@@ -227,14 +227,16 @@ pub fn activity(pid: u32, start: u64, unit: Option<&str>, usage: &Path, _hold: &
 }
 
 /// One process's [`super::Activity`]: `stat`'s utime, stime, cutime and cstime (in the fixed
-/// 100 Hz of `/proc`), and `io`'s rchar and wchar.
+/// 100 Hz of `/proc`), and `io`'s read_bytes and write_bytes: storage I/O, as a scope's `io.stat`
+/// counts it. A socket's or a pipe's traffic is none (rchar and wchar count it): a test polling its
+/// parked app's remote every 50 ms moved 10-20 KB/s within its own processes and read as work (11-07).
 #[cfg(target_os = "linux")]
 fn proc_activity(pid: u32) -> Option<super::Activity> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let f: Vec<&str> = stat[stat.rfind(')')? + 2..].split_whitespace().collect();
     // f[11..15] = fields 14-17
     let ticks: u64 = f.get(11..15)?.iter().filter_map(|t| t.parse::<u64>().ok()).sum();
-    let io = std::fs::read_to_string(format!("/proc/{pid}/io")).unwrap_or_default().lines().filter_map(|l| l.strip_prefix("rchar: ").or_else(|| l.strip_prefix("wchar: "))).filter_map(|n| n.trim().parse::<u64>().ok()).sum();
+    let io = std::fs::read_to_string(format!("/proc/{pid}/io")).unwrap_or_default().lines().filter_map(|l| l.strip_prefix("read_bytes: ").or_else(|| l.strip_prefix("write_bytes: "))).filter_map(|n| n.trim().parse::<u64>().ok()).sum();
     Some(super::Activity { cpu_us: ticks * 10_000, io_bytes: io })
 }
 
@@ -356,11 +358,48 @@ pub fn processes_view(pids: &[u32]) -> String {
     for &pid in pids.iter().filter(|p| !parents.contains(p)) {
         match stacks(pid) {
             Ok(frames) => out.push_str(&format!("stacks of {pid}:\n{frames}\n")),
+            // one gone meanwhile says nothing of the box: a poll loop's `sleep 0.1` ended under gdb
+            // and the hung stub after it went without its stacks (11-08)
+            Err(_) if !Path::new(&format!("/proc/{pid}")).exists() => {}
             // it is the box's answer, the same for the next one
             Err(why) => { out.push_str(&format!("stacks of {pid}: {why}\n")); break; }
         }
     }
     out
+}
+
+/// Where a stuck run of `pids` waits: the oldest of them that started none of the others (what the
+/// rest wait on), as the chain of commands that leads to it from the first of them, collapsed
+/// where a shell's subshell repeats it, with its pid and how long it has run, in s. A jitlegs
+/// leg's hung fixture stub slept under five shells, beside a poll loop's ever-new `sleep 0.1`
+/// (11-08). None: none of them lives.
+#[cfg(target_os = "linux")]
+pub fn stuck_in(pids: &[u32]) -> Option<(String, u32, u64)> {
+    // /proc's start times are in its fixed 100 Hz
+    let up_s: f64 = std::fs::read_to_string("/proc/uptime").ok()?.split_whitespace().next()?.parse().ok()?;
+    // pid -> (parent, start), of the live ones (a zombie does nothing)
+    let procs: std::collections::BTreeMap<u32, (u32, u64)> = pids.iter().filter_map(|&pid| {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let f: Vec<&str> = stat[stat.rfind(')')? + 2..].split_whitespace().collect();
+        if f.first() == Some(&"Z") { return None; }
+        Some((pid, (f.get(1)?.parse().ok()?, f.get(19)?.parse().ok()?)))
+    }).collect();
+    let (&leaf, &(_, start)) = procs.iter().filter(|(p, _)| !procs.values().any(|(parent, _)| parent == *p)).min_by_key(|(p, (_, start))| (*start, **p))?;
+    let mut chain: Vec<String> = Vec::new();
+    let mut at = Some(leaf);
+    for _ in 0..procs.len() {
+        let Some(p) = at else { break };
+        if let Some(label) = crate::top::label(p).filter(|l| chain.last() != Some(l)) { chain.push(label); }
+        at = procs.get(&p).map(|(parent, _)| *parent).filter(|parent| procs.contains_key(parent));
+    }
+    chain.reverse();
+    Some((chain.join(" > "), leaf, (up_s - start as f64 / 100.0).max(0.0) as u64))
+}
+
+/// (No process table read here.)
+#[cfg(not(target_os = "linux"))]
+pub fn stuck_in(_pids: &[u32]) -> Option<(String, u32, u64)> {
+    None
 }
 
 /// gdb's stacks of a process. Yama's default lets a process trace only its own descendants, so on

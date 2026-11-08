@@ -14,7 +14,12 @@ call $DH; a landing's CLI goes live when its rebuild finishes
   stream [--json] [--all]                 one line per event, live (--all: info lines too)
   ls [machine]                            machines and their JITs, each with what it is up to
   hot [--json]                            hot failures / hot loads, causes and apps (24h and all time)
-  inspect <machine>/<pid|app> <cmd...>    any inspect command on that JIT (master: every node)
+  inspect <machine>/<pid|app> [--read-only] <cmd...>
+                                          any inspect command on a JIT a devhub lease runs (master: every
+                                          node); `call <service>.<tool> {json}` and `tools` are its AI tools.
+                                          A JIT no lease started (a person's app, the node's WM or AI hub) is
+                                          refused, and --read-only reaches it with reads only (help status log
+                                          grab gseq why-hung stacks session panics events tools)
   top <node>                              CPU, GPU, RAM, disk and the busiest processes of a node
   log <node>/<pid|app> [n]                the tail of a JIT's log (its session log, or its launch log)
   reply <request-id> <status> <message>   answer an engine request (received working deployed declined note)
@@ -32,16 +37,25 @@ call $DH; a landing's CLI goes live when its rebuild finishes
   master start                            a master in a session of its own, at this shell's priority; its log
                                           is master.log in devhub's home. A niced shell is refused (zsh runs
                                           `&` jobs at +5; restarts keep a level and shown apps inherit it)
-  land [<branch|-> [<commercial worktree> <commercial branch>]]
-                                          hand in for landing (no args: this worktree's branch and its nested
-                                          commercial branch); merges onto the current tips in queue order;
-                                          timer buckets check the landed tips afterwards
+  master who                              the process that answers the control socket (pid=, since_ms=: its
+                                          start; an exec keeps the pid); exit 1 when none answers
+  land [<branch|-> [<commercial worktree> <commercial branch>] [<nested repo>=<branch>]...]
+                                          hand in for landing (no args: this worktree's branch, its nested
+                                          commercial branch and each other nested repo's branch, which
+                                          merges into the branch your checkout of apps/<repo> is on);
+                                          pins each branch's commit now and merges exactly those onto
+                                          the current tips in queue order (later commits are the next
+                                          hand-in); timer buckets check the landed tips afterwards
+  land [...] --wire-change                a hand-in that changes the hosted wire's files (platform/studio,
+                                          key_code: a WM and apps of different builds refuse each other);
+                                          without it such a hand-in fails, naming the files
   land [...] --show <app> [--on <device>] [-- <devhub words>]
                                           the chain: when it lands, show the app there, then run the words
   land status [all|<branch>] [--json]     per hand-in: queued / failed + error lines /
                                           conflict + files / waiting / landed <shas>
-  land wait <branch>                      until it lands, fails or conflicts; prints its status (exit 0 landed)
-  land hold <branch> [reason] | unhold <branch> | retry <branch> | drop <branch>
+  land wait <branch>                      until it lands, fails or conflicts; prints its status (exit 0 landed);
+                                          a conflict or failure is final: hand in again
+  land hold <branch> [reason] | unhold <branch> | retry <branch> (its pinned commits again) | drop <branch>
   bucket [status]                        the last 10 post-land bucket runs and attributed lanes
   bucket run <fast|tests|hot|ci|full>    that bucket's run now, of the tip then (full: every package's tests)
   land pause [reason] | resume | paused  the whole train: no new round while paused (the menu bar's Pause landing)";
@@ -320,11 +334,119 @@ pub(crate) fn local_name(c: &Client) -> String {
         .unwrap_or_default()
 }
 
-fn inspect(c: &Client, target: &str, words: &[String]) -> i32 {
-    let Some((machine, app)) = target.split_once('/') else {
-        eprintln!("makepad devhub inspect: <machine>/<pid|app> <command...>");
+/// The commands `devhub inspect --read-only` lets reach a JIT that no devhub lease started: they
+/// read what it shows, what it logged and where it waits, and change nothing in it. No AI tool
+/// call is one (a tool's risk is the app's to say, and a read tool still runs the app's code).
+pub(crate) const READ_ONLY: [&str; 11] = ["help", "status", "log", "grab", "gseq", "why-hung", "stacks", "session", "panics", "events", "tools"];
+
+/// One JIT of a machine as `devhub inspect` tells whose it is: the lease that started it, "" for
+/// none (its discovery file's `lease`, the node hub's `ps`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Whose {
+    pub pid: u32,
+    pub app: String,
+    pub lease: String,
+}
+
+/// The JITs of a `ps` answer (its machine line has no pid), with their leases.
+pub(crate) fn whose_of_ps(lines: &[String]) -> Vec<Whose> {
+    lines
+        .iter()
+        .filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok())
+        .filter_map(|v| {
+            let pid = u32::try_from(v.get("pid")?.as_u64()?).ok()?;
+            let app = v.get("app")?.as_str()?.to_string();
+            Some(Whose { pid, app, lease: v.get("lease").and_then(|l| l.as_str()).unwrap_or("").to_string() })
+        })
+        .collect()
+}
+
+/// The JITs of `machine` with their leases: this machine's from their discovery files (what
+/// [`Client::connect`] reaches), another's from its hub's `ps`.
+pub(crate) fn whose(c: &Client, machine: &str, here: bool) -> Result<Vec<Whose>, String> {
+    if here {
+        return Ok(makepad_remote::discovery::apps().into_iter().map(|a| Whose { pid: a.pid, lease: a.text("lease").unwrap_or_default(), app: a.app }).collect());
+    }
+    ask(c, Some(machine), "ps", "ps").map(|lines| whose_of_ps(&lines))
+}
+
+/// Why `devhub inspect` leaves `<machine>/<jit>` alone (None: the command goes). A JIT no devhub
+/// lease started is a person's app or the machine's own (its WM, its AI hub), never a lane's, and
+/// a lane's command must not reach the user's live app by a name it shares with the lane's own or
+/// by a pid read off the wrong line: refused, with why. `--read-only` lets [`READ_ONLY`] reach it,
+/// and holds a lease's JIT to them as well. By name, every JIT of that name must be a lease's.
+pub(crate) fn leave_alone(jits: &[Whose], machine: &str, jit: &str, verb: &str, read_only: bool) -> Option<String> {
+    let reads = READ_ONLY.join(", ");
+    if read_only && !READ_ONLY.contains(&verb) {
+        return Some(format!("`{verb}` is not a read: --read-only lets through only {reads}"));
+    }
+    let named: Vec<&Whose> = jits.iter().filter(|j| j.pid.to_string() == jit || j.app == jit).collect();
+    if named.is_empty() {
+        return Some(format!("{machine} runs no JIT `{jit}` (`devhub ls {machine}` lists them)"));
+    }
+    let theirs: Vec<String> = named.iter().filter(|j| j.lease.is_empty()).map(|j| format!("{} {}", j.pid, j.app)).collect();
+    if read_only || theirs.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{machine}/{jit} is no lease's ({}): no devhub lease started it, so it is a person's app or {machine}'s own, and devhub inspect leaves it alone. \
+         A lane inspects what its own leases run; `--read-only` reads this one ({reads})",
+        theirs.join(", ")
+    ))
+}
+
+/// `devhub inspect`'s own words before its command: the target and the options `--lease L` and
+/// `--read-only`, in any order (`w` without `inspect`): (target, lease, read-only, where the
+/// command starts).
+pub(crate) fn inspect_words<S: AsRef<str>>(w: &[S]) -> (Option<&str>, Option<&str>, bool, usize) {
+    let (mut target, mut lease, mut read_only, mut i) = (None, None, false, 0);
+    while i < w.len() {
+        match w[i].as_ref() {
+            "--lease" if i + 1 < w.len() => {
+                lease = Some(w[i + 1].as_ref());
+                i += 2;
+            }
+            "--read-only" => {
+                read_only = true;
+                i += 1;
+            }
+            t if target.is_none() => {
+                target = Some(t);
+                i += 1;
+            }
+            _ => break,
+        }
+    }
+    (target, lease, read_only, i)
+}
+
+/// Whether `devhub inspect` answers `words` on its own client of the app (through the hub when it
+/// runs elsewhere), not as a command of the app's: the app's AI tools (`tools`, `call
+/// <service>.<tool> ..`, its `app` service) and a grab or another command read from its frames,
+/// which the app has no command for.
+pub(crate) fn answered_here(words: &[String]) -> bool {
+    makepad_remote::app::app_request_of(&words.join(" ")).is_some() || makepad_remote::app::client_side(words)
+}
+
+fn inspect(c: &Client, args: &[String]) -> i32 {
+    let (target, _, read_only, at) = inspect_words(args);
+    let words = &args[at..];
+    let Some((machine, app)) = target.and_then(|t| t.split_once('/')).filter(|_| !words.is_empty()) else {
+        eprintln!("makepad devhub inspect: <machine>/<pid|app> [--read-only] <command...>");
         return 2;
     };
+    let local = machine == local_name(c);
+    match whose(c, machine, local).map(|jits| leave_alone(&jits, machine, app, &words[0], read_only)) {
+        Ok(None) => {}
+        Ok(Some(why)) => {
+            eprintln!("makepad devhub inspect: {why}");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("makepad devhub inspect: whose {machine}/{app} is: {e}");
+            return 2;
+        }
+    }
     let line = words.join(" ");
     let mut had_err = false;
     let mut print = |l: &str| {
@@ -332,14 +454,11 @@ fn inspect(c: &Client, target: &str, words: &[String]) -> i32 {
         println!("{l}");
         true
     };
-    // the app's AI tools (`tools`, `call <service>.<tool> ..`) are its `app` service, not a command
     let request = makepad_remote::app::app_request_of(&line);
-    // a grab and the other commands read from the app's frames are answered here, on a client of
-    // the app (through the hub when it runs elsewhere): the app has none of them
-    let here = request.is_some() || makepad_remote::app::client_side(words);
+    let here = answered_here(words);
     let r = if let Some(Err(usage)) = &request {
         Err(usage.clone())
-    } else if machine == local_name(c) {
+    } else if local {
         // this machine: the JIT's own socket, exactly `makepad inspect`
         match Client::connect(app) {
             Ok(j) if here => makepad_remote::app::run(&j, words, &mut print).map(|_| ()).map_err(|e| e.to_string()),
@@ -498,6 +617,9 @@ pub fn main(args: &[String]) -> i32 {
     if a == ["master", "start"] {
         return master_start();
     }
+    if a == ["master", "who"] {
+        return master_who();
+    }
     // the master's jobs first: `lanes` (the lane view) is theirs, `lanes now` the merge bot's
     #[cfg(feature = "checkout")]
     if let Some(code) = crate::orch::cli::main(&a) {
@@ -536,7 +658,7 @@ pub fn main(args: &[String]) -> i32 {
             Err(e) => { eprintln!("makepad devhub hot: {e}"); 2 }
         },
         ["stream", rest @ ..] => stream(&c, rest.contains(&"--json"), rest.contains(&"--all")),
-        ["inspect", target, cmd @ ..] if !cmd.is_empty() => inspect(&c, target, &args[2..]),
+        ["inspect", _, _, ..] => inspect(&c, &args[1..]),
         ["reply", id, status, msg @ ..] => reply(&c, id, status, &msg.join(" ")),
         ["inbox", rest @ ..] => match inbox_window(rest) {
             Ok(window) => lines_out(ask(&c, None, "inbox", if rest.contains(&"--all") { "list all" } else { "list" }).map(|l| seen_within(l, window, proto::wall_ms())), true),
@@ -673,6 +795,9 @@ fn lines_out(r: Result<Vec<String>, String>, text: bool) -> i32 {
 
 /// `serve [--node <conf>]`: the hub core without a window or tray (tests, ssh sessions).
 fn serve(args: &[&str]) -> i32 {
+    // before it starts anything: a run gets the handles it is given, never one of the hub's (the
+    // app's start does the same)
+    crate::os::keep_handles_to_self();
     // (no process the hub starts shows an error window on the box's desktop)
     crate::os::quiet_errors();
     crate::procinfo::reap_inherited();
@@ -998,6 +1123,11 @@ fn land(c: &Client, a: &[&str]) -> i32 {
                     };
                     if matches!(e.state, crate::land::St::Landed | crate::land::St::Failed | crate::land::St::Conflict) {
                         show(&l[l.len() - 1..], true, false);
+                        // nothing retries it: a conflict landed nothing, and a later commit lands only
+                        // by a new hand-in (#2759 believed nothing would land, and a retry landed it)
+                        if e.state == crate::land::St::Conflict {
+                            println!("conflict: nothing landed; merge work/main into the branches and hand in again");
+                        }
                         return if e.state == crate::land::St::Landed { 0 } else { 1 };
                     }
                 }
@@ -1029,6 +1159,7 @@ fn land(c: &Client, a: &[&str]) -> i32 {
             };
             let flag = |w: &str| a.iter().position(|x| *x == w).and_then(|i| a.get(i + 1).copied());
             let (chain_app, chain_on) = (flag("--show"), flag("--on").unwrap_or("mac"));
+            let wire = a.contains(&"--wire-change");
             let mut plain: Vec<&str> = Vec::new();
             let mut k = 0;
             while k < a.len() {
@@ -1036,7 +1167,9 @@ fn land(c: &Client, a: &[&str]) -> i32 {
                     k += 2;
                     continue;
                 }
-                plain.push(a[k]);
+                if a[k] != "--wire-change" {
+                    plain.push(a[k]);
+                }
                 k += 1;
             }
             if chain_app.is_none() && !then.is_empty() {
@@ -1044,7 +1177,9 @@ fn land(c: &Client, a: &[&str]) -> i32 {
                 return 2;
             }
             let a = plain.as_slice();
-            // a hand-in: given, or this worktree's branch (+ its nested commercial branch when it is on one)
+            // a hand-in: given, or this worktree's branch (+ its nested commercial branch when it is
+            // on one, and each other nested repository's as `<name>=<branch>`: the master leaves
+            // out one with nothing to land)
             let args: Vec<String> = if a.is_empty() {
                 let g = |dir: &str, args: &[&str]| crate::git_exec::command().arg("-C").arg(dir).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
                 let Some(top) = g(".", &["rev-parse", "--show-toplevel"]) else {
@@ -1058,6 +1193,11 @@ fn land(c: &Client, a: &[&str]) -> i32 {
                 if !cb.is_empty() && cb != "main" {
                     v.extend([cdir, cb]);
                 }
+                for name in crate::nested::names(std::path::Path::new(&top)).into_iter().filter(|n| n != crate::state::PAIRED) {
+                    if let Some(nb) = g(&format!("{top}/{}", crate::nested::dir(&name)), &["branch", "--show-current"]).filter(|nb| !nb.is_empty()) {
+                        v.push(format!("{name}={nb}"));
+                    }
+                }
                 if v.len() == 1 && v[0] == "-" {
                     eprintln!("makepad devhub land: this worktree is on no lane branch");
                     return 2;
@@ -1067,12 +1207,14 @@ fn land(c: &Client, a: &[&str]) -> i32 {
                 a.iter().map(|x| x.to_string()).collect()
             };
             let agent = std::env::var("DEVHUB_AGENT").ok().filter(|x| makepad_devhub_conf::valid_name(x)).map(|x| format!(" agent={x}")).unwrap_or_default();
-            match ask_land(&format!("add {}{agent}", args.join(" "))) {
+            let mark = if wire { " wire-change" } else { "" };
+            match ask_land(&format!("add {}{mark}{agent}", args.join(" "))) {
                 Ok(l) => {
                     let v = l.first().and_then(|x| makepad_strict_json::parse(x.as_bytes()).ok());
                     let n = |k: &str| v.as_ref().and_then(|v| v.get(k)).and_then(|x| x.as_u64()).unwrap_or(0);
                     let s = |k: &str| v.as_ref().and_then(|v| v.get(k)).and_then(|x| x.as_str());
-                    let key = if args[0] == "-" { args.last().unwrap() } else { &args[0] };
+                    // (a branch: the commercial one of a `-` hand-in, never a nested `<name>=<branch>`)
+                    let key = if args[0] == "-" { args.iter().rev().find(|a| !a.contains('=')).unwrap() } else { &args[0] };
                     let label = s("label").map(str::to_string).unwrap_or_else(|| args.join(" "));
                     let wait_key = s("label").unwrap_or(key);
                     let included = s("included").map(|b| format!(" (+ {b} from the lane)")).unwrap_or_default();
@@ -1117,6 +1259,23 @@ fn land(c: &Client, a: &[&str]) -> i32 {
     }
 }
 
+/// `devhub master who`: the process that answers the control socket now (`pid=<pid>
+/// since_ms=<ms>`, its endpoint's start); exit 1 when none answers. A script that waits for a
+/// master waits on this, never on a bare connect (a listener a gone master's child kept takes one).
+fn master_who() -> i32 {
+    let socket = proto::control_socket();
+    match crate::node::who_serves(&socket) {
+        Some(who) => {
+            println!("{who}");
+            0
+        }
+        None => {
+            eprintln!("devhub: no devhub answers at {}", socket.display());
+            1
+        }
+    }
+}
+
 /// `devhub master start`: `serve` in a session of its own, so it outlives this shell, at this shell's
 /// priority. It waits until the master answers or its start has failed. A `serve &` by hand in zsh
 /// ran at nice 5 from then on ([`crate::master::start_level`]).
@@ -1127,9 +1286,8 @@ fn master_start() -> i32 {
         1
     };
     let socket = proto::control_socket();
-    let answers = || Client::new(Target::Unix(socket.clone()), "probe").conn().is_ok();
-    if answers() {
-        return fail(format!("a devhub already serves {}", socket.display()));
+    if let Some(who) = crate::node::who_serves(&socket) {
+        return fail(format!("a devhub ({who}) already serves {}", socket.display()));
     }
     if let Err(why) = crate::master::start_level() {
         return fail(why);
@@ -1150,8 +1308,9 @@ fn master_start() -> i32 {
         Err(e) => return fail(format!("{}: {e}", own[0])),
     };
     loop {
-        if answers() {
-            println!("devhub: master up, pid {}; its log is {}", child.id(), log.display());
+        // (the pid that answers: the serve itself, under the cargo a first start may run it with)
+        if let Some(who) = crate::node::who_serves(&socket) {
+            println!("devhub: master up, pid {}; its log is {}", who.pid, log.display());
             return 0;
         }
         match child.try_wait() {
@@ -1182,6 +1341,73 @@ pub fn own_argv(repo: &std::path::Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn jit(pid: u32, app: &str, lease: &str) -> Whose {
+        Whose { pid, app: app.to_string(), lease: lease.to_string() }
+    }
+
+    /// `devhub inspect` reaches a JIT a lease runs, and leaves every other one alone, saying why:
+    /// a lane's `call vis.play ..` must never reach the user's live Source Library (11-07).
+    #[test]
+    fn inspect_reaches_only_what_a_lease_runs() {
+        let jits = [jit(41, "makepad-source-library", ""), jit(42, "makepad-source-library", "/leases/L7"), jit(43, "makepad-app-wm", "")];
+        assert_eq!(leave_alone(&jits, "boxa", "42", "call", false), None, "the lease's own app");
+        let why = leave_alone(&jits, "boxa", "41", "call", false).expect("a person's app is refused");
+        assert!(why.contains("boxa/41 is no lease's (41 makepad-source-library)") && why.contains("--read-only"), "{why}");
+        // by name, the lane's app and the user's share it: refused, never a guess between them
+        let why = leave_alone(&jits, "boxa", "makepad-source-library", "call", false).expect("a shared name is refused");
+        assert!(why.contains("41 makepad-source-library") && !why.contains("42"), "{why}");
+        assert!(leave_alone(&jits, "boxa", "makepad-app-wm", "click", false).is_some(), "the node's own WM");
+        let why = leave_alone(&jits, "boxa", "9", "status", false).expect("no such JIT");
+        assert!(why.contains("runs no JIT `9`") && why.contains("devhub ls boxa"), "{why}");
+        // --read-only: reads reach a person's app, nothing else reaches any app
+        for verb in ["grab", "log", "why-hung", "stacks", "tools"] {
+            assert_eq!(leave_alone(&jits, "boxa", "41", verb, true), None, "{verb}");
+        }
+        for (pid, verb) in [("41", "call"), ("41", "click"), ("41", "quit"), ("41", "gq"), ("42", "call")] {
+            let why = leave_alone(&jits, "boxa", pid, verb, true).unwrap_or_else(|| panic!("{pid} {verb} under --read-only"));
+            assert!(why.starts_with(&format!("`{verb}` is not a read")), "{why}");
+        }
+    }
+
+    /// The node hub's `ps` names each JIT's lease; its machine line is no JIT.
+    #[test]
+    fn whose_reads_the_lease_of_each_ps_line() {
+        let lines = [
+            r#"{"machine":"boxa","os":"linux","cpus":16,"jits":2}"#,
+            r#"{"pid":41,"app":"makepad-source-library","lease":"","up_s":9}"#,
+            r#"{"pid":42,"app":"makepad-app-calculator","lease":"/leases/L7","up_s":3}"#,
+        ]
+        .map(String::from);
+        assert_eq!(whose_of_ps(&lines), vec![jit(41, "makepad-source-library", ""), jit(42, "makepad-app-calculator", "/leases/L7")]);
+    }
+
+    /// Its options go before or after the target; the command's own words are left to it.
+    #[test]
+    fn inspect_words_take_the_options_anywhere_before_the_command() {
+        let w = |line: &str| {
+            let words: Vec<&str> = line.split(' ').collect();
+            let (target, lease, read_only, at) = inspect_words(&words);
+            (target.map(str::to_string), lease.map(str::to_string), read_only, words[at..].join(" "))
+        };
+        let t = |s: &str| Some(s.to_string());
+        assert_eq!(w("boxa/42 call vis.play {}"), (t("boxa/42"), None, false, "call vis.play {}".into()));
+        assert_eq!(w("--lease L7 boxa/42 --read-only grab"), (t("boxa/42"), t("L7"), true, "grab".into()));
+        assert_eq!(w("boxa/42 --lease L7 log --read-only"), (t("boxa/42"), t("L7"), false, "log --read-only".into()));
+    }
+
+    /// The app's AI tools and its frames are answered on a client of the app; the rest are its
+    /// commands, relayed (`call` relayed as one was "unknown command `call`", 11-07).
+    #[test]
+    fn ai_tools_and_frames_are_answered_on_a_client_of_the_app() {
+        let words = |line: &str| line.split(' ').map(String::from).collect::<Vec<_>>();
+        for line in ["call vis.play {\"id\":\"leaf\"}", "tools", "grab out=a.png", "gseq n=4"] {
+            assert!(answered_here(&words(line)), "{line}");
+        }
+        for line in ["status", "why-hung", "quit", "ui tree"] {
+            assert!(!answered_here(&words(line)), "{line}");
+        }
+    }
 
     /// Lanes piped the whole help through grep 777 times in 36 h; `job result --help` answered
     /// "no job --help" (11-04).

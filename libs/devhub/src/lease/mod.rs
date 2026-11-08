@@ -33,7 +33,6 @@ pub mod master;
 pub mod native;
 pub mod panel;
 pub mod patch;
-pub mod pre_nested;
 pub mod prof;
 pub mod sched;
 pub mod ship;
@@ -329,6 +328,9 @@ pub struct Caps {
     pub arch: String,
     pub os: String,
     pub cpu: String,
+    /// the `-C target-cpu` every program it runs may be built for ([`caps::cpu_target`]): what a
+    /// build `--for` it takes in place of `native` (empty: an older hub)
+    pub cpu_target: String,
     pub cores: u32,
     /// The CPUs its lease.conf pins shared kinds (`cpus.shared`) and timed leases (`cpus.timed`)
     /// to, counted (0: not pinned, all of `cores`): what a lease of each can use
@@ -501,9 +503,19 @@ impl UserSense {
 /// 10: the shards of one tests bucket run share their native tree; 11: `lease-tell`, the lease's
 /// `$DEVHUB_TOLD` file, the tests run's queue; 12: an explicit `--jit` is the run's JIT for any
 /// command, held for it at `$MAKEPAD_LOADER`; 13: `jit-read` / `jit-put`, a `--jit` copied to the
-/// box a lease is granted on; 14: a rev names any nested repository, [`NESTED_PROTO`]).
+/// box a lease is granted on; 14: a rev names any nested repository, [`NESTED_PROTO`]; 15: a
+/// lease builds `--for` another box's CPU, [`FOR_CPU_PROTO`]).
 /// Only requests needing a newer facility wait for its self-update; other leases keep using the hub.
-pub const HUB_PROTO: u32 = 14;
+pub const HUB_PROTO: u32 = 15;
+/// The first protocol whose hub builds a lease `--for` another box ([`sched::Req::cpu_target`]):
+/// an older one would build for its own CPU (`native`) and say nothing.
+pub const FOR_CPU_PROTO: u32 = 15;
+
+/// Whether `t` can be a `-C target-cpu` a lease builds for (it goes into the build's flags):
+/// lowercase letters, digits, `-` and `.`.
+pub fn valid_cpu_target(t: &str) -> bool {
+    !t.is_empty() && t.len() <= 40 && t.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+}
 /// The first protocol whose hub takes every nested repository a lease's rev names (its store, its
 /// tree, its overlay); hubs before took makepad and the ledger's paired one
 /// ([`crate::state::PAIRED`]) only.
@@ -557,12 +569,13 @@ impl Caps {
         let exec_limits = self.exec_limits.map_or("null".into(), |l| l.to_json());
         let slots: Vec<String> = self.slots.iter().map(|(k, n)| format!("\"{}\":{n}", k.as_str())).collect();
         format!(
-            "{{\"exec_limits\":{exec_limits},\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"cpus_shared\":{},\"cpus_timed\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"mem_pressure\":{},\"trouble\":{},\"wm_wire\":{},\"wm_dark\":{},\"wm_drain\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"hub_proto\":{}{},\"services\":{{{}}},\"user\":{}}}",
+            "{{\"exec_limits\":{exec_limits},\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cpu_target\":{},\"cores\":{},\"cpus_shared\":{},\"cpus_timed\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"mem_pressure\":{},\"trouble\":{},\"wm_wire\":{},\"wm_dark\":{},\"wm_drain\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"hub_proto\":{}{},\"services\":{{{}}},\"user\":{}}}",
             json_str(&self.rustc),
             json_str(&self.node),
             json_str(&self.arch),
             json_str(&self.os),
             json_str(&self.cpu),
+            json_str(&self.cpu_target),
             self.cores,
             self.cpus_shared,
             self.cpus_timed,
@@ -616,6 +629,7 @@ impl Caps {
             arch: s("arch"),
             os: s("os"),
             cpu: s("cpu"),
+            cpu_target: s("cpu_target"),
             cores: f("cores") as u32,
             cpus_shared: f("cpus_shared") as u32,
             cpus_timed: f("cpus_timed") as u32,
@@ -869,9 +883,28 @@ pub fn parse_pinned(spec: &str) -> Result<(RevPin, Vec<(String, RevPin)>), Strin
     Ok((mk, nested))
 }
 
+/// A pinned `--rev` ([`pin_revs`]) as a lease's lines say it: each repository's branch and short
+/// commit, nested ones by name (`rc-x@621f4e19c4,source-library=slmain@06739bed58`).
+pub fn rev_said(spec: &str) -> String {
+    let side = |p: &RevPin| format!("{}@{}", p.branch, &p.sha[..10]);
+    match parse_pinned(spec) {
+        Ok((mk, nested)) => nested.iter().fold(side(&mk), |k, (name, p)| format!("{k},{name}={}", side(p))),
+        Err(_) => spec.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A nested build's lease line said only "sources at the worktree's HEAD" (11-07: a lane's
+    /// nested tree was right, and nothing said which it was).
+    #[test]
+    fn a_leases_line_names_each_repositorys_branch_and_commit() {
+        let (a, b) = ("1".repeat(40), "2".repeat(40));
+        assert_eq!(rev_said(&format!("rc-x@{a},source-library=slmain@{b}")), "rc-x@1111111111,source-library=slmain@2222222222");
+        assert_eq!(rev_said(&format!("work@{a}")), "work@1111111111");
+    }
 
     #[test]
     fn a_runs_class_is_its_command_past_an_env_prefix() {
@@ -916,6 +949,7 @@ mod tests {
             arch: "x86_64".into(),
             os: "linux".into(),
             cpu: "CPU-B".into(),
+            cpu_target: "x86-64-v3".into(),
             cores: 16,
             cpus_shared: 8,
             cpus_timed: 6,
@@ -956,7 +990,7 @@ mod tests {
             stalls: vec!["lease/exec.rs:1184 (makepad-remote-7) waits on lease start held by lease/exec.rs:1763 (makepad-remote-3) (for 12 s)".into()],
             wm_wire: "makepad-wm-0 answered \"makepad-wm mismatch 0123\"".into(),
             wm_dark: "its WM's window is 0x0: no output shows it".into(),
-            wm_drain: "test lease L9 of landq-tests (a landing)".into(),
+            wm_drain: "screen lease L9 of lane-s (its windows)".into(),
             hub_proto: HUB_PROTO,
             jit_store: None,
             services: vec![("ai-hub".into(), 1_700_000_000_000)],

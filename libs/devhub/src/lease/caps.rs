@@ -435,6 +435,51 @@ pub fn head_sha(tree: &std::path::Path) -> Option<String> {
 
 pub const GB: f64 = (1u64 << 30) as f64;
 
+/// The `-C target-cpu` every program this box runs may be built for ([`Caps::cpu_target`]): on
+/// x86-64 the highest psABI level its CPU has all of, read from the CPU at run time (so a box with
+/// no rustc says it too); on an Apple chip (`model`, its brand string) its `apple-m<N>`; elsewhere
+/// `generic`. A build `--for` the box takes it in place of `native`, the building box's own CPU:
+/// a pool box's AVX-512 build stopped with "Illegal instruction" on a box without it (11-07).
+pub fn cpu_target(model: &str) -> String {
+    match (apple_target(model), x86_features()) {
+        (Some(apple), _) => apple,
+        (None, Some((v2, v3, v4))) => x86_level(v2, v3, v4).to_string(),
+        (None, None) => "generic".into(),
+    }
+}
+
+/// Whether the CPU has all of the x86-64 psABI v2, v3 and v4 features; None: not x86-64.
+#[cfg(target_arch = "x86_64")]
+fn x86_features() -> Option<(bool, bool, bool)> {
+    use std::arch::is_x86_feature_detected as has;
+    let v2 = has!("cmpxchg16b") && has!("popcnt") && has!("sse3") && has!("ssse3") && has!("sse4.1") && has!("sse4.2");
+    let v3 = has!("avx") && has!("avx2") && has!("bmi1") && has!("bmi2") && has!("f16c") && has!("fma") && has!("lzcnt") && has!("movbe") && has!("xsave");
+    let v4 = has!("avx512f") && has!("avx512bw") && has!("avx512cd") && has!("avx512dq") && has!("avx512vl");
+    Some((v2, v3, v4))
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn x86_features() -> Option<(bool, bool, bool)> {
+    None
+}
+
+/// The x86-64 psABI level of a CPU with all of each level's features (`v2`, `v3`, `v4`): a level
+/// counts only on top of the ones below it.
+fn x86_level(v2: bool, v3: bool, v4: bool) -> &'static str {
+    match (v2, v2 && v3, v2 && v3 && v4) {
+        (_, _, true) => "x86-64-v4",
+        (_, true, _) => "x86-64-v3",
+        (true, _, _) => "x86-64-v2",
+        _ => "x86-64",
+    }
+}
+
+/// rustc's name for an Apple chip by its brand string (`Apple M<n> <tier>`: `apple-m<n>`).
+fn apple_target(model: &str) -> Option<String> {
+    let n: String = model.strip_prefix("Apple M")?.chars().take_while(char::is_ascii_digit).collect();
+    (!n.is_empty()).then(|| format!("apple-m{n}"))
+}
+
 /// `model name` and the number of logical CPUs from `/proc/cpuinfo`.
 pub fn parse_cpuinfo(text: &str) -> (String, u32) {
     let mut model = String::new();
@@ -523,6 +568,7 @@ mod os {
     pub fn hardware() -> Caps {
         let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
         let (cpu, cores) = parse_cpuinfo(&read("/proc/cpuinfo"));
+        let cpu_target = cpu_target(&cpu);
         let (ram, avail) = parse_meminfo(&read("/proc/meminfo"));
         let gpu = crate::top::gpu_use();
         // CPU use since the previous measure (the master asks every 10 s)
@@ -538,6 +584,7 @@ mod os {
             arch: std::env::consts::ARCH.to_string(),
             os: std::env::consts::OS.to_string(),
             cpu,
+            cpu_target,
             cores: cores.max(1),
             load1: parse_loadavg(&read("/proc/loadavg")),
             ram_gb: ram,
@@ -775,6 +822,7 @@ mod os {
             cpu_pct,
             arch: std::env::consts::ARCH.to_string(),
             os: "macos".into(),
+            cpu_target: cpu_target(&sysctl_str("machdep.cpu.brand_string")),
             cpu: sysctl_str("machdep.cpu.brand_string"),
             cores: (sysctl_u64("hw.logicalcpu") as u32).max(1),
             load1: m.load1,
@@ -848,6 +896,7 @@ mod os {
             gpu_busy: gpu.iter().map(|g| (g.util_pct, g.mem_used_gb)).collect(),
             arch: std::env::consts::ARCH.to_string(),
             os: "windows".into(),
+            cpu_target: cpu_target(&crate::os::cpu_name()),
             cpu: crate::os::cpu_name(),
             cores: std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1),
             // no load average on Windows: the busy share of the cores stands in
@@ -945,6 +994,11 @@ mod tests {
     fn cpuinfo_meminfo_loadavg_nvidia_battery() {
         let cpu = "processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel name\t: CPU-B 8-Core Processor\n\nprocessor\t: 1\nmodel name\t: CPU-B 8-Core Processor\n";
         assert_eq!(parse_cpuinfo(cpu), ("CPU-B 8-Core Processor".to_string(), 2));
+        // a build for a box takes the CPU level it has all of, never more
+        assert_eq!([x86_level(true, true, true), x86_level(true, true, false), x86_level(true, false, true), x86_level(false, true, true)], ["x86-64-v4", "x86-64-v3", "x86-64-v2", "x86-64"]);
+        assert_eq!([apple_target("Apple M0 Tier"), apple_target("Apple M00"), apple_target("Apple Mx"), apple_target("CPU-B 8-Core Processor")], [Some("apple-m0".to_string()), Some("apple-m00".to_string()), None, None]);
+        let here = cpu_target("CPU-B 8-Core Processor");
+        assert!(!here.is_empty() && here.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'), "{here}");
         let (t, a) = parse_meminfo("MemTotal:       65536000 kB\nMemFree:  100 kB\nMemAvailable:   32768000 kB\n");
         assert!((t - 62.5).abs() < 0.01 && (a - 31.25).abs() < 0.01);
         assert_eq!(parse_loadavg("3.52 2.10 1.00 2/900 1234\n"), 3.52);

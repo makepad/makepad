@@ -1,8 +1,9 @@
-//! The master follows work and commercial main so each deployment receives landed changes
-//! independently of leases. A node is behind when `caps.deploy` differs from those tips. Each
-//! round attempts one node; the node owns its build, live patches and safe restart rules.
-//! Settings are reread from autosync.conf; autosync.state records successful applies across
-//! master restarts. Repeated failures are reported once, to the master's stderr.
+//! The master follows the followed repositories' branches ([`super::followed`]: work, commercial
+//! main) so each deployment receives landed changes independently of leases. A node is behind
+//! when `caps.deploy` differs from those tips (a pin, [`Pin`]). Each round attempts one node; the
+//! node owns its build, live patches and safe restart rules. Settings are reread from
+//! autosync.conf; autosync.state records successful applies across master restarts, a
+//! `<node> <pin>` line each. Repeated failures are reported once, to the master's stderr.
 //!
 //! A landing kicks the watcher (`makepad devhub sync now`, the landing scripts' hook): the next
 //! round starts at once and reaches every node that needs the new tips, the first listed node
@@ -23,6 +24,7 @@
 use super::cli::{ask_local, branch_sha, fleet_nodes, push_and_apply};
 use super::git::valid_sha;
 use crate::lease::sched::{deploy_to, DeployTo};
+use crate::lease::Pin;
 use crate::proto;
 use makepad_remote::link::{Client, Target};
 use std::collections::{BTreeMap, BTreeSet};
@@ -64,8 +66,9 @@ fn wait_kick(interval: Duration) -> Option<u64> {
     k.take()
 }
 
-/// What one node's apply answered: its applied revisions, or why not.
-fn apply_result(code: i32, lines: &[String]) -> Result<(String, String), String> {
+/// What one node's apply of an order to move to `to` answered: the commits it applied of each
+/// repository `to` names, or why not.
+fn apply_result(code: i32, lines: &[String], to: &Pin) -> Result<Pin, String> {
     let mut success = None;
     let mut error = None;
     for line in lines {
@@ -80,10 +83,9 @@ fn apply_result(code: i32, lines: &[String]) -> Result<(String, String), String>
             error.get_or_insert_with(|| line.clone());
         }
         if let Some(a) = v.get("applied") {
-            if let (Some(mp), Some(cm)) = (a.get("makepad").and_then(|x| x.as_str()), a.get("commercial").and_then(|x| x.as_str())) {
-                if valid_sha(mp) && valid_sha(cm) {
-                    success = Some((mp.to_string(), cm.to_string()));
-                }
+            let sha = |name: &str| a.get(name).and_then(|x| x.as_str()).filter(|s| valid_sha(s)).map(str::to_string);
+            if let Some(mp) = sha("makepad") {
+                success = to.nested.keys().try_fold(Pin::at(&mp), |pin, name| Some(pin.with(name, &sha(name)?)));
             }
         }
     }
@@ -147,6 +149,28 @@ pub fn prewarm_suits(v: &makepad_strict_json::Value) -> bool {
     b("up") && b("dev") && !b("draining") && !b("user") && leases == 0 && caps.is_some_and(|c| !loaded(&c))
 }
 
+/// The tips of the followed repositories ([`super::followed`]) in the checkout at `repo`: each
+/// nested one's in its `apps/<name>`.
+fn tips(repo: &Path, follows: &[(String, String)]) -> Result<Pin, String> {
+    let mut pin = Pin::default();
+    for (name, branch) in follows {
+        if name == "makepad" {
+            pin.makepad = branch_sha(repo, branch)?;
+        } else {
+            pin.nested.insert(name.clone(), branch_sha(&repo.join(crate::nested::dir(name)), branch)?);
+        }
+    }
+    Ok(pin)
+}
+
+/// Whether a deployment at `deploy` is at `tips` (both pins' keys): the same commit of each
+/// repository the tips name; one it holds besides (a nested checkout no longer followed) moves
+/// nothing.
+fn at_tips(deploy: &str, tips: &str) -> bool {
+    let (Some(d), Some(t)) = (Pin::parse(deploy), Pin::parse(tips)) else { return false };
+    d.makepad == t.makepad && t.nested.iter().all(|(name, sha)| d.nested.get(name) == Some(sha))
+}
+
 /// Deployments behind the tips, which nodes can pre-warm after applying, and each node's deployment.
 fn nodes_to_apply(nodes: &[String], status: &[String], tips: &str) -> (Vec<String>, BTreeMap<String, bool>, BTreeMap<String, String>) {
     let mut deploys = BTreeMap::<String, String>::new();
@@ -160,7 +184,7 @@ fn nodes_to_apply(nodes: &[String], status: &[String], tips: &str) -> (Vec<Strin
             }
         }
     }
-    let todo = nodes.iter().filter(|n| deploys.get(*n).map(String::as_str) != Some(tips)).cloned().collect();
+    let todo = nodes.iter().filter(|n| !deploys.get(*n).is_some_and(|d| at_tips(d, tips))).cloned().collect();
     (todo, idle, deploys)
 }
 
@@ -174,9 +198,13 @@ fn user_wms(status: &[String]) -> BTreeSet<String> {
 }
 
 /// Where a user's WM node at `deploy` moves ([`crate::bucket::proven_tip`]): Ok(the tip's pin key,
-/// [`crate::state::Pair::pin_key`]), or Err(why it holds what it has).
-fn proven_move(home: &Path, repo: &Path, deploy: &str) -> Result<String, String> {
-    let at = |t: &crate::state::Pair| t.pin_key();
+/// [`Pin::key`], of the repositories it follows, `follows`), or Err(why it holds what it has).
+fn proven_move(home: &Path, repo: &Path, deploy: &str, follows: &[(String, String)]) -> Result<String, String> {
+    let at = |t: &Pin| {
+        let mut t = t.clone();
+        t.nested.retain(|name, _| follows.iter().any(|(f, _)| f == name));
+        t.key()
+    };
     match crate::bucket::proven_tip(home, &|t| deploy == at(t) || super::deploy_has(repo, deploy, &at(t))) {
         crate::bucket::Proven::Move(t) => Ok(at(&t)),
         crate::bucket::Proven::Stay(why) => Err(format!("held at {}: {why}", crate::state::Pair::of_pin_key(deploy).map_or_else(|| deploy.to_string(), |p| p.short()))),
@@ -218,10 +246,11 @@ impl Waits {
     }
 }
 
-/// The nodes' last successful applies (`autosync.state`, read by `devhub autosync status`).
+/// The nodes' last successful applies (`autosync.state`, read by `devhub autosync status`): a
+/// `<node> <pin>` line each ([`Pin::key`]).
 struct Applied {
     path: PathBuf,
-    revs: BTreeMap<String, (String, String)>,
+    revs: BTreeMap<String, Pin>,
     dirty: bool,
 }
 
@@ -231,9 +260,9 @@ impl Applied {
         match std::fs::read_to_string(&path) {
             Ok(text) => for line in text.lines() {
                 let words: Vec<_> = line.split_whitespace().collect();
-                if let [node, mp, cm] = words.as_slice() {
-                    if valid_sha(mp) && valid_sha(cm) {
-                        revs.insert(node.to_string(), (mp.to_string(), cm.to_string()));
+                if let [node, key] = words.as_slice() {
+                    if let Some(pin) = Pin::parse(key) {
+                        revs.insert(node.to_string(), pin);
                     }
                 }
             },
@@ -244,7 +273,7 @@ impl Applied {
     }
 
     fn save(&mut self) -> std::io::Result<()> {
-        let text: String = self.revs.iter().map(|(n, (mp, cm))| format!("{n} {mp} {cm}\n")).collect();
+        let text: String = self.revs.iter().map(|(n, pin)| format!("{n} {}\n", pin.key())).collect();
         let tmp = self.path.with_extension("state.tmp");
         std::fs::create_dir_all(self.path.parent().unwrap_or(Path::new("."))).and_then(|_| std::fs::write(&tmp, text)).and_then(|_| std::fs::rename(&tmp, &self.path))?;
         self.dirty = false;
@@ -285,11 +314,11 @@ impl Follow {
         self.waits.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Takes in what `node` answered an order to move to `to` (`work`, `commercial`).
-    fn answer(&self, report: &mut Report, node: &str, to: (&str, &str), after: &str, result: Result<(String, String), String>) -> Answer {
+    /// Takes in what `node` answered an order to move to `to`.
+    fn answer(&self, report: &mut Report, node: &str, to: &Pin, after: &str, result: Result<Pin, String>) -> Answer {
         match result {
             Ok(revs) => {
-                report.say(node, format!("applied work={} commercial={}{after}", revs.0, revs.1));
+                report.say(node, format!("applied {}{after}", revs.key()));
                 self.waits().done(node);
                 let mut applied = self.applied.lock().unwrap_or_else(|e| e.into_inner());
                 applied.revs.insert(node.to_string(), revs);
@@ -301,12 +330,12 @@ impl Follow {
             Err(e) => {
                 let waits = e.contains("\"waits: ");
                 if waits {
-                    self.waits().wait(node, format!("its deployment moves to {}", &to.0[..to.0.len().min(10)]));
+                    self.waits().wait(node, format!("its deployment moves to {}", to.short()));
                 } else {
                     // it failed or was unreachable: it waits for no timed run
                     self.waits().done(node);
                 }
-                report.say(node, format!("skip work={} commercial={}: {e}", to.0, to.1));
+                report.say(node, format!("skip {}: {e}", to.key()));
                 if waits { Answer::Waits } else { Answer::Failed }
             }
         }
@@ -325,8 +354,8 @@ struct PinMoves {
     report: Report,
 }
 
-/// A node's move to a pin (a pin key, [`crate::lease::Pin::key`]): the revisions it applied, or why not.
-type MoveTo<'a> = Arc<dyn Fn(&str, &str) -> Result<(String, String), String> + Send + Sync + 'a>;
+/// A node's move to a pin: the commits it applied, or why not.
+type MoveTo<'a> = Arc<dyn Fn(&str, &Pin) -> Result<Pin, String> + Send + Sync + 'a>;
 
 /// One look at the pinned nodes (node, its pin): a node that holds its pin waits for no update,
 /// whatever an earlier order said (it reached the pin some other way: a move by hand, a round's
@@ -350,10 +379,10 @@ fn pin_pass<'s>(scope: &'s std::thread::Scope<'s, '_>, follow: &'s Follow, moves
                 drop(m);
                 let apply = apply.clone();
                 scope.spawn(move || {
-                    let result = apply(&node, &at);
-                    let to = crate::state::Pair::of_pin_key(&at).unwrap_or_default();
+                    let to = Pin::parse(&at).ok_or_else(|| format!("`{at}` is no pin"));
+                    let result = to.as_ref().map_err(String::clone).and_then(|to| apply(&node, to));
                     let mut m = moves.lock().unwrap_or_else(|e| e.into_inner());
-                    let answer = follow.answer(&mut m.report, &node, (to.work.as_str(), to.main.as_str()), "", result);
+                    let answer = follow.answer(&mut m.report, &node, &to.unwrap_or_default(), "", result);
                     m.not_before.remove(&node);
                     match answer {
                         Answer::Applied => { m.moved.insert(node.clone(), at.clone()); }
@@ -395,10 +424,10 @@ fn follow_pins(control_socket: PathBuf, follow: Arc<Follow>, pin_of: PinOf) {
             let (_, _, deploys) = nodes_to_apply(&nodes, &status, "");
             let repo = conf.repo;
             let order = repo.clone();
-            let apply: MoveTo = Arc::new(move |node: &str, at: &str| {
+            let apply: MoveTo = Arc::new(move |node: &str, to: &Pin| {
                 let mut lines = Vec::new();
-                let code = push_and_apply(c, &order, "work", Some("main"), Some(at), &[node.to_string()], "on", "auto", false, "", &mut |n, l| if n == node { lines.push(l.to_string()) });
-                apply_result(code, &lines)
+                let code = push_and_apply(c, &order, &super::followed(&order), Some(&to.key()), &[node.to_string()], "on", "auto", false, "", &mut |n, l| if n == node { lines.push(l.to_string()) });
+                apply_result(code, &lines, to)
             });
             pin_pass(s, &follow, &moves, pinned, &deploys, |d, a| super::deploy_has(&repo, d, a), Duration::from_secs(conf.interval_s), apply);
             Ok(())
@@ -449,7 +478,8 @@ pub fn start(control_socket: PathBuf, say_waits: SayWaits, pin_of: PinOf) {
                 if conf.repo.as_os_str().is_empty() {
                     return Err("no checkout found; set repo in autosync.conf".into());
                 }
-                let shas = (branch_sha(&conf.repo, "work")?, branch_sha(&conf.repo.join("apps/commercial"), "main")?);
+                let follows = super::followed(&conf.repo);
+                let tips = tips(&conf.repo, &follows)?;
                 let nodes = match conf.nodes {
                     Some(nodes) => nodes,
                     None => fleet_nodes(&c)?,
@@ -460,7 +490,7 @@ pub fn start(control_socket: PathBuf, say_waits: SayWaits, pin_of: PinOf) {
                     return Ok(());
                 }
                 let status = ask_local(&c, "nodes", "nodes").unwrap_or_default();
-                let (todo, idle, deploys) = nodes_to_apply(&nodes, &status, &crate::state::Pair::new(&shas.0, &shas.1).pin_key());
+                let (todo, idle, deploys) = nodes_to_apply(&nodes, &status, &tips.key());
                 let users = user_wms(&status);
                 // a node a timed ask pinned moves to its pin ([`follow_pins`]), or holds it until
                 // the ask starts; the user's WM node moves to the newest proven tip, or holds
@@ -470,7 +500,7 @@ pub fn start(control_socket: PathBuf, say_waits: SayWaits, pin_of: PinOf) {
                 let todo: Vec<String> = todo.into_iter().filter(|n| {
                     let deploy = deploys.get(n).map_or("", String::as_str);
                     match deploy_to(pin_of(n), deploy, |d, a| super::deploy_has(&conf.repo, d, a)) {
-                        DeployTo::Tips if users.contains(n) => match proven_move(&home, &conf.repo, deploy) {
+                        DeployTo::Tips if users.contains(n) => match proven_move(&home, &conf.repo, deploy, &follows) {
                             Ok(at) => {
                                 proven.insert(n.clone(), at);
                                 true
@@ -522,15 +552,14 @@ pub fn start(control_socket: PathBuf, say_waits: SayWaits, pin_of: PinOf) {
                     last_node = batch.last().cloned();
                     let prewarm = batch.iter().all(|n| suits(n));
                     let mut lines = BTreeMap::<String, Vec<String>>::new();
-                    let code = push_and_apply(&c, &conf.repo, "work", Some("main"), at.as_deref(), &batch, "on", "auto", prewarm, &extra, &mut |n, l| lines.entry(n.to_string()).or_default().push(l.to_string()));
-                    let to = at.as_deref().and_then(crate::state::Pair::of_pin_key).unwrap_or_else(|| crate::state::Pair::new(&shas.0, &shas.1));
-                    let to = (to.work.as_str(), to.main.as_str());
+                    let code = push_and_apply(&c, &conf.repo, &follows, at.as_deref(), &batch, "on", "auto", prewarm, &extra, &mut |n, l| lines.entry(n.to_string()).or_default().push(l.to_string()));
+                    let to = at.as_deref().and_then(Pin::parse).unwrap_or_else(|| tips.clone());
                     for node in &batch {
                         let mine = lines.remove(node).unwrap_or_default();
                         // a batch's exit code is every node's: one node's is its own error lines
                         let code = if batch.len() == 1 { code } else { mine.iter().any(|l| l.starts_with("{\"err\":")) as i32 };
                         let after = landed.map_or(String::new(), |ms| format!(" ({} ms after the landing)", proto::wall_ms().saturating_sub(ms)));
-                        waiting |= follow.answer(&mut report, node, to, &after, apply_result(code, &mine)) == Answer::Waits;
+                        waiting |= follow.answer(&mut report, node, &to, &after, apply_result(code, &mine, &to)) == Answer::Waits;
                     }
                 }
                 Ok(())
@@ -573,10 +602,28 @@ mod tests {
         assert!(!c.prewarm && !c.lanes && c.lanes_root == Path::new("/w"));
     }
 
+    /// A deployment is at the tips when each repository the tips name is at its commit there: one
+    /// it lacks (a nested repository newly followed) or holds at another commit moves it, one it
+    /// holds besides (no longer followed) does not.
+    #[test]
+    fn a_deployment_is_at_the_tips_by_each_repository_they_name() {
+        let (a, b, c, e) = ("a".repeat(40), "b".repeat(40), "c".repeat(40), "e".repeat(40));
+        let tips = Pin::at(&a).with("commercial", &c).with("repo-b", &e).key();
+        assert!(at_tips(&tips, &tips));
+        assert!(!at_tips(&Pin::at(&a).with("commercial", &c).key(), &tips), "repo-b newly followed");
+        assert!(!at_tips(&Pin::at(&a).with("commercial", &c).with("repo-b", &b).key(), &tips));
+        assert!(!at_tips(&Pin::at(&b).with("commercial", &c).with("repo-b", &e).key(), &tips));
+        assert!(at_tips(&Pin::at(&a).with("commercial", &c).with("repo-b", &e).with("repo-c", &b).key(), &tips), "repo-c no longer followed");
+        assert!(!at_tips("", &tips), "no deployment yet");
+        let status = |deploy: &str| format!("{{\"node\":\"n\",\"up\":true,\"dev\":true,\"leases\":0,\"user\":false,\"caps\":{}}}", crate::lease::Caps { deploy: deploy.into(), cores: 16, ..Default::default() }.to_json());
+        let (todo, _, _) = nodes_to_apply(&["n".to_string()], &[status(&Pin::at(&a).with("commercial", &c).key())], &tips);
+        assert_eq!(todo, vec!["n"]);
+    }
+
     #[test]
     fn deployment_follows_tips_while_the_work_tree_is_held() {
-        let tips = crate::state::Pair::new(&"a".repeat(40), &"c".repeat(40)).pin_key();
-        let old = crate::state::Pair::new(&"b".repeat(40), &"d".repeat(40)).pin_key();
+        let tips = Pin::at(&"a".repeat(40)).with("commercial", &"c".repeat(40)).key();
+        let old = Pin::at(&"b".repeat(40)).with("commercial", &"d".repeat(40)).key();
         assert_eq!(tips, format!("{},commercial={}", "a".repeat(40), "c".repeat(40)), "the tips in a node's caps' form");
         let status = |node: &str, deploy: &str, tree: &str, leases: u32, user: bool| {
             let caps = crate::lease::Caps { deploy: deploy.into(), tree: tree.into(), cores: 16, ram_gb: 64.0, ram_avail_gb: 40.0, ..Default::default() };
@@ -606,17 +653,17 @@ mod tests {
         };
         let moves = Mutex::new(PinMoves::default());
         let (pin, later) = (format!("{},commercial={}", "a".repeat(40), "c".repeat(40)), format!("{},commercial={}", "b".repeat(40), "c".repeat(40)));
-        let revs = |at: &str| crate::state::Pair::of_pin_key(at).map(|p| (p.work, p.main)).unwrap();
+        let revs = |at: &str| Pin::parse(at).unwrap();
         let on = || follow.waits().on.contains("node-a");
         let (order_tx, order_rx) = std::sync::mpsc::channel::<String>();
-        let (answer_tx, answer_rx) = std::sync::mpsc::channel::<Result<(String, String), String>>();
+        let (answer_tx, answer_rx) = std::sync::mpsc::channel::<Result<Pin, String>>();
         let (order_tx, answer_rx) = (Mutex::new(order_tx), Mutex::new(answer_rx));
         let settled = || while moves.lock().unwrap().running.contains("node-a") { std::thread::sleep(Duration::from_millis(1)); };
         // (the box's caps have not said a move yet)
         let deploys = BTreeMap::from([("node-a".to_string(), "old".to_string())]);
         std::thread::scope(|s| {
-            let apply: MoveTo = Arc::new(|_: &str, at: &str| {
-                order_tx.lock().unwrap().send(at.to_string()).unwrap();
+            let apply: MoveTo = Arc::new(|_: &str, at: &Pin| {
+                order_tx.lock().unwrap().send(at.key()).unwrap();
                 answer_rx.lock().unwrap().recv().unwrap()
             });
             let pass = |at: &str, holds: bool| pin_pass(s, &follow, &moves, vec![("node-a".to_string(), ("L2".to_string(), at.to_string()))], &deploys, |_, _| holds, Duration::from_secs(3600), apply.clone());
@@ -672,6 +719,28 @@ mod tests {
         assert_eq!(*said.lock().unwrap(), vec![("a".into(), Some("x".into())), ("b".into(), Some("y".into())), ("a".into(), none.clone()), ("b".into(), none)]);
     }
 
+    /// The state keeps each node's applied pin, every repository of it; a line in another form
+    /// is not read (that node's next apply writes it again). An apply's answer counts once it
+    /// names a commit of every repository the order moved.
+    #[test]
+    fn the_state_and_an_apply_answer_carry_every_repository_of_the_pin() {
+        let dir = std::env::temp_dir().join(format!("devhub-autosync-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (a, c, e) = ("a".repeat(40), "c".repeat(40), "e".repeat(40));
+        let to = Pin::at(&a).with("commercial", &c).with("repo-b", &e);
+        let mut applied = Applied { path: dir.join("autosync.state"), revs: BTreeMap::from([("node-a".to_string(), to.clone())]), dirty: true };
+        applied.save().unwrap();
+        let text = std::fs::read_to_string(dir.join("autosync.state")).unwrap();
+        assert_eq!(text, format!("node-a {a},commercial={c},repo-b={e}\n"));
+        std::fs::write(dir.join("autosync.state"), format!("{text}node-b {a} {c}\n")).unwrap();
+        assert_eq!(Applied::load(dir.join("autosync.state")).revs, BTreeMap::from([("node-a".to_string(), to.clone())]), "an old three-word line is not read");
+        let answer = |b: &str| vec![format!("{{\"applied\":{{\"makepad\":\"{a}\",\"commercial\":\"{c}\"{b},\"session\":\"\",\"ms\":5}}}}")];
+        assert_eq!(apply_result(0, &answer(&format!(",\"repo-b\":\"{e}\"")), &to), Ok(to.clone()));
+        assert!(apply_result(0, &answer(""), &to).is_err(), "a repository the order moved is missing from the answer");
+        assert_eq!(apply_result(0, &answer(""), &Pin::at(&a).with("commercial", &c)), Ok(Pin::at(&a).with("commercial", &c)), "the answer of an order of makepad and commercial");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn conf_parses() {
         let repo = Path::new("/checkout/makepad");
@@ -707,12 +776,20 @@ mod tests {
         };
         // (no checkout: a deployment holds only the tip it is at)
         let none = Path::new("/nonexistent-devhub-repo");
+        let follows = super::super::followed(none);
         std::fs::write(home.join("buckets.jsonl"), row('a', "") + &row('b', "") + &row('c', "\"check pkg-x\"")).unwrap();
-        assert_eq!(proven_move(&home, none, &at('a')), Ok(at('b')), "b proven, c has a new red unit");
-        let held = proven_move(&home, none, &at('b')).unwrap_err();
+        assert_eq!(proven_move(&home, none, &at('a'), &follows), Ok(at('b')), "b proven, c has a new red unit");
+        let held = proven_move(&home, none, &at('b'), &follows).unwrap_err();
         let (b, c, f) = ("b".repeat(10), "c".repeat(10), "f".repeat(10));
         assert!(held.starts_with(&format!("held at {b},{f}: tip {c},{f} has check pkg-x failing")) && held.ends_with("(log l-c)"), "{held}");
-        assert_eq!(proven_move(&home, none, ""), Ok(at('c')), "a box new to the rule starts at the newest run");
+        assert_eq!(proven_move(&home, none, "", &follows), Ok(at('c')), "a box new to the rule starts at the newest run");
+        // a run that also pinned a nested repository the deployments do not follow: the move
+        // names only the ones they do
+        let (d, e, f) = ("d".repeat(40), "e".repeat(40), "f".repeat(40));
+        let mut rows = std::fs::read_to_string(home.join("buckets.jsonl")).unwrap();
+        rows.push_str(&format!("{{\"bucket\":\"fast\",\"tip\":{{\"work\":\"{d}\",\"main\":\"{f}\",\"nested\":{{\"repo-b\":\"{e}\"}}}},\"started_ms\":1,\"failing\":[],\"passed\":[\"check pkg-x\"],\"log\":\"l-d\"}}\n"));
+        std::fs::write(home.join("buckets.jsonl"), rows).unwrap();
+        assert_eq!(proven_move(&home, none, &at('b'), &follows), Ok(at('d')));
         let _ = std::fs::remove_dir_all(&home);
     }
 }

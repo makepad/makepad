@@ -6,6 +6,11 @@ license = "MIT OR Apache-2.0"
 publish = false
 description = "devhub: observes every JIT on the LAN (events, explorer, full remote inspect for the master), one app with master and node roles"
 
+# `devhub test` runs these tests in the lane's tree, never a JIT overlay (which holds the pinned
+# commit alone, at a root only the JIT's process sees)
+[package.metadata.makepad]
+test-tree = "its tests walk this checkout's git history and run cargo tree on it"
+
 # `makepad devhub <words>` is this binary (the JIT binary forwards to it through cargo): a devhub change
 # never rebuilds the JIT, and a JIT change never rebuilds devhub
 [[bin]]

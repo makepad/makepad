@@ -21,8 +21,8 @@
 //!   whole or not at all, so a worktree is never left half merged; when the second half of a pair
 //!   refuses, the first takes back only the bot's own merge, with its ref locked and checked.
 //! - Held branches (`devhub hold <branch>`) are skipped.
-//! - Never a push, a force, a rebase, or a reset but of its own merge. A merge gives the branch a new sha, which the
-//!   landing train treats as a new candidate (landbatch.failed skips only the sha that failed).
+//! - Never a push, a force, a rebase, or a reset but of its own merge. A merge gives the branch a new sha, which
+//!   lands only by the lane's next hand-in: the train merges the commits a hand-in pinned ([`crate::land::Entry::ms`]).
 //!
 //! State (the master's one state document, `state.json`): its `merges` section (per lane half:
 //! the last result) and `held` (branch, why). `devhub lanes` lists it; every change of

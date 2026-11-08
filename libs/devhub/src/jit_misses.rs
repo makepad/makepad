@@ -60,7 +60,7 @@ pub(crate) fn compile_errors(log: &str) -> Vec<String> {
             if line.starts_with("test result: ok.") || line.starts_with("test result: FAILED.") { harness = false; }
             continue;
         }
-        if line.starts_with("makepad live:") || line.contains("restart the app") { continue; }
+        if line.starts_with("makepad live:") || line.contains("restart the app") || app_log(line) { continue; }
         // A run's crash report (a test's panic, a fault): the program's verdict, never a build's.
         if line.starts_with("report: {") || line.contains(" report: {") || line.starts_with("report (caught): {") { continue; }
         if let Ok(v) = makepad_strict_json::parse(line.as_bytes()) {
@@ -97,6 +97,13 @@ pub(crate) fn compile_errors(log: &str) -> Vec<String> {
         }
     }
     if errors.is_empty() { summary } else { errors }
+}
+
+/// A line of the program's own log (`log!`, `error!`: `[I] <file>:<line>:<col> - <message>`, and
+/// `[E]`, `[W]`, `[!]`, `[.]`): what the app said while it ran, never a build's error. An app's
+/// `[I]` line at a source line read as one, and its runs went to cargo as JIT misses (M75-M77, 11-07).
+fn app_log(line: &str) -> bool {
+    ["[I] ", "[E] ", "[W] ", "[!] ", "[.] "].iter().any(|p| line.starts_with(p))
 }
 
 /// A located diagnostic that is no error: `<file>.rs:<line>:<col>: warning|note|help: ..`. A JIT
@@ -190,18 +197,35 @@ pub(crate) fn notice(v: &Value) -> String {
 
 /// Whether a package is JIT-own; an empty repo uses the local checkout.
 pub(crate) fn jit_own(repo: &Path, pair: &crate::state::Pair, pkg: &str) -> Result<bool, String> {
+    test_package(repo, pair, pkg).map(|(own, _)| own)
+}
+
+/// Whether a package is JIT-own, and why its tests run in the lane's tree, never a JIT overlay:
+/// its `[package.metadata.makepad] test-tree` reason. An overlay holds the pinned commit alone,
+/// at a root only the JIT's own process reads: a test that walks the checkout's history or runs
+/// cargo on it failed there for want of them, never of its code (devhub's, 11-07). An empty
+/// repo uses the local checkout.
+pub(crate) fn test_package(repo: &Path, pair: &crate::state::Pair, pkg: &str) -> Result<(bool, Option<String>), String> {
     #[cfg(feature = "checkout")]
     {
-        use crate::orch::ci::{jit_own_dirs, package_dirs, Tree};
         let repo = if repo.as_os_str().is_empty() { crate::orch::repo() } else { repo.to_path_buf() };
-        let tree = Tree::at(&repo, pair)?;
-        Ok(package_dirs(&tree).get(pkg).is_some_and(|dir| jit_own_dirs(&tree).contains(dir)))
+        Ok(package_of(&crate::orch::ci::Tree::at(&repo, pair)?, pkg))
     }
     #[cfg(not(feature = "checkout"))]
     {
         let _ = (repo, pair, pkg);
-        Ok(false)
+        Ok((false, None))
     }
+}
+
+#[cfg(feature = "checkout")]
+fn package_of(tree: &crate::orch::ci::Tree, pkg: &str) -> (bool, Option<String>) {
+    use crate::orch::ci::{jit_own_dirs, package_dirs};
+    use makepad_toml_parser::{parse_toml, Toml};
+    let Some(dir) = package_dirs(tree).remove(pkg) else { return (false, None) };
+    let manifest = if dir.is_empty() { "Cargo.toml".to_string() } else { format!("{dir}/Cargo.toml") };
+    let why = tree.read(&manifest).and_then(|t| parse_toml(&t).ok()).and_then(|d| d.get_path(&["package", "metadata", "makepad", "test-tree"]).and_then(Toml::as_str).map(str::to_string));
+    (jit_own_dirs(tree).contains(&dir), why)
 }
 
 /// The packages the JIT binary is built from.
@@ -541,6 +565,33 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         let error = "/tree/src/b.rs:1:2: E0308: mismatched types";
         log.push_str(error);
         assert_eq!(compile_errors(&log), vec![error.to_string()]);
+    }
+
+    /// A line of the app's own log at a source line is no compile error: an `[I]` line of a guard
+    /// run was its JIT miss (M75-M77, 11-07).
+    #[test]
+    fn an_apps_log_line_is_no_compile_error() {
+        let log = "[I] apps/x/src/fx.rs:628:17 - effects: bloom read (144.5 ms)\n[E] apps/x/src/fx.rs:9:1 - no such picture\n[W] src/a.rs:3:2 - slow\n";
+        assert!(compile_errors(log).is_empty(), "{:?}", compile_errors(log));
+        let error = "/tree/src/b.rs:1:2: E0308: mismatched types";
+        assert_eq!(compile_errors(&format!("{log}{error}\n")), vec![error.to_string()]);
+    }
+
+    /// A package says why its tests need the lane's tree; one that says nothing runs in an
+    /// overlay. devhub's own tests walk this checkout's history and run cargo tree on it, which
+    /// an overlay lacks (11-07).
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn a_package_whose_tests_read_the_checkout_runs_in_the_tree() {
+        let t = crate::orch::ci::Tree::mem(vec![
+            ("libs/a/Cargo.toml", "[package]\nname = \"a\"\n[package.metadata.makepad]\ntest-tree = \"its tests read the history\"\n"),
+            ("libs/b/Cargo.toml", "[package]\nname = \"b\"\n[package.metadata.makepad]\nplatforms = [\"desktop\"]\n"),
+        ]);
+        assert_eq!(super::package_of(&t, "a"), (false, Some("its tests read the history".to_string())));
+        assert_eq!(super::package_of(&t, "b"), (false, None));
+        assert_eq!(super::package_of(&t, "c"), (false, None));
+        let own = makepad_toml_parser::parse_toml(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap()).unwrap();
+        assert!(own.get_path(&["package", "metadata", "makepad", "test-tree"]).and_then(makepad_toml_parser::Toml::as_str).is_some(), "devhub's tests read the checkout: its Cargo.toml says so");
     }
 
     /// A JIT warning or note at a source line is no compile error: M71 recorded a test run's

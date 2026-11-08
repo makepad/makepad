@@ -2313,7 +2313,9 @@ fn judged<'a>(ci: &'a Ci, tip: &Pair, since: u64) -> Option<&'a CiRun> {
 /// a previous master started (adopted from its `.log.run`) answers from that run's verdict: the
 /// run itself outlived the master and went on in its slot.
 pub fn ci(repo: PathBuf) -> crate::bucket::Run {
-    Arc::new(move |base, tip, log| {
+    Arc::new(move |base_pin, tip_pin, log| {
+        // CI runs work and main
+        let tip = &tip_pin.pair();
         let Some(ctx) = super::ctx() else {
             return crate::bucket::Outcome { ok: false, failing: Vec::new(), log: String::new(), summary: "CI incomplete: master not started".into(), no_verdict: Some("the master has not started".into()) };
         };
@@ -2321,8 +2323,8 @@ pub fn ci(repo: PathBuf) -> crate::bucket::Run {
         while !RESUMED.load(std::sync::atomic::Ordering::Acquire) { std::thread::sleep(Duration::from_millis(200)); }
         // the bucket's start, its log's name (none: a run asked outside a bucket)
         let since = crate::bucket::log_started(log);
-        if let (Some(since), Some(base)) = (since, base) {
-            if let Err(e) = crate::bucket::save_run(log, std::process::id(), since, base, tip) {
+        if let (Some(since), Some(base)) = (since, base_pin) {
+            if let Err(e) = crate::bucket::save_run(log, std::process::id(), since, base, tip_pin) {
                 ctx.store.event("ci", Sev::Warn, format!("ci bucket {}: noting its run: {e}", tip.short()), None);
             }
         }
@@ -2358,7 +2360,7 @@ pub fn regression(repo: PathBuf) -> crate::bucket::Run {
     Arc::new(move |base, tip, log| {
         let outcome = run(base, tip, log);
         if let (Some(ctx), false) = (super::ctx(), run_stop(false).load(std::sync::atomic::Ordering::SeqCst)) {
-            own_tests_after(&calling_ctx(ctx, repo.clone()), tip);
+            own_tests_after(&calling_ctx(ctx, repo.clone()), &tip.pair());
         }
         outcome
     })
@@ -4257,7 +4259,29 @@ mod tests {
             }
             tips.into_iter().map(|t| t.to_hex()).collect::<Vec<_>>()
         }).unwrap();
-        let lock = std::fs::read_to_string(repo.join("Cargo.lock")).unwrap();
+        // the checkout's lock, as CI's `Digests::at` reads it: untracked, written by cargo, so a
+        // tree no cargo ran in yet has none (a JIT run's in the lane's tree, 11-07). One there is
+        // read as it is; with none, cargo writes the one any build here would in a temp dir that
+        // links the checkout's top-level entries: the checkout is never written (the test rewrote
+        // the checkout's lock under its builds, and wrote one into a tree that had none)
+        let lock = match std::fs::read_to_string(repo.join("Cargo.lock")) {
+            Ok(lock) => lock,
+            Err(_) => {
+                let copy = std::env::temp_dir().join(format!("devhub-digests-lock-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&copy);
+                std::fs::create_dir_all(&copy).unwrap();
+                for name in std::fs::read_dir(&repo).unwrap().map(|e| e.unwrap().file_name()).filter(|n| n != ".git" && n != "target") {
+                    std::os::unix::fs::symlink(repo.join(&name), copy.join(&name)).unwrap();
+                }
+                let made = std::process::Command::new(crate::orch::roll::cargo_bin()).current_dir(&copy).args(["metadata", "--offline", "--format-version", "1"]).stdout(std::process::Stdio::null()).output().unwrap();
+                assert!(made.status.success(), "cargo metadata: {}", String::from_utf8_lossy(&made.stderr));
+                assert!(!repo.join("Cargo.lock").exists(), "cargo wrote the checkout's lock");
+                let lock = std::fs::read_to_string(copy.join("Cargo.lock")).unwrap();
+                // (the links go, never what they link to)
+                std::fs::remove_dir_all(&copy).unwrap();
+                lock
+            }
+        };
         let oses = [Os::Linux, Os::Macos, Os::Windows];
         let texts: Mutex<HashMap<String, Option<String>>> = Mutex::new(HashMap::new());
         let read_per_blob = |tree: &Tree, krate: &str, files: &[&str]| -> BTreeSet<String> {

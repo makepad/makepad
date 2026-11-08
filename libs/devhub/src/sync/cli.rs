@@ -580,21 +580,26 @@ fn retired_refusal(repo: &Path, line: &str) -> Option<&'static str> {
     (crate::gitread::Pass::default().retired_holds(repo, from) == Some(true)).then_some("makepad")
 }
 
+/// `follow`: the repositories to move, each with its branch (makepad first, [`super::followed`]);
 /// `at`: the commits to move to (a timed ask's pin, [`crate::lease::Pin::key`]) in place of the
 /// branches' tips; the branches name them on the node.
-pub(super) fn push_and_apply(c: &Client, repo: &Path, makepad_branch: &str, commercial: Option<&str>, at: Option<&str>, nodes: &[String], build: &str, restart: &str, prewarm: bool, extra: &str, out: &mut dyn FnMut(&str, &str)) -> i32 {
+pub(super) fn push_and_apply(c: &Client, repo: &Path, follow: &[(String, String)], at: Option<&str>, nodes: &[String], build: &str, restart: &str, prewarm: bool, extra: &str, out: &mut dyn FnMut(&str, &str)) -> i32 {
     let mut pushes = Vec::new();
     let pinned = at.map(|a| crate::lease::Pin::parse(a).ok_or_else(|| format!("`{a}` is no pin (`<makepad sha>[,<name>=<sha>]...`)")));
-    let paired = crate::state::PAIRED;
-    for (name, dir, branch) in [("makepad", repo.to_path_buf(), Some(makepad_branch)), (paired, repo.join(crate::nested::dir(paired)), commercial)] {
+    for (name, branch) in follow {
+        let dir = if name == "makepad" { repo.to_path_buf() } else { repo.join(crate::nested::dir(name)) };
+        // a pin that names none of a nested repository other than the paired one leaves it where
+        // it is (a timed ask's pin names the repositories its run reads)
+        if pinned.as_ref().is_some_and(|p| p.as_ref().is_ok_and(|p| name != "makepad" && name != crate::state::PAIRED && !p.nested.contains_key(name))) {
+            continue;
+        }
         let pin = pinned.as_ref().map(|p| {
             let p = p.as_ref().map_err(String::clone)?;
             let sha = if name == "makepad" { Some(p.makepad.clone()) } else { p.nested.get(name).cloned() };
             sha.ok_or_else(|| format!("`{}` names no {name} commit", at.unwrap_or("")))
         });
-        let Some(branch) = branch else { continue };
         match pin.unwrap_or_else(|| branch_sha(&dir, branch)) {
-            Ok(sha) => pushes.push(Push { repo: name.to_string(), dir, branch: branch.to_string(), sha }),
+            Ok(sha) => pushes.push(Push { repo: name.clone(), dir, branch: branch.clone(), sha }),
             Err(e) => {
                 for n in nodes {
                     out(n, &format!("{{\"err\":{}}}", makepad_remote::json_str(&e)));
@@ -719,8 +724,8 @@ fn sync_push(c: &Client, args: &[&str]) -> i32 {
         if n.is_empty() { println!("{l}"); } else { println!("{n} {l}"); }
     };
     let Some(session) = flag(args, "--session") else {
-        let commercial = (!args.contains(&"--no-commercial")).then(|| flag(args, "--commercial").unwrap_or("main"));
-        return push_and_apply(c, &repo, flag(args, "--makepad").unwrap_or("work"), commercial, None, &nodes, build, restart, args.contains(&"--prewarm"), "", &mut out);
+        let follow: Vec<(String, String)> = pushes.iter().map(|p| (p.repo.clone(), p.branch.clone())).collect();
+        return push_and_apply(c, &repo, &follow, None, &nodes, build, restart, args.contains(&"--prewarm"), "", &mut out);
     };
     let revs: String = pushes.iter().map(|p| format!(" {}={}", p.repo, p.sha)).collect();
     for p in &pushes {
