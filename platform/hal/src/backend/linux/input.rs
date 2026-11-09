@@ -254,8 +254,10 @@ pub(super) fn button(code: u32) -> u32 {
         0x110 | 1 => 1,
         0x111 | 3 => 2,
         0x112 | 2 => 4,
-        0x113 | 8 => 8,
-        0x114 | 9 => 16,
+        // most mice send their back/forward thumb buttons as BTN_SIDE/BTN_EXTRA (X11 buttons 8/9),
+        // but some send BTN_BACK (0x116)/BTN_FORWARD (0x115)
+        0x113 | 0x116 | 8 => 8,
+        0x114 | 0x115 | 9 => 16,
         _ => 0,
     }
 }
