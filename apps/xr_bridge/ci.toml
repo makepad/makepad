@@ -16,10 +16,10 @@ work = "01480d769c143b6aa4fc837b1e675b7aa1ac6d05"
 
 [app.windows]
 capture = ""
-date = "2026-11-08"
-digest = "692d9fd1bd69bccf8867e2ba60b483b5d65e4b09fafde7f61ffed76c8b8fac11"
-main = "7a3bfa2fed356bd7323016f85ff43cae31292417"
-work = "564a9a3f5ebbc02911363ae2e23fd3fcd34a69ac"
+date = "2026-11-09"
+digest = "b714ef4ffb2ea418f118592f8ff1d85c625db3e3beac3af3e5fb459730d24ba5"
+main = "97c198d89dd03f219b3d47ffd68d93fba841442f"
+work = "e528b1738df62c0590f67e7f147da7d5e69c38de"
 
 [job.jit_05.linux]
 date = "2026-11-04"
