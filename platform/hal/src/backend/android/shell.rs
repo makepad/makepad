@@ -153,8 +153,9 @@ impl Shell for AndroidShell {
                 jni::ime_command(cmd)
             },
             OsCmd::ClipSet { text } => jni::copy_to_clipboard(&text),
-            OsCmd::SelectionHandles { op: action, start, end, .. } => jni::selection_handles(action, start, end),
-            OsCmd::ClipboardActions { show, area, selection, .. } => jni::clipboard_actions(show, area, selection),
+            // they sit at the asking window's points, so only the Activity's own window places them (a hide always goes)
+            OsCmd::SelectionHandles { id, op: action, start, end } if action == selection_handles::HIDE || lock(&Shared::global().state).recipient == Some((sid, id)) => jni::selection_handles(action, start, end),
+            OsCmd::ClipboardActions { id, show, area, selection } if !show || lock(&Shared::global().state).recipient == Some((sid, id)) => jni::clipboard_actions(show, area, selection),
             OsCmd::BackUnhandled => jni::back_unhandled(),
             OsCmd::NativeAppearance { value } => jni::set_native_appearance(value),
             OsCmd::MobileUi { op: mobile_ui::APP_BACKGROUND, value } => jni::set_app_background(value),
