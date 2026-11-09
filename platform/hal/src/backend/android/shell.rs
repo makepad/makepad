@@ -153,6 +153,7 @@ impl Shell for AndroidShell {
                 jni::ime_command(cmd)
             },
             OsCmd::ClipSet { text } => jni::copy_to_clipboard(&text),
+            OsCmd::SelectionHandles { op: action, start, end, .. } => jni::selection_handles(action, start, end),
             OsCmd::BackUnhandled => jni::back_unhandled(),
             OsCmd::NativeAppearance { value } => jni::set_native_appearance(value),
             OsCmd::MobileUi { op: mobile_ui::APP_BACKGROUND, value } => jni::set_app_background(value),

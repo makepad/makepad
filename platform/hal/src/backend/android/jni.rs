@@ -403,6 +403,17 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
     }).unwrap_or(false)
 }
 
+/// The selection's drag handles at `start` / `end`, in window points (the Activity takes pixels).
+pub(super) fn selection_handles(action: u32, start: [f32; 2], end: [f32; 2]) -> bool {
+    let dpi = Shared::global().dpi();
+    let args = [start[0], start[1], end[0], end[1]].map(|v| jvalue { f: v * dpi });
+    with_activity(|env, activity| unsafe { match action {
+        crate::selection_handles::SHOW => void(env, activity, c"showSelectionHandles", c"(FFFF)V", &args),
+        crate::selection_handles::MOVE => void(env, activity, c"updateSelectionHandles", c"(FFFF)V", &args),
+        _ => void(env, activity, c"hideSelectionHandles", c"()V", &[]),
+    } }).unwrap_or(false)
+}
+
 /// Registers the shell's, and the media services' natives in one strict pass. The
 /// returned names are the Java natives no HAL module owns (app-side services); they are never
 /// filled with no-op functions.
