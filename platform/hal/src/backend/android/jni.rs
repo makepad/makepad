@@ -81,6 +81,11 @@ pub(super) fn set_native_appearance(value: u32) -> bool {
 pub(super) fn set_system_bar_appearance(dark_icons: bool) -> bool {
     with_activity(|env, activity| unsafe { void(env, activity, c"setSystemBarAppearance", c"(Z)V", &[jvalue { z: dark_icons as jboolean }]) }).unwrap_or(false)
 }
+pub(super) fn set_screen_orientation(orientation: u32) -> bool {
+    // ActivityInfo's SCREEN_ORIENTATION_SENSOR_PORTRAIT, _SENSOR_LANDSCAPE and _UNSPECIFIED (no lock)
+    let value = match orientation { crate::mobile_ui::orientation::PORTRAIT => 7, crate::mobile_ui::orientation::LANDSCAPE => 6, _ => -1 };
+    with_activity(|env, activity| unsafe { void(env, activity, c"setScreenOrientation", c"(I)V", &[jvalue { i: value }]) }).unwrap_or(false)
+}
 pub(super) fn set_app_background(argb: u32) -> bool {
     with_activity(|env, activity| unsafe { void(env, activity, c"setAppBackgroundColor", c"(I)V", &[jvalue { i: argb as jint }]) }).unwrap_or(false)
 }
