@@ -3730,14 +3730,21 @@ public class MakepadActivity
                 try {
                     Display.Mode current = display.getMode();
                     Display.Mode topMode = current;
+                    boolean hasOtherRefreshRates = false;
                     for (Display.Mode mode : display.getSupportedModes()) {
-                        if (mode.getPhysicalWidth() == current.getPhysicalWidth()
-                            && mode.getPhysicalHeight() == current.getPhysicalHeight()
-                            && mode.getRefreshRate() > topMode.getRefreshRate()) {
+                        if (mode.getPhysicalWidth() != current.getPhysicalWidth()
+                            || mode.getPhysicalHeight() != current.getPhysicalHeight()) {
+                            continue;
+                        }
+                        hasOtherRefreshRates |= mode.getRefreshRate() != current.getRefreshRate();
+                        if (mode.getRefreshRate() > topMode.getRefreshRate()) {
                             topMode = mode;
                         }
                     }
-                    modeId = topMode.getModeId();
+                    // With just one refresh rate there's nothing to boost to, and setting a mode costs a relayout.
+                    if (hasOtherRefreshRates) {
+                        modeId = topMode.getModeId();
+                    }
                 } catch (IllegalStateException e) {
                     // getMode() throws if the display's info is ever out of sync, and a boost isn't worth a crash.
                     return;
