@@ -392,6 +392,17 @@ pub(super) fn ime_command(cmd: OsCmd) -> bool {
     }).unwrap_or(false)
 }
 
+pub(super) fn copy_to_clipboard(text: &str) -> bool {
+    with_activity(|env, activity| unsafe {
+        let utf16: Vec<u16> = text.encode_utf16().collect();
+        let s = ((**env).NewString.unwrap())(env, utf16.as_ptr(), utf16.len() as i32);
+        let ok = !s.is_null() && void(env, activity, c"copyToClipboard", c"(Ljava/lang/String;)V", &[jvalue { l: s }]);
+        if ((**env).ExceptionCheck.unwrap())(env) != 0 { ((**env).ExceptionDescribe.unwrap())(env); ((**env).ExceptionClear.unwrap())(env); }
+        if !s.is_null() { ((**env).DeleteLocalRef.unwrap())(env, s); }
+        ok
+    }).unwrap_or(false)
+}
+
 /// Registers the shell's, and the media services' natives in one strict pass. The
 /// returned names are the Java natives no HAL module owns (app-side services); they are never
 /// filled with no-op functions.

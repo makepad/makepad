@@ -152,6 +152,7 @@ impl Shell for AndroidShell {
                 if lock(&Shared::global().state).ime_session != Some(sid) { return false; }
                 jni::ime_command(cmd)
             },
+            OsCmd::ClipSet { text } => jni::copy_to_clipboard(&text),
             OsCmd::BackUnhandled => jni::back_unhandled(),
             OsCmd::NativeAppearance { value } => jni::set_native_appearance(value),
             OsCmd::MobileUi { op: mobile_ui::APP_BACKGROUND, value } => jni::set_app_background(value),
