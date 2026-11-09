@@ -13,7 +13,8 @@ use {
         event::xr::XrAnchor,
         event::{
             video_playback::CameraPreviewMode, DigitId, DragItem, Event, NextFrame, QuitReason,
-            QuitRequestedEvent, ScrollDirection, ScrollEvent, Timer, Trigger, VideoSource,
+            QuitRequestedEvent, ScrollDirection, ScrollEvent, Timer, TouchPoint, Trigger,
+            VideoSource,
         },
         gpu_info::GpuInfo,
         ime::TextInputConfig,
@@ -1657,6 +1658,7 @@ impl Cx {
         config: TextInputConfig,
     ) {
         if !self.keyboard.text_ime_dismissed {
+            self.keyboard.is_text_ime_hide_deferred = false;
             self.ime_area = area;
             let rect = area.rect(self);
             self.publish_hosted_ime(crate::ime::HostedImeState {
@@ -1688,10 +1690,35 @@ impl Cx {
         });
     }
 
+    /// Hides the soft keyboard, once no widget is being pressed by a finger.
+    ///
+    /// Hiding it moves everything above it, which would move a pressed widget out from under the finger.
     pub fn hide_text_ime(&mut self) {
-        self.publish_hosted_ime(crate::ime::HostedImeState::default());
         self.keyboard.reset_text_ime_dismissed();
-        self.platform_ops.push_back(CxOsOp::HideTextIME);
+        self.keyboard.is_text_ime_hide_deferred = true;
+        self.flush_text_ime_hide();
+    }
+
+    /// Cancels a hide of the soft keyboard that's still waiting for a press to end,
+    /// e.g., because a text input that shows it took the key focus again.
+    pub fn cancel_text_ime_hide(&mut self) {
+        self.keyboard.is_text_ime_hide_deferred = false;
+        self.keyboard.is_text_ime_hide_cancelled = true;
+    }
+
+    /// Sends out a hide of the soft keyboard that's been waiting, unless a widget is still being pressed.
+    fn flush_text_ime_hide(&mut self) {
+        if self.keyboard.is_text_ime_hide_deferred && !self.fingers.is_touch_press_held() {
+            self.keyboard.is_text_ime_hide_deferred = false;
+            self.publish_hosted_ime(crate::ime::HostedImeState::default());
+            self.platform_ops.push_back(CxOsOp::HideTextIME);
+        }
+    }
+
+    /// Ends a touch update after it was dispatched.
+    pub(crate) fn end_touch_update(&mut self, touches: &[TouchPoint]) {
+        self.fingers.process_touch_update_end(touches);
+        self.flush_text_ime_hide();
     }
 
     /// Whether keys go to a text field now: the widget with the key focus
@@ -1705,6 +1732,7 @@ impl Cx {
 
     pub fn text_ime_was_dismissed(&mut self) {
         self.publish_hosted_ime(crate::ime::HostedImeState::default());
+        self.keyboard.is_text_ime_hide_deferred = false;
         self.keyboard.set_text_ime_dismissed();
         // A focused TextInput re-pushes ShowTextIME on every draw, so a show op
         // queued by a frame drawn just before this dismissal landed can still be
@@ -1996,6 +2024,7 @@ impl Cx {
     /// Call it once those widgets saw the touch get canceled.
     pub fn release_touch_captures(&mut self, uid: u64) {
         self.fingers.release_digit(live_id_num!(touch, uid).into());
+        self.flush_text_ime_hide();
     }
 
     pub fn sweep_unlock(&mut self, value: Area) {
