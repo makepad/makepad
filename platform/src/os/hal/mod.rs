@@ -142,6 +142,9 @@ pub struct HalClient {
     /// the color last given to the Activity to show in place of its surface
     #[cfg(target_os = "android")]
     pub(crate) app_background_argb: Option<u32>,
+    /// the Activity's "compiling shaders" screen was already asked for, which only the first frame needs
+    #[cfg(target_os = "android")]
+    pub(crate) shader_compile_screen_requested: bool,
     /// the oldest input event (HAL ns) consumed since the last frame was built
     pub(crate) input_ns: u64,
     /// a composition is in flight (`Ime` start / update seen, not yet committed or cancelled)
@@ -235,6 +238,8 @@ impl Default for HalClient {
             internal_drag_items: None,
             #[cfg(target_os = "android")]
             app_background_argb: None,
+            #[cfg(target_os = "android")]
+            shader_compile_screen_requested: false,
             input_ns: 0,
             composing: false,
             ime_visible: false,

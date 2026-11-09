@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The text of the screen shown while the first launch compiles shaders.
+  An app can replace it by shipping its own resources/android/res/values/makepad_shader_compile_strings.xml.
+-->
+<resources>
+    <!-- The \u2060 word joiner keeps the ellipsis from wrapping onto a line of its own. -->
+    <string name="makepad_shader_compile_title">Compiling shaders (for UI styling)\u2060…</string>
+    <string name="makepad_shader_compile_note">This is a one-time process that is only necessary the first time you run this app.</string>
+</resources>

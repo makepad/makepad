@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The colors of the screen shown while the first launch compiles shaders, on a light or dark app background.
+  An app can replace them by shipping its own resources/android/res/values/makepad_shader_compile_colors.xml.
+-->
+<resources>
+    <color name="makepad_shader_compile_title_light">#FF1F2328</color>
+    <color name="makepad_shader_compile_note_light">#FF59636E</color>
+    <color name="makepad_shader_compile_spinner_light">#FF1F2328</color>
+    <color name="makepad_shader_compile_title_dark">#FFF2F2F2</color>
+    <color name="makepad_shader_compile_note_dark">#FFCCCCCC</color>
+    <color name="makepad_shader_compile_spinner_dark">#FFF2F2F2</color>
+</resources>

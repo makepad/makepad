@@ -81,6 +81,9 @@ pub(super) fn set_native_appearance(value: u32) -> bool {
 pub(super) fn set_app_background(argb: u32) -> bool {
     with_activity(|env, activity| unsafe { void(env, activity, c"setAppBackgroundColor", c"(I)V", &[jvalue { i: argb as jint }]) }).unwrap_or(false)
 }
+pub(super) fn show_shader_compile_screen() -> bool {
+    with_activity(|env, activity| unsafe { void(env, activity, c"showShaderCompileScreen", c"()V", &[]) }).unwrap_or(false)
+}
 
 unsafe fn method(env: *mut JNIEnv, object: jobject, name: &CStr, sig: &CStr) -> jmethodID {
     let cls = ((**env).GetObjectClass.unwrap())(env, object);

@@ -1130,6 +1130,23 @@ impl Cx {
         self.hal_pick_readback(fb, ticket, original, twin);
     }
 
+    /// The Activity shows our clear color in place of the surface whenever it hasn't drawn yet,
+    /// like at startup or while resuming.
+    #[cfg(target_os = "android")]
+    pub(crate) fn fb_send_app_background(&mut self, fb: &mut FrameBuilder, pass_id: DrawPassId) {
+        if let CxDrawPassParent::Window(w) = self.passes[pass_id].parent {
+            if !self.windows[w].is_popup {
+                let color = self.passes[pass_id].clear_color;
+                let [r, g, b] = [color.x, color.y, color.z].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u32);
+                let argb = 0xFF00_0000 | (r << 16) | (g << 8) | b;
+                if self.hal.app_background_argb != Some(argb) {
+                    self.hal.app_background_argb = Some(argb);
+                    fb.w.mobile_ui(makepad_hal::mobile_ui::APP_BACKGROUND, argb);
+                }
+            }
+        }
+    }
+
     /// One pass into one FramePacket. None when the pass paints nothing now.
     fn fb_pass(&mut self, fb: &mut FrameBuilder, pass_id: DrawPassId, input_ns: u64) -> Option<u64> {
         let picking = self.pick.paint.is_some();
@@ -1162,20 +1179,8 @@ impl Cx {
             },
             _ => (None, false),
         };
-        // The Activity shows our clear color in place of the surface whenever it hasn't drawn yet,
-        // like at startup or while resuming.
         #[cfg(target_os = "android")]
-        if let CxDrawPassParent::Window(w) = self.passes[pass_id].parent {
-            if !self.windows[w].is_popup {
-                let color = self.passes[pass_id].clear_color;
-                let [r, g, b] = [color.x, color.y, color.z].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u32);
-                let argb = 0xFF00_0000 | (r << 16) | (g << 8) | b;
-                if self.hal.app_background_argb != Some(argb) {
-                    self.hal.app_background_argb = Some(argb);
-                    fb.w.mobile_ui(makepad_hal::mobile_ui::APP_BACKGROUND, argb);
-                }
-            }
-        }
+        self.fb_send_app_background(fb, pass_id);
         if let Some(w) = window {
             if !self.hal.window_ready(w) {
                 // the HAL has not confirmed the window yet: the pass stays dirty
