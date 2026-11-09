@@ -48,6 +48,11 @@ impl NextFrameGate {
         }
     }
 
+    /// Withholds frames from a hidden child until it asks for one outside a NextFrame.
+    pub fn withhold_frames(&mut self) {
+        self.wants_frame = false;
+    }
+
     pub fn mark_drawn(&mut self, cx: &mut Cx) {
         self.was_visible = true;
         if std::mem::take(&mut self.skipped_frame) {
