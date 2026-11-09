@@ -1,10 +1,14 @@
 #[cfg(target_arch = "wasm32")]
 use super::{
+    font_atlas::GlyphImageKind,
     image::{Bgra, Image},
     msdfer::Msdfer,
-    rasterizer::{CompletedMsdfJob, QueuedMsdfJob},
+    rasterizer::{CompletedMsdfJob, CompletedOutlineJob, CompletedSdfJob, QueuedOutlineJob},
+    sdfer::Sdfer,
     slug_atlas::SlugAtlas,
 };
+#[cfg(target_arch = "wasm32")]
+use makepad_font_core::raster::render_sdf;
 use {
     super::{
         font::{Font, FontId, GlyphId},
@@ -21,6 +25,42 @@ use {
 };
 #[cfg(target_arch = "wasm32")]
 use std::mem::ManuallyDrop;
+
+/// How we draw glyphs that have outlines. Color glyphs like emoji always come from the atlas.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GlyphRendering {
+    /// Slug at every size, on every platform.
+    #[default]
+    PlatformDefault,
+    /// The GPU draws every glyph from its outline's curves.
+    Slug,
+    /// Glyphs below 128 dpx/em come from the SDF atlas, and a frame waits for the ones it's missing.
+    Atlas,
+    /// Like `Atlas`, but a glyph draws with Slug until its SDF is ready instead of waiting for it.
+    ///
+    /// The web has no worker to build SDFs without threads, so there this is the same as `Atlas`.
+    Hybrid,
+}
+
+pub fn get_glyph_rendering(cx: &Cx) -> GlyphRendering {
+    cx.get_global_ref::<GlyphRendering>().copied().unwrap_or_default()
+}
+
+/// Sets how we draw glyphs from now on, redrawing everything if text already exists.
+///
+/// It's fine to call this before any text exists, like in `app_main!`'s `configure`.
+pub fn set_glyph_rendering(cx: &mut Cx, glyph_rendering: GlyphRendering) {
+    if *cx.global::<GlyphRendering>() == glyph_rendering {
+        return;
+    }
+    *cx.global::<GlyphRendering>() = glyph_rendering;
+    if !cx.has_global::<Rc<RefCell<Fonts>>>() {
+        return;
+    }
+    let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+    fonts.borrow_mut().apply_glyph_rendering(glyph_rendering);
+    cx.redraw_all();
+}
 
 #[derive(Default)]
 struct LazyFontRequests {
@@ -67,10 +107,12 @@ pub struct Fonts {
     /// Outline glyphs at or above this size draw as slug curves, smaller ones from the
     /// SDF/MSDF atlas. 0 (the default, every platform): all text is slug.
     slug_min_dpxs_per_em: f32,
+    glyph_rendering: GlyphRendering,
+    default_outline_rasterization_mode: OutlineRasterizationMode,
     #[cfg(target_arch = "wasm32")]
-    msdf_job_sender: Option<FromUISender<QueuedMsdfJob>>,
+    msdf_job_sender: Option<FromUISender<QueuedOutlineJob>>,
     #[cfg(target_arch = "wasm32")]
-    msdf_result_receiver: ToUIReceiver<CompletedMsdfJob>,
+    msdf_result_receiver: ToUIReceiver<CompletedOutlineJob>,
     /// Upgrades the MSDF worker has sent (it raises the UI signal after each) and those
     /// applied at a draw: the signal hook redraws while sent > applied.
     #[cfg(target_arch = "wasm32")]
@@ -94,7 +136,8 @@ impl Fonts {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new(cx: &mut Cx, settings: layouter::Settings) -> Self {
         let layouter = Layouter::new(settings);
-        Self {
+        let default_outline_rasterization_mode = layouter.rasterizer().borrow().outline_rasterization_mode();
+        let mut fonts = Self {
             layouter,
             lazy_font_requests: Default::default(),
             system_fallback: Default::default(),
@@ -117,30 +160,37 @@ impl Fonts {
                 TextureFormat::VecRGBAf32 { width: 1, height: 1, data: None, updated: TextureUpdated::Empty },
             ),
             slug_min_dpxs_per_em: 0.0,
+            glyph_rendering: GlyphRendering::PlatformDefault,
+            default_outline_rasterization_mode,
             unavailable_fonts: FxHashSet::default(),
             unavailable_generation: 0,
-        }
+        };
+        fonts.apply_configured_glyph_rendering(cx);
+        fonts
     }
 
     #[cfg(target_arch = "wasm32")]
     pub fn new(cx: &mut Cx, settings: layouter::Settings) -> Self {
         let layouter = Layouter::new(settings);
         let atlas_size = layouter.rasterizer().borrow().color_atlas().size();
-        let msdf_result_receiver: ToUIReceiver<CompletedMsdfJob> = Default::default();
+        let default_outline_rasterization_mode = layouter.rasterizer().borrow().outline_rasterization_mode();
+        let msdf_result_receiver: ToUIReceiver<CompletedOutlineJob> = Default::default();
         let msdf_sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         #[cfg(not(target_feature = "atomics"))]
         let msdf_job_sender = None;
         #[cfg(target_feature = "atomics")]
         let msdf_job_sender = {
-            let mut sender: FromUISender<QueuedMsdfJob> = Default::default();
+            let mut sender: FromUISender<QueuedOutlineJob> = Default::default();
             let worker_rx = sender.receiver().expect("MSDF worker receiver is taken exactly once");
             let worker_tx = msdf_result_receiver.sender();
             let worker_sent = msdf_sent.clone();
             let msdfer_settings = layouter.rasterizer().borrow().msdfer().settings();
+            let sdfer_settings = layouter.rasterizer().borrow().sdfer().settings();
             match cx.spawn_worker(move || {
                 let mut msdfer = Msdfer::new(msdfer_settings);
+                let mut sdfer = Sdfer::new(sdfer_settings);
                 while let Ok(job) = worker_rx.recv() {
-                    let completed = render_msdf_job(&mut msdfer, job);
+                    let completed = render_outline_job(&mut msdfer, &mut sdfer, job);
                     // Count before the send so the UI signal sees the completed job.
                     worker_sent.fetch_add(1, std::sync::atomic::Ordering::Release);
                     if worker_tx.send(completed).is_err() { break; }
@@ -151,7 +201,7 @@ impl Fonts {
             }
         };
 
-        Self {
+        let mut fonts = Self {
             layouter,
             lazy_font_requests: Default::default(),
             system_fallback: Default::default(),
@@ -168,6 +218,8 @@ impl Fonts {
             ),
             slug_atlas: SlugAtlas::new(cx),
             slug_min_dpxs_per_em: 0.0,
+            glyph_rendering: GlyphRendering::PlatformDefault,
+            default_outline_rasterization_mode,
             msdf_job_sender,
             msdf_result_receiver,
             msdf_sent,
@@ -175,7 +227,32 @@ impl Fonts {
             msdf_jobs_in_flight: 0,
             unavailable_fonts: FxHashSet::default(),
             unavailable_generation: 0,
+        };
+        fonts.apply_configured_glyph_rendering(cx);
+        fonts
+    }
+
+    /// `set_glyph_rendering` can run before any text exists, so a new `Fonts` applies its choice here.
+    fn apply_configured_glyph_rendering(&mut self, cx: &mut Cx) {
+        let glyph_rendering = *cx.global::<GlyphRendering>();
+        if glyph_rendering != GlyphRendering::PlatformDefault {
+            self.apply_glyph_rendering(glyph_rendering);
         }
+    }
+
+    fn apply_glyph_rendering(&mut self, glyph_rendering: GlyphRendering) {
+        let mut rasterizer = self.layouter.rasterizer().borrow_mut();
+        let (slug_min_dpxs_per_em, outline_rasterization_mode) = match glyph_rendering {
+            GlyphRendering::PlatformDefault => (0.0, self.default_outline_rasterization_mode),
+            GlyphRendering::Slug => (0.0, OutlineRasterizationMode::Sdf),
+            GlyphRendering::Atlas | GlyphRendering::Hybrid => (
+                rasterizer.msdf_resolution().max_dpxs_per_em,
+                OutlineRasterizationMode::Sdf,
+            ),
+        };
+        rasterizer.set_outline_rasterization_mode(outline_rasterization_mode);
+        self.slug_min_dpxs_per_em = slug_min_dpxs_per_em;
+        self.glyph_rendering = glyph_rendering;
     }
 
     pub fn rasterizer(&self) -> &Rc<RefCell<Rasterizer>> {
@@ -226,6 +303,16 @@ impl Fonts {
         dpxs_per_em >= self.slug_min_dpxs_per_em
     }
 
+    /// Returns whether a glyph should come from an SDF the worker builds, drawing with Slug until then.
+    pub fn should_use_hybrid_glyph(&self, dpxs_per_em: f32) -> bool {
+        // On the web without threads there's no worker to wait for, so this draws like `Atlas`.
+        #[cfg(target_arch = "wasm32")]
+        if self.msdf_job_sender.is_none() {
+            return false;
+        }
+        self.glyph_rendering == GlyphRendering::Hybrid && !self.should_use_slug_glyph(dpxs_per_em)
+    }
+
     /// Selects the SDF/MSDF atlas for outline glyphs below `dpxs_per_em` (`f32::INFINITY`: the
     /// atlas at every size; `outline_rasterization_mode` picks SDF or MSDF). Slug is the default
     /// at every size (0).
@@ -271,7 +358,7 @@ impl Fonts {
             .layouter
             .rasterizer()
             .try_borrow()
-            .map_or(0, |rasterizer| rasterizer.queued_msdf_job_count());
+            .map_or(0, |rasterizer| rasterizer.queued_outline_job_count());
         self.msdf_jobs_in_flight + queued
     }
 
@@ -490,6 +577,9 @@ impl Fonts {
         for (local, kind, glyphs) in &outbox.requests {
             cx.hal_glyph_request(*local, *kind, glyphs);
         }
+        for (local, kind, glyphs) in &outbox.background_requests {
+            cx.hal_glyph_request_background(*local, *kind, glyphs);
+        }
         cx.hal_glyphs_pending(&outbox.pending);
         if !outbox.releases.is_empty() {
             cx.hal_glyph_release(&outbox.releases);
@@ -519,7 +609,7 @@ impl Fonts {
         if self.slug_atlas.reset_if_needed() {
             return false;
         }
-        let completed = self.apply_completed_msdf_jobs() + self.dispatch_msdf_jobs();
+        let completed = self.apply_completed_outline_jobs() + self.dispatch_outline_jobs();
         if completed > 0 {
             cx.redraw_all();
         }
@@ -550,7 +640,7 @@ impl Fonts {
     /// The start of a draw. Under the HAL: takes what the font service answered since the last one
     /// (the atlas textures lent to this session, the glyphs that arrived or were taken back).
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn prepare_atlases_if_needed(&mut self, cx: &mut Cx) {
+    pub fn prepare_atlases_if_needed(&mut self, cx: &mut Cx, _draw_event: &DrawEvent) {
         use crate::makepad_platform::{hal_font_wire as wire, HalFontEvent};
         for event in cx.hal_take_font_events() {
             let mut rasterizer = self.layouter.rasterizer().borrow_mut();
@@ -577,12 +667,15 @@ impl Fonts {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub fn prepare_atlases_if_needed(&mut self, cx: &mut Cx) {
-        if !self.needs_prepare_atlases {
-            return;
+    pub fn prepare_atlases_if_needed(&mut self, cx: &mut Cx, draw_event: &DrawEvent) {
+        if self.needs_prepare_atlases {
+            self.prepare_atlas(cx);
+            self.needs_prepare_atlases = false;
         }
-        self.prepare_atlas(cx);
-        self.needs_prepare_atlases = false;
+        // a full redraw can use finished SDFs right away, any other draw leaves them for `prepare_textures`
+        if draw_event.redraw_all {
+            self.apply_completed_outline_jobs();
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -594,9 +687,14 @@ impl Fonts {
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn dispatch_msdf_jobs(&mut self) -> usize {
-        let jobs = self.layouter.rasterizer().borrow_mut().take_queued_msdf_jobs();
-        let mut fallback: Option<Msdfer> = None;
+    fn dispatch_outline_jobs(&mut self) -> usize {
+        let jobs = {
+            let mut rasterizer = self.layouter.rasterizer().borrow_mut();
+            let mut jobs = rasterizer.take_queued_msdf_jobs();
+            jobs.extend(rasterizer.take_queued_sdf_jobs());
+            jobs
+        };
+        let mut fallback: Option<(Msdfer, Sdfer)> = None;
         let mut completed = 0;
         for job in jobs {
             let job = if let Some(sender) = &self.msdf_job_sender {
@@ -607,22 +705,25 @@ impl Fonts {
             } else { job };
             // Without threads, finish the same raster work here. A failed worker
             // send returns ownership of the job, so it can use this path too.
-            let msdfer = fallback.get_or_insert_with(|| Msdfer::new(self.layouter.rasterizer().borrow().msdfer().settings()));
-            let result = render_msdf_job(msdfer, job);
-            self.layouter.rasterizer().borrow_mut().apply_completed_msdf_job(result);
+            let (msdfer, sdfer) = fallback.get_or_insert_with(|| {
+                let rasterizer = self.layouter.rasterizer().borrow();
+                (Msdfer::new(rasterizer.msdfer().settings()), Sdfer::new(rasterizer.sdfer().settings()))
+            });
+            let result = render_outline_job(msdfer, sdfer, job);
+            self.layouter.rasterizer().borrow_mut().apply_completed_outline_job(result);
             completed += 1;
         }
         completed
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn apply_completed_msdf_jobs(&mut self) -> usize {
+    fn apply_completed_outline_jobs(&mut self) -> usize {
         let mut completed = 0usize;
         while let Ok(job) = self.msdf_result_receiver.try_recv() {
             self.layouter
                 .rasterizer()
                 .borrow_mut()
-                .apply_completed_msdf_job(job);
+                .apply_completed_outline_job(job);
             completed += 1;
             self.msdf_jobs_in_flight = self.msdf_jobs_in_flight.saturating_sub(1);
         }
@@ -641,10 +742,14 @@ impl Fonts {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn render_msdf_job(msdfer: &mut Msdfer, job: QueuedMsdfJob) -> CompletedMsdfJob {
+fn render_outline_job(msdfer: &mut Msdfer, sdfer: &mut Sdfer, job: QueuedOutlineJob) -> CompletedOutlineJob {
+    if job.key.kind == GlyphImageKind::OutlineSdf {
+        let sdf_image = render_sdf(sdfer, &job.outline, job.dpxs_per_em, job.key.size);
+        return CompletedOutlineJob::Sdf(CompletedSdfJob { key: job.key, sdf_image, epoch: job.epoch });
+    }
     let mut msdf = Image::<Bgra>::new(job.key.size);
     msdfer.outline_to_msdf(&job.outline, job.dpxs_per_em, &mut msdf.subimage_mut(super::geom::Rect::from(job.key.size)));
-    CompletedMsdfJob { key: job.key, pixels: msdf.into_pixels(), epoch: job.epoch }
+    CompletedOutlineJob::Msdf(CompletedMsdfJob { key: job.key, pixels: msdf.into_pixels(), epoch: job.epoch })
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -475,10 +475,27 @@ fn note_glyph_uses(cx: &mut Cx2d) {
 /// for an atlas image. Also answers the slug generation a draw must upload (web), or 0.
 fn prepare_glyph(cx: &mut Cx2d, glyph: &LaidoutGlyph, dpxs_per_em: f32) -> (Option<PreparedGlyph>, u64) {
     let raster_image = glyph.font.has_glyph_raster_image(glyph.id, dpxs_per_em);
-    if !raster_image && cx.fonts.borrow().should_use_slug_glyph(dpxs_per_em) {
+    let mut is_waiting_on_sdf = false;
+    // `GlyphRendering::Hybrid`: a missing SDF doesn't hold the frame, its slug curves draw meanwhile
+    if !raster_image && cx.fonts.borrow().should_use_hybrid_glyph(dpxs_per_em) {
+        let sdf_glyph = cx.fonts.borrow().rasterizer().borrow_mut()
+            .get_or_queue_glyph_outline_sdf(&glyph.font, glyph.id, dpxs_per_em);
+        if sdf_glyph.is_some() {
+            return (sdf_glyph.map(PreparedGlyph::Raster), 0);
+        }
+        is_waiting_on_sdf = true;
+    }
+    if !raster_image && (is_waiting_on_sdf || cx.fonts.borrow().should_use_slug_glyph(dpxs_per_em)) {
         let lookup = cx.fonts.borrow_mut().get_or_cache_slug_glyph(glyph.font.as_ref(), glyph.id);
         match lookup {
-            SlugGlyphCacheResult::Ready(info) => return (Some(PreparedGlyph::Slug(info)), 0),
+            SlugGlyphCacheResult::Ready(info) => {
+                // this list redraws with the SDFs once they're all in
+                #[cfg(not(target_arch = "wasm32"))]
+                if let (true, Some(list)) = (is_waiting_on_sdf, cx.draw_list_stack.last().copied()) {
+                    cx.hal_redraw_list_after_background_glyphs(list);
+                }
+                return (Some(PreparedGlyph::Slug(info)), 0);
+            }
             SlugGlyphCacheResult::NeedsUpload { generation, glyph: info } => return (Some(PreparedGlyph::Slug(info)), generation),
             SlugGlyphCacheResult::Empty => return (None, 0),
             SlugGlyphCacheResult::Unavailable => {

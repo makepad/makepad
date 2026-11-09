@@ -1,9 +1,9 @@
 use super::{
-    font::{Font, GlyphId},
+    font::{Font, FontId, GlyphId},
     font_atlas::{ColorAtlas, GlyphImageKey, GrayscaleAtlas, MsdfAtlas},
     geom::{Point, Size},
     glyph_outline::GlyphOutline,
-    image::Bgra,
+    image::{Bgra, Image, R},
     msdfer::Msdfer,
     sdfer::Sdfer,
 };
@@ -14,8 +14,9 @@ pub use makepad_font_core::raster::{
 };
 use makepad_font_core::raster::{
     plan_color, plan_outline_msdf, plan_outline_sdf, AtlasPlane, AtlasSlot, MultiPlaneAllocator,
-    COLOR_PADDING,
+    SdfPlan, COLOR_PADDING,
 };
+use std::rc::Rc;
 //use std::{fs::File, io::BufWriter, path::Path, slice};
 
 #[derive(Debug)]
@@ -29,7 +30,13 @@ pub struct Rasterizer {
     outline_msdf_ready: FxHashSet<GlyphImageKey>,
     outline_msdf_pending: FxHashSet<GlyphImageKey>,
     outline_msdf_failed: FxHashSet<GlyphImageKey>,
-    queued_msdf_jobs: Vec<QueuedMsdfJob>,
+    queued_msdf_jobs: Vec<QueuedOutlineJob>,
+    outline_sdf_pending: FxHashSet<GlyphImageKey>,
+    queued_sdf_jobs: Vec<QueuedOutlineJob>,
+    /// The fonts and sizes (as `f32` bits) whose printable ASCII we've already queued.
+    prewarm_sdf_sizes: FxHashSet<(FontId, u32)>,
+    /// The fonts and sizes whose printable ASCII we queue after this frame's own glyphs.
+    queued_sdf_prewarms: Vec<(Rc<Font>, f32)>,
     atlas_epoch: u64,
 }
 
@@ -109,6 +116,10 @@ impl Rasterizer {
             outline_msdf_pending: FxHashSet::default(),
             outline_msdf_failed: FxHashSet::default(),
             queued_msdf_jobs: Vec::new(),
+            outline_sdf_pending: FxHashSet::default(),
+            queued_sdf_jobs: Vec::new(),
+            prewarm_sdf_sizes: FxHashSet::default(),
+            queued_sdf_prewarms: Vec::new(),
             atlas_epoch: 0,
         }
     }
@@ -144,15 +155,55 @@ impl Rasterizer {
         self.outline_msdf_pending.clear();
         self.outline_msdf_failed.clear();
         self.queued_msdf_jobs.clear();
+        self.outline_sdf_pending.clear();
+        self.queued_sdf_jobs.clear();
+        self.prewarm_sdf_sizes.clear();
+        self.queued_sdf_prewarms.clear();
         self.atlas_epoch = self.atlas_epoch.wrapping_add(1);
     }
 
-    pub fn queued_msdf_job_count(&self) -> usize {
-        self.queued_msdf_jobs.len()
+    pub fn queued_outline_job_count(&self) -> usize {
+        self.queued_msdf_jobs.len() + self.queued_sdf_jobs.len()
     }
 
-    pub fn take_queued_msdf_jobs(&mut self) -> Vec<QueuedMsdfJob> {
+    pub fn take_queued_msdf_jobs(&mut self) -> Vec<QueuedOutlineJob> {
         std::mem::take(&mut self.queued_msdf_jobs)
+    }
+
+    /// Takes the SDF jobs queued since the last call, with the printable ASCII we prewarm last.
+    pub fn take_queued_sdf_jobs(&mut self) -> Vec<QueuedOutlineJob> {
+        for (font, dpxs_per_em) in std::mem::take(&mut self.queued_sdf_prewarms) {
+            let glyph_ids = font.with_ttf_parser_face(|face| {
+                (' '..='~')
+                    .filter_map(|ch| face.glyph_index(ch))
+                    .collect::<Vec<_>>()
+            });
+            for glyph_id in glyph_ids {
+                if let Some(plan) = plan_outline_sdf(&font, glyph_id.0, dpxs_per_em, &self.settings) {
+                    self.queue_glyph_outline_sdf(&plan);
+                }
+            }
+        }
+        std::mem::take(&mut self.queued_sdf_jobs)
+    }
+
+    pub fn apply_completed_outline_job(&mut self, job: CompletedOutlineJob) {
+        match job {
+            CompletedOutlineJob::Msdf(job) => self.apply_completed_msdf_job(job),
+            CompletedOutlineJob::Sdf(job) => self.apply_completed_sdf_job(job),
+        }
+    }
+
+    pub fn apply_completed_sdf_job(&mut self, job: CompletedSdfJob) {
+        if job.epoch != self.atlas_epoch || !self.outline_sdf_pending.remove(&job.key) {
+            return;
+        }
+        let Some((slot, allocated)) = self.allocate_sdf_slot(job.key) else {
+            return;
+        };
+        if allocated {
+            self.write_sdf_image(slot, &job.sdf_image);
+        }
     }
 
     pub fn apply_completed_msdf_job(&mut self, job: CompletedMsdfJob) {
@@ -327,17 +378,55 @@ impl Rasterizer {
         let (slot, allocated) = self.allocate_sdf_slot(plan.key.clone())?;
         if allocated {
             let sdf_image = plan.render(&mut self.sdfer);
-            let mut image = self.atlas.get_cached_glyph_image_mut(slot.rect);
-            for y in 0..plan.key.size.height {
-                for x in 0..plan.key.size.width {
-                    let point = Point::new(x, y);
-                    let v = sdf_image[point].r();
-                    let old = image[point];
-                    image[point] = slot.plane.set(old, v);
-                }
+            self.write_sdf_image(slot, &sdf_image);
+        }
+        Some(self.build_sdf_glyph(slot, &plan))
+    }
+
+    /// Returns the glyph's SDF if the atlas has it, or else queues it for the worker.
+    ///
+    /// The first time a font misses at some size, we also queue that font's printable ASCII.
+    pub fn get_or_queue_glyph_outline_sdf(
+        &mut self,
+        font: &Rc<Font>,
+        glyph_id: GlyphId,
+        dpxs_per_em: f32,
+    ) -> Option<RasterizedGlyph> {
+        let plan = plan_outline_sdf(font, glyph_id, dpxs_per_em, &self.settings)?;
+        if let Some(slot) = self.get_cached_slot(&plan.key) {
+            return Some(self.build_sdf_glyph(slot, &plan));
+        }
+        self.queue_glyph_outline_sdf(&plan);
+        if self.prewarm_sdf_sizes.insert((font.id(), plan.dpxs_per_em.to_bits())) {
+            self.queued_sdf_prewarms.push((font.clone(), plan.dpxs_per_em));
+        }
+        None
+    }
+
+    fn queue_glyph_outline_sdf(&mut self, plan: &SdfPlan) {
+        if self.cached_slots.contains_key(&plan.key) || !self.outline_sdf_pending.insert(plan.key.clone()) {
+            return;
+        }
+        self.queued_sdf_jobs.push(QueuedOutlineJob {
+            key: plan.key.clone(),
+            outline: plan.outline(),
+            dpxs_per_em: plan.dpxs_per_em,
+            epoch: self.atlas_epoch,
+        });
+    }
+
+    fn write_sdf_image(&mut self, slot: AtlasSlot, sdf_image: &Image<R>) {
+        let mut image = self.atlas.get_cached_glyph_image_mut(slot.rect);
+        for y in 0..slot.rect.size.height {
+            for x in 0..slot.rect.size.width {
+                let point = Point::new(x, y);
+                image[point] = slot.plane.set(image[point], sdf_image[point].r());
             }
         }
-        Some(RasterizedGlyph {
+    }
+
+    fn build_sdf_glyph(&self, slot: AtlasSlot, plan: &SdfPlan) -> RasterizedGlyph {
+        RasterizedGlyph {
             source: Default::default(),
             atlas_kind: AtlasKind::Grayscale,
             atlas_size: self.atlas.size(),
@@ -346,7 +435,7 @@ impl Rasterizer {
             atlas_plane: slot.plane.index(),
             origin_in_dpxs: plan.origin_in_dpxs,
             dpxs_per_em: plan.dpxs_per_em,
-        })
+        }
     }
 
     fn rasterize_glyph_outline_msdf(
@@ -395,7 +484,7 @@ impl Rasterizer {
             // The job crosses a thread boundary, so it needs an owned copy of the
             // outline. This deep clone happens at most once per glyph per atlas
             // epoch, guarded by the pending set above.
-            self.queued_msdf_jobs.push(QueuedMsdfJob {
+            self.queued_msdf_jobs.push(QueuedOutlineJob {
                 key,
                 outline: plan.outline(),
                 dpxs_per_em,
@@ -429,8 +518,9 @@ impl Rasterizer {
     }
 }
 
+/// A glyph outline for the worker to build an SDF or MSDF image of, depending on its key's kind.
 #[derive(Clone, Debug)]
-pub struct QueuedMsdfJob {
+pub struct QueuedOutlineJob {
     pub key: GlyphImageKey,
     pub outline: GlyphOutline,
     pub dpxs_per_em: f32,
@@ -442,6 +532,19 @@ pub struct CompletedMsdfJob {
     pub key: GlyphImageKey,
     pub pixels: Vec<Bgra>,
     pub epoch: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompletedSdfJob {
+    pub key: GlyphImageKey,
+    pub sdf_image: Image<R>,
+    pub epoch: u64,
+}
+
+#[derive(Clone, Debug)]
+pub enum CompletedOutlineJob {
+    Msdf(CompletedMsdfJob),
+    Sdf(CompletedSdfJob),
 }
 
 #[derive(Debug)]
