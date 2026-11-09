@@ -2551,6 +2551,13 @@ public class MakepadActivity
             }
         }
         else {
+            if (Build.VERSION.SDK_INT < 30) {
+                // applyEdgeToEdge() keeps the flags that are set, so the hiding ones have to go first.
+                decorView.setSystemUiVisibility(decorView.getSystemUiVisibility()
+                    & ~(View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY));
+            }
             applyEdgeToEdge();
             if (Build.VERSION.SDK_INT >= 30) {
                 android.view.WindowInsetsController controller = getWindow().getInsetsController();
