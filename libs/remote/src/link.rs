@@ -155,21 +155,22 @@ impl Client {
         Ok(c)
     }
 
-    /// A fresh carrier, what ends its handshake timeout, and the token its HELLO carries.
-    fn carrier(&self) -> io::Result<(Carrier, Option<Box<dyn FnOnce() + Send>>, String)> {
+    /// A fresh carrier, what ends its handshake timeout, and the token and own-process secret its
+    /// HELLO carries (`Hello::own`: loopback only, to an endpoint of this process).
+    fn carrier(&self) -> io::Result<(Carrier, Option<Box<dyn FnOnce() + Send>>, String, String)> {
         match &self.0.target {
             Target::Unix(p) => {
                 #[cfg(unix)]
                 {
                     let (c, keep) = carrier::unix::dial(p)?;
-                    Ok((c, Some(Box::new(move || carrier::unix::settle(&keep))), String::new()))
+                    Ok((c, Some(Box::new(move || carrier::unix::settle(&keep))), String::new(), String::new()))
                 }
                 // no Unix sockets: the path is a file naming a loopback endpoint and its token
                 #[cfg(windows)]
                 {
                     let (addr, token) = carrier::unix::resolve(p)?;
                     let (c, keep) = carrier::loopback::dial(&addr)?;
-                    Ok((c, Some(Box::new(move || carrier::loopback::settle(&keep))), token))
+                    Ok((c, Some(Box::new(move || carrier::loopback::settle(&keep))), token, carrier::loopback::own_secret_for(&addr)))
                 }
                 #[cfg(not(any(unix, windows)))]
                 {
@@ -180,15 +181,15 @@ impl Client {
             #[cfg(not(target_arch = "wasm32"))]
             Target::Loopback(addr, token) => {
                 let (c, keep) = carrier::loopback::dial(addr)?;
-                Ok((c, Some(Box::new(move || carrier::loopback::settle(&keep))), token.clone()))
+                Ok((c, Some(Box::new(move || carrier::loopback::settle(&keep))), token.clone(), carrier::loopback::own_secret_for(addr)))
             }
             #[cfg(not(target_arch = "wasm32"))]
-            Target::Tcp(addr, creds) => Ok((carrier::tcp::dial(addr, creds)?, None, String::new())),
-            Target::Dialer(dial) => Ok((dial()?, None, String::new())),
+            Target::Tcp(addr, creds) => Ok((carrier::tcp::dial(addr, creds)?, None, String::new(), String::new())),
+            Target::Dialer(dial) => Ok((dial()?, None, String::new(), String::new())),
             Target::Routed(..) => Err(io::Error::new(io::ErrorKind::Unsupported, "a routed client opens its channels through the hub")),
             Target::Command(argv) => {
                 let (first, rest) = argv.split_first().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty command"))?;
-                Ok((carrier::stdio::spawn(std::process::Command::new(first).args(rest))?, None, String::new()))
+                Ok((carrier::stdio::spawn(std::process::Command::new(first).args(rest))?, None, String::new(), String::new()))
             }
         }
     }
@@ -201,9 +202,9 @@ impl Client {
                 return Ok(c.clone());
             }
         }
-        let (mut car, settle, token) = self.carrier().map_err(|e| Error::LinkLost(e.to_string()))?;
+        let (mut car, settle, token, own) = self.carrier().map_err(|e| Error::LinkLost(e.to_string()))?;
         car.reader.deadline = Some(std::time::Instant::now() + Duration::from_secs(10));
-        let hello = Hello { name: self.0.name.clone(), link_id: self.0.link_id.clone(), token, ..Hello::default() };
+        let hello = Hello { name: self.0.name.clone(), link_id: self.0.link_id.clone(), token, own, ..Hello::default() };
         let ok = match hello::client_handshake(&mut car.reader, &mut *car.writer, &hello) {
             Ok(ok) => ok,
             Err(e) => {

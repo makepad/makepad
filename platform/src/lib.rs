@@ -111,6 +111,8 @@ pub mod perf_monitor;
 pub mod thread_counters;
 pub mod gpu_frame_timer;
 pub mod pass_load;
+#[cfg(not(target_arch = "wasm32"))]
+mod first_draw;
 pub mod gpu_admission;
 pub mod sploded;
 pub mod pick;

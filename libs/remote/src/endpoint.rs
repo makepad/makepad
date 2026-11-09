@@ -157,12 +157,15 @@ impl Endpoint {
 
     /// As [`serve_checked`](Self::serve_checked), for a peer whose process the carrier knows
     /// (`pid`, from a Unix socket's credentials): [`Hello::pid`] of the connection's peer, which a
-    /// command's log names as who asked ([`crate::cmd::asked_by`]).
+    /// command's log names as who asked ([`crate::cmd::asked_by`]). With no credentials (0), a peer
+    /// that sends this process's own secret (`Hello::own`) is this process.
     pub fn serve_peer(&self, mut reader: FrameReader, mut writer: Box<dyn Write + Send>, shutdown: Box<dyn Fn() + Send + Sync>, token: &str, pid: u32) -> Result<Conn, HandshakeError> {
         reader.deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
         let own = Hello { name: self.0.app.clone(), caps: self.caps(), token: token.to_string(), serving_pid: std::process::id(), serving_since_ms: self.0.since_ms, ..Hello::default() };
         let peer = match hello::server_handshake(&mut reader, &mut *writer, &own) {
-            Ok(p) => Hello { pid, ..p },
+            // (the loopback carrier gives no credentials: a peer with this process's own secret is
+            // this process; the secret goes no further)
+            Ok(p) => Hello { pid: if pid == 0 && crate::carrier::loopback::is_own(&p.own) { std::process::id() } else { pid }, own: String::new(), ..p },
             Err(e) => {
                 shutdown();
                 return Err(e);

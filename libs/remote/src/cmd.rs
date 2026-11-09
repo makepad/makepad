@@ -368,6 +368,12 @@ pub fn asked_by() -> Option<String> {
     }
 }
 
+/// The process that sent the command being answered on this thread, as its carrier's credentials
+/// say (a Unix socket's); 0 where the carrier cannot say (the loopback carrier), or for no command.
+pub fn asker_pid() -> u32 {
+    ASKER.with(|a| a.borrow().0)
+}
+
 /// The `cmd` service served by `dispatch`.
 pub fn service(dispatch: fn(&Req, &mut Out), end_fields: EndFields) -> Factory {
     Arc::new(move |conn, open| {

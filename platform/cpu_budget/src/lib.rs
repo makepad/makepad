@@ -696,6 +696,16 @@ pub fn park() { thread::park(); }
 #[relax_api]
 pub fn park_for(ns: u64) { thread::park_timeout(std::time::Duration::from_nanos(ns)); }
 
+/// A wait for an [`Admission`] of `class` (its poll gave no permit): the budget's native park,
+/// shown as a token wait where the host traces waits, as a wait in [`admit`] is.
+#[relax_api]
+pub fn park_admission(class: u8) {
+    match WAIT_HOOK.get() {
+        Some(hook) => hook(class),
+        None => thread::park(),
+    }
+}
+
 /// Admission whose class follows a native job while its worker waits. `desired` is the job's
 /// `AtomicU8::as_ptr`, alive for the call: the byte crosses the Relax op boundary, std's type doesn't.
 #[relax_api]

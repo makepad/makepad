@@ -1335,6 +1335,9 @@ impl Cx {
                 self.live_code_patched(file);
             }
         }
+        if seen != SEEN.load(Ordering::Relaxed) {
+            self.first_draw.note_patch();
+        }
         SEEN.store(seen, Ordering::Relaxed);
         self.live_patches = seen;
         self.redraw_all();
@@ -1685,6 +1688,8 @@ impl Cx {
     }
 
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.first_draw.note_event(event);
         // One dispatch for every backend, including remote input. Hover and plain
         // pointer motion leave startup warm-up alone; an actual gesture ends it.
         if crate::thread::ends_warmup(event) {

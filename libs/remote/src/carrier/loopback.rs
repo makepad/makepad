@@ -2,7 +2,9 @@
 //! port, guarded by a random 256-bit token. The endpoint writes `"socket":"tcp:127.0.0.1:PORT"`
 //! and `"token":"<hex>"` into its discovery file (in the user's temp folder, readable by that
 //! user); a client sends the token in HELLO and the endpoint refuses a HELLO without it. Nothing
-//! else about the connection differs from the Unix carrier.
+//! else about the connection differs from the Unix carrier, but that it gives no peer
+//! credentials: a client of the endpoint's own process says so with the process's own secret
+//! (`Hello::own`), which it sends only to an address this process serves.
 
 use super::Carrier;
 use crate::endpoint::Endpoint;
@@ -11,6 +13,27 @@ use makepad_network::clone_tcp;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
+
+/// This process's own secret (`Hello::own`): made with its first loopback endpoint, never written
+/// anywhere and never sent to another process's endpoint.
+static OWN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// The addresses this process's loopback endpoints listen on.
+static SERVED: std::sync::Mutex<Vec<SocketAddr>> = std::sync::Mutex::new(Vec::new());
+
+/// What the HELLO of a client that dials `addr` says of its process: this process's secret to an
+/// endpoint of this process, nothing to any other.
+pub fn own_secret_for(addr: &str) -> String {
+    let ours = addr.parse::<SocketAddr>().is_ok_and(|a| SERVED.lock().unwrap().contains(&a));
+    match OWN.get() {
+        Some(own) if ours => own.clone(),
+        _ => String::new(),
+    }
+}
+
+/// A peer whose HELLO carries this process's secret is this process.
+pub(crate) fn is_own(claim: &str) -> bool {
+    !claim.is_empty() && OWN.get().is_some_and(|own| own == claim)
+}
 
 /// 32 random bytes as hex.
 pub fn new_token() -> io::Result<String> {
@@ -55,6 +78,11 @@ pub fn settle(s: &TcpStream) {
 pub fn serve(ep: &Endpoint, token: &str) -> io::Result<SocketAddr> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let addr = listener.local_addr()?;
+    if OWN.get().is_none() {
+        // (two first endpoints at once: one secret is kept, either serves)
+        let _ = OWN.set(new_token()?);
+    }
+    SERVED.lock().unwrap().push(addr);
     let (ep, token) = (ep.clone(), token.to_string());
     let hooks = ep.hooks();
     std::thread::Builder::new().name("makepad-remote-accept".into()).spawn(move || {

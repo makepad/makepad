@@ -213,6 +213,44 @@ impl Cx {
         }
     }
 
+    /// The first-draw watch's round (`first_draw`): once per run, its flight-recorder event when
+    /// a run that started and beat paints no window round after round with no frame on its way.
+    fn first_draw_round(&mut self, display_clock: bool, reasked: bool) {
+        if self.first_draw.done() {
+            return;
+        }
+        let round = crate::first_draw::Round {
+            painted: self.window_paints != 0,
+            window: self.first_draw_window(),
+            hidden: self.hosted_frames_held(),
+            work: self.hal_has_work(),
+            reasked,
+        };
+        if !self.first_draw.round(round) {
+            return;
+        }
+        let b = |v: bool| v as u8;
+        let ids: Vec<_> = self.windows.id_iter().filter(|id| self.windows[*id].is_created).collect();
+        let ready = ids.iter().filter(|id| self.hal.window_ready(**id)).count();
+        let paused = ids.iter().filter(|id| self.windows[**id].paint_paused).count();
+        let shown = ids.iter().filter(|id| self.hal.glyph_wait.presented.contains(&hal_window_id(**id))).count();
+        let (dry, beats, live_edits, patches, events) = self.first_draw.counts();
+        let state = format!(
+            "no window painted: redraw {} dirty {} next {} draws {} hosted {} clock {} lost {}; windows {} ready {} paused {} shown {}; LiveEdit {} patch {}",
+            b(self.need_redrawing()), b(self.any_passes_dirty()), b(!self.new_next_frames.is_empty()), b(self.app_draws_now()),
+            b(self.hal.hosted.is_some()), b(display_clock), b(self.hal.device_lost), ids.len(), ready, paused, shown, live_edits, patches,
+        );
+        // (the events first: the state's mark has the recording written)
+        crate::makepad_error_log::flight::mark_ab(crate::first_draw::CAT_EVENTS, &format!("before: {}", self.first_draw.events_text()), events as u64, 0);
+        crate::makepad_error_log::flight::mark_ab(crate::first_draw::CAT, &state, dry as u64, beats as u64);
+    }
+
+    /// A window the first-draw watch waits for: made (a tray dropdown is made on first use) and
+    /// not paused by the app.
+    fn first_draw_window(&self) -> bool {
+        self.windows.id_iter().any(|id| self.windows[id].is_created && !self.windows[id].paint_paused)
+    }
+
     /// The paint clock stands still when nothing needs a frame.
     pub(super) fn hal_has_work(&self) -> bool {
         if self.hosted_frames_held() {
@@ -377,6 +415,8 @@ impl Cx {
                 // and not announced is asked again when its wait runs out
                 match requested.filter(|_| display_clock && self.hal_has_work()) {
                     Some(at) => (at + REREQUEST).saturating_duration_since(std::time::Instant::now()).as_nanos() as u64,
+                    // (a run that beat and painted nothing wakes to count its rounds: `first_draw`)
+                    None if self.first_draw.armed() && self.first_draw_window() => crate::first_draw::IDLE_ROUND_NS,
                     None => u64::MAX,
                 }
             } else {
@@ -501,6 +541,7 @@ impl Cx {
                 break 'turns;
             }
             // work for the next vsync: ask each window for a frame
+            let mut reasked = false;
             if hosted {
                 self.hal_hosted_announce_demand();
             } else if display_clock && !self.hal.device_lost && self.hal_has_work() && !self.hal.beat && requested.is_none_or(|t| t.elapsed() > REREQUEST) {
@@ -509,11 +550,13 @@ impl Cx {
                 for id in ids {
                     self.hal.frames.w.frame_request(hal_window_id(id));
                 }
+                reasked = asked && requested.is_some();
                 requested = Some(std::time::Instant::now());
                 if asked { loop_watch::requested(requested.unwrap()); }
             }
             self.hal_run_tasks();
             self.hal_submit_batch();
+            self.first_draw_round(display_clock, reasked);
             // what this turn leaves the loop waiting for, read by `loop` without the UI thread
             loop_watch::publish(display_clock && self.hal_has_work(), self.hal.beat,
                 in_flight.len(), in_flight.front().map(|&(_, at)| at), FRAMES_IN_FLIGHT);
@@ -677,6 +720,7 @@ impl Cx {
     /// draw event, shader compiles, then the passes into commands.
     pub(super) fn hal_beat(&mut self) -> bool {
         let _phase = crate::thread::ui_phase(crate::thread::UiPhase::Beat);
+        self.first_draw.note_beat();
         self.hal.beat_phases = [[0; 2]; 6];
         let wake = makepad_hal::clock_ns();
         self.hal.beat_phases[0][0] = wake;
@@ -850,6 +894,7 @@ impl Cx {
                 if pending_glyphs != 0 || pending_pipelines != 0 {
                     if first_frame {
                         crate::cx::first_frame_hold::deferred(pending_glyphs, pending_pipelines);
+                        self.first_draw.note_deferred();
                         if log_enabled() {
                             eprintln!("[hal-client] first window FramePacket deferred: pending_glyphs={} pending_pipelines={}; waiting for resources before submission",
                                 pending_glyphs, pending_pipelines);

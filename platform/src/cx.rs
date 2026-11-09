@@ -188,6 +188,10 @@ pub struct Cx {
     pub(crate) remote_present_owed: bool,
     /// Repaints that painted a window, since the start (`Cx::window_paints`).
     pub(crate) window_paints: u64,
+    /// This run painted no window yet: what came before, and its one event if none comes
+    /// (`first_draw`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) first_draw: crate::first_draw::FirstDrawWatch,
     /// A child its host says nothing shows of (`HostedVisible`: a hosted process over its
     /// socket, a HAL domain as an app message from its parent): next-frame callbacks and draws
     /// wait until it is shown again (`hosted_frames_held`).
@@ -1098,6 +1102,8 @@ impl Cx {
             #[cfg(not(target_arch = "wasm32"))]
             remote_present_owed: false,
             window_paints: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            first_draw: Default::default(),
             hosted_hidden: false,
 
             post_draw_hook: None,
