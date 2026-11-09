@@ -1144,6 +1144,7 @@ impl PortalList {
 
         let vi = self.vec_index;
         let mut visible_items = 0;
+        let mut tail_jumped = false;
         let mut filler_plan = None;
         let mut last_visible_id: Option<usize> = None;
 
@@ -1450,7 +1451,7 @@ impl PortalList {
                         // Instant jump: adjust first_scroll to scroll down
                         self.first_scroll -= self.tail_adjustment_needed;
                         self.tail_adjustment_needed = 0.0;
-                        self.area.redraw(cx);
+                        tail_jumped = true;
                     }
                 }
             }
@@ -1550,6 +1551,10 @@ impl PortalList {
         }
 
         cx.end_turtle_with_area(&mut self.area);
+        // A tail jump only shows in the next draw, and a plain redraw does nothing mid-draw.
+        if tail_jumped {
+            cx.redraw_area_in_draw(self.area);
+        }
         self.visible_items = visible_items;
         self.last_visible_id = last_visible_id;
 
@@ -2658,7 +2663,7 @@ impl PortalList {
             // The list was repositioned by code, so showing an end of it now
             // is news again — the same rule `set_first_id_and_scroll` follows.
             self.forget_reached_edges();
-            self.area.redraw(cx);
+            cx.redraw_area_in_draw(self.area);
         }
     }
 
