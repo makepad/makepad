@@ -1172,7 +1172,7 @@ impl Cx {
                 let argb = 0xFF00_0000 | (r << 16) | (g << 8) | b;
                 if self.hal.app_background_argb != Some(argb) {
                     self.hal.app_background_argb = Some(argb);
-                    self.hal.frames.w.mobile_ui(makepad_hal::mobile_ui::APP_BACKGROUND, argb);
+                    fb.w.mobile_ui(makepad_hal::mobile_ui::APP_BACKGROUND, argb);
                 }
             }
         }
