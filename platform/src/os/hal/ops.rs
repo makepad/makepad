@@ -436,14 +436,23 @@ impl Cx {
                     // focus from another input) keeps the keyboard up.
                     #[cfg(target_os = "android")]
                     { self.hal.pending_ime_hide = false; }
+                    let config = ime_config(&config);
+                    // The backend forgets its last show the moment the keyboard closes, so a repeat
+                    // drawn before we've heard about that close would bring the keyboard back.
+                    #[cfg(target_os = "android")]
+                    if !self.hal_is_embedded() && self.hal.ime_shown.replace(config) == Some(config) {
+                        continue;
+                    }
                     // both corners of the caret line (area-relative layout points) in native points
                     let window_id = self.get_window_id_of(&area).unwrap_or(crate::window::CxWindowPool::id_zero());
                     let area_pos = area.clipped_rect(self).pos;
                     let tl = self.windows[window_id].layout_vec2d_to_native_points(area_pos + cursor_rect.pos);
                     let br = self.windows[window_id].layout_vec2d_to_native_points(area_pos + cursor_rect.pos + cursor_rect.size);
-                    self.hal.frames.w.ime_show(hal_window_id(window_id), [tl.x as f32, tl.y as f32, (br.x - tl.x) as f32, (br.y - tl.y) as f32], ime_config(&config));
+                    self.hal.frames.w.ime_show(hal_window_id(window_id), [tl.x as f32, tl.y as f32, (br.x - tl.x) as f32, (br.y - tl.y) as f32], config);
                 }
                 CxOsOp::HideTextIME => {
+                    #[cfg(target_os = "android")]
+                    { self.hal.ime_shown = None; }
                     // On Android a hide waits until after the next draw, but only the non-hosted
                     // beat in `hal_run` sends it, so a hosted or embedded session hides right away.
                     #[cfg(target_os = "android")]

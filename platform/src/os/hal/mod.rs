@@ -149,6 +149,10 @@ pub struct HalClient {
     /// the soft keyboard is up and its height (layout points), to drop repeated reports
     pub(crate) ime_visible: bool,
     pub(crate) ime_height: f64,
+    /// The keyboard config we last showed, until our own hide or a closed report clears it. A child
+    /// session embedded in a parent doesn't keep one, since its shows get dropped while unfocused.
+    #[cfg(target_os = "android")]
+    pub(crate) ime_shown: Option<u32>,
     /// Set by `HideTextIME`, which waits until after the next draw, so that moving focus
     /// from one text input to another keeps the keyboard up instead of hiding it.
     #[cfg(target_os = "android")]
@@ -249,6 +253,8 @@ impl Default for HalClient {
             composing: false,
             ime_visible: false,
             ime_height: 0.0,
+            #[cfg(target_os = "android")]
+            ime_shown: None,
             #[cfg(target_os = "android")]
             pending_ime_hide: false,
             #[cfg(target_os = "android")]
