@@ -1676,6 +1676,12 @@ impl PortalList {
         if let Some(draw_state) = self.draw_state.get() {
             match draw_state {
                 ListDrawState::Begin => {
+                    // If the range shrank past the item we last showed first, we'd only draw items outside of it,
+                    // so we show the last items instead.
+                    if self.first_id >= self.range_end && self.range_end > self.range_start {
+                        self.first_id = self.range_end - 1;
+                        self.first_scroll = 0.0;
+                    }
                     let viewport = cx.turtle().inner_rect();
                     self.draw_state.set(ListDrawState::Down {
                         index: self.first_id,
