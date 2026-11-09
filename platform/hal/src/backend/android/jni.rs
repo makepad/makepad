@@ -243,7 +243,23 @@ fn key(code: i32) -> u32 {
     let key = makepad_key_code::android::android_to_makepad_key_code(code as u32);
     key.to_index()
 }
-unsafe extern "system" fn key_down(_: *mut JNIEnv, _: jclass, code: jint, meta: jint, repeat: jboolean) { boost_frame_rate(); Shared::global().emit(clock_ns(), |q, id| q.key_down(id, key(code), repeat != 0, mods(meta))); }
+unsafe extern "system" fn key_down(_: *mut JNIEnv, _: jclass, code: jint, meta: jint, repeat: jboolean) { boost_frame_rate();
+    let (code, mods) = (key(code), mods(meta));
+    // the paste chord brings the clipboard's text, ahead of the key (as AppKit's shell does)
+    let paste = if mods & input::MOD_CONTROL != 0 && code == makepad_key_code::KeyCode::KeyV.to_index() {
+        with_activity(|env, activity| {
+            let text = reg::object(env, activity, c"pasteFromClipboard", c"()Ljava/lang/String;", &[]);
+            if ((**env).ExceptionCheck.unwrap())(env) != 0 { ((**env).ExceptionDescribe.unwrap())(env); ((**env).ExceptionClear.unwrap())(env); }
+            let out = reg::string(env, text);
+            if !text.is_null() { ((**env).DeleteLocalRef.unwrap())(env, text); }
+            out
+        }).unwrap_or_default()
+    } else { String::new() };
+    Shared::global().emit(clock_ns(), |q, id| {
+        if !paste.is_empty() { q.text(id, input::text::PASTE, paste.as_bytes()); }
+        q.key_down(id, code, repeat != 0, mods);
+    });
+}
 unsafe extern "system" fn key_up(_: *mut JNIEnv, _: jclass, code: jint, meta: jint) { boost_frame_rate(); Shared::global().emit(clock_ns(), |q, id| q.key_up(id, key(code), mods(meta))); }
 unsafe extern "system" fn back(_: *mut JNIEnv, _: jclass) { boost_frame_rate(); Shared::global().emit(clock_ns(), |q, id| q.back_pressed(id)); }
 /// `x`, `y` are surface pixels (NaN for the back button), `time` the uptime in milliseconds.
