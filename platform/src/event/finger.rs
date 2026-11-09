@@ -1344,6 +1344,7 @@ impl CxFingers {
         for touch in touches {
             if let TouchState::Start = touch.state {
                 self.process_tap_count(touch.abs, time);
+                self.tap.digit_id = live_id_num!(touch, touch.uid).into();
             }
         }
     }
@@ -1370,6 +1371,11 @@ impl CxFingers {
                 TouchState::Start | TouchState::Move | TouchState::Stable => {
                     self.cycle_hover_area(digit_id);
                 }
+            }
+            // A press that moved too far to be a tap doesn't count towards a double tap, like on Android and iOS,
+            // so swiping twice from the same spot doesn't make the second swipe a double tap.
+            if digit_id == self.tap.digit_id && touch.abs.distance(&self.tap.last_pos) >= TAP_COUNT_DISTANCE {
+                self.tap.last_time = f64::NEG_INFINITY;
             }
         }
         self.switch_captures();
