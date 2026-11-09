@@ -947,6 +947,12 @@ pub struct PortalList {
     /// Speed factor for smooth tail animation (0.0-1.0, lower = slower). Default 0.25.
     #[live(0.25)]
     smooth_tail_speed: f64,
+    /// Whether the end of the list stays put when the viewport gets shorter or longer, like a chat
+    /// timeline whose latest messages stay right above its input as the soft keyboard shrinks it.
+    #[live(false)]
+    keep_end_on_resize: bool,
+    #[rust]
+    last_viewport_size: f64,
 
     #[rust(false)]
     tail_range: bool,
@@ -1677,6 +1683,24 @@ impl PortalList {
             match draw_state {
                 ListDrawState::Begin => {
                     let viewport = cx.turtle().inner_rect();
+                    let viewport_size = viewport.size.index(vi);
+                    // A list with no size isn't laid out yet, so it has no end to keep in place.
+                    if viewport_size > 0.0 {
+                        if self.keep_end_on_resize && self.last_viewport_size > 0.0 {
+                            let mut delta = viewport_size - self.last_viewport_size;
+                            // Growing taller can't pull down more content than there is above the viewport.
+                            if delta > 0.0 {
+                                let first_index = self.first_id.saturating_sub(self.range_start);
+                                let height_before = match &self.height_tree {
+                                    Some(tree) if first_index > 0 => tree.prefix_sum(first_index - 1),
+                                    _ => 0.0,
+                                };
+                                delta = delta.min((height_before - self.first_scroll).max(0.0));
+                            }
+                            self.first_scroll += delta;
+                        }
+                        self.last_viewport_size = viewport_size;
+                    }
                     self.draw_state.set(ListDrawState::Down {
                         index: self.first_id,
                         pos: self.first_scroll,
@@ -2715,6 +2739,8 @@ impl PortalList {
         // The list was repositioned by code, so showing the start/end now is
         // news again (e.g. a list re-purposed for other content).
         self.forget_reached_edges();
+        // The new position is meant for the viewport we'll draw next, not the last one.
+        self.last_viewport_size = 0.0;
     }
 
     /// Sets the first visible item and scroll offset to keep showing the same content.

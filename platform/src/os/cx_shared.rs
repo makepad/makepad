@@ -1671,6 +1671,9 @@ impl Cx {
         if self.event_dispatch_is_reentrant(event) {
             return;
         }
+        if let Event::VirtualKeyboard(keyboard_event) = event {
+            self.keyboard.note_virtual_keyboard_event(keyboard_event);
+        }
         crate::remote::note_user_event(self, event);
         match event {
             Event::Signal => crate::frame_sources::signal(),
@@ -1871,6 +1874,8 @@ impl Cx {
         self.drawing_id += 1;
         self.drawing_start = self.redraw_id;
         self.in_draw_event = true;
+        // A draw that unwound (e.g., a panic the platform caught) can't leave a KeyboardView's scope behind.
+        self.ime_scope = 0;
         crate::frame_trace::note_drawn();
         // The flag comes down whether the draw returned or unwound: a
         // platform that catches the panic and goes on must not have every

@@ -17,6 +17,8 @@ const KEYBOARD_SHIFT_EPSILON: f64 = 0.5;
 const KEYBOARD_RECONCILE_DURATION: f64 = 0.10;
 const KEYBOARD_RECONCILE_EASE: Ease = Ease::OutCubic;
 
+/// Moves its content out from under the soft keyboard, by panning it up or by shrinking it.
+/// KeyboardViews can nest, and only the innermost one around the focused text input moves anything.
 #[derive(Script, ScriptHook, Widget)]
 pub struct KeyboardView {
     #[source]
@@ -55,6 +57,13 @@ pub struct KeyboardView {
     keyboard_resize: bool,
     #[rust]
     next_frame: NextFrame,
+    /// The `cx.ime_scope` around us, which we put back once our content is drawn.
+    /// It's 0 if we're the outermost KeyboardView.
+    #[rust]
+    outer_ime_scope: u64,
+    /// The `cx.ime_area_scope()` that our last draw saw, which only the outermost KeyboardView tracks.
+    #[rust]
+    last_ime_area_scope: u64,
 
     /// Current vertical scroll offset applied to the inner content (Makepad layout points).
     #[rust]
@@ -116,19 +125,28 @@ impl KeyboardView {
     /// is nested under padding/scrollers, when the platform has already shrunk
     /// the surface to make room for the IME, or when there is no settled rect
     /// yet for `self.area`.
+    ///
+    /// With `keyboard_resize`, it's how much we shrink instead.
     fn compute_target_shift(&self, keyboard_height: f64, cx: &Cx) -> f64 {
-        if keyboard_height <= 0.0 {
+        if keyboard_height <= 0.0 || !self.owns_ime(cx) {
             return 0.0;
         }
+        let window_inner_size = cx.windows[CxWindowPool::id_zero()].window_geom.inner_size;
         if self.keyboard_resize {
-            return keyboard_height;
+            // We only shrink by how far the keyboard reaches up past our bottom edge,
+            // so whatever is below us (like a safe area inset) just goes behind it.
+            let rect = self.area.rect(cx);
+            if rect.size.y <= 0.0 || window_inner_size.y <= 0.0 {
+                return keyboard_height;
+            }
+            let keyboard_top = window_inner_size.y - keyboard_height.min(window_inner_size.y);
+            return (rect.pos.y + rect.size.y - keyboard_top).clamp(0.0, keyboard_height);
         }
         let ime_rect = cx.get_ime_area_rect();
         // Without a registered IME area there is no field to keep visible.
         if ime_rect.size.y <= 0.0 {
             return 0.0;
         }
-        let window_inner_size = cx.windows[CxWindowPool::id_zero()].window_geom.inner_size;
         if window_inner_size.y <= 0.0 {
             return 0.0;
         }
@@ -148,9 +166,26 @@ impl KeyboardView {
         needed.max(0.0).min(keyboard_height)
     }
 
+    /// Whether the focused text input is inside us, but not inside another KeyboardView inside us.
+    fn owns_ime(&self, cx: &Cx) -> bool {
+        match cx.ime_area_scope() {
+            // E.g., a modal's text input, which isn't laid out inside any of us.
+            0 => self.outer_ime_scope == 0,
+            scope => scope == self.widget_uid().0,
+        }
+    }
+
     fn set_keyboard_shift(&mut self, cx: &mut Cx, shift: f64) {
-        self.keyboard_shift = shift.max(0.0);
-        cx.keyboard_shift = if self.keyboard_resize { 0.0 } else { self.keyboard_shift };
+        let shift = shift.max(0.0);
+        // Unlike `redraw()`, this also works mid-draw, e.g., when the post-draw reconcile snaps us to a new shift.
+        if shift != self.keyboard_shift {
+            cx.redraw_area_in_draw(self.area);
+        }
+        self.keyboard_shift = shift;
+        // Overlays like modals aren't inside any of us, so they pan along with the outermost one.
+        if !self.keyboard_resize && self.outer_ime_scope == 0 {
+            cx.keyboard_shift = self.keyboard_shift;
+        }
     }
 
     fn animate_to_shift(
@@ -196,6 +231,8 @@ impl KeyboardView {
     }
 
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
+        // A text input that shows the IME while we're drawing notes that it's ours (see `owns_ime`).
+        self.outer_ime_scope = std::mem::replace(&mut cx.ime_scope, self.widget_uid().0);
         self.drawn_shift = if self.keyboard_resize { 0.0 } else { self.keyboard_shift };
         cx.begin_turtle(
             walk,
@@ -206,6 +243,7 @@ impl KeyboardView {
 
     fn end(&mut self, cx: &mut Cx2d) {
         cx.end_turtle_with_area(&mut self.area);
+        cx.ime_scope = self.outer_ime_scope;
     }
 }
 
@@ -228,12 +266,10 @@ impl Widget for KeyboardView {
                     let dt = e.time - start_time;
                     if dt < duration && duration > 0.0 {
                         let t = ease.map(dt / duration);
-                        self.keyboard_shift = from_shift + (to_shift - from_shift) * t;
-                        cx.keyboard_shift = if self.keyboard_resize { 0.0 } else { self.keyboard_shift };
+                        self.set_keyboard_shift(cx, from_shift + (to_shift - from_shift) * t);
                         self.next_frame = cx.new_next_frame();
                     } else {
-                        self.keyboard_shift = to_shift;
-                        cx.keyboard_shift = if self.keyboard_resize { 0.0 } else { self.keyboard_shift };
+                        self.set_keyboard_shift(cx, to_shift);
                         self.anim_state = AnimState::Open;
                     }
                     self.redraw(cx);
@@ -247,12 +283,10 @@ impl Widget for KeyboardView {
                     let dt = e.time - start_time;
                     if dt < duration && duration > 0.0 {
                         let t = ease.map(dt / duration);
-                        self.keyboard_shift = from_shift * (1.0 - t);
-                        cx.keyboard_shift = if self.keyboard_resize { 0.0 } else { self.keyboard_shift };
+                        self.set_keyboard_shift(cx, from_shift * (1.0 - t));
                         self.next_frame = cx.new_next_frame();
                     } else {
-                        self.keyboard_shift = 0.0;
-                        cx.keyboard_shift = self.keyboard_shift;
+                        self.set_keyboard_shift(cx, 0.0);
                         self.anim_state = AnimState::Closed;
                         self.keyboard_height = 0.0;
                     }
@@ -313,10 +347,14 @@ impl Widget for KeyboardView {
                     // the next draw is delayed (Android can stall redraws for
                     // >200ms once the IME event stream goes quiet). If the IME
                     // area is not valid yet, fall back to the post-draw
-                    // reconcile below.
-                    if cx.get_ime_area_rect().size.y > 0.0 {
+                    // reconcile below. Shrinking doesn't need that rect.
+                    if self.keyboard_resize || cx.get_ime_area_rect().size.y > 0.0 {
                         let target = self.compute_target_shift(*height, cx);
                         self.set_keyboard_shift(cx, target);
+                    } else if !cx.text_input_has_focus() {
+                        // A field that lost the key focus and isn't drawn has no rect, so we only keep
+                        // the page from sitting above the keyboard and let the reconcile take it to 0.
+                        self.set_keyboard_shift(cx, self.keyboard_shift.min(*height));
                     }
                     self.redraw(cx);
                 }
@@ -348,6 +386,35 @@ impl Widget for KeyboardView {
             walk.margin = Inset::default();
             walk
         }) {
+            // We can miss keyboard events, e.g., while a hidden ancestor isn't passing them along,
+            // so we catch up with wherever the keyboard is now.
+            let time = cx.time();
+            match self.anim_state {
+                AnimState::Opening { duration, start_time, to_shift, .. } if time >= start_time + duration => {
+                    self.set_keyboard_shift(cx, to_shift);
+                    self.anim_state = AnimState::Open;
+                }
+                AnimState::Closing { duration, start_time, .. } if time >= start_time + duration => {
+                    self.set_keyboard_shift(cx, 0.0);
+                    self.anim_state = AnimState::Closed;
+                    self.keyboard_height = 0.0;
+                }
+                AnimState::Open | AnimState::Closed => {
+                    let keyboard_height = cx.keyboard.virtual_keyboard_height();
+                    if (keyboard_height - self.keyboard_height).abs() > KEYBOARD_SHIFT_EPSILON {
+                        if keyboard_height > 0.0 {
+                            // The post-draw reconcile below moves us to wherever this keyboard needs us.
+                            self.keyboard_height = keyboard_height;
+                            self.anim_state = AnimState::Open;
+                        } else {
+                            self.set_keyboard_shift(cx, 0.0);
+                            self.anim_state = AnimState::Closed;
+                            self.keyboard_height = 0.0;
+                        }
+                    }
+                }
+                _ => {}
+            }
             self.begin(cx, walk);
         }
         if let Some(mut walk) = self.draw_state.get() {
@@ -390,7 +457,13 @@ impl Widget for KeyboardView {
             // of a second after the keyboard is fully up (e.g. when a cursor
             // blink redraws the KeyboardView but not the field). A genuine
             // field move always redraws the field, so this never misses one.
-            if cx.get_ime_area_rect().size.y > 0.0 {
+            // Shrinking, or letting go of a field that isn't ours anymore, doesn't need that rect.
+            // Neither does going back down once the field lost the key focus and isn't drawn anymore.
+            if self.keyboard_resize
+                || !self.owns_ime(cx)
+                || cx.get_ime_area_rect().size.y > 0.0
+                || !cx.text_input_has_focus()
+            {
                 let height_changed = (self.keyboard_height
                     - self.last_reconciled_keyboard_height)
                     .abs()
@@ -413,6 +486,15 @@ impl Widget for KeyboardView {
                     };
                     self.animate_to_shift(cx, time, new_target, duration, KEYBOARD_RECONCILE_EASE);
                 }
+            }
+        }
+        // A KeyboardView inside us can lose the focused text input to one drawn after it,
+        // which it won't notice until it draws again, so we redraw everything.
+        if self.outer_ime_scope == 0 {
+            let ime_area_scope = cx.ime_area_scope();
+            let last_ime_area_scope = std::mem::replace(&mut self.last_ime_area_scope, ime_area_scope);
+            if last_ime_area_scope != ime_area_scope && self.keyboard_height > 0.0 {
+                cx.redraw_all();
             }
         }
         DrawStep::done()
