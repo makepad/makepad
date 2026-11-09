@@ -5472,6 +5472,60 @@ mod imp {
         })
     }
 
+    pub(crate) fn gpu_geometry_patchmatch(
+        images: &[f32], cameras: &[crate::geometry_ops::GeometryCamera],
+        params: &crate::geometry_ops::GeometryParams,
+        initial: Option<crate::geometry_ops::GeometryInitial<'_>>, iterations: usize,
+    ) -> Result<crate::geometry_ops::GeometryMap, String> {
+        use crate::geometry_ops::{ffi, GeometryMap};
+        let size = cameras[0].width as usize * cameras[0].height as usize;
+        let images_gpu = gpu_upload(images, 1, images.len())?;
+        let mut packed = vec![0.0; size * 5];
+        if let Some(init) = &initial {
+            for i in 0..size {
+                packed[i * 5] = init.depth[i];
+                packed[i * 5 + 1..i * 5 + 4].copy_from_slice(&init.normal[i]);
+            }
+        }
+        let output = gpu_upload(&packed, size, 5)?;
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let camera_bytes = unsafe {
+                std::slice::from_raw_parts(cameras.as_ptr().cast::<u8>(), std::mem::size_of_val(cameras))
+            };
+            let camera_gpu = gpu_pool_acquire(camera_bytes.len())?;
+            camera_gpu.write(camera_bytes, backend.stream)?;
+            let camera_ptr = camera_gpu.ptr.as_ptr().cast();
+            gpu_check(unsafe { ffi::makepad_cuda_geometry_init(
+                images_gpu.device_ptr()?, camera_ptr, *params, output.device_ptr()?,
+                u32::from(initial.is_some()), backend.stream,
+            ) })?;
+            let mut scale = 1.0;
+            for iteration in 0..iterations {
+                for colour in 0..2 {
+                    let sweep = ffi::GeometrySweep { iteration: iteration as u64, colour, scale };
+                    gpu_check(unsafe { ffi::makepad_cuda_geometry_sweep(
+                        images_gpu.device_ptr()?, camera_ptr, *params, output.device_ptr()?, sweep, backend.stream,
+                    ) })?;
+                }
+                scale *= 0.5;
+            }
+            // Keep camera storage alive until all kernels have consumed it.
+            crate::synchronize_stream(backend.stream).map_err(|e| e.to_string())?;
+            Ok(())
+        })?;
+        let packed = gpu_download(&output)?;
+        let mut result = GeometryMap {
+            depth: Vec::with_capacity(size), normal: Vec::with_capacity(size), cost: Vec::with_capacity(size),
+        };
+        for pixel in packed.chunks_exact(5) {
+            result.depth.push(pixel[0]);
+            result.normal.push([pixel[1], pixel[2], pixel[3]]);
+            result.cost.push(pixel[4]);
+        }
+        Ok(result)
+    }
+
     /// CUDA execution of the released Michelangelo Fourier embedder followed
     /// by normal concatenation. Keeping this model-specific primitive additive
     /// prevents CUDA libdevice trig differences from leaking into generic
@@ -23280,6 +23334,127 @@ mod imp {
     }
 
     use std::mem::size_of;
+
+    /// The bf16 operand staging (`makepad_cuda_f32_to_bf16`, ahead of every
+    /// bf16 GEMM and the bf16 flash attention) against a host conversion
+    /// written from the definition. Kernel builds only: it needs a device.
+    #[cfg(test)]
+    mod bf16_staging_tests {
+        use super::*;
+
+        fn is_nan_word(word: u16) -> bool {
+            word & 0x7f80 == 0x7f80 && word & 0x007f != 0
+        }
+
+        /// Round to nearest, ties to even, from the definition: of the two
+        /// bf16 values around a finite `value` (toward zero, and one step
+        /// further from zero), the nearer; on a tie the one with an even last
+        /// bit. One step past the largest finite bf16 is infinity, taken as
+        /// 2^128 for the distance, so values from halfway up overflow as in
+        /// IEEE. Infinities stay; NaN becomes some NaN.
+        fn host_bf16(value: f32) -> u16 {
+            let bits = value.to_bits();
+            if value.is_nan() {
+                return 0x7fc0;
+            }
+            let toward_zero = (bits >> 16) as u16;
+            if value.is_infinite() {
+                return toward_zero;
+            }
+            let away = toward_zero + 1;
+            let magnitude = |word: u16| -> f64 {
+                if word & 0x7fff == 0x7f80 {
+                    2f64.powi(128)
+                } else {
+                    f64::from(f32::from_bits(u32::from(word & 0x7fff) << 16))
+                }
+            };
+            let exact = f64::from(value.abs());
+            let below = exact - magnitude(toward_zero);
+            let above = magnitude(away) - exact;
+            if below < above || (below == above && toward_zero & 1 == 0) {
+                toward_zero
+            } else {
+                away
+            }
+        }
+
+        fn staged(values: &[f32]) -> Vec<u16> {
+            let n = values.len();
+            let input = gpu_upload(values, 1, n).expect("upload");
+            let output = with_dense_linear_backend(|backend| {
+                backend.prepare_device()?;
+                let words = gpu_pool_acquire(n * size_of::<u16>())?;
+                let out = GpuTensor::from_pool(1, n)?;
+                gpu_check(unsafe {
+                    makepad_cuda_f32_to_bf16(input.device_ptr()?, words.ptr.as_ptr().cast::<u16>(), n as u32, backend.stream)
+                })?;
+                gpu_check(unsafe {
+                    makepad_cuda_bf16_to_f32(words.ptr.as_ptr().cast::<u16>().cast_const(), out.device_ptr()?, n as u32, backend.stream)
+                })?;
+                gpu_pool_release(words);
+                Ok(out)
+            })
+            .expect("staging");
+            gpu_download(&output).expect("download").iter().map(|value| (value.to_bits() >> 16) as u16).collect()
+        }
+
+        #[test]
+        fn bf16_staging_rounds_to_nearest_even_and_keeps_nan_infinity_and_denormals() {
+            // (f32 bits, the bf16 word), each also checked against the host conversion.
+            let cases: [(u32, u16); 24] = [
+                (0x3f80_8000, 0x3f80), // 1 + 2^-8: a tie, the even neighbour is below
+                (0x3f81_8000, 0x3f82), // 1 + 3 * 2^-8: a tie, the even neighbour is above
+                (0xbf80_8000, 0xbf80), // the same ties, negative
+                (0xbf81_8000, 0xbf82),
+                (0x3f80_7fff, 0x3f80), // just under a tie
+                (0x3f80_8001, 0x3f81), // just over a tie
+                (0x3f80_0000, 0x3f80), // exact
+                (0x0000_0000, 0x0000), // +0
+                (0x8000_0000, 0x8000), // -0
+                (0x7f80_0000, 0x7f80), // +inf
+                (0xff80_0000, 0xff80), // -inf
+                (0x7f7f_7fff, 0x7f7f), // just under halfway past the largest finite bf16
+                (0x7f7f_8000, 0x7f80), // halfway (odd neighbour): overflows to inf
+                (0x7f7f_ffff, 0x7f80), // f32::MAX
+                (0xff7f_ffff, 0xff80), // -f32::MAX
+                (0x0001_2345, 0x0001), // a denormal
+                (0x0000_8000, 0x0000), // a denormal tie down to even zero
+                (0x0001_8000, 0x0002), // a denormal tie up to even
+                (0x8001_2345, 0x8001), // a negative denormal
+                (0x0000_0001, 0x0000), // the smallest denormal
+                (0x007f_ffff, 0x0080), // the largest denormal rounds up to the smallest normal
+                (0x4049_0fdb, 0x4049), // pi
+                (0xc049_0fdb, 0xc049), // -pi
+                (0x3dcc_cccd, 0x3dcd), // 0.1
+            ];
+            let nans: [u32; 5] = [0x7fc0_0000, 0x7f80_0001, 0x7fff_ffff, 0xff80_0001, 0xffff_ffff];
+            let mut values: Vec<f32> = cases.iter().map(|&(bits, _)| f32::from_bits(bits)).collect();
+            values.extend(nans.iter().map(|&bits| f32::from_bits(bits)));
+            // A sweep over every exponent and sign, with low bits around the rounding point.
+            let mut state = 0x9e37_79b9_7f4a_7c15u64;
+            for _ in 0..1 << 14 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                values.push(f32::from_bits((state >> 32) as u32));
+            }
+            let words = staged(&values);
+            for (&(bits, expected), &word) in cases.iter().zip(&words) {
+                assert_eq!(host_bf16(f32::from_bits(bits)), expected, "host reference for {bits:#010x}");
+                assert_eq!(word, expected, "staged {bits:#010x}");
+            }
+            for (&bits, &word) in nans.iter().zip(&words[cases.len()..]) {
+                assert!(is_nan_word(word), "NaN {bits:#010x} staged to {word:#06x}");
+                assert_eq!(word & 0x8000, ((bits >> 16) & 0x8000) as u16, "NaN sign {bits:#010x}");
+            }
+            for (&value, &word) in values.iter().zip(&words).skip(cases.len() + nans.len()) {
+                if value.is_nan() {
+                    assert!(is_nan_word(word), "NaN {:#010x} staged to {word:#06x}", value.to_bits());
+                } else {
+                    assert_eq!(word, host_bf16(value), "staged {:#010x}", value.to_bits());
+                }
+            }
+        }
+    }
 }
 
 #[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)))]

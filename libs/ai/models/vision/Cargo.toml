@@ -9,3 +9,9 @@ license = "MIT"
 makepad-ai-common = { path = "../common" }
 makepad-ai-loader = { path = "../../loader" }
 makepad-ai-flux = { path = "../flux" }
+makepad-ai-geometry = { path = "../geometry" }
+# The CUDA kernels (makepad-ai-cuda `cuda`), for the validator bins run on a GPU box.
+makepad-ai-cuda = { path = "../../cuda", optional = true }
+
+[features]
+cuda = ["dep:makepad-ai-cuda", "makepad-ai-cuda/cuda", "makepad-ai-geometry/cuda"]

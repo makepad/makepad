@@ -1,0 +1,17 @@
+[package]
+name = "makepad-ai-geometry"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Generic multi-view geometry: camera views, PatchMatch stereo, depth fusion, pose refinement."
+
+[dependencies]
+makepad-ai-cuda = { path = "../../cuda", optional = true }
+
+[features]
+cuda = ["dep:makepad-ai-cuda", "makepad-ai-cuda/cuda"]
+
+[[bin]]
+name = "patchmatch-check"
+path = "src/bin/patchmatch_check.rs"
+required-features = ["cuda"]

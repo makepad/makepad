@@ -17,6 +17,7 @@ pub mod birefnet;
 mod birefnet_model;
 pub mod da3;
 pub mod depth_anything;
+pub mod scan_scenes;
 mod depth_anything_temporal;
 pub mod realesrgan;
 mod realesrgan_model;

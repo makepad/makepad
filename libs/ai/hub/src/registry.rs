@@ -209,7 +209,7 @@ pub enum Domain {
     /// Image -> sewing-pattern JSON.
     Garment,
     /// Views of one scene (images, with poses and intrinsics where known)
-    /// -> per-view metric depth, rays, poses and confidence (MapAnything).
+    /// -> per-view metric depth, rays, poses and confidence.
     /// Its own domain: a job needs every view of the scene at once, so no
     /// single-image domain can route to it.
     Multiview,
@@ -2107,43 +2107,6 @@ mod tests {
         let json = r#"{"models":[{"id":"x","domain":"image","backend":"b","available":true,"gated":false,"vram_gb":null,"note":null,"license":{"name":"X","url":"https://example.com/l","summary":"s","restriction":"copyleft"},"files":[]}]}"#;
         let message = Registry::parse(json).unwrap_err().to_string();
         assert!(message.contains("unknown license restriction"), "{message}");
-    }
-
-    #[test]
-    fn multiview_pair_is_pinned_disabled_and_behind_its_licence() {
-        use crate::catalogue::{licence_gate, LicenceGate};
-        let registry = Registry::embedded().unwrap();
-        let pins = [
-            ("mapanything", "facebook/map-anything", "a1d87e9086706fb9974f3be5a3e3a0ca5401c5aa",
-             "981f060c64664dff3272b5f5a823d350abe71a2f144444db4cfc325f3ed5a3a0", LicenseRestriction::NonCommercial,
-             LicenceGate::Confirm("non-commercial".into())),
-            ("mapanything-apache", "facebook/map-anything-apache", "00f9c245bbcb60522d1ed7f9e9d88462c6e3f38a",
-             "fa06c0fdccefc5048e072c85935d5789b1e36b307f3859033c17f9dcb9fd5201", LicenseRestriction::None,
-             LicenceGate::Open),
-        ];
-        let gpu = crate::gpu::GpuInfo::default();
-        let mut caches = Vec::new();
-        for (id, repo, revision, sha256, restriction, gate) in pins {
-            let spec = registry.find(id).unwrap();
-            assert_eq!(spec.domain, Domain::Multiview, "{id}");
-            assert_eq!(spec.backend, "multiview-native", "{id}");
-            // Disabled until the native port matches the reference parity tensors.
-            assert!(!spec.available, "{id}");
-            assert!(crate::backend::model_availability(spec, &gpu, 0).unwrap_err().contains("disabled in registry"));
-            assert_eq!(spec.license.as_ref().unwrap().restriction, restriction, "{id}");
-            assert_eq!(licence_gate(spec, false), gate, "{id}");
-            assert_eq!(spec.files.len(), 1, "{id}");
-            let weights = spec.file_by_role("native-multiview").unwrap();
-            assert_eq!(weights.repo, repo);
-            assert_eq!(weights.path, "model.safetensors");
-            assert_eq!(weights.revision.as_deref(), Some(revision));
-            assert_eq!(weights.size, Some(4_914_062_480));
-            assert_eq!(weights.sha256.as_deref(), Some(sha256));
-            assert!(weights.cache_as.starts_with("multiview/"), "{}", weights.cache_as);
-            caches.push(weights.cache_as.clone());
-        }
-        // Different weights, so never one cache file.
-        assert_ne!(caches[0], caches[1]);
     }
 
     #[test]

@@ -2611,58 +2611,6 @@
    ]
   },
   {
-   "id": "mapanything",
-   "domain": "multiview",
-   "backend": "multiview-native",
-   "available": false,
-   "gated": false,
-   "license": {
-    "name": "Creative Commons Attribution-NonCommercial 4.0",
-    "url": "https://huggingface.co/facebook/map-anything",
-    "summary": "MapAnything (facebook/map-anything) weights are CC-BY-NC-4.0: non-commercial use only, with attribution. Review the model card before any commercial use of the model or its results.",
-    "restriction": "non-commercial"
-   },
-   "vram_gb": 24.0,
-   "note": "MapAnything (facebook/map-anything, CC-BY-NC-4.0) multi-view metric 3D reconstruction: the views of one scene (images, with poses, intrinsics and depth where known) -> per-view metric depth, ray directions, camera poses and confidence. About 1.23 B params in one f32 safetensors. Native Rust/CUDA port in progress (no Python, Torch or subprocess); DISABLED until the port matches the reference parity tensors. vram_gb 24.0 is a pre-port estimate for a 150-view pass at 518 px; replace it with the measured peak. The Apache-2.0 release (mapanything-apache) is a different checkpoint of the same architecture: one port serves both.",
-   "files": [
-    {
-     "role": "native-multiview",
-     "repo": "facebook/map-anything",
-     "path": "model.safetensors",
-     "revision": "a1d87e9086706fb9974f3be5a3e3a0ca5401c5aa",
-     "cache_as": "multiview/mapanything/model.safetensors",
-     "size": 4914062480,
-     "sha256": "981f060c64664dff3272b5f5a823d350abe71a2f144444db4cfc325f3ed5a3a0"
-    }
-   ]
-  },
-  {
-   "id": "mapanything-apache",
-   "domain": "multiview",
-   "backend": "multiview-native",
-   "available": false,
-   "gated": false,
-   "license": {
-    "name": "Apache License 2.0",
-    "url": "https://huggingface.co/facebook/map-anything-apache",
-    "summary": "MapAnything (facebook/map-anything-apache) weights are Apache-2.0: permissive use, including commercial, subject to Apache-2.0 conditions.",
-    "restriction": "none"
-   },
-   "vram_gb": 24.0,
-   "note": "MapAnything Apache release (facebook/map-anything-apache, Apache-2.0) multi-view metric 3D reconstruction: the views of one scene (images, with poses, intrinsics and depth where known) -> per-view metric depth, ray directions, camera poses and confidence. About 1.23 B params in one f32 safetensors. Native Rust/CUDA port in progress (no Python, Torch or subprocess); DISABLED until the port matches the reference parity tensors. vram_gb 24.0 is a pre-port estimate for a 150-view pass at 518 px; replace it with the measured peak. Its weights differ from the CC-BY-NC mapanything checkpoint (same architecture and size): one port serves both.",
-   "files": [
-    {
-     "role": "native-multiview",
-     "repo": "facebook/map-anything-apache",
-     "path": "model.safetensors",
-     "revision": "00f9c245bbcb60522d1ed7f9e9d88462c6e3f38a",
-     "cache_as": "multiview/mapanything-apache/model.safetensors",
-     "size": 4914062480,
-     "sha256": "fa06c0fdccefc5048e072c85935d5789b1e36b307f3859033c17f9dcb9fd5201"
-    }
-   ]
-  },
-  {
    "id": "sam3dbody",
    "domain": "body",
    "backend": "body-native",

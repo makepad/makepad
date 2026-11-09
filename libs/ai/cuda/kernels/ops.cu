@@ -31,6 +31,17 @@ __device__ __forceinline__ uint16_t makepad_cuda_f32_to_bf16_bits(float value) {
     return static_cast<uint16_t>(bits >> 16);
 }
 
+// Round to nearest even, the usual f32 -> bf16 cast: truncation
+// biases every staged operand toward zero, and the bias adds up across a deep
+// network's GEMMs instead of averaging out. NaN stays a quiet NaN.
+__device__ __forceinline__ uint16_t makepad_cuda_f32_to_bf16_rn_bits(float value) {
+    const uint32_t bits = __float_as_uint(value);
+    if ((bits & 0x7fffffffu) > 0x7f800000u) {
+        return static_cast<uint16_t>((bits >> 16) | 0x40u);
+    }
+    return static_cast<uint16_t>((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+
 __device__ __forceinline__ float makepad_cuda_bf16_round(float value) {
     const uint32_t bits = __float_as_uint(value);
     return __uint_as_float(bits & 0xFFFF0000u);
@@ -144,7 +155,7 @@ static __global__ void makepad_cuda_f32_to_bf16_kernel(
     if (idx >= n) {
         return;
     }
-    output[idx] = makepad_cuda_f32_to_bf16_bits(input[idx]);
+    output[idx] = makepad_cuda_f32_to_bf16_rn_bits(input[idx]);
 }
 
 static __global__ void makepad_cuda_bf16_to_f32_kernel(

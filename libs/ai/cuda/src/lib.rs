@@ -24,6 +24,7 @@ pub mod cudnn;
 pub mod cudnn_v8_bench;
 pub mod driver;
 pub mod launch;
+pub mod geometry_ops;
 pub mod llm_ops;
 pub mod roformer_ops;
 pub mod train;
