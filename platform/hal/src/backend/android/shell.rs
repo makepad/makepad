@@ -156,6 +156,7 @@ impl Shell for AndroidShell {
             OsCmd::NativeAppearance { value } => jni::set_native_appearance(value),
             OsCmd::MobileUi { op: mobile_ui::STATUS_BAR_DARK_ICONS, value } => jni::set_system_bar_appearance(value != 0),
             OsCmd::MobileUi { op: mobile_ui::ORIENTATION, value } => jni::set_screen_orientation(value),
+            OsCmd::MobileUi { op: mobile_ui::KEEP_SCREEN_ON, value } => jni::set_keep_screen_on(value != 0),
             OsCmd::MobileUi { op: mobile_ui::APP_BACKGROUND, value } => jni::set_app_background(value),
             _ => false,
         }
