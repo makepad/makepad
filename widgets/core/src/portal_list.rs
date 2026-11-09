@@ -845,11 +845,11 @@ pub struct PortalList {
     #[live(true)]
     pub bounce_at_end: bool,
     /// Whether to emit [`PortalListAction::Scroll`] whenever the viewport moves, at
-    /// most once per frame. On by default; lists with no scroll-position consumers
-    /// can disable it to skip the per-frame action. The one-shot edge sentinels
-    /// are controlled separately by [`Self::reached_start_margin`] and
-    /// [`Self::reached_end_margin`].
-    #[live(true)]
+    /// most once per frame. Off by default, since each one is another event through
+    /// the whole widget tree, so a list turns it on when something reads its scroll
+    /// actions. The one-shot edge sentinels are controlled separately by
+    /// [`Self::reached_start_margin`] and [`Self::reached_end_margin`].
+    #[live(false)]
     emit_scroll_actions: bool,
     /// Whether (and how early) to emit [`PortalListAction::ReachedStart`]:
     /// `Some(0)` (the default) fires exactly when the first item is drawn; a

@@ -1164,6 +1164,7 @@ impl MailView {
     }
 
     fn pop_compact(&mut self, cx: &mut Cx) {
+        self.capture_scroll(cx);
         match self.ui.history.last().copied() {
             Some(Route::Read(_)) => {
                 self.ui.history.pop();
