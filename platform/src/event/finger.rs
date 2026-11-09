@@ -926,6 +926,8 @@ impl CxFingers {
         let before = self.cancelled.len();
         self.move_to_cancelled(|v| v.digit_id == digit_id && !v.owner && Some(v.area) != partner);
         if self.cancelled.len() > before {
+            // It's a drag now, not a tap, so it only keeps the key focus if the scroller marks it again.
+            self.unmark_press_as_keeping_key_focus(digit_id);
             let abs = self.captures.iter().find(|v| v.digit_id == digit_id).map(|v| v.abs_start).unwrap_or_default();
             self.queue_cancel(digit_id, abs);
         }

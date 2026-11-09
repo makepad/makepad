@@ -1,5 +1,6 @@
 use crate::{
     animator::Animate,
+    event::ScrollDirection,
     makepad_derive_widget::*,
     makepad_draw::*,
     scroll_bars::ScrollBars,
@@ -426,11 +427,17 @@ impl Widget for TabBar {
                         };
                     }
                 }
-                TabAction::TouchScroll { abs, time } => {
+                TabAction::TouchScroll { abs, abs_start, time, digit_id } => {
                     if let FingerScrollState::Dragging { samples } = &mut self.finger_scroll {
                         let Some(old_abs) = samples.last().map(|s| s.abs) else {
                             return;
                         };
+                        // Like any scroll, it keeps the keyboard up once it goes the tap distance our way.
+                        if ScrollDirection::from_travel(abs - abs_start)
+                            .is_some_and(|direction| direction.allows(Vec2Index::X))
+                        {
+                            cx.fingers.mark_press_as_keeping_key_focus(digit_id);
+                        }
                         samples.push(FingerScrollSample { abs: abs.x, time });
                         if samples.len() > 4 {
                             samples.remove(0);

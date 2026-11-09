@@ -195,6 +195,9 @@ pub enum ScrollState {
         /// Whether this drag has exceeded the minimum threshold to be treated
         /// as scroll rather than a tap. Until committed, no scroll deltas are applied.
         committed: bool,
+        /// Whether the press has traveled the tap distance our way, so it's a scroll and not a tap.
+        /// Unlike `committed`, a press away from interactive items doesn't start out with it.
+        has_traveled: bool,
     },
     Flick {
         /// The momentum-fling animation state (native iOS-style exponential decay,
@@ -872,6 +875,10 @@ pub struct PortalList {
     /// scrollable around it, like CSS `overscroll-behavior: contain`.
     #[live(false)]
     contain_scroll: bool,
+    /// Whether a drag that scrolls us hides the soft keyboard when it ends (the focused text input loses its focus),
+    /// like a tap elsewhere does. It's off by default, since most apps keep the keyboard up while you scroll.
+    #[live]
+    hide_keyboard_on_scroll: bool,
     /// Whether a horizontal list also scrolls sideways on vertical scrolls, like a mouse wheel's.
     #[live]
     use_vertical_finger_scroll: bool,
@@ -1102,6 +1109,8 @@ impl ScriptHook for PortalList {
         } else {
             self.vec_index = Vec2Index::X;
         }
+        // Dragging our scroll bar scrolls us too.
+        self.scroll_bar.hide_keyboard_on_scroll = self.hide_keyboard_on_scroll;
 
         // Only a new list starts out following its end; a reload keeps the user's scroll intent.
         if self.auto_tail && apply.is_new() {
@@ -4161,6 +4170,10 @@ impl Widget for PortalList {
                         // is a stop, not a click. The bounce spring itself keeps settling.
                         _ => self.motion_live(fe.time) || self.press_is_catch(fe.time),
                     };
+                    // Stopping us is part of scrolling, so it keeps the keyboard up like our drags do.
+                    if self.was_scrolling && !self.hide_keyboard_on_scroll {
+                        cx.fingers.mark_press_as_keeping_key_focus(fe.digit_id);
+                    }
                     // One press consumes the catch; later presses are ordinary clicks.
                     self.touch_caught_motion_at = None;
                     self.drag_claimed = false;
@@ -4277,6 +4290,7 @@ impl Widget for PortalList {
                                 // For non-interactive areas, commit immediately since
                                 // there's no ambiguity.
                                 committed: !on_interactive,
+                                has_traveled: false,
                             };
                         }
                     }
@@ -4430,9 +4444,13 @@ impl Widget for PortalList {
                             samples,
                             initial_abs,
                             committed,
+                            has_traveled,
                         } = &mut self.scroll_state
                         {
                             let new_abs = e.abs.index(vi);
+                            // It's a scroll once it goes the tap distance along our axis, in a direction we can take.
+                            *has_traveled |= travel.index(vi).abs() >= TAP_COUNT_DISTANCE
+                                && ScrollDirection::from_travel(travel).is_some_and(|direction| direction.allows(vi));
 
                             // Not the list's finger yet: track samples, don't scroll.
                             if !self.drag_claimed {
@@ -4441,6 +4459,9 @@ impl Widget for PortalList {
                             }
                             *committed = true;
                             self.suppress_child_events = true;
+                            if *has_traveled && !self.hide_keyboard_on_scroll {
+                                cx.fingers.mark_press_as_keeping_key_focus(e.digit_id);
+                            }
                             // The claiming move scrolls by the travel since the
                             // press (on Android less the touch slop, so the
                             // content doesn't jump and stays under the finger).

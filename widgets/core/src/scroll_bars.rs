@@ -42,7 +42,7 @@
 //! both. This is the flat-box version, for anything that draws its content in
 //! one turtle instead of virtualising rows.
 
-use crate::{event::TouchState, makepad_draw::*, scroll_bar::*};
+use crate::{event::{TouchPoint, TouchState}, makepad_draw::*, scroll_bar::*};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -481,26 +481,20 @@ impl ScrollBars {
             return false;
         }
         let area_rect = self.area.rect(cx);
+        let is_press = |t: &TouchPoint| t.state == TouchState::Start && area_rect.contains(t.abs);
         // The press time also gates the coast check below, so a momentum stream that
         // silently stopped reaching this view can't leave it eating presses.
         let press_time = match event {
             Event::MouseDown(e) if area_rect.contains(e.abs) => e.time,
-            Event::TouchUpdate(e)
-                if e.touches
-                    .iter()
-                    .any(|t| matches!(t.state, TouchState::Start) && area_rect.contains(t.abs)) =>
-            {
-                e.time
-            }
+            Event::TouchUpdate(e) if e.touches.iter().any(is_press) => e.time,
             _ => return false,
         };
         // Use `|` so both bars' catch markers are consumed by this one press.
-        let press_catch = (self.show_scroll_x && self.scroll_bar_x.take_press_catch(press_time))
-            | (self.show_scroll_y && self.scroll_bar_y.take_press_catch(press_time));
-        let flinging = press_catch
-            || (self.show_scroll_x && self.scroll_bar_x.is_motion_live(press_time))
-            || (self.show_scroll_y && self.scroll_bar_y.is_motion_live(press_time));
-        if !flinging {
+        let is_x_caught = self.show_scroll_x
+            && (self.scroll_bar_x.take_press_catch(press_time) | self.scroll_bar_x.is_motion_live(press_time));
+        let is_y_caught = self.show_scroll_y
+            && (self.scroll_bar_y.take_press_catch(press_time) | self.scroll_bar_y.is_motion_live(press_time));
+        if !is_x_caught && !is_y_caught {
             return false;
         }
         // Stop both axes: a single press catches a 2D fling on both bars. The press
@@ -511,6 +505,20 @@ impl ScrollBars {
         }
         if self.show_scroll_y {
             self.scroll_bar_y.stop_fling(press_time);
+        }
+        // Stopping a scroll is part of scrolling, so it keeps the keyboard up like a drag of ours would.
+        if (is_x_caught && !self.scroll_bar_x.hide_keyboard_on_scroll)
+            || (is_y_caught && !self.scroll_bar_y.hide_keyboard_on_scroll)
+        {
+            match event {
+                Event::MouseDown(_) => cx.fingers.mark_press_as_keeping_key_focus(live_id!(mouse).into()),
+                Event::TouchUpdate(e) => {
+                    for touch in e.touches.iter().filter(|t| is_press(t)) {
+                        cx.fingers.mark_press_as_keeping_key_focus(live_id_num!(touch, touch.uid).into());
+                    }
+                }
+                _ => {}
+            }
         }
         true
     }
