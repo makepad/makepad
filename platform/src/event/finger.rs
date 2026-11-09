@@ -2540,7 +2540,9 @@ impl Event {
                         is_sweep: false,
                         cancelled: capture.cancelled,
                     });
-                    if is_over {
+                    // A `capture_overload` parent (e.g., PortalList) gets this release after the pressed item,
+                    // so only the first capture takes the hover, else the item never gets its hover-out.
+                    if is_over && cx.fingers.find_digit_capture(digit_id).is_some_and(|c| c.area == area) {
                         cx.fingers.new_hover_area(digit_id, area);
                     }
                     return event;
