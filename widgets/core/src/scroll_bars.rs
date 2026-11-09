@@ -747,6 +747,7 @@ impl ScrollBars {
     }
 
     fn draw_scroll_bars_along(&mut self, cx: &mut Cx2d, track: Rect, view_visible: Vec2d, view_total: Vec2d) {
+        let laid_out_at = dvec2(self.scroll_bar_x.get_scroll_pos(), self.scroll_bar_y.get_scroll_pos());
         if self.show_scroll_x {
             let scroll_pos = self.scroll_bar_x
                 .draw_scroll_bar_along(cx, ScrollAxis::Horizontal, track, view_visible, view_total);
@@ -759,6 +760,11 @@ impl ScrollBars {
             // The bar has just been handed this frame's real total and visible
             // size, so from here the end is a number rather than a guess.
             self.follow_tail(cx);
+        }
+        // Content that got shorter (or a view that got bigger) can leave us scrolled past the end. The bars just
+        // pulled us back, but only after the content was laid out at the old offset, so we lay it out once more.
+        if dvec2(self.scroll_bar_x.get_scroll_pos(), self.scroll_bar_y.get_scroll_pos()) != laid_out_at {
+            cx.redraw_area_in_draw(self.area);
         }
     }
 
