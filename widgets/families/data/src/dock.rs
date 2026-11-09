@@ -3028,8 +3028,6 @@ impl DockRef {
     }
 
     /// Starts dragging a tab, showing the grabbing cursor until the drag ends.
-    ///
-    /// On Windows the OLE drag session shows its own drag cursors instead.
     pub fn tab_start_drag(&self, cx: &mut Cx, _tab_id: LiveId, item: DragItem) {
         cx.start_dragging(vec![item]);
         cx.set_cursor(MouseCursor::Grabbing);
