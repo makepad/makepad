@@ -410,7 +410,7 @@ impl WidgetNode for Tip {
         // the full repaint.
         if self.view.visible != visible {
             self.view.visible = visible;
-            if visible && self.area().is_empty() {
+            if visible && self.area().is_empty() && !cx.is_in_draw_walk {
                 cx.redraw_all();
             } else {
                 self.redraw(cx);

@@ -1591,7 +1591,9 @@ impl WidgetNode for View {
             // redraw is a no-op and the visibility change only lands on
             // the next unrelated full repaint (the classic "appears after
             // hot reload" bug). Escalate to a full redraw in that case.
-            if visible && matches!(self.area, Area::Empty) {
+            // Not during the draw walk though, since a view shown then (like a list
+            // filling an item) gets drawn by that same walk.
+            if visible && matches!(self.area, Area::Empty) && !cx.is_in_draw_walk {
                 cx.redraw_all();
             } else {
                 self.redraw(cx);
