@@ -1488,6 +1488,14 @@ impl Cache {
         self.stores[p as usize].get_checked_at(e as usize, key)
     }
 
+    /// The checksum of the payload stored under `key` (the store index's sum64), unread: which
+    /// of the payloads a key has had it holds now (the startup image keeps it per slot).
+    fn entry_sum(&self, key: u128) -> Option<u64> {
+        let (p, e) = self.index_at(key)?;
+        let x = self.stores[p as usize].index.get(e as usize)?;
+        (x.key == key).then_some(x.sum)
+    }
+
     /// The crate whose store file an entry keyed by `crates` goes to: the deepest in the
     /// dependency graph (it depends on the others when there is a chain: its version covers
     /// theirs), ties by crate index.

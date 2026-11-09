@@ -10,7 +10,7 @@ root = pathlib.Path(__file__).resolve().parent
 p = subprocess.run(
     [os.path.abspath(sys.argv[1]), "test", str(root / "visibility.rs")],
     env=dict(os.environ, MAKEPAD_RUN_CACHE="0", MAKEPAD_RUN_RELOAD_TRACE="1"),
-    capture_output=True, text=True, timeout=120,
+    capture_output=True, text=True,
 )
 try:
     assert p.returncode == 0, f"exit {p.returncode}"

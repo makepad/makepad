@@ -111,8 +111,9 @@ fn streaming() {
     assert_eq!(rr.stream(old).unwrap(), Stream::Applied { kept: 0 });
     assert_eq!(value(rr), 1);
     pause();
-    rr.stream(&text[..28]).unwrap();
-    assert_eq!(value(rr), 1);
+    // an .rx module composes a prefix like an .rs one: the complete first item applies
+    assert_eq!(rr.stream(&text[..28]).unwrap(), Stream::Applied { kept: 1 });
+    assert_eq!(value(rr), 2);
     assert_eq!(label(rr), 3);
     assert_eq!(rr.finish_stream(text).unwrap(), Edit::Patched);
     assert_eq!(value(rr), 2);

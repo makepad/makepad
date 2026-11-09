@@ -13,9 +13,8 @@ p = subprocess.Popen([mk, "test", os.path.join(root, "unload_inside.rs")], env=e
 err = []
 pid = None
 ident = None
-t0 = time.time()
 try:
-    while time.time() - t0 < 120:
+    while True:
         line = p.stderr.readline()
         if not line:
             break
@@ -27,7 +26,7 @@ try:
     assert ident, "no park line"
     assert p.poll() is None, "the process ended instead of parking"
     def inspect(*args):
-        r = subprocess.run([mk, "inspect", pid, *args], capture_output=True, text=True, timeout=60)
+        r = subprocess.run([mk, "inspect", pid, *args], capture_output=True, text=True)
         return r.stdout + r.stderr
     listed = inspect("panics")
     assert ident in listed and "stale access" in listed and "parker" in listed, f"not listed: {listed[:600]}"
@@ -44,7 +43,7 @@ try:
     time.sleep(0.5)
     assert p.poll() is None, "ended before the decision"
     inspect("resume", ident, "stop")
-    rc = p.wait(timeout=60)
+    rc = p.wait()
     out = p.stdout.read()
     assert rc != 0 and "out parked call" not in out, f"stop: rc {rc}, out {out[:300]}"
     print("modules stale access parks until stop: PASS")
@@ -54,8 +53,7 @@ try:
     p = q
     err = []
     ident = None
-    t0 = time.time()
-    while time.time() - t0 < 120:
+    while True:
         line = q.stderr.readline()
         if not line:
             break
@@ -68,7 +66,7 @@ try:
     told = inspect("stale")
     assert "unloaded module `parker`" in told and "CALLED" in told and "Module::unload" in told, f"trusted_call stale: {told[:1500]}"
     inspect("resume", ident, "stop")
-    rc = q.wait(timeout=60)
+    rc = q.wait()
     out = q.stdout.read()
     assert rc != 0 and "out called an unloaded" not in out, f"trusted_call stop: rc {rc}, out {out[:300]}"
     print("modules stale call into an unloaded trusted module parks: PASS")

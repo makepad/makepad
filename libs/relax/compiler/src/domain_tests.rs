@@ -976,6 +976,142 @@ fn fixture(p: *mut u64) {
 }
 "#;
 
+const HOST_CALLBACK: &str = r#"
+use std::sync::atomic::{AtomicU64, Ordering};
+static FLAGS: AtomicU64 = AtomicU64::new(0);
+fn flags(a: usize) -> &'static [AtomicU64; 4] { unsafe { &*(a as *const [AtomicU64; 4]) } }
+/// An app command's answer: it waits for the program's event loop, which never answers (a
+/// `status` waits up to 600 s).
+extern "C" fn query() {
+    let a = FLAGS.load(Ordering::SeqCst) as usize;
+    let (tx, rx) = std::sync::mpsc::channel::<u32>();
+    // (its wait compiled before the call is counted as in it)
+    let _ = rx.recv_timeout(std::time::Duration::from_millis(1));
+    flags(a)[0].fetch_add(1, Ordering::SeqCst);
+    let _ = rx.recv_timeout(std::time::Duration::from_secs(600));
+    drop(tx);
+    flags(a)[1].fetch_add(1, Ordering::SeqCst);
+}
+fn fixture(p: *mut u64) {
+    let a = p as usize;
+    FLAGS.store(a as u64, Ordering::SeqCst);
+    let q: extern "C" fn() = query;
+    flags(a)[3].store(q as usize as u64, Ordering::SeqCst);
+    loop { std::thread::park(); }
+}
+"#;
+
+/// A host call into the program (an inspect app command, `Callback::call`) that waits in there when
+/// the run ends comes back None at once: the end kicks its wait and the call leaves the ended code
+/// for its recovery point. No code of the ended run runs after, the host's frames around the call
+/// go on with what they hold (its lock is free), and the run's end is not held. Without the
+/// recovery point the thread stayed in the ended code with an inspect request's run gate, and a
+/// restart in place never finished (11-08).
+#[test]
+fn a_host_call_into_the_program_ends_with_the_run() {
+    isolated_test!(a_host_call_into_the_program_ends_with_the_run);
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut u, entry, root) = fixture_of(HOST_CALLBACK, "fixture");
+    let up = &mut *u as *mut Unit;
+    let flags: [AtomicU64; 4] = Default::default();
+    let (domain, base, main) = launch(&mut u, entry, None, &flags);
+    wait(|| flags[3].load(Ordering::SeqCst) != 0);
+    let query = flags[3].load(Ordering::SeqCst) as usize;
+    let scope = domains().iter().find(|d| d.info.base == base).map(|d| Callback { id: d.info.id, base, started: d.started }).unwrap();
+    static CALLER_LOCK: std::sync::Mutex<u32> = std::sync::Mutex::new(0);
+    let caller = std::thread::spawn(move || {
+        let _g = CALLER_LOCK.lock().unwrap();
+        let q: extern "C" fn() = unsafe { std::mem::transmute(query) };
+        scope.call(|| q())
+    });
+    wait(|| flags[0].load(Ordering::SeqCst) == 1);
+    // (a grace far past a kick's round trip: a call that stays is named in `left`, not waited for)
+    let end = end_run(up, Duration::from_secs(60));
+    assert!(end.left.is_empty(), "the call left with the run: {:?}", end.left);
+    assert!(caller.join().unwrap().is_none(), "the call came back saying the run ended");
+    assert!(CALLER_LOCK.try_lock().is_ok());
+    assert_eq!(flags[1].load(Ordering::SeqCst), 0, "code of the ended run ran");
+    assert!(scope.call(|| ()).is_none(), "a call after the run's end comes back at once");
+    main.join().unwrap();
+    wait_thread_done(domain);
+    assert_eq!(CALLED_IN.load(Ordering::SeqCst), 0, "no call stayed in the ended run");
+    domains().retain(|d| d.info.id != domain);
+    std::mem::forget(u);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+const HOST_QUERY: &str = r#"
+use std::sync::atomic::{AtomicU64, Ordering};
+static FLAGS: AtomicU64 = AtomicU64::new(0);
+fn flags(a: usize) -> &'static [AtomicU64; 4] { unsafe { &*(a as *const [AtomicU64; 4]) } }
+/// A quick answer of an app command (a wake of the event loop), read through the run's statics.
+extern "C" fn query() {
+    let a = FLAGS.load(Ordering::SeqCst) as usize;
+    flags(a)[0].fetch_add(1, Ordering::SeqCst);
+}
+fn fixture(p: *mut u64) {
+    let a = p as usize;
+    FLAGS.store(a as u64, Ordering::SeqCst);
+    let q: extern "C" fn() = query;
+    flags(a)[3].store(q as usize as u64, Ordering::SeqCst);
+    while flags(a)[1].load(Ordering::SeqCst) == 0 { std::thread::yield_now(); }
+}
+"#;
+
+/// A host thread that stays (the inspect server's) calls into each run in turn: a `session
+/// relaunch` wakes the program's event loop through `Callback::call` on it, run after run. Each call
+/// runs in its run's domain, with its statics, and leaves nothing registered there. The recovery
+/// point around the call once met the thread as new after the first run's end and freed the thread
+/// block the call had just been given: the app died at its second relaunch (11-09).
+#[test]
+fn a_host_thread_calls_into_each_run_in_turn() {
+    isolated_test!(a_host_thread_calls_into_each_run_in_turn);
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (asks, asked) = std::sync::mpsc::channel::<(Callback, usize)>();
+    let (answers, answered) = std::sync::mpsc::channel::<Option<()>>();
+    let worker = std::thread::spawn(move || {
+        for (scope, query) in asked {
+            let q: extern "C" fn() = unsafe { std::mem::transmute(query) };
+            answers.send(scope.call(|| q())).unwrap();
+        }
+    });
+    let (mut units, mut roots) = (Vec::new(), Vec::new());
+    for run in 0..3 {
+        let (mut u, entry, root) = fixture_of(HOST_QUERY, "fixture");
+        u.tier1 = None;
+        let up = &mut *u as *mut Unit;
+        let flags: [AtomicU64; 4] = Default::default();
+        let (domain, base, main) = launch(&mut u, entry, None, &flags);
+        wait(|| flags[3].load(Ordering::SeqCst) != 0);
+        let scope = domains().iter().find(|d| d.info.base == base).map(|d| Callback { id: d.info.id, base, started: d.started }).unwrap();
+        for k in 1..=2u64 {
+            asks.send((scope, flags[3].load(Ordering::SeqCst) as usize)).unwrap();
+            assert_eq!(answered.recv().unwrap(), Some(()), "run {run}: call {k} came back");
+            assert_eq!(flags[0].load(Ordering::SeqCst), k, "run {run}: call {k} ran with its run's statics");
+            let stayed = domains().iter().filter(|d| d.info.base == base).map(|d| d.threads.iter().filter(|t| t.name == "host callback").count()).sum::<usize>();
+            assert_eq!(stayed, 0, "run {run}: call {k} left its registration in the domain");
+        }
+        flags[1].store(1, Ordering::SeqCst);
+        main.join().unwrap();
+        wait_thread_done(domain);
+        let end = end_run(up, Duration::from_secs(10));
+        assert!(end.left.is_empty(), "left: {:?}", end.left);
+        crate::jit::thread_locals_end();
+        unsafe { crate::os::tls::reset_statics() };
+        domains().retain(|d| d.info.id != domain);
+        units.push(u);
+        roots.push(root);
+    }
+    drop(asks);
+    worker.join().unwrap();
+    std::mem::forget(units);
+    // (each run's fixture is in the one folder of this process)
+    roots.dedup();
+    for root in roots {
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 static HOST_LOCK: std::sync::Mutex<u32> = std::sync::Mutex::new(0);
 static IN_NATIVE: AtomicU64 = AtomicU64::new(0);
 static NATIVE_GO: AtomicU64 = AtomicU64::new(0);

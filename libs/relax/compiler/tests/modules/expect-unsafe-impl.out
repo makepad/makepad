@@ -1,0 +1,3 @@
+out derive Clone, Copy loads: true
+out hand-written unsafe impl TrivialClone refused: true
+out unsafe impl Send refused: true

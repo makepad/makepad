@@ -3470,7 +3470,7 @@ impl<'a> Parser<'a> {
         let items = self.assoc_items();
         self.in_trait = outer_trait;
         let items = items?;
-        Ok(ItemKind::Impl(self.ast.push_row(ImplItem { unsafe_, default_, generics, negative, trait_, self_ty, items })))
+        Ok(ItemKind::Impl(self.ast.push_row(ImplItem { unsafe_, builtin_derive: false, default_, generics, negative, trait_, self_ty, items })))
     }
 
     fn ty_impl_header(&mut self) -> PResult<TyId> {

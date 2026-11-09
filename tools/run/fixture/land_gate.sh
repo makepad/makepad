@@ -102,6 +102,7 @@ step_checks() {
   tr=$(bash tools/run/fixture/test_run.sh 2>&1); echo "$tr"; case "$tr" in *"test_run: ok"*) ;; *) fail="$fail test-run";; esac
   gu=$(bash tools/run/fixture/guard_units.sh 2>&1); echo "$gu"; case "$gu" in *"guard_units: ok"*) ;; *) fail="$fail guard-units";; esac
   cu=$(bash tools/run/fixture/cargo_units.sh 2>&1); echo "$cu"; case "$cu" in *"cargo_units: ok"*) ;; *) fail="$fail cargo-units";; esac
+  tf=$(bash tools/run/fixture/tests_features.sh 2>&1); echo "$tf"; case "$tf" in *"tests_features: ok"*) ;; *) fail="$fail tests-features";; esac
   # (the checks above built this tree's JIT)
   jit=${CARGO_TARGET_DIR:-$PWD/target}/host/makepad
   se=$(bash libs/relax/compiler/tests/strict_errors/run.sh "$jit" 2>&1); echo "$se" | grep -E 'FAILED|^strict_errors'; case "$se" in *"strict_errors: ok"*) ;; *) fail="$fail strict-errors";; esac
@@ -422,13 +423,14 @@ step_qcheck() {
 # cargo_units <lines file> <LABEL> <failing step word> <errors|warnings> [cargo check args]
 cargo_units() {
   local list=$1 label=$2 word=$3 level=$4 f out code unit own owned repro named=0 pkgs=(); shift 4
-  while read -r -a f; do pkgs+=(-p "${f[1]}"); done < "$list"
+  # a line's words after its directory go to cargo (a `tests` line's `--features=`: what its users turn on)
+  while read -r -a f; do pkgs+=(-p "${f[1]}" "${f[@]:3}"); done < "$list"
   out=$(CARGO_TARGET_DIR=$T nice -n 10 cargo check --release --message-format short -j $(( (${MAKEPAD_RUN_JOBS:-8} + 1) / 2 )) "$@" "${pkgs[@]}" 2>&1); code=$?
   owned=$(echo "$out" | owner_of "$list")
   while read -r -a f; do
     unit=$(unit_of "${f[@]}")
     own=$(echo "$owned" | awk -F '\t' -v p="${f[1]}" '$1 == p { sub(/^[^\t]*\t/, ""); print }')
-    repro="GATEREPRO $unit :: ${UNITS_REPRO:-cargo check --release${*:+ $*} -p} ${f[1]}"
+    repro="GATEREPRO $unit :: ${UNITS_REPRO:-cargo check --release${*:+ $*} -p} ${f[1]}${f[3]:+ ${f[*]:3}}"
     if echo "$out" | grep -qF "could not compile \`${f[1]}\`" || { [ "$level" = warnings ] && [ -n "$own" ]; }; then
       echo "$own" | head -40; echo "${f[1]}: cargo check failed"; echo "$repro"; unit_line fail "$unit"; fail="$fail ${f[1]}"; named=$((named + 1))
     else

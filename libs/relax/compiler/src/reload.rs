@@ -46,6 +46,8 @@ struct ReloadTrace {
     sub_last: Option<Instant>,
     subs: std::collections::BTreeMap<&'static str, f64>,
     counts: std::collections::BTreeMap<&'static str, usize>,
+    // the names of the bodies the patch replaced (printed on the patch line)
+    bodies: Vec<String>,
 }
 // The transaction runs on the watcher thread and on the owner thread (unit calls): one process-wide trace.
 static TRACE_CELL: relax_session::sync::Mutex<ReloadTrace> = relax_session::sync::Mutex::new(ReloadTrace::new());
@@ -120,6 +122,11 @@ fn call_traced<R>(at: &'static str, f: impl FnOnce() -> R) -> R {
         f()
     })
 }
+fn trace_bodies(prog: &Program, bodies: &[DefId]) {
+    TRACE.with(|s| {
+        if s.started.is_some() { s.bodies = bodies.iter().map(|&d| def_name(prog, d)).collect(); }
+    });
+}
 pub(crate) fn trace_count(name: &'static str, n: usize) {
     TRACE.with(|s| {
         if s.started.is_some() { *s.counts.entry(name).or_default() += n; }
@@ -129,7 +136,7 @@ struct TraceTransaction;
 impl ReloadTrace {
     const fn new() -> Self {
         Self { started: None, last: None, cpu_last: 0, cpu: std::collections::BTreeMap::new(), stages: std::collections::BTreeMap::new(),
-            sub_last: None, subs: std::collections::BTreeMap::new(), counts: std::collections::BTreeMap::new() }
+            sub_last: None, subs: std::collections::BTreeMap::new(), counts: std::collections::BTreeMap::new(), bodies: Vec::new() }
     }
 }
 impl TraceTransaction {
@@ -157,8 +164,9 @@ impl TraceTransaction {
                 let mut counts = s.counts.iter().map(|(k,v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
                 for (k, v) in &s.subs { counts.push_str(&format!(" sub.{k}_ms={v:.3}")); }
                 let parse = crate::parse_work::finish();
-                eprintln!("reload-trace: rung={} total_ms={:.3} {} {} {} changed={} installed={} ahead={} parse_detail_ms={:?} style_reapply=unobserved",
-                    out.rung.name(), ms(start) + s.stages["watch"] + s.stages["read"], stages, cpu, counts,
+                let bodies = if out.rung == Rung::Patch { format!(" (bodies {:?})", s.bodies) } else { String::new() };
+                eprintln!("reload-trace: rung={}{} total_ms={:.3} {} {} {} changed={} installed={} ahead={} parse_detail_ms={:?} style_reapply=unobserved",
+                    out.rung.name(), bodies, ms(start) + s.stages["watch"] + s.stages["read"], stages, cpu, counts,
                     out.changed, out.names.len(), out.work[1], parse.0);
             }
         });
@@ -4354,7 +4362,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             p
         } else { u.prog.parse_version(e.file, &e.path, e.src.clone()) };
         let parsed = initial.or_else(|err| {
-            if partial != 0 && partial != HOLD_ROUND && e.path.ends_with(".rs") {
+            if partial != 0 && partial != HOLD_ROUND && (e.path.ends_with(".rs") || module) {
                 if let Some((src, n)) = compose_partial(&u.prog, e.file, &e.src) {
                     kept = Some(kept.unwrap_or(0) + n);
                     return u.prog.parse_version(e.file, &e.path, src);
@@ -6052,6 +6060,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     }
     trace_sub("consts_errs");
     trace_stage("commit_collect");
+    trace_bodies(&u.prog, &body_defs);
     let mut checked_bodies = Vec::new();
     {
         let mut todo: Vec<(DefId, Vec<TyId>)> = Vec::new();

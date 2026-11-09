@@ -961,6 +961,8 @@ pub fn start() {
         *OWNER_JOIN.lock().unwrap_or_else(|e| e.into_inner()) = Some(thread);
         let _ = rx.recv();
     });
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    crate::os::fault::start_abort_reporter();
 }
 
 /// The owner thread ends (`run_end`): every thread that asked it for something has ended. The next

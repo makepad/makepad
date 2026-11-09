@@ -28,23 +28,34 @@
 # the unit) and the GPU's (nvidia-smi: said if it has not answered, never waited on past the capture).
 # Its processes' summed peak RSS, the most at any look, in MB in <out>.peak (the tests run's GATEPEAK).
 # B: the JIT command for the captures (`makepad`); HUNG_QUIET, HUNG_LOOK (s between looks), IDLE_PCT,
-# MEASURED_S (none: no bound).
+# MEASURED_S (none: no bound). FAKE_PROC: a test's clock and /proc (devhub bucket.rs): its <s>/ dirs are /proc
+# at each second of the watch, a wait takes no time, and no nvidia-smi runs. A spinning unit under a loaded
+# box's tests got under a tenth of a core, read as quiet before its bound, and the test of the bound failed (11-08).
 set -u
 session=$1 out=$2
 HUNG_QUIET=${HUNG_QUIET:-540} HUNG_LOOK=${HUNG_LOOK:-10} IDLE_PCT=${IDLE_PCT:-5} B=${B:-makepad} MEASURED_S=${MEASURED_S:-}
+FAKE_PROC=${FAKE_PROC:-}
 bound=""
 [ -z "$MEASURED_S" ] || bound=$((2 * MEASURED_S + HUNG_QUIET))
+# the watch's time in s (now) and the /proc it reads (proc); wait_s <s> moves both on
+t0=$SECONDS now=0 proc=/proc
+[ -z "$FAKE_PROC" ] || proc=$FAKE_PROC/0
+nap=""
+wait_s() {
+  if [ -n "$FAKE_PROC" ]; then now=$((now + $1)); proc=$FAKE_PROC/$now; return; fi
+  sleep "$1" & nap=$!; wait "$nap"; nap=""; now=$((SECONDS - t0))
+}
 # unit_activity: the session's processes' CPU in µs (/proc stat utime, stime, cutime, cstime at 100 Hz), storage
 # I/O bytes (io read_bytes + write_bytes) and peak RSS in KB (status VmHWM: each one's
 # own peak, between looks too) into ua_cpu, ua_io and ua_rss, and their pids into ua_pids, without a fork
 unit_activity() {
   local p s f k v
   ua_cpu=0; ua_io=0; ua_rss=0; ua_pids=()
-  for p in /proc/[0-9]*; do
+  for p in "$proc"/[0-9]*; do
     read -r s 2>/dev/null < "$p/stat" || continue
     s=${s##*) }; read -r -a f <<< "$s"
     [ "${f[3]}" = "$session" ] || continue
-    ua_pids+=("${p#/proc/}")
+    ua_pids+=("${p##*/}")
     ua_cpu=$((ua_cpu + (f[11] + f[12] + f[13] + f[14]) * 10000))
     while read -r k v; do case $k in read_bytes:|write_bytes:) ua_io=$((ua_io + v));; esac; done 2>/dev/null < "$p/io"
     while read -r k v _; do case $k in VmHWM:) ua_rss=$((ua_rss + v)); break;; esac; done 2>/dev/null < "$p/status"
@@ -72,45 +83,45 @@ parked_line() {
   done
 }
 stop() { echo $((peak / 1024)) > "$out.peak"; }
-nap=""; peak=0
+peak=0
 trap '[ -z "$nap" ] || kill "$nap" 2>/dev/null; stop; exit 0' TERM
-since=$SECONDS
+since=$now
 unit_activity; c0=$ua_cpu; i0=$ua_io; peak=$ua_rss
 why=""
 while :; do
-  sleep "$HUNG_LOOK" & nap=$!; wait "$nap"; nap=""
-  unit_activity; over=$(( (SECONDS - since) * 1000000 ))
+  wait_s "$HUNG_LOOK"
+  unit_activity; over=$(( (now - since) * 1000000 ))
   [ "$ua_rss" -le "$peak" ] || peak=$ua_rss
   parked=$(parked_line)
   if [ -n "$parked" ]; then why="a process of it parked, which nobody resumes in a gate: $parked"; break; fi
-  if [ -n "$bound" ] && [ "$SECONDS" -ge "$bound" ]; then
-    why="it ran $SECONDS s, past its bound of $bound s (twice its measured $MEASURED_S s, then $HUNG_QUIET s)"; break
+  if [ -n "$bound" ] && [ "$now" -ge "$bound" ]; then
+    why="it ran $now s, past its bound of $bound s (twice its measured $MEASURED_S s, then $HUNG_QUIET s)"; break
   fi
   if [ "$ua_cpu" -lt "$c0" ] || [ "$ua_io" -lt "$i0" ] || [ $((ua_cpu - c0)) -gt $(( over * IDLE_PCT / 100 > 200000 ? over * IDLE_PCT / 100 : 200000 )) ] || [ $((ua_io - i0)) -gt 1048576 ]; then
-    since=$SECONDS; c0=$ua_cpu; i0=$ua_io; continue
+    since=$now; c0=$ua_cpu; i0=$ua_io; continue
   fi
-  if [ $((SECONDS - since)) -ge "$HUNG_QUIET" ]; then why="its processes did nothing (under $IDLE_PCT% of a core, no I/O) for $((SECONDS - since)) s"; break; fi
+  if [ $((now - since)) -ge "$HUNG_QUIET" ]; then why="its processes did nothing (under $IDLE_PCT% of a core, no I/O) for $((now - since)) s"; break; fi
 done
 stop
 # threads <pid>...: each thread of them: its state, its CPU in % of a core over a second, its kernel wait channel
 threads() {
   local p t s f n=() c0=() i=0
-  for p in "$@"; do for t in /proc/"$p"/task/[0-9]*; do
+  for p in "$@"; do for t in "$proc/$p"/task/[0-9]*; do
     read -r s 2>/dev/null < "$t/stat" || continue
-    s=${s##*) }; read -r -a f <<< "$s"; n+=("$t"); c0+=($((f[11] + f[12])))
+    s=${s##*) }; read -r -a f <<< "$s"; n+=("${t#"$proc"/}"); c0+=($((f[11] + f[12])))
   done; done
-  sleep 1
+  wait_s 1
   for t in "${n[@]}"; do
-    read -r s 2>/dev/null < "$t/stat" || { i=$((i + 1)); continue; }
+    read -r s 2>/dev/null < "$proc/$t/stat" || { i=$((i + 1)); continue; }
     local comm=${s#*(}; comm=${comm%)*}; s=${s##*) }; read -r -a f <<< "$s"
-    echo "  ${t#/proc/} $comm ${f[0]} $((f[11] + f[12] - c0[i]))% wchan $(cat "$t/wchan" 2>/dev/null)"
+    echo "  $t $comm ${f[0]} $((f[11] + f[12] - c0[i]))% wchan $(cat "$proc/$t/wchan" 2>/dev/null)"
     i=$((i + 1))
   done
 }
 unit_activity
 # the GPU's read first, beside the rest
 gpu="$out.gpu"
-if command -v nvidia-smi > /dev/null 2>&1; then { nvidia-smi > "$gpu" 2>&1; echo "== answered" >> "$gpu"; } & fi
+if [ -z "$FAKE_PROC" ] && command -v nvidia-smi > /dev/null 2>&1; then { nvidia-smi > "$gpu" 2>&1; echo "== answered" >> "$gpu"; } & fi
 # its threads as they hung, before the captures make its JITs busy
 th=$(threads "${ua_pids[@]}")
 caps="" cause=""
@@ -141,9 +152,9 @@ top=$(awk '{ for (i = 2; i <= NF; i++) if ($i ~ /^[0-9]+%$/ && $i + 0 > best) { 
   else echo "  (nvidia-smi has not answered by the end of the capture: the driver may be stuck)"; cat "$gpu"; fi
   printf '%s' "$caps"; } > "$out.hung" 2>&1
 # its processes only: the session started for it
-for p in /proc/[0-9]*; do
+for p in "$proc"/[0-9]*; do
   read -r s 2>/dev/null < "$p/stat" || continue
   s=${s##*) }; read -r -a f <<< "$s"
-  [ "${f[3]}" = "$session" ] && kill -KILL "${p#/proc/}" 2>/dev/null
+  [ "${f[3]}" = "$session" ] && kill -KILL "${p##*/}" 2>/dev/null
 done
 exit 0

@@ -14,7 +14,7 @@ with tempfile.TemporaryDirectory(prefix="module-stream-watch-") as tmp:
         [os.path.abspath(sys.argv[1]), "run", "--quiet", "module-stream-watch"],
         cwd=pkg,
         env=dict(os.environ, MAKEPAD_RUN_CACHE="0"),
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True,
     )
 lines = p.stderr.splitlines()
 quiet = next((i for i, s in enumerate(lines) if s == "stream-watch: quiet window ended"), None)

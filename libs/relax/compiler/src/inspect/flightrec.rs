@@ -431,6 +431,9 @@ pub extern "C" fn relax_flight_mark(cat: *const u8, cat_len: usize, text: *const
     let (cat, text) = (s(cat, cat_len), s(text, text_len));
     if host_cat(cat) {
         event(cat, text, a, b);
+        if cat == NODRAW_CAT {
+            request_dump(Why::NoDraw);
+        }
     } else {
         push_ev(app_events(), cat, text, a, b);
     }
@@ -460,7 +463,13 @@ pub enum Why {
     Panic,
     Fault,
     Asked,
+    /// a run painted no window (makepad-platform's first-draw watch: `NODRAW_CAT`)
+    NoDraw,
 }
+
+/// The category of makepad-platform's first-draw event (`first_draw::CAT`): a run that started
+/// and beat painted no window, round after round. Its mark writes a recording, as a panic's does.
+const NODRAW_CAT: &str = "window.nodraw";
 
 impl Why {
     fn name(self) -> &'static str {
@@ -470,6 +479,7 @@ impl Why {
             Why::Panic => "panic",
             Why::Fault => "fault",
             Why::Asked => "asked",
+            Why::NoDraw => "nodraw",
         }
     }
 }
@@ -521,16 +531,20 @@ fn watch() {
                 1 => Why::Hitch,
                 2 => Why::Panic,
                 3 => Why::Fault,
+                5 => Why::NoDraw,
                 _ => Why::Asked,
             };
             let now = crate::clock::wall_ns();
             let last = LAST_AUTO.load(Relaxed);
-            let gap = if why == Why::Panic { DUMP_GAP_NS / 3 } else { DUMP_GAP_NS };
+            // (a run's one no-draw event is never left out for an earlier recording: a restart's
+            // hitch just before it would have been)
+            let gap = match why { Why::Panic => DUMP_GAP_NS / 3, Why::NoDraw => 0, _ => DUMP_GAP_NS };
             if last == 0 || now.saturating_sub(last) >= gap {
                 LAST_AUTO.store(now, Relaxed);
                 match save(if why == Why::Hitch { HITCH_LAST_NS } else { DUMP_LAST_NS }, why, None, true) {
-                    // a hitch (a cold start has some) is named with --verbose; panics and faults always
-                    Ok((path, n)) if why != Why::Hitch || crate::run::VERBOSE.load(Relaxed) => eprintln!("makepad-run flightrec: {} recorded: {} ({} KB; makepad inspect file={} pf brief)", why.name(), path.display(), n / 1024, path.display()),
+                    // a hitch (a cold start has some) and a no-draw (the recorder's, not the log's)
+                    // are named with --verbose; panics and faults always
+                    Ok((path, n)) if !matches!(why, Why::Hitch | Why::NoDraw) || crate::run::VERBOSE.load(Relaxed) => eprintln!("makepad-run flightrec: {} recorded: {} ({} KB; makepad inspect file={} pf brief)", why.name(), path.display(), n / 1024, path.display()),
                     Ok(_) => {}
                     Err(e) => eprintln!("makepad-run flightrec: cannot write the {} recording: {}", why.name(), e),
                 }

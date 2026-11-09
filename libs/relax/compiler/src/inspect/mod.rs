@@ -265,7 +265,11 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
 ];
 
 fn dispatch(req: &Req, out: &mut Out) {
-    let _at_the_run = crate::run_threads::request();
+    let Some(_at_the_run) = crate::run_threads::request(makepad_remote::cmd::asker_pid() == std::process::id()) else {
+        // (this process asks itself, from the run that ends: the next run waits for it)
+        out.err("the run that asks this has ended");
+        return;
+    };
     // (a wait of a long command ends when the run does: `gone` says so, and so does the answer)
     out.stop_also(crate::run_threads::ending);
     let _act = activity::begin(req);
@@ -1796,7 +1800,7 @@ fn cmd_provided(req: &Req, out: &mut Out) {
     }
     let mut reply = ProvidedReply { out, pending: Vec::new() };
     let Some(truncated) = scope.call(|| query(line.as_ptr(), line.len(), sink, &mut reply as *mut ProvidedReply as *mut std::ffi::c_void)) else {
-        reply.out.err("the app domain is not running");
+        reply.out.err("the app domain is not running (or its run ended while it answered)");
         return;
     };
     if !reply.pending.is_empty() {

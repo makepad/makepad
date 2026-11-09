@@ -86,12 +86,15 @@ impl Cache {
         for (i, (id, k, crates)) in chosen.iter().enumerate() {
             if i % 16 == 15 && stop() { return Err(()); }
             let Some(payload) = self.image_payload(*k, &pend) else { continue };
+            // which payload of the key the image's code is (a stored one's checksum is the
+            // index's, which image_payload checked it against)
+            let sum = if pend.contains_key(k) { crate::store::sum64(payload) } else { let Some(s) = self.entry_sum(*k) else { continue }; s };
             let Some(bytes) = self.slot_bytes_known(*id) else { continue };
             let mut cr: Vec<u32> = crates.clone();
             let body = match u.fns[*id as usize].key { crate::jit::FnKey::Plain(b) => b, _ => *id };
             let clean = twinlink && u.verdict_clean(body);
             let retarget = |t: &[u8]| -> bool { clean && t.first() == Some(&4) && in_image.contains(&t[1..]) };
-            if image_slot(&mut tab, &mut slots, &mut blob, *k, bytes, payload, &mut cr, &self.crate_by_ident, &retarget).is_some() {
+            if image_slot(&mut tab, &mut slots, &mut blob, *k, sum, bytes, payload, &mut cr, &self.crate_by_ident, &retarget).is_some() {
                 n += 1;
             }
         }
@@ -437,8 +440,9 @@ impl Cache {
     }
 }
 
-/// The startup image section of a manifest ("PLI7" after the slot list).
-pub(super) const IMAGE_MAGIC: u32 = 0x3749_4c50;
+/// The startup image section of a manifest ("PLI8" after the slot list; PLI7 images, whose slots
+/// carry no payload checksum, are not read: the manifest is written again with a new one).
+pub(super) const IMAGE_MAGIC: u32 = 0x3849_4c50;
 
 /// A loaded manifest's image section, read in place: the store it is mapped from stays open.
 pub(super) struct ManifestImage {
@@ -664,7 +668,7 @@ fn call_targets(payload: &[u8]) -> Option<Vec<&[u8]>> {
     Some(out)
 }
 
-fn image_slot(tab: &mut ImageTables, out: &mut E, blob: &mut Vec<u8>, entry_key: u128, key: Vec<u8>, payload: &[u8], crates: &mut Vec<u32>, crate_by_ident: &HashMap<u128, u32>, retarget: &dyn Fn(&[u8]) -> bool) -> Option<()> {
+fn image_slot(tab: &mut ImageTables, out: &mut E, blob: &mut Vec<u8>, entry_key: u128, sum: u64, key: Vec<u8>, payload: &[u8], crates: &mut Vec<u32>, crate_by_ident: &HashMap<u128, u32>, retarget: &dyn Fn(&[u8]) -> bool) -> Option<()> {
     let mut d = D { b: payload, p: 0 };
     if d.u32()? != ENTRY_VERSION {
         return None;
@@ -726,6 +730,7 @@ fn image_slot(tab: &mut ImageTables, out: &mut E, blob: &mut Vec<u8>, entry_key:
     let key = tab.keys.id(&key);
     let mut e = E::default();
     e.u128(entry_key);
+    e.u64(sum);
     e.u32(key);
     e.u8(tier);
     e.u32(inl.len() as u32);
@@ -1015,6 +1020,10 @@ pub(crate) struct PrelinkedSlot {
 /// One slot record of a loaded image (ranges into the flat arrays of `Img`).
 struct ImgSlot {
     entry: u128,
+    /// the checksum of the entry payload its code is (the store index's sum64): the entry under
+    /// `entry` may since have been replaced by another payload (recorded again once a slot its
+    /// code inlined changed), whose certificate says nothing about this code
+    sum: u64,
     key: u32,
     tier: u8,
     inl: (usize, usize),
@@ -1189,6 +1198,7 @@ fn parse_image(img: &'static [u8], store: std::sync::Arc<Store>, crate_ok: impl 
     let mut flat = Vec::new();
     for _ in 0..ns {
         let entry = d.u128()?;
+        let sum = d.u64()?;
         let key = d.u32()?;
         let tier = d.u8()?;
         let a = flat.len();
@@ -1212,7 +1222,7 @@ fn parse_image(img: &'static [u8], store: std::sync::Arc<Store>, crate_ok: impl 
         let np = d.u32()? as usize;
         let pc = (d.p, d.p.checked_add(np)?);
         d.take(np)?;
-        slots.push(ImgSlot { entry, key, tier, inl, crates, code: (off, len), code_n, rel, pc });
+        slots.push(ImgSlot { entry, sum, key, tier, inl, crates, code: (off, len), code_n, rel, pc });
     }
     let blob = d.bytes()?;
     let [keys, syms, files] = tables;
@@ -1761,7 +1771,7 @@ impl Linker {
             }
             let files = self.img_files(u, im);
             let s = &im.slots[si];
-            let (pcs, tier, inl, entry, key) = (s.pc, s.tier, s.inl, s.entry, s.key);
+            let (pcs, tier, inl, entry, key, sum) = (s.pc, s.tier, s.inl, s.entry, s.key, s.sum);
             let pc = crate::jit::PcMap::mapped(&im.bytes[pcs.0..pcs.1], files);
             let inlined: Vec<u32> = im.flat[inl.0..inl.1].iter().filter_map(|&k| im.slot_of(k)).collect();
             if !u.aux { crate::harness::reach::note(id, inlined.iter().copied()); }
@@ -1771,7 +1781,13 @@ impl Linker {
             }
             let c = self.cache();
             c.linked.insert(id);
-            c.linked_key.insert(id, entry);
+            // the entry it was linked from only while that entry is still the image's payload: a
+            // replaced one (its crates as the image has them, the code here theirs) is not this
+            // code -- image_entry must not take it as valid for the next image on this link, nor
+            // linked_readers judge this code by its certificate
+            if c.entry_sum(entry) == Some(sum) {
+                c.linked_key.insert(id, entry);
+            }
             let verdict = if tier == TIER_O3 { TierVerdict::None } else { c.tier_verdict_key(entry) };
             out.push(PrelinkedSlot { id, at: at + off as u64, len: n as u32, trailer, pc, inlined, o3: tier == TIER_O3, guards: if live { std::mem::take(&mut guards[k]) } else { Vec::new() }, o2: tier == TIER_O2, base: tier == TIER_BASE, kind, verdict });
         }
@@ -1804,8 +1820,10 @@ impl Linker {
         let mut live: Vec<bool> = (0..im.slots.len()).map(|si| self.img_live(&im, si, &mut need, &mut need_sym, true)).collect();
         // a slot naming a changed crate whose code entry is still this run's (its key and its
         // certificate as recorded: an edit reaches few of the slots naming its crate), once the
-        // identities are decoded below
-        let candidates: Vec<usize> = (0..im.slots.len()).filter(|&si| !live[si] && self.img_live(&im, si, &mut need, &mut need_sym, false)).collect();
+        // identities are decoded below -- and still the payload the image's code is: an entry
+        // recorded again since (a slot its code inlined changed: its old entry was refused) has
+        // a certificate that holds now, for other code than the image's
+        let candidates: Vec<usize> = (0..im.slots.len()).filter(|&si| !live[si] && self.cache().entry_sum(im.slots[si].entry) == Some(im.slots[si].sum) && self.img_live(&im, si, &mut need, &mut need_sym, false)).collect();
         for &k in &im.thunks {
             need[k as usize] = true;
         }

@@ -18,7 +18,8 @@ since: selected whatever the diff reaches, as a diff that never reaches it says 
 `gone <unit>` line: its package left the tree. A `suite <package>` line: a JIT suite failing since.
 A `tests <package> <dir>` line: a package whose test targets the diff reaches, the changed packages
 and every package that uses one (a dev-dependency too), in both repos: the gate type-checks them in
-one `cargo check --tests` ([`tested`]). `--tests` prints only those lines, in any cargo workspace
+one `cargo check --tests` ([`tested`]). It ends in `--features=<package>/<feature>,..` when its users
+turn on features of it ([`turned_on`]): it is checked with them whatever else that check holds. `--tests` prints only those lines, in any cargo workspace
 (land_gate.sh tests). `--runs` prints the tests bucket's: `tests` lines of the packages whose tests it runs under
 the JIT after a landing (land_gate.sh testrun, [`run_units`]): the changed packages and the gate packages the
 diff reaches, as the fast bucket picks its checks; GATE_FULL=1 (the full bucket, daily) runs every package's,
@@ -125,6 +126,31 @@ def tested(packages, members, touched, retry):
     # a test-target check (`tests <pkg>`) or a run of the tests (`test <pkg>`, the tests bucket) red since
     names |= {words[1] for words in retry if words[0] in ("tests", "test") and by_name.get(words[1]) in has_tests}
     return sorted((name, by_name[name]) for name in names)
+
+
+def turned_on(packages, directory):
+    """The features of the package at `directory` that its users' path dependencies turn on (any
+    edge kind that can hold). Features unify per build, so a target that needs one (a bin's
+    `required-features`, a `#[cfg(feature)]` body) compiles only in a check that also holds such
+    a user. makepad-ai-hub's multiview_check bin (required-features multiview-native, which the AI
+    hub app turns on) failed the fast bucket's one test check beside the app. Checked again alone,
+    as a retry, the bin was skipped and the break read as fixed (11-08). Sorted."""
+    own = set(packages[directory].get("features") or {})
+    on = set()
+    for d, pkg in packages.items():
+        if d == directory:
+            continue
+        for dep in pkg["dependencies"]:
+            if dep.get("path") and dep.get("target") != "cfg(any())" and Path(dep["path"]).resolve() == directory:
+                on.update(f for f in dep.get("features") or () if f in own)
+    return sorted(on)
+
+
+def tests_line(packages, name, directory, root):
+    """A `tests` line: the package, its directory, and the features its users turn on ([`turned_on`])."""
+    on = turned_on(packages, directory)
+    extra = f" --features={','.join(f'{name}/{f}' for f in on)}" if on else ""
+    return f"tests {name} {directory.relative_to(root)}{extra}"
 
 
 def nested_bases():
@@ -235,7 +261,8 @@ def tests_only(root, base, cbase, runs):
         # the test targets the diff reaches; a JIT or workspace-wide change reaches every package's
         units = tested(packages, members, set(members) if workspace or jit else touched, retried())
     for name, directory in units:
-        print(f"tests {name} {directory.relative_to(root)}")
+        # (the tests bucket's runs take the package's own features, as `makepad test` does)
+        print(f"tests {name} {directory.relative_to(root)}" if runs else tests_line(packages, name, directory, root))
 
 
 def main():
@@ -452,7 +479,7 @@ def main():
     for name in sorted(other):
         print(f"cargo {name} {where(name)}")
     for name, directory in tests:
-        print(f"tests {name} {directory.relative_to(root)}")
+        print(tests_line(packages, name, directory, root))
     for name in SMOKE:
         if name in PRESENT_ARGS and (name in selected or name in retry_presents):
             print(" ".join(["present", name, where(name), *PRESENT_ARGS[name]]))

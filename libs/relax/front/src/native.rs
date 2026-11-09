@@ -3,7 +3,7 @@
 //! Without the flag nothing native from a third party runs. With it, the packages whose build
 //! script compiles or links native code (`links =`, a build-dependency on cc / cmake / pkg-config /
 //! bindgen / vcpkg, or a script that reads `DEP_*` metadata of those) are built by cargo itself, so
-//! their build scripts run verbatim: `cargo check --release --locked -p <package> --message-format=json`
+//! their build scripts run verbatim: `cargo check --release -p <package> --message-format=json`
 //! in the run's workspace, same Cargo.lock, same cargo flags. Cargo's `RUSTC_WRAPPER` is this
 //! executable (`wrapper`): it compiles with the real rustc only what the native scripts need (the
 //! scripts of the native packages and their build-dependency closure) and answers every other
@@ -18,6 +18,14 @@
 //! The cargo step and the link are cached under `<relax dir>/native/<key>/`: the key covers the
 //! cargo flags, the resolved packages (versions, features, sources), the C compiler and
 //! the target. A run with an unchanged key starts no cargo.
+//!
+//! Cargo brings the lock up to date as `cargo run` does, and fetches only what is missing (the
+//! run's --offline / --frozen and cargo's offline settings still hold). Cargo.lock is not
+//! tracked, so each tree keeps its own, and with `--locked` every native build failed on a tree
+//! whose lock predated a new workspace member. What cargo updates leaves the key as it is.
+//! Relax reads path packages from their manifests, and cargo keeps every locked version the
+//! manifests still accept. The update adds a member or a path package's new version that the
+//! lock lacks, drops what nothing uses and puts the rest in cargo's order.
 //!
 //! Two tiers, as for the Rust code: the first build compiles the C at opt-level 0 (a cold start
 //! waits for it; Robrix's sqlite3.c alone is 28 s at -O3 with gcc and 3 s at -O0). Then cargo
@@ -445,7 +453,7 @@ fn run_cargo_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<St
     // Otherwise OUT_DIR no longer identifies target probes, and Cargo can
     // reuse stubs or nightly cfgs from a different native selection.
     let metadata = Command::new("cargo")
-        .args(["metadata", "--locked", "--format-version", "1", "--no-deps"])
+        .args(["metadata", "--format-version", "1", "--no-deps"])
         .current_dir(workspace)
         .env("CARGO_TARGET_DIR", &target)
         .output().map_err(|e| format!("native build directory: {e}"))?;
@@ -467,7 +475,7 @@ fn run_cargo_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<St
         // beside the program: two jobs
         Tier::Optimized => { cmd.env("CARGO_BUILD_JOBS", "2"); }
     }
-    cmd.args(["check", "--release", "--locked", "--message-format=json", "-p", package]);
+    cmd.args(["check", "--release", "--message-format=json", "-p", package]);
     let cargo_flags = cargo_selection(flags);
     if !cargo_flags.iter().any(|f| f == "--target" || f.starts_with("--target=")) {
         cmd.args(["--target", triple]);

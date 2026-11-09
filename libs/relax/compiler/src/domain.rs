@@ -414,13 +414,15 @@ impl Callback {
         let token = {
             let mut ds = domains();
             let d = ds.iter_mut().find(|d| d.info.base == self.base && d.started == self.started)?;
-            if d.info.id == 0 { drop(ds); return Some(f()); }
+            if d.info.id == 0 { drop(ds); return crate::jit::guarded(f); }
             if d.reclaiming || !cleanup && (d.cancel || !matches!(d.info.state, DomainState::Running)) { return None; }
             let token = NEXT_THREAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             d.threads.push(DomainThread::new(token, "host callback".into(), crate::inspect::threads::self_os_id(), crate::os::thread::current()));
             token
         };
-        Some(crate::jit::domain_callback(self.base, token, f))
+        // (under a recovery point: a run's end that comes while it is in the program's code ends
+        // the call, None, instead of leaving the thread in the ended code with what it holds)
+        crate::jit::domain_callback(self.base, token, || crate::jit::guarded(f))
     }
 }
 

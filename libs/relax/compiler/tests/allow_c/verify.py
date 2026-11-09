@@ -67,9 +67,7 @@ assert keys == sorted(p.name for p in native.iterdir() if (p / "messages.jsonl")
 assert receipts == {key: (native / key / "messages.jsonl").stat().st_mtime_ns for key in keys}, "warm launch rewrote native build receipt"
 print("PASS cache: reordered unused patches keep one key; second launch reuses native build")
 
-# Keep the loader case independent of Cargo's unused-patch order checks. Even
-# equivalent patch ordering can make Cargo demand a lock rewrite on a cold build;
-# --locked correctly refuses that instead of mutating the input behind the key.
+# Keep the loader case independent of Cargo's unused-patch order checks.
 manifest = fixture / "Cargo.toml"
 manifest.write_text(manifest.read_text().split("[patch.crates-io]")[0])
 run("lock-without-patches", ["cargo", "generate-lockfile", "--offline"])
@@ -100,13 +98,31 @@ for expected in ["cannot load the --allow-c native library", "`cn_rust_square`",
 c_source.write_text(c_text)
 print("PASS constructor: a C constructor calling into Rust reports the symbol; exit 1; no program output")
 
-# --locked must reject a changed graph rather than repairing its lockfile.
-# Change the path dependency's version after resolution has a lock to read.
+# Cargo.lock is no tracked file: a tree keeps its own, and a workspace member
+# added since that lock was made is not in it. The native build brings the lock
+# up to date, as cargo run does, and runs. The C changes so that the build is cold.
+member = fixture / "newmember"
+(member / "src").mkdir(parents=True)
+(member / "Cargo.toml").write_text('[package]\nname = "newmember"\nversion = "0.1.0"\nedition = "2021"\n')
+(member / "src" / "lib.rs").write_text("")
+manifest = fixture / "Cargo.toml"
+manifest.write_text(manifest.read_text().replace("[workspace]\n", '[workspace]\nmembers = ["newmember"]\n'))
+assert "newmember" not in lock.read_text(), "the lock already lists the new member"
+c_source.write_text(c_text + "\n/* built again with the new member */\n")
+stale = run("new-member", command)
+assert stale.stdout == baseline.stdout, "fixture output with a new workspace member differs from cargo"
+assert "building native dependencies with cargo" in stale.stderr, "the new member's native build was not cold"
+assert 'name = "newmember"' in lock.read_text(), "the native build left the lock without the new member"
+print("PASS member: a workspace member the lock lacks; the native build updates the lock and runs")
+
+# A path package's new version updates its entry. Relax reads the version from the
+# manifest, so it is in the key: a new key builds, beside the earlier ones.
 manifest = fixture / "cnative" / "Cargo.toml"
 manifest.write_text(manifest.read_text().replace('version = "0.1.0"', 'version = "0.1.1"'))
-lock_before = lock.read_bytes()
-locked = run("locked", command, success=False)
-assert lock.read_bytes() == lock_before, "native cargo rewrote a stale lockfile"
-assert "locked" in locked.stderr.lower(), f"missing locked diagnostic: {locked.stderr}"
-assert not locked.stdout, "program started with a stale lockfile"
-print("PASS locked: changed graph fails without rewriting Cargo.lock or starting program")
+before = {p.name for p in native.iterdir() if (p / "messages.jsonl").is_file()}
+bumped = run("path-version", command)
+assert bumped.stdout == baseline.stdout, "fixture output after a path version change differs from cargo"
+assert "building native dependencies with cargo" in bumped.stderr, "a path version change reused a native build"
+assert len({p.name for p in native.iterdir() if (p / "messages.jsonl").is_file()} - before) == 1, "a path version change kept the native key"
+assert 'name = "cnative"\nversion = "0.1.1"' in lock.read_text(), "the native build left cnative's old version in the lock"
+print("PASS path version: the native build updates the lock entry under a new key and runs")

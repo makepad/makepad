@@ -12,6 +12,12 @@ autotests = false
 [package.metadata.commercial]
 include = ["../../libs/relax/build_stamp.rs"]
 
+# `devhub test` runs these tests in the lane's tree, never a JIT overlay: cargo reads the config
+# its build-flag tests check from the checkout it runs in, and an overlay's tree is one only the
+# JIT process reads
+[package.metadata.makepad]
+test-tree = "its build-flag tests run cargo in the checkout, which reads the workspace's .cargo/config.toml"
+
 [lib]
 name = "makepad_run"
 path = "src/lib.rs"
@@ -19,6 +25,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "makepad"
 path = "src/main.rs"
+
+[[test]]
+name = "modules"
+path = "fixture/modules_harness.rs"
 
 [[bin]]
 name = "makepad-launcher"

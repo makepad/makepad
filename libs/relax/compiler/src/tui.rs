@@ -243,6 +243,9 @@ pub(crate) fn log_only(_line: &str) {}
 pub use unix::{finish, start};
 #[cfg(unix)]
 pub(crate) use unix::{flush, fault_fd, log_only};
+// (os/fault.rs's abort report: the pipe drained as after the panic hook)
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+pub(crate) use unix::fatal_drain;
 
 #[cfg(unix)]
 mod unix {
@@ -580,7 +583,7 @@ mod unix {
         let previous = std::panic::take_hook();
         // the hook lives as long as the process: the program's heap
         // the message reaches the transcript and the terminal before an abort can follow the hook
-        { let _k = crate::zone_alloc::kept(); std::panic::set_hook(Box::new(move |info| { abnormal(); previous(info); panic_drain(); })); }
+        { let _k = crate::zone_alloc::kept(); std::panic::set_hook(Box::new(move |info| { abnormal(); previous(info); fatal_drain(); })); }
         unsafe { atexit(at_exit) };
         { let _k = crate::zone_alloc::kept();
         if let Err(e) = std::thread::Builder::new().name("run-log-tee".into()).spawn(tee) {
@@ -634,9 +637,9 @@ mod unix {
         }
     }
 
-    /// After the panic hook printed: everything in the pipe to the transcript, and to the
-    /// terminal (through the display when it is free, else raw).
-    fn panic_drain() {
+    /// After the panic hook or an abort report printed: everything in the pipe to the transcript,
+    /// and to the terminal (through the display when it is free, else raw).
+    pub(crate) fn fatal_drain() {
         // try_lock: a panic on the tee thread itself (inside its drain) must not wait for itself;
         // that drain is then the one that copies this message
         if let Ok(mut g) = READER.try_lock() {

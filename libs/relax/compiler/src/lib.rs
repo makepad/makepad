@@ -54,10 +54,19 @@ macro_rules! print {
 /// sharing a process saw each other's units: a lazily compiled slot of one test was built in
 /// another's unit (the parallel suite aborted: "failed to initiate panic" / "free(): invalid
 /// pointer"), and every test after the first dropped unit found the cache stopped.
+///
+/// The process sizes its CPU budget from MAKEPAD_CPU_CORES (a gate's share of its lease,
+/// land_gate.sh step_testrun). A test whose checks need a budget of a certain shape gives its
+/// own process the cores it needs with `isolated_test!(name, cores = N)`, not the share it ran in.
 #[cfg(test)]
 macro_rules! isolated_test {
     ($name:ident) => {
         if !$crate::test_child::run_alone(module_path!(), stringify!($name)) {
+            return;
+        }
+    };
+    ($name:ident, cores = $cores:expr) => {
+        if !$crate::test_child::run_alone_with_cores(module_path!(), stringify!($name), Some($cores)) {
             return;
         }
     };
@@ -113,16 +122,23 @@ mod test_child {
     /// True in the child (run the test body); in the parent, runs the child and returns false
     /// once it passed (a failure panics with the child's output).
     pub fn run_alone(module: &str, name: &str) -> bool {
+        run_alone_with_cores(module, name, None)
+    }
+
+    /// `run_alone`, with an optional CPU budget for the child instead of its parent's share.
+    pub fn run_alone_with_cores(module: &str, name: &str, cores: Option<usize>) -> bool {
         let module = module.split_once("::").map_or("", |(_, rest)| rest);
         let test = if module.is_empty() { name.to_string() } else { format!("{module}::{name}") };
         if std::env::var(CHILD).is_ok_and(|t| t == test) {
             return true;
         }
-        let output = output(
-            Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", &test, "--include-ignored", "--test-threads=1", "--nocapture"])
-                .env(CHILD, &test),
-        );
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", &test, "--include-ignored", "--test-threads=1", "--nocapture"])
+            .env(CHILD, &test);
+        if let Some(cores) = cores {
+            command.env("MAKEPAD_CPU_CORES", cores.to_string());
+        }
+        let output = output(&mut command);
         let all = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         assert!(output.status.success() && all.contains("test result: ok. 1 passed"), "{test} in its own process:\n{all}");
         false

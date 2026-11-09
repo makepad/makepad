@@ -2343,26 +2343,71 @@ pub fn app_call(thunk: unsafe extern "C" fn(*mut u8), data: *mut u8) -> bool {
         let here = if b == 0 { 0 } else { *(b as *const u64) };
         let none = here == 0 || here == crate::domain::default_base();
         let scoped = crate::domain::foreign_enter(if none { crate::domain::run_scope() } else { 0 });
-        let e = END_CTX.with(|c| c.get() as *mut u64);
-        let saved = [*e, *e.add(1)];
-        let over = APP_CALL_OVER.with(|o| o.replace(*ctx_ptr()));
-        let place = app_caller();
-        let was = if place.is_null() { 0 } else { (*place).in_call.swap(*(tls_block() as *const u64) + 1, Ordering::AcqRel) };
-        let mut call = (thunk, data);
-        let enter: rt_fn_ty!(fn(u64, u64, *mut u64) -> u64) = std::mem::transmute(enter as usize);
-        let r = enter(app_call_body as *const () as usize as u64, &mut call as *mut _ as u64, e);
-        if !place.is_null() {
-            (*place).in_call.store(was, Ordering::Release);
-        }
-        APP_CALL_OVER.with(|o| o.set(over));
-        *e = saved[0];
-        *e.add(1) = saved[1];
+        let ok = recovered_call(enter, thunk, data);
         crate::domain::foreign_leave(scoped);
-        if r == LEAVE_RUN_ENDED {
-            note_abandoned_frames(true);
-        }
-        r != LEAVE_RUN_ENDED
+        ok
     }
+}
+
+/// `thunk(data)` through the program's `enter` under a recovery point of its own, in the domain the
+/// thread is in: false when the run ended under it (`app_call`, `guarded`).
+unsafe fn recovered_call(enter: u64, thunk: unsafe extern "C" fn(*mut u8), data: *mut u8) -> bool {
+    let e = END_CTX.with(|c| c.get() as *mut u64);
+    let saved = [*e, *e.add(1)];
+    let over = APP_CALL_OVER.with(|o| o.replace(*ctx_ptr()));
+    let place = app_caller();
+    let was = if place.is_null() { 0 } else { (*place).in_call.swap(*(tls_block() as *const u64) + 1, Ordering::AcqRel) };
+    let mut call = (thunk, data);
+    let enter: rt_fn_ty!(fn(u64, u64, *mut u64) -> u64) = std::mem::transmute(enter as usize);
+    let r = enter(app_call_body as *const () as usize as u64, &mut call as *mut _ as u64, e);
+    if !place.is_null() {
+        (*place).in_call.store(was, Ordering::Release);
+    }
+    APP_CALL_OVER.with(|o| o.set(over));
+    *e = saved[0];
+    *e.add(1) = saved[1];
+    if r == LEAVE_RUN_ENDED {
+        note_abandoned_frames(true);
+    }
+    r != LEAVE_RUN_ENDED
+}
+
+/// `f`, host code that calls into the program (an inspect query, a service's open or close, a
+/// domain's wake), under a recovery point of its own, as [`app_call`]: None when the run ended under
+/// it (a run's end kicks its wait, and it leaves the ended code) or had ended when it came. Without
+/// one, such a call stayed in the ended code for good with what its host frames held: an inspect
+/// request's run gate, and the restart never finished (an inspect `text` asked as an aichat
+/// restarted in place, 11-08). It runs in the domain the caller put the thread in
+/// (`domain_callback`): `app_call`'s own entry would meet the thread as new again after a run's end
+/// and free the block that domain_callback made for the call (the process died at a second
+/// relaunch, 11-09).
+pub(crate) fn guarded<R, F: FnOnce() -> R>(f: F) -> Option<R> {
+    struct Call<F, R> {
+        f: Option<F>,
+        r: Option<R>,
+    }
+    unsafe extern "C" fn thunk<R, F: FnOnce() -> R>(p: *mut u8) {
+        // SAFETY: `p` is the `Call` below, alive for the whole `app_call`
+        let call = unsafe { &mut *(p as *mut Call<F, R>) };
+        if let Some(f) = call.f.take() {
+            call.r = Some(f());
+        }
+    }
+    let mut call = Call { f: Some(f), r: None };
+    let enter = APP_ENTER.load(Ordering::Acquire);
+    // (JIT code and the runtime it calls run in the kept phase)
+    let _kept = crate::zone_alloc::kept();
+    let p = &mut call as *mut Call<F, R> as *mut u8;
+    // SAFETY: `p` lives across the call; `enter` is a program's entry glue (or none yet)
+    let ok = unsafe {
+        if enter == 0 {
+            thunk::<R, F>(p);
+            true
+        } else {
+            recovered_call(enter, thunk::<R, F>, p)
+        }
+    };
+    if ok { call.r } else { None }
 }
 
 /// Runs a program thread's body `f(arg)`, Relax's ABI, under the thread's last recovery point. It
@@ -2890,11 +2935,25 @@ unsafe fn stale_how_in(u: &Unit, pc: u64, sp_top: u64, sp_below: u64, lr: u64) -
 }
 
 fn frames_from_raw(pc: u64, pc_is_ret: bool, raw: &[u64]) -> Vec<u64> {
+    frames_from_raw_in(cur_unit(), pc, pc_is_ret, raw)
+}
+
+/// The return addresses of the calling thread's frame chain from `fp` (signal-safe: no
+/// allocation, no lock, no thread-local with a destructor), for `frames_from_raw_in` on another
+/// thread: os/fault.rs's abort report.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+pub(crate) fn raw_frames_here(fp: u64, out: &mut [u64]) -> usize {
+    let here = &fp as *const u64 as u64;
+    walk_fp_bounded(fp, here.min(fp), out)
+}
+
+/// `frames_from_raw` of the thread whose unit is `up`, on any thread.
+pub(crate) fn frames_from_raw_in(up: *mut Unit, pc: u64, pc_is_ret: bool, raw: &[u64]) -> Vec<u64> {
     let mut frames = vec![pc.wrapping_sub(pc_is_ret as u64)];
-    if cur_unit().is_null() {
+    if up.is_null() {
         return frames;
     }
-    let u = unsafe { &*cur_unit() };
+    let u = unsafe { &*up };
     // a stop inside C code (a libc abort/trap): its frames (frame pointers are kept on both
     // targets) are skipped up to the JIT code that called it
     let mut in_c = u.find_fn(frames[0]).is_none();
@@ -26658,7 +26717,7 @@ mod front_yield_tests {
     /// build waits for nothing that job holds, so this is no hang.
     #[test]
     fn a_build_below_the_jit_floor_finishes_and_the_last_job_runs_after_it() {
-        isolated_test!(a_build_below_the_jit_floor_finishes_and_the_last_job_runs_after_it);
+        isolated_test!(a_build_below_the_jit_floor_finishes_and_the_last_job_runs_after_it, cores = 12);
         use makepad_cpu_budget as budget;
         use std::sync::Arc;
         // (a small machine has no floor for the build to be below)
@@ -26709,7 +26768,7 @@ mod front_yield_tests {
 
     #[test]
     fn jobs_on_every_token_do_not_hang_on_a_build_that_needs_one() {
-        isolated_test!(jobs_on_every_token_do_not_hang_on_a_build_that_needs_one);
+        isolated_test!(jobs_on_every_token_do_not_hang_on_a_build_that_needs_one, cores = 8);
         use std::sync::Arc;
         let (u, f, g, path) = two_fn_unit("budget_lock");
         let up = &*u as *const Unit as usize;
