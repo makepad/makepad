@@ -20,6 +20,7 @@ pub mod repo;
 mod sha1;
 #[doc(hidden)]
 pub mod test_support;
+pub mod text_clean;
 pub mod tree;
 pub mod worktree;
 pub mod worktrees;

@@ -395,11 +395,25 @@ pub(crate) fn worktree_vs_index_status_for_path(
         fs::read(&file_path)?
     };
     let worktree_oid = hash_object("blob", &content);
-    if worktree_oid != idx_entry.oid {
-        Ok(Some(FileStatus::Modified))
-    } else {
+    if worktree_oid == idx_entry.oid || (!file_type.is_symlink() && converts_to_blob(workdir, path, &content, idx_entry.oid)) {
         Ok(None)
+    } else {
+        Ok(Some(FileStatus::Modified))
     }
+}
+
+/// Whether a file that differs from its blob byte for byte is that blob once git's text conversion
+/// is undone, as `git status` reads it: a racily clean `eol=crlf` script has its content compared,
+/// and its checkout CRLFs refused a lane's retire as uncommitted. What can't be proved is Modified.
+fn converts_to_blob(workdir: &Path, path: &str, content: &[u8], oid: ObjectId) -> bool {
+    // (what the conversion undoes is all it can change)
+    if !content.contains(&b'\r') && !content.windows(4).any(|w| w == b"$Id:") {
+        return false;
+    }
+    let Ok(Some(paths)) = crate::repo::repository_paths(workdir) else { return false };
+    crate::text_clean::conversion_config(&paths)
+        .and_then(|config| crate::text_clean::cleans_to(workdir, &paths.common_dir, path, oid, &config))
+        .unwrap_or(false)
 }
 
 fn compute_untracked_status_for_path(
@@ -1274,6 +1288,42 @@ mod tests {
         write_worktree_file(workdir, "f.txt", oid, 0o100644, b"inside").unwrap();
         assert_eq!(fs::read_to_string(outside.path().join("target.txt")).unwrap(), "outside");
         assert_eq!(fs::read_to_string(workdir.join("f.txt")).unwrap(), "inside");
+    }
+
+    /// A file whose content is compared (here its index stat is empty, as a racily clean entry's
+    /// is) reads as git reads it: checkout CRLFs under its attributes are clean, an edit is not,
+    /// and where its attributes convert nothing the CRLFs are a change.
+    #[test]
+    fn status_undoes_text_conversion_as_git_does() {
+        let dir = crate::test_support::tempdir().unwrap();
+        let workdir = dir.path();
+        fs::create_dir_all(workdir.join(".git")).unwrap();
+        fs::write(workdir.join(".gitattributes"), "*.ps1 text eol=crlf\n*.txt text=auto\n*.bin -text\n").unwrap();
+        let entry = |path: &str, blob: &[u8]| IndexEntry {
+            ctime_sec: 0, ctime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, dev: 0, ino: 0, mode: 0o100644, uid: 0, gid: 0, file_size: 0,
+            oid: hash_object("blob", blob), flags: path.len() as u16, path: path.to_string(),
+        };
+        let lf = b"one\ntwo\n";
+        let crlf = b"one\r\ntwo\r\n";
+        let mut entries = Vec::new();
+        for (path, on_disk) in [
+            ("script.ps1", &crlf[..]),
+            ("auto.txt", &crlf[..]),
+            ("edited.ps1", b"one\r\nthree\r\n"),
+            ("raw.bin", &crlf[..]),
+            ("plain.other", &crlf[..]),
+            ("lf_edit.ps1", b"one\nthree\n"),
+        ] {
+            fs::write(workdir.join(path), on_disk).unwrap();
+            entries.push(entry(path, lf));
+        }
+        entries.push(entry(".gitattributes", b"*.ps1 text eol=crlf\n*.txt text=auto\n*.bin -text\n"));
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        let index = Index { version: 2, entries };
+        let status = compute_status_worktree_only(&index, workdir).unwrap();
+        let mut modified: Vec<_> = status.entries.iter().filter(|e| e.status == FileStatus::Modified).map(|e| e.path.as_str()).collect();
+        modified.sort();
+        assert_eq!(modified, ["edited.ps1", "lf_edit.ps1", "plain.other", "raw.bin"]);
     }
 
     /// What `git status` reports for symlinks, nested repositories, tracked
