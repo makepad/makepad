@@ -260,7 +260,7 @@ pub(super) fn button(code: u32) -> u32 {
     }
 }
 
-pub(super) fn cursor_name(cursor: u32) -> &'static CStr {
+fn cursor_name(cursor: u32) -> &'static CStr {
     match cursor {
         2 => c"crosshair",
         3 => c"pointer",
