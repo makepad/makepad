@@ -17,6 +17,7 @@
 
 pub mod bead;
 pub mod check;
+pub mod dyn_world;
 pub mod flex;
 pub mod geom;
 pub mod joint;

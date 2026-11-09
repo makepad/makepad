@@ -71,6 +71,9 @@ script_mod! {
         depth_tex: texture_2d(float)
         // 0: copy the input; 1: subsample the level above
         u_step: uniform(0.0)
+        // The raw pass's camera terms (its `u_proj`): an orthographic view's distances become
+        // depths along the view's axis here
+        u_proj: uniform(vec4(0.5773, 0.5773, 0.0, 0.0))
         frag: fragment_position()
         depth_clip: 0.0
 
@@ -86,8 +89,24 @@ script_mod! {
         }
 
         pixel: fn() -> vec4f {
-            if self.u_step < 0.5 {
+            if self.u_step < 0.5 && self.u_proj.z < 0.5 {
                 return vec4(self.depth_tex.sample_nearest(self.pos).x, 0.0, 0.0, 1.0)
+            }
+            if self.u_step < 0.5 {
+                // Orthographic: the input's texel under the pixel's centre, read at its own
+                // centre. Its distance, from an eye that stands anywhere on the view's axis,
+                // less that texel's own offset off the axis, is its depth along the axis: the
+                // same over a face square to the view wherever the texel lies.
+                let size = self.depth_tex.size()
+                let t = min(floor(self.pos * size), size - vec2(1.0, 1.0))
+                let uv = (t + vec2(0.5, 0.5)) / size
+                let d = self.depth_tex.sample_nearest(uv).x
+                if d <= 0.0 {
+                    return vec4(0.0, 0.0, 0.0, 1.0)
+                }
+                let x = (uv.x * 2.0 - 1.0) * self.u_proj.x
+                let y = (1.0 - uv.y * 2.0) * self.u_proj.y
+                return vec4(max(sqrt(max(d * d - x * x - y * y, 0.0)), 0.000001), 0.0, 0.0, 1.0)
             }
             let ip = floor(self.frag.xy)
             let above = self.depth_tex.size()
@@ -108,7 +127,11 @@ script_mod! {
     // One AO core, two ways to rebuild a surface point from the input:
     //   distance mode (`u_mode.x` 0): the input's red channel is the
     //     VIEW-SPACE DISTANCE in metres (0 = nothing); the point is
-    //     unprojected along the pixel's ray from `u_proj`'s terms.
+    //     unprojected along the pixel's ray from `u_proj`'s terms. An
+    //     orthographic view's levels hold the depth along its axis instead
+    //     (`DrawSsaoDepth` turns the distances into it): its rays are
+    //     parallel and its eye stands anywhere on the axis, so a distance
+    //     from the eye mixes a texel's offset off the axis into its depth.
     //   matrix mode (`u_mode.x` 1): the input is a HARDWARE depth buffer
     //     (ndc z, 1 = nothing drawn); the point is the world position the
     //     caller's inverse clip matrix gives. Radius and bias are in that
@@ -146,10 +169,11 @@ script_mod! {
         u_clip_from_world: uniform(mat4x4f(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0))
         u_world_from_clip: uniform(mat4x4f(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0))
         // The eye in world space (w = 1; distance mode: the origin, w = 1;
-        // matrix mode of an orthographic view: w = 0)
+        // an orthographic view: w = 0)
         u_eye: uniform(vec4(0.0, 0.0, 0.0, 1.0))
-        // Matrix mode without an eye: the unit view axis toward the
-        // camera, and a point on the near side to measure depth from
+        // Without an eye: the unit view axis toward the camera (distance
+        // mode: +z), and in matrix mode a point on the near side to
+        // measure depth from
         u_axis: uniform(vec4(0.0, 0.0, 1.0, 0.0))
         u_ref: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // Nothing to clip against: the quad IS the pass. Straight to clip
@@ -170,15 +194,12 @@ script_mod! {
 
         // Distance mode: uv + stored distance → view-space position. View
         // space is metric (the view matrix is rigid), camera at the origin
-        // looking down -z.
+        // looking down -z; orthographic, `d` is the depth along the axis.
         view_pos: fn(uv: vec2f, d: float) -> vec3f {
             let nx = uv.x * 2.0 - 1.0
             let ny = 1.0 - uv.y * 2.0
             if self.u_proj.z > 0.5 {
-                let x = nx * self.u_proj.x
-                let y = ny * self.u_proj.y
-                let z2 = max(d * d - x * x - y * y, 0.000001)
-                return vec3(x, y, 0.0 - sqrt(z2))
+                return vec3(nx * self.u_proj.x, ny * self.u_proj.y, 0.0 - d)
             }
             let ray = vec3(nx * self.u_proj.x, ny * self.u_proj.y, 0.0 - 1.0)
             return normalize(ray) * d
@@ -187,6 +208,9 @@ script_mod! {
         // Depth of a point: its distance from the eye, or along the axis.
         depth_of: fn(p: vec3f) -> float {
             if self.u_mode.x < 0.5 {
+                if self.u_proj.z > 0.5 {
+                    return 0.0 - p.z
+                }
                 return length(p)
             }
             if self.u_eye.w > 0.5 {
@@ -195,7 +219,7 @@ script_mod! {
             return dot(p - self.u_ref.xyz, vec3(0.0, 0.0, 0.0) - self.u_axis.xyz) + 0.0001
         }
         // The ray from the eye through a point (distance mode: from the
-        // origin).
+        // origin), or down the axis of a view without an eye.
         ray_of: fn(p: vec3f) -> vec3f {
             if self.u_eye.w > 0.5 {
                 return p - self.u_eye.xyz
@@ -458,7 +482,9 @@ pub struct SsaoParams {
     /// millimetre gaps of coplanar construction layers.
     pub bias: f32,
     /// Extra bias per metre of view distance, so grazing walls at range
-    /// stay clean.
+    /// stay clean. An orthographic view ([`SsaoProjection`]) takes none: its
+    /// eye stands anywhere on the axis, so the host folds the distance its
+    /// view is seen at into [`SsaoParams::bias`].
     pub bias_slope: f32,
     /// How dark full occlusion goes at the consumer (0 = off, 1 = black).
     /// The consumers apply it — the pass itself outputs raw visibility.
@@ -488,7 +514,10 @@ impl Default for SsaoParams {
 }
 
 /// Camera terms for reconstruction, matching the projection that produced
-/// the depth target.
+/// the depth target. Orthographic, the chain takes the input's distances
+/// to depths along the view's axis and its bias takes no slope (where the
+/// eye stands on the axis then changes nothing), and
+/// [`SsaoPass::output`]'s distance channel holds those depths.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SsaoProjection {
     pub ortho: bool,
@@ -671,8 +700,8 @@ impl SsaoPass {
     }
 
     /// The blurred occlusion target (RGBA16F; x = occlusion with 1 =
-    /// unoccluded, y = view distance). Valid after [`SsaoPass::run`] in the
-    /// same frame.
+    /// unoccluded, y = view distance, orthographic the depth along the
+    /// axis). Valid after [`SsaoPass::run`] in the same frame.
     pub fn output(&self) -> Option<&Texture> {
         self.tex_c.as_ref()
     }
@@ -782,12 +811,19 @@ impl SsaoPass {
             }
         };
 
+        // The distance mode's camera terms, for the depth's first level and the taps.
+        let proj = match input {
+            SsaoInput::View(proj) => [proj.half_x, proj.half_y, if proj.ortho { 1.0 } else { 0.0 }, 0.0],
+            SsaoInput::General(_) => [0.5773, 0.5773, 0.0, 0.0],
+        };
+
         // ---- depth and its levels ------------------------------------------
         for m in 0..LEVELS {
             let draw_depth = &mut self.draw_depth[m];
             let dv = &mut draw_depth.draw_super.draw_vars;
             dv.set_texture(0, if m == 0 { depth_src } else { &tex_depth[m - 1] });
             dv.set_uniform(cx.cx, live_id!(u_step), &[if m == 0 { 0.0 } else { 1.0 }]);
+            dv.set_uniform(cx.cx, live_id!(u_proj), &proj);
             let level_size = size * 0.5f64.powi(m as i32);
             run_stage(cx, &mut self.stages, m, level_size, &tex_depth[m], &mut |cx, r| {
                 draw_depth.draw_abs(cx, r)
@@ -806,26 +842,20 @@ impl SsaoPass {
                 live_id!(u_texel),
                 &[1.0 / px.x, 1.0 / px.y, px.x, px.y],
             );
+            let ortho = matches!(input, SsaoInput::View(SsaoProjection { ortho: true, .. }));
             dv.set_uniform(
                 cx.cx,
                 live_id!(u_ao),
-                &[params.radius, params.bias, params.bias_slope, params.seed],
+                &[params.radius, params.bias, if ortho { 0.0 } else { params.bias_slope }, params.seed],
             );
             dv.set_uniform(cx.cx, live_id!(u_range), &[params.range]);
             match input {
-                SsaoInput::View(proj) => {
-                    dv.set_uniform(
-                        cx.cx,
-                        live_id!(u_proj),
-                        &[
-                            proj.half_x,
-                            proj.half_y,
-                            if proj.ortho { 1.0 } else { 0.0 },
-                            0.0,
-                        ],
-                    );
+                SsaoInput::View(view) => {
+                    dv.set_uniform(cx.cx, live_id!(u_proj), &proj);
                     dv.set_uniform(cx.cx, live_id!(u_mode), &[0.0, 0.0, 0.0, 0.0]);
-                    dv.set_uniform(cx.cx, live_id!(u_eye), &[0.0, 0.0, 0.0, 1.0]);
+                    // the eye at the origin; an orthographic view's rays all down its axis
+                    dv.set_uniform(cx.cx, live_id!(u_eye), &[0.0, 0.0, 0.0, if view.ortho { 0.0 } else { 1.0 }]);
+                    dv.set_uniform(cx.cx, live_id!(u_axis), &[0.0, 0.0, 1.0, 0.0]);
                 }
                 SsaoInput::General(general) => {
                     let terms = general.terms();

@@ -45,7 +45,8 @@ script_mod! {
         // term in this file that needs the eye: everything else here is
         // view-independent. TRUE world, not stage world, so it matches
         // v_csm.xyz and v_csm_n — the same convention the cascades and the
-        // dynamic lights already use.
+        // dynamic lights already use. Read it through `toward_eye`, which
+        // also holds for an orthographic view.
         eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))
 
         // ---- this layer's material, off the vertex stream ----
@@ -196,6 +197,19 @@ script_mod! {
             return (self.sun_color * (back * mix(1.0, 3.14159265, self.lin_ctl.x) * 0.45) + self.sun_sky * 0.8) * (e * e * e * amb_occ)
         }
 
+        // From the surface point `p` (true world) toward the eye: to the
+        // eye itself in perspective; in an orthographic view, along the
+        // view's back axis (its rays all run parallel to it, wherever on it
+        // the eye stands), as far as `p` lies below the eye. The pass view
+        // differs from true world only by a translation, so its axis is the
+        // same in both.
+        toward_eye: fn(p: vec3) -> vec3 {
+            let d = self.eye.xyz - p
+            if (self.draw_pass.camera_projection * vec4(0.0, 0.0, -1.0, 0.0)).w > 0.5 { return d }
+            let back = normalize((self.draw_pass.camera_inv * vec4(0.0, 0.0, 1.0, 0.0)).xyz)
+            return back * dot(d, back)
+        }
+
         pixel: fn() {
             self.host_cut()
             self.door_window()
@@ -239,7 +253,7 @@ script_mod! {
                 // as a checker grid from the air. With distance, blend in a
                 // second top-down read at an unrelated scale and offset, and
                 // drift the brightness over ~60 m, so no period survives.
-                let dist = length(self.eye.xyz - self.v_csm.xyz)
+                let dist = length(self.toward_eye(self.v_csm.xyz))
                 let far = smoothstep(25.0, 140.0, dist)
                 if far > 0.001 {
                     let t2 = self.tex.sample_repeat(vec2(wp.x * 0.173 + 0.31, wp.z * 0.173 - 0.47))
@@ -333,7 +347,7 @@ script_mod! {
                 clamp(self.roughness * mix(1.0, orm.y, self.orm_on), 0.045, 1.0)
             ))
             var n=normalize(self.v_csm_n)
-            if self.double_sided>0.5 && dot(n,self.eye.xyz-self.v_csm.xyz)<0.0 {n=n*(-1.0)}
+            if self.double_sided>0.5 && dot(n,self.toward_eye(self.v_csm.xyz))<0.0 {n=n*(-1.0)}
             if self.surface_on>0.5 && abs(self.normal_scale)>0.00001 {
                 let dp1=dFdx(self.v_csm.xyz)
                 let dp2=dFdy(self.v_csm.xyz)
@@ -419,7 +433,8 @@ script_mod! {
             let sun_lit = self.sun_filled(sun_all, local)
 
             let l = normalize(self.light_dir)
-            let v = normalize(self.eye.xyz - self.v_csm.xyz)
+            let te = self.toward_eye(self.v_csm.xyz)
+            let v = normalize(te)
             let h = normalize(l + v)
             let ndv = max(dot(n, v), 0.0001)
             let ndl = max(dot(n, l), 0.0001)
@@ -469,7 +484,7 @@ script_mod! {
             let analytic = surface_ambient * (ao * sao)
                 + surface_direct * (ao_direct * sun_lit)
                 + local * ao_direct
-            let local_pbr = self.cluster_pbr(self.v_csm.xyz, n, self.eye.xyz, albedo, rough, metal)
+            let local_pbr = self.cluster_pbr(self.v_csm.xyz, n, self.v_csm.xyz + te, albedo, rough, metal)
             // Per-draw factors of zero fold these maps out: skip the reads.
             var occlusion=1.0
             if self.occlusion_strength*self.surface_on>0.0 {occlusion=mix(1.0,self.occlusion_map.sample_repeat(self.v_uv).x,self.occlusion_strength*self.surface_on)}
@@ -480,7 +495,7 @@ script_mod! {
             // shadow, before N.L) and its specular lobe per unit N.L.
             let sun_rad = self.sun_color * (ao_direct * sun_lit)
             let lobe = (dist * geo / max(4.0 * ndv * ndl, 0.0001)) * mix(1.0, 3.14159265, self.lin_ctl.x)
-            var lit = self.fur_shade(self.mat_compose(albedo, metal, surface_ambient*(ao*sao*occlusion), surface_direct*(ao_direct*sun_lit), local*ao_direct, sun_spec*f, amb_spec*occlusion, local_pbr*ao_direct, n, l, v, sun_rad, f, lobe), n, self.eye.xyz-self.v_csm.xyz) + emission
+            var lit = self.fur_shade(self.mat_compose(albedo, metal, surface_ambient*(ao*sao*occlusion), surface_direct*(ao_direct*sun_lit), local*ao_direct, sun_spec*f, amb_spec*occlusion, local_pbr*ao_direct, n, l, v, sun_rad, f, lobe), n, te) + emission
             if self.tex_mag.y > 0.5 {
                 lit = self.clear_coat(lit, n, v, l, albedo, surface_direct * (sun_lit * ao_direct), ao * sao)
             }
@@ -496,7 +511,7 @@ script_mod! {
         // a clear coat: an unlit surface reflects nothing).
         shade_unlit: fn(albedo: vec3, surf_w: float, least: vec3) -> vec4 {
             var n=normalize(self.v_csm_n)
-            if self.double_sided>0.5 && dot(n,self.eye.xyz-self.v_csm.xyz)<0.0 {n=n*(-1.0)}
+            if self.double_sided>0.5 && dot(n,self.toward_eye(self.v_csm.xyz))<0.0 {n=n*(-1.0)}
             if self.surface_on>0.5 && abs(self.normal_scale)>0.00001 {
                 let dp1=dFdx(self.v_csm.xyz)
                 let dp2=dFdy(self.v_csm.xyz)
@@ -514,12 +529,13 @@ script_mod! {
             }
             n = self.mat_normal(n)
             let l = normalize(self.light_dir)
-            let v = normalize(self.eye.xyz - self.v_csm.xyz)
+            let te = self.toward_eye(self.v_csm.xyz)
+            let v = normalize(te)
             var emission=vec3(0.0,0.0,0.0)
             if max(self.emissive.x,max(self.emissive.y,self.emissive.z))>0.0 {emission=self.to_scene(self.emissive_map.sample_repeat(self.v_uv).xyz)*self.emissive}
             emission = self.mat_emission(emission)
             let none = vec3(0.0,0.0,0.0)
-            let lit = max(self.fur_shade(self.mat_compose(albedo, 0.0, none, none, none, none, none, none, n, l, v, none, none, 0.0), n, self.eye.xyz-self.v_csm.xyz) + emission, least)
+            let lit = max(self.fur_shade(self.mat_compose(albedo, 0.0, none, none, none, none, none, none, n, l, v, none, none, 0.0), n, te) + emission, least)
             let fin=self.mat_finish(vec4(self.to_display(lit),mix(1.0,surf_w,step(1.5,self.alpha_mode))))
             let coverage=fin.w
             return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(fin.xyz, self.v_fog, self.v_csm.xyz, self.fog_density)*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)

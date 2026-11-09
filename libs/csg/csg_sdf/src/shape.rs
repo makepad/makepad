@@ -189,6 +189,10 @@ pub enum SdfDeform {
     /// Mirrored across the plane through the origin normal to `axis` (0 x,
     /// 1 y, 2 z): the half on the positive side, twice.
     Mirror { axis: u8 },
+    /// Stretched along its own axes by `scale` (each above zero): a placement that scales a
+    /// part by axis ([`stretched`]). Its value, divided by the warp's bound, is the source's
+    /// times the smallest of `scale`: a lower bound on the distance.
+    Stretch { scale: P3 },
 }
 
 /// The smallest taper scale used: a taper that reaches zero is clamped here.
@@ -211,6 +215,7 @@ impl SdfDeform {
                 (1.0 / smin).max(1.0) + rate.abs() * ext(0).hypot(ext(2)) / smin
             }
             SdfDeform::Mirror { .. } => 1.0,
+            SdfDeform::Stretch { scale } => 1.0 / scale[0].min(scale[1]).min(scale[2]),
         }
     }
 
@@ -234,6 +239,7 @@ impl SdfDeform {
                 1 => Vec3d::new(p.x, p.y.abs(), p.z),
                 _ => Vec3d::new(p.x, p.y, p.z.abs()),
             },
+            SdfDeform::Stretch { scale } => Vec3d::new(p.x / scale[0], p.y / scale[1], p.z / scale[2]),
         }
     }
 }
@@ -474,6 +480,10 @@ impl Out {
                         self.u8(3);
                         self.u8(axis);
                     }
+                    SdfDeform::Stretch { scale } => {
+                        self.u8(4);
+                        scale.iter().for_each(|v| self.f(*v));
+                    }
                 }
                 self.f(*lipschitz);
                 self.node(of);
@@ -545,20 +555,67 @@ impl SdfShape {
     /// one [`SdfNode::Sculpt`] of `strokes` (a sculpt at its root takes the new log in place of
     /// its own), its box grown by the raised tubes. A shape sculpted by a log, then by that log
     /// with strokes added, equals the unsculpted shape sculpted by the longer log, key included.
+    /// A placement's stretch at its root ([`stretched`]) stays outside: the strokes are in the
+    /// frame before it, as the log's are.
     pub fn sculpted(self, strokes: Arc<crate::strokes::Strokes>) -> SdfShape {
-        let of = match self.root {
+        let (stretch, root) = match self.root {
+            SdfNode::Deform { deform: SdfDeform::Stretch { scale }, lipschitz, of } => (Some((scale, lipschitz)), *of),
+            root => (None, root),
+        };
+        let of = match root {
             SdfNode::Sculpt { of, .. } => of,
             root => Box::new(root),
         };
         let (mut min, mut max) = (self.min, self.max);
         if let Some((lo, hi)) = strokes.raised_bounds() {
+            let s = stretch.map_or([1.0; 3], |(s, _)| s);
             for k in 0..3 {
-                min[k] = min[k].min(lo[k]);
-                max[k] = max[k].max(hi[k]);
+                min[k] = min[k].min(lo[k] * s[k]);
+                max[k] = max[k].max(hi[k] * s[k]);
             }
         }
-        SdfShape { root: SdfNode::Sculpt { strokes, of }, min, max, materials: self.materials }
+        let root = SdfNode::Sculpt { strokes, of };
+        let root = match stretch {
+            Some((scale, lipschitz)) => SdfNode::Deform { deform: SdfDeform::Stretch { scale }, lipschitz, of: Box::new(root) },
+            None => root,
+        };
+        SdfShape { root, min, max, materials: self.materials }
     }
+}
+
+/// `shape` under the affine `m` (row-major, `out = m * p`) split so that its value stays a
+/// distance in the outer frame: (the shape the split leaves, the rest of `m`). A turn, a move
+/// and one uniform scale keep a distance, so under them the shape stays as it is (None). A map
+/// that also stretches the shape along its own axes (its columns at right angles, of unequal
+/// lengths: a part scaled by axis, then turned) takes the stretch over the smallest scale into
+/// the shape, as a [`SdfDeform::Stretch`] at its root, whose value is a lower bound on the
+/// distance; what is left of `m` turns, moves and scales by that smallest scale. A shape with a
+/// stretch at its root already (split before) takes the two as one. None: a map that shears or
+/// flattens.
+pub fn stretched(shape: &SdfShape, m: &[[f64; 4]; 3]) -> Option<(Option<SdfShape>, [[f64; 4]; 3])> {
+    let col = |c: usize| [m[0][c], m[1][c], m[2][c]];
+    let dot = |a: P3, b: P3| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let l: P3 = std::array::from_fn(|c| dot(col(c), col(c)).sqrt());
+    let (least, most) = (l[0].min(l[1]).min(l[2]), l[0].max(l[1]).max(l[2]));
+    if !(least > 1e-12 * most.max(1.0)) || !least.is_finite() || !most.is_finite() {
+        return None;
+    }
+    if (0..3).any(|i| (i + 1..3).any(|j| dot(col(i), col(j)).abs() > 1e-9 * l[i] * l[j])) {
+        return None;
+    }
+    if most - least <= 1e-9 * most {
+        return Some((None, *m));
+    }
+    let scale: P3 = std::array::from_fn(|c| l[c] / least);
+    let rest = std::array::from_fn(|r| [m[r][0] / scale[0], m[r][1] / scale[1], m[r][2] / scale[2], m[r][3]]);
+    let (min, max) = crate::bounds::deform_bounds(&SdfDeform::Stretch { scale }, &(shape.min, shape.max));
+    let (of, total) = match &shape.root {
+        SdfNode::Deform { deform: SdfDeform::Stretch { scale: before }, of, .. } => (of.clone(), std::array::from_fn(|k| before[k] * scale[k])),
+        root => (Box::new(root.clone()), scale),
+    };
+    let deform = SdfDeform::Stretch { scale: total };
+    let root = SdfNode::Deform { deform, lipschitz: deform.lipschitz(None), of };
+    Some((Some(SdfShape { root, min, max, materials: shape.materials.clone() }), rest))
 }
 
 /// The field evaluator owns its matrices. The public tree remains editable and its
@@ -1121,6 +1178,7 @@ mod tests {
             SdfNode::deform(SdfDeform::Bend { rate: 0.05 }, SdfNode::Box { size: [30.0, 4.0, 4.0], radius: 0.0 }),
             SdfNode::deform(SdfDeform::Taper { rate: -0.03 }, bar.clone()),
             SdfNode::deform(SdfDeform::Mirror { axis: 0 }, ball(3.0, [4.0, 1.0, 0.0])),
+            SdfNode::deform(SdfDeform::Stretch { scale: [1.0, 0.5, 2.0] }, bar.clone()),
             SdfNode::Material { slot: 2, within: None, of: Box::new(SdfNode::Bone { id: 7, rest: SdfPlace::IDENTITY, of: Box::new(SdfNode::Id { id: part_id("arm"), of: Box::new(bar) }) }) },
         ]
     }
@@ -1173,6 +1231,7 @@ mod tests {
             SdfNode::Instance { places: vec![SdfPlace::IDENTITY, SdfPlace { at: [1.0, 0.0, 0.0], rotate: quat_from_degrees([10.0, 30.0, -5.0]), scale: 0.7 }], of: child() },
             SdfNode::Bone { id: 2, rest: SdfPlace { at: [2.0; 3], ..SdfPlace::IDENTITY }, of: child() },
             SdfNode::deform(SdfDeform::Twist { rate: 0.2 }, *child()),
+            SdfNode::deform(SdfDeform::Stretch { scale: [1.0, 0.5, 2.0] }, *child()),
             SdfNode::Id { id: 3, of: child() },
             SdfNode::Sculpt { strokes: Arc::new(strokes), of: child() },
             SdfNode::Tubes(Arc::new(crate::tubes::Tubes::new(vec![crate::tubes::TubeCurve { pts: vec![[-1.5, 0.0, 0.0, 0.5], [0.0, 1.0, 0.5, 0.7], [1.5, 0.5, -0.5, 0.3]], slot: 1 }], 0.0))),
@@ -1273,6 +1332,106 @@ mod tests {
                     assert!((d - distance(&n, q)).abs() <= (*p - q).length() * (1.0 + 1e-6), "{n:?} at {p:?}");
                 }
             }
+        }
+    }
+
+    /// A turn of `deg` about z, then the per-axis `scale`, then a move: row-major `out = m * p`.
+    fn turned_stretch(deg: f64, scale: P3, at: P3) -> [[f64; 4]; 3] {
+        let (s, c) = deg.to_radians().sin_cos();
+        let r = [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]];
+        std::array::from_fn(|i| [r[i][0] * scale[0], r[i][1] * scale[1], r[i][2] * scale[2], at[i]])
+    }
+
+    /// The outer frame's point `q` into the frame the split leaves: the inverse of the similar
+    /// rest of the map (a turn times one scale, then a move), and that scale.
+    fn into_rest(rest: &[[f64; 4]; 3], q: Vec3d) -> (Vec3d, f64) {
+        let k = (0..3).map(|r| rest[r][0] * rest[r][0]).sum::<f64>().sqrt();
+        let d = [q.x - rest[0][3], q.y - rest[1][3], q.z - rest[2][3]];
+        let p: P3 = std::array::from_fn(|c| (0..3).map(|r| rest[r][c] * d[r]).sum::<f64>() / (k * k));
+        (Vec3d::new(p[0], p[1], p[2]), k)
+    }
+
+    /// A part scaled by axis (1 x 0.5 x 2, then turned 30° and moved) splits into its shape with
+    /// a stretch at the root and a turn, a move and the smallest scale. Its value in the outer
+    /// frame is a lower bound on the distance to the stretched surface (a ball becomes an
+    /// ellipsoid: its surface sampled densely is never nearer), zero on that surface, negative
+    /// inside, and its box holds the ellipsoid.
+    #[test]
+    fn a_stretched_ball_reads_a_lower_bound_on_the_distance_to_its_ellipsoid() {
+        let shape = SdfShape { root: SdfNode::Sphere { radius: 2.0 }, min: [-2.0; 3], max: [2.0; 3], materials: Default::default() };
+        let (scale, at) = ([1.0, 0.5, 2.0], [5.0, -3.0, 1.0]);
+        let m = turned_stretch(30.0, scale, at);
+        let (split, rest) = stretched(&shape, &m).expect("columns at right angles");
+        let split = split.expect("a stretch");
+        let SdfNode::Deform { deform: SdfDeform::Stretch { scale: s }, .. } = &split.root else { panic!("{:?}", split.root) };
+        assert_eq!(*s, [2.0, 1.0, 4.0]);
+        let value = |q: Vec3d| {
+            let (p, k) = into_rest(&rest, q);
+            distance(&split.root, p) * k
+        };
+        // the ellipsoid in the outer frame: semi-axes 2, 1, 4 along the turned axes
+        let semi = [2.0 * scale[0], 2.0 * scale[1], 2.0 * scale[2]];
+        let on = |u: f64, v: f64| {
+            let e = [semi[0] * v.sin() * u.cos(), semi[1] * v.sin() * u.sin(), semi[2] * v.cos()];
+            let (s, c) = 30f64.to_radians().sin_cos();
+            Vec3d::new(c * e[0] - s * e[1] + at[0], s * e[0] + c * e[1] + at[1], e[2] + at[2])
+        };
+        let n = 160;
+        let surface: Vec<Vec3d> = (0..n).flat_map(|i| (0..=n).map(move |j| (i, j))).map(|(i, j)| on(i as f64 * std::f64::consts::TAU / n as f64, j as f64 * std::f64::consts::PI / n as f64)).collect();
+        for p in surface.iter().step_by(97) {
+            assert!(value(*p).abs() < 1e-9, "on the surface at {p:?}: {}", value(*p));
+        }
+        let c = Vec3d::new(at[0], at[1], at[2]);
+        assert!(value(c) < -0.9, "inside: {}", value(c));
+        for q in lattice(&([-1.0, -9.0, -8.0], [11.0, 3.0, 10.0]), 9) {
+            let v = value(q);
+            let near = surface.iter().map(|p| (*p - q).length()).fold(f64::MAX, f64::min);
+            if v > 0.0 {
+                assert!(v <= near + 1e-9, "at {q:?}: {v} past the surface {near} away");
+            }
+        }
+        // its box, through the rest of the map, holds the ellipsoid
+        let (lo, hi) = (split.min, split.max);
+        for p in &surface {
+            let (q, _) = into_rest(&rest, *p);
+            assert!((0..3).all(|k| [q.x, q.y, q.z][k] >= lo[k] - 1e-9 && [q.x, q.y, q.z][k] <= hi[k] + 1e-9), "{q:?} outside {lo:?}..{hi:?}");
+        }
+    }
+
+    /// A map that turns, moves and scales evenly keeps a distance: the shape stays as it is. One
+    /// that shears has no split. A shape split once and then stretched again takes the two
+    /// stretches as one, the same field as the one split of the two maps together.
+    #[test]
+    fn a_stretch_splits_once_uniform_keeps_the_shape_and_a_shear_has_none() {
+        let shape = SdfShape { root: SdfNode::Box { size: [4.0, 6.0, 2.0], radius: 0.0 }, min: [-2.0, -3.0, -1.0], max: [2.0, 3.0, 1.0], materials: Default::default() };
+        let even = turned_stretch(40.0, [1.5; 3], [1.0, 2.0, 3.0]);
+        let (none, rest) = stretched(&shape, &even).unwrap();
+        assert!(none.is_none());
+        assert_eq!(rest, even);
+        let mut shear = even;
+        shear[0][1] += 0.3;
+        assert!(stretched(&shape, &shear).is_none());
+        // twice: 1 x 0.5 x 2, then 3 x 1 x 1 along the same axes
+        let first = turned_stretch(30.0, [1.0, 0.5, 2.0], [0.0; 3]);
+        let (once, rest) = stretched(&shape, &first).unwrap();
+        let once = once.unwrap();
+        let again: [[f64; 4]; 3] = std::array::from_fn(|r| std::array::from_fn(|c| if c < 3 { rest[r][c] * [3.0, 1.0, 1.0][c] } else { rest[r][3] }));
+        let (twice, rest2) = stretched(&once, &again).unwrap();
+        let twice = twice.unwrap();
+        let SdfNode::Deform { deform: SdfDeform::Stretch { scale }, of, .. } = &twice.root else { panic!("{:?}", twice.root) };
+        assert!(matches!(**of, SdfNode::Box { .. }), "one stretch over the box: {:?}", twice.root);
+        let both = turned_stretch(30.0, [3.0, 0.5, 2.0], [0.0; 3]);
+        let (one, rest1) = stretched(&shape, &both).unwrap();
+        let one = one.unwrap();
+        let SdfNode::Deform { deform: SdfDeform::Stretch { scale: s1 }, .. } = &one.root else { panic!() };
+        for k in 0..3 {
+            assert!((scale[k] - s1[k]).abs() < 1e-12, "{scale:?} {s1:?}");
+            assert!((twice.min[k] - one.min[k]).abs() < 1e-9 && (twice.max[k] - one.max[k]).abs() < 1e-9);
+        }
+        for q in lattice(&([-6.0; 3], [6.0; 3]), 7) {
+            let (p2, k2) = into_rest(&rest2, q);
+            let (p1, k1) = into_rest(&rest1, q);
+            assert!((distance(&twice.root, p2) * k2 - distance(&one.root, p1) * k1).abs() < 1e-9, "at {q:?}");
         }
     }
 

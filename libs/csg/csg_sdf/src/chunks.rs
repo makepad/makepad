@@ -349,9 +349,9 @@ mod tests {
     }
 
     /// Chunks read the whole tree's values bit for bit, in the grid and off it, a point at a time
-    /// and in batches, and its material slots; a box's slopes are unbounded where a kernel makes the
-    /// values and off the grid, more than a distance's over a flat ellipsoid (less so at the values
-    /// near 0), a distance's by a ball.
+    /// and in batches, and its material slots; a box's slopes are as steep as a kernel measured where
+    /// it makes the values, unbounded off the grid, more than a distance's over a flat ellipsoid
+    /// (less so at the values near 0), a distance's by a ball.
     #[test]
     fn chunks_read_the_trees_values() {
         let kernel = SdfNode::Kernel(SdfKernel { key: 5, field: Arc::new(Steep), splash: None, bounds: Some(([-5.0; 3], [5.0; 3])), solid: None });
@@ -371,7 +371,8 @@ mod tests {
             assert_eq!(crate::shape::distance_slot(&root, *p).1, chunks.distance_slot(*p).1, "{p:?}");
         }
         let slopes = |b: Bounds| chunks.slopes_in(&b, f64::INFINITY);
-        assert_eq!(slopes(([-1.0, 29.0, 29.0], [1.0, 31.0, 31.0])).outside, f64::INFINITY, "at the kernel");
+        let at_kernel = slopes(([-1.0, 29.0, 29.0], [1.0, 31.0, 31.0])).outside;
+        assert!(at_kernel.is_finite() && at_kernel >= 2.0, "at the kernel, as it measured: {at_kernel}");
         let flat = ([-1.0, 64.5, -1.0], [1.0, 65.5, 1.0]);
         assert!(slopes(flat).outside > 1.0, "over a flat ellipsoid");
         assert!(chunks.slopes_in(&flat, 0.01).outside < slopes(flat).outside, "a flat ellipsoid's estimate less steep near its surface");

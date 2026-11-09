@@ -3,10 +3,11 @@
 //!
 //! A tree's pieces prove their slopes ([`crate::bounds::slopes_within`]); a Splash kernel
 //! (`m.sdf`) may be any function, not a distance (a gyroid's `|g| / k` climbs up to about 1.9
-//! times as fast as the distance to its sheet), and is measured: the steepest forward-difference
-//! gradient on a lattice over the bounds, near the surface. Everything that culls by the value
-//! (the mesher, a coarse search, a march) reads its radius from these so it never
-//! steps past a surface.
+//! times as fast as the distance to its sheet), and is measured on its own over its box
+//! ([`measured`]): the steepest forward-difference gradients on a lattice, near its surface and
+//! at any value. The tree's slopes compose round that measure as round any piece's.
+//! Everything that culls by the value (the mesher, a coarse search, a march) reads its radius
+//! from these so it never steps past a surface.
 
 use crate::sdf::Sdf3;
 use crate::shape::{SdfNode, SdfShape, P3};
@@ -16,9 +17,42 @@ use std::sync::Arc;
 /// Lattice cells per side.
 const N: usize = 24;
 
+/// How steep a field was measured over a box, as many times as a distance (each at least 1,
+/// [`measured`]): outside its solid and inside, at the values within `near` of 0 and at any.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Measured {
+    /// How far from 0 the near values reach: two lattice cells.
+    pub near: f64,
+    /// (near values, any value) outside the solid.
+    pub outside: (f64, f64),
+    /// (near values, any value) inside it.
+    pub inside: (f64, f64),
+}
+
+impl Measured {
+    /// How steep at the values in `w.0..=w.1` (0 where there are none): the near values' where
+    /// the window stays within their reach on a side, else any value's.
+    pub fn within(&self, w: (f64, f64)) -> f64 {
+        if !(w.0 <= w.1) {
+            return 0.0;
+        }
+        let outside = if w.1 < 0.0 { 0.0 } else if w.1 <= self.near { self.outside.0 } else { self.outside.1 };
+        let inside = if w.0 > 0.0 { 0.0 } else if -w.0 <= self.near { self.inside.0 } else { self.inside.1 };
+        outside.max(inside)
+    }
+}
+
 /// The steepest gradient of `field` over `min..max` near its surface (within two lattice
-/// cells of it), at least 1, with a tenth to spare.
+/// cells of it) on either side, at least 1, with a tenth to spare ([`measured`]).
 pub fn measure(field: &Arc<dyn Sdf3 + Send + Sync>, min: Vec3d, max: Vec3d) -> f64 {
+    let m = measured(field, min, max);
+    m.outside.0.max(m.inside.0)
+}
+
+/// How steep `field` is over `min..max` ([`Measured`]): the steepest forward-difference
+/// gradient on a lattice of `N` cells a side, at the points whose values lie on each side and
+/// within two cells of 0 or anywhere, each at least 1 and with a tenth to spare.
+pub fn measured(field: &Arc<dyn Sdf3 + Send + Sync>, min: Vec3d, max: Vec3d) -> Measured {
     let size = max - min;
     let step = size.x.max(size.y).max(size.z).max(1e-9) / N as f64;
     let h = step / 16.0;
@@ -32,17 +66,60 @@ pub fn measure(field: &Arc<dyn Sdf3 + Send + Sync>, min: Vec3d, max: Vec3d) -> f
         }
     }
     let d = crate::surface_mesh::sample(field, ps);
-    let mut l = 1.0f64;
+    let near = 2.0 * step;
+    let (mut outside, mut inside) = ((1.0f64, 1.0f64), (1.0f64, 1.0f64));
     for q in d.chunks_exact(4) {
-        if q[0].abs() > 2.0 * step {
+        let g = ((q[1] - q[0]).powi(2) + (q[2] - q[0]).powi(2) + (q[3] - q[0]).powi(2)).sqrt() / h;
+        if !g.is_finite() {
             continue;
         }
-        let g = ((q[1] - q[0]).powi(2) + (q[2] - q[0]).powi(2) + (q[3] - q[0]).powi(2)).sqrt() / h;
-        if g.is_finite() {
-            l = l.max(g);
+        let v = q[0];
+        if v >= 0.0 {
+            outside = (if v <= near { outside.0.max(g) } else { outside.0 }, outside.1.max(g));
+        }
+        if v <= 0.0 {
+            inside = (if -v <= near { inside.0.max(g) } else { inside.0 }, inside.1.max(g));
         }
     }
-    l * 1.1
+    Measured { near, outside: (outside.0 * 1.1, outside.1 * 1.1), inside: (inside.0 * 1.1, inside.1 * 1.1) }
+}
+
+/// How far past its declared box a kernel is measured, in shares of the box's longest side.
+const KERNEL_MARGIN: f64 = 0.25;
+
+/// The box a kernel is measured over (its declared box grown by [`KERNEL_MARGIN`]) and its
+/// measure there ([`measured`]), once per kernel and box in the process: a kernel is the same
+/// function wherever its tree places it. A Splash kernel is known by its key (its whole program);
+/// any other by its key and its field, which the record holds so no other field takes its place.
+/// None: a kernel with no box, or one that reads a grid (each region crops its grid to the piece it
+/// reads, and a grid read's own samples bound its tree).
+pub(crate) fn kernel_measured(k: &crate::shape::SdfKernel) -> Option<(crate::bounds::Bounds, Measured)> {
+    let b = k.bounds?;
+    if k.solid.is_some() || k.splash.as_ref().is_some_and(|s| s.grid().is_some()) {
+        return None;
+    }
+    type Field = Option<Arc<dyn Sdf3 + Send + Sync>>;
+    type Seen = std::sync::Mutex<std::collections::HashMap<(u64, usize, [u64; 6]), (crate::bounds::Bounds, Measured, Field)>>;
+    static SEEN: std::sync::OnceLock<Seen> = std::sync::OnceLock::new();
+    let field = if k.splash.is_some() { 0 } else { Arc::as_ptr(&k.field) as *const u8 as usize };
+    let key = (k.key, field, [b.0[0], b.0[1], b.0[2], b.1[0], b.1[1], b.1[2]].map(f64::to_bits));
+    let seen = SEEN.get_or_init(Default::default);
+    if let Some(&(grown, m, _)) = seen.lock().unwrap().get(&key) {
+        return Some((grown, m));
+    }
+    let size = (0..3).map(|i| b.1[i] - b.0[i]).fold(0.0f64, f64::max);
+    if !(size > 0.0) {
+        return None;
+    }
+    let grown = crate::bounds::grow(b, KERNEL_MARGIN * size);
+    let v = |p: P3| Vec3d::new(p[0], p[1], p[2]);
+    let m = measured(&k.field, v(grown.0), v(grown.1));
+    let mut seen = seen.lock().unwrap();
+    if seen.len() >= 4096 {
+        seen.clear();
+    }
+    seen.insert(key, (grown, m, k.splash.is_none().then(|| k.field.clone())));
+    Some((grown, m))
 }
 
 /// How steep the ellipsoid's estimate `k0 (k0 - 1) / k1` is wherever `k0 >= 1/2`, from its radii.
@@ -278,22 +355,32 @@ impl SdfShape {
     /// How far the shape's values prove its surface away, for points within its box's size of
     /// the box (a line from one to the solid stays there): what its pieces prove there at each
     /// reach ([`crate::bounds::slopes_within`]: an ellipsoid's estimate is about a distance near
-    /// its surface and unbounded only deep inside, where its values then prove nothing), or
-    /// where they prove no slope at any reach (a kernel, a sculpt), [`SdfShape::lipschitz`]'s
-    /// measure at every value.
+    /// its surface and unbounded only deep inside, where its values then prove nothing; a
+    /// kernel's as it measured round its own box, near its surface), and at any value where they
+    /// prove no slope on either side (a kernel's values far from its box, a sculpt),
+    /// [`SdfShape::lipschitz`]'s measure.
     pub fn clearance(&self) -> Clearance {
         let size = (0..3).map(|k| self.max[k] - self.min[k]).fold(0.0f64, f64::max);
-        let region = crate::bounds::grow((self.min, self.max), size);
+        let mut c = self.clearance_in(&crate::bounds::grow((self.min, self.max), size));
+        let any = &mut c.rungs[REACHES.len()];
+        if any.1.is_infinite() && any.2.is_infinite() {
+            let l = self.lipschitz().max(1.0);
+            (any.1, any.2) = (l, l);
+        }
+        c
+    }
+
+    /// How far the shape's values prove its surface away for points in `region`: what its
+    /// pieces prove there at each reach (the reaches its box's size sets, as
+    /// [`SdfShape::clearance`]'s), infinite where they prove none. Nothing is measured.
+    pub fn clearance_in(&self, region: &crate::bounds::Bounds) -> Clearance {
+        let size = (0..3).map(|k| self.max[k] - self.min[k]).fold(0.0f64, f64::max);
         let mut rungs = [(f64::INFINITY, f64::INFINITY, f64::INFINITY); REACHES.len() + 1];
         for (r, w) in rungs.iter_mut().zip(REACHES.iter().map(|f| f * size).chain([f64::INFINITY])) {
-            let s = crate::bounds::slopes_within(&self.root, &region, w);
+            let s = crate::bounds::slopes_within(&self.root, region, w);
             *r = (w, s.outside.max(1.0), s.inside.max(1.0));
         }
-        if rungs.iter().any(|r| r.1.is_finite() || r.2.is_finite()) {
-            Clearance { rungs }
-        } else {
-            Clearance::uniform(self.lipschitz())
-        }
+        Clearance { rungs }
     }
 
     /// The shape's Lipschitz bound over its box, on both sides of its surface: its pieces' own
@@ -331,6 +418,18 @@ pub(crate) fn has_kernel(n: &SdfNode) -> bool {
         SdfNode::Shell { of, .. } | SdfNode::Round { of, .. } | SdfNode::Transform { of, .. } | SdfNode::Instance { of, .. } | SdfNode::Bone { of, .. } | SdfNode::Deform { of, .. } | SdfNode::Id { of, .. } | SdfNode::Sculpt { of, .. } => has_kernel(of),
         // its own bound keeps it 1-Lipschitz: its pattern kernel is no distance
         SdfNode::Texture { of, .. } => has_kernel(of),
+        _ => false,
+    }
+}
+
+/// Whether a sculpt is in the tree ([`SdfNode::Sculpt`]): a piece whose slope nothing proves
+/// ([`crate::bounds::slopes_within`]), which only a measure of its values bounds.
+pub fn has_sculpt(n: &SdfNode) -> bool {
+    match n {
+        SdfNode::Sculpt { .. } => true,
+        SdfNode::Combine { of, .. } => of.iter().any(has_sculpt),
+        SdfNode::Material { within, of, .. } => has_sculpt(of) || within.as_deref().is_some_and(has_sculpt),
+        SdfNode::Shell { of, .. } | SdfNode::Round { of, .. } | SdfNode::Transform { of, .. } | SdfNode::Instance { of, .. } | SdfNode::Bone { of, .. } | SdfNode::Deform { of, .. } | SdfNode::Id { of, .. } | SdfNode::Texture { of, .. } => has_sculpt(of),
         _ => false,
     }
 }
@@ -463,5 +562,65 @@ mod tests {
             assert!(most_in > 0.0, "{r:?}: no point inside where the window bounds it");
         }
         assert!(checked[0] > 500_000 && checked[1] > 20_000, "{checked:?} points outside and inside");
+    }
+
+    /// Two and a half times a capsule's distance, in metres: a kernel steeper than a distance.
+    struct SteepLeg;
+    impl Sdf3 for SteepLeg {
+        fn distance(&self, p: Vec3d) -> f64 {
+            let y = p.y.clamp(0.003, 0.027);
+            2.5 * ((p.x - 0.006).hypot(p.z).hypot(p.y - y) - 0.002)
+        }
+    }
+
+    /// A steep kernel's leg in metres, framed a thousand times up and blended between ellipsoids,
+    /// as a figure's: its slopes hold round its own measure, so the tree proves rungs near its
+    /// surface instead of measuring the whole of it, and every one holds over a dense sample (the
+    /// rung at any value is the whole tree's measure, not a proof).
+    #[test]
+    fn a_kernel_in_a_tree_is_proven_round_its_own_measure() {
+        let at = |p: P3, scale: f64, of: SdfNode| SdfNode::Transform { at: p, rotate: [0.0; 3], scale, of: Box::new(of) };
+        let leg = SdfNode::Kernel(crate::shape::SdfKernel { key: 0x1e9, field: Arc::new(SteepLeg), splash: None, bounds: Some(([0.003, 0.0, -0.003], [0.009, 0.03, 0.003])), solid: None });
+        let root = SdfNode::Combine {
+            op: crate::shape::SdfOp::Union,
+            blend: 1.0,
+            of: vec![at([0.0, 45.0, 0.0], 1.0, SdfNode::Ellipsoid { radii: [20.0, 40.0, 15.0] }), at([0.0; 3], 1000.0, leg), at([6.0, 2.0, 0.0], 1.0, SdfNode::Ellipsoid { radii: [8.0, 5.0, 10.0] })],
+        };
+        let (min, max) = ([-21.0, -4.0, -16.0], [21.0, 86.0, 16.0]);
+        let shape = SdfShape { root, min, max, materials: Vec::new() };
+        let c = shape.clearance();
+        let (s, w) = c.at(1.0);
+        assert!(s.is_finite() && s >= 2.5 && w > 0.0, "{c:?}: ({s}, {w}) at 1");
+        let proven: Vec<_> = c.rungs.iter().copied().filter(|r| r.1.is_finite() && r.2.is_finite()).collect();
+        assert!(!proven.is_empty() && proven.iter().all(|r| r.1 >= 2.5 && r.1 <= 3.0), "{c:?}");
+        // every proven rung holds at the values within its reach on each side
+        let n = 64;
+        let size: Vec<f64> = (0..3).map(|k| max[k] - min[k]).collect();
+        let (mut seed, mut checked) = (0x5eed_u64, 0usize);
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let h = 1e-5;
+        for idx in 0..n * n * n {
+            let cell = [idx % n, idx / n % n, idx / (n * n)];
+            let p = Vec3d::new(
+                min[0] - 0.1 * size[0] + 1.2 * size[0] * (cell[0] as f64 + next()) / n as f64,
+                min[1] - 0.1 * size[1] + 1.2 * size[1] * (cell[1] as f64 + next()) / n as f64,
+                min[2] - 0.1 * size[2] + 1.2 * size[2] * (cell[2] as f64 + next()) / n as f64,
+            );
+            let v = crate::shape::distance(&shape.root, p);
+            let d = |e: Vec3d| (crate::shape::distance(&shape.root, p + e) - crate::shape::distance(&shape.root, p - e)) / (2.0 * h);
+            let g = Vec3d::new(d(Vec3d::new(h, 0.0, 0.0)), d(Vec3d::new(0.0, h, 0.0)), d(Vec3d::new(0.0, 0.0, h)));
+            let g = (g.x * g.x + g.y * g.y + g.z * g.z).sqrt();
+            for &(w, o, i) in c.rungs.iter() {
+                let bound = if v >= 0.0 { o } else { i };
+                if w.is_finite() && bound.is_finite() && v.abs() <= w {
+                    assert!(g <= bound * (1.0 + 1e-3), "{g} over {bound} at {p:?} (value {v}, reach {w})");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 20_000, "{checked} checks");
     }
 }

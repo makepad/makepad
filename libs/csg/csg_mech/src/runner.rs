@@ -6,6 +6,7 @@
 //! the events (hard contacts, limit hits) for haptics.
 
 use crate::geom::*;
+use crate::dyn_world::Reset;
 use crate::sim::{Assembly, BodyAction, JointKind, MechWorld, Pose};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -96,6 +97,8 @@ pub struct Snapshot {
     pub grabbed: Option<usize>,
     pub pinned: Vec<usize>,
     pub frozen: Vec<usize>,
+    /// Every time the dynamics engine's state blew up and it put the parts back at the print pose (box3d has none).
+    pub resets: Vec<Reset>,
 }
 
 impl Snapshot {
@@ -140,6 +143,7 @@ fn snapshot(w: &mut MechWorld, asm: &Assembly, frame: u64, commands: u64, runnin
         grabbed: w.grabbed(),
         pinned: w.pinned(),
         frozen: w.frozen(),
+        resets: Vec::new(),
     }
 }
 
@@ -166,6 +170,7 @@ impl Runner {
             grabbed: None,
             pinned: Vec::new(),
             frozen: Vec::new(),
+            resets: Vec::new(),
         });
         let latest = Arc::new(Mutex::new(first.clone()));
         let events = Arc::new(Mutex::new(Vec::new()));
