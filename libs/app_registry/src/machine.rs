@@ -207,10 +207,22 @@ pub fn request_activity(path: &std::path::Path) -> Result<String, String> {
 #[cfg(unix)]
 pub fn unsaved_work() -> Vec<(u32, String, String)> {
     let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) else { return Vec::new() };
-    let Ok(entries) = std::fs::read_dir(PathBuf::from(dir).join("makepad-unsaved")) else { return Vec::new() };
+    unsaved_in(&PathBuf::from(dir).join("makepad-unsaved"))
+}
+
+/// The records of `dir` ([`unsaved_work`]) that their pid's process wrote: one written before
+/// that process started is a dead app's, whose pid came back. An app killed with unsaved work
+/// leaves its record (the runtime dir lives until the session ends): a Fab's from a week before
+/// named a pid that one of the WM's threads had taken since, and held a node's WM restart on
+/// "code being typed" with no Fab open and no input on the box (11-08).
+#[cfg(unix)]
+fn unsaved_in(dir: &std::path::Path) -> Vec<(u32, String, String)> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+        let Some(written) = entry.metadata().and_then(|m| m.modified()).ok() else { continue };
+        if started(pid).is_none_or(|start| written < start) { continue }
         let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else { continue };
         let app = cmdline.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned())
             .find(|a| find_app_name(a).is_some()).and_then(|a| find_app_name(&a)).unwrap_or_else(|| format!("pid {pid}"));
@@ -220,6 +232,22 @@ pub fn unsaved_work() -> Vec<(u32, String, String)> {
     }
     out.sort();
     out
+}
+
+/// When process `pid` started: the boot time (`btime` of /proc/stat, whole seconds, so at most
+/// a second early) plus its start in clock ticks after boot (field 22 of /proc/<pid>/stat). None:
+/// no such process, or no /proc (macOS).
+#[cfg(unix)]
+fn started(pid: u32) -> Option<std::time::SystemTime> {
+    // /proc's clock ticks: Linux's USER_HZ, 100 on every architecture it exports
+    // (`sysconf(_SC_CLK_TCK)` answers it)
+    const TICKS_PER_S: u64 = 100;
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // the fields after the command name, which is in parentheses and may hold anything: from
+    // the state (field 3) on
+    let ticks: u64 = stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()?;
+    let boot: u64 = std::fs::read_to_string("/proc/stat").ok()?.lines().find_map(|l| l.strip_prefix("btime "))?.trim().parse().ok()?;
+    Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(boot) + std::time::Duration::from_millis(ticks * 1000 / TICKS_PER_S))
 }
 
 /// The registry label of a package or binary named by a command-line word (a path's file name).
@@ -238,6 +266,26 @@ mod tests {
         let env = parse_app_conf("# a node's app\nlan = on\nenv APP_SETTING=x\nenv CARGO_TARGET_DIR=/x\nenv MAKEPAD_TEST_LANE=x\nnonsense\n");
         assert_eq!(env, vec![("MAKEPAD_LAN".to_string(), "1".to_string()), ("APP_SETTING".to_string(), "x".to_string())]);
         assert_eq!(parse_app_conf("lan = off"), vec![("MAKEPAD_LAN".to_string(), "0".to_string())]);
+    }
+
+    /// A record its pid's process wrote is unsaved work; the same record written before that
+    /// process started is a dead app's whose pid came back, and one whose pid no process has is
+    /// nobody's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unsaved_work_is_what_the_process_with_that_pid_wrote() {
+        let me = std::process::id();
+        let dir = std::env::temp_dir().join(format!("makepad-unsaved-test-{me}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(me.to_string()), "code being typed\n").unwrap();
+        std::fs::write(dir.join((u32::MAX - 1).to_string()), "code being typed\n").unwrap();
+        let found = |dir: &std::path::Path| unsaved_in(dir).into_iter().map(|(pid, _, what)| (pid, what)).collect::<Vec<_>>();
+        assert_eq!(found(&dir), vec![(me, "code being typed".to_string())]);
+        let before = started(me).unwrap() - std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(dir.join(me.to_string())).unwrap().set_modified(before).unwrap();
+        assert_eq!(found(&dir), Vec::new());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

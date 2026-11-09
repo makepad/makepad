@@ -427,12 +427,35 @@ pub fn is_available(entry: &AppEntry) -> bool {
 
 /// The command that builds `entry`: `build_argv` in the checkout root with
 /// the launchers' cargo environment (`cargo_command`), so a build from a tool
-/// (Stage's app runs) leaves what the WM, Code and DECK find fresh. None
-/// outside a checkout.
-pub fn build_command(entry: &AppEntry) -> Option<Command> {
-    let root = repo_root()?;
+/// (Stage's app runs) leaves what the WM, Code and DECK find fresh. Err
+/// outside a checkout, and in one cargo cannot read ([`on_disk`]).
+pub fn build_command(entry: &AppEntry) -> Result<Command, String> {
+    let root = repo_root().ok_or("no Makepad checkout to build in")?;
+    on_disk(&root)?;
     let (program, args) = build_argv_features(&entry.target(), &root, &entry.build_features());
-    Some(cargo_command(&program, &args, &root))
+    Ok(cargo_command(&program, &args, &root))
+}
+
+/// Err when `root` lies in the JIT's virtual source tree (its mount table, MAKEPAD_RUN_VFS: a
+/// devhub overlay run, or a run of a git repository). The JIT process reads its files, but cargo
+/// runs as a process of its own and finds only the disk, where that tree is not: under an overlay
+/// an app run's build failed with "manifest path `<work>/dev/src/Cargo.toml` does not exist"
+/// (11-08).
+pub fn on_disk(root: &Path) -> Result<(), String> {
+    match virtual_mount(root, &std::env::var("MAKEPAD_RUN_VFS").unwrap_or_default()) {
+        Some(at) => Err(format!(
+            "{} is in the JIT's virtual source tree (mounted at {at}): only the JIT process reads it, so cargo finds no checkout there. \
+             Build from a checkout on disk: in devhub, the lane's tree (`devhub test <lane> <package> --tree`, \
+             or `[package.metadata.makepad] test-tree = \"<why>\"` in the package's Cargo.toml)",
+            root.display()
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The mount of a mount table (`root\tstore\tcommit..` per line) that `path` lies in.
+fn virtual_mount<'a>(path: &Path, mounts: &'a str) -> Option<&'a str> {
+    mounts.lines().filter_map(|line| line.split('\t').next()).find(|at| !at.is_empty() && path.starts_with(at))
 }
 
 #[cfg(test)]
@@ -457,6 +480,19 @@ mod tests {
         #[cfg(target_os = "linux")]
         assert_eq!(runs_binary(std::process::id(), &std::env::current_exe().unwrap()), Some(true));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A root in the JIT's virtual source tree is no checkout cargo can build in: an overlay's
+    /// root, a nested repository mounted in it and any folder under them. A folder beside them
+    /// is the disk's.
+    #[test]
+    fn a_root_in_the_jits_virtual_tree_is_no_checkout_for_cargo() {
+        let mounts = "/w/dev/src\t/w/dev/stores/makepad\tab12\n/w/dev/src/apps/x\t/w/dev/stores/x\tcd34\t0+10\n";
+        assert_eq!(virtual_mount(Path::new("/w/dev/src"), mounts), Some("/w/dev/src"));
+        assert_eq!(virtual_mount(Path::new("/w/dev/src/apps/x/libs/y"), mounts), Some("/w/dev/src"));
+        assert_eq!(virtual_mount(Path::new("/w/dev/srcs"), mounts), None, "a folder whose name starts like the root's");
+        assert_eq!(virtual_mount(Path::new("/w/tree"), mounts), None);
+        assert_eq!(virtual_mount(Path::new("/w/dev/src"), ""), None, "no mounts: every folder is the disk's");
     }
 
     /// The checkout these tests were compiled in.

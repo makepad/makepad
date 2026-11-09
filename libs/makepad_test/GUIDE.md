@@ -65,8 +65,9 @@ The runtime is synchronous and serial-first:
 - action budget: a wait fails once the app's main thread has run `10s` of CPU, or the app has
   sat idle (nothing running, nothing pending) for `10s`, without what it waits for: a loaded
   box or a cold JIT spends neither. What the app spends answering the test's asks (snapshots,
-  log reads) is not its own work: a wait that asks every poll still sees an app with nothing to
-  do as idle
+  log reads, tool calls, grabs) is not its own work: its share is what it runs outside a wait's
+  closure, over the time outside it, so a wait that asks every poll still sees an app with
+  nothing to do as idle, and a closure that sleeps hides none of the app's work
 - poll interval: `50ms`
 - artifacts: `<manifest_dir>/target/makepad_test/<package>/<test>/` (`$MAKEPAD_TEST_ARTIFACTS/<package>/<test>/` when set; devhub sets it per lease)
 

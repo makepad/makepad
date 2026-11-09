@@ -398,7 +398,9 @@ impl TestApp {
         let mut budget = Budget::start(self, budget)?;
         loop {
             self.ensure_running()?;
+            let (since, before) = (Instant::now(), self.client().cpu()?);
             let Some(what) = pending() else { return Ok(()) };
+            budget.asked(since, before, self.client().cpu()?);
             if budget.look_due() {
                 if let Some(spent) = budget.spent(self)? {
                     return Err(TestError::new(format!("{what}: {spent}")));
@@ -1250,9 +1252,11 @@ pub fn run_current_package_test<F, R>(
 /// the app: a thread that waits for a core, or for the JIT to compile code it runs for the first
 /// time, runs no CPU of its own and is not idle (the JIT's compiles are its process's CPU). An
 /// app with nothing running (its process under 1/[`IDLE_SHARE`] of a core, not counting what
-/// its threads serving remote peers run: the wait's own asks cost the app CPU) and nothing pending
-/// (`settled`) has nothing left that would bring what the wait waits for: `action_timeout` of
-/// that ends the wait.
+/// its threads serving remote peers run: the wait's own asks cost the app CPU) and nothing
+/// pending (`settled`) has nothing left that would bring what the wait waits for:
+/// `action_timeout` of that ends the wait. What the UI thread runs answering an ask (a tool call,
+/// a grab) no serving thread counts, so the share is the app's while the wait left it alone:
+/// what it ran outside the wait's closure, over the time outside it.
 struct Budget {
     /// The main thread's CPU the wait may spend.
     limit: Duration,
@@ -1264,12 +1268,21 @@ struct Budget {
     last: (Instant, Duration),
     /// How long the app has been idle, to the last look.
     idle: Duration,
+    /// The time the wait spent asking the app (its closure ran), and the app's own CPU in it,
+    /// since the last look.
+    asked: (Duration, Duration),
 }
 
 impl Budget {
     fn start(app: &TestApp, limit: Duration) -> TestResult<Budget> {
         let cpu = app.client().cpu()?;
-        Ok(Budget { limit, idle_limit: app.action_timeout(), main: cpu.main, last: (Instant::now(), cpu.own), idle: Duration::ZERO })
+        Ok(Budget { limit, idle_limit: app.action_timeout(), main: cpu.main, last: (Instant::now(), cpu.own), idle: Duration::ZERO, asked: (Duration::ZERO, Duration::ZERO) })
+    }
+
+    /// The wait asked the app from `since` (its closure ran): its CPU before and after.
+    fn asked(&mut self, since: Instant, before: crate::remote::AppCpu, after: crate::remote::AppCpu) {
+        self.asked.0 += since.elapsed();
+        self.asked.1 += after.own.saturating_sub(before.own);
     }
 
     fn look_due(&self) -> bool {
@@ -1286,7 +1299,10 @@ impl Budget {
         }
         let (then, own) = self.last;
         let over = now - then;
-        let idle = cpu.own.saturating_sub(own) * IDLE_SHARE < over && app.client().settled()?;
+        // what the app ran left alone, over the time it was
+        let (asking, asked) = std::mem::take(&mut self.asked);
+        let ran = cpu.own.saturating_sub(own).saturating_sub(asked);
+        let idle = ran * IDLE_SHARE < over.saturating_sub(asking) && app.client().settled()?;
         self.idle = if idle { self.idle + over } else { Duration::ZERO };
         self.last = (now, cpu.own);
         Ok((self.idle >= self.idle_limit).then(|| {
