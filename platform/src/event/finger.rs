@@ -681,6 +681,8 @@ pub struct CxFingers {
     scroll_drag_locks: Vec<(DigitId, ScrollDirection)>,
     /// The presses something outside a drag scroller already held when it got them, which it never joins.
     presses_held_outside: Vec<(DigitId, Area)>,
+    /// The presses that leave the key focus where it is, see [`Self::mark_press_as_keeping_key_focus`].
+    presses_keeping_key_focus: Vec<DigitId>,
     is_touching: bool,
     is_mouse_drag_scrolling_disabled: bool,
 }
@@ -1160,6 +1162,7 @@ impl CxFingers {
         self.scroll_drag_holders.retain(|(id, _)| *id != digit_id);
         self.scroll_drag_locks.retain(|(id, _)| *id != digit_id);
         self.presses_held_outside.retain(|(id, _)| *id != digit_id);
+        self.presses_keeping_key_focus.retain(|id| *id != digit_id);
     }
 
     /// See [`Cx::set_mouse_drag_scrolling`].
@@ -1235,6 +1238,25 @@ impl CxFingers {
         if !self.presses_held_outside.contains(&(digit_id, area)) {
             self.presses_held_outside.push((digit_id, area));
         }
+    }
+
+    /// Marks `digit_id`'s press as leaving the key focus where it is, so a focused text input stays focused
+    /// (and keeps its soft keyboard up) even though the press ends outside of it. Call it before the press ends,
+    /// e.g., on `Hit::FingerDown`.
+    pub fn mark_press_as_keeping_key_focus(&mut self, digit_id: DigitId) {
+        if !self.presses_keeping_key_focus.contains(&digit_id) {
+            self.presses_keeping_key_focus.push(digit_id);
+        }
+    }
+
+    /// Undoes [`Self::mark_press_as_keeping_key_focus`], e.g., once a press that might have been a tap turns into a drag.
+    pub fn unmark_press_as_keeping_key_focus(&mut self, digit_id: DigitId) {
+        self.presses_keeping_key_focus.retain(|id| *id != digit_id);
+    }
+
+    /// Whether `digit_id`'s press leaves the key focus where it is, see [`Self::mark_press_as_keeping_key_focus`].
+    pub fn is_press_keeping_key_focus(&self, digit_id: DigitId) -> bool {
+        self.presses_keeping_key_focus.contains(&digit_id)
     }
 
     /// Whether a widget holds the press of a finger on the screen,

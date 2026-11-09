@@ -3125,7 +3125,10 @@ impl Widget for TextInput {
             let rect = self.draw_bg.area().rect(cx);
             let should_lose_focus = match event {
                 // Handle desktop mouse clicks
-                Event::MouseUp(mu) => !rect.contains(mu.abs),
+                Event::MouseUp(mu) => {
+                    !rect.contains(mu.abs)
+                        && !cx.fingers.is_press_keeping_key_focus(live_id!(mouse).into())
+                }
                 // Handle mobile touch events
                 Event::TouchUpdate(tu) => {
                     let mut should_lose_focus = false;
@@ -3145,7 +3148,10 @@ impl Widget for TextInput {
                             }
                             TouchState::Stop => {
                                 if self.pending_outside_focus_loss_touch == Some(touch.uid) {
-                                    should_lose_focus = !rect.contains(touch.abs);
+                                    should_lose_focus = !rect.contains(touch.abs)
+                                        && !cx.fingers.is_press_keeping_key_focus(
+                                            live_id_num!(touch, touch.uid).into(),
+                                        );
                                     self.pending_outside_focus_loss_touch = None;
                                 }
                             }
