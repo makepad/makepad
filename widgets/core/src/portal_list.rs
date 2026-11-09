@@ -4453,6 +4453,12 @@ impl Widget for PortalList {
                             push_sample(samples, new_abs, e.time);
                             // Android keeps sending moves for a still finger.
                             if new_abs != from {
+                                // A draw before the drag got going may have found us still at the end, so moving away
+                                // from it stops following it, and a later draw that finds us there follows it again.
+                                if new_abs > from {
+                                    self.tail_range = false;
+                                }
+                                self.detect_tail_in_draw = true;
                                 self.delta_top_scroll(cx, new_abs - from, false, false, 0.0, true, true);
                                 self.area.redraw(cx);
                             }
