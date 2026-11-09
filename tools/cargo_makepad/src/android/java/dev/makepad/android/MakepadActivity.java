@@ -46,6 +46,7 @@ import android.os.SystemClock;
 import android.util.Log;
 import android.view.ActionMode;
 import android.view.Display;
+import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.Menu;
 import android.view.MenuItem;
@@ -77,6 +78,7 @@ import android.text.SpannableStringBuilder;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.PopupWindow;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
 
@@ -103,6 +105,9 @@ class MakepadImeInsets {
     // fallbacks (onApplyWindowInsets, onGlobalLayout) observe a contradictory
     // mix of target and stale insets mid-animation, so they defer to it.
     static boolean imeAnimationInProgress = false;
+
+    // Set by MakepadLegacyImeProbe, which only runs below API 30.
+    static Rect legacyImeProbeFrame = null;
 
     private static int keyboardThresholdPx(View view) {
         return Math.max(1, (int) (view.getResources().getDisplayMetrics().density * MIN_KEYBOARD_HEIGHT_DP));
@@ -145,7 +150,11 @@ class MakepadImeInsets {
 
     private static int visibleFrameBottomOverlapPx(View view) {
         Rect visibleFrame = new Rect();
-        view.getWindowVisibleDisplayFrame(visibleFrame);
+        if (Build.VERSION.SDK_INT < 30 && legacyImeProbeFrame != null) {
+            visibleFrame.set(legacyImeProbeFrame);
+        } else {
+            view.getWindowVisibleDisplayFrame(visibleFrame);
+        }
 
         View root = view.getRootView();
         if (root == null || root.getHeight() <= 0) {
@@ -236,6 +245,48 @@ class MakepadImeInsets {
         int bottomOverlap = bottomOverlapPx(view, insets);
         boolean visible = isVisible(view, bottomOverlap);
         MakepadNative.surfaceOnResizeTextIME(bottomOverlap, visible);
+    }
+}
+
+// An invisible, untouchable ADJUST_RESIZE popup. Below API 30 its visible frame does shrink
+// for the IME, unlike our own window's, so it tells us how much the keyboard covers.
+class MakepadLegacyImeProbe implements ViewTreeObserver.OnGlobalLayoutListener {
+    private final View surface;
+    private final View probe;
+    private final PopupWindow popup;
+
+    @SuppressWarnings("deprecation")
+    MakepadLegacyImeProbe(Context context, View surface) {
+        this.surface = surface;
+        probe = new View(context);
+        popup = new PopupWindow(probe, 0, ViewGroup.LayoutParams.MATCH_PARENT, false);
+        popup.setSoftInputMode(LayoutParams.SOFT_INPUT_ADJUST_RESIZE | LayoutParams.SOFT_INPUT_STATE_UNCHANGED);
+        popup.setInputMethodMode(PopupWindow.INPUT_METHOD_NEEDED);
+        popup.setTouchable(false);
+        popup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        probe.getViewTreeObserver().addOnGlobalLayoutListener(this);
+    }
+
+    void show(View anchor) {
+        anchor.post(() -> {
+            if (!popup.isShowing() && anchor.getWindowToken() != null) {
+                popup.showAtLocation(anchor, Gravity.NO_GRAVITY, 0, 0);
+            }
+        });
+    }
+
+    void dismiss() {
+        probe.getViewTreeObserver().removeOnGlobalLayoutListener(this);
+        popup.dismiss();
+        MakepadImeInsets.legacyImeProbeFrame = null;
+    }
+
+    @Override
+    public void onGlobalLayout() {
+        Rect frame = new Rect();
+        probe.getWindowVisibleDisplayFrame(frame);
+        MakepadImeInsets.legacyImeProbeFrame = frame;
+        MakepadImeInsets.report(surface, null, "legacyImeProbe");
     }
 }
 
@@ -1087,6 +1138,7 @@ public class MakepadActivity
     private boolean mNativesDeferred = false;
 
     private MakepadSurface view;
+    private MakepadLegacyImeProbe mLegacyImeProbe;
 
     // JNI notification worker calls this; the provider posts delivery to Android's UI thread.
     public void a11yEvent(int id, int kind, int change, String text) {
@@ -1485,6 +1537,10 @@ public class MakepadActivity
         mSelectionHandleOverlay.addView(mSelectionHandleEnd);
 
         setContentView(mRootLayout);
+        if (Build.VERSION.SDK_INT < 30) {
+            mLegacyImeProbe = new MakepadLegacyImeProbe(this, view);
+            mLegacyImeProbe.show(mRootLayout);
+        }
 
         // Default state: edge to edge, the bars visible and transparent over the
         // app's drawing, their size reported as safe-area insets. Apps that want
@@ -1649,6 +1705,10 @@ public class MakepadActivity
         // declare, and the running app moves over to the new one, so it must not shut down here.
         boolean isRecreating = isChangingConfigurations();
         unregisterPhysicalKeyboardListener();
+        if (mLegacyImeProbe != null) {
+            mLegacyImeProbe.dismiss();
+            mLegacyImeProbe = null;
+        }
         if (mNativeLayers != null) { mNativeLayers.close(); mNativeLayers = null; }
         if (mBackCallback != null) {
             getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(mBackCallback);
