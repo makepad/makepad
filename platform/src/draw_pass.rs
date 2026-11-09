@@ -670,6 +670,63 @@ pub enum CxDrawPassRect {
     Size(Vec2d),
 }
 
+/// The clock `time_fps` frames run on, which `Cx::compute_pass_repaint_order` sets for the paint after it.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct TimeFpsClock {
+    pub(crate) frame_time: f64,
+    /// Half the time between presents, so a frame takes the present nearest its due.
+    pub(crate) tolerance: f64,
+    /// When the soonest `time_fps` frame is due, which the paint's own requests keep current.
+    pub(crate) next_due: Option<f64>,
+}
+
+/// A pass's `time_fps` frames, which keep coming till a paint of the pass draws no `time_fps` shader.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct TimeFpsFrames {
+    pub(crate) due: Option<f64>,
+    /// Whether a `time_fps` shader asked since the pass was last queued.
+    pub(crate) asked: bool,
+    /// The shortest frame period any `time_fps` shader in the pass asked for in its latest paint.
+    period: f64,
+    /// The due and period this paint started from.
+    due_before: Option<f64>,
+    period_before: f64,
+}
+
+/// The display ticks a backend paints on, as it learns them from the ticks themselves.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct TickClock {
+    /// When the last tick came, in the clock the backend runs `time_fps` frames on.
+    pub(crate) last: f64,
+    /// The median of the last three gaps between ticks in a row, or 0 till there are three.
+    pub(crate) interval: f64,
+    gaps: [f64; 3],
+    gap_count: usize,
+    in_a_row: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl TickClock {
+    /// The ticks stopped, so the next one doesn't count as following the last.
+    pub(crate) fn pause(&mut self) {
+        self.in_a_row = false;
+    }
+
+    pub(crate) fn tick(&mut self, time: f64) {
+        // A browser can serve two ticks from one display frame with the same stamp, which is no gap at all.
+        if std::mem::replace(&mut self.in_a_row, true) && time > self.last {
+            self.gaps[self.gap_count % 3] = time - self.last;
+            self.gap_count += 1;
+            if self.gap_count >= 3 {
+                let [a, b, c] = self.gaps;
+                self.interval = a.min(b).max(a.max(b).min(c));
+            }
+        }
+        self.last = time;
+    }
+}
+
 #[derive(Clone)]
 pub struct CxDrawPass {
     pub debug: bool,
@@ -710,11 +767,12 @@ pub struct CxDrawPass {
     /// it paints once even while orphaned (a thumbnail sheet re-executed for
     /// a texture readback). Cleared when the repaint order is computed.
     pub repaint_requested: bool,
-    /// Set by a backend while painting this pass when something in it needs the
-    /// next frame too: a shader that reads `draw_pass.time`, or a draw call it had to skip.
+    /// Set by a backend while painting this pass when something in it needs the next frame
+    /// too: a shader that reads `draw_pass.time` and wants every frame, or a draw call it had to skip.
     pub repaint_next: bool,
     /// This pass still has a time-driven frame to paint, so the pass clock can't rebase.
     pub(crate) time_owed: bool,
+    pub(crate) time_fps_frames: TimeFpsFrames,
     /// The repaint that last painted this pass whole (0 before the first).
     /// A repaint the backend stopped — instances or uniforms not resident,
     /// the submitter saturated — leaves it as it was, so a producer that
@@ -806,6 +864,46 @@ impl CxDrawPass {
             out.extend(query.breakdown.try_iter());
         }
     }
+
+    /// A backend calls this for each draw it paints whose shader reads `draw_pass.time`, and ORs what it
+    /// returns into `Cx::demo_time_repaint`: true when the draw wants every frame.
+    pub(crate) fn request_time_repaint(&mut self, time_fps: f64, clock: &mut TimeFpsClock) -> bool {
+        // A rate nearer every frame than every other frame repaints every frame like 0 does, since the
+        // display's own ticks pace it anyway and their measured interval jitters.
+        let period = 1.0 / time_fps;
+        if !(period > 0.0 && period.is_finite() && period >= 3.0 * clock.tolerance) {
+            self.repaint_next = true;
+            return true;
+        }
+        let frames = &mut self.time_fps_frames;
+        // The first `time_fps` draw of a paint works the pass's next frame out from the due it had.
+        if !frames.asked {
+            frames.asked = true;
+            frames.due_before = frames.due;
+            frames.period_before = frames.period;
+            frames.period = f64::INFINITY;
+        }
+        // Each `time_fps` shader in the paint picks its next frame, and the pass takes the soonest.
+        let earlier = if frames.period.is_finite() { frames.due } else { None };
+        frames.period = frames.period.min(period);
+        let now = clock.frame_time;
+        let due = match frames.due_before {
+            // This paint is the frame that came due, so the next is a step on, at the pass's own pace unless a
+            // faster shader joined. After a stall we skip the steps it missed, keeping the phase so it can't burst.
+            Some(due) if now >= due - clock.tolerance => {
+                let step = period.min(frames.period_before);
+                due + (((now + clock.tolerance - due) / step).floor() + 1.0) * step
+            }
+            // It painted early for something else, so the due stays, unless a faster shader needs it sooner.
+            Some(due) if period < frames.period_before => due.min(now + period),
+            Some(due) => due,
+            None => now + period,
+        };
+        let due = earlier.map_or(due, |earlier| earlier.min(due));
+        frames.due = Some(due);
+        clock.next_due = Some(clock.next_due.map_or(due, |next_due| next_due.min(due)));
+        false
+    }
 }
 
 impl Default for CxDrawPass {
@@ -837,6 +935,7 @@ impl Default for CxDrawPass {
             repaint_requested: false,
             repaint_next: false,
             time_owed: false,
+            time_fps_frames: TimeFpsFrames::default(),
             painted_serial: 0,
             incomplete: false,
             painted_frame: 0,

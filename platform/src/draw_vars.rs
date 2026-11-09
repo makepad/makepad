@@ -139,6 +139,11 @@ impl ScriptHook for DrawVars {
             } else if let Some(v) = backface_culling_value.as_f64() {
                 self.options.backface_culling = v != 0.0;
             }
+
+            // Anything but a positive, finite rate means every frame, and a NaN would never batch.
+            if let Some(v) = vm.value(io_self, id!(time_fps)).as_f64() {
+                self.options.time_fps = if v > 0.0 && v.is_finite() { v } else { 0.0 };
+            }
         }
         // lets fill our values
         if self.draw_shader_id.is_some() {

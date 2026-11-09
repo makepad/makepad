@@ -849,8 +849,9 @@ impl Cx {
                     .draw_call()
                     .map_or(0, |call| call.uniforms_gen);
                 if sh.mapping.uses_time {
-                    self.demo_time_repaint = true;
-                    self.passes[draw_pass_id].repaint_next = true;
+                    let time_fps = draw_item.kind.draw_call().map_or(0.0, |call| call.options.time_fps);
+                    self.demo_time_repaint |=
+                        self.passes[draw_pass_id].request_time_repaint(time_fps, &mut self.time_fps_clock);
                 }
             }
         }

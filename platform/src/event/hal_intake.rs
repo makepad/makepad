@@ -733,8 +733,12 @@ impl Cx {
                 }
                 // the window's focus has its own event; the surface is the backend's (it rebuilds
                 // the swapchain and reports the geometry), Cx only paints into the new one
-                makepad_hal::lifecycle::FOCUS_GAINED | makepad_hal::lifecycle::FOCUS_LOST | makepad_hal::lifecycle::SURFACE_LOST => {}
-                makepad_hal::lifecycle::SURFACE_AVAILABLE => self.hal_repaint_all(),
+                makepad_hal::lifecycle::FOCUS_GAINED | makepad_hal::lifecycle::FOCUS_LOST => {}
+                makepad_hal::lifecycle::SURFACE_LOST => self.hal.surface_lost = true,
+                makepad_hal::lifecycle::SURFACE_AVAILABLE => {
+                    self.hal.surface_lost = false;
+                    self.hal_repaint_all();
+                }
                 _ => {
                     self.request_quit(QuitReason::App);
                     if !self.hal_handle_platform_ops() {
@@ -849,12 +853,17 @@ impl Cx {
             HalEvent::XrDepth { window: _, display_ns, depth } => {
                 self.hal_xr_depth(display_ns, depth);
             }
-            HalEvent::FrameReady { window, next_ns: _ } => {
+            HalEvent::FrameReady { window, next_ns } => {
                 let window_id = window_id(window);
                 if self.windows.is_valid(window_id) {
                     self.hal.beat = true;
-                    if self.hal.xr.as_ref().is_some_and(|xr| xr.window == window_id) {
+                    if let Some(xr) = self.hal.xr.as_ref().filter(|xr| xr.window == window_id) {
                         self.hal.xr_beat = true;
+                        // the headset's frame comes right before this and is stamped on the same clock
+                        self.hal.frame_interval = next_ns.saturating_sub(xr.display_ns) as f64 / 1e9;
+                    } else if next_ns > time_ns && self.hal_info_flags() & makepad_hal::info_flags::DIRECT_DISPLAY == 0 {
+                        // a direct display's `next_ns` is only its next vblank, so there we stay at 0 and wait for the due
+                        self.hal.frame_interval = (next_ns - time_ns) as f64 / 1e9;
                     }
                     if let Some(w) = self.hal.windows.get_mut(&window_id.0) {
                         w.paced = true;
