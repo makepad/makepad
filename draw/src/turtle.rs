@@ -6194,6 +6194,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     fn move_align_list(&mut self, start: usize, end: usize, dx: f64, dy: f64, shift_clip: bool) {
         debug_assert!(!dx.is_nan());
         debug_assert!(!dy.is_nan());
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
 
         let d = dvec2(dx, dy);
         let mut c = start;
