@@ -39,6 +39,9 @@ struct Text {
     position: Cell<Option<[f64; 2]>>,
     /// the number of the last `ImeState` pushed (see `shell::Op::Cmd`)
     forwarded: Cell<u64>,
+    /// The text and UTF-16 selection makepad last pushed, which the next show uses to fill
+    /// a recreated view. A hide wipes the view, so it drops this too.
+    pushed_text: Cell<Option<(String, [u64; 2])>>,
     physical_keyboard: Cell<bool>,
 }
 
@@ -60,6 +63,7 @@ fn text() -> &'static Text {
                 config: Cell::new(None),
                 position: Cell::new(None),
                 forwarded: Cell::new(0),
+                pushed_text: Cell::new(None),
                 physical_keyboard: Cell::new(false),
             })
         })
@@ -242,6 +246,7 @@ pub(super) fn hide() {
     if view == nil {
         return;
     }
+    text().pushed_text.set(None);
     unsafe {
         (*view).set_ivar::<BOOL>("programmatic_update", YES);
         let () = msg_send![view, setText: str_to_nsstring("")];
@@ -265,6 +270,8 @@ pub(super) fn session_closed(sid: u32) {
 /// a fresh one replaced, which `show` removes once the fresh one has the keyboard.
 fn configure(config: u32) -> Option<ObjcId> {
     let t = text();
+    // Every show takes it, since only the next one is sure to be for the field that pushed it.
+    let pushed_text = t.pushed_text.take();
     let before = t.config.replace(Some(config));
     if before == Some(config) {
         return None;
@@ -277,7 +284,17 @@ fn configure(config: u32) -> Option<ObjcId> {
             // The old view still has the keyboard if this show cancelled its hide. A resign here would read as
             // the user closing it, so `show` hands it straight over, and makepad won't hear what the old view commits.
             (*old).set_ivar::<BOOL>("programmatic_update", YES);
-            t.view.set(create_view(t.root.get()));
+            let new_view = create_view(t.root.get());
+            // Nothing re-pushes the field's text into the fresh view, so we fill it with makepad's
+            // last push, or the first keystroke would leave the field holding just that character.
+            if let Some((text_now, [sel_start, sel_end])) = pushed_text {
+                (*new_view).set_ivar::<BOOL>("programmatic_update", YES);
+                let () = msg_send![new_view, setText: str_to_nsstring(&text_now)];
+                let range = NSRange { location: sel_start, length: sel_end.saturating_sub(sel_start) };
+                let () = msg_send![new_view, setSelectedRange: range];
+                (*new_view).set_ivar::<BOOL>("programmatic_update", NO);
+            }
+            t.view.set(new_view);
         }
         t.position.set(None);
         Some(old)
@@ -360,6 +377,9 @@ fn position(caret: [f64; 2], line_height: f64) {
 /// wins. The delegate callbacks the writes trigger do not echo back to the app.
 pub(super) fn sync(text_now: &str, selection: [u32; 2], composition: [u32; 2], taken: u64) {
     let t = text();
+    let utf16 = |chars: u32| -> u64 { text_now.chars().take(chars as usize).map(|c| c.len_utf16() as u64).sum() };
+    let (sel_start, sel_end) = (utf16(selection[0]), utf16(selection[1]));
+    t.pushed_text.set(Some((text_now.to_string(), [sel_start, sel_end])));
     if taken < t.forwarded.get() {
         return;
     }
@@ -367,8 +387,6 @@ pub(super) fn sync(text_now: &str, selection: [u32; 2], composition: [u32; 2], t
     if view == nil {
         return;
     }
-    let utf16 = |chars: u32| -> u64 { text_now.chars().take(chars as usize).map(|c| c.len_utf16() as u64).sum() };
-    let (sel_start, sel_end) = (utf16(selection[0]), utf16(selection[1]));
     unsafe {
         let ns_text: ObjcId = msg_send![view, text];
         let live = if ns_text == nil { String::new() } else { nsstring_to_string(ns_text) };

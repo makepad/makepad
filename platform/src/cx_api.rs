@@ -1694,6 +1694,12 @@ impl Cx {
     ///
     /// Hiding it moves everything above it, which would move a pressed widget out from under the finger.
     pub fn hide_text_ime(&mut self) {
+        // A text input that just took the focus already synced its text into iOS's text view, which a hide would wipe,
+        // and it shows the keyboard again anyway.
+        #[cfg(target_os = "ios")]
+        if self.keyboard.is_text_ime_hide_cancelled {
+            return;
+        }
         self.keyboard.reset_text_ime_dismissed();
         self.keyboard.is_text_ime_hide_deferred = true;
         self.flush_text_ime_hide();
