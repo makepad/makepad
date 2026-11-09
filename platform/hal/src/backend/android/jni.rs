@@ -136,7 +136,7 @@ unsafe extern "system" fn resume(_: *mut JNIEnv, _: jclass) {
     SURFACE_COVERED.store(true, Ordering::Release);
     emit_lifecycle(lifecycle::RESUME); request_frame();
     // Android may have shown the system bars again while the app was away
-    if lock(&Shared::global().state).fullscreen { set_full_screen(true); }
+    if lock(&Shared::global().state).fullscreen.is_some() { set_full_screen(true); }
 }
 unsafe extern "system" fn pause(_: *mut JNIEnv, _: jclass) {
     // an XR session keeps drawing while the Activity pauses (its state decides)

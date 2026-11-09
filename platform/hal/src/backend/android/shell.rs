@@ -34,8 +34,9 @@ pub(super) struct State {
     pub focused: bool,
     pub physical_keyboard: Option<bool>,
     pub ime: Option<(i32, bool)>,
-    /// The app asked for fullscreen, so the system bars stay hidden, also after a resume.
-    pub fullscreen: bool,
+    /// The session that asked for fullscreen: the system bars stay hidden, also after a resume,
+    /// until it restores its window or closes.
+    pub fullscreen: Option<u32>,
     pub wake: Option<Arc<dyn Fn() + Send + Sync>>,
     /// An immersive (OpenXR) build: the host window is the XR panel, this many pixels at this
     /// density, whatever the Activity's own surface is.
@@ -49,7 +50,7 @@ impl Shared {
     pub fn global() -> &'static Self {
         static VALUE: OnceLock<Shared> = OnceLock::new();
         VALUE.get_or_init(|| Self { registry: Mutex::new(Registry::default()), state: Mutex::new(State {
-            recipient: None, ime_session: None, events: Vec::new(), params: AndroidParams::default(), refresh: 60., insets: [0.; 4], pending: HashSet::new(), active: false, focused: false, physical_keyboard: None, ime: None, fullscreen: false, wake: None, xr: None,
+            recipient: None, ime_session: None, events: Vec::new(), params: AndroidParams::default(), refresh: 60., insets: [0.; 4], pending: HashSet::new(), active: false, focused: false, physical_keyboard: None, ime: None, fullscreen: None, wake: None, xr: None,
         }) })
     }
     pub fn dpi(&self) -> f32 { let s = lock(&self.state); s.xr.map_or(s.params.density, |(_, dpi)| dpi) }
@@ -72,7 +73,7 @@ impl Shared {
             Some((size, dpi)) => (size, dpi, s.refresh, [0.; 4]),
             None => (size, s.params.density, s.refresh, s.insets),
         } };
-        let state = if lock(&self.state).fullscreen { window_state::FULLSCREEN } else { window_state::RESTORE };
+        let state = if lock(&self.state).fullscreen.is_some() { window_state::FULLSCREEN } else { window_state::RESTORE };
         self.emit(clock_ns(), |q, id| {
             q.display(id, dpi, refresh);
             q.geom(id, 0., 0., size[0] as f64 / dpi as f64, size[1] as f64 / dpi as f64, dpi, state);
@@ -135,7 +136,7 @@ impl Shell for AndroidShell {
             }
             OsCmd::WindowState { id, state: state @ (window_state::FULLSCREEN | window_state::RESTORE) } if lock(&Shared::global().state).recipient == Some((sid, id)) => {
                 let fullscreen = state == window_state::FULLSCREEN;
-                lock(&Shared::global().state).fullscreen = fullscreen;
+                lock(&Shared::global().state).fullscreen = fullscreen.then_some(sid);
                 jni::set_full_screen(fullscreen);
                 Shared::global().display(); true
             }
@@ -242,7 +243,11 @@ impl Backend for AndroidBackend {
         state.events.retain(|(s, _)| *s != Some(sid));
         state.pending.retain(|(s, _)| *s != sid);
         if state.recipient.is_some_and(|(s, _)| s == sid) { state.recipient = self.host.map(|id| (HOST, id)); }
+        let restore = state.fullscreen == Some(sid);
+        if restore { state.fullscreen = None; }
         drop(state);
+        // its fullscreen ends with it, so the next app gets the system bars back
+        if restore { jni::set_full_screen(false); shared.display(); }
         let mut registry = lock(&shared.registry);
         if registry.xr_window.is_some_and(|(s, _)| s == sid) { registry.xr_window = None; }
     }
