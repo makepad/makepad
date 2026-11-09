@@ -18,19 +18,29 @@ use current source for API signatures and working examples.
 
 ## Current agent workflow
 
-- Opus 5.5 decides who gets each task. It keeps design, research, hard
-  diagnosis and reviews of every lane's diff, and gives well-specified
-  implementation, tests, runs and cleanups to Codex.
+- Work goes down a chain of three tiers:
+  1. Opus 5.5 is on top: the main session and the lane leads. It decides
+     who gets each task. It keeps design, research and hard diagnosis, and
+     it reviews and lands every diff that comes from below.
+  2. Sonnet 5.5 or Codex `gpt-6-astra` does well-specified implementation:
+     code the brief spells out, ports of a known reference function, test
+     scaffolding, and fixes with a known cause.
+  3. Haiku or Codex `gpt-6.1-sol` does mechanical work: renames, deletions,
+     call swaps to existing APIs, test updates, runs and reruns, log sweeps
+     and summaries. Sol writes no new logic.
+- Each lane keeps some Codex work going, one or two jobs at a time. A lane
+  starts no agents itself. The main session spawns the Sonnet and Haiku
+  helpers, and it picks each lane's model by that lane's hardest work.
 - Grok handles only hyper-mechanical work (bulk renames, repetitive edits,
   transcription, log sweeps) under precise briefs.
-- Codex works under precise briefs: `codex exec -s workspace-write -C <worktree> -m <model> "<brief>" < /dev/null`, from the normal user environment (its real HOME; a changed HOME or CODEX_HOME fails with 401, an open stdin hangs it). Sol and Fable are not used for now.
+- Codex works under precise briefs: `codex exec -s workspace-write -C <worktree> -m <model> "<brief>" < /dev/null`, from the normal user environment (its real HOME; a changed HOME or CODEX_HOME fails with 401, an open stdin hangs it). Fable is not used for now.
 - An agent does the task it was given itself. It never starts another agent
   CLI (claude, codex, grok) as a subprocess. If a task is too hard or the
   brief is not enough, it stops and ends with `HAND BACK: <reason>` plus what
   it found and changed; the Opus lead then takes the task over.
 - Resume a finished lane with its context for follow-ups instead of starting
   a fresh one that repays the same input.
-- This is the user's current workflow (2026-11-03) and supersedes older role
+- This is the user's current workflow (2026-11-08) and supersedes older role
   assignments in local skills or memories.
 
 ## Token cost of a turn

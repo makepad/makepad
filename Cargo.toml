@@ -134,6 +134,7 @@ workspace.members = [
     "libs/raytrace",
     "libs/scene",
     "libs/soft_body",
+    "libs/dynamics",
     "libs/show_control",
     "libs/bounded_http",
     # zero-dependency shared primitives (SHA-256, reuse-address UDP bind)
@@ -589,6 +590,12 @@ opt-level = 1
 # math AOT overflows the stack.
 [profile.release.package.makepad-stitch]
 incremental = false
+
+# The dynamics engine's step in one codegen unit (measured 2026-11-09 on a Linux pool box, same
+# code back to back): chain +12%, hinge chain +5%, humanoid +6%, limited hinge chain +15% steps/s;
+# the crate's own release build goes from 8.5 s to 19 s.
+[profile.release.package.makepad-dynamics]
+codegen-units = 1
 
 #[profile.dev.package.makepad-live-tokenizer]
 #opt-level = 3

@@ -1,0 +1,8 @@
+[package]
+name = "makepad-dynamics"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Rigid-body dynamics in generalized coordinates: articulated trees whose joints cannot drift, soft contacts solved as a convex problem, tendons and actuators; a faithful port of a C engine (CREDITS.md)"
+
+[dependencies]
