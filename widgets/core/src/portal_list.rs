@@ -4156,7 +4156,8 @@ impl Widget for PortalList {
                     // still brings the keyboard here.
                     let held_by_another_widget =
                         cx.fingers.is_mouse_held_outside(&self.own_press_areas());
-                    if self.grab_key_focus && !held_by_another_widget {
+                    // A touch waits until it's a tap, so a drag that scrolls us keeps the keyboard up.
+                    if self.grab_key_focus && !fe.device.is_touch() && !held_by_another_widget {
                         cx.set_key_focus(self.area);
                     }
                     // A press that doesn't end up moving us off the end shouldn't stop
@@ -4481,6 +4482,13 @@ impl Widget for PortalList {
                     }
                 }
                 Hit::FingerUp(fe) if fe.is_primary_hit() => {
+                    // A tap that only stopped us is part of scrolling, so it leaves the key focus be.
+                    if self.grab_key_focus && fe.device.is_touch() && fe.is_over && fe.was_tap()
+                        && !self.was_scrolling
+                        && !cx.fingers.is_press_keeping_key_focus(fe.digit_id)
+                    {
+                        cx.set_key_focus(self.area);
+                    }
                     if fe.cancelled && cx.fingers.press_taken_away(fe.digit_id) {
                         self.stop_all_scroll_motion();
                         self.is_selecting = false;

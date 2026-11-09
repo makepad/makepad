@@ -1478,7 +1478,10 @@ impl Widget for GlassRadio {
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 self.down = 1.0;
-                self.set_key_focus(cx);
+                // A touch waits until it clicks us, so a drag that scrolls from here keeps the keyboard up.
+                if !fe.device.is_touch() {
+                    self.set_key_focus(cx);
+                }
                 self.redraw(cx);
             }
             Hit::FingerUp(fe) => {
@@ -1486,6 +1489,9 @@ impl Widget for GlassRadio {
                 // Checkbox semantics: a click toggles this control on or off
                 // independently (with the sliding animation), it is not a radio.
                 if fe.is_over {
+                    if fe.device.is_touch() {
+                        self.set_key_focus(cx);
+                    }
                     self.active_target = if self.active_target > 0.5 { 0.0 } else { 1.0 };
                     self.next_frame = cx.new_next_frame();
                     cx.widget_action_with_data(&self.action_data, uid, GlassRadioAction::Clicked);
@@ -1863,12 +1869,18 @@ impl Widget for GlassButton {
                 self.redraw(cx);
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                if !self.disabled {
+                // A touch waits until it clicks us, so a drag that scrolls from here keeps the keyboard up.
+                if !self.disabled && !fe.device.is_touch() {
                     self.set_key_focus(cx);
                 }
                 self.finger_down(cx);
             }
-            Hit::FingerUp(fe) => self.finger_up(cx, fe.is_over),
+            Hit::FingerUp(fe) => {
+                if !self.disabled && fe.is_over && fe.device.is_touch() {
+                    self.set_key_focus(cx);
+                }
+                self.finger_up(cx, fe.is_over);
+            }
             _ => {}
         }
     }
