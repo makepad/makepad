@@ -72,6 +72,10 @@ pub struct ScrollBars {
     show_scroll_y: bool,
     #[live(false)]
     ignore_scroll_input: bool,
+    /// Whether to draw the bars just outside of the view's right and bottom edges, instead of on top
+    /// of its content. They take up no layout space, so the view needs empty space around it for them.
+    #[live(false)]
+    bars_outside_view: bool,
     /// Follow the bottom while content arrives, and let go when the reader
     /// scrolls up. Off by default, so a box that was never asked to follow
     /// behaves exactly as it did before. See the module doc for the rule.
@@ -96,6 +100,9 @@ pub struct ScrollBars {
     scroll: Vec2d,
     #[rust]
     area: Area,
+    /// The size of the content, for bars that are waiting for the view's turtle to end.
+    #[rust]
+    pending_outside_view_total: Option<Vec2d>,
 }
 
 pub enum ScrollBarsAction {
@@ -675,6 +682,7 @@ impl ScrollBars {
         self.draw_scroll_bars(cx);
         // this needs to be a rect_area
         cx.end_turtle_with_area(&mut self.area);
+        self.draw_scroll_bars_outside_view(cx);
         self.end_nav_area(cx);
     }
 
@@ -682,6 +690,7 @@ impl ScrollBars {
         self.draw_scroll_bars(cx);
         // this needs to be a rect_area
         cx.end_turtle_with_area(&mut self.area);
+        self.draw_scroll_bars_outside_view(cx);
         self.end_nav_area(cx);
     }
     // separate API
@@ -701,6 +710,10 @@ impl ScrollBars {
     pub fn draw_scroll_bars(&mut self, cx: &mut Cx2d) {
         // lets ask the turtle our actual bounds
         let view_total = cx.turtle().used();
+        if self.bars_outside_view {
+            self.pending_outside_view_total = Some(view_total);
+            return;
+        }
         let mut rect_now = cx.turtle().rect();
 
         // The turtle's rect might be `NaN` if either size dimension is `Fit`,
@@ -716,16 +729,32 @@ impl ScrollBars {
                 .map_or(view_total.x, |max| view_total.x.min(max));
         }
 
+        let track = Rect { pos: Vec2d::default(), size: rect_now.size };
+        self.draw_scroll_bars_along(cx, track, rect_now.size, view_total);
+    }
+
+    /// Draws the bars of a `bars_outside_view` view, once its turtle has ended and its area is set.
+    /// This has to wait until then, since the view's clip would cut off anything drawn outside of it.
+    pub fn draw_scroll_bars_outside_view(&mut self, cx: &mut Cx2d) {
+        let Some(view_total) = self.pending_outside_view_total.take() else { return };
+        let view_rect = self.area.rect(cx);
+        let track = Rect {
+            // A bar is positioned relative to the unscrolled origin of the turtle it's drawn in, now our parent.
+            pos: view_rect.pos - cx.turtle().origin() - cx.turtle().scroll(),
+            size: view_rect.size + dvec2(self.scroll_bar_y.bar_size, self.scroll_bar_x.bar_size),
+        };
+        self.draw_scroll_bars_along(cx, track, view_rect.size, view_total);
+    }
+
+    fn draw_scroll_bars_along(&mut self, cx: &mut Cx2d, track: Rect, view_visible: Vec2d, view_total: Vec2d) {
         if self.show_scroll_x {
-            let scroll_pos =
-                self.scroll_bar_x
-                    .draw_scroll_bar(cx, ScrollAxis::Horizontal, rect_now, view_total);
+            let scroll_pos = self.scroll_bar_x
+                .draw_scroll_bar_along(cx, ScrollAxis::Horizontal, track, view_visible, view_total);
             self.set_scroll_x(cx, scroll_pos);
         }
         if self.show_scroll_y {
-            let scroll_pos =
-                self.scroll_bar_y
-                    .draw_scroll_bar(cx, ScrollAxis::Vertical, rect_now, view_total);
+            let scroll_pos = self.scroll_bar_y
+                .draw_scroll_bar_along(cx, ScrollAxis::Vertical, track, view_visible, view_total);
             self.set_scroll_y(cx, scroll_pos);
             // The bar has just been handed this frame's real total and visible
             // size, so from here the end is a number rather than a guess.
