@@ -1257,7 +1257,11 @@ impl CheckBox {
         }
         self.draw_bg.end(cx);
         self.draw_knob_icons(cx);
-        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
+        // A disabled box is no Tab stop, unless it still holds the focus,
+        // since Tab can't move on from a focus that isn't a stop.
+        if !self.disabled(cx) || cx.has_key_focus(self.draw_bg.area()) {
+            cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
+        }
         DrawStep::done()
     }
 
@@ -1677,6 +1681,23 @@ impl Widget for CheckBox {
 
         if let Event::ClearHover = event {
             self.animator_cut(cx, ids!(hover.off));
+        }
+
+        // A disabled box takes no input and won't see the end of a press, hover
+        // or focus it already had, so we end those ourselves.
+        if self.disabled(cx) {
+            self.animator_play(cx, ids!(hover.off));
+            if self.animator_in_state(cx, ids!(press.on)) || self.drag.is_some() {
+                self.drag = None;
+                self.animator_play(cx, ids!(press.off));
+                self.draw_bg.redraw(cx);
+                self.knob_motion_kick(cx, true);
+            }
+            if matches!(event, Event::KeyFocus(kf) if kf.prev == self.draw_bg.area()) {
+                self.animator_play(cx, ids!(focus.off));
+                self.draw_bg.redraw(cx);
+            }
+            return;
         }
 
         match event.hits(cx, self.draw_bg.area()) {
