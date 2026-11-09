@@ -3757,7 +3757,8 @@ fn on_work(repo: &Path) -> bool {
     super::git(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"]).is_ok_and(|b| b == "work")
 }
 
-fn head_pair(repo: &Path) -> Result<Pair, String> {
+/// The commits a checkout has out: makepad's HEAD and its nested commercial checkout's.
+pub(crate) fn head_pair(repo: &Path) -> Result<Pair, String> {
     let work = super::git(repo, &["rev-parse", "HEAD"])?;
     let main = if repo.join(COMMERCIAL).join(".git").exists() { super::git(&repo.join(COMMERCIAL), &["rev-parse", "HEAD"])? } else { String::new() };
     Ok(Pair::new(&work, &main))

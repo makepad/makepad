@@ -1,8 +1,8 @@
 //! A master restart ends nothing, end to end: a real master process (leases, jobs, verify, CI,
-//! allapps) over real node executors in another process, killed under a job, a verify leg, a CI
-//! shard and its own allapps run, and started again on its state after the nodes went longer than
-//! their no-beat limit without it. All four finish with their real exit codes, each command run
-//! once. The tools wait for a release file, created once the restarted master has taken its state
+//! allapps) over real node executors in another process, killed under a job, a job whose lease is
+//! still building its JIT, a verify leg, a CI shard and its own allapps run, and started again on
+//! its state after the nodes went longer than their no-beat limit without it. All finish with their
+//! real exit codes, each command and that build run once. The tools wait for a release file, created once the restarted master has taken its state
 //! back.
 
 use super::*;
@@ -206,9 +206,11 @@ fn a_master_restart_ends_nothing() {
     // CARGO_HOME keeps the box's rustup toolchain from going ahead of them in the runs' PATH)
     let release = base.join("release");
     let once = |name: &str, body: &str| format!("#!/bin/sh\necho \"$*\" >> {}/{name}\necho before\nwhile [ ! -e \"{}\" ]; do sleep 0.02; done\n{body}\n", ran.display(), release.display());
-    // (the JIT stage before a box's shards, `makepad --version`: the box keeps that binary)
-    let version = "#!/bin/sh\ncase \"$*\" in *' -- --version') echo makepad; exit 0;; esac\n";
-    script(&bin.join("cargo"), &once("cargo", "echo 0 errors\necho \"test result: ok. 1 passed; 0 failed\"\nexit 0").replacen("#!/bin/sh\n", version, 1));
+    // (a lease's `cargo run` of the JIT builds it first, `cargo build`, then runs what it built: this
+    // script again, as the JIT; the JIT stage before a box's shards is `makepad --version`; a run
+    // that asks holds its build until the release)
+    let jit = format!("#!/bin/sh\ncase \"$1\" in\nbuild)\n  if [ -n \"$BUILD_HELD\" ]; then echo \"$*\" >> {ran}/build; echo building; while [ ! -e \"{release}\" ]; do sleep 0.02; done; fi\n  mkdir -p \"$CARGO_TARGET_DIR/host\" && cp \"$0\" \"$CARGO_TARGET_DIR/host/makepad\"; exit;;\n--version) echo makepad; exit 0;;\nbuilt-job) echo \"$*\" >> {ran}/built-job; echo the built JIT ran; exit 0;;\nesac\n", ran = ran.display(), release = release.display());
+    script(&bin.join("cargo"), &once("cargo", "echo 0 errors\necho \"test result: ok. 1 passed; 0 failed\"\nexit 0").replacen("#!/bin/sh\n", &jit, 1));
     script(&bin.join("git"), &format!("#!/bin/sh\nif [ \"$1\" = -C ]; then echo {main}; else echo {work}; fi\n"));
     script(&bin.join("leg"), &once("leg", "echo TESTLEG-OK\nexit 0"));
     script(&bin.join("job"), &once("job", "echo after\nexit 7"));
@@ -228,7 +230,7 @@ fn a_master_restart_ends_nothing() {
         assert!(t.elapsed() < Duration::from_secs(30), "the nodes did not come up");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let submit = format!("job submit {{\"tree\":{},\"rev\":{},\"jobs\":[{{\"kind\":\"test\",\"lane\":\"proof\",\"cmd\":[{}]}},{{\"kind\":\"test\",\"lane\":\"refused\",\"cmd\":[\"env\"]}}]}}", json(&repo), makepad_remote::json_str(&format!("work@{work}")), json(&bin.join("job")));
+    let submit = format!("job submit {{\"tree\":{},\"rev\":{},\"jobs\":[{{\"kind\":\"test\",\"lane\":\"proof\",\"cmd\":[{}]}},{{\"kind\":\"test\",\"lane\":\"refused\",\"cmd\":[\"env\"]}},{{\"kind\":\"test\",\"lane\":\"built\",\"cmd\":[\"env\",\"BUILD_HELD=1\",\"cargo\",\"run\",\"--profile\",\"host\",\"-p\",\"makepad-run\",\"--bin\",\"makepad\",\"--\",\"built-job\"]}}]}}", json(&repo), makepad_remote::json_str(&format!("work@{work}")), json(&bin.join("job")));
     let mut first = role("master", "orch::restart_tests::restart_role_master");
     first.env("DEVHUB_RESTART_SUBMIT", submit);
     let mut master = first.spawn().unwrap();
@@ -253,6 +255,8 @@ fn a_master_restart_ends_nothing() {
         }
     };
     let job0 = |s: &makepad_strict_json::Value| s.get("jobs").and_then(|j| j.as_arr()).and_then(|j| j.first()).cloned();
+    let built = |s: &makepad_strict_json::Value| s.get("jobs").and_then(|j| j.as_arr()).and_then(|j| j.iter().find(|j| text(j, "lane") == "built").cloned());
+    let count = |name: &str| std::fs::read_to_string(ran.join(name)).unwrap_or_default().lines().count();
     let leg0 = |s: &makepad_strict_json::Value| s.get("jitlegs").and_then(|v| v.get("runs")).and_then(|r| r.as_arr()).and_then(|r| r.last()).and_then(|r| r.get("legs")).and_then(|l| l.as_arr()).and_then(|l| l.first()).cloned();
     let shards_of = |s: &makepad_strict_json::Value| s.get("ci").and_then(|c| c.get("run")).and_then(|r| r.get("shards")).and_then(|x| x.as_arr()).map(|a| a.to_vec()).unwrap_or_default();
     let shard_running = |s: &makepad_strict_json::Value| shards_of(s).into_iter().find(|x| num(x, "run_n") > 0);
@@ -266,13 +270,17 @@ fn a_master_restart_ends_nothing() {
         // (CI runs on two nodes only, so shards past those wait for a lease: the settled ones are the granted)
         job0(s).is_some_and(|j| num(&j, "run_n") > 0) && leg0(s).is_some_and(|l| num(&l, "run_n") > 0) && shards.iter().any(|x| num(x, "run_n") > 0) && shards.iter().all(|x| text(x, "lease").is_empty() || num(x, "run_n") > 0)
             && allapps_running(s).is_some_and(|r| num(&r, "run_n") > 0)
+            // and a job on its lease, its JIT's build running
+            && built(s).is_some_and(|j| !text(&j, "lease").is_empty()) && count("build") == 1
     });
     let s = state().unwrap();
+    let mid_build = built(&s).unwrap();
+    assert_eq!(num(&mid_build, "run_n"), 0, "killed before its command: {}", mid_build.to_json());
     let (job_lease, leg_lease, shard) = (text(&job0(&s).unwrap(), "lease"), text(&leg0(&s).unwrap(), "lease"), shard_running(&s).unwrap());
     let allapps_lease = text(&allapps_running(&s).unwrap(), "lease");
     let (shard_id, shard_lease) = (text(&shard, "id"), text(&shard, "lease"));
     // the boxes those leases are on
-    let mut held: Vec<String> = [job0(&s).unwrap(), leg0(&s).unwrap(), allapps_running(&s).unwrap()].iter().chain(shards_of(&s).iter().filter(|x| !text(x, "lease").is_empty())).map(|x| text(x, "node")).collect();
+    let mut held: Vec<String> = [job0(&s).unwrap(), mid_build.clone(), leg0(&s).unwrap(), allapps_running(&s).unwrap()].iter().chain(shards_of(&s).iter().filter(|x| !text(x, "lease").is_empty())).map(|x| text(x, "node")).collect();
     held.sort();
     held.dedup();
     assert!(!held.is_empty() && held.iter().all(|n| NODES.contains(&n.as_str())), "{held:?}: {}", s.to_json());
@@ -326,6 +334,15 @@ fn a_master_restart_ends_nothing() {
     assert_eq!((text(&refused, "state").as_str(), num(&refused, "attempts")), ("failed", 1), "{}", refused.to_json());
     assert!(text(&refused, "note").contains("env needs a command"), "{}", refused.to_json());
 
+    // a job the master was killed under while its lease built its JIT: asked again under its name
+    // it joined that build, and its command ran on what was built, not that build as its command
+    until("the built job's result", &|s| built(s).is_some_and(|j| !matches!(text(&j, "state").as_str(), "queued" | "leasing" | "running")));
+    let j = built(&state().unwrap()).unwrap();
+    assert_eq!((text(&j, "state").as_str(), num(&j, "exit"), text(&j, "lease"), num(&j, "attempts"), num(&j, "run_n")), ("ok", 0, text(&mid_build, "lease"), 1, 1), "{}", j.to_json());
+    let log = std::fs::read_to_string(home.join(format!("devhub/jobs/{}.log", text(&j, "id")))).unwrap();
+    assert!(log.contains("devhub: cargo built this tree's JIT in") && log.contains("the built JIT ran"), "{log}");
+    assert_eq!((count("build"), count("built-job")), (1, 1), "one build, one command: {log}");
+
     let verified = |s: &makepad_strict_json::Value| s.get("verify").and_then(|v| v.get("verified")).and_then(|v| v.as_arr()).is_some_and(|v| !v.is_empty());
     until("the verdict", &|s| (verified(s) || s.get("verify").and_then(|v| v.get("failing")).is_some_and(|f| !f.is_null()))
         && s.get("ci").and_then(|c| c.get("runs")).and_then(|r| r.as_arr()).is_some_and(|r| !r.is_empty()));
@@ -339,7 +356,6 @@ fn a_master_restart_ends_nothing() {
     let shards = run.get("shards").and_then(|x| x.as_arr()).unwrap();
     assert!(shards.iter().any(|x| text(x, "id") == shard_id && text(x, "lease") == shard_lease), "shard {shard_id} kept its lease {shard_lease}: {}", run.to_json());
     // each command ran exactly once: nothing started over
-    let count = |name: &str| std::fs::read_to_string(ran.join(name)).unwrap_or_default().lines().count();
     assert_eq!(count("job"), 1, "the job ran once");
     assert_eq!(count("leg"), 1, "the leg ran once");
     let planned: usize = shards.len(); // one boot each

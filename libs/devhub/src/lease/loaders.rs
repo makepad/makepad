@@ -94,8 +94,14 @@ fn path(target: &Path, key: &str) -> PathBuf {
 
 /// The binary Cargo builds for the JIT in `target` (`makepad.exe` on Windows: a warm on a node
 /// built it and then failed on the bare name with a bare "cannot find the file", 11-03).
-fn built_binary(target: &Path) -> PathBuf {
+pub(super) fn built_binary(target: &Path) -> PathBuf {
     target.join("host").join(format!("makepad{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// The binary [`publish`] kept in `target` as `key`, when it is there.
+#[cfg(feature = "checkout")]
+pub(super) fn kept(target: &Path, key: &str) -> Option<PathBuf> {
+    Some(path(target, key)).filter(|p| valid_key(key) && p.is_file())
 }
 
 fn valid_key(k: &str) -> bool {
@@ -772,6 +778,16 @@ pub fn cargo_run_args(argv: &[String]) -> Option<&[String]> {
     next.is_none().then(|| &argv[sep + 1..])
 }
 
+/// The JIT's build alone, as a JIT run's cargo builds it ([`cargo_run_args`] takes the run's argv):
+/// `cargo build` with that run's flags.
+#[cfg(feature = "checkout")]
+pub fn cargo_build_argv(argv: &[String]) -> Option<Vec<String>> {
+    cargo_run_args(argv)?;
+    let argv = cargo_form(command_of(argv).to_vec());
+    let sep = argv.iter().position(|a| a == "--")?;
+    Some(["cargo", "build"].into_iter().map(String::from).chain(argv[2..sep].iter().cloned()).collect())
+}
+
 /// A command (its `env` prefix already taken off) as it runs: a bare `makepad <args>` becomes the
 /// JIT's cargo invocation.
 pub fn cargo_form(cmd: Vec<String>) -> Vec<String> {
@@ -938,6 +954,10 @@ mod tests {
         assert_eq!(cargo_form(words("cargo test z")), words("cargo test z"));
         assert!(command_of(&words("env K=V")).is_empty());
         assert!(cargo_run_args(&words("env K=V cargo test z")).is_none());
+        // its build alone: the run's flags, without its arguments or environment
+        assert_eq!(cargo_build_argv(&quiet).unwrap(), words("cargo build --profile host -q -p makepad-run --bin makepad"));
+        assert_eq!(cargo_build_argv(&words("env K=V makepad test z")).unwrap(), words("cargo build --profile host -q -p makepad-run --bin makepad"));
+        assert!(cargo_build_argv(&words("cargo test z")).is_none());
     }
 
     #[test]

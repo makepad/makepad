@@ -18,6 +18,13 @@ macro_rules! println {
 macro_rules! print {
     ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_fmt(format_args!($($t)+)); }};
 }
+// (and a master's own lines in the moment its log stamper ended before its output is back on the
+// log, [`logstamp`])
+#[cfg(not(test))]
+macro_rules! eprintln {
+    () => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_all(b"\n"); }};
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_fmt(format_args!("{}\n", format_args!($($t)+))); }};
+}
 
 pub mod proto;
 pub mod procinfo;
@@ -45,6 +52,7 @@ pub mod git_exec;
 pub mod gitread;
 pub mod nested;
 pub mod jitcache;
+pub mod logstamp;
 mod jit_misses;
 pub mod state;
 pub mod testlog;

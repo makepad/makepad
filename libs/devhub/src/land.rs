@@ -485,8 +485,15 @@ impl Train {
         let Some(e) = list.iter_mut().find(|e| e.id == id) else { return };
         f(e);
         e.changed_ms = now;
-        let detail = e.detail.clone();
-        if let Err(e) = self.save(&mut list) { eprintln!("devhub land state: {e}"); return; }
+        let (detail, label) = (e.detail.clone(), e.label());
+        // a change that did not save is undone (the list is the store's again): said where the
+        // train's events go, never only in the master's log
+        if let Err(e) = self.save(&mut list) {
+            drop(list);
+            eprintln!("devhub land state: {e}");
+            self.event(Sev::Err, format!("land {label}: its change did not save, so it stays as it was: {e}"), &[]);
+            return;
+        }
         drop(list);
         if let Some((sev, line)) = ev {
             self.event(sev, line, if sev == Sev::Info { &[] } else { &detail });
@@ -726,7 +733,13 @@ impl Train {
             // branches ([`Entry::ms`])
             if matches!(e.state, St::Landed | St::Failed | St::Conflict) || !e.held.is_empty() { continue; }
             if e.state == St::Waiting && (self.clock)().saturating_sub(e.changed_ms) < WAITING_RETRY_MS { continue; }
-            let (Some(w0), Some(m0)) = (rev(r, "refs/heads/work"), rev(&c, "refs/heads/main")) else { break };
+            // a tip that does not read stops the round, said: a round that stopped unsaid left a
+            // hand-in queued with nothing to tell why (a test's second entry, 11-08)
+            let (Some(w0), Some(m0)) = (rev(r, "refs/heads/work"), rev(&c, "refs/heads/main")) else {
+                let unread: Vec<String> = [(r.as_path(), "work"), (c.as_path(), "main")].into_iter().filter(|(dir, b)| rev(dir, &format!("refs/heads/{b}")).is_none()).map(|(dir, b)| format!("{b} in {}", dir.display())).collect();
+                self.event(Sev::Warn, format!("land: {} did not read: the round stops before {}", if unread.is_empty() { "work / main".to_string() } else { unread.join(", ") }, e.label()), &[]);
+                break;
+            };
             // the pinned commits, whatever the branches hold now; one no longer in its repository
             // (its branch deleted and pruned) lands nothing
             let pinned = |dir: &Path, sha: &str, none: bool| if none { Some(String::new()) } else { (!sha.is_empty() && rev(dir, sha).as_deref() == Some(sha)).then(|| sha.to_string()) };
@@ -1144,7 +1157,8 @@ mod tests {
         std::fs::write(x.join("base"), "trunk\n").unwrap();
         g(&x, &["commit", "-qam", "trunk moves"]);
         g(&x, &["branch", "rc-in", "trunk"]);
-        let t = train(&home, &r, Path::new("/usr/bin/true"), Arc::new(Mutex::new(Vec::new())));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let t = train(&home, &r, Path::new("/usr/bin/true"), events.clone());
         let ask = |line: &str| {
             let mut out = Vec::new();
             t.serve(line, &mut out);
@@ -1163,7 +1177,9 @@ mod tests {
         assert!(t.start_ready());
         let st = |b: &str| Entry::parse(&ask(&format!("status {b}"))[0]).unwrap();
         let (n, o, k) = (st("rc-n+extra=rc-n"), st("-+extra=rc-o"), st("-+extra=rc-k"));
-        assert_eq!((n.state, o.state), (St::Landed, St::Landed), "{n:?} {o:?}");
+        // (the train's events say why an entry stayed: its round stopped, its change did not save;
+        // one red here, 11-08, left its second entry queued untouched with nothing said)
+        assert_eq!((n.state, o.state), (St::Landed, St::Landed), "{n:?} {o:?}; the train said: {:?}", events.lock().unwrap());
         assert_eq!((k.state, k.detail.clone()), (St::Conflict, vec!["apps/extra/base".to_string()]));
         // trunk has both extra halves, work the makepad one; the user's checkouts moved with them
         let trunk = rev(&x, "refs/heads/trunk").unwrap();
@@ -1333,6 +1349,65 @@ mod tests {
         assert!(!is_ancestor(&c, &later, &main), "a commit after the hand-in did not");
         assert_eq!(std::fs::read_to_string(c.join("model")).unwrap(), "tubes(curves, blend)\n");
         assert_eq!(std::fs::read_to_string(r.join("lib")).unwrap(), "fn tubes(curves, blend) {}\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A round that stops on a tip that does not read says so and which, and a change of an entry
+    /// that does not save says so too: either left a hand-in queued untouched with nothing said.
+    #[cfg(unix)]
+    #[test]
+    fn a_stopped_round_and_an_unsaved_change_are_said() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("devhub-land-said-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (r, home) = (d.join("repo"), d.join("home"));
+        let c = r.join("apps/commercial");
+        std::fs::create_dir_all(&c).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let g = |dir: &Path, args: &[&str]| assert!(git(dir, args).0, "git {args:?} in {}", dir.display());
+        for (dir, main) in [(&r, "work"), (&c, "main")] {
+            g(dir, &["init", "-q", "-b", main]);
+            g(dir, &["config", "user.email", "t@t"]);
+            g(dir, &["config", "user.name", "t"]);
+            std::fs::write(dir.join("base"), "1\n").unwrap();
+            g(dir, &["add", "."]);
+            g(dir, &["commit", "-qm", "base"]);
+        }
+        std::fs::write(r.join(".gitignore"), "apps/commercial\n").unwrap();
+        g(&r, &["add", "."]);
+        g(&r, &["commit", "-qm", "ignore"]);
+        g(&r, &["checkout", "-qb", "rc-a"]);
+        std::fs::write(r.join("a"), "a\n").unwrap();
+        g(&r, &["add", "."]);
+        g(&r, &["commit", "-qm", "rc-a"]);
+        g(&r, &["checkout", "-q", "work"]);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let t = train(&home, &r, Path::new("/usr/bin/true"), events.clone());
+        let ask = |line: &str| {
+            let mut out = Vec::new();
+            t.serve(line, &mut out);
+            out
+        };
+        let st = || Entry::parse(&ask("status rc-a")[0]).unwrap();
+        assert!(ask("add rc-a")[0].contains("\"id\":1"));
+        // commercial's main does not read: the round stops before rc-a, and says so
+        let (main, away) = (c.join(".git/refs/heads/main"), c.join(".git/main.away"));
+        std::fs::rename(&main, &away).unwrap();
+        assert!(!t.start_ready());
+        let said = events.lock().unwrap().join("\n");
+        assert!(said.contains(&format!("land: main in {} did not read: the round stops before rc-a", c.display())), "{said}");
+        assert_eq!(st().state, St::Queued);
+        std::fs::rename(&away, &main).unwrap();
+        // the state's folder takes no write: the landing's change does not save, and says so
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // (a user no permission stops, root, writes there anyway: nothing to see)
+        if std::fs::write(home.join("probe"), "").is_err() {
+            assert!(t.start_ready(), "work moved");
+            let said = events.lock().unwrap().join("\n");
+            assert!(said.contains("land rc-a: its change did not save, so it stays as it was: "), "{said}");
+            assert_eq!(st().state, St::Queued, "the store's state is the train's");
+        }
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(&d);
     }
 

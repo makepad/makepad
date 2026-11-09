@@ -521,6 +521,14 @@ fn free_spares(nodes: &[NodeView], free: &[String], l: &LaneActivity, group: &Ca
     nodes.iter().filter(|n| free.contains(&n.name) && spare_ok(n, l, group, pooled) && n.caps.as_ref().is_some_and(|c| c.ram_avail_gb >= 8.0 && (!native || native_room(c, activity)))).map(|n| n.name.clone()).collect()
 }
 
+/// A spare's leg that has waited to start at its box (`running`, holding no lease yet) past what
+/// it saves there, `value_ms` (a JIT build on that box: the most the lane's next lease there
+/// spends building it): its lane's next lease builds anyway. Three lanes' warm legs waited up to
+/// 10 min at a box behind its tests shard while two others sat at 1-3% CPU (11-09).
+fn waited_out(s: &Spare, running: bool, now: u64, value_ms: u64) -> bool {
+    running && s.progress.lease.is_none() && s.progress.state == "waiting" && now.saturating_sub(s.progress.started_ms) > value_ms
+}
+
 /// Only agent lanes receive spares, excluding devhub's own job lanes.
 fn agent_lane(lane: &str) -> bool {
     !matches!(lane, crate::lease::sched::CI_LANE | crate::lease::sched::LANDING_LANE)
@@ -554,13 +562,21 @@ fn spare_tick(ctx: &Arc<Ctx>, nodes: &[NodeView], compilers: &[String], activity
         let free = free_spares(nodes, &free, l, group, s.native, activity);
         (!free.is_empty()).then(|| (lane.clone(), free))
     }).collect();
+    // one with nowhere to move gives up once it waited past what it saves ([`waited_out`])
+    let waited: BTreeMap<String, u64> = spares.lanes.iter().filter(|(lane, _)| !moves.contains_key(*lane)).filter_map(|(lane, s)| {
+        let value = ctx.leases.jit_build_ms(&s.node);
+        waited_out(s, spares.running.contains_key(lane), now, value).then(|| (lane.clone(), value))
+    }).collect();
     let remove: Vec<_> = spares.lanes.iter().filter(|(lane, s)| {
-        moves.contains_key(*lane) || !needing.get(lane).is_some_and(|(l, group)| s.native == (l.src == Src::Tree) && nodes.iter().any(|n| n.name == s.node && spare_ok(n, l, group, pool_in_group(nodes, group))))
+        moves.contains_key(*lane) || waited.contains_key(*lane) || !needing.get(lane).is_some_and(|(l, group)| s.native == (l.src == Src::Tree) && nodes.iter().any(|n| n.name == s.node && spare_ok(n, l, group, pool_in_group(nodes, group))))
     }).map(|(lane, _)| lane.clone()).collect();
     for lane in remove {
         let s = spares.lanes.remove(&lane).unwrap();
         if let Some(free) = moves.get(&lane) {
             ctx.store.event("warm", Sev::Info, format!("warm {lane}: its leg waited at {}, which has no room, while {} could start it: it moves", s.node, free.join(" ")), None);
+        }
+        if let Some(value) = waited.get(&lane) {
+            ctx.store.event("warm", Sev::Info, format!("warm {lane}: its leg waited {} s at {}, past what it saves there (a JIT build there, {} s), and no box it may warm could start it: dropped (the lane's next lease builds anyway)", now.saturating_sub(s.progress.started_ms) / 1000, s.node, value / 1000), None);
         }
         // Serialize this with finish's note_warm: an old completion cannot restore the mark.
         if !s.native { ctx.leases.forget_warm(&lane, &s.node); }
@@ -1105,6 +1121,19 @@ mod tests {
         let free: Vec<String> = ["own", "free", "bench", "short", "mac"].iter().map(|n| n.to_string()).collect();
         assert_eq!(super::free_spares(&nodes, &free, &l, &group, false, &super::Activity::default()), vec!["free".to_string()]);
         assert!(super::free_spares(&nodes, &[], &l, &group, false, &super::Activity::default()).is_empty(), "no box could start it: it stays");
+    }
+
+    /// A spare's leg that waited to start past what it saves at its box gives up: not before, not
+    /// once it holds its lease, and not while no leg runs (its next warm's wait).
+    #[test]
+    fn a_spares_leg_gives_up_past_what_it_saves() {
+        let spare = |state: &str, lease: Option<&str>| super::Spare { node: "a".into(), native: true, generation: 1, warmed: None, progress: Progress { state: state.into(), lease: lease.map(str::to_string), ..Progress::waiting("", 1_000) } };
+        let waiting = spare("waiting", None);
+        assert!(!super::waited_out(&waiting, true, 91_000, 90_000), "90 s: what a build there takes");
+        assert!(super::waited_out(&waiting, true, 91_001, 90_000));
+        assert!(!super::waited_out(&waiting, false, 900_000, 90_000), "no leg runs: its next warm waits its turn");
+        assert!(!super::waited_out(&spare("held", Some("L1")), true, 900_000, 90_000), "started: it builds");
+        assert!(!super::waited_out(&spare("syncing", Some("L1")), true, 900_000, 90_000));
     }
 
     fn plan(nodes: Vec<Node>) -> Plan {

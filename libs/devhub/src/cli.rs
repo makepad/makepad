@@ -39,6 +39,8 @@ call $DH; a landing's CLI goes live when its rebuild finishes
                                           `&` jobs at +5; restarts keep a level and shown apps inherit it)
   master who                              the process that answers the control socket (pid=, since_ms=: its
                                           start; an exec keeps the pid); exit 1 when none answers
+  log-stamp                               stdin to stdout, each line starting with the UTC time it came in
+                                          (2026-11-08T20:31:05.123Z): the master's log goes through it
   land [<branch|-> [<commercial worktree> <commercial branch>] [<nested repo>=<branch>]...]
                                           hand in for landing (no args: this worktree's branch, its nested
                                           commercial branch and each other nested repo's branch, which
@@ -620,6 +622,9 @@ pub fn main(args: &[String]) -> i32 {
     if a == ["master", "who"] {
         return master_who();
     }
+    if a == ["log-stamp"] {
+        return crate::logstamp::log_stamp();
+    }
     // the master's jobs first: `lanes` (the lane view) is theirs, `lanes now` the merge bot's
     #[cfg(feature = "checkout")]
     if let Some(code) = crate::orch::cli::main(&a) {
@@ -838,6 +843,10 @@ fn serve(args: &[&str]) -> i32 {
             }
         }
         [] => {
+            #[cfg(all(unix, feature = "checkout"))]
+            if let Err(e) = crate::logstamp::stamp_output(crate::logstamp::stamper) {
+                eprintln!("devhub: the master's log goes on without times: {e}");
+            }
             let name = std::env::var("MAKEPAD_DEVHUB_NAME").ok().filter(|n| makepad_devhub_conf::valid_name(n)).unwrap_or_else(|| "mac".into());
             match crate::master::Master::start(&name, makepad_devhub_conf::HITCH_MS, trust(&name), std::sync::Arc::new(|_r| {})) {
                 Ok(_m) => {

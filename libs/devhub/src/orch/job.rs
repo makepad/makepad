@@ -394,8 +394,9 @@ fn run(ctx: &Arc<Ctx>, id: &str, notify: Option<mpsc::Sender<()>>) {
     asked();
     let held = match acquired {
         Ok(h) => h,
-        // the master's socket or a box's link went away: no verdict on the job
-        Err(e) if crate::lease::master::unreachable(&e) && again(ctx, id, &format!("no lease ({})", crate::proto::clean(&e, 160))) => return,
+        // the master's socket or a box's link went away, or the master answered its ask with
+        // nothing: no verdict on the job, which never ran
+        Err(e) if super::leg::exit_lost(&e) && again(ctx, id, &format!("no lease ({})", crate::proto::clean(&e, 160))) => return,
         Err(e) => {
             ended_by_hand(ctx, id, &e);
             return finish(ctx, id, Err(e), &log);
@@ -431,7 +432,7 @@ fn run(ctx: &Arc<Ctx>, id: &str, notify: Option<mpsc::Sender<()>>) {
             Ok(s) => source = s,
             Err(e) => {
                 held.release(None);
-                if crate::lease::master::unreachable(&e) && again(ctx, id, &format!("shipping to {} failed ({})", j.node, crate::proto::clean(&e, 160))) {
+                if super::leg::exit_lost(&e) && again(ctx, id, &format!("shipping to {} failed ({})", j.node, crate::proto::clean(&e, 160))) {
                     return;
                 }
                 return finish(ctx, id, Err(format!("shipping {}: {e}", j.snap)), &log);
@@ -1131,6 +1132,9 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
     let mut notes = Vec::new();
     // where each job's lane came from (`--lane`, DEVHUB_LANE or the worktree), said as it queues
     let mut lane_from = Vec::new();
+    // the commits read for a JIT test's `test-tree`, once per submission: the pinned ones, else
+    // the worktree's HEADs
+    let mut pair = None;
     for (i, r) in reqs.iter().enumerate() {
         let fields: &[(String, Value)] = match r { Value::Obj(pairs) => pairs, _ => &[] };
         if let Some(field) = fields.iter().map(|(k, _)| k.as_str()).find(|k| !JOB_FIELDS.contains(k)) {
@@ -1159,7 +1163,20 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         }
         lane_from.push(s(r, "lane_from"));
         let prio = r.get("prio").and_then(|p| p.as_i64()).unwrap_or(crate::lease::sched::DEFAULT_PRIO as i64) as i32;
-        let src = Src::for_run(Kind::parse(&kind).unwrap(), &cmd, r.get("tree").and_then(|v| v.as_bool()).unwrap_or(false));
+        let mut src = Src::for_run(Kind::parse(&kind).unwrap(), &cmd, r.get("tree").and_then(|v| v.as_bool()).unwrap_or(false));
+        // a JIT test of a package whose tests read the checkout itself (cargo on it, its history)
+        // takes the lane's tree, as `devhub test` gives it: an overlay's tree is one only the JIT
+        // process reads (a batch's app-run test failed there, 11-08)
+        if src == Src::Overlay && crate::jit_misses::tested_package(&cmd).is_some() {
+            if pair.is_none() {
+                let rev = s(&v, "rev");
+                pair = Some(match crate::lease::Pin::of_rev(&rev) { Some(pin) => pin.pair(), None => super::ci::head_pair(&tree).map_err(|e| format!("job submit: {e}"))? });
+            }
+            if let Some(line) = crate::jit_misses::test_tree_of(&tree, pair.as_ref().unwrap(), &cmd).map_err(|e| format!("job {}: {e}", i + 1))? {
+                notes.push(format!("job {}: {line}", i + 1));
+                src = Src::Tree;
+            }
+        }
         let cwd = s(r, "cwd");
         if !cwd.is_empty() && (std::path::Path::new(&cwd).is_absolute() || cwd.contains(char::is_whitespace) || std::path::Path::new(&cwd).components().any(|c| matches!(c, std::path::Component::ParentDir))) { return Err("job cwd must be a relative directory without spaces".into()); }
         let shadow = r.get("shadow").and_then(|v| v.as_bool()).unwrap_or(false) && kind == "test" && crate::lease::loaders::cargo_run_args(&cmd).is_some_and(|a| a.first().is_some_and(|a| a == "test")) && ctx.store.read(|d| d.devhub_shadow);
@@ -1673,6 +1690,32 @@ mod tests {
         // a lane named in upper case is the same lane: folded at submit
         submit_line(&c, "rc-t", false, &[req("x", &[]).replace("\"lane1\"", "\"LANE1\"")]).unwrap();
         assert_eq!(c.store.read(|d| d.jobs.last().map(|j| j.lane.clone())), Some("lane1".to_string()));
+        let home = c.repo.parent().unwrap().to_path_buf();
+        drop(c);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A JIT test of a package whose Cargo.toml says `test-tree` runs in the lane's tree, as
+    /// `devhub test` runs it; any other JIT test keeps its overlay. A batch's app-run test built
+    /// its apps with cargo at the overlay's virtual root, which the disk has not (11-08).
+    #[test]
+    fn a_jit_test_whose_package_reads_the_checkout_runs_in_the_tree() {
+        let c = ctx("test-tree");
+        let tree = c.repo.clone();
+        for (dir, manifest) in [("libs/a", "[package]\nname = \"pkg-a\"\n[package.metadata.makepad]\ntest-tree = \"its tests run cargo on the checkout\"\n"), ("libs/b", "[package]\nname = \"pkg-b\"\n")] {
+            std::fs::create_dir_all(tree.join(dir)).unwrap();
+            std::fs::write(tree.join(dir).join("Cargo.toml"), manifest).unwrap();
+        }
+        g(&tree, &["add", "."]);
+        g(&tree, &["commit", "-q", "-m", "packages"]);
+        let job = |cmd: &[&str]| format!("{{\"kind\":\"test\",\"needs\":\"arch=x64\",\"lane\":\"lane1\",\"agent\":\"a\",\"cmd\":[{}],\"after\":[]}}", cmd.iter().map(|w| json_str(w)).collect::<Vec<_>>().join(","));
+        let r = submit_line(&c, "", false, &[
+            job(&["env", "CARGO_INCREMENTAL=0", "makepad", "test", "-p", "pkg-a", "--release", "--", "one"]),
+            job(&["makepad", "test", "pkg-b", "--lib"]),
+        ]).unwrap();
+        assert!(r.contains("job 1: pkg-a runs in the lane's tree: its tests run cargo on the checkout (its Cargo.toml's test-tree)"), "{r}");
+        assert!(!r.contains("job 2:"), "{r}");
+        assert_eq!(c.store.read(|d| d.jobs.iter().map(|j| j.src.clone()).collect::<Vec<_>>()), ["tree", "overlay"]);
         let home = c.repo.parent().unwrap().to_path_buf();
         drop(c);
         let _ = std::fs::remove_dir_all(&home);

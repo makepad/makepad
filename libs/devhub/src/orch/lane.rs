@@ -2201,6 +2201,33 @@ mod tests {
     /// A parked lane's branches are held (the merge bot leaves them alone) and `lane quiet` lists it
     /// in one row; a retired one leaves its worktree and keeps its branches, never with an
     /// untracked file in it.
+    /// A tracked `eol=crlf` script with its index stat out of date is clean to git, and so to the
+    /// retire check: four of them refused a finished lane's retire as uncommitted until a later
+    /// `git status` had refreshed the index. A real edit still refuses.
+    #[test]
+    fn a_checkout_crlf_file_does_not_refuse_a_retire() {
+        let base = std::env::temp_dir().join(format!("devhub-lane-crlf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        repo(&base, "work");
+        std::fs::write(base.join(".gitattributes"), "*.ps1 text eol=crlf\n").unwrap();
+        std::fs::write(base.join("tool.ps1"), "one\r\ntwo\r\n").unwrap();
+        g(&base, &["add", "."]);
+        g(&base, &["commit", "-q", "-m", "a script"]);
+        let rewritten = |bytes: &str| {
+            std::fs::remove_file(base.join("tool.ps1")).unwrap();
+            std::fs::write(base.join("tool.ps1"), bytes).unwrap();
+            let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+            std::fs::File::options().write(true).open(base.join("tool.ps1")).unwrap().set_modified(later).unwrap();
+        };
+        rewritten("one\r\ntwo\r\n");
+        assert_eq!(dirty_refusal(&base), None);
+        rewritten("one\r\nthree\r\n");
+        let (class, why) = dirty_refusal(&base).expect("an edit");
+        assert_eq!(class, "uncommitted or untracked files");
+        assert!(why.contains("tool.ps1"), "{why}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn a_lane_parks_and_retires_keeping_its_branches() {
         let base = std::env::temp_dir().join(format!("devhub-lane-park-{}", std::process::id()));

@@ -329,6 +329,11 @@ fn start_master() -> Result<MasterCore, String> {
     // a self-update's exec keeps this process: the children the last image started (its git,
     // cargo and lease children) are reaped as they end, before this image starts any
     makepad_devhub::procinfo::reap_inherited();
+    // its log with the time on every line, by a stamper that outlives its exec and a crash
+    #[cfg(unix)]
+    if let Err(e) = makepad_devhub::logstamp::stamp_output(makepad_devhub::logstamp::stamper) {
+        log_line(&format!("devhub: the master's log goes on without times: {e}"));
+    }
     let name = std::env::var("MAKEPAD_DEVHUB_NAME").ok().filter(|n| makepad_devhub_conf::valid_name(n)).unwrap_or_else(|| "mac".into());
     let master = Master::start(&name, makepad_devhub_conf::HITCH_MS, trust(&name), Arc::new(|_r| {}))?;
     log_line(&format!("devhub: master {name} up; control {}", proto::control_socket().display()));

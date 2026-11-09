@@ -1182,6 +1182,27 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
         }
     }
     o.req.exec_profile = super::argv::ExecProfile::of(&o.cmd);
+    // a JIT `makepad test` of a package whose tests read the checkout itself (cargo on it, its
+    // history: `test-tree`) takes the lane's tree, as `devhub test` gives it (`test`: it did): an
+    // overlay's tree is one only the JIT process reads
+    if test.is_none() && !o.tree && Src::for_run(o.req.kind, &o.cmd, false) == Src::Overlay {
+        let rev = o.req.rev.clone().unwrap_or_default();
+        let Some(pin) = super::Pin::of_rev(&rev) else {
+            eprintln!("makepad devhub {word}: rev `{rev}` is not pinned");
+            return (2, false);
+        };
+        match crate::jit_misses::test_tree_of(&root, &pin.pair(), &o.cmd) {
+            Ok(Some(line)) => {
+                eprintln!("makepad devhub {word}: {line}");
+                o.tree = true;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("makepad devhub {word}: {e}");
+                return (2, false);
+            }
+        }
+    }
     o.req.src = Src::for_run(o.req.kind, &o.cmd, o.tree);
     let c = match retry_master(master) {
         Ok(c) => c,
@@ -1456,7 +1477,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
             // tests that read the checkout itself (its history, cargo on it) say so in their
             // Cargo.toml, and run in the lane's tree: an overlay has neither
             if let Some(why) = tree.filter(|_| !o.tree) {
-                eprintln!("devhub test: {pkg} runs in the lane's tree: {why} (its Cargo.toml's test-tree)");
+                eprintln!("devhub test: {}", crate::jit_misses::tree_line(pkg, &why));
                 o.tree = true;
             }
             own
@@ -1639,7 +1660,9 @@ fn live_test(mut o: Opts, pkg: &str, args: &[String], inputs: MissInputs) -> i32
                             _ => "patching",
                         },
                     };
-                    eprintln!("still running: {phase} ({} min)", started.elapsed().as_secs() / 60);
+                    // a session placed again says so while it waits for its box
+                    let note = x.as_ref().filter(|x| x.state == "starting" && !x.note.is_empty()).map_or(String::new(), |x| format!(": {}", x.note));
+                    eprintln!("still running: {phase}{note} ({} min)", started.elapsed().as_secs() / 60);
                     notice_after = started.elapsed() + STILL_RUNNING_EVERY;
                 }
             }

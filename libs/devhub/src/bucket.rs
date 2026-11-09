@@ -2223,44 +2223,51 @@ mod tests {
     /// A unit busy far past its measure fails HUNG at its bound, twice its measure and then the
     /// quiet a hung unit is given, with its state kept and the busiest thread named: a unit
     /// measured at 15 s spun a driver thread at 96% of a core for 732 min, busy by every look
-    /// (11-08). A unit not measured yet has no bound (the busy unit of the test above).
+    /// (11-08). A unit not measured yet has no bound. The watch reads a fake /proc on a fake clock
+    /// (its FAKE_PROC): a real spinning unit on a loaded box's tests got under a tenth of a core,
+    /// read as quiet before its bound (11-08).
     #[cfg(target_os = "linux")]
     #[test]
     fn a_unit_busy_far_past_its_measure_is_hung_at_its_bound() {
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/run/fixture/unit_watch.sh");
         let root = std::env::temp_dir().join(format!("devhub-bucket-unit-bound-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let mut unit = std::process::Command::new("setsid").args(["python3", "-I", "-c", "while True:\n    pass\n"]).spawn().unwrap();
-        let sid = unit.id();
-        let leads = || std::fs::read_to_string(format!("/proc/{sid}/stat")).ok()
-            .is_some_and(|stat| stat.rsplit(") ").next().and_then(|s| s.split_whitespace().nth(3)) == Some(sid.to_string().as_str()));
-        assert!((0..50).any(|_| leads() || { std::thread::sleep(Duration::from_millis(20)); false }), "the unit leads its session");
-        let out = root.join("unit");
-        std::fs::write(&out, "").unwrap();
-        let started = std::time::Instant::now();
-        let mut w = std::process::Command::new("bash").arg(&script).arg(sid.to_string()).arg(&out)
-            .env("HUNG_LOOK", "1").env("HUNG_QUIET", "2").env("MEASURED_S", "1").env("TMPDIR", &root).env("B", "true").spawn().unwrap();
-        let ended = (0..300).any(|_| w.try_wait().unwrap().is_some() || { std::thread::sleep(Duration::from_millis(100)); false });
-        if !ended {
-            let _ = std::process::Command::new("kill").arg(w.id().to_string()).status();
-            let _ = w.wait();
+        // its session's one process, a pid past Linux's limit (2^22): none the watch's kill reaches
+        let pid = 4_194_401u32;
+        // a core's work each second, for 6 s
+        let proc = root.join("proc");
+        for t in 0..=6u64 {
+            let task = proc.join(t.to_string()).join(pid.to_string());
+            let thread = task.join("task").join(pid.to_string());
+            std::fs::create_dir_all(&thread).unwrap();
+            let stat = format!("{pid} (python3) R 1 {pid} {pid} 0 -1 4194304 100 0 0 0 {} 0 0 0 20 0 1 0\n", 100 * t);
+            for dir in [&task, &thread] {
+                std::fs::write(dir.join("stat"), &stat).unwrap();
+                std::fs::write(dir.join("wchan"), "0").unwrap();
+            }
+            std::fs::write(task.join("io"), "read_bytes: 0\nwrite_bytes: 0\n").unwrap();
+            std::fs::write(task.join("status"), "VmHWM:\t   10240 kB\n").unwrap();
         }
-        // the watch stopped it: its exit is the KILL's
-        let stopped = (0..50).any(|_| unit.try_wait().unwrap().is_some() || { std::thread::sleep(Duration::from_millis(20)); false });
-        if !stopped {
-            let _ = unit.kill();
-            let _ = unit.wait();
-        }
-        let hung = std::fs::read_to_string(format!("{}.hung", out.display())).unwrap_or_default();
-        let _ = std::fs::remove_dir_all(&root);
-        assert!(ended && stopped, "the watch ended ({ended}) and stopped the unit ({stopped}) within 30 s: {hung}");
-        let first = hung.lines().next().unwrap_or("");
-        assert!(first.starts_with("== it ran ") && first.contains(" s, past its bound of 4 s (twice its measured 1 s, then 2 s)"), "{first}");
-        assert!(first.contains("; the busiest thread: ") && first.contains(" python3 R "), "the spinning thread is named: {first}");
-        assert!(first.ends_with("; their state"), "{first}");
+        // what the watch kept: <out>.hung, <out>.peak
+        let watch = |measured: Option<&str>| -> (String, String) {
+            let out = root.join(format!("unit-{}", measured.unwrap_or("new")));
+            std::fs::write(&out, "").unwrap();
+            let mut w = std::process::Command::new("bash");
+            w.arg(&script).arg(pid.to_string()).arg(&out)
+                .env("HUNG_LOOK", "1").env("HUNG_QUIET", "2").env("FAKE_PROC", &proc).env("TMPDIR", &root).env("B", "true");
+            if let Some(m) = measured { w.env("MEASURED_S", m); }
+            assert!(w.status().unwrap().success());
+            let kept = |ext: &str| std::fs::read_to_string(format!("{}.{ext}", out.display())).unwrap_or_default();
+            (kept("hung"), kept("peak"))
+        };
+        let (hung, peak) = watch(Some("1"));
+        assert_eq!(hung.lines().next(), Some(format!("== it ran 4 s, past its bound of 4 s (twice its measured 1 s, then 2 s); the busiest thread: {pid}/task/{pid} python3 R 100% wchan 0; their state").as_str()), "{hung}");
         assert!(hung.contains("-- threads (") && hung.contains("-- the GPU"), "{hung}");
-        assert!(started.elapsed() >= Duration::from_secs(4), "not before its bound");
+        assert_eq!(peak.trim(), "10", "its peak in MB");
+        // not measured: busy past where a bound would be, it is hung only once its processes are gone
+        let (hung, _) = watch(None);
+        assert!(hung.starts_with("== its processes did nothing (under 5% of a core, no I/O) for 2 s; their state"), "{hung}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A shard's class names its shape: another shape's measures are not its own.

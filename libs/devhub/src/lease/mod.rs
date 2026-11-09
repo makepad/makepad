@@ -353,6 +353,11 @@ pub struct Caps {
     pub gpu_busy: Vec<(f64, f64)>,
     /// CPU use of all cores since the previous measure (None: the first one)
     pub cpu_pct: Option<f64>,
+    /// the box's CPU since the previous measure by whose it was ([`crate::top::cpu_split`]), cores
+    /// on average: each lease's, and the busiest processes outside them (what, pid). A box measured
+    /// busier than its leases' charges names a lease past its charge and these as what took the rest
+    pub busy_leases: Vec<(String, f64)>,
+    pub busy_outside: Vec<(String, u32, f64)>,
     /// a display / WM session the node can show windows on
     pub display: Option<String>,
     /// what a WM of ours there answered on another hosted wire (its probe): it hosts no app of
@@ -613,7 +618,9 @@ impl Caps {
             self.hub_rss_mb,
             self.hub_heap_mb,
             self.hub_proto,
-            format!(",\"native\":[{}],\"native_trees\":{}{},\"hub_building\":{}", self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json())), self.hub_building),
+            format!(",\"native\":[{}],\"native_trees\":{}{},\"hub_building\":{},\"busy_leases\":[{}],\"busy_outside\":[{}]", self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json())), self.hub_building,
+                self.busy_leases.iter().map(|(lease, cores)| format!("{{\"lease\":{},\"cores\":{cores:.2}}}", json_str(lease))).collect::<Vec<_>>().join(","),
+                self.busy_outside.iter().map(|(what, pid, cores)| format!("{{\"what\":{},\"pid\":{pid},\"cores\":{cores:.2}}}", json_str(what))).collect::<Vec<_>>().join(",")),
             self.services.iter().map(|(n, t)| format!("{}:{t}", json_str(n))).collect::<Vec<_>>().join(","),
             self.user.as_ref().map_or("null".to_string(), |u| u.to_json()),
         )
@@ -683,6 +690,12 @@ impl Caps {
                     c.gpu_busy.push((u, g.get("used_gb").and_then(num).unwrap_or(0.0)));
                 }
             }
+        }
+        for b in v.get("busy_leases").and_then(|x| x.as_arr()).unwrap_or(&[]) {
+            c.busy_leases.push((b.get("lease").and_then(|x| x.as_str()).unwrap_or("").to_string(), b.get("cores").and_then(num).unwrap_or(0.0)));
+        }
+        for b in v.get("busy_outside").and_then(|x| x.as_arr()).unwrap_or(&[]) {
+            c.busy_outside.push((b.get("what").and_then(|x| x.as_str()).unwrap_or("").to_string(), b.get("pid").and_then(num).unwrap_or(0.0) as u32, b.get("cores").and_then(num).unwrap_or(0.0)));
         }
         if let Some(b) = v.get("battery").filter(|b| b.get("pct").is_some()) {
             c.battery = Some((b.get("pct").and_then(num).unwrap_or(0.0) as u32, b.get("charging").and_then(|x| x.as_bool()).unwrap_or(false)));
@@ -962,6 +975,8 @@ mod tests {
             gpus: vec![("GPU-B".into(), 32.0)],
             gpu_busy: vec![(37.0, 4.5)],
             cpu_pct: Some(12.5),
+            busy_leases: vec![("L7".into(), 11.5), ("L9".into(), 0.25)],
+            busy_outside: vec![("indexer --all".into(), 4_000_021, 2.25), ("dumper".into(), 4_000_020, 0.75)],
             display: Some("wm".into()),
             battery: None,
             role: Some(Role::Pool),

@@ -276,7 +276,7 @@ pub fn control_kept() -> bool {
 /// Sets or clears close-on-exec on `fd`: fcntl only (F_GETFD 1, F_SETFD 2, FD_CLOEXEC 1 on Linux
 /// and macOS), so an exec's pre_exec hook may call it.
 #[cfg(unix)]
-fn close_on_exec(fd: i32, on: bool) -> std::io::Result<()> {
+pub(crate) fn close_on_exec(fd: i32, on: bool) -> std::io::Result<()> {
     extern "C" {
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     }
@@ -311,13 +311,16 @@ fn keep_over_exec(cmd: &mut std::process::Command, fd: i32) {
     }
 }
 
-/// Execs `cmd` in place of this process, the control listener kept over it
-/// ([`keep_control_over_exec`]). Returns only when the exec failed, with its error: the hook ran
-/// in this process, so close-on-exec is set again and no child this image starts inherits the
-/// listener.
+/// Execs `cmd` in place of this process, the control listener ([`keep_control_over_exec`]) and
+/// the log's stamper ([`crate::logstamp::keep_over_exec`]) kept over it. Returns only when the
+/// exec failed, with its error: the hooks ran in this process, so close-on-exec is set again and
+/// no child this image starts inherits the listener or the log.
 #[cfg(unix)]
 pub fn exec(cmd: &mut std::process::Command) -> std::io::Error {
-    exec_keeping(cmd, CONTROL.load(std::sync::atomic::Ordering::Relaxed))
+    crate::logstamp::keep_over_exec(cmd);
+    let e = exec_keeping(cmd, CONTROL.load(std::sync::atomic::Ordering::Relaxed));
+    crate::logstamp::exec_failed();
+    e
 }
 
 #[cfg(unix)]

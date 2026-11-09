@@ -107,7 +107,7 @@ pub fn blocker(reason: &str) -> String {
         return format!("held by {kind}");
     }
     if let Some(b) = r.strip_prefix("budget:").or_else(|| r.strip_prefix("budget ")) { return format!("budget {}", b.split_whitespace().next().unwrap_or("resources")); }
-    for key in ["self-update", "hold for timed", "hold for whole", "behind timed", "behind whole", "held for timed", "held for whole", "held for interactive", "node off", "dev off", "node down", "node busy", super::sched::JIT_WAIT, "lane cap", "class", "disk floor"] {
+    for key in ["self-update", "behind a catch-up", "hold for timed", "hold for whole", "behind timed", "behind whole", "held for timed", "held for whole", "held for interactive", "node off", "dev off", "node down", "node busy", super::sched::JIT_WAIT, "lane cap", "class", "disk floor"] {
         if r.starts_with(key) { return key.into(); }
     }
     if r.starts_with("scrubbing") { return "teardown".into(); }

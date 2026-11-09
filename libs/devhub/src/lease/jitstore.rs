@@ -271,8 +271,11 @@ impl Store {
         if !super::exec::valid_name(lease) { return Err("invalid JIT lease".into()); }
         let _lock = lock(&self.root.join("store.lock"))?;
         let p = self.root.join("leases").join(lease);
-        if p.exists() { std::fs::remove_dir_all(&p).map_err(|e| format!("{}: {e}", p.display()))?; }
-        self.prune();
+        // (a lease that held nothing frees nothing to prune: every tree lease's end asks)
+        if p.exists() {
+            std::fs::remove_dir_all(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            self.prune();
+        }
         Ok(())
     }
 

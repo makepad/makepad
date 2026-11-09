@@ -633,6 +633,11 @@ impl LeaseMaster {
         self.sched.lock().unwrap().starts_elsewhere(lane, proto::wall_ms())
     }
 
+    /// A JIT build on `node` by its measure ([`Sched::jit_build_ms`]).
+    pub fn jit_build_ms(&self, node: &str) -> u64 {
+        self.sched.lock().unwrap().jit_build_ms(node)
+    }
+
     /// Writes `leases.live` when its text changed: every state change reaches the file at once
     /// (not after a node's teardown), so a restart in between neither loses a lease nor brings an
     /// ended one back.
@@ -729,6 +734,7 @@ impl LeaseMaster {
         let mut records = Vec::new();
         let mut memory = Vec::new();
         let mut calls = Vec::new();
+        let mut jit_peaks = Vec::new();
         // (records from before 11-06 say no OS family: they weigh every box's peaks only)
         let os = |v: &makepad_strict_json::Value| v.get("os").and_then(|o| o.as_str()).filter(|o| !o.is_empty()).map(str::to_string);
         // (a live session weighs its own lane's peaks: [`super::sched::Sched::record_lane_peak`])
@@ -739,6 +745,8 @@ impl LeaseMaster {
             if reader.read_line(&mut line).is_err() || !line.ends_with('\n') { break; }
             *offset += line.len() as u64;
             if let Ok(v) = makepad_strict_json::parse(line.as_bytes()) {
+                // what a lease's JIT build held, however the lease ended ([`Sched::jit_build_ram`])
+                if let Some(peak) = v.get("jit_peak_gb").and_then(super::num) { jit_peaks.push((os(&v), peak)); }
                 // A memory end measures only RAM: its wall, CPU and run time were cut short.
                 if v.get("how").and_then(|h| h.as_str()) == Some("memory") {
                     if let Some(class) = v.get("class").and_then(|v| v.as_str()) {
@@ -773,6 +781,10 @@ impl LeaseMaster {
             }
         }
         let mut sched = self.sched.lock().unwrap();
+        for (os, peak) in jit_peaks {
+            sched.record_resources("jit-build", "", Some(peak), None);
+            if let Some(os) = os { sched.record_family_peak(&os, "jit-build", "", Some(peak)); }
+        }
         for (class, kind, launch, peak) in calls {
             sched.record_call(&class, &kind, launch, peak);
         }
@@ -849,6 +861,7 @@ impl LeaseMaster {
             match a {
                 Action::Profile { .. } => {}
                 Action::Event(r) => (self.publish)(r),
+                Action::Log(line) => eprintln!("devhub sched: {line}"),
                 Action::Grant { id, node } => {
                     let inspect = self.sched.lock().unwrap().get(&id).is_some_and(|l| !l.req.set_up_on_node());
                     if inspect {
@@ -1245,7 +1258,7 @@ impl LeaseMaster {
         // its last run did not end by itself, or it stopped a unit as hung
         let said = |k: &str| usage.and_then(|v| v.get(k));
         let unmeasured = said("abnormal").and_then(|a| a.get("line")).and_then(|a| a.as_str()).or_else(|| said("hung").and_then(|h| h.as_str())).map_or("null".to_string(), json_str);
-        let line = format!("{{\"class\":{},\"kind\":\"{}\",\"cost\":\"{}\",\"wall_ms\":{wall},\"peak_ram_gb\":{},\"cpu_seconds\":{},\"node\":{},\"os\":{os},\"lane\":{},\"ended_ms\":{ended},\"lease\":{},\"how\":{},\"unmeasured\":{unmeasured},\"deployment\":{},\"source\":{}, {}}}\n", json_str(class), l.req.kind.as_str(), l.cost_class.as_str(), measured("peak_ram_gb"), measured("cpu_seconds"), json_str(l.node.as_deref().unwrap_or("")), json_str(&l.req.lane), json_str(&l.id), json_str(how), json_str(&l.deployment), json_str(usage.and_then(|v| v.get("source")).and_then(|v| v.as_str()).unwrap_or("")), phases.fields(ended));
+        let line = format!("{{\"class\":{},\"kind\":\"{}\",\"cost\":\"{}\",\"wall_ms\":{wall},\"jit_peak_gb\":{},\"peak_ram_gb\":{},\"cpu_seconds\":{},\"node\":{},\"os\":{os},\"lane\":{},\"ended_ms\":{ended},\"lease\":{},\"how\":{},\"unmeasured\":{unmeasured},\"deployment\":{},\"source\":{}, {}}}\n", json_str(class), l.req.kind.as_str(), l.cost_class.as_str(), measured("jit_peak_gb"), measured("peak_ram_gb"), measured("cpu_seconds"), json_str(l.node.as_deref().unwrap_or("")), json_str(&l.req.lane), json_str(&l.id), json_str(how), json_str(&l.deployment), json_str(usage.and_then(|v| v.get("source")).and_then(|v| v.as_str()).unwrap_or("")), phases.fields(ended));
         let _ = std::fs::create_dir_all(&self.home);
         // File appends and the rolling window have the same order, including concurrent ends.
         let offset = self.costs_offset.lock().unwrap();
@@ -1948,15 +1961,17 @@ impl LeaseMaster {
                 match self.durable_state_line(id) { Ok(Some(line)) => out.push(line), Ok(None) => {}, Err(e) => out.push(err(&e)) }
             }
             "beat" => {
-                let exists = self.sched.lock().unwrap().beat(line.trim(), now).is_some();
-                if exists {
+                let beaten = self.sched.lock().unwrap().beat(line.trim(), now);
+                if let Some(at_beat) = beaten {
                     match self.durable_state_line(line.trim()) {
                         // its holder hears the idle verdict or its yield too, not the inbox alone (`Beat`)
                         Ok(Some(state)) => out.push(match self.owner_word(line.trim()) {
                             Some(word) => format!("{},\"idle\":{}}}", state.strip_suffix('}').unwrap_or(&state), json_str(&word)),
                             None => state,
                         }),
-                        Ok(None) => {}
+                        // an empty answer, said with the lease as its beat found it (a live test's
+                        // session failed on "beat: no answer", unexplained: W4322, 11-08)
+                        Ok(None) => eprintln!("devhub lease: beat {}: answered with nothing: the lease left the scheduler after its beat; at its beat: {}", line.trim(), crate::proto::clean(&at_beat, 600)),
                         Err(e) => out.push(err(&e)),
                     }
                 } else { out.push(err(&format!("no lease {}", line.trim()))); }
@@ -2399,6 +2414,10 @@ mod tests {
         (live.class, live.live) = ("family-run".into(), true);
         assert_eq!(m.sched.lock().unwrap().measured_ram(&live, Some("box-a")), Some(1.2), "its lane's own peak and a fifth");
         assert_eq!(m.sched.lock().unwrap().measured_ram(&req, Some("box-a")), Some(2.4), "a run of another lane: the family's");
+        // a lease's JIT build measures such builds' RAM, however its lease ended
+        std::io::Write::write_all(&mut file, b"{\"class\":\"built-run\",\"kind\":\"test\",\"node\":\"box-c\",\"os\":\"linux\",\"wall_ms\":1000,\"jit_peak_gb\":5.0,\"peak_ram_gb\":6.0,\"how\":\"cancelled\"}\n").unwrap();
+        m.refresh_costs();
+        assert_eq!(m.sched.lock().unwrap().jit_build_ram("box-a"), Some(6.0), "its peak and a fifth");
         m.refresh_costs();
         let s = m.sched.lock().unwrap();
         for class in ["memory-run", "raced-run"] {

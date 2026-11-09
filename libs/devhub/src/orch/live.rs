@@ -1753,10 +1753,19 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
     };
     // A box that goes away while the sources ship is no verdict on the session (its hub restarts
     // for its self-update, most often): the lease goes back and it is placed again, as a job is.
+    // So is an ask for its box whose answer was lost ([`super::leg::exit_lost`]): a live test's
+    // session queued 9 min for its box failed on "beat: no answer", its test never run (W4322, 11-08).
     let mut placed = 0;
     let (held, ship_started) = loop {
         let held = match Held::acquire_with(&spec, &configure, &mut |_| {}, &|| get(ctx, id).is_none_or(|x| !x.active())) {
             Ok(h) => h,
+            Err(e) if placed + 1 < super::job::ATTEMPTS && super::leg::exit_lost(&e) => {
+                placed += 1;
+                let why = format!("no box ({}); placed again", crate::proto::clean(&e, 160));
+                let x = set(ctx, id, |s| s.note = why.clone());
+                event(ctx, Sev::Warn, format!("live {id}: {why}"), x.as_ref());
+                continue;
+            }
             Err(e) => return fail(e),
         };
         placed += 1;
@@ -1765,7 +1774,7 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
         let Err(e) = shipped else { break (held, ship_started) };
         let node = held.node.clone();
         held.release(None);
-        if placed >= super::job::ATTEMPTS || !crate::lease::master::unreachable(&e) {
+        if placed >= super::job::ATTEMPTS || !super::leg::exit_lost(&e) {
             return fail(format!("shipping {snap}: {e}"));
         }
         event(ctx, Sev::Warn, format!("live {id}: shipping to {node} failed ({}); placed again", crate::proto::clean(&e, 160)), Some(&x));
@@ -1791,6 +1800,8 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
     join(&ctx.monitor, id, r.clone());
     let x = set(ctx, id, |s| {
         s.state = "running".into();
+        // (a placement's "placed again" note says how it waited, not how it runs)
+        s.note.clear();
         s.lease = r.lease.clone();
         s.node = r.node.clone();
         s.started_ms = wall_ms();

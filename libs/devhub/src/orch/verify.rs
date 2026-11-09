@@ -617,7 +617,8 @@ fn active_leg<'a>(d: &'a mut crate::state::Doc, job: &str, pair: &Pair, name: &s
 }
 
 /// One leg: lease, check the tree is at the pair, run, verdict; its state as it goes. `back`: a
-/// previous master's run of it, on the lease this master took back, is followed instead.
+/// previous master's run of it, on the lease this master took back, is followed instead. A run
+/// whose exit was lost ([`super::leg::exit_lost`]) is no verdict: the leg runs again.
 pub(crate) fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[String], log: &Path, mut back: Option<Leg>) -> Verdict {
     let (name, marker) = (def.name.as_str(), def.marker.as_str());
     let job = if spec.agent == "devhub-jitlegs" { "jitlegs" } else { "verify" };
@@ -651,7 +652,17 @@ pub(crate) fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[
             }
         }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() })
     };
-    // a background leg: preempted by lane work, it asks again (a fresh log)
+    // a background leg: preempted by lane work, it asks again (a fresh log); a run whose exit was
+    // lost runs again too, as a job whose box was lost is placed again: up to its attempts in all
+    let mut lost: Vec<String> = Vec::new();
+    let mut again = |r: &Result<i32, String>| -> bool {
+        let Some(e) = r.as_ref().err().filter(|e| super::leg::exit_lost(e)) else { return false };
+        lost.push(e.clone());
+        if lost.len() >= super::job::ATTEMPTS as usize { return false; }
+        ctx.store.event(job, Sev::Info, format!("{job} leg {name} of {}: its exit was lost ({e}); it runs again", pair.short()), None);
+        set("wait", "", "", &format!("its exit was lost ({e}); asks again"));
+        true
+    };
     let (r, exit) = loop {
         if let Some(l) = back.take() {
             let off = std::fs::metadata(log).map_or(0, |m| m.len());
@@ -671,6 +682,7 @@ pub(crate) fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[
                 set("wait", "", "", "preempted by lane work; asks again");
                 continue;
             }
+            if again(&r) { continue; }
             break (r, exit);
         }
         let mut file = match std::fs::File::create(log) {
@@ -727,12 +739,14 @@ pub(crate) fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[
             set("wait", "", "", "preempted by lane work; asks again");
             continue;
         }
+        if again(&r) { continue; }
         break (r, exit);
     };
     let text = std::fs::read_to_string(log).unwrap_or_default();
     let (v, mut summary) = leg_verdict(name, marker, &text, exit);
     if let Err(e) = r {
         summary = format!("{summary}; {e}");
+        if super::leg::exit_lost(&e) && lost.len() > 1 { summary = format!("{summary} (its exit was lost on all {} runs)", lost.len()); }
     }
     let state = match v {
         Verdict::Ok => "ok",

@@ -90,47 +90,59 @@ struct ProcRow {
     gpu_mb: f64,
 }
 
+/// Every process: pid -> (name, parent, group, CPU ticks so far, RSS bytes).
+#[cfg(target_os = "linux")]
+fn procs() -> std::collections::HashMap<u32, (String, u32, u32, u64, u64)> {
+    let mut out = std::collections::HashMap::new();
+    for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+        let (Some(a), Some(b)) = (stat.find('('), stat.rfind(')')) else { continue };
+        let name = stat[a + 1..b].to_string();
+        let f: Vec<&str> = stat[b + 2..].split_whitespace().collect();
+        let num = |i: usize| f.get(i).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
+        out.insert(pid, (name, num(1) as u32, num(2) as u32, num(11) + num(12), num(21) * 4096));
+    }
+    out
+}
+
+/// The kernel's CPU ticks per second.
+#[cfg(target_os = "linux")]
+fn ticks_per_s() -> f64 {
+    extern "C" {
+        fn sysconf(name: i32) -> i64;
+    }
+    let t = unsafe { sysconf(2) };
+    if t > 0 { t as f64 } else { 100.0 }
+}
+
+/// Each process's CPU (% of one core) from ticks `before` to `after` over `secs`; a process not
+/// seen before started since: all its ticks are of the span.
+#[cfg(target_os = "linux")]
+fn rows_between(before: &std::collections::HashMap<u32, u64>, after: std::collections::HashMap<u32, (String, u32, u32, u64, u64)>, secs: f64) -> Vec<ProcRow> {
+    let tck = ticks_per_s();
+    after
+        .into_iter()
+        .map(|(pid, (name, ppid, pgid, ticks, rss))| {
+            let was = before.get(&pid).copied().unwrap_or(0);
+            ProcRow { pid, ppid, pgid, name, cpu_pct: ticks.saturating_sub(was) as f64 / tck / secs.max(0.001) * 100.0, rss_mb: rss as f64 / 1048576.0, gpu_mb: 0.0 }
+        })
+        .collect()
+}
+
 #[cfg(target_os = "linux")]
 fn sample() -> (f64, Vec<ProcRow>) {
-    use std::collections::HashMap;
-    fn procs() -> HashMap<u32, (String, u32, u32, u64, u64)> {
-        let mut out = HashMap::new();
-        for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
-            let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
-            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
-            let (Some(a), Some(b)) = (stat.find('('), stat.rfind(')')) else { continue };
-            let name = stat[a + 1..b].to_string();
-            let f: Vec<&str> = stat[b + 2..].split_whitespace().collect();
-            let num = |i: usize| f.get(i).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
-            out.insert(pid, (name, num(1) as u32, num(2) as u32, num(11) + num(12), num(21) * 4096));
-        }
-        out
-    }
     let read = || std::fs::read_to_string("/proc/stat").ok().and_then(|t| parse_proc_stat(&t));
     let (s0, p0) = (read(), procs());
     let t0 = std::time::Instant::now();
     std::thread::sleep(std::time::Duration::from_millis(500));
     let (s1, p1) = (read(), procs());
-    let secs = t0.elapsed().as_secs_f64().max(0.001);
-    let tck = {
-        extern "C" {
-            fn sysconf(name: i32) -> i64;
-        }
-        let t = unsafe { sysconf(2) };
-        if t > 0 { t as f64 } else { 100.0 }
-    };
     let cpu = match (s0, s1) {
         (Some(a), Some(b)) => cpu_pct(a, b),
         _ => 0.0,
     };
-    let rows = p1
-        .into_iter()
-        .map(|(pid, (name, ppid, pgid, ticks, rss))| {
-            let before = p0.get(&pid).map_or(ticks, |p| p.3);
-            ProcRow { pid, ppid, pgid, name, cpu_pct: (ticks.saturating_sub(before)) as f64 / tck / secs * 100.0, rss_mb: rss as f64 / 1048576.0, gpu_mb: 0.0 }
-        })
-        .collect();
-    (cpu, rows)
+    let before = p0.into_iter().map(|(pid, p)| (pid, p.3)).collect();
+    (cpu, rows_between(&before, p1, t0.elapsed().as_secs_f64()))
 }
 
 #[cfg(windows)]
@@ -248,18 +260,38 @@ pub fn label(_pid: u32) -> Option<String> {
 /// owner ("" for the timed lease's own work, else a lease's tag); a process this hub started
 /// (its own builds) is the hub's, with what the hub started; None: neither (the OS, the user).
 fn owner(rows: &std::collections::HashMap<u32, &ProcRow>, r: &ProcRow, me: u32, whose: &dyn Fn(u32) -> Option<String>) -> Option<String> {
+    match owner_of(rows, r, me, whose) {
+        Owner::Group(w) | Owner::Hub(w) => Some(w),
+        Owner::Nobody => None,
+    }
+}
+
+/// Whose a process is ([`owner_of`]).
+enum Owner {
+    /// a group `whose` names, by that name
+    Group(String),
+    /// the hub started it: `the hub's <what>`
+    Hub(String),
+    /// neither: the OS's, the user's
+    Nobody,
+}
+
+fn owner_of(rows: &std::collections::HashMap<u32, &ProcRow>, r: &ProcRow, me: u32, whose: &dyn Fn(u32) -> Option<String>) -> Owner {
     let mut at = r;
     // a parent chain is short; the bound only guards a cycle in a racy sample
     for _ in 0..64 {
         if let Some(w) = whose(at.pgid) {
-            return Some(w);
+            return Owner::Group(w);
         }
         if at.ppid == me {
-            return Some(format!("the hub's {}", label(at.pid).unwrap_or_else(|| at.name.clone())));
+            return Owner::Hub(format!("the hub's {}", label(at.pid).unwrap_or_else(|| at.name.clone())));
         }
-        at = rows.get(&at.ppid)?;
+        match rows.get(&at.ppid) {
+            Some(p) => at = p,
+            None => return Owner::Nobody,
+        }
     }
-    None
+    Owner::Nobody
 }
 
 /// The CPU (% of one core, a half-second look) of each of `pids` that runs.
@@ -285,6 +317,84 @@ pub fn outside(whose: &dyn Fn(u32) -> Option<String>) -> (f64, Vec<(String, f64)
     }).collect();
     v.sort_by(|a, b| b.1.total_cmp(&a.1));
     (crate::procinfo::machine().load1, v)
+}
+
+/// A process outside the box's leases is named once it uses this many cores on average.
+#[cfg(not(windows))]
+const OUTSIDE_MIN_CORES: f64 = 0.5;
+/// and at most this many of them, the busiest
+#[cfg(not(windows))]
+const OUTSIDE_TOP: usize = 3;
+
+/// The box's CPU by whose it was since the previous call (the master's caps poll, every 10 s),
+/// cores on average: each lease's (`lease_of(pgid)` names a lease run's process group: what runs
+/// in it or under it is that lease's), the busiest first, and the busiest processes outside the
+/// leases (what it is, pid, cores), at least [`OUTSIDE_MIN_CORES`] each, at most [`OUTSIDE_TOP`];
+/// what the hub started outside a lease is named as the hub's. A box measured busier than its
+/// leases' charges says what took the rest: a lease past its charge or work of no lease's (a box
+/// charged a few cores measured 7-8 more the whole of a live launch's 9 min wait, and nothing said
+/// what, W4322, 11-08). Windows: none (a process's parent is not known there, so a lease's
+/// children cannot be told from the rest).
+#[cfg(target_os = "linux")]
+pub fn cpu_split(lease_of: &dyn Fn(u32) -> Option<String>) -> CpuSplit {
+    use std::collections::HashMap;
+    static LAST: std::sync::Mutex<Option<(std::time::Instant, HashMap<u32, u64>)>> = std::sync::Mutex::new(None);
+    let now = std::time::Instant::now();
+    let after = procs();
+    let ticks = after.iter().map(|(pid, p)| (*pid, p.3)).collect();
+    let Some((then, before)) = LAST.lock().unwrap().replace((now, ticks)) else { return CpuSplit::default() };
+    split_rows(&rows_between(&before, after, now.duration_since(then).as_secs_f64()), lease_of)
+}
+#[cfg(not(any(target_os = "linux", windows)))]
+pub fn cpu_split(lease_of: &dyn Fn(u32) -> Option<String>) -> CpuSplit {
+    // (`ps` gives each process's CPU as a decaying average: no span of its own)
+    split_rows(&sample().1, lease_of)
+}
+#[cfg(windows)]
+pub fn cpu_split(_lease_of: &dyn Fn(u32) -> Option<String>) -> CpuSplit {
+    CpuSplit::default()
+}
+
+/// [`cpu_split`]'s answer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CpuSplit {
+    /// (lease, cores), the busiest first
+    pub leases: Vec<(String, f64)>,
+    /// (what, pid, cores), the busiest first
+    pub outside: Vec<(String, u32, f64)>,
+}
+
+/// [`cpu_split`] of a look's rows.
+#[cfg(not(windows))]
+fn split_rows(rows: &[ProcRow], lease_of: &dyn Fn(u32) -> Option<String>) -> CpuSplit {
+    let me = std::process::id();
+    let by_pid: std::collections::HashMap<u32, &ProcRow> = rows.iter().map(|r| (r.pid, r)).collect();
+    let mut out = CpuSplit::default();
+    for r in rows.iter().filter(|r| r.pid != me && r.cpu_pct > 0.0) {
+        let what = match owner_of(&by_pid, r, me, lease_of) {
+            Owner::Group(lease) => {
+                match out.leases.iter_mut().find(|(l, _)| *l == lease) {
+                    Some((_, cores)) => *cores += r.cpu_pct / 100.0,
+                    None => out.leases.push((lease, r.cpu_pct / 100.0)),
+                }
+                continue;
+            }
+            Owner::Hub(what) => what,
+            Owner::Nobody => label(r.pid).unwrap_or_else(|| r.name.clone()),
+        };
+        if r.cpu_pct >= OUTSIDE_MIN_CORES * 100.0 {
+            out.outside.push((crate::proto::clean(&what, 60), r.pid, r.cpu_pct / 100.0));
+        }
+    }
+    out.leases.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out.outside.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.1.cmp(&b.1)));
+    out.outside.truncate(OUTSIDE_TOP);
+    out
+}
+
+/// The processes [`cpu_split`] names outside the leases, said: `dumper pid 812 (1.0 cores), ...`.
+pub fn outside_said(busy: &[(String, u32, f64)]) -> String {
+    busy.iter().map(|(what, pid, cores)| format!("{what} pid {pid} ({cores:.1} cores)")).collect::<Vec<_>>().join(", ")
 }
 
 /// The `top` answer: a machine line, a line per GPU, then the `n` busiest processes.
@@ -385,5 +495,36 @@ mod tests {
         let mut s = String::new();
         render(&top("t", 3), &mut s);
         assert!(s.starts_with("t  cpu "), "{s}");
+    }
+
+    /// What a box ran outside its leases: a lease's run and what runs under it are the lease's;
+    /// what the hub started outside a lease is the hub's; the rest by name and pid, busiest first,
+    /// at least half a core each, three at most.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_busiest_processes_outside_the_leases_are_named() {
+        let me = std::process::id();
+        let row = |pid: u32, ppid: u32, pgid: u32, name: &str, cpu_pct: f64| ProcRow { pid, ppid, pgid, name: name.into(), cpu_pct, ..Default::default() };
+        let rows = [
+            // a lease's run (group 4000000) and a compiler under it in a group of its own
+            row(4000000, 1, 4000000, "bash", 0.0),
+            row(4000001, 4000000, 4000001, "rustc", 790.0),
+            // the hub's own build
+            row(4000010, me, 4000010, "cargo", 120.0),
+            // the box's own work, one idle
+            row(4000020, 1, 4000020, "dumper", 98.0),
+            row(4000021, 1, 4000021, "indexer", 260.0),
+            row(4000022, 1, 4000022, "wm", 3.0),
+            row(4000023, 1, 4000023, "sweeper", 60.0),
+        ];
+        let lease_of = |pgid: u32| (pgid == 4000000).then(|| "L7".to_string());
+        let split = split_rows(&rows, &lease_of);
+        assert_eq!(split.leases, vec![("L7".to_string(), 7.9)], "the compiler under the lease's run is the lease's");
+        let busy = split.outside;
+        let pids: Vec<u32> = busy.iter().map(|b| b.1).collect();
+        assert_eq!(pids, vec![4000021, 4000010, 4000020], "{busy:?}");
+        assert_eq!(busy[0].0, "indexer");
+        assert!(busy[1].0.starts_with("the hub's "), "{busy:?}");
+        assert_eq!(outside_said(&busy[2..]), "dumper pid 4000020 (1.0 cores)");
     }
 }

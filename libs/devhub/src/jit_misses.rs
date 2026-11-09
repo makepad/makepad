@@ -218,6 +218,37 @@ pub(crate) fn test_package(repo: &Path, pair: &crate::state::Pair, pkg: &str) ->
     }
 }
 
+/// The package a JIT `makepad test` command tests: the first word after `test` that is no option,
+/// as makepad test reads it (relax test_pkg.rs: `-p` / `--package` only mark it; an option before
+/// it may take a value).
+pub(crate) fn tested_package(argv: &[String]) -> Option<&str> {
+    let (first, rest) = crate::lease::loaders::cargo_run_args(argv)?.split_first()?;
+    if first != "test" { return None; }
+    let mut words = rest.iter();
+    while let Some(w) = words.next() {
+        match w.as_str() {
+            "--" => return None,
+            "--features" | "-F" | "--cfg" | "--report-to" | "--run-dir" | "--workspace-dir" => { words.next(); }
+            w if w.starts_with('-') => {}
+            pkg => return Some(pkg),
+        }
+    }
+    None
+}
+
+/// What a lane's run of the JIT `makepad test` command `argv` says as it takes the lane's tree
+/// rather than an overlay: its package's `test-tree` reason at `pair` ([`test_package`]). None:
+/// the command tests no package that says it.
+pub(crate) fn test_tree_of(repo: &Path, pair: &crate::state::Pair, argv: &[String]) -> Result<Option<String>, String> {
+    let Some(pkg) = tested_package(argv) else { return Ok(None) };
+    Ok(test_package(repo, pair, pkg)?.1.map(|why| tree_line(pkg, &why)))
+}
+
+/// A run that takes the lane's tree for its package's `test-tree` says so in these words.
+pub(crate) fn tree_line(pkg: &str, why: &str) -> String {
+    format!("{pkg} runs in the lane's tree: {why} (its Cargo.toml's test-tree)")
+}
+
 #[cfg(feature = "checkout")]
 fn package_of(tree: &crate::orch::ci::Tree, pkg: &str) -> (bool, Option<String>) {
     use crate::orch::ci::{jit_own_dirs, package_dirs};
@@ -592,6 +623,24 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         assert_eq!(super::package_of(&t, "c"), (false, None));
         let own = makepad_toml_parser::parse_toml(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap()).unwrap();
         assert!(own.get_path(&["package", "metadata", "makepad", "test-tree"]).and_then(makepad_toml_parser::Toml::as_str).is_some(), "devhub's tests read the checkout: its Cargo.toml says so");
+    }
+
+    /// The package a JIT `makepad test` command tests, as makepad test reads it: past its
+    /// options (with their values) and the `-p` marker; nothing for other commands.
+    #[test]
+    fn a_jit_test_command_names_its_package() {
+        let w = |c: &str| c.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+        for (cmd, pkg) in [
+            ("makepad test -p pkg-a --release -- one", Some("pkg-a")),
+            ("env CARGO_INCREMENTAL=0 makepad test --package pkg-a", Some("pkg-a")),
+            ("makepad test --features x,y --live pkg-b --lib", Some("pkg-b")),
+            ("cargo run --profile host -q -p makepad-run --bin makepad -- test pkg-c", Some("pkg-c")),
+            ("makepad test -- pkg-d", None),
+            ("makepad run pkg-e", None),
+            ("cargo test -p pkg-f", None),
+        ] {
+            assert_eq!(super::tested_package(&w(cmd)), pkg, "{cmd}");
+        }
     }
 
     /// A JIT warning or note at a source line is no compile error: M71 recorded a test run's
