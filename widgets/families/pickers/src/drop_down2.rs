@@ -486,7 +486,9 @@ pub struct DropDown2 {
     visible: bool,
     #[live]
     labels: Vec<String>,
+    #[imperative]
     #[live]
+    #[apply_state]
     selected_item: usize,
     #[live(22.0)]
     item_height: f64,
