@@ -89,6 +89,9 @@ pub(super) fn set_screen_orientation(orientation: u32) -> bool {
 pub(super) fn set_keep_screen_on(on: bool) -> bool {
     with_activity(|env, activity| unsafe { void(env, activity, c"setKeepScreenOn", c"(Z)V", &[jvalue { z: on as jboolean }]) }).unwrap_or(false)
 }
+pub(super) fn set_full_screen(fullscreen: bool) -> bool {
+    with_activity(|env, activity| unsafe { void(env, activity, c"setFullScreen", c"(Z)V", &[jvalue { z: fullscreen as jboolean }]) }).unwrap_or(false)
+}
 pub(super) fn set_app_background(argb: u32) -> bool {
     with_activity(|env, activity| unsafe { void(env, activity, c"setAppBackgroundColor", c"(I)V", &[jvalue { i: argb as jint }]) }).unwrap_or(false)
 }
@@ -132,6 +135,8 @@ unsafe extern "system" fn resume(_: *mut JNIEnv, _: jclass) {
     lock(&Shared::global().state).active = true;
     SURFACE_COVERED.store(true, Ordering::Release);
     emit_lifecycle(lifecycle::RESUME); request_frame();
+    // Android may have shown the system bars again while the app was away
+    if lock(&Shared::global().state).fullscreen { set_full_screen(true); }
 }
 unsafe extern "system" fn pause(_: *mut JNIEnv, _: jclass) {
     // an XR session keeps drawing while the Activity pauses (its state decides)
