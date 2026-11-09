@@ -9,7 +9,7 @@ work = "f846b2047215349aa13ba2a265f13f3305635e8f"
 
 [app.windows]
 capture = ""
-date = "2026-11-08"
-digest = "019b9bd513a3e7bf8a170a2a33901caa0e96bf73a862801b0bedefe8d83e363b"
-main = "7a3bfa2fed356bd7323016f85ff43cae31292417"
-work = "564a9a3f5ebbc02911363ae2e23fd3fcd34a69ac"
+date = "2026-11-09"
+digest = "a7799be1526f7ad604bfc7977e9940f3ac831b9688725ed1f4a285f2d3eaaad7"
+main = "97c198d89dd03f219b3d47ffd68d93fba841442f"
+work = "e528b1738df62c0590f67e7f147da7d5e69c38de"

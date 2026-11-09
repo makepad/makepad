@@ -33,3 +33,27 @@ fn a_wait_that_asks_all_the_while_fails_once_the_app_sits_idle(app: TestApp) {
     assert!(err.message().contains(": it sat idle for "), "fails on the idle rule: {}", err.message());
     println!("{} after {asks} asks", err.message());
 }
+
+/// Grabs a wait takes at each of its asks: the app's UI thread draws and reads back its window
+/// for each, work no serving thread counts, enough that answering would alone keep the app above
+/// the idle share.
+const GRABS_PER_ASK: usize = 4;
+
+/// A wait for what never comes fails once the app sits idle, though its UI thread is busy
+/// answering the wait's asks all the while: what the app runs while it is asked is not its own.
+#[makepad_test]
+fn a_wait_whose_asks_keep_the_ui_thread_busy_fails_once_the_app_sits_idle(app: TestApp) {
+    let mut asks = 0;
+    let err = app
+        .try_wait_until(|| {
+            asks += 1;
+            assert!(asks < MOST_ASKS, "the wait never saw the app idle: {asks} asks");
+            for _ in 0..GRABS_PER_ASK {
+                app.screenshot();
+            }
+            Some("a label that never shows".to_string())
+        })
+        .unwrap_err();
+    assert!(err.message().contains(": it sat idle for "), "fails on the idle rule: {}", err.message());
+    println!("{} after {asks} asks", err.message());
+}

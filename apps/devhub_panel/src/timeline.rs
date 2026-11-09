@@ -197,7 +197,8 @@ impl DrawArea {
     /// data) over the band `y .. y + h`, a segment between each two columns' centres. Equal
     /// neighbours merge into one quad.
     #[allow(clippy::too_many_arguments)]
-    pub fn series(&mut self, cx: &mut Cx2d, x0: f64, col_w: f64, y: f64, h: f64, vals: &[f32], color_of: &dyn Fn(f32) -> Vec4f, edge_alpha: f32) {
+    /// `left`: nothing is drawn left of it (a grid's first column starts left of the plot).
+    pub fn series(&mut self, cx: &mut Cx2d, x0: f64, left: f64, col_w: f64, y: f64, h: f64, vals: &[f32], color_of: &dyn Fn(f32) -> Vec4f, edge_alpha: f32) {
         let mut i = 0;
         while i + 1 < vals.len() {
             let (a, b) = (vals[i], vals[i + 1]);
@@ -212,7 +213,13 @@ impl DrawArea {
                     j += 1;
                 }
             }
+            let (xa, xb) = (x0 + (i as f64 + 0.5) * col_w, x0 + (j as f64 + 0.5) * col_w);
             let (va, vb) = (a.min(1.0), vals[j].min(1.0));
+            if xb <= left {
+                i = j;
+                continue;
+            }
+            let (xa, va) = trim(xa, xb, va, vb, left);
             let (ca, cb) = (color_of(va), color_of(vb));
             self.color = ca;
             self.color2 = cb;
@@ -222,8 +229,6 @@ impl DrawArea {
             self.hi0 = va;
             self.hi1 = vb;
             self.shade = 0.55;
-            let xa = x0 + (i as f64 + 0.5) * col_w;
-            let xb = x0 + (j as f64 + 0.5) * col_w;
             self.draw_abs(cx, Rect { pos: dvec2(xa, y), size: dvec2(xb - xa, h) });
             i = j;
         }
@@ -259,6 +264,76 @@ const TRAIN_H: f64 = 14.0;
 const AREA_H: f64 = 28.0;
 /// an area chart's column
 const COL_W: f64 = 3.0;
+
+/// The columns the areas bin into: [`COL_W`] px of the zoom's ms each, on a grid anchored to
+/// absolute time, so a pan slides them with the bars and landings (the same time-to-x) and
+/// re-bins nothing; only a zoom changes them. Counted from the view's left edge, every fractional
+/// pan gave the columns new boundaries, and each area wobbled as it moved (11-08).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Grid {
+    /// the first column's start, ms (at or before the view's left edge)
+    t0: f64,
+    /// a column's width, ms
+    per: f64,
+    /// the first column's x, at or left of the plot's left edge
+    x0: f64,
+    /// columns to the right edge and one past it
+    n: usize,
+}
+
+impl Grid {
+    fn of(t_left: f64, ms_per_px: f64, plot_x: f64, right: f64) -> Grid {
+        let per = ms_per_px.max(1e-6) * COL_W;
+        let t0 = (t_left / per).floor() * per;
+        let x0 = plot_x + (t0 - t_left) / ms_per_px.max(1e-6);
+        Grid { t0, per, x0, n: ((right - x0) / COL_W).ceil().max(0.0) as usize + 1 }
+    }
+
+    /// The column `t` falls in, fractional (left of the first: negative).
+    fn col(&self, t: u64) -> f64 {
+        (t as f64 - self.t0) / self.per
+    }
+}
+
+/// A column's x and value cut at `left`: the part of a quad from `xa` to `xb` right of it.
+fn trim(xa: f64, xb: f64, va: f32, vb: f32, left: f64) -> (f64, f32) {
+    if xa >= left || xb <= xa {
+        return (xa, va);
+    }
+    let t = ((left - xa) / (xb - xa)) as f32;
+    (left, va + (vb - va) * t)
+}
+
+/// The samples' values per column of `per` ms from `t0` (each the most of those it covers; -1 for
+/// none): a sample holds until the next one, the last until `now`.
+fn columns(samples: &[Sample], t0: f64, per: f64, n: usize, now: u64, v: &dyn Fn(&Sample) -> f32) -> Vec<f32> {
+    let mut out = vec![-1.0f32; n];
+    if n == 0 || per <= 0.0 {
+        return out;
+    }
+    let t1 = t0 + per * n as f64;
+    let a = samples.partition_point(|s| (s.t_ms as f64) < t0).saturating_sub(1);
+    for (i, s) in samples[a..].iter().enumerate() {
+        if s.t_ms as f64 > t1 {
+            break;
+        }
+        let next = (samples.get(a + i + 1).map_or(now, |x| x.t_ms) as f64).min(t1);
+        let from = (s.t_ms as f64).max(t0);
+        if next <= from {
+            continue;
+        }
+        let c0 = ((from - t0) / per) as usize;
+        let c1 = (((next - t0) / per).ceil() as usize).min(n);
+        let val = v(s);
+        if val < 0.0 {
+            continue;
+        }
+        for o in out.iter_mut().take(c1).skip(c0.min(n)) {
+            *o = o.max(val);
+        }
+    }
+    out
+}
 const PRESS_ROW: f64 = 9.0;
 const PRESS_ROWS: [&str; 4] = ["reserved", "cpu", "ram", "gpu"];
 /// how long a lease that just started or ended glows: one draw shows it and one ends it (a whole
@@ -565,6 +640,10 @@ impl FleetTimeline {
         self.t_right - self.ms_per_px * self.plot_w()
     }
 
+    fn col_grid(&self) -> Grid {
+        Grid::of(self.t_left(), self.ms_per_px, self.plot_x(), self.right())
+    }
+
     fn x_of(&self, t: u64) -> f64 {
         self.plot_x() + (t as f64 - self.t_left()) / self.ms_per_px.max(1e-6)
     }
@@ -663,35 +742,6 @@ impl FleetTimeline {
 
     /// A value per column over `[t0, t1]` from a node's samples (each holds until the next):
     /// the column's highest; negative where no sample covers it.
-    fn columns(samples: &[Sample], t0: u64, t1: u64, now: u64, n: usize, v: &dyn Fn(&Sample) -> f32) -> Vec<f32> {
-        let mut out = vec![-1.0f32; n];
-        if n == 0 || t1 <= t0 {
-            return out;
-        }
-        let per = (t1 - t0) as f64 / n as f64;
-        let a = samples.partition_point(|s| s.t_ms < t0).saturating_sub(1);
-        for (i, s) in samples[a..].iter().enumerate() {
-            if s.t_ms > t1 {
-                break;
-            }
-            let next = samples.get(a + i + 1).map_or(now, |x| x.t_ms).min(t1);
-            let from = s.t_ms.max(t0);
-            if next <= from {
-                continue;
-            }
-            let c0 = ((from - t0) as f64 / per) as usize;
-            let c1 = (((next - t0) as f64 / per).ceil() as usize).min(n);
-            let val = v(s);
-            if val < 0.0 {
-                continue;
-            }
-            for o in out.iter_mut().take(c1).skip(c0.min(n)) {
-                *o = o.max(val);
-            }
-        }
-        out
-    }
-
     fn draw_fleet(&mut self, cx: &mut Cx2d, f: &Fleet) {
         self.picks.clear();
         let view = self.view;
@@ -943,9 +993,10 @@ impl FleetTimeline {
         let blockers = f.blockers(t0, t1);
         let top: Vec<&str> = blockers.iter().take(6).map(|(b, _)| b.as_str()).collect();
         let plot_x = self.plot_x();
-        let cols = (self.plot_w() / COL_W).ceil() as usize + 1;
+        let grid = self.col_grid();
+        let cols = grid.n;
         let mut counts = vec![[0u16; 7]; cols];
-        let col_of = |t: u64| -> f64 { (t as f64 - self.t_left()) / (self.ms_per_px * COL_W) };
+        let col_of = |t: u64| grid.col(t);
         for r in &f.rows {
             for w in &r.waits {
                 let end = if w.end_ms == 0 { f.now_ms } else { w.end_ms };
@@ -962,8 +1013,8 @@ impl FleetTimeline {
         }
         let peak = counts.iter().map(|c| c.iter().map(|&v| v as u32).sum::<u32>()).max().unwrap_or(0).max(4) as f32;
         let base = y + AREA_H;
-        let grid = self.grid;
-        self.rect(cx, plot_x, base, self.right(), 1.0, grid);
+        let line = self.grid;
+        self.rect(cx, plot_x, base, self.right(), 1.0, line);
         // the stacked layers, each a smooth band between the ones below and its own top
         let mut lo = vec![0.0f32; cols];
         for k in 0..7 {
@@ -975,16 +1026,22 @@ impl FleetTimeline {
                     i += 1;
                     continue;
                 }
+                let (xa, xb) = (grid.x0 + (i as f64 + 0.5) * COL_W, grid.x0 + (i as f64 + 1.5) * COL_W);
+                if xb <= plot_x {
+                    i += 1;
+                    continue;
+                }
+                let (xa_cut, lo0) = trim(xa, xb, lo[i], lo[i + 1], plot_x);
+                let (_, hi0) = trim(xa, xb, hi[i], hi[i + 1], plot_x);
                 self.draw_area.color = Self::with_alpha(col, 0.7);
                 self.draw_area.color2 = Self::with_alpha(col, 0.7);
                 self.draw_area.edge = Self::with_alpha(col, 0.95);
-                self.draw_area.lo0 = lo[i];
+                self.draw_area.lo0 = lo0;
                 self.draw_area.lo1 = lo[i + 1];
-                self.draw_area.hi0 = hi[i];
+                self.draw_area.hi0 = hi0;
                 self.draw_area.hi1 = hi[i + 1];
                 self.draw_area.shade = 0.5;
-                let xa = plot_x + (i as f64 + 0.5) * COL_W;
-                self.draw_area.draw_abs(cx, Rect { pos: dvec2(xa, base - (AREA_H - 3.0)), size: dvec2(COL_W, AREA_H - 3.0) });
+                self.draw_area.draw_abs(cx, Rect { pos: dvec2(xa_cut, base - (AREA_H - 3.0)), size: dvec2(xb - xa_cut, AREA_H - 3.0) });
                 i += 1;
             }
             lo = hi;
@@ -1060,20 +1117,17 @@ impl FleetTimeline {
             self.draw_down(cx, f, l, y);
             return;
         }
-        let plot_w = self.plot_w();
-        let cols = (plot_w / COL_W).ceil() as usize + 1;
+        let g = self.col_grid();
         let samples = f.pressure.get(&n.name).cloned();
         let caps = n.caps.clone();
         // its CPU use as a soft area behind the bars (collapsed), or its four pressure rows
         if let (Some(s), Some(c)) = (samples.as_ref(), caps.as_ref()) {
-            let t_end = (self.t_left() + cols as f64 * COL_W * self.ms_per_px).max(0.0) as u64;
-            let t_start = self.t_left().max(0.0) as u64;
             if l.mode == Mode::Collapsed {
-                let vals = Self::columns(s, t_start, t_end, f.now_ms, cols, &|x: &Sample| if x.cpu_pct < 0.0 { -1.0 } else { x.cpu_pct / 100.0 });
+                let vals = columns(s, g.t0, g.per, g.n, f.now_ms, &|x: &Sample| if x.cpu_pct < 0.0 { -1.0 } else { x.cpu_pct / 100.0 });
                 let me = &*self;
                 let heat: Vec<Vec4f> = (0..=20).map(|i| me.heat(i as f32 / 20.0)).collect();
                 let color_of = |v: f32| Self::with_alpha(heat[(v.clamp(0.0, 1.0) * 20.0) as usize], 0.16);
-                self.draw_area.series(cx, plot_x, COL_W, y + 1.0, l.bars_h + 2.0, &vals, &color_of, 0.5);
+                self.draw_area.series(cx, g.x0, plot_x, COL_W, y + 1.0, l.bars_h + 2.0, &vals, &color_of, 0.5);
             } else {
                 let py = y + l.bars_h + 4.0;
                 let muted = self.muted;
@@ -1084,9 +1138,9 @@ impl FleetTimeline {
                     self.rect(cx, plot_x, ry + PRESS_ROW, right, 1.0, grid);
                     self.small_right(cx, plot_x - 6.0, ry, name, muted);
                     let (cores, ram) = (c.cores, c.ram_gb);
-                    let vals = Self::columns(s, t_start, t_end, f.now_ms, cols, &|x: &Sample| shares(x, cores, ram)[k]);
+                    let vals = columns(s, g.t0, g.per, g.n, f.now_ms, &|x: &Sample| shares(x, cores, ram)[k]);
                     let color_of = |v: f32| Self::with_alpha(heat[(v.clamp(0.0, 1.0) * 20.0) as usize], 0.6);
-                    self.draw_area.series(cx, plot_x, COL_W, ry, PRESS_ROW, &vals, &color_of, 0.95);
+                    self.draw_area.series(cx, g.x0, plot_x, COL_W, ry, PRESS_ROW, &vals, &color_of, 0.95);
                 }
             }
         }
@@ -1254,13 +1308,14 @@ impl FleetTimeline {
         let sh = (l.h - 17.0).max(8.0);
         if let Some(s) = f.pressure.get(&n.name) {
             let n_cols = (SPARK_W / COL_W) as usize;
-            let vals = Self::columns(s, t0, t1.min(f.now_ms), f.now_ms, n_cols, &|x: &Sample| if x.cpu_pct < 0.0 { -1.0 } else { x.cpu_pct / 100.0 });
+            let per = t1.min(f.now_ms).saturating_sub(t0) as f64 / n_cols.max(1) as f64;
+            let vals = columns(s, t0 as f64, per, n_cols, f.now_ms, &|x: &Sample| if x.cpu_pct < 0.0 { -1.0 } else { x.cpu_pct / 100.0 });
             let g = self.grid;
             self.rect(cx, x, sy + sh, x + SPARK_W, 1.0, g);
             let me = &*self;
             let heat: Vec<Vec4f> = (0..=20).map(|i| me.heat(i as f32 / 20.0)).collect();
             let color_of = |v: f32| Self::with_alpha(heat[(v.clamp(0.0, 1.0) * 20.0) as usize], 0.6);
-            self.draw_area.series(cx, x, COL_W, sy, sh, &vals, &color_of, 0.95);
+            self.draw_area.series(cx, x, x, COL_W, sy, sh, &vals, &color_of, 0.95);
         }
         let chip_x = x + SPARK_W + 8.0;
         let running = l.placed.iter().filter(|(i, _)| f.rows[*i].ended_ms.is_none()).count() + l.hidden_running;
@@ -1763,4 +1818,54 @@ impl Widget for FleetTimeline {
 /// of its RAM, the busiest GPU (negative: none).
 fn shares(s: &Sample, cores: u32, ram_gb: f64) -> [f32; 4] {
     [s.res_cores / (cores as f32).max(1.0), s.cpu_pct / 100.0, s.ram_used_gb / (ram_gb as f32).max(1.0), s.gpu_pct / 100.0]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pan by a fraction of a pixel or by whole pixels keeps every column's span and value: the
+    /// grid only slides (its first column's x), and only a zoom re-bins (11-08: the areas wobbled
+    /// as the view panned).
+    #[test]
+    fn a_pan_slides_the_columns_and_rebins_nothing() {
+        let ms_per_px = 1_250.0;
+        let (plot_x, right) = (200.0, 1_000.0);
+        let now = 10_000_000u64;
+        // one sample every 7 s, its CPU stepping through ten levels
+        let samples: Vec<Sample> = (0..1_400u64).map(|i| Sample { t_ms: i * 7_000, cpu_pct: (i % 10) as f32 * 10.0, ..Sample::default() }).collect();
+        let cpu = |s: &Sample| s.cpu_pct / 100.0;
+        // each column by its start in ms, and its value
+        let binned = |t_left: f64| -> (Grid, Vec<(i64, f32)>) {
+            let g = Grid::of(t_left, ms_per_px, plot_x, right);
+            assert!(g.x0 <= plot_x && g.x0 > plot_x - COL_W, "the first column starts at the plot's left edge or within one column left of it: {g:?}");
+            let vals = columns(&samples, g.t0, g.per, g.n, now, &cpu);
+            (g, vals.into_iter().enumerate().map(|(i, v)| ((g.t0 / g.per).round() as i64 + i as i64, v)).collect())
+        };
+        let t_left = 3_000_000.0;
+        let (g, base) = binned(t_left);
+        for px in [0.25, 0.5, 0.999, 1.0, 2.0, 3.0, 7.5, 40.0] {
+            let (h, moved) = binned(t_left + px * ms_per_px);
+            assert_eq!(h.per, g.per, "a pan keeps the zoom's column width");
+            // the same time sits at the same x relative to the bars: the grid moved by the pan
+            let shift = (h.t0 - g.t0) / ms_per_px - (h.x0 - g.x0);
+            assert!((shift - px).abs() < 1e-6, "{px} px: the columns slid {shift} px");
+            let common: Vec<_> = moved.iter().filter(|(k, _)| base.iter().any(|(b, _)| b == k)).collect();
+            assert!(common.len() + 20 >= base.len(), "{px} px: most columns are the same ones");
+            for (k, v) in common {
+                let b = base.iter().find(|(b, _)| b == k).unwrap().1;
+                assert_eq!(*v, b, "{px} px: column {k} kept its value");
+            }
+        }
+        // a zoom is a new grid
+        let z = Grid::of(t_left, ms_per_px * 1.5, plot_x, right);
+        assert!(z.per > g.per);
+    }
+
+    /// The part of a column left of the plot is cut, its value where the cut falls.
+    #[test]
+    fn a_column_left_of_the_plot_is_cut_at_its_edge() {
+        assert_eq!(trim(10.0, 13.0, 0.0, 0.6, 11.5), (11.5, 0.3));
+        assert_eq!(trim(12.0, 13.0, 0.2, 0.6, 11.5), (12.0, 0.2), "right of the edge: as it is");
+    }
 }
