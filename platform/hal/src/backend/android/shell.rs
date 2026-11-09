@@ -154,6 +154,7 @@ impl Shell for AndroidShell {
             },
             OsCmd::ClipSet { text } => jni::copy_to_clipboard(&text),
             OsCmd::SelectionHandles { op: action, start, end, .. } => jni::selection_handles(action, start, end),
+            OsCmd::ClipboardActions { show, area, selection, .. } => jni::clipboard_actions(show, area, selection),
             OsCmd::BackUnhandled => jni::back_unhandled(),
             OsCmd::NativeAppearance { value } => jni::set_native_appearance(value),
             OsCmd::MobileUi { op: mobile_ui::APP_BACKGROUND, value } => jni::set_app_background(value),

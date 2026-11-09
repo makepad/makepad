@@ -284,6 +284,21 @@ unsafe extern "system" fn selection_handle(_: *mut JNIEnv, _: jclass, handle: ji
     let dpi = Shared::global().dpi() as f64;
     Shared::global().emit(time as u64 * 1_000_000, |q, id| q.selection_handle(id, handle as u32, phase as u32, x as f64 / dpi, y as f64 / dpi));
 }
+/// The copy / paste toolbar's actions, as the app already understands them: the copy, cut and
+/// select all chords, and pasted text.
+unsafe extern "system" fn clipboard_action(env: *mut JNIEnv, _: jclass, action: jstring) { boost_frame_rate();
+    let key = match reg::string(env, action).as_str() {
+        "copy" => makepad_key_code::KeyCode::KeyC,
+        "cut" => makepad_key_code::KeyCode::KeyX,
+        "select_all" => makepad_key_code::KeyCode::KeyA,
+        _ => return,
+    }.to_index();
+    Shared::global().emit(clock_ns(), |q, id| { q.key_down(id, key, false, input::MOD_CONTROL); q.key_up(id, key, input::MOD_CONTROL); });
+}
+unsafe extern "system" fn clipboard_paste(env: *mut JNIEnv, _: jclass, content: jstring) { boost_frame_rate();
+    let text = reg::string(env, content);
+    if !text.is_empty() { Shared::global().emit(clock_ns(), |q, id| q.text(id, input::text::PASTE, text.as_bytes())); }
+}
 
 /// The config of the soft keyboard last asked for, while it is up: a focused text input re-sends
 /// its show on every draw, and each one reaches Android's IME tracker (a show/cancel loop).
@@ -414,6 +429,17 @@ pub(super) fn selection_handles(action: u32, start: [f32; 2], end: [f32; 2]) -> 
     } }).unwrap_or(false)
 }
 
+/// The copy / paste toolbar over `area` (window points), or none.
+pub(super) fn clipboard_actions(show: bool, area: [f32; 4], selection: bool) -> bool {
+    let dpi = Shared::global().dpi();
+    let [x, y, w, h] = area.map(|v| v * dpi);
+    with_activity(|env, activity| unsafe {
+        if !show { return void(env, activity, c"dismissClipboardActions", c"()V", &[]); }
+        // the last one is the keyboard's shift, which the Activity doesn't use
+        void(env, activity, c"showClipboardActions", c"(ZIIIII)V", &[jvalue { z: selection as jboolean }, jvalue { i: x as jint }, jvalue { i: y as jint }, jvalue { i: (x + w) as jint }, jvalue { i: (y + h) as jint }, jvalue { i: 0 }])
+    }).unwrap_or(false)
+}
+
 /// Registers the shell's, and the media services' natives in one strict pass. The
 /// returned names are the Java natives no HAL module owns (app-side services); they are never
 /// filled with no-op functions.
@@ -472,6 +498,8 @@ pub fn native_methods() -> Vec<(&'static str, &'static str, *mut c_void)> {
         ("onImeTextStateChanged", "(Ljava/lang/String;IIII)V", ime_state as *mut c_void),
         ("onImeEditorAction", "(I)V", ime_action as *mut c_void),
         ("onSelectionHandleDrag", "(IIFFJ)V", selection_handle as *mut c_void),
+        ("onClipboardAction", "(Ljava/lang/String;)V", clipboard_action as *mut c_void),
+        ("onClipboardPaste", "(Ljava/lang/String;)V", clipboard_paste as *mut c_void),
     ];
     methods.extend(super::a11y::native_methods());
     methods
