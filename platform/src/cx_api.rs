@@ -2618,6 +2618,12 @@ impl Cx {
         }
     }
 
+    /// Whether a screen created now gets its shaders built in the background, ready by the time it opens.
+    /// The HAL compiles pipelines asynchronously, but this only reads true on Android, once the first frame has shown.
+    pub fn is_building_shaders_in_background(&self) -> bool {
+        cfg!(target_os = "android") && crate::first_present_seen()
+    }
+
     pub fn send_trigger(&mut self, area: Area, trigger: Trigger) {
         if let Some(triggers) = self.triggers.get_mut(&area) {
             triggers.push(trigger);
