@@ -407,10 +407,7 @@ fn assert_mutation_events_refused(document: CodeDocument, explicit_read_only: bo
     ] {
         events.push(Event::KeyDown(KeyEvent {
             key_code,
-            modifiers: KeyModifiers {
-                control: true,
-                ..Default::default()
-            },
+            modifiers: KeyModifiers::primary(),
             ..Default::default()
         }));
     }
@@ -450,6 +447,46 @@ fn assert_mutation_events_refused(document: CodeDocument, explicit_read_only: bo
         assert_eq!(session.document().version(), 0);
         assert_eq!(editor.blink_timer.0, 0);
     }
+}
+
+#[test]
+fn undo_redo_and_select_all_take_only_the_primary_modifier() {
+    fn press(cx: &mut Cx, editor: &mut CodeEditor, session: &mut CodeSession, key_code: KeyCode, modifiers: KeyModifiers) {
+        let event = Event::KeyDown(KeyEvent { key_code, modifiers, ..Default::default() });
+        editor.handle_event(cx, &event, &mut Scope::empty(), session);
+    }
+    let (mut cx, mut editor) = editor();
+    let mut session = CodeSession::new(doc("ab"));
+    record_editor(&mut cx, &mut editor, &mut session);
+    editor.set_key_focus(&mut cx);
+    cx.action(());
+    cx.handle_actions();
+    let typed = Event::TextInput(TextInputEvent { input: "x".into(), ..Default::default() });
+    editor.handle_event(&mut cx, &typed, &mut Scope::empty(), &mut session);
+    let text = |session: &CodeSession| session.document().as_text().to_string();
+    assert_eq!(text(&session), "xab");
+    let primary = KeyModifiers::primary();
+    let other = KeyModifiers { logo: primary.control, control: primary.logo, ..Default::default() };
+    for key_code in [KeyCode::KeyZ, KeyCode::KeyY, KeyCode::KeyX, KeyCode::KeyV] {
+        let key = Event::KeyDown(KeyEvent { key_code, modifiers: other, ..Default::default() });
+        assert!(!CodeEditor::is_mutation_event(&key));
+    }
+    press(&mut cx, &mut editor, &mut session, KeyCode::KeyZ, other);
+    assert_eq!(text(&session), "xab");
+    press(&mut cx, &mut editor, &mut session, KeyCode::KeyZ, primary);
+    assert_eq!(text(&session), "ab");
+    press(&mut cx, &mut editor, &mut session, KeyCode::KeyZ, KeyModifiers { shift: true, ..other });
+    press(&mut cx, &mut editor, &mut session, KeyCode::KeyY, other);
+    assert_eq!(text(&session), "ab");
+    press(&mut cx, &mut editor, &mut session, KeyCode::KeyZ, KeyModifiers { shift: true, ..primary });
+    assert_eq!(text(&session), "xab");
+    press(&mut cx, &mut editor, &mut session, KeyCode::KeyZ, primary);
+    press(&mut cx, &mut editor, &mut session, KeyCode::KeyY, primary);
+    assert_eq!(text(&session), "xab");
+    press(&mut cx, &mut editor, &mut session, KeyCode::KeyA, other);
+    assert!(session.selections()[0].is_empty());
+    press(&mut cx, &mut editor, &mut session, KeyCode::KeyA, primary);
+    assert_eq!(session.copy(), "xab");
 }
 
 #[test]

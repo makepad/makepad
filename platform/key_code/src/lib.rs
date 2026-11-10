@@ -749,4 +749,26 @@ impl DeJson for KeyCode {
     }
 }
 
+/// Whether the platform's primary modifier, the one copy, paste and undo take, is the logo key
+/// (Command) instead of Control. It is on Apple platforms, and on the web when the browser runs on one.
+pub fn primary_modifier_is_logo() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        WEB_PRIMARY_MODIFIER_IS_LOGO.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        cfg!(target_vendor = "apple")
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+static WEB_PRIMARY_MODIFIER_IS_LOGO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The web runtime sets this at startup, once it knows the browser's OS.
+#[cfg(target_arch = "wasm32")]
+pub fn set_web_primary_modifier_is_logo(is_logo: bool) {
+    WEB_PRIMARY_MODIFIER_IS_LOGO.store(is_logo, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub mod android;

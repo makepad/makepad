@@ -1348,8 +1348,9 @@ impl PanelControl {
             items.push(("Type a value".into(), "Enter", MenuAct::Type));
         }
         items.push(("Reset to default".into(), "Backspace", MenuAct::Reset));
-        items.push(("Copy value".into(), "Ctrl+C", MenuAct::Copy));
-        items.push(("Paste value".into(), "Ctrl+V", MenuAct::Paste));
+        let (copy, paste) = if KeyModifiers::primary().logo { ("Cmd+C", "Cmd+V") } else { ("Ctrl+C", "Ctrl+V") };
+        items.push(("Copy value".into(), copy, MenuAct::Copy));
+        items.push(("Paste value".into(), paste, MenuAct::Paste));
         if self.animatable() {
             match self.key.state.clone() {
                 Some(Ok(false)) => items.push(("Animate".into(), "I", MenuAct::Animate)),
@@ -1731,11 +1732,11 @@ impl Widget for PanelControl {
                         self.draw_bg.redraw(cx);
                         return;
                     }
-                    KeyCode::KeyC if cmd => {
+                    KeyCode::KeyC if ke.modifiers.is_primary() => {
                         self.copy(cx);
                         return;
                     }
-                    KeyCode::KeyV if cmd => {
+                    KeyCode::KeyV if ke.modifiers.is_primary() => {
                         let comp = self.hot.and_then(Part::field).unwrap_or(self.focus);
                         self.paste(cx, comp);
                         return;

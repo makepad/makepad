@@ -358,7 +358,7 @@ impl Cx {
             HalEvent::KeyDown { window: _, key, repeat, mods } => {
                 let e = KeyEvent { key_code: KeyCode::from_index(key), is_repeat: repeat, modifiers: key_modifiers(mods), time };
                 // the copy / cut chords ask the focused widget for its text; the answer is the clipboard
-                if e.modifiers.logo || e.modifiers.control {
+                if e.modifiers.is_primary() {
                     match e.key_code {
                         KeyCode::KeyC => self.hal_clipboard_chord(true),
                         KeyCode::KeyX => self.hal_clipboard_chord(false),
@@ -1242,6 +1242,29 @@ mod tests {
         let m = key_modifiers(input::MOD_SHIFT | input::MOD_LOGO);
         assert!(m.shift && m.logo && !m.control && !m.alt);
         assert_eq!(key_modifiers(0), KeyModifiers::default());
+    }
+
+    #[test]
+    fn the_hal_and_cx_agree_on_the_primary_modifier() {
+        assert_eq!(key_modifiers(input::mod_primary()), KeyModifiers::primary());
+    }
+
+    #[test]
+    fn only_the_primary_modifier_copies_and_cuts() {
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let seen = asked.clone();
+        let mut cx = Cx::new(Box::new(move |_, event| match event {
+            Event::TextCopy(_) => seen.borrow_mut().push("copy"),
+            Event::TextCut(_) => seen.borrow_mut().push("cut"),
+            _ => {}
+        }));
+        let other = (input::MOD_CONTROL | input::MOD_LOGO) & !input::mod_primary();
+        for mods in [other, input::mod_primary()] {
+            for key in [KeyCode::KeyC, KeyCode::KeyX] {
+                cx.hal_intake(0, HalEvent::KeyDown { window: hal_window_id(WindowId(0, 0)), key: key.to_index(), repeat: false, mods });
+            }
+        }
+        assert_eq!(*asked.borrow(), ["copy", "cut"]);
     }
 
     #[test]

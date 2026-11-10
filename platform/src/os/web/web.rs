@@ -285,6 +285,7 @@ impl Cx {
                         tw.gpu_info.vendor,
                         tw.gpu_info.renderer,
                     );
+                    makepad_key_code::set_web_primary_modifier_is_logo(tw.browser_info.primary_is_logo);
                     let mut browser_info = tw.browser_info;
                     browser_info.search = super::web_embed::page_query(browser_info.search);
                     self.os_type = browser_info.into();

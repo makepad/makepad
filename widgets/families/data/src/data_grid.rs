@@ -3452,7 +3452,7 @@ impl DataGrid {
                     cx.widget_action(uid, DataGridAction::ClearCells);
                 }
             }
-            KeyCode::KeyA if cmd && self.selection != GridSelectMode::Off => {
+            KeyCode::KeyA if ke.modifiers.is_primary() && self.selection != GridSelectMode::Off => {
                 self.selected = Some(GridSelection {
                     kind: GridSelectKind::All,
                     anchor: (0, 0),
@@ -4709,10 +4709,24 @@ mod tests {
         }
         let out = raised(&mut cx, &mut grid, |cx, grid| {
             grid.handle_key_down(cx, &key(KeyCode::ArrowDown, mods(true, false)));
-            grid.handle_key_down(cx, &key(KeyCode::KeyA, mods(false, true)));
+            grid.handle_key_down(cx, &key(KeyCode::KeyA, KeyModifiers::primary()));
         });
         assert!(out.is_empty(), "{out:?}");
         assert_eq!(grid.selection(), None);
+        });
+    }
+
+    #[test]
+    fn select_all_takes_only_the_primary_modifier() {
+        crate::on_test_cx(|| {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        let primary = KeyModifiers::primary();
+        let other = KeyModifiers { logo: primary.control, control: primary.logo, ..Default::default() };
+        grid.handle_key_down(&mut cx, &key(KeyCode::KeyA, other));
+        assert_eq!(grid.selection(), None);
+        grid.handle_key_down(&mut cx, &key(KeyCode::KeyA, primary));
+        assert_eq!(grid.selection().map(|s| s.kind), Some(GridSelectKind::All));
         });
     }
 

@@ -317,7 +317,7 @@ impl App {
                             }
                         }
                     }
-                    if !repeat && mods & (input::MOD_CONTROL | input::MOD_LOGO) != 0 && mods & input::MOD_ALT == 0 && code == KeyCode::KeyV && !self.clipboard.text.is_empty() {
+                    if !repeat && mods & input::mod_primary() != 0 && mods & input::MOD_ALT == 0 && code == KeyCode::KeyV && !self.clipboard.text.is_empty() {
                         delivered.text(key.1, input::text::PASTE, self.clipboard.text.as_bytes());
                     }
                 }

@@ -1257,7 +1257,7 @@ impl CodeEditor {
         match event {
             Event::TextInput(_) | Event::TextRangeReplace(_) | Event::TextCut(_) | Event::Drop(_) => true,
             Event::KeyDown(key) => matches!(key.key_code, KeyCode::ReturnKey | KeyCode::Tab | KeyCode::Backspace | KeyCode::Delete)
-                || ((key.modifiers.control || key.modifiers.logo)
+                || (key.modifiers.is_primary()
                     && matches!(key.key_code, KeyCode::KeyZ | KeyCode::KeyY | KeyCode::KeyX | KeyCode::KeyV)),
             _ => false,
         }
@@ -1380,10 +1380,10 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyA,
-                modifiers: KeyModifiers { control, logo, .. },
+                modifiers,
                 ..
             }) => {
-                if control || logo {
+                if modifiers.is_primary() {
                     let ((cursor, affinity), _is_in_gutter) = self.pick(session, dvec2(0.0, 0.0));
                     session.set_selection(cursor, affinity, SelectionMode::All, NewGroup::Yes);
                     self.reset_cursor_blinker(cx);
@@ -1569,15 +1569,9 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
-                modifiers:
-                    KeyModifiers {
-                        control,
-                        logo,
-                        shift,
-                        ..
-                    },
+                modifiers,
                 ..
-            }) if (control || logo) && !shift && !self.is_read_only() => {
+            }) if modifiers.is_primary() && !modifiers.shift && !self.is_read_only() => {
                 if session.undo() {
                     cx.redraw_all();
                     actions.push(CodeEditorAction::TextDidChange);
@@ -1586,15 +1580,9 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
-                modifiers:
-                    KeyModifiers {
-                        control,
-                        logo,
-                        shift,
-                        ..
-                    },
+                modifiers,
                 ..
-            }) if (control || logo) && shift && !self.is_read_only() => {
+            }) if modifiers.is_primary() && modifiers.shift && !self.is_read_only() => {
                 if session.redo() {
                     self.redraw(cx);
                     actions.push(CodeEditorAction::TextDidChange);
@@ -1603,9 +1591,9 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyY,
-                modifiers: KeyModifiers { control: true, shift: false, alt: false, .. },
+                modifiers: modifiers @ KeyModifiers { shift: false, alt: false, .. },
                 ..
-            }) if !self.is_read_only() => {
+            }) if modifiers.is_primary() && !self.is_read_only() => {
                 if session.redo() {
                     self.redraw(cx);
                     actions.push(CodeEditorAction::TextDidChange);

@@ -487,7 +487,7 @@ pub fn sends_char_on_keydown(key_code: KeyCode) -> bool {
 /// without a display server and its clipboard is private to the process.
 pub fn page_takes_key_down(key_event: &KeyEvent, pasted_text: &mut bool) -> bool {
     let modifiers = &key_event.modifiers;
-    if !(modifiers.control || modifiers.logo) || modifiers.alt {
+    if !modifiers.is_primary() || modifiers.alt {
         return true;
     }
     match key_event.key_code {
@@ -544,4 +544,23 @@ pub fn key_event_modifiers(key_event: &KeyEvent) -> u32 {
         modifiers |= EVENTFLAG_IS_KEY_PAD;
     }
     modifiers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_platforms_own_clipboard_chords_stay_out_of_the_page() {
+        let primary = KeyModifiers::primary();
+        let other = KeyModifiers { logo: primary.control, control: primary.logo, ..Default::default() };
+        let press = |key_code, modifiers| KeyEvent { key_code, modifiers, ..Default::default() };
+        let mut pasted = true;
+        for key_code in [KeyCode::KeyC, KeyCode::KeyX] {
+            assert!(!page_takes_key_down(&press(key_code, primary), &mut pasted));
+            assert!(page_takes_key_down(&press(key_code, other), &mut pasted));
+        }
+        assert!(page_takes_key_down(&press(KeyCode::KeyV, other), &mut pasted));
+        assert!(pasted);
+    }
 }

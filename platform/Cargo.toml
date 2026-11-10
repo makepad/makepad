@@ -57,6 +57,7 @@ makepad-gpu-trace = { path = "../libs/gpu_trace", version = "1.0.0" }
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "1.0.0", optional = true }
 
 [target.wasm32-unknown-unknown.dependencies]
+makepad-key-code = { path = "key_code", version = "0.1.0" }
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "1.0.0" }
 
 [target.aarch64-apple-darwin.dependencies]
