@@ -20,6 +20,9 @@ extern "C" {
     fn AChoreographer_getInstance() -> *mut c_void;
     fn AChoreographer_postFrameCallback(choreographer: *mut c_void, callback: unsafe extern "C" fn(c_long, *mut c_void), data: *mut c_void);
 }
+extern "C" {
+    fn _exit(status: std::ffi::c_int) -> !;
+}
 
 pub(super) fn request_frame() {
     // an XR session paces frames itself (xrWaitFrame)
@@ -105,6 +108,9 @@ unsafe fn void(env: *mut JNIEnv, object: jobject, name: &CStr, sig: &CStr, args:
     ((**env).ExceptionCheck.unwrap())(env) == 0
 }
 
+/// The app's Android state, which gets each new Activity (a global reference it keeps). The host
+/// sets it before the first Activity exists.
+pub(super) static ACTIVITY_READY: std::sync::OnceLock<unsafe fn(jobject)> = std::sync::OnceLock::new();
 unsafe extern "system" fn create(env: *mut JNIEnv, _: jclass, activity: jobject) {
     let mut vm = std::ptr::null_mut();
     ((**env).GetJavaVM.unwrap())(env, &mut vm);
@@ -113,6 +119,7 @@ unsafe extern "system" fn create(env: *mut JNIEnv, _: jclass, activity: jobject)
     if new.is_null() { return; }
     let old = std::mem::replace(&mut *lock(&ACTIVITY), new as usize);
     if old != 0 { ((**env).DeleteGlobalRef.unwrap())(env, old as _); }
+    if let Some(ready) = ACTIVITY_READY.get() { ready(((**env).NewGlobalRef.unwrap())(env, activity)); }
     emit_lifecycle(lifecycle::FOREGROUND);
 }
 fn emit_lifecycle(kind: u32) { Shared::global().emit(clock_ns(), |q, _| q.lifecycle(kind)); }
@@ -131,11 +138,14 @@ unsafe extern "system" fn stop(_: *mut JNIEnv, _: jclass) {
     if !super::xr::active() { lock(&Shared::global().state).active = false; }
     emit_lifecycle(lifecycle::BACKGROUND);
 }
+/// How many Activities were destroyed for good (not recreated for a config change).
+pub(super) static ACTIVITIES_DESTROYED: AtomicUsize = AtomicUsize::new(0);
 unsafe extern "system" fn destroy(env: *mut JNIEnv, _: jclass) {
     lock(&Shared::global().state).active = false;
     surface_destroyed(env, std::ptr::null_mut(), std::ptr::null_mut());
     let old = std::mem::take(&mut *lock(&ACTIVITY));
     if old != 0 { ((**env).DeleteGlobalRef.unwrap())(env, old as _); }
+    ACTIVITIES_DESTROYED.fetch_add(1, Ordering::AcqRel);
     emit_lifecycle(lifecycle::DESTROYED);
 }
 unsafe extern "system" fn focus(_: *mut JNIEnv, _: jclass, on: jboolean) {
@@ -350,6 +360,22 @@ pub(super) fn with_activity<R>(f: impl FnOnce(*mut JNIEnv, jobject) -> R) -> Opt
         };
         out
     }).flatten()
+}
+
+/// Ends the process once the app returned. If an Activity was destroyed since the app started (`destroyed`
+/// is the count then) and the one here now never drew, it came as the app closed, so it starts again.
+pub(super) fn end_process(destroyed: usize) -> ! {
+    // Held through `_exit`, so an Activity created from here on waits in `create` and dies before
+    // it resumes, and the system starts it again in a new process.
+    let current = lock(&ACTIVITY);
+    if *current != 0 && ACTIVITIES_DESTROYED.load(Ordering::Acquire) != destroyed && SURFACE_COVERED.load(Ordering::Acquire) {
+        let activity = *current as jobject;
+        on_java(|env| unsafe {
+            void(env, activity, c"restartTaskInNewProcess", c"()V", &[]);
+            if ((**env).ExceptionCheck.unwrap())(env) != 0 { ((**env).ExceptionDescribe.unwrap())(env); ((**env).ExceptionClear.unwrap())(env); }
+        });
+    }
+    unsafe { _exit(0) }
 }
 
 pub(super) fn ime_command(cmd: OsCmd) -> bool {
