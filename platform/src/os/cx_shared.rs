@@ -93,7 +93,7 @@ impl Cx {
 
     /// When a loop that paints on display ticks should ask for the tick the next `time_fps` frame lands on.
     /// That's the tick before the one nearest its due, on the grid `interval` apart through `last_tick`.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
     pub(crate) fn time_repaint_tick_wake(&self, last_tick: f64, interval: f64) -> Option<f64> {
         let due = self.time_repaint_at()?;
         if !(interval > 0.0 && interval.is_finite()) {
@@ -108,13 +108,6 @@ impl Cx {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn time_repaint_request_at(&self, frame_interval: f64) -> Option<f64> {
         self.time_repaint_at().map(|due| due - time_fps_tolerance(frame_interval))
-    }
-
-    /// Whether a repaint at `frame_time` paints a `time_fps` frame, for loops that skip repaints with nothing dirty.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn is_time_repaint_due(&self, frame_time: f64, frame_interval: f64) -> bool {
-        let tolerance = time_fps_tolerance(frame_interval);
-        self.time_fps_clock.next_due.is_some_and(|due| frame_time >= due - tolerance)
     }
 
     /// The window a pass ultimately presents into (through any chain of

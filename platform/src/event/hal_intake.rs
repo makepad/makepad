@@ -861,9 +861,15 @@ impl Cx {
                         self.hal.xr_beat = true;
                         // the headset's frame comes right before this and is stamped on the same clock
                         self.hal.frame_interval = next_ns.saturating_sub(xr.display_ns) as f64 / 1e9;
-                    } else if next_ns > time_ns && self.hal_info_flags() & makepad_hal::info_flags::DIRECT_DISPLAY == 0 {
-                        // a direct display's `next_ns` is only its next vblank, so there we stay at 0 and wait for the due
-                        self.hal.frame_interval = (next_ns - time_ns) as f64 / 1e9;
+                    } else {
+                        let flags = self.hal_info_flags();
+                        if flags & makepad_hal::info_flags::DISPLAY_CLOCK != 0 {
+                            self.hal.frame_tick = Some(time);
+                        }
+                        if next_ns > time_ns && flags & makepad_hal::info_flags::DIRECT_DISPLAY == 0 {
+                            // a direct display's `next_ns` is only its next vblank, so there we stay at 0 and wait for the due
+                            self.hal.frame_interval = (next_ns - time_ns) as f64 / 1e9;
+                        }
                     }
                     if let Some(w) = self.hal.windows.get_mut(&window_id.0) {
                         w.paced = true;

@@ -191,20 +191,32 @@ impl Cx {
             || self.hal_time_repaint_due()
     }
 
-    /// Whether the next `time_fps` frame may paint by now, which is when we ask for it: a display
-    /// answers on its next tick, the one nearest the frame's due, and other backends answer at once.
+    /// Whether it's time to ask for the next `time_fps` frame: a display answers on its next tick,
+    /// the one nearest the frame's due, and other backends answer at once.
     fn hal_time_repaint_due(&self) -> bool {
-        !self.hal.surface_lost && self.is_time_repaint_due(self.hal_now(), self.hal.frame_interval)
+        !self.hal.surface_lost && self.hal_time_repaint_ask_at().is_some_and(|at| self.hal_now() >= at)
     }
 
-    /// How long the loop can sleep before the next `time_fps` frame may paint, or `None` when
+    /// How long the loop can sleep before it asks for the next `time_fps` frame, or `None` when
     /// no frame is coming or none can paint (a hosted child that's held, a lost GPU or surface).
     fn hal_time_repaint_wait_ns(&self) -> Option<u64> {
         if self.hal.device_lost || self.hal.surface_lost || self.hosted_frames_held() {
             return None;
         }
-        let at = self.time_repaint_request_at(self.hal.frame_interval)?;
+        let at = self.hal_time_repaint_ask_at()?;
         Some(((at - self.hal_now()).max(0.0) * 1e9).ceil() as u64)
+    }
+
+    /// When we ask for the next `time_fps` frame: the first moment it may paint, half a tick before its due.
+    fn hal_time_repaint_ask_at(&self) -> Option<f64> {
+        let interval = self.hal.frame_interval;
+        // Android's Choreographer takes a request through the main thread's looper to SurfaceFlinger, which can
+        // take longer than half a tick, so there we ask a quarter tick after the tick before the one it lands on.
+        #[cfg(target_os = "android")]
+        if self.hal_info_flags() & info_flags::DISPLAY_CLOCK != 0 {
+            return self.time_repaint_tick_wake(self.time_fps_clock.frame_time, interval).map(|at| at + interval * 0.25);
+        }
+        self.time_repaint_request_at(interval)
     }
 
     fn hal_run(&mut self) {
@@ -610,6 +622,9 @@ impl Cx {
 
     /// Visible frame work: hidden hosted children keep callbacks and dirty passes pending.
     fn hal_draw_frame(&mut self) -> bool {
+        // `time_fps` frames go by the tick that started the beat, not when it runs, which keeps their dues on
+        // the display's ticks and a late beat from painting one a tick early (the virtual clock has no ticks).
+        let tick = self.hal.frame_tick.take().filter(|_| !crate::remote::app_clock::enabled());
         // the GPU device is lost: nothing is drawn until the HAL's DeviceReset (dirty passes
         // stay dirty and paint then)
         if self.hal.device_lost {
@@ -710,7 +725,7 @@ impl Cx {
         });
         let mut fb = std::mem::take(&mut self.hal.frames);
         let mut passes = Vec::new();
-        self.compute_pass_repaint_order(&mut passes, time_now, self.hal.frame_interval);
+        self.compute_pass_repaint_order(&mut passes, tick.unwrap_or(time_now), self.hal.frame_interval);
         if !passes.is_empty() {
             self.repaint_id += 1;
             fb.stats.repaints += 1;
