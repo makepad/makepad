@@ -18,6 +18,7 @@ mod program;
 mod render;
 pub mod surface;
 mod sys;
+mod timer;
 
 use super::exec::{self, Gpu, PipeStatus};
 use super::{Backend, Pixels};
@@ -161,7 +162,8 @@ impl GlBackend {
     pub(crate) fn with_source(wake: Arc<dyn Fn() + Send + Sync>, source: Box<dyn surface::EglSurfaceSource>, shell: Option<ShellRef>) -> Result<Self, String> {
         let mailbox = Mailbox::new(wake);
         let (queue, caps, thread) = render::start(source, mailbox.clone())?;
-        let mut info = HalInfo { backend: backend_id::GL, dialect: dialect::GLSL, formats: caps.formats, msaa: 1, dpi: 1.0, flags: 0,
+        let mut info = HalInfo { backend: backend_id::GL, dialect: dialect::GLSL, formats: caps.formats, msaa: 1, dpi: 1.0,
+            flags: if caps.gpu_timer { info_flags::GPU_TIMESTAMPS } else { 0 },
             max_texture: caps.max_texture, max_window: [caps.max_texture; 2],
             device_kind: if caps.software { device_kind::SOFTWARE } else { device_kind::UNKNOWN }, ..Default::default() };
         info.set_device_name(&caps.renderer);
@@ -237,16 +239,19 @@ impl GlBackend {
             let sid = done.token.sid;
             if !world.session(sid).is_some_and(|s| Arc::ptr_eq(&s.font_frames, &done.token.incarnation)) { continue; }
             match done.event {
-                Event::Frame { target, kind, frame, window } => {
-                    if let Some(s) = world.session_mut(sid) { s.stats.frames += 1; }
+                Event::Frame { target, kind, frame, window, gpu_ns } => {
+                    if let Some(s) = world.session_mut(sid) {
+                        s.stats.frames += 1;
+                        if gpu_ns > 0 { s.stats.gpu_frames += 1; s.stats.gpu_ns_total += gpu_ns; s.stats.gpu_ns_max = s.stats.gpu_ns_max.max(gpu_ns); }
+                    }
                     if window {
-                        world.window_presented(sid, target, frame, 0, done.time);
+                        world.window_presented(sid, target, frame, gpu_ns, done.time);
                         #[cfg(target_os = "linux")]
                         if let Some(shell) = self.shell { shell.presented(self.window_key(sid, target)); }
                         #[cfg(target_os = "android")]
                         super::android::jni::surface_presented();
                     }
-                    world.frame_done(sid, target, kind, frame, 0, done.time, [0.0; 2]);
+                    world.frame_done(sid, target, kind, frame, gpu_ns, done.time, [0.0; 2]);
                 }
                 Event::Readback { req, status, rect, pixels } => world.to_session(sid, |q| q.readback(req, status, rect, &pixels)),
                 Event::Pick { req, ids } => world.to_session(sid, |q| q.pick_result(req, &ids.into_iter().flat_map(u32::to_le_bytes).collect::<Vec<_>>())),

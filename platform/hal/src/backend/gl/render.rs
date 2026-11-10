@@ -56,6 +56,8 @@ pub(super) struct Caps {
     pub renderer: String,
     /// a software rasterizer: the default selection prefers hardware Vulkan and GL to it
     pub software: bool,
+    /// frames carry their GPU time (`timer.rs`)
+    pub gpu_timer: bool,
     /// the EGL display, config and context of the share group (the `GlShare` event)
     #[cfg(target_os = "linux")]
     pub share: [u64; 3],
@@ -68,7 +70,8 @@ pub(super) struct Token {
 }
 
 pub(super) enum Event {
-    Frame { target: Id, kind: u32, frame: u64, window: bool },
+    /// `gpu_ns`: 0 when the GPU time isn't known
+    Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64 },
     Readback { req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
     Pick { req: u32, ids: Vec<u32> },
 }
@@ -171,7 +174,7 @@ fn half(b: &[u8]) -> [u8; 2] {
 }
 
 pub(super) enum Then {
-    Frame { token: Token, target: Id, kind: u32, frame: u64, window: bool },
+    Frame { token: Token, target: Id, kind: u32, frame: u64, window: bool, timing: Option<(GLuint, u64)> },
     Read { token: Token, req: u32, rect: [u32; 4], read: ReadFormat, pbo: GLuint, pick: Option<[f32; 2]> },
     Copy { token: Token, req: u32, rect: [u32; 4] },
 }
@@ -217,6 +220,7 @@ pub(super) struct Renderer {
     urgent: Arc<Mutex<Vec<Job>>>,
     /// made at the first compile, once the app's cache dir is known
     pub cache: Option<super::cache::ProgramCache>,
+    pub timer: Option<super::timer::GpuTimer>,
     exit: bool,
 }
 
@@ -261,6 +265,7 @@ impl Renderer {
         if let Some(threads) = gl.glMaxShaderCompilerThreadsKHR.filter(|_| parallel_compile) {
             unsafe { threads(u32::MAX) }
         }
+        let timer = super::timer::GpuTimer::new(gl, &ext);
         let caps = Arc::new(Caps {
             formats,
             max_texture: gl.integer(sys::MAX_TEXTURE_SIZE).min(gl.integer(sys::MAX_RENDERBUFFER_SIZE)).max(2048) as u32,
@@ -272,6 +277,7 @@ impl Renderer {
             parallel_compile,
             renderer: format!("{} ({version})", gl.string(sys::RENDERER)),
             software: ctx.software(),
+            gpu_timer: timer.is_some(),
             #[cfg(target_os = "linux")]
             share: [ctx.share.display as u64, ctx.share.config as u64, ctx.share.context as u64],
         });
@@ -294,7 +300,7 @@ impl Renderer {
         }
         Ok(Self { ctx, caps, textures: HashMap::new(), buffers: HashMap::new(), programs: HashMap::new(), linking: Vec::new(),
             fbos: HashMap::new(), read_fbo: names[0], copy_fbo: names[1], fallback,
-            uniform_arena: names[2], instance_arena: names[3], arena_words: (0, 0), pending: VecDeque::new(), mailbox, #[cfg(target_os = "android")] urgent, cache: None, exit: false })
+            uniform_arena: names[2], instance_arena: names[3], arena_words: (0, 0), pending: VecDeque::new(), mailbox, #[cfg(target_os = "android")] urgent, cache: None, timer, exit: false })
     }
 
     pub fn exit(&mut self) {
@@ -357,9 +363,13 @@ impl Renderer {
     fn complete(&mut self, then: Then, failed: bool) {
         let gl = &self.ctx.gl;
         match then {
-            Then::Frame { token, target, kind, frame, window } => {
+            Then::Frame { token, target, kind, frame, window, timing } => {
+                let gpu_ns = match (timing, &mut self.timer) {
+                    (Some((query, began)), Some(timer)) if !failed => timer.read(gl, query, began),
+                    _ => 0,
+                };
                 token.incarnation.done(frame);
-                self.mailbox.push(token, Event::Frame { target, kind, frame, window });
+                self.mailbox.push(token, Event::Frame { target, kind, frame, window, gpu_ns });
             }
             Then::Copy { token, req, rect } => {
                 self.mailbox.push(token, Event::Readback { req, rect, status: if failed { readback::FAILED } else { readback::OK }, pixels: Vec::new() });
@@ -756,5 +766,6 @@ impl Drop for Renderer {
             for (fence, _) in self.pending.drain(..) { (gl.glDeleteSync)(fence) }
             (gl.glFinish)();
         }
+        if let Some(timer) = &mut self.timer { timer.delete(gl); }
     }
 }

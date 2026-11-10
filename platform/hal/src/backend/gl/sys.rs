@@ -18,6 +18,8 @@ macro_rules! gl_functions {
             $(pub $name: unsafe extern "C" fn($($arg),*) $(-> $ret)?,)*
             /// KHR_parallel_shader_compile: links finish on driver threads while frames render.
             pub glMaxShaderCompilerThreadsKHR: Option<unsafe extern "C" fn(GLuint)>,
+            /// EXT_disjoint_timer_query's 64-bit results: a frame's GPU time.
+            pub glGetQueryObjectui64vEXT: Option<unsafe extern "C" fn(GLuint, GLenum, *mut u64)>,
         }
         impl Gl {
             pub fn load(get: impl Fn(&CStr) -> *mut c_void) -> Result<Self, String> {
@@ -30,6 +32,10 @@ macro_rules! gl_functions {
                     glMaxShaderCompilerThreadsKHR: {
                         let f = get(c"glMaxShaderCompilerThreadsKHR");
                         (!f.is_null()).then(|| unsafe { std::mem::transmute::<*mut c_void, unsafe extern "C" fn(GLuint)>(f) })
+                    },
+                    glGetQueryObjectui64vEXT: {
+                        let f = get(c"glGetQueryObjectui64vEXT");
+                        (!f.is_null()).then(|| unsafe { std::mem::transmute::<*mut c_void, unsafe extern "C" fn(GLuint, GLenum, *mut u64)>(f) })
                     },
                 })
             }
@@ -126,6 +132,12 @@ gl_functions! {
     glCullFace(GLenum);
     glFrontFace(GLenum);
     glDrawElementsInstanced(GLenum, GLsizei, GLenum, *const c_void, GLsizei);
+    glGenQueries(GLsizei, *mut GLuint);
+    glDeleteQueries(GLsizei, *const GLuint);
+    glBeginQuery(GLenum, GLuint);
+    glEndQuery(GLenum);
+    glGetQueryiv(GLenum, GLenum, *mut GLint);
+    glGetQueryObjectuiv(GLuint, GLenum, *mut GLuint);
     glFlush();
     glFinish();
     glFenceSync(GLenum, GLbitfield) -> GLsync;
@@ -278,6 +290,12 @@ pub const DEPTH_STENCIL_ATTACHMENT: GLenum = 0x821A;
 pub const COLOR: GLenum = 0x1800;
 pub const DEPTH: GLenum = 0x1801;
 pub const COLOR_BUFFER_BIT: GLbitfield = 0x4000;
+// queries
+pub const TIME_ELAPSED_EXT: GLenum = 0x88BF;
+pub const QUERY_COUNTER_BITS_EXT: GLenum = 0x8864;
+pub const QUERY_RESULT: GLenum = 0x8866;
+pub const QUERY_RESULT_AVAILABLE: GLenum = 0x8867;
+pub const GPU_DISJOINT_EXT: GLenum = 0x8FBB;
 // sync
 pub const SYNC_GPU_COMMANDS_COMPLETE: GLenum = 0x9117;
 pub const SYNC_FLUSH_COMMANDS_BIT: GLbitfield = 0x0001;

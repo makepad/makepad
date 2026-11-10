@@ -451,6 +451,7 @@ fn draw_buffer_list(mask: u32) -> ([GLenum; 4], i32) {
 
 impl Renderer {
     pub fn run_frame(&mut self, job: FrameJob) {
+        let timing = self.timer.as_mut().and_then(|timer| timer.begin(&self.ctx.gl));
         let gl = &self.ctx.gl;
         unsafe {
             // fresh storage each frame: the driver keeps the previous frame's bytes for its draws
@@ -467,6 +468,8 @@ impl Renderer {
         for pass in &job.passes {
             if let Err(e) = self.run_pass(pass) { eprintln!("[hal-gl] pass: {e}"); }
         }
+        // the frame's own work, without the blit to the window and the swap
+        if let (Some(timer), Some(_)) = (&self.timer, timing) { timer.end(&self.ctx.gl); }
         let mut window = job.window;
         if let Some((key, image)) = &job.present {
             match self.present(*key, image.key) {
@@ -474,7 +477,7 @@ impl Renderer {
                 Err(e) => { eprintln!("[hal-gl] present: {e}"); window = false; }
             }
         }
-        self.after_gpu(Then::Frame { token: job.token, target: job.target, kind: job.kind, frame: job.frame, window });
+        self.after_gpu(Then::Frame { token: job.token, target: job.target, kind: job.kind, frame: job.frame, window, timing });
     }
 
     fn run_pass(&mut self, p: &PassJob) -> Result<(), String> {
