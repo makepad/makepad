@@ -2109,6 +2109,7 @@ impl Widget for View {
 
                 if let Some(scroll_bars) = &mut self.scroll_bars_obj {
                     scroll_bars.set_area(self.area);
+                    scroll_bars.draw_scroll_bars_outside_view(cx);
                     scroll_bars.end_nav_area(cx);
                 };
 
