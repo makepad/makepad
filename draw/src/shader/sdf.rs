@@ -273,21 +273,28 @@ script_mod! {
                 return self.fill_premul(vec4(color.rgb * color.a, color.a))
             }
 
-            stroke_keep: fn(color: vec4, width: float) -> vec4 {
+            stroke_keep_premul: fn(source: vec4, width: float) -> vec4 {
                 let f = self.calc_blur(abs(self.shape) - width / self.scale_factor);
-                let source = vec4(color.rgb * color.a, color.a);
                 let dest = self.result;
                 self.result = source * f + dest * (1.0 - source.a * f);
                 return self.result;
             }
 
-            stroke: fn(color: vec4, width: float) -> vec4 {
-                self.stroke_keep(color, width);
+            stroke_premul: fn(source: vec4, width: float) -> vec4 {
+                self.stroke_keep_premul(source, width);
                 self.old_shape = 1e+20;
                 self.shape = 1e+20;
                 self.clip = -1e+20;
                 self.has_clip = 0.;
                 return self.result;
+            }
+
+            stroke_keep: fn(color: vec4, width: float) -> vec4 {
+                return self.stroke_keep_premul(vec4(color.rgb * color.a, color.a), width)
+            }
+
+            stroke: fn(color: vec4, width: float) -> vec4 {
+                return self.stroke_premul(vec4(color.rgb * color.a, color.a), width)
             }
 
             glow_keep: fn(color: vec4, width: float) -> vec4 {

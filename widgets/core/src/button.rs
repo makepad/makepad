@@ -450,11 +450,13 @@ script_mod! {
                     self.rect_size.y / sz_inner_px.y
                 )
 
-                let mut color_fill = self.color
-                let mut color_fill_hover = self.color_hover
-                let mut color_fill_down = self.color_down
-                let mut color_fill_focus = self.color_focus
-                let mut color_fill_disabled = self.color_disabled
+                // We premultiply every color before mixing, so a fade to or from a transparent color
+                // doesn't pass through a darker, half-transparent version of the other one.
+                let mut color_fill = Pal.premul(self.color)
+                let mut color_fill_hover = Pal.premul(self.color_hover)
+                let mut color_fill_down = Pal.premul(self.color_down)
+                let mut color_fill_focus = Pal.premul(self.color_focus)
+                let mut color_fill_disabled = Pal.premul(self.color_disabled)
 
                 if self.color_2.x > -0.5 {
                     let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
@@ -463,11 +465,11 @@ script_mod! {
                         self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                     )
                     let dir = if self.gradient_fill_horizontal > 0.5 gradient_fill.x else gradient_fill.y
-                    color_fill = mix(self.color, self.color_2, dir)
-                    color_fill_hover = mix(self.color_hover, self.color_2_hover, dir)
-                    color_fill_down = mix(self.color_down, self.color_2_down, dir)
-                    color_fill_focus = mix(self.color_focus, self.color_2_focus, dir)
-                    color_fill_disabled = mix(self.color_disabled, self.color_2_disabled, dir)
+                    color_fill = mix(Pal.premul(self.color), Pal.premul(self.color_2), dir)
+                    color_fill_hover = mix(Pal.premul(self.color_hover), Pal.premul(self.color_2_hover), dir)
+                    color_fill_down = mix(Pal.premul(self.color_down), Pal.premul(self.color_2_down), dir)
+                    color_fill_focus = mix(Pal.premul(self.color_focus), Pal.premul(self.color_2_focus), dir)
+                    color_fill_disabled = mix(Pal.premul(self.color_disabled), Pal.premul(self.color_2_disabled), dir)
                 }
 
                 let mut fill = color_fill
@@ -475,6 +477,10 @@ script_mod! {
                     .mix(color_fill_hover, self.hover)
                     .mix(color_fill_down, self.down)
                     .mix(color_fill_disabled, self.disabled)
+
+                // The state layer below and every caller want straight alpha, so we convert back here.
+                // Dither can push a gradient's alpha below zero, which they'd multiply into bright specks.
+                fill = vec4(fill.rgb / max(fill.a, 0.0001), max(fill.a, 0.0))
 
                 if self.layer_color.x > -0.5 && self.material < 0.5 {
                     // The state layer composites over the fill with straight
@@ -489,11 +495,11 @@ script_mod! {
 
             /** the bevel stroke for the current state, dashed when border_dash is set */
             face_stroke: fn() -> vec4 {
-                let mut color_stroke = self.border_color
-                let mut color_stroke_hover = self.border_color_hover
-                let mut color_stroke_down = self.border_color_down
-                let mut color_stroke_focus = self.border_color_focus
-                let mut color_stroke_disabled = self.border_color_disabled
+                let mut color_stroke = Pal.premul(self.border_color)
+                let mut color_stroke_hover = Pal.premul(self.border_color_hover)
+                let mut color_stroke_down = Pal.premul(self.border_color_down)
+                let mut color_stroke_focus = Pal.premul(self.border_color_focus)
+                let mut color_stroke_disabled = Pal.premul(self.border_color_disabled)
 
                 if self.border_color_2.x > -0.5 {
                     let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
@@ -502,11 +508,11 @@ script_mod! {
                         self.pos.y + dither
                     )
                     let dir = if self.gradient_border_horizontal > 0.5 gradient_border.x else gradient_border.y
-                    color_stroke = mix(self.border_color, self.border_color_2, dir)
-                    color_stroke_hover = mix(self.border_color_hover, self.border_color_2_hover, dir)
-                    color_stroke_down = mix(self.border_color_down, self.border_color_2_down, dir)
-                    color_stroke_focus = mix(self.border_color_focus, self.border_color_2_focus, dir)
-                    color_stroke_disabled = mix(self.border_color_disabled, self.border_color_2_disabled, dir)
+                    color_stroke = mix(Pal.premul(self.border_color), Pal.premul(self.border_color_2), dir)
+                    color_stroke_hover = mix(Pal.premul(self.border_color_hover), Pal.premul(self.border_color_2_hover), dir)
+                    color_stroke_down = mix(Pal.premul(self.border_color_down), Pal.premul(self.border_color_2_down), dir)
+                    color_stroke_focus = mix(Pal.premul(self.border_color_focus), Pal.premul(self.border_color_2_focus), dir)
+                    color_stroke_disabled = mix(Pal.premul(self.border_color_disabled), Pal.premul(self.border_color_2_disabled), dir)
                 }
 
                 let mut stroke = color_stroke
@@ -514,6 +520,7 @@ script_mod! {
                     .mix(color_stroke_hover, self.hover)
                     .mix(color_stroke_down, self.down)
                     .mix(color_stroke_disabled, self.disabled)
+                stroke = vec4(stroke.rgb / max(stroke.a, 0.0001), max(stroke.a, 0.0))
 
                 if self.border_dash > 0.0 {
                     // Dashes along x + y: regular on every straight edge.
