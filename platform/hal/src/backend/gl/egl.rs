@@ -310,6 +310,13 @@ impl Context {
         for key in keys { self.close(key); }
     }
 
+    /// Lets go of every native window, before Android's `surfaceDestroyed` returns.
+    #[cfg(target_os = "android")]
+    pub fn close_all(&mut self) {
+        let keys: Vec<_> = self.windows.keys().copied().collect();
+        for key in keys { self.close(key); }
+    }
+
     /// Blits the whole finished image (`framebuffer`, rows top first) into the window's surface
     /// and swaps. Ok(false): the window has no drawable surface now (closed, zero sized).
     pub fn present(&mut self, key: (u32, Id), framebuffer: u32, size: [u32; 2]) -> Result<bool, String> {

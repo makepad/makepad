@@ -19,12 +19,25 @@ pub(super) type Job = Box<dyn FnOnce(&mut Renderer) + Send>;
 
 /// The HAL side's handle to the render thread.
 #[derive(Clone)]
-pub(super) struct Queue(mpsc::Sender<Job>);
+pub(super) struct Queue {
+    jobs: mpsc::Sender<Job>,
+    /// jobs that run before the ones queued ahead of them, as soon as the running one ends
+    #[cfg(target_os = "android")]
+    urgent: Arc<Mutex<Vec<Job>>>,
+}
 
 impl Queue {
     pub fn push(&self, job: impl FnOnce(&mut Renderer) + Send + 'static) {
         // after the backend is gone the context and all its objects are gone with the thread
-        let _ = self.0.send(Box::new(job));
+        let _ = self.jobs.send(Box::new(job));
+    }
+
+    /// For a job that can't wait behind queued work (Android's surfaceDestroyed): it must not
+    /// depend on anything queued before it.
+    #[cfg(target_os = "android")]
+    pub fn push_urgent(&self, job: impl FnOnce(&mut Renderer) + Send + 'static) {
+        self.urgent.lock().unwrap_or_else(|e| e.into_inner()).push(Box::new(job));
+        self.push(|_| {});
     }
 }
 
@@ -200,14 +213,19 @@ pub(super) struct Renderer {
     pub arena_words: (GLuint, u32),
     pending: VecDeque<(GLsync, Then)>,
     pub mailbox: Mailbox,
+    #[cfg(target_os = "android")]
+    urgent: Arc<Mutex<Vec<Job>>>,
     exit: bool,
 }
 
 pub(super) fn start(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox) -> Result<(Queue, Arc<Caps>, std::thread::JoinHandle<()>), String> {
     let (tx, rx) = mpsc::channel::<Job>();
+    let queue = Queue { jobs: tx, #[cfg(target_os = "android")] urgent: Arc::new(Mutex::new(Vec::new())) };
+    #[cfg(target_os = "android")]
+    let urgent = queue.urgent.clone();
     let (ready, made) = mpsc::sync_channel(1);
     let thread = std::thread::Builder::new().name("makepad-gl-render".into()).spawn(move || {
-        match Renderer::new(source, mailbox) {
+        match Renderer::new(source, mailbox, #[cfg(target_os = "android")] urgent) {
             Ok(r) => {
                 let _ = ready.send(Ok(r.caps.clone()));
                 r.run(rx);
@@ -216,14 +234,14 @@ pub(super) fn start(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox) -> Resu
         }
     }).map_err(|e| format!("render thread: {e}"))?;
     match made.recv() {
-        Ok(Ok(caps)) => Ok((Queue(tx), caps, thread)),
+        Ok(Ok(caps)) => Ok((queue, caps, thread)),
         Ok(Err(e)) => { let _ = thread.join(); Err(e) }
         Err(_) => { let _ = thread.join(); Err("the GL render thread ended during startup".into()) }
     }
 }
 
 impl Renderer {
-    fn new(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox) -> Result<Self, String> {
+    fn new(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox, #[cfg(target_os = "android")] urgent: Arc<Mutex<Vec<Job>>>) -> Result<Self, String> {
         let ctx = Context::new(source)?;
         let gl = &ctx.gl;
         let version = gl.string(sys::VERSION);
@@ -274,7 +292,7 @@ impl Renderer {
         }
         Ok(Self { ctx, caps, textures: HashMap::new(), buffers: HashMap::new(), programs: HashMap::new(), linking: Vec::new(),
             fbos: HashMap::new(), read_fbo: names[0], copy_fbo: names[1], fallback,
-            uniform_arena: names[2], instance_arena: names[3], arena_words: (0, 0), pending: VecDeque::new(), mailbox, exit: false })
+            uniform_arena: names[2], instance_arena: names[3], arena_words: (0, 0), pending: VecDeque::new(), mailbox, #[cfg(target_os = "android")] urgent, exit: false })
     }
 
     pub fn exit(&mut self) {
@@ -283,6 +301,11 @@ impl Renderer {
 
     fn run(mut self, rx: Receiver<Job>) {
         loop {
+            #[cfg(target_os = "android")]
+            {
+                let urgent = std::mem::take(&mut *self.urgent.lock().unwrap_or_else(|e| e.into_inner()));
+                for job in urgent { job(&mut self); }
+            }
             let next = match rx.try_recv() {
                 Ok(job) => Some(job),
                 Err(TryRecvError::Disconnected) => break,

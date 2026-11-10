@@ -175,6 +175,20 @@ impl GlBackend {
         self.caps.software
     }
 
+    /// What Android's `surfaceDestroyed` calls: the render thread lets go of every window
+    /// surface before it returns, as Android asks, or after a second at most.
+    #[cfg(target_os = "android")]
+    pub fn window_release(&self) -> Box<dyn Fn() + Send + Sync> {
+        let queue = self.queue.clone();
+        Box::new(move || {
+            let (done, released) = std::sync::mpsc::sync_channel(1);
+            queue.push_urgent(move |r| { r.ctx.close_all(); let _ = done.send(()); });
+            if released.recv_timeout(std::time::Duration::from_secs(1)).is_err() {
+                eprintln!("[hal-gl] the render thread didn't let go of the window within a second");
+            }
+        })
+    }
+
     fn token(s: &Session) -> Token {
         Token { sid: s.id, incarnation: s.font_frames.clone() }
     }

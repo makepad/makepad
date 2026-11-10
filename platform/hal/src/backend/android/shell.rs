@@ -42,13 +42,16 @@ pub(super) struct State {
 pub(super) struct Shared {
     pub registry: Mutex<Registry>,
     pub state: Mutex<State>,
+    /// Lets go of the Activity's window before `surfaceDestroyed` returns (the GLES core's
+    /// EGL surfaces; Vulkan's swapchains keep a lease and fail their next present instead).
+    pub release_window: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 impl Shared {
     pub fn global() -> &'static Self {
         static VALUE: OnceLock<Shared> = OnceLock::new();
         VALUE.get_or_init(|| Self { registry: Mutex::new(Registry::default()), state: Mutex::new(State {
             recipient: None, ime_session: None, events: Vec::new(), params: AndroidParams::default(), refresh: 60., insets: [0.; 4], pending: HashSet::new(), active: false, focused: false, physical_keyboard: None, ime: None, wake: None, xr: None,
-        }) })
+        }), release_window: Mutex::new(None) })
     }
     pub fn dpi(&self) -> f32 { let s = lock(&self.state); s.xr.map_or(s.params.density, |(_, dpi)| dpi) }
     pub fn emit(&self, time: u64, f: impl FnOnce(&mut EventQueue, Id)) {
@@ -201,6 +204,7 @@ impl AndroidBackend {
         let offscreen = flags & open_flags::OFFSCREEN_WINDOWS != 0;
         let shell: Option<Box<dyn Shell>> = if offscreen { None } else { Some(Box::new(AndroidShell)) };
         let core = GlBackend::with_source(wake, Box::new(AndroidEglSurfaces { offscreen }), shell)?;
+        if !offscreen { *lock(&Shared::global().release_window) = Some(core.window_release()); }
         lock(&Shared::global().state).wake = Some(notify);
         Ok(Self { core: Box::new(core), host: None, offscreen })
     }
