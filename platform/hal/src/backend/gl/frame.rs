@@ -359,7 +359,13 @@ impl GlBackend {
         for i in 0..program.code.textures.len() {
             let id = id_at(arena, d.tex, i);
             if id.is_none() { textures.push(None); continue; }
-            let tex = self.resolve(s, id).ok_or("missing sampled texture")?;
+            let tex = match self.resolve(s, id) {
+                Some(tex) => tex,
+                // a video or camera target before its first frame samples the fallback, as on
+                // Vulkan and Metal: failing the draw blanked the whole video
+                None if s.textures.get(s.id, id).is_ok_and(|t| t.val.imported && t.val.lent.is_none()) => { textures.push(None); continue; }
+                None => return Err("missing sampled texture".into()),
+            };
             if attached(&tex) { return Err("a texture sampled by the pass it renders into".into()); }
             s.ledger.touch(Kind::Texture, id.index, id.gen, s.frame, now);
             textures.push(Some(tex));
