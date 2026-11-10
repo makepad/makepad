@@ -1,19 +1,23 @@
+use super::shell::{lock, Shared};
 use super::xr::sys::ModuleLoader;
 use std::ffi::c_void;
 use std::time::Duration;
 
 type GetManagerFn = unsafe extern "C" fn() -> *mut c_void;
 type CreateSessionFn = unsafe extern "C" fn(*mut c_void, *const i32, usize, i64) -> *mut c_void;
+type UpdateTargetFn = unsafe extern "C" fn(*mut c_void, i64) -> i32;
 type ReportActualFn = unsafe extern "C" fn(*mut c_void, i64) -> i32;
 type CloseSessionFn = unsafe extern "C" fn(*mut c_void);
 
 /// A performance hint session (ADPF, API 33+) for the thread that draws. Each cycle that drew a frame reports
-/// its CPU time against the beat period, so Android can raise clocks or move the thread to a bigger core in time.
+/// its CPU time against the time a frame has, so Android can raise clocks or move the thread to a bigger core in time.
 pub struct PerformanceHint {
     session: *mut c_void,
+    update_target: UpdateTargetFn,
     report_actual: ReportActualFn,
     close_session: CloseSessionFn,
     _lib: ModuleLoader,
+    target: Duration,
     cycle_start: Option<Duration>,
     beat: Option<(u64, Duration)>,
 }
@@ -28,6 +32,7 @@ impl PerformanceHint {
         let lib = ModuleLoader::load("libandroid.so").ok()?;
         let get_manager: GetManagerFn = lib.get_symbol("APerformanceHint_getManager").ok()?;
         let create_session: CreateSessionFn = lib.get_symbol("APerformanceHint_createSession").ok()?;
+        let update_target = lib.get_symbol("APerformanceHint_updateTargetWorkDuration").ok()?;
         let report_actual = lib.get_symbol("APerformanceHint_reportActualWorkDuration").ok()?;
         let close_session = lib.get_symbol("APerformanceHint_closeSession").ok()?;
         let session = unsafe {
@@ -42,9 +47,11 @@ impl PerformanceHint {
         }
         Some(Self {
             session,
+            update_target,
             report_actual,
             close_session,
             _lib: lib,
+            target: beat_period,
             cycle_start: None,
             beat: None,
         })
@@ -52,7 +59,17 @@ impl PerformanceHint {
 
     /// Called on each beat, before its drawing, with the app's `repaint_id`. A beat after a pause starts a new
     /// cycle, since the pause isn't part of a frame's work.
-    pub fn start_frame(&mut self, repaint_id: u64, after_pause: bool) {
+    pub fn start_frame(&mut self, repaint_id: u64, after_pause: bool, display_paced: bool) {
+        // a frame paced by the display has its frame interval, which a switch to 120 Hz halves
+        if display_paced {
+            let refresh = lock(&Shared::global().state).refresh as f64;
+            if let Ok(target) = Duration::try_from_secs_f64(1.0 / refresh) {
+                if target.abs_diff(self.target) > self.target / 20 {
+                    self.target = target;
+                    unsafe { (self.update_target)(self.session, target.as_nanos() as i64) };
+                }
+            }
+        }
         let cycle_start = match self.cycle_start {
             Some(start) if !after_pause => start,
             _ => thread_cpu_time(),

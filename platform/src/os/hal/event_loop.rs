@@ -372,7 +372,7 @@ impl Cx {
                 if let Some(hint) = performance_hint.as_mut() {
                     match self.hal.xr {
                         Some(_) => hint.skip_frame(),
-                        None => hint.start_frame(self.repaint_id, after_pause),
+                        None => hint.start_frame(self.repaint_id, after_pause, display_clock),
                     }
                 }
                 if !self.hal_guarded(true, |cx| cx.hal_beat()) {
