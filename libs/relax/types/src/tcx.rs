@@ -264,6 +264,9 @@ pub struct Tcx {
     /// async blocks / async fn bodies (file, expr; an async fn body is ASYNC_FN_BODY | block):
     /// closure types that are coroutines -- they implement Future<Output = sig's return>; their
     /// storage record holds the state word and is extended by saved locals (coro_frames).
+    /// Whoever makes such a type marks it here first: the type check of the body that holds the
+    /// block, and the code cache for a type it decodes (cache.rs dec_ty), whose body this run may
+    /// never check.
     pub coroutines: crate::conc::MemoMap<(u32, u32), ()>,
     /// `mir_coroutine_witnesses` reduced to what dropck asks (whether any local live across a suspension
     /// point needs drop), per coroutine (file, expr), set when borrowck has built the coroutine's MIR.
