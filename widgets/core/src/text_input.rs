@@ -3395,7 +3395,7 @@ impl Widget for TextInput {
                     && ScrollDirection::from_travel(fe.abs - fe.abs_start).is_none()
                 {
                     self.reset_blink_timer(cx);
-                    self.set_key_focus(cx);
+                    cx.set_key_focus_from_user(self.draw_bg.area());
                     let rel = fe.abs - self.text_area.rect(cx).pos;
                     if let Ok(cursor) = self.point_in_lpxs_to_cursor(Point::new(rel.x as f32, rel.y as f32)) {
                         self.set_cursor(cx, cursor, false);
@@ -3456,7 +3456,7 @@ impl Widget for TextInput {
                 self.touch_press = None;
                 cx.claim_finger_drag(lp.digit_id);
                 self.reset_blink_timer(cx);
-                self.set_key_focus(cx);
+                cx.set_key_focus_from_user(self.draw_bg.area());
 
                 // Select word at long press position
                 let rel = lp.abs - self.text_area.rect(cx).pos;
