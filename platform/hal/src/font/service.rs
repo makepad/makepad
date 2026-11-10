@@ -69,6 +69,8 @@ pub struct FontStats {
     pub shrinks: u64,
     /// glyphs that could not be placed even in an empty atlas (delivered as empty)
     pub oversized: u64,
+    /// glyphs answered `NO_ROOM`, since the glyphs on screen filled the atlas
+    pub no_room: u64,
     pub bad: u64,
     /// bytes of the host's atlas textures, slots / glyphs in them
     pub raster_bytes: u64,
@@ -742,6 +744,7 @@ impl FontService {
                     Place::Deferred(ImageData::Sdf(pixels)) => return Some(Payload::Sdf { key, pixels: Work::Rendered(pixels), padding, origin, dpxs, msdf }),
                     Place::Deferred(ImageData::Pixels(_)) => unreachable!("SDF placement retains SDF pixels"),
                     Place::None => {}
+                    Place::NoRoom => entry.atlas_kind = glyph::NO_ROOM,
                     Place::Slot(slot) => {
                         self.fill_raster_entry(&mut entry, slot, origin, dpxs);
                         if let Some((mkey, outline, mdpxs)) = msdf {
@@ -756,6 +759,7 @@ impl FontService {
                     Place::Deferred(ImageData::Pixels(pixels)) => return Some(Payload::Color { key, pixels: Work::Rendered(pixels), padding, origin, dpxs }),
                     Place::Deferred(ImageData::Sdf(_)) => unreachable!("color placement retains color pixels"),
                     Place::None => {}
+                    Place::NoRoom => entry.atlas_kind = glyph::NO_ROOM,
                     Place::Slot(slot) => self.fill_raster_entry(&mut entry, slot, origin, dpxs),
                 }
             }
@@ -847,6 +851,10 @@ impl FontService {
                 return Place::Deferred(image);
             }
             if !self.make_raster_room(gpu, world, true) {
+                if self.raster.as_ref().is_some_and(|a| a.len() > 0) {
+                    self.stats.no_room += 1;
+                    return Place::NoRoom;
+                }
                 self.stats.oversized += 1;
                 return Place::None;
             }
@@ -910,18 +918,19 @@ impl FontService {
     }
 
     /// Makes room in a full raster atlas: slots no session holds go first, then it grows (if
-    /// `grow`), and only then are slots a session still draws taken back. False when none of it can.
+    /// `grow`), then held slots nobody drew since the last touch. False when only glyphs on
+    /// screen are left: taking one back would just bring it back in place of another.
     fn make_raster_room(&mut self, gpu: &mut dyn Gpu, world: &mut World, grow: bool) -> bool {
-        self.evict_raster(world, false) || (grow && self.grow_raster(gpu, world)) || self.evict_raster(world, true)
+        self.evict_raster(world, 0) || (grow && self.grow_raster(gpu, world)) || self.evict_raster(world, self.tick)
     }
 
-    /// Takes back a quarter of the raster atlas's base size, or less when only slots no session
-    /// holds may go (`held` false); false when there's nothing to take.
-    fn evict_raster(&mut self, world: &mut World, held: bool) -> bool {
+    /// Takes back up to a quarter of the raster atlas's base size: slots no session holds, and
+    /// held ones last used before `below` (0: none). False when there's nothing to take.
+    fn evict_raster(&mut self, world: &mut World, below: u64) -> bool {
         let fence = RetireFence::capture(world, &self.closed_frames);
         let base = self.settings.atlas_size;
         let Some(a) = self.raster.as_mut() else { return false };
-        let taken = a.evict(((base.width * base.height * 4) as f32 * EVICT_FRACTION) as usize, held, fence);
+        let taken = a.evict(((base.width * base.height * 4) as f32 * EVICT_FRACTION) as usize, below, fence);
         if taken.is_empty() {
             return false;
         }
@@ -1037,7 +1046,8 @@ impl FontService {
             if a.has_retired() {
                 return Some(Payload::Msdf { key, pixels });
             }
-            // an upgrade is never worth more memory, so the atlas doesn't grow for one
+            // an upgrade the atlas has no spare room for is dropped: it's never worth more memory
+            // or a glyph on screen
             if !self.make_raster_room(gpu, world, false) {
                 return None;
             }
@@ -1118,6 +1128,8 @@ enum Place {
     Slot(u32),
     /// no room even in an empty atlas
     None,
+    /// the glyphs on screen fill the atlas (`glyph::NO_ROOM`)
+    NoRoom,
     /// the request waits for another worker, or runs again: nothing to deliver yet
     Waiting,
     /// The pixels are ready, but a pre-eviction frame still owns the space they need.

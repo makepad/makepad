@@ -134,6 +134,17 @@ pub struct GlyphSource {
     pub dpxs_bits: u32,
 }
 
+/// What a look-up of an outline glyph's SDF found. Until it's `Ready`, the text draws the glyph's
+/// slug curves in its place (`GlyphRendering::Hybrid`).
+#[derive(Clone, Copy, Debug)]
+pub enum OutlineSdf {
+    Ready(RasterizedGlyph),
+    /// asked for: the text draws again once it's here
+    Pending,
+    /// none is coming (no outline, no image, or no room for it)
+    Unavailable,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AtlasKind {
     Grayscale,

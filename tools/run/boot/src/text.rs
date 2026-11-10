@@ -114,6 +114,8 @@ impl Text {
                     self.ready.clear();
                     self.pending.clear();
                 }
+                // a new size may have room for what had none
+                self.ready.retain(|_, entry| entry.atlas_kind != wire::glyph::NO_ROOM);
                 self.generation = generation;
                 self.atlas = texture;
             }
@@ -138,9 +140,11 @@ impl Text {
                 slots,
             } => {
                 if generation == self.generation {
+                    // what had no room is asked for again: there may be room now
                     let slots: HashSet<_> = wire::read_slots(slots, count).into_iter().collect();
-                    self.ready
-                        .retain(|_, entry| !slots.contains(&(entry.slot, entry.slot_gen)));
+                    self.ready.retain(|_, entry| {
+                        !slots.contains(&(entry.slot, entry.slot_gen)) && entry.atlas_kind != wire::glyph::NO_ROOM
+                    });
                 }
             }
             _ => return Ok(false),
@@ -310,7 +314,7 @@ impl Text {
             let Some(entry) = self.lookup(glyph.id, line.style.size, dpi, requests) else {
                 continue;
             };
-            if entry.atlas_kind == wire::glyph::EMPTY {
+            if entry.atlas_kind == wire::glyph::EMPTY || entry.atlas_kind == wire::glyph::NO_ROOM {
                 continue;
             }
             let (rect, uv) = self.quad(entry, baseline, line.style.size);

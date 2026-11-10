@@ -26,7 +26,7 @@ use {
             },
             line_break::{FollowingContext, PrecedingContext},
             loader::{FontDefinition, FontFamilyDefinition},
-            rasterizer::{AtlasKind, RasterizedGlyph},
+            rasterizer::{AtlasKind, OutlineSdf, RasterizedGlyph},
             shaper::ShapedText,
             slug_atlas::SlugGlyphCacheResult,
             system_faces::{self, SystemFaceKey, SystemFaceState},
@@ -488,23 +488,22 @@ fn note_glyph_uses(cx: &mut Cx2d) {
 /// for an atlas image. Also answers the slug generation a draw must upload (web), or 0.
 fn prepare_glyph(cx: &mut Cx2d, glyph: &LaidoutGlyph, dpxs_per_em: f32) -> (Option<PreparedGlyph>, u64) {
     let raster_image = glyph.font.has_glyph_raster_image(glyph.id, dpxs_per_em);
-    let mut is_waiting_on_sdf = false;
     // `GlyphRendering::Hybrid`: a missing SDF doesn't hold the frame, its slug curves draw meanwhile
-    if !raster_image && cx.fonts.borrow().should_use_hybrid_glyph(dpxs_per_em) {
-        let sdf_glyph = cx.fonts.borrow().rasterizer().borrow_mut()
-            .get_or_queue_glyph_outline_sdf(&glyph.font, glyph.id, dpxs_per_em);
-        if sdf_glyph.is_some() {
-            return (sdf_glyph.map(PreparedGlyph::Raster), 0);
-        }
-        is_waiting_on_sdf = true;
+    let sdf = if !raster_image && cx.fonts.borrow().should_use_hybrid_glyph(dpxs_per_em) {
+        Some(cx.fonts.borrow().rasterizer().borrow_mut().get_or_queue_glyph_outline_sdf(&glyph.font, glyph.id, dpxs_per_em))
+    } else {
+        None
+    };
+    if let Some(OutlineSdf::Ready(sdf_glyph)) = sdf {
+        return (Some(PreparedGlyph::Raster(sdf_glyph)), 0);
     }
-    if !raster_image && (is_waiting_on_sdf || cx.fonts.borrow().should_use_slug_glyph(dpxs_per_em)) {
+    if !raster_image && (sdf.is_some() || cx.fonts.borrow().should_use_slug_glyph(dpxs_per_em)) {
         let lookup = cx.fonts.borrow_mut().get_or_cache_slug_glyph(glyph.font.as_ref(), glyph.id);
         match lookup {
             SlugGlyphCacheResult::Ready(info) => {
                 // this list redraws with the SDFs once they're all in
                 #[cfg(not(target_arch = "wasm32"))]
-                if let (true, Some(list)) = (is_waiting_on_sdf, cx.draw_list_stack.last().copied()) {
+                if let (Some(OutlineSdf::Pending), Some(list)) = (sdf, cx.draw_list_stack.last().copied()) {
                     cx.hal_redraw_list_after_background_glyphs(list);
                 }
                 return (Some(PreparedGlyph::Slug(info)), 0);
@@ -673,13 +672,32 @@ impl DrawText {
         glyph: PreparedGlyph,
         color: Vec4f,
     ) {
-        let slug = match glyph {
+        let glyph = match glyph {
+            // under `Hybrid` a kept SDF draws like laid-out text: its slug curves stand in while it's not held
+            #[cfg(not(target_arch = "wasm32"))]
+            PreparedGlyph::Raster(raster) if raster.atlas_kind == AtlasKind::Grayscale
+                && cx.fonts.borrow().should_use_hybrid_glyph(f32::from_bits(raster.source.dpxs_bits)) =>
+            {
+                let rasterizer = cx.fonts.borrow().rasterizer().clone();
+                let mut rasterizer = rasterizer.borrow_mut();
+                let sdf = rasterizer.client_mut().refresh_outline_sdf(raster);
+                if let OutlineSdf::Ready(sdf_glyph) = sdf {
+                    PreparedGlyph::Raster(sdf_glyph)
+                } else {
+                    let slug = rasterizer.client_mut().slug_stand_in(raster.source);
+                    if let (OutlineSdf::Pending, Some(list)) = (sdf, cx.draw_list_stack.last().copied()) {
+                        cx.hal_redraw_list_after_background_glyphs(list);
+                    }
+                    // curves on their way hold this frame, so it draws again with them
+                    slug.map_or(PreparedGlyph::Raster(RasterizedGlyph { atlas_kind: AtlasKind::Unresolved, ..raster }), PreparedGlyph::Slug)
+                }
+            }
             PreparedGlyph::Raster(raster) => {
                 return self.draw_rasterized_glyph_abs(cx, origin_in_lpxs, font_size_in_lpxs, raster, color);
             }
             // a kept glyph is looked up again (curves upgraded, taken back, or still on their
             // way when it was prepared), which also keeps it in use
-            PreparedGlyph::Slug(slug) => cx.fonts.borrow().rasterizer().borrow_mut().refresh_slug_glyph(slug),
+            PreparedGlyph::Slug(slug) => PreparedGlyph::Slug(cx.fonts.borrow().rasterizer().borrow_mut().refresh_slug_glyph(slug)),
         };
         let open = self.many_instances.take();
         let batch_was_open = open.is_some();
@@ -694,8 +712,13 @@ impl DrawText {
             }
         };
         self.color = color;
-        let aa_pad_in_lpxs = (self.get_aa_pad_px(cx.cx) / cx.current_dpi_factor() as f32).max(0.0);
-        self.draw_slug_glyph(origin_in_lpxs, font_size_in_lpxs, None, slug, aa_pad_in_lpxs, &mut instances.instances);
+        match glyph {
+            PreparedGlyph::Slug(slug) => {
+                let aa_pad_in_lpxs = (self.get_aa_pad_px(cx.cx) / cx.current_dpi_factor() as f32).max(0.0);
+                self.draw_slug_glyph(origin_in_lpxs, font_size_in_lpxs, None, slug, aa_pad_in_lpxs, &mut instances.instances);
+            }
+            PreparedGlyph::Raster(raster) => self.draw_rasterized_glyph(origin_in_lpxs, font_size_in_lpxs, None, raster, &mut instances.instances),
+        }
         if batch_was_open {
             self.many_instances = Some(instances);
         } else {

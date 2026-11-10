@@ -169,10 +169,10 @@ impl RasterAtlas {
         out
     }
 
-    /// Retires least recently used slots totalling `bytes` (slots no session holds go first, and
-    /// only those unless `held`). Their storage is free only after `fence` completes.
-    pub(super) fn evict(&mut self, bytes: usize, held: bool, fence: Arc<RetireFence>) -> Vec<(u32, SlotRec)> {
-        let mut order: Vec<(bool, u64, u32)> = self.slots.iter().map(|(id, r)| (!r.sessions.is_empty(), r.last_use, *id)).filter(|(is_held, _, _)| held || !is_held).collect();
+    /// Retires least recently used slots totalling `bytes`: slots no session holds go first, then
+    /// held ones last used before `below` (0: none). Their storage is free only after `fence` completes.
+    pub(super) fn evict(&mut self, bytes: usize, below: u64, fence: Arc<RetireFence>) -> Vec<(u32, SlotRec)> {
+        let mut order: Vec<(bool, u64, u32)> = self.slots.iter().map(|(id, r)| (!r.sessions.is_empty(), r.last_use, *id)).filter(|(held, last_use, _)| !held || *last_use < below).collect();
         if order.is_empty() {
             return Vec::new();
         }

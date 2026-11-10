@@ -10,7 +10,7 @@ use super::{
 use fxhash::{FxHashMap, FxHashSet};
 pub use makepad_font_core::raster::{
     AtlasKind, MsdfComplexitySettings, MsdfResolutionSettings, OutlineRasterizationMode,
-    RasterizedGlyph, Settings,
+    OutlineSdf, RasterizedGlyph, Settings,
 };
 use makepad_font_core::raster::{
     plan_color, plan_outline_msdf, plan_outline_sdf, AtlasPlane, AtlasSlot, MultiPlaneAllocator,
@@ -390,16 +390,18 @@ impl Rasterizer {
         font: &Rc<Font>,
         glyph_id: GlyphId,
         dpxs_per_em: f32,
-    ) -> Option<RasterizedGlyph> {
-        let plan = plan_outline_sdf(font, glyph_id, dpxs_per_em, &self.settings)?;
+    ) -> OutlineSdf {
+        let Some(plan) = plan_outline_sdf(font, glyph_id, dpxs_per_em, &self.settings) else {
+            return OutlineSdf::Unavailable;
+        };
         if let Some(slot) = self.get_cached_slot(&plan.key) {
-            return Some(self.build_sdf_glyph(slot, &plan));
+            return OutlineSdf::Ready(self.build_sdf_glyph(slot, &plan));
         }
         self.queue_glyph_outline_sdf(&plan);
         if self.prewarm_sdf_sizes.insert((font.id(), plan.dpxs_per_em.to_bits())) {
             self.queued_sdf_prewarms.push((font.clone(), plan.dpxs_per_em));
         }
-        None
+        OutlineSdf::Pending
     }
 
     fn queue_glyph_outline_sdf(&mut self, plan: &SdfPlan) {

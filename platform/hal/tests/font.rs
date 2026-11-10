@@ -230,13 +230,15 @@ fn a_small_atlas_gives_slots_back_least_recently_used_first() {
     a.open_font(1, PLEX);
     let all: Vec<u32> = (1..400).collect();
     let dpxs = 40.0;
-    // far more glyphs than the atlas holds, in batches
+    // far more glyphs than the atlas holds, in batches, each drawn in its turn
     for batch in all.chunks(40) {
         a.request(1, kind::SDF, batch, dpxs);
         assert!(a.wait(20, |s| batch.iter().all(|g| s.ready.contains_key(&(*g, dpxs.to_bits(), kind::SDF)))));
+        a.touch(batch, dpxs, kind::SDF);
     }
     let stats = hal.font_stats();
     assert!(stats.evictions > 0, "the atlas was too small for everything");
+    assert_eq!(stats.no_room, 0, "what was drawn before made room");
     assert!(!a.seen.evicted.is_empty(), "the session was told");
     assert!(stats.raster_slots < all.len());
     assert!(a.seen.atlases.iter().all(|x| x.2 == 256));
@@ -345,6 +347,7 @@ fn held_small_glyphs_keep_their_own_pixels_through_evictions() {
     for batch in all.chunks(25) {
         a.request(1, kind::SDF, batch, dpxs);
         assert!(a.wait(30, |s| batch.iter().all(|g| s.ready.contains_key(&(*g, dpxs.to_bits(), kind::SDF)))));
+        a.touch(batch, dpxs, kind::SDF);
         // let retirements finish and any further uploads settle
         for _ in 0..5 {
             a.pump(5_000_000);
@@ -442,7 +445,7 @@ fn a_full_atlas_grows_and_keeps_every_glyph_where_it_was() {
     }
     let stats = hal.font_stats();
     assert_eq!(stats.growths, 2, "twice as tall each time");
-    assert_eq!((stats.evictions, a.seen.evicted.len()), (0, 0), "no slot was taken back");
+    assert_eq!((stats.evictions, a.seen.evicted.len(), stats.no_room), (0, 0, 0), "no slot was taken back");
     assert_eq!(stats.raster_bytes, 2048 * 8192 * 4);
     let heights: Vec<u32> = a.seen.atlases.iter().map(|x| x.3).collect();
     assert_eq!(heights, vec![2048, 4096, 8192], "64 MiB on a GPU of unknown size");
@@ -571,7 +574,7 @@ fn a_grown_atlas_goes_back_to_its_base_size_in_the_background() {
 }
 
 /// The atlas grows no taller than the device's largest texture; past that it takes back the
-/// least recently used slots as before.
+/// least recently drawn slots, as a scrolling grid draws each batch in its turn.
 #[test]
 fn a_full_grown_atlas_takes_slots_back() {
     let emoji = emoji_ids(500);
@@ -579,12 +582,49 @@ fn a_full_grown_atlas_takes_slots_back() {
     let mut a = Client::new(&hal, 1);
     hal.with_world(|w| w.max_texture = 4096);
     a.open_font(1, EMOJI);
-    request_all(&mut a, 1, &emoji, EMOJI_DPXS);
+    for batch in emoji.chunks(50) {
+        request_all(&mut a, 1, batch, EMOJI_DPXS);
+        a.touch(batch, EMOJI_DPXS, kind::AUTO);
+    }
     let stats = hal.font_stats();
     assert_eq!(stats.growths, 1);
     assert!(stats.evictions > 0 && !a.seen.evicted.is_empty(), "it took slots back once it was full-grown");
+    assert_eq!(stats.no_room, 0, "the batches drawn before made room");
     assert_eq!(a.seen.atlases.last().unwrap().3, 4096);
     assert_eq!(stats.raster_bytes, 2048 * 4096 * 4);
+}
+
+/// When every glyph left in a full-grown atlas is on screen (the session drew all of them at
+/// its last touch), taking one back would only bring it back in place of another. So a new glyph
+/// is answered `NO_ROOM` and nothing is taken; once the screen moves on, there's room again.
+#[test]
+fn glyphs_on_screen_are_not_taken_back_for_more_than_the_atlas_holds() {
+    let emoji = emoji_ids(300);
+    let reference = reference_pixels(&emoji, EMOJI_DPXS);
+    let hal = Hal::new();
+    let mut a = Client::new(&hal, 1);
+    hal.with_world(|w| w.max_texture = 2048);
+    a.open_font(1, EMOJI);
+    // one screen of emoji, every one drawn at each touch
+    for (i, batch) in emoji.chunks(50).enumerate() {
+        request_all(&mut a, 1, batch, EMOJI_DPXS);
+        a.touch(&emoji[..(i + 1) * 50], EMOJI_DPXS, kind::AUTO);
+    }
+    let stats = hal.font_stats();
+    let no_room: Vec<u32> = a.seen.ready.values().filter(|e| e.atlas_kind == glyph::NO_ROOM).map(|e| e.glyph).collect();
+    assert!(!no_room.is_empty() && stats.no_room == no_room.len() as u64, "what didn't fit was answered NO_ROOM");
+    assert_eq!((stats.evictions, a.seen.evicted.len(), stats.growths), (0, 0, 0), "nothing on screen was taken back");
+    assert_own_pixels(&hal, &a, &reference);
+    // the screen moves on: the first batch isn't drawn any more, so those glyphs make room
+    a.touch(&emoji[50..], EMOJI_DPXS, kind::AUTO);
+    for g in &no_room {
+        a.seen.ready.remove(&(*g, EMOJI_DPXS.to_bits(), kind::AUTO));
+    }
+    request_all(&mut a, 1, &no_room[..no_room.len().min(20)], EMOJI_DPXS);
+    assert!(no_room[..no_room.len().min(20)].iter().all(|g| a.entry(*g, EMOJI_DPXS, kind::AUTO).atlas_kind == glyph::COLOR));
+    let first: std::collections::HashSet<u32> = a.slots(&emoji[..50], EMOJI_DPXS, kind::AUTO).into_iter().map(|s| s.0).collect();
+    assert!(!a.seen.evicted.is_empty() && a.seen.evicted.iter().all(|(s, _)| first.contains(s)), "only what left the screen was taken back");
+    assert_own_pixels(&hal, &a, &reference);
 }
 
 /// A device that refuses the taller texture isn't asked again at every overflow: once per idle
