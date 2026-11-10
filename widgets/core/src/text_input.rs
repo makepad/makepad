@@ -847,7 +847,7 @@ pub struct TextInput {
     #[live]
     draw_bg: DrawColor,
     #[live]
-    draw_text: DrawText,
+    pub draw_text: DrawText,
     #[live]
     draw_selection: DrawQuad,
     #[live]
