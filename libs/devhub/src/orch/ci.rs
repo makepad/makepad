@@ -1786,10 +1786,6 @@ impl BoxInfo {
 }
 
 /// A CI box: its lease.conf opts in (`slots.ci`).
-fn takes_ci(n: &crate::lease::sched::NodeView) -> bool {
-    n.caps.as_ref().is_some_and(|c| crate::lease::sched::slots(c, crate::lease::Kind::Ci) > 0)
-}
-
 /// The allowed CI boxes that are up, dev on, with capabilities.
 pub fn boxes(ctx: &Ctx) -> Vec<BoxInfo> {
     ci_boxes(ctx, BoxAvailability::Ready)
@@ -1807,16 +1803,21 @@ fn box_up(ctx: &Ctx, node: &str) -> bool {
     ctx.leases.nodes().iter().any(|n| n.name == node && n.up && n.dev)
 }
 
-enum BoxAvailability { Ready, Soon, DevOff }
+/// `Remembered`: down since before this master started, as its last caps said ([`crate::lease::master::LeaseMaster::heard`]).
+enum BoxAvailability { Ready, Soon, DevOff, Remembered }
 
 fn ci_boxes(ctx: &Ctx, availability: BoxAvailability) -> Vec<BoxInfo> {
+    let remembered = matches!(availability, BoxAvailability::Remembered);
     ctx.leases
         .nodes()
         .into_iter()
-        .filter(takes_ci)
         .filter_map(|n| {
-            let c = n.caps?;
-            if c.role().users() {
+            let c = match n.caps.clone() {
+                Some(c) if !remembered => c,
+                None if remembered && !n.up => ctx.leases.heard(&n.name)?.1,
+                _ => return None,
+            };
+            if crate::lease::sched::slots(&c, Kind::Ci) == 0 || c.role().users() {
                 return None;
             }
             let os = Os::of(&c.os);
@@ -1826,6 +1827,7 @@ fn ci_boxes(ctx: &Ctx, availability: BoxAvailability) -> Vec<BoxInfo> {
                 BoxAvailability::Ready => n.dev && ready,
                 BoxAvailability::Soon => n.dev && !ready,
                 BoxAvailability::DevOff => !n.dev,
+                BoxAvailability::Remembered => n.dev,
             };
             if !include { return None; }
             let work = match c.role() {
@@ -1981,11 +1983,21 @@ fn close_span(s: &mut CiShard, node: &str) {
     s.granted_ms = 0;
 }
 
+/// The boxes a shard has, besides those in the run ([`no_box`]): `down` (down or updating, each
+/// with since when), `off` (dev off), `remembered` (down since before this master started, each
+/// with since when: it does not wait for them).
+struct Away<'a> {
+    down: &'a [String],
+    off: &'a [&'a str],
+    remembered: &'a [String],
+}
+
 /// What becomes of a shard no box can take: a state and a summary, or None while it waits. `here`:
-/// the boxes of its kind in the run now. `down`: those down or updating. `off`: those with dev off.
-/// `waited`: how long nothing else has been running, `heard`: whether this master has heard its
-/// nodes, `gone`: a box that fits it is away now (it may be the one that can).
-fn no_box(shard: &Shard, s: &CiShard, here: &[&BoxInfo], down: &[&str], off: &[&str], out: &[String], waited: Duration, heard: bool, gone: bool) -> Option<(&'static str, String)> {
+/// the boxes of its kind in the run now, `away` the others. `waited`: how long nothing else has
+/// been running, `heard`: whether this master has heard its nodes, `gone`: a box that fits it is
+/// away now (it may be the one that can).
+fn no_box(shard: &Shard, s: &CiShard, here: &[&BoxInfo], away: &Away, out: &[String], waited: Duration, heard: bool, gone: bool) -> Option<(&'static str, String)> {
+    let Away { down, off, remembered } = away;
     let kind = format!("{}{}", shard.os.as_str(), if BoxInfo::needs_gui(shard) { " with a display" } else { "" });
     if !heard {
         return None;
@@ -2011,10 +2023,35 @@ fn no_box(shard: &Shard, s: &CiShard, here: &[&BoxInfo], down: &[&str], off: &[&
     }
     // the boxes that could take it are down: it does not run this round (its log says so)
     if !down.is_empty() {
-        return (waited >= NO_BOX_WAIT).then(|| ("incomplete", format!("box down: {} (not back in {} min)", down.join(", "), NO_BOX_WAIT.as_secs() / 60)));
+        return (waited >= NO_BOX_WAIT).then(|| ("incomplete", format!("box down: {}, not back in {} min", down.join(", "), NO_BOX_WAIT.as_secs() / 60)));
     }
-    let why = if off.is_empty() { "none is set up".to_string() } else { format!("{} dev off", off.join(", ")) };
-    Some((crate::state::NOT_RUN, format!("no CI box takes {kind}: {why}")))
+    let mut why = Vec::new();
+    if !off.is_empty() { why.push(format!("{} dev off", off.join(", "))); }
+    if !remembered.is_empty() { why.push(format!("box down: {}", remembered.join(", "))); }
+    if why.is_empty() { why.push("none is set up".to_string()); }
+    Some((crate::state::NOT_RUN, format!("no CI box takes {kind}: {}", why.join("; "))))
+}
+
+/// The box an earlier run ran this shard on, when it is down and no master since heard its caps
+/// (down since before the caps were kept: the one Linux display box, down from 11-07, read "none
+/// is set up" on 11-08 to 11-10): `node (it ran this shard last 11-07 01:00Z)`.
+fn last_ran_down(ctx: &Ctx, shard: &str) -> Option<String> {
+    let (node, at) = ctx.store.read(|d| d.ci.runs.iter().rev().find_map(|r| r.shards.iter().find(|s| s.id == shard && !s.node.is_empty()).map(|s| (s.node.clone(), r.started_ms))))?;
+    let n = ctx.leases.nodes().into_iter().find(|n| n.name == node)?;
+    if n.up || !n.dev || n.caps.is_some() || ctx.leases.heard(&node).is_some() { return None; }
+    let t = makepad_civil_time::utc((at / 1000) as i64);
+    Some(format!("{node} (it ran this shard last {:02}-{:02} {}Z)", t.month, t.day, t.hm()))
+}
+
+/// `node (since 11-07 16:27Z)`: since its caps last answered, when this master knows.
+fn down_since(ctx: &Ctx, node: &str) -> String {
+    match ctx.leases.heard(node) {
+        Some((ms, _)) => {
+            let t = makepad_civil_time::utc((ms / 1000) as i64);
+            format!("{node} (since {:02}-{:02} {}Z)", t.month, t.day, t.hm())
+        }
+        None => node.to_string(),
+    }
 }
 
 /// A run's shard states for the state document.
@@ -2778,14 +2815,20 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
                 let out: Vec<String> = bs.iter().filter(|b| g.out(&b.node)).map(|b| b.node.clone()).collect();
                 let downs = down_boxes(ctx);
                 let offs = ci_boxes(ctx, BoxAvailability::DevOff);
+                let remembers = ci_boxes(ctx, BoxAvailability::Remembered);
                 for i in stuck {
                     let here: Vec<&BoxInfo> = bs.iter().filter(|b| b.fits(&g.shards[i])).collect();
-                    let down: Vec<&str> = downs.iter().filter(|b| b.fits(&g.shards[i])).map(|b| b.node.as_str()).collect();
+                    let down: Vec<String> = downs.iter().filter(|b| b.fits(&g.shards[i])).map(|b| down_since(ctx, &b.node)).collect();
                     let off: Vec<&str> = offs.iter().filter(|b| b.fits(&g.shards[i])).map(|b| b.node.as_str()).collect();
+                    let mut remembered: Vec<String> = remembers.iter().filter(|b| b.fits(&g.shards[i])).map(|b| down_since(ctx, &b.node)).collect();
+                    if remembered.is_empty() && here.is_empty() && down.is_empty() {
+                        remembered.extend(last_ran_down(ctx, &g.state[i].id));
+                    }
                     // Impossible shards end as soon as the nodes are heard, even while others run.
                     // Recoverable capacity and attempted shards keep the existing idle wait.
                     if !idle && (!here.is_empty() || !down.is_empty() || !g.state[i].failed_on.is_empty()) { continue; }
-                    match no_box(&g.shards[i], &g.state[i], &here, &down, &off, &out, waited, master_t0.elapsed() >= HEAR, !down.is_empty()) {
+                    let away = Away { down: &down, off: &off, remembered: &remembered };
+                    match no_box(&g.shards[i], &g.state[i], &here, &away, &out, waited, master_t0.elapsed() >= HEAR, !down.is_empty()) {
                         Some((state, summary)) => {
                             g.state[i].state = state.into();
                             g.state[i].summary = summary;
@@ -4857,40 +4900,66 @@ mod tests {
         assert_eq!(groups(vec![("a".into(), 30.0), ("b".into(), 30.0), ("c".into(), 30.0)], 60.0), vec![vec!["a".to_string(), "b".into()], vec!["c".into()]]);
     }
 
+    /// A shard whose box went down before any master kept its caps names that box, from the run
+    /// that last ran the shard there: "box down: <box>", not "none is set up" (11-08 to 11-10).
+    #[test]
+    fn a_shard_names_the_down_box_it_last_ran_on() {
+        let home = std::env::temp_dir().join(format!("devhub-ci-last-ran-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let leases = Arc::new(crate::lease::master::LeaseMaster::new("mac", home.clone(), Arc::new(|_: &str, _: &str, _: &str| Err("no nodes".to_string())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
+        let ctx = Ctx { store: crate::state::Store::open(&home, "mac", Arc::new(|_| 0)).unwrap(), leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: home.clone(), home: home.clone() };
+        ctx.leases.refresh(&[("node-d".to_string(), "192.0.2.4".to_string())]);
+        let ran = |id: &str, node: &str| CiShard { id: id.into(), state: "fail".into(), node: node.into(), ..Default::default() };
+        ctx.store.update(|d| {
+            d.ci.runs.push(CiRun { id: "A".into(), started_ms: 1_794_013_200_000, shards: vec![ran("smoke:linux:apps/wm", "node-d"), ran("smoke:linux:apps/x", "node-gone")], ..Default::default() });
+            d.ci.runs.push(CiRun { id: "B".into(), started_ms: 1_794_099_600_000, shards: vec![ran("smoke:linux:apps/wm", "")], ..Default::default() });
+        }).unwrap();
+        assert_eq!(last_ran_down(&ctx, "smoke:linux:apps/wm").as_deref(), Some("node-d (it ran this shard last 11-07 01:00Z)"), "the newest run that gave it a box");
+        assert_eq!(last_ran_down(&ctx, "smoke:linux:apps/x"), None, "a box no longer in the fleet");
+        assert_eq!(last_ran_down(&ctx, "smoke:linux:apps/new"), None, "a shard that never ran");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
     #[test]
     fn a_shard_no_box_can_take_waits_or_says_why() {
         let sh = Shard { id: "s".into(), kind: Kind::Build, os: Os::Macos, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Exit, est: 1.0, dirs: None, whole: false, cores: None };
         let mac = BoxInfo { node: "node-d".into(), os: Os::Macos, arch: "aarch64".into(), gui: true, gpu: true, ci: true, work: BoxWork::All };
         let wait = CiShard::default();
+        const NONE: Away<'static> = Away { down: &[], off: &[], remembered: &[] };
+        let down = ["node-d (since 11-07 16:27Z)".to_string()];
         // a master that just started has not heard its boxes: no box is gone
-        assert_eq!(no_box(&sh, &wait, &[], &[], &[], &[], Duration::from_secs(3600), false, false), None);
+        assert_eq!(no_box(&sh, &wait, &[], &NONE, &[], Duration::from_secs(3600), false, false), None);
         // Heard, no fitting capacity now or soon: no wait, and the gap is explicit.
-        let (state, why) = no_box(&sh, &wait, &[], &[], &[], &[], Duration::ZERO, true, false).unwrap();
+        let (state, why) = no_box(&sh, &wait, &[], &NONE, &[], Duration::ZERO, true, false).unwrap();
         assert_eq!((state, why.as_str()), (crate::state::NOT_RUN, "no CI box takes macos: none is set up"));
         let display = Shard { id: "smoke:macos:apps/x".into(), ..sh.clone() };
-        let (state, why) = no_box(&display, &wait, &[], &[], &["node-d", "node-e"], &[], Duration::ZERO, true, false).unwrap();
+        let (state, why) = no_box(&display, &wait, &[], &Away { off: &["node-d", "node-e"], ..NONE }, &[], Duration::ZERO, true, false).unwrap();
         assert_eq!((state, why.as_str()), (crate::state::NOT_RUN, "no CI box takes macos with a display: node-d, node-e dev off"));
+        // its box went down before this master started: it does not wait for it, and says which
+        let (state, why) = no_box(&display, &wait, &[], &Away { remembered: &down, ..NONE }, &[], Duration::ZERO, true, false).unwrap();
+        assert_eq!((state, why.as_str()), (crate::state::NOT_RUN, "no CI box takes macos with a display: box down: node-d (since 11-07 16:27Z)"));
         // every box of its kind said it cannot run it: a failure that names them
         let unfit = CiShard { summary: "unfit: xcheck x: no nightly".into(), lost: vec![("node-d".into(), LOST_TRIES)], ..Default::default() };
-        let (state, why) = no_box(&sh, &unfit, &[&mac], &[], &[], &[], Duration::ZERO, true, false).unwrap();
+        let (state, why) = no_box(&sh, &unfit, &[&mac], &NONE, &[], Duration::ZERO, true, false).unwrap();
         assert_eq!((state, why.as_str()), ("fail", "no box can run it (node-d): unfit: xcheck x: no nightly"));
         // ... unless a box that may be able to is away: it gets its time
-        assert_eq!(no_box(&sh, &unfit, &[&mac], &[], &[], &[], Duration::ZERO, true, true), None);
-        assert_eq!(no_box(&sh, &unfit, &[&mac], &[], &[], &[], NO_BOX_WAIT, true, true).unwrap().0, "fail");
+        assert_eq!(no_box(&sh, &unfit, &[&mac], &NONE, &[], Duration::ZERO, true, true), None);
+        assert_eq!(no_box(&sh, &unfit, &[&mac], &NONE, &[], NO_BOX_WAIT, true, true).unwrap().0, "fail");
         // the box is out of the run, or the shard's first failure has no second box
-        assert_eq!(no_box(&sh, &wait, &[&mac], &[], &[], &["node-d".to_string()], Duration::ZERO, true, false).unwrap().0, "incomplete");
+        assert_eq!(no_box(&sh, &wait, &[&mac], &NONE, &["node-d".to_string()], Duration::ZERO, true, false).unwrap().0, "incomplete");
         let failed = CiShard { failed_on: "node-d".into(), failed_why: "exit 1".into(), ..Default::default() };
-        assert_eq!(no_box(&sh, &failed, &[], &[], &[], &[], Duration::ZERO, true, false), Some(("fail", "exit 1".to_string())));
+        assert_eq!(no_box(&sh, &failed, &[], &NONE, &[], Duration::ZERO, true, false), Some(("fail", "exit 1".to_string())));
         // the box of its kind is down: it waits for it a while, then does not run this round
-        assert_eq!(no_box(&sh, &wait, &[], &["node-d"], &[], &[], Duration::from_secs(60), true, true), None);
-        let (state, why) = no_box(&sh, &wait, &[], &["node-d"], &[], &[], NO_BOX_WAIT, true, true).unwrap();
-        assert_eq!((state, why.as_str()), ("incomplete", "box down: node-d (not back in 15 min)"));
+        assert_eq!(no_box(&sh, &wait, &[], &Away { down: &down, ..NONE }, &[], Duration::from_secs(60), true, true), None);
+        let (state, why) = no_box(&sh, &wait, &[], &Away { down: &down, ..NONE }, &[], NO_BOX_WAIT, true, true).unwrap();
+        assert_eq!((state, why.as_str()), ("incomplete", "box down: node-d (since 11-07 16:27Z), not back in 15 min"));
         let dir = std::env::temp_dir().join(format!("devhub-ci-box-down-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // only ever asked for there (its asks withdrawn as the box went down): it did not run
         let asked = CiShard { state: state.into(), summary: why, log: dir.join("s.log").to_string_lossy().into_owned(), spans: vec![CiSpan { node: "node-d".into(), asked_ms: 1, granted_ms: 0, ended_ms: 2 }], ..Default::default() };
         did_not_run(&asked, false).unwrap();
-        assert_eq!(std::fs::read_to_string(&asked.log).unwrap(), "did not run: box down: node-d (not back in 15 min)\n");
+        assert_eq!(std::fs::read_to_string(&asked.log).unwrap(), "did not run: box down: node-d (since 11-07 16:27Z), not back in 15 min\n");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -251,9 +251,13 @@ impl Master {
             o(&r);
         }));
         // every inspect, grab and act on a node's app routes through here: a lane's screen run
-        // of the app is in use
+        // of the app is in use, and so is a live session that runs it
         let l = leases.clone();
-        hub.set_route_seen(Arc::new(move |node, spec, service| l.app_touched(node, spec, service)));
+        hub.set_route_seen(Arc::new(move |node, spec, service, _caller| {
+            l.app_touched(node, spec, service);
+            #[cfg(feature = "checkout")]
+            crate::orch::live::app_routed(node, spec, service, _caller);
+        }));
         // the workflow jobs (verify, after, allapps, push) and their state
         #[cfg(feature = "checkout")]
         {

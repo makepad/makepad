@@ -73,6 +73,10 @@ fleet-id revoke n5                             # then ship `revoked` and restart
 fleet-id show                                    # this machine's credential, valid or not
 ```
 
+A reissued credential takes effect only after each long-running fleet
+process on that machine restarts (its AI hub, Desk Link, devhub): a process
+reads `id.key` and `id.cred` once and serves under them until it exits.
+
 `local/agent_state/relax-campaign/fleetid-data/issue-credentials.sh` issues
 and installs every machine's credential through the ssh path, ships
 `revoked` (`--revoked`) and deletes the retired symmetric secrets

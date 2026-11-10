@@ -4,11 +4,17 @@
 //! input, a spinning app, a video or load never mark a person. A user's own app launch comes
 //! from such input (a click, a key), so it marks them at that moment and not after.
 //!
+//! A Mac has no WM of ours: its hub reads the HID system's idle time instead (`HIDIdleTime`,
+//! `hid_idle_ms`: the last keyboard, mouse or trackpad input of any session), the same answer
+//! in the same rules ([`hid_answer`]). Agents drive apps through their remote sockets, which the
+//! HID system never sees.
+//!
 //! Input within `user_idle_min` minutes (lease.conf, default 3): the node is "user": the
 //! master grants it no new lease and the node takes no network writes; running leases finish.
 //! That long without input, it takes work again. The user's dev switch is separate and wins:
-//! a node they switched off stays off. A node without our WM (the Macs, Windows) senses
-//! nothing; its switch alone decides. Events: `node_user_present`, `node_user_idle`.
+//! a node they switched off stays off. A node with neither our WM nor a Mac's HID idle time
+//! (Windows) senses nothing; its switch alone decides. Events: `node_user_present`,
+//! `node_user_idle`.
 //!
 //! A Desk Link viewer showing the node ([`UserTrack::watched`]: its tab selected in a visible
 //! window, which the WM counts as an unpaused viewer) holds back what a person watching would see
@@ -29,6 +35,56 @@ pub const VIEWER_HOLDS_MIN: u64 = 10;
 
 /// How often the hub asks its WM.
 pub const POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A Mac's HID idle time as the WM's `activity` answer: input `idle_ms` ago from its device.
+pub fn hid_answer(idle_ms: u64) -> String {
+    format!("{{\"input_ms\":{idle_ms},\"origin\":\"device\",\"what\":\"input\"}}")
+}
+
+/// How long ago the HID system took input, ms: IOHIDSystem's `HIDIdleTime` (ns). None: no such
+/// service or no number in it.
+#[cfg(target_os = "macos")]
+pub fn hid_idle_ms() -> Option<u64> {
+    use core::ffi::{c_char, c_void};
+    #[link(name = "IOKit", kind = "framework")]
+    extern "C" {
+        fn IOServiceMatching(name: *const c_char) -> *mut c_void;
+        fn IOServiceGetMatchingService(main_port: u32, matching: *mut c_void) -> u32;
+        fn IORegistryEntryCreateCFProperty(entry: u32, key: *const c_void, allocator: *const c_void, options: u32) -> *const c_void;
+        fn IOObjectRelease(object: u32) -> i32;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithCString(allocator: *const c_void, text: *const c_char, encoding: u32) -> *const c_void;
+        fn CFGetTypeID(cf: *const c_void) -> usize;
+        fn CFNumberGetTypeID() -> usize;
+        fn CFNumberGetValue(number: *const c_void, kind: isize, out: *mut c_void) -> u8;
+        fn CFRelease(cf: *const c_void);
+    }
+    const UTF8: u32 = 0x0800_0100;
+    const SINT64: isize = 4;
+    // SAFETY: each call gets live arguments; the matching dictionary is consumed by the lookup,
+    // and the service, key and property are released here once read.
+    unsafe {
+        let service = IOServiceGetMatchingService(0, IOServiceMatching(c"IOHIDSystem".as_ptr()));
+        if service == 0 {
+            return None;
+        }
+        let key = CFStringCreateWithCString(core::ptr::null(), c"HIDIdleTime".as_ptr(), UTF8);
+        let value = if key.is_null() { core::ptr::null() } else { IORegistryEntryCreateCFProperty(service, key, core::ptr::null(), 0) };
+        let mut ns: i64 = -1;
+        if !value.is_null() && CFGetTypeID(value) == CFNumberGetTypeID() {
+            CFNumberGetValue(value, SINT64, &mut ns as *mut i64 as *mut c_void);
+        }
+        for cf in [value, key] {
+            if !cf.is_null() {
+                CFRelease(cf);
+            }
+        }
+        IOObjectRelease(service);
+        u64::try_from(ns).ok().map(|ns| ns / 1_000_000)
+    }
+}
 
 /// What the hub keeps between answers.
 #[derive(Default, Debug)]
@@ -169,6 +225,23 @@ mod tests {
         t.update(t0, Ok(&input(0)), 10);
         assert_eq!(t.update(t0 + 9 * MIN, Ok(&input(9 * MIN)), 10), None);
         assert_eq!(t.update(t0 + 10 * MIN, Ok(&input(10 * MIN)), 10), Some(Flip::Idle));
+    }
+
+    #[test]
+    fn a_macs_hid_idle_time_is_a_person_by_the_same_rules() {
+        let mut t = UserTrack::default();
+        let t0 = 10 * MIN;
+        // the HID idle time grows between inputs: one input, then three quiet minutes
+        assert_eq!(t.update(t0, Ok(&hid_answer(2 * MIN)), 3), Some(Flip::Present));
+        assert_eq!(t.sense.as_ref().unwrap().what, "input from its device");
+        assert_eq!(t.update(t0 + MIN - 1, Ok(&hid_answer(3 * MIN - 1)), 3), None, "under 3 min since the input");
+        assert_eq!(t.update(t0 + MIN, Ok(&hid_answer(3 * MIN)), 3), Some(Flip::Idle));
+        // a new input resets it
+        assert_eq!(t.update(t0 + 2 * MIN, Ok(&hid_answer(10)), 3), Some(Flip::Present));
+        // a Mac nobody touched since it booted
+        let mut n = UserTrack::default();
+        assert_eq!(n.update(t0, Ok(&hid_answer(40 * 24 * 60 * MIN)), 3), None);
+        assert!(!n.present());
     }
 
     #[test]

@@ -1329,7 +1329,7 @@ fn test_run(repo: PathBuf, home: PathBuf, proofs: Arc<crate::gateproof::Store>, 
             }
         };
         let proven = format!("GATE_PROVEN={}", units.join(";"));
-        let (ask, class) = (cores.to_string(), shard_class(cores));
+        let (ask, class) = (cores.to_string(), shard_class(cores, full));
         // the run's one queue, dealt as the shards' slots free ([`Dealer`])
         let dealer = Mutex::new(Dealer::new(shards));
         let ended: Vec<AtomicBool> = (0..shards).map(|_| AtomicBool::new(false)).collect();
@@ -1416,9 +1416,12 @@ const SHARD_RAM_GB: f64 = 40.0;
 /// A tests shard's measured class, its shape (its cores) in it: a shard's wall and peaks come from
 /// what it runs at once, and another shape's are wrong data for it. An 8-core shard's 37.9 GB peak
 /// charged the 12-core shards 45.5 GB each, where they peaked at 27-29 GB, and one waited for RAM
-/// on a box that held it (11-07).
-fn shard_class(cores: u32) -> String {
-    format!("test bash land_gate.sh testrun {cores} cores @{}", crate::lease::sched::TESTS_LANE)
+/// on a box that held it (11-07). The full bucket's shards ([`FULL`]: every package's tests, no
+/// proof reused) are a class of their own: theirs ran 26-39 min against the tests bucket's 9
+/// (L767799-801), and in one class the tests bucket's next shards asked large, measured 27 min,
+/// with 18-30 GB each, and waited 10 min for RAM (11-10).
+fn shard_class(cores: u32, full: bool) -> String {
+    format!("test bash land_gate.sh testrun{} {cores} cores @{}", if full { " full" } else { "" }, crate::lease::sched::TESTS_LANE)
 }
 
 /// [`test_boxes`] of the master's `nodes` answer: how many shards, and the cores each asks: their
@@ -1710,8 +1713,8 @@ fn unit_secs(text: &str) -> BTreeMap<String, u64> {
     unit_measures(text, "GATETIME")
 }
 
-/// A run's units' peak RSS in MB (land_gate.sh's `GATEPEAK <unit> <MB>`: its processes' summed
-/// RSS at its watch's looks).
+/// A run's units' peak RSS in MB (land_gate.sh's `GATEPEAK <unit> <MB>`: the most its processes
+/// held at once, their RSS summed at its watch's looks or one's own peak between them).
 fn unit_mb(text: &str) -> BTreeMap<String, u64> {
     unit_measures(text, "GATEPEAK")
 }
@@ -1773,12 +1776,18 @@ pub struct ShardBox {
 /// lines land_gate.sh's at_once says in each shard's log, each with what its box says
 /// (`shard_box`: by the shard's lease, None once it ended): a hub that does not answer, a load
 /// past [`OVER_LOAD`] times its cores (a unit past [`OVER_TIMES`] its measure there is listed
-/// whatever its seconds), else where to look for a hang. Until 11-08 a unit that hung busy was no
-/// HUNG (land_gate.sh's watch stopped a unit idle 9 min; now one past its bound too): two render tests polled stalled GStreamer
+/// whatever its seconds), else where to look for a hang. A unit that hangs busy is no HUNG
+/// (land_gate.sh's watch stops a unit only when its tests make no progress for 9 min, never one at
+/// work), so this list is what says it: two render tests polled stalled GStreamer
 /// pipelines at 4 % of a core for 73 min and held their shard at 98 min while the others took
 /// 21 to 33, and nothing said so (11-07). Three units said 27x their measure on a box whose hub
 /// had stopped answering, read as the box oversubscribed, while the other shards' units ran at
 /// 1.0x theirs (11-07).
+/// A unit whose tests gave no new result far past its measure (the watch's `GATEBUSY`: a spin,
+/// which its watch never stops) is said as that instead, with the stack sample the watch took
+/// then: six threads in `while !go` and a test thread spinning in a budget callback would have
+/// held a shard and its box for ever with nothing said (11-09). It is a report, not a cap: main
+/// or the unit's owner decides.
 pub fn slow_units(home: &Path, now_ms: u64, shard_box: &dyn Fn(&str) -> Option<ShardBox>) -> Vec<String> {
     let rows = rows_of(home, "tests");
     let logs = home.join("bucket-logs");
@@ -1794,20 +1803,28 @@ pub fn slow_units(home: &Path, now_ms: u64, shard_box: &dyn Fn(&str) -> Option<S
     let mut out = Vec::new();
     for i in 1.. {
         let Ok(text) = std::fs::read_to_string(shard_log(&log, i)) else { break };
-        let (lease, running) = running_in(&text);
+        let (lease, running, busy) = running_in(&text);
         let at = match lease {
             Some(lease) => match shard_box(lease) { Some(b) => Some((lease, b)), None => continue },
             None => None,
         };
         let over = at.as_ref().is_some_and(|(_, b)| b.up && b.load > OVER_LOAD * f64::from(b.cores));
         let who = at.as_ref().map_or("its lease".to_string(), |(lease, b)| format!("{lease} on {}", b.node));
+        for (unit, b) in &busy {
+            let measured = measures.get(*unit).map_or("not measured yet".to_string(), |m| format!("measured {}", took(*m)));
+            let keep = shard_log(&log, i).with_extension("keep");
+            let get = at.as_ref().map_or(String::new(), |(lease, _)| format!("`devhub get {} tmp/{}/{} <dir> --lease {lease}` now, ", crate::lease::sched::TESTS_LANE, crate::lease::KEEP_DIR, b.sample));
+            let says = if b.says.is_empty() { String::new() } else { format!(": {}", b.says) };
+            out.push(format!("tests run {ms} shard {i} ({who}): `{unit}` busy, no new result for {} ({measured}); nothing stops it: main or its owner decides. Its stack sample: {get}{} once its lease ends{says}", took((now_ms / 1000).saturating_sub(b.since)), keep.join(b.sample).display()));
+        }
         for (unit, ran, measure) in slow_in(&running, &measures, now_ms / 1000, over) {
+            if busy.contains_key(unit.as_str()) { continue; }
             let why = match &at {
                 Some((_, b)) if !b.up => format!("{} does not answer: the seconds are its silence, not the unit's (its lease is lost if it stays so, and the shard runs again)", b.node),
                 Some((_, b)) if over => format!("{} is oversubscribed: load {:.0} on {} cores", b.node, b.load, b.cores),
                 _ => {
                     let node = at.as_ref().map_or("<node>", |(_, b)| b.node.as_str());
-                    format!("its watch fails it HUNG, its state kept, at twice its measure and 9 min more (idle: at 9 min): `devhub top {node}` shows its processes, `devhub inspect {node}/<pid> why-hung` where they wait")
+                    format!("its watch fails it HUNG, its state kept, once its tests make no progress for 9 min (no result, no CPU, no I/O; never while it builds or works): `devhub top {node}` shows its processes, `devhub inspect {node}/<pid> why-hung` where they wait")
                 }
             };
             out.push(format!("tests run {ms} shard {i} ({who}): `{unit}` running {} against its measured {} ({}x); {why}", took(ran), took(measure), ran / measure.max(1)));
@@ -1816,22 +1833,43 @@ pub fn slow_units(home: &Path, now_ms: u64, shard_box: &dyn Fn(&str) -> Option<S
     out
 }
 
+/// A running unit its watch said stalled busy (unit_watch_body.sh's `GATEBUSY <unit> :: <since>
+/// <sample> <says>`): since when (epoch s) its tests gave no new result, its stack sample's path
+/// in the shard's keep dir, and what the sample says (the JIT's cause, the busiest thread).
+#[derive(Debug, PartialEq)]
+struct Busy<'a> {
+    since: u64,
+    sample: &'a str,
+    says: &'a str,
+}
+
 /// A shard's log's lease (its last `GATEQUEUE <lease> ..`: a shard that lost its lease runs again
-/// on a new one, and the lost one's units ended with it) and the units it started since
-/// (`GATESTART <unit> <epoch s>`) and did not end (`GATEEND <unit>`), by when each started.
-fn running_in(text: &str) -> (Option<&str>, BTreeMap<&str, u64>) {
-    let (mut lease, mut running) = (None, BTreeMap::new());
+/// on a new one, and the lost one's units ended with it), the units it started since
+/// (`GATESTART <unit> <epoch s>`) and did not end (`GATEEND <unit>`), by when each started, and
+/// those of them its watch said stalled busy ([`Busy`]; `GATEBUSY <unit> :: 0`: a new result since).
+fn running_in(text: &str) -> (Option<&str>, BTreeMap<&str, u64>, BTreeMap<&str, Busy<'_>>) {
+    let (mut lease, mut running, mut busy) = (None, BTreeMap::new(), BTreeMap::new());
     for l in text.lines() {
         if let Some(rest) = l.strip_prefix("GATEQUEUE ") {
             lease = rest.split_whitespace().next();
             running.clear();
+            busy.clear();
         } else if let Some((unit, at)) = l.strip_prefix("GATESTART ").and_then(|r| r.rsplit_once(' ')) {
             if let Ok(at) = at.trim().parse() { running.insert(unit, at); }
         } else if let Some(unit) = l.strip_prefix("GATEEND ") {
             running.remove(unit.trim_end());
+            busy.remove(unit.trim_end());
+        } else if let Some((unit, said)) = l.strip_prefix("GATEBUSY ").and_then(|r| r.split_once(" :: ")) {
+            let mut w = said.splitn(3, ' ');
+            match (w.next().and_then(|n| n.parse::<u64>().ok()), w.next()) {
+                (Some(since), Some(sample)) if since > 0 && running.contains_key(unit) => {
+                    busy.insert(unit, Busy { since, sample, says: w.next().unwrap_or("").trim() });
+                }
+                _ => { busy.remove(unit); }
+            }
         }
     }
-    (lease, running)
+    (lease, running, busy)
 }
 
 /// The running units ([`running_in`]) the check-in lists by `now_s`: past [`SLOW_TIMES`] their
@@ -2201,7 +2239,7 @@ mod tests {
                 .is_some_and(|stat| stat.rsplit(") ").next().and_then(|s| s.split_whitespace().nth(3)) == Some(sid.to_string().as_str()));
             assert!((0..50).any(|_| leads() || { std::thread::sleep(Duration::from_millis(20)); false }), "the unit leads its session");
             let out = root.join(format!("unit-{sid}"));
-            std::fs::write(&out, "").unwrap();
+            std::fs::write(&out, "running 1 test\n").unwrap();
             let mut w = std::process::Command::new("bash").arg(&script).arg(sid.to_string()).arg(&out)
                 .env("HUNG_LOOK", "1").env("HUNG_QUIET", "3").env("TMPDIR", &root).env("B", "true").spawn().unwrap();
             let ended = (0..60).any(|_| w.try_wait().unwrap().is_some() || { std::thread::sleep(Duration::from_millis(100)); false });
@@ -2220,61 +2258,108 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A unit busy far past its measure fails HUNG at its bound, twice its measure and then the
-    /// quiet a hung unit is given, with its state kept and the busiest thread named: a unit
-    /// measured at 15 s spun a driver thread at 96% of a core for 732 min, busy by every look
-    /// (11-08). A unit not measured yet has no bound. The watch reads a fake /proc on a fake clock
-    /// (its FAKE_PROC): a real spinning unit on a loaded box's tests got under a tenth of a core,
-    /// read as quiet before its bound (11-08).
+    /// A unit is hung only when its tests make no progress for the quiet: no new test result and its
+    /// processes doing nothing, counted while a target's tests run. A build is never a hang (a cold
+    /// JIT's compile, its wait for the box's JIT store), nor is a unit at work however long it takes:
+    /// a bound from its warm measure failed a cold JIT's `makepad-fab --bin` HUNG at 672 s against a
+    /// warm 66 s, its first frame at 471 s and a test thread at a core in JIT code (11-09). The watch's
+    /// body reads a fake /proc and a fake output on a fake clock here: a real spinning unit on a
+    /// loaded box's tests got under a tenth of a core (11-08). Its peak (GATEPEAK) is the most it held
+    /// at once, never its processes' own peaks summed: those read a force_mode unit's 12 GB as 30 GB
+    /// (11-10).
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_unit_busy_far_past_its_measure_is_hung_at_its_bound() {
-        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/run/fixture/unit_watch.sh");
-        let root = std::env::temp_dir().join(format!("devhub-bucket-unit-bound-{}", std::process::id()));
+    fn a_unit_is_hung_only_when_its_tests_make_no_progress() {
+        let body = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/run/fixture/unit_watch_body.sh");
+        let root = std::env::temp_dir().join(format!("devhub-bucket-unit-progress-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         // its session's one process, a pid past Linux's limit (2^22): none the watch's kill reaches
         let pid = 4_194_401u32;
-        // a core's work each second, for 6 s
-        let proc = root.join("proc");
-        for t in 0..=6u64 {
-            let task = proc.join(t.to_string()).join(pid.to_string());
-            let thread = task.join("task").join(pid.to_string());
-            std::fs::create_dir_all(&thread).unwrap();
-            let stat = format!("{pid} (python3) R 1 {pid} {pid} 0 -1 4194304 100 0 0 0 {} 0 0 0 20 0 1 0\n", 100 * t);
-            for dir in [&task, &thread] {
-                std::fs::write(dir.join("stat"), &stat).unwrap();
-                std::fs::write(dir.join("wchan"), "0").unwrap();
+        // the watch on a fake clock, a wait taking no time: second t's /proc is <case>/proc/<t>, its
+        // processes `mem(t)`'s (pid, command line, VmHWM and VmRSS in KB), the session's own at `cpu(t)`
+        // ticks; its output is `outs`' text from the second each is given on; a stall is said after 5 s
+        // with no new result. What it kept: the first lines of <out>.hung and <out>.busy, <out>.peak,
+        // what it said live (its fd 4) and <out>.peak.by
+        let watch = |case: &str, cpu: &dyn Fn(u64) -> u64, outs: &[(u64, &str)], mem: &dyn Fn(u64) -> Vec<(u32, &'static str, u64, u64)>| -> (String, String, String, String, String) {
+            let dir = root.join(case);
+            let proc = dir.join("proc");
+            for t in 0..=40u64 {
+                for (p, cmd, hwm, rss) in mem(t) {
+                    let task = proc.join(t.to_string()).join(p.to_string());
+                    let thread = task.join("task").join(p.to_string());
+                    std::fs::create_dir_all(&thread).unwrap();
+                    let comm = cmd.split(' ').next().unwrap();
+                    let stat = format!("{p} ({comm}) R 1 {p} {pid} 0 -1 4194304 100 0 0 0 {} 0 0 0 20 0 1 0\n", if p == pid { cpu(t) } else { 0 });
+                    for dir in [&task, &thread] {
+                        std::fs::write(dir.join("stat"), &stat).unwrap();
+                        std::fs::write(dir.join("wchan"), "0").unwrap();
+                    }
+                    std::fs::write(task.join("io"), "read_bytes: 0\nwrite_bytes: 0\n").unwrap();
+                    std::fs::write(task.join("status"), format!("VmPeak:\t{hwm} kB\nVmHWM:\t{hwm} kB\nVmRSS:\t{rss} kB\nVmData:\t{rss} kB\n")).unwrap();
+                    std::fs::write(task.join("cmdline"), cmd.split(' ').map(|a| format!("{a}\0")).collect::<String>()).unwrap();
+                }
             }
-            std::fs::write(task.join("io"), "read_bytes: 0\nwrite_bytes: 0\n").unwrap();
-            std::fs::write(task.join("status"), "VmHWM:\t   10240 kB\n").unwrap();
-        }
-        // what the watch kept: <out>.hung, <out>.peak
-        let watch = |measured: Option<&str>| -> (String, String) {
-            let out = root.join(format!("unit-{}", measured.unwrap_or("new")));
-            std::fs::write(&out, "").unwrap();
-            let mut w = std::process::Command::new("bash");
-            w.arg(&script).arg(pid.to_string()).arg(&out)
-                .env("HUNG_LOOK", "1").env("HUNG_QUIET", "2").env("FAKE_PROC", &proc).env("TMPDIR", &root).env("B", "true");
-            if let Some(m) = measured { w.env("MEASURED_S", m); }
-            assert!(w.status().unwrap().success());
+            let out = dir.join("unit");
+            std::fs::write(&out, outs.iter().find(|(t, _)| *t == 0).map_or("", |(_, text)| *text)).unwrap();
+            for (t, text) in outs {
+                std::fs::write(format!("{}.at{t}", out.display()), text).unwrap();
+            }
+            let script = dir.join("fake_watch.sh");
+            std::fs::write(&script, format!(
+                "now=0 nap=\"\" proc={0}/0\nwait_s() {{ now=$((now + $1)); proc={0}/$now; [ ! -f \"$out.at$now\" ] || cp \"$out.at$now\" \"$out\"; }}\nread_gpu() {{ :; }}\nwall() {{ echo $((1794000000 + now)); }}\nexec 4> \"$2.live\"\n. {1}\n",
+                proc.display(), body.display())).unwrap();
+            assert!(std::process::Command::new("bash").arg(&script).arg(pid.to_string()).arg(&out)
+                .env("HUNG_LOOK", "1").env("HUNG_QUIET", "2").env("BUSY_S", "5").env("BUSY_UNIT", "test p").env("DEVHUB_KEEP", dir.join("keep"))
+                .env("TMPDIR", &dir).env("B", "true").status().unwrap().success());
             let kept = |ext: &str| std::fs::read_to_string(format!("{}.{ext}", out.display())).unwrap_or_default();
-            (kept("hung"), kept("peak"))
+            let first = |ext: &str| kept(ext).lines().next().unwrap_or("").to_string();
+            if !kept("busy").is_empty() {
+                assert_eq!(std::fs::read_to_string(dir.join("keep").join(case).join("unit.busy")).unwrap(), kept("busy"), "{case}: its sample in the lease's keep dir");
+            }
+            (first("hung"), kept("peak"), first("busy"), kept("live"), kept("peak.by"))
         };
-        let (hung, peak) = watch(Some("1"));
-        assert_eq!(hung.lines().next(), Some(format!("== it ran 4 s, past its bound of 4 s (twice its measured 1 s, then 2 s); the busiest thread: {pid}/task/{pid} python3 R 100% wchan 0; their state").as_str()), "{hung}");
-        assert!(hung.contains("-- threads (") && hung.contains("-- the GPU"), "{hung}");
-        assert_eq!(peak.trim(), "10", "its peak in MB");
-        // not measured: busy past where a bound would be, it is hung only once its processes are gone
-        let (hung, _) = watch(None);
-        assert!(hung.starts_with("== its processes did nothing (under 5% of a core, no I/O) for 2 s; their state"), "{hung}");
+        let one = |_: u64| vec![(pid, "python3", 10_240u64, 10_240u64)];
+        const GB: u64 = 1 << 20;
+        // the test's process at 4 GB from 2 s to 5 s, a build it set off at half a GB and then at 3 GB from
+        // 5 s, gone at 8 s: 4.5 GB at once at most, against 7 GB of their own peaks summed
+        let two = |t: u64| {
+            let mut ps = vec![(pid, "python3 -I -c spin", if t >= 2 { 4 * GB } else { GB }, if (2..5).contains(&t) { 4 * GB } else { GB })];
+            if t < 8 { ps.push((pid + 1, "rustc --crate-name dep", if t >= 5 { 3 * GB } else { GB / 2 }, if t >= 5 { 3 * GB } else { GB / 2 })); }
+            ps
+        };
+        let hung_at = |s: u64| format!("== its processes did nothing (no test result, under 5% of a core, no I/O) for 2 s while its tests ran, {s} s into the unit; their state");
+        // a core's work each second for 20 s, far past any measure, one result at 8 s, then nothing
+        let (hung, peak, busy, live, by) = watch("busy", &|t| 100 * t.min(20), &[(0, "running 2 tests\n"), (8, "running 2 tests\ntest a ... ok\n")], &two);
+        assert_eq!(hung, hung_at(22), "busy: a unit at work is no hang, however long it works");
+        assert_eq!(peak.trim(), "4608", "busy: its peak in MB is the most its processes held at once, not their own peaks summed (7168)");
+        assert_eq!(by.trim(), "4.0 GB python3 -I -c spin; 0.5 GB rustc --crate-name dep", "busy: its processes at its peak, largest first, by command");
+        let top = "the busiest thread: 4194401/task/4194401 python3 R 100% wchan 0";
+        assert_eq!(busy, format!("== busy: no new test result for 5 s while its tests ran, 13 s into the unit; nothing stops it; {top}; their state"), "busy: its last stall's sample");
+        assert_eq!(live, format!("GATEBUSY test p :: 1794000000 busy/unit.busy {top}\nGATEBUSY test p :: 0\nGATEBUSY test p :: 1794000008 busy/unit.busy {top}\n"),
+            "busy: each stall said once with its last result's time, a new result clearing it");
+        // nothing for 10 s before its target's tests start (its build waits), then nothing
+        // its process at 2 GB for a moment between two looks, held at 0.1 GB at each
+        let spike = |t: u64| vec![(pid, "python3", if t >= 3 { 2 * GB } else { GB / 10 }, GB / 10)];
+        let (hung, peak, busy, live, by) = watch("build", &|_| 0, &[(0, ""), (10, "running 1 test\n")], &spike);
+        assert_eq!(hung, hung_at(11), "build: a build is never a hang; the quiet counts from its tests' start");
+        assert_eq!((busy.as_str(), live.as_str()), ("", ""), "build: a build is no stall");
+        assert_eq!((peak.trim(), by.trim()), ("2048", "2.0 GB python3 (its own peak, between looks)"), "build: one process's own peak between looks counts");
+        // its processes idle, a test result every 2 s
+        let (hung, peak, busy, live, _) = watch("results", &|_| 0, &[(0, "running 3 tests\n"), (2, "running 3 tests\ntest a ... ok\n"),
+            (4, "running 3 tests\ntest a ... ok\ntest b ... ok\n"), (6, "running 3 tests\ntest a ... ok\ntest b ... ok\ntest c ... ok\n")], &one);
+        assert_eq!(peak.trim(), "10", "results: its peak in MB");
+        assert_eq!(hung, hung_at(8), "results: a new test result is progress");
+        assert_eq!((busy.as_str(), live.as_str()), ("", ""), "results: no stall");
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A shard's class names its shape: another shape's measures are not its own.
+    /// A shard's class names its shape and its bucket: another shape's or the full bucket's
+    /// measures are not its own.
     #[test]
-    fn a_shards_class_is_its_shape() {
-        assert_eq!(shard_class(12), format!("test bash land_gate.sh testrun 12 cores @{}", crate::lease::sched::TESTS_LANE));
-        assert_ne!(shard_class(8), shard_class(12), "another shape measures apart");
+    fn a_shards_class_is_its_shape_and_its_bucket() {
+        assert_eq!(shard_class(12, false), format!("test bash land_gate.sh testrun 12 cores @{}", crate::lease::sched::TESTS_LANE));
+        assert_ne!(shard_class(8, false), shard_class(12, false), "another shape measures apart");
+        assert_eq!(shard_class(12, true), format!("test bash land_gate.sh testrun full 12 cores @{}", crate::lease::sched::TESTS_LANE), "the full bucket's measure apart");
     }
 
     /// The tests bucket takes a shard per SHARD_CORES of test cores on each up Linux x64 pool box
@@ -2515,13 +2600,14 @@ mod tests {
         let measures: BTreeMap<String, u64> = [("test slow", 540), ("test done", 60), ("test near", 600), ("test quick", 5)].iter().map(|(u, s)| (u.to_string(), *s)).collect();
         let now = 10_000;
         let shard = "testrun: 4 packages\nGATEQUEUE L7 5 0123456789ab\nGATESTART test slow 5000\nGATESTART test done 5000\nGATEEND test done\nGATESTART test near 9000\nGATESTART test quick 9500\nGATESTART test new 1000\nGATESTART junk\n";
-        let (lease, running) = running_in(shard);
+        let (lease, running, busy) = running_in(shard);
         assert_eq!(lease, Some("L7"));
+        assert!(busy.is_empty());
         assert_eq!(slow_in(&running, &measures, now, false), [("test slow".to_string(), 5000, 540)]);
         assert_eq!(slow_in(&running, &measures, 5100, false), [], "not yet 10 min");
         assert_eq!(slow_in(&running, &measures, now, true), [("test quick".to_string(), 500, 5), ("test slow".to_string(), 5000, 540)], "oversubscribed: past five times its measure");
         let again = format!("{shard}LEASE LOST on box-a (L7): link lost\nGATEQUEUE L8 5 0123456789ab\nGATESTART test quick 9900\n");
-        assert_eq!(running_in(&again), (Some("L8"), [("test quick", 9900)].into_iter().collect()), "the lost lease's units ended with it");
+        assert_eq!(running_in(&again), (Some("L8"), [("test quick", 9900)].into_iter().collect(), BTreeMap::new()), "the lost lease's units ended with it");
         let dir = std::env::temp_dir().join(format!("devhub-slow-units-{}", std::process::id()));
         let logs = dir.join("bucket-logs");
         std::fs::create_dir_all(&logs).unwrap();
@@ -2541,6 +2627,16 @@ mod tests {
         assert_eq!(said.len(), 1, "a box that does not answer is not judged oversubscribed by its last load: {said:?}");
         assert!(said[0].ends_with("(9x); box-a does not answer: the seconds are its silence, not the unit's (its lease is lost if it stays so, and the shard runs again)"), "{said:?}");
         assert_eq!(slow_units(&dir, now * 1000, &|_| None), Vec::<String>::new(), "its lease ended");
+        // a unit its watch said stalled busy is said as that with its sample, not as slow; one with a
+        // new result since is slow again; one never started is nothing
+        let stalled = "GATEQUEUE L9 3 0123456789ab\nGATESTART test spin 1000\nGATEBUSY test spin :: 3000 landgate.x/testrun-spin.busy the busiest thread: 7/task/8 worker R 99% wchan 0\nGATESTART test slow 5000\nGATEBUSY test slow :: 4000 landgate.x/testrun-slow.busy\nGATEBUSY test slow :: 0\nGATEBUSY test gone :: 4000 landgate.x/testrun-gone.busy\n";
+        std::fs::write(logs.join("tests-s2-1794013801204.log"), stalled).unwrap();
+        let both = |lease: &str| ["L7", "L9"].contains(&lease).then(|| ShardBox { node: "box-a".into(), up: true, load: 20.0, cores: 16 });
+        let said = slow_units(&dir, now * 1000, &both);
+        assert_eq!(said.len(), 3, "{said:?}");
+        assert_eq!(said[1], format!("tests run 1794013801204 shard 2 (L9 on box-a): `test spin` busy, no new result for 116 min (not measured yet); nothing stops it: main or its owner decides. Its stack sample: `devhub get landq-tests tmp/keep/landgate.x/testrun-spin.busy <dir> --lease L9` now, {} once its lease ends: the busiest thread: 7/task/8 worker R 99% wchan 0", logs.join("tests-s2-1794013801204.keep/landgate.x/testrun-spin.busy").display()));
+        assert!(said[2].starts_with("tests run 1794013801204 shard 2 (L9 on box-a): `test slow` running 83 min against its measured 9 min (9x)"), "{said:?}");
+        std::fs::remove_file(logs.join("tests-s2-1794013801204.log")).unwrap();
         // a run with its row is over: its sidecar stays
         let ended = obj(vec![("bucket", s("tests")), ("started_ms", Value::Int(1794013801204))]);
         std::fs::write(dir.join("buckets.jsonl"), format!("{}\n{}\n", ended.to_json(), row.to_json())).unwrap();

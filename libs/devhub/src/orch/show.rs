@@ -1404,7 +1404,8 @@ pub fn on_record(ctx: &Ctx, r: &Record) {
     failed(ctx, &x, format!("panic {}: {} at {} [{}]", p.id, p.message, p.location, p.thread));
 }
 
-/// `show add {"app","on","after":[words],"replace","by"}`, `show stop <app> <device>`, `show list [all]`.
+/// `show add {"app","on","after":[words],"replace","by"}`, `show native <app> <device>`,
+/// `show stop <app> <device>`, `show list [all]`.
 pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
     let mut w = line.splitn(3, ' ');
     let _ = w.next();
@@ -1489,12 +1490,35 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             }
             Ok(format!("{{\"id\":{},\"app\":{},\"device\":{},\"state\":{}}}", json_str(&x.id), json_str(&app), json_str(&dev), json_str(&x.state)))
         }
+        // a person's launch of the compiled app: the WM's own from here, with no JIT to follow, so
+        // no show is kept. What the node's WM said is the answer.
+        "native" => {
+            let mut w = rest.split_whitespace();
+            let (Some(app), Some(dev)) = (w.next(), w.next()) else { return Err("show native <app> <node>".into()) };
+            let dev = device(ctx, dev)?;
+            if matches!(dev.as_str(), "mac" | "quest") {
+                return Err(format!("show --native asks a node's WM to build and open the app: {dev} has none (--on <node>)"));
+            }
+            let app = package_of(app);
+            if ctx.store.read(|d| d.shows.iter().any(|x| x.active() && x.app == app && x.device == dev)) {
+                return Err(format!("{app} is shown on {dev} already, under the JIT, and the WM would only focus it: `devhub show stop {app} --on {dev}` first"));
+            }
+            let answer = crate::cli::ask(&ctl(), Some(&dev), "launch", &format!("show {app} native"))?;
+            if let Some(why) = answer.first().and_then(|l| makepad_strict_json::parse(l.as_bytes()).ok()).and_then(|v| v.get("err").and_then(|e| e.as_str()).map(str::to_string)) {
+                return Err(format!("{dev}: {why}"));
+            }
+            let line = format!("show {app} on {dev}: its WM opens the compiled app, not a test instance; its tile shows the build first, and one already open only takes focus");
+            event(ctx, Sev::Info, line.clone(), None);
+            Ok(format!("{{\"app\":{},\"device\":{},\"line\":{}}}", json_str(&app), json_str(&dev), json_str(&line)))
+        }
         "stop" => {
             let mut w = rest.split_whitespace();
             let (Some(app), dev) = (w.next(), w.next().unwrap_or("mac")) else { return Err("show stop <app> [<device>]".into()) };
             let dev = device(ctx, dev)?;
             let app = &package_of(app);
-            let x = ctx.store.read(|d| d.shows.iter().find(|x| x.active() && x.app == *app && x.device == dev).cloned()).ok_or_else(|| format!("{app} is not shown on {dev}"))?;
+            let Some(x) = ctx.store.read(|d| d.shows.iter().find(|x| x.active() && x.app == *app && x.device == dev).cloned()) else {
+                return stop_compiled(ctx, app, &dev);
+            };
             if matches!(x.state.as_str(), "running" | "paused") {
                 stop(&x)?;
             }
@@ -1522,6 +1546,25 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
         }
         _ => Err(format!("show: unknown word `{verb}` (add stop pin list)")),
     }
+}
+
+/// `show stop` of an app with no show: what `show --native` opened on a node has none, and only
+/// its box can close it.
+fn stop_compiled(ctx: &Ctx, app: &str, dev: &str) -> Result<String, String> {
+    let not_shown = format!("{app} is not shown on {dev}");
+    if matches!(dev, "mac" | "quest") {
+        return Err(not_shown);
+    }
+    let answer = crate::cli::ask(&ctl(), Some(dev), "launch", &format!("close {app}"))?;
+    let said = answer.first().and_then(|l| makepad_strict_json::parse(l.as_bytes()).ok()).ok_or_else(|| format!("{dev}: no answer to close {app}"))?;
+    if let Some(why) = said.get("err").and_then(|e| e.as_str()) {
+        return Err(format!("{dev}: {why}"));
+    }
+    if said.get("closed").and_then(|n| n.as_u64()).unwrap_or(0) == 0 {
+        return Err(not_shown);
+    }
+    event(ctx, Sev::Info, format!("show {app} on {dev}: its compiled app closed"), None);
+    Ok(format!("{{\"app\":{},\"device\":{},\"state\":\"stopped\"}}", json_str(app), json_str(dev)))
 }
 
 #[cfg(test)]
@@ -1759,6 +1802,10 @@ mod tests {
         let r = add("mymac").unwrap();
         assert!(r.contains("\"device\":\"mac\"") && r.contains("\"state\":\"waiting\""), "{r}");
         assert!(add("nowhere").unwrap_err().contains("no device nowhere"));
+        // a native launch asks a node's WM: the Mac and the Quest have none
+        assert!(serve(&ctx, "show native makepad-foo mac").unwrap_err().contains("mac has none"));
+        assert!(serve(&ctx, "show native makepad-foo quest").unwrap_err().contains("quest has none"));
+        assert!(serve(&ctx, "show native makepad-foo nowhere").unwrap_err().contains("no device nowhere"));
         // a second show of the same app on the same device replaces a waiting one
         add("mac").unwrap();
         assert_eq!(ctx.store.read(|d| d.shows.iter().map(|x| x.state.clone()).collect::<Vec<_>>()), vec!["replaced", "waiting"]);

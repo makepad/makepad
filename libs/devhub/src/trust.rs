@@ -23,7 +23,7 @@ use makepad_network::tls::{TlsIdentity, TlsServer, TlsStream};
 use makepad_network::SocketStream;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,34 @@ const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const BAN: Duration = Duration::from_secs(15 * 60);
 const MAX_SESSIONS: usize = 16;
 const MAX_PER_PEER: usize = 4;
+
+/// The address a connection to `hub` would come from: the system's pick for that route, with
+/// nothing sent (a UDP connect only looks the route up).
+fn source_address(hub: SocketAddr) -> io::Result<IpAddr> {
+    let any: IpAddr = if hub.is_ipv4() { Ipv4Addr::UNSPECIFIED.into() } else { Ipv6Addr::UNSPECIFIED.into() };
+    let socket = UdpSocket::bind((any, 0))?;
+    socket.connect(hub)?;
+    Ok(socket.local_addr()?.ip())
+}
+
+/// What a credential bound to `bound` gets from a hub when its connections come from `source`:
+/// `Need::Admin` holds only from the bound address, and anywhere else a hub answers that the
+/// credential has no rights there.
+fn address_said(bound: IpAddr, source: io::Result<IpAddr>) -> Option<String> {
+    match source {
+        Err(e) => Some(format!("this Mac has no route to its hubs: {e}")),
+        Ok(s) if id::normalize(s) == id::normalize(bound) => None,
+        Ok(s) => Some(format!("this Mac's address is not the credential's bound address ({s}, bound to {bound}): every hub refuses it until it is")),
+    }
+}
+
+/// What keeps this machine's credential from working on `hubs` (`<ip>:<port>`), read from this
+/// machine alone, so it holds while no hub can be asked: one a hub would refuse for its address,
+/// or no route to a hub at all. None with no bound address in its credential.
+pub fn network_problem<'a>(hubs: impl Iterator<Item = &'a str>) -> Option<String> {
+    let bound = id::me()?.cred.from?;
+    hubs.filter_map(|hub| hub.parse().ok()).find_map(|hub| address_said(bound, source_address(hub)))
+}
 
 fn read_line<S: Read>(s: &mut S) -> io::Result<String> {
     let mut line = Vec::new();
@@ -324,3 +352,29 @@ fn accept_one(tls: &TlsServer, verifier: &id::Verifier, pick: &Pick, accepted: O
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// An outage's 15 min with every box refusing the master came down to one address: said here
+    /// as that, from this machine alone, while no hub can be asked.
+    #[test]
+    fn an_address_other_than_the_bound_one_is_said_plainly() {
+        let bound = ip("192.0.2.22");
+        assert_eq!(address_said(bound, Ok(bound)), None);
+        assert_eq!(address_said(bound, Ok(ip("::ffff:192.0.2.22"))), None, "the same address, as a hub reads it");
+        let said = address_said(bound, Ok(ip("192.0.2.77"))).unwrap();
+        assert!(said.starts_with("this Mac's address is not the credential's bound address") && said.contains("192.0.2.77") && said.contains("192.0.2.22"), "{said}");
+        let no_route = address_said(bound, Err(io::Error::new(io::ErrorKind::NetworkUnreachable, "Network is unreachable"))).unwrap();
+        assert_eq!(no_route, "this Mac has no route to its hubs: Network is unreachable");
+    }
+
+    #[test]
+    fn the_source_address_is_the_routes_own() {
+        assert_eq!(source_address("127.0.0.1:9".parse().unwrap()).unwrap(), ip("127.0.0.1"));
+    }
+}

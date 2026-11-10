@@ -774,8 +774,10 @@ pub struct Live {
     pub src: String,
     pub cost: String,
     pub est_min: Option<f64>,
-    /// `--cores`: what it asks, past its class's measure
+    /// `--cores`: what its run sees, charged its class's measure
     pub cores: Option<f64>,
+    /// `--ram-gb`: what it asks, past its class's measure
+    pub ram_gb: Option<f64>,
     pub class: String,
     pub priority: String,
     pub loader: String,
@@ -813,6 +815,9 @@ pub struct Live {
     pub restart_since_ms: u64,
     pub restart_saves: u64,
     pub restart_why: String,
+    /// since when it waits for one of its lane's headless slots, asking for no box yet (0: it has
+    /// one, or is visible): a lane's session past them waits like a lease ([`crate::orch::live`])
+    pub slot_wait_ms: u64,
     pub panic: Option<JobPanic>,
     pub log: String,
     pub note: String,
@@ -1132,6 +1137,9 @@ pub struct Job {
     pub needs: String,
     /// the node it runs on (`--node`; it waits for it), or empty
     pub node_pref: String,
+    /// `--series`: why it names that node, a series compared on that one box, or empty
+    /// ([`crate::lease::sched::Req::series`])
+    pub series: String,
     pub prio: i32,
     /// the pinned `--rev` (`branch@sha[,branch@sha]`): the snapshot's base commits
     pub rev: String,
@@ -1189,6 +1197,8 @@ pub struct Job {
     pub waited_ms: u64,
     /// the lease whose idle verdict a `job wait` told its owner: told once a lease
     pub idle_told: String,
+    /// a timed run's box was not quiet: its box and why ([`crate::lease::master::unquiet`])
+    pub unquiet: String,
     pub note: String,
 }
 
@@ -1680,6 +1690,7 @@ fn live_state_value(x: &Live) -> Value {
         ("cost", s(&x.cost)),
         ("est_min", x.est_min.map_or(Value::Null, Value::F64)),
         ("cores", x.cores.map_or(Value::Null, Value::F64)),
+        ("ram_gb", x.ram_gb.map_or(Value::Null, Value::F64)),
         ("class", s(&x.class)),
         ("priority", s(&x.priority)),
         ("loader", s(&x.loader)),
@@ -1700,6 +1711,7 @@ fn live_state_value(x: &Live) -> Value {
         ("restart_since_ms", int(x.restart_since_ms)),
         ("restart_saves", int(x.restart_saves)),
         ("restart_why", s(&x.restart_why)),
+        ("slot_wait_ms", int(x.slot_wait_ms)),
         ("panic", panic_value(&x.panic)),
         ("log", s(&x.log)),
         ("note", s(&x.note)),
@@ -1737,6 +1749,7 @@ fn live_state_from(v: &Value) -> Live {
         cost: text(o, "cost"),
         est_min: v.get("est_min").and_then(crate::lease::num),
         cores: v.get("cores").and_then(crate::lease::num),
+        ram_gb: v.get("ram_gb").and_then(crate::lease::num),
         class: text(o, "class"),
         priority: text(o, "priority"),
         loader: text(o, "loader"),
@@ -1757,6 +1770,7 @@ fn live_state_from(v: &Value) -> Live {
         restart_since_ms: uint(o, "restart_since_ms"),
         restart_saves: uint(o, "restart_saves"),
         restart_why: text(o, "restart_why"),
+        slot_wait_ms: uint(o, "slot_wait_ms"),
         panic: panic_from(v.get("panic")),
         log: text(o, "log"),
         note: text(o, "note"),
@@ -1847,6 +1861,7 @@ pub fn job_value(j: &Job) -> Value {
         ("kind", s(&j.kind)),
         ("needs", s(&j.needs)),
         ("node_pref", s(&j.node_pref)),
+        ("series", s(&j.series)),
         ("prio", Value::Int(j.prio as i64)),
         ("rev", s(&j.rev)),
         ("repo_dir", s(&j.repo_dir)),
@@ -1885,6 +1900,7 @@ pub fn job_value(j: &Job) -> Value {
         ("released", Value::Bool(j.released)),
         ("waited_ms", int(j.waited_ms)),
         ("idle_told", s(&j.idle_told)),
+        ("unquiet", s(&j.unquiet)),
         ("note", s(&j.note)),
     ])
 }
@@ -1909,6 +1925,7 @@ pub fn job_from(v: &Value) -> Job {
         kind: text(o, "kind"),
         needs: text(o, "needs"),
         node_pref: text(o, "node_pref"),
+        series: text(o, "series"),
         prio: v.get("prio").and_then(|x| x.as_i64()).unwrap_or(5) as i32,
         rev: text(o, "rev"),
         repo_dir: text(o, "repo_dir"),
@@ -1947,6 +1964,7 @@ pub fn job_from(v: &Value) -> Job {
         released: flag(o, "released", false),
         waited_ms: uint(o, "waited_ms"),
         idle_told: text(o, "idle_told"),
+        unquiet: text(o, "unquiet"),
         note: text(o, "note"),
     }
 }
@@ -2555,6 +2573,15 @@ mod tests {
         assert_eq!((ci.timing("jit:01"), ci.timing("test:x:lib"), ci.timing("nope")), (Some(30.0), Some(5.0), None));
         let doc = Doc { ci, ..Default::default() };
         assert_eq!(Doc::parse(&doc.to_value().to_json()), Some(doc));
+    }
+
+    /// A session keeps what it asked through a master's restart, and `live again` reads it there.
+    #[test]
+    fn a_live_session_keeps_its_cores_and_ram_asks() {
+        let x = Live { id: "W1".into(), cores: Some(4.0), ram_gb: Some(12.5), ..Default::default() };
+        let back = live_from(&live_value(&x));
+        assert_eq!((back.cores, back.ram_gb), (Some(4.0), Some(12.5)));
+        assert_eq!(live_from(&live_value(&Live::default())).ram_gb, None);
     }
 
     #[test]

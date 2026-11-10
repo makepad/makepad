@@ -79,7 +79,6 @@ Set-Content -Path $startCmd -Encoding ascii -Value @(
     "rem devhub node at logon (tools/devhub/windows/install-node.ps1): cargo run in the node's tree, restarted on every exit",
     "cd /d `"$Tree`"",
     "set CARGO_TARGET_DIR=$target",
-    "set CARGO_INCREMENTAL=0",
     "set CARGO_NET_OFFLINE=true",
     ":again",
     "echo %DATE% %TIME% devhub node start in $Tree >> `"$startLog`"",

@@ -580,10 +580,26 @@ fn retired_refusal(repo: &Path, line: &str) -> Option<&'static str> {
     (crate::gitread::Pass::default().retired_holds(repo, from) == Some(true)).then_some("makepad")
 }
 
+/// What a building apply does about its box's deployment-build room ([`push_and_apply`]'s `room_for`).
+pub(super) enum RoomNow {
+    /// it builds under this room, released once its node answers
+    Built(crate::orch::roll::DeployRoom),
+    /// it builds under a room its caller holds, on these jobs
+    Held(Option<u32>),
+    /// its tree moves alone: its room waits in line, and the box builds once it is granted
+    Tree,
+    /// timed work on the box goes first: it waits for the gap after
+    Waits,
+}
+
+/// How a building apply gets its box's room: (node, its wait lines' sink).
+pub(super) type RoomFor<'a> = dyn Fn(&str, &mut dyn FnMut(&str)) -> Result<RoomNow, String> + Sync + 'a;
+
 /// `follow`: the repositories to move, each with its branch (makepad first, [`super::followed`]);
 /// `at`: the commits to move to (a timed ask's pin, [`crate::lease::Pin::key`]) in place of the
-/// branches' tips; the branches name them on the node.
-pub(super) fn push_and_apply(c: &Client, repo: &Path, follow: &[(String, String)], at: Option<&str>, nodes: &[String], build: &str, restart: &str, prewarm: bool, extra: &str, out: &mut dyn FnMut(&str, &str)) -> i32 {
+/// branches' tips; the branches name them on the node. `room_for`: how a building apply gets its
+/// box's room (None: it waits in line for it, [`crate::orch::roll::deploy_build_room`]).
+pub(super) fn push_and_apply(c: &Client, repo: &Path, follow: &[(String, String)], at: Option<&str>, nodes: &[String], build: &str, restart: &str, prewarm: bool, extra: &str, room_for: Option<&RoomFor>, out: &mut dyn FnMut(&str, &str)) -> i32 {
     let mut pushes = Vec::new();
     let pinned = at.map(|a| crate::lease::Pin::parse(a).ok_or_else(|| format!("`{a}` is no pin (`<makepad sha>[,<name>=<sha>]...`)")));
     for (name, branch) in follow {
@@ -640,19 +656,40 @@ pub(super) fn push_and_apply(c: &Client, repo: &Path, follow: &[(String, String)
             }
         }
     }
-    // 2. apply, keeping the node's fast-forward check and restart policy
-    let words = format!("apply{revs} build={build} restart={restart}{}{extra}", if prewarm { " prewarm=on" } else { "" });
+    // 2. apply, keeping the node's fast-forward check and restart policy. One that builds holds its
+    // box's deployment-build room until its node answers: the prebuild is charged and queues like
+    // any build ([`crate::orch::roll::deploy_build_room`]), on the jobs of its grant
+    let words = |build: &str| format!("apply{revs} build={build} restart={restart}{}{extra}", if prewarm { " prewarm=on" } else { "" });
     let answers = std::thread::scope(|s| {
+        let (tx, rx) = std::sync::mpsc::channel::<(String, String)>();
         let hs: Vec<_> = ready.into_iter().map(|n| {
-            let words = &words;
+            let (words, tx) = (&words, tx.clone());
             (n, s.spawn(move || {
-                let order = sign::sign(words)?;
+                let mut waits = |l: &str| { let _ = tx.send((String::new(), format!("{n}: {l}"))); };
+                let room = match build {
+                    "on" => match room_for {
+                        Some(f) => f(n, &mut waits)?,
+                        None => crate::orch::roll::deploy_build_room(repo, n, &mut waits)?.map_or(RoomNow::Waits, RoomNow::Built),
+                    },
+                    _ => RoomNow::Tree,
+                };
+                let (words, _room) = match room {
+                    RoomNow::Waits => return Ok(vec![format!("{{\"err\":\"waits: timed work runs or waits at {n}: its deployment builds in the gap after it\"}}")]),
+                    RoomNow::Tree => (words("off"), None),
+                    RoomNow::Held(jobs) => (with_jobs(words("on"), jobs), None),
+                    RoomNow::Built(room) => (with_jobs(words("on"), room.jobs()), Some(room)),
+                };
+                let order = sign::sign(&words)?;
                 let answer = ask(c, n, "sync", &format!("apply {order}"))?;
                 let Some(repoint) = answer.iter().find_map(|l| retired_refusal(repo, l)) else { return Ok(answer) };
                 let order = sign::sign(&format!("{words} repoint={repoint}"))?;
                 ask(c, n, "sync", &format!("apply {order}"))
             }))
         }).collect();
+        drop(tx);
+        for (n, l) in rx {
+            out(&n, &l);
+        }
         hs.into_iter().map(|(n, h)| (n, h.join().unwrap_or_else(|_| Err("panicked".into())))).collect::<Vec<_>>()
     });
     for (n, r) in answers {
@@ -668,6 +705,14 @@ pub(super) fn push_and_apply(c: &Client, repo: &Path, follow: &[(String, String)
         }
     }
     code
+}
+
+/// An apply order's words with the jobs of its room's grant ([`crate::lease::DEPLOY_JOBS_PROTO`]).
+fn with_jobs(words: String, jobs: Option<u32>) -> String {
+    match jobs {
+        Some(j) => format!("{words} jobs={j}"),
+        None => words,
+    }
 }
 
 fn sync_push(c: &Client, args: &[&str]) -> i32 {
@@ -725,7 +770,7 @@ fn sync_push(c: &Client, args: &[&str]) -> i32 {
     };
     let Some(session) = flag(args, "--session") else {
         let follow: Vec<(String, String)> = pushes.iter().map(|p| (p.repo.clone(), p.branch.clone())).collect();
-        return push_and_apply(c, &repo, &follow, None, &nodes, build, restart, args.contains(&"--prewarm"), "", &mut out);
+        return push_and_apply(c, &repo, &follow, None, &nodes, build, restart, args.contains(&"--prewarm"), "", None, &mut out);
     };
     let revs: String = pushes.iter().map(|p| format!(" {}={}", p.repo, p.sha)).collect();
     for p in &pushes {
@@ -895,7 +940,7 @@ pub fn main(args: &[&str]) -> Option<i32> {
     }
     // the dock's app on this machine, from its own shell: no hub, no master
     if let ("open", [app]) = (verb, &args[1..]) {
-        return Some(match super::launch::show(app) {
+        return Some(match super::launch::show(app, false) {
             Ok(_) => 0,
             Err(e) => {
                 eprintln!("makepad devhub open: {e}");

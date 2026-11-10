@@ -757,7 +757,6 @@ fn run_leg(ctx: &Ctx, run: &Run) {
                 // took a build's 12 GB default (three pool boxes' prebuilds waited 23 min an hour
                 // on RAM, holding their box meanwhile, 11-03)
                 r.class = WARM_CLASS.into();
-                if prebuild { r.priority = crate::lease::Priority::Interactive; }
                 if run.borrow().os == "macos" { r.needs.push(("os".into(), "macos".into())); }
             }, &mut on_wait, &give_up, &mut follow);
             if prebuild {

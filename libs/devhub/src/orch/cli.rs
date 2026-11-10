@@ -3,7 +3,7 @@
 //!
 //! Exit codes: 0 ok, 1 the command failed (or a push was refused), 2 usage or no master.
 
-use crate::cli::{ask, control, has, retry_master};
+use crate::cli::{ask, control, has, jit_reads, link_cut, retry_master, RAN_NOTHING};
 use crate::proto::{Record, Sev};
 use makepad_remote::json_str;
 use makepad_remote::link::Client;
@@ -11,7 +11,7 @@ use makepad_strict_json::Value;
 use std::io::Write;
 use std::time::Duration;
 
-pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N] [--prio P] [--lane L] [--after J1,J2] [--rev R] [--with-uncommitted] [--tree]
+pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [--series S]] [--prio P] [--lane L] [--after J1,J2] [--rev R] [--with-uncommitted] [--tree]
         [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--whole]
         [--class name] [--priority interactive|background] [--jit key] [--native <reason>] -- cmd...
                                           an async job (prefer it to holding a lease): returns its id at once; it runs
@@ -37,7 +37,7 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N] [
   job inspect <id> <cmd..> | job resume <id> <P1> retry|restart|unwind | job release <id>
                                           a job paused on a parked panic keeps its box: look, resume or let go
                                           (while the panic stays parked; 10 min with no action release it)
-  live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--cores N] [--env K=V ..] [--bin B] [-- args...]
+  live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--bin B] [-- args...]
         [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key]
                                           the app under the JIT on a box (headless, or visible on a screen box), held
                                           for this lane: every file saved in this worktree ships to it as it comes and
@@ -55,7 +55,8 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N] [
                                           or a frame drawn; verdict gives save → shipped → patched → tests times
   live sync <id> | live release <id> | live list [--all] | live <id>
                                           ship changes since the last ship, including deletions; end it (10 min idle; tests 30 min)
-  live again <id>                         an ended session (parked: an ask needed the RAM it held idle) starts again
+  live again <id>                         an ended session (parked: an ask needed the RAM it held idle; a visible one
+                                          parks only for timed or whole-box work) starts again
                                           as it was asked: same app or tests, box, env and source mode
   show <app> [--on mac|<node>|quest] [--after landed <branch>] [--replace] [--pin] [-- <app args>]
   show pin <app> [--on <device> | <device>] on|off   an operation runs on the app: no edit or landing reaches it and it
@@ -376,7 +377,7 @@ fn job_req(words: &[String], base: &[(String, String)]) -> Result<String, String
                 f.push(("loader".into(), v.clone()));
                 i += 2;
             }
-            ("--kind" | "--needs" | "--node" | "--prio" | "--lane" | "--after" | "--cost" | "--est-min" | "--cores" | "--ram-gb" | "--class" | "--priority" | "--native", v) => {
+            ("--kind" | "--needs" | "--node" | "--series" | "--prio" | "--lane" | "--after" | "--cost" | "--est-min" | "--cores" | "--ram-gb" | "--class" | "--priority" | "--native", v) => {
                 // (`--needs -- cmd` took `--` for the needs and ran the command with none, 11-04)
                 let Some(v) = v.filter(|v| !v.starts_with("--")) else { return Err(format!("{w} needs a value")) };
                 f.retain(|(k, _)| k != &w[2..]);
@@ -429,8 +430,10 @@ fn job_req(words: &[String], base: &[(String, String)]) -> Result<String, String
     // `--jit` goes with any command: the run's MAKEPAD_LOADER, held for it on its box (it went
     // only with a JIT cargo run, and a script's `--jit` was dropped here unsaid, 11-07)
     let loader = get("loader").unwrap_or_default();
+    // only when given: a master from before it refuses a field it does not know
+    let series = get("series").map_or(String::new(), |name| format!("\"series\":{},", json_str(&name)));
     Ok(format!(
-        "{{\"loader\":{},\"priority\":{},\"cost\":{},\"est_min\":{est_min},\"cores\":{cores},\"ram_gb\":{ram_gb},\"whole\":{whole},\"class\":{},\"tree\":{tree},\"kind\":{},\"needs\":{},\"node\":{},\"prio\":{prio},\"lane\":{},\"lane_from\":{},\"agent\":{},\"native\":{},\"cmd\":[{}],\"after\":[{}]}}",
+        "{{\"loader\":{},\"priority\":{},\"cost\":{},\"est_min\":{est_min},\"cores\":{cores},\"ram_gb\":{ram_gb},\"whole\":{whole},\"class\":{},\"tree\":{tree},\"kind\":{},\"needs\":{},\"node\":{},{series}\"prio\":{prio},\"lane\":{},\"lane_from\":{},\"agent\":{},\"native\":{},\"cmd\":[{}],\"after\":[{}]}}",
         json_str(&loader),
         json_str(&priority),
         json_str(&cost),
@@ -461,7 +464,7 @@ fn submit_flags(rest: &[String]) -> (Vec<(String, String)>, String, Option<Strin
             ("--rev", Some(v)) => rev = v.clone(),
             ("--batch", Some(v)) => batch = Some(v.clone()),
             ("--jit", Some(v)) => common.push(("loader".into(), v.clone())),
-            (k @ ("--kind" | "--needs" | "--node" | "--prio" | "--lane" | "--after" | "--cost" | "--est-min" | "--cores" | "--ram-gb" | "--class" | "--priority" | "--native"), Some(v)) if !v.starts_with("--") => common.push((k[2..].to_string(), v.clone())),
+            (k @ ("--kind" | "--needs" | "--node" | "--series" | "--prio" | "--lane" | "--after" | "--cost" | "--est-min" | "--cores" | "--ram-gb" | "--class" | "--priority" | "--native"), Some(v)) if !v.starts_with("--") => common.push((k[2..].to_string(), v.clone())),
             _ => break,
         }
         i += 2;
@@ -570,7 +573,7 @@ fn job(c: &Client, words: &[&str], json: bool) -> i32 {
                     if t.get("queued").is_some() {
                         println!("{id} stays queued: `devhub job cancel {id}` ends it, `devhub job wait {id}` waits on (said once a lease)");
                     } else {
-                        println!("{id} runs on: `devhub job cancel {id}` ends it, `devhub job wait {id}` waits on (said once a lease); its stacks: `devhub inbox`");
+                        println!("{id} runs on: `devhub job cancel {id}` ends it, `devhub job wait {id}` waits on (said once a lease)");
                     }
                     println!("{id}: {}", t.get("word").and_then(Value::as_str).unwrap_or(""));
                 }
@@ -636,6 +639,60 @@ fn job(c: &Client, words: &[&str], json: bool) -> i32 {
     }
 }
 
+/// One ask of a `live act`, for [`retry_master`]: a restart of the master or of the session's box's
+/// hub, as each landing that rolls them does, cuts the calls they carry, and the session goes on. A lane
+/// read the bare "link lost" as a lost session and released it, twice in an hour (11-09). A cut
+/// call goes round again when that does nothing twice: it had only waited for room, or `read`
+/// says it only reads. Any other call may have reached the app, so it is not sent again, and the
+/// error says what is and isn't known.
+fn cut_act<T>(asked: Result<T, String>, id: &str, read: impl FnOnce() -> bool) -> Result<T, String> {
+    match asked {
+        Err(e) if link_cut(&e) && !e.contains(RAN_NOTHING) && !read() => Err(format!(
+            "{id}: the master or its box's hub restarted during this call, as they do when work lands. That doesn't end a session: `devhub live {id}` shows whether it still runs. Whether this call reached the app isn't known, so it was not sent again: look at the app, then ask again if it didn't"
+        )),
+        asked => asked,
+    }
+}
+
+/// Whether `cmd` only reads, by the JIT's own list or by the risk the app's manifest gives it (a
+/// tool's risk is the app's to say). What neither knows acts. It asks the app, on the way to asking
+/// again after a cut only: nothing else needs to know.
+fn only_reads(c: &Client, lv: &str, id: &str, cmd: &[&str]) -> bool {
+    if jit_reads(cmd) { return true; }
+    let Ok(v) = retry_master(|| one(c, "live", &format!("{lv} act {id} tools"))) else { return false };
+    let lines: Vec<&str> = v.get("lines").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|l| l.as_str()).collect();
+    reads_by_manifest(&lines, cmd)
+}
+
+/// Whether an `app` list (`tools`) gives `cmd` the risk `Read`: `call <service>.<tool>` is that
+/// tool, other words its command's (`ui find` is `ui_find` of any service, and `ui` only if there
+/// is none: `ui q=x`). A name two services have must read in both.
+fn reads_by_manifest(list: &[&str], cmd: &[&str]) -> bool {
+    let (service, names) = match cmd {
+        ["call", tool, ..] => match tool.split_once('.') {
+            Some((service, name)) => (Some(service), vec![name.to_string()]),
+            None => return false,
+        },
+        [a, b, ..] => (None, vec![format!("{a}_{b}"), a.to_string()]),
+        [a] => (None, vec![a.to_string()]),
+        [] => return false,
+    };
+    let manifests: Vec<Value> = list.iter().filter_map(|l| makepad_strict_json::parse_depth(l.as_bytes(), 16).ok()).collect();
+    let risks = |name: &str| -> Vec<String> {
+        manifests.iter().filter_map(|l| l.get("Instance")?.get("manifest"))
+            .filter(|m| service.is_none_or(|s| m.get("id").and_then(|i| i.as_str()) == Some(s)))
+            .filter_map(|m| m.get("tools")?.as_arr())
+            .flatten()
+            .filter(|t| t.get("name").and_then(|n| n.as_str()) == Some(name))
+            .map(|t| match t.get("risk") {
+                Some(Value::Obj(pairs)) => pairs.first().map_or(String::new(), |(k, _)| k.clone()),
+                _ => String::new(),
+            })
+            .collect()
+    };
+    names.iter().map(|n| risks(n)).find(|r| !r.is_empty()).is_some_and(|r| r.iter().all(|k| k == "Read"))
+}
+
 fn live(c: &Client, words: &[&str], json: bool) -> i32 {
     // A live session belongs to the lane that started it: calls on one say which lane they come
     // from (`--lane L` overrides the worktree's), and the master refuses another lane's.
@@ -656,7 +713,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
         ["start", app, rest @ ..] => {
             let (mut needs, mut visible, mut lane, mut node) = (String::new(), false, None::<String>, String::new());
             let (mut use_tree, mut cost, mut est_min, mut class) = (false, String::new(), "null".to_string(), String::new());
-            let mut cores = "null".to_string();
+            let (mut cores, mut ram_gb) = ("null".to_string(), "null".to_string());
             let mut priority = "interactive";
             let mut loader = None;
             let (mut test, mut test_args, mut selected) = (false, Vec::new(), false);
@@ -698,6 +755,11 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
                         let Some(n) = n.parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0) else { eprintln!("--cores is a positive number"); return 2 };
                         cores = n.to_string(); i += 1;
                     }
+                    // the RAM it asks, past its class's measure
+                    ("--ram-gb", Some(n)) => {
+                        let Some(n) = n.parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0) else { eprintln!("--ram-gb is a positive number"); return 2 };
+                        ram_gb = n.to_string(); i += 1;
+                    }
                     ("--test", next) if !test && next.is_none_or(|a| a.starts_with('-')) => test = true,
                     // without --test, `--bin` runs that bin: it ran the bin's unit tests, none, and
                     // looked like a success that did nothing (11-04)
@@ -713,7 +775,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
                     }
                     ("--", _) => { test_args.extend_from_slice(&rest[i..]); break; }
                     (w, _) => {
-                        eprintln!("makepad devhub live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--cores N] [--env K=V ..] [--bin B] [--test [--lib|--bin B|--test T]] [-- args...]: invalid `{w}`");
+                        eprintln!("makepad devhub live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--bin B] [--test [--lib|--bin B|--test T]] [-- args...]: invalid `{w}`");
                         return 2;
                     }
                 }
@@ -729,18 +791,22 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
             };
             let lane = lane.or_else(|| std::env::var("DEVHUB_LANE").ok().filter(|l| !l.is_empty())).unwrap_or_else(|| tree.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default());
             let loader = loader.unwrap_or_default();
-            let req = format!("{{\"loader\":{},\"priority\":{},\"cost\":{},\"class\":{},\"est_min\":{est_min},\"cores\":{cores},\"tree\":{use_tree},\"app\":{},\"repo_dir\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"visible\":{visible},\"test\":{test},\"test_args\":[{}],\"env\":[{}],\"also\":[{}]}}", json_str(&loader), json_str(priority), json_str(&cost), json_str(&class), json_str(app), json_str(&tree.to_string_lossy()), json_str(&lane), json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()), json_str(&needs), json_str(&node), test_args.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","), env.join(","), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","));
+            let req = format!("{{\"loader\":{},\"priority\":{},\"cost\":{},\"class\":{},\"est_min\":{est_min},\"cores\":{cores},\"ram_gb\":{ram_gb},\"tree\":{use_tree},\"app\":{},\"repo_dir\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"visible\":{visible},\"test\":{test},\"test_args\":[{}],\"env\":[{}],\"also\":[{}]}}", json_str(&loader), json_str(priority), json_str(&cost), json_str(&class), json_str(app), json_str(&tree.to_string_lossy()), json_str(&lane), json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()), json_str(&needs), json_str(&node), test_args.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","), env.join(","), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","));
             done(retry_master(|| one(c, "live", &format!("live start {req}"))), json, &flat)
         }
-        ["act", id, cmd @ ..] if !cmd.is_empty() => done(one(c, "live", &format!("{lv} act {id} {}", makepad_remote::app::typed_line(&cmd.iter().map(|w| w.to_string()).collect::<Vec<_>>()))), json, &|v| {
+        // goes on through a master or hub restart when asking again does nothing twice ([`cut_act`])
+        ["act", id, cmd @ ..] if !cmd.is_empty() => done({
+            let line = format!("{lv} act {id} {}", makepad_remote::app::typed_line(&cmd.iter().map(|w| w.to_string()).collect::<Vec<_>>()));
+            let mut reads = None;
+            retry_master(|| cut_act(one(c, "live", &line), id, || *reads.get_or_insert_with(|| only_reads(c, &lv, id, cmd))))
+        }, json, &|v| {
             let mut out: String = v.get("lines").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().map(|l| format!("{}\n", l.as_str().unwrap_or(""))).collect();
             out.push_str(&format!("({} ms)\n", v.get("ms").and_then(|m| m.as_u64()).unwrap_or(0)));
             out
         }),
         ["look", id] => look(c, &lv, id, "300"),
         ["look", id, timeout] if timeout.parse::<u64>().is_ok() => look(c, &lv, id, timeout),
-        // waits, syncs and reads go on through a master restart (the live job outlives it); an
-        // act is not sent twice
+        // waits, syncs and looks go on through a master restart (the live job outlives it)
         ["wait", id, "verdict", rest @ ..] => match retry_master(|| one(c, "live", &format!("{lv} wait {id} verdict {}", rest.join(" ")))) {
             Ok(v) => {
                 let x = crate::state::live_from(&v);
@@ -806,10 +872,10 @@ fn look(c: &Client, lv: &str, id: &str, timeout: &str) -> i32 {
 
 fn show(c: &Client, words: &[&str], json: bool) -> i32 {
     let usage = || {
-        eprintln!("makepad devhub show <app> [--on mac|<node>|quest] [--after landed <branch>] [--replace] [--pin] [-- <app args>] | show stop <app> [--on <device>] | show pin <app> [--on <device>] on|off");
+        eprintln!("makepad devhub show <app> [--on mac|<node>|quest] [--after landed <branch>] [--replace] [--pin] [-- <app args>] | show <app> --on <node> --native | show stop <app> [--on <device>] | show pin <app> [--on <device>] on|off");
         2
     };
-    let (mut on, mut after, mut replace, mut pin, mut pos) = (String::new(), Vec::<String>::new(), false, false, Vec::<&str>::new());
+    let (mut on, mut after, mut replace, mut pin, mut native, mut pos) = (String::new(), Vec::<String>::new(), false, false, false, Vec::<&str>::new());
     // what follows `--` is the app's own
     let (words, args) = words.iter().position(|w| *w == "--").map_or((words, &[][..]), |i| (&words[..i], &words[i + 1..]));
     let mut i = 0;
@@ -836,12 +902,18 @@ fn show(c: &Client, words: &[&str], json: bool) -> i32 {
             }
             ("--replace", _) => replace = true,
             ("--pin", _) => pin = true,
+            ("--native", _) => native = true,
             (w, _) if w.starts_with("--") => return usage(),
             (w, _) => pos.push(w),
         }
         i += 1;
     }
     match pos.as_slice() {
+        // the WM's own launch: nothing the master keeps, so nothing to wait for, replace or pin
+        [app] if native && after.is_empty() && !replace && !pin && args.is_empty() => {
+            done(one(c, "show", &format!("show native {app} {}", if on.is_empty() { "mac" } else { &on })), json, &|v| format!("{}\n", v.get("line").and_then(Value::as_str).unwrap_or("")))
+        }
+        _ if native => usage(),
         ["stop", app] => done(one(c, "show", &format!("show stop {app} {}", if on.is_empty() { "mac" } else { &on })), json, &flat),
         ["pin", app, state @ ("on" | "off")] => done(one(c, "show", &format!("show pin {app} {} {state}", if on.is_empty() { "mac" } else { &on })), json, &flat),
         ["pin", app, dev, state @ ("on" | "off")] if on.is_empty() => done(one(c, "show", &format!("show pin {app} {dev} {state}")), json, &flat),
@@ -1219,6 +1291,62 @@ fn watch(c: &Client, words: &[&str], json: bool) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A master restart doesn't lose a session's call: one that can't do a thing twice goes round
+    /// again, and one that may have reached the app isn't sent twice and says so, in words that
+    /// don't read as a lost session.
+    #[test]
+    fn a_call_cut_by_a_master_restart_asks_again_only_if_nothing_happens_twice() {
+        let cut = "link lost: connection closed by the peer".to_string();
+        let run = |answers: Vec<Result<u32, String>>, read: bool| {
+            let (mut left, mut asked, mut looked) = (answers.into_iter(), 0, 0);
+            let got = crate::cli::retry_master_wait(|| {
+                asked += 1;
+                cut_act(left.next().unwrap(), "W1", || {
+                    looked += 1;
+                    read
+                })
+            }, || true);
+            (got, asked, looked)
+        };
+        // a read: asked again
+        assert_eq!(run(vec![Err(cut.clone()), Ok(7)], true), (Ok(7), 2, 1));
+        // cut again on its way: still asked
+        assert_eq!(run(vec![Err(cut.clone()), Err(cut.clone()), Ok(7)], true), (Ok(7), 3, 2));
+        // an act: sent once, and the error says what is known
+        let (got, asked, _) = run(vec![Err(cut.clone())], false);
+        let e = got.unwrap_err();
+        assert_eq!(asked, 1);
+        assert!(e.contains("devhub live W1") && e.contains("not sent again") && !link_cut(&e), "{e}");
+        // an act cut while it waited for room had done nothing: its risk needn't be asked
+        assert_eq!(run(vec![Err(format!("{cut}: {RAN_NOTHING}")), Ok(7)], false), (Ok(7), 2, 0));
+        // a master not up yet was sent nothing
+        assert_eq!(run(vec![Err("no devhub master at /x".to_string()), Ok(7)], false), (Ok(7), 2, 0));
+        // what the master answers stands
+        assert_eq!(run(vec![Err("W1: parked".to_string())], true), (Err("W1: parked".to_string()), 1, 0));
+    }
+
+    /// The app's manifest says what reads; what it doesn't list or a word it can't find doesn't.
+    #[test]
+    fn a_commands_risk_is_read_off_the_apps_manifest() {
+        let tool = |name: &str, risk: &str| format!("{{\"name\":\"{name}\",\"risk\":{{\"{risk}\":[]}}}}");
+        let service = |id: &str, tools: &[String]| format!("{{\"Instance\":{{\"manifest\":{{\"id\":\"{id}\",\"tools\":[{}]}}}}}}", tools.join(","));
+        let list = [
+            service("ui", &[tool("ui", "Read"), tool("ui_find", "Read"), tool("ui_act", "Act"), tool("close", "Destructive"), tool("status", "Read")]),
+            service("os", &[tool("close", "Act"), tool("list", "Read")]),
+            service("edit", &[tool("tweak", "Act"), tool("tweak_state", "Read")]),
+            service("fab", &[tool("inspect", "Read"), tool("slice", "Act")]),
+            "{\"end\":\"list\"}".to_string(),
+        ];
+        let list: Vec<&str> = list.iter().map(String::as_str).collect();
+        let reads = |cmd: &[&str]| reads_by_manifest(&list, cmd);
+        for cmd in [&["ui"][..], &["ui", "find", "q=Save"], &["ui", "q=Save"], &["status"], &["tweak", "state"], &["call", "fab.inspect", "{}"]] {
+            assert!(reads(cmd), "{cmd:?}");
+        }
+        for cmd in [&["ui", "act", "q=Save"][..], &["tweak", "set", "x=1"], &["close"], &["call", "fab.slice"], &["call", "os.inspect"], &["call", "fab"], &["eval", "1"], &["call"], &[]] {
+            assert!(!reads(cmd), "{cmd:?}");
+        }
+    }
 
     #[test]
     fn batch_lines_become_job_requests() {

@@ -364,7 +364,7 @@ pub fn serve(sched: &Mutex<Sched>, ledger: &Path, line: &str, now: u64, out: &mu
         rows.extend(s.recent_ended(usize::MAX).iter().filter(|l| l.ended_ms.unwrap_or(0) >= since).map(row));
         // the scheduler holds the leases that ended since the master started, up to a bound:
         // what ended before that is in the ledger only
-        (s.node_view(), rows, s.pressure_since(since), s.ended_from_ms)
+        (s.node_view(now), rows, s.pressure_since(since), s.ended_from_ms)
     };
     if since < kept_from {
         let have: HashSet<String> = rows.iter().map(|r| r.id.clone()).collect();

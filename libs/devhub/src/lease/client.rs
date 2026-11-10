@@ -58,7 +58,7 @@ fn timed_boxes(leases: &[Value]) -> Vec<String> {
     }).collect()
 }
 
-pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--prio P] [--rev <branch>[@sha][,<name>=<branch>[@sha]]...]
+pub const HELP: &str = "  lease <kind> [--node N [--series S]|--needs k=v,..] [--lane L] [--prio P] [--rev <branch>[@sha][,<name>=<branch>[@sha]]...]
         [--repo-dir D] [--watch-pid P] [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--ram-floor-gb N] [--whole]
         [--class name] [--priority interactive|background] [--jit key] [--native <reason>] [--keep <dir>]
         [--input NAME=<archive> ..] [--for <node>] [--exit-to <file>] [-- cmd...]
@@ -68,6 +68,7 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
                                           gpu=1: a box with a GPU, gpu=<name>: one with that in its name);
                                           with a cmd: run it there and exit with its code. --node N: N or wait for
                                           it, never another box (refused, saying why, when N can never take it);
+                                          --series S says why: a series S compared on N (never asked to unpin);
                                           --keep <dir>: what the cmd put in $DEVHUB_KEEP (a failed step's logs) is
                                           copied into <dir> before the lease ends. --ram-floor-gb N: the least RAM its
                                           unasked need is cut to on a box (a tests shard's largest unit). --input NAME=<archive> (lease and
@@ -82,10 +83,14 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
                                           box, or runs over 10 min while one of 10 min or less waits there (it says
                                           who); a timed series or bench checks it between steps and, once
                                           it exists, stops after the current step with its partial results and releases
-  run <lane> <kind> [--node N|--needs ..] [--with-uncommitted] [--tree] [--patch <diff> ..]
+  run <lane> <kind> [--node N [--series S]|--needs ..] [--with-uncommitted] [--tree] [--patch <diff> ..]
         [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--whole]
         [--class name] [--priority interactive|background] [--jit key] [--native <reason>] [--keep <dir>]
         [--for <node>] -- cmd...
+                                          --cores N: the run sees N cores, as each unit of a land gate's tests bucket does:
+                                          MAKEPAD_CPU_CORES (its pools and JIT workers), MAKEPAD_RUN_JOBS, CARGO_BUILD_JOBS and
+                                          RUST_TEST_THREADS are N, unpinned (`devhub test ... --cores 4` runs as a unit of 4).
+                                          Its box is charged what its class's runs used, its N until one is measured.
                                           A run's outputs (sheets, grabs, logs): the cmd writes them to $DEVHUB_KEEP and
                                           --keep <dir> copies them into <dir> before the lease ends; a `get` after the
                                           run can find the lane's tree already handed to another lane.
@@ -102,12 +107,15 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
                                           is refused unless it is the JIT's own crate, has an open JIT miss, targets a
                                           platform no JIT runs on, or says --native <reason> (native-vs-JIT baseline, timed
                                           perf series); the refusal names the JIT command
+                                          A run (or test) whose every process sat idle 10 min goes on as a job and the
+                                          command returns, exit 5, the verdict last: `job wait J..` waits on, `job cancel
+                                          J..` ends it, `job result L..` has its stacks. devhub ends nothing.
   overlay status <lane> [--node N]        pinned commits, overlay hashes, whiteouts and diff vs work
   overlay why <lane> <path> [--node N]     serving layer and content hash
   overlay selftest [--node N] [--case NAME]
                                           compare real checkouts with overlay runs on a test lease
   overlay shadow on|off|status           background tree/overlay comparisons of JIT tests; last 24 h of evidence
-  test <lane> <pkg> [--lib|--bin B|--test T|--tests] [--features F] [--needs k=v,..] [--node N] [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--native [<reason>]|--live] [--rev R] [--tree] [-- args...]
+  test <lane> <pkg> [--lib|--bin B|--test T|--tests] [--features F] [--needs k=v,..] [--node N [--series S]] [--cost small|medium|large] [--est-min N] [--cores N] [--class name] [--priority interactive|background] [--jit key] [--native [<reason>]|--live] [--rev R] [--tree] [-- args...]
                                           --rev R: one run at the commits R alone (`<branch>[@sha]` for makepad, then
                                           `,<name>=<branch>[@sha]` per nested apps/<name> repo, as in `work,commercial=main`;
                                           each nested checkout's HEAD where R names none), none of the worktree's uncommitted files.
@@ -132,7 +140,10 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
                                           another lane's lease at any time: a run's outputs come back with `run ...
                                           --keep <dir>`, which copies what the cmd put in $DEVHUB_KEEP before the lease ends.
                                           A native build is for its box's CPU: a get from a target no `--for` built
-                                          says so (`target/for-<cpu>/..`: one that did)
+                                          says so (`target/for-<cpu>/..`: one that did).
+                                          `captures/<file>` (with --node, any lane, no lease): the box's JIT
+                                          captures, a report or flight recording, in seconds; then
+                                          `makepad inspect file=<dir>/<x.mkpf> pf <query>` here
   release <id>                            end a lease (says how its node cleaned up)
   lease <id> cancel | cancel <id>         the user's cancel of ONE lease: its processes stop, its slot frees, the
                                           lane is kept off that node for 30 min (unless it names it with --node;
@@ -187,6 +198,12 @@ pub const CANCELLED_EXIT: i32 = 3;
 /// lost it, or its node lost it or stayed unreachable): the command has no verdict, the code is
 /// not to blame; run it again (a landing bucket does, once).
 pub const LOST_EXIT: i32 = 4;
+
+/// Exit code of a `run`/`test`/`lease -- cmd` whose run sat idle, every process of its lease, for
+/// the idle verdict's 10 min: the run goes on as a job the master follows (`job adopt`), and this
+/// client returns to its owner, who decides: `devhub job wait J..` waits on, `devhub job cancel
+/// J..` ends it, its stacks are in `devhub job result L..`. devhub ends nothing.
+pub const HUNG_EXIT: i32 = 5;
 
 /// How the master ends a lease that infrastructure lost, never a person or the command.
 fn lost_how(how: &str) -> bool {
@@ -279,7 +296,7 @@ fn through_restarts<T>(id: &str, c: &mut Client, mut f: impl FnMut(&Client) -> R
                     }
                     (None, _) if node_restarting(&e) => {
                         if super::master::host_gone(&e) {
-                            eprintln!("{id}: its node is off the network ({e}); the master ends its leases as lost after {} s, re-attaching if it is back first", super::sched::HOST_GONE_MS / 1000);
+                            eprintln!("{id}: its node is off the network ({e}); the master ends its leases as lost after {} s unless it hears no box at all (its own network), re-attaching if it is back first", super::sched::HOST_GONE_MS / 1000);
                         } else {
                             eprintln!("{id}: its node does not answer ({e}); its hub restarts? re-attaching when it is back");
                         }
@@ -473,6 +490,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
             "--ram-floor-gb" => req.ram_floor_gb = Some(val(i)?.parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0).ok_or("--ram-floor-gb is a positive number")?),
             "--class" => req.class = val(i)?.to_string(),
             "--node" => req.node = Some(val(i)?.to_string()),
+            "--series" => req.series = Some(val(i)?.to_string()),
             "--needs" => req.needs = parse_needs(val(i)?),
             "--lane" => req.lane = val(i)?.to_string(),
             "--priority" => req.priority = Priority::parse(val(i)?).ok_or("--priority is interactive or background")?,
@@ -490,6 +508,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
         }
         i += 2;
     }
+    req.check_series()?;
     if req.lane.is_empty() {
         req.lane = default_lane();
     }
@@ -536,6 +555,11 @@ struct Held {
     work: String,
     env: Vec<(String, String)>,
     beat: Beat,
+    /// the job its run becomes at the idle verdict ([`hand_over`]): its fields, as JSON; None:
+    /// it stays with this client (a bucket's run, devhub's own)
+    adopt: Option<String>,
+    /// what its owner hears once its run went on as a job
+    handed: std::sync::Mutex<Option<String>>,
 }
 
 /// The holder's beat: a thread of its own beats the master every [`BEAT`] while the lease is
@@ -546,6 +570,8 @@ struct Held {
 struct Beat {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ended: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
+    /// the idle verdict, once a beat brought it (`hung`), until its run's follower takes it
+    hung: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -554,7 +580,8 @@ impl Beat {
         use std::sync::atomic::Ordering;
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ended = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let (halt, end, id) = (stop.clone(), ended.clone(), id.to_string());
+        let hung = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (halt, end, verdict, id) = (stop.clone(), ended.clone(), hung.clone(), id.to_string());
         let thread = std::thread::Builder::new().name("devhub-beat".into()).spawn(move || {
             let mut client: Option<Client> = None;
             let mut lost = false;
@@ -580,6 +607,7 @@ impl Beat {
                         if !told && v.get("idle").is_some() {
                             told = true;
                             eprintln!("{}", s(&v, "idle"));
+                            if v.get("hung").and_then(Value::as_bool) == Some(true) { *verdict.lock().unwrap() = Some(s(&v, "idle")); }
                         }
                     }
                     // a restarting master keeps its granted leases (leases.live): only "no lease" ends it
@@ -595,7 +623,12 @@ impl Beat {
                 }
             }
         }).ok();
-        Beat { stop, ended, thread }
+        Beat { stop, ended, hung, thread }
+    }
+
+    /// The idle verdict a beat brought, taken once.
+    fn hung(&self) -> Option<String> {
+        self.hung.lock().unwrap().take()
     }
 
     /// How and why the lease ended, once a beat heard it.
@@ -650,6 +683,8 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
             "starting" => format!("{id} {}@{}: granted, setting up", req.kind.as_str(), s(&v, "node")),
             "granted" => {
                 if !note.is_empty() { eprintln!("{id} {}@{}: granted{note}", req.kind.as_str(), s(&v, "node")); }
+                // a healthy log and `inspect` both read the same with no window on the screen
+                if req.kind == Kind::Screen { eprintln!("{id} screen@{}: its windows are hidden from the person, as every lease's are (MAKEPAD_HIDE_WINDOWS=1): not on the screen unless the command takes that off. A person's launch is `devhub show <app> --on <node>` (`--native`: compiled)", s(&v, "node")); }
                 let deployment = s(&v, "deployment");
                 if req.kind == Kind::Timed && !deployment.is_empty() {
                     let short = deployment.split(',').map(|sha| &sha[..sha.len().min(10)]).collect::<Vec<_>>().join(",");
@@ -665,7 +700,7 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
                 };
                 if !s(&v, "reason").is_empty() { eprintln!("{id}: {}", s(&v, "reason")); }
                 let beat = Beat::start(&id);
-                return Ok(Held { id, node: s(&v, "node"), work: start.map(|st| s(st, "work")).unwrap_or_default(), env, beat });
+                return Ok(Held { id, node: s(&v, "node"), work: start.map(|st| s(st, "work")).unwrap_or_default(), env, beat, adopt: None, handed: Default::default() });
             }
             _ => {
                 let how = s(&v, "how");
@@ -770,7 +805,12 @@ fn follow_there(c: &Client, held: &Held, run: u64, out: &mut dyn Write) -> Resul
     let mut c = c.clone();
     let mut off = 0u64;
     let mut logs = crate::cli::NodeAsks::new(&held.node, "lease-log");
+    // a verdict from before this run (its ship) is no verdict on it
+    let _ = held.beat.hung();
     loop {
+        if let Some(word) = held.beat.hung() {
+            if hand_over(&c, held, run, &word) { return Err(format!("{} goes on as a job", held.id)); }
+        }
         let v = through_restarts(&held.id, &mut c, |c| {
             held.beat.check(&held.id)?;
             first_of(&held.node, "lease-log", logs.ask(c, &format!("lease-log {} {run} {off}", held.id))?)
@@ -793,6 +833,36 @@ fn follow_there(c: &Client, held: &Held, run: u64, out: &mut dyn Write) -> Resul
             std::thread::sleep(Duration::from_millis(300));
         }
     }
+}
+
+/// The idle verdict on the run: it goes on as a job the master follows (`job adopt`), and this
+/// client returns to its owner, waiting on its end, with the verdict ([`HUNG_EXIT`]). Its run's
+/// output so far is above; the whole of it goes in the job's log. False: not handed over (a run
+/// devhub watches itself, or the master refused): it is followed here, the verdict said.
+fn hand_over(c: &Client, held: &Held, run: u64, word: &str) -> bool {
+    let Some(body) = held.adopt.as_deref().and_then(|b| b.strip_prefix('{')) else { return false };
+    let line = format!("job adopt {{\"lease\":{},\"pid\":{},\"run\":{run},{body}", makepad_remote::json_str(&held.id), std::process::id());
+    match retry_master(|| one(c, "job", &line)) {
+        Ok(v) => {
+            let job = s(&v, "job");
+            *held.handed.lock().unwrap() = Some(format!("{0} goes on as job {job}, devhub ends nothing: `devhub job wait {job}` waits on, `devhub job cancel {job}` ends it; its whole output: `devhub job result {job}` once it ends\n{0}: {word}", held.id));
+            true
+        }
+        Err(e) => {
+            eprintln!("{}: its run stays with this client ({e})", held.id);
+            false
+        }
+    }
+}
+
+/// The job a run's client hands its run to at the idle verdict ([`hand_over`]), as `job adopt`'s
+/// fields; None for a run devhub itself waits on (a bucket's `--exit-to`, an agent `devhub-..`).
+fn adopt_body(o: &Opts, cwd: &str) -> Option<String> {
+    let j = makepad_remote::json_str;
+    let agent = o.req.agent.clone().or_else(|| std::env::var("DEVHUB_AGENT").ok()).unwrap_or_default();
+    if o.exit_to.is_some() || agent.starts_with("devhub-") || o.cmd.is_empty() { return None; }
+    Some(format!("{{\"lane\":{},\"agent\":{},\"kind\":{},\"cmd\":[{}],\"cwd\":{},\"rev\":{},\"repo_dir\":{},\"class\":{},\"priority\":{},\"src\":{}}}",
+        j(&o.req.lane), j(&agent), j(o.req.kind.as_str()), o.cmd.iter().map(|a| j(a)).collect::<Vec<_>>().join(","), j(cwd), j(o.req.rev.as_deref().unwrap_or("")), j(o.req.repo_dir.as_deref().unwrap_or("")), j(&o.req.class), j(o.req.priority.as_str()), j(o.req.src.as_str())))
 }
 
 /// The JIT-first gate (lease/native.rs) for a command the lane runs here: prints its hint;
@@ -871,10 +941,11 @@ fn lease_with(o: &mut Opts) -> i32 {
         return 2;
     }
     if let Err(code) = native_gate(&c, o) { return code; }
-    let held = match acquire(&c, &o.req) {
+    let mut held = match acquire(&c, &o.req) {
         Ok(h) => h,
         Err(code) => return code,
     };
+    held.adopt = adopt_body(o, ".");
     // a lease at a rev: the tree it holds, every repository's branch and commit
     if let Some(rev) = &o.req.rev {
         eprintln!("{} {}: sources at {}", held.id, held.node, super::rev_said(rev));
@@ -890,7 +961,10 @@ fn lease_with(o: &mut Opts) -> i32 {
         if let (Ok(_), Some(dst)) = (&r, &o.keep) {
             eprintln!("{}", keep_said(&held.id, dst, &kept(&c, &held.node, &o.req.lane, &held.id, dst)));
         }
-        return finish(&c, &held, r);
+        let code = finish(&c, &held, r);
+        // the verdict goes last: a `| tail -1` reader sees it
+        if let Some(said) = held.handed.lock().unwrap().as_deref() { println!("{said}"); }
+        return code;
     }
     println!("{} granted {}@{} work={}", held.id, o.req.kind.as_str(), held.node, held.work);
     println!("export DEVHUB_LEASE={}", held.id);
@@ -922,6 +996,8 @@ fn lease_with(o: &mut Opts) -> i32 {
 }
 
 fn finish(c: &Client, held: &Held, r: Result<i32, String>) -> i32 {
+    // its run went on as a job: the lease is the job's, not this client's to release
+    if held.handed.lock().unwrap().is_some() { return HUNG_EXIT; }
     let end = one(c, "beat", &held.id).ok().filter(|v| s(v, "state") == "ended");
     let ended = end.as_ref().map(|v| s(v, "how"));
     // the user cancelled it: its processes were stopped, so the run's own result is just the fallout
@@ -969,8 +1045,11 @@ fn released_line(v: &Value) -> String {
         "ok" => format!("{head}; {} cleaned up: {} stopped, {} MB freed{}", s(c, "node"), super::master::plural(n(c, "stopped") as usize, "process", "processes"), n(c, "freed_mb"), if n(c, "leak") > 0.0 { format!(", {} LEFT (see the inbox)", super::master::plural(n(c, "leak") as usize, "process", "processes")) } else { String::new() }),
         other => format!("{head}; {other}"),
     };
-    // a timed run: what shared its box
-    let quiet = c.get("box").filter(|b| b.get("samples").is_some()).map_or(String::new(), |b| format!("\nbox {}: {}", s(c, "node"), super::master::box_line(b)));
+    // a timed run: what shared its box, and whether its timings are clean
+    let quiet = c.get("box").filter(|b| b.get("samples").is_some()).map_or(String::new(), |b| match c.get("unquiet").and_then(Value::as_str) {
+        Some(why) => format!("\nbox {}: NOT QUIET ({why}): its timings are not clean, run it again on a quiet box; {}", s(c, "node"), super::master::box_line(b)),
+        None => format!("\nbox {}: quiet: {}", s(c, "node"), super::master::box_line(b)),
+    });
     let failed = super::master::strs(c.get("failed_tests"));
     let failed = if failed.is_empty() { String::new() } else { format!("\nfailed tests: {}; their output: `devhub job result {} --tail`", failed.join(", "), s(v, "id")) };
     let kept = if failed.is_empty() && c.get("kept_tail").and_then(Value::as_bool) == Some(true) { format!("\nhow far it got: `devhub job result {} --tail`", s(v, "id")) } else { String::new() };
@@ -1209,10 +1288,11 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
         Err(e) => return (fail(e), false),
     };
     let queued = Instant::now();
-    let held = match acquire(&c, &o.req) {
+    let mut held = match acquire(&c, &o.req) {
         Ok(h) => h,
         Err(code) => return (code, false),
     };
+    held.adopt = adopt_body(o, rel.trim_end_matches('/'));
     let queue = queued.elapsed();
     let shipping = Instant::now();
     let rev = o.req.rev.clone().unwrap_or_default();
@@ -1232,6 +1312,11 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
         eprintln!("{}", keep_said(&held.id, dst, &kept(&c, &held.node, &o.req.lane, &held.id, dst)));
     }
     let mut code = finish(&c, &held, r);
+    // its run went on as a job: no verdict yet; what its owner hears goes last
+    if let Some(said) = held.handed.lock().unwrap().as_deref() {
+        let _ = writeln!(out, "{said}");
+        return (code, false);
+    }
     if let Some(pkg) = test {
         // a test run that executed no test is no pass
         let none = if code == 0 { tally.no_pass(&o.cmd) } else { None };
@@ -1397,22 +1482,6 @@ pub fn test_route(own: bool, jit: Option<u64>, cargo: Option<u64>) -> (bool, Str
 
 pub(crate) const ALL_TESTS: &str = "tests:*";
 
-/// A `devhub test`'s filter (libtest's words after `--`, without its output and thread flags) as
-/// one class word: `test:<pkg>[:<target>]?<filter>` is measured apart from the whole suite.
-fn filter_key(args: &[&str]) -> String {
-    let mut out = Vec::new();
-    let mut words = args.iter().skip_while(|a| **a == "--");
-    while let Some(w) = words.next() {
-        match *w {
-            "--nocapture" | "--show-output" | "-q" | "--quiet" => {}
-            "--test-threads" | "--color" | "--format" => { words.next(); }
-            w if ["--test-threads=", "--color=", "--format="].iter().any(|p| w.starts_with(p)) => {}
-            w => out.push(w.split_whitespace().collect::<Vec<_>>().join("_")),
-        }
-    }
-    out.join(",")
-}
-
 fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
     let parsed = (|| -> Result<_, String> {
         if pkg.is_empty() || pkg.starts_with('-') || !pkg.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')) {
@@ -1433,7 +1502,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
                 "--live" => live = true,
                 "--rev" => { rev_spec = Some(val()?); i += 1; }
                 "--tree" => flags.push("--tree"),
-                "--needs" | "--node" | "--priority" | "--jit" | "--cost" | "--est-min" | "--class" => { flags.extend([rest[i], val()?]); i += 1; }
+                "--needs" | "--node" | "--series" | "--priority" | "--jit" | "--cost" | "--est-min" | "--cores" | "--class" => { flags.extend([rest[i], val()?]); i += 1; }
                 "--features" => { select.extend([rest[i], val()?]); i += 1; }
                 "--lib" | "--bin" | "--tests" | "--test" => {
                     if target.is_some() { return Err("select only one of --lib, --bin B, --test T or --tests".into()); }
@@ -1492,7 +1561,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
             if !use_jit { native = true; }
         }
         // a filtered run is measured apart from its whole suite (routing above reads the suite's)
-        let filter = filter_key(&args);
+        let filter = super::filter_key(&args);
         if default_class && !filter.is_empty() { o.req.class = format!("{}?{filter}", o.req.class); }
         if live && !flags.contains(&"--priority") { o.req.priority = Priority::Interactive; }
         let mut test_args = select.clone();
@@ -1619,12 +1688,14 @@ fn live_test(mut o: Opts, pkg: &str, args: &[String], inputs: MissInputs) -> i32
         let needs = o.req.needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
         let req = format!("{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"priority\":{},\"loader\":{},\"cost\":\"small\",\"class\":{},\"also\":[{}],\"test_args\":[{}]}}", makepad_remote::json_str(pkg), makepad_remote::json_str(&root.to_string_lossy()), o.tree, makepad_remote::json_str(&o.req.lane), makepad_remote::json_str(o.req.agent.as_deref().unwrap_or("")), makepad_remote::json_str(&needs), makepad_remote::json_str(o.req.priority.as_str()), makepad_remote::json_str(&loader), makepad_remote::json_str(&o.req.class), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(makepad_remote::json_str).collect::<Vec<_>>().join(","), args.iter().map(|a| makepad_remote::json_str(a)).collect::<Vec<_>>().join(","));
         let selected = if args.last().is_some_and(|a| a == "--") { &args[..args.len() - 1] } else { args };
-        let status = || -> Option<crate::state::Live> {
+        // the session, and what devhub tells its owner of it (its call far past its measure)
+        let status = || -> Option<(crate::state::Live, Option<String>)> {
             let v = one(&c, "live", "live list").ok()?;
-            v.as_arr()?.iter().map(crate::state::live_from).find(|x| x.test && x.lane == o.req.lane && x.app == pkg && x.test_args == selected)
+            v.as_arr()?.iter().map(|v| (crate::state::live_from(v), v.get("word").and_then(Value::as_str).map(str::to_string))).find(|(x, _)| x.test && x.lane == o.req.lane && x.app == pkg && x.test_args == selected)
         };
-        let measured_ms = status().and_then(|x| x.patch).and_then(|p| p.tests).map_or(0, |t| t.ms.max(0.0) as u64);
+        let measured_ms = status().and_then(|(x, _)| x.patch).and_then(|p| p.tests).map_or(0, |t| t.ms.max(0.0) as u64);
         let mut notice_after = Duration::from_millis(measured_ms.saturating_add(120_000));
+        let mut told = String::new();
         let v = retry_master(|| {
             // Keep the request open without a deadline. A separate channel reads its phase
             // once it exceeds the previous test time plus two minutes.
@@ -1647,7 +1718,7 @@ fn live_test(mut o: Opts, pkg: &str, args: &[String], inputs: MissInputs) -> i32
                     Err(false) => return Err("the hub connection ended".into()),
                 }
                 if started.elapsed() > notice_after {
-                    let x = status();
+                    let (x, word) = status().map_or((None, None), |(x, w)| (Some(x), w));
                     let phase = match x.as_ref() {
                         None => "waiting for a live job",
                         Some(x) if x.state != "running" => x.state.as_str(),
@@ -1663,6 +1734,10 @@ fn live_test(mut o: Opts, pkg: &str, args: &[String], inputs: MissInputs) -> i32
                     // a session placed again says so while it waits for its box
                     let note = x.as_ref().filter(|x| x.state == "starting" && !x.note.is_empty()).map_or(String::new(), |x| format!(": {}", x.note));
                     eprintln!("still running: {phase}{note} ({} min)", started.elapsed().as_secs() / 60);
+                    if let Some(word) = word.filter(|w| *w != told) {
+                        eprintln!("devhub: {word}");
+                        told = word;
+                    }
                     notice_after = started.elapsed() + STILL_RUNNING_EVERY;
                 }
             }
@@ -1836,7 +1911,7 @@ fn get(lane: &str, rel: &str, dst: &str, rest: &[&str]) -> i32 {
         i += 2;
     }
     if !makepad_devhub_conf::valid_name(lane) || rel.is_empty() || rel.contains(' ') {
-        eprintln!("makepad devhub get <lane> <rel> <local-dir> [--node N] [--lease L] (rel: a path relative to the lane's dir, no spaces)");
+        eprintln!("makepad devhub get <lane> <rel> <local-dir> [--node N] [--lease L] (rel: a path relative to the lane's dir, or captures/<file>: the box's JIT captures; no spaces)");
         return 2;
     }
     let c = match master() {
@@ -1901,11 +1976,13 @@ fn queue(c: &Client, all: bool) -> i32 {
                 let ram = info.and_then(|i| i.get("held_mb")).and_then(super::num).map_or(String::new(), |m| format!(" ram {:.1} GB", m / 1024.0));
                 let disk = info.and_then(|i| i.get("disk_mb")).and_then(super::num).map_or(String::new(), |m| format!(" disk {:.1} GB", m / 1024.0));
                 let agent = s(&v, "agent");
+                let past = n(&v, "past_budget");
                 format!(
-                    "{st} {}s ago, beat {}s ago{}{run}{ram}{disk}{}",
+                    "{st} {}s ago, beat {}s ago{}{run}{ram}{disk}{}{}",
                     n(&v, "granted_s"),
                     n(&v, "beat_s"),
                     if agent.is_empty() { String::new() } else { format!(" agent {agent}") },
+                    if past > 0.0 { format!(" past the box's budget by {past} cores (background work yields)") } else { String::new() },
                     v.get("start").map(|x| format!(" work={}", s(x, "work"))).unwrap_or_default()
                 )
             }
@@ -1932,6 +2009,10 @@ fn nodes(c: &Client) -> i32 {
                 if v.get("master").is_some() {
                     let (up, hub) = (crate::proto::wall_ms().saturating_sub(n(&v, "up_ms") as u64), s(&v, "hub"));
                     println!("{:<8} {:<8} hub {} (this build up {})", s(&v, "master"), "master", &hub[..hub.len().min(10)], super::sched::dur(up));
+                    let network = s(&v, "network");
+                    if !network.is_empty() {
+                        println!("{:<8} {:<8} {network}", "", "");
+                    }
                     continue;
                 }
                 println!("{:<8} {:<8} {}  [{}; {} leases, {} waiting]", s(&v, "node"), s(&v, "role"), s(&v, "caps_line"), s(&v, "state"), n(&v, "leases"), n(&v, "waiting"));
@@ -1959,11 +2040,11 @@ fn inspect(target: &str, lease: Option<&str>, read_only: bool, cmd: &[&str]) -> 
     if node == local_name(&c) {
         return None;
     }
-    let Some(verb) = cmd.first() else {
+    if cmd.is_empty() {
         eprintln!("makepad devhub inspect <node>/<pid|app> [--lease L] [--read-only] <cmd...>");
         return Some(2);
-    };
-    match crate::cli::whose(&c, node, false).map(|jits| crate::cli::leave_alone(&jits, node, jit, verb, read_only)) {
+    }
+    match crate::cli::whose(&c, node, false).map(|jits| crate::cli::leave_alone(&jits, node, jit, cmd, read_only)) {
         Ok(None) => {}
         Ok(Some(why)) => {
             eprintln!("makepad devhub inspect: {why}");
@@ -2036,7 +2117,7 @@ fn node_conf(c: &Client, node: &str, what: &str) -> i32 {
                 slots.join(" "),
                 caps.disk_floor_gb,
                 caps.disk_warn_gb,
-                if caps.timed { "on" } else { "off" },
+                if caps.timed_spare { "spare" } else if caps.timed { "on" } else { "off" },
                 if caps.spec.is_empty() { String::new() } else { format!("  spec {}", caps.spec) }
             );
             0
@@ -2205,7 +2286,7 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         ["overlay", word @ ("status" | "why"), lane, rest @ ..] => return Some(overlay_inspect(word, lane, rest)),
         ["run", lane, kind, rest @ ..] => return Some(run(lane, kind, rest)),
         ["test", lane, pkg, rest @ ..] => return Some(test(lane, pkg, rest)),
-        ["test", ..] => { eprintln!("makepad devhub test <lane> <pkg> [--lib|--bin B|--test T|--tests] [--features F] [--needs k=v,..] [--node N] [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--native [<reason>]|--live] [--tree] [-- args...]"); return Some(2); }
+        ["test", ..] => { eprintln!("makepad devhub test <lane> <pkg> [--lib|--bin B|--test T|--tests] [--features F] [--needs k=v,..] [--node N [--series S]] [--cost small|medium|large] [--est-min N] [--cores N] [--class name] [--priority interactive|background] [--jit key] [--native [<reason>]|--live] [--tree] [-- args...]"); return Some(2); }
         ["get", lane, rel, dst, rest @ ..] => return Some(get(lane, rel, dst, rest)),
         _ => {}
     }
@@ -2504,6 +2585,25 @@ mod tests {
         assert_eq!(cancelled_notice("L7", CancelledAt::Ran("a")), "LEASE CANCELLED by user on a (L7): pick another node (devhub nodes) and retry; don't retry on a unless asked. Exit code 3.");
         assert_eq!(cancelled_notice("L7", CancelledAt::Queued(Some("a"))), "LEASE CANCELLED by user while queued for a (L7): pick another node (devhub nodes) and retry; don't retry on a unless asked. Exit code 3.");
         assert_eq!(cancelled_notice("L7", CancelledAt::Queued(None)), "LEASE CANCELLED by user while queued (L7): don't ask again unless asked. Exit code 3.");
+    }
+
+    /// A timed run's release line says whether its box was quiet, by the master's verdict
+    /// ([`super::super::master::unquiet`]): beside a desktop left running it was not, and its
+    /// timings are not clean; its own load past the box's cores is no verdict; a quiet box's line
+    /// says so too.
+    #[test]
+    fn a_timed_runs_release_line_says_whether_its_box_was_quiet() {
+        use super::super::master::unquiet;
+        let b = |outside: f64, load: f64| makepad_strict_json::parse(format!(r#"{{"samples":3,"load1_max":{load},"outside_cpu_pct":{outside},"outside_cpu_pct_max":300,"busiest":[["WindowServer",34]]}}"#).as_bytes()).unwrap();
+        assert_eq!(unquiet(&b(143.0, 93.5)).as_deref(), Some("143% of a core ran outside it on average"));
+        assert_eq!(unquiet(&b(20.0, 40.0)), None, "a timed build's own load past its box's cores");
+        assert_eq!(unquiet(&b(20.0, 3.0)), None, "a quiet box");
+        let line = |outside: f64, load: f64| {
+            let why = unquiet(&b(outside, load)).map_or("null".to_string(), |w| makepad_remote::json_str(&w));
+            released_line(&makepad_strict_json::parse(format!(r#"{{"id":"L1","kind":"timed","lane":"x","node":"box-a","how":"released","cleanup":{{"cleanup":"other","node":"box-a","box":{},"unquiet":{why}}}}}"#, b(outside, load).to_json()).as_bytes()).unwrap())
+        };
+        assert!(line(143.0, 93.5).ends_with("\nbox box-a: NOT QUIET (143% of a core ran outside it on average): its timings are not clean, run it again on a quiet box; load1 max 93.5; outside it 143% of a core (max 300%): WindowServer 34%"), "{}", line(143.0, 93.5));
+        assert!(line(20.0, 3.0).ends_with("\nbox box-a: quiet: load1 max 3.0; outside it 20% of a core (max 300%): WindowServer 34%"), "{}", line(20.0, 3.0));
     }
 
     /// `--keep` says what came back, an empty copy too (an empty one said nothing, 11-07).

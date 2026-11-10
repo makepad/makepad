@@ -538,9 +538,16 @@ fn ai_hub_config(text: &str) -> AiHubEndpoint {
     endpoint
 }
 
-/// Where this node's AI hub's fleet front listens: its settings' host, else the primary
+/// Where this node's AI hub's fleet front listens: its settings' host when it names one; for the
+/// wildcard (`0.0.0.0`, `::`, a WM's default) the address the hub binds for it, this machine's
+/// first private IPv4 (libs/ai/hub/src/node_conf.rs `lan_host`); with none set, the primary
 /// outgoing interface's address.
 fn ai_hub_host(host: Option<String>) -> io::Result<String> {
+    if matches!(host.as_deref().map(str::trim), Some("0.0.0.0" | "::")) {
+        return makepad_core_util::netif::interfaces().into_iter().map(|i| i.addr).find(|ip| ip.is_private()).map(|ip| ip.to_string()).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::AddrNotAvailable, "the hub's host is the wildcard and this machine has no private IPv4 address for it")
+        });
+    }
     host.map(Ok).unwrap_or_else(|| {
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
         // UDP connect sends nothing; TEST-NET-1 selects the primary outgoing interface.

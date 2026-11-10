@@ -117,6 +117,16 @@ mod board_tests {
     }
 }
 
+/// The leader (pid and process group) of this node's running pre-warm step, 0 while none runs:
+/// what runs under it is named the hub's pre-warm (`top`, a timed run's look at its box), not just
+/// `makepad run` of no lease (11-10).
+static STEP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The leader of the running pre-warm step ([`STEP`]).
+pub fn step_leader() -> Option<u32> {
+    Some(STEP.load(std::sync::atomic::Ordering::Acquire)).filter(|p| *p != 0)
+}
+
 #[cfg(feature = "checkout")]
 pub use node::*;
 
@@ -276,6 +286,15 @@ mod node {
         }
         let (mut child, hold) = crate::os::lease_spawn(&mut cmd, None).map_err(|e| format!("{} {}: {e}", step.app, step.what))?;
         let pid = child.id();
+        // named the pre-warm's while it runs, whichever way the step ends
+        struct Named;
+        impl Drop for Named {
+            fn drop(&mut self) {
+                super::STEP.store(0, Ordering::Release);
+            }
+        }
+        super::STEP.store(pid, Ordering::Release);
+        let _named = Named;
         let t0 = Instant::now();
         let stop = |child: &mut std::process::Child| {
             // what it started ends by this stop, not by a crash: said before the TERM, while

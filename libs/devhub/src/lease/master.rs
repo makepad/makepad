@@ -61,6 +61,9 @@ pub struct LeaseMaster {
     /// (`devhub nodes`): the check-in showed each hub's version but not the master's, and a
     /// landing's scheduler fix read as running 15 min before the master took it (11-07)
     up_ms: u64,
+    /// What keeps this machine's own network from reaching its hubs ([`Self::note_network`]),
+    /// said on the master's line of `devhub nodes`
+    network: Mutex<Option<String>>,
     /// The lease loop's last look at both clocks (monotonic, wall ms), from its start on
     /// ([`Self::start`]): where the wall ran past the monotonic one, the machine slept
     /// ([`Self::note_sleep`]). None in tests: their clock is the test's.
@@ -105,6 +108,9 @@ pub struct LeaseMaster {
     restored_own: Mutex<Vec<String>>,
     /// per node: the stalls its last caps answer named, and the ones said already ([`Self::say_stalls`])
     stalls: Mutex<HashMap<String, (Vec<String>, Vec<String>)>>,
+    /// per node: when its caps last answered, that answer, and whether it is on disk ([`HEARD`]):
+    /// a box down since before this master started still says what it was ([`Self::heard`])
+    heard: Mutex<HashMap<String, (u64, String, bool)>>,
     /// the lane registry's worktrees ([`from_the_lanes_worktree`]); none: no lane is checked
     lane_trees: Mutex<Option<LaneTrees>>,
     /// per live session: the turn its box's word on its weight is sent in ([`Self::weigh_live`])
@@ -159,6 +165,17 @@ pub fn unreachable(e: &str) -> bool {
 /// "Host is down", 11-07).
 pub fn host_gone(e: &str) -> bool {
     ["Host is down", "No route to host", "Network is unreachable", "Operation timed out", "Connection timed out"].iter().any(|w| e.contains(w))
+}
+
+/// Why a node's `caps` call brought no caps: its error, its hub's refusal, or what it said instead.
+fn caps_miss(asked: &Result<Vec<String>, String>) -> String {
+    match asked {
+        Err(e) => e.clone(),
+        Ok(lines) => match lines.first() {
+            None => "no answer".to_string(),
+            Some(l) => makepad_strict_json::parse(l.as_bytes()).ok().and_then(|v| v.get("err").and_then(|e| e.as_str()).map(str::to_string)).unwrap_or_else(|| format!("a bad answer: {l}")),
+        },
+    }
 }
 
 /// A registered lane's lease comes from the lane's own worktree, the one the lane registry holds
@@ -289,6 +306,22 @@ fn write_desk_links(home: &Path, nodes: &[NodeView]) {
     }
 }
 
+/// `<home>/heard/<node>`: when a box that stopped answering last answered (ms) and its caps line.
+/// A box off since before the master's restart still counts as what it was: a CI shard only it
+/// takes says "box down: <node> (since ..)", not "none is set up" (one went off 11-07 and every
+/// nightly run after said the second, 11-10).
+const HEARD: &str = "heard";
+
+fn read_heard(dir: &Path) -> HashMap<String, (u64, String, bool)> {
+    std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let text = std::fs::read_to_string(e.path()).ok()?;
+        let (ms, line) = text.trim_end().split_once('\n')?;
+        makepad_devhub_conf::valid_name(&name).then_some(())?;
+        Some((name, (ms.parse().ok()?, line.to_string(), true)))
+    }).collect()
+}
+
 fn read_blocked(home: &Path) -> Vec<String> {
     std::fs::read_to_string(home.join("blocked")).unwrap_or_default().lines().map(str::trim).filter(|l| makepad_devhub_conf::valid_name(l)).map(str::to_string).collect()
 }
@@ -346,6 +379,15 @@ pub fn plural(n: usize, one: &str, many: &str) -> String {
 
 /// A timed run whose box spent this much CPU (% of one core, mean) outside it was not quiet.
 pub const NOISY_CPU_PCT: f64 = 50.0;
+/// Why a timed run's box was not quiet ([`box_line`]'s `box`), if it was not: what ran outside it
+/// took [`NOISY_CPU_PCT`] on average. Its timings are not clean, and its release line says so: a
+/// timed gate on a Mac a person's desktop shared ran single runs at 56-280 s against 7.6 s, its
+/// numbers handed back as any other's (11-10). Its load is no verdict here: under the run it
+/// counts the run's own threads (a timed build's rustc frontends took a box past its cores).
+pub fn unquiet(b: &makepad_strict_json::Value) -> Option<String> {
+    let outside = b.get("outside_cpu_pct").and_then(super::num)?;
+    (outside >= NOISY_CPU_PCT).then(|| format!("{outside:.0}% of a core ran outside it on average"))
+}
 
 /// A timed lease's `box` (what shared its box, the node's look every 10 s) in a line:
 /// `load1 max 27.0; outside it 140% of a core (max 210%): mds_stores 120%, XprotectService 30%`.
@@ -475,6 +517,7 @@ impl LeaseMaster {
         // unused: a holder of one would take a new lease's place (a lane's run once kept the id a new lease was given)
         let next = next_id(&home.join("leases.jsonl"));
         let next = if next > 1 { next + 1000 } else { next };
+        let heard = read_heard(&home.join(HEARD));
         // the leases a previous master granted and did not end: their holders and nodes still
         // run them (a restart of the master must not cost them their work)
         let mut sched = Sched::new(machine, next);
@@ -503,6 +546,7 @@ impl LeaseMaster {
         LeaseMaster {
             machine: machine.to_string(),
             up_ms: crate::proto::wall_ms(),
+            network: Mutex::new(None),
             awake: Mutex::new(None),
             sched: Mutex::new(sched),
             ask,
@@ -530,6 +574,7 @@ impl LeaseMaster {
             restored_own: Mutex::new(restored_own),
             agents_seen: Mutex::new(HashMap::new()),
             stalls: Mutex::new(HashMap::new()),
+            heard: Mutex::new(heard),
             lane_trees: Mutex::new(None),
         }
     }
@@ -1002,6 +1047,7 @@ impl LeaseMaster {
     pub fn live_idle(self: &Arc<Self>, id: &str) {
         let mut s = self.sched.lock().unwrap();
         s.live_called.insert(id.to_string());
+        s.live_call_ended(id);
         if s.live_idle.insert(id.to_string()) {
             drop(s);
             self.weigh_live(id);
@@ -1010,9 +1056,10 @@ impl LeaseMaster {
     }
 
     /// A live session's call starts: its full charge again, if its box has room (`Err`: why
-    /// not). Never past the box's cores: a call taken anyway ran past them (11-05).
-    /// A call that waits keeps its room on its box from every other ask until it runs or
-    /// [`Self::live_unwait`].
+    /// not). An interactive call whose full charge does not fit starts at once with the cores
+    /// free there, charged those, and runs slower beside the work ([`Sched::live_room`]); a
+    /// background one waits. A call that waits keeps its room on its box from every other ask
+    /// until it runs or [`Self::live_unwait`].
     pub fn live_admit(self: &Arc<Self>, id: &str) -> Result<(), String> {
         let mut s = self.sched.lock().unwrap();
         if !s.live_idle.contains(id) {
@@ -1022,9 +1069,23 @@ impl LeaseMaster {
             s.live_waiting.insert(id.to_string());
             return Err(why);
         }
+        let short = s.call_start_cores(id);
+        if let Some((free, _, _)) = short {
+            s.live_call_charged(id, free);
+        }
         s.live_idle.remove(id);
         s.live_waiting.remove(id);
+        s.live_call_began(id, self.now());
+        let past = s.past_budget_said(id);
+        let past = match short {
+            Some((free, full, in_use)) => {
+                let node = s.get(id).and_then(|l| l.node.clone()).unwrap_or_default();
+                format!(" at once with the {free:.0} cores free on {node} of its {full:.0} ({in_use:.0} in use beside it): slower beside that work, not waiting for it{past}")
+            }
+            None => past,
+        };
         drop(s);
+        if !past.is_empty() { self.event(Sev::Info, format!("{id}: its call runs{past}")); }
         self.weigh_live(id);
         Ok(())
     }
@@ -1364,17 +1425,19 @@ impl LeaseMaster {
                             }
                             failed_names(text)
                         });
-                        // a timed run's box: in the release answer, and the inbox when it was not quiet
+                        // a timed run's box: in the release answer, its verdict too, and the inbox when it
+                        // was not quiet
                         let noise = v.get("box").filter(|_| l.req.kind == Kind::Timed);
-                        if let Some(b) = noise.filter(|b| b.get("outside_cpu_pct").and_then(super::num).is_some_and(|c| c >= NOISY_CPU_PCT)) {
-                            self.event(Sev::Warn, format!("{} of {} on {node} was not quiet: {}", l.tag(), l.req.lane, box_line(b)));
+                        let unquiet = noise.and_then(unquiet);
+                        if let (Some(b), Some(why)) = (noise, &unquiet) {
+                            self.event(Sev::Warn, format!("{} of {} on {node} was not quiet ({why}): {}", l.tag(), l.req.lane, box_line(b)));
                         }
                         // it wrote under the overlay's virtual root on its box's disk: its work fails, and it is named
                         let wrote_root = v.get("virtual_root").and_then(|w| w.as_str());
                         if let Some(why) = wrote_root {
                             self.event(Sev::Err, format!("{} of {} (agent {}) {why}", l.tag(), l.req.lane, l.req.agent.as_deref().unwrap_or("?")));
                         }
-                        summary = format!("{{\"cleanup\":{},\"node\":{},\"stopped\":{},\"freed_mb\":{freed:.0},\"leak\":{},\"ended\":{},\"kept_tail\":{kept_tail},\"box\":{},\"failed_tests\":[{}],\"virtual_root\":{}}}", json_str(if cleanup_ok { "ok" } else { "unconfirmed: capacity unknown" }), json_str(node), killed.len(), leak.len(), ended.as_ref().map_or("null".to_string(), |e| json_str(&e.0)), noise.map_or("null".to_string(), |b| b.to_json()), failed.iter().map(|n| json_str(n)).collect::<Vec<_>>().join(","), wrote_root.map_or("null".to_string(), json_str));
+                        summary = format!("{{\"cleanup\":{},\"node\":{},\"stopped\":{},\"freed_mb\":{freed:.0},\"leak\":{},\"ended\":{},\"kept_tail\":{kept_tail},\"box\":{},\"unquiet\":{},\"failed_tests\":[{}],\"virtual_root\":{}}}", json_str(if cleanup_ok { "ok" } else { "unconfirmed: capacity unknown" }), json_str(node), killed.len(), leak.len(), ended.as_ref().map_or("null".to_string(), |e| json_str(&e.0)), noise.map_or("null".to_string(), |b| b.to_json()), unquiet.as_deref().map_or("null".to_string(), json_str), failed.iter().map(|n| json_str(n)).collect::<Vec<_>>().join(","), wrote_root.map_or("null".to_string(), json_str));
                         if let Some(path) = v.get("recovered").and_then(|r| r.as_str()) {
                             self.fetch_recovered(node, path, l);
                         }
@@ -1558,11 +1621,12 @@ impl LeaseMaster {
 
     fn refresh_node(self: &Arc<Self>, name: &str) {
         let asked = (self.ask)(name, "caps", "caps");
-        let gone = asked.as_ref().err().filter(|e| host_gone(e)).cloned();
-        let caps = asked.ok().and_then(|l| l.into_iter().next()).filter(|l| !l.starts_with("{\"err\":")).and_then(|l| Caps::parse(&l));
+        let line = asked.as_ref().ok().and_then(|l| l.first()).filter(|l| !l.starts_with("{\"err\":"));
+        let caps = line.and_then(|l| Caps::parse(l));
         let now = self.now();
         match caps {
             Some(c) => {
+                if let Some(line) = line { self.note_heard(name, now, line); }
                 self.ledger_jit_builds(name, &c, now);
                 self.say_stalls(name, &c.stalls);
                 // the hub's outage its WM recorded (in this one answer): the box was down, and why
@@ -1585,15 +1649,46 @@ impl LeaseMaster {
                 }
             }
             None => {
+                self.note_unheard(name);
                 // a box off the network for a minute: its leases end as lost, their holders ask again
                 let lost = {
                     let mut s = self.sched.lock().unwrap();
                     self.note_sleep(&mut s);
-                    s.caps_missed(name, gone.as_deref(), now)
+                    s.caps_missed(name, &caps_miss(&asked), now)
                 };
                 if !lost.is_empty() { self.pump(); }
             }
         }
+    }
+
+    /// Its caps answered: what it says now is no longer kept on disk.
+    fn note_heard(&self, name: &str, now: u64, line: &str) {
+        let mut heard = self.heard.lock().unwrap();
+        let kept = heard.get(name).is_some_and(|h| h.2);
+        heard.insert(name.to_string(), (now, line.to_string(), false));
+        drop(heard);
+        if kept { let _ = std::fs::remove_file(self.home.join(HEARD).join(name)); }
+    }
+
+    /// Its caps did not answer: its last answer goes to disk, once, for a master that starts
+    /// while the box is still away.
+    fn note_unheard(&self, name: &str) {
+        let mut heard = self.heard.lock().unwrap();
+        let Some((ms, line, kept)) = heard.get_mut(name).filter(|h| !h.2) else { return };
+        *kept = true;
+        let text = format!("{ms}\n{line}\n");
+        drop(heard);
+        let dir = self.home.join(HEARD);
+        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(name), text)) {
+            self.event(Sev::Warn, format!("{}: {e}", dir.join(name).display()));
+        }
+    }
+
+    /// When `name`'s caps last answered and what they said, from before this master started too.
+    pub fn heard(&self, name: &str) -> Option<(u64, Caps)> {
+        let heard = self.heard.lock().unwrap();
+        let (ms, line, _) = heard.get(name)?;
+        Some((*ms, Caps::parse(line)?))
     }
 
     /// A wait in a node's hub that two caps answers in a row name is said once, as a warning (a
@@ -1710,9 +1805,25 @@ impl LeaseMaster {
         });
         let m = self.clone();
         let _ = std::thread::Builder::new().name("devhub-lease-nodes".into()).spawn(move || loop {
-            m.refresh(&hosts());
+            let hosts = hosts();
+            m.refresh(&hosts);
+            m.note_network(crate::trust::network_problem(hosts.iter().filter(|(name, _)| *name != m.machine).map(|(_, addr)| addr.as_str())));
             std::thread::sleep(pace.caps);
         });
+    }
+
+    /// What keeps this machine's own network from reaching its hubs ([`crate::trust::network_problem`]):
+    /// its boxes would read as down one by one and each for its own reason, when the one thing to
+    /// fix is here (an address change stopped every box for 15+ min, 11-09). Said once per change.
+    pub fn note_network(&self, problem: Option<String>) {
+        self.sched.lock().unwrap().own_network(problem.clone());
+        let mut said = self.network.lock().unwrap();
+        if *said == problem { return; }
+        match &problem {
+            Some(p) => self.event(Sev::Warn, p.clone()),
+            None => self.event(Sev::Info, "this machine's network reaches its hubs again".to_string()),
+        }
+        *said = problem;
     }
 
     /// Informational self-update progress in `nodes`; placement continues unchanged, except
@@ -1801,12 +1912,26 @@ impl LeaseMaster {
         self.sched.lock().unwrap().owner_word(id)
     }
 
+    /// Its holder `pid` hands running lease `id` to the master's own work ([`Sched::adopt`]),
+    /// kept in `leases.live` at once; its box and when it was granted.
+    pub fn adopt(&self, id: &str, pid: u32) -> Result<(String, u64), String> {
+        let held = self.sched.lock().unwrap().adopt(id, pid)?;
+        self.save_live();
+        Ok(held)
+    }
+
     pub fn never_places(&self, req: &Req) -> Option<String> {
         self.sched.lock().unwrap().never_places(req)
     }
 
+    /// When a person last gave input at the node ([`super::sched::Sched::user_input_ms`]).
+    pub fn user_input_ms(&self, node: &str) -> Option<u64> {
+        self.sched.lock().unwrap().user_input_ms(node)
+    }
+
     pub fn nodes(&self) -> Vec<NodeView> {
-        self.sched.lock().unwrap().node_view()
+        let now = self.now();
+        self.sched.lock().unwrap().node_view(now)
     }
 
     /// Routing for the master's JIT-first gate: `class` is the JIT class, without `native:`.
@@ -1964,9 +2089,10 @@ impl LeaseMaster {
                 let beaten = self.sched.lock().unwrap().beat(line.trim(), now);
                 if let Some(at_beat) = beaten {
                     match self.durable_state_line(line.trim()) {
-                        // its holder hears the idle verdict or its yield too, not the inbox alone (`Beat`)
+                        // its holder hears the idle verdict or its yield too, not the inbox alone (`Beat`);
+                        // `hung`: the idle verdict, on which a run's client hands its run to a job
                         Ok(Some(state)) => out.push(match self.owner_word(line.trim()) {
-                            Some(word) => format!("{},\"idle\":{}}}", state.strip_suffix('}').unwrap_or(&state), json_str(&word)),
+                            Some(word) => format!("{},\"idle\":{}{}}}", state.strip_suffix('}').unwrap_or(&state), json_str(&word), if self.sched.lock().unwrap().hung_word(line.trim()).is_some() { ",\"hung\":true" } else { "" }),
                             None => state,
                         }),
                         // an empty answer, said with the lease as its beat found it (a live test's
@@ -2087,7 +2213,8 @@ impl LeaseMaster {
             "nodes" => {
                 // (`nodes master`: the master's own build first, for `devhub nodes`)
                 if line.split_whitespace().any(|w| w == "master") {
-                    out.push(format!("{{\"master\":{},\"hub\":{},\"up_ms\":{}}}", json_str(&self.machine), json_str(super::caps::hub_rev()), self.up_ms));
+                    let network = self.network.lock().unwrap().clone().unwrap_or_default();
+                    out.push(format!("{{\"master\":{},\"hub\":{},\"up_ms\":{},\"network\":{}}}", json_str(&self.machine), json_str(super::caps::hub_rev()), self.up_ms, json_str(&network)));
                 }
                 out.extend(self.nodes().iter().map(|n| n.to_json()));
             }
@@ -2194,7 +2321,7 @@ impl LeaseMaster {
             if l.state != State::Granted || l.req.on_node() || l.node.as_deref() != Some(node) || l.req.jit.as_deref() != Some(jit) {
                 return out.push(err(&format!("{id} is not a live inspect lease on {node}/{jit}")));
             }
-            let view = s.node_view();
+            let view = s.node_view(self.now());
             let n = view.iter().find(|n| n.name == node);
             let user = n.is_some_and(|n| n.role().users());
             // input and windows are writes: off while the node's dev switch is off (§10.11)
@@ -2340,6 +2467,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The master says what is wrong with its own network once, and says it on its line of `devhub
+    /// nodes` for as long as it is so. A box's line says what its caps call said.
+    #[test]
+    fn the_masters_own_network_is_said_once_and_on_its_line() {
+        let dir = std::env::temp_dir().join(format!("devhub-lease-network-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (m, _node, _clock, recs) = master(&dir);
+        let warned = |recs: &Mutex<Vec<Record>>| recs.lock().unwrap().iter().filter(|r| r.sev == Sev::Warn && r.line.contains("bound address")).count();
+        let line = |m: &Arc<LeaseMaster>| serve(m, "nodes", "nodes master").lines().next().unwrap().to_string();
+        m.note_network(None);
+        assert!(line(&m).contains("\"network\":\"\"") && warned(&recs) == 0, "nothing to say: {}", line(&m));
+        let off = "this Mac's address is not the credential's bound address";
+        for _ in 0..3 { m.note_network(Some(off.to_string())); }
+        assert_eq!(warned(&recs), 1, "one event, not one per look");
+        assert!(line(&m).contains(off), "{}", line(&m));
+        m.note_network(None);
+        assert!(line(&m).contains("\"network\":\"\""), "{}", line(&m));
+        assert_eq!(warned(&recs), 1, "being back asks nothing of anybody");
+        assert!(recs.lock().unwrap().last().is_some_and(|r| r.sev == Sev::Info));
+        m.note_network(Some(off.to_string()));
+        assert_eq!(warned(&recs), 2, "off again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_caps_miss_says_its_error_or_its_hubs_refusal() {
+        assert_eq!(caps_miss(&Err("link lost: Host is down".to_string())), "link lost: Host is down");
+        assert_eq!(caps_miss(&Ok(vec![r#"{"err":"credential `fleet-mac` has no rights on this hub"}"#.to_string()])), "credential `fleet-mac` has no rights on this hub");
+        assert_eq!(caps_miss(&Ok(Vec::new())), "no answer");
+        assert_eq!(caps_miss(&Ok(vec!["not json".to_string()])), "a bad answer: not json");
+    }
+
     #[test]
     fn a_lease_that_took_the_disk_ends_with_that_reason() {
         let dir = std::env::temp_dir().join(format!("devhub-lease-disk-{}", std::process::id()));
@@ -2447,6 +2607,7 @@ mod tests {
             dev: false,
             dev_set: false,
             caps: Some(Caps { desk_link: desk.map(|(on, port)| crate::embed::DeskLinkState { on, port, note: String::new() }), ..Default::default() }),
+            unheard: None,
             leases: 0,
             waiting: 0,
             draining: false,
@@ -2454,6 +2615,7 @@ mod tests {
             updating: None,
             update_waits: None,
             update_pin: None,
+            timed: None,
             latency: String::new(),
         };
         let nodes = [view("headset", "192.0.2.85:8788", true, Some((true, 8790))), view("phone", "192.0.2.50", true, Some((true, 0))), view("off", "192.0.2.51", true, Some((false, 8790))), view("gone", "192.0.2.52", false, Some((true, 8790))), view("node-a", "192.0.2.89", true, None)];
@@ -2734,14 +2896,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_lane_jit_built_on_one_box_runs_a_test_lease_granted_on_another() {
-        use super::super::exec::{Exec, Opts};
+        use super::super::exec::{BoxLook, Exec, Opts};
         use super::super::jitstore::{Snapshot, Store};
         let dir = std::env::temp_dir().join(format!("devhub-lease-jit-copy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("home")).unwrap();
         let hub = |name: &str| {
             let conf = super::super::caps::LeaseConf::parse(&format!("work = {}\n", dir.join(name).join("work").display()), &dir.join(name));
-            Exec::new(name, conf, dir.join(name).join("leases"), Opts { scopes: Some(false), watch_memory: false, watch_wm: false, ..Opts::default() }, Arc::new(|_| {}))
+            Exec::new(name, conf, dir.join(name).join("leases"), Opts { scopes: Some(false), watch_memory: false, watch_wm: false, box_look: Some(BoxLook::quiet()), ..Opts::default() }, Arc::new(|_| {}))
         };
         let (built_on, granted_on) = (hub("box-a"), hub("box-b"));
         // the lane's JIT, built on box-a: a script past two copy chunks
@@ -2907,19 +3069,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The idle verdict reaches whoever holds the lease through its beat, not the inbox alone.
+    /// The idle verdict reaches whoever holds the lease through its beat, not the inbox alone,
+    /// with where its stacks are; and its holder may hand the running lease to the master's own
+    /// work (a job that follows the run), after which the holder's end no longer ends it.
     #[test]
-    fn an_idle_leases_beat_says_so() {
+    fn an_idle_leases_beat_says_so_and_its_holder_may_hand_it_over() {
         let dir = std::env::temp_dir().join(format!("devhub-lease-idle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let (m, ..) = master(&dir);
         m.refresh(&[("node-a".to_string(), "192.0.2.89:8797".to_string())]);
-        serve(&m, "lease", &Req::new("gapx", Kind::Build).to_json());
+        let mut r = Req::new("gapx", Kind::Build);
+        r.holder = Some(std::process::id());
+        serve(&m, "lease", &r.to_json());
         assert!(!serve(&m, "beat", "L1").contains("\"idle\""));
         m.sched.lock().unwrap().set_info("L1", r#"{"idle_s":600}"#, 1_000);
         let beat = serve(&m, "beat", "L1");
         assert!(beat.contains("\"state\":\"granted\"") && beat.contains("\"idle\":\"") && beat.contains("every process idle"), "{beat}");
+        assert!(beat.contains("\"hung\":true") && beat.contains("its stacks: `devhub job result L1`"), "the idle verdict, its client's cue: {beat}");
+        let other = std::process::id() + 1;
+        assert!(m.adopt("L1", other).unwrap_err().contains("not held by"), "only its holder hands it over");
+        assert_eq!(m.adopt("L1", std::process::id()).map(|(node, _)| node), Ok("node-a".to_string()));
+        assert!(m.sched.lock().unwrap().holders_gone(&|_| false).is_empty(), "its holder's end no longer ends it");
+        assert!(std::fs::read_to_string(dir.join("leases.live")).unwrap().contains("\"master\":true"), "a restarted master's job takes it back");
+        assert!(m.adopt("L1", std::process::id()).is_err(), "handed over once");
         m.sched.lock().unwrap().set_info("L1", r#"{"idle_s":0}"#, 1_000);
         assert!(!serve(&m, "beat", "L1").contains("\"idle\""), "it works again");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3231,11 +3404,17 @@ mod tests {
         assert!(a.contains("\"state\":\"queued\""), "{a}");
         assert!(serve(&m, "beat", "L1").contains("\"state\":\"queued\""), "still waiting while the box is down");
         assert!(recs.lock().unwrap().iter().any(|r| r.line.contains("node-a unreachable at its start")));
+        // its caps go unanswered: what it said last stays on disk, for a master that starts while
+        // it is away (a CI shard only it takes says the box is down, not that none is set up)
+        m.refresh(&hosts);
+        let (again, _, _, _) = master(&dir);
+        assert!(again.heard("node-a").is_some_and(|(_, c)| c.display.as_deref() == Some("wm:makepad-wm-0")), "a new master knows what the box was");
         // the hub is back: its caps answer, the box is up, the lease gets it
         node.gone.store(false, Ordering::SeqCst);
         *node.trouble.lock().unwrap() = "devhub on node-a could not run for 9 s (1 try): could not start: the user's service manager is down".into();
         m.refresh(&hosts);
         assert!(serve(&m, "beat", "L1").contains("\"state\":\"granted\""));
+        assert!(!dir.join(HEARD).join("node-a").exists(), "a box that answers again keeps nothing on disk");
         // and why it was down, from its WM's record, is said once as a warning
         m.refresh(&hosts);
         let said: Vec<_> = recs.lock().unwrap().iter().filter(|r| r.line.contains("could not run for 9 s")).map(|r| r.sev).collect();

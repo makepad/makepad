@@ -232,7 +232,8 @@ pub fn preempt(ctx: &Ctx, last: &mut u64) {
     if now.saturating_sub(*last) < PREEMPT_AFTER_MS { return; }
     // Interactive work drains successors in the scheduler; only background work uses this path.
     let mut cands: Vec<_> = view.iter().filter(|l| l.state == State::Queued && crate::lease::sched::owed_leg(l)).collect();
-    cands.extend(view.iter().filter(|l| l.state == State::Queued && !leg::is_background(l) && now.saturating_sub(l.asked_ms) > PREEMPT_AFTER_MS));
+    // (a box's prebuild ends nothing: nobody waits on it)
+    cands.extend(view.iter().filter(|l| l.state == State::Queued && !leg::is_background(l) && !l.req.upkeep() && now.saturating_sub(l.asked_ms) > PREEMPT_AFTER_MS));
     cands.sort_by_key(|l| (!crate::lease::sched::owed_leg(l), l.asked_ms));
     // what may end, by box (owed background work asked at OWED_PRIO: it keeps its box)
     let mut boxes: std::collections::BTreeMap<&str, Vec<&crate::lease::sched::Lease>> = Default::default();

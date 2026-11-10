@@ -86,6 +86,9 @@ pub fn stamper() -> Result<std::process::Command, String> {
 pub fn stamp_output(stamper: impl FnOnce() -> Result<std::process::Command, String>) -> Result<(), String> {
     use std::os::fd::{AsFd, AsRawFd, IntoRawFd};
     if let Some((pid, log)) = kept() {
+        // (open over the exec that brought it here: from here on, as in the image that made it, it
+        // goes to no child)
+        let _ = crate::node::close_on_exec(log, true);
         watch(pid, log);
         return Ok(());
     }
@@ -232,6 +235,10 @@ mod tests {
                 stamp_output(|| Err("the image after the exec made a stamper of its own".into())).unwrap();
                 let pid = stamper_pid();
                 eprintln!("after line");
+                // a child of this image gets no descriptor of the log
+                let fd = LOG.load(std::sync::atomic::Ordering::Relaxed);
+                let child = std::process::Command::new("sh").args(["-c", &format!(": >&{fd}")]).stderr(std::process::Stdio::null()).status().unwrap();
+                assert!(!child.success(), "the log's descriptor {fd} went to a child");
                 let log = base.join("log");
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
                 while !std::fs::read_to_string(&log).unwrap().contains("after line") {

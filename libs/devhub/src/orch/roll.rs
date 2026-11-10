@@ -41,7 +41,7 @@
 //!   shards go on from where their logs stand; queued ones stay queued). Only an allapps run is
 //!   started over, so it is waited for up to [`MASTER_DEADLINE`]. It execs with its own args into
 //!   each devhub build it lacks as that build ends ([`prebuild`]: devhub's own small binary,
-//!   never the JIT, built in a target dir of its own and swapped in at
+//!   never the JIT, built apart from `target/host` and swapped in at
 //!   `target/host/makepad-devhub`, [`build_devhub`]; a master that runs as the devhub app, the
 //!   one with a menu-bar item, execs into the app's build: [`MasterBin`]), before the next landing's build starts: a
 //!   landing during a build is the next one's, and the master takes it as that ends (the node rolls
@@ -1111,6 +1111,42 @@ fn hub_build_room(ctx: &Ctx, node: &str, gone: &dyn Fn() -> bool, waits: &dyn Fn
     super::leg::Held::acquire_with(&spec, &|r| r.class = HUB_BUILD.into(), &mut |line| waits(line), gone)
 }
 
+/// The room a box's deployment build takes (a `sync` apply's prebuild, [`crate::lease::sched::Req::deploy_build`]):
+/// a lease of its hub build's class, so sized and queued like it, held by the apply until its node
+/// answers. `repo` is the master's checkout. It waits in line like any build, but never behind the
+/// box's timed work, which goes first there: a timed run on the box, or a timed ask first in line
+/// for it (the box holds its deployment for that ask, sync/autosync.rs), gives it up (None) and
+/// the apply waits for the gap after. It is one of the master's own holders ([`holding`]): a
+/// restart lets its apply end first, and a queued one gives its request up for the next master.
+pub(crate) fn deploy_build_room(repo: &std::path::Path, node: &str, waits: &mut dyn FnMut(&str)) -> Result<Option<DeployRoom>, String> {
+    use crate::lease::sched::{DEFAULT_PRIO, DEPLOY_BUILD, HUB_BUILD};
+    let timed = || super::leases().is_some_and(|lm| lm.update_pin(node).is_some() || lm.view().iter().any(|l| matches!(l.state, crate::lease::sched::State::Starting | crate::lease::sched::State::Granted) && l.req.kind == crate::lease::Kind::Timed && l.node.as_deref() == Some(node)));
+    if timed() { return Ok(None); }
+    let drain = holding();
+    let spec = super::leg::Spec { lane: format!("{DEPLOY_BUILD}-{node}"), agent: "devhub-sync".into(), kind: crate::lease::Kind::Build, needs: String::new(), prio: DEFAULT_PRIO, rev: String::new(), repo_dir: repo.to_string_lossy().into_owned(), node: Some(node.to_string()), since_ms: None };
+    match super::leg::Held::acquire_with(&spec, &|r| r.class = HUB_BUILD.into(), waits, &|| timed() || draining()) {
+        Ok(held) => Ok(Some(DeployRoom { held, _drain: drain })),
+        Err(_) if timed() => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// A box's deployment-build room ([`deploy_build_room`]), held until dropped.
+pub(crate) struct DeployRoom {
+    held: super::leg::Held,
+    _drain: Holding,
+}
+
+impl DeployRoom {
+    /// The jobs its build builds with ([`crate::lease::sched::Sched::hub_build_jobs`]), for a node
+    /// whose hub takes them ([`crate::lease::DEPLOY_JOBS_PROTO`]).
+    pub(crate) fn jobs(&self) -> Option<u32> {
+        let lm = super::leases()?;
+        let takes = lm.nodes().into_iter().find(|n| n.name == self.held.node).and_then(|n| n.caps).is_some_and(|c| c.hub_proto >= crate::lease::DEPLOY_JOBS_PROTO);
+        takes.then(|| lm.hub_build_jobs(&self.held.id)).flatten()
+    }
+}
+
 /// How a box's roll ended. Only a restart that was asked for goes on the record: a service that
 /// runs that build already is not one (the AI hub said so to an ask every 15 s, read as 24 rolls a minute).
 enum RollEnd {
@@ -1190,7 +1226,7 @@ fn drained(say: impl FnOnce(usize)) {
 
 /// What a master runs as, and so what its self-update builds and execs into: devhub's own binary
 /// (`makepad-devhub serve`, at `target/host`, the CLI's callers' too), or the devhub app with its
-/// menu-bar item (a master on a desktop, apps/devhub), built in a target dir of its own ([`APP_TARGET`])
+/// menu-bar item (a master on a desktop, apps/devhub), built in its own target dir ([`APP_TARGET`])
 /// and run from there: its login item's wrapper builds the same there before it starts it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MasterBin {
@@ -1219,6 +1255,17 @@ impl MasterBin {
         match self {
             MasterBin::Cli => repo.join("target/host").join(exe("makepad-devhub")),
             MasterBin::App => repo.join(APP_TARGET).join("host").join(exe(APP_NAME)),
+        }
+    }
+
+    /// Where devhub's binary builds: the app's target dir under a master that runs as the app. The
+    /// app builds on the same devhub lib, one compile (over 9 min on a Mac at background QoS, 11-09):
+    /// in a target dir of its own it was compiled twice in each landing's cycle, and the master
+    /// took a landing only after the second.
+    fn cli_target(self, repo: &Path) -> PathBuf {
+        match self {
+            MasterBin::Cli => repo.join("target/devhub"),
+            MasterBin::App => repo.join(APP_TARGET),
         }
     }
 
@@ -1308,8 +1355,8 @@ pub(super) fn cargo_bin() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).map(|h| h.join(".cargo/bin/cargo")).filter(|c| c.exists()).unwrap_or_else(|| PathBuf::from("cargo"))
 }
 
-/// devhub's binary, built in a target dir of its own (never the lock of `target/host`, where the
-/// apps and the JIT build) and swapped in at `target/host/makepad-devhub` through a rename: a
+/// devhub's binary, built apart from `target/host` ([`MasterBin::cli_target`]: never the lock of
+/// that one, where the apps and the JIT build) and swapped in at `target/host/makepad-devhub` through a rename: a
 /// caller runs the old build or the new one, never a missing or half-written file. A background
 /// build ([`crate::os::background`]: background QoS on the person's Mac) on 4 jobs, the master's
 /// own restart too: the running master beats on while it builds, and only the exec's gap counts.
@@ -1319,15 +1366,16 @@ pub(super) fn cargo_bin() -> PathBuf {
 /// master's restart at one landing; the master stayed behind for its retry pause).
 pub fn build_devhub(repo: &Path) -> Result<(), String> {
     let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
+    let target = MasterBin::this().cli_target(repo);
     let mut cmd = crate::os::background(cargo_bin().as_os_str());
-    cmd.args(["build", "-j4", "--profile", "host", "-p", "makepad-devhub", "--bin", "makepad-devhub", "--target-dir"]).arg(repo.join("target/devhub")).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null());
+    cmd.args(["build", "-j4", "--profile", "host", "-p", "makepad-devhub", "--bin", "makepad-devhub", "--target-dir"]).arg(&target).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null());
     match cmd.output() {
         Ok(o) if o.status.success() => {}
         Ok(o) => return Err(format!("does not build: {}", build_failure(&o))),
         Err(e) => return Err(format!("cargo: {e}")),
     }
     let name = format!("makepad-devhub{}", std::env::consts::EXE_SUFFIX);
-    swap_in(&repo.join("target/devhub/host").join(&name), &repo.join("target/host").join(&name))
+    swap_in(&target.join("host").join(&name), &repo.join("target/host").join(&name))
 }
 
 /// One devhub build at a time ([`build_devhub`], [`build_master_app`]).
@@ -1481,6 +1529,9 @@ mod tests {
         assert_eq!(MasterBin::of(&repo.join("target/devhub-app/host").join(exe("makepad-app-devhub"))), MasterBin::App);
         assert_eq!(MasterBin::Cli.live(repo), repo.join("target/host").join(exe("makepad-devhub")));
         assert_eq!(MasterBin::App.live(repo), repo.join("target/devhub-app/host").join(exe("makepad-app-devhub")));
+        // the CLI builds beside the app, which is built on the same lib
+        assert_eq!(MasterBin::App.cli_target(repo), repo.join("target/devhub-app"));
+        assert_eq!(MasterBin::Cli.cli_target(repo), repo.join("target/devhub"));
         let devhub = std::collections::BTreeSet::from(["libs/devhub".to_string(), "libs/devhub_conf".to_string()]);
         assert_eq!(MasterBin::Cli.dirs(&devhub), devhub);
         // the CLI binary: the master's own build, or its restart's; one its wrapper started builds it

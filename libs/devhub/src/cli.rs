@@ -98,12 +98,12 @@ pub(crate) fn retry_master_wait<T>(mut call: impl FnMut() -> Result<T, String>, 
     loop {
         match call() {
             Ok(v) => return Ok(v),
-            Err(e) if e.starts_with("no devhub master at ") || e.contains("link lost") || e.contains("hub connection ended") => {
+            Err(e) if e.starts_with("no devhub master at ") || link_cut(&e) => {
                 let up = beat();
                 if told != Some(up) {
                     eprintln!("{}", match (told, up) {
                         (_, false) => "master not reachable: waiting",
-                        (None, true) => "the master's link was cut: asking again",
+                        (None, true) => "the link was cut: asking again",
                         (Some(_), true) => "the master is back: asking again",
                     });
                     told = Some(up);
@@ -112,6 +112,28 @@ pub(crate) fn retry_master_wait<T>(mut call: impl FnMut() -> Result<T, String>, 
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Whether an ask's error says its link went while it was out: a master that restarts cuts what
+/// it was answering ([`retry_master`]). By how it starts: an answer that only quotes one is an
+/// answer. A session ended on a lost link says `W1 ended: box: link lost: ..`, and `live act` on it
+/// asked again for good (11-09).
+pub(crate) fn link_cut(e: &str) -> bool {
+    e.starts_with("link lost") || e.starts_with("the hub connection ended")
+}
+
+/// What a cut ask's error adds when the service had said it still waited: nothing of the request
+/// was done, so it can be asked again whatever it does.
+pub(crate) const RAN_NOTHING: &str = "it had done nothing yet";
+
+/// A `{"say":..}` line a service sends while it waits (`lines::say_waiting`): what it says, and
+/// whether the request still waits. An answer's lines are not one.
+fn said_line(l: &str) -> Option<(String, bool)> {
+    if !l.starts_with("{\"say\":") {
+        return None;
+    }
+    let v = makepad_strict_json::parse(l.as_bytes()).ok()?;
+    Some((v.get("say")?.as_str()?.to_string(), v.get("waiting")?.as_bool()?))
 }
 
 /// Sends one line to a lines service and collects the answer.
@@ -170,25 +192,39 @@ fn ask_lines(c: &Client, target: Option<&str>, service: &str, line: &str) -> Res
         None => {
             let ch = c.open(service, "").map_err(|e| e.to_string())?;
             ch.send(line.as_bytes().to_vec()).map_err(|e| format!("link lost: {e}"))?;
-            'recv: loop {
-                match ch.recv() {
-                    Some(makepad_remote::Event::Data(d)) => {
-                        for l in String::from_utf8_lossy(&d).lines().filter(|l| !l.is_empty()) {
-                            if l.starts_with("{\"end\":") {
-                                break 'recv;
-                            }
-                            got.push(l.to_string());
-                        }
-                    }
-                    Some(makepad_remote::Event::Opened(_)) => {}
-                    Some(makepad_remote::Event::Closed(makepad_remote::conn::CLOSE_LINK_LOST, why)) => return Err(format!("link lost: {why}")),
-                    Some(makepad_remote::Event::Closed(_, why)) => return Err(why),
-                    None => return Err("the hub connection ended".into()),
-                }
-            }
+            got = answer_of(|| ch.recv())?;
         }
     }
     Ok(got)
+}
+
+/// The answer lines of one request, as its channel delivers them: what a service says while it
+/// waits goes to stderr (`lines::say_waiting`), and a cut while it still waited says it did nothing.
+fn answer_of(mut recv: impl FnMut() -> Option<makepad_remote::Event>) -> Result<Vec<String>, String> {
+    let mut got = Vec::new();
+    let mut waiting = false;
+    let cut = |e: String, waiting: bool| if waiting { format!("{e}: {RAN_NOTHING}") } else { e };
+    loop {
+        match recv() {
+            Some(makepad_remote::Event::Data(d)) => {
+                for l in String::from_utf8_lossy(&d).lines().filter(|l| !l.is_empty()) {
+                    if l.starts_with("{\"end\":") {
+                        return Ok(got);
+                    }
+                    if let Some((said, still)) = said_line(l) {
+                        if !said.is_empty() { eprintln!("{said}"); }
+                        waiting = still;
+                        continue;
+                    }
+                    got.push(l.to_string());
+                }
+            }
+            Some(makepad_remote::Event::Opened(_)) => {}
+            Some(makepad_remote::Event::Closed(makepad_remote::conn::CLOSE_LINK_LOST, why)) => return Err(cut(format!("link lost: {why}"), waiting)),
+            Some(makepad_remote::Event::Closed(_, why)) => return Err(why),
+            None => return Err(cut("the hub connection ended".into(), waiting)),
+        }
+    }
 }
 
 pub(crate) fn has(c: &Client, service: &str) -> bool {
@@ -341,6 +377,16 @@ pub(crate) fn local_name(c: &Client) -> String {
 /// call is one (a tool's risk is the app's to say, and a read tool still runs the app's code).
 pub(crate) const READ_ONLY: [&str; 11] = ["help", "status", "log", "grab", "gseq", "why-hung", "stacks", "session", "panics", "events", "tools"];
 
+/// Whether `cmd` only reads by that list. `session` does alone, or with `pending` or `view`; its other
+/// words act: `session relaunch` restarts the app, `session view open` changes what it shows.
+pub(crate) fn jit_reads(cmd: &[&str]) -> bool {
+    match cmd {
+        ["session"] | ["session", "pending" | "view"] => true,
+        ["session", ..] | [] => false,
+        [verb, ..] => READ_ONLY.contains(verb),
+    }
+}
+
 /// One JIT of a machine as `devhub inspect` tells whose it is: the lease that started it, "" for
 /// none (its discovery file's `lease`, the node hub's `ps`).
 #[derive(Clone, Debug, PartialEq)]
@@ -377,10 +423,10 @@ pub(crate) fn whose(c: &Client, machine: &str, here: bool) -> Result<Vec<Whose>,
 /// a lane's command must not reach the user's live app by a name it shares with the lane's own or
 /// by a pid read off the wrong line: refused, with why. `--read-only` lets [`READ_ONLY`] reach it,
 /// and holds a lease's JIT to them as well. By name, every JIT of that name must be a lease's.
-pub(crate) fn leave_alone(jits: &[Whose], machine: &str, jit: &str, verb: &str, read_only: bool) -> Option<String> {
+pub(crate) fn leave_alone(jits: &[Whose], machine: &str, jit: &str, cmd: &[&str], read_only: bool) -> Option<String> {
     let reads = READ_ONLY.join(", ");
-    if read_only && !READ_ONLY.contains(&verb) {
-        return Some(format!("`{verb}` is not a read: --read-only lets through only {reads}"));
+    if read_only && !jit_reads(cmd) {
+        return Some(format!("`{}` is not a read: --read-only lets through only {reads}", cmd.join(" ")));
     }
     let named: Vec<&Whose> = jits.iter().filter(|j| j.pid.to_string() == jit || j.app == jit).collect();
     if named.is_empty() {
@@ -438,7 +484,8 @@ fn inspect(c: &Client, args: &[String]) -> i32 {
         return 2;
     };
     let local = machine == local_name(c);
-    match whose(c, machine, local).map(|jits| leave_alone(&jits, machine, app, &words[0], read_only)) {
+    let cmd: Vec<&str> = words.iter().map(String::as_str).collect();
+    match whose(c, machine, local).map(|jits| leave_alone(&jits, machine, app, &cmd, read_only)) {
         Ok(None) => {}
         Ok(Some(why)) => {
             eprintln!("makepad devhub inspect: {why}");
@@ -1351,6 +1398,44 @@ pub fn own_argv(repo: &std::path::Path) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// What a service says while it waits is not its answer, and an answer is not said.
+    #[test]
+    fn a_said_line_is_told_apart_from_the_answer() {
+        assert_eq!(said_line("{\"say\":\"live call W1 waits for room\",\"waiting\":true}"), Some(("live call W1 waits for room".to_string(), true)));
+        assert_eq!(said_line("{\"say\":\"\",\"waiting\":false}"), Some((String::new(), false)));
+        assert_eq!(said_line("{\"lines\":[],\"say\":\"x\"}"), None);
+        assert_eq!(said_line("{\"say\":"), None);
+    }
+
+    /// An ask cut while its service still waited says it did nothing, which a caller may ask
+    /// again; one cut after the wait, or with no wait said, doesn't.
+    #[test]
+    fn an_ask_cut_while_it_waited_says_it_did_nothing() {
+        use makepad_remote::{conn::CLOSE_LINK_LOST, Event};
+        let waits = "{\"say\":\"no room\",\"waiting\":true}\n";
+        let over = "{\"say\":\"\",\"waiting\":false}\n";
+        let answer = |lines: &[&str], end: Option<Event>| {
+            let mut events: Vec<Option<Event>> = lines.iter().map(|l| Some(Event::Data(l.as_bytes().to_vec()))).collect();
+            events.push(end);
+            let mut events = events.into_iter();
+            answer_of(|| events.next().flatten())
+        };
+        let lost = || Some(Event::Closed(CLOSE_LINK_LOST, "peer closed".to_string()));
+        for end in [lost(), None] {
+            let e = answer(&[waits], end).unwrap_err();
+            assert!(link_cut(&e) && e.contains(RAN_NOTHING), "{e}");
+        }
+        for (lines, end) in [(&[waits, over][..], lost()), (&[waits, over], None), (&[], lost()), (&[], None)] {
+            let e = answer(lines, end).unwrap_err();
+            assert!(link_cut(&e) && !e.contains(RAN_NOTHING), "{lines:?}: {e}");
+        }
+        // an answer that quotes a cut is an answer: asked again, it would say the same for good
+        assert!(!link_cut("W1 ended: boxa: link lost: cannot reach fleet hub `boxa`"));
+        // what it said is not its answer
+        let done = answer(&[waits, over, "{\"lines\":[]}\n{\"end\":\"live\",\"ms\":1}\n"], None);
+        assert_eq!(done, Ok(vec!["{\"lines\":[]}".to_string()]));
+    }
+
     fn jit(pid: u32, app: &str, lease: &str) -> Whose {
         Whose { pid, app: app.to_string(), lease: lease.to_string() }
     }
@@ -1360,22 +1445,30 @@ mod tests {
     #[test]
     fn inspect_reaches_only_what_a_lease_runs() {
         let jits = [jit(41, "makepad-source-library", ""), jit(42, "makepad-source-library", "/leases/L7"), jit(43, "makepad-app-wm", "")];
-        assert_eq!(leave_alone(&jits, "boxa", "42", "call", false), None, "the lease's own app");
-        let why = leave_alone(&jits, "boxa", "41", "call", false).expect("a person's app is refused");
+        assert_eq!(leave_alone(&jits, "boxa", "42", &["call"], false), None, "the lease's own app");
+        let why = leave_alone(&jits, "boxa", "41", &["call"], false).expect("a person's app is refused");
         assert!(why.contains("boxa/41 is no lease's (41 makepad-source-library)") && why.contains("--read-only"), "{why}");
         // by name, the lane's app and the user's share it: refused, never a guess between them
-        let why = leave_alone(&jits, "boxa", "makepad-source-library", "call", false).expect("a shared name is refused");
+        let why = leave_alone(&jits, "boxa", "makepad-source-library", &["call"], false).expect("a shared name is refused");
         assert!(why.contains("41 makepad-source-library") && !why.contains("42"), "{why}");
-        assert!(leave_alone(&jits, "boxa", "makepad-app-wm", "click", false).is_some(), "the node's own WM");
-        let why = leave_alone(&jits, "boxa", "9", "status", false).expect("no such JIT");
+        assert!(leave_alone(&jits, "boxa", "makepad-app-wm", &["click"], false).is_some(), "the node's own WM");
+        let why = leave_alone(&jits, "boxa", "9", &["status"], false).expect("no such JIT");
         assert!(why.contains("runs no JIT `9`") && why.contains("devhub ls boxa"), "{why}");
         // --read-only: reads reach a person's app, nothing else reaches any app
         for verb in ["grab", "log", "why-hung", "stacks", "tools"] {
-            assert_eq!(leave_alone(&jits, "boxa", "41", verb, true), None, "{verb}");
+            assert_eq!(leave_alone(&jits, "boxa", "41", &[verb], true), None, "{verb}");
         }
         for (pid, verb) in [("41", "call"), ("41", "click"), ("41", "quit"), ("41", "gq"), ("42", "call")] {
-            let why = leave_alone(&jits, "boxa", pid, verb, true).unwrap_or_else(|| panic!("{pid} {verb} under --read-only"));
+            let why = leave_alone(&jits, "boxa", pid, &[verb], true).unwrap_or_else(|| panic!("{pid} {verb} under --read-only"));
             assert!(why.starts_with(&format!("`{verb}` is not a read")), "{why}");
+        }
+        // `session` reads alone; its other words act on the app
+        for cmd in [&["session"][..], &["session", "pending"], &["session", "view"]] {
+            assert_eq!(leave_alone(&jits, "boxa", "41", cmd, true), None, "{cmd:?}");
+        }
+        for cmd in [&["session", "relaunch"][..], &["session", "view", "open"], &["session", "view", "dismiss"]] {
+            let why = leave_alone(&jits, "boxa", "41", cmd, true).unwrap_or_else(|| panic!("{cmd:?} under --read-only"));
+            assert!(why.starts_with(&format!("`{}` is not a read", cmd.join(" "))), "{why}");
         }
     }
 

@@ -6,7 +6,7 @@
 //! back.
 
 use super::*;
-use crate::lease::exec::{Exec, Opts, WORDS};
+use crate::lease::exec::{BoxLook, Exec, Opts, WORDS};
 use crate::lease::master::SERVICES as LEASE_SERVICES;
 use makepad_remote::hosts::{Host, Hosts, Via};
 use makepad_remote::hub::Hub;
@@ -49,7 +49,7 @@ fn restart_role_nodes() {
         let work = work_dir(&base, name);
         let ci = if NODES[..2].contains(&name) { "slots.ci = 1\n" } else { "" };
         let conf = crate::lease::caps::LeaseConf::parse(&format!("work = {}\nrole = pool\ndisk_floor_gb = 0\ndisk_warn_gb = 0\n{ci}", work.display()), &dir);
-        let x = Exec::new(name, conf, dir.join("leases"), Opts { watch_memory: false, scopes: Some(false), no_beat: NO_BEAT, tick: Duration::from_millis(100), ..Opts::default() }, Arc::new(|_| {}));
+        let x = Exec::new(name, conf, dir.join("leases"), Opts { watch_memory: false, scopes: Some(false), no_beat: NO_BEAT, tick: Duration::from_millis(100), box_look: Some(BoxLook::quiet()), ..Opts::default() }, Arc::new(|_| {}));
         let ep = Endpoint::new(name);
         for &word in WORDS {
             let e = x.clone();

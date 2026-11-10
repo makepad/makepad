@@ -165,7 +165,6 @@ if [ "$scoped" = 1 ] && [ -r /proc/self/cgroup ]; then
 fi
 record() {
     if [ -n "$group" ]; then
-        if [ -r "$group/memory.peak" ] && read -r peak < "$group/memory.peak"; then printf 'peak %s\n' "$peak"; fi
         if [ -r "$group/cpu.stat" ]; then
             while read -r key value; do
                 if [ "$key" = usage_usec ]; then printf 'cpu %s\n' "$value"; fi
@@ -191,11 +190,13 @@ exit "$?"
     full
 }
 
-/// Current scope high-water mark and cumulative CPU. The in-scope wrapper saves these again
-/// at exit because systemd removes an empty scope before its parent can read the cgroup.
+/// What a scoped run holds now that its class's RAM is measured by ([`parse_unreclaimable`]), and
+/// its cumulative CPU. The in-scope wrapper saves the CPU again at exit because systemd removes
+/// an empty scope before its parent can read the cgroup.
 pub fn scope_usage(pid: u32, start: u64, unit: Option<&str>, usage: &Path) -> (Option<u64>, Option<f64>) {
     let Some(group) = scope_dir(pid, start, unit, usage) else { return (None, None) };
-    let peak = std::fs::read_to_string(group.join("memory.peak")).ok().and_then(|s| s.trim().parse().ok());
+    let read = |f: &str| std::fs::read_to_string(group.join(f)).ok();
+    let peak = read("memory.current").and_then(|c| parse_unreclaimable(&c, &read("memory.stat").unwrap_or_default()));
     let cpu = std::fs::read_to_string(group.join("cpu.stat")).ok().and_then(|s| s.lines().find_map(|s| s.strip_prefix("usage_usec ").and_then(|s| s.parse::<f64>().ok()))).map(|us| us / 1_000_000.0);
     (peak, cpu)
 }
@@ -465,6 +466,16 @@ fn process_table(_leaders: &[u32]) -> std::collections::HashMap<u32, (u32, bool)
 pub fn scope_now(pid: u32, start: u64, unit: Option<&str>, usage: &Path) -> Option<u64> {
     let stat = std::fs::read_to_string(scope_dir(pid, start, unit, usage)?.join("memory.stat")).ok()?;
     Some(parse_held(&stat))
+}
+
+/// A cgroup's `memory.current` less the page cache the kernel reclaims first (`memory.stat`'s
+/// `inactive_file`), bytes: what a run's class asks for. Never `memory.peak`, which counts every
+/// file the run read: a third of a tests shard's scope was idle cache, and its class asked
+/// 27.7 GB and waited 15 min for a box with that free (11-10).
+pub fn parse_unreclaimable(current: &str, stat: &str) -> Option<u64> {
+    let current: u64 = current.trim().parse().ok()?;
+    let idle = stat.lines().find_map(|l| l.strip_prefix("inactive_file ")).and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
+    Some(current.saturating_sub(idle))
 }
 
 /// `anon` + `shmem` of a cgroup's `memory.stat`.
@@ -963,6 +974,18 @@ fn safety_raised_limit_is_the_open_file_limit() {
     let soft = limits.lines().find_map(|l| l.strip_prefix("Max open files")).unwrap()
         .split_whitespace().next().unwrap().parse::<u64>().unwrap();
     assert_eq!(actual, soft);
+}
+
+/// A scope's class RAM is what it holds less its idle page cache, from a tests shard's numbers
+/// (11.6 GB held, 3.5 GB of it idle cache); a cgroup without the stat line keeps it all.
+#[cfg(test)]
+#[test]
+fn a_scopes_class_ram_leaves_out_its_idle_page_cache() {
+    let mb = 1u64 << 20;
+    let stat = format!("anon {}\nfile {}\nkernel {}\nshmem {}\nactive_file {}\ninactive_file {}\n", 7953 * mb, 3798 * mb, 53 * mb, 89 * mb, 87 * mb, 3621 * mb);
+    assert_eq!(parse_unreclaimable(&format!("{}\n", 11888 * mb), &stat), Some(8267 * mb));
+    assert_eq!(parse_unreclaimable("4096\n", "anon 4096\n"), Some(4096), "no inactive_file: all of it");
+    assert_eq!(parse_unreclaimable("", &stat), None, "no memory.current: no measure");
 }
 
 /// A run's group and what descends from it count, by footprint; this process does not.

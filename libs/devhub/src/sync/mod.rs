@@ -110,7 +110,7 @@ pub fn followed(repo: &std::path::Path) -> Vec<(String, String)> {
 #[cfg(feature = "checkout")]
 pub fn push_tree(control: &makepad_remote::Client, repo: &std::path::Path, node: &str, at: Option<&str>) -> (i32, Vec<String>) {
     let mut lines = Vec::new();
-    let code = cli::push_and_apply(control, repo, &followed(repo), at, &[node.to_string()], "off", "none", false, "", &mut |n, l| lines.push(format!("{n} {l}")));
+    let code = cli::push_and_apply(control, repo, &followed(repo), at, &[node.to_string()], "off", "none", false, "", None, &mut |n, l| lines.push(format!("{n} {l}")));
     (code, lines)
 }
 

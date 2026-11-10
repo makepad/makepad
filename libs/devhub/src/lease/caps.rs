@@ -3,7 +3,8 @@
 //!
 //! `lease.conf` is `key = value` lines: `role = pool|hot|suite|bench|user-wm|device` (`bench`: the
 //! boxes timed leases go to), `slots.<kind> = 0|1` (one write lease per kind; CI only with `slots.ci`),
-//! `disk_floor_gb`, `disk_warn_gb`, `timed = on|off`, `spec = <text>`, `work = <dir>` (default
+//! `disk_floor_gb`, `disk_warn_gb`, `timed = on|off|spare` (`spare`: a pool box that takes a timed lease
+//! while the bench boxes that meet it are taken by timed work), `spec = <text>`, `work = <dir>` (default
 //! [`WORK_DIR`] in home), CPU pinning for leases (`cpus.shared = 8-15,24-31`, `cpus.timed = 0-7,16-23`) and
 //! `user_idle_min` (default 3: minutes without a person's input before a node with our WM
 //! takes work again, [`super::UserSense`]).
@@ -21,6 +22,8 @@ pub struct LeaseConf {
     pub disk_floor_gb: f64,
     pub disk_warn_gb: f64,
     pub timed: bool,
+    /// `timed = spare`: a pool box that takes timed work while the bench boxes are taken by it
+    pub timed_spare: bool,
     pub spec: String,
     /// where leases work: `dev/` for overlays; `native/`, `native-target/`, `ci-tree/`,
     /// `ci-target/`, `lane/`, `target/`, `tmp/`, `recovered/` for tree leases
@@ -62,6 +65,7 @@ impl LeaseConf {
             disk_floor_gb: 25.0,
             disk_warn_gb: 50.0,
             timed: true,
+            timed_spare: false,
             spec: String::new(),
             work: home.join(WORK_DIR),
             native_trees: NATIVE_TREES,
@@ -77,7 +81,7 @@ impl LeaseConf {
                 "role" => c.role = Role::parse(v).unwrap_or(c.role),
                 "disk_floor_gb" => c.disk_floor_gb = v.parse().unwrap_or(c.disk_floor_gb),
                 "disk_warn_gb" => c.disk_warn_gb = v.parse().unwrap_or(c.disk_warn_gb),
-                "timed" => c.timed = v != "off",
+                "timed" => (c.timed, c.timed_spare) = (v != "off", v == "spare"),
                 "spec" => c.spec = v.to_string(),
                 "work" => c.work = v.strip_prefix("~/").map_or_else(|| PathBuf::from(v), |r| home.join(r)),
                 "native_trees" => c.native_trees = v.parse().unwrap_or(c.native_trees),
@@ -111,7 +115,7 @@ pub fn settable(key: &str, value: &str) -> Result<(), String> {
         "role" => Role::parse(value).map(|_| ()).ok_or_else(|| "role = pool|hot|suite|bench|user-wm|device".to_string()),
         "disk_floor_gb" | "disk_warn_gb" => num(),
         "native_trees" => value.parse::<u32>().map(|_| ()).map_err(|_| "native_trees takes a count".to_string()),
-        "timed" => matches!(value, "on" | "off").then_some(()).ok_or_else(|| "timed = on|off".to_string()),
+        "timed" => matches!(value, "on" | "off" | "spare").then_some(()).ok_or_else(|| "timed = on|off|spare".to_string()),
         "spec" => (!value.is_empty() && value.len() <= 64 && value.bytes().all(|b| b.is_ascii_graphic())).then_some(()).ok_or_else(|| "spec: one word".to_string()),
         "cpus.shared" | "cpus.timed" => (value.is_empty() || valid_cpus(value)).then_some(()).ok_or_else(|| format!("{key}: a CPU list like 8-15,24-31")),
         "user_idle_min" => value.parse::<u32>().ok().filter(|m| (1..=1440).contains(m)).map(|_| ()).ok_or_else(|| "user_idle_min: whole minutes, 1..1440".to_string()),
@@ -209,6 +213,12 @@ pub fn dark_of(status: &str) -> String {
     if windows.iter().all(empty) { "its WM's window is 0x0: no output shows it".into() } else { String::new() }
 }
 
+/// The node's own WM among this box's endpoints, the newest when a restart left the old one's file.
+/// A lease's WM is a test desktop beside it, and says nothing of what the box shows.
+pub fn node_wm(apps: &[makepad_remote::discovery::App]) -> Option<&makepad_remote::discovery::App> {
+    apps.iter().filter(|a| a.app == "makepad-app-wm" && a.text("lease").is_none()).max_by_key(|a| a.started_ms)
+}
+
 /// The box's WM answered on another hosted wire at the last caps measure (its socket and
 /// answer): no display for gui work until it restarts (`sync::serve` rolls that restart).
 #[cfg(target_os = "linux")]
@@ -229,6 +239,7 @@ pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
     c.disk_floor_gb = conf.disk_floor_gb;
     c.disk_warn_gb = conf.disk_warn_gb;
     c.timed = conf.timed;
+    c.timed_spare = conf.timed_spare;
     c.apply = apply.to_string();
     c.hub_rev = hub_rev().to_string();
     c.hub_rss_mb = crate::procinfo::proc(std::process::id()).map_or(0, |p| p.rss_bytes >> 20);
@@ -241,6 +252,8 @@ pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
     c.hub_building = super::exec::hub_building();
     #[cfg(feature = "checkout")]
     { c.wm_drain = crate::sync::serve::wm_drain(); }
+    #[cfg(feature = "checkout")]
+    { c.prewarming = crate::sync::prewarm::running(); }
     c.jit_store = Some(std::sync::Arc::new(super::jitstore::Store::new(&conf.work).snapshot()));
     c.native_trees = conf.native_trees;
     c.cpus_shared = cpu_count(&conf.cpus_shared);
@@ -275,6 +288,23 @@ pub fn mac_pressure(level: u32) -> Option<&'static str> {
         2 => Some("mac pressure warn"),
         _ => Some("mac pressure critical"),
     }
+}
+
+/// PSI `full avg10` at which a Linux box starts no new lease ([`memory_stall`]).
+pub const MEM_STALL_PCT: f64 = 10.0;
+
+/// Why a Linux box starts no new lease now, if so: every task on it stalled on memory for
+/// [`MEM_STALL_PCT`] or more of the last 10 s (PSI `full avg10`). The nodes' swap is small and
+/// full, so their memory pressure is page-cache reclaim, which free RAM does not show and PSI
+/// measures. What runs there goes on.
+pub fn memory_stall(pct: f64) -> Option<String> {
+    (pct >= MEM_STALL_PCT).then(|| format!("memory stall {pct:.0}% (PSI full avg10): no new lease until it eases"))
+}
+
+/// The `full` line's `avg10` of `/proc/pressure/memory`: the share of the last 10 s, in percent,
+/// in which every task stalled on memory; 0 without PSI.
+pub fn parse_psi_full(text: &str) -> f64 {
+    text.lines().find(|l| l.starts_with("full ")).and_then(|l| l.split_whitespace().find_map(|w| w.strip_prefix("avg10="))).and_then(|v| v.parse().ok()).unwrap_or(0.0)
 }
 
 /// The WM-supervised services that run on this node (`~/.makepad/wm/<name>.state`, written at
@@ -589,6 +619,7 @@ mod os {
             load1: parse_loadavg(&read("/proc/loadavg")),
             ram_gb: ram,
             ram_avail_gb: avail,
+            mem_stall: parse_psi_full(&read("/proc/pressure/memory")),
             gpus: gpu.iter().map(|g| (g.name.clone(), g.mem_total_gb)).collect(),
             display: display(),
             // read after display(): its probe leaves the answer of a WM on another wire
@@ -631,10 +662,15 @@ mod os {
 
     pub(super) static OTHER_WIRE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-    /// Why the box's WM shows nothing ([`super::dark_of`] of its `status`), asked as any inspect
-    /// client asks it; empty when it shows something, or does not answer.
+    /// Why the box's WM shows nothing ([`super::dark_of`] of its `status`); empty when it shows
+    /// something, or does not answer. By its socket: a bare name reaches only what the caller's
+    /// lease started, and this hub starts no WM, so asked by name it was refused on every box and
+    /// read as a WM that shows something (no box ever said it, 0 of the windows that timed out
+    /// under a 0x0 WM, 11-09).
     fn wm_dark() -> String {
-        let Ok(wm) = makepad_remote::link::Client::connect("makepad-app-wm") else { return String::new() };
+        let apps = makepad_remote::discovery::apps();
+        let Some(wm) = super::node_wm(&apps) else { return String::new() };
+        let Ok(wm) = makepad_remote::link::Client::connect(&wm.socket) else { return String::new() };
         wm.set_timeout(Some(std::time::Duration::from_secs(3)));
         match wm.cmd("status").ok().and_then(|mut lines| lines.next()) {
             Some(Ok(line)) => super::dark_of(&line),
@@ -978,6 +1014,23 @@ mod tests {
     }
     use super::*;
 
+    /// A hub asks the node's own WM, not a lane's test desktop beside it, and the newest of two.
+    #[test]
+    fn the_dark_check_asks_the_nodes_own_wm() {
+        let app = |pid: u32, name: &str, started_ms: u64, lease: Option<&str>| makepad_remote::discovery::App {
+            pid,
+            app: name.to_string(),
+            socket: format!("/s/{pid}.sock"),
+            started_ms,
+            caps: Vec::new(),
+            restart_parent: None,
+            fields: lease.map(|l| ("lease".to_string(), format!("\"{l}\""))).into_iter().collect(),
+        };
+        let apps = [app(1, "makepad-app-wm", 10, None), app(2, "makepad-app-wm", 30, None), app(3, "makepad-app-wm", 40, Some("L7")), app(4, "makepad-fab", 50, None)];
+        assert_eq!(node_wm(&apps).map(|a| a.pid), Some(2));
+        assert_eq!(node_wm(&apps[2..]).map(|a| a.pid), None, "only a lease's test desktop runs here");
+    }
+
     /// A WM whose one window is 0x0 shows nothing; one with a size, or an answer without
     /// windows, says nothing against the box (the status of a node whose WM had no output, 11-07).
     #[test]
@@ -1002,6 +1055,10 @@ mod tests {
         let (t, a) = parse_meminfo("MemTotal:       65536000 kB\nMemFree:  100 kB\nMemAvailable:   32768000 kB\n");
         assert!((t - 62.5).abs() < 0.01 && (a - 31.25).abs() < 0.01);
         assert_eq!(parse_loadavg("3.52 2.10 1.00 2/900 1234\n"), 3.52);
+        let psi = "some avg10=31.20 avg60=4.00 avg300=1.00 total=99\nfull avg10=14.20 avg60=3.10 avg300=0.80 total=88\n";
+        assert_eq!(parse_psi_full(psi), 14.2, "the full line's avg10, not the some line's");
+        assert_eq!(parse_psi_full(""), 0.0, "a kernel without PSI");
+        assert!(memory_stall(14.2).is_some_and(|w| w.starts_with("memory stall 14% ")) && memory_stall(9.9).is_none());
         let g = parse_nvidia("NVIDIA GeForce GPU-B, 33000\nNVIDIA GeForce GPU-A, 25000\n");
         assert_eq!(g.len(), 2);
         assert_eq!(g[0].0, "NVIDIA GeForce GPU-B");
@@ -1041,6 +1098,9 @@ mod tests {
         assert!(settable("role", "user-wm").is_ok() && settable("role", "boss").is_err());
         assert!(settable("slots.build", "3").is_ok() && settable("slots.build", "x").is_err() && settable("slots.nope", "1").is_err());
         assert!(settable("work", "/tmp").is_err() && settable("cpus.shared", "rm -rf").is_err());
+        assert!(settable("timed", "spare").is_ok() && settable("timed", "maybe").is_err());
+        let spare = LeaseConf::parse("timed = spare\n", Path::new("/h"));
+        assert_eq!((spare.timed, spare.timed_spare, LeaseConf::parse("timed = on\n", Path::new("/h")).timed_spare), (true, true, false));
         let t = conf_with("# a node\nrole = pool  # was\nslots.build = 2\n", &[("role".into(), "user-wm".into()), ("cpus.shared".into(), "8-15,24-31".into())]);
         assert_eq!(t, "# a node\nrole = user-wm  # was\nslots.build = 2\ncpus.shared = 8-15,24-31\n");
         let c = LeaseConf::parse(&t, Path::new("/h"));

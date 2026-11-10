@@ -6,13 +6,15 @@
 //!   then `target/release/makepad-wm-build <wm flags> -- <prebuild>`, which builds each app (and
 //!   the AI Hub, with its features and CUDA env) with the WM's own launch command.
 //! - `build = apps` builds each `prebuild` app with the launch's own command
-//!   ([`AppLaunch::build_command`]), for a checkout no WM runs from.
+//!   ([`AppLaunch::build_command`]), for a checkout no WM runs from. A service such a node runs
+//!   from its kept copy (no WM supervises it there: install-node-mac.sh --ai-hub) takes the new
+//!   build only once it built ([`keep`]).
 //!
 //! Every step runs at nice 15, logs to `~/.makepad/devhub/sync/logs`, and reports the crates it
 //! compiled (a no-op prebuild compiles none).
 
 use super::conf::{Build, SyncConf};
-use makepad_app_registry::{AppLaunch, Runner};
+use makepad_app_registry::{AppLaunch, AppTarget, Runner};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -88,13 +90,21 @@ fn compiling(line: &str) -> Option<String> {
     line[at + "Compiling ".len()..].split_whitespace().next().map(str::to_string)
 }
 
-/// Runs one step, appending its output to `log`; the crates it compiled go to `compiled`.
+/// Runs one step, appending its output to `log`; the crates it compiled go to `compiled`. It runs
+/// in a process group of its own, which the box's CPU split names its deployment-build room's
+/// ([`crate::lease::exec::deploy_build_group`]).
 fn step(mut cmd: Command, name: &str, log: &Path, compiled: &mut Vec<String>) -> Result<(), String> {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new().create(true).append(true).open(log).map_err(|e| format!("{}: {e}", log.display()))?;
     let _ = writeln!(file, "== {name}");
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("{name}: {e}"))?;
+    let (mut child, _group) = crate::os::lease_spawn(&mut cmd, None).map_err(|e| format!("{name}: {e}"))?;
+    crate::lease::exec::deploy_build_group(child.id());
+    struct Ended;
+    impl Drop for Ended {
+        fn drop(&mut self) { crate::lease::exec::deploy_build_group(0); }
+    }
+    let _ended = Ended;
     let out = child.stdout.take().unwrap();
     let file2 = file.try_clone().map_err(|e| e.to_string())?;
     let t = std::thread::spawn(move || {
@@ -130,9 +140,10 @@ pub fn logs_dir() -> PathBuf {
     crate::proto::home().join("sync").join("logs")
 }
 
-/// Builds what the conf asks for in the checkout; `jit_built` hears when the JIT is (step 0,
+/// Builds what the conf asks for in the checkout, on `jobs` (its room's cores, `apply ... jobs=N`)
+/// or the conf's; `jit_built` hears when the JIT is (step 0,
 /// before the WM: a waiting gate goes on while the rest builds).
-pub fn prebuild(conf: &SyncConf, jit_built: &dyn Fn()) -> Built {
+pub fn prebuild(conf: &SyncConf, jobs: Option<u32>, jit_built: &dyn Fn()) -> Built {
     let t = Instant::now();
     let dir = logs_dir();
     let _ = std::fs::create_dir_all(&dir);
@@ -140,6 +151,7 @@ pub fn prebuild(conf: &SyncConf, jit_built: &dyn Fn()) -> Built {
     let mut b = Built { log: log.clone(), ..Default::default() };
     let root = &conf.checkout;
     let cargo = makepad_app_registry::cargo_bin();
+    let jobs = jobs.unwrap_or(conf.jobs);
     let r = match conf.build {
         Build::Off => Ok(()),
         Build::Wm => (|| {
@@ -152,7 +164,7 @@ pub fn prebuild(conf: &SyncConf, jit_built: &dyn Fn()) -> Built {
                 let mut jit = background(Path::new(cmd.get_program()), &cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>());
                 // what makepad-wm-build inherits (step 2), then the launch's own environment over it
                 clear_build_env(&mut jit);
-                jit.current_dir(cmd.get_current_dir().unwrap_or(root)).envs(wm_env()).env("MAKEPAD", "linux_direct").env("MAKEPAD_WM_ROOT", root).env("CARGO_NET_OFFLINE", "true").env("CARGO_BUILD_JOBS", conf.jobs.to_string());
+                jit.current_dir(cmd.get_current_dir().unwrap_or(root)).envs(wm_env()).env("MAKEPAD", "linux_direct").env("MAKEPAD_WM_ROOT", root).env("CARGO_NET_OFFLINE", "true").env("CARGO_BUILD_JOBS", jobs.to_string());
                 for (k, v) in cmd.get_envs() {
                     match v {
                         Some(v) => jit.env(k, v),
@@ -165,8 +177,8 @@ pub fn prebuild(conf: &SyncConf, jit_built: &dyn Fn()) -> Built {
                 built?;
             }
             // 1. the WM, with its session's environment
-            let jobs = conf.jobs.to_string();
-            let wm_args: Vec<String> = ["build", "--offline", "--release", "-j", jobs.as_str(), "-p", "makepad-app-wm"].iter().map(|s| s.to_string()).collect();
+            let wm_jobs = jobs.to_string();
+            let wm_args: Vec<String> = ["build", "--offline", "--release", "-j", wm_jobs.as_str(), "-p", "makepad-app-wm"].iter().map(|s| s.to_string()).collect();
             let mut wm = background(&cargo, &wm_args);
             clear_build_env(&mut wm);
             wm.current_dir(root).envs(wm_env()).env("MAKEPAD", "linux_direct").env("MAKEPAD_WM_ROOT", root).env("CARGO_NET_OFFLINE", "true").env("CARGO_INCREMENTAL", "0");
@@ -177,7 +189,7 @@ pub fn prebuild(conf: &SyncConf, jit_built: &dyn Fn()) -> Built {
             args.extend(conf.prebuild.iter().cloned());
             let mut apps = background(&root.join("target/release/makepad-wm-build"), &args);
             clear_build_env(&mut apps);
-            apps.current_dir(root).envs(wm_env()).env("MAKEPAD", "linux_direct").env("MAKEPAD_WM_ROOT", root).env("CARGO_NET_OFFLINE", "true").env("CARGO_BUILD_JOBS", conf.jobs.to_string());
+            apps.current_dir(root).envs(wm_env()).env("MAKEPAD", "linux_direct").env("MAKEPAD_WM_ROOT", root).env("CARGO_NET_OFFLINE", "true").env("CARGO_BUILD_JOBS", jobs.to_string());
             step(apps, "makepad-wm-build", &log, &mut b.compiled)
         })(),
         Build::Apps => (|| {
@@ -195,8 +207,17 @@ pub fn prebuild(conf: &SyncConf, jit_built: &dyn Fn()) -> Built {
                         None => n.env_remove(k),
                     };
                 }
-                n.current_dir(cmd.get_current_dir().unwrap_or(root)).env("CARGO_NET_OFFLINE", "true").env("CARGO_BUILD_JOBS", conf.jobs.to_string());
+                n.current_dir(cmd.get_current_dir().unwrap_or(root)).env("CARGO_NET_OFFLINE", "true").env("CARGO_BUILD_JOBS", jobs.to_string());
                 step(n, id, &log, &mut b.compiled)?;
+                if runner == Runner::Native {
+                    // where that build put it: the command's target dir (set, or removed for the
+                    // checkout's own), else the one it inherited
+                    let target_dir = match cmd.get_envs().find(|(k, _)| *k == "CARGO_TARGET_DIR") {
+                        Some((_, v)) => v.map(|v| v.to_os_string()),
+                        None => std::env::var_os("CARGO_TARGET_DIR"),
+                    };
+                    keep(&kept_dir(), &app.target(), &makepad_app_registry::checkout_binary(&app.target(), root, target_dir.as_deref()))?;
+                }
             }
             jit_built();
             Ok(())
@@ -208,6 +229,26 @@ pub fn prebuild(conf: &SyncConf, jit_built: &dyn Fn()) -> Built {
         Err(e) => b.err = e,
     }
     b
+}
+
+/// Where a node no WM runs on keeps the binaries its services start (`kept/<binary>` in devhub's
+/// home): each the last build of its app that succeeded. Its service's start runs that copy and
+/// never `cargo run`, which on a tip that does not build would rebuild at every start of a
+/// KeepAlive agent with none serving (the WM restarts a failed `cargo run` with a backoff and
+/// keeps no binary to fall back on).
+pub fn kept_dir() -> PathBuf {
+    crate::proto::home().join("kept")
+}
+
+/// `built`, the app's new build, as its kept copy in `dir` when the node keeps one ([`kept_dir`]):
+/// a copy beside it, renamed over it, so a start never runs a half-written file.
+fn keep(dir: &Path, app: &AppTarget, built: &Path) -> Result<(), String> {
+    let kept = dir.join(app.bin);
+    if !kept.exists() {
+        return Ok(());
+    }
+    let new = dir.join(format!("{}.new", app.bin));
+    std::fs::copy(built, &new).and_then(|_| std::fs::rename(&new, &kept)).map_err(|e| format!("prebuild: {} as its kept copy {}: {e}", built.display(), kept.display()))
 }
 
 /// The modification time of a built binary (to tell whether a prebuild replaced it).
@@ -222,6 +263,27 @@ mod tests {
         assert_eq!(super::compiling("    Building [==>  ] 84/97: relax…   Compiling makepad-script-std v1.0.0 (/x)").as_deref(), Some("makepad-script-std"));
         assert_eq!(super::compiling("   Compiling relax-front v0.1.0").as_deref(), Some("relax-front"));
         assert_eq!(super::compiling("    Finished `release`"), None);
+    }
+
+    /// A node keeps a service's binary only when it keeps one (install-node-mac.sh made the first):
+    /// the new build replaces it whole, and a node that keeps none gets no copy.
+    #[test]
+    fn a_kept_binary_follows_a_build_only_where_the_node_keeps_one() {
+        let dir = std::env::temp_dir().join(format!("devhub-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = makepad_app_registry::AppTarget { id: "svc", package: "pkg-svc", dir: "apps/svc", bin: "svc", manifest: None, profile: "release" };
+        let built = dir.join("built");
+        std::fs::write(&built, "new build").unwrap();
+        super::keep(&dir, &app, &built).unwrap();
+        assert!(!dir.join("svc").exists(), "a node that keeps none gets no copy");
+        std::fs::write(dir.join("svc"), "last good").unwrap();
+        super::keep(&dir, &app, &built).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("svc")).unwrap(), "new build");
+        assert!(!dir.join("svc.new").exists(), "renamed over it");
+        assert!(super::keep(&dir, &app, &dir.join("missing")).is_err(), "a build that left no binary keeps the last");
+        assert_eq!(std::fs::read_to_string(dir.join("svc")).unwrap(), "new build");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

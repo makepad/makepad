@@ -77,17 +77,18 @@ pub fn cpu_pct(a: (u64, u64), b: (u64, u64)) -> f64 {
     if total == 0 { 0.0 } else { busy as f64 * 100.0 / total as f64 }
 }
 
+/// A process of the box, with its CPU over a look ([`processes`]).
 #[derive(Clone, Debug, Default)]
-struct ProcRow {
-    pid: u32,
+pub struct ProcRow {
+    pub pid: u32,
     /// its parent (Windows: unknown, 0)
-    ppid: u32,
+    pub ppid: u32,
     /// its process group (Windows: itself)
-    pgid: u32,
-    name: String,
-    cpu_pct: f64,
-    rss_mb: f64,
-    gpu_mb: f64,
+    pub pgid: u32,
+    pub name: String,
+    pub cpu_pct: f64,
+    pub rss_mb: f64,
+    pub gpu_mb: f64,
 }
 
 /// Every process: pid -> (name, parent, group, CPU ticks so far, RSS bytes).
@@ -258,11 +259,12 @@ pub fn label(_pid: u32) -> Option<String> {
 
 /// Whose a process is, by its process group or an ancestor's: `whose(pgid)` names a group's
 /// owner ("" for the timed lease's own work, else a lease's tag); a process this hub started
-/// (its own builds) is the hub's, with what the hub started; None: neither (the OS, the user).
+/// (its own builds) is the hub's, with what the hub started; else what it runs under, when that
+/// is another program (`under cargo < makepad-app-wm`); None: none of these (the OS, the user).
 fn owner(rows: &std::collections::HashMap<u32, &ProcRow>, r: &ProcRow, me: u32, whose: &dyn Fn(u32) -> Option<String>) -> Option<String> {
     match owner_of(rows, r, me, whose) {
         Owner::Group(w) | Owner::Hub(w) => Some(w),
-        Owner::Nobody => None,
+        Owner::Nobody => under(rows, r),
     }
 }
 
@@ -272,8 +274,30 @@ enum Owner {
     Group(String),
     /// the hub started it: `the hub's <what>`
     Hub(String),
-    /// neither: the OS's, the user's
+    /// neither: the OS's, the user's (what it runs under: [`under`])
     Nobody,
+}
+
+/// The programs `r` runs under, below the box's init and session managers: its parent, and the
+/// topmost one when that is another (`under cargo < makepad-app-wm`). A timed run's box said
+/// `rustc 71%` (at up to 14 cores) and nothing said whose it was (11-10).
+fn under(rows: &std::collections::HashMap<u32, &ProcRow>, r: &ProcRow) -> Option<String> {
+    let manager = |p: &ProcRow| p.pid <= 1 || matches!(p.name.as_str(), "systemd" | "init" | "launchd");
+    let mut chain: Vec<&ProcRow> = Vec::new();
+    let mut at = r;
+    // a parent chain is short; the bound only guards a cycle in a racy sample
+    for _ in 0..64 {
+        match rows.get(&at.ppid).filter(|p| !manager(p)) {
+            Some(p) => {
+                chain.push(p);
+                at = p;
+            }
+            None => break,
+        }
+    }
+    let name = |p: &ProcRow| label(p.pid).unwrap_or_else(|| p.name.clone());
+    let (first, top) = (chain.first()?, chain.last()?);
+    Some(if first.pid == top.pid { format!("under {}", name(first)) } else { format!("under {} < {}", name(first), name(top)) })
 }
 
 fn owner_of(rows: &std::collections::HashMap<u32, &ProcRow>, r: &ProcRow, me: u32, whose: &dyn Fn(u32) -> Option<String>) -> Owner {
@@ -284,14 +308,60 @@ fn owner_of(rows: &std::collections::HashMap<u32, &ProcRow>, r: &ProcRow, me: u3
             return Owner::Group(w);
         }
         if at.ppid == me {
-            return Owner::Hub(format!("the hub's {}", label(at.pid).unwrap_or_else(|| at.name.clone())));
+            let what = label(at.pid).unwrap_or_else(|| at.name.clone());
+            return Owner::Hub(if crate::sync::prewarm::step_leader() == Some(at.pid) { format!("the hub's prewarm ({what})") } else { format!("the hub's {what}") });
         }
         match rows.get(&at.ppid) {
             Some(p) => at = p,
-            None => return Owner::Nobody,
+            None => break,
         }
     }
     Owner::Nobody
+}
+
+/// The programs of a build ([`compilers_among`]).
+const COMPILERS: [&str; 13] = ["rustc", "cargo", "cc", "c++", "gcc", "g++", "clang", "cc1", "cc1plus", "collect2", "ld", "ld.lld", "mold"];
+
+/// The box's processes, each with its CPU over a half-second look.
+pub fn processes() -> Vec<ProcRow> {
+    sample().1
+}
+
+/// The compilers among a look's `rows` ([`processes`]; `me`: the hub's pid) that run outside
+/// every lease (`whose(pgid)` names a lease's groups) at 1% of a core or more, the hub's pre-warm
+/// apart (a lease start stops it): each with its pid, whose it is or what it runs under, and its
+/// CPU, the busiest first (`rustc pid 812 (under cargo < makepad run app) at 808% of a core`). A
+/// timed start waits for them: a box's app took its deployment's move and rebuilt the makepad it
+/// runs at up to 14 cores, in no lease, under three timed runs in 20 min (11-10).
+pub fn compilers_among(rows: &[ProcRow], me: u32, whose: &dyn Fn(u32) -> Option<String>) -> Vec<String> {
+    let by_pid: std::collections::HashMap<u32, &ProcRow> = rows.iter().map(|r| (r.pid, r)).collect();
+    let mut busy: Vec<(f64, String)> = rows.iter().filter(|r| r.pid != me && r.cpu_pct >= 1.0 && COMPILERS.contains(&r.name.as_str())).filter_map(|r| {
+        let whose = match owner_of(&by_pid, r, me, whose) {
+            Owner::Group(_) => return None,
+            Owner::Hub(w) if w.starts_with("the hub's prewarm (") => return None,
+            Owner::Hub(w) => w,
+            Owner::Nobody => under(&by_pid, r).unwrap_or_else(|| "of no lease".to_string()),
+        };
+        Some((r.cpu_pct, format!("{} pid {} ({whose}) at {:.0}% of a core", r.name, r.pid, r.cpu_pct)))
+    }).collect();
+    busy.sort_by(|a, b| b.0.total_cmp(&a.0));
+    busy.into_iter().map(|(_, s)| s).collect()
+}
+
+/// What runs outside every lease among a look's `rows` ([`processes`]; `me`: the hub's pid; `whose`
+/// names a lease's groups), the hub's pre-warm apart (a lease start stops it): its CPU in all (%
+/// of one core) and the busiest three (`WindowServer 34%`, `rustc (the hub's cargo build) 180%`).
+/// A timed start waits while it is [`crate::lease::master::NOISY_CPU_PCT`] or more.
+pub fn outside_among(rows: &[ProcRow], me: u32, whose: &dyn Fn(u32) -> Option<String>) -> (f64, Vec<String>) {
+    let by_pid: std::collections::HashMap<u32, &ProcRow> = rows.iter().map(|r| (r.pid, r)).collect();
+    let mut busy: Vec<(f64, String)> = rows.iter().filter(|r| r.pid != me && r.cpu_pct >= 1.0).filter_map(|r| match owner_of(&by_pid, r, me, whose) {
+        Owner::Group(_) => None,
+        Owner::Hub(w) if w.starts_with("the hub's prewarm (") => None,
+        Owner::Hub(w) => Some((r.cpu_pct, format!("{} ({w}) {:.0}%", r.name, r.cpu_pct))),
+        Owner::Nobody => Some((r.cpu_pct, format!("{} {:.0}%", r.name, r.cpu_pct))),
+    }).collect();
+    busy.sort_by(|a, b| b.0.total_cmp(&a.0));
+    (busy.iter().map(|(cpu, _)| cpu).sum(), busy.into_iter().take(3).map(|(_, said)| said).collect())
 }
 
 /// The CPU (% of one core, a half-second look) of each of `pids` that runs.
@@ -379,12 +449,15 @@ fn split_rows(rows: &[ProcRow], lease_of: &dyn Fn(u32) -> Option<String>) -> Cpu
                 }
                 continue;
             }
+            // (named only when it is said: a look has hundreds of these)
+            _ if r.cpu_pct < OUTSIDE_MIN_CORES * 100.0 => continue,
             Owner::Hub(what) => what,
-            Owner::Nobody => label(r.pid).unwrap_or_else(|| r.name.clone()),
+            Owner::Nobody => {
+                let what = label(r.pid).unwrap_or_else(|| r.name.clone());
+                under(&by_pid, r).map_or_else(|| what.clone(), |u| format!("{what} ({u})"))
+            }
         };
-        if r.cpu_pct >= OUTSIDE_MIN_CORES * 100.0 {
-            out.outside.push((crate::proto::clean(&what, 60), r.pid, r.cpu_pct / 100.0));
-        }
+        out.outside.push((crate::proto::clean(&what, 60), r.pid, r.cpu_pct / 100.0));
     }
     out.leases.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     out.outside.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.1.cmp(&b.1)));
@@ -516,6 +589,11 @@ mod tests {
             row(4000021, 1, 4000021, "indexer", 260.0),
             row(4000022, 1, 4000022, "wm", 3.0),
             row(4000023, 1, 4000023, "sweeper", 60.0),
+            // a compiler of no lease's and not the hub's, under a cargo another program started
+            row(4000030, 1, 4000030, "session", 0.0),
+            row(4000031, 4000030, 4000031, "cargo", 0.0),
+            row(4000032, 4000031, 4000031, "rustc", 40.0),
+            row(4000033, 4000030, 4000030, "lone", 40.0),
         ];
         let lease_of = |pgid: u32| (pgid == 4000000).then(|| "L7".to_string());
         let split = split_rows(&rows, &lease_of);
@@ -526,5 +604,16 @@ mod tests {
         assert_eq!(busy[0].0, "indexer");
         assert!(busy[1].0.starts_with("the hub's "), "{busy:?}");
         assert_eq!(outside_said(&busy[2..]), "dumper pid 4000020 (1.0 cores)");
+        let by_pid: std::collections::HashMap<u32, &ProcRow> = rows.iter().map(|r| (r.pid, r)).collect();
+        let said = |pid: u32| owner(&by_pid, by_pid[&pid], me, &lease_of);
+        assert_eq!(said(4000032).as_deref(), Some("under cargo < session"), "what an unowned process runs under");
+        assert_eq!(said(4000033).as_deref(), Some("under session"));
+        assert_eq!(said(4000020), None, "the box's own work, under its init");
+        assert_eq!(said(4000001).as_deref(), Some("L7"));
+        // what a timed start waits for: compilers of no lease's, busiest first, each with whose it is
+        assert_eq!(compilers_among(&rows, me, &lease_of), vec![
+            "cargo pid 4000010 (the hub's cargo) at 120% of a core".to_string(),
+            "rustc pid 4000032 (under cargo < session) at 40% of a core".to_string(),
+        ], "not the lease's compiler, an idle one or other programs");
     }
 }

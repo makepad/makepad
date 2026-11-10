@@ -11,7 +11,8 @@
 //! Cargo.lock, .cargo/config.toml and rust-toolchain{,.toml} count when tracked. Root Cargo.toml
 //! counts canonically without workspace members/exclude/default-members or uninherited workspace
 //! dependencies, so workspace membership alone cannot rebuild the JIT. Keys hash these paths and
-//! blob ids (the normalized manifest's SHA-256 in place of its blob id), plus the compiler.
+//! blob ids (the normalized manifest's SHA-256 in place of its blob id), plus the compiler. A
+//! tree's file counts as its blob only while it holds the blob's bytes ([`on_disk`]).
 //!
 //! Dev overlays use pinned RELAXGIT blobs and [`super::jitstore`]. A miss builds only the
 //! committed pin in `<work>/dev/tree`, with `<work>/dev/target`.
@@ -75,16 +76,46 @@ fn key(compiler: &str, inputs: &[String], blob: &dyn Fn(&str) -> Option<String>)
     Some(h[..12].iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// `git ls-files -s -z` output: path -> blob.
-fn blobs(listing: &str) -> HashMap<String, String> {
+/// `git ls-files` with each blob's size, what [`on_disk`] checks a file against.
+const LISTING: [&str; 3] = ["ls-files", "-z", "--format=%(objectname) %(objectsize) %(path)"];
+
+/// [`LISTING`] output: path -> (blob, its size).
+fn listed(listing: &str) -> HashMap<String, (String, u64)> {
     listing
         .split('\0')
         .filter_map(|e| {
-            let (meta, path) = e.split_once('\t')?;
-            let blob = meta.split(' ').find(|w| w.len() >= 40 && w.bytes().all(|b| b.is_ascii_hexdigit()))?;
-            Some((path.to_string(), blob.to_string()))
+            let mut w = e.splitn(3, ' ');
+            let (blob, size, path) = (w.next()?, w.next()?.parse().ok()?, w.next()?);
+            (blob.len() >= 40 && blob.bytes().all(|b| b.is_ascii_hexdigit())).then(|| (path.to_string(), (blob.to_string(), size)))
         })
         .collect()
+}
+
+/// What git stores for the file at `path`: a symlink's target, else its bytes.
+fn disk_bytes(path: &Path) -> Option<Vec<u8>> {
+    if std::fs::symlink_metadata(path).ok()?.file_type().is_symlink() {
+        return Some(std::fs::read_link(path).ok()?.to_string_lossy().as_bytes().to_vec());
+    }
+    std::fs::read(path).ok()
+}
+
+/// The blob of what `p` holds on disk in `root` now, `(blob, size)` its index entry, and whether
+/// that is another blob than the entry's. A file git calls clean holds its blob's bytes unless a
+/// checkout converted them, and then a JIT built from the blob is not the build of that file: the
+/// key reads its bytes on disk, as cargo and the JIT's own proc-macro check do. (A CI tree checked
+/// out under autocrlf before the repo's `eol=lf` kept CRLF in 11 487 files that no move rewrote;
+/// the box's dev JIT of the same blobs then ran there and refused the tree's proc macros, "source
+/// bytes differ", on every Windows leg, 11-10.) A clean file's conversions (CRLF, `$Id$`) only
+/// lengthen it, so a file of its blob's size is its blob.
+fn on_disk(root: &Path, p: &str, (blob, size): &(String, u64)) -> Option<(String, bool)> {
+    let path = root.join(p);
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if !meta.file_type().is_symlink() && meta.len() == *size {
+        return Some((blob.clone(), false));
+    }
+    let id = makepad_git::oid::hash_object("blob", &disk_bytes(&path)?).to_hex();
+    let other = id != *blob;
+    Some((id, other))
 }
 
 /// `<target>/host/makepad.jit-<key>`.
@@ -136,12 +167,20 @@ pub fn find(root: &Path, target: &Path) -> Option<(String, PathBuf)> {
     if held.is_empty() {
         return None;
     }
-    let index = blobs(&git(root, &["ls-files", "-s", "-z"]).ok()?);
+    let index = listed(&git(root, &LISTING).ok()?);
     let dirty: HashSet<String> = git(root, &["diff", "--name-only"]).ok()?.lines().map(str::to_string).collect();
+    // each file is looked at once, whichever binaries name it
+    let seen = std::cell::RefCell::new(HashMap::<String, Option<String>>::new());
+    let blob = |f: &str| -> Option<String> {
+        if let Some(b) = seen.borrow().get(f) { return b.clone(); }
+        let b = on_disk(root, f, index.get(f)?).map(|(b, _)| b);
+        seen.borrow_mut().insert(f.to_string(), b.clone());
+        b
+    };
     held.into_iter().find_map(|k| {
         let inputs = read_inputs(target, &k)?;
         let p = path(target, &k);
-        (!inputs.iter().any(|i| dirty.contains(i)) && p.is_file() && key(compiler(), &inputs, &|f| index.get(f).cloned()).as_deref() == Some(k.as_str())).then_some((k, p))
+        (!inputs.iter().any(|i| dirty.contains(i)) && p.is_file() && key(compiler(), &inputs, &blob).as_deref() == Some(k.as_str())).then_some((k, p))
     })
     .map(|(k, p)| {
         used(target, &k);
@@ -357,16 +396,26 @@ pub(crate) fn commit_ids(repo: &Path, sha: &str, compilers: &[String]) -> Result
     compilers.iter().filter(|c| !c.is_empty()).map(|c| inputs.key(c, &|p| index.get(p).cloned()).ok_or_else(|| "JIT input missing from pin".to_string())).collect()
 }
 
+/// A tree's key in the dev JIT store ([`tree_id`]).
+#[cfg(feature = "checkout")]
+pub struct TreeKey {
+    pub key: String,
+    /// its inputs that hold other bytes on disk than their blobs ([`on_disk`]): how many, and one
+    pub converted: Option<(usize, String)>,
+}
+
 /// The native tree's current content key in the dev JIT store. Use the same manifest closure
 /// as overlays, with staged, unstaged and new inputs accounted for before accepting a hit.
 #[cfg(feature = "checkout")]
-pub fn tree_id(root: &Path) -> Option<String> {
+pub fn tree_id(root: &Path) -> Option<TreeKey> {
     let mut index = std::collections::BTreeMap::new();
+    let mut entries = HashMap::new();
     let mut changed = HashSet::new();
     let nested = crate::nested::names(root);
     let sides = std::iter::once((root.to_path_buf(), String::new())).chain(nested.iter().map(|n| (root.join(crate::nested::dir(n)), crate::nested::prefix(n))));
     for (dir, prefix) in sides {
-        let mut files = blobs(&git(&dir, &["ls-files", "-s", "-z"]).ok()?);
+        let listing = listed(&git(&dir, &LISTING).ok()?);
+        let mut files: HashMap<String, String> = listing.iter().map(|(p, (b, _))| (p.clone(), b.clone())).collect();
         let dirty = git(&dir, &["diff", "--name-only", "-z"]).ok()?;
         let added = git(&dir, &["ls-files", "--others", "--exclude-standard", "-z"]).ok()?;
         for p in dirty.split('\0').chain(added.split('\0')).filter(|p| !p.is_empty()) {
@@ -375,18 +424,23 @@ pub fn tree_id(root: &Path) -> Option<String> {
             files.insert(p.into(), String::new());
             changed.insert(format!("{prefix}{p}"));
         }
-        index.extend(files.into_iter().filter(|(p, _)| !prefix.is_empty() || crate::nested::split(p, nested.iter().map(String::as_str)).is_none()).map(|(p, oid)| (format!("{prefix}{p}"), oid)));
+        let ours = |p: &String| !prefix.is_empty() || crate::nested::split(p, nested.iter().map(String::as_str)).is_none();
+        entries.extend(listing.into_iter().filter(|(p, _)| ours(p)).map(|(p, entry)| (format!("{prefix}{p}"), entry)));
+        index.extend(files.into_iter().filter(|(p, _)| ours(p)).map(|(p, oid)| (format!("{prefix}{p}"), oid)));
     }
     let inputs = inputs(&index, &|p| std::fs::read(root.join(p)).map_err(|e| e.to_string())).ok()?;
     if compiler().is_empty() { return None; }
-    inputs.key(compiler(), &|p| {
-        if !changed.contains(p) { return index.get(p).cloned(); }
-        let path = root.join(p);
-        let bytes = if std::fs::symlink_metadata(&path).ok()?.file_type().is_symlink() { std::fs::read_link(&path).ok()?.to_string_lossy().as_bytes().to_vec() } else { std::fs::read(&path).ok()? };
-        let mut object = format!("blob {}\0", bytes.len()).into_bytes();
-        object.extend_from_slice(&bytes);
-        Some(relax_base::gitstore::hex(&relax_base::gitstore::sha1(&object)))
-    })
+    let converted = std::cell::RefCell::new(None::<(usize, String)>);
+    let key = inputs.key(compiler(), &|p| {
+        if changed.contains(p) { return Some(makepad_git::oid::hash_object("blob", &disk_bytes(&root.join(p))?).to_hex()); }
+        let (blob, other) = on_disk(root, p, entries.get(p)?)?;
+        if other {
+            let mut c = converted.borrow_mut();
+            c.get_or_insert_with(|| (0, p.to_string())).0 += 1;
+        }
+        Some(blob)
+    })?;
+    Some(TreeKey { key, converted: converted.into_inner() })
 }
 
 /// The lane pin's base JIT key and its inputs, from RELAXGIT only.
@@ -720,8 +774,8 @@ fn build_tree(root: &Path, target: &Path, pin: &super::Pin, inputs: &[String], i
     }
     let dep_info = target.join("host/makepad.d");
     let dep = std::fs::read_to_string(&dep_info).map_err(|e| format!("{}: {e}", dep_info.display()))?;
-    let index = blobs(&git(root, &["ls-files", "-s", "-z"])?);
-    let outside: Vec<_> = inputs_of(&dep, root, &index).into_iter().filter(|p| !inputs.contains(p)).collect();
+    let index = listed(&git(root, &LISTING)?);
+    let outside: Vec<_> = inputs_of(&dep, root, &|p| index.contains_key(p)).into_iter().filter(|p| !inputs.contains(p)).collect();
     if !outside.is_empty() {
         eprintln!("devhub: dev JIT {id} at {}: dep-info names {} file(s) outside its inputs (not an error): {}{}", pin.short(), outside.len(), outside[..outside.len().min(5)].join(", "), if outside.len() > 5 { " ..." } else { "" });
     }
@@ -797,11 +851,11 @@ pub fn cargo_form(cmd: Vec<String>) -> Vec<String> {
 
 /// What cargo's dep-info names under the tree: tracked files only (it also lists folders, and what
 /// is outside the tree comes with the compiler or Cargo.lock), plus the workspace-wide files.
-fn inputs_of(depinfo: &str, root: &Path, index: &HashMap<String, String>) -> Vec<String> {
+fn inputs_of(depinfo: &str, root: &Path, tracked: &dyn Fn(&str) -> bool) -> Vec<String> {
     let mut out: Vec<String> = dep_files(depinfo, root)
         .into_iter()
         .chain(["Cargo.toml", "Cargo.lock", ".cargo/config.toml"].iter().map(|s| s.to_string()))
-        .filter(|p| index.contains_key(p))
+        .filter(|p| tracked(p))
         .collect();
     out.sort();
     out.dedup();
@@ -847,9 +901,9 @@ pub fn publish(root: &Path, target: &Path, own: Option<&TreeBuild>) -> Result<Op
     let built = std::fs::metadata(&bin).and_then(|m| m.modified()).map_err(|e| format!("{}: {e}", bin.display()))?;
     let dep_info = target.join("host/makepad.d");
     let dep = std::fs::read_to_string(&dep_info).map_err(|e| format!("{}: {e}", dep_info.display()))?;
-    let index = blobs(&git(root, &["ls-files", "-s", "-z"])?);
+    let index = listed(&git(root, &LISTING)?);
     let dirty: HashSet<String> = git(root, &["diff", "--name-only"])?.lines().map(str::to_string).collect();
-    let inputs = inputs_of(&dep, root, &index);
+    let inputs = inputs_of(&dep, root, &|p| index.contains_key(p));
     if inputs.len() < 100 {
         return Err(format!("makepad.d names only {} tracked files", inputs.len()));
     }
@@ -867,7 +921,7 @@ pub fn publish(root: &Path, target: &Path, own: Option<&TreeBuild>) -> Result<Op
     if let Some(p) = inputs.iter().find(|p| std::fs::metadata(root.join(p)).and_then(|m| m.modified()).map_or(true, |t| t > built)) {
         return Err(format!("{p} changed after the build"));
     }
-    let k = key(compiler(), &inputs, &|f| index.get(f).cloned()).ok_or("an input is not tracked")?;
+    let k = key(compiler(), &inputs, &|f| on_disk(root, f, index.get(f)?).map(|(b, _)| b)).ok_or("an input is not tracked")?;
     let dst = path(target, &k);
     // one key is one build: a published binary is never unlinked or replaced, since a loader that
     // runs from it would lose its own path (current_exe)
@@ -975,11 +1029,11 @@ mod tests {
 
     #[test]
     fn listings_and_depinfo_parse() {
-        let idx = blobs(&format!("100644 {} 0\ta/b c\0", "f".repeat(40)));
-        assert_eq!(idx.get("a/b c").unwrap(), &"f".repeat(40));
+        let idx = listed(&format!("{} 12 a/b c\0", "f".repeat(40)));
+        assert_eq!(idx.get("a/b c").unwrap(), &("f".repeat(40), 12));
         let index: HashMap<String, String> = ["a/b c", "Cargo.lock", "tools/x.rs"].iter().map(|p| (p.to_string(), "1".to_string())).collect();
         let dep = "/r/target/host/makepad: /r/a/b\\ c /r/libs/dir tools/x.rs /other/z.rs\n";
-        assert_eq!(inputs_of(dep, Path::new("/r"), &index), vec!["Cargo.lock", "a/b c", "tools/x.rs"]);
+        assert_eq!(inputs_of(dep, Path::new("/r"), &|p| index.contains_key(p)), vec!["Cargo.lock", "a/b c", "tools/x.rs"]);
         // a Windows build's, under its root whichever way that is spelled; another drive is outside
         let windows = "C:\\w\\target\\host\\makepad.exe: C:\\w\\a\\b\\ c C:\\w\\tools\\x.rs c:\\w\\tools\\y.rs D:\\o\\z.rs tools\\r.rs\n";
         for root in ["C:\\w", "\\\\?\\C:\\w", "C:/w/"] {
@@ -1152,10 +1206,11 @@ mod tests {
         g(&["init", "-q"]);
         let mut dep = format!("{}/host/makepad:", target.display());
         for i in 0..120 {
-            std::fs::write(root.join(format!("f{i}.rs")), format!("{i}")).unwrap();
+            std::fs::write(root.join(format!("f{i}.rs")), if i == 0 { "a\nb\n".to_string() } else { format!("{i}") }).unwrap();
             dep.push_str(&format!(" {}/f{i}.rs", root.display()));
         }
         std::fs::write(root.join(".gitignore"), "target\n").unwrap();
+        std::fs::write(root.join(".gitattributes"), "* text=auto eol=lf\n").unwrap();
         g(&["add", "-A"]);
         g(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"]);
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -1172,6 +1227,25 @@ mod tests {
         std::fs::write(target.join(MARK), "").unwrap();
         assert_eq!(publish(&root, &target, None).unwrap().as_deref(), Some(k.as_str()));
         assert_eq!(std::fs::read_to_string(path(&target, &k)).unwrap(), "bin");
+        // a checkout's conversion: the same blobs with CRLF on disk, which git calls clean, are not
+        // what that binary was built from, and a build of those bytes is its own (a CI tree checked
+        // out under autocrlf before the repo's eol=lf, 11-10)
+        std::fs::write(root.join("f0.rs"), "a\r\nb\r\n").unwrap();
+        assert!(git(&root, &["diff", "--name-only"]).unwrap().trim().is_empty(), "git calls the converted file clean");
+        assert!(find(&root, &target).is_none(), "the build of the blobs is not this tree's");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::remove_file(built_binary(&target)).unwrap();
+        std::fs::write(built_binary(&target), "bin of crlf").unwrap();
+        std::fs::write(target.join(MARK), "").unwrap();
+        let crlf = publish(&root, &target, None).unwrap().unwrap();
+        assert_ne!(crlf, k);
+        assert_eq!(find(&root, &target).unwrap().0, crlf);
+        std::fs::write(root.join("f0.rs"), "a\nb\n").unwrap();
+        assert_eq!(find(&root, &target).unwrap().0, k, "the blobs' bytes again: their build");
+        // (cargo's build of the tree again, newer than that file)
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::remove_file(built_binary(&target)).unwrap();
+        std::fs::write(built_binary(&target), "bin").unwrap();
         // an edited input: no binary for this tree
         std::fs::write(root.join("f3.rs"), "edit").unwrap();
         assert!(find(&root, &target).is_none());

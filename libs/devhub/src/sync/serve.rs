@@ -45,7 +45,7 @@ pub struct Sync {
 }
 
 /// The words of an apply order that are not repositories.
-const ORDER_WORDS: [&str; 10] = ["at", "build", "jit", "landed", "prewarm", "repoint", "restart", "session", "tickcmd", "wait_ms"];
+const ORDER_WORDS: [&str; 11] = ["at", "build", "jit", "jobs", "landed", "prewarm", "repoint", "restart", "session", "tickcmd", "wait_ms"];
 
 /// The repositories an apply order moves, each to the commit it names: `makepad=<sha>` and each
 /// nested repository's `<name>=<sha>`, makepad first.
@@ -223,6 +223,9 @@ impl Sync {
         struct Applying;
         impl Drop for Applying {
             fn drop(&mut self) {
+                if MOVED_IN_APPLY.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    MOVED_MS.store(proto::wall_ms(), std::sync::atomic::Ordering::SeqCst);
+                }
                 APPLYING.store(false, std::sync::atomic::Ordering::SeqCst);
                 *BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
@@ -341,6 +344,9 @@ impl Sync {
             let r = store.move_checkout(&dir, from.as_deref(), to).and_then(|m| store.set_ref(SYNCED_REF, to).map(|_| m));
             match r {
                 Ok(m) => {
+                    if !m.files.is_empty() {
+                        MOVED_IN_APPLY.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
                     let line = format!("sync: {repo} {} -> {} ({} files){}", from.as_deref().map_or("(new)", short), short(to), m.files.len(), if session_line.is_empty() { String::new() } else { format!(", {session_line}") });
                     let detail = format!("{{\"repo\":{},\"from\":{},\"to\":{},\"files\":[{}]}}", json_str(repo), from.as_deref().map_or("null".into(), json_str), json_str(to), m.files.iter().take(64).map(|f| json_str(f)).collect::<Vec<_>>().join(","));
                     self.event(Sev::Info, line.clone(), detail);
@@ -410,7 +416,9 @@ impl Sync {
                 }
                 *BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()) = None;
             };
-            let b = build::prebuild(&self.conf, &jit_built);
+            // on the cores its room was granted, when fewer than it measured (`jobs=N`, [`crate::lease::DEPLOY_JOBS_PROTO`])
+            let jobs = o.get("jobs").and_then(|n| n.parse::<u32>().ok()).filter(|n| *n > 0);
+            let b = build::prebuild(&self.conf, jobs, &jit_built);
             *BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()) = None;
             let n = b.compiled.len();
             built_ok = b.ok;
@@ -828,6 +836,20 @@ impl Sync {
 /// An apply (its tree's move, its build) runs on this node.
 static APPLYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The running apply moved files of the checkout the box's apps run from.
+static MOVED_IN_APPLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// When the last apply that moved the checkout ended (wall ms, 0: none since this hub started).
+static MOVED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long ago the last apply that moved the checkout under the box's apps ended: they take
+/// the move, and one that runs makepad from it rebuilds what it runs (`Exec`'s timed start
+/// waits until the box is quiet again).
+pub fn moved_ago() -> Option<std::time::Duration> {
+    let at = MOVED_MS.load(std::sync::atomic::Ordering::SeqCst);
+    (at > 0).then(|| std::time::Duration::from_millis(proto::wall_ms().saturating_sub(at)))
+}
+
 /// The timed lease that runs on this node, if one does: the quiet mark its hub keeps while it
 /// lives (`<home>/quiet/<id>.cmd`, lease/exec.rs).
 fn timed_here() -> Option<String> {
@@ -1013,7 +1035,7 @@ mod tests {
     #[test]
     fn an_apply_moves_each_repository_its_order_names() {
         let (a, b, c, e) = ("a".repeat(40), "b".repeat(40), "c".repeat(40), "e".repeat(40));
-        let o = Order { words: format!("apply repo-b={e} makepad={a} commercial={c} build=on restart=auto session=s1 landed=17 prewarm=on").split(' ').map(str::to_string).collect(), signer: String::new() };
+        let o = Order { words: format!("apply repo-b={e} makepad={a} commercial={c} build=on restart=auto session=s1 landed=17 prewarm=on jobs=3").split(' ').map(str::to_string).collect(), signer: String::new() };
         assert_eq!(order_repos(&o), [("makepad".to_string(), a.clone()), ("repo-b".to_string(), e.clone()), ("commercial".to_string(), c.clone())]);
         let was = crate::lease::Pin::at(&b).with("commercial", &b);
         assert_eq!(deployed_after(Some(was.clone()), &[("repo-b".into(), e.clone())]), Some(was.clone().with("repo-b", &e)), "what did not move stays");

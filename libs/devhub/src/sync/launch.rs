@@ -9,7 +9,7 @@
 //!
 //! `show <app>` is not a launch: it asks the node's WM for its dock app (launch-or-focus, the
 //! registry's one launch definition, no lease, env or args), what a lane does to show the user
-//! something it landed.
+//! something it landed. `close <app>` ends what its `native` form opened, for `show stop`.
 //!
 //! A launch is a run of its lease ([`crate::lease::exec::launch`]): under the run wrapper, in its
 //! own session and scope, so its exit is the lease's to tell, through a hub restart too.
@@ -225,7 +225,34 @@ pub fn stop(pid: u32) -> Result<String, String> {
     Ok("SIGKILL after 10 s".into())
 }
 
-/// The `launch` service: `launch …`, `stop <pid>`, `relaunch <pid>`, `list`, `log <pid> [n]`.
+/// The pids of `app`'s compiled instances here that no lease started: what `show <app> native`
+/// asked the WM to open.
+fn compiled_open(apps: &[makepad_remote::discovery::App], app: &str) -> Vec<u32> {
+    apps.iter().filter(|a| a.app == app && a.text("run").is_none() && a.text("lease").unwrap_or_default().is_empty()).map(|a| a.pid).collect()
+}
+
+/// Closes what `show <app> native` opened here, SIGTERM then SIGKILL as [`stop`] does, and says how
+/// many. It is the WM's child, no launch of this hub and no lease's, so nothing else ends it, and
+/// one left open on a box nobody sits at holds that box's WM restart for good (11-09).
+fn close_compiled(app: &str) -> usize {
+    let open = compiled_open(&makepad_remote::discovery::apps(), app);
+    crate::lease::exec::note_stopped_pids("by show stop", open.clone());
+    let started: Vec<(u32, Option<u64>)> = open.iter().map(|&pid| (pid, makepad_remote::relay::proc_start(pid))).collect();
+    for &pid in &open {
+        crate::os::signal_one(pid, false);
+    }
+    let runs = |&(pid, start): &(u32, Option<u64>)| start.is_some() && makepad_remote::relay::proc_start(pid) == start;
+    let end = Instant::now() + Duration::from_secs(10);
+    while started.iter().any(runs) && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    for s in started.iter().filter(|s| runs(s)) {
+        crate::os::signal_one(s.0, true);
+    }
+    open.len()
+}
+
+/// The `launch` service: `launch …`, `stop <pid>`, `relaunch <pid>`, `close <app>`, `list`, `log <pid> [n]`.
 pub fn service(conf: Arc<SyncConf>, publish: crate::local::Publish, machine: String) -> Arc<makepad_remote::lines::Handler> {
     Arc::new(move |line: &str, out: &mut Vec<String>| {
         let words: Vec<&str> = line.split_whitespace().collect();
@@ -290,12 +317,27 @@ pub fn service(conf: Arc<SyncConf>, publish: crate::local::Publish, machine: Str
                     Err(e) => err(out, &e),
                 }
             }
+            // what `show <app> native` opened: a person's to close if one is here
+            ["close", app] => {
+                if !guard(out) {
+                    return;
+                }
+                if crate::lease::exec::user_present() {
+                    return err(out, &format!("a person uses {machine}: what its WM opened is theirs to close"));
+                }
+                let closed = close_compiled(app);
+                if closed > 0 {
+                    publish(hub_record(&machine, app, 0, "launch", Sev::Info, format!("launch: closed the dock's compiled {app}"), String::new()));
+                }
+                out.push(format!("{{\"closed\":{closed}}}"));
+            }
             // the user's own dock app on their display (launch-or-focus): no dev work, so a node
             // whose dev switch is off (the user's display node) shows it too
-            ["show", app] => {
-                match show(app) {
+            ["show", app, how @ ..] if matches!(how, [] | ["native"]) => {
+                let native = !how.is_empty();
+                match show(app, native) {
                     Ok(line) => {
-                        publish(hub_record(&machine, app, 0, "launch", Sev::Info, format!("launch: showed the dock's {app}"), String::new()));
+                        publish(hub_record(&machine, app, 0, "launch", Sev::Info, format!("launch: showed the dock's {app}{}", if native { ", compiled" } else { "" }), String::new()));
                         out.push(line);
                     }
                     Err(e) => err(out, &e),
@@ -317,24 +359,25 @@ pub fn service(conf: Arc<SyncConf>, publish: crate::local::Publish, machine: Str
                     out.push(format!("{{\"log\":{}}}", json_str(&proto::clean(l, 400))));
                 }
             }
-            _ => err(out, "launch [visible|hidden] [lan] [K=V ...] <app> [args...] | show <app> | stop <pid> | relaunch <pid> | list | log <pid> [n]"),
+            _ => err(out, "launch [visible|hidden] [lan] [K=V ...] <app> [args...] | show <app> [native] | stop <pid> | relaunch <pid> | list | log <pid> [n]"),
         }
     })
 }
 
 /// Asks this node's WM for its dock app `app` (launch-or-focus): the user's one instance of it,
 /// started the dock's way when it is not running (`makepad_hal::wm_socket::request_launch`).
-pub fn show(app: &str) -> Result<String, String> {
+/// `native`: its compiled build, whatever the WM runs it under otherwise.
+pub fn show(app: &str, native: bool) -> Result<String, String> {
     let entry = find_app(app).ok_or_else(|| format!("no app `{app}` in the registry"))?;
     #[cfg(target_os = "linux")]
     {
         let path = makepad_app_registry::machine::wm_socket().ok_or("no WM runs on this node (no makepad-wm socket)")?;
-        makepad_app_registry::machine::request_launch(&path, entry.id)?;
+        makepad_app_registry::machine::request_launch(&path, entry.id, native)?;
         Ok(format!("{{\"shown\":{}}}", json_str(entry.id)))
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = entry;
+        let _ = (entry, native);
         Err("show: only a Linux node's WM has a dock to ask".into())
     }
 }
@@ -364,6 +407,28 @@ fn launch_reply(conf: &SyncConf, spec: &Spec, publish: &crate::local::Publish, m
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `show stop` closes the compiled app the WM opened, never a JIT of that name or a lease's.
+    #[test]
+    fn only_a_compiled_app_no_lease_started_is_closed() {
+        let app = |pid: u32, name: &str, fields: &[(&str, &str)]| makepad_remote::discovery::App {
+            pid,
+            app: name.into(),
+            socket: String::new(),
+            started_ms: 0,
+            caps: Vec::new(),
+            restart_parent: None,
+            fields: fields.iter().map(|(k, v)| (k.to_string(), format!("\"{v}\""))).collect(),
+        };
+        let apps = [
+            app(1, "clock", &[]),
+            app(2, "clock", &[("run", "r1")]),
+            app(3, "clock", &[("lease", "L1")]),
+            app(4, "other", &[]),
+        ];
+        assert_eq!(compiled_open(&apps, "clock"), vec![1]);
+        assert_eq!(compiled_open(&apps, "none"), Vec::<u32>::new());
+    }
 
     #[test]
     fn specs_and_env_policy() {

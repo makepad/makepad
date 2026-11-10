@@ -511,9 +511,40 @@ fn reattach(ctx: &Arc<Ctx>, j: &Job) {
     ended(ctx, id, held, r, &log);
 }
 
+/// `adopt {lease,pid,run,lane,agent,kind,cmd,cwd,rev,repo_dir,class,priority,src}`: a `devhub
+/// run`/`test`/`lease -- cmd` client's run, told every process of its lease sat idle, becomes a
+/// job, and the client returns to its owner with the verdict: an owner waits on that process's
+/// end, and a lane's background `devhub test` hung 16 min with its verdict on a stderr nobody read
+/// (11-10). The run goes on, followed from its first byte into the job's log; `take` hands the
+/// lease over from its holder `pid` (its box, its grant). devhub ends nothing: `job wait`, `job
+/// result` and `job cancel` are the owner's. Placed again it would run without the client's tree:
+/// it never is.
+fn adopt(ctx: &Ctx, json: &str, take: &dyn Fn(&str, u32) -> Result<(String, u64), String>) -> Result<Job, String> {
+    let v = makepad_strict_json::parse_depth(json.as_bytes(), 8).map_err(|_| "job adopt: bad request")?;
+    let text = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let lease = text("lease");
+    let pid = v.get("pid").and_then(Value::as_u64).and_then(|p| u32::try_from(p).ok()).ok_or("job adopt: no pid")?;
+    let run_n = v.get("run").and_then(Value::as_u64).filter(|n| *n > 0).ok_or("job adopt: no run")?;
+    let cmd: Vec<String> = v.get("cmd").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).map(str::to_string).collect();
+    if lease.is_empty() || cmd.is_empty() { return Err("job adopt: no lease or command".into()); }
+    let (node, granted) = take(&lease, pid)?;
+    let j = ctx.store.update(|d| {
+        d.jobs_next += 1;
+        let id = format!("J{}", d.jobs_next);
+        let log = ctx.logs("jobs").join(format!("{id}.log")).to_string_lossy().into_owned();
+        // its wait was told this lease's verdict: the client said it
+        let j = Job { id, lane: text("lane"), agent: text("agent"), kind: text("kind"), cmd: cmd.clone(), cwd: text("cwd"), rev: text("rev"), repo_dir: text("repo_dir"), class: text("class"), priority: text("priority"), src: text("src"), state: "running".into(), submitted_ms: granted, asked_ms: granted, granted_ms: granted, shipped_ms: granted, started_ms: granted, lease: lease.clone(), node: node.clone(), run_n, log, attempts: ATTEMPTS, idle_told: lease.clone(), note: format!("{lease}'s client handed its run over at the idle verdict"), ..Default::default() };
+        d.jobs.push(j.clone());
+        j
+    })?;
+    event(ctx, Sev::Warn, format!("job {}: {lease} on {node} of lane {}, every process idle, goes on as this job (its client returned to its owner); `devhub job cancel {}` ends it", j.id, j.lane, j.id), Some(&j));
+    Ok(j)
+}
+
 /// A job's run is over: its lease goes, and it has its result, or (the box lost under it, no exit)
 /// it is placed again from its snapshot.
 fn ended(ctx: &Arc<Ctx>, id: &str, held: Held, r: Result<i32, String>, log: &std::path::Path) {
+    if get(ctx, id).is_some_and(|j| j.kind == "timed") { note_quiet(ctx, id, &held); }
     if let Some(j) = get(ctx, id).filter(|j| j.waited_ms > 0) {
         crate::lease::prof::log_wait(&ctx.home, &format!("{{\"kind\":\"job\",\"lane\":{},\"id\":{},\"lease\":{},\"start_ms\":{},\"end_ms\":{}}}", json_str(&j.lane), json_str(id), json_str(&j.lease), j.waited_ms, wall_ms()));
     }
@@ -555,6 +586,18 @@ fn ended(ctx: &Arc<Ctx>, id: &str, held: Held, r: Result<i32, String>, log: &std
     if !finished { finish(ctx, id, r, log); }
 }
 
+/// Whether a timed job's box was quiet under its run (`lease-box`, [`crate::lease::master::unquiet`]):
+/// one that was not says so in its result, before its waiter reads it (a series' next job takes
+/// the box before this one's release says what shared it): its timings are not clean.
+fn note_quiet(ctx: &Ctx, id: &str, held: &Held) {
+    let Ok(lines) = ask(&ctl(), Some(&held.node), "lease-box", &format!("lease-box {}", held.id)) else { return };
+    let Some(v) = lines.iter().find_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()) else { return };
+    let Some(b) = v.get("box").filter(|b| !b.is_null()) else { return };
+    if let Some(why) = crate::lease::master::unquiet(b) {
+        set(ctx, id, |j| j.unquiet = format!("{}: {why}; {}", held.node, crate::lease::master::box_line(b)));
+    }
+}
+
 /// Someone ended the job's lease by hand (`devhub cancel L..` or `devhub release L..`, what the
 /// hung warning says), granted or still asked: the job ends with it, cancelled. Placed again, a
 /// hung job came straight back and hung again (J6015, 11-04), and a released one asked again on a
@@ -571,6 +614,7 @@ fn again(ctx: &Ctx, id: &str, why: &str) -> bool {
         if matches!(j.state.as_str(), "leasing" | "running") && j.attempts < ATTEMPTS && j.holder.is_none_or(crate::os::pid_alive) {
             j.state = "queued".into();
             j.note = format!("{why}; placed again");
+            j.unquiet.clear();
             j.lease.clear();
             j.node.clear();
             j.run_n = 0;
@@ -583,6 +627,17 @@ fn again(ctx: &Ctx, id: &str, why: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// What its lease kept of a stall (its processes, every JIT thread's stack: the idle verdict's
+/// capture) goes at the end of the job's log, after the run's output its result reads: a hung
+/// job's evidence is its own log's, also once it is cancelled (11-10).
+fn keep_stall(ctx: &Ctx, id: &str, log: &std::path::Path) {
+    use std::io::Write;
+    let Some(lease) = get(ctx, id).map(|j| j.lease).filter(|l| !l.is_empty()) else { return };
+    let Some(kept) = std::fs::read_to_string(ctx.logs(LEASE_LOGS).join(format!("{lease}.log"))).ok().filter(|k| k.contains(" when it stalled (")) else { return };
+    let added = std::fs::OpenOptions::new().append(true).create(true).open(log).and_then(|mut f| f.write_all(format!("\n== what {lease} kept when it stalled (`devhub job result {lease}`)\n{kept}").as_bytes()));
+    if let Err(e) = added { eprintln!("devhub job {id}: its stall's capture is not in {}: {e}", log.display()); }
 }
 
 /// Why a failed job failed, for its event line: its first error line; else, when its run exited
@@ -601,6 +656,7 @@ fn spec_cmd(j: &Job) -> String {
 fn finish(ctx: &Ctx, id: &str, r: Result<i32, String>, log: &std::path::Path) {
     let text = std::fs::read_to_string(log).unwrap_or_default();
     let (errors, tail) = digest(&text);
+    keep_stall(ctx, id, log);
     let j = set(ctx, id, |j| {
         j.ended_ms = wall_ms();
         j.errors = errors;
@@ -865,6 +921,17 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
             Ok("{}".into())
         }
         "idle" => told_idle(ctx, &ids(), &|lease| ctx.leases.owner_word(lease), &|lane| ctx.leases.behind_hung(lane).or_else(|| ctx.leases.behind_own(lane))),
+        "adopt" => {
+            let own = super::CTX.get().ok_or("job adopt: this master runs no jobs")?.clone();
+            let j = adopt(ctx, rest, &|lease, pid| ctx.leases.adopt(lease, pid))?;
+            let (c, followed) = (own.clone(), j.clone());
+            if let Err(e) = std::thread::Builder::new().name("devhub-job".into()).spawn(move || reattach(&c, &followed)) {
+                let why = format!("job adopt: no thread to follow it: {e}");
+                finish(&own, &j.id, Err(why.clone()), std::path::Path::new(&j.log));
+                return Err(why);
+            }
+            Ok(format!("{{\"job\":{}}}", json_str(&j.id)))
+        }
         "get" | "wait" => {
             let rest = rest.strip_prefix("--wait").unwrap_or(rest).trim();
             let (any, rest) = rest.strip_prefix("--any").map_or((false, rest), |r| (true, r.trim()));
@@ -1074,7 +1141,7 @@ fn nested_devhub(cmd: &[String]) -> Option<String> {
 
 /// The fields of a submitted job this master reads ([`submit`]): one it does not know is refused,
 /// never dropped (a job's `--jit` was dropped on its way and the job ran without its JIT, 11-07).
-const JOB_FIELDS: &[&str] = &["after", "agent", "class", "cmd", "cores", "cost", "cwd", "est_min", "holder", "kind", "lane", "lane_from", "loader", "native", "needs", "node", "prio", "priority", "ram_gb", "shadow", "tree", "whole"];
+const JOB_FIELDS: &[&str] = &["after", "agent", "class", "cmd", "cores", "cost", "cwd", "est_min", "holder", "kind", "lane", "lane_from", "loader", "native", "needs", "node", "prio", "priority", "ram_gb", "series", "shadow", "tree", "whole"];
 
 /// Why a job that asks for no JIT (`--jit`) is refused: its command, or a file it names (the
 /// script it runs, in its tree), names a binary of a box's JIT store
@@ -1109,6 +1176,7 @@ fn configure_request(r: &mut crate::lease::sched::Req, j: &Job) {
     r.ram_gb = j.ram_gb;
     r.whole = j.whole;
     r.holder = j.holder;
+    r.series = (!j.series.is_empty()).then(|| j.series.clone());
 }
 
 /// `submit {"tree","rev"?,"batch","jobs":[{kind,needs,node,prio,lane,agent,cmd,after}]}`: ids at
@@ -1193,7 +1261,7 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         let gate = crate::lease::native::Ask { lane: &lane, agent: &agent, kind: Kind::parse(&kind).unwrap(), cmd: &cmd, repo_dir: &tree, cwd: if cwd.is_empty() { "." } else { &cwd }, rev: &rev, reason: &reason, class: &s(r, "class"), route: &|class| { let (jit, why) = ctx.leases.test_route("test", class, false); (!jit).then_some(why) }, os: &os, arch: &arch };
         let note = crate::lease::native::check(&ctx.home, &gate, wall_ms()).map_err(|e| format!("job {}: {e}", i + 1))?;
         if !note.is_empty() { notes.push(note); }
-        jobs.push(Job { cwd, holder, shadow, priority: priority.as_str().into(), loader: s(r, "loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, whole, class: s(r, "class"), kind, needs: s(r, "needs"), node_pref: s(r, "node"), prio, repo_dir: tree.to_string_lossy().into_owned(), lane, agent: s(r, "agent"), cmd, after: list(r, "after"), state: "queued".into(), ..Default::default() });
+        jobs.push(Job { cwd, holder, shadow, priority: priority.as_str().into(), loader: s(r, "loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, whole, class: s(r, "class"), kind, needs: s(r, "needs"), node_pref: s(r, "node"), series: s(r, "series"), prio, repo_dir: tree.to_string_lossy().into_owned(), lane, agent: s(r, "agent"), cmd, after: list(r, "after"), state: "queued".into(), ..Default::default() });
     }
     for (i, j) in jobs.iter().enumerate() {
         let mut req = crate::lease::sched::Req::new(&j.lane, Kind::parse(&j.kind).unwrap());
@@ -1201,6 +1269,7 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         req.node = (!j.node_pref.is_empty()).then(|| j.node_pref.clone());
         req.master = true;
         configure_request(&mut req, j);
+        req.check_series().map_err(|e| format!("job {}: {e}", i + 1))?;
         req.normalize_kind();
         if let Some(never) = ctx.leases.never_places(&req) { return Err(format!("job {}: no box could ever take it: {never}", i + 1)); }
     }
@@ -1300,7 +1369,7 @@ fn rerun(ctx: &Ctx, id: &str) -> Result<String, String> {
     }
     let n = ctx.store.update(|d| {
         d.jobs_next += 1;
-        let n = Job { id: format!("J{}", d.jobs_next), cwd: j.cwd.clone(), priority: j.priority.clone(), loader: j.loader.clone(), src: j.src.clone(), cost: j.cost.clone(), est_min: j.est_min, cores: j.cores, ram_gb: j.ram_gb, whole: j.whole, class: j.class.clone(), kind: j.kind.clone(), needs: j.needs.clone(), node_pref: j.node_pref.clone(), prio: j.prio, rev: j.rev.clone(), repo_dir: j.repo_dir.clone(), snap: j.snap.clone(), snap_files: j.snap_files, lane: j.lane.clone(), agent: j.agent.clone(), cmd: j.cmd.clone(), state: "queued".into(), submitted_ms: wall_ms(), note: format!("rerun of {id}"), ..Default::default() };
+        let n = Job { id: format!("J{}", d.jobs_next), cwd: j.cwd.clone(), priority: j.priority.clone(), loader: j.loader.clone(), src: j.src.clone(), cost: j.cost.clone(), est_min: j.est_min, cores: j.cores, ram_gb: j.ram_gb, whole: j.whole, class: j.class.clone(), kind: j.kind.clone(), needs: j.needs.clone(), node_pref: j.node_pref.clone(), series: j.series.clone(), prio: j.prio, rev: j.rev.clone(), repo_dir: j.repo_dir.clone(), snap: j.snap.clone(), snap_files: j.snap_files, lane: j.lane.clone(), agent: j.agent.clone(), cmd: j.cmd.clone(), state: "queued".into(), submitted_ms: wall_ms(), note: format!("rerun of {id}"), ..Default::default() };
         d.jobs.push(n.clone());
         n
     })?;
@@ -1322,6 +1391,9 @@ pub fn render(j: &Job, tail: bool) -> String {
     // and as what held one's lane cap, 11-06)
     let lane = if j.lane.is_empty() { String::new() } else { format!(" @{}", j.lane) };
     let mut out = format!("{} {}{exit}{secs}{at}{lane}: {}\n", j.id, j.state, crate::proto::clean(&spec_cmd(j), 160));
+    if !j.unquiet.is_empty() {
+        out.push_str(&format!("  NOT QUIET box {}: its timings are not clean, run it again on a quiet box\n", j.unquiet));
+    }
     if let Some(p) = &j.panic {
         out.push_str(&format!("  panic {}: {} at {} [{}] pid {} ({} ago)\n", p.id, p.message, p.location, p.thread, p.pid, age(p.at_ms)));
         if j.state == "paused" {
@@ -1485,6 +1557,35 @@ mod tests {
         let behind = |_: &str| Some(("L9".to_string(), "L10 waits behind L9".to_string()));
         assert_eq!(told_idle(&c, &ids, &word, &behind).unwrap(), r#"[{"id":"J1","queued":true,"word":"L10 waits behind L9"}]"#);
         assert_eq!(told_idle(&c, &ids, &word, &behind).unwrap(), "[]");
+        let _ = std::fs::remove_dir_all(&c.home);
+    }
+
+    /// A run's client told its lease's idle verdict hands the run to a job: from its holder only,
+    /// told once, never placed again (it would run without the client's tree), and what its lease
+    /// kept of the stall goes at the end of the job's log after a cancel, its result read from the
+    /// run's own output.
+    #[test]
+    fn a_hung_runs_client_hands_it_to_a_job_that_keeps_its_stall() {
+        let c = ctx("adopt");
+        let body = r#"{"lease":"L7","pid":42,"run":2,"lane":"lane1","agent":"a","kind":"test","cmd":["cargo","test"],"cwd":".","rev":"rc-t@abc","class":"native:test:x"}"#;
+        let refused = |_: &str, _: u32| Err::<(String, u64), String>("L7 is not held by pid 42".into());
+        assert_eq!(adopt(&c, body, &refused).unwrap_err(), "L7 is not held by pid 42");
+        assert!(adopt(&c, &body.replace("\"pid\":42,", ""), &|_, _| Ok(("node-a".into(), 5_000))).is_err(), "no holder named");
+        assert_eq!(c.store.read(|d| d.jobs.len()), 0, "a refused hand-over writes no job");
+        let taken = |lease: &str, pid: u32| if (lease, pid) == ("L7", 42) { Ok(("node-a".to_string(), 5_000)) } else { Err("wrong lease".to_string()) };
+        let j = adopt(&c, body, &taken).unwrap();
+        assert_eq!((j.state.as_str(), j.lease.as_str(), j.node.as_str(), j.run_n, j.started_ms, j.cmd.join(" ")), ("running", "L7", "node-a", 2, 5_000, "cargo test".to_string()));
+        assert_eq!(told_idle(&c, std::slice::from_ref(&j.id), &|lease| Some(format!("{lease} idle")), &|_| None).unwrap(), "[]", "its client said the verdict");
+        assert!(!again(&c, &j.id, "box node-a lost"), "never placed again");
+        std::fs::create_dir_all(c.logs("jobs")).unwrap();
+        std::fs::create_dir_all(c.logs(LEASE_LOGS)).unwrap();
+        let log = std::path::PathBuf::from(&j.log);
+        std::fs::write(&log, "running 1 test\ntest a ...\n").unwrap();
+        std::fs::write(c.logs(LEASE_LOGS).join("L7.log"), "== node-a: its processes and last lines when it stalled (L7 test@node-a of lane1: every process idle for 10m00s)\npid 7: sleep 3600\n").unwrap();
+        finish(&c, &j.id, Err("L7 ended (cancelled): cancelled by user".into()), &log);
+        let done = get(&c, &j.id).unwrap();
+        assert_eq!(done.tail.last().map(String::as_str), Some("test a ..."), "its result reads the run's output");
+        assert!(std::fs::read_to_string(&log).unwrap().ends_with("== what L7 kept when it stalled (`devhub job result L7`)\n== node-a: its processes and last lines when it stalled (L7 test@node-a of lane1: every process idle for 10m00s)\npid 7: sleep 3600\n"));
         let _ = std::fs::remove_dir_all(&c.home);
     }
 

@@ -404,7 +404,16 @@ impl Held {
                         continue 'ask;
                     }
                 }
-                v = beat(&ctl, &id, &said(&v))?;
+                // an answer it can't read gives its ask up with its place, for the ask that follows
+                // ([`crate::lease::sched::Sched::keep_dropped_ask`]). Left to expire, that ask
+                // started at the back while this one held its box, and the place went to a later ask.
+                v = match beat(&ctl, &id, &said(&v)) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = ask(&ctl, None, "release", &id);
+                        return Err(e);
+                    }
+                };
             }
         }
     }

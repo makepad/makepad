@@ -8,9 +8,13 @@
 //! the save to the patch and to the first frame after it. `live act` runs any inspect command in
 //! the app (ui, key, click, grab, test hooks); `live wait patched|verdict|settled|frame` blocks on the
 //! JIT. A parked panic pauses the live job (act and resume through it). It ends on release, when
-//! its app exits, after 10 min with no edit or call, when its lane starts a fourth (the least
-//! recently used idle one goes), when its lane landed, or to give a waiting whole/timed lease its
-//! box once the current call answers. Tests keep one job per lane, target and args;
+//! its app exits, after 10 min with no edit or call (a `devhub inspect` of its app is a call; a
+//! visible one: nor a person's input at its box), when its lane starts a fourth headless one (the least recently used idle headless one
+//! goes; with all of them busy the new one waits for a slot: a visible session is the person's app
+//! and never counts), when its lane landed, or to give a waiting whole/timed lease its box once the
+//! current call answers. A call (a test session's tests) past three times its class's measured run
+//! is said, never ended: an inbox warning, a why-hung sample in `devhub job result <lease>`, and
+//! the test's still-running line. Tests keep one job per lane, target and args;
 //! their saves only queue, and a test call ships and waits for that patch's test group.
 //! Between calls a session is charged only its resident share of its box (one core and its
 //! memory); a call takes its full charge back, admitted like a lease (it waits up to 30 s for
@@ -31,8 +35,115 @@ use std::time::{Duration, Instant};
 
 /// A live job with no edit or call this long ends (tests too: an idle session's box waits for it).
 pub const IDLE_MS: u64 = 10 * 60 * 1000;
-/// Live sessions a lane keeps at once: a new one ends the lane's least recently used idle one.
+/// Headless live sessions a lane keeps at once: a new one ends the lane's least recently used idle
+/// one, or waits for a slot ([`slot`]; visible ones never count).
 pub const LANE_SESSIONS: usize = 3;
+/// How long a session has gone unused at `now`: since its last edit or call, and a visible one also
+/// since a person's last input at its box (`input_ms`, [`crate::lease::sched::Sched::user_input_ms`]):
+/// a visible session is the person's app, in use while they work at its box (the idle end closed
+/// a person's visible Fab, 11-09).
+fn unused_ms(x: &Live, input_ms: Option<u64>, now: u64) -> u64 {
+    let last = if x.visible { x.touched_ms.max(input_ms.unwrap_or(0)) } else { x.touched_ms };
+    now.saturating_sub(last)
+}
+
+/// Whether a lane's session may ask for its box ([`slot`]).
+#[derive(Debug, PartialEq)]
+enum Slot<'a> {
+    /// the lane has room
+    Free,
+    /// it takes the place of this one, the lane's least recently used idle headless session
+    Takes(&'a Live),
+    /// the lane's headless sessions are all busy, or an earlier one waits: it waits for a slot
+    Waits,
+}
+
+/// Whether a session of a lane (`mine`: the lane's other active sessions; `own`: the session when it
+/// waits already, None for a new one) may ask for its box. At most [`LANE_SESSIONS`] headless sessions
+/// per lane hold a slot: past them the least recently used idle one goes, and with all of them busy
+/// the session waits for one, like a lease, first come first served (a lane's fourth session was
+/// refused, 11-09: a bound waits, it never refuses). A waiting session holds no slot. A visible
+/// session is the person's app: it never counts, never waits and is never the one ended (the cap
+/// ended a person's visible Fab for its lane's next session, 11-09).
+fn slot<'a>(mine: &'a [Live], own: Option<&Live>, visible: bool, idle: impl Fn(&Live) -> bool) -> Slot<'a> {
+    if visible { return Slot::Free; }
+    let key = |x: &Live| (x.slot_wait_ms, x.id.len(), x.id.clone());
+    if mine.iter().any(|x| x.slot_wait_ms != 0 && own.is_none_or(|o| key(x) < key(o))) { return Slot::Waits; }
+    let counted: Vec<&Live> = mine.iter().filter(|x| !x.visible && x.slot_wait_ms == 0).collect();
+    if counted.len() < LANE_SESSIONS { return Slot::Free; }
+    counted.into_iter().filter(|x| idle(x)).min_by_key(|x| x.touched_ms).map_or(Slot::Waits, Slot::Takes)
+}
+
+/// No call runs in the session and no edit is on its way to it (one still placed has neither).
+fn idle_now(x: &Live) -> bool {
+    running(&x.id).is_none_or(|r| r.calls.lock().unwrap().count == 0 && !r.inflight.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// A command routed to an app on `node` (`spec`: its pid or name, as `devhub inspect <node>/<spec>`
+/// names it) is a call of the live session that runs it, as `live act` is: a lane that drove its
+/// session's app through `devhub inspect` (`ui find`, its AI tools) lost it to the idle end (11-09).
+/// `caller`: the routing link's name ([`makepad_remote::hub::RouteSeen`]).
+pub fn app_routed(node: &str, spec: &str, service: &str, caller: &str) {
+    if !a_lanes_call(service, caller) { return; }
+    let Some(ctx) = super::ctx() else { return };
+    let ids: Vec<String> = ctx.store.read(|d| d.lives.iter().filter(|x| x.active() && names_app(x, node, spec)).map(|x| x.id.clone()).collect());
+    for id in ids {
+        let _ = try_set(ctx, &id, |s| s.touched_ms = wall_ms());
+    }
+}
+
+/// Whether a route to an app is a lane's call of it: not a watch or stream, which only follow the
+/// app, and not devhub's own look at it (its `devhub-*` clients: a session's start, its look's checks),
+/// which kept no session in use.
+fn a_lanes_call(service: &str, caller: &str) -> bool {
+    !matches!(service, "watch" | "stream") && !caller.starts_with("devhub-")
+}
+
+/// `node`/`spec` names the session's app: its box, and its JIT's pid, its package or the registry
+/// name it was started by.
+fn names_app(x: &Live, node: &str, spec: &str) -> bool {
+    x.node == node && ((x.pid > 0 && x.pid.to_string() == spec) || x.app == spec || makepad_app_registry::find(spec).is_some_and(|e| e.package == x.app))
+}
+
+/// What a session that waits for a slot of `lane` says while it waits.
+fn slot_note(lane: &str) -> String {
+    format!("waits for a slot: lane {lane}'s {LANE_SESSIONS} headless live sessions are busy (or an earlier one waits); it asks for its box when one is idle or ends")
+}
+
+/// A session that waits for its lane's slot ([`slot`]) has one once one of its lane's headless
+/// sessions is idle (it takes that one's place) or ends, and earlier waiters have theirs. False: it
+/// ended meanwhile.
+fn wait_slot(ctx: &Ctx, id: &str) -> bool {
+    loop {
+        let (signal, seen) = {
+            let _starting = STARTING.lock().unwrap();
+            let Some(x) = get(ctx, id).filter(|x| x.active()) else { return false };
+            if x.slot_wait_ms == 0 { return true; }
+            let mine: Vec<Live> = ctx.store.read(|d| d.lives.iter().filter(|o| o.active() && o.lane == x.lane && o.id != id).cloned().collect());
+            let free = match slot(&mine, Some(&x), x.visible, idle_now) {
+                Slot::Waits => false,
+                Slot::Free => true,
+                Slot::Takes(lru) => {
+                    event(ctx, Sev::Info, format!("live {} ({}) of lane {}: released for its lane's waiting session {id} (at most {LANE_SESSIONS} headless per lane)", lru.id, lru.app, x.lane), Some(lru));
+                    release(ctx, &lru.id, &format!("released: lane {}'s waiting session {id} took its place (at most {LANE_SESSIONS} headless per lane)", x.lane)).is_ok()
+                }
+            };
+            if free {
+                let waited = wall_ms().saturating_sub(x.slot_wait_ms) / 1000;
+                let x = set(ctx, id, |s| { s.slot_wait_ms = 0; s.note.clear(); });
+                event(ctx, Sev::Info, format!("live {id}: has its lane's slot after {waited} s: asks for a box"), x.as_ref());
+                return true;
+            }
+            // a lane session's change (one ending, this one released) wakes it; one going idle, the next look
+            let ids: Vec<&str> = mine.iter().map(|o| o.id.as_str()).chain(std::iter::once(id)).collect();
+            let signal = ctx.store.subscribe("live", &ids);
+            let seen = signal.generation();
+            (signal, seen)
+        };
+        signal.wait(seen, HOUSEKEEPING);
+    }
+}
+
 /// How often live jobs are checked for a lane that is gone (a lease beat).
 const ORPHAN_LOOK: Duration = Duration::from_secs(30);
 /// The ship loop's look at idle and orphaned jobs while no save or ended call wakes it.
@@ -136,6 +247,8 @@ const ADMIT_LOOK: Duration = Duration::from_millis(100);
 /// A wait for room this long is a warning: the inbox and the history have it, not only the event
 /// stream (a ship waited 220 s for its box's RAM, said only as info, 11-06).
 const ROOM_WARN: Duration = Duration::from_secs(30);
+/// How often a call that still waits for room says what it waits on now.
+const ROOM_SAY_AGAIN: Duration = Duration::from_secs(60);
 
 /// A call takes its session's full charge back, admitted like a lease: it runs once that fits its
 /// box, never past the box's cores. Taken anyway (an edit at once, a call after 30 s), calls kept
@@ -143,8 +256,9 @@ const ROOM_WARN: Duration = Duration::from_secs(30);
 /// idle session (`Sched::call_room`): a call waits beside another call, never for work past its
 /// charge, which yields to it.
 /// A wait says so as it starts (`live call <id> waits for room on <node>: waiting for N cores (..),
-/// held by ..: <why>`) and once it ends (`.. waited <ms> ms ..`, a warning past [`ROOM_WARN`]), and
-/// the call's reply carries that line ([`with_room`]). No clock ends it: its session
+/// held by ..: <why>`), to its caller too (a lane's `live act` sat silent for 6 min, 11-09), each
+/// [`ROOM_SAY_AGAIN`] while it lasts, and once it ends (`.. waited <ms> ms ..`, a warning past
+/// [`ROOM_WARN`]), and the call's reply carries that line ([`with_room`]). No clock ends it: its session
 /// parking or ending does, or the client it answers going (`client`: the request's connection; an
 /// edit's ship answers none, its session's state alone ends its wait).
 fn admit(ctx: &Ctx, id: &str, r: &Running, client: Option<makepad_remote::Conn>) -> Result<Option<String>, String> {
@@ -154,12 +268,15 @@ fn admit(ctx: &Ctx, id: &str, r: &Running, client: Option<makepad_remote::Conn>)
         if get(ctx, id).is_none_or(|x| !x.active()) { return Some(format!("{id}: the session ended while its call waited for room")); }
         client.as_ref().filter(|c| c.is_closed()).map(|_| format!("{id}: this call's client has gone"))
     };
-    let waited = wait_for_room(&mut || ctx.leases.live_admit(&r.lease), &ended, &mut |why| {
-        event(ctx, Sev::Info, format!("live call {id} waits for room on {}: {why}", r.node), None);
+    let waited = wait_for_room(&mut || ctx.leases.live_admit(&r.lease), &ended, ROOM_SAY_AGAIN, &mut |why| {
+        let line = format!("live call {id} waits for room on {}: {why}", r.node);
+        makepad_remote::lines::say_waiting(&line);
+        event(ctx, Sev::Info, line, None);
     }).inspect_err(|_| ctx.leases.live_unwait(&r.lease))?;
     // (said to the caller too: the event reaches only the stream, and a lane's call waited
     // 265 s on a Mac without a word, 11-06)
     Ok(waited.map(|why| {
+        makepad_remote::lines::wait_over();
         let waited = t.elapsed();
         let line = format!("live call {id} waited {} ms for room on {}: {why}", waited.as_millis(), r.node);
         event(ctx, if waited >= ROOM_WARN { Sev::Warn } else { Sev::Info }, line.clone(), get(ctx, id).as_ref());
@@ -182,13 +299,21 @@ fn room_of<'a>(held: &'a Option<Call<'_>>) -> Option<&'a str> {
 }
 
 /// [`admit`]'s wait: `try_admit` until it lets the call in (Ok: the first refusal, if it waited),
-/// `ended` saying why the wait ends otherwise (Err), `waits` told the first refusal at once.
-fn wait_for_room(try_admit: &mut dyn FnMut() -> Result<(), String>, ended: &dyn Fn() -> Option<String>, waits: &mut dyn FnMut(&str)) -> Result<Option<String>, String> {
+/// `ended` saying why the wait ends otherwise (Err), `waits` told the first refusal at once and the
+/// refusal then each `again`.
+fn wait_for_room(try_admit: &mut dyn FnMut() -> Result<(), String>, ended: &dyn Fn() -> Option<String>, again: Duration, waits: &mut dyn FnMut(&str)) -> Result<Option<String>, String> {
     let mut first: Option<String> = None;
+    let mut said = Instant::now();
     loop {
         match try_admit() {
             Ok(()) => return Ok(first),
-            Err(why) => if first.is_none() { waits(&why); first = Some(why); },
+            Err(why) => {
+                if first.is_none() || said.elapsed() >= again {
+                    waits(&why);
+                    said = Instant::now();
+                }
+                first.get_or_insert(why);
+            }
         }
         if let Some(why) = ended() { return Err(first.map_or(why.clone(), |f| format!("{why}; it waited for {f}"))); }
         std::thread::sleep(ADMIT_LOOK);
@@ -570,13 +695,14 @@ pub fn start(ctx: Arc<Ctx>) {
         let now = wall_ms();
         let idle: Vec<Live> = c.store.read(|d| d.lives.iter().filter(|x| x.active() && !x.lease.is_empty() && now.saturating_sub(x.touched_ms) >= IDLE_MS).cloned().collect());
         for x in idle {
+            if x.visible && unused_ms(&x, c.leases.user_input_ms(&x.node), now) < IDLE_MS { continue; }
             let Some(r) = running(&x.id) else { continue };
             // (a test session's saves wait for its next call: one within the timeout keeps it)
             if r.test && r.pending.lock().unwrap().2.is_some_and(|t| t.elapsed() < Duration::from_millis(IDLE_MS)) { continue; }
             {
                 let mut calls = r.calls.lock().unwrap();
                 if calls.count > 0 || r.inflight.load(std::sync::atomic::Ordering::SeqCst) { continue; }
-                calls.park.get_or_insert_with(|| "ended after 10 min with no edit or call".into());
+                calls.park.get_or_insert_with(|| if x.visible { "ended after 10 min with no edit, call or person's input at its box" } else { "ended after 10 min with no edit or call" }.into());
             }
             park_ready(&c, &x.id, &r);
         }
@@ -690,25 +816,60 @@ fn no_verdict(answer: &Result<Vec<String>, String>, waited: Duration) -> String 
 /// closes its link as it dies, and its box reaps it a moment after.
 const EXIT_LOOKS: u32 = 10;
 
-/// Why a watch's link closed before its verdict, as far as the session's box and log say: the
-/// app's exit (a signal's said as 128 + its number), or that it runs on, and its log's last lines.
-/// A closed link said only "connection closed by the peer" (W3683, 11-06): its lane could not tell
-/// its own crash from devhub's.
-fn peer_closed(r: &Running, x: &Live) -> String {
-    let mut said = String::new();
+/// What a session's box says of its app once a link to the app closed.
+enum AppSaid {
+    Exit(i64),
+    Runs,
+    /// The box doesn't answer: its hub is away.
+    NoAnswer(String),
+}
+
+/// Asks a session's box how its app stands, until its exit is known or for [`EXIT_LOOKS`] looks.
+fn app_said(r: &Running, x: &Live) -> AppSaid {
+    let mut said = AppSaid::Runs;
     for look in 0..EXIT_LOOKS {
         if look > 0 { std::thread::sleep(Duration::from_millis(100)); }
         // (past the log's end: the exit alone, once the box reaped the run)
         let exit = ask(r.held.client(), Some(&r.node), "lease-log", &format!("lease-log {} {} {}", r.lease, x.run_n, u64::MAX >> 1))
             .map(|lines| lines.first().and_then(|l| makepad_strict_json::parse(l.as_bytes()).ok()).and_then(|v| v.get("exit").and_then(Value::as_i64)));
-        match exit {
-            Ok(Some(c)) => { said = format!("the app exited ({})", exit_said(c)); break; }
-            Ok(None) => said = format!("the app runs on (pid {})", x.pid),
-            Err(e) => said = format!("its box did not say whether the app runs ({})", crate::proto::clean(&e, 120)),
-        }
+        said = match exit {
+            Ok(Some(c)) => return AppSaid::Exit(c),
+            Ok(None) => AppSaid::Runs,
+            Err(e) => AppSaid::NoAnswer(e),
+        };
     }
+    said
+}
+
+/// [`AppSaid`] in words: the app's exit (a signal's said as 128 + its number), or that it runs on,
+/// and its log's last lines.
+fn said_of(said: &AppSaid, x: &Live) -> String {
+    let said = match said {
+        AppSaid::Exit(c) => format!("the app exited ({})", exit_said(*c)),
+        AppSaid::Runs => format!("the app runs on (pid {})", x.pid),
+        AppSaid::NoAnswer(e) => format!("its box did not say whether the app runs ({})", crate::proto::clean(e, 120)),
+    };
     let tail = log_tail(&x.log, LOG_TAIL_LINES);
     if tail.is_empty() { said } else { format!("{said}; its log's last lines: {}", crate::proto::clean(&tail, 600)) }
+}
+
+/// Why a watch's link closed before its verdict, as far as the session's box and log say.
+/// A closed link said only "connection closed by the peer" (W3683, 11-06): its lane could not tell
+/// its own crash from devhub's.
+fn peer_closed(r: &Running, x: &Live) -> String {
+    said_of(&app_said(r, x), x)
+}
+
+/// What an `act` says whose link closed under it (`e`). A box that doesn't answer has lost its hub,
+/// as each landing that rolls the hubs does, and the app runs on under the next one: `link lost`,
+/// the cut its caller knows how to go on from (`devhub live act`, orch/cli.rs `cut_act`). A long read
+/// ended on the bare close, its session running, at the first hub roll a check held one through
+/// (11-09). Otherwise the app did it: its exit, or that it runs on.
+fn closed_act(id: &str, e: &str, x: &Live, said: AppSaid) -> String {
+    match said {
+        AppSaid::NoAnswer(_) => format!("link lost: {}'s hub left during this call ({e})", x.node),
+        said => format!("{id}: {e}: {}", said_of(&said, x)),
+    }
 }
 
 /// An exit code as its run's waiter keeps it: a signal's is 128 + its number on Unix, a Windows
@@ -1703,6 +1864,7 @@ fn finished(ctx: &Ctx, id: &str, r: &Running, res: Result<i32, String>) {
 
 /// Places the live job, starts its app, runs until it ends.
 fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
+    if !wait_slot(ctx, id) { return; }
     let Some(x) = get(ctx, id) else { return };
     // (a job released meanwhile stays released: its lease wait gives up because of that)
     let fail = |e: String| {
@@ -1747,6 +1909,7 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
     let configure = |r: &mut crate::lease::sched::Req| {
         r.run_options(src, CostClass::parse(&x.cost), x.est_min, &x.class, &argv);
         r.cores = x.cores;
+        r.ram_gb = x.ram_gb;
         r.live = true;
         r.priority = Priority::parse(&x.priority).unwrap_or(Priority::Interactive);
         r.loader = (!x.loader.is_empty()).then(|| x.loader.clone());
@@ -2100,6 +2263,20 @@ mod owner_tests {
         let _ = std::fs::remove_file(&log);
     }
 
+    /// A call closed with its box away is a cut its caller goes on from; with its box answering it
+    /// is the app's, and says how the app stands.
+    #[test]
+    fn a_call_closed_by_a_hub_leaving_is_a_cut_and_one_closed_by_the_app_says_so() {
+        let x = super::Live { node: "boxa".into(), pid: 42, log: "/nonexistent/devhub-live.log".into(), ..Default::default() };
+        let closed = "connection closed by the peer";
+        let gone = super::closed_act("W1", closed, &x, super::AppSaid::NoAnswer("link lost: host `boxa` is not connected".into()));
+        assert!(crate::cli::link_cut(&gone) && gone.contains("boxa's hub"), "{gone}");
+        let exited = super::closed_act("W1", closed, &x, super::AppSaid::Exit(139));
+        assert!(!crate::cli::link_cut(&exited) && exited.contains("the app exited (exit 139: signal 11)"), "{exited}");
+        let runs = super::closed_act("W1", closed, &x, super::AppSaid::Runs);
+        assert!(!crate::cli::link_cut(&runs) && runs.contains("the app runs on (pid 42)"), "{runs}");
+    }
+
     #[test]
     fn a_park_waits_for_the_whole_call_and_any_inflight_edit() {
         let mut calls = super::Calls { count: 1, ..Default::default() };
@@ -2133,15 +2310,19 @@ mod owner_tests {
         let full = "a: waiting for 6 cores (14 of 16 in use), held by L1 (test, 8), W2 (live, in a call, 6): beside the call of W2";
         let (mut tries, mut said) = (0, Vec::new());
         let r = super::wait_for_room(&mut || { tries += 1; Err(full.to_string()) },
-            &|| gone.load(Ordering::SeqCst).then(|| "W1: this call's client has gone".to_string()), &mut |why| said.push(why.to_string()));
+            &|| gone.load(Ordering::SeqCst).then(|| "W1: this call's client has gone".to_string()), super::ROOM_SAY_AGAIN, &mut |why| said.push(why.to_string()));
         client.join().unwrap();
         assert_eq!(r, Err(format!("W1: this call's client has gone; it waited for {full}")), "the caller hears what it waited for");
-        assert_eq!(said, [full], "said once, as it started");
+        assert_eq!(said, [full], "said as it started, not again before its time");
         assert!(tries > 1, "it asked again until its client left");
         // room at once: in, nothing said; room after refusals: the first is what it waited for
-        assert_eq!(super::wait_for_room(&mut || Ok(()), &|| None, &mut |_| panic!("no wait")), Ok(None));
+        assert_eq!(super::wait_for_room(&mut || Ok(()), &|| None, super::ROOM_SAY_AGAIN, &mut |_| panic!("no wait")), Ok(None));
         let mut n = 0;
-        assert_eq!(super::wait_for_room(&mut || { n += 1; if n < 3 { Err(format!("full {n}")) } else { Ok(()) } }, &|| None, &mut |_| {}), Ok(Some("full 1".to_string())));
+        assert_eq!(super::wait_for_room(&mut || { n += 1; if n < 3 { Err(format!("full {n}")) } else { Ok(()) } }, &|| None, super::ROOM_SAY_AGAIN, &mut |_| {}), Ok(Some("full 1".to_string())));
+        // past its time it says what it waits on then, and still answers with the first
+        let (mut n, mut said) = (0, Vec::new());
+        assert_eq!(super::wait_for_room(&mut || { n += 1; if n < 3 { Err(format!("full {n}")) } else { Ok(()) } }, &|| None, std::time::Duration::ZERO, &mut |why| said.push(why.to_string())), Ok(Some("full 1".to_string())));
+        assert_eq!(said, ["full 1", "full 2"]);
     }
 
     /// A relaunch its JIT queued in place ends when no edit waits for a restart any more (the new
@@ -2511,41 +2692,48 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                 }
                 return Err(format!("{} already runs {app} for lane {lane} on {} (live release {} first)", old.id, old.node, old.id));
             }
-            // a lane keeps LANE_SESSIONS: the new one ends its least recently used idle one
-            // (lanes held 7 and 8 sessions past the lane cap, 11-02)
+            // a lane keeps LANE_SESSIONS headless: the new one ends its least recently used idle one,
+            // or waits for a slot (lanes held 7 and 8 sessions past the lane cap, 11-02); a visible
+            // one is the person's
+            let visible = v.get("visible").and_then(|b| b.as_bool()).unwrap_or(false);
             let mine: Vec<Live> = ctx.store.read(|d| d.lives.iter().filter(|x| x.active() && x.lane == lane).cloned().collect());
-            if mine.len() >= LANE_SESSIONS {
-                let idle = |x: &Live| running(&x.id).is_none_or(|r| r.calls.lock().unwrap().count == 0 && !r.inflight.load(std::sync::atomic::Ordering::SeqCst));
-                let Some(lru) = mine.iter().filter(|x| idle(x)).min_by_key(|x| x.touched_ms) else {
-                    return Err(format!("lane {lane} runs {} live sessions, all busy (at most {LANE_SESSIONS} per lane): wait for one, or `live release <id>`", mine.len()));
-                };
-                event(ctx, Sev::Info, format!("live {} ({}) of lane {lane}: released for its lane's new session (at most {LANE_SESSIONS} per lane)", lru.id, lru.app), Some(lru));
-                release(ctx, &lru.id, &format!("released: lane {lane}'s new session took its place (at most {LANE_SESSIONS} per lane)"))?;
-            }
+            let waits = match slot(&mine, None, visible, idle_now) {
+                Slot::Free => false,
+                Slot::Takes(lru) => {
+                    event(ctx, Sev::Info, format!("live {} ({}) of lane {lane}: released for its lane's new session (at most {LANE_SESSIONS} headless per lane)", lru.id, lru.app), Some(lru));
+                    release(ctx, &lru.id, &format!("released: lane {lane}'s new session took its place (at most {LANE_SESSIONS} headless per lane)"))?;
+                    false
+                }
+                Slot::Waits => true,
+            };
             let priority = match s("priority").as_str() { "" => Priority::Interactive, p => Priority::parse(p).ok_or("priority is interactive or background")? };
             let cost = s("cost");
             if !cost.is_empty() && CostClass::parse(&cost).is_none() { return Err("cost is small, medium or large".into()); }
             let est_min = v.get("est_min").filter(|v| !v.is_null()).map(|v| crate::lease::num(v).filter(|m| m.is_finite() && *m >= 0.0).ok_or("est_min is a nonnegative number")).transpose()?;
             if verb == "test" && ((!cost.is_empty() && cost != "small") || est_min.is_some()) { return Err("test --live uses small cost on a hot box".into()); }
             let cores = v.get("cores").filter(|v| !v.is_null()).map(|v| crate::lease::num(v).filter(|n| n.is_finite() && *n > 0.0).ok_or("cores is a positive number")).transpose()?;
+            let ram_gb = v.get("ram_gb").filter(|v| !v.is_null()).map(|v| crate::lease::num(v).filter(|n| n.is_finite() && *n > 0.0).ok_or("ram_gb is a positive number")).transpose()?;
             let x = ctx.store.update(|d| {
                 d.lives_next += 1;
-                let x = Live { id: format!("W{}", d.lives_next), priority: priority.as_str().into(), loader: s("loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, class: s("class"), app: app.clone(), test, test_args, env, also, lane: lane.clone(), agent: s("agent"), tree: tree.clone(), needs: s("needs"), pin: s("node"), visible: v.get("visible").and_then(|b| b.as_bool()).unwrap_or(false), state: "starting".into(), touched_ms: wall_ms(), ..Default::default() };
+                let x = Live { id: format!("W{}", d.lives_next), priority: priority.as_str().into(), loader: s("loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, class: s("class"), app: app.clone(), test, test_args, env, also, lane: lane.clone(), agent: s("agent"), tree: tree.clone(), needs: s("needs"), pin: s("node"), visible, state: "starting".into(), touched_ms: wall_ms(), slot_wait_ms: if waits { wall_ms() } else { 0 }, note: if waits { slot_note(&lane) } else { String::new() }, ..Default::default() };
                 d.lives.push(x.clone());
                 x
             })?;
             drop(starting);
-            event(ctx, Sev::Info, format!("live {}: {app} for lane {lane} asks for a box", x.id), Some(&x));
+            event(ctx, Sev::Info, if waits { format!("live {}: {app} for lane {lane} {}", x.id, x.note) } else { format!("live {}: {app} for lane {lane} asks for a box", x.id) }, Some(&x));
             let (c, id, first_call) = (ctx.clone(), x.id.clone(), verb == "test");
             if let Err(e) = std::thread::Builder::new().name("devhub-live".into()).spawn(move || run(&c, &id, first_call)) {
                 try_set(ctx, &x.id, |s| { s.state = "failed".into(); s.note = e.to_string(); })?;
             }
             if first_call { initial_call(ctx, &x.id) }
-            else { Ok(format!("{{\"id\":{},\"app\":{},\"state\":\"starting\"}}", json_str(&x.id), json_str(&app))) }
+            else { Ok(format!("{{\"id\":{},\"app\":{},\"state\":\"starting\",\"note\":{}}}", json_str(&x.id), json_str(&app), json_str(&x.note))) }
         }
         "act" => {
             let held = call(ctx, id)?;
-            act(ctx, id, arg, held.as_ref())
+            act(ctx, id, arg, held.as_ref()).map_err(|e| match (crate::lease::master::unreachable(&e) && !crate::cli::link_cut(&e), running(id), get(ctx, id)) {
+                (true, Some(r), Some(x)) => closed_act(id, &e, &x, app_said(&r, &x)),
+                _ => e,
+            })
         }
         "wait" => {
             let mut held = call(ctx, id)?;
@@ -2579,9 +2767,9 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             let strs = |v: &[String]| format!("[{}]", v.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(","));
             let env = x.env.iter().map(|(k, v)| format!("[{},{}]", json_str(k), json_str(v))).collect::<Vec<_>>().join(",");
             let req = format!(
-                "{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"visible\":{},\"test\":{},\"test_args\":{},\"env\":[{env}],\"also\":{},\"priority\":{},\"cost\":{},\"est_min\":{},\"cores\":{},\"class\":{},\"loader\":{}}}",
+                "{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"visible\":{},\"test\":{},\"test_args\":{},\"env\":[{env}],\"also\":{},\"priority\":{},\"cost\":{},\"est_min\":{},\"cores\":{},\"ram_gb\":{},\"class\":{},\"loader\":{}}}",
                 json_str(&x.app), json_str(&x.tree), x.src == Src::Tree.as_str(), json_str(&x.lane), json_str(&x.agent), json_str(&x.needs), json_str(&x.pin), x.visible, x.test,
-                strs(&x.test_args), strs(&x.also), json_str(&x.priority), json_str(&x.cost), x.est_min.map_or("null".to_string(), |m| m.to_string()), x.cores.map_or("null".to_string(), |n| n.to_string()), json_str(&x.class), json_str(&x.loader),
+                strs(&x.test_args), strs(&x.also), json_str(&x.priority), json_str(&x.cost), x.est_min.map_or("null".to_string(), |m| m.to_string()), x.cores.map_or("null".to_string(), |n| n.to_string()), x.ram_gb.map_or("null".to_string(), |n| n.to_string()), json_str(&x.class), json_str(&x.loader),
             );
             serve(ctx, &format!("live {} {req}", if x.test { "test" } else { "start" }))
         }
@@ -2598,7 +2786,14 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
         "get" => get(ctx, id).map(|x| crate::state::live_value(&x).to_json()).ok_or_else(|| format!("no live job {id}")),
         "list" => {
             let all = rest == "all";
-            let list: Vec<String> = ctx.store.read(|d| d.lives.iter().filter(|x| all || x.active()).cloned().collect::<Vec<_>>()).iter().map(|x| crate::state::live_value(x).to_json()).collect();
+            // each with what devhub tells its owner of its lease (a call far past its measure)
+            let list: Vec<String> = ctx.store.read(|d| d.lives.iter().filter(|x| all || x.active()).cloned().collect::<Vec<_>>()).iter().map(|x| {
+                let mut v = crate::state::live_value(x);
+                if let (Value::Obj(fields), Some(word)) = (&mut v, (!x.lease.is_empty()).then(|| ctx.leases.owner_word(&x.lease)).flatten()) {
+                    fields.push(("word".into(), Value::Str(word)));
+                }
+                v.to_json()
+            }).collect();
             Ok(format!("[{}]", list.join(",")))
         }
         _ => Err(format!("live: unknown word `{verb}` (start act wait sync release again end-lane get list)")),
@@ -2807,4 +3002,60 @@ pub fn render(x: &Live) -> String {
         out.push_str(&format!("  panic {}: {} at {} [{}] -> live act {} stacks | live act {} resume {} retry|restart|panic\n", p.id, p.message, p.location, p.thread, x.id, x.id, p.id));
     }
     out
+}
+
+#[cfg(test)]
+mod person_tests {
+    use crate::state::Live;
+
+    /// A lane holds [`super::LANE_SESSIONS`] headless sessions: past them the least recently used
+    /// idle one goes, and with all of them busy the new one waits for a slot, first come first served,
+    /// never refused. A visible session is the person's app: the cap never ends it, counts it or
+    /// makes it wait (it closed a person's visible Fab for its lane's next session, and refused a
+    /// lane's fourth session, 11-09).
+    #[test]
+    fn a_lanes_sessions_past_its_cap_wait_and_its_visible_one_is_the_persons() {
+        use super::Slot;
+        let t0 = 1_793_713_740_000u64;
+        let min = 60_000;
+        let live = |id: &str, visible: bool, touched_ms: u64| Live { id: id.into(), lane: "a-lane".into(), node: "box-a".into(), visible, touched_ms, state: "running".into(), ..Default::default() };
+        let waiting = |id: &str, since: u64| Live { slot_wait_ms: since, state: "starting".into(), ..live(id, false, since) };
+        let pick = |s: Slot| match s { Slot::Free => "free".to_string(), Slot::Takes(x) => x.id.clone(), Slot::Waits => "waits".to_string() };
+        // the visible session is the least recently used one, and idle
+        let mine = [live("W1", true, t0), live("W2", false, t0 + min), live("W3", false, t0 + 2 * min), live("W4", false, t0 + 3 * min)];
+        assert_eq!(pick(super::slot(&mine, None, false, |_| true)), "W2", "cap: the least recently used idle headless session goes, never the visible one");
+        assert_eq!(pick(super::slot(&mine, None, true, |_| true)), "free", "cap: a new visible session ends none");
+        assert_eq!(pick(super::slot(&mine[..3], None, false, |_| true)), "free", "cap: a visible session does not count toward it");
+        assert_eq!(pick(super::slot(&mine, None, false, |x| x.visible)), "waits", "cap: with its headless sessions busy the new one waits, the visible one stays");
+        // W5 and W6 wait, in that order; W2 ended
+        let (w5, w6) = (waiting("W5", t0 + 4 * min), waiting("W6", t0 + 5 * min));
+        let lane = [mine[0].clone(), mine[2].clone(), mine[3].clone(), w5.clone(), w6.clone()];
+        let others = |id: &str| lane.iter().filter(|x| x.id != id).cloned().collect::<Vec<_>>();
+        assert_eq!(pick(super::slot(&others("W5"), Some(&w5), false, |_| false)), "free", "wait: a slot freed goes to the first waiter; waiting sessions hold none");
+        assert_eq!(pick(super::slot(&others("W6"), Some(&w6), false, |_| true)), "waits", "wait: a later waiter waits behind an earlier one");
+        assert_eq!(pick(super::slot(&lane, None, false, |_| true)), "waits", "wait: a new session queues behind the waiters");
+        assert_eq!(pick(super::slot(&lane, None, true, |_| false)), "free", "wait: a visible session never waits");
+        let now = t0 + 30 * min;
+        assert_eq!(super::unused_ms(&mine[0], Some(now - 2 * min), now), 2 * min, "idle: a person's input at its box uses a visible session");
+        assert_eq!(super::unused_ms(&mine[1], Some(now - 2 * min), now), 29 * min, "idle: a headless session on that box goes by its edits and calls");
+        assert_eq!(super::unused_ms(&mine[0], None, now), 30 * min, "idle: no input seen at its box");
+        assert!(super::unused_ms(&mine[0], Some(now - 12 * min), now) >= super::IDLE_MS, "idle: it ends 10 min after the person's last input");
+    }
+
+    /// `devhub inspect <box>/<pid|app>` of a session's app is a call of the session's: its box and its
+    /// pid, package or registry name name it (FABSTRENGTHEN's `ui find` and tool calls went that way
+    /// and its sessions idled out, 11-09).
+    #[test]
+    fn a_routed_command_names_its_sessions_app() {
+        let x = Live { id: "W1".into(), node: "box-a".into(), pid: 4242, app: "makepad-app-calculator".into(), state: "running".into(), ..Default::default() };
+        for spec in ["4242", "makepad-app-calculator", "calculator"] {
+            assert!(super::names_app(&x, "box-a", spec), "{spec} names it");
+        }
+        assert!(!super::names_app(&x, "box-b", "4242"), "another box's pid");
+        assert!(!super::names_app(&x, "box-a", "4243"), "another pid");
+        assert!(!super::names_app(&Live { pid: 0, ..x.clone() }, "box-a", "0"), "a session whose app is not up yet has no pid");
+        assert!(super::a_lanes_call("cmd", "observe") && super::a_lanes_call("app", "devhub"), "a lane's inspect and tool call");
+        assert!(!super::a_lanes_call("watch", "observe") && !super::a_lanes_call("stream", "observe"), "a watch only follows");
+        assert!(!super::a_lanes_call("cmd", "devhub-live"), "devhub's own look at the app");
+    }
 }
