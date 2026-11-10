@@ -50,12 +50,16 @@ impl OpenSpec {
     }
 }
 
+/// (the session's font id, request kind, glyphs with their size)
+pub type GlyphRequest = (u32, u32, Vec<(u32, f32)>);
+
 /// What the client has to say to the host this turn.
 #[derive(Default)]
 pub struct Outbox {
     pub opens: Vec<OpenSpec>,
-    /// (the session's font id, request kind, glyphs with their size)
-    pub requests: Vec<(u32, u32, Vec<(u32, f32)>)>,
+    pub requests: Vec<GlyphRequest>,
+    /// Like `requests`, but nothing waits for these: a stand-in draws until they arrive.
+    pub background_requests: Vec<GlyphRequest>,
     pub releases: Vec<(u32, u32)>,
     /// Slots in use since the last sweep: the host keeps them over unused ones when it evicts.
     pub touches: Vec<(u32, u32)>,
@@ -66,7 +70,7 @@ pub struct Outbox {
 
 impl Outbox {
     pub fn is_empty(&self) -> bool {
-        self.opens.is_empty() && self.requests.is_empty() && self.releases.is_empty() && self.touches.is_empty() && self.pending.is_empty()
+        self.opens.is_empty() && self.requests.is_empty() && self.background_requests.is_empty() && self.releases.is_empty() && self.touches.is_empty() && self.pending.is_empty()
     }
 }
 
@@ -118,6 +122,12 @@ pub struct GlyphClient {
     out_opens: Vec<OpenSpec>,
     out_requests: FxHashMap<(u32, u32), Vec<(u32, f32)>>,
     out_releases: Vec<(u32, u32)>,
+    /// The SDFs this frame's text is waiting on with slug curves in their place, per font.
+    out_background_requests: FxHashMap<u32, Vec<(u32, f32)>>,
+    /// The fonts and sizes (as `f32` bits) whose printable ASCII we've already asked for.
+    prewarm_sdf_sizes: FxHashSet<(u32, u32)>,
+    /// The printable ASCII we ask for after this frame's own glyphs: (font, size, glyphs).
+    out_prewarms: Vec<(u32, f32, Vec<GlyphId>)>,
     /// The pending list's storage, handed back by [`GlyphClient::recycle`]: a draw that
     /// waits on glyphs lists them every frame, and that list allocates once, not per frame.
     out_pending: Vec<(u32, u32, u32, u32)>,
@@ -262,6 +272,39 @@ impl GlyphClient {
             Some(entry) => Lookup::Ready(entry),
             None => Lookup::Pending,
         }
+    }
+
+    /// The glyph's SDF if the host has sent it, or else asks for it without holding the frame, so
+    /// the caller draws its slug curves until then. A font's first miss also asks for its ASCII.
+    pub fn get_or_request_outline_sdf(&mut self, font: &Font, glyph: GlyphId, dpxs: f32) -> Option<RasterizedGlyph> {
+        let local = self.local_of(font);
+        if self.failed.contains(&local) {
+            return None;
+        }
+        let bits = dpxs.to_bits();
+        let key: Key = (local, glyph, wire::kind::SDF);
+        let frame = self.frame;
+        if let Some(h) = self.ready.get_mut(&key).and_then(|held| held.iter_mut().find(|h| h.dpxs_bits == bits)) {
+            h.used = frame;
+            let entry = h.entry;
+            if entry.atlas_kind == wire::glyph::EMPTY {
+                return None;
+            }
+            self.uses.push([local, glyph as u32, wire::kind::SDF]);
+            let source = GlyphSource { font: local, glyph, kind: wire::kind::SDF, dpxs_bits: bits };
+            return Some(self.rasterized_from(&entry, source));
+        }
+        // a glyph with no outline (a space) has no SDF to ask the host for
+        font.glyph_outline_rc(glyph)?;
+        if self.requested.insert((key, bits)) {
+            self.out_background_requests.entry(local).or_default().push((glyph as u32, dpxs));
+        }
+        if self.prewarm_sdf_sizes.insert((local, bits)) {
+            let ascii = font.with_ttf_parser_face(|face| (' '..='~').filter_map(|ch| face.glyph_index(ch)).collect::<Vec<_>>());
+            let glyphs = ascii.into_iter().map(|id| id.0).filter(|id| font.glyph_outline_rc(*id).is_some()).collect();
+            self.out_prewarms.push((local, dpxs, glyphs));
+        }
+        None
     }
 
     pub fn raster(
@@ -432,6 +475,9 @@ impl GlyphClient {
             let slug = kind == wire::atlas::SLUG;
             self.ready.retain(|(_, _, k), _| (*k == wire::kind::SLUG) != slug);
             self.slots.retain(|_, (_, keys)| keys.first().is_none_or(|((_, _, k), _)| (*k == wire::kind::SLUG) != slug));
+            if !slug {
+                self.prewarm_sdf_sizes.clear();
+            }
             self.epoch += 1;
         }
     }
@@ -573,11 +619,28 @@ impl GlyphClient {
     }
 
     pub fn take_outbox(&mut self) -> Outbox {
-        let mut requests: Vec<(u32, u32, Vec<(u32, f32)>)> = self.out_requests.drain().map(|((local, kind), glyphs)| (local, kind, glyphs)).collect();
+        let mut requests: Vec<GlyphRequest> = self.out_requests.drain().map(|((local, kind), glyphs)| (local, kind, glyphs)).collect();
         requests.sort_by_key(|r| (r.0, r.1));
+        let mut background_requests: Vec<GlyphRequest> = self.out_background_requests.drain().map(|(local, glyphs)| (local, wire::kind::SDF, glyphs)).collect();
+        background_requests.sort_by_key(|r| r.0);
+        // the ASCII goes last, so the host starts on this frame's own glyphs
+        for (local, dpxs, ascii) in self.out_prewarms.drain(..) {
+            let bits = dpxs.to_bits();
+            let mut glyphs = Vec::new();
+            for id in ascii {
+                let key: Key = (local, id, wire::kind::SDF);
+                let is_held = self.ready.get(&key).is_some_and(|held| held.iter().any(|h| h.dpxs_bits == bits));
+                if !is_held && self.requested.insert((key, bits)) {
+                    glyphs.push((id as u32, dpxs));
+                }
+            }
+            if !glyphs.is_empty() {
+                background_requests.push((local, wire::kind::SDF, glyphs));
+            }
+        }
         let mut pending = std::mem::take(&mut self.out_pending);
         pending.extend(self.draw_pending.drain().map(|((font, glyph, kind), bits)| (font, glyph as u32, kind, bits)));
-        Outbox { opens: std::mem::take(&mut self.out_opens), requests, releases: std::mem::take(&mut self.out_releases), touches: std::mem::take(&mut self.out_touches), pending }
+        Outbox { opens: std::mem::take(&mut self.out_opens), requests, background_requests, releases: std::mem::take(&mut self.out_releases), touches: std::mem::take(&mut self.out_touches), pending }
     }
 
     /// Takes back an outbox's pending list once the host has been told, for the next frame's.
@@ -673,6 +736,12 @@ impl Rasterizer {
         };
         self.client
             .raster(font, glyph_id, dpxs_per_em, kind, &self.settings)
+    }
+
+    /// See `GlyphClient::get_or_request_outline_sdf`. Sizes below the minimum all use the same
+    /// atlas image, so they all ask for it at the minimum.
+    pub fn get_or_queue_glyph_outline_sdf(&mut self, font: &Font, glyph_id: GlyphId, dpxs_per_em: f32) -> Option<RasterizedGlyph> {
+        self.client.get_or_request_outline_sdf(font, glyph_id, dpxs_per_em.max(self.settings.msdf_resolution.min_dpxs_per_em))
     }
 
     /// See `GlyphClient::refresh`: what a kept glyph draws as now.

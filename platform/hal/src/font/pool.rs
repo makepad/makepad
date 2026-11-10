@@ -203,7 +203,11 @@ impl Pool {
 
     pub fn submit(&self, job: Job) {
         self.shared.in_flight.fetch_add(1, Ordering::AcqRel);
-        lock(&self.shared.queue).push_back(job);
+        // slug curves take microseconds and a frame can be waiting on them, so they skip the queued images
+        match job.kind {
+            JobKind::Glyph { req } if req.kind == super::wire::kind::SLUG => lock(&self.shared.queue).push_front(job),
+            _ => lock(&self.shared.queue).push_back(job),
+        }
         self.shared.cv.notify_one();
     }
 

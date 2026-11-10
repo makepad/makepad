@@ -176,8 +176,6 @@ pub fn is_msdf_complexity_acceptable(
 /// outline to render it from.
 pub struct SdfPlan {
     pub key: GlyphImageKey,
-    /// the coverage image (without padding)
-    pub image_size: Size<usize>,
     pub padding: usize,
     pub origin_in_dpxs: Point<f32>,
     pub dpxs_per_em: f32,
@@ -187,17 +185,26 @@ pub struct SdfPlan {
 impl SdfPlan {
     /// The distance field, `key.size` pixels (the coverage plus the padding all around).
     pub fn render(&self, sdfer: &mut Sdfer) -> Image<R> {
-        let mut coverage = Image::new(self.image_size);
-        self.outline
-            .rasterize(self.dpxs_per_em, &mut coverage.subimage_mut(self.image_size.into()));
-        let size = self.image_size + Size::from(self.padding) * 2;
-        let mut sdf = Image::<R>::new(size);
-        sdfer.coverage_to_sdf(
-            &coverage.subimage(self.image_size.into()),
-            &mut sdf.subimage_mut(Rect::from(size)),
-        );
-        sdf
+        render_sdf(sdfer, &self.outline, self.dpxs_per_em, self.key.size)
     }
+
+    /// A copy of the outline for a thread that renders it.
+    pub fn outline(&self) -> GlyphOutline {
+        (*self.outline).clone()
+    }
+}
+
+/// Renders the distance field of `outline`, `size` pixels (the coverage plus the padding all around).
+pub fn render_sdf(sdfer: &mut Sdfer, outline: &GlyphOutline, dpxs_per_em: f32, size: Size<usize>) -> Image<R> {
+    let image_size = size - Size::from(sdfer.settings().padding) * 2;
+    let mut coverage = Image::new(image_size);
+    outline.rasterize(dpxs_per_em, &mut coverage.subimage_mut(image_size.into()));
+    let mut sdf = Image::<R>::new(size);
+    sdfer.coverage_to_sdf(
+        &coverage.subimage(image_size.into()),
+        &mut sdf.subimage_mut(Rect::from(size)),
+    );
+    sdf
 }
 
 pub fn plan_outline_sdf(
@@ -220,7 +227,6 @@ pub fn plan_outline_sdf(
             size: image_size + Size::from(padding) * 2,
             kind: GlyphImageKind::OutlineSdf,
         },
-        image_size,
         padding,
         origin_in_dpxs: bounds_in_ems.origin * dpxs_per_em,
         dpxs_per_em,
