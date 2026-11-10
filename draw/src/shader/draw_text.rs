@@ -749,6 +749,11 @@ impl DrawText {
         self.draw_walk_keep(cx, walk, align, text).0
     }
 
+    /// Like [`Self::draw_walk`], but `wrap` decides whether the text wraps instead of the turtle's flow.
+    pub fn draw_walk_with_wrap(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, wrap: bool, text: &str) -> Rect {
+        self.draw_walk_inner(cx, walk, align, wrap, text, None).0
+    }
+
     /// `draw_walk`, also handing back the laid-out text, for a widget that
     /// maps points to text and back (selection).
     pub fn draw_walk_keep(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) -> (Rect, Rc<LaidoutText>) {
@@ -766,6 +771,19 @@ impl DrawText {
         text: &str,
         restyle: Option<&dyn Fn(&LaidoutText) -> Option<LaidoutText>>,
     ) -> (Rect, Rc<LaidoutText>) {
+        let wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
+        self.draw_walk_inner(cx, walk, align, wrap, text, restyle)
+    }
+
+    fn draw_walk_inner(
+        &mut self,
+        cx: &mut Cx2d,
+        walk: Walk,
+        align: Align,
+        wrap: bool,
+        text: &str,
+        restyle: Option<&dyn Fn(&LaidoutText) -> Option<LaidoutText>>,
+    ) -> (Rect, Rc<LaidoutText>) {
         let walk = cx.resolve_walk(walk, ResolveAt::BeforeBegin);
         let mut max_width_in_lpxs = self.max_layout_width_for_walk(cx, walk);
         if max_width_in_lpxs.is_none()
@@ -779,7 +797,6 @@ impl DrawText {
             max_width_in_lpxs =
                 self.fit_layout_width_for_walk(cx, walk, ellipsis_width_in_lpxs);
         }
-        let wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
         let laid = self.layout(cx, 0.0, 0.0, max_width_in_lpxs, wrap, align, text);
         let laid = match restyle {
             Some(restyle) => restyle(&laid).map(Rc::new).unwrap_or(laid),

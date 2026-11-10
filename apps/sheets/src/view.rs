@@ -740,8 +740,8 @@ impl MpSheets {
         script_apply_eval!(cx, name, {width: #(if phone { 64.0 } else { 76.0 }) height: #(if phone { 48.0 } else { 22.0 })});
         let mut fx = self.view.widget(cx, ids!(fx_label));
         script_apply_eval!(cx, fx, {width: #(if phone { 24.0 } else { 16.0 })});
-        // A placeholder draws with word wrap (the typed text does not), so
-        // the phone gets one that fits its field on one line.
+        // A placeholder that doesn't fit its field ends in "…", so the
+        // phone gets a shorter one that fits.
         if let Some(mut field) = self.view.text_input(cx, ids!(formula_input)).borrow_mut() {
             let hint = if portrait { "Value or =formula" } else { "Enter a value, or = to start a formula" };
             field.set_empty_text(cx, hint.to_string());

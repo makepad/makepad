@@ -9,6 +9,7 @@ use {
                 AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
                 TextInputConfig, TextInputContentType,
             },
+            shader::draw_text::TextOverflow,
             text::{
                 geom::Point,
                 layouter::{LaidoutText, SelectionRect},
@@ -929,6 +930,10 @@ pub struct TextInput {
     scroll_x: f64,
     #[live]
     empty_text: String,
+    /// Lets the empty text wrap onto more lines. Otherwise it stays on one line,
+    /// ending in "…" if it doesn't fit.
+    #[live(false)]
+    wrap_empty_text: bool,
     #[live]
     text: String,
     #[live(0.5)]
@@ -1438,9 +1443,16 @@ impl TextInput {
 
     fn draw_text(&mut self, cx: &mut Cx2d) -> Rect {
         let inner_walk = self.inner_walk();
-        let text_rect = if self.text.is_empty() {
+        let text_rect = if self.text.is_empty() && self.wrap_empty_text {
             self.draw_text
                 .draw_walk(cx, inner_walk, self.label_align, &self.empty_text)
+        } else if self.text.is_empty() {
+            // Only the empty text gets the ellipsis, so we put the typed text's `text_overflow` back after.
+            let text_overflow = std::mem::replace(&mut self.draw_text.text_overflow, TextOverflow::Ellipsis);
+            let text_rect = self.draw_text
+                .draw_walk_with_wrap(cx, inner_walk, self.label_align, false, &self.empty_text);
+            self.draw_text.text_overflow = text_overflow;
+            text_rect
         } else {
             let laidout_text = self.laidout_text.as_ref().unwrap();
             self.draw_text
@@ -1728,8 +1740,6 @@ impl TextInput {
             // than its point size suggests, clip descenders in tight ones. Going
             // through scroll_y keeps every downstream coordinate (hit test, IME,
             // selection rects) consistent, since they all compensate for it.
-            let text_height =
-                (laidout_text.size_in_lpxs.height * self.draw_text.font_scale) as f64;
             let centering = (text_height - height) * 0.5;
             self.cached_max_scroll_y = 0.0;
             // Guard NaN (an unresolved turtle size), which the old clamp
