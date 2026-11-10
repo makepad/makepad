@@ -825,6 +825,9 @@ pub mod mobile_ui {
     /// `value`: the window's background, 0xAARRGGBB, which the OS shows until the app draws
     /// (a start or a resume).
     pub const APP_BACKGROUND: u32 = 4;
+    /// The first frame waits on pipelines the cache didn't have, so the OS explains the wait until
+    /// the app draws (Android's "compiling shaders" screen; `value` is unused).
+    pub const SHADER_COMPILE_SCREEN: u32 = 5;
 
     pub mod orientation {
         pub const AUTO: u32 = 0;

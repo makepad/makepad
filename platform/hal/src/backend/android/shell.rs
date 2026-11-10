@@ -159,6 +159,7 @@ impl Shell for AndroidShell {
             OsCmd::BackUnhandled => jni::back_unhandled(),
             OsCmd::NativeAppearance { value } => jni::set_native_appearance(value),
             OsCmd::MobileUi { op: mobile_ui::APP_BACKGROUND, value } => jni::set_app_background(value),
+            OsCmd::MobileUi { op: mobile_ui::SHADER_COMPILE_SCREEN, .. } => jni::show_shader_compile_screen(),
             _ => false,
         }
     }
