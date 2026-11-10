@@ -8,8 +8,10 @@ use crate::{
 };
 
 use crate::makepad_draw::DrawSvg;
+use crate::makepad_draw::text::layouter::LaidoutText;
 use crate::pointer_field::{FieldArbiter, PointerField};
 use crate::slider::CapMotion;
+use std::rc::Rc;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -99,6 +101,8 @@ script_mod! {
             error: instance(0.0)
             /** pointer held down mix, for the toggle's knob growth 0..1 step 0.01 */
             pressed: instance(0.0)
+            /** the mark box's offset down from our middle, which lines it up with the label's first line */
+            mark_box_offset_y: instance(0.0)
 
             /** mark box side length in pixels 8..32 step 1 */
             size: uniform(15.0)
@@ -273,7 +277,7 @@ script_mod! {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
                 let sz_px = self.size
-                let center_px = vec2(sz_px * 0.5, self.rect_size.y * 0.5)
+                let center_px = vec2(sz_px * 0.5, self.rect_size.y * 0.5 + self.mark_box_offset_y)
                 // The mark box sits at the start of the row, or at its end
                 // when the label goes first.
                 let offset_px = vec2((self.rect_size.x - sz_px) * self.mark_at_end, center_px.y - sz_px * 0.5)
@@ -553,7 +557,7 @@ script_mod! {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
                 let sz_px = vec2(self.size * self.pill_aspect, self.size)
-                let center_px = vec2(sz_px.x * 0.5, self.rect_size.y * 0.5)
+                let center_px = vec2(sz_px.x * 0.5, self.rect_size.y * 0.5 + self.mark_box_offset_y)
                 // The pill sits at the start of the row, or at its end when
                 // the label goes first.
                 let offset_px = vec2((self.rect_size.x - sz_px.x) * self.mark_at_end, center_px.y - sz_px.y * 0.5)
@@ -721,7 +725,7 @@ script_mod! {
                 let sz = vec2(self.size * self.pill_aspect, self.size)
                 // The housing's edges on whole device pixels, so its outline
                 // is one pixel wide wherever the row put the switch.
-                let o0 = vec2((self.rect_size.x - sz.x) * self.mark_at_end, self.rect_size.y * 0.5 - sz.y * 0.5)
+                let o0 = vec2((self.rect_size.x - sz.x) * self.mark_at_end, self.rect_size.y * 0.5 + self.mark_box_offset_y - sz.y * 0.5)
                 let lo = vec2(Finish.snap(self.rect_pos.x + o0.x, px), Finish.snap(self.rect_pos.y + o0.y, px)) - self.rect_pos
                 let hi = vec2(Finish.snap(self.rect_pos.x + o0.x + sz.x, px), Finish.snap(self.rect_pos.y + o0.y + sz.y, px)) - self.rect_pos
                 let o = lo
@@ -818,7 +822,7 @@ script_mod! {
                 let sz = vec2(self.size * self.pill_aspect, self.size)
                 // The housing's edges on whole device pixels, so its outline
                 // is one pixel wide wherever the row put the switch.
-                let o0 = vec2((self.rect_size.x - sz.x) * self.mark_at_end, self.rect_size.y * 0.5 - sz.y * 0.5)
+                let o0 = vec2((self.rect_size.x - sz.x) * self.mark_at_end, self.rect_size.y * 0.5 + self.mark_box_offset_y - sz.y * 0.5)
                 let lo = vec2(Finish.snap(self.rect_pos.x + o0.x, px), Finish.snap(self.rect_pos.y + o0.y, px)) - self.rect_pos
                 let hi = vec2(Finish.snap(self.rect_pos.x + o0.x + sz.x, px), Finish.snap(self.rect_pos.y + o0.y + sz.y, px)) - self.rect_pos
                 let o = lo
@@ -1238,6 +1242,7 @@ impl CheckBox {
         // on a face that is nothing but an icon that phantom is what pushes
         // the mark off the middle.
         let worded = !text.is_empty();
+        let mut laid_out_label = None;
         if worded && self.label_before {
             // A leading label has the row's icon after it, so we keep the icon's room free too.
             let row_icon = if knob_carries_the_pair {
@@ -1250,7 +1255,7 @@ impl CheckBox {
             let icon_room = row_icon
                 .measure(cx, icon_walk)
                 .map_or(0.0, |size| size.x + icon_walk.margin.width() + self.layout.spacing);
-            Self::draw_label(cx, &mut self.draw_text, label_walk, self.label_align, text, icon_room);
+            laid_out_label = Self::draw_label(cx, &mut self.draw_text, label_walk, self.label_align, text, icon_room);
         }
         // The mark in the row: the face for the state it is in when the
         // pair is the row's own, and the single icon otherwise.
@@ -1262,9 +1267,20 @@ impl CheckBox {
             self.draw_icon_off.draw_walk(cx, icon_walk);
         }
         if worded && !self.label_before {
-            Self::draw_label(cx, &mut self.draw_text, label_walk, self.label_align, text, 0.0);
+            laid_out_label = Self::draw_label(cx, &mut self.draw_text, label_walk, self.label_align, text, 0.0);
         }
         self.draw_bg.end(cx);
+        // We line the mark box up with the label's first line, not the middle of a wrapped label.
+        if let Some((text, label_area)) = laid_out_label {
+            // A one-line label leaves the mark box in our middle, even when we're taller than the label.
+            if let [first_row, _, ..] = &text.rows[..] {
+                let first_row_height = (first_row.ascender_in_lpxs - first_row.descender_in_lpxs) * self.draw_text.font_scale;
+                let rect = self.draw_bg.area().rect(cx);
+                let label_rect = label_area.rect(cx);
+                let mark_box_offset_y = label_rect.pos.y + first_row_height as f64 * 0.5 - (rect.pos.y + rect.size.y * 0.5);
+                self.draw_bg.set_instance_on_area(cx, live_id!(mark_box_offset_y), &[mark_box_offset_y as f32]);
+            }
+        }
         self.draw_knob_icons(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
@@ -1277,7 +1293,7 @@ impl CheckBox {
         align: Align,
         text: &str,
         room_after: f64,
-    ) {
+    ) -> Option<(Rc<LaidoutText>, Area)> {
         // DrawText would wrap a Fit label at our whole inner width (or nowhere, while we're Fit),
         // so we give it just the room left after the mark and icon, within our width or max width.
         let label_room = walk.width.is_fit().then(|| {
@@ -1300,9 +1316,14 @@ impl CheckBox {
                 align,
                 text,
             );
-            draw_text.draw_walk_laidout(cx, walk, &text);
+            let label_rect = draw_text.draw_walk_laidout(cx, walk, &text);
+            // Unlike the rect we walked, this area follows the label when our turtle aligns it.
+            let mut label_area = Area::Empty;
+            cx.add_aligned_rect_area(&mut label_area, label_rect);
+            Some((text, label_area))
         } else {
             draw_text.draw_walk(cx, walk, align, text);
+            None
         }
     }
 
@@ -1380,8 +1401,15 @@ impl CheckBox {
             pill.y * 0.5 + border - travel * knob_t as f64
         };
         let offset_x = if self.label_before { rect.size.x - pill.x } else { 0.0 };
-        let center = dvec2(rect.pos.x + offset_x + along, rect.pos.y + rect.size.y * 0.5);
+        let center = dvec2(rect.pos.x + offset_x + along, self.mark_box_center_y(cx, rect));
         Some((center, radius * 2.0, knob_t))
+    }
+
+    /// The mark box's middle on the window: our middle, moved to line up with the label's first line.
+    fn mark_box_center_y(&self, cx: &Cx, rect: Rect) -> f64 {
+        let mut offset_y = [0.0f32];
+        self.draw_bg.get_instance_on_area(cx, live_id!(mark_box_offset_y), &mut offset_y);
+        rect.pos.y + rect.size.y * 0.5 + offset_y[0] as f64
     }
 
     /// How far the knob travels between off and on, in layout points.
@@ -1440,7 +1468,7 @@ impl CheckBox {
         } else {
             value
         };
-        Some((x0 + th * 0.5 + t * (w - th), rect.pos.y + rect.size.y * 0.5, th * 0.5))
+        Some((x0 + th * 0.5 + t * (w - th), self.mark_box_center_y(cx, rect), th * 0.5))
     }
 
     /// The pointer's field over the knob: its frame steps, the pointer read
