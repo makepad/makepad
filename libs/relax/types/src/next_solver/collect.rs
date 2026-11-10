@@ -487,7 +487,7 @@ impl Tcx {
                         }
                     }
                     let (mut own_args, mut own_regions) = (args.split_off(parent_args), rs.split_off(parent_regions));
-                    self.fit_assoc_own_args(prog, ad, &mut own_args, &mut own_regions);
+                    self.fit_assoc_own_args(prog, ad, &mut own_args, &mut own_regions, None);
                     args.extend(own_args); rs.extend(own_regions);
                     let alias = self.tys.intern(TyKind::Alias(IsRigid::No, AliasTy { kind: AliasTyKind::Projection { def_id: ad }, args: self.tys.mk_list(&args), regions: self.tys.intern_region_args(&rs) }));
                     match *arg {

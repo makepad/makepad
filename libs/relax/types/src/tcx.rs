@@ -2913,7 +2913,7 @@ impl Tcx {
                         let mut own_regions = self.written_lifetimes(cx.infcx, prog, file, env, p);
                         self.infer_elided_assoc_lifetimes(cx, prog, ad, &mut own_regions, source_ty.is_none());
                         let mut own_args = self.lower_generic_args_of_item(cx, prog, file, module, env, p, Some(ad));
-                        self.fit_assoc_own_args(prog, ad, &mut own_args, &mut own_regions);
+                        self.fit_assoc_own_args(prog, ad, &mut own_args, &mut own_regions, cx.infcx.filter(|_| source_ty.is_none()));
                         args.extend(own_args);
                         let mut rs = self.tys.region_args(tr).to_vec();
                         rs.extend(own_regions);
@@ -3374,21 +3374,29 @@ impl Tcx {
         for _ in 0..lifetimes { regions.push(infcx.next_region_var()); }
     }
 
-    pub(crate) fn fit_assoc_own_args(&self, prog: &Program, ad: DefId, args: &mut Vec<TyId>, regions: &mut Vec<RegionId>) {
+    /// The associated type's own arguments, one per parameter: missing ones are errors, or with
+    /// `infer` (an expression path's segment, rustc `seg.infer_args`) inference variables, so
+    /// `Self::RwLock::new(value)` for `type RwLock<T>` infers T like `RwLock::new(value)`.
+    pub(crate) fn fit_assoc_own_args(&self, prog: &Program, ad: DefId, args: &mut Vec<TyId>, regions: &mut Vec<RegionId>, infer: Option<&crate::infer::InferCtxt<'_>>) {
         let def = prog.def(ad);
         let ast = &prog.files[def.file as usize].ast;
         let Some(generics) = ast.kind_generics(&ast.item(def.item).kind) else { return; };
         let params = ast.list(generics.params);
         let lifetimes = params.iter().filter(|p| matches!(p.kind, GenericParamKind::Lifetime(_))).count();
-        regions.resize(lifetimes, self.tys.intern_region(RegionKind::ReError));
+        regions.truncate(lifetimes);
+        while regions.len() < lifetimes {
+            regions.push(infer.map_or_else(|| self.tys.intern_region(RegionKind::ReError), |infcx| infcx.next_region_var()));
+        }
         let mut own = params.iter().filter(|p| !matches!(p.kind, GenericParamKind::Lifetime(_)));
         let mut fitted = Vec::new();
         for _ in 0..params.len() - lifetimes {
             let param = own.next().unwrap();
-            fitted.push(match args.get(fitted.len()) {
-                Some(&t) => t,
-                None if matches!(param.kind, GenericParamKind::Const(..)) => self.tys.intern(TyKind::Const(self.tys.intern_const(crate::consts::ConstKind::Error))),
-                None => self.tys.error,
+            fitted.push(match (args.get(fitted.len()), infer) {
+                (Some(&t), _) => t,
+                (None, Some(infcx)) if matches!(param.kind, GenericParamKind::Const(..)) => self.tys.intern(TyKind::Const(infcx.next_const_var())),
+                (None, Some(infcx)) => infcx.next_ty_var(),
+                (None, None) if matches!(param.kind, GenericParamKind::Const(..)) => self.tys.intern(TyKind::Const(self.tys.intern_const(crate::consts::ConstKind::Error))),
+                (None, None) => self.tys.error,
             });
         }
         *args = fitted;
@@ -3980,7 +3988,7 @@ impl Tcx {
         let mut own_regions = self.written_lifetimes(cx.infcx, prog, file, env, path);
         self.infer_elided_assoc_lifetimes(cx, prog, alias.kind.def_id(), &mut own_regions, source_ty.is_none());
         let mut own_args = self.lower_generic_args_of_item(cx, prog, file, module, env, path, Some(alias.kind.def_id()));
-        self.fit_assoc_own_args(prog, alias.kind.def_id(), &mut own_args, &mut own_regions);
+        self.fit_assoc_own_args(prog, alias.kind.def_id(), &mut own_args, &mut own_regions, cx.infcx.filter(|_| source_ty.is_none()));
         args.extend(own_args);
         let mut regions = self.tys.region_args(alias.regions).to_vec();
         regions.extend(own_regions);
