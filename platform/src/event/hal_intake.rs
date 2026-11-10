@@ -540,6 +540,8 @@ impl Cx {
             }
             HalEvent::Geom { window, x, y, w, h, dpi, state } => self.hal_window_geom(window_id(window), dvec2(x, y), dvec2(w, h), dpi as f64, state),
             HalEvent::Display { window, dpi, refresh: _ } => {
+                #[cfg(target_os = "android")]
+                self.hal_update_android_os_type();
                 let window_id = window_id(window);
                 if self.windows.is_valid(window_id) {
                     let geom = self.windows[window_id].window_geom.clone();
@@ -707,6 +709,8 @@ impl Cx {
             // ---- app
             // (every backend paints its windows once after the app started)
             HalEvent::Startup {} => {
+                #[cfg(target_os = "android")]
+                self.hal_update_android_os_type();
                 if self.hal.hosted.is_some() {
                     Self::send_studio_message(crate::studio::AppToStudio::BeforeStartup);
                     self.set_physical_keyboard_state(true);

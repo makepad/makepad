@@ -1503,6 +1503,9 @@ public class MakepadActivity
         mVideoPlaybackHandler = new Handler(mVideoPlaybackThread.getLooper());
         mVideoPlayerRunnables = new HashMap<Long, VideoPlayerRunnable>();
 
+        // The app starts as soon as it sees this activity, so its params have to be there first.
+        sendAndroidParams();
+        sendDisplayRotation();
         MakepadNative.activityOnCreate(this);
         registerPhysicalKeyboardListener();
 
@@ -1580,8 +1583,6 @@ public class MakepadActivity
         }
 
         int sdkVersion = Build.VERSION.SDK_INT;
-        sendAndroidParams();
-        sendDisplayRotation();
         // Landscape to reverse landscape (a half turn) changes no configuration,
         // so onConfigurationChanged never hears of it: the display listener does.
         android.hardware.display.DisplayManager displays =
@@ -2550,6 +2551,13 @@ public class MakepadActivity
             }
         }
         else {
+            if (Build.VERSION.SDK_INT < 30) {
+                // applyEdgeToEdge() keeps the flags that are set, so the hiding ones have to go first.
+                decorView.setSystemUiVisibility(decorView.getSystemUiVisibility()
+                    & ~(View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY));
+            }
             applyEdgeToEdge();
             if (Build.VERSION.SDK_INT >= 30) {
                 android.view.WindowInsetsController controller = getWindow().getInsetsController();
