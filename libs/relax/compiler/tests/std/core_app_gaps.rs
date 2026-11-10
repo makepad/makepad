@@ -110,3 +110,29 @@ fn a06_collections_bound() {
     let r: Vec<u32> = m.range((std::collections::Bound::Excluded(2), std::collections::Bound::Included(5))).map(|(_, v)| *v).collect();
     println!("| range {:?}", r);
 }
+
+// litemap's `#[derive(.., PartialOrd, Ord)] struct LiteMap<K: ?Sized, V: ?Sized, S>` (icu_locale_core's
+// extension maps): the derive compares the PhantomData fields too. "the trait bound
+// `PhantomData<T0>: PartialOrd<PhantomData<T0>>` is not satisfied".
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct Tagged<K: ?Sized, V: ?Sized, S> {
+    key: std::marker::PhantomData<K>,
+    values: S,
+    value: std::marker::PhantomData<V>,
+}
+
+#[test]
+fn a07_phantom_data_ord() {
+    use std::cmp::Ordering;
+    use std::marker::PhantomData;
+    let t = |v: Vec<u8>| Tagged::<str, [u16], Vec<u8>> { key: PhantomData, values: v, value: PhantomData };
+    let (a, b) = (t(vec![1, 2]), t(vec![1, 3]));
+    println!("| derived {:?} {:?} {:?} {}", a.cmp(&b), b.partial_cmp(&a), a.cmp(&a), a < b);
+    let p: PhantomData<dyn Fn(&str) -> u8> = PhantomData;
+    println!("| phantom {:?} {:?} {} {} {}", p.cmp(&p), p.partial_cmp(&p), p <= p, p < p, p.max(p) == p);
+    let mut v = vec![(PhantomData::<String>, 3u8), (PhantomData, 1), (PhantomData, 2)];
+    v.sort();
+    println!("| sorted {:?} {:?}", v.iter().map(|x| x.1).collect::<Vec<_>>(), v.iter().max() == Some(&(PhantomData, 3)));
+    let set: std::collections::BTreeSet<PhantomData<u8>> = [PhantomData, PhantomData].into_iter().collect();
+    println!("| set {} {:?}", set.len(), PhantomData::<u8>.cmp(&PhantomData) == Ordering::Equal);
+}
