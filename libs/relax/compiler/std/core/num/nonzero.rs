@@ -115,6 +115,37 @@ impl<T: ZeroablePrimitive> fmt::Display for NonZero<T> {
         fmt::Display::fmt(&self.0, f)
     }
 }
+// the radix and exponent forms are the inner integer's own (core's impl_nonzero_fmt!)
+impl<T: ZeroablePrimitive + fmt::Binary> fmt::Binary for NonZero<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Binary::fmt(&self.0, f)
+    }
+}
+impl<T: ZeroablePrimitive + fmt::Octal> fmt::Octal for NonZero<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Octal::fmt(&self.0, f)
+    }
+}
+impl<T: ZeroablePrimitive + fmt::LowerHex> fmt::LowerHex for NonZero<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+impl<T: ZeroablePrimitive + fmt::UpperHex> fmt::UpperHex for NonZero<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::UpperHex::fmt(&self.0, f)
+    }
+}
+impl<T: ZeroablePrimitive + fmt::LowerExp> fmt::LowerExp for NonZero<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::LowerExp::fmt(&self.0, f)
+    }
+}
+impl<T: ZeroablePrimitive + fmt::UpperExp> fmt::UpperExp for NonZero<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::UpperExp::fmt(&self.0, f)
+    }
+}
 impl<T: ZeroablePrimitive> FromStr for NonZero<T> {
     type Err = ParseIntError;
     fn from_str(src: &str) -> Result<NonZero<T>, ParseIntError> {
