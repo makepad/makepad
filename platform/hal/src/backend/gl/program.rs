@@ -93,11 +93,11 @@ impl Renderer {
             (gl.glLinkProgram)(program);
             self.linking.push((Arc::downgrade(state), Linking { program, shaders }));
         }
-        if gl.glMaxShaderCompilerThreadsKHR.is_none() { self.poll_links(); }
+        if !self.caps.parallel_compile { self.poll_links(); }
     }
 
     pub fn poll_links(&mut self) {
-        let parallel = self.ctx.gl.glMaxShaderCompilerThreadsKHR.is_some();
+        let parallel = self.caps.parallel_compile;
         let mut i = 0;
         while i < self.linking.len() {
             let program = self.linking[i].1.program;

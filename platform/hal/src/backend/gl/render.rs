@@ -37,6 +37,9 @@ pub(super) struct Caps {
     pub max_ubo: usize,
     pub border_clamp: bool,
     pub float_blend: bool,
+    /// KHR_parallel_shader_compile: links finish on the driver's threads. EGL may hand out its
+    /// entry point on a driver without the extension, so the extension list decides.
+    pub parallel_compile: bool,
     pub renderer: String,
     /// a software rasterizer: the default selection prefers hardware Vulkan and GL to it
     pub software: bool,
@@ -234,8 +237,9 @@ impl Renderer {
         if has("GL_EXT_texture_compression_bptc") { formats |= 1 << format::BC7; }
         if has("GL_EXT_texture_compression_rgtc") { formats |= 1 << format::BC5; }
         if has("GL_KHR_texture_compression_astc_ldr") { formats |= 1 << format::ASTC4X4; }
-        if let Some(threads) = gl.glMaxShaderCompilerThreadsKHR {
-            if has("GL_KHR_parallel_shader_compile") { unsafe { threads(u32::MAX) } }
+        let parallel_compile = has("GL_KHR_parallel_shader_compile") && gl.glMaxShaderCompilerThreadsKHR.is_some();
+        if let Some(threads) = gl.glMaxShaderCompilerThreadsKHR.filter(|_| parallel_compile) {
+            unsafe { threads(u32::MAX) }
         }
         let caps = Arc::new(Caps {
             formats,
@@ -245,6 +249,7 @@ impl Renderer {
             max_ubo: gl.integer(sys::MAX_UNIFORM_BLOCK_SIZE).max(16384) as usize,
             border_clamp: has("GL_EXT_texture_border_clamp") || has("GL_OES_texture_border_clamp"),
             float_blend: has("GL_EXT_float_blend"),
+            parallel_compile,
             renderer: format!("{} ({version})", gl.string(sys::RENDERER)),
             software: ctx.software(),
             #[cfg(target_os = "linux")]
