@@ -24,6 +24,9 @@ pub(super) struct Queue {
     /// jobs that run before the ones queued ahead of them, as soon as the running one ends
     #[cfg(target_os = "android")]
     urgent: Arc<Mutex<Vec<Job>>>,
+    /// how many window surfaces the render thread holds
+    #[cfg(target_os = "android")]
+    pub surfaces: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Queue {
@@ -236,7 +239,7 @@ pub(super) struct Renderer {
 
 pub(super) fn start(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox) -> Result<(Queue, Arc<Caps>, std::thread::JoinHandle<()>), String> {
     let (tx, rx) = mpsc::channel::<Job>();
-    let queue = Queue { jobs: tx, #[cfg(target_os = "android")] urgent: Arc::new(Mutex::new(Vec::new())) };
+    let queue = Queue { jobs: tx, #[cfg(target_os = "android")] urgent: Arc::new(Mutex::new(Vec::new())), #[cfg(target_os = "android")] surfaces: Default::default() };
     #[cfg(target_os = "android")]
     let own = queue.clone();
     let (ready, made) = mpsc::sync_channel(1);
@@ -258,7 +261,7 @@ pub(super) fn start(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox) -> Resu
 
 impl Renderer {
     fn new(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox, #[cfg(target_os = "android")] queue: Queue) -> Result<Self, String> {
-        let ctx = Context::new(source)?;
+        let ctx = Context::new(source, #[cfg(target_os = "android")] queue.surfaces.clone())?;
         let gl = &ctx.gl;
         let version = gl.string(sys::VERSION);
         if !version.starts_with("OpenGL ES 3") {

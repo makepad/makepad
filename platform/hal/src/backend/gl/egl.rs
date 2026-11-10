@@ -231,13 +231,16 @@ pub struct Context {
     wayland: Option<&'static Wayland>,
     source: Box<dyn EglSurfaceSource>,
     windows: HashMap<(u32, Id), Window>,
+    /// how many window surfaces there are, so Android's `surfaceDestroyed` only waits while there's one
+    #[cfg(target_os = "android")]
+    surfaces: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     current: Handle,
     /// what is bound while no window presents: nothing, or a 1x1 pbuffer without surfaceless contexts
     idle: Handle,
 }
 
 impl Context {
-    pub fn new(source: Box<dyn EglSurfaceSource>) -> Result<Self, String> {
+    pub fn new(source: Box<dyn EglSurfaceSource>, #[cfg(target_os = "android")] surfaces: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Result<Self, String> {
         let native = source.display()?;
         let egl = Egl::load()?;
         #[cfg(target_os = "linux")]
@@ -311,7 +314,7 @@ impl Context {
                 }
             };
             Ok(Self { gl, share: std::sync::Arc::new(Share { egl, display, config, context, #[cfg(target_os = "android")] surfaceless }), #[cfg(target_os = "linux")] wayland, source,
-                windows: HashMap::new(), current: idle, idle })
+                windows: HashMap::new(), #[cfg(target_os = "android")] surfaces, current: idle, idle })
         }
     }
 
@@ -344,6 +347,8 @@ impl Context {
 
     pub fn close(&mut self, key: (u32, Id)) {
         let Some(window) = self.windows.remove(&key) else { return };
+        #[cfg(target_os = "android")]
+        self.surfaces.store(self.windows.len(), std::sync::atomic::Ordering::SeqCst);
         if self.current == window.surface {
             let _ = self.bind(self.idle);
         }
@@ -401,6 +406,8 @@ impl Context {
             }
             let size = native.size;
             self.windows.insert(key, Window { surface, #[cfg(target_os = "linux")] wl_window, size, native });
+            #[cfg(target_os = "android")]
+            self.surfaces.store(self.windows.len(), std::sync::atomic::Ordering::SeqCst);
             self.bind(surface)?;
             // the shell paces frames (FrameReady); a swap never waits for the compositor. On
             // Android a swap waits for a free buffer, like Vulkan's FIFO swapchain there.

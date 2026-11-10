@@ -188,6 +188,8 @@ impl GlBackend {
         Box::new(move || {
             let (done, released) = std::sync::mpsc::sync_channel(1);
             queue.push_urgent(move |r| { r.ctx.close_all(); let _ = done.send(()); });
+            // before the first frame there's no surface to let go of, while the render thread may be compiling
+            if queue.surfaces.load(Ordering::SeqCst) == 0 { return; }
             if released.recv_timeout(std::time::Duration::from_secs(1)).is_err() {
                 eprintln!("[hal-gl] the render thread didn't let go of the window within a second");
             }
