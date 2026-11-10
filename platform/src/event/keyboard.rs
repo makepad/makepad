@@ -74,7 +74,8 @@ impl CxKeyboard {
 
     /// Whether `focus_area` has key focus that the user gave it, rather than code.
     pub fn has_key_focus_from_user(&self, focus_area: Area) -> bool {
-        self.key_focus == focus_area && self.is_key_focus_from_user
+        // Nothing focused is never the user's, e.g., when a restore finds its area gone.
+        !focus_area.is_empty() && self.key_focus == focus_area && self.is_key_focus_from_user
     }
 
     pub fn set_text_ime_dismissed(&mut self) {
