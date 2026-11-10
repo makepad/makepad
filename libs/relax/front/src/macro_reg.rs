@@ -93,6 +93,9 @@ pub struct Reg {
     /// (crate name, host side) -> the units its unit(s) reach through their caller edges
     /// (transitively; memoised)
     pub reach: std::collections::HashMap<(String, bool), Vec<bool>>,
+    /// root file of a proc-macro crate's dependency -> the `macro_rules!` definitions of its
+    /// files (memoised for one scan round: every proc-macro crate asks syn's again)
+    pub dep_macro_defs: std::collections::HashMap<String, std::sync::Arc<Vec<crate::macros::MacroDef>>>,
 }
 
 impl Reg {
@@ -654,6 +657,8 @@ pub fn set_build_outputs(sess: &std::sync::Arc<crate::Session>, units: &[CrateUn
                 }
             }
         }
+        // sources changed since the last round: the dependencies' macros are read again
+        reg.dep_macro_defs.clear();
         for (ui, src_path, edition) in rescan {
             reg.derives.retain(|(_, e)| e.unit != ui);
             reg.macros.retain(|(_, e)| e.unit != ui);
@@ -826,18 +831,48 @@ pub fn has_derive(name: &str) -> bool {
     REG.with(|r| r.borrow().as_ref().map_or(false, |r| r.derives.iter().any(|(n, _)| n == name)))
 }
 
-/// Collects `macro_rules!` definitions from a crate's root file for proc-macro entry discovery.
+/// Collects the `macro_rules!` definitions of a crate for proc-macro entry discovery: its root
+/// file and the files of its `mod x;` declarations (synstructure's `decl_derive!`, which declares
+/// malloc_size_of_derive's `MallocSizeOf`, is in its `macros.rs`).
 fn collect_macro_rules_defs(root: &str, krate: &str, edition: u16) -> Vec<crate::macros::MacroDef> {
+    let mut defs = Vec::new();
+    let mut stack = vec![root.to_string()];
+    let mut seen: Vec<String> = Vec::new();
+    while let Some(path) = stack.pop() {
+        if seen.contains(&path) {
+            continue;
+        }
+        let is_root = seen.is_empty();
+        seen.push(path.clone());
+        collect_macro_rules_defs_of_file(&path, is_root, krate, edition, &mut defs, &mut stack);
+    }
+    defs
+}
+
+/// [`collect_macro_rules_defs`] of one file; the files of its `mod x;` go on `stack`.
+fn collect_macro_rules_defs_of_file(path: &str, is_root: bool, krate: &str, edition: u16, defs: &mut Vec<crate::macros::MacroDef>, stack: &mut Vec<String>) {
     use crate::lexer::T;
-    let Ok(src) = crate::vfs::read(root) else { return Vec::new() };
+    let Ok(src) = crate::vfs::read(path) else { return };
     let mut toks = Vec::new();
     if crate::lexer::lex(&src, edition, &mut toks).is_err() {
-        return Vec::new();
+        return;
     }
     let text = |i: usize| -> &[u8] { &src[toks[i].lo as usize..toks[i].hi as usize] };
-    let mut defs = Vec::new();
+    let dir = crate::program::dir_of(path).to_string();
     let mut i = 0;
     while i < toks.len() {
+        if toks[i].kind == T::KwMod && i + 2 < toks.len() && matches!(toks[i + 1].kind, T::Ident | T::RawIdent) && toks[i + 2].kind == T::Semi {
+            let name = String::from_utf8_lossy(text(i + 1)).trim_start_matches("r#").to_string();
+            let base = if is_root || path.ends_with("/mod.rs") { dir.clone() } else { format!("{}/{}", dir, crate::program::stem_of(path)) };
+            for c in [format!("{}/{}.rs", base, name), format!("{}/{}/mod.rs", base, name)] {
+                if crate::vfs::exists(&c) {
+                    stack.push(c);
+                    break;
+                }
+            }
+            i += 3;
+            continue;
+        }
         if toks[i].kind == T::Ident && text(i) == b"macro_rules" && i + 3 < toks.len() && toks[i + 1].kind == T::Not {
             let name = String::from_utf8_lossy(text(i + 2)).trim_start_matches("r#").to_string();
             let open = i + 3;
@@ -868,7 +903,6 @@ fn collect_macro_rules_defs(root: &str, krate: &str, edition: u16) -> Vec<crate:
         }
         i += 1;
     }
-    defs
 }
 
 /// `#[proc_macro_derive(Name, ..)]` / `#[proc_macro]` / `#[proc_macro_attribute]` fns of a
@@ -883,13 +917,21 @@ fn scan_entries(sess: &std::sync::Arc<crate::Session>, reg: &mut Reg, unit: usiz
         cfg.set.push(c.replace('"', ""));
     }
     let mut local_defs = collect_macro_rules_defs(root, &u.name, edition);
-    let deps: Vec<(usize, String)> = u.deps.clone();
-    for (dep_idx, _) in deps {
-        if let Some(dep_u) = reg.units.get(dep_idx) {
-            if !dep_u.proc_macro {
-                local_defs.extend(collect_macro_rules_defs(&dep_u.src_path, &dep_u.name, dep_u.edition));
+    let deps: Vec<(String, String, u16)> = u.deps.iter()
+        .filter_map(|(dep_idx, _)| reg.units.get(*dep_idx))
+        .filter(|dep_u| !dep_u.proc_macro)
+        .map(|dep_u| (dep_u.src_path.clone(), dep_u.name.clone(), dep_u.edition))
+        .collect();
+    for (src_path, name, dep_edition) in deps {
+        let defs = match reg.dep_macro_defs.get(&src_path) {
+            Some(defs) => defs.clone(),
+            None => {
+                let defs = std::sync::Arc::new(collect_macro_rules_defs(&src_path, &name, dep_edition));
+                reg.dep_macro_defs.insert(src_path, defs.clone());
+                defs
             }
-        }
+        };
+        local_defs.extend(defs.iter().cloned());
     }
     let mut stack = vec![root.to_string()];
     let mut seen = Vec::new();
