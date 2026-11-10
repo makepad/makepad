@@ -227,7 +227,7 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
             test_crates.push(crates.len());
         }
         let tname = if u.sysroot { tname } else { crate::crates::own_crate_name(tname) };
-        crates.push(CrateUnit { name: tname, src_path, edition, features, deps: udeps, host: None, proc_macro: pm, bin, harness: u.harness, build_script: false, version: ver.clone(), registry: !u.pkg_id.starts_with("path+") });
+        crates.push(CrateUnit { name: tname, src_path, edition, features, deps: udeps, host: None, proc_macro: pm, bin, harness: u.harness, build_script: false, version: ver.clone(), registry: !u.pkg_id.starts_with("path+"), host_only: u.host });
         crate_paths.push(norm);
         pkg.push((pkg_dir, pname, ver));
     }
