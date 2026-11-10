@@ -2226,6 +2226,7 @@ impl View {
     /// first frame is drawn at a position put back from before a rebuild.
     pub fn set_scroll_pos_unclipped(&mut self, cx: &mut Cx, v: Vec2d) {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
+            scroll_bars.stop_motion();
             scroll_bars.set_scroll_pos_no_clip(cx, v);
         } else {
             self.layout.scroll = v;
