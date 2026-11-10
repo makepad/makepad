@@ -470,6 +470,17 @@ impl Box<dyn Any + Send> {
     }
 }
 
+impl Box<dyn Any + Send + Sync> {
+    pub fn downcast<T: Any>(self) -> Result<Box<T>, Box<dyn Any + Send + Sync>> {
+        if self.is::<T>() {
+            let raw: *mut (dyn Any + Send + Sync) = Box::into_raw(self);
+            Ok(unsafe { Box::from_raw(raw as *mut T) })
+        } else {
+            Err(self)
+        }
+    }
+}
+
 // library/alloc/src/boxed.rs:2271-2294 (Relax's Box has no allocator parameter).
 impl<A: crate::marker::Tuple, F: ?Sized + crate::ops::FnOnce<A>> crate::ops::FnOnce<A> for Box<F> {
     type Output = <F as crate::ops::FnOnce<A>>::Output;
