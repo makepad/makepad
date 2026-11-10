@@ -45,7 +45,7 @@ fn dragged_free_body_flies_at_the_release_velocity() {
 fn throw_carries_transitively_jointed_neighbours_but_not_other_bodies() {
     let mut asm = Assembly { bodies: vec![cube([0.0; 3]), cube([12.0, 0.0, 0.0]), cube([24.0, 0.0, 0.0]), cube([0.0, 100.0, 0.0])], up: [0.0, 0.0, 1.0], ..Default::default() };
     for i in 0..2 {
-        asm.joints.push(JointSpec { name: format!("joint {i}"), a: i, b: i + 1, pivot: [6.0 + i as f64 * 12.0, 0.0, 0.0], axis: [0.0, 0.0, 1.0], kind: JointKind::Revolute { lower: -3.0, upper: 3.0 }, friction: Friction::default(), collide: true, brake: None });
+        asm.joints.push(JointSpec { name: format!("joint {i}"), a: i, b: i + 1, pivot: [6.0 + i as f64 * 12.0, 0.0, 0.0], axis: [0.0, 0.0, 1.0], kind: JointKind::Revolute { lower: -3.0, upper: 3.0 }, friction: Friction::default(), collide: true, brake: None, motor: None });
     }
     let mut w = MechWorld::new(&asm, [0.0; 3], None);
     drag(&mut w);

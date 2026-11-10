@@ -108,14 +108,14 @@ fn scenes_keep_a_mail_together() {
     let (wp, link, frame) = setup();
     let w = mail(&wp, link, frame, [-20.0, -20.0], [20.0, 20.0], 0.0, &|_| -1.0);
     for scene in [WeaveScene::Drop, WeaveScene::Drape, WeaveScene::Hang] {
-        let r = simulate(&w, 1.24e-3, scene, 2.0, &|| false);
+        let r = simulate(&w, 1.24e-3, scene, 2.0, &|| false).unwrap();
         println!("{r:?}");
         assert_eq!(r.unlinked, 0, "{scene:?}");
         assert!(r.deepest > -0.5, "{scene:?} {}", r.deepest);
         assert!(r.drop > 1.0, "{scene:?} fell {}", r.drop);
     }
     let c = chain(&wp, link, frame, &[[0.0, 0.0], [80.0, 0.0]], false);
-    let r = simulate(&c, 1.24e-3, WeaveScene::Hang, 3.0, &|| false);
+    let r = simulate(&c, 1.24e-3, WeaveScene::Hang, 3.0, &|| false).unwrap();
     assert_eq!(r.unlinked, 0);
 }
 
@@ -140,7 +140,7 @@ fn graded_mail_interlocks_at_every_size() {
     assert!(c.bridge <= wp.bridge_max, "{}", c.bridge);
     assert!((c.min_gap_z.0 - wp.c_z).abs() < 1e-6, "{:?}", c.min_gap_z);
     assert!(c.min_gap_xy.0 >= wp.c_xy - 1e-6, "{:?}", c.min_gap_xy);
-    let r = simulate(&w, 1.24e-3, WeaveScene::Drop, 1.5, &|| false);
+    let r = simulate(&w, 1.24e-3, WeaveScene::Drop, 1.5, &|| false).unwrap();
     assert_eq!(r.unlinked, 0, "{r:?}");
 }
 
@@ -197,7 +197,7 @@ fn trellis_fills_a_box_standing_on_the_bed() {
     // near upright the planes barely cross: far fewer interlocks for the same box
     let upright = trellis(&wp, LeanLink::new(&wp, 80f64.to_radians()), frame, [-15.0, -15.0, 0.0], [15.0, 15.0, 20.0], 0.0, 0.0, &|_| -1.0);
     assert!(upright.pairs.len() * 2 < w.pairs.len(), "{} interlocks at 80 deg vs {} at 60", upright.pairs.len(), w.pairs.len());
-    let r = simulate(&w, 1.24e-3, WeaveScene::Drop, 2.0, &|| false);
+    let r = simulate(&w, 1.24e-3, WeaveScene::Drop, 2.0, &|| false).unwrap();
     println!("{r:?}");
     assert_eq!(r.unlinked, 0);
     assert!(r.pair_motion > wp.c_xy, "pairs moved {}", r.pair_motion);

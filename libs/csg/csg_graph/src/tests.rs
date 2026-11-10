@@ -202,3 +202,28 @@ fn meshes_built_ahead_are_the_meshes_mesh_builds() {
     assert_eq!(after, serial);
     assert_eq!(ahead.built, one.built);
 }
+
+/// An offset's mesh is its source's grown by the distance on every side.
+#[test]
+fn an_offset_grows_a_mesh_by_its_distance() {
+    let mut g = Graph::new();
+    let a = g.push(Op::Box { size: [10.0, 4.0, 6.0], radius: 0.0 }).unwrap();
+    let grown = g.push(Op::Offset { source: a, distance: 1.0, cell: Some(0.25) }).unwrap();
+    let shrunk = g.push(Op::Offset { source: a, distance: -1.0, cell: Some(0.25) }).unwrap();
+    let extent = |id| {
+        let mesh = Evaluator::new().mesh(&g, id, None).unwrap();
+        let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
+        for v in &mesh.vertices {
+            for (k, x) in [v.x, v.y, v.z].into_iter().enumerate() {
+                lo[k] = lo[k].min(x);
+                hi[k] = hi[k].max(x);
+            }
+        }
+        std::array::from_fn::<f64, 3, _>(|k| hi[k] - lo[k])
+    };
+    let (up, down) = (extent(grown), extent(shrunk));
+    for (k, side) in [10.0, 4.0, 6.0].into_iter().enumerate() {
+        assert!((up[k] - (side + 2.0)).abs() < 0.3, "axis {k}: {} grown", up[k]);
+        assert!((down[k] - (side - 2.0)).abs() < 0.3, "axis {k}: {} shrunk", down[k]);
+    }
+}

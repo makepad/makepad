@@ -20,6 +20,7 @@ pub mod check;
 pub mod dyn_world;
 pub mod flex;
 pub mod geom;
+pub mod hulls;
 pub mod joint;
 mod keep_out;
 pub mod mass;
@@ -31,7 +32,7 @@ pub mod weave;
 pub use check::{Found, Gap, LayerReport, Risk, Tack, Turned};
 pub use flex::{BondDecl, Flex};
 pub use geom::{Prim, Solid, P3};
-pub use joint::{AnchorDecl, BallDecl, BearingDecl, Brake, BrakeDecl, Extent, BRAKE_SQUEEZE, HingeDecl, JointDecl, JointGeom, Material, Measured, Note, PartBox, Profile, Seat, SliderDecl};
+pub use joint::{AnchorDecl, BallDecl, BearingDecl, Brake, BrakeDecl, Extent, BRAKE_SQUEEZE, HingeDecl, JointDecl, JointGeom, Material, Measured, MotorDecl, MotorKind, Note, PartBox, Profile, Seat, SliderDecl};
 
 use geom::*;
 use makepad_csg_sdf::Sdf3;
@@ -492,7 +493,8 @@ impl Sdf3 for Welded<'_> {
 }
 
 /// Convex hulls of a part away from its joints: its vertices outside every keep-out sphere, cut into slabs along
-/// its longest side.
+/// its longest side, each slab's hull as few of its corners as keep within [`GAP_TOL`] of it
+/// ([`hulls::coarse_hull`]).
 pub fn proxy_hulls(vertices: &[P3], keep_out: &[(P3, f64)]) -> Vec<Vec<P3>> {
     let pts: Vec<P3> = vertices.iter().copied().filter(|v| keep_out.iter().all(|(c, r)| len(sub(*v, *c)) > *r)).collect();
     if pts.len() < 4 {
@@ -539,7 +541,7 @@ pub fn proxy_hulls(vertices: &[P3], keep_out: &[(P3, f64)]) -> Vec<Vec<P3>> {
         }
     }
     out.retain(|slab| slab.len() >= 4);
-    out
+    out.iter().map(|slab| hulls::coarse_hull(slab, GAP_TOL)).collect()
 }
 
 /// The sim's view of the piece: a body per part (mass from its mesh at `fill`), a joint per joint with its
@@ -601,10 +603,12 @@ pub fn assembly(plan: &Plan, parts: &[FinalPart], checks: &[JointCheck], fill: f
             };
             let collide = matches!(g, JointGeom::Hinge { .. } | JointGeom::Ball { .. });
             let brake = match g {
-                JointGeom::Hinge { brake: Some(bk), .. } => Some(sim::BrakeSpec { torque: (0..=sim::BRAKE_SAMPLES).map(|k| bk.torque(k as f64 * sim::BRAKE_STEP) * N_MM).collect() }),
+                JointGeom::Hinge { brake: Some(bk), .. } => Some(sim::BrakeSpec { torque: (0..=sim::BRAKE_SAMPLES).map(|k| bk.torque(k as f64 * sim::BRAKE_STEP) * sim::NEWTON).collect() }),
                 _ => None,
             };
-            sim::JointSpec { name: format!("{}-{}", parts[a].name, parts[b].name), a, b, pivot, axis, kind, friction: sim::Friction { mu, radius: g.bearing_radius(), torque: 0.0 }, collide, brake }
+            // a hinge's limit is in N mm, a slider's in N: both a million of the sim's units
+            let motor = d.motor().map(|m| sim::Motor { kind: m.kind, limit: m.limit * sim::NEWTON });
+            sim::JointSpec { name: format!("{}-{}", parts[a].name, parts[b].name), a, b, pivot, axis, kind, friction: sim::Friction { mu, radius: g.bearing_radius(), torque: 0.0 }, collide, brake, motor }
         })
         .chain(bond_joints(plan, parts))
         .chain(plan.joints.iter().zip(&plan.decls).filter_map(|(g, d)| g.shoe().map(|s| shoe_weld(plan, parts, d.parts().1, s))))
@@ -622,11 +626,9 @@ pub fn assembly(plan: &Plan, parts: &[FinalPart], checks: &[JointCheck], fill: f
             friction: sim::Friction { mu, radius: a.hole.map_or(0.0, |h| h.1), torque: 0.0 },
         })
         .collect();
-    sim::Assembly { bodies, joints, anchors, up: plan.profile.up, sleep: sim::SLEEP_SPEED, workers: 1, contact_margin: 0.0, max_speed: 0.0, contact_hertz: 0.0, substeps: sim::JOINT_SUBSTEPS, ball: None, shake_about: [0.0; 3], shake_tempo: 0.0, lift: 0.0 }
+    sim::Assembly { bodies, joints, anchors, up: plan.profile.up, sleep: sim::SLEEP_SPEED, workers: 1, contact_margin: 0.0, max_speed: 0.0, contact_hertz: 0.0, substeps: sim::JOINT_SUBSTEPS, ball: None, shake_about: [0.0; 3], shake_tempo: 0.0, lift: 0.0, strings: Vec::new(), interlocks: Vec::new() }
 }
 
-/// A newton millimetre in the sim's units (g mm^2 / s^2).
-const N_MM: f64 = 1e6;
 
 /// A brake's shoes ride the part they print in.
 fn shoe_weld(plan: &Plan, parts: &[FinalPart], b: usize, shoe: usize) -> sim::JointSpec {
@@ -640,6 +642,7 @@ fn shoe_weld(plan: &Plan, parts: &[FinalPart], b: usize, shoe: usize) -> sim::Jo
         friction: sim::Friction::default(),
         collide: false,
         brake: None,
+        motor: None,
     }
 }
 
@@ -660,6 +663,7 @@ fn bond_joints<'a>(plan: &'a Plan, parts: &'a [FinalPart]) -> impl Iterator<Item
         friction: sim::Friction::default(),
         collide: false,
         brake: None,
+        motor: None,
     };
     let welds = plan.bonds.iter().flat_map(move |b| if b.flexible { vec![weld(b.parts[0], b.to)] } else { b.parts.iter().map(|p| weld(b.to, *p)).collect() });
     let flexes = plan.flexes.iter().map(move |f| {
@@ -675,6 +679,7 @@ fn bond_joints<'a>(plan: &'a Plan, parts: &'a [FinalPart]) -> impl Iterator<Item
             friction: sim::Friction::default(),
             collide: true,
             brake: None,
+            motor: None,
         }
     });
     flexes.chain(welds)
@@ -684,6 +689,108 @@ fn bond_joints<'a>(plan: &'a Plan, parts: &'a [FinalPart]) -> impl Iterator<Item
 /// bodies. All vertices are in the assembly's common frame (mm); free parts have no keep-outs.
 pub fn mesh_body(name: &str, vertices: &[P3], triangles: &[[u32; 3]], density: f64, fill: f64, keep_out: &[(P3, f64)]) -> sim::BodySpec {
     sim::BodySpec { name: name.into(), mass: mass::mesh_mass(vertices, triangles, density, fill), hulls: proxy_hulls(vertices, keep_out), tubes: Vec::new(), balls: Vec::new(), rods: Vec::new(), field: None }
+}
+
+/// A rigid part from its final mesh when that keeps to its convex hull ([`hulls::fits_its_hull`] to
+/// [`GAP_TOL`]: a ball, a roller, a pin): its one coarse hull is all of it, and it meets the fields of
+/// the parts around it through that hull (a field of its own would be the same shape, for more work).
+pub fn convex_body(name: &str, vertices: &[P3], triangles: &[[u32; 3]], density: f64, fill: f64) -> sim::BodySpec {
+    let hulls = vec![hulls::coarse_hull(vertices, GAP_TOL)];
+    sim::BodySpec { name: name.into(), mass: mass::mesh_mass(vertices, triangles, density, fill), hulls, tubes: Vec::new(), balls: Vec::new(), rods: Vec::new(), field: None }
+}
+
+/// A mesh's loose pieces, each with its own (welded) vertices and triangles, in the mesh's frame: what of
+/// it prints as separate solids. A mesh may hold several closed shells (corners at one place, to 10 nm,
+/// are one vertex). A shell facing in (its volume negative) is a hollow of the smallest shell around it, and
+/// a piece is a shell with its hollows. Pieces that come within `fused` mm of each other, or overlap,
+/// print as one and are one piece. One piece: the mesh as it is.
+pub fn mesh_pieces(vertices: &[P3], triangles: &[[u32; 3]], fused: f64) -> Vec<(Vec<P3>, Vec<[u32; 3]>)> {
+    fn root(p: &mut [usize], mut i: usize) -> usize {
+        while p[i] != i {
+            p[i] = p[p[i]];
+            i = p[i];
+        }
+        i
+    }
+    // the shells: triangles joined by the corners they share
+    let mut welded: std::collections::HashMap<[i64; 3], usize> = std::collections::HashMap::new();
+    let corner: Vec<usize> = vertices.iter().map(|p| { let n = welded.len(); *welded.entry(p.map(|v| (v * 1e5).round() as i64)).or_insert(n) }).collect();
+    let mut joined: Vec<usize> = (0..welded.len()).collect();
+    for t in triangles {
+        let a = root(&mut joined, corner[t[0] as usize]);
+        for &v in &t[1..] {
+            let b = root(&mut joined, corner[v as usize]);
+            if a != b {
+                joined[b] = a;
+            }
+        }
+    }
+    let mut shell_of: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut shells: Vec<Vec<usize>> = Vec::new();
+    for (k, t) in triangles.iter().enumerate() {
+        let r = root(&mut joined, corner[t[0] as usize]);
+        let s = *shell_of.entry(r).or_insert_with(|| { shells.push(Vec::new()); shells.len() - 1 });
+        shells[s].push(k);
+    }
+    if shells.len() < 2 {
+        return vec![(vertices.to_vec(), triangles.to_vec())];
+    }
+    // each shell with its own vertices
+    let mesh = |tris: &mut dyn Iterator<Item = usize>| -> (Vec<P3>, Vec<[u32; 3]>) {
+        let mut index: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+        let (mut pos, mut out) = (Vec::new(), Vec::new());
+        for k in tris {
+            out.push(triangles[k].map(|v| *index.entry(corner[v as usize]).or_insert_with(|| { pos.push(vertices[v as usize]); pos.len() as u32 - 1 })));
+        }
+        (pos, out)
+    };
+    let field = |(pos, tris): &(Vec<P3>, Vec<[u32; 3]>)| makepad_csg_sdf::mesh_field::MeshField::new(makepad_csg_sdf::mesh_field::MeshData { positions: pos.iter().map(|p| p.map(|v| v as f32)).collect(), triangles: tris.clone() });
+    let span = |pos: &[P3]| pos.iter().fold(([f64::MAX; 3], [f64::MIN; 3]), |(lo, hi), p| (std::array::from_fn(|k| lo[k].min(p[k])), std::array::from_fn(|k| hi[k].max(p[k]))));
+    let volume = |tris: &[usize]| tris.iter().map(|&k| { let [a, b, c] = triangles[k].map(|v| vertices[v as usize]); dot(a, cross(b, c)) }).sum::<f64>() / 6.0;
+    let volumes: Vec<f64> = shells.iter().map(|t| volume(t)).collect();
+    let solids: Vec<usize> = (0..shells.len()).filter(|&s| volumes[s] >= 0.0).collect();
+    let alone: Vec<(Vec<P3>, Vec<[u32; 3]>)> = solids.iter().map(|&s| mesh(&mut shells[s].iter().copied())).collect();
+    let alone_fields: Vec<_> = alone.iter().map(field).collect();
+    // a hollow belongs to the smallest solid shell around it (one around none is a piece of its own)
+    let mut hollows: Vec<Vec<usize>> = vec![Vec::new(); solids.len()];
+    let mut lone = Vec::new();
+    for s in (0..shells.len()).filter(|&s| volumes[s] < 0.0) {
+        let at = vertices[triangles[shells[s][0]][0] as usize];
+        let around = (0..solids.len()).filter(|&k| alone_fields[k].distance(makepad_csg_math::dvec3(at[0], at[1], at[2])) < 0.0).min_by(|&a, &b| volumes[solids[a]].total_cmp(&volumes[solids[b]]));
+        match around {
+            Some(k) => hollows[k].push(s),
+            None => lone.push(s),
+        }
+    }
+    let mut pieces: Vec<Vec<usize>> = (0..solids.len()).map(|k| std::iter::once(solids[k]).chain(hollows[k].iter().copied()).collect()).collect();
+    pieces.extend(lone.into_iter().map(|s| vec![s]));
+    let meshes: Vec<(Vec<P3>, Vec<[u32; 3]>)> = pieces.iter().map(|shells_of| mesh(&mut shells_of.iter().flat_map(|&s| shells[s].iter().copied()))).collect();
+    // pieces that print fused are one
+    let fields: Vec<_> = meshes.iter().map(field).collect();
+    let spans: Vec<(P3, P3)> = meshes.iter().map(|(pos, _)| span(pos)).collect();
+    let mut one: Vec<usize> = (0..meshes.len()).collect();
+    for a in 0..meshes.len() {
+        for b in a + 1..meshes.len() {
+            let lo: P3 = std::array::from_fn(|k| spans[a].0[k].max(spans[b].0[k]) - fused);
+            let hi: P3 = std::array::from_fn(|k| spans[a].1[k].min(spans[b].1[k]) + fused);
+            if (0..3).all(|k| lo[k] <= hi[k]) && check::closer_than(&fields[a], &fields[b], lo, hi, fused) {
+                let (ra, rb) = (root(&mut one, a), root(&mut one, b));
+                one[rb] = ra;
+            }
+        }
+    }
+    let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
+    for k in 0..meshes.len() {
+        let r = root(&mut one, k);
+        match groups.iter_mut().find(|g| g.0 == r) {
+            Some(g) => g.1.push(k),
+            None => groups.push((r, vec![k])),
+        }
+    }
+    if groups.len() < 2 {
+        return vec![(vertices.to_vec(), triangles.to_vec())];
+    }
+    groups.iter().map(|(_, members)| mesh(&mut members.iter().flat_map(|&m| pieces[m].iter().flat_map(|&s| shells[s].iter().copied())))).collect()
 }
 
 /// A distance-field part as a body, straight from its field: the field is sampled on a grid of cells

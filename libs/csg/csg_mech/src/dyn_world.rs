@@ -13,15 +13,18 @@
 //! waits ten substeps, after which a slow pendulum would stop at the top of its swing.
 
 use crate::geom::*;
-use crate::sim::{AnchorKind, Assembly, BodyAction, Friction, JointKind, Pose, AIR_ANGULAR_DAMPING,
+use crate::sim::{AnchorKind, Assembly, BodyAction, Friction, JointKind, Motor, Pose, StringFault, StringPath, StringSpec, NEWTON, AIR_ANGULAR_DAMPING,
     AIR_LINEAR_DAMPING, BOUNCE_SPEED, CONTACT_HERTZ, DANGLE_HZ, GRAB_DAMPING_RATIO, GRIP_SPIN_DAMPING, GRIP_STICTION,
     GRIP_SWING_DAMPING_RATIO, GRAVITY, HAND_SMOOTHING, PLA_ON_PLA};
-use makepad_dynamics::{builder, core_smooth, core_util, forward, io, name, sleep, support, util_solve, util_spatial};
+use makepad_dynamics::{builder, collision_driver, core_smooth, core_util, forward, io, name, sleep, support, util_solve, util_spatial};
 use makepad_dynamics::data::Data;
 use makepad_dynamics::model::Model;
-use makepad_dynamics::model_spec::{BodySpec, EqualitySpec, ExcludeSpec, GeomSpec, JointSpec, MeshSpec, ModelSpec, PairSpec};
+use makepad_dynamics::model_spec::{ActuatorSpec, BodySpec, EqualitySpec, ExcludeSpec, GeomSpec, JointSpec, MeshSpec, ModelSpec, PairSpec, SiteSpec, TendonSpec, WrapSpec};
 use makepad_dynamics::types::*;
-use std::collections::{BTreeMap};
+use makepad_dynamics::sdf::{self, Sdf};
+use makepad_box3d::field::DistanceField;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 // The sliding coefficient is to be chosen by measurement of the printed surfaces.
 const CONTACT_MU: f64 = PLA_ON_PLA.slide;
@@ -38,6 +41,37 @@ struct Pin {
     body: usize,
     local: P3,
     world: P3,
+}
+
+/// A joint's motor in the model: its actuator and what it is set to.
+struct Motored {
+    joint: usize,
+    actuator: usize,
+    kind: crate::MotorKind,
+    target: f64,
+}
+
+// A motor is a servo (a position actuator) or a drive (a velocity actuator) on its joint, its force clamped to
+// the motor's limit. A servo pushes its whole limit this far off its target, as a hobby servo does; a drive
+// this far off its speed. Both are as stiff as that, or as a substep holds when that is stiffer: their gains
+// come from the engine's own measure of the inertia the joint moves (acc0), so the stiffest servo still swings
+// at a quarter radian per substep.
+const SERVO_BAND_HINGE: f64 = 3.0 * std::f64::consts::PI / 180.0;
+const SERVO_BAND_SLIDER: f64 = 0.5;
+const DRIVE_BAND_HINGE: f64 = 0.5;
+const DRIVE_BAND_SLIDER: f64 = 5.0;
+const MOTOR_SWING: f64 = 0.25;
+
+fn motor_name(j: usize) -> String { format!("motor_{j}") }
+
+// The motor of `asm.joints[j]`: unit gains; DynWorld::tune_motors sets them from the compiled model.
+fn motor_spec(j: usize, motor: &Motor) -> ActuatorSpec {
+    let mut a = ActuatorSpec { name: Some(motor_name(j)), ctrllimited: 0, forcelimited: 1, forcerange: [-motor.limit, motor.limit], ..ActuatorSpec::on(TRN_JOINT, &joint_name(j)) };
+    match motor.kind {
+        crate::MotorKind::Position => a.set_to_position(1.0, None, None, None, 0.0),
+        crate::MotorKind::Speed => a.set_to_velocity(1.0),
+    }.expect("a motor's shortcut takes unit gains");
+    a
 }
 
 #[derive(Clone)]
@@ -62,6 +96,13 @@ struct Grab {
     dry_torque: f64,
 }
 
+/// A grab on a held part: the held point in the ground's frame. A drag moves the ground, which carries
+/// every held part, so that point is under the hand at the end of each step.
+struct Carry {
+    body: usize,
+    local: P3,
+}
+
 /// The engine found its state blown up in a substep and put everything back at the print pose: when (the
 /// sim's time before that substep) and on which part it saw it first.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -72,10 +113,19 @@ pub struct DynWorld {
     model: Model,
     data: Data,
     spec: ModelSpec,
+    /// The field geoms (by name) and their fields, attached to each model compiled from the spec.
+    fields: Vec<(String, Arc<dyn Sdf>)>,
     assembly: Assembly,
     bodies: Vec<usize>,
     origins: Vec<P3>,
     joints: Vec<Option<usize>>,
+    motors: Vec<Motored>,
+    /// What the panel reads, as last measured while its tree was awake (a sleeping tree has no rows to read):
+    /// per assembly joint the force through it (N), per motor what it pushes (N mm, a slider's N), per
+    /// string its tension (N).
+    loads: Vec<Option<f64>>,
+    efforts: Vec<f64>,
+    tensions: Vec<f64>,
     /// Per model body, the share of its part's mass it carries (a part that closes loops shares it with
     /// the bodies of its loop joints).
     shares: Vec<f64>,
@@ -87,6 +137,7 @@ pub struct DynWorld {
     geom_parts: Vec<Option<usize>>,
     pins: Vec<Pin>,
     grab: Option<Grab>,
+    carry: Option<Carry>,
     substeps: u32,
     touching: Vec<(usize, usize)>,
     next_touching: Vec<(usize, usize)>,
@@ -117,6 +168,7 @@ fn join(parents: &mut [usize], a: usize, b: usize) -> bool {
 }
 
 fn body_name(i: usize) -> String { format!("part_{i}") }
+fn string_name(i: usize) -> String { format!("string_{i}") }
 fn loop_name(i: usize) -> String { format!("loop_{i}") }
 fn joint_name(i: usize) -> String { format!("joint_{i}") }
 fn triple(values: &[f64], i: usize) -> P3 { values[3*i..3*i+3].try_into().unwrap() }
@@ -141,17 +193,23 @@ fn reach(asm: &Assembly, body: usize) -> f64 {
 fn contact_hertz(asm: &Assembly) -> f64 {
     if asm.contact_hertz > 0.0 { asm.contact_hertz } else { CONTACT_HERTZ }
 }
-// A loop's closing weld as stiff as the engine allows (impedance 0.9999 at any violation), so the solve
-// carries the loop's forces and the closure projection after it has little left to take; the loop joint's
-// limits and friction alike, so they hold as a tree joint's do.
-const LOOP_SOLIMP: [f64; NIMP] = [0.9999, 0.9999, 0.001, 0.5, 2.0];
+// As stiff as the engine allows (impedance 0.9999 at any violation). A loop's closing weld, so the solve carries
+// the loop's forces and the closure projection after it has little left to take; the loop joint's limits and
+// friction alike, so they hold as a tree joint's do.
+const STIFF_SOLIMP: [f64; NIMP] = [0.9999, 0.9999, 0.001, 0.5, 2.0];
+// A joint's friction. At the engine's default (impedance 0.9, time constant 20 ms) friction is a soft constraint, and
+// a joint under load creeps through it instead of standing still, at about load * (1-d)/d * time constant/2: some
+// 10 mm/s under gravity, so a posed limb or a car's wheels take a second to stop. The time constant at its floor of
+// two substeps (joint_spec) and this impedance bring that to some 0.05 mm/s; the impedance alone would need to go
+// higher, and the stiffer the row the harder the solve (the dragon's worst step doubles at 0.9999).
+const FRICTION_SOLIMP: [f64; NIMP] = [0.99, 0.99, 0.001, 0.5, 2.0];
 
 // The joint of `asm.joints[j]` at `pos` in its child body's frame, its axis times `sign`.
 fn joint_spec(asm: &Assembly, j: usize, pos: P3, sign: f64, dt: f64) -> JointSpec {
     let source = &asm.joints[j];
     let mut joint = JointSpec {
         name: Some(joint_name(j)), pos, axis: scale(norm(source.axis),sign),
-        frictionloss: source.friction.torque, solref_limit: [2.0*dt,1.0], limited: 0,
+        frictionloss: source.friction.torque, solimp_friction: FRICTION_SOLIMP, solref_friction: [2.0*dt,1.0], solref_limit: [2.0*dt,1.0], limited: 0,
         ..JointSpec::default()
     };
     match source.kind {
@@ -187,6 +245,98 @@ fn timeconst(hertz: f64, dt: f64) -> f64 { (1.0 / (std::f64::consts::TAU * hertz
 // needs contacts ahead of time to keep thin fast links from passing through each other; here speculative
 // contacts do that (a geom that moves more than its size in a substep is swept), and a detection gap
 // would only add contacts that never act (on a hanging mail, 1700 found for 34 that act).
+// A link collides as capsules along its centreline, kept to the points it needs to stay within this of the
+// printed one (mm): fewer than half the capsules (the mail demo's 1148 become 492), and a chain's step
+// fits the view's time. The chords cut the links' rounded corners by up to this much, so two interlocked
+// links' solids may overlap by up to 0.3 mm at a corner; links stay linked through hangs and drags.
+const TUBE_TOLERANCE: f64 = 0.3;
+
+// Two parts' fields meet where the engine finds them: it starts this many points in their common box and walks
+// each this many steps down their distance (its own defaults are 40 and 10; the cost goes about as their
+// product). A roller bearing's rings and rollers turned by the hand, per 240 Hz step at the 4 substeps fields
+// run at (runner::dynamics_world): 13.4 ms at the defaults, 1.5 ms at 10 and 5, 2.3 ms at these. At 10 and 5 a
+// ball of fields comes to rest 0.8 mm inside its cup's wall; at these it keeps within 0.07 mm of the wall and
+// sinks up to 0.26 mm into the floor (0.13 at the defaults). The bearing keeps its rollers as close to their
+// track at all of them (0.6 to 1.1 mm off it, where its clearance lets the inner ring 1.2 mm off its axis).
+// A hull meets a field through its faces, one start on each walked this many steps to its deepest point.
+const SDF_INITPOINTS: i32 = 8;
+const SDF_ITERATIONS: i32 = 8;
+// What meets what (contype and conaffinity bits). The floor, tubes and the drape ball are SOLID; rods meet rods
+// and the floor; a part's hulls meet the floor, tubes, hulls and fields; fields meet fields and hulls. A part
+// with a field meets the others through it, and its own hulls only the floor and tubes (they would fill its
+// hollows).
+const SOLID: i32 = 1;
+const ROD: i32 = 2;
+const FIELD: i32 = 4;
+const HULL: i32 = 8;
+
+// A part's field (its distance, in the model frame) as the engine's SDF of its field geom, in the geom's
+// frame: the model frame moved to the centre of the field's bounds. The field gives the distance and the way
+// it grows from one lookup, so the engine's walk asks it once per point.
+struct FieldSdf {
+    field: Arc<dyn DistanceField>,
+    centre: P3,
+}
+
+impl FieldSdf {
+    fn at(&self, p: &[f64; 3]) -> (f64, [f64; 3]) {
+        let (d, n) = self.field.distance(makepad_box3d::math_functions::vec3((p[0] + self.centre[0]) as f32, (p[1] + self.centre[1]) as f32, (p[2] + self.centre[2]) as f32));
+        (d as f64, [n.x as f64, n.y as f64, n.z as f64])
+    }
+}
+
+impl Sdf for FieldSdf {
+    fn distance(&self, point: &[f64; 3]) -> f64 {
+        self.at(point).0
+    }
+    fn gradient(&self, gradient: &mut [f64; 3], point: &[f64; 3]) {
+        *gradient = self.at(point).1;
+    }
+    fn distance_gradient(&self, gradient: &mut [f64; 3], point: &[f64; 3]) -> f64 {
+        let (d, g) = self.at(point);
+        *gradient = g;
+        d
+    }
+}
+
+// The builder takes no fields: a field geom compiles as a box over the field's bounds (the broad phase's
+// extent) and becomes its field once compiled.
+fn attach_fields(model: &mut Model, fields: &[(String, Arc<dyn Sdf>)]) {
+    for (name, field) in fields {
+        let geom = name::name2id(model, OBJ_GEOM, name);
+        assert!(geom >= 0, "field geom {name} is in the spec it compiled from");
+        sdf::attach(model, geom as usize, field.clone());
+    }
+}
+
+// The points of a closed centreline it needs to stay within `tol` of it (Douglas-Peucker, split first at the
+// point farthest from the first one). Each half keeps its farthest point, so a loop stays a loop.
+fn simplified(points: &[P3], tol: f64) -> Vec<P3> {
+    let m = points.len();
+    let at = |i: usize| points[i % m];
+    let off = |p: P3, a: P3, b: P3| {
+        let ab = sub(b, a);
+        let t = (dot(sub(p, a), ab) / dot(ab, ab).max(1e-12)).clamp(0.0, 1.0);
+        len(sub(p, madd(a, ab, t)))
+    };
+    let far = (1..m).max_by(|&a, &b| len(sub(points[a], points[0])).total_cmp(&len(sub(points[b], points[0])))).unwrap_or(0);
+    let mut keep = vec![false; m];
+    keep[0] = true;
+    keep[far] = true;
+    let mut stack = vec![(0, far, true), (far, m, true)];
+    while let Some((i, j, half)) = stack.pop() {
+        let worst = (i + 1..j).map(|k| (k, off(at(k), at(i), at(j)))).max_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((k, d)) = worst {
+            if half || d > tol {
+                keep[k % m] = true;
+                stack.push((i, k, false));
+                stack.push((k, j, false));
+            }
+        }
+    }
+    (0..m).filter(|&k| keep[k]).map(|k| points[k]).collect()
+}
+
 fn geom(asm: &Assembly, dt: f64, bits: i32) -> GeomSpec {
     GeomSpec {
         contype: bits, conaffinity: bits, condim: 3,
@@ -205,17 +355,54 @@ fn connect(a: String, b: Option<String>, local: P3, dt: f64) -> EqualitySpec {
 // throw the part out from there, so a pair that overlaps gets a contact that pushes only past that depth (the
 // engine's per-pair margin, negative here, with the gap that keeps the detection at touch). The pair still
 // touches, so a lid still stops at its box.
+//
+// Hull facets don't follow a joint, so moving a part away from where it printed can sink it a little deeper before it
+// comes clear, and a contact there would hold it. So the depth a pair gets is the deepest it goes on its way out, each
+// way the hinge or slider between its parts goes, until they clear or the joint can go no further. A way that sinks it
+// by more than its print depth again, and more than MOST_HUMP, is a stop and not a way out: a lid going down into its
+// box. A ball joint, or a pair with more than one joint between its parts, keeps the print depth: there is no one line to follow.
+const MOST_HUMP: f64 = 1.0;
+const HINGE_STEP: f64 = 0.25*std::f64::consts::PI/180.0;
+const SLIDER_STEP: f64 = 0.25;
 fn print_overlaps(model: &Model, asm: &Assembly, dt: f64) -> Vec<PairSpec> {
     let mut data = io::make_data(model);
     forward::fwd_position(model,&mut data);
-    let mut deepest = BTreeMap::new();
-    for c in &data.contact[..data.ncon as usize] {
-        if c.dist<0.0 && c.geom.iter().all(|&g| g>=0) {
-            let at=deepest.entry((c.geom[0],c.geom[1])).or_insert(0.0_f64);
-            *at=at.min(c.dist);
+    let part_geom=|g: i32| name::id2name(model,OBJ_GEOM,g).filter(|n| n.starts_with(b"geom_")).map(|n| String::from_utf8_lossy(n).into_owned());
+    let mut at_print = overlapping(&data);
+    at_print.retain(|pair,_| part_geom(pair.0).is_some() && part_geom(pair.1).is_some());
+    let mut deepest = at_print.clone();
+    let joints: BTreeSet<usize> = at_print.keys().filter_map(|&pair| moving_joint(model,pair)).collect();
+    for joint in joints {
+        let adr=model.jnt_qposadr[joint] as usize;
+        let rest=model.qpos0[adr];
+        let step=if model.jnt_type[joint]==JNT_HINGE { HINGE_STEP } else { SLIDER_STEP };
+        for sign in [1.0,-1.0] {
+            let end=if model.jnt_limited[joint]!=0 { model.jnt_range[2*joint+usize::from(sign>0.0)] } else { rest+sign*std::f64::consts::PI };
+            let steps=((end-rest).abs()/step).ceil() as usize;
+            let mut out: BTreeMap<(i32,i32),f64> = at_print.iter().filter(|entry| moving_joint(model,*entry.0)==Some(joint)).map(|(&pair,&print)| (pair,print)).collect();
+            let mut going: Vec<(i32,i32)> = out.keys().copied().collect();
+            for k in 1..=steps {
+                data.qpos[adr]=rest+(end-rest)*k as f64/steps as f64;
+                core_smooth::kinematics(model,&mut data);
+                collision_driver::collision(model,&mut data);
+                let now=overlapping(&data);
+                going.retain(|pair| {
+                    let Some(&depth)=now.get(pair) else { return false };
+                    let seen=out.get_mut(pair).expect("every pair going was put in out");
+                    *seen=seen.min(depth);
+                    let print=at_print[pair];
+                    if print-*seen>(-print).max(MOST_HUMP) { *seen=print; return false; }
+                    true
+                });
+                if going.is_empty() { break; }
+            }
+            data.qpos[adr]=rest;
+            for (pair,depth) in out {
+                let at=deepest.get_mut(&pair).expect("out only has pairs from at_print");
+                *at=at.min(depth);
+            }
         }
     }
-    let part_geom=|g: i32| name::id2name(model,OBJ_GEOM,g).filter(|n| n.starts_with(b"geom_")).map(|n| String::from_utf8_lossy(n).into_owned());
     deepest.into_iter().filter_map(|((a,b),depth): ((i32,i32),f64)| {
         Some(PairSpec {
             geomname1:Some(part_geom(a)?),geomname2:Some(part_geom(b)?),margin:depth,gap:-depth,
@@ -225,6 +412,27 @@ fn print_overlaps(model: &Model, asm: &Assembly, dt: f64) -> Vec<PairSpec> {
     }).collect()
 }
 
+// The pairs of parts' proxies that overlap in this pose, each at its deepest (negative).
+fn overlapping(data: &Data) -> BTreeMap<(i32,i32),f64> {
+    let mut deepest = BTreeMap::new();
+    for c in &data.contact[..data.ncon as usize] {
+        if c.dist<0.0 && c.geom.iter().all(|&g| g>=0) {
+            let at=deepest.entry((c.geom[0],c.geom[1])).or_insert(0.0_f64);
+            *at=at.min(c.dist);
+        }
+    }
+    deepest
+}
+
+// The hinge or slider that alone moves a pair of proxies' bodies against each other.
+fn moving_joint(model: &Model, pair: (i32,i32)) -> Option<usize> {
+    let (a,b)=(model.geom_bodyid[pair.0 as usize] as usize,model.geom_bodyid[pair.1 as usize] as usize);
+    let child=if model.body_parentid[a] as usize==b { a } else if model.body_parentid[b] as usize==a { b } else { return None };
+    if model.body_jntnum[child]!=1 { return None; }
+    let joint=model.body_jntadr[child] as usize;
+    matches!(model.jnt_type[joint],JNT_HINGE|JNT_SLIDE).then_some(joint)
+}
+
 impl DynWorld {
     pub fn new(asm: &Assembly, gravity: P3, floor: Option<f64>) -> Result<DynWorld, String> {
         let n = asm.bodies.len();
@@ -232,7 +440,6 @@ impl DynWorld {
         if floor.is_some() && len(gravity) == 0.0 { return Err("a floor needs a gravity direction".into()); }
         for b in &asm.bodies {
             if b.hulls.iter().flatten().any(|p| !p.iter().all(|v| v.is_finite())) { return Err("hull points must be finite".into()); }
-            if b.field.is_some() { return Err("field geoms need SDF support".into()); }
             if !(b.mass.mass > 0.0 && b.mass.mass.is_finite()) { return Err("body mass must be finite and positive".into()); }
             if !b.mass.com.iter().chain(b.mass.inertia.iter().flatten()).all(|v| v.is_finite()) {
                 return Err("body inertia and centre must be finite".into());
@@ -245,13 +452,22 @@ impl DynWorld {
         for a in &asm.anchors {
             if a.body >= n { return Err("anchor body is outside the assembly".into()); }
         }
+        check_strings(asm).map_err(|f| f.to_string())?;
+        // Balls meet fields on box3d: runner::on_dynamics sends every piece with balls there (a support check's
+        // pieces against the part), so no sim builds one here. Here the balls would meet nothing.
+        if asm.bodies.iter().any(|b| b.field.is_some()) && asm.bodies.iter().any(|b| !b.balls.is_empty()) {
+            return Err("balls meet fields on box3d (runner::on_dynamics routes them there)".into());
+        }
         let substeps = if asm.substeps == 0 { 4 } else { asm.substeps };
         let dt = 1.0 / (crate::runner::HZ * substeps as f64);
         let mut spec = ModelSpec::default();
         spec.option.gravity = gravity;
         spec.option.timestep = dt;
-        spec.option.cone = CONE_ELLIPTIC;
+        spec.option.cone = CONE_PYRAMIDAL;
         spec.option.enableflags |= ENBL_SPECULATIVE;
+        spec.option.sdf_initpoints = SDF_INITPOINTS;
+        spec.option.sdf_iterations = SDF_ITERATIONS;
+        let mut fields: Vec<(String, Arc<dyn Sdf>)> = Vec::new();
         // Two parts on a joint touch away from it, as the current engine's do (their proxies leave the joint's
         // region out): the assembly says which pairs never touch (a joint's collide), so the engine's own
         // filter, which drops every contact between a body and its parent, is off.
@@ -367,7 +583,7 @@ impl DynWorld {
                 let anchor = &asm.anchors[a];
                 body.parent = 1;
                 if let AnchorKind::Pin(axis) = anchor.kind {
-                    body.joints.push(JointSpec { name: Some(format!("anchor_{a}")), pos: sub(anchor.pivot,origin), axis: norm(axis), limited: 0, frictionloss: anchor.friction.torque, ..JointSpec::default() });
+                    body.joints.push(JointSpec { name: Some(format!("anchor_{a}")), pos: sub(anchor.pivot,origin), axis: norm(axis), limited: 0, frictionloss: anchor.friction.torque, solimp_friction: FRICTION_SOLIMP, solref_friction: [2.0*dt,1.0], ..JointSpec::default() });
                 }
             } else {
                 body.joints.push(JointSpec { name: Some(format!("free_{g}")), r#type: JNT_FREE, limited: 0, ..JointSpec::default() });
@@ -388,20 +604,38 @@ impl DynWorld {
                 };
                 for (points,r) in &b.tubes {
                     if points.len() < 3 { return Err("a closed tube needs at least three points".into()); }
-                    for k in 0..points.len() { capsule(points[k],points[(k+1)%points.len()],*r,1)?; }
+                    let points = simplified(points, TUBE_TOLERANCE);
+                    for k in 0..points.len() { capsule(points[k],points[(k+1)%points.len()],*r,SOLID)?; }
                 }
-                for &(a,c,r) in &b.rods { capsule(a,c,r,2)?; }
+                for &(a,c,r) in &b.rods { capsule(a,c,r,ROD)?; }
+                let hull_bits = if b.field.is_some() {
+                    GeomSpec { contype: 0, ..geom(asm,dt,SOLID) }
+                } else {
+                    GeomSpec { contype: HULL, conaffinity: SOLID|HULL, ..geom(asm,dt,SOLID) }
+                };
                 for (k,h) in b.hulls.iter().enumerate() {
                     let name = format!("mesh_{i}_{k}");
                     let vert = solid_hull(h).iter().flat_map(|p| { let p = sub(*p,origin); [p[0] as f32,p[1] as f32,p[2] as f32] }).collect();
                     hulls.push((i,k));
                     spec.meshes.push(MeshSpec { name: Some(name.clone()), vert, ..MeshSpec::default() });
                     body.geoms.push(GeomSpec {
-                        name: Some(format!("geom_{i}_{serial}")), r#type: GEOM_MESH, meshname: Some(name), ..geom(asm,dt,1)
+                        name: Some(format!("geom_{i}_{serial}")), r#type: GEOM_MESH, meshname: Some(name), ..hull_bits.clone()
                     });
                     serial += 1;
                 }
-                // Balls meet only fields; with fields refused, these geoms meet nothing and are omitted.
+                if let Some(field) = &b.field {
+                    let bounds = field.0.bounds();
+                    let lo = [bounds.lower_bound.x as f64, bounds.lower_bound.y as f64, bounds.lower_bound.z as f64];
+                    let hi = [bounds.upper_bound.x as f64, bounds.upper_bound.y as f64, bounds.upper_bound.z as f64];
+                    if !lo.iter().chain(hi.iter()).all(|v| v.is_finite()) || (0..3).any(|k| !(hi[k] > lo[k])) {
+                        return Err(format!("body {}: a field needs finite bounds with volume", b.name));
+                    }
+                    let centre = scale(add(lo,hi),0.5);
+                    let name = format!("geom_{i}_{serial}");
+                    body.geoms.push(GeomSpec { name: Some(name.clone()), r#type: GEOM_BOX, pos: sub(centre,origin), size: scale(sub(hi,lo),0.5), contype: FIELD, conaffinity: FIELD|HULL, ..geom(asm,dt,FIELD) });
+                    fields.push((name, Arc::new(FieldSdf { field: field.0.clone(), centre })));
+                }
+                // Balls meet only fields, and run on box3d beside one (above): alone, they meet nothing and are omitted.
             }
             spec_ids[g] = spec.bodies.len();
             spec.bodies.push(body);
@@ -422,7 +656,7 @@ impl DynWorld {
                 };
                 // Its limit and friction rows take their softness from the tree's inverse weights, which see the
                 // shared body but not the loop's parts that move with it: as stiff as the closing weld.
-                body.joints.push(JointSpec { solimp_limit: LOOP_SOLIMP, solimp_friction: LOOP_SOLIMP, ..joint_spec(asm,i,[0.0;3],1.0,dt) });
+                body.joints.push(JointSpec { solimp_limit: STIFF_SOLIMP, solimp_friction: STIFF_SOLIMP, ..joint_spec(asm,i,[0.0;3],1.0,dt) });
                 spec.bodies.push(body);
                 // the weld's anchor is on part b; its relative pose is taken at the rest pose
                 let mut data = [0.0;NEQDATA];
@@ -430,28 +664,54 @@ impl DynWorld {
                 data[10] = 1.0;
                 spec.equalities.push(EqualitySpec {
                     name: Some(loop_name(i)), r#type: EQ_WELD, name1: Some(loop_name(i)), name2: Some(body_name(group[j.b])),
-                    data, solref: [2.0*dt,1.0], solimp: LOOP_SOLIMP, ..EqualitySpec::default()
+                    data, solref: [2.0*dt,1.0], solimp: STIFF_SOLIMP, ..EqualitySpec::default()
                 });
             }
+        }
+        // A string is a site at each of its points and one tendon through them, limited to its length: taut,
+        // it holds as stiffly as a loop's weld; slack, it exerts nothing (no spring, no damping). Its tendon's
+        // id is its index, as strings are the only tendons.
+        for (s,string) in asm.strings.iter().enumerate() {
+            let mut path = Vec::new();
+            for (k,(part,at)) in string.points().enumerate() {
+                let site = format!("{}_{k}",string_name(s));
+                spec.bodies[spec_ids[group[part]]].sites.push(SiteSpec { name: Some(site.clone()), pos: sub(at,origins[part]), ..SiteSpec::default() });
+                path.push(WrapSpec::site(&site));
+            }
+            spec.tendons.push(TendonSpec {
+                name: Some(string_name(s)), limited: 1, range: [0.0,string.length],
+                solref_limit: [2.0*dt,1.0], solimp_limit: STIFF_SOLIMP, path, ..TendonSpec::default()
+            });
+        }
+        // A motor drives a hinge or a slider, tree joint or loop joint alike: both are named for the assembly's joint.
+        let mut motors = Vec::new();
+        for (i,j) in asm.joints.iter().enumerate() {
+            let Some(motor) = &j.motor else { continue };
+            if !matches!(j.kind, JointKind::Revolute { .. } | JointKind::Prismatic { .. }) { return Err(format!("joint {}: a motor drives a hinge or a slider", j.name)); }
+            if !(motor.limit > 0.0 && motor.limit.is_finite()) { return Err(format!("joint {}: a motor's limit must be finite and positive", j.name)); }
+            motors.push(Motored { joint: i, actuator: spec.actuators.len(), kind: motor.kind, target: 0.0 });
+            spec.actuators.push(motor_spec(i, motor));
         }
         if let Some(level) = floor {
             let up = scale(norm(gravity),-1.0);
             let mut quat = [0.0;4];
             util_spatial::quat_z2vec(&mut quat,&up);
-            spec.bodies[0].geoms.push(GeomSpec { name:Some("floor".into()),r#type:GEOM_PLANE,pos:scale(up,level),quat,size:[0.0,0.0,1.0],..geom(asm,dt,3) });
+            spec.bodies[0].geoms.push(GeomSpec { name:Some("floor".into()),r#type:GEOM_PLANE,pos:scale(up,level),quat,size:[0.0,0.0,1.0],..geom(asm,dt,SOLID|ROD) });
         }
         if let Some((centre,radius)) = asm.ball {
-            spec.bodies[0].geoms.push(GeomSpec { name:Some("drape_ball".into()),pos:centre,size:[radius,0.0,0.0],..geom(asm,dt,1) });
+            spec.bodies[0].geoms.push(GeomSpec { name:Some("drape_ball".into()),pos:centre,size:[radius,0.0,0.0],..geom(asm,dt,SOLID) });
         }
         let mut model = builder::compile(&spec).map_err(|e| hull_error(&spec,&hulls).unwrap_or(e))?;
+        attach_fields(&mut model,&fields);
         let overlaps = print_overlaps(&model,asm,dt);
         if !overlaps.is_empty() {
             spec.pairs.extend(overlaps);
             model = builder::compile(&spec).map_err(|e| hull_error(&spec,&hulls).unwrap_or(e))?;
+            attach_fields(&mut model,&fields);
         }
         let data = io::make_data(&model);
         let bodies: Vec<_> = group.iter().map(|&g| name::name2id(&model,OBJ_BODY,&body_name(g)) as usize).collect();
-        let joints = (0..asm.joints.len()).map(|i| {
+        let joints: Vec<Option<usize>> = (0..asm.joints.len()).map(|i| {
             let id=name::name2id(&model,OBJ_JOINT,&joint_name(i)); (id>=0).then_some(id as usize)
         }).collect();
         let mut shares = vec![1.0; model.nbody];
@@ -463,10 +723,15 @@ impl DynWorld {
         let anchor_joints = asm.anchors.iter().enumerate().filter_map(|(i,a)| {
             let id=name::name2id(&model,OBJ_JOINT,&format!("anchor_{i}")); (id>=0).then_some((id as usize,a.friction))
         }).collect();
-        let mut world = DynWorld { model,data,spec,assembly:asm.clone(),bodies,origins,joints,shares,loops:Vec::new(),still:Vec::new(),anchor_joints,
-            geom_parts:Vec::new(),pins:Vec::new(),grab:None,substeps,touching:Vec::new(),next_touching:Vec::new(),resets:Vec::new(),speed_scale:Vec::new(),impulse:Vec::new(),frozen:Vec::new(),ground:0,ground_velocity:[0.0;3],ground_spin:[0.0;3],ground_left:0.0,begins:Vec::new(),hit_events:Vec::new(),gravity };
+        let (loads,efforts,tensions) = (joints.iter().map(|j| j.map(|_| 0.0)).collect(),vec![0.0;motors.len()],vec![0.0;asm.strings.len()]);
+        let mut world = DynWorld { model,data,spec,fields,assembly:asm.clone(),bodies,origins,joints,motors,loads,efforts,tensions,shares,loops:Vec::new(),still:Vec::new(),anchor_joints,
+            geom_parts:Vec::new(),pins:Vec::new(),grab:None,carry:None,substeps,touching:Vec::new(),next_touching:Vec::new(),resets:Vec::new(),speed_scale:Vec::new(),impulse:Vec::new(),frozen:Vec::new(),ground:0,ground_velocity:[0.0;3],ground_spin:[0.0;3],ground_left:0.0,begins:Vec::new(),hit_events:Vec::new(),gravity };
         world.configure();
+        world.tune_motors();
         forward::forward(&world.model,&mut world.data);
+        // paused at the print pose, the panel reads what holds it there
+        core_smooth::rne_post_constraint(&world.model,&mut world.data);
+        world.read();
         Ok(world)
     }
 
@@ -483,7 +748,7 @@ impl DynWorld {
         self.model.tree_sleep_policy.fill(SLEEP_NEVER);
 
         for (i,b) in self.assembly.bodies.iter().enumerate() {
-            let count = b.tubes.iter().map(|(p,_)| p.len()).sum::<usize>() + b.rods.len() + b.hulls.len();
+            let count = b.tubes.iter().map(|(p,_)| p.len()).sum::<usize>() + b.rods.len() + b.hulls.len() + usize::from(b.field.is_some());
             for k in 0..count {
                 let id = name::name2id(&self.model,OBJ_GEOM,&format!("geom_{i}_{k}"));
                 if id >= 0 { self.geom_parts[id as usize]=Some(i); }
@@ -501,8 +766,15 @@ impl DynWorld {
     }
 
     pub fn name(&self) -> &'static str { "dynamics" }
-    /// The compiled model, its state and its spec (for measurements and exports).
     pub fn time(&self) -> f64 { self.data.time }
+    /// Gravity from now on, mm/s^2 (rebuilds keep it). It wakes everything, as nothing rests under a new pull.
+    pub fn set_gravity(&mut self, g: P3) {
+        let all: Vec<usize> = (0..self.model.nbody).collect();
+        self.wake(&all);
+        self.gravity = g;
+        self.model.opt.gravity = g;
+        self.spec.option.gravity = g;
+    }
     pub fn rest_com(&self, body: usize) -> P3 { self.assembly.bodies[body].mass.com }
     pub fn kept_out(&self) -> usize { 0 }
 
@@ -517,6 +789,40 @@ impl DynWorld {
             let q=quaternion(&self.data.xquat,body);
             Pose { com:self.world_point(body,sub(self.rest_com(i),self.origins[i])),rot:[q[1],q[2],q[3],q[0]] }
         }).collect()
+    }
+    /// Each string as it hangs now.
+    pub fn strings(&self) -> Vec<StringPath> {
+        self.assembly.strings.iter().enumerate().map(|(t,string)| {
+            let adr = self.data.ten_wrapadr[t] as usize;
+            let num = self.data.ten_wrapnum[t] as usize;
+            StringPath {
+                points: (adr..adr+num).map(|k| triple(&self.data.wrap_xpos,k)).collect(),
+                slack: (string.length-self.data.ten_length[t]).max(0.0),
+                tension: self.tensions[t],
+            }
+        }).collect()
+    }
+    /// Per assembly joint, the force through it (N); none for a weld (its parts are one body).
+    pub fn loads(&self) -> Vec<Option<f64>> { self.loads.clone() }
+    /// Per motor, in [`motors`](Self::motors)' order, the torque it pushes with (N mm; a slider's force, N).
+    pub fn efforts(&self) -> Vec<f64> { self.efforts.clone() }
+    // The readings of the substep just taken: a joint's force is what its body's parent puts through it, a
+    // motor's what its actuator pushes, a string's the force of its tendon's limit row (none when slack).
+    fn read(&mut self) {
+        let (m,d)=(&self.model,&self.data);
+        let awake=|body: usize| { let t=m.body_treeid[body]; t<0 || d.tree_asleep[t as usize]<0 };
+        for (load,j) in self.loads.iter_mut().zip(&self.joints) {
+            let Some(j)=*j else { continue };
+            let body=m.jnt_bodyid[j] as usize;
+            if awake(body) { *load=Some(len(triple(&d.cfrc_int,2*body+1))/NEWTON); }
+        }
+        for (effort,motor) in self.efforts.iter_mut().zip(&self.motors) {
+            if self.joints[motor.joint].is_some_and(|j| awake(m.jnt_bodyid[j] as usize)) { *effort=d.actuator_force[motor.actuator]/NEWTON; }
+        }
+        for (t,(tension,string)) in self.tensions.iter_mut().zip(&self.assembly.strings).enumerate() {
+            if !string.points().any(|(part,_)| awake(self.bodies[part])) { continue; }
+            *tension=(0..d.nefc as usize).filter(|&r| d.efc_type[r]==CNSTR_LIMIT_TENDON && d.efc_id[r]==t as i32).map(|r| d.efc_force[r]).sum::<f64>()/NEWTON;
+        }
     }
     fn velocity(&self, body: usize, point: P3) -> P3 {
         let mut v=[0.0;6];
@@ -560,8 +866,9 @@ impl DynWorld {
             for r in self.model.geom_solref.chunks_exact_mut(NREF) { r[0]=timeconst(contact_hertz(&self.assembly),h); }
             for r in self.model.pair_solref.chunks_exact_mut(NREF) { r[0]=timeconst(contact_hertz(&self.assembly),h); }
             for r in self.model.eq_solref.chunks_exact_mut(NREF) { r[0]=2.0*h; }
+            for r in self.model.dof_solref.chunks_exact_mut(NREF) { r[0]=2.0*h; }
+            self.tune_motors();
         }
-        self.damp_grip(dt);
         self.begins.clear();
         self.hit_events.clear();
         // With every tree asleep and nothing to move one (no hand, a still ground), a step changes nothing but
@@ -579,6 +886,7 @@ impl DynWorld {
             forward::step1(&self.model,&mut self.data);
             // The hand moves from where it was to where it is over the step, as the current engine's target body does.
             if let Some((from,travel))=hand { self.pull(madd(from,travel,k as f64/self.substeps as f64),scale(travel,1.0/dt),h); }
+            if k==0 { self.damp_grip(dt,h); }
             forward::step2(&self.model,&mut self.data);
             self.note_resets(time);
             core_smooth::rne_post_constraint(&self.model,&mut self.data);
@@ -588,9 +896,12 @@ impl DynWorld {
             self.close_loops();
         }
         if let Some(g)=&mut self.grab { g.from=g.at; }
+        self.read();
         // The integrator advances qpos after computing xpos; expose the completed step's pose.
         core_smooth::kinematics(&self.model,&mut self.data);
         core_smooth::com_pos(&self.model,&mut self.data);
+        // and the strings' paths through it
+        if self.model.ntendon>0 { core_smooth::tendon(&self.model,&mut self.data); }
         core_smooth::com_vel(&self.model,&mut self.data);
     }
 
@@ -664,6 +975,52 @@ impl DynWorld {
         }).collect()
     }
 
+    // The motors' gains for this substep ([`SERVO_BAND_HINGE`] and the others).
+    fn tune_motors(&mut self) {
+        let fastest = MOTOR_SWING / self.model.opt.timestep;
+        for m in &self.motors {
+            let i = m.actuator;
+            let inertia = 1.0 / self.model.actuator_acc0[i].max(MINVAL);
+            let limit = self.model.actuator_forcerange[2*i+1];
+            let slide = self.model.jnt_type[self.model.actuator_trnid[2*i] as usize] == JNT_SLIDE;
+            let (gain, bias) = (&mut self.model.actuator_gainprm[NGAIN*i..NGAIN*(i+1)], &mut self.model.actuator_biasprm[NBIAS*i..NBIAS*(i+1)]);
+            match m.kind {
+                crate::MotorKind::Position => {
+                    let band = if slide { SERVO_BAND_SLIDER } else { SERVO_BAND_HINGE };
+                    let kp = (limit / band).min(inertia * fastest * fastest);
+                    gain[0] = kp;
+                    bias[1] = -kp;
+                    bias[2] = -2.0 * (kp * inertia).sqrt();
+                }
+                crate::MotorKind::Speed => {
+                    let band = if slide { DRIVE_BAND_SLIDER } else { DRIVE_BAND_HINGE };
+                    let kv = (limit / band).min(2.0 * inertia * fastest);
+                    gain[0] = kv;
+                    bias[2] = -kv;
+                }
+            }
+        }
+    }
+
+    /// Sets joint `j`'s motor: a servo's angle or travel to go to (B relative to A from where it printed, within
+    /// the joint's range), a drive's speed. A joint without a motor, or a target that is not finite, is left as it is.
+    pub fn set_motor(&mut self, j: usize, target: f64) {
+        let Some(k) = self.motors.iter().position(|m| m.joint == j) else { return };
+        let Some(id) = self.joints[j] else { return };
+        if !target.is_finite() { return; }
+        let target = if self.motors[k].kind == crate::MotorKind::Position && self.model.jnt_limited[id] != 0 {
+            target.clamp(self.model.jnt_range[2*id], self.model.jnt_range[2*id+1])
+        } else {
+            target
+        };
+        self.motors[k].target = target;
+        self.data.ctrl[self.model.actuator_ctrladr[self.motors[k].actuator] as usize] = target;
+        self.wake(&[self.model.jnt_bodyid[id] as usize]);
+    }
+
+    /// Each motor's joint and what it is set to.
+    pub fn motors(&self) -> Vec<(usize, f64)> { self.motors.iter().map(|m| (m.joint, m.target)).collect() }
+
     pub fn set_limits(&mut self, j: usize, kind: &JointKind) {
         // Only a weld has no joint.
         let Some(id)=self.joints[j] else { return };
@@ -688,6 +1045,14 @@ impl DynWorld {
     pub fn grab(&mut self, body: usize, point: P3, stiffness_hz: f64) {
         assert!(stiffness_hz>0.0 && stiffness_hz.is_finite(),"grab stiffness must be finite and positive");
         let id=self.bodies[body];
+        let held=self.assembly.anchors.iter().any(|a| a.kind==AnchorKind::Held && self.bodies[a.body]==id);
+        if held && self.model.body_rootid[id] as usize==self.ground {
+            let m=self.model.body_mocapid[self.ground] as usize;
+            let local=unrotated(quaternion(&self.data.mocap_quat,m),sub(point,triple(&self.data.mocap_pos,m)));
+            self.release();
+            self.carry=Some(Carry {body,local});
+            return;
+        }
         self.wake(&[id]);
         let local=self.local_point(id,point);
         let mass=self.assembly.bodies[body].mass.mass;
@@ -747,6 +1112,13 @@ impl DynWorld {
     }
     pub fn dangle(&mut self, body: usize, point: P3) { self.grab(body,point,DANGLE_HZ); }
     pub fn drag(&mut self, point: P3, dt: f64) {
+        if let Some(c)=&self.carry {
+            let m=self.model.body_mocapid[self.ground] as usize;
+            let q=quaternion(&self.data.mocap_quat,m);
+            let at=sub(point,rotated(q,c.local));
+            self.wake_all();
+            self.set_ground(at,q,dt);
+        }
         if let Some(g)=&mut self.grab {
             let delta=sub(point,g.at);
             let cap=self.assembly.max_speed*dt;
@@ -758,8 +1130,21 @@ impl DynWorld {
             g.at=at;
         }
     }
-    pub fn release(&mut self) { self.grab=None; self.data.xfrc_applied.fill(0.0); }
-    pub fn grabbed(&self) -> Option<usize> { self.grab.as_ref().map(|g|g.body) }
+    pub fn release(&mut self) { self.grab=None; self.carry=None; self.data.xfrc_applied.fill(0.0); }
+    pub fn grabbed(&self) -> Option<usize> { self.grab.as_ref().map(|g|g.body).or(self.carry.as_ref().map(|c|c.body)) }
+    /// A grab carries a held part (and the ground with it).
+    pub fn carrying(&self) -> bool { self.carry.is_some() }
+    /// Where the ground (what holds the held and fixed parts) is now.
+    pub fn ground_at(&self) -> P3 { triple(&self.data.mocap_pos,self.model.body_mocapid[self.ground] as usize) }
+    /// Whether a part the ground does not hold (one that hangs from what it holds, or lies free) reaches below
+    /// `height` against gravity.
+    pub fn hangs_below(&self, height: f64) -> bool {
+        let up=scale(norm(self.gravity),-1.0);
+        (0..self.bodies.len()).filter(|&b| self.model.body_rootid[self.bodies[b]] as usize!=self.ground).any(|b| {
+            let (lo,hi)=self.bounds(b);
+            (0..8).any(|i| dot(std::array::from_fn(|k| if i&(1<<k)==0 {lo[k]} else {hi[k]}),up)<height)
+        })
+    }
 
     pub fn poke(&mut self, body: usize, point: P3, dv: P3) {
         self.wake(&[self.bodies[body]]);
@@ -812,6 +1197,7 @@ impl DynWorld {
             compiled.equalities.push(eq);
         }
         let mut model=builder::compile(&compiled).expect("valid mechanism topology must compile");
+        attach_fields(&mut model,&self.fields);
         for p in &self.pins {
             let id=name::name2id(&model,OBJ_EQUALITY,&format!("pin_{}",p.body)) as usize;
             model.eq_data[id*NEQDATA+3..id*NEQDATA+6].copy_from_slice(&p.world);
@@ -884,8 +1270,10 @@ impl DynWorld {
             let id=name::name2id(&model,OBJ_JOINT,&format!("anchor_{i}"));
             (id>=0).then_some((id as usize,a.friction))
         }).collect();
+        data.ctrl.copy_from_slice(&self.data.ctrl);
         self.model=model; self.data=data;
         self.configure();
+        self.tune_motors();
         self.touching.clear(); self.next_touching.clear();
         forward::forward(&self.model,&mut self.data);
     }
@@ -894,7 +1282,12 @@ impl DynWorld {
         String::from_utf8(name::id2name(&self.model,OBJ_BODY,self.bodies[body] as i32).unwrap().to_vec()).unwrap()
     }
 
-    fn damp_grip(&mut self, dt:f64) {
+    // The hand's damping over the step (the held part drawn to the hand's velocity, its spin slowed), as the
+    // current engine's grip has it: an implicit step's impulse, applied as a force over the step's first substep
+    // (`h`), so the contact solve meets it with the hand's pull. Added to the velocities ahead of the solve, it
+    // drove a part held against a wall into it, the solve's rebound lifted the part off its contacts, and the
+    // pull threw it in for a substep: up to 0.9 mm into the wall, every few steps of a hard drag.
+    fn damp_grip(&mut self, dt:f64, h:f64) {
         let Some(g)=&self.grab else {return;};
         let body=self.bodies[g.body];
         let mut velocity=[0.0;6];
@@ -907,12 +1300,10 @@ impl DynWorld {
         let torque=rotated(q,scale(momentum,keep-1.0));
         let mass=self.assembly.bodies[g.body].mass.mass;
         let force=scale(sub(g.velocity,velocity[3..].try_into().unwrap()),mass*dt*g.linear_damping/(1.0+dt*g.linear_damping));
-        let point=triple(&self.data.xipos,body);
-        self.impulse.fill(0.0);
-        support::apply_ft(&self.model,&mut self.data,Some(&force),Some(&torque),&point,body as i32,&mut self.impulse);
-        core_smooth::solve_m(&self.model,&mut self.data,&mut self.impulse,None,1);
-        for (v,dv) in self.data.qvel.iter_mut().zip(&self.impulse) {*v+=dv;}
-        core_smooth::com_vel(&self.model,&mut self.data);
+        for k in 0..3 {
+            self.data.xfrc_applied[6*body+k]+=force[k]/h;
+            self.data.xfrc_applied[6*body+3+k]+=torque[k]/h;
+        }
     }
 
     // The engine meets an equality at the acceleration level, so a loop moving fast drifts open by about
@@ -1013,6 +1404,12 @@ impl DynWorld {
             self.still[t] = if slow { self.still[t]+h } else { 0.0 };
             m.tree_sleep_policy[t] = if self.still[t] >= SLEEP_TIME { SLEEP_ALLOWED } else { SLEEP_NEVER };
         }
+    }
+
+    /// Wakes every part, as a hand that moves the ground does.
+    pub fn wake_all(&mut self) {
+        let everything=self.bodies.clone();
+        self.wake(&everything);
     }
 
     // Wakes the trees of these model bodies with their islands now, each for SLEEP_TIME at least: a hand on a
@@ -1270,6 +1667,123 @@ impl DynWorld {
         }
         forward::forward(&self.model,&mut self.data);
     }
+}
+
+// A string's point may lie this far outside its part's solid (mm): on its surface, as a hole's centre in a
+// thin wall is.
+const STRING_POINT_SLACK: f64 = 0.5;
+
+/// Checks the strings as [`DynWorld::new`] does before it builds: each point inside its part, and no string
+/// shorter than its path as printed.
+pub fn check_strings(asm: &Assembly) -> Result<(), StringFault> {
+    let names: Vec<&str> = asm.bodies.iter().map(|b| b.name.as_str()).collect();
+    check_string_parts(&asm.strings,&names,&|part,at| inside_part(&asm.bodies[part],at))
+}
+
+/// [`check_strings`] on parts known by their names and `inside(part, point)`: a host checks against each part's
+/// [`Outline`] before it has the bodies.
+pub fn check_string_parts(strings: &[StringSpec], names: &[&str], inside: &dyn Fn(usize, P3) -> bool) -> Result<(), StringFault> {
+    for (s,string) in strings.iter().enumerate() {
+        let points: Vec<_> = string.points().collect();
+        for (k,&(part,at)) in points.iter().enumerate() {
+            let Some(name) = names.get(part) else { return Err(StringFault::NoPart { string: s, part }) };
+            if !inside(part,at) { return Err(StringFault::Outside { string: s, point: k, points: points.len(), part: name.to_string() }); }
+        }
+        let path: f64 = points.windows(2).map(|w| len(sub(w[1].1,w[0].1))).sum();
+        if !(string.length > 0.0 && string.length.is_finite()) || path > string.length {
+            return Err(StringFault::TooShort { string: s, path, length: string.length });
+        }
+    }
+    Ok(())
+}
+
+// Inside the part: within the outline of all its hulls together (a hole's centre is a void, and a part's convex
+// pieces may leave it out), or a tube's or rod's capsule, or a ball.
+fn inside_part(b: &crate::sim::BodySpec, p: P3) -> bool {
+    let capsule = |a: P3, c: P3, r: f64| {
+        let d = sub(c,a);
+        let t = (dot(sub(p,a),d)/dot(d,d).max(f64::MIN_POSITIVE)).clamp(0.0,1.0);
+        len(sub(p,madd(a,d,t))) <= r+STRING_POINT_SLACK
+    };
+    let outline: Vec<P3> = b.hulls.iter().flatten().copied().collect();
+    (!outline.is_empty() && Outline::new(&outline).contains(p))
+        || b.tubes.iter().any(|(pts,r)| (0..pts.len()).any(|k| capsule(pts[k],pts[(k+1)%pts.len()],*r)))
+        || b.rods.iter().any(|&(a,c,r)| capsule(a,c,r))
+        || b.balls.iter().any(|&(c,r)| len(sub(p,c)) <= r+STRING_POINT_SLACK)
+}
+
+/// A part's outline for the strings' check: the convex hull of its points (its hulls' corners, or a mesh's
+/// vertices), so a hole through the part has its centre inside. The hull is never built: a point's distance
+/// to it comes from the points' extremes alone (GJK), so a meshed field's flat faces, a hair off flat, are no
+/// trouble.
+pub struct Outline {
+    points: Vec<P3>,
+}
+
+impl Outline {
+    pub fn new(points: &[P3]) -> Outline {
+        Outline { points: points.to_vec() }
+    }
+
+    /// Within the outline, or [`STRING_POINT_SLACK`] outside it.
+    pub fn contains(&self, p: P3) -> bool {
+        let Some(&first) = self.points.first() else { return false };
+        // from p, the outline's point farthest along d
+        let support = |d: P3| self.points.iter().map(|q| sub(*q,p)).max_by(|a,b| dot(*a,d).total_cmp(&dot(*b,d))).unwrap();
+        let mut simplex = vec![sub(first,p)];
+        let mut v = simplex[0];
+        loop {
+            let d = len(v);
+            if d <= STRING_POINT_SLACK { return true; }
+            let w = support(scale(v,-1.0));
+            // the whole outline lies beyond the plane through w across v: at least this far from p
+            if dot(w,v)/d > STRING_POINT_SLACK { return false; }
+            simplex.push(w);
+            let (nearer, kept) = nearest_on_simplex(&simplex);
+            // rounding stops the descent: p is as far as v says
+            if dot(nearer,nearer) >= d*d { return false; }
+            (v, simplex) = (nearer, kept);
+        }
+    }
+}
+
+// The point of the simplex `s` (at most four points) nearest the origin, and the fewest of its points that span
+// it: over every subset, the origin's projection onto the subset's span, where that falls within the subset.
+fn nearest_on_simplex(s: &[P3]) -> (P3, Vec<P3>) {
+    let mut best: Option<(f64, P3, Vec<P3>)> = None;
+    for mask in 1u32..(1 << s.len()) {
+        let pts: Vec<P3> = (0..s.len()).filter(|i| mask >> i & 1 == 1).map(|i| s[i]).collect();
+        let o = pts[0];
+        let e: Vec<P3> = pts[1..].iter().map(|q| sub(*q,o)).collect();
+        let mu: Vec<f64> = match e.len() {
+            0 => Vec::new(),
+            1 => {
+                let g = dot(e[0],e[0]);
+                if g <= 0.0 { continue; }
+                vec![-dot(e[0],o)/g]
+            }
+            2 => {
+                let (a,b,c) = (dot(e[0],e[0]),dot(e[0],e[1]),dot(e[1],e[1]));
+                let det = a*c-b*b;
+                if det <= 1e-12*a*c { continue; }
+                let (r0,r1) = (-dot(e[0],o),-dot(e[1],o));
+                vec![(r0*c-r1*b)/det,(a*r1-b*r0)/det]
+            }
+            _ => {
+                let det = dot(e[0],cross(e[1],e[2]));
+                if det.abs() <= 1e-12*len(e[0])*len(e[1])*len(e[2]) { continue; }
+                let t = scale(o,-1.0);
+                vec![dot(t,cross(e[1],e[2]))/det,dot(e[0],cross(t,e[2]))/det,dot(e[0],cross(e[1],t))/det]
+            }
+        };
+        if mu.iter().any(|m| *m < 0.0) || mu.iter().sum::<f64>() > 1.0 { continue; }
+        let x = e.iter().zip(&mu).fold(o,|x,(ei,m)| madd(x,*ei,*m));
+        let d = dot(x,x);
+        if best.as_ref().is_none_or(|b| d < b.0 || (d == b.0 && pts.len() < b.2.len())) { best = Some((d,x,pts)); }
+    }
+    // a single point is always its own nearest
+    let (_,x,pts) = best.unwrap();
+    (x,pts)
 }
 
 // A hull's points as the dynamics engine's mesh takes them. The engine refuses a flat, straight or

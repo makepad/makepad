@@ -152,7 +152,7 @@ script_mod! {
         //       nothing); gba = a model-space offset added to the vertex
         //   texels 1..3 (stride 4 only): the rows of a model-space rotation
         //       applied before the offset (rigid moves: a live mechanism),
-        //       and to the normal
+        //       and to the normal; texel 2 `a` over 0.5: casts no shadow
         // `elem_ctl` = (map width, map height, texels per element, enable).
         // The host writes both with `DrawVars::set_texture(6, ..)` /
         // `set_uniform(live_id!(elem_ctl), ..)` on its own draw struct.
@@ -163,6 +163,13 @@ script_mod! {
         // a fragment where dot(xyz, p) + w < 0 is cut away. The zero plane
         // (the default) keeps everything.
         host_clip: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // A box the model lanes keep (`Renderer::set_host_box`): a fragment past 1 on any of its
+        // three rows, abs(dot(row, (p, 1))), is cut. All zero: nothing reads past 1. An element
+        // whose lookup says so (stride 4, texel 3 `a` below zero) stays whole: what stands around
+        // the box, not in it.
+        host_box0: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        host_box1: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        host_box2: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // ---- screen-space AO (ssao.rs) — slot 7, OFF by default ----
         // A host that runs `SsaoPass` hands its blurred output to
         // `Renderer::set_ssao`, which binds it here for BOTH model lanes.
@@ -584,6 +591,10 @@ script_mod! {
         // complementary pixels.
         host_cut: fn() {
             if dot(self.host_clip.xyz, self.v_csm.xyz) + self.host_clip.w < 0.0 { self.clip() }
+            let p = vec4(self.v_csm.xyz, 1.0)
+            if max(max(abs(dot(self.host_box0, p)), abs(dot(self.host_box1, p))), abs(dot(self.host_box2, p))) > 1.0 {
+                if self.v_paint.w < 0.0 || self.paint_texel(self.v_paint.w * self.elem_ctl.z + 3.0).w > 0.0 - 0.5 { self.clip() }
+            }
         }
         door_window: fn() {
             if self.color_adjust_ctl.w > 0.5 {

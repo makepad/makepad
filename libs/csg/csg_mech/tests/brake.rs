@@ -34,7 +34,7 @@ fn boxes() -> [PartBox; 3] {
 }
 
 fn knee(brake: Option<BrakeDecl>) -> JointDecl {
-    JointDecl::Hinge(HingeDecl { a: 0, b: 1, at: [0.0, JY, 0.0], axis: [1.0, 0.0, 0.0], limits: None, pin: Some(2.5), plate: None, clearance: None, clearance_axial: None, brake })
+    JointDecl::Hinge(HingeDecl { a: 0, b: 1, at: [0.0, JY, 0.0], axis: [1.0, 0.0, 0.0], limits: None, pin: Some(2.5), plate: None, clearance: None, clearance_axial: None, brake, motor: None })
 }
 
 struct Built {
@@ -56,7 +56,7 @@ impl Leg {
         self.rk + 0.05
     }
     fn knee(&self, brake: Option<BrakeDecl>) -> JointDecl {
-        JointDecl::Hinge(HingeDecl { a: 0, b: 1, at: [0.0, self.jy(), 0.0], axis: [1.0, 0.0, 0.0], limits: None, pin: Some(2.5), plate: None, clearance: None, clearance_axial: None, brake })
+        JointDecl::Hinge(HingeDecl { a: 0, b: 1, at: [0.0, self.jy(), 0.0], axis: [1.0, 0.0, 0.0], limits: None, pin: Some(2.5), plate: None, clearance: None, clearance_axial: None, brake, motor: None })
     }
     fn slabs(&self) -> [PartBox; 3] {
         let jy = self.jy();
@@ -148,13 +148,13 @@ fn a_brake_needs_a_shoe_of_its_own_and_a_pin_to_groove() {
     let mut parts = boxes().to_vec();
     parts.push(PartBox { min: [-6.0, 0.0, 40.0], max: [6.0, 2.0 * JY, 70.0] });
     parts.push(PartBox { min: [-6.0, 0.0, 31.0], max: [6.0, 2.0 * JY, 49.0] });
-    let ankle = |brake: Option<BrakeDecl>| JointDecl::Hinge(HingeDecl { a: 1, b: 3, at: [0.0, JY, 40.0], axis: [1.0, 0.0, 0.0], limits: None, pin: Some(2.5), plate: None, clearance: None, clearance_axial: None, brake });
+    let ankle = |brake: Option<BrakeDecl>| JointDecl::Hinge(HingeDecl { a: 1, b: 3, at: [0.0, JY, 40.0], axis: [1.0, 0.0, 0.0], limits: None, pin: Some(2.5), plate: None, clearance: None, clearance_axial: None, brake, motor: None });
     let fails = |decls: &[JointDecl]| plan(&parts, decls, &[], &[], &profile).unwrap_err().message;
     assert!(fails(&[knee(Some(BrakeDecl { shoe: 1, hold: None }))]).contains("of its own"));
     assert!(fails(&[knee(Some(BrakeDecl { shoe: 3, hold: None })), ankle(None)]).contains("a joint joins"));
     assert!(fails(&[knee(Some(BrakeDecl { shoe: 2, hold: None })), ankle(Some(BrakeDecl { shoe: 2, hold: None }))]).contains("of its own"));
     plan(&parts, &[knee(Some(BrakeDecl { shoe: 2, hold: None })), ankle(Some(BrakeDecl { shoe: 4, hold: None }))], &[], &[], &profile).unwrap();
-    let thin = JointDecl::Hinge(HingeDecl { a: 0, b: 1, at: [0.0, JY, 0.0], axis: [1.0, 0.0, 0.0], limits: None, pin: Some(1.0), plate: None, clearance: None, clearance_axial: None, brake: Some(BrakeDecl { shoe: 2, hold: None }) });
+    let thin = JointDecl::Hinge(HingeDecl { a: 0, b: 1, at: [0.0, JY, 0.0], axis: [1.0, 0.0, 0.0], limits: None, pin: Some(1.0), plate: None, clearance: None, clearance_axial: None, brake: Some(BrakeDecl { shoe: 2, hold: None }), motor: None });
     assert!(fails(&[thin]).contains("a brake needs a pin"));
 }
 

@@ -544,9 +544,10 @@ pub fn slopes_within(n: &SdfNode, region: &Bounds, reach: f64) -> Slopes {
     Slopes { outside: steep(n, g.as_ref(), (0.0, reach)), inside: steep(n, g.as_ref(), (-reach, 0.0)) }
 }
 
-/// `n`'s [`Slopes`] anywhere.
-pub fn slopes_anywhere(n: &SdfNode) -> Slopes {
-    Slopes { outside: steep(n, None, (0.0, f64::INFINITY)), inside: steep(n, None, (f64::NEG_INFINITY, 0.0)) }
+/// `n`'s [`Slopes`] anywhere, at only the values within `reach` of 0: outside at `0..=reach`,
+/// inside at `-reach..=0`, as [`slopes_within`].
+pub fn slopes_anywhere(n: &SdfNode, reach: f64) -> Slopes {
+    Slopes { outside: steep(n, None, (0.0, reach)), inside: steep(n, None, (-reach, 0.0)) }
 }
 
 /// `w` times `f` (a negative `f` turns it over).
@@ -910,59 +911,62 @@ pub fn same(a: &SdfNode, b: &SdfNode) -> bool {
 
 /// Where two stroke logs on the same field can differ: the moved strokes' boxes, grown by
 /// the widest blend.
-fn strokes_changed(sa: &crate::strokes::Strokes, sb: &crate::strokes::Strokes) -> Option<Bounds> {
+fn strokes_changed(sa: &crate::strokes::Strokes, sb: &crate::strokes::Strokes) -> Vec<Bounds> {
     let k = sa.applied().chain(sb.applied()).filter_map(|(_, s)| s.tube()).map(|t| t.blend).fold(0.0, f64::max);
-    sa.changed_boxes(sb, false).into_iter().map(|b| grow(b, k)).reduce(union)
+    sa.changed_boxes(sb, false).into_iter().map(|b| grow(b, k)).collect()
 }
 
-/// Where the surface of `new` can differ from the surface of `old`: the
-/// bounds of every changed subtree, old and new, grown by the blends,
-/// shells and roundings above it and placed into the root frame. `None`
-/// when the nodes are the same; an unbounded change is `Some` of an
-/// infinite box.
+/// [`changes`] in one box: `None` when the nodes are the same; an unbounded change is `Some` of
+/// an infinite box.
 pub fn changed(old: &SdfNode, new: &SdfNode) -> Option<Bounds> {
+    changes(old, new).into_iter().reduce(union)
+}
+
+/// Where the surface of `new` can differ from the surface of `old`, a box for each change: the
+/// bounds of a changed subtree, old and new, grown by the blends, shells and roundings above it
+/// and placed into the root frame. Each change reaches only its own box whatever the others do,
+/// so past all the boxes the surface is the same. None when the nodes are the same; an unbounded
+/// change is an infinite box.
+pub fn changes(old: &SdfNode, new: &SdfNode) -> Vec<Bounds> {
     if same(old, new) {
-        return None;
+        return Vec::new();
     }
     let everywhere = ([f64::NEG_INFINITY; 3], [f64::INFINITY; 3]);
     let whole = || match (node_bounds(old), node_bounds(new)) {
-        (Some(a), Some(b)) => union(a, b),
-        _ => everywhere,
+        (Some(a), Some(b)) => vec![union(a, b)],
+        _ => vec![everywhere],
     };
-    Some(match (old, new) {
+    let grown = |boxes: Vec<Bounds>, r: f64| boxes.into_iter().map(|b| grow(b, r)).collect::<Vec<_>>();
+    match (old, new) {
         (SdfNode::Combine { op: oa, blend: ba, of: ca }, SdfNode::Combine { op: ob, blend: bb, of: cb }) if oa == ob && ba == bb && ca.len() == cb.len() => {
-            let mut out: Option<Bounds> = None;
-            for (a, b) in ca.iter().zip(cb) {
-                if let Some(c) = changed(a, b) {
-                    let c = grow(c, fold_reach(*ba, ca.len()));
-                    out = Some(out.map_or(c, |o| union(o, c)));
-                }
-            }
-            out?
+            grown(ca.iter().zip(cb).flat_map(|(a, b)| changes(a, b)).collect(), fold_reach(*ba, ca.len()))
         }
-        (SdfNode::Shell { thickness: ta, of: a }, SdfNode::Shell { thickness: tb, of: b }) if ta == tb => grow(changed(a, b)?, *ta),
-        (SdfNode::Round { radius: ra, of: a }, SdfNode::Round { radius: rb, of: b }) if ra == rb => grow(changed(a, b)?, *ra),
+        (SdfNode::Shell { thickness: ta, of: a }, SdfNode::Shell { thickness: tb, of: b }) if ta == tb => grown(changes(a, b), *ta),
+        (SdfNode::Round { radius: ra, of: a }, SdfNode::Round { radius: rb, of: b }) if ra == rb => grown(changes(a, b), *ra),
         (SdfNode::Transform { at: aa, rotate: ra, scale: sa, of: a }, SdfNode::Transform { at: ab, rotate: rb, scale: sb, of: b }) if aa == ab && ra == rb && sa == sb => {
-            map_bounds(&changed(a, b)?, out_of(*aa, *ra, *sa))
+            changes(a, b).iter().map(|c| map_bounds(c, out_of(*aa, *ra, *sa))).collect()
         }
         // A slot change is a material change on the same surface.
-        (SdfNode::Material { of: a, .. }, SdfNode::Material { of: b, .. }) | (SdfNode::Id { of: a, .. }, SdfNode::Id { of: b, .. }) => changed(a, b).unwrap_or_else(whole),
-        (SdfNode::Bone { id: ia, rest: ra, of: a }, SdfNode::Bone { id: ib, rest: rb, of: b }) if ia == ib && ra == rb => changed(a, b)?,
+        (SdfNode::Material { of: a, .. }, SdfNode::Material { of: b, .. }) | (SdfNode::Id { of: a, .. }, SdfNode::Id { of: b, .. }) => match changes(a, b) {
+            none if none.is_empty() => whole(),
+            boxes => boxes,
+        },
+        (SdfNode::Bone { id: ia, rest: ra, of: a }, SdfNode::Bone { id: ib, rest: rb, of: b }) if ia == ib && ra == rb => changes(a, b),
         // The source's change, as far as the texture reads it.
-        (SdfNode::Texture { tex: ta, of: a }, SdfNode::Texture { tex: tb, of: b }) if ta.same(tb) => grow(changed(a, b)?, ta.reach()),
+        (SdfNode::Texture { tex: ta, of: a }, SdfNode::Texture { tex: tb, of: b }) if ta.same(tb) => grown(changes(a, b), ta.reach()),
         // Only where the strokes moved (one drawn, one undone).
-        (SdfNode::Sculpt { strokes: sa, of: a }, SdfNode::Sculpt { strokes: sb, of: b }) if same(a, b) => strokes_changed(sa, sb)?,
+        (SdfNode::Sculpt { strokes: sa, of: a }, SdfNode::Sculpt { strokes: sb, of: b }) if same(a, b) => strokes_changed(sa, sb),
         // The first stroke (or the last one undone): only where it reaches.
-        (a, SdfNode::Sculpt { strokes, of: b }) if same(a, b) => strokes_changed(&crate::strokes::Strokes::new(), strokes)?,
-        (SdfNode::Sculpt { strokes, of: a }, b) if same(a, b) => strokes_changed(strokes, &crate::strokes::Strokes::new())?,
+        (a, SdfNode::Sculpt { strokes, of: b }) if same(a, b) => strokes_changed(&crate::strokes::Strokes::new(), strokes),
+        (SdfNode::Sculpt { strokes, of: a }, b) if same(a, b) => strokes_changed(strokes, &crate::strokes::Strokes::new()),
         (SdfNode::Instance { places: pa, of: a }, SdfNode::Instance { places: pb, of: b }) if same(a, b) => {
             // Only the moved, added or removed copies.
             let ob = node_bounds(a).unwrap_or(everywhere);
             let moved = |x: &[crate::shape::SdfPlace], y: &[crate::shape::SdfPlace]| x.iter().filter(|p| !y.contains(p)).map(|pl| map_bounds(&ob, |q| pl.out_of(q))).collect::<Vec<_>>();
-            moved(pa, pb).into_iter().chain(moved(pb, pa)).reduce(union)?
+            moved(pa, pb).into_iter().chain(moved(pb, pa)).collect()
         }
         _ => whole(),
-    })
+    }
 }
 
 /// What [`cut_within`] reads of one tree for one window, made once per tree ([`window`]): each
@@ -1398,6 +1402,76 @@ pub(crate) mod tests {
             }
         }
         assert!(checked > 500_000, "{checked} points outside the regions");
+    }
+
+    /// Random pairs of edits of [`Figure`] at once, each pair told by a box per change: no point a
+    /// dense sample round each box holds changes side outside all of them, and [`changed`] is
+    /// the box round them.
+    #[test]
+    fn random_edits_two_at_once_change_the_solid_only_inside_their_boxes() {
+        let (mut checked, mut apart) = (0, 0);
+        for seed in 1..=2u64 {
+            let mut r = Rng(0x2545_f491_4f6c_dd1d ^ (seed << 32));
+            let mut fig = Figure::new();
+            for _ in 0..40 {
+                let old = fig.node();
+                let what = [fig.edit(&mut r), fig.edit(&mut r)];
+                let new = fig.node();
+                let boxes = changes(&old, &new);
+                let round = boxes.iter().copied().reduce(union);
+                assert!(round.map(|(lo, hi)| (lo.map(f64::to_bits), hi.map(f64::to_bits))) == changed(&old, &new).map(|(lo, hi)| (lo.map(f64::to_bits), hi.map(f64::to_bits))), "seed {seed}: {what:?}: changed is the box round {boxes:?}");
+                apart += usize::from(boxes.iter().enumerate().any(|(i, a)| boxes[i + 1..].iter().any(|b| meet(a, b).is_none())));
+                let hull = union(node_bounds(&old).unwrap(), node_bounds(&new).unwrap());
+                for b in &boxes {
+                    let Some(near) = meet(&grow(*b, 4.0), &grow(hull, 0.5)) else { continue };
+                    let n = 24;
+                    let j: P3 = std::array::from_fn(|_| r.unit());
+                    let step: P3 = std::array::from_fn(|k| (near.1[k] - near.0[k]) / n as f64);
+                    for a in 0..n {
+                        for c in 0..n {
+                            for d in 0..n {
+                                let p = Vec3d::new(near.0[0] + (a as f64 + j[0]) * step[0], near.0[1] + (c as f64 + j[1]) * step[1], near.0[2] + (d as f64 + j[2]) * step[2]);
+                                if boxes.iter().any(|b| inside(b, p)) {
+                                    continue;
+                                }
+                                checked += 1;
+                                assert!((distance(&old, p) <= 0.0) == (distance(&new, p) <= 0.0), "seed {seed}: {what:?} changed {p:?} outside {boxes:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 100_000, "{checked} points outside the boxes");
+        assert!(apart >= 5, "{apart} pairs of edits made boxes apart");
+    }
+
+    /// Two balls grown at the two ends of a blended chain in a turned frame: a box for each, apart,
+    /// each holding where its own ball moves the surface, necks included, and no point outside
+    /// them changing side.
+    #[test]
+    fn two_changes_in_a_turned_blend_stay_in_their_boxes() {
+        let ball = |x: f64, r: f64| at([x, 0.0, 0.0], SdfNode::Sphere { radius: r });
+        let chain = |a: f64, b: f64| SdfNode::Transform {
+            at: [3.0, -2.0, 5.0],
+            rotate: [25.0, 50.0, 10.0],
+            scale: 1.0,
+            of: Box::new(SdfNode::Combine { op: SdfOp::Union, blend: 2.0, of: vec![ball(-60.0, a), ball(-55.0, 2.0), ball(0.0, 2.0), ball(55.0, 2.0), ball(60.0, b)] }),
+        };
+        let (old, new) = (chain(3.0, 3.0), chain(3.5, 3.5));
+        let boxes = changes(&old, &new);
+        assert_eq!(boxes.len(), 2, "{boxes:?}");
+        assert!(meet(&boxes[0], &boxes[1]).is_none(), "the two are apart: {boxes:?}");
+        for b in &boxes {
+            let mut moved = 0;
+            for p in grid(&grow(*b, 3.0), 70) {
+                if (distance(&old, p) <= 0.0) != (distance(&new, p) <= 0.0) {
+                    assert!(inside(b, p), "{p:?} changed outside {b:?}");
+                    moved += 1;
+                }
+            }
+            assert!(moved > 0, "the surface moved in {b:?}");
+        }
     }
 
     /// A smooth fold carries a change on through its later steps: growing the first of three

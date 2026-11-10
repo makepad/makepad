@@ -27,7 +27,7 @@ pub mod texture;
 pub mod sketches;
 pub mod tubes;
 
-pub use bounds::{changed, changed_within, cull, culls_alike, cut, cut_within, deform_bounds, node_bounds, reaches, same, slopes, tight_bounds, window, Bounds, Cut, Slopes, Window, WindowChange};
+pub use bounds::{changed, changed_within, changes, cull, culls_alike, cut, cut_within, deform_bounds, node_bounds, reaches, same, slopes, tight_bounds, window, Bounds, Cut, Slopes, Window, WindowChange};
 pub use chunks::{Chunk, Chunks};
 pub use combinators::*;
 pub use extent::{shape_bottom, shape_bounds, shape_bounds_after, surface_bounds, Bottom, Extent, ProofWork, SideProof};

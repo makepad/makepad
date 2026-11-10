@@ -261,69 +261,6 @@ mod tests {
     use super::*;
     use crate::sky::luminance;
 
-    /// Job-sized stage timings; generation and warm-up are not measured.
-    #[test]
-    #[ignore = "a measurement"]
-    fn measure_job_ibl_stages() {
-        use makepad_draw::makepad_platform::{Cx, thread::{checkpoint, Class}};
-        use std::{cell::Cell, time::Instant};
-        let paint = |d: [f32; 3], key: bool| {
-            let sky = 0.2 + 0.8 * d[1].max(0.0);
-            let panel = if d[0] > 0.85 { 3.0 } else { 0.0 };
-            let key = if key && d[1] > 0.98 { 40.0 } else { 0.0 };
-            [sky + panel + key, sky + panel * 0.8 + key, sky + panel * 0.6 + key]
-        };
-        let source = EnvMap::from_fn(4096, |d| paint(d, true));
-        let keyless = EnvMap::from_fn(4096, |d| paint(d, false));
-        let measure = |mode: &str, source: &EnvMap, keyless: &EnvMap, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync)), stop: &(dyn Fn() -> bool + Sync)| {
-            let sizes = PrepareSizes { dome: DOME_MAX_WIDTH, atlas: ATLAS_WIDTH, lighting: LIGHTING_MAX_WIDTH };
-            std::hint::black_box(prepare_ibl_until(source, KeyRemoval::Exact(keyless), 1.0, 0.0, sizes, stop, run).unwrap());
-            let total = Instant::now();
-            let stage = Cell::new(total);
-            let report = |name: &str| {
-                let now = Instant::now();
-                eprintln!("ibl_stage {mode} {name}: {:.3} ms", now.duration_since(stage.replace(now)).as_secs_f64() * 1000.0);
-            };
-            let env = sane_spread(source, run);
-            report("sane scan");
-            let dome = env.resized_spread(dome_width(env.width, sizes.dome), run).data.into_flattened();
-            report("dome");
-            assert!(!stop());
-            let lit = lighting_copy_spread(&env, KeyRemoval::Exact(keyless), sizes.lighting, run);
-            report("lighting copy");
-            assert!(!stop());
-            let level = Cell::new(0usize);
-            let timed_run = |n, f: &(dyn Fn(usize) + Sync)| {
-                let k = level.get();
-                if k == 0 { report("pyramid + frames"); }
-                run(n, f);
-                report(&format!("prefilter level {k}"));
-                level.set(k + 1);
-            };
-            let atlas = ibl::prefilter_spread(&lit, sizes.atlas, ATLAS_LEVELS, stop, &timed_run).unwrap();
-            assert!(!stop());
-            let sh = ibl::sh9(&lit);
-            report("sh9");
-            let meter = mean_luminance(&lit);
-            let horizon = horizon_band(&lit);
-            report("mean luminance + horizon band");
-            let texture = ibl::pack_ibl(&atlas, &sh, 1.0, 0.0);
-            report("pack");
-            eprintln!("ibl_stage {mode} total: {:.3} ms", total.elapsed().as_secs_f64() * 1000.0);
-            std::hint::black_box((dome, texture, meter, horizon));
-        };
-        measure("serial", &source, &keyless, &|n, f| (0..n).for_each(f), &|| false);
-        let cx = Cx::new(Box::new(|_, _| {}));
-        let pool = cx.task_pool();
-        let work_pool = pool.clone();
-        // Join off the pool's UI owner, as required by TaskHandle::join.
-        std::thread::scope(|scope| scope.spawn(move || {
-            pool.submit(Class::Background, move || {
-                measure("pool", &source, &keyless, &|n, f| work_pool.fan_out(n, f), &|| checkpoint().is_err());
-            }).unwrap().join().unwrap();
-        }).join().unwrap());
-    }
-
     /// A w x w/2 map painted by direction at texel centres.
     fn map(w: usize, paint: impl Fn(Vec3f) -> Vec3f) -> EnvMap {
         EnvMap::from_fn(w, |d| arr(paint(vec(d))))

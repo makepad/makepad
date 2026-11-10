@@ -426,6 +426,8 @@ pub struct Renderer {
     /// The host's clip plane (`host_clip`, see shaders/skinned.rs and
     /// [`Self::set_clip_plane`]) for the model lanes.
     clip_plane: Option<[f32; 4]>,
+    /// The world box the host keeps ([`Self::set_host_box`]) for the model lanes.
+    host_box: Option<[[f32; 4]; 3]>,
     /// See [`Self::set_element_reach`].
     element_reach: Option<(Vec3f, Vec3f)>,
     custom_draws: std::collections::BTreeMap<String, Box<CustomMaterial>>,
@@ -779,6 +781,7 @@ impl Default for Renderer {
             pbr_draw: None,
             element_lookup: None,
             clip_plane: None,
+            host_box: None,
             element_reach: None,
             custom_draws: Default::default(),
             ibl: Default::default(),

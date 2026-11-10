@@ -237,6 +237,8 @@ pub enum Op {
     Mirror { source: NodeId, plane: MirrorPlane, center: P3, keep: bool },
     /// Walls of `thickness`; the cavity is meshed from the source's distance at `cell`.
     Shell { source: NodeId, thickness: f64, open: Open, cell: Option<f64> },
+    /// The surface moved out by `distance` (in, negative), meshed from the source's distance at `cell`.
+    Offset { source: NodeId, distance: f64, cell: Option<f64> },
     /// `a` combined with every `b` in order (n-ary). `tolerance` none: scaled to the part.
     Boolean { mode: BoolMode, a: NodeId, b: Vec<NodeId> },
     /// Scale, then rotate X, Y, Z (degrees), then move by `at`.
@@ -260,7 +262,7 @@ impl Op {
     /// The nodes it reads.
     pub fn inputs(&self) -> Vec<NodeId> {
         match self {
-            Op::Fillet { source, .. } | Op::Chamfer { source, .. } | Op::Hole { source, .. } | Op::Mirror { source, .. } | Op::Shell { source, .. } | Op::Transform { source, .. } => vec![*source],
+            Op::Fillet { source, .. } | Op::Chamfer { source, .. } | Op::Hole { source, .. } | Op::Mirror { source, .. } | Op::Shell { source, .. } | Op::Offset { source, .. } | Op::Transform { source, .. } => vec![*source],
             Op::Boolean { a, b, .. } => std::iter::once(*a).chain(b.iter().copied()).collect(),
             Op::Gear { mesh_with: Some((g, _)), .. } => vec![*g],
             Op::Brep { inputs, .. } => inputs.clone(),
@@ -286,6 +288,7 @@ impl Op {
             Op::Hole { .. } => "hole",
             Op::Mirror { .. } => "mirror",
             Op::Shell { .. } => "shell",
+            Op::Offset { .. } => "offset",
             Op::Boolean { mode: BoolMode::Union, .. } => "union",
             Op::Boolean { mode: BoolMode::Difference, .. } => "difference",
             Op::Boolean { mode: BoolMode::Intersection, .. } => "intersection",
@@ -488,6 +491,11 @@ impl Graph {
                 child(&mut h, *source);
                 h.f(*thickness);
                 h.u(*open as u64);
+                h.opt(*cell);
+            }
+            Op::Offset { source, distance, cell } => {
+                child(&mut h, *source);
+                h.f(*distance);
                 h.opt(*cell);
             }
             Op::Boolean { mode, a, b } => {

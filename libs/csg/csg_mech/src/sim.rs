@@ -256,6 +256,18 @@ pub struct JointSpec {
     pub collide: bool,
     /// A hinge's brake: the friction it adds by how far it is turned.
     pub brake: Option<BrakeSpec>,
+    /// A hinge's or slider's motor.
+    pub motor: Option<Motor>,
+}
+
+/// A motor on a hinge or a slider: a servo to the place it is set to, or a drive at the speed it is
+/// set to (B relative to A, as the joint's angle or travel goes), pushing with at most `limit`: a
+/// torque (g mm^2 / s^2) on a hinge, a force (g mm / s^2) on a slider. It starts set to where the
+/// joint printed, or to standing still.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Motor {
+    pub kind: crate::MotorKind,
+    pub limit: f64,
 }
 
 /// The angle between a brake's samples (radians): half a degree.
@@ -293,6 +305,9 @@ pub enum AnchorKind {
     Fixed,
     /// Hangs on a pin through `pivot` along the axis.
     Pin(P3),
+    /// Held by a hand where it printed: fixed until a grab carries it, and it stays where it is let go (a
+    /// marionette's control). On the dynamics engine only; elsewhere (the joint check) it is held fixed.
+    Held,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -302,6 +317,79 @@ pub struct AnchorSpec {
     pub kind: AnchorKind,
     /// A hanging pin's friction.
     pub friction: Friction,
+}
+
+/// A string from a point on part `a` to a point on part `b` (model frame, mm), through eyelets on other
+/// parts that it slides through freely. It is a one-sided limit with no spring: taut at `length`, slack
+/// below it. Strings run only on the dynamics engine, and they pass through parts.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct StringSpec {
+    pub a: usize,
+    pub from: P3,
+    pub b: usize,
+    pub to: P3,
+    /// The eyelets in order: (part, point).
+    pub through: Vec<(usize, P3)>,
+    pub length: f64,
+}
+
+impl StringSpec {
+    /// Its points in order with their parts: the start, the eyelets, the end.
+    pub fn points(&self) -> impl Iterator<Item = (usize, P3)> + '_ {
+        std::iter::once((self.a, self.from)).chain(self.through.iter().copied()).chain(std::iter::once((self.b, self.to)))
+    }
+
+    /// The string as printed: straight from point to point.
+    pub fn printed(&self) -> StringPath {
+        let points: Vec<P3> = self.points().map(|(_, p)| p).collect();
+        let path: f64 = points.windows(2).map(|w| len(sub(w[1], w[0]))).sum();
+        StringPath { points, slack: (self.length - path).max(0.0), tension: 0.0 }
+    }
+}
+
+/// A string as it hangs: its path's points in order (model frame, mm), its slack (its length less the
+/// path's, 0 when taut) and its tension (N, 0 when slack).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct StringPath {
+    pub points: Vec<P3>,
+    pub slack: f64,
+    pub tension: f64,
+}
+
+/// A newton in the sim's units (g mm / s^2), and a newton millimetre (g mm^2 / s^2).
+pub const NEWTON: f64 = 1e6;
+
+/// Why a string of an assembly cannot be built; `string` is its index in [`Assembly::strings`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum StringFault {
+    /// It names a part the assembly does not have.
+    NoPart { string: usize, part: usize },
+    /// Its point `point` (0 the start, then the eyelets, the last the end) is not inside part `part`.
+    Outside { string: usize, point: usize, points: usize, part: String },
+    /// Its path as printed is longer than its length, so it would start stretched; or the length is not a
+    /// positive number.
+    TooShort { string: usize, path: f64, length: f64 },
+}
+
+impl StringFault {
+    /// What is wrong, without the string's number: a host that names its strings says which one.
+    pub fn what(&self) -> String {
+        match self {
+            StringFault::NoPart { part, .. } => format!("it names part {part}, which the piece does not have"),
+            StringFault::Outside { point, points, part, .. } => {
+                let which = if *point == 0 { "start".to_string() } else if point + 1 == *points { "end".to_string() } else { format!("eyelet {point}") };
+                format!("its {which} is not inside part '{part}'")
+            }
+            StringFault::TooShort { path, length, .. } => format!("it is {length:.1} mm long, but its path as printed is {path:.1} mm: a string must not start stretched"),
+        }
+    }
+}
+
+impl std::fmt::Display for StringFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let (StringFault::NoPart { string, .. } | StringFault::Outside { string, .. } | StringFault::TooShort { string, .. }) = self;
+        write!(f, "string {string}: {}", self.what())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -334,6 +422,11 @@ pub struct Assembly {
     /// A moment after the start, the held anchors rise this far (mm): what they carry comes off the floor,
     /// and what only stood there stays behind.
     pub lift: f64,
+    /// Strings between parts. A piece with strings runs only on the dynamics engine.
+    pub strings: Vec<StringSpec>,
+    /// Body pairs designed to interlock (a weave's links). A weave whose links each hold at most two others
+    /// is a chain, which the dynamics engine steps; one whose links hold more (mail) runs on box3d.
+    pub interlocks: Vec<(usize, usize)>,
 }
 
 impl Assembly {
@@ -350,19 +443,40 @@ impl Assembly {
         }
     }
 
-    /// The gravity of a held hanging test. Hung on a pin: across the print up and across the line from the pin
-    /// to the centroid, so the piece swings down from how it was printed. Held fixed (welded where it
-    /// printed, as a car by its chassis) or not held: straight down (-up).
+    /// The gravity of a held hanging test. Hung on a pin: along the line from the pin to the centre of mass of
+    /// what hangs on it (the pinned part and every part joined to it), less its part along the pin, so a piece
+    /// on a pin loads at rest as it printed and swings once pushed. With that centre of mass on the pin's line,
+    /// or held fixed (welded where it printed, as a car by its chassis), or not held: straight down (-up).
     pub fn hang_gravity(&self) -> P3 {
         let up = norm(self.up);
-        let Some(anchor) = self.anchors.first().filter(|a| a.kind != AnchorKind::Fixed) else { return scale(up, -1.0) };
-        let d = sub(self.centroid(), anchor.pivot);
-        let side = cross(up, d);
-        if len(side) < 1e-6 * len(d).max(1.0) {
+        let Some((pinned, pivot, axis)) = self.anchors.first().and_then(|a| match a.kind {
+            AnchorKind::Pin(axis) => Some((a.body, a.pivot, norm(axis))),
+            AnchorKind::Fixed | AnchorKind::Held => None,
+        }) else {
+            return scale(up, -1.0);
+        };
+        let mut hung = vec![false; self.bodies.len()];
+        hung[pinned] = true;
+        let mut grew = true;
+        while grew {
+            grew = false;
+            for j in &self.joints {
+                if hung[j.a] != hung[j.b] {
+                    (hung[j.a], hung[j.b], grew) = (true, true, true);
+                }
+            }
+        }
+        let (mut s, mut m) = ([0.0; 3], 0.0);
+        for b in self.bodies.iter().zip(&hung).filter(|(_, &h)| h).map(|(b, _)| b) {
+            s = madd(s, b.mass.com, b.mass.mass);
+            m += b.mass.mass;
+        }
+        let d = if m > 0.0 { sub(scale(s, 1.0 / m), pivot) } else { [0.0; 3] };
+        let across = sub(d, scale(axis, dot(d, axis)));
+        if len(across) < 1e-6 * len(d).max(1.0) {
             return scale(up, -1.0);
         }
-        // in the bed plane, across the arm: the piece swings down about its pins
-        norm(side)
+        norm(across)
     }
 }
 
@@ -705,7 +819,7 @@ impl MechWorld {
         let mut anchors = Vec::new();
         for a in &asm.anchors {
             match &a.kind {
-                AnchorKind::Fixed => {
+                AnchorKind::Fixed | AnchorKind::Held => {
                     let mut d = default_weld_joint_def();
                     d.base.body_id_a = ground;
                     d.base.body_id_b = bodies[a.body];
@@ -755,6 +869,11 @@ impl MechWorld {
 
     pub fn time(&self) -> f64 {
         self.time
+    }
+
+    /// Gravity from now on, mm/s^2.
+    pub fn set_gravity(&mut self, g: P3) {
+        makepad_box3d::physics_world::world_set_gravity(&mut self.world, makepad_box3d::math_functions::vec3(g[0] as f32, g[1] as f32, g[2] as f32));
     }
 
     /// One fixed step (`dt` seconds, always `substeps` solver substeps).
@@ -1234,7 +1353,7 @@ impl JointDefBase {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Scenario {
-    /// Held by its anchors, released as printed: does it swing down and hang straight?
+    /// Held by its anchors, released as printed: do its parts swing down on their joints and hang straight?
     Hang,
     /// Held and shaken: does every joint move, does anything bind?
     Shake,
@@ -1461,6 +1580,9 @@ pub const MAX_SECONDS: f64 = 30.0;
 
 /// Run a scenario headless. `cancelled` is polled every 60 steps.
 pub fn simulate(asm: &Assembly, opts: &SimOptions, cancelled: &dyn Fn() -> bool) -> Result<SimReport, String> {
+    if !asm.strings.is_empty() {
+        return Err("strings run only on the dynamics engine, and the joint check runs on box3d".into());
+    }
     if asm.bodies.len() > MAX_BODIES {
         return Err(format!("{} parts: the sim budget is {MAX_BODIES}", asm.bodies.len()));
     }

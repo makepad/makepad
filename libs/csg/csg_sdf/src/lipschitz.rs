@@ -287,6 +287,24 @@ pub fn ellipsoid_slope_within(radii: P3, k: (f64, f64), w: (f64, f64)) -> f64 {
     }
 }
 
+/// What the nodes that aren't distances add to a shape's own bound, which takes them as 1 and
+/// measures only kernels. An ellipsoid's value is `k0 (k0 - 1) / k1`: `k0 / k1` is at most the
+/// largest radius and `k0` grows at most 1 over the smallest, so the value is at most their ratio
+/// times the distance, and CSG keeps that. Blended or rounded it is its slope that holds.
+fn steepest(n: &SdfNode) -> f64 {
+    match n {
+        SdfNode::Ellipsoid { radii } => {
+            let lo = radii[0].min(radii[1]).min(radii[2]);
+            let hi = radii[0].max(radii[1]).max(radii[2]);
+            (hi / lo).max(ellipsoid_slope(*radii))
+        }
+        SdfNode::Gyroid { .. } => 3f64.sqrt(),
+        SdfNode::Combine { of, .. } => of.iter().map(steepest).fold(1.0, f64::max),
+        SdfNode::Shell { of, .. } | SdfNode::Round { of, .. } | SdfNode::Transform { of, .. } | SdfNode::Material { of, .. } | SdfNode::Instance { of, .. } | SdfNode::Bone { of, .. } | SdfNode::Deform { of, .. } | SdfNode::Id { of, .. } | SdfNode::Sculpt { of, .. } | SdfNode::Texture { of, .. } => steepest(of),
+        _ => 1.0,
+    }
+}
+
 /// The reaches from 0, as shares of a shape's box, of the values a [`Clearance`] holds a slope
 /// for, besides any value's: down to where a thin ellipsoid's estimate, unbounded deep inside it,
 /// is proven near its surface.
@@ -379,6 +397,24 @@ impl SdfShape {
         for (r, w) in rungs.iter_mut().zip(REACHES.iter().map(|f| f * size).chain([f64::INFINITY])) {
             let s = crate::bounds::slopes_within(&self.root, region, w);
             *r = (w, s.outside.max(1.0), s.inside.max(1.0));
+        }
+        Clearance { rungs }
+    }
+
+    /// How far the shape's values prove its surface away at any point: what its pieces prove anywhere at each reach
+    /// ([`crate::bounds::slopes_anywhere`]), and at any value where they prove no slope on either side (a kernel's values far
+    /// from its box, a sculpt), [`SdfShape::lipschitz`]'s measure, at least the slope the nodes that aren't distances add to it.
+    pub fn clearance_anywhere(&self) -> Clearance {
+        let size = (0..3).map(|k| self.max[k] - self.min[k]).fold(0.0f64, f64::max);
+        let mut rungs = [(f64::INFINITY, f64::INFINITY, f64::INFINITY); REACHES.len() + 1];
+        for (r, w) in rungs.iter_mut().zip(REACHES.iter().map(|f| f * size).chain([f64::INFINITY])) {
+            let s = crate::bounds::slopes_anywhere(&self.root, w);
+            *r = (w, s.outside.max(1.0), s.inside.max(1.0));
+        }
+        let any = &mut rungs[REACHES.len()];
+        if any.1.is_infinite() && any.2.is_infinite() {
+            let l = self.lipschitz().max(1.0).max(steepest(&self.root));
+            (any.1, any.2) = (l, l);
         }
         Clearance { rungs }
     }
@@ -622,5 +658,40 @@ mod tests {
             }
         }
         assert!(checked > 20_000, "{checked} checks");
+    }
+
+    #[test]
+    fn clearance_anywhere_holds_far_from_the_box() {
+        let radii = [40.0, 40.0, 2.0];
+        let shape = SdfShape { root: SdfNode::Ellipsoid { radii }, min: radii.map(|r| -r), max: radii, materials: Vec::new() };
+        let c = shape.clearance_anywhere();
+        assert!(c.radius(0.1) > 0.1 / steepest(&shape.root), "{c:?}: near the surface no better than one slope");
+        let mut surface = Vec::new();
+        for latitude in -90..=90 {
+            let (z, r) = (latitude as f64).to_radians().sin_cos();
+            for longitude in 0..360 {
+                let (y, x) = (longitude as f64).to_radians().sin_cos();
+                surface.push(Vec3d::new(radii[0] * r * x, radii[1] * r * y, radii[2] * z));
+            }
+        }
+        let n = 16;
+        let size: Vec<f64> = (0..3).map(|k| shape.max[k] - shape.min[k]).collect();
+        let mut seed = 0x5eed_u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for idx in 0..n * n * n {
+            let cell = [idx % n, idx / n % n, idx / (n * n)];
+            let p = Vec3d::new(
+                20.0 * size[0] * (2.0 * (cell[0] as f64 + next()) / n as f64 - 1.0),
+                20.0 * size[1] * (2.0 * (cell[1] as f64 + next()) / n as f64 - 1.0),
+                20.0 * size[2] * (2.0 * (cell[2] as f64 + next()) / n as f64 - 1.0),
+            );
+            let v = crate::shape::distance(&shape.root, p);
+            let distance = surface.iter().map(|q| (p.x - q.x).powi(2) + (p.y - q.y).powi(2) + (p.z - q.z).powi(2)).fold(f64::INFINITY, f64::min).sqrt();
+            let radius = c.radius(v);
+            assert!(distance + 0.5 >= radius - 1e-9, "{radius} over sampled distance {distance} at {p:?} (value {v})");
+        }
     }
 }

@@ -28,8 +28,9 @@ script_mod! {
             var pos=vec3(self.geom.px,self.geom.py,self.geom.pz)
             if self.morph_ctl.w > 0.5 { pos=pos+self.morph_delta(self.geom.ao_uv,0.0) }
             // The host's per-element lookup, the table the picture's lanes read
-            // (shaders/skinned.rs has its layout): a hidden element casts nothing and a
-            // moved one casts where it shows, on the frame it shows there.
+            // (shaders/skinned.rs has its layout): a hidden element casts nothing, nor one the
+            // host draws as a ghost over its picture (stride 4, texel 2 `a`), and a moved one
+            // casts where it shows, on the frame it shows there.
             if self.elem_ctl.w > 0.5 {
                 let ao = unpack4u8(self.geom.ao_uv)
                 let lo = (ao.x + ao.y * 256.0) * 255.0
@@ -37,7 +38,7 @@ script_mod! {
                 let stride = max(self.elem_ctl.z, 1.0)
                 let base = floor(lo + modf(floor(hi + 0.5), 16.0) * 65536.0 + 0.5) * stride
                 let f = self.elem_texel(base)
-                if f.x < 0.5 {
+                if f.x < 0.5 || (stride > 3.5 && self.elem_texel(base + 2.0).w > 0.5) {
                     pos = vec3(0.0, 0.0, 0.0)
                 } else {
                     if stride > 3.5 {

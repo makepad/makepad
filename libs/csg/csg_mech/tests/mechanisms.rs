@@ -98,7 +98,7 @@ fn chain_of_three_hangs_and_articulates() {
     let nodes: Vec<NodeId> = (0..n).map(|i| boxed(&mut g, [i as f64 * pitch, 0.0, -2.5], [(i + 1) as f64 * pitch, 6.0, 2.5])).collect();
     let boxes: Vec<PartBox> = (0..n).map(|i| PartBox { min: [i as f64 * pitch, 0.0, -2.5], max: [(i + 1) as f64 * pitch, 6.0, 2.5] }).collect();
     let decls: Vec<JointDecl> = (0..n - 1)
-        .map(|i| JointDecl::Hinge(HingeDecl { a: i, b: i + 1, at: [(i + 1) as f64 * pitch, 0.0, 0.0], axis: [0.0, 1.0, 0.0], limits: None, pin: None, plate: None, clearance: None, clearance_axial: None, brake: None }))
+        .map(|i| JointDecl::Hinge(HingeDecl { a: i, b: i + 1, at: [(i + 1) as f64 * pitch, 0.0, 0.0], axis: [0.0, 1.0, 0.0], limits: None, pin: None, plate: None, clearance: None, clearance_axial: None, brake: None, motor: None }))
         .collect();
     let anchors = vec![AnchorDecl { part: 0, at: [2.5, 3.0, 0.0], hole: Some(([0.0, 1.0, 0.0], 1.2)) }];
     let plan = plan(&boxes, &decls, &[], &anchors, &profile).unwrap();
@@ -148,7 +148,7 @@ fn a_ball_shoulder_printed_on_the_bed_turns() {
     let fore_box = PartBox { min: [22.0, 0.0, -3.0], max: [34.0, 7.0, 3.0] };
     let nodes = vec![boxed(&mut g, torso_box.min, torso_box.max), boxed(&mut g, upper_box.min, upper_box.max), boxed(&mut g, fore_box.min, fore_box.max)];
     let ball = |at: P3| JointDecl::Ball(BallDecl { a: 0, b: 1, at, radius: Some(r), neck: None, axis: Some([1.0, 0.0, 0.0]), cone: 30f64.to_radians(), twist: None, clearance: None, wall: None });
-    let elbow = JointDecl::Hinge(HingeDecl { a: 1, b: 2, at: [22.0, 0.0, 0.0], axis: [0.0, 1.0, 0.0], limits: Some((-110f64.to_radians(), 110f64.to_radians())), pin: None, plate: None, clearance: None, clearance_axial: None, brake: None });
+    let elbow = JointDecl::Hinge(HingeDecl { a: 1, b: 2, at: [22.0, 0.0, 0.0], axis: [0.0, 1.0, 0.0], limits: Some((-110f64.to_radians(), 110f64.to_radians())), pin: None, plate: None, clearance: None, clearance_axial: None, brake: None, motor: None });
     let anchors = vec![AnchorDecl { part: 0, at: [0.0, 5.0, 0.0], hole: None }];
     let boxes = [torso_box, upper_box, fore_box];
     // Over a socket floor the ball would print in mid-air: refused, saying where it prints.
@@ -231,7 +231,7 @@ fn a_hinge_holds_its_limits_hung_and_pulled() {
         let mut g = Graph::new();
         let nodes: Vec<NodeId> = spans.iter().map(|&(a, b, w)| boxed(&mut g, [a, 0.0, -w / 2.0], [b, 6.0, w / 2.0])).collect();
         let boxes: Vec<PartBox> = spans.iter().map(|&(a, b, w)| PartBox { min: [a, 0.0, -w / 2.0], max: [b, 6.0, w / 2.0] }).collect();
-        let decls: Vec<JointDecl> = limits.iter().enumerate().map(|(i, l)| JointDecl::Hinge(HingeDecl { a: i, b: i + 1, at: [spans[i].1, 0.0, 0.0], axis: [0.0, 1.0, 0.0], limits: Some((-l.to_radians(), l.to_radians())), pin: None, plate: None, clearance: None, clearance_axial: None, brake: None })).collect();
+        let decls: Vec<JointDecl> = limits.iter().enumerate().map(|(i, l)| JointDecl::Hinge(HingeDecl { a: i, b: i + 1, at: [spans[i].1, 0.0, 0.0], axis: [0.0, 1.0, 0.0], limits: Some((-l.to_radians(), l.to_radians())), pin: None, plate: None, clearance: None, clearance_axial: None, brake: None, motor: None })).collect();
         let anchors = vec![AnchorDecl { part: 0, at: [6.0, 3.0, 0.0], hole: None }];
         let p = plan(&boxes, &decls, &[], &anchors, &profile).unwrap();
         let names: Vec<String> = (0..spans.len()).map(|i| format!("part[{i}]")).collect();
@@ -311,7 +311,7 @@ fn a_hinge_low_over_the_bed_is_slotted_down_to_it() {
         let spans = [(0.0, 12.0), (12.0, 24.0)];
         let nodes: Vec<NodeId> = spans.iter().map(|&(a, b)| boxed(&mut g, [a, 0.0, -4.0], [b, height, 4.0])).collect();
         let boxes: Vec<PartBox> = spans.iter().map(|&(a, b)| PartBox { min: [a, 0.0, -4.0], max: [b, height, 4.0] }).collect();
-        let decls = vec![JointDecl::Hinge(HingeDecl { a: 0, b: 1, at: [12.0, 0.5 * height, 0.0], axis: [0.0, 0.0, 1.0], limits: None, pin: None, plate: None, clearance: None, clearance_axial: None, brake: None })];
+        let decls = vec![JointDecl::Hinge(HingeDecl { a: 0, b: 1, at: [12.0, 0.5 * height, 0.0], axis: [0.0, 0.0, 1.0], limits: None, pin: None, plate: None, clearance: None, clearance_axial: None, brake: None, motor: None })];
         let plan = plan(&boxes, &decls, &[], &[], &profile).unwrap();
         let built = build(g, &nodes, &["leaf[0]", "leaf[1]"], &plan);
         (plan, built)
@@ -353,7 +353,7 @@ fn a_slider_and_a_bearing_print_as_they_stand_and_move() {
     let (rail, carriage) = (PartBox { min: [0.0, 0.0, -8.0], max: [60.0, 6.0, 8.0] }, PartBox { min: [20.0, 0.0, -12.0], max: [32.0, 16.0, 12.0] });
     let mut g = Graph::new();
     let nodes = vec![boxed(&mut g, rail.min, rail.max), boxed(&mut g, carriage.min, carriage.max)];
-    let decl = |at: P3, axis: P3, travel: Option<(f64, f64)>| JointDecl::Slider(SliderDecl { a: 0, b: 1, at, axis, travel: (travel.map(|t| t.0), travel.map(|t| t.1)), width: None, depth: None, clearance: None });
+    let decl = |at: P3, axis: P3, travel: Option<(f64, f64)>| JointDecl::Slider(SliderDecl { a: 0, b: 1, at, axis, travel: (travel.map(|t| t.0), travel.map(|t| t.1)), width: None, depth: None, clearance: None, motor: None });
     let anchors = vec![AnchorDecl { part: 0, at: [30.0, 3.0, 0.0], hole: None }];
     // Across the print's up it does not run; past the end stops it does not slide.
     assert!(plan(&[rail, carriage], &[decl([26.0, 0.0, 0.0], [0.0, 1.0, 0.0], None)], &[], &anchors, &profile).unwrap_err().message.contains("along the bed"));
@@ -448,17 +448,26 @@ fn runner_publishes_poses_and_takes_a_grab() {
     let mut g = Graph::new();
     let nodes: Vec<NodeId> = (0..3).map(|i| boxed(&mut g, [i as f64 * 12.0, 0.0, -2.5], [(i + 1) as f64 * 12.0, 6.0, 2.5])).collect();
     let boxes: Vec<PartBox> = (0..3).map(|i| PartBox { min: [i as f64 * 12.0, 0.0, -2.5], max: [(i + 1) as f64 * 12.0, 6.0, 2.5] }).collect();
-    let decls: Vec<JointDecl> = (0..2).map(|i| JointDecl::Hinge(HingeDecl { a: i, b: i + 1, at: [(i + 1) as f64 * 12.0, 0.0, 0.0], axis: [0.0, 1.0, 0.0], limits: None, pin: None, plate: None, clearance: None, clearance_axial: None, brake: None })).collect();
+    let decls: Vec<JointDecl> = (0..2).map(|i| JointDecl::Hinge(HingeDecl { a: i, b: i + 1, at: [(i + 1) as f64 * 12.0, 0.0, 0.0], axis: [0.0, 1.0, 0.0], limits: None, pin: None, plate: None, clearance: None, clearance_axial: None, brake: None, motor: None })).collect();
     let anchors = vec![AnchorDecl { part: 0, at: [2.5, 3.0, 0.0], hole: Some(([0.0, 1.0, 0.0], 1.2)) }];
     let plan = plan(&boxes, &decls, &[], &anchors, &profile).unwrap();
     let built = build(g, &nodes, &["l0", "l1", "l2"], &plan);
     let fs = fields(&built, &plan);
     let parts = finals(&built, &fs);
     let asm = assembly(&plan, &parts, &[], 1.0);
-    let gravity = makepad_csg_mech::geom::scale(asm.hang_gravity(), makepad_csg_mech::sim::GRAVITY);
-    let mut r = Runner::start(asm, gravity);
+    // pulled across the chain (hung along it, it would load at rest)
+    let gravity = [0.0, 0.0, -makepad_csg_mech::sim::GRAVITY];
+    let wakes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let woken = || wakes.load(std::sync::atomic::Ordering::Acquire);
+    let mut r = Runner::start(asm, gravity, {
+        let wakes = wakes.clone();
+        move || {
+            wakes.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    });
     let s0 = r.latest();
     assert_eq!(s0.poses.len(), 3);
+    assert!(r.take_news(), "the print pose is news before the sim answers");
     r.send(Command::Play);
     // the answer to a command is a snapshot that has taken it up
     let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -497,6 +506,12 @@ fn runner_publishes_poses_and_takes_a_grab() {
         assert!(std::time::Instant::now() < until, "runner did not publish the pin and pause");
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+    // a view that goes idle takes the news: a paused sim publishes none and leaves it asleep, and the
+    // answer to its next command wakes it
+    r.take_news();
+    let asleep = woken();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(!r.take_news() && woken() == asleep, "a paused sim published news ({} wakes)", woken() - asleep);
     r.send(Command::Reset);
     let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
@@ -507,6 +522,7 @@ fn runner_publishes_poses_and_takes_a_grab() {
         assert!(std::time::Instant::now() < until, "Reset must clear the pin and resume");
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+    assert_eq!(woken(), asleep + 1, "the answer to Reset wakes the idle view once, until it takes the news");
     // carried: the anchored link goes where the hand takes it and stays there, on the sim's own time
     let start = r.latest().poses[0].com;
     r.send(Command::Carry { at: [0.0, 0.0, 30.0], axis: [1.0, 0.0, 0.0], angle: 0.0 });
@@ -549,7 +565,7 @@ fn hinge_pair(clearance: Option<f64>) -> (Plan, Built) {
     let pitch = 12.0;
     let nodes: Vec<NodeId> = (0..2).map(|i| boxed(&mut g, [i as f64 * pitch, 0.0, -2.5], [(i + 1) as f64 * pitch, 6.0, 2.5])).collect();
     let boxes: Vec<PartBox> = (0..2).map(|i| PartBox { min: [i as f64 * pitch, 0.0, -2.5], max: [(i + 1) as f64 * pitch, 6.0, 2.5] }).collect();
-    let decls = vec![JointDecl::Hinge(HingeDecl { a: 0, b: 1, at: [pitch, 0.0, 0.0], axis: [0.0, 1.0, 0.0], limits: None, pin: None, plate: None, clearance, clearance_axial: clearance, brake: None })];
+    let decls = vec![JointDecl::Hinge(HingeDecl { a: 0, b: 1, at: [pitch, 0.0, 0.0], axis: [0.0, 1.0, 0.0], limits: None, pin: None, plate: None, clearance, clearance_axial: clearance, brake: None, motor: None })];
     let plan = plan(&boxes, &decls, &[], &[], &profile).unwrap();
     let built = build(g, &nodes, &["link[0]", "link[1]"], &plan);
     (plan, built)

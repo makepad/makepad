@@ -540,6 +540,10 @@ impl Renderer {
                     }
                 }
                 draw.base().draw_vars.set_uniform(cx.cx, live_id!(host_clip), &self.clip_plane.unwrap_or([0.0; 4]));
+                let host_box = self.host_box.unwrap_or([[0.0; 4]; 3]);
+                draw.base().draw_vars.set_uniform(cx.cx, live_id!(host_box0), &host_box[0]);
+                draw.base().draw_vars.set_uniform(cx.cx, live_id!(host_box1), &host_box[1]);
+                draw.base().draw_vars.set_uniform(cx.cx, live_id!(host_box2), &host_box[2]);
                 if let Some(morph)=&loaded.morph{
                     let target=match lane{WorldModelLane::Placed=>ModelTarget::Instance(i),WorldModelLane::Attachment=>ModelTarget::Attachment(i)};
                     let weights=self.model_anim_state.morph_weights(&target,&inst.model,&morph.source);
@@ -769,7 +773,7 @@ impl Renderer {
                             draw.base().morph_weights0 = vec4(d.wind * 0.35, inv_height, self.sky_time, flutter);
                         }
                     }
-                    let cut = screen_clip || stand_in || layer_window > 0.0 || self.clip_plane.is_some() || match &material.surface {
+                    let cut = screen_clip || stand_in || layer_window > 0.0 || self.clip_plane.is_some() || self.host_box.is_some() || match &material.surface {
                         // Masked layers discard; blended ones need the stock
                         // pipeline too (the no-discard variant draws opaque).
                         Some(surface) if pbr_lane => surface.definition.alpha_mode != 0,

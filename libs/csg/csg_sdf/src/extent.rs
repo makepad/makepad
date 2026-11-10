@@ -379,7 +379,7 @@ fn known_side(n: &SdfNode, dn: P3, ceiling: f64, tol: f64, budget: usize, to_roo
             let (plain, read): (Vec<&SdfNode>, Vec<&SdfNode>) = of.iter().partition(|c| !has_kernel(c));
             // a smooth maximum is at least either operand, so past one's ball (at its slope outside
             // it) nothing is left
-            let slopes: Vec<f64> = plain.iter().map(|c| crate::bounds::slopes_anywhere(c).outside.max(1.0)).collect();
+            let slopes: Vec<f64> = plain.iter().map(|c| crate::bounds::slopes_anywhere(c, f64::INFINITY).outside.max(1.0)).collect();
             let cleared = |p: P3, r: f64| clear(p, r) || plain.iter().zip(&slopes).any(|(c, s)| distance(c, v3(p)) > r * s);
             for c in plain.iter().chain(&read) {
                 let k = known_side(c, dn, all.top, tol, budget, to_root, solid, &cleared)?;
@@ -390,7 +390,7 @@ fn known_side(n: &SdfNode, dn: P3, ceiling: f64, tol: f64, budget: usize, to_roo
         // A cut only takes away: deep inside one nothing is left.
         SdfNode::Combine { op: SdfOp::Difference, of, .. } => {
             // (at its slope inside it: none deep inside an ellipsoid, whose estimate jumps at its centre)
-            let cuts: Vec<(&SdfNode, f64)> = of[1..].iter().filter(|c| !has_kernel(c)).map(|c| (c, crate::bounds::slopes_anywhere(c).inside.max(1.0))).collect();
+            let cuts: Vec<(&SdfNode, f64)> = of[1..].iter().filter(|c| !has_kernel(c)).map(|c| (c, crate::bounds::slopes_anywhere(c, f64::INFINITY).inside.max(1.0))).collect();
             let cleared = |p: P3, r: f64| clear(p, r) || cuts.iter().any(|(c, s)| -distance(c, v3(p)) > r * s);
             known_side(&of[0], dn, ceiling, tol, budget, to_root, solid, &cleared)
         }

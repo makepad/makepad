@@ -2,9 +2,9 @@ use makepad_csg_mech::dyn_world::DynWorld;
 use makepad_csg_mech::geom::*;
 use makepad_csg_mech::joint::Profile;
 use makepad_csg_mech::mass::MassProps;
-use makepad_csg_mech::sim::{AnchorKind, AnchorSpec, Assembly, BodyAction, BodySpec, Friction, JointKind, JointSpec, MechWorld, GRAVITY};
+use makepad_csg_mech::runner;
+use makepad_csg_mech::sim::{AnchorKind, AnchorSpec, Assembly, BodyAction, BodySpec, Friction, JointKind, JointSpec, MechWorld, SolidField, GRAVITY, NEWTON, SLEEP_SPEED};
 use makepad_csg_mech::weave::{self, Frame, SquareLink, Weave, WeaveProfile};
-use std::time::Instant;
 
 const DT: f64 = 1.0 / 240.0;
 
@@ -31,7 +31,6 @@ fn fixed(asm: &mut Assembly, body: usize) {
 
 #[test]
 fn hanging_chain_stays_linked() {
-    let start = Instant::now();
     let (wp, link, frame) = setup();
     let w = weave::chain(&wp, link, frame, &[[0.0, 0.0], [40.0, 0.0]], false);
     assert!(!w.pairs.is_empty(), "chain must have interlocks");
@@ -42,12 +41,10 @@ fn hanging_chain_stays_linked() {
     let last = w.links.len()-1;
     assert!(dot(sub(world.poses()[last].com, world.rest_com(last)), frame.y) < -1.0, "chain must hang");
     assert!((world.time()-2.0).abs()<1e-10, "time uses all substeps");
-    println!("hanging chain: {:.3}s", start.elapsed().as_secs_f64());
 }
 
 #[test]
 fn hanging_mail_stays_linked() {
-    let start = Instant::now();
     let (wp, link, frame) = setup();
     let w = weave::mail(&wp, link, frame, [-12.0,-12.0], [12.0,12.0], 0.0, &|_| -1.0);
     assert!(w.pairs.len()>2, "mail must have multiple interlocks");
@@ -60,16 +57,17 @@ fn hanging_mail_stays_linked() {
     for step in 0..480 { world.step(DT); linked(&w,&world,step); }
     let low = world.poses().iter().enumerate().map(|(i,p)| dot(sub(p.com,world.rest_com(i)),frame.y)).fold(0.0,f64::min);
     assert!(low < -1.0, "mail must hang: {low}");
-    println!("hanging mail: {:.3}s", start.elapsed().as_secs_f64());
 }
 
 #[test]
-fn chain_drag_at_three_hundred_stays_linked() {
-    let start = Instant::now();
+fn chain_runs_on_dynamics_and_stays_linked_through_a_drag() {
     let (wp, link, frame) = setup();
     let w = weave::chain(&wp, link, frame, &[[0.0,0.0],[40.0,0.0]], false);
     let asm = weave::assembly(&w,1.24e-3,240.0);
-    let mut world = DynWorld::new(&asm,scale(frame.y,-GRAVITY),None).unwrap();
+    assert!(runner::on_dynamics(&asm), "a chain runs on the dynamics engine");
+    let mail = weave::mail(&wp, link, frame, [-12.0,-12.0], [12.0,12.0], 0.0, &|_| -1.0);
+    assert!(!runner::on_dynamics(&weave::assembly(&mail,1.24e-3,240.0)), "mail runs on box3d");
+    let mut world = runner::dynamics_world(&asm,scale(frame.y,-GRAVITY),None).unwrap();
     let body = w.links.len()-1;
     let at = world.rest_com(body);
     world.grab(body,at,makepad_csg_mech::runner::POINTER_HZ);
@@ -82,12 +80,10 @@ fn chain_drag_at_three_hundred_stays_linked() {
     world.throw(scale(frame.x,300.0));
     world.release();
     assert_eq!(world.grabbed(),None);
-    println!("chain drag: {:.3}s",start.elapsed().as_secs_f64());
 }
 
 #[test]
 fn dropped_chain_rests_on_floor() {
-    let start = Instant::now();
     let (wp, link, frame) = setup();
     let w = weave::chain(&wp,link,frame,&[[0.0,0.0],[40.0,0.0]],false);
     let asm = weave::assembly(&w,1.24e-3,240.0);
@@ -107,7 +103,6 @@ fn dropped_chain_rests_on_floor() {
         assert!(bottom>floor-0.1,"link {i} penetrated floor: {bottom}");
         assert!(dot(sub(poses[i].com,world.rest_com(i)),frame.up)< -5.0,"link {i} must drop");
     }
-    println!("dropped chain: {:.3}s",start.elapsed().as_secs_f64());
 }
 
 fn capsule(name: &str, a: P3, b: P3, mass: f64) -> BodySpec {
@@ -126,12 +121,11 @@ fn capsule(name: &str, a: P3, b: P3, mass: f64) -> BodySpec {
 fn hinge(a: usize,b: usize,pivot: P3) -> JointSpec {
     JointSpec {name:format!("hinge_{a}_{b}"),a,b,pivot,axis:[0.0,1.0,0.0],
         kind:JointKind::Revolute {lower:-std::f64::consts::PI,upper:std::f64::consts::PI},
-        friction:Friction::default(),collide:false,brake:None}
+        friction:Friction::default(),collide:false,brake:None,motor:None}
 }
 
 #[test]
 fn hinge_pendulum_period_matches_inertia() {
-    let start=Instant::now();
     let pivot=[0.0,0.0,50.0];
     let angle=0.08_f64;
     let end=madd(pivot,[angle.sin(),0.0,-angle.cos()],40.0);
@@ -152,7 +146,7 @@ fn hinge_pendulum_period_matches_inertia() {
     assert!(crossings.len()>=3,"pendulum must swing repeatedly");
     let period=(crossings[crossings.len()-1]-crossings[0])/(crossings.len()-1) as f64;
     assert!((period/expected-1.0).abs()<0.02,"period {period}, inertia prediction {expected}");
-    println!("pendulum: {:.3}s, period {period:.6}s, predicted {expected:.6}s",start.elapsed().as_secs_f64());
+    println!("pendulum: period {period:.6}s, predicted {expected:.6}s");
 }
 
 // A parallelogram four-bar: base (fixed) a-b, left a-c, coupler c-d, right b-d, hinges about y. Its last
@@ -178,7 +172,6 @@ fn p95(mut values: Vec<f64>) -> f64 {
 // its closure stretches no more than a tree joint does.
 #[test]
 fn four_bar_swings_with_its_period_and_its_loop_closed() {
-    let start=Instant::now();
     let length=40.0_f64;
     let angle=0.1_f64;
     let offset=[length*angle.sin(),0.0,-length*angle.cos()];
@@ -208,7 +201,6 @@ fn four_bar_swings_with_its_period_and_its_loop_closed() {
         assert!(last>0.99*first,"loop closed at joint {}: swing {first} mm became {last} mm",3-rotate);
         println!("four-bar swing, loop at joint {}: period {period:.6}s predicted {expected:.6}s, swing {first:.4} then {last:.4} mm, stretch max {worst:.3e} p95 {:.3e} mm",3-rotate,p95(stretches));
     }
-    println!("four-bar swing: {:.3}s",start.elapsed().as_secs_f64());
 }
 
 // The four-bar that falls over (it runs on the current engine) runs here; limits set on its loop joint, then
@@ -216,7 +208,6 @@ fn four_bar_swings_with_its_period_and_its_loop_closed() {
 // joints give 0.33 mm there).
 #[test]
 fn loop_joint_limits_hold() {
-    let start=Instant::now();
     let offset=[12.0,0.0,38.0];
     let limit=JointKind::Revolute {lower:-0.1,upper:0.1};
     for limited in [vec![],vec![3],vec![0,1,2,3]] {
@@ -237,7 +228,6 @@ fn loop_joint_limits_hold() {
         assert!(worst<1e-6,"joints {limited:?} limited: closure stretch max {worst} mm");
         println!("four-bar limited at {limited:?}: largest angle {most:.5} rad, stretch max {worst:.3e} p95 {typical:.3e} mm");
     }
-    println!("loop limits: {:.3}s",start.elapsed().as_secs_f64());
 }
 
 // A spatial loop (crank and rocker on crossed hinges, a coupler on two balls) closed by a cone-limited ball.
@@ -246,11 +236,10 @@ fn loop_joint_limits_hold() {
 // engine; this coupler, 0.48 there). The closure holds as a tree joint's does (the current engine's: 0.08 mm).
 #[test]
 fn spatial_loop_closed_by_a_limited_ball() {
-    let start=Instant::now();
     let o=[0.0,0.0,0.0]; let q=[0.0,40.0,0.0];
     let a=[20.0,0.0,0.0]; let b=[0.0,40.0,-25.0];
     let ball=|x: usize,y: usize,pivot: P3,cone: f64| JointSpec {name:format!("ball_{x}_{y}"),a:x,b:y,pivot,axis:norm(sub(b,a)),
-        kind:JointKind::Spherical {cone,twist:None},friction:Friction::default(),collide:false,brake:None};
+        kind:JointKind::Spherical {cone,twist:None},friction:Friction::default(),collide:false,brake:None,motor:None};
     let mut rocker=hinge(3,0,q);
     rocker.axis=[1.0,0.0,0.0];
     let cone=0.3;
@@ -267,12 +256,11 @@ fn spatial_loop_closed_by_a_limited_ball() {
     assert!(len(sub(world.poses()[1].com,world.rest_com(1)))>1.0,"the crank must turn");
     assert!(most<cone+0.1,"the closing ball turned {most} rad past its cone {cone}");
     assert!(worst<1e-6,"spatial loop closure stretch {worst} mm");
-    println!("spatial loop: {:.3}s, closing ball at most {most:.4} rad, stretch {worst:.3e} mm",start.elapsed().as_secs_f64());
+    println!("spatial loop: closing ball at most {most:.4} rad, stretch {worst:.3e} mm");
 }
 
 #[test]
 fn shaken_hanging_chain_stays_linked() {
-    let start = Instant::now();
     let (wp, link, frame) = setup();
     let w = weave::chain(&wp, link, frame, &[[0.0, 0.0], [40.0, 0.0]], false);
     let mut asm = weave::assembly(&w, 1.24e-3, 240.0);
@@ -285,12 +273,10 @@ fn shaken_hanging_chain_stays_linked() {
         linked(&w, &world, step);
         assert!(len(sub(world.poses()[0].com, add(world.rest_com(0), at))) < 1e-8, "ground must carry its fixed anchor");
     }
-    println!("shaken chain: {:.3}s", start.elapsed().as_secs_f64());
 }
 
 #[test]
 fn frozen_chain_holds_then_falls() {
-    let start = Instant::now();
     let (wp, link, frame) = setup();
     let w = weave::chain(&wp, link, frame, &[[0.0, 0.0], [40.0, 0.0]], false);
     let asm = weave::assembly(&w, 1.24e-3, 240.0);
@@ -312,12 +298,10 @@ fn frozen_chain_holds_then_falls() {
     for (i,p) in world.poses().iter().enumerate() {
         assert!(dot(sub(p.com, world.rest_com(i)), frame.up) < -1.0, "thawed body {i} must fall");
     }
-    println!("frozen chain: {:.3}s", start.elapsed().as_secs_f64());
 }
 
 #[test]
 fn fixed_chain_drop_releases_anchor_and_reaches_floor() {
-    let start = Instant::now();
     let (wp, link, frame) = setup();
     let w = weave::chain(&wp, link, frame, &[[0.0, 0.0], [40.0, 0.0]], false);
     let mut asm = weave::assembly(&w, 1.24e-3, 240.0);
@@ -340,7 +324,6 @@ fn fixed_chain_drop_releases_anchor_and_reaches_floor() {
     assert!(began, "released chain must contact floor");
     assert!(world.max_speed() < 2.0, "released chain must rest: {}", world.max_speed());
     assert!(dot(sub(world.poses()[0].com, before[0].com), frame.up) < -5.0, "fixed anchor must have become free");
-    println!("fixed chain drop: {:.3}s", start.elapsed().as_secs_f64());
 }
 
 fn cuboid(name: &str, center: P3, half: P3, mass: f64) -> BodySpec {
@@ -367,7 +350,6 @@ fn stretch(asm: &Assembly, world: &DynWorld) -> f64 {
 
 #[test]
 fn hull_hinge_pendulum_period_matches_inertia() {
-    let start=Instant::now();
     let pivot=[0.0,0.0,50.0];
     let angle=0.08_f64;
     let centre=madd(pivot,[angle.sin(),0.0,-angle.cos()],20.0);
@@ -389,7 +371,7 @@ fn hull_hinge_pendulum_period_matches_inertia() {
     assert!(crossings.len()>=3,"pendulum must swing repeatedly");
     let period=(crossings[crossings.len()-1]-crossings[0])/(crossings.len()-1) as f64;
     assert!((period/expected-1.0).abs()<0.02,"period {period}, inertia prediction {expected}");
-    println!("hull pendulum: {:.3}s, period {period:.6}s, predicted {expected:.6}s",start.elapsed().as_secs_f64());
+    println!("hull pendulum: period {period:.6}s, predicted {expected:.6}s");
 }
 
 fn box_chain(count: usize, gap: f64) -> Assembly {
@@ -403,7 +385,6 @@ fn box_chain(count: usize, gap: f64) -> Assembly {
 
 #[test]
 fn hull_chain_keeps_joints_closed() {
-    let start=Instant::now();
     let asm=box_chain(6,2.0);
     // gravity off the chain's axis, so it swings
     let g=[GRAVITY*0.5,0.0,-GRAVITY*0.866];
@@ -412,12 +393,11 @@ fn hull_chain_keeps_joints_closed() {
     for _ in 0..480 { world.step(DT); worst=worst.max(stretch(&asm,&world)); }
     assert!(worst<1e-6,"joint stretch {worst} mm");
     assert!(len(sub(world.poses()[5].com,world.rest_com(5)))>5.0,"chain must swing");
-    println!("hull chain: {:.3}s, worst stretch {worst:.3e}mm",start.elapsed().as_secs_f64());
+    println!("hull chain: worst stretch {worst:.3e}mm");
 }
 
 #[test]
 fn tilted_hull_lands_flat_on_a_face() {
-    let start=Instant::now();
     let side=10.0;
     let (sa,ca)=(0.5_f64.sin(),0.5_f64.cos());
     let (sb,cb)=(0.3_f64.sin(),0.3_f64.cos());
@@ -441,14 +421,13 @@ fn tilted_hull_lands_flat_on_a_face() {
     assert!(z[0]>-0.5,"cube sank into the floor: {}",z[0]);
     assert!(z[3]-z[0]<0.2,"four lowest corners must share a face: {z:?}");
     assert!(world.max_speed()<0.5 && world.max_angular_speed()<0.05,"cube must rest: {} {}",world.max_speed(),world.max_angular_speed());
-    println!("tilted hull: {:.3}s, lowest corners {:?}",start.elapsed().as_secs_f64(),&z[..4]);
+    println!("tilted hull: lowest corners {:?}", &z[..4]);
 }
 
 // The engine (as its reference) refuses flat and straight point clouds; DynWorld gives them the current
 // engine's thickness, so a plate is a thin solid that lies flat on the floor.
 #[test]
 fn flat_and_straight_hulls_are_thin_solids() {
-    let start=Instant::now();
     let (s,c)=(0.4_f64.sin(),0.4_f64.cos());
     let centre=[0.0,0.0,15.0];
     let corners: Vec<P3>=[[-10.0,-10.0],[10.0,-10.0],[10.0,10.0],[-10.0,10.0]].iter().map(|&[x,y]| add(centre,[c*x,y,s*x])).collect();
@@ -464,14 +443,13 @@ fn flat_and_straight_hulls_are_thin_solids() {
     let mut asm=box_chain(2,2.0);
     asm.bodies[1].hulls=vec![vec![[0.0,0.0,-15.0],[1.0,0.0,-15.0],[2.0,0.0,-15.0],[3.0,0.0,-15.0]]];
     DynWorld::new(&asm,[0.0,0.0,-GRAVITY],None).expect("a straight cloud is a thin bar");
-    println!("flat hulls: {:.3}s, plate corners {z:?}",start.elapsed().as_secs_f64());
+    println!("flat hulls: plate corners {z:?}");
 }
 
 // The hand pulls no harder than the current engine's: 200 times the part's weight, at least ten times
 // everything's. A part held by a hinge and pulled away from it loads the hinge with exactly that.
 #[test]
 fn hand_pull_is_capped() {
-    let start=Instant::now();
     let pivot=[0.0,0.0,0.0];
     let mut asm=Assembly {bodies:vec![cuboid("support",pivot,[3.0,3.0,3.0],1.0),cuboid("arm",[0.0,0.0,-20.0],[4.0,4.0,10.0],1.0)],
         joints:vec![hinge(0,1,pivot)],substeps:4,..Assembly::default()};
@@ -484,14 +462,13 @@ fn hand_pull_is_capped() {
     let cap=(1.0_f64*200.0).max(2.0*10.0)*GRAVITY;
     let force=world.joint_force(0);
     assert!((force/cap-1.0).abs()<0.02,"hinge load {force} against the cap {cap}");
-    println!("hand cap: {:.3}s, hinge load {force:.0} for a cap of {cap:.0}",start.elapsed().as_secs_f64());
+    println!("hand cap: hinge load {force:.0} for a cap of {cap:.0}");
 }
 
 fn moved(poses: &[makepad_csg_mech::sim::Pose], rest: &[P3], body: usize) -> f64 { len(sub(poses[body].com,rest[body])) }
 
 #[test]
 fn drop_of_one_body_frees_the_same_bodies_as_the_current_engine() {
-    let start=Instant::now();
     let asm=box_chain(3,2.0);
     let g=[GRAVITY*0.5,0.0,-GRAVITY*0.866];
     for (set,anchor_let_go) in [(vec![1usize],false),(vec![0usize],true)] {
@@ -511,12 +488,10 @@ fn drop_of_one_body_frees_the_same_bodies_as_the_current_engine() {
         }
         assert_eq!(moved(&d,&rest,0)>100.0,anchor_let_go,"anchor body {set:?}");
     }
-    println!("partial drop: {:.3}s",start.elapsed().as_secs_f64());
 }
 
 #[test]
 fn body_let_go_from_the_moving_ground_keeps_its_velocity() {
-    let start=Instant::now();
     let asm=box_chain(3,2.0);
     let mut world=DynWorld::new(&asm,[0.0,0.0,0.0],None).unwrap();
     world.move_ground([0.0,0.0,3.0],[0.0,0.0,1.0],0.0,0.1);
@@ -525,7 +500,6 @@ fn body_let_go_from_the_moving_ground_keeps_its_velocity() {
     world.apply(&[0,1,2],&BodyAction::Drop {lift:0.0});
     let after=world.max_speed();
     assert!((after-30.0).abs()<1.0,"the ground moves at 30 mm/s, speed after letting go {after}");
-    println!("ground velocity: {:.3}s",start.elapsed().as_secs_f64());
 }
 
 // A hinge chain hanging from a fixed anchor and a box on the floor fall asleep at rest; woken by a poke, a
@@ -533,7 +507,6 @@ fn body_let_go_from_the_moving_ground_keeps_its_velocity() {
 // the chain into the box (two sleeping trees must never meet).
 #[test]
 fn woken_trees_move_as_if_they_never_slept() {
-    let start=Instant::now();
     let make=|sleep: f64| {
         let pivot=[0.0,0.0,60.0];
         let mut asm=Assembly {bodies:vec![capsule("support",sub(pivot,[0.0,3.0,0.0]),add(pivot,[0.0,3.0,0.0]),1.0)],substeps:4,sleep,..Assembly::default()};
@@ -577,14 +550,12 @@ fn woken_trees_move_as_if_they_never_slept() {
         assert!(apart<1e-6,"woken by {wake}: {apart} mm from the assembly that never slept");
         println!("woken by {wake}: moved {moved:.2} mm, {apart:.3e} mm from the assembly that never slept");
     }
-    println!("woken trees: {:.3}s",start.elapsed().as_secs_f64());
 }
 
 // A slow, small swing passes under the sleep speed at the top of each arc for longer than the engine's
 // ten substeps; it must keep swinging, not sleep there.
 #[test]
 fn slow_swing_does_not_sleep_at_the_top() {
-    let start=Instant::now();
     let pivot=[0.0,0.0,100.0];
     let angle=0.0125_f64;
     let end=madd(pivot,[angle.sin(),0.0,-angle.cos()],80.0);
@@ -600,7 +571,7 @@ fn slow_swing_does_not_sleep_at_the_top() {
         if step<120 { first=first.max(x.abs()); } else if step>=360 { last=last.max(x.abs()); }
     }
     assert!(last>0.99*first,"the swing must go on: {first} mm then {last} mm");
-    println!("slow swing: {first:.4} then {last:.4} mm, {:.3}s",start.elapsed().as_secs_f64());
+    println!("slow swing: {first:.4} then {last:.4} mm");
 }
 
 // A joint's collide says whether its two parts touch away from it, whichever of them the tree makes the
@@ -641,6 +612,73 @@ fn a_pair_that_overlaps_where_it_prints_stays_put_and_still_stops() {
     assert!((weighed-middle).abs()<0.5,"its weight does not take it through: its middle at {weighed} mm");
 }
 
+// Turning a part from where it printed can sink its proxy deeper before it comes clear. This arm's corner lies across
+// the hinge from the block, 1.5 mm into it: turned one way it goes 0.5 mm deeper over 18 degrees and is clear by 55.
+// A hand takes it past a right angle each way, and the block still stops it further round.
+#[test]
+fn a_part_turns_out_of_its_print_overlap_over_a_hump() {
+    let turned=|sign: f64,degrees: f64| {
+        let (mass,com)=(5.0,[12.0,0.0,0.0]);
+        let inertia=[[mass*10.0,0.0,0.0],[0.0,mass*140.0,0.0],[0.0,0.0,mass*140.0]];
+        let outline=[[-9.5,3.12],[30.0,3.12],[30.0,-3.0],[-7.0,-3.0]];
+        let hull=outline.iter().flat_map(|c: &[f64;2]| [[c[0],-2.0,c[1]],[c[0],2.0,c[1]]]).collect();
+        let arm=BodySpec {name:"arm".into(),mass:MassProps {volume:mass/1.24e-3,mass,com,inertia},
+            rods:Vec::new(),tubes:Vec::new(),hulls:vec![hull],balls:Vec::new(),field:None};
+        let mut asm=Assembly {bodies:vec![cuboid("block",[-18.0,0.0,0.0],[10.0,5.0,12.0],10.0),arm],
+            joints:vec![JointSpec {collide:true,..hinge(0,1,[0.0;3])}],substeps:8,..Assembly::default()};
+        fixed(&mut asm,0);
+        let mut world=DynWorld::new(&asm,[0.0;3],None).unwrap();
+        let far=[30.0,0.0,0.0];
+        world.grab(1,far,makepad_csg_mech::runner::HAND_HZ);
+        let mut most=0.0_f64;
+        let frames=(degrees/40.0/DT) as usize;
+        for k in 1..=frames {
+            world.drag(rotate(far,[0.0,1.0,0.0],sign*(40.0*k as f64*DT).to_radians()),DT);
+            world.step(DT);
+            most=most.max(2.0*world.poses()[1].rot[3].abs().min(1.0).acos());
+        }
+        most.to_degrees()
+    };
+    for sign in [-1.0,1.0] {
+        let past=turned(sign,100.0);
+        assert!(past>90.0,"turned {sign} way, the hand got it only {past:.1} degrees");
+        let stopped=turned(sign,170.0);
+        assert!(stopped<130.0,"turned {sign} way, the block let it go {stopped:.1} degrees");
+    }
+}
+
+// Hung on a pin, a piece's gravity runs from the pin through its centre of mass as it printed: it loads at rest, and a
+// push swings it back and forth through where it loaded. On either engine.
+#[test]
+fn a_piece_on_a_pin_loads_at_rest_and_swings_once_pushed() {
+    let pivot=[0.0,0.0,0.0];
+    let mut asm=Assembly {bodies:vec![capsule("near",pivot,[20.0,0.0,0.0],1.0),capsule("far",[20.0,0.0,0.0],[40.0,0.0,0.0],1.0)],
+        joints:vec![hinge(0,1,[20.0,0.0,0.0])],up:[0.0,1.0,0.0],substeps:8,..Assembly::default()};
+    asm.anchors.push(AnchorSpec {body:0,pivot,kind:AnchorKind::Pin([0.0,1.0,0.0]),friction:Friction::default()});
+    let gravity=scale(asm.hang_gravity(),GRAVITY);
+    assert!(dot(norm(gravity),[1.0,0.0,0.0])>0.999999,"along the piece: {gravity:?}");
+    let swing=|c: P3| c[2].atan2(c[0]).to_degrees();
+    macro_rules! hang { ($world:expr,$name:expr) => {{
+        let mut world=$world;
+        let mut still=0.0_f64;
+        for _ in 0..240 { world.step(DT); still=still.max(swing(world.poses()[1].com).abs()); }
+        assert!(still<0.01,"{}: loaded, it swings {still:.4} degrees",$name);
+        world.poke(1,[40.0,0.0,0.0],[0.0,0.0,100.0]);
+        let (mut most,mut crossings,mut last)=(0.0_f64,0,0.0_f64);
+        for _ in 0..240 {
+            world.step(DT);
+            let now=swing(world.poses()[1].com);
+            most=most.max(now.abs());
+            if now*last<0.0 { crossings+=1; }
+            last=now;
+        }
+        println!("{}: loaded, swings {still:.6} degrees; pushed, {most:.2} degrees, through rest {crossings} times in 1 s",$name);
+        assert!(most>2.0 && crossings>=3,"{}: pushed, it swings {most:.2} degrees, through rest {crossings} times",$name);
+    }}}
+    hang!(DynWorld::new(&asm,gravity,None).unwrap(),"dynamics");
+    hang!(MechWorld::new(&asm,gravity,None),"box3d");
+}
+
 // The engine puts a blown-up state back at the print pose by itself: the world keeps a record of it, with the
 // part it saw it on. A spring far stiffer than the substep can hold blows up; a soft one never does.
 #[test]
@@ -659,4 +697,269 @@ fn a_state_that_blows_up_is_on_record() {
     let first=resets.first().expect("a spring far too stiff for its substep blows up");
     assert_eq!(first.part,Some(1),"the part on the spring");
     assert!(first.time>0.0 && first.time<1.0,"when it did: {}",first.time);
+}
+
+// Motors on one base: a servo lifts its arm and holds it there, a servo too weak for its arm's weight lets it
+// sink, a drive spins a balanced wheel at its speed, and a slider's servo goes to its travel, its setting kept
+// within the joint's range.
+#[test]
+fn motors_go_where_they_are_set_within_their_limits() {
+    use makepad_csg_mech::sim::Motor;
+    use makepad_csg_mech::MotorKind;
+    let motor=|kind,limit: f64| Some(Motor {kind,limit:limit*1e6});
+    let arm=|y: f64| capsule("arm",[0.0,y,0.0],[40.0,y,0.0],5.0);
+    let mut asm=Assembly {bodies:vec![cuboid("base",[0.0,30.0,-30.0],[5.0,40.0,5.0],10.0),arm(0.0),arm(20.0),cuboid("wheel",[0.0,40.0,0.0],[10.0,2.0,10.0],2.0),cuboid("carriage",[0.0,60.0,0.0],[3.0,3.0,3.0],2.0)],
+        joints:vec![JointSpec {motor:motor(MotorKind::Position,50.0),..hinge(0,1,[0.0;3])},JointSpec {motor:motor(MotorKind::Position,0.5),..hinge(0,2,[0.0,20.0,0.0])},
+            JointSpec {motor:motor(MotorKind::Speed,10.0),..hinge(0,3,[0.0,40.0,0.0])},
+            JointSpec {kind:JointKind::Prismatic {lower:-10.0,upper:10.0},axis:[1.0,0.0,0.0],motor:motor(MotorKind::Position,5.0),..hinge(0,4,[0.0,60.0,0.0])}],
+        substeps:8,..Assembly::default()};
+    fixed(&mut asm,0);
+    let mut world=DynWorld::new(&asm,[0.0,0.0,-GRAVITY],None).unwrap();
+    assert_eq!(world.motors(),[(0,0.0),(1,0.0),(2,0.0),(3,0.0)],"every motor starts where its joint printed, or still");
+    world.set_motor(3,50.0);
+    assert_eq!(world.motors()[3],(3,10.0),"a servo's setting stays within its joint's range");
+    world.set_motor(0,-0.5);
+    world.set_motor(2,2.0);
+    world.set_motor(3,5.0);
+    for _ in 0..90 { world.step(DT); }
+    let before=world.angles(&asm);
+    for _ in 0..30 { world.step(DT); }
+    let after=world.angles(&asm);
+    assert!((after[0]+0.5).abs()<1f64.to_radians(),"the servo lifts its arm to -0.5 rad and holds it: {}",after[0]);
+    assert!(after[1]>30f64.to_radians(),"a servo of 0.5 N mm cannot hold an arm that weighs 1 N mm: it sinks to {} rad",after[1]);
+    let speed=(after[2]-before[2])/(30.0*DT);
+    assert!((speed/2.0-1.0).abs()<0.05,"the drive spins its wheel at 2 rad/s: {speed}");
+    assert!((after[3]-5.0).abs()<0.05,"the slider's servo goes to 5 mm: {}",after[3]);
+    assert!(world.resets().is_empty(),"no motor blows the state up");
+    // what the panel reads: the held arm's servo pushes the arm's weight times its reach, the sinking one all it
+    // has, and the held arm's hinge carries the arm's weight
+    let (efforts,loads)=(world.efforts(),world.loads());
+    let weight=asm.bodies[1].mass.mass*GRAVITY/NEWTON;
+    let held=weight*asm.bodies[1].mass.com[0]*0.5f64.cos();
+    assert!((efforts[0].abs()/held-1.0).abs()<0.05,"the servo holding its arm pushes {held} N mm: {} N mm",efforts[0]);
+    assert!((efforts[1].abs()-0.5).abs()<0.005,"the sinking arm's servo pushes all of its 0.5 N mm: {} N mm",efforts[1]);
+    assert!(loads[0].is_some_and(|f| (f/weight-1.0).abs()<0.03),"the held arm's hinge carries its weight, {weight} N: {:?} N",loads[0]);
+}
+
+/// A solid given by its distance (model frame): the distance at a point and the way it grows.
+#[derive(Debug)]
+struct Solid { sd: fn([f32; 3]) -> f32, lo: [f32; 3], hi: [f32; 3] }
+
+impl makepad_box3d::field::DistanceField for Solid {
+    fn distance(&self, p: makepad_box3d::math_functions::Vec3) -> (f32, makepad_box3d::math_functions::Vec3) {
+        let (f, e) = (|x: f32, y: f32, z: f32| (self.sd)([x, y, z]), 0.01);
+        let g = [f(p.x + e, p.y, p.z) - f(p.x - e, p.y, p.z), f(p.x, p.y + e, p.z) - f(p.x, p.y - e, p.z), f(p.x, p.y, p.z + e) - f(p.x, p.y, p.z - e)];
+        let l = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt().max(1e-6);
+        (f(p.x, p.y, p.z), makepad_box3d::math_functions::vec3(g[0] / l, g[1] / l, g[2] / l))
+    }
+    fn bounds(&self) -> makepad_box3d::math_functions::AABB {
+        let v = |p: [f32; 3]| makepad_box3d::math_functions::vec3(p[0], p[1], p[2]);
+        makepad_box3d::math_functions::AABB { lower_bound: v(self.lo), upper_bound: v(self.hi) }
+    }
+}
+
+// The cup: 40 mm across outside, 3 mm walls and floor, 30 mm tall, standing on the floor; the ball: 6 mm
+// in radius, printed inside it 11 mm above the cup's floor.
+const CUP_HALF: f32 = 20.0;
+const CUP_WALL: f32 = 3.0;
+const CUP_RIM: f32 = 30.0;
+const BALL_R: f32 = 6.0;
+const BALL_Z: f32 = 20.0;
+
+fn sd_box(p: [f32; 3], half: f32, z: [f32; 2]) -> f32 {
+    let q = [p[0].abs() - half, p[1].abs() - half, (p[2] - (z[0] + z[1]) / 2.0).abs() - (z[1] - z[0]) / 2.0];
+    (q[0].max(0.0).powi(2) + q[1].max(0.0).powi(2) + q[2].max(0.0).powi(2)).sqrt() + q[0].max(q[1]).max(q[2]).min(0.0)
+}
+
+fn field_body(name: &str, solid: Solid, com: P3, mass: f64, inertia: f64, hull: Vec<P3>) -> BodySpec {
+    BodySpec { name: name.into(), mass: MassProps { volume: mass / 1.24e-3, mass, com, inertia: std::array::from_fn(|i| std::array::from_fn(|j| if i == j { inertia } else { 0.0 })) },
+        hulls: vec![hull], tubes: Vec::new(), balls: Vec::new(), rods: Vec::new(), field: Some(SolidField(std::sync::Arc::new(solid))) }
+}
+
+#[test]
+fn a_ball_in_a_cup_of_fields_rests_on_its_floor_and_its_wall_holds() {
+    let (h, w, rim) = (CUP_HALF as f64, CUP_WALL as f64, CUP_RIM as f64);
+    let cup = Solid { sd: |p| sd_box(p, CUP_HALF, [0.0, CUP_RIM]).max(-sd_box(p, CUP_HALF - CUP_WALL, [CUP_WALL, CUP_RIM + 10.0])), lo: [-CUP_HALF, -CUP_HALF, 0.0], hi: [CUP_HALF, CUP_HALF, CUP_RIM] };
+    let corners = (0..8).map(|k| [if k & 1 == 0 { -h } else { h }, if k & 2 == 0 { -h } else { h }, if k & 4 == 0 { 0.0 } else { rim }]).collect();
+    let r = BALL_R as f64;
+    let ball = Solid { sd: |p| (p[0] * p[0] + p[1] * p[1] + (p[2] - BALL_Z) * (p[2] - BALL_Z)).sqrt() - BALL_R, lo: [-BALL_R, -BALL_R, BALL_Z - BALL_R], hi: [BALL_R, BALL_R, BALL_Z + BALL_R] };
+    let centre = [0.0, 0.0, BALL_Z as f64];
+    let tips = (0..6).map(|k| { let mut p = centre; p[k / 2] += if k % 2 == 0 { -r } else { r }; p }).collect();
+    let mut asm = Assembly { bodies: vec![field_body("cup", cup, [0.0, 0.0, 12.0], 20.0, 5000.0, corners), field_body("ball", ball, centre, 1.1, 16.0, tips)], up: [0.0, 0.0, 1.0], sleep: SLEEP_SPEED, ..Assembly::default() };
+    // parts that meet through their fields run on the engine; beside balls (a support check's pieces) they stay on box3d
+    assert!(runner::on_dynamics(&asm), "a piece of fields runs on the dynamics engine");
+    let mut with_balls = asm.clone();
+    with_balls.bodies.push(BodySpec { balls: vec![([30.0, 0.0, 5.0], 1.5)], ..cuboid("piece", [30.0, 0.0, 5.0], [2.0; 3], 0.1) });
+    assert!(!runner::on_dynamics(&with_balls) && DynWorld::new(&with_balls, [0.0, 0.0, -GRAVITY], Some(0.0)).is_err(), "balls meet fields on box3d");
+    let mut world = runner::dynamics_world(&asm, [0.0, 0.0, -GRAVITY], Some(0.0)).unwrap();
+    // dropped, the ball lands on the cup's floor and rolls about it; once landed it stays inside (their hulls
+    // meet only the floor: the cup's would fill it) and the cup's hull stands on the floor
+    let (mut floor_in, mut wall_in): (f64, f64) = (f64::MIN, f64::MIN);
+    for k in 0..360 {
+        world.step(DT);
+        if k >= 120 {
+            let (cup_at, ball_at) = (world.poses()[0].com, world.poses()[1].com);
+            let at = sub(ball_at, sub(cup_at, [0.0, 0.0, 12.0]));
+            floor_in = floor_in.max(w + r - at[2]);
+            wall_in = wall_in.max(at[0].abs().max(at[1].abs()) + r - (h - w));
+        }
+    }
+    let cup_at = world.poses()[0].com;
+    println!("fields: landed, the ball went {floor_in:.3} mm into the cup's floor and {wall_in:.3} into a wall; the cup at {cup_at:?}");
+    assert!(floor_in > -0.5 && floor_in < 0.35, "the ball rests on the cup's floor: {floor_in:.3} mm into it");
+    assert!(wall_in < 0.3, "the cup's wall keeps the ball in: {wall_in:.3} mm into it");
+    assert!(len(sub(cup_at, [0.0, 0.0, 12.0])) < 0.3, "the cup stands where it printed: {cup_at:?}");
+    // pulled hard into the wall (the cup held: the hand pulls with up to 200 times the ball's weight), the ball
+    // reaches it and stays out of it
+    fixed(&mut asm, 0);
+    let mut world = runner::dynamics_world(&asm, [0.0, 0.0, -GRAVITY], Some(0.0)).unwrap();
+    for _ in 0..120 { world.step(DT); }
+    let ball_at = world.poses()[1].com;
+    world.grab(1, ball_at, runner::POINTER_HZ);
+    let mut deepest: f64 = f64::MIN;
+    for k in 0..120 {
+        world.drag([ball_at[0] + 30.0 * (k as f64 / 60.0).min(1.0), ball_at[1], ball_at[2]], DT);
+        world.step(DT);
+        deepest = deepest.max(world.poses()[1].com[0] + r - (h - w));
+    }
+    println!("fields: pulled into the wall, the ball went {deepest:.3} mm into it");
+    assert!(deepest > -0.5 && deepest < 0.5, "the ball reaches the cup's wall and stays out of it: {deepest:.3} mm into it");
+}
+
+/// A sphere of radius `r` about `c` as a closed mesh: an icosahedron's faces split `n` times, pushed out to it.
+fn icosphere(n: usize, r: f64, c: P3) -> (Vec<P3>, Vec<[u32; 3]>) {
+    let t = (1.0 + 5f64.sqrt()) / 2.0;
+    let mut v: Vec<P3> = [[-1.0, t, 0.0], [1.0, t, 0.0], [-1.0, -t, 0.0], [1.0, -t, 0.0], [0.0, -1.0, t], [0.0, 1.0, t], [0.0, -1.0, -t], [0.0, 1.0, -t], [t, 0.0, -1.0], [t, 0.0, 1.0], [-t, 0.0, -1.0], [-t, 0.0, 1.0]]
+        .iter()
+        .map(|p| norm(*p))
+        .collect();
+    let mut f: Vec<[u32; 3]> = vec![[0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11], [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8], [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9], [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1]];
+    for _ in 0..n {
+        let mut mid = std::collections::HashMap::new();
+        let mut half = |a: u32, b: u32, v: &mut Vec<P3>| *mid.entry((a.min(b), a.max(b))).or_insert_with(|| { v.push(norm(add(v[a as usize], v[b as usize]))); v.len() as u32 - 1 });
+        f = f.iter().flat_map(|&[a, b, c]| { let (ab, bc, ca) = (half(a, b, &mut v), half(b, c, &mut v), half(c, a, &mut v)); [[a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]] }).collect();
+    }
+    (v.into_iter().map(|p| add(c, scale(p, r))).collect(), f)
+}
+
+/// How far inside `whole`'s hull `part`'s hull falls short along `dirs` at most (their support functions'
+/// largest gap: for two convex hulls over all directions, the farthest a point of one lies from the other).
+fn short_of(part: &[P3], whole: &[P3], dirs: &[P3]) -> f64 {
+    let reach = |pts: &[P3], d: P3| pts.iter().map(|&p| dot(p, d)).fold(f64::MIN, f64::max);
+    dirs.iter().map(|&d| reach(whole, d) - reach(part, d)).fold(0.0, f64::max)
+}
+
+#[test]
+fn a_ball_that_keeps_to_its_hull_meets_a_cup_of_fields_through_it_and_sleeps() {
+    use makepad_csg_mech::{convex_body, hulls, GAP_TOL};
+    let (h, w, rim, r) = (CUP_HALF as f64, CUP_WALL as f64, CUP_RIM as f64, BALL_R as f64);
+    let centre = [0.0, 0.0, BALL_Z as f64];
+    let (ball, faces) = icosphere(4, r, centre);
+    // a ball keeps to its hull; dented by 0.1 mm at a corner it does not, so it would keep its field
+    assert!(hulls::fits_its_hull(&ball, &faces, GAP_TOL), "a ball keeps to its hull");
+    let mut dented = ball.clone();
+    dented[7] = add(centre, scale(sub(ball[7], centre), (r - 0.1) / r));
+    assert!(!hulls::fits_its_hull(&dented, &faces, GAP_TOL), "a ball dented 0.1 mm does not keep to its hull");
+    // as a body it is one hull of a few of its corners, short of its whole hull by no more than GAP_TOL in any
+    // direction (those of its corners and of the axes and diagonals)
+    let body = convex_body("ball", &ball, &faces, 1.24e-3, 1.0);
+    let hull = &body.hulls[0];
+    let dirs: Vec<P3> = ball.iter().map(|&p| norm(sub(p, centre))).chain((0..27).filter(|&k| k != 13).map(|k| norm([(k % 3) as f64 - 1.0, ((k / 3) % 3) as f64 - 1.0, (k / 9) as f64 - 1.0]))).collect();
+    let short = short_of(hull, &ball, &dirs);
+    println!("hull: {} of the ball's {} corners, {short:.4} mm short of its whole hull", hull.len(), ball.len());
+    assert!(body.hulls.len() == 1 && body.field.is_none() && hull.len() < ball.len() / 2, "one hull of a few of its corners: {} of {}", hull.len(), ball.len());
+    assert!(short <= GAP_TOL + 1e-9, "the hull keeps within GAP_TOL of the ball's: {short:.4} mm short");
+    let cup = Solid { sd: |p| sd_box(p, CUP_HALF, [0.0, CUP_RIM]).max(-sd_box(p, CUP_HALF - CUP_WALL, [CUP_WALL, CUP_RIM + 10.0])), lo: [-CUP_HALF, -CUP_HALF, 0.0], hi: [CUP_HALF, CUP_HALF, CUP_RIM] };
+    let corners = (0..8).map(|k| [if k & 1 == 0 { -h } else { h }, if k & 2 == 0 { -h } else { h }, if k & 4 == 0 { 0.0 } else { rim }]).collect();
+    let mut asm = Assembly { bodies: vec![field_body("cup", cup, [0.0, 0.0, 12.0], 20.0, 5000.0, corners), body], up: [0.0, 0.0, 1.0], sleep: SLEEP_SPEED, ..Assembly::default() };
+    let mut world = runner::dynamics_world(&asm, [0.0, 0.0, -GRAVITY], Some(0.0)).unwrap();
+    // dropped, it lands on the cup's floor and is asleep within a second, with no kick once landed (its speed
+    // never jumps), and stays asleep
+    let (mut asleep_at, mut kick, mut last, mut floor_in) = (None, 0.0f64, 0.0, (f64::MAX, f64::MIN));
+    for k in 1..=480 {
+        world.step(DT);
+        let (t, v) = (k as f64 * DT, world.max_speed());
+        if t > 0.1 {
+            kick = kick.max(v - last);
+            let z = world.poses()[1].com[2];
+            floor_in = (floor_in.0.min(w + r - z), floor_in.1.max(w + r - z));
+        }
+        last = v;
+        if asleep_at.is_none() && world.sleeping().contains(&1) {
+            asleep_at = Some(t);
+        }
+    }
+    println!("hull in fields: asleep at {asleep_at:?} s, speed jumps by {kick:.2} mm/s at most once landed, {:.3}..{:.3} mm into the cup's floor", floor_in.0, floor_in.1);
+    assert!(asleep_at.is_some_and(|t| t < 1.0) && world.sleeping().contains(&1), "the ball is asleep within a second and stays so: {asleep_at:?}");
+    assert!(kick < 10.0, "no kick once landed: its speed jumps by {kick:.2} mm/s");
+    assert!(floor_in.0 > -0.05 && floor_in.1 < 0.05, "it rests on the cup's floor: {:.3}..{:.3} mm into it", floor_in.0, floor_in.1);
+    // pulled hard into the wall (the cup held), it reaches the wall and stays out of it
+    fixed(&mut asm, 0);
+    let mut world = runner::dynamics_world(&asm, [0.0, 0.0, -GRAVITY], Some(0.0)).unwrap();
+    for _ in 0..120 { world.step(DT); }
+    let ball_at = world.poses()[1].com;
+    world.grab(1, ball_at, runner::POINTER_HZ);
+    let mut deepest: f64 = f64::MIN;
+    for k in 0..120 {
+        world.drag([ball_at[0] + 30.0 * (k as f64 / 60.0).min(1.0), ball_at[1], ball_at[2]], DT);
+        world.step(DT);
+        deepest = deepest.max(world.poses()[1].com[0] + r - (h - w));
+    }
+    println!("hull in fields: pulled into the wall, the ball went {deepest:.3} mm into it");
+    assert!(deepest > -0.5 && deepest < 0.5, "the ball reaches the cup's wall and stays out of it: {deepest:.3} mm into it");
+}
+
+// The block: 20 mm on a side, standing on the floor, with a hole 2.5 mm across down to 5 mm over its bottom;
+// the pin: 2 mm across and 16 mm long, printed in the hole 1 mm over its bottom, 0.15 mm off its axis and
+// leaning 0.3 degrees to that side.
+const HOLE_R: f32 = 1.25;
+const HOLE_FLOOR: f32 = 5.0;
+
+#[test]
+fn a_pin_that_keeps_to_its_hull_rests_in_a_hole_of_a_field_and_sleeps() {
+    use makepad_csg_mech::{convex_body, hulls, GAP_TOL};
+    let (pin_r, pin_len, z0, n) = (1.0, 16.0, HOLE_FLOOR as f64 + 1.0, 48);
+    // a closed cylinder: two rims of `n` corners, their caps fanned from their centres
+    let mut pin: Vec<P3> = (0..2 * n).map(|i| { let a = (i % n) as f64 * std::f64::consts::TAU / n as f64; [pin_r * a.cos(), pin_r * a.sin(), z0 + if i < n { 0.0 } else { pin_len }] }).collect();
+    pin.extend([[0.0, 0.0, z0], [0.0, 0.0, z0 + pin_len]]);
+    let lean = 0.3f64.to_radians();
+    let lean = |p: P3| [0.15 + p[0] * lean.cos() + (p[2] - z0) * lean.sin(), p[1], z0 - p[0] * lean.sin() + (p[2] - z0) * lean.cos()];
+    let pin: Vec<P3> = pin.into_iter().map(lean).collect();
+    let (foot, head) = (pin[2 * n], pin[2 * n + 1]);
+    let (n32, low, high) = (n as u32, 2 * n as u32, 2 * n as u32 + 1);
+    let tris: Vec<[u32; 3]> = (0..n32).flat_map(|i| { let j = (i + 1) % n32; [[i, j, n32 + j], [i, n32 + j, n32 + i], [low, j, i], [high, n32 + i, n32 + j]] }).collect();
+    assert!(hulls::fits_its_hull(&pin, &tris, GAP_TOL), "a pin keeps to its hull");
+    let body = convex_body("pin", &pin, &tris, 1.24e-3, 1.0);
+    let block = Solid {
+        sd: |p| sd_box(p, 10.0, [0.0, 20.0]).max(-((p[0] * p[0] + p[1] * p[1]).sqrt() - HOLE_R).max(HOLE_FLOOR - p[2])),
+        lo: [-10.0, -10.0, 0.0],
+        hi: [10.0, 10.0, 20.0],
+    };
+    let corners = (0..8).map(|k| [if k & 1 == 0 { -10.0 } else { 10.0 }, if k & 2 == 0 { -10.0 } else { 10.0 }, if k & 4 == 0 { 0.0 } else { 20.0 }]).collect();
+    let asm = Assembly { bodies: vec![field_body("block", block, [0.0, 0.0, 10.0], 10.0, 700.0, corners), body], up: [0.0, 0.0, 1.0], sleep: SLEEP_SPEED, ..Assembly::default() };
+    let mut world = runner::dynamics_world(&asm, [0.0, 0.0, -GRAVITY], Some(0.0)).unwrap();
+    // it drops to the hole's bottom, stands on its end and is asleep within a second, with no kick once landed,
+    // and stays asleep and in the hole
+    let (mut asleep_at, mut kick, mut last, mut off, mut low_z) = (None, 0.0f64, 0.0, 0.0f64, f64::MAX);
+    for k in 1..=480 {
+        world.step(DT);
+        let (t, v) = (k as f64 * DT, world.max_speed());
+        let pose = world.poses()[1];
+        let rest = world.rest_com(1);
+        let (foot, head) = (pose.apply(rest, foot), pose.apply(rest, head));
+        off = off.max(len([foot[0], foot[1], 0.0])).max(len([head[0], head[1], 0.0]));
+        low_z = low_z.min(foot[2]);
+        if t > 0.1 {
+            kick = kick.max(v - last);
+        }
+        last = v;
+        if asleep_at.is_none() && world.sleeping().contains(&1) {
+            asleep_at = Some(t);
+        }
+    }
+    println!("pin in a hole: asleep at {asleep_at:?} s, speed jumps by {kick:.2} mm/s at most once landed, axis up to {off:.3} mm off the hole's, foot down to {low_z:.3} mm");
+    assert!(asleep_at.is_some_and(|t| t < 1.0) && world.sleeping().contains(&1), "the pin is asleep within a second and stays so: {asleep_at:?}");
+    assert!(kick < 10.0, "no kick once landed: its speed jumps by {kick:.2} mm/s");
+    assert!(off < (HOLE_R as f64 - pin_r) + 0.05, "the pin stays in the hole: its axis {off:.3} mm off the hole's");
+    assert!(low_z > HOLE_FLOOR as f64 - 0.1, "the pin rests on the hole's bottom, its contacts giving less than 0.1 mm: its foot at {low_z:.3} mm");
 }

@@ -365,7 +365,7 @@ impl Evaluator {
     /// below it).
     fn drafted(&self, g: &Graph, id: NodeId) -> bool {
         match &g.node(id).op {
-            Op::Field { .. } | Op::Shell { .. } | Op::Brep { .. } | Op::Cage { .. } => true,
+            Op::Field { .. } | Op::Shell { .. } | Op::Offset { .. } | Op::Brep { .. } | Op::Cage { .. } => true,
             op => op.inputs().into_iter().any(|i| self.drafted(g, i)),
         }
     }
@@ -520,6 +520,7 @@ impl Evaluator {
                 Ok(if *keep { cad::union(source, &m) } else { m })
             }
             Op::Shell { thickness, open, cell, .. } => shell(&inputs[0], *thickness, *open, cell.map(|c| c * self.draft_scale()), self.draft_scale()),
+            Op::Offset { distance, cell, .. } => offset(&inputs[0], *distance, cell.map(|c| c * self.draft_scale()), self.draft_scale()),
             Op::Boolean { mode, .. } => {
                 let mut out = (*inputs[0]).clone();
                 for other in &inputs[1..] {
@@ -714,6 +715,44 @@ impl makepad_csg_sdf::Sdf3 for Cavity {
     fn distance(&self, p: Vec3d) -> f64 {
         self.bvh.signed_distance(p) + self.t
     }
+}
+
+/// A solid with its surface moved out by `d`.
+struct Grown {
+    bvh: cad::measure::Bvh,
+    d: f64,
+}
+
+impl makepad_csg_sdf::Sdf3 for Grown {
+    fn distance(&self, p: Vec3d) -> f64 {
+        self.bvh.signed_distance(p) - self.d
+    }
+}
+
+/// `source` with its surface moved out by `d` (in, negative), meshed from the solid's distance
+/// field at `cell`.
+fn offset(source: &TriMesh, d: f64, cell: Option<f64>, draft: f64) -> Result<TriMesh, String> {
+    if d == 0.0 {
+        return Ok(source.clone());
+    }
+    let bb = source.bounding_box();
+    let ext = bb.max - bb.min;
+    let largest = ext.x.max(ext.y).max(ext.z);
+    let cell = cell.unwrap_or((largest / 64.0).clamp(0.1, 2.0) * draft);
+    let depth = ((largest / cell).log2().ceil() as usize).clamp(4, 8);
+    let pad = d.max(0.0) + cell;
+    let pad = dvec3(pad, pad, pad);
+    let mut grown = makepad_csg_sdf::sdf_to_mesh(Grown { bvh: cad::measure::Bvh::build(source), d }, bb.min - pad, bb.max + pad, depth);
+    if grown.triangles.is_empty() {
+        return Err(format!("an offset of {d} leaves nothing of the solid"));
+    }
+    if cad::signed_volume(&grown) < 0.0 {
+        grown.clear_normals();
+        for tri in &mut grown.triangles {
+            tri.swap(1, 2);
+        }
+    }
+    Ok(grown)
 }
 
 /// Hollow `source` to walls of `t`: the outer skin stays exactly as it was; the

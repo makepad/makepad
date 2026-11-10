@@ -146,6 +146,22 @@ pub struct HingeDecl {
     pub clearance_axial: Option<f64>,
     /// Shoes that hold the pose ([`BrakeDecl`]); none: it turns free.
     pub brake: Option<BrakeDecl>,
+    /// A motor on the pin in the sim; its limit in N mm.
+    pub motor: Option<MotorDecl>,
+}
+
+/// A motor on a hinge or a slider in the sim: a servo to the place it is set to, or a drive at the
+/// speed it is set to, pushing with at most `limit` (a hinge's N mm, a slider's N).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MotorDecl {
+    pub kind: MotorKind,
+    pub limit: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MotorKind {
+    Position,
+    Speed,
 }
 
 /// A brake on a hinge: a part of a flexible filament (`shoe`) the hinge shapes into two shoes set
@@ -360,6 +376,8 @@ pub struct SliderDecl {
     /// How far its ridge reaches past the neck each side (mm).
     pub depth: Option<f64>,
     pub clearance: Option<f64>,
+    /// A motor on the way in the sim; its limit in N.
+    pub motor: Option<MotorDecl>,
 }
 
 /// A declared bearing: A is the outer race, B the inner that turns in it about the print's up.
@@ -399,6 +417,15 @@ impl JointDecl {
     pub fn shoe(&self) -> Option<usize> {
         match self {
             JointDecl::Hinge(HingeDecl { brake: Some(b), .. }) => Some(b.shoe),
+            _ => None,
+        }
+    }
+
+    /// Its motor, when it has one (a hinge's or a slider's).
+    pub fn motor(&self) -> Option<MotorDecl> {
+        match self {
+            JointDecl::Hinge(h) => h.motor,
+            JointDecl::Slider(s) => s.motor,
             _ => None,
         }
     }

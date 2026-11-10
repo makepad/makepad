@@ -477,6 +477,14 @@ impl Renderer {
         self.clip_plane = plane;
     }
 
+    /// A world box the model lanes keep, turned as it likes (`host_box0..2`: a fragment where
+    /// abs(dot(row, (p, 1))) > 1 on any of the three rows is cut away), for the draws recorded
+    /// from now on. `None` keeps everything. A model drawn while a box is set takes its lane's
+    /// discarding shader.
+    pub fn set_host_box(&mut self, rows: Option<[[f32; 4]; 3]>) {
+        self.host_box = rows;
+    }
+
     /// Moves the clip plane in the draws already recorded into `list` and the lists it holds:
     /// each call whose shader takes `host_clip` gets the new plane in place and its pass paints
     /// again; nothing records. The plane must have been set when they recorded (or the calls
