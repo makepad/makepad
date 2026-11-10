@@ -7,7 +7,7 @@ use crate::{
     makepad_math::*,
     makepad_wasm_bridge::*,
     os::web::from_wasm::*,
-    texture::TextureFormat,
+    texture::{TextureFormat, TextureUpdated},
 };
 use std::collections::BTreeSet;
 
@@ -453,23 +453,41 @@ impl Cx {
 
                     let cxtexture = &mut self.textures[texture_id];
                     if cxtexture.format.is_vec() {
-                        if cxtexture.alloc_vec() {}
-                        if !cxtexture.take_updated().is_empty() {
+                        // Leave the update pending while the data's taken, so its rect
+                        // merges into the next upload instead of getting lost.
+                        if let TextureFormat::VecBGRAu8_32 { data: None, .. } = cxtexture.format {
+                            continue;
+                        }
+                        let updated = cxtexture.take_updated();
+                        if !updated.is_empty() {
+                            // An empty update mustn't use up a size change,
+                            // or the rect below would miss the texture.
+                            let is_new_allocation = cxtexture.alloc_vec();
                             match &cxtexture.format {
                                 TextureFormat::VecBGRAu8_32 {
                                     width,
                                     height,
-                                    data,
+                                    data: Some(data),
                                     ..
                                 } => {
+                                    if let (TextureUpdated::Partial(rect), false) = (updated, is_new_allocation) {
+                                        self.os.from_wasm(FromWasmUpdateTextureRect_BGRAu8_32 {
+                                            texture_id: texture_id.0,
+                                            image_width: *width,
+                                            image_height: *height,
+                                            x: rect.origin.x,
+                                            y: rect.origin.y,
+                                            width: rect.size.width,
+                                            height: rect.size.height,
+                                            data: WasmPtrU32::new(data),
+                                        });
+                                        continue;
+                                    }
                                     self.os.from_wasm(FromWasmAllocTextureImage2D_BGRAu8_32 {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
-                                        data: WasmPtrU32::new(match data {
-                                            Some(data) => data,
-                                            None => continue,
-                                        }),
+                                        data: WasmPtrU32::new(data),
                                     });
                                 }
                                 // VecMipBGRAu8_32: level 0 only for now (safe, no mip chain).
