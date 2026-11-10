@@ -110,10 +110,13 @@ fn seeded_linear_systems_and_constrained_quadratics() {
     let mut l = [0.0; 49];
     let mut work = [0.0; 7];
     assert_eq!(
-        chol_factor_numeric(
-            &mut l, 7, MINVAL, &l_rownnz, &l_rowadr, &l_colind, &lt_rownnz, &lt_rowadr, &lt_colind,
-            &lt_map, &values, &rownnz, &rowadr, &colind, &mut work,
-        ),
+        // SAFETY: l_colind is the pattern chol_factor_symbolic built and checked above.
+        unsafe {
+            chol_factor_numeric(
+                &mut l, 7, MINVAL, &l_rownnz, &l_rowadr, &l_colind, &lt_rownnz, &lt_rowadr, &lt_colind,
+                &lt_map, &values, &rownnz, &rowadr, &colind, &mut work,
+            )
+        },
         7,
         "sparse SPD rank"
     );

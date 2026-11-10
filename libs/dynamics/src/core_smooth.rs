@@ -2,7 +2,7 @@
 //!
 //! Translated from `src/engine/engine_core_smooth.c` of the engine named in
 //! CREDITS.md (Apache-2.0, Copyright 2021 DeepMind Technologies Limited);
-//! changed: translated to Rust.
+//! changed: translated to Rust; with sleep on, a mocap body is static while it holds still.
 
 use crate::core_constraint::mul_jac_tvec;
 use crate::core_util::*;
@@ -34,7 +34,13 @@ pub fn kinematics1(m: &Model, d: &mut Data) {
     d.ximat[8] = 1.0;
     let sleep_filter = enabled(m, ENBL_SLEEP);
     for i in 1..nbody {
-        if sleep_filter && d.body_awake[i] == S_STATIC {
+        // A mocap body is awake while it moves and static while it holds still (its pose is checked below), and
+        // so are the bodies it carries: a still one wakes nothing it touches.
+        let mocap = sleep_filter && m.body_mocapid[i] >= 0;
+        if sleep_filter && !mocap && m.body_treeid[i] < 0 && m.body_mocapid[m.body_rootid[i] as usize] >= 0 {
+            d.body_awake[i] = d.body_awake[m.body_rootid[i] as usize];
+        }
+        if sleep_filter && !mocap && d.body_awake[i] == S_STATIC {
             continue;
         }
         let mut xpos = [0.0; 3];
@@ -108,6 +114,10 @@ pub fn kinematics1(m: &Model, d: &mut Data) {
             }
         }
         blas::normalize4(&mut xquat);
+        if mocap {
+            let still = xpos == *at3(&d.xpos, 3 * i) && xquat == *at4(&d.xquat, 4 * i);
+            d.body_awake[i] = if still { S_STATIC } else { S_AWAKE };
+        }
         if sleep_filter && jntnum != 0 && d.body_awake[i] == S_ASLEEP {
             let pos = at3(&d.xpos, 3 * i);
             let xq = at4(&d.xquat, 4 * i);

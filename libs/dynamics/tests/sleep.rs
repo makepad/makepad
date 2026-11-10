@@ -1,4 +1,9 @@
+use makepad_dynamics::builder::compile;
+use makepad_dynamics::forward::step;
+use makepad_dynamics::io::make_data;
+use makepad_dynamics::model_spec::*;
 use makepad_dynamics::sleep::{sleep_cycle, wake_island};
+use makepad_dynamics::types::*;
 
 #[test]
 fn sleep_cycles_and_wake_islands() {
@@ -59,4 +64,36 @@ fn sleep_cycles_and_wake_islands() {
         "wake singleton"
     );
     assert_eq!(tree_asleep, [-12, -11, -11, -11], "all trees awake");
+}
+
+#[test]
+fn a_box_on_a_still_mocap_sleeps_and_wakes_when_it_moves() {
+    // A 20 mm cube dropped 0.5 mm onto a mocap platform (mm, g, s).
+    let mut spec = ModelSpec::default();
+    spec.option.gravity = [0.0, 0.0, -9810.0];
+    spec.option.timestep = 1.0 / 240.0;
+    spec.option.enableflags |= ENBL_SLEEP;
+    spec.option.sleep_tolerance = 2.0;
+    spec.bodies.push(BodySpec {
+        name: Some("platform".into()), mocap: true,
+        geoms: vec![GeomSpec { r#type: GEOM_BOX, size: [50.0, 50.0, 5.0], ..GeomSpec::default() }],
+        ..BodySpec::default()
+    });
+    spec.bodies.push(BodySpec {
+        name: Some("box".into()), pos: [0.0, 0.0, 15.5], mass: 8.0, inertia: [533.0; 3],
+        joints: vec![JointSpec { r#type: JNT_FREE, limited: 0, ..JointSpec::default() }],
+        geoms: vec![GeomSpec { r#type: GEOM_BOX, size: [10.0; 3], ..GeomSpec::default() }],
+        ..BodySpec::default()
+    });
+    let m = compile(&spec).expect("compile the box on a platform");
+    let mut d = make_data(&m);
+    let slept = (0..960).position(|_| { step(&m, &mut d); d.tree_asleep[0] >= 0 });
+    assert!(slept.is_some(), "the box comes to rest on the still platform and sleeps within 4 s");
+    for s in 0..240 {
+        step(&m, &mut d);
+        assert!(d.tree_asleep[0] >= 0, "a still mocap body wakes nothing it touches: the box woke {s} steps after it slept");
+    }
+    d.mocap_pos[2] += 1.0;
+    step(&m, &mut d);
+    assert!(d.tree_asleep[0] < 0, "the platform moving wakes the box on it");
 }

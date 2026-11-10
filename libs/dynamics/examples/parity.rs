@@ -1,11 +1,12 @@
 //! Parity traces: step a model file and write what each step computed, or compare two traces
 //! bit for bit (this crate's against the reference engine's, CREDITS.md).
 //!
-//!   parity trace <model file> <steps> <qvel scale> <out>
+//!   parity trace <model file> <steps> <qvel scale> <out> [<ctrl scale> [<integrator>]]
 //!   parity diff <a> <b>
 //!   parity speed <model file> <steps> <qvel scale> <runs>
 //!
-//! The start state: reset, then qvel[i] = qvel_scale * sin(1 + i); every step is one `step`.
+//! The start state: reset, then qvel[i] = qvel_scale * sin(1 + i); every step is one `step`. With a
+//! ctrl scale, before step s: ctrl[i] = ctrl_scale * sin(0.01 s + 1 + i); an integrator replaces the model's.
 //! Trace file, little-endian, version 1:
 //!   "MPTR", i32 version, i32 nq, i32 nv, i32 na, i32 nsteps
 //!   per step: f64 time, f64 qpos[nq], f64 qvel[nv], f64 act[na], f64 qacc[nv],
@@ -275,15 +276,23 @@ fn start(m: &Model, scale: f64) -> Data {
     d
 }
 
-fn run_trace(model: &str, steps: usize, scale: f64, out_path: &str) -> Result<bool, String> {
-    let m = load_model_with(Path::new(model), attach)?;
+fn run_trace(model: &str, steps: usize, scale: f64, out_path: &str, ctrl: Option<f64>, integrator: Option<i32>) -> Result<bool, String> {
+    let mut m = load_model_with(Path::new(model), attach)?;
+    if let Some(i) = integrator {
+        m.opt.integrator = i;
+    }
     let mut d = start(&m, scale);
     let mut out = Vec::new();
     out.extend_from_slice(b"MPTR");
     for v in [1, m.nq as i32, m.nv as i32, m.na as i32, steps as i32] {
         put_i32(&mut out, v);
     }
-    for _ in 0..steps {
+    for s in 0..steps {
+        if let Some(c) = ctrl {
+            for i in 0..m.nu {
+                d.ctrl[i] = c * (0.01 * s as f64 + 1.0 + i as f64).sin();
+            }
+        }
         forward::step(&m, &mut d);
         step_record(&m, &d, &mut out);
     }
@@ -369,6 +378,8 @@ fn run_kernel_speed(model: &str, steps: usize, scale: f64) -> Result<bool, Strin
         ("factor_m", core_smooth::factor_m),
         ("collision", collision_driver::collision),
         ("make_constraint", core_constraint::make_constraint),
+        ("make_m", core_smooth::make_m),
+        ("island", makepad_dynamics::island::island),
         ("transmission", core_smooth::transmission),
         ("project_constraint", core_constraint::project_constraint),
         ("com_vel", core_smooth::com_vel),
@@ -393,8 +404,16 @@ fn main() {
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["diff", a, b] => run_diff(a, b),
         ["trace", model, steps, scale, out] => match (steps.parse(), scale.parse()) {
-            (Ok(n), Ok(q)) => run_trace(model, n, q, out),
+            (Ok(n), Ok(q)) => run_trace(model, n, q, out, None, None),
             _ => Err("trace: steps and qvel scale are numbers".to_string()),
+        },
+        ["trace", model, steps, scale, out, ctrl] => match (steps.parse(), scale.parse(), ctrl.parse()) {
+            (Ok(n), Ok(q), Ok(c)) => run_trace(model, n, q, out, Some(c), None),
+            _ => Err("trace: steps, qvel scale and ctrl scale are numbers".to_string()),
+        },
+        ["trace", model, steps, scale, out, ctrl, integrator] => match (steps.parse(), scale.parse(), ctrl.parse(), integrator.parse()) {
+            (Ok(n), Ok(q), Ok(c), Ok(i)) => run_trace(model, n, q, out, Some(c), Some(i)),
+            _ => Err("trace: steps, qvel scale, ctrl scale and integrator are numbers".to_string()),
         },
         ["speed", model, steps, scale, runs] => match (steps.parse(), scale.parse(), runs.parse()) {
             (Ok(n), Ok(q), Ok(r)) => run_speed(model, n, q, r),
@@ -408,7 +427,7 @@ fn main() {
             (Ok(n), Ok(q)) => run_stage_speed(model, n, q),
             _ => Err("stagespeed: steps and qvel scale are numbers".to_string()),
         },
-        _ => Err("usage: parity trace <model file> <steps> <qvel scale> <out> | parity diff <a> <b> | parity speed <model file> <steps> <qvel scale> <runs> | parity stagespeed <model file> <steps> <qvel scale> | parity kernelspeed <model file> <steps> <qvel scale>".to_string()),
+        _ => Err("usage: parity trace <model file> <steps> <qvel scale> <out> [<ctrl scale> [<integrator>]] | parity diff <a> <b> | parity speed <model file> <steps> <qvel scale> <runs> | parity stagespeed <model file> <steps> <qvel scale> | parity kernelspeed <model file> <steps> <qvel scale>".to_string()),
     };
     match result {
         Ok(true) => {}

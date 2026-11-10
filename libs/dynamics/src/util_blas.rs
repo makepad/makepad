@@ -405,6 +405,13 @@ pub fn norm(res: &[f64], n: usize) -> f64 {
 
 #[inline]
 pub fn dot(vec1: &[f64], vec2: &[f64], n: usize) -> f64 {
+    dot_lanes(vec1, vec2, n)
+}
+
+// The four-lane dot product. Like the reference's dot kernel it is always inlined, so the matrix-vector
+// routines below take it inline instead of calling it once per row.
+#[inline(always)]
+fn dot_lanes(vec1: &[f64], vec2: &[f64], n: usize) -> f64 {
     let mut vec1 = &vec1[..n];
     let mut vec2 = &vec2[..n];
     let mut res0 = 0.0;
@@ -444,7 +451,7 @@ pub fn dot_ind(vec1: &[f64], vec2: &[f64], ind: &[i32], n: usize) -> f64 {
 
 pub fn mul_mat_vec(res: &mut [f64], mat: &[f64], vec: &[f64], nr: usize, nc: usize) {
     for r in 0..nr {
-        res[r] = crate::util_blas::dot(&mat[r * nc..], vec, nc);
+        res[r] = dot_lanes(&mat[r * nc..], vec, nc);
     }
 }
 
@@ -461,7 +468,7 @@ pub fn mul_mat_tvec(res: &mut [f64], mat: &[f64], vec: &[f64], nr: usize, nc: us
 pub fn mul_vec_mat_vec(vec1: &[f64], mat: &[f64], vec2: &[f64], n: usize) -> f64 {
     let mut res = 0.0;
     for i in 0..n {
-        res += vec1[i] * crate::util_blas::dot(&mat[i * n..], vec2, n);
+        res += vec1[i] * dot_lanes(&mat[i * n..], vec2, n);
     }
     res
 }
@@ -516,7 +523,7 @@ pub fn mul_mat_mat(res: &mut [f64], mat1: &[f64], mat2: &[f64], r1: usize, c1: u
 pub fn mul_mat_mat_t(res: &mut [f64], mat1: &[f64], mat2: &[f64], r1: usize, c1: usize, r2: usize) {
     for i in 0..r1 {
         for j in 0..r2 {
-            res[i * r2 + j] = crate::util_blas::dot(&mat1[i * c1..], &mat2[j * c1..], c1);
+            res[i * r2 + j] = dot_lanes(&mat1[i * c1..], &mat2[j * c1..], c1);
         }
     }
 }

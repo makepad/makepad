@@ -176,7 +176,7 @@ impl BoundingVolumeHierarchy {
         if self.child[2*index] == -1 && self.child[2*index+1] == -1 {
             panic!("this should have been a leaf, nelements={nelements}");
         }
-        if lev > MAXTREEDEPTH { eprintln!("max tree depth exceeded"); }
+        if lev > MAXTREEDEPTH { crate::util_errmem::warning_text("max tree depth exceeded"); }
         index as i32
     }
 }
@@ -654,7 +654,7 @@ fn make_graph(name: &str, dvert: &[f64], nvert: usize) -> Result<Vec<i32>, Strin
 
     // bad graph: delete
     if !ok {
-        eprintln!("Could not construct convex hull graph");
+        crate::util_errmem::warning_text("Could not construct convex hull graph");
         return Ok(Vec::new());
     }
 
@@ -1663,6 +1663,18 @@ struct Equality {
     obj1id: i32,
     obj2id: i32,
 }
+// A compiled wrap: its model fields and the body GetBodyIdFromWrap gives (-1 for a pulley).
+struct Wrap {
+    r#type: i32,
+    objid: i32,
+    prm: f64,
+    bodyid: i32,
+}
+struct Tendon {
+    spec: TendonSpec,
+    spatial: bool,
+    wraps: Vec<Wrap>,
+}
 struct Tree {
     bodies: Vec<BodySpec>,
     children: Vec<Vec<usize>>,
@@ -1672,7 +1684,11 @@ struct Tree {
     joint_names: HashMap<String, usize>,
     geom_names: HashMap<String, usize>,
     site_names: HashMap<String, usize>,
+    tendon_names: HashMap<String, usize>,
     joint_types: Vec<i32>,
+    // The body of each joint and site, by id.
+    joint_body: Vec<usize>,
+    site_body: Vec<usize>,
     mesh_names: HashMap<String, usize>,
     geoms: Vec<(usize, usize)>,
     // The mesh each geom names, by id, or -1 (IndexAssets).
@@ -1712,7 +1728,8 @@ fn object_lists(spec: &ModelSpec) -> Result<Tree, String> {
     let mut tree = Tree {
         bodies, children: vec![Vec::new(); nbody], weldid: vec![0; nbody], dofnum: vec![0; nbody],
         body_names: HashMap::new(), joint_names: HashMap::new(), geom_names: HashMap::new(), site_names: HashMap::new(),
-        mesh_names: HashMap::new(), joint_types: Vec::new(), geoms: Vec::new(), geom_mesh, geom_aabb,
+        tendon_names: HashMap::new(), mesh_names: HashMap::new(), joint_types: Vec::new(), joint_body: Vec::new(), site_body: Vec::new(),
+        geoms: Vec::new(), geom_mesh, geom_aabb,
         body_bvh: (0..nbody).map(|_| BoundingVolumeHierarchy::default()).collect(),
     };
     let mut njnt = 0;
@@ -1725,6 +1742,7 @@ fn object_lists(spec: &ModelSpec) -> Result<Tree, String> {
         for j in &b.joints {
             insert_name(&mut tree.joint_names, &j.name, njnt)?;
             tree.joint_types.push(j.r#type);
+            tree.joint_body.push(i);
             njnt += 1;
         }
         for (k, g) in b.geoms.iter().enumerate() {
@@ -1732,12 +1750,18 @@ fn object_lists(spec: &ModelSpec) -> Result<Tree, String> {
             tree.geoms.push((i, k));
             ngeom += 1;
         }
-        for s in &b.sites { insert_name(&mut tree.site_names, &s.name, nsite)?; nsite += 1; }
+        for s in &b.sites {
+            insert_name(&mut tree.site_names, &s.name, nsite)?;
+            tree.site_body.push(i);
+            nsite += 1;
+        }
     }
-    for names in [spec.pairs.iter().map(|p| &p.name).collect::<Vec<_>>(), spec.excludes.iter().map(|e| &e.name).collect(), spec.equalities.iter().map(|e| &e.name).collect()] {
+    for names in [spec.pairs.iter().map(|p| &p.name).collect::<Vec<_>>(), spec.excludes.iter().map(|e| &e.name).collect(),
+        spec.equalities.iter().map(|e| &e.name).collect(), spec.actuators.iter().map(|a| &a.name).collect()] {
         let mut map = HashMap::new();
         for (i, name) in names.into_iter().enumerate() { insert_name(&mut map, name, i)?; }
     }
+    for (i, t) in spec.tendons.iter().enumerate() { insert_name(&mut tree.tendon_names, &t.name, i)?; }
     Ok(tree)
 }
 
@@ -1892,6 +1916,333 @@ fn compile_equality(spec: &EqualitySpec, tree: &Tree) -> Result<Equality, String
     Ok(Equality { spec: e, obj1id, obj2id })
 }
 
+// mjCTendon::Compile, with mjCWrap::Compile and ResolveReferences. The builder has no name
+// spaces, so a wrap that names no object fails at once. The gauge is the identity: every
+// wrap's prmscale is 1. With autolimits fixed on, checklimited never refuses.
+fn compile_tendon(spec: &TendonSpec, id: usize, tree: &Tree) -> Result<Tendon, String> {
+    let t = spec.clone();
+    let name = t.name.as_deref().unwrap_or("");
+    let sz = t.path.len();
+    if sz == 0 { return Err(format!("tendon '{name}' (id = {id}): path cannot be empty")); }
+    let spatial = t.path.iter().any(|w| w.r#type != WRAP_JOINT);
+    if spatial && sz < 2 { return Err(format!("tendon '{name}' (id = {id}): spatial path must contain at least two objects")); }
+    if spatial && t.width <= 0.0 { return Err(format!("tendon '{name}' (id = {id}) must have positive width")); }
+    let mut wraps = Vec::with_capacity(sz);
+    let mut npulley = 0;
+    for (i, w) in t.path.iter().enumerate() {
+        let wname = w.name.as_deref().unwrap_or("");
+        let find = |map: &HashMap<String, usize>, what: &str| map.get(wname).copied()
+            .ok_or_else(|| format!("{what} '{wname}' not found in tendon {id}, wrap {i}"));
+        // CopyFromSpec: a cylinder wrap becomes a sphere, and its geom decides again.
+        let wrap = match if w.r#type == WRAP_CYLINDER { WRAP_SPHERE } else { w.r#type } {
+            WRAP_JOINT => {
+                let j = find(&tree.joint_names, "joint")?;
+                Wrap { r#type: WRAP_JOINT, objid: j as i32, prm: w.prm, bodyid: tree.joint_body[j] as i32 }
+            }
+            WRAP_SPHERE => {
+                let g = find(&tree.geom_names, "geom")?;
+                let (b, k) = tree.geoms[g];
+                let r#type = match tree.bodies[b].geoms[k].r#type {
+                    GEOM_CYLINDER => WRAP_CYLINDER,
+                    GEOM_SPHERE => WRAP_SPHERE,
+                    _ => return Err(format!("geom '{wname}' in tendon {id}, wrap {i} is not sphere or cylinder")),
+                };
+                let side = w.sidesite.as_deref().unwrap_or("");
+                let sideid = if side.is_empty() { -1 } else {
+                    tree.site_names.get(side).copied()
+                        .ok_or_else(|| format!("side site '{side}' not found in tendon {id}, wrap {i}"))? as i32
+                };
+                Wrap { r#type, objid: g as i32, prm: sideid as f64, bodyid: b as i32 }
+            }
+            WRAP_PULLEY => {
+                npulley += 1;
+                if w.prm <= 0.0 { return Err(format!("pulley divisor must be positive in tendon {id}, wrap {i}")); }
+                Wrap { r#type: WRAP_PULLEY, objid: -1, prm: w.prm, bodyid: -1 }
+            }
+            WRAP_SITE => {
+                let site = tree.site_names.get(wname).copied().ok_or_else(|| format!("site '{wname}' not found in wrap {i}"))?;
+                Wrap { r#type: WRAP_SITE, objid: site as i32, prm: w.prm, bodyid: tree.site_body[site] as i32 }
+            }
+            _ => return Err(format!("unknown wrap type in tendon {id}, wrap {i}")),
+        };
+        wraps.push(wrap);
+    }
+    if npulley == sz { return Err(format!("tendon '{name}' (id = {id}): no attached reference found")); }
+    if t.armature < 0.0 { return Err(format!("tendon '{name}' (id = {id}): tendon armature cannot be negative")); }
+    for i in 0..sz {
+        let ty = wraps[i].r#type;
+        if !spatial {
+            if !matches!(tree.joint_types[wraps[i].objid as usize], JNT_SLIDE | JNT_HINGE) {
+                return Err(format!("joint '{}' in tendon {id}, wrap {i} must be slide or hinge", t.path[i].name.as_deref().unwrap_or("")));
+            }
+            if wraps[..i].iter().any(|w| w.objid == wraps[i].objid) { return Err(format!("tendon '{name}' (id = {id}): joint {i} is repeated")); }
+            continue;
+        }
+        let pulley = |k: usize| wraps[k].r#type == WRAP_PULLEY;
+        match ty {
+            WRAP_PULLEY => {
+                if i > 0 && pulley(i - 1) { return Err(format!("tendon '{name}' (id = {id}): consecutive pulleys (pos {i})")); }
+                if i == sz - 1 { return Err(format!("tendon '{name}' (id = {id}): path ends with pulley")); }
+            }
+            WRAP_SITE => {
+                if (i == 0 || pulley(i - 1)) && (i == sz - 1 || pulley(i + 1)) {
+                    return Err(format!("tendon '{name}' (id = {id}): site {i} needs a neighbor that is not a pulley"));
+                }
+                if i < sz - 1 && wraps[i + 1].r#type == WRAP_SITE && wraps[i].objid == wraps[i + 1].objid {
+                    return Err(format!("tendon '{name}' (id = {id}): site {i} is repeated"));
+                }
+            }
+            WRAP_SPHERE | WRAP_CYLINDER => {
+                if i == 0 || i == sz - 1 || wraps[i - 1].r#type != WRAP_SITE || wraps[i + 1].r#type != WRAP_SITE {
+                    return Err(format!("tendon '{name}' (id = {id}): geom at pos {i} not bracketed by sites"));
+                }
+                if t.armature > 0.0 { return Err(format!("tendon '{name}' (id = {id}): geom wrapping not supported by tendon armature")); }
+            }
+            _ => return Err(format!("tendon '{name} (id = {id})': joint wrap found in spatial path at pos {i}")),
+        }
+    }
+    if t.range[0] >= t.range[1] && islimited(t.limited, &t.range) { return Err("invalid limits in tendon".into()); }
+    if islimited(t.actfrclimited, &t.actfrcrange) && (t.actfrcrange[0] >= t.actfrcrange[1] || t.actfrcrange[0] > 0.0 || t.actfrcrange[1] < 0.0) {
+        return Err("invalid actuatorfrcrange in tendon".into());
+    }
+    if t.springlength[0] > t.springlength[1] { return Err("invalid springlength in tendon".into()); }
+    if t.springyield < 0.0 { return Err("springyield cannot be negative in tendon".into()); }
+    Ok(Tendon { spec: t, spatial, wraps })
+}
+
+struct Actuator {
+    spec: ActuatorSpec,
+    trnid: [i32; 2],
+    so3: bool,
+    ctrlnum: usize,
+    ctrlspec: i32,
+    outnum: usize,
+    ctrllimiteds: [bool; 4],
+    ctrlranges: [[f64; 2]; 4],
+}
+
+// mjCActuator::Compile and ResolveReferences. A plugin and a control history are outside the
+// subset, and so are muscles: their length range needs the compiler's own simulation. The gauge
+// is the identity. With autolimits fixed on, checklimited never refuses.
+fn compile_actuator(spec: &ActuatorSpec, id: usize, tree: &Tree, tendons: &[Tendon]) -> Result<Actuator, String> {
+    let mut a = spec.clone();
+    let name = a.name.clone().unwrap_or_default();
+    if a.gaintype == GAIN_MUSCLE || a.biastype == BIAS_MUSCLE || a.dyntype == DYN_MUSCLE || a.r#type == ACTUATOR_MUSCLE {
+        return Err(format!("actuator '{name}' (id = {id}): muscles are outside the builder subset (their length range needs the compiler's own simulation)"));
+    }
+    if a.nsample != 0 || a.interp != 0 || a.delay != 0.0 {
+        return Err(format!("actuator '{name}' (id = {id}): a control history (nsample, interp, delay) is outside the builder subset"));
+    }
+    // reset input/output block widths, resolved below
+    let mut ctrlnum = 1;
+    let mut ctrlspec = 0;
+    let mut outnum = 1;
+    let mut so3 = false;
+    let target = a.target.clone().unwrap_or_default();
+    if target.is_empty() { return Err("missing transmission target for actuator".into()); }
+
+    // ResolveReferences
+    let mut trnid = [-1, -1];
+    let site = |n: &str| tree.site_names.get(n).copied();
+    let ptarget = match a.trntype {
+        TRN_JOINT | TRN_JOINTINPARENT => Some(tree.joint_names.get(&target).copied()
+            .ok_or_else(|| format!("unknown transmission target '{target}' for actuator id = {id}"))?),
+        TRN_SLIDERCRANK => {
+            let slider = a.slidersite.clone().unwrap_or_default();
+            if slider.is_empty() { return Err(format!("missing base site for slider-crank '{name}' (id = {id})")); }
+            trnid[1] = site(&slider).ok_or_else(|| format!("base site '{slider}' not found for actuator {id}"))? as i32;
+            if a.cranklength <= 0.0 { return Err(format!("crank length must be positive in actuator '{name}' (id = {id})")); }
+            site(&target)
+        }
+        TRN_TENDON => tree.tendon_names.get(&target).copied(),
+        TRN_SITE => {
+            let refsite = a.refsite.clone().unwrap_or_default();
+            if !refsite.is_empty() {
+                trnid[1] = site(&refsite).ok_or_else(|| format!("reference site '{refsite}' not found for actuator {id}"))? as i32;
+            }
+            site(&target)
+        }
+        TRN_BODY => tree.body_names.get(&target).copied(),
+        _ => return Err("invalid transmission type in actuator".into()),
+    };
+    let ptarget = ptarget.ok_or_else(|| format!("transmission target '{target}' not found in actuator {id}"))?;
+    trnid[0] = ptarget as i32;
+    let joint = matches!(a.trntype, TRN_JOINT | TRN_JOINTINPARENT).then(|| tree.bodies.iter().flat_map(|b| b.joints.iter()).nth(ptarget).expect("a joint id names a joint"));
+
+    // SO3 geodesic servo: validate and resolve the SO3 transmission
+    if a.gaintype == GAIN_SO3 || a.biastype == BIAS_SO3 {
+        if a.gaintype != GAIN_SO3 || a.biastype != BIAS_SO3 { return Err(format!("gaintype and biastype must both be 'so3' in actuator '{name}' (id = {id})")); }
+        if a.dyntype != DYN_NONE && a.dyntype != DYN_INTEGRATOR { return Err(format!("so3 requires dyntype 'none' or 'integrator' in actuator '{name}' (id = {id})")); }
+        if a.gainprm[0] != -a.biasprm[1] { return Err(format!("so3 requires gainprm[0] == -biasprm[1] in actuator '{name}' (id = {id})")); }
+        if a.trntype == TRN_SITE {
+            if a.refsite.as_deref().unwrap_or("").is_empty() { return Err(format!("so3 site transmission requires refsite in actuator '{name}' (id = {id})")); }
+        } else if a.trntype == TRN_JOINT {
+            if joint.is_none_or(|j| j.r#type != JNT_BALL) { return Err(format!("so3 joint transmission requires a ball joint in actuator '{name}' (id = {id})")); }
+        } else {
+            return Err(format!("so3 requires site or ball joint transmission in actuator '{name}' (id = {id})"));
+        }
+        // integrator variant: activation is the 3D orientation setpoint
+        if a.dyntype == DYN_INTEGRATOR {
+            if a.actdim > 0 && a.actdim != 3 { return Err(format!("so3 integrator requires actdim 3 in actuator '{name}' (id = {id})")); }
+            a.actdim = 3;
+            // the act setpoint is re-anchored to a bounded representative at integration time
+            if a.actlimited == 1 && a.actrange[0] == 0.0 && a.actrange[1] == 0.0 { a.actlimited = 0; }
+        }
+        // input chart: expmap (3 controls, default) or quat (4 controls)
+        ctrlspec = if a.ctrlspec != 0 { a.ctrlspec } else { CHART_EXPMAP };
+        if ctrlspec == CHART_QUAT {
+            if a.dyntype != DYN_NONE { return Err(format!("so3 quat input requires dyntype 'none' in actuator '{name}' (id = {id})")); }
+        } else if ctrlspec != CHART_EXPMAP {
+            return Err(format!("so3 input must be expmap or quat in actuator '{name}' (id = {id})"));
+        }
+        // force is clamped on the norm of the output torque: lower bound must be 0
+        if islimited(a.forcelimited, &a.forcerange) && a.forcerange[0] != 0.0 {
+            return Err(format!("so3 forcerange bounds the force norm, lower bound must be 0 in actuator '{name}' (id = {id})"));
+        }
+        ctrlnum = if ctrlspec == CHART_QUAT { 4 } else { 3 };
+        outnum = 3;
+        so3 = true;
+    }
+
+    // PID servo: validate and resolve input block
+    if a.gaintype == GAIN_PID {
+        if a.biastype != BIAS_AFFINE { return Err(format!("pid requires biastype 'affine' in actuator '{name}' (id = {id})")); }
+        if a.dyntype != DYN_NONE && a.dyntype != DYN_PID { return Err(format!("pid requires dyntype 'none' or 'pid' in actuator '{name}' (id = {id})")); }
+        if a.dyntype == DYN_NONE && a.gainprm[0] != 0.0 { return Err(format!("ki (gainprm[0]) requires dyntype 'pid' in actuator '{name}' (id = {id})")); }
+        if a.trntype == TRN_BODY { return Err(format!("pid cannot use body transmission, actuator '{name}' (id = {id})")); }
+        // controller states, slot order [slew, integral]: gated on slewmax (dynprm[1]) and ki
+        if a.dyntype == DYN_PID {
+            if a.dynprm[0] < 0.0 { return Err(format!("imax (dynprm[0]) must be non-negative in actuator '{name}' (id = {id})")); }
+            if a.dynprm[1] < 0.0 { return Err(format!("slewmax (dynprm[1]) must be non-negative in actuator '{name}' (id = {id})")); }
+            let nslot = (a.dynprm[1] > 0.0) as i32 + (a.gainprm[0] > 0.0) as i32;
+            if a.actdim > 0 && a.actdim != nslot { return Err(format!("pid controller states require matching actdim in actuator '{name}' (id = {id})")); }
+            a.actdim = nslot;
+        }
+        // input block: any subset of [pos, vel, ff], default [pos, vel]
+        ctrlspec = if a.ctrlspec != 0 { a.ctrlspec } else { INPUT_POS | INPUT_VEL };
+        if ctrlspec & !(INPUT_POS | INPUT_VEL | INPUT_FF) != 0 { return Err(format!("pid inputs are a subset of [pos, vel, ff] in actuator '{name}' (id = {id})")); }
+        if a.dyntype == DYN_PID && ctrlspec & INPUT_POS == 0 { return Err(format!("pid controller states require the pos input in actuator '{name}' (id = {id})")); }
+        ctrlnum = (ctrlspec & INPUT_POS != 0) as usize + (ctrlspec & INPUT_VEL != 0) as usize + (ctrlspec & INPUT_FF != 0) as usize;
+    }
+
+    // DC motor: resolve input block (default: raw voltage command)
+    if a.gaintype == GAIN_DCMOTOR {
+        ctrlspec = if a.ctrlspec != 0 { a.ctrlspec } else { INPUT_VOLTAGE };
+        if ctrlspec != INPUT_NONE && ctrlspec & !(INPUT_POS | INPUT_VEL | INPUT_FF | INPUT_VOLTAGE) != 0 {
+            return Err(format!("dcmotor inputs are 'none' or a subset of [pos, vel, ff, voltage] in actuator '{name}' (id = {id})"));
+        }
+        // controller inputs engage the torque-space controller, which divides by the motor constant
+        let controller = if ctrlspec == INPUT_NONE { 0 } else { ctrlspec & (INPUT_POS | INPUT_VEL | INPUT_FF) };
+        if controller != 0 && a.gainprm[1] <= 0.0 { return Err(format!("dcmotor controller inputs require a positive motor constant in actuator '{name}' (id = {id})")); }
+        if controller == 0 && (a.gainprm[4] != 0.0 || a.gainprm[5] != 0.0 || a.gainprm[6] != 0.0) {
+            return Err(format!("dcmotor controller gains require a controller input [pos, vel, ff] in actuator '{name}' (id = {id})"));
+        }
+        if a.gainprm[5] > 0.0 && ctrlspec & INPUT_POS == 0 { return Err(format!("dcmotor integral gain requires the pos input in actuator '{name}' (id = {id})")); }
+        ctrlnum = (ctrlspec & INPUT_POS != 0) as usize + (ctrlspec & INPUT_VEL != 0) as usize + (ctrlspec & INPUT_FF != 0) as usize + (ctrlspec & INPUT_VOLTAGE != 0) as usize;
+        if controller == 0 && a.dynprm[7] > 0.0 {
+            return Err(format!("dcmotor slew rate limiting requires a controller input [pos, vel, ff] in actuator '{name}' (id = {id})"));
+        }
+    }
+
+    // pid dynamics are pid-only
+    if a.dyntype == DYN_PID && a.gaintype != GAIN_PID { return Err(format!("dyntype 'pid' requires gaintype 'pid', actuator '{name}' (id = {id})")); }
+
+    // fixed and affine gains: one declared input, pos, vel or pressure; none declared: a command
+    if a.gaintype == GAIN_FIXED || a.gaintype == GAIN_AFFINE {
+        if a.ctrlspec != 0 && a.ctrlspec != INPUT_POS && a.ctrlspec != INPUT_VEL && a.ctrlspec != INPUT_PRESSURE {
+            return Err(format!("fixed and affine gains take one input, 'pos', 'vel' or 'pressure', in actuator '{name}' (id = {id})"));
+        }
+        ctrlspec = a.ctrlspec;
+    } else if a.ctrlspec != 0 && a.gaintype != GAIN_SO3 && a.gaintype != GAIN_PID && a.gaintype != GAIN_DCMOTOR {
+        // muscle and user gains take no input signature
+        return Err(format!("input is not available for muscle and user gains, actuator '{name}' (id = {id})"));
+    }
+
+    // check damping/armature only valid for joint and tendon transmission
+    let on_joint_or_tendon = matches!(a.trntype, TRN_JOINT | TRN_JOINTINPARENT | TRN_TENDON);
+    if a.damping.iter().any(|&d| d != 0.0) && !on_joint_or_tendon { return Err(format!("damping requires joint or tendon transmission in actuator '{name}' (id = {id})")); }
+    if a.armature != 0.0 && !on_joint_or_tendon { return Err(format!("armature requires joint or tendon transmission in actuator '{name}' (id = {id})")); }
+
+    // handle inheritrange
+    if ((a.gaintype == GAIN_FIXED && a.gainprm[0] == -a.biasprm[1]) || a.gaintype == GAIN_PID) && a.biastype == BIAS_AFFINE && a.inheritrange > 0.0 {
+        // semantic of actuator is the same as transmission, inheritrange is applicable
+        let act_range = if matches!(a.dyntype, DYN_NONE | DYN_FILTEREXACT | DYN_PID) {
+            false
+        } else if a.dyntype == DYN_INTEGRATOR {
+            true
+        } else {
+            return Err("inheritrange only available for position and intvelocity actuators".into());
+        };
+        let target_range = if a.trntype == TRN_JOINT {
+            let j = joint.expect("a joint transmission has its joint");
+            if j.r#type != JNT_HINGE && j.r#type != JNT_SLIDE { return Err("inheritrange can only be used with hinge and slide joints, actuator".into()); }
+            j.range
+        } else if a.trntype == TRN_TENDON {
+            tendons[ptarget].spec.range
+        } else {
+            return Err("inheritrange can only be used with joint and tendon transmission, actuator".into());
+        };
+        if target_range[0] == target_range[1] { return Err(format!("inheritrange used but target '{target}' has no range defined in actuator {id}")); }
+        // set range automatically
+        let mean = 0.5 * (target_range[1] + target_range[0]);
+        let radius = 0.5 * (target_range[1] - target_range[0]) * a.inheritrange;
+        let range = if act_range { &mut a.actrange } else { &mut a.ctrlrange };
+        range[0] = mean - radius;
+        range[1] = mean + radius;
+    }
+
+    // check limits
+    if a.forcerange[0] >= a.forcerange[1] && islimited(a.forcelimited, &a.forcerange) { return Err("invalid force range for actuator".into()); }
+    if a.ctrlrange[0] >= a.ctrlrange[1] && islimited(a.ctrllimited, &a.ctrlrange) { return Err("invalid control range for actuator".into()); }
+    if a.actrange[0] >= a.actrange[1] && islimited(a.actlimited, &a.actrange) { return Err("invalid actrange for actuator".into()); }
+    if islimited(a.actlimited, &a.actrange) && a.dyntype == DYN_NONE { return Err("actrange specified but dyntype is 'none' in actuator".into()); }
+
+    // check and set actdim
+    if a.actdim > 1 && a.dyntype != DYN_USER && a.dyntype != DYN_DCMOTOR && a.dyntype != DYN_PID && !so3 {
+        return Err("actdim > 1 is only allowed for dyntype 'user', 'dcmotor' and 'pid'".into());
+    }
+    if a.actdim == 1 && a.dyntype == DYN_NONE { return Err("invalid actdim 1 in stateless actuator".into()); }
+    if a.actdim == 0 && a.dyntype != DYN_NONE && a.dyntype != DYN_DCMOTOR { return Err("invalid actdim 0 in stateful actuator".into()); }
+
+    // DC motor: one activation per enabled state, as in mj_dcmotorSlots
+    if a.dyntype == DYN_DCMOTOR {
+        let nslot = (a.dynprm[7] > 0.0) as i32 + (a.gainprm[5] > 0.0) as i32 + (a.dynprm[2] > 0.0) as i32 + (a.dynprm[5] > 0.0) as i32 + (a.dynprm[0] > 0.0) as i32;
+        if a.actdim < 0 {
+            a.actdim = nslot;
+        } else if a.actdim != nslot {
+            return Err(format!("DC motor parameters in actuator '{name}' (id = {id}) require actdim {nslot}, got {}", a.actdim));
+        }
+    }
+
+    // set actdim to 1 if it is unset and type is standard one-activation dyntype
+    if a.actdim < 0 { a.actdim = (a.dyntype != DYN_NONE) as i32; }
+
+    // DC motor always uses actearly
+    if a.dyntype == DYN_DCMOTOR && !a.actearly { return Err(format!("actearly cannot be false for DC motor actuator '{name}' (id = {id})")); }
+
+    // resolve per-input control ranges: broadcast ctrlrange, pid overrides vel and ff
+    let mut ctrllimiteds = [false; 4];
+    let mut ctrlranges = [[0.0; 2]; 4];
+    for j in 0..ctrlnum.min(4) {
+        ctrllimiteds[j] = islimited(a.ctrllimited, &a.ctrlrange);
+        ctrlranges[j] = a.ctrlrange;
+    }
+    if a.gaintype == GAIN_PID {
+        // present inputs pack in canonical order [pos, vel, ff]; pos keeps the ctrlrange broadcast
+        let mut j = if ctrlspec & INPUT_POS != 0 { 1 } else { 0 };
+        if ctrlspec & INPUT_VEL != 0 {
+            ctrllimiteds[j] = a.velrange[0] < a.velrange[1];
+            ctrlranges[j] = a.velrange;
+            j += 1;
+        }
+        if ctrlspec & INPUT_FF != 0 {
+            ctrllimiteds[j] = a.ffrange[0] < a.ffrange[1];
+            ctrlranges[j] = a.ffrange;
+        }
+    }
+    Ok(Actuator { spec: a, trnid, so3, ctrlnum, ctrlspec, outnum, ctrllimiteds, ctrlranges })
+}
+
 // IsNullPose.
 fn is_null_pose(pos: &[f64; 3], quat: Option<&[f64; 4]>) -> bool {
     if pos[0].abs() >= 1e-6 || pos[1].abs() >= 1e-6 || pos[2].abs() >= 1e-6 { return false; }
@@ -1907,8 +2258,13 @@ fn is_null_pose(pos: &[f64; 3], quat: Option<&[f64; 4]>) -> bool {
 fn joint_nq(j: &JointSpec) -> usize { match j.r#type { JNT_FREE => 7, JNT_BALL => 4, _ => 1 } }
 fn joint_nv(j: &JointSpec) -> usize { match j.r#type { JNT_FREE => 6, JNT_BALL => 3, _ => 1 } }
 
-// mjCModel::ComputeSparseSizes, rigid bodies only.
-fn compute_sparse_sizes(tree: &Tree, nv: usize, sizes: &mut [i64]) {
+// The armature of a tendon or of an actuator on it, as ComputeSparseSizes and FinalizeSimple test it.
+fn tendon_has_armature(id: usize, armature: bool, actuators: impl Iterator<Item = (i32, i32, f64)>) -> bool {
+    armature || actuators.into_iter().any(|(trntype, trnid, armature)| trntype == TRN_TENDON && trnid == id as i32 && armature != 0.0)
+}
+
+// mjCModel::ComputeSparseSizes, rigid bodies and tendons.
+fn compute_sparse_sizes(tree: &Tree, nv: usize, tendons: &[Tendon], actuators: &[Actuator], sizes: &mut [i64]) {
     if nv == 0 { return; }
     let nbody = tree.bodies.len();
     let mut dof_parentid_pre = vec![-1; nv];
@@ -1975,7 +2331,12 @@ fn compute_sparse_sizes(tree: &Tree, nv: usize, sizes: &mut [i64]) {
             for pj in &pb.joints { if pj.r#type != JNT_SLIDE { body_simple_pre[i] = 1; break; } }
         }
     }
-    // tendons and actuator armature: outside the subset; GetBodyIdFromWrap omitted.
+    // tendon-armature-based demotion, including the armature of actuators on the tendon
+    for (id, t) in tendons.iter().enumerate() {
+        if tendon_has_armature(id, t.spec.armature > 0.0, actuators.iter().map(|a| (a.spec.trntype, a.trnid[0], a.spec.armature))) {
+            for w in &t.wraps { if w.bodyid != -1 { body_simple_pre[w.bodyid as usize] = 0; } }
+        }
+    }
     let mut count = 0;
     for i in (0..nv).rev() {
         if body_simple_pre[dof_bodyid_pre[i]] != 0 { count += 1; } else { count = 0; }
@@ -1989,6 +2350,25 @@ fn compute_sparse_sizes(tree: &Tree, nv: usize, sizes: &mut [i64]) {
         }
     }
     set_size(sizes, "n_c", n_od+nv);
+    let mut body_dofadr = vec![0; nbody];
+    let mut adr = 0;
+    for i in 0..nbody { body_dofadr[i] = adr; adr += tree.dofnum[i]; }
+    let mut n_jten = 0;
+    let mut dof_bitmap = vec![false; nv];
+    for t in tendons {
+        if !t.spatial { n_jten += t.wraps.len(); continue; }
+        dof_bitmap.fill(false);
+        for w in &t.wraps {
+            let mut b = w.bodyid;
+            while b > 0 {
+                let b_ = b as usize;
+                for k in 0..tree.dofnum[b_] { dof_bitmap[body_dofadr[b_] + k] = true; }
+                b = tree.bodies[b_].parent as i32;
+            }
+        }
+        n_jten += dof_bitmap.iter().filter(|&&used| used).count();
+    }
+    set_size(sizes, "n_jten", n_jten);
 }
 
 // mjCModel::SetSizes: named construction arguments map to MJMODEL_SIZES.
@@ -2017,7 +2397,7 @@ fn namelist(list: &[&Option<String>], adr: &mut usize, name_adr: &mut [i32], nam
 }
 
 // mjCModel::CopyNames.
-fn copy_names(m: &mut Model, modelname: &str, tree: &Tree, meshes: &[Mesh], pairs: &[Pair], excludes: &[Exclude], equalities: &[Equality]) {
+fn copy_names(m: &mut Model, modelname: &str, tree: &Tree, meshes: &[Mesh], pairs: &[Pair], excludes: &[Exclude], equalities: &[Equality], tendons: &[Tendon], actuators: &[Actuator]) {
     let mut adr = modelname.len()+1;
     m.names[..modelname.len()].copy_from_slice(modelname.as_bytes());
     m.names_map.fill(-1);
@@ -2037,6 +2417,8 @@ fn copy_names(m: &mut Model, modelname: &str, tree: &Tree, meshes: &[Mesh], pair
     list!(name_pairadr, pairs.iter().map(|p| &p.spec.name).collect());
     list!(name_excludeadr, excludes.iter().map(|e| &e.spec.name).collect());
     list!(name_eqadr, equalities.iter().map(|e| &e.spec.name).collect());
+    list!(name_tendonadr, tendons.iter().map(|t| &t.spec.name).collect());
+    list!(name_actuatoradr, actuators.iter().map(|a| &a.spec.name).collect());
     assert_eq!(mapadr, m.nnames_map);
     assert_eq!(adr, m.nnames);
 }
@@ -2244,8 +2626,8 @@ fn copy_tree(m: &mut Model, tree: &Tree, meshes: &[Mesh]) -> Result<(), String> 
     Ok(())
 }
 
-// mjCModel::CopyObjects, meshes and rigid constraints only.
-fn copy_objects(m: &mut Model, meshes: &[Mesh], pairs: &[Pair], excludes: &[Exclude], equalities: &[Equality]) {
+// mjCModel::CopyObjects, meshes, rigid constraints, tendons and actuators.
+fn copy_objects(m: &mut Model, meshes: &[Mesh], pairs: &[Pair], excludes: &[Exclude], equalities: &[Equality], tendons: &[Tendon], actuators: &[Actuator]) {
     // find bvh_adr after bodies
     let mut bvh_adr = 0;
     for i in 0..m.nbody { bvh_adr = bvh_adr.max(m.body_bvhadr[i] + m.body_bvhnum[i]); }
@@ -2396,10 +2778,122 @@ fn copy_objects(m: &mut Model, meshes: &[Mesh], pairs: &[Pair], excludes: &[Excl
         m.eq_solimp[NIMP*i..NIMP*(i+1)].copy_from_slice(&e.solimp);
         m.eq_data[NEQDATA*i..NEQDATA*(i+1)].copy_from_slice(&e.data);
     }
+    let mut adr = 0;
+    let mut plastic_adr = 0;
+    for i in 0..m.njnt {
+        if m.jnt_springyield[i] > 0.0 { plastic_adr += match m.jnt_type[i] { JNT_FREE => 7, JNT_BALL => 4, _ => 1 }; }
+    }
+    for (i, ten) in tendons.iter().enumerate() {
+        let t = &ten.spec;
+        m.tendon_type[i] = if ten.spatial { TENDON_SPATIAL } else { TENDON_FIXED };
+        m.tendon_adr[i] = adr as i32;
+        m.tendon_num[i] = ten.wraps.len() as i32;
+        m.tendon_matid[i] = -1;
+        m.tendon_group[i] = t.group;
+        m.tendon_plasticadr[i] = if t.springyield > 0.0 { plastic_adr } else { -1 };
+        if t.springyield > 0.0 { plastic_adr += 2; }
+        m.tendon_limited[i] = islimited(t.limited, &t.range) as u8;
+        m.tendon_actfrclimited[i] = islimited(t.actfrclimited, &t.actfrcrange) as u8;
+        m.tendon_width[i] = t.width;
+        m.tendon_solref_lim[NREF*i..NREF*(i+1)].copy_from_slice(&t.solref_limit);
+        m.tendon_solimp_lim[NIMP*i..NIMP*(i+1)].copy_from_slice(&t.solimp_limit);
+        m.tendon_solref_fri[NREF*i..NREF*(i+1)].copy_from_slice(&t.solref_friction);
+        m.tendon_solimp_fri[NIMP*i..NIMP*(i+1)].copy_from_slice(&t.solimp_friction);
+        m.tendon_range[2*i..2*i+2].copy_from_slice(&t.range);
+        m.tendon_actfrcrange[2*i..2*i+2].copy_from_slice(&t.actfrcrange);
+        m.tendon_margin[i] = t.margin;
+        m.tendon_stiffness[i] = t.stiffness[0];
+        m.tendon_stiffnesspoly[NPOLY*i..NPOLY*(i+1)].copy_from_slice(&t.stiffness[1..]);
+        m.tendon_damping[i] = t.damping[0];
+        m.tendon_dampingpoly[NPOLY*i..NPOLY*(i+1)].copy_from_slice(&t.damping[1..]);
+        m.tendon_armature[i] = t.armature;
+        m.tendon_frictionloss[i] = t.frictionloss;
+        m.tendon_lengthspring[2*i..2*i+2].copy_from_slice(&t.springlength);
+        m.tendon_springyield[i] = t.springyield;
+        // tendon_user: nuser_tendon is zero in the subset.
+        m.tendon_rgba[4*i..4*i+4].copy_from_slice(&t.rgba);
+        for (j, w) in ten.wraps.iter().enumerate() {
+            m.wrap_type[adr+j] = w.r#type;
+            m.wrap_objid[adr+j] = w.objid;
+            m.wrap_prm[adr+j] = w.prm;
+        }
+        adr += ten.wraps.len();
+    }
+
+    // actuators: no control history (nhistory is zero) and no plugin
+    let mut adr = 0;
+    let mut ctrladr = 0;
+    let mut outadr = 0;
+    for (i, pac) in actuators.iter().enumerate() {
+        let a = &pac.spec;
+        m.actuator_trntype[i] = if pac.so3 { TRN_SO3 } else { a.trntype };
+        m.actuator_dyntype[i] = a.dyntype;
+        m.actuator_gaintype[i] = a.gaintype;
+        m.actuator_biastype[i] = a.biastype;
+        m.actuator_trnid[2*i..2*i+2].copy_from_slice(&pac.trnid);
+        m.actuator_actnum[i] = a.actdim;
+        m.actuator_actadr[i] = if a.actdim != 0 { adr } else { -1 };
+        adr += a.actdim;
+        m.actuator_group[i] = a.group;
+        // input and output blocks
+        m.actuator_ctrladr[i] = ctrladr as i32;
+        m.actuator_ctrlnum[i] = pac.ctrlnum as i32;
+        m.actuator_ctrlspec[i] = pac.ctrlspec;
+        ctrladr += pac.ctrlnum;
+        m.actuator_outadr[i] = outadr as i32;
+        m.actuator_outnum[i] = pac.outnum as i32;
+        outadr += pac.outnum;
+        // historyadr
+        m.actuator_delay[i] = a.delay;
+        m.actuator_history[2*i] = a.nsample;
+        m.actuator_history[2*i+1] = a.interp;
+        m.actuator_historyadr[i] = -1;
+        m.actuator_actlimited[i] = islimited(a.actlimited, &a.actrange) as u8;
+        m.actuator_actearly[i] = a.actearly as u8;
+        m.actuator_cranklength[i] = a.cranklength;
+        m.actuator_damping[i] = a.damping[0];
+        m.actuator_dampingpoly[NPOLY*i..NPOLY*(i+1)].copy_from_slice(&a.damping[1..]);
+        m.actuator_armature[i] = a.armature;
+        m.actuator_dynprm[NDYN*i..NDYN*(i+1)].copy_from_slice(&a.dynprm);
+        m.actuator_gainprm[NGAIN*i..NGAIN*(i+1)].copy_from_slice(&a.gainprm);
+        m.actuator_biasprm[NBIAS*i..NBIAS*(i+1)].copy_from_slice(&a.biasprm);
+        m.actuator_actrange[2*i..2*i+2].copy_from_slice(&a.actrange);
+        m.actuator_forcelimited[i] = islimited(a.forcelimited, &a.forcerange) as u8;
+        m.actuator_forcerange[2*i..2*i+2].copy_from_slice(&a.forcerange);
+        // actuator_user: nuser_actuator is zero in the subset.
+        m.actuator_plugin[i] = -1;
+        // per-input arrays, at the actuator's ctrl block
+        for k in 0..pac.ctrlnum {
+            let j = m.actuator_ctrladr[i] as usize + k;
+            m.actuator_ctrllimited[j] = pac.ctrllimiteds[k] as u8;
+            m.actuator_ctrlrange[2*j..2*j+2].copy_from_slice(&pac.ctrlranges[k]);
+        }
+        // per-output arrays, at the actuator's output block
+        for j in m.actuator_outadr[i] as usize..(m.actuator_outadr[i] as usize + pac.outnum) {
+            m.actuator_gear[6*j..6*j+6].copy_from_slice(&a.gear);
+            m.actuator_lengthrange[2*j..2*j+2].copy_from_slice(&a.lengthrange);
+        }
+    }
 }
 
-// mjCModel::FinalizeSimple; tendon demotion is outside the subset.
+// mjCModel::FinalizeSimple.
 fn finalize_simple(m: &mut Model) -> Result<(), String> {
+    // demote bodies affected by inertia-bearing tendon to non-simple, the armature of actuators on
+    // the tendon included, as in ComputeSparseSizes
+    for i in 0..m.ntendon {
+        let on_tendon = (0..m.nactuator).map(|k| (m.actuator_trntype[k], m.actuator_trnid[2*k], m.actuator_armature[k]));
+        if !tendon_has_armature(i, m.tendon_armature[i] != 0.0, on_tendon) { continue; }
+        let adr = m.tendon_adr[i] as usize;
+        for j in adr..adr + m.tendon_num[i] as usize {
+            let objid = m.wrap_objid[j];
+            match m.wrap_type[j] {
+                WRAP_JOINT => m.body_simple[m.jnt_bodyid[objid as usize] as usize] = 0,
+                WRAP_SITE => m.body_simple[m.site_bodyid[objid as usize] as usize] = 0,
+                WRAP_CYLINDER | WRAP_SPHERE => m.body_simple[m.geom_bodyid[objid as usize] as usize] = 0,
+                _ => {}
+            }
+        }
+    }
     let mut count = 0;
     for i in (0..m.nv).rev() {
         if m.body_simple[m.dof_bodyid[i] as usize] != 0 { count += 1; } else { count = 0; }
@@ -2452,6 +2946,54 @@ fn check_body_mass_inertia(tree: &Tree, root: usize) -> bool {
     false
 }
 
+// mjCModel::CountTendonDofs.
+fn count_tendon_dofs(m: &Model, id: usize) -> usize {
+    let adr = m.tendon_adr[id] as usize;
+    let num = m.tendon_num[id] as usize;
+    if m.tendon_type[id] == TENDON_FIXED { return num; }
+    let mut dof_used = vec![false; m.nv];
+    for j in adr..adr + num {
+        let objid = m.wrap_objid[j] as usize;
+        let bodyid = match m.wrap_type[j] {
+            WRAP_SITE => m.site_bodyid[objid],
+            WRAP_SPHERE | WRAP_CYLINDER => m.geom_bodyid[objid],
+            _ => -1,
+        };
+        let mut bid = bodyid;
+        while bid > 0 {
+            let b = bid as usize;
+            let bdofadr = m.body_dofadr[b] as usize;
+            for k in 0..m.body_dofnum[b] as usize { dof_used[bdofadr + k] = true; }
+            bid = m.body_parentid[b];
+        }
+    }
+    dof_used.iter().filter(|&&used| used).count()
+}
+
+// mjCModel::CountNJmom: the non-zeros in actuator_moment.
+fn count_njmom(m: &Model) -> usize {
+    let nv = m.nv;
+    let mut chain = vec![0; nv];
+    let mut count = 0;
+    for i in 0..m.nactuator {
+        let id = m.actuator_trnid[2*i] as usize;
+        let id1 = m.actuator_trnid[2*i+1];
+        count += match m.actuator_trntype[i] {
+            // ball joint: 3 identity rows; site+refsite: 3 dense rows
+            TRN_SO3 => if id1 >= 0 { 3*nv } else { 3 },
+            TRN_JOINT | TRN_JOINTINPARENT => match m.jnt_type[id] { JNT_SLIDE | JNT_HINGE => 1, JNT_BALL => 3, _ => 6 },
+            TRN_SLIDERCRANK => crate::core_util::merge_chain(m, &mut chain, m.site_bodyid[id] as usize, m.site_bodyid[id1 as usize] as usize, 0),
+            TRN_TENDON => count_tendon_dofs(m, id),
+            TRN_SITE => {
+                let ref_body = if id1 >= 0 { m.site_bodyid[id1 as usize] as usize } else { 0 };
+                crate::core_util::merge_chain(m, &mut chain, m.site_bodyid[id] as usize, ref_body, 1)
+            }
+            _ => nv, // TRN_BODY; the compile admits no other type
+        };
+    }
+    count
+}
+
 // PrintIndent, PrintTree and mjCModel::Signature. The explicit stack avoids
 // recursion while retaining the reference's depth check and indentation cap.
 fn signature(tree: &Tree, spec: &ModelSpec) -> Result<u64, String> {
@@ -2477,6 +3019,8 @@ fn signature(tree: &Tree, spec: &ModelSpec) -> Result<u64, String> {
     for _ in &spec.pairs { text.push_str("<pair/>\n"); }
     for _ in &spec.excludes { text.push_str("<exclude/>\n"); }
     for _ in &spec.equalities { text.push_str("<equality/>\n"); }
+    for _ in &spec.tendons { text.push_str("<tendon/>\n"); }
+    for _ in &spec.actuators { text.push_str("<actuator/>\n"); }
     Ok(crate::name::hash_string(&text, u64::MAX))
 }
 
@@ -2508,8 +3052,9 @@ pub fn compile(spec: &ModelSpec) -> Result<Model, String> {
     }
     // default classes: outside the subset.
     // user data: outside the subset; SetNuser resolves empty auto fields to zero.
-    if spec.nuserdata != 0 || [spec.nuser_body, spec.nuser_jnt, spec.nuser_geom, spec.nuser_site].iter().any(|&n| n > 0 || n < -1)
-        || spec.bodies.iter().any(|b| !b.userdata.is_empty() || b.joints.iter().any(|j| !j.userdata.is_empty()) || b.geoms.iter().any(|g| !g.userdata.is_empty()) || b.sites.iter().any(|s| !s.userdata.is_empty())) {
+    if spec.nuserdata != 0 || [spec.nuser_body, spec.nuser_jnt, spec.nuser_geom, spec.nuser_site, spec.nuser_tendon, spec.nuser_actuator].iter().any(|&n| n > 0 || n < -1)
+        || spec.bodies.iter().any(|b| !b.userdata.is_empty() || b.joints.iter().any(|j| !j.userdata.is_empty()) || b.geoms.iter().any(|g| !g.userdata.is_empty()) || b.sites.iter().any(|s| !s.userdata.is_empty()))
+        || spec.tendons.iter().any(|t| !t.userdata.is_empty()) || spec.actuators.iter().any(|a| !a.userdata.is_empty()) {
         return Err("user data is outside the builder subset".into());
     }
     if spec.memory < -1 { return Err("memory must be -1 or nonnegative".into()); }
@@ -2540,10 +3085,12 @@ pub fn compile(spec: &ModelSpec) -> Result<Model, String> {
     for p in &spec.pairs { pairs.push(compile_pair(p, &tree)?); }
     let mut excludes = Vec::new();
     for e in &spec.excludes { excludes.push(compile_exclude(e, &tree)?); }
-    // tendons: outside the subset.
+    let mut tendons = Vec::new();
+    for (i, t) in spec.tendons.iter().enumerate() { tendons.push(compile_tendon(t, i, &tree)?); }
     let mut equalities = Vec::new();
     for e in &spec.equalities { equalities.push(compile_equality(e, &tree)?); }
-    // actuators: outside the subset; CountNJmom and LengthRange workers omitted.
+    let mut actuators = Vec::new();
+    for (i, a) in spec.actuators.iter().enumerate() { actuators.push(compile_actuator(a, i, &tree, &tendons)?); }
     // sensors: outside the subset.
     // numeric/text/tuple: outside the subset.
     // plugins: outside the subset.
@@ -2591,7 +3138,17 @@ pub fn compile(spec: &ModelSpec) -> Result<Model, String> {
     for p in &pairs { nnames += p.spec.name.as_deref().unwrap_or("").len()+1; }
     for e in &excludes { nnames += e.spec.name.as_deref().unwrap_or("").len()+1; }
     for e in &equalities { nnames += e.spec.name.as_deref().unwrap_or("").len()+1; }
-    for (name, value) in [("nbody", nbody), ("nq", nq), ("nv", nv), ("njnt", njnt), ("ngeom", ngeom), ("nsite", nsite), ("ntree", ntree), ("nmocap", nmocap), ("nplastic", nplastic), ("npair", pairs.len()), ("nexclude", excludes.len()), ("neq", equalities.len()), ("nnames", nnames), ("npaths", 1),
+    for t in &tendons {
+        nnames += t.spec.name.as_deref().unwrap_or("").len()+1;
+        if t.spec.springyield > 0.0 { nplastic += 2; }
+    }
+    let nwrap = tendons.iter().map(|t| t.wraps.len()).sum::<usize>();
+    // nu, nactuator, nout, na
+    for a in &actuators { nnames += a.spec.name.as_deref().unwrap_or("").len()+1; }
+    let nu = actuators.iter().map(|a| a.ctrlnum).sum::<usize>();
+    let nout = actuators.iter().map(|a| a.outnum).sum::<usize>();
+    let na = actuators.iter().map(|a| a.spec.actdim as usize).sum::<usize>();
+    for (name, value) in [("nbody", nbody), ("nq", nq), ("nv", nv), ("njnt", njnt), ("ngeom", ngeom), ("nsite", nsite), ("ntree", ntree), ("nmocap", nmocap), ("nplastic", nplastic), ("npair", pairs.len()), ("nexclude", excludes.len()), ("neq", equalities.len()), ("ntendon", tendons.len()), ("nwrap", nwrap), ("nactuator", actuators.len()), ("nu", nu), ("nout", nout), ("na", na), ("nnames", nnames), ("npaths", 1),
         ("nmesh", meshes.len()),
         ("nmeshvert", meshes.iter().map(|mesh| mesh.nvert()).sum::<usize>()),
         ("nmeshnormal", meshes.iter().map(|mesh| mesh.nnormal()).sum::<usize>()),
@@ -2602,7 +3159,7 @@ pub fn compile(spec: &ModelSpec) -> Result<Model, String> {
         ("nmeshpolymap", meshes.iter().map(|mesh| mesh.npolygonmap()).sum::<usize>())] {
         set_size(&mut sizes, name, value);
     }
-    compute_sparse_sizes(&tree, nv, &mut sizes);
+    compute_sparse_sizes(&tree, nv, &tendons, &actuators, &mut sizes);
     let mut nbvhstatic = 0;
     for bvh in &tree.body_bvh { nbvhstatic += bvh.nodeid.len(); }
     for mesh in &meshes { nbvhstatic += mesh.tree.nodeid.len(); }
@@ -2613,12 +3170,13 @@ pub fn compile(spec: &ModelSpec) -> Result<Model, String> {
     }
     let mut m = make_model(&sizes)?;
     m.opt = spec.option.clone();
-    copy_names(&mut m, modelname, &tree, &meshes, &pairs, &excludes, &equalities);
+    copy_names(&mut m, modelname, &tree, &meshes, &pairs, &excludes, &equalities, &tendons, &actuators);
     // CopyPaths: no assets; the one-byte empty paths buffer is already zero.
     copy_tree(&mut m, &tree, &meshes)?;
     // keyframes: outside the subset; ResolveKeyframes and quaternion normalization omitted.
-    copy_objects(&mut m, &meshes, &pairs, &excludes, &equalities);
+    copy_objects(&mut m, &meshes, &pairs, &excludes, &equalities, &tendons, &actuators);
     finalize_simple(&mut m)?;
+    m.n_jmom = count_njmom(&m);
     if spec.compiler.settotalmass > 0.0 { crate::support::set_totalmass(&mut m, spec.compiler.settotalmass); }
     if spec.memory != -1 { m.narena = spec.memory as usize; }
     else {

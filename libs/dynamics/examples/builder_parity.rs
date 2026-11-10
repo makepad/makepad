@@ -253,9 +253,210 @@ fn hull_pair() -> ModelSpec {
     s
 }
 
+fn site(name: &str, pos: [f64; 3]) -> SiteSpec {
+    SiteSpec { name: Some(name.into()), pos, size: [5.0; 3], ..SiteSpec::default() }
+}
+
+fn wrap_geom(name: &str, r#type: i32, pos: [f64; 3], quat: [f64; 4], size: [f64; 3]) -> GeomSpec {
+    GeomSpec {
+        name: Some(name.into()), r#type, pos, quat, size, contype: 0, conaffinity: 0,
+        density: 0.001, ..GeomSpec::default()
+    }
+}
+
+// Spatial tendons over a cylinder with a side site, over a sphere, and through a pulley,
+// and a fixed tendon coupling two hinges.
+fn tendon_arm() -> ModelSpec {
+    let mut s = model("tendon_arm");
+    s.bodies[0].sites.extend([site("anchor", [0.0, 0.0, 1500.0]), site("anchor2", [300.0, 0.0, 1500.0])]);
+    let mut upper = link("upper", 0, [0.0, 0.0, 1000.0], JNT_HINGE);
+    let half = std::f64::consts::FRAC_1_SQRT_2;
+    upper.geoms.push(wrap_geom("elbow_cyl", GEOM_CYLINDER, [0.0, 0.0, -100.0], [half, half, 0.0, 0.0], [20.0, 15.0, 0.0]));
+    upper.sites.extend([site("elbow_side", [30.0, 0.0, -100.0]), site("upper_s", [10.0, 0.0, -30.0])]);
+    s.bodies.push(upper);
+    let mut lower = link("lower", 1, [0.0, 0.0, -100.0], JNT_HINGE);
+    lower.joints[0].range = [-2.0, 2.0];
+    lower.sites.push(site("lower_s", [10.0, 0.0, -70.0]));
+    s.bodies.push(lower);
+    let mut hand = link("hand", 2, [0.0, 0.0, -100.0], JNT_BALL);
+    hand.joints[0].range = [0.0, 0.6];
+    hand.geoms.push(wrap_geom("hand_wrap", GEOM_SPHERE, [0.0, 0.0, -50.0], [1.0, 0.0, 0.0, 0.0], [25.0, 0.0, 0.0]));
+    hand.sites.push(site("hand_s", [0.0, 0.0, -100.0]));
+    s.bodies.push(hand);
+    s.tendons.push(TendonSpec {
+        name: Some("flexor".into()), stiffness: [50.0, 0.0, 0.0], damping: [0.5, 0.0, 0.0],
+        springlength: [600.0, 600.0], width: 5.0,
+        path: vec![WrapSpec::site("anchor"), WrapSpec::site("upper_s"), WrapSpec::geom("elbow_cyl", Some("elbow_side")), WrapSpec::site("lower_s")],
+        ..TendonSpec::default()
+    });
+    s.tendons.push(TendonSpec {
+        name: Some("over_hand".into()), range: [0.0, 400.0],
+        path: vec![WrapSpec::site("lower_s"), WrapSpec::geom("hand_wrap", None), WrapSpec::site("hand_s")],
+        ..TendonSpec::default()
+    });
+    s.tendons.push(TendonSpec {
+        name: Some("pulley_pair".into()), stiffness: [5.0, 0.0, 0.0], springlength: [1200.0, 1200.0],
+        path: vec![WrapSpec::site("anchor"), WrapSpec::site("upper_s"), WrapSpec::pulley(2.0), WrapSpec::site("anchor2"), WrapSpec::site("lower_s")],
+        ..TendonSpec::default()
+    });
+    s.tendons.push(TendonSpec {
+        name: Some("coupling".into()), limited: 1, range: [-0.5, 0.5], stiffness: [1.0, 0.0, 0.0],
+        path: vec![WrapSpec::joint("upper_joint", 1.0), WrapSpec::joint("lower_joint", -0.5)],
+        ..TendonSpec::default()
+    });
+    s
+}
+
+// A puppet on strings: one-sided length limits from a bar to a free torso and its arms, with
+// friction loss and damping; one string has armature, which demotes its bodies from simple,
+// and one stretches plastically.
+fn puppet_strings() -> ModelSpec {
+    let mut s = model("puppet_strings");
+    s.bodies[0].sites.push(site("hook", [600.0, 0.0, 900.0]));
+    let mut bar = link("bar", 0, [0.0, 0.0, 1000.0], JNT_HINGE);
+    bar.joints[0].axis = [1.0, 0.0, 0.0];
+    bar.sites.extend([site("bar_l", [-150.0, 0.0, 0.0]), site("bar_c", [0.0; 3]), site("bar_r", [150.0, 0.0, 0.0])]);
+    s.bodies.push(bar);
+    let mut torso = link("torso", 0, [0.0, 0.0, 300.0], JNT_FREE);
+    torso.sites.push(site("head", [0.0, 0.0, 20.0]));
+    s.bodies.push(torso);
+    let mut arm_l = link("arm_l", 2, [-70.0, 0.0, -10.0], JNT_HINGE);
+    arm_l.joints[0].range = [-2.5, 0.3];
+    arm_l.sites.push(site("hand_l", [0.0, 0.0, -100.0]));
+    s.bodies.push(arm_l);
+    let mut arm_r = link("arm_r", 2, [70.0, 0.0, -10.0], JNT_BALL);
+    arm_r.joints[0].range = [0.0, 1.2];
+    arm_r.sites.push(site("hand_r", [0.0, 0.0, -100.0]));
+    s.bodies.push(arm_r);
+    let string = |name: &str, from: &str, to: &str, length: f64| TendonSpec {
+        name: Some(name.into()), range: [0.0, length], width: 2.0,
+        path: vec![WrapSpec::site(from), WrapSpec::site(to)],
+        ..TendonSpec::default()
+    };
+    s.tendons.push(string("head_string", "bar_c", "head", 700.0));
+    s.tendons.push(TendonSpec { frictionloss: 10000.0, ..string("left_string", "bar_l", "hand_l", 800.0) });
+    s.tendons.push(TendonSpec { damping: [10.0, 0.0, 0.0], armature: 1.0, ..string("right_string", "bar_r", "hand_r", 800.0) });
+    s.tendons.push(TendonSpec {
+        limited: 0, stiffness: [100.0, 0.0, 0.0], springyield: 5000.0,
+        ..string("sag_string", "hook", "head", 0.0)
+    });
+    s
+}
+
+fn on(name: &str, trntype: i32, target: &str) -> ActuatorSpec {
+    ActuatorSpec { name: Some(name.into()), ..ActuatorSpec::on(trntype, target) }
+}
+
+// An actuator made by one of the shortcut setters, on fields set beforehand.
+fn shortcut(mut a: ActuatorSpec, set: impl FnOnce(&mut ActuatorSpec) -> Result<(), String>) -> ActuatorSpec {
+    set(&mut a).expect("a valid shortcut");
+    a
+}
+
+fn gear(first: [f64; 3]) -> [f64; 6] { [first[0], first[1], first[2], 0.0, 0.0, 0.0] }
+
+// Servos on a hinge arm and a carriage: position (kv and an inherited range; a damping ratio with
+// a time constant), intvelocity with an inherited activation range, velocity in the parent frame,
+// a geared motor with a force clamp, damper, cylinder, a pid with integral, anti-windup, slew and
+// feedforward, and actuators on fixed tendons (one with armature and damping, which demotes the
+// carriage from simple; one with an inherited range).
+fn servo_arm() -> ModelSpec {
+    let mut s = model("servo_arm");
+    let mut upper = link("upper", 0, [0.0, 0.0, 1000.0], JNT_HINGE);
+    upper.joints[0].range = [-2.0, 2.0];
+    s.bodies.push(upper);
+    let mut lower = link("lower", 1, [0.0, 0.0, -100.0], JNT_HINGE);
+    lower.joints[0].range = [-1.5, 1.5];
+    s.bodies.push(lower);
+    s.bodies.push(BodySpec {
+        name: Some("carriage".into()), pos: [300.0, 0.0, 500.0], ipos: [0.0; 3], mass: 100.0, inertia: [1000.0; 3],
+        joints: vec![JointSpec { name: Some("rail".into()), r#type: JNT_SLIDE, axis: [1.0, 0.0, 0.0], range: [-50.0, 50.0], ..JointSpec::default() }],
+        geoms: vec![GeomSpec { r#type: GEOM_BOX, size: [10.0; 3], ..GeomSpec::default() }],
+        ..BodySpec::default()
+    });
+    s.tendons.push(TendonSpec {
+        name: Some("elbow_pair".into()), limited: 1, range: [-1.0, 1.0],
+        path: vec![WrapSpec::joint("upper_joint", 1.0), WrapSpec::joint("lower_joint", -0.5)],
+        ..TendonSpec::default()
+    });
+    s.tendons.push(TendonSpec { name: Some("rail_belt".into()), path: vec![WrapSpec::joint("rail", 1.0)], ..TendonSpec::default() });
+    s.actuators.extend([
+        shortcut(on("shoulder", TRN_JOINT, "upper_joint"), |a| a.set_to_position(2e8, Some(2e7), None, None, 0.9)),
+        shortcut(ActuatorSpec { gear: gear([50.0, 0.0, 0.0]), forcerange: [-0.5, 0.5], ctrlrange: [-1.0, 1.0], ..on("shoulder_motor", TRN_JOINT, "upper_joint") }, |a| a.set_to_motor()),
+        shortcut(on("elbow", TRN_JOINT, "lower_joint"), |a| a.set_to_position(1e8, None, Some(1.0), Some(0.02), 0.0)),
+        shortcut(on("elbow_speed", TRN_JOINT, "lower_joint"), |a| a.set_to_int_velocity(1e7, Some(1e6), None, None, 1.0)),
+        shortcut(on("elbow_drag", TRN_JOINTINPARENT, "lower_joint"), |a| a.set_to_velocity(1e6)),
+        shortcut(ActuatorSpec { ctrlrange: [0.0, 1.0], ..on("rail_brake", TRN_JOINT, "rail") }, |a| a.set_to_damper(1000.0)),
+        shortcut(ActuatorSpec { ctrlrange: [0.0, 2.0], ..on("rail_ram", TRN_JOINT, "rail") }, |a| a.set_to_cylinder(0.05, 0.0, 300.0, -1.0)),
+        shortcut(ActuatorSpec { ctrlrange: [-40.0, 40.0], velrange: [-100.0, 100.0], ffrange: [-1e4, 1e4], forcerange: [-5e4, 5e4], ..on("rail_pid", TRN_JOINT, "rail") },
+            |a| a.set_to_pid(1e5, Some(2e3), None, Some(1e5), Some(1e3), Some(100.0), 0.0, INPUT_POS | INPUT_VEL | INPUT_FF)),
+        shortcut(ActuatorSpec { armature: 50.0, damping: [100.0, 0.0, 0.0], ..on("belt_motor", TRN_TENDON, "rail_belt") }, |a| a.set_to_motor()),
+        shortcut(on("pair_servo", TRN_TENDON, "elbow_pair"), |a| a.set_to_position(5e7, Some(5e6), None, None, 1.0)),
+    ]);
+    s
+}
+
+// SO3 servos on a ball joint (expmap, damping ratio) and on a site against a reference site
+// (quat), site motors with and without a reference site, a ball motor in the parent frame, a
+// motor on a free joint, adhesion on a body resting on the floor, and a slider-crank.
+fn site_actuators() -> ModelSpec {
+    let mut s = model("site_actuators");
+    s.bodies[0].geoms.push(GeomSpec { name: Some("floor".into()), r#type: GEOM_PLANE, size: [2000.0, 2000.0, 10.0], ..GeomSpec::default() });
+    s.bodies[0].sites.extend([site("anchor", [0.0, 0.0, 1100.0]), site("slider_base", [600.0, 0.0, 700.0])]);
+    // the balls' links spin about their length too, so the servos' twist is no stiffer than a step
+    let mut wrist = link("wrist", 0, [0.0, 0.0, 1000.0], JNT_BALL);
+    wrist.inertia[2] = 40000.0;
+    wrist.sites.push(site("wrist_s", [0.0, 0.0, -100.0]));
+    s.bodies.push(wrist);
+    let mut gimbal = link("gimbal", 0, [300.0, 0.0, 1000.0], JNT_BALL);
+    gimbal.inertia[2] = 40000.0;
+    gimbal.sites.push(site("gimbal_s", [0.0, 0.0, -100.0]));
+    s.bodies.push(gimbal);
+    s.bodies.push(BodySpec {
+        name: Some("pad".into()), pos: [-300.0, 0.0, 10.0], ipos: [0.0; 3], mass: 80.0, inertia: [5000.0; 3],
+        joints: vec![JointSpec { name: Some("pad_free".into()), r#type: JNT_FREE, ..JointSpec::default() }],
+        geoms: vec![GeomSpec { r#type: GEOM_BOX, size: [20.0, 20.0, 10.0], ..GeomSpec::default() }],
+        ..BodySpec::default()
+    });
+    let mut crank = link("crank", 0, [600.0, 0.0, 900.0], JNT_HINGE);
+    crank.sites.push(site("crank_pin", [0.0, 0.0, -50.0]));
+    s.bodies.push(crank);
+    let anchor = Some("anchor".to_string());
+    s.actuators.extend([
+        shortcut(on("wrist_servo", TRN_JOINT, "wrist_joint"), |a| a.set_to_orientation(5e7, None, Some(1.0), 0)),
+        shortcut(ActuatorSpec { refsite: anchor.clone(), ..on("gimbal_servo", TRN_SITE, "gimbal_s") }, |a| a.set_to_orientation(5e7, Some(5e5), None, CHART_QUAT)),
+        shortcut(ActuatorSpec { refsite: anchor, gear: gear([0.0, 1e4, 0.0]), ..on("gimbal_push", TRN_SITE, "gimbal_s") }, |a| a.set_to_motor()),
+        shortcut(ActuatorSpec { gear: [0.0, 0.0, 0.0, 0.0, 0.0, 1e6], ..on("wrist_twist", TRN_SITE, "wrist_s") }, |a| a.set_to_motor()),
+        shortcut(ActuatorSpec { gear: gear([1e6, 0.0, 5e5]), ..on("wrist_parent", TRN_JOINTINPARENT, "wrist_joint") }, |a| a.set_to_motor()),
+        shortcut(ActuatorSpec { gear: gear([5e4, 0.0, 0.0]), ..on("pad_push", TRN_JOINT, "pad_free") }, |a| a.set_to_motor()),
+        shortcut(ActuatorSpec { ctrlrange: [0.0, 1.0], ..on("pad_grip", TRN_BODY, "pad") }, |a| a.set_to_adhesion(1e5)),
+        shortcut(ActuatorSpec { slidersite: Some("slider_base".into()), cranklength: 150.0, gear: gear([1e5, 0.0, 0.0]), ..on("crank_rod", TRN_SLIDERCRANK, "crank_pin") }, |a| a.set_to_motor()),
+    ]);
+    s
+}
+
+// DC motors: a voltage-driven one with cogging, and a geared, current-limited one with an
+// electrical time constant, a position and velocity controller and a thermal model.
+fn dc_motors() -> ModelSpec {
+    let mut s = model("dc_motors");
+    s.bodies.push(link("rotor", 0, [0.0, 0.0, 1000.0], JNT_HINGE));
+    s.bodies.push(link("geared", 0, [300.0, 0.0, 1000.0], JNT_HINGE));
+    s.actuators.extend([
+        shortcut(on("drive", TRN_JOINT, "rotor_joint"), |a| a.set_to_dc_motor(&DcMotorSpec {
+            motorconst: Some([3000.0, 3000.0]), resistance: 2.0, cogging: Some([100.0, 6.0, 0.0]), ..DcMotorSpec::default()
+        })),
+        shortcut(ActuatorSpec { gear: gear([2.0, 0.0, 0.0]), ..on("servo", TRN_JOINT, "geared_joint") }, |a| a.set_to_dc_motor(&DcMotorSpec {
+            motorconst: Some([3000.0, 3000.0]), resistance: 2.0, saturation: Some([5e5, 0.0, 0.0]), inductance: Some([0.0, 0.02]),
+            controller: Some([50.0, 0.0, 1.0, 0.0, 0.0, 0.0]), thermal: Some([2.0, 50.0, 0.0, 0.004, 25.0, 25.0]),
+            ctrlspec: INPUT_POS | INPUT_VEL, ..DcMotorSpec::default()
+        })),
+    ]);
+    s
+}
+
 fn run(out: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(out)?;
-    for spec in [chain(false), chain(true), slide_hinge(), free_box(), four_bar(), mocap_pendulum(), rings(), hull_box(), hull_ellipsoid(), hull_pair()] {
+    for spec in [chain(false), chain(true), slide_hinge(), free_box(), four_bar(), mocap_pendulum(), rings(), hull_box(), hull_ellipsoid(), hull_pair(), tendon_arm(), puppet_strings(), servo_arm(), site_actuators(), dc_motors()] {
         let name = spec.modelname.as_deref().unwrap();
         let path = out.join(format!("{name}.xml"));
         std::fs::write(&path, write_mjcf(&spec))?;

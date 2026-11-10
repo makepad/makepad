@@ -2,7 +2,7 @@
 //!
 //! Translated from `src/engine/engine_sleep.c` of the engine named in
 //! CREDITS.md (Apache-2.0, Copyright 2021 DeepMind Technologies Limited);
-//! changed: translated to Rust.
+//! changed: translated to Rust; a mocap body is static while it holds still, so it wakes nothing it touches.
 
 use crate::data::Data;
 use crate::model::Model;
@@ -19,8 +19,10 @@ pub fn update_sleep_init(m: &Model, d: &mut Data, flg_staticawake: bool) {
     let mut nparent_awake = 0;
     for i in 0..m.nbody {
         if m.body_treeid[i] < 0 {
-            d.body_awake[i] = if m.body_mocapid[m.body_rootid[i] as usize] >= 0 {
-                S_AWAKE
+            let root = m.body_rootid[i] as usize;
+            d.body_awake[i] = if m.body_mocapid[root] >= 0 {
+                // a mocap body and what it carries: static while it holds still (kinematics1 finds which)
+                if flg_staticawake || d.body_awake[root] != S_STATIC { S_AWAKE } else { S_STATIC }
             } else if flg_staticawake {
                 S_AWAKE
             } else {

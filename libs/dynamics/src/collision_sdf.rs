@@ -2,7 +2,8 @@
 //!
 //! Translated from `src/engine/engine_collision_sdf.c` and its header of the engine named in
 //! CREDITS.md (Apache-2.0, Copyright 2021 DeepMind Technologies Limited);
-//! changed: translated to Rust; Sdf replaces plugin callbacks.
+//! changed: translated to Rust; Sdf replaces plugin callbacks; a mesh face against an SDF gives one start's
+//! deepest point and the deepest faces are kept (see `process_sdf_corners`).
 
 use crate::data::{Data, PreContact};
 use crate::inline::{at3, at3_mut, at4, at6};
@@ -443,6 +444,49 @@ fn geom_gradient(
     }
 }
 
+// A geom's distance and gradient at one point: as geom_distance and geom_gradient, in one lookup for a
+// plugin field that finds both at once.
+fn geom_distance_gradient(gradient: &mut [f64; 3], m: &Model, d: &Data, p: Option<&dyn Sdf>, i: i32, x: &[f64; 3], r#type: i32) -> f64 {
+    match (r#type, p) {
+        (GEOM_SDF, Some(p)) => p.distance_gradient(gradient, x),
+        _ => {
+            geom_gradient(gradient, m, d, p, i, x, r#type);
+            geom_distance(m, d, p, i, x, r#type)
+        }
+    }
+}
+
+// distance and gradient at one point, the same values as the two give, each geom's field looked up once.
+fn distance_gradient(m: &Model, d: &Data, s: &SdfQuery<'_>, gradient: &mut [f64; 3], x: &[f64; 3]) -> f64 {
+    let mut y = [0.0; 3];
+    let mut grad1 = [0.0; 3];
+    let mut grad2 = [0.0; 3];
+    match s.r#type {
+        SDFTYPE_SINGLE => geom_distance_gradient(gradient, m, d, s.plugin[0], s.id[0], x, s.geomtype[0]),
+        SDFTYPE_COLLISION => {
+            mul_mat_vec3(&mut y, s.relmat, x);
+            add_to3(&mut y, s.relpos);
+            let a = geom_distance_gradient(&mut grad1, m, d, s.plugin[0], s.id[0], x, s.geomtype[0]);
+            let b = geom_distance_gradient(&mut grad2, m, d, s.plugin[1], s.id[1], &y, s.geomtype[1]);
+            let input = grad2;
+            mul_mat_tvec3(&mut grad2, s.relmat, &input);
+            gradient[0] = grad1[0] + grad2[0];
+            gradient[1] = grad1[1] + grad2[1];
+            gradient[2] = grad1[2] + grad2[2];
+            add_to_scl3(
+                gradient,
+                if a > b { &grad1 } else { &grad2 },
+                if max(a, b) > 0.0 { 1.0 } else { -1.0 },
+            );
+            a + b + max(a, b).abs()
+        }
+        _ => {
+            self::gradient(m, d, s, gradient, x);
+            distance(m, d, s, x)
+        }
+    }
+}
+
 pub fn distance(m: &Model, d: &Data, s: &SdfQuery<'_>, x: &[f64; 3]) -> f64 {
     let mut y = [0.0; 3];
     match s.r#type {
@@ -627,13 +671,18 @@ fn step_frank_wolfe(
         let mut best = MAXVAL;
         let mut s = [0.0; 3];
         let mut grad = [0.0; 3];
-        gradient(m, d, sdf, &mut grad, x);
+        let dist = distance_gradient(m, d, sdf, &mut grad, x);
         for i in 0..ncorners {
             let fun = dot3(at3(corners, 3 * i), &grad);
             if fun < best {
                 best = fun;
                 copy3(&mut s, at3(corners, 3 * i));
             }
+        }
+        // At the corner it steps to, the walk stays there for its remaining steps (the same gradient picks the
+        // same corner): their distance is the one at hand.
+        if s == *x {
+            return dist;
         }
         sub_from3(&mut s, x);
         add_to_scl3(x, &s, 2.0 / (step as f64 + 2.0));
@@ -649,7 +698,8 @@ fn step_gradient(x: &mut [f64; 3], m: &Model, s: &SdfQuery<'_>, d: &Data, niter:
     for _step in 0..niter {
         let mut grad = [0.0; 3];
         let mut alpha = 2.0;
-        gradient(m, d, s, &mut grad, x);
+        // the distance at x0 (x before the step) comes with its gradient
+        let dist0 = distance_gradient(m, d, s, &mut grad, x);
         if grad[0].is_nan()
             || grad[0] > MAXVAL
             || grad[0] < -MAXVAL
@@ -663,7 +713,6 @@ fn step_gradient(x: &mut [f64; 3], m: &Model, s: &SdfQuery<'_>, d: &Data, niter:
             return MAXVAL;
         }
         let x0 = [x[0], x[1], x[2]];
-        let dist0 = distance(m, d, s, &x0);
         let mut wolfe = -c * alpha * dot3(&grad, &grad);
         loop {
             alpha *= rho;
@@ -815,44 +864,56 @@ fn select_fps(
     nselected
 }
 
-fn process_sdf_corners(
-    corners: &[f64; 9],
-    m: &Model,
-    d: &Data,
-    sdf: &SdfQuery<'_>,
-    nstartpts: i32,
-    candidate: &mut [f64],
-    dist: &mut [f64],
-    ncandidate: &mut usize,
-) {
-    let mut x = [0.0; 3];
+// Deviation from the reference (engine_collision_sdf.c processSdfCorners: each of sdf_initpoints starts is a
+// candidate when it penetrates, and `if (*ncandidate >= mjMAXCONPAIR) break;` ends the search for the whole
+// mesh): there the slots fill in the BVH's traversal order from the first faces met, deep or not, and later
+// faces are not looked at. Frank-Wolfe's first step has step size 1, so a face's starts mostly land on the
+// same corner and fill several slots with it: a finely meshed part is pulled through a wall on the few
+// contacts of its first faces. Here a face takes one start (the corner the others find again), and
+// `keep_deepest` holds the mjMAXCONPAIR deepest faces wherever they come in the traversal.
+fn process_sdf_corners(corners: &[f64; 9], m: &Model, d: &Data, sdf: &SdfQuery<'_>) -> Option<([f64; 3], f64)> {
     if !triangle_intersect(corners, m, sdf, d) {
-        return;
+        return None;
     }
-    for sp in 0..nstartpts {
-        if *ncandidate >= MAXCONPAIR {
-            break;
-        }
-        let mut u = halton(sp + 1, 2);
-        let mut v = halton(sp + 1, 3);
-        if u + v > 1.0 {
-            u = 1.0 - u;
-            v = 1.0 - v;
-        }
-        let b0 = 1.0 - u - v;
-        let b1 = u;
-        let b2 = v;
-        x[0] = b0 * corners[0] + b1 * corners[3] + b2 * corners[6];
-        x[1] = b0 * corners[1] + b1 * corners[4] + b2 * corners[7];
-        x[2] = b0 * corners[2] + b1 * corners[5] + b2 * corners[8];
-        let depth = step_frank_wolfe(&mut x, corners, 3, m, sdf, d);
-        if depth < 0.0 {
-            let nc = *ncandidate;
-            copy3(at3_mut(candidate, 3 * nc), &x);
-            dist[nc] = depth;
-            *ncandidate += 1;
-        }
+    let mut u = halton(1, 2);
+    let mut v = halton(1, 3);
+    if u + v > 1.0 {
+        u = 1.0 - u;
+        v = 1.0 - v;
     }
+    let b0 = 1.0 - u - v;
+    let b1 = u;
+    let b2 = v;
+    let mut x = [
+        b0 * corners[0] + b1 * corners[3] + b2 * corners[6],
+        b0 * corners[1] + b1 * corners[4] + b2 * corners[7],
+        b0 * corners[2] + b1 * corners[5] + b2 * corners[8],
+    ];
+    let depth = step_frank_wolfe(&mut x, corners, 3, m, sdf, d);
+    (depth < 0.0).then_some((x, depth))
+}
+
+/// Holds `x` at `depth` among the mjMAXCONPAIR deepest candidates: in a free slot, else in place of the
+/// shallowest when it is deeper. Whether it was kept.
+fn keep_deepest(candidate: &mut [f64], dist: &mut [f64], ncandidate: &mut usize, x: &[f64; 3], depth: f64) -> bool {
+    let slot = if *ncandidate < MAXCONPAIR {
+        *ncandidate += 1;
+        *ncandidate - 1
+    } else {
+        let mut shallowest = 0;
+        for i in 1..MAXCONPAIR {
+            if dist[i] > dist[shallowest] {
+                shallowest = i;
+            }
+        }
+        if depth >= dist[shallowest] {
+            return false;
+        }
+        shallowest
+    };
+    copy3(at3_mut(candidate, 3 * slot), x);
+    dist[slot] = depth;
+    true
 }
 
 struct MeshSdfContext<'a, 'b> {
@@ -863,7 +924,6 @@ struct MeshSdfContext<'a, 'b> {
     rotation: &'a [f64; 9],
     vertadr: usize,
     faceadr: usize,
-    nstartpts: i32,
     candidate: &'b mut [f64],
     dist: &'b mut [f64],
     ncandidate: &'b mut usize,
@@ -874,7 +934,7 @@ fn process_one_face(
     bvh_active: Option<&mut [u8]>,
     node: usize,
     ctx: &mut MeshSdfContext<'_, '_>,
-) {
+) -> bool {
     let mut corners = [0.0; 9];
     let m = ctx.m;
     let face = ctx.faceadr + faceid as usize;
@@ -887,21 +947,14 @@ fn process_one_face(
         mul_mat_vec3(at3_mut(&mut corners, 3 * v), ctx.rotation, &vec);
         add_to3(at3_mut(&mut corners, 3 * v), ctx.offset);
     }
-    process_sdf_corners(
-        &corners,
-        m,
-        ctx.d,
-        ctx.sdf,
-        ctx.nstartpts,
-        ctx.candidate,
-        ctx.dist,
-        ctx.ncandidate,
-    );
+    let kept = process_sdf_corners(&corners, m, ctx.d, ctx.sdf)
+        .is_some_and(|(x, depth)| keep_deepest(ctx.candidate, ctx.dist, ctx.ncandidate, &x, depth));
     if let Some(bvh_active) = bvh_active {
         if *ctx.ncandidate > 0 {
             bvh_active[node] = 1;
         }
     }
+    kept
 }
 
 fn traverse_bvh(
@@ -953,9 +1006,7 @@ fn traverse_bvh(
 }
 
 fn mesh_face_callback(face_id: i32, node: usize, ctx: &mut MeshSdfContext<'_, '_>) -> bool {
-    let ncandidate_before = *ctx.ncandidate;
-    process_one_face(face_id, None, node, ctx);
-    *ctx.ncandidate > ncandidate_before
+    process_one_face(face_id, None, node, ctx)
 }
 
 pub fn hfield_sdf(
@@ -966,7 +1017,7 @@ pub fn hfield_sdf(
     _g2: i32,
     _margin: f64,
 ) -> usize {
-    eprintln!("HField vs SDF collision not yet supported!");
+    crate::util_errmem::warning_text("HField vs SDF collision not yet supported!");
     0
 }
 
@@ -1016,7 +1067,6 @@ pub fn mesh_sdf(
             rotation: &rotation,
             vertadr: m.mesh_vertadr[m.geom_dataid[g1 as usize] as usize] as usize,
             faceadr: m.mesh_faceadr[m.geom_dataid[g1 as usize] as usize] as usize,
-            nstartpts: max(1.0, m.opt.sdf_initpoints as f64) as i32,
             candidate: &mut candidate,
             dist: &mut dist2,
             ncandidate: &mut ncandidate,

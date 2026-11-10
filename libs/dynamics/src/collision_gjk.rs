@@ -1507,7 +1507,7 @@ fn add_edge(pt: &mut Polytope, index: usize, edge: usize) -> i32 {
     pt.horizon.nedges += 1;
     // Grow at the C buffer-full boundary.
     if i >= pt.horizon.maxedges {
-        eprintln!("EPA: growing storage for horizon edges on expanding polytope");
+        crate::util_errmem::warning_text("EPA: growing storage for horizon edges on expanding polytope");
         pt.horizon.maxedges = pt.horizon.nedges;
         if pt.horizon.edges.len() < pt.horizon.maxedges {
             pt.horizon.edges.resize(pt.horizon.maxedges, 0);
@@ -1622,7 +1622,7 @@ fn epa(
         }
         let fi = face.unwrap();
         if lower2 <= 0.0 {
-            eprintln!("EPA: origin lies on affine hull of face");
+            crate::util_errmem::warning_text("EPA: origin lies on affine hull of face");
             break;
         }
         let lower = lower2.sqrt();
@@ -1656,7 +1656,7 @@ fn epa(
         }
         pt.horizon.w = w.vert;
         if horizon(pt, fi) < 0 {
-            eprintln!("EPA: out of memory for horizon edges on expanding polytope, set ccd_iterations to at least {}",pt.horizon.nedges+11);
+            crate::util_errmem::warning_text(&format!("EPA: out of memory for horizon edges on expanding polytope, set ccd_iterations to at least {}", pt.horizon.nedges+11));
             face = None;
             break;
         }
@@ -1667,7 +1667,7 @@ fn epa(
         let nfaces = pt.nfaces;
         let nedges = pt.horizon.nedges;
         if nedges > max_faces(pt) {
-            eprintln!("EPA: growing storage for faces on expanding polytope");
+            crate::util_errmem::warning_text("EPA: growing storage for faces on expanding polytope");
             pt.maxfaces = pt.nfaces + nedges;
             if pt.faces.len() < pt.maxfaces {
                 pt.faces.resize(pt.maxfaces, Face::default());

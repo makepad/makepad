@@ -4,7 +4,10 @@
 //! of the engine named in CREDITS.md (Apache-2.0, Copyright 2021 DeepMind Technologies Limited);
 //! changed: translated to Rust.
 
-// Only the scalar #else paths are translated; they preserve the C scalar/AVX reduction order.
+// The scalar #else paths are translated, except where the reference's AVX build
+// (src/engine/engine_util_sparse_avx.h) sums in another order: dot_sparse_x3 sums in its four lanes,
+// as dot_sparse (whose scalar path shares them) does. mul_mat_vec_sparse follows the AVX build's
+// structure: the rows of a supernode in threes, sharing the gathered vector.
 use crate::{
     data::Data,
     util_blas::*,
@@ -18,7 +21,8 @@ pub fn ctz64(x: u64) -> i32 {
     x.trailing_zeros() as i32
 }
 
-#[inline]
+// Inlined into every caller, as the C's static inline mju_dotSparse is.
+#[inline(always)]
 pub fn dot_sparse(vec1: &[f64], vec2: &[f64], nnz1: usize, ind1: &[i32]) -> f64 {
     let mut vec1 = &vec1[..nnz1];
     let mut ind1 = &ind1[..nnz1];
@@ -149,6 +153,11 @@ pub fn combine_sparse(
     nnz
 }
 
+// Three rows of one column pattern times vec2, each summed as dot_sparse sums it (four lanes, then the
+// tail), with vec2 gathered once for the three: the reference build's mju_dotSparseX3 (its AVX path; the
+// scalar #else sums in one accumulator). Inlined into its callers as the C's static inline is; the rows
+// are walked in chunks of four, so only the gather is checked.
+#[inline(always)]
 pub fn dot_sparse_x3(
     res0: &mut f64,
     res1: &mut f64,
@@ -160,13 +169,30 @@ pub fn dot_sparse_x3(
     nnz1: usize,
     ind1: &[i32],
 ) {
+    let (ind4, ind_tail) = ind1[..nnz1].as_chunks::<4>();
+    let (a4, a_tail) = vec10[..nnz1].as_chunks::<4>();
+    let (b4, b_tail) = vec11[..nnz1].as_chunks::<4>();
+    let (c4, c_tail) = vec12[..nnz1].as_chunks::<4>();
+    let mut s0 = [0.0; 4];
+    let mut s1 = [0.0; 4];
+    let mut s2 = [0.0; 4];
+    for (((ix, a), b), c) in ind4.iter().zip(a4).zip(b4).zip(c4) {
+        let g = [vec2[ix[0] as usize], vec2[ix[1] as usize], vec2[ix[2] as usize], vec2[ix[3] as usize]];
+        for l in 0..4 {
+            s0[l] += a[l] * g[l];
+            s1[l] += b[l] * g[l];
+            s2[l] += c[l] * g[l];
+        }
+    }
     // C RES0/RES1/RES2 clash with the output names after case conversion.
-    let (mut res0_mat, mut res1_mat, mut res2_mat) = (0.0, 0.0, 0.0);
-    for i in 0..nnz1 {
-        let v2 = vec2[ind1[i] as usize];
-        res0_mat += vec10[i] * v2;
-        res1_mat += vec11[i] * v2;
-        res2_mat += vec12[i] * v2;
+    let mut res0_mat = (s0[0] + s0[2]) + (s0[1] + s0[3]);
+    let mut res1_mat = (s1[0] + s1[2]) + (s1[1] + s1[3]);
+    let mut res2_mat = (s2[0] + s2[2]) + (s2[1] + s2[3]);
+    for (((&ix, &a), &b), &c) in ind_tail.iter().zip(a_tail).zip(b_tail).zip(c_tail) {
+        let v2 = vec2[ix as usize];
+        res0_mat += a * v2;
+        res1_mat += b * v2;
+        res2_mat += c * v2;
     }
     *res0 = res0_mat;
     *res1 = res1_mat;
@@ -306,10 +332,36 @@ pub fn mul_mat_vec_sparse(
     colind: &[i32],
     rowsuper: Option<&[i32]>,
 ) {
-    let _ = rowsuper; // Unused by the scalar C path.
-    for r in 0..nr {
-        let adr = rowadr[r] as usize;
-        res[r] = dot_sparse(&mat[adr..], vec, rownnz[r] as usize, &colind[adr..]);
+    let Some(rowsuper) = rowsuper else {
+        for r in 0..nr {
+            let adr = rowadr[r] as usize;
+            res[r] = dot_sparse(&mat[adr..], vec, rownnz[r] as usize, &colind[adr..]);
+        }
+        return;
+    };
+    // regular rows, and supernodes: rows rowsuper[r] + 1 long that share row r's columns
+    let mut r = 0;
+    while r < nr {
+        let mut rs = rowsuper[r] as usize + 1;
+        // the supernode's rows in blocks of three
+        while rs >= 3 {
+            let adr = rowadr[r] as usize;
+            let (mut a, mut b, mut c) = (0.0, 0.0, 0.0);
+            dot_sparse_x3(&mut a, &mut b, &mut c, &mat[adr..], &mat[rowadr[r + 1] as usize..], &mat[rowadr[r + 2] as usize..],
+                vec, rownnz[r] as usize, &colind[adr..]);
+            res[r] = a;
+            res[r + 1] = b;
+            res[r + 2] = c;
+            r += 3;
+            rs -= 3;
+        }
+        // the remaining rows
+        while rs > 0 {
+            let adr = rowadr[r] as usize;
+            res[r] = dot_sparse(&mat[adr..], vec, rownnz[r] as usize, &colind[adr..]);
+            r += 1;
+            rs -= 1;
+        }
     }
 }
 
@@ -702,11 +754,12 @@ pub fn transpose_sparse(
     }
     zero_int(res_rownnz, nc);
     let row_offset = rowadr[0];
+    let res_rownnz = &mut res_rownnz[..nc];
     for r in 0..nr {
         let start = (rowadr[r] - row_offset) as usize;
         let end = start + rownnz[r] as usize;
-        for j in start..end {
-            res_rownnz[colind[j] as usize] += 1;
+        for &c in &colind[start..end] {
+            res_rownnz[c as usize] += 1;
         }
     }
     if let Some(s) = res_rowsuper.as_deref_mut() {
@@ -719,23 +772,38 @@ pub fn transpose_sparse(
     for i in 1..nc {
         res_rowadr[i] = res_rowadr[i - 1] + res_rownnz[i - 1];
     }
+    // each row's columns (and values) sliced once; the values and supernode marks as the row asks
+    let res_rowadr_nc = &mut res_rowadr[..nc];
     for r in 0..nr {
         let mut c_prev = -1;
         let start = (rowadr[r] - row_offset) as usize;
         let end = start + rownnz[r] as usize;
-        for i in start..end {
-            let c = colind[i];
-            let adr = res_rowadr[c as usize] as usize;
-            res_rowadr[c as usize] += 1;
-            res_colind[adr] = r as i32;
-            if let Some(v) = res.as_deref_mut() {
-                v[adr] = mat[i];
-            }
+        let cols = &colind[start..end];
+        let mut mark = |c: i32| {
             if let Some(s) = res_rowsuper.as_deref_mut() {
                 if c > 0 && c != c_prev + 1 && s[c as usize - 1] != 0 {
                     s[c as usize - 1] = 0;
                 }
                 c_prev = c;
+            }
+        };
+        match res.as_deref_mut() {
+            Some(v) => {
+                for (&c, &x) in cols.iter().zip(&mat[start..end]) {
+                    let adr = res_rowadr_nc[c as usize] as usize;
+                    res_rowadr_nc[c as usize] += 1;
+                    res_colind[adr] = r as i32;
+                    v[adr] = x;
+                    mark(c);
+                }
+            }
+            None => {
+                for &c in cols {
+                    let adr = res_rowadr_nc[c as usize] as usize;
+                    res_rowadr_nc[c as usize] += 1;
+                    res_colind[adr] = r as i32;
+                    mark(c);
+                }
             }
         }
     }
@@ -891,7 +959,7 @@ pub fn sqr_mat_tdsparse_symbolic(
     rowadr_t: &[i32],
     colind_t: &[i32],
     rowsuper_t: Option<&[i32]>,
-    d: &mut Data,
+    scratch: &mut crate::memory::Scratch,
 ) -> i32 {
     if nc == 0 || nr == 0 {
         if nc > 0 {
@@ -912,10 +980,10 @@ pub fn sqr_mat_tdsparse_symbolic(
     let colnnz_t = rownnz;
     let coladr_t = rowadr;
     let rowind_t = colind;
-    let mut marker = d.scratch.int(nc);
+    let mut marker = scratch.int(nc);
     zero_int(&mut marker, nc);
-    let mut buffer_idx = d.scratch.int(nc);
-    let mut rowstart = d.scratch.int(nr);
+    let mut buffer_idx = scratch.int(nc);
+    let mut rowstart = scratch.int(nr);
     zero_int(&mut rowstart, nr);
     zero_int(res_rownnz, nc);
     let mut c = 0;
@@ -1006,7 +1074,7 @@ pub fn sqr_mat_tdsparse_symbolic(
         }
     }
     if let (Some(ci), Some(di)) = (res_colind.as_deref_mut(), res_diagind.as_deref_mut()) {
-        let mut lower_nnz = d.scratch.int(nc);
+        let mut lower_nnz = scratch.int(nc);
         copy_int(&mut lower_nnz, res_rownnz, nc);
         for r in 0..nc {
             di[r] = if lower_nnz[r] != 0 {
@@ -1026,18 +1094,21 @@ pub fn sqr_mat_tdsparse_symbolic(
                 }
             }
         }
-        d.scratch.put_int(lower_nnz);
+        scratch.put_int(lower_nnz);
     }
-    d.scratch.put_int(marker);
-    d.scratch.put_int(buffer_idx);
-    d.scratch.put_int(rowstart);
+    scratch.put_int(marker);
+    scratch.put_int(buffer_idx);
+    scratch.put_int(rowstart);
     res_rowadr[nc - 1] + res_rownnz[nc - 1]
 }
 
-fn accum_super_row(
+// W is a constant (4, or MAXSUPER), as the C passes a literal width to its inlined function.
+// ind_k and val_k are M's row k, which holds column r.
+#[inline(always)]
+fn accum_super_row<const W: usize>(
     block: &mut [[f64; MAXSUPER]; MAXSUPER],
     buffer: &mut [f64],
-    scale: &[f64],
+    scale: &[f64; MAXSUPER],
     mat_t_s: &[&[f64]; MAXSUPER],
     ind_k: &[i32],
     val_k: &[f64],
@@ -1045,27 +1116,24 @@ fn accum_super_row(
     r: usize,
     ns: usize,
     any_off: i32,
-    width: usize,
 ) {
     for t in 0..ns {
         let v = mat_t_s[t][i];
-        for s in 0..width {
+        for s in 0..W {
             block[t][s] += scale[s] * v;
         }
     }
     if any_off != 0 {
-        let mut j = 0;
-        loop {
-            let c = ind_k[j] as usize;
+        let buffer = &mut buffer[..r * MAXSUPER];
+        for (&c, &v) in ind_k.iter().zip(val_k) {
+            let c = c as usize;
             if c >= r {
                 break;
             }
-            let v = val_k[j];
-            let buf = &mut buffer[c * MAXSUPER..];
-            for s in 0..width {
+            let buf = &mut buffer[c * MAXSUPER..c * MAXSUPER + W];
+            for s in 0..W {
                 buf[s] += scale[s] * v;
             }
-            j += 1;
         }
     }
 }
@@ -1087,13 +1155,12 @@ pub fn sqr_mat_tdsparse_numeric(
     colind_t: &[i32],
     rowsuper_t: Option<&[i32]>,
     diag: Option<&[f64]>,
-    d: &mut Data,
+    scratch: &mut crate::memory::Scratch,
 ) {
-    let _ = rownnz;
     if nc == 0 {
         return;
     }
-    let mut buffer = d.scratch.num(nc * MAXSUPER);
+    let mut buffer = scratch.num(nc * MAXSUPER);
     let mut buf_zeroed = 0;
     let mut r = 0;
     while r < nc {
@@ -1136,17 +1203,16 @@ pub fn sqr_mat_tdsparse_numeric(
                 }
                 diag_r += scale * val_t;
                 if off_nnz > 0 {
+                    // M's row k, sliced to its nonzeros, up to column r (which it holds); the accumulator to r
                     let adr_k = rowadr[k] as usize;
-                    let ind_k = &colind[adr_k..];
-                    let val_k = &mat[adr_k..];
-                    let mut j = 0;
-                    loop {
-                        let c = ind_k[j] as usize;
+                    let end_k = adr_k + rownnz[k] as usize;
+                    let buf = &mut buffer[..r];
+                    for (&c, &v) in colind[adr_k..end_k].iter().zip(&mat[adr_k..end_k]) {
+                        let c = c as usize;
                         if c >= r {
                             break;
                         }
-                        buffer[c] += scale * val_k[j];
-                        j += 1;
+                        buf[c] += scale * v;
                     }
                 }
             }
@@ -1194,34 +1260,12 @@ pub fn sqr_mat_tdsparse_numeric(
                     }
                 }
                 let adr_k = rowadr[k] as usize;
+                let end_k = adr_k + rownnz[k] as usize;
+                let (ind_k, val_k) = (&colind[adr_k..end_k], &mat[adr_k..end_k]);
                 if ns <= 4 {
-                    accum_super_row(
-                        &mut block,
-                        &mut buffer,
-                        &scale,
-                        &mat_t_s,
-                        &colind[adr_k..],
-                        &mat[adr_k..],
-                        i,
-                        r,
-                        ns,
-                        any_off,
-                        4,
-                    );
+                    accum_super_row::<4>(&mut block, &mut buffer, &scale, &mat_t_s, ind_k, val_k, i, r, ns, any_off);
                 } else {
-                    accum_super_row(
-                        &mut block,
-                        &mut buffer,
-                        &scale,
-                        &mat_t_s,
-                        &colind[adr_k..],
-                        &mat[adr_k..],
-                        i,
-                        r,
-                        ns,
-                        any_off,
-                        MAXSUPER,
-                    );
+                    accum_super_row::<MAXSUPER>(&mut block, &mut buffer, &scale, &mat_t_s, ind_k, val_k, i, r, ns, any_off);
                 }
             }
             for s in 0..ns {
@@ -1241,7 +1285,7 @@ pub fn sqr_mat_tdsparse_numeric(
         r += ns;
     }
     if let Some(di) = res_diagind {
-        let mut upper_pos = d.scratch.int(nc);
+        let mut upper_pos = scratch.int(nc);
         for r in 0..nc {
             upper_pos[r] = di[r] + 1;
         }
@@ -1256,9 +1300,9 @@ pub fn sqr_mat_tdsparse_numeric(
                 }
             }
         }
-        d.scratch.put_int(upper_pos);
+        scratch.put_int(upper_pos);
     }
-    d.scratch.put_num(buffer);
+    scratch.put_num(buffer);
 }
 
 pub fn sqr_mat_tdsparse(

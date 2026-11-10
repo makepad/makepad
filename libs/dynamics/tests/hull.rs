@@ -193,3 +193,79 @@ fn corner_on_a_straight_side_stays_in_every_face() {
     ].iter().map(|p| p.map(|v| v as f64)).collect();
     checked_hull(&points);
 }
+
+// A cube's surface grid, `k` points along each edge, side 2, with every coordinate moved by up to `amp`
+// of the side, or only the face points moved along their face's normal.
+fn jittered_cube(k: usize, amp: f64, seed: u64, every_coordinate: bool) -> Vec<[f64; 3]> {
+    let mut generator = Generator(seed);
+    let mut points = Vec::new();
+    let at = |i: usize| -1.0 + 2.0 * i as f64 / (k - 1) as f64;
+    for i in 0..k {
+        for j in 0..k {
+            for l in 0..k {
+                let ends: Vec<_> = [i, j, l].iter().map(|&c| c == 0 || c == k - 1).collect();
+                if !ends.contains(&true) {
+                    continue;
+                }
+                let mut point = [at(i), at(j), at(l)];
+                if every_coordinate {
+                    for coordinate in &mut point {
+                        *coordinate += 2.0 * amp * generator.coordinate();
+                    }
+                } else if ends.iter().filter(|&&end| end).count() == 1 {
+                    point[ends.iter().position(|&end| end).unwrap()] += 2.0 * amp * generator.coordinate();
+                }
+                points.push(point);
+            }
+        }
+    }
+    points
+}
+
+// A meshed field's faces are flat only to the rounding of its points: neighbouring triangles a hair off
+// one plane, and corners of one facet on another's side. Rounding-sized offsets used to break the hull
+// (a group with fewer than three corners, inverted triangles), and 1e-9 of the side is a face just off flat.
+#[test]
+fn jittered_cube_gives_a_closed_outward_hull() {
+    for (k, amps) in [(5, &[1e-9, 1e-13, 1e-14, 3e-15][..]), (9, &[1e-13, 3e-15][..])] {
+        for &amp in amps {
+            for every_coordinate in [true, false] {
+                for seed in 0..6 {
+                    let case = format!("k {k} amp {amp:e} every coordinate {every_coordinate} seed {seed}");
+                    let points = jittered_cube(k, amp, seed, every_coordinate);
+                    let coordinates: Vec<_> = points.iter().flatten().copied().collect();
+                    let hull = convex_hull(&coordinates, points.len()).unwrap_or_else(|error| panic!("{case}: {error}"));
+                    let mut edges = BTreeMap::<(i32, i32), (usize, i32)>::new();
+                    let mut volume = 0.0;
+                    for (id, face) in hull.faces.iter().enumerate() {
+                        for i in 0..3 {
+                            let (a, b) = (face[i], face[(i + 1) % 3]);
+                            let edge = edges.entry((a.min(b), a.max(b))).or_default();
+                            edge.0 += 1;
+                            edge.1 += if a < b { 1 } else { -1 };
+                        }
+                        let [a, b, c] = face.map(|v| points[v as usize]);
+                        volume += dot(a, cross(b, c)) / 6.0;
+                        // A triangle's plane tilts from its facet's by the facet's points' offset over the
+                        // triangle's height: only large triangles are held to a tight bound.
+                        let normal = cross(sub(b, a), sub(c, a));
+                        let longest = [sub(b, a), sub(c, b), sub(a, c)].iter().map(|e| dot(*e, *e).sqrt()).fold(0.0, f64::max);
+                        let area = dot(normal, normal).sqrt();
+                        if area / longest < 0.2 {
+                            continue;
+                        }
+                        let normal = normal.map(|v| v / area);
+                        assert!(dot(normal, a) > 0.5, "{case}: face {id} faces away from the outside");
+                        for (point, &position) in points.iter().enumerate() {
+                            let distance = dot(normal, sub(position, a));
+                            assert!(distance <= 2e-11, "{case}: point {point} outside face {id} by {distance:e}");
+                        }
+                    }
+                    assert!(edges.values().all(|&edge| edge == (2, 0)), "{case}: each edge has two opposite uses");
+                    assert_eq!(hull.vertices.len() + hull.faces.len(), edges.len() + 2, "{case}: Euler characteristic");
+                    assert!((volume / 8.0 - 1.0).abs() < 1e-6, "{case}: volume {volume} of a cube of 8");
+                }
+            }
+        }
+    }
+}

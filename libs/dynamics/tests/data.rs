@@ -163,9 +163,8 @@ fn data_creation_reset_and_keyframe() {
         (2, 0)
     );
     assert!(warning_text_of(WARN_CNSTRFULL, 1024).contains("above 1K bytes."));
-    let mut v = d.scratch.num(8);
+    let v = d.scratch.num(8);
     let ptr = v.as_ptr();
-    v.fill(1.0);
     d.scratch.put_num(v);
     let large = d.scratch.num(16);
     d.scratch.put_num(large);
@@ -175,20 +174,7 @@ fn data_creation_reset_and_keyframe() {
         ptr,
         "smallest fitting scratch allocation is reused"
     );
-    assert_eq!(v, [0.0; 4]);
     d.scratch.put_num(v);
-    let mut ints = d.scratch.int(3);
-    ints.fill(4);
-    d.scratch.put_int(ints);
-    let ints = d.scratch.int(2);
-    assert_eq!(ints, [0; 2]);
-    d.scratch.put_int(ints);
-    let mut bytes = d.scratch.byte(3);
-    bytes.fill(5);
-    d.scratch.put_byte(bytes);
-    let bytes = d.scratch.byte(2);
-    assert_eq!(bytes, [0; 2]);
-    d.scratch.put_byte(bytes);
     d.qpos.fill(99.0);
     d.qvel.fill(99.0);
     d.time = 99.0;

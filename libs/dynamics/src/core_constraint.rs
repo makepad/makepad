@@ -1582,7 +1582,7 @@ fn no_dofs(m: &Model, body: &[i32], n: usize) -> i32 {
 pub fn contact_jacobian(
     m: &Model,
     d: &mut Data,
-    con: &crate::data::Contact,
+    i: usize,
     dim: i32,
     jacdifp: &mut [f64],
     jacdifr: Option<&mut [f64]>,
@@ -1592,6 +1592,7 @@ pub fn contact_jacobian(
     jac2r: Option<&mut [f64]>,
     chain: &mut [i32],
 ) -> usize {
+    let con = &d.contact[i];
     if (con.geom[0] >= 0
         || (con.vert[0] >= 0 && m.flex_interp[con.flex[0] as usize] == 0 && {
             crate::unported!("mj_rodHasTwist");
@@ -1655,6 +1656,7 @@ pub fn contact_jacobian(
         const MAXFLEXINTERPW: usize = 98;
         let mut bid = [0; 2 * MAXFLEXINTERPW];
         let mut bweight = [0.0; 2 * MAXFLEXINTERPW];
+        let (pos, flex) = (con.pos, con.flex);
         let mut nb = core_util::contact_body_weight(m, d, con, 0, &mut bid, Some(&mut bweight));
         let input = bweight;
         util_blas::scl(&mut bweight, &input, -1.0, nb);
@@ -1670,14 +1672,14 @@ pub fn contact_jacobian(
             nb,
             &bid,
             &bweight,
-            &con.pos,
+            &pos,
             jacdifp,
             jacdifr,
             (dim > 3) as i32,
         );
         if nv > 0 {
             for side in 0..2 {
-                if con.flex[side] >= 0 {
+                if flex[side] >= 0 {
                     // mj_rodContactJac follows if the untranslated twist predicate is true.
                     crate::unported!("mj_rodHasTwist");
                 }
@@ -1713,11 +1715,10 @@ pub fn instantiate_contact(m: &Model, d: &mut Data) {
         }
         let dim = d.contact[i].dim as usize;
         d.contact[i].efc_address = d.nefc;
-        let con = d.contact[i].clone();
         let nv_mat = contact_jacobian(
             m,
             d,
-            &con,
+            i,
             dim as i32,
             &mut jacdifp,
             Some(&mut jacdifr),
@@ -1732,6 +1733,8 @@ pub fn instantiate_contact(m: &Model, d: &mut Data) {
             d.contact[i].exclude = 3;
             continue;
         }
+        let con = &d.contact[i];
+        let (dist, includemargin, friction) = (con.dist, con.includemargin, con.friction);
         util_blas::mul_mat_mat(
             &mut jac,
             &con.frame,
@@ -1755,8 +1758,8 @@ pub fn instantiate_contact(m: &Model, d: &mut Data) {
                 m,
                 d,
                 &jac,
-                Some(&[con.dist]),
-                Some(&[con.includemargin]),
+                Some(&[dist]),
+                Some(&[includemargin]),
                 0.0,
                 1,
                 CNSTR_CONTACT_FRICTIONLESS,
@@ -1765,21 +1768,21 @@ pub fn instantiate_contact(m: &Model, d: &mut Data) {
                 if issparse { Some(&chain) } else { None },
             );
         } else if ispyramid {
-            let cpos = [con.dist; 2];
-            let cmargin = [con.includemargin; 2];
+            let cpos = [dist; 2];
+            let cmargin = [includemargin; 2];
             for k in 1..dim {
                 util_blas::add_scl(
                     &mut jacdifp,
                     &jac,
                     &jac[k * nv_mat..],
-                    con.friction[k - 1],
+                    friction[k - 1],
                     nv_mat,
                 );
                 util_blas::add_scl(
                     &mut jacdifp[nv_mat..],
                     &jac,
                     &jac[k * nv_mat..],
-                    -con.friction[k - 1],
+                    -friction[k - 1],
                     nv_mat,
                 );
                 add_constraint(
@@ -1801,8 +1804,8 @@ pub fn instantiate_contact(m: &Model, d: &mut Data) {
             let mut cmargin = [0.0; 6];
             util_blas::zero(&mut cpos, dim);
             util_blas::zero(&mut cmargin, dim);
-            cpos[0] = con.dist;
-            cmargin[0] = con.includemargin;
+            cpos[0] = dist;
+            cmargin[0] = includemargin;
             add_constraint(
                 m,
                 d,
@@ -1833,6 +1836,9 @@ pub fn instantiate_contact(m: &Model, d: &mut Data) {
 pub fn diag_approx(m: &Model, d: &mut Data) {
     let mut weldcnt = 0;
     let nefc = d.nefc as usize;
+    // a contact side's bodies and weights: written before they are read, so filled once here
+    let mut bid = [0; 98];
+    let mut bweight = [0.0; 98];
     let mut i = 0;
     while i < nefc {
         let id = d.efc_id[i] as usize;
@@ -1940,8 +1946,6 @@ pub fn diag_approx(m: &Model, d: &mut Data) {
                 let mut tran = 0.0;
                 let mut rot = 0.0;
                 for side in 0..2 {
-                    let mut bid = [0; 98];
-                    let mut bweight = [0.0; 98];
                     let nb = core_util::contact_body_weight(
                         m,
                         d,
@@ -2017,7 +2021,7 @@ fn getsolparam(
         _ => {}
     }
     if (solref[0] > 0.0) ^ (solref[1] > 0.0) {
-        eprintln!("mixed solref format, replacing with default");
+        crate::util_errmem::warning_text("mixed solref format, replacing with default");
         crate::model::default_sol_ref_imp(Some(solref), None);
     }
     let metric = core_util::is_metric(m) != 0;
@@ -2025,7 +2029,7 @@ fn getsolparam(
         solref[0] = max(solref[0], 2.0 * m.opt.timestep);
     }
     if (solreffriction[0] > 0.0) ^ (solreffriction[1] > 0.0) {
-        eprintln!("solreffriction values should have the same sign, replacing with default");
+        crate::util_errmem::warning_text("solreffriction values should have the same sign, replacing with default");
         util_blas::zero(solreffriction, NREF);
     }
     if !disabled(m, DSBL_REFSAFE) && solreffriction[0] > 0.0 && !metric {
@@ -2117,9 +2121,14 @@ pub fn make_impedance(m: &Model, d: &mut Data) {
         let (mut pos, mut dim, mut imp, mut imp_p) = (0.0, 0, 0.0, 0.0);
         getposdim(m, d, i, &mut pos, &mut dim);
         getimpedance(&solimp, pos, d.efc_margin[i], &mut imp, &mut imp_p);
+        // This constraint's rows as slices: a store below reloads none of the other arrays.
+        let efc_r = &mut d.efc_r[i..i + dim];
+        let efc_kbip = &mut d.efc_kbip[4 * i..4 * (i + dim)];
+        let efc_diag_a = &d.efc_diag_a[i..i + dim];
+        let efc_type = &d.efc_type[i..i + dim];
         for j in 0..dim {
-            d.efc_r[i + j] = max(MINVAL, (1.0 - imp) * d.efc_diag_a[i + j] / imp);
-            let tp = d.efc_type[i + j];
+            efc_r[j] = max(MINVAL, (1.0 - imp) * efc_diag_a[j] / imp);
+            let tp = efc_type[j];
             let elliptic_friction = tp == CNSTR_CONTACT_ELLIPTIC && j > 0;
             let r#ref =
                 if elliptic_friction && (solreffriction[0] != 0.0 || solreffriction[1] != 0.0) {
@@ -2127,26 +2136,26 @@ pub fn make_impedance(m: &Model, d: &mut Data) {
                 } else {
                     &solref
                 };
+            let kbip = &mut efc_kbip[4 * j..4 * j + 4];
             if tp == CNSTR_FRICTION_DOF || tp == CNSTR_FRICTION_TENDON || elliptic_friction {
-                d.efc_kbip[4 * (i + j)] = 0.0;
+                kbip[0] = 0.0;
             } else if r#ref[0] > 0.0 {
-                d.efc_kbip[4 * (i + j)] = 1.0
+                kbip[0] = 1.0
                     / max(
                         MINVAL,
                         solimp[1] * solimp[1] * r#ref[0] * r#ref[0] * r#ref[1] * r#ref[1],
                     );
             } else {
-                d.efc_kbip[4 * (i + j)] = -r#ref[0] / max(MINVAL, solimp[1] * solimp[1]);
+                kbip[0] = -r#ref[0] / max(MINVAL, solimp[1] * solimp[1]);
             }
             if r#ref[1] > 0.0 {
-                d.efc_kbip[4 * (i + j) + 1] = 2.0 / max(MINVAL, solimp[1] * r#ref[0]);
+                kbip[1] = 2.0 / max(MINVAL, solimp[1] * r#ref[0]);
             } else {
-                d.efc_kbip[4 * (i + j) + 1] = -r#ref[1] / max(MINVAL, solimp[1]);
+                kbip[1] = -r#ref[1] / max(MINVAL, solimp[1]);
             }
-            d.efc_kbip[4 * (i + j) + 2] = imp;
-            d.efc_kbip[4 * (i + j) + 3] = imp_p;
+            kbip[2] = imp;
+            kbip[3] = imp_p;
             if metric {
-                let kbip = &mut d.efc_kbip[4 * (i + j)..];
                 if !disabled(m, DSBL_REFSAFE)
                     && r#ref[0] > 0.0
                     && kbip[0] > 0.0
@@ -2167,41 +2176,49 @@ pub fn make_impedance(m: &Model, d: &mut Data) {
                     }
                 }
                 let f = implicit_factor(kbip, h);
-                let rmin = max(MINVAL, (1.0 - MAXIMP) * d.efc_diag_a[i + j] / MAXIMP);
-                d.efc_r[i + j] = max(d.efc_r[i + j] / f, rmin);
+                let rmin = max(MINVAL, (1.0 - MAXIMP) * efc_diag_a[j] / MAXIMP);
+                efc_r[j] = max(efc_r[j] / f, rmin);
             }
         }
         i += dim;
     }
+    // The efc arrays cut to nefc once for the passes below.
+    let efc_r = &mut d.efc_r[..nefc];
+    let efc_type = &d.efc_type[..nefc];
+    let efc_id = &d.efc_id[..nefc];
+    let contact = &mut d.contact[..];
     i = (d.ne + d.nf) as usize;
     while i < nefc {
-        if d.efc_type[i] == CNSTR_CONTACT_PYRAMIDAL || d.efc_type[i] == CNSTR_CONTACT_ELLIPTIC {
-            let id = d.efc_id[i] as usize;
-            let dim = d.contact[id].dim as usize;
-            let friction = d.contact[id].friction;
-            d.efc_r[i + 1] = d.efc_r[i] / max(MINVAL, m.opt.impratio);
-            d.contact[id].mu = friction[0] * (d.efc_r[i + 1] / d.efc_r[i]).sqrt();
-            if d.efc_type[i] == CNSTR_CONTACT_ELLIPTIC {
+        if efc_type[i] == CNSTR_CONTACT_PYRAMIDAL || efc_type[i] == CNSTR_CONTACT_ELLIPTIC {
+            let con = &mut contact[efc_id[i] as usize];
+            let dim = con.dim as usize;
+            let friction = con.friction;
+            efc_r[i + 1] = efc_r[i] / max(MINVAL, m.opt.impratio);
+            con.mu = friction[0] * (efc_r[i + 1] / efc_r[i]).sqrt();
+            if efc_type[i] == CNSTR_CONTACT_ELLIPTIC {
                 for j in 1..dim - 1 {
-                    d.efc_r[i + j + 1] =
-                        d.efc_r[i + 1] * friction[0] * friction[0] / (friction[j] * friction[j]);
+                    efc_r[i + j + 1] =
+                        efc_r[i + 1] * friction[0] * friction[0] / (friction[j] * friction[j]);
                 }
                 i += dim - 1;
             } else {
-                let rpy = 2.0 * d.contact[id].mu * d.contact[id].mu * d.efc_r[i];
+                let rpy = 2.0 * con.mu * con.mu * efc_r[i];
                 for j in 0..2 * (dim - 1) {
-                    d.efc_r[i + j] = rpy;
+                    efc_r[i + j] = rpy;
                 }
                 i += 2 * (dim - 1) - 1;
             }
         }
         i += 1;
     }
+    let efc_d = &mut d.efc_d[..nefc];
     for i in 0..nefc {
-        d.efc_d[i] = 1.0 / d.efc_r[i];
+        efc_d[i] = 1.0 / efc_r[i];
     }
+    let efc_kbip = &d.efc_kbip[..4 * nefc];
+    let efc_diag_a = &mut d.efc_diag_a[..nefc];
     for i in 0..nefc {
-        d.efc_diag_a[i] = d.efc_r[i] * d.efc_kbip[4 * i + 2] / (1.0 - d.efc_kbip[4 * i + 2]);
+        efc_diag_a[i] = efc_r[i] * efc_kbip[4 * i + 2] / (1.0 - efc_kbip[4 * i + 2]);
     }
 }
 
@@ -2488,31 +2505,29 @@ fn nc(m: &Model, d: &mut Data, nnz: Option<&mut i32>) -> i32 {
     let sleep_filter = enabled(m, ENBL_SLEEP) && d.ntree_awake < m.ntree as i32;
     let mut chain = d.scratch.int(m.nv);
     for i in 0..ncon {
-        let mut con = d.contact[i].clone();
-        let f0 = con.flex[0];
-        let f1 = con.flex[1];
+        let Contact { geom, flex, vert, dim, .. } = d.contact[i];
+        let f0 = flex[0];
+        let f1 = flex[1];
         let wants = (f0 > -1 && core_util::eff_flex_contact_possible(m, f0 as usize) != 0)
             || (f1 > -1 && core_util::eff_flex_contact_possible(m, f1 as usize) != 0);
         let mut ok = f0 > -1 && f1 > -1;
         let mut s = 0;
         while s < 2 && !ok {
-            if con.flex[s] < 0 && con.geom[s] > -1 {
-                ok = m.body_weldid[m.geom_bodyid[con.geom[s] as usize] as usize] == 0;
+            if flex[s] < 0 && geom[s] > -1 {
+                ok = m.body_weldid[m.geom_bodyid[geom[s] as usize] as usize] == 0;
             }
             s += 1;
         }
         if wants && ok {
-            con.efc_address = -1;
-            con.exclude = 4;
             d.contact[i].efc_address = -1;
             d.contact[i].exclude = 4;
         }
-        if con.exclude != 0 {
+        if d.contact[i].exclude != 0 {
             continue;
         }
         if sleep_filter {
-            let g1 = con.geom[0];
-            let g2 = con.geom[1];
+            let g1 = geom[0];
+            let g2 = geom[1];
             if g1 >= 0 && g2 >= 0 {
                 let b1 = m.body_weldid[m.geom_bodyid[g1 as usize] as usize] as usize;
                 let b2 = m.body_weldid[m.geom_bodyid[g2 as usize] as usize] as usize;
@@ -2527,33 +2542,33 @@ fn nc(m: &Model, d: &mut Data, nnz: Option<&mut i32>) -> i32 {
                 }
             }
             for side in 0..2 {
-                if con.geom[side] >= 0 {
+                if geom[side] >= 0 {
                     continue;
                 }
-                let b = sleep::flex_body(m, &con, side) as usize;
+                let b = sleep::flex_body(m, &d.contact[i], side) as usize;
                 if d.body_awake[m.body_weldid[b] as usize] as i32 == S_ASLEEP {
-                    panic!("contact {} involves sleeping flex {}", i, con.flex[side]);
+                    panic!("contact {} involves sleeping flex {}", i, flex[side]);
                 }
             }
         }
         let mut nv_mat = 0;
         if nnz.is_some() {
-            if (con.geom[0] >= 0
-                || (con.vert[0] >= 0 && m.flex_interp[con.flex[0] as usize] == 0 && {
+            if (geom[0] >= 0
+                || (vert[0] >= 0 && m.flex_interp[flex[0] as usize] == 0 && {
                     crate::unported!("mj_rodHasTwist");
                 }))
-                && (con.geom[1] >= 0
-                    || (con.vert[1] >= 0 && m.flex_interp[con.flex[1] as usize] == 0 && {
+                && (geom[1] >= 0
+                    || (vert[1] >= 0 && m.flex_interp[flex[1] as usize] == 0 && {
                         crate::unported!("mj_rodHasTwist");
                     }))
             {
                 let mut bid = [0; 2];
                 for side in 0..2 {
-                    bid[side] = if con.geom[side] >= 0 {
-                        m.geom_bodyid[con.geom[side] as usize]
+                    bid[side] = if geom[side] >= 0 {
+                        m.geom_bodyid[geom[side] as usize]
                     } else {
                         m.flex_vertbodyid
-                            [(m.flex_vertadr[con.flex[side] as usize] + con.vert[side]) as usize]
+                            [(m.flex_vertadr[flex[side] as usize] + vert[side]) as usize]
                     };
                 }
                 if no_dofs(m, &bid, 2) == 0 {
@@ -2577,8 +2592,8 @@ fn nc(m: &Model, d: &mut Data, nnz: Option<&mut i32>) -> i32 {
                 }
             } else {
                 let mut bid = [0; 196];
-                let mut nb = core_util::contact_body_weight(m, d, &con, 0, &mut bid, None);
-                nb += core_util::contact_body_weight(m, d, &con, 1, &mut bid[nb..], None);
+                let mut nb = core_util::contact_body_weight(m, d, &d.contact[i], 0, &mut bid, None);
+                nb += core_util::contact_body_weight(m, d, &d.contact[i], 1, &mut bid[nb..], None);
                 if no_dofs(m, &bid, nb) == 0 {
                     nv_mat = jac_sum_count(m, d, &mut chain, nb, &bid) as i32;
                 }
@@ -2587,7 +2602,6 @@ fn nc(m: &Model, d: &mut Data, nnz: Option<&mut i32>) -> i32 {
                 continue;
             }
         }
-        let dim = con.dim;
         if dim == 1 {
             nc += 1;
             nnzc += nv_mat;
@@ -3001,7 +3015,7 @@ fn make_arsymbolic(m: &Model, d: &mut Data) {
             &y_rowadr,
             &y_colind,
             Some(&y_rowsuper),
-            d,
+            &mut d.scratch,
         );
         d.efc_ar.resize(d.n_a as usize, 0.0);
         d.efc_ar_colind.resize(d.n_a as usize, 0);
@@ -3021,7 +3035,7 @@ fn make_arsymbolic(m: &Model, d: &mut Data) {
             &y_rowadr,
             &y_colind,
             Some(&y_rowsuper),
-            d,
+            &mut d.scratch,
         );
         d.efc_ar_rownnz = ar_rownnz;
         d.efc_ar_rowadr = ar_rowadr;
@@ -3099,7 +3113,7 @@ fn make_arnumeric(m: &Model, d: &mut Data) {
             &y_colind,
             Some(&y_rowsuper),
             None,
-            d,
+            &mut d.scratch,
         );
         d.efc_ar = ar;
         d.efc_ar_rownnz = ar_rownnz;

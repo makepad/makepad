@@ -25,9 +25,13 @@ The full licence text is in `LICENSE` beside this file. The source carries no
 NOTICE file.
 
 Changes: the C sources were translated to Rust, one module per source file
-(the file each module comes from is named in its header). The renderer, the
-visualisation, the user interface, the XML parser and model compiler, the
-Python bindings, the thread pool and the GPU back ends were not translated.
-The model builder (`builder.rs`) and the MJCF writer (`xml_export.rs`) are this
-crate's own, written to produce models the original compiler produces. Fixed-size
-arenas became growable vectors.
+(the file each module comes from is named in its header). The rigid-body part
+of the model compiler (`src/user/user_model.cc`, `user_objects.cc`,
+`user_mesh.cc`, `user_util.cc`, `user_init.c` and the setters of `user_api.cc`)
+was translated into the model builder (`builder.rs`, `model_spec.rs`) for the
+subset this crate builds. The renderer, the visualisation, the user interface,
+the XML parser, the rest of the model compiler, the Python bindings, the thread
+pool and the GPU back ends were not translated. The MJCF writer
+(`xml_export.rs`) is this crate's own; its attribute spellings and enum
+mappings follow `src/xml/xml_native_reader.cc`. The convex hull (`hull.rs`) is
+this crate's own. Fixed-size arenas became growable vectors.

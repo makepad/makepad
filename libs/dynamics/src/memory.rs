@@ -25,6 +25,8 @@ pub struct Scratch {
     ccd_buffers: Vec<(usize, CcdBuffer)>,
 }
 
+/// A pooled vector of `n` elements. Like the reference's stack allocations it is not cleared: the
+/// elements it keeps hold what an earlier user left, and every caller writes before it reads.
 fn take<T: Copy + Default>(pool: &mut Vec<Vec<T>>, n: usize) -> Vec<T> {
     if n == 0 {
         return Vec::new();
@@ -43,13 +45,13 @@ fn take<T: Copy + Default>(pool: &mut Vec<Vec<T>>, n: usize) -> Vec<T> {
         }
     }
     let mut v = best.map_or_else(Vec::new, |i| pool.swap_remove(i));
-    // Fill retained elements once; resize initializes only the newly exposed tail.
+    // resize sets only the newly exposed tail
     v.truncate(n);
-    v.fill(T::default());
     v.resize(n, T::default());
     v
 }
 
+// The typed pools below hand out vectors like take(): the elements they keep are not cleared.
 impl Scratch {
     pub(crate) fn contact_info(&mut self, n: usize) -> Vec<ContactInfo> {
         let pool = &mut self.contact_infos;
@@ -62,7 +64,6 @@ impl Scratch {
         let index = best.or_else(|| pool.len().checked_sub(1));
         let mut v = index.map_or_else(Vec::new, |i| pool.swap_remove(i));
         v.resize(n, ContactInfo::default());
-        v.fill(ContactInfo::default());
         v
     }
     pub(crate) fn put_contact_info(&mut self, v: Vec<ContactInfo>) {
@@ -79,7 +80,6 @@ impl Scratch {
         let index = best.or_else(|| pool.len().checked_sub(1));
         let mut v = index.map_or_else(Vec::new, |i| pool.swap_remove(i));
         v.resize(n, Pair::default());
-        v.fill(Pair::default());
         v
     }
     pub(crate) fn put_pair(&mut self, v: Vec<Pair>) { self.pairs.push(v); }
@@ -93,7 +93,6 @@ impl Scratch {
         let index = best.or_else(|| pool.len().checked_sub(1));
         let mut v = index.map_or_else(Vec::new, |i| pool.swap_remove(i));
         v.resize(n, Packed32::default());
-        v.fill(Packed32::default());
         v
     }
     pub(crate) fn put_packed_pair(&mut self, v: Vec<Packed32>) { self.packed_pairs.push(v); }
@@ -107,7 +106,6 @@ impl Scratch {
         let index = best.or_else(|| pool.len().checked_sub(1));
         let mut v = index.map_or_else(Vec::new, |i| pool.swap_remove(i));
         v.resize(n, Sap::default());
-        v.fill(Sap::default());
         v
     }
     pub(crate) fn put_sap(&mut self, v: Vec<Sap>) { self.saps.push(v); }
@@ -121,7 +119,6 @@ impl Scratch {
         let index = best.or_else(|| pool.len().checked_sub(1));
         let mut v = index.map_or_else(Vec::new, |i| pool.swap_remove(i));
         v.resize(n, CollisionTree::default());
-        v.fill(CollisionTree::default());
         v
     }
     pub(crate) fn put_collision_tree(&mut self, v: Vec<CollisionTree>) { self.collision_trees.push(v); }
@@ -135,7 +132,6 @@ impl Scratch {
         let index = best.or_else(|| pool.len().checked_sub(1));
         let mut v = index.map_or_else(Vec::new, |i| pool.swap_remove(i));
         v.resize(n, PreContact::default());
-        v.fill(PreContact::default());
         v
     }
     pub(crate) fn put_pre_contact(&mut self, v: Vec<PreContact>) { self.pre_contacts.push(v); }
@@ -149,7 +145,6 @@ impl Scratch {
         let index = best.or_else(|| pool.len().checked_sub(1));
         let mut v = index.map_or_else(Vec::new, |i| pool.swap_remove(i));
         v.resize(n, i32::default());
-        v.fill(i32::default());
         v
     }
     pub(crate) fn put_contact_count(&mut self, v: Vec<i32>) { self.contact_counts.push(v); }

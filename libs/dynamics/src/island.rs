@@ -321,17 +321,20 @@ fn union_constraint_trees(
     err_i: &mut i32,
 ) -> Option<&'static str> {
     let nefc = d.nefc as usize;
+    // Rows cut to nefc: the loop indexes them without per-row bounds checks.
+    let (efc_types, efc_ids) = (&d.efc_type[..nefc], &d.efc_id[..nefc]);
+    let efc_tree = &mut efc_tree[..nefc];
     let mut efc_type = -1;
     let mut efc_id = -1;
     for i in 0..nefc {
-        if i > 0 && efc_type == d.efc_type[i] && efc_id == d.efc_id[i] {
+        if i > 0 && efc_type == efc_types[i] && efc_id == efc_ids[i] {
             if !is_flex_equality(m, efc_type, efc_id) {
                 efc_tree[i] = efc_tree[i - 1];
                 continue;
             }
         }
-        efc_type = d.efc_type[i];
-        efc_id = d.efc_id[i];
+        efc_type = efc_types[i];
+        efc_id = efc_ids[i];
         if efc_type == CNSTR_CONTACT_FRICTIONLESS
             || efc_type == CNSTR_CONTACT_PYRAMIDAL
             || efc_type == CNSTR_CONTACT_ELLIPTIC
@@ -584,40 +587,57 @@ pub fn island(m: &Model, d: &mut Data) {
         d.island_dofadr[i] = d.map_idof2dof[d.island_idofadr[i] as usize];
     }
 
-    // Constraints.
-    zero_int(&mut d.island_ne, nisland);
-    zero_int(&mut d.island_nf, nisland);
-    zero_int(&mut d.island_nefc, nisland);
-    for i in 0..nefc {
-        d.efc_island[i] = tree_island[efc_tree[i] as usize];
-        let island = d.efc_island[i] as usize;
-        d.island_nefc[island] += 1;
-        match d.efc_type[i] {
-            CNSTR_EQUALITY => d.island_ne[island] += 1,
-            CNSTR_FRICTION_DOF | CNSTR_FRICTION_TENDON => d.island_nf[island] += 1,
-            _ => {}
+    // Constraints. The per-row arrays are cut to nefc and the per-island ones to nisland, so
+    // the row loops check each island-local index once instead of once per array.
+    {
+        let efc_tree = &efc_tree[..nefc];
+        let (efc_type, efc_id) = (&d.efc_type[..nefc], &d.efc_id[..nefc]);
+        let efc_frictionloss = &d.efc_frictionloss[..nefc];
+        let (efc_d, efc_r) = (&d.efc_d[..nefc], &d.efc_r[..nefc]);
+        let efc_island = &mut d.efc_island[..nefc];
+        let island_ne = &mut d.island_ne[..nisland];
+        let island_nf = &mut d.island_nf[..nisland];
+        let island_nefc = &mut d.island_nefc[..nisland];
+        zero_int(island_ne, nisland);
+        zero_int(island_nf, nisland);
+        zero_int(island_nefc, nisland);
+        for i in 0..nefc {
+            efc_island[i] = tree_island[efc_tree[i] as usize];
+            let island = efc_island[i] as usize;
+            island_nefc[island] += 1;
+            match efc_type[i] {
+                CNSTR_EQUALITY => island_ne[island] += 1,
+                CNSTR_FRICTION_DOF | CNSTR_FRICTION_TENDON => island_nf[island] += 1,
+                _ => {}
+            }
         }
-    }
-    d.island_iefcadr[0] = 0;
-    for i in 1..nisland {
-        d.island_iefcadr[i] = d.island_iefcadr[i - 1] + d.island_nefc[i - 1];
-    }
-    let island_nefc2 = &mut island_nv2;
-    zero_int(island_nefc2, nisland);
-    for c in 0..nefc {
-        let island = d.efc_island[c] as usize;
-        let ic = d.island_iefcadr[island] + island_nefc2[island];
-        island_nefc2[island] += 1;
-        d.map_efc2iefc[c] = ic;
-        d.map_iefc2efc[ic as usize] = c as i32;
-        d.iefc_type[ic as usize] = d.efc_type[c];
-        d.iefc_id[ic as usize] = d.efc_id[c];
-        d.iefc_frictionloss[ic as usize] = d.efc_frictionloss[c];
-        d.iefc_d[ic as usize] = d.efc_d[c];
-        d.iefc_r[ic as usize] = d.efc_r[c];
-    }
-    if compare(island_nefc2, &d.island_nefc, nisland) == 0 {
-        panic!("island_nefc miscount");
+        let island_iefcadr = &mut d.island_iefcadr[..nisland];
+        island_iefcadr[0] = 0;
+        for i in 1..nisland {
+            island_iefcadr[i] = island_iefcadr[i - 1] + island_nefc[i - 1];
+        }
+        let island_nefc2 = &mut island_nv2[..nisland];
+        zero_int(island_nefc2, nisland);
+        let (map_efc2iefc, map_iefc2efc) = (&mut d.map_efc2iefc[..nefc], &mut d.map_iefc2efc[..nefc]);
+        let (iefc_type, iefc_id) = (&mut d.iefc_type[..nefc], &mut d.iefc_id[..nefc]);
+        let iefc_frictionloss = &mut d.iefc_frictionloss[..nefc];
+        let (iefc_d, iefc_r) = (&mut d.iefc_d[..nefc], &mut d.iefc_r[..nefc]);
+        for c in 0..nefc {
+            let island = efc_island[c] as usize;
+            let ic = island_iefcadr[island] + island_nefc2[island];
+            island_nefc2[island] += 1;
+            map_efc2iefc[c] = ic;
+            let ic = ic as usize;
+            map_iefc2efc[ic] = c as i32;
+            iefc_type[ic] = efc_type[c];
+            iefc_id[ic] = efc_id[c];
+            iefc_frictionloss[ic] = efc_frictionloss[c];
+            iefc_d[ic] = efc_d[c];
+            iefc_r[ic] = efc_r[c];
+        }
+        if compare(island_nefc2, island_nefc, nisland) == 0 {
+            panic!("island_nefc miscount");
+        }
     }
     d.scratch.put_int(efc_tree);
     d.scratch.put_int(parent);

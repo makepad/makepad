@@ -74,8 +74,11 @@ is a quoted shell argument. There is no HTTP, no status code and no POST body.
 | `ui find [q=QUERY] [role=button] [name=Save] [nth=N] [w=]` | Matching nodes and count (nth is zero-based) |
 | `ui act node=ID\|q=QUERY ACTION [v=] [t=] [from= to=] [dx= dy=] [name=] [wait=1]` | Action result and resulting node; rejects missing, ambiguous, hidden or disabled targets |
 | `ui act node=ID\|q=QUERY drag dx= dy= [ms=1000] [hz=120] [legs=1] [x= y=] [b=0] [mods=shift+ctrl]` | A real pointer drag: press, one move every 1/hz through the window's input queue on time whatever the app is doing, release. `legs` traversals of `dx,dy` over `ms` (even: back at the start), press at `x,y` from the node's corner, default its centre. Answers `events`, `ms`, `late_ms_max`, `frames`, `per_2s_min` (fewest frames in any 2 s window) and `gap_ms`. |
-| `ui type node=ID\|q=QUERY t=TEXT [from= to=]` | Focus and replace the selection; default range is the caret/selection |
+| `ui type node=ID\|q=QUERY t=TEXT [from= to=]` | Focus and replace the selection; default range is the caret/selection. A node without replace_text (the code editor) gets the text as text input |
+| `ui act node=ID\|q=QUERY type t=TEXT [wait=1]` | `ui type`'s last step alone: the text as text input into the focus an earlier `ui act ... focus` gave the node, posted (nothing waits for the app; `wait=1` or `ui present` waits for its frame) |
 | `ui wait q=QUERY [gone=1\|changed=1\|count=N] [timeout_ms=5000]` | Nodes and elapsed milliseconds once the condition holds |
+| `ui done req=N [timeout_ms=5000]` | The result of an action an `act` answered `action N timed out` for (still pending: the app had not taken it yet), or that answer again |
+| `ui present node=ID\|q=QUERY\|w=WINDOW [timeout_ms=5000]` | Waits for the next present of the node's window, what `act wait=1` waits for; `w=` alone names the window (an act whose press removed its node), and a window gone answers `gone` at once |
 | `ui snap name=X` / `ui diff a=X [b=now\|Y]` | Save and compare semantic trees |
 | `ui speak [since=N] [node=ID]` / `ui lint` | Announcement stream or accessibility findings |
 | `mouse k=click x=X y=Y` | Mouse input; kinds also include move, down, up, scroll; `k=drag` sends its moves in one burst, which coalesce into one (a value field reads that as the start of a drag and does not change: use `ui act ... drag`) |
@@ -258,13 +261,12 @@ take; `cap stop`; `quit`.
 
 - The proof rig for anything visual is the native GPU backend (Metal on
   macOS) in an owned `--remote` instance. `MAKEPAD_HIDE_WINDOWS=1` keeps its
-  windows off the user's screen; grabs and input still work because `g`
-  forces a present on a hidden window. Measured on macOS (2026-09-10): the
-  first hidden `g` answers in ~100 ms, later ones in ~2 s each, and `gseq`
-  delivers at that ~2 s spacing regardless of `every_ms`; on an app that is
-  not redrawing, `gseq` can time out ("grab timeout"). Rest/settle timing
-  proofs need a window that presents on its own (the user's, or a visible
-  unfocused one).
+  windows off screen. On Apple it defaults to offscreen Metal without an
+  AppKit window; `g` requests a present directly (measured: 22–63 ms).
+  Explicit `MAKEPAD_HAL_BACKEND=metal` keeps hidden AppKit windows without
+  a display link; whether grabs hit the 2 s `FRAME_STALL` backstop is
+  **not verified**. Rest/settle timing proofs need a window that presents
+  on its own (the user's, or a visible unfocused one).
 - `MAKEPAD_HAL_BACKEND=headless` runs the HAL headless backend: the native
   client with no window, no GPU and no raster. It is for logic and
   data-structure tests only. Never use it to prove a picture or to chase a

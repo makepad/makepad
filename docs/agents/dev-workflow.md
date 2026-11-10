@@ -75,7 +75,11 @@ buckets ask for one, and the queue decides where and when.
 
 - **Kinds**:
   - build and test: the bulk;
-  - screen: opens windows on a box that presents;
+  - screen: opens windows on a box that presents, hidden from the person
+    (`MAKEPAD_HIDE_WINDOWS=1`, as in every lease). A person's launch is
+    `devhub show <app> --on <node>`, with `--native` for the compiled app: the
+    node's WM opens it, with no lease and no test instance, and its tile shows the build
+    (`devhub show stop <app> --on <node>` closes it: left open, it holds that box's WM restart);
   - timed: the box to itself, for timings;
   - gate: a landing gate;
   - gpu, long, inspect and ci;
@@ -93,9 +97,11 @@ buckets ask for one, and the queue decides where and when.
     class's measured cores is charged the measure, and its run still gets only what it asked.
   - RAM is what it asked (`--ram-gb`) or its class's measured peak, cut to the box's
     budget.
-  - Each box keeps some room for live calls. A background request at the head of the box's
-    queue, or a landing gate, may borrow it while no call uses it; a call that comes runs
-    beside it at the higher CPU weight.
+  - On Linux, a live launch or call doesn't count background shared leases' cores, or the
+    box's measured CPU: it runs ahead of them at the higher CPU weight, and no room is kept
+    for calls. Its lease line says when that takes the box past its budget, and by how much.
+    RAM, GPUs, timed work, gates, owed legs and other interactive work still count. Other
+    systems keep room for one call of their largest idle session.
 - **Queue rules**:
   - Landing gates go first. A gate that waited a minute takes the cores its box has free
     (at least 4). From then on it drains the box: no newer work starts there unless it ends
@@ -109,7 +115,7 @@ buckets ask for one, and the queue decides where and when.
   - `lane first <name> on` (the user's call) puts a lane's leases ahead of every other
     lane's and the land queue's.
 - **Reading a wait reason** (`devhub queue`, `devhub why-queued <lease>`), for example:
-  `L<lease> test: 2nd in queue (<box>: budget cores <n>, in use <n>, kept for a live call <n>, asked <n> (+<k> nodes))`
+  `L<lease> test: 2nd in queue (<box>: budget cores <n>, in use <n>, asked <n> (+<k> nodes))`
   - budget cores / budget ram: the box's budget is spent. It starts when something ends.
     Ask fewer cores or a smaller cost if the job allows it;
   - node busy: the box measured busy past what devhub charged (work outside leases);
@@ -139,7 +145,9 @@ buckets ask for one, and the queue decides where and when.
   - `devhub live look <id>`: patched, a frame drawn, and a grab in
     `local/screencap/<lane>/` (a look, not a playtest);
   - `live wait <id> patched|verdict|settled|frame` waits for one of those;
-    `live act <id> <inspect cmd>` drives the app;
+    `live act <id> <inspect cmd>` drives the app. A call goes on through a restart of the master or its
+    box's hub when asking again does nothing twice (it reads, or only waited for room); any other call that is
+    cut says so and isn't sent twice, and the session still runs;
   - `live release <id>` ends it. Idle sessions end on their own (apps 10 min, tests 30 min);
     `live again <id>` restarts one as it was.
 - **Tests**: `devhub test <lane> <pkg> [--lib|--test T] --live [-- filter]` keeps one warm

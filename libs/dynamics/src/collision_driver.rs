@@ -3,7 +3,8 @@
 //! Translated from `src/engine/engine_collision_driver.c` and
 //! `src/engine/engine_collision_driver.h` of the engine named in
 //! CREDITS.md (Apache-2.0, Copyright 2021 DeepMind Technologies Limited);
-//! changed: translated to Rust; arena and stack storage use retained vectors.
+//! changed: translated to Rust; arena and stack storage use retained vectors; a sleeping body skips a
+//! mocap body that holds still as it skips the world.
 
 use crate::collision_box::{box_box, capsule_box, sphere_box};
 use crate::collision_continuous::{advance_geom_pair, geom_step_motion, geom_supported};
@@ -113,7 +114,8 @@ fn get_gap(m: &Model, g1: i32, g2: i32, ipair: i32) -> f64 {
 }
 
 fn reset_arena(d: &mut Data) {
-    d.contact.truncate(d.ncon as usize);
+    // Like the reference's arena the contact vector keeps its length: the contacts past ncon hold what an
+    // earlier step left, and every contact added is written whole before it is read.
     d.parena = d.ncon as usize * std::mem::size_of::<Contact>();
 }
 
@@ -222,13 +224,18 @@ fn filter_sphere(m: &Model, d: &Data, g1: i32, g2: i32, margin: f64) -> bool {
     }
     false
 }
-fn filter_body_pair(weldbody1: i32, weldparent1: i32, asleep1: bool, dofnum1: i32, weldbody2: i32, weldparent2: i32, asleep2: bool, dofnum2: i32, dsbl_filterparent: bool) -> bool {
+// static1/2: the weld is the world's or a mocap body's that holds still.
+fn filter_body_pair(weldbody1: i32, weldparent1: i32, asleep1: bool, static1: bool, dofnum1: i32, weldbody2: i32, weldparent2: i32, asleep2: bool, static2: bool, dofnum2: i32, dsbl_filterparent: bool) -> bool {
     if weldbody1 == weldbody2 { return true; }
     if dofnum1 == 0 && dofnum2 == 0 { return true; }
     if asleep1 && asleep2 { return true; }
-    if (asleep1 && weldbody2 == 0) || (asleep2 && weldbody1 == 0) { return true; }
+    if (asleep1 && static2) || (asleep2 && static1) { return true; }
     if (!dsbl_filterparent && weldbody1 != 0 && weldbody2 != 0) && (weldbody1 == weldparent2 || weldbody2 == weldparent1) { return true; }
     false
+}
+// The world's weld, or a weld that is static to sleep (a mocap body holding still).
+fn still_weld(m: &Model, d: &Data, weld: i32, sleep_filter: bool) -> bool {
+    weld == 0 || (sleep_filter && m.body_treeid[weld as usize] < 0 && d.body_awake[weld as usize] == S_STATIC)
 }
 fn can_collide(m: &Model, bf: usize) -> bool {
     if bf < m.nbody { m.body_contype[bf] != 0 || m.body_conaffinity[bf] != 0 }
@@ -639,7 +646,7 @@ fn broadphase(m: &Model, d: &mut Data, bfpair: &mut [Packed32], maxpair: usize) 
                 if !can_collide(m, b2) { continue; }
                 let weld2 = m.body_weldid[b2]; let parent_weld2 = m.body_weldid[m.body_parentid[weld2 as usize] as usize];
                 let asleep2 = sleep_filter && d.body_awake[b2] as i32 == S_ASLEEP; let dofnum2 = m.body_dofnum[weld2 as usize];
-                if filter_body_pair(weld1, parent_weld1, false, dofnum1, weld2, parent_weld2, asleep2, dofnum2, dsbl_filterparent) { continue; }
+                if filter_body_pair(weld1, parent_weld1, false, still_weld(m, d, weld1, sleep_filter), dofnum1, weld2, parent_weld2, asleep2, still_weld(m, d, weld2, sleep_filter), dofnum2, dsbl_filterparent) { continue; }
                 add_pair(Some(m), b1, b2, &mut npair, bfpair, maxpair);
             }
             for f in 0..nflex {
@@ -681,7 +688,7 @@ fn broadphase(m: &Model, d: &mut Data, bfpair: &mut [Packed32], maxpair: usize) 
                 let parent_weld1 = m.body_weldid[m.body_parentid[weld1 as usize] as usize]; let parent_weld2 = m.body_weldid[m.body_parentid[weld2 as usize] as usize];
                 let asleep1 = sleep_filter && d.body_awake[bf1] as i32 == S_ASLEEP; let asleep2 = sleep_filter && d.body_awake[bf2] as i32 == S_ASLEEP;
                 let dofnum1 = m.body_dofnum[weld1 as usize]; let dofnum2 = m.body_dofnum[weld2 as usize];
-                if filter_body_pair(weld1, parent_weld1, asleep1, dofnum1, weld2, parent_weld2, asleep2, dofnum2, dsbl_filterparent) { continue; }
+                if filter_body_pair(weld1, parent_weld1, asleep1, still_weld(m, d, weld1, sleep_filter), dofnum1, weld2, parent_weld2, asleep2, still_weld(m, d, weld2, sleep_filter), dofnum2, dsbl_filterparent) { continue; }
             } else if !has_awake_dofs(m, d, bf1.min(bf2), sleep_filter) && !has_awake_dofs(m, d, bf1.max(bf2), sleep_filter) { continue; }
             add_pair(Some(m), bf1, bf2, &mut npair, bfpair, maxpair);
         }
@@ -696,7 +703,7 @@ fn broadphase(m: &Model, d: &mut Data, bfpair: &mut [Packed32], maxpair: usize) 
     npair
 }
 
-fn set_contact(m: &Model, d: &Data, con: &mut Contact, condim: i32, includemargin: f64, solref: &[f64; NREF], solreffriction: &[f64; NREF], solimp: &[f64; NIMP], friction: &[f64; 5], adhesion: f64, speculative: i32) {
+fn set_contact(m: &Model, con: &mut Contact, condim: i32, includemargin: f64, solref: &[f64; NREF], solreffriction: &[f64; NREF], solimp: &[f64; NIMP], friction: &[f64; 5], adhesion: f64, speculative: i32) {
     con.dim = condim; con.includemargin = includemargin; con.adhesion = adhesion;
     assign_ref(m, &mut con.solref, solref); assign_ref(m, &mut con.solreffriction, solreffriction);
     assign_imp(m, &mut con.solimp, solimp); assign_friction(m, &mut con.friction, friction);
@@ -704,27 +711,32 @@ fn set_contact(m: &Model, d: &Data, con: &mut Contact, condim: i32, includemargi
     if adhesion != 0.0 && speculative == 0 && con.dist >= includemargin { con.dim = 1; }
     make_frame(&mut con.frame);
     inline::zero3(&mut con.surfacevel);
-    if m.flg_surfacevel != 0 {
-        let mut svel = [0.0; 3]; let mut sang = [0.0; 3]; let mut active = false;
-        for side in 0..2 {
-            let g = con.geom[side];
-            if g < 0 { continue; }
-            let sv = &m.geom_surfacevel[6*g as usize..];
-            if sv[0] == 0.0 && sv[1] == 0.0 && sv[2] == 0.0 && sv[3] == 0.0 && sv[4] == 0.0 && sv[5] == 0.0 { continue; }
-            active = true;
-            let sgn = if side != 0 { 1.0 } else { -1.0 };
-            let mut vw = [0.0; 3]; let mut ww = [0.0; 3];
-            geom_surface_velocity(m, d, g as usize, &con.pos, &mut vw, &mut ww);
-            inline::add_to_scl3(&mut svel, &vw, sgn); inline::add_to_scl3(&mut sang, &ww, sgn);
-        }
-        if active {
-            con.surfacevel[0] = u::dot3(at3(&con.frame, 3), &svel);
-            con.surfacevel[1] = u::dot3(at3(&con.frame, 6), &svel);
-            con.surfacevel[2] = u::dot3(at3(&con.frame, 0), &sang);
-        }
-    }
     con.efc_address = -1; con.mu = 0.0; u::zero(&mut con.h, 36);
     con.geom1 = con.geom[0]; con.geom2 = con.geom[1];
+}
+
+// The surface-velocity part of mj_setContact, for a contact already in d: it reads the geoms' motion from d,
+// so set_contact, which writes the contact in place, leaves it to this.
+fn set_contact_surfacevel(m: &Model, d: &mut Data, i: usize) {
+    let (geom, pos, frame) = (d.contact[i].geom, d.contact[i].pos, d.contact[i].frame);
+    let mut svel = [0.0; 3]; let mut sang = [0.0; 3]; let mut active = false;
+    for side in 0..2 {
+        let g = geom[side];
+        if g < 0 { continue; }
+        let sv = &m.geom_surfacevel[6*g as usize..];
+        if sv[0] == 0.0 && sv[1] == 0.0 && sv[2] == 0.0 && sv[3] == 0.0 && sv[4] == 0.0 && sv[5] == 0.0 { continue; }
+        active = true;
+        let sgn = if side != 0 { 1.0 } else { -1.0 };
+        let mut vw = [0.0; 3]; let mut ww = [0.0; 3];
+        geom_surface_velocity(m, d, g as usize, &pos, &mut vw, &mut ww);
+        inline::add_to_scl3(&mut svel, &vw, sgn); inline::add_to_scl3(&mut sang, &ww, sgn);
+    }
+    if active {
+        let con = &mut d.contact[i];
+        con.surfacevel[0] = u::dot3(at3(&frame, 3), &svel);
+        con.surfacevel[1] = u::dot3(at3(&frame, 6), &svel);
+        con.surfacevel[2] = u::dot3(at3(&frame, 0), &sang);
+    }
 }
 
 struct ContactArg<'a> {
@@ -785,7 +797,7 @@ fn add_pair_contacts(m: &Model, d: &mut Data, precon: &[PreContact], ncon: usize
     // The Vec arena grows instead of failing mj_arenaAllocByte. C has no
     // nconmax clamp here: max-contact bounds are per pair, not a global cap.
     let start = d.ncon as usize;
-    d.contact.resize(start+ncon, Contact::default());
+    if d.contact.len() < start+ncon { d.contact.resize(start+ncon, Contact::default()); }
     d.ncon += ncon as i32;
     d.parena = d.ncon as usize * std::mem::size_of::<Contact>();
     let mut condim = 0;
@@ -803,14 +815,13 @@ fn add_pair_contacts(m: &Model, d: &mut Data, precon: &[PreContact], ncon: usize
         if m.pair_solreffriction[NREF*ipair] != 0.0 || m.pair_solreffriction[NREF*ipair+1] != 0.0 { u::copy(&mut solreffriction, &m.pair_solreffriction[NREF*ipair..], NREF); }
     } else { contact_param(m, &mut condim, &mut solref, &mut solimp, &mut friction, &mut adhesion, g1, g2, -1, -1); }
     for i in 0..ncon {
-        // Copy out the contact so setContact can read d while writing it.
-        let mut con = d.contact[start+i];
+        let con = &mut d.contact[start+i];
         con.dist = precon[i].dist; inline::copy3(&mut con.pos, &precon[i].pos);
         inline::copy3(crate::inline::at3_mut(&mut con.frame, 0), &precon[i].normal);
         inline::copy3(crate::inline::at3_mut(&mut con.frame, 3), &precon[i].tangent);
         con.geom = [g1,g2]; con.flex = [-1,-1]; con.elem = [-1,-1]; con.vert = [-1,-1];
-        set_contact(m, d, &mut con, condim, margin, &solref, &solreffriction, &solimp, &friction, adhesion, spec);
-        d.contact[start+i] = con;
+        set_contact(m, con, condim, margin, &solref, &solreffriction, &solimp, &friction, adhesion, spec);
+        if m.flg_surfacevel != 0 { set_contact_surfacevel(m, d, start+i); }
     }
     true
 }

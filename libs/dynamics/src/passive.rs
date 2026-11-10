@@ -322,7 +322,7 @@ pub fn adhesion(m: &Model, d: &mut Data) -> i32 {
         let nv_mat = core_constraint::contact_jacobian(
             m,
             d,
-            &con,
+            i,
             1,
             &mut jacdif,
             None,

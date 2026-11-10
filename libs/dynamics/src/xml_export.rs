@@ -301,10 +301,117 @@ fn equality(x: &mut Xml, e: &EqualitySpec) {
     x.end();
 }
 
+fn tendon(x: &mut Xml, t: &TendonSpec) {
+    // mjCTendon::Type: fixed when the path is non-empty and has only joints.
+    let fixed = !t.path.is_empty() && t.path.iter().all(|w| w.r#type == WRAP_JOINT);
+    let tag = if fixed { "fixed" } else { "spatial" };
+    x.start(tag);
+    x.name("name", &t.name);
+    x.number("group", t.group);
+    x.text("limited", keyword(t.limited, &["false", "true", "auto"]));
+    x.text("actuatorfrclimited", keyword(t.actfrclimited, &["false", "true", "auto"]));
+    x.array("range", &t.range);
+    x.array("actuatorfrcrange", &t.actfrcrange);
+    x.array("solreflimit", &t.solref_limit);
+    x.array("solimplimit", &t.solimp_limit);
+    x.array("solreffriction", &t.solref_friction);
+    x.array("solimpfriction", &t.solimp_friction);
+    x.number("frictionloss", t.frictionloss);
+    x.array("springlength", &t.springlength);
+    x.number("springyield", t.springyield);
+    x.number("margin", t.margin);
+    x.array("stiffness", &t.stiffness);
+    x.array("damping", &t.damping);
+    x.number("armature", t.armature);
+    x.array("user", &t.userdata);
+    if fixed {
+        let d = TendonSpec::default();
+        assert!(t.width == d.width && t.rgba == d.rgba, "MJCF has no width or rgba on a fixed tendon");
+    } else {
+        x.number("width", t.width);
+        x.array("rgba", &t.rgba);
+    }
+    x.open();
+    for w in &t.path {
+        match w.r#type {
+            WRAP_SITE => { x.start("site"); x.name("site", &w.name); }
+            WRAP_SPHERE | WRAP_CYLINDER => {
+                x.start("geom");
+                x.name("geom", &w.name);
+                if w.sidesite.as_deref().is_some_and(|s| !s.is_empty()) { x.name("sidesite", &w.sidesite); }
+            }
+            WRAP_PULLEY => { x.start("pulley"); x.number("divisor", w.prm); }
+            WRAP_JOINT => { x.start("joint"); x.name("joint", &w.name); x.number("coef", w.prm); }
+            _ => panic!("wrap type outside MJCF"),
+        }
+        x.end();
+    }
+    x.close(tag);
+}
+
+// The "input" attribute: an so3 chart keyword, "none" (an empty signature), or the input tokens
+// in canonical order.
+fn input(gaintype: i32, ctrlspec: i32) -> String {
+    if gaintype == GAIN_SO3 { return keyword(ctrlspec, &["", "expmap", "quat"]).into(); }
+    if ctrlspec == INPUT_NONE { return "none".into(); }
+    let tokens = [(INPUT_POS, "pos"), (INPUT_VEL, "vel"), (INPUT_FF, "ff"), (INPUT_VOLTAGE, "voltage"), (INPUT_PRESSURE, "pressure")];
+    assert!(ctrlspec & !(INPUT_POS | INPUT_VEL | INPUT_FF | INPUT_VOLTAGE | INPUT_PRESSURE) == 0, "input bits outside MJCF");
+    tokens.iter().filter(|(bit, _)| ctrlspec & bit != 0).map(|(_, token)| *token).collect::<Vec<_>>().join(" ")
+}
+
+// Every actuator is written as <general>: the shortcut setters have already filled its rows.
+fn actuator(x: &mut Xml, a: &ActuatorSpec) {
+    assert!(a.nsample == 0 && a.interp == 0 && a.delay == 0.0, "a control history is outside the builder subset");
+    x.start("general");
+    x.name("name", &a.name);
+    let target = &a.target;
+    match a.trntype {
+        TRN_JOINT => x.name("joint", target),
+        TRN_JOINTINPARENT => x.name("jointinparent", target),
+        TRN_TENDON => x.name("tendon", target),
+        TRN_SLIDERCRANK => {
+            x.name("cranksite", target);
+            x.name("slidersite", &a.slidersite);
+            x.number("cranklength", a.cranklength);
+        }
+        TRN_SITE => {
+            x.name("site", target);
+            if a.refsite.as_deref().is_some_and(|s| !s.is_empty()) { x.name("refsite", &a.refsite); }
+        }
+        TRN_BODY => x.name("body", target),
+        _ => panic!("transmission type outside MJCF"),
+    }
+    x.number("group", a.group);
+    x.text("ctrllimited", keyword(a.ctrllimited, &["false", "true", "auto"]));
+    x.text("forcelimited", keyword(a.forcelimited, &["false", "true", "auto"]));
+    x.text("actlimited", keyword(a.actlimited, &["false", "true", "auto"]));
+    x.array("ctrlrange", &a.ctrlrange);
+    x.array("forcerange", &a.forcerange);
+    x.array("actrange", &a.actrange);
+    x.array("lengthrange", &a.lengthrange);
+    x.array("gear", &a.gear);
+    x.array("damping", &a.damping);
+    x.number("armature", a.armature);
+    x.number("actdim", a.actdim);
+    x.array("velrange", &a.velrange);
+    x.array("ffrange", &a.ffrange);
+    x.number("inheritrange", a.inheritrange);
+    x.text("dyntype", keyword(a.dyntype, &["none", "integrator", "filter", "filterexact", "muscle", "dcmotor", "pid", "user"]));
+    x.text("gaintype", keyword(a.gaintype, &["fixed", "affine", "muscle", "dcmotor", "so3", "pid", "user"]));
+    x.text("biastype", keyword(a.biastype, &["none", "affine", "muscle", "dcmotor", "so3", "user"]));
+    x.array("dynprm", &a.dynprm);
+    x.array("gainprm", &a.gainprm);
+    x.array("biasprm", &a.biasprm);
+    x.text("actearly", if a.actearly { "true" } else { "false" });
+    if a.ctrlspec != 0 { x.text("input", &input(a.gaintype, a.ctrlspec)); }
+    x.array("user", &a.userdata);
+    x.end();
+}
+
 /// Export all applicable attributes, including defaults, using shortest round-trip
 /// numeric spelling. Unset sentinels and mutually exclusive alternatives are omitted.
 /// Panics on invalid topology or values/combinations MJCF cannot represent.
-/// Names referenced by equalities/pairs/excludes must be supplied by the builder.
+/// Names referenced by equalities/pairs/excludes/tendons/actuators must be supplied by the builder.
 /// Traversal preserves sibling, joint, geom and site order and takes linear time.
 pub fn write_mjcf(spec: &ModelSpec) -> String {
     assert!(!spec.bodies.is_empty(), "body zero must be the world");
@@ -351,6 +458,8 @@ pub fn write_mjcf(spec: &ModelSpec) -> String {
     x.number("nuser_jnt", spec.nuser_jnt);
     x.number("nuser_geom", spec.nuser_geom);
     x.number("nuser_site", spec.nuser_site);
+    x.number("nuser_tendon", spec.nuser_tendon);
+    x.number("nuser_actuator", spec.nuser_actuator);
     x.end();
     if !spec.meshes.is_empty() {
         x.start("asset");
@@ -378,6 +487,12 @@ pub fn write_mjcf(spec: &ModelSpec) -> String {
         for s in &b.sites { site(&mut x, s); }
         stack.push((i, true));
         for &child in children[i].iter().rev() { stack.push((child, false)); }
+    }
+    if !spec.tendons.is_empty() {
+        x.start("tendon");
+        x.open();
+        for t in &spec.tendons { tendon(&mut x, t); }
+        x.close("tendon");
     }
     x.start("equality");
     x.open();
@@ -408,6 +523,12 @@ pub fn write_mjcf(spec: &ModelSpec) -> String {
         x.end();
     }
     x.close("contact");
+    if !spec.actuators.is_empty() {
+        x.start("actuator");
+        x.open();
+        for a in &spec.actuators { actuator(&mut x, a); }
+        x.close("actuator");
+    }
     x.close("mujoco");
     x.0
 }

@@ -253,6 +253,9 @@ pub fn chol_factor_symbolic(
     if let (Some(d), Some(v)) = (d, owned) {
         d.scratch.put_int(v);
     }
+    // chol_factor_numeric indexes its dense accumulator by these columns unchecked: each is a row below n
+    // by construction, checked here once per pattern (over the whole slice, so no stale entry escapes).
+    assert!(l_colind.iter().all(|&c| (c as u32 as usize) < n), "chol_factor_symbolic: a column of L is not below n");
     0
 }
 
@@ -428,11 +431,15 @@ fn chol_suffix_update<const NS: usize, const BATCH: usize>(
 }
 
 // The supernode's loops through the dense accumulator, each a small function of its own: inlined
-// into the supernode, these loops reloaded spilled pointers on every element.
+// into the supernode, these loops reloaded spilled pointers on every element. Those that index dense
+// by columns of L do so unchecked, as the C's loops do (a check per element was a fifth of the
+// factorization): the columns are below n (checked once per pattern by chol_factor_symbolic) and dense
+// is at least n long (checked by chol_factor_numeric).
 
 // Scatter the lower part of a row of H (its columns up to `row`) into dense.
 #[inline(never)]
 fn chol_scatter_row(dense: &mut [f64], cols: &[i32], vals: &[f64], row: usize) {
+    let dense = &mut dense[..=row];
     for (&c, &v) in cols.iter().zip(vals) {
         let c = c as usize;
         if c > row {
@@ -443,35 +450,47 @@ fn chol_scatter_row(dense: &mut [f64], cols: &[i32], vals: &[f64], row: usize) {
 }
 
 // Gather dense into a row of L at its columns (`add`: added to the row), clearing dense there.
+/// # Safety
+/// Every entry of `cols` is below `dense.len()`.
 #[inline(never)]
-fn chol_gather_row(row: &mut [f64], cols: &[i32], dense: &mut [f64], add: bool) {
+unsafe fn chol_gather_row(row: &mut [f64], cols: &[i32], dense: &mut [f64], add: bool) {
+    // SAFETY (each access): c < dense.len(), the caller's contract.
     if add {
         for (x, &c) in row.iter_mut().zip(cols) {
             let c = c as usize;
-            *x += dense[c];
-            dense[c] = 0.0;
+            unsafe {
+                *x += *dense.get_unchecked(c);
+                *dense.get_unchecked_mut(c) = 0.0;
+            }
         }
     } else {
         for (x, &c) in row.iter_mut().zip(cols) {
             let c = c as usize;
-            *x = dense[c];
-            dense[c] = 0.0;
+            unsafe {
+                *x = *dense.get_unchecked(c);
+                *dense.get_unchecked_mut(c) = 0.0;
+            }
         }
     }
 }
 
 // dense[cols[i]] -= scale * vals[i]: a non-suffix descendant's update of a later supernode row.
+/// # Safety
+/// Every entry of `cols` is below `dense.len()`.
 #[inline(never)]
-fn chol_scatter_sub(dense: &mut [f64], cols: &[i32], vals: &[f64], scale: f64) {
+unsafe fn chol_scatter_sub(dense: &mut [f64], cols: &[i32], vals: &[f64], scale: f64) {
     for (&c, &v) in cols.iter().zip(vals) {
-        dense[c as usize] -= scale * v;
+        // SAFETY: c < dense.len(), the caller's contract.
+        unsafe { *dense.get_unchecked_mut(c as usize) -= scale * v };
     }
 }
 
 // Non-suffix scatter of BATCH descendant rows into dense (BATCH is a constant, as in the C).
 // The rows a batch reads are sliced to num_cols once (the same operations, no check per element).
+/// # Safety
+/// Every entry of `colptr[..num_cols]` is below `dense.len()`.
 #[inline(never)]
-fn chol_scatter_update<const BATCH: usize>(
+unsafe fn chol_scatter_update<const BATCH: usize>(
     num_cols: usize,
     dense: &mut [f64],
     colptr: &[i32],
@@ -487,7 +506,8 @@ fn chol_scatter_update<const BATCH: usize>(
     let p3 = if BATCH >= 4 { &p3[..num_cols] } else { &p3[..0] };
     for i in 0..num_cols {
         let col = colptr[i] as usize;
-        let mut acc = dense[col] - s[0] * p0[i];
+        // SAFETY (this read and the write below): col < dense.len(), the caller's contract.
+        let mut acc = unsafe { *dense.get_unchecked(col) } - s[0] * p0[i];
         if BATCH >= 2 {
             acc -= s[1] * p1[i];
         }
@@ -497,7 +517,7 @@ fn chol_scatter_update<const BATCH: usize>(
         if BATCH >= 4 {
             acc -= s[3] * p3[i];
         }
-        dense[col] = acc;
+        unsafe { *dense.get_unchecked_mut(col) = acc };
     }
 }
 
@@ -507,8 +527,10 @@ fn chol_scatter_update<const BATCH: usize>(
 // c > r: L is split there, and the target rows (the C's Lptr0..Lptr2) and the descendant rows are
 // separate slices, as the C's restrict pointers are. `base` is where the descendant rows start.
 // Not inlined into chol_factor_numeric: each size is a function of its own (called once per supernode).
+/// # Safety
+/// Every entry of `l_colind` is below `dense.len()`.
 #[inline(never)]
-fn chol_factor_supernode<const NS: usize>(
+unsafe fn chol_factor_supernode<const NS: usize>(
     r: usize,
     mindiag: f64,
     l: &mut [f64],
@@ -568,7 +590,8 @@ fn chol_factor_supernode<const NS: usize>(
             used_dense = true;
         } else {
             chol_scatter_row(dense, h_cols, h_vals, row);
-            chol_gather_row(row_s, &l_colptr[..nnz_s], dense, false);
+            // SAFETY: columns of L, below dense.len() (this function's contract).
+            unsafe { chol_gather_row(row_s, &l_colptr[..nnz_s], dense, false) };
         }
     }
 
@@ -647,12 +670,15 @@ fn chol_factor_supernode<const NS: usize>(
             for b in 0..batch {
                 s[b] = desc[idx[b] - base];
             }
-            match batch {
-                1 => chol_scatter_update::<1>(num_cols, dense, colptr, q0, q1, q2, q3, &s),
-                2 => chol_scatter_update::<2>(num_cols, dense, colptr, q0, q1, q2, q3, &s),
-                3 => chol_scatter_update::<3>(num_cols, dense, colptr, q0, q1, q2, q3, &s),
-                4 => chol_scatter_update::<4>(num_cols, dense, colptr, q0, q1, q2, q3, &s),
-                _ => unreachable!(),
+            // SAFETY: colptr holds columns of L, below dense.len() (this function's contract).
+            unsafe {
+                match batch {
+                    1 => chol_scatter_update::<1>(num_cols, dense, colptr, q0, q1, q2, q3, &s),
+                    2 => chol_scatter_update::<2>(num_cols, dense, colptr, q0, q1, q2, q3, &s),
+                    3 => chol_scatter_update::<3>(num_cols, dense, colptr, q0, q1, q2, q3, &s),
+                    4 => chol_scatter_update::<4>(num_cols, dense, colptr, q0, q1, q2, q3, &s),
+                    _ => unreachable!(),
+                }
             }
         }
         k += batch;
@@ -670,12 +696,14 @@ fn chol_factor_supernode<const NS: usize>(
                     if l_colptr[l_nnz - num_cols] != l_colind[c0_adr] {
                         let scale = desc[l_cr0_idx - s - base];
                         let n = num_cols - s;
-                        chol_scatter_sub(dense, &l_colind[c0_adr..c0_adr + n], &desc[c0_adr - base..][..n], scale);
+                        // SAFETY: columns of L, below dense.len() (this function's contract).
+                        unsafe { chol_scatter_sub(dense, &l_colind[c0_adr..c0_adr + n], &desc[c0_adr - base..][..n], scale) };
                     }
                 }
             }
             let nnz_s = l_nnz - s;
-            chol_gather_row(&mut rows[s][..nnz_s], &l_colptr[..nnz_s], dense, true);
+            // SAFETY: columns of L, below dense.len() (this function's contract).
+            unsafe { chol_gather_row(&mut rows[s][..nnz_s], &l_colptr[..nnz_s], dense, true) };
         }
     }
 
@@ -735,7 +763,12 @@ fn chol_factor_supernode<const NS: usize>(
     rank_dec
 }
 
-pub fn chol_factor_numeric(
+/// Factor H into the pattern of L, the C's mju_cholFactorNumeric.
+/// # Safety
+/// Every entry of `l_colind` is below `n`: true of the pattern chol_factor_symbolic builds, which checks it
+/// once per pattern. The dense accumulator (`scratch`, at least n long, checked here) is indexed by those
+/// columns without checks.
+pub unsafe fn chol_factor_numeric(
     l: &mut [f64],
     n: usize,
     mindiag: f64,
@@ -753,6 +786,7 @@ pub fn chol_factor_numeric(
     scratch: &mut [f64],
 ) -> i32 {
     let mut rank = n as i32;
+    assert!(scratch.len() >= n, "chol_factor_numeric: the dense accumulator is shorter than n");
     let dense = scratch;
     zero(dense, n);
     let mut r = n as i32 - 1;
@@ -798,20 +832,29 @@ pub fn chol_factor_numeric(
             ns += 1;
         }
         if ns == 3 {
-            rank -= chol_factor_supernode::<3>(
-                row, mindiag, l, l_rownnz, l_rowadr, l_colind, lt_rownnz, lt_rowadr, lt_colind,
-                lt_map, h, h_rownnz, h_rowadr, h_colind, dense,
-            );
+            // SAFETY: l_colind is below n (this function's contract), and n <= dense.len() (checked above).
+            rank -= unsafe {
+                chol_factor_supernode::<3>(
+                    row, mindiag, l, l_rownnz, l_rowadr, l_colind, lt_rownnz, lt_rowadr, lt_colind,
+                    lt_map, h, h_rownnz, h_rowadr, h_colind, dense,
+                )
+            };
         } else if ns == 2 {
-            rank -= chol_factor_supernode::<2>(
-                row, mindiag, l, l_rownnz, l_rowadr, l_colind, lt_rownnz, lt_rowadr, lt_colind,
-                lt_map, h, h_rownnz, h_rowadr, h_colind, dense,
-            );
+            // SAFETY: l_colind is below n (this function's contract), and n <= dense.len() (checked above).
+            rank -= unsafe {
+                chol_factor_supernode::<2>(
+                    row, mindiag, l, l_rownnz, l_rowadr, l_colind, lt_rownnz, lt_rowadr, lt_colind,
+                    lt_map, h, h_rownnz, h_rowadr, h_colind, dense,
+                )
+            };
         } else {
-            rank -= chol_factor_supernode::<1>(
-                row, mindiag, l, l_rownnz, l_rowadr, l_colind, lt_rownnz, lt_rowadr, lt_colind,
-                lt_map, h, h_rownnz, h_rowadr, h_colind, dense,
-            );
+            // SAFETY: l_colind is below n (this function's contract), and n <= dense.len() (checked above).
+            rank -= unsafe {
+                chol_factor_supernode::<1>(
+                    row, mindiag, l, l_rownnz, l_rowadr, l_colind, lt_rownnz, lt_rowadr, lt_colind,
+                    lt_map, h, h_rownnz, h_rowadr, h_colind, dense,
+                )
+            };
         }
         r -= ns as i32;
     }
