@@ -133,20 +133,27 @@ pub fn wm_socket() -> Option<PathBuf> {
 }
 
 /// Asks the WM at `path` to open its dock app `id` (`makepad-wm launch <id>`): launch-or-focus,
-/// the registry's one launch definition. Ok once the WM took the request.
+/// the registry's one launch definition. `native`: its compiled build, whatever runs it otherwise.
+/// Ok once the WM took the request.
 #[cfg(unix)]
-pub fn request_launch(path: &std::path::Path, id: &str) -> Result<(), String> {
+pub fn request_launch(path: &std::path::Path, id: &str, native: bool) -> Result<(), String> {
     use std::io::{BufRead, Write};
     if !id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')) || id.is_empty() {
         return Err(format!("not an app id: {id:?}"));
     }
     let stream = std::os::unix::net::UnixStream::connect(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
-    (&stream).write_all(format!("makepad-wm launch {id}\n").as_bytes()).map_err(|e| e.to_string())?;
+    let how = if native { " native" } else { "" };
+    (&stream).write_all(format!("makepad-wm launch {id}{how}\n").as_bytes()).map_err(|e| e.to_string())?;
     let mut line = String::new();
     std::io::BufReader::new(&stream).read_line(&mut line).map_err(|e| format!("the WM did not answer: {e}"))?;
     match line.trim() {
         "makepad-wm launched" => Ok(()),
+        // the id is checked above: only a WM from before `native` reads the two words as a bad id
+        "makepad-wm refused not an app id" if native => {
+            let package = crate::find(id).map_or(id, |a| a.package);
+            Err(format!("this WM is older than native launches: it takes them after its next restart. Until then, a screen lease that takes the test environment off: `devhub run <lane> screen --node <node> --native <why> -- env -u MAKEPAD_HIDE_WINDOWS -u MAKEPAD_TEST_LANE -u SANDBOX_MUTE -u MAKEPAD_LAN cargo run --release -p {package}`, which queues while the person is at the box (`devhub node <node> back` lets it through)"))
+        }
         other => Err(other.strip_prefix("makepad-wm refused ").map_or_else(|| format!("unexpected answer {other:?}"), str::to_string)),
     }
 }
@@ -260,6 +267,34 @@ fn find_app_name(word: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_native_launch_asks_for_it_and_an_older_wm_says_why() {
+        use std::io::{BufRead, Write};
+        let dir = std::env::temp_dir().join(format!("makepad-request-launch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wm");
+        let socket = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let wm = std::thread::spawn(move || {
+            let mut heard = Vec::new();
+            for answer in ["makepad-wm launched", "makepad-wm launched", "makepad-wm refused not an app id"] {
+                let (stream, _) = socket.accept().unwrap();
+                let mut line = String::new();
+                std::io::BufReader::new(&stream).read_line(&mut line).unwrap();
+                heard.push(line);
+                (&stream).write_all(format!("{answer}\n").as_bytes()).unwrap();
+            }
+            heard
+        });
+        assert_eq!(request_launch(&path, "fab", false), Ok(()));
+        assert_eq!(request_launch(&path, "fab", true), Ok(()));
+        let older = request_launch(&path, "fab", true).unwrap_err();
+        assert!(older.contains("next restart") && older.contains("cargo run --release -p makepad-fab"), "{older}");
+        assert_eq!(wm.join().unwrap(), ["makepad-wm launch fab\n", "makepad-wm launch fab native\n", "makepad-wm launch fab native\n"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn an_app_conf_gives_lan_and_named_settings_only() {

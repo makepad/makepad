@@ -13710,33 +13710,40 @@ mod tests {
                 },
             );
         }
-        assert_eq!(map.tile_queue.staged_len(), staged.len());
+        for key in staged {
+            assert!(map.tile_queue.contains(&key), "{key:?} was pushed with no window free, yet is not staged");
+        }
 
         map.set_center(&mut cx, 0.0, 0.0);
         map.ensure_visible_tiles(&mut cx, rect);
-        let stale = requested_before
-            .into_iter()
-            .filter(|key| !map.visible_tiles.contains(key))
-            .collect::<Vec<_>>();
-        assert!(!stale.is_empty());
-        // The queue hands one window over whatever the pool is doing, and that
-        // much is out of reach; everything staged is pruned.
-        for key in staged {
-            assert!(!map.local_requested_tiles.contains_key(&key));
-            assert!(!map.tiles.contains_key(&key));
-        }
+        let visible = map.visible_tiles.iter().copied().collect::<HashSet<_>>();
+        assert!(requested_before.iter().any(|key| !visible.contains(key)), "the pan left no tile of the first view off-screen");
+        // Every tile either view, the test or the map asked for. The queue hands
+        // one window over whatever the pool is doing, and that much is out of
+        // reach; what it still holds is the new view's, whatever the pool's width.
+        let keys = requested_before
+            .iter()
+            .chain(&staged)
+            .chain(&visible)
+            .chain(map.local_requested_tiles.keys())
+            .chain(map.tiles.keys())
+            .copied()
+            .collect::<HashSet<_>>();
         let handed_over = map.tile_queue.in_flight();
         let window = map.bake_window(&cx, &pool);
         assert!(handed_over <= window, "a window of {window}, yet {handed_over} tile jobs were handed over");
-        let leaked = stale
-            .iter()
-            .filter(|key| map.local_requested_tiles.contains_key(key))
-            .count();
-        assert!(leaked <= handed_over, "{leaked} stale builds survived the pan");
-        for key in &stale {
-            if !map.local_requested_tiles.contains_key(key) {
-                assert!(!map.tiles.contains_key(key));
-            }
+        let mut off_screen_requested = 0;
+        for key in keys.iter().filter(|key| !visible.contains(key)) {
+            assert!(!map.tile_queue.contains(key), "{key:?} is off-screen after the pan, yet still staged");
+            let requested = map.local_requested_tiles.contains_key(key);
+            off_screen_requested += requested as usize;
+            let placeholder = map.tiles.get(key).is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal));
+            assert!(!placeholder || requested, "{key:?} is off-screen after the pan, its build pruned, yet its loading placeholder stays");
+        }
+        assert!(off_screen_requested <= handed_over, "{off_screen_requested} off-screen builds survived the pan; only the {handed_over} handed over are out of reach");
+        // the two far tiles were never handed over: gone entirely
+        for key in staged {
+            assert!(!map.local_requested_tiles.contains_key(&key) && !map.tiles.contains_key(&key), "{key:?} was staged off-screen and survived the pan");
         }
         assert!(map
             .local_requested_tiles

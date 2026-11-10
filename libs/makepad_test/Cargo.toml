@@ -9,6 +9,8 @@ readme = "README.md"
 [dependencies]
 makepad-a11y = { path = "../a11y", version = "0.1.0" }
 makepad-remote = { path = "../remote", version = "0.1.0" }
+# the idle rule reads the test process's own CPU and, under makepad run, the runtime's (clock)
+makepad-hal = { path = "../../platform/hal", version = "1.0.0" }
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
 makepad-studio-protocol = { path = "../../platform/studio", version = "0.1.0" }
 makepad-test-macros = { path = "./macros", version = "0.1.0" }

@@ -23,6 +23,9 @@ const LOOK: Duration = Duration::from_secs(1);
 /// A process using under this share of one core (1/n) for its own work (not serving remote
 /// peers), with nothing pending, is idle.
 const IDLE_SHARE: u32 = 20;
+/// Major page faults a second at which a look that ran nothing waited on memory (a swapping box):
+/// a few faults are a mapped file's first read, not swapping.
+const SWAP_FAULTS_PER_S: f64 = 50.0;
 const DRAG_STEPS: usize = 6;
 /// How long a held drag rests at its end before letting go, which keeps it from flinging.
 const DRAG_HOLD: Duration = Duration::from_millis(300);
@@ -627,6 +630,26 @@ impl TestApp {
         self.inner.borrow().focus_window
     }
 
+    /// `ask` again while `pending` reads its error as "not yet" (each answer takes the app's
+    /// look), until it answers or the app has spent the wait's [`Budget`], started at the first
+    /// "not yet": the verdict says what did not come and what the app spent.
+    fn wait_looks<T>(&self, budget: &mut Option<Budget>, what: &str, mut ask: impl FnMut() -> TestResult<T>, pending: impl Fn(&str) -> bool) -> TestResult<T> {
+        loop {
+            match ask() {
+                Err(err) if pending(err.message()) => {
+                    let budget = match budget {
+                        Some(budget) => budget,
+                        None => budget.insert(Budget::start(self, self.action_timeout())?),
+                    };
+                    if let Some(spent) = budget.spent(self)? {
+                        return Err(TestError::new(format!("app remote {what}: {spent}")));
+                    }
+                }
+                done => return done,
+            }
+        }
+    }
+
     fn action_timeout(&self) -> Duration {
         self.inner.borrow().config.action_timeout
     }
@@ -911,7 +934,7 @@ impl Locator {
     }
 
     pub fn try_type_text(&self, text: impl AsRef<str>) -> TestResult<()> {
-        self.command("ui type", &[("t",text.as_ref())])
+        self.type_in(&[("t",text.as_ref())])
     }
 
     pub fn clear(self) -> Self {
@@ -935,7 +958,16 @@ impl Locator {
     pub fn try_fill(&self, text: impl AsRef<str>) -> TestResult<()> {
         let node = self.resolve_unique_readable()?;
         let len = node.text.as_ref().map_or(node.value.len(), |t| t.content.len());
-        self.command("ui type", &[("t",text.as_ref()),("from","0"),("to",&len.to_string())])
+        self.type_in(&[("t",text.as_ref()),("from","0"),("to",&len.to_string())])
+    }
+
+    /// `ui type`'s steps, each an act waited for under a wait's [`Budget`]: the focus and its
+    /// frame, then the text: through the node's replace_text, or typed into the focus as text
+    /// input when it has none (the code editor).
+    fn type_in(&self, extra: &[(&str,&str)]) -> TestResult<()> {
+        self.act("focus", &[])?;
+        let node = self.resolve_unique_readable()?;
+        self.act(if node.actions.contains(makepad_a11y::Actions::REPLACE_TEXT) { "replace_text" } else { "type" }, extra)
     }
 
     pub fn press_key(self, key_code: KeyCode) -> Self {
@@ -1074,26 +1106,44 @@ impl Locator {
         Ok(self.app.query_widgets(&self.selector, true)?.len())
     }
 
-    fn command(&self, command: &str, extra: &[(&str,&str)]) -> TestResult<()> {
+    /// An action, then the present it brings, each waited for a look at a time under a wait's
+    /// [`Budget`]: an app busy taking it (its main thread compiling the code the action runs for
+    /// the first time, say) is no app that sits idle.
+    fn act(&self, action: &str, extra: &[(&str,&str)]) -> TestResult<()> {
         self.app.ensure_running()?;
+        let command = format!("ui act {action}");
         let q = self.selector.as_query();
-        let mut args = vec![("q",q.as_str()),("json","1"),("wait","1")];
+        let look = LOOK.as_millis().to_string();
+        let mut args = vec![("q",q.as_str()),("json","1"),("timeout_ms",look.as_str())];
         if let Some(w) = self.selector.window_arg() { args.push(("w",w)); }
         args.extend_from_slice(extra);
-        if let Err(refused) = self.app.client().get_json(command, &args) {
-            // The app's refusal ("no such node", "ambiguous") names no selector: when the
-            // selector does not pick one visible widget, say which selector and what it matched.
-            self.resolve_unique_visible()?;
-            return Err(refused);
+        // the node's window, read before the act: a press that removes its own button (a
+        // dialog's Cancel) leaves no node to look up after it, and its window's frame is what comes
+        let window = match self.selector.window_arg() {
+            Some(w) => w.to_string(),
+            None => self.resolve_unique_visible()?.window_arg(),
+        };
+        let mut budget = None;
+        if let Err(refused) = self.app.client().get_json(&command, &args) {
+            let Some(req) = pending_action(refused.message()) else {
+                // The app's refusal ("no such node", "ambiguous") names no selector: when the
+                // selector does not pick one visible widget, say which selector and what it matched.
+                self.resolve_unique_visible()?;
+                return Err(refused);
+            };
+            let req = req.to_string();
+            let done = [("req",req.as_str()),("json","1"),("timeout_ms",look.as_str())];
+            self.app.wait_looks(&mut budget, &format!("{command}: the app did not take the action"),
+                || self.app.client().get_json("ui done", &done), |e| pending_action(e).is_some())?;
         }
+        let present = [("w",window.as_str()),("json","1"),("timeout_ms",look.as_str())];
+        self.app.wait_looks(&mut budget, &format!("{command}: the action's frame did not present"),
+            || self.app.client().get_json("ui present", &present), |e| e.contains("presentation timed out"))?;
         if let Some(node) = self.app.query_widgets(&self.selector, false)?.first() {
             self.app.inner.borrow_mut().focus_window = Some(node.window_index());
         }
         self.app.pace_after_action();
         Ok(())
-    }
-    fn act(&self, action: &str, extra: &[(&str,&str)]) -> TestResult<()> {
-        self.command(&format!("ui act {action}"), extra)
     }
     /// The app's `ui wait`, a look at a time: it ends on what it waits for, or once the app
     /// has spent the wait's [`Budget`].
@@ -1249,14 +1299,29 @@ pub fn run_current_package_test<F, R>(
 
 /// What a wait may spend before it fails: `limit` of the app's main thread's CPU (`action_timeout`,
 /// or a long wait's own), or `action_timeout` with the app idle. A loaded box spends neither for
-/// the app: a thread that waits for a core, or for the JIT to compile code it runs for the first
-/// time, runs no CPU of its own and is not idle (the JIT's compiles are its process's CPU). An
-/// app with nothing running (its process under 1/[`IDLE_SHARE`] of a core, not counting what
-/// its threads serving remote peers run: the wait's own asks cost the app CPU) and nothing
-/// pending (`settled`) has nothing left that would bring what the wait waits for:
-/// `action_timeout` of that ends the wait. What the UI thread runs answering an ask (a tool call,
-/// a grab) no serving thread counts, so the share is the app's while the wait left it alone:
-/// what it ran outside the wait's closure, over the time outside it.
+/// the app: a thread that waits for a core runs no CPU of its own, and one that waits for the JIT
+/// to compile code it runs for the first time has work pending (`waits_on_jit`): neither is idle.
+/// An app with nothing running (its own threads under 1/[`IDLE_SHARE`] of a core: not what its
+/// threads serving remote peers run, the wait's own asks cost the app CPU, nor what the JIT's own
+/// threads run beside it, its background checks and tier-ups, which bring the app nothing) and
+/// nothing pending (`settled`, no install it waits on) has nothing left that would bring what the
+/// wait waits for: `action_timeout` of that ends the wait. (A cold JIT's background type check ran
+/// a whole core for 26 s beside an app that sat idle: the wait counted it as the app's, 11-09.) What
+/// the UI thread runs answering an ask (this wait's own looks included) the app counts as served;
+/// what the closure's asks set off beyond their answers (the frame an input brings) is left out with
+/// the closure's time, so the share is the app's while the wait left it alone: what it ran outside
+/// the wait's closure, over the time outside it. Two stalls run no CPU either and are no idle app,
+/// and the verdict names them: a look whose process took major page faults at a swapping rate
+/// ([`SWAP_FAULTS_PER_S`]) waited on memory (a thread that waits for its page runs no CPU; one fault
+/// in 10 s read as "waiting on memory", 11-10), and one with only the app pool's
+/// queued jobs pending, none of them taken since the last look, is a starved pool (its jobs wait
+/// for a CPU permit the process's budget does not grant). Such a stretch ends the wait as soon.
+/// (A test unit at 29.8 GB beside another suite on a swapping box read as "sat idle", with 7,324
+/// Background jobs queued, 11-10.) And a test may run what the app waits on in its own process (an
+/// AI hub on loopback with its GPU device): what the test process runs beside the thread driving
+/// the test ([`beside_cpu`]) is progress the app waits for, and while it runs at the idle share the
+/// app is not idle. (A grown part's refine on a cold cache: the app at 0%, the test's hub compiling
+/// its GPU programs, read as "sat idle 10.2 s", 11-10.)
 struct Budget {
     /// The main thread's CPU the wait may spend.
     limit: Duration,
@@ -1268,6 +1333,17 @@ struct Budget {
     last: (Instant, Duration),
     /// How long the app has been idle, to the last look.
     idle: Duration,
+    /// The process's major page faults at the last look, and of the idle stretch, how long its
+    /// looks took some and how many.
+    faults: u64,
+    memory: (Duration, u64),
+    /// The jobs the app pool's workers had taken at the last look, and of the idle stretch, how
+    /// long its looks found queued jobs and none taken, and the jobs queued per class at the last.
+    taken: u64,
+    starved: (Duration, [u64; 3]),
+    /// What the test process had run beside its driving thread at the last look ([`beside_cpu`]),
+    /// and how long, over the whole wait, that alone kept the app from counting as idle.
+    beside: (Duration, Duration),
     /// The time the wait spent asking the app (its closure ran), and the app's own CPU in it,
     /// since the last look.
     asked: (Duration, Duration),
@@ -1276,7 +1352,7 @@ struct Budget {
 impl Budget {
     fn start(app: &TestApp, limit: Duration) -> TestResult<Budget> {
         let cpu = app.client().cpu()?;
-        Ok(Budget { limit, idle_limit: app.action_timeout(), main: cpu.main, last: (Instant::now(), cpu.own), idle: Duration::ZERO, asked: (Duration::ZERO, Duration::ZERO) })
+        Ok(Budget { limit, idle_limit: app.action_timeout(), main: cpu.main, last: (Instant::now(), cpu.own), idle: Duration::ZERO, faults: cpu.faults, memory: (Duration::ZERO, 0), taken: 0, starved: (Duration::ZERO, [0; 3]), beside: (beside_cpu(), Duration::ZERO), asked: (Duration::ZERO, Duration::ZERO) })
     }
 
     /// The wait asked the app from `since` (its closure ran): its CPU before and after.
@@ -1302,18 +1378,90 @@ impl Budget {
         // what the app ran left alone, over the time it was
         let (asking, asked) = std::mem::take(&mut self.asked);
         let ran = cpu.own.saturating_sub(own).saturating_sub(asked);
-        let idle = ran * IDLE_SHARE < over.saturating_sub(asking) && app.client().settled()?;
-        self.idle = if idle { self.idle + over } else { Duration::ZERO };
+        let quiet = ran * IDLE_SHARE < over.saturating_sub(asking);
+        // what the test process ran meanwhile beside this thread: a service the app waits on
+        let beside = beside_cpu();
+        let busy_beside = beside.saturating_sub(self.beside.0) * IDLE_SHARE >= over;
+        self.beside.0 = beside;
+        if quiet && busy_beside {
+            self.beside.1 += over;
+        }
+        let settled = if quiet && !busy_beside { Some(app.client().settled()?) } else { None };
+        let (queued, running, taken) = settled.as_ref().and_then(|s| s.pool).unwrap_or(([0; 3], 0, self.taken));
+        // the app ran nothing, with nothing pending (or only pool jobs, none taken since the last
+        // look), and nothing ran beside the test in its own process
+        let stalled = settled.as_ref().is_some_and(|s| s.settled || (s.only_pool && taken == self.taken)) && !app.client().waits_on_jit()?;
+        let faults = cpu.faults.saturating_sub(self.faults);
+        if stalled {
+            self.idle += over;
+            if faults as f64 >= SWAP_FAULTS_PER_S * over.as_secs_f64() {
+                self.memory = (self.memory.0 + over, self.memory.1 + faults);
+            }
+            if queued.iter().any(|&n| n > 0) {
+                self.starved = (self.starved.0 + over, queued);
+            }
+        } else {
+            (self.idle, self.memory, self.starved) = (Duration::ZERO, (Duration::ZERO, 0), (Duration::ZERO, [0; 3]));
+        }
         self.last = (now, cpu.own);
-        Ok((self.idle >= self.idle_limit).then(|| {
-            format!(
-                "it sat idle for {:.1} s (budget {:.0} s), nothing running and nothing pending (its main thread ran {:.1} s of CPU)",
-                self.idle.as_secs_f64(),
-                self.idle_limit.as_secs_f64(),
-                main.as_secs_f64()
-            )
+        self.faults = cpu.faults;
+        self.taken = taken;
+        if self.idle < self.idle_limit {
+            return Ok(None);
+        }
+        let (idle, budget, main) = (self.idle.as_secs_f64(), self.idle_limit.as_secs_f64(), main.as_secs_f64());
+        let beside = match self.beside.1 {
+            Duration::ZERO => String::new(),
+            busy => format!("; before that the test process's own threads (a service the test runs in it, as a hub) were busy for {:.1} s, which the wait counted as progress", busy.as_secs_f64()),
+        };
+        Ok(Some(match (self.memory, self.starved) {
+            ((waited, n), _) if n > 0 => format!(
+                "it was waiting on memory (swapping) for {:.1} of the {idle:.1} s it ran nothing (budget {budget:.0} s): {n} major page faults, {:.0} a second while it waited{} (its main thread ran {main:.1} s of CPU){beside}",
+                waited.as_secs_f64(),
+                n as f64 / waited.as_secs_f64(),
+                memory_pressure().map_or(String::new(), |p| format!("; the box's memory pressure: tasks waited on memory {p:.1}% of the last 10 s"))
+            ),
+            (_, (starved, queued)) if starved > Duration::ZERO => {
+                let classes: Vec<String> = ["Interactive", "Visible", "Background"].iter().zip(queued).filter(|(_, n)| *n > 0).map(|(class, n)| format!("{n} jobs queued at {class}")).collect();
+                format!(
+                    "its pool was starved: {}, none granted for {:.1} s of the {idle:.1} s it ran nothing (budget {budget:.0} s; its main thread ran {main:.1} s of CPU){beside}",
+                    classes.join(", "),
+                    starved.as_secs_f64()
+                )
+            }
+            _ => format!(
+                "it sat idle for {idle:.1} s (budget {budget:.0} s), nothing running and nothing pending{} (its main thread ran {main:.1} s of CPU){beside}",
+                if running > 0 { format!(" ({running} pool jobs on its workers ran no CPU)") } else { String::new() }
+            ),
         }))
     }
+}
+
+/// The box's memory pressure where the OS says it (Linux PSI): the share of the last 10 s in which
+/// some task waited on memory, in percent.
+fn memory_pressure() -> Option<f64> {
+    let text = fs::read_to_string("/proc/pressure/memory").ok()?;
+    let some = text.lines().find(|line| line.starts_with("some "))?;
+    some.split_whitespace().find_map(|field| field.strip_prefix("avg10="))?.parse().ok()
+}
+
+/// The CPU the test process has run beside the calling thread (the one driving the test): what a
+/// service the test runs in its own process runs (an AI hub on loopback the app asks, its GPU
+/// device's thread compiling its programs), less what the runtime's own threads ran (under makepad
+/// run, the JIT's checks and tier-ups of the test), what serving remote peers cost it, and what its
+/// connections to the app ran carrying the test's asks. The process's other tests wait for the test
+/// lock meanwhile, running nothing (a suite that runs them side by side counts their drivers too:
+/// an idle app fails its wait once they quiet).
+/// The number of an action the app has not taken yet, from its `action N timed out` answer.
+fn pending_action(message: &str) -> Option<u64> {
+    let at = message.find(" timed out")?;
+    message[..at].rsplit_once("action ")?.1.parse().ok()
+}
+
+fn beside_cpu() -> Duration {
+    use makepad_hal::clock;
+    let others = clock::process_cpu_ns().saturating_sub(clock::thread_cpu_ns());
+    Duration::from_nanos(others.saturating_sub(makepad_remote::runtime_cpu_ns()).saturating_sub(makepad_remote::served_cpu_ns()).saturating_sub(makepad_remote::asked_cpu_ns()))
 }
 
 /// A failed test of a JIT app names the app's state at the failure (first, before the

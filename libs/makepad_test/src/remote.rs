@@ -132,8 +132,23 @@ impl std::fmt::Debug for RemoteClient {
 pub(crate) struct AppCpu {
     pub(crate) main: Duration,
     /// The whole process's but what its threads serving remote peers ran (answering a test's
-    /// snapshots and log reads among it): the app's own work.
+    /// snapshots and log reads among it) and what the runtime's own threads ran (under the JIT,
+    /// its background checks, tier-ups and monitor): the app's own work.
     pub(crate) own: Duration,
+    /// The process's major page faults so far: pages it waited on from disk (swap, or a mapped
+    /// file's), what an app that runs no CPU while it waits on memory shows.
+    pub(crate) faults: u64,
+}
+
+/// Why the app would still change if time moved on (`settled`), as the idle rule reads it.
+pub(crate) struct AppSettled {
+    /// Nothing is pending.
+    pub(crate) settled: bool,
+    /// Only the app pool's queued jobs are (a starved pool runs nothing, and its app no CPU).
+    pub(crate) only_pool: bool,
+    /// The app pool's jobs queued per class (interactive, visible, background), on its workers,
+    /// and taken by its workers so far; None before the pool started.
+    pub(crate) pool: Option<([u64; 3], u64, u64)>,
 }
 
 impl RemoteClient {
@@ -179,7 +194,8 @@ impl RemoteClient {
     }
 
     /// The app's CPU so far (`uicounts`): its main thread's, and its whole process's but what
-    /// serving remote peers ran.
+    /// serving remote peers ran (its serving threads, and its UI thread answering their asks) and
+    /// what the runtime's own threads ran; and its process's major page faults.
     pub(crate) fn cpu(&self) -> TestResult<AppCpu> {
         let json = self.get_json("uicounts", &[])?;
         let ns = |key: &str| {
@@ -187,17 +203,39 @@ impl RemoteClient {
                 .map(|ns| Duration::from_nanos(ns as u64))
                 .ok_or_else(|| TestError::new(format!("app remote uicounts: no {key}: {json:?}")))
         };
-        Ok(AppCpu { main: ns("cpu_ns")?, own: ns("process_cpu_ns")?.saturating_sub(ns("served_cpu_ns")?) })
+        let faults = json_f64(json.key("faults")).ok_or_else(|| TestError::new(format!("app remote uicounts: no faults: {json:?}")))? as u64;
+        Ok(AppCpu { main: ns("cpu_ns")?, own: ns("process_cpu_ns")?.saturating_sub(ns("served_cpu_ns")?).saturating_sub(ns("runtime_cpu_ns")?), faults })
     }
 
-    /// Nothing would change the app if time moved on (`settled`): no frame, redraw or load is
-    /// pending.
-    pub(crate) fn settled(&self) -> TestResult<bool> {
-        let json = self.get_json("settled", &[])?;
-        match json.key("settled") {
-            Some(JsonValue::Bool(settled)) => Ok(*settled),
-            _ => Err(TestError::new(format!("app remote settled: no answer: {json:?}"))),
+    /// Under the JIT, the program waits for code it is about to run (`jit_foreground`): an
+    /// install the app waits on, work pending for it. Natively never.
+    pub(crate) fn waits_on_jit(&self) -> TestResult<bool> {
+        if !self.jit {
+            return Ok(false);
         }
+        self.jit_foreground()
+    }
+
+    /// Whether anything would change the app if time moved on (`settled`): a frame, redraw,
+    /// load or queued pool job pending.
+    pub(crate) fn settled(&self) -> TestResult<AppSettled> {
+        let json = self.get_json("settled", &[])?;
+        let bad = || TestError::new(format!("app remote settled: no answer: {json:?}"));
+        let settled = match json.key("settled") {
+            Some(JsonValue::Bool(settled)) => *settled,
+            _ => return Err(bad()),
+        };
+        let reasons = json_array(json.key("reasons")).ok_or_else(bad)?;
+        let only_pool = !reasons.is_empty() && reasons.iter().all(|r| r.string().is_some_and(|r| r == "pool"));
+        let pool = match json.key("pool") {
+            None => None,
+            Some(pool) => {
+                let n = |v: Option<&JsonValue>| json_f64(v).map(|n| n as u64).ok_or_else(bad);
+                let queued = json_array(pool.key("queued")).filter(|q| q.len() == 3).ok_or_else(bad)?;
+                Some(([n(queued.first())?, n(queued.get(1))?, n(queued.get(2))?], n(pool.key("running"))?, n(pool.key("taken"))?))
+            }
+        };
+        Ok(AppSettled { settled, only_pool, pool })
     }
 
     /// The socket path this client dials, for diagnostics.
