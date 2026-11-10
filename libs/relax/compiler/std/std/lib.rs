@@ -109,6 +109,8 @@ pub mod collections {
     pub use core::collections::LinkedList;
     pub use core::collections::TryReserveError;
     pub use core::collections::VecDeque;
+    /// std's deprecated, doc-hidden re-export ("moved to `std::ops::Bound`"): redb imports it
+    pub use core::ops::Bound;
 }
 
 pub mod num {
