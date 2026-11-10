@@ -1439,7 +1439,7 @@ impl Widget for HtmlLink {
                     if fe.is_primary_hit() {
                         // A touch waits until it's a tap, so a drag that scrolls from here keeps the keyboard up.
                         if self.grab_key_focus && !fe.device.is_touch() {
-                            cx.set_key_focus(self.area());
+                            cx.set_key_focus_from_user(self.area());
                         }
                         self.animator_play(cx, ids!(hover.pressed));
                     } else if fe.mouse_button().is_some_and(|mb| mb.is_secondary()) {
@@ -1476,7 +1476,7 @@ impl Widget for HtmlLink {
 
                     if fu.is_over && fu.is_primary_hit() && fu.was_tap() {
                         if self.grab_key_focus && fu.device.is_touch() {
-                            cx.set_key_focus(self.area());
+                            cx.set_key_focus_from_user(self.area());
                         }
                         self.emit_url_action(cx, HtmlLinkAction::Clicked {
                             url: self.url.clone(),

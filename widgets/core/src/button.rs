@@ -1599,7 +1599,7 @@ impl Widget for Button {
         }
         let uid = self.widget_uid();
         if self.grab_key_focus && self.hide_keyboard_on_tap {
-            cx.set_key_focus(self.draw_bg.area());
+            cx.set_key_focus_from_user(self.draw_bg.area());
         }
         cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_press.clone(), &[]);
         if self.trigger_on_press {
@@ -1868,7 +1868,7 @@ impl Widget for Button {
             Hit::FingerDown(fe) if takes_input && fe.is_primary_hit() => {
                 // A touch waits until it clicks us, so a drag that scrolls from here keeps the keyboard up.
                 if self.grab_key_focus && !fe.device.is_touch() {
-                    cx.set_key_focus(self.draw_bg.area());
+                    cx.set_key_focus_from_user(self.draw_bg.area());
                 }
                 cx.widget_action_with_data(
                     &self.action_data,
@@ -1912,7 +1912,7 @@ impl Widget for Button {
                     };
                 if was_clicked {
                     if self.grab_key_focus && self.hide_keyboard_on_tap && fe.device.is_touch() {
-                        cx.set_key_focus(self.draw_bg.area());
+                        cx.set_key_focus_from_user(self.draw_bg.area());
                     }
                     crate::makepad_platform::makepad_error_log::flight_mark!("ui.click", uid.0, 0, "button `{}`", self.text.as_ref());
                     cx.widget_action_with_data(

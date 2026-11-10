@@ -3530,7 +3530,7 @@ impl Widget for TextFlowLink {
                 Hit::FingerDown(fe) if fe.is_primary_hit() => {
                     // A touch waits until it's a tap, so a drag that scrolls from here keeps the keyboard up.
                     if self.grab_key_focus && !fe.device.is_touch() {
-                        cx.set_key_focus(self.area());
+                        cx.set_key_focus_from_user(self.area());
                     }
                     self.animator_play(cx, ids!(hover.down));
                     if self.click_on_down {
@@ -3552,7 +3552,7 @@ impl Widget for TextFlowLink {
                 }
                 Hit::FingerUp(fe) if fe.is_primary_hit() => {
                     if self.grab_key_focus && fe.device.is_touch() && fe.is_over && fe.was_tap() {
-                        cx.set_key_focus(self.area());
+                        cx.set_key_focus_from_user(self.area());
                     }
                     if fe.is_over {
                         if !self.click_on_down {

@@ -452,12 +452,12 @@ impl Widget for PlayerControls {
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 // A touch waits until it's a tap, so a drag that scrolls from here keeps the keyboard up.
                 if !fe.device.is_touch() {
-                    cx.set_key_focus(area);
+                    cx.set_key_focus_from_user(area);
                 }
             }
             Hit::FingerUp(fe) if fe.is_primary_hit() && fe.was_tap() => {
                 if fe.device.is_touch() && fe.is_over {
-                    cx.set_key_focus(area);
+                    cx.set_key_focus_from_user(area);
                 }
                 self.on_tap(cx, fe.abs, fe.time, fe.rect, fe.device.is_mouse());
             }
