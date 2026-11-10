@@ -26,3 +26,22 @@ fn block_comment_around_operand() {
     unsafe { core::arch::asm!("/* {0} */ add {0}, {0}, #1", inout(reg) x); }
     assert_eq!(x, 6);
 }
+
+// zeroize's template is `# {}` on every target it covers, aarch64 included: a `#` that starts a
+// statement is a line comment there too (LLVM's AsmLexer), while inside a statement it stays an
+// immediate's prefix.
+#[test]
+fn hash_comment_on_every_target() {
+    let v = [1u8, 2, 3];
+    unsafe {
+        core::arch::asm!("# {}", in(reg) v.as_ptr(), options(readonly, preserves_flags, nostack));
+        core::arch::asm!("# {} and {}\n nop", in(reg) v.as_ptr(), in(reg) 7usize, options(readonly, preserves_flags, nostack));
+    }
+    assert_eq!(v.iter().sum::<u8>(), 6);
+    #[cfg(target_arch = "aarch64")]
+    {
+        let mut x = 5u64;
+        unsafe { core::arch::asm!("# add one", "add {0}, {0}, #1", inout(reg) x); }
+        assert_eq!(x, 6);
+    }
+}

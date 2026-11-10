@@ -352,7 +352,9 @@ impl Lexer<'_> {
                     i += 2;
                     continue;
                 }
-                if text[i..].starts_with(comment) || text[i..].starts_with(b"//") {
+                // (LLVM AsmLexer: a `#` that starts a statement is a line comment on every target,
+                // the C preprocessor's line markers; elsewhere on Arm it is an immediate's prefix)
+                if text[i..].starts_with(comment) || text[i..].starts_with(b"//") || c == b'#' && cur.is_empty() {
                     in_line_comment = true;
                     continue;
                 }
