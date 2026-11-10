@@ -2,7 +2,7 @@ use {
     crate::makepad_draw::event::{DigitId, FingerLongPressEvent},
     crate::{
         animator::*,
-        held_events::HeldEvents,
+        held_events::{self, HeldEvents},
         gauss_view::{arm_gauss_capture, bind_gauss_snapshot, request_window_gauss},
         makepad_derive_widget::*,
         makepad_draw::*,
@@ -153,9 +153,9 @@ pub struct View {
     #[live(false)]
     block_signal_event: bool,
     /// While hidden (`visible: false`) this view's subtree still gets frame
-    /// requests and actions as they happen (see `held_events`); without it
-    /// frame requests wait until it is shown again and actions are skipped.
-    /// Signals and timers reach a hidden subtree either way.
+    /// requests as they happen (see `held_events`); without it they wait
+    /// until it is shown again. Signals, timers and actions reach a hidden
+    /// subtree either way.
     #[live(false)]
     pub background_events: bool,
     #[rust]
@@ -1705,6 +1705,9 @@ impl Widget for View {
             for held in held.take() {
                 self.handle_event(cx, &held, scope);
             }
+        }
+        if !self.visible && matches!(event, Event::Actions(_)) && !held_events::in_hidden_subtree(cx) {
+            return held_events::handle_in_hidden_subtree(cx, |cx| self.handle_event(cx, event, scope));
         }
 
         let uid = self.widget_uid();
