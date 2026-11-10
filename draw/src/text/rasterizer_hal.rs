@@ -133,6 +133,8 @@ pub struct GlyphClient {
     out_pending: Vec<(u32, u32, u32, u32)>,
     raster_generation: u32,
     slug_generation: u32,
+    /// The raster atlas's height: when it shrinks, the slots past it are gone, or all of them in the background.
+    raster_height: u32,
     /// bumped when entries are taken away (eviction, a new atlas): runs built on them are stale
     epoch: u64,
     /// Glyphs looked up since they were last handed to a draw list (`take_uses`): the keys
@@ -460,7 +462,7 @@ impl GlyphClient {
         }
     }
 
-    pub fn on_atlas(&mut self, kind: u32, generation: u32) {
+    pub fn on_atlas(&mut self, kind: u32, generation: u32, height: u32) {
         let old = if kind == wire::atlas::SLUG { &mut self.slug_generation } else { &mut self.raster_generation };
         let changed = *old != 0 && *old != generation;
         *old = generation;
@@ -473,6 +475,13 @@ impl GlyphClient {
                 self.prewarm_sdf_sizes.clear();
             }
             self.epoch += 1;
+        }
+        if kind == wire::atlas::RASTER {
+            // the ASCII asked for ahead of time may be gone with the slots a shrink took back
+            if height < self.raster_height {
+                self.prewarm_sdf_sizes.clear();
+            }
+            self.raster_height = height;
         }
     }
 
@@ -514,6 +523,8 @@ impl GlyphClient {
             }
         }
         self.slots.insert(e.slot, (e.slot_gen, keys));
+        // nothing names the plain field's slot any more
+        self.out_releases.push((e.replaces, e.replaces_gen));
     }
 
     pub fn on_evicted(&mut self, slots: &[(u32, u32)]) {

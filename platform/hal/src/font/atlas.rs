@@ -1,8 +1,8 @@
 //! The two atlases the font service owns, on the CPU: the glyph image atlas (BGRA8, four
 //! distance-field planes that colour and multi-channel glyphs share) and the slug curve store
 //! (RGBA32F texels, two per curve). Both are bounded by their texture and give slots back under
-//! pressure, least recently used first; a slot's id is never reused, so an event that names a
-//! slot can never mean another glyph.
+//! pressure, least recently used first (the image atlas can move to a taller texture first); a
+//! slot's id is never reused, so an event that names a slot can never mean another glyph.
 
 use super::pool::Known;
 use super::RetireFence;
@@ -12,6 +12,7 @@ use makepad_font_core::{
     image::{Bgra, Image},
     raster::{AtlasPlane, AtlasSlot, MultiPlaneAllocator, UNRESOLVED_RASTER_RECT},
 };
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -145,6 +146,18 @@ impl RasterAtlas {
         true
     }
 
+    /// The first `rows` rows as the texture holds them. They're one run of pixels, and on a
+    /// little-endian target each pixel's bytes are already its BGRA8 bytes, so nothing is copied.
+    pub fn rows_bytes(&self, rows: usize) -> Cow<'_, [u8]> {
+        let pixels = &self.image.as_pixels()[..self.size.width * rows];
+        if cfg!(target_endian = "little") {
+            // SAFETY: `Bgra` is a transparent `u32`, so the slice is `len * 4` initialised bytes
+            Cow::Borrowed(unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) })
+        } else {
+            Cow::Owned(pixels.iter().flat_map(|p| p.bits.to_le_bytes()).collect())
+        }
+    }
+
     /// The rectangle's pixels as the texture holds them (BGRA8 rows).
     pub fn rect_bytes(&self, rect: Rect<usize>) -> Vec<u8> {
         let mut out = Vec::with_capacity(rect.size.width * rect.size.height * 4);
@@ -156,27 +169,25 @@ impl RasterAtlas {
         out
     }
 
-    /// Retires least recently used slots totalling `fraction` of the atlas (slots no session
-    /// holds go first). Their storage is free only after `fence` completes.
-    pub(super) fn evict(&mut self, fraction: f32, fence: Arc<RetireFence>) -> Vec<(u32, SlotRec)> {
-        if self.slots.is_empty() {
+    /// Retires least recently used slots totalling `bytes` (slots no session holds go first, and
+    /// only those unless `held`). Their storage is free only after `fence` completes.
+    pub(super) fn evict(&mut self, bytes: usize, held: bool, fence: Arc<RetireFence>) -> Vec<(u32, SlotRec)> {
+        let mut order: Vec<(bool, u64, u32)> = self.slots.iter().map(|(id, r)| (!r.sessions.is_empty(), r.last_use, *id)).filter(|(is_held, _, _)| held || !is_held).collect();
+        if order.is_empty() {
             return Vec::new();
         }
-        let mut order: Vec<(bool, u64, u32)> = self.slots.iter().map(|(id, r)| (!r.sessions.is_empty(), r.last_use, *id)).collect();
         order.sort();
-        let total = (self.size.width * self.size.height * 4) as f64;
-        let target = total * fraction as f64;
-        let mut freed = 0.0;
+        let mut freed = 0;
         let mut taken = Vec::new();
         for (_, _, id) in order {
             let rec = self.slots.remove(&id).expect("listed slot");
-            freed += (rec.key.size.width * rec.key.size.height * if rec.shared { 4 } else { 1 }) as f64;
+            freed += rec.key.size.width * rec.key.size.height * if rec.shared { 4 } else { 1 };
             self.by_key.remove(&rec.key);
             if !fence.complete() {
                 self.retired.push((rec.slot, rec.shared, fence.clone()));
             }
             taken.push((id, rec));
-            if freed >= target {
+            if freed >= bytes {
                 break;
             }
         }
@@ -186,6 +197,37 @@ impl RasterAtlas {
                 known.raster.remove(&rec.key);
             }
         }
+        self.rebuild();
+        taken
+    }
+
+    /// Whether a session still holds a slot that reaches past the first `rows` rows.
+    pub fn holds_past(&self, rows: usize) -> bool {
+        self.slots.values().any(|r| !r.sessions.is_empty() && r.slot.rect.max().y > rows)
+    }
+
+    /// Moves the atlas to texture `tex`, `height` rows tall. The slots in its first `keep` rows
+    /// stay where they are, so what was drawn from them stays right; the rest are returned.
+    pub(super) fn resize(&mut self, tex: Id, height: usize, keep: usize) -> Vec<(u32, SlotRec)> {
+        let gone: Vec<u32> = self.slots.iter().filter(|(_, r)| r.slot.rect.max().y > keep).map(|(id, _)| *id).collect();
+        let mut taken = Vec::with_capacity(gone.len());
+        {
+            let mut known = known_write(&self.known);
+            for id in gone {
+                let rec = self.slots.remove(&id).expect("listed slot");
+                self.by_key.remove(&rec.key);
+                known.raster.remove(&rec.key);
+                taken.push((id, rec));
+            }
+        }
+        self.retired.retain(|(slot, _, _)| slot.rect.max().y <= keep);
+        let size = Size::new(self.size.width, height);
+        let mut image = Image::new_zeroed(size);
+        let kept = size.width * keep.min(height).min(self.size.height);
+        image.as_mut_pixels()[..kept].copy_from_slice(&self.image.as_pixels()[..kept]);
+        self.image = image;
+        self.size = size;
+        self.tex = tex;
         self.rebuild();
         taken
     }

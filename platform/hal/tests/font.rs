@@ -1,5 +1,6 @@
 //! The font service on the headless backend: sessions share one raster per glyph through the
-//! host's atlas, the atlas outlives the sessions, and a small atlas gives slots back.
+//! host's atlas, the atlas outlives the sessions, a full atlas grows and later shrinks back, and
+//! one that can't grow gives slots back.
 
 use makepad_font_core::geom::Size;
 use makepad_font_core::rustybuzz::ttf_parser::Face;
@@ -103,6 +104,18 @@ impl<'a> Client<'a> {
 
     fn entry(&self, glyph: u32, dpxs: f32, kind: u32) -> GlyphEntry {
         *self.seen.ready.get(&(glyph, dpxs.to_bits(), kind)).unwrap_or_else(|| panic!("no entry for glyph {glyph}"))
+    }
+
+    /// The slots of `glyphs` this session holds.
+    fn slots(&self, glyphs: &[u32], dpxs: f32, kind: u32) -> Vec<(u32, u32)> {
+        glyphs.iter().filter_map(|g| self.seen.ready.get(&(*g, dpxs.to_bits(), kind))).filter(|e| e.slot != 0).map(|e| (e.slot, e.slot_gen)).collect()
+    }
+
+    /// Tells the host these glyphs were drawn, as a client's touch does: what it drew before and
+    /// not since is then the least recently used.
+    fn touch(&self, glyphs: &[u32], dpxs: f32, kind: u32) {
+        let slots = self.slots(glyphs, dpxs, kind);
+        self.send(|w| w.touch_glyphs(&slots));
     }
 }
 
@@ -212,6 +225,8 @@ fn a_small_atlas_gives_slots_back_least_recently_used_first() {
     let hal = Hal::new();
     hal.with_world(|w| w.font_service().set_atlas_size(Size::new(256, 256)));
     let mut a = Client::new(&hal, 1);
+    // a device whose largest texture is this atlas: it can't grow
+    hal.with_world(|w| w.max_texture = 256);
     a.open_font(1, PLEX);
     let all: Vec<u32> = (1..400).collect();
     let dpxs = 40.0;
@@ -321,6 +336,7 @@ fn held_small_glyphs_keep_their_own_pixels_through_evictions() {
     let hal = Hal::new();
     hal.with_world(|w| w.font_service().set_atlas_size(Size::new(128, 128)));
     let mut a = Client::new(&hal, 1);
+    hal.with_world(|w| w.max_texture = 128);
     a.open_font(1, PLEX);
     let dpxs = 11.0;
     let all: Vec<u32> = (1..500).collect();
@@ -351,4 +367,280 @@ fn held_small_glyphs_keep_their_own_pixels_through_evictions() {
     }
     assert!(hal.font_stats().evictions > 0, "the atlas was too small for everything");
     assert!(checked > 200);
+}
+
+/// Big colour emoji, about 140x132 texels each: a 2048x2048 atlas holds some 200 of them.
+const EMOJI_DPXS: f32 = 96.0;
+
+/// The first `n` colour emoji of the emoji font.
+fn emoji_ids(n: usize) -> Vec<u32> {
+    let text: String = (0x1F300u32..0x1FB00).filter_map(char::from_u32).collect();
+    let ids = glyph_ids(EMOJI, &text);
+    assert!(ids.len() >= n, "the font has {} emoji there", ids.len());
+    ids[..n].to_vec()
+}
+
+/// Asks for `glyphs` 50 at a time, as a scrolling grid does, and waits for every answer.
+fn request_all(c: &mut Client, font: u32, glyphs: &[u32], dpxs: f32) {
+    for batch in glyphs.chunks(50) {
+        c.request(font, kind::AUTO, batch, dpxs);
+        assert!(c.wait(60, |s| batch.iter().all(|g| s.ready.contains_key(&(*g, dpxs.to_bits(), kind::AUTO)))));
+    }
+}
+
+/// Each glyph's pixels in an atlas tall enough that it never had to grow.
+fn reference_pixels(glyphs: &[u32], dpxs: f32) -> HashMap<u32, Vec<u8>> {
+    let hal = Hal::new();
+    hal.with_world(|w| w.font_service().set_atlas_size(Size::new(2048, 8192)));
+    let mut c = Client::new(&hal, 99);
+    c.open_font(1, EMOJI);
+    request_all(&mut c, 1, glyphs, dpxs);
+    assert_eq!(hal.font_stats().growths, 0);
+    glyphs.iter().map(|g| (*g, hal.with_world(|w| w.font_service().raster_rect_bytes(c.entry(*g, dpxs, kind::AUTO).rect)).expect("atlas"))).collect()
+}
+
+/// Every glyph the session holds shows its own pixels in the host's atlas.
+fn assert_own_pixels(hal: &Hal, c: &Client, reference: &HashMap<u32, Vec<u8>>) {
+    let evicted: std::collections::HashSet<u32> = c.seen.evicted.iter().map(|(s, _)| *s).collect();
+    let mut checked = 0;
+    for e in c.seen.ready.values().filter(|e| e.atlas_kind == glyph::COLOR && !evicted.contains(&e.slot)) {
+        let have = hal.with_world(|w| w.font_service().raster_rect_bytes(e.rect)).expect("atlas");
+        assert!(have == reference[&e.glyph], "glyph {} (slot {}, rect {:?}) shows other pixels", e.glyph, e.slot, e.rect);
+        checked += 1;
+    }
+    assert!(checked > 0);
+}
+
+/// The host texture a session's atlas id stands for, and its size and uploaded bytes.
+fn atlas_texture(hal: &Hal, c: &Client) -> (Id, u32, u32, u64) {
+    let alias = c.seen.atlases.iter().rev().find(|x| x.0 == atlas::RASTER).expect("an atlas").1;
+    hal.with_world(|w| {
+        let lent = w.session(c.sid).unwrap().textures.get(c.sid, alias).unwrap().val.clone();
+        let tex = lent.lent.expect("lent by the host").tex;
+        let host = w.session(0).unwrap().textures.get(0, tex).expect("the host texture is alive").val.clone();
+        assert_eq!((lent.w, lent.h), (host.w, host.h), "the session's id has the texture's size");
+        (tex, host.w, host.h, host.uploaded)
+    })
+}
+
+/// A dense emoji grid overflows the atlas: it moves to a texture twice as tall instead of taking
+/// slots back, then twice as tall again, and every glyph keeps its slot and its pixels (a draw
+/// recorded before a growth keeps its texels, and the shader divides them by the new size).
+#[test]
+fn a_full_atlas_grows_and_keeps_every_glyph_where_it_was() {
+    let emoji = emoji_ids(700);
+    let reference = reference_pixels(&emoji, EMOJI_DPXS);
+    let hal = Hal::new();
+    let mut a = Client::new(&hal, 1);
+    a.open_font(1, EMOJI);
+    // the atlas height each glyph was delivered at
+    let mut delivered_at: HashMap<u32, u32> = HashMap::new();
+    for batch in emoji.chunks(50) {
+        request_all(&mut a, 1, batch, EMOJI_DPXS);
+        let height = a.seen.atlases.last().unwrap().3;
+        delivered_at.extend(batch.iter().map(|g| (*g, height)));
+    }
+    let stats = hal.font_stats();
+    assert_eq!(stats.growths, 2, "twice as tall each time");
+    assert_eq!((stats.evictions, a.seen.evicted.len()), (0, 0), "no slot was taken back");
+    assert_eq!(stats.raster_bytes, 2048 * 8192 * 4);
+    let heights: Vec<u32> = a.seen.atlases.iter().map(|x| x.3).collect();
+    assert_eq!(heights, vec![2048, 4096, 8192], "64 MiB on a GPU of unknown size");
+    let (first, last) = (a.seen.atlases[0], *a.seen.atlases.last().unwrap());
+    assert_eq!((last.1, last.4), (first.1, first.4), "the same id and generation: every entry stays valid");
+    let (_, w, h, uploaded) = atlas_texture(&hal, &a);
+    assert_eq!((w, h), (2048, 8192));
+    assert!(uploaded >= (2048 + 4096) * 2048 * 4, "what each old texture held went to the new one");
+    // the entries delivered before each growth still show their own pixels
+    for height in [2048, 4096] {
+        assert!(delivered_at.values().any(|h| *h == height), "glyphs delivered while it was {height} tall");
+    }
+    assert!(a.seen.ready.values().any(|e| e.rect[1] + e.rect[3] > 4096), "some went into the last rows");
+    assert_own_pixels(&hal, &a, &reference);
+}
+
+/// A grown atlas goes back to its base size after five minutes without a new glyph, once no
+/// session holds one in its extra rows. The rest keep their slots and pixels, one taken back
+/// comes back when asked, and the host's own textures keep their ids through every move.
+#[test]
+fn a_grown_atlas_goes_back_to_its_base_size_once_idle() {
+    let emoji = emoji_ids(300);
+    let reference = reference_pixels(&emoji, EMOJI_DPXS);
+    let hal = Hal::new();
+    let mut a = Client::new(&hal, 1);
+    // the host's own textures, at low ids like `makepad run`'s boot renderer uses
+    let host_ids: Vec<Id> = (1..=8).map(|i| Id::new(i, 1)).collect();
+    let mut host = CmdWriter::new(0);
+    for id in &host_ids {
+        host.texture_create(*id, usage::SAMPLED, format::RGBA8, 64, 32, [1, 1], Attr::default());
+    }
+    hal.submit(&host.buf());
+    a.open_font(1, EMOJI);
+    request_all(&mut a, 1, &emoji, EMOJI_DPXS);
+    assert_eq!(hal.font_stats().growths, 1);
+    let held = a.seen.ready.clone();
+    let past: Vec<u32> = held.values().filter(|e| e.rect[1] + e.rect[3] > 2048).map(|e| e.glyph).collect();
+    assert!(!past.is_empty());
+    // idle long enough, but the session still holds glyphs in the extra rows
+    hal.with_world(|w| w.clock.manual = Some(w.now() + 310_000_000_000));
+    a.pump(5_000_000);
+    assert_eq!(hal.font_stats().shrinks, 0, "it waits while they're held");
+    // the session lets go of them, and another idle period goes by
+    let slots = a.slots(&past, EMOJI_DPXS, kind::AUTO);
+    a.send(|w| w.release_glyphs(&slots));
+    for g in &past {
+        a.seen.ready.remove(&(*g, EMOJI_DPXS.to_bits(), kind::AUTO));
+    }
+    hal.with_world(|w| w.clock.manual = Some(w.now() + 290_000_000_000));
+    a.pump(5_000_000);
+    assert_eq!(hal.font_stats().shrinks, 0, "not idle long enough yet");
+    hal.with_world(|w| w.clock.manual = Some(w.now() + 20_000_000_000));
+    assert!(a.wait(5, |s| s.atlases.last().is_some_and(|x| x.3 == 2048)));
+    let stats = hal.font_stats();
+    assert_eq!((stats.shrinks, stats.raster_bytes), (1, 2048 * 2048 * 4));
+    assert_eq!(stats.raster_slots, held.len() - past.len(), "only the extra rows' slots are taken back");
+    assert!(a.seen.evicted.is_empty(), "nobody held them, so nobody was told");
+    assert_eq!(a.seen.atlases.last().unwrap().4, a.seen.atlases[0].4, "the same generation");
+    let (tex, _, h, _) = atlas_texture(&hal, &a);
+    assert_eq!(h, 2048);
+    assert!(tex.index >= LENT_BASE, "the atlas takes no id the host's own commands can");
+    assert_own_pixels(&hal, &a, &reference);
+    // ask again for one that was taken back: the atlas grows again for it
+    let gone = past[0];
+    a.request(1, kind::AUTO, &[gone], EMOJI_DPXS);
+    assert!(a.wait(20, |s| s.ready.contains_key(&(gone, EMOJI_DPXS.to_bits(), kind::AUTO))));
+    let e = a.entry(gone, EMOJI_DPXS, kind::AUTO);
+    let have = hal.with_world(|w| w.font_service().raster_rect_bytes(e.rect)).expect("atlas");
+    assert!(have == reference[&gone]);
+    hal.with_world(|w| {
+        let host = w.session(0).unwrap();
+        for id in &host_ids {
+            let t = host.textures.get(0, *id).expect("the host's texture is still there");
+            assert_eq!((t.val.w, t.val.h), (64, 32));
+        }
+    });
+}
+
+/// The app going to the background takes a grown atlas back to its base size at once, through
+/// the `Lifecycle` event the shell sends, giving back every glyph, and it doesn't grow again until
+/// the app is back. The glyphs come back when asked.
+#[test]
+fn a_grown_atlas_goes_back_to_its_base_size_in_the_background() {
+    let emoji = emoji_ids(300);
+    let reference = reference_pixels(&emoji, EMOJI_DPXS);
+    let hal = Hal::new();
+    let mut a = Client::new(&hal, 1);
+    let sid = a.sid;
+    let send_lifecycle = |hal: &Hal, kind: u32| {
+        hal.with_world(|w| {
+            let mut q = EventQueue::new();
+            q.lifecycle(kind);
+            q.drain_with(|e, p| w.window_event(sid, e, p));
+        })
+    };
+    let forget = |a: &mut Client, glyphs: &[u32]| {
+        for g in glyphs {
+            a.seen.ready.remove(&(*g, EMOJI_DPXS.to_bits(), kind::AUTO));
+        }
+    };
+    a.open_font(1, EMOJI);
+    request_all(&mut a, 1, &emoji[..20], EMOJI_DPXS);
+    // in the background before it grew: nothing to give back, now or once it grows later
+    send_lifecycle(&hal, lifecycle::BACKGROUND);
+    send_lifecycle(&hal, lifecycle::FOREGROUND);
+    request_all(&mut a, 1, &emoji, EMOJI_DPXS);
+    a.pump(5_000_000);
+    assert_eq!((hal.font_stats().growths, hal.font_stats().shrinks), (1, 0));
+    let held: Vec<GlyphEntry> = a.seen.ready.values().filter(|e| e.atlas_kind == glyph::COLOR).copied().collect();
+    send_lifecycle(&hal, lifecycle::BACKGROUND);
+    assert!(a.wait(5, |s| s.atlases.last().is_some_and(|x| x.3 == 2048)));
+    assert_eq!(hal.font_stats().shrinks, 1);
+    let evicted: std::collections::HashSet<u32> = a.seen.evicted.iter().map(|(s, _)| *s).collect();
+    assert!(held.iter().all(|e| evicted.contains(&e.slot)), "every glyph was given back");
+    assert_eq!(hal.font_stats().raster_slots, 0);
+    // what's asked for while in the background doesn't grow it again
+    forget(&mut a, &emoji);
+    request_all(&mut a, 1, &emoji, EMOJI_DPXS);
+    assert_eq!(hal.font_stats().growths, 1);
+    // back from the background: what it shows comes back
+    send_lifecycle(&hal, lifecycle::FOREGROUND);
+    forget(&mut a, &emoji);
+    request_all(&mut a, 1, &emoji, EMOJI_DPXS);
+    assert!(emoji.iter().all(|g| a.entry(*g, EMOJI_DPXS, kind::AUTO).atlas_kind == glyph::COLOR));
+    assert_own_pixels(&hal, &a, &reference);
+}
+
+/// The atlas grows no taller than the device's largest texture; past that it takes back the
+/// least recently used slots as before.
+#[test]
+fn a_full_grown_atlas_takes_slots_back() {
+    let emoji = emoji_ids(500);
+    let hal = Hal::new();
+    let mut a = Client::new(&hal, 1);
+    hal.with_world(|w| w.max_texture = 4096);
+    a.open_font(1, EMOJI);
+    request_all(&mut a, 1, &emoji, EMOJI_DPXS);
+    let stats = hal.font_stats();
+    assert_eq!(stats.growths, 1);
+    assert!(stats.evictions > 0 && !a.seen.evicted.is_empty(), "it took slots back once it was full-grown");
+    assert_eq!(a.seen.atlases.last().unwrap().3, 4096);
+    assert_eq!(stats.raster_bytes, 2048 * 4096 * 4);
+}
+
+/// A device that refuses the taller texture isn't asked again at every overflow: once per idle
+/// period, or once the app has been in the background.
+#[test]
+fn a_refused_growth_is_not_tried_again_at_once() {
+    let emoji = emoji_ids(300);
+    let hal = Hal::new();
+    // a tall narrow atlas whose double is past the headless device's largest texture, though
+    // the device claims it takes it
+    hal.with_world(|w| w.font_service().set_atlas_size(Size::new(256, 16384)));
+    let mut a = Client::new(&hal, 1);
+    hal.with_world(|w| w.max_texture = 65536);
+    let refused = |hal: &Hal| hal.with_world(|w| w.session(0).unwrap().stats.bad_args);
+    a.open_font(1, EMOJI);
+    let grid = |a: &mut Client, glyphs: &[u32]| {
+        for batch in glyphs.chunks(25) {
+            for g in batch {
+                a.seen.ready.remove(&(*g, EMOJI_DPXS.to_bits(), kind::AUTO));
+            }
+            request_all(a, 1, batch, EMOJI_DPXS);
+            a.touch(batch, EMOJI_DPXS, kind::AUTO);
+        }
+    };
+    grid(&mut a, &emoji[..200]);
+    let stats = hal.font_stats();
+    assert!(stats.evictions > 1 && stats.growths == 0, "it took slots back instead");
+    assert_eq!(refused(&hal), 1, "one refused texture for many overflows");
+    // an idle period later it asks once more
+    hal.with_world(|w| w.clock.manual = Some(w.now() + 310_000_000_000));
+    grid(&mut a, &emoji[200..]);
+    assert_eq!(refused(&hal), 2);
+    // and once the app is back from the background
+    hal.with_world(|w| {
+        w.font_service().app_backgrounded();
+        w.font_service().app_foregrounded();
+    });
+    grid(&mut a, &emoji[..100]);
+    assert_eq!((refused(&hal), hal.font_stats().growths), (3, 0));
+}
+
+/// Slots no session holds any more go before the atlas grows: a grid that was scrolled past and
+/// let go of makes room for the next one without taking more memory.
+#[test]
+fn let_go_slots_make_room_before_the_atlas_grows() {
+    let emoji = emoji_ids(400);
+    let hal = Hal::new();
+    let mut a = Client::new(&hal, 1);
+    a.open_font(1, EMOJI);
+    let (first, second) = emoji.split_at(200);
+    request_all(&mut a, 1, first, EMOJI_DPXS);
+    let slots: Vec<(u32, u32)> = first.iter().map(|g| a.entry(*g, EMOJI_DPXS, kind::AUTO)).map(|e| (e.slot, e.slot_gen)).collect();
+    a.send(|w| w.release_glyphs(&slots));
+    request_all(&mut a, 1, second, EMOJI_DPXS);
+    let stats = hal.font_stats();
+    assert_eq!(stats.growths, 0);
+    assert!(stats.evictions > 0, "the let-go slots were taken back");
+    assert!(a.seen.evicted.is_empty(), "nobody held them, so nobody was told");
 }

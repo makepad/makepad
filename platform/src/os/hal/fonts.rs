@@ -141,6 +141,11 @@ impl Cx {
             _ => {}
         }
         self.hal.font_events.push(event);
+        // Not in the background, where the text would only ask again for what the host just took
+        // back. The draw once it's back takes these answers.
+        if self.hal.in_background {
+            return;
+        }
         // the text draws again: it takes the answers before it lays out glyphs
         if redraw_all {
             self.redraw_all();

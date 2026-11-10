@@ -89,3 +89,17 @@ pub(crate) fn service(gpu: &mut dyn Gpu, world: &mut World) {
         with_service(world, |service, world| service.service(gpu, world));
     }
 }
+
+/// Takes a grown atlas back to its base size once it's due (`FontService::trim`). Called from
+/// the pumps, never from a submit, whose frames were drawn before the change.
+pub(crate) fn trim(gpu: &mut dyn Gpu, world: &mut World) {
+    let now = world.now();
+    if trim_at(world).is_some_and(|at| now >= at) {
+        with_service(world, |service, world| service.trim(gpu, world));
+    }
+}
+
+/// When `trim` has work next, for the pumps to wake by.
+pub(crate) fn trim_at(world: &World) -> Option<u64> {
+    world.fonts.as_ref().and_then(|s| s.trim_at())
+}

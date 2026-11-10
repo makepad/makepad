@@ -202,6 +202,8 @@ pub struct HalClient {
     pub(crate) readbacks: readback::Readbacks,
     /// font service answers the text stack has not taken yet
     pub(crate) font_events: Vec<HalFontEvent>,
+    /// The app is in the background: font answers wait for the draw when it's back.
+    pub(crate) in_background: bool,
     pub(crate) glyph_wait: fonts::GlyphWait,
     /// the GLES backend's share group and the Cx thread's GL context (`Cx::with_gl`)
     #[cfg(not(target_os = "android"))]
@@ -268,6 +270,7 @@ impl Default for HalClient {
             readbacks: Default::default(),
             event_arena_min: 0,
             font_events: Vec::new(),
+            in_background: false,
             glyph_wait: Default::default(),
             #[cfg(not(target_os = "android"))]
             gl: Default::default(),

@@ -722,8 +722,17 @@ impl Cx {
                 }
             }
             HalEvent::Lifecycle { kind } => match kind {
-                makepad_hal::lifecycle::FOREGROUND => self.call_event_handler(&Event::Foreground),
-                makepad_hal::lifecycle::BACKGROUND => self.call_event_handler(&Event::Background),
+                makepad_hal::lifecycle::FOREGROUND => {
+                    self.hal.in_background = false;
+                    if !self.hal.font_events.is_empty() {
+                        self.redraw_all();
+                    }
+                    self.call_event_handler(&Event::Foreground);
+                }
+                makepad_hal::lifecycle::BACKGROUND => {
+                    self.hal.in_background = true;
+                    self.call_event_handler(&Event::Background);
+                }
                 makepad_hal::lifecycle::PAUSE => self.call_event_handler(&Event::Pause),
                 makepad_hal::lifecycle::RESUME => {
                     // Java may cover the surface across a pause, and only a present lifts that.
