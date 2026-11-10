@@ -57,9 +57,16 @@ impl PerformanceHint {
         })
     }
 
-    /// Called on each beat, before its drawing, with the app's `repaint_id`. A beat after a pause starts a new
-    /// cycle, since the pause isn't part of a frame's work.
-    pub fn start_frame(&mut self, repaint_id: u64, after_pause: bool, display_paced: bool) {
+    /// Called at the start of each loop turn. After one that begins with nothing to draw, or while the app is
+    /// paused, the next frame's cycle starts at its own beat, so nothing from before that beat counts.
+    pub fn start_turn(&mut self, idle: bool) {
+        if idle || !lock(&Shared::global().state).active {
+            self.cycle_start = None;
+        }
+    }
+
+    /// Called on each beat, before its drawing, with the app's `repaint_id`.
+    pub fn start_frame(&mut self, repaint_id: u64, display_paced: bool) {
         // a frame paced by the display has its frame interval, which a switch to 120 Hz halves
         if display_paced {
             let refresh = lock(&Shared::global().state).refresh as f64;
@@ -70,15 +77,11 @@ impl PerformanceHint {
                 }
             }
         }
-        let cycle_start = match self.cycle_start {
-            Some(start) if !after_pause => start,
-            _ => thread_cpu_time(),
-        };
-        self.beat = Some((repaint_id, cycle_start));
+        self.beat = Some((repaint_id, self.cycle_start.unwrap_or_else(thread_cpu_time)));
     }
 
-    /// Called instead of `start_frame` for a beat whose frame isn't reported, so the next frame's cycle starts
-    /// at its own beat.
+    /// Called instead of `start_frame` for a beat whose frame isn't reported, so its work never counts toward
+    /// a later frame.
     pub fn skip_frame(&mut self) {
         self.cycle_start = None;
     }

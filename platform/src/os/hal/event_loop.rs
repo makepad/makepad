@@ -307,9 +307,10 @@ impl Cx {
             } else {
                 next_beat.saturating_duration_since(std::time::Instant::now()).as_nanos() as u64
             };
-            // a beat in a turn that began with nothing to do (or with the GPU lost) comes after a pause
             #[cfg(target_os = "android")]
-            let after_pause = performance_hint.is_some() && (!self.hal_has_work() || self.hal.device_lost);
+            if let Some(hint) = performance_hint.as_mut() {
+                hint.start_turn(!self.hal_has_work() || self.hal.device_lost);
+            }
             if !self.hal_guarded(true, |cx| cx.hal_pump_events(timeout)) {
                 crate::log!("hal: the last window closed");
                 break 'turns;
@@ -372,7 +373,7 @@ impl Cx {
                 if let Some(hint) = performance_hint.as_mut() {
                     match self.hal.xr {
                         Some(_) => hint.skip_frame(),
-                        None => hint.start_frame(self.repaint_id, after_pause, display_clock),
+                        None => hint.start_frame(self.repaint_id, display_clock),
                     }
                 }
                 if !self.hal_guarded(true, |cx| cx.hal_beat()) {
