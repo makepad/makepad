@@ -757,7 +757,9 @@ impl Widget for Dialog {
             let content = self.modal.widget(cx.cx.cx, ids!(content));
             let mut view = content.borrow_mut::<crate::view::View>();
             if let Some(view) = view.as_mut() {
-                view.walk = panel_walk.with_abs_pos(pos);
+                // A panel placed with `abs_pos` skips the modal's pan, so
+                // it takes the keyboard's shift itself.
+                view.walk = panel_walk.with_abs_pos(pos - dvec2(0.0, cx.keyboard_shift));
             }
             drop(view);
         } else if self.is_open() {

@@ -345,7 +345,10 @@ impl Widget for Modal {
         // Even an invisible `draw_bg` costs the GPU a full-window pass every frame,
         // so a closed modal leaves its overlay empty.
         if self.is_open {
-            self.draw_bg.begin(cx, Walk::fill(), self.view.layout);
+            // Our overlay doesn't move with the window body when it pans up to keep a focused
+            // text input above the soft keyboard, so we pan our content up by the same amount.
+            let layout = self.view.layout.with_scroll(dvec2(0.0, cx.keyboard_shift));
+            self.draw_bg.begin(cx, Walk::fill(), layout);
             let bg_view = self.view.widget(cx, ids!(bg_view));
             let _ = bg_view.draw_walk(
                 cx,

@@ -59,6 +59,10 @@ pub struct KeyboardView {
     /// Current vertical scroll offset applied to the inner content (Makepad layout points).
     #[rust]
     keyboard_shift: f64,
+    /// The scroll our content was last drawn with, which is what the focused text input's rect includes.
+    /// It's 0 when we shrink instead of panning.
+    #[rust]
+    drawn_shift: f64,
     /// Last known on-screen keyboard height in Makepad layout points. Stored so the
     /// shift can be recomputed when the focused IME area moves due to a layout
     /// reflow that happens while the keyboard stays open.
@@ -131,7 +135,7 @@ impl KeyboardView {
         // `ime_rect` comes from `Area::rect`, which reads the GPU-side draw
         // position, i.e. the IME rect's y AFTER our own `with_scroll` has
         // been applied. We need its NATURAL (unshifted) y to compute an
-        // absolute target shift. Without re-adding the current shift the
+        // absolute target shift. Without re-adding the drawn shift the
         // formula oscillates: each applied shift moves the IME up, the next
         // call sees it unobstructed and returns 0, the shift snaps back to
         // 0, the IME returns to its original position, the next call sees
@@ -139,7 +143,7 @@ impl KeyboardView {
         // every frame.
         let keyboard_height = keyboard_height.min(window_inner_size.y).max(0.0);
         let keyboard_top = window_inner_size.y - keyboard_height;
-        let ime_natural_bottom = ime_rect.pos.y + ime_rect.size.y + self.keyboard_shift;
+        let ime_natural_bottom = ime_rect.pos.y + ime_rect.size.y + self.drawn_shift;
         let needed = ime_natural_bottom + self.keyboard_min_shift - keyboard_top;
         needed.max(0.0).min(keyboard_height)
     }
@@ -192,10 +196,11 @@ impl KeyboardView {
     }
 
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
+        self.drawn_shift = if self.keyboard_resize { 0.0 } else { self.keyboard_shift };
         cx.begin_turtle(
             walk,
             self.outer_layout
-                .with_scroll(dvec2(0., if self.keyboard_resize { 0.0 } else { self.keyboard_shift })),
+                .with_scroll(dvec2(0., self.drawn_shift)),
         );
     }
 
