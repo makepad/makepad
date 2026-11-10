@@ -652,6 +652,7 @@ impl<T> RangeBounds<T> for RangeToInclusive<&T> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ControlFlow<B, C = ()> {
     #[cfg_attr(not(relax_check), lang = "Continue")]
     Continue(C),
@@ -779,6 +780,24 @@ impl<B, C> ControlFlow<B, C> {
         match self {
             ControlFlow::Break(b) => Some(b),
             ControlFlow::Continue(_) => None,
+        }
+    }
+    pub const fn continue_value(self) -> Option<C> {
+        match self {
+            ControlFlow::Continue(c) => Some(c),
+            ControlFlow::Break(_) => None,
+        }
+    }
+    pub fn map_break<T, F: FnOnce(B) -> T>(self, f: F) -> ControlFlow<T, C> {
+        match self {
+            ControlFlow::Continue(c) => ControlFlow::Continue(c),
+            ControlFlow::Break(b) => ControlFlow::Break(f(b)),
+        }
+    }
+    pub fn map_continue<T, F: FnOnce(C) -> T>(self, f: F) -> ControlFlow<B, T> {
+        match self {
+            ControlFlow::Continue(c) => ControlFlow::Continue(f(c)),
+            ControlFlow::Break(b) => ControlFlow::Break(b),
         }
     }
 }
