@@ -603,9 +603,10 @@ class MakepadSurface
     @SuppressWarnings("deprecation")
     @Override
     public boolean onKey(View v, int keyCode, KeyEvent event) {
+        // Back only reaches the app as BackPressed, which below API 33 the activity sends for a key we don't take.
         // API 36 still passes the back key on to us after the activity's back callback got it as Back.
-        if (keyCode == KeyEvent.KEYCODE_BACK && MakepadActivity.mBackGoesThroughCallback) {
-            return true;
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            return MakepadActivity.mBackGoesThroughCallback;
         }
         if (event.getAction() == KeyEvent.ACTION_DOWN && keyCode != 0) {
             int metaState = event.getMetaState();
