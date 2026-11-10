@@ -1188,7 +1188,7 @@ impl Cx {
                 }
             }
         }
-        self.fingers.process_touch_update_end(&e.touches);
+        self.end_touch_update(&e.touches);
     }
 
     /// Signals, actions, script tasks and network events the loop services on a wake and on
