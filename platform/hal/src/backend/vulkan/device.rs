@@ -67,6 +67,8 @@ pub struct Device {
     /// every pipeline variant from SPIR-V again (`save_pipeline_cache` writes it back).
     pub pipeline_cache: vk::PipelineCache,
     pipeline_cache_file: Option<PipelineCacheFile>,
+    /// The cache started without this app build's pipelines (`info_flags::PIPELINE_CACHE_COLD`).
+    pub pipeline_cache_cold: bool,
     /// Pipelines made since the cache was last saved, and when the last one was (clock_ns).
     pub pipelines_made: AtomicU32,
     pub pipeline_made_ns: AtomicU64,
@@ -459,7 +461,7 @@ impl Device {
         let video_encode = video_family.map(|f| VideoQueue { family: f as u32, queue: unsafe { raw.get_device_queue(f as u32, 0) }, timestamp_bits: video_timestamp_bits,
             more: (1..video_count).map(|i| (unsafe { raw.get_device_queue(f as u32, i) }, Mutex::new(()))).collect(), lock: Mutex::new(()), h265, qp_map: has_qp_map });
         if let Some(v) = &video_encode { if log_enabled() { eprintln!("[hal-vulkan] hardware video encode queue family={}", v.family); } }
-        let (pipeline_cache, pipeline_cache_file) = open_pipeline_cache(&raw, &properties);
+        let (pipeline_cache, pipeline_cache_file, pipeline_cache_cold) = open_pipeline_cache(&raw, &properties);
         Ok(Some(Arc::new(Self {
             queue: unsafe { raw.get_device_queue(family as u32, 0) }, queue_lock: Mutex::new(()), raw, instance: instance.clone(),
             physical, family: family as u32, properties, memory, features, formats,
@@ -467,7 +469,7 @@ impl Device {
             video_encode,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: has_ycbcr, video_samplers: Mutex::new(Default::default()),
-            pipeline_cache, pipeline_cache_file, pipelines_made: AtomicU32::new(0), pipeline_made_ns: AtomicU64::new(0),
+            pipeline_cache, pipeline_cache_file, pipeline_cache_cold, pipelines_made: AtomicU32::new(0), pipeline_made_ns: AtomicU64::new(0),
         })))
     }
 
@@ -619,14 +621,14 @@ impl Device {
         let raw = unsafe { instance.create_device(physical, &create, None) }.map_err(error)?;
         let memory = unsafe { instance.get_physical_device_memory_properties(physical) };
         let formats = std::array::from_fn(|f| unsafe { instance.get_physical_device_format_properties(physical, super::resources::vk_format(f as u32).unwrap()) });
-        let (pipeline_cache, pipeline_cache_file) = open_pipeline_cache(&raw, &properties);
+        let (pipeline_cache, pipeline_cache_file, pipeline_cache_cold) = open_pipeline_cache(&raw, &properties);
         Ok(Arc::new(Self { instance: instance.clone(), queue: unsafe { raw.get_device_queue(family as u32, 0) },
             raw, physical, queue_lock: Mutex::new(()), family: family as u32, properties, memory, features, formats,
             // a display peer only scans out: the GPU profiler times the rendering device
             timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, multiview: false, fdm: false, msaa: 1, life: owner.life.clone(), video_encode: None,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: false, video_samplers: Mutex::new(Default::default()),
-            pipeline_cache, pipeline_cache_file, pipelines_made: AtomicU32::new(0), pipeline_made_ns: AtomicU64::new(0) }))
+            pipeline_cache, pipeline_cache_file, pipeline_cache_cold, pipelines_made: AtomicU32::new(0), pipeline_made_ns: AtomicU64::new(0) }))
     }
 }
 
@@ -691,7 +693,7 @@ fn pipeline_cache_size(raw: &makepad_vulkan::Device, cache: vk::PipelineCache) -
 /// The device's pipeline cache, primed from its file when there is one. On a phone's GPU
 /// an app's warm start spent seconds of its HAL thread in vkCreateGraphicsPipelines
 /// (every variant compiled from SPIR-V, every launch) before this.
-fn open_pipeline_cache(raw: &makepad_vulkan::Device, properties: &vk::PhysicalDeviceProperties) -> (vk::PipelineCache, Option<PipelineCacheFile>) {
+fn open_pipeline_cache(raw: &makepad_vulkan::Device, properties: &vk::PhysicalDeviceProperties) -> (vk::PipelineCache, Option<PipelineCacheFile>, bool) {
     let path = pipeline_cache_file(properties);
     // what changes with each new build of the app, so it starts a fresh cache: on Android the
     // package's version and last update time, elsewhere the executable's size and mtime
@@ -725,14 +727,20 @@ fn open_pipeline_cache(raw: &makepad_vulkan::Device, properties: &vk::PhysicalDe
     };
     let mut info = vk::PipelineCacheCreateInfo::default();
     if !data.is_empty() { info.initial_data_size = data.len(); info.p_initial_data = data.as_ptr() as *const std::ffi::c_void; }
-    let made = unsafe { raw.create_pipeline_cache(&info, None) }
-        .or_else(|_| unsafe { raw.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None) });
+    // the driver ignores data whose header names another device or cache UUID, and a header
+    // alone has no pipelines in it
+    let warm = data.len() > 32 && data[8..12] == properties.vendor_id.to_le_bytes()
+        && data[12..16] == properties.device_id.to_le_bytes() && data[16..32] == properties.pipeline_cache_uuid;
+    let made = unsafe { raw.create_pipeline_cache(&info, None) }.map(|cache| (cache, !warm))
+        .or_else(|_| unsafe { raw.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None) }.map(|cache| (cache, true)));
     match made {
-        Ok(cache) => {
-            if log_enabled() { eprintln!("[hal-vulkan] pipeline cache: {} bytes from {}", data.len(), path.as_ref().map_or("nowhere".into(), |p| p.display().to_string())); }
-            (cache, path.map(|path| PipelineCacheFile { path, header, saved: AtomicUsize::new(pipeline_cache_size(raw, cache)) }))
+        Ok((cache, cold)) => {
+            // without a file nothing is kept for the next launch, so no launch counts as cold
+            let cold = cold && path.is_some();
+            if log_enabled() { eprintln!("[hal-vulkan] pipeline cache: {} bytes from {} (cold: {cold})", data.len(), path.as_ref().map_or("nowhere".into(), |p| p.display().to_string())); }
+            (cache, path.map(|path| PipelineCacheFile { path, header, saved: AtomicUsize::new(pipeline_cache_size(raw, cache)) }), cold)
         }
-        Err(e) => { eprintln!("[hal-vulkan] pipeline cache: {e:?}; pipelines are compiled every run"); (vk::PipelineCache::null(), None) }
+        Err(e) => { eprintln!("[hal-vulkan] pipeline cache: {e:?}; pipelines are compiled every run"); (vk::PipelineCache::null(), None, false) }
     }
 }
 
