@@ -178,6 +178,10 @@ impl Cx {
         if self.hosted_frames_held() {
             return false;
         }
+        #[cfg(target_os = "android")]
+        if self.hal.pending_ime_hide {
+            return true;
+        }
         let next_frames_due = !self.new_next_frames.is_empty() && !crate::remote::app_clock::enabled();
         self.any_passes_dirty()
             || self.need_redrawing()
@@ -377,6 +381,14 @@ impl Cx {
                     self.hal_submit_batch();
                     break 'turns;
                 }
+                // A hide still pending after this draw really hides the keyboard,
+                // unless the draw queued a `ShowTextIME` for an input that took focus.
+                #[cfg(target_os = "android")]
+                if self.hal.pending_ime_hide
+                    && !self.platform_ops.iter().any(|queued| matches!(queued, crate::cx_api::CxOsOp::ShowTextIME(..)))
+                {
+                    self.hal_send_pending_ime_hide();
+                }
                 // a fixed cadence: the next beat is one period after this one was DUE, not after
                 // its work ended (that made the period 16.7 ms + the beat's CPU time: ~48 fps
                 // offscreen); a beat more than a period late (idle, a stall) starts a new cadence
@@ -394,6 +406,15 @@ impl Cx {
                 self.call_event_handler(&Event::Shutdown);
                 self.hal_submit_batch();
                 break 'turns;
+            }
+            // No draw is coming to wait for if no window is ready, the surface is gone, the
+            // Activity is paused or the GPU device is lost, so a hide goes out now.
+            #[cfg(target_os = "android")]
+            if self.hal.pending_ime_hide
+                && (self.hal.no_surface || self.hal.activity_paused || self.hal.device_lost
+                    || !self.windows.id_iter().any(|w| self.hal.window_ready(w)))
+            {
+                self.hal_send_pending_ime_hide();
             }
             // work for the next vsync: ask each window for a frame
             if hosted {
