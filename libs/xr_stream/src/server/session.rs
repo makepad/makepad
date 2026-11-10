@@ -3,7 +3,7 @@
 //! poses, stats and reports in, the pictures out) and its per-window numbers.
 
 use super::pipeline::{Core, Out, Uplink};
-use super::{LiveHeadset, ServerShared};
+use super::{LiveHeadset, MicEvent, ServerShared};
 use crate::settings_types::HeadsetSettings;
 use makepad_desk_link::server::{fleet_identity, lan_address};
 use makepad_desk_link::xr::*;
@@ -16,7 +16,7 @@ use makepad_widgets::makepad_platform::makepad_network::tls::{self as net_tls, T
 use makepad_widgets::makepad_platform::video_file::{StreamVideoCodec, VideoStreamEncoder};
 use std::io::Read;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -154,7 +154,7 @@ impl Host {
                             if !lan_address(peer.ip()) {
                                 continue;
                             }
-                            let ctx = Session { peer, tls: tls.clone(), verifier: verifier.clone(), shared: shared.clone(), stop: stop2.clone(), busy: busy.clone(), server: name.clone(), world: world.clone(), pairing: pairing.clone() };
+                            let ctx = Session { peer, tls: tls.clone(), verifier: verifier.clone(), shared: shared.clone(), stop: stop2.clone(), busy: busy.clone(), server: name.clone(), world: world.clone(), pairing: pairing.clone(), pictures: AtomicU64::new(0), decoded: AtomicU64::new(0) };
                             let _ = std::thread::Builder::new().name("xr-host-session".into()).spawn(move || ctx.run(tcp));
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(50)),
@@ -194,12 +194,17 @@ struct Session {
     busy: Arc<AtomicBool>,
     server: String,
     pairing: Arc<Mutex<ServerPairing>>,
+    /// The pictures written to the headset and those it reported decoded, for the line that says
+    /// how the session ended.
+    pictures: AtomicU64,
+    decoded: AtomicU64,
 }
 
 impl Session {
     fn run(self, tcp: TcpStream) {
+        let began = Instant::now();
         let why = self.serve(tcp).unwrap_or_else(|e| e);
-        (self.shared.log)(&format!("xr host: session {}: {why}", self.peer));
+        (self.shared.log)(&format!("xr host: session {}: {why} (lasted {:.1} s, {} pictures written, {} decoded by the headset)", self.peer, began.elapsed().as_secs_f64(), self.pictures.load(Ordering::Acquire), self.decoded.load(Ordering::Acquire)));
     }
 
     fn serve(&self, tcp: TcpStream) -> Result<String, String> {
@@ -291,9 +296,13 @@ impl Session {
         self.shared.haptics.lock().unwrap().clear();
         self.shared.haptics_ok.store(decodes & codecs::HAPTICS != 0, Ordering::Release);
         self.shared.capture_ok.store(decodes & codecs::CAPTURE != 0, Ordering::Release);
+        self.shared.mic_ok.store(decodes & codecs::MIC != 0, Ordering::Release);
         let why = self.pump(stream, &mut inbox, &mut buf, &core, (paired, instance), session);
+        self.decoded.store(core.flow.decoded_tiles.load(Ordering::Acquire) / core.tiles.max(1) as u64, Ordering::Release);
         self.shared.haptics_ok.store(false, Ordering::Release);
         self.shared.capture_ok.store(false, Ordering::Release);
+        self.shared.mic_ok.store(false, Ordering::Release);
+        self.shared.mic_link_ended(session);
         *self.shared.live_headset.lock().unwrap() = None;
         self.shared.reports.lock().unwrap().clear();
         audio.stop();
@@ -319,6 +328,7 @@ impl Session {
         let mut see_through_told: Option<bool> = None;
         let mut headset_told: Option<HeadsetSettings> = None;
         let mut capture_told = None;
+        let mut mic_told = false;
         let mut capture = CaptureAssembler::default();
         let mut flowing = false;
         loop {
@@ -363,6 +373,15 @@ impl Session {
                 }
                 (self.shared.log)(&format!("xr host: capture {}", if ask.is_some() { "on" } else { "off" }));
                 capture_told = Some(ask);
+            }
+            // the app's ask of the microphone (only of a headset that has one)
+            let mic = sh.mic_asked(session);
+            if sh.mic_ok.load(Ordering::Acquire) && mic_told != mic {
+                if let Err(e) = write_all(stream, &XrServerMsg::Mic { on: mic }.encode()) {
+                    return format!("write: {e}");
+                }
+                (self.shared.log)(&format!("xr host: microphone {}", if mic { "on" } else { "off" }));
+                mic_told = mic;
             }
             // the app's controller buzzes (only to a headset that plays them)
             let haptics = std::mem::take(&mut *sh.haptics.lock().unwrap());
@@ -416,6 +435,7 @@ impl Session {
                             return format!("write: {e}");
                         }
                         stats.sent(&head, msg.len(), write_at.elapsed());
+                        self.pictures.fetch_add(1, Ordering::AcqRel);
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => return "the encoder stopped".into(),
@@ -482,6 +502,14 @@ impl Session {
                             None => {}
                         }
                     }
+                    XrClientMsg::Mic { state, text, pcm, .. } => {
+                        stats.mic_bytes += pcm.len() as u64;
+                        if !pcm.is_empty() {
+                            self.shared.mic_event(session, MicEvent::Pcm(pcm.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect()));
+                        } else {
+                            self.shared.mic_event(session, MicEvent::State { state, text });
+                        }
+                    }
                     XrClientMsg::Hello { .. } => return "a second hello".into(),
                 }
             }
@@ -512,6 +540,8 @@ pub(crate) struct PumpStats {
     brick_bytes: u64,
     /// Capture chunks' bytes received (the headset's cameras).
     capture_bytes: u64,
+    /// Microphone sound bytes received (the wearer's voice: counted, never logged).
+    mic_bytes: u64,
     /// The rate controller's second (its own window inside this one).
     rate: RateWindow,
 }
@@ -549,7 +579,7 @@ fn median_ms(v: &mut [u32]) -> f64 {
 
 impl PumpStats {
     pub(crate) fn new() -> Self {
-        PumpStats { at: Instant::now(), poses: 0, refused_poses: 0, pictures: 0, bytes: 0, stages_us: Default::default(), desk_us: Vec::new(), write_us: Vec::new(), decode_us: Vec::new(), trip_us: Vec::new(), unreported: Default::default(), bricks: 0, brick_bytes: 0, capture_bytes: 0, rate: RateWindow::new() }
+        PumpStats { at: Instant::now(), poses: 0, refused_poses: 0, pictures: 0, bytes: 0, stages_us: Default::default(), desk_us: Vec::new(), write_us: Vec::new(), decode_us: Vec::new(), trip_us: Vec::new(), unreported: Default::default(), bricks: 0, brick_bytes: 0, capture_bytes: 0, mic_bytes: 0, rate: RateWindow::new() }
     }
 
     pub(crate) fn sent(&mut self, head: &VideoHead, bytes: usize, write: Duration) {
@@ -604,16 +634,18 @@ impl PumpStats {
         }
         let built = core.flow.built.swap(0, Ordering::AcqRel);
         let skipped = core.flow.skipped.swap(0, Ordering::AcqRel);
+        let no_eyes = core.flow.no_eyes.swap(0, Ordering::AcqRel);
         let kbps = core.rate.current();
         *sh.server_line.lock().unwrap() = format!("server {} Hz · built {:.0}/s · sent {:.1} of {:.0} Mbit/s · render {:.1} gpu {:.1} encode {:.1} ms",
             core.fps, built as f64 / secs, self.bytes as f64 * 8.0 / secs / 1e6, sh.bitrate_kbps.load(Ordering::Acquire) as f64 / 1000.0, median_ms(&mut self.stages_us[0].clone()), median_ms(&mut self.stages_us[1].clone()), median_ms(&mut self.stages_us[2].clone()));
         let [ref mut render, ref mut gpu, ref mut encode, ref mut send] = self.stages_us;
         log(&format!(
-            "xr host: poses {:.0}/s ({} no XR window) · built {:.0}/s ({} without a slot) · sent {:.0}/s {:.1} Mbit/s (rate {:.0}) · render {:.1} gpu {:.1} encode {:.1} send {:.1} (write {:.1}) ms · headset decode {:.1} ms · in flight {}",
+            "xr host: poses {:.0}/s ({} no XR window) · built {:.0}/s ({} without a slot, {} with no eyes) · sent {:.0}/s {:.1} Mbit/s (rate {:.0}) · render {:.1} gpu {:.1} encode {:.1} send {:.1} (write {:.1}) ms · headset decode {:.1} ms · in flight {}",
             self.poses as f64 / secs,
             self.refused_poses,
             built as f64 / secs,
             skipped,
+            no_eyes,
             self.pictures as f64 / secs,
             self.bytes as f64 * 8.0 / secs / 1e6,
             kbps as f64 / 1000.0,
@@ -627,6 +659,9 @@ impl PumpStats {
         ));
         if self.bricks > 0 {
             log(&format!("xr host: room field {} bricks ({:.1} KB/s) from the headset", self.bricks, self.brick_bytes as f64 / secs / 1000.0));
+        }
+        if self.mic_bytes > 0 {
+            log(&format!("xr host: microphone {:.1} s of sound from the headset", self.mic_bytes as f64 / (2.0 * MIC_RATE as f64)));
         }
         if self.capture_bytes > 0 {
             log(&format!("xr host: capture {:.1} MB/s from the headset", self.capture_bytes as f64 / secs / 1e6));

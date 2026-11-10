@@ -9,7 +9,7 @@
 //! The pictures are the wearer's: they go to the app that asked and nowhere else (never to a
 //! log).
 //!
-//! Both ends use the plane codec ([`encode_plane`], [`decode_plane`]).
+//! Both ends use the plane codec (`makepad_desk_link::xr_capture`'s `encode_plane`, `decode_plane`).
 
 use makepad_desk_link::xr::link::XrLink;
 use makepad_desk_link::xr_capture::*;
@@ -24,70 +24,18 @@ use std::time::{Duration, Instant};
 
 /// The camera slots the capture reads: the platform's last two.
 const SLOTS: [usize; 2] = [MAX_VIDEO_DEVICE_INDEX - 2, MAX_VIDEO_DEVICE_INDEX - 1];
-/// One keyframe is one moment: its cameras' middles of exposure at most this far apart.
-const PAIR_NS: u64 = 8_000_000;
+/// A keyframe's pictures: the cameras' middles of exposure at most this far apart, so a camera
+/// and the other's next frame at 30 Hz, in step or not. Each picture has its own head pose.
+const PAIR_NS: u64 = 34_000_000;
+/// How long after the grant the platform's camera list may still be the one read before it
+/// (it reads the cameras once a second).
+const LIST_SETTLES: Duration = Duration::from_secs(5);
 /// A frame the head's turn smears by more than this during its exposure (pixels) is not taken.
 const BLUR_MAX_PX: f32 = 1.0;
 /// The next keyframe is taken once the link holds less than this of the last one.
 const QUEUED_MAX: usize = 4 << 20;
-/// miniz's fast level: the headset's core keeps up with the cameras.
-const DEFLATE_LEVEL: u32 = 1;
 /// How often the capture says how it goes.
 const STATUS_EVERY: Duration = Duration::from_secs(2);
-
-// ------------------------------------------------------------------ the plane codec
-
-/// `samples` (rows of `width * bytes_per_sample` bytes, tight) as a lossless plane
-/// (`plane_codec::DELTA_DEFLATE`).
-pub fn encode_plane(width: u32, height: u32, bytes_per_sample: u8, samples: &[u8]) -> CapturePlane {
-    let row = width as usize * bytes_per_sample as usize;
-    let bps = bytes_per_sample as usize;
-    let mut delta = vec![0u8; samples.len()];
-    for (r, (out, line)) in delta.chunks_exact_mut(row.max(1)).zip(samples.chunks_exact(row.max(1))).enumerate() {
-        for i in 0..line.len() {
-            let pred = if i >= bps { line[i - bps] } else if r > 0 { samples[(r - 1) * row + i] } else { 0 };
-            out[i] = line[i].wrapping_sub(pred);
-        }
-    }
-    CapturePlane { width, height, bytes_per_sample, codec: plane_codec::DELTA_DEFLATE, data: makepad_fast_inflate::deflate_compress(&delta, DEFLATE_LEVEL) }
-}
-
-/// A plane's samples, rows tight.
-pub fn decode_plane(p: &CapturePlane) -> Result<Vec<u8>, String> {
-    let bps = p.bytes_per_sample.max(1) as usize;
-    // (a peer's header: a size that overflows is refused, never wrapped to a small one)
-    let size = (p.width as usize).checked_mul(bps).and_then(|row| Some((row, row.checked_mul(p.height as usize)?)));
-    let Some((row, len)) = size else {
-        return Err(format!("a plane of {}x{} x{bps}: its size overflows", p.width, p.height));
-    };
-    if len > MAX_PLANE_BYTES {
-        return Err(format!("a plane of {}x{} x{bps}: over the size limit", p.width, p.height));
-    }
-    match p.codec {
-        plane_codec::RAW => {
-            if p.data.len() != len {
-                return Err(format!("raw plane of {} bytes, {len} expected", p.data.len()));
-            }
-            Ok(p.data.clone())
-        }
-        plane_codec::DELTA_DEFLATE => {
-            // (into the plane's own size: data that inflates past it is refused, never grown into)
-            let mut s = vec![0u8; len];
-            let (_, written) = makepad_fast_inflate::deflate_decompress(&p.data, &mut s).map_err(|e| format!("plane of {len} bytes: {e}"))?;
-            if written != len {
-                return Err(format!("plane of {written} bytes, {len} expected"));
-            }
-            for r in 0..p.height as usize {
-                for i in 0..row {
-                    let pred = if i >= bps { s[r * row + i - bps] } else if r > 0 { s[(r - 1) * row + i] } else { 0 };
-                    s[r * row + i] = s[r * row + i].wrapping_add(pred);
-                }
-            }
-            Ok(s)
-        }
-        c => Err(format!("plane codec {c}")),
-    }
-}
 
 // ------------------------------------------------------------------ the headset's side
 
@@ -228,12 +176,19 @@ pub(crate) struct HeadsetCapture {
     selector: Arc<Mutex<Selector>>,
     /// The cameras read (input, format size), by slot; empty until listed and opened.
     opened: Vec<(VideoInputId, [usize; 2])>,
+    /// When the wearer's permission came (asked at the start).
+    granted_at: Option<Instant>,
     state: u8,
     status_at: Instant,
 }
 
 fn lens(c: &CameraCalibration) -> Option<CaptureLensPose> {
     Some(CaptureLensPose { rotation: c.lens_rotation?, translation: c.lens_translation?, reference: c.lens_reference.unwrap_or(2) })
+}
+
+/// A picture of this camera can be placed in the world.
+fn calibrated(c: &CameraCalibration) -> bool {
+    c.intrinsics.is_some() && lens(c).is_some()
 }
 
 impl HeadsetCapture {
@@ -248,7 +203,7 @@ impl HeadsetCapture {
         };
         let selector = Selector { jobs: Some(jobs.clone()), ask, cameras: 0, focal_px: [0.0; 2], last: None, pending: [None, None], index: 0, in_flight, frames: 0, blurred: 0, untimed: 0, untracked: 0 };
         let selector = Arc::new(Mutex::new(selector));
-        let mut c = HeadsetCapture { link, jobs, on, selector: selector.clone(), opened: Vec::new(), state: capture_state::OFF, status_at: Instant::now() };
+        let mut c = HeadsetCapture { link, jobs, on, selector: selector.clone(), opened: Vec::new(), granted_at: None, state: capture_state::OFF, status_at: Instant::now() };
         if let Err(e) = spawned {
             // (no sender thread: the status goes on the link from here, nothing else does)
             log!("xr capture: no sender thread: {e}");
@@ -284,6 +239,9 @@ impl HeadsetCapture {
 
     /// The passthrough cameras opened at their largest size once the platform lists them.
     fn open(&mut self, cx: &mut Cx) {
+        // (without the permission the list hides what the capture is for: a camera's intrinsics
+        // and lens pose, perhaps the passthrough cameras themselves)
+        let Some(granted_at) = self.granted_at else { return };
         if !self.opened.is_empty() || self.state == capture_state::FAILED {
             return;
         }
@@ -291,8 +249,11 @@ impl HeadsetCapture {
         let mut cams: Vec<_> = descs.iter().filter_map(|d| cx.video_input_calibration(d.input_id).filter(|c| c.passthrough).map(|c| (d.clone(), c))).collect();
         cams.sort_by_key(|(_, c)| c.position.unwrap_or(u8::MAX));
         cams.truncate(SLOTS.len());
-        if cams.is_empty() {
-            self.status(capture_state::FAILED, "this headset lists no passthrough cameras".into());
+        if cams.is_empty() || !cams.iter().all(|(_, c)| calibrated(c)) {
+            if granted_at.elapsed() >= LIST_SETTLES {
+                let why = if cams.is_empty() { "this headset lists no passthrough cameras" } else { "the passthrough cameras give no intrinsics or lens pose" };
+                self.status(capture_state::FAILED, why.into());
+            }
             return;
         }
         let mut records = Vec::new();
@@ -365,8 +326,13 @@ impl HeadsetCapture {
     }
 
     pub(crate) fn permission(&mut self, result: &PermissionResult) {
-        if result.permission == Permission::HeadsetCamera && matches!(result.status, PermissionStatus::DeniedCanRetry | PermissionStatus::DeniedPermanent) {
-            self.status(capture_state::FAILED, "the headset camera permission was denied".into());
+        if result.permission != Permission::HeadsetCamera {
+            return;
+        }
+        match result.status {
+            PermissionStatus::Granted => self.granted_at = self.granted_at.or(Some(Instant::now())),
+            PermissionStatus::DeniedCanRetry | PermissionStatus::DeniedPermanent => self.status(capture_state::FAILED, "the headset camera permission was denied".into()),
+            _ => {}
         }
     }
 
@@ -448,47 +414,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capture_planes_round_trip_lossless() {
-        // a picture-like plane (gradients and texture) and 16-bit depth, odd sizes
-        let (w, h) = (37u32, 23u32);
-        let y: Vec<u8> = (0..w * h).map(|i| ((i % w) * 3 + (i / w) * 5 + (i * 2654435761u32 >> 28)) as u8).collect();
-        let p = encode_plane(w, h, 1, &y);
-        assert_eq!(p.codec, plane_codec::DELTA_DEFLATE);
-        assert_eq!(decode_plane(&p).unwrap(), y);
-        let depth: Vec<u8> = (0..w * h).flat_map(|i| ((1000 + i * 7) as u16).to_le_bytes()).collect();
-        let d = encode_plane(w, h, 2, &depth);
-        assert_eq!(decode_plane(&d).unwrap(), depth);
-        assert!(d.data.len() < depth.len() / 4, "a smooth depth ramp compresses well: {} of {}", d.data.len(), depth.len());
-        let raw = CapturePlane { width: 2, height: 1, bytes_per_sample: 1, codec: plane_codec::RAW, data: vec![1, 2] };
-        assert_eq!(decode_plane(&raw).unwrap(), vec![1, 2]);
-        assert!(decode_plane(&CapturePlane { data: vec![1], ..raw }).is_err());
-    }
-
-    #[test]
-    fn capture_plane_decode_is_bounded() {
-        // a stream that inflates far past its plane's size (64 MB of zeros as a 64x64 plane) is
-        // refused without growing into it, and so is a plane claiming a huge size
-        let bomb = CapturePlane { width: 64, height: 64, bytes_per_sample: 1, codec: plane_codec::DELTA_DEFLATE, data: makepad_fast_inflate::deflate_compress(&vec![0u8; 64 << 20], 1) };
-        assert!(bomb.data.len() < 1 << 20);
-        assert!(decode_plane(&bomb).is_err());
-        let short = CapturePlane { data: makepad_fast_inflate::deflate_compress(&[0u8; 100], 1), ..bomb.clone() };
-        assert!(decode_plane(&short).is_err());
-        let huge = CapturePlane { width: 1 << 16, height: 1 << 16, bytes_per_sample: 2, ..short };
-        assert!(decode_plane(&huge).unwrap_err().contains("size limit"));
-    }
-
-    #[test]
-    fn capture_plane_size_never_wraps() {
-        // 65536 x 65536 x 4: refused (over the limit, or overflowing where usize is 32 bits)
-        let empty = makepad_fast_inflate::deflate_compress(&[], 1);
-        let big = CapturePlane { width: 1 << 16, height: 1 << 16, bytes_per_sample: 4, codec: plane_codec::DELTA_DEFLATE, data: empty.clone() };
-        assert!(decode_plane(&big).is_err());
-        // 2^31 x 2^31 x 4 is 2^64: it wrapped to 0, passed the limit and indexed past the
-        // empty plane (a panic on the session thread); now refused, raw or deflated
-        let wraps = CapturePlane { width: 1 << 31, height: 1 << 31, ..big };
-        assert!(decode_plane(&wraps).unwrap_err().contains("overflows"));
-        let raw = CapturePlane { codec: plane_codec::RAW, data: Vec::new(), ..wraps };
-        assert!(decode_plane(&raw).unwrap_err().contains("overflows"));
+    fn a_camera_without_intrinsics_or_lens_pose_is_not_calibrated() {
+        // what the list says of a camera before the permission
+        let hidden = CameraCalibration { passthrough: true, ..Default::default() };
+        assert!(!calibrated(&hidden));
+        let intrinsics = Some([870.0, 870.0, 640.0, 640.0, 0.0]);
+        assert!(!calibrated(&CameraCalibration { intrinsics, ..hidden }));
+        let (lens_rotation, lens_translation) = (Some([0.0, 0.0, 0.0, 1.0]), Some([0.03, 0.0, 0.0]));
+        assert!(!calibrated(&CameraCalibration { lens_rotation, lens_translation, ..hidden }));
+        assert!(calibrated(&CameraCalibration { intrinsics, lens_rotation, lens_translation, ..hidden }));
     }
 
     #[test]

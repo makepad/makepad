@@ -48,6 +48,8 @@ const HOLD: usize = 6;
 mod auto;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod capture;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mic;
 mod desktop;
 mod mirror;
 mod panel;
@@ -59,7 +61,10 @@ pub use mirror::{DrawXrMirror, XrMirrorClock, XrMirrorView};
 pub use desktop::{XrDesktopCache, XrDesktopFreeze};
 pub use panel::{XrCaptionButton, XrStreamSettings};
 #[cfg(not(target_arch = "wasm32"))]
-pub use server::{launch_enabled, HostLoad, LiveHeadset, ServerStats, XrServer};
+#[cfg(not(target_arch = "wasm32"))]
+pub use makepad_desk_link::xr::mic_state;
+#[cfg(not(target_arch = "wasm32"))]
+pub use server::{launch_enabled, HostLoad, LiveHeadset, MicEvent, MicSink, ServerStats, XrServer};
 pub use settings_types::{HeadsetSettings, StreamAa, StreamView, STREAM_AA_DEFAULT, STREAM_AA_MODES};
 /// The serving side's shaders and widgets: the server's pack, the mirror and the caption's
 /// `XrCaptionButton` (an app with the control registers them).
@@ -461,10 +466,12 @@ script_mod! {
     // fixed to the head (the same direction in both eyes: it sits far away), over everything.
     mod.draw.DrawXrCamerasOn = mod.std.set_type_default() do #(DrawXrCamerasOn::script_shader(vm)){
         ..mod.draw.DrawQuad
+        // 0: the cameras' mark; 1: the microphone's, beside it, in orange
+        slot: 0.0
         vertex: fn() {
             let proj = self.draw_pass.camera_projection
             // its direction (tangents of the view: left, up) and radius
-            let c = vec2(-0.42, 0.36)
+            let c = vec2(-0.42 + self.slot * 0.09, 0.36)
             let r = 0.035
             let g = self.geom.pos
             self.pos = g
@@ -477,7 +484,7 @@ script_mod! {
             let disc = 1.0 - smoothstep(0.55, 0.62, d)
             let ring = (1.0 - smoothstep(0.86, 0.95, d)) * smoothstep(0.66, 0.74, d)
             let a = max(disc, ring)
-            let rgb = mix(vec3(1.0, 1.0, 1.0), vec3(0.95, 0.15, 0.12), disc)
+            let rgb = mix(vec3(1.0, 1.0, 1.0), mix(vec3(0.95, 0.15, 0.12), vec3(1.0, 0.6, 0.05), self.slot), disc)
             return vec4(rgb * a, a)
         }
     }
@@ -505,6 +512,9 @@ pub struct DrawXrStream {
 pub struct DrawXrCamerasOn {
     #[deref]
     pub draw_super: DrawQuad,
+    /// Which mark: 0 the cameras', 1 the microphone's.
+    #[live]
+    pub slot: f32,
 }
 
 /// One tile of a picture, decoded, waiting for the UI thread.
@@ -576,6 +586,9 @@ struct Shared {
     /// new link).
     #[cfg(not(target_arch = "wasm32"))]
     capture_ask: Option<makepad_desk_link::xr_capture::CaptureAsk>,
+    /// The server's app asks for the microphone (`XrServerMsg::Mic`; off as on every new link).
+    #[cfg(not(target_arch = "wasm32"))]
+    mic_ask: bool,
 }
 
 /// The stats of one window (5 s).
@@ -686,6 +699,14 @@ pub struct XrStreamClient {
     /// The cameras' capture while the server's app asks for it (`capture`).
     #[cfg(not(target_arch = "wasm32"))]
     capture: Option<capture::HeadsetCapture>,
+    /// The microphone while the server's app asks for it (`mic`), whether the wearer allowed it,
+    /// and the headset's microphone once the platform lists it.
+    #[cfg(not(target_arch = "wasm32"))]
+    mic: Option<mic::HeadsetMic>,
+    #[cfg(not(target_arch = "wasm32"))]
+    mic_granted: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    mic_input: Option<makepad_widgets::makepad_platform::audio::AudioDeviceId>,
     /// The room field sent so far on `world_link` (its brick cursor), and the frame count that
     /// paces it.
     #[cfg(not(target_arch = "wasm32"))]
@@ -811,7 +832,7 @@ impl XrStreamClient {
                 XrTarget::Address { .. } => "headset".to_string(),
             };
             // (the cameras' capture: a headset's passthrough cameras, an Android one's)
-            let capture = if cfg!(target_os = "android") { codecs::CAPTURE } else { 0 };
+            let capture = if cfg!(target_os = "android") { codecs::CAPTURE | codecs::MIC } else { 0 };
             let info = HeadsetInfo { name, instance: 0, eye, refresh_mhz: (refresh_hz * 1000.0) as u32, codecs: codecs::HEVC | codecs::H264 | codecs::HAPTICS | capture };
             let _ = std::thread::Builder::new().name("xr-stream".into()).spawn(move || worker(target, info, shared, signal, audio));
         }
@@ -829,6 +850,12 @@ impl XrStreamClient {
             no_depth: None,
             #[cfg(not(target_arch = "wasm32"))]
             capture: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            mic: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            mic_granted: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            mic_input: None,
             #[cfg(not(target_arch = "wasm32"))]
             world_link: None,
             world_cursor: 0,
@@ -913,12 +940,21 @@ impl XrStreamClient {
         false
     }
 
+    /// The headset's microphone goes to the computer now (the server's app asked for it): the
+    /// view shows it for as long as it does.
+    pub fn mic_on(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.mic.is_some();
+        #[cfg(target_arch = "wasm32")]
+        false
+    }
+
     /// Nothing to show: the stream is off or no server is linked (no XR frames are drawn), and
     /// the cameras are not on (their mark is shown in every XR frame).
     pub fn idle(&self) -> bool {
         let s = self.shared.lock().unwrap();
         #[cfg(not(target_arch = "wasm32"))]
-        return (s.stream_off || s.link.is_none()) && self.capture.is_none();
+        return (s.stream_off || s.link.is_none()) && self.capture.is_none() && self.mic.is_none();
         // (no link on the web)
         #[cfg(target_arch = "wasm32")]
         true
@@ -943,6 +979,11 @@ impl XrStreamClient {
         #[cfg(target_arch = "wasm32")]
         let _ = &cx;
         match event {
+            #[cfg(not(target_arch = "wasm32"))]
+            Event::AudioDevices(devices) => {
+                self.mic_input = devices.default_input().into_iter().next();
+                false
+            }
             Event::XrUpdate(_) => {
                 self.window.display_frames += 1;
                 self.frame_code = 0;
@@ -1024,6 +1065,9 @@ impl XrStreamClient {
                 if let Some(c) = self.capture.as_mut() {
                     c.permission(result);
                 }
+                if let Some(m) = self.mic.as_mut() {
+                    m.permission(result, &mut self.mic_granted);
+                }
                 false
             }
             // (a decoded picture: the next XR frame takes it)
@@ -1084,8 +1128,9 @@ impl XrStreamClient {
     fn housekeeping(&mut self, cx: &mut Cx) {
         use makepad_widgets::makepad_platform::makepad_hal as hal;
         // (no server linked: idle like the stream off, the PIN card alone)
-        let (link, room_field, off, vr, capture_ask) = { let s = self.shared.lock().unwrap(); (s.link.clone(), s.room_field, s.stream_off || s.link.is_none(), s.vr, s.capture_ask) };
+        let (link, room_field, off, vr, capture_ask, mic_ask) = { let s = self.shared.lock().unwrap(); (s.link.clone(), s.room_field, s.stream_off || s.link.is_none(), s.vr, s.capture_ask, s.mic_ask) };
         capture::HeadsetCapture::drive(&mut self.capture, cx, link.as_ref(), capture_ask);
+        mic::HeadsetMic::drive(&mut self.mic, &mut self.mic_granted, cx, link.as_ref(), mic_ask, self.mic_input);
         if room_field != cx.xr_room_field_wanted() {
             cx.xr_set_room_field(room_field);
             // (on again: every brick anew, the server's mirror may have dropped them)
@@ -1097,7 +1142,7 @@ impl XrStreamClient {
         // (a capture records the headset's depth with its pictures)
         let env = (!off && self.occlusion && !vr) || room_field || self.capture.is_some();
         // (the cameras on, XR frames go on with the stream off: their mark shows in each)
-        let paused = off && self.capture.is_none();
+        let paused = off && self.capture.is_none() && self.mic.is_none();
         let want = (off, vr, env, paused);
         if self.power != Some(want) {
             let before = self.power.replace(want);
@@ -1496,6 +1541,7 @@ impl XrStreamClient {
         let Some(shown) = self.shown[0].as_ref() else { return };
         let angle = |a: [f32; 4], b: [f32; 4]| (2.0 * (0..4).map(|k| a[k] * b[k]).sum::<f32>().abs().min(1.0).acos()).to_degrees();
         let seq = shown.head.seq;
+        let eye0 = (shown.head.eyes[0].fov, shown.head.eyes[0].orientation);
         self.watch_seq = if self.watch_seq.0 == seq { (seq, self.watch_seq.1 + 1) } else { (seq, 1) };
         let off = (display_ns as i64 - shown.head.display_ns as i64) as f64 / period_ns() as f64;
         let render_view = angle(shown.head.eyes[0].orientation, frame.eyes[0].pose.orientation);
@@ -1517,7 +1563,7 @@ impl XrStreamClient {
         if odd && self.watch_after == 0 {
             self.odd_frames += 1;
             self.watch_after = 6;
-            log!("xr stream: odd frame #{}: {} (before: {})", self.odd_frames, self.watch.back().unwrap(), self.watch.iter().rev().skip(1).rev().cloned().collect::<Vec<_>>().join(" | "));
+            log!("xr stream: odd frame #{}: {} eyes: render fov {:?} rot {:?} (before: {})", self.odd_frames, self.watch.back().unwrap(), eye0.0, eye0.1, self.watch.iter().rev().skip(1).rev().cloned().collect::<Vec<_>>().join(" | "));
         } else if self.watch_after > 0 {
             self.watch_after -= 1;
             if self.watch_after == 0 {
@@ -1735,6 +1781,16 @@ impl XrStreamClient {
             return;
         }
         // (never the XR pass's depth clip: the mark is over everything)
+        draw.depth_clip = 0.0;
+        draw.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2(1.0, 1.0) });
+    }
+
+    /// While the microphone is on ([`XrStreamClient::mic_on`]), its mark beside the cameras' one.
+    pub fn draw_mic_on(&mut self, cx: &mut Cx2d, draw: &mut DrawXrCamerasOn) {
+        if !self.mic_on() {
+            return;
+        }
+        draw.slot = 1.0;
         draw.depth_clip = 0.0;
         draw.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2(1.0, 1.0) });
     }
@@ -2095,6 +2151,7 @@ fn worker(target: XrTarget, mut info: HeadsetInfo, shared: Arc<Mutex<Shared>>, s
         // stream comes back on
         let mut stream_shape: Option<(StreamVideoCodec, [u32; 2], u8)> = None;
         let mut pinged = Instant::now();
+        let linked_at = Instant::now();
         let why = loop {
             if shared.lock().unwrap().stop {
                 return;
@@ -2125,6 +2182,7 @@ fn worker(target: XrTarget, mut info: HeadsetInfo, shared: Arc<Mutex<Shared>>, s
                         let mut s = shared.lock().unwrap();
                         s.link = Some(link.clone());
                         s.capture_ask = None;
+                        s.mic_ask = false;
                         s.tiles = n;
                         s.tile_size = tile_size;
                         s.eye = eye;
@@ -2208,6 +2266,10 @@ fn worker(target: XrTarget, mut info: HeadsetInfo, shared: Arc<Mutex<Shared>>, s
                     shared.lock().unwrap().capture_ask = on.then_some(makepad_desk_link::xr_capture::CaptureAsk { step_deg, step_m, preview_hz });
                     SignalToUI::set_ui_signal();
                 }
+                XrServerMsg::Mic { on } => {
+                    shared.lock().unwrap().mic_ask = on;
+                    SignalToUI::set_ui_signal();
+                }
                 XrServerMsg::Headset { foveation, eye_min_pct, eye_max_pct, multimodal, occlusion, ahead } => {
                     shared.lock().unwrap().headset = Some(HeadsetSettings { foveation, eye_min_pct, eye_max_pct, multimodal, occlusion, ahead });
                     SignalToUI::set_ui_signal();
@@ -2233,7 +2295,9 @@ fn worker(target: XrTarget, mut info: HeadsetInfo, shared: Arc<Mutex<Shared>>, s
             s.link = None;
             s.udp = None;
             s.capture_ask = None;
+            s.mic_ask = false;
         }
+        log!("xr stream: link ended after {:.1} s: {why}; reconnecting", linked_at.elapsed().as_secs_f64());
         set_status(format!("link ended: {why}; reconnecting"));
         std::thread::sleep(Duration::from_secs(1));
     }

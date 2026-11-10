@@ -47,6 +47,18 @@ pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
 /// session's thread. They hold the wearer's camera pictures: the sink keeps them for its app.
 pub type CaptureSink = Arc<dyn Fn(u64, CaptureRecord) + Send + Sync>;
 
+/// What the headset's microphone says to the app that asked (`XrServer::set_mic`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum MicEvent {
+    /// The microphone's state (`desk_link::xr::mic_state`) with why, when it failed.
+    State { state: u8, text: String },
+    /// The next sound: mono 16 kHz samples.
+    Pcm(Vec<i16>),
+}
+
+/// The headset's microphone events with the link's session id, on the link's thread.
+pub type MicSink = Arc<dyn Fn(u64, MicEvent) + Send + Sync>;
+
 /// The pictures are NV12 textures, one per tile, the pack rendering into their planes (the
 /// encoder takes each as it lies): D3D11. Elsewhere one packed picture (BGRA8 texels holding
 /// the NV12 bytes of both eye columns) the encoders read their columns of.
@@ -202,6 +214,12 @@ pub(crate) struct ServerShared {
     pub(crate) capture_ask: Mutex<Option<(u64, CaptureAsk)>>,
     pub(crate) capture_ok: AtomicBool,
     pub(crate) capture_sink: Mutex<Option<CaptureSink>>,
+    /// The app's ask of the headset's microphone: the link's session id and whether it still asks
+    /// (false: asked to stop, and the link's last sound and its off are still taken). Whether the
+    /// linked headset has one (`codecs::MIC` in its hello), and where its sound goes.
+    pub(crate) mic_ask: Mutex<Option<(u64, bool)>>,
+    pub(crate) mic_ok: AtomicBool,
+    pub(crate) mic_sink: Mutex<Option<MicSink>>,
     pub(crate) pairing: Mutex<Option<Arc<Mutex<ServerPairing>>>>,
     pub(crate) live_headset: Mutex<Option<LiveHeadset>>,
     pub(crate) server_line: Mutex<String>,
@@ -216,7 +234,7 @@ pub(crate) struct ServerShared {
 }
 
 impl ServerShared {
-    fn new(log: Log) -> ServerShared {
+    pub(crate) fn new(log: Log) -> ServerShared {
         ServerShared {
             log,
             live: Mutex::new(None),
@@ -245,6 +263,9 @@ impl ServerShared {
             capture_ask: Mutex::new(None),
             capture_ok: AtomicBool::new(false),
             capture_sink: Mutex::new(None),
+            mic_ask: Mutex::new(None),
+            mic_ok: AtomicBool::new(false),
+            mic_sink: Mutex::new(None),
             pairing: Mutex::new(None),
             live_headset: Mutex::new(None),
             server_line: Mutex::new(String::new()),
@@ -275,6 +296,49 @@ impl ServerShared {
         let sink = self.capture_sink.lock().unwrap().clone();
         if let Some(sink) = sink {
             sink(session, record);
+        }
+    }
+
+    /// Whether the app asks the microphone of the link of `session` now.
+    pub(crate) fn mic_asked(&self, session: u64) -> bool {
+        matches!(*self.mic_ask.lock().unwrap(), Some((s, true)) if s == session)
+    }
+
+    /// The microphone's word from the link of `session`: to the sink while the app asks that link
+    /// or has just asked it to stop (its last sound and its off are still on their way), else
+    /// dropped. The off ends the stop.
+    pub(crate) fn mic_event(&self, session: u64, event: MicEvent) {
+        {
+            let mut ask = self.mic_ask.lock().unwrap();
+            match *ask {
+                Some((s, _)) if s == session => {
+                    if matches!(event, MicEvent::State { state: makepad_desk_link::xr::mic_state::OFF, .. }) && !matches!(*ask, Some((_, true))) {
+                        *ask = None;
+                    }
+                }
+                _ => return,
+            }
+        }
+        let sink = self.mic_sink.lock().unwrap().clone();
+        if let Some(sink) = sink {
+            sink(session, event);
+        }
+    }
+
+    /// The link of `session` ended: an app that was asking its microphone is told it is gone.
+    pub(crate) fn mic_link_ended(&self, session: u64) {
+        let was = {
+            let mut ask = self.mic_ask.lock().unwrap();
+            match *ask {
+                Some((s, _)) if s == session => ask.take().is_some(),
+                _ => false,
+            }
+        };
+        if was {
+            let sink = self.mic_sink.lock().unwrap().clone();
+            if let Some(sink) = sink {
+                sink(session, MicEvent::State { state: makepad_desk_link::xr::mic_state::FAILED, text: "the headset's link ended".into() });
+            }
         }
     }
 
@@ -545,6 +609,29 @@ impl XrServer {
         *self.shared.capture_sink.lock().unwrap() = sink;
     }
 
+    /// Ask the headset of the link `session` ([`LiveHeadset::session`]) for its microphone, or
+    /// stop (false). Only that link is asked. Its sound and states go to the sink
+    /// ([`XrServer::set_mic_sink`]), also the last of them after the stop, up to the headset's
+    /// off; a link that ends meanwhile says so there.
+    pub fn set_mic(&self, session: u64, on: bool) {
+        let mut ask = self.shared.mic_ask.lock().unwrap();
+        *ask = match (on, *ask) {
+            (true, _) => Some((session, true)),
+            (false, Some((s, _))) if s == session => Some((s, false)),
+            (false, other) => other,
+        };
+    }
+
+    /// Where the microphone's sound and states go (None: dropped as they arrive).
+    pub fn set_mic_sink(&self, sink: Option<MicSink>) {
+        *self.shared.mic_sink.lock().unwrap() = sink;
+    }
+
+    /// The linked headset has a microphone to give (None linked: false).
+    pub fn mic_available(&self) -> bool {
+        self.shared.mic_ok.load(Ordering::Acquire)
+    }
+
     /// The linked headset can capture its cameras (None linked: false).
     pub fn capture_available(&self) -> bool {
         self.shared.capture_ok.load(Ordering::Acquire)
@@ -692,6 +779,38 @@ mod tests {
             Ok(())
         });
         assert_eq!(drawn, Ok(7));
+    }
+
+    #[test]
+    fn mic_goes_only_to_the_asked_link_until_its_off() {
+        use makepad_desk_link::xr::mic_state;
+        let shared = ServerShared::new(Arc::new(|_: &str| {}));
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink_got = got.clone();
+        *shared.mic_sink.lock().unwrap() = Some(Arc::new(move |session: u64, e: MicEvent| sink_got.lock().unwrap().push((session, e))));
+        let pcm = || MicEvent::Pcm(vec![1, 2]);
+        let off = || MicEvent::State { state: mic_state::OFF, text: String::new() };
+        // nothing asked: dropped
+        shared.mic_event(7, pcm());
+        // asked for link 7: its sound goes, another link's does not
+        *shared.mic_ask.lock().unwrap() = Some((7, true));
+        assert!(shared.mic_asked(7) && !shared.mic_asked(8));
+        shared.mic_event(7, pcm());
+        shared.mic_event(8, pcm());
+        // asked to stop: the last sound and the off still go, then the gate is shut
+        *shared.mic_ask.lock().unwrap() = Some((7, false));
+        assert!(!shared.mic_asked(7));
+        shared.mic_event(7, pcm());
+        shared.mic_event(7, off());
+        shared.mic_event(7, pcm());
+        assert_eq!(*got.lock().unwrap(), vec![(7, pcm()), (7, pcm()), (7, off())]);
+        // a link that ends while asked says so, once
+        *shared.mic_ask.lock().unwrap() = Some((9, true));
+        shared.mic_link_ended(9);
+        shared.mic_link_ended(9);
+        let got = got.lock().unwrap();
+        assert_eq!(got.len(), 4);
+        assert!(matches!(&got[3], (9, MicEvent::State { state: mic_state::FAILED, .. })));
     }
 
     #[test]

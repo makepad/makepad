@@ -63,6 +63,8 @@ pub struct Signals {
     pub repeat_late: f64,
     pub repeat_server: f64,
     pub repeat_dropped: f64,
+    /// The headset's poses that came, per second.
+    pub poses_per_s: f64,
     pub built_per_s: f64,
     pub gpu_ms: f64,
     pub render_ms: f64,
@@ -77,6 +79,12 @@ pub struct Signals {
 impl Signals {
     fn budget_ms(&self) -> f64 {
         1000.0 / self.display_hz.max(1.0)
+    }
+
+    /// The headset sends no poses (taken off, asleep): the server builds nothing because nothing
+    /// asks for it, and there is no load to judge.
+    fn idle(&self) -> bool {
+        self.poses_per_s < self.display_hz * 0.1
     }
 
     /// The headset holds the server back: it waited for room (pictures in flight to the headset's
@@ -138,7 +146,7 @@ impl XrAuto {
     /// One step with this window's signals; `auto(l)`: the user left lever `l` on Auto. Returns
     /// true when a value changed (to be applied).
     pub fn step(&mut self, s: &Signals, auto: impl Fn(Lever) -> bool, now: Instant) -> bool {
-        if self.last_change.is_some_and(|t| now - t < DWELL) {
+        if self.last_change.is_some_and(|t| now - t < DWELL) || s.idle() {
             return false;
         }
         let budget = s.budget_ms();
@@ -225,6 +233,7 @@ impl XrAuto {
             repeat_late: mean(r::REPEAT_LATE),
             repeat_server: mean(r::REPEAT_SERVER),
             repeat_dropped: mean(r::REPEAT_DROPPED),
+            poses_per_s: server.poses_per_s,
             built_per_s: server.built_per_s,
             gpu_ms: server.gpu_ms,
             render_ms: server.render_ms,
@@ -242,7 +251,18 @@ mod tests {
     use super::*;
 
     fn healthy() -> Signals {
-        Signals { display_hz: 90.0, shown: 90.0, repeat_late: 0.0, repeat_server: 0.0, repeat_dropped: 0.0, built_per_s: 90.0, gpu_ms: 3.0, render_ms: 4.0, trip_ms: 6.0, trip_base_ms: 5.0, sent_mbps: 79.0, rate_mbps: 80.0, waited_per_s: 0.0 }
+        Signals { display_hz: 90.0, shown: 90.0, repeat_late: 0.0, repeat_server: 0.0, repeat_dropped: 0.0, poses_per_s: 90.0, built_per_s: 90.0, gpu_ms: 3.0, render_ms: 4.0, trip_ms: 6.0, trip_base_ms: 5.0, sent_mbps: 79.0, rate_mbps: 80.0, waited_per_s: 0.0 }
+    }
+
+    #[test]
+    fn a_headset_sending_no_poses_changes_no_lever() {
+        let mut a = XrAuto::default();
+        let was = a.values;
+        // asleep: no poses, so nothing built, no repeats reported, the GPU idle
+        let asleep = Signals { poses_per_s: 0.0, built_per_s: 0.0, gpu_ms: 0.0, ..healthy() };
+        assert!(!a.step(&asleep, |_| true, Instant::now()));
+        assert_eq!(a.values, was);
+        assert!(a.note.is_empty());
     }
 
     #[test]

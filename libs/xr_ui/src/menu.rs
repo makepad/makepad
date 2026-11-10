@@ -123,7 +123,7 @@ impl XrWristMenu {
             self.open = lh.is_open() && !lh.is_palm_down(true);
         }
         let size = self.panel.size();
-        self.card = if self.open { Card::wrist(lc, lh, size) } else { None };
+        self.card = if self.open { Card::wrist(lc, lh, s.head_pose, size) } else { None };
         let mut out = MenuStep { open: self.card.is_some(), ..Default::default() };
         let mut pointer = None;
         let mut poke = false;

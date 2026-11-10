@@ -54,6 +54,10 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
     let _ = std::thread::Builder::new().name("xr-selftest".into()).spawn(move || {
         let start = Instant::now();
         let mut seq = 0u64;
+        // MAKEPAD_XR_REMOTE_SELFTEST_DECODE=1 (macOS): the encoded stream decoded here, the 300th
+        // picture's numbers beside the dump's (what the encode and decode did to them)
+        #[cfg(target_os = "macos")]
+        let mut decoded = (std::env::var("MAKEPAD_XR_REMOTE_SELFTEST_DECODE").as_deref() == Ok("1")).then(Decoded::default);
         let mut stats = PumpStats::new();
         let mut idle_told = false;
         while !stop.load(Ordering::Acquire) {
@@ -92,6 +96,10 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
             loop {
                 while let Ok(m) = core.out.try_recv() {
                     let Out::Video(mut head, data, encoded_at) = m;
+                    #[cfg(target_os = "macos")]
+                    if let Some(d) = decoded.as_mut() {
+                        d.take(&head, &data, &log);
+                    }
                     head.stages[stage::SEND] = encoded_at.elapsed().as_micros() as u32;
                     stats.sent(&head, data.len(), Duration::ZERO);
                     core.tile_decoded();
@@ -133,6 +141,10 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn dump_picture(_dir: &std::ffi::OsStr, _p: &Picture, _size: [u32; 2], _log: &Log) {}
 
+/// The display time of the picture the dump measured: the selftest's decoder measures that one.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+static DUMPED_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn dump_picture(dir: &std::ffi::OsStr, p: &Picture, size: [u32; 2], log: &Log) {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -142,17 +154,26 @@ pub(crate) fn dump_picture(dir: &std::ffi::OsStr, p: &Picture, size: [u32; 2], l
     if p.ready.wait(Duration::from_secs(2)).is_err() {
         return log("xr host: dump: the picture's GPU work did not complete");
     }
+    DUMPED_NS.store(p.display_ns, Ordering::Release);
     let [w, h] = size;
-    let Some(px) = read_packed(p.surfaces[0].id, w, h) else {
+    let Some(px) = read_packed(p.surfaces[0].id, w, h * 3 / 2) else {
         return log("xr host: dump: the picture could not be read");
     };
     // a BGRA texel holds luma samples 0..3 in its bytes as they lie: the row is the plane's row
     let mut pgm = format!("P5\n{w} {h}\n255\n").into_bytes();
-    pgm.extend_from_slice(&px);
+    pgm.extend_from_slice(&px[..(w * h) as usize]);
     let path = std::path::Path::new(dir).join("picture.pgm");
     let _ = std::fs::write(&path, &pgm);
+    let line = format!("xr host: dumped {} ({w}x{h}){}", path.display(), picture_numbers(&px, w, h, 2));
+    log(&line);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// Per eye of a packed picture (`w` bytes a row: `h` luma rows, then the chroma rows, `eyes` eye columns of it): its
+/// colour's luma and chroma, its band's coverage and inverse depth, as numbers.
+fn picture_numbers(px: &[u8], w: u32, h: u32, eyes: usize) -> String {
     // per eye column: its colour's luma, its band's coverage (left half) and inverse depth (right half)
-    let (ew, eh) = (w / 2, h * 2 / 3);
+    let (ew, eh) = (w / eyes as u32, h * 2 / 3);
     let area = |x0: u32, x1: u32, y0: u32, y1: u32| {
         let (mut n, mut sum, mut max, mut nonzero) = (0u64, 0u64, 0u8, 0u64);
         for y in y0..y1 {
@@ -166,16 +187,29 @@ pub(crate) fn dump_picture(dir: &std::ffi::OsStr, p: &Picture, size: [u32; 2], l
         }
         (sum as f64 / n.max(1) as f64, max, nonzero as f64 * 100.0 / n.max(1) as f64)
     };
-    let mut line = format!("xr host: dumped {} ({w}x{h})", path.display());
-    for (e, name) in ["left", "right"].iter().enumerate() {
+    let mut line = String::new();
+    for (e, name) in ["left", "right"].iter().take(eyes).enumerate() {
         let x = e as u32 * ew;
         let (l_mean, _, _) = area(x, x + ew, 0, eh);
         let (a_mean, a_max, a_cov) = area(x, x + ew / 2, eh, h);
+        // the band's coverage samples about half (a see-through surface): their share
+        let half = (eh..h).flat_map(|y| (x..x + ew / 2).map(move |x| (x, y))).filter(|(x, y)| (96..160).contains(&px[(y * w + x) as usize])).count() as f64 * 100.0 / (((h - eh) * (ew / 2)) as f64).max(1.0);
         let (d_mean, d_max, d_cov) = area(x + ew / 2, x + ew, eh, h);
         let near = if d_max > 0 { DEPTH_NEAR_M * 255.0 / d_max as f32 } else { 0.0 };
-        line += &format!("; {name} eye: luma mean {l_mean:.1}, coverage mean {a_mean:.1} max {a_max} drawn {a_cov:.0}%, inverse depth mean {d_mean:.1} max {d_max} (nearest {near:.2} m) drawn {d_cov:.0}%");
+        // the colour's chroma (rows h.., U V pairs): the samples off neutral, and the largest
+        let mut off = 0u64;
+        let mut dev = 0u8;
+        for y in h..h + eh / 2 {
+            for x in x..x + ew {
+                let d = px[(y * w + x) as usize].abs_diff(128);
+                off += (d > 16) as u64;
+                dev = dev.max(d);
+            }
+        }
+        line += &format!("; {name} eye chroma: {:.1}% of samples off neutral by 16+, largest {dev}", off as f64 * 100.0 / ((eh / 2 * ew) as f64).max(1.0));
+        line += &format!("; {name} eye: luma mean {l_mean:.1}, coverage mean {a_mean:.1} max {a_max} drawn {a_cov:.0}% half {half:.1}%, inverse depth mean {d_mean:.1} max {d_max} (nearest {near:.2} m) drawn {d_cov:.0}%");
     }
-    log(&line);
+    line
 }
 
 /// The packed picture's bytes (`w / 4` BGRA texels a row, `h` rows), tight. Linux: a DMA-BUF.
@@ -245,4 +279,38 @@ pub(crate) fn tune() -> Tune {
         }
     }
     t
+}
+
+/// The selftest's own decoder (`MAKEPAD_XR_REMOTE_SELFTEST_DECODE=1`).
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct Decoded {
+    decoder: Option<makepad_widgets::makepad_platform::video_file::VideoStreamDecoder>,
+    measured: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl Decoded {
+    fn take(&mut self, head: &VideoHead, data: &[u8], log: &Log) {
+        let codec = if head.codec == CODEC_HEVC { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
+        if self.decoder.is_none() {
+            match makepad_widgets::makepad_platform::video_file::VideoStreamDecoder::new(codec) {
+                Ok(d) => self.decoder = Some(d),
+                Err(e) => return log(&format!("xr selftest: no decoder: {e:?}")),
+            }
+        }
+        let Some(decoder) = self.decoder.as_mut() else { return };
+        let frames = match decoder.push_packet(data, head.seq as i64 * 10) {
+            Ok(f) => f,
+            Err(e) => return log(&format!("xr selftest: decode: {e:?}")),
+        };
+        // the picture the dump measured (the first decoded at or after its display time)
+        let dumped = DUMPED_NS.load(Ordering::Acquire);
+        for f in frames {
+            if !self.measured && dumped != 0 && head.display_ns >= dumped {
+                self.measured = true;
+                log(&format!("xr selftest: decoded ({}x{}){}", f.width, f.height, picture_numbers(&f.nv12, f.width, f.height, ((f.width * 2 / head.size[0].max(1)) as usize).clamp(1, 2))));
+            }
+        }
+    }
 }

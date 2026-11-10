@@ -114,6 +114,9 @@ pub struct XrRemoteView {
     /// The cameras-on mark while the computer's app captures the headset's cameras.
     #[live]
     draw_cameras_on: DrawXrCamerasOn,
+    /// The microphone-on mark while the computer's app listens to the headset's microphone.
+    #[live]
+    draw_mic_on: DrawXrCamerasOn,
     #[new]
     pass: DrawPass,
     /// The XR pass's own draw list (draws inside a pass need one).
@@ -204,6 +207,7 @@ impl XrRemoteView {
         // (whatever else is drawn: the wearer always sees the cameras are on)
         if let Some(client) = self.client.as_mut() {
             client.draw_cameras_on(cx, &mut self.draw_cameras_on);
+            client.draw_mic_on(cx, &mut self.draw_mic_on);
         }
         cx.end_pass_sized_turtle_no_clip();
         self.draw_list.end(cx);
