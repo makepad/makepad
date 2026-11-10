@@ -1658,6 +1658,7 @@ impl Cx {
     ) {
         if !self.keyboard.text_ime_dismissed {
             self.ime_area = area;
+            self.ime_area_scope = self.ime_scope;
             let rect = area.rect(self);
             self.publish_hosted_ime(crate::ime::HostedImeState {
                 visible: !config.is_read_only
@@ -2536,6 +2537,11 @@ impl Cx {
 
     pub fn get_ime_area_rect(&self) -> Rect {
         self.ime_area.rect(self)
+    }
+
+    /// The `ime_scope` that the focused text input last showed the IME from.
+    pub fn ime_area_scope(&self) -> u64 {
+        self.ime_area_scope
     }
 
     pub fn update_area_refs(&mut self, old_area: Area, new_area: Area) -> Area {

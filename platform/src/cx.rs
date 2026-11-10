@@ -153,6 +153,10 @@ pub struct Cx {
     pub(crate) cancel_scopes: CxCancelScopes,
     pub fingers: CxFingers,
     pub(crate) ime_area: Area,
+    /// The innermost view being drawn that moves its content out from under the soft keyboard
+    /// (like `KeyboardView`), by its widget uid, or 0 outside of all of them.
+    pub ime_scope: u64,
+    pub(crate) ime_area_scope: u64,
     pub keyboard_shift: f64,
     pub(crate) drag_drop: CxDragDrop,
     pub(crate) file_dialogs: FileDialogState,
@@ -1057,6 +1061,8 @@ impl Cx {
             drag_drop: Default::default(),
             file_dialogs: Default::default(),
             ime_area: Default::default(),
+            ime_scope: 0,
+            ime_area_scope: 0,
             keyboard_shift: 0.0,
             platform_ops: Default::default(),
             trays: Vec::new(),

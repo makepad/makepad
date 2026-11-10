@@ -1,5 +1,5 @@
 use {
-    crate::{area::Area, event::finger::KeyModifiers, window::WindowId},
+    crate::{area::Area, event::{finger::KeyModifiers, VirtualKeyboardEvent}, window::WindowId},
     std::cell::RefCell,
     std::rc::Rc,
 };
@@ -21,11 +21,26 @@ pub struct CxKeyboard {
     pub(crate) keys_down: Vec<KeyEvent>,
     pub(crate) text_ime_dismissed: bool,
     pub(crate) has_physical_keyboard: bool,
+    /// The soft keyboard's height from the latest `VirtualKeyboard` event, or 0 once it's hiding.
+    pub(crate) virtual_keyboard_height: f64,
 }
 
 impl CxKeyboard {
     pub fn has_physical_keyboard(&self) -> bool {
         self.has_physical_keyboard
+    }
+
+    pub fn virtual_keyboard_height(&self) -> f64 {
+        self.virtual_keyboard_height
+    }
+
+    /// Keeps a `VirtualKeyboard` event's height. Anything that hands one straight to a `KeyboardView`
+    /// has to call this too, since that view catches up with this height when it draws.
+    pub fn note_virtual_keyboard_event(&mut self, event: &VirtualKeyboardEvent) {
+        self.virtual_keyboard_height = match event {
+            VirtualKeyboardEvent::WillShow { height, .. } | VirtualKeyboardEvent::DidShow { height, .. } => *height,
+            VirtualKeyboardEvent::WillHide { .. } | VirtualKeyboardEvent::DidHide { .. } => 0.0,
+        };
     }
 
     pub fn modifiers(&self) -> KeyModifiers {

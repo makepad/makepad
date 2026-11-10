@@ -345,7 +345,10 @@ impl Widget for Modal {
         // Even an invisible `draw_bg` costs the GPU a full-window pass every frame,
         // so a closed modal leaves its overlay empty.
         if self.is_open {
-            self.draw_bg.begin(cx, Walk::fill(), self.view.layout);
+            // Our overlay doesn't move with the window body when it pans up to keep a focused
+            // text input above the soft keyboard, so we pan our content up by the same amount.
+            let layout = self.view.layout.with_scroll(dvec2(0.0, cx.keyboard_shift));
+            self.draw_bg.begin(cx, Walk::fill(), layout);
             let bg_view = self.view.widget(cx, ids!(bg_view));
             let _ = bg_view.draw_walk(
                 cx,
@@ -353,8 +356,12 @@ impl Widget for Modal {
                 Walk::fill().with_abs_pos(Vec2d { x: 0., y: 0. }),
             );
 
+            // We aren't laid out inside any KeyboardView around us, so our text inputs go to the outermost one,
+            // which is the one we pan along with.
+            let ime_scope = std::mem::take(&mut cx.ime_scope);
             let content = self.view.widget(cx, ids!(content));
             let _ = content.draw_all(cx, scope);
+            cx.ime_scope = ime_scope;
             self.draw_bg.end(cx);
         }
 

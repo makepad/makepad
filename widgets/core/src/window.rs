@@ -3049,6 +3049,8 @@ impl Widget for Window {
                 } else {
                     VirtualKeyboardEvent::WillHide { time, height: 0.0, duration: 0.22, ease: makepad_platform::event::Ease::OutCubic }
                 };
+                // This event skips `call_event_handler`, which is where the height normally gets noted.
+                cx.keyboard.note_virtual_keyboard_event(&event);
                 self.view.handle_event(cx, &Event::VirtualKeyboard(event), scope);
                 self.view.redraw(cx);
                 return;
