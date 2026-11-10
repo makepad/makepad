@@ -597,6 +597,10 @@ class MakepadSurface
         MakepadSystemInsets.report(this, insets);
     }
 
+    // The keys pressed while Ctrl or Meta was held. They're shortcuts,
+    // so letting go of one types nothing, even when Ctrl comes up first.
+    private final HashSet<Integer> mShortcutKeys = new HashSet<>();
+
     // docs says getCharacters are deprecated
     // but somehow on non-latyn input all keyCode and all the relevant fields in the KeyEvent are zeros
     // and only getCharacters has some usefull data
@@ -610,11 +614,18 @@ class MakepadSurface
         if (event.getAction() == KeyEvent.ACTION_DOWN && keyCode != 0) {
             int metaState = event.getMetaState();
             boolean isRepeat = event.getRepeatCount() > 0;
+            if ((metaState & (KeyEvent.META_CTRL_ON | KeyEvent.META_META_ON)) != 0) {
+                mShortcutKeys.add(keyCode);
+            } else {
+                mShortcutKeys.remove(keyCode);
+            }
             MakepadNative.surfaceOnKeyDown(keyCode, metaState, isRepeat);
         }
 
+        boolean shortcut = false;
         if (event.getAction() == KeyEvent.ACTION_UP && keyCode != 0) {
             int metaState = event.getMetaState();
+            shortcut = mShortcutKeys.remove(keyCode);
             MakepadNative.surfaceOnKeyUp(keyCode, metaState);
         }
 
@@ -627,7 +638,7 @@ class MakepadSurface
                 }
             }
 
-            if (character != 0) {
+            if (character != 0 && !shortcut) {
                 MakepadNative.surfaceOnCharacter(character);
             }
         }
