@@ -3,7 +3,7 @@
 use super::{shell::{lock, AndroidParams, Shared}, state::{self, Pointer}, surface::Window};
 use crate::{backend::exec::OsCmd, buffers::Wire, clock_ns, input, lifecycle};
 use makepad_jni_sys::{registration as reg, *};
-use std::{ffi::{c_long, c_void, CStr}, sync::{atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}, Mutex}, time::Duration};
+use std::{ffi::{c_long, c_void, CStr}, sync::{atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}, Mutex, OnceLock}, time::Duration};
 
 static ACTIVITY: Mutex<usize> = Mutex::new(0);
 static VM: AtomicUsize = AtomicUsize::new(0);
@@ -21,21 +21,102 @@ extern "C" {
     fn AChoreographer_postFrameCallback(choreographer: *mut c_void, callback: unsafe extern "C" fn(c_long, *mut c_void), data: *mut c_void);
 }
 
+/// The Choreographer calls newer than the app's minimum API level, looked up when it's set up.
+struct ChoreographerCalls {
+    /// `AChoreographer_postVsyncCallback` and the frame data its callback reads (API 33)
+    vsync: Option<VsyncCalls>,
+    /// `AChoreographer_registerRefreshRateCallback` (API 30)
+    register_refresh_rate: Option<unsafe extern "C" fn(*mut c_void, unsafe extern "C" fn(i64, *mut c_void), *mut c_void)>,
+}
+struct VsyncCalls {
+    post: unsafe extern "C" fn(*mut c_void, unsafe extern "C" fn(*const c_void, *mut c_void), *mut c_void),
+    frame_time: unsafe extern "C" fn(*const c_void) -> i64,
+    timelines: unsafe extern "C" fn(*const c_void) -> usize,
+    present_time: unsafe extern "C" fn(*const c_void, usize) -> i64,
+}
+static CHOREOGRAPHER_CALLS: OnceLock<ChoreographerCalls> = OnceLock::new();
+fn choreographer_calls() -> &'static ChoreographerCalls {
+    CHOREOGRAPHER_CALLS.get_or_init(|| {
+        let Ok(lib) = super::xr::sys::ModuleLoader::load("libandroid.so") else { return ChoreographerCalls { vsync: None, register_refresh_rate: None } };
+        let vsync = (|| Some(VsyncCalls {
+            post: lib.get_symbol("AChoreographer_postVsyncCallback").ok()?,
+            frame_time: lib.get_symbol("AChoreographerFrameCallbackData_getFrameTimeNanos").ok()?,
+            timelines: lib.get_symbol("AChoreographerFrameCallbackData_getFrameTimelinesLength").ok()?,
+            present_time: lib.get_symbol("AChoreographerFrameCallbackData_getFrameTimelineExpectedPresentationTimeNanos").ok()?,
+        }))();
+        ChoreographerCalls { vsync, register_refresh_rate: lib.get_symbol("AChoreographer_registerRefreshRateCallback").ok() }
+    })
+}
+
 pub(super) fn request_frame() {
     // an XR session paces frames itself (xrWaitFrame)
     if super::xr::active() { return; }
-    let p = CHOREOGRAPHER.load(Ordering::Acquire);
+    if !lock(&Shared::global().state).pending.is_empty() { post_frame_callback(); }
+}
+/// While the app is paused or has no surface its frame requests wait here, and `resume` and
+/// `set_surface` post them, so the app needn't ask again meanwhile.
+pub fn frame_requests_held() -> bool { !super::xr::active() && !can_show() }
+fn can_show() -> bool {
     let shared = Shared::global();
-    let visible = lock(&shared.registry).window.is_some();
-    let wanted = { let s = lock(&shared.state); visible && s.active && !s.pending.is_empty() };
-    if p != 0 && wanted && !FRAME_POSTED.swap(true, Ordering::AcqRel) {
-        unsafe { AChoreographer_postFrameCallback(p as _, frame_callback, std::ptr::null_mut()); }
+    lock(&shared.registry).window.is_some() && lock(&shared.state).active
+}
+fn post_frame_callback() {
+    let p = CHOREOGRAPHER.load(Ordering::Acquire);
+    if p != 0 && can_show() && !FRAME_POSTED.swap(true, Ordering::AcqRel) {
+        unsafe {
+            match &choreographer_calls().vsync {
+                Some(vsync) => (vsync.post)(p as _, vsync_callback, std::ptr::null_mut()),
+                None => AChoreographer_postFrameCallback(p as _, frame_callback, std::ptr::null_mut()),
+            }
+        }
     }
 }
+unsafe extern "C" fn vsync_callback(data: *const c_void, _: *mut c_void) {
+    let Some(vsync) = &choreographer_calls().vsync else { return };
+    // the frame timelines are one frame interval apart, at the rate the app's frames come
+    let interval = if (vsync.timelines)(data) > 1 { (vsync.present_time)(data, 1) - (vsync.present_time)(data, 0) } else { 0 };
+    deliver_frame((vsync.frame_time)(data) as u64, interval);
+}
+/// Below API 30 nothing tells us the display's rate after a mode switch (a boost), so the frame callbacks do. We take
+/// the second shortest of the last five gaps between callbacks in a row: late callbacks and one odd short gap drop out.
+struct CallbackGaps { last: u64, in_a_row: bool, gaps: [u64; 5], count: usize }
+static CALLBACK_GAPS: Mutex<CallbackGaps> = Mutex::new(CallbackGaps { last: 0, in_a_row: false, gaps: [0; 5], count: 0 });
 unsafe extern "C" fn frame_callback(time: c_long, _: *mut c_void) {
+    // a 32-bit `long` only keeps the low bits of the vsync time, which was a moment ago
+    let time = if std::mem::size_of::<c_long>() < 8 {
+        let now = clock_ns();
+        let time = (now & !0xffff_ffff) | time as u32 as u64;
+        if time > now { time.saturating_sub(1 << 32) } else { time }
+    } else { time as u64 };
+    let measured = choreographer_calls().register_refresh_rate.is_none();
+    let interval = if !measured { 0 } else {
+        let mut g = lock(&CALLBACK_GAPS);
+        if g.in_a_row && time > g.last { let i = g.count % 5; g.gaps[i] = time - g.last; g.count += 1; }
+        g.last = time;
+        let mut gaps = g.gaps;
+        gaps.sort_unstable();
+        if g.count >= 5 { gaps[1] as i64 } else { 0 }
+    };
+    deliver_frame(time, interval);
+    // a callback posted while this one ran comes at the next vsync
+    if measured { lock(&CALLBACK_GAPS).in_a_row = FRAME_POSTED.load(Ordering::Acquire); }
+}
+fn deliver_frame(time: u64, interval: i64) {
     FRAME_POSTED.store(false, Ordering::Release);
-    Shared::global().frame(time as u64);
-    request_frame();
+    let shared = Shared::global();
+    let asked = {
+        let mut s = lock(&shared.state);
+        if interval > 0 { s.refresh = 1e9 / interval as f32; }
+        !s.pending.is_empty()
+    };
+    shared.frame(time);
+    // After a frame we post the next callback right away, so the app's ask for its next frame still
+    // gets the next vsync when it comes late in this one. A callback with nothing asked posts no more.
+    if asked { post_frame_callback(); }
+}
+unsafe extern "C" fn refresh_rate_changed(period: i64, _: *mut c_void) {
+    // an XR session's frame loop owns the rate
+    if period > 0 && !super::xr::active() { lock(&Shared::global().state).refresh = 1e9 / period as f32; }
 }
 
 const FRAME_RATE_BOOST_NS: u64 = 1_000_000_000;
@@ -157,8 +238,13 @@ unsafe extern "system" fn params(env: *mut JNIEnv, _: jclass, cache: jstring, da
 unsafe extern "system" fn night_mode(_: *mut JNIEnv, _: jclass, night: jboolean) { lock(&Shared::global().state).params.night_mode = night != 0; }
 unsafe extern "system" fn display_rotation(_: *mut JNIEnv, _: jclass, rotation: jint) { lock(&Shared::global().state).params.rotation = rotation.rem_euclid(4) as u32; }
 unsafe extern "system" fn choreographer(_: *mut JNIEnv, _: jclass, refresh: jfloat, _: jint) {
-    CHOREOGRAPHER.store(AChoreographer_getInstance() as usize, Ordering::Release);
+    let choreographer = AChoreographer_getInstance();
+    CHOREOGRAPHER.store(choreographer as usize, Ordering::Release);
     if refresh.is_finite() && refresh > 0. { lock(&Shared::global().state).refresh = refresh; }
+    // keeps the rate current where the vsync callback can't tell it (a second registration is ignored)
+    if let Some(register) = choreographer_calls().register_refresh_rate.filter(|_| !choreographer.is_null()) {
+        register(choreographer, refresh_rate_changed, std::ptr::null_mut());
+    }
     Shared::global().display(); request_frame();
 }
 unsafe fn set_surface(env: *mut JNIEnv, surface: jobject, size: Option<[u32; 2]>) {
