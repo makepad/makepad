@@ -20,8 +20,8 @@ pub(super) enum Event {
     Capture { window: Id, surface: Arc<crate::backend::linux::media::capture_surface::Surface> },
     Presented { target: Id, frame: u64 },
     /// `gpu_span`: the frame's first and last timestamps in seconds of the device's clock (the
-    /// frame timer orders a frame's passes by it).
-    Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, gpu_span: [f64; 2] },
+    /// frame timer orders a frame's passes by it). `ran`: the GPU did the frame's work.
+    Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, gpu_span: [f64; 2], ran: bool },
     Readback { req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
     Pick { req: u32, ids: Vec<u32> },
     Shared { id: Id, handle: u64 },
@@ -740,7 +740,7 @@ impl Batch {
                     // all the same, never presented: its app paints again (a dropped frame) or
                     // after DeviceReset (a lost device)
                     token.incarnation.done(frame);
-                    push(token, Event::Frame { target, kind, frame, window: window && !failed, gpu_ns, gpu_span });
+                    push(token, Event::Frame { target, kind, frame, window: window && !failed, gpu_ns, gpu_span, ran: !failed });
                 }
                 Ticket::Copy { token, req, rect } => push(token, Event::Readback {
                     req, rect, status: if failed { readback::FAILED } else { readback::OK }, pixels: Vec::new(),

@@ -4,7 +4,7 @@ use {
     crate::{
         cx::Cx,
         draw_vars::{DrawVars, DRAW_CALL_UNIFORM_BUFFER_SLOTS},
-        geometry::GeometryId,
+        geometry::{Geometry, GeometryId},
         makepad_live_id::*,
         makepad_script::heap::ScriptHeap,
         makepad_script::pod::{ScriptPodTy, ScriptPodVec},
@@ -902,6 +902,15 @@ pub struct DrawShaderTableConst {
     pub negated: bool,
 }
 
+/// Where a shader's vertices can land, so a draw call that changed knows which pixels it touched.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VertexExtent {
+    #[default]
+    Unknown,
+    /// Inside each instance's `rect_pos` and `rect_size`, clipped to its `draw_clip` and the draw list's clip.
+    Rect,
+}
+
 #[derive(Clone)]
 pub struct CxDrawShaderMapping {
     pub source: ScriptObjectRef,
@@ -928,6 +937,7 @@ pub struct CxDrawShaderMapping {
     pub rect_pos: Option<usize>,
     pub rect_size: Option<usize>,
     pub draw_clip: Option<usize>,
+    pub vertex_extent: VertexExtent,
     /// Where an instance keeps the depth it is drawn at, when it keeps one:
     /// the slot `Cx2d::lift_align_range` adds to so already-drawn ink wins
     /// the depth test against ink painted after it.
@@ -1476,6 +1486,35 @@ impl CxDrawShaderMapping {
             );
         }
 
+        // The stock `DrawQuad` and `DrawText` vertex functions keep every vertex of their stock quad inside
+        // the instance's rect, so we only trust a shader that uses them unchanged.
+        let heap = vm.heap();
+        let get_fn_ip = |object: ScriptObject, name: LiveId| {
+            heap.value(object, name.into(), NoTrap).as_object().and_then(|f| heap.fn_script_ip(f))
+        };
+        let is_stock_rect = rect_pos.is_some()
+            && rect_size.is_some()
+            && geometry_id.is_some()
+            && heap.value(heap.modules, id!(draw).into(), NoTrap).as_object().is_some_and(|draw| {
+                [(id!(DrawQuad), id!(clip_and_transform_vertex)), (id!(DrawText), id!(slug_dilate))]
+                    .into_iter()
+                    .any(|(base, helper)| {
+                        let Some(base) = heap.value(draw, base.into(), NoTrap).as_object() else {
+                            return false;
+                        };
+                        let base_geometry_id = heap
+                            .value(base, id!(geom).into(), NoTrap)
+                            .as_object()
+                            .and_then(|geom| heap.value(geom, id!(buffer).into(), NoTrap).as_handle())
+                            .and_then(|buffer| heap.handle_ref::<Geometry>(buffer))
+                            .map(Geometry::geometry_id);
+                        base_geometry_id == geometry_id
+                            && [id!(vertex), helper].into_iter().all(|name| {
+                                get_fn_ip(base, name).is_some_and(|ip| get_fn_ip(source.as_object(), name) == Some(ip))
+                            })
+                    })
+            });
+        let vertex_extent = if is_stock_rect { VertexExtent::Rect } else { VertexExtent::Unknown };
         CxDrawShaderMapping {
             source,
             code,
@@ -1503,6 +1542,7 @@ impl CxDrawShaderMapping {
             rect_pos,
             rect_size,
             draw_clip,
+            vertex_extent,
             draw_depth,
             uniform_buffer_bindings,
             scope_uniforms,

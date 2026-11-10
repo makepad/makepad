@@ -9,7 +9,7 @@ use super::submit::{Batch, Ticket};
 use super::{window_row, Texture, Vulkan};
 use crate::backend::exec::{self, LentState};
 use crate::backend::log_enabled;
-use crate::buffers::{id_at, read_ids, read_pairs, CmdView};
+use crate::buffers::{id_at, read_ids, read_pairs, read_rects, CmdView};
 use crate::gpu_prof::{self, ShaderFacts, SplitRuns};
 use crate::ledger::Kind;
 use crate::session::{LentRef, Session, TextureObj, HOST};
@@ -314,16 +314,18 @@ impl Vulkan {
         let align = self.dev.properties.limits.min_uniform_buffer_offset_alignment.max(self.dev.properties.limits.min_storage_buffer_offset_alignment).max(16);
         let mut reserve = 0u64;
         let mut draw_counts = crate::FastMap::<usize, u32>::default();
+        // the damage check draws a window pass a second time, whole
+        let encodes = if damage_check() { 2 } else { 1 };
         for pass in &view.passes[pr.clone()] {
             for d in &view.draws[slice(pass.draws, view.draws.len()).unwrap()] {
                 if let Some(p) = self.pipe.get(&(sid, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen) {
                     let count = draw_counts.entry(Arc::as_ptr(&p.state) as usize).or_default();
-                    *count = count.saturating_add(1);
+                    *count = count.saturating_add(encodes);
                 }
                 for bytes in d.uniforms.iter().copied().chain([pass.uniforms, d.inst.data]) {
-                    reserve = reserve.saturating_add((bytes.len.max(16) as u64).div_ceil(align) * align);
+                    reserve = reserve.saturating_add((bytes.len.max(16) as u64).div_ceil(align) * align * encodes as u64);
                 }
-                reserve = reserve.saturating_add(align); // pick block
+                reserve = reserve.saturating_add(align * encodes as u64); // pick block
             }
         }
         // a recorded frame times its passes: its batch's timestamp pool is sized for them
@@ -564,6 +566,9 @@ impl Vulkan {
         if let Some(c) = self.compose.as_ref().filter(|_| is_window) { size = [size[0].min(c.desc.w), size[1].min(c.desc.h)]; }
         let mut colors: Vec<(usize, Arc<Image>)> = Vec::new();
         let mut window = None;
+        // whether the window renders into the image we keep for it from frame to frame
+        let mut retained = false;
+        let skipped_before = s.stats.skipped_draws;
         for (i, id) in pass.color.iter().enumerate().filter(|(_, id)| !id.is_none()) {
             let image = self.resolve(s, *id).ok_or("missing pass color texture")?;
             if s.textures.get(s.id, *id).is_ok_and(|t| t.val.lent.is_some()) { return Err("cannot render into a lent texture".into()); }
@@ -583,7 +588,7 @@ impl Vulkan {
                     match self.compose.clone() {
                         Some(composed) => composed,
                         // the retained image a badge layer is composed over
-                        None if layered => { self.retained_stale.remove(&key.1.index); self.offscreen(s, target, size, now)? }
+                        None if layered => { self.retained_stale.remove(&key.1.index); retained = true; self.offscreen(s, target, size, now)? }
                         // a multiview window: the shell's own target (a layer per view), or its own image
                         None if views > 1 => match self.windows.source.target(key.0, key.1, size) {
                             Some(image) => { if key.0 == HOST { self.retained_stale.insert(key.1.index); self.direct_frame.insert(key.1.index, image.clone()); } image }
@@ -592,7 +597,7 @@ impl Vulkan {
                         None => match self.windows.source.target(key.0, key.1, size) {
                             // the retained image no longer holds the newest frame
                             Some(image) => { if key.0 == HOST { self.retained_stale.insert(key.1.index); self.direct_frame.insert(key.1.index, image.clone()); } image }
-                            None => { self.retained_stale.remove(&key.1.index); self.offscreen(s, target, size, now)? }
+                            None => { self.retained_stale.remove(&key.1.index); retained = true; self.offscreen(s, target, size, now)? }
                         },
                     }
                 }
@@ -616,8 +621,15 @@ impl Vulkan {
         let density = if self.dev.fdm { colors.first().and_then(|(_, c)| super::resources::density_map(c.image)) } else { None };
         // an MSAA pass (never a pick pass, nor one with a density map)
         let samples = if pick || density.is_some() { 1 } else { pass_samples(pass, self.dev.msaa) };
+        let base = { let (sid, id) = self.window_key(s.id, target); (sid, id.index) };
+        // The kept image still holds the frame the pass's damage is measured from, so we only repaint the damage.
+        let partial = retained && views == 1 && samples == 1 && density.is_none() && colors.len() == 1
+            && pass.load[0] == pass_load::CLEAR && (depth.is_none() || pass.load[4] != pass_load::LOAD)
+            && pass.damage_since != 0 && pass.damage.len <= 32
+            && self.damage_base.get(&base).is_some_and(|(sid, image, frame)| *sid == s.id && *frame == pass.damage_since && image.as_ptr() == Arc::as_ptr(&colors[0].1));
         let mut key = PassKey { colors: [ABSENT; 4], depth: depth.as_ref().map_or(ABSENT, |d| d.desc.format), load: pass.load, views, fdm: density.is_some(), samples };
         for (i, c) in &colors { key.colors[*i] = c.desc.format; }
+        if partial { key.load[0] = pass_load::LOAD; }
         let render_pass = if let Some(pass) = self.passes.get(&key) { pass.clone() } else {
             let pass = RenderPass::new(self.dev.clone(), key)?; self.passes.insert(key, pass.clone()); pass
         };
@@ -632,11 +644,28 @@ impl Vulkan {
         // an ablation frame of the GPU profiler leaves out one shader's draws
         let ablate = prof_key.filter(|k| k.ablate && !pick).and_then(|_| gpu_prof::ablate_target());
         batch.forget_blocks();
+        // the damaged rects inside the target, an empty one kept in its place since the draws' masks count them
+        let damage: Option<Vec<vk::Rect2D>> = partial.then(|| read_rects(view.arena, pass.damage).map(|[x, y, w, h]| {
+            let x0 = x.max(0.0).min(target_size[0] as f32) as u32;
+            let y0 = y.max(0.0).min(target_size[1] as f32) as u32;
+            let x1 = (x + w).max(x0 as f32).min(target_size[0] as f32) as u32;
+            let y1 = (y + h).max(y0 as f32).min(target_size[1] as f32) as u32;
+            vk::Rect2D { offset: vk::Offset2D { x: x0 as i32, y: y0 as i32 }, extent: vk::Extent2D { width: x1 - x0, height: y1 - y0 } }
+        }).collect());
+        let damage_mask = damage.as_ref().map(|rects| rects.iter().enumerate()
+            .filter(|(_, r)| r.extent.width > 0 && r.extent.height > 0).fold(0u32, |mask, (i, _)| mask | 1 << i));
         for d in draws {
             s.stats.draws += 1;
             if d.index[1] == 0 || d.inst.count == 0 { continue; }
             if let Some(t) = ablate.as_deref() {
                 if self.pipe.get(&(s.id, d.pipeline.index)).is_some_and(|p| gpu_prof::ablates(s, &p.desc, d.owner, t)) { continue; }
+            }
+            // a draw outside the damage isn't drawn, but what it uses mustn't look idle
+            if damage_mask.is_some_and(|mask| d.damage & mask == 0) {
+                s.ledger.touch(Kind::Pipeline, d.pipeline.index, d.pipeline.gen, s.frame, now);
+                for id in [d.vb, d.ib, d.inst.id].into_iter().chain(d.ubufs).filter(|i| !i.is_none()) { s.ledger.touch(Kind::Buffer, id.index, id.gen, s.frame, now); }
+                for id in read_ids(view.arena, d.tex).filter(|i| !i.is_none()) { s.ledger.touch(Kind::Texture, id.index, id.gen, s.frame, now); }
+                continue;
             }
             match self.prepare(s, pass, d, view.arena, pick, render_pass.clone(), &attachments, batch, now, deps) {
                 Ok(Some(p)) => prepared.push((d, p)),
@@ -695,6 +724,24 @@ impl Vulkan {
         let origin = [((v[0] - offset[0] as f32).max(0.0) as u32).min(target_size[0]), ((v[1] - offset[1] as f32).max(0.0) as u32).min(target_size[1])];
         let area = vk::Rect2D { offset: vk::Offset2D { x: origin[0] as i32, y: origin[1] as i32 },
             extent: vk::Extent2D { width: target_size[0] - origin[0], height: target_size[1] - origin[1] } };
+        let intersect = |a: &vk::Rect2D, b: &vk::Rect2D| {
+            let (x0, y0) = (a.offset.x.max(b.offset.x), a.offset.y.max(b.offset.y));
+            let x1 = (a.offset.x + a.extent.width as i32).min(b.offset.x + b.extent.width as i32);
+            let y1 = (a.offset.y + a.extent.height as i32).min(b.offset.y + b.extent.height as i32);
+            (x1 > x0 && y1 > y0).then(|| vk::Rect2D { offset: vk::Offset2D { x: x0, y: y0 }, extent: vk::Extent2D { width: (x1 - x0) as u32, height: (y1 - y0) as u32 } })
+        };
+        // a partial repaint loads and stores only around the damage, and one pixel when nothing changed
+        let area = match &damage {
+            Some(rects) => rects.iter().filter(|r| r.extent.width > 0 && r.extent.height > 0).copied()
+                .reduce(|a, b| {
+                    let (x0, y0) = (a.offset.x.min(b.offset.x), a.offset.y.min(b.offset.y));
+                    let x1 = (a.offset.x + a.extent.width as i32).max(b.offset.x + b.extent.width as i32);
+                    let y1 = (a.offset.y + a.extent.height as i32).max(b.offset.y + b.extent.height as i32);
+                    vk::Rect2D { offset: vk::Offset2D { x: x0, y: y0 }, extent: vk::Extent2D { width: (x1 - x0) as u32, height: (y1 - y0) as u32 } }
+                })
+                .unwrap_or(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width: 1, height: 1 } }),
+            None => area,
+        };
 
         // ---- the GPU profiler's timestamps. A recorded frame times the pass whole; a split
         // frame cuts it into one render pass per run of draws of one pipeline on the same
@@ -737,9 +784,19 @@ impl Vulkan {
                 .render_area(area).clear_values(&clear), vk::SubpassContents::INLINE);
             // The existing SPIR-V emitter already maps Vulkan's coordinate conventions.
             self.dev.raw.cmd_set_viewport(batch.cb, 0, &[viewport]);
+            // the damage starts out as the clear colour, the way a whole repaint's clear leaves it
+            if let Some(rects) = &damage {
+                let rects: Vec<vk::ClearRect> = rects.iter().filter(|r| r.extent.width > 0 && r.extent.height > 0)
+                    .map(|r| vk::ClearRect { rect: *r, base_array_layer: 0, layer_count: 1 }).collect();
+                if !rects.is_empty() {
+                    let color = vk::ClearAttachment { aspect_mask: vk::ImageAspectFlags::COLOR, color_attachment: 0, clear_value: clear[0] };
+                    self.dev.raw.cmd_clear_attachments(batch.cb, &[color], &rects);
+                }
+            }
             // The state the last draw bound in this render pass: a draw binds only what changed
             // (a run of one model's copies or layers shares the pipeline and often the buffers).
             let mut bound = Bound::default();
+            let mut scissors = Vec::new();
             for (di, (d, p)) in prepared.into_iter().enumerate() {
                 if let (Some(q), Some(lp), Some(g)) = (split_q, &load_pass, runs.iter().position(|r| *r == di).filter(|g| *g > 0)) {
                     // the next run of a split pass: a render pass of its own, continuing the attachments
@@ -766,15 +823,18 @@ impl Vulkan {
                     vk::Rect2D { offset: vk::Offset2D { x: x0 as i32, y: y0 as i32 }, extent: vk::Extent2D { width: x1 - x0, height: y1 - y0 } }
                 };
                 if scissor.extent.width == 0 || scissor.extent.height == 0 { continue; }
+                // a partial repaint draws once into each damaged rect the draw touches
+                scissors.clear();
+                match (&damage, damage_mask) {
+                    (Some(rects), Some(mask)) => scissors.extend(rects.iter().enumerate()
+                        .filter(|(i, _)| d.damage & mask & 1 << i != 0).filter_map(|(_, rect)| intersect(&scissor, rect))),
+                    _ => scissors.push(scissor),
+                }
+                if scissors.is_empty() { continue; }
                 if prof_key.is_some() {
                     let program = &p.pipeline.program;
                     records.push(gpu_prof::DrawRecord::new(s, d, view.arena, v[2], v[3], depth.is_some(), program.desc.instance_stride as u64 * 4,
                         p.vertex.size + p.index.size, program.code.textures.len()));
-                }
-                let rect = (scissor.offset.x, scissor.offset.y, scissor.extent.width, scissor.extent.height);
-                if bound.scissor != Some(rect) {
-                    self.dev.raw.cmd_set_scissor(batch.cb, 0, &[scissor]);
-                    bound.scissor = Some(rect);
                 }
                 if bound.pipeline != p.pipeline.raw {
                     self.dev.raw.cmd_bind_pipeline(batch.cb, vk::PipelineBindPoint::GRAPHICS, p.pipeline.raw);
@@ -795,11 +855,18 @@ impl Vulkan {
                 let dynamic = p.pipeline.program.dynamic.len();
                 self.dev.raw.cmd_bind_descriptor_sets(batch.cb, vk::PipelineBindPoint::GRAPHICS, p.pipeline.program.layout, 0, &[p.descriptors], &p.offsets[..dynamic]);
                 if d.inst_ranges.len != 0 && read_pairs(view.arena, d.inst_ranges).count() != d.inst_ranges.len as usize { s.bad(); continue; }
-                let whole = (d.inst_ranges.len == 0).then_some([0, d.inst.count]);
-                for [start, count] in whole.into_iter().chain(read_pairs(view.arena, d.inst_ranges)) {
-                    if start.checked_add(count).is_none_or(|end| end > d.inst.count) { s.bad(); continue; }
-                    let Some(first) = p.first_instance.checked_add(start) else { s.bad(); continue; };
-                    self.dev.raw.cmd_draw_indexed(batch.cb, d.index[1], count, d.index[0], 0, first);
+                for scissor in &scissors {
+                    let rect = (scissor.offset.x, scissor.offset.y, scissor.extent.width, scissor.extent.height);
+                    if bound.scissor != Some(rect) {
+                        self.dev.raw.cmd_set_scissor(batch.cb, 0, std::slice::from_ref(scissor));
+                        bound.scissor = Some(rect);
+                    }
+                    let whole = (d.inst_ranges.len == 0).then_some([0, d.inst.count]);
+                    for [start, count] in whole.into_iter().chain(read_pairs(view.arena, d.inst_ranges)) {
+                        if start.checked_add(count).is_none_or(|end| end > d.inst.count) { s.bad(); continue; }
+                        let Some(first) = p.first_instance.checked_add(start) else { s.bad(); continue; };
+                        self.dev.raw.cmd_draw_indexed(batch.cb, d.index[1], count, d.index[0], 0, first);
+                    }
                 }
             }
             self.dev.raw.cmd_end_render_pass(batch.cb);
@@ -820,12 +887,25 @@ impl Vulkan {
                 p.passes.push(ProfPass { pass: pi, query: whole_q, split: split_q.map(|_| split_runs) });
             }
         }
+        // the kept image holds all of this frame now, unless some of its draws were left out
+        if retained {
+            if s.stats.skipped_draws == skipped_before && ablate.is_none() {
+                self.damage_base.insert(base, (s.id, Arc::downgrade(&colors[0].1), s.frame));
+            } else {
+                self.damage_base.remove(&base);
+            }
+        }
         for (i, color) in colors {
             if !pick && color.desc.mips > 1 { self.generate_mips(&color, pass.layer[i], batch); }
             color.transition(batch.cb, color.sampled_layout());
             batch.rendered(&color);
         }
         if let Some(depth) = depth { depth.transition(batch.cb, depth.sampled_layout()); }
+        if partial && damage_check() {
+            if let Some(image) = window.clone() {
+                self.check_partial_repaint(s, target, pass, frame_size, draws, view, batch, now, deps, &image, damage_mask.unwrap_or(0));
+            }
+        }
         if hosted {
             self.win.insert((s.id, target.index), Texture { gen: target.gen, image: window.as_ref().unwrap().clone() });
             self.hosted_sizes.insert((s.id, target.index), size);
@@ -833,6 +913,88 @@ impl Vulkan {
         #[cfg(target_os = "linux")]
         if window.is_some() { self.window_px = size; }
         Ok(window)
+    }
+
+    /// The damage check: the pass we just repainted partially into `image` is rendered whole into an image
+    /// of its own too, and the two pictures are compared once the GPU is done with them.
+    #[allow(clippy::too_many_arguments)]
+    fn check_partial_repaint(&mut self, s: &mut Session, target: Id, pass: &Pass, frame_size: [u32; 2], draws: &[Draw], view: &CmdView,
+        batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>, image: &Arc<Image>, damage_mask: u32) {
+        let (w, h, fmt) = (image.desc.w, image.desc.h, image.desc.format);
+        let len = w as u64 * h as u64 * format::texel_bytes(fmt);
+        // an image and staging buffer an earlier check is done with, so checking every frame doesn't run the GPU out of memory
+        let fits = |i: &Arc<Image>| [i.desc.w, i.desc.h, i.desc.format] == [w, h, fmt];
+        self.damage_checks.retain(|(i, b)| fits(i) || Arc::strong_count(i) > 1 || Arc::strong_count(b) > 1);
+        let free = self.damage_checks.iter().find(|(i, b)| fits(i) && Arc::strong_count(i) == 1 && Arc::strong_count(b) == 1).cloned();
+        let (whole, staging) = match free {
+            Some(pair) => pair,
+            None if self.damage_checks.len() >= DAMAGE_CHECKS_IN_FLIGHT => {
+                DAMAGE_SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+            None => {
+                let whole = Image::new(self.dev.clone(), TextureObj { format: fmt, w, h, depth: 1, mips: 1,
+                    usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None });
+                match (whole, Buffer::scratch(self.dev.clone(), len * 2, vk::BufferUsageFlags::TRANSFER_DST)) {
+                    (Ok(whole), Ok(staging)) => { self.damage_checks.push((whole.clone(), staging.clone())); (whole, staging) }
+                    (Err(e), _) | (_, Err(e)) => { eprintln!("[hal-damage-check] {e}"); return; }
+                }
+            }
+        };
+        let full = Pass { damage: Range::default(), damage_since: 0, ..*pass };
+        if let Err(e) = self.encode_pass(s, target, true, false, &full, frame_size, draws, view, batch, now, deps, Some((&whole, [0, 0]))) {
+            eprintln!("[hal-damage-check] whole repaint: {e}");
+            return;
+        }
+        let layers = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1);
+        for (i, source) in [image, &whole].into_iter().enumerate() {
+            source.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+            let copy = vk::BufferImageCopy::default().buffer_offset(i as u64 * len).image_subresource(layers)
+                .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
+            unsafe { self.dev.raw.cmd_copy_image_to_buffer(batch.cb, source.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, staging.buffer, &[copy]); }
+            source.transition(batch.cb, source.sampled_layout());
+        }
+        unsafe {
+            self.dev.raw.cmd_pipeline_barrier(batch.cb, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::HOST, vk::DependencyFlags::empty(),
+                &[vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::TRANSFER_WRITE).dst_access_mask(vk::AccessFlags::HOST_READ)], &[], &[]);
+        }
+        batch.images.push(whole);
+        batch.buffers.push(staging.clone());
+        let (frame, damage) = (s.frame, read_rects(view.arena, pass.damage).collect::<Vec<_>>());
+        // the draws the partial repaint left out, so a difference can name the ones over it
+        let left_out: Vec<(String, u32, u32, [f32; 4])> = draws.iter().filter(|d| d.index[1] != 0 && d.inst.count != 0 && d.damage & damage_mask == 0)
+            .map(|d| (self.pipe.get(&(s.id, d.pipeline.index)).map_or_else(|| "?".into(), |p| gpu_prof::shader_name(s, &p.desc)), d.list, d.item, d.bounds))
+            .collect();
+        let texel = format::texel_bytes(fmt) as usize;
+        batch.tickets.push(Ticket::FrameCap { staging, len: len as usize * 2, done: Box::new(move |bytes| {
+            let Some(bytes) = bytes else { return };
+            let (partial, whole) = bytes.split_at(bytes.len() / 2);
+            let mut differ = 0u64;
+            let mut bbox = [u32::MAX, u32::MAX, 0, 0];
+            let mut first = None;
+            if partial != whole {
+                for (i, (a, b)) in partial.chunks_exact(texel).zip(whole.chunks_exact(texel)).enumerate() {
+                    if a != b {
+                        let (x, y) = (i as u32 % w, i as u32 / w);
+                        first.get_or_insert((x, y, a.to_vec(), b.to_vec()));
+                        differ += 1;
+                        bbox = [bbox[0].min(x), bbox[1].min(y), bbox[2].max(x + 1), bbox[3].max(y + 1)];
+                    }
+                }
+            }
+            let checked = DAMAGE_CHECKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let wrong = DAMAGE_WRONG.fetch_add((differ != 0) as u64, std::sync::atomic::Ordering::Relaxed) + (differ != 0) as u64;
+            if differ != 0 {
+                let over: Vec<_> = left_out.iter().filter(|(.., b)| b.iter().any(|v| v.is_nan())
+                    || (b[0] < bbox[2] as f32 && b[0] + b[2] > bbox[0] as f32 && b[1] < bbox[3] as f32 && b[1] + b[3] > bbox[1] as f32)).collect();
+                eprintln!("[hal-damage-check] frame {frame}: {differ} pixels differ from a whole repaint, within {bbox:?} (x0, y0, x1, y1); damage {damage:?}");
+                eprintln!("[hal-damage-check] first at {first:?} (x, y, partial, whole); left out over it (shader, list, item, bounds): {over:?}");
+            }
+            if differ != 0 || checked.is_multiple_of(120) {
+                let skipped = DAMAGE_SKIPPED.load(std::sync::atomic::Ordering::Relaxed);
+                eprintln!("[hal-damage-check] {checked} partial frames checked, {wrong} differed, {skipped} not checked while earlier checks ran");
+            }
+        }) });
     }
 
     fn prepare(&mut self, s: &mut Session, pass: &Pass, d: &Draw, arena: &[u8], pick: bool, render_pass: Arc<RenderPass>, attachments: &[Arc<Image>],
@@ -1028,6 +1190,25 @@ impl Vulkan {
             }
         });
     }
+}
+
+static DAMAGE_CHECKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DAMAGE_WRONG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DAMAGE_SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// About as many frames as the GPU has in flight.
+const DAMAGE_CHECKS_IN_FLIGHT: usize = 3;
+
+/// `MAKEPAD_DAMAGE_CHECK=1` (on Android, `setprop debug.makepad.damage_check 1`): every partial repaint
+/// is rendered whole too and the two compared (`Vulkan::check_partial_repaint`).
+fn damage_check() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        #[cfg(target_os = "android")]
+        if let Some(value) = crate::backend::android::xr::system_property("debug.makepad.damage_check") {
+            return value == "1";
+        }
+        std::env::var_os("MAKEPAD_DAMAGE_CHECK").is_some_and(|v| v == "1")
+    })
 }
 
 /// `MAKEPAD_FRAME_STAMP=1`: stamp every frame handed to a host compositor (`Vulkan::stamp_frame`).
