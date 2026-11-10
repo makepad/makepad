@@ -1239,8 +1239,18 @@ impl CheckBox {
         // the mark off the middle.
         let worded = !text.is_empty();
         if worded && self.label_before {
-            self.draw_text
-                .draw_walk(cx, label_walk, self.label_align, text);
+            // A leading label has the row's icon after it, so we keep the icon's room free too.
+            let row_icon = if knob_carries_the_pair {
+                &mut self.draw_icon
+            } else if on {
+                &mut self.draw_icon_on
+            } else {
+                &mut self.draw_icon_off
+            };
+            let icon_room = row_icon
+                .measure(cx, icon_walk)
+                .map_or(0.0, |size| size.x + icon_walk.margin.width() + self.layout.spacing);
+            Self::draw_label(cx, &mut self.draw_text, label_walk, self.label_align, text, icon_room);
         }
         // The mark in the row: the face for the state it is in when the
         // pair is the row's own, and the single icon otherwise.
@@ -1252,13 +1262,48 @@ impl CheckBox {
             self.draw_icon_off.draw_walk(cx, icon_walk);
         }
         if worded && !self.label_before {
-            self.draw_text
-                .draw_walk(cx, label_walk, self.label_align, text);
+            Self::draw_label(cx, &mut self.draw_text, label_walk, self.label_align, text, 0.0);
         }
         self.draw_bg.end(cx);
         self.draw_knob_icons(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
+    }
+
+    fn draw_label(
+        cx: &mut Cx2d,
+        draw_text: &mut DrawText,
+        walk: Walk,
+        align: Align,
+        text: &str,
+        room_after: f64,
+    ) {
+        // DrawText would wrap a Fit label at our whole inner width (or nowhere, while we're Fit),
+        // so we give it just the room left after the mark and icon, within our width or max width.
+        let label_room = walk.width.is_fit().then(|| {
+            let turtle = cx.turtle();
+            let width = Some(turtle.width())
+                .filter(|width| !width.is_nan())
+                .or_else(|| cx.current_turtle_max_width())?;
+            let label_x = turtle.pos().x + cx.turtle_next_walk_offset().x + walk.margin.left;
+            Some(turtle.origin().x + width - turtle.padding().right - label_x - walk.margin.right - room_after)
+        }).flatten();
+        if let Some(label_room) = label_room {
+            let wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
+            let max_width_in_lpxs = label_room.max(0.0) as f32 / draw_text.font_scale.max(0.0001);
+            let text = draw_text.layout(
+                cx,
+                0.0,
+                0.0,
+                Some(max_width_in_lpxs),
+                wrap,
+                align,
+                text,
+            );
+            draw_text.draw_walk_laidout(cx, walk, &text);
+        } else {
+            draw_text.draw_walk(cx, walk, align, text);
+        }
     }
 
     /// Whether the state pair belongs on a knob rather than in the row:
