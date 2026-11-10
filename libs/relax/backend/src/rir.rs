@@ -1149,7 +1149,10 @@ impl SwitchTable {
 pub struct Succs {
     a: [u32; 2],
     n: u8,
-    i: u8,
+    // as wide as a switch table is long: an 8-bit position wrapped to 0 after a table's 256th
+    // successor and the iterator never ended (a derived `Debug` on a 256-variant enum is one
+    // switch with that many distinct arms; whoever collected the successors grew without bound)
+    i: u32,
     sw: Option<std::sync::Arc<SwitchTable>>,
 }
 
@@ -1162,7 +1165,7 @@ impl Iterator for Succs {
             self.i += 1;
             return r;
         }
-        if self.i < self.n {
+        if self.i < self.n as u32 {
             self.i += 1;
             Some(self.a[self.i as usize - 1])
         } else {
@@ -2492,6 +2495,24 @@ mod slot_table_tests {
         assert_eq!(t.find(2, t.table((1 << 18) + 3)), Some(((1 << 18) + 3, 0)));
         assert_eq!(t.find(0, a + 5 * 32 + 4), Some((5, 4)));
         assert_eq!(t.find(0, 0x2000_0000), None);
+    }
+}
+
+#[cfg(test)]
+mod succs_tests {
+    use super::{SwitchTable, Term, VReg};
+
+    /// A switch lists each distinct successor once and then ends, however long its table is.
+    #[test]
+    fn a_switch_with_more_than_255_successors_ends() {
+        for n in [1u32, 2, 255, 256, 257, 300, 70_000] {
+            let t = Term::Switch(VReg(0), std::sync::Arc::new(SwitchTable::new(0, (1..=n).collect(), 0)));
+            // bounded, so that a position that wraps fails the test instead of filling memory
+            let got: Vec<u32> = t.succs().take(n as usize + 10).collect();
+            let mut want: Vec<u32> = (1..=n).collect();
+            want.push(0);
+            assert_eq!(got, want, "{} table entries", n);
+        }
     }
 }
 
