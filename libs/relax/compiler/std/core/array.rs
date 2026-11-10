@@ -147,6 +147,16 @@ impl<'b, T: PartialEq<U>, U, const N: usize> PartialEq<[U; N]> for &'b [T] {
         crate::slice::slice_eq(*self, &other[..])
     }
 }
+impl<'b, T: PartialEq<U>, U, const N: usize> PartialEq<&'b mut [U]> for [T; N] {
+    fn eq(&self, other: &&'b mut [U]) -> bool {
+        crate::slice::slice_eq(&self[..], &**other)
+    }
+}
+impl<'b, T: PartialEq<U>, U, const N: usize> PartialEq<[U; N]> for &'b mut [T] {
+    fn eq(&self, other: &[U; N]) -> bool {
+        crate::slice::slice_eq(&**self, &other[..])
+    }
+}
 impl<T: Eq, const N: usize> Eq for [T; N] {}
 
 /// real core array/mod.rs: an array hashes as its slice (length prefix included)
