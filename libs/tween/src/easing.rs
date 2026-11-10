@@ -111,7 +111,7 @@ pub enum Easing {
         /// `((a - 1) * -b) / (a * (1 - b))`.
         base: f64,
     },
-    /// Makepad's loose cubic-bezier solver (theme motion tokens, EaseEditor
+    /// Makepad's cubic-bezier solver (theme motion tokens, EaseEditor
     /// output): identical to `Ease::Bezier`. CSS strings use [`Easing::CubicBezier`].
     Bezier {
         /// First control point x.
@@ -551,8 +551,7 @@ impl Easing {
             Self::Bezier { x1, y1, x2, y2 } => parity_bezier(x1, y1, x2, y2, t),
             Self::Emphasized => {
                 // Android's path is the emphasized-accelerate curve up to 40% at a sixth of
-                // the time, then the emphasized-decelerate curve for the rest. Solved precisely:
-                // the loose parity solver steps backwards on these steep curves.
+                // the time, then the emphasized-decelerate curve for the rest.
                 const SPLIT_TIME: f64 = 1.0 / 6.0;
                 const SPLIT_PROGRESS: f64 = 0.4;
                 if t <= 0. {
@@ -805,8 +804,8 @@ fn exp_decay_map(d1: f64, d2: f64, steps: u32, max: u32, t: f64) -> f64 {
     1.0
 }
 
-/// Makepad's `Ease::Bezier` solver: six Newton steps with a loose epsilon
-/// (`t / 200`), then eight bisection steps.
+/// Makepad's `Ease::Bezier` solver: up to eight Newton steps, then up to 30
+/// bisection steps, until x is within 1e-7 of `t`.
 fn parity_bezier(x1: f64, y1: f64, x2: f64, y2: f64, t: f64) -> f64 {
     if t < 0. {
         return 0.;
@@ -817,7 +816,8 @@ fn parity_bezier(x1: f64, y1: f64, x2: f64, y2: f64, t: f64) -> f64 {
     if (x1 - y1).abs() < 0.001 && (x2 - y2).abs() < 0.001 {
         return t;
     }
-    let epsilon = 1.0 / 200.0 * t;
+    // Tight enough that steep curves stay smooth instead of jittering back and forth.
+    const EPSILON: f64 = 1e-7;
     let cx = 3.0 * x1;
     let bx = 3.0 * (x2 - x1) - cx;
     let ax = 1.0 - cx - bx;
@@ -825,9 +825,9 @@ fn parity_bezier(x1: f64, y1: f64, x2: f64, y2: f64, t: f64) -> f64 {
     let by = 3.0 * (y2 - y1) - cy;
     let ay = 1.0 - cy - by;
     let mut u = t;
-    for _ in 0..6 {
+    for _ in 0..8 {
         let x = ((ax * u + bx) * u + cx) * u - t;
-        if x.abs() < epsilon {
+        if x.abs() < EPSILON {
             return ((ay * u + by) * u + cy) * u;
         }
         let d = (3.0 * ax * u + 2.0 * bx) * u + cx;
@@ -839,9 +839,9 @@ fn parity_bezier(x1: f64, y1: f64, x2: f64, y2: f64, t: f64) -> f64 {
     let mut w = 0.0;
     let mut v = 1.0;
     u = t;
-    for _ in 0..8 {
+    for _ in 0..30 {
         let x = ((ax * u + bx) * u + cx) * u;
-        if (x - t).abs() < epsilon {
+        if (x - t).abs() < EPSILON {
             return ((ay * u + by) * u + cy) * u;
         }
         if t > x {

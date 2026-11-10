@@ -7,7 +7,7 @@
 //!   parity [`Easing::Bezier`] that `Ease::Bezier` runs through in the
 //!   Animator and in tweens), so what is drawn is what plays. Design section
 //!   11 asks for the parametric `(X(u), Y(u))`; the y deviates on purpose, by
-//!   at most about 0.011 (ease_in_out_back). A stretch past the widget is
+//!   at most about 2e-5 (ease_in_out_expo). A stretch past the widget is
 //!   clipped, not flattened onto the edge. A preview dot runs along the
 //!   curve (1 s, hold 0.4 s, loop) on a [`TweenClock`] chain that patches one
 //!   instance per frame (no redraw, no layout, no allocation) and stops as soon
