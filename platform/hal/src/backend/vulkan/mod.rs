@@ -126,6 +126,9 @@ pub struct Vulkan {
     queue: Option<Worker>,
     complete: Arc<Worker>,
     compiler: Worker,
+    /// The newest pipeline (`Device::pipeline_made_ns`) a save of the pipeline cache was queued
+    /// after, so the next save waits for another pipeline.
+    pipeline_cache_queued_ns: u64,
     /// The UI's memory reserve and the creates waiting for room (`crate::gpu_pressure`).
     pressure: crate::gpu_pressure::Pressure,
     /// The instance extensions the device was made with (a replacement device gets the same).
@@ -147,6 +150,8 @@ pub struct Vulkan {
 /// The first wait before another attempt at a replacement device, and the longest.
 const RESET_RETRY_NS: u64 = 250_000_000;
 const RESET_RETRY_MAX_NS: u64 = 8_000_000_000;
+/// How long after the newest pipeline the pipeline cache goes to its file.
+const PIPELINE_CACHE_SAVE_NS: u64 = 2_000_000_000;
 
 impl Vulkan {
     /// `sessions` makes a completion's session look; `notify` (the shell's events) every pump.
@@ -217,7 +222,7 @@ impl Vulkan {
             #[cfg(target_os = "linux")] foreign_support,
             batch: None, spares: Default::default(), mailbox: Mailbox::new(sessions),
             queue: Some(Worker::new("makepad-vulkan-submit")?), complete: Arc::new(Worker::new("makepad-vulkan-complete")?),
-            compiler: Worker::new("makepad-vulkan-compile")?, pressure: Default::default(),
+            compiler: Worker::new("makepad-vulkan-compile")?, pipeline_cache_queued_ns: 0, pressure: Default::default(),
             instance_extensions, lost_posted: false, retry_ns: 0, reset_failures: 0, simulate: false,
             simulate_at_ns: super::simulated_loss_at() })
     }
@@ -537,13 +542,21 @@ impl Backend for Vulkan {
             self.flush();
         }
         self.watch_memory(world);
+        // pipelines were made and none for two seconds: the cache goes to its file (compile
+        // worker), even when nothing draws after them
+        if let Some(made) = self.unsaved_pipeline_ns().filter(|made| crate::clock_ns() >= made + PIPELINE_CACHE_SAVE_NS) {
+            self.pipeline_cache_queued_ns = made;
+            let dev = self.dev.clone();
+            self.compiler.push(move || dev.save_pipeline_cache());
+        }
         exec::step_timers(world, sid);
     }
     fn next_due(&self, world: &World, sid: u32) -> Option<u64> {
         let watch = self.pressure.waiting().then(|| world.now() + crate::gpu_pressure::CHECK_NS);
         // a lost device is tried again (`recover`) without anything else to wake the HAL
         let reset = self.lost_posted.then(|| world.now() + RESET_RETRY_NS);
-        let timer = exec::next_timer(world, sid).into_iter().chain(watch).chain(reset).min();
+        let save = self.unsaved_pipeline_ns().map(|made| made + PIPELINE_CACHE_SAVE_NS);
+        let timer = exec::next_timer(world, sid).into_iter().chain(watch).chain(reset).chain(save).min();
         #[cfg(target_os = "android")]
         let timer = timer.into_iter().chain(self.native_layers.pending.keys().any(|(s, _)| *s == sid).then(|| world.now() + 8_000_000)).min();
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -583,6 +596,7 @@ impl Backend for Vulkan {
     /// stop in dependency order -- compiles; the queue (its submits, presents and retirements,
     /// which hand completions on); the completions (fence waits, frees) -- each joined.
     fn before_exit(&mut self) {
+        self.dev.save_pipeline_cache();
         self.flush();
         if let Some(queue) = self.queue.as_ref() { self.windows.clear(queue); }
         self.compiler.stop();
@@ -622,6 +636,13 @@ impl Vulkan {
             let _ = job.program.set(program); job.epoch.fetch_add(1, Ordering::Release);
             for sid in job.answered() { notify(sid, false); }
         });
+    }
+
+    /// When the newest pipeline was made (`Device::pipeline_made_ns`), while no save of the
+    /// pipeline cache has been queued since.
+    fn unsaved_pipeline_ns(&self) -> Option<u64> {
+        let made = self.dev.pipeline_made_ns.load(Ordering::Relaxed);
+        (self.dev.pipelines_made.load(Ordering::Relaxed) > 0 && made != self.pipeline_cache_queued_ns).then_some(made)
     }
 
     /// A lost device (the driver's VK_ERROR_DEVICE_LOST, or a simulated loss) is replaced
