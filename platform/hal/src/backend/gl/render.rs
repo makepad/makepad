@@ -63,6 +63,8 @@ pub(super) struct Caps {
     pub software: bool,
     /// frames carry their GPU time (`timer.rs`)
     pub gpu_timer: bool,
+    /// the program cache keeps binaries but has none yet (`info_flags::PIPELINE_CACHE_COLD`)
+    pub program_cache_cold: bool,
     /// the EGL display, config and context of the share group (the `GlShare` event)
     #[cfg(target_os = "linux")]
     pub share: [u64; 3],
@@ -231,8 +233,8 @@ pub(super) struct Renderer {
     pub presented: bool,
     #[cfg(target_os = "android")]
     pub worker: super::worker::WorkerState,
-    /// made at the first compile, once the app's cache dir is known
-    pub cache: Option<super::cache::ProgramCache>,
+    /// made with the context, since the Activity's params (the app's cache dir) come before the app starts
+    pub cache: super::cache::ProgramCache,
     pub timer: Option<super::timer::GpuTimer>,
     exit: bool,
 }
@@ -279,6 +281,7 @@ impl Renderer {
             unsafe { threads(u32::MAX) }
         }
         let timer = super::timer::GpuTimer::new(gl, &ext);
+        let cache = super::cache::ProgramCache::new(gl);
         let caps = Arc::new(Caps {
             formats,
             max_texture: gl.integer(sys::MAX_TEXTURE_SIZE).min(gl.integer(sys::MAX_RENDERBUFFER_SIZE)).max(2048) as u32,
@@ -292,6 +295,7 @@ impl Renderer {
             renderer: format!("{} ({version})", gl.string(sys::RENDERER)),
             software: ctx.software(),
             gpu_timer: timer.is_some(),
+            program_cache_cold: cache.cold,
             #[cfg(target_os = "linux")]
             share: [ctx.share.display as u64, ctx.share.config as u64, ctx.share.context as u64],
         });
@@ -331,7 +335,7 @@ impl Renderer {
             fbos: HashMap::new(), read_fbo: names[0], copy_fbo: names[1], fallback, nearest,
             uniform_arena: names[2], instance_arena: names[3], arena_words: (0, 0), pending: VecDeque::new(), mailbox,
             #[cfg(target_os = "android")] queue, #[cfg(target_os = "android")] presented: false,
-            #[cfg(target_os = "android")] worker: super::worker::WorkerState::Unstarted, cache: None, timer, exit: false })
+            #[cfg(target_os = "android")] worker: super::worker::WorkerState::Unstarted, cache, timer, exit: false })
     }
 
     pub fn exit(&mut self) {

@@ -181,14 +181,14 @@ impl Renderer {
     pub(super) fn compile_on_worker(&mut self, state: &Arc<PipeState>, key: Key) -> bool {
         if !self.presented || self.caps.parallel_compile { return false; }
         if matches!(self.worker, WorkerState::Unstarted) {
-            let cache = self.cache.as_ref().filter(|c| c.binaries);
+            let cache = self.cache.binaries.then_some(&self.cache);
             self.worker = cache.and_then(|c| Worker::start(self.ctx.share.clone(), self.ctx.gl.driver(), c.dir(), self.queue.clone()))
                 .map_or(WorkerState::Off, WorkerState::On);
         }
         let WorkerState::On(worker) = &self.worker else { return false };
         // a cached program loads here, unless the worker is compiling
         if let Some(hold) = worker.hold() {
-            if let Some(program) = self.cache.as_mut().and_then(|c| c.load(&self.ctx.gl, key)) {
+            if let Some(program) = self.cache.load(&self.ctx.gl, key) {
                 self.loaded(state, program);
                 return true;
             }
@@ -204,12 +204,12 @@ impl Renderer {
             match reply {
                 Reply::Binary { format, binary, cached } => match cache::load(&self.ctx.gl, format, &binary) {
                     Some(program) => {
-                        if let Some(c) = &mut self.cache { c.loaded(); }
+                        self.cache.loaded();
                         self.loaded(&state, program);
                     }
                     // that cache file is no good, so the program compiles afresh
                     None if cached => {
-                        if let Some(c) = &self.cache { c.forget(job.key); }
+                        self.cache.forget(job.key);
                         let key = job.key;
                         match &self.worker {
                             WorkerState::On(worker) => worker.push(job),
@@ -218,7 +218,7 @@ impl Renderer {
                     }
                     // a binary made in this process didn't load back, so none will
                     None => {
-                        if let Some(c) = &mut self.cache { c.reject(); }
+                        self.cache.reject();
                         self.stop_worker();
                         self.compile_here(&state, job.key);
                     }

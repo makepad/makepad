@@ -31,6 +31,8 @@ pub(super) struct ProgramCache {
     dir: Option<PathBuf>,
     /// the driver has binary formats and hasn't refused one it made in this process
     pub binaries: bool,
+    /// binaries go to disk but this launch found none, so it compiles every program
+    pub cold: bool,
     /// a binary of this driver loaded, so its binaries come back
     verified: bool,
 }
@@ -38,7 +40,7 @@ pub(super) struct ProgramCache {
 impl ProgramCache {
     /// The directory of this driver's binaries, under `MAKEPAD_HAL_CACHE_DIR` or the app's cache dir.
     pub fn new(gl: &Gl) -> Self {
-        let none = |binaries| Self { dir: None, binaries, verified: false };
+        let none = |binaries| Self { dir: None, binaries, cold: false, verified: false };
         if gl.integer(sys::NUM_PROGRAM_BINARY_FORMATS) <= 0 { return none(false); }
         let driver = gl.driver();
         #[cfg(target_os = "android")]
@@ -52,7 +54,8 @@ impl ProgramCache {
         }
         sweep(&parent, &dir);
         if dir.join(REJECTED).exists() { return none(false); }
-        Self { dir: Some(dir), binaries: true, verified: false }
+        let cold = !std::fs::read_dir(&dir).into_iter().flatten().flatten().any(|e| e.path().extension().is_some_and(|x| x == "bin"));
+        Self { dir: Some(dir), binaries: true, cold, verified: false }
     }
 
     /// Whether linked programs' binaries go to disk.

@@ -5,7 +5,7 @@
 //! twin of texture i on unit textures + i, the instance words after them; attribute pointers per
 //! draw on one VAO.
 
-use super::cache::{Key, ProgramCache};
+use super::cache::Key;
 use super::render::Renderer;
 use super::sys::{self, GLenum, GLint, GLuint};
 use super::{Linked, PipeState};
@@ -122,8 +122,6 @@ pub(super) fn link_error(gl: &sys::Gl, program: GLuint, shaders: [GLuint; 2]) ->
 impl Renderer {
     pub fn compile(&mut self, state: &Arc<PipeState>) {
         let key = Key::of(&state.code.vertex, &state.code.fragment);
-        let gl = &self.ctx.gl;
-        self.cache.get_or_insert_with(|| ProgramCache::new(gl));
         #[cfg(target_os = "android")]
         if self.compile_on_worker(state, key) { return; }
         self.compile_here(state, key);
@@ -132,12 +130,11 @@ impl Renderer {
     /// Loads the program from the cache, or compiles and links it on this thread.
     pub(super) fn compile_here(&mut self, state: &Arc<PipeState>, key: Key) {
         let gl = &self.ctx.gl;
-        let cache = self.cache.get_or_insert_with(|| ProgramCache::new(gl));
-        if let Some(program) = cache.load(gl, key) {
+        if let Some(program) = self.cache.load(gl, key) {
             self.loaded(state, program);
             return;
         }
-        let keep = cache.keeps();
+        let keep = self.cache.keeps();
         let (program, shaders) = start_link(gl, &state.code.vertex, &state.code.fragment, keep);
         self.linking.push((Arc::downgrade(state), Linking { program, shaders, key: keep.then_some(key) }));
         if !self.caps.parallel_compile { self.poll_links(); }
@@ -192,7 +189,7 @@ impl Renderer {
             return Err(log);
         }
         unsafe { for s in linking.shaders { (gl.glDeleteShader)(s) } }
-        if let (Some(key), Some(cache)) = (linking.key, &mut self.cache) { cache.store(gl, key, program); }
+        if let Some(key) = linking.key { self.cache.store(gl, key, program); }
         let uniform = |name: &str| unsafe { (gl.glGetUniformLocation)(program, cstr(name).as_ptr()) };
         unsafe { (gl.glUseProgram)(program) };
         let flip = uniform("mp_clip_y_flip");

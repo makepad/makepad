@@ -165,7 +165,7 @@ impl GlBackend {
         let mailbox = Mailbox::new(wake);
         let (queue, caps, thread) = render::start(source, mailbox.clone())?;
         let mut info = HalInfo { backend: backend_id::GL, dialect: dialect::GLSL, formats: caps.formats, msaa: 1, dpi: 1.0,
-            flags: if caps.gpu_timer { info_flags::GPU_TIMESTAMPS } else { 0 },
+            flags: if caps.gpu_timer { info_flags::GPU_TIMESTAMPS } else { 0 } | if caps.program_cache_cold { info_flags::PIPELINE_CACHE_COLD } else { 0 },
             max_texture: caps.max_texture, max_window: [caps.max_texture; 2],
             device_kind: if caps.software { device_kind::SOFTWARE } else { device_kind::UNKNOWN }, ..Default::default() };
         info.set_device_name(&caps.renderer);

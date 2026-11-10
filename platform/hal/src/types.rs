@@ -247,8 +247,8 @@ pub mod info_flags {
     /// both eyes side by side, and the app hands the result on; the XR window only paces them
     /// (its `XrFrame`s and `FrameReady`s), it is never presented.
     pub const XR_OFFSCREEN: u32 = 2048;
-    /// The backend keeps compiled pipelines across launches, and this one started with none from
-    /// this app build (a fresh install or an update), so its first frame compiles them all.
+    /// The backend keeps compiled pipelines across launches, and this one started with none it can
+    /// use (a fresh install, and on Vulkan an update too), so its first frame compiles them all.
     pub const PIPELINE_CACHE_COLD: u32 = 32768;
 
     #[test]
