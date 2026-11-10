@@ -633,16 +633,21 @@ impl RectPacker {
         {
             return false;
         }
-        let mut next_free_rects = Vec::with_capacity(self.free_rects.len().saturating_mul(2));
+        // No free rect is inside another, so none of the ones `used` misses can be inside a piece
+        // cut from one it hits: only the pieces need pruning, which keeps a big atlas's rebuild fast.
+        let mut kept = Vec::with_capacity(self.free_rects.len().saturating_mul(2));
+        let mut pieces = Vec::new();
         for free in self.free_rects.drain(..) {
-            if !rects_intersect(free, used) {
-                next_free_rects.push(free);
-                continue;
+            if rects_intersect(free, used) {
+                split_free_rect(free, used, &mut pieces);
+            } else {
+                kept.push(free);
             }
-            split_free_rect(free, used, &mut next_free_rects);
         }
-        self.free_rects = next_free_rects;
-        prune_contained_rects(&mut self.free_rects);
+        prune_contained_rects(&mut pieces);
+        pieces.retain(|piece| !kept.iter().any(|free| free.contains_rect(*piece)));
+        kept.append(&mut pieces);
+        self.free_rects = kept;
         true
     }
 }
