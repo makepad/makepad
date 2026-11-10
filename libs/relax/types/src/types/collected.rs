@@ -207,7 +207,8 @@ impl Types {
     pub fn collected_writer(&self) -> Option<crate::image::Writer<'_>> {
         self.collected_writer_with(&|| false)
     }
-    /// collected_writer, asking `stop` every arena chunk of rows (None: it said yes)
+    /// collected_writer, asking `stop` every arena chunk of rows and through the intern tables
+    /// (None: it said yes)
     pub fn collected_writer_with(&self, stop: &dyn Fn() -> bool) -> Option<crate::image::Writer<'_>> {
         let (n, table) = {
             let _g = self.index.lock();
@@ -222,6 +223,7 @@ impl Types {
         for t in [self.unit, self.bool_, self.char_, self.str_, self.never, self.error,
             self.i32_, self.i64_, self.u8_, self.u32_, self.u64_, self.usize_, self.isize_,
             self.f32_, self.f64_, self.str_ref] { t.put(&mut meta); }
+        if stop() { return None; }
         let mapped_rows = self.image.as_ref().map_or(&[][..], |image| image.rows);
         // the rows past the mapped ones, as the arena chunks hold them (no copy): a row below
         // `n` is written before `len` publishes it and never changes, and a chunk is freed only
@@ -240,12 +242,11 @@ impl Types {
             if stop() { return None; }
             i = end;
         }
-        let slots = table.snapshot(|s| (s & ID_MASK) as usize <= n);
-        if stop() { return None; }
+        let slots = table.snapshot(|s| (s & ID_MASK) as usize <= n, stop)?;
         // the list table after the rows taken above: every list they name is below its end
-        let (list_end, list_slots) = self.lists.image_slots();
+        let (list_end, list_slots) = self.lists.image_slots(stop)?;
         let mapped_words = self.lists.mapped;
-        let words = self.lists.tail_word_bytes(mapped_words.len(), list_end);
+        let words = self.lists.tail_word_bytes(mapped_words.len(), list_end, stop)?;
         let mut image = crate::image::Writer::default();
         image.add_bytes(0, meta); image.add_parts(1, mapped_rows, runs);
         image.add_mapped_prefix(2, mapped_words, words);

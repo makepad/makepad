@@ -76,6 +76,11 @@ pub fn map_inst(x: &Inst, m: &dyn Fn(VReg) -> VReg, slot_base: u32) -> Inst {
         Inst::TlsAddr(d, off) => Inst::TlsAddr(m(*d), *off),
         Inst::TlsStatic(d, off) => Inst::TlsStatic(m(*d), *off),
         Inst::Sel(d, c, a, b) => Inst::Sel(m(*d), m(*c), m(*a), m(*b)),
+        Inst::SelCmp(d, c, a, b) => {
+            let mut c = *c;
+            c.vregs_mut(|v| *v = m(*v));
+            Inst::SelCmp(m(*d), c, m(*a), m(*b))
+        }
         Inst::VSel(d, k, a, b) => Inst::VSel(m(*d), m(*k), m(*a), m(*b)),
         Inst::VFma(np, na, keep, w, d, a, b, c) => Inst::VFma(*np, *na, *keep, *w, m(*d), m(*a), m(*b), m(*c)),
         Inst::VSplat(d, a) => Inst::VSplat(m(*d), m(*a)),
@@ -7917,37 +7922,65 @@ pub fn expand_small_copies(f: &mut Func) {
     }
 }
 
-/// Late: `c ? 1 : 0` / `c ? 0 : 1` of a compare result c (0 / 1) is c / c ^ 1 (setcc instead of
+/// Late: `c ? 1 : 0` / `c ? 0 : 1` of a compare result c (0 / 1) is c / !c (setcc instead of
 /// two constants and a cmov: `count += is_less as usize` after an Ordering became a select).
-/// Runs after the last simplify, whose Ordering / phi folds read selects of constants.
+/// !c is the opposite compare made again when each of its operands has one definition, which runs
+/// before the compare on every path (they hold the same values here: `setge` instead of
+/// `setl; xor 1`), else c ^ 1. Runs after the last simplify, whose Ordering / phi folds read
+/// selects of constants.
 pub fn bool_selects(f: &mut Func) {
     let nv = f.vregs.len();
     let mut ndef = vec![0u32; nv];
     let mut k01: Vec<Option<i64>> = vec![None; nv];
-    let mut is_cmp = vec![false; nv];
+    let mut cmp: Vec<Option<Cmp>> = vec![None; nv];
+    let mut def_at = vec![(u32::MAX, 0usize); nv];
     for p in &f.params {
         ndef[p.0 as usize] += 1;
     }
-    for b in &f.blocks {
-        for i in &b.insts {
-            for_defs(i, |d| ndef[d.0 as usize] += 1);
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for (k, i) in b.insts.iter().enumerate() {
+            for_defs(i, |d| {
+                ndef[d.0 as usize] += 1;
+                def_at[d.0 as usize] = (bi as u32, k);
+            });
             match *i {
                 Inst::Iconst(d, k @ (0 | 1)) => k01[d.0 as usize] = Some(k),
-                Inst::ICmp(_, _, d, ..) | Inst::ICmpI(_, _, d, ..) | Inst::FCmp(_, _, d, ..) => is_cmp[d.0 as usize] = true,
-                _ => {}
+                _ => {
+                    if let Some((d, c)) = Cmp::of(i) {
+                        cmp[d.0 as usize] = Some(c);
+                    }
+                }
             }
         }
     }
     let one = |v: VReg, ndef: &[u32]| ndef[v.0 as usize] == 1;
+    let negs = f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(*i, Inst::Sel(_, c, x, y) if cmp[c.0 as usize].is_some() && k01[x.0 as usize] == Some(0) && k01[y.0 as usize] == Some(1))));
+    let dom = negs.then(|| crate::dom::Dom::new(f));
+    let held = |cc: Cmp, at: (u32, usize)| {
+        let mut h = dom.is_some();
+        cc.uses(|o| {
+            let d = def_at[o.0 as usize];
+            h &= one(o, &ndef) && (d.0 == u32::MAX || dom.as_ref().is_some_and(|dm| dm.before(d, at)));
+        });
+        h
+    };
+    let vregs = &f.vregs;
     for b in f.blocks.iter_mut() {
         for i in b.insts.iter_mut() {
             if let Inst::Sel(d, c, x, y) = *i {
-                if !one(c, &ndef) || !is_cmp[c.0 as usize] || !one(x, &ndef) || !one(y, &ndef) || f.vregs[d.0 as usize] != Cls::I {
+                let Some(cc) = cmp[c.0 as usize] else { continue };
+                if !one(c, &ndef) || !one(x, &ndef) || !one(y, &ndef) || vregs[d.0 as usize] != Cls::I {
                     continue;
                 }
+                let held = k01[x.0 as usize] == Some(0) && held(cc, def_at[c.0 as usize]);
                 match (k01[x.0 as usize], k01[y.0 as usize]) {
                     (Some(1), Some(0)) => *i = Inst::Mov(d, c),
-                    (Some(0), Some(1)) => *i = Inst::IBinI(IOp::Xor, U64, d, c, 1),
+                    (Some(0), Some(1)) => {
+                        *i = match cc.not() {
+                            Some(n) if held => n.inst(d),
+                            _ => Inst::IBinI(IOp::Xor, U64, d, c, 1),
+                        }
+                    }
                     _ => {}
                 }
             }

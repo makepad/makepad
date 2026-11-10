@@ -80,7 +80,7 @@ impl Raw {
     }
 }
 
-pub use imp::{list, regs_now, tid_of_handle};
+pub use imp::{each_thread, list, regs_now, tid_of_handle};
 
 thread_local! {
     static SELF_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -287,14 +287,9 @@ mod imp {
             // the handle the rest of Relax names threads by comes from libpthread
             let os_id = ident(port).0;
             let handle = unsafe { pthread_from_mach_thread_np(port) } as u64;
-            // thread_extended_info: user/system ns, cpu usage, policy, run state, flags,
-            // interruptible, cur/base/max priority, name[64]
-            let mut ext = [0u32; 28];
-            let mut n = 28u32;
             let (mut name, mut state, mut cpu_ns) = (String::new(), "?", 0u64);
-            if unsafe { thread_info(port, THREAD_EXTENDED_INFO, ext.as_mut_ptr(), &mut n) } == 0 {
-                let w = |k: usize| (ext[2 * k] as u64) | ((ext[2 * k + 1] as u64) << 32);
-                cpu_ns = w(0) + w(1);
+            if let Some(ext) = extended(port) {
+                cpu_ns = ext_cpu_ns(&ext);
                 state = match ext[6] {
                     1 => "running",
                     2 => "stopped",
@@ -303,9 +298,7 @@ mod imp {
                     5 => "halted",
                     _ => "?",
                 };
-                let bytes: Vec<u8> = ext[12..28].iter().flat_map(|w| w.to_ne_bytes()).collect();
-                let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-                name = String::from_utf8_lossy(&bytes[..len]).into_owned();
+                name = ext_name(&ext);
             }
             let stack = if handle != 0 {
                 let hi = unsafe { pthread_get_stackaddr_np(handle as usize) } as u64;
@@ -318,6 +311,45 @@ mod imp {
         }
         unsafe { vm_deallocate(task(), ports as usize, count as usize * 4) };
         out
+    }
+
+    /// thread_extended_info: user/system ns, cpu usage, policy, run state, flags, interruptible,
+    /// cur/base/max priority, name[64]
+    fn extended(port: Port) -> Option<[u32; 28]> {
+        let mut ext = [0u32; 28];
+        let mut n = 28u32;
+        (unsafe { thread_info(port, THREAD_EXTENDED_INFO, ext.as_mut_ptr(), &mut n) } == 0).then_some(ext)
+    }
+
+    fn ext_cpu_ns(ext: &[u32; 28]) -> u64 {
+        let w = |k: usize| (ext[2 * k] as u64) | ((ext[2 * k + 1] as u64) << 32);
+        w(0) + w(1)
+    }
+
+    fn ext_name(ext: &[u32; 28]) -> String {
+        let bytes: Vec<u8> = ext[12..28].iter().flat_map(|w| w.to_ne_bytes()).collect();
+        let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        String::from_utf8_lossy(&bytes[..len]).into_owned()
+    }
+
+    /// Each thread of the task now, cheaply (`instrument::runtime_cpu_ns` reads them on every look
+    /// a test takes): its Mach thread id, and on demand its name and its CPU (ns; None once it
+    /// ended), each one thread_info.
+    pub fn each_thread(mut f: impl FnMut(u64, &dyn Fn() -> String, &dyn Fn() -> Option<u64>)) {
+        let mut ports: *mut Port = std::ptr::null_mut();
+        let mut count = 0u32;
+        if unsafe { task_threads(task(), &mut ports, &mut count) } != 0 {
+            return;
+        }
+        for i in 0..count as usize {
+            let port = unsafe { *ports.add(i) };
+            let id = ident(port).0;
+            if id != 0 {
+                f(id, &|| extended(port).map_or_else(String::new, |e| ext_name(&e)), &|| extended(port).map(|e| ext_cpu_ns(&e)));
+            }
+            unsafe { mach_port_deallocate(task(), port) };
+        }
+        unsafe { vm_deallocate(task(), ports as usize, count as usize * 4) };
     }
 
     impl Drop for Thread {
@@ -515,6 +547,59 @@ mod imp {
         }
         out.sort_by_key(|t| t.os_id);
         out
+    }
+
+    /// Each thread of the process now, cheaply (`instrument::runtime_cpu_ns` reads them on every
+    /// look a test takes): its tid from one read of /proc/self/task, and on demand its name
+    /// (`comm`) and its CPU (its thread CPU clock, ns; None once it ended). `list` reads three
+    /// files per thread, and a thread's `syscall` file waits for the thread to come off its CPU:
+    /// on a loaded box a look cost the app's UI thread milliseconds. The directory stays open
+    /// (rewound for each look: no path walk) and its entries are read in place, nothing allocated
+    /// per thread.
+    pub fn each_thread(mut f: impl FnMut(u64, &dyn Fn() -> String, &dyn Fn() -> Option<u64>)) {
+        extern "C" {
+            fn opendir(path: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+            fn readdir64(dir: *mut std::ffi::c_void) -> *const u8;
+            fn rewinddir(dir: *mut std::ffi::c_void);
+        }
+        // the open stream (its address; 0 until the first look); its lock keeps one walk at a time on it
+        static DIR: relax_session::sync::Mutex<usize> = relax_session::sync::Mutex::new(0);
+        let mut dir = DIR.lock().unwrap_or_else(|e| e.into_inner());
+        if *dir == 0 {
+            *dir = unsafe { opendir(c"/proc/self/task".as_ptr()) } as usize;
+            if *dir == 0 {
+                return;
+            }
+        } else {
+            unsafe { rewinddir(*dir as *mut std::ffi::c_void) };
+        }
+        loop {
+            let e = unsafe { readdir64(*dir as *mut std::ffi::c_void) };
+            if e.is_null() {
+                break;
+            }
+            // dirent64: ino (8), off (8), reclen (2), type (1), then the name, NUL-terminated
+            let name = unsafe { std::ffi::CStr::from_ptr(e.add(19).cast()) }.to_bytes();
+            let Some(tid) = (!name.is_empty() && name.iter().all(u8::is_ascii_digit)).then(|| name.iter().fold(0u64, |t, &b| t * 10 + (b - b'0') as u64)) else { continue };
+            f(tid, &|| std::fs::read_to_string(format!("/proc/self/task/{tid}/comm")).unwrap_or_default().trim_end().to_string(), &|| thread_clock_ns(tid));
+        }
+    }
+
+    /// Thread `tid`'s CPU time in ns, read from its CPU clock (the kernel's
+    /// MAKE_THREAD_CPUCLOCK(tid, CPUCLOCK_SCHED), the clock pthread_getcpuclockid names): one call,
+    /// no file. None once it ended.
+    fn thread_clock_ns(tid: u64) -> Option<u64> {
+        #[repr(C)]
+        struct Ts {
+            s: i64,
+            ns: i64,
+        }
+        extern "C" {
+            fn clock_gettime(id: i32, ts: *mut Ts) -> i32;
+        }
+        let id = ((!(tid as u32)) << 3) as i32 | 6;
+        let mut ts = Ts { s: 0, ns: 0 };
+        (unsafe { clock_gettime(id, &mut ts) } == 0).then(|| ts.s as u64 * 1_000_000_000 + ts.ns as u64)
     }
 
     /// `/proc/self/task/<tid>/syscall`: "nr a1..a6 sp pc" while it blocks in a syscall
@@ -1111,6 +1196,26 @@ mod imp {
         out
     }
 
+    /// Each thread of the process now (one snapshot), and on demand its name and its CPU.
+    pub fn each_thread(mut f: impl FnMut(u64, &dyn Fn() -> String, &dyn Fn() -> Option<u64>)) {
+        let Ok(snap) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }) else { return };
+        let pid = unsafe { GetCurrentProcessId() };
+        let mut e = THREADENTRY32::default();
+        e.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        let mut more = unsafe { Thread32First(snap, &mut e) }.is_ok();
+        while more {
+            if e.th32OwnerProcessID == pid {
+                let tid = e.th32ThreadID as u64;
+                f(tid, &|| name_and_cpu(tid).0, &|| Some(name_and_cpu(tid).1));
+            }
+            e.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            more = unsafe { Thread32Next(snap, &mut e) }.is_ok();
+        }
+        unsafe {
+            let _ = CloseHandle(snap);
+        }
+    }
+
     /// The thread's description (SetThreadDescription; std names its threads with it) and its
     /// user + kernel CPU time.
     fn name_and_cpu(tid: u64) -> (String, u64) {
@@ -1197,6 +1302,7 @@ mod imp {
     pub fn list() -> Vec<Thread> {
         Vec::new()
     }
+    pub fn each_thread(_f: impl FnMut(u64, &dyn Fn() -> String, &dyn Fn() -> Option<u64>)) {}
     pub fn capture(_t: &Thread, _raw: &mut Raw) -> Result<(), &'static str> {
         Err("stack capture is not implemented on this target")
     }

@@ -140,8 +140,50 @@ mod test_child {
         }
         let output = output(&mut command);
         let all = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-        assert!(output.status.success() && all.contains("test result: ok. 1 passed"), "{test} in its own process:\n{all}");
+        if !(output.status.success() && all.contains("test result: ok. 1 passed")) {
+            panic!("{test} in its own process: {}\n{all}", child_cause(&all, &test, output.status));
+        }
         false
+    }
+
+    /// A failed child's cause for the panic's first line, the line a bucket's summary shows: the
+    /// message its test thread panicked with and where; else that of the first panic the JIT
+    /// reported uncaught (`report: {..}`, under the JIT a panic's only line at times), else the
+    /// first other thread's; or how the child ended without one.
+    fn child_cause(all: &str, test: &str, status: ExitStatus) -> String {
+        let lines: Vec<&str> = all.lines().collect();
+        let panics = || lines.windows(2).filter_map(|w| {
+            let (who, at) = w[0].strip_prefix("thread '")?.split_once(" panicked at ")?;
+            Some((who.split_once('\'').map_or(who, |(name, _)| name), format!("{} (panicked at {})", w[1].trim(), at.trim_end_matches(':'))))
+        });
+        let reported = || lines.iter().find_map(|line| {
+            let report = line.trim_start().strip_prefix("report: {\"kind\":\"panic\"")?;
+            Some(format!("{} (panicked at {})", json_field(report, "message")?, json_field(report, "location")?))
+        });
+        match panics().find(|(who, _)| *who == test).map(|(_, cause)| cause).or_else(reported).or_else(|| panics().next().map(|(_, cause)| cause)) {
+            Some(cause) => cause,
+            None if status.success() => "it ran no test".to_string(),
+            None => format!("it ended with {status} and no panic"),
+        }
+    }
+
+    /// The first line of the string field `key` of one JSON object's text, its escapes read (a
+    /// report's message).
+    fn json_field(object: &str, key: &str) -> Option<String> {
+        let mut chars = object.split_once(&format!("\"{key}\":\""))?.1.chars();
+        let mut out = String::new();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => return Some(out),
+                '\\' => match chars.next()? {
+                    'n' => return Some(out),
+                    'u' => out.push(char::from_u32(u32::from_str_radix(&chars.by_ref().take(4).collect::<String>(), 16).ok()?).unwrap_or('?')),
+                    e => out.push(e),
+                },
+                c => out.push(c),
+            }
+        }
+        None
     }
 }
 

@@ -245,6 +245,37 @@ fn a_failed_check_reports_no_late_lints() {
     assert_eq!(warnings, ["unused import: `std::collections::HashMap` [unused_imports]", "unused import: `std::fmt::Debug` [unused_imports]", "unused variable: `x` [unused_variables]"]);
 }
 
+/// A body whose check was preempted has no answer yet. Asked again and preempted again, it counted
+/// as clean and its error was lost: it is asked until it has an answer.
+#[test]
+fn a_body_preempted_again_and_again_still_reports_its_error() {
+    if warnings_in_child("check_lint_tests::a_body_preempted_again_and_again_still_reports_its_error").is_none() {
+        crate::check::force_body_unwinds("never_clean", 3);
+        assert_ne!(check_package_code("pub fn never_clean() -> u32 { \"text\" }\n", &[]), 0, "its error was lost");
+        assert_eq!(crate::check::forced_body_unwinds_left(), 0, "it was not held up");
+    }
+}
+
+/// A constant's evaluation that panicked has no answer: it counted as clean.
+#[test]
+fn a_constant_whose_evaluation_panics_fails_the_check() {
+    if warnings_in_child("check_lint_tests::a_constant_whose_evaluation_panics_fails_the_check").is_none() {
+        crate::check::force_eval_panic("NEVER_CLEAN");
+        assert_ne!(check_package_code("pub const NEVER_CLEAN: u32 = 1;\n", &[]), 0, "its panic was lost");
+        assert_eq!(crate::check::forced_evals_left(), 0, "it did not panic");
+    }
+}
+
+/// A constant's evaluation cancelled on its way is asked again: its error is still reported.
+#[test]
+fn a_constant_preempted_again_and_again_still_reports_its_error() {
+    if warnings_in_child("check_lint_tests::a_constant_preempted_again_and_again_still_reports_its_error").is_none() {
+        crate::check::force_eval_unwinds("NEVER_FINE", 3);
+        assert_ne!(check_package_code("pub const NEVER_FINE: u32 = [1u32][2];\n", &[]), 0, "its error was lost");
+        assert_eq!(crate::check::forced_evals_left(), 0, "it was not held up");
+    }
+}
+
 /// Beside errors the unused imports are still rustc's: an import that does not resolve is its
 /// E0432 error, never an unused import (rustc_resolve counts an erroneous import as used); a trait
 /// whose method a body that failed its check called before the error is used; an import nothing

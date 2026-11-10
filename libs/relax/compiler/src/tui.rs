@@ -245,7 +245,7 @@ pub use unix::{finish, start};
 pub(crate) use unix::{flush, fault_fd, log_only};
 // (os/fault.rs's abort report: the pipe drained as after the panic hook)
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-pub(crate) use unix::fatal_drain;
+pub(crate) use unix::{fatal_drain, hold_tee};
 
 #[cfg(unix)]
 mod unix {
@@ -583,7 +583,7 @@ mod unix {
         let previous = std::panic::take_hook();
         // the hook lives as long as the process: the program's heap
         // the message reaches the transcript and the terminal before an abort can follow the hook
-        { let _k = crate::zone_alloc::kept(); std::panic::set_hook(Box::new(move |info| { abnormal(); previous(info); fatal_drain(); })); }
+        { let _k = crate::zone_alloc::kept(); std::panic::set_hook(Box::new(move |info| { abnormal(); previous(info); fatal_drain(b""); })); }
         unsafe { atexit(at_exit) };
         { let _k = crate::zone_alloc::kept();
         if let Err(e) = std::thread::Builder::new().name("run-log-tee".into()).spawn(tee) {
@@ -637,31 +637,96 @@ mod unix {
         }
     }
 
-    /// After the panic hook or an abort report printed: everything in the pipe to the transcript,
-    /// and to the terminal (through the display when it is free, else raw).
-    pub(crate) fn fatal_drain() {
-        // try_lock: a panic on the tee thread itself (inside its drain) must not wait for itself;
-        // that drain is then the one that copies this message
-        if let Ok(mut g) = READER.try_lock() {
+    /// After the panic hook printed, or with an abort's report (`after`): what the display holds
+    /// and everything in the pipe, then `after`, to the transcript and the terminal. It waits for
+    /// no lock and allocates or frees nothing: a lock held by a thread that never lets go (one
+    /// stuck in the heap an abort found corrupt; the tee thread itself, when it panicked inside
+    /// its drain) leaves out what only it reaches, and a line after the rest names it.
+    pub(crate) fn fatal_drain(after: &[u8]) {
+        use std::io::Write;
+        use std::sync::TryLockError;
+        fn tried<T>(r: std::sync::TryLockResult<T>) -> Option<T> {
+            match r {
+                Ok(g) => Some(g),
+                Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
+                Err(TryLockError::WouldBlock) => None,
+            }
+        }
+        let out = fault_fd();
+        let mut skipped: [&str; 3] = [""; 3];
+        // the display: its bar off, then its partial line (the oldest bytes)
+        match tried(STATE.try_lock()) {
+            Some(mut g) => {
+                if let Some(st) = g.as_mut() {
+                    erase(st);
+                    out_all(out, &st.partial);
+                    st.partial.clear();
+                }
+            }
+            None => skipped[0] = "display: STATE lock held, its bar and partial line left as they are",
+        }
+        match tried(TEE.try_lock()) {
+            Some(mut tee) => {
+                out_all(out, &tee);
+                tee.clear();
+            }
+            None => skipped[1] = "tee: TEE lock held, what it holds not shown",
+        }
+        let mut after_out = false;
+        if let Some(mut g) = tried(READER.try_lock()) {
             if let Some(r) = g.as_mut() {
-                if drain(r) {
+                let mut buf = [0u8; 16384];
+                let ended = loop {
+                    let n = unsafe { read(r.fd, buf.as_mut_ptr().cast(), buf.len()) };
+                    if n > 0 {
+                        let chunk = &buf[..n as usize];
+                        if let Some(f) = r.file.as_mut() {
+                            let _ = f.write_all(chunk);
+                        }
+                        out_all(out, chunk);
+                        continue;
+                    }
+                    if n == 0 {
+                        break true;
+                    }
+                    match std::io::Error::last_os_error().kind() {
+                        std::io::ErrorKind::Interrupted => continue,
+                        std::io::ErrorKind::WouldBlock => break false,
+                        _ => break true,
+                    }
+                };
+                if let Some(f) = r.file.as_mut() {
+                    let _ = f.write_all(after);
+                }
+                out_all(out, after);
+                after_out = true;
+                if ended {
                     unsafe { close(r.fd) };
                     *g = None;
                 }
+            } else {
+                out_all(out, after);
+                after_out = true;
+            }
+        } else {
+            skipped[2] = "transcript: READER lock held, the pipe not drained and this report on the terminal only";
+        }
+        if !after_out {
+            out_all(out, after);
+        }
+        for s in skipped.iter().filter(|s| !s.is_empty()) {
+            for part in [b"makepad: ".as_slice(), s.as_bytes(), b"\n"] {
+                out_all(out, part);
             }
         }
-        match STATE.try_lock() {
-            Ok(mut g) => {
-                if let Some(st) = g.as_mut() { pump(st, true); }
-            }
-            Err(_) => {
-                let out = OUT.load(Ordering::Acquire);
-                if out >= 0 {
-                    let bytes = std::mem::take(&mut *TEE.lock().unwrap_or_else(|e| e.into_inner()));
-                    out_all(out, &bytes);
-                }
-            }
-        }
+    }
+
+    /// MAKEPAD_RUN_ABORT_HOLD (os/fault.rs, tests/abort_heap's held case): the tee's lock, kept
+    /// while `then` runs.
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    pub(crate) fn hold_tee(then: impl FnOnce()) {
+        let _tee = TEE.lock().unwrap_or_else(|e| e.into_inner());
+        then();
     }
 
     /// Takes the bar down and gives fd 2 back its terminal. `summary`: first present, print the

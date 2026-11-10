@@ -6,11 +6,10 @@
 //! 1. Parse every edited file as a new version (nothing the running program reads changes).
 //! 2. Classify each item against the running version: body edits (class B), const value
 //!    edits (B, with the readers recompiled) and initializer edits of statics not placed yet
-//!    apply; everything else takes the restart rung with a one-line reason, never a silent
-//!    stale result (a static or `thread_local!` that already holds its value, signature,
-//!    layout, item set, macro, declarative edits until their mechanisms exist). The restart
-//!    rung restarts the program in place on its own (restart_in_place), and a patch whose old
-//!    code keeps running in a frame that never returns takes it too (the landing check).
+//!    apply, as do supported layout, macro and visibility edits. Eligible named-field structs
+//!    keep existing field slots and add defaulted fields in extension blocks. Unsupported edits
+//!    offer a restart with a reason; the app keeps running until `session relaunch` is requested.
+//!    The landing check also offers a restart when old code remains on a thread's stack.
 //! 3. Freeze: closures of the functions about to be rebuilt that were never compiled are
 //!    compiled now, from the version their stored values were made by.
 //! 4. Commit the versions (each a new file index: old code, closure and coroutine types and
@@ -2644,12 +2643,9 @@ fn def_is_bound(prog: &crate::program::Program, d: DefId) -> bool {
 /// The two types a vtable's data name gives (syms::VTABLE_NAME: `vtable:<type>#<hash>:<dyn
 /// type>#<hash>`, jit.rs Unit::vtable), as printed, without their hashes.
 fn vtable_name_types(name: &str) -> Option<(String, String)> {
-    let rest = name.strip_prefix(crate::syms::VTABLE_NAME)?;
-    let b = rest.as_bytes();
-    // (the last `#<hash>:`: the concrete type's end; the dyn type ends in its own hash)
-    let cut = (0..b.len()).rev().find(|&i| b[i] == b'#' && i + 9 < b.len() && b[i + 9] == b':' && b[i + 1..i + 9].iter().all(u8::is_ascii_hexdigit))?;
+    let (t, dy) = crate::syms::vtable_name_parts(name)?;
     let bare = |t: &str| t.rsplit_once('#').map_or(t, |x| x.0).to_string();
-    Some((bare(&rest[..cut + 9]), bare(&rest[cut + 10..])))
+    Some((bare(t), bare(dy)))
 }
 
 /// "T` as `dyn Tr" from a vtable's data name, for a message's backquotes.
@@ -6137,6 +6133,21 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             errs.extend(e);
         }
     }
+    // What a crate the host provides lacks: its items are this makepad's own, and its changed
+    // sources wait for the rebuilt makepad, so no patch adds them -- the restart into that
+    // makepad applies the edit (the held items wait for it, the rest patches now). Only while
+    // makepad's own inputs have changed (host::inputs_changed: seen, whether or not this process
+    // can build makepad, until a rebuild shows them unchanged): with none, no makepad has them and
+    // the errors are the edit's own. (A new op runs in the host, beside its state: no JIT copy of
+    // it can stand in.)
+    if !real.is_empty() && host::inputs_changed() {
+        if let Some(lines) = provided_lacks(&real) {
+            errs.retain(|e| !real.contains(e));
+            errs.extend(lines);
+            real.clear();
+            as_restart = true;
+        }
+    }
     // a restart that the edit's errors would stop: the errors alone refuse it
     if as_restart && !real.is_empty() {
         errs = real.clone();
@@ -8077,6 +8088,29 @@ pub(crate) fn patch_refused_event(what: &str, refused: bool, lines: &[String]) {
     );
     // Reporting does not restart. The watcher retries the whole settled batch
     // before deciding whether a refusal is a failure of makepad itself.
+}
+
+/// The path an unresolved name's error names: a `use` (E0432), a value (E0425) or a type (E0412),
+/// as the resolver and the type checker print them.
+fn unresolved_path(e: &str) -> Option<&str> {
+    let at = ["E0432: unresolved import `", "E0425: cannot find value `", "E0412: cannot find type `"].iter().find_map(|h| e.find(h).map(|i| i + h.len()))?;
+    Some(&e[at..at + e[at..].find('`')?])
+}
+
+/// `errs`, said as the restart rung's lines, when every one is a path into a provided crate that
+/// does not resolve or a name such a path would have bound (a `use` of its re-export, a call
+/// through that): None when any is another error.
+fn provided_lacks(errs: &[String]) -> Option<Vec<String>> {
+    let last = |p: &str| p.rsplit("::").next().unwrap_or(p).to_string();
+    let lacked: Vec<(String, String)> = errs.iter().filter_map(|e| unresolved_path(e)).filter_map(|p| {
+        let (krate, rest) = p.trim_start_matches("::").split_once("::")?;
+        (!rest.is_empty() && crate::provided::registered(krate)).then(|| (last(p), krate.to_string()))
+    }).collect();
+    errs.iter().map(|e| {
+        let name = last(unresolved_path(e)?);
+        let (_, krate) = lacked.iter().find(|(n, _)| *n == name)?;
+        Some(format!("{e} -- `{krate}` is built into makepad, and this one lacks it: needs the rebuilt makepad: restart to apply"))
+    }).collect()
 }
 
 /// Whether a refusal's lines hold a failure of makepad itself, not of the edit.

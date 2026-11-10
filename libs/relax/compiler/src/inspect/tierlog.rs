@@ -64,8 +64,7 @@ pub const ARM_WHY: [&str; 5] = ["new code", "new code under the open window", "c
 pub const WIN_DONE: u8 = 0;
 pub const WIN_IDLE: u8 = 1;
 pub const WIN_WORK: u8 = 2;
-pub const WIN_CREDITED: u8 = 3;
-pub const WIN_WHY: [&str; 4] = ["entries/blocks/time reached", "went idle (built with what it has)", "lukewarm code showed work", "a hot loop ran under it"];
+pub const WIN_WHY: [&str; 3] = ["entries/blocks/time reached", "went idle (built with what it has)", "lukewarm code showed work"];
 
 pub const DROP_PANIC: u8 = 0;
 pub const DROP_CODEGEN: u8 = 1;
@@ -77,7 +76,7 @@ pub const DROP_WHY: [&str; 5] = ["build panicked", "codegen error", "a patch cha
 pub const REFUSE_VERDICT: u8 = 0;
 pub const REFUSE_TAKE: u8 = 1;
 pub const REFUSE_PROFILE_GONE: u8 = 2;
-pub const REFUSE_WHY: [&str; 3] = ["not allowed (borrow-check verdict pending, or a patch without a clean verdict)", "its snapshot bailed (a front could not be made off the owner)", "its counted profile is gone (patched or rebuilt)"];
+pub const REFUSE_WHY: [&str; 3] = ["not allowed (borrow-check verdict pending, or a patch without a clean verdict)", "its snapshot bailed", "its counted profile is gone (patched or rebuilt)"];
 
 pub const Q_WHY: [&str; 5] = ["calls", "loop", "retier", "marked", "profiled"];
 
@@ -111,6 +110,24 @@ pub fn note(slot: u32, ev: u8, why: u8, a: u64, b: u64) {
     if let Some(r) = RING.get() {
         r.push(Ev { t: crate::clock::wall_ns(), slot, ev, why, a, b });
     }
+}
+
+/// What a take's bail ran into (`owner::forbid_in_publish`).
+const TAKE_BAILS: [&str; 7] = ["front", "promoted initializer", "initializer", "jit", "a front write", "a wait", "a request"];
+
+/// An O3 build not started: its take bailed on `what`, needing `slot`'s front, after `rounds` rounds;
+/// `front_why` is what this thread's last front made nothing for (an index of PREFRONT_FAIL_NAMES).
+pub fn note_take_bail(slot: u32, what: &str, needs: Option<u32>, rounds: u32, front_why: u8) {
+    let what = TAKE_BAILS.iter().position(|w| *w == what).unwrap_or(TAKE_BAILS.len()) as u64;
+    note(slot, ev::O3_REFUSED, REFUSE_TAKE, what | (rounds as u64) << 8 | (front_why as u64) << 40, needs.map_or(0, |s| s as u64 + 1));
+}
+
+fn describe_take_bail(e: &Ev) -> String {
+    let what = TAKE_BAILS.get((e.a & 0xff) as usize).copied().unwrap_or("?");
+    let rounds = (e.a >> 8) & 0xffff_ffff;
+    let front = crate::jit::PREFRONT_FAIL_NAMES.get((e.a >> 40) as usize).copied().unwrap_or("?");
+    let needs = if e.b == 0 { String::new() } else { format!(" of S{}", e.b - 1) };
+    format!("its snapshot bailed on {what}{needs} after {rounds} rounds (the last front made nothing for: {front})")
 }
 
 /// A count stub went in (unit lock held, never a program thread's hot path): only a slot that
@@ -272,6 +289,7 @@ pub fn describe(e: &Ev, code: &dyn Fn(u64) -> String) -> String {
         ev::PARKED => "parked in counted code: too little work for O3".into(),
         ev::O3_INSTALLED => format!("O3 code installed ({} build)", ms(e.a)),
         ev::O3_DROPPED => format!("O3 build dropped: {}", DROP_WHY.get(e.why as usize).unwrap_or(&"?")),
+        ev::O3_REFUSED if e.why == REFUSE_TAKE => format!("O3 build not started: {}", describe_take_bail(e)),
         ev::O3_REFUSED => format!("O3 build not started: {}", REFUSE_WHY.get(e.why as usize).unwrap_or(&"?")),
         ev::RETIER => format!("queued to be built again (retier {} of 4)", e.a),
         ev::RETIER_SPENT => "retier refused: its 4 retiers are used up".into(),
@@ -328,13 +346,14 @@ fn cmd_uncounted(req: &super::Req, out: &mut super::Out) {
     let r = crate::owner::call_within(crate::owner::Class::Job, 10_000, move || {
         let u = unsafe { &*up };
         let v = crate::jit::tier_uncounted(u);
-        let mut rows = vec![format!("{} slots are not counted (their count stub replaced while they count): they never queue O3", v.len())];
+        let never = v.iter().filter(|x| x.1).count();
+        let mut rows = vec![format!("{} slots are not counted: {} with their count stub replaced while they count, {} of a counted kind never armed (installed without a count stub): they never queue O3", v.len(), v.len() - never, never)];
         if !v.is_empty() {
-            rows.push("| slot | fn | code |".into());
-            rows.push("|---|---|---|".into());
-            for id in v.iter().take(n) {
-                let f = &u.fns[*id as usize];
-                rows.push(format!("| S{} | `{}` | {} |", id, super::short(&super::display_name(u, *id, 0), 80), super::codever::label(super::codever::kind_at(u, f.code))));
+            rows.push("| slot | fn | code | why |".into());
+            rows.push("|---|---|---|---|".into());
+            for &(id, never) in v.iter().take(n) {
+                let f = &u.fns[id as usize];
+                rows.push(format!("| S{} | `{}` | {} | {} |", id, super::short(&super::display_name(u, id, 0), 80), super::codever::label(super::codever::kind_at(u, f.code)), if never { "never armed" } else { "stub replaced" }));
             }
             if v.len() > n {
                 rows.push(format!("+{} more (n=)", v.len() - n));

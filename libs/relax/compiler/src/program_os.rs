@@ -207,9 +207,12 @@ mod tests {
 
     /// Off a domain, mallinfo2 leaves out what the loader's allocator holds in the system heap:
     /// a loader block allocated meanwhile does not show, as the program did not allocate it.
+    /// (In a process of its own: the system-held count is the process's, and the suite's other
+    /// threads freeing meanwhile took it below the 1 MiB block, one whole-suite run in eight.)
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     #[test]
     fn mallinfo2_leaves_out_the_loaders_blocks() {
+        isolated_test!(mallinfo2_leaves_out_the_loaders_blocks);
         let m = super::Mallinfo2 { uordblks: 1000, hblkhd: 500, fordblks: 7, ..Default::default() };
         let p = super::program_mallinfo2(m, 1200);
         assert_eq!((p.uordblks, p.hblkhd, p.fordblks), (0, 300, 7));

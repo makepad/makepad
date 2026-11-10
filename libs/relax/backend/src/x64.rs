@@ -882,7 +882,7 @@ fn keeps_rax(options: &relax_session::Options, i: &Inst) -> bool {
         Inst::Iconst(..) | Inst::IBinI(..) | Inst::ICmpI(..) | Inst::ICmp(..) | Inst::IBit(..) | Inst::INeg(..) | Inst::INot(..) => true,
         Inst::IBin(op, ..) => matches!(op, IOp::Add | IOp::Sub | IOp::And | IOp::Or | IOp::Xor | IOp::Mul) || (matches!(op, IOp::Shl | IOp::Shr) && host_bmi2(options)),
         Inst::SlotAddr(..) | Inst::FnAddr(..) | Inst::Mov(..) | Inst::Load(..) | Inst::Store(..) | Inst::LoadX(..) | Inst::StoreX(..) => true,
-        Inst::Conv(Conv::IntToInt(_), ..) | Inst::Sel(..) => true,
+        Inst::Conv(Conv::IntToInt(_), ..) | Inst::Sel(..) | Inst::SelCmp(..) => true,
         // scalar float arithmetic (Gen::inst arms and Gen::fma): float registers, r10 / r11 only;
         // vector ops (Gen::vinst, index_operands) and int <-> float conversions use rax
         Inst::Fconst(..) | Inst::FBin(..) | Inst::FUnary(..) | Inst::FCmp(..) | Inst::FMulAdd(..) => true,
@@ -993,31 +993,49 @@ fn fload_cmp_ok(cond: Cond, t: VReg, x: VReg, y: VReg) -> bool {
 }
 
 fn x64_defers(b: &Block, k: usize, uses: &[u32]) -> bool {
+    let once = |t: VReg| uses[t.0 as usize] == 1;
+    // into the branch's compare: test x, K / cmp [p + o], K / cmp [p + o], r / ucomiss r, [p + o]
+    // (against a register only a 64-bit load: compares read whole registers)
+    let (bcmp, ne) = regalloc::branch_compare(b, uses);
+    if let Some(cmp) = bcmp {
+        if k + 1 == ne {
+            return match (&b.insts[k], cmp) {
+                (Inst::IBinI(IOp::And, _, t, x, _), Cmp::K(Cond::Eq | Cond::Ne, _, t2, 0)) => x != t && once(*t) && t2 == *t,
+                (Inst::Load(Mem::Int(_, _), t, base, _), Cmp::K(_, _, t2, _)) => base != t && once(*t) && t2 == *t,
+                (Inst::Load(Mem::Int(sz, _), t, base, _), Cmp::R(_, _, x, y)) => base != t && once(*t) && *sz == 8 && (x == *t) != (y == *t),
+                (Inst::Load(Mem::F32 | Mem::F64, t, _, _), Cmp::F(cond, _, x, y)) => once(*t) && fload_cmp_ok(cond, *t, x, y),
+                _ => false,
+            };
+        }
+    }
     let n = b.insts.len();
     if k + 1 >= n {
         return false;
     }
-    let once = |t: VReg| uses[t.0 as usize] == 1;
     let next = &b.insts[k + 1];
     let branch_on = |c: VReg| matches!(b.term, Term::Branch(c2, _, _) if c2 == c) && once(c) && k + 2 == n;
     match b.insts[k] {
         Inst::ICmp(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) if once(d) => matches!(*next, Inst::Sel(_, c, _, _) if c == d),
         Inst::Load(Mem::F32 | Mem::F64, t, _, _) if once(t) => match *next {
             Inst::FBin(_, _, _, x, y) => (x == t) != (y == t),
-            Inst::FCmp(cond, _, c, x, y) => branch_on(c) && fload_cmp_ok(cond, t, x, y),
             Inst::FMulAdd(_, _, _, _, a, b2, c) => b2 != t && (a == t) != (c == t),
             Inst::VInsert(_, _, _, s2) => s2 == t,
             _ => false,
         },
-        Inst::IBinI(IOp::And, _, t, x, _) if x != t && once(t) => matches!(*next, Inst::ICmpI(Cond::Eq | Cond::Ne, _, c, t2, 0) if t2 == t && branch_on(c)),
-        // (or against a register: cmp [p + o], r -- a 64-bit load: ICmp compares whole registers)
-        Inst::Load(Mem::Int(sz, _), t, base, _) if base != t && once(t) => match *next {
-            Inst::ICmpI(_, _, c, t2, _) => t2 == t && branch_on(c),
-            Inst::ICmp(_, _, c, x, y) => sz == 8 && (x == t) != (y == t) && branch_on(c),
-            _ => false,
-        },
         Inst::IBin(IOp::Shr, it, s, m, t) if it.bits == 64 && !it.signed && m != s && t != s && once(s) => matches!(*next, Inst::IBinI(IOp::And, _, d, s2, 1) if s2 == s && branch_on(d)),
         _ => false,
+    }
+}
+
+/// The selects x64 makes on a compare's flags (Gen::sel_on): cmov on any integer compare and on an
+/// ordered float one (`a` / `ae`, false when unordered), a float select on any compare. A float
+/// `==` / `!=` needs the parity flag too, which one cmov cannot take.
+pub fn x64_sel_ok(c: &Cmp, data: Cls) -> bool {
+    match (c, data) {
+        (Cmp::F(Cond::Eq | Cond::Ne, ..), Cls::I) => false,
+        (Cmp::F(..), Cls::I | Cls::F32 | Cls::F64) => true,
+        (Cmp::F(..), _) => false,
+        _ => true,
     }
 }
 
@@ -1123,10 +1141,10 @@ struct Gen<'a> {
     /// Values whose bytes are all 0x00 / 0xff, so VSel can use a byte blend.
     byte_masks: Vec<bool>,
     /// the compare fused into the next select
-    sel_cmp: Option<Inst>,
-    /// an integer compare whose result has other uses, emitted right before a select on it:
-    /// (its result, condition code) -- the select's cmov reads the flags, no test
-    sel_flags: Option<(VReg, u8)>,
+    sel_cmp: Option<Cmp>,
+    /// the integer compare the flags hold, made by the instruction just emitted (a compare for its
+    /// value, or a select on it): its condition code. A select or branch on it next reads them.
+    sel_flags: Option<(Cmp, u8)>,
     /// C ABI body: its plan, per-argument buffer (rbp disp, 0 = none), result buffer,
     /// the cell keeping an indirect result address for rax
     cplan: Option<Plan>,
@@ -1760,52 +1778,45 @@ impl<'a> Gen<'a> {
             }
             let b = &self.f.blocks[bi];
             let n = b.insts.len();
-            // compare feeding the branch: fused into cmp + jcc
-            let mut fused = false;
-            if let Term::Branch(c, _, _) = &b.term {
-                if n > 0 && self.al.uses[c.0 as usize] == 1 {
-                    match &b.insts[n - 1] {
-                        Inst::ICmp(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) if d == c => fused = true,
-                        _ => {}
-                    }
-                }
-            }
-            // `t = x & K; c = t ==/!= 0` feeding the branch (t used once): test x, K
+            // the compare the branch reads (fused into cmp + jcc): the instructions before it
+            let (bcmp, ne) = regalloc::branch_compare(b, &self.al.uses);
+            let fused = bcmp.is_some();
+            // `t = x & K` and a branch on `t ==/!= 0` (t used once): test x, K
             self.test_fuse = None;
-            if fused && n >= 2 {
-                if let (Inst::IBinI(IOp::And, it, t, x, k), Inst::ICmpI(Cond::Eq | Cond::Ne, _, _, t2, 0)) = (&b.insts[n - 2], &b.insts[n - 1]) {
+            if let (Some(Cmp::K(Cond::Eq | Cond::Ne, _, t2, 0)), true) = (bcmp, ne >= 1) {
+                if let Inst::IBinI(IOp::And, it, t, x, k) = &b.insts[ne - 1] {
                     // a mask within 32 bits tests the low half (test r32, imm32: any of its bits); a
                     // negative imm32 is sign-extended by the 64-bit form, so only for 64-bit values
                     // (a narrower value's mask must not reach its upper bits)
                     let ok = (0..=u32::MAX as i64).contains(k) || (it.bits == 64 && (i32::MIN as i64..0).contains(k));
-                    if t == t2 && *x != *t && self.al.uses[t.0 as usize] == 1 && ok && x64_defers(b, n - 2, &self.al.uses) {
+                    if *t == t2 && *x != *t && self.al.uses[t.0 as usize] == 1 && ok && x64_defers(b, ne - 1, &self.al.uses) {
                         self.test_fuse = Some((*x, *k));
                     }
                 }
             }
-            // `t = load [p + o]; c = t cmp K` feeding the branch (t used once): cmp [p + o], K
+            // `t = load [p + o]` and a branch on `t cmp K` (t used once): cmp [p + o], K
             self.load_fuse = None;
-            if fused && n >= 2 && self.test_fuse.is_none() {
-                if let (Inst::Load(Mem::Int(sz, sx), t, base, off), Inst::ICmpI(cond, signed, _, t2, k)) = (&b.insts[n - 2], &b.insts[n - 1]) {
-                    if t == t2 && base != t && self.al.uses[t.0 as usize] == 1 && load_cmp_fits(*sz, *sx, *cond, *signed, *k) && x64_defers(b, n - 2, &self.al.uses) {
-                        self.load_fuse = Some((*base, *off, *sz, *k));
+            if let (Some(Cmp::K(cond, signed, t2, k)), true, None) = (bcmp, ne >= 1, self.test_fuse) {
+                if let Inst::Load(Mem::Int(sz, sx), t, base, off) = &b.insts[ne - 1] {
+                    if *t == t2 && base != t && self.al.uses[t.0 as usize] == 1 && load_cmp_fits(*sz, *sx, cond, signed, k) && x64_defers(b, ne - 1, &self.al.uses) {
+                        self.load_fuse = Some((*base, *off, *sz, k));
                     }
                 }
             }
             self.load_cmp = None;
-            if fused && n >= 2 && self.test_fuse.is_none() && self.load_fuse.is_none() && !crate::stats::opt_off(options, "-loadcmp") {
-                if let (Inst::Load(Mem::Int(8, _), t, base, off), Inst::ICmp(_, _, _, x, y)) = (&b.insts[n - 2], &b.insts[n - 1]) {
-                    if (x == t) != (y == t) && base != t && self.al.uses[t.0 as usize] == 1 && x64_defers(b, n - 2, &self.al.uses) {
-                        self.load_cmp = Some((*base, *off, if x == t { *y } else { *x }, x == t));
+            if let (Some(Cmp::R(_, _, x, y)), true) = (bcmp, ne >= 1) {
+                if let Inst::Load(Mem::Int(8, _), t, base, off) = &b.insts[ne - 1] {
+                    if !crate::stats::opt_off(options, "-loadcmp") && (x == *t) != (y == *t) && base != t && self.al.uses[t.0 as usize] == 1 && x64_defers(b, ne - 1, &self.al.uses) {
+                        self.load_cmp = Some((*base, *off, if x == *t { y } else { x }, x == *t));
                     }
                 }
             }
-            // `t = load [p + o]; c = fcmp x, y` (t one of them, used once) feeding the branch:
+            // `t = load [p + o]` and a branch on `fcmp x, y` (t one of them, used once):
             // ucomiss reg, [p + o]
             self.fload_cmp = None;
-            if fused && n >= 2 && self.test_fuse.is_none() && self.load_fuse.is_none() && self.load_cmp.is_none() && !crate::stats::opt_off(options, "-loadcmp") {
-                if let (Inst::Load(Mem::F32 | Mem::F64, t, base, off), Inst::FCmp(..)) = (&b.insts[n - 2], &b.insts[n - 1]) {
-                    if self.al.uses[t.0 as usize] == 1 && x64_defers(b, n - 2, &self.al.uses) {
+            if let (Some(Cmp::F(..)), true) = (bcmp, ne >= 1) {
+                if let Inst::Load(Mem::F32 | Mem::F64, t, base, off) = &b.insts[ne - 1] {
+                    if !crate::stats::opt_off(options, "-loadcmp") && self.al.uses[t.0 as usize] == 1 && x64_defers(b, ne - 1, &self.al.uses) {
                         self.fload_cmp = Some((*base, *off, *t));
                     }
                 }
@@ -1820,15 +1831,15 @@ impl<'a> Gen<'a> {
                 }
             }
             // a branch on a loaded value itself (a bool field): cmp [p + o], 0
-            let mut load_branch = false;
             if !fused && n >= 1 {
                 if let (Term::Branch(c, _, _), Inst::Load(Mem::Int(sz, _), t, base, off)) = (&b.term, &b.insts[n - 1]) {
                     if c == t && base != t && self.al.uses[t.0 as usize] == 1 {
                         self.load_fuse = Some((*base, *off, *sz, 0));
-                        load_branch = true;
                     }
                 }
             }
+            // the instruction emitted with the branch
+            let into_branch = self.test_fuse.is_some() || self.load_cmp.is_some() || self.fload_cmp.is_some() || self.load_fuse.is_some();
             // a block start can be a jump target: no spill store before it carries over, nor
             // the flags of the ALU op that ended the block above (a jump arrives with other ones)
             self.last_spill = None;
@@ -1838,15 +1849,15 @@ impl<'a> Gen<'a> {
             // block's terminator reads at its start: no window there, the slot is read)
             self.cur_pos = self.al.block_start[bi];
             self.sel_flags = None;
-            for (ii, inst) in b.insts.iter().enumerate() {
+            for (ii, inst) in b.insts.iter().enumerate().take(ne) {
                 self.pc_map.push((self.a.pos() as u32, b.pos[ii]));
                 if self.rir_map_on {
                     self.rir_map.push((self.a.pos() as u32, bi as u32, ii as u32));
                 }
                 self.cur_pos = self.al.inst_pos(bi, ii);
-                // a compare's flags serve the run of selects on it right after it only
+                // the flags of a compare serve the selects on it right after it only
                 if let Some((fc, _)) = self.sel_flags {
-                    if !matches!(inst, Inst::Sel(_, c, ..) if *c == fc) {
+                    if !matches!(inst, Inst::SelCmp(_, c, ..) if *c == fc) {
                         self.sel_flags = None;
                     }
                 }
@@ -1860,69 +1871,19 @@ impl<'a> Gen<'a> {
                         }
                     }
                 }
-                if fused && ii == n - 1 {
+                if into_branch && ii + 1 == ne {
                     break;
                 }
-                if (self.test_fuse.is_some() || self.load_cmp.is_some() || self.fload_cmp.is_some() || self.load_fuse.is_some() && !load_branch) && ii == n - 2 {
+                if self.bt_fuse.is_some() && ii + 2 >= ne {
                     continue;
                 }
-                if load_branch && ii == n - 1 {
-                    break;
-                }
-                if self.bt_fuse.is_some() && ii >= n - 2 {
-                    continue;
-                }
-                // a compare whose one use is the next select: fused into it (flags + cmov,
-                // or a scalar float branch)
-                if ii + 1 < n && !(fused && ii + 1 == n - 1) {
-                    if let (Some(cd), Inst::Sel(sd, sc, sa, sb)) = (cmp_def(inst), &b.insts[ii + 1]) {
-                        let data = self.f.vregs[sd.0 as usize];
-                        let ok = match inst {
-                            Inst::ICmp(..) | Inst::ICmpI(..) => true,
-                            Inst::FCmp(..) => matches!(data, Cls::F32 | Cls::F64),
-                            _ => false,
-                        };
-                        if *sc == cd && self.al.uses[cd.0 as usize] == 1 && ok && x64_defers(b, ii, &self.al.uses) {
-                            self.sel_cmp = Some(inst.clone());
+                // a compare whose one use is the select right after it: the select's own (the
+                // tiers that run no compares_into_readers)
+                if ii + 1 < ne {
+                    if let (Some((cd, cmp)), Inst::Sel(sd, sc, ..)) = (Cmp::of(inst), &b.insts[ii + 1]) {
+                        if *sc == cd && self.al.uses[cd.0 as usize] == 1 && x64_sel_ok(&cmp, self.f.vregs[sd.0 as usize]) && x64_defers(b, ii, &self.al.uses) {
+                            self.sel_cmp = Some(cmp);
                             continue;
-                        }
-                        // Keep a shared compare (e.g. argmax's index), but let the float
-                        // select use scalar min/max independently of the bool materialization.
-                        if *sc == cd && ok && matches!(data, Cls::F32 | Cls::F64) && scalar_minmax(inst, *sa, *sb).is_some() {
-                            self.inst(options, inst);
-                            self.sel_cmp = Some(inst.clone());
-                            continue;
-                        }
-                        // other uses: the compare is emitted (setcc) and the select reads its flags
-                        // (so do the integer selects on it right after: cmov keeps the flags). When
-                        // those selects are all its uses (x.min(y) next to x.max(y), pair_selects),
-                        // the compare only sets the flags: no setcc
-                        if *sc == cd && data == Cls::I {
-                            if let Inst::ICmp(cc, sg, ..) | Inst::ICmpI(cc, sg, ..) = inst {
-                                let run = b.insts[ii + 1..].iter().take_while(|j| matches!(j, Inst::Sel(d, c, ..) if *c == cd && self.f.vregs[d.0 as usize] == Cls::I)).count();
-                                if run == self.al.uses[cd.0 as usize] as usize {
-                                    match *inst {
-                                        Inst::ICmp(_, _, _, x, y) => self.cmp_vregs(options, x, y),
-                                        Inst::ICmpI(_, _, _, x, k) => {
-                                            let rx = self.use_i(options, x, R10);
-                                            self.cmp_imm(rx, k);
-                                        }
-                                        _ => unreachable!(),
-                                    }
-                                } else {
-                                    self.inst(options, inst);
-                                }
-                                self.sel_flags = Some((cd, icc(*cc, *sg)));
-                                continue;
-                            }
-                            // an ordered float compare (ucomis[sd], operands swapped for Lt / Le:
-                            // `a` / `ae`, false when unordered): an argmax's index select
-                            if let Inst::FCmp(cc @ (Cond::Lt | Cond::Le | Cond::Gt | Cond::Ge), ..) = inst {
-                                let fcc = if matches!(cc, Cond::Lt | Cond::Gt) { CC_A } else { CC_AE };
-                                self.inst(options, inst);
-                                self.sel_flags = Some((cd, fcc));
-                                continue;
-                            }
                         }
                     }
                 }
@@ -1930,7 +1891,7 @@ impl<'a> Gen<'a> {
                 // (either operand of a commutative op) or an FMA's addend / factor a, read straight
                 // from memory (vmulss xd, xa, [base + off]; vfmadd213ss xd, xb, [base + off])
                 if let Inst::Load(m @ (Mem::F32 | Mem::F64), t, base, off) = inst {
-                    if self.avx && self.al.uses[t.0 as usize] == 1 && ii + 1 < n && !(fused && ii + 1 == n - 1) {
+                    if self.avx && self.al.uses[t.0 as usize] == 1 && ii + 1 < ne {
                         let w = *m == Mem::F64;
                         let ok = match &b.insts[ii + 1] {
                             Inst::FBin(op @ (FOp::Add | FOp::Sub | FOp::Mul | FOp::Div), w2, _, x, y) => {
@@ -1952,31 +1913,12 @@ impl<'a> Gen<'a> {
                 // Fconst used once by the next FBin as its second operand (or either
                 // operand of a commutative op, when the other one is not the same const)
                 if let Inst::Fconst(cd, bits, _) = inst {
-                    if self.memconst && self.al.uses[cd.0 as usize] == 1 && ii + 1 < n && !(fused && ii + 1 == n - 1) {
+                    if self.memconst && self.al.uses[cd.0 as usize] == 1 && ii + 1 < ne {
                         if let Inst::FBin(op @ (FOp::Add | FOp::Sub | FOp::Mul | FOp::Div), _, _, x, y) = &b.insts[ii + 1] {
                             let comm = matches!(op, FOp::Add | FOp::Mul);
                             if (y == cd && x != cd) || (comm && x == cd && y != cd) {
                                 self.mem_const = Some((*cd, *bits));
                                 continue;
-                            }
-                        }
-                    }
-                }
-                // A min/max select can also follow other instructions/users of the
-                // compare. Stop at any redefinition of the bool or selected values:
-                // RIR is not necessarily SSA (loop-carried values are often assigned).
-                if self.sel_cmp.is_none() {
-                    if let Inst::Sel(d, c, a, z) = inst {
-                        if matches!(self.f.vregs[d.0 as usize], Cls::F32 | Cls::F64) {
-                            for prev in b.insts[..ii].iter().rev() {
-                                let mut changed = false;
-                                crate::regalloc::for_defs(prev, |v| changed |= v == *c || v == *a || v == *z);
-                                if changed {
-                                    if cmp_def(prev) == Some(*c) && scalar_minmax(prev, *a, *z).is_some() {
-                                        self.sel_cmp = Some(prev.clone());
-                                    }
-                                    break;
-                                }
                             }
                         }
                     }
@@ -1988,6 +1930,12 @@ impl<'a> Gen<'a> {
                     break;
                 }
                 self.inst(options, inst);
+                // an integer compare made for its value leaves its flags for a select or branch on it next
+                if let Some((d, cmp @ (Cmp::R(cc, sg, ..) | Cmp::K(cc, sg, ..)))) = Cmp::of(inst) {
+                    if !cmp.reads(d) {
+                        self.sel_flags = Some((cmp, icc(cc, sg)));
+                    }
+                }
             }
             // a sibling call ended the block: its Ret is the callee's
             if self.tail.get(bi).is_some_and(|t| t.is_some()) {
@@ -1999,7 +1947,7 @@ impl<'a> Gen<'a> {
             }
             // region windows entered from here: loaded before the terminator (regalloc edge loads);
             // the region's register home before it (exit stores)
-            if matches!(b.term, Term::Jump(_) | Term::Branch(..) | Term::Switch(..)) {
+            if matches!(b.term, Term::Jump(_) | Term::Branch(..) | Term::BranchCmp(..) | Term::Switch(..)) {
                 let tp = self.al.block_end[bi] - 1;
                 self.exit_stores(tp);
                 if let Some(ls) = self.win_start.get(&tp).cloned() {
@@ -2011,8 +1959,7 @@ impl<'a> Gen<'a> {
                     }
                 }
             }
-            let fuse_inst = if fused { Some(b.insts[n - 1].clone()) } else { None };
-            self.term(options, &b.term, bi, fuse_inst);
+            self.term(options, &b.term, bi, bcmp);
         }
         // landing stubs of invoked calls: the unwinder resumes here with rbp, rsp and the
         // callee-saved registers of this frame restored; reload the caller-saved values the
@@ -3165,14 +3112,16 @@ impl<'a> Gen<'a> {
         }
     }
 
-    fn term(&mut self, options: &relax_session::Options, t: &Term, bi: usize, fused: Option<Inst>) {
+    fn term(&mut self, options: &relax_session::Options, t: &Term, bi: usize, fused: Option<Cmp>) {
         match t {
             Term::Jump(target) => self.jump_to(*target, bi),
-            Term::Branch(c, tt, ff) => {
+            Term::Branch(_, tt, ff) | Term::BranchCmp(_, tt, ff) => {
                 let next = self.next_block[bi];
-                // integer condition code for `c` true
-                let icond: Option<u8> = match &fused {
-                    Some(Inst::ICmp(cond, signed, _, _, _)) if self.load_cmp.is_some() => {
+                // integer condition code for the branch's condition true
+                let icond: Option<u8> = match fused {
+                    // the flags of the compare just made for its value (or a select on it)
+                    Some(cmp @ (Cmp::R(..) | Cmp::K(..))) if self.sel_flags.is_some_and(|(fc, _)| fc == cmp) => self.sel_flags.map(|(_, cc)| cc),
+                    Some(Cmp::R(cond, signed, _, _)) if self.load_cmp.is_some() => {
                         let (base, off, other, load_lhs) = self.load_cmp.take().unwrap();
                         let ro = self.use_i(options, other, R10);
                         let (rb, disp) = self.base_disp(options, base, R11, off);
@@ -3180,19 +3129,19 @@ impl<'a> Gen<'a> {
                         self.a.rex(true, ro, 0, rb, false);
                         self.a.byte(if load_lhs { 0x39 } else { 0x3b });
                         self.a.modrm_mem(ro, rb, disp);
-                        Some(icc(*cond, *signed))
+                        Some(icc(cond, signed))
                     }
-                    Some(Inst::ICmp(cond, signed, _, x, y)) => {
-                        self.cmp_vregs(options, *x, *y);
-                        Some(icc(*cond, *signed))
+                    Some(Cmp::R(cond, signed, x, y)) => {
+                        self.cmp_vregs(options, x, y);
+                        Some(icc(cond, signed))
                     }
-                    Some(Inst::ICmpI(cond, signed, _, _, _)) if self.load_fuse.is_some() => {
+                    Some(Cmp::K(cond, signed, _, _)) if self.load_fuse.is_some() => {
                         let (base, off, sz, k) = self.load_fuse.take().unwrap();
                         let (rb, disp) = self.base_disp(options, base, R11, off);
                         self.cmp_mem_imm(rb, disp, sz, k);
-                        Some(icc(*cond, *signed))
+                        Some(icc(cond, signed))
                     }
-                    Some(Inst::ICmpI(cond, signed, _, x, k)) => match self.test_fuse.take() {
+                    Some(Cmp::K(cond, signed, x, k)) => match self.test_fuse.take() {
                         Some((src, mask)) => {
                             // test src, imm32 (F7 /0 id): 32-bit for a mask within 32 bits, REX.W
                             // for a negative one (sign-extended to 64)
@@ -3201,28 +3150,28 @@ impl<'a> Gen<'a> {
                             self.a.byte(0xf7);
                             self.a.modrm_rr(0, rs);
                             self.a.u32(mask as i32 as u32);
-                            Some(icc(*cond, *signed))
+                            Some(icc(cond, signed))
                         }
                         None => {
-                            let rx = self.use_i(options, *x, R10);
+                            let rx = self.use_i(options, x, R10);
                             // ZF of the ALU instruction that just wrote x is x == 0
-                            if !(*k == 0 && matches!(cond, Cond::Eq | Cond::Ne) && self.last_alu == Some((rx, self.a.pos()))) {
-                                self.cmp_imm(rx, *k);
+                            if !(k == 0 && matches!(cond, Cond::Eq | Cond::Ne) && self.last_alu == Some((rx, self.a.pos()))) {
+                                self.cmp_imm(rx, k);
                             }
-                            Some(icc(*cond, *signed))
+                            Some(icc(cond, signed))
                         }
                     },
-                    Some(Inst::FCmp(cond, f64_, _, x, y)) => {
-                        let pfx = if *f64_ { 0x66 } else { 0 };
+                    Some(Cmp::F(cond, f64_, x, y)) => {
+                        let pfx = if f64_ { 0x66 } else { 0 };
                         if let Some((base, off, t)) = self.fload_cmp.take() {
                             // ucomiss reg, [p + o]: the loaded operand is the one the compare
                             // reads from r/m below (fload_cmp_ok)
-                            let ro = self.use_f(if *x == t { *y } else { *x }, XS);
+                            let ro = self.use_f(if x == t { y } else { x }, XS);
                             let (rb, disp) = self.base_disp(options, base, R11, off);
                             self.a.sse_rm(pfx, 0x2e, ro, rb, disp);
                         } else {
-                            let xa = self.use_f(*x, XS);
-                            let xb = self.use_f(*y, XS2);
+                            let xa = self.use_f(x, XS);
+                            let xb = self.use_f(y, XS2);
                             match cond {
                                 Cond::Lt | Cond::Le => self.a.sse_rr(pfx, 0x2e, xb, xa, false),
                                 _ => self.a.sse_rr(pfx, 0x2e, xa, xb, false),
@@ -3242,13 +3191,13 @@ impl<'a> Gen<'a> {
                             }
                         }
                     }
-                    _ if self.load_fuse.is_some() => {
+                    None if self.load_fuse.is_some() => {
                         let (base, off, sz, k) = self.load_fuse.take().unwrap();
                         let (rb, disp) = self.base_disp(options, base, R11, off);
                         self.cmp_mem_imm(rb, disp, sz, k);
                         Some(CC_NE)
                     }
-                    _ if self.bt_fuse.is_some() => {
+                    None if self.bt_fuse.is_some() => {
                         let (m, t) = self.bt_fuse.take().unwrap();
                         let rm = self.use_i(options, m, R10);
                         let rt = self.use_i(options, t, R11);
@@ -3259,7 +3208,8 @@ impl<'a> Gen<'a> {
                         self.a.modrm_rr(rt, rm);
                         Some(CC_B)
                     }
-                    _ => {
+                    None => {
+                        let Term::Branch(c, ..) = t else { unreachable!("a BranchCmp carries its compare") };
                         let r = self.use_i(options, *c, R10);
                         self.a.test_rr(r, r);
                         Some(CC_NE)
@@ -3374,6 +3324,7 @@ impl<'a> Gen<'a> {
             // recomputed at each use (Alloc::remat)
             Inst::Iconst(d, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::Mov(d, _) | Inst::IBinI(IOp::Add, _, d, _, _) if self.al.remat[d.0 as usize].is_some() => {}
             Inst::Sel(d, c, a, b) => self.sel(options, *d, *c, *a, *b),
+            Inst::SelCmp(d, c, a, b) => self.sel_on(options, *d, *c, *a, *b),
             _ if self.ymm && y_inst(self.f, i) => self.y(options, i),
             Inst::VShuffle(..) | Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VTbl(..) | Inst::VConst(..) => self.vinst(options, i),
             Inst::VLoadX(d, base, idx, sh, off) => {
@@ -5422,70 +5373,88 @@ impl<'a> Gen<'a> {
 
     /// d = c != 0 ? a : b. Integers use cmov; scalar floats use min/max or a branch.
     fn sel(&mut self, options: &relax_session::Options, d: VReg, c: VReg, a: VReg, b: VReg) {
-        let int_data = self.f.vregs[d.0 as usize] == Cls::I;
-        if let Some(i) = self.sel_cmp.take() {
-            if !int_data {
-                if let Some((w, op)) = scalar_minmax(&i, a, b) {
-                    // x86 chooses its second input on both equality and unordered.
-                    // Keep b second, even if the allocator made d alias b.
-                    let xa = self.use_f(a, XS);
-                    let xb = self.use_f(b, XS2);
-                    let xd = self.def_f(d, XS);
-                    if self.avx {
-                        self.a.vex_rr(if w { 3 } else { 2 }, 1, false, op, xd, xa, xb);
-                    } else {
-                        let tmp = if xd == xb { 0 } else { xd };
-                        self.a.movf_rr(true, tmp, xa);
-                        self.a.sse_rr(if w { 0xf2 } else { 0xf3 }, op, tmp, xb, false);
-                        self.a.movf_rr(true, xd, tmp);
-                    }
-                    self.fin_f(d, xd);
-                    return;
-                }
-            }
-            let (cc, parity) = match i {
-                Inst::ICmp(cc, signed, _, x, y) => {
-                    self.cmp_vregs(options, x, y);
-                    (icc(cc, signed), None)
-                }
-                Inst::ICmpI(cc, signed, _, x, k) => {
-                    let rx = self.use_i(options, x, R10);
-                    self.cmp_imm(rx, k);
-                    (icc(cc, signed), None)
-                }
-                Inst::FCmp(cc, w, _, x, y) => {
-                    let xa = self.use_f(x, XS);
-                    let xb = self.use_f(y, XS2);
-                    let (left, right) = if matches!(cc, Cond::Lt | Cond::Le) { (xb, xa) } else { (xa, xb) };
-                    self.a.sse_rr(if w { 0x66 } else { 0 }, 0x2e, left, right, false);
-                    match cc {
-                        Cond::Lt | Cond::Gt => (CC_A, None),
-                        Cond::Le | Cond::Ge => (CC_AE, None),
-                        Cond::Eq => (CC_E, Some(false)),
-                        Cond::Ne => (CC_NE, Some(true)),
-                    }
-                }
-                _ => unreachable!(),
-            };
-            if int_data {
-                return self.cmov_sel(options, d, a, b, cc);
-            }
-            return self.float_sel(d, a, b, cc, parity);
+        if let Some(cmp) = self.sel_cmp.take() {
+            return self.sel_on(options, d, cmp, a, b);
         }
-        if int_data {
-            // (kept for the next select on c: the block loop drops it at any other instruction)
-            if let Some((fc, cc)) = self.sel_flags {
-                if fc == c {
-                    return self.cmov_sel(options, d, a, b, cc);
-                }
-            }
-            let rc = self.use_i(options, c, R10);
-            self.a.test_rr(rc, rc);
+        let rc = self.use_i(options, c, R10);
+        self.a.test_rr(rc, rc);
+        if self.f.vregs[d.0 as usize] == Cls::I {
             self.cmov_sel(options, d, a, b, CC_NE);
         } else {
-            let rc = self.use_i(options, c, R10);
-            self.a.test_rr(rc, rc);
             self.float_sel(d, a, b, CC_NE, None);
+        }
+    }
+
+    /// d = cmp ? a : b (x64_sel_ok): the compare's flags, then cmov, a float min / max or a branch.
+    /// An integer select right after another on the same compare reads its flags again.
+    fn sel_on(&mut self, options: &relax_session::Options, d: VReg, cmp: Cmp, a: VReg, b: VReg) {
+        let int_data = self.f.vregs[d.0 as usize] == Cls::I;
+        if !int_data {
+            if let Some((w, op)) = scalar_minmax(&cmp, a, b) {
+                // x86 chooses its second input on both equality and unordered.
+                // Keep b second, even if the allocator made d alias b.
+                let xa = self.use_f(a, XS);
+                let xb = self.use_f(b, XS2);
+                let xd = self.def_f(d, XS);
+                if self.avx {
+                    self.a.vex_rr(if w { 3 } else { 2 }, 1, false, op, xd, xa, xb);
+                } else {
+                    let tmp = if xd == xb { 0 } else { xd };
+                    self.a.movf_rr(true, tmp, xa);
+                    self.a.sse_rr(if w { 0xf2 } else { 0xf3 }, op, tmp, xb, false);
+                    self.a.movf_rr(true, xd, tmp);
+                }
+                self.fin_f(d, xd);
+                return;
+            }
+        }
+        if let (Some((fc, cc)), true) = (self.sel_flags, int_data) {
+            if fc == cmp {
+                self.cmov_sel(options, d, a, b, cc);
+                if cmp.reads(d) {
+                    self.sel_flags = None;
+                }
+                return;
+            }
+        }
+        let (cc, parity) = self.cmp_flags(options, cmp);
+        if int_data {
+            self.cmov_sel(options, d, a, b, cc);
+            // (unless d is one of its operands: the flags are then those of the old value)
+            if !cmp.reads(d) {
+                self.sel_flags = Some((cmp, cc));
+            }
+        } else {
+            self.float_sel(d, a, b, cc, parity);
+        }
+    }
+
+    /// Sets the flags to a compare: its condition code, and for a float `==` / `!=` the answer when
+    /// unordered (the parity flag). Lt / Le compare the operands swapped (`a` / `ae`: false when
+    /// unordered).
+    fn cmp_flags(&mut self, options: &relax_session::Options, cmp: Cmp) -> (u8, Option<bool>) {
+        match cmp {
+            Cmp::R(cc, signed, x, y) => {
+                self.cmp_vregs(options, x, y);
+                (icc(cc, signed), None)
+            }
+            Cmp::K(cc, signed, x, k) => {
+                let rx = self.use_i(options, x, R10);
+                self.cmp_imm(rx, k);
+                (icc(cc, signed), None)
+            }
+            Cmp::F(cc, w, x, y) => {
+                let xa = self.use_f(x, XS);
+                let xb = self.use_f(y, XS2);
+                let (left, right) = if matches!(cc, Cond::Lt | Cond::Le) { (xb, xa) } else { (xa, xb) };
+                self.a.sse_rr(if w { 0x66 } else { 0 }, 0x2e, left, right, false);
+                match cc {
+                    Cond::Lt | Cond::Gt => (CC_A, None),
+                    Cond::Le | Cond::Ge => (CC_AE, None),
+                    Cond::Eq => (CC_E, Some(false)),
+                    Cond::Ne => (CC_NE, Some(true)),
+                }
+            }
         }
     }
 
@@ -6521,25 +6490,18 @@ fn load_cmp_fits(sz: u8, sx: bool, c: Cond, signed: bool, k: i64) -> bool {
     }
 }
 
-fn cmp_def(i: &Inst) -> Option<VReg> {
-    match i {
-        Inst::ICmp(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) => Some(*d),
-        _ => None,
-    }
-}
-
 /// Strict ordered selects return b for ties (including signed zero) and NaNs,
 /// exactly like x86 MIN/MAX with b as the source. Non-strict comparisons cannot
 /// use this: equality picks a but unordered picks b, requiring distinct handling.
-fn scalar_minmax(i: &Inst, a: VReg, b: VReg) -> Option<(bool, u8)> {
-    let Inst::FCmp(cc, w, _, x, y) = i else { return None };
-    let direct = *x == a && *y == b;
-    let swapped = *x == b && *y == a;
+fn scalar_minmax(c: &Cmp, a: VReg, b: VReg) -> Option<(bool, u8)> {
+    let Cmp::F(cc, w, x, y) = *c else { return None };
+    let direct = x == a && y == b;
+    let swapped = x == b && y == a;
     match cc {
-        Cond::Gt if direct => Some((*w, 0x5f)),
-        Cond::Lt if swapped => Some((*w, 0x5f)),
-        Cond::Lt if direct => Some((*w, 0x5d)),
-        Cond::Gt if swapped => Some((*w, 0x5d)),
+        Cond::Gt if direct => Some((w, 0x5f)),
+        Cond::Lt if swapped => Some((w, 0x5f)),
+        Cond::Lt if direct => Some((w, 0x5d)),
+        Cond::Gt if swapped => Some((w, 0x5d)),
         _ => None,
     }
 }
@@ -6697,18 +6659,15 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     // (hot code only: the rewrite copies the function, +15% back-end time at O1)
     let hoisted = if env.opt_regs || f.full { regalloc::hoist_loop_consts(f, &imm_fits, false, false, None) } else { None };
     let f = hoisted.as_ref().unwrap_or(f);
-    // selects on one compare next to each other, then compares next to the selects that read
-    // them (the cmovs take the flags)
+    // selects on one compare next to each other (the cmovs share its flags)
     let paired = if env.opt_regs || f.full { regalloc::pair_selects(f) } else { None };
     let f = paired.as_ref().unwrap_or(f);
-    let sunk = if env.opt_regs || f.full { regalloc::sink_compares(f) } else { None };
-    let f = sunk.as_ref().unwrap_or(f);
     // counter steps after the last read of the old value (no copy per iteration)
     let stepped = if env.opt_regs || f.full { regalloc::sink_increments(options, f) } else { None };
     let f = stepped.as_ref().unwrap_or(f);
-    // branch compares at the end of their block (fused into cmp + jcc)
-    let brs = if env.opt_regs || f.full { regalloc::sink_branch_compares(options, f) } else { None };
-    let f = brs.as_ref().unwrap_or(f);
+    // branches and selects on their compares' flags (cmp + jcc, cmp + cmov)
+    let cmps = if env.opt_regs || f.full { regalloc::compares_into_readers(options, f, x64_sel_ok) } else { None };
+    let f = cmps.as_ref().unwrap_or(f);
     // the backend-internal rewrites above run after the last pipeline verify
     f.verify_after("x64 backend rewrites (legalize/pair256/switch/hoist/sink)")?;
     let mut cfg = reg_config(options);

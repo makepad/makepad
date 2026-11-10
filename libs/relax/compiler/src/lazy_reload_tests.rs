@@ -2131,3 +2131,89 @@ fn module_bodies_classify_by_item() {
     restart("a module given an attribute", a_src.replace("pub mod inner {", "#[allow(dead_code)]\npub mod inner {"), "mod `inner` changed: its attributes changed");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A new item in one JIT-compiled crate and its first use in another, saved together, patch in one
+/// edit: the dependent crate's new code calls the new fn (no restart, nothing refused). The
+/// counterpart, an item a crate the host provides lacks (its items are the running makepad's):
+/// with makepad's inputs unchanged a use of it is the edit's own error, and once they changed it
+/// waits for the rebuilt makepad, the restart offered -- also where this process cannot build
+/// makepad and nothing on the ring builds (a dock app's sync, 11-10: E0425 on a new `makepad_hal`
+/// op stood as the edit's own error).
+#[test]
+fn a_new_item_in_another_crate_patches_unless_the_host_provides_that_crate() {
+    const CHILD: &str = "MAKEPAD_RUN_CROSS_ITEM_TEST";
+    if std::env::var(CHILD).is_err() {
+        let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "lazy_reload_tests::a_new_item_in_another_crate_patches_unless_the_host_provides_that_crate", "--nocapture", "--test-threads=1", "--format=terse"])
+            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    use crate::reload::{apply, Edit, Rung};
+    crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-cross-item-{}", std::process::id()));
+    std::fs::write({ std::fs::create_dir_all(&dir).unwrap(); dir.join("Cargo.toml") }, "[workspace]\nmembers = [\"app\", \"parts\"]\n").unwrap();
+    let src = |name: &str, text: &str| {
+        std::fs::create_dir_all(dir.join(name).join("src")).unwrap();
+        std::fs::write(dir.join(name).join("Cargo.toml"), format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")).unwrap();
+        let path = dir.join(name).join("src/lib.rs");
+        std::fs::write(&path, text).unwrap();
+        path.to_string_lossy().into_owned()
+    };
+    let parts_src = "pub fn base() -> u32 { 11 }\n";
+    let app_src = |call: &str| format!("pub fn value(out: &mut u32) {{ *out = parts::{call}(); }}\n");
+    let (parts_path, app_path) = (src("parts", parts_src), src("app", &app_src("base")));
+    let session = Arc::new(crate::Session::default());
+    crate::pmhost::install();
+    let mut prog = Program::new(&session);
+    let (core, deps) = crate::load_std_crates(&session, &mut prog).unwrap();
+    let cfg = crate::program_cfg(&session, &[]);
+    let parts = prog.load_crate_deferred("parts", &parts_path, 2021, cfg.clone(), deps.clone()).unwrap();
+    let mut app_deps = deps;
+    app_deps.push((prog.syms.intern("parts"), parts));
+    let app_crate = prog.load_crate_deferred("app", &app_path, 2021, cfg, app_deps).unwrap();
+    prog.prelude_crate = Some(core);
+    prog.resolve_imports();
+    assert!(prog.errors.is_empty(), "{:?}", prog.errors);
+    let value = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = crate::program::DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == "value").then_some(id)
+    }).unwrap();
+    let parts_file = prog.mods[prog.crates[parts as usize].root_mod as usize].file;
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    let mut u = crate::jit::Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut crate::jit::Unit;
+    let entry = crate::owner::call(crate::owner::Class::Program, || {
+        let id = u.fn_id(crate::jit::FnKey::Inst(value, vec![]));
+        u.entry(id)
+    });
+    let run = || {
+        let mut result = 0u32;
+        unsafe { crate::jit::call_jit(up, entry, &mut result as *mut u32 as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        result
+    };
+    assert_eq!(run(), 11);
+    let app_file = u.prog.def(value).file;
+    let o = unsafe { apply(up, vec![
+        Edit { file: parts_file, path: parts_path, src: format!("{parts_src}pub fn fresh() -> u32 {{ 29 }}\n").into_bytes() },
+        Edit { file: app_file, path: app_path.clone(), src: app_src("fresh").into_bytes() },
+    ]) };
+    assert_eq!(o.rung, Rung::Patch, "a new fn and its first use in another crate, saved together: {:?}", o.lines);
+    assert_eq!(run(), 29, "the dependent crate's new code calls the new fn");
+    unsafe extern "C" fn no_panic(_: *mut *const u8, _: *mut usize) {}
+    crate::provided::register("parts", Default::default(), Default::default(), Default::default(), Default::default(), no_panic, 0, &[]);
+    let use_later = || vec![Edit { file: app_file, path: app_path.clone(), src: app_src("later").into_bytes() }];
+    let o = unsafe { apply(up, use_later()) };
+    assert_eq!(o.rung, Rung::Refuse, "a fn the provided crate lacks, with makepad's inputs unchanged: {:?}", o.lines);
+    // makepad's inputs changed, and this process cannot build it (no loader package here)
+    assert!(crate::reload::host::request("a provided crate changed".into(), Vec::new()).is_err(), "the test process has no makepad to rebuild");
+    assert!(crate::reload::host::route() == crate::reload::host::Route::Plain, "nothing builds: the ring has no rebuild to offer");
+    let o = unsafe { apply(up, use_later()) };
+    assert!(o.lines.iter().any(|l| l.contains("E0425") && l.contains("needs the rebuilt makepad: restart to apply")), "once makepad's inputs changed, the use waits for the rebuilt makepad: {:?} {:?}", o.rung, o.lines);
+    assert_eq!(run(), 29, "the running code stays until the restart");
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}

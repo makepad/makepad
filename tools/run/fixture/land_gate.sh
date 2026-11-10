@@ -49,6 +49,9 @@ log=$(mktemp -d "${TMPDIR:-/tmp}/landgate.XXXXXX") || exit 2
 # tmpfs /tmp on the nodes: orphaned gate dirs filled it and crashed a hosted app. A failed gate's step logs
 # (proofs, presents, depcheck) go to the lease's keep dir first, which its holder copies to the master
 KEEP_LOGS=$here/keep_logs.sh
+# a tests unit's stall is said (GATEBUSY: testrun_one's watch) once its tests give no new result for BUSY_TIMES its
+# last measure, at least BUSY_FLOOR_S: the check-in's own bound for a slow unit (bucket.rs SLOW_TIMES, SLOW_FLOOR_S)
+BUSY_TIMES=3 BUSY_FLOOR_S=600
 trap '[ -z "$fail" ] || bash "$KEEP_LOGS" "$log"; rm -rf -- "$log"' EXIT
 fail=""; sum=""
 # The master classifies before acquiring either lease; the shell only carries its verdict.
@@ -338,7 +341,8 @@ reap_one() {
 # Each run's start and end are said live (GATESTART <unit> <epoch s>, GATEEND <unit>), beside the runs' own output,
 # which comes once they all ended: the master's check-in lists a unit running far over its last measure (bucket.rs
 # slow_units). A test that hung busy (a stalled GStreamer pipeline polled at 4 % of a core) is no HUNG, and held
-# its shard 73 min with nothing said (11-07).
+# its shard 73 min with nothing said (11-07). A run's fd 4 is this live output: its unit watch says a stall there
+# (GATEBUSY, unit_watch_body.sh), which the check-in lists with its sample.
 # A line is taken once a run's slot is free: from the file, or from a next fn (into `f`, false at the end: the
 # tests run's queue, next_told).
 at_once() { # at_once <fn> <lines file> [at most N] [next fn]: runs `<fn> <fields of a line>` per line in parallel
@@ -353,7 +357,7 @@ at_once() { # at_once <fn> <lines file> [at most N] [next fn]: runs `<fn> <field
     o="$log/${1%_one}-$i-${f[1]}"; outs+=("$o")
     # both files open here: present's own `for i` loop changed $i inside the subshell, so its failures
     # went to another run's .fail and the verdict passed with GATEUNIT fail lines
-    ( fail=""; "$1" "${f[@]}" 3>&-; printf '%s' "$fail" >&3 ) > "$o.out" 2>&1 3> "$o.fail" &
+    ( fail=""; "$1" "${f[@]}" 3>&-; printf '%s' "$fail" >&3 ) 4>&1 > "$o.out" 2>&1 3> "$o.fail" &
     running[$!]=$(unit_of "${f[@]}")
     echo "GATESTART ${running[$!]} $(date +%s)"
   done
@@ -524,9 +528,11 @@ step_qpresent() {
   PRESENT_JOBS=$(( cores / at ))
   at_once qpresent_one "$log/presents" "$at"
 }
-# A unit hangs when a process of it parks, when its processes do nothing for 9 min, or when it runs past twice its
-# last measure and 9 min more: unit_watch.sh beside it keeps its state, stops its processes, and it fails HUNG
-# while the other units go on.
+# A unit hangs when a process of it parks, or when its tests run and make no progress for 9 min (no test result,
+# its processes doing nothing): unit_watch.sh beside it keeps its state, stops its processes, and it fails HUNG
+# while the other units go on. A build, or a unit at work, is never a hang, however long it takes; one whose tests
+# give no new result for BUSY_TIMES its last measure (GATE_TIMES), at least BUSY_FLOOR_S (bucket.rs SLOW_TIMES and
+# SLOW_FLOOR_S), is said with a sample of its state (GATEBUSY), never stopped.
 # watched <out> <cmd...>: the command in a session of its own (a background job of this shell leads no group:
 # setsid execs in place) with unit_watch.sh beside it; its exit code, and <out>.hung when it hung. The watch is
 # this gate's own file, wherever the gate runs from (test_run.sh runs it in a stub repo: a path from the tree's
@@ -536,9 +542,9 @@ step_qpresent() {
 watched() {
   local out=$1 pid watcher code ended
   shift
-  setsid "$@" > "$out" 2>&1 < /dev/null &
+  setsid "$@" > "$out" 2>&1 < /dev/null 4>&- &
   pid=$!
-  B=$B MEASURED_S=${MEASURED_S:-} bash "${UNIT_WATCH:-$here/unit_watch.sh}" "$pid" "$out" 2> "$out.watch" &
+  B=$B BUSY_S=${busy_s:-0} BUSY_UNIT=${busy_unit:-} bash "${UNIT_WATCH:-$here/unit_watch.sh}" "$pid" "$out" 2> "$out.watch" &
   watcher=$!
   wait -n -p ended "$pid" "$watcher"; code=$?
   if [ "$ended" = "$pid" ]; then
@@ -624,20 +630,29 @@ test_failures() {
 # tests and panics, or HUNG and the tests it still ran, and the command that runs it alone (GATEREPRO)
 testrun_one() {
   # (a split package's target: `test <pkg> <dir> --lib`, its unit `test <pkg> --lib`, its log its own)
-  local unit code r hung run name=$2${4:+-${*:4}} MEASURED_S
+  local unit code r hung run name=$2${4:+-${*:4}} busy_unit busy_s m pk was
   unit=$(unit_of "$@"); name=${name// /-}
+  # a stall said once its tests give no new result far past its last measure (watched)
+  m=${TIME_S[$unit]:-0}; busy_unit=$unit busy_s=$(( m * BUSY_TIMES > BUSY_FLOOR_S ? m * BUSY_TIMES : BUSY_FLOOR_S ))
   run=(env ${TEST_JOBS:+MAKEPAD_RUN_JOBS=$TEST_JOBS MAKEPAD_CPU_CORES=$TEST_JOBS RUST_TEST_THREADS=$TEST_JOBS} MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 $B test "$2" "${@:4}")
   local t0=$SECONDS
-  # its last measure (GATE_TIMES), which bounds it (unit_watch.sh): far past it, busy or not, it fails HUNG
-  MEASURED_S=${TIME_S[$unit]:-}
   watched "$log/testrun-$name" "${run[@]}"; code=$?
-  MEASURED_S=
   # its seconds, which the next run deals the slowest units out by (GATE_TIMES); a hung unit's are no measure:
   # one stopped after 78 min took a shard of its own in the next run's deal, and every unit not measured yet with
   # it (as the slowest measured), 11-07
   [ "$code" != 0 ] && [ -s "$log/testrun-$name.hung" ] || echo "GATETIME $unit $((SECONDS - t0))"
   # its peak RSS, which the next run's shards start it by (GATE_PEAKS)
-  [ -s "$log/testrun-$name.peak" ] && echo "GATEPEAK $unit $(< "$log/testrun-$name.peak")"
+  if [ -s "$log/testrun-$name.peak" ]; then
+    pk=$(< "$log/testrun-$name.peak"); was=${PEAK_MB[$unit]:-0}
+    echo "GATEPEAK $unit $pk"
+    # what held it then, largest first: a build the unit set off shows by name
+    [ ! -s "$log/testrun-$name.peak.by" ] || echo "GATEPEAKBY $unit :: $(< "$log/testrun-$name.peak.by")"
+    # far past the last peak its shard fitted it by beside the others (ram_room): said, so a red beside it reads
+    # against the RAM it took (no cap: a measure never ends a run, 11-03)
+    if [ "$was" -gt 0 ] && [ "$pk" -ge $((was * 3 / 2)) ] && [ "$pk" -ge $((was + 1024)) ]; then
+      awk -v u="$unit" -v a="$pk" -v b="$was" 'BEGIN { printf "%s: peaked %.1f GB, %.1fx the %.1f GB of its last run\n", u, a / 1024, a / b, b / 1024 }'
+    fi
+  fi
   r=$(grep -E '^test result:' "$log/testrun-$name" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^(passed|failed);?$/) s[$i] += $(i - 1) } END { printf "%d passed, %d failed", s["passed;"], s["failed;"] }')
   # (a unit that ended by itself as its watch said HUNG: it ended)
   if [ "$code" != 0 ] && [ -s "$log/testrun-$name.hung" ]; then

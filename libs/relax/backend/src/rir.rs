@@ -336,6 +336,95 @@ pub enum Cond {
     Ge,
 }
 
+impl Cond {
+    /// The condition that holds exactly when this one does not (on integers; of float compares only
+    /// `==` and `!=`: `!=` is true when unordered)
+    pub fn not(self) -> Cond {
+        match self {
+            Cond::Eq => Cond::Ne,
+            Cond::Ne => Cond::Eq,
+            Cond::Lt => Cond::Ge,
+            Cond::Ge => Cond::Lt,
+            Cond::Le => Cond::Gt,
+            Cond::Gt => Cond::Le,
+        }
+    }
+}
+
+/// The compare a branch or a select reads in place (`Term::BranchCmp`, `Inst::SelCmp`): the
+/// condition is the compare's flags and never lives in a register. Backend-only, made by
+/// `regalloc::compares_into_readers` just before register allocation, from the `ICmp` / `ICmpI` /
+/// `FCmp` (and `c ^ 1` of one) a `Branch` or `Sel` read; the optimiser passes never see it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Cmp {
+    /// `ICmp(cond, signed, _, a, b)`
+    R(Cond, bool, VReg, VReg),
+    /// `ICmpI(cond, signed, _, a, k)`
+    K(Cond, bool, VReg, i64),
+    /// `FCmp(cond, f64, _, a, b)`
+    F(Cond, bool, VReg, VReg),
+}
+
+impl Cmp {
+    /// The compare an instruction makes, and its result.
+    pub fn of(i: &Inst) -> Option<(VReg, Cmp)> {
+        match *i {
+            Inst::ICmp(c, s, d, a, b) => Some((d, Cmp::R(c, s, a, b))),
+            Inst::ICmpI(c, s, d, a, k) => Some((d, Cmp::K(c, s, a, k))),
+            Inst::FCmp(c, w, d, a, b) => Some((d, Cmp::F(c, w, a, b))),
+            _ => None,
+        }
+    }
+    /// The instruction that makes this compare's 0 / 1 in d.
+    pub fn inst(self, d: VReg) -> Inst {
+        match self {
+            Cmp::R(c, s, a, b) => Inst::ICmp(c, s, d, a, b),
+            Cmp::K(c, s, a, k) => Inst::ICmpI(c, s, d, a, k),
+            Cmp::F(c, w, a, b) => Inst::FCmp(c, w, d, a, b),
+        }
+    }
+    pub fn cond(self) -> Cond {
+        match self {
+            Cmp::R(c, ..) | Cmp::K(c, ..) | Cmp::F(c, ..) => c,
+        }
+    }
+    /// The compare that is true exactly when this one is false (None: an ordered float compare,
+    /// false both ways when unordered).
+    pub fn not(self) -> Option<Cmp> {
+        match self {
+            Cmp::R(c, s, a, b) => Some(Cmp::R(c.not(), s, a, b)),
+            Cmp::K(c, s, a, k) => Some(Cmp::K(c.not(), s, a, k)),
+            Cmp::F(c @ (Cond::Eq | Cond::Ne), w, a, b) => Some(Cmp::F(c.not(), w, a, b)),
+            Cmp::F(..) => None,
+        }
+    }
+    /// Whether it reads v.
+    pub fn reads(self, v: VReg) -> bool {
+        let mut r = false;
+        self.uses(|u| r |= u == v);
+        r
+    }
+    /// The registers it reads.
+    pub fn uses(self, mut f: impl FnMut(VReg)) {
+        match self {
+            Cmp::R(_, _, a, b) | Cmp::F(_, _, a, b) => {
+                f(a);
+                f(b);
+            }
+            Cmp::K(_, _, a, _) => f(a),
+        }
+    }
+    pub fn vregs_mut(&mut self, mut f: impl FnMut(&mut VReg)) {
+        match self {
+            Cmp::R(_, _, a, b) | Cmp::F(_, _, a, b) => {
+                f(a);
+                f(b);
+            }
+            Cmp::K(_, _, a, _) => f(a),
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum FOp {
     Add,
@@ -923,6 +1012,8 @@ pub enum Inst {
     Copy(VReg, VReg, u32),
     /// d = c != 0 ? a : b (c an integer vreg; a, b, d of one class)
     Sel(VReg, VReg, VReg, VReg), // d, c, a, b
+    /// backend-only (`Cmp`): d = cmp ? a : b
+    SelCmp(VReg, Cmp, VReg, VReg), // d, cmp, a, b
     /// fused multiply-add, one rounding: d = (neg_prod ? -a : a) * b + (neg_add ? -c : c), the
     /// negations those of the operands (a NaN's sign flips: `(-a).mul_add(b, c)`). A NaN result
     /// is [`fma_nan_f32`] / [`fma_nan_f64`] of the negated operands on every tier and register
@@ -996,6 +1087,8 @@ pub enum Inst {
 pub enum Term {
     Jump(u32),
     Branch(VReg, u32, u32),
+    /// backend-only (`Cmp`): to the first block when the compare holds, else the second
+    BranchCmp(Cmp, u32, u32),
     Ret(Vec<VReg>),
     Unreachable,
     /// (normal, unwind): the block's last instruction is a call (Callee::Fn / Indirect / Host)
@@ -1077,7 +1170,7 @@ impl Inst {
             Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::TlsStatic(d, _) | Inst::VConst(d, _) => f(*d),
             Inst::Mov(d, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::FUnary(_, _, d, _) | Inst::Conv(_, d, _) | Inst::IBinI(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::Load(_, d, _, _) | Inst::VSplat(d, _) | Inst::VExtract(d, _, _) | Inst::VLoad(d, _, _) | Inst::VAny(d, _) | Inst::AtomicLoad(_, _, d, _) => f(*d),
             Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VGather(d, _, _) | Inst::VTbl(d, _, _, _) | Inst::VShuffle(d, _, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) | Inst::VLoadX(d, _, _, _, _) => f(*d),
-            Inst::Sel(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, _, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => f(*d),
+            Inst::Sel(d, _, _, _) | Inst::SelCmp(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, _, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => f(*d),
             Inst::VInsert(d, _, _, _) => f(*d),
             Inst::Call(_, _, rets) => rets.iter().for_each(|r| f(*r)),
             Inst::FpEnv(_, v) => f(*v),
@@ -1115,6 +1208,12 @@ impl Inst {
                 f(b);
                 f(c);
             }
+            Inst::SelCmp(d, c, a, b) => {
+                f(d);
+                c.vregs_mut(&mut f);
+                f(a);
+                f(b);
+            }
             Inst::Call(c, args, rets) => {
                 if let Callee::Indirect(v) | Callee::CIndirect(v, _) = c {
                     f(v);
@@ -1141,7 +1240,7 @@ impl Term {
     pub fn succs(&self) -> Succs {
         match *self {
             Term::Jump(t) => Succs { a: [t, 0], n: 1, i: 0, sw: None },
-            Term::Branch(_, t, e) | Term::Invoke(t, e) => Succs { a: [t, e], n: if t == e { 1 } else { 2 }, i: 0, sw: None },
+            Term::Branch(_, t, e) | Term::BranchCmp(_, t, e) | Term::Invoke(t, e) => Succs { a: [t, e], n: if t == e { 1 } else { 2 }, i: 0, sw: None },
             Term::Ret(_) | Term::Unreachable | Term::Resume => Succs { a: [0, 0], n: 0, i: 0, sw: None },
             Term::Switch(_, ref t) => Succs { a: [0, 0], n: 0, i: 0, sw: Some(t.clone()) },
         }
@@ -1151,7 +1250,7 @@ impl Term {
     pub fn map_succs(&mut self, mut f: impl FnMut(u32) -> u32) {
         match self {
             Term::Jump(t) => *t = f(*t),
-            Term::Branch(_, t, e) | Term::Invoke(t, e) => {
+            Term::Branch(_, t, e) | Term::BranchCmp(_, t, e) | Term::Invoke(t, e) => {
                 *t = f(*t);
                 *e = f(*e);
             }
@@ -1746,6 +1845,21 @@ impl Func {
         s
     }
 
+    /// A compare's operands against its kind.
+    fn check_cmp(&self, c: &Cmp, what: &str) -> Result<(), String> {
+        let want = match c {
+            Cmp::R(..) | Cmp::K(..) => Cls::I,
+            Cmp::F(_, true, ..) => Cls::F64,
+            Cmp::F(_, false, ..) => Cls::F32,
+        };
+        let mut bad = false;
+        c.uses(|u| bad |= self.vregs[u.0 as usize] != want);
+        if bad {
+            return Err(format!("{}: {} compare class mismatch: {:?}", self.name, what, c));
+        }
+        Ok(())
+    }
+
     /// C ABI vregs (call arguments or body params) against their CSig.
     fn check_csig(&self, sig: &CSig, vs: &[VReg], what: &str) -> Result<(), String> {
         let skip = sig.ret.is_some() as usize;
@@ -1880,6 +1994,12 @@ impl Func {
                         regs.push(*a);
                         regs.push(*b);
                     }
+                    Inst::SelCmp(d, c, a, b) => {
+                        regs.push(*d);
+                        c.uses(|u| regs.push(u));
+                        regs.push(*a);
+                        regs.push(*b);
+                    }
                     Inst::FMulAdd(_, _, _, d, a, b, c) => {
                         regs.push(*d);
                         regs.push(*a);
@@ -1930,6 +2050,13 @@ impl Func {
                             return Err(format!("{}: b{} select class mismatch: {:?}", self.name, bi, x));
                         }
                     }
+                    Inst::SelCmp(d, c, a, b2) => {
+                        let cd = self.vregs[d.0 as usize];
+                        if self.vregs[a.0 as usize] != cd || self.vregs[b2.0 as usize] != cd {
+                            return Err(format!("{}: b{} select class mismatch: {:?}", self.name, bi, x));
+                        }
+                        self.check_cmp(c, &format!("b{} select", bi))?;
+                    }
                     _ => {}
                 }
             }
@@ -1941,6 +2068,17 @@ impl Func {
                 }
                 Term::Branch(c, t, f) => {
                     chk(*c)?;
+                    if *t >= nb || *f >= nb {
+                        return Err(format!("{}: bad branch target", self.name));
+                    }
+                }
+                Term::BranchCmp(c, t, f) => {
+                    let mut ops: Vec<VReg> = Vec::new();
+                    c.uses(|u| ops.push(u));
+                    for u in ops {
+                        chk(u)?;
+                    }
+                    self.check_cmp(c, &format!("b{} branch", bi))?;
                     if *t >= nb || *f >= nb {
                         return Err(format!("{}: bad branch target", self.name));
                     }

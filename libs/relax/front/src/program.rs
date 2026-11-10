@@ -426,8 +426,8 @@ pub struct CrateInfo {
     pub is_bin: bool,
     /// built with `--test` (libtest's main): the check requires no main of it
     pub harness: bool,
-    /// the crate's errors are reported (set by the check for its checked crates): validation-only
-    /// checks run for it and for no other crate
+    /// the crate's errors are reported (set by the check for its checked crates, by a run for its
+    /// app's crates): validation-only checks run for it and for no other crate
     pub validate: bool,
     /// a provided crate (rustc built it into the loader and `makepad run` binds it): rustc lays
     /// its types out, so none of them takes the live layout, wherever the crate's sources are

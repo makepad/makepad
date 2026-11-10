@@ -149,10 +149,16 @@ fn keeps_flags(i: &Inst) -> bool {
 /// operand locations) only narrow these shapes; the loop asks this before each deferral.
 fn arm64_defers(b: &Block, k: usize, uses: &[u32]) -> bool {
     let n = b.insts.len();
+    let once = |t: VReg| uses[t.0 as usize] == 1;
+    // `t = x & K` before a branch on `t ==/!= 0`: tst x, #K
+    if let (Some(Cmp::K(Cond::Eq | Cond::Ne, _, t2, 0)), ne) = regalloc::branch_compare(b, uses) {
+        if k + 1 == ne {
+            return matches!(b.insts[k], Inst::IBinI(IOp::And, _, t, x, _) if x != t && once(t) && t2 == t);
+        }
+    }
     if k + 1 >= n {
         return false;
     }
-    let once = |t: VReg| uses[t.0 as usize] == 1;
     let next = &b.insts[k + 1];
     match b.insts[k] {
         Inst::IBinI(IOp::Shl | IOp::Shr, it, t, _, sh) if it.bits == 64 && (1..64).contains(&sh) && once(t) => match *next {
@@ -163,9 +169,14 @@ fn arm64_defers(b: &Block, k: usize, uses: &[u32]) -> bool {
         Inst::IBin(IOp::Mul, it, t, a, m) if it.bits == 64 && a != t && m != t && once(t) => mul_add_next(t, next),
         Inst::IBinI(IOp::Mul, it, t, a, _) if it.bits == 64 && a != t && once(t) => mul_add_next(t, next),
         Inst::IBit(BitOp::Bswap | BitOp::Rev, t, _) if once(t) => matches!(*next, Inst::IBinI(IOp::Shr, it, _, x, 32 | 48) if x == t && it.bits == 64 && !it.signed),
-        Inst::IBinI(IOp::And, _, t, x, _) if k + 2 == n && x != t && once(t) => matches!((next, &b.term), (Inst::ICmpI(Cond::Eq | Cond::Ne, _, c, t2, 0), Term::Branch(c2, _, _)) if *t2 == t && c == c2 && once(*c)),
         _ => false,
     }
+}
+
+/// The selects arm64 makes on a compare's flags: csel / fcsel take any condition (a float compare's
+/// conditions are false when unordered but for `!=`, as Rust's).
+pub fn arm64_sel_ok(_: &Cmp, data: Cls) -> bool {
+    matches!(data, Cls::I | Cls::F32 | Cls::F64)
 }
 
 /// mul_add's second instructions for a product t
@@ -225,7 +236,7 @@ fn keeps_v0_7(f: &Func, i: &Inst) -> bool {
     match i {
         Inst::Iconst(..) | Inst::IBinI(..) | Inst::ICmpI(..) | Inst::ICmp(..) | Inst::IBin(..) | Inst::IBit(..) | Inst::INeg(..) | Inst::INot(..) => true,
         Inst::SlotAddr(..) | Inst::Addr(..) | Inst::FnAddr(..) | Inst::Mov(..) | Inst::Load(..) | Inst::Store(..) | Inst::LoadX(..) | Inst::StoreX(..) => true,
-        Inst::Fconst(..) | Inst::FBin(..) | Inst::FUnary(..) | Inst::FCmp(..) | Inst::FMulAdd(..) | Inst::Sel(..) | Inst::Conv(..) | Inst::Copy(..) => true,
+        Inst::Fconst(..) | Inst::FBin(..) | Inst::FUnary(..) | Inst::FCmp(..) | Inst::FMulAdd(..) | Inst::Sel(..) | Inst::SelCmp(..) | Inst::Conv(..) | Inst::Copy(..) => true,
         Inst::VLoad(..) | Inst::VStore(..) | Inst::VLoadX(..) | Inst::VStoreX(..) | Inst::VConst(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) => true,
         Inst::VSel(..) | Inst::VFma(..) | Inst::VAny(..) | Inst::VGather(..) => true,
         Inst::VX(op, ..) => {
@@ -840,11 +851,13 @@ struct Gen<'a> {
     qcopy: bool,
     /// the block ends `t = x & K; t ==/!= 0; branch`: emitted as tst x, #K (the And skipped)
     test_fuse: Option<(VReg, i64)>,
-    /// a compare whose flags the selects right after it read (csel / fcsel on the condition, no
-    /// `cmp c, #0`): (its bool vreg, condition). Valid only for the selects that directly follow
-    /// the compare in its block: any other instruction, a fused compare-and-branch, or a block
-    /// boundary ends it (the flags then belong to something else).
-    sel_chain: Option<(VReg, u8)>,
+    /// the compare whose flags the selects right after it read (csel / fcsel on the condition, no
+    /// `cmp c, #0`): (its bool vreg when it was made as one and not written since, the compare while
+    /// its operands are not written, condition). Valid only for
+    /// the selects that follow it in its block with nothing but keeps_flags instructions between:
+    /// any other instruction, a fused compare-and-branch, or a block boundary ends it (the flags
+    /// then belong to something else).
+    sel_chain: Option<(Option<VReg>, Option<Cmp>, u8)>,
     /// a zero vector whose definition was skipped: the VInsert of lane 0 right after it reads
     /// it (fmov s, which zeroes lanes 1-3)
     zero_ins: Option<VReg>,
@@ -1363,22 +1376,18 @@ impl<'a> Gen<'a> {
             }
             let b = &self.f.blocks[bi];
             let n = b.insts.len();
-            // a compare feeding only the branch is fused into cmp + b.cond
-            let mut fused = false;
-            if let Term::Branch(c, _, _) = &b.term {
-                if n > 0 && self.al.uses[c.0 as usize] == 1 && isel_flags(options) & A64_FUSE != 0 {
-                    match &b.insts[n - 1] {
-                        Inst::ICmp(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) if d == c => fused = true,
-                        _ => {}
-                    }
-                }
-            }
-            // `t = x & K; c = t ==/!= 0` feeding the branch (t used once, K a bitmask immediate): tst x, #K
+            // the compare the branch reads (fused into cmp + b.cond): the instructions before it
+            // (-fuse: a compare made for the branch is a bool the branch tests)
+            let (bcmp, mut ne) = match regalloc::branch_compare(b, &self.al.uses) {
+                (Some(c), ne) if ne == n || isel_flags(options) & A64_FUSE != 0 => (Some(c), ne),
+                _ => (None, n),
+            };
+            // `t = x & K` and a branch on `t ==/!= 0` (t used once, K a bitmask immediate): tst x, #K
             self.test_fuse = None;
             let mut test_pair = false;
-            if fused && n >= 2 {
-                if let (Inst::IBinI(IOp::And, it, t, x, k), Inst::ICmpI(Cond::Eq | Cond::Ne, _, _, t2, 0)) = (&b.insts[n - 2], &b.insts[n - 1]) {
-                    if t == t2 && *x != *t && self.al.uses[t.0 as usize] == 1 && (it.bits == 64 || (0..1i64 << 32).contains(k)) && bitmask_imm(*k as u64).is_some() && arm64_defers(b, n - 2, &self.al.uses) {
+            if let (Some(Cmp::K(Cond::Eq | Cond::Ne, _, t2, 0)), true) = (bcmp, ne >= 1) {
+                if let Inst::IBinI(IOp::And, it, t, x, k) = &b.insts[ne - 1] {
+                    if *t == t2 && *x != *t && self.al.uses[t.0 as usize] == 1 && (it.bits == 64 || (0..1i64 << 32).contains(k)) && bitmask_imm(*k as u64).is_some() && arm64_defers(b, ne - 1, &self.al.uses) {
                         self.test_fuse = Some((*x, *k));
                         test_pair = true;
                     }
@@ -1387,11 +1396,11 @@ impl<'a> Gen<'a> {
             // `c = x & K` branched on directly (c used once): tst x, #K / tbnz (switch bit tests:
             // `lsr; and #1; cbnz` was three instructions)
             if let Term::Branch(c, _, _) = &b.term {
-                if !fused && n > 0 && self.al.uses[c.0 as usize] == 1 && isel_flags(options) & A64_FUSE != 0 {
+                if bcmp.is_none() && n > 0 && self.al.uses[c.0 as usize] == 1 && isel_flags(options) & A64_FUSE != 0 {
                     if let Inst::IBinI(IOp::And, it, t, x, k) = &b.insts[n - 1] {
                         if t == c && *x != *t && (it.bits == 64 || (0..1i64 << 32).contains(k)) && bitmask_imm(*k as u64).is_some() {
                             self.test_fuse = Some((*x, *k));
-                            fused = true;
+                            ne = n - 1;
                         }
                     }
                 }
@@ -1441,14 +1450,15 @@ impl<'a> Gen<'a> {
                 // only selects (and what leaves the flags alone) continue a chain; checked before
                 // any instruction is skipped or fused into the terminator (a fused compare
                 // rewrites the flags)
-                if !matches!(inst, Inst::Sel(..)) && !keeps_flags(inst) {
+                if !matches!(inst, Inst::Sel(..) | Inst::SelCmp(..)) && !keeps_flags(inst) {
                     self.sel_chain = None;
                 }
-                if fused && ii == n - 1 {
-                    break;
+                // a select reads the flags before it writes (Gen::sel_written)
+                if !matches!(inst, Inst::Sel(..) | Inst::SelCmp(..)) {
+                    regalloc::for_defs(inst, |d| self.sel_written(d));
                 }
-                if test_pair && ii == n - 2 {
-                    continue;
+                if ii == ne || test_pair && ii + 1 == ne {
+                    break;
                 }
                 if skip_next {
                     skip_next = false;
@@ -1468,7 +1478,7 @@ impl<'a> Gen<'a> {
                     continue;
                 }
                 // three or more zero stores off one base in a row: the widest zr stores over their bytes
-                let limit = if test_pair { n - 2 } else if fused { n - 1 } else { n };
+                let limit = if test_pair { ne - 1 } else { ne };
                 if ii + 2 < limit && isel_flags(options) & A64_FUSE != 0 {
                     let k = self.zero_run(bi, ii, limit);
                     if k > 0 {
@@ -1476,7 +1486,7 @@ impl<'a> Gen<'a> {
                         continue;
                     }
                 }
-                if ii + 1 < n && !(fused && ii + 1 == n - 1) {
+                if ii + 1 < ne {
                     // a shift by a constant feeding only the next add/sub/and/or/xor: the shifted
                     // register operand form (`eor d, a, b, lsl #13`); a 64-bit byte swap whose only
                     // use shifts the low half back down: the 32-bit forms (u32 / u16
@@ -1493,7 +1503,7 @@ impl<'a> Gen<'a> {
                 }
                 // a float multiply only read by the negation right after it: fnmul (one
                 // instruction; -(a*b) bit for bit, NaNs included)
-                if ii + 1 < n && !(fused && ii + 1 == n - 1) {
+                if ii + 1 < ne {
                     if let (Inst::FBin(FOp::Mul, w1, t, a, bb), Inst::FUnary(FUn::Neg, w2, _, t2)) = (inst, &b.insts[ii + 1]) {
                         if w1 == w2 && t == t2 && t != a && t != bb && self.al.uses[t.0 as usize] == 1 {
                             self.fnmul_ins = Some((*a, *bb));
@@ -1503,7 +1513,7 @@ impl<'a> Gen<'a> {
                 }
                 // a zero vector only read by the lane-0 insert right after it (SROA'd vector cells,
                 // `_mm_setr_ps` gathers): no movi; the insert is `fmov s` (zeroes lanes 1-3)
-                if ii + 1 < n && !(fused && ii + 1 == n - 1) && self.zero_then_insert(inst, &b.insts[ii + 1]) {
+                if ii + 1 < ne && self.zero_then_insert(inst, &b.insts[ii + 1]) {
                     if let Inst::VConst(z, _) | Inst::VX(_, z, _, _) = inst {
                         self.zero_ins = Some(*z);
                     }
@@ -1513,9 +1523,10 @@ impl<'a> Gen<'a> {
                 // sets flags: other selects of it, keeps_flags instructions); when they are all its
                 // uses, the bool is never materialised (`cmp; cset; cmp #0; csel` was `cmp; csel`:
                 // Paeth's lo / hi / thresh selects, a min and max of one compare)
-                if let Inst::ICmp(_, _, d, ..) | Inst::ICmpI(_, _, d, ..) | Inst::FCmp(_, _, d, ..) = inst {
+                if let Some((d, cmp)) = Cmp::of(inst) {
+                    let d = &d;
                     let (mut k, mut span) = (0, 0);
-                    while ii + 1 + span < n && !(fused && ii + 1 + span == n - 1) {
+                    while ii + 1 + span < ne {
                         let next = &b.insts[ii + 1 + span];
                         match next {
                             Inst::Sel(sd, c, x, y) if c == d && x != d && y != d && sd != d => k += 1,
@@ -1532,14 +1543,15 @@ impl<'a> Gen<'a> {
                         span += 1;
                     }
                     if k > 0 {
+                        let held = (!cmp.reads(*d)).then_some(cmp);
                         if self.al.uses[d.0 as usize] as usize == k {
-                            let cond = self.cmp_flags(inst);
-                            self.sel_chain = Some((*d, cond));
+                            let cond = self.cmp_flags(cmp);
+                            self.sel_chain = Some((Some(*d), held, cond));
                             continue;
                         }
-                        if let Inst::ICmp(c, sg, ..) | Inst::ICmpI(c, sg, ..) = inst {
+                        if let Cmp::R(c, sg, ..) | Cmp::K(c, sg, ..) = cmp {
                             self.inst(options, inst);
-                            self.sel_chain = Some((*d, icc(*c, *sg)));
+                            self.sel_chain = Some((Some(*d), held, icc(c, sg)));
                             continue;
                         }
                     }
@@ -1558,7 +1570,7 @@ impl<'a> Gen<'a> {
             }
             // region windows entered from here: loaded before the terminator (regalloc edge loads);
             // the region's register home before it (exit stores)
-            if matches!(b.term, Term::Jump(_) | Term::Branch(..) | Term::Switch(..)) {
+            if matches!(b.term, Term::Jump(_) | Term::Branch(..) | Term::BranchCmp(..) | Term::Switch(..)) {
                 let tp = self.al.block_end[bi] - 1;
                 self.exit_stores(tp);
                 if let Some(ls) = self.win_start.get(&tp).cloned() {
@@ -1574,8 +1586,7 @@ impl<'a> Gen<'a> {
             if self.rir_map_on {
                 self.rir_map.push(((self.a.pos() * 4) as u32, bi as u32, u32::MAX));
             }
-            let fuse_inst = if fused { Some(b.insts[n - 1].clone()) } else { None };
-            self.term(&b.term, bi, fuse_inst);
+            self.term(&b.term, bi, bcmp);
         }
         if crate::rir::unwind_stats_on() {
             // bytes of blocks only reachable through unwind edges (cleanup pads)
@@ -3748,22 +3759,31 @@ impl<'a> Gen<'a> {
         k - ii
     }
 
+    /// v was written: the select chain no longer holds its bool (when v is it) nor its compare (when
+    /// v is an operand): later selects on them read another value.
+    fn sel_written(&mut self, v: VReg) {
+        if let Some((b, c, cc)) = self.sel_chain {
+            let b = b.filter(|b| *b != v);
+            let c = c.filter(|c| !c.reads(v));
+            self.sel_chain = if b.is_none() && c.is_none() { None } else { Some((b, c, cc)) };
+        }
+    }
+
     /// Sets the flags for a fused compare and returns the condition for "true".
-    fn cmp_flags(&mut self, i: &Inst) -> u8 {
-        match i {
-            Inst::ICmp(c, signed, _, a, b) => {
-                let ra = self.use_i(*a, S0);
-                let rb = self.use_i(*b, S1);
+    fn cmp_flags(&mut self, c: Cmp) -> u8 {
+        match c {
+            Cmp::R(c, signed, a, b) => {
+                let ra = self.use_i(a, S0);
+                let rb = self.use_i(b, S1);
                 self.a.cmp(ra, rb);
-                icc(*c, *signed)
+                icc(c, signed)
             }
-            Inst::ICmpI(c, signed, _, a, v) => {
-                let ra = self.use_i(*a, S0);
-                self.cmp_imm(ra, *v);
-                icc(*c, *signed)
+            Cmp::K(c, signed, a, v) => {
+                let ra = self.use_i(a, S0);
+                self.cmp_imm(ra, v);
+                icc(c, signed)
             }
-            Inst::FCmp(c, f64_, _, a, b) => fcc(self.fcmp_v(*c, *f64_, *a, *b)),
-            _ => NE,
+            Cmp::F(c, f64_, a, b) => fcc(self.fcmp_v(c, f64_, a, b)),
         }
     }
 
@@ -3958,48 +3978,54 @@ impl<'a> Gen<'a> {
         }
     }
 
-    fn term(&mut self, t: &Term, bi: usize, fused: Option<Inst>) {
+    fn term(&mut self, t: &Term, bi: usize, fused: Option<Cmp>) {
         match t {
             Term::Jump(target) => self.jump_to(*target, bi),
-            Term::Branch(c, tt, ff) => {
+            Term::Branch(_, tt, ff) | Term::BranchCmp(_, tt, ff) => {
+                if let Some((src, mask)) = self.test_fuse.take() {
+                    // and with a bitmask immediate, compared with zero (or branched on directly:
+                    // `!= 0`): tst + b.cond
+                    let cnd = match fused {
+                        Some(Cmp::K(c, ..)) => c,
+                        _ => Cond::Ne,
+                    };
+                    let rs = self.use_i(src, S0);
+                    if self.tbz && (mask as u64).is_power_of_two() {
+                        // one bit: tbz / tbnz (branch to tt when the bit is zero == Eq)
+                        let bit = (mask as u64).trailing_zeros();
+                        let zero_to_tt = cnd == Cond::Eq;
+                        let (yes, no) = if zero_to_tt { (CondBr::Tz(rs, bit), CondBr::Tnz(rs, bit)) } else { (CondBr::Tnz(rs, bit), CondBr::Tz(rs, bit)) };
+                        self.branch_pair(yes, no, *tt, *ff, bi);
+                        return;
+                    }
+                    let (nn, immr, imms) = bitmask_imm(mask as u64).unwrap();
+                    // ANDS xzr, xs, #mask
+                    self.a.e(0xF200_001F | nn << 22 | immr << 16 | imms << 10 | (rs as u32) << 5);
+                    let cc = if cnd == Cond::Eq { EQ } else { NE };
+                    self.branch_pair(CondBr::B(cc), CondBr::B(cc ^ 1), *tt, *ff, bi);
+                    return;
+                }
                 match fused {
-                    // and with a bitmask immediate, compared with zero: tst + b.cond
-                    Some(ref fi @ (Inst::ICmpI(Cond::Eq | Cond::Ne, _, _, _, 0) | Inst::IBinI(IOp::And, ..))) if self.test_fuse.is_some() => {
-                        // (x & K) != 0 for a branch straight on the and
-                        let cnd = match fi {
-                            Inst::ICmpI(c, ..) => *c,
-                            _ => Cond::Ne,
-                        };
-                        let (src, mask) = self.test_fuse.take().unwrap();
-                        let rs = self.use_i(src, S0);
-                        if self.tbz && (mask as u64).is_power_of_two() {
-                            // one bit: tbz / tbnz (branch to tt when the bit is zero == Eq)
-                            let bit = (mask as u64).trailing_zeros();
-                            let zero_to_tt = cnd == Cond::Eq;
-                            let (yes, no) = if zero_to_tt { (CondBr::Tz(rs, bit), CondBr::Tnz(rs, bit)) } else { (CondBr::Tnz(rs, bit), CondBr::Tz(rs, bit)) };
-                            self.branch_pair(yes, no, *tt, *ff, bi);
-                            return;
-                        }
-                        let (nn, immr, imms) = bitmask_imm(mask as u64).unwrap();
-                        // ANDS xzr, xs, #mask
-                        self.a.e(0xF200_001F | nn << 22 | immr << 16 | imms << 10 | (rs as u32) << 5);
-                        let cc = if cnd == Cond::Eq { EQ } else { NE };
+                    // the flags of the compare the selects right before read
+                    Some(cmp) if self.sel_chain.is_some_and(|(_, c0, _)| c0 == Some(cmp)) => {
+                        let cc = self.sel_chain.map_or(NE, |(_, _, cc)| cc);
                         self.branch_pair(CondBr::B(cc), CondBr::B(cc ^ 1), *tt, *ff, bi);
                     }
                     // compare with zero for (in)equality: cbz / cbnz, no flags
-                    Some(Inst::ICmpI(cnd @ (Cond::Eq | Cond::Ne), _, _, a, 0)) => {
+                    Some(Cmp::K(cnd @ (Cond::Eq | Cond::Ne), _, a, 0)) => {
                         let r = self.use_i(a, S0);
                         // branch to tt when (r == 0) == (cnd == Eq)
                         let zero_to_tt = cnd == Cond::Eq;
                         let (yes, no) = if zero_to_tt { (CondBr::Z(r), CondBr::Nz(r)) } else { (CondBr::Nz(r), CondBr::Z(r)) };
                         self.branch_pair(yes, no, *tt, *ff, bi);
                     }
-                    Some(i) => {
-                        let cc = self.cmp_flags(&i);
+                    Some(cmp) => {
+                        let cc = self.cmp_flags(cmp);
                         // the condition codes come in true/false pairs: cc ^ 1 negates
                         self.branch_pair(CondBr::B(cc), CondBr::B(cc ^ 1), *tt, *ff, bi);
                     }
                     None => {
+                        let Term::Branch(c, ..) = t else { unreachable!("a BranchCmp carries its compare") };
                         let r = self.use_i(*c, S0);
                         self.branch_pair(CondBr::Nz(r), CondBr::Z(r), *tt, *ff, bi);
                     }
@@ -4495,10 +4521,20 @@ impl<'a> Gen<'a> {
             Inst::VShuffle(..) | Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VLoadX(..) | Inst::VStoreX(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VTbl(..) | Inst::VConst(..) => self.vinst(i),
             Inst::VX(op, d, a, b) => self.vx(*op, *d, *a, *b),
             Inst::VX3(op, d, a, b, c) => self.vx3(*op, *d, *a, *b, *c),
-            Inst::Sel(d, c, a, b) => {
-                let cond = match self.sel_chain {
-                    Some((c0, cc)) if c0 == *c => cc,
-                    _ => {
+            Inst::Sel(..) | Inst::SelCmp(..) => {
+                let (d, a, b) = match i {
+                    Inst::Sel(d, _, a, b) | Inst::SelCmp(d, _, a, b) => (d, a, b),
+                    _ => unreachable!(),
+                };
+                let cond = match (i, self.sel_chain) {
+                    (Inst::Sel(_, c, ..), Some((Some(c0), _, cc))) if c0 == *c => cc,
+                    (Inst::SelCmp(_, cmp, ..), Some((_, Some(c0), cc))) if c0 == *cmp => cc,
+                    (Inst::SelCmp(_, cmp, ..), _) => {
+                        let cc = self.cmp_flags(*cmp);
+                        self.sel_chain = Some((None, Some(*cmp), cc));
+                        cc
+                    }
+                    (Inst::Sel(_, c, ..), _) => {
                         let rc = self.use_i(*c, S0);
                         self.cmp_imm(rc, 0);
                         // the flags now hold this test: a chained compare's are gone (a later
@@ -4506,6 +4542,7 @@ impl<'a> Gen<'a> {
                         self.sel_chain = None;
                         NE
                     }
+                    _ => unreachable!(),
                 };
                 if self.cls(*d) == Cls::I {
                     // (a 0 is xzr: register 31 in csel's operands)
@@ -4522,6 +4559,7 @@ impl<'a> Gen<'a> {
                     self.a.e(0x1E20_0C00 | if w { DBL } else { 0 } | (xb as u32) << 16 | (cond as u32) << 12 | (xa as u32) << 5 | xd as u32);
                     self.fin_f(*d, xd);
                 }
+                self.sel_written(*d);
             }
             Inst::FMulAdd(np, na, w, d, a, b, c) => {
                 let xa = self.use_f(*a, FS0);
@@ -5565,9 +5603,9 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     // counter steps after the last read of the old value (no copy per iteration)
     let stepped = if env.opt_regs || f.full { regalloc::sink_increments(options, f) } else { None };
     let f = stepped.as_ref().unwrap_or(f);
-    // branch compares at the end of their block (fused into cmp + b.cond)
-    let brs = if env.opt_regs || f.full { regalloc::sink_branch_compares(options, f) } else { None };
-    let f = brs.as_ref().unwrap_or(f);
+    // branches and selects on their compares' flags (cmp + b.cond, cmp + csel)
+    let cmps = if env.opt_regs || f.full { regalloc::compares_into_readers(options, f, arm64_sel_ok) } else { None };
+    let f = cmps.as_ref().unwrap_or(f);
     // the backend-internal rewrites above run after the last pipeline verify
     f.verify_after("arm64 backend rewrites (legalize/switch/folds/hoist/share/sink)")?;
     // v0-v7 are allocatable outside the instructions that name them (arm64_clobbers), except

@@ -3273,6 +3273,7 @@ fn lower(options: &relax_session::Options, f: &Func, slots: SlotsPtr, syms: u64,
             Term::Unreachable => l.emit(h_trap, &[0]),
             Term::Resume => l.emit(h_resume, &[]),
             Term::Switch(..) => unreachable!("Switch is made after the interpreter's lowering"),
+            Term::BranchCmp(..) => unreachable!("BranchCmp is made by the native back ends only"),
         }
     }
     let mut code = l.code.into_boxed_slice();
@@ -3455,6 +3456,7 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
             let w = l.w4(*d, *c, *a, *b);
             l.emit(if l.cls(*d) == Cls::V128 { h_sel16 } else { h_sel }, &[w]);
         }
+        Inst::SelCmp(..) => unreachable!("SelCmp is made by the native back ends only"),
         Inst::Call(callee, args, rets) => {
             let target = match callee {
                 // an asm! block runs only as machine code: its function stays native
@@ -3651,7 +3653,7 @@ fn defs_of(i: &Inst, out: &mut Vec<VReg>) {
         Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::TlsStatic(d, _) | Inst::VConst(d, _) => out.push(*d),
         Inst::Mov(d, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::FUnary(_, _, d, _) | Inst::Conv(_, d, _) | Inst::IBinI(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::Load(_, d, _, _) | Inst::VSplat(d, _) | Inst::VExtract(d, _, _) | Inst::VLoad(d, _, _) | Inst::VAny(d, _) | Inst::AtomicLoad(_, _, d, _) | Inst::Xgetbv(d, _) => out.push(*d),
         Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VGather(d, _, _) | Inst::VTbl(d, _, _, _) | Inst::VShuffle(d, _, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) | Inst::VLoadX(d, _, _, _, _) => out.push(*d),
-        Inst::VInsert(d, _, _, _) | Inst::Sel(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, _, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => out.push(*d),
+        Inst::VInsert(d, _, _, _) | Inst::Sel(d, _, _, _) | Inst::SelCmp(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, _, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => out.push(*d),
     }
 }
 

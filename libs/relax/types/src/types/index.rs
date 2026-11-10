@@ -64,9 +64,16 @@ impl<S: Slot> Table<S> {
         S::store(&self.slots[i], s);
     }
 
-    /// The slots as they are, `keep` deciding which stay (the others read as empty).
-    pub(crate) fn snapshot(&self, keep: impl Fn(S) -> bool) -> Vec<S> {
-        self.slots.iter().map(|a| S::load(a)).map(|s| if s != S::EMPTY && keep(s) { s } else { S::EMPTY }).collect()
+    /// The slots as they are, `keep` deciding which stay (the others read as empty). `stop` is
+    /// asked every 64Ki slots (None: it said yes): a large app's table has millions, and a mid-run
+    /// image is taken on the owner thread, which must give way to a waiting request.
+    pub(crate) fn snapshot(&self, keep: impl Fn(S) -> bool, stop: &dyn Fn() -> bool) -> Option<Vec<S>> {
+        let mut out = Vec::with_capacity(self.slots.len());
+        for part in self.slots.chunks(1 << 16) {
+            if stop() { return None; }
+            out.extend(part.iter().map(|a| S::load(a)).map(|s| if s != S::EMPTY && keep(s) { s } else { S::EMPTY }));
+        }
+        Some(out)
     }
 
     /// The filled slots.

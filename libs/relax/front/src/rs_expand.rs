@@ -30,7 +30,8 @@ pub(crate) fn expand<'a>(src: &'a [u8], toks: impl Into<super::lazy_bodies::Toks
 ) -> Surface {
     let reuse = crate::parse_work::Session::new(Arc::default());
     let toks: super::lazy_bodies::Toks<'_> = toks.into();
-    outline(Parser::new(&ctx.cfg.session, src, toks, edition), ctx.clone(), table, reuse)
+    // the lints' records come from the parse (uses::unrecorded)
+    crate::macros::uses::unrecorded(|| outline(Parser::new(&ctx.cfg.session, src, toks, edition), ctx.clone(), table, reuse))
 }
 
 fn outline(mut p: Parser<'_>, ctx: std::rc::Rc<crate::builtins::FileCtx>, table: Arc<crate::macros::MacroTable>,

@@ -1589,6 +1589,7 @@ unsafe fn install_prelinked_slot(up: *mut Unit, s: crate::cache::PrelinkedSlot, 
         return;
     }
     let tier1 = s.o3;
+    let counted = s.counted();
     if tier1 {
         cached_tier1(up, s.id, &s.inlined);
     } else {
@@ -1631,10 +1632,11 @@ unsafe fn install_prelinked_slot(up: *mut Unit, s: crate::cache::PrelinkedSlot, 
     }
     // an instance, a closure or an unverified-mode twin (image slots are never foreign fns: their
     // code is not stored): its call counter, armed with the others of the block (arm_counters), as
-    // arm_counter arms them. (A twin left out had no count stub and tier state 0, so neither its
-    // calls nor its loop counters could tier it up: a warm launch whose image held the previous
-    // run's unverified callers ran their twins' baseline code for the whole session, MICKEYGAP.)
-    if matches!(s.kind, 0 | 1 | 4) {
+    // arm_counter arms them. (A kind left out has no count stub and tier state 0, so neither its
+    // calls nor its loop counters can tier it up: a warm launch whose image held the previous
+    // run's unverified callers ran their twins' baseline code for the whole session, MICKEYGAP;
+    // closures keyed by their ordinal ran their image code so, their loops uncounted)
+    if counted {
         arm.push((s.id, s.at));
         // (its tier starts from its stored verdict once armed: stored_tier_verdict)
         if !tier1 {
@@ -1645,7 +1647,7 @@ unsafe fn install_prelinked_slot(up: *mut Unit, s: crate::cache::PrelinkedSlot, 
     }
     crate::cache::trace_lookup(u, s.id, "prelink");
     crate::cache::trace_lookup(u, s.id, if tier1 { "hit1" } else { "hit" });
-    if gandalf && s.kind == 0 {
+    if gandalf && s.kind == Some(crate::cache::KeyKind::Inst) {
         notes.push(s.id);
     }
 }
@@ -2125,6 +2127,19 @@ pub static FAULTS_FATAL: AtomicBool = AtomicBool::new(false);
 
 /// Set by the first contained fault: what happened where (reported with every later error).
 static POISONED: relax_session::sync::Mutex<Option<String>> = relax_session::sync::Mutex::new(None);
+
+/// MAKEPAD_RUN_ABORT_HOLD (os/fault.rs, tests/abort_heap's held case): every lock an abort's
+/// report of unit `up` could wait for, taken and kept while `then` runs, as a thread stuck in a
+/// corrupt heap would keep them.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+pub(crate) fn hold_report_locks(up: *mut Unit, then: impl FnOnce()) {
+    let u = unsafe { &*up };
+    let _frames = FRAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let _poisoned = POISONED.lock().unwrap_or_else(|e| e.into_inner());
+    let _sites = u.sites.lock().unwrap_or_else(|e| e.into_inner());
+    let _code = u.code.write().unwrap_or_else(|e| e.into_inner());
+    then();
+}
 
 /// The poisoned-state note, when a fault was contained earlier.
 pub fn poisoned_note() -> Option<String> {
@@ -2935,7 +2950,7 @@ unsafe fn stale_how_in(u: &Unit, pc: u64, sp_top: u64, sp_below: u64, lr: u64) -
 }
 
 fn frames_from_raw(pc: u64, pc_is_ret: bool, raw: &[u64]) -> Vec<u64> {
-    frames_from_raw_in(cur_unit(), pc, pc_is_ret, raw)
+    frames_from_raw_in(cur_unit(), pc, pc_is_ret, raw, None)
 }
 
 /// The return addresses of the calling thread's frame chain from `fp` (signal-safe: no
@@ -2943,24 +2958,66 @@ fn frames_from_raw(pc: u64, pc_is_ret: bool, raw: &[u64]) -> Vec<u64> {
 /// thread: os/fault.rs's abort report.
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 pub(crate) fn raw_frames_here(fp: u64, out: &mut [u64]) -> usize {
+    if STACK_BOUNDS.try_with(|c| c.get().1).unwrap_or(0) == 0 {
+        return walk_fp_checked(fp, out);
+    }
     let here = &fp as *const u64 as u64;
     walk_fp_bounded(fp, here.min(fp), out)
 }
 
-/// `frames_from_raw` of the thread whose unit is `up`, on any thread.
-pub(crate) fn frames_from_raw_in(up: *mut Unit, pc: u64, pc_is_ret: bool, raw: &[u64]) -> Vec<u64> {
+/// `walk_fp_bounded` of a thread that never recorded its stack bounds (asking for them here is not
+/// safe: glibc's pthread_getattr_np allocates, in the heap an abort may have found corrupt): only
+/// aligned, strictly rising frame addresses, each read checked. Signal-safe.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+pub(crate) fn walk_fp_checked(mut fp: u64, out: &mut [u64]) -> usize {
+    let mut n = 0;
+    while n < out.len() && fp != 0 && fp & 7 == 0 {
+        let (Some(next), Some(ret)) = (os::fault::read_word_checked(fp), os::fault::read_word_checked(fp + 8)) else {
+            break;
+        };
+        out[n] = ret;
+        n += 1;
+        if next <= fp {
+            break;
+        }
+        fp = next;
+    }
+    n
+}
+
+/// `frames_from_raw` of the thread whose unit is `up`, on any thread. `skipped` (an abort's
+/// report, Unit::report_nowait): the code table's lock is tried, not waited for; held, every
+/// frame is kept and `skipped` says so.
+pub(crate) fn frames_from_raw_in(up: *mut Unit, pc: u64, pc_is_ret: bool, raw: &[u64], skipped: Option<&mut Vec<&'static str>>) -> Vec<u64> {
+    use std::sync::TryLockError;
     let mut frames = vec![pc.wrapping_sub(pc_is_ret as u64)];
     if up.is_null() {
         return frames;
     }
     let u = unsafe { &*up };
+    let tried = match skipped {
+        None => None,
+        Some(sk) => match u.code.try_read() {
+            Ok(t) => Some(t),
+            Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(TryLockError::WouldBlock) => {
+                sk.push("frames: code table lock held, C frames kept");
+                frames.extend(raw.iter().map(|r| r.wrapping_sub(1)));
+                return frames;
+            }
+        },
+    };
+    let is_jit = |pc: u64| match &tried {
+        Some(t) => t.slot_at(pc).is_some(),
+        None => u.find_fn(pc).is_some(),
+    };
     // a stop inside C code (a libc abort/trap): its frames (frame pointers are kept on both
     // targets) are skipped up to the JIT code that called it
-    let mut in_c = u.find_fn(frames[0]).is_none();
+    let mut in_c = !is_jit(frames[0]);
     let mut c_frames = 0;
     for r in raw {
         let ra = r.wrapping_sub(1);
-        if u.find_fn(ra).is_none() {
+        if !is_jit(ra) {
             c_frames += 1;
             if !in_c || c_frames > 16 {
                 break;
@@ -3476,13 +3533,14 @@ unsafe fn unwind_walk(regs: *const u64) -> ! {
     }
 }
 
-#[cfg(target_vendor = "apple")]
+// (the stub's symbol, for the two asm blocks below: their targets only)
+#[cfg(all(unix, any(target_arch = "x86_64", target_arch = "aarch64"), target_vendor = "apple"))]
 macro_rules! native_raise_sym {
     () => {
         "_relax_native_raise_stub"
     };
 }
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(all(unix, any(target_arch = "x86_64", target_arch = "aarch64"), not(target_vendor = "apple")))]
 macro_rules! native_raise_sym {
     () => {
         "relax_native_raise_stub"
@@ -6228,13 +6286,11 @@ impl Unit {
             bytes.extend_from_slice(&self.ptr_word(*w));
         }
         let a = self.data(&bytes, pb as u64, crate::syms::DataKind::Words(wsyms));
+        // (named: one of a trait-object type real-time code calls through is compiled after the
+        // current request, realtime_vtable)
         self.syms.set_data_name(a, format!("{}{}:{}", crate::syms::VTABLE_NAME, crate::syms::stable_ty(self, src), crate::syms::stable_ty(self, dy)));
         // a racing builder of the same vtable: everyone uses the first (one symbol per vtable)
-        let a = self.vtables.insert_first((src, dy), a);
-        // real-time code calls through this trait-object type: the new vtable's methods are
-        // compiled after the current request (realtime_drain)
-        realtime_vtable(dy, a);
-        Ok(a)
+        Ok(self.vtables.insert_first((src, dy), a))
     }
 
     /// The reload index, built from the slots made so far on first use.
@@ -7686,6 +7742,11 @@ impl Unit {
     /// source position of the instruction containing it)
     pub fn pc_to_src(&self, pc: u64) -> Option<(u32, String)> {
         let id = self.find_fn(pc)?;
+        Some(self.src_at(id, pc))
+    }
+
+    /// `pc_to_src` of a pc in slot `id`'s code.
+    fn src_at(&self, id: u32, pc: u64) -> (u32, String) {
         let f = &self.fns[id as usize];
         let (base, map) = if pc >= f.code && pc < f.code + f.code_len as u64 {
             (f.code, &f.pc_map)
@@ -7706,16 +7767,56 @@ impl Unit {
         let off = (pc - base) as u32;
         // no pc-map entry: the fn's file without a line (byte 0 would claim line 1:1)
         let Some(pos) = map.lookup(off) else {
-            return Some((id, self.prog.file_paths.get(f.file as usize).cloned().unwrap_or_else(|| "source position unknown".to_string())));
+            return (id, self.prog.file_paths.get(f.file as usize).cloned().unwrap_or_else(|| "source position unknown".to_string()));
         };
-        Some((id, self.pos_str(relax_backend::rir::pos_file(pos), pos as u32)))
+        (id, self.pos_str(relax_backend::rir::pos_file(pos), pos as u32))
     }
 
     /// Structured JSON crash report for a panic/fault/hang.
     pub fn report(&self, p: &PanicInfo) -> String {
+        self.report_in(p, None)
+    }
+
+    /// `report` that waits for no lock: an abort's (os/fault.rs), whose locks may be held by a
+    /// thread stuck for good in the heap the abort found corrupt. Each lock is tried once; one
+    /// another thread holds leaves its part out, and "skipped" names it, after `skipped`.
+    pub fn report_nowait(&self, p: &PanicInfo, skipped: Vec<&'static str>) -> String {
+        self.report_in(p, Some(skipped))
+    }
+
+    fn report_in(&self, p: &PanicInfo, mut nowait: Option<Vec<&'static str>>) -> String {
+        use std::sync::TryLockError;
         let mut s = String::from("{");
         s.push_str(&format!("\"kind\":{:?},\"message\":{:?},\"build\":{:?}", p.kind, p.message, crate::jit::PROVENANCE));
-        let site = self.sites.lock().unwrap_or_else(|e| e.into_inner()).get(p.site as usize).map(|st| (st.file, st.pos));
+        // (nowait: the locks of every frame, tried once here)
+        let mut frames_g = None;
+        let mut code_g = None;
+        if let Some(sk) = nowait.as_mut() {
+            match FRAMES.try_lock() {
+                Ok(g) => frames_g = Some(g),
+                Err(TryLockError::Poisoned(e)) => frames_g = Some(e.into_inner()),
+                Err(TryLockError::WouldBlock) => sk.push("frames: FRAMES lock held, frame sizes left out"),
+            }
+            match self.code.try_read() {
+                Ok(g) => code_g = Some(g),
+                Err(TryLockError::Poisoned(e)) => code_g = Some(e.into_inner()),
+                Err(TryLockError::WouldBlock) => sk.push("backtrace: code table lock held, frames by address only"),
+            }
+        }
+        let site = if p.site == u64::MAX {
+            None
+        } else if let Some(sk) = nowait.as_mut() {
+            match self.sites.try_lock() {
+                Ok(g) => g.get(p.site as usize).map(|st| (st.file, st.pos)),
+                Err(TryLockError::Poisoned(e)) => e.into_inner().get(p.site as usize).map(|st| (st.file, st.pos)),
+                Err(TryLockError::WouldBlock) => {
+                    sk.push("location: sites lock held, left out");
+                    None
+                }
+            }
+        } else {
+            self.sites.lock().unwrap_or_else(|e| e.into_inner()).get(p.site as usize).map(|st| (st.file, st.pos))
+        };
         if let Some((file, pos)) = site {
             s.push_str(&format!(",\"location\":{:?}", self.pos_str(file, pos)));
         } else if !p.location.is_empty() {
@@ -7726,24 +7827,47 @@ impl Unit {
             if i > 0 {
                 s.push(',');
             }
-            match self.pc_to_src(*f) {
+            let src = match (&nowait, &code_g) {
+                (None, _) => self.pc_to_src(*f),
+                (Some(_), Some(t)) => t.slot_at(*f).map(|id| self.src_at(id, *f)),
+                (Some(_), None) => None,
+            };
+            match src {
                 Some((id, loc)) => {
                     // the frame size of the code the pc is in (O3 when it is the current code of a
                     // slot that tiered up): a stack overflow's report then shows where the stack went
                     let fe = &self.fns[id as usize];
                     let t1 = !fe.history().retired.is_empty() && *f >= fe.code && *f < fe.code + fe.code_len as u64;
-                    let fr = FRAMES.lock().unwrap_or_else(|e| e.into_inner()).get(id as usize).map_or(0, |x| if t1 { x.1 } else { x.0 });
-                    // the code version the pc is in (tier, origin, start): which optimised code ran
-                    let (start, kind) = match self.code.try_read().ok().and_then(|t| t.entry_at(*f).map(|e| (e.0, t.kind_of(e.0)))) {
-                        Some(x) => x,
-                        None => (fe.code, CodeKind::default()),
+                    let size = |x: &(u32, u32)| if t1 { x.1 } else { x.0 };
+                    let fr = match (&nowait, &frames_g) {
+                        (None, _) => FRAMES.lock().unwrap_or_else(|e| e.into_inner()).get(id as usize).map_or(0, size),
+                        (Some(_), Some(g)) => g.get(id as usize).map_or(0, size),
+                        (Some(_), None) => 0,
                     };
+                    // the code version the pc is in (tier, origin, start): which optimised code ran
+                    let entry = |t: &CodeTables| t.entry_at(*f).map(|e| (e.0, t.kind_of(e.0)));
+                    let at = match &code_g {
+                        Some(t) => entry(&**t),
+                        None => self.code.try_read().ok().and_then(|t| entry(&*t)),
+                    };
+                    let (start, kind) = at.unwrap_or((fe.code, CodeKind::default()));
                     s.push_str(&format!("{{\"fn\":{:?},\"at\":{:?},\"off\":{},\"patch_gen\":{},\"tier\":{},\"code\":\"{} {} {:#x}\",\"frame\":{}}}", fe.name, loc, f.wrapping_sub(start), fe.patch_gen, t1 as u8, kind.tier_name(), kind.origin_name(), start, fr))
                 }
                 None => s.push_str(&format!("{{\"pc\":\"{:#x}\"}}", f)),
             }
         }
-        if let Some(n) = poisoned_note() {
+        let poisoned = match nowait.as_mut() {
+            None => poisoned_note(),
+            Some(sk) => match POISONED.try_lock() {
+                Ok(g) => g.clone(),
+                Err(TryLockError::Poisoned(e)) => e.into_inner().clone(),
+                Err(TryLockError::WouldBlock) => {
+                    sk.push("poisoned: POISONED lock held, left out");
+                    None
+                }
+            },
+        };
+        if let Some(n) = poisoned {
             s.push_str(&format!("],\"poisoned\":{:?},\"recent_patches\":[", n));
         } else {
             s.push_str("],\"recent_patches\":[");
@@ -7756,7 +7880,11 @@ impl Unit {
             }
             s.push_str(&format!("{{\"fn\":{:?},\"gen\":{}}}", self.fns[*slot as usize].name, gen));
         }
-        s.push_str("]}");
+        s.push(']');
+        if let Some(sk) = nowait.filter(|sk| !sk.is_empty()) {
+            s.push_str(&format!(",\"skipped\":{:?}", sk));
+        }
+        s.push('}');
         s
     }
 
@@ -9137,10 +9265,14 @@ unsafe fn ready_code_locked(up: *mut Unit, id: u32) -> Option<u64> {
             if let Ok((fresh, fmap, relocs)) = compile_fn(up, id) {
                 let u = &mut *up;
                 let mut c = u.cache.take();
-                let same = c.as_mut().map_or(true, |c| c.verify_entry(u, id, &fresh, &relocs));
+                let same = c.as_mut().map_or(Some(true), |c| c.verify_entry(u, id, &fresh, &relocs));
                 u.cache = c;
                 if let Some(c) = u.cache.as_mut() {
-                    if same { c.stats.verify_same += 1 } else { c.stats.verify_diff += 1 }
+                    match same {
+                        Some(true) => c.stats.verify_same += 1,
+                        Some(false) => c.stats.verify_diff += 1,
+                        None => c.stats.verify_other_tier += 1,
+                    }
                 }
                 return Some(install_compiled(up, id, &fresh, fmap, &relocs, true));
             }
@@ -10720,7 +10852,7 @@ fn o2_hottest_queued(offered: &std::collections::HashSet<(usize, u32)>) -> Optio
     let seen = O2_SEEN.lock().unwrap_or_else(|e| e.into_inner());
     let now = HeatNow::take();
     candidates.iter().filter(|e| !seen.as_ref().is_some_and(|s| s.contains(&(up as usize, e.0))))
-        .max_by_key(|e| (now.key(0, e.0, e.2), std::cmp::Reverse(e.2)))
+        .max_by_key(|e| (now.tier_key(e), std::cmp::Reverse(e.2)))
         .map(|e| (up, e.0))
 }
 
@@ -16422,17 +16554,24 @@ pub(crate) fn names_moved_copy_ver(u: &Unit, syms: impl Iterator<Item = relax_ba
     guard_reads(u, syms).1.iter().any(|&x| unsafe { (*tier_rec(&u.slots, x).add((TIER_COPY / 8) as usize)).load(Ordering::Acquire) } != 0)
 }
 
-/// The loop counter and rt_loop_hot symbols for the baseline / O1 / O2 code of slot `id` (unit
-/// lock held): every slot whose calls the count stub counts, when O3 is on. None: its code counts
-/// no loops (O3 off, a shim / glue / foreign fn, a naked fn).
-unsafe fn loop_syms(u: &Unit, id: u32) -> Option<(relax_backend::rir::Sym, relax_backend::rir::Sym)> {
-    let counted = match &u.fns[id as usize].key {
+/// Slots of key `key` count their calls (a count stub) and loops for O3: an instance that is not
+/// a foreign fn, a closure, a sandbox twin of a base, an unverified-mode twin (SPEC-V: twins tier
+/// up too, Unit::o3_allowed). Not shims and glue. (The startup image decides by the key's first
+/// byte before it decodes: cache::KeyKind::counted.)
+pub(crate) fn counted_key(u: &Unit, key: &FnKey) -> bool {
+    match key {
         FnKey::Inst(d, _) => u.prog.def(*d).kind != DefKind::ForeignFn,
         FnKey::Closure(..) | FnKey::Plain(_) => true,
         FnKey::Sandbox(base) => *base != u32::MAX,
         FnKey::Shim(_) | FnKey::Glue(..) => false,
-    };
-    if u.tier1.is_none() || !counted || !loops_on() {
+    }
+}
+
+/// The loop counter and rt_loop_hot symbols for the baseline / O1 / O2 code of slot `id` (unit
+/// lock held): every slot whose calls the count stub counts, when O3 is on. None: its code counts
+/// no loops (O3 off, a shim / glue / foreign fn, a naked fn).
+unsafe fn loop_syms(u: &Unit, id: u32) -> Option<(relax_backend::rir::Sym, relax_backend::rir::Sym)> {
+    if u.tier1.is_none() || !counted_key(u, &u.fns[id as usize].key) || !loops_on() {
         return None;
     }
     Some((loop_counter_sym(u, id), loop_hot_sym(u)))
@@ -16505,9 +16644,9 @@ rt_fn! {
 /// budget, the counter the count stub takes its calls' cost from. The slot is queued at its next
 /// call if the decayed cost is over the threshold then (rt_hot): without OSR the frame running the
 /// loop finishes in the code it is in, so a function entered once (a loader's parse loop, an
-/// event loop) is never built for its loops. The first time the loop makes its slot hot, its JIT
-/// callers are charged a threshold's cost each: a loop in a callee is their loop too, and they
-/// queue at their next call.
+/// event loop) is never built for its loops. The first time the loop makes its slot hot, the JIT
+/// callers right under it are charged a threshold's cost each (loop_walk): a loop in a callee is
+/// their loop too, and they queue at their next call.
 fn rt_loop_hot(counter: u64, fp: u64) {
     let _z = crate::zone_alloc::compiler();
     let _keep = os::proc::KeepLastError::new();
@@ -16574,44 +16713,59 @@ fn rt_loop_hot(counter: u64, fp: u64) {
         // address into it); a frame that is not JIT code ends the walk before its fp is read
         let mut fp = fp;
         let mut at = id;
-        for _ in 0..LOOP_CALLERS {
+        let callers = std::iter::from_fn(|| {
             if fp == 0 || fp % 8 != 0 {
-                break;
+                return None;
             }
             let ra = *((fp + 8) as *const u64);
             let found = u.find_fn(ra);
             if tier1_trace() {
                 eprintln!("O3q loop #{}: caller {:?} (state {})", at, found, found.map_or(0, |c| (*tier_rec(&u.slots, c).add(3)).load(Ordering::Relaxed)));
             }
-            let Some(c) = found else { break };
-            // SPEC-V: a frame calling a twin is that twin's caller (indirect and helper-lowered
-            // calls leave no record at lowering): recorded, and if the twin is hot its caller is
-            // brought to the base slot (twin_seen)
-            if c != at && matches!(u.fns[at as usize].key, FnKey::Plain(_)) {
-                twin_seen(u, c, at);
-            }
-            if c != at {
-                let crec = tier_rec(&u.slots, c);
-                let st = (*crec.add(3)).load(Ordering::Relaxed);
-                // a lukewarm slot in its counting window: the loop under it is its work (credited:
-                // pgo_poll ends its window); any other slot that turned hot ends the walk
-                if st == T_QUEUED && !pgo_credit(c) {
-                    break;
-                }
-                if st == T_COUNTING {
-                    tier_charge(crec, threshold);
-                    (*crec.add(5)).fetch_or(LOOP_CHARGED, Ordering::Relaxed);
-                }
-            }
+            let c = found?;
             at = c;
             let next = *(fp as *const u64);
-            if next <= fp {
-                break;
+            fp = if next <= fp { 0 } else { next };
+            Some(c)
+        });
+        // SPEC-V: a frame calling a twin is that twin's caller (indirect and helper-lowered calls
+        // leave no record at lowering): recorded, and if the twin is hot its caller is brought to
+        // the base slot (twin_seen)
+        let twin = |c: u32, callee: u32| {
+            if matches!(u.fns[callee as usize].key, FnKey::Plain(_)) {
+                twin_seen(u, c, callee);
             }
-            fp = next;
-        }
+        };
+        loop_walk(id, threshold, callers.take(LOOP_FRAMES), |c| tier_rec(&u.slots, c), twin);
     }
 }
+}
+
+/// rt_loop_hot's walk over the JIT callers under the loop that turned hot in slot `at`, innermost
+/// first (a frame of the same slot, a recursion, is skipped). Each is shown to `twin` with the
+/// slot it called. The first LOOP_CALLERS are charged a threshold's cost if they are counting, and
+/// a lukewarm one in its counted window is credited (pgo_poll looks at its own work now); further
+/// down neither, the walk goes on past them for `twin` alone. A slot that turned hot otherwise
+/// ends the walk.
+unsafe fn loop_walk(mut at: u32, threshold: u64, callers: impl Iterator<Item = u32>, rec: impl Fn(u32) -> *const AtomicU64, mut twin: impl FnMut(u32, u32)) {
+    let mut near = LOOP_CALLERS;
+    for c in callers {
+        if c == at {
+            continue;
+        }
+        twin(c, at);
+        let crec = rec(c);
+        let st = (*crec.add(3)).load(Ordering::Relaxed);
+        if st == T_QUEUED && !pgo_credit(c, near > 0) {
+            break;
+        }
+        if st == T_COUNTING && near > 0 {
+            tier_charge(crec, threshold);
+            (*crec.add(5)).fetch_or(LOOP_CHARGED, Ordering::Relaxed);
+        }
+        near = near.saturating_sub(1);
+        at = c;
+    }
 }
 
 /// Per-slot record at `SlotTable::tier(slot)`: [cost budget, counted code, count stub, state,
@@ -16671,11 +16825,17 @@ const LOOP_CHUNK_DIV: u64 = 4;
 /// A check that stays under the threshold refills the budget with what is left to it, at least
 /// threshold / REFILL_DIV: lukewarm code checks a few times per threshold's worth of cost
 const REFILL_DIV: u64 = 8;
-/// A hot loop queues the JIT frames under it with it (rt_loop_hot), up to the first one queued
-/// already and at most this many: a loop in a callee is its callers' loop too, and their O3 builds
-/// inline it (llm_host: a generic collect's loop under f32_bytes_to_vec under the decode step,
-/// all entered rarely). Each caller is charged a threshold's cost: its next call queues it.
-const LOOP_CALLERS: usize = 64;
+/// A hot loop queues the JIT callers right under it with it (rt_loop_hot), this many: a loop in a
+/// callee is its callers' loop too, and their O3 builds inline it (llm_host: a generic collect's
+/// loop under f32_bytes_to_vec under the decode step, all entered rarely). Each is charged a
+/// threshold's cost: its next call queues it. Further down the counted builds were waste: in a
+/// cold plate run the callers three and more frames down took ~200 counted builds (2.9 s of CPU),
+/// one in twelve showing work of its own, nearly all of those with a hot loop of their own; the
+/// second caller down still one in four (the first: one in three)
+const LOOP_CALLERS: usize = 2;
+/// ... and the walk goes on past them up to the first one queued already and at most this many
+/// frames, for SPEC-V's twin callers (twin_seen)
+const LOOP_FRAMES: usize = 64;
 /// The threshold's cost reached within this: hot without the counted window's evidence of work
 /// (rt_hot's rate is the cost spent since the last check per second)
 const CALL_FAST_NS: u64 = 10_000_000;
@@ -16762,10 +16922,19 @@ impl HeatNow {
         HeatNow { hu: heat_unit(), wall: wall_ns(), tier: tier_clock() }
     }
 
-    fn key(&self, unit: usize, id: u32, at: u64) -> u64 {
-        let (heat, ui) = self.heat(unit, id);
-        if at == O2_FRONT_AT { queue::heat_key(heat, ui, 0) + 64 * 1024 }
-        else { queue::heat_key(heat, ui, self.wall.saturating_sub(at)) }
+    /// An O3 queue entry's place among the others: its heat, and the time it waited.
+    fn tier_key(&self, e: &queue::TierEntry) -> u64 {
+        let (heat, ui) = self.tier_heat(e);
+        queue::heat_key(heat, ui, self.wall.saturating_sub(e.2))
+    }
+
+    /// An O3 queue entry's heat and UI mark. A queued slot's calls are not counted (rt_hot takes its
+    /// stub out), so its record only decays, and all that tells it from any other entry is the rate
+    /// it was queued at (the cost per second that reached the threshold). Its loops and counted code
+    /// may show more since.
+    fn tier_heat(&self, e: &queue::TierEntry) -> (u64, bool) {
+        let (heat, ui) = self.heat(0, e.0);
+        (heat.max(e.3), ui)
     }
 
     /// Slot `id`'s heat and UI mark (`unit` 0: the tiering unit; another unit's slot: none).
@@ -16940,6 +17109,60 @@ mod tier_cost_tests {
         assert!(drive(60 * 894, 894, 10).is_some(), "the race's Hud::draw_walk (weight 894) tiers up within 10 s");
         let t = drive(1_000_000_000, 20, 10).unwrap();
         assert!(t < 0.01, "a burst tiers up at once ({t} s)");
+    }
+
+    /// Why: every UI handler on a hot loop's stack went to O3 (rt_loop_hot credits each lukewarm
+    /// frame it walks past, and a credited window skipped the work test): in a slicing session 94%
+    /// of the compile CPU went to code no sample saw. A credited window is looked at at once, on
+    /// its own work: with too little it stays parked, with enough it goes to O3.
+    #[test]
+    fn a_lukewarm_slot_a_hot_loop_ran_under_needs_work_of_its_own() {
+        isolated_test!(a_lukewarm_slot_a_hot_loop_ran_under_needs_work_of_its_own);
+        let now = 100 * PGO_WORK_NS;
+        let weights: &'static [u32] = Box::leak(vec![8u32; 4].into_boxed_slice());
+        // its own code over the window since its last look: 4 blocks of 8 instructions, `runs` times
+        let window = |id: u32, runs: u64| {
+            let counters: &'static [AtomicU64] = Box::leak((0..4).map(|_| AtomicU64::new(runs)).collect());
+            Counting { id, counters, weights, at: now - 10 * PGO_WORK_NS, lukewarm: true, mark: (0, now - 2 * PGO_MS * 1_000_000), parked: true, credited: false }
+        };
+        // a handler: a few calls a second; a loop driver: the bar's work over the window, twice over
+        let per_window = (2 * PGO_MIN_WORK * 2 * PGO_MS / 1000).div_ceil(4 * 8);
+        let (handler, driver, untouched) = (u32::MAX - 1, u32::MAX - 2, u32::MAX - 3);
+        COUNTING.lock().unwrap().extend([window(handler, 3), window(driver, per_window), window(untouched, per_window)]);
+        assert!(pgo_credit(handler, true) && pgo_credit(driver, true), "both are lukewarm counting slots");
+        pgo_poll_at(now);
+        let left = |id: u32| COUNTING.lock().unwrap().iter().find(|e| e.id == id).map(|e| (e.parked, e.credited));
+        assert_eq!(left(handler), Some((true, false)), "the handler stays parked in its counted code: a loop under it is not its work");
+        assert_eq!(left(driver), None, "the driver's own work takes it to O3");
+        assert_eq!(left(untouched), Some((true, false)), "a parked window no loop ran under waits for its PGO_WORK_NS look");
+    }
+
+    /// Why: a hot loop charged every JIT frame under it, up to 64 of them, and the counted builds
+    /// of the callers far down were waste (LOOP_CALLERS). The two callers right under the loop are
+    /// charged, or credited if lukewarm; the walk goes on past the rest for SPEC-V's twin callers.
+    #[test]
+    fn a_hot_loop_charges_the_two_callers_right_under_it() {
+        isolated_test!(a_hot_loop_charges_the_two_callers_right_under_it);
+        let threshold = tier_threshold(2000);
+        // the loop's slot 0 (a recursion of it first), counting callers 1, 3 and 5, lukewarm 2 and 4
+        // in their counted windows, 7 queued for O3 (6 under it is never reached)
+        let recs: Vec<Vec<AtomicU64>> = (0..8).map(|_| (0..10).map(|_| AtomicU64::new(threshold)).collect()).collect();
+        for (c, r) in recs.iter().enumerate() {
+            r[3].store(if [2, 4, 7].contains(&c) { T_QUEUED } else { T_COUNTING }, Ordering::Relaxed);
+            r[5].store(0, Ordering::Relaxed);
+        }
+        let window = |id: u32| Counting { id, counters: &[], weights: &[], at: 0, lukewarm: true, mark: (0, 0), parked: true, credited: false };
+        COUNTING.lock().unwrap().extend([window(2), window(4)]);
+        let mut seen = Vec::new();
+        unsafe { loop_walk(0, threshold, [0, 1, 2, 3, 4, 5, 7, 6].into_iter(), |c| recs[c as usize].as_ptr(), |c, at| seen.push((c, at))) };
+        let charged = |c: usize| (recs[c][0].load(Ordering::Relaxed) == 0, recs[c][5].load(Ordering::Relaxed) & LOOP_CHARGED != 0);
+        assert_eq!(charged(1), (true, true), "the caller right under the loop is charged");
+        let credited = |id: u32| COUNTING.lock().unwrap().iter().find(|e| e.id == id).map(|e| e.credited);
+        assert_eq!(credited(2), Some(true), "the second, lukewarm, is credited");
+        assert_eq!([charged(3), charged(5)], [(false, false); 2], "the callers further down are not charged");
+        assert_eq!(credited(4), Some(false), "nor credited");
+        assert_eq!(charged(6), (false, false));
+        assert_eq!(seen, [(1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (7, 5)], "the twin callers: every frame down to the one queued for O3");
     }
 
     /// Idle code decays to nothing (no work while it is idle: the decay is applied at its next check).
@@ -17993,22 +18216,25 @@ unsafe fn queued_gone_cold(rec: *const AtomicU64, at: u64, now: u64, threshold: 
         && tier_cost_now(rec, threshold, tier_clock()).0 < threshold
 }
 
-fn tier_revalidate(q: &mut Vec<(u32, u8, u64, u64)>) {
+/// Returns the entries it took out of `q`: whole entries, as the slot may be queued again already.
+fn tier_revalidate(q: &mut Vec<(u32, u8, u64, u64)>) -> Vec<(u32, u8, u64, u64)> {
+    let mut gone = Vec::new();
     if q.is_empty() || !ahead_policy().o3_revalidate {
-        return;
+        return gone;
     }
     let now = wall_ns();
     if !q.iter().any(|e| matches!(e.1, Q_CALLS | Q_LOOP) && now.saturating_sub(e.2) >= REVALIDATE_NS) {
-        return;
+        return gone;
     }
     let up = TIER_UNIT.load(Ordering::Acquire);
     if up.is_null() {
-        return;
+        return gone;
     }
     let u = unsafe { &*up };
-    let Some(threshold) = u.tier1.as_ref().map(|t| t.threshold) else { return };
+    let Some(threshold) = u.tier1.as_ref().map(|t| t.threshold) else { return gone };
     let mut n = 0u64;
-    q.retain(|&(id, why, at, _)| {
+    q.retain(|&entry| {
+        let (id, why, at, _) = entry;
         if !matches!(why, Q_CALLS | Q_LOOP) {
             return true;
         }
@@ -18034,6 +18260,7 @@ fn tier_revalidate(q: &mut Vec<(u32, u8, u64, u64)>) {
             crate::inspect::tierlog::note_arm(id, crate::inspect::tierlog::ARM_REVALIDATE, code);
         }
         n += 1;
+        gone.push(entry);
         false
     });
     if n > 0 {
@@ -18042,6 +18269,7 @@ fn tier_revalidate(q: &mut Vec<(u32, u8, u64, u64)>) {
             eprintln!("O3q @{:.3} {} cold entries counted again, q={}", now as f64 / 1e9, n, q.len());
         }
     }
+    gone
 }
 
 
@@ -18056,8 +18284,7 @@ static BUDGET_RUN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 static SAMPLER_ACTIVITY: std::sync::Mutex<Option<(u64, std::time::Instant)>> = std::sync::Mutex::new(None);
 
 /// The settled latch's sources (update_sampler_settled: a compile, an O3 queue push or an O3 install
-/// restarts its 3 s of quiet; its first settle ends the CPU budget's warm-up), counted per second
-/// of the run and by kind. A speculative job that builds nothing (the slot has code, or its stored
+/// restarts its 3 s of quiet), counted per second of the run and by kind. A speculative job that builds nothing (the slot has code, or its stored
 /// entry links) is no compile, and neither is a first call that links its stored code: they do not
 /// restart the quiet (a warm run reaching new code links it in microseconds). The verbose exit
 /// line says when the JIT first settled, or what held it open: `makepad-run: the JIT settled ...`.
@@ -18153,14 +18380,13 @@ fn sampler_activity() -> u64 {
 pub(crate) fn start_cpu_budget() {
     let mut activity = SAMPLER_ACTIVITY.lock().unwrap();
     *activity = Some((sampler_activity(), std::time::Instant::now()));
-    makepad_cpu_budget::begin_warmup();
+    makepad_cpu_budget::set_jit_settled(false);
     SAMPLER_SETTLED.store(false, Ordering::Relaxed);
     BUDGET_RUN.store(true, Ordering::Release);
 }
 
-// Ordinary runs have no PC sampler. Reuse the existing monitor's tick so they still settle (the
-// budget's warm-up ends; a test harness, which drives no budget, still reports when it settled),
-// without enabling profiling or adding a polling thread.
+// Ordinary runs have no PC sampler. Reuse the existing monitor's tick so they still report
+// when they settle, without enabling profiling or adding a polling thread.
 pub(crate) fn poll_settled() {
     if !sampling_on() {
         update_sampler_settled();
@@ -18184,14 +18410,14 @@ fn update_sampler_settled() -> bool {
         busy::QUIET_MS.store(quiet.as_millis() as u64, Ordering::Relaxed);
         busy::QUIET_AT.store(crate::clock::ms_since_start() as u64, Ordering::Relaxed);
     }
+    if BUDGET_RUN.load(Ordering::Acquire) {
+        makepad_cpu_budget::set_jit_settled(quiet >= SETTLED_AFTER);
+    }
     let settled = settle_on && quiet >= SETTLED_AFTER;
     if settled != SAMPLER_SETTLED.load(Ordering::Relaxed) {
         SAMPLER_SETTLED.store(settled, Ordering::Relaxed);
         if settled && first {
             busy::SETTLED_AT.store((crate::clock::ms_since_start() as u64).max(1), Ordering::Relaxed);
-        }
-        if settled && BUDGET_RUN.load(Ordering::Acquire) {
-            makepad_cpu_budget::end_warmup();
         }
         let ms = if settled { SETTLED_MS } else { SAMPLE_MS };
         for (_, _, h) in SAMPLED.lock().unwrap().iter() {
@@ -18207,15 +18433,18 @@ pub(crate) fn sampler_period_floor() -> u64 {
     if SAMPLER_SETTLED.load(Ordering::Relaxed) { SETTLED_MS } else { SAMPLE_MS }
 }
 
-/// makepad inspect `why-tier uncounted`: slots still counting (T_COUNTING) whose count stub is not
-/// their entry (other code was installed over it) -- their calls are not counted.
-pub(crate) fn tier_uncounted(u: &Unit) -> Vec<u32> {
+/// makepad inspect `why-tier uncounted`: the slots whose calls are not counted, so they never
+/// queue O3 -- still counting (T_COUNTING) with their count stub not their entry (other code was
+/// installed over it: false), or of a counted kind (counted_key) with code below O3 and never
+/// armed (no count stub, tier state 0: true).
+pub(crate) fn tier_uncounted(u: &Unit) -> Vec<(u32, bool)> {
     if u.tier1.is_none() {
         return Vec::new();
     }
     let mut v = Vec::new();
     for id in 0..u.fns.len() as u32 {
-        if !u.fns[id as usize].compiled {
+        let f = &u.fns[id as usize];
+        if !f.compiled {
             continue;
         }
         let (state, stub) = unsafe {
@@ -18223,7 +18452,11 @@ pub(crate) fn tier_uncounted(u: &Unit) -> Vec<u32> {
             ((*rec.add(3)).load(Ordering::Relaxed), (*rec.add(2)).load(Ordering::Relaxed))
         };
         if state == T_COUNTING && stub != 0 && slot_word(u, id) != stub {
-            v.push(id);
+            v.push((id, false));
+        } else if state == 0 && stub == 0 && f.code_len > 0 && counted_key(u, &f.key) && u.forward_of(id).is_none()
+            && !matches!(crate::inspect::codever::kind_at(u, f.code).tier, tier::O3 | tier::INSTRUMENTED_O3)
+        {
+            v.push((id, true));
         }
     }
     v
@@ -18426,6 +18659,9 @@ fn tier_push_locked(id: u32, why: u8, rate: u64, now: u64) {
 
 /// Common queue admission order, including running jobs, class, heat, age and blocking reason.
 pub(crate) fn queue_view(n: usize) -> Vec<String> { queue::view(n) }
+
+/// What the compile jobs took so far (makepad inspect `jit spent`).
+pub(crate) fn queue_spent(n: usize) -> Vec<String> { queue::spent(n) }
 
 /// The UI must be quiet this long before concurrent non-Interactive builds resume.
 const BURST_UI_QUIET_NS: u64 = 1_000_000_000;
@@ -18645,14 +18881,7 @@ impl Unit {
 
     /// After a O1 compile: count calls through the slot (unit lock held).
     fn arm_counter(&mut self, id: u32, code: u64) {
-        let counted = match &self.fns[id as usize].key {
-            FnKey::Inst(d, _) => self.prog.def(*d).kind != DefKind::ForeignFn,
-            FnKey::Closure(..) => true,
-            FnKey::Sandbox(base) => *base != u32::MAX,
-            // SPEC-V: twins tier up too (Unit::o3_allowed); loop counters queue only counted slots
-            FnKey::Plain(_) => true,
-            FnKey::Shim(_) | FnKey::Glue(..) => false,
-        };
+        let counted = counted_key(self, &self.fns[id as usize].key);
         self.arm_counter_as(id, code, counted);
     }
 
@@ -18922,7 +19151,8 @@ struct Counting {
     /// a lukewarm slot whose last window showed too little work: it stays in its counted code
     /// (not pending for O3_PROGRESS, looked at on the usual poll)
     parked: bool,
-    /// a hot loop ran under one of its frames (rt_loop_hot): the work is its callees'
+    /// a hot loop ran under one of its frames (rt_loop_hot): its window is looked at on the next
+    /// poll, parked or not (its own work still decides)
     credited: bool,
 }
 /// slots running counted code
@@ -18975,8 +19205,11 @@ static PGO_LOOP_UNFINALS: AtomicU64 = AtomicU64::new(0);
 
 /// Queues O3 for the counting slots whose window is over (first O3 worker, no lock held).
 fn pgo_poll() {
+    pgo_poll_at(wall_ns());
+}
+
+fn pgo_poll_at(now: u64) {
     profiled_heat();
-    let now = wall_ns();
     let mut ready: Vec<(u32, u64, &'static [AtomicU64], &'static [u32])> = Vec::new();
     let mut parked_now: Vec<u32> = Vec::new();
     {
@@ -18997,17 +19230,14 @@ fn pgo_poll() {
                 let work: u64 = ctr.iter().zip(e.weights).map(|(c, w)| c.load(Ordering::Relaxed).saturating_mul(*w as u64)).fold(0, u64::saturating_add);
                 (work as u128 * 1_000_000_000 / el.max(1) as u128).min(u64::MAX as u128) as u64
             };
-            if e.lukewarm && e.credited {
-                crate::inspect::tierlog::note(e.id, crate::inspect::tierlog::ev::WINDOW_END, crate::inspect::tierlog::WIN_CREDITED, rate, 0);
-                ready.push((e.id, work_rate(), e.counters, e.weights));
-                return false;
-            }
             if e.lukewarm {
-                // (a parked slot is looked at once per PGO_WORK_NS window)
+                // (a parked slot is looked at once per PGO_WORK_NS window, one a hot loop ran under
+                // at once: its own work decides, not the loop's)
                 let win = now.saturating_sub(e.mark.1);
-                if win < if e.parked { PGO_WORK_NS } else { PGO_MS * 1_000_000 } {
+                if win < if e.parked && !e.credited { PGO_WORK_NS } else { PGO_MS * 1_000_000 } {
                     return true;
                 }
+                e.credited = false;
                 let work: u64 = ctr.iter().zip(e.weights).map(|(c, w)| c.load(Ordering::Relaxed).saturating_mul(*w as u64)).fold(0, u64::saturating_add);
                 let per_s = ((work - e.mark.0.min(work)) as u128 * 1_000_000_000 / win as u128) as u64;
                 if per_s >= PGO_MIN_WORK {
@@ -19130,13 +19360,14 @@ fn profiled_heat() {
 }
 
 /// A hot loop ran under a frame of slot `id` (rt_loop_hot, no unit lock): true if `id` is a
-/// lukewarm counting slot, whose window that credit ends. A program thread never waits on the
-/// lock (rule I-CALL): busy, no credit (the walk stops there; the next run-out looks again).
-fn pgo_credit(id: u32) -> bool {
+/// lukewarm counting slot, whose window, with `credit`, is looked at on the next poll. A program
+/// thread never waits on the lock (rule I-CALL): busy, no credit (the walk stops there; the next
+/// run-out looks again).
+fn pgo_credit(id: u32, credit: bool) -> bool {
     let Ok(mut g) = COUNTING.try_lock() else { return false };
     match g.iter_mut().find(|e| e.id == id && e.lukewarm) {
         Some(e) => {
-            e.credited = true;
+            e.credited |= credit;
             true
         }
         None => false,
@@ -20036,7 +20267,8 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         }
         Err(b) => {
             owner::BAILS[owner::BAIL_DROPPED].fetch_add(1, Ordering::Relaxed);
-            crate::inspect::tierlog::note(id, crate::inspect::tierlog::ev::O3_REFUSED, crate::inspect::tierlog::REFUSE_TAKE, 0, 0);
+            let front_why = PREFRONT_WHY.try_with(|w| w.get()).unwrap_or(AF_OK);
+            crate::inspect::tierlog::note_take_bail(id, b.what, b.slots.first().copied(), rounds, front_why);
             if tier1_trace() {
                 eprintln!("O3 take of #{} bailed: {} (slots {:?})", id, b.what, b.slots);
             }
@@ -20348,14 +20580,18 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 }
             }
         }
-        // the calls O3 left (MAKEPAD_RUN_O3_TRACE): (callee slot, in a cold block)
+        // the calls O3 left (MAKEPAD_RUN_O3_TRACE): (callee slot, in a cold block). A guarded inline
+        // copy's slow call is not one of them: the callee was inlined, and that call runs only once
+        // a live patch replaced it.
         let mut left: Vec<(u32, bool, u8)> = Vec::new();
         if tier1_trace() {
-            for b in &func.blocks {
+            for (bi, b) in func.blocks.iter().enumerate() {
                 let cold = matches!(b.term, relax_backend::rir::Term::Unreachable | relax_backend::rir::Term::Resume);
-                for i in &b.insts {
+                for (ii, i) in b.insts.iter().enumerate() {
                     if let relax_backend::rir::Inst::Call(relax_backend::rir::Callee::Fn(c), _, _) = i {
-                        left.push((*c, cold, get(*c).map_or(255, |x| x.1)));
+                        if !func.guard_call(bi, ii) {
+                            left.push((*c, cold, get(*c).map_or(255, |x| x.1)));
+                        }
                     }
                 }
             }
@@ -22796,6 +23032,10 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"__relax_fork_exec_done" => Some(crate::forkexec::relax_fork_exec_done as *const () as usize),
         b"relax_allocator_swap" => Some(relax_allocator_swap as *const () as usize),
         b"relax_set_panic_hook" => Some(relax_set_panic_hook as *const () as usize),
+        // what observers cost the program and what the runtime's own threads run: one count for the
+        // host's endpoint and every copy of makepad-remote the program runs, whichever crates bind
+        b"relax_served_ns" => Some(makepad_remote::served_count() as *const std::sync::atomic::AtomicU64 as usize),
+        b"relax_runtime_cpu_ns" => Some(crate::inspect::instrument::relax_runtime_cpu_ns as *const () as usize),
         b"relax_set_payload_end" => Some(relax_set_payload_end as *const () as usize),
         b"relax_before_first_frame" => Some(relax_before_first_frame as *const () as usize),
         b"relax_app_main" => Some(relax_app_main as *const () as usize),
@@ -23782,12 +24022,30 @@ thread_local! {
 /// (instrument) fronts run off the owner by job: [count, cpu ns] per PREFRONT_SITE_NAMES
 pub static PREFRONT_SITE: [[AtomicU64; 2]; 8] = [const { [AtomicU64::new(0), AtomicU64::new(0)] }; 8];
 pub const PREFRONT_SITE_NAMES: [&str; 8] = ["other", "O2", "O1v", "borrow", "O2 base", "counted", "spec", "O3"];
+/// A background job's fronts (the checks and lowerings ahead its build makes off the owner for its
+/// own takes), from before the first to the job's end: the job they count under (instrument,
+/// PREFRONT_SITE_NAMES), and held (FRONTS_HELD): queue::cleanup_ahead sweeps none while one is.
+/// A sweep between a build's front and its take took the lowering just made for it: the take
+/// fronted again, or the build gave up ("front failed other") and left its slot to a lazy compile.
 struct FrontSite(u8);
 impl FrontSite {
-    fn enter(k: u8) -> Self { FrontSite(FRONT_SITE.with(|s| s.replace(k))) }
+    fn enter(k: u8) -> Self {
+        FRONTS_HELD.fetch_add(1, Ordering::SeqCst);
+        FrontSite(FRONT_SITE.with(|s| s.replace(k)))
+    }
 }
 impl Drop for FrontSite {
-    fn drop(&mut self) { let _ = FRONT_SITE.try_with(|s| s.set(self.0)); }
+    fn drop(&mut self) {
+        let _ = FRONT_SITE.try_with(|s| s.set(self.0));
+        FRONTS_HELD.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+/// Background jobs holding their fronts (FrontSite)
+static FRONTS_HELD: AtomicU32 = AtomicU32::new(0);
+/// A background job holds its fronts (FrontSite). Asked under the lock a front is put under: a
+/// job holds them from before it puts the first.
+fn fronts_held() -> bool {
+    FRONTS_HELD.load(Ordering::SeqCst) != 0
 }
 fn prefront_count(t0: u64) {
     let ns = cpu_ns() - t0;
@@ -26651,11 +26909,12 @@ mod front_yield_tests {
         makepad_cpu_budget::tokens().holders.iter().filter(|h| h.label == label).count()
     }
 
-    /// As many jobs as CPU tokens, each with its token, all calling one fn whose speculative build
-    /// (Background, in flight) sits out a checkpoint for them: the build needs a token and they wait
-    /// for the build. Budget::acquire held it for good: nothing moved until the process died.
+    /// As many jobs as Visible lets in, each with its token, all calling one fn whose speculative
+    /// build (Background, in flight) sits out a checkpoint for them: the build needs a token and they
+    /// wait for the build. Budget::acquire held it for good: nothing moved until the process died.
     /// `callers` of the jobs call; the others keep their tokens, running.
-    /// `jobs` is the tokens left beside the other compile job and the build.
+    /// `jobs` is what Visible lets in beside the compile jobs past the JIT's floor (it does not count
+    /// the JIT's builds past the floor): with the build, the CPU is over its cores.
     /// Returns once the callers are on their way: the jobs, and the callers still to end.
     fn jobs_on_every_token(up: usize, slot: u32, jobs: usize, callers: usize) -> (Vec<std::thread::JoinHandle<u64>>, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         use makepad_cpu_budget as budget;
@@ -26690,26 +26949,26 @@ mod front_yield_tests {
                 code
             })
         }).collect();
-        // the build's token is the one the last job waits for: its first checkpoint yields it
-        on_budget_change(|| budget::tokens().waiting.iter().any(|w| w.class == budget::VISIBLE && w.client == budget::APP));
-        BACK_END_GATE.store(0, Ordering::SeqCst);
+        // the jobs in, the CPU is over its cores: the build's first checkpoint yields its token
         on_budget_change(|| pool_jobs("a pool job") >= jobs);
+        BACK_END_GATE.store(0, Ordering::SeqCst);
         // (a build that no longer stops here would pass without showing anything; asked of the budget,
         // which every JIT in the process shares: under the JIT the wait hook is the loader's)
         let building = BACK_END_THREAD.load(Ordering::SeqCst);
         on_budget_change(|| {
-            assert!(queue::running_class(up, slot).is_some(), "the build sits out its checkpoint for the last job");
+            assert!(queue::running_class(up, slot).is_some(), "the build sits out its checkpoint over the cores");
             budget::tokens().waiting.iter().any(|w| w.thread == building)
         });
         go.store(true, Ordering::SeqCst);
         (handles, left)
     }
 
-    /// Other compile jobs up to the JIT's floor, so the build is past it: a Visible job waiting for a
-    /// token takes the build's at its checkpoint, and the build needs another. (Below the floor it
-    /// keeps its token: `a_build_below_the_jit_floor_finishes_and_the_last_job_runs_after_it`.)
-    fn compile_jobs_at_the_floor(stop: &std::sync::Arc<AtomicBool>) -> (Vec<std::thread::JoinHandle<()>>, Vec<u64>) {
-        (0..makepad_cpu_budget::jit_floor().max(1)).map(|_| other_compile_job(stop.clone())).unzip()
+    /// Other compile jobs one past the JIT's floor: with the build and the jobs Visible lets in, the
+    /// CPU is one over its cores, and the build gives its token up at its checkpoint and needs
+    /// another. (A build gives its token up only then: a job waiting for a token could not have it.
+    /// At the floor it keeps its token: `a_build_below_the_jit_floor_finishes_and_the_last_job_runs_after_it`.)
+    fn compile_jobs_past_the_floor(stop: &std::sync::Arc<AtomicBool>) -> (Vec<std::thread::JoinHandle<()>>, Vec<u64>) {
+        (0..makepad_cpu_budget::jit_floor() + 1).map(|_| other_compile_job(stop.clone())).unzip()
     }
 
     /// With the JIT short of its floor, Visible work leaves it the token: the build keeps its own
@@ -26779,7 +27038,7 @@ mod front_yield_tests {
         // chain says so when it does not: a plain failure, as it stands still. (A second of age: a
         // job between its wait's row and giving its token up looks stuck for that moment.)
         let stop = Arc::new(AtomicBool::new(false));
-        let (others, _) = compile_jobs_at_the_floor(&stop);
+        let (others, _) = compile_jobs_past_the_floor(&stop);
         let (jobs, left) = jobs_on_every_token(up, f, jobs_beside, jobs_beside);
         while left.load(Ordering::SeqCst) != 0 {
             if let Some(chain) = crate::inspect::budget_deadlock(1_000_000_000) {
@@ -26796,7 +27055,7 @@ mod front_yield_tests {
         // one job calls and the others run on: only its token comes free, and Background is not let
         // in below its limit. The build takes the class of who waits for it.
         let stop = Arc::new(AtomicBool::new(false));
-        let (others, other_threads) = compile_jobs_at_the_floor(&stop);
+        let (others, other_threads) = compile_jobs_past_the_floor(&stop);
         let (jobs, left) = jobs_on_every_token(up, g, jobs_beside, 1);
         let building = BACK_END_THREAD.load(Ordering::SeqCst);
         let waiter = || crate::waits::snapshot().into_iter().find(|w| !other_threads.contains(&w.thread) && w.holder == building && matches!(w.kind, crate::waits::Kind::Pump | crate::waits::Kind::Build)).map(|w| (w.thread, w.since_ns));
@@ -27273,15 +27532,18 @@ struct RealTime {
     /// slots reached, in order (what the disk cache records)
     set: Vec<u32>,
     seen: crate::fxhash::HashSet<u32>,
-    /// trait-object types real-time code is handed (TyId), and the vtables already followed
+    /// trait-object types real-time code is handed (TyId) and their names (stable_ty: a vtable
+    /// linked from the disk cache or placed from the startup image names its types only so), and
+    /// the vtables already followed
     dyns: crate::fxhash::HashSet<u32>,
+    dyn_names: crate::fxhash::HashSet<String>,
     vtables: crate::fxhash::HashSet<u64>,
     /// the earlier runs' set was taken (into `link`)
     loaded: bool,
     /// slots of the set whose compile failed: a call still compiles them (Realtime::lazy counts them)
     failed: crate::fxhash::HashSet<u32>,
-    /// the reach in progress: the earlier runs' slots still to link (compiled, not walked), the
-    /// slots still to walk, the trait-object types newly called through
+    /// the reach in progress: the earlier runs' slots still to compile ahead (no part of the reach
+    /// until the walk takes them), the slots still to walk, the trait-object types newly called through
     link: Vec<u32>,
     todo: Vec<u32>,
     new_dyns: Vec<u32>,
@@ -27300,7 +27562,7 @@ struct RealTime {
 }
 
 static REALTIME: relax_session::sync::Mutex<Option<RealTime>> = relax_session::sync::Mutex::new(None);
-/// any real-time slot or trait-object type known (vtable() / installs check this before the mutex)
+/// any real-time slot or trait-object type known (realtime_vtable / installs check this before the mutex)
 static RT_DYNS: AtomicBool = AtomicBool::new(false);
 static RT_ANY: AtomicBool = AtomicBool::new(false);
 /// vtables made for a real-time trait-object type, waiting for realtime_drain
@@ -27406,8 +27668,8 @@ static RT_ARMED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::ne
 /// What real-time code can reach that a call would still compile: the reach's work left (slots to
 /// link or walk, trait-object types and vtables to follow, the new callees of new code) and the
 /// set's slots whose compile failed. The reach is one walk for every mark (a slot two roots reach is
-/// walked once, and a warm run links the earlier runs' set without walking it), so this is the
-/// whole real-time set's answer: never 0 while something on any root's path is lazy.
+/// walked once; a warm run compiles the earlier runs' set ahead and walks from the roots all the
+/// same), so this is the whole real-time set's answer: never 0 while something on any root's path is lazy.
 ///
 /// The queues realtime_drain empties are read first: it adds their work to the reach before it
 /// takes them off, so a read never falls between the two (a vtable made just now is counted in
@@ -27459,10 +27721,10 @@ unsafe fn realtime_mark(up: *mut Unit, root: u64, data: u64, meta: u64, ticket: 
             }
         }
     }
-    // a trait object (or a struct ending in one): the methods of its vtable
+    // a trait object (or a struct ending in one): the methods of its vtable (and its drop glue:
+    // the concrete type behind it is a parameter, below)
     if meta != 0 {
         crate::syms::data_thunks(u, meta, &mut roots);
-        values.extend(u.vtables.snapshot().into_iter().filter(|(_, a)| *a == meta).map(|((t, _), _)| t));
     }
     // what the roots' callers pass them (a Fab arms run's `run_until(&mut self, link: &mut dyn
     // CellLink, ..)`: the planner's `Box<dyn Route>`, the link)
@@ -27526,14 +27788,17 @@ pub(crate) unsafe fn realtime_reach_queued(up: *mut Unit, roots: Vec<u32>, why: 
     }
 }
 
-/// One bounded owner step of the reach (see the section comment): links the earlier runs' set,
-/// then compiles and walks slots until the reach is done or RT_STEP_NS passed; the rest is posted
+/// One bounded owner step of the reach (see the section comment): compiles the earlier runs' set
+/// ahead, then compiles and walks slots until the reach is done or RT_STEP_NS passed; the rest is posted
 /// behind the program's requests. Done: the set's top tier, its disk cache record, the tickets.
 unsafe fn realtime_step(up: *mut Unit) {
     let t0 = wall_ns();
-    // the earlier runs' set, once, first: on a warm run most of it links from the disk cache
-    // (their code is compiled, their references are not walked again: what they reached then is
-    // in the set; an edited slot's key no longer resolves and is walked from what calls it)
+    // the earlier runs' set, once, first: on a warm run most of it links from the disk cache. It is
+    // only what to compile ahead: the reach is what the walk from the roots takes. A slot's key names
+    // its identity, not its body, so a set an older program recorded still resolves where the bodies
+    // call other code now; a set walked no further kept its hole for good (the land gate's recorded
+    // 5182 slots of which 3 resolved, its root among them: that run reached 1934 of 8250, and every
+    // run after linked those 1934, meeting 27 to 67 lazy compiles on the cell's loop thread, 11-10)
     if with_rt(|rt| !std::mem::replace(&mut rt.loaded, true)) {
         let root = crate::layout::root_crate();
         let (keys, dyns) = {
@@ -27551,7 +27816,7 @@ unsafe fn realtime_step(up: *mut Unit) {
         if rt_trace() {
             eprintln!("makepad-run rt: the earlier runs' set: {} keys, {} resolved, {} trait-object types", keys.len(), earlier.len(), dyns.len());
         }
-        // (linked slots are not walked: the trait-object types the reach followed are the set's)
+        // (the trait-object types the reach followed then: their vtables are followed now too)
         with_rt(|rt| {
             rt.link.extend(earlier.into_iter().rev());
             rt.new_dyns.extend(dyns.into_iter().map(|d| d.0).filter(|d| !rt.dyns.contains(d)));
@@ -27582,19 +27847,11 @@ unsafe fn realtime_step(up: *mut Unit) {
         });
         match next {
             Next::Link(id) => {
-                if !realtime_take(id) {
-                    continue;
-                }
+                // compiled ahead only (the walk reads its references from that code)
                 if (id as usize) < (&*up).fns.len() && !(&*up).fns[id as usize].compiled {
                     let _ = compile_slot_locked(up, id, false);
                     compiled += 1;
                 }
-                let lazy = (id as usize) < (&*up).fns.len() && !(&*up).fns[id as usize].compiled;
-                let partner = realtime_partner(&*up, id);
-                with_rt(|rt| {
-                    if lazy { rt.failed.insert(id); } else { rt.failed.remove(&id); }
-                    rt.todo.extend(partner);
-                });
             }
             Next::Walk(id) => {
                 // a diverging fn (a panic, an abort) ends the callback's normal path: it stays lazy
@@ -27620,34 +27877,44 @@ unsafe fn realtime_step(up: *mut Unit) {
                 });
             }
             // trait-object types newly handed to real-time code: every vtable of each, now and later
+            // (lowered, linked from the disk cache, placed from the startup image: by its name)
             Next::Dyns(new_dyns) => {
                 let u = &*up;
+                let names: Vec<(u32, String)> = new_dyns.iter().map(|&d| (d, crate::syms::stable_ty(u, TyId(d)))).collect();
                 // known first, then the vtables made so far: one made meanwhile (on another
-                // thread) is in the snapshot or noted by realtime_vtable
+                // thread) is in the scan or noted by realtime_vtable
                 with_rt(|rt| {
-                    if new_dyns.iter().filter(|d| rt.dyns.insert(**d)).count() > 0 {
+                    let mut any = false;
+                    for (d, n) in names {
+                        if rt.dyns.insert(d) {
+                            rt.dyn_names.insert(n);
+                            any = true;
+                        }
+                    }
+                    if any {
                         RT_DYNS.store(true, Ordering::Release);
                     }
                 });
-                let snapshot = u.vtables.snapshot();
                 with_rt(|rt| {
-                    let addrs: Vec<(u32, u64, TyId)> = snapshot.into_iter().filter(|((_, dy), a)| rt.dyns.contains(&dy.0) && !rt.vtables.contains(a)).map(|((t, dy), a)| (dy.0, a, t)).collect();
+                    let addrs = u.syms.vtables_of(|a, dy| rt.dyn_names.contains(dy) && !rt.vtables.contains(&a));
                     if rt_trace() {
-                        let mut by: crate::fxhash::HashMap<u32, usize> = Default::default();
-                        for (d, _, _) in &addrs {
-                            *by.entry(*d).or_default() += 1;
+                        let mut by: std::collections::BTreeMap<&str, usize> = Default::default();
+                        for (_, dy) in &addrs {
+                            *by.entry(dy.as_str()).or_default() += 1;
                         }
-                        for (d, n) in by {
-                            eprintln!("makepad-run rt: trait objects `{}` handed to real-time code: {} vtables followed", crate::typeck::ty_to_string(false, &u.prog, &u.tcx, TyId(d)), n);
+                        for (dy, n) in by {
+                            eprintln!("makepad-run rt: trait objects `{}` handed to real-time code: {} vtables followed", dy, n);
+                        }
+                    }
+                    let mut slots = Vec::new();
+                    for (a, _) in addrs {
+                        if rt.vtables.insert(a) {
+                            crate::syms::data_thunks(u, a, &mut slots);
                         }
                     }
                     // the values behind those vtables hold trait objects of their own
-                    let behind: Vec<TyId> = addrs.iter().map(|x| x.2).collect();
-                    rt.new_dyns.extend(realtime_value_dyns(u, &behind).into_iter().filter(|d| !rt.dyns.contains(d)));
-                    for (_, a, _) in addrs {
-                        rt.vtables.insert(a);
-                        crate::syms::data_thunks(u, a, &mut rt.todo);
-                    }
+                    rt.new_dyns.extend(realtime_value_dyns(u, &realtime_root_params(u, &slots, &[])).into_iter().filter(|d| !rt.dyns.contains(d)));
+                    rt.todo.extend(slots);
                 });
             }
             Next::Done => break true,
@@ -27757,19 +28024,25 @@ unsafe fn realtime_miss_caller(up: *mut Unit, id: u32, frames: &[u64]) {
     eprintln!("makepad-run rt: miss `{}` called by {} (caller in the real-time set: {})", short_name(&u.fns[id as usize].name), who, if inset { "yes" } else { "no" });
 }
 
-/// The parameter types of the real-time roots: fn items' and methods' (slots `roots`), closures'
-/// and fn pointers' (values of `types`). Their callers are not real-time code: what they pass in is
-/// made elsewhere, and so are the trait objects it holds.
+/// The parameter types of the real-time roots: fn items' and methods' (slots `roots`), the value a
+/// drop glue drops, closures' and fn pointers' (values of `types`). Their callers are not real-time
+/// code: what they pass in is made elsewhere, and so are the trait objects it holds. (A vtable's
+/// methods and drop glue: the concrete type behind it, also where the vtable came from the disk
+/// cache or the startup image and only its name tells the type.)
 fn realtime_root_params(u: &Unit, roots: &[u32], types: &[TyId]) -> Vec<TyId> {
     let mut out = Vec::new();
     for &id in roots {
         if (id as usize) >= u.fns.len() {
             continue;
         }
-        if let FnKey::Inst(d, args) = &u.fns[id as usize].key {
-            if let Some(sig) = u.tcx.fn_sig(&u.prog, *d) {
-                out.extend(sig.params.iter().map(|p| u.tcx.tys.subst_erasing_regions(*p, args)));
+        match &u.fns[id as usize].key {
+            FnKey::Inst(d, args) => {
+                if let Some(sig) = u.tcx.fn_sig(&u.prog, *d) {
+                    out.extend(sig.params.iter().map(|p| u.tcx.tys.subst_erasing_regions(*p, args)));
+                }
             }
+            FnKey::Glue(GLUE_DROP, t) => out.push(*t),
+            _ => {}
         }
     }
     for &t in types {
@@ -27933,12 +28206,16 @@ unsafe fn realtime_refs(up: *mut Unit, id: u32) -> Vec<u32> {
             c.last_thunks.clear();
             c.last_data.clear();
         };
-        clear(up);
         if !(&*up).fns[id as usize].compiled {
             let _ = compile_slot_locked(up, id, false);
-        } else if (&*up).fns[id as usize].rir.is_none() && (&*up).cache.is_some() && !matches!((&*up).fns[id as usize].key, FnKey::Sandbox(_)) {
-            // installed from the disk cache (or the startup image): its entry names its references
-            // (none linked: it was built this run, its RIR dropped at its install)
+        }
+        // installed from the disk cache (or the startup image), just now or before: its entry names
+        // its references (none linked: it was built this run, its RIR dropped at its install). Read
+        // afresh: the link that installs a slot takes its callees to link them ahead, and those
+        // links leave their own references behind (a gate run's cell loop met 16 to 244 lazy
+        // compiles: warm code, no set recorded, the walk lost what every slot it linked calls)
+        clear(up);
+        if (&*up).fns[id as usize].compiled && (&*up).fns[id as usize].rir.is_none() && (&*up).cache.is_some() && !matches!((&*up).fns[id as usize].key, FnKey::Sandbox(_)) {
             if cache_lookup(up, id).is_none() {
                 clear(up);
             }
@@ -27991,13 +28268,15 @@ fn realtime_rir_refs(u: &Unit, f: &relax_backend::rir::Func, slots: &mut Vec<u32
     }
 }
 
-/// A vtable was made (Unit::vtable): one of a trait-object type real-time code calls through is
-/// compiled after the current request.
-fn realtime_vtable(dy: TyId, addr: u64) {
+/// A vtable was named (`name`, syms::VTABLE_NAME: lowered by Unit::vtable, linked from the disk
+/// cache, placed from the startup image): one of a trait-object type real-time code calls through
+/// is compiled after the current request. (The data lock not held.)
+pub(crate) fn realtime_vtable(addr: u64, name: &str) {
     if !RT_DYNS.load(Ordering::Acquire) {
         return;
     }
-    let known = REALTIME.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|r| r.dyns.contains(&dy.0) && !r.vtables.contains(&addr));
+    let Some((_, dy)) = crate::syms::vtable_name_parts(name) else { return };
+    let known = REALTIME.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|r| r.dyn_names.contains(dy) && !r.vtables.contains(&addr));
     if known {
         crate::zone_alloc::kept_with(|| RT_PENDING.lock().unwrap_or_else(|e| e.into_inner()).push(addr));
     }
@@ -28083,7 +28362,7 @@ impl Drop for WantConsts {
 /// Constants a background build's lowering ahead needed and nobody had evaluated in this run (with
 /// the collect epoch they were named under): a warm run links its code from the disk cache, so the
 /// owner's lowerings that evaluate them in a cold run never happen, and every O3 build whose body
-/// names one (`EPS`, `usize::MAX`, `Vec::ZERO`) bailed on its own front for the whole run (mickey:
+/// names one (`EPS`, `usize::MAX`, `Vec::ZERO`) bailed on its own front for the whole run (a game's
 /// mirror::walk_hurt_changed / reconcile ran their warm-cache baseline code). Rule I-PURE keeps
 /// CTFE on the owner: it evaluates them between requests (const_drain), nobody waits for it.
 /// The same holds for a `#[thread_local]` static nobody placed in this run (Unit::thread_local_place
@@ -28271,14 +28550,20 @@ pub(crate) fn realtime_drain() {
         return;
     }
     let u = unsafe { &*up };
-    with_rt(|rt| {
+    let held = with_rt(|rt| {
+        let mut methods = Vec::new();
         for &a in &addrs {
             if rt.vtables.insert(a) {
-                crate::syms::data_thunks(u, a, &mut roots);
+                crate::syms::data_thunks(u, a, &mut methods);
             }
         }
+        // the values behind those vtables hold trait objects of their own
+        let n = rt.new_dyns.len();
+        rt.new_dyns.extend(realtime_value_dyns(u, &realtime_root_params(u, &methods, &[])).into_iter().filter(|d| !rt.dyns.contains(d)));
+        roots.extend(methods);
+        rt.new_dyns.len() > n
     });
-    if !roots.is_empty() {
+    if !roots.is_empty() || held {
         unsafe { realtime_reach(up, roots, if slots > 0 { "new code" } else { "new vtable" }) };
     }
     RT_PENDING_SLOTS.lock().unwrap_or_else(|e| e.into_inner()).drain(..slots);
@@ -28440,11 +28725,7 @@ fn run_tick() {
     drain_slow_base();
     settle_tier_tick();
     if records_due() { drain_records_bounded(); }
-    let mut tiers = queue::tiers();
-    let before: std::collections::HashSet<_> = tiers.iter().map(|e| e.0).collect();
-    tier_revalidate(&mut tiers);
-    let kept: std::collections::HashSet<_> = tiers.iter().map(|e| e.0).collect();
-    queue::retain(|job| !matches!(job, queue::Job::O3(e) if before.contains(&e.0) && !kept.contains(&e.0)));
+    queue::drop_tiers(tier_revalidate(&mut queue::tiers()));
     o2_offer_hottest();
     let now = w0_activity();
     let mut state = TICK_STATE.lock().unwrap_or_else(|e| e.into_inner());

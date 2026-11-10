@@ -27,6 +27,26 @@ fn live() -> relax_session::sync::MutexGuard<'static, Vec<(u64, String)>> {
 
 struct Running(u64);
 
+/// Run on each of the run's threads as it ends (`on_thread_end`).
+static THREAD_END: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// Its thread is ending: the end hook runs on it (`on_thread_end`).
+struct Ending;
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        if let Some(end) = THREAD_END.get() {
+            end();
+        }
+    }
+}
+
+/// `end` runs on each thread `spawn` started as it ends, its function returned or unwound (once
+/// for the process: a second hook is not taken).
+pub fn on_thread_end(end: fn()) {
+    let _ = THREAD_END.set(end);
+}
+
 impl Drop for Running {
     fn drop(&mut self) {
         let mut l = live();
@@ -62,6 +82,7 @@ fn start<T: Send + 'static>(name: &str, stack: Option<usize>, f: impl FnOnce() -
     }
     builder.spawn(move || {
         let _running = running;
+        let _ending = Ending;
         f()
     })
 }

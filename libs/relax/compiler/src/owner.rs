@@ -885,6 +885,16 @@ pub fn serving_note() -> String {
     }
 }
 
+/// `serving_note` with the site of the request served (atomics only: an abort's report, which
+/// names what kept the owner from its lookups).
+pub fn serving_detail() -> String {
+    // SAFETY: only &'static Locations are stored
+    match unsafe { NOW_SITE.load(Ordering::Relaxed).as_ref() } {
+        Some(site) if NOW_CLASS.load(Ordering::Relaxed) != u8::MAX => format!("{}, asked at {}:{}", serving_note(), site.file(), site.line()),
+        _ => serving_note(),
+    }
+}
+
 /// The request queue as a JSON object (makepad inspect; atomics only, never the queue's lock):
 /// queued requests, of which foreground (main + app) and main.
 pub fn queued_note() -> String {

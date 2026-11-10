@@ -358,7 +358,7 @@ fn key(e: &Entry, now: &HeatNow) -> i64 {
     if matches!(e.job, Job::Check(..)) { return if crate::check::check_waited() { CHECK_WAITED_KEY } else { i64::MIN }; }
     let (heat, ui) = match &e.job {
         Job::O2(u, id, _) => now.heat(*u, *id),
-        Job::O3(t) => now.heat(0, t.0),
+        Job::O3(t) => now.tier_heat(t),
         _ => (0, false),
     };
     // log2 heat buckets, with one doubling per four seconds of age. Adding the
@@ -385,6 +385,12 @@ static QUEUE: OnceLock<relax_session::sync::Mutex<Queue>> = OnceLock::new();
 const TIERS: usize = 6;
 static COUNTS: [AtomicUsize; TIERS] = [const { AtomicUsize::new(0) }; TIERS];
 static RUNNING: [AtomicUsize; TIERS] = [const { AtomicUsize::new(0) }; TIERS];
+const TIER_NAMES: [&str; TIERS] = ["ahead", "O2", "O3", "spec", "tick", "check"];
+/// What the jobs of each tier took so far, the CPU of the threads running them (makepad inspect `jit spent`).
+static JOB_CPU: [AtomicU64; TIERS] = [const { AtomicU64::new(0) }; TIERS];
+static JOB_RUNS: [AtomicU64; TIERS] = [const { AtomicU64::new(0) }; TIERS];
+/// The same per slot for its O2 and O3 jobs: O2 ns, O2 jobs, O3 ns, O3 jobs.
+static SLOT_CPU: relax_session::sync::Mutex<Option<HashMap<u32, [u64; 4]>>> = relax_session::sync::Mutex::new(None);
 /// A worker's park state, on its own cache line (each worker writes its flag at every job).
 #[repr(align(64))]
 /// `idle`: the worker runs at the OS's idle policy (idle_tiers): it takes tier-ups only.
@@ -650,6 +656,41 @@ pub(super) fn tiers_where(keep: impl Fn(&TierEntry) -> bool) -> Vec<TierEntry> {
     drain_tier_inbox();
     lock().entries.iter().filter_map(|e| if let Job::O3(t) = e.job { keep(&t).then_some(t) } else { None }).collect()
 }
+/// Takes the O3 entries `gone` off the queue (tier_revalidate). By the whole entry, not by slot: hot
+/// code counted again is queued again within microseconds, and that new entry stays.
+pub(super) fn drop_tiers(gone: Vec<TierEntry>) {
+    if !gone.is_empty() {
+        lock().drop_tiers(&gone.into_iter().collect());
+    }
+}
+fn note_job(tier: usize, slot: Option<u32>, ns: u64) {
+    JOB_CPU[tier].fetch_add(ns, Ordering::Relaxed);
+    JOB_RUNS[tier].fetch_add(1, Ordering::Relaxed);
+    if let (true, Some(slot)) = (is_tier_up(tier), slot) {
+        let at = (tier - 1) * 2;
+        crate::zone_alloc::kept_with(|| {
+            let mut g = SLOT_CPU.lock().unwrap_or_else(|e| e.into_inner());
+            let row = g.get_or_insert_with(Default::default).entry(slot).or_default();
+            row[at] += ns;
+            row[at + 1] += 1;
+        });
+    }
+}
+/// What the jobs took by tier, then the `n` slots whose O2 and O3 jobs took the most.
+pub(super) fn spent(n: usize) -> Vec<String> {
+    let mut rows = vec![TIER_NAMES.iter().enumerate()
+        .map(|(i, name)| format!("{name} {:.1} s x{}", JOB_CPU[i].load(Ordering::Relaxed) as f64 / 1e9, JOB_RUNS[i].load(Ordering::Relaxed)))
+        .collect::<Vec<_>>().join(", ")];
+    let g = SLOT_CPU.lock().unwrap_or_else(|e| e.into_inner());
+    let mut slots: Vec<(&u32, &[u64; 4])> = g.iter().flatten().collect();
+    slots.sort_by_key(|(id, r)| (std::cmp::Reverse(r[0] + r[2]), **id));
+    rows.push(format!("{} slots had an O2 or O3 job", slots.len()));
+    rows.extend(slots.into_iter().take(n).map(|(id, r)| {
+        let name = slot_name(*id).unwrap_or_default();
+        format!("S{id} O2 {:.1} ms x{} O3 {:.1} ms x{} {name}", r[0] as f64 / 1e6, r[1], r[2] as f64 / 1e6, r[3])
+    }));
+    rows
+}
 pub(super) fn retire_front(front: &Arc<FrontShared>) {
     front.alive.store(false, Ordering::SeqCst);
     retain(|job| !matches!(job, Job::Ahead(f, _) if Arc::ptr_eq(f, front)));
@@ -663,6 +704,12 @@ pub(super) fn retain(mut keep: impl FnMut(&Job) -> bool) {
     }
 }
 impl Queue {
+    fn drop_tiers(&mut self, gone: &std::collections::HashSet<TierEntry>) {
+        let mut i = 0;
+        while i < self.entries.len() {
+            if matches!(&self.entries[i].job, Job::O3(e) if gone.contains(e)) { self.remove(i); } else { i += 1; }
+        }
+    }
     /// Promotes slot `id`'s queued and running jobs to their waiters' class; returns whether a
     /// queued one can start now.
     fn promote(&mut self, unit: usize, id: u32) -> bool {
@@ -880,7 +927,9 @@ fn worker_loop(index: usize) {
                         TIER_ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).push(tier.0);
                         Some(TierActive(tier.0))
                     } else { None };
+                    let (slot, cpu) = (entry.slot.map(|s| s.1), cpu_ns());
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(entry.job)));
+                    note_job(tier, slot, cpu_ns().saturating_sub(cpu));
                     drop(active);
                     if let Err(payload) = result {
                         let (message, bail) = panic_payload(&*payload);
@@ -952,7 +1001,7 @@ pub(super) fn view(n: usize) -> Vec<String> {
         let e = &q.entries[i];
         let (heat, ui) = match &e.job {
             Job::O2(unit, id, _) => now.heat(*unit, *id),
-            Job::O3(t) => now.heat(0, t.0),
+            Job::O3(t) => now.tier_heat(t),
             _ => (0, false),
         };
         let why = match &e.job {
@@ -971,6 +1020,47 @@ pub(super) fn view(n: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_queued_slot_keeps_the_heat_it_was_queued_at() {
+        const S: u64 = 1_000_000_000;
+        let mut q = Queue::new();
+        let now = 1000 * S;
+        let (cold, hot, old_cold) = ((u32::MAX - 1, 0, now, 1 << 15), (u32::MAX - 2, 0, now, 1 << 34), (u32::MAX - 3, 0, now - 40 * S, 1 << 15));
+        for e in [cold, hot, old_cold] {
+            q.push(Job::O3(e), e.2);
+        }
+        let keys = [0, 1, 2].map(|i| q.entries[i].key);
+        assert!(keys[1] > keys[2] && keys[2] > keys[0], "the hottest first, then what waited longest: {keys:?}");
+        q.drop_tiers(&[cold, hot, old_cold].into_iter().collect());
+    }
+
+    #[test]
+    fn a_slot_queued_again_keeps_its_new_entry() {
+        let mut q = Queue::new();
+        let (old, new, other) = ((7, 0, 100, 5), (7, 0, 200, 5), (8, 0, 100, 5));
+        for e in [old, other, new] {
+            q.push(Job::O3(e), e.2);
+        }
+        q.drop_tiers(&[old].into_iter().collect());
+        let left: Vec<TierEntry> = q.entries.iter().filter_map(|e| if let Job::O3(t) = e.job { Some(t) } else { None }).collect();
+        assert_eq!(left.len(), 2);
+        assert!(left.contains(&new) && left.contains(&other), "only the entry counted again goes: {left:?}");
+        for e in [new, other] {
+            q.drop_tiers(&[e].into_iter().collect());
+        }
+    }
+
+    #[test]
+    fn a_jobs_cpu_goes_to_its_tier_and_slot() {
+        let slot = u32::MAX - 11;
+        note_job(2, Some(slot), 5_000_000);
+        note_job(2, Some(slot), 5_000_000);
+        note_job(1, Some(slot), 1_000_000);
+        let rows = spent(usize::MAX);
+        assert!(rows[0].contains("O3 "), "by tier first: {}", rows[0]);
+        assert!(rows.iter().any(|r| r.starts_with(&format!("S{slot} O2 1.0 ms x1 O3 10.0 ms x2"))), "{rows:?}");
+    }
 
     #[test]
     fn admission_order_and_waiter_promotion() {
@@ -1107,9 +1197,19 @@ pub(super) fn cleanup_ahead() {
     let Some(front) = front else { return };
     let q = lock();
     if q.entries.iter().any(|e| e.job.tier() == 0) || q.running.iter().any(|r| r.tier == 0) { return; }
-    let keys = std::mem::take(&mut *front.ahead_post.lock().unwrap_or_else(|e| e.into_inner()));
-    let unused: Vec<_> = keys.iter().filter_map(|key| front.ahead.remove(key)).collect();
-    let lowered = std::mem::take(&mut *front.lowered.lock().unwrap_or_else(|e| e.into_inner()));
+    // (not what a background build checked and lowered for its own take: its bodies are published
+    // under the claim lock, its lowerings under the map's)
+    let (keys, unused) = {
+        let _claim = front.inprog.lock().unwrap_or_else(|e| e.into_inner());
+        if fronts_held() { return; }
+        let keys = std::mem::take(&mut *front.ahead_post.lock().unwrap_or_else(|e| e.into_inner()));
+        let unused: Vec<_> = keys.iter().filter_map(|key| front.ahead.remove(key)).collect();
+        (keys, unused)
+    };
+    let lowered = {
+        let mut lowered = front.lowered.lock().unwrap_or_else(|e| e.into_inner());
+        if fronts_held() { Default::default() } else { std::mem::take(&mut *lowered) }
+    };
     drop(q);
     lowered_end();
     if !keys.is_empty() {
@@ -1125,6 +1225,9 @@ pub(crate) unsafe fn reset_statics() {
     reset(&QUEUE, OnceLock::new());
     reset(&COUNTS, [const { AtomicUsize::new(0) }; TIERS]);
     reset(&RUNNING, [const { AtomicUsize::new(0) }; TIERS]);
+    reset(&JOB_CPU, [const { AtomicU64::new(0) }; TIERS]);
+    reset(&JOB_RUNS, [const { AtomicU64::new(0) }; TIERS]);
+    reset(&SLOT_CPU, relax_session::sync::Mutex::new(None));
     reset(&THREADS, OnceLock::new());
     reset(&NEXT_WORKER, AtomicUsize::new(0));
     reset(&IDLE_WORKERS, AtomicUsize::new(0));

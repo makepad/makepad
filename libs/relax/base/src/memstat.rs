@@ -8,7 +8,8 @@
 //! A block keeps the tag it was allocated with when it grows (realloc), so a table built at
 //! boot and grown later stays a boot table. The program's own heap (Relax's std calls
 //! the program allocator ABI) is not counted; rustc-built provided crates allocate through here, as
-//! `other`.
+//! `other`, except an op's blocks in its thread's domain heap (the run phase): those are the
+//! program's, carry no header and are not counted, since JIT code frees them by address.
 
 use std::alloc::{GlobalAlloc, Layout};
 // the heap underneath: the system allocator, Relax's own malloc zone after a program swaps
@@ -290,8 +291,15 @@ unsafe impl GlobalAlloc for Counting {
             }
             return p;
         }
+        #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows))]
+        {
+            let p = crate::zone_alloc::domain::run_alloc(l, false);
+            if !p.is_null() {
+                return p;
+            }
+        }
         let h = hdr(l.align());
-        let b = System.alloc(Layout::from_size_align_unchecked(l.size() + h, l.align().max(HDR)));
+        let b = outside_domains(|| System.alloc(Layout::from_size_align_unchecked(l.size() + h, l.align().max(HDR))));
         if b.is_null() {
             return b;
         }
@@ -315,8 +323,15 @@ unsafe impl GlobalAlloc for Counting {
             }
             return p;
         }
+        #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows))]
+        {
+            let p = crate::zone_alloc::domain::run_alloc(l, true);
+            if !p.is_null() {
+                return p;
+            }
+        }
         let h = hdr(l.align());
-        let b = System.alloc_zeroed(Layout::from_size_align_unchecked(l.size() + h, l.align().max(HDR)));
+        let b = outside_domains(|| System.alloc_zeroed(Layout::from_size_align_unchecked(l.size() + h, l.align().max(HDR))));
         if b.is_null() {
             return b;
         }
@@ -346,12 +361,7 @@ unsafe impl GlobalAlloc for Counting {
         if TRACK.load(Relaxed) {
             track_free(p);
         }
-        let h = hdr(l.align());
-        let b = p.sub(h);
-        sites::on_free(p, l.size());
-        add(*b.add(h - 1), -(l.size() as i64));
-        add_block(*b.add(h - 1), l.size(), -1);
-        System.dealloc(b, Layout::from_size_align_unchecked(l.size() + h, l.align().max(HDR)));
+        self.dealloc_counted(p, l);
     }
 
     #[inline(always)]
@@ -380,14 +390,36 @@ unsafe impl GlobalAlloc for Counting {
 }
 
 impl Counting {
+    /// Frees block `p` with its header (accounting on).
+    #[inline(always)]
+    unsafe fn dealloc_counted(&self, p: *mut u8, l: Layout) {
+        let h = hdr(l.align());
+        let b = p.sub(h);
+        sites::on_free(p, l.size());
+        add(*b.add(h - 1), -(l.size() as i64));
+        add_block(*b.add(h - 1), l.size(), -1);
+        System.dealloc(b, Layout::from_size_align_unchecked(l.size() + h, l.align().max(HDR)));
+    }
+
     /// `realloc` with accounting on (MAKEPAD_RUN_MEM_REPORT).
     #[inline(always)]
     unsafe fn realloc_counted(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
+        // A counted block an op grows moves into the op's domain heap, headerless, as a new one
+        // would be there.
+        #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows))]
+        {
+            let q = crate::zone_alloc::domain::run_alloc(Layout::from_size_align_unchecked(new, l.align()), false);
+            if !q.is_null() {
+                std::ptr::copy_nonoverlapping(p, q, l.size().min(new));
+                self.dealloc_counted(p, l);
+                return q;
+            }
+        }
         let h = hdr(l.align());
         let b = p.sub(h);
         let t = *b.add(h - 1);
         if l.align() <= HDR {
-            let nb = System.realloc(b, Layout::from_size_align_unchecked(l.size() + h, HDR), new + h);
+            let nb = outside_domains(|| System.realloc(b, Layout::from_size_align_unchecked(l.size() + h, HDR), new + h));
             if nb.is_null() {
                 return nb;
             }
@@ -397,7 +429,7 @@ impl Counting {
             add_block(t, new, 1);
             return nb.add(h);
         }
-        let nb = System.alloc(Layout::from_size_align_unchecked(new + h, l.align()));
+        let nb = outside_domains(|| System.alloc(Layout::from_size_align_unchecked(new + h, l.align())));
         if nb.is_null() {
             return nb;
         }
@@ -411,6 +443,17 @@ impl Counting {
         add_block(t, new, 1);
         nb.add(h)
     }
+}
+
+/// `f` with the run phase's routing into a domain heap off: a block with the header never lives
+/// in one, where a free by address would miss the header (only `run_alloc`'s headerless blocks do).
+#[inline(always)]
+fn outside_domains<R>(f: impl FnOnce() -> R) -> R {
+    if relax_session::phase::in_run() {
+        let _kept = relax_session::phase::kept();
+        return f();
+    }
+    f()
 }
 
 /// Live bytes charged to `t` (0 unless MAKEPAD_RUN_MEM_REPORT).
@@ -810,11 +853,13 @@ pub fn note_big(kind: &str, name: &str, s: PeakScope, what: impl FnOnce() -> Str
 }
 
 /// glibc malloc keeps freed memory at the top of each thread arena until the top exceeds the trim
-/// threshold, which grows by itself (to 32 MB) whenever a large mapped block is freed. With the
-/// compiler's and the apps' threads each using an arena, a domain's start/stop cycles left ~5 MB
-/// per cycle of such free-but-resident tops (and `malloc_trim` does not release an arena's top).
-/// A fixed 1 MB threshold (which also turns the dynamic adjustment off) returns them as they
-/// are freed. Call once at process start, before threads exist. Other platforms: nothing.
+/// threshold, which grows by itself (to 32 MB) whenever a large mapped block is freed. A fixed 1 MB
+/// threshold returns such tops as they are freed: for a long-lived process whose threads come and go
+/// and whose memory is what counts (a devhub hub, devhub heap.rs). Not for a JIT process: it turns
+/// the dynamic adjustment off for the mmap threshold too, which stays at 128 KB, so every block of
+/// that size or more is its own mapping, faulted in 4 KB at a time and unmapped when it is freed
+/// (a slice's Vec growth and buffers: 1.73M faults against 0.65M, 6% of its wall time). Call once at
+/// process start, before threads exist. Other platforms: nothing.
 pub fn tune_malloc() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {

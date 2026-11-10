@@ -101,13 +101,15 @@ run() { # run <label> <expected line>
 }
 # direct and generic: 1000 + core's constant; through: (1000 + core's constant) ^ 1; user: 1000 + the lib's
 line() { echo "direct=$((1000 + $1)) through=$(((1000 + $1) ^ 1)) generic=$((1000 + $1)) user=$((1000 + $2))"; }
-core() { sed -i "s|+ $1 // edited|+ $2 // edited|" "$S/core/hint.rs"; }
+# (a new file and a move: `sed -i` takes different arguments on GNU and BSD)
+swap() { sed "s|+ $1 // edited|+ $2 // edited|" "$3" > "$3.new" && mv "$3.new" "$3"; }
+core() { swap "$1" "$2" "$S/core/hint.rs"; }
 run cold      "$(line 41 41)"
 run warm      "$(line 41 41)"
 core 41 42;                                              run core      "$(line 42 41)"
 run warm2     "$(line 42 41)"
 run warm3     "$(line 42 41)"
-sed -i 's|+ 41 // edited|+ 42 // edited|' "$P/lib/src/lib.rs"; run lib       "$(line 42 42)"
+swap 41 42 "$P/lib/src/lib.rs"; run lib       "$(line 42 42)"
 run warm4     "$(line 42 42)"
 core 42 41;                                              run core_back "$(line 41 42)"
 run warm5     "$(line 41 42)"

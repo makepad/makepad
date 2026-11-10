@@ -2426,7 +2426,25 @@ pub mod uses {
     static USED: Mutex<Option<HashSet<(String, u32, u32)>>> = Mutex::new(None);
 
     pub fn record(on: bool) { ON.store(on, Ordering::Relaxed); }
-    pub fn recording() -> bool { ON.load(Ordering::Relaxed) }
+    pub fn recording() -> bool { ON.load(Ordering::Relaxed) && !PREVIEW.with(|p| p.get()) }
+
+    // This thread is expanding the file-selection outline (rs_expand), whose expansion text is its
+    // own: a position in it is no position of the parsed file's, so a definition recorded there
+    // is one the program never has (a `macro_rules!` an item macro writes, reported unused at
+    // whatever another expansion put at that offset of the parsed file). The parse expands every
+    // call again while recording (parse_work's reuse is off then) and records what the program
+    // holds.
+    thread_local! { static PREVIEW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+    /// `f` with this thread's recording off (the outline's expansion).
+    pub fn unrecorded<R>(f: impl FnOnce() -> R) -> R {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) { PREVIEW.with(|p| p.set(self.0)); }
+        }
+        let _restore = Restore(PREVIEW.with(|p| p.replace(true)));
+        f()
+    }
 
     pub(super) fn defined(d: &MacroDef) {
         if !recording() || d.builtin != 0 { return; }

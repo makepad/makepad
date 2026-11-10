@@ -417,6 +417,7 @@ impl<K: Codec + ImageKey + std::hash::Hash + Eq, V: Codec> ImageMap<K, V> {
         let size = (keys.len() * 2).next_power_of_two().max(2);
         let mut index = vec![0u32; size];
         for (i, k) in keys.iter().enumerate() {
+            if i % 4096 == 4095 && stop() { return None; }
             let mut at = key_slot(k.get(), size);
             while index[at] != 0 { at = (at + 1) & (size - 1); }
             index[at] = i as u32 + 1;

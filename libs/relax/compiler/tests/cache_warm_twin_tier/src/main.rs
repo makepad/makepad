@@ -1,6 +1,6 @@
 // main's first code is lowered before its borrow-check verdict (unverified), so its call to
 // step(&mut Vec, &Vec) -- a `&mut` to a sized value next to another pointer-holding argument -- goes to step's unverified-mode
-// twin. PRELINK_ONCE=1: one call, then exit (the run that fills the cache and its startup image).
+// twin. PRELINK_ONCE=1: one pass, then late once, then exit (the run that fills the cache and its startup image).
 // Otherwise step runs every millisecond for TWIN_SECS (default 4) and the sum is printed.
 // step's callee mix and the late fn `late` (first called after LATE_MS, so its code comes from the
 // disk cache, not the startup image) name constants: in the warm run nothing lowers on the owner, so
@@ -64,13 +64,16 @@ fn main() {
         step(&mut acc, &data);
         n += 1;
         h = h.wrapping_add(tick() & 1);
+        if once {
+            // one pass, so step stays below O3; late's first call still comes after the image is done
+            std::thread::sleep(std::time::Duration::from_millis(LATE_MS));
+            h ^= late(&mut acc);
+            break;
+        }
         if t0.elapsed().as_millis() as u64 >= LATE_MS {
             h ^= late(&mut acc);
-            if once {
-                break;
-            }
         }
-        if !once && t0.elapsed().as_secs() >= secs {
+        if t0.elapsed().as_secs() >= secs {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(1));

@@ -148,7 +148,7 @@ pub fn rustc_inline_cost(callee: &Func, _callee_id: u32) -> usize {
             penalty += rustc_inst_cost(inst, ii + 1 == block.insts.len() && matches!(block.term, Term::Invoke(..)));
         }
         match block.term {
-            Term::Branch(..) | Term::Switch(..) => penalty += RUSTC_INSTR_COST,
+            Term::Branch(..) | Term::BranchCmp(..) | Term::Switch(..) => penalty += RUSTC_INSTR_COST,
             Term::Resume => penalty += RESUME_PENALTY,
             Term::Unreachable => bonus += RUSTC_INSTR_COST,
             Term::Jump(..) | Term::Ret(..) | Term::Invoke(..) => {}
@@ -1353,6 +1353,7 @@ fn inline_site(f: &mut Func, bi: usize, ii: usize, callee: &Func, args: &[VReg],
             }
             Term::Unreachable => Term::Unreachable,
             Term::Switch(..) => unreachable!("Switch is made after optimisation"),
+            Term::BranchCmp(..) => unreachable!("BranchCmp is made after optimisation"),
             Term::Invoke(t, e) => Term::Invoke(t + boff, e + boff),
             // the callee's cleanup is done: unwinding goes on in the caller, at the
             // invoke's pad if the call was invoked

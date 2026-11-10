@@ -6523,10 +6523,17 @@ pub(crate) fn parse_owned_input(sess: &std::sync::Arc<crate::Session>, mut src: 
         let parsed = { let _timing = crate::parse_work::time(1); p.parse_file() };
         if let Err(e) = parsed {
             if token_input { return Err((p.source_span(e.pos), e.msg)); }
-            // an error inside an expansion is reported at its call site
+            // rustc pairs up a file's delimiters before anything parses: where this parser ran out
+            // of tokens says nothing about where the brace went
+            if let Some((pos, msg)) = crate::delims::delimiter_error(&src, (0..p.toks.len()).map(|i| p.toks.at(i))) {
+                return Err((SourceSpan { file: 0, lo: pos, hi: pos }, msg));
+            }
+            // an error inside an expansion is reported at its call site, and the file's own end is
+            // none, though the first expansion's text starts at that same position
             let mut pos = e.pos;
+            let at_end = pos == src_len && p.toks.at(p.pos).kind == T::Eof && p.toks.at(p.pos).lo == src_len;
             for _ in 0..4096 {
-                if pos < src_len { break; }
+                if pos < src_len || at_end { break; }
                 let next = region_of(p.exp_map.view(),pos);
                 match next { Some(at) if at != pos => pos = at, _ => break }
             }
@@ -6723,6 +6730,41 @@ mod diagnostic_tests {
         let call = source.windows(9).rposition(|s| s == b"outer!();").unwrap() as u32;
         let result = parse_owned_ctx(sess, source,None,2021,Some(crate::macros::MacroScope::new(std::sync::Arc::new(crate::macros::MacroTable::default()))),"test",None,false);
         match result { Err((pos,_)) => assert_eq!(pos,call), Ok(_) => panic!("expected a parse error") }
+    }
+
+    fn parse_error_with_macros(source: &str) -> (usize, usize, String) {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let scope = crate::macros::MacroScope::new(std::sync::Arc::new(crate::macros::MacroTable::default()));
+        match parse_owned_ctx(sess, source.as_bytes().to_vec(), None, 2021, Some(scope), "test", None, false) {
+            Err((pos, msg)) => {
+                let (l, c) = crate::source::line_col(source.as_bytes(), &crate::source::line_starts(source.as_bytes()), pos);
+                (l, c, msg)
+            }
+            Ok(_) => panic!("expected a parse error"),
+        }
+    }
+
+    /// A lost brace, an expansion earlier in the file: the file's end is at the position of the
+    /// first expansion's text, and the error went to that expansion's call.
+    #[test]
+    fn a_lost_brace_is_reported_where_it_is_not_at_the_files_first_expansion() {
+        let (l, c, msg) = parse_error_with_macros("macro_rules! m { () => { struct A; } }\nm!();\nmod tests {\n    fn lost() {\n        if a {\n    }\n}\n");
+        assert_eq!((l, c), (5, 14), "{msg}");
+        assert!(msg.starts_with("this file contains an unclosed delimiter"), "{msg}");
+    }
+
+    /// The same for a file that pairs up and ends too soon.
+    #[test]
+    fn an_error_at_the_files_end_is_reported_there_not_at_the_files_first_expansion() {
+        let (l, _, msg) = parse_error_with_macros("macro_rules! m { () => { struct A; } }\nm!();\nstruct B\n");
+        assert_eq!(l, 4, "{msg}");
+    }
+
+    /// The first expansion's own first token keeps going to its call.
+    #[test]
+    fn an_error_at_the_first_expansions_first_token_stays_at_its_call() {
+        let (l, _, msg) = parse_error_with_macros("macro_rules! m { () => { = } }\nstruct A;\nm!();\n");
+        assert_eq!(l, 3, "{msg}");
     }
 
     #[test]

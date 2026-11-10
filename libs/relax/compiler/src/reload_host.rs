@@ -201,13 +201,18 @@ struct State {
     offered: bool,
     /// A change of the JIT's own inputs came and this process cannot build it.
     cannot_build: bool,
+    /// What makepad is built from changed since the binary this process runs (a change the
+    /// watcher saw, the boot's source check), and no rebuild has shown makepad unchanged by it:
+    /// set whether or not this process can build it, kept through the build and its failure
+    /// ([`inputs_changed`]).
+    stale: bool,
     progress: BuildProgress,
     /// the low-priority cargo running now: its process and where it is marked ([`Gate`])
     low_cargo: Option<(u32, PathBuf)>,
     update_message: Option<std::sync::Arc<str>>,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { phase: Phase::Idle, since: None, why: String::new(), paths: Vec::new(), again: false, failed: String::new(), provided: None, offered: false, cannot_build: false, low_cargo: None, progress: BuildProgress { done: 0, total: 0, building: String::new(), waiting: String::new() }, update_message: None });
+static STATE: Mutex<State> = Mutex::new(State { phase: Phase::Idle, since: None, why: String::new(), paths: Vec::new(), again: false, failed: String::new(), provided: None, offered: false, cannot_build: false, stale: false, low_cargo: None, progress: BuildProgress { done: 0, total: 0, building: String::new(), waiting: String::new() }, update_message: None });
 
 /// Best effort, once on the compiler worker when the mismatch is found. Group paths by their
 /// repository (a worktree's .git may be a file); removed inputs still name a commit in git log.
@@ -244,6 +249,7 @@ pub(crate) fn offer_provided(change: crate::provided::ProvidedChange, domain: Op
         st.why = why;
         st.provided = provided;
         st.cannot_build = cannot_build;
+        st.stale = true;
         st.update_message = update_message;
         if st.phase == Phase::Building { st.again = true; }
     }
@@ -440,7 +446,23 @@ pub fn build_progress() -> BuildProgress {
 
 /// A change of the JIT's own inputs that this process cannot build (the watcher: [`offer`] said so).
 pub(super) fn note_cannot_build() {
-    STATE.lock().unwrap_or_else(|e| e.into_inner()).cannot_build = true;
+    let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    st.cannot_build = true;
+    st.stale = true;
+}
+
+/// What makepad is built from changed since the binary this process runs: a provided crate's
+/// item an edit names can be in its sources and not in this makepad (reload.rs provided_lacks).
+/// Unlike [`route`], it stays while no build runs, the rebuild failed, or this process cannot
+/// build makepad (a dock app's devhub sync, 11-10: its E0425 on a new `makepad_hal` op stood as
+/// the edit's own error).
+pub fn inputs_changed() -> bool {
+    STATE.lock().unwrap_or_else(|e| e.into_inner()).stale
+}
+
+/// Notes a change of what makepad is built from, before whatever answers it can fail.
+fn note_stale() {
+    STATE.lock().unwrap_or_else(|e| e.into_inner()).stale = true;
 }
 
 /// The last failure's message (empty without one).
@@ -458,6 +480,7 @@ fn stamps(paths: &[String]) -> Vec<super::inputs::Stamp> {
 /// the person restarts ([`relaunch`]). Err: this makepad cannot rebuild itself.
 pub(super) fn offer(why: String, paths: Vec<String>) -> Result<(), String> {
     let _k = crate::zone_alloc::kept();
+    note_stale();
     command(Priority::Background)?;
     {
         let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -484,8 +507,9 @@ pub(super) fn offer(why: String, paths: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn request(why: String, paths: Vec<String>) -> Result<(), String> {
+pub(crate) fn request(why: String, paths: Vec<String>) -> Result<(), String> {
     let _k = crate::zone_alloc::kept();
+    note_stale();
     command(Priority::Background)?;
     let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
     st.why = why;
@@ -765,6 +789,8 @@ fn build_loop() {
             if st.again { drop(st); continue; }
             st.phase = Phase::Idle;
             st.since = Some(Instant::now());
+            // this makepad is what the sources build
+            st.stale = false;
             let asked = RESTART_AFTER_BUILD.swap(false, std::sync::atomic::Ordering::SeqCst);
             drop(st);
             // makepad's own change: nothing is left to update to. The edits that wait for the

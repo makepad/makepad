@@ -32,28 +32,7 @@ fn trace() -> bool {
     *E.get_or_init(|| std::env::var("MAKEPAD_RUN_VERSION_TRACE").is_ok())
 }
 
-/// Dominance over f's blocks (pre/post numbers of the dominator tree).
-pub struct Dom {
-    pre: Vec<u32>,
-    post: Vec<u32>,
-}
-
-impl Dom {
-    pub fn new(f: &Func) -> Dom {
-        let idom = relax_backend::dom::idoms(f);
-        let (pre, post, _) = relax_backend::dom::dom_numbers(&idom);
-        Dom { pre, post }
-    }
-    /// instruction (a, i) runs before (b, j) on every path from the entry to (b, j)
-    /// (j == usize::MAX: b's terminator)
-    pub fn before(&self, a: (u32, usize), b: (u32, usize)) -> bool {
-        if a.0 == b.0 {
-            return a.1 < b.1;
-        }
-        let (x, y) = (a.0 as usize, b.0 as usize);
-        self.pre[x] <= self.pre[y] && self.post[y] <= self.post[x]
-    }
-}
+pub use relax_backend::dom::Dom;
 
 /// The one definition of `v` inside the loop when it runs before `at` on every path (so `at` reads
 /// the value of this iteration's definition), else None.

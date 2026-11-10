@@ -712,9 +712,10 @@ impl Tcx {
         FnHeader { safety: if unsafe_ { Safety::Unsafe } else { Safety::Safe }, abi, c_variadic }
     }
 
-    /// Whether the errors of code in `file` are reported (a checked crate): the validation-only
-    /// checks (generic argument counts, cast validation) skip every other crate -- std, provided
-    /// and framework code -- so `makepad run` does no extra work there.
+    /// Whether the errors of code in `file` are reported (a checked crate, or an app's own under
+    /// `makepad run`): the validation-only checks (generic argument counts, cast validation) skip
+    /// every other crate -- std, provided and framework code -- so `makepad run` does no extra
+    /// work there.
     #[inline]
     pub fn validates(&self, prog: &Program, file: u32) -> bool {
         prog.file_crate.get(file as usize).is_some_and(|&k| prog.crates[k as usize].validate)

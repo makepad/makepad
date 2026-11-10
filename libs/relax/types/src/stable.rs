@@ -32,8 +32,9 @@ fn crate_ident(prog: &Program, krate: u32, h: &mut Sip128) {
 
 /// A definition's identity: crate, def path, kind and, unless the path alone names it, its
 /// parent's identity (an impl's or trait's item, a variant), an impl's header, or else the
-/// defining file and the item's byte offset there (two same-named items -- local structs in
-/// different blocks of one fn -- differ).
+/// defining file and its place there (block_place: the fn whose body holds it and its ordinal
+/// among its namesakes there, so two same-named items -- local structs in different blocks of
+/// one fn -- differ, and a line added above it changes nothing).
 ///
 /// An item its module binds by name is named by its path: its identity must not move when a
 /// live edit shifts the text before it (or the edit arrives as another file). `TypeId` is this
@@ -60,13 +61,46 @@ pub fn def_ident(prog: &Program, d: DefId, h: &mut Sip128) {
         }
         return;
     }
-    let file = def.file as usize;
-    match prog.file_paths.get(file) {
+    match prog.file_paths.get(def.file as usize) {
         Some(p) => h.str(p),
         None => h.str(""),
     }
-    let lo = prog.files.get(file).and_then(|f| f.ast.items.get(def.item.0 as usize)).map_or(u32::MAX, |it| it.lo);
-    h.u32(lo);
+    let (owner, ord) = block_place(prog, d);
+    if let Some(o) = owner {
+        h.str("block of");
+        def_ident(prog, o, h);
+    }
+    h.u32(ord);
+}
+
+/// Where an item neither its path nor its parent names is, as rustc's DefPath disambiguates it:
+/// the fn whose body holds it (None: no fn body does -- a module's `const _`) and its ordinal
+/// among the items of its file with its name, kind and parent in that same place, in item
+/// order (one body's items are numbered in its text's order). No offset: a line added above it,
+/// in its fn or anywhere before, leaves its identity as it was.
+pub fn block_place(prog: &Program, d: DefId) -> (Option<DefId>, u32) {
+    let def = prog.def(d);
+    let owner = block_owner_of(prog, def.scope);
+    let mut ord = 0;
+    for i in 0..def.item.0 {
+        let Some(&o) = prog.item_defs.get(&(def.file, i)) else { continue };
+        let od = prog.def(o);
+        if o != d && od.kind == def.kind && od.name == def.name && od.parent == def.parent && ident_has_place(prog, o) && block_owner_of(prog, od.scope) == owner {
+            ord += 1;
+        }
+    }
+    (owner, ord)
+}
+
+/// The fn whose body block scope `m` is in, through the blocks around it.
+fn block_owner_of(prog: &Program, mut m: u32) -> Option<DefId> {
+    for _ in 0..256 {
+        if let Some(&o) = prog.block_owner.get(&m) {
+            return Some(o);
+        }
+        m = prog.mods.get(m as usize)?.lexical_parent?;
+    }
+    None
 }
 
 /// Whether `d`'s path names it alone: a module item (not one in a fn body's block scope) that
@@ -119,10 +153,10 @@ fn parent_names(prog: &Program, d: DefId) -> Option<ParentNamed> {
     }
 }
 
-/// Whether `d`'s identity (def_ident) carries its file offset: an item neither its path nor
-/// its parent names (block-scoped items, `const _`). The code cache keys definitions the same
+/// Whether `d`'s identity (def_ident) carries its place (block_place): an item neither its path
+/// nor its parent names (block-scoped items, `const _`). The code cache keys definitions the same
 /// way, so a key and the TypeId folded into its code never disagree.
-pub fn ident_has_offset(prog: &Program, d: DefId) -> bool {
+pub fn ident_has_place(prog: &Program, d: DefId) -> bool {
     d != NO_DEF && !path_names(prog, d) && parent_names(prog, d).is_none()
 }
 

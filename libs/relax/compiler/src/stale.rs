@@ -378,10 +378,12 @@ fn handle_held(h: Held) {
         crate::os::fault::die_by(11);
     }
     crate::domain::held_for_good(h.os_id);
-    // one line for `why-hung` and the restart's offer: the thread, the code, the patch
+    // one line for `why-hung` and the restart's offer: the thread, the code, the patch. The offer
+    // comes first: whoever reads the held thread finds its restart offered (a test read the line
+    // and then no offer, the watcher between the two on a loaded box, 11-09).
     let line = format!("thread `{}` (tid {}) is held for good: it had a frame in {} ({}) -- restart the app", thread, h.os_id, h.what, h.reason);
-    crate::zone_alloc::kept_with(|| HELD_NOW.lock().unwrap_or_else(|e| e.into_inner()).push(line.clone()));
     crate::reload::offer_restart(&line);
+    crate::zone_alloc::kept_with(|| HELD_NOW.lock().unwrap_or_else(|e| e.into_inner()).push(line));
 }
 
 /// The threads held for good at a layout patch (`park_held`), one line each (`why-hung`).

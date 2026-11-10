@@ -4167,6 +4167,8 @@ impl<'a> Fx<'a> {
         match &t {
             Term::Jump(x) => self.do_branch(b, *x)?,
             Term::Branch(c, x, y) => self.branch(b, *c, *x, *y)?,
+            // (made by the native back ends' compares_into_readers only)
+            Term::BranchCmp(..) => return Err(format!("{}: b{}: a compare-and-branch reaches the wasm back end", self.f.name, b)),
             Term::Ret(vs) => {
                 for (k, v) in vs.iter().enumerate() {
                     let narrow = self.sigs[self.me].ret.get(k).is_some_and(|x| *x != 0);

@@ -255,7 +255,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("vms", "", "every live Splash VM: label, thread, heap objects / strings / arrays and bytes, GC runs and time, errors, evaluations"),
     ("live", "[after=<next>]", "an instant look for live graphs (no window, no sleep), one JSON line: now_ms, frames presented, live patches installed and the ones the newest presented window frame was built with (frame_patch), finished builds so far per kind (lazy, ahead, o2, o3, linked; diff two looks for a rate), queues [ahead,o2,o3], UI ms waited on the JIT; with after=<the last answer's next>: the UI frames since then (the last minute at most) as ft [[ms before now_ms the frame ended, ms it worked], ...]"),
     ("cpu", "", "the shared CPU budget: running and queued app/JIT jobs per class, waits and checkpoint warnings, who holds and waits for the tokens"),
-    ("jit", "[ms=250]","live compile activity in one line (what the JIT ring shows): busy or idle, the jobs running now, the queues per tier (ahead, O2, O3), builds finished and their rate over ms, the UI thread's JIT duty"),
+    ("jit", "[ms=250] | spent [n=20]","live compile activity in one line (what the JIT ring shows): busy or idle, the jobs running now, the queues per tier (ahead, O2, O3), builds finished and their rate over ms, the UI thread's JIT duty; spent: the CPU the compile jobs took so far by tier, and the slots whose O2 and O3 jobs took the most"),
     ("jit queue", "[n=10]","running JIT jobs, then the unified queue in admission order: class, heat, UI path, wait, function"),
     ("threads", "", "every thread: name, role, state, CPU time, what it waits on; JIT threads: alive/restarting/dead, panics, heartbeat"),
     ("stacks", "[thread=<name|tid|main|owner|all>] [depth=12]", "symbolised stacks (identical stacks folded)"),
@@ -1353,6 +1353,13 @@ fn cmd_jit(req: &Req, out: &mut Out) {
     if req.pos.first().map(String::as_str) == Some("queue") {
         out.measured("JIT compile queues", "jit::queue_view: unified queue admission order, heat from tier records", &[]);
         for l in crate::jit::queue_view(req.num("n", 10) as usize) {
+            out.line(&l);
+        }
+        return;
+    }
+    if req.pos.first().map(String::as_str) == Some("spent") {
+        out.measured("JIT compile jobs: CPU by tier, then by slot", "jit_queue: the thread's CPU around each job (a job's publishes run on the owner)", &[]);
+        for l in crate::jit::queue_spent(req.num("n", 20) as usize) {
             out.line(&l);
         }
         return;

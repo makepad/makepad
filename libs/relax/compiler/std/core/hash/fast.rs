@@ -3,10 +3,14 @@
 //! (bucket index) and high bits (control byte) for open addressing.
 //!
 //! RandomState's keys are real std's (random.rs: per-thread OS randomness, k0 + 1 per new), so
-//! HashMap iteration order differs between processes and maps, as in real std; DefaultHasher::new
-//! has fixed keys, as real std's (0, 0). The difference from real std: the hash function is not
-//! SipHash-1-3 (the keys are not a cryptographic secret here).
+//! HashMap iteration order differs between processes and maps, as in real std. The difference
+//! from real std: a RandomState's hash function is not SipHash-1-3 (the keys are not a
+//! cryptographic secret here; no program can rely on the values of a randomly keyed hash).
+//! DefaultHasher::new / default (fixed keys (0, 0)) hash as real std's, SipHash-1-3 over real
+//! core's byte stream (sip.rs): their values are the same every run natively, so a program sees the
+//! same ones here (a hash written to disk, compared with a native build's).
 
+use super::sip::SipHasher13;
 use super::{BuildHasher, Hasher};
 
 const MULT: u64 = 0x5851_f42d_4c95_7f2d;
@@ -156,19 +160,28 @@ impl Default for RandomState {
 impl BuildHasher for RandomState {
     type Hasher = DefaultHasher;
     fn build_hasher(&self) -> DefaultHasher {
-        DefaultHasher { inner: FastHasher::with_keys(self.k0, self.k1) }
+        DefaultHasher { inner: Inner::Fast(FastHasher::with_keys(self.k0, self.k1)) }
     }
 }
 
-/// `std::hash::DefaultHasher` (also at std::collections::hash_map::DefaultHasher).
+/// `std::hash::DefaultHasher` (also at std::collections::hash_map::DefaultHasher): one type, as
+/// real std's (`RandomState::Hasher`), its hash chosen where it is made.
 #[derive(Clone, Debug)]
 pub struct DefaultHasher {
-    inner: FastHasher,
+    inner: Inner,
+}
+
+#[derive(Clone, Debug)]
+enum Inner {
+    /// a RandomState's
+    Fast(FastHasher),
+    /// DefaultHasher::new's: real std's values
+    Sip(SipHasher13),
 }
 
 impl DefaultHasher {
     pub const fn new() -> DefaultHasher {
-        DefaultHasher { inner: FastHasher::with_seed(DEFAULT_SEED) }
+        DefaultHasher { inner: Inner::Sip(SipHasher13::new_with_keys(0, 0)) }
     }
 }
 
@@ -180,31 +193,58 @@ impl Default for DefaultHasher {
 
 impl Hasher for DefaultHasher {
     fn finish(&self) -> u64 {
-        self.inner.finish()
+        match &self.inner {
+            Inner::Fast(h) => h.finish(),
+            Inner::Sip(h) => h.finish(),
+        }
     }
     fn write(&mut self, bytes: &[u8]) {
-        self.inner.write(bytes)
+        match &mut self.inner {
+            Inner::Fast(h) => h.write(bytes),
+            Inner::Sip(h) => h.write(bytes),
+        }
     }
     fn write_u8(&mut self, i: u8) {
-        self.inner.write_u64(i as u64)
+        match &mut self.inner {
+            Inner::Fast(h) => h.write_u64(i as u64),
+            Inner::Sip(h) => h.write_u8(i),
+        }
     }
     fn write_u16(&mut self, i: u16) {
-        self.inner.write_u64(i as u64)
+        match &mut self.inner {
+            Inner::Fast(h) => h.write_u64(i as u64),
+            Inner::Sip(h) => h.write_u16(i),
+        }
     }
     fn write_u32(&mut self, i: u32) {
-        self.inner.write_u64(i as u64)
+        match &mut self.inner {
+            Inner::Fast(h) => h.write_u64(i as u64),
+            Inner::Sip(h) => h.write_u32(i),
+        }
     }
     fn write_u64(&mut self, i: u64) {
-        self.inner.write_u64(i)
+        match &mut self.inner {
+            Inner::Fast(h) => h.write_u64(i),
+            Inner::Sip(h) => h.write_u64(i),
+        }
     }
     fn write_u128(&mut self, i: u128) {
-        self.inner.write_u128(i)
+        match &mut self.inner {
+            Inner::Fast(h) => h.write_u128(i),
+            Inner::Sip(h) => h.write_u128(i),
+        }
     }
     fn write_usize(&mut self, i: usize) {
-        self.inner.write_u64(i as u64)
+        match &mut self.inner {
+            Inner::Fast(h) => h.write_u64(i as u64),
+            Inner::Sip(h) => h.write_usize(i),
+        }
     }
     #[cfg(not(relax_check))]
     fn write_str(&mut self, s: &str) {
-        self.inner.write_str(s)
+        match &mut self.inner {
+            Inner::Fast(h) => h.write_str(s),
+            Inner::Sip(h) => h.write_str(s),
+        }
     }
 }

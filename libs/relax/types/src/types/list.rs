@@ -242,23 +242,28 @@ impl Lists {
         (from..self.end()).map(|p| self.word_at(p)).collect()
     }
 
-    /// tail_words as the bytes of the words (an image section's tail, taken once)
-    pub(super) fn tail_word_bytes(&self, from: usize, end: usize) -> Vec<u8> {
+    /// tail_words as the bytes of the words (an image section's tail, taken once), asking
+    /// `stop` every 64Ki words (None: it said yes)
+    pub(super) fn tail_word_bytes(&self, from: usize, end: usize, stop: &dyn Fn() -> bool) -> Option<Vec<u8>> {
         let mut b = Vec::with_capacity(end.saturating_sub(from) * 4);
-        for p in from..end { b.extend_from_slice(&self.word_at(p).to_ne_bytes()); }
-        b
+        for p in from..end {
+            if (p - from) % (1 << 16) == (1 << 16) - 1 && stop() { return None; }
+            b.extend_from_slice(&self.word_at(p).to_ne_bytes());
+        }
+        Some(b)
     }
 
     /// The image's view of the table: the end position and the slots of the lists below it.
     /// Read under the lock, so every list below the end is in the table read; a list claimed
     /// since lies past the end and reads as empty, which cuts no other list's probe run (slots
     /// are claimed in position order). A table replaced meanwhile stays allocated.
-    pub(super) fn image_slots(&self) -> (usize, Vec<u64>) {
+    /// `stop`: as Table::snapshot.
+    pub(super) fn image_slots(&self, stop: &dyn Fn() -> bool) -> Option<(usize, Vec<u64>)> {
         let (end, t) = {
             let _g = self.index.lock();
             (self.end(), self.index.table())
         };
-        (end, t.snapshot(|s| ((s as u32) >> LEN_BITS) as usize >= 1 && (((s as u32) >> LEN_BITS) as usize) < end))
+        Some((end, t.snapshot(|s| ((s as u32) >> LEN_BITS) as usize >= 1 && (((s as u32) >> LEN_BITS) as usize) < end, stop)?))
     }
 
     /// A collected image's words and intern table; new lists follow the mapped words.

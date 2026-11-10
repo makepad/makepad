@@ -93,7 +93,7 @@ impl Cache {
             let mut cr: Vec<u32> = crates.clone();
             let body = match u.fns[*id as usize].key { crate::jit::FnKey::Plain(b) => b, _ => *id };
             let clean = twinlink && u.verdict_clean(body);
-            let retarget = |t: &[u8]| -> bool { clean && t.first() == Some(&4) && in_image.contains(&t[1..]) };
+            let retarget = |t: &[u8]| -> bool { clean && t.first().copied().and_then(KeyKind::of) == Some(KeyKind::Twin) && in_image.contains(&t[1..]) };
             if image_slot(&mut tab, &mut slots, &mut blob, *k, sum, bytes, payload, &mut cr, &self.crate_by_ident, &retarget).is_some() {
                 n += 1;
             }
@@ -941,6 +941,14 @@ fn skip_ty(d: &mut D, depth: u32, v: &mut dyn FnMut(Atom)) -> Option<()> {
         }
         20 => skip_const(d, depth + 1, v)?,
         27 => skip_def(d, v)?,
+        28 => {
+            skip_ty(d, depth + 1, v)?;
+            d.u32()?;
+            d.u64()?;
+            skip_ty(d, depth + 1, v)?;
+            skip_ty(d, depth + 1, v)?;
+            skip_ty(d, depth + 1, v)?;
+        }
         _ => return None,
     }
     Some(())
@@ -950,22 +958,28 @@ pub(crate) fn skip_fnkey(d: &mut D, depth: u32, v: &mut dyn FnMut(Atom)) -> Opti
     if depth > 32 {
         return None;
     }
-    match d.u8()? {
-        0 => {
+    match KeyKind::of(d.u8()?)? {
+        KeyKind::Inst => {
             skip_def(d, v)?;
             skip_tys(d, 0, v)
         }
-        1 => {
+        KeyKind::ClosureInFile => {
             skip_file(d, v)?;
             d.u32()?;
             d.u64()?;
             skip_fnkey(d, depth + 1, v)
         }
-        2 => {
+        // a closure by its owner's ordinal and its text (cache.rs closure_ordinal)
+        KeyKind::Closure => {
+            d.u32()?;
+            d.u64()?;
+            skip_fnkey(d, depth + 1, v)
+        }
+        KeyKind::Glue => {
             d.u8()?;
             skip_ty(d, 0, v)
         }
-        3 => {
+        KeyKind::Shim => {
             let tag = d.u8()?;
             skip_def(d, v)?;
             match tag {
@@ -983,8 +997,7 @@ pub(crate) fn skip_fnkey(d: &mut D, depth: u32, v: &mut dyn FnMut(Atom)) -> Opti
             skip_tys(d, 0, v)
         }
         // an unverified-mode twin: its base's key
-        4 => skip_fnkey(d, depth + 1, v),
-        _ => None,
+        KeyKind::Twin => skip_fnkey(d, depth + 1, v),
     }
 }
 
@@ -1009,12 +1022,19 @@ pub(crate) struct PrelinkedSlot {
     pub o2: bool,
     /// baseline code (cache.rs TIER_BASE): built again at O2 after the first present
     pub base: bool,
-    /// the kind of its key (its encoding's first byte: 0 an instance, 1 a closure, 2 glue), for
-    /// what the install decides by it before the identity is decoded
-    pub kind: u8,
+    /// the kind of its key (its encoding's first byte), for what the install decides by it before
+    /// the identity is decoded
+    pub kind: Option<KeyKind>,
     /// the tier decision an earlier run stored for its code below O3 (Cache::tier_verdict_key; O3
     /// code: None, unused)
     pub verdict: TierVerdict,
+}
+
+impl PrelinkedSlot {
+    /// Its calls and loops are counted for O3 (jit arm_counters), as its key's kind says.
+    pub fn counted(&self) -> bool {
+        self.kind.is_some_and(KeyKind::counted)
+    }
 }
 
 /// One slot record of a loaded image (ranges into the flat arrays of `Img`).
@@ -1775,7 +1795,7 @@ impl Linker {
             let pc = crate::jit::PcMap::mapped(&im.bytes[pcs.0..pcs.1], files);
             let inlined: Vec<u32> = im.flat[inl.0..inl.1].iter().filter_map(|&k| im.slot_of(k)).collect();
             if !u.aux { crate::harness::reach::note(id, inlined.iter().copied()); }
-            let kind = im.keys[key as usize].first().copied().unwrap_or(u8::MAX);
+            let kind = im.keys[key as usize].first().copied().and_then(KeyKind::of);
             for &a in makes.get(k).map_or(&[][..], |v| v.as_slice()) {
                 u.note_vtable_maker(a, id);
             }

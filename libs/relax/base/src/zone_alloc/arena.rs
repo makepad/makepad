@@ -2,7 +2,7 @@ use std::alloc::Layout;
 use std::cell::{Cell, UnsafeCell};
 use std::marker::PhantomData;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 /// A chunk holds one thread's blocks of one size class. The web target's linear memory takes
 /// 512 KB chunks: every thread keeps a current chunk per class, and at 2 MB the program's few
@@ -55,6 +55,8 @@ const SMALL_CLASS: [u8; SMALL_MAX / 16 + 1] = {
     t
 };
 
+// The reservation of one region of an arena: a domain heap whose region is full reserves another
+// (`grow`), so a heap's address space runs out only with the process's.
 #[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
 const PLATFORM_MAX_ORDER: usize = 15; // 64 GB of virtual address space, not resident memory
 // Android arm64 kernels give a process 39 bits of address space (512 GB) and ART reserves its
@@ -63,7 +65,7 @@ const PLATFORM_MAX_ORDER: usize = 15; // 64 GB of virtual address space, not res
 #[cfg(all(target_pointer_width = "64", target_os = "android"))]
 const PLATFORM_MAX_ORDER: usize = 12;
 #[cfg(not(target_pointer_width = "64"))]
-const PLATFORM_MAX_ORDER: usize = 7; // 256 MB on 32-bit; exhaustion falls back to the heap
+const PLATFORM_MAX_ORDER: usize = 7; // 256 MB on 32-bit
 // The web target's linear memory (zone_alloc/web.rs): 2 GB (4096 chunks of 512 KB) at a fixed
 // address inside one 4 GB window, so a pointer's low 32 bits are its wasm address.
 const MAX_ORDER: usize = if WEB_AT != 0 { 12 } else { PLATFORM_MAX_ORDER };
@@ -104,7 +106,7 @@ const WARM_MAX: usize = 256;
 const WARM_TOUCHED_MAX: usize = 256 << 10;
 const WARM_BYTES_MAX: usize = 32 << 20;
 /// Warm large runs (program heaps only): a freed large block's run (one exclusive allocation,
-/// above the small classes) stays committed for the next large block of the same order, instead
+/// above the small classes) stays committed for the next large block of as many chunks, instead
 /// of being decommitted and faulted in again. A program that builds a large Vec each frame (Sandbox:
 /// `collect_lm_movers`, 230 KB a frame by `push`) otherwise paid a commit, a decommit and a page
 /// fault per 4 KB on every growth step, every frame (~350 faults a frame; the system heap keeps
@@ -123,7 +125,7 @@ struct Warm {
     len: usize,
     bytes: usize,
 }
-/// The warm large runs: (chunk index, committed bytes, order). The order is kept here so a take
+/// The warm large runs: (chunk index, committed bytes, chunks). The size is kept here so a take
 /// never locks a chunk while holding this list (a release holds its chunk, then takes the list).
 struct WarmLarge {
     runs: [(usize, usize, usize); WARM_LARGE_MAX],
@@ -530,18 +532,25 @@ struct State {
     attached: bool,
     committed: usize,
     run: usize,
-    order: usize,
+    /// The chunks of the run starting at `run` (1: a small chunk)
+    units: usize,
     bytes: usize, // requested bytes live in this chunk (burst arena stats only)
     /// A large block handed out from the warm large list: its pages hold old bytes, so
     /// `alloc_zeroed` writes the zeros the pool's decommitted runs would have given.
     dirty: bool,
-    /// The live blocks this chunk had when, detached, it last gave its whole free granules back
-    /// (`trim_detached`; usize::MAX: not since it was last handed back).
+    /// Detached: the live blocks this chunk had when it last gave its whole free granules back
+    /// (`trim_detached`; usize::MAX: not since it was last handed back). Attached to a waiting
+    /// owner: the monitor's `idle_mark` of the chunk at its last pass (`settle_for_waiting_owner`).
     trim_live: usize,
+    /// Bytes of the carved part given back to the OS (`drop_free_granules`): their slots left the
+    /// free list until the chunk is released.
+    dropped: usize,
 }
 
 // A buddy free-chunk list supports both single chunks and contiguous large mappings.
 // Links and order markers stay outside mappings; splitting/merging never touches pages.
+// A run of any whole number of chunks is cut from the buddy block it rounds up to, and the rest
+// goes back at once: rounded up to a power of two, a 33-chunk Vec held 64 chunks of address.
 struct Pool {
     heads: [usize; MAX_ORDER + 1],
     next: [usize; N],
@@ -579,6 +588,30 @@ impl Pool {
             self.push(i + (1 << o), o);
         }
         Some(i)
+    }
+    /// A run of `units` chunks: the buddy block it rounds up to, less its tail, which goes back
+    /// as the aligned blocks it splits into (a run starts on a multiple of that block's size, so
+    /// every piece of it is a buddy block too).
+    fn take_units(&mut self, units: usize) -> Option<usize> {
+        let order = units.next_power_of_two().trailing_zeros() as usize;
+        let i = self.take(order)?;
+        let mut o = units;
+        while o < 1 << order {
+            let b = o.trailing_zeros() as usize;
+            self.release(i + o, b);
+            o += 1 << b;
+        }
+        Some(i)
+    }
+    /// Gives back the run `take_units` gave, as its buddy blocks (largest first).
+    fn release_units(&mut self, run: usize, units: usize) {
+        let mut o = 0;
+        for b in (0..=MAX_ORDER).rev() {
+            if units & 1 << b != 0 {
+                self.release(run + o, b);
+                o += 1 << b;
+            }
+        }
     }
     fn release(&mut self, mut i: usize, mut order: usize) {
         while order < MAX_ORDER {
@@ -863,6 +896,17 @@ mod os {
 /// Ids of domain arenas: never reused, so a thread's stale `DOMAIN_ARENA` cannot match a new arena
 /// allocated at the address of a dropped one.
 static NEXT_ARENA_ID: AtomicUsize = AtomicUsize::new(1);
+/// The mapping of a region's tables (`add_region`).
+const REGION_TABLES: usize = (std::mem::size_of::<Arena>() + PAGE - 1) & !(PAGE - 1);
+/// Every domain heap region's addresses lie in [HEAPS_LOW, HEAPS_HIGH): conservative bounds that
+/// only widen, so a native free of any other block skips the heap lookup (domain.rs).
+pub static HEAPS_LOW: AtomicUsize = AtomicUsize::new(usize::MAX);
+pub static HEAPS_HIGH: AtomicUsize = AtomicUsize::new(0);
+/// Unmaps a region `add_region` made (its range and tables).
+unsafe fn drop_region(r: *mut Arena) {
+    std::ptr::drop_in_place(r);
+    os::unreserve(r as usize, REGION_TABLES);
+}
 
 
 pub struct Arena {
@@ -886,6 +930,15 @@ pub struct Arena {
     /// (`owned_tick`): no other thread may touch its free list, and the thread itself frees into
     /// it, so the free pages of a thread's current chunks are released by the thread.
     trim_epoch: AtomicUsize,
+    /// Domain heaps: the heap's first region (null: this is it), which is the heap as
+    /// `current_domain` names it, and the region after this one (null: none). A heap whose regions
+    /// are full reserves another (`grow`); each lives until the first region is dropped.
+    first: AtomicPtr<Arena>,
+    next: AtomicPtr<Arena>,
+    /// A region reserved for one block larger than RESERVE: its size (0: a RESERVE region).
+    single: AtomicUsize,
+    /// Held while a region is added to the chain (first region only).
+    growing: Mutex<()>,
 }
 // all zero: in the binary's zero-fill section, not 7 MB of initialised data in it (iOS); `init`
 // sets what is not zero at the first use (`init_zeroed`), as `create` does for a domain arena.
@@ -933,6 +986,156 @@ impl Arena {
             } else {
                 None
             }
+        }
+    }
+    /// The first region of this one's heap: the heap as `current_domain` names it.
+    #[inline]
+    fn first(&self) -> &Arena {
+        match unsafe { self.first.load(Ordering::Relaxed).as_ref() } {
+            Some(f) => f,
+            None => self,
+        }
+    }
+    /// The regions of this one's heap, first to last (a domain heap; any other arena is one region).
+    pub fn regions(&self) -> impl Iterator<Item = &Arena> {
+        std::iter::successors(Some(self.first()), |r| unsafe { r.next.load(Ordering::Acquire).as_ref() })
+    }
+    /// The bytes this region reserved.
+    fn reach(&self) -> usize {
+        match self.single.load(Ordering::Relaxed) {
+            0 => RESERVE,
+            n => n,
+        }
+    }
+    fn holds(&self, p: *mut u8) -> bool {
+        let base = self.base.load(Ordering::Relaxed);
+        base != 0 && (p as usize).wrapping_sub(base) < self.reach()
+    }
+    /// The region of this one's heap that holds `p`, this one first.
+    #[inline]
+    pub fn region_of(&self, p: *mut u8) -> Option<&Arena> {
+        if self.owns(p) {
+            return Some(self);
+        }
+        self.other_region_of(p)
+    }
+    #[cold]
+    #[inline(never)]
+    fn other_region_of(&self, p: *mut u8) -> Option<&Arena> {
+        self.regions().find(|r| r.holds(p))
+    }
+    /// A new region at the end of this heap's chain (`single`: reserved for one block of that many
+    /// bytes; 0: a RESERVE region). Its tables are mapped, not allocated: in the run phase a domain
+    /// thread's native allocations come from its own heap (memstat `run_alloc`), the full one.
+    unsafe fn add_region(&self, single: usize) -> Option<&Arena> {
+        let first = self.first();
+        let at = os::reserve(REGION_TABLES, PAGE, c"makepad-run-domain tables");
+        if at == 0 {
+            return None;
+        }
+        if !os::commit(at as *mut u8, REGION_TABLES) {
+            os::unreserve(at, REGION_TABLES);
+            return None;
+        }
+        // fresh pages read as zero: every field's valid all-zero state, as `create` has it
+        let r = &mut *(at as *mut Arena);
+        r.dynamic = true;
+        r.id = NEXT_ARENA_ID.fetch_add(1, Ordering::Relaxed);
+        r.init_zeroed();
+        r.first.store(first as *const Arena as *mut Arena, Ordering::Relaxed);
+        r.single.store(single, Ordering::Relaxed);
+        if single != 0 {
+            // the one block takes chunk 0 (`take_run`): nothing for the pool
+            let pool = &mut *r.pool.value.get();
+            pool.heads[MAX_ORDER] = NONE;
+            pool.order[0] = u8::MAX;
+        } else if heap_check_on() {
+            r.live_bits.store(os_bits_map(), Ordering::Relaxed);
+        }
+        if !r.init() {
+            drop_region(r);
+            return None;
+        }
+        let mut last = first;
+        while let Some(n) = last.next.load(Ordering::Acquire).as_ref() {
+            last = n;
+        }
+        last.next.store(r as *mut Arena, Ordering::Release);
+        Some(r)
+    }
+    /// A domain heap's block this region has no room for (`alloc_slow` step 2 or 3): another region
+    /// of the heap serves it, first to last (the earliest have had the longest to free space), or
+    /// a new one; a block larger than a region gets a region of its own. A thread inside this
+    /// region moves into the region that serves it: its current chunks go back here, and its next
+    /// blocks come from there. One thread at a time adds a region, so a burst of threads that
+    /// find the heap full adds one.
+    #[cold]
+    #[inline(never)]
+    unsafe fn grow(&self, l: Layout, small: bool, class: usize, requested: usize, span: usize, step: u32) -> *mut u8 {
+        let single = if span > RESERVE { (span + CHUNK - 1) & !(CHUNK - 1) } else { 0 };
+        // (a block of a region of its own starts at the region: chunk 0 holds its state)
+        if !self.dynamic || WEB_AT != 0 || single != 0 && l.align() > CHUNK {
+            self.alloc_failed(step, l);
+            return null_mut();
+        }
+        let first = self.first();
+        let enter = self.cache_fast() && single == 0;
+        let _adding = lock(&first.growing);
+        for r in first.regions() {
+            let fits = if single != 0 { r.single.load(Ordering::Relaxed) >= single } else { r.single.load(Ordering::Relaxed) == 0 };
+            if !std::ptr::eq(r, self) && fits {
+                let p = r.alloc_moved(l, small, class, requested, enter);
+                if !p.is_null() {
+                    return p;
+                }
+            }
+        }
+        let p = match first.add_region(single) {
+            Some(r) => r.alloc_moved(l, small, class, requested, enter),
+            None => null_mut(),
+        };
+        if p.is_null() {
+            self.alloc_failed(step, l);
+        }
+        p
+    }
+    /// `grow`'s allocation in this region; `enter`: the calling thread moves into it first.
+    unsafe fn alloc_moved(&self, l: Layout, small: bool, class: usize, requested: usize, enter: bool) -> *mut u8 {
+        if enter {
+            let t = domain_tls();
+            if let Some(cur) = t.arena.get().as_ref() {
+                cur.detach_thread();
+            }
+            self.enter_thread();
+        }
+        self.alloc_slow(l, small, class, requested, false)
+    }
+    /// A run of `units` chunks of this region: from the pool, or a region for one block its chunk
+    /// 0 while that is free (a claim under its lock; `unclaim` and the free put it back).
+    fn take_run(&self, units: usize) -> Option<usize> {
+        if self.single.load(Ordering::Relaxed) == 0 {
+            return lock(&self.pool).take_units(units);
+        }
+        let mut s = lock(&self.headers[0].state);
+        if units * CHUNK > self.reach() || !s.released || s.committed != 0 {
+            return None;
+        }
+        s.released = false;
+        Some(0)
+    }
+    /// A run `take_run` gave that was never used.
+    fn unclaim(&self, run: usize, units: usize) {
+        if self.single.load(Ordering::Relaxed) == 0 {
+            lock(&self.pool).release_units(run, units);
+        } else {
+            lock(&self.headers[0].state).released = true;
+        }
+    }
+    /// A run whose chunk state is released and decommitted (its lock held) goes back: to the pool,
+    /// or (a region for one block) it is free once its state says so.
+    fn give_back(&self, run: usize, units: usize) {
+        if self.single.load(Ordering::Relaxed) == 0 {
+            lock(&self.pool).release_units(run, units);
         }
     }
     /// `with` on the thread's chunk cache. `try_with` of a const TLS without a destructor never
@@ -1132,9 +1335,9 @@ impl Arena {
             return;
         }
         o.trim_seen = epoch;
-        let _s = lock(&h.state);
+        let mut s = lock(&h.state);
         let chunk = self.base.load(Ordering::Relaxed) + index * CHUNK;
-        if let Some(head) = self.drop_free_granules(index, chunk, o.stride, bump, o.free) {
+        if let Some(head) = self.drop_free_granules(index, &mut s, chunk, o.stride, bump, o.free) {
             o.free = head;
         }
     }
@@ -1150,7 +1353,8 @@ impl Arena {
         }
         s.trim_live = live;
         let chunk = self.base.load(Ordering::Relaxed) + index * CHUNK;
-        if let Some(head) = self.drop_free_granules(index, chunk, s.stride, s.bump, s.free) {
+        let (stride, bump, free) = (s.stride, s.bump, s.free);
+        if let Some(head) = self.drop_free_granules(index, s, chunk, stride, bump, free) {
             s.free = head;
         }
     }
@@ -1158,26 +1362,41 @@ impl Arena {
     /// owner is blocked in a wait, as the owner's own pass would: the blocks other threads freed
     /// into it are its free list's again, and, sparse, it gives its whole free pages back. A pool
     /// worker that did a job and now waits for the next kept what the others freed of its blocks
-    /// (Scope: 25-55 MB on the remote lists of waiting workers). The owner's `quiet` word makes it
-    /// safe: taken from QUIET_WAITING, the owner, waking, waits for it to be handed back.
-    unsafe fn settle_for_waiting_owner(&self, index: usize, h: &Chunk, epoch: usize) {
+    /// (25-55 MB on the remote lists of waiting workers in one measured app). A chunk that sat through a whole
+    /// epoch unchanged gives its whole free pages back at any fill, once: the waiting pool workers
+    /// of one measured app session held 155 MB of whole free pages in current chunks at least a quarter
+    /// live, which the sparse rule never trims. A busy owner changes its chunks between passes and
+    /// is never walked for it. A trim the program asks for (`trim`, `force`) walks it at once, at
+    /// any fill, unless it was walked at this very state. The owner's `quiet` word makes it safe:
+    /// taken from QUIET_WAITING, the owner, waking, waits for it to be handed back.
+    unsafe fn settle_for_waiting_owner(&self, index: usize, h: &Chunk, s: &mut State, epoch: usize, force: bool) {
         let q = h.owner_quiet.load(Ordering::Relaxed);
-        if !COMPILER || q == 0 || h.remote.load(Ordering::Relaxed) == 0 {
+        if !COMPILER || q == 0 {
             return;
         }
         let q = &*(q as *const AtomicU8);
         if q.compare_exchange(QUIET_WAITING, QUIET_SETTLING, Ordering::Acquire, Ordering::Relaxed).is_err() {
             return;
         }
-        self.drain(h, h.remote.swap(0, Ordering::Acquire));
+        if h.remote.load(Ordering::Relaxed) != 0 {
+            self.drain(h, h.remote.swap(0, Ordering::Acquire));
+        }
         let o = &mut *h.owned.get();
         let (live, bump) = (o.live.load(Ordering::Relaxed), o.bump.load(Ordering::Relaxed));
-        if bump >= OWNED_TRIM_MIN && live * o.stride * 4 < bump && o.trim_seen != epoch {
+        let mark = idle_mark(o.free, live, bump);
+        let sparse = live * o.stride * 4 < bump && o.trim_seen != epoch;
+        let idle = s.trim_live == mark;
+        let walked = s.trim_live == mark | 1;
+        if bump >= OWNED_TRIM_MIN && (sparse || idle || force && !walked) {
             o.trim_seen = epoch;
             let chunk = self.base.load(Ordering::Relaxed) + index * CHUNK;
-            if let Some(head) = self.drop_free_granules(index, chunk, o.stride, bump, o.free) {
+            if let Some(head) = self.drop_free_granules(index, s, chunk, o.stride, bump, o.free) {
                 o.free = head;
             }
+            // walked at this state: the next pass walks it only after it changed and sat again
+            s.trim_live = idle_mark(o.free, live, bump) | 1;
+        } else if s.trim_live & !1 != mark {
+            s.trim_live = mark;
         }
         q.store(QUIET_WAITING, Ordering::Release);
     }
@@ -1209,6 +1428,42 @@ impl Arena {
             }
         }
     }
+    /// A trim the program asked for (`trim`), on its own thread `t` inside this program heap: its
+    /// current chunks give their whole free pages back at any fill, as a waiting owner's do,
+    /// after taking what other threads freed into them; an emptied one goes back. Fab asks from
+    /// a pool worker at its quiet points, and its own chunks were the ones the trim skipped.
+    unsafe fn owner_trim(&self, t: &DomainTls) {
+        let epoch = self.trim_epoch.load(Ordering::Relaxed);
+        for class in 0..CLASSES {
+            let c = t.current.as_ptr().cast::<Current>().add(class).read();
+            if c.index == NONE {
+                continue;
+            }
+            let h = self.headers.get_unchecked(c.index);
+            if h.remote.load(Ordering::Relaxed) != 0 {
+                self.drain(h, h.remote.swap(0, Ordering::Acquire));
+            }
+            let o = &mut *h.owned.get();
+            let (live, bump) = (o.live.load(Ordering::Relaxed), o.bump.load(Ordering::Relaxed));
+            if live == 0 && bump > OWNED_KEEP_MAX {
+                self.release_emptied(c.index, class);
+                continue;
+            }
+            if bump < OWNED_TRIM_MIN {
+                continue;
+            }
+            let mut s = lock(&h.state);
+            if s.trim_live == idle_mark(o.free, live, bump) | 1 {
+                continue;
+            }
+            o.trim_seen = epoch;
+            let chunk = self.base.load(Ordering::Relaxed) + c.index * CHUNK;
+            if let Some(head) = self.drop_free_granules(c.index, &mut s, chunk, o.stride, bump, o.free) {
+                o.free = head;
+            }
+            s.trim_live = idle_mark(o.free, live, bump) | 1;
+        }
+    }
     /// The thread's current chunk of `class` has no live block left and a large carved part: it
     /// leaves the thread and its pages go back to the OS (or the warm list).
     #[cold]
@@ -1230,7 +1485,7 @@ impl Arena {
         if s.stride != 0 && s.bump <= WARM_TOUCHED_MAX && self.warm_put(index, s.bump) {
             return;
         }
-        if self.dynamic && s.stride == 0 && index == s.run && s.committed <= WARM_LARGE_ONE_MAX && self.warm_large_put(index, s.committed, s.order) {
+        if self.dynamic && s.stride == 0 && index == s.run && s.committed <= WARM_LARGE_ONE_MAX && self.warm_large_put(index, s.committed, s.units) {
             return;
         }
         event(E_DECOMMIT);
@@ -1240,14 +1495,15 @@ impl Arena {
             self.committed.fetch_sub(s.committed, Ordering::Relaxed);
             self.chunks.fetch_sub((s.committed + CHUNK - 1) / CHUNK, Ordering::Relaxed);
             s.committed = 0;
-            lock(&self.pool).release(s.run, s.order);
+            self.give_back(s.run, s.units);
         }
     }
     pub fn committed(&self) -> usize {
         self.committed.load(Ordering::Relaxed)
     }
+    /// This region's address range.
     pub fn range(&self) -> (usize, usize) {
-        (self.base.load(Ordering::Acquire), RESERVE)
+        (self.base.load(Ordering::Acquire), self.reach())
     }
     /// Reserves the address range on first use. False when the OS refused (callers then fall back
     /// to the system heap).
@@ -1264,7 +1520,7 @@ impl Arena {
                     if WEB_AT != 0 {
                         os::reserve_at(WEB_AT, RESERVE, LABEL)
                     } else {
-                        os::reserve(RESERVE, CHUNK, if self.dynamic { c"makepad-run-domain" } else { LABEL })
+                        os::reserve(self.reach(), CHUNK, if self.dynamic { c"makepad-run-domain" } else { LABEL })
                     }
                 };
                 // every arena. A domain heap (the program's heap, as its malloc would be) gets
@@ -1272,7 +1528,11 @@ impl Arena {
                 // Scope 2-2.4 GB resident for 100 MB in use, none at all cost Sandbox race warm
                 // frames +4% UI-thread CPU and cold start +5 s on a node (JITMEM.REPORT.md)
                 if base != 0 {
-                    unsafe { os::no_huge_pages(base, RESERVE) };
+                    unsafe { os::no_huge_pages(base, self.reach()) };
+                }
+                if base != 0 && self.dynamic {
+                    HEAPS_LOW.fetch_min(base, Ordering::Release);
+                    HEAPS_HIGH.fetch_max(base + self.reach(), Ordering::Release);
                 }
                 self.base.store(base, Ordering::Release);
             }
@@ -1280,6 +1540,8 @@ impl Arena {
         self.base.load(Ordering::Relaxed) != 0
     }
     #[inline(always)]
+    /// Whether `p` lies in this region's first RESERVE bytes (all of it but for a region for one
+    /// block, `region_of`).
     pub fn owns(&self, p: *mut u8) -> bool {
         let base = self.base.load(Ordering::Relaxed);
         base != 0 && (p as usize).wrapping_sub(base) < RESERVE
@@ -1389,12 +1651,12 @@ impl Arena {
         let epoch = self.trim_epoch.fetch_add(1, Ordering::Relaxed) + 1;
         let mut done = 0;
         for (index, h) in self.headers.iter().enumerate() {
-            let s = lock(&h.state);
+            let mut s = lock(&h.state);
             if s.committed == 0 || s.released {
                 continue;
             }
             if s.attached && s.stride != 0 {
-                unsafe { self.settle_for_waiting_owner(index, h, epoch) };
+                unsafe { self.settle_for_waiting_owner(index, h, &mut s, epoch, false) };
             }
             if !os::THP {
                 continue;
@@ -1413,7 +1675,9 @@ impl Arena {
             // a thread's current chunk is hot whatever is live in it at this moment (a frame's
             // temporaries come and go there): carved half way, it is dense enough -- unless its
             // live blocks fill under a quarter of what it carved: that one gives its free pages
-            // back (`owned_tick`), and a huge page would keep them
+            // back (`owned_tick`), and a huge page would keep them. A chunk that gave pages back
+            // never gets one: the collapse would fill those pages again, resident, while their
+            // slots stay off the free list until the chunk is released.
             let attached = s.attached && COMPILER;
             let (dense, sparse) = if attached {
                 // the owner thread updates these without the lock: a racy, approximate read
@@ -1424,7 +1688,7 @@ impl Arena {
             } else {
                 (h.live.load(Ordering::Relaxed) * s.stride >= CHUNK / 2, h.live.load(Ordering::Relaxed) * s.stride < CHUNK / 8)
             };
-            if !huge && s.committed == CHUNK && dense && done < budget {
+            if !huge && s.committed == CHUNK && dense && s.dropped == 0 && done < budget {
                 h.huge.store(true, Ordering::Relaxed);
                 unsafe { os::huge_pages(address, CHUNK, true) };
                 done += 1;
@@ -1839,9 +2103,9 @@ impl Arena {
                     return p;
                 }
             }
-            return self.alloc_slow(l, true, class, requested);
+            return self.alloc_slow(l, true, class, requested, true);
         }
-        self.alloc_slow(l, false, 0, requested)
+        self.alloc_slow(l, false, 0, requested, true)
     }
     /// Registers (once per thread) the destructor that hands the thread's chunks back.
     #[cold]
@@ -1905,7 +2169,9 @@ impl Arena {
         put(b", committed ");
         let i = num(self.committed.load(Ordering::Relaxed) >> 20, &mut t);
         put(&t[i..]);
-        put(b" MB");
+        put(b" MB, regions ");
+        let i = num(self.regions().count(), &mut t);
+        put(&t[i..]);
         // the first failure also says what holds the arena (one header walk)
         static SAID: AtomicBool = AtomicBool::new(false);
         if !SAID.swap(true, Ordering::Relaxed) {
@@ -1921,7 +2187,7 @@ impl Arena {
                 }
                 if st.stride == 0 {
                     large += 1;
-                    large_units += 1 << st.order;
+                    large_units += st.units;
                     large_bytes += st.committed;
                     if h.live.load(Ordering::Relaxed) == 0 {
                         warmish += 1;
@@ -1962,7 +2228,8 @@ impl Arena {
         COMPILER && !self.dynamic && HAND_SEEN.try_with(|e| e.get()).map_or(false, |e| e != HAND_BACK.load(Ordering::Relaxed))
     }
     #[cold]
-    unsafe fn alloc_slow(&self, l: Layout, small: bool, class: usize, requested: usize) -> *mut u8 {
+    /// `may_grow`: a domain heap that has no room here tries its other regions (`grow`).
+    unsafe fn alloc_slow(&self, l: Layout, small: bool, class: usize, requested: usize, may_grow: bool) -> *mut u8 {
         if self.hand_back_due() {
             let _ = HAND_SEEN.try_with(|e| e.set(HAND_BACK.load(Ordering::Relaxed)));
             self.detach_thread();
@@ -1993,21 +2260,23 @@ impl Arena {
         };
         // Extra virtual space allows alignments above 2 MB; only the payload is committed.
         let span = match committed.checked_add(l.align().saturating_sub(CHUNK)) {
-            Some(n) if n <= RESERVE => n,
-            _ => { self.alloc_failed(2, l); return null_mut(); },
+            Some(n) => n,
+            None => { self.alloc_failed(2, l); return null_mut(); },
         };
+        if span > self.reach() {
+            return if may_grow { self.grow(l, small, class, requested, span, 2) } else { null_mut() };
+        }
         let units = (span + CHUNK - 1) / CHUNK;
-        let order = units.next_power_of_two().trailing_zeros() as usize;
         // a warm chunk (committed, nothing live) serves a small class without an OS call; a warm
-        // large run of the same order serves a large block (committing only what it lacks)
-        let warm_large = if !small && self.dynamic && l.align() <= CHUNK { self.warm_large_take(order) } else { None };
+        // large run of as many chunks serves a large block (committing only what it lacks)
+        let warm_large = if !small && self.dynamic && l.align() <= CHUNK { self.warm_large_take(units) } else { None };
         let warm = if small { self.warm_take() } else { warm_large.map(|w| w.0) };
         let kept = warm_large.map_or(0, |w| w.1);
         let run = match warm {
             Some(i) => i,
-            None => match lock(&self.pool).take(order) {
+            None => match self.take_run(units) {
                 Some(i) => i,
-                None => { self.alloc_failed(3, l); return null_mut(); },
+                None => return if may_grow { self.grow(l, small, class, requested, span, 3) } else { null_mut() },
             },
         };
         let start = self.base.load(Ordering::Relaxed) + run * CHUNK;
@@ -2018,7 +2287,7 @@ impl Arena {
             event(E_COMMIT);
         }
         if warm.is_none() && !os::commit(p, committed) {
-            lock(&self.pool).release(run, order);
+            self.unclaim(run, units);
             { self.alloc_failed(4, l); return null_mut(); }
         }
         if warm_large.is_some() && committed > kept && !os::commit((address + kept) as *mut u8, committed - kept) {
@@ -2029,7 +2298,7 @@ impl Arena {
                 self.chunks.fetch_sub((kept + CHUNK - 1) / CHUNK, Ordering::Relaxed);
                 s.committed = 0;
                 drop(s);
-                lock(&self.pool).release(run, order);
+                self.give_back(run, units);
             }
             { self.alloc_failed(5, l); return null_mut(); }
         }
@@ -2058,10 +2327,11 @@ impl Arena {
                 attached: cache,
                 committed,
                 run,
-                order,
+                units,
                 bytes: 0,
                 dirty: warm_large.is_some(),
                 trim_live: usize::MAX,
+                dropped: 0,
             };
             h.live.store(1, Ordering::Relaxed);
             h.old.store(false, Ordering::Relaxed);
@@ -2128,9 +2398,11 @@ impl Arena {
         if !(COMPILER && l.size().max(l.align()).max(16) > 1 << MAX_SHIFT) {
             std::ptr::write_bytes(p, 0, l.size());
         } else if self.dynamic {
-            // a large block from the warm large list holds old bytes
-            let index = ((p as usize) - self.base.load(Ordering::Relaxed)) / CHUNK;
-            let mut s = lock(&self.headers[index].state);
+            // a large block from the warm large list holds old bytes (the region that gave it: a
+            // full heap's block may come from another, `grow`)
+            let r = self.region_of(p).unwrap_or(self);
+            let index = ((p as usize) - r.base.load(Ordering::Relaxed)) / CHUNK;
+            let mut s = lock(&r.headers[index].state);
             if s.dirty {
                 s.dirty = false;
                 drop(s);
@@ -2169,10 +2441,10 @@ impl Arena {
         } else if need <= 1 << MAX_SHIFT {
             false
         } else {
-            // a large block owns a power-of-two run of chunks and commits only what it uses: it
-            // grows and shrinks inside that run without moving
+            // a large block owns a run of chunks and commits only what it uses: it grows and
+            // shrinks inside that run without moving
             let start = self.base.load(Ordering::Relaxed) + s.run * CHUNK;
-            let span = (CHUNK << s.order) - (p as usize - start);
+            let span = CHUNK * s.units - (p as usize - start);
             match new_size.checked_add(PAGE - 1).map(|n| n & !(PAGE - 1)) {
                 Some(nc) if nc == s.committed => true,
                 Some(nc) if COMPILER && nc <= span => {
@@ -2284,7 +2556,7 @@ impl Arena {
         s.released = true;
         // Released chunks cannot be reached through an old current slot, even while their
         // pages stay warm; only a new generation may allocate from them.
-        if s.stride != 0 && s.committed != 0 && s.order == 0 && s.bump <= WARM_TOUCHED_MAX {
+        if s.stride != 0 && s.committed != 0 && s.units == 1 && s.bump <= WARM_TOUCHED_MAX {
             let touched = s.bump;
             drop(s);
             if self.warm_put(index, touched) {
@@ -2304,9 +2576,9 @@ impl Arena {
         self.committed.fetch_sub(s.committed, Ordering::Relaxed);
         self.chunks.fetch_sub((s.committed + CHUNK - 1) / CHUNK, Ordering::Relaxed);
         s.committed = 0;
-        let (run, order) = (s.run, s.order);
+        let (run, units) = (s.run, s.units);
         drop(s);
-        lock(&self.pool).release(run, order);
+        self.give_back(run, units);
     }
     fn warm_take(&self) -> Option<usize> {
         let mut w = lock(&self.warm);
@@ -2330,34 +2602,45 @@ impl Arena {
         true
     }
     /// Parks an emptied large run of a program heap committed (see WARM_LARGE_MAX).
-    fn warm_large_put(&self, index: usize, committed: usize, order: usize) -> bool {
+    fn warm_large_put(&self, index: usize, committed: usize, units: usize) -> bool {
         let mut w = lock(&self.warm_large);
         if w.len == WARM_LARGE_MAX || w.bytes + committed > WARM_LARGE_BYTES_MAX {
             return false;
         }
         let n = w.len;
-        w.runs[n] = (index, committed, order);
+        w.runs[n] = (index, committed, units);
         w.len += 1;
         w.bytes += committed;
         true
     }
-    /// The most recently parked warm large run of `order`, with its committed bytes.
-    fn warm_large_take(&self, order: usize) -> Option<(usize, usize)> {
+    /// The most recently parked warm large run of `units` chunks, with its committed bytes.
+    fn warm_large_take(&self, units: usize) -> Option<(usize, usize)> {
         let mut w = lock(&self.warm_large);
         let n = w.len;
-        let k = (0..n).rev().find(|&k| w.runs[k].2 == order)?;
+        let k = (0..n).rev().find(|&k| w.runs[k].2 == units)?;
         let e = w.runs[k];
         w.runs[k] = w.runs[n - 1];
         w.len -= 1;
         w.bytes -= e.1;
         Some((e.0, e.1))
     }
-    /// Decommits the warm chunks and returns them to the pool (settle's heap trim, tests).
+    /// Decommits the warm chunks and returns them to the pool (settle's heap trim, the program's
+    /// `malloc_trim`, tests). A program heap's current chunks give their whole free pages back at
+    /// any fill: the calling thread's own and those of the threads blocked in a wait (the others
+    /// are in use). Only the lists were trimmed before: Fab's trims at its quiet points gave back
+    /// 13-49 MB each while its waiting pool workers' chunks held 894 MB resident for 310 MB live.
     pub fn trim(&self) {
         // the calling thread's own current chunks go back first (the lists are what the trim walks)
         if COMPILER && !self.dynamic {
             self.detach_thread();
             let _ = HAND_SEEN.try_with(|e| e.set(HAND_BACK.fetch_add(1, Ordering::Relaxed) + 1));
+        }
+        if COMPILER && self.dynamic {
+            let _ = DOMAIN.try_with(|t| {
+                if std::ptr::eq(t.arena.get(), self) {
+                    unsafe { self.owner_trim(t) };
+                }
+            });
         }
         self.warm_drain();
         // burst arena too: blocks that outlived their compile pin the chunks they were carved
@@ -2387,9 +2670,9 @@ impl Arena {
             self.committed.fetch_sub(s.committed, Ordering::Relaxed);
             self.chunks.fetch_sub((s.committed + CHUNK - 1) / CHUNK, Ordering::Relaxed);
             s.committed = 0;
-            let (run, order) = (s.run, s.order);
+            let (run, units) = (s.run, s.units);
             drop(s);
-            lock(&self.pool).release(run, order);
+            self.give_back(run, units);
         }
         while let Some(index) = self.warm_take() {
             let h = &self.headers[index];
@@ -2404,28 +2687,37 @@ impl Arena {
             self.committed.fetch_sub(s.committed, Ordering::Relaxed);
             self.chunks.fetch_sub((s.committed + CHUNK - 1) / CHUNK, Ordering::Relaxed);
             s.committed = 0;
-            let (run, order) = (s.run, s.order);
+            let (run, units) = (s.run, s.units);
             drop(s);
-            lock(&self.pool).release(run, order);
+            self.give_back(run, units);
         }
     }
     /// Gives the OS every granule of a small chunk whose slots are all free. Such a
     /// granule's slots leave the free list for good (the chunk stays attached to its live blocks and
     /// is released whole when they are gone); the rest of the free list is relinked. What malloc_trim
-    /// does for the system heap.
+    /// does for the system heap. A program heap's chunk attached to a thread blocked in a wait is
+    /// settled for it (`settle_for_waiting_owner`, at any fill).
     fn release_free_pages(&self) {
         let base = self.base.load(Ordering::Relaxed);
         if base == 0 {
             return;
         }
+        let epoch = self.trim_epoch.load(Ordering::Relaxed);
         for index in 0..N {
             let h = &self.headers[index];
             let mut s = lock(&h.state);
-            if (COMPILER && s.attached) || s.stride == 0 || s.committed == 0 || h.live.load(Ordering::Relaxed) == 0 || s.free == 0 {
+            if COMPILER && s.attached {
+                if self.dynamic && s.stride != 0 && s.committed != 0 && !s.released {
+                    unsafe { self.settle_for_waiting_owner(index, h, &mut s, epoch, true) };
+                }
+                continue;
+            }
+            if s.stride == 0 || s.committed == 0 || h.live.load(Ordering::Relaxed) == 0 || s.free == 0 {
                 continue;
             }
             let chunk = base + index * CHUNK;
-            if let Some(head) = unsafe { self.drop_free_granules(index, chunk, s.stride, s.bump, s.free) } {
+            let (stride, bump, free) = (s.stride, s.bump, s.free);
+            if let Some(head) = unsafe { self.drop_free_granules(index, &mut s, chunk, stride, bump, free) } {
                 s.free = head;
             }
         }
@@ -2433,8 +2725,9 @@ impl Arena {
     /// Releases the granules of chunk `index` (at `chunk`, `carved` bytes carved in slots of
     /// `stride`) whose slots are all on the free list from `head`, and returns the relinked list of
     /// the other free slots; None when no granule was whole. The caller owns the list (the chunk's
-    /// lock for a detached chunk, the owner thread for its current one) and holds the chunk's lock.
-    unsafe fn drop_free_granules(&self, index: usize, chunk: usize, stride: usize, carved: usize, head: usize) -> Option<usize> {
+    /// lock for a detached chunk, the owner thread for its current one) and holds the chunk's lock,
+    /// whose `dropped` count the released bytes join.
+    unsafe fn drop_free_granules(&self, index: usize, s: &mut State, chunk: usize, stride: usize, carved: usize, head: usize) -> Option<usize> {
         let nslots = carved / stride;
         let mut free = [0u64; (CHUNK / 16) / 64];
         let mut p = head;
@@ -2474,6 +2767,7 @@ impl Arena {
         if released == 0 {
             return None;
         }
+        s.dropped += released;
         self.unhuge(index, chunk, CHUNK);
         // pass 2: relink the free slots that do not touch a dropped granule
         let dropped = |k: usize| {
@@ -2498,11 +2792,22 @@ impl Arena {
         (c, STRIDE[c])
     }
 }
+/// A current chunk's state as the monitor sees it between passes (its free list's head, live
+/// blocks, bump), bit 0 clear: the same mark at two passes means its owner did not touch it.
+fn idle_mark(free: usize, live: usize, bump: usize) -> usize {
+    (free ^ live.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ bump.rotate_left(32)) & !1
+}
 impl Drop for Arena {
     fn drop(&mut self) {
+        // a heap's first region takes the others with it
+        let mut n = self.next.swap(null_mut(), Ordering::Acquire);
+        while let Some(r) = unsafe { n.as_mut() } {
+            n = r.next.swap(null_mut(), Ordering::Acquire);
+            unsafe { drop_region(r) };
+        }
         let base = self.base.load(Ordering::Acquire);
         if self.dynamic && base != 0 {
-            unsafe { os::unreserve(base, RESERVE) };
+            unsafe { os::unreserve(base, self.reach()) };
         }
         let bits = self.live_bits.load(Ordering::Relaxed);
         if bits != 0 {
@@ -2659,18 +2964,26 @@ unsafe extern "C" fn owned_tick_c(index: usize, class: usize, live: usize, a: &A
     a.owned_tick(index, class, live)
 }
 /// The domain arena the calling thread is inside (`enter_domain`; null: none).
+/// The heap's first region: whichever region of it the thread allocates in (`grow`).
 pub fn current_domain() -> *const Arena {
-    domain_tls().arena.get()
+    match unsafe { domain_tls().arena.get().as_ref() } {
+        Some(a) => a.first(),
+        None => std::ptr::null(),
+    }
 }
-/// Puts the calling thread inside domain arena `a` (null: none): the chunks it holds in the
-/// arena it leaves go back to that arena (alive: the thread is still registered in its domain);
-/// the next arena starts with an empty cache.
+/// Puts the calling thread inside domain arena `a` (a heap's first region; null: none): the
+/// chunks it holds in the arena it leaves go back to that arena (alive: the thread is still
+/// registered in its domain); the next arena starts with an empty cache. A thread already in a
+/// region of `a`'s heap stays in it.
 pub unsafe fn enter_domain(a: *const Arena) {
     let old = domain_tls().arena.get();
     if old == a {
         return;
     }
     if let Some(old) = old.as_ref() {
+        if std::ptr::eq(old.first(), a) {
+            return;
+        }
         old.detach_thread();
     }
     if let Some(a) = a.as_ref() {
@@ -2764,9 +3077,18 @@ unsafe fn domain_free_in(t: &'static DomainTls, p: *mut u8, l: Layout, other: un
     };
     let off = (p as usize).wrapping_sub(a.base.load(Ordering::Relaxed));
     if off >= RESERVE {
-        return other(p, l.size(), l.align());
+        return free_elsewhere(p, l.size(), l.align(), a, other);
     }
     a.dealloc_in(t, p, off, l)
+}
+/// `domain_free` of a block outside the thread's region: another region of its heap, or `other`.
+#[cold]
+#[inline(never)]
+unsafe extern "C" fn free_elsewhere(p: *mut u8, size: usize, align: usize, a: &Arena, other: unsafe extern "C" fn(*mut u8, usize, usize)) {
+    match a.other_region_of(p) {
+        Some(r) => r.dealloc(p, Layout::from_size_align_unchecked(size, align)),
+        None => other(p, size, align),
+    }
 }
 /// Frees a block of the domain arena the calling thread is inside; false when the block is not
 /// one (the caller finds its owner).
@@ -2779,10 +3101,22 @@ pub unsafe fn domain_dealloc(p: *mut u8, l: Layout) -> bool {
     // an entered arena is reserved (`Arena::create` fails otherwise): its base is not 0
     let off = (p as usize).wrapping_sub(a.base.load(Ordering::Relaxed));
     if off >= RESERVE {
-        return false;
+        return dealloc_elsewhere(p, l, a);
     }
     a.dealloc_in(t, p, off, l);
     true
+}
+/// `domain_dealloc` of a block outside the thread's region: another region of its heap's, or false.
+#[cold]
+#[inline(never)]
+unsafe fn dealloc_elsewhere(p: *mut u8, l: Layout, a: &Arena) -> bool {
+    match a.other_region_of(p) {
+        Some(r) => {
+            r.dealloc(p, l);
+            true
+        }
+        None => false,
+    }
 }
 pub fn init() -> bool {
     DEFAULT.init()

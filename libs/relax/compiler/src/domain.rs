@@ -604,6 +604,8 @@ pub struct DomainInfo {
     pub arena_committed: usize,
     /// bytes touched in small chunks / in live slots / in large blocks (the arena's detail)
     pub arena_detail: (usize, usize, usize),
+    /// address space the heap's regions reserved (a full region makes the heap reserve another)
+    pub arena_reserved: usize,
     pub static_committed: u64,
 }
 
@@ -721,7 +723,7 @@ fn set_state(id: DomainId, st: DomainState) {
 /// A non-HAL `makepad run` booted `package` in the unit's own domain: domain 0.
 pub(crate) fn register_boot(package: &str, base: u64) {
     domains().push(Domain {
-        info: DomainInfo { id: 0, package: package.to_string(), parent: None, state: DomainState::Running, base, crates: 0, reused: 0, loaded: 0, new_crates: Vec::new(), resolve_ms: 0.0, load_ms: 0.0, spawn_ms: 0.0, first_frame_ms: None, threads: 0, thread_names: Vec::new(), arena_in_use: 0, arena_committed: 0, arena_detail: (0, 0, 0), static_committed: 0 },
+        info: DomainInfo { id: 0, package: package.to_string(), parent: None, state: DomainState::Running, base, crates: 0, reused: 0, loaded: 0, new_crates: Vec::new(), resolve_ms: 0.0, load_ms: 0.0, spawn_ms: 0.0, first_frame_ms: None, threads: 0, thread_names: Vec::new(), arena_in_use: 0, arena_committed: 0, arena_detail: (0, 0, 0), arena_reserved: 0, static_committed: 0 },
         started: std::time::Instant::now(),
         args: Vec::new(),
         thread_done: false,
@@ -752,6 +754,7 @@ fn snapshot(d: &Domain) -> DomainInfo {
     i.thread_names = d.threads.iter().map(|t| t.name.clone()).collect();
     (i.arena_in_use, i.arena_committed) = d.heap.as_ref().map_or((0, 0), |h| h.stats());
     i.arena_detail = d.heap.as_ref().map_or((0, 0, 0), |h| { let x = h.detail(); (x.0, x.1, x.2) });
+    i.arena_reserved = d.heap.as_ref().map_or(0, |h| h.ranges().map(|r| r.1).sum());
     i
 }
 fn with_block_memory(mut i: DomainInfo) -> DomainInfo {
@@ -1135,13 +1138,17 @@ fn teardown(id: DomainId) {
         destroy(base);
     }
     if let Some(heap) = heap {
-        let (base, size) = heap.range();
-        crate::run_end::heap_goes(base..base + size);
-        crate::inspect::heap::forget_range(base, size);
+        let ranges: Vec<(usize, usize)> = heap.ranges().collect();
+        for &(base, size) in &ranges {
+            crate::run_end::heap_goes(base..base + size);
+            crate::inspect::heap::forget_range(base, size);
+        }
         freed += (heap.stats().1 + heap.metadata_bytes()) as u64;
         drop(heap);
         #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-        crate::run_end::leftovers::heap_gone(base, size);
+        for (base, size) in ranges {
+            crate::run_end::leftovers::heap_gone(base, size);
+        }
     }
     drop((args, threads, crates));
     // The process heap keeps what the domain's threads freed in their malloc arenas (free but
@@ -1423,7 +1430,7 @@ pub fn prepare(spec: &AppSpec) -> Result<DomainId, Vec<String>> {
             d.remove(k);
         }
         d.push(Domain {
-            info: DomainInfo { id, package: spec.package.clone(), parent: spec.parent, state: DomainState::Compiling("package graph".into()), base: 0, crates: 0, reused: 0, loaded: 0, new_crates: Vec::new(), resolve_ms: 0.0, load_ms: 0.0, spawn_ms: 0.0, first_frame_ms: None, threads: 0, thread_names: Vec::new(), arena_in_use: 0, arena_committed: 0, arena_detail: (0, 0, 0), static_committed: 0 },
+            info: DomainInfo { id, package: spec.package.clone(), parent: spec.parent, state: DomainState::Compiling("package graph".into()), base: 0, crates: 0, reused: 0, loaded: 0, new_crates: Vec::new(), resolve_ms: 0.0, load_ms: 0.0, spawn_ms: 0.0, first_frame_ms: None, threads: 0, thread_names: Vec::new(), arena_in_use: 0, arena_committed: 0, arena_detail: (0, 0, 0), arena_reserved: 0, static_committed: 0 },
             started: t0,
             args: spec.argv.clone().unwrap_or_else(|| std::iter::once(spec.package.clone().into_bytes()).chain(spec.args.iter().map(|a| a.clone().into_bytes())).collect()),
             thread_done: false,
@@ -2082,7 +2089,7 @@ mod tests {
         isolated_test!(a_stop_does_not_wait_for_a_main_held_for_good);
         let (id, main_os_id): (DomainId, u64) = (77, 4242);
         domains().push(Domain {
-            info: DomainInfo { id, package: "held".into(), parent: None, state: DomainState::Running, base: 0x7000_0000, crates: 0, reused: 0, loaded: 0, new_crates: Vec::new(), resolve_ms: 0.0, load_ms: 0.0, spawn_ms: 0.0, first_frame_ms: None, threads: 0, thread_names: Vec::new(), arena_in_use: 0, arena_committed: 0, arena_detail: (0, 0, 0), static_committed: 0 },
+            info: DomainInfo { id, package: "held".into(), parent: None, state: DomainState::Running, base: 0x7000_0000, crates: 0, reused: 0, loaded: 0, new_crates: Vec::new(), resolve_ms: 0.0, load_ms: 0.0, spawn_ms: 0.0, first_frame_ms: None, threads: 0, thread_names: Vec::new(), arena_in_use: 0, arena_committed: 0, arena_detail: (0, 0, 0), arena_reserved: 0, static_committed: 0 },
             started: std::time::Instant::now(),
             args: Vec::new(),
             thread_done: false,

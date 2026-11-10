@@ -148,6 +148,16 @@ struct DataIndex {
 /// The name prefix of a vtable's data object (jit.rs Unit::vtable).
 pub const VTABLE_NAME: &str = "vtable:";
 
+/// The two types a vtable's data name gives (`vtable:<type>#<hash>:<dyn type>#<hash>`, stable_ty
+/// each), with their hashes.
+pub fn vtable_name_parts(name: &str) -> Option<(&str, &str)> {
+    let rest = name.strip_prefix(VTABLE_NAME)?;
+    let b = rest.as_bytes();
+    // (the last `#<hash>:`: the concrete type's end; the dyn type ends in its own hash)
+    let cut = (0..b.len()).rev().find(|&i| b[i] == b'#' && i + 9 < b.len() && b[i + 9] == b':' && b[i + 1..i + 9].iter().all(u8::is_ascii_hexdigit))?;
+    Some((&rest[..cut + 9], &rest[cut + 10..]))
+}
+
 impl Syms {
     pub fn new(vals: u64, dom0: u64) -> Syms {
         Syms { dom0, vals, classes: crate::jit::alloc_rw(SYM_CAP), kinds: crate::conc::AppendVec::new_kept(SYM_CAP), inner: Mutex::new(SymsInner::default()), data: Mutex::new(DataIndex::default()), rw_blocks: Mutex::new(Vec::new()), rw_starts: Mutex::new(BTreeMap::new()), rw_syms: Mutex::new(BTreeMap::new()), const_copies: Mutex::new(HashMap::new()), initial_data: Mutex::new(HashMap::new()), foreign_defs: Mutex::new(HashMap::new()), rt_by_addr: OnceLock::new(), foreign_by_addr: Mutex::new(ForeignIndex::default()) }
@@ -251,6 +261,7 @@ impl Syms {
         d.objs.reserve(objs.len());
         let first = d.objs.len() as u32;
         let syms: Vec<Sym> = objs.iter().enumerate().map(|(i, o)| self.intern(SymKind::Data(first + i as u32), o.0)).collect();
+        let vtables = d.vtables.len();
         for (i, (start, len, align, name)) in objs.iter().enumerate() {
             let kind = DataKind::Relocs(ptrs(i, &syms));
             if name.as_deref().is_some_and(|n| n.starts_with(VTABLE_NAME)) {
@@ -258,6 +269,16 @@ impl Syms {
             }
             d.objs.push(DataObj { start: *start, len: *len, align: *align, kind, sym: syms[i].id, name: name.clone(), mutable: false, ptrs: None, opaque: false });
             d.by_start.insert(*start, first + i as u32);
+        }
+        let vtables = d.vtables.len() > vtables;
+        drop(d);
+        // (the data lock released: the real-time reach's lock goes first)
+        if vtables {
+            for (start, _, _, name) in objs {
+                if let Some(n) = name.as_deref().filter(|n| n.starts_with(VTABLE_NAME)) {
+                    crate::jit::realtime_vtable(*start, n);
+                }
+            }
         }
         syms
     }
@@ -313,13 +334,19 @@ impl Syms {
     /// Names a registered object (its stable identity across runs).
     pub fn set_data_name(&self, start: u64, name: String) {
         let _k = crate::zone_alloc::kept();
-        let name = name.clone();
-        let mut d = self.data.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(&i) = d.by_start.get(&start) {
-            if name.starts_with(VTABLE_NAME) && !d.objs[i as usize].name.as_deref().is_some_and(|n| n.starts_with(VTABLE_NAME)) {
+        let mut name = name.clone();
+        let vtable = name.starts_with(VTABLE_NAME);
+        {
+            let mut d = self.data.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(&i) = d.by_start.get(&start) else { return };
+            if vtable && !d.objs[i as usize].name.as_deref().is_some_and(|n| n.starts_with(VTABLE_NAME)) {
                 d.vtables.push(i);
             }
-            d.objs[i as usize].name = Some(name);
+            d.objs[i as usize].name = Some(if vtable { name.clone() } else { std::mem::take(&mut name) });
+        }
+        // (the data lock released: the real-time reach's lock goes first)
+        if vtable {
+            crate::jit::realtime_vtable(start, &name);
         }
     }
 
@@ -328,6 +355,21 @@ impl Syms {
     pub fn vtable_objs(&self) -> Vec<(u64, String)> {
         let d = self.data.lock().unwrap_or_else(|e| e.into_inner());
         d.vtables.iter().filter_map(|&i| d.objs.get(i as usize)).filter_map(|o| Some((o.start, o.name.clone()?))).collect()
+    }
+
+    /// The vtables of this run (see vtable_objs) whose dyn type `of(start, dyn type)` takes, by its
+    /// name (vtable_name_parts): (start, dyn type).
+    pub fn vtables_of(&self, mut of: impl FnMut(u64, &str) -> bool) -> Vec<(u64, String)> {
+        let d = self.data.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        for o in d.vtables.iter().filter_map(|&i| d.objs.get(i as usize)) {
+            if let Some((_, dy)) = o.name.as_deref().and_then(vtable_name_parts) {
+                if of(o.start, dy) {
+                    out.push((o.start, dy.to_string()));
+                }
+            }
+        }
+        out
     }
 
     /// Whether a vtable's data object starts at `addr`.

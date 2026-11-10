@@ -854,7 +854,7 @@ fn unrelated(x: u32) -> u32 { x + 1 }
         let rebuilt = unsafe { compile_fn(up, id) }.unwrap();
         assert_eq!(u.fns[id as usize].rir.as_ref().unwrap().dump(), rir);
         assert_eq!(rebuilt.0, first.0, "O1 machine code changed after settle");
-        assert!(verify.verify_entry(&u, id, &rebuilt.0, &rebuilt.2), "cache verify after settle");
+        assert_eq!(verify.verify_entry(&u, id, &rebuilt.0, &rebuilt.2), Some(true), "cache verify after settle");
         unsafe { settle_drop(up) };
     });
     assert!(unsafe { compile_tier1(up, id) }, "O3 must rebuild settled RIR");

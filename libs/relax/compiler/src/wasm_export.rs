@@ -340,7 +340,7 @@ fn succs(t: &relax_backend::rir::Term) -> Vec<u32> {
     use relax_backend::rir::Term;
     match t {
         Term::Jump(a) => vec![*a],
-        Term::Branch(_, a, b) | Term::Invoke(a, b) => vec![*a, *b],
+        Term::Branch(_, a, b) | Term::BranchCmp(_, a, b) | Term::Invoke(a, b) => vec![*a, *b],
         Term::Switch(_, tab) => tab.targets.iter().copied().chain(std::iter::once(tab.default)).collect(),
         Term::Ret(_) | Term::Unreachable | Term::Resume => Vec::new(),
     }

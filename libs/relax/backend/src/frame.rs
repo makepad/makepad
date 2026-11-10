@@ -235,7 +235,7 @@ pub fn slot_colors_used(f: &Func, min: u32, addressed: &[bool]) -> Option<Vec<u3
 /// Positions for a straight-line body, including chains of unconditional jumps.
 /// Require every block in the chain; all other CFGs keep the full lifetime analysis.
 pub fn slot_linear_positions(f: &Func) -> Option<Vec<u32>> {
-    if f.blocks.is_empty() || f.blocks.iter().any(|b| matches!(b.term, Term::Branch(..) | Term::Invoke(..))) {
+    if f.blocks.is_empty() || f.blocks.iter().any(|b| matches!(b.term, Term::Branch(..) | Term::BranchCmp(..) | Term::Invoke(..))) {
         return None;
     }
     let mut positions = vec![u32::MAX; f.blocks.len()];
@@ -250,7 +250,7 @@ pub fn slot_linear_positions(f: &Func) -> Option<Vec<u32>> {
         match f.blocks[b].term {
             Term::Jump(next) => b = next as usize,
             Term::Ret(_) | Term::Unreachable | Term::Resume => return (seen == f.blocks.len()).then_some(positions),
-            Term::Branch(..) | Term::Switch(..) | Term::Invoke(..) => return None,
+            Term::Branch(..) | Term::BranchCmp(..) | Term::Switch(..) | Term::Invoke(..) => return None,
         }
     }
 }

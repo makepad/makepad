@@ -1,7 +1,7 @@
 use cache_items_dep::*;
 
 #[inline(never)]
-fn use_leaf() -> u32 { leaf() + 1 }
+fn use_leaf() -> u32 { leaf_user() }
 #[inline(never)]
 fn use_shape() -> usize { std::mem::size_of::<Shape>() }
 #[inline(never)]

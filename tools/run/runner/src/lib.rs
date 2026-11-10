@@ -134,7 +134,6 @@ fn plain(p: std::path::PathBuf) -> std::path::PathBuf {
 
 /// The runner on this process's command line, with `host` added.
 pub fn main(host: &'static Host) {
-    relax_compiler::memstat::tune_malloc();
     set_host(host);
     relax_compiler::wasm_export::startup();
     run(relax_compiler::os::proc::args_bytes())
@@ -144,7 +143,6 @@ pub fn main(host: &'static Host) {
 /// loader's executable (the Android host library in an Activity's process): `exe` is Relax's own
 /// executable, which build scripts and `MAKEPAD_RUN_LOADER` programs run as.
 pub fn init_embedded(exe: &std::path::Path, host: &'static Host) {
-    relax_compiler::memstat::tune_malloc();
     set_host(host);
     relax_compiler::unitgraph::set_self_exe(exe.to_path_buf());
     // the program's argv[0] / current_exe: the embedder has no command line of its own

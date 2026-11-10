@@ -617,6 +617,137 @@ fn jobs() -> usize {
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()).min(16))
 }
 
+/// How one definition's work in the whole check's item passes ended.
+enum DefWork<R> {
+    Done(R),
+    /// The error to report: a fatal diagnostic, or an internal error saying what the panic said.
+    Failed(String),
+    /// A constant it evaluates needs a file the check left unloaded (`settled_defs`).
+    NeedsLoad,
+}
+
+/// One definition's work on a worker of the whole check's item passes. A constant it evaluates may
+/// find the compiler's owner held up (owner.rs): that work unwinds with no result and no message
+/// and is no failure, so it is asked again, as the body checks do. Only a panic is an internal
+/// error, and `ice` gets what it said.
+fn def_work<R>(ice: impl Fn(&str) -> String, mut f: impl FnMut() -> R) -> DefWork<R> {
+    loop {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut f)) {
+            Ok(v) => return DefWork::Done(v),
+            Err(p) if p.is::<crate::preempt::NeedsLoad>() => return DefWork::NeedsLoad,
+            Err(p) if crate::preempt::is_preempted(&*p) || p.is::<crate::preempt::OwnerBusy>() => std::thread::yield_now(),
+            Err(p) => {
+                if let Some(fatal) = p.downcast_ref::<relax_types::infer::diagnostics::FatalError>() {
+                    return DefWork::Failed(fatal.0.clone());
+                }
+                let said = p.downcast_ref::<String>().map(String::as_str).or_else(|| p.downcast_ref::<&str>().copied());
+                return DefWork::Failed(ice(said.unwrap_or("a panic with no text")));
+            }
+        }
+    }
+}
+
+/// A test's stand-in for preempted work: the next body checks of the fn named `.0` unwind with no
+/// result, `.1` times.
+#[cfg(test)]
+static FORCED_BODY_UNWINDS: std::sync::Mutex<(String, u32)> = std::sync::Mutex::new((String::new(), 0));
+
+#[cfg(test)]
+pub(crate) fn force_body_unwinds(name: &str, times: u32) {
+    *FORCED_BODY_UNWINDS.lock().unwrap() = (name.to_string(), times);
+}
+
+/// How many of them are still to come: a test that forced none shows nothing.
+#[cfg(test)]
+pub(crate) fn forced_body_unwinds_left() -> u32 {
+    FORCED_BODY_UNWINDS.lock().unwrap().1
+}
+
+#[cfg(test)]
+fn forced_body_unwind(prog: &crate::program::Program, d: crate::program::DefId) {
+    let mut forced = FORCED_BODY_UNWINDS.lock().unwrap();
+    if forced.1 > 0 && prog.def_path(d).ends_with(forced.0.as_str()) {
+        forced.1 -= 1;
+        drop(forced);
+        std::panic::resume_unwind(Box::new(crate::preempt::Preempted));
+    }
+}
+
+/// The same for evaluations alone (eval_items): the next ones of the item named `.0` unwind with
+/// no result, `.1` times; with `.2` they panic instead. Its own count: the item's body check,
+/// which runs first, must not take it.
+#[cfg(test)]
+static FORCED_EVALS: std::sync::Mutex<(String, u32, bool)> = std::sync::Mutex::new((String::new(), 0, false));
+
+#[cfg(test)]
+pub(crate) fn force_eval_unwinds(name: &str, times: u32) {
+    *FORCED_EVALS.lock().unwrap() = (name.to_string(), times, false);
+}
+
+#[cfg(test)]
+pub(crate) fn force_eval_panic(name: &str) {
+    *FORCED_EVALS.lock().unwrap() = (name.to_string(), 1, true);
+}
+
+#[cfg(test)]
+pub(crate) fn forced_evals_left() -> u32 {
+    FORCED_EVALS.lock().unwrap().1
+}
+
+#[cfg(test)]
+fn forced_eval(prog: &crate::program::Program, d: crate::program::DefId) {
+    let mut forced = FORCED_EVALS.lock().unwrap();
+    if forced.1 > 0 && prog.def_path(d).ends_with(forced.0.as_str()) {
+        forced.1 -= 1;
+        let panics = forced.2;
+        drop(forced);
+        assert!(!panics, "a forced panic");
+        std::panic::resume_unwind(Box::new(crate::preempt::Preempted));
+    }
+}
+
+/// An item pass's internal error, at the definition and saying what went wrong.
+fn def_ice(prog: &crate::program::Program, d: crate::program::DefId, what: &str, said: &str) -> String {
+    let def = prog.def(d);
+    let pos = prog.files[def.file as usize].ast.item(def.item).lo;
+    prog.record_error(def.file, pos, "typeck", format!("internal compiler error while checking {} of {}: {}{} -- makepad run bug, report it", what, prog.def_path(d), said, jit::take_ice_location()))
+}
+
+/// `f` on `defs`, on the check's workers, in `defs`' order.
+fn def_round<R: Send>(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, defs: &[crate::program::DefId], what: &str, f: &(impl Fn(&crate::program::Program, &crate::tcx::Tcx, crate::program::DefId) -> R + Sync)) -> Vec<DefWork<R>> {
+    par_map(defs, jobs(), |&d| def_work(|said| def_ice(prog, d, what, said), || f(prog, tcx, d)))
+}
+
+/// A pass's results once no definition waits for a file: nothing else runs here, so the check's
+/// skipped files load and the definitions that wanted one are asked again, as the body checks do.
+fn settled_defs<R: Send>(u: &mut Unit, defs: &[crate::program::DefId], what: &str, mut work: Vec<DefWork<R>>, f: &(impl Fn(&crate::program::Program, &crate::tcx::Tcx, crate::program::DefId) -> R + Sync)) -> Vec<Result<R, String>> {
+    loop {
+        let left: Vec<usize> = (0..work.len()).filter(|&i| matches!(work[i], DefWork::NeedsLoad)).collect();
+        if left.is_empty() || u.prog.skipped_files.is_empty() { break; }
+        unsafe { jit::load_all_skipped(u) };
+        let again: Vec<crate::program::DefId> = left.iter().map(|&i| defs[i]).collect();
+        for (i, w) in left.into_iter().zip(def_round(&u.prog, &u.tcx, &again, what, f)) { work[i] = w; }
+    }
+    work.into_iter().zip(defs).map(|(w, &d)| match w {
+        DefWork::Done(r) => Ok(r),
+        DefWork::Failed(e) => Err(e),
+        DefWork::NeedsLoad => Err(def_ice(&u.prog, d, what, "it needs a file to be loaded and none is left")),
+    }).collect()
+}
+
+/// `settled_defs` for one definition, on the check's own thread: nothing else runs here either.
+fn settled_def<R>(up: *mut Unit, d: crate::program::DefId, what: &str, mut f: impl FnMut() -> R) -> Result<R, String> {
+    loop {
+        let u = unsafe { &*up };
+        match def_work(|said| def_ice(&u.prog, d, what, said), &mut f) {
+            DefWork::Done(r) => return Ok(r),
+            DefWork::Failed(e) => return Err(e),
+            DefWork::NeedsLoad if u.prog.skipped_files.is_empty() => return Err(def_ice(&u.prog, d, what, "it needs a file to be loaded and none is left")),
+            DefWork::NeedsLoad => unsafe { jit::load_all_skipped(up) },
+        }
+    }
+}
+
 fn par_map<T: Sync, R: Send>(items: &[T], jobs: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let next = std::sync::atomic::AtomicUsize::new(0);
     let out: relax_session::sync::Mutex<Vec<(usize, R)>> = relax_session::sync::Mutex::new(Vec::with_capacity(items.len()));
@@ -785,7 +916,7 @@ fn body_errors(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, options: &
         match pats {
             Ok(r) if !r.errors.is_empty() => { let mut e = r.errors; e.extend(r.at_patterns); return (staged(patterns, e).collect(), Vec::new()) }
             Ok(r) => at_patterns = r.at_patterns,
-            Err(p) if p.is::<crate::preempt::NeedsLoad>() || crate::preempt::is_preempted(&*p) => std::panic::resume_unwind(p),
+            Err(p) if crate::preempt::is_cancelled(&*p) => std::panic::resume_unwind(p),
             Err(_) => {
                 if check_trace() { stderr_line!("makepad check: pattern analysis failed in {}", prog.def_path(d)); }
             }
@@ -883,32 +1014,32 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
         let check_times = std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some();
         let defs: Vec<crate::program::DefId> = (0..u.prog.defs.len()).filter(|&i| own[u.prog.defs[i].krate as usize]).map(|i| crate::program::DefId(i as u32)).filter(|&d| !is_live_default(&u.prog, d)).collect();
         let (prog, tcx) = (&u.prog, &u.tcx);
+        let signature = |prog: &crate::program::Program, tcx: &crate::tcx::Tcx, d: crate::program::DefId| {
+            let t0 = std::time::Instant::now();
+            let mut e = tcx.check_def_signature(prog, d);
+            let dt_sig = t0.elapsed();
+            if prog.def(d).kind == DefKind::Impl { e.extend(relax_types::unsafety::check_impl(prog, tcx, d)); }
+            let dt = t0.elapsed();
+            if check_times && dt.as_millis() >= 500 {
+                stderr_line!("makepad check: slow sig {:.2} s (check_def_sig {:.2} s): {:?} {}", dt.as_secs_f64(), dt_sig.as_secs_f64(), prog.def(d).kind, prog.def_path(d));
+            }
+            e
+        };
         // the item lint passes meanwhile, on a thread of their own: they report lints only (no
         // error of the check's), and the lints are ordered when printed (check_order.rs)
-        let sigs = std::thread::scope(|sc| {
+        let first = std::thread::scope(|sc| {
             let lints = std::thread::Builder::new().name("run-check-lints".into()).stack_size(256 << 20).spawn_scoped(sc, || {
                 let _z = crate::zone_alloc::compiler_thread();
                 let t0 = std::time::Instant::now();
                 relax_types::lint_pass::check_items(prog, tcx, own);
                 if check_times { stderr_line!("makepad check: lint_pass::check_items {:.2} s (beside the signatures)", t0.elapsed().as_secs_f64()); }
             }).expect("check lints");
-            let sigs = par_map(&defs, jobs(), |&d| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let t0 = std::time::Instant::now();
-                    let mut e = tcx.check_def_signature(prog, d);
-                    let dt_sig = t0.elapsed();
-                    if prog.def(d).kind == DefKind::Impl { e.extend(relax_types::unsafety::check_impl(prog, tcx, d)); }
-                    let dt = t0.elapsed();
-                    if check_times && dt.as_millis() >= 500 {
-                        stderr_line!("makepad check: slow sig {:.2} s (check_def_sig {:.2} s): {:?} {}", dt.as_secs_f64(), dt_sig.as_secs_f64(), prog.def(d).kind, prog.def_path(d));
-                    }
-                    e
-                }))
-                .unwrap_or_else(|_| vec![format!("internal compiler error while checking the signature of {} -- makepad run bug, report it", prog.def_path(d))]));
+            let first = def_round(prog, tcx, &defs, "the signature", &signature);
             if let Err(p) = lints.join() { std::panic::resume_unwind(p); }
-            sigs
+            first
         });
-        for e in sigs {
-            errors.extend(staged(Stage::new(Phase::Wf, 0), e));
+        for e in settled_defs(u, &defs, "the signature", first, &signature) {
+            errors.extend(staged(Stage::new(Phase::Wf, 0), e.unwrap_or_else(|failed| vec![failed])));
         }
     }
     let d_sigs = t_sigs0.elapsed();
@@ -951,31 +1082,21 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
         let check_times = std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some();
         let defs: Vec<crate::program::DefId> = (0..u.prog.defs.len()).filter(|&i| own[u.prog.defs[i].krate as usize]).map(|i| crate::program::DefId(i as u32)).filter(|&d| !is_live_default(&u.prog, d)).collect();
         let (prog, tcx) = (&u.prog, &u.tcx);
-        // (a constant a well-formedness check evaluates may find the compiler's owner busy: preempted
-        // work is asked again, as the body checks do)
-        for e in par_map(&defs, jobs(), |&d| {
-            let mut tries = 0;
-            loop {
-                let t0 = std::time::Instant::now();
-                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let v = relax_types::wfcheck::obligations::check_def(prog, tcx, d);
-                    let dt_wf = t0.elapsed();
-                    // rustc_privacy check_mod_privacy: the types of the item's signature
-                    let privacy = relax_types::privacy_types::check_item(prog, tcx, d);
-                    let dt = t0.elapsed();
-                    if check_times && dt.as_millis() >= 500 {
-                        stderr_line!("makepad check: slow wf {:.2} s (check_def {:.2} s, tries {}): {:?} {}", dt.as_secs_f64(), dt_wf.as_secs_f64(), tries, prog.def(d).kind, prog.def_path(d));
-                    }
-                    (v, privacy)
-                }));
-                match r {
-                    Ok(v) => break v,
-                    Err(p) if (crate::preempt::is_preempted(&*p) || p.is::<crate::preempt::NeedsLoad>() || p.is::<crate::preempt::OwnerBusy>()) && tries < 100 => { tries += 1; std::thread::yield_now(); }
-                    Err(p) => break (if let Some(fatal) = p.downcast_ref::<relax_types::infer::diagnostics::FatalError>() { vec![fatal.0.clone()] } else { vec![format!("internal compiler error while checking the well-formedness of {} ({}) -- makepad run bug, report it", prog.def_path(d),
-                        p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default())] }, Vec::new()),
-                }
+        let well_formed = |prog: &crate::program::Program, tcx: &crate::tcx::Tcx, d: crate::program::DefId| {
+            let t0 = std::time::Instant::now();
+            let v = relax_types::wfcheck::obligations::check_def(prog, tcx, d);
+            let dt_wf = t0.elapsed();
+            // rustc_privacy check_mod_privacy: the types of the item's signature
+            let privacy = relax_types::privacy_types::check_item(prog, tcx, d);
+            let dt = t0.elapsed();
+            if check_times && dt.as_millis() >= 500 {
+                stderr_line!("makepad check: slow wf {:.2} s (check_def {:.2} s): {:?} {}", dt.as_secs_f64(), dt_wf.as_secs_f64(), prog.def(d).kind, prog.def_path(d));
             }
-        }) {
+            (v, privacy)
+        };
+        let first = def_round(prog, tcx, &defs, "the well-formedness", &well_formed);
+        for e in settled_defs(u, &defs, "the well-formedness", first, &well_formed) {
+            let e = e.unwrap_or_else(|failed| (vec![failed], Vec::new()));
             errors.extend(staged(Stage::new(Phase::Wf, 0), e.0));
             errors.extend(staged(Stage::new(Phase::Late, crate::check_order::LATE_PRIVACY), e.1));
         }
@@ -1047,31 +1168,29 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
     // typeck-audit 1.27: anonymous constants outside bodies are body owners of their own (typed
     // and checked on MAKEPAD_RUN_JOBS threads; their results, and the evaluations, in order)
     let anons: Vec<crate::program::DefId> = fresh_crates.iter().flat_map(|&k| crate::borrowck::body::signature_anon_consts(&u.prog, &u.tcx, k)).filter(|&anon| !is_live_default(&u.prog, anon)).collect();
-    let checked_anons = {
-        let (prog, tcx) = (&u.prog, &u.tcx);
-        par_map(&anons, jobs(), |&anon| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let body = tcx.typeck(prog, anon);
-            let errs = body.errors.to_vec();
-            let mut diags = Vec::new();
-            if errs.is_empty() {
-                relax_types::lint::check_literals(prog, tcx, &body);
-                relax_types::lint_pass::check_body(prog, tcx, &body);
-            }
-            // rustc check_consts: an anonymous constant is a const context of its own
-            if errs.is_empty() && crate::borrowck::enabled(options) {
-                if let Some((_, relax_front::def_collector::NodeId::AnonConst(expr))) = prog.def_id_to_node_id.get(&anon) {
-                    let state = crate::tcx::EvalState::new();
-                    let cx = crate::tcx::EvalCx::new(prog, tcx, crate::tcx::TypingEnv::fully_monomorphized(prog), &state);
-                    let errs = crate::borrowck::check_anon_const(&cx, prog, tcx, &body, *expr);
-                    if !errs.is_empty() {
-                        diags.extend(crate::borrowck::lazy::report_checked(prog, 0, tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst), anon, &body.args, errs, crate::borrowck::event::Origin::Check).iter().map(|e| e.error.to_diagnostic()));
-                    }
+    let check_anon = |prog: &crate::program::Program, tcx: &crate::tcx::Tcx, anon: crate::program::DefId| {
+        let body = tcx.typeck(prog, anon);
+        let errs = body.errors.to_vec();
+        let mut diags = Vec::new();
+        if errs.is_empty() {
+            relax_types::lint::check_literals(prog, tcx, &body);
+            relax_types::lint_pass::check_body(prog, tcx, &body);
+        }
+        // rustc check_consts: an anonymous constant is a const context of its own
+        if errs.is_empty() && crate::borrowck::enabled(options) {
+            if let Some((_, relax_front::def_collector::NodeId::AnonConst(expr))) = prog.def_id_to_node_id.get(&anon) {
+                let state = crate::tcx::EvalState::new();
+                let cx = crate::tcx::EvalCx::new(prog, tcx, crate::tcx::TypingEnv::fully_monomorphized(prog), &state);
+                let errs = crate::borrowck::check_anon_const(&cx, prog, tcx, &body, *expr);
+                if !errs.is_empty() {
+                    diags.extend(crate::borrowck::lazy::report_checked(prog, 0, tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst), anon, &body.args, errs, crate::borrowck::event::Origin::Check).iter().map(|e| e.error.to_diagnostic()));
                 }
             }
-            (errs, diags)
-        })))
+        }
+        (errs, diags)
     };
-    for (anon, r) in anons.into_iter().zip(checked_anons) {
+    let first = def_round(&u.prog, &u.tcx, &anons, "the constant", &check_anon);
+    for (&anon, r) in anons.iter().zip(settled_defs(u, &anons, "the constant", first, &check_anon)) {
         match r {
             Ok((e, diags)) => {
                 let e_ok = e.is_empty() && diags.is_empty();
@@ -1080,19 +1199,18 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
                 // or not): one that fails is reported there (E0080)
                 if e_ok && u.tcx.generic_indices_of(&u.prog, anon).types_consts.is_empty() && !matches!(u.prog.def(u.prog.def(anon).parent).kind, DefKind::Trait | DefKind::TypeAlias) {
                     let env = crate::tcx::TypingEnv::fully_monomorphized(&u.prog);
-                    let before = u.tcx.dcx.err_count();
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| u.tcx.const_eval_resolve(&u.prog, env, anon, &[])));
-                    let _ = before;
+                    let evaluated = settled_def(up, anon, "the constant", || { let _ = u.tcx.const_eval_resolve(&u.prog, env, anon, &[]); });
+                    if let Err(failed) = evaluated { errors.push((Stage::of(Phase::Typeck, 0, anon), failed)); }
                 }
                 errors.extend(staged(Stage::of(Phase::Typeck, 0, anon), e))
             }
-            Err(_) => errors.push((Stage::of(Phase::Typeck, 0, anon), format!("internal compiler error while checking {}", u.prog.def_path(anon)))),
+            Err(failed) => errors.push((Stage::of(Phase::Typeck, 0, anon), failed)),
         }
     }
     // every body owner type- and borrow-checked on MAKEPAD_RUN_JOBS threads: typeck and the borrow
     // checker are queries over the shared program and type context (as the run's typeck-ahead
     // workers use them); results are merged in owner order
-    struct Outcome { errors: Vec<(Stage, String)>, diags: Vec<crate::diag::Diagnostic>, seed: Option<crate::program::DefId>, needs_load: bool, preempted: bool }
+    struct Outcome { errors: Vec<(Stage, String)>, diags: Vec<crate::diag::Diagnostic>, seed: Option<crate::program::DefId>, needs_load: bool, unchecked: bool }
     let jobs = jobs();
     let upn = up as usize;
     let check_one = move |owner: &crate::borrowck::body::CheckedBody, generic: bool| -> Outcome {
@@ -1100,30 +1218,26 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
         let (prog, tcx) = (&uu.prog, &uu.tcx);
         let d = owner.owner;
         if check_trace() { stderr_line!("makepad check: body {}", prog.def_path(d)); }
-        let mut out = Outcome { errors: Vec::new(), diags: Vec::new(), seed: None, needs_load: false, preempted: false };
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut out = Outcome { errors: Vec::new(), diags: Vec::new(), seed: None, needs_load: false, unchecked: false };
+        // (work that unwound with no result is asked again in there, until it has an answer)
+        let r = def_work(|said| def_ice(prog, d, "the body", said), || {
+            #[cfg(test)]
+            forced_body_unwind(prog, d);
             let (errors, events) = body_errors(prog, tcx, options, owner, generic, true);
             (errors, events.iter().map(|ev| ev.error.to_diagnostic()).collect())
-        }));
+        });
         match r {
-            Ok((errs, diags)) => {
+            DefWork::Done((errs, diags)) => {
                 if errs.is_empty() && owner.kind == crate::borrowck::body::BodyKind::Function && !generic {
                     out.seed = Some(d);
                 }
                 out.errors = errs;
                 out.diags = diags;
             }
-            // a module the check did not load (another crate's skipped file): checked again
-            // once every file is loaded
-            Err(p) if p.is::<crate::preempt::NeedsLoad>() => out.needs_load = true,
-            // a constant it needed was asked of the compiler's owner thread while an earlier
-            // request held it up (owner.rs): checked again
-            Err(p) if crate::preempt::is_preempted(&*p) => out.preempted = true,
-            Err(_) => {
-                let def = prog.def(d);
-                let pos = prog.files[def.file as usize].ast.item(def.item).lo;
-                out.errors.push((Stage::of(Phase::Typeck, 0, d), prog.record_error(def.file, pos, "typeck", format!("internal compiler error while checking {} -- makepad run bug, report it{}", prog.def_path(d), jit::take_ice_location()))));
-            }
+            // a module the check did not load (another crate's skipped file): no answer yet,
+            // checked again once every file is loaded
+            DefWork::NeedsLoad => { out.needs_load = true; out.unchecked = true; }
+            DefWork::Failed(e) => out.errors.push((Stage::of(Phase::Typeck, 0, d), e)),
         }
         // an error may be a name in a file the app check left unloaded: settled with all loaded
         if !out.errors.is_empty() { out.needs_load = true; }
@@ -1156,8 +1270,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
     body_times_report();
     outcomes.sort_by_key(|(i, _)| *i);
     // owners that failed or met an unloaded module: every skipped file loaded, checked again
-    // (only when some other crate's file is still skipped: else the first answer stands);
-    // owners preempted by OwnerBusy are always retried in parallel.
+    // (only when some other crate's file is still skipped: else the first answer stands)
     let skipped_left = unsafe { !(&*up).prog.skipped_files.is_empty() };
     if skipped_left && outcomes.iter().any(|(_, o)| o.needs_load) {
         let t_skip = std::time::Instant::now();
@@ -1167,7 +1280,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
         }
     }
     let retry_idxs: Vec<usize> = outcomes.iter().enumerate()
-        .filter(|(_, (_, o))| (skipped_left && o.needs_load) || o.preempted)
+        .filter(|(_, (_, o))| skipped_left && o.needs_load)
         .map(|(idx, _)| idx)
         .collect();
     if !retry_idxs.is_empty() {
@@ -1187,7 +1300,13 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
     let mut seeds = Vec::new();
     // rustc: an item whose body failed its checks (borrowck included) is tainted: it is never evaluated
     let mut tainted: std::collections::HashSet<crate::program::DefId> = std::collections::HashSet::new();
-    for (i, o) in outcomes {
+    for (i, mut o) in outcomes {
+        // a body with no answer is no clean body
+        if o.unchecked {
+            let d = fns[i].0.owner;
+            let e = def_ice(unsafe { &(*up).prog }, d, "the body", "it needs a file to be loaded and none is left");
+            o.errors.push((Stage::of(Phase::Typeck, 0, d), e));
+        }
         if !o.errors.is_empty() || !o.diags.is_empty() { tainted.insert(fns[i].0.owner); }
         errors.extend(o.errors);
         borrow_diagnostics.extend(o.diags);
@@ -1206,7 +1325,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
         let uu = unsafe { &*up };
         for (anon, owner, e) in crate::borrowck::body::body_anon_consts(&uu.prog, &uu.tcx, k) {
             if is_live_default(&uu.prog, owner) { continue; }
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let errs = settled_def(up, anon, "the constant", || {
                 let outer = uu.tcx.typeck(&uu.prog, owner);
                 let owner_typed = outer.has_expr(e) && outer.expr_typed.get(outer.expr_ix(e));
                 let body = uu.tcx.typeck(&uu.prog, anon);
@@ -1215,8 +1334,8 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
                     relax_types::lint_dead::collect_body(&uu.prog, &uu.tcx, &body);
                 }
                 body.errors.to_vec()
-            }));
-            if let Ok(errs) = r { errors.extend(staged(Stage::of(Phase::Typeck, 0, anon), errs)); }
+            }).unwrap_or_else(|failed| vec![failed]);
+            errors.extend(staged(Stage::of(Phase::Typeck, 0, anon), errs));
         }
     }
     st.mark("body anon consts");
@@ -1680,12 +1799,19 @@ fn eval_items(up: *mut Unit, own: &[bool], tainted: &std::collections::HashSet<c
         let before = unsafe { (&*up).errors.len() };
         let t1 = std::time::Instant::now();
         let inner = std::sync::atomic::AtomicU64::new(0);
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::owner::call(crate::owner::Class::Program, || unsafe {
-            let t2 = std::time::Instant::now();
-            let u = &mut *up;
-            if is_static { u.static_addr(d); } else { u.const_addr(d, Vec::new()); }
-            inner.store(t2.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-        })));
+        // (work cancelled on its way is asked again: const_addr's stack pops as it unwinds, and a
+        // static's initializer that unwound runs again into its storage (PendingInit). A panic
+        // is the check's internal error, never a clean item)
+        let evaluated = settled_def(up, d, if is_static { "the static" } else { "the constant" }, || {
+            #[cfg(test)]
+            forced_eval(unsafe { &(*up).prog }, d);
+            crate::owner::call(crate::owner::Class::Program, || unsafe {
+                let t2 = std::time::Instant::now();
+                let u = &mut *up;
+                if is_static { u.static_addr(d); } else { u.const_addr(d, Vec::new()); }
+                inner.store(t2.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            })
+        });
         let inner = inner.load(std::sync::atomic::Ordering::Relaxed) as u128;
         t_queue += t1.elapsed().as_nanos().saturating_sub(inner);
         if is_static { t_static += inner; n_static += 1; } else { t_const += inner; n_const += 1; }
@@ -1695,6 +1821,7 @@ fn eval_items(up: *mut Unit, own: &[bool], tainted: &std::collections::HashSet<c
         while i < u.errors.len() {
             if u.errors[i].starts_with("compile error in ") && u.errors[i].contains("not found in the loaded libraries") { u.errors.remove(i); } else { i += 1; }
         }
+        if let Err(failed) = evaluated { u.errors.push(failed); }
     }
     // (a verdict no evaluation took is not kept for a later check)
     unsafe { (*up).interp_ahead.clear(); }
@@ -1907,4 +2034,48 @@ pub(crate) unsafe fn reset_statics() {
     reset(&CHECK_WAITED, std::sync::atomic::AtomicBool::new(false));
     reset(&BESIDE, (relax_session::sync::Mutex::new(0), relax_session::sync::Condvar::new()));
     reset(&RUN_CHECK, [const { std::sync::atomic::AtomicU64::new(0) }; 5]);
+}
+
+#[cfg(test)]
+mod def_work_tests {
+    use super::{def_work, DefWork};
+
+    fn ice(said: &str) -> String {
+        format!("ice: {said}")
+    }
+
+    /// (the signature pass reported any unwind as an internal error, these silent ones too)
+    #[test]
+    fn work_that_found_the_owner_busy_or_was_preempted_is_asked_again() {
+        let mut tries = 0;
+        let r = def_work(ice, || {
+            tries += 1;
+            match tries {
+                1 => std::panic::resume_unwind(Box::new(crate::preempt::OwnerBusy)),
+                2 => std::panic::resume_unwind(Box::new(crate::preempt::Preempted)),
+                _ => tries,
+            }
+        });
+        assert!(matches!(r, DefWork::Done(3)));
+    }
+
+    #[test]
+    fn work_that_needs_a_file_says_so() {
+        let r = def_work(ice, || -> u32 { std::panic::resume_unwind(Box::new(crate::preempt::NeedsLoad)) });
+        assert!(matches!(r, DefWork::NeedsLoad));
+    }
+
+    #[test]
+    fn a_fatal_diagnostic_is_the_definitions_error() {
+        let r = def_work(ice, || -> u32 { std::panic::resume_unwind(Box::new(relax_types::infer::diagnostics::FatalError("overflow".to_string()))) });
+        assert!(matches!(r, DefWork::Failed(e) if e == "overflow"));
+    }
+
+    #[test]
+    fn a_panic_is_an_internal_error_and_says_what_it_said() {
+        let r = def_work(ice, || -> u32 { panic!("the query's table has no {}", "entry") });
+        assert!(matches!(r, DefWork::Failed(e) if e == "ice: the query's table has no entry"));
+        let r = def_work(ice, || -> u32 { panic!("plain") });
+        assert!(matches!(r, DefWork::Failed(e) if e == "ice: plain"));
+    }
 }

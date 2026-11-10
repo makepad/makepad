@@ -1228,7 +1228,103 @@ pub(crate) fn program_thread(t: &super::threads::Thread) -> bool {
     if (t.handle != 0 && t.handle == main) || t.os_id == std::process::id() as u64 {
         return true;
     }
-    !(t.name.starts_with("run-") || t.name.starts_with("gandalf") || (t.handle != 0 && t.handle == crate::owner::owner_tid()))
+    !(runtime_name(&t.name) || (t.handle != 0 && t.handle == crate::owner::owner_tid()))
+}
+
+/// A name the runtime gives its own threads: its compilers, checks, monitor, writers and the owner
+/// (`run-owner`), and gandalf's.
+fn runtime_name(name: &str) -> bool {
+    name.starts_with("run-") || name.starts_with("gandalf")
+}
+
+/// A thread `runtime_cpu_ns` has seen: its id, whether it is the runtime's (by its name, read on
+/// its first two looks: a thread takes its name just after it starts), and its CPU at the last look.
+#[derive(Clone, Copy)]
+struct Seen {
+    id: u64,
+    runtime: bool,
+    looks: u8,
+    cpu: u64,
+}
+
+/// The CPU the runtime's own threads have run (not `program_thread`s: its compiles, checks,
+/// monitor and owner), in nanoseconds: none of it is the program's work, and a test's idle rule
+/// leaves it out of the app's (makepad_remote::runtime_cpu_ns, through `relax_runtime_cpu_ns`). A
+/// thread that ended keeps what it had run at the last look: the count only grows.
+///
+/// The app's UI thread reads it for every look a test's wait takes (`uicounts`, twice per poll), so
+/// it is cheap: the threads from one listing (`threads::each_thread`), a name only while a thread is
+/// new, and each runtime thread's own CPU clock (ns): about 70 us of the UI thread with 69 threads on
+/// a loaded gate box, 5 of them the clocks. Read from the full thread list (three files a
+/// thread on Linux, one of them waiting for the thread to leave its CPU) the wait's polls cost the
+/// UI thread 4-8 ms each on a loaded gate box, 8% of a core at 20 Hz: an idle Fab read as busy for
+/// two minutes.
+pub fn runtime_cpu_ns() -> u64 {
+    // (the threads at the last look, by id; this look's, kept for its storage; what the runtime
+    // threads that ended since had run)
+    static SEEN: relax_session::sync::Mutex<(Vec<Seen>, Vec<Seen>, u64)> = relax_session::sync::Mutex::new((Vec::new(), Vec::new(), 0));
+    static HOOKED: std::sync::Once = std::sync::Once::new();
+    HOOKED.call_once(|| crate::run_threads::on_thread_end(note_thread_end));
+    crate::zone_alloc::kept_with(|| {
+        let mut g = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        let (last, now, ended) = &mut *g;
+        now.clear();
+        super::threads::each_thread(|id, name, cpu| {
+            let was = last.binary_search_by_key(&id, |s| s.id).ok().map(|i| last[i]);
+            let (runtime, looks) = match was {
+                Some(s) if s.looks >= 2 => (s.runtime, s.looks),
+                _ => (runtime_name(&name()), was.map_or(1, |s| s.looks + 1)),
+            };
+            let cpu = if runtime { cpu().unwrap_or(was.map_or(0, |s| s.cpu)) } else { 0 };
+            now.push(Seen { id, runtime, looks, cpu });
+        });
+        now.sort_unstable_by_key(|s| s.id);
+        let gone = |id: u64| now.binary_search_by_key(&id, |n| n.id).is_err();
+        let mut ends = ENDS.lock().unwrap_or_else(|e| e.into_inner());
+        // a runtime thread that ended (or that took a program thread's name) keeps what it had
+        // run: to its end where it said so (`note_thread_end`), else at the last look
+        for s in last.iter().filter(|s| s.runtime) {
+            let said = gone(s.id) && ends.iter().any(|e| e.0 == s.id);
+            if !said && now.binary_search_by_key(&s.id, |n| n.id).map_or(true, |i| !now[i].runtime) {
+                *ended += s.cpu;
+            }
+        }
+        // what it said, once it is gone (a look that sees it still leaving counts it as running),
+        // whether a look saw it or not: a thread that started and ended between two looks
+        ends.retain(|&(id, cpu)| {
+            if !gone(id) {
+                return true;
+            }
+            *ended += last.binary_search_by_key(&id, |s| s.id).map_or(cpu, |i| cpu.max(last[i].cpu));
+            false
+        });
+        drop(ends);
+        std::mem::swap(last, now);
+        *ended + last.iter().map(|s| s.cpu).sum::<u64>()
+    })
+}
+
+/// The runtime threads that ended and said what they ran to their end (`note_thread_end`): id,
+/// CPU (ns). A look (`runtime_cpu_ns`) takes each once the thread is gone.
+static ENDS: relax_session::sync::Mutex<Vec<(u64, u64)>> = relax_session::sync::Mutex::new(Vec::new());
+
+/// A runtime thread of the run ends (run_threads' end hook, which the first look sets): what it
+/// ran to its end, for the next look, which sees it only while it runs. (Without it, what a
+/// thread ran after the last look, a short check's whole run, counted as the program's: a test's
+/// idle rule saw the test process busy beside the app for minutes, 11-10.)
+fn note_thread_end() {
+    if !std::thread::current().name().is_some_and(runtime_name) {
+        return;
+    }
+    let cpu = relax_session::clock::cpu_ns();
+    let id = super::threads::self_os_id();
+    crate::zone_alloc::kept_with(|| ENDS.lock().unwrap_or_else(|e| e.into_inner()).push((id, cpu)));
+}
+
+/// [`runtime_cpu_ns`] for the program (a loader symbol, jit.rs `loader_symbol`): makepad-remote
+/// finds it at its first read, whichever copy of the program's crates reads it.
+pub(crate) extern "C" fn relax_runtime_cpu_ns() -> u64 {
+    runtime_cpu_ns()
 }
 
 /// The host's UI thread of a hosted run (run.rs `host_thread`: the process's main thread, on the

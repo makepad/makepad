@@ -1,7 +1,8 @@
 //! regalloc::sink_increments (a counter's step moves down to the next read of the counter, past
-//! bounds-check side exits where the counter is dead) and regalloc::sink_branch_compares (a
-//! branch's one-use compare moves to the end of its block): where they move things, where they
-//! must not, and that the host backend's code computes the same sums.
+//! bounds-check side exits where the counter is dead) and regalloc::compares_into_readers (a
+//! branch reads its one-use compare in place, and the mask it tests moves to the end of its
+//! block): where they move things, where they must not, and that the host backend's code computes
+//! the same sums.
 #![cfg(any(all(target_arch = "x86_64", unix), all(target_arch = "aarch64", unix)))]
 use relax_backend::{exec::Code, regalloc, rir::*};
 
@@ -98,7 +99,7 @@ fn moved_steps_compute_the_same_sums() {
 }
 
 #[test]
-fn branch_compare_moves_to_the_block_end() {
+fn branch_compare_moves_into_the_branch() {
     let o = relax_session::Options::default();
     let mut f = Func::new("brc".into(), 0);
     let (a, b) = (f.vreg(Cls::I), f.vreg(Cls::I));
@@ -116,10 +117,12 @@ fn branch_compare_moves_to_the_block_end() {
     f.blocks[1].term = Term::Ret(vec![r]);
     f.blocks[2].term = Term::Ret(vec![a]);
     f.verify().unwrap();
-    let g = regalloc::sink_branch_compares(&o, &f).expect("moved");
+    let g = regalloc::compares_into_readers(&o, &f, |_, _| true).expect("moved");
     g.verify().unwrap();
     let ins = &g.blocks[0].insts;
-    assert!(matches!(ins[ins.len() - 1], Inst::ICmpI(..)) && matches!(ins[ins.len() - 2], Inst::IBinI(IOp::And, ..)), "{:?}", ins);
+    assert!(matches!(g.blocks[0].term, Term::BranchCmp(Cmp::K(Cond::Eq, false, t, 0), 1, 2) if t == m), "{:?}", g.blocks[0].term);
+    assert!(!ins.iter().any(|i| matches!(i, Inst::ICmpI(..))), "the compare is the branch's: {:?}", ins);
+    assert!(matches!(ins[ins.len() - 1], Inst::IBinI(IOp::And, ..)), "{:?}", ins);
     type Entry = extern "C" fn(u64, u64) -> u64;
     let code = Code::new(&compile(&f)).unwrap();
     let run: Entry = unsafe { std::mem::transmute(code.ptr()) };

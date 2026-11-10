@@ -85,7 +85,6 @@ fn boot() -> Result<i32, String> {
     args.push(bundle.join(PACK).as_os_str().as_encoded_bytes().to_vec());
     args.push(conf.package.into_bytes());
     args.extend(conf.flags.into_iter().map(String::into_bytes));
-    relax_compiler::memstat::tune_malloc();
     relax_runner::set_host(&crate::HOST);
     relax_runner::run_with_args(args);
     Ok(0)

@@ -1,8 +1,8 @@
 //! Hashing: Hash, Hasher, BuildHasher, and Hash impls for the primitive and core types.
 //! Primitives feed hashers exactly as real core does (integers via write_<int>, str as its
 //! bytes plus 0xff, slices as a length prefix plus elements), so a user hasher sees the same
-//! byte stream; the default hasher itself (fast.rs) differs from real std's SipHash; RandomState's
-//! keys are real std's (random.rs).
+//! byte stream. DefaultHasher::new hashes as real std's (SipHash-1-3, sip.rs); a RandomState's
+//! hasher is a faster one (fast.rs), keyed as real std's (random.rs).
 
 mod fast;
 mod random;

@@ -582,8 +582,8 @@ pub fn cmd_memory(req: &Req, out: &mut Out) {
     let resident_of = |id: crate::domain::DomainId| heaps.iter().find(|h| h.0 == id).map_or(0, |h| arena_resident(&h.1));
     let domains = crate::domain::list();
     for d in &domains {
-        out.line(&format!("{{\"domain\":{},\"package\":{},\"state\":{},\"arena_in_use_bytes\":{},\"arena_resident_bytes\":{},\"arena_committed_bytes\":{},\"arena_touched_small_bytes\":{},\"arena_live_slot_bytes\":{},\"arena_large_bytes\":{},\"static_committed_bytes\":{},\"threads\":{},\"thread_names\":[{}]}}",
-            d.id, json_str(&d.package), json_str(&format!("{:?}", d.state)), d.arena_in_use, resident_of(d.id), d.arena_committed, d.arena_detail.0, d.arena_detail.1, d.arena_detail.2, d.static_committed, d.threads,
+        out.line(&format!("{{\"domain\":{},\"package\":{},\"state\":{},\"arena_in_use_bytes\":{},\"arena_resident_bytes\":{},\"arena_committed_bytes\":{},\"arena_touched_small_bytes\":{},\"arena_live_slot_bytes\":{},\"arena_large_bytes\":{},\"arena_reserved_bytes\":{},\"static_committed_bytes\":{},\"threads\":{},\"thread_names\":[{}]}}",
+            d.id, json_str(&d.package), json_str(&format!("{:?}", d.state)), d.arena_in_use, resident_of(d.id), d.arena_committed, d.arena_detail.0, d.arena_detail.1, d.arena_detail.2, d.arena_reserved, d.static_committed, d.threads,
             d.thread_names.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(",")));
     }
     // chunk states with resident bytes (MB): attached / listed / released / full, then large, then sparse

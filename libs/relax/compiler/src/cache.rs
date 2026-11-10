@@ -19,8 +19,8 @@
 //! (cache/front_run.rs), which the stores named by the crate fingerprint refer to (front.rs).
 //!
 //! MAKEPAD_RUN_CACHE=on (default) | off | verify | readonly;
-//! The stores live in the workspace's `<target>/relax/cache` (dirs.rs; MAKEPAD_RUN_CACHE_DIR replaces
-//! `<target>/relax` for tests and measurement); MAKEPAD_RUN_CACHE_MAX (MB) caps them (default: twice
+//! Stores live in `<cargo target dir>/makepad-run/cache` (dirs.rs); MAKEPAD_RUN_CACHE_DIR replaces
+//! the run dir for tests and measurement. MAKEPAD_RUN_CACHE_MAX (MB) caps them (default: twice
 //! what the run uses, at least 4096; prune_root).
 
 use crate::borrowck::lazy::StoredVerdict;
@@ -228,8 +228,11 @@ const LEDGER_KEY: u128 = 0;
 // offsets of one block link to one block. 29: image symbol and closure-parent key spans (image.rs
 // skip_*) follow the encoding again; images written before cut keys short. 30: a code entry ended
 // with the trait-object types its code calls through; 31: it no longer does (jit.rs realtime reach
-// follows the trait objects its roots are passed, not every one its code calls through).
-const ENTRY_VERSION: u32 = 31;
+// follows the trait objects its roots are passed, not every one its code calls through). 32: a
+// closure is named by its owner's closure ordinal and its text (closure_ordinal), not by its
+// file version and position, in slot keys and types alike; a block-scoped item by its fn and
+// its ordinal there (stable::block_place), not its offset.
+const ENTRY_VERSION: u32 = 32;
 /// the level of a code entry's code (its tier byte)
 const TIER_O1: u8 = 0;
 const TIER_O3: u8 = 1;
@@ -528,6 +531,9 @@ pub struct CacheStats {
     pub link_ns: u64,
     pub verify_same: u64,
     pub verify_diff: u64,
+    /// cached entries of another tier than the verifying build's (an O2 or O3 rebuild replaced
+    /// the first build's entry): not compared
+    pub verify_other_tier: u64,
     pub packs: u64,
     pub packs_rejected: u64,
     pub index_entries: u64,
@@ -862,6 +868,9 @@ pub struct Cache {
     /// expression has, for expressions this run has not parsed yet: checked when one is
     /// decoded again and when the closure is built (jit: closure_identity_ok)
     closure_fps: HashMap<(u32, u32), u64>,
+    /// (item, its file) -> the item's closures in order (program::closure_exprs): what an
+    /// owner-local closure identity's ordinal counts (closure_ordinal, closure_at)
+    closure_ords: HashMap<(DefId, u32), std::sync::Arc<[u32]>>,
     pub stats: CacheStats,
     pub why_unencodable: HashMap<&'static str, u64>,
     last_why: &'static str,
@@ -1144,6 +1153,7 @@ impl Cache {
             pending_verdicts: HashMap::new(),
             slot_by_bytes: Default::default(),
             closure_fps: HashMap::new(),
+            closure_ords: HashMap::new(),
             stats: CacheStats::default(),
             why_unencodable: HashMap::new(),
             last_why: "",
@@ -1715,6 +1725,36 @@ impl Cache {
         self.closure_fps.get(&(file, expr)).copied()
     }
 
+    /// Item `item`'s closures in order, memoized per item and file version.
+    fn item_closures(&mut self, u: &Unit, item: DefId) -> std::sync::Arc<[u32]> {
+        let file = u.prog.def(item).file;
+        self.closure_ords.entry((item, file)).or_insert_with(|| crate::program::closure_exprs(&u.prog, item).into()).clone()
+    }
+
+    /// Closure `expr` of `file` as its owner knows it, the way rustc's DefPath names a closure:
+    /// its ordinal among the closures of the item that encloses it (`owner`, or the item a closure
+    /// def `owner` is in) and its text, with no file version and no position -- a line added above
+    /// it, or anywhere else in its file, leaves it the same closure (its code's entries still say
+    /// where it is: code keys hash the enclosing bodies' text and position). None: an async fn's
+    /// body, or an expression the item's closures do not hold (it keeps the file-keyed identity).
+    fn closure_ordinal(&mut self, u: &Unit, owner: DefId, file: u32, expr: u32) -> Option<(u32, u64)> {
+        if expr & crate::tcx::ASYNC_FN_BODY != 0 || (owner.0 as usize) >= u.prog.defs.len() { return None; }
+        let item = closure_item(u, owner);
+        if u.prog.def(item).file != file { return None; }
+        let ord = self.item_closures(u, item).iter().position(|&x| x == expr)? as u32;
+        Some((ord, closure_text_only_fp(u, file, expr)?))
+    }
+
+    /// The closure an owner-local identity (closure_ordinal) names in this program: (file,
+    /// expr), when the item's closure at that ordinal has that text.
+    fn closure_at(&mut self, u: &Unit, owner: DefId, ord: u32, fp: u64) -> Option<(u32, u32)> {
+        if (owner.0 as usize) >= u.prog.defs.len() { return None; }
+        let item = closure_item(u, owner);
+        let file = u.prog.def(item).file;
+        let expr = *self.item_closures(u, item).get(ord as usize)?;
+        (closure_text_only_fp(u, file, expr)? == fp).then_some((file, expr))
+    }
+
     fn dec_file(&mut self, u: &Unit, d: &mut D) -> Option<u32> {
         let ident = d.u128()?;
         self.file_by_ident(u, ident)
@@ -1872,6 +1912,18 @@ impl Cache {
                 return self.enc_tys(u, u.tcx.tys.list(args), e, crates, depth);
             }
             TyKind::Closure(file, expr, crate::types::ClosureArgs { parent_args: owner, closure_kind_ty, closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: state }) => {
+                // its owner's closure ordinal (closure_ordinal): the owner's type first, which
+                // names the item the ordinal counts in
+                let def = match u.tcx.tys.kind(owner) { TyKind::FnDef(d, ..) => Some(*d), _ => None };
+                if let Some((ord, fp)) = def.filter(|_| !u.prog.is_edit_version(file)).and_then(|d| self.closure_ordinal(u, d, file, expr)) {
+                    e.u8(28);
+                    crates.push(u.prog.file_crate.get(file as usize).copied().unwrap_or(0));
+                    self.enc_ty(u, owner, e, crates, depth + 1)?;
+                    e.u32(ord);
+                    e.u64(fp);
+                    self.enc_ty(u, closure_kind_ty, e, crates, depth + 1)?; self.enc_ty(u, sig, e, crates, depth + 1)?;
+                    return self.enc_ty(u, state, e, crates, depth + 1);
+                }
                 e.u8(17);
                 crates.push(u.prog.file_crate.get(file as usize).copied().unwrap_or(0));
                 self.enc_file(u, file, e)?;
@@ -2100,6 +2152,17 @@ impl Cache {
                 let owner = self.dec_ty(u, d, depth + 1)?;
                 TyKind::Closure(file, expr, crate::types::ClosureArgs { parent_args: owner, closure_kind_ty: kind, closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: state })
             }
+            28 => {
+                let owner = self.dec_ty(u, d, depth + 1)?;
+                let ord = d.u32()?;
+                let fp = d.u64()?;
+                let TyKind::FnDef(def, ..) = *u.tcx.tys.kind(owner) else { return None };
+                let (file, expr) = self.closure_at(u, def, ord, fp)?;
+                let kind = self.dec_ty(u, d, depth + 1)?;
+                let sig = self.dec_ty(u, d, depth + 1)?;
+                let state = self.dec_ty(u, d, depth + 1)?;
+                TyKind::Closure(file, expr, crate::types::ClosureArgs { parent_args: owner, closure_kind_ty: kind, closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: state })
+            }
             18 => {
                 let rigid = match d.u8()? { 0 => crate::consts::IsRigid::Yes, 1 => crate::consts::IsRigid::No, _ => return None };
                 let tag = d.u8()?;
@@ -2157,7 +2220,7 @@ impl Cache {
             // twins are never cached (their code depends on the sandbox layout of this run)
             FnKey::Shim(shim) => {
                 use relax_types::instance::{ShimKind, ReifyReason};
-                e.u8(3);
+                e.u8(KeyKind::Shim as u8);
                 let def = shim.kind.def_id();
                 let (tag, ty) = match shim.kind {
                     ShimKind::VTable(_) => (0, None),
@@ -2188,12 +2251,12 @@ impl Cache {
                 if base as usize >= u.fns.len() {
                     return None;
                 }
-                e.u8(4);
+                e.u8(KeyKind::Twin as u8);
                 let bk = u.fns[base as usize].key.clone();
                 self.enc_fnkey(u, &bk, e, crates, depth + 1)
             }
             FnKey::Inst(d, args) => {
-                e.u8(0);
+                e.u8(KeyKind::Inst as u8);
                 self.enc_def(u, d, e, crates);
                 self.enc_tys(u, &args, e, crates, 0)
             }
@@ -2201,7 +2264,17 @@ impl Cache {
                 if parent as usize >= u.fns.len() {
                     return None;
                 }
-                e.u8(1);
+                // its owner's closure ordinal, as rustc names it (closure_ordinal)
+                let owner = key_defs(u, &u.fns[parent as usize].key).first().copied();
+                if let Some((ord, fp)) = owner.filter(|_| !u.prog.is_edit_version(file)).and_then(|o| self.closure_ordinal(u, o, file, expr)) {
+                    e.u8(KeyKind::Closure as u8);
+                    crates.push(u.prog.file_crate.get(file as usize).copied().unwrap_or(0));
+                    e.u32(ord);
+                    e.u64(fp);
+                    let pk = u.fns[parent as usize].key.clone();
+                    return self.enc_fnkey(u, &pk, e, crates, depth + 1);
+                }
+                e.u8(KeyKind::ClosureInFile as u8);
                 crates.push(u.prog.file_crate.get(file as usize).copied().unwrap_or(0));
                 self.enc_file(u, file, e)?;
                 e.u32(expr);
@@ -2216,7 +2289,7 @@ impl Cache {
                 None
             }
             FnKey::Glue(g, t) => {
-                e.u8(2);
+                e.u8(KeyKind::Glue as u8);
                 e.u8(g);
                 self.enc_ty(u, t, e, crates, 0)
             }
@@ -3862,8 +3935,12 @@ impl Cache {
             return true;
         }
         let Some(key) = self.manifest_key(root) else { self.manifest_done = true; self.manifest_len = order.len(); return true };
-        // what earlier spills of this run wrote: the image takes those entries too
-        self.index_written();
+        // what earlier spills of this run wrote: the image takes those entries too (mid-run, as the
+        // cache writer opened their stores before this request: open_written)
+        if !self.index_written(crate::preempt::is_stopped()) {
+            if self.verbose { eprintln!("makepad-run cache: startup manifest waits for the stores a spill wrote since this write began"); }
+            return false;
+        }
         crate::run::yield_section("manifest keys");
         let mut list: Vec<(Vec<u8>, u128)> = Vec::with_capacity(order.len());
         let mut before_present = 0;
@@ -3977,7 +4054,7 @@ impl Cache {
     pub fn flush(&mut self) -> Result<usize, String> {
         if self.verbose && self.mode == Mode::Verify {
             let s = &self.stats;
-            eprintln!("makepad-run cache: verify: {} identical, {} different", s.verify_same, s.verify_diff);
+            eprintln!("makepad-run cache: verify: {} identical, {} different, {} of another tier", s.verify_same, s.verify_diff, s.verify_other_tier);
         }
         if self.mode == Mode::ReadOnly {
             return Ok(0);
@@ -4010,6 +4087,52 @@ impl Cache {
             prune_root(root);
         }
         Ok(n)
+    }
+}
+
+/// Declares KeyKind and its byte map together: `of` names every kind the enum has.
+macro_rules! key_kinds {
+    ($($(#[$m:meta])* $name:ident = $v:literal,)*) => {
+        /// The first byte of a slot identity's bytes (enc_fnkey): the kind of key it is. Its readers
+        /// match on this enum without a catch-all, so a new kind does not build until each of
+        /// them says what it does with it (the startup image's count stubs missed a new closure
+        /// kind once, a twin before: KeyKind::counted).
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        #[repr(u8)]
+        pub(crate) enum KeyKind { $($(#[$m])* $name = $v,)* }
+        impl KeyKind {
+            /// The kind a key's first byte names (None: no key's first byte).
+            pub(crate) fn of(b: u8) -> Option<KeyKind> {
+                match b { $($v => Some(KeyKind::$name),)* _ => None }
+            }
+        }
+    };
+}
+
+key_kinds! {
+    /// an instance: its def and type args
+    Inst = 0,
+    /// a closure by its file's identity, its expression and its text (async fn bodies, live
+    /// edits' file versions)
+    ClosureInFile = 1,
+    /// type glue: its kind and type
+    Glue = 2,
+    /// a shim: its kind, def and type args
+    Shim = 3,
+    /// an unverified-mode twin: its base's key
+    Twin = 4,
+    /// a closure by its owner's closure ordinal and its text (closure_ordinal)
+    Closure = 5,
+}
+
+impl KeyKind {
+    /// Slots of this kind count their calls and loops for O3 (jit::counted_key's rule, for the
+    /// slots the startup image installs before their identities decode: jit arm_counters).
+    pub(crate) fn counted(self) -> bool {
+        match self {
+            KeyKind::Inst | KeyKind::ClosureInFile | KeyKind::Closure | KeyKind::Twin => true,
+            KeyKind::Glue | KeyKind::Shim => false,
+        }
     }
 }
 
@@ -4116,41 +4239,91 @@ impl Spill {
 /// first warm run rewrote the whole image (~435 ms on the owner) and started unprelinked.
 static WRITTEN: relax_session::sync::Mutex<Vec<(PathBuf, PathBuf, Vec<u128>)>> = relax_session::sync::Mutex::new(Vec::new());
 
-impl Cache {
-    /// Indexes the code and data entries this run's spills wrote to this cache's stores
-    /// (WRITTEN): the store file is opened again (mapped) and its new entries replace what the
-    /// index had for their keys, as the file's own index does.
-    fn index_written(&mut self) {
-        let mine: Vec<(PathBuf, Vec<u128>)> = {
+/// The stores of WRITTEN's entries, opened and searched off the owner thread (`open_written`):
+/// (cache dir, store path, the store, the keys WRITTEN named in it, (key, entry) of the ones it holds).
+static OPENED: relax_session::sync::Mutex<Vec<(PathBuf, PathBuf, std::sync::Arc<Store>, Vec<u128>, Vec<(u128, u32)>)>> = relax_session::sync::Mutex::new(Vec::new());
+
+/// Opens the stores this run's spills wrote to the cache at `dir` (WRITTEN) and finds the
+/// entries they wrote, for `Cache::index_written`. On the cache writer, not the owner thread: an
+/// open takes the store file's shared lock and reads its index (a mid-run write on a loaded box
+/// held the owner 1.5 s here, while program threads' lazy compiles queued behind it). A store
+/// opened before is opened again once, for its earlier keys and its new ones.
+pub fn open_written(dir: &std::path::Path) {
+    crate::zone_alloc::kept_with(|| {
+        // (process state, in the kept heap: what stays is another cache's, kept as it was)
+        let mut paths: Vec<(PathBuf, Vec<u128>)> = Vec::new();
+        {
             let mut w = WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
-            // (what stays is another cache's, kept as it was: the list lives in the kept heap)
-            let mut mine = Vec::new();
             let mut i = 0;
             while i < w.len() {
-                if w[i].0 == self.dir {
-                    let (_, path, keys) = &w[i];
-                    mine.push((path.clone(), keys.clone()));
-                    crate::zone_alloc::kept_with(|| drop(w.swap_remove(i)));
+                if w[i].0 == dir {
+                    let (_, path, keys) = w.swap_remove(i);
+                    match paths.iter_mut().find(|p| p.0 == path) {
+                        Some(p) => p.1.extend(keys),
+                        None => paths.push((path, keys)),
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        if paths.is_empty() { return; }
+        {
+            let mut o = OPENED.lock().unwrap_or_else(|e| e.into_inner());
+            let mut i = 0;
+            while i < o.len() {
+                match paths.iter_mut().find(|p| o[i].0 == dir && p.0 == o[i].1) {
+                    Some(p) => { let (_, _, _, keys, _) = o.swap_remove(i); p.1.extend(keys); }
+                    None => i += 1,
+                }
+            }
+        }
+        for (path, keys) in paths {
+            let Some(st) = Store::open(&path) else { continue };
+            let want: HashSet<u128> = keys.iter().copied().collect();
+            let found: Vec<(u128, u32)> = st.index.iter().enumerate().filter_map(|(e, ix)| { let key = ix.key; want.contains(&key).then_some((key, e as u32)) }).collect();
+            OPENED.lock().unwrap_or_else(|e| e.into_inner()).push((dir.to_path_buf(), path, std::sync::Arc::new(st), keys, found));
+        }
+    });
+}
+
+impl Cache {
+    /// Indexes the code and data entries this run's spills wrote to this cache's stores, as
+    /// `open_written` found them: their entries replace what the index had for their keys, as the
+    /// file's own index does. `open`: the stores not opened yet are opened here first (the exit:
+    /// nothing waits for the owner thread then). false: a spill wrote to this cache since the last
+    /// `open_written` (a mid-run startup image waits for the next write, which opens it).
+    fn index_written(&mut self, open: bool) -> bool {
+        if open { open_written(&self.dir); }
+        let mine: Vec<(std::sync::Arc<Store>, Vec<(u128, u32)>)> = crate::zone_alloc::kept_with(|| {
+            let mut o = OPENED.lock().unwrap_or_else(|e| e.into_inner());
+            let mut mine = Vec::new();
+            let mut i = 0;
+            while i < o.len() {
+                if o[i].0 == self.dir {
+                    let (_, _, st, _, found) = o.swap_remove(i);
+                    mine.push((st, found));
                 } else {
                     i += 1;
                 }
             }
             mine
-        };
-        for (path, keys) in mine {
-            let Some(st) = Store::open(&path) else { continue };
-            let keys: HashSet<u128> = keys.into_iter().collect();
+        });
+        for (st, found) in &mine {
+            if found.is_empty() { continue; }
             let si = self.stores.len() as u32;
-            let mut n = 0;
-            for (e, ix) in st.index.iter().enumerate() {
-                let key = ix.key;
-                if keys.contains(&key) {
-                    self.index.insert(key, (si, e as u32));
-                    n += 1;
-                }
+            for &(key, e) in found {
+                self.index.insert(key, (si, e));
             }
-            if n != 0 { self.stores.push(std::sync::Arc::new(st)); }
+            self.stores.push(st.clone());
         }
+        crate::zone_alloc::kept_with(|| drop(mine));
+        !WRITTEN.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|w| w.0 == self.dir)
+    }
+
+    /// The directory of this cache's stores
+    pub fn dir(&self) -> &std::path::Path {
+        &self.dir
     }
 }
 
@@ -4671,8 +4844,9 @@ fn prim_of(c: u8) -> Option<crate::program::Prim> {
 }
 
 /// A definition's key: its parent's key (the crate's identity at the root), name, kind,
-/// defining file and, for an item its path does not name (block-scoped, `const _`), its offset
-/// there -- the identity stable::def_ident gives TypeId (memoized in `memo`; parents are in
+/// defining file and, for an item its path does not name (block-scoped, `const _`), its place
+/// there (stable::block_place: its fn's key and its ordinal) -- the identity stable::def_ident
+/// gives TypeId (memoized in `memo`; parents are in
 /// the same crate).
 fn def_key_in(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, crate_ident: &[u128], memo: &mut HashMap<DefId, u128>, files: &mut HashMap<u32, u128>, d: DefId) -> u128 {
     if let Some(&k) = memo.get(&d) {
@@ -4686,10 +4860,15 @@ fn def_key_in(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, crate_ident
     h.str(prog.syms.str(def.name));
     h.u32(def_kind_code(&def.kind));
     h.u128(fk);
-    // the item's offset only when its path does not name it -- the identity TypeId uses
+    // the item's place only when its path does not name it -- the identity TypeId uses
     // (stable::def_ident): a key and the TypeId folded into its code never disagree
-    if crate::stable::ident_has_offset(prog, d) {
-        h.u32(prog.files.get(def.file as usize).and_then(|f| f.ast.items.get(def.item.0 as usize)).map_or(u32::MAX, |it| it.lo));
+    if crate::stable::ident_has_place(prog, d) {
+        let (owner, ord) = crate::stable::block_place(prog, d);
+        if let Some(o) = owner {
+            h.str("block of");
+            h.u128(def_key_in(prog, tcx, crate_ident, memo, files, o));
+        }
+        h.u32(ord);
     }
     // not def.sub: module / impl indices are global to the program (they differ per app).
     // Impls (derived ones share their type's item) by what they implement for what.
@@ -4807,17 +4986,25 @@ fn provided_value(u: &Unit, name: &str) -> Option<u64> {
 impl Cache {
     /// Verify mode: the entry this run would record for slot `id` (fresh code + relocs) against
     /// the cached entry: same declared nounwind inputs, pool-zeroed code and encoded
-    /// relocations. Prints the first difference, including changed conservative answers.
-    pub fn verify_entry(&mut self, u: &Unit, id: u32, fresh: &[u8], relocs: &[RelocAt]) -> bool {
+    /// relocations. Prints the first difference, including changed conservative answers. None:
+    /// the cached code is another tier than the fresh build's (baseline or O1), so the two say
+    /// nothing about each other.
+    pub fn verify_entry(&mut self, u: &Unit, id: u32, fresh: &[u8], relocs: &[RelocAt]) -> Option<bool> {
         let key = match self.slot_key(u, id) {
             Some(k) => k,
-            None => return true,
+            None => return Some(true),
         };
         let cached = match self.get(key) {
             Some((KIND_CODE, p)) => p.to_vec(),
-            _ => return true,
+            _ => return Some(true),
         };
-        let mut d = D { b: &cached, p: 0 };
+        let fresh_tier = if u.fns[id as usize].rir.as_ref().is_some_and(|r| r.baseline) { TIER_BASE } else { TIER_O1 };
+        if payload_tier(&cached).is_some_and(|t| t != fresh_tier) { return None; }
+        Some(self.verify_same_tier(u, id, &cached, fresh, relocs))
+    }
+
+    fn verify_same_tier(&mut self, u: &Unit, id: u32, cached: &[u8], fresh: &[u8], relocs: &[RelocAt]) -> bool {
+        let mut d = D { b: cached, p: 0 };
         if d.u32() != Some(ENTRY_VERSION) || d.str().is_none() { return false; }
         let Some((start, end)) = skip_build_inputs(&mut d) else { return false };
         let facts = u.fns[id as usize].rir.as_ref().map_or(&[][..], |r| r.nounwind_inputs.as_slice());
@@ -4975,6 +5162,31 @@ fn closure_text_fp(u: &Unit, file: u32, expr: u32) -> Option<u64> {
     h.write(pf.bytes(lo, hi));
     h.u32(at.lo);
     h.u32(at.hi);
+    Some(h.finish128() as u64)
+}
+
+/// The item a closure def is in (closure defs' parents, up to the first that is no closure).
+fn closure_item(u: &Unit, mut d: DefId) -> DefId {
+    for _ in 0..64 {
+        let def = u.prog.def(d);
+        if def.kind != DefKind::Closure || def.parent == NO_DEF { break; }
+        d = def.parent;
+    }
+    d
+}
+
+/// A closure expression's text alone (closure_ordinal's identity): closure_text_fp without
+/// where the text is.
+fn closure_text_only_fp(u: &Unit, file: u32, expr: u32) -> Option<u64> {
+    let pf = u.prog.files.get(file as usize)?;
+    let x = crate::ast::ExprId(expr);
+    if !pf.ast.has_expr(x) {
+        return None;
+    }
+    let x = pf.ast.expr(x);
+    let mut h = Sip128::new();
+    h.str("closure-text");
+    h.write(pf.bytes(x.lo, x.hi));
     Some(h.finish128() as u64)
 }
 
@@ -7340,9 +7552,11 @@ mod data_tests {
         pub(super) static BEFORE_LINK: std::cell::RefCell<Option<Box<dyn FnOnce(&mut Unit)>>> = Default::default();
     }
 
+    /// Every kind of fn key round-trips (encode, decode, the image's skip), and the startup image
+    /// arms the slot of each key's first byte as arm_counter arms the decoded key.
     #[test]
-    fn round23_shim_keys_roundtrip() {
-        isolated_test!(round23_shim_keys_roundtrip);
+    fn round23_fn_keys_roundtrip() {
+        isolated_test!(round23_fn_keys_roundtrip);
         use relax_types::instance::{ShimKind, ReifyReason};
         let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
         let mut session = crate::Session::default();
@@ -7377,17 +7591,33 @@ mod data_tests {
         let array = u.tcx.tys.intern(TyKind::Array(u.tcx.tys.usize_, u.tcx.tys.const_usize(3)));
         let tuple = u.tcx.tys.intern(TyKind::Tuple(u.tcx.tys.mk_list(&[array, reference])));
         let slice = u.tcx.tys.intern(TyKind::Slice(tuple));
+        let mut keys: Vec<FnKey> = kinds.into_iter().map(|kind| FnKey::Shim(crate::jit::ShimInstance { kind, args: vec![callable, pointer, borrowed, early, alias, object, reference, array, tuple, slice] })).collect();
+        // an instance, its unverified-mode twin, and the closures of an instance (keyed by their
+        // owner's ordinal)
+        let owner = named("owner");
+        let owner_slot = u.fn_id(FnKey::Inst(owner, vec![]));
+        let method_slot = u.fn_id(FnKey::Inst(method, vec![]));
+        keys.extend([FnKey::Inst(method, vec![]), FnKey::Plain(method_slot)]);
+        let owner_file = u.prog.def(owner).file;
+        let owner_closures = cache.item_closures(&u, owner);
+        assert_eq!(owner_closures.len(), 2);
+        keys.extend(owner_closures.iter().map(|&expr| FnKey::Closure(owner_file, expr, owner_slot)));
         let mut encoded = Vec::new();
-        for kind in kinds {
-            let key = FnKey::Shim(crate::jit::ShimInstance { kind, args: vec![callable, pointer, borrowed, early, alias, object, reference, array, tuple, slice] });
+        for key in keys {
             let mut bytes = E::default();
             let mut crates = vec![];
             assert!(cache.enc_fnkey(&u, &key, &mut bytes, &mut crates, 0).is_some());
+            if matches!(key, FnKey::Closure(..)) {
+                assert_eq!(bytes.0[0], KeyKind::Closure as u8, "a closure of an instance is keyed by its ordinal");
+            }
+            // the startup image arms a slot by its key's first byte (before the key decodes): as
+            // arm_counter arms the decoded key (a closure left unarmed ran its image code for good)
+            assert_eq!(KeyKind::of(bytes.0[0]).is_some_and(KeyKind::counted), crate::jit::counted_key(&u, &key), "the startup image arms {key:?} as arm_counter does");
             // the image's walk of a key finds the crates its encoder named (Img::key_ok)
             crates.sort_unstable();
             crates.dedup();
             assert_eq!(cache.key_crates(&u, &bytes.0), Some(crates));
-            assert!(!encoded.contains(&bytes.0), "colliding shim key");
+            assert!(!encoded.contains(&bytes.0), "colliding fn key");
             encoded.push(bytes.0);
         }
         u.tcx = crate::tcx::Tcx::new();
@@ -7981,6 +8211,34 @@ mod data_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A mid-run write indexes the code its spills wrote for the startup manifest, but the owner
+    /// thread never opens their stores: the cache writer opens them first (`open_written`), and an
+    /// unopened write makes the manifest wait. A store written again after it was opened is
+    /// opened again for its earlier keys and its new ones.
+    #[test]
+    fn written_code_is_indexed_only_from_stores_opened_off_the_owner() {
+        isolated_test!(written_code_is_indexed_only_from_stores_opened_off_the_owner);
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let (root, prog, _) = front_fixture(sess, "written");
+        let u = Unit::new(prog, crate::tcx::Tcx::new(), 0);
+        let mut c = open_test_cache(&u, &root);
+        let (first, second) = (0x51u128 << 64 | 1, 0x52u128 << 64 | 2);
+        let spill = |c: &mut Cache, key: u128| {
+            c.pending.push((0, NewEntry { key, kind: KIND_CODE, payload: vec![7; 16] }));
+            c.spill_take().unwrap().write().unwrap();
+        };
+        spill(&mut c, first);
+        assert!(!c.index_written(false), "an unopened write must make the manifest wait");
+        assert!(!c.has_index(&first), "the owner must not open a written store itself");
+        open_written(&c.dir);
+        spill(&mut c, second);
+        open_written(&c.dir);
+        assert!(c.index_written(false), "every write was opened");
+        assert!(c.has_index(&first) && c.has_index(&second), "a store opened again keeps its earlier keys");
+        drop(c);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn front_record_rejects_unexplained_files_and_metadata_changes() {
         isolated_test!(front_record_rejects_unexplained_files_and_metadata_changes);
@@ -8374,12 +8632,12 @@ impl Linker {
         if depth > 32 {
             return None;
         }
-        Some(match d.u8()? {
-            0 => {
+        Some(match KeyKind::of(d.u8()?)? {
+            KeyKind::Inst => {
                 let def = self.cache().dec_def(u, d)?;
                 FnKey::Inst(def, self.cache().dec_tys(u, d, 0)?)
             }
-            1 => {
+            KeyKind::ClosureInFile => {
                 let file = self.cache().dec_file(u, d)?;
                 let expr = d.u32()?;
                 if !self.cache().closure_fp_agrees(u, file, expr, d.u64()?) { return None; }
@@ -8393,11 +8651,25 @@ impl Linker {
                 };
                 FnKey::Closure(file, expr, parent)
             }
-            2 => {
+            KeyKind::Closure => {
+                let ord = d.u32()?;
+                let fp = d.u64()?;
+                let parent = match self.image_slot_at(u, d) {
+                    Some(p) => p,
+                    None => {
+                        let pk = self.dec_fnkey(u, d, depth + 1)?;
+                        u.fn_id(pk)
+                    }
+                };
+                let owner = *key_defs(u, &u.fns[parent as usize].key).first()?;
+                let (file, expr) = self.cache().closure_at(u, owner, ord, fp)?;
+                FnKey::Closure(file, expr, parent)
+            }
+            KeyKind::Glue => {
                 let g = d.u8()?;
                 FnKey::Glue(g, self.cache().dec_ty(u, d, 0)?)
             }
-            3 => {
+            KeyKind::Shim => {
                 use relax_types::instance::{ShimKind, ReifyReason};
                 let tag = d.u8()?;
                 let def = self.cache().dec_def(u, d)?;
@@ -8413,7 +8685,7 @@ impl Linker {
                 FnKey::Shim(crate::jit::ShimInstance { kind, args: self.cache().dec_tys(u, d, 0)? })
             }
             // SPEC-V: an unverified-mode twin, keyed by its base (a base the startup image names: its slot)
-            4 => {
+            KeyKind::Twin => {
                 let base = match self.image_slot_at(u, d) {
                     Some(b) => b,
                     None => {
@@ -8423,7 +8695,6 @@ impl Linker {
                 };
                 FnKey::Plain(base)
             }
-            _ => return None,
         })
     }
 
@@ -9623,6 +9894,7 @@ pub(crate) unsafe fn reset_statics() {
     warm_count::reset_statics();
     reset(&FRONT_USED, relax_session::sync::Mutex::new(Vec::new()));
     reset(&WRITTEN, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&OPENED, relax_session::sync::Mutex::new(Vec::new()));
     reset(&TRACE, relax_session::sync::Mutex::new(None));
     reset(&FRONT_GRAPH_WRITES, relax_session::sync::Mutex::new(Vec::new()));
     reset(&DEFERRED_FRONT, relax_session::sync::Mutex::new(Vec::new()));
