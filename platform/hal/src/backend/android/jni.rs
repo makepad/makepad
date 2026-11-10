@@ -369,8 +369,22 @@ pub(super) fn ime_command(cmd: OsCmd) -> bool {
         };
         let ok = if activity.is_null() { false } else { match cmd {
             OsCmd::ImeShow { config, .. } => {
-                let ok = void(env, activity, c"configureKeyboard", c"(IIIIZZ)V", &[jvalue { i: if config & 8 != 0 { 8 } else { 0 } }, jvalue { i: 0 }, jvalue { i: 0 }, jvalue { i: if config & 4 != 0 { 5 } else { 0 } }, jvalue { z: (config & 1 != 0) as u8 }, jvalue { z: (config & 2 != 0) as u8 }]);
-                ok && void(env, activity, c"showKeyboard", c"(Z)V", &[jvalue { z: (config & 8 == 0) as u8 }])
+                use input::ime_config as cfg;
+                // the Cx enums' variants in declaration order (see `ime_config`), as MakepadSurface's constants
+                let input_mode = match cfg::field(config, cfg::INPUT_MODE_SHIFT, 4) {
+                    // Text Ascii Url Numeric Tel Email Decimal Search
+                    mode @ 1..=8 if config & cfg::READ_ONLY == 0 => mode as i32 - 1,
+                    // None, and a read-only field: no keyboard
+                    _ => 8,
+                };
+                // None Words Sentences AllCharacters, and Default Enabled Disabled: the same numbers in Java
+                let autocapitalize = cfg::field(config, cfg::AUTOCAPITALIZE_SHIFT, 2) as i32;
+                let autocorrect = cfg::field(config, cfg::AUTOCORRECT_SHIFT, 2) as i32;
+                // Default None Go Google Join Next Route Search Send Yahoo Done EmergencyCall Continue Previous,
+                // each as the closest RETURN_KEY_* Java has
+                let return_key = [0, 6, 1, 2, 1, 4, 1, 2, 3, 2, 5, 5, 4, 7].get(cfg::field(config, cfg::RETURN_KEY_SHIFT, 4) as usize).copied().unwrap_or(0);
+                let ok = void(env, activity, c"configureKeyboard", c"(IIIIZZ)V", &[jvalue { i: input_mode }, jvalue { i: autocapitalize }, jvalue { i: autocorrect }, jvalue { i: return_key }, jvalue { z: (config & cfg::MULTILINE != 0) as u8 }, jvalue { z: (config & cfg::SECURE != 0) as u8 }]);
+                ok && void(env, activity, c"showKeyboard", c"(Z)V", &[jvalue { z: (config & cfg::READ_ONLY == 0) as u8 }])
             }
             OsCmd::ImeHide { .. } => void(env, activity, c"showKeyboard", c"(Z)V", &[jvalue { z: 0 }]),
             OsCmd::ImeSync { selection, composition, text, .. } => {
