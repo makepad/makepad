@@ -5873,10 +5873,11 @@ impl<'a> Fcx<'a> {
                             // unsizes to (rustc method/probe.rs lookup_indexing: unsize step)
                             // (a generic index of a polymorphic body -- `I: SliceIndex<[T]>` --
                             // goes through std's `impl<T, I: SliceIndex<[T]>> Index<I> for [T]`:
-                            // the result is `<I as SliceIndex<[T]>>::Output`)
+                            // the result is `<I as SliceIndex<[T]>>::Output`; a pair of bounds,
+                            // `(Bound<usize>, Bound<usize>)`, is an index of that impl too)
                             let std_range = match self.tcx.tys.kind(tis) {
                                 TyKind::Adt(..) => idx_is_range,
-                                TyKind::Param(_) | TyKind::Alias(_, AliasTy { kind: AliasTyKind::Projection { .. }, .. }) => false,
+                                TyKind::Param(_) | TyKind::Tuple(_) | TyKind::Alias(_, AliasTy { kind: AliasTyKind::Projection { .. }, .. }) => false,
                                 _ => true,
                             };
                             if !std_range {
