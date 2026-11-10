@@ -4684,6 +4684,13 @@ impl PortalListRef {
         }
     }
 
+    /// Stops any fling or smooth scroll, e.g., before jumping somewhere with `set_first_id_and_scroll()`.
+    pub fn stop_scrolling(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.stop_all_scroll_motion();
+        }
+    }
+
     /// See [`PortalList::set_first_id_and_scroll_in_place()`].
     pub fn set_first_id_and_scroll_in_place(&self, first_id: usize, first_scroll: f64) {
         if let Some(mut inner) = self.borrow_mut() {
