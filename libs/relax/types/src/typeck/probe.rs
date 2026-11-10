@@ -109,8 +109,11 @@ impl Fcx<'_> {
     }
 
     /// :880-1203: collect candidates before testing receiver adjustments. Bounds on
-    /// a parameter and object methods have inherent priority; alias bounds extend
-    /// the trait candidates. All predicates retain their binders and lifetime args.
+    /// a parameter and object methods have inherent priority. An alias (an associated
+    /// or opaque type) gets no candidates from its own bounds: only the traits in scope
+    /// apply to it, and the solver proves them through those bounds (rustc 1.97 rejects
+    /// `t.get().hello()` with E0599 when `T::A: Tr` holds and `Tr` is not in scope).
+    /// All predicates retain their binders and lifetime args.
     fn assemble_probe_candidates(&self, steps: &[CandidateStep], name: Sym) -> (Vec<Candidate>, Vec<Candidate>) {
         let mut inherent = Vec::new();
         let mut extension = Vec::new();
@@ -143,7 +146,6 @@ impl Fcx<'_> {
                     p.bound_vars = vec![crate::next_solver::BoundVariableKind::Region(crate::types::BoundRegionKind::Anon); *bound as usize].into();
                     self.assemble_candidates_for_bounds(self.tcx.supertraits(self.prog, p), name, 1, &mut inherent);
                 }
-                TyKind::Alias(..) => self.assemble_candidates_for_bounds(self.alias_bound_clauses(ty), name, 2, &mut extension),
                 _ => {}
             }
         }
