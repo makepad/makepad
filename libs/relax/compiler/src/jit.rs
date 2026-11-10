@@ -34,8 +34,10 @@ pub enum FnKey {
     Inst(DefId, Vec<TyId>),
     /// (file, closure expr, parent fn slot)
     Closure(u32, u32, u32),
-    /// compiler-generated helper for a type: (kind, type); GLUE_DROP = drop in place
-    Glue(u8, TyId),
+    /// compiler-generated helper for a type: (kind, type); GLUE_DROP = drop in place. The kind
+    /// is as wide as a variant index: a constructor's kind is GLUE_CTOR + its variant's index,
+    /// and stylo's `PropertyDeclaration` alone has several hundred tuple variants.
+    Glue(u32, TyId),
     /// the sandboxed twin of a slot (sandbox.rs): the same RIR compiled with every memory
     /// access confined to the calling module's arena, calls and fn values redirected to twins
     Sandbox(u32),
@@ -53,8 +55,8 @@ pub struct ShimInstance {
     pub args: Vec<TyId>,
 }
 
-pub const GLUE_DROP: u8 = 0;
-pub const GLUE_CLONE: u8 = 4;
+pub const GLUE_DROP: u32 = 0;
+pub const GLUE_CLONE: u32 = 4;
 /// `dyn Fn` entry for a callable without state (fn item, fn pointer, capture-free closure):
 /// `fn(env, args..) -> R` forwarding to it
 
@@ -62,10 +64,10 @@ pub const GLUE_CLONE: u8 = 4;
 
 /// a tuple-struct / tuple-variant constructor used as a fn value: GLUE_CTOR + variant index,
 /// for the constructor's fn pointer type `fn(fields..) -> Adt`
-pub const GLUE_CTOR: u8 = 16;
+pub const GLUE_CTOR: u32 = 16;
 /// a slot of the startup image whose identity is still encoded (cache/image.rs, `name_slot`), or
 /// whose key did not decode: never built
-pub const GLUE_UNNAMED: u8 = 15;
+pub const GLUE_UNNAMED: u32 = 15;
 
 /// A slot. Its own heap data lives in the unit-lifetime slot arena, separately from the
 /// front-end state a settle rebuild drops. RIR is disposable compiler state; slot call lists,
@@ -6493,7 +6495,7 @@ impl Unit {
                     let r = self.tcx.normalize_erasing_late_bound_regions(&self.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.prog), self.tcx.tys.subst(sig.ret, args));
                     let fp = self.tcx.tys.intern(TyKind::FnPtr(self.tcx.tys.mk_list(&ps), r, sig.header, 0));
                     let vi = if k == crate::program::DefKind::Variant { self.prog.def(*d).sub } else { 0 };
-                    let id = self.fn_id(FnKey::Glue(GLUE_CTOR + vi as u8, fp));
+                    let id = self.fn_id(FnKey::Glue(GLUE_CTOR + vi, fp));
                     self.fn_map.insert(crate::zone_alloc::kept_clone(&key), id);
                     return id;
                 }
