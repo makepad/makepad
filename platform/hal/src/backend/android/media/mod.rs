@@ -1,10 +1,10 @@
 //! Android media services for the HAL: camera, playback, SAF file dialog, permissions,
 //! location, haptics (workers `Worker<E>` per session) and AAudio / AMidi (two control
-//! workers per session). Wired like Linux's media: Vulkan calls `command`, `drain`,
-//! `next_due`, `session_closed`, and forwards FileDialog OsCmds to `dialog`.
+//! workers per session). Wired like Linux's media: the GPU core (Vulkan or GLES) calls `command`,
+//! `drain`, `next_due`, `session_closed`, and forwards FileDialog OsCmds to `dialog`.
 //!
 //! Playback uses the Java MediaPlayer/SurfaceTexture on a private EGL worker, reads RGBA
-//! there, and stages it through Gpu texture hooks; GL names never enter Vulkan. Camera
+//! there, and stages it through Gpu texture hooks; its GL names never reach the core. Camera
 //! capture copies strided YUV/JPEG on its worker; only texture staging and event packing
 //! run in the HAL pump. Frame mailboxes retain the latest frame per consumer; control and
 //! reply queues are lossless. The one-command worker pipe retries on pressure.
@@ -30,7 +30,7 @@ pub mod stream_decode;
 pub mod video_file;
 
 use crate::{
-    backend::{exec::OsCmd, vulkan::Vulkan},
+    backend::exec::{Gpu, OsCmd},
     cmds::HalCmd,
     media::*,
     session::Session,
@@ -429,7 +429,7 @@ impl AndroidMedia {
         }
         Ok(self.sessions.get_mut(&sid).unwrap())
     }
-    pub fn command(&mut self, gpu: &mut Vulkan, s: &mut Session, c: &HalCmd) -> bool {
+    pub fn command(&mut self, gpu: &mut dyn Gpu, s: &mut Session, c: &HalCmd) -> bool {
         if matches!(c, HalCmd::NativeLayerCreate { .. } | HalCmd::NativeLayerOp { .. } | HalCmd::NativeLayerDestroy { .. }) { return self.native_command(s, c); }
         if let HalCmd::Haptic { kind } = *c { return self.haptic(s.id, kind); }
         if matches!(c, HalCmd::AudioUse { .. } | HalCmd::AudioEntry { .. } | HalCmd::Midi { .. }) { return self.control_command(s, c); }
@@ -629,7 +629,7 @@ impl AndroidMedia {
             Err(e) => { eprintln!("[hal-android-haptic] {e}"); false }
         }
     }
-    pub fn drain(&mut self, gpu: &mut Vulkan, s: &mut Session) {
+    pub fn drain(&mut self, gpu: &mut dyn Gpu, s: &mut Session) {
         let sm = match self.session(s.id) { Ok(sm) => sm, Err(e) => { eprintln!("[hal-android-media] {e}"); return; } };
         sm.camera.flush();
         if let Some(w) = &mut sm.video { w.flush(); }

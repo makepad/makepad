@@ -1,5 +1,5 @@
-use super::{jni, surface::{AndroidSurfaces, Registry}};
-use crate::{backend::{exec::{Gpu, OsCmd}, vulkan::{Shell, Vulkan}, Backend, Pixels}, buffers::{CmdView, EventQueue}, session::{World, HOST}, *};
+use super::{jni, surface::{AndroidEglSurfaces, AndroidSurfaces, Registry}};
+use crate::{backend::{exec::{Gpu, OsCmd}, gl::GlBackend, vulkan::Vulkan, Backend, Pixels, Shell}, buffers::{CmdView, EventQueue}, session::{World, HOST}, *};
 use std::{collections::HashSet, sync::{Arc, Mutex, MutexGuard, OnceLock}};
 
 pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> { m.lock().unwrap_or_else(|e| e.into_inner()) }
@@ -160,7 +160,26 @@ impl Shell for AndroidShell {
     }
 }
 
-pub struct AndroidBackend { core: Vulkan, host: Option<Id>, offscreen: bool }
+/// The backend `hal_open` makes on Android: Vulkan where the device has Vulkan 1.1, GLES 3
+/// everywhere else. `MAKEPAD_HAL_BACKEND` (`gl` or `vulkan`, read by `OpenReq::from_env`) or the
+/// `debug.makepad.hal_backend` system property picks one, without falling back to the other.
+pub fn open(backend: u32, flags: u32, sessions: crate::backend::SessionNotify, wake: Arc<dyn Fn() + Send + Sync>, notify: Arc<dyn Fn() + Send + Sync>) -> Result<Box<dyn Backend>, String> {
+    let backend = match (backend, super::xr::system_property("debug.makepad.hal_backend").as_deref()) {
+        (backend_id::AUTO, Some("gl")) => backend_id::GL,
+        (backend_id::AUTO, Some("vulkan")) => backend_id::VULKAN,
+        (backend, _) => backend,
+    };
+    if backend != backend_id::GL {
+        match AndroidBackend::new(flags, sessions, notify.clone()) {
+            Ok(vulkan) => return Ok(Box::new(vulkan)),
+            Err(e) if backend == backend_id::VULKAN => return Err(e),
+            Err(e) => eprintln!("[hal-android] no Vulkan 1.1 ({e}), drawing with GLES"),
+        }
+    }
+    Ok(Box::new(AndroidBackend::with_gl(flags, wake, notify)?))
+}
+
+pub struct AndroidBackend { core: Box<dyn Backend>, host: Option<Id>, offscreen: bool }
 impl AndroidBackend {
     /// `notify` makes every pump look (the Activity's events and frame callbacks); `sessions` the
     /// session a GPU result is for.
@@ -174,7 +193,16 @@ impl AndroidBackend {
         let mut core = Vulkan::with_sources(flags, sessions, source, Box::new(crate::backend::vulkan::shared_images()))?;
         if !offscreen { core.set_shell(Box::new(AndroidShell)); }
         lock(&Shared::global().state).wake = Some(notify);
-        Ok(Self { core, host: None, offscreen })
+        Ok(Self { core: Box::new(core), host: None, offscreen })
+    }
+
+    /// GLES 3 through EGL on the Activity's `ANativeWindow`, for devices without Vulkan 1.1.
+    pub fn with_gl(flags: u32, wake: Arc<dyn Fn() + Send + Sync>, notify: Arc<dyn Fn() + Send + Sync>) -> Result<Self, String> {
+        let offscreen = flags & open_flags::OFFSCREEN_WINDOWS != 0;
+        let shell: Option<Box<dyn Shell>> = if offscreen { None } else { Some(Box::new(AndroidShell)) };
+        let core = GlBackend::with_source(wake, Box::new(AndroidEglSurfaces { offscreen }), shell)?;
+        lock(&Shared::global().state).wake = Some(notify);
+        Ok(Self { core: Box::new(core), host: None, offscreen })
     }
     pub fn params() -> AndroidParams { lock(&Shared::global().state).params.clone() }
     fn ensure_host(&mut self, world: &mut World) {

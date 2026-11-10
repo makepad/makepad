@@ -466,8 +466,8 @@ impl Hal {
                 #[cfg(target_os = "android")]
                 // the Activity's events and frame callbacks make the pumps look (no `Wake` for every
                 // app); a GPU result its own session's
-                backend_id::VULKAN => match backend::android::AndroidBackend::new(req.flags, sessions.clone(), notify.clone()) {
-                    Ok(v) => Some(Box::new(v)),
+                backend_id::AUTO | backend_id::VULKAN | backend_id::GL => match backend::android::open(id, req.flags, sessions.clone(), wake.clone(), notify.clone()) {
+                    Ok(b) => Some(b),
                     Err(e) => { eprintln!("[hal-android] {e}"); None }
                 },
                 _ => None,

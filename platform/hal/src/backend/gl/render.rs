@@ -41,6 +41,7 @@ pub(super) struct Caps {
     /// a software rasterizer: the default selection prefers hardware Vulkan and GL to it
     pub software: bool,
     /// the EGL display, config and context of the share group (the `GlShare` event)
+    #[cfg(target_os = "linux")]
     pub share: [u64; 3],
 }
 
@@ -246,6 +247,7 @@ impl Renderer {
             float_blend: has("GL_EXT_float_blend"),
             renderer: format!("{} ({version})", gl.string(sys::RENDERER)),
             software: ctx.software(),
+            #[cfg(target_os = "linux")]
             share: [ctx.share.display as u64, ctx.share.config as u64, ctx.share.context as u64],
         });
         let mut names = [0; 4];

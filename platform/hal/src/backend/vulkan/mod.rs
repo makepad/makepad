@@ -33,6 +33,8 @@ pub use share::{picture_ticket, release_picture_ticket, shared_images};
 pub use surface::{Offscreen, VkSurfaceSource};
 
 use super::exec::{self, Gpu, PipeStatus};
+#[cfg(target_os = "android")]
+use super::Shell;
 use super::{Backend, Pixels};
 use crate::buffers::{CmdView, PipelineBlob};
 use crate::ledger::{Kind, LedgerEntry};
@@ -53,13 +55,6 @@ struct Retained { gen: u32, buffer: Arc<Buffer>, evictable: bool }
 /// shader of another session, whose names (string ids) are that session's; the GPU profiler names
 /// the pipeline by this one.
 struct Pipe { gen: u32, state: Arc<State>, epoch: u64, announced: bool, desc: PipelineDesc }
-
-/// Native window-system work stays outside the GPU core.
-pub trait Shell: Send {
-    fn command(&mut self, session: u32, cmd: exec::OsCmd) -> bool;
-    fn lent(&mut self, session: u32, alias: Id, host: Id, attach: bool);
-    fn auto_adopt(&self) -> bool { false }
-}
 
 pub struct Vulkan {
     #[cfg(target_os = "linux")]
