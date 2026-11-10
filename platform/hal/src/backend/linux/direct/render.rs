@@ -130,7 +130,11 @@ impl CardDriver for Kms<'_> {
 impl Card {
     fn open(path: &Path, device: &Arc<Device>) -> Result<Self,String> {
         let file = OpenOptions::new().read(true).write(true).open(path).map_err(|e| format!("{}: {e}",path.display()))?;
-        if unsafe { drm::drmSetMaster(file.as_raw_fd()) } < 0 { return Err(format!("{}: DRM master: {}",path.display(),std::io::Error::last_os_error())); }
+        if unsafe { drm::drmSetMaster(file.as_raw_fd()) } < 0 {
+            let denied = std::io::Error::last_os_error();
+            drop(file);
+            return Err(format!("{}: {NO_MASTER}: {denied} (open in {})",path.display(),card_holders(path)));
+        }
         let fd = file.as_raw_fd();
         let mut saved = Vec::new();
         unsafe {
@@ -713,14 +717,41 @@ fn arrange_screens(arrangement:&crate::direct::DisplayArrangement,names:&[&str],
     ([layout.width,layout.height],screens,placements)
 }
 
+/// What the error of a refused DRM master says ([`Failed::wants_master`]).
+const NO_MASTER:&str = "DRM master";
+
 /// A connector that could not be driven, with the request it failed under. It is
 /// retried only when the connector itself changes (replug, another monitor), its mode
-/// request changes or, when it found no free head, a head may have come free; never on a
-/// timer: a retry must not disturb working outputs.
+/// request changes or, when it found no free head, a head may have come free, or its card's
+/// DRM master has; never on a timer alone: a retry must not disturb working outputs.
 struct Failed { connector:DrmConnector, requested:Option<String>, row:LinuxDisplayOutput,
     /// It found no free display head or plane: retried also when one may have come free (a
     /// monitor unplugged or turned off).
-    wants_head:bool }
+    wants_head:bool,
+    /// Another process was the card's DRM master when it was opened: retried once the card can
+    /// be had ([`master_free`]). A WM starts while the last one's exit still holds the card, and
+    /// nothing else would retry it: a box's WM stayed 0x0 until its next restart, and every
+    /// visible app on it died of no first frame (11-09).
+    wants_master:bool }
+
+/// Whether a descriptor opened on `card` now gets its DRM master: nobody else holds it.
+fn master_free(card:&Path) -> bool {
+    OpenOptions::new().read(true).write(true).open(card).is_ok_and(|file| unsafe { drm::drmSetMaster(file.as_raw_fd()) } == 0)
+}
+
+/// The processes with `path` open, as far as this user can see them: what a refused master names.
+fn card_holders(path:&Path) -> String {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|p| p.parse::<u32>().ok()) else { continue };
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else { continue };
+        if fds.flatten().any(|fd| std::fs::read_link(fd.path()).is_ok_and(|target| target == path)) {
+            let name = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+            found.push(format!("{pid} {}",name.trim()));
+        }
+    }
+    if found.is_empty() { "no process this user can see".to_string() } else { found.join(", ") }
+}
 
 fn mode_label(mode:&DisplayMode) -> String {
     format!("{}x{}@{}",mode.extent.width,mode.extent.height,(mode.refresh_mhz + 500) / 1000)
@@ -929,7 +960,8 @@ impl Context {
         state.released.store(true,Ordering::Release); state.shared.signal();
     }
     fn fail_row(&mut self,connector:&DrmConnector,requested:Option<String>,reason:String,wants_head:bool) {
-        let retry = if wants_head { "replugged, its mode changes, or a monitor is unplugged or turned off" } else { "replugged or its mode changes" };
+        let wants_master = reason.contains(NO_MASTER);
+        let retry = if wants_master { "replugged, its mode changes, or the card's DRM master comes free" } else if wants_head { "replugged, its mode changes, or a monitor is unplugged or turned off" } else { "replugged or its mode changes" };
         eprintln!("[hal-direct] {}: {reason}; retried when the connector is {retry}",connector.name);
         // The dropdown stays usable on a failed screen: list its DRM (EDID) modes.
         let (modes,native) = match self.cards.get(&connector.card) {
@@ -939,7 +971,7 @@ impl Context {
         let row = LinuxDisplayOutput { name:connector.name.clone(),monitor:connector.monitor.clone(),fingerprint:connector.fingerprint,
             card:card_name(&connector.card),status:reason.clone(),error:Some(reason),
             requested:requested.clone(),modes,native,pci:pci(&connector.card),mode_override:self.modes.get(&connector.name).cloned(),..Default::default() };
-        self.failed.push(Failed { connector:connector.clone(),requested,row,wants_head });
+        self.failed.push(Failed { connector:connector.clone(),requested,row,wants_head,wants_master });
     }
     /// Drop one output and give its display back. Only this output's display goes;
     /// every other output on the card keeps its acquisition and its scanout.
@@ -1011,7 +1043,7 @@ impl Context {
         // A monitor unplugged or turned off may free a head for a connector that found none.
         let heads_freed = self.connectors.iter().any(|c| !connectors.contains(c)) || retired.iter().any(|o:&Output| self.arrangement.is_off(&o.connector.name));
         self.failed.retain(|f| connectors.contains(&f.connector) && f.requested == requested(&f.connector.name) && !self.arrangement.is_off(&f.connector.name)
-            && !(f.wants_head && heads_freed));
+            && !(f.wants_head && heads_freed) && !f.wants_master);
         let pending:Vec<_> = connectors.iter().filter(|c| !kept.iter().any(|o:&Output| o.connector == **c)
             && !self.failed.iter().any(|f| f.connector == **c) && !self.arrangement.is_off(&c.name)).cloned().collect();
         self.outputs = kept;
@@ -1486,6 +1518,7 @@ pub(super) fn run(state:Arc<State>,device:Arc<Device>) {
                 Ok(connectors) => { rescan |= connectors != context.connectors; }
                 Err(e) => eprintln!("[hal-direct] rescan: {e}"),
             }
+            rescan |= context.failed.iter().any(|f| f.wants_master && master_free(&f.connector.card));
         }
         rescan |= context.outputs.iter().any(|o| o.rebuild);
         if rescan && context.active {
@@ -1539,6 +1572,16 @@ pub(super) fn run(state:Arc<State>,device:Arc<Device>) {
 mod tests {
     use super::*;
     use crate::direct::DisplayPacing;
+    #[test]
+    fn a_refused_master_names_who_holds_the_card() {
+        let path = std::env::temp_dir().canonicalize().unwrap().join(format!("card-holders-{}",std::process::id()));
+        let file = File::create(&path).unwrap();
+        let held = card_holders(&path);
+        assert!(held.split(", ").any(|holder| holder.starts_with(&format!("{} ",std::process::id()))),"{held}");
+        drop(file);
+        assert_eq!(card_holders(&path),"no process this user can see");
+        std::fs::remove_file(&path).unwrap();
+    }
     fn c(index:usize,name:&'static str,hz:u32,screen:usize,optimise:bool,main:bool,rendering_gpu:bool) -> PacingCandidate<'static> {
         PacingCandidate { index,name,refresh_mhz:hz*1000,screen,optimise,main,rendering_gpu }
     }

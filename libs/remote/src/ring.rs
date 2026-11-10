@@ -273,7 +273,7 @@ impl Ring {
 pub fn serve_feed(ring: &Ring, kind: Kind, ch: Channel, mut cur: Cursor, drop_marker: fn(u64) -> Vec<u8>) {
     let tx = ch.tx();
     loop {
-        crate::served::tick();
+        crate::served::tick(true);
         loop {
             match ch.try_recv() {
                 Ok(Event::Closed(..)) | Err(false) => return,

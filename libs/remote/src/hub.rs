@@ -130,9 +130,9 @@ struct Inner {
 
 pub type Source = Arc<dyn Fn() -> Hosts + Send + Sync>;
 
-/// A route that names an app on a known host: its host, its endpoint spec (an app name or a pid)
-/// and the service it opens.
-pub type RouteSeen = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
+/// A route that names an app on a known host: its host, its endpoint spec (an app name or a pid),
+/// the service it opens and the name its caller's link said in its hello.
+pub type RouteSeen = Arc<dyn Fn(&str, &str, &str, &str) + Send + Sync>;
 
 /// Dials a `via = "fleet"` host's address: an authenticated carrier.
 pub type FleetDialer = Arc<dyn Fn(&str) -> io::Result<crate::carrier::Carrier> + Send + Sync>;
@@ -347,7 +347,7 @@ impl Hub {
 }
 
 fn route_factory(hub: Hub) -> Factory {
-    Arc::new(move |_, open| {
+    Arc::new(move |conn, open| {
         let mut it = open.args.splitn(3, ' ');
         let (target, service, args) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or("").to_string());
         let (host, spec) = parse_target(target);
@@ -360,7 +360,7 @@ fn route_factory(hub: Hub) -> Factory {
             return Err((CLOSE_REFUSED, format!("unknown host `{host}` (known: {})", if known.is_empty() { "none; see hosts.toml".to_string() } else { known.join(", ") })));
         };
         if let (Some(spec), Some(seen)) = (spec.as_deref(), hub.0.seen.lock().unwrap().clone()) {
-            seen(host, spec, service);
+            seen(host, spec, service, &conn.peer().name);
         }
         let service = service.to_string();
         let channel = open.channel;

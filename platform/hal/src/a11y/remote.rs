@@ -12,8 +12,15 @@ pub trait Backend {
     fn activate(&self);
     fn trees(&self) -> Trees;
     fn wait_change(&self, versions: &[(u64, u64)], timeout: Duration);
+    /// Injects `request` and waits up to `timeout` for its result. One the app has not taken by
+    /// then fails with `action N timed out`, and stays pending: [`Backend::wait_action`] waits on.
     fn action(&self, window: u64, request: ActionRequest, timeout: Duration) -> Result<ActionResult, String>;
+    /// Waits up to `timeout` for action `req`, left pending by a timed-out [`Backend::action`]:
+    /// its result, or None while the app still has not taken it; an error for no such action.
+    fn wait_action(&self, req: u64, timeout: Duration) -> Result<Option<ActionResult>, String>;
     fn present(&self, window: u64, timeout: Duration) -> Result<(), String>;
+    /// Text input into the window's focus, posted: it reaches the app in order with what is
+    /// asked after it (a `present` waits for its frame), and nothing waits for the app here.
     fn type_text(&self, window: u64, text: &str) -> Result<(), String>;
     fn user_seq(&self, window: u64) -> Result<u64, String>;
     /// Feeds a pointer event into the window's input queue, where the OS's arrive (`mods` marks
@@ -192,7 +199,7 @@ fn paced_drag(req: &Req, backend: &dyn Backend, key: u64, node: &Node) -> Result
 pub fn dispatch(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Snapshots) {
     let verb = req.pos.first().map_or("", String::as_str);
     let Some(params) = makepad_remote::params::ui(verb) else {
-        return out.err("ui: find, act, type, wait, snap, diff, speak, lint, oscheck (help lists arguments)");
+        return out.err("ui: find, act, type, wait, done, present, snap, diff, speak, lint, oscheck (help lists arguments)");
     };
     if let Err(e) = req.validate_params(params) { return out.err(&e); }
     backend.activate();
@@ -206,7 +213,9 @@ fn run(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Snapshots) -
     let q = query(req, verb)?;
     let start = Instant::now();
     let mut trees = selected(req, backend.trees())?;
-    while trees.iter().all(|(_, t)| t.nodes.is_empty()) && start.elapsed() < timeout && !out.cancelled() {
+    // (a window's present needs no tree: its window may be gone)
+    let by_window = verb == "present" && q.is_empty();
+    while !by_window && trees.iter().all(|(_, t)| t.nodes.is_empty()) && start.elapsed() < timeout && !out.cancelled() {
         backend.activate();
         backend.wait_change(&versions(&backend.trees()), timeout.saturating_sub(start.elapsed()).min(Duration::from_millis(100)));
         trees = selected(req, backend.trees())?;
@@ -254,6 +263,12 @@ fn run(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Snapshots) -
                 if !matches!(result, ActionResult::Handled | ActionResult::Fallback) { return Err(format!("#{}: {}", node.id.short(), result.short())); }
                 Ok(result)
             };
+            // text input into the window's focus, for a node without replace_text (the code editor)
+            let typed = |text: &str| -> Result<ActionResult, String> {
+                if backend.user_seq(key)? != seq { return Err("user_intervened: sequence invalidated".into()); }
+                backend.type_text(key, text)?;
+                Ok(ActionResult::Fallback)
+            };
             if verb == "act" && req.pos.get(1).map(String::as_str).or(req.get("action")) == Some("drag") {
                 let measured = paced_drag(req, backend, key, &node)?;
                 // the person's input during it invalidates the numbers, the way it does a sequence's
@@ -273,14 +288,17 @@ fn run(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Snapshots) -
                 if current.actions.contains(Actions::REPLACE_TEXT) {
                     invoke(Actions::REPLACE_TEXT, argument(req, Actions::REPLACE_TEXT, &current)?)?
                 } else {
-                    if backend.user_seq(key)? != seq { return Err("user_intervened: sequence invalidated".into()); }
-                    backend.type_text(key, text)?;
-                    ActionResult::Fallback
+                    typed(text)?
                 }
             } else {
-                let name = req.pos.get(1).map(String::as_str).or(req.get("action")).ok_or("ui act needs an action (press, focus, toggle, set_value, ...)")?;
-                let action = Actions::from_short(name).ok_or_else(|| format!("unknown action `{name}`"))?;
-                invoke(action, argument(req, action, &node)?)?
+                let name = req.pos.get(1).map(String::as_str).or(req.get("action")).ok_or("ui act needs an action (press, focus, toggle, set_value, type, ...)")?;
+                // `type`: `ui type`'s last step alone, into the focus an earlier `ui act ... focus` gave the node
+                if name == "type" {
+                    typed(req.get("t").ok_or("ui act type needs t=TEXT")?)?
+                } else {
+                    let action = Actions::from_short(name).ok_or_else(|| format!("unknown action `{name}`"))?;
+                    invoke(action, argument(req, action, &node)?)?
+                }
             };
             if req.get("wait") == Some("1") || verb == "type" { backend.present(key, timeout)?; }
             if backend.user_seq(key)? != seq { return Err("user_intervened: inspect before retrying an applied action".into()); }
@@ -316,6 +334,34 @@ fn run(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Snapshots) -
                 if versions(&trees) != versions(&current) { trees = current; continue; }
                 backend.wait_change(&versions(&all), left.min(Duration::from_millis(100)));
                 trees = selected(req, backend.trees())?;
+            }
+        }
+        // An action an `act` left waiting (its answer named `action N timed out`): its result once
+        // the app has taken it, or that answer again. The caller waits with looks of its own, and
+        // decides from the app's progress whether to wait on (makepad_test's waits).
+        "done" => {
+            let id = number::<u64>(req, "req", 0)?;
+            if id == 0 { return Err("ui done needs req=N, the number an `act` that timed out named".into()); }
+            let Some(result) = backend.wait_action(id, timeout)? else { return Err(format!("action {id} timed out; inspect before retrying")) };
+            if !matches!(result, ActionResult::Handled | ActionResult::Fallback) { return Err(format!("action {id}: {}", result.short())); }
+            if json { out.line(&format!("{{\"result\":{}}}", json_str(result.short()))); } else { out.line(result.short()); }
+        }
+        // The next present of the window a node is in: what `act wait=1` waits for, alone.
+        "present" => {
+            // A window alone (w=): what an act waits for after it, its node possibly gone (a press
+            // that closes its own button's dialog); a window gone has no present to wait for.
+            let key = if by_window {
+                if req.get("w").is_none() { return Err("ui present needs node=ID, q=QUERY or w=WINDOW".into()); }
+                trees.first().map(|(key, _)| *key)
+            } else {
+                Some(resolve(&trees, &q)?.0)
+            };
+            match key {
+                Some(key) => {
+                    backend.present(key, timeout)?;
+                    if json { out.line("{\"presented\":true}"); } else { out.line("presented"); }
+                }
+                None => if json { out.line("{\"presented\":false,\"gone\":true}"); } else { out.line("window gone: no present to wait for"); },
             }
         }
         "snap" => {
@@ -356,7 +402,7 @@ fn run(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Snapshots) -
             let text = backend.os_selfcheck(key, req.get("act") == Some("1"))?;
             text_result(out, json, "oscheck", &text);
         }
-        _ => return Err("ui: find, act, type, wait, snap, diff, speak, lint, oscheck (help lists arguments)".into()),
+        _ => return Err("ui: find, act, type, wait, done, present, snap, diff, speak, lint, oscheck (help lists arguments)".into()),
     }
     Ok(())
 }
@@ -382,6 +428,12 @@ mod tests {
         assert!(ok.contains("\"count\":0"), "{ok}");
         let timed_out = run("ui wait w=4294967295 count=1 timeout_ms=0");
         assert!(timed_out.contains("ui wait timed out"), "{timed_out}");
+        // An act's present by its window: a window gone (its button closed it) has none to wait
+        // for, at once; without a node or a window there is nothing to present.
+        let gone = run("ui present w=4294967295 json=1");
+        assert!(gone.contains("\"gone\":true") && !gone.contains("\"err\""), "{gone}");
+        let error = run("ui present json=1");
+        assert!(error.contains("needs node=ID, q=QUERY or w=WINDOW"), "{error}");
         // A key valid for one verb must not leak into the others, even with full output.
         for line in ["ui find depth=1", "ui snap q=button", "ui lint node=1", "ui wait wait=1 full=1"] {
             let error = run(line);

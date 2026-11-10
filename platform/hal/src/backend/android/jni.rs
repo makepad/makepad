@@ -174,7 +174,7 @@ unsafe fn set_surface(env: *mut JNIEnv, surface: jobject, size: Option<[u32; 2]>
     let shared = Shared::global();
     let old = {
         let mut r = lock(&shared.registry);
-        if size.is_some() { r.state.changed(window.0, dimensions); } else { r.state.created(window.0, dimensions); }
+        if size.is_some() { r.state.changed(window.0, dimensions); } else { r.state.created(window.0, dimensions); crate::backend::shell::window_made(); }
         r.window.replace(window)
     };
     drop(old);

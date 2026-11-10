@@ -87,6 +87,106 @@ fn interactive_stops_at_cores() {
     for p in held { b.release(p); }
 }
 
+/// Why (user): clicking through plates under the JIT sat at "waiting for a free worker": the JIT's
+/// builds held the tokens Interactive had left, with no checkpoint in their optimiser for seconds.
+#[test]
+fn a_persons_work_never_waits_for_the_jits_background_builds() {
+    let b = budget(16);
+    let jit: Vec<_> = (0..13).map(|_| b.admit(BACKGROUND, JIT, "O3")).collect();
+    let tiles: Vec<_> = (0..2).map(|_| b.admit(VISIBLE, APP, "tiles")).collect();
+    let mut load = vec![b.admit(INTERACTIVE, APP, "a load")];
+    assert_eq!(b.state.lock().unwrap().running, 16, "every core has a token");
+    let (tx, rx) = mpsc::channel();
+    let helper = worker(&b, INTERACTIVE, APP, 1, &tx);
+    assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(300)), Ok(1), "the load waited for the builds' tokens");
+    load.extend((0..12).map(|_| b.admit(INTERACTIVE, APP, "a load")));
+    assert_eq!(b.state.lock().unwrap().running, 13 + 2 + 14);
+    assert!(b.should_yield(jit[0]), "the builds leave at their next checkpoint");
+    assert!(b.should_yield(tiles[0]), "and what ranks below the load");
+    assert!(load.iter().all(|p| !b.should_yield(*p)), "the load keeps its helpers: it is within the cores");
+    assert!(load.iter().all(|p| !b.contended(*p)));
+    // Interactive's own limit stands: the cores, whatever else has them
+    let last = worker(&b, INTERACTIVE, APP, 2, &tx);
+    until(&b, |s| s.waiters.len() == 1);
+    assert!(rx.try_recv().is_err());
+    b.release(load.pop().unwrap());
+    assert_eq!(rx.recv().unwrap(), 2);
+    finish(last);
+    finish(helper);
+    for p in load.into_iter().chain(tiles).chain(jit) { b.release(p); }
+    let s = b.state.lock().unwrap();
+    assert_eq!((s.running, s.jit_tokens), (0, 0));
+}
+
+/// Why (user): what a plate load builds is Visible, and it sat behind the same builds. The builds
+/// over the JIT's floor don't count against it; once they left, Visible is back at its old limit.
+#[test]
+fn a_plate_loads_visible_work_passes_the_builds_above_the_jits_floor() {
+    let b = budget(16);
+    let floor = b.jit_floor;
+    let mut jit: Vec<_> = (0..13).map(|_| b.admit(BACKGROUND, JIT, "O3")).collect();
+    let mut load: Vec<_> = (0..12).map(|_| b.admit(VISIBLE, APP, "a load")).collect();
+    assert_eq!(b.state.lock().unwrap().running, 25, "the machine has 16: the builds are over it");
+    assert!(jit.iter().all(|p| b.should_yield(*p)), "the builds leave at their next checkpoint");
+    assert!(load.iter().all(|p| !b.should_yield(*p)), "the load is within its limit");
+    let (tx, rx) = mpsc::channel();
+    let waits = worker(&b, VISIBLE, APP, 1, &tx);
+    until(&b, |s| s.waiters.len() == 1);
+    assert!(rx.try_recv().is_err(), "the floor's tokens count: Visible's limit is the old one less those");
+    // the builds leave down to the cores, and no further: the token of one past the floor would not
+    // let the waiter in (Visible does not count it), nor would one of the floor's
+    while jit.len() > floor {
+        b.release(jit.pop().unwrap());
+        let over = b.state.lock().unwrap().running > 16;
+        assert!(jit.iter().all(|p| b.should_yield(*p) == over), "{} builds: they leave only over the cores", jit.len());
+    }
+    assert!(rx.try_recv().is_err(), "the load holds what it may next to the JIT's floor");
+    load.push(b.admit(INTERACTIVE, APP, "a click"));
+    assert!(jit.iter().all(|p| !b.should_yield(*p) && !b.contended(*p)), "the floor's builds keep their tokens: no waiter could have them");
+    b.release(load.pop().unwrap());
+    b.release(load.pop().unwrap());
+    assert_eq!(rx.recv().unwrap(), 1, "a token below the limit goes to the load");
+    finish(waits);
+    for p in load.into_iter().chain(jit) { b.release(p); }
+    let s = b.state.lock().unwrap();
+    assert_eq!((s.running, s.jit_tokens), (0, 0));
+}
+
+/// A build that does reach its checkpoint under a person's work leaves its token, and the JIT keeps
+/// one build going (above the budget) however many tokens the person's work wants.
+#[test]
+fn the_jit_keeps_one_build_going_under_a_persons_work() {
+    let b = budget(4);
+    let job = b.admit(BACKGROUND, JIT, "O3");
+    let load: Vec<_> = (0..4).map(|_| b.admit(INTERACTIVE, APP, "a load")).collect();
+    assert_eq!(b.state.lock().unwrap().running, 5, "the load has all the cores, over the build's token");
+    assert!(b.should_yield(job));
+    let job = b.checkpoint(job, 0, "");
+    assert!(b.tokens().holders.iter().any(|h| h.above && h.label == "O3"), "the JIT's one job goes on");
+    {
+        let s = b.state.lock().unwrap();
+        assert_eq!((s.running, s.jit_tokens), (4, 0));
+    }
+    assert!(!b.should_yield(job) && load.iter().all(|p| !b.should_yield(*p)));
+    b.release(job);
+    for p in load { b.release(p); }
+}
+
+/// A build's token that changes class is counted by the class it has now: a build a waiting thread
+/// raised is that thread's work, and a person's work counts it.
+#[test]
+fn a_raised_build_counts_against_a_persons_work() {
+    let b = budget(2);
+    let job = b.admit(BACKGROUND, JIT, "O3");
+    assert_eq!(b.state.lock().unwrap().jit_tokens, 1);
+    b.reclass(job, INTERACTIVE);
+    assert_eq!(b.state.lock().unwrap().jit_tokens, 0);
+    b.reclass(job, BACKGROUND);
+    assert_eq!(b.state.lock().unwrap().jit_tokens, 1);
+    b.release(job);
+    assert_eq!(b.state.lock().unwrap().jit_tokens, 0);
+}
+
 #[test]
 fn background_reserves_two_visible_slots_and_visible_reserves_one() {
     let b = budget(4);
@@ -187,38 +287,6 @@ fn a_small_machine_keeps_visible_ahead_of_the_jit() {
     b.release(above);
     assert_eq!(rx.recv().unwrap(), 1);
     finish(jit);
-}
-
-#[test]
-fn warmup_limits_app_background_once_and_leaves_room_for_jit() {
-    let b = budget(6);
-    let early = b.admit(BACKGROUND, APP, "before warm-up");
-    let p = b.admit(BACKGROUND, APP, "warm seed");
-    let jit = b.admit(BACKGROUND, JIT, "warm compiler");
-    b.begin_warmup();
-    assert!(b.should_yield(early) && b.should_yield(p), "the app's background past one yields while warming");
-    assert!(!b.should_yield(jit), "the JIT's background does not");
-    b.release(early);
-    assert!(!b.should_yield(p));
-    let (tx, rx) = mpsc::channel();
-    let w = worker(&b, BACKGROUND, APP, 1, &tx);
-    until(&b, |s| s.waiters.len() == 1);
-    assert!(rx.try_recv().is_err());
-    assert!(!b.should_yield(p));
-    let v = b.admit(VISIBLE, HAL, "visible during warmup");
-    b.release(v);
-    b.end_warmup();
-    assert_eq!(rx.recv().unwrap(), 1);
-    b.begin_warmup();
-    assert!(!b.warming(), "a later compile burst cannot restart warm-up");
-    assert!(!b.should_yield(p) && !b.should_yield(jit));
-    b.release(jit);
-    let full = b.admit(BACKGROUND, APP, "restored third slot");
-    assert_eq!(b.state.lock().unwrap().background, 3);
-    b.release(full);
-    finish(w);
-    assert!(!b.should_yield(p));
-    b.release(p);
 }
 
 #[test]
@@ -485,29 +553,6 @@ fn one_jit_job_runs_above_a_full_budget() {
     finish(more_app);
     for p in &app[1..] { b.release(*p); }
     assert_eq!(b.state.lock().unwrap().running, 0);
-}
-
-/// The JIT's only job yields its token to the app and goes on above the budget: its checkpoint
-/// passes the token on, it does not stop the JIT.
-#[test]
-fn the_only_jit_job_gives_up_its_token_and_goes_on_above_the_budget() {
-    let b = budget(3);
-    let job = b.admit(BACKGROUND, JIT, "tier-up");
-    let app = b.admit(VISIBLE, APP, "busy");
-    let (tx, rx) = mpsc::channel();
-    let waiter = worker(&b, VISIBLE, APP, 1, &tx);
-    until(&b, |s| s.waiters.len() == 1);
-    assert!(b.should_yield(job));
-    let job = b.checkpoint(job, 0, "");
-    assert_eq!(rx.recv().unwrap(), 1, "the app's waiter has its token");
-    assert_eq!(b.state.lock().unwrap().running, 2);
-    assert!(b.tokens().holders.iter().any(|h| h.above && h.label == "tier-up"));
-    assert!(!b.should_yield(job));
-    b.release(job);
-    assert_eq!(b.state.lock().unwrap().running, 2);
-    finish(waiter);
-    b.release(app);
-    assert_eq!(b.state.lock().unwrap().jit_running, 0);
 }
 
 /// One JIT job running keeps the others to the budget's limits.

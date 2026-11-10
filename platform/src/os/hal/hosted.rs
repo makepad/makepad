@@ -183,6 +183,11 @@ impl HostedClient {
             && Self::free_image(swapchain).is_none()
     }
 
+    /// A frame was handed in and its present is not heard of yet.
+    pub(crate) fn frame_on_its_way(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     pub(crate) fn submitted(&mut self, window: WindowId, index: usize, frame: u64, size: [u32; 2]) {
         let swapchain = self.windows.get_mut(&hal_window_id(window)).expect("selected hosted swapchain");
         let image = &mut swapchain.images[index];

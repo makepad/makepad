@@ -12,9 +12,9 @@ impl Cx {
 
     pub(crate) fn hal_answer_query(&mut self, req: u32, request: &[u8]) {
         let request = String::from_utf8_lossy(request);
+        // (posted: nothing waits for a reply)
         if let Some(text) = request.strip_prefix("a11y_type\n") {
             self.a11y_type_fallback(text.to_owned());
-            self.hal.frames.w.query_reply(req, b"ok");
             return;
         }
         if let Some(index) = request.strip_prefix("a11y_present ").and_then(|s| s.parse::<usize>().ok()) {
@@ -30,8 +30,7 @@ impl Cx {
         }
         let reply = match request.trim() {
             "draw_owners" => self.draw_owners_answer(),
-            "a11y_user_seq" => self.remote_activity.user_seq().to_string(),
-            other => format!("error: unknown request `{other}` (draw_owners, a11y_present, a11y_user_seq)"),
+            other => format!("error: unknown request `{other}` (draw_owners, a11y_present)"),
         };
         self.hal.frames.w.query_reply(req, reply.as_bytes());
     }

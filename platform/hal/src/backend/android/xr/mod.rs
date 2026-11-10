@@ -292,6 +292,7 @@ pub(super) fn create_window(sid: u32, id: Id) -> bool {
     let shared = Shared::global();
     let previous = lock(&shared.registry).xr_window.replace((sid, id));
     if previous.is_some() { xr_log!("a second XR window replaces {previous:?}"); }
+    crate::backend::shell::window_made();
     let refresh = lock(&shared.state).refresh;
     shared.emit_to(sid, id, clock_ns(), |q, id| {
         q.display(id, 1., refresh);

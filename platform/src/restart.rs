@@ -1,13 +1,11 @@
-//! State-preserving restart in live sessions (Relax's hot reload, local/plans/hotreload.md §0
-//! and §4.8): an edit Relax cannot patch in place (a struct's layout, a signature, a module) is
-//! applied by restarting the app, and the user keeps what they were looking at.
+//! App state and window frames across a requested live-session restart.
 //!
 //! At the app's next event after Relax asks for a restart:
 //! 1. `AppMain::can_restart` may postpone it (unsaved work: the app says why, and the restart
 //!    waits until the app allows it, or until the person answers the window caption's "new
 //!    version ready: restart" with restart: [`postponed`], [`restart_anyway`]);
 //! 2. the app's own state (`AppMain::restart_state`) and the window frames are written;
-//! 3. Relax replaces the process with a fresh run of the same command line;
+//! 3. Relax starts a fresh run with that state (a rebuilt runner replaces the process);
 //! 4. that run's `Startup` gives the app its state back (`AppMain::restore_state`) and opens
 //!    the windows at their old frames.
 //!
@@ -15,32 +13,25 @@
 
 use crate::{cx::Cx, makepad_math::Vec2d};
 
-/// What crosses a restart: each window's frame (by window index), the widgets' own state by
-/// stable identity (their id path from the root, `crate::restart` users in the widgets crate)
-/// and the app's own text.
+/// What crosses a restart: window frames (by index), the restart reason and the app's own text.
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct RestartState {
     pub windows: Vec<(usize, Vec2d, Vec2d, bool)>,
-    pub widgets: Vec<(String, String)>,
     /// why the previous run restarted (Relax's classifier), for the kept/lost report
     pub reason: String,
     pub app: Option<String>,
 }
 
 impl RestartState {
-    /// Text form: `window <index> <x> <y> <w> <h> <fullscreen>` lines, `widget <path> <bytes>`
-    /// lines each followed by that many bytes and a newline, then `app <bytes>` and the app's
-    /// text.
+    /// Text form: a version, optional length-prefixed reason, window frame lines, then
+    /// optional length-prefixed app text.
     pub fn to_text(&self) -> String {
-        let mut s = String::from("makepad-restart 2\n");
+        let mut s = String::from("makepad-restart 3\n");
         if !self.reason.is_empty() {
             s.push_str(&format!("reason {}\n{}\n", self.reason.len(), self.reason));
         }
         for (i, p, z, f) in &self.windows {
             s.push_str(&format!("window {} {} {} {} {} {}\n", i, p.x, p.y, z.x, z.y, *f as u8));
-        }
-        for (path, st) in &self.widgets {
-            s.push_str(&format!("widget {} {}\n{}\n", path, st.len(), st));
         }
 
         if let Some(a) = &self.app {
@@ -50,7 +41,7 @@ impl RestartState {
     }
 
     pub fn from_text(t: &str) -> Option<RestartState> {
-        let head = "makepad-restart 2\n";
+        let head = "makepad-restart 3\n";
         if !t.starts_with(head) {
             return None;
         }
@@ -64,11 +55,6 @@ impl RestartState {
                 ["window", i, x, y, ww, h, f] => {
                     let n = |v: &str| v.parse::<f64>().unwrap_or(0.0);
                     st.windows.push((i.parse().ok()?, Vec2d { x: n(x), y: n(y) }, Vec2d { x: n(ww), y: n(h) }, *f == "1"));
-                }
-                ["widget", path, len] => {
-                    let len: usize = len.parse().ok()?;
-                    st.widgets.push((path.to_string(), t.get(at..at + len)?.to_string()));
-                    at = (at + len + 1).min(t.len());
                 }
                 ["reason", len] => {
                     let len: usize = len.parse().ok()?;
@@ -90,50 +76,23 @@ impl RestartState {
 
 use std::sync::Mutex;
 
-/// The widgets' state, written by the widget root at the event a restart is about to happen
-/// (`wants_snapshot`), read by `try_restart` right after it.
-static WIDGETS_OUT: Mutex<Option<Vec<(String, String)>>> = Mutex::new(None);
-/// After a restart: the widgets' state still to give back (the widget root takes it as the
-/// widgets appear) and what is known so far for the kept/lost report.
-static WIDGETS_IN: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 static REPORT: Mutex<Option<Report>> = Mutex::new(None);
-static SNAPSHOT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// What a restart kept and lost (logged once the widgets settle, `restart_report`).
+/// Window frames and app state kept by a restart (logged after app state restoration).
 #[derive(Default, Debug, Clone)]
 pub struct Report {
     pub reason: String,
     pub windows: usize,
     pub app_state: Option<bool>,
-    pub widgets_kept: usize,
-    pub widgets_lost: Vec<String>,
 }
 
-/// The widget root, at each event while a restart is due: whether to write the widgets' state
-/// now (`stash_widgets`) because the restart is asked for right after this event.
-pub fn wants_snapshot() -> bool {
-    SNAPSHOT.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-pub fn stash_widgets(w: Vec<(String, String)>) {
-    *WIDGETS_OUT.lock().unwrap() = Some(w);
-}
-
-/// After a restart: the widgets' state not given back yet (empty otherwise: one lock).
-pub fn take_restored_widgets() -> Vec<(String, String)> {
-    std::mem::take(&mut *WIDGETS_IN.lock().unwrap())
-}
-
-/// At `Startup` of a restarted run: the app's state was given back (or there was none); with
-/// no widget state to wait for, the report is final now.
-pub fn restored_app(app: bool, no_widgets: bool) {
+/// At `Startup` of a restarted run: the app's state was given back (or there was none).
+pub fn restored_app(app: bool) {
     let mut g = REPORT.lock().unwrap();
     if let Some(r) = g.as_mut() {
         r.app_state = Some(app);
-        if no_widgets {
-            crate::log!("{}", r.text());
-            log_report(r);
-        }
+        crate::log!("{}", r.text());
+        log_report(r);
     }
 }
 
@@ -154,30 +113,16 @@ pub fn first_present() {
 fn log_report(r: &Report) {
     #[cfg(relax)]
     {
-        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-        let lost: Vec<String> = r.widgets_lost.iter().map(|l| format!("\"{}\"", esc(l))).collect();
         std::relax::live_log(&format!(
-            "{{\"event\":\"restart_report\",\"pid\":{},\"kept\":{{\"windows\":{},\"app_state\":{},\"widgets\":{}}},\"lost\":{{\"app_fields_fresh\":{},\"widgets\":[{}]}}}}",
+            "{{\"event\":\"restart_report\",\"pid\":{},\"kept\":{{\"windows\":{},\"app_state\":{}}},\"lost\":{{\"app_fields_fresh\":{}}}}}",
             std::process::id(),
             r.windows,
             r.app_state == Some(true),
-            r.widgets_kept,
-            r.app_state == Some(false),
-            lost.join(",")
+            r.app_state == Some(false)
         ));
     }
     #[cfg(not(relax))]
     let _ = r;
-}
-
-/// The widget root: these entries found their widgets; `lost` never did (final).
-pub fn widgets_settled(kept: usize, lost: Vec<String>) {
-    if let Some(r) = REPORT.lock().unwrap().as_mut() {
-        r.widgets_kept = kept;
-        r.widgets_lost = lost;
-        crate::log!("{}", r.text());
-        log_report(r);
-    }
 }
 
 /// The last restart's kept/lost report (None in a run that was not a restart).
@@ -192,17 +137,12 @@ impl Report {
             Some(false) => "app fields start fresh (the app has no AppMain::restart_state)",
             None => "no app state",
         };
-        let mut s = format!(
-            "restart ({}): kept {} window frame(s), {}, {} widget state(s)",
+        format!(
+            "restart ({}): kept {} window frame(s), {}",
             if self.reason.is_empty() { "live edit".to_string() } else { self.reason.lines().next().unwrap_or("").chars().take(160).collect::<String>() },
             self.windows,
-            app,
-            self.widgets_kept
-        );
-        if !self.widgets_lost.is_empty() {
-            s.push_str(&format!("; LOST {} widget state(s) (no widget at that id path now): {}", self.widgets_lost.len(), self.widgets_lost.join(", ")));
-        }
-        s
+            app
+        )
     }
 }
 
@@ -314,8 +254,7 @@ pub fn restored() -> Option<RestartState> {
     #[cfg(relax)]
     {
         let st = std::relax::restored_state().and_then(|t| RestartState::from_text(&t))?;
-        *WIDGETS_IN.lock().unwrap() = st.widgets.clone();
-        *REPORT.lock().unwrap() = Some(Report { reason: st.reason.clone(), windows: st.windows.len(), app_state: None, widgets_kept: 0, widgets_lost: Vec::new() });
+        *REPORT.lock().unwrap() = Some(Report { reason: st.reason.clone(), windows: st.windows.len(), app_state: None });
         Some(st)
     }
     #[cfg(not(relax))]
@@ -324,7 +263,7 @@ pub fn restored() -> Option<RestartState> {
     }
 }
 
-/// Restarts with `state`: the process is replaced by a fresh run. Returns only if that failed.
+/// Restarts with `state`: Relax starts a fresh run. Returns only if that failed.
 pub fn restart_now(state: &RestartState) {
     #[cfg(relax)]
     std::relax::restart_now(&state.to_text());
@@ -420,17 +359,10 @@ pub fn try_restart(app: &mut dyn crate::app_main::AppMain, cx: &mut Cx) {
     if last != 0 && now < last + 1000 && !anyway {
         return;
     }
-    // the widgets write their state at the next event (they see `wants_snapshot` while they
-    // handle it); the app is asked after that event
-    if !SNAPSHOT.swap(true, Ordering::Relaxed) {
-        cx.redraw_all();
-        return;
-    }
     LAST_ASK_MS.store(now, Ordering::Relaxed);
     let asked = if anyway { Ok(()) } else { app.can_restart(cx).and_then(|()| unsaved().map_or(Ok(()), Err)) };
     match asked {
         Err(why) => {
-            SNAPSHOT.store(false, Ordering::Relaxed);
             if last == 0 {
                 crate::log!("restart postponed ({}): {}", reason(), why);
             }
@@ -443,12 +375,10 @@ pub fn try_restart(app: &mut dyn crate::app_main::AppMain, cx: &mut Cx) {
             }
         }
         Ok(()) => {
-            let widgets = WIDGETS_OUT.lock().unwrap().take().unwrap_or_default();
-            let st = RestartState { windows: cx.restart_window_frames(), widgets, reason: reason(), app: app.restart_state(cx) };
+            let st = RestartState { windows: cx.restart_window_frames(), reason: reason(), app: app.restart_state(cx) };
             set_postponed(None);
             ANYWAY.store(false, Ordering::Release);
             restart_now(&st);
-            SNAPSHOT.store(false, Ordering::Relaxed);
         }
     }
 }
@@ -473,11 +403,11 @@ mod tests {
     fn text_round_trip() {
         let st = RestartState {
             windows: vec![(0, Vec2d { x: 10.0, y: 20.5 }, Vec2d { x: 800.0, y: 600.0 }, false)],
-            widgets: vec![("main_window/body/input".to_string(), "3 3\nab\nc".to_string()), ("w".to_string(), String::new())],
             reason: "struct `App` changed:\nits layout".to_string(),
             app: Some("a b\nc".to_string()),
         };
         assert_eq!(RestartState::from_text(&st.to_text()), Some(st));
+        assert_eq!(RestartState::from_text("makepad-restart 2\n"), None, "old restart state is not restored");
     }
 }
 
@@ -633,7 +563,7 @@ pub fn after_event(app: &mut dyn crate::app_main::AppMain, cx: &mut Cx, event: &
             if let Some(state) = restored() {
                 cx.restart_apply_window_frames(&state.windows);
                 if let Some(text) = &state.app { app.restore_state(cx, text); }
-                restored_app(state.app.is_some(), state.widgets.is_empty());
+                restored_app(state.app.is_some());
             }
         }
         if requested() { try_restart(app, cx); }

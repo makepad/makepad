@@ -1171,7 +1171,8 @@ mod imp {
             return request_ids;
         }
         let captured = Instant::now();
-        // Only the GPU callback takes this blocking lock. The UI uses try_lock.
+        // Every holder of this lock keeps it for a few map updates (a send under it never
+        // waits), so the UI takes it too: the HAL's grabs come here from the UI thread.
         let Ok(mut sinks) = grab_sinks().lock() else {
             return request_ids;
         };
@@ -1405,7 +1406,11 @@ mod imp {
                 Cmd::Tweak { wait: true, .. } | Cmd::Ai { wait: true, .. } => Some(None),
                 _ => None,
             };
+            // answering is observing the app, not its own work: what this thread runs for the
+            // command is counted as served (a test's idle rule leaves it out, wherever its asks fall)
+            let start = makepad_hal::clock::thread_cpu_ns();
             apply(cx, cmd);
+            makepad_remote::charge_served(makepad_hal::clock::thread_cpu_ns().saturating_sub(start));
             // Do not batch later input ahead of a grab in this same drain.
             poll_captures(cx);
             pending |= drive_step(cx);
@@ -1660,6 +1665,34 @@ mod imp {
     /// readback still ends in a finished file.
     const CAPTURE_SHUTDOWN_WAIT: Duration = Duration::from_secs(20);
 
+    /// The process's major page faults so far: each one a wait for a page read back from disk
+    /// (swap, or a mapped file's page). A test's idle rule tells an app that waits on memory from
+    /// one that sits idle by them: neither runs CPU. One getrusage call; 0 where none counts them
+    /// (Windows' fault count has the soft ones in it).
+    fn major_faults() -> u64 {
+        #[cfg(unix)]
+        {
+            #[repr(C)]
+            struct Rusage {
+                /// ru_utime and ru_stime (two timevals, two longs' room each)
+                times: [std::ffi::c_long; 4],
+                /// ru_maxrss .. ru_nivcsw; ru_majflt is the sixth
+                counts: [std::ffi::c_long; 14],
+            }
+            extern "C" {
+                fn getrusage(who: i32, usage: *mut Rusage) -> i32;
+            }
+            const RUSAGE_SELF: i32 = 0;
+            let mut usage = Rusage { times: [0; 4], counts: [0; 14] };
+            // SAFETY: `usage` is a valid struct rusage for the call to fill
+            if unsafe { getrusage(RUSAGE_SELF, &mut usage) } == 0 { usage.counts[5].max(0) as u64 } else { 0 }
+        }
+        #[cfg(not(unix))]
+        {
+            0
+        }
+    }
+
     /// `/settled`: why the app would still change if time moved on.
     fn settled_json(cx: &Cx) -> String {
         let mut reasons = Vec::new();
@@ -1688,6 +1721,12 @@ mod imp {
         if cx.pipelines_pending() > 0 {
             reasons.push("shaders");
         }
+        // Jobs on the app's pool that wait for a worker or a CPU permit: their results are still
+        // to come (a starved pool runs nothing, and its app no CPU).
+        let pool = cx.task_pool_backlog();
+        if pool.as_ref().is_some_and(|p| p.queued.iter().any(|&n| n > 0)) {
+            reasons.push("pool");
+        }
         let list: Vec<String> = reasons.iter().map(|reason| format!("\"{reason}\"")).collect();
         let mut out = format!(
             "{{\"settled\":{},\"reasons\":[{}]",
@@ -1700,6 +1739,9 @@ mod imp {
                 .map(|(kind, count)| format!("{}:{count}", json_str(kind)))
                 .collect();
             out.push_str(&format!(",\"loads\":{{{}}}", entries.join(",")));
+        }
+        if let Some(p) = &pool {
+            out.push_str(&format!(",\"pool\":{{\"queued\":[{},{},{}],\"running\":{},\"taken\":{}}}", p.queued[0], p.queued[1], p.queued[2], p.running, p.taken));
         }
         if let Some(now) = app_clock::now() {
             out.push_str(&format!(",\"frame\":{},\"time\":{}", app_clock::frame(), num(now)));
@@ -2293,8 +2335,9 @@ mod imp {
             }
             Cmd::UiCounts(tx) => {
                 let (ins, cyc) = crate::thread_counters::read().unwrap_or((0, 0));
-                let (cpu, process, served) = (makepad_hal::clock::thread_cpu_ns(), makepad_hal::clock::process_cpu_ns(), makepad_hal::clock::served_cpu_ns());
-                let _ = tx.send(Reply::Text(format!("{{\"ins\":{ins},\"cyc\":{cyc},\"cpu_ns\":{cpu},\"process_cpu_ns\":{process},\"served_cpu_ns\":{served}}}")));
+                let (cpu, process, served, runtime) = (makepad_hal::clock::thread_cpu_ns(), makepad_hal::clock::process_cpu_ns(), makepad_remote::served_cpu_ns(), makepad_remote::runtime_cpu_ns());
+                let faults = major_faults();
+                let _ = tx.send(Reply::Text(format!("{{\"ins\":{ins},\"cyc\":{cyc},\"cpu_ns\":{cpu},\"process_cpu_ns\":{process},\"served_cpu_ns\":{served},\"runtime_cpu_ns\":{runtime},\"faults\":{faults}}}")));
             }
             Cmd::Platform(payload) => match *payload
                 .downcast::<PlatformCmd>()

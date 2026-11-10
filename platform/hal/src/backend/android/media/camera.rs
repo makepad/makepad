@@ -13,8 +13,9 @@ pub(super) enum Command {
     Source(Ticket, Key),
     Place(Ticket, crate::types::Layer),
 }
-/// `boottime`: its timestamps are the boot clock (SENSOR_INFO_TIMESTAMP_SOURCE REALTIME), which
-/// converts to the HAL clock; otherwise their base is unknown and frames carry no HAL time.
+/// `boottime`: it says its timestamps are the boot clock (SENSOR_INFO_TIMESTAMP_SOURCE REALTIME);
+/// one that does not say is read by each capture result's arrival
+/// (`clock::sensor_start_on_hal_clock`).
 struct Device { id: CString, desc: VideoInputInfo, boottime: bool }
 struct Preview { ticket: Ticket, key: Key, native: bool, active: bool, size: Option<[u32; 2]>, window: Option<Window> }
 type Surfaces = Arc<Mutex<Vec<(u64, Option<Window>)>>>;
@@ -344,7 +345,6 @@ struct Capture {
     /// The captures that failed (their results never come), tied to their images by frame
     /// number (the NDK's result thread adds them): such an image goes without a result.
     failures: Failures,
-    boottime: bool,
     /// What the repeating request was given (kept for its lifetime).
     _capture_callbacks: Callbacks,
 }
@@ -365,7 +365,7 @@ fn set_repeating_v2() -> Option<ndk::SetRepeatingV2> {
 /// Results kept while their images are on the way (a few frames).
 const RESULTS_KEPT: usize = 8;
 #[derive(Clone)]
-struct DeviceRoute { failed: Arc<AtomicI32>, results: Results, failures: Failures, thread: Thread }
+struct DeviceRoute { failed: Arc<AtomicI32>, results: Results, failures: Failures, thread: Thread, boottime: bool }
 fn device_routes() -> &'static Mutex<HashMap<usize, DeviceRoute>> {
     static ROUTES: OnceLock<Mutex<HashMap<usize, DeviceRoute>>> = OnceLock::new();
     ROUTES.get_or_init(Default::default)
@@ -378,7 +378,7 @@ impl Capture {
         let failed = Arc::new(AtomicI32::new(0));
         let results: Results = Default::default();
         let failures: Failures = Default::default();
-        device_routes().lock().unwrap_or_else(|e| e.into_inner()).insert(callback, DeviceRoute { failed: failed.clone(), results: results.clone(), failures: failures.clone(), thread: std::thread::current() });
+        device_routes().lock().unwrap_or_else(|e| e.into_inner()).insert(callback, DeviceRoute { failed: failed.clone(), results: results.clone(), failures: failures.clone(), thread: std::thread::current(), boottime });
         let context = callback as *mut c_void;
         let capture_callbacks = match set_repeating_v2() {
             Some(set) => Callbacks::Numbered(Box::new(ndk::CaptureCallbacks {
@@ -390,7 +390,7 @@ impl Capture {
                 sequence_completed: Some(sequence_completed), sequence_aborted: Some(sequence_aborted), buffer_lost: Some(buffer_lost),
             })),
         };
-        let mut c = Self { device: std::ptr::null_mut(), request: std::ptr::null_mut(), container: std::ptr::null_mut(), outputs: Vec::new(), targets: Vec::new(), reader: std::ptr::null_mut(), windows, format, orientation, callback, failed, results, pending: FrameResults::default(), failures, boottime, _capture_callbacks: capture_callbacks };
+        let mut c = Self { device: std::ptr::null_mut(), request: std::ptr::null_mut(), container: std::ptr::null_mut(), outputs: Vec::new(), targets: Vec::new(), reader: std::ptr::null_mut(), windows, format, orientation, callback, failed, results, pending: FrameResults::default(), failures, _capture_callbacks: capture_callbacks };
         // The callback context is an opaque registry token, never a Rust pointer.
         // Late NDK callbacks after close cannot dereference freed capture state.
         let mut callbacks = ndk::DeviceCallbacks { context: callback as *mut c_void, disconnected: Some(disconnected), error: Some(device_error) };
@@ -457,9 +457,7 @@ impl Capture {
         if error != 0 { return Err(format!("camera device disconnected or failed: {error}")); }
         if !self.has_reader() { return Ok(None); }
         unsafe {
-            let Some((image, time, mut exposure)) = self.next_image()? else { return Ok(None) };
-            // the sensor's start of exposure on the HAL clock (from the boot clock it counts in)
-            exposure.start_ns = if self.boottime && exposure.start_ns != 0 { (exposure.start_ns as i64 - boot_offset_ns()).max(0) as u64 } else { 0 };
+            let Some((image, time, exposure)) = self.next_image()? else { return Ok(None) };
             let mut width = 0;
             let mut height = 0;
             checked(ndk::AImage_getWidth(image.0, &mut width), "image width")?;
@@ -539,18 +537,21 @@ unsafe extern "C" fn disconnected(context: *mut c_void, _: *mut c_void) { device
 /// A capture's result (on the NDK's thread): its exposure, kept for its image by timestamp.
 unsafe extern "C" fn capture_completed(context: *mut c_void, _: *mut c_void, _: *mut c_void, result: *const c_void) {
     let Some(time) = integer(result, tag::SENSOR_TIMESTAMP) else { return };
+    let Some(route) = lock(device_routes()).get(&(context as usize)).cloned() else { return };
     let field = |t| integer(result, t).map_or(0, |v| v.clamp(0, u32::MAX as i64) as u32);
-    let exposure = CameraExposure { start_ns: time.max(0) as u64, exposure_ns: field(tag::SENSOR_EXPOSURE_TIME), rolling_skew_ns: field(tag::SENSOR_ROLLING_SHUTTER_SKEW), frame_duration_ns: field(tag::SENSOR_FRAME_DURATION), sensitivity: field(tag::SENSOR_SENSITIVITY) };
-    let route = lock(device_routes()).get(&(context as usize)).cloned();
-    if let Some(route) = route {
-        {
-            let mut results = lock(&route.results);
-            results.push_back((time, exposure));
-            while results.len() > RESULTS_KEPT { results.pop_front(); }
+    let (now, boot_offset) = (crate::clock::raw_ns() as i64, boot_offset_ns());
+    let start_ns = crate::clock::sensor_start_on_hal_clock(time, route.boottime, now, boot_offset);
+    let exposure = CameraExposure { start_ns: start_ns.unwrap_or(0), exposure_ns: field(tag::SENSOR_EXPOSURE_TIME), rolling_skew_ns: field(tag::SENSOR_ROLLING_SHUTTER_SKEW), frame_duration_ns: field(tag::SENSOR_FRAME_DURATION), sensitivity: field(tag::SENSOR_SENSITIVITY) };
+    {
+        let mut results = lock(&route.results);
+        if results.is_empty() {
+            crate::backend::android::xr::log(&format!("camera first result: says boot clock {}, stamp age {} ms on the HAL clock, boot clock {} ms ahead, on the HAL clock: {}", route.boottime, (now - time) / 1_000_000, boot_offset / 1_000_000, start_ns.is_some()));
         }
-        // an image waiting for this result goes on now, not at the next poll
-        route.thread.unpark();
+        results.push_back((time, exposure));
+        while results.len() > RESULTS_KEPT { results.pop_front(); }
     }
+    // an image waiting for this result goes on now, not at the next poll
+    route.thread.unpark();
 }
 /// A capture that failed: its result never comes, so its image goes now, if it waits.
 unsafe extern "C" fn capture_failed(context: *mut c_void, _: *mut c_void, _: *mut c_void, failure: *mut c_void) {

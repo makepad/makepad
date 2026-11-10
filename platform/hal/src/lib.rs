@@ -1056,6 +1056,13 @@ impl Hal {
 
     /// Asks the app: a `Query` event carrying `request`, answered by a `QueryReply` command.
     /// Returns the reply bytes, or `None` when the app did not answer within `timeout`.
+    /// A request for the session that wants no reply (`query` without the wait): it reaches the
+    /// session in order with the queries and events after it.
+    pub fn post(&self, session: u32, request: &[u8]) {
+        let req = self.next_req.fetch_add(1, Ordering::Relaxed);
+        self.with_events(session, |q| q.query(req, request));
+    }
+
     pub fn query(&self, session: u32, request: &[u8], timeout: Duration) -> Option<Vec<u8>> {
         let req = self.next_req.fetch_add(1, Ordering::Relaxed);
         self.with_events(session, |q| q.query(req, request));

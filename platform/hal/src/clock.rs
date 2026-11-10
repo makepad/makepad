@@ -1,7 +1,6 @@
 //! The HAL's one clock: raw monotonic nanoseconds, absolute (not deltas). And CPU time, of the
 //! calling thread or of the process: what they ran, which a loaded box does not move (a thread
-//! that waits for a core, or for anything else, spends none). And the CPU the process ran
-//! serving its remote peers, which observers cost the app.
+//! that waits for a core, or for anything else, spends none).
 
 /// `clock_gettime_nsec_np` of `clock_id`.
 #[cfg(target_vendor = "apple")]
@@ -131,20 +130,53 @@ pub fn process_cpu_ns() -> u64 {
     times.map_or(0, |()| filetimes_ns([kernel, user]))
 }
 
-/// The CPU the process's threads have run serving its remote peers (makepad-remote's count:
-/// reading and writing their frames, answering their commands, following their feeds), in
-/// nanoseconds: what observing the app costs it, not its own work. Under `makepad run`, the
-/// host's: its endpoint serves the program.
-#[cfg(any(unix, windows))]
-#[makepad_relax_api::relax_api]
-pub fn served_cpu_ns() -> u64 {
-    makepad_remote::served_cpu_ns()
-}
-
 #[cfg(not(any(unix, windows)))]
 pub fn raw_ns() -> u64 {
     use std::sync::OnceLock;
     use std::time::Instant;
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_nanos() as u64 + 1
+}
+
+/// A capture result's sensor timestamp (the start of its exposure) on the HAL clock, read as the
+/// result arrives. `says_boot`: the camera says it counts in the boot clock, `boot_offset` ahead
+/// of the HAL's. A camera that does not say counts in one clock or the other as far as it can be
+/// told: the one where this exposure has only just begun. None: in neither.
+pub fn sensor_start_on_hal_clock(stamp: i64, says_boot: bool, hal_now: i64, boot_offset: i64) -> Option<u64> {
+    const RESULT_AGE_MAX_NS: i64 = 1_000_000_000;
+    let just_begun = |age: i64| (0..RESULT_AGE_MAX_NS).contains(&age);
+    if stamp <= 0 {
+        None
+    } else if says_boot {
+        Some((stamp - boot_offset).max(0) as u64)
+    } else if just_begun(hal_now - stamp) {
+        Some(stamp as u64)
+    } else if just_begun(hal_now + boot_offset - stamp) {
+        Some((stamp - boot_offset).max(0) as u64)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sensor_start_on_hal_clock;
+
+    #[test]
+    fn a_sensor_stamp_reaches_the_hal_clock_by_its_arrival() {
+        const MS: i64 = 1_000_000;
+        let (now, offset) = (500_000 * MS, 90_000 * MS);
+        // says the boot clock: taken at its word, whatever the age
+        assert_eq!(sensor_start_on_hal_clock(now + offset - 40 * MS, true, now, offset), Some((now - 40 * MS) as u64));
+        assert_eq!(sensor_start_on_hal_clock(now + offset - 5000 * MS, true, now, offset), Some((now - 5000 * MS) as u64));
+        // says nothing: the clock where it has just begun
+        assert_eq!(sensor_start_on_hal_clock(now - 40 * MS, false, now, offset), Some((now - 40 * MS) as u64));
+        assert_eq!(sensor_start_on_hal_clock(now + offset - 40 * MS, false, now, offset), Some((now - 40 * MS) as u64));
+        // no suspend since boot: the clocks agree
+        assert_eq!(sensor_start_on_hal_clock(now - 40 * MS, false, now, 0), Some((now - 40 * MS) as u64));
+        // on neither clock, or none at all
+        assert_eq!(sensor_start_on_hal_clock(1000 * MS, false, now, offset), None);
+        assert_eq!(sensor_start_on_hal_clock(now + 5 * MS, false, now, 0), None);
+        assert_eq!(sensor_start_on_hal_clock(0, true, now, offset), None);
+    }
 }

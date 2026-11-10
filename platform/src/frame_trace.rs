@@ -12,6 +12,12 @@
 //! present histogram and an uneven next-frame histogram is the app clock's;
 //! the reverse is the compositor's.
 //!
+//! A present's gap counts only time a frame was due. An idle app presents
+//! nothing, and that is no stall: a rest runs from a turn of the loop that left
+//! no work for a frame and none on its way to the screen, to when the loop next
+//! started on something that left one (an input it took, or its wake), and the
+//! gap leaves it out. A handler's time is not rest. The line says so.
+//!
 //! Off, each call is one atomic load.
 
 use crate::makepad_error_log::trace_enabled;
@@ -116,9 +122,15 @@ pub struct FrameTrace {
     flip_lead: Hist,
     last_next_frame: Option<f64>,
     last_present: Option<f64>,
+    /// When the loop started on this turn's work: its oldest input, or its wake.
+    turn_from: Option<f64>,
+    /// No frame has been due since this time.
+    resting: Option<f64>,
+    /// Seconds of rest since the last present.
+    rested: f64,
 }
 
-fn on() -> bool {
+pub(crate) fn on() -> bool {
     trace_enabled("frames")
 }
 
@@ -132,6 +144,9 @@ impl FrameTrace {
             flip_lead: Hist::default(),
             last_next_frame: None,
             last_present: None,
+            turn_from: None,
+            resting: None,
+            rested: 0.0,
         }
     }
 
@@ -158,15 +173,41 @@ impl FrameTrace {
         self.last_next_frame = Some(time);
     }
 
+    /// The loop started on something at this time: an input it took, or a wake. A turn's oldest
+    /// counts.
+    pub fn work_from(&mut self, at: f64) {
+        if on() {
+            self.turn_from.get_or_insert(at);
+        }
+    }
+
+    /// The loop's turn is over at `now`; `due`: it leaves work for a frame, or a frame on its way
+    /// to the screen. A rest ends when the loop started on what made a frame due.
+    pub fn turn_over(&mut self, due: bool, now: f64) {
+        let from = self.turn_from.take().unwrap_or(now);
+        if !due {
+            self.resting.get_or_insert(now);
+        } else if let Some(rest) = self.resting.take() {
+            let rest = self.last_present.map_or(rest, |prev| rest.max(prev));
+            self.rested += (from - rest).max(0.0);
+        }
+    }
+
+    /// The gap in ms this present counts: since the one before, less the rests between them.
+    fn gap(&mut self, now: f64) -> Option<f64> {
+        let rested = std::mem::take(&mut self.rested);
+        let prev = self.last_present.replace(now)?;
+        Some(((now - prev - rested) * 1000.0).max(0.0))
+    }
+
     /// A window frame was presented at this time (seconds of the backend's clock).
     pub fn present(&mut self, now: f64) {
         if !on() {
             return;
         }
-        if let Some(prev) = self.last_present {
-            self.present.add((now - prev) * 1000.0);
+        if let Some(ms) = self.gap(now) {
+            self.present.add(ms);
         }
-        self.last_present = Some(now);
     }
 
     /// Print and reset every two seconds of wall time.
@@ -184,7 +225,7 @@ impl FrameTrace {
         let [display, cadence, host] = self.sources;
         crate::trace!("frames", "ticks/2s: display={display} cadence={cadence} host={host}");
         crate::trace!("frames", "{}", self.next_frame.line("next_frame gap"));
-        crate::trace!("frames", "{}", self.present.line("present gap"));
+        crate::trace!("frames", "{} (only while a frame was due)", self.present.line("present gap"));
         crate::trace!("frames", "{}", self.flip_lead.line("flip lead"));
         self.sources = [0; 3];
         self.next_frame = Hist::default();
@@ -197,6 +238,58 @@ impl FrameTrace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn near(got: Option<f64>, ms: f64) -> bool {
+        got.is_some_and(|g| (g - ms).abs() < 1e-6)
+    }
+
+    #[test]
+    fn a_present_gap_leaves_out_a_rest_and_nothing_else() {
+        let mut t = FrameTrace::new();
+        assert_eq!(t.gap(1.0), None, "the first has nothing to count from");
+        // frames that run on count whole
+        t.turn_over(true, 1.002);
+        assert!(near(t.gap(1.008), 8.0));
+        // a rest, a wake that asked for nothing, then an input: from the input
+        t.turn_over(false, 1.008);
+        t.turn_over(false, 2.0);
+        t.turn_from = Some(4.0);
+        t.turn_over(true, 4.001);
+        assert!(near(t.gap(4.04), 40.0));
+        // a stall with a frame due counts whole
+        t.turn_over(true, 5.0);
+        assert!(near(t.gap(8.04), 4000.0));
+        // a stall in the handler the rest ended for counts whole
+        t.turn_over(false, 8.04);
+        t.turn_from = Some(9.0);
+        t.turn_over(true, 12.0);
+        assert!(near(t.gap(12.01), 3010.0));
+        // a wake's work counts from the wake
+        t.turn_over(false, 12.01);
+        t.turn_from = Some(13.0);
+        t.turn_over(true, 13.1);
+        assert!(near(t.gap(13.11), 110.0));
+    }
+
+    #[test]
+    fn a_present_gap_adds_up_its_rests_and_never_rests_before_the_present() {
+        let mut t = FrameTrace::new();
+        let _ = t.gap(1.0);
+        // two rests between two presents
+        t.turn_over(false, 1.0);
+        t.turn_from = Some(2.0);
+        t.turn_over(true, 2.0);
+        t.turn_over(false, 2.1);
+        t.turn_from = Some(3.1);
+        t.turn_over(true, 3.1);
+        assert!(near(t.gap(3.12), 120.0));
+        // a present heard after a turn found nothing due: the rest is from the present
+        t.turn_over(false, 3.11);
+        assert!(near(t.gap(3.13), 10.0));
+        t.turn_from = Some(5.0);
+        t.turn_over(true, 5.0);
+        assert!(near(t.gap(5.01), 10.0));
+    }
 
     #[test]
     fn gaps_fall_in_their_buckets_and_print_the_populated_ones() {

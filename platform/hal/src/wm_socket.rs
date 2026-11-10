@@ -20,9 +20,10 @@
 //!   as that client like an app the WM launched itself. `lane=` marks a lane's test instance
 //!   (`MAKEPAD_TEST_LANE`, [`TEST_LANE_ENV`]): the WM badges it and never takes it for the
 //!   dock's own instance of the app.
-//! - or, instead of the hello, client `makepad-wm launch <app id>`; server `makepad-wm launched`
+//! - or, instead of the hello, client `makepad-wm launch <app id> [native]`; server `makepad-wm launched`
 //!   or `makepad-wm refused <reason>`: the WM opens its dock app (launch-or-focus), what devhub's
-//!   `show` and a shell ask for (`makepad_app_registry::machine::request_launch`).
+//!   `show` and a shell ask for (`makepad_app_registry::machine::request_launch`). `native`: the
+//!   app's compiled build, whatever runs it otherwise.
 //! - or client `makepad-wm notify <title>\t<body>[\t<action>]`; server `makepad-wm notified` or
 //!   `makepad-wm refused <reason>`: a toast in the WM's notification stack (devhub's "app
 //!   updated" after a sync, `makepad_app_registry::machine::request_notify`); `<action>` is what
@@ -384,13 +385,14 @@ impl WmSocket {
 
     /// Serve one connection: the version check, then (when the client asks) `admit`, which makes
     /// the window slot and answers the hub port and client id.
-    /// `launch`: a `makepad-wm launch <id>` request (the WM opens its dock app `id`).
+    /// `launch`: a `makepad-wm launch <id> [native]` request (the WM opens its dock app `id`, its
+    /// compiled build when `native`).
     /// `notify`: a `makepad-wm notify <title>\t<body>[\t<action>]` request (a toast).
     pub fn serve(
         stream: UnixStream,
         wire: u64,
         admit: impl FnOnce(&AdoptRequest) -> Result<Admission, String>,
-        launch: impl FnOnce(&str) -> Result<(), String>,
+        launch: impl FnOnce(&str, bool) -> Result<(), String>,
         notify: impl FnOnce(&str, &str, Option<&str>) -> Result<(), String>,
     ) -> io::Result<Option<AdoptRequest>> {
         Self::serve_with(stream, wire, Versions::THIS, admit, launch, notify)
@@ -402,7 +404,7 @@ impl WmSocket {
         wire: u64,
         versions: Versions,
         admit: impl FnOnce(&AdoptRequest) -> Result<Admission, String>,
-        launch: impl FnOnce(&str) -> Result<(), String>,
+        launch: impl FnOnce(&str, bool) -> Result<(), String>,
         notify: impl FnOnce(&str, &str, Option<&str>) -> Result<(), String>,
     ) -> io::Result<Option<AdoptRequest>> {
         stream.set_read_timeout(Some(LINE_TIMEOUT))?;
@@ -414,12 +416,13 @@ impl WmSocket {
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(e) => return Err(e),
         };
-        if let Some(id) = line.strip_prefix(GREETING).and_then(|r| r.trim().strip_prefix("launch ")) {
-            let id = id.trim();
+        if let Some(ask) = line.strip_prefix(GREETING).and_then(|r| r.trim().strip_prefix("launch ")) {
+            let ask = ask.trim();
+            let (id, native) = ask.strip_suffix(" native").map_or((ask, false), |id| (id.trim(), true));
             let answer = if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')) {
                 format!("{GREETING} refused not an app id\n")
             } else {
-                match launch(id) {
+                match launch(id, native) {
                     Ok(()) => format!("{GREETING} launched\n"),
                     Err(why) => format!("{GREETING} refused {}\n", why.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>()),
                 }
@@ -583,7 +586,7 @@ mod tests {
                 let got = WmSocket::serve(stream, wire, |req| {
                     assert_eq!(req.crate_name, "makepad-app-amp");
                     Ok(Admission { port: 8766, client: 1 << 32, version: req.version })
-                }, |_| Err("no launches here".into()), |_, _, _| Err("no toasts here".into())).unwrap();
+                }, |_, _| Err("no launches here".into()), |_, _, _| Err("no toasts here".into())).unwrap();
                 adopted.extend(got);
             }
             adopted
@@ -639,7 +642,7 @@ mod tests {
                         assert_ne!(version, 0, "incompatible clients never ask for admission");
                         assert_eq!(request.version, version);
                         Ok(Admission { port: 1, client: 2, version: request.version })
-                    }, |_| Err("no launches here".into()), |_, _, _| Err("no toasts here".into())).unwrap();
+                    }, |_, _| Err("no launches here".into()), |_, _, _| Err("no toasts here".into())).unwrap();
                     adopted.extend(got);
                 }
                 adopted
@@ -707,7 +710,7 @@ mod tests {
         crate::user_input::note(crate::user_input::Origin::Device, crate::user_input::What::Key);
         let server = thread::spawn(move || {
             let (stream, _) = socket.listener.accept().unwrap();
-            WmSocket::serve(stream, 7, |_| Err("no".into()), |_| Err("no".into()), |_, _, _| Err("no".into())).unwrap();
+            WmSocket::serve(stream, 7, |_| Err("no".into()), |_, _| Err("no".into()), |_, _, _| Err("no".into())).unwrap();
         });
         let stream = UnixStream::connect(&path).unwrap();
         (&stream).write_all(b"makepad-wm activity\n").unwrap();
@@ -719,6 +722,31 @@ mod tests {
         let ms: u64 = json.split("\"input_ms\":").nth(1).and_then(|r| r.split(',').next()).and_then(|n| n.parse().ok()).unwrap();
         assert!(ms < 5_000, "{json}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_launch_says_whether_it_asks_for_the_compiled_build() {
+        let asks = [
+            ("makepad-wm launch fab\n", Some(("fab", false)), "makepad-wm launched"),
+            ("makepad-wm launch fab native\n", Some(("fab", true)), "makepad-wm launched"),
+            ("makepad-wm launch fab other\n", None, "makepad-wm refused not an app id"),
+        ];
+        for (ask, wanted, answer) in asks {
+            let (client, server) = UnixStream::pair().unwrap();
+            let served = thread::spawn(move || {
+                let mut got = None;
+                WmSocket::serve(server, 7, |_| Err("no".into()), |id, native| {
+                    got = Some((id.to_string(), native));
+                    Ok(())
+                }, |_, _, _| Err("no".into())).unwrap();
+                got
+            });
+            (&client).write_all(ask.as_bytes()).unwrap();
+            let mut line = String::new();
+            BufReader::new(&client).read_line(&mut line).unwrap();
+            assert_eq!(line.trim(), answer);
+            assert_eq!(served.join().unwrap(), wanted.map(|(id, native)| (id.to_string(), native)));
+        }
     }
 
     #[test]
@@ -734,7 +762,7 @@ mod tests {
         assert_eq!(paths, vec![stale.clone(), socket_path(&dir, 0)]);
         let server = thread::spawn(move || {
             let (stream, _) = live.listener.accept().unwrap();
-            WmSocket::serve(stream, wire, |request| Ok(Admission { port: 1, client: 2, version: request.version }), |_| Ok(()), |_, _, _| Ok(())).unwrap();
+            WmSocket::serve(stream, wire, |request| Ok(Admission { port: 1, client: 2, version: request.version }), |_, _| Ok(()), |_, _, _| Ok(())).unwrap();
         });
         let found = paths.iter().find_map(|p| adopt(p, wire, 9, "devhub").ok());
         assert_eq!(found, Some(Admission { port: 1, client: 2, version: Versions::THIS.max }));

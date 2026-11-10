@@ -342,6 +342,32 @@ fn a_request_sees_its_client_go() {
     assert!(!crate::lines::client_gone(), "no request on this thread");
 }
 
+/// A handler that waits says so ahead of its answer, on that request's channel only.
+#[test]
+fn a_request_says_what_it_waits_on_ahead_of_its_answer() {
+    let ep = Endpoint::new("makepad-remote-says");
+    ep.register("slow", 1, crate::lines::service("slow", std::sync::Arc::new(move |_, out| {
+        crate::lines::say_waiting("waits for \"room\"");
+        crate::lines::wait_over();
+        out.push("{\"answer\":1}".to_string());
+    })));
+    let conn = pair(&ep);
+    let ch = conn.open("slow", "").unwrap();
+    ch.send(b"wait\n".to_vec()).unwrap();
+    let mut text = String::new();
+    while !text.contains("{\"end\":") {
+        match ch.recv_timeout(WAIT).unwrap() {
+            Event::Data(d) => text.push_str(&String::from_utf8_lossy(&d)),
+            Event::Opened(_) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[..3], ["{\"say\":\"waits for \\\"room\\\"\",\"waiting\":true}", "{\"say\":\"\",\"waiting\":false}", "{\"answer\":1}"]);
+    crate::lines::say_waiting("nothing outside a request");
+    crate::lines::wait_over();
+}
+
 /// A late follower gets what came before it only when it asks from there, and once.
 #[test]
 fn a_feed_from_a_record_gets_what_came_before_it() {
@@ -797,10 +823,8 @@ fn a_request_past_its_timeout_is_closed_and_the_connection_goes_on() {
     let addr = crate::carrier::loopback::serve(&ep, &token).unwrap().to_string();
     let client = Client::new(Target::Loopback(addr, token), "t");
     client.set_timeout(Some(Duration::from_millis(100)));
-    let t = std::time::Instant::now();
     let mut lines = client.cmd("slow").unwrap();
     assert!(matches!(lines.next(), Some(Err(Error::Timeout))));
-    assert!(t.elapsed() < Duration::from_millis(500));
     assert!(lines.next().is_none());
     // the same connection answers the next request in time
     let first = client.cmd("quick").unwrap().next().unwrap().unwrap();

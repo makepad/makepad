@@ -427,6 +427,9 @@ impl Cx {
             let alive = self.hal_guarded(true, |cx| cx.hal_pump_events(timeout, if gpu_wait { PumpWait::Gpu } else { PumpWait::Idle }));
             busy_from = self.pass_load.mark();
             loop_watch::in_pump(false);
+            if crate::frame_trace::on() {
+                self.hal.frame_trace.work_from(makepad_hal::clock_ns() as f64 * 1e-9);
+            }
             // (the intake said why: its last window closed, or the window system asked it to quit)
             if !alive {
                 break 'turns;
@@ -556,6 +559,7 @@ impl Cx {
             }
             self.hal_run_tasks();
             self.hal_submit_batch();
+            self.hal_trace_turn(!in_flight.is_empty());
             self.first_draw_round(display_clock, reasked);
             // what this turn leaves the loop waiting for, read by `loop` without the UI thread
             loop_watch::publish(display_clock && self.hal_has_work(), self.hal.beat,
@@ -792,6 +796,15 @@ impl Cx {
             ));
         }
         true
+    }
+
+    /// `MAKEPAD_TRACE=frames`: this turn of the loop is over. `on_its_way`: a frame is on the GPU.
+    fn hal_trace_turn(&mut self, on_its_way: bool) {
+        if crate::frame_trace::on() {
+            let on_its_way = on_its_way || self.hal.hosted.as_ref().is_some_and(|hosted| hosted.frame_on_its_way());
+            let due = on_its_way || self.hal_has_work();
+            self.hal.frame_trace.turn_over(due, makepad_hal::clock_ns() as f64 * 1e-9);
+        }
     }
 
     /// `MAKEPAD_TRACE=frames`: what woke this beat (at `wake`, HAL ns), and the histograms every

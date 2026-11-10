@@ -36,6 +36,23 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
 /// `act` also performs one action through the OS API. Each adapter registers it when it starts.
 pub type OsSelfCheck = fn(window_key: u64, act: bool) -> String;
 
+/// The person's native input to this process, counted: the platform advances it at each input
+/// (its remote activity ledger), and a check of a sequence (an act's, `if_user_seq`) reads it on
+/// its own thread, never through the UI thread: it waits for nothing while the app is busy.
+static USER_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// The person's native input so far (`USER_SEQ`). An op: the count lives with the HAL's code.
+#[makepad_relax_api::relax_api]
+pub fn user_seq() -> u64 {
+    USER_SEQ.load(Ordering::Acquire)
+}
+
+/// The person gave this process native input (`USER_SEQ`). An op, as `user_seq`.
+#[makepad_relax_api::relax_api]
+pub fn note_user_input() {
+    USER_SEQ.fetch_add(1, Ordering::Release);
+}
+
 fn os_selfcheck() -> &'static OnceLock<OsSelfCheck> {
     static CHECK: OnceLock<OsSelfCheck> = OnceLock::new();
     &CHECK
@@ -284,14 +301,18 @@ impl remote::Backend for Native {
         let req = inject_action(window, request);
         wait_done(req, timeout).map(ActionResult::from_u8).ok_or_else(|| format!("action {req} timed out; inspect before retrying"))
     }
+    fn wait_action(&self, req: u64, timeout: Duration) -> Result<Option<ActionResult>,String> {
+        if !lock(&completions().0).requests.contains_key(&req) { return Err(format!("action {req}: no such pending action")); }
+        Ok(wait_done(req, timeout).map(ActionResult::from_u8))
+    }
     fn present(&self, window: u64, timeout: Duration) -> Result<(), String> {
         let query = format!("a11y_present {}", window as u32);
         let reply = Hal::global().query((window >> 32) as u32, query.as_bytes(), timeout).ok_or("presentation timed out; action may already be applied")?;
         if reply == b"ok" { Ok(()) } else { Err(String::from_utf8_lossy(&reply).into_owned()) }
     }
     fn type_text(&self, window: u64, text: &str) -> Result<(), String> {
-        let reply = Hal::global().query((window >> 32) as u32, format!("a11y_type\n{text}").as_bytes(), Duration::from_secs(5)).ok_or("text input timed out")?;
-        if reply == b"ok" { Ok(()) } else { Err(String::from_utf8_lossy(&reply).into_owned()) }
+        Hal::global().post((window >> 32) as u32, format!("a11y_type\n{text}").as_bytes());
+        Ok(())
     }
 
     fn os_selfcheck(&self, window: u64, act: bool) -> Result<String, String> {
@@ -299,9 +320,8 @@ impl remote::Backend for Native {
         Ok(check(window, act))
     }
 
-    fn user_seq(&self, window: u64) -> Result<u64, String> {
-        let reply = Hal::global().query((window >> 32) as u32, b"a11y_user_seq", Duration::from_secs(5)).ok_or("activity query timed out")?;
-        String::from_utf8_lossy(&reply).parse().map_err(|_| "invalid activity counter".into())
+    fn user_seq(&self, _window: u64) -> Result<u64, String> {
+        Ok(user_seq())
     }
 
     fn pointer(&self, window: u64, event: remote::PointerEvent, x: f64, y: f64, button: u32, mods: u32) -> Result<(), String> {

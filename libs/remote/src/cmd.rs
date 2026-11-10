@@ -426,7 +426,7 @@ fn serve(ch: crate::conn::Channel, dispatch: fn(&Req, &mut Out), end_fields: End
                 ch.close(CLOSE_NORMAL, "");
                 return;
             }
-            crate::served::tick();
+            crate::served::tick(true);
         }
     }
 }

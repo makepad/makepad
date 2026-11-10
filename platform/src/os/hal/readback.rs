@@ -52,6 +52,48 @@ impl Strand {
     }
 }
 
+/// The `screen_capture` windows whose last frame still waits for its sinks (behind other
+/// callbacks in [`Readbacks::jobs`], or for a pool worker the app's work holds), each with the
+/// frames it left uncopied since. Such a window gets no new copy: a stuck delivery holds one frame
+/// per window, never one per frame presented meanwhile (at 60 a second, gigabytes in a minute).
+/// The wait is logged when it first skips a frame and when it ends.
+#[derive(Clone, Default)]
+struct CaptureBacklog(Arc<Mutex<HashMap<usize, u64>>>);
+impl CaptureBacklog {
+    fn lock(&self) -> MutexGuard<'_, HashMap<usize, u64>> { self.0.lock().unwrap_or_else(|e| e.into_inner()) }
+    fn waits(&self, window: usize) -> bool { self.lock().contains_key(&window) }
+    /// A frame of `window` the sinks want is not copied: its last still waits for them.
+    fn skip(&self, window: usize) {
+        let first = match self.lock().get_mut(&window) {
+            Some(skipped) => {
+                *skipped += 1;
+                *skipped == 1
+            }
+            None => false,
+        };
+        if first {
+            crate::log!("screen capture: window {window}'s last frame still waits for its sinks; its next frames are skipped until they take it");
+        }
+    }
+}
+/// A frame of a `screen_capture` window queued for its sinks: dropped once they took it (or it
+/// was dropped unrun), the window's frames are copied again.
+struct CaptureQueued(CaptureBacklog, usize);
+impl CaptureQueued {
+    fn new(backlog: &CaptureBacklog, window: usize) -> Self {
+        backlog.lock().insert(window, 0);
+        CaptureQueued(backlog.clone(), window)
+    }
+}
+impl Drop for CaptureQueued {
+    fn drop(&mut self) {
+        let skipped = self.0.lock().remove(&self.1).unwrap_or(0);
+        if skipped > 0 {
+            crate::log!("screen capture: window {}'s sinks took its frame; {skipped} frames were skipped while it waited", self.1);
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Readbacks {
     next: u32,
@@ -61,6 +103,7 @@ pub(crate) struct Readbacks {
     snapshots: HashMap<u32, Texture>,
     /// Window copies in flight for `screen_capture` byte sinks: req -> window index. One per window.
     captures: HashMap<u32, usize>,
+    capture_backlog: CaptureBacklog,
     picks: HashMap<u32, (crate::pick::PickTicket, Texture, Texture)>,
     images: VecDeque<(Vec<u64>, u32, u32, Arc<[u8]>)>,
     workers: Vec<TaskHandle<()>>,
@@ -353,6 +396,8 @@ impl Cx {
             self.hal.event_arena_min = self.hal.event_arena_min.max(width * height * 4);
             fb.w.snapshot(crate::event::hal_intake::hal_window_id(window), req);
             self.hal.readbacks.captures.insert(req, window.id());
+        } else if crate::screen_capture::capture_wants_window(Some(window.id())) {
+            self.hal.readbacks.capture_backlog.skip(window.id());
         }
         // A grab is of a whole paint: one that left a draw out (its pipeline or shader still
         // compiling, a picture it samples unfinished) keeps the grabs waiting for the paint the
@@ -379,12 +424,13 @@ impl Cx {
         self.hal.readbacks.windows.insert(req, ids);
     }
 
-    /// A `screen_capture` byte sink is owed this window's frame and no copy of it is in flight.
-    /// Every HAL backend answers the copy (it is the `/g` grab's snapshot), so cap streams work
-    /// wherever grabs do.
+    /// A `screen_capture` byte sink is owed this window's frame, no copy of it is in flight and
+    /// its sinks took the last ([`CaptureBacklog`]). Every HAL backend answers the copy (it is the
+    /// `/g` grab's snapshot), so cap streams work wherever grabs do.
     pub(crate) fn hal_capture_due(&self, window: WindowId) -> bool {
         crate::screen_capture::capture_wants_window(Some(window.id()))
             && !self.hal.readbacks.captures.values().any(|w| *w == window.id())
+            && !self.hal.readbacks.capture_backlog.waits(window.id())
     }
 
     pub(crate) fn hal_pick_readback(
@@ -487,8 +533,10 @@ impl Cx {
             // Same RGBA top-left rows as a grab; sinks run off the Cx thread, in frame order.
             if ok {
                 let pixels: Arc<[u8]> = Arc::from(pixels);
+                let queued = CaptureQueued::new(&self.hal.readbacks.capture_backlog, window);
                 self.hal.readbacks.jobs.push(Box::new(move || {
-                    crate::screen_capture::deliver_capture_frame(Some(window), w, h, &pixels)
+                    crate::screen_capture::deliver_capture_frame(Some(window), w, h, &pixels);
+                    drop(queued);
                 }));
                 self.hal_poll_readback_images();
             }
@@ -605,11 +653,28 @@ impl Cx {
         let pool = self.task_pool();
         self.hal.readbacks.jobs.start(&pool, Class::Visible);
         while let Some((ids, ..)) = self.hal.readbacks.images.front() {
-            let class = if crate::remote::grab_ids_only(ids) { Class::Interactive } else { Class::Visible };
+            // A remote grab's pixels go from here to the grab encoder's own thread: no pool job
+            // carries them, so the app's work cannot keep a grab waiting (at two cores the pool
+            // has one worker, and one long job without a task boundary holds it). What is left
+            // to do here is a few map updates under the sinks' lock and a send that never waits;
+            // with the remote off no grab waits for them.
+            if crate::remote::grab_ids_only(ids) {
+                let (ids, width, height, pixels) = self.hal.readbacks.images.pop_front().unwrap();
+                let _no_remote = crate::remote::deliver_grab_pixels(
+                    ids,
+                    width,
+                    height,
+                    pixels,
+                    width as usize * 4,
+                    crate::texture::ReadbackChannelOrder::Rgba,
+                    crate::texture::ReadbackOrigin::TopLeft,
+                );
+                continue;
+            }
             let pool = self.task_pool();
             if !pool.is_open() { break; }
             let (ids, width, height, pixels) = self.hal.readbacks.images.pop_front().unwrap();
-            if let Ok(handle) = pool.submit(class, move || {
+            if let Ok(handle) = pool.submit(Class::Visible, move || {
                 let ids = crate::remote::deliver_grab_pixels(
                     ids,
                     width,
@@ -686,6 +751,44 @@ mod tests {
             assert!(start.elapsed() < Duration::from_secs(5), "readback callback was not answered");
             std::thread::yield_now();
         }
+    }
+
+    /// A remote grab's pixels leave the readback queue on the turn that has them, with a task
+    /// pool that takes no job at all: a grab never waits for a worker the app's own work holds.
+    #[test]
+    fn a_grab_s_pixels_never_wait_for_a_pool_worker() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.use_closed_task_pool();
+        // the remote's grab ids start at 1 << 62
+        let grab = (1u64 << 62) + 1;
+        assert!(crate::remote::grab_ids_only(&[grab]), "a remote grab's id");
+        cx.hal.readbacks.images.push_back((vec![grab], 2, 1, Arc::from(vec![0u8; 8])));
+        cx.hal_poll_readback_images();
+        assert!(cx.hal.readbacks.images.is_empty(), "the grab's pixels went on without a pool job");
+    }
+
+    /// A screen capture's frame that waits for its sinks (here behind a pool that takes no job)
+    /// keeps its window from a new copy: a stuck delivery holds one frame, not one per frame the
+    /// window presents meanwhile.
+    #[test]
+    fn a_capture_frame_waiting_for_its_sinks_holds_back_the_next_copy() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.use_closed_task_pool();
+        // a window no other test captures
+        let window = WindowId(9001, 0);
+        let sink = crate::screen_capture::add_screen_capture(
+            crate::screen_capture::ScreenCaptureOptions { window_id: Some(window.id()), max_fps: 0.0 },
+            |_frame: &crate::screen_capture::ScreenCaptureFrame<'_>| {},
+        );
+        assert!(cx.hal_capture_due(window), "the sink wants the window's frames");
+        let req = cx.hal_readback_request();
+        cx.hal.readbacks.captures.insert(req, window.id());
+        cx.hal_readback(req, makepad_hal::readback::OK, [0, 0, 2, 1], &[0u8; 8]);
+        assert!(!cx.hal_capture_due(window), "no new copy while the last frame waits for its sinks");
+        let job = cx.hal.readbacks.jobs.lock().jobs.pop_front().expect("the frame waits for its sinks");
+        job();
+        assert!(cx.hal_capture_due(window), "the window's frames are copied again once its sinks took the last");
+        crate::screen_capture::remove_screen_capture(sink);
     }
 
     #[test]

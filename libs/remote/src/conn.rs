@@ -207,7 +207,7 @@ impl State {
 impl Conn {
     /// Starts the reader and writer threads over `io`, after the handshake. `initiator`: the
     /// side that dialled (it allocates odd channel numbers, the other even). A connection with a
-    /// `handler` serves its peer: its threads' CPU counts as served.
+    /// `handler` serves its peer: its threads' CPU counts as served (else as asked).
     pub fn start(io: Io, peer: Hello, initiator: bool, handler: Option<OpenHandler>, hooks: Hooks) -> Conn {
         let serves = handler.is_some();
         let closed = Arc::new(AtomicBool::new(false));
@@ -301,7 +301,9 @@ impl Conn {
         self.0.work.notify_one();
     }
 
-    /// Says goodbye and closes once everything queued before it is written.
+    /// Says goodbye and closes. The goodbye goes ahead of queued channel data and the peer ends the
+    /// link on reading it, so data still queued may never reach it: to end after its data, close
+    /// the channel ([`ChannelTx::close`]).
     pub fn close(&self, reason: &str) {
         self.0.closing.store(true, Relaxed);
         let mut st = self.0.st.lock().unwrap();
@@ -365,9 +367,7 @@ impl Conn {
 
     fn read_loop(&self, mut rd: FrameReader, serves: bool) {
         loop {
-            if serves {
-                crate::served::tick();
-            }
+            crate::served::tick(serves);
             let f = match rd.next() {
                 Ok(f) => f,
                 Err(e) => {
@@ -513,9 +513,7 @@ impl Conn {
         let mut flushed = true;
         let mut idle_since = std::time::Instant::now();
         loop {
-            if serves {
-                crate::served::tick();
-            }
+            crate::served::tick(serves);
             let work = {
                 let mut st = self.0.st.lock().unwrap();
                 loop {

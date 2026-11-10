@@ -144,11 +144,21 @@ impl Backend for RemoteUi {
         request.req = next();
         lock(&self.0.state).actions.insert(request.req, None);
         self.send_action(&request);
-        let result = self.wait(timeout, |s| s.actions.get(&request.req).copied().flatten()).map(ActionResult::from_u8);
-        lock(&self.0.state).actions.remove(&request.req);
-        result
+        // one the child has not answered by then stays pending, for `wait_action`
+        self.wait_action(request.req, timeout)?.ok_or_else(|| format!("action {} timed out; inspect before retrying", request.req))
     }
-    fn present(&self, window: u64, timeout: Duration) -> Result<(),String> { self.read(window,true,timeout).map(|_| ()) }
+    fn wait_action(&self, req: u64, timeout: Duration) -> Result<Option<ActionResult>,String> {
+        if !lock(&self.0.state).actions.contains_key(&req) { return Err(format!("action {req}: no such pending action")); }
+        match self.wait(timeout, |s| s.actions.get(&req).copied().flatten()) {
+            Ok(result) => { lock(&self.0.state).actions.remove(&req); Ok(Some(ActionResult::from_u8(result))) }
+            Err(_) if !lock(&self.0.state).closed => Ok(None),
+            Err(why) => { lock(&self.0.state).actions.remove(&req); Err(why) }
+        }
+    }
+    fn present(&self, window: u64, timeout: Duration) -> Result<(),String> {
+        // the same answer as a native window's, so a caller that waits on knows it
+        self.read(window,true,timeout).map(|_| ()).map_err(|why| if why.starts_with("hosted ui timed out") { "presentation timed out; action may already be applied".into() } else { why })
+    }
     fn user_seq(&self, window: u64) -> Result<u64,String> { self.read(window,false,Duration::from_secs(5)) }
     fn type_text(&self, _window: u64, text: &str) -> Result<(),String> {
         self.send(StudioToApp::A11yType { text: text.into() });

@@ -98,10 +98,12 @@ impl Cx {
         if matches!(
             event,
             HalEvent::MouseDown { .. } | HalEvent::MouseMove { .. } | HalEvent::MouseUp { .. } | HalEvent::Scroll { .. } | HalEvent::Pinch { .. } | HalEvent::Touch { .. } | HalEvent::KeyDown { .. } | HalEvent::KeyUp { .. } | HalEvent::Text { .. } | HalEvent::Ime { .. }
-        ) && self.hal.input_ns == 0
-        {
+        ) {
+            self.hal.frame_trace.work_from(time_ns as f64 * 1e-9);
             // the oldest input a frame consumes is its cause (FrameMeta::input_ns)
-            self.hal.input_ns = time_ns;
+            if self.hal.input_ns == 0 {
+                self.hal.input_ns = time_ns;
+            }
         }
         if makepad_hal::profile::on() {
             use makepad_hal::profile::{input, Input};

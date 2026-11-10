@@ -84,6 +84,7 @@ impl Win {
         let a = app();
         let popup = kind & 0xff == window_kind::POPUP && parent.is_some();
         let shared = Shared::global();
+        crate::backend::shell::window_made();
         let view = unsafe {
             if !popup && !a.root_taken() {
                 a.root.get()

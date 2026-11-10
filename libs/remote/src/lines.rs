@@ -1,9 +1,10 @@
 //! A request/answer service of JSON lines for the services that are not `cmd` (the relay's
 //! `list` and `session`, the hub's `hosts`): one request line per DATA message, the answer lines
-//! sent as one DATA message ending with `{"end":"<first word>","ms":N}`, like `cmd`.
+//! sent as one DATA message ending with `{"end":"<first word>","ms":N}`, like `cmd`. A handler that
+//! waits may say so first ([`say_waiting`]), as `{"say":"<line>","waiting":true}` lines ahead of them.
 
 use crate::cmd::json_str;
-use crate::conn::{Conn, Event, CLOSE_REFUSED};
+use crate::conn::{ChannelTx, Conn, Event, CLOSE_REFUSED};
 use crate::endpoint::Factory;
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -11,6 +12,28 @@ use std::sync::Arc;
 thread_local! {
     /// The connection this thread answers requests on.
     static ASKED_ON: RefCell<Option<Conn>> = const { RefCell::new(None) };
+    /// Where this thread answers its requests.
+    static ANSWERS: RefCell<Option<ChannelTx>> = const { RefCell::new(None) };
+}
+
+/// Tells the client of the request this thread answers what it waits on, ahead of the answer, which
+/// may be minutes away. The request has done nothing yet, so a client cut off now can ask again
+/// (nothing outside a request).
+pub fn say_waiting(line: &str) {
+    answer_early(format!("{{\"say\":{},\"waiting\":true}}\n", json_str(line)));
+}
+
+/// The wait [`say_waiting`] told of is over: the request goes on to do what it asks.
+pub fn wait_over() {
+    answer_early("{\"say\":\"\",\"waiting\":false}\n".to_string());
+}
+
+fn answer_early(line: String) {
+    ANSWERS.with(|tx| {
+        if let Some(tx) = tx.borrow().as_ref() {
+            let _ = tx.send(line.into_bytes());
+        }
+    });
 }
 
 /// Whether the client of the request this thread is answering has gone (never outside a request):
@@ -40,6 +63,7 @@ pub fn service(name: &'static str, handler: Arc<Handler>) -> Factory {
                 (hooks.enter)();
                 ASKED_ON.with(|c| *c.borrow_mut() = Some(asked_on));
                 let ch = open.channel;
+                ANSWERS.with(|tx| *tx.borrow_mut() = Some(ch.tx()));
                 'requests: while let Some(ev) = ch.recv() {
                     let data = match ev {
                         Event::Data(d) => d,
@@ -63,7 +87,7 @@ pub fn service(name: &'static str, handler: Arc<Handler>) -> Factory {
                         if ch.send(text.into_bytes()).is_err() {
                             break 'requests;
                         }
-                        crate::served::tick();
+                        crate::served::tick(true);
                     }
                 }
                 (hooks.exit)();
