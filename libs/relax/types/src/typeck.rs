@@ -6139,15 +6139,6 @@ impl<'a> Fcx<'a> {
                 adt_ty
             }
             ExprKind::Range(a, b, incl) => {
-                let elem = self.fresh(0);
-                if let Some(a) = a.get() {
-                    let t = self.check_expr(a, Some(elem));
-                    self.eq(t, elem);
-                }
-                if let Some(b) = b.get() {
-                    let t = self.check_expr(b, Some(elem));
-                    self.eq(t, elem);
-                }
                 let name = match (a.is_some(), b.is_some(), *incl) {
                     (true, true, false) => "Range",
                     (true, true, true) => "RangeInclusive",
@@ -6156,7 +6147,26 @@ impl<'a> Fcx<'a> {
                     (false, true, true) => "RangeToInclusive",
                     (false, false, _) => "RangeFull",
                 };
-                match self.lang_item(&["ops", name]) {
+                let range = self.lang_item(&["ops", name]);
+                let elem = self.fresh(0);
+                // rustc lowers a range to a struct literal (`a..=b` to `RangeInclusive::new(a, b)`):
+                // an expected type of the same range gives the bounds their type (expr.rs
+                // check_expr_struct_fields adt_ty_hint), and each bound is a coercion site
+                // (`*mut u8` bounds for a `Range<*const u8>` parameter)
+                if let (Some(x), Some(d)) = (expected, range) {
+                    let x = self.shallow(x);
+                    if let TyKind::Adt(xd, args, _) = self.tcx.tys.kind(x).clone() {
+                        if xd == d {
+                            if let [arg] = *self.tcx.tys.list(args) { self.eq(elem, arg); }
+                        }
+                    }
+                }
+                for bound in [a.get(), b.get()].into_iter().flatten() {
+                    let t = self.check_expr(bound, Some(elem));
+                    let pos = self.ast().expr(bound).lo;
+                    self.coerce_or_unify(t, elem, Some(bound), pos);
+                }
+                match range {
                     Some(d) => {
                         let n = self.tcx.adts.get(&d).map_or(0, |a| a.n_generics);
                         let args = if n == 0 { Vec::new() } else { vec![elem] };

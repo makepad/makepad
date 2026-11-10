@@ -7431,15 +7431,16 @@ impl<'a> Lcx<'a> {
             ExprKind::MethodCall(recv, row) => self.lower_method(e, *recv, ast.list(ast.row(*row).args), t),
             ExprKind::Struct(row) => { let crate::ast::StructRow { fields, base, rest, .. } = ast.row(*row); self.lower_struct_lit(e, ast.list(*fields), base.get(), *rest, t) }
             ExprKind::Range(a, b, _) => {
-                // Range { start, end } as a plain struct value
+                // Range { start, end } as a plain struct value; each bound is a coercion site
+                // (`&a..&b` for a `Range<&[u8]>`)
                 let mut vals = Vec::new();
                 let tys = self.range_field_tys(t);
                 if let Some(a) = &a.get() {
-                    vals.push((self.lower_expr(*a), tys[0]));
+                    vals.push((self.lower_expr_coerced(*a, tys[0]), tys[0]));
                 }
                 if let Some(b) = &b.get() {
                     let ft = if tys.len() > 1 { tys[1] } else { tys[0] };
-                    vals.push((self.lower_expr(*b), ft));
+                    vals.push((self.lower_expr_coerced(*b, ft), ft));
                 }
                 // RangeInclusive has an extra `exhausted: bool` field
                 if let TyKind::Adt(d, _, _) = self.kind(t) {
