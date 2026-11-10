@@ -421,12 +421,13 @@ impl Repository {
         // millions in a history scan. An id names one content, so where
         // it is found does not change what is read.
         let packed = self.ensure_packs();
-        if let Some(packs) = &self.packs {
-            for pack in packs {
-                if let Some(offset) = pack.find_offset(oid) {
-                    return pack.read_object(offset);
-                }
-            }
+        let packed_read = self.packs.iter().flatten().find_map(|pack| pack.find_offset(oid).map(|offset| pack.read_object(offset)));
+        match packed_read {
+            Some(Ok(obj)) => return Ok(obj),
+            // its pack removed by a repack meanwhile: in the packs that replaced it
+            Some(Err(_)) if self.packs_moved() => return self.read_object_uncached(oid),
+            Some(Err(e)) => return Err(e),
+            None => {}
         }
         match read_loose_object(&self.common_dir, oid) {
             Ok(obj) => return Ok(obj),
@@ -454,7 +455,9 @@ impl Repository {
                 }
             }
         }
-
+        if self.packs_moved() {
+            return self.read_object_uncached(oid);
+        }
         Err(GitError::ObjectNotFound(oid.to_hex()))
     }
 
@@ -502,10 +505,12 @@ impl Repository {
     pub fn object_size(&mut self, oid: &ObjectId) -> Result<u64, GitError> {
         // Packs first (see `read_object_uncached`).
         let packed = self.ensure_packs();
-        for pack in self.packs.iter().chain(self.alternate_packs.iter()).flatten() {
-            if let Some(offset) = pack.find_offset(oid) {
-                return pack.object_size(offset);
-            }
+        let packed_size = self.packs.iter().chain(self.alternate_packs.iter()).flatten().find_map(|pack| pack.find_offset(oid).map(|offset| pack.object_size(offset)));
+        match packed_size {
+            Some(Ok(size)) => return Ok(size),
+            Some(Err(_)) if self.packs_moved() => return self.object_size(oid),
+            Some(Err(e)) => return Err(e),
+            None => {}
         }
         match read_loose_object(&self.common_dir, oid) {
             Ok(obj) => return Ok(obj.data.len() as u64),
@@ -521,6 +526,9 @@ impl Repository {
                     Err(e) => return Err(e),
                 }
             }
+        }
+        if self.packs_moved() {
+            return self.object_size(oid);
         }
         Err(GitError::ObjectNotFound(oid.to_hex()))
     }
@@ -1697,6 +1705,24 @@ impl Repository {
         self.ensure_object_sources()
     }
 
+    /// After a miss (or a pack that no longer reads): true, and the packs dropped to be read
+    /// again, when the packs on disk are no longer those read. A repack (`git gc`, `git repack
+    /// -d`, by any process) packs loose objects and removes their files, and may remove the packs
+    /// it replaced, so an object loose when the packs were read can be in a pack this reader never
+    /// listed by now. git's reader lists its packs again on a miss too (`reprepare_packed_git`).
+    /// A real miss costs a listing of the pack directories.
+    fn packs_moved(&mut self) -> bool {
+        let Some(packs) = &self.packs else { return false };
+        let read: std::collections::BTreeSet<std::ffi::OsString> = packs.iter().filter_map(|p| p.pack_path.with_extension("idx").file_name().map(|n| n.to_os_string())).collect();
+        if pack_index_names(&self.common_dir) == read {
+            return false;
+        }
+        self.packs = None;
+        self.alternates = None;
+        self.alternate_packs = None;
+        true
+    }
+
     /// Read the pack indexes now (otherwise at the first object read). A
     /// repository kept open shares them with every other reader of the
     /// same packs opened meanwhile, so a job that opens the repository in
@@ -1708,6 +1734,20 @@ impl Repository {
     fn ensure_alternates(&mut self) -> Result<(), GitError> {
         self.ensure_object_sources()
     }
+}
+
+/// The pack indexes on disk by file name (a pack is named by its content's hash): the store's and
+/// each alternate's, as [`object_sources`] reads them.
+fn pack_index_names(common_dir: &Path) -> std::collections::BTreeSet<std::ffi::OsString> {
+    let primary = common_dir.join("objects");
+    let mut dirs = vec![primary.clone()];
+    if let Ok(content) = fs::read_to_string(primary.join("info").join("alternates")) {
+        dirs.extend(content.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(|l| resolve_alternate(common_dir, l)));
+    }
+    dirs.iter().filter_map(|d| fs::read_dir(d.join("pack")).ok()).flatten().flatten()
+        .map(|e| e.file_name())
+        .filter(|n| Path::new(n).extension().is_some_and(|x| x == "idx"))
+        .collect()
 }
 
 /// The packs' error when they did not open and the object is no loose one either: both said
