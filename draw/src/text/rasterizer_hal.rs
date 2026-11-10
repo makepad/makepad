@@ -142,6 +142,11 @@ pub struct GlyphClient {
     uses: Vec<GlyphUse>,
     out_touches: Vec<(u32, u32)>,
     frame: u64,
+    /// The frame the slots in use were last touched at.
+    touched_at: u64,
+    /// The host took slots back: the next frame end touches the ones in use, so its next eviction
+    /// knows what's on screen.
+    touch_soon: bool,
 }
 
 impl GlyphClient {
@@ -543,6 +548,7 @@ impl GlyphClient {
                 }
             }
             self.epoch += 1;
+            self.touch_soon = true;
         }
     }
 
@@ -554,7 +560,7 @@ impl GlyphClient {
     /// Whether this frame's end sweeps (`sweep`): the caller then names the glyphs its kept
     /// draw lists still show.
     pub fn sweep_due(&self) -> bool {
-        (self.frame + 1) % SWEEP_FRAMES == 0
+        (self.frame + 1).is_multiple_of(SWEEP_FRAMES) || self.touch_soon
     }
 
     /// A glyph a live draw list shows: in use, every size of it held.
@@ -577,16 +583,25 @@ impl GlyphClient {
     /// render target painted again from its kept instances, a code pane at rest) shows its
     /// glyphs without looking them up. Before, they were let go after IDLE_FRAMES, the host
     /// drew other glyphs into their slots, and words went blank or garbled ("Re ax").
+    ///
+    /// Right after the host takes slots back, the ones this frame drew are touched at its end
+    /// too: a resting screen draws too few frames to say what it still shows.
     pub fn end_frame(&mut self) {
         self.frame += 1;
         // lookups no draw list took (a measurement) are no one's
         self.uses.clear();
-        if self.frame % SWEEP_FRAMES != 0 {
+        let sweep = self.frame.is_multiple_of(SWEEP_FRAMES);
+        let soon = std::mem::take(&mut self.touch_soon);
+        if !soon && !sweep {
             return;
         }
-        let limit = self.frame.saturating_sub(IDLE_FRAMES);
-        self.release_idle(limit);
-        let since = self.frame.saturating_sub(SWEEP_FRAMES);
+        if sweep {
+            let limit = self.frame.saturating_sub(IDLE_FRAMES);
+            self.release_idle(limit);
+        }
+        let last = std::mem::replace(&mut self.touched_at, self.frame);
+        // only this frame's glyphs when the host needs to know exactly what's on screen
+        let since = if soon { self.frame - 1 } else { last };
         let mut touched: Vec<(u32, u32)> = Vec::new();
         for held in self.ready.values() {
             for h in held {
