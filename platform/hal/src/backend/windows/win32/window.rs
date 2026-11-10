@@ -860,6 +860,8 @@ fn set_cursor(cursor: u32) {
         }
         cursor::CROSSHAIR => IDC_CROSS,
         cursor::HAND => IDC_HAND,
+        // Default to Hand for non-supported cursors, until we include our own custom cursor files.
+        cursor::GRAB | cursor::GRABBING => IDC_HAND,
         cursor::MOVE => IDC_SIZEALL,
         cursor::TEXT => IDC_IBEAM,
         cursor::WAIT => IDC_WAIT,

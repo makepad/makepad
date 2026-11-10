@@ -99,12 +99,9 @@ impl Theme {
                 eprintln!("[hal-wayland] cursor theme unavailable");
                 return;
             }
-            let mut shape = (self.get)(theme, common::cursor_name(cursor).as_ptr());
-            if shape.is_null() {
-                shape = (self.get)(theme, c"left_ptr".as_ptr());
-            }
-            let Some(shape) = shape
-                .as_ref()
+            let Some(shape) = common::cursor_names(cursor)
+                .chain([c"left_ptr"])
+                .find_map(|name| (self.get)(theme, name.as_ptr()).as_ref())
                 .filter(|s| s.image_count > 0 && !s.images.is_null())
             else {
                 return;
