@@ -3330,7 +3330,7 @@ impl Widget for TextInput {
             }) if device.is_primary_hit() && !scrollbar_captured => {
                 cx.claim_finger_drag(digit_id);
                 self.reset_blink_timer(cx);
-                self.set_key_focus(cx);
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 let rel = abs - self.text_area.rect(cx).pos;
                 let Ok(cursor) =
                     self.point_in_lpxs_to_cursor(Point::new(rel.x as f32, rel.y as f32))
@@ -3527,7 +3527,7 @@ impl Widget for TextInput {
                 // Clear preserved cursor - user is dragging to select
                 self.preserved_selection_cursor = None;
                 self.reset_blink_timer(cx);
-                self.set_key_focus(cx);
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 let rel = abs - self.text_area.rect(cx).pos;
                 let Ok(cursor) =
                     self.point_in_lpxs_to_cursor(Point::new(rel.x as f32, rel.y as f32))

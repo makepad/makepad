@@ -3048,6 +3048,9 @@ pub struct GlassFloatingSurface {
     /// to", which is also what a caret already inside the surface counts as.
     #[rust]
     focus_before: Area,
+    /// Whether the user gave `focus_before` its focus, so it gets it back the same way.
+    #[rust]
+    is_focus_before_from_user: bool,
     /// The corner mark's hover mix.
     #[rust]
     hot: f32,
@@ -3143,6 +3146,7 @@ impl GlassFloatingSurface {
     fn take_key_focus(&mut self, cx: &mut Cx, area: Area) {
         if !self.focus_is_inside(cx) {
             self.focus_before = cx.key_focus();
+            self.is_focus_before_from_user = cx.has_key_focus_from_user(self.focus_before);
         }
         self.holds_key_focus = true;
         cx.set_key_focus(area);
@@ -3194,12 +3198,13 @@ impl GlassFloatingSurface {
     fn drop_key_focus(&mut self, cx: &mut Cx) {
         let took_it = self.holds_key_focus;
         let back = self.focus_before;
+        let is_back_from_user = std::mem::take(&mut self.is_focus_before_from_user);
         self.holds_key_focus = false;
         self.focus_before = Area::Empty;
         if !self.focus_is_inside(cx) {
             return;
         }
-        cx.set_key_focus(if took_it { back } else { Area::Empty });
+        cx.restore_key_focus(if took_it { back } else { Area::Empty }, took_it && is_back_from_user);
     }
 
     /// Come up, or arrive somewhere new, with the lens looking at where it
