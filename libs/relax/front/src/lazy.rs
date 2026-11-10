@@ -145,6 +145,14 @@ impl PendingPlan {
         self.outlined.get_or_init(|| Plan::build(&self.pending_crates, self.pending_contexts.clone(), None, &EarlyCrates::default(), None))
             .image.outline_macros(ci)
     }
+    /// The imports the outline's expansions of crate `ci` wrote, with outline_macros' plan.
+    pub(crate) fn outline_expansions(&self, ci: usize) -> Option<Arc<HashMap<(String, String), Vec<String>>>> {
+        if let Some(uses) = std::ops::Deref::deref(self).image.outline_expansions(ci) {
+            return Some(uses);
+        }
+        self.outlined.get_or_init(|| Plan::build(&self.pending_crates, self.pending_contexts.clone(), None, &EarlyCrates::default(), None))
+            .image.outline_expansions(ci)
+    }
     /// The crates' source contexts (the plan's own, without waiting for it).
     pub fn contexts(&self) -> &[Arc<crate::source_context::Context>] { &self.pending_contexts }
     /// The crates the plan is for (without waiting for it).

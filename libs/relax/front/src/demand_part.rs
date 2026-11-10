@@ -266,6 +266,8 @@ pub(super) struct MacroPart {
 fields!(MacroPart, definitions, aliases, uses, modules, expansions, s2_fmt);
 impl MacroPart {
     pub(super) fn definitions(&self) -> &[Arc<crate::macros::MacroDef>] { &self.definitions }
+    /// The crate's expansion-made imports ((module, binding) -> path), as its outline found them.
+    pub(super) fn expansions(&self) -> &Arc<HashMap<(String, String), Vec<String>>> { &self.expansions }
     fn referenced_size(&self) -> usize {
         4 + self.definitions.len() * 16 + self.aliases.plain_size() + self.uses.plain_size()
             + self.modules.plain_size() + self.expansions.plain_size() + 1
@@ -415,6 +417,15 @@ impl DemandImage {
             return parts.get(ci).map(|p| p.macros.definitions().to_vec());
         }
         recording.ready.lock().unwrap().get(ci).map(|p| p.macros.definitions().to_vec())
+    }
+    /// The imports the expansions of crate `ci`'s outline wrote (`pub use internal as name;`
+    /// beside a generated `macro_rules! internal`), under the same conditions as outline_macros.
+    pub(crate) fn outline_expansions(&self, ci: usize) -> Option<Arc<HashMap<(String, String), Vec<String>>>> {
+        let recording = self.recording.as_ref()?;
+        if let Some((_, _, parts)) = recording.pending.lock().unwrap().as_ref() {
+            return parts.get(ci).map(|p| p.macros.expansions().clone());
+        }
+        recording.ready.lock().unwrap().get(ci).map(|p| p.macros.expansions().clone())
     }
     pub fn recorded_parts(&self) -> Vec<Arc<DemandPart>> {
         let _mem = crate::memstat::tag(crate::memstat::Tag::Planner);
