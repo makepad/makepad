@@ -339,7 +339,13 @@ pub fn android_rustflags(
     prefer_dynamic: bool,
 ) -> String {
     let cfg_flag = format!("--cfg android_target=\"{}\"", android_target.to_str());
-    compose_android_rustflags(existing, &cfg_flag, prefer_dynamic)
+    // Android's armeabi-v7a ABI includes NEON (CDD 3.3.1) and the NDK's clang turns it on,
+    // but Rust's armv7 target leaves it off. User RUSTFLAGS come after it, so they still win.
+    let mut existing_rustflags = existing.unwrap_or_default().to_string();
+    if let AndroidTarget::armv7 = android_target {
+        existing_rustflags.insert_str(0, "-C target-feature=+neon ");
+    }
+    compose_android_rustflags(Some(&existing_rustflags), &cfg_flag, prefer_dynamic)
 }
 
 fn main_java(url: &str, host: bool) -> String {
