@@ -89,6 +89,13 @@ impl Cx {
         self.hal.focused.filter(|w| self.windows.is_valid(*w)).or_else(|| self.windows.id_iter().find(|w| self.hal.window_ready(*w)))
     }
 
+    #[cfg(target_os = "android")]
+    pub(super) fn hal_send_pending_ime_hide(&mut self) {
+        self.hal.pending_ime_hide = false;
+        let w = self.hal_target_window();
+        self.hal.frames.w.ime_hide(w);
+    }
+
     /// Layout points of `window_id` (when it exists) in native window points.
     fn hal_native_points(&self, window_id: Option<WindowId>, p: crate::makepad_math::Vec2d) -> crate::makepad_math::Vec2d {
         match window_id {
@@ -425,14 +432,34 @@ impl Cx {
                     self.hal.frames.w.pointer_lock(w, pointer::REPIN)
                 }
                 CxOsOp::ShowTextIME(area, cursor_rect, config) => {
+                    // An input asking for the keyboard right after a hide (e.g., it just took
+                    // focus from another input) keeps the keyboard up.
+                    #[cfg(target_os = "android")]
+                    { self.hal.pending_ime_hide = false; }
+                    let config = ime_config(&config);
+                    // The backend forgets its last show the moment the keyboard closes, so a repeat
+                    // drawn before we've heard about that close would bring the keyboard back.
+                    #[cfg(target_os = "android")]
+                    if !self.hal_is_embedded() && self.hal.ime_shown.replace(config) == Some(config) {
+                        continue;
+                    }
                     // both corners of the caret line (area-relative layout points) in native points
                     let window_id = self.get_window_id_of(&area).unwrap_or(crate::window::CxWindowPool::id_zero());
                     let area_pos = area.clipped_rect(self).pos;
                     let tl = self.windows[window_id].layout_vec2d_to_native_points(area_pos + cursor_rect.pos);
                     let br = self.windows[window_id].layout_vec2d_to_native_points(area_pos + cursor_rect.pos + cursor_rect.size);
-                    self.hal.frames.w.ime_show(hal_window_id(window_id), [tl.x as f32, tl.y as f32, (br.x - tl.x) as f32, (br.y - tl.y) as f32], ime_config(&config));
+                    self.hal.frames.w.ime_show(hal_window_id(window_id), [tl.x as f32, tl.y as f32, (br.x - tl.x) as f32, (br.y - tl.y) as f32], config);
                 }
                 CxOsOp::HideTextIME => {
+                    #[cfg(target_os = "android")]
+                    { self.hal.ime_shown = None; }
+                    // On Android a hide waits until after the next draw, but only the non-hosted
+                    // beat in `hal_run` sends it, so a hosted or embedded session hides right away.
+                    #[cfg(target_os = "android")]
+                    if self.hal.hosted.is_none() && !self.hal.externally_driven {
+                        self.hal.pending_ime_hide = true;
+                        continue;
+                    }
                     let w = self.hal_target_window();
                     self.hal.frames.w.ime_hide(w)
                 }

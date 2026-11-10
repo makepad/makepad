@@ -113,6 +113,17 @@ impl Cx {
                 _ => {}
             }
         }
+        // A pending IME hide needs to know when there's no draw coming to wait for.
+        #[cfg(target_os = "android")]
+        if let HalEvent::Lifecycle { kind } = event {
+            match kind {
+                makepad_hal::lifecycle::PAUSE => self.hal.activity_paused = true,
+                makepad_hal::lifecycle::RESUME => self.hal.activity_paused = false,
+                makepad_hal::lifecycle::SURFACE_LOST => self.hal.no_surface = true,
+                makepad_hal::lifecycle::SURFACE_AVAILABLE => self.hal.no_surface = false,
+                _ => {}
+            }
+        }
         match event {
             HalEvent::NativeLayerState { id, what, a, b, data } => self.hal_native_layer_state(id, what, a, b, data),
             HalEvent::GpuProfRecording { bytes } => match makepad_gpu_trace::Recording::decode(bytes) {
@@ -427,6 +438,9 @@ impl Cx {
                 self.call_event_handler(&Event::ImeAction(ImeActionEvent { action }));
             }
             HalEvent::ImeResize { window, height, open } => {
+                // Every closed report lets the next show go out, even one the checks below ignore.
+                #[cfg(target_os = "android")]
+                if !open { self.hal.ime_shown = None; }
                 let window_id = window_id(window);
                 if !self.windows.is_valid(window_id) {
                     return true;
