@@ -634,6 +634,13 @@ impl<'a> Parser<'a> {
                 || (!self.path_frags.is_empty() && self.path_frags.contains(&{ self.toks.at(i).lo })) {
                 return BodyOutline::Eager(5);
             }
+            // Nor the invisible parentheses of an expression fragment (synth_parens): there a false
+            // `#[cfg]` at the fragment's start would leave `()` for the list element it removes
+            // (list_elem), stringify! would print the parentheses, and a fragment written after
+            // an expression would be its call arguments.
+            if k == T::OpenParen && !self.synth_parens.is_empty() && self.synth_parens.contains(&{ self.toks.at(i).lo }) {
+                return BodyOutline::Eager(5);
+            }
             match k {
                 T::OpenParen | T::OpenBracket | T::OpenBrace => stack.push(k),
                 T::CloseParen | T::CloseBracket | T::CloseBrace => {
