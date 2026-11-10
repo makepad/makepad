@@ -260,7 +260,8 @@ pub(super) fn back_unhandled() -> bool {
     }).unwrap_or(false)
 }
 unsafe extern "system" fn character(_: *mut JNIEnv, _: jclass, code: jint) { boost_frame_rate();
-    if let Some(c) = char::from_u32(code as u32) { let mut bytes = [0; 4]; let text = c.encode_utf8(&mut bytes); Shared::global().emit(clock_ns(), |q, id| q.text(id, input::text::TYPED, text.as_bytes())); }
+    // Enter and Tab reach the app as keys, so like the other shells we type no control characters
+    if let Some(c) = char::from_u32(code as u32).filter(|c| !c.is_control()) { let mut bytes = [0; 4]; let text = c.encode_utf8(&mut bytes); Shared::global().emit(clock_ns(), |q, id| q.text(id, input::text::TYPED, text.as_bytes())); }
 }
 unsafe extern "system" fn resize_ime(_: *mut JNIEnv, _: jclass, height: jint, open: jboolean) { boost_frame_rate();
     if open == 0 { *lock(&LAST_IME) = None; }
