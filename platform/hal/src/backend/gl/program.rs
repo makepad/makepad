@@ -1,6 +1,7 @@
 //! Programs from the GLSL dialect payload: loaded from the program cache, or compiled and
 //! linked on the render thread (finished by the driver's threads where KHR_parallel_shader_compile
-//! exists), then the fixed bindings: uniform block i at binding i, texture i on unit i, the pick
+//! exists, by the compile worker after the first frame on Android where it doesn't, `worker.rs`),
+//! then the fixed bindings: uniform block i at binding i, texture i on unit i, the pick
 //! twin of texture i on unit textures + i, the instance words after them; attribute pointers per
 //! draw on one VAO.
 
@@ -82,39 +83,73 @@ fn cstr(s: &str) -> Vec<u8> {
     v
 }
 
+/// Compiles and attaches both stages and starts the link (`hint`: the driver keeps a binary to hand back).
+pub(super) fn start_link(gl: &sys::Gl, vertex: &str, fragment: &str, hint: bool) -> (GLuint, [GLuint; 2]) {
+    let mut shaders = [0; 2];
+    unsafe {
+        let program = (gl.glCreateProgram)();
+        for (i, (stage, source)) in [(sys::VERTEX_SHADER, vertex), (sys::FRAGMENT_SHADER, fragment)].into_iter().enumerate() {
+            let shader = (gl.glCreateShader)(stage);
+            let ptr = source.as_ptr();
+            let len = source.len() as GLint;
+            (gl.glShaderSource)(shader, 1, &ptr, &len);
+            (gl.glCompileShader)(shader);
+            (gl.glAttachShader)(program, shader);
+            shaders[i] = shader;
+        }
+        // a driver may only hand back a binary for the cache when asked before the link
+        if hint { (gl.glProgramParameteri)(program, sys::PROGRAM_BINARY_RETRIEVABLE_HINT, sys::TRUE as GLint) }
+        (gl.glLinkProgram)(program);
+        (program, shaders)
+    }
+}
+
+/// Why a program didn't link: its log, and those of the stages that didn't compile.
+pub(super) fn link_error(gl: &sys::Gl, program: GLuint, shaders: [GLuint; 2]) -> String {
+    let mut len = 0;
+    unsafe { (gl.glGetProgramiv)(program, sys::INFO_LOG_LENGTH, &mut len) };
+    let mut log = vec![0u8; len.max(1) as usize];
+    unsafe { (gl.glGetProgramInfoLog)(program, len.max(1), std::ptr::null_mut(), log.as_mut_ptr()) };
+    let mut log = String::from_utf8_lossy(&log).trim_end_matches('\0').trim().to_owned();
+    for (stage, s) in ["vertex", "fragment"].iter().zip(shaders) {
+        let mut compiled = 0;
+        unsafe { (gl.glGetShaderiv)(s, sys::COMPILE_STATUS, &mut compiled) };
+        if compiled == 0 { log.push_str(&format!("\n{stage}: {}", shader_log(gl, s))); }
+    }
+    format!("GLES link failed: {log}")
+}
+
 impl Renderer {
     pub fn compile(&mut self, state: &Arc<PipeState>) {
+        let key = Key::of(&state.code.vertex, &state.code.fragment);
         let gl = &self.ctx.gl;
-        let code = &state.code;
-        let key = Key::of(&code.vertex, &code.fragment);
+        self.cache.get_or_insert_with(|| ProgramCache::new(gl));
+        #[cfg(target_os = "android")]
+        if self.compile_on_worker(state, key) { return; }
+        self.compile_here(state, key);
+    }
+
+    /// Loads the program from the cache, or compiles and links it on this thread.
+    pub(super) fn compile_here(&mut self, state: &Arc<PipeState>, key: Key) {
+        let gl = &self.ctx.gl;
         let cache = self.cache.get_or_insert_with(|| ProgramCache::new(gl));
         if let Some(program) = cache.load(gl, key) {
-            let result = self.finish(state, Linking { program, shaders: [0; 2], key: None });
-            self.linked(state, result);
+            self.loaded(state, program);
             return;
         }
         let keep = cache.keeps();
-        let mut shaders = [0; 2];
-        unsafe {
-            let program = (gl.glCreateProgram)();
-            for (i, (stage, source)) in [(sys::VERTEX_SHADER, &code.vertex), (sys::FRAGMENT_SHADER, &code.fragment)].into_iter().enumerate() {
-                let shader = (gl.glCreateShader)(stage);
-                let ptr = source.as_ptr();
-                let len = source.len() as GLint;
-                (gl.glShaderSource)(shader, 1, &ptr, &len);
-                (gl.glCompileShader)(shader);
-                (gl.glAttachShader)(program, shader);
-                shaders[i] = shader;
-            }
-            // a driver may only hand back a binary for the cache when asked before the link
-            if keep { (gl.glProgramParameteri)(program, sys::PROGRAM_BINARY_RETRIEVABLE_HINT, sys::TRUE as GLint) }
-            (gl.glLinkProgram)(program);
-            self.linking.push((Arc::downgrade(state), Linking { program, shaders, key: keep.then_some(key) }));
-        }
+        let (program, shaders) = start_link(gl, &state.code.vertex, &state.code.fragment, keep);
+        self.linking.push((Arc::downgrade(state), Linking { program, shaders, key: keep.then_some(key) }));
         if !self.caps.parallel_compile { self.poll_links(); }
     }
 
-    fn linked(&self, state: &PipeState, result: Result<Linked, String>) {
+    /// A program made from a driver binary gets its bindings, and the HAL side hears it linked.
+    pub(super) fn loaded(&mut self, state: &PipeState, program: GLuint) {
+        let result = self.finish(state, Linking { program, shaders: [0; 2], key: None });
+        self.linked(state, result);
+    }
+
+    pub(super) fn linked(&self, state: &PipeState, result: Result<Linked, String>) {
         let _ = state.linked.set(result);
         state.epoch.fetch_add(1, Ordering::Release);
         (self.mailbox.wake)();
@@ -149,21 +184,12 @@ impl Renderer {
         let mut ok = 0;
         unsafe { (gl.glGetProgramiv)(program, sys::LINK_STATUS, &mut ok) };
         if ok == 0 {
-            let mut len = 0;
-            unsafe { (gl.glGetProgramiv)(program, sys::INFO_LOG_LENGTH, &mut len) };
-            let mut log = vec![0u8; len.max(1) as usize];
-            unsafe { (gl.glGetProgramInfoLog)(program, len.max(1), std::ptr::null_mut(), log.as_mut_ptr()) };
-            let mut log = String::from_utf8_lossy(&log).trim_end_matches('\0').trim().to_owned();
-            for (stage, s) in ["vertex", "fragment"].iter().zip(linking.shaders) {
-                let mut compiled = 0;
-                unsafe { (gl.glGetShaderiv)(s, sys::COMPILE_STATUS, &mut compiled) };
-                if compiled == 0 { log.push_str(&format!("\n{stage}: {}", shader_log(gl, s))); }
-            }
+            let log = link_error(gl, program, linking.shaders);
             unsafe {
                 for s in linking.shaders { (gl.glDeleteShader)(s) }
                 (gl.glDeleteProgram)(program);
             }
-            return Err(format!("GLES link failed: {log}"));
+            return Err(log);
         }
         unsafe { for s in linking.shaders { (gl.glDeleteShader)(s) } }
         if let (Some(key), Some(cache)) = (linking.key, &mut self.cache) { cache.store(gl, key, program); }

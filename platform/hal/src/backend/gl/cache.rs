@@ -29,6 +29,8 @@ pub(super) struct ProgramCache {
     /// `None` keeps nothing: there's no cache dir, or the driver has no binary formats or
     /// doesn't take its own binaries back
     dir: Option<PathBuf>,
+    /// the driver has binary formats and hasn't refused one it made in this process
+    pub binaries: bool,
     /// a binary of this driver loaded, so its binaries come back
     verified: bool,
 }
@@ -36,26 +38,31 @@ pub(super) struct ProgramCache {
 impl ProgramCache {
     /// The directory of this driver's binaries, under `MAKEPAD_HAL_CACHE_DIR` or the app's cache dir.
     pub fn new(gl: &Gl) -> Self {
-        let none = || Self { dir: None, verified: false };
-        if gl.integer(sys::NUM_PROGRAM_BINARY_FORMATS) <= 0 { return none(); }
+        let none = |binaries| Self { dir: None, binaries, verified: false };
+        if gl.integer(sys::NUM_PROGRAM_BINARY_FORMATS) <= 0 { return none(false); }
         let driver = gl.driver();
         #[cfg(target_os = "android")]
         let driver = driver + &crate::backend::android::xr::system_property("ro.build.fingerprint").unwrap_or_default();
-        let Some(base) = base_dir() else { return none() };
+        let Some(base) = base_dir() else { return none(true) };
         let parent = base.join("makepad-hal");
         let dir = parent.join(format!("gl-{:016x}", fxhash::hash64(&driver)));
         if let Err(e) = std::fs::create_dir_all(&dir) {
             eprintln!("[hal-gl] program cache {}: {e}", dir.display());
-            return none();
+            return none(true);
         }
         sweep(&parent, &dir);
-        if dir.join(REJECTED).exists() { return none(); }
-        Self { dir: Some(dir), verified: false }
+        if dir.join(REJECTED).exists() { return none(false); }
+        Self { dir: Some(dir), binaries: true, verified: false }
     }
 
     /// Whether linked programs' binaries go to disk.
     pub fn keeps(&self) -> bool {
         self.dir.is_some()
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn dir(&self) -> Option<PathBuf> {
+        self.dir.clone()
     }
 
     /// A new program made from the cached binary of `key`, if it's there and the driver takes it.
@@ -71,6 +78,12 @@ impl ProgramCache {
     /// Deletes the cached binary of `key`.
     pub fn forget(&self, key: Key) {
         if let Some(dir) = &self.dir { let _ = std::fs::remove_file(path(dir, key)); }
+    }
+
+    /// A binary this driver made loaded, so its binaries come back.
+    #[cfg(target_os = "android")]
+    pub fn loaded(&mut self) {
+        self.verified = true;
     }
 
     /// Keeps the binary of a program linked from the sources of `key`. Until one of this driver's
@@ -90,6 +103,7 @@ impl ProgramCache {
     /// stop keeping its binaries instead of compiling and writing them every launch.
     pub fn reject(&mut self) {
         eprintln!("[hal-gl] this GL driver doesn't load its own program binaries, so they're no longer kept");
+        self.binaries = false;
         if let Some(dir) = self.dir.take() { let _ = std::fs::write(dir.join(REJECTED), b""); }
     }
 }
@@ -148,7 +162,10 @@ pub(super) fn write(dir: &Path, key: Key, format: GLenum, binary: &[u8]) {
     bytes.extend_from_slice(&key.lens[1].to_le_bytes());
     bytes.extend_from_slice(&fxhash::hash64(binary).to_le_bytes());
     bytes.extend_from_slice(binary);
-    let temp = path.with_extension(format!("{}.tmp", std::process::id()));
+    // the render thread and the compile worker both write, so each temp file gets a number of its own
+    static WRITES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = path.with_extension(format!("{n}.{}.tmp", std::process::id()));
     if let Err(e) = std::fs::write(&temp, &bytes).and_then(|_| std::fs::rename(&temp, &path)) {
         let _ = std::fs::remove_file(&temp);
         eprintln!("[hal-gl] program cache {}: {e}", path.display());

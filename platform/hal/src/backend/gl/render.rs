@@ -32,8 +32,8 @@ impl Queue {
         let _ = self.jobs.send(Box::new(job));
     }
 
-    /// For a job that can't wait behind queued work (Android's surfaceDestroyed): it must not
-    /// depend on anything queued before it.
+    /// For a job that can't wait behind queued work (Android's surfaceDestroyed, the compile
+    /// worker's answers): it must not depend on anything queued before it.
     #[cfg(target_os = "android")]
     pub fn push_urgent(&self, job: impl FnOnce(&mut Renderer) + Send + 'static) {
         self.urgent.lock().unwrap_or_else(|e| e.into_inner()).push(Box::new(job));
@@ -220,8 +220,14 @@ pub(super) struct Renderer {
     pub arena_words: (GLuint, u32),
     pending: VecDeque<(GLsync, Then)>,
     pub mailbox: Mailbox,
+    /// its own queue's urgent lane, which the compile worker answers through
     #[cfg(target_os = "android")]
-    urgent: Arc<Mutex<Vec<Job>>>,
+    pub queue: Queue,
+    /// a window frame has been shown: from then on the compile worker can take compiles
+    #[cfg(target_os = "android")]
+    pub presented: bool,
+    #[cfg(target_os = "android")]
+    pub worker: super::worker::WorkerState,
     /// made at the first compile, once the app's cache dir is known
     pub cache: Option<super::cache::ProgramCache>,
     pub timer: Option<super::timer::GpuTimer>,
@@ -232,10 +238,10 @@ pub(super) fn start(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox) -> Resu
     let (tx, rx) = mpsc::channel::<Job>();
     let queue = Queue { jobs: tx, #[cfg(target_os = "android")] urgent: Arc::new(Mutex::new(Vec::new())) };
     #[cfg(target_os = "android")]
-    let urgent = queue.urgent.clone();
+    let own = queue.clone();
     let (ready, made) = mpsc::sync_channel(1);
     let thread = std::thread::Builder::new().name("makepad-gl-render".into()).spawn(move || {
-        match Renderer::new(source, mailbox, #[cfg(target_os = "android")] urgent) {
+        match Renderer::new(source, mailbox, #[cfg(target_os = "android")] own) {
             Ok(r) => {
                 let _ = ready.send(Ok(r.caps.clone()));
                 r.run(rx);
@@ -251,7 +257,7 @@ pub(super) fn start(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox) -> Resu
 }
 
 impl Renderer {
-    fn new(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox, #[cfg(target_os = "android")] urgent: Arc<Mutex<Vec<Job>>>) -> Result<Self, String> {
+    fn new(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox, #[cfg(target_os = "android")] queue: Queue) -> Result<Self, String> {
         let ctx = Context::new(source)?;
         let gl = &ctx.gl;
         let version = gl.string(sys::VERSION);
@@ -320,7 +326,9 @@ impl Renderer {
         }
         Ok(Self { ctx, caps, textures: HashMap::new(), buffers: HashMap::new(), programs: HashMap::new(), linking: Vec::new(),
             fbos: HashMap::new(), read_fbo: names[0], copy_fbo: names[1], fallback, nearest,
-            uniform_arena: names[2], instance_arena: names[3], arena_words: (0, 0), pending: VecDeque::new(), mailbox, #[cfg(target_os = "android")] urgent, cache: None, timer, exit: false })
+            uniform_arena: names[2], instance_arena: names[3], arena_words: (0, 0), pending: VecDeque::new(), mailbox,
+            #[cfg(target_os = "android")] queue, #[cfg(target_os = "android")] presented: false,
+            #[cfg(target_os = "android")] worker: super::worker::WorkerState::Unstarted, cache: None, timer, exit: false })
     }
 
     pub fn exit(&mut self) {
@@ -331,7 +339,7 @@ impl Renderer {
         loop {
             #[cfg(target_os = "android")]
             {
-                let urgent = std::mem::take(&mut *self.urgent.lock().unwrap_or_else(|e| e.into_inner()));
+                let urgent = std::mem::take(&mut *self.queue.urgent.lock().unwrap_or_else(|e| e.into_inner()));
                 for job in urgent { job(&mut self); }
             }
             let next = match rx.try_recv() {

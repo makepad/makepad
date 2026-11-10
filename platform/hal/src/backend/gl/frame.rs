@@ -473,7 +473,11 @@ impl Renderer {
         let mut window = job.window;
         if let Some((key, image)) = &job.present {
             match self.present(*key, image.key) {
-                Ok(shown) => window = shown,
+                Ok(shown) => {
+                    window = shown;
+                    #[cfg(target_os = "android")]
+                    { self.presented |= shown; }
+                }
                 Err(e) => { eprintln!("[hal-gl] present: {e}"); window = false; }
             }
         }

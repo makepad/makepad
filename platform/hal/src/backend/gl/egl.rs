@@ -168,11 +168,61 @@ pub struct Share {
     pub display: Handle,
     pub config: Handle,
     pub context: Handle,
+    /// EGL_KHR_surfaceless_context; without it a context is made current on a 1x1 pbuffer
+    #[cfg(target_os = "android")]
+    pub surfaceless: bool,
 }
 
 // SAFETY: EGL handles are process-wide values; the functions are thread-safe per the EGL spec.
 unsafe impl Send for Share {}
 unsafe impl Sync for Share {}
+
+/// A context of its own on the display (outside the share group), current on the thread that
+/// made it until it's dropped there.
+#[cfg(target_os = "android")]
+pub struct Private {
+    share: std::sync::Arc<Share>,
+    context: Handle,
+    surface: Handle,
+    pub gl: Gl,
+}
+
+#[cfg(target_os = "android")]
+impl Private {
+    pub fn new(share: &std::sync::Arc<Share>) -> Result<Self, String> {
+        let (egl, display) = (share.egl, share.display);
+        unsafe {
+            (egl.bind_api)(0x30A0);
+            let context = (egl.create_context)(display, share.config, ptr::null_mut(), [0x3098, 3, NONE].as_ptr());
+            if context.is_null() { return Err(format!("eglCreateContext: {:#x}", (egl.error)())); }
+            let surface = if share.surfaceless { ptr::null_mut() } else { (egl.create_pbuffer)(display, share.config, [0x3057, 1, 0x3056, 1, NONE].as_ptr()) };
+            let release = |error: String| {
+                (egl.make_current)(display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+                if !surface.is_null() { (egl.destroy_surface)(display, surface); }
+                (egl.destroy_context)(display, context);
+                error
+            };
+            if !share.surfaceless && surface.is_null() { return Err(release(format!("eglCreatePbufferSurface: {:#x}", (egl.error)()))); }
+            if (egl.make_current)(display, surface, surface, context) == 0 { return Err(release(format!("eglMakeCurrent: {:#x}", (egl.error)()))); }
+            match egl.gl() {
+                Ok(gl) => Ok(Self { share: share.clone(), context, surface, gl }),
+                Err(e) => Err(release(e)),
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+impl Drop for Private {
+    fn drop(&mut self) {
+        let s = &self.share;
+        unsafe {
+            (s.egl.make_current)(s.display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+            if !self.surface.is_null() { (s.egl.destroy_surface)(s.display, self.surface); }
+            (s.egl.destroy_context)(s.display, self.context);
+        }
+    }
+}
 
 pub struct Context {
     pub gl: Gl,
@@ -260,7 +310,7 @@ impl Context {
                     return Err(e);
                 }
             };
-            Ok(Self { gl, share: std::sync::Arc::new(Share { egl, display, config, context }), #[cfg(target_os = "linux")] wayland, source,
+            Ok(Self { gl, share: std::sync::Arc::new(Share { egl, display, config, context, #[cfg(target_os = "android")] surfaceless }), #[cfg(target_os = "linux")] wayland, source,
                 windows: HashMap::new(), current: idle, idle })
         }
     }

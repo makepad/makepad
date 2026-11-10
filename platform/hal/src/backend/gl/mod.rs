@@ -4,12 +4,12 @@
 //! (session, index) with generations; pipelines come as the GLSL dialect payload Cx's shader
 //! compiler emitted.
 //!
-//! One GL context, owned by one render thread (render.rs), does all GL work; the hooks here run
-//! inside `hal_submit` and only validate, lay out and queue owned jobs. Windows of the X11 and
-//! Wayland shells and of Android's Activity present through EGL window surfaces; offscreen
-//! windows (hidden runs, tests) use the surfaceless platform. Images keep their top row first as
-//! on the other backends: every vertex shader of the dialect flips clip-space Y and the present
-//! blit flips it back.
+//! One GL context, owned by one render thread (render.rs), does all GL work but Android's compiles
+//! after the first frame (worker.rs); the hooks here run inside `hal_submit` and only validate, lay
+//! out and queue owned jobs. Windows of the X11 and Wayland shells and of Android's Activity present
+//! through EGL window surfaces; offscreen windows (hidden runs, tests) use the surfaceless platform.
+//! Images keep their top row first as on the other backends: every vertex shader of the dialect
+//! flips clip-space Y and the present blit flips it back.
 
 mod cache;
 pub(crate) mod egl;
@@ -19,6 +19,8 @@ mod render;
 pub mod surface;
 mod sys;
 mod timer;
+#[cfg(target_os = "android")]
+mod worker;
 
 use super::exec::{self, Gpu, PipeStatus};
 use super::{Backend, Pixels};
