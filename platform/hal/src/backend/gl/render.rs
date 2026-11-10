@@ -50,6 +50,8 @@ pub(super) struct Caps {
     pub max_ubo: usize,
     pub border_clamp: bool,
     pub float_blend: bool,
+    /// OES_texture_float_linear: RGBA32F and R32F textures can be filtered
+    pub float_linear: bool,
     /// KHR_parallel_shader_compile: links finish on the driver's threads. EGL may hand out its
     /// entry point on a driver without the extension, so the extension list decides.
     pub parallel_compile: bool,
@@ -210,6 +212,8 @@ pub(super) struct Renderer {
     pub copy_fbo: GLuint,
     /// 1x1 textures per sampled shape for a draw that names no texture
     pub fallback: [GLuint; 5],
+    /// nearest samplers per address mode and compare mode, for formats the driver can't filter
+    pub nearest: [GLuint; 8],
     /// the frame's uniform blocks and inline instances, and the instance words as a texture
     pub uniform_arena: GLuint,
     pub instance_arena: GLuint,
@@ -274,6 +278,7 @@ impl Renderer {
             max_ubo: gl.integer(sys::MAX_UNIFORM_BLOCK_SIZE).max(16384) as usize,
             border_clamp: has("GL_EXT_texture_border_clamp") || has("GL_OES_texture_border_clamp"),
             float_blend: has("GL_EXT_float_blend"),
+            float_linear: has("GL_OES_texture_float_linear"),
             parallel_compile,
             renderer: format!("{} ({version})", gl.string(sys::RENDERER)),
             software: ctx.software(),
@@ -295,11 +300,26 @@ impl Renderer {
             (gl.glBlendFuncSeparate)(sys::ONE, sys::ONE_MINUS_SRC_ALPHA, sys::ONE, sys::ONE_MINUS_SRC_ALPHA);
         }
         let fallback = [0, 1, 2, 3, 4].map(|shape| fallback(gl, shape));
+        let nearest = std::array::from_fn(|i| {
+            let mut sampler = 0;
+            unsafe {
+                (gl.glGenSamplers)(1, &mut sampler);
+                (gl.glSamplerParameteri)(sampler, sys::TEXTURE_MAG_FILTER, sys::NEAREST as i32);
+                (gl.glSamplerParameteri)(sampler, sys::TEXTURE_MIN_FILTER, sys::NEAREST_MIPMAP_NEAREST as i32);
+                let wrap = wrap(i as u32 / 2, caps.border_clamp) as i32;
+                for p in [sys::TEXTURE_WRAP_S, sys::TEXTURE_WRAP_T, sys::TEXTURE_WRAP_R] { (gl.glSamplerParameteri)(sampler, p, wrap) }
+                if i % 2 == 1 {
+                    (gl.glSamplerParameteri)(sampler, sys::TEXTURE_COMPARE_MODE, sys::COMPARE_REF_TO_TEXTURE as i32);
+                    (gl.glSamplerParameteri)(sampler, sys::TEXTURE_COMPARE_FUNC, sys::LEQUAL as i32);
+                }
+            }
+            sampler
+        });
         if super::super::log_enabled() {
-            eprintln!("[hal-gl] context: {} ubo_align={} extensions={}", caps.renderer, caps.ubo_align, ext.len());
+            eprintln!("[hal-gl] context: {} ubo_align={} extensions={} float_linear={}", caps.renderer, caps.ubo_align, ext.len(), caps.float_linear);
         }
         Ok(Self { ctx, caps, textures: HashMap::new(), buffers: HashMap::new(), programs: HashMap::new(), linking: Vec::new(),
-            fbos: HashMap::new(), read_fbo: names[0], copy_fbo: names[1], fallback,
+            fbos: HashMap::new(), read_fbo: names[0], copy_fbo: names[1], fallback, nearest,
             uniform_arena: names[2], instance_arena: names[3], arena_words: (0, 0), pending: VecDeque::new(), mailbox, #[cfg(target_os = "android")] urgent, cache: None, timer, exit: false })
     }
 
@@ -544,6 +564,9 @@ impl Renderer {
                 (gl.glGenTextures)(1, &mut tex.0);
                 (gl.glBindTexture)(sys::TEXTURE_2D, tex.0);
                 (gl.glTexStorage2D)(sys::TEXTURE_2D, 1, sys::R32UI, WORD_ROW as i32, rows as i32);
+                // it's sampled without a sampler object, and an integer texture is only complete unfiltered
+                (gl.glTexParameteri)(sys::TEXTURE_2D, sys::TEXTURE_MIN_FILTER, sys::NEAREST as i32);
+                (gl.glTexParameteri)(sys::TEXTURE_2D, sys::TEXTURE_MAG_FILTER, sys::NEAREST as i32);
                 *tex = (tex.0, rows);
             } else {
                 (gl.glBindTexture)(sys::TEXTURE_2D, tex.0);
@@ -735,6 +758,26 @@ pub(super) fn texture_target(t: &TextureObj) -> GLenum {
 /// 3 depth, 4 depth array).
 pub(super) fn shape_target(shape: u32) -> GLenum {
     match shape { 1 => sys::TEXTURE_CUBE_MAP, 2 | 4 => sys::TEXTURE_2D_ARRAY, _ => sys::TEXTURE_2D }
+}
+
+/// The wrap mode of a sampler address (0 repeat, 1 edge, 2 transparent border, 3 mirrored repeat).
+pub(super) fn wrap(address: u32, border_clamp: bool) -> GLenum {
+    match address {
+        0 => sys::REPEAT,
+        2 if border_clamp => sys::CLAMP_TO_BORDER,
+        3 => sys::MIRRORED_REPEAT,
+        _ => sys::CLAMP_TO_EDGE,
+    }
+}
+
+/// Whether a filtering sampler keeps a texture of `format` complete. GLES 3 never filters integers,
+/// filters 32-bit floats only with OES_texture_float_linear, and depth only when it compares.
+pub(super) fn filterable(caps: &Caps, format: u32, compare: bool) -> bool {
+    match format {
+        format::RGBA32F | format::R32F => caps.float_linear,
+        format::R32UINT => false,
+        f => compare || !format::is_depth(f),
+    }
 }
 
 /// (internal format, upload format, upload type). BGRA8 is stored as RGBA8: a texture that is

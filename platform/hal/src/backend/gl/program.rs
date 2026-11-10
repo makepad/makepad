@@ -39,6 +39,10 @@ pub(super) struct GlProgram {
     pub samplers: Vec<GLuint>,
     pub targets: Vec<GLenum>,
     pub shapes: Vec<u32>,
+    /// per texture: whether its sampler compares depth, and the renderer's nearest sampler of
+    /// the same wrap and compare mode, for a format the driver can't filter
+    pub compare: Vec<bool>,
+    pub nearest: Vec<GLuint>,
     pub pick: GLint,
     pub inst_base: GLint,
     /// the unit of the instance words (programs that fetch instances by id)
@@ -181,6 +185,8 @@ impl Renderer {
         let ntex = code.textures.len() as u32;
         let mut samplers = Vec::new();
         let mut targets = Vec::new();
+        let mut compares = Vec::new();
+        let mut nearest = Vec::new();
         for (unit, t) in code.textures.iter().enumerate() {
             let loc = uniform(&t.name);
             if loc >= 0 { unsafe { (gl.glUniform1i)(loc, unit as GLint) } }
@@ -191,25 +197,23 @@ impl Renderer {
             let mut sampler = 0;
             let s = t.sampler;
             let linear = s.filter == 1;
-            let wrap = match s.address {
-                0 => sys::REPEAT,
-                2 if self.caps.border_clamp => sys::CLAMP_TO_BORDER,
-                3 => sys::MIRRORED_REPEAT,
-                _ => sys::CLAMP_TO_EDGE,
-            };
+            let wrap = super::render::wrap(s.address, self.caps.border_clamp);
+            // a shadow sampler (shape 3) compares; every other shape reads plain values
+            let compare = t.shape == 3;
             unsafe {
                 (gl.glGenSamplers)(1, &mut sampler);
                 (gl.glSamplerParameteri)(sampler, sys::TEXTURE_MAG_FILTER, if linear { sys::LINEAR } else { sys::NEAREST } as GLint);
                 (gl.glSamplerParameteri)(sampler, sys::TEXTURE_MIN_FILTER, if linear { sys::LINEAR_MIPMAP_LINEAR } else { sys::NEAREST_MIPMAP_LINEAR } as GLint);
                 for p in [sys::TEXTURE_WRAP_S, sys::TEXTURE_WRAP_T, sys::TEXTURE_WRAP_R] { (gl.glSamplerParameteri)(sampler, p, wrap as GLint) }
-                // a shadow sampler (shape 3) compares; every other shape reads plain values
-                if t.shape == 3 {
+                if compare {
                     (gl.glSamplerParameteri)(sampler, sys::TEXTURE_COMPARE_MODE, sys::COMPARE_REF_TO_TEXTURE as GLint);
                     (gl.glSamplerParameteri)(sampler, sys::TEXTURE_COMPARE_FUNC, sys::LEQUAL as GLint);
                 }
             }
             samplers.push(sampler);
             targets.push(super::render::shape_target(t.shape));
+            compares.push(compare);
+            nearest.push(self.nearest[(s.address.min(3) * 2 + compare as u32) as usize]);
         }
         let words_unit = code.instance_texture.then(|| {
             let unit = ntex * if code.pick { 2 } else { 1 };
@@ -242,7 +246,7 @@ impl Renderer {
             (gl.glUseProgram)(0);
         }
         self.programs.insert(state.key, GlProgram { name: program, vao, geometry, instance, vertex_stride: code.vertex_stride as i32,
-            samplers, targets, shapes: code.textures.iter().map(|t| t.shape).collect(), pick, inst_base, words_unit, geometry_on: true });
+            samplers, targets, shapes: code.textures.iter().map(|t| t.shape).collect(), compare: compares, nearest, pick, inst_base, words_unit, geometry_on: true });
         Ok(Linked { block_sizes })
     }
 

@@ -587,12 +587,14 @@ impl Renderer {
                 (gl.glBindBufferBase)(sys::UNIFORM_BUFFER, *binding, buffer(b));
             }
             for (unit, target) in program.targets.iter().enumerate() {
-                let tex = d.textures.get(unit).and_then(|t| t.as_ref()).and_then(|t| self.textures.get(&t.key))
-                    .filter(|g| g.target == *target && (program.shapes[unit] != 3 || format::is_depth(g.desc.format)))
-                    .map_or(self.fallback[program.shapes[unit] as usize], |g| g.name);
+                let shape = program.shapes[unit];
+                let (tex, format) = d.textures.get(unit).and_then(|t| t.as_ref()).and_then(|t| self.textures.get(&t.key))
+                    .filter(|g| g.target == *target && (shape != 3 || format::is_depth(g.desc.format)))
+                    .map_or((self.fallback[shape as usize], if shape >= 3 { format::DEPTH32F } else { format::RGBA8 }), |g| (g.name, g.desc.format));
                 (gl.glActiveTexture)(sys::TEXTURE0 + unit as u32);
                 (gl.glBindTexture)(*target, tex);
-                (gl.glBindSampler)(unit as u32, program.samplers[unit]);
+                let filterable = super::render::filterable(&self.caps, format, program.compare[unit]);
+                (gl.glBindSampler)(unit as u32, if filterable { program.samplers[unit] } else { program.nearest[unit] });
             }
             if let Some([id, mask]) = d.pick {
                 let base = program.targets.len() as u32;

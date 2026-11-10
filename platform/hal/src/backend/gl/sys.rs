@@ -222,6 +222,7 @@ pub const TEXTURE_COMPARE_FUNC: GLenum = 0x884D;
 pub const COMPARE_REF_TO_TEXTURE: GLenum = 0x884E;
 pub const NEAREST: GLenum = 0x2600;
 pub const LINEAR: GLenum = 0x2601;
+pub const NEAREST_MIPMAP_NEAREST: GLenum = 0x2700;
 pub const NEAREST_MIPMAP_LINEAR: GLenum = 0x2702;
 pub const LINEAR_MIPMAP_LINEAR: GLenum = 0x2703;
 pub const REPEAT: GLenum = 0x2901;
