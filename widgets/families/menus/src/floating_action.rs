@@ -2936,7 +2936,7 @@ impl FloatingAction {
             .filter(|stop| !disabled.contains(stop))
             .collect();
         if let Some(next) = tab_target(&stops, cx.key_focus(), back) {
-            cx.set_key_focus(next);
+            cx.set_key_focus_from_user(next);
         }
     }
 

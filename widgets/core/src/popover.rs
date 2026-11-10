@@ -590,6 +590,9 @@ pub struct Popover {
     /// Where key focus was when this opened; it goes back there on close.
     #[rust]
     focus_before: Area,
+    /// Whether the user gave `focus_before` its focus, so it gets it back the same way.
+    #[rust]
+    is_focus_before_from_user: bool,
     /// Focus is to move into the content at the next draw, when its areas
     /// exist.
     #[rust]
@@ -765,6 +768,7 @@ impl Popover {
         self.refresh_anchor(cx);
         self.open = true;
         self.focus_before = cx.key_focus();
+        self.is_focus_before_from_user = cx.has_key_focus_from_user(self.focus_before);
         if self.owns_pointer() {
             if from_press {
                 self.lock_pending = true;
@@ -817,7 +821,7 @@ impl Popover {
             } else {
                 self.focus_before
             };
-            cx.set_key_focus(back);
+            cx.restore_key_focus(back, self.is_focus_before_from_user);
         }
         self.redraw_all(cx);
         let uid = self.widget_uid();
@@ -1472,6 +1476,8 @@ impl ConfirmPopoverRef {
 pub struct FocusTrap {
     area: Area,
     restore: Area,
+    /// Whether the user gave `restore` its focus, so it gets it back the same way.
+    is_restore_from_user: bool,
     active: bool,
 }
 
@@ -1479,6 +1485,7 @@ impl FocusTrap {
     /// Start trapping inside `area`, remembering where focus is now.
     pub fn begin(&mut self, cx: &mut Cx, area: Area) {
         self.restore = cx.key_focus();
+        self.is_restore_from_user = cx.has_key_focus_from_user(self.restore);
         self.area = area;
         self.active = true;
     }
@@ -1496,7 +1503,7 @@ impl FocusTrap {
         }
         self.active = false;
         if !self.restore.is_empty() {
-            cx.set_key_focus(self.restore);
+            cx.restore_key_focus(self.restore, self.is_restore_from_user);
         }
     }
 
@@ -1547,7 +1554,7 @@ impl FocusTrap {
                 (None, true) => stops[len - 1],
             }
         };
-        cx.set_key_focus(next);
+        cx.set_key_focus_from_user(next);
         true
     }
 }

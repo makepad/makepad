@@ -82,7 +82,7 @@ impl NavControl {
         {
             Self::send_trigger_to_scroll_stack(cx, scroll_stack);
         }
-        cx.set_key_focus(area);
+        cx.set_key_focus_from_user(area);
     }
 
     pub fn draw(&mut self, cx: &mut Cx2d) {
