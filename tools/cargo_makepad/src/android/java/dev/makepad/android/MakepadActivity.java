@@ -1503,6 +1503,9 @@ public class MakepadActivity
         mVideoPlaybackHandler = new Handler(mVideoPlaybackThread.getLooper());
         mVideoPlayerRunnables = new HashMap<Long, VideoPlayerRunnable>();
 
+        // The app starts as soon as it sees this activity, so its params have to be there first.
+        sendAndroidParams();
+        sendDisplayRotation();
         MakepadNative.activityOnCreate(this);
         registerPhysicalKeyboardListener();
 
@@ -1580,8 +1583,6 @@ public class MakepadActivity
         }
 
         int sdkVersion = Build.VERSION.SDK_INT;
-        sendAndroidParams();
-        sendDisplayRotation();
         // Landscape to reverse landscape (a half turn) changes no configuration,
         // so onConfigurationChanged never hears of it: the display listener does.
         android.hardware.display.DisplayManager displays =
