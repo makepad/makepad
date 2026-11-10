@@ -6,7 +6,7 @@ use makepad_vulkan::{vk, Entry};
 use std::collections::{HashSet, VecDeque};
 use std::ffi::CStr;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -695,6 +695,23 @@ fn pipeline_cache_size(raw: &makepad_vulkan::Device, cache: vk::PipelineCache) -
 /// (every variant compiled from SPIR-V, every launch) before this.
 fn open_pipeline_cache(raw: &makepad_vulkan::Device, properties: &vk::PhysicalDeviceProperties) -> (vk::PipelineCache, Option<PipelineCacheFile>, bool) {
     let path = pipeline_cache_file(properties);
+    // we delete files no launch will read: temp files of saves that died midway, and this app's files
+    // for other drivers of its GPU (or on Android, where the folder is the app's own, every other file)
+    if let Some((dir, name)) = path.as_ref().and_then(|p| Some((p.parent()?, p.file_name()?.to_str()?))) {
+        let app_gpu = name.rsplit_once('-').map_or(name, |(app_gpu, _)| app_gpu);
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let file = entry.file_name();
+            let Some(file) = file.to_str().filter(|f| f.starts_with("pipelines-") && *f != name) else { continue };
+            let stale = match file.strip_suffix(".tmp") {
+                Some(tmp) => tmp.rsplit_once('.').and_then(|(_, n)| n.split_once('-')).is_some_and(|(pid, _)| !Path::new("/proc").join(pid).exists()),
+                None => file.ends_with(".bin") && (cfg!(target_os = "android") || file.rsplit_once('-').is_some_and(|(other, _)| other == app_gpu)),
+            };
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+                if log_enabled() { eprintln!("[hal-vulkan] pipeline cache: deleted stale {file}"); }
+            }
+        }
+    }
     // what changes with each new build of the app, so it starts a fresh cache: on Android the
     // package's version and last update time, elsewhere the executable's size and mtime
     #[cfg(target_os = "android")]
