@@ -5397,8 +5397,12 @@ impl<'a> Fcx<'a> {
                     st = self.never_scrutinee(*x, st);
                 }
                 // arms coerce to a known expected type (rustc _match.rs check_match:
-                // CoerceMany starts from `ExpectHasType(ety)` unless it is `()`)
+                // CoerceMany starts from `ExpectHasType(ety)` unless it is `()`). A hint is no
+                // such type: for a match that is itself an arm of an outer match the hint is the
+                // outer match's earlier arms' type, and the two meet in the outer CoerceMany,
+                // which may coerce those arms to this one's type (`&String` arms to `&str`).
                 let target = match expected {
+                    Some(_) if soft => None,
                     Some(et) => {
                         let s = self.shallow(et);
                         if matches!(self.tcx.tys.kind(s), TyKind::Infer(_) | TyKind::Error) || s == unit || self.is_unsized_ty(s) {
