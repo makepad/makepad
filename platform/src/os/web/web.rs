@@ -377,7 +377,7 @@ impl Cx {
                     } else {
                         panic!()
                     };
-                    self.fingers.process_touch_update_end(&e.touches);
+                    self.end_touch_update(&e.touches);
                 }
 
                 live_id!(ToWasmMouseDown) => {

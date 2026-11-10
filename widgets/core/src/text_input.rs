@@ -3125,7 +3125,10 @@ impl Widget for TextInput {
             let rect = self.draw_bg.area().rect(cx);
             let should_lose_focus = match event {
                 // Handle desktop mouse clicks
-                Event::MouseUp(mu) => !rect.contains(mu.abs),
+                Event::MouseUp(mu) => {
+                    !rect.contains(mu.abs)
+                        && !cx.fingers.is_press_keeping_key_focus(live_id!(mouse).into())
+                }
                 // Handle mobile touch events
                 Event::TouchUpdate(tu) => {
                     let mut should_lose_focus = false;
@@ -3145,7 +3148,10 @@ impl Widget for TextInput {
                             }
                             TouchState::Stop => {
                                 if self.pending_outside_focus_loss_touch == Some(touch.uid) {
-                                    should_lose_focus = !rect.contains(touch.abs);
+                                    should_lose_focus = !rect.contains(touch.abs)
+                                        && !cx.fingers.is_press_keeping_key_focus(
+                                            live_id_num!(touch, touch.uid).into(),
+                                        );
                                     self.pending_outside_focus_loss_touch = None;
                                 }
                             }
@@ -3247,6 +3253,10 @@ impl Widget for TextInput {
                 // Only `draw_walk` shows the IME (it knows where the caret is), so we redraw on focus.
                 // Focus set from a `draw_walk` arrives mid-draw, where a plain `redraw` gets dropped.
                 cx.redraw_area_in_draw(self.draw_bg.area());
+                // We'll show the IME again when we're drawn, so a hide still waiting on a press can't happen.
+                if !self.is_read_only && self.effective_input_mode() != InputMode::None {
+                    cx.cancel_text_ime_hide();
+                }
                 // Sync text state to platform IME before keyboard shows
                 let sel_start_chars = self.text[..self.selection.start().index].chars().count();
                 let sel_end_chars = self.text[..self.selection.end().index].chars().count();

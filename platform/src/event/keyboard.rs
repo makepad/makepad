@@ -20,6 +20,10 @@ pub struct CxKeyboard {
     #[allow(dead_code)]
     pub(crate) keys_down: Vec<KeyEvent>,
     pub(crate) text_ime_dismissed: bool,
+    /// Whether a hide of the soft keyboard is waiting for the last finger to lift.
+    pub(crate) is_text_ime_hide_deferred: bool,
+    /// Whether that hide was cancelled while the key focus was changing, see `Cx::cancel_text_ime_hide`.
+    pub(crate) is_text_ime_hide_cancelled: bool,
     pub(crate) has_physical_keyboard: bool,
 }
 

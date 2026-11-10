@@ -1,4 +1,4 @@
-use crate::{makepad_draw::Vec2Index, Area, Cx, Event, Hit, MouseCursor, NextFrame};
+use crate::{event::ScrollDirection, makepad_draw::Vec2Index, Area, Cx, Event, Hit, MouseCursor, NextFrame};
 
 #[derive(Clone, Copy, Debug)]
 struct ScrollSample {
@@ -237,14 +237,21 @@ impl TouchGesture {
                 cx.set_cursor(MouseCursor::Default);
                 match &mut self.scroll_state {
                     ScrollState::Drag { samples } => {
+                        let travel = e.abs - e.abs_start;
                         // A drag we share with a scroller along the other axis keeps to the way it started out.
-                        match cx.lock_scroll_drag(e.digit_id, e.abs - e.abs_start) {
+                        match cx.lock_scroll_drag(e.digit_id, travel) {
                             None => return TouchMotionChange::None,
                             Some(direction) if !direction.allows(Vec2Index::Y) => {
                                 self.scroll_state = ScrollState::Stopped;
                                 return TouchMotionChange::ScrollStateChanged;
                             }
                             Some(_) => {}
+                        }
+                        // Like any scroll, it keeps the keyboard up once it goes the tap distance our way.
+                        if ScrollDirection::from_travel(travel)
+                            .is_some_and(|direction| direction.allows(Vec2Index::Y))
+                        {
+                            cx.fingers.mark_press_as_keeping_key_focus(e.digit_id);
                         }
                         let new_abs = e.abs.y;
                         let old_sample = *samples.last().unwrap();
