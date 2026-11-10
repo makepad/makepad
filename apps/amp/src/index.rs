@@ -949,7 +949,7 @@ mod tests {
         index
     }
 
-    /// A search over tens of thousands of tracks finds them (how long it takes: the bench below).
+    /// A search over tens of thousands of tracks finds them.
     #[test]
     fn search_over_tens_of_thousands_of_tracks_finds_them() {
         let index = big_index();
@@ -957,20 +957,6 @@ mod tests {
         assert!(hits.track_total > 0);
         assert_eq!(hits.tracks.len(), hits.track_total.min(200));
         assert!(hits.tracks.iter().all(|&id| index.tracks[id as usize].name.ends_with("of the night")));
-    }
-
-    /// The same search, timed: a shared test box's load made it 400 ms where a quiet one takes a
-    /// fraction of its 250 ms bound (11-07), so it runs as a bench, not in the test bucket.
-    #[test]
-    #[ignore = "a bench: timed work on a quiet machine"]
-    fn search_over_tens_of_thousands_of_tracks_is_quick() {
-        let index = big_index();
-        let start = std::time::Instant::now();
-        let hits = index.search("night artist 99", 200);
-        let elapsed = start.elapsed();
-        assert!(hits.track_total > 0);
-        // Debug builds are several times slower than the release app.
-        assert!(elapsed.as_millis() < 250, "search took {elapsed:?}");
     }
 
     /// Older files still read: a version 1 or 2 track keeps what it had but

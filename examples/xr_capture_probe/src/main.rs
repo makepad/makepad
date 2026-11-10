@@ -8,9 +8,8 @@
 //!
 //! Run with the local network allowed and the stream on (`MAKEPAD_LAN=1`, `--xr-stream=on`);
 //! `--pin NNNN` pairs the headset showing that PIN.
-use makepad_desk_link::xr_capture::{CaptureAsk, CaptureCamera, CaptureKeyframe, CaptureRecord, CapturePlane};
+use makepad_desk_link::xr_capture::{decode_plane, CaptureAsk, CaptureCamera, CaptureKeyframe, CaptureRecord, CapturePlane};
 use makepad_widgets::*;
-use makepad_xr_stream::capture::decode_plane;
 use makepad_xr_stream::XrServer;
 use std::sync::{Arc, Mutex};
 
@@ -326,8 +325,7 @@ impl AppMain for App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_desk_link::xr_capture::{CaptureDepth, CaptureLensPose, CapturePose, CaptureView};
-    use makepad_xr_stream::capture::encode_plane;
+    use makepad_desk_link::xr_capture::{encode_plane, CaptureDepth, CaptureLensPose, CapturePose, CaptureView};
 
     fn camera(position: u8) -> CaptureCamera {
         CaptureCamera {
