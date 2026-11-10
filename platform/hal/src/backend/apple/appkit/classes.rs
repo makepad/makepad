@@ -845,9 +845,10 @@ fn define_view_class() -> *const Class {
     }
 
     extern "C" fn accepts_first_mouse(this: &Object, _: Sel, event: ObjcId) -> BOOL {
-        // The caption answer crosses the asynchronous pipe. Accept the press here, then
-        // mouseDown asks the app; only its Caption reply can start a native window drag.
-        if event != nil && !win_of(this).retired.get() { YES } else { NO }
+        // Like AppKit's own title bar, a press on an inactive window's caption bar drags it right away.
+        // The app's caption answer crosses the asynchronous pipe, so the strip stands in for it here.
+        let win = win_of(this);
+        if event != nil && !win.retired.get() && win.accepts_first_mouse(event_pos(this, event)[1]) { YES } else { NO }
     }
 
     let mut decl = ClassDecl::new("HalView", class!(NSView)).unwrap();
