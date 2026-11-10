@@ -26,7 +26,7 @@ use {
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
         thread::{SignalToUI, ToUIReceiver},
         uniform_buffer::CxUniformBufferPool,
-        window::CxWindowPool,
+        window::{CxWindowPool, WindowId},
     },
     makepad_futures::{
         executor,
@@ -329,7 +329,8 @@ pub struct Cx {
     /// Selects a cancel scope from the currently active widget hierarchy. The lookup
     /// returns the newest matching scope for a widget UID. Called only for a new
     /// Escape/Back press; widgets install this without a platform dependency on them.
-    pub cancel_scope_resolver: Option<fn(&Cx, &dyn Fn(u64) -> Option<u64>) -> Option<u64>>,
+    /// For a swipe, it also gets the window the swipe starts in.
+    pub cancel_scope_resolver: Option<fn(&Cx, Option<WindowId>, &dyn Fn(u64) -> Option<u64>) -> Option<u64>>,
     /// The tweaker overlay's remote dispatcher (widgets/families/tweaker/src/tweaker.rs).
     /// Registered by the widgets crate at startup, exactly like the widget
     /// tree callbacks above; the /tweak routes in remote.rs delegate here so
@@ -926,7 +927,7 @@ impl Cx {
         self.cancel_scopes.has_press_owner()
     }
 
-    /// Whether a back swipe by a touch starting in the event being delivered belongs to `scope`, a scope
+    /// Whether a back swipe by a touch or trackpad gesture starting in the event being delivered belongs to `scope`, a scope
     /// from [`Self::begin_widget_back_swipe_scope()`] that Back would go to right now. Only meaningful during that event.
     pub fn owns_back_swipe(&self, scope: &CancelScope) -> bool {
         self.cancel_scopes.owns_back_swipe(scope)

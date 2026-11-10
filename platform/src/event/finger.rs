@@ -192,6 +192,15 @@ impl CxScrollLatch {
         self.owners[axis_slot(axis)]
     }
 
+    /// Whether `e` starts a new trackpad gesture, rather than being a wheel, momentum or more of a gesture.
+    pub(crate) fn starts_finger_gesture(&self, e: &ScrollEvent) -> bool {
+        match e.phase {
+            ScrollPhase::Began => true,
+            ScrollPhase::Changed => self.gesture != ScrollGesture::Fingers,
+            _ => false,
+        }
+    }
+
     /// Ends the gesture, so the next scroll event starts a new one.
     pub(crate) fn reset(&mut self) {
         self.gesture = ScrollGesture::Idle;
