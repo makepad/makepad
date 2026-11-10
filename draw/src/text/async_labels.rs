@@ -533,7 +533,7 @@ fn prepare(
                 let mut raster = glyph.rasterize(size * dpi);
                 if raster.is_none() {
                     let mut rasterizer = layouter.rasterizer().borrow_mut();
-                    if rasterizer.color_atlas_mut().reset_if_needed() {
+                    if std::mem::take(&mut rasterizer.atlas_overflow_hash) != 0 {
                         rasterizer.on_atlas_reset();
                     }
                     drop(rasterizer);

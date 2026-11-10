@@ -135,6 +135,8 @@ impl<'a> CxDraw<'a> {
                 cx.redraw_all();
             }
         });
+        #[cfg(target_arch = "wasm32")]
+        cx.event_hooks.push(Fonts::handle_event);
         cx.register_async_load_probe("glyph", |cx| {
             cx.get_global_ref::<Rc<RefCell<Fonts>>>()
                 .and_then(|fonts| fonts.try_borrow().ok().map(|fonts| fonts.pending_glyph_rasters()))

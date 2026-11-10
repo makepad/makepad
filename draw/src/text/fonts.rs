@@ -1,6 +1,7 @@
 #[cfg(target_arch = "wasm32")]
 use super::{
-    font_atlas::GlyphImageKind,
+    font_atlas::{ColorAtlas, GlyphImageKind},
+    geom::Size,
     image::{Bgra, Image},
     msdfer::Msdfer,
     rasterizer::{CompletedMsdfJob, CompletedOutlineJob, CompletedSdfJob, QueuedOutlineJob},
@@ -62,6 +63,10 @@ pub fn set_glyph_rendering(cx: &mut Cx, glyph_rendering: GlyphRendering) {
     cx.redraw_all();
 }
 
+/// How long a grown atlas waits for new glyphs before it goes back to its base size.
+#[cfg(target_arch = "wasm32")]
+const ATLAS_IDLE_SECS: f64 = 300.0;
+
 #[derive(Default)]
 struct LazyFontRequests {
     requested: FxHashSet<(FontFamilyId, LazyFontFamily)>,
@@ -122,6 +127,16 @@ pub struct Fonts {
     /// Glyph rasters sent to the MSDF worker and not applied yet.
     #[cfg(target_arch = "wasm32")]
     msdf_jobs_in_flight: usize,
+    #[cfg(target_arch = "wasm32")]
+    atlas_base_size: Size<usize>,
+    #[cfg(target_arch = "wasm32")]
+    atlas_shrink_timer: Timer,
+    /// The `drawing_id` of the frame that fills an atlas we just emptied.
+    #[cfg(target_arch = "wasm32")]
+    atlas_refill_drawing: u64,
+    /// Cleared once a refill fits.
+    #[cfg(target_arch = "wasm32")]
+    seen_atlas_overflow_hashes: FxHashSet<u64>,
     /// Fonts whose resource this process could not read (see
     /// [`Self::note_font_unavailable`]); their families render without them
     /// until the resource registry moves on (`unavailable_generation`).
@@ -225,6 +240,10 @@ impl Fonts {
             msdf_sent,
             msdf_applied: 0,
             msdf_jobs_in_flight: 0,
+            atlas_base_size: atlas_size,
+            atlas_shrink_timer: Timer::empty(),
+            atlas_refill_drawing: 0,
+            seen_atlas_overflow_hashes: FxHashSet::default(),
             unavailable_fonts: FxHashSet::default(),
             unavailable_generation: 0,
         };
@@ -596,12 +615,18 @@ impl Fonts {
         assert!(!self.needs_prepare_atlases);
         // Frame boundary for the layout cache's working-set protection.
         self.layouter.advance_cache_generation();
-        let mut rasterizer = self.layouter.rasterizer().borrow_mut();
-        if rasterizer.color_atlas_mut().reset_if_needed() {
-            rasterizer.on_atlas_reset();
+        let overflow = std::mem::take(&mut self.layouter.rasterizer().borrow_mut().atlas_overflow_hash);
+        let is_refill = cx.drawing_id() == self.atlas_refill_drawing;
+        if is_refill && overflow == 0 {
+            self.seen_atlas_overflow_hashes.clear();
+        }
+        // A refill already holds all it can of this frame's glyphs, so a reset wouldn't help it,
+        // and it wouldn't help any later frame that misses the same glyphs either.
+        if overflow != 0 && self.seen_atlas_overflow_hashes.insert(overflow) && !is_refill {
+            self.layouter.rasterizer().borrow_mut().on_atlas_reset();
+            self.atlas_refill_drawing = cx.drawing_id() + 1;
             return false;
         }
-        drop(rasterizer);
         // Same idea for the append-only slug glyph atlas: if it grew past its cap, clear it
         // here (before any upload below) and force a full redraw so every slug glyph rebuilds
         // into the fresh atlas. Returning false leaves the existing slug textures intact for
@@ -626,15 +651,72 @@ impl Fonts {
     fn prepare_atlas_texture(&mut self, cx: &mut Cx) {
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
         let dirty_rect = rasterizer.color_atlas_mut().take_dirty_image().bounds();
+        let size = rasterizer.color_atlas().size();
         let pixels = bgra_vec_into_u32(rasterizer.color_atlas_mut().take_pixels());
+        // an atlas that grew goes up whole, into a texture of its new size
+        let grew = match self.atlas_texture.get_format(cx) {
+            TextureFormat::VecBGRAu8_32 { height, .. } if *height != size.height => {
+                *height = size.height;
+                true
+            }
+            _ => false,
+        };
         self.atlas_texture.put_back_vec_u32(
             cx,
             pixels,
-            Some(RectUsize::new(
+            (!grew).then(|| RectUsize::new(
                 PointUsize::new(dirty_rect.origin.x, dirty_rect.origin.y),
                 SizeUsize::new(dirty_rect.size.width, dirty_rect.size.height),
             )),
-        )
+        );
+        // A refill doesn't start the countdown, or a screen that needs the extra rows would
+        // shrink and grow back forever. The next frame starts it instead.
+        if size != self.atlas_base_size
+            && cx.drawing_id() != self.atlas_refill_drawing
+            && (!dirty_rect.is_empty() || self.atlas_shrink_timer.is_empty())
+        {
+            cx.stop_timer(self.atlas_shrink_timer);
+            self.atlas_shrink_timer = cx.start_timeout(ATLAS_IDLE_SECS);
+        }
+    }
+
+    /// Goes back to the base size, dropping the CPU pixels here and giving up the GPU texture.
+    #[cfg(target_arch = "wasm32")]
+    fn shrink_atlas(&mut self, cx: &mut Cx) {
+        let size = self.atlas_base_size;
+        let mut rasterizer = self.layouter.rasterizer().borrow_mut();
+        if rasterizer.color_atlas().size() == size {
+            return;
+        }
+        *rasterizer.color_atlas_mut() = ColorAtlas::new_zeroed(size);
+        rasterizer.on_atlas_reset();
+        let pixels = bgra_vec_into_u32(rasterizer.color_atlas_mut().take_pixels());
+        self.atlas_texture.release(cx);
+        self.atlas_texture.set_data_u32(cx, size.width, size.height, pixels);
+        // the pixels are the texture's now, so the next draw takes them back
+        self.needs_prepare_atlases = true;
+        cx.stop_timer(self.atlas_shrink_timer);
+        self.atlas_shrink_timer = Timer::empty();
+        self.atlas_refill_drawing = cx.drawing_id() + 1;
+    }
+
+    /// A grown atlas goes back to its base size once it's been idle, or when the app goes to
+    /// the background.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn handle_event(cx: &mut Cx, event: &Event) {
+        if !matches!(event, Event::Background | Event::Timer(_)) {
+            return;
+        }
+        let Some(fonts) = cx.get_global_ref::<Rc<RefCell<Fonts>>>().cloned() else { return };
+        let Ok(mut fonts) = fonts.try_borrow_mut() else { return };
+        match event {
+            Event::Background => fonts.shrink_atlas(cx),
+            Event::Timer(timer) if fonts.atlas_shrink_timer.is_timer(timer).is_some() => {
+                fonts.shrink_atlas(cx);
+                cx.redraw_all();
+            }
+            _ => {}
+        }
     }
 
     /// The start of a draw. Under the HAL: takes what the font service answered since the last one
@@ -672,6 +754,7 @@ impl Fonts {
             self.prepare_atlas(cx);
             self.needs_prepare_atlases = false;
         }
+        self.layouter.rasterizer().borrow_mut().refilling = cx.drawing_id() == self.atlas_refill_drawing;
         // a full redraw can use finished SDFs right away, any other draw leaves them for `prepare_textures`
         if draw_event.redraw_all {
             self.apply_completed_outline_jobs();
@@ -684,6 +767,13 @@ impl Fonts {
         let pixels = self.atlas_texture.take_vec_u32(cx);
         let pixels = u32_vec_into_bgra(pixels);
         rasterizer.color_atlas_mut().replace_pixels(pixels);
+        // At most twice the base size, since each change uploads the whole atlas, and the wasm
+        // heap, the upload's scratch and the texture each hold a copy of it.
+        let max_bytes = cx.memory_budget() / 48;
+        rasterizer.max_atlas_height = (max_bytes / (self.atlas_base_size.width * 4))
+            .min(cx.gpu_info().max_texture_size)
+            .min(2 * self.atlas_base_size.height)
+            .max(self.atlas_base_size.height);
     }
 
     #[cfg(target_arch = "wasm32")]

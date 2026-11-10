@@ -9,7 +9,6 @@ use {
 
 #[derive(Clone, Debug)]
 pub struct FontAtlas<T> {
-    needs_reset: bool,
     image: Image<T>,
     dirty_rect: Rect<usize>,
 }
@@ -20,18 +19,9 @@ impl<T> FontAtlas<T> {
         T: Clone + Default,
     {
         Self {
-            needs_reset: false,
             image: Image::new(size),
             dirty_rect: Rect::ZERO,
         }
-    }
-
-    pub fn needs_reset(&self) -> bool {
-        self.needs_reset
-    }
-
-    pub fn request_reset(&mut self) {
-        self.needs_reset = true;
     }
 
     pub fn size(&self) -> Size<usize> {
@@ -72,15 +62,6 @@ impl<T> FontAtlas<T> {
             self.dirty_rect = self.dirty_rect.union(rect);
         }
     }
-
-    pub fn reset_if_needed(&mut self) -> bool {
-        if !self.needs_reset() {
-            return false;
-        }
-        self.needs_reset = false;
-        self.dirty_rect = Rect::ZERO;
-        true
-    }
 }
 
 pub type GrayscaleAtlas = FontAtlas<Bgra>;
@@ -108,10 +89,17 @@ impl FontAtlas<Bgra> {
     /// `new` with the image's pages left to the allocator's zero fill (Image::new_zeroed).
     pub fn new_zeroed(size: Size<usize>) -> Self {
         Self {
-            needs_reset: false,
             image: Image::new_zeroed(size),
             dirty_rect: Rect::ZERO,
         }
+    }
+
+    /// Adds empty rows at the bottom. They come zeroed from the allocator, so they're free until they're used.
+    pub fn grow(&mut self, height: usize) {
+        let mut image = Image::new_zeroed(Size::new(self.size().width, height));
+        let old = self.image.as_pixels();
+        image.as_mut_pixels()[..old.len()].copy_from_slice(old);
+        self.image = image;
     }
 }
 
