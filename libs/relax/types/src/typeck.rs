@@ -5804,7 +5804,9 @@ impl<'a> Fcx<'a> {
                         TyKind::Adt(d, args, regions) => {
                             let adt = self.tcx.adts.get(&d);
                             if let Some(adt) = adt {
-                                if !adt.is_enum {
+                                // only a tuple struct has fields named by position: `owned.0` on a
+                                // struct with named fields is a field of its Deref target
+                                if !adt.is_enum && adt.variants[0].shape == 1 {
                                     if let Some(f) = adt.variants[0].fields.get(*idx as usize) {
                                         if self.field_visible(d, f) {
                                             self.b.field_idx.insert(e.0, (derefs as u32, *idx));
