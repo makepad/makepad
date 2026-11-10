@@ -316,3 +316,52 @@ impl<'a, const CAP: usize> TryFrom<fmt::Arguments<'a>> for ArrayString<CAP> {
         Ok(string)
     }
 }
+
+// arrayvec 0.7 src/array_string.rs: "Requires crate feature `"serde"`".
+#[cfg(feature = "serde")]
+impl<const CAP: usize> serde::Serialize for ArrayString<CAP> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&*self)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, const CAP: usize> serde::Deserialize<'de> for ArrayString<CAP> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use core::marker::PhantomData;
+        use serde::de::{self, Visitor};
+
+        struct ArrayStringVisitor<const CAP: usize>(PhantomData<[u8; CAP]>);
+
+        impl<'de, const CAP: usize> Visitor<'de> for ArrayStringVisitor<CAP> {
+            type Value = ArrayString<CAP>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                write!(formatter, "a string no more than {} bytes long", CAP)
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                ArrayString::from(v).map_err(|_| E::invalid_length(v.len(), &self))
+            }
+
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let s = str::from_utf8(v).map_err(|_| E::invalid_value(de::Unexpected::Bytes(v), &self))?;
+                ArrayString::from(s).map_err(|_| E::invalid_length(s.len(), &self))
+            }
+        }
+
+        deserializer.deserialize_str(ArrayStringVisitor(PhantomData))
+    }
+}

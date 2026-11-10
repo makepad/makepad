@@ -2,7 +2,8 @@
 //! (crate substitution, coord.md "SV1"). Behaviour follows arrayvec 0.7.6 (fixed capacity
 //! CAP, u32 length, panic messages, CapacityError); ported from it (Copyright (c) Ulrik Sverdrup
 //! "bluss" 2015-2023, MIT/Apache-2.0; see libs/relax/compiler/std/CREDITS.md).
-//! Includes ArrayString's API without optional external trait integrations.
+//! Includes ArrayString's API; of the optional external trait integrations, `serde` (the
+//! crate's feature of that name, std/substitutes.txt).
 //! The rustc path keeps the real crate and std/check_ext tests this file against it.
 
 use core::borrow::{Borrow, BorrowMut};
@@ -689,5 +690,52 @@ impl<T: PartialOrd, const CAP: usize> PartialOrd for ArrayVec<T, CAP> {
 impl<T: Ord, const CAP: usize> Ord for ArrayVec<T, CAP> {
     fn cmp(&self, other: &ArrayVec<T, CAP>) -> cmp::Ordering {
         (**self).cmp(other)
+    }
+}
+
+// arrayvec 0.7 src/arrayvec.rs: "Requires crate feature `"serde"`".
+#[cfg(feature = "serde")]
+impl<T: serde::Serialize, const CAP: usize> serde::Serialize for ArrayVec<T, CAP> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_seq(self)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, T: serde::Deserialize<'de>, const CAP: usize> serde::Deserialize<'de> for ArrayVec<T, CAP> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use core::marker::PhantomData;
+        use serde::de::{Error, SeqAccess, Visitor};
+
+        struct ArrayVecVisitor<'de, T: serde::Deserialize<'de>, const CAP: usize>(PhantomData<(&'de (), [T; CAP])>);
+
+        impl<'de, T: serde::Deserialize<'de>, const CAP: usize> Visitor<'de> for ArrayVecVisitor<'de, T, CAP> {
+            type Value = ArrayVec<T, CAP>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                write!(formatter, "an array with no more than {} items", CAP)
+            }
+
+            fn visit_seq<SA>(self, mut seq: SA) -> Result<Self::Value, SA::Error>
+            where
+                SA: SeqAccess<'de>,
+            {
+                let mut values = ArrayVec::<T, CAP>::new();
+                while let Some(value) = seq.next_element()? {
+                    if values.try_push(value).is_err() {
+                        return Err(SA::Error::invalid_length(CAP + 1, &self));
+                    }
+                }
+                Ok(values)
+            }
+        }
+
+        deserializer.deserialize_seq(ArrayVecVisitor::<T, CAP>(PhantomData))
     }
 }

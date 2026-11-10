@@ -4,6 +4,7 @@
 //! panic messages); the algorithms are ported from it (Copyright (c) 2018 The Servo Project
 //! Developers, MIT/Apache-2.0; see libs/relax/compiler/std/CREDITS.md). `smallvec!` is a
 //! Relax built-in that expands per SV2; `smallvec_inline!` is exported without a feature gate.
+//! Of the crate's optional features the ones std/substitutes.txt lists: `write` and `serde`.
 //! The rustc path keeps using the real crate; std/check_ext tests this file against it.
 
 extern crate alloc;
@@ -1134,5 +1135,83 @@ impl<'a, T: 'a + Array> Drop for Drain<'a, T> {
                 source_vec.set_len(start + self.tail_len);
             }
         }
+    }
+}
+
+// smallvec 1.15.1 src/lib.rs: `impl io::Write for SmallVec<A>` (feature `write`).
+#[cfg(feature = "write")]
+impl<A: Array<Item = u8>> std::io::Write for SmallVec<A> {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    #[inline]
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.extend_from_slice(buf);
+        Ok(())
+    }
+
+    #[inline]
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+// smallvec 1.15.1 src/lib.rs: Serialize / Deserialize (feature `serde`).
+#[cfg(feature = "serde")]
+impl<A: Array> serde::Serialize for SmallVec<A>
+where
+    A::Item: serde::Serialize,
+{
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut state = serializer.serialize_seq(Some(self.len()))?;
+        for item in self {
+            state.serialize_element(item)?;
+        }
+        state.end()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, A: Array> serde::Deserialize<'de> for SmallVec<A>
+where
+    A::Item: serde::Deserialize<'de>,
+{
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_seq(SmallVecVisitor { phantom: core::marker::PhantomData })
+    }
+}
+
+#[cfg(feature = "serde")]
+struct SmallVecVisitor<A> {
+    phantom: core::marker::PhantomData<A>,
+}
+
+#[cfg(feature = "serde")]
+impl<'de, A: Array> serde::de::Visitor<'de> for SmallVecVisitor<A>
+where
+    A::Item: serde::Deserialize<'de>,
+{
+    type Value = SmallVec<A>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a sequence")
+    }
+
+    fn visit_seq<B>(self, mut seq: B) -> Result<Self::Value, B::Error>
+    where
+        B: serde::de::SeqAccess<'de>,
+    {
+        use serde::de::Error;
+        let len = seq.size_hint().unwrap_or(0);
+        let mut values = SmallVec::new();
+        values.try_reserve(len).map_err(B::Error::custom)?;
+        while let Some(value) = seq.next_element()? {
+            values.push(value);
+        }
+        Ok(values)
     }
 }
