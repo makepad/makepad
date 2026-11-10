@@ -215,6 +215,8 @@ pub(super) struct Renderer {
     pub mailbox: Mailbox,
     #[cfg(target_os = "android")]
     urgent: Arc<Mutex<Vec<Job>>>,
+    /// made at the first compile, once the app's cache dir is known
+    pub cache: Option<super::cache::ProgramCache>,
     exit: bool,
 }
 
@@ -292,7 +294,7 @@ impl Renderer {
         }
         Ok(Self { ctx, caps, textures: HashMap::new(), buffers: HashMap::new(), programs: HashMap::new(), linking: Vec::new(),
             fbos: HashMap::new(), read_fbo: names[0], copy_fbo: names[1], fallback,
-            uniform_arena: names[2], instance_arena: names[3], arena_words: (0, 0), pending: VecDeque::new(), mailbox, #[cfg(target_os = "android")] urgent, exit: false })
+            uniform_arena: names[2], instance_arena: names[3], arena_words: (0, 0), pending: VecDeque::new(), mailbox, #[cfg(target_os = "android")] urgent, cache: None, exit: false })
     }
 
     pub fn exit(&mut self) {

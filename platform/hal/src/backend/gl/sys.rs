@@ -84,6 +84,9 @@ gl_functions! {
     glGetProgramiv(GLuint, GLenum, *mut GLint);
     glGetProgramInfoLog(GLuint, GLsizei, *mut GLsizei, *mut u8);
     glDeleteProgram(GLuint);
+    glProgramParameteri(GLuint, GLenum, GLint);
+    glGetProgramBinary(GLuint, GLsizei, *mut GLsizei, *mut GLenum, *mut c_void);
+    glProgramBinary(GLuint, GLenum, *const c_void, GLsizei);
     glUseProgram(GLuint);
     glGetAttribLocation(GLuint, *const u8) -> GLint;
     glGetActiveAttrib(GLuint, GLuint, GLsizei, *mut GLsizei, *mut GLint, *mut GLenum, *mut u8);
@@ -176,6 +179,7 @@ pub const ONE: GLenum = 1;
 pub const ONE_MINUS_SRC_ALPHA: GLenum = 0x0303;
 pub const FUNC_ADD: GLenum = 0x8006;
 pub const MAX: GLenum = 0x8008;
+pub const VENDOR: GLenum = 0x1F00;
 pub const RENDERER: GLenum = 0x1F01;
 pub const VERSION: GLenum = 0x1F02;
 pub const EXTENSIONS: GLenum = 0x1F03;
@@ -260,6 +264,9 @@ pub const UNSIGNED_INT_VEC2: GLenum = 0x8DC6;
 pub const UNSIGNED_INT_VEC3: GLenum = 0x8DC7;
 pub const UNSIGNED_INT_VEC4: GLenum = 0x8DC8;
 pub const COMPLETION_STATUS_KHR: GLenum = 0x91B1;
+pub const PROGRAM_BINARY_LENGTH: GLenum = 0x8741;
+pub const NUM_PROGRAM_BINARY_FORMATS: GLenum = 0x87FE;
+pub const PROGRAM_BINARY_RETRIEVABLE_HINT: GLenum = 0x8257;
 // framebuffers
 pub const FRAMEBUFFER: GLenum = 0x8D40;
 pub const READ_FRAMEBUFFER: GLenum = 0x8CA8;

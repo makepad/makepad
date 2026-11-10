@@ -11,6 +11,7 @@
 //! on the other backends: every vertex shader of the dialect flips clip-space Y and the present
 //! blit flips it back.
 
+mod cache;
 pub(crate) mod egl;
 mod frame;
 mod program;

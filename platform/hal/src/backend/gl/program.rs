@@ -1,8 +1,10 @@
-//! Programs from the GLSL dialect payload: compile and link on the render thread (finished by
-//! the driver's threads where KHR_parallel_shader_compile exists), then the fixed bindings:
-//! uniform block i at binding i, texture i on unit i, the pick twin of texture i on unit
-//! textures + i, the instance words after them; attribute pointers per draw on one VAO.
+//! Programs from the GLSL dialect payload: loaded from the program cache, or compiled and
+//! linked on the render thread (finished by the driver's threads where KHR_parallel_shader_compile
+//! exists), then the fixed bindings: uniform block i at binding i, texture i on unit i, the pick
+//! twin of texture i on unit textures + i, the instance words after them; attribute pointers per
+//! draw on one VAO.
 
+use super::cache::{Key, ProgramCache};
 use super::render::Renderer;
 use super::sys::{self, GLenum, GLint, GLuint};
 use super::{Linked, PipeState};
@@ -13,6 +15,8 @@ use std::sync::Arc;
 pub(super) struct Linking {
     program: GLuint,
     shaders: [GLuint; 2],
+    /// where its binary goes once it links; `None` for a program loaded from the cache
+    key: Option<Key>,
 }
 
 #[derive(Clone, Copy)]
@@ -78,6 +82,14 @@ impl Renderer {
     pub fn compile(&mut self, state: &Arc<PipeState>) {
         let gl = &self.ctx.gl;
         let code = &state.code;
+        let key = Key::of(&code.vertex, &code.fragment);
+        let cache = self.cache.get_or_insert_with(|| ProgramCache::new(gl));
+        if let Some(program) = cache.load(gl, key) {
+            let result = self.finish(state, Linking { program, shaders: [0; 2], key: None });
+            self.linked(state, result);
+            return;
+        }
+        let keep = cache.keeps();
         let mut shaders = [0; 2];
         unsafe {
             let program = (gl.glCreateProgram)();
@@ -90,10 +102,18 @@ impl Renderer {
                 (gl.glAttachShader)(program, shader);
                 shaders[i] = shader;
             }
+            // a driver may only hand back a binary for the cache when asked before the link
+            if keep { (gl.glProgramParameteri)(program, sys::PROGRAM_BINARY_RETRIEVABLE_HINT, sys::TRUE as GLint) }
             (gl.glLinkProgram)(program);
-            self.linking.push((Arc::downgrade(state), Linking { program, shaders }));
+            self.linking.push((Arc::downgrade(state), Linking { program, shaders, key: keep.then_some(key) }));
         }
         if !self.caps.parallel_compile { self.poll_links(); }
+    }
+
+    fn linked(&self, state: &PipeState, result: Result<Linked, String>) {
+        let _ = state.linked.set(result);
+        state.epoch.fetch_add(1, Ordering::Release);
+        (self.mailbox.wake)();
     }
 
     pub fn poll_links(&mut self) {
@@ -114,9 +134,7 @@ impl Renderer {
                 continue;
             };
             let result = self.finish(&state, linking);
-            let _ = state.linked.set(result);
-            state.epoch.fetch_add(1, Ordering::Release);
-            (self.mailbox.wake)();
+            self.linked(&state, result);
         }
     }
 
@@ -144,6 +162,7 @@ impl Renderer {
             return Err(format!("GLES link failed: {log}"));
         }
         unsafe { for s in linking.shaders { (gl.glDeleteShader)(s) } }
+        if let (Some(key), Some(cache)) = (linking.key, &self.cache) { cache.store(gl, key, program); }
         let uniform = |name: &str| unsafe { (gl.glGetUniformLocation)(program, cstr(name).as_ptr()) };
         unsafe { (gl.glUseProgram)(program) };
         let flip = uniform("mp_clip_y_flip");
