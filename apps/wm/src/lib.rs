@@ -1102,6 +1102,12 @@ impl App {
     }
 
     fn launch_app(&mut self, cx: &mut Cx, app_id: &str) {
+        self.open_app(cx, app_id, false);
+    }
+
+    /// `native`: the app's compiled build, whatever runs it otherwise (`devhub show --native`): as
+    /// a process of its own, past any domain, module or warm instance of its usual runner.
+    fn open_app(&mut self, cx: &mut Cx, app_id: &str, native: bool) {
         if (app_id == clients::HUB_SERVICE_APP || app_id == clients::DEVHUB_SERVICE_APP) && self.show_running_service(cx, app_id) {
             return;
         }
@@ -1144,7 +1150,7 @@ impl App {
         }
 
         #[cfg(not(target_arch = "wasm32"))]
-        if self.domains.enabled {
+        if self.domains.enabled && !native {
             self.launch_domain(cx, app);
             return;
         }
@@ -1152,7 +1158,7 @@ impl App {
         // In-process hosting (aicontrol §3): a linked module the person
         // switched on (or a dev `--module` run) becomes an instance in an
         // isolate of its own — never a process, never the pool.
-        if self.apps.hosting(app_id) == Hosting::Module {
+        if !native && self.apps.hosting(app_id) == Hosting::Module {
             if let Some(module) = self.apps.module(app_id) {
                 self.launch_module(cx, module);
                 return;
@@ -1169,14 +1175,14 @@ impl App {
 
         // THE POOL: a standby instance of this app becomes the window now,
         // already drawn, and the pool tops itself back up behind it.
-        if self.adopt_warm(cx, app_id) {
+        if !native && self.adopt_warm(cx, app_id) {
             return;
         }
 
         let id = self.next_id;
         self.next_id += 1;
         let cwd = self.launch_cwd(app_id, true);
-        let runner = self.apps.runner(app_id);
+        let runner = if native { makepad_app_registry::Runner::Native } else { self.apps.runner(app_id) };
         let state = self.state_mut();
         let term_env = state.term_env.clone();
         let lines = self.line_sender();

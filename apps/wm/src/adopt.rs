@@ -59,8 +59,9 @@ pub(crate) struct Adopted {
 pub(crate) struct Adoptions {
     pub path: std::path::PathBuf,
     rx: Receiver<Adopted>,
-    /// `makepad-wm launch <id>` requests (devhub's `show`, a shell): the dock's launch-or-focus.
-    launches: Receiver<String>,
+    /// `makepad-wm launch <id> [native]` requests (devhub's `show`, a shell): the dock's
+    /// launch-or-focus, its compiled build when `native`.
+    launches: Receiver<(String, bool)>,
     /// `makepad-wm notify <title>\t<body>` requests (devhub's "app updated" after a sync): toasts.
     toasts: Receiver<(String, String, Option<u32>)>,
 }
@@ -104,11 +105,11 @@ impl Adoptions {
                         .map_err(|_| "the WM is shutting down".to_string())?;
                     SignalToUI::set_ui_signal();
                     Ok(Admission { port: hub_port, client, version: request.version })
-                }, |app| {
+                }, |app, native| {
                     if makepad_app_registry::find(app).is_none_or(|e| !e.wm_launchable) {
                         return Err(format!("no dock app {app}"));
                     }
-                    launch_tx.send(app.to_string()).map_err(|_| "the WM is shutting down".to_string())?;
+                    launch_tx.send((app.to_string(), native)).map_err(|_| "the WM is shutting down".to_string())?;
                     SignalToUI::set_ui_signal();
                     Ok(())
                 }, |title, body, action| {
@@ -141,15 +142,15 @@ impl App {
     pub(crate) fn drain_adoptions(&mut self, cx: &mut Cx) {
         let Some(adoptions) = self.adoptions.as_ref() else { return };
         let adopted: Vec<Adopted> = adoptions.rx.try_iter().collect();
-        let launches: Vec<String> = adoptions.launches.try_iter().collect();
+        let launches: Vec<(String, bool)> = adoptions.launches.try_iter().collect();
         let toasts: Vec<(String, String, Option<u32>)> = adoptions.toasts.try_iter().collect();
         for (title, body, relaunch) in toasts {
             log!("wm: socket toast: {title}: {body}{}", relaunch.map_or(String::new(), |p| format!(" [click: restart pid {p}]")));
             self.notify_with(cx, &title, &body, relaunch);
         }
-        for app in launches {
-            log!("wm: socket asks for the dock's {app}");
-            self.launch_app(cx, &app);
+        for (app, native) in launches {
+            log!("wm: socket asks for the dock's {app}{}", if native { ", compiled" } else { "" });
+            self.open_app(cx, &app, native);
         }
         for Adopted { client, pid, crate_name, launched, test_lane } in adopted {
             if launched {

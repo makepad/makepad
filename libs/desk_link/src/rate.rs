@@ -126,9 +126,19 @@ impl LinkTrip {
         self.base_us as f64 / 1000.0
     }
 
+    /// Whether a queue (`queued`) is this stream's: it sent at least a quarter of the rate it is
+    /// allowed (`sent_kbps` against `rate_kbps`). A stream sending next to nothing (a still scene)
+    /// cannot queue the link, and a trip over the idle one is then the link's own jitter: the rate
+    /// is no answer to it.
+    pub fn ours(queued: bool, sent_kbps: u64, rate_kbps: u32) -> bool {
+        queued && sent_kbps * 4 >= rate_kbps as u64
+    }
+
     /// A second's median and lowest round trip (ms; 0: none measured): whether the link queued.
     pub fn queued(&mut self, trip_ms: f64, trip_min_ms: f64) -> bool {
-        if trip_ms <= 0.0 {
+        // (no median, or no lowest: nothing measured; a lowest of 0 would pull the idle trip to 0,
+        // from where it creeps back a microsecond a second and every trip reads as a queue)
+        if trip_ms <= 0.0 || trip_min_ms <= 0.0 {
             return false;
         }
         let min_us = (trip_min_ms * 1000.0) as u32;
@@ -644,6 +654,20 @@ mod tests {
         assert!(r.note_due(300_000, limit::LINK), "the link");
         assert!(r.note_due(290_000, limit::LINK), "every drop");
         assert!(r.note_due(290_000, limit::CAP), "a new limit");
+    }
+
+    #[test]
+    fn a_trip_with_no_lowest_leaves_the_idle_trip_alone_and_a_quiet_stream_cannot_queue_the_link() {
+        let mut trip = LinkTrip::default();
+        assert!(!trip.queued(6.0, 4.0));
+        // a median with no lowest measured (0): not a queue, and the idle trip stays
+        assert!(!trip.queued(13.0, 0.0));
+        assert_eq!(trip.base_ms(), 4.0);
+        // trips over the idle one while the stream sends 0.4 of 19 Mbit/s: not its queue
+        assert!(trip.queued(25.0, 9.0));
+        assert!(!LinkTrip::ours(true, 400, 19_000));
+        assert!(LinkTrip::ours(true, 5_000, 19_000));
+        assert!(!LinkTrip::ours(false, 19_000, 19_000));
     }
 
     #[test]

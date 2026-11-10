@@ -17,6 +17,8 @@ host = ["server", "tiles"]
 drive = ["server", "dep:makepad-platform-video", "dep:makepad-zune-png", "dep:makepad-key-code"]
 
 [dependencies]
+# The capture records' plane codec.
+makepad-fast-inflate = { path = "../fast_inflate", version = "0.1.0" }
 makepad-remote = { path = "../remote", optional = true }
 makepad-network = { path = "../../platform/network", optional = true }
 makepad-platform-video = { path = "../../platform/video", optional = true }
