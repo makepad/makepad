@@ -314,16 +314,18 @@ impl Vulkan {
         let align = self.dev.properties.limits.min_uniform_buffer_offset_alignment.max(self.dev.properties.limits.min_storage_buffer_offset_alignment).max(16);
         let mut reserve = 0u64;
         let mut draw_counts = crate::FastMap::<usize, u32>::default();
+        // the damage check draws a window pass a second time, whole
+        let encodes = if damage_check() { 2 } else { 1 };
         for pass in &view.passes[pr.clone()] {
             for d in &view.draws[slice(pass.draws, view.draws.len()).unwrap()] {
                 if let Some(p) = self.pipe.get(&(sid, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen) {
                     let count = draw_counts.entry(Arc::as_ptr(&p.state) as usize).or_default();
-                    *count = count.saturating_add(1);
+                    *count = count.saturating_add(encodes);
                 }
                 for bytes in d.uniforms.iter().copied().chain([pass.uniforms, d.inst.data]) {
-                    reserve = reserve.saturating_add((bytes.len.max(16) as u64).div_ceil(align) * align);
+                    reserve = reserve.saturating_add((bytes.len.max(16) as u64).div_ceil(align) * align * encodes as u64);
                 }
-                reserve = reserve.saturating_add(align); // pick block
+                reserve = reserve.saturating_add(align * encodes as u64); // pick block
             }
         }
         // a recorded frame times its passes: its batch's timestamp pool is sized for them
@@ -899,6 +901,11 @@ impl Vulkan {
             batch.rendered(&color);
         }
         if let Some(depth) = depth { depth.transition(batch.cb, depth.sampled_layout()); }
+        if partial && damage_check() {
+            if let Some(image) = window.clone() {
+                self.check_partial_repaint(s, target, pass, frame_size, draws, view, batch, now, deps, &image, damage_mask.unwrap_or(0));
+            }
+        }
         if hosted {
             self.win.insert((s.id, target.index), Texture { gen: target.gen, image: window.as_ref().unwrap().clone() });
             self.hosted_sizes.insert((s.id, target.index), size);
@@ -906,6 +913,88 @@ impl Vulkan {
         #[cfg(target_os = "linux")]
         if window.is_some() { self.window_px = size; }
         Ok(window)
+    }
+
+    /// The damage check: the pass we just repainted partially into `image` is rendered whole into an image
+    /// of its own too, and the two pictures are compared once the GPU is done with them.
+    #[allow(clippy::too_many_arguments)]
+    fn check_partial_repaint(&mut self, s: &mut Session, target: Id, pass: &Pass, frame_size: [u32; 2], draws: &[Draw], view: &CmdView,
+        batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>, image: &Arc<Image>, damage_mask: u32) {
+        let (w, h, fmt) = (image.desc.w, image.desc.h, image.desc.format);
+        let len = w as u64 * h as u64 * format::texel_bytes(fmt);
+        // an image and staging buffer an earlier check is done with, so checking every frame doesn't run the GPU out of memory
+        let fits = |i: &Arc<Image>| [i.desc.w, i.desc.h, i.desc.format] == [w, h, fmt];
+        self.damage_checks.retain(|(i, b)| fits(i) || Arc::strong_count(i) > 1 || Arc::strong_count(b) > 1);
+        let free = self.damage_checks.iter().find(|(i, b)| fits(i) && Arc::strong_count(i) == 1 && Arc::strong_count(b) == 1).cloned();
+        let (whole, staging) = match free {
+            Some(pair) => pair,
+            None if self.damage_checks.len() >= DAMAGE_CHECKS_IN_FLIGHT => {
+                DAMAGE_SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+            None => {
+                let whole = Image::new(self.dev.clone(), TextureObj { format: fmt, w, h, depth: 1, mips: 1,
+                    usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None });
+                match (whole, Buffer::scratch(self.dev.clone(), len * 2, vk::BufferUsageFlags::TRANSFER_DST)) {
+                    (Ok(whole), Ok(staging)) => { self.damage_checks.push((whole.clone(), staging.clone())); (whole, staging) }
+                    (Err(e), _) | (_, Err(e)) => { eprintln!("[hal-damage-check] {e}"); return; }
+                }
+            }
+        };
+        let full = Pass { damage: Range::default(), damage_since: 0, ..*pass };
+        if let Err(e) = self.encode_pass(s, target, true, false, &full, frame_size, draws, view, batch, now, deps, Some((&whole, [0, 0]))) {
+            eprintln!("[hal-damage-check] whole repaint: {e}");
+            return;
+        }
+        let layers = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1);
+        for (i, source) in [image, &whole].into_iter().enumerate() {
+            source.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+            let copy = vk::BufferImageCopy::default().buffer_offset(i as u64 * len).image_subresource(layers)
+                .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
+            unsafe { self.dev.raw.cmd_copy_image_to_buffer(batch.cb, source.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, staging.buffer, &[copy]); }
+            source.transition(batch.cb, source.sampled_layout());
+        }
+        unsafe {
+            self.dev.raw.cmd_pipeline_barrier(batch.cb, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::HOST, vk::DependencyFlags::empty(),
+                &[vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::TRANSFER_WRITE).dst_access_mask(vk::AccessFlags::HOST_READ)], &[], &[]);
+        }
+        batch.images.push(whole);
+        batch.buffers.push(staging.clone());
+        let (frame, damage) = (s.frame, read_rects(view.arena, pass.damage).collect::<Vec<_>>());
+        // the draws the partial repaint left out, so a difference can name the ones over it
+        let left_out: Vec<(String, u32, u32, [f32; 4])> = draws.iter().filter(|d| d.index[1] != 0 && d.inst.count != 0 && d.damage & damage_mask == 0)
+            .map(|d| (self.pipe.get(&(s.id, d.pipeline.index)).map_or_else(|| "?".into(), |p| gpu_prof::shader_name(s, &p.desc)), d.list, d.item, d.bounds))
+            .collect();
+        let texel = format::texel_bytes(fmt) as usize;
+        batch.tickets.push(Ticket::FrameCap { staging, len: len as usize * 2, done: Box::new(move |bytes| {
+            let Some(bytes) = bytes else { return };
+            let (partial, whole) = bytes.split_at(bytes.len() / 2);
+            let mut differ = 0u64;
+            let mut bbox = [u32::MAX, u32::MAX, 0, 0];
+            let mut first = None;
+            if partial != whole {
+                for (i, (a, b)) in partial.chunks_exact(texel).zip(whole.chunks_exact(texel)).enumerate() {
+                    if a != b {
+                        let (x, y) = (i as u32 % w, i as u32 / w);
+                        first.get_or_insert((x, y, a.to_vec(), b.to_vec()));
+                        differ += 1;
+                        bbox = [bbox[0].min(x), bbox[1].min(y), bbox[2].max(x + 1), bbox[3].max(y + 1)];
+                    }
+                }
+            }
+            let checked = DAMAGE_CHECKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let wrong = DAMAGE_WRONG.fetch_add((differ != 0) as u64, std::sync::atomic::Ordering::Relaxed) + (differ != 0) as u64;
+            if differ != 0 {
+                let over: Vec<_> = left_out.iter().filter(|(.., b)| b.iter().any(|v| v.is_nan())
+                    || (b[0] < bbox[2] as f32 && b[0] + b[2] > bbox[0] as f32 && b[1] < bbox[3] as f32 && b[1] + b[3] > bbox[1] as f32)).collect();
+                eprintln!("[hal-damage-check] frame {frame}: {differ} pixels differ from a whole repaint, within {bbox:?} (x0, y0, x1, y1); damage {damage:?}");
+                eprintln!("[hal-damage-check] first at {first:?} (x, y, partial, whole); left out over it (shader, list, item, bounds): {over:?}");
+            }
+            if differ != 0 || checked.is_multiple_of(120) {
+                let skipped = DAMAGE_SKIPPED.load(std::sync::atomic::Ordering::Relaxed);
+                eprintln!("[hal-damage-check] {checked} partial frames checked, {wrong} differed, {skipped} not checked while earlier checks ran");
+            }
+        }) });
     }
 
     fn prepare(&mut self, s: &mut Session, pass: &Pass, d: &Draw, arena: &[u8], pick: bool, render_pass: Arc<RenderPass>, attachments: &[Arc<Image>],
@@ -1101,6 +1190,25 @@ impl Vulkan {
             }
         });
     }
+}
+
+static DAMAGE_CHECKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DAMAGE_WRONG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DAMAGE_SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// About as many frames as the GPU has in flight.
+const DAMAGE_CHECKS_IN_FLIGHT: usize = 3;
+
+/// `MAKEPAD_DAMAGE_CHECK=1` (on Android, `setprop debug.makepad.damage_check 1`): every partial repaint
+/// is rendered whole too and the two compared (`Vulkan::check_partial_repaint`).
+fn damage_check() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        #[cfg(target_os = "android")]
+        if let Some(value) = crate::backend::android::xr::system_property("debug.makepad.damage_check") {
+            return value == "1";
+        }
+        std::env::var_os("MAKEPAD_DAMAGE_CHECK").is_some_and(|v| v == "1")
+    })
 }
 
 /// `MAKEPAD_FRAME_STAMP=1`: stamp every frame handed to a host compositor (`Vulkan::stamp_frame`).

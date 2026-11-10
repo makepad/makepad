@@ -93,6 +93,8 @@ pub struct Vulkan {
     win: FastMap<(u32, u32), Texture>,
     /// The session and frame a window's kept image holds all of, so that session's next pass can repaint just what changed since.
     damage_base: FastMap<(u32, u32), (u32, Weak<Image>, u64)>,
+    /// The images and staging buffers of `MAKEPAD_DAMAGE_CHECK` (`frame::check_partial_repaint`).
+    damage_checks: Vec<(Arc<Image>, Arc<Buffer>)>,
     /// A hosted window's newest frame size: its host's shared image is allocated larger than
     /// the window (resizes reuse it), and a snapshot or copy reads only what the frame drew.
     hosted_sizes: FastMap<(u32, u32), [u32; 2]>,
@@ -215,7 +217,7 @@ impl Vulkan {
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
         Ok(Self { #[cfg(target_os = "linux")] native_apps: Default::default(), #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: FastMap::default(), buf: FastMap::default(), pipe: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
             #[cfg(target_os = "android")] native_layers: Default::default(),
-            passes: FastMap::default(), msaa: FastMap::default(), win: FastMap::default(), damage_base: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), retained_stale: Default::default(), direct_frame: FastMap::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
+            passes: FastMap::default(), msaa: FastMap::default(), win: FastMap::default(), damage_base: FastMap::default(), damage_checks: Vec::new(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), retained_stale: Default::default(), direct_frame: FastMap::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
             fallback: FastMap::default(), windows: surface::Windows::new(source), sharing,
             #[cfg(target_os = "linux")] foreign_support,
             batch: None, spares: Default::default(), mailbox: Mailbox::new(sessions),
@@ -696,6 +698,7 @@ impl exec::DeviceReset for Vulkan {
         self.buf.clear();
         self.win.clear();
         self.damage_base.clear();
+        self.damage_checks.clear();
         self.hosted_sizes.clear();
         for b in self.badged.values_mut() { *b = Default::default(); }
         self.scanout_images.clear();
