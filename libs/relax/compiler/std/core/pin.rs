@@ -86,6 +86,13 @@ impl<'a, T: ?Sized> Pin<&'a T> {
     }
 }
 
+impl<T: ?Sized> Pin<&'static T> {
+    /// A static borrow never ends, so its pointee never moves.
+    pub const fn static_ref(r: &'static T) -> Pin<&'static T> {
+        Pin { pointer: r }
+    }
+}
+
 impl<'a, T: ?Sized> Pin<&'a mut T> {
     pub const fn into_ref(self) -> Pin<&'a T> {
         Pin { pointer: self.pointer }
@@ -101,6 +108,12 @@ impl<'a, T: ?Sized> Pin<&'a mut T> {
     }
     pub unsafe fn map_unchecked_mut<U: ?Sized, F: FnOnce(&mut T) -> &mut U>(self, func: F) -> Pin<&'a mut U> {
         Pin { pointer: func(self.pointer) }
+    }
+}
+
+impl<T: ?Sized> Pin<&'static mut T> {
+    pub const fn static_mut(r: &'static mut T) -> Pin<&'static mut T> {
+        Pin { pointer: r }
     }
 }
 
