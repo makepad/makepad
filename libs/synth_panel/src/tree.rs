@@ -290,7 +290,7 @@ impl Widget for ScoreTree {
                 }
                 if out.consumed {
                     if matches!(event, Event::MouseDown(_)) {
-                        cx.set_key_focus(self.draw_bg.area());
+                        cx.set_key_focus_from_user(self.draw_bg.area());
                     }
                     return;
                 }

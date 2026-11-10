@@ -354,7 +354,7 @@ impl ValueInput {
         self.edit_focus = true;
         let seed = self.edit_seed();
         self.text_input.set_text(cx, &seed);
-        self.text_input.set_key_focus(cx);
+        cx.set_key_focus_from_user(self.text_input.area());
         self.text_input.select_all(cx);
         self.draw_bg.redraw(cx);
     }
@@ -430,7 +430,7 @@ impl Widget for ValueInput {
             // one now, so it asks again, once.
             if self.edit_focus && !self.text_input.area().is_empty() {
                 self.edit_focus = false;
-                self.text_input.set_key_focus(cx);
+                cx.set_key_focus_from_user(self.text_input.area());
             }
         } else {
             let rect = cx.turtle().rect();
@@ -530,7 +530,7 @@ impl Widget for ValueInput {
             // opens the editor, so reaching for the keyboard never leaves a
             // number behind.
             Hit::FingerDown(fe) if fe.device.is_primary_hit() && self.track => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 if track_press_means_typing(fe.tap_count) {
                     self.type_here(cx, uid);
                 } else {

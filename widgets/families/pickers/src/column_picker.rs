@@ -486,7 +486,7 @@ impl Widget for ColumnPicker {
                 }
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                cx.set_key_focus(self.area);
+                cx.set_key_focus_from_user(self.area);
                 let Some((level, node)) = self.spot_at(fe.rect, fe.abs) else {
                     self.draw_bg.redraw(cx);
                     return;

@@ -1159,6 +1159,9 @@ impl MenuBar {
                         self.close(cx);
                     } else {
                         self.open(cx, index);
+                        if self.open_menu == Some(index) {
+                            cx.set_key_focus_from_user(self.draw_bg.area());
+                        }
                     }
                 }
             }

@@ -333,6 +333,8 @@ impl Widget for FieldWell {
                 // input: aiming at the box and getting nothing is the
                 // commonest way a field feels broken.
                 self.focus_input(cx);
+                // Counted as the user's, since they pressed the box.
+                cx.set_key_focus_from_user(self.input.area());
                 self.redraw(cx);
             }
             Hit::FingerUp(fe) if !fe.cancelled => {

@@ -2198,7 +2198,7 @@ impl Widget for GlassSlider {
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 self.dragging = true;
                 cx.claim_finger_drag(fe.digit_id);
-                self.set_key_focus(cx);
+                cx.set_key_focus_from_user(self.area());
                 if self.set_value_from_x(cx, fe.abs.x) {
                     cx.widget_action_with_data(&self.action_data, uid, GlassSliderAction::Changed);
                 }
@@ -2538,7 +2538,7 @@ impl Widget for GlassSegmented {
                     self.next_frame = cx.new_next_frame();
                     cx.widget_action_with_data(&self.action_data, uid, GlassSegmentedAction::Selected);
                 }
-                self.set_key_focus(cx);
+                cx.set_key_focus_from_user(self.area());
                 self.redraw(cx);
             }
             _ => {}
@@ -3137,7 +3137,7 @@ impl GlassFloatingSurface {
             self.is_focus_before_from_user = cx.has_key_focus_from_user(self.focus_before);
         }
         self.holds_key_focus = true;
-        cx.set_key_focus(area);
+        cx.set_key_focus_from_user(area);
     }
 
     /// Whether the caret is somewhere this surface draws.

@@ -1523,7 +1523,7 @@ impl Widget for InstrumentBrowser {
         }
         if let (Event::MouseDown(e), false) = (event, self.modal) {
             if self.browser.rect.contains(e.abs) {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
             } else {
                 return;
             }

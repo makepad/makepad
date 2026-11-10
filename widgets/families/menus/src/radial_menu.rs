@@ -2297,7 +2297,7 @@ impl RadialMenu {
         }
         match event.hits(cx, self.field_area) {
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                cx.set_key_focus(self.field_area);
+                cx.set_key_focus_from_user(self.field_area);
                 if self.open.is_some() {
                     self.aim_at(cx, fe.abs);
                 } else if self.trigger == RadialTrigger::Press {

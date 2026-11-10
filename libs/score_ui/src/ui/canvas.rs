@@ -1053,7 +1053,7 @@ impl Widget for ScoreCanvas {
                 self.area.redraw(cx);
             }
             Hit::FingerDown(down) => {
-                cx.set_key_focus(self.area);
+                cx.set_key_focus_from_user(self.area);
                 let semantic = self.semantic_at(state, down.abs);
                 if down.mouse_button().is_some_and(|button| button.is_secondary()) {
                     cx.action(ScoreAction::ContextMenu {

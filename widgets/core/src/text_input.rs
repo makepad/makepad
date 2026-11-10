@@ -1167,6 +1167,12 @@ impl TextInput {
         self.draw_bg.redraw(cx);
     }
 
+    /// Like [`Self::take_key_focus`], for focus the user gave, e.g., with a press on the box around this field.
+    pub fn take_key_focus_from_user(&mut self, cx: &mut Cx) {
+        self.take_key_focus(cx);
+        cx.set_key_focus_from_user(self.draw_bg.area());
+    }
+
     /// Overrides the height this field asks its parent for.
     ///
     /// For a composer that folds to one line when it loses focus. Pinning the
@@ -3983,6 +3989,13 @@ impl TextInputRef {
     pub fn take_key_focus(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.take_key_focus(cx);
+        }
+    }
+
+    /// See [`TextInput::take_key_focus_from_user`].
+    pub fn take_key_focus_from_user(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.take_key_focus_from_user(cx);
         }
     }
 

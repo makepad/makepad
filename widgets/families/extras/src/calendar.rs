@@ -1665,7 +1665,7 @@ impl Widget for Calendar {
                 }
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 if self.prev_rect.contains(fe.abs) {
                     self.step(cx, -1);
                     return;

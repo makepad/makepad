@@ -1741,7 +1741,7 @@ impl Widget for CheckBox {
                 }
                 let drag = self.drag.take();
                 if fe.is_over {
-                    self.set_key_focus(cx);
+                    cx.set_key_focus_from_user(self.area());
                 }
                 // We flip on release, so a press dragged off us, or taken over by a scroll, leaves us as we were.
                 if fe.is_over && !drag.is_some_and(|drag| drag.moved) {

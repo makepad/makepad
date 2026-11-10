@@ -1994,6 +1994,12 @@ impl FabValueInput {
         self.draw_bg.redraw(cx);
     }
 
+    /// Like [`Self::begin_edit`], for the user's click or key.
+    fn begin_edit_from_user(&mut self, cx: &mut Cx) {
+        self.begin_edit(cx);
+        cx.set_key_focus_from_user(self.text_input.area());
+    }
+
     fn end_edit(&mut self, cx: &mut Cx) {
         self.editing = false;
         self.cancel_scope = None;
@@ -2381,7 +2387,7 @@ impl Widget for FabValueInput {
                 // was.
                 self.track_press_value = self.value;
                 self.cancel_scope = Some(self.begin_cancel_scope(cx));
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 self.animator_play(cx, ids!(hover.down));
                 if self.track_zone(cx, fe.abs.x) == SliderZone::Track {
                     self.tracking = true;
@@ -2421,7 +2427,7 @@ impl Widget for FabValueInput {
                         SliderZone::Label => {
                             cx.widget_action(uid, FabValueInputAction::Reset);
                         }
-                        SliderZone::Readout => self.begin_edit(cx),
+                        SliderZone::Readout => self.begin_edit_from_user(cx),
                         SliderZone::Track => {}
                     }
                 }
@@ -2441,7 +2447,7 @@ impl Widget for FabValueInput {
                 KeyCode::ArrowRight | KeyCode::ArrowUp => {
                     self.step_once(cx, uid, 1.0, ke.modifiers.shift)
                 }
-                KeyCode::ReturnKey => self.begin_edit(cx),
+                KeyCode::ReturnKey => self.begin_edit_from_user(cx),
                 _ => {}
             },
             Hit::FingerDown(fe) if fe.device.is_primary_hit() && !self.editing => {
@@ -2540,7 +2546,7 @@ impl Widget for FabValueInput {
                     match zone {
                         FieldZone::Decrement => self.step_once(cx, uid, -1.0, fe.modifiers.shift),
                         FieldZone::Increment => self.step_once(cx, uid, 1.0, fe.modifiers.shift),
-                        FieldZone::Middle => self.begin_edit(cx),
+                        FieldZone::Middle => self.begin_edit_from_user(cx),
                     }
                 }
                 if fe.is_over && fe.device.has_hovers() {
@@ -3256,7 +3262,7 @@ impl Widget for FabSlider {
                 self.draw_bg.redraw(cx);
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 self.press_value = self.value;
                 // `hits` took the mouse on the way in and holds it until the
                 // release, which is what a scroller around this control asks
@@ -4145,7 +4151,7 @@ impl Widget for FabKnob {
                 self.draw_bg.redraw(cx);
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 // A press is the end of whatever the wheel was doing.
                 self.end_wheel_run(cx, uid);
                 self.cancel_scope = Some(self.begin_cancel_scope(cx));
@@ -4643,7 +4649,7 @@ impl Widget for FabColorWheel {
                 cx.set_cursor(MouseCursor::Crosshair);
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_wheel.area());
+                cx.set_key_focus_from_user(self.draw_wheel.area());
                 let rect = self.draw_wheel.area().rect(cx);
                 let size = rect.size.x.min(rect.size.y);
                 let zone = wheel_zone(fe.abs - rect.pos, size, self.hsv());
@@ -5677,7 +5683,7 @@ impl Widget for FabPaletteCarousel {
                 }
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.area);
+                cx.set_key_focus_from_user(self.area);
                 // A hand on a moving row stops it where it stands: the
                 // row's place comes back to what was drawn, so from the
                 // touch on the picture and the place are one number and the

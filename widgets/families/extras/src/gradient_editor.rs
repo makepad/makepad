@@ -1775,7 +1775,7 @@ impl GradientEditor {
                 }
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 let geo = self.geometry(fe.rect);
                 let p = fe.abs;
                 if let Some(mark) = geo.mark_at(&self.gradient, p, self.selected) {

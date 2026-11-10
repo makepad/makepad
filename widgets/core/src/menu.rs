@@ -1231,7 +1231,7 @@ impl Widget for MenuLayer {
             Actions::FOCUS | Actions::SCROLL_INTO_VIEW => {
                 self.levels[level].hi = Some(index);
                 self.levels[level].scroll_to(index);
-                cx.set_key_focus(self.area);
+                cx.set_key_focus_from_user(self.area);
                 self.redraw_menus(cx);
             }
             _ => return ActionResult::Unhandled,
