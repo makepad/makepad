@@ -11,6 +11,7 @@ use makepad_font_core::{
     geom::{Point, Rect, Size},
     image::{Bgra, Image},
     raster::{AtlasPlane, AtlasSlot, MultiPlaneAllocator, UNRESOLVED_RASTER_RECT},
+    slug::SlugCurves,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -241,6 +242,11 @@ pub struct SlugRec {
     /// first curve, and how many
     pub offset: u32,
     pub count: u32,
+    /// the room it takes, in curves (its bands follow its curves)
+    pub run: u32,
+    /// where its band block starts (texels from its first curve) and its bands per axis
+    pub band_offset: u32,
+    pub band_count: u32,
     pub origin: Point<f32>,
     pub size: Size<f32>,
     pub last_use: u64,
@@ -278,9 +284,9 @@ impl SlugStore {
         self.glyphs.len()
     }
 
-    /// Curves of the glyphs held (retired and free runs not counted).
+    /// Room the glyphs held take, in curves (retired and free runs not counted).
     pub fn curves_held(&self) -> u64 {
-        self.glyphs.values().map(|r| r.count as u64).sum()
+        self.glyphs.values().map(|r| r.run as u64).sum()
     }
 
     pub fn capacity_curves(&self) -> u32 {
@@ -300,15 +306,24 @@ impl SlugStore {
         self.glyphs.get_mut(&key)
     }
 
-    fn take_run(&mut self, count: u32) -> Option<u32> {
-        let i = self.free.iter().position(|(_, len)| *len >= count)?;
-        let (start, len) = self.free[i];
-        if len == count {
-            self.free.remove(i);
-        } else {
-            self.free[i] = (start + count, len - count);
+    /// Where a run of `count` curves can start in the free run (start, len); one in a row
+    /// (a glyph with bands) can't cross into the next row.
+    fn fit(&self, (start, len): (u32, u32), count: u32, in_row: bool) -> Option<u32> {
+        let row = (self.width / CURVE_TEXELS) as u32;
+        let at = if in_row && start % row + count > row { start.next_multiple_of(row) } else { start };
+        (at + count <= start + len).then_some(at)
+    }
+
+    fn take_run(&mut self, count: u32, in_row: bool) -> Option<u32> {
+        let (i, at) = self.free.iter().enumerate().find_map(|(i, run)| Some((i, self.fit(*run, count, in_row)?)))?;
+        let (start, len) = self.free.remove(i);
+        let tail = (at + count, start + len - at - count);
+        for (piece_start, piece_len) in [(start, at - start), tail].into_iter().rev() {
+            if piece_len > 0 {
+                self.free.insert(i, (piece_start, piece_len));
+            }
         }
-        Some(start)
+        Some(at)
     }
 
     fn give_run(free: &mut Vec<(u32, u32)>, start: u32, len: u32) {
@@ -325,15 +340,27 @@ impl SlugStore {
     }
 
     /// Stores a glyph's curves; `None` when no run of that length is free.
-    #[allow(clippy::too_many_arguments)]
-    pub fn alloc(&mut self, slot: u32, font: u32, glyph: u16, curves: &[f32], origin: Point<f32>, size: Size<f32>, tick: u64) -> Option<u32> {
-        let count = (curves.len() / CURVE_FLOATS) as u32;
-        let offset = self.take_run(count)?;
+    pub fn alloc(&mut self, slot: u32, font: u32, glyph: u16, curves: &SlugCurves, tick: u64) -> Option<u32> {
+        let run = (curves.data.len() / CURVE_FLOATS) as u32;
+        let offset = self.take_run(run, curves.band_count > 0)?;
         let at = offset as usize * CURVE_FLOATS;
-        self.data[at..at + curves.len()].copy_from_slice(curves);
+        self.data[at..at + curves.data.len()].copy_from_slice(&curves.data);
         self.by_slot.insert(slot, (font, glyph));
         known_write(&self.known).slug.insert((font, glyph));
-        self.glyphs.insert((font, glyph), SlugRec { slot, font, glyph, offset, count, origin, size, last_use: tick, sessions: Vec::new() });
+        self.glyphs.insert((font, glyph), SlugRec {
+            slot,
+            font,
+            glyph,
+            offset,
+            count: curves.curve_count as u32,
+            run,
+            band_offset: curves.band_offset as u32,
+            band_count: curves.band_count as u32,
+            origin: curves.origin_in_ems,
+            size: curves.size_in_ems,
+            last_use: tick,
+            sessions: Vec::new(),
+        });
         Some(slot)
     }
 
@@ -354,24 +381,24 @@ impl SlugStore {
     }
 
     /// Retires least recently used glyphs (those no session holds first) until a run of `need`
-    /// curves will be free after `fence` completes.
-    pub(super) fn evict_for(&mut self, need: u32, fence: Arc<RetireFence>) -> Vec<SlugRec> {
+    /// curves (in one row when `in_row`) will be free after `fence` completes.
+    pub(super) fn evict_for(&mut self, need: u32, in_row: bool, fence: Arc<RetireFence>) -> Vec<SlugRec> {
         let mut order: Vec<(bool, u64, (u32, u16))> = self.glyphs.iter().map(|(k, r)| (!r.sessions.is_empty(), r.last_use, *k)).collect();
         order.sort();
         let mut taken = Vec::new();
         // Choose enough victims for a contiguous run without making that run reusable yet.
         let mut available = self.free.clone();
         for (_, _, key) in order {
-            if available.iter().any(|(_, len)| *len >= need) {
+            if available.iter().any(|run| self.fit(*run, need, in_row).is_some()) {
                 break;
             }
             let rec = self.glyphs.remove(&key).expect("listed glyph");
             self.by_slot.remove(&rec.slot);
-            Self::give_run(&mut available, rec.offset, rec.count);
+            Self::give_run(&mut available, rec.offset, rec.run);
             if fence.complete() {
-                Self::give_run(&mut self.free, rec.offset, rec.count);
+                Self::give_run(&mut self.free, rec.offset, rec.run);
             } else {
-                self.retired.push((rec.offset, rec.count, fence.clone()));
+                self.retired.push((rec.offset, rec.run, fence.clone()));
             }
             taken.push(rec);
         }
