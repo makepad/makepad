@@ -280,6 +280,7 @@ impl Cx {
                     };
                     crate::thread::set_web_available_parallelism(self.cpu_cores);
                     self.gpu_info.float_color_targets = tw.gpu_info.float_color_targets;
+                    self.gpu_info.max_texture_size = tw.gpu_info.max_texture_size as usize;
                     self.gpu_info.init_from_info(
                         tw.gpu_info.min_uniform_vectors,
                         tw.gpu_info.vendor,

@@ -20,6 +20,8 @@ pub struct GpuInfo {
     /// backend sets them after probing the device.
     pub texture_bc7: bool,
     pub texture_astc4x4: bool,
+    /// The longest side a texture may have, as the backend or WebGL reports it.
+    pub max_texture_size: usize,
     pub performance: GpuPerformance,
     pub vendor: String,
     pub renderer: String,
@@ -38,6 +40,7 @@ impl Default for GpuInfo {
             float16_blend_targets: false,
             texture_bc7: false,
             texture_astc4x4: false,
+            max_texture_size: 8192,
             performance: GpuPerformance::Tier4,
             vendor: "unknown".to_string(),
             renderer: "unknown".to_string(),
