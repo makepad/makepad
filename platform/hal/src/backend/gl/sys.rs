@@ -165,6 +165,10 @@ impl Gl {
         unsafe { (self.glGetIntegerv)(name, &mut v) };
         v
     }
+    /// The vendor, renderer and version lines, which program binaries are only good for.
+    pub fn driver(&self) -> String {
+        [VENDOR, RENDERER, VERSION].map(|name| self.string(name)).join("\n")
+    }
 }
 
 pub const TRUE: GLboolean = 1;

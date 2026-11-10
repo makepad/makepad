@@ -166,7 +166,7 @@ impl Renderer {
             return Err(format!("GLES link failed: {log}"));
         }
         unsafe { for s in linking.shaders { (gl.glDeleteShader)(s) } }
-        if let (Some(key), Some(cache)) = (linking.key, &self.cache) { cache.store(gl, key, program); }
+        if let (Some(key), Some(cache)) = (linking.key, &mut self.cache) { cache.store(gl, key, program); }
         let uniform = |name: &str| unsafe { (gl.glGetUniformLocation)(program, cstr(name).as_ptr()) };
         unsafe { (gl.glUseProgram)(program) };
         let flip = uniform("mp_clip_y_flip");

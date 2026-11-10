@@ -29,25 +29,28 @@ pub(super) struct ProgramCache {
     /// `None` keeps nothing: there's no cache dir, or the driver has no binary formats or
     /// doesn't take its own binaries back
     dir: Option<PathBuf>,
+    /// a binary of this driver loaded, so its binaries come back
+    verified: bool,
 }
 
 impl ProgramCache {
     /// The directory of this driver's binaries, under `MAKEPAD_HAL_CACHE_DIR` or the app's cache dir.
     pub fn new(gl: &Gl) -> Self {
-        if gl.integer(sys::NUM_PROGRAM_BINARY_FORMATS) <= 0 { return Self { dir: None }; }
-        let driver = [sys::VENDOR, sys::RENDERER, sys::VERSION].map(|name| gl.string(name)).join("\n");
+        let none = || Self { dir: None, verified: false };
+        if gl.integer(sys::NUM_PROGRAM_BINARY_FORMATS) <= 0 { return none(); }
+        let driver = gl.driver();
         #[cfg(target_os = "android")]
         let driver = driver + &crate::backend::android::xr::system_property("ro.build.fingerprint").unwrap_or_default();
-        let Some(base) = base_dir() else { return Self { dir: None } };
+        let Some(base) = base_dir() else { return none() };
         let parent = base.join("makepad-hal");
         let dir = parent.join(format!("gl-{:016x}", fxhash::hash64(&driver)));
         if let Err(e) = std::fs::create_dir_all(&dir) {
             eprintln!("[hal-gl] program cache {}: {e}", dir.display());
-            return Self { dir: None };
+            return none();
         }
         sweep(&parent, &dir);
-        if dir.join(REJECTED).exists() { return Self { dir: None }; }
-        Self { dir: Some(dir) }
+        if dir.join(REJECTED).exists() { return none(); }
+        Self { dir: Some(dir), verified: false }
     }
 
     /// Whether linked programs' binaries go to disk.
@@ -55,64 +58,100 @@ impl ProgramCache {
         self.dir.is_some()
     }
 
-    fn path(&self, key: Key) -> Option<PathBuf> {
-        self.dir.as_ref().map(|dir| dir.join(format!("{:016x}.bin", key.name)))
-    }
-
     /// A new program made from the cached binary of `key`, if it's there and the driver takes it.
+    /// A file the driver refuses is deleted, so the program's next link writes it again.
     pub fn load(&mut self, gl: &Gl, key: Key) -> Option<GLuint> {
-        let path = self.path(key)?;
-        let bytes = std::fs::read(&path).ok()?;
-        let intact = bytes.len() > HEADER && &bytes[..4] == MAGIC && bytes[8..16] == key.check.to_le_bytes()
-            && bytes[16..20] == key.lens[0].to_le_bytes() && bytes[20..24] == key.lens[1].to_le_bytes()
-            && bytes[24..32] == fxhash::hash64(&bytes[HEADER..]).to_le_bytes();
-        if !intact {
-            let _ = std::fs::remove_file(&path);
-            return None;
-        }
-        let program = unsafe {
-            let format = GLenum::from_le_bytes(bytes[4..8].try_into().unwrap());
-            let binary = &bytes[HEADER..];
-            let program = (gl.glCreateProgram)();
-            (gl.glProgramBinary)(program, format, binary.as_ptr() as *const _, binary.len() as i32);
-            let mut ok = 0;
-            (gl.glGetProgramiv)(program, sys::LINK_STATUS, &mut ok);
-            if ok == 0 { (gl.glDeleteProgram)(program); }
-            (ok != 0).then_some(program)
-        };
-        if program.is_none() {
-            // This driver wrote the binary itself and won't take it back (the Android emulator's
-            // doesn't), so we stop keeping its binaries instead of compiling and writing every launch.
-            eprintln!("[hal-gl] this GL driver doesn't load its own program binaries, so they're no longer kept");
-            if let Some(dir) = self.dir.take() { let _ = std::fs::write(dir.join(REJECTED), b""); }
-        }
+        let dir = self.dir.as_deref()?;
+        let (format, binary) = read(dir, key)?;
+        let program = load(gl, format, &binary);
+        if program.is_some() { self.verified = true; } else { self.forget(key); }
         program
     }
 
-    /// Keeps the binary of a program linked from the sources of `key` (through a temp file, so
-    /// a launch never reads half of one).
-    pub fn store(&self, gl: &Gl, key: Key, program: GLuint) {
-        let Some(path) = self.path(key) else { return };
-        let mut len: GLint = 0;
-        unsafe { (gl.glGetProgramiv)(program, sys::PROGRAM_BINARY_LENGTH, &mut len) };
-        if len <= 0 { return; }
-        let mut bytes = vec![0u8; HEADER + len as usize];
-        let (mut written, mut format) = (0, 0);
-        unsafe { (gl.glGetProgramBinary)(program, len, &mut written, &mut format, bytes[HEADER..].as_mut_ptr() as *mut _) };
-        if written <= 0 { return; }
-        bytes.truncate(HEADER + written as usize);
-        let hash = fxhash::hash64(&bytes[HEADER..]);
-        bytes[..4].copy_from_slice(MAGIC);
-        bytes[4..8].copy_from_slice(&format.to_le_bytes());
-        bytes[8..16].copy_from_slice(&key.check.to_le_bytes());
-        bytes[16..20].copy_from_slice(&key.lens[0].to_le_bytes());
-        bytes[20..24].copy_from_slice(&key.lens[1].to_le_bytes());
-        bytes[24..32].copy_from_slice(&hash.to_le_bytes());
-        let temp = path.with_extension(format!("{}.tmp", std::process::id()));
-        if let Err(e) = std::fs::write(&temp, &bytes).and_then(|_| std::fs::rename(&temp, &path)) {
-            let _ = std::fs::remove_file(&temp);
-            eprintln!("[hal-gl] program cache {}: {e}", path.display());
+    /// Deletes the cached binary of `key`.
+    pub fn forget(&self, key: Key) {
+        if let Some(dir) = &self.dir { let _ = std::fs::remove_file(path(dir, key)); }
+    }
+
+    /// Keeps the binary of a program linked from the sources of `key`. Until one of this driver's
+    /// binaries has loaded, it's loaded back first, so a driver that refuses its own stops getting them.
+    pub fn store(&mut self, gl: &Gl, key: Key, program: GLuint) {
+        if self.dir.is_none() { return; }
+        let Some((format, binary)) = binary(gl, program) else { return };
+        if !self.verified {
+            let Some(copy) = load(gl, format, &binary) else { return self.reject() };
+            unsafe { (gl.glDeleteProgram)(copy) };
+            self.verified = true;
         }
+        if let Some(dir) = &self.dir { write(dir, key, format, &binary); }
+    }
+
+    /// The driver refused a binary it made in this process (the Android emulator's does), so we
+    /// stop keeping its binaries instead of compiling and writing them every launch.
+    pub fn reject(&mut self) {
+        eprintln!("[hal-gl] this GL driver doesn't load its own program binaries, so they're no longer kept");
+        if let Some(dir) = self.dir.take() { let _ = std::fs::write(dir.join(REJECTED), b""); }
+    }
+}
+
+fn path(dir: &Path, key: Key) -> PathBuf {
+    dir.join(format!("{:016x}.bin", key.name))
+}
+
+/// The cached binary of `key` and its format, if its file is there and intact (a damaged one is deleted).
+pub(super) fn read(dir: &Path, key: Key) -> Option<(GLenum, Vec<u8>)> {
+    let path = path(dir, key);
+    let bytes = std::fs::read(&path).ok()?;
+    let intact = bytes.len() > HEADER && &bytes[..4] == MAGIC && bytes[8..16] == key.check.to_le_bytes()
+        && bytes[16..20] == key.lens[0].to_le_bytes() && bytes[20..24] == key.lens[1].to_le_bytes()
+        && bytes[24..32] == fxhash::hash64(&bytes[HEADER..]).to_le_bytes();
+    if !intact {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    Some((GLenum::from_le_bytes(bytes[4..8].try_into().unwrap()), bytes[HEADER..].to_vec()))
+}
+
+/// A new program made from a driver binary, if the driver takes it.
+pub(super) fn load(gl: &Gl, format: GLenum, binary: &[u8]) -> Option<GLuint> {
+    unsafe {
+        let program = (gl.glCreateProgram)();
+        (gl.glProgramBinary)(program, format, binary.as_ptr() as *const _, binary.len() as i32);
+        let mut ok = 0;
+        (gl.glGetProgramiv)(program, sys::LINK_STATUS, &mut ok);
+        if ok == 0 { (gl.glDeleteProgram)(program); }
+        (ok != 0).then_some(program)
+    }
+}
+
+/// A linked program's driver binary and its format, if the driver hands one back.
+pub(super) fn binary(gl: &Gl, program: GLuint) -> Option<(GLenum, Vec<u8>)> {
+    let mut len: GLint = 0;
+    unsafe { (gl.glGetProgramiv)(program, sys::PROGRAM_BINARY_LENGTH, &mut len) };
+    if len <= 0 { return None; }
+    let mut binary = vec![0u8; len as usize];
+    let (mut written, mut format) = (0, 0);
+    unsafe { (gl.glGetProgramBinary)(program, len, &mut written, &mut format, binary.as_mut_ptr() as *mut _) };
+    if written <= 0 { return None; }
+    binary.truncate(written as usize);
+    Some((format, binary))
+}
+
+/// Keeps a binary made from the sources of `key` (through a temp file, so a launch never reads half of one).
+pub(super) fn write(dir: &Path, key: Key, format: GLenum, binary: &[u8]) {
+    let path = path(dir, key);
+    let mut bytes = Vec::with_capacity(HEADER + binary.len());
+    bytes.extend_from_slice(MAGIC);
+    bytes.extend_from_slice(&format.to_le_bytes());
+    bytes.extend_from_slice(&key.check.to_le_bytes());
+    bytes.extend_from_slice(&key.lens[0].to_le_bytes());
+    bytes.extend_from_slice(&key.lens[1].to_le_bytes());
+    bytes.extend_from_slice(&fxhash::hash64(binary).to_le_bytes());
+    bytes.extend_from_slice(binary);
+    let temp = path.with_extension(format!("{}.tmp", std::process::id()));
+    if let Err(e) = std::fs::write(&temp, &bytes).and_then(|_| std::fs::rename(&temp, &path)) {
+        let _ = std::fs::remove_file(&temp);
+        eprintln!("[hal-gl] program cache {}: {e}", path.display());
     }
 }
 
