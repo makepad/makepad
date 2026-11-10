@@ -75,8 +75,8 @@ pub(super) struct Token {
 }
 
 pub(super) enum Event {
-    /// `gpu_ns`: 0 when the GPU time isn't known
-    Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64 },
+    /// `gpu_ns`: 0 when the GPU time isn't known. `ran`: the GPU did the frame's work.
+    Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, ran: bool },
     Readback { req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
     Pick { req: u32, ids: Vec<u32> },
 }
@@ -400,7 +400,7 @@ impl Renderer {
                     _ => 0,
                 };
                 token.incarnation.done(frame);
-                self.mailbox.push(token, Event::Frame { target, kind, frame, window, gpu_ns });
+                self.mailbox.push(token, Event::Frame { target, kind, frame, window, gpu_ns, ran: !failed });
             }
             Then::Copy { token, req, rect } => {
                 self.mailbox.push(token, Event::Readback { req, rect, status: if failed { readback::FAILED } else { readback::OK }, pixels: Vec::new() });
@@ -688,8 +688,9 @@ impl Renderer {
         self.after_gpu(Then::Copy { token, req, rect });
     }
 
-    /// The window's image goes to its surface. Ok(false): nothing is on screen for it.
-    pub fn present(&mut self, window: (u32, Id), key: u64) -> Result<bool, String> {
+    /// The window's image goes to its surface; `damage` is what changed since its last frame (`None`:
+    /// all of it). Ok(false): nothing is on screen for it.
+    pub fn present(&mut self, window: (u32, Id), key: u64, damage: Option<&[[i32; 4]]>) -> Result<bool, String> {
         let t = self.textures.get(&key).ok_or("the window image has no storage")?;
         let size = [t.desc.w, t.desc.h];
         let gl = &self.ctx.gl;
@@ -698,7 +699,7 @@ impl Renderer {
             attach(gl, sys::FRAMEBUFFER, sys::COLOR_ATTACHMENT0, t, 0);
             (gl.glBindFramebuffer)(sys::FRAMEBUFFER, 0);
         }
-        self.ctx.present(window, self.read_fbo, size)
+        self.ctx.present(window, self.read_fbo, size, damage)
     }
 }
 

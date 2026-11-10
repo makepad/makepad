@@ -9,7 +9,7 @@ use super::sys::{self, Gl};
 #[cfg(target_os = "linux")]
 use crate::backend::linux::media::module_loader::ModuleLoader;
 use crate::Id;
-use std::{collections::HashMap, ffi::{c_void, CStr}, ptr};
+use std::{collections::{HashMap, VecDeque}, ffi::{c_void, CStr}, ptr};
 
 pub type Handle = *mut c_void;
 
@@ -21,6 +21,11 @@ const PBUFFER_BIT: i32 = 0x0001;
 const DEPTH_SIZE: i32 = 0x3025;
 const STENCIL_SIZE: i32 = 0x3026;
 const SAMPLES: i32 = 0x3031;
+const BUFFER_AGE: i32 = 0x313D;
+
+/// Some phones hand out back buffers 6 frames old, so we remember as many frames as Android's BufferQueue has slots.
+/// Each repaint only reads as far back as its buffer's age.
+const DAMAGE_HISTORY_LEN: usize = 64;
 
 #[cfg(target_os = "linux")]
 const LIBRARY: &str = "libEGL.so.1";
@@ -160,6 +165,20 @@ struct Window {
     wl_window: Handle,
     size: [u32; 2],
     native: NativeSurface,
+    /// what changed in the frames this surface showed, newest first, `None` where we don't know
+    history: VecDeque<Option<Vec<[i32; 4]>>>,
+    /// a frame reached the window's image but not this surface, so the next present blits it all
+    missed: bool,
+}
+
+/// What lets a present blit only the parts of a back buffer that are out of date.
+#[derive(Clone, Copy, Default)]
+struct PartialUpdate {
+    /// a back buffer's age: EGL_EXT_buffer_age, or EGL_KHR_partial_update's own
+    buffer_age: bool,
+    /// EGL_KHR_partial_update: a buffer only keeps what's outside the region we set
+    set_damage_region: Option<unsafe extern "C" fn(Handle, Handle, *mut i32, i32) -> u32>,
+    swap_with_damage: Option<unsafe extern "C" fn(Handle, Handle, *const i32, i32) -> u32>,
 }
 
 /// The display, config and share group every GL context of the process belongs to.
@@ -237,6 +256,7 @@ pub struct Context {
     current: Handle,
     /// what is bound while no window presents: nothing, or a 1x1 pbuffer without surfaceless contexts
     idle: Handle,
+    partial: PartialUpdate,
 }
 
 impl Context {
@@ -313,8 +333,23 @@ impl Context {
                     return Err(e);
                 }
             };
+            let has = |name: &str| extensions.split(' ').any(|e| e == name);
+            let proc = |name: &CStr| Some((egl.get_proc)(name.as_ptr())).filter(|p| !p.is_null());
+            let set_damage_region = proc(c"eglSetDamageRegionKHR").filter(|_| has("EGL_KHR_partial_update"))
+                .map(|p| std::mem::transmute::<Handle, unsafe extern "C" fn(Handle, Handle, *mut i32, i32) -> u32>(p));
+            let swap_with_damage = if has("EGL_KHR_swap_buffers_with_damage") { proc(c"eglSwapBuffersWithDamageKHR") }
+                else if has("EGL_EXT_swap_buffers_with_damage") { proc(c"eglSwapBuffersWithDamageEXT") } else { None };
+            let partial = PartialUpdate {
+                // with partial updates a buffer only keeps what's outside the damage region we set
+                buffer_age: if has("EGL_KHR_partial_update") { set_damage_region.is_some() } else { has("EGL_EXT_buffer_age") },
+                set_damage_region,
+                swap_with_damage: swap_with_damage.map(|p| std::mem::transmute::<Handle, unsafe extern "C" fn(Handle, Handle, *const i32, i32) -> u32>(p)),
+            };
+            if super::super::log_enabled() {
+                eprintln!("[hal-gl] partial repaint: buffer_age={} set_damage_region={} swap_with_damage={}", partial.buffer_age, partial.set_damage_region.is_some(), partial.swap_with_damage.is_some());
+            }
             Ok(Self { gl, share: std::sync::Arc::new(Share { egl, display, config, context, #[cfg(target_os = "android")] surfaceless }), #[cfg(target_os = "linux")] wayland, source,
-                windows: HashMap::new(), #[cfg(target_os = "android")] surfaces, current: idle, idle })
+                windows: HashMap::new(), #[cfg(target_os = "android")] surfaces, current: idle, idle, partial })
         }
     }
 
@@ -372,15 +407,19 @@ impl Context {
         for key in keys { self.close(key); }
     }
 
-    /// Blits the whole finished image (`framebuffer`, rows top first) into the window's surface
-    /// and swaps. Ok(false): the window has no drawable surface now (closed, zero sized).
-    pub fn present(&mut self, key: (u32, Id), framebuffer: u32, size: [u32; 2]) -> Result<bool, String> {
+    /// Blits the finished image (`framebuffer`, rows top first) into the window's surface and swaps; with a
+    /// buffer age, only what that buffer misses of `damage` (`None`: all changed) and the frames since.
+    /// Ok(false): the window has no drawable surface now (closed, zero sized).
+    pub fn present(&mut self, key: (u32, Id), framebuffer: u32, size: [u32; 2], damage: Option<&[[i32; 4]]>) -> Result<bool, String> {
         let native = match self.source.state(key.0, key.1) {
             SurfaceState::Offscreen => return Ok(true),
             SurfaceState::Lost => { self.close(key); return Ok(false); }
             SurfaceState::Native(n) => n,
         };
-        if native.size.contains(&0) { return Ok(false); }
+        if native.size.contains(&0) {
+            if let Some(w) = self.windows.get_mut(&key) { w.missed = true; }
+            return Ok(false);
+        }
         if self.windows.get(&key).is_some_and(|w| w.native.generation != native.generation) { self.close(key); }
         if !self.windows.contains_key(&key) {
             let share = &self.share;
@@ -405,7 +444,7 @@ impl Context {
                 return Err(format!("eglCreateWindowSurface: {error:#x}"));
             }
             let size = native.size;
-            self.windows.insert(key, Window { surface, #[cfg(target_os = "linux")] wl_window, size, native });
+            self.windows.insert(key, Window { surface, #[cfg(target_os = "linux")] wl_window, size, native, history: VecDeque::new(), missed: false });
             #[cfg(target_os = "android")]
             self.surfaces.store(self.windows.len(), std::sync::atomic::Ordering::SeqCst);
             self.bind(surface)?;
@@ -422,7 +461,10 @@ impl Context {
             w.native = native;
         }
         let (surface, out) = { let w = &self.windows[&key]; (w.surface, w.size) };
-        self.bind(surface)?;
+        if let Err(e) = self.bind(surface) {
+            self.windows.get_mut(&key).unwrap().missed = true;
+            return Err(e);
+        }
         // the surface's own size, which can be newer than the shell's (Android hands out buffers
         // of a rotated size before `surfaceChanged` tells us)
         let out = unsafe {
@@ -431,15 +473,58 @@ impl Context {
                 [w as u32, h as u32]
             } else { out }
         };
+        let s = &self.share;
+        let w = self.windows.get_mut(&key).unwrap();
+        // a stretched blit leaves us unsure what any buffer of the surface holds, a missed frame what they lack
+        let missed = std::mem::take(&mut w.missed);
+        let damage = damage.filter(|_| size == out && !missed);
+        let history = &mut w.history;
+        if damage.is_none() { history.clear(); }
+        // what the back buffer is missing: this frame's damage and that of the frames since it last showed
+        let region = damage.filter(|_| self.partial.buffer_age).and_then(|damage| {
+            let mut age = 0;
+            unsafe { (s.egl.query_surface)(s.display, surface, BUFFER_AGE, &mut age) };
+            let older = (age as usize).checked_sub(1).filter(|n| *n <= history.len())?;
+            let mut rects = damage.to_vec();
+            for frame in history.iter().take(older) { rects.extend_from_slice(frame.as_ref()?); }
+            // A buffer has to be drawn to be shown again, so an up-to-date one gets repainted in full.
+            (!rects.is_empty()).then_some(rects)
+        });
+        // EGL's rects count rows from the bottom
+        let egl_rects = |rects: &[[i32; 4]]| rects.iter().flat_map(|[x, y, w, h]| [*x, out[1] as i32 - y - h, *w, *h]).collect::<Vec<i32>>();
+        let region = match (region, self.partial.set_damage_region) {
+            (Some(rects), Some(set)) => {
+                let mut egl = egl_rects(&rects);
+                if unsafe { set(s.display, surface, egl.as_mut_ptr(), rects.len() as i32) } != 0 { Some(rects) } else {
+                    eprintln!("[hal-gl] eglSetDamageRegionKHR: {:#x}, so whole frames are presented from now on", unsafe { (s.egl.error)() });
+                    self.partial = PartialUpdate::default();
+                    None
+                }
+            }
+            (region, _) => region,
+        };
         let gl = &self.gl;
         unsafe {
             (gl.glDisable)(sys::SCISSOR_TEST);
             (gl.glBindFramebuffer)(sys::READ_FRAMEBUFFER, framebuffer);
             (gl.glBindFramebuffer)(sys::DRAW_FRAMEBUFFER, 0);
             // image row 0 is the top; the window's framebuffer counts rows from the bottom
-            (gl.glBlitFramebuffer)(0, 0, size[0] as i32, size[1] as i32, 0, out[1] as i32, out[0] as i32, 0, sys::COLOR_BUFFER_BIT, sys::NEAREST);
+            match &region {
+                Some(rects) => for [x, y, w, h] in rects {
+                    let top = out[1] as i32 - y;
+                    (gl.glBlitFramebuffer)(*x, *y, x + w, y + h, *x, top, x + w, top - h, sys::COLOR_BUFFER_BIT, sys::NEAREST);
+                },
+                None => (gl.glBlitFramebuffer)(0, 0, size[0] as i32, size[1] as i32, 0, out[1] as i32, out[0] as i32, 0, sys::COLOR_BUFFER_BIT, sys::NEAREST),
+            }
             (gl.glBindFramebuffer)(sys::READ_FRAMEBUFFER, 0);
-            if (self.share.egl.swap)(self.share.display, surface) == 0 {
+            // the compositor only redraws what changed, once the surface shows a frame of ours
+            let swapped = match (damage, self.partial.swap_with_damage) {
+                (Some(rects), Some(swap)) if !history.is_empty() && !rects.is_empty() => swap(s.display, surface, egl_rects(rects).as_ptr(), rects.len() as i32),
+                _ => (s.egl.swap)(s.display, surface),
+            };
+            history.push_front(damage.map(<[_]>::to_vec));
+            history.truncate(DAMAGE_HISTORY_LEN);
+            if swapped == 0 {
                 let error = (self.share.egl.error)();
                 self.close(key);
                 // a surface Android abandoned (surfaceDestroyed) is not an error worth reporting

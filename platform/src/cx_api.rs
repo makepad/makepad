@@ -2619,7 +2619,7 @@ impl Cx {
     }
 
     /// Sets whether a frame repaints only the parts of the window that changed, which it does by default.
-    /// Only the Vulkan backend does that so far.
+    /// Only the Vulkan and GLES backends do that so far.
     pub fn set_partial_repainting(&mut self, is_enabled: bool) {
         #[cfg(not(target_arch = "wasm32"))]
         self.draw_damage.set_disabled(!is_enabled);

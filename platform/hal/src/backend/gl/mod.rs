@@ -126,6 +126,9 @@ pub struct GlBackend {
     programs: HashMap<Vec<u8>, Weak<PipeState>>,
     /// windows' images, by (owner, index)
     win: HashMap<(u32, u32), Tex>,
+    /// the frame a window's kept image holds all of (and that image's key), so the window's next
+    /// pass can repaint just what changed since
+    damage_base: HashMap<(u32, u32), (u64, u64)>,
     aliases: HashMap<(u32, Id), Id>,
     /// the id target of each window's newest pick frame, and the targets missing a draw
     pick_ids: HashMap<(u32, Id), Id>,
@@ -165,13 +168,13 @@ impl GlBackend {
         let mailbox = Mailbox::new(wake);
         let (queue, caps, thread) = render::start(source, mailbox.clone())?;
         let mut info = HalInfo { backend: backend_id::GL, dialect: dialect::GLSL, formats: caps.formats, msaa: 1, dpi: 1.0,
-            flags: if caps.gpu_timer { info_flags::GPU_TIMESTAMPS } else { 0 },
+            flags: if caps.gpu_timer { info_flags::GPU_TIMESTAMPS } else { 0 } | info_flags::PARTIAL_REPAINT,
             max_texture: caps.max_texture, max_window: [caps.max_texture; 2],
             device_kind: if caps.software { device_kind::SOFTWARE } else { device_kind::UNKNOWN }, ..Default::default() };
         info.set_device_name(&caps.renderer);
         if super::log_enabled() { eprintln!("[hal-gl] {} offscreen={} software={}", caps.renderer, shell.is_none(), caps.software); }
         Ok(Self { shell, info, caps, queue, thread: Some(thread), next_key: 1, allocated: Arc::new(AtomicU64::new(0)),
-            tex: HashMap::new(), buf: HashMap::new(), pipe: HashMap::new(), programs: HashMap::new(), win: HashMap::new(),
+            tex: HashMap::new(), buf: HashMap::new(), pipe: HashMap::new(), programs: HashMap::new(), win: HashMap::new(), damage_base: HashMap::new(),
             aliases: HashMap::new(), pick_ids: HashMap::new(), pick_pending: HashSet::new(), mailbox, media: Default::default() })
     }
 
@@ -243,7 +246,14 @@ impl GlBackend {
             let sid = done.token.sid;
             if !world.session(sid).is_some_and(|s| Arc::ptr_eq(&s.font_frames, &done.token.incarnation)) { continue; }
             match done.event {
-                Event::Frame { target, kind, frame, window, gpu_ns } => {
+                Event::Frame { target, kind, frame, window, gpu_ns, ran } => {
+                    // a frame the GPU never ran isn't in the window's image, nor is any frame built on it
+                    if !ran && super::window_frame(kind) {
+                        let (key_sid, key) = self.window_key(sid, target);
+                        if self.damage_base.get(&(key_sid, key.index)).is_some_and(|(_, base)| *base >= frame) {
+                            self.damage_base.remove(&(key_sid, key.index));
+                        }
+                    }
                     if let Some(s) = world.session_mut(sid) {
                         s.stats.frames += 1;
                         if gpu_ns > 0 { s.stats.gpu_frames += 1; s.stats.gpu_ns_total += gpu_ns; s.stats.gpu_ns_max = s.stats.gpu_ns_max.max(gpu_ns); }
@@ -399,6 +409,7 @@ impl Backend for GlBackend {
         self.buf.retain(|k, _| k.0 != sid);
         self.pipe.retain(|k, _| k.0 != sid);
         self.win.retain(|k, _| k.0 != sid);
+        self.damage_base.retain(|k, _| k.0 != sid);
         self.aliases.retain(|k, _| k.0 != sid);
         self.pick_ids.retain(|k, _| k.0 != sid);
         self.pick_pending.retain(|k| k.0 != sid);
@@ -586,6 +597,7 @@ impl Gpu for GlBackend {
     }
     fn window_closed(&mut self, sid: u32, id: Id) {
         self.win.remove(&(sid, id.index));
+        self.damage_base.remove(&(sid, id.index));
         self.pick_ids.remove(&(sid, id));
         self.queue.push(move |r| r.ctx.close((sid, id)));
     }
