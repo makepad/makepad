@@ -868,6 +868,13 @@ impl GenJob {
         self.job_id.as_deref()
     }
 
+    /// The output is in hand: the node deletes the finished job's record and artifacts now.
+    /// An error says the node did not (an older node keeps them to its retention).
+    pub fn discard(&mut self) -> Result<(), String> {
+        let (Some(provider), Some(job_id)) = (self.provider.as_ref(), self.job_id.as_deref()) else { return Ok(()) };
+        provider.provider.discard(job_id).map_err(|e| e.to_string())
+    }
+
     /// Stop the job on its node and release its lease. Later polls are
     /// `Pending`. The node keeps the model warm for the next job.
     pub fn cancel(&mut self) {

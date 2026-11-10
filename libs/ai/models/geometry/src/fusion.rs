@@ -228,6 +228,19 @@ pub fn fused_errors(
     views: &[GrayView], reference: usize, sources: &[usize], map: &DepthNormalMap, fused: &FusedMap,
     window: &PatchMatchParams, params: &FusedErrorParams,
 ) -> Result<Vec<f64>, String> {
+    let view = check_fused_errors(views, reference, sources, map, fused, window, params)?;
+    Ok(errors_from_costs(view, map, fused, window, params, |i| {
+        let (x, y, depth, normal) = (i % view.width, i / view.width, map.depth[i], map.normal[i]);
+        let cost = |d: f64| view_cost(views, reference, sources, x, y, d, normal, window);
+        [cost(depth), cost(depth * (1.0 + params.width_step)), cost(depth * (1.0 - params.width_step))]
+    }))
+}
+
+/// The argument checks of [`fused_errors`]; returns the reference view.
+pub(crate) fn check_fused_errors<'a>(
+    views: &'a [GrayView], reference: usize, sources: &[usize], map: &DepthNormalMap, fused: &FusedMap,
+    window: &PatchMatchParams, params: &FusedErrorParams,
+) -> Result<&'a GrayView, String> {
     let view = views.get(reference).ok_or("reference index out of range")?;
     if sources.iter().any(|&s| s >= views.len() || s == reference) {
         return Err("sources must index other views".into());
@@ -246,15 +259,22 @@ pub fn fused_errors(
     {
         return Err("a zero window step, or error parameters negative or not finite".into());
     }
+    Ok(view)
+}
+
+/// [`fused_errors`] given a fused pixel's costs at the map's depth and at `d (1 + width_step)` and `d (1 - width_step)`.
+pub(crate) fn errors_from_costs(
+    view: &GrayView, map: &DepthNormalMap, fused: &FusedMap, window: &PatchMatchParams, params: &FusedErrorParams,
+    costs: impl Fn(usize) -> [f64; 3],
+) -> Vec<f64> {
     let focal = 0.5 * (view.k[0] + view.k[1]);
-    Ok((0..size)
+    (0..view.pixels.len())
         .map(|i| {
             if fused.points[i].is_none() {
                 return 0.0;
             }
-            let (x, y, depth, normal) = (i % view.width, i / view.width, map.depth[i], map.normal[i]);
-            let cost = |d: f64| view_cost(views, reference, sources, x, y, d, normal, window);
-            let (c0, up, down) = (cost(depth), cost(depth * (1.0 + params.width_step)), cost(depth * (1.0 - params.width_step)));
+            let (x, y, depth) = (i % view.width, i / view.width, map.depth[i]);
+            let [c0, up, down] = costs(i);
             let curvature = up + down - 2.0 * c0;
             let width = if c0 < 2.0 && up < 2.0 && down < 2.0 && curvature > 0.0 {
                 params.width_step * depth * (2.0 * params.width_rise / curvature).sqrt()
@@ -265,7 +285,7 @@ pub fn fused_errors(
             let edge = if isotropy < params.edge_isotropy { params.edge_slope * lever * depth / focal } else { 0.0 };
             fused.spread[i].max(width).max(edge)
         })
-        .collect())
+        .collect()
 }
 
 /// Settings of [`complete_view`].
@@ -280,15 +300,21 @@ pub struct CompletionParams {
     /// Neighbourhoods reach 1, 2, 4, ... tiles from the tile, up to this many (default 4).
     pub max_reach: usize,
     /// Quantile of a neighbourhood's overlap relative differences taken as the prior's relative error there (default
-    /// 0.9): the differences include the fused points' own errors.
+    /// 0.95).
     pub error_quantile: f64,
     /// Quantile of the whole view's overlap relative differences that fused points are checked against (default 0.95).
     pub check_quantile: f64,
+    /// Pixels between the samples that measure the prior's depth jumps (default 4): more than a learned depth blurs an
+    /// edge over.
+    pub jump_gap: usize,
+    /// A fused point within this many pixels of an unusable prior depth covers the largest depth jump of the prior as
+    /// near it (default 2).
+    pub edge_reach: usize,
 }
 
 impl Default for CompletionParams {
     fn default() -> Self {
-        Self { max_relative_step: 0.05, tile: 16, min_overlap: 30, max_reach: 4, error_quantile: 0.9, check_quantile: 0.95 }
+        Self { max_relative_step: 0.05, tile: 16, min_overlap: 30, max_reach: 4, error_quantile: 0.95, check_quantile: 0.95, jump_gap: 4, edge_reach: 2 }
     }
 }
 
@@ -326,6 +352,34 @@ fn quantile(mut values: Vec<f64>, q: f64) -> f64 {
     values[((q * values.len() as f64).ceil() as usize).clamp(1, values.len()) - 1]
 }
 
+/// The largest depth jump of `depth` within `reach` pixels of each pixel (a square). A jump is the second difference over
+/// `gap` pixels along a row or column: it is the whole jump next to an edge a blur narrower than `gap` spreads, and on a
+/// slanted plane it stays small. Samples outside the image or not finite and positive measure nothing.
+fn depth_jumps(depth: &[f64], width: usize, height: usize, gap: usize, reach: usize) -> Vec<f64> {
+    let second = |a: f64, b: f64, c: f64| if [a, b, c].iter().all(|d| d.is_finite() && *d > 0.0) { (a + c - 2.0 * b).abs() } else { 0.0 };
+    let measured: Vec<f64> = (0..depth.len())
+        .map(|i| {
+            let (x, y) = (i % width, i / width);
+            let along_row = if x >= gap && x + gap < width { second(depth[i - gap], depth[i], depth[i + gap]) } else { 0.0 };
+            let along_column = if y >= gap && y + gap < height { second(depth[i - gap * width], depth[i], depth[i + gap * width]) } else { 0.0 };
+            along_row.max(along_column)
+        })
+        .collect();
+    let widest = |values: &[f64], along_row: bool| -> Vec<f64> {
+        (0..values.len())
+            .map(|i| {
+                let (x, y) = (i % width, i / width);
+                if along_row {
+                    (x.saturating_sub(reach)..(x + reach + 1).min(width)).map(|n| values[y * width + n]).fold(0.0, f64::max)
+                } else {
+                    (y.saturating_sub(reach)..(y + reach + 1).min(height)).map(|n| values[n * width + x]).fold(0.0, f64::max)
+                }
+            })
+            .collect()
+    };
+    widest(&widest(&measured, true), false)
+}
+
 /// Completes a fused view of `view` with `prior`, a camera-z depth per pixel of that view (for instance a learned
 /// model's), where `fused_error` is the fused points' expected error (as [`fused_errors`]). A prior depth is usable when
 /// it and its eight neighbours' (those inside the image) are finite and positive and the neighbours' are within
@@ -335,19 +389,23 @@ fn quantile(mut values: Vec<f64>, q: f64) -> f64 {
 /// point and a usable prior depth; each has the distance between the two points over the prior point's distance from
 /// the camera. For a pixel in a `tile`-pixel tile, the prior's relative error is the `error_quantile` of the overlap's
 /// in the tiles within 1, 2, 4, ... tiles of it (to `max_reach`), the first with at least `min_overlap`; with none it
-/// is unmeasured. A prior point's expected error is that times its distance from the camera.
+/// is unmeasured. A prior point's expected error is that times its distance from the camera, or the prior's depth jump
+/// at the pixel (`jump_gap`) along its ray if that is larger: the overlap says nothing there, since near an edge the
+/// prior can put a pixel on the wrong side of it and fusion often keeps no point.
 ///
 /// Every pixel with a fused point keeps it with its expected error, except where it fails the check against the
 /// prior: when the two points are further apart than both expected errors together, one of them is wrong, and the
 /// fused point's expected error becomes their distance plus the prior's. The check takes the prior's relative error
 /// as the `check_quantile` of the whole view's overlap (with at least `min_overlap`; else there is no check): near
 /// fused points that are wrong together, as on a highlight, the neighbourhood's would grow with them and pass them.
+/// Within `edge_reach` pixels of an unusable prior depth there may be an edge, and the check says nothing: there a
+/// fused point's expected error is at least the prior's largest depth jump within `edge_reach`, along its ray.
 /// Every other pixel with a usable prior depth gets the prior's point where its error is measured, and no point where
 /// it is not (`unsupported`).
 ///
 /// Returns Err for a view failing [`GrayView::check`], a fused map, fused errors or prior whose size does not match the
-/// view, a fused error that is negative or not finite where there is a point, a zero `tile` or `min_overlap`, an
-/// `error_quantile` or `check_quantile` outside (0, 1], or a `max_relative_step` that is not finite and nonnegative.
+/// view, a fused error that is negative or not finite where there is a point, a zero `tile`, `min_overlap` or
+/// `jump_gap`, an `error_quantile` or `check_quantile` outside (0, 1], or a `max_relative_step` that is not finite and nonnegative.
 pub fn complete_view(view: &GrayView, fused: &FusedMap, fused_error: &[f64], prior: &[f64], params: &CompletionParams) -> Result<CompletedMap, String> {
     view.check()?;
     let size = view.pixels.len();
@@ -360,10 +418,10 @@ pub fn complete_view(view: &GrayView, fused: &FusedMap, fused_error: &[f64], pri
         return Err("fused errors must be finite and nonnegative".into());
     }
     let in_unit = |q: f64| q > 0.0 && q <= 1.0;
-    if params.tile == 0 || params.min_overlap == 0 || !in_unit(params.error_quantile) || !in_unit(params.check_quantile)
+    if params.tile == 0 || params.min_overlap == 0 || params.jump_gap == 0 || !in_unit(params.error_quantile) || !in_unit(params.check_quantile)
         || !(params.max_relative_step.is_finite() && params.max_relative_step >= 0.0)
     {
-        return Err("tile and min_overlap must be positive, the quantiles in (0, 1] and max_relative_step finite and nonnegative".into());
+        return Err("tile, min_overlap and jump_gap must be positive, the quantiles in (0, 1] and max_relative_step finite and nonnegative".into());
     }
     let (width, height) = (view.width, view.height);
     let positive = |d: f64| d.is_finite() && d > 0.0;
@@ -412,6 +470,14 @@ pub fn complete_view(view: &GrayView, fused: &FusedMap, fused_error: &[f64], pri
         })
         .collect();
     let check = (overlap >= params.min_overlap).then(|| quantile(tiles.concat(), params.check_quantile));
+    let jumps = depth_jumps(prior, width, height, params.jump_gap, 0);
+    let edge_jumps = depth_jumps(prior, width, height, params.jump_gap, params.edge_reach);
+    let near_unusable = |i: usize| {
+        let (x, y, reach) = (i % width, i / width, params.edge_reach);
+        (y.saturating_sub(reach)..(y + reach + 1).min(height))
+            .any(|ny| (x.saturating_sub(reach)..(x + reach + 1).min(width)).any(|nx| !usable[ny * width + nx]))
+    };
+    let forward = [view.cam_to_world[0][2], view.cam_to_world[1][2], view.cam_to_world[2][2]];
     let mut unsupported = 0;
     let points = (0..size)
         .map(|i| {
@@ -427,14 +493,19 @@ pub fn complete_view(view: &GrayView, fused: &FusedMap, fused_error: &[f64], pri
                             expected_error = apart + prior_error;
                         }
                     }
+                    if near_unusable(i) {
+                        let z: f64 = (0..3).map(|axis| forward[axis] * (world[axis] - centre[axis])).sum();
+                        expected_error = expected_error.max(edge_jumps[i] * distance(world, centre) / z);
+                    }
                     Some(CompletedPoint { world, source: PointSource::Fused, expected_error })
                 }
                 (None, Some(relative)) => {
                     let world = prior_point(i);
+                    let reach = distance(world, centre);
                     world.iter().all(|v| v.is_finite()).then(|| CompletedPoint {
                         world,
                         source: PointSource::Prior,
-                        expected_error: relative * distance(world, centre),
+                        expected_error: (relative * reach).max(jumps[i] * reach / prior[i]),
                     })
                 }
                 (None, None) => {
@@ -655,16 +726,29 @@ mod tests {
         let at = |x: usize, y: usize| completed.points[y * 96 + x];
         // A prior f times too deep along the ray is 1 - 1/f of its distance off. Tile columns 4 and 5 (x >= 64) reach the
         // overlap (x < 60) within one and two tiles. Tiles in rows 0-1 and 4-5 see only one of the two priors that near;
-        // tile row 2 sees both, a third of them 4% deep, and takes the 90% quantile's.
+        // tile row 2 sees both, a third of them 4% deep, and takes the 95% quantile's. A gap as wide as the image measures
+        // no jumps.
+        let without_jumps = complete_view(view, &fused, &fused_error, &prior, &CompletionParams { jump_gap: 96, ..Default::default() }).unwrap();
         for (x, y, factor) in [(70, 5, 1.02), (90, 5, 1.02), (65, 45, 1.04), (70, 90, 1.04), (90, 90, 1.04)] {
             let world = world_point(view, x, y, prior[y * 96 + x]);
-            let point = at(x, y).unwrap();
+            let point = without_jumps.points[y * 96 + x].unwrap();
             assert_eq!((point.world, point.source), (world, PointSource::Prior), "prior at ({x}, {y})");
             let expected = (1.0 - 1.0 / factor) * reach(world);
             assert!((point.expected_error - expected).abs() < 1e-12, "prior error at ({x}, {y}): {} vs {expected}", point.expected_error);
         }
         for (x, y) in [(80, 19), (80, 20), (80, 39), (80, 40), (69, 30), (70, 30), (80, 60), (81, 61)] {
             assert_eq!(at(x, y), None, "no usable prior at ({x}, {y}): a depth step or an unknown depth next to it");
+        }
+        // Within the gap of the 50% step, on either side of it, the point's expected error is the jump along its ray.
+        // In the block a usable depth is half as far again, so the jump is a third of it. Far from it, the slant of the
+        // plane and the prior's 2% step at row 48 are smaller than the measured error.
+        for (x, y, share) in [(80, 16, 0.5), (80, 18, 0.5), (66, 30, 0.5), (80, 22, 1.0 / 3.0), (80, 37, 1.0 / 3.0)] {
+            let point = at(x, y).unwrap();
+            let ratio = point.expected_error / reach(point.world) / share;
+            assert!((0.9..1.1).contains(&ratio), "jump at ({x}, {y}): {} of the point's reach, not {share}", point.expected_error / reach(point.world));
+        }
+        for (x, y) in [(70, 90), (90, 90), (65, 70)] {
+            assert_eq!(at(x, y), without_jumps.points[y * 96 + x], "no jump near ({x}, {y})");
         }
         // Fused points are checked against the whole view's 95% quantile, the 4% deep prior's: those that agree within both
         // errors keep theirs; the one 10% deep does not.
@@ -703,6 +787,7 @@ mod tests {
         }
         assert!(complete_view(view, &fused, &fused_error, &prior, &CompletionParams { min_overlap: 0, ..Default::default() }).is_err(), "min_overlap");
         assert!(complete_view(view, &fused, &fused_error, &prior, &CompletionParams { tile: 0, ..Default::default() }).is_err(), "tile");
+        assert!(complete_view(view, &fused, &fused_error, &prior, &CompletionParams { jump_gap: 0, ..Default::default() }).is_err(), "jump gap");
     }
 
     fn with_pixels(view: &GrayView, pixels: Vec<f32>) -> GrayView {
@@ -829,5 +914,33 @@ mod tests {
             assert!(fuse_view(&views, &maps, 0, &[1], &params).is_err(), "cost length {index}");
             maps[index].cost.pop();
         }
+    }
+
+    #[test]
+    fn fused_points_beside_an_unusable_prior_cover_its_jump() {
+        let (views, _) = scene(0.0);
+        let view = &views[0];
+        let size = view.pixels.len();
+        let depth = plane_depth(view, 0.0);
+        // Fused points left of x = 48, on the true depth. The prior agrees there and is half as deep again from it, so
+        // x = 47 and 48 are unusable.
+        let points: Vec<Option<[f64; 3]>> = (0..size).map(|i| (i % 96 < 48).then(|| world_point(view, i % 96, i / 96, depth[i]))).collect();
+        let fused = FusedMap { width: 96, height: 96, points, agreeing: vec![2; size], spread: vec![0.0005; size] };
+        let prior: Vec<f64> = depth.iter().enumerate().map(|(i, &d)| d * if i % 96 < 48 { 1.0 } else { 1.5 }).collect();
+        let completed = complete_view(view, &fused, &vec![0.0005; size], &prior, &CompletionParams::default()).unwrap();
+        let centre = [view.cam_to_world[0][3], view.cam_to_world[1][3], view.cam_to_world[2][3]];
+        for x in [45, 46, 47] {
+            let point = completed.points[30 * 96 + x].unwrap();
+            assert_eq!(point.source, PointSource::Fused);
+            let reach = (0..3).map(|axis| (point.world[axis] - centre[axis]).powi(2)).sum::<f64>().sqrt();
+            let ratio = point.expected_error / reach / 0.5;
+            assert!((0.9..1.1).contains(&ratio), "x = {x}: {} of the point's reach, not half", point.expected_error / reach);
+        }
+        // Further than two pixels from an unusable prior depth, a fused point keeps its error though a jump is measured
+        // within the gap.
+        assert_eq!(completed.points[30 * 96 + 44].unwrap().expected_error, 0.0005);
+        // With no edge to look for, none of them moves.
+        let wide = complete_view(view, &fused, &vec![0.0005; size], &prior, &CompletionParams { edge_reach: 0, ..Default::default() }).unwrap();
+        assert_eq!(wide.points[30 * 96 + 46].unwrap().expected_error, 0.0005);
     }
 }

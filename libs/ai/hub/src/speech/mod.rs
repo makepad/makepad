@@ -126,6 +126,10 @@ pub struct SttConfig {
     /// silence. `None` = the engine default.
     pub silence_threshold: Option<f32>,
     pub wake: Option<WakeHook>,
+    /// Hubs (base URLs) that do the recognizing, and only they: with any named, nothing runs in
+    /// this process or on this machine, no beacon is heard and the OS recognizer is not
+    /// consulted. If none can transcribe, the session fails and says why.
+    pub hubs: Vec<String>,
 }
 
 impl Default for SttConfig {
@@ -143,6 +147,7 @@ impl Default for SttConfig {
             max_tokens: 0,
             silence_threshold: None,
             wake: None,
+            hubs: Vec::new(),
         }
     }
 }

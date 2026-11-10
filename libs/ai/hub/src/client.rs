@@ -86,6 +86,13 @@ pub trait ContentProvider {
         ))
     }
 
+    /// Deletes a finished job's record and artifacts at the provider (`POST /job/<id>/discard`):
+    /// the caller has its output and nothing of it should stay there.
+    fn discard(&self, job_id: &str) -> Result<(), AssetAiError> {
+        let _ = job_id;
+        Err(AssetAiError::Unavailable("discard not supported by this provider".to_string()))
+    }
+
     /// A person's cancel: the job stops and, once it has unwound, its model
     /// leaves the device (`{"free": true}`) unless other work wants it.
     /// Providers without it cancel plainly.
@@ -300,6 +307,15 @@ impl ContentProvider for LocalService {
 
     fn cancel_freeing(&self, job_id: &str) -> Result<JobStatusJson, AssetAiError> {
         self.post_cancel(job_id, br#"{"free":true}"#)
+    }
+
+    fn discard(&self, job_id: &str) -> Result<(), AssetAiError> {
+        let url = format!("{}/job/{job_id}/discard", self.base_url);
+        let response = http_fetch(&self.post_request(&url, "application/json", b"{}"))?;
+        if response.status != 200 {
+            return Err(AssetAiError::Http(format!("{url}: http {}", response.status)));
+        }
+        Ok(())
     }
 
     fn keepalive(&self, job_id: &str) -> Result<(), AssetAiError> {

@@ -1987,6 +1987,27 @@ fn route_post_by(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::f
             CancelOutcome::Unknown => error_json(404, format!("no such job: {job_id}")),
         };
     }
+    // POST /job/<id>/discard — the owner has what the finished job made: its record and artifacts
+    // are deleted now instead of waiting out the retention ring (a job made of someone's
+    // voice is not kept). 409 for a job that has not finished.
+    if let Some(job_id) = path
+        .strip_prefix("/job/")
+        .and_then(|rest| rest.strip_suffix("/discard"))
+    {
+        let owner = shared.job_owners.lock().unwrap().get(job_id).cloned();
+        if owner.is_some_and(|owner| owner != caller.client_id) && caller.client_id != "local" {
+            return error_json(403, format!("job {job_id} belongs to another client"));
+        }
+        let gone = shared.jobs.with(|store| store.discard_finished(job_id));
+        return match gone {
+            Some(job) => {
+                purge_jobs(shared, std::slice::from_ref(&job));
+                shared.job_owners.lock().unwrap().remove(job_id);
+                ok_json(r#"{"discarded":true}"#.to_string())
+            }
+            None => error_json(409, format!("job {job_id} is unknown or has not finished")),
+        };
+    }
     if path == "/realtime" {
         return route_realtime_post(shared, body);
     }
@@ -2683,8 +2704,13 @@ fn apply_finished_retention(shared: &Arc<ServiceShared>) {
     if evicted.is_empty() {
         return;
     }
+    purge_jobs(shared, &evicted);
+}
+
+/// Deletes the artifacts (files and map entries) of jobs the store let go.
+fn purge_jobs(shared: &Arc<ServiceShared>, jobs: &[crate::jobs::EvictedJob]) {
     let mut artifacts = shared.artifacts.lock().unwrap();
-    for job in &evicted {
+    for job in jobs {
         for artifact_id in &job.artifact_ids {
             if let Some(meta) = artifacts.remove(artifact_id) {
                 let _ = fs::remove_file(&meta.path);

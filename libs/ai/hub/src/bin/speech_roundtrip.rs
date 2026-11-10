@@ -10,6 +10,7 @@
 //! cd libs/ai/hub && cargo run --release --bin speech-roundtrip
 //! cd libs/ai/hub && cargo run --release --bin speech-roundtrip -- --tts system --stt system --reach local
 //! cd libs/ai/hub && cargo run --release --bin speech-roundtrip -- score clip.wav "what it should say"
+//! cd libs/ai/hub && cargo run --release --bin speech-roundtrip -- --hub https://hub.example:8123
 //! ```
 //!
 //! `score` transcribes a WAV from anywhere (a reference export, a file on
@@ -75,12 +76,14 @@ fn run() {
         _ => SttEngine::Auto,
     };
 
+    // (--hub: that hub does the recognizing and nothing else, as Fab's voice link has it)
+    let hubs: Vec<String> = arg(&args, "--hub").into_iter().collect();
     let hub = AiHub::in_process();
     if args.first().map(String::as_str) == Some("score") {
-        return score(&hub, &args[1..], stt_engine, reach);
+        return score(&hub, &args[1..], stt_engine, reach, hubs);
     }
     let tts = hub.start_tts(TtsConfig { engine: tts_engine, reach, voice: arg(&args, "--voice"), ..TtsConfig::default() });
-    let stt = hub.start_stt(SttConfig { engine: stt_engine, reach, ..SttConfig::default() });
+    let stt = hub.start_stt(SttConfig { engine: stt_engine, reach, hubs, ..SttConfig::default() });
 
     // Wait for both engines; print what the hub chose.
     let deadline = Instant::now() + Duration::from_secs(180);
@@ -149,6 +152,7 @@ fn run() {
         };
         let pcm = audio.resampled(STT_SAMPLE_RATE);
         let synth_secs = audio.duration_secs();
+        let asked = Instant::now();
         let id = stt.transcribe(pcm.samples);
         let heard = loop {
             let mut got = None;
@@ -174,7 +178,7 @@ fn run() {
         total_errors += errors;
         println!("said  : {sentence}");
         println!("heard : {heard}");
-        println!("        {synth_secs:.1}s audio, {errors} word error(s)\n");
+        println!("        {synth_secs:.1}s audio, {errors} word error(s), text {} ms after the audio was handed over\n", asked.elapsed().as_millis());
     }
     println!(
         "word error rate: {:.1}% ({total_errors}/{total_words}) in {:.1}s",
@@ -209,7 +213,7 @@ fn edit_distance(a: &[String], b: &[String]) -> usize {
 
 /// `score <wav> [expected words...]`: transcribe one file through the hub's
 /// STT session and report the word error rate against the expected text.
-fn score(hub: &AiHub, args: &[String], engine: SttEngine, reach: SpeechReach) {
+fn score(hub: &AiHub, args: &[String], engine: SttEngine, reach: SpeechReach, hubs: Vec<String>) {
     let Some(path) = args.first() else {
         eprintln!("usage: speech-roundtrip score <wav> [expected text]");
         std::process::exit(2);
@@ -219,7 +223,7 @@ fn score(hub: &AiHub, args: &[String], engine: SttEngine, reach: SpeechReach) {
     let (samples, rate) = makepad_ai_hub::wav::decode_wav_to_mono_f32(&bytes).expect("decode wav");
     let audio = makepad_ai_hub::speech::SpeechAudio { samples, sample_rate: rate };
     println!("wav      : {path} ({:.2}s @ {rate} Hz)", audio.duration_secs());
-    let stt = hub.start_stt(SttConfig { engine, reach, ..SttConfig::default() });
+    let stt = hub.start_stt(SttConfig { engine, reach, hubs, ..SttConfig::default() });
     let id = stt.transcribe(audio.resampled(STT_SAMPLE_RATE).samples);
     let deadline = Instant::now() + Duration::from_secs(300);
     let heard = loop {

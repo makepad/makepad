@@ -258,6 +258,19 @@ trait Engine {
 // ----------------------------------------------------------------- choosing
 
 fn choose(config: &SttConfig, send: &dyn Fn(SttEvent)) -> Result<Box<dyn Engine>, String> {
+    if !config.hubs.is_empty() {
+        // (the named hubs and nothing else: not this process, this machine, the beacon or the OS)
+        send(SttEvent::Loading { phase: "reaching the voice hub".into(), fraction: 0.0 });
+        let mut why = Vec::new();
+        for hub in &config.hubs {
+            match RemotePipe::whisper_at(hub) {
+                Ok(pipe) => return Ok(Box::new(RemoteStt { pipe })),
+                Err(e) => why.push(e),
+            }
+        }
+        why.dedup();
+        return Err(why.join("; "));
+    }
     let want_whisper = matches!(config.engine, SttEngine::Auto | SttEngine::Whisper);
     let want_system = matches!(config.engine, SttEngine::Auto | SttEngine::System);
     let mut reasons: Vec<String> = Vec::new();

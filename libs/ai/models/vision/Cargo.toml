@@ -9,9 +9,10 @@ license = "MIT"
 makepad-ai-common = { path = "../common" }
 makepad-ai-loader = { path = "../../loader" }
 makepad-ai-flux = { path = "../flux" }
-makepad-ai-geometry = { path = "../geometry" }
+# The multi-view stereo behind scan-mvs.
+makepad-ai-geometry = { path = "../geometry", optional = true }
 # The CUDA kernels (makepad-ai-cuda `cuda`), for the validator bins run on a GPU box.
 makepad-ai-cuda = { path = "../../cuda", optional = true }
 
 [features]
-cuda = ["dep:makepad-ai-cuda", "makepad-ai-cuda/cuda", "makepad-ai-geometry/cuda"]
+cuda = ["dep:makepad-ai-cuda", "makepad-ai-cuda/cuda", "dep:makepad-ai-geometry", "makepad-ai-geometry/cuda"]

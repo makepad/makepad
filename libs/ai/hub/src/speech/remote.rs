@@ -49,6 +49,21 @@ impl RemotePipe {
         best.map(|(_, pipe)| pipe)
     }
 
+    /// The speech-to-text pipe of the hub at `base_url` and no other, or why there is none, in
+    /// words for the person: a hub that does not answer, one without the model, one whose model
+    /// is not installed or still arriving. Only a loaded or ready model serves.
+    pub(crate) fn whisper_at(base_url: &str) -> Result<RemotePipe, String> {
+        let models = LocalService::new(base_url).list_models().map_err(|_| "the voice hub does not answer".to_string())?;
+        let Some(model) = models.into_iter().find(|m| m.available && m.domain == Domain::Stt.as_str() && m.backend == "whisper") else {
+            return Err("the voice hub has no speech-to-text model (whisper)".to_string());
+        };
+        match model.state.as_str() {
+            MODEL_STATE_LOADED | MODEL_STATE_READY => Ok(RemotePipe { base_url: base_url.to_string(), model: model.id }),
+            MODEL_STATE_DOWNLOADING => Err("the voice hub is still downloading its whisper model".to_string()),
+            _ => Err("the whisper model is not installed on the voice hub".to_string()),
+        }
+    }
+
     /// The pipe at one node, with its readiness rank, when it serves one.
     pub(crate) fn at(base_url: &str, domain: Domain, backends: &[&str]) -> Option<(u8, RemotePipe)> {
         let service = LocalService::new(base_url);
@@ -113,7 +128,7 @@ impl RemotePipe {
             ..Default::default()
         };
         let _ = timestamps;
-        let output = self.run_job(Domain::Stt, request, Want::Outputs { media: 1, text: 0 })?;
+        let output = self.run_job_with(Domain::Stt, request, Want::Outputs { media: 1, text: 0 }, true, &mut |_| {})?;
         let bytes = output.artifacts.into_iter().next().ok_or_else(|| "job finished without an artifact".to_string())?.bytes;
         let text = std::str::from_utf8(&bytes).map_err(|_| "transcript is not utf-8".to_string())?;
         let json = TranscriptJson::deserialize_json(text).map_err(|e| format!("transcript json: {e:?}"))?;
@@ -185,7 +200,7 @@ impl RemotePipe {
             stream: Some(true),
             ..Default::default()
         };
-        let output = self.run_job_with(Domain::Speech, request, Want::All, &mut |chunk| {
+        let output = self.run_job_with(Domain::Speech, request, Want::All, false, &mut |chunk| {
             if let Ok((samples, sample_rate)) = wav::decode_wav_to_mono_f32(&chunk.bytes) {
                 on_chunk(SpeechAudio { samples, sample_rate });
             }
@@ -195,7 +210,7 @@ impl RemotePipe {
 
     /// Run one job on this node to completion.
     fn run_job(&self, domain: Domain, request: GenerateRequestJson, want: Want) -> Result<GenOutput, String> {
-        self.run_job_with(domain, request, want, &mut |_| {})
+        self.run_job_with(domain, request, want, false, &mut |_| {})
     }
 
     fn run_job_with(
@@ -203,6 +218,7 @@ impl RemotePipe {
         domain: Domain,
         request: GenerateRequestJson,
         want: Want,
+        discard: bool,
         on_chunk: &mut dyn FnMut(ArtifactBytes),
     ) -> Result<GenOutput, String> {
         let router = Arc::new(PipeRouter(self.base_url.clone()));
@@ -216,7 +232,16 @@ impl RemotePipe {
         let mut last = None;
         loop {
             let moved = match job.poll() {
-                JobPoll::Done(output) => return Ok(output),
+                JobPoll::Done(output) => {
+                    if discard {
+                        // (what was said is the person's: the hub deletes the job once its output
+                        // is here; counted, never the contents)
+                        if let Err(why) = job.discard() {
+                            eprintln!("[speech] the hub did not delete a finished job: {why}");
+                        }
+                    }
+                    return Ok(output);
+                }
                 JobPoll::Chunk(chunk) => {
                     on_chunk(chunk);
                     true

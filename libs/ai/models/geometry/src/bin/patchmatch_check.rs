@@ -1,5 +1,6 @@
 use makepad_ai_geometry::{
-    cuda::patchmatch_cuda,
+    cuda::{fused_errors_cuda, patchmatch_cuda},
+    fusion::{fused_errors, FusedErrorParams, FusedMap},
     patchmatch::{patchmatch_reference, DepthNormalMap, PatchMatchParams},
     synthetic::textured_plane,
 };
@@ -94,6 +95,17 @@ fn run() -> Result<bool, String> {
             bar(&mut failures, &mut passes, good, format!("PMGPU {degrees} {what}"));
         }
     }
+    let (views, truth) = textured_plane(96, 120.0, 0.5236, &[-0.10, 0.10]);
+    let window = PatchMatchParams { depth_min: 0.3, depth_max: 1.0, ..Default::default() };
+    let size = truth.depth.len();
+    let fused = FusedMap { width: truth.width, height: truth.height, points: vec![Some([0.0; 3]); size], agreeing: vec![2; size], spread: vec![0.0; size] };
+    let params = FusedErrorParams { edge_isotropy: 0.0, ..Default::default() };
+    let host = fused_errors(&views, 0, &[1, 2], &truth, &fused, &window, &params)?;
+    let gpu = fused_errors_cuda(&views, 0, &[1, 2], &truth, &fused, &window, &params)?;
+    let indices = pixels(&truth, window.radius);
+    let within = fraction(&indices, |i| (gpu[i] - host[i]).abs() <= 0.01 * host[i].max(1e-4));
+    println!("ERRORS within_1pct={within:.9}");
+    bar(&mut failures, &mut passes, within >= 0.98, "fused errors".to_string());
     let (views, _) = textured_plane(518, 647.5, 0.5236, &[-0.10, -0.05, 0.05, 0.10]);
     let params = PatchMatchParams { depth_min: 0.3, depth_max: 1.0, ..Default::default() };
     let start = Instant::now();

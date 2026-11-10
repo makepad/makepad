@@ -1,5 +1,6 @@
 //! CUDA implementation of the deterministic host PatchMatch search.
 
+use crate::fusion::{check_fused_errors, errors_from_costs, FusedErrorParams, FusedMap};
 use crate::patchmatch::{check_arguments, DepthNormalMap, PatchMatchParams};
 use crate::views::{relative_pose, GrayView};
 use makepad_ai_cuda::geometry_ops::{self, GeometryCamera, GeometryInitial, GeometryParams};
@@ -52,4 +53,37 @@ pub fn patchmatch_cuda(
         depth: map.depth.into_iter().map(f64::from).collect(),
         normal: map.normal.into_iter().map(|n| n.map(f64::from)).collect(),
         cost: map.cost.into_iter().map(f64::from).collect() })
+}
+
+/// [`crate::fusion::fused_errors`] from GPU costs: PatchMatch with no iterations scores the map's own hypotheses, here
+/// at three depths. The arithmetic of the costs is f32, the rest as there.
+pub fn fused_errors_cuda(
+    views: &[GrayView], reference: usize, sources: &[usize], map: &DepthNormalMap, fused: &FusedMap,
+    window: &PatchMatchParams, params: &FusedErrorParams,
+) -> Result<Vec<f64>, String> {
+    let view = check_fused_errors(views, reference, sources, map, fused, window, params)?;
+    let (nearest, farthest) = map.depth.iter().fold((f64::MAX, 0.0_f64), |(a, b), &d| (a.min(d), b.max(d)));
+    let score = |factor: f64| -> Result<Vec<f64>, String> {
+        let moved = DepthNormalMap {
+            width: map.width,
+            height: map.height,
+            depth: map.depth.iter().map(|d| d * factor).collect(),
+            normal: map.normal.clone(),
+            cost: vec![2.0; map.depth.len()],
+        };
+        let range = PatchMatchParams {
+            radius: window.radius,
+            step: window.step,
+            top_k: window.top_k,
+            sigma_spatial: window.sigma_spatial,
+            sigma_color: window.sigma_color,
+            seed: window.seed,
+            iterations: 0,
+            depth_min: nearest * factor * 0.5,
+            depth_max: farthest * factor * 2.0,
+        };
+        Ok(patchmatch_cuda(views, reference, sources, Some(&moved), &range)?.cost)
+    };
+    let (at, up, down) = (score(1.0)?, score(1.0 + params.width_step)?, score(1.0 - params.width_step)?);
+    Ok(errors_from_costs(view, map, fused, window, params, |i| [at[i], up[i], down[i]]))
 }

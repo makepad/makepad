@@ -31,11 +31,27 @@ pub struct AlignParams {
     /// Prior standard deviation of each pose's translation from its prior pose about the pivot, in metres
     /// (default 0.005).
     pub prior_translation: f64,
+    /// A step taking a pose further from its prior than this many of those deviations stops it there
+    /// (default 8), and the other poses take theirs. A window that leaves a picture stops pulling on its
+    /// pose, so on few or poor windows nothing else keeps a pose among the others.
+    pub prior_limit: f64,
     /// A solve on fixed sources ends when a step rotates no pose by more than this, in radians, and the whole
     /// refinement when a selection's solve does (default 1e-6) ...
     pub rotation_tolerance: f64,
     /// ... and moves no pose by more than this, in metres (default 1e-6).
     pub translation_tolerance: f64,
+}
+
+impl AlignParams {
+    /// How much looser than these settings' a coarser level's tolerances are, per pixel of its downsampling.
+    const COARSER_TOLERANCE: f64 = 10.0;
+
+    /// These settings for views downsampled by `factor` whose poses only start a finer level's: the solve needs no
+    /// finer steps than those pixels show.
+    pub fn downsampled(&self, factor: usize) -> Self {
+        let loose = Self::COARSER_TOLERANCE * factor as f64;
+        Self { rotation_tolerance: self.rotation_tolerance * loose, translation_tolerance: self.translation_tolerance * loose, ..*self }
+    }
 }
 
 impl Default for AlignParams {
@@ -48,6 +64,7 @@ impl Default for AlignParams {
             robust_scale: 0.1,
             prior_rotation: 0.5_f64.to_radians(),
             prior_translation: 0.005,
+            prior_limit: 8.0,
             rotation_tolerance: 1e-6,
             translation_tolerance: 1e-6,
         }
@@ -425,6 +442,7 @@ const CHUNK: usize = 256;
 struct Problem<'a> {
     fan_out: FanOut<'a>,
     views: &'a [GrayView],
+    sources: &'a [Vec<usize>],
     points: Vec<Point>,
     priors: Vec<Pose>,
     fixed: usize,
@@ -454,9 +472,9 @@ fn select(problem: &Problem, state: &State) -> (Vec<Vec<usize>>, usize, f64) {
         let sources = range
             .map(|i| {
                 let (point, plane) = (&problem.points[i], state.planes[i]);
-                let mut costs: Vec<(f64, usize)> = (0..problem.views.len())
-                    .filter(|&s| s != point.view)
-                    .filter_map(|s| evaluate(point, plane, &frame, s, false, &mut scratch).map(|cost| (cost, s)))
+                let mut costs: Vec<(f64, usize)> = problem.sources[point.view]
+                    .iter()
+                    .filter_map(|&s| evaluate(point, plane, &frame, s, false, &mut scratch).map(|cost| (cost, s)))
                     .collect();
                 costs.sort_by(|a, b| a.0.total_cmp(&b.0));
                 costs.truncate(problem.top_k);
@@ -476,6 +494,18 @@ fn select(problem: &Problem, state: &State) -> (Vec<Vec<usize>>, usize, f64) {
     (sources, count, if count == 0 { 0.0 } else { total / count as f64 })
 }
 
+/// `pose`, or where it is further from `prior` than [`AlignParams::prior_limit`], the pose at that limit in its direction.
+fn within_prior_limit(problem: &Problem, pose: Pose, prior: &Pose) -> Pose {
+    let p = problem.params;
+    let (rotation, translation) = (p.prior_limit * p.prior_rotation, p.prior_limit * p.prior_translation);
+    let (w, t) = pose.motion_from(prior, problem.pivot);
+    if dot(w, w) <= rotation * rotation && dot(t, t) <= translation * translation {
+        return pose;
+    }
+    let at_most = |v: [f64; 3], limit: f64| v.map(|x| x * (limit / dot(v, v).sqrt()).min(1.0));
+    prior.moved(at_most(w, rotation), at_most(t, translation), problem.pivot)
+}
+
 fn prior_cost(problem: &Problem, poses: &[Pose]) -> f64 {
     let p = problem.params;
     poses
@@ -490,23 +520,32 @@ fn prior_cost(problem: &Problem, poses: &[Pose]) -> f64 {
         .sum()
 }
 
-/// The objective at `state`: each selected window's weighted robust cost (that of cost 2 when it cannot be
-/// evaluated, so that no step gains by pushing windows out of the images) plus the prior.
-fn objective(problem: &Problem, state: &State, sources: &[Vec<usize>]) -> f64 {
+/// The objective at `state` and each selected window's cost there: each window's weighted robust cost plus the prior.
+/// `starts` is where each point's windows begin in the flat `held` and in the returned costs. A window that cannot be
+/// evaluated counts at its cost in `held`, that of the last kept state, so that a step neither gains nor loses by
+/// pushing it out of the images. At a fixed high cost, the windows leaving outweigh the gain of every step on small
+/// images, where a window covers much of the image.
+fn objective(problem: &Problem, state: &State, sources: &[Vec<usize>], starts: &[usize], held: &[f64]) -> (f64, Vec<f64>) {
     let frame = Frame { views: problem.views, poses: &state.poses, pivot: problem.pivot };
     let chunk = |range: std::ops::Range<usize>| {
-        let mut total = 0.0;
+        let (mut total, mut costs) = (0.0, Vec::with_capacity(starts[range.end] - starts[range.start]));
         let mut scratch = Scratch::default();
         for i in range {
             let (point, plane) = (&problem.points[i], state.planes[i]);
-            for &source in &sources[i] {
-                let cost = evaluate(point, plane, &frame, source, false, &mut scratch).unwrap_or(2.0);
+            for (k, &source) in sources[i].iter().enumerate() {
+                let cost = evaluate(point, plane, &frame, source, false, &mut scratch).unwrap_or(held[starts[i] + k]);
                 total += point.weight * cauchy(cost, problem.params.robust_scale).0;
+                costs.push(cost);
             }
         }
-        total
+        (total, costs)
     };
-    fold_chunks(problem.fan_out, problem.points.len(), CHUNK, 0.0, chunk, |total: &mut f64, part| *total += part) + prior_cost(problem, &state.poses)
+    let all = (0.0, Vec::with_capacity(held.len()));
+    let (total, costs) = fold_chunks(problem.fan_out, problem.points.len(), CHUNK, all, chunk, |all: &mut (f64, Vec<f64>), part| {
+        all.0 += part.0;
+        all.1.extend(part.1);
+    });
+    (total + prior_cost(problem, &state.poses), costs)
 }
 
 /// Gauss-Newton normal equations (IRLS weights) at a state: the pose block, and per point its plane block, gradient
@@ -712,6 +751,30 @@ pub fn refine_poses(
     views: &[GrayView], maps: &[DepthNormalMap], fixed: usize, priors: &[[[f64; 4]; 4]], window: &PatchMatchParams,
     params: &AlignParams, fan_out: FanOut,
 ) -> Result<Alignment, String> {
+    let sources: Vec<Vec<usize>> = (0..views.len()).map(|v| (0..views.len()).filter(|&s| s != v).collect()).collect();
+    refine_poses_among(&PosedMaps { views, maps, sources: &sources }, fixed, priors, window, params, fan_out)
+}
+
+/// The views a refinement moves, their maps, and per view the others its windows may be seen in.
+pub struct PosedMaps<'a> {
+    pub views: &'a [GrayView],
+    pub maps: &'a [DepthNormalMap],
+    pub sources: &'a [Vec<usize>],
+}
+
+/// [`refine_poses`] with each view's windows seen only in its [`PosedMaps::sources`]: many views cost in
+/// proportion to those lists rather than to the square of the views.
+pub fn refine_poses_among(
+    input: &PosedMaps, fixed: usize, priors: &[[[f64; 4]; 4]], window: &PatchMatchParams, params: &AlignParams,
+    fan_out: FanOut,
+) -> Result<Alignment, String> {
+    let PosedMaps { views, maps, sources: candidates } = *input;
+    if candidates.len() != views.len() {
+        return Err("source list and view counts do not match".into());
+    }
+    if candidates.iter().enumerate().any(|(v, list)| list.iter().any(|&s| s >= views.len() || s == v)) {
+        return Err("sources must index other views".into());
+    }
     if views.len() != maps.len() || views.len() != priors.len() {
         return Err("view, map and prior counts do not match".into());
     }
@@ -721,7 +784,7 @@ pub fn refine_poses(
     if params.stride == 0 || window.step == 0 || window.top_k == 0 {
         return Err("stride, window step and top_k must be positive".into());
     }
-    let positive = [params.image_noise, params.robust_scale, params.prior_rotation, params.prior_translation, window.sigma_spatial, window.sigma_color];
+    let positive = [params.image_noise, params.robust_scale, params.prior_rotation, params.prior_translation, params.prior_limit, window.sigma_spatial, window.sigma_color];
     let nonnegative = [params.max_cost, params.rotation_tolerance, params.translation_tolerance];
     if positive.iter().any(|v| !v.is_finite() || *v <= 0.0) || nonnegative.iter().any(|v| !v.is_finite() || *v < 0.0) {
         return Err("alignment parameters must be finite and positive".into());
@@ -756,7 +819,7 @@ pub fn refine_poses(
         }
     }
     let problem = Problem {
-        fan_out, views, priors: priors.iter().map(Pose::of).collect(), fixed, pivot, slots, n, top_k: window.top_k, params, points,
+        fan_out, views, sources: candidates, priors: priors.iter().map(Pose::of).collect(), fixed, pivot, slots, n, top_k: window.top_k, params, points,
     };
     let mut state = State { planes: vec![[0.0; 3]; problem.points.len()], poses };
     let (mut sources, start_windows, start_cost) = select(&problem, &state);
@@ -768,7 +831,14 @@ pub fn refine_poses(
         }
         selections += 1;
         let before = state.poses.clone();
-        let mut current = objective(&problem, &state, &sources);
+        let starts: Vec<usize> = std::iter::once(0)
+            .chain(sources.iter().scan(0, |at, list| {
+                *at += list.len();
+                Some(*at)
+            }))
+            .collect();
+        // Every selected window evaluates at the state it was selected at, so these never count.
+        let (mut current, mut held) = objective(&problem, &state, &sources, &starts, &vec![2.0; starts[sources.len()]]);
         let mut system = normal_equations(&problem, &state, &sources);
         let mut mu = 1e-4;
         while tries < params.max_steps {
@@ -783,17 +853,22 @@ pub fn refine_poses(
                     .iter()
                     .enumerate()
                     .map(|(k, pose)| match problem.slots[k] {
-                        Some(b) => pose.moved([step[6 * b], step[6 * b + 1], step[6 * b + 2]], [step[6 * b + 3], step[6 * b + 4], step[6 * b + 5]], pivot),
+                        Some(b) => within_prior_limit(
+                            &problem,
+                            pose.moved([step[6 * b], step[6 * b + 1], step[6 * b + 2]], [step[6 * b + 3], step[6 * b + 4], step[6 * b + 5]], pivot),
+                            &problem.priors[k],
+                        ),
                         None => *pose,
                     })
                     .collect(),
                 planes: state.planes.iter().zip(&planes).map(|(p, d)| std::array::from_fn(|i| p[i] + d[i])).collect(),
             };
             let small = within_tolerance(&candidate.poses, &state.poses, params);
-            let next = objective(&problem, &candidate, &sources);
+            let (next, costs) = objective(&problem, &candidate, &sources, &starts, &held);
             if next <= current {
                 state = candidate;
                 current = next;
+                held = costs;
                 steps += 1;
                 mu = (mu / 3.0).max(1e-12);
                 if !small {
@@ -1030,6 +1105,69 @@ mod tests {
     }
 
     #[test]
+    fn refinement_keeps_to_each_views_sources() {
+        let (truth, maps) = plane_scene();
+        let mut views = copy(&truth);
+        perturb(&mut views, 2.0, 0.2, 7);
+        let priors: Vec<[[f64; 4]; 4]> = views.iter().map(|v| v.cam_to_world).collect();
+        let (window, params) = (PatchMatchParams::default(), AlignParams { stride: 3, max_steps: 12, ..AlignParams::default() });
+        let among = |sources: &[Vec<usize>]| {
+            refine_poses_among(&PosedMaps { views: &views, maps: &maps, sources }, 0, &priors, &window, &params, &serial)
+        };
+        let every = refine_poses(&views, &maps, 0, &priors, &window, &params, &serial).unwrap();
+        let n = views.len();
+        let others: Vec<Vec<usize>> = (0..n).map(|v| (0..n).filter(|&s| s != v).collect()).collect();
+        assert_eq!(among(&others).unwrap().cam_to_world, every.cam_to_world, "every other view listed is the plain refinement");
+        let chain: Vec<Vec<usize>> = (0..n).map(|v| vec![if v == 0 { 1 } else { v - 1 }]).collect();
+        assert_ne!(among(&chain).unwrap().cam_to_world, every.cam_to_world, "a shorter list is another refinement");
+        assert!(among(&others[..2]).is_err(), "list count");
+        assert!(among(&vec![vec![0]; n]).is_err(), "a view is no source of its own");
+        assert!(among(&vec![vec![n]; n]).is_err(), "source index");
+    }
+
+    #[test]
+    fn a_pose_stays_within_its_priors_limit() {
+        let (truth, maps) = plane_scene();
+        let mut views = copy(&truth);
+        perturb(&mut views, 2.0, 0.2, 7);
+        let priors: Vec<[[f64; 4]; 4]> = views.iter().map(|v| v.cam_to_world).collect();
+        let window = PatchMatchParams::default();
+        let turned = |poses: &[[[f64; 4]; 4]]| {
+            poses.iter().zip(&priors).map(|(a, b)| {
+                let w = log_rotation(&mul_transpose(&Pose::of(a).rotation, &Pose::of(b).rotation));
+                dot(w, w).sqrt().to_degrees()
+            }).fold(0.0_f64, f64::max)
+        };
+        let free = AlignParams { stride: 3, max_steps: 30, ..AlignParams::default() };
+        let run = |params: &AlignParams| refine_poses(&views, &maps, 0, &priors, &window, params, &serial).unwrap();
+        let unlimited = turned(&run(&free).cam_to_world);
+        assert!(unlimited > 0.1, "the refinement turns a pose {unlimited} degrees");
+        // a tenth of the prior's half a degree
+        let limited = run(&AlignParams { prior_limit: 0.1, ..free });
+        assert!(limited.steps > 0, "it still takes the steps inside the limit");
+        assert!(turned(&limited.cam_to_world) <= 0.05 + 1e-9, "{}", turned(&limited.cam_to_world));
+    }
+
+    #[test]
+    fn a_pose_at_its_limit_leaves_the_others_their_steps() {
+        let (truth, maps) = plane_scene();
+        let mut views = copy(&truth);
+        perturb(&mut views, 0.4, 0.04, 7);
+        // View 1 starts a fifth of a degree off, four times the limit below: it cannot get there.
+        let off = Pose::of(&truth[1].cam_to_world);
+        views[1].cam_to_world = Pose { rotation: mul(&exp_rotation([0.0, 0.2_f64.to_radians(), 0.0]), &off.rotation), centre: off.centre }.matrix();
+        let priors: Vec<[[f64; 4]; 4]> = views.iter().map(|v| v.cam_to_world).collect();
+        let params = AlignParams { stride: 3, max_steps: 30, prior_limit: 0.1, ..AlignParams::default() };
+        let result = refine_poses(&views, &maps, 0, &priors, &PatchMatchParams::default(), &params, &serial).unwrap();
+        let w = log_rotation(&mul_transpose(&Pose::of(&result.cam_to_world[1]).rotation, &Pose::of(&priors[1]).rotation));
+        assert!(dot(w, w).sqrt().to_degrees() <= 0.05 + 1e-9, "view 1 stays at its limit");
+        let (before, _) = pose_error(&priors[2..], &truth[2..]);
+        let (after, _) = pose_error(&result.cam_to_world[2..], &truth[2..]);
+        // Refusing the whole step when view 1 reached its limit left them at 0.84 of where they began.
+        assert!(after < 0.7 * before, "the others go from {before} to {after} degrees");
+    }
+
+    #[test]
     fn invalid_arguments_are_errors() {
         let (views, maps) = plane_scene();
         let priors: Vec<[[f64; 4]; 4]> = views.iter().map(|v| v.cam_to_world).collect();
@@ -1042,6 +1180,7 @@ mod tests {
         assert!(refine_poses(&views, &maps, 0, &priors, &PatchMatchParams { top_k: 0, ..PatchMatchParams::default() }, &params, &serial).is_err(), "top_k");
         for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert!(refine_poses(&views, &maps, 0, &priors, &window, &AlignParams { image_noise: bad, ..AlignParams::default() }, &serial).is_err(), "noise {bad}");
+            assert!(refine_poses(&views, &maps, 0, &priors, &window, &AlignParams { prior_limit: bad, ..AlignParams::default() }, &serial).is_err());
             assert!(refine_poses(&views, &maps, 0, &priors, &window, &AlignParams { prior_translation: bad, ..AlignParams::default() }, &serial).is_err(), "prior {bad}");
         }
         let mut skewed = priors.clone();

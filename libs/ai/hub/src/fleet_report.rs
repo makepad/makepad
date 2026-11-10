@@ -223,23 +223,45 @@ fn io_status(error: std::io::Error) -> NodeStatus {
     }
 }
 
+/// Each peer whose last probe could not connect, and why: said in the hub's log when it changes.
+static CONNECT_FAILED: std::sync::Mutex<std::collections::BTreeMap<String, String>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// A peer's connect outcome (`failed`: why it did not connect), said once per change: `peer
+/// <host:port>: connect failed: <why>`, then `reachable again`. A probe that never leaves the box
+/// (a gate's refusal, an OS that blocks the connect) shows as one line in the hub's log: a Mac's
+/// hub reached 1 of its 7 peers for hours, its connects blocked before they left the box, and its
+/// log said nothing (11-10).
+fn say_connect(peer: &str, failed: Option<String>) {
+    let mut last = CONNECT_FAILED.lock().unwrap_or_else(|e| e.into_inner());
+    match failed {
+        Some(why) if last.get(peer) != Some(&why) => {
+            eprintln!("ai-hub: peer {peer}: connect failed: {why}");
+            last.insert(peer.to_string(), why);
+        }
+        None if last.remove(peer).is_some() => eprintln!("ai-hub: peer {peer}: reachable again"),
+        _ => {}
+    }
+}
+
 fn probe_models(node: &KnownNode) -> ProbeResult {
     use std::net::ToSocketAddrs;
     use std::time::Duration;
     let base = base_url(&node.base_url_or_addr);
     let url = crate::http_client::parse_url(&base).map_err(|_| NodeStatus::NoAnswer("invalid hub address; correct the roster entry".into()))?;
     let host = url.host.trim_start_matches('[').trim_end_matches(']');
-    makepad_network::lan::hub_check_host("ai-hub fleet diagnosis", host).map_err(io_status)?;
-    let addresses = (host, url.port).to_socket_addrs().map_err(io_status)?;
-    let mut failure = NodeStatus::Unreachable;
-    let mut connected = false;
-    for addr in addresses {
-        match makepad_network::lan::hub_connect_timeout("ai-hub fleet diagnosis", &addr, Duration::from_millis(1500)) {
-            Ok(_) => { connected = true; break; }
-            Err(error) => { failure = io_status(error); }
+    let connected = (|| -> std::io::Result<()> {
+        makepad_network::lan::hub_check_host("ai-hub fleet diagnosis", host)?;
+        let mut failure = std::io::Error::new(std::io::ErrorKind::NotFound, "no address");
+        for addr in (host, url.port).to_socket_addrs()? {
+            match makepad_network::lan::hub_connect_timeout("ai-hub fleet diagnosis", &addr, Duration::from_millis(1500)) {
+                Ok(_) => return Ok(()),
+                Err(error) => failure = error,
+            }
         }
-    }
-    if !connected { return Err(failure); }
+        Err(failure)
+    })();
+    say_connect(&format!("{}:{}", url.host, url.port), connected.as_ref().err().map(ToString::to_string));
+    connected.map_err(io_status)?;
     LocalService::new(&base).list_models().map_err(|error| {
         let reason = error.to_string();
         let lower = reason.to_ascii_lowercase();

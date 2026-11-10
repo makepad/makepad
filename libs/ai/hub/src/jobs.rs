@@ -645,6 +645,22 @@ impl JobStore {
         self.release(id);
     }
 
+    /// Forget a finished job now, the caller having what it made: its record goes and the
+    /// server deletes its artifacts. None: no such job, or it has not finished.
+    pub fn discard_finished(&mut self, id: &str) -> Option<EvictedJob> {
+        let done = self.jobs.get(id).is_some_and(|job| matches!(job.state, JobState::Done { .. } | JobState::Error { .. }));
+        if !done {
+            return None;
+        }
+        self.finished.retain(|f| f != id);
+        let job = self.jobs.remove(id)?;
+        let artifact_ids = match job.state {
+            JobState::Done { artifacts } => artifacts.into_iter().map(|artifact| artifact.id).collect(),
+            _ => Vec::new(),
+        };
+        Some(EvictedJob { job_id: id.to_string(), artifact_ids })
+    }
+
     /// Retention: keeps the newest [`FINISHED_RETAIN`] finished records and
     /// evicts the rest oldest-first, returning what was dropped so the
     /// server can also delete the artifacts from its map and disk. Late
@@ -1346,6 +1362,24 @@ pub(crate) mod tests {
         // Zero is refused into a 1-slot queue, never a dead one.
         store.set_queue_limit(0);
         assert_eq!(store.queue_limit(), 1);
+    }
+
+    #[test]
+    fn a_discarded_job_is_forgotten_with_its_artifacts_at_once() {
+        use crate::protocol::ArtifactRefJson;
+        let mut store = JobStore::new();
+        let running = store.submit(params("m"), QueuePolicy::Queue).unwrap();
+        assert_eq!(store.take_next().as_ref(), Some(&running));
+        // a job that has not finished is not discarded
+        assert!(store.discard_finished(&running).is_none());
+        let artifact = ArtifactRefJson { id: format!("{running}-0"), url: format!("/artifact/{running}-0"), content_type: "application/json".to_string(), sha256: None, byte_len: None };
+        store.finish(&running, vec![artifact]);
+        let gone = store.discard_finished(&running).expect("a finished job is discarded");
+        assert_eq!((gone.job_id.as_str(), gone.artifact_ids.clone()), (running.as_str(), vec![format!("{running}-0")]));
+        assert!(store.status_json(&running).is_none(), "gone is gone");
+        assert!(store.discard_finished(&running).is_none());
+        // and it no longer counts against the retention ring
+        assert!(store.evict_expired_finished().is_empty());
     }
 
     #[test]

@@ -56,6 +56,28 @@ impl GrayView {
         Ok(())
     }
 
+    /// This view with `factor` times fewer pixels a side, and the same pose: each new pixel is the mean of its block of
+    /// the old ones, and the intrinsics move with its centre. Columns and rows that fill no block are dropped.
+    /// Returns Err for a zero `factor` or one larger than the image.
+    pub fn downsampled(&self, factor: usize) -> Result<GrayView, String> {
+        if factor == 0 || factor > self.width || factor > self.height {
+            return Err("the factor must be positive and fit the image".into());
+        }
+        let (width, height) = (self.width / factor, self.height / factor);
+        let pixels = (0..width * height)
+            .map(|i| {
+                let (x, y) = (i % width * factor, i / width * factor);
+                let sum: f64 = (y..y + factor).flat_map(|row| &self.pixels[row * self.width + x..row * self.width + x + factor]).map(|&v| f64::from(v)).sum();
+                (sum / (factor * factor) as f64) as f32
+            })
+            .collect();
+        // New pixel x has its centre at old x * factor + (factor - 1) / 2.
+        let scale = factor as f64;
+        let shift = (scale - 1.0) / 2.0;
+        let k = [self.k[0] / scale, self.k[1] / scale, (self.k[2] - shift) / scale, (self.k[3] - shift) / scale];
+        Ok(GrayView { width, height, pixels, k, cam_to_world: self.cam_to_world })
+    }
+
     /// Bilinear sampling at a real pixel position. Returns None outside the
     /// closed image rectangle, for nonfinite positions, or missing pixels.
     pub fn sample(&self, x: f64, y: f64) -> Option<f32> {
@@ -98,6 +120,35 @@ pub fn relative_pose(reference: &GrayView, source: &GrayView) -> ([[f64; 3]; 3],
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downsampled_keeps_each_new_pixels_ray_and_averages_its_block() {
+        let (width, height) = (9, 7);
+        let view = GrayView {
+            width, height,
+            pixels: (0..width * height).map(|i| (i % width) as f32 / 20.0 + (i / width) as f32 / 40.0).collect(),
+            k: [120.0, 110.0, 4.5, 3.25],
+            cam_to_world: [[1.0, 0.0, 0.0, 0.2], [0.0, 1.0, 0.0, -0.1], [0.0, 0.0, 1.0, 0.3], [0.0, 0.0, 0.0, 1.0]],
+        };
+        for factor in [1, 2, 3] {
+            let small = view.downsampled(factor).unwrap();
+            small.check().unwrap();
+            assert_eq!((small.width, small.height, small.cam_to_world), (width / factor, height / factor, view.cam_to_world));
+            let scale = factor as f64;
+            for y in 0..small.height {
+                for x in 0..small.width {
+                    // The block's centre, in old pixels: the same ray, and on a linear image the same value, as there.
+                    let (old_x, old_y) = (x as f64 * scale + (scale - 1.0) / 2.0, y as f64 * scale + (scale - 1.0) / 2.0);
+                    assert!(((x as f64 - small.k[2]) / small.k[0] - (old_x - view.k[2]) / view.k[0]).abs() < 1e-12, "ray x");
+                    assert!(((y as f64 - small.k[3]) / small.k[1] - (old_y - view.k[3]) / view.k[1]).abs() < 1e-12, "ray y");
+                    let value = old_x / 20.0 + old_y / 40.0;
+                    assert!((f64::from(small.pixels[y * small.width + x]) - value).abs() < 1e-6, "value at ({x}, {y}) of {factor}");
+                }
+            }
+        }
+        assert!(view.downsampled(0).is_err(), "zero");
+        assert!(view.downsampled(8).is_err(), "taller than the image");
+    }
 
     fn reference_view() -> GrayView {
         GrayView {

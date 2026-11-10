@@ -152,6 +152,46 @@ script_mod! {
         }
     }
 
+    // Annotate: a marker pen, slanted; the lit one has the accent behind it.
+    let AnnotateButton = GlyphButton{
+        draw_bg +: {
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(1., 1., self.rect_size.x - 2., self.rect_size.y - 2., self.border_radius)
+                sdf.fill(vec4(self.face_hover.xyz, self.face_hover.w * max(self.hover, self.down)))
+                let ink = mix(self.ink, self.ink_hover, self.hover)
+                let mid = self.rect_size * 0.5
+                // the barrel, from lower left to upper right, and its tip
+                sdf.move_to(mid.x - 5.5, mid.y + 5.5)
+                sdf.line_to(mid.x + 4.5, mid.y - 4.5)
+                sdf.stroke(ink, 4.0)
+                sdf.move_to(mid.x - 6.5, mid.y + 6.5)
+                sdf.line_to(mid.x - 5.0, mid.y + 5.0)
+                sdf.stroke(ink, 1.6)
+                return sdf.result
+            }
+        }
+    }
+    let AnnotateOnButton = GlyphButton{
+        draw_bg +: {
+            accent: uniform(theme.color_primary)
+            ink_on: uniform(theme.color_on_primary)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(1., 1., self.rect_size.x - 2., self.rect_size.y - 2., self.border_radius)
+                sdf.fill(mix(self.accent, mix(self.accent, #xFFFFFFFF, 0.15), self.hover))
+                let mid = self.rect_size * 0.5
+                sdf.move_to(mid.x - 5.5, mid.y + 5.5)
+                sdf.line_to(mid.x + 4.5, mid.y - 4.5)
+                sdf.stroke(self.ink_on, 4.0)
+                sdf.move_to(mid.x - 6.5, mid.y + 6.5)
+                sdf.line_to(mid.x - 5.0, mid.y + 5.0)
+                sdf.stroke(self.ink_on, 1.6)
+                return sdf.result
+            }
+        }
+    }
+
     // Send: an arrow on the accent; greyed while there is nothing to send.
     let SendButton = GlyphButton{
         width: 28
@@ -191,6 +231,61 @@ script_mod! {
                 sdf.stroke(self.ring, 1.0)
                 sdf.box(mid.x - 4., mid.y - 4., 8., 8., 1.5)
                 sdf.fill(mix(self.ink, self.ink_hover, self.hover))
+                return sdf.result
+            }
+        }
+    }
+
+    // Speak to the chat: a microphone. Listening turns it red and a click stops it.
+    let MicButton = GlyphButton{
+        width: 28
+        height: 28
+        draw_bg +: {
+            live: uniform(theme.color_error)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(1., 1., self.rect_size.x - 2., self.rect_size.y - 2., self.border_radius)
+                sdf.fill(vec4(self.face_hover.xyz, self.face_hover.w * max(self.hover, self.down)))
+                let ink = mix(self.ink, self.ink_hover, self.hover)
+                let mid = self.rect_size * 0.5
+                sdf.box(mid.x - 2.5, mid.y - 7., 5., 9., 2.5)
+                sdf.stroke(ink, 1.3)
+                sdf.move_to(mid.x - 5., mid.y - 1.)
+                sdf.line_to(mid.x - 5., mid.y + 0.5)
+                sdf.line_to(mid.x - 3., mid.y + 3.5)
+                sdf.line_to(mid.x + 3., mid.y + 3.5)
+                sdf.line_to(mid.x + 5., mid.y + 0.5)
+                sdf.line_to(mid.x + 5., mid.y - 1.)
+                sdf.move_to(mid.x, mid.y + 3.5)
+                sdf.line_to(mid.x, mid.y + 7.)
+                sdf.stroke(ink, 1.3)
+                return sdf.result
+            }
+        }
+    }
+
+    // Stop listening: the microphone on a red disc, in place of the microphone while it listens.
+    let MicLiveButton = GlyphButton{
+        width: 28
+        height: 28
+        draw_bg +: {
+            live: uniform(theme.color_error)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let mid = self.rect_size * 0.5
+                sdf.circle(mid.x, mid.y, min(mid.x, mid.y) - 1.0)
+                sdf.fill(mix(self.live, #xFFFFFFFF, 0.15 * self.hover))
+                sdf.box(mid.x - 2.5, mid.y - 7., 5., 9., 2.5)
+                sdf.fill_keep(#xFFFFFFFF)
+                sdf.move_to(mid.x - 5., mid.y - 1.)
+                sdf.line_to(mid.x - 5., mid.y + 0.5)
+                sdf.line_to(mid.x - 3., mid.y + 3.5)
+                sdf.line_to(mid.x + 3., mid.y + 3.5)
+                sdf.line_to(mid.x + 5., mid.y + 0.5)
+                sdf.line_to(mid.x + 5., mid.y - 1.)
+                sdf.move_to(mid.x, mid.y + 3.5)
+                sdf.line_to(mid.x, mid.y + 7.)
+                sdf.stroke(#xFFFFFFFF, 1.3)
                 return sdf.result
             }
         }
@@ -750,6 +845,33 @@ script_mod! {
                 }
             }
 
+            // The marks drawn on the page for the next line.
+            marks_row := RoundedView{
+                visible: false
+                width: Fill
+                height: Fit
+                flow: Right
+                spacing: 6
+                margin: Inset{bottom: 2}
+                padding: Inset{left: 8 right: 2 top: 2 bottom: 2}
+                align: Align{y: 0.5}
+                draw_bg +: { color: theme.color_u_1 border_radius: 5.0 }
+                marks_label := Label{
+                    width: Fill
+                    max_lines: 1
+                    text: ""
+                    draw_text +: {
+                        color: theme.color_text
+                        text_style: theme.font_regular{font_size: 8.0}
+                    }
+                }
+                Tip{
+                    text: "Clear the marks"
+                    place: TopEnd
+                    marks_clear := CloseButtonSm{}
+                }
+            }
+
             // Pictures that go with the next line.
             attach_row := View{
                 visible: false
@@ -819,6 +941,18 @@ script_mod! {
                     place: TopStart
                     attach_button := AttachButton{}
                 }
+                annotate_tip := Tip{
+                    visible: false
+                    text: "Annotate: draw on the page with a marker for the AI (Esc to stop)"
+                    place: TopStart
+                    annotate_button := AnnotateButton{}
+                }
+                annotate_on_tip := Tip{
+                    visible: false
+                    text: "Annotating: drag on the page to draw (Esc or press to stop; the marks stay)"
+                    place: TopStart
+                    annotate_on_button := AnnotateOnButton{}
+                }
                 // What the turn is about: the page and what is open on it.
                 // It follows the page; it is not removed by hand.
                 target_row := View{
@@ -844,6 +978,18 @@ script_mod! {
                     }
                 }
                 bar_gap := View{width: Fill height: 1}
+                mic_tip := Tip{
+                    text: "Speak to the chat (the headset's microphone)"
+                    place: TopEnd
+                    visible: false
+                    mic_button := MicButton{}
+                }
+                mic_live_tip := Tip{
+                    text: "Stop listening and write what was said"
+                    place: TopEnd
+                    visible: false
+                    mic_live_button := MicLiveButton{}
+                }
                 send_tip := Tip{
                     text: "Send (Enter; Shift+Enter for a new line)"
                     place: TopEnd
@@ -859,6 +1005,20 @@ script_mod! {
     }
 }
 
+/// The composer's microphone button, as the host sets it ([`AiChatPanel::set_voice`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VoiceUi {
+    /// No microphone to offer: the button is not shown.
+    #[default]
+    Hidden,
+    /// Ready: a press starts listening.
+    Idle,
+    /// Listening: the button is red and a press stops it.
+    Listening,
+    /// What was said is being turned into text: the button waits.
+    Busy,
+}
+
 /// What the panel tells its host.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum AiChatPanelAction {
@@ -872,8 +1032,79 @@ pub enum AiChatPanelAction {
     /// The person cleared the selected element under the context line: the
     /// host deselects it on the page (the next target it sets has none).
     SelectionCleared,
+    /// The microphone button was pressed (shown only while the host offers one,
+    /// [`AiChatPanel::set_voice`]): the host starts or stops listening.
+    VoiceToggled,
+    /// The person switched the marker on (true) or off: the host draws, the panel only asks.
+    Annotate(bool),
+    /// The person cleared the marks from the chip.
+    MarksCleared,
+    /// A line is waiting to go with the marks: the host reads the page's picture and answers
+    /// with [`AiChatPanel::release_marks`].
+    MarksWanted,
     #[default]
     None,
+}
+
+/// A line waiting for its marks. The text goes only after the host has every mark resolved and has
+/// read the picture they are drawn in: it is never taken before [`Hold::begin_release`], however
+/// long the host takes to resolve.
+#[derive(Debug, Default, PartialEq)]
+pub struct Hold {
+    text: Option<String>,
+    asked: bool,
+    releasing: bool,
+}
+
+impl Hold {
+    /// The person sent `text` while marks exist.
+    pub fn take_line(&mut self, text: String) {
+        *self = Hold { text: Some(text), asked: false, releasing: false };
+    }
+
+    pub fn is_waiting(&self) -> bool {
+        self.text.is_some()
+    }
+
+    pub fn releasing(&self) -> bool {
+        self.releasing
+    }
+
+    /// Whether the host should be asked for the marks' picture now: once, when the line waits and
+    /// no mark is still being resolved.
+    pub fn wants_picture(&mut self, resolving: usize) -> bool {
+        if self.text.is_some() && !self.asked && !self.releasing && resolving == 0 {
+            self.asked = true;
+            return true;
+        }
+        false
+    }
+
+    /// The host answered with the picture (or none): false when no line waits.
+    pub fn begin_release(&mut self) -> bool {
+        if self.text.is_none() {
+            return false;
+        }
+        self.releasing = true;
+        true
+    }
+
+    /// The line to send now (its marks are in), or to give back.
+    pub fn finish(&mut self) -> Option<String> {
+        self.asked = false;
+        self.releasing = false;
+        self.text.take()
+    }
+}
+
+/// What the panel shows of the host's marks: the Annotate button (when the host offers it), the
+/// marker on, how many marks there are and how many the host is still resolving.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct MarksUi {
+    pub offered: bool,
+    pub on: bool,
+    pub count: usize,
+    pub resolving: usize,
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -893,6 +1124,9 @@ pub struct AiChatPanel {
     /// Pictures waiting for the next line.
     #[rust]
     attachments: Vec<Dropped>,
+    /// The microphone button's state, set by the host.
+    #[rust]
+    voice: VoiceUi,
     /// Dropped pictures being decoded on the task pool.
     #[rust]
     loading: Vec<TaskHandle<Result<Dropped, String>>>,
@@ -906,6 +1140,15 @@ pub struct AiChatPanel {
     /// The attachment chips show this many pictures.
     #[rust]
     attach_shown: Option<(usize, usize)>,
+    /// The host's marks on the page, as it last said.
+    #[rust]
+    marks: MarksUi,
+    /// A line waiting for its marks: it goes once the host has them resolved and their picture.
+    #[rust]
+    hold: Hold,
+    /// The line being sent already has its marks.
+    #[rust]
+    marks_through: bool,
     /// The clipboard read a paste in the composer asked for (a copied
     /// picture is attached; text is the input's own paste).
     #[rust]
@@ -1006,7 +1249,7 @@ impl AiChatPanel {
     /// session's restart for a deploy among them (one ended two chats with the WM, 11-06).
     fn publish_unsaved(&mut self, cx: &mut Cx) {
         let replying = self.engine.as_ref().is_some_and(|e| matches!(e.state().status, Status::Thinking | Status::Streaming | Status::WaitingForTool));
-        let typed = !self.view.text_input(cx, ids!(input)).text().trim().is_empty() || !self.attachments.is_empty();
+        let typed = !self.view.text_input(cx, ids!(input)).text().trim().is_empty() || !self.attachments.is_empty() || self.marks.count > 0;
         let what = if replying { Some("an AI chat reply still coming") } else if typed { Some("an AI chat message not sent") } else { None };
         if what != self.unsaved_published.as_deref() {
             self.unsaved_published = what.map(str::to_string);
@@ -1273,6 +1516,34 @@ impl AiChatPanel {
         cx.seconds_since_app_start()
     }
 
+    /// The microphone button: hidden, ready, listening or waiting ([`VoiceUi`]).
+    pub fn set_voice(&mut self, cx: &mut Cx, voice: VoiceUi) {
+        if self.voice != voice {
+            self.voice = voice;
+            self.view.redraw(cx);
+        }
+    }
+
+    /// What was said, written after what is in the composer (a space between), and the composer
+    /// focused: the person reads it and sends it, or says more.
+    pub fn dictate(&mut self, cx: &mut Cx, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let input = self.view.text_input(cx, ids!(input));
+        let before = input.text();
+        let joined = if before.trim().is_empty() { text.to_string() } else { format!("{} {text}", before.trim_end()) };
+        input.set_text(cx, &joined);
+        input.take_key_focus(cx);
+        self.view.redraw(cx);
+    }
+
+    /// A line the person must read, in the chat's notice style (a microphone that cannot be used).
+    pub fn notify(&mut self, cx: &mut Cx, text: String) {
+        self.note(cx, text);
+    }
+
     /// A line as if typed and sent — the bridge's `/ai?say=`.
     pub fn say(&mut self, cx: &mut Cx, text: String) {
         self.send(cx, text);
@@ -1361,6 +1632,72 @@ impl AiChatPanel {
                 None => i += 1,
             }
         }
+        if self.hold.releasing() && self.loading.is_empty() {
+            self.finish_release(cx);
+        }
+    }
+
+    /// The host's marks changed: the Annotate button and the chip show them, and a held line
+    /// goes on when its marks are resolved.
+    pub fn set_marks(&mut self, cx: &mut Cx, marks: MarksUi) {
+        if self.marks == marks {
+            return;
+        }
+        self.marks = marks;
+        self.view.widget(cx, ids!(annotate_tip)).set_visible(cx, marks.offered && !marks.on);
+        self.view.widget(cx, ids!(annotate_on_tip)).set_visible(cx, marks.offered && marks.on);
+        self.view.widget(cx, ids!(marks_row)).set_visible(cx, marks.count > 0);
+        let words = match (marks.count, marks.resolving) {
+            (1, 0) => "1 mark goes with the next line".to_string(),
+            (n, 0) => format!("{n} marks go with the next line"),
+            (n, r) => format!("{n} marks, {r} still being read"),
+        };
+        self.view.label(cx, ids!(marks_label)).set_text(cx, &words);
+        if self.hold.is_waiting() {
+            if marks.count == 0 && !self.hold.releasing() {
+                // cleared while the line waited: it goes as it was typed
+                let text = self.hold.finish().unwrap_or_default();
+                self.marks_through = true;
+                self.send(cx, text);
+            } else {
+                self.ask_marks(cx);
+            }
+        }
+        self.view.redraw(cx);
+    }
+
+    /// Ask the host for the marks' picture once they are resolved.
+    fn ask_marks(&mut self, cx: &mut Cx) {
+        if self.hold.wants_picture(self.marks.resolving) {
+            cx.widget_action(self.widget_uid(), AiChatPanelAction::MarksWanted);
+        }
+    }
+
+    /// The host has the marks' picture (none: the marks go as text alone): the held line goes
+    /// with it.
+    pub fn release_marks(&mut self, cx: &mut Cx, picture: Option<Source>) {
+        if !self.hold.begin_release() {
+            return;
+        }
+        match picture {
+            Some(source) => self.attach(cx, source),
+            None => self.finish_release(cx),
+        }
+    }
+
+    fn finish_release(&mut self, cx: &mut Cx) {
+        if let Some(text) = self.hold.finish() {
+            self.marks_through = true;
+            self.send(cx, text);
+        }
+    }
+
+    /// The person gave up on the held line: it is back in the composer.
+    fn cancel_held(&mut self, cx: &mut Cx) {
+        if let Some(text) = self.hold.finish() {
+            self.view.text_input(cx, ids!(input)).set_text(cx, &text);
+            self.note(cx, "not sent: the marks were not ready".into());
+        }
     }
 
     /// Take what the task pool finished: pictures fitted for the model, and a restored chat's
@@ -1426,6 +1763,18 @@ impl AiChatPanel {
             self.view.text_input(cx, ids!(input)).set_text(cx, "");
             return;
         }
+        // Marks on the page go with the line: it waits until the host has them resolved and
+        // their picture (the host's `MarksWanted`), and the person's text is never sent without.
+        if self.marks.count > 0 && !self.marks_through && !text.trim().starts_with('/') {
+            self.hold.take_line(text);
+            let input = self.view.text_input(cx, ids!(input));
+            input.set_text(cx, "");
+            input.take_key_focus(cx);
+            self.ask_marks(cx);
+            self.view.redraw(cx);
+            return;
+        }
+        self.marks_through = false;
         let mut sent = false;
         if !self.attachments.is_empty() && !text.trim().starts_with('/') {
             let pictures = std::mem::take(&mut self.attachments);
@@ -1445,7 +1794,9 @@ impl AiChatPanel {
             }
         }
         if !sent {
-            self.ensure_engine().send(&text, now);
+            // Marks whose picture the model cannot take still go, as text.
+            let line = if text.trim().is_empty() && self.marks.count > 0 { "What I marked on the page.".to_string() } else { text };
+            self.ensure_engine().send(&line, now);
         }
         let input = self.view.text_input(cx, ids!(input));
         input.set_text(cx, "");
@@ -1889,7 +2240,16 @@ impl Widget for AiChatPanel {
             if ke.key_code == KeyCode::Escape && composing {
                 let busy = self.engine.as_ref().map(|e| e.state().status.is_busy()).unwrap_or(false);
                 let empty = self.view.text_input(cx, ids!(input)).text().trim().is_empty();
-                if busy {
+                if self.hold.is_waiting() {
+                    self.cancel_held(cx);
+                    self.view.redraw(cx);
+                } else if self.marks.on {
+                    self.marks.on = false;
+                    cx.widget_action(self.widget_uid(), AiChatPanelAction::Annotate(false));
+                    self.view.widget(cx, ids!(annotate_tip)).set_visible(cx, self.marks.offered);
+                    self.view.widget(cx, ids!(annotate_on_tip)).set_visible(cx, false);
+                    self.view.redraw(cx);
+                } else if busy {
                     let now = Self::now(cx);
                     self.ensure_engine().cancel(now);
                     self.view.redraw(cx);
@@ -2042,6 +2402,9 @@ impl Widget for AiChatPanel {
         self.view.button(cx, ids!(stop_button)).set_visible(cx, busy);
         let typed = !self.view.text_input(cx, ids!(input)).text().trim().is_empty() || !self.attachments.is_empty();
         self.view.widget(cx, ids!(send_button)).set_disabled(cx, !typed);
+        self.view.widget(cx, ids!(mic_tip)).set_visible(cx, matches!(self.voice, VoiceUi::Idle | VoiceUi::Busy));
+        self.view.widget(cx, ids!(mic_button)).set_disabled(cx, self.voice == VoiceUi::Busy);
+        self.view.widget(cx, ids!(mic_live_tip)).set_visible(cx, self.voice == VoiceUi::Listening);
 
         let allowed: Vec<String> = self.engine.as_ref().map(|engine| engine.allowed().map(str::to_string).collect()).unwrap_or_default();
         self.view.view(cx, ids!(allowed_row)).set_visible(cx, !allowed.is_empty());
@@ -2358,12 +2721,12 @@ impl WidgetMatchEvent for AiChatPanel {
         let returned = input.returned(actions).map(|(text, _)| text);
         if let Some(text) = returned {
             // Enter on an empty line with no picture sends nothing.
-            if !text.trim().is_empty() || !self.attachments.is_empty() {
+            if !text.trim().is_empty() || !self.attachments.is_empty() || self.marks.count > 0 {
                 self.send(cx, text);
             }
         } else if self.view.button(cx, ids!(send_button)).clicked(actions) {
             let text = input.text();
-            if !text.trim().is_empty() || !self.attachments.is_empty() {
+            if !text.trim().is_empty() || !self.attachments.is_empty() || self.marks.count > 0 {
                 self.send(cx, text);
             }
         }
@@ -2392,6 +2755,9 @@ impl WidgetMatchEvent for AiChatPanel {
         if self.view.button(cx, ids!(attach_button)).clicked(actions) {
             self.pick_pictures(cx);
         }
+        if self.view.button(cx, ids!(mic_button)).clicked(actions) || self.view.button(cx, ids!(mic_live_button)).clicked(actions) {
+            cx.widget_action(self.widget_uid(), AiChatPanelAction::VoiceToggled);
+        }
         for action in actions {
             match action.downcast_ref::<FileDialogAction>() {
                 Some(FileDialogAction::FileSelected { id, paths }) if *id == ATTACH_DIALOG => {
@@ -2406,6 +2772,23 @@ impl WidgetMatchEvent for AiChatPanel {
                 }
                 _ => {}
             }
+        }
+        if self.view.button(cx, ids!(annotate_button)).clicked(actions) {
+            self.marks.on = true;
+            self.view.widget(cx, ids!(annotate_tip)).set_visible(cx, false);
+            self.view.widget(cx, ids!(annotate_on_tip)).set_visible(cx, true);
+            cx.widget_action(self.widget_uid(), AiChatPanelAction::Annotate(true));
+            self.view.redraw(cx);
+        }
+        if self.view.button(cx, ids!(annotate_on_button)).clicked(actions) {
+            self.marks.on = false;
+            self.view.widget(cx, ids!(annotate_tip)).set_visible(cx, true);
+            self.view.widget(cx, ids!(annotate_on_tip)).set_visible(cx, false);
+            cx.widget_action(self.widget_uid(), AiChatPanelAction::Annotate(false));
+            self.view.redraw(cx);
+        }
+        if self.view.button(cx, ids!(marks_clear)).clicked(actions) {
+            cx.widget_action(self.widget_uid(), AiChatPanelAction::MarksCleared);
         }
         if self.view.button(cx, ids!(selection_clear)).clicked(actions) {
             // Shown cleared at once; the host deselects on the page.
@@ -2521,6 +2904,28 @@ mod tests {
 
     /// A call's row reads its arguments as `key: value` text, a string that holds a separator in
     /// quotes; a long one is cut with an ellipsis, short of what a row could hold.
+    /// A line sent with marks still being resolved (the worker is behind a long build) waits: the
+    /// host is not asked for the picture, and the text is not taken, until every mark is in; then
+    /// it is asked once, and the text goes only when released. Giving up returns the text.
+    #[test]
+    fn a_line_waits_for_marks_still_resolving() {
+        let mut hold = Hold::default();
+        hold.take_line("what did I circle?".into());
+        for _ in 0..5 {
+            assert!(!hold.wants_picture(2), "asked for the picture with marks unresolved");
+        }
+        assert!(hold.is_waiting() && !hold.releasing());
+        assert!(!hold.wants_picture(1));
+        assert!(hold.wants_picture(0), "asked once they are all in");
+        assert!(!hold.wants_picture(0), "and only once");
+        assert!(hold.begin_release() && hold.releasing());
+        assert!(!hold.wants_picture(0), "not again while the picture is read");
+        assert_eq!(hold.finish().as_deref(), Some("what did I circle?"));
+        assert!(!hold.is_waiting() && !hold.begin_release(), "nothing left to release");
+        hold.take_line("again".into());
+        assert_eq!(hold.finish().as_deref(), Some("again"), "given up: the text is back");
+    }
+
     #[test]
     fn a_call_s_arguments_read_as_one_plain_line() {
         assert_eq!(args_line(r#"{"views":["front","35,0"],"focus":{"object":"a/b"},"ortho":true}"#), r#"views: [front, "35,0"], focus: {object: a/b}, ortho: true"#);
