@@ -112,6 +112,8 @@ pub struct UnixListener {
     sock: Socket,
 }
 
+// library/std/src/os/unix/net/listener.rs: `#[derive(Debug)]`, it prints the listener it borrows
+#[derive(Debug)]
 pub struct Incoming<'a> {
     listener: &'a UnixListener,
 }
@@ -407,6 +409,18 @@ impl<'a> Iterator for Incoming<'a> {
             Ok((s, _)) => Ok(s),
             Err(e) => Err(e),
         })
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (usize::MAX, None)
+    }
+}
+
+// `for conn in &listener` (cap-std's UnixListener forwards its own IntoIterator to this one)
+impl<'a> IntoIterator for &'a UnixListener {
+    type Item = io::Result<UnixStream>;
+    type IntoIter = Incoming<'a>;
+    fn into_iter(self) -> Incoming<'a> {
+        self.incoming()
     }
 }
 
