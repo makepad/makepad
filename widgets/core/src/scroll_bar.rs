@@ -335,6 +335,10 @@ pub struct ScrollBar {
     /// Whether to enable drag scrolling
     #[live(false)]
     drag_scrolling: bool,
+    /// Whether a mouse drag that starts on a widget inside us, like a button, drags us once it's
+    /// a drag our way, like a touch drag always does (e.g., for a sideways row of buttons).
+    #[live(false)]
+    mouse_drags_from_widgets: bool,
     /// Whether a scroll that starts at this bar's limit stays here instead of going on to a
     /// scrollable around it, like CSS `overscroll-behavior: contain`.
     #[live(false)]
@@ -1063,8 +1067,21 @@ impl ScrollBar {
         // A cancellation is terminal cleanup of this box's own press: it is
         // never an unrelated mouse gesture, so no held mouse stops it.
         // Another drag scroller holding the press doesn't count: nested scrollers split a drag by axis.
+        // With `mouse_drags_from_widgets`, nor does a widget inside us that took this press first (and marked it),
+        // like a button, since we take the press from it once it's a drag our way.
         let touch_event = matches!(event, Event::TouchUpdate(_) | Event::FingerCancel(_));
-        if !touch_event && cx.fingers.is_mouse_held_outside_scrollers(&[scroll_area]) {
+        let pressed_inside = match event {
+            Event::MouseDown(e) if self.mouse_drags_from_widgets && scroll_area.clipped_rect(cx).contains(e.abs) => {
+                Some(e.handled.get()).filter(|holder| !holder.is_empty() && *holder != scroll_area)
+            }
+            _ => None,
+        };
+        let held_outside = match pressed_inside {
+            Some(holder) => cx.fingers.is_mouse_held_outside_scrollers(&[scroll_area, holder]),
+            None if self.mouse_drags_from_widgets => cx.fingers.is_mouse_held_outside_drag_scroller(scroll_area),
+            None => cx.fingers.is_mouse_held_outside_scrollers(&[scroll_area]),
+        };
+        if !touch_event && held_outside {
             if matches!(self.scroll_state, ScrollState::Drag { .. }) {
                 self.stop_drag(cx, dispatch_action);
             }
@@ -1073,13 +1090,19 @@ impl ScrollBar {
 
         let axis = self.axis.vec_index();
         // We can share a press that only nested drag scrollers hold, along an axis none of them took,
-        // and a touch that widgets inside us hold, which we take from them once it's a drag our way.
+        // and a touch (or with `mouse_drags_from_widgets`, a mouse press) that widgets inside us hold,
+        // which we take from them once it's a drag our way.
         let joins = self.scrollable()
             && match event {
                 Event::MouseDown(e) => {
+                    let digit_id = live_id!(mouse).into();
                     e.button.is_primary()
                         && cx.fingers.can_mouse_drag_scroll()
-                        && cx.fingers.can_join_scroll_drag(live_id!(mouse).into(), axis, scroll_area)
+                        && if self.mouse_drags_from_widgets {
+                            cx.fingers.can_take_over_press(digit_id, axis, scroll_area)
+                        } else {
+                            cx.fingers.can_join_scroll_drag(digit_id, axis, scroll_area)
+                        }
                 }
                 Event::TouchUpdate(e) => {
                     let mut held = e
@@ -1164,10 +1187,12 @@ impl ScrollBar {
                             ScrollAxis::Horizontal => (travel.x.abs(), travel.y.abs()),
                             ScrollAxis::Vertical => (travel.y.abs(), travel.x.abs()),
                         };
-                        // Touch only: a mouse drag scrolls from its first move,
-                        // as it always has.
+                        // A mouse drag scrolls from its first move, as it always has, unless it started
+                        // on a widget inside us: then it waits for the slop like a touch does.
                         let slop = touch_drag_slop(TAP_COUNT_DISTANCE, e.device.is_touch());
-                        if e.device.is_touch() && (along < slop || (along < across && !is_shared && !is_held_by_widget)) {
+                        if (e.device.is_touch() || is_held_by_widget)
+                            && (along < slop || (along < across && !is_shared && !is_held_by_widget))
+                        {
                             push_sample(samples, new_abs, e.time);
                             return;
                         }
