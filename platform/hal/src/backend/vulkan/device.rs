@@ -7,7 +7,7 @@ use std::collections::{HashSet, VecDeque};
 use std::ffi::CStr;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -676,6 +676,16 @@ struct PipelineCacheFile {
     /// What the file starts with, naming the app build that saved it. The driver data's length
     /// and hash come next.
     header: Vec<u8>,
+    /// The driver's cache size when it was opened or last saved. A save only writes past that,
+    /// since a launch that found all its pipelines in the cache doesn't grow it.
+    saved: AtomicUsize,
+}
+
+/// How big `cache` is right now, without copying its data out.
+fn pipeline_cache_size(raw: &makepad_vulkan::Device, cache: vk::PipelineCache) -> usize {
+    let Some(call) = raw.table.get_pipeline_cache_data else { return 0 };
+    let mut size = 0;
+    unsafe { call(raw.handle(), cache, &mut size, std::ptr::null_mut()) }.result().map_or(0, |_| size)
 }
 
 /// The device's pipeline cache, primed from its file when there is one. On a phone's GPU
@@ -720,19 +730,24 @@ fn open_pipeline_cache(raw: &makepad_vulkan::Device, properties: &vk::PhysicalDe
     match made {
         Ok(cache) => {
             if log_enabled() { eprintln!("[hal-vulkan] pipeline cache: {} bytes from {}", data.len(), path.as_ref().map_or("nowhere".into(), |p| p.display().to_string())); }
-            (cache, path.map(|path| PipelineCacheFile { path, header }))
+            (cache, path.map(|path| PipelineCacheFile { path, header, saved: AtomicUsize::new(pipeline_cache_size(raw, cache)) }))
         }
         Err(e) => { eprintln!("[hal-vulkan] pipeline cache: {e:?}; pipelines are compiled every run"); (vk::PipelineCache::null(), None) }
     }
 }
 
 impl Device {
-    /// Writes the pipeline cache when pipelines were made since it was last saved (the file is
-    /// replaced whole, through a rename). Called from the compile worker and at exit.
+    /// Writes the pipeline cache when pipelines were made since it was last saved and the cache
+    /// grew (the file is replaced whole, through a rename). Called from the compile worker and at exit.
     pub fn save_pipeline_cache(&self) {
         if self.pipeline_cache == vk::PipelineCache::null() { return; }
         let Some(file) = &self.pipeline_cache_file else { return };
         if self.pipelines_made.swap(0, Ordering::AcqRel) == 0 { return; }
+        let size = pipeline_cache_size(&self.raw, self.pipeline_cache);
+        if size <= file.saved.load(Ordering::Relaxed) {
+            if log_enabled() { eprintln!("[hal-vulkan] pipeline cache didn't grow ({size} bytes), not saved"); }
+            return;
+        }
         let data = match unsafe { self.raw.get_pipeline_cache_data(self.pipeline_cache) } {
             Ok(d) => d,
             Err(e) => { eprintln!("[hal-vulkan] pipeline cache data: {e:?}"); return; }
@@ -753,7 +768,10 @@ impl Device {
             })
             .and_then(|_| std::fs::rename(&tmp, &file.path));
         match written {
-            Ok(()) => if log_enabled() { eprintln!("[hal-vulkan] pipeline cache saved: {} bytes", data.len()); },
+            Ok(()) => {
+                file.saved.store(data.len(), Ordering::Relaxed);
+                if log_enabled() { eprintln!("[hal-vulkan] pipeline cache saved: {} bytes", data.len()); }
+            }
             Err(e) => { let _ = std::fs::remove_file(&tmp); eprintln!("[hal-vulkan] pipeline cache {}: {e}", file.path.display()) }
         }
     }

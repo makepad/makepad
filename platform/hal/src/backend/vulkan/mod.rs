@@ -542,8 +542,8 @@ impl Backend for Vulkan {
             self.flush();
         }
         self.watch_memory(world);
-        // pipelines were made and none for two seconds: the cache goes to its file (compile
-        // worker), even when nothing draws after them
+        // pipelines were made and none for two seconds: the compile worker saves the cache if it
+        // grew, even when nothing draws after them
         if let Some(made) = self.unsaved_pipeline_ns().filter(|made| crate::clock_ns() >= made + PIPELINE_CACHE_SAVE_NS) {
             self.pipeline_cache_queued_ns = made;
             let dev = self.dev.clone();
