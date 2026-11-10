@@ -509,3 +509,18 @@ fn _mm_movemask_epi8() {
 fn _mm_store_si128() {
     intel::_mm_store_si128();
 }
+
+#[test]
+fn _mm_cmpestri() {
+    intel::_mm_cmpestri();
+}
+
+#[test]
+fn _mm_cmpestrm() {
+    intel::_mm_cmpestrm();
+}
+
+#[test]
+fn _mm_extract_epi16() {
+    intel::_mm_extract_epi16();
+}

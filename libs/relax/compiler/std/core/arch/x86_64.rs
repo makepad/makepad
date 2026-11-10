@@ -1749,6 +1749,15 @@ pub fn _mm_mullo_epi16(a: __m128i, b: __m128i) -> __m128i {
 }
 
 #[inline]
+#[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+pub fn _mm_extract_epi16<const IMM8: i32>(a: __m128i) -> i32 {
+    unsafe {
+        lanes128_u16(a)[(IMM8 & 7) as usize] as i32
+    }
+}
+
+#[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse4.1"))]
 #[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub fn _mm_extract_epi32<const IMM8: i32>(a: __m128i) -> i32 {
@@ -5936,4 +5945,136 @@ pub fn _mm256_madd52hi_epu64(a: __m256i, b: __m256i, c: __m256i) -> __m256i {
         i += 1;
     }
     __m256i(r)
+}
+
+// jetscii 0.5.3: the SSE4.2 packed string compares with explicit lengths, element by element
+// (Intel SDM vol. 2B section 4.1 "Imm8 control byte", core_arch x86 sse42.rs)
+pub const _SIDD_UBYTE_OPS: i32 = 0b0000_0000;
+pub const _SIDD_UWORD_OPS: i32 = 0b0000_0001;
+pub const _SIDD_SBYTE_OPS: i32 = 0b0000_0010;
+pub const _SIDD_SWORD_OPS: i32 = 0b0000_0011;
+pub const _SIDD_CMP_EQUAL_ANY: i32 = 0b0000_0000;
+pub const _SIDD_CMP_RANGES: i32 = 0b0000_0100;
+pub const _SIDD_CMP_EQUAL_EACH: i32 = 0b0000_1000;
+pub const _SIDD_CMP_EQUAL_ORDERED: i32 = 0b0000_1100;
+pub const _SIDD_POSITIVE_POLARITY: i32 = 0b0000_0000;
+pub const _SIDD_NEGATIVE_POLARITY: i32 = 0b0001_0000;
+pub const _SIDD_MASKED_POSITIVE_POLARITY: i32 = 0b0010_0000;
+pub const _SIDD_MASKED_NEGATIVE_POLARITY: i32 = 0b0011_0000;
+pub const _SIDD_LEAST_SIGNIFICANT: i32 = 0b0000_0000;
+pub const _SIDD_MOST_SIGNIFICANT: i32 = 0b0100_0000;
+pub const _SIDD_BIT_MASK: i32 = 0b0000_0000;
+pub const _SIDD_UNIT_MASK: i32 = 0b0100_0000;
+
+// IntRes2 of PCMPESTRI / PCMPESTRM (one bit per element of `b`) and the element count
+unsafe fn sidd_cmpestr(a: __m128i, la: i32, b: __m128i, lb: i32, imm8: i32) -> (u32, usize) {
+    let n: usize = if imm8 & 1 != 0 { 8 } else { 16 };
+    let signed = imm8 & 2 != 0;
+    let mut ea = [0i32; 16];
+    let mut eb = [0i32; 16];
+    if n == 8 {
+        let xa = lanes128_u16(a);
+        let xb = lanes128_u16(b);
+        let mut i = 0;
+        while i < 8 {
+            ea[i] = if signed { xa[i] as i16 as i32 } else { xa[i] as i32 };
+            eb[i] = if signed { xb[i] as i16 as i32 } else { xb[i] as i32 };
+            i += 1;
+        }
+    } else {
+        let xa = lanes128_u8(a);
+        let xb = lanes128_u8(b);
+        let mut i = 0;
+        while i < 16 {
+            ea[i] = if signed { xa[i] as i8 as i32 } else { xa[i] as i32 };
+            eb[i] = if signed { xb[i] as i8 as i32 } else { xb[i] as i32 };
+            i += 1;
+        }
+    }
+    // a length is the absolute value of its register, saturated to the element count
+    let la = if la.unsigned_abs() as usize > n { n } else { la.unsigned_abs() as usize };
+    let lb = if lb.unsigned_abs() as usize > n { n } else { lb.unsigned_abs() as usize };
+    let mut res: u32 = 0;
+    let mut j = 0;
+    while j < n {
+        let mut hit;
+        match (imm8 >> 2) & 3 {
+            // equal any: b[j] is one of the valid elements of a
+            0 => {
+                hit = false;
+                let mut i = 0;
+                while j < lb && i < la {
+                    hit |= ea[i] == eb[j];
+                    i += 1;
+                }
+            }
+            // ranges: b[j] lies in one of the valid pairs a[i] ..= a[i + 1]
+            1 => {
+                hit = false;
+                let mut i = 0;
+                while j < lb && i + 1 < la {
+                    hit |= ea[i] <= eb[j] && eb[j] <= ea[i + 1];
+                    i += 2;
+                }
+            }
+            // equal each: the same element at the same place, or both strings are over
+            2 => {
+                hit = if j < la && j < lb { ea[j] == eb[j] } else { j >= la && j >= lb };
+            }
+            // equal ordered: a, as far as it is valid, matches b from j on
+            _ => {
+                hit = true;
+                let mut i = 0;
+                while i < n - j && i < la {
+                    hit &= j + i < lb && ea[i] == eb[j + i];
+                    i += 1;
+                }
+            }
+        }
+        if hit {
+            res |= 1 << j;
+        }
+        j += 1;
+    }
+    match (imm8 >> 4) & 3 {
+        1 => res ^= (1u32 << n) - 1,
+        // masked negative: only the valid elements of b are negated
+        3 => res ^= (1u32 << lb) - 1,
+        _ => {}
+    }
+    (res, n)
+}
+
+#[inline]
+#[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse4.2"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(4))]
+pub fn _mm_cmpestri<const IMM8: i32>(a: __m128i, la: i32, b: __m128i, lb: i32) -> i32 {
+    let (res, n) = unsafe { sidd_cmpestr(a, la, b, lb, IMM8) };
+    if res == 0 {
+        n as i32
+    } else if IMM8 & _SIDD_MOST_SIGNIFICANT != 0 {
+        31 - res.leading_zeros() as i32
+    } else {
+        res.trailing_zeros() as i32
+    }
+}
+
+#[inline]
+#[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse4.2"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(4))]
+pub fn _mm_cmpestrm<const IMM8: i32>(a: __m128i, la: i32, b: __m128i, lb: i32) -> __m128i {
+    let (res, n) = unsafe { sidd_cmpestr(a, la, b, lb, IMM8) };
+    if IMM8 & _SIDD_UNIT_MASK == 0 {
+        return __m128i([res as i64, 0]);
+    }
+    let width = 16 / n;
+    let mut r = [0u8; 16];
+    let mut i = 0;
+    while i < 16 {
+        if (res >> (i / width)) & 1 != 0 {
+            r[i] = 0xff;
+        }
+        i += 1;
+    }
+    unsafe { from128_u8(r) }
 }
