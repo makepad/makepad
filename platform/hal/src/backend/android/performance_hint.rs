@@ -1,37 +1,26 @@
 use super::xr::sys::ModuleLoader;
 use std::ffi::c_void;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 type GetManagerFn = unsafe extern "C" fn() -> *mut c_void;
 type CreateSessionFn = unsafe extern "C" fn(*mut c_void, *const i32, usize, i64) -> *mut c_void;
-type UpdateTargetFn = unsafe extern "C" fn(*mut c_void, i64) -> i32;
 type ReportActualFn = unsafe extern "C" fn(*mut c_void, i64) -> i32;
 type CloseSessionFn = unsafe extern "C" fn(*mut c_void);
 
-/// How many gaps between vsync ticks we measure the vsync period over.
-const PERIOD_GAPS: usize = 31;
-/// A gap this long means ticks paused while nothing drew, which isn't a vsync period or part of a frame's work.
-const PAUSE: Duration = Duration::from_millis(250);
-
-/// A performance hint session (ADPF, API 33+) for the thread that draws. Each vsync cycle that drew a frame reports
-/// its CPU time against the vsync period, so Android can raise clocks or move the thread to a bigger core in time.
+/// A performance hint session (ADPF, API 33+) for the thread that draws. Each cycle that drew a frame reports
+/// its CPU time against the beat period, so Android can raise clocks or move the thread to a bigger core in time.
 pub struct PerformanceHint {
     session: *mut c_void,
-    update_target: UpdateTargetFn,
     report_actual: ReportActualFn,
     close_session: CloseSessionFn,
     _lib: ModuleLoader,
-    target: Duration,
-    gaps: [Duration; PERIOD_GAPS],
-    gap_count: usize,
-    last_vsync: Option<Instant>,
-    cycle_start: Duration,
-    frame_drawn: bool,
+    cycle_start: Option<Duration>,
+    beat: Option<(u64, Duration)>,
 }
 
 impl PerformanceHint {
     /// Returns `None` below API 33, and on devices that don't support performance hints.
-    pub fn for_this_thread() -> Option<Self> {
+    pub fn for_this_thread(beat_period: Duration) -> Option<Self> {
         unsafe extern "C" {
             fn gettid() -> i32;
         }
@@ -39,71 +28,55 @@ impl PerformanceHint {
         let lib = ModuleLoader::load("libandroid.so").ok()?;
         let get_manager: GetManagerFn = lib.get_symbol("APerformanceHint_getManager").ok()?;
         let create_session: CreateSessionFn = lib.get_symbol("APerformanceHint_createSession").ok()?;
-        let update_target = lib.get_symbol("APerformanceHint_updateTargetWorkDuration").ok()?;
         let report_actual = lib.get_symbol("APerformanceHint_reportActualWorkDuration").ok()?;
         let close_session = lib.get_symbol("APerformanceHint_closeSession").ok()?;
-        let target = Duration::from_micros(16_667);
         let session = unsafe {
             let manager = get_manager();
             if manager.is_null() {
                 return None;
             }
-            create_session(manager, &render_thread_id, 1, target.as_nanos() as i64)
+            create_session(manager, &render_thread_id, 1, beat_period.as_nanos() as i64)
         };
         if session.is_null() {
             return None;
         }
         Some(Self {
             session,
-            update_target,
             report_actual,
             close_session,
             _lib: lib,
-            target,
-            gaps: [Duration::ZERO; PERIOD_GAPS],
-            gap_count: 0,
-            last_vsync: None,
-            cycle_start: thread_cpu_time(),
-            frame_drawn: false,
+            cycle_start: None,
+            beat: None,
         })
     }
 
-    fn record_vsync(&mut self, vsync_time: Instant) {
-        let Some(last_vsync) = self.last_vsync.replace(vsync_time) else { return };
-        let gap = vsync_time.saturating_duration_since(last_vsync);
-        if gap >= PAUSE {
-            self.frame_drawn = false;
-            return;
-        }
-        self.gaps[self.gap_count] = gap;
-        self.gap_count += 1;
-        if self.gap_count == PERIOD_GAPS {
-            // The median ignores both a late tick's long gap and the short one right after it.
-            self.gaps.sort();
-            let period = self.gaps[PERIOD_GAPS / 2];
-            if period.abs_diff(self.target) > self.target / 20 {
-                self.target = period;
-                unsafe { (self.update_target)(self.session, period.as_nanos() as i64) };
-            }
-            self.gap_count = 0;
-        }
+    /// Called on each beat, before its drawing, with the app's `repaint_id`. A beat after a pause starts a new
+    /// cycle, since the pause isn't part of a frame's work.
+    pub fn start_frame(&mut self, repaint_id: u64, after_pause: bool) {
+        let cycle_start = match self.cycle_start {
+            Some(start) if !after_pause => start,
+            _ => thread_cpu_time(),
+        };
+        self.beat = Some((repaint_id, cycle_start));
     }
 
-    /// Called on each frame tick, before its drawing.
-    pub fn start_cycle(&mut self, vsync_time: Instant) {
-        self.record_vsync(vsync_time);
+    /// Called instead of `start_frame` for a beat whose frame isn't reported, so the next frame's cycle starts
+    /// at its own beat.
+    pub fn skip_frame(&mut self) {
+        self.cycle_start = None;
+    }
+
+    /// Called at the end of each loop turn. Once a frame went out to the GPU, reports its cycle's CPU time.
+    pub fn finish_frame(&mut self, repaint_id: u64) {
+        let Some((beat_repaint_id, cycle_start)) = self.beat.take() else { return };
         let now = thread_cpu_time();
-        // The events handled between ticks compete for the same vsync, so the whole cycle counts.
-        if self.frame_drawn {
-            let work = now.saturating_sub(self.cycle_start);
+        // a beat that painted nothing (video polling, shader compiles) drew no frame
+        if repaint_id != beat_repaint_id {
+            let work = now.saturating_sub(cycle_start);
             unsafe { (self.report_actual)(self.session, work.as_nanos().max(1) as i64) };
         }
-        self.frame_drawn = false;
-        self.cycle_start = now;
-    }
-
-    pub fn mark_frame_drawn(&mut self) {
-        self.frame_drawn = true;
+        // The events handled until the next beat compete for its frame, so the whole cycle counts.
+        self.cycle_start = Some(now);
     }
 }
 
