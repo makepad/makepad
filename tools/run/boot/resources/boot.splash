@@ -530,15 +530,15 @@ let Quad = {
         sdf_sharpness: uniform(1.0)
         sdf_luma_bias: uniform(0.03)
         pixel: fn() {
+            // `uv` is in texels, so it stays right when the host's atlas grows
             let t = mix(self.uv.xy, self.uv.zw, self.pos)
             let tex_size = self.grayscale_texture.size()
-            let half_texel = vec2(0.5) / tex_size
-            let p = clamp(t, self.uv.xy + half_texel, self.uv.zw - half_texel)
+            let p = clamp(t, self.uv.xy + vec2(0.5), self.uv.zw - vec2(0.5)) / tex_size
             if self.color_glyph > 0.5 {
                 let c = self.grayscale_texture.sample(p)
                 return vec4(c.rgb * c.a, c.a)
             }
-            let scale = (length(dFdx(t) * tex_size) + length(dFdy(t) * tex_size)) * 0.5
+            let scale = (length(dFdx(t)) + length(dFdy(t))) * 0.5
             let coverage = self.sdf(scale, p, self.color)
             return coverage * vec4(self.color.rgb * self.color.a, self.color.a)
         }

@@ -110,7 +110,6 @@ pub struct MsdfComplexitySettings {
 #[derive(Clone, Copy, Debug)]
 pub struct RasterizedGlyph {
     pub atlas_kind: AtlasKind,
-    pub atlas_size: Size<usize>,
     pub atlas_image_bounds: Rect<usize>,
     pub atlas_image_padding: usize,
     pub atlas_plane: u8,

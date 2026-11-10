@@ -652,8 +652,8 @@ impl Fonts {
                     }
                     client.on_opened(font, status);
                 }
-                HalFontEvent::Atlas { kind, texture, width, height, generation } => {
-                    client.on_atlas(kind, width, height, generation);
+                HalFontEvent::Atlas { kind, texture, generation, .. } => {
+                    client.on_atlas(kind, generation);
                     if kind == wire::atlas::RASTER {
                         self.atlas_texture.set_hal_lent(cx, texture);
                     } else {

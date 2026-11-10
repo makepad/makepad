@@ -131,7 +131,6 @@ pub struct GlyphClient {
     /// The pending list's storage, handed back by [`GlyphClient::recycle`]: a draw that
     /// waits on glyphs lists them every frame, and that list allocates once, not per frame.
     out_pending: Vec<(u32, u32, u32, u32)>,
-    raster_size: Size<usize>,
     raster_generation: u32,
     slug_generation: u32,
     /// bumped when entries are taken away (eviction, a new atlas): runs built on them are stale
@@ -343,9 +342,8 @@ impl GlyphClient {
                 };
                 Some(RasterizedGlyph {
                     atlas_kind: AtlasKind::Unresolved,
-                    // No AtlasInfo is needed to draw an unresolved instance. Its UVs are set
+                    // No AtlasInfo is needed to draw an unresolved instance. Its texels are set
                     // separately from these bounds, which describe the eventual glyph rectangle.
-                    atlas_size: Size::new(1, 1),
                     atlas_image_bounds: Rect::new(Point::new(0, 0), size),
                     atlas_image_padding: padding,
                     atlas_plane: 0,
@@ -385,7 +383,6 @@ impl GlyphClient {
                 wire::glyph::MSDF => AtlasKind::Msdf,
                 _ => AtlasKind::Grayscale,
             },
-            atlas_size: self.raster_size,
             atlas_image_bounds: Rect::new(Point::new(e.rect[0] as usize, e.rect[1] as usize), Size::new(e.rect[2] as usize, e.rect[3] as usize)),
             atlas_image_padding: e.padding as usize,
             atlas_plane: e.plane as u8,
@@ -463,13 +460,10 @@ impl GlyphClient {
         }
     }
 
-    pub fn on_atlas(&mut self, kind: u32, width: u32, height: u32, generation: u32) {
+    pub fn on_atlas(&mut self, kind: u32, generation: u32) {
         let old = if kind == wire::atlas::SLUG { &mut self.slug_generation } else { &mut self.raster_generation };
         let changed = *old != 0 && *old != generation;
         *old = generation;
-        if kind == wire::atlas::RASTER {
-            self.raster_size = Size::new(width as usize, height as usize);
-        }
         if changed {
             // every entry of the older generation is void
             let slug = kind == wire::atlas::SLUG;

@@ -96,7 +96,6 @@ impl Rasterizer {
         }
         Some(RasterizedGlyph {
             source: Default::default(),
-            atlas_size: self.atlas.size(),
             atlas_image_bounds: slot.rect,
             atlas_plane: slot.plane.index(),
             ..published.glyph
@@ -429,7 +428,6 @@ impl Rasterizer {
         RasterizedGlyph {
             source: Default::default(),
             atlas_kind: AtlasKind::Grayscale,
-            atlas_size: self.atlas.size(),
             atlas_image_bounds: slot.rect,
             atlas_image_padding: plan.padding,
             atlas_plane: slot.plane.index(),
@@ -458,7 +456,6 @@ impl Rasterizer {
                 return Some(RasterizedGlyph {
             source: Default::default(),
                     atlas_kind: AtlasKind::Msdf,
-                    atlas_size: self.atlas.size(),
                     atlas_image_bounds: slot.rect,
                     atlas_image_padding: plan.padding,
                     atlas_plane: AtlasPlane::R.index(),
@@ -508,7 +505,6 @@ impl Rasterizer {
         Some(RasterizedGlyph {
             source: Default::default(),
             atlas_kind: AtlasKind::Color,
-            atlas_size: self.atlas.size(),
             atlas_image_bounds: slot.rect,
             atlas_image_padding: COLOR_PADDING,
             atlas_plane: AtlasPlane::R.index(),

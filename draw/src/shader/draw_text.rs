@@ -87,6 +87,8 @@ script_mod! {
 
         pos: varying(vec2f)
         t: varying(vec2f)
+        t_min: varying(vec2f)
+        t_max: varying(vec2f)
         world: varying(vec4f)
 
         radius: uniform(float)
@@ -141,7 +143,7 @@ script_mod! {
             )
 
             self.pos = mix(p_normalized_raster, pos_slug, use_slug)
-            self.t = mix(self.t_min, self.t_max, p_normalized_raster.xy)
+            self.set_atlas_uvs(p_normalized_raster.xy)
             let final_pos = mix(p_clipped_raster, p_clipped_slug, use_slug)
             self.world = self.draw_list.view_transform * vec4(
                 final_pos.x,
@@ -157,20 +159,29 @@ script_mod! {
 
 
 
+        // The glyph's atlas texels as UVs of the atlas as it is now, so a draw recorded before
+        // the atlas grew still samples its glyph. `t`, `t_min` and `t_max` are UVs.
+        set_atlas_uvs: fn(p: vec2) {
+            let atlas_size = self.color_texture.size()
+            self.t_min = self.atlas_min / atlas_size
+            self.t_max = self.atlas_max / atlas_size
+            self.t = mix(self.t_min, self.t_max, p)
+        }
+
         slug_curve_offset: fn() -> float {
-            return self.t_min.x
+            return self.atlas_min.x
         }
 
         slug_curve_count: fn() -> float {
-            return self.t_min.y
+            return self.atlas_min.y
         }
 
         slug_band_offset: fn() -> float {
-            return self.t_max.x
+            return self.atlas_max.x
         }
 
         slug_band_count: fn() -> float {
-            return self.t_max.y
+            return self.atlas_max.y
         }
 
         slug_fill_flags: fn() -> float {
@@ -413,10 +424,12 @@ pub struct DrawText {
     pub sdf_sharpness: f32,
     #[live(0.03)]
     pub sdf_luma_bias: f32,
+    /// The glyph's atlas rectangle in texels (a slug glyph's curve and band offset and count),
+    /// so a recorded draw stays right when the atlas grows.
     #[live]
-    pub t_min: Vec2f,
+    pub atlas_min: Vec2f,
     #[live]
-    pub t_max: Vec2f,
+    pub atlas_max: Vec2f,
     #[live]
     pub atlas_plane: f32,
     #[live]
@@ -1829,8 +1842,8 @@ impl DrawText {
         }
         self.texture_index = 3.0;
         self.atlas_plane = glyph.fill_flags as f32;
-        self.t_min = vec2(glyph.curve_offset as f32, glyph.curve_count as f32);
-        self.t_max = vec2(glyph.band_offset as f32, glyph.band_count as f32);
+        self.atlas_min = vec2(glyph.curve_offset as f32, glyph.curve_count as f32);
+        self.atlas_max = vec2(glyph.band_offset as f32, glyph.band_count as f32);
         let slice = self.draw_vars.as_slice();
 
         output.extend_from_slice(slice);
@@ -1846,13 +1859,6 @@ impl DrawText {
         glyph: RasterizedGlyph,
         output: &mut RecordingBuffer,
     ) {
-        fn tex_coord(point: Point<usize>, size: Size<usize>) -> Point<f32> {
-            Point::new(
-                point.x as f32 / size.width as f32,
-                point.y as f32 / size.height as f32,
-            )
-        }
-
         let texture_index = match glyph.atlas_kind {
             AtlasKind::Grayscale => 0.0,
             AtlasKind::Color => 1.0,
@@ -1861,16 +1867,12 @@ impl DrawText {
         };
 
         let atlas_image_bounds = glyph.atlas_image_bounds;
-        let atlas_size = glyph.atlas_size;
-        let (t_min, t_max) = if glyph.atlas_kind == AtlasKind::Unresolved {
+        let (atlas_min, atlas_max) = if glyph.atlas_kind == AtlasKind::Unresolved {
             // The image bounds below still describe the full glyph; the shader samples only
             // the reserved transparent texel, even before we know the host atlas dimensions.
-            (Point::new(0.0, 0.0), Point::new(0.0, 0.0))
+            (Point::new(0, 0), Point::new(0, 0))
         } else {
-            (
-                tex_coord(atlas_image_bounds.min(), atlas_size),
-                tex_coord(atlas_image_bounds.max(), atlas_size),
-            )
+            (atlas_image_bounds.min(), atlas_image_bounds.max())
         };
 
         let atlas_image_padding = glyph.atlas_image_padding;
@@ -1904,8 +1906,8 @@ impl DrawText {
         }
         self.texture_index = texture_index;
         self.atlas_plane = glyph.atlas_plane as f32;
-        self.t_min = vec2(t_min.x, t_min.y);
-        self.t_max = vec2(t_max.x, t_max.y);
+        self.atlas_min = vec2(atlas_min.x as f32, atlas_min.y as f32);
+        self.atlas_max = vec2(atlas_max.x as f32, atlas_max.y as f32);
         let slice = self.draw_vars.as_slice();
 
         output.extend_from_slice(slice);

@@ -59,7 +59,6 @@ pub struct Text {
     font: Font,
     opened: bool,
     atlas: Id,
-    atlas_size: [f32; 2],
     generation: u32,
     ready: HashMap<Key, GlyphEntry>,
     pending: HashSet<Key>,
@@ -81,7 +80,6 @@ impl Text {
             font,
             opened: false,
             atlas: Id::NONE,
-            atlas_size: [1.0; 2],
             generation: 0,
             ready: HashMap::new(),
             pending: HashSet::new(),
@@ -109,9 +107,8 @@ impl Text {
             HalEvent::AtlasInfo {
                 kind: wire::atlas::RASTER,
                 texture,
-                w,
-                h,
                 generation,
+                ..
             } => {
                 if self.generation != 0 && self.generation != generation {
                     self.ready.clear();
@@ -119,7 +116,6 @@ impl Text {
                 }
                 self.generation = generation;
                 self.atlas = texture;
-                self.atlas_size = [w as f32, h as f32];
             }
             HalEvent::GlyphsReady {
                 font: FONT_ID,
@@ -419,7 +415,8 @@ impl Text {
     }
 
     /// Identical raster metric convention to DrawText: origin is relative to
-    /// the baseline, with padding around the host's raster rectangle.
+    /// the baseline, with padding around the host's raster rectangle. The UVs are texels, so
+    /// they stay right when the host's atlas grows.
     pub fn quad(&self, entry: GlyphEntry, baseline: [f32; 2], size: f32) -> ([f32; 4], [f32; 4]) {
         let scale = size / entry.scale;
         let [x, y, w, h] = entry.rect.map(|v| v as f32);
@@ -430,7 +427,6 @@ impl Text {
             w * scale,
             h * scale,
         ];
-        let [aw, ah] = self.atlas_size;
-        (rect, [x / aw, y / ah, (x + w) / aw, (y + h) / ah])
+        (rect, [x, y, x + w, y + h])
     }
 }
