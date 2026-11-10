@@ -5379,6 +5379,35 @@ impl<'a> Parser<'a> {
             self.pending_shape.truncate(pend0);
             return Ok(None);
         }
+        // An `$e:expr` fragment keeps the attributes it was matched with (rustc_parse nonterminal.rs
+        // matches it with parse_expr_force_collect, attributes included), so a false `#[cfg]` at its
+        // start removes the element it is transcribed as: `&[$($scope,)+]` over
+        // `#[cfg(a)] Scope::A, #[cfg(not(a))] Scope::B`. Each transcription put the fragment in
+        // invisible parentheses (one pair per macro it was forwarded through); a true `#[cfg]` is
+        // left to the parenthesised expression.
+        let mut depth = 0;
+        while attrs.is_empty() && self.nth(depth) == T::OpenParen && self.synth_parens.contains(&{ self.toks.at(self.pos + depth).lo }) { depth += 1; }
+        if depth > 0 && self.nth(depth) == T::Pound && self.nth(depth + 1) == T::OpenBracket && self.nth(depth + 2) != T::Eof
+            && matches!(self.tok_text(self.toks.at(self.pos + depth + 2)), b"cfg" | b"cfg_attr")
+        {
+            // the fragment is the whole element: its outermost `)` ends the element
+            let end = self.tok_close_of(self.pos, self.toks.len()).filter(|&close| matches!(self.nth(close + 1 - self.pos), T::Comma | T::CloseParen | T::CloseBracket));
+            if let Some(end) = end {
+                let start = self.pos;
+                self.pos += depth;
+                let inner = self.outer_attrs()?;
+                if !self.cfg_present(&inner) {
+                    self.parse_stripped(|p| p.expr_bp(0, r))?;
+                    if self.pos + depth == end + 1 && (0..depth).all(|i| self.nth(i) == T::CloseParen) {
+                        self.pos = end + 1;
+                        self.pending_shape.truncate(pend0);
+                        return Ok(None);
+                    }
+                }
+                self.pos = start;
+                self.pending_shape.truncate(pend0);
+            }
+        }
         self.closure_attrs(&attrs)?;
         let at = self.lo();
         let outer = std::mem::replace(&mut self.list_elem_at, (at, if paren { ELEM_PAREN_FIRST } else { ELEM_LIST }));
