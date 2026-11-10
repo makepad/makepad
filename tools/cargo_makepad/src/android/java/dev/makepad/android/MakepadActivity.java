@@ -440,6 +440,9 @@ class MakepadSurface
 
         setFocusable(true);
         setFocusableInTouchMode(true);
+        // Makepad draws its own focus. Android's default highlight would gray out the
+        // whole surface whenever it gets focus outside touch mode.
+        setDefaultFocusHighlightEnabled(false);
         requestFocus();
         setOnTouchListener(this);
         setOnKeyListener(this);
