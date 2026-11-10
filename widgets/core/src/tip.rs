@@ -1458,15 +1458,15 @@ mod tests {
             })
         };
 
-        // A tap: the finger lands, the button takes the focus, the finger lifts.
+        // A tap: the finger lands, the finger lifts, and the button takes the focus.
         assert_eq!(deliver(&mut cx, &mut root, &mut layer, &touch(1, TouchState::Start)), None);
-        assert_eq!(settle_focus(&mut cx, &mut root, &mut layer), None, "the tap's focus raises no tip");
-        assert!(cx.has_key_focus(button.area()), "the tap did hand the button the focus");
         assert_eq!(
             deliver(&mut cx, &mut root, &mut layer, &touch(1, TouchState::Stop)),
             None,
-            "nor does the tap leave one"
+            "the tap leaves no tip"
         );
+        assert_eq!(settle_focus(&mut cx, &mut root, &mut layer), None, "nor does the tap's focus raise one");
+        assert!(cx.has_key_focus(button.area()), "the tap did hand the button the focus");
 
         // A tip up when a finger lands goes with the press.
         let to = at(&root, &[0]).area();
