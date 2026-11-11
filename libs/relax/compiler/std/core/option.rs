@@ -141,6 +141,12 @@ impl<T> Option<T> {
             None => default(),
         }
     }
+    pub fn map_or_default<U: Default, F: FnOnce(T) -> U>(self, f: F) -> U {
+        match self {
+            Some(t) => f(t),
+            None => U::default(),
+        }
+    }
     pub const fn ok_or<E>(self, err: E) -> Result<T, E> {
         match self {
             Some(v) => Ok(v),
