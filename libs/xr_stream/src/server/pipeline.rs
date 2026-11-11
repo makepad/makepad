@@ -293,23 +293,65 @@ impl Uplink {
     }
 }
 
+/// How long the headset's menu stays down to be a hold, not a press (ns).
+const MENU_HOLD_NS: u64 = 600_000_000;
+
+/// The headset's menu: the left controller's menu button, or a tracked left hand's menu gesture.
+#[derive(Default)]
+pub(crate) struct MenuPress {
+    /// When it went down (its pose's sample time), and whether the button was part of it.
+    down_at: Option<u64>,
+    button: bool,
+    /// Down [`MENU_HOLD_NS`]: a hold, until its release.
+    held: bool,
+}
+
+impl MenuPress {
+    /// One pose (`at`: its sample time): whether the menu is held now. The button's short press
+    /// turns the stream on and off at its release; a hold turns it on.
+    fn step(&mut self, shared: &ServerShared, at: u64, button: bool, gesture: bool) -> bool {
+        match (button || gesture, self.down_at) {
+            (true, None) => *self = MenuPress { down_at: Some(at), button, held: false },
+            (true, Some(from)) => {
+                self.button |= button;
+                if !self.held && at.saturating_sub(from) >= MENU_HOLD_NS {
+                    self.held = true;
+                    shared.set_streaming(true);
+                    (shared.log)("xr host: the headset's menu held");
+                }
+            }
+            (false, Some(from)) => {
+                // (a release seen only after the hold's time, a gap in the poses, is no press)
+                if self.button && !self.held && at.saturating_sub(from) < MENU_HOLD_NS {
+                    shared.set_streaming(!shared.streaming());
+                    (shared.log)(if shared.streaming() { "xr host: the headset's menu button resumed the stream" } else { "xr host: the headset's menu button paused the stream" });
+                }
+                *self = MenuPress::default();
+            }
+            (false, None) => {}
+        }
+        self.held
+    }
+}
+
 /// A pose from the headset: to the app's XR window, and kept to match its picture.
 fn take_pose(shared: &ServerShared, poses: &Mutex<VecDeque<(u64, Arrived)>>, seq: u64, sample_ns: u64, display_ns: u64, frame: &[u8]) -> bool {
-    // the left controller's menu button turns the stream on and off (unless the app took that
-    // over, `set_menu_toggles_streaming`): never seen by the app then
+    // the left controller's menu (unless the app took the button over,
+    // `set_menu_toggles_streaming`): its button never reaches the app; a short press turns the
+    // stream on and off, a hold reaches the app as HOLD_MENU on the left controller
     let mut masked = None;
     if shared.menu_toggles.load(Ordering::Acquire) {
-        use makepad_hal::{buffers::{read_items, Wire}, xr_controller, XrFrame};
+        use makepad_hal::{buffers::{read_items, Wire}, xr_controller, xr_hand, XrFrame};
         if let Some(mut f) = read_items::<XrFrame>(frame, 1).next() {
+            let gesture = f.hands[0].flags & xr_hand::MENU_PRESSED != 0;
             let left = &mut f.controllers[0];
-            let down = left.buttons & xr_controller::ACTIVE != 0 && left.buttons & xr_controller::CLICK_MENU != 0;
-            if down && !shared.menu_down.swap(true, Ordering::AcqRel) {
-                shared.set_streaming(!shared.streaming());
-            } else if !down {
-                shared.menu_down.store(false, Ordering::Release);
-            }
-            if left.buttons & xr_controller::CLICK_MENU != 0 {
+            let button = left.buttons & xr_controller::ACTIVE != 0 && left.buttons & xr_controller::CLICK_MENU != 0;
+            let held = shared.menu.lock().unwrap().step(shared, sample_ns, button, gesture);
+            if left.buttons & xr_controller::CLICK_MENU != 0 || held {
                 left.buttons &= !xr_controller::CLICK_MENU;
+                if held {
+                    left.buttons |= xr_controller::HOLD_MENU;
+                }
                 let mut bytes = Vec::with_capacity(frame.len());
                 f.write(&mut bytes);
                 masked = Some(bytes);

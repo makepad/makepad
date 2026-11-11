@@ -1,13 +1,14 @@
 //! The wrist menu: a panel on a card at the left controller (or the left wrist of a tracked
 //! hand). It opens with a button on the left controller (by default Y) or, with tracked hands,
-//! while the left palm is open and turned up. The right hand's aim points at it (a tracked
-//! hand's index tip touches it), its trigger (index pinch) presses.
+//! while the left palm is open and turned up. The right hand's tip (the controller's, or a tracked
+//! hand's index tip) touches it, else the right hand's aim points at it. Its trigger (index pinch)
+//! presses the cell under it, and so does the tip pushed through a cell, as a finger presses a key.
 
-use crate::card::Card;
+use crate::card::{Card, PUSH_M};
 use crate::haptic::{Haptics, HOVER, PRESS};
 use crate::input::{self, Buttons, Trigger};
 use crate::panel::XrPanel;
-use makepad_widgets::makepad_platform::event::xr::{XrController, XrHand, XrState};
+use makepad_widgets::makepad_platform::event::xr::{XrController, XrState};
 use makepad_widgets::*;
 
 script_mod! {
@@ -52,7 +53,10 @@ pub struct SliderDrag {
 struct SliderCapture {
     drag: SliderDrag,
     card: Card,
+    /// It follows the tip on the card (else the aim ray).
     poke: bool,
+    /// A tip pushed it: it ends when the tip comes back out in front (else at the trigger's release).
+    pushed: bool,
     tick: f32,
 }
 
@@ -76,6 +80,17 @@ pub struct XrWristMenu {
     pointer: Option<Vec2f>,
     #[rust]
     poke: bool,
+    /// The right tip's last place in front of the card, in the card's frame ((u, v), height): a
+    /// push through the face from there presses where it went through.
+    #[rust]
+    front: Option<(Vec2f, f32)>,
+    /// This frame's push through the face: where it went through.
+    #[rust]
+    push: Option<Vec2f>,
+    /// The tip pushed a cell and has not come back out in front: the same touch is not pressed
+    /// again by the trigger.
+    #[rust]
+    pushed: bool,
 }
 
 /// How long the wrist must stay turned before the menu shows (s).
@@ -127,22 +142,35 @@ impl XrWristMenu {
         let mut out = MenuStep { open: self.card.is_some(), ..Default::default() };
         let mut pointer = None;
         let mut poke = false;
-        if let Some(card) = self.card {
-            if let Some(a) = input::aim(rc, rh) {
-                let (o, d) = input::ray(&a);
-                pointer = card.hit(o, d).map(|(uv, _)| uv);
-                out.hover = pointer.and_then(|uv| self.panel.cell_at(uv));
+        let mut push = None;
+        // The tip on the card points where it touches it, a controller's as a finger's: a tip
+        // pressed onto the card goes through its face, where the aim ray (from the tip) misses it.
+        let tip = self.card.zip(input::tip(rc, rh)).map(|(card, t)| (card, t.position));
+        if let Some((card, tip)) = tip {
+            pointer = card.poke(tip);
+            out.hover = pointer.and_then(|uv| self.panel.cell_at(uv));
+            poke = out.hover.is_some();
+            let (uv, height) = card.touch(tip);
+            if height > 0.0 {
+                self.front = Some((uv, height));
+                self.pushed = false;
+            } else if height <= -PUSH_M {
+                // where it went through the face, between its last place in front and this one
+                push = self.front.take().map(|(from, h)| from + (uv - from) * (h / (h - height)));
             }
-            if out.hover.is_none() && !rc.active() {
-                if let Some(tip) = rh.tip_pos_checked(XrHand::INDEX_TIP) {
-                    pointer = card.poke(tip);
-                    out.hover = pointer.and_then(|uv| self.panel.cell_at(uv));
-                    poke = out.hover.is_some();
-                }
-            }
+        } else {
+            self.front = None;
+            self.pushed = false;
+        }
+        if let (None, Some(card), Some(a)) = (out.hover, self.card, input::aim(rc, rh)) {
+            let (o, d) = input::ray(&a);
+            pointer = card.hit(o, d).map(|(uv, _)| uv);
+            out.hover = pointer.and_then(|uv| self.panel.cell_at(uv));
+            poke = false;
         }
         self.pointer = pointer;
         self.poke = poke;
+        self.push = push;
         // An existing slider owns the hand until its release, even outside the card.
         if let Some(capture) = &self.slider {
             out.slider = Some(capture.drag);
@@ -156,16 +184,20 @@ impl XrWristMenu {
     pub fn interact(&mut self, s: &XrState, buttons: &Buttons, out: &mut MenuStep) {
         let (rc, rh) = (&s.right_controller, &s.right_hand);
         let (pointer, poke) = (self.pointer, self.poke);
-        let pressed = self.trigger.pressed(rc, rh);
-        if pressed && !buttons.claimed(1) && out.hover.is_some() && self.slider.is_none() {
-            let id = out.hover.unwrap();
-            if let Some(value) = pointer.and_then(|uv| self.panel.slider_at(id, uv)) {
+        // the trigger on the cell under the pointer, but not again on a touch a push pressed
+        let triggered = self.trigger.pressed(rc, rh) && !(poke && self.pushed);
+        let by_trigger = out.hover.zip(pointer).filter(|_| triggered).map(|at| (at, false));
+        let by_push = self.push.and_then(|uv| Some(((self.panel.cell_at(uv)?, uv), true)));
+        let press = by_trigger.or(by_push).filter(|_| !buttons.claimed(1) && self.slider.is_none());
+        if let Some(((id, uv), pushed)) = press {
+            if let Some(value) = self.panel.slider_at(id, uv) {
                 self.slider = self.card.map(|card| SliderCapture {
-                    drag: SliderDrag { id, value, ended: false }, card, poke, tick: value,
+                    drag: SliderDrag { id, value, ended: false }, card, poke: poke || pushed, pushed, tick: value,
                 });
             } else {
                 out.pressed = Some(id);
             }
+            self.pushed |= pushed;
             out.haptics.add(1, PRESS);
         }
         out.slider = None;
@@ -177,7 +209,7 @@ impl XrWristMenu {
                     capture.card = card;
                 }
                 let uv = if capture.poke {
-                    rh.tip_pos_checked(XrHand::INDEX_TIP).map(|p| capture.card.project(p))
+                    input::tip(rc, rh).map(|p| capture.card.project(p.position))
                 } else {
                     input::aim(rc, rh).and_then(|a| {
                         let (o, d) = input::ray(&a);
@@ -191,7 +223,7 @@ impl XrWristMenu {
                         out.haptics.add(1, HOVER);
                     }
                 }
-                capture.drag.ended = !self.trigger.down();
+                capture.drag.ended = if capture.pushed { !self.pushed } else { !self.trigger.down() };
                 self.panel.set_slider_value(capture.drag.id, capture.drag.value);
                 out.hover = Some(capture.drag.id);
                 out.slider = Some(capture.drag);

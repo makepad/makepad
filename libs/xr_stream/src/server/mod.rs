@@ -173,11 +173,12 @@ pub(crate) struct ServerShared {
     pub(crate) room_field_wanted: AtomicBool,
     /// The user's power switches: the stream runs (pictures and sound to the headset), the room
     /// scan is allowed (the headset scans only when this and the app's want are both on); the
-    /// left menu button turns the stream on and off (the app may take the button over).
+    /// left menu button's press turns the stream on and off and its hold is the app's (the app
+    /// may take the button over).
     pub(crate) streaming: AtomicBool,
     pub(crate) room_scan: AtomicBool,
     pub(crate) menu_toggles: AtomicBool,
-    pub(crate) menu_down: AtomicBool,
+    pub(crate) menu: Mutex<pipeline::MenuPress>,
     /// The headset shows the room through the picture (mixed reality) or not (VR): the app's
     /// ask (`Cx::xr_set_see_through`) under the user's view.
     pub(crate) see_through: AtomicBool,
@@ -242,7 +243,7 @@ impl ServerShared {
             streaming: AtomicBool::new(true),
             room_scan: AtomicBool::new(true),
             menu_toggles: AtomicBool::new(true),
-            menu_down: AtomicBool::new(false),
+            menu: Mutex::new(pipeline::MenuPress::default()),
             see_through: AtomicBool::new(true),
             app_see_through: AtomicBool::new(true),
             view: AtomicU8::new(0),
@@ -584,8 +585,9 @@ impl XrServer {
         self.shared.streaming_changes.load(Ordering::Acquire)
     }
 
-    /// Whether the left controller's menu button turns the stream on and off (default on;
-    /// off: the app gets the button).
+    /// Whether the left controller's menu button is the stream's (default on): a short press
+    /// turns the stream on and off, a hold reaches the app as `XrController::HOLD_MENU`. Off:
+    /// the app gets the button.
     pub fn set_menu_toggles_streaming(&self, on: bool) {
         self.shared.menu_toggles.store(on, Ordering::Release);
     }

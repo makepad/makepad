@@ -24,7 +24,7 @@
 //!   pad bindings.
 use makepad_platform::event::game_input::{gamepad_button as gb, GamepadState};
 use makepad_platform::event::xr::{XrController, XrHand, XrState};
-use makepad_platform::makepad_math::{vec2f, vec3f, Mat4f, Vec2f, Vec3f};
+use makepad_platform::makepad_math::{vec2f, vec3f, Mat4f, Pose, Vec2f, Vec3f};
 
 /// The box a world shows in, in the room (tracking space): its centre, its turn about the
 /// room's up axis and its half extents (metres).
@@ -285,6 +285,32 @@ impl XrNav {
     pub fn center_on(&mut self, world: Vec3f) {
         let v = XrNavView { clip: self.clip, origin: Vec3f::default(), yaw: self.yaw, scale: self.scale };
         self.origin = self.anchor() - v.room_from_world(world);
+    }
+
+    /// Free: the box set down `distance` metres in front of `head` along its level forward,
+    /// `height` metres up, turned to face it, at its starting size for `scale` (clamped to the
+    /// range), and the world point `world` at its anchor, the world turned with the box (its -Z
+    /// along that forward, its front toward the head). A zoom or turn easing ends there; a hold
+    /// of both grabbers starts again from the new place.
+    pub fn place_before(&mut self, head: Pose, distance: f32, height: f32, scale: f32, world: Vec3f) {
+        let f = head.orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+        let flat = vec3f(f.x, 0.0, f.z);
+        let flat = if flat.length() > 1.0e-4 { flat.normalize() } else { vec3f(0.0, 0.0, -1.0) };
+        // R_y(yaw) takes -Z to (-sin yaw, -cos yaw): the head's level forward
+        let yaw = (-flat.x).atan2(-flat.z);
+        let scale = scale.clamp(self.config.scale_min, self.config.scale_max);
+        let start = self.config.box_start;
+        self.clip = ClipBox {
+            center: vec3f(head.position.x + flat.x * distance, height, head.position.z + flat.z * distance),
+            yaw,
+            half: start.half * (scale / self.config.scale_start),
+        };
+        self.yaw = yaw;
+        self.scale = scale;
+        self.zoom_target = scale;
+        self.turn_target = self.turn;
+        self.grab = None;
+        self.center_on(world);
     }
 
     /// Free: show the world at `scale` (clamped to the range), the world point at the anchor

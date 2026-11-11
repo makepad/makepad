@@ -16,8 +16,11 @@ pub struct Card {
     pub size: Vec2f,
 }
 
-/// How far a fingertip may be from a card to touch it (m).
+/// How far a tip (a controller's or a fingertip) may be from a card to touch it (m).
 pub const POKE_M: f32 = 0.015;
+/// How far through a card's face a tip goes to press the cell it went through (m). It presses
+/// again once it has come back out in front of the face.
+pub const PUSH_M: f32 = 0.005;
 /// How far a wrist card's bottom edge stands above the grip, clear of the controller's top (m).
 const WRIST_CLEAR_M: f32 = 0.09;
 /// How far toward the eyes a wrist card stands from the grip, with the controller behind it (m).
@@ -105,27 +108,26 @@ impl Card {
         Some((self.project(origin + dir * t), t))
     }
 
-    /// Where a fingertip touches the card (within [`POKE_M`] of its plane).
-    pub fn poke(&self, tip: Vec3f) -> Option<Vec2f> {
-        let d = (tip - self.center).dot(self.normal);
-        if d.abs() > POKE_M {
-            return None;
-        }
-        self.hit(tip + self.normal * 0.02, self.normal * -1.0).map(|(uv, _)| uv)
+    /// Where a tip stands against the card: the (u, v) of its foot on the card's plane (outside
+    /// 0..1 off the card) and its height above the front (m, below 0 behind it).
+    pub fn touch(&self, tip: Vec3f) -> (Vec2f, f32) {
+        (self.project(tip), (tip - self.center).dot(self.normal))
     }
 
-    /// Where a hand points at the card: its aim ray, else (a tracked hand) its index tip.
+    /// Where a tip touches the card (within [`POKE_M`] of its plane).
+    pub fn poke(&self, tip: Vec3f) -> Option<Vec2f> {
+        let (uv, d) = self.touch(tip);
+        (d.abs() <= POKE_M && (0.0..=1.0).contains(&uv.x) && (0.0..=1.0).contains(&uv.y)).then_some(uv)
+    }
+
+    /// Where a hand points at the card: where its tip touches it (a controller's or a tracked
+    /// hand's), else where its aim ray meets it.
     pub fn pointed(&self, c: &XrController, h: &XrHand) -> Option<Vec2f> {
-        if let Some(a) = input::aim(c, h) {
-            let (o, d) = input::ray(&a);
-            if let Some((uv, _)) = self.hit(o, d) {
-                return Some(uv);
-            }
+        if let Some(uv) = input::tip(c, h).and_then(|t| self.poke(t.position)) {
+            return Some(uv);
         }
-        if c.active() {
-            return None;
-        }
-        self.poke(h.tip_pos_checked(XrHand::INDEX_TIP)?)
+        let (o, d) = input::ray(&input::aim(c, h)?);
+        self.hit(o, d).map(|(uv, _)| uv)
     }
 }
 

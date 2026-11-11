@@ -49,10 +49,15 @@ wrist menu, cards, pointing, haptic ticks and grab-to-edit.
     Update a slider with `panel.set_slider_value(id, value)` without changing the rows' key:
     its track and knob are geometry and do not repaint the text texture.
 
-  `menu.step(state, &buttons, now)` opens the menu, places it and finds the hover. It returns
-  the cell pressed this frame and the hover and press haptics. `MenuStep::slider` reports
-  `SliderDrag { id, value, ended }`: trigger/index pinch captures a slider until release,
-  following the aim or touching fingertip even outside the cell, clamped to its ends.
+  `menu.step(state, &buttons, now)` opens the menu, places it and finds the hover: the cell
+  the right tip touches (a controller's tip or a tracked hand's fingertip, within `POKE_M` of
+  the card on either side), else the cell the right aim ray meets. It returns the cell pressed
+  this frame and the hover and press haptics. The trigger/index pinch presses the hovered
+  cell; so does the tip pushed `PUSH_M` through the card's face, at the cell it went through
+  (once per touch: it presses again after coming back out in front, and the trigger does not
+  press that touch again). `MenuStep::slider` reports `SliderDrag { id, value, ended }`: a
+  trigger/index pinch captures a slider until release, a push until the tip comes back out,
+  following the aim or the touching tip even outside the cell, clamped to its ends.
   Release reports `ended: true`; travel ticks every 5% with `haptic::HOVER`.
 
   The menu opens with `MenuOpen::Button(XrController::CLICK_Y)` by default. Apps whose buttons

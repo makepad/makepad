@@ -3,7 +3,8 @@
 //!
 //! - [`XrWristMenu`]: a menu card on the left wrist. The app writes its rows (buttons, toggles,
 //!   sliders, text) when what they show changes; the menu lays them out, hit-tests the right
-//!   hand's aim or fingertip, lights the hover and reports presses and captured slider drags.
+//!   hand's tip (a controller's or a fingertip) or aim, lights the hover and reports presses
+//!   (trigger, or the tip pushed through a cell) and captured slider drags.
 //! - [`XrPanel`] on a [`Card`]: a floating card (beside a hand, facing the head, pinned in the
 //!   room) with the same rows.
 //! - [`input`]: aim, tip, trigger and grab the same for controllers and tracked hands; button
