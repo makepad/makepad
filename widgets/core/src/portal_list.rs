@@ -238,6 +238,8 @@ pub enum ScrollState {
         /// See `smooth_scroll_to_end()`. If the end moves during the scroll (e.g., new items get
         /// added), the scroll keeps going to the new end.
         to_end: bool,
+        /// The list went out of sight mid-scroll, so the scroll waits for its next draw to finish.
+        waits_for_draw: bool,
     },
     Tailing {
         next_frame: NextFrame,
@@ -938,6 +940,9 @@ pub struct PortalList {
     event_item_ids: Vec<usize>,
     #[rust]
     detect_tail_in_draw: bool,
+    /// Whether the list drew since a smooth scroll last moved it.
+    #[rust]
+    drawn_since_scroll_step: bool,
 
     #[live(false)]
     auto_tail: bool,
@@ -1625,6 +1630,13 @@ impl PortalList {
         // measured where it now is rather than where it was, and after the
         // notifications above, which belong to the position just drawn.
         self.apply_keep_visible(cx);
+
+        // A smooth scroll that went on out of sight finishes from where this draw put the list.
+        self.drawn_since_scroll_step = true;
+        if let ScrollState::ScrollingTo { next_frame, waits_for_draw: waits @ true, .. } = &mut self.scroll_state {
+            *waits = false;
+            *next_frame = cx.new_next_frame();
+        }
 }
 
     /// Draws the continuation rows of a short list: one quad per row, at the
@@ -2916,6 +2928,7 @@ impl PortalList {
             next_frame: cx.new_next_frame(),
             top_offset,
             to_end,
+            waits_for_draw: false,
         };
     }
 
@@ -3797,6 +3810,7 @@ impl Widget for PortalList {
                 next_frame,
                 top_offset,
                 to_end,
+                ..
             } => {
                 if next_frame.is_event(event).is_some() {
                     // Copy values out of the borrow so we can call &self methods.
@@ -3804,6 +3818,9 @@ impl Widget for PortalList {
                     let delta_val = *delta;
                     let top_offset = *top_offset;
                     let to_end = *to_end;
+                    // With no draw since the last step, the list is out of sight and can't measure the rows it
+                    // passes. So it goes straight to where it thinks the target is, and finishes once it's drawn.
+                    let out_of_sight = !self.drawn_since_scroll_step;
 
                     // Going to the end lines up the bottom of the list with the bottom of the viewport.
                     let (aligned_id, goal) = if to_end {
@@ -3819,7 +3836,7 @@ impl Widget for PortalList {
                         Some(aligned_top) => smooth_scroll_step(
                             aligned_top,
                             goal,
-                            delta_val.abs(),
+                            if out_of_sight { f64::INFINITY } else { delta_val.abs() },
                             self.first_id == self.range_start && self.first_scroll >= 0.0,
                             self.at_end,
                         ),
@@ -3836,11 +3853,20 @@ impl Widget for PortalList {
                         }
                     };
 
-                    if let Some(step) = step {
+                    if out_of_sight {
+                        if let Some(step) = step {
+                            self.delta_top_scroll(cx, step, true, false, 0.0, false, false);
+                            self.area.redraw(cx);
+                        }
+                        if let ScrollState::ScrollingTo { waits_for_draw, .. } = &mut self.scroll_state {
+                            *waits_for_draw = true;
+                        }
+                    } else if let Some(step) = step {
                         if let ScrollState::ScrollingTo { next_frame, .. } = &mut self.scroll_state
                         {
                             *next_frame = cx.new_next_frame();
                         }
+                        self.drawn_since_scroll_step = false;
                         self.delta_top_scroll(cx, step, true, false, 0.0, false, false);
                         self.area.redraw(cx);
                     } else {
