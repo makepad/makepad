@@ -539,10 +539,13 @@ impl Core {
         }
     }
 
-    /// The headset decoded one eye of a picture.
-    pub(crate) fn tile_decoded(&self) {
-        self.flow.decoded_tiles.fetch_add(1, Ordering::AcqRel);
-        self.shared.wake();
+    /// Eye pictures out of flight (decoded by the headset, or dropped on the way): their slots
+    /// free, the app woken for them.
+    pub(crate) fn tiles_out(&self, n: u64) {
+        if n > 0 {
+            self.flow.decoded_tiles.fetch_add(n, Ordering::AcqRel);
+            self.shared.wake();
+        }
     }
 
     pub(crate) fn stop(&self) {

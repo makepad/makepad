@@ -347,9 +347,15 @@ impl Session {
                     return format!("write: {e}");
                 }
                 (self.shared.log)(&format!("xr host: stream {}", if on { "on" } else { "off" }));
-                // (on again: the decoder starts from a key picture)
-                if on && streaming_told.is_some() {
-                    core.keyframe();
+                if streaming_told.is_some() {
+                    // a paused headset drops the pictures that reach it, and one that resumes has
+                    // none of the old ones: those written and not reported are out of flight, or
+                    // each would hold its slot for good and the app build ever less
+                    core.tiles_out(stats.forget_unreported());
+                    // (on again: the decoder starts from a key picture)
+                    if on {
+                        core.keyframe();
+                    }
                 }
                 streaming_told = Some(on);
             }
@@ -434,7 +440,7 @@ impl Session {
                         if let Err(e) = write_all(stream, &msg) {
                             return format!("write: {e}");
                         }
-                        stats.sent(&head, msg.len(), write_at.elapsed());
+                        core.tiles_out(stats.sent(&head, msg.len(), write_at.elapsed()));
                         self.pictures.fetch_add(1, Ordering::AcqRel);
                     }
                     Err(TryRecvError::Empty) => break,
@@ -478,8 +484,7 @@ impl Session {
                     }
                     XrClientMsg::Stats { seq, decode_us, .. } => {
                         stats.decode_us.push(decode_us);
-                        stats.reported(seq, decode_us);
-                        core.tile_decoded();
+                        core.tiles_out(stats.reported(seq, decode_us));
                     }
                     XrClientMsg::Ping { client_ns } => {
                         if let Err(e) = write_all(stream, &XrServerMsg::Pong { client_ns, server_ns: makepad_hal::clock_ns() }.encode()) {
@@ -533,7 +538,9 @@ pub(crate) struct PumpStats {
     /// Per tile: from its last byte written to the headset's report that it took it, less the
     /// headset's own time on it (the link's round trip with whatever queue it holds).
     trip_us: Vec<u32>,
-    /// The tiles written and not yet reported: (seq, when written).
+    /// The tiles written and not yet reported: (seq, when written). Kept across the windows: each
+    /// goes out of flight once, by its report, a later picture's, a pause or resume, or the
+    /// list's end.
     unreported: std::collections::VecDeque<(u64, Instant)>,
     /// Room-field bricks received, and their messages' bytes.
     bricks: u64,
@@ -582,7 +589,9 @@ impl PumpStats {
         PumpStats { at: Instant::now(), poses: 0, refused_poses: 0, pictures: 0, bytes: 0, stages_us: Default::default(), desk_us: Vec::new(), write_us: Vec::new(), decode_us: Vec::new(), trip_us: Vec::new(), unreported: Default::default(), bricks: 0, brick_bytes: 0, capture_bytes: 0, mic_bytes: 0, rate: RateWindow::new() }
     }
 
-    pub(crate) fn sent(&mut self, head: &VideoHead, bytes: usize, write: Duration) {
+    /// A tile written; the tiles out of flight with it: the oldest one unreported when it no
+    /// longer fits the list (its report, if one comes, finds nothing).
+    pub(crate) fn sent(&mut self, head: &VideoHead, bytes: usize, write: Duration) -> u64 {
         // a picture counted once, at its first tile; its stages are the slowest tile's
         if head.tile == 0 {
             self.pictures += 1;
@@ -595,21 +604,28 @@ impl PumpStats {
             self.stages_us[i].push(*v);
         }
         self.write_us.push(write.as_micros() as u32);
-        if self.unreported.len() >= 64 {
-            self.unreported.pop_front();
-        }
+        let out = if self.unreported.len() >= 64 { self.unreported.pop_front().is_some() as u64 } else { 0 };
         self.unreported.push_back((head.seq, Instant::now()));
+        out
     }
 
-    /// The headset took a tile of picture `seq` (`decode_us` after it arrived).
-    fn reported(&mut self, seq: u64, decode_us: u32) {
-        let Some(at) = self.unreported.iter().position(|(s, _)| *s == seq) else { return };
+    /// The headset took a tile of picture `seq` (`decode_us` after it arrived): the tiles out of
+    /// flight with it, this one and those written before it and never reported (the headset
+    /// dropped them); none when it was out already (a pause or a later report took it).
+    pub(crate) fn reported(&mut self, seq: u64, decode_us: u32) -> u64 {
+        let Some(at) = self.unreported.iter().position(|(s, _)| *s == seq) else { return 0 };
         let (_, written) = self.unreported.remove(at).unwrap();
         // (older ones never reported: lost)
         self.unreported.drain(..at);
         let trip = (written.elapsed().as_micros() as u32).saturating_sub(decode_us);
         self.trip_us.push(trip);
         self.rate.trip_us.push(trip);
+        at as u64 + 1
+    }
+
+    /// The tiles written and never reported, forgotten (the stream paused or resumed): how many.
+    pub(crate) fn forget_unreported(&mut self) -> u64 {
+        self.unreported.drain(..).count() as u64
     }
 
     /// The rate controller's second, when one passed.
@@ -704,9 +720,10 @@ impl PumpStats {
                 link_late_per_s: link_late as f64 / secs,
             };
         }
-        let rate = std::mem::replace(&mut self.rate, RateWindow::new());
+        // the rate's window and the tiles in flight go on into the next window
+        let (rate, unreported) = (std::mem::replace(&mut self.rate, RateWindow::new()), std::mem::take(&mut self.unreported));
         *self = PumpStats::new();
-        self.rate = rate;
+        (self.rate, self.unreported) = (rate, unreported);
     }
 }
 

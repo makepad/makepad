@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 /// A headset on a loop (`MAKEPAD_XR_REMOTE_SELFTEST=1`): synthetic poses a display period apart (the head turning
 /// slowly, eyes 64 mm apart, ±45° fields) drive the app's XR window exactly as a headset's would, and
-/// every picture is encoded and measured, then dropped (and counted decoded at once). The server
+/// every picture is encoded and measured, then dropped (and counted decoded a link trip later). The server
 /// side's numbers without a headset. It ends like a session when the server is switched off
 /// (`stop`: its listener's). A headset that goes away, for tests: `MAKEPAD_XR_REMOTE_SELFTEST_POSES_S=n`
 /// sends poses for n seconds and then none (linked, idle: taken off, asleep), and
@@ -24,7 +24,12 @@ use std::time::{Duration, Instant};
 /// ±45° unless `MAKEPAD_XR_REMOTE_SELFTEST_FOV=<left>,<right>,<up>,<down>` (the left eye's
 /// tangent angles, radians; the right eye mirrored) says (a Quest 3: `-0.94,0.72,0.84,-0.96`),
 /// `MAKEPAD_XR_REMOTE_SELFTEST_STILL=1` keeps the head from turning (pictures to compare) and
-/// `MAKEPAD_XR_REMOTE_SELFTEST_PITCH=<radians>` tilts it (negative: looking down).
+/// `MAKEPAD_XR_REMOTE_SELFTEST_PITCH=<radians>` tilts it (negative: looking down). While the file
+/// `MAKEPAD_XR_REMOTE_SELFTEST_PAUSE_FILE=<path>` names exists, the headset has paused the stream
+/// (as its menu button does) and drops the pictures that still reach it (never reported); it
+/// resumes the stream when the file goes. Words in the file: `sleep`, its poses stop meanwhile
+/// (power save), and an id of `STREAM_AA_MODES`, the anti-aliasing the stream takes meanwhile
+/// (as Auto steps it while a headset is paused).
 pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<AtomicBool>) {
     let log = shared.log.clone();
     use makepad_hal::{buffers::Wire, XrEye, XrFrame, XrPose};
@@ -44,6 +49,7 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
         let a: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         (a.len() == 4).then(|| [a[0], a[1], a[2], a[3]])
     });
+    let pause_file = std::env::var_os("MAKEPAD_XR_REMOTE_SELFTEST_PAUSE_FILE").map(std::path::PathBuf::from);
     let fov_l = fov.unwrap_or([-0.785, 0.785, 0.785, -0.785]);
     let fov_r = [-fov_l[1], -fov_l[0], fov_l[2], fov_l[3]];
     let still = std::env::var("MAKEPAD_XR_REMOTE_SELFTEST_STILL").as_deref() == Ok("1");
@@ -60,10 +66,38 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
         let mut decoded = (std::env::var("MAKEPAD_XR_REMOTE_SELFTEST_DECODE").as_deref() == Ok("1")).then(Decoded::default);
         let mut stats = PumpStats::new();
         let mut idle_told = false;
+        let (mut paused, mut asleep) = (false, false);
+        // the tiles that reached the headset and are not reported yet: it reports a link trip
+        // after they arrived (decoded meanwhile), and drops them while it has paused the stream
+        let mut arrived = std::collections::VecDeque::<(u64, Instant)>::new();
+        const TRIP: Duration = Duration::from_millis(20);
         while !stop.load(Ordering::Acquire) {
+            if let Some(file) = &pause_file {
+                if file.exists() != paused {
+                    paused = !paused;
+                    let says = if paused { std::fs::read_to_string(file).unwrap_or_default() } else { String::new() };
+                    asleep = says.split_whitespace().any(|w| w == "sleep");
+                    log(if !paused { "xr selftest: the headset resumed the stream" } else if asleep { "xr selftest: the headset paused the stream and sleeps (no poses)" } else { "xr selftest: the headset paused the stream" });
+                    shared.set_streaming(!paused);
+                    core.tiles_out(stats.forget_unreported());
+                    if let Some(i) = says.split_whitespace().find_map(|w| crate::settings_types::STREAM_AA_MODES.iter().position(|m| m.id == w)) {
+                        shared.aa.store(i as u8, Ordering::Release);
+                        log(&format!("xr selftest: anti-aliasing {} while paused", crate::settings_types::STREAM_AA_MODES[i].name));
+                    }
+                }
+            }
             if link_for.is_some_and(|d| start.elapsed() >= d) {
                 log("xr selftest: the headset went away");
                 break;
+            }
+            if asleep {
+                // no poses; what still reaches it is dropped, never reported
+                while let Ok(Out::Video(head, data, _)) = core.out.try_recv() {
+                    core.tiles_out(stats.sent(&head, data.len(), Duration::ZERO));
+                }
+                arrived.clear();
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
             }
             if poses_for.is_some_and(|d| start.elapsed() >= d) {
                 // linked and idle: no poses (the app is woken once, as by a session's loop)
@@ -91,7 +125,7 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
             if !core.pose(seq, makepad_hal::clock_ns(), makepad_hal::clock_ns() + 30_000_000, &wire) {
                 stats.refused_poses += 1;
             }
-            // drained as they come (a headset decodes on arrival), the next pose a display period on
+            // drained as they come, the next pose a display period on
             let next = Instant::now() + Duration::from_micros(1_000_000 / hz as u64);
             loop {
                 while let Ok(m) = core.out.try_recv() {
@@ -101,8 +135,15 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
                         d.take(&head, &data, &log);
                     }
                     head.stages[stage::SEND] = encoded_at.elapsed().as_micros() as u32;
-                    stats.sent(&head, data.len(), Duration::ZERO);
-                    core.tile_decoded();
+                    core.tiles_out(stats.sent(&head, data.len(), Duration::ZERO));
+                    arrived.push_back((head.seq, Instant::now()));
+                }
+                if paused {
+                    arrived.clear();
+                }
+                while arrived.front().is_some_and(|(_, at)| at.elapsed() >= TRIP) {
+                    let (s, _) = arrived.pop_front().unwrap();
+                    core.tiles_out(stats.reported(s, 0));
                 }
                 let now = Instant::now();
                 if now >= next {

@@ -34,6 +34,9 @@ const LIST_SETTLES: Duration = Duration::from_secs(5);
 const BLUR_MAX_PX: f32 = 1.0;
 /// The next keyframe is taken once the link holds less than this of the last one.
 const QUEUED_MAX: usize = 4 << 20;
+/// What the wearer allows before the passthrough cameras list, asked one after the other: the device's cameras,
+/// then the headset's own.
+const ALLOWED: [(Permission, &str); 2] = [(Permission::Camera, "camera"), (Permission::HeadsetCamera, "headset camera")];
 /// How often the capture says how it goes.
 const STATUS_EVERY: Duration = Duration::from_secs(2);
 
@@ -176,7 +179,11 @@ pub(crate) struct HeadsetCapture {
     selector: Arc<Mutex<Selector>>,
     /// The cameras read (input, format size), by slot; empty until listed and opened.
     opened: Vec<(VideoInputId, [usize; 2])>,
-    /// When the wearer's permission came (asked at the start).
+    /// How many of [`ALLOWED`] the wearer granted so far, in their order.
+    granted: usize,
+    /// The next of them to ask for, at the next tick.
+    to_ask: Option<Permission>,
+    /// When the last of them came.
     granted_at: Option<Instant>,
     state: u8,
     status_at: Instant,
@@ -184,6 +191,33 @@ pub(crate) struct HeadsetCapture {
 
 fn lens(c: &CameraCalibration) -> Option<CaptureLensPose> {
     Some(CaptureLensPose { rotation: c.lens_rotation?, translation: c.lens_translation?, reference: c.lens_reference.unwrap_or(2) })
+}
+
+/// What an answer to a permission request means to a capture that has `granted` of [`ALLOWED`].
+#[derive(Debug, PartialEq)]
+enum Answer {
+    /// Not the one waited for.
+    Other,
+    /// Granted, and this one is asked for next.
+    Next(Permission),
+    /// Granted, the last of them.
+    All,
+    /// Refused: the capture's status.
+    Refused(String),
+}
+
+fn answer(granted: usize, result: &PermissionResult) -> Answer {
+    let Some(&(permission, name)) = ALLOWED.get(granted) else { return Answer::Other };
+    if result.permission != permission {
+        return Answer::Other;
+    }
+    match result.status {
+        PermissionStatus::Granted => ALLOWED.get(granted + 1).map_or(Answer::All, |next| Answer::Next(next.0)),
+        PermissionStatus::DeniedCanRetry | PermissionStatus::DeniedPermanent => {
+            Answer::Refused(format!("the {name} permission was refused: allow it for this app in the headset's settings"))
+        }
+        _ => Answer::Other,
+    }
 }
 
 /// A picture of this camera can be placed in the world.
@@ -203,7 +237,7 @@ impl HeadsetCapture {
         };
         let selector = Selector { jobs: Some(jobs.clone()), ask, cameras: 0, focal_px: [0.0; 2], last: None, pending: [None, None], index: 0, in_flight, frames: 0, blurred: 0, untimed: 0, untracked: 0 };
         let selector = Arc::new(Mutex::new(selector));
-        let mut c = HeadsetCapture { link, jobs, on, selector: selector.clone(), opened: Vec::new(), granted_at: None, state: capture_state::OFF, status_at: Instant::now() };
+        let mut c = HeadsetCapture { link, jobs, on, selector: selector.clone(), opened: Vec::new(), granted: 0, to_ask: None, granted_at: None, state: capture_state::OFF, status_at: Instant::now() };
         if let Err(e) = spawned {
             // (no sender thread: the status goes on the link from here, nothing else does)
             log!("xr capture: no sender thread: {e}");
@@ -216,8 +250,8 @@ impl HeadsetCapture {
             }
             return c;
         }
-        // (asked once: granted already, it is answered at once)
-        cx.request_permission(Permission::HeadsetCamera);
+        // (each asked once, the next when the one before is granted: granted already, it is answered at once)
+        cx.request_permission(ALLOWED[0].0);
         cx.xr_set_depth_tap(true);
         // the slots' frames to the selector (camera i reads slot i; the first callback also has
         // the platform list its cameras)
@@ -305,6 +339,9 @@ impl HeadsetCapture {
     }
 
     fn tick(&mut self, cx: &mut Cx) {
+        if let Some(permission) = self.to_ask.take() {
+            cx.request_permission(permission);
+        }
         self.open(cx);
         if self.state == capture_state::FAILED || self.status_at.elapsed() < STATUS_EVERY {
             return;
@@ -317,7 +354,12 @@ impl HeadsetCapture {
             v
         };
         if frames == 0 {
-            self.status(capture_state::STARTING, if self.opened.is_empty() { "waiting for the camera list".into() } else { "waiting for the cameras (permission)".into() });
+            let waiting = match ALLOWED.get(self.granted) {
+                Some((_, name)) => format!("waiting for the wearer to allow the {name}"),
+                None if self.opened.is_empty() => "waiting for the camera list".into(),
+                None => "waiting for the cameras' first frames".into(),
+            };
+            self.status(capture_state::STARTING, waiting);
         } else if untimed == frames {
             self.status(capture_state::FAILED, "the cameras give no exposure times on the headset's clock: no head poses for them".into());
         } else {
@@ -326,13 +368,17 @@ impl HeadsetCapture {
     }
 
     pub(crate) fn permission(&mut self, result: &PermissionResult) {
-        if result.permission != Permission::HeadsetCamera {
-            return;
-        }
-        match result.status {
-            PermissionStatus::Granted => self.granted_at = self.granted_at.or(Some(Instant::now())),
-            PermissionStatus::DeniedCanRetry | PermissionStatus::DeniedPermanent => self.status(capture_state::FAILED, "the headset camera permission was denied".into()),
-            _ => {}
+        match answer(self.granted, result) {
+            Answer::Other => {}
+            Answer::Next(permission) => {
+                self.granted += 1;
+                self.to_ask = Some(permission);
+            }
+            Answer::All => {
+                self.granted += 1;
+                self.granted_at = Some(Instant::now());
+            }
+            Answer::Refused(why) => self.status(capture_state::FAILED, why),
         }
     }
 
@@ -423,6 +469,24 @@ mod tests {
         let (lens_rotation, lens_translation) = (Some([0.0, 0.0, 0.0, 1.0]), Some([0.03, 0.0, 0.0]));
         assert!(!calibrated(&CameraCalibration { lens_rotation, lens_translation, ..hidden }));
         assert!(calibrated(&CameraCalibration { intrinsics, lens_rotation, lens_translation, ..hidden }));
+    }
+
+    #[test]
+    fn both_camera_permissions_are_asked_in_turn_and_a_refusal_names_its_own() {
+        let result = |permission, status| PermissionResult { permission, request_id: 0, status };
+        let granted = PermissionStatus::Granted;
+        assert_eq!(answer(0, &result(Permission::Camera, granted)), Answer::Next(Permission::HeadsetCamera), "the headset's cameras are asked for after the device's");
+        assert_eq!(answer(1, &result(Permission::HeadsetCamera, granted)), Answer::All, "both granted starts the capture");
+        // an answer for another permission, or one out of turn, changes nothing
+        assert_eq!(answer(0, &result(Permission::HeadsetCamera, granted)), Answer::Other);
+        assert_eq!(answer(1, &result(Permission::AudioInput, PermissionStatus::DeniedPermanent)), Answer::Other);
+        assert_eq!(answer(2, &result(Permission::Camera, granted)), Answer::Other);
+        for (at, permission, name) in [(0, Permission::Camera, "the camera permission"), (1, Permission::HeadsetCamera, "the headset camera permission")] {
+            for status in [PermissionStatus::DeniedCanRetry, PermissionStatus::DeniedPermanent] {
+                let Answer::Refused(why) = answer(at, &result(permission, status)) else { panic!("a refusal fails the capture") };
+                assert!(why.starts_with(name), "the status names the refused permission: {why}");
+            }
+        }
     }
 
     #[test]
