@@ -263,6 +263,8 @@ pub struct Cx {
     /// The exploded z-layer inspection view. Inert while off.
     pub sploded: SplodedView,
     pub(crate) pick: crate::pick::CxPick,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) draw_damage: crate::draw_damage::CxDrawDamage,
     /// How many `WidgetRef` draw scopes deep the current draw is — the turtle
     /// nesting AS COMPONENTS SEE IT. Maintained by `WidgetRef::draw_walk` and
     /// its siblings, stamped onto every draw call at creation, and used as the
@@ -1113,6 +1115,8 @@ impl Cx {
             perf_monitor: Default::default(),
             sploded: Default::default(),
             pick: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            draw_damage: Default::default(),
             nesting_depth: 0,
             nesting_depth_max: 0,
 

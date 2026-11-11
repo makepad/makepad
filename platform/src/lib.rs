@@ -72,6 +72,8 @@ pub mod draw_shader_layout;
 mod draw_vars;
 #[cfg(not(target_arch = "wasm32"))]
 mod frame_build;
+#[cfg(not(target_arch = "wasm32"))]
+mod draw_damage;
 pub mod shader_pack;
 pub mod collect;
 pub mod splash_blank;

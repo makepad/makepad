@@ -1107,6 +1107,9 @@ impl CxTexture {
     #[allow(unused)]
     pub(crate) fn take_updated(&mut self) -> TextureUpdated {
         let updated = self.updated();
+        if !updated.is_empty() {
+            self.texel_generation += 1;
+        }
         self.set_updated(TextureUpdated::Empty);
         updated
     }
@@ -1678,6 +1681,12 @@ impl Texture {
         cx.textures[self.texture_id()].append_rows = append_rows;
     }
 
+    /// Says that texels a draw already samples only change when `epoch` does,
+    /// like in a glyph atlas that only reuses its slots after a reset.
+    pub fn set_content_epoch(&self, cx: &mut Cx, epoch: u64) {
+        cx.textures[self.texture_id()].content_epoch = Some(epoch);
+    }
+
     pub fn animation<'a>(&self, cx: &'a mut Cx) -> &'a Option<TextureAnimation> {
         &cx.textures[self.texture_id()].animation
     }
@@ -1809,6 +1818,10 @@ pub struct CxTexture {
     pub(crate) alloc: Option<TextureAlloc>,
     pub(crate) allocation_generation: u64,
     pub(crate) producer_serial: u64,
+    /// Goes up whenever an update of its texels goes up to the GPU.
+    pub(crate) texel_generation: u64,
+    /// Set by `Texture::set_content_epoch`, and `None` when its texels can change without us knowing.
+    pub(crate) content_epoch: Option<u64>,
     pub(crate) animation: Option<TextureAnimation>,
     pub(crate) natural_size: Option<(usize, usize)>,
     /// A render target the application keeps as a cache: a software backend
