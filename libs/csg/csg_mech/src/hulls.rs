@@ -1,6 +1,5 @@
 //! A part's convex hull as the sim meets it: coarse but close (a few of its corners, whose own hull keeps
-//! within a distance of it), and whether a part's surface keeps within a distance of its hull (the part is
-//! convex to that).
+//! within a distance of it).
 //!
 //! Model frame, millimetres.
 
@@ -74,42 +73,6 @@ pub fn coarse_hull(points: &[P3], tol: f64) -> Vec<P3> {
             picked.push(i);
         }
     }
-}
-
-/// Whether a closed mesh's surface keeps within `tol` (mm) of its convex hull: none of its corners and face
-/// centres lies deeper than `tol` inside the hull's faces. A hollow, a hole or a dent deeper than that keeps
-/// a part from it; a mesh with no solid hull (flat) does not keep to it.
-pub fn fits_its_hull(vertices: &[P3], triangles: &[[u32; 3]], tol: f64) -> bool {
-    let Some((_, faces)) = hull_faces(vertices) else { return false };
-    let planes: Vec<(P3, f64)> = faces
-        .iter()
-        .map(|f| {
-            let n = norm(cross(sub(vertices[f[1]], vertices[f[0]]), sub(vertices[f[2]], vertices[f[0]])));
-            (n, dot(n, vertices[f[0]]))
-        })
-        .collect();
-    // the hull's faces around each of its corners, by position (a mesh may repeat a vertex)
-    let mut around: HashMap<[u64; 3], Vec<usize>> = HashMap::new();
-    for (f, face) in faces.iter().enumerate() {
-        for &c in face {
-            around.entry(vertices[c].map(f64::to_bits)).or_default().push(f);
-        }
-    }
-    let within = |p: P3, f: usize| planes[f].1 - dot(planes[f].0, p) <= tol;
-    let mut seen = vec![false; vertices.len()];
-    for t in triangles {
-        let near: Vec<usize> = t.iter().filter_map(|&v| around.get(&vertices[v as usize].map(f64::to_bits))).flatten().copied().collect();
-        let corners_and_centre = t.iter().filter(|&&v| !std::mem::replace(&mut seen[v as usize], true)).map(|&v| vertices[v as usize]).chain(std::iter::once(scale(
-            add(add(vertices[t[0] as usize], vertices[t[1] as usize]), vertices[t[2] as usize]),
-            1.0 / 3.0,
-        )));
-        for p in corners_and_centre {
-            if !near.iter().any(|&f| within(p, f)) && !(0..planes.len()).any(|f| within(p, f)) {
-                return false;
-            }
-        }
-    }
-    true
 }
 
 /// The hull of `points`: its corners and its faces (counter-clockwise seen from outside), as indices into

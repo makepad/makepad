@@ -22,6 +22,8 @@
 //! the field's open share, plus the field's bounce. Open space therefore
 //! looks exactly as with GI off; a cavity darkens; a coloured neighbour
 //! adds its reflected light, never more than it receives.
+//! A ray that runs out inside the padded scene box carries no data: it
+//! adds neither sky nor bounce nor distance moments, and is no backface.
 use makepad_draw::*;
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -205,6 +207,14 @@ script_mod! {
             if self.gi_on<=0.0 {return fallback}
             return self.gi_gather(wp,normalize(normal),fallback,0.0)
         }
+        // Reuse the diffuse sample, including its cascade confidence and
+        // fallback. No additional field or environment texture reads.
+        gi_specular_occlusion: fn(ambient:vec3,hemisphere:vec3)->float {
+            if self.gi_on<=0.0 {return 1.0}
+            let luma=vec3(0.2126,0.7152,0.0722)
+            let spec_occ=clamp(dot(ambient,luma)/max(dot(hemisphere,luma),0.0001),0.0,1.0)
+            return mix(1.0,spec_occ,min(self.gi_on,1.0))
+        }
         // Display receivers supply output_dither; debug views keep their exact colour.
         gi_display: fn(color:vec4,wp:vec3,n:vec3)->vec4 {
             if color.w<0.999 {return color}
@@ -342,6 +352,9 @@ script_mod! {
         gi_vox0: uniform(vec4(0.0,0.0,0.0,0.0))
         gi_vox1: uniform(vec4(0.0,0.0,0.0,0.0))
         gi_vox2: uniform(vec4(0.0,0.0,0.0,0.0))
+        // Snapshot geometry bounds, padded by one coarsest voxel on the CPU.
+        gi_scene_min: uniform(vec3(0.0,0.0,0.0))
+        gi_scene_max: uniform(vec3(0.0,0.0,0.0))
         vox_level: fn(l:float)->vec4 {
             if l<0.5 {return self.gi_vox0}
             if l<1.5 {return self.gi_vox1}
@@ -380,9 +393,18 @@ script_mod! {
             if f.x<0.0 {return true}
             return !self.vox_solid(f.x,f.yzw)
         }
+        // Both distance and resident-window endings use the actual endpoint.
+        // Outside any face (including the top) is sky; inside is unknown.
+        vox_end_status: fn(p:vec3)->float {
+            let lo=self.gi_scene_min
+            let hi=self.gi_scene_max
+            if p.x<lo.x || p.y<lo.y || p.z<lo.z || p.x>hi.x || p.y>hi.y || p.z>hi.z {return 0.0}
+            return 0.25
+        }
         // DDA through the finest level first, then coarser levels from
         // where the ray left the finer window. vec4(t, level, entry axis
-        // (+-1..3, 0 = start voxel), 1 hit / 0 miss / -1 step budget spent).
+        // (+-1..3, 0 = start voxel), status: 1 hit / 0 left the scene /
+        // 0.25 ran out inside the scene / -1 step budget spent).
         vox_trace: fn(ro:vec3,rd:vec3,tmax:float,first:float)->vec4 {
             let stp=step(vec3(0.0,0.0,0.0),rd)*2.0-vec3(1.0,1.0,1.0)
             let inv=stp/max(abs(rd),vec3(0.000001,0.000001,0.000001))
@@ -427,7 +449,10 @@ script_mod! {
                 level=level+1.0
                 skip=true
             }
-            return vec4(tmax,level,0.0,0.0)
+            // The next voxel boundary may overshoot tmax. A window exit
+            // can instead be much nearer: never classify its untraced tail.
+            let end=min(t,tmax)
+            return vec4(end,level,0.0,self.vox_end_status(ro+rd*end))
         }
     }
     mod.draw.DrawGiTrace = set_type_default() do #(DrawGiTrace::script_shader(vm)) {
@@ -472,11 +497,11 @@ script_mod! {
             let probe=self.place(a.y,(b.xyz+self.gi_home.xyz)*s)
             if col>63.5 {return probe}
             // hits: (t, albedo, normal (negative = backface), emission);
-            // y = -1 miss, -2 invalid (probe or ray unusable).
+            // y = -1 left the scene, -2 invalid (including ran-out rays).
             if probe.w<0.0 {return vec4(0.0,-2.0,0.0,0.0)}
             let rd=self.gi_ray(col,a)
             let hit=self.vox_trace(probe.xyz,rd,self.gi_pass.z,a.y)
-            if hit.w<0.0 {return vec4(0.0,-2.0,0.0,0.0)}
+            if hit.w<0.0 || hit.w==0.25 {return vec4(0.0,-2.0,0.0,0.0)}
             if hit.w<0.5 {return vec4(self.gi_pass.z,-1.0,0.0,0.0)}
             let v=self.vox_level(hit.y)
             let cell=floor((probe.xyz+rd*(hit.x+v.w*0.01))/v.w)
@@ -554,8 +579,9 @@ script_mod! {
             let ray=min(floor(self.pos.x*64.0),63.0)
             let probe=self.hit_at(64.0,row)
             let hit=self.hit_at(ray,row)
-            // radiance: (rgb, distance); w = -1 backface, -2 invalid; x = -1
-            // a miss (the sky: the receivers light it with their own ambient).
+            // radiance: (rgb, distance); w = -1 backface, -2 invalid
+            // (including ran out); x = -1 left the scene (sky, lit by
+            // the receivers' own ambient).
             if probe.w<0.0 || hit.y<(-1.5) {return vec4(0.0,0.0,0.0,-2.0)}
             if hit.y<(-0.5) {return vec4(-1.0,0.0,0.0,hit.x)}
             let a=self.batch_a(row)
@@ -582,6 +608,9 @@ script_mod! {
                 let v=self.vox_level(a.y)
                 let origin=p+n*(v.w*0.75)-rd*(v.w*0.25)
                 let shadow=self.vox_trace(origin,self.gi_sun_dir,self.gi_relight.w,a.y)
+                // Preserve sun visibility: distance/window exhaustion is
+                // unshadowed, even inside the scene (0.25). Hits and the
+                // existing step-budget failure remain shadowed.
                 if shadow.w<0.5 && shadow.w>(-0.5) {light=self.gi_sun_color*ndl}
             }
             light=light+self.local_bounce(p,n,self.gi_light_ids0.x)+self.local_bounce(p,n,self.gi_light_ids0.y)
@@ -621,7 +650,8 @@ script_mod! {
             return normalize(d)
         }
         // Around d, cosine-weighted: the radiance the surfaces send (E/pi)
-        // and the share of rays that left the scene. w < 0: no ray.
+        // and the share of rays that left the scene. w < 0 (including
+        // ran out) contributes to neither sum nor the normalization.
         irradiance: fn(d:vec3,row:float,a:vec4)->vec4 {
             var sum=vec3(0.0,0.0,0.0)
             var open=0.0
@@ -640,7 +670,8 @@ script_mod! {
             if total<=0.0001 {return vec4(0.0,0.0,0.0,-1.0)}
             return vec4(sum/total,open/total)
         }
-        // Filtered (E[d], E[d^2]) around d from this update's rays.
+        // Filtered (E[d], E[d^2]) around d from this update's valid rays;
+        // ran-out rays have w = -2 and carry no distance or weight.
         moments: fn(d:vec3,row:float,a:vec4,s:float)->vec4 {
             var m=vec2(0.0,0.0)
             var total=0.0
@@ -691,7 +722,8 @@ script_mod! {
                     r=r+1.0
                 }
                 // Mostly backfaces: the probe sits inside closed geometry
-                // (below terrain, inside a wall box).
+                // (below terrain, inside a wall box). Invalid / ran-out
+                // samples (w = -2) do not count against the probe.
                 if probe.w<0.0 || back>16.0 {return vec4(0.0,0.0,0.0,-1.0)}
                 var state=0.34
                 if history {state=min(old_info.w+0.34,1.0)}
@@ -729,6 +761,25 @@ script_mod! {
         ..mod.draw.DrawQuad,
         alpha_blend: false
         color_format: @Rgba16F
+        gi_batch: texture_2d(float)
+        gi_atlas: uniform(vec4(640.0,1824.0,64.0,32.0))
+        // Immutable instances identify a batch row and tile region; only
+        // the two-column batch texture changes from one frame to the next.
+        vertex: fn() {
+            var p=self.rect_pos
+            if self.gi_tile.x>=0.0 {
+                let a=self.gi_batch.sample_nearest(vec2(0.25,(self.gi_tile.x+0.5)/self.gi_update_size.y),0.0)
+                let x=a.x-floor(a.x/self.gi_atlas.z)*self.gi_atlas.z
+                let y=floor(a.x/self.gi_atlas.z)
+                let base=a.y*self.gi_atlas.w*19.0
+                let w=self.gi_tile.z
+                var offset=0.0
+                if self.gi_tile.w>0.5 {offset=self.gi_atlas.w*8.0}
+                if self.gi_tile.w>1.5 {offset=self.gi_atlas.w*18.0}
+                p=vec2(x*w,base+offset+y*w)
+            }
+            self.vertex_pos=self.clip_and_transform_vertex(p,self.rect_size)
+        }
         gi_update: texture_2d(float)
         gi_update_size: uniform(vec2(165.0,1.0))
         pixel: fn(){

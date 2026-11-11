@@ -20,6 +20,8 @@ pub struct EntityLight {
     pub outer_angle: f32,
     pub enabled: bool,
     pub shadows: bool,
+    /// Scatter in the participating medium (without local shadowing).
+    pub volumetric: bool,
 }
 
 impl Default for EntityLight {
@@ -36,6 +38,7 @@ impl Default for EntityLight {
             outer_angle: 25.0,
             enabled: true,
             shadows: false,
+            volumetric: false,
         }
     }
 }
@@ -145,6 +148,7 @@ pub fn set_vehicle_lamps(lights: &mut Vec<EntityLight>, half: Vec3f, enabled: bo
                 outer_angle: 40.0,
                 enabled,
                 shadows,
+                volumetric: false,
             }
         } else {
             EntityLight {
@@ -160,6 +164,7 @@ pub fn set_vehicle_lamps(lights: &mut Vec<EntityLight>, half: Vec3f, enabled: bo
                 outer_angle: 70.0,
                 enabled,
                 shadows: false,
+                volumetric: false,
             }
         };
         set_light(lights, light)?;

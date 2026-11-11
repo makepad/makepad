@@ -1287,6 +1287,28 @@ mod shader_registration_tests {
     use super::*;
     use makepad_draw::makepad_platform::makepad_script::script_eval;
 
+    #[test]
+    fn splat_relief_marches_only_inside_its_uniform_gate() {
+        let source = include_str!("shaders/splat.rs");
+        let gate = "if self.splat_relief_on > 0.5 {";
+        let start = source.find(gate).expect("draw-wide relief gate") + gate.len();
+        let mut depth = 1;
+        let end = source[start..].char_indices().find_map(|(i, c)| {
+            if c == '{' { depth += 1; }
+            if c == '}' { depth -= 1; }
+            (depth == 0).then_some(start + i)
+        }).expect("closed relief gate");
+        let gated = &source[start..end];
+        for call in ["self.splat_relief_trace(", "self.splat_relief_shadow("] {
+            assert_eq!(source.matches(call).count(), 1, "one {call} call site");
+            assert_eq!(gated.matches(call).count(), 1, "{call} must be inside the gate");
+        }
+        assert!(gated.contains("surface_param.x > 0.0 && dist < 20.0"), "visible layer and distance gate");
+        assert!(gated.contains("if dist < 8.0"), "self shadow is near-only");
+        assert!(source.contains("for i in 0..24") && source.contains("for i in 0..4"), "constant march bounds");
+        assert!(source.contains("smoothstep(12.0, 20.0, dist)") && source.contains("smoothstep(0.1391731, 0.2756374, nv)"), "distance and grazing fades");
+    }
+
     /// The hard budget the scene lanes sit against, pinned so that adding
     /// one `#[live]` field cannot silently cross it again.
     ///

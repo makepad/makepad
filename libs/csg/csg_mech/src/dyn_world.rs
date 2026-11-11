@@ -251,16 +251,20 @@ fn timeconst(hertz: f64, dt: f64) -> f64 { (1.0 / (std::f64::consts::TAU * hertz
 // links' solids may overlap by up to 0.3 mm at a corner; links stay linked through hangs and drags.
 const TUBE_TOLERANCE: f64 = 0.3;
 
-// Two parts' fields meet where the engine finds them: it starts this many points in their common box and walks
-// each this many steps down their distance (its own defaults are 40 and 10; the cost goes about as their
-// product). A roller bearing's rings and rollers turned by the hand, per 240 Hz step at the 4 substeps fields
-// run at (runner::dynamics_world): 13.4 ms at the defaults, 1.5 ms at 10 and 5, 2.3 ms at these. At 10 and 5 a
-// ball of fields comes to rest 0.8 mm inside its cup's wall; at these it keeps within 0.07 mm of the wall and
-// sinks up to 0.26 mm into the floor (0.13 at the defaults). The bearing keeps its rollers as close to their
-// track at all of them (0.6 to 1.1 mm off it, where its clearance lets the inner ring 1.2 mm off its axis).
-// A hull meets a field through its faces, one start on each walked this many steps to its deepest point.
+// Two parts' fields meet where the engine's search finds them (collision_sdf::sdf): each collision it walks from
+// where they last touched, from the middle of their common box and from SDF_INITPOINTS more points in each cube
+// of the thinner part's thickness along the box's longest side, each walk until it settles at the deepest point
+// of their overlap (its step under a thousandth of the box's size); from each touch it finds how far it reaches
+// along their surfaces (a face's or a line's ends), and keeps as many contacts (the deepest and those farthest
+// apart). A walk still going after SDF_ITERATIONS steps carries on in the next collision
+// (Data::sdf_walks_bounded, logged at the first); the parts rarely need it: of the walks of a pin pulled into
+// its hole's wall, 5 in 123 thousand, none of a roller pulled into its bearing's ring or of a ball at rest in its
+// cup. Per 240 Hz step at the 4 substeps fields run at (runner::dynamics_world): a bearing's rings and rollers
+// 0.94 ms, a ball in its cup 0.12 ms, a pin in its hole 0.13 ms; the roller pulled into its ring is kept within
+// 0.04 mm of it, a ball rests in its cup within 3.5 s. A hull meets a field through its faces, one start on each
+// walked at most SDF_ITERATIONS steps to its deepest corner.
 const SDF_INITPOINTS: i32 = 8;
-const SDF_ITERATIONS: i32 = 8;
+const SDF_ITERATIONS: i32 = 64;
 // What meets what (contype and conaffinity bits). The floor, tubes and the drape ball are SOLID; rods meet rods
 // and the floor; a part's hulls meet the floor, tubes, hulls and fields; fields meet fields and hulls. A part
 // with a field meets the others through it, and its own hulls only the floor and tubes (they would fill its

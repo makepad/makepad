@@ -31,6 +31,58 @@ pub enum Construction {
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum BooleanMode {Union,Difference,Intersection}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ConstructionKey {
+    Box { size: [u64; 3], radius: u64, segments: u32, material: u32 },
+    Capsule { radius: u64, height: u64, segments: u32, rings: u32, material: u32 },
+    Cone { bottom: u64, top: u64, height: u64, segments: u32, smooth: bool, material: u32 },
+}
+impl ConstructionKey {
+    fn new(shape: &Shape, material: u32) -> Option<Self> {
+        Some(match shape {
+            Shape::Box { size, radius, segments } => Self::Box { size: size.map(f64::to_bits), radius: radius.to_bits(), segments: *segments, material },
+            Shape::Capsule { radius, height, segments, rings } => Self::Capsule { radius: radius.to_bits(), height: height.to_bits(), segments: *segments, rings: *rings, material },
+            Shape::Cone { bottom, top, height, segments, smooth } => Self::Cone { bottom: bottom.to_bits(), top: top.to_bits(), height: height.to_bits(), segments: *segments, smooth: *smooth, material },
+            _ => return None,
+        })
+    }
+}
+struct CachedConstruction { remaining: usize, generated: Option<(Mesh, u64)> }
+/// Repeated factories in one transaction, with no scene-dependent inputs.
+pub(crate) struct ConstructionCache { shapes: BTreeMap<ConstructionKey, CachedConstruction> }
+impl ConstructionCache {
+    pub(crate) fn new(ops: &[crate::Operation]) -> Self {
+        let mut shapes = BTreeMap::<ConstructionKey, CachedConstruction>::new();
+        for op in ops {
+            if let crate::Operation::Construction(ConstructionOperation { kind: Construction::Shape { shape, material }, .. }) = op {
+                if let Some(key) = ConstructionKey::new(shape, *material) {
+                    shapes.entry(key).or_insert(CachedConstruction { remaining: 0, generated: None }).remaining += 1;
+                }
+            }
+        }
+        shapes.retain(|_, cached| cached.remaining > 1);
+        Self { shapes }
+    }
+    fn generate(&mut self, shape: &Shape, material: u32, ctx: &mut Context<'_>) -> Result<Mesh> {
+        let Some(key) = ConstructionKey::new(shape, material) else { return shape.generate(material, ctx) };
+        let Some(cached) = self.shapes.get_mut(&key) else { return shape.generate(material, ctx) };
+        cached.remaining -= 1;
+        if let Some((mesh, work)) = &cached.generated {
+            // Count limits and inputs are fixed for this transaction, but the
+            // available working bytes shrink as preceding objects are added.
+            // Repeat the factory's admission and retain its full work charge.
+            let (vertices, faces, corners) = (mesh.vertices().len(), mesh.faces().len(), mesh.corners().len());
+            admit(vertices, faces, corners, ctx)?;
+            ctx.checkpoint(work.saturating_sub((vertices + corners) as u64))?;
+            return Ok(if cached.remaining == 0 { cached.generated.take().unwrap().0 } else { mesh.clone() });
+        }
+        let before = ctx.work_used();
+        let mesh = shape.generate(material, ctx)?;
+        cached.generated = Some((mesh.clone(), ctx.work_used() - before));
+        Ok(mesh)
+    }
+}
 impl ConstructionOperation {
     pub fn object_name(&self)->&str{&self.object}
     pub fn memory_bytes(&self)->usize{let mut w=Writer::new(usize::MAX);if self.write(&mut w).is_err(){return usize::MAX;}w.bytes.len().saturating_mul(4).saturating_add(256)}
@@ -38,6 +90,12 @@ impl ConstructionOperation {
         self.apply_in_scene(objects,&crate::SceneState::default(),limits,ctx)
     }
     pub(crate) fn apply_in_scene(&self,objects:&mut BTreeMap<String,Mesh>,scene:&crate::SceneState,limits:&Limits,ctx:&mut Context<'_>)->Result<OperationResult>{
+        self.apply_inner(objects,scene,limits,ctx,None)
+    }
+    pub(crate) fn apply_cached_in_scene(&self,objects:&mut BTreeMap<String,Mesh>,scene:&crate::SceneState,limits:&Limits,ctx:&mut Context<'_>,cache:&mut ConstructionCache)->Result<OperationResult>{
+        self.apply_inner(objects,scene,limits,ctx,Some(cache))
+    }
+    fn apply_inner(&self,objects:&mut BTreeMap<String,Mesh>,scene:&crate::SceneState,limits:&Limits,ctx:&mut Context<'_>,cache:Option<&mut ConstructionCache>)->Result<OperationResult>{
         self.check(limits)?;
         if objects.contains_key(&self.object){return Err(Error::DuplicateObject(self.object.clone()));}if objects.len()>=limits.max_objects{return Err(Error::Budget("objects"));}
         ctx.checkpoint(0)?;let mesh=match &self.kind{
@@ -53,7 +111,7 @@ impl ConstructionOperation {
                 boolean_mesh(&a,&b,*mode,ctx)?
             },
             Construction::Voxel{source,resolution}=>voxel_mesh(&world_source(objects,scene,source,ctx)?,*resolution,ctx)?,
-            Construction::Shape{shape,material}=>shape.generate(*material,ctx)?,
+            Construction::Shape{shape,material}=>match cache{Some(cache)=>cache.generate(shape,*material,ctx)?,None=>shape.generate(*material,ctx)?},
             Construction::Decal{decal,material}=>decal.generate(&world_source(objects,scene,&decal.target,ctx)?,*material,ctx)?,
         };
         ctx.checkpoint(0)?;let mut result=OperationResult{object:self.object.clone(),faces:mesh.faces().iter().map(|f|f.id).collect(),vertices:mesh.vertices().iter().map(|v|v.id).collect(),..Default::default()};

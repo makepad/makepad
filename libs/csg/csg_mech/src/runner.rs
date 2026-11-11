@@ -151,10 +151,8 @@ pub struct Runner {
 }
 
 /// What the dynamics engine steps: parts on joints or strings, or held by a hand (a jointed piece as
-/// Mechanics shows it), chains, and parts that meet through their fields (exactly, as two distance
-/// fields). A weave is a chain when each of its links holds at most two others, open or closed; mail
-/// (links holding four) has too many contacts for the engine's step and stays on box3d. Balls meet fields
-/// on box3d (a support check's pieces against the part). A flex joint's spring is integrated explicitly on
+/// Mechanics shows it), weaves (chains and mail), and parts that meet through their fields (exactly, as
+/// two distance fields). Balls meet fields on box3d (a support check's pieces against the part). A flex joint's spring is integrated explicitly on
 /// the engine, and on a small part it is stiffer than a substep can hold (a jellyfish's needs 35 substeps of
 /// a 240 Hz step), so a piece with one stays on box3d, whole, until the engine's position-implicit
 /// integrator is ported.
@@ -163,30 +161,30 @@ pub fn on_dynamics(asm: &Assembly) -> bool {
     let fields = asm.bodies.iter().any(|b| b.field.is_some());
     let moving = !asm.joints.is_empty() || !asm.strings.is_empty() || asm.anchors.iter().any(|a| a.kind == AnchorKind::Held);
     (moving || woven || fields)
-        && (!woven || chain(asm))
         && asm.joints.iter().all(|j| !matches!(j.kind, JointKind::Flex { .. }))
         && asm.bodies.iter().all(|b| b.balls.is_empty())
 }
 
-/// Each body interlocks with at most two others.
-fn chain(asm: &Assembly) -> bool {
+/// Mail: a weave with a link that holds more than two others (a chain's hold one or two).
+fn mail(asm: &Assembly) -> bool {
     let mut held = vec![0usize; asm.bodies.len()];
     for &(a, b) in &asm.interlocks {
         held[a] += 1;
         held[b] += 1;
     }
-    held.iter().all(|&n| n <= 2)
+    held.iter().any(|&n| n > 2)
 }
 
-/// A chain on the dynamics engine steps in this long (ms) beside the view's work. A longer chain is not
-/// refused: it runs slower than real time, and says so once ([`ChainSteps`]).
-const CHAIN_STEP_MS: f64 = 2.5;
+/// A weave on the dynamics engine steps in this long (ms) beside the view's work. A longer step is not
+/// refused: the sim runs slower than real time ([`MAX_CATCH_UP`]), every step whole, and the weave says
+/// so once ([`WeaveSteps`]).
+const WEAVE_STEP_MS: f64 = 2.5;
 
-/// A chain's step times, a second's worth at a time, until one step goes over [`CHAIN_STEP_MS`]: that
-/// second is logged (the chain's link count, its 95th percentile and slowest step) and timing stops. The
+/// A weave's step times, a second's worth at a time, until one step goes over [`WEAVE_STEP_MS`]: that
+/// second is logged (the weave's link count, its 95th percentile and slowest step) and timing stops. The
 /// first second is not judged: under the JIT the step's code compiles as it first runs (a 14-link chain's
 /// first second has a p95 of 14 ms and one step of 146 ms; its later steps take about 2 ms).
-struct ChainSteps {
+struct WeaveSteps {
     links: usize,
     ms: Vec<f64>,
     over: bool,
@@ -194,13 +192,13 @@ struct ChainSteps {
     logged: bool,
 }
 
-impl ChainSteps {
+impl WeaveSteps {
     fn add(&mut self, ms: f64) {
         if self.logged {
             return;
         }
         self.ms.push(ms);
-        self.over |= ms > CHAIN_STEP_MS;
+        self.over |= ms > WEAVE_STEP_MS;
         if self.ms.len() < HZ as usize {
             return;
         }
@@ -209,7 +207,7 @@ impl ChainSteps {
             let p95 = self.ms[self.ms.len() * 95 / 100];
             let slowest = self.ms[self.ms.len() - 1];
             makepad_dynamics::util_errmem::warning_text(&format!(
-                "mech-sim: a chain of {} links steps over {CHAIN_STEP_MS} ms: p95 {p95:.2} ms, slowest {slowest:.2} ms over a second of steps",
+                "mech-sim: a weave of {} links steps over {WEAVE_STEP_MS} ms: p95 {p95:.2} ms, slowest {slowest:.2} ms over a second of steps",
                 self.links
             ));
             self.logged = true;
@@ -223,18 +221,29 @@ impl ChainSteps {
 /// Solver substeps of a 240 Hz step on the dynamics engine. box3d and the joint checks keep the assembly's.
 const DYNAMICS_SUBSTEPS: u32 = 8;
 
+/// Substeps of a 240 Hz step for mail: a 41-link sheet keeps every link through its hang and drags at 4 as
+/// at 8 and falls asleep as soon, in half the time (natively a drag's step is 5.0 ms at the median and
+/// 5.7 at the 95th percentile, against 10.4 and 12.7 at 8, so it runs slower than real time there).
+const MAIL_SUBSTEPS: u32 = 4;
+
 /// Substeps of a 240 Hz step for a piece whose parts meet through their fields: finding where two fields
 /// meet costs most of a step, and a roller bearing rests and turns at 4 as it does at 8, in half the time.
 const FIELD_SUBSTEPS: u32 = 4;
 
 /// A piece's world on the dynamics engine, at its own substeps.
 pub fn dynamics_world(asm: &Assembly, gravity: P3, floor: Option<f64>) -> Result<DynWorld, String> {
-    let substeps = if asm.bodies.iter().any(|b| b.field.is_some()) { FIELD_SUBSTEPS } else { DYNAMICS_SUBSTEPS };
+    let substeps = if asm.bodies.iter().any(|b| b.field.is_some()) {
+        FIELD_SUBSTEPS
+    } else if mail(asm) {
+        MAIL_SUBSTEPS
+    } else {
+        DYNAMICS_SUBSTEPS
+    };
     DynWorld::new(&Assembly { substeps, ..asm.clone() }, gravity, floor)
 }
 
-/// The world a live sim steps: jointed pieces, chains and parts that meet through their fields on the
-/// dynamics engine ([`on_dynamics`]), every other assembly (mail, free parts, a support check) on MechWorld. A weave's offline run ([`crate::weave::simulate`]) steps the
+/// The world a live sim steps: jointed pieces, weaves and parts that meet through their fields on the
+/// dynamics engine ([`on_dynamics`]), every other assembly (free parts, a support check) on MechWorld. A weave's offline run ([`crate::weave::simulate`]) steps the
 /// same world.
 pub(crate) enum Engine {
     Mech(MechWorld),
@@ -307,7 +316,7 @@ impl Engine {
         if on_dynamics(asm) {
             dynamics_world(asm, gravity, floor).map(|w| Engine::Dynamics(Box::new(w)))
         } else if !asm.strings.is_empty() || asm.anchors.iter().any(|a| a.kind == AnchorKind::Held) || asm.joints.iter().any(|j| j.motor.is_some()) {
-            Err("strings, held parts and motors run only on the dynamics engine, and mail and flex joints run on box3d".into())
+            Err("strings, held parts and motors run only on the dynamics engine, and flex joints run on box3d".into())
         } else {
             Ok(Engine::Mech(MechWorld::new(asm, gravity, floor)))
         }
@@ -481,7 +490,7 @@ fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, mut w: Engine, rx: Re
     let mut behind = 0.0;
     let mut behind_logged = Instant::now();
     let links = asm.bodies.iter().filter(|b| !b.tubes.is_empty()).count();
-    let mut chain_steps = (links > 0 && matches!(w, Engine::Dynamics(_))).then(|| ChainSteps { links, ms: Vec::new(), over: false, warm: false, logged: false });
+    let mut weave_steps = (links > 0 && matches!(w, Engine::Dynamics(_))).then(|| WeaveSteps { links, ms: Vec::new(), over: false, warm: false, logged: false });
     while !stop.load(Ordering::Relaxed) {
         let mut single = false;
         let mut changed = false;
@@ -639,7 +648,7 @@ fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, mut w: Engine, rx: Re
             }
             let started = Instant::now();
             w.step(dt);
-            if let Some(c) = &mut chain_steps {
+            if let Some(c) = &mut weave_steps {
                 c.add(started.elapsed().as_secs_f64() * 1e3);
             }
             frame += 1;

@@ -4,6 +4,15 @@
 use crate::{context::invalid,geometry::*,topology::{surface,blended_vertex,replace_corners},*};
 use std::collections::{BTreeMap,BTreeSet};
 
+#[derive(Default)]
+struct CollapseScratch {
+    patch_positions:Vec<[f64;3]>,
+    // Keep polygon slots, including their three-element buffers, at the largest
+    // neighborhood seen so far. Only the active prefix is passed to validation.
+    polygons:Vec<Polygon>,
+    old_normals:Vec<[f64;3]>,
+}
+
 impl Mesh {
     /// Triangulates the cage, then collapses eligible manifold edges toward the
     /// requested triangle-face count. max_error bounds every original vertex's
@@ -26,6 +35,7 @@ impl Mesh {
             }}
             for edge in m.edge_data.keys(){protected.extend([edge.0,edge.1]);}
             let mut radii=m.vertices.iter().map(|v|(v.id,0f64)).collect::<BTreeMap<_,_>>();let mut merged=BTreeMap::<VertexId,VertexId>::new();let mut collapses=0;
+            let mut scratch=CollapseScratch::default();
             // Each pass collapses every independent candidate in error order:
             // a collapse dirties both one-rings, whose adjacency is stale until
             // the next pass rebuilds it. One collapse per adjacency rebuild made
@@ -39,7 +49,7 @@ impl Mesh {
                     if dirty.contains(&edge.0)||dirty.contains(&edge.1){continue;}
                     // Never remove more incident triangles than the target asks.
                     if m.faces.len().saturating_sub(adj.radial(edge).len())<target_faces{continue;}
-                    match collapse_triangle_neighborhood(m,&adj,edge,ctx){
+                    match collapse_triangle_neighborhood(m,&adj,edge,&mut scratch,ctx){
                         Ok(_)=>{radii.insert(edge.0,error);radii.remove(&edge.1);merged.insert(edge.1,edge.0);collapses+=1;progressed=true;
                             for v in [edge.0,edge.1]{dirty.insert(v);for e in &adj.vertex_edges[&v]{dirty.insert(e.0);dirty.insert(e.1);}}
                             if m.faces.len()<=target_faces{break;}}
@@ -70,7 +80,9 @@ fn emit_triangle(next:&mut Mesh,source:&Mesh,triangles:&TriangleMesh,tri:&Triang
 /// Internal to the already-staged decimation edit. Refused candidates never
 /// mutate the mesh. Only the one-ring is copied/validated, rather than cloning
 /// and qualifying the entire mesh for each attempted collapse.
-fn collapse_triangle_neighborhood(mesh:&mut Mesh,adj:&Adjacency,edge:EdgeKey,ctx:&mut Context<'_>)->Result<()> {
+fn collapse_triangle_neighborhood(mesh:&mut Mesh,adj:&Adjacency,edge:EdgeKey,scratch:&mut CollapseScratch,ctx:&mut Context<'_>)->Result<()> {
+    let CollapseScratch{patch_positions,polygons,old_normals}=scratch;
+    patch_positions.clear();old_normals.clear();
     let uses=adj.radial(edge);
     if uses.is_empty()||uses.len()>2{return Err(invalid("collapse needs a manifold edge"));}
     let neighbors=|v:VertexId|adj.vertex_edges[&v].iter().map(|e|if e.0==v{e.1}else{e.0}).collect::<BTreeSet<_>>();
@@ -78,32 +90,35 @@ fn collapse_triangle_neighborhood(mesh:&mut Mesh,adj:&Adjacency,edge:EdgeKey,ctx
     let a=neighbors(edge.0);let b=neighbors(edge.1);
     let mut opposite=BTreeSet::new();
     for use_ in uses{for c in mesh.face_corners(use_.face)?{ctx.checkpoint(1)?;if c.vertex!=edge.0&&c.vertex!=edge.1{opposite.insert(c.vertex);}}}
-    if a.intersection(&b).copied().collect::<BTreeSet<_>>()!=opposite{return Err(invalid("collapse violates triangle link condition"));}
+    if !a.intersection(&b).eq(opposite.iter()){return Err(invalid("collapse violates triangle link condition"));}
     let boundary=|v|adj.vertex_edges[&v].iter().any(|e|adj.radial(*e).len()==1);
     // An interior edge joining two boundary vertices would pinch the boundary.
     if uses.len()==2&&boundary(edge.0)&&boundary(edge.1){return Err(invalid("collapse would pinch the boundary"));}
     let (position,weights)=blended_vertex(mesh,edge.0,edge.1,0.5,ctx)?;
     let affected=adj.vertex_faces[&edge.0].iter().chain(&adj.vertex_faces[&edge.1]).copied().collect::<BTreeSet<_>>();
     let mut remove=BTreeSet::new();let mut replacements=BTreeMap::new();
-    let mut patch_positions=Vec::new();let mut patch_vertices=BTreeMap::new();let mut polygons=Vec::new();let mut old_normals=Vec::new();
+    let mut patch_vertices=BTreeMap::new();
     for face in affected{
         ctx.checkpoint(1)?;let source=mesh.face_corners(face)?;
         if source.len()!=3{return Err(invalid("decimation collapse requires triangles"));}
         if source.iter().any(|c|c.vertex==edge.0)&&source.iter().any(|c|c.vertex==edge.1){remove.insert(face);continue;}
+        let polygon_index=old_normals.len();
         old_normals.push(face_geometry(mesh,face,ctx)?.normal);
-        let mut corners=source.to_vec();let mut indices=Vec::new();
+        if polygon_index==polygons.len(){polygons.push(Polygon{vertices:Vec::with_capacity(3),uvs:Vec::with_capacity(3),material:0});}
+        let polygon=&mut polygons[polygon_index];polygon.vertices.clear();polygon.uvs.clear();polygon.material=mesh.face(face).unwrap().material;
+        let mut corners:[Corner;3]=std::array::from_fn(|i|source[i].clone());
         for c in &mut corners{
             ctx.checkpoint(1)?;if c.vertex==edge.1{c.vertex=edge.0;}c.normal=None;
             let next=patch_vertices.len()as u32;
             let index=*patch_vertices.entry(c.vertex).or_insert_with(||{patch_positions.push(if c.vertex==edge.0{position}else{mesh.vertex(c.vertex).unwrap().position});next});
-            indices.push(index);
+            polygon.vertices.push(index);polygon.uvs.push(c.uv);
         }
-        polygons.push(Polygon{vertices:indices,uvs:corners.iter().map(|c|c.uv).collect(),material:mesh.face(face).unwrap().material});
         replacements.insert(face,corners);
     }
+    let polygons=&polygons[..old_normals.len()];
     ctx.bytes(mesh.memory_bytes().saturating_mul(2).saturating_add(patch_positions.len().saturating_mul(2048)).saturating_add(polygons.len().saturating_mul(2048)))?;
-    let patch=Mesh::from_polygons(&patch_positions,&polygons,ctx)?;
-    for (face,normal) in patch.faces.iter().zip(old_normals){
+    let patch=Mesh::from_polygons(patch_positions,polygons,ctx)?;
+    for (face,&normal) in patch.faces.iter().zip(old_normals.iter()){
         if dot(normal,face_geometry(&patch,face.id,ctx)?.normal)<=1e-8{return Err(invalid("collapse would reverse a face"));}
     }
     surface(&patch,ctx)?;

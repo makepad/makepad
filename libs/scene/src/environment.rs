@@ -39,6 +39,93 @@ impl Default for SkyConfig {
     }
 }
 
+/// A height-varying participating medium, in linear light and world metres.
+/// Extinction is `density * exp(-max(y - height, 0) * falloff)`.
+/// Local lights explicitly marked volumetric scatter without local shadows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VolumeFog {
+    pub density: f32,
+    pub height: f32,
+    pub falloff: f32,
+    /// Linear albedo tint (0..1).
+    pub color: [f32; 3],
+    /// Henyey-Greenstein g toward the sun (0..0.9).
+    pub anisotropy: f32,
+    /// Sun in-scattering gain; zero leaves ambient and local lights.
+    pub shafts: f32,
+    pub max_distance: f32,
+}
+
+impl Default for VolumeFog {
+    fn default() -> Self {
+        Self { density: 0.0, height: 0.0, falloff: 0.0, color: [1.0; 3], anisotropy: 0.6, shafts: 1.0, max_distance: 80.0 }
+    }
+}
+
+impl VolumeFog {
+    /// Sanitize host input as well as script input before writing uniforms.
+    pub fn sanitized(self) -> Self {
+        let d = Self::default();
+        let finite = |v: f32, fallback: f32| if v.is_finite() { v } else { fallback };
+        Self {
+            density: finite(self.density, d.density).clamp(0.0, 1.0),
+            height: finite(self.height, d.height),
+            falloff: finite(self.falloff, d.falloff).clamp(0.0, 5.0),
+            color: self.color.map(|v| finite(v, 1.0).clamp(0.0, 1.0)),
+            anisotropy: finite(self.anisotropy, d.anisotropy).clamp(0.0, 0.9),
+            shafts: finite(self.shafts, d.shafts).clamp(0.0, 8.0),
+            max_distance: finite(self.max_distance, d.max_distance).clamp(5.0, 500.0),
+        }
+    }
+
+    pub fn active(self) -> bool { self.density.is_finite() && self.density > 0.0 }
+}
+
+/// Screen-space reflections on glossy surfaces, disabled by default.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SsrSettings {
+    pub strength: f32,
+    /// Maximum reflection ray distance in world metres.
+    pub max_distance: f32,
+}
+
+impl Default for SsrSettings {
+    fn default() -> Self {
+        Self { strength: 0.0, max_distance: 30.0 }
+    }
+}
+
+impl SsrSettings {
+    /// Sanitize host input as well as script input before writing uniforms.
+    pub fn sanitized(self) -> Self {
+        let d = Self::default();
+        let finite = |v: f32, fallback: f32| if v.is_finite() { v } else { fallback };
+        Self {
+            strength: finite(self.strength, d.strength).clamp(0.0, 2.0),
+            max_distance: finite(self.max_distance, d.max_distance).clamp(2.0, 200.0),
+        }
+    }
+
+    pub fn active(self) -> bool { self.strength.is_finite() && self.strength > 0.0 }
+}
+
+/// Camera-following probe lighting. None on a world leaves GI off.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GiSettings {
+    /// Finest cascade's probe spacing, in metres.
+    pub spacing: f32,
+    /// Blend from ordinary ambient to probe lighting (0..1).
+    pub strength: f32,
+    /// Previous-field feedback for further bounces (0..0.95).
+    pub bounce: f32,
+}
+
+impl Default for GiSettings {
+    fn default() -> Self {
+        Self { spacing: 1.0, strength: 1.0, bounce: 0.85 }
+    }
+}
+
 /// A game's colour grade (`game.grade({...})`), applied where the HDR
 /// composite tone maps. Every default reproduces the stock look.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -383,6 +470,25 @@ impl Environment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reflections_default_off_and_sanitize_host_settings() {
+        let defaults = SsrSettings::default();
+        assert_eq!(defaults, SsrSettings { strength: 0.0, max_distance: 30.0 });
+        assert!(!defaults.active(), "existing worlds keep reflections off");
+        for (value, expected) in [
+            (-1000.0, SsrSettings { strength: 0.0, max_distance: 2.0 }),
+            (1000.0, SsrSettings { strength: 2.0, max_distance: 200.0 }),
+            (f32::NAN, defaults),
+            (f32::INFINITY, defaults),
+            (f32::NEG_INFINITY, defaults),
+        ] {
+            let raw = SsrSettings { strength: value, max_distance: value };
+            assert_eq!(raw.sanitized(), expected, "host range/finite checks for {value}");
+            assert_eq!(raw.active(), value.is_finite() && value > 0.0, "only finite positive strength is active");
+        }
+        assert!(SsrSettings { strength: 1.0, ..defaults }.active());
+    }
 
     fn sun() -> EnvSun {
         EnvSun { dir: vec3f(0.0, 0.8, -0.6), radiance: vec3f(5.0e4, 4.8e4, 4.5e4), cos_radius: 0.99996, facing: 1.0, cos_cover: 0.99995 }

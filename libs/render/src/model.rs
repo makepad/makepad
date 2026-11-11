@@ -1733,15 +1733,16 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
 fn gltf_splat(json:&Val,bin:&[u8],splat:&Val)->Option<crate::material_surface::SplatSurface> {
     let texture=|v:Option<&Val>|v.and_then(Val::usize).and_then(|i|json.get("textures")?.idx(i)?.get("source")?.usize()).and_then(|i|gltf_embedded_png(json,bin,i));
     let num=|v:&Val,key:&str,default:f32|v.get(key).and_then(Val::f64).map_or(default,|f|f as f32);
-    let map=splat.get("map")?;
-    let m=|i:usize|map.idx(i).and_then(Val::f64).map(|v|v as f32);
+    let m=|i:usize,default:f32|splat.get("map").and_then(|map|map.idx(i)).and_then(Val::f64).map_or(default,|v|v as f32);
     let layers=splat.get("layers")?.arr().iter().map(|l|crate::material_surface::SplatLayer{
         albedo_png:texture(l.get("albedo")),
         color:std::array::from_fn(|i|l.get("color").and_then(|c|c.idx(i)).and_then(Val::f64).unwrap_or(0.5) as f32),
         normal_png:texture(l.get("normal")),
         scale:num(l,"scale",1.0),roughness:num(l,"roughness",0.9),metallic:num(l,"metallic",0.0),bump:num(l,"bump",0.0),
+        relief:num(l,"relief",0.0).clamp(0.0,0.12),
+        wet:num(l,"wet",0.0).clamp(0.0,1.0),puddles:num(l,"puddles",0.0).clamp(0.0,1.0),
     }).collect::<Vec<_>>();
-    Some(crate::material_surface::SplatSurface{layers,weights_png:texture(splat.get("weights"))?,origin:[m(0)?,m(1)?],cell:m(2)?,width:m(3)?,rows:m(4)?})
+    Some(crate::material_surface::SplatSurface{layers,weights_png:texture(splat.get("weights")).unwrap_or_default(),origin:[m(0,0.0),m(1,0.0)],cell:m(2,1.0),width:m(3,1.0),rows:m(4,1.0)})
 }
 
 impl PrimSpan {
@@ -3841,6 +3842,17 @@ pub(crate) mod tests {
             assert!(m.anim_parts.is_empty());
             assert_eq!(m.vertex_count(), 3);
         }
+    }
+
+    #[test]
+    fn splat_surface_parameters_parse_with_legacy_defaults() {
+        let json = JsonParser::parse(br#"{"layers":[{"relief":0.04,"wet":0.6,"puddles":0.25}]}"#).unwrap();
+        let splat = gltf_splat(&json, &[], &json).unwrap();
+        assert_eq!((splat.layers[0].relief, splat.layers[0].wet, splat.layers[0].puddles), (0.04, 0.6, 0.25));
+        assert_eq!((splat.width, splat.rows), (1.0, 1.0), "a single surface needs no weight grid");
+        let old = JsonParser::parse(br#"{"layers":[{}]}"#).unwrap();
+        let old = gltf_splat(&old, &[], &old).unwrap();
+        assert_eq!((old.layers[0].relief, old.layers[0].wet, old.layers[0].puddles), (0.0, 0.0, 0.0));
     }
 
     #[test]

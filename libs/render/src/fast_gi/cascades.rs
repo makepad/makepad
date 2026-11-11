@@ -65,7 +65,7 @@ fn gcd(a: usize, b: usize) -> usize { if b == 0 { a } else { gcd(b, a % b) } }
 impl Cascade {
     pub fn new(grid: [usize; 3], spacing: f32, settle: bool) -> Self {
         let count = grid.iter().product();
-        Self { grid, spacing, origin: None, queued: vec![Queued::No; count], queue: VecDeque::new(), cursor: 0, stride: refresh_stride(count), stamp: vec![0; count], frame: 0, settle, updates: vec![0; count], needed: vec![!settle; count] }
+        Self { grid, spacing, origin: None, queued: vec![Queued::No; count], queue: VecDeque::with_capacity(count), cursor: 0, stride: refresh_stride(count), stamp: vec![0; count], frame: 0, settle, updates: vec![0; count], needed: vec![!settle; count] }
     }
     /// Which probes of the window a surface can read (window-local cells,
     /// x + grid.x (y + grid.y z)). A probe newly needed is traced.
@@ -152,7 +152,7 @@ impl Cascade {
         let count = self.count();
         let mut taken = 0;
         // Settle mode looks past the probes that are done for ones that are not.
-        for _ in 0..if self.settle { count } else { n.min(count) } {
+        for _ in 0..count {
             if taken == n { break; }
             let slot = (self.cursor * self.stride) % count;
             self.cursor = (self.cursor + 1) % count;
@@ -176,40 +176,73 @@ impl Cascade {
 }
 
 /// Shares of the budget: the finest cascade covers what the eye sees.
-fn shares(budget: usize, cascades: usize) -> Vec<usize> {
-    let weights: Vec<usize> = (0..cascades).map(|i| if i == 0 { 2 } else { 1 }).collect();
-    let total: usize = weights.iter().sum();
-    let mut s: Vec<usize> = weights.iter().map(|w| budget * w / total).collect();
-    let rest = budget - s.iter().sum::<usize>();
-    if let Some(first) = s.first_mut() { *first += rest; }
+fn shares(budget: usize, cascades: usize) -> [usize; super::MAX_CASCADES] {
+    let mut s = [0; super::MAX_CASCADES];
+    let total = cascades + 1;
+    for (i, share) in s[..cascades].iter_mut().enumerate() {
+        *share = budget * if i == 0 { 2 } else { 1 } / total;
+    }
+    s[0] += budget - s.iter().sum::<usize>();
     s
 }
 
-/// This frame's probe updates, at most `budget` of them.
-pub(crate) fn schedule(cascades: &mut [Cascade], budget: usize) -> Vec<BatchItem> {
-    let mut out = Vec::with_capacity(budget);
-    let ready: Vec<usize> = (0..cascades.len()).filter(|&i| cascades[i].origin.is_some()).collect();
-    if ready.is_empty() || budget == 0 { return out; }
-    for &i in &ready { cascades[i].frame = cascades[i].frame.wrapping_add(1).max(1); }
-    // Queued work first; a cascade with no queue lends its share to the
-    // others' queues before anything is spent on refresh.
+/// Largest batch whose 2:1:1 refresh shares fit without repeating a slot.
+/// Queued work may borrow those shares, but never raises this ceiling.
+pub(crate) fn batch_capacity(count: usize, cascades: usize) -> usize {
+    count * (cascades + 1) / 2
+}
+
+/// This frame's updates, in the existing queue/stride order. Storage belongs
+/// to the caller; no catch-up work or allocation on an ordinary frame.
+pub(crate) fn schedule(cascades: &mut [Cascade], budget: usize, out: &mut Vec<BatchItem>) {
+    out.clear();
+    let mut ready = [0; super::MAX_CASCADES];
+    let mut nready = 0;
+    for (i, cascade) in cascades.iter_mut().enumerate() {
+        if cascade.origin.is_some() {
+            ready[nready] = i;
+            nready += 1;
+            cascade.frame = cascade.frame.wrapping_add(1).max(1);
+        }
+    }
+    let ready = &ready[..nready];
+    if ready.is_empty() || budget == 0 { return; }
     let mut left = budget;
     loop {
-        let busy: Vec<usize> = ready.iter().copied().filter(|&i| cascades[i].pending() > 0).collect();
-        if left == 0 || busy.is_empty() { break; }
-        let s = shares(left, busy.len());
+        let mut busy = [0; super::MAX_CASCADES];
+        let mut nbusy = 0;
+        for &i in ready {
+            if cascades[i].pending() > 0 {
+                busy[nbusy] = i;
+                nbusy += 1;
+            }
+        }
+        if left == 0 || nbusy == 0 { break; }
+        let s = shares(left, nbusy);
         let mut taken = 0;
-        for (k, &i) in busy.iter().enumerate() { taken += cascades[i].take_queued(i, s[k], &mut out); }
+        for (k, &i) in busy[..nbusy].iter().enumerate() {
+            taken += cascades[i].take_queued(i, s[k], out);
+        }
         if taken == 0 { break; }
         left -= taken;
     }
-    // What a settled cascade leaves goes to those that are not.
+    // Look past already queued/stamped slots, retaining the same stride.
+    // An edit must not leave a short frame followed by a full-frame burst.
+    let mut exhausted = [false; super::MAX_CASCADES];
     while left > 0 {
-        let s = shares(left, ready.len());
+        let mut refresh = [0; super::MAX_CASCADES];
+        let mut nrefresh = 0;
+        for &i in ready {
+            if !exhausted[i] { refresh[nrefresh] = i; nrefresh += 1; }
+        }
+        if nrefresh == 0 { break; }
+        let s = shares(left, nrefresh);
         let mut taken = 0;
-        for (k, &i) in ready.iter().enumerate() { taken += cascades[i].take_refresh(i, s[k], &mut out); }
-        if taken == 0 || !cascades[ready[0]].settle { break; }
+        for (k, &i) in refresh[..nrefresh].iter().enumerate() {
+            let n = cascades[i].take_refresh(i, s[k], out);
+            if n < s[k] { exhausted[i] = true; }
+            taken += n;
+        }
         left -= taken;
     }
-    out
 }

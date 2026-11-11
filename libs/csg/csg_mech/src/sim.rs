@@ -425,7 +425,7 @@ pub struct Assembly {
     /// Strings between parts. A piece with strings runs only on the dynamics engine.
     pub strings: Vec<StringSpec>,
     /// Body pairs designed to interlock (a weave's links). A weave whose links each hold at most two others
-    /// is a chain, which the dynamics engine steps; one whose links hold more (mail) runs on box3d.
+    /// is a chain; one whose links hold more is mail, which the dynamics engine steps at fewer substeps.
     pub interlocks: Vec<(usize, usize)>,
 }
 

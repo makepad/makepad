@@ -1,6 +1,6 @@
 # Experimental incremental diffuse GI
 
-`Renderer::set_gi_mode(GiMode::Fast)` enables a world-space, incremental multi-bounce
+`Renderer::set_gi_settings(Some(GiSettings::default()))` enables a world-space, incremental multi-bounce
 diffuse-light cache on the clustered forward path. `GiMode::Off` is the
 default, including Quest. Off allocates no GI field and schedules no GI work.
 This is not the existing progressive GPU path tracer: only its CPU BVH
@@ -8,43 +8,25 @@ builder is reused; the bounded trace and lighting shaders are independent.
 Static probe placement also uses CPU BVH queries on the worker pool, only
 when preparing a scene/grid, never for per-frame lighting.
 
-In Sandbox use Settings → Indirect light, or Shift+F7 while the game has keyboard
-input. `MAKEPAD_GI=fast` opts in at startup. An asset-independent fixture is
-available with Sandbox's world setting set to `gi`: click to capture mouse look, WASD to walk,
-Shift to run, Space to jump, Escape to release. It uses the ordinary player
-rig and world collisions, with no weapon. Launch without Sandbox's
-diagnostic camera target or distance settings: those deliberately pin the diagnostic camera.
-F6 moves its door; Shift+F7 compares GI on/off; F5 compares multi-bounce feedback
-with one-bounce lighting (allow several probe sweeps to settle).
-`MAKEPAD_GI_DEMO_FREEZE=1` freezes the fixture's spotlight for comparisons.
-F4 cycles cells, confidence, probe-weight colours, irradiance, probe state,
-raw nearest-probe irradiance, and normal rendering. These are display-only;
-they never enter feedback. Raw probe mode selects the largest nominal
-trilinear weight without visibility, facing or interpolation. It can select
-exterior probes behind a wall: use it to inspect cached SH, not as lighting.
-The room has no direct sun by default: `MAKEPAD_GI_TEST_SUN=1` restores the
-former faint directional source. Its roof edge casts a real line across the
-floor even with GI off. `MAKEPAD_GI_TEST_NO_SPOT_SHADOW=1` isolates spot shadows
-(it also removes that light from GI bounce lighting; do not compare GI energy).
-
-Build from `apps/commercial/sandbox` with `cargo build --release -p makepad-sandbox`,
-then launch `apps/commercial/sandbox/target/release/makepad-sandbox --remote` from the
-repository root with those environment variables. Close agent-owned test
-instances through `/gq`.
+In Sandbox the game enables GI with `game.gi(true)` or
+`game.gi({spacing: 1.0, strength: 1.0, bounce: 0.85})`; `game.gi(false)` disables it.
+The field follows the camera. Spacing is metres between the finest cascade's
+probes (0.5–4 for scripts), strength blends the lighting (0–1), and bounce sets
+previous-field feedback (0–0.95). Omitted options use the defaults. Each call
+replaces the settings; repeated unchanged settings preserve the field. The
+world starts with `gi: None`, and a script reload clears it for the game to
+redeclare. Ctrl+Shift+F7 cycles display-only diagnostics while the world has GI
+enabled.
 
 ## Work and quality controls
 
 ```rust
-renderer.set_gi_config(makepad_render::GiConfig {
-    grid: [12, 8, 12],
-    spacing: 1.5,
-    probes_per_frame: 32,
-    ray_distance: 32.0,
+renderer.set_gi_settings(Some(makepad_scene::GiSettings {
+    spacing: 1.0,
     strength: 1.0,
-    anchor: None, // Some(world_center) for a fixed room volume
-    feedback: 0.85, // 0 = one bounce; bounded to 0..0.95
-});
-renderer.set_gi_mode(makepad_render::GiMode::Fast);
+    bounce: 0.85, // 0 = one bounce; bounded to 0..0.95
+}));
+// renderer.set_gi_settings(None); // off
 ```
 
 With no selected box emitters, the defaults give 1,152 probes, 64 rays per
@@ -63,7 +45,7 @@ lighting and hemisphere ambient remain available during warmup. This changes
 presentation only: transport still uses full feedback strength and the same
 per-frame ray budget. At defaults the warmup is 108 rendered frames without
 selected emitters, 135 with one, or 153 with two; larger BVHs or smaller budgets
-take longer. F4 diagnostics bypass the presentation
+take longer. GI diagnostics bypass the presentation
 fade. `GiStats::startup_sweeps` and `display_blend` report readiness separately
 from the number of statically traced probes. Sandbox's asset-free GI/clustered
 fixtures also keep their world when the unrelated asset library arrives.
@@ -198,8 +180,7 @@ interpolation, and partial-tile occlusion remain approximate. The optional
 mode still defaults Off, including Quest; these changes are not a headset
 performance claim.
 
-`anchor: Some(center)` fixes the volume independently of camera motion. The
-GI room uses `(0,2,0)`, so walking does not invalidate its field. Unanchored
+`anchor: Some(center)` fixes the volume independently of camera motion. Unanchored
 volumes still reset on snapped-grid changes. Realm changes clear the anchor.
 Strength and feedback changes preserve geometry/history; other configuration
 changes invalidate it.
@@ -214,8 +195,8 @@ GI rays, temporal noise, or dependency on TAA.
 `Renderer::set_local_shadow_source_radius(radius)` sets the apparent emitter
 radius in world units, default 0.4, clamped to 0–2. This is currently shared
 by local lights, not a per-light physical emitter shape.
-Sandbox enables the softer filter when opting into Fast GI,
-and retains it when toggling GI off for an otherwise identical comparison.
+`set_gi_settings(Some(...))` enables the softer filter,
+and `set_gi_settings(None)` retains it for an otherwise identical comparison.
 Depth bias scales with the projected shadow-texel size and the filter's
 support, preventing adjacent floor/wall samples from making a false dark seam.
 This is bounded shadow-map filtering, not physically traced area-light penumbrae.
@@ -291,18 +272,55 @@ binding; it is not a requirement for 17 fragment texture units.
 rays, memory estimates, selected lights, mover overflow, queue/build state,
 and asynchronous GPU pass timings. `ready_probes` counts updated slots, not
 GPU-confirmed valid probes. Memory estimates exclude driver allocations.
-`set_gi_debug(GiDebug::...)` provides the F4 views to other hosts. Probe-state
+`set_gi_debug(GiDebug::...)` provides the diagnostic views to other hosts. Probe-state
 colours: green valid, red solid/backface-invalid, magenta traversal exhausted,
 gray uninitialized. Placement statistics count CPU classifications only; GPU
 relighting can invalidate additional probes inside movers. Statistics also
 include placement time, relocated/inactive counts, retained CPU BVH bytes,
 traversal cap, cells with blockers, and full-list overflow cells.
 
-`MAKEPAD_GI_STATS=1` logs producer-pass timings and Sandbox scene-pass
-timings separately. Scene timings include GI sampling but exclude shadow
-and GI producer passes. Compare fixed cameras and resolutions after warm-up;
-do not call the GI producer timings the feature's total cost. No Quest
-performance claim follows from desktop measurements.
+`GiConfig::gpu_budget_ms` is GI's own GPU share, default 2.0 ms. The batch
+controller targets 80% (1.6 ms at the default), leaving headroom for cost
+variation and asynchronous feedback. Its cost is the sum of trace, relight,
+gather and scatter for each completed frame, divided by the probe rows over
+the last 120 complete measurements. The cap slews in either direction at the
+same logarithmic rate (at most a factor of 1.1 per second); idle/skipped
+frames earn no work credit and missing timings never mean free work. Only
+the batch cap changes: probe order, sweep coverage and lighting equations
+are unchanged. One probe remains the minimum, even if its cost exceeds the aim.
+
+`Renderer::gi_stats()` and `RenderStats::gi` expose `frame_sum_mean` and
+`frame_sum_max120` (milliseconds, last 120 measured GI frames), `gpu_aim_ms`,
+and **`frame_sum_max`** (milliseconds, last **600** measured GI frames).
+These fields work with **MAKEPAD_GI_STATS unset**, using the controller's
+existing timing feed with no additional query. The peak is the maximum of
+frame sums, not the sum of independently observed pass maxima. Missing or
+unpairable completions are excluded, so these windows count measurements,
+not wall-clock/display frames; disabling GI or resetting the field clears them.
+
+`MAKEPAD_GI_STATS=1`, read once on first use, enables the per-pass 120-sample
+means/maxima (`gpu_ms`, `gpu_peak_ms`) and the periodic producer log. That
+line also prints the frame-sum mean, max120, max600 and aim. With logging
+disabled, GI does no log formatting, rounding, or per-pass window work.
+Frame accounting uses fixed arrays: one 120-entry scan for feedback and one
+600-entry scan for the long peak per GI run, independent of scene/probe count;
+neither window wrap allocates or schedules GPU work.
+
+The current platform watcher returns owned, untagged per-pass vectors.
+Matching entries of equally sized streams represent completed frames in the
+normal four-pass path, including several completions delivered together.
+Unequal streams cannot safely form sums, and even equal lengths cannot detect
+different missing frame IDs. Probe counts still use the previous submitted
+batch as an approximation: exact submission matching and allocation-free
+draining need a platform API change. The watcher itself still allocates when
+refilled after draining. GI issues no separate voxel-upload render pass;
+changed voxel rows become texture uploads. Backend upload blits have no GI
+watcher sample, so their independent cost is not accounted here.
+
+Scene timings include GI sampling but exclude shadow and GI producer passes.
+Compare fixed cameras and resolutions after warm-up; do not call the GI
+producer timings the feature's total cost. No Quest performance claim follows
+from desktop measurements.
 
 The CPU alternative can be reproduced with the release
 `makepad-raytrace` example `gi_cpu_budget`. On an M-series, 2,048 closest-hit

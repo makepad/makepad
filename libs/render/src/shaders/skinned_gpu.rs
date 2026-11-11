@@ -355,7 +355,7 @@ script_mod! {
         // clearcoat * 255 * 256 + flake * 255, the PBR lane's layout): a
         // clear lacquer that reflects the sky gradient with a tight sun
         // glint, and the soft studio rim that separates a silhouette.
-        toy_coat: fn(base: vec3, n: vec3, v: vec3, l: vec3, sun: vec3, amb_occ: float) -> vec3 {
+        toy_coat: fn(base: vec3, n: vec3, v: vec3, l: vec3, sun: vec3, amb_occ: float, spec_occ: float) -> vec3 {
             let packed = floor(self.fur_layer.y + 0.5)
             let rim = floor(packed / 65536.0)
             let coat = floor((packed - rim * 65536.0) / 256.0) / 255.0
@@ -372,7 +372,7 @@ script_mod! {
             let e = 1.0 - ndv
             let back = 0.35 + 0.65 * max(0.0 - dot(l, v), 0.0)
             let edge = (self.sun_color * (back * mix(1.0, 3.14159265, self.lin_ctl.x) * 0.45) + self.sun_sky * 0.8) * (e * e * e * amb_occ * rim / 255.0)
-            return base * (1.0 - fc) + env * (fc * amb_occ) + sun * (glint * fc) + edge
+            return base * (1.0 - fc) + env * (fc * amb_occ * spec_occ) + sun * (glint * fc) + edge
         }
         // Every discard of this shader goes through here, as in
         // DrawSceneSkinned: a pipeline that can discard costs a tile GPU its
@@ -486,14 +486,15 @@ script_mod! {
                     fill=self.mat_ibl_lane_ambient(n,fill)
                 }
                 // GI occludes that fill and adds its bounce.
-                fill=self.gi_ambient(self.v_csm.xyz,n,fill)
+                let gi_fill=self.gi_ambient(self.v_csm.xyz,n,fill)
+                let spec_occ=self.gi_specular_occlusion(gi_fill,fill)
                 let fresnel=f0+(max(vec3(1.0-rough,1.0-rough,1.0-rough),f0)-f0)*pow(1.0-ndv,5.0)
-                let ambient=(base*(1.0-metal)*fill+environment*fresnel)*ao
+                let ambient=(base*(1.0-metal)*gi_fill+environment*fresnel*spec_occ)*ao
                 let occlusion=mix(1.0,self.occlusion_map.sample_repeat(self.v_uv).x,self.occlusion_strength)
                 let emission=srgb_to_linear(self.emissive_map.sample_repeat(self.v_uv).xyz)*self.emissive
                 let punctual=self.cluster_pbr(self.v_csm.xyz,n,self.eye,base,rough,metal)
                 var result=self.fur_shade(direct+ambient*occlusion+punctual*ao_direct,n,self.eye-self.v_csm.xyz)+emission
-                if self.fur_layer.y>0.5{result=self.toy_coat(result,n,view,light,self.sun_color*(ndl*sun_vis*ao_direct*mix(1.0,3.14159265,self.lin_ctl.x)),ao)}
+                if self.fur_layer.y>0.5{result=self.toy_coat(result,n,view,light,self.sun_color*(ndl*sun_vis*ao_direct*mix(1.0,3.14159265,self.lin_ctl.x)),ao,spec_occ)}
                 let coverage=mix(1.0,alpha,step(1.5,self.alpha_mode))
                 return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(mix(linear_to_srgb(result),result,self.lin_ctl.x),self.v_fog,self.v_csm.xyz,self.fog_density)*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
             }

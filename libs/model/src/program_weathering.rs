@@ -29,9 +29,11 @@ impl Bvh {
         }
         index
     }
-    fn hit(&self, o: [f64; 3], d: [f64; 3], max: f64) -> bool {
+    fn hit(&self, o: [f64; 3], d: [f64; 3], max: f64, stack: &mut Vec<usize>) -> bool {
+        // A hit can return with unvisited nodes still on the stack.
+        stack.clear();
         if self.nodes.is_empty() { return false; }
-        let mut stack = vec![0];
+        stack.push(0);
         while let Some(n) = stack.pop() {
             let (lo, hi, s, e, kids) = self.nodes[n];
             let (mut near, mut far) = (0f64, max);
@@ -64,9 +66,10 @@ impl Bvh {
 /// Vertex-paint operations for every (listed) object of `doc`.
 pub(crate) fn weathering_ops(doc: &Document, objects: Option<&[String]>, ao: f64, distance: f64, edges: f64, samples: usize) -> Vec<Operation> {
     let mut tris = Vec::new();
-    let mut per_object: Vec<(String, Vec<(crate::mesh::VertexId, [f64; 3])>, BTreeMap<crate::mesh::VertexId, Vec<crate::mesh::VertexId>>, BTreeMap<crate::mesh::VertexId, [f64; 3]>)> = Vec::new();
+    let mut per_object: Vec<(String, BTreeMap<crate::mesh::VertexId, [f64; 3]>, BTreeMap<crate::mesh::VertexId, Vec<crate::mesh::VertexId>>, BTreeMap<crate::mesh::VertexId, [f64; 3]>)> = Vec::new();
     for (name, mesh) in doc.objects() {
         if name.starts_with("__") { continue; }
+        let selected = objects.is_none_or(|list| list.iter().any(|o| o == name));
         let world = doc.scene().world_matrix(name).unwrap_or(IDENTITY_MATRIX);
         let pos: BTreeMap<_, _> = mesh.vertices().iter().map(|v| (v.id, transform_point(world, v.position))).collect();
         let mut normal: BTreeMap<_, [f64; 3]> = BTreeMap::new();
@@ -76,36 +79,43 @@ pub(crate) fn weathering_ops(doc: &Document, objects: Option<&[String]>, ao: f64
             let pts: Vec<[f64; 3]> = cs.iter().map(|c| pos[&c.vertex]).collect();
             let mut n = [0.; 3];
             for i in 1..pts.len() - 1 { n = add(n, cross(sub(pts[i], pts[0]), sub(pts[i + 1], pts[0]))); tris.push([pts[0], pts[i], pts[i + 1]]); }
+            // All objects occlude; only painted objects need vertex adjacency.
+            if !selected { continue; }
             for (i, c) in cs.iter().enumerate() {
                 let e = normal.entry(c.vertex).or_insert([0.; 3]); *e = add(*e, n);
                 let list = neighbours.entry(c.vertex).or_default();
                 for other in [cs[(i + 1) % cs.len()].vertex, cs[(i + cs.len() - 1) % cs.len()].vertex] { if !list.contains(&other) { list.push(other); } }
             }
         }
-        if objects.is_some_and(|list| !list.iter().any(|o| o == name)) { continue; }
-        per_object.push((name.to_string(), pos.into_iter().collect(), neighbours, normal));
+        if !selected { continue; }
+        per_object.push((name.to_string(), pos, neighbours, normal));
     }
     let bvh = Bvh::new(tris);
     let golden = std::f64::consts::PI * (3. - 5f64.sqrt());
+    // These coefficients depend only on the sample index/count. Keep their
+    // arithmetic and the per-vertex vector addition order unchanged.
+    let directions: Vec<[f64; 3]> = (0..samples).map(|k| {
+        let r = ((k as f64 + 0.5) / samples as f64).sqrt(); let a = golden * k as f64;
+        [r * a.pcos(), r * a.psin(), (1. - r * r).max(0.).sqrt()]
+    }).collect();
+    let mut stack = Vec::new();
     let mut ops = Vec::new();
     for (name, pos, neighbours, normal) in per_object {
-        let lookup: BTreeMap<_, _> = pos.iter().copied().collect();
         let (mut ids, mut colors) = (Vec::new(), Vec::new());
         for (id, p) in &pos {
             let Ok(n) = normalized(*normal.get(id).unwrap_or(&[0., 1., 0.])) else { continue };
             let (t1, t2) = { let a = if n[1].abs() < 0.9 { [0., 1., 0.] } else { [1., 0., 0.] }; let t = normalized(cross(a, n)).unwrap(); (t, cross(n, t)) };
             let origin = add(*p, mul(n, distance * 0.02));
             let mut blocked = 0usize;
-            for k in 0..samples {
+            for &[x, y, z] in &directions {
                 // Cosine-weighted directions on a spiral.
-                let r = ((k as f64 + 0.5) / samples as f64).sqrt(); let a = golden * k as f64;
-                let d = add(add(mul(t1, r * a.pcos()), mul(t2, r * a.psin())), mul(n, (1. - r * r).max(0.).sqrt()));
-                if bvh.hit(origin, d, distance) { blocked += 1; }
+                let d = add(add(mul(t1, x), mul(t2, y)), mul(n, z));
+                if bvh.hit(origin, d, distance, &mut stack) { blocked += 1; }
             }
             let occlusion = blocked as f64 / samples.max(1) as f64;
             // Convexity: how far neighbours fall below the tangent plane.
             let convex = neighbours.get(id).map_or(0., |list| {
-                let s: f64 = list.iter().filter_map(|o| lookup.get(o)).map(|q| { let d = sub(*p, *q); let l = length(d); if l > 1e-9 { dot(n, d) / l } else { 0. } }).sum();
+                let s: f64 = list.iter().filter_map(|o| pos.get(o)).map(|q| { let d = sub(*p, *q); let l = length(d); if l > 1e-9 { dot(n, d) / l } else { 0. } }).sum();
                 s / list.len().max(1) as f64
             });
             let wear = (convex * 4.).clamp(0., 1.);

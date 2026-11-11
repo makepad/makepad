@@ -71,6 +71,10 @@ pub struct SplatLayer {
     pub roughness: f32,
     pub metallic: f32,
     pub bump: f32,
+    /// Parallax depth in metres; zero skips every relief read.
+    pub relief: f32,
+    pub wet: f32,
+    pub puddles: f32,
 }
 
 /// How lit a signal lamp of `role` is on a copy whose vehicle shows
@@ -561,6 +565,8 @@ pub struct PreparedSplat {
     pub normal: Vec<std::sync::Arc<PreparedTexture>>,
     pub weights: PreparedTexture,
     pub params: [[f32; 4]; SPLAT_LAYERS],
+    /// Per-layer relief and surface factors (shader parameters, not pixels).
+    pub surface: [[f32; 4]; SPLAT_LAYERS],
     pub map: [f32; 4],
     pub size: [f32; 4],
 }
@@ -574,6 +580,8 @@ pub struct UploadedSplat {
     pub normal: Texture,
     pub weights: Texture,
     pub params: [[f32; 4]; SPLAT_LAYERS],
+    /// Per-layer relief and surface factors (shader parameters, not pixels).
+    pub surface: [[f32; 4]; SPLAT_LAYERS],
     /// Weight map: world x, z of texel 0, texels per metre.
     pub map: [f32; 4],
     /// Weight map: texels per row, rows per page, pages, layers.
@@ -632,16 +640,44 @@ impl PreparedSplat {
         let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
         // A flat-colour layer: its colour at half height.
         let albedo = splat_kind(layers.iter().map(|l| l.albedo_png.clone()).collect(), &|i| { let c = layers[i].color; 0x8000_0000 | byte(c[0]) << 16 | byte(c[1]) << 8 | byte(c[2]) }, PixelSemantic::MaskedColor, remaining)?;
-        let normal = splat_kind(layers.iter().map(|l| l.normal_png.clone()).collect(), &|_| 0xff80_80ff, PixelSemantic::Normal, remaining)?;
-        let image = texture_work(TextureWork::DecodeMip, || crate::renderer::decode_generated_png(&splat.weights_png, 4096, *remaining))?;
+        let normal = splat_kind(layers.iter().map(|l| l.normal_png.clone()).collect(), &|_| 0x8080_80ff, PixelSemantic::Normal, remaining)?;
+        let image = if splat.weights_png.is_empty() && layers.len() == 1 {
+            let mut image = ImageBuffer::default();
+            image.width = 1;
+            image.height = 1;
+            image.data = vec![0xffff_0000];
+            image
+        } else {
+            texture_work(TextureWork::DecodeMip, || crate::renderer::decode_generated_png(&splat.weights_png, 4096, *remaining))?
+        };
         let weights = PreparedTexture::prepare(image, PixelSemantic::Data);
         *remaining = remaining.checked_sub(weights.bytes()).ok_or("material maps exceed texture byte budget")?;
         let mut params = [[0.0f32; 4]; SPLAT_LAYERS];
         for (p, l) in params.iter_mut().zip(layers) {
             *p = [l.scale, l.roughness, l.metallic, if l.normal_png.is_some() { l.bump } else { 0.0 }];
         }
+        let mut surface = [[0.0f32; 4]; SPLAT_LAYERS];
+        for ((p, l), texture) in surface.iter_mut().zip(layers).zip(&albedo) {
+            // The height distribution is not uniform (equalised recipes
+            // retain part of their raw relief). Convert a share to a level
+            // once on this worker, never during a frame. Splat layers are
+            // prepared from PNGs above, so level-zero RGBA is available.
+            let mut level = 0.0;
+            if l.puddles > 0.0 {
+                let mut histogram = [0u32; 256];
+                let count = texture.width * texture.height;
+                for pixel in &texture.data[..count] { histogram[(pixel >> 24) as usize] += 1; }
+                let target = (l.puddles * count as f32).ceil() as u32;
+                let mut total = 0;
+                for (height, n) in histogram.iter().enumerate() {
+                    total += n;
+                    if total >= target { level = height as f32 / 255.0; break; }
+                }
+            }
+            *p = [l.relief, l.wet, l.puddles, level];
+        }
         let pages = layers.len().div_ceil(4) as f32;
-        Ok(Self { albedo, normal, weights, params, map: [splat.origin[0], splat.origin[1], 1.0 / splat.cell.max(1e-6), 0.0], size: [splat.width, splat.rows, pages, layers.len() as f32] })
+        Ok(Self { albedo, normal, weights, params, surface, map: [splat.origin[0], splat.origin[1], 1.0 / splat.cell.max(1e-6), 0.0], size: [splat.width, splat.rows, pages, layers.len() as f32] })
     }
 
     /// Upload, sharing the arrays (by their layers' content) and the
@@ -667,7 +703,7 @@ impl PreparedSplat {
         let albedo = array(cx, cache, &self.albedo);
         let normal = array(cx, cache, &self.normal);
         let weights = self.weights.upload_cached(cx, cache);
-        UploadedSplat { albedo, normal, weights, params: self.params, map: self.map, size: self.size }
+        UploadedSplat { albedo, normal, weights, params: self.params, surface: self.surface, map: self.map, size: self.size }
     }
 
     pub fn bytes(&self) -> usize { self.albedo.iter().chain(&self.normal).map(|t| t.bytes()).sum::<usize>() + self.weights.bytes() }
@@ -708,6 +744,24 @@ impl PreparedSurface {
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn splat_preparation_keeps_roughness_alpha_and_quantiles() {
+        let albedo: Vec<u8> = [32u8, 96, 160, 224].into_iter().flat_map(|h| [128, 128, 128, h]).collect();
+        let normal: Vec<u8> = [16u8, 80, 176, 240].into_iter().flat_map(|r| [128, 128, 255, r]).collect();
+        let layer = SplatLayer {
+            albedo_png: Some(Cx::encode_rgba_as_png(2, 2, &albedo).unwrap()), color: [0.5; 3],
+            normal_png: Some(Cx::encode_rgba_as_png(2, 2, &normal).unwrap()),
+            scale: 0.5, roughness: 0.7, metallic: 0.0, bump: 0.0, relief: 0.04, wet: 0.6, puddles: 0.25,
+        };
+        let source = SplatSurface { layers: vec![layer], weights_png: Vec::new(), origin: [0.0; 2], cell: 1.0, width: 1.0, rows: 1.0 };
+        let prepared = PreparedSplat::prepare(&source, &mut 4096).unwrap();
+        assert_eq!(prepared.params[0], [0.5, 0.7, 0.0, 0.0], "roughness remains available with bump zero");
+        assert_eq!(prepared.surface[0], [0.04, 0.6, 0.25, 32.0 / 255.0], "puddle share selects the lowest quarter");
+        assert_eq!(prepared.normal[0].data[..4].iter().map(|p| p >> 24).collect::<Vec<_>>(), [16, 80, 176, 240], "level-zero roughness alpha survives");
+        assert_eq!(prepared.normal[0].data[4] >> 24, 128, "mip alpha averages linearly");
+        assert_eq!(prepared.size[3], 1.0, "single mesh surface needs no weight map read");
+    }
+
     #[test]
     fn image_content_hash_tells_bytes_and_lengths_apart() {
         let a: Vec<u8> = (0..1000u32).map(|i| (i * 7) as u8).collect();

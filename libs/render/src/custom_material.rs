@@ -286,7 +286,9 @@ impl CustomMaterial {
         if std::env::var_os("MAKEPAD_SHADER_VARIANTS").is_some_and(|v| v == "0") {
             return (Some(stock), None);
         }
-        let features = Features { clip: true, ..features };
+        // Arbitrary light/lighting hooks can make ambient specular non-additive.
+        // Keep those programs' own reflection until they expose a separable term.
+        let features = Features { clip: true, reflections: features.reflections && !self.plan.builtins.contains(&Builtin::HookedCompose), ..features };
         if !self.variants.contains_key(&features) {
             let Some(program) = self.program.clone() else { return (Some(stock), None) };
             let (lit, opaque) = (self.lit(), self.cuts_no_pixel(cx) && std::env::var_os("MAKEPAD_OPAQUE_VARIANT").is_none_or(|v| v != "0"));
@@ -700,7 +702,7 @@ mod tests {
             let program = m.program.as_ref().unwrap().as_object();
             // Every feature on but `clip`, and every feature off: each has
             // the stock layout (build_variant checks it).
-            let all = Features { clip: false, gi: true, gi_debug: true, csm: true, csm_debug: true, cluster: true, local_shadows: true };
+            let all = Features { clip: false, gi: true, gi_debug: true, csm: true, csm_debug: true, cluster: true, local_shadows: true, reflections: false };
             for features in [all, Features::default()] {
                 let variant = build_variant(vm, program, stock, features, true).expect("the stock layout");
                 assert_ne!(stock, variant);

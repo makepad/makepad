@@ -365,6 +365,9 @@ impl Renderer {
         // and its Sun and Sky replace the rig's key and fill.
         let sun = crate::world_lights::apply_world_sun(world, sun);
         crate::world_lights::append_world_lights(world, &mut self.frame_lights);
+        if let Some(lights) = &self.review_lights { self.frame_lights.clone_from(lights); }
+        self.prepare_volume_fog_lighting(cx.current_pass_id(), sun, camera_pos);
+        self.prepare_ssr_camera(cx.current_pass_id(), camera_pos);
         self.clustered.lin_ctl = self.lin_ctl();
         let local_shadows = self.clustered_enabled && self.frame_lights.iter().any(|l| l.shadows);
         // Character palettes pack BEFORE the cascades encode: the skinned
@@ -449,8 +452,8 @@ impl Renderer {
             self.clustered.render_shadows(cx.cx, camera_pos, &statics, &lm_movers);
             stats.clustered = self.clustered.stats();
         }
-        self.gi.flush_retired(cx.cx);
-        if self.gi.mode()!=crate::GiMode::Off && self.clustered_enabled && cx.gpu_info().float_color_targets {
+        if !self.review_gi { self.gi.flush_retired(cx.cx); }
+        if !self.review_gi && self.gi.mode()!=crate::GiMode::Off && self.clustered_enabled && cx.gpu_info().float_color_targets {
             self.run_fast_gi(cx, world, camera_pos, &scene_state, skinned.as_ref().map(|b| b.items.as_slice()), &sun, &mut stats);
         }
         draw_list.begin_always(cx);
@@ -569,6 +572,8 @@ impl Renderer {
         // HDR lane: per-pixel exponential height fog (clustered.rs
         // scene_fog) with the game's density at the base height.
         // A world's linear or exp2 fog is fogged with distance as it says.
+        let volume_fog_on = self.volume_fog_active_for(cx.current_pass_id());
+        let fog_density = if volume_fog_on { 0.0 } else { fog_density };
         let fog_on = self.hdr_output && fog_density > 0.0;
         self.clustered.fog_ctl = match (fog_on, &world.environment.fog) {
             (false, _) => [0.0; 4],
@@ -598,6 +603,10 @@ impl Renderer {
             }
             None => (fog_color, fog_density),
         };
+        // One fog model in this frame, including material families that
+        // otherwise pick the underwater analytic override above.
+        let fog_density = if volume_fog_on { 0.0 } else { fog_density };
+        if volume_fog_on { self.clustered.fog_ctl = [0.0; 4]; }
         self.clustered.uw = if shows_environment {
             super::water::water_column(world.water.as_deref(), camera_pos, world.water_time, &sun)
         } else {

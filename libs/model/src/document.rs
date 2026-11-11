@@ -1016,6 +1016,7 @@ fn execute_with(
     if accounted&&color_source_bytes.saturating_add(state.memory_bytes())>execution_budget{return Err(Error::Budget("vertex color provenance snapshot"));}
     let color_sources=if colored_objects.is_empty(){None}else{Some(state.objects.iter().filter(|(name,_)|colored_objects.contains(name)).map(|(n,m)|(n.clone(),m.clone())).collect::<BTreeMap<_,_>>())};
     drop(colored_objects);
+    let mut construction_cache = crate::construction::ConstructionCache::new(ops);
     for op in ops {
         if accounted {
             let target = op
@@ -1042,7 +1043,7 @@ fn execute_with(
                 continue;
             }
             Operation::Construction(op) => {
-                out.push(op.apply_in_scene(&mut state.objects, &state.scene, limits, ctx)?);
+                out.push(op.apply_cached_in_scene(&mut state.objects, &state.scene, limits, ctx, &mut construction_cache)?);
                 continue;
             }
             Operation::Rig(op) => {
@@ -1054,12 +1055,14 @@ fn execute_with(
                 continue;
             }
             Operation::Surface(op) => {
+                let texture_start = (!matches!(op, crate::SurfaceOperation::VertexPaint { .. } | crate::SurfaceOperation::VertexColors { .. })).then(crate::program::ProgramInstant::now);
                 if matches!(op,crate::SurfaceOperation::Bake{..}|crate::SurfaceOperation::ProjectedStroke{..}) {
                     let cache=state.scene.evaluated_meshes(state,ctx)?;
                     let mut world=std::collections::BTreeMap::new();
                     for (name,source) in &cache{ctx.checkpoint(1)?;let mut mesh=(**source).clone();let matrix=state.scene.world_matrix(name)?;let ids=mesh.vertices().iter().map(|v|v.id).collect::<Vec<_>>();mesh.transform(&ids,matrix,ctx)?;world.insert(name.clone(),mesh);}
                     state.surface.apply(op,&world,&state.materials,limits,ctx)?;
                 } else {state.surface.apply(op, &state.objects, &state.materials, limits, ctx)?;}
+                if let Some(start) = texture_start { crate::program::record_texture_time(start.elapsed()); }
                 out.push(OperationResult::default());
                 continue;
             }
@@ -1078,10 +1081,12 @@ fn execute_with(
                     return Err(Error::Invalid("unknown texture material"));
                 }
                 texture_admission(*width, *height, 0, ctx)?;
+                let texture_start = crate::program::ProgramInstant::now();
                 let texture = crate::Texture::solid(*width, *height, *color, limits)?;
                 ctx.checkpoint(texture.rgb.len() as u64)?;
                 let png = texture.to_png(limits)?;
                 state.materials.get_mut(material).unwrap().base_color_png = png;
+                crate::program::record_texture_time(texture_start.elapsed());
                 out.push(OperationResult::default());
                 continue;
             }
@@ -1102,9 +1107,11 @@ fn execute_with(
                     ));
                 }
                 png_admission(&material.base_color_png, ctx)?;
+                let texture_start = crate::program::ProgramInstant::now();
                 let mut texture = crate::Texture::from_png(&material.base_color_png, limits)?;
                 texture.paint_disk_ctx(*center, *radius, *color, limits, ctx)?;
                 material.base_color_png = texture.to_png(limits)?;
+                crate::program::record_texture_time(texture_start.elapsed());
                 out.push(OperationResult::default());
                 continue;
             }

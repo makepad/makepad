@@ -141,6 +141,24 @@ fn impostor_color_images(doc: &makepad_gltf::GltfDocument) -> std::collections::
         .filter_map(|t| textures.get(t.index)?.source).collect()
 }
 
+/// Splat arrays consume RGBA PNGs: height and roughness live in alpha.
+/// In particular, a normal-alpha layer must never become two-channel BC5.
+fn splat_images(doc: &makepad_gltf::GltfDocument) -> std::collections::HashSet<usize> {
+    let textures = doc.textures.as_deref().unwrap_or(&[]);
+    let mut out = std::collections::HashSet::new();
+    let mut add = |v: Option<&makepad_gltf::JsonValue>| {
+        if let Some(image) = v.and_then(|v| v.as_u64()).and_then(|i| textures.get(i as usize)).and_then(|t| t.source) { out.insert(image); }
+    };
+    for material in doc.materials.as_deref().unwrap_or(&[]) {
+        let Some(splat) = material.extras.as_ref().and_then(|e| e.key("makepadSplat")) else { continue; };
+        add(splat.key("weights"));
+        if let Some(layers) = splat.key("layers").and_then(|l| l.as_array()) {
+            for layer in layers { add(layer.key("albedo")); add(layer.key("normal")); }
+        }
+    }
+    out
+}
+
 /// Images sampled with NEAREST magnification anywhere in the document
 /// (pixel art: its exact colours matter and block compression softens them).
 fn nearest_images(doc: &makepad_gltf::GltfDocument) -> std::collections::HashSet<usize> {
@@ -213,6 +231,7 @@ pub fn embed_load_ready_images(glb: &[u8], quality: makepad_texcomp::uastc::Qual
     let semantics = image_semantics(&parsed.document);
     let mut keep_png = nearest_images(&parsed.document);
     keep_png.extend(impostor_color_images(&parsed.document));
+    keep_png.extend(splat_images(&parsed.document));
     drop(parsed);
     let mut failure = None;
     let mut changed = false;

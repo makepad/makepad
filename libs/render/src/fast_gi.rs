@@ -35,6 +35,9 @@ mod shaders;
 pub(crate) mod voxels;
 #[path = "fast_gi/cascades.rs"]
 mod cascades;
+#[path = "fast_gi/work.rs"]
+mod work;
+use work::{BatchController, FrameTimes, ScatterCache, StageTimes};
 pub use shaders::script_mod;
 pub(crate) use shaders::{DrawGiTrace, DrawGiRelight, DrawGiGather, DrawGiScatter};
 pub use voxels::{Instance as GiInstance, Mesh as GiMesh, GiField};
@@ -53,6 +56,13 @@ pub const MAX_LIGHTS: usize = 8;
 const RECEIVER_FALLBACK_FLOOR: f32 = 1.0;
 /// Probe home inside its cell: off the integer planes floors and walls use.
 const HOME: [f32; 3] = [0.43, 0.47, 0.41];
+
+/// Logging is a startup opt-in. Cache it so the disabled path does no
+/// environment lookup/allocation, formatting, or additional GPU query.
+pub(crate) fn gi_stats_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("MAKEPAD_GI_STATS").is_some())
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GiMode { #[default] Off, Fast }
@@ -87,7 +97,7 @@ pub struct GiConfig {
     /// neighbours brighter than their light and tinted them with their own
     /// colour). Emission stays as it is.
     pub bounce: f32,
-    /// GPU time the GI passes aim for per frame.
+    /// GI's own GPU share per frame; the sum of its passes aims at 80% of it.
     pub gpu_budget_ms: f32,
     /// A still scene: trace only the probes a surface can read, a fixed
     /// number of updates each, then stop until the scene or the light
@@ -104,6 +114,18 @@ pub struct GiConfig {
 impl Default for GiConfig {
     fn default() -> Self { Self { grid:[16,8,16], spacing:1.0, home:HOME, cascades:3, probes_per_frame:128, ray_distance:48.0, strength:1.0, anchor:None, feedback:0.85, bounce:1.0, gpu_budget_ms:2.0, settle:false, thin_walls:false } }
 }
+impl From<makepad_scene::GiSettings> for GiConfig {
+    fn from(settings: makepad_scene::GiSettings) -> Self {
+        Self {
+            spacing: settings.spacing,
+            strength: settings.strength,
+            feedback: settings.bounce,
+            ..Self::default()
+        }
+        .clamped()
+    }
+}
+
 impl GiConfig {
     pub fn clamped(self) -> Self {
         let sane=|x:f32,d:f32,lo:f32,hi:f32|if x.is_finite(){x.clamp(lo,hi)}else{d};
@@ -145,9 +167,23 @@ pub struct GiStats {
     pub dirty_probes: usize,
     pub snapshot_us: u64,
     pub encode_us: u64,
-    /// Latest async GPU durations of trace, relight, gather, scatter.
+    /// Immutable scatter instance bytes rebuilt this frame (zero when cached).
+    pub static_encode_bytes: usize,
+    /// Rolling means over 120 completed frames of trace, relight, gather, scatter.
+    /// Collected only with MAKEPAD_GI_STATS; missing measurements are not zero.
     pub gpu_ms: [f64;4],
+    /// Maxima over the same 120 completed pass measurements.
     pub gpu_peak_ms: [f64;4],
+    /// Mean and maximum of complete per-frame GI pass sums over 120 samples, ms.
+    /// These remain available without MAKEPAD_GI_STATS for budget feedback.
+    pub frame_sum_mean: f64,
+    pub frame_sum_max120: f64,
+    /// Maximum complete GI frame sum over the last 600 measured GI frames, ms.
+    /// Always collected, independent of MAKEPAD_GI_STATS. Missing frames are excluded;
+    /// the current platform feed pairs untagged pass samples by completion order.
+    pub frame_sum_max: f64,
+    /// Target for the sum of GI's passes: 80% of gpu_budget_ms, in ms.
+    pub gpu_aim_ms: f64,
     /// Screen AO passes (raw + 2 blurs), minimum observed.
     pub ao_gpu_ms: f64,
     pub resident_bytes: usize,
@@ -163,17 +199,31 @@ pub(crate) fn finite(p:Vec3f)->bool {p.x.is_finite()&&p.y.is_finite()&&p.z.is_fi
 /// Scene identity the host passes with a snapshot (revisions it knows of).
 pub(crate) type SceneKey = [u64; 5];
 
-type VoxelJob = makepad_platform::thread::TaskHandle<(u64, Box<VoxelWorld>, VoxelUpdate)>;
+type SceneBounds = (Vec3f, Vec3f);
+type VoxelJob = makepad_platform::thread::TaskHandle<(u64, Box<VoxelWorld>, VoxelUpdate, SceneBounds)>;
 
 /// The GPU passes of a frame, by the names the frame timer reports them under.
 const STAGE_NAMES:[&str;4]=["GI trace","GI relight","GI gather","GI scatter"];
-struct Stage {pass:DrawPass,list:DrawList}
+struct Stage {pass:DrawPass,list:DrawList,times:StageTimes}
 struct Gpu {
     stages:Vec<Stage>, trace:DrawGiTrace, relight:DrawGiRelight, gather:DrawGiGather, scatter:DrawGiScatter,
     field:Texture, hits:Texture, radiance:Texture, update:Texture, batch:Texture,
     /// Info texels of slots that changed cells, zeroed in the next scatter.
     clears:Vec<(usize,usize)>,
     vox:[Texture;3], layout:VoxelLayout, capacity:usize,
+    scatter_cache:ScatterCache,
+    encode_key:Option<EncodeKey>, light_key:Option<[f32;22]>,
+}
+
+/// Uniform blocks whose inputs change only with configuration or a voxel
+/// publication. Keep them in DrawVars between recordings.
+#[derive(PartialEq)]
+struct EncodeKey {
+    config: GiConfig,
+    origins: [Option<[i32;3]>; MAX_CASCADES],
+    committed: [Option<[i32;3]>; MAX_CASCADES],
+    bounds: SceneBounds,
+    reload_generation: u64,
 }
 
 /// Screen-space AO for hosts without a depth prepass: ssao.rs over the
@@ -218,13 +268,15 @@ pub(crate) struct FastGi {
     generation:u64,
     scene_key:Option<SceneKey>,
     scene_center:Option<Vec3f>,
-    pending_scene:Option<Arc<Snapshot>>,
+    pending_scene:Option<(Arc<Snapshot>,SceneBounds)>,
+    /// Padded snapshot bounds matching the committed GPU voxel textures.
+    scene_bounds:SceneBounds,
     has_scene:bool,
     /// Requested voxel windows (with hysteresis) and those the GPU holds.
     requested:Vec<[i32;3]>,
     committed:Vec<Option<[i32;3]>>,
     cascades:Vec<Cascade>,
-    budget:f32, gpu_recent:Vec<f64>, frame:u64,
+    controller:BatchController, frame_times:FrameTimes, batch:Vec<BatchItem>, frame:u64,
     /// Settle mode: the light the settled field holds, and whether all the
     /// work is done (nothing queued, nothing building, the scene current).
     light_key:Option<[u32;12]>, settled:bool,
@@ -236,8 +288,8 @@ pub(crate) struct FastGi {
 }
 impl Default for FastGi {
     fn default()->Self{Self{mode:GiMode::Off,config:GiConfig::default(),debug:GiDebug::Off,linear_albedo:false,emission_gain:1.0,gpu:None,retired:Vec::new(),screen:None,voxels:None,voxel_job:None,generation:0,
-        scene_key:None,scene_center:None,pending_scene:None,has_scene:false,requested:Vec::new(),committed:Vec::new(),cascades:Vec::new(),
-        budget:0.0,gpu_recent:Vec::new(),frame:0,light_key:None,settled:false,scene_stale:false,meshes:MeshCache::default(),ao:ScreenAo::default(),stats:GiStats::default()}}
+        scene_key:None,scene_center:None,pending_scene:None,scene_bounds:Default::default(),has_scene:false,requested:Vec::new(),committed:Vec::new(),cascades:Vec::new(),
+        controller:BatchController::default(),frame_times:FrameTimes::default(),batch:Vec::new(),frame:0,light_key:None,settled:false,scene_stale:false,meshes:MeshCache::default(),ao:ScreenAo::default(),stats:GiStats::default()}}
 }
 impl FastGi {
     pub fn mode(&self)->GiMode{self.mode}
@@ -276,7 +328,8 @@ impl FastGi {
             if gpu.capacity>0 {self.retired.extend([gpu.hits,gpu.radiance,gpu.update,gpu.batch]);}
         }
         self.voxels=None;self.scene_key=None;self.scene_center=None;self.pending_scene=None;self.has_scene=false;
-        self.requested.clear();self.committed.clear();self.cascades.clear();self.budget=0.0;self.gpu_recent.clear();self.light_key=None;self.settled=false;self.scene_stale=false;
+        self.scene_bounds=Default::default();
+        self.requested.clear();self.committed.clear();self.cascades.clear();self.controller=BatchController::default();self.frame_times=FrameTimes::default();self.batch.clear();self.light_key=None;self.settled=false;self.scene_stale=false;
         self.meshes=MeshCache::default();self.stats=GiStats::default();
     }
     /// Frees the storage of what `release` let go.
@@ -302,7 +355,9 @@ impl FastGi {
     pub fn submit_scene(&mut self,key:SceneKey,center:Vec3f,snapshot:Snapshot){
         self.stats.triangles=snapshot.triangles;self.stats.instances=snapshot.instances.len();
         self.scene_key=Some(key);self.scene_center=Some(center);
-        self.pending_scene=Some(Arc::new(snapshot));
+        let layout=VoxelLayout::new(self.config);
+        let bounds=snapshot.padded_bounds(layout.voxel_size(layout.levels-1));
+        self.pending_scene=Some((Arc::new(snapshot),bounds));
     }
     /// More frames would change the picture: probes are queued, a voxel job
     /// runs or a newer scene waits.
@@ -321,14 +376,17 @@ impl FastGi {
         ))else{return false;};
         let c=self.config;let layout=VoxelLayout::new(c);
         STAGE_NAMES.iter().for_each(|name|makepad_platform::gpu_frame_timer::watch(name));
-        let stages=STAGE_NAMES.into_iter().map(|name|Stage{pass:DrawPass::new_with_name(cx,name),list:DrawList::new(cx)}).collect();
+        let stages=STAGE_NAMES.into_iter().map(|name|Stage{pass:DrawPass::new_with_name(cx,name),list:DrawList::new(cx),times:StageTimes::default()}).collect();
         let atlas=c.atlas();
         let field=Texture::new_with_format(cx,TextureFormat::RenderRGBAf16{size:TextureSize::Fixed{width:atlas[0],height:atlas[1]},initial:true});
         let vox=[0,1,2].map(|_|Texture::new_with_format(cx,TextureFormat::VecBGRAu8_32{width:layout.width(),height:layout.height(),data:Some(vec![0;layout.width()*layout.height()]),updated:TextureUpdated::Full}));
-        self.gpu=Some(Gpu{stages,trace,relight,gather,scatter,field,hits:Texture::new(cx),radiance:Texture::new(cx),update:Texture::new(cx),batch:Texture::new(cx),clears:Vec::new(),vox,layout,capacity:0});
+        self.gpu=Some(Gpu{stages,trace,relight,gather,scatter,field,hits:Texture::new(cx),radiance:Texture::new(cx),update:Texture::new(cx),batch:Texture::new(cx),clears:Vec::with_capacity(c.probe_count()*c.cascades),vox,layout,capacity:0,scatter_cache:ScatterCache::default(),encode_key:None,light_key:None});
         self.cascades=(0..c.cascades).map(|k|Cascade::new(c.grid,c.cascade_spacing(k),c.settle)).collect();
         self.committed=vec![None;c.cascades];
-        self.budget=c.probes_per_frame as f32;
+        let capacity=cascades::batch_capacity(c.probe_count(),c.cascades);
+        self.batch=Vec::with_capacity(capacity);
+        self.controller=BatchController::new(c.probes_per_frame.min(capacity),c.gpu_budget_ms);
+        self.ensure_capacity(cx,capacity);
         true
     }
 
@@ -337,7 +395,7 @@ impl FastGi {
     fn poll_voxels(&mut self,cx:&mut Cx) {
         let Some(result)=self.voxel_job.as_mut().and_then(|j|j.try_take()) else {return};
         self.voxel_job=None;self.stats.building=false;
-        let (generation,world,update)=match result {
+        let (generation,world,update,bounds)=match result {
             Ok(r)=>r,
             Err(e)=>{log!("fast GI voxel worker failed: {e:?}");self.scene_key=None;return;}
         };
@@ -371,9 +429,10 @@ impl FastGi {
             if !update.dirty.is_empty() {self.cascades[k].restart();}
         }
         self.stats.voxel_jobs+=1;self.stats.voxel_bricks=update.bricks;self.stats.voxel_ms=update.ms;
-        if std::env::var_os("MAKEPAD_GI_STATS").is_some() {
+        if gi_stats_enabled() {
             log!("fast GI voxels: {} bricks / {} triangles in {:.1}ms (worker), {} edit boxes -> {} probes, scroll {} probes",update.bricks,update.triangles,update.ms,update.dirty.len(),self.stats.dirty_probes,self.stats.scroll_probes);
         }
+        self.scene_bounds=bounds;
         self.voxels=Some(world);
     }
 
@@ -394,12 +453,16 @@ impl FastGi {
         self.stats.building=true;
         // The first world (its 4.7 MB mirror) is allocated on the worker.
         let world=self.voxels.take();let settle=c.settle;
-        let scene=self.pending_scene.take();self.has_scene=true;
+        let (scene,bounds)=match self.pending_scene.take() {
+            Some((scene,bounds))=>(Some(scene),bounds),
+            None=>(None,self.scene_bounds),
+        };
+        self.has_scene=true;
         let windows=self.requested.clone();let generation=self.generation;
         match cx.task_pool().submit(makepad_platform::thread::Class::Visible, move||{
             let mut world=world.unwrap_or_else(||Box::new(VoxelWorld::new(layout)));
             world.track_needed=settle;
-            let update=world.update(scene,&windows);(generation,world,update)
+            let update=world.update(scene,&windows);(generation,world,update,bounds)
         }) {
             Ok(job) => self.voxel_job=Some(job),
             Err(error) => { self.stats.building=false; log!("fast GI: {error}"); }
@@ -415,6 +478,8 @@ impl FastGi {
         gpu.update=Texture::new_with_format(cx,TextureFormat::RenderRGBAf16{size:TextureSize::Fixed{width:GATHER_WIDTH,height:cap},initial:true});
         gpu.batch=Texture::new_with_format(cx,TextureFormat::VecRGBAf32{width:2,height:cap,data:Some(vec![0.0;cap*8]),updated:TextureUpdated::Full});
         gpu.capacity=cap;
+        gpu.encode_key=None;
+        self.stats.static_encode_bytes+=gpu.scatter_cache.prepare(&mut gpu.scatter,cap);
     }
 
     fn cascade_uniforms(cx:&Cx,dv:&mut DrawVars,c:GiConfig,cascades:&[Cascade]) {
@@ -427,9 +492,12 @@ impl FastGi {
         let a=c.atlas();
         dv.set_uniform(cx,live_id!(gi_atlas),&[a[0]as f32,a[1]as f32,a[2]as f32,a[3]as f32]);
     }
-    fn voxel_uniforms(cx:&Cx,dv:&mut DrawVars,l:VoxelLayout,vox:&[Texture;3],committed:&[Option<[i32;3]>]) {
+    fn voxel_uniforms(cx:&Cx,dv:&mut DrawVars,l:VoxelLayout,vox:&[Texture;3],committed:&[Option<[i32;3]>],bounds:SceneBounds) {
         dv.set_uniform(cx,live_id!(gi_vox_dims),&[l.dims[0]as f32,l.dims[1]as f32,l.dims[2]as f32,l.levels as f32]);
         dv.set_uniform(cx,live_id!(gi_vox_tex),&[l.width()as f32,l.height()as f32,l.level_height()as f32,voxels::TILE_COLUMNS as f32]);
+        let (lo,hi)=bounds;
+        dv.set_uniform(cx,live_id!(gi_scene_min),&[lo.x,lo.y,lo.z]);
+        dv.set_uniform(cx,live_id!(gi_scene_max),&[hi.x,hi.y,hi.z]);
         for (k,name) in [live_id!(gi_vox0),live_id!(gi_vox1),live_id!(gi_vox2)].into_iter().enumerate() {
             let v=match committed.get(k).copied().flatten(){Some(o)=>[o[0]as f32,o[1]as f32,o[2]as f32,l.voxel_size(k)],None=>[0.0;4]};
             dv.set_uniform(cx,name,&v);
@@ -440,7 +508,8 @@ impl FastGi {
     pub fn run(&mut self,cx:&mut CxDraw,center:Vec3f,sun:&crate::sun::SunLight,clustered:&crate::clustered::ClusteredLights) {
         if self.mode==GiMode::Off{return;}
         let center=self.config.anchor.unwrap_or(center);
-        let start=Cx::monotonic_now();self.stats.traced_rays=0;self.stats.uploads_bytes=0;self.stats.batch=0;
+        let previous_batch=self.stats.batch;
+        let start=Cx::monotonic_now();self.stats.traced_rays=0;self.stats.uploads_bytes=0;self.stats.batch=0;self.stats.static_encode_bytes=0;
         if !finite(center)||!self.ensure(cx.cx){return;}
         self.frame=self.frame.wrapping_add(1);
         self.poll_voxels(cx.cx);
@@ -453,36 +522,39 @@ impl FastGi {
             if self.light_key.is_some_and(|k|k!=key) {self.cascades.iter_mut().for_each(|c|c.restart());}
             self.light_key=Some(key);
         }
-        // Probe budget follows the measured GPU time of the four passes.
-        // The timers are async and include queueing behind other GPU work,
-        // so the controller reads the MINIMUM of the recent samples: shrink
-        // when even the best frame is over target, grow when it is well
-        // under; never below a floor that keeps GI converging.
-        {
-            let mut sample=false;
-            for (i,name) in STAGE_NAMES.iter().enumerate() {
-                for ms in makepad_platform::gpu_frame_timer::take_watched(name){let ms=ms as f64;self.stats.gpu_ms[i]=ms;self.stats.gpu_peak_ms[i]=self.stats.gpu_peak_ms[i].max(ms);sample=true;}
-            }
-            if sample {
-                self.gpu_recent.push(self.stats.gpu_ms.iter().sum());
-                if self.gpu_recent.len()>=30 {
-                    let best=self.gpu_recent.iter().copied().fold(f64::MAX,f64::min);
-                    self.gpu_recent.clear();
-                    let target=c.gpu_budget_ms as f64;
-                    if best>target {self.budget*=0.8;} else if best<target*0.6 {self.budget*=1.25;}
-                    self.budget=self.budget.clamp(64.0,(count*self.cascades.len())as f32);
-                }
+        // HAL currently exposes only name-based samples (no submission tag
+        // or reusable drain). Consume every arrival, including delayed ones;
+        // only equally sized streams can supply complete frame sums.
+        // Its Vec transfer still allocates in platform's watcher; replacing
+        // that API belongs in platform, not this render-library change.
+        // HAL publishes these streams together on the UI thread; take them
+        // before processing any further completions. GI issues four render
+        // passes: voxel changes are texture uploads, not a fifth GI pass.
+        let samples=STAGE_NAMES.map(makepad_platform::gpu_frame_timer::take_watched);
+        let sample=self.frame_times.push(std::array::from_fn(|i|samples[i].as_slice()),previous_batch);
+        if gi_stats_enabled() {
+            for (i,stage) in self.gpu.as_mut().unwrap().stages.iter_mut().enumerate() {
+                for &ms in &samples[i] {stage.times.record(ms as f64,previous_batch);}
+                let (mean,peak,_)=stage.times.stats();
+                self.stats.gpu_ms[i]=mean;self.stats.gpu_peak_ms[i]=peak;
             }
         }
+        let (mean,peak,cost)=self.frame_times.stats();
+        self.stats.frame_sum_mean=mean;self.stats.frame_sum_max120=peak;
+        self.stats.frame_sum_max=self.frame_times.max600();
+        self.stats.gpu_aim_ms=BatchController::aim(c.gpu_budget_ms);
+        // With a slowly changing batch, the previous submitted size is an
+        // approximation for async samples. Missing samples freeze the rate.
+        let active=self.cascades.iter().any(|c|c.origin.is_some())&&!self.settled;
+        self.controller.advance(start,if sample&&previous_batch>0{cost}else{None},active);
         self.stats.probes=count*self.cascades.len();
-        self.stats.budget=self.budget as usize;
-        let batch=cascades::schedule(&mut self.cascades,self.stats.budget);
+        self.stats.budget=self.controller.cap(c.gpu_budget_ms,cascades::batch_capacity(count,c.cascades));
+        cascades::schedule(&mut self.cascades,self.stats.budget,&mut self.batch);
         self.stats.pending_probes=self.cascades.iter().map(|c|c.pending()).sum();
-        self.settled=batch.is_empty()&&self.voxel_job.is_none()&&self.pending_scene.is_none()&&!self.scene_stale&&self.has_scene&&self.cascades.iter().all(|c|c.origin.is_some());
-        if batch.is_empty(){self.stats.resident_bytes=self.resident_bytes();self.stats.encode_us=((Cx::monotonic_now()-start)*1e6)as u64;return;}
-        self.ensure_capacity(cx.cx,batch.len());
-        self.encode(cx,&batch,center,sun,clustered);
-        self.stats.batch=batch.len();self.stats.traced_rays=batch.len()*RAYS;
+        self.settled=self.batch.is_empty()&&self.voxel_job.is_none()&&self.pending_scene.is_none()&&!self.scene_stale&&self.has_scene&&self.cascades.iter().all(|c|c.origin.is_some());
+        if self.batch.is_empty(){self.stats.resident_bytes=self.resident_bytes();self.stats.encode_us=((Cx::monotonic_now()-start)*1e6)as u64;return;}
+        self.encode(cx,center,sun,clustered);
+        self.stats.batch=self.batch.len();self.stats.traced_rays=self.batch.len()*RAYS;
         self.stats.resident_bytes=self.resident_bytes();
         self.stats.encode_us=((Cx::monotonic_now()-start)*1e6)as u64;
     }
@@ -492,11 +564,12 @@ impl FastGi {
         let l=gpu.layout;
         let a=self.config.atlas();
         a[0]*a[1]*8+(RAYS*2+1+2)*gpu.capacity*16+GATHER_WIDTH*gpu.capacity*8
-            +l.width()*l.height()*4*3*2+self.meshes.bytes()
+            +l.width()*l.height()*4*3*2+self.meshes.bytes()+gpu.scatter_cache.instances.as_ref().map_or(0,|r|r.byte_len()*2)
     }
 
-    fn encode(&mut self,cx:&mut CxDraw,batch:&[BatchItem],center:Vec3f,sun:&crate::sun::SunLight,clustered:&crate::clustered::ClusteredLights) {
+    fn encode(&mut self,cx:&mut CxDraw,center:Vec3f,sun:&crate::sun::SunLight,clustered:&crate::clustered::ClusteredLights) {
         let c=self.config;
+        let batch=&self.batch;
         let rows=batch.len();
         {
             let gpu=self.gpu.as_mut().unwrap();
@@ -511,20 +584,34 @@ impl FastGi {
         let cap=self.gpu.as_ref().unwrap().capacity;
         let pass_uniform=[rows as f32,cap as f32,c.ray_distance,(self.frame%4096)as f32];
         let linear=self.linear_albedo;let emission_gain=self.emission_gain;
+        let key=EncodeKey{config:c,origins:std::array::from_fn(|k|self.cascades.get(k).and_then(|c|c.origin)),committed:std::array::from_fn(|k|self.committed.get(k).copied().flatten()),bounds:self.scene_bounds,reload_generation:cx.reload_generation};
+        let light_key=[sun.dir.x,sun.dir.y,sun.dir.z,sun.color.x,sun.color.y,sun.color.z,sun.sky.x,sun.sky.y,sun.sky.z,sun.ground.x,sun.ground.y,sun.ground.z,emission_gain,light_ids[0],light_ids[1],light_ids[2],light_ids[3],light_ids[4],light_ids[5],light_ids[6],light_ids[7],if linear{1.0}else{0.0}];
+        let gpu=self.gpu.as_mut().unwrap();
+        let reloaded=gpu.encode_key.as_ref().is_some_and(|k|k.reload_generation!=key.reload_generation);
+        for dv in [&mut gpu.trace.quad.draw_vars,&mut gpu.relight.quad.draw_vars,&mut gpu.gather.quad.draw_vars,&mut gpu.scatter.quad.draw_vars] {
+            dv.refresh_after_reload(cx.cx);
+        }
+        if reloaded {
+            gpu.scatter_cache=ScatterCache::default();
+            self.stats.static_encode_bytes+=gpu.scatter_cache.prepare(&mut gpu.scatter,cap);
+        }
+        let static_dirty=gpu.encode_key.as_ref()!=Some(&key);
+        let light_dirty=static_dirty||gpu.light_key!=Some(light_key);
+        gpu.encode_key=Some(key);gpu.light_key=Some(light_key);
         let mut cx2=Cx2d::new(cx);
         for i in 0..4 {
             {
-                let FastGi{gpu,cascades,committed,..}=&mut *self;
+                let FastGi{gpu,cascades,committed,scene_bounds,..}=self;
                 let gpu=gpu.as_mut().unwrap();
                 let (batch_tex,field,hits,radiance,update,vox,layout)=(gpu.batch.clone(),gpu.field.clone(),gpu.hits.clone(),gpu.radiance.clone(),gpu.update.clone(),gpu.vox.clone(),gpu.layout);
                 let dv=match i{0=>&mut gpu.trace.quad.draw_vars,1=>&mut gpu.relight.quad.draw_vars,2=>&mut gpu.gather.quad.draw_vars,_=>&mut gpu.scatter.quad.draw_vars};
                 if i<3 {
-                    Self::cascade_uniforms(cx2.cx,dv,c,cascades);
+                    if static_dirty {Self::cascade_uniforms(cx2.cx,dv,c,cascades);}
                     dv.set_uniform(cx2.cx,live_id!(gi_pass),&pass_uniform);
-                    bind_texture(cx2.cx,dv,live_id!(gi_batch),&batch_tex);
+                    if static_dirty {bind_texture(cx2.cx,dv,live_id!(gi_batch),&batch_tex);}
                 }
-                if i<2 {Self::voxel_uniforms(cx2.cx,dv,layout,&vox,committed);}
-                if i==1||i==2 {
+                if i<2&&static_dirty {Self::voxel_uniforms(cx2.cx,dv,layout,&vox,committed,*scene_bounds);}
+                if (i==1||i==2)&&static_dirty {
                     // Producers read last frame's field: feedback, history.
                     dv.set_uniform(cx2.cx,live_id!(gi_on),&[1.0]);
                     dv.set_uniform(cx2.cx,live_id!(gi_fallback_floor),&[0.0]);
@@ -538,13 +625,16 @@ impl FastGi {
                 }
                 if i==1 {
                     clustered.bind(cx2.cx,dv,true);
-                    for (name,v) in [(live_id!(gi_sun_dir),sun.dir),(live_id!(gi_sun_color),sun.color),(live_id!(gi_sky),sun.sky),(live_id!(gi_ground),sun.ground)]{dv.set_uniform(cx2.cx,name,&[v.x,v.y,v.z]);}
-                    dv.set_uniform(cx2.cx,live_id!(gi_relight),&[c.feedback,if linear{1.0}else{0.0},emission_gain,c.ray_distance]);
-                    dv.set_uniform(cx2.cx,live_id!(gi_bounce),&[c.bounce]);
-                    dv.set_uniform(cx2.cx,live_id!(gi_light_ids0),&light_ids[..4]);dv.set_uniform(cx2.cx,live_id!(gi_light_ids1),&light_ids[4..]);
+                    if light_dirty {for (name,v) in [(live_id!(gi_sun_dir),sun.dir),(live_id!(gi_sun_color),sun.color),(live_id!(gi_sky),sun.sky),(live_id!(gi_ground),sun.ground)]{dv.set_uniform(cx2.cx,name,&[v.x,v.y,v.z]);}}
+                    if light_dirty {dv.set_uniform(cx2.cx,live_id!(gi_relight),&[c.feedback,if linear{1.0}else{0.0},emission_gain,c.ray_distance]);
+                    dv.set_uniform(cx2.cx,live_id!(gi_bounce),&[c.bounce]);}
+                    if light_dirty {dv.set_uniform(cx2.cx,live_id!(gi_light_ids0),&light_ids[..4]);dv.set_uniform(cx2.cx,live_id!(gi_light_ids1),&light_ids[4..]);}
                 }
-                if i==2 {bind_texture(cx2.cx,dv,live_id!(gi_radiance),&radiance);}
-                if i==3 {
+                if i==2&&static_dirty {bind_texture(cx2.cx,dv,live_id!(gi_radiance),&radiance);}
+                if i==3&&static_dirty {
+                    bind_texture(cx2.cx,dv,live_id!(gi_batch),&batch_tex);
+                    let a=c.atlas();
+                    dv.set_uniform(cx2.cx,live_id!(gi_atlas),&a.map(|v|v as f32));
                     bind_texture(cx2.cx,dv,live_id!(gi_update),&update);
                     dv.set_uniform(cx2.cx,live_id!(gi_update_size),&[GATHER_WIDTH as f32,cap as f32]);
                 }
@@ -559,8 +649,9 @@ impl FastGi {
             if let Some(next)=next{stage.pass.set_pass_parent(cx2.cx,next);}
             cx2.begin_pass(&stage.pass,Some(1.0));
             stage.pass.set_size(cx2.cx,dvec2(width as f64,height as f64));stage.pass.clear_color_textures(cx2.cx);
-            // The field keeps its contents; the batch targets are rewritten.
-            let clear=if i==3{DrawPassClearColor::InitWith(vec4(0.0,0.0,0.0,0.0))}else{DrawPassClearColor::ClearWith(vec4(0.0,0.0,0.0,0.0))};
+            // Every live row is overwritten; unused rows are never sampled.
+            // Do not clear a full-capacity target for a small batch.
+            let clear=DrawPassClearColor::InitWith(vec4(0.0,0.0,0.0,0.0));
             stage.pass.set_color_texture(cx2.cx,&target,clear);
             stage.list.begin_always(&mut cx2);
             cx2.begin_root_turtle(dvec2(width as f64,height as f64),Layout::flow_overlay());
@@ -575,16 +666,27 @@ impl FastGi {
                         let (x,y)=((slot%atlas[2])as f64,(slot/atlas[2])as f64);let base=(k*atlas[3]*19)as f64;let t=atlas[3]as f64;
                         match region{0=>dvec2(x*8.0,base+y*8.0),1=>dvec2(x*10.0,base+t*8.0+y*10.0),_=>dvec2(x,base+t*18.0+y)}
                     };
-                    for (k,slot) in std::mem::take(&mut gpu.clears) {
-                        gpu.scatter.gi_tile=vec4(-1.0,0.0,1.0,0.0);
-                        gpu.scatter.quad.draw_abs(&mut cx2,Rect{pos:tile(k,slot,2),size:dvec2(1.0,1.0)});
-                    }
-                    for (row,b) in batch.iter().enumerate() {
-                        for (region,col,w) in [(0,0.0,8.0),(1,64.0,10.0),(2,164.0,1.0)] {
-                            gpu.scatter.gi_tile=vec4(row as f32,col,w as f32,0.0);
-                            gpu.scatter.quad.draw_abs(&mut cx2,Rect{pos:tile(b.cascade,b.slot,region),size:dvec2(w,w)});
+                    // Keep a stable draw slot for clears, even on frames with
+                    // none. Retain its storage across scene publications.
+                    if let Some(mut many)=cx2.begin_many_instances(&mut gpu.scatter.quad.draw_vars) {
+                        // Scroll emits sorted slots: clear contiguous info
+                        // texels with one rectangle, including whole rows on
+                        // first publication/teleport. No thousands of quads
+                        // competing with the steady warm-up batch.
+                        let mut clears=gpu.clears.drain(..).peekable();
+                        while let Some((k,slot))=clears.next() {
+                            let mut width=1;
+                            while clears.peek().is_some_and(|&(next_k,next)|next_k==k&&next==slot+width&&next/atlas[2]==slot/atlas[2]) {
+                                clears.next();width+=1;
+                            }
+                            gpu.scatter.gi_tile=vec4(-1.0,0.0,1.0,0.0);
+                            gpu.scatter.quad.rect_pos=tile(k,slot,2).into();
+                            gpu.scatter.quad.rect_size=vec2(width as f32,1.0);
+                            many.instances.extend_from_slice(gpu.scatter.quad.draw_vars.as_slice());
                         }
+                        cx2.end_many_instances(many);
                     }
+                    cx2.add_retained_instances_count(&mut gpu.scatter.quad.draw_vars,gpu.scatter_cache.instances.as_ref().unwrap(),rows*3);
                 },
             }
             cx2.end_pass_sized_turtle();stage.list.end(&mut cx2);cx2.end_pass(&stage.pass);

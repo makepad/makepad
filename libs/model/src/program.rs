@@ -7,6 +7,37 @@
 #[path = "program_weathering.rs"]
 mod weathering;
 use crate::{canon::Writer, character::{CharacterSpec, FpsArms}, transform::*, Attachment, CompiledModel, Document, Error, Limits, Operation, RigOperation, SceneOperation, Socket, Transaction, WeightEdit};
+use std::{cell::Cell, collections::BTreeMap, time::Duration};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use std::time::Instant as ProgramInstant;
+
+// The standard library has no clock on wasm. Every Makepad web thread
+// provides this monotonic host clock (also used by the git and box3d crates).
+#[cfg(target_arch = "wasm32")]
+pub(crate) struct ProgramInstant(f64);
+#[cfg(target_arch = "wasm32")]
+impl ProgramInstant {
+    pub(crate) fn now() -> Self {
+        #[link(wasm_import_module = "env")]
+        extern "C" { fn js_monotonic_now() -> f64; }
+        // SAFETY: the host import takes no arguments and returns seconds.
+        Self(unsafe { js_monotonic_now() })
+    }
+    pub(crate) fn elapsed(&self) -> Duration {
+        Duration::from_secs_f64((Self::now().0 - self.0).max(0.0))
+    }
+}
+
+thread_local! {
+    // Build and export run on the calling worker. A cumulative counter lets
+    // callers account for texture work without changing transaction batches.
+    static TEXTURE_TIME: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+}
+pub(crate) fn texture_time() -> Duration { TEXTURE_TIME.with(Cell::get) }
+pub(crate) fn record_texture_time(elapsed: Duration) {
+    TEXTURE_TIME.with(|time| time.set(time.get() + elapsed));
+}
 
 /// One program step.
 #[derive(Clone, Debug)]
@@ -58,7 +89,33 @@ pub enum MeshPrimitive {
     Cylinder { object: String, radius: f64, height: f64, segments: u32, smooth: bool },
     Polygons { object: String, positions: Vec<[f64; 3]>, polygons: Vec<crate::mesh::Polygon> },
 }
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PrimitiveKey {
+    Sphere { radius: u64, segments: u32, rings: u32, smooth: bool },
+    Cylinder { radius: u64, height: u64, segments: u32, smooth: bool },
+}
+struct CachedPrimitive { remaining: usize, source: Option<Vec<u8>> }
 impl MeshPrimitive {
+    fn cache_key(&self) -> Option<(PrimitiveKey, &str)> {
+        match self {
+            Self::Sphere { object, radius, segments, rings, smooth } => Some((PrimitiveKey::Sphere { radius: radius.to_bits(), segments: *segments, rings: *rings, smooth: *smooth }, object)),
+            Self::Cylinder { object, radius, height, segments, smooth } => Some((PrimitiveKey::Cylinder { radius: radius.to_bits(), height: height.to_bits(), segments: *segments, smooth: *smooth }, object)),
+            Self::Polygons { .. } => None,
+        }
+    }
+    fn cached_operation(&self, limits: &Limits, cache: &mut BTreeMap<PrimitiveKey, CachedPrimitive>) -> crate::Result<Operation> {
+        let Some((key, object)) = self.cache_key() else { return self.operation(limits) };
+        let Some(cached) = cache.get_mut(&key) else { return self.operation(limits) };
+        cached.remaining -= 1;
+        if let Some(source) = &mut cached.source {
+            // Move the last use out so the cache does not retain completed inputs.
+            let source = if cached.remaining == 0 { std::mem::take(source) } else { source.clone() };
+            return Ok(Operation::ImportMesh { object: object.into(), source });
+        }
+        let op = self.operation(limits)?;
+        if let Operation::ImportMesh { source, .. } = &op { cached.source = Some(source.clone()); }
+        Ok(op)
+    }
     fn operation(&self, limits: &Limits) -> crate::Result<Operation> {
         match self {
             Self::Sphere { object, radius, segments, rings, smooth } => Operation::sphere(object.clone(), *radius, *segments, *rings, *smooth, limits),
@@ -145,7 +202,20 @@ pub struct ProgramFailure { pub index: usize, pub op: String, pub message: Strin
 impl std::fmt::Display for ProgramFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "operation {} ({}): {}", self.index, self.op, self.message) }
 }
-pub struct BuiltProgram { pub document: Document, pub compiled: CompiledModel, pub warnings: Vec<String> }
+/// Disjoint wall-clock phases of one build, measured on its calling worker.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProgramTimings {
+    /// Program expansion and document application, excluding texture synthesis
+    /// and weathering generation. Includes application of the baked colours.
+    pub geometry: Duration,
+    /// BVH construction, ambient occlusion sampling and edge-wear generation.
+    pub weathering: Duration,
+    /// Image preparation, surface operations and final texture flattening/PNG.
+    pub textures: Duration,
+    /// Final model compilation, excluding texture work counted above.
+    pub compile: Duration,
+}
+pub struct BuiltProgram { pub document: Document, pub compiled: CompiledModel, pub warnings: Vec<String>, pub timings: ProgramTimings }
 
 /// Readable text for engine errors, for authors rather than engine tests.
 pub fn describe_error(error: &Error) -> String {
@@ -215,25 +285,52 @@ fn weight_edit(object: &str, joint: usize) -> Operation {
 /// GLB bytes and `ImageLayer` images to PNG bytes (it runs on the calling worker; the host decides where bytes
 /// come from). Nothing here blocks on anything but that callback.
 pub fn build_program(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(&str) -> Result<Vec<u8>, String>, cancelled: Option<&dyn Fn() -> bool>) -> Result<BuiltProgram, ProgramFailure> {
+    build_program_inner(ops, limits, fetch, cancelled, None)
+}
+
+/// Builds a program and retains reusable compile data for later exports.
+pub fn build_program_with_cache(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(&str) -> Result<Vec<u8>, String>, cancelled: Option<&dyn Fn() -> bool>, cache: &mut crate::CompileCache) -> Result<BuiltProgram, ProgramFailure> {
+    build_program_inner(ops, limits, fetch, cancelled, Some(cache))
+}
+
+fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(&str) -> Result<Vec<u8>, String>, cancelled: Option<&dyn Fn() -> bool>, cache: Option<&mut crate::CompileCache>) -> Result<BuiltProgram, ProgramFailure> {
+    let geometry_start = ProgramInstant::now();
+    let texture_start = texture_time();
+    let mut timings = ProgramTimings::default();
     let names: Vec<String> = ops.iter().map(|op| op.name().to_string()).collect();
     let fail = |index: usize, message: String| ProgramFailure { index, op: names.get(index).cloned().unwrap_or_default(), message };
     let doc = Document::new(limits.clone()).map_err(|e| fail(0, describe_error(&e)))?;
     let mut run = Runner { doc, limits: limits.clone(), pending: Vec::new(), serial: 0, cancelled };
     let mut warnings = Vec::new();
     let mut bound = std::collections::BTreeSet::new();
+    // All entries use this build's fixed Limits. Retain source bytes only for
+    // repeated complete parameter keys, and only until their final occurrence.
+    let mut primitives = BTreeMap::<PrimitiveKey, CachedPrimitive>::new();
+    for op in ops {
+        if let ProgramOp::Mesh(m) = op {
+            if let Some((key, _)) = m.cache_key() {
+                primitives.entry(key).or_insert(CachedPrimitive { remaining: 0, source: None }).remaining += 1;
+            }
+        }
+    }
+    primitives.retain(|_, cached| cached.remaining > 1);
     for (index, op) in ops.iter().enumerate() {
         if cancelled.is_some_and(|c| c()) { return Err(fail(index, "cancelled".into())); }
         match op {
             ProgramOp::Op(op) => run.pending.push((index, op.clone())),
             ProgramOp::Impostor { .. } => {}
-            ProgramOp::Mesh(m) => run.pending.push((index, m.operation(&run.limits).map_err(|e| fail(index, describe_error(&e)))?)),
+            ProgramOp::Mesh(m) => run.pending.push((index, m.cached_operation(&run.limits, &mut primitives).map_err(|e| fail(index, describe_error(&e)))?)),
             ProgramOp::ImageLayer { material, channel, layer, image } => {
                 use crate::{SurfaceChannel as Ch, SurfaceOperation as S};
+                let image_start = ProgramInstant::now();
+                let nested_textures = texture_time();
                 let bytes = fetch(image).map_err(|e| fail(index, format!("image '{image}': {e}")))?;
                 let pixels = crate::RgbaImage::from_png(&bytes, &run.limits).map_err(|e| fail(index, format!("image '{image}': {}", describe_error(&e))))?;
+                record_texture_time(image_start.elapsed().saturating_sub(texture_time() - nested_textures));
                 // The image carries the channel: its factor goes neutral (white base colour
                 // keeping alpha, full roughness and metalness, white emission).
                 run.flush(&names)?;
+                let image_start = ProgramInstant::now();
                 let mut factors = match run.doc.surface().materials.get(material) {
                     Some(m) => m.clone(),
                     None => {
@@ -251,6 +348,7 @@ pub fn build_program(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(&s
                 let layer = crate::SurfaceLayer::new(layer.clone(), pixels);
                 run.pending.push((index, Operation::Surface(S::Material { material: *material, value: factors })));
                 run.pending.push((index, Operation::Surface(S::Layer { material: *material, channel: *channel, layer })));
+                record_texture_time(image_start.elapsed());
             }
             ProgramOp::HumanoidRig { height, clips, sockets } => {
                 let height = *height;
@@ -311,10 +409,12 @@ pub fn build_program(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(&s
             }
             ProgramOp::Weathering { ao, distance, edges, samples, objects } => {
                 run.flush(&names)?;
+                let weathering_start = ProgramInstant::now();
                 let (ao, distance, edges, samples) = (ao.clamp(0., 1.), distance.clamp(0.005, 10.), edges.clamp(0., 1.), (*samples).clamp(1, 64) as usize);
                 for op in weathering::weathering_ops(&run.doc, objects.as_deref(), ao, distance, edges, samples) {
                     run.pending.push((index, op));
                 }
+                timings.weathering += weathering_start.elapsed();
             }
             ProgramOp::Joint { name, parent, translation } => {
                 run.flush(&names)?;
@@ -360,6 +460,16 @@ pub fn build_program(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(&s
         }
     }
     run.flush(&names)?;
-    let compiled = run.doc.compile(cancelled).map_err(|e| ProgramFailure { index: ops.len(), op: "compile".into(), message: describe_error(&e) })?;
-    Ok(BuiltProgram { document: run.doc, compiled, warnings })
+    timings.textures = texture_time() - texture_start;
+    timings.geometry = geometry_start.elapsed().saturating_sub(timings.weathering + timings.textures);
+    let compile_start = ProgramInstant::now();
+    let texture_start = texture_time();
+    let compiled = match cache {
+        Some(cache) => run.doc.compile_with_cache(cache, cancelled),
+        None => run.doc.compile(cancelled),
+    }.map_err(|e| ProgramFailure { index: ops.len(), op: "compile".into(), message: describe_error(&e) })?;
+    let compile_textures = texture_time() - texture_start;
+    timings.compile = compile_start.elapsed().saturating_sub(compile_textures);
+    timings.textures += compile_textures;
+    Ok(BuiltProgram { document: run.doc, compiled, warnings, timings })
 }

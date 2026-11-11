@@ -14,7 +14,13 @@ fn attachment(a:&Attachment,names:&BTreeMap<String,usize>)->Result<GlbAttachment
 
 impl Document {
     pub fn compile(&self,cancelled:Option<&dyn Fn()->bool>)->Result<CompiledModel>{
-        self.compile_view(cancelled,false)
+        self.compile_view(cancelled,false,None)
+    }
+    /// Reuse unchanged static mesh parts, tangents and encoded surface images
+    /// from a previous compile on this worker. Scene metadata and the GLB are
+    /// assembled afresh in their original order, including newly added LODs.
+    pub fn compile_with_cache(&self,cache:&mut crate::CompileCache,cancelled:Option<&dyn Fn()->bool>)->Result<CompiledModel>{
+        self.compile_view(cancelled,false,Some(cache))
     }
     /// Compile a static draft at the current editable head. Geometry, materials,
     /// shape-key weights and rest-pose lights are visible before binding is done.
@@ -22,10 +28,10 @@ impl Document {
     /// sockets, collision and delivery LODs; it is not a publication product.
     /// Source state, history and completion checks in `compile` are unchanged.
     pub fn compile_preview(&self,cancelled:Option<&dyn Fn()->bool>)->Result<CompiledModel>{
-        self.compile_view(cancelled,true)
+        self.compile_view(cancelled,true,None)
     }
-    fn compile_view(&self,cancelled:Option<&dyn Fn()->bool>,preview:bool)->Result<CompiledModel>{
-        if !preview&&self.soft_body().is_none()&&self.scene().is_empty()&&self.rig().morphs.is_empty(){return self.compile_evaluated(cancelled);}
+    fn compile_view(&self,cancelled:Option<&dyn Fn()->bool>,preview:bool,cache:Option<&mut crate::CompileCache>)->Result<CompiledModel>{
+        if !preview&&self.soft_body().is_none()&&self.scene().is_empty()&&self.rig().morphs.is_empty(){return self.compile_evaluated(cancelled,cache);}
         let mut ctx=mesh::Context::new(self.limits().mesh.clone(),cancelled);
         ctx.checkpoint(1)?;
         self.scene().validate(&self.state,self.limits(),&mut ctx)?;
@@ -62,7 +68,7 @@ impl Document {
         evaluated.state.objects=objects;
         drop(cached);
         crate::delivery::expand(&mut evaluated,&mut ctx)?;
-        let mut product=evaluated.compile_evaluated(cancelled)?;
+        let mut product=evaluated.compile_evaluated(cancelled,cache)?;
         if !preview {if let Some(metadata)=self.soft_body(){
             product.glb=augment_glb_soft_body(&product.glb,metadata).map_err(|_|Error::Invalid("soft-body GLB metadata"))?;
         }}

@@ -59,6 +59,8 @@ pub mod sky;
 pub mod smoke;
 pub mod vfx;
 pub mod ssao;
+pub mod volume_fog;
+pub mod ssr;
 pub mod still_aa;
 pub mod stream;
 pub mod sun;
@@ -87,6 +89,7 @@ pub use preview::*;
 pub use shadow::*;
 pub use shadow_mesh::*;
 pub use ssao::*;
+pub use ssr::SsrSettings;
 pub use still_aa::{jittered_projection, still_aa_offset, DrawStillAaBlend, StillAa, STILL_AA_SAMPLES};
 pub use smoke::SmokeVolume;
 pub use sun::*;
@@ -117,5 +120,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     smoke::script_mod(vm);
     vfx::shader::script_mod(vm);
     shaders::script_mod(vm);
+    volume_fog::script_mod(vm);
+    ssr::script_mod(vm);
     local_shadows::script_mod(vm)
 }

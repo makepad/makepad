@@ -5,6 +5,46 @@ use makepad_gltf::{
     GlbPrimitiveSkin, GlbSkinJoint, GlbTexturedPart,
 };
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+/// Worker-owned export intermediates for a sequence of related compiles.
+/// Entries compare their source inputs; changing an object or a texture layer
+/// rebuilds that entry. Drop this with the build, rather than retaining model
+/// geometry and image layers in a process-wide cache.
+#[derive(Default)]
+pub struct CompileCache {
+    objects: BTreeMap<String, CachedObject>,
+    textures: BTreeMap<(u32, crate::SurfaceChannel), CachedTexture>,
+}
+
+struct CachedObject {
+    mesh: mesh::Mesh,
+    colors: Vec<(mesh::VertexId, [u64; 4])>,
+    rich_surface: bool,
+    parts: Vec<(u32, Arc<Part>)>,
+}
+
+struct CachedTexture {
+    layers: Vec<crate::SurfaceLayer>,
+    limits: (u32, usize, usize, usize),
+    texture: Option<makepad_gltf::GlbPbrTexture>,
+}
+
+// PartialEq alone identifies -0 and +0, but the exported f32 buffers retain
+// their bits. Check the floating-point mesh inputs as well as the topology.
+fn same_mesh(a: &mesh::Mesh, b: &mesh::Mesh) -> bool {
+    a == b
+        && a.vertices().iter().zip(b.vertices()).all(|(a, b)| {
+            a.position.map(f64::to_bits) == b.position.map(f64::to_bits)
+                && a.weights.iter().zip(&b.weights).all(|(a, b)| a.weight.to_bits() == b.weight.to_bits())
+        })
+        && a.corners().iter().zip(b.corners()).all(|(a, b)| {
+            a.uv.map(f64::to_bits) == b.uv.map(f64::to_bits)
+                && a.normal.map(|n| n.map(f64::to_bits)) == b.normal.map(|n| n.map(f64::to_bits))
+        })
+        && a.edge_attributes().values().zip(b.edge_attributes().values())
+            .all(|(a, b)| a.attributes.crease.to_bits() == b.attributes.crease.to_bits())
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PrimitiveSource {
@@ -24,7 +64,7 @@ pub struct CompiledModel {
     pub bounds: [[f32; 3]; 2],
     pub primitives: Vec<PrimitiveSource>,
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Part {
     source_vertices: Vec<mesh::VertexId>,
     positions: Vec<[f32; 3]>,
@@ -34,6 +74,7 @@ struct Part {
     faces: Vec<mesh::FaceId>,
     weights: Vec<f64>,
     colors: Vec<[f32; 4]>,
+    tangents: Vec<[f32; 4]>,
 }
 fn f32_value(v: f64) -> Result<f32> {
     let v = v as f32;
@@ -59,6 +100,7 @@ impl Document {
     pub(crate) fn compile_evaluated(
         &self,
         cancelled: Option<&dyn Fn() -> bool>,
+        mut cache: Option<&mut CompileCache>,
     ) -> Result<CompiledModel> {
         let mut ctx = mesh::Context::new(self.limits().mesh.clone(), cancelled);
         let rich_surface =
@@ -95,14 +137,34 @@ impl Document {
             return Err(Error::Budget("skin/export working bytes"));
         }
         ctx.checkpoint(1)?;
-        let mut parts: BTreeMap<(String, u32), Part> = BTreeMap::new();
+        let mut parts: BTreeMap<(String, u32), Arc<Part>> = BTreeMap::new();
         let mut weld: std::collections::HashMap<(String, u32), std::collections::HashMap<(mesh::VertexId, [u32; 3], [u32; 2]), u32>> = std::collections::HashMap::new();
         // Shape keys carry per-triangle normal deltas, so a document with
         // morphs keeps one render vertex per triangle corner.
         let weld_corners = self.rig().morphs.is_empty();
         let mut triangles = 0usize;
+        if let Some(cache) = cache.as_deref_mut() {
+            cache.objects.retain(|name, _| joint_count == 0 && weld_corners && self.state.objects.contains_key(name));
+            if !rich_surface { cache.textures.clear(); }
+        }
         for (name, mesh) in self.objects() {
             ctx.checkpoint(1)?;
+            // Skinned export remaps UVs and weights, and morphs keep distinct
+            // corners. Cache only the static, welded representation.
+            let reusable = cache.is_some() && joint_count == 0 && weld_corners;
+            let colors = if reusable {
+                self.surface().vertex_colors.range((name.to_owned(), mesh::VertexId(0))..)
+                    .take_while(|((object, _), _)| object == name)
+                    .map(|((_, vertex), color)| (*vertex, color.map(f64::to_bits))).collect::<Vec<_>>()
+            } else { Vec::new() };
+            if let Some(hit) = cache.as_deref().and_then(|c| c.objects.get(name))
+                .filter(|hit| reusable && hit.rich_surface == rich_surface && hit.colors == colors && same_mesh(&hit.mesh, mesh)) {
+                for (material, part) in &hit.parts {
+                    triangles += part.indices.len() / 3;
+                    parts.insert((name.to_owned(), *material), part.clone());
+                }
+                continue;
+            }
             if joint_count == 0 && mesh.vertices().iter().any(|v| !v.weights.is_empty()) {
                 return Err(Error::Invalid(
                     "weighted mesh requires a skeleton; static compile cannot discard skin weights",
@@ -128,7 +190,7 @@ impl Document {
             }
             for tri in &triangulated.triangles {
                 ctx.checkpoint(1)?;
-                let part = parts.entry((name.to_owned(), tri.material)).or_default();
+                let part = Arc::make_mut(parts.entry((name.to_owned(), tri.material)).or_default());
                 let welded = weld.entry((name.to_owned(), tri.material)).or_default();
                 part.faces.push(tri.source_face);
                 for index in tri.indices {
@@ -191,9 +253,26 @@ impl Document {
                     }
                 }
             }
+            if rich_surface {
+                for (_, part) in parts.range_mut((name.to_owned(), 0)..).take_while(|((object, _), _)| object == name) {
+                    let part = Arc::make_mut(part);
+                    part.tangents = part_tangents(part, &mut ctx)?;
+                }
+            }
+            if reusable {
+                let object_parts = parts.range((name.to_owned(), 0)..).take_while(|((object, _), _)| object == name)
+                    .map(|((_, material), part)| (*material, part.clone())).collect();
+                cache.as_deref_mut().unwrap().objects.insert(name.to_owned(), CachedObject {
+                    mesh: self.object(name).unwrap().clone(), colors, rich_surface, parts: object_parts,
+                });
+            }
         }
         if triangles == 0 {
             return Err(Error::Invalid("model has no surface to compile"));
+        }
+        if let Some(cache) = cache.as_deref_mut() {
+            let used = parts.keys().map(|(_, material)| *material).collect::<std::collections::BTreeSet<_>>();
+            cache.textures.retain(|(id, _), _| used.contains(id));
         }
         let atlas = if joint_count > 0 && !rich_surface {
             let mut ranges = crate::atlas::UvBounds::new();
@@ -210,9 +289,11 @@ impl Document {
             }
             let mut atlas_limits = self.limits().clone();
             atlas_limits.mesh.max_bytes = atlas_limits.mesh.max_bytes.saturating_sub(working);
+            let started = crate::program::ProgramInstant::now();
             let atlas = crate::atlas::bake(self.materials(), &ranges, &atlas_limits, &mut ctx)?;
+            crate::program::record_texture_time(started.elapsed());
             for ((_, material), part) in &mut parts {
-                for uv in &mut part.uvs {
+                for uv in &mut Arc::make_mut(part).uvs {
                     ctx.checkpoint(1)?;
                     *uv = atlas.remap(*material, *uv);
                 }
@@ -221,7 +302,9 @@ impl Document {
         } else {
             None
         };
+        let started = crate::program::ProgramInstant::now();
         let white = Texture::solid(1, 1, [255; 3], self.limits())?.to_png(self.limits())?;
+        crate::program::record_texture_time(started.elapsed());
         let mut bounds = [[f32::INFINITY; 3], [f32::NEG_INFINITY; 3]];
         let mut vertices = 0;
         let mut primitives = Vec::new();
@@ -285,7 +368,7 @@ impl Document {
         };
         drop(views);
         if rich_surface {
-            glb = export_surface(self, &glb, &parts, &mut ctx)?;
+            glb = export_surface(self, &glb, &parts, &mut ctx, cache.as_deref_mut())?;
         }
         if let Some(skeleton) = self.skeleton() {
             let parsed = makepad_gltf::parse_glb_bytes(&glb)
@@ -320,7 +403,7 @@ impl Document {
                 .map(|(primitive, (_, part))| GlbPrimitiveSkin {
                     node: target_node,
                     primitive,
-                    weights: part.weights,
+                    weights: Arc::unwrap_or_clone(part).weights,
                 })
                 .collect::<Vec<_>>();
             ctx.checkpoint((vertices as u64).saturating_mul(joint_count as u64))?;
@@ -390,8 +473,9 @@ impl Document {
 fn export_surface(
     doc: &Document,
     glb: &[u8],
-    parts: &BTreeMap<(String, u32), Part>,
+    parts: &BTreeMap<(String, u32), Arc<Part>>,
     ctx: &mut mesh::Context<'_>,
+    mut cache: Option<&mut CompileCache>,
 ) -> Result<Vec<u8>> {
     use crate::{SurfaceAlpha, SurfaceChannel, SurfaceMaterial};
     use makepad_gltf::{augment_glb_pbr, GlbPbrMaterial, GlbPbrPrimitive, GlbPbrTexture};
@@ -408,38 +492,62 @@ fn export_surface(
             let source = if let Some(source) = doc.surface().materials.get(id) {
                 source
             } else {
+                let started = crate::program::ProgramInstant::now();
                 fallback = SurfaceMaterial::from_legacy(
                     doc.materials()
                         .get(id)
                         .ok_or(Error::Invalid("surface export material"))?,
                     doc.limits(),
                 )?;
+                crate::program::record_texture_time(started.elapsed());
                 &fallback
             };
             source.validate(doc.limits(), ctx)?;
             let mut map = |channel: SurfaceChannel| -> Result<Option<GlbPbrTexture>> {
-                let Some(image) = source.flatten(channel, doc.limits(), ctx)? else {
-                    return Ok(None);
+                let layers = source.channels.get(&channel).map(Vec::as_slice).unwrap_or(&[]);
+                let limits = (doc.limits().max_texture_dimension, doc.limits().max_texture_bytes,
+                    doc.limits().mesh.max_bytes, doc.limits().max_source_bytes);
+                let hit = cache.as_deref().and_then(|c| c.textures.get(&(*id, channel)))
+                    .filter(|c| c.limits == limits && c.layers == layers
+                        && c.layers.iter().zip(layers).all(|(a, b)| a.opacity.to_bits() == b.opacity.to_bits()));
+                let texture = if let Some(hit) = hit {
+                    hit.texture.clone()
+                } else {
+                    let started = crate::program::ProgramInstant::now();
+                    let texture = (|| -> Result<Option<GlbPbrTexture>> {
+                        let Some(image) = source.flatten(channel, doc.limits(), ctx)? else {
+                            return Ok(None);
+                        };
+                        let mips = image.mip_chain(channel.encoding(), doc.limits(), ctx)?;
+                        let png = image.to_png(doc.limits())?;
+                        let mut mip_pngs = Vec::new();
+                        for mip in mips {
+                            ctx.checkpoint(mip.pixels.len() as u64)?;
+                            let png = mip.to_png(doc.limits())?;
+                            mip_pngs.push(png);
+                        }
+                        Ok(Some(GlbPbrTexture { png, mip_pngs }))
+                    })();
+                    crate::program::record_texture_time(started.elapsed());
+                    let texture = texture?;
+                    if let Some(cache) = cache.as_deref_mut() {
+                        cache.textures.insert((*id, channel), CachedTexture { layers: layers.to_vec(), limits, texture: texture.clone() });
+                    }
+                    texture
                 };
-                let mips = image.mip_chain(channel.encoding(), doc.limits(), ctx)?;
-                let png = image.to_png(doc.limits())?;
-                let mut mip_pngs = Vec::new();
-                derived_bytes = derived_bytes.saturating_add(png.len());
-                for mip in mips {
-                    ctx.checkpoint(mip.pixels.len() as u64)?;
-                    let png = mip.to_png(doc.limits())?;
-                    derived_bytes = derived_bytes.saturating_add(png.len());
-                    mip_pngs.push(png);
+                if let Some(texture) = &texture {
+                    derived_bytes = derived_bytes.saturating_add(texture.png.len());
+                    for png in &texture.mip_pngs { derived_bytes = derived_bytes.saturating_add(png.len()); }
+                    if derived_bytes
+                        .saturating_mul(4)
+                        .saturating_add(doc.surface().memory_bytes())
+                        .saturating_add(glb.len() * 3)
+                        > doc.limits().mesh.max_bytes
+                    {
+                        return Err(Error::Budget("PBR export images"));
+                    }
                 }
-                if derived_bytes
-                    .saturating_mul(4)
-                    .saturating_add(doc.surface().memory_bytes())
-                    .saturating_add(glb.len() * 3)
-                    > doc.limits().mesh.max_bytes
-                {
-                    return Err(Error::Budget("PBR export images"));
-                }
-                Ok(Some(GlbPbrTexture { png, mip_pngs }))
+                Ok(texture)
             };
             let out = GlbPbrMaterial {
                 fur: source.fur,
@@ -470,13 +578,12 @@ fn export_surface(
             ids.insert(*id, index);
             index
         };
-        let tangents = part_tangents(part, ctx)?;
         assignments.push(GlbPbrPrimitive {
             mesh: 0,
             primitive,
             material,
             colors: part.colors.clone(),
-            tangents,
+            tangents: part.tangents.clone(),
         });
     }
     ctx.checkpoint((derived_bytes + glb.len()) as u64)?;

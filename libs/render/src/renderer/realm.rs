@@ -14,6 +14,8 @@ impl Renderer {
     /// and pass pools, stage policy, bake settings, shadow budget, and the
     /// adaptive-quality history owned by this device.
     pub fn enter_realm(&mut self) {
+        self.volume_fog.reset();
+        self.ssr.reset();
         self.custom_draws.clear();
         // The stock IBL program went with them: a build of it that failed
         // may be made again (renderer/stock_ibl.rs).
@@ -537,6 +539,8 @@ impl Renderer {
         review.model_anim_state = self.model_anim_state.clone();
         review.ao_textures = self.ao_textures.clone();
         review.model_pack = self.model_pack.clone();
+        review.model_lod_chains = self.model_lod_chains.clone();
+        review.model_lod_chains_dirty = self.model_lod_chains_dirty;
         review.skin_rig_geometries = self.skin_rig_geometries.clone();
         review.skin_material_draws = self.skin_material_draws.clone();
         review.skin_lods = self.skin_lods.clone();
@@ -547,6 +551,28 @@ impl Renderer {
         review.host_lights = self.host_lights.clone();
         review.host_asset_lights = self.host_asset_lights.clone();
         review.sky_time = self.sky_time;
+        review.sky_clock = self.sky_clock;
+        review.sky_hour = self.sky_hour;
+        review.set_hdr_output(self.hdr_output);
+        review.set_camera_relative(self.camera_relative());
+        review.set_graphics_tier(self.graphics_tier);
+        let csm = self.csm_config();
+        review.set_csm_config(csm.tile_resolution, csm.far_range);
+        review.set_cluster_config(self.clustered.config());
+        review.set_local_shadow_config(self.clustered.shadows.config());
+        review.pbr_materials_enabled = self.pbr_materials_enabled;
+        review.lightmap_enabled = self.lightmap_enabled;
+        review.display_transform = self.display_transform;
+        review.output_dither = self.output_dither;
+        review.fxaa = self.fxaa;
+        review.bloom = self.bloom;
+        review.auto_exposure = self.auto_exposure;
+        review.grade = self.grade;
+        review.clustered.shadows.soft_filter = self.clustered.shadows.soft_filter;
+        review.clustered.shadows.source_radius = self.clustered.shadows.source_radius;
+        review.star_texture = self.star_texture.clone();
+        review.star_map_loaded = self.star_map_loaded;
+        review.mirror_stream_from(self);
         review.set_gpu_lightmap_mode(crate::GpuLightmapMode::Realtime);
         review.set_clustered_lighting(true);
         review.set_gi_mode(crate::GiMode::Off);
@@ -558,6 +584,72 @@ impl Renderer {
     /// review pass, then restore them before encoding the player's pass.
     pub fn swap_review_materials(&mut self, other: &mut Self) {
         std::mem::swap(&mut self.custom_draws, &mut other.custom_draws);
+        // UploadedSurface already shares its albedo/normal arrays and
+        // weight map. The missing state was the prepared material lane:
+        // a fresh fork can fall back while its pipeline is compiling.
+        std::mem::swap(&mut self.pbr_draw, &mut other.pbr_draw);
+        std::mem::swap(&mut self.splat_draw, &mut other.splat_draw);
+        std::mem::swap(&mut self.foliage_draw, &mut other.foliage_draw);
+        std::mem::swap(&mut self.lane_variants, &mut other.lane_variants);
+        std::mem::swap(&mut self.grass, &mut other.grass);
+        std::mem::swap(&mut self.grass_draw, &mut other.grass_draw);
+    }
+
+    /// Lend the live probe field during a secondary scene draw. Call again
+    /// immediately afterwards. No relighting, recentering or voxel work is
+    /// allowed while borrowed; the secondary camera keeps its own SSAO.
+    pub fn swap_review_gi(&mut self, other: &mut Self) {
+        std::mem::swap(&mut self.gi, &mut other.gi);
+        self.review_gi = !self.review_gi;
+    }
+
+    /// Whether resident specialized material lanes could actually draw.
+    pub fn review_materials_ready(&self) -> bool {
+        if !self.pbr_materials_enabled { return true; }
+        let used: std::collections::HashSet<&str> = self.placed_models.iter().chain(&self.world_attachments)
+            .map(|m| m.model.as_str()).collect();
+        self.static_models.iter().filter(|(id, _)| used.contains(id.as_str())).all(|(_, model)| {
+            std::iter::once(model).chain(model.lods.iter().map(|(_, m)| m)).all(|m| {
+                (!m.wants_pbr || self.pbr_ready) && (self.splat_ready ||
+                    !std::iter::once(&m.material).chain(m.extra_draws.iter().map(|l| &l.4))
+                        .any(|m| m.surface.as_ref().is_some_and(|s| s.splat.is_some())))
+            })
+        })
+    }
+
+    /// Current poses and resolved lights for another camera. Called only
+    /// when that camera renders, after the source scene has resolved them.
+    pub fn mirror_review_frame_from(&mut self, live: &Self) {
+        self.set_models(live.placed_models.clone());
+        self.set_world_attachments(live.world_attachments.clone());
+        self.model_anim_state = live.model_anim_state.clone();
+        self.sky_time = live.sky_time;
+        self.sky_clock = live.sky_clock;
+        self.sky_hour = live.sky_hour;
+        self.review_lights = Some(live.frame_lights.clone());
+        self.grade = live.grade;
+        self.bloom = live.bloom;
+        self.fxaa = live.fxaa;
+    }
+
+    /// Refresh uploads that completed between an on-demand camera's warmup
+    /// and capture. Geometry/texture handles remain shared; never decode a
+    /// second copy or keep a replaced generated surface in the fork.
+    pub fn mirror_review_assets_from(&mut self, live: &Self) {
+        let same = self.static_models.len() == live.static_models.len()
+            && self.static_models.iter().zip(&live.static_models).all(|((id, a), (other, b))| {
+                id == other && a.geometry.geometry_id() == b.geometry.geometry_id()
+                    && a.texture.texture_id() == b.texture.texture_id() && a.lods.len() == b.lods.len()
+            });
+        if same { return; }
+        self.static_models.clone_from(&live.static_models);
+        self.model_casts_shadow.clone_from(&live.model_casts_shadow);
+        self.ao_textures.clone_from(&live.ao_textures);
+        self.model_pack.clone_from(&live.model_pack);
+        self.model_lod_chains.clone_from(&live.model_lod_chains);
+        self.model_lod_chains_dirty = live.model_lod_chains_dirty;
+        self.models_rev = self.models_rev.wrapping_add(1);
+        self.rebuild_csm_static_casters();
     }
 
     pub fn review_models_ready(&self) -> bool {

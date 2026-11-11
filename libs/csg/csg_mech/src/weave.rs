@@ -1068,8 +1068,9 @@ pub fn link_mass(l: &Link, density: f64) -> MassProps {
     MassProps { volume: m / density, mass: m, com, inertia }
 }
 
-/// A box3d world for a weave: free links, sleeping, contacts made a bar diameter early, speed capped so no
-/// link moves more than that in one step at `hz`.
+/// A weave's world: free links, sleeping, contacts made a bar diameter early, speed capped so no link moves
+/// more than that in one step at `hz`. Its substeps are box3d's (the reference the engine is compared with);
+/// the dynamics engine, which steps weaves, takes its own ([`crate::runner::dynamics_world`]).
 pub fn assembly(w: &Weave, density: f64, hz: f64) -> crate::sim::Assembly {
     let margin = 2.0 * w.link.r;
     crate::sim::Assembly {
@@ -1081,8 +1082,8 @@ pub fn assembly(w: &Weave, density: f64, hz: f64) -> crate::sim::Assembly {
         workers: 1,
         contact_margin: margin,
         max_speed: margin * hz,
-        // a hanging cloth is a long stack of light contacts: stiff contacts and 8 substeps keep 40 rows
-        // interlocked (4 substeps let deep rows pass through each other)
+        // a hanging cloth is a long stack of light contacts: stiff contacts and, on box3d, 8 substeps keep
+        // 40 rows interlocked (4 substeps let deep rows pass through each other there)
         contact_hertz: 240.0,
         substeps: 8,
         ball: None,
@@ -1309,7 +1310,7 @@ pub struct WeaveSimReport {
 }
 
 /// Runs a weave in a scene for `seconds` (simulated; at most 30), the same every run, on the world the live
-/// sim steps for it (a chain on the dynamics engine, mail on box3d).
+/// sim steps for it (the dynamics engine).
 pub fn simulate(w: &Weave, density: f64, which: WeaveScene, seconds: f64, cancelled: &dyn Fn() -> bool) -> Result<WeaveSimReport, String> {
     let started = std::time::Instant::now();
     let setup = scene(w, density, which);

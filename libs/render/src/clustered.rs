@@ -190,10 +190,18 @@ impl Default for ClusteredLights {
 
 impl ClusteredLights {
     pub(crate) fn gi_light_ids(&self,center:Vec3f)->[f32;8] {
-        let mut ranked:Vec<_>=self.lights.iter().enumerate().filter(|(i,_)|self.shadows.records.get(*i).map_or(false,|r|r.count>0))
-            .map(|(i,l)|(l.color.x.max(l.color.y).max(l.color.z)/(1.0+(l.pos-center).length()),i)).collect();
-        ranked.sort_by(|a,b|b.0.total_cmp(&a.0));let mut out=[-1.0;8];
-        for (slot,(_,i)) in ranked.into_iter().take(8).enumerate(){out[slot]=i as f32;}out
+        // Stable top eight, matching the old descending stable sort without
+        // allocating or sorting all lights on every GI frame.
+        let mut ranked = [(f32::NEG_INFINITY, -1.0); 8];
+        for (i, l) in self.lights.iter().enumerate() {
+            if !self.shadows.records.get(i).is_some_and(|r| r.count > 0) { continue; }
+            let score = l.color.x.max(l.color.y).max(l.color.z) / (1.0 + (l.pos-center).length());
+            if let Some(slot) = ranked.iter().position(|&(s, id)| id < 0.0 || score.total_cmp(&s).is_gt()) {
+                ranked.copy_within(slot..7, slot+1);
+                ranked[slot] = (score, i as f32);
+            }
+        }
+        ranked.map(|(_, id)| id)
     }
     pub(crate) fn parent_shadows(&self,cx:&mut Cx,parent:DrawPassId){self.shadows.parent_to(cx,parent);}
     pub fn set_config(&mut self, config: ClusterConfig) {
@@ -937,7 +945,7 @@ script_mod! {
         mat_light: fn(radiance: vec3, l: vec3, n: vec3, v: vec3, brdf: vec3) -> vec3 {
             return radiance*brdf
         }
-        cluster_lights: fn(wp: vec3, normal: vec3, eye: vec3, albedo: vec3, roughness: float, metallic: float, pbr: float) -> vec3 {
+        cluster_lights_f0: fn(wp: vec3, normal: vec3, eye: vec3, albedo: vec3, roughness: float, metallic: float, pbr: float, f0: vec3) -> vec3 {
             if self.cluster_on < 0.5 { return vec3(0.0,0.0,0.0) }
             let p=vec4(wp.x,wp.y,wp.z,1.0)
             let w=dot(self.cluster_w,p)
@@ -964,9 +972,8 @@ script_mod! {
             // The BRDF's per-pixel half, hoisted out of the light loop.
             let view=normalize(eye-wp)
             let ndv=max(dot(n,view),0.0001)
-            let rough=clamp(roughness,0.045,1.0)
+            let rough=clamp(roughness,0.03,1.0)
             let metal=clamp(metallic,0.0,1.0)
-            let f0=mix(vec3(0.04,0.04,0.04),albedo,metal)
             let a2=rough*rough*rough*rough
             let k=(rough+1.0)*(rough+1.0)*0.125
             let pa=vec4(ndv,k,ndv/max(ndv*(1.0-k)+k,0.0001),mix(1.0,3.14159265,self.lin_ctl.x))
@@ -989,6 +996,11 @@ script_mod! {
                 i=i+1.0
             }
             return total
+        }
+        // Ordinary callers retain their original roughness floor and F0.
+        cluster_lights: fn(wp: vec3, normal: vec3, eye: vec3, albedo: vec3, roughness: float, metallic: float, pbr: float) -> vec3 {
+            let metal = clamp(metallic, 0.0, 1.0)
+            return self.cluster_lights_f0(wp, normal, eye, albedo, max(roughness, 0.045), metal, pbr, mix(vec3(0.04, 0.04, 0.04), albedo, metal))
         }
         cluster_sum: fn(wp: vec3, normal: vec3) -> vec3 {
             return self.cluster_lights(wp,normal,vec3(0.0,0.0,0.0),vec3(1.0,1.0,1.0),1.0,0.0,0.0)

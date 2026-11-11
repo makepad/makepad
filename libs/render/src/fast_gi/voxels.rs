@@ -174,6 +174,22 @@ pub(crate) struct Snapshot {
     pub triangles: usize,
 }
 
+impl Snapshot {
+    /// Geometry bounds, not the camera's snapshot region or voxel window.
+    /// Computed once at submission; an empty scene keeps an inverted box
+    /// so every finite ray endpoint is outside it.
+    pub fn padded_bounds(&self, padding: f32) -> (Vec3f, Vec3f) {
+        let mut lo = vec3f(f32::MAX, f32::MAX, f32::MAX);
+        let mut hi = vec3f(f32::MIN, f32::MIN, f32::MIN);
+        for instance in &self.instances {
+            lo = vec3f(lo.x.min(instance.lo.x), lo.y.min(instance.lo.y), lo.z.min(instance.lo.z));
+            hi = vec3f(hi.x.max(instance.hi.x), hi.y.max(instance.hi.y), hi.z.max(instance.hi.z));
+        }
+        let pad = vec3f(padding, padding, padding);
+        (lo - pad, hi + pad)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct VoxelLayout {
     pub dims: [usize; 3],

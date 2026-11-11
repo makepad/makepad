@@ -463,6 +463,10 @@ pub struct Renderer {
     grass_rings: [Vec<(f32, f32)>; 3],
     /// The PBR pipeline can draw this frame (`draw_models_inner`).
     pbr_ready: bool,
+    /// A secondary camera may borrow the live probe field for sampling only.
+    review_gi: bool,
+    /// Already resolved lights borrowed by a secondary camera, in lane units.
+    review_lights: Option<Vec<crate::lightmap::LmLight>>,
     /// The diffuse and PBR lanes' no-discard variants (opaque.rs).
     lane_variants: variants::LaneVariants,
     /// Whether shiny loaded models use the PBR material lane. Enabled by
@@ -521,6 +525,8 @@ pub struct Renderer {
     auto_exposure: bool,
     /// See [`Renderer::set_grade`].
     grade: makepad_scene::ColorGrade,
+    volume_fog: volume_fog::VolumeFogState,
+    ssr: ssr::SsrState,
     /// The baked lightmap's KILL SWITCH (F9 in the sandbox,
     /// `MAKEPAD_LIGHTMAP=off` at launch). Off binds the 1x1 "fully sunlit,
     /// no lamps" stand-in instead of the atlas, so every static falls back
@@ -689,6 +695,8 @@ mod skinned;
 mod frame;
 mod frame_layers;
 mod gi;
+mod volume_fog;
+mod ssr;
 mod stream_draw;
 mod grass_draw;
 mod vfx_draw;
@@ -801,6 +809,8 @@ impl Default for Renderer {
             graphics_tier: crate::quality_tier::GraphicsTier::High,
             grass_rings: Default::default(),
             pbr_ready: false,
+            review_gi: false,
+            review_lights: None,
             lane_variants: Default::default(),
             pbr_materials_enabled: true,
             ssao: None,
@@ -826,6 +836,8 @@ impl Default for Renderer {
             bloom: DEFAULT_BLOOM,
             auto_exposure: true,
             grade: Default::default(),
+            volume_fog: Default::default(),
+            ssr: Default::default(),
             star_map_loaded: false,
             star_texture: None,
             gpu_baker: {

@@ -167,7 +167,9 @@ script_mod! {
             let ndl = max(dot(n, l), 0.0)
             let pi_hdr = mix(1.0, 3.14159265, self.lin_ctl.x)
             let direct = self.sun_color * (ndl * ao_direct * sun_lit)
-            let ambient = self.gi_ambient(pos, n, self.v_ambient) * (ao * sao)
+            let gi_ambient = self.gi_ambient(pos, n, self.v_ambient)
+            let spec_occ = self.gi_specular_occlusion(gi_ambient, self.v_ambient)
+            let ambient = gi_ambient * (ao * sao)
             let ndv = max(dot(n, v), 0.0001)
             let refl = n * (2.0 * ndv) - v
 
@@ -201,13 +203,13 @@ script_mod! {
                 if rough < 0.6 && kind > 0.5 { env = self.c_reflect(normalize(refl), rough, night, 1.0 - step(2.5, kind)) }
                 let local_pbr = self.cluster_pbr(pos, n, self.eye.xyz, albedo, rough, fm)
                 lit = albedo * ((1.0 - fm) * (ambient + direct + local * ao_direct))
-                    + direct * spec * fv + env * f_env * (ao * sao) + local_pbr * ao_direct
+                    + direct * spec * fv + env * f_env * (ao * sao * spec_occ) + local_pbr * ao_direct
                 if kind > 2.5 {
                     // Clear coat: a second, near-mirror interface on top.
                     let cf = 0.04 + 0.96 * self.pow5(1.0 - ndv)
                     let cenv = self.c_reflect(normalize(refl), 0.12, night, 0.0)
                     let cspec = self.c_ggx(n, v, l, 0.06) * pi_hdr
-                    lit = lit * (1.0 - cf) + (cenv * (ao * sao) + direct * cspec) * cf
+                    lit = lit * (1.0 - cf) + (cenv * (ao * sao * spec_occ) + direct * cspec) * cf
                 }
                 // The reveal faces sideways, out of the sun: mostly sky fill.
                 lit = lit * (1.0 - 0.5 * reveal)
@@ -284,7 +286,7 @@ script_mod! {
                     let cap = max(max(lit.x, max(lit.y, lit.z)) * 3.0, 0.12)
                     let gl = warm * glow
                     room = room + gl * (min(1.0, cap / max(gl.x, 0.0001)) * (1.0 - roomed))
-                    let glass_lit = room * (1.0 - gf) + genv * (gf * ao) + direct * (gspec * gf)
+                    let glass_lit = room * (1.0 - gf) + genv * (gf * ao * spec_occ) + direct * (gspec * gf)
                     lit = mix(lit, glass_lit, glass)
                 } else {
                     let glow = warm * (on * mix(0.3, 0.8, night) * mix(0.45, 1.0, m))

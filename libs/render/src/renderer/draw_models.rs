@@ -482,11 +482,22 @@ impl Renderer {
                 let inv_height = 1.0 / root.max.y.max(0.5);
                 let sways = foliage_ready && std::iter::once(&root.material).chain(root.extra_draws.iter().map(|l| &l.4))
                     .any(|m| m.surface.as_ref().is_some_and(|s| s.definition.wind > 0.0));
-                let paints = splat_ready && std::iter::once(&root.material).chain(root.extra_draws.iter().map(|l| &l.4))
-                    .any(|m| m.surface.as_ref().is_some_and(|s| s.splat.is_some()));
                 let distance=distances[i];
                 let mut fur_budget = 12_000usize.min(96_000usize.saturating_sub(stats.fur_triangles));
                 let loaded=if lod_index==0{root}else{&root.lods[lod_index-1].1};
+                // Paint belongs to a layer: an opaque surface can share a
+                // model with an ordinary decal or an untextured LOD.
+                let primary = (loaded.triangles > 0) as usize;
+                let layer_count = primary + loaded.extra_draws.len();
+                if layer_pass == 0 && layer_count > 1 {
+                    layered.push(((i, lod_index, window), layer_count));
+                }
+                let layer_material = if primary == 1 && layer_pass == 0 {
+                    Some(&loaded.material)
+                } else {
+                    loaded.extra_draws.get(layer_pass - primary).map(|l| &l.4)
+                };
+                let paints = splat_ready && layer_material.is_some_and(|m| m.surface.as_ref().is_some_and(|s| s.splat.is_some()));
                 // Lane filter. Both passes walk the same instance list — indices
                 // address `lm_remaps` / `model_ground` / the light-cell key, so
                 // they must not be renumbered — and each takes only the models
@@ -593,11 +604,7 @@ impl Renderer {
                         .into_iter()
                         .chain(m.extra_draws.iter().map(|(g, t, d, s, mat)| (g.geometry_id(), t, d, *s, mat)))
                 };
-                let layer_count = (m.triangles > 0) as usize + m.extra_draws.len();
                 let prelit = m.prelit;
-                if layer_pass == 0 && layer_count > 1 {
-                    layered.push(((i, lod_index, window), layer_count));
-                }
                 // Rigid parts ride the PARENT's material: a door is cut from the
                 // level tile it sits in, so its metal/roughness is the model's.
                 let has_lightmap_source = loaded.lm_source.is_some();

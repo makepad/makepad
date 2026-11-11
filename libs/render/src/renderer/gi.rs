@@ -4,11 +4,28 @@
 use super::*;
 
 impl Renderer {
+    /// Apply a world's camera-following probe lighting without invalidating
+    /// an unchanged field. Soft local shadows stay enabled after GI is disabled.
+    pub fn set_gi_settings(&mut self, settings: Option<makepad_scene::GiSettings>) {
+        if let Some(settings) = settings {
+            let config = crate::GiConfig::from(settings);
+            if self.gi_config() != config {
+                self.set_gi_config(config);
+            }
+            self.set_gi_mode(crate::GiMode::Fast);
+            self.set_soft_local_shadows(true);
+        } else {
+            self.set_gi_mode(crate::GiMode::Off);
+        }
+    }
+
     /// The GPU device was replaced (`Event::GpuReset`): the GI field and cascades, and the
     /// baked lightmaps, lived only on the GPU. GI starts over; the lightmap bakes again into
     /// its regions.
     pub fn gpu_reset(&mut self) {
         self.gi.release();
+        self.volume_fog.reset();
+        self.ssr.reset();
         self.gpu_baker.debug_redirty();
     }
 
@@ -104,10 +121,42 @@ impl Renderer {
         self.gi.run(cx.cx,center,sun,&self.clustered);
         if self.gi.stats.batch>0 {if let Some(parent)=self.gi.relight_pass(){self.clustered.parent_shadows(cx.cx,parent);}}
         stats.gi=self.gi.stats;
-        if self.clustered_frames%120==0 && std::env::var_os("MAKEPAD_GI_STATS").is_some(){
+        if crate::fast_gi::gi_stats_enabled() && self.clustered_frames%120==0 {
             let g=&stats.gi;
-            log!("fast GI: {} instances / {} triangles ({} outside region), {} probes ({} pending), batch {} of budget {}, {} lights, {}us snapshot, {}us encode, voxels {} jobs / {} bricks / {:.1}ms, GPU [trace, relight, gather, scatter] {:?}ms peak {:?}ms, AO {:.3}ms, {} bytes resident, {} uploaded; building={} unsupported={}",
-                g.instances,g.triangles,g.omitted_instances,g.probes,g.pending_probes,g.batch,g.budget,g.selected_lights,g.snapshot_us,g.encode_us,g.voxel_jobs,g.voxel_bricks,g.voxel_ms,g.gpu_ms.map(|v|(v*1000.0).round()/1000.0),g.gpu_peak_ms.map(|v|(v*1000.0).round()/1000.0),g.ao_gpu_ms,g.resident_bytes,g.uploads_bytes,g.building,g.rejected_scene);
+            log!("fast GI: {} instances / {} triangles ({} outside region), {} probes ({} pending), batch {} of budget {}, {} lights, {}us snapshot, {}us encode ({} static bytes), voxels {} jobs / {} bricks / {:.1}ms, GPU [trace, relight, gather, scatter] mean {:?}ms max120 {:?}ms, sum mean {:.3}ms max120 {:.3}ms max600 {:.3}ms aim {:.3}ms, AO {:.3}ms, {} bytes resident, {} uploaded; building={} unsupported={}",
+                g.instances,g.triangles,g.omitted_instances,g.probes,g.pending_probes,g.batch,g.budget,g.selected_lights,g.snapshot_us,g.encode_us,g.static_encode_bytes,g.voxel_jobs,g.voxel_bricks,g.voxel_ms,g.gpu_ms.map(|v|(v*1000.0).round()/1000.0),g.gpu_peak_ms.map(|v|(v*1000.0).round()/1000.0),g.frame_sum_mean,g.frame_sum_max120,g.frame_sum_max,g.gpu_aim_ms,g.ao_gpu_ms,g.resident_bytes,g.uploads_bytes,g.building,g.rejected_scene);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use makepad_scene::GiSettings;
+
+    #[test]
+    fn settings_enable_and_disable_without_resetting_an_unchanged_field() {
+        let mut renderer = Renderer::default();
+        assert_eq!(renderer.gi_mode(), crate::GiMode::Off);
+        let settings = GiSettings { spacing: 0.75, ..Default::default() };
+        renderer.set_gi_settings(Some(settings));
+        let config = renderer.gi_config();
+        assert_eq!(config, crate::GiConfig::from(settings));
+        assert_eq!(renderer.gi_mode(), crate::GiMode::Fast);
+        assert!(renderer.clustered.shadows.soft_filter);
+        // release() clears statistics along with the field. Preserve a
+        // resident probe count across repeated frames and lighting edits.
+        renderer.gi.stats.probes = config.probe_count() * config.cascades;
+        let probes = renderer.gi_stats().probes;
+        renderer.set_gi_settings(Some(settings));
+        assert_eq!(renderer.gi_config(), config, "unchanged config");
+        assert_eq!(renderer.gi_stats().probes, probes, "unchanged settings keep the field");
+        renderer.set_gi_settings(Some(GiSettings { strength: 0.4, bounce: 0.0, ..settings }));
+        assert_eq!(renderer.gi_stats().probes, probes, "lighting changes keep the field");
+        renderer.set_gi_settings(Some(GiSettings { spacing: 1.5, ..settings }));
+        assert_eq!(renderer.gi_stats().probes, 0, "spacing rebuilds the field");
+        renderer.set_gi_settings(None);
+        assert_eq!(renderer.gi_mode(), crate::GiMode::Off);
+        assert!(renderer.clustered.shadows.soft_filter, "disabling GI keeps shadow quality");
     }
 }

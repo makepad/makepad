@@ -28,6 +28,7 @@ pub fn place_entity_light(owner: &Entity, light: &EntityLight) -> Option<LmLight
     placed.dir = dir * (1.0 / len);
     placed.cone = light.spot.then_some((light.inner_angle, light.outer_angle));
     placed.shadows = light.shadows;
+    placed.volumetric = light.volumetric;
     Some(placed)
 }
 

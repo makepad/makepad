@@ -1,5 +1,4 @@
 use makepad_csg_mech::joint::Profile;
-use makepad_csg_mech::sim::{AnchorKind, AnchorSpec, Friction, MechWorld};
 use makepad_csg_mech::weave::*;
 
 fn setup() -> (WeaveProfile, SquareLink, Frame) {
@@ -49,32 +48,6 @@ fn tight_bracelet_is_flagged() {
     let circle = |r: f64| -> Vec<[f64; 2]> { (0..128).map(|k| { let t = k as f64 / 128.0 * std::f64::consts::TAU; [r * t.cos(), r * t.sin()] }).collect() };
     assert_eq!(check(&chain(&wp, link, frame, &circle(30.0), true), &wp).verdict, GapClass::Ok);
     assert_ne!(check(&chain(&wp, link, frame, &circle(15.0), true), &wp).verdict, GapClass::Ok);
-}
-
-#[test]
-fn hanging_mail_stays_linked() {
-    let (wp, link, frame) = setup();
-    let w = mail(&wp, link, frame, [-20.0, -20.0], [20.0, 20.0], 0.0, &|_| -1.0);
-    let mut asm = assembly(&w, 1.24e-3, 240.0);
-    let ys: Vec<f64> = w.links.iter().map(|l| frame.to_local(l.center())[1]).collect();
-    let top = ys.iter().cloned().fold(f64::MIN, f64::max);
-    for (i, y) in ys.iter().enumerate() {
-        if *y > top - 1e-6 {
-            asm.anchors.push(AnchorSpec { body: i, pivot: asm.bodies[i].mass.com, kind: AnchorKind::Fixed, friction: Friction::default() });
-        }
-    }
-    let rest: Vec<_> = asm.bodies.iter().map(|b| b.mass.com).collect();
-    let mut mw = MechWorld::new(&asm, makepad_csg_mech::geom::scale(frame.y, -9810.0), None);
-    for _ in 0..480 {
-        mw.step(1.0 / 240.0);
-    }
-    let poses = mw.poses();
-    let posed: Vec<Vec<_>> = w.links.iter().enumerate().map(|(i, l)| l.pts.iter().map(|p| poses[i].apply(rest[i], *p)).collect()).collect();
-    let unlinked = w.pairs.iter().filter(|(a, b)| linking_number(&posed[*a as usize], &posed[*b as usize]) == 0).count();
-    assert_eq!(unlinked, 0);
-    // it hangs: the bottom row fell below where it was printed
-    let low = (0..w.links.len()).map(|i| frame.to_local(poses[i].com)[1] - frame.to_local(rest[i])[1]).fold(0.0, f64::min);
-    assert!(low < -1.0, "moved {low}");
 }
 
 #[test]

@@ -10,11 +10,22 @@ pub(crate) fn surface(mesh:&Mesh,ctx:&mut Context<'_>)->Result<Adjacency> {
     }
     mesh.adjacency(ctx)
 }
-pub(crate) fn replace_corners(mesh:&mut Mesh,replacements:&BTreeMap<FaceId,Vec<Corner>>,ctx:&mut Context<'_>)->Result<()> {
+pub(crate) fn replace_corners<C:AsRef<[Corner]>>(mesh:&mut Mesh,replacements:&BTreeMap<FaceId,C>,ctx:&mut Context<'_>)->Result<()> {
+    // Triangle collapses keep each surviving face's corner count. Copy only
+    // those ranges, retaining the mesh's allocation and all corner identities.
+    if replacements.iter().all(|(&id,cs)|mesh.face(id).map_or(true,|face|cs.as_ref().len()==face.corner_count as usize)) {
+        for face in &mesh.faces {
+            ctx.checkpoint(1)?;
+            if let Some(source)=replacements.get(&face.id) {
+                mesh.corners[face.first_corner as usize..(face.first_corner+face.corner_count) as usize].clone_from_slice(source.as_ref());
+            }
+        }
+        return Ok(());
+    }
     let mut corners=Vec::new();
     for face in &mut mesh.faces {
         ctx.checkpoint(1)?;
-        let source=replacements.get(&face.id).map(Vec::as_slice).unwrap_or_else(||
+        let source=replacements.get(&face.id).map(AsRef::as_ref).unwrap_or_else(||
             &mesh.corners[face.first_corner as usize..(face.first_corner+face.corner_count) as usize]);
         let start=u32::try_from(corners.len()).map_err(|_|invalid("corner count overflow"))?;
         corners.extend_from_slice(source);face.first_corner=start;face.corner_count=source.len() as u32;

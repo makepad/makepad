@@ -691,14 +691,6 @@ pub fn mesh_body(name: &str, vertices: &[P3], triangles: &[[u32; 3]], density: f
     sim::BodySpec { name: name.into(), mass: mass::mesh_mass(vertices, triangles, density, fill), hulls: proxy_hulls(vertices, keep_out), tubes: Vec::new(), balls: Vec::new(), rods: Vec::new(), field: None }
 }
 
-/// A rigid part from its final mesh when that keeps to its convex hull ([`hulls::fits_its_hull`] to
-/// [`GAP_TOL`]: a ball, a roller, a pin): its one coarse hull is all of it, and it meets the fields of
-/// the parts around it through that hull (a field of its own would be the same shape, for more work).
-pub fn convex_body(name: &str, vertices: &[P3], triangles: &[[u32; 3]], density: f64, fill: f64) -> sim::BodySpec {
-    let hulls = vec![hulls::coarse_hull(vertices, GAP_TOL)];
-    sim::BodySpec { name: name.into(), mass: mass::mesh_mass(vertices, triangles, density, fill), hulls, tubes: Vec::new(), balls: Vec::new(), rods: Vec::new(), field: None }
-}
-
 /// A mesh's loose pieces, each with its own (welded) vertices and triangles, in the mesh's frame: what of
 /// it prints as separate solids. A mesh may hold several closed shells (corners at one place, to 10 nm,
 /// are one vertex). A shell facing in (its volume negative) is a hollow of the smallest shell around it, and
@@ -792,60 +784,3 @@ pub fn mesh_pieces(vertices: &[P3], triangles: &[[u32; 3]], fused: f64) -> Vec<(
     }
     groups.iter().map(|(_, members)| mesh(&mut members.iter().flat_map(|&m| pieces[m].iter().flat_map(|&s| shells[s].iter().copied())))).collect()
 }
-
-/// A distance-field part as a body, straight from its field: the field is sampled on a grid of cells
-/// (about [`FIELD_BODY_CELLS`] along the longest side), the cells inside give the mass, centre and
-/// inertia, and the inside cells that touch the outside give the collision proxies' points. No mesh is
-/// built (a field part is meshed for export and Mesh shading only). Everything is put into the
-/// assembly's common frame by `to_frame`. Call on the scene-building worker.
-pub fn field_body(name: &str, shape: &makepad_csg_graph::SdfShape, to_frame: &[[f64; 4]; 3], density: f64, fill: f64) -> Result<sim::BodySpec, String> {
-    let (lo, hi) = (shape.min, shape.max);
-    let size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
-    let longest = size.iter().copied().fold(0.0, f64::max);
-    if !(longest > 0.0) {
-        return Err(format!("{name} has no solid volume to simulate"));
-    }
-    let cell = longest / FIELD_BODY_CELLS as f64;
-    let n = size.map(|s| (s / cell).ceil().max(1.0) as usize);
-    let at = |i: usize, j: usize, k: usize| makepad_csg_math::Vec3d::new(lo[0] + (i as f64 + 0.5) * cell, lo[1] + (j as f64 + 0.5) * cell, lo[2] + (k as f64 + 0.5) * cell);
-    let mut points = Vec::with_capacity(n[0] * n[1] * n[2]);
-    for k in 0..n[2] {
-        for j in 0..n[1] {
-            for i in 0..n[0] {
-                points.push(at(i, j, k));
-            }
-        }
-    }
-    let mut dist = vec![0.0; points.len()];
-    shape.field().distance_many(&points, &mut dist);
-    let index = |i: usize, j: usize, k: usize| (k * n[1] + j) * n[0] + i;
-    let inside = |i: isize, j: isize, k: isize| i >= 0 && j >= 0 && k >= 0 && (i as usize) < n[0] && (j as usize) < n[1] && (k as usize) < n[2] && dist[index(i as usize, j as usize, k as usize)] < 0.0;
-    let to = |p: makepad_csg_math::Vec3d| -> P3 { std::array::from_fn(|r| to_frame[r][0] * p.x + to_frame[r][1] * p.y + to_frame[r][2] * p.z + to_frame[r][3]) };
-    let lin = [[to_frame[0][0], to_frame[0][1], to_frame[0][2]], [to_frame[1][0], to_frame[1][1], to_frame[1][2]], [to_frame[2][0], to_frame[2][1], to_frame[2][2]]];
-    let det = (lin[0][0] * (lin[1][1] * lin[2][2] - lin[1][2] * lin[2][1]) - lin[0][1] * (lin[1][0] * lin[2][2] - lin[1][2] * lin[2][0]) + lin[0][2] * (lin[1][0] * lin[2][1] - lin[1][1] * lin[2][0])).abs();
-    let voxel = det * cell * cell * cell;
-    let mut centres = Vec::new();
-    let mut skin = Vec::new();
-    for k in 0..n[2] {
-        for j in 0..n[1] {
-            for i in 0..n[0] {
-                if !inside(i as isize, j as isize, k as isize) {
-                    continue;
-                }
-                let q = to(at(i, j, k));
-                centres.push(q);
-                let (a, b, c) = (i as isize, j as isize, k as isize);
-                if !(inside(a - 1, b, c) && inside(a + 1, b, c) && inside(a, b - 1, c) && inside(a, b + 1, c) && inside(a, b, c - 1) && inside(a, b, c + 1)) {
-                    skin.push(q);
-                }
-            }
-        }
-    }
-    if centres.is_empty() {
-        return Err(format!("{name} has no solid volume to simulate"));
-    }
-    Ok(sim::BodySpec { name: name.into(), mass: mass::voxel_mass(&centres, voxel, density, fill), hulls: proxy_hulls(&skin, &[]), tubes: Vec::new(), balls: Vec::new(), rods: Vec::new(), field: None })
-}
-
-/// Cells along the longest side of a field part sampled for its body.
-pub const FIELD_BODY_CELLS: usize = 48;

@@ -6,6 +6,17 @@ use crate::particles::{ParticleSystem, PARTICLE_SHEET};
 use crate::vfx::{record_radius, DrawSceneVfx, DrawSceneVfxDecal, VfxFrame, VfxLight};
 
 impl Renderer {
+    /// Copy this frame's effects for a secondary camera before the live VFX
+    /// pass consumes its records. Passes and camera state remain independent.
+    pub fn mirror_frame_effects_from(&mut self, live: &Self) {
+        self.vfx.records.clone_from(&live.vfx.records);
+        self.vfx.decals.clone_from(&live.vfx.decals);
+        self.vfx.cpu_sim = live.vfx.cpu_sim;
+        self.vfx.pass_enabled = live.vfx.pass_enabled;
+        self.smoke_volumes.clone_from(&live.smoke_volumes);
+        self.firework_instances.clone_from(&live.firework_instances);
+    }
+
     /// Hand this frame's particles to the renderer: explicit records (a
     /// host's markers) or burst records. Replaces the previous frame's.
     pub fn set_particles(&mut self, instances: Vec<ParticleInstance>) {

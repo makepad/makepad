@@ -459,6 +459,8 @@ pub struct LmLight {
     /// Request a budgeted realtime shadow. Unallocated requests are omitted
     /// rather than silently lighting through walls.
     pub shadows: bool,
+    /// Participates in the optional volume-fog march.
+    pub volumetric: bool,
     /// A rectangular area light (clustered lighting only): `pos` is the
     /// rectangle's centre and `dir` the side it emits from. The atlas bake
     /// and the per-vertex lamp slots treat it as a point at its centre.
@@ -498,7 +500,7 @@ impl Default for LmLight {
 impl LmLight {
     /// An omnidirectional light.
     pub fn omni(pos: Vec3f, color: Vec3f, radius: f32) -> Self {
-        LmLight { pos, color, radius, dir: Vec3f { x: 0.0, y: -1.0, z: 0.0 }, spot: 0.0, cone: None, shadows: false, area: None }
+        LmLight { pos, color, radius, dir: Vec3f { x: 0.0, y: -1.0, z: 0.0 }, spot: 0.0, cone: None, shadows: false, volumetric: false, area: None }
     }
 }
 
@@ -1158,10 +1160,12 @@ mod tests {
             "a sun_filled declaration appeared or vanished"
         );
         // DrawSceneCube, DrawSceneSkinned, DrawScenePbr (inherited),
-        // DrawSceneSkinnedGpu and DrawSceneTerrain each call it once.
+        // DrawSceneSkinnedGpu and DrawSceneTerrain each call it once; so does
+        // the reflections variant of the PBR composite (`pbr_reflections`),
+        // which shades the same surface while writing the reflection targets.
         assert_eq!(
             src.matches("self.sun_filled(").count(),
-            5,
+            6,
             "a composite stopped filling the sun shadow, or gained a call"
         );
     }
