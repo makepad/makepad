@@ -24,7 +24,6 @@ use {
     std::{
         cell::Cell,
         collections::{HashMap, HashSet},
-        f64::consts::PI,
         rc::Rc,
     },
 };
@@ -884,325 +883,74 @@ pub enum Ease {
 }
 
 impl Ease {
+    /// The ease curve at `t`. It runs through `makepad_tween::Easing` like the Animator's `Ease`,
+    /// so there's one copy of the math.
     pub fn map(&self, t: f64) -> f64 {
-        match self {
-            Self::ExpDecay { d1, d2, max } => {
-                // there must be a closed form for this
-                if t > 0.999 {
-                    return 1.0;
-                }
+        use makepad_tween::Easing as E;
+        let easing = match *self {
+            Self::Linear => E::Linear,
+            Self::None => E::Instant,
+            Self::Constant(c) => E::Constant(c),
+            Self::InQuad => E::InQuad,
+            Self::OutQuad => E::OutQuad,
+            Self::InOutQuad => E::InOutQuad,
+            Self::InCubic => E::InCubic,
+            Self::OutCubic => E::OutCubic,
+            Self::InOutCubic => E::InOutCubic,
+            Self::InQuart => E::InQuart,
+            Self::OutQuart => E::OutQuart,
+            Self::InOutQuart => E::InOutQuart,
+            Self::InQuint => E::InQuint,
+            Self::OutQuint => E::OutQuint,
+            Self::InOutQuint => E::InOutQuint,
+            Self::InSine => E::InSine,
+            Self::OutSine => E::OutSine,
+            Self::InOutSine => E::InOutSine,
+            Self::InExp => E::InExp,
+            Self::OutExp => E::OutExp,
+            Self::InOutExp => E::InOutExp,
+            Self::InCirc => E::InCirc,
+            Self::OutCirc => E::OutCirc,
+            Self::InOutCirc => E::InOutCirc,
+            Self::InElastic => E::InElastic,
+            Self::OutElastic => E::OutElastic,
+            Self::InOutElastic => E::InOutElastic,
+            Self::InBack => E::InBack,
+            Self::OutBack => E::OutBack,
+            Self::InOutBack => E::InOutBack,
+            Self::InBounce => E::InBounce,
+            Self::OutBounce => E::OutBounce,
+            Self::InOutBounce => E::InOutBounce,
+            Self::ExpDecay { d1, d2, max } => E::exp_decay(d1, d2, max),
+            Self::Pow { begin, end } => E::pow(begin, end),
+            Self::Bezier { cp0, cp1, cp2, cp3 } => E::Bezier {
+                x1: cp0,
+                y1: cp1,
+                x2: cp2,
+                y2: cp3,
+            },
+        };
+        easing.map(t)
+    }
+}
 
-                // first we count the number of steps we'd need to decay
-                let mut di = *d1;
-                let mut dt = 1.0;
-                let max_steps = (*max).min(1000);
-                let mut steps = 0;
-                // for most of the settings we use this takes max 15 steps or so
-                while dt > 0.001 && steps < max_steps {
-                    steps = steps + 1;
-                    dt = dt * di;
-                    di *= d2;
-                }
-                // then we know how to find the step, and lerp it
-                let step = t * (steps as f64);
-                let mut di = *d1;
-                let mut dt = 1.0;
-                let max_steps = max_steps as f64;
-                let mut steps = 0.0;
-                while dt > 0.001 && steps < max_steps {
-                    steps += 1.0;
-                    if steps >= step {
-                        // right step
-                        let fac = steps - step;
-                        return 1.0 - (dt * fac + (dt * di) * (1.0 - fac));
-                    }
-                    dt = dt * di;
-                    di *= d2;
-                }
-                1.0
-            }
-            Self::Linear => {
-                return t.max(0.0).min(1.0);
-            }
-            Self::Constant(t) => {
-                return t.max(0.0).min(1.0);
-            }
-            Self::None => {
-                return 1.0;
-            }
-            Self::Pow { begin, end } => {
-                if t < 0. {
-                    return 0.;
-                }
-                if t > 1. {
-                    return 1.;
-                }
-                let a = -1. / (begin * begin).max(1.0);
-                let b = 1. + 1. / (end * end).max(1.0);
-                let t2 = (((a - 1.) * -b) / (a * (1. - b))).powf(t);
-                return (-a * b + b * a * t2) / (a * t2 - b);
-            }
+#[cfg(test)]
+mod ease_tests {
+    use super::*;
 
-            Self::InQuad => {
-                return t * t;
-            }
-            Self::OutQuad => {
-                return t * (2.0 - t);
-            }
-            Self::InOutQuad => {
-                let t = t * 2.0;
-                if t < 1. {
-                    return 0.5 * t * t;
-                } else {
-                    let t = t - 1.;
-                    return -0.5 * (t * (t - 2.) - 1.);
-                }
-            }
-            Self::InCubic => {
-                return t * t * t;
-            }
-            Self::OutCubic => {
-                let t2 = t - 1.0;
-                return t2 * t2 * t2 + 1.0;
-            }
-            Self::InOutCubic => {
-                let t = t * 2.0;
-                if t < 1. {
-                    return 0.5 * t * t * t;
-                } else {
-                    let t = t - 2.;
-                    return 1. / 2. * (t * t * t + 2.);
-                }
-            }
-            Self::InQuart => return t * t * t * t,
-            Self::OutQuart => {
-                let t = t - 1.;
-                return -(t * t * t * t - 1.);
-            }
-            Self::InOutQuart => {
-                let t = t * 2.0;
-                if t < 1. {
-                    return 0.5 * t * t * t * t;
-                } else {
-                    let t = t - 2.;
-                    return -0.5 * (t * t * t * t - 2.);
-                }
-            }
-            Self::InQuint => {
-                return t * t * t * t * t;
-            }
-            Self::OutQuint => {
-                let t = t - 1.;
-                return t * t * t * t * t + 1.;
-            }
-            Self::InOutQuint => {
-                let t = t * 2.0;
-                if t < 1. {
-                    return 0.5 * t * t * t * t * t;
-                } else {
-                    let t = t - 2.;
-                    return 0.5 * (t * t * t * t * t + 2.);
-                }
-            }
-            Self::InSine => {
-                return -(t * PI * 0.5).cos() + 1.;
-            }
-            Self::OutSine => {
-                return (t * PI * 0.5).sin();
-            }
-            Self::InOutSine => {
-                return -0.5 * ((t * PI).cos() - 1.);
-            }
-            Self::InExp => {
-                if t < 0.001 {
-                    return 0.;
-                } else {
-                    return 2.0f64.powf(10. * (t - 1.));
-                }
-            }
-            Self::OutExp => {
-                if t > 0.999 {
-                    return 1.;
-                } else {
-                    return -(2.0f64.powf(-10. * t)) + 1.;
-                }
-            }
-            Self::InOutExp => {
-                if t < 0.001 {
-                    return 0.;
-                }
-                if t > 0.999 {
-                    return 1.;
-                }
-                let t = t * 2.0;
-                if t < 1. {
-                    return 0.5 * 2.0f64.powf(10. * (t - 1.));
-                } else {
-                    let t = t - 1.;
-                    return 0.5 * (-(2.0f64.powf(-10. * t)) + 2.);
-                }
-            }
-            Self::InCirc => {
-                return -((1. - t * t).sqrt() - 1.);
-            }
-            Self::OutCirc => {
-                let t = t - 1.;
-                return (1. - t * t).sqrt();
-            }
-            Self::InOutCirc => {
-                let t = t * 2.;
-                if t < 1. {
-                    return -0.5 * ((1. - t * t).sqrt() - 1.);
-                } else {
-                    let t = t - 2.;
-                    return 0.5 * ((1. - t * t).sqrt() + 1.);
-                }
-            }
-            Self::InElastic => {
-                let p = 0.3;
-                let s = p / 4.0; // c = 1.0, b = 0.0, d = 1.0
-                if t < 0.001 {
-                    return 0.;
-                }
-                if t > 0.999 {
-                    return 1.;
-                }
-                let t = t - 1.0;
-                return -(2.0f64.powf(10.0 * t) * ((t - s) * (2.0 * PI) / p).sin());
-            }
-            Self::OutElastic => {
-                let p = 0.3;
-                let s = p / 4.0; // c = 1.0, b = 0.0, d = 1.0
-
-                if t < 0.001 {
-                    return 0.;
-                }
-                if t > 0.999 {
-                    return 1.;
-                }
-                return 2.0f64.powf(-10.0 * t) * ((t - s) * (2.0 * PI) / p).sin() + 1.0;
-            }
-            Self::InOutElastic => {
-                let p = 0.3;
-                let s = p / 4.0; // c = 1.0, b = 0.0, d = 1.0
-                if t < 0.001 {
-                    return 0.;
-                }
-                if t > 0.999 {
-                    return 1.;
-                }
-                let t = t * 2.0;
-                if t < 1. {
-                    let t = t - 1.0;
-                    return -0.5 * (2.0f64.powf(10.0 * t) * ((t - s) * (2.0 * PI) / p).sin());
-                } else {
-                    let t = t - 1.0;
-                    return 0.5 * 2.0f64.powf(-10.0 * t) * ((t - s) * (2.0 * PI) / p).sin() + 1.0;
-                }
-            }
-            Self::InBack => {
-                let s = 1.70158;
-                return t * t * ((s + 1.) * t - s);
-            }
-            Self::OutBack => {
-                let s = 1.70158;
-                let t = t - 1.;
-                return t * t * ((s + 1.) * t + s) + 1.;
-            }
-            Self::InOutBack => {
-                let s = 1.70158;
-                let t = t * 2.0;
-                if t < 1. {
-                    let s = s * 1.525;
-                    return 0.5 * (t * t * ((s + 1.) * t - s));
-                } else {
-                    let t = t - 2.;
-                    return 0.5 * (t * t * ((s + 1.) * t + s) + 2.);
-                }
-            }
-            Self::InBounce => {
-                return 1.0 - Self::OutBounce.map(1.0 - t);
-            }
-            Self::OutBounce => {
-                if t < (1. / 2.75) {
-                    return 7.5625 * t * t;
-                }
-                if t < (2. / 2.75) {
-                    let t = t - (1.5 / 2.75);
-                    return 7.5625 * t * t + 0.75;
-                }
-                if t < (2.5 / 2.75) {
-                    let t = t - (2.25 / 2.75);
-                    return 7.5625 * t * t + 0.9375;
-                }
-                let t = t - (2.625 / 2.75);
-                return 7.5625 * t * t + 0.984375;
-            }
-            Self::InOutBounce => {
-                if t < 0.5 {
-                    return Self::InBounce.map(t * 2.) * 0.5;
-                } else {
-                    return Self::OutBounce.map(t * 2. - 1.) * 0.5 + 0.5;
-                }
-            }
-            Self::Bezier { cp0, cp1, cp2, cp3 } => {
-                if t < 0. {
-                    return 0.;
-                }
-                if t > 1. {
-                    return 1.;
-                }
-
-                if (cp0 - cp1).abs() < 0.001 && (cp2 - cp3).abs() < 0.001 {
-                    return t;
-                }
-
-                let epsilon = 1.0 / 200.0 * t;
-                let cx = 3.0 * cp0;
-                let bx = 3.0 * (cp2 - cp0) - cx;
-                let ax = 1.0 - cx - bx;
-                let cy = 3.0 * cp1;
-                let by = 3.0 * (cp3 - cp1) - cy;
-                let ay = 1.0 - cy - by;
-                let mut u = t;
-
-                for _i in 0..6 {
-                    let x = ((ax * u + bx) * u + cx) * u - t;
-                    if x.abs() < epsilon {
-                        return ((ay * u + by) * u + cy) * u;
-                    }
-                    let d = (3.0 * ax * u + 2.0 * bx) * u + cx;
-                    if d.abs() < 1e-6 {
-                        break;
-                    }
-                    u = u - x / d;
-                }
-
-                if t > 1. {
-                    return (ay + by) + cy;
-                }
-                if t < 0. {
-                    return 0.0;
-                }
-
-                let mut w = 0.0;
-                let mut v = 1.0;
-                u = t;
-                for _i in 0..8 {
-                    let x = ((ax * u + bx) * u + cx) * u;
-                    if (x - t).abs() < epsilon {
-                        return ((ay * u + by) * u + cy) * u;
-                    }
-
-                    if t > x {
-                        w = u;
-                    } else {
-                        v = u;
-                    }
-                    u = (v - w) * 0.5 + w;
-                }
-
-                return ((ay * u + by) * u + cy) * u;
+    #[test]
+    fn keyboard_curves_match_the_precise_bezier() {
+        // UIKit's ease-in-out, ease-in and ease-out, which `hal_intake` sends as the keyboard's ease
+        for [x1, y1, x2, y2] in [[0.42, 0.0, 0.58, 1.0], [0.42, 0.0, 1.0, 1.0], [0.0, 0.0, 0.58, 1.0]] {
+            let ease = Ease::Bezier { cp0: x1, cp1: y1, cp2: x2, cp3: y2 };
+            let precise = makepad_tween::Easing::css(x1, y1, x2, y2);
+            let mut prev = 0.0;
+            for i in 0..=100_000 {
+                let t = i as f64 / 100_000.0;
+                let mix = ease.map(t);
+                assert!((mix - precise.map(t)).abs() < 1e-6, "{ease:?} is off at t = {t}");
+                assert!(mix >= prev, "{ease:?} steps backwards at t = {t}");
+                prev = mix;
             }
         }
     }
