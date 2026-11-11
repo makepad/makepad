@@ -445,6 +445,19 @@ pub struct FromWasmAllocTextureImage2D_BGRAu8_32 {
 
 #[allow(non_camel_case_types)]
 #[derive(FromWasm)]
+pub struct FromWasmUpdateTextureRect_BGRAu8_32 {
+    pub texture_id: usize,
+    pub image_width: usize,
+    pub image_height: usize,
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+    pub data: WasmPtrU32,
+}
+
+#[allow(non_camel_case_types)]
+#[derive(FromWasm)]
 pub struct FromWasmAllocTextureImage2D_Ru8 {
     pub texture_id: usize,
     pub width: usize,

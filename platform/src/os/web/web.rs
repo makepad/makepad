@@ -1703,6 +1703,7 @@ impl CxOsApi for Cx {
             FromWasmFreeWebGLResources::to_js_code(),
             FromWasmPollGpuCompletion::to_js_code(),
             FromWasmAllocTextureImage2D_BGRAu8_32::to_js_code(),
+            FromWasmUpdateTextureRect_BGRAu8_32::to_js_code(),
             FromWasmAllocTextureImage2D_Ru8::to_js_code(),
             FromWasmAllocTextureImage2D_RGBAf32::to_js_code(),
             FromWasmAllocTextureCube_BGRAu8_32::to_js_code(),
