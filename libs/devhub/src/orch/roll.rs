@@ -1365,7 +1365,36 @@ pub fn build_devhub(repo: &Path) -> Result<(), String> {
         Err(e) => return Err(format!("cargo: {e}")),
     }
     let name = format!("makepad-devhub{}", std::env::consts::EXE_SUFFIX);
-    swap_in(&target.join("host").join(&name), &repo.join("target/host").join(&name))
+    let built = target.join("host").join(&name);
+    sign_stable(repo, &built, CLI_SIGN_ID);
+    swap_in(&built, &repo.join("target/host").join(&name))
+}
+
+/// The fixed code identifiers of devhub's binaries on a Mac: with the local signing identity their
+/// designated requirement is identifier + certificate, the same for every build, so macOS privacy
+/// grants (Local Network, keychain access) stay across self-updates. The master app's is the
+/// bundle id of its Dock wrapper (`~/Applications/devhub.app`).
+pub const APP_SIGN_ID: &str = "nl.makepad.devhub";
+pub const CLI_SIGN_ID: &str = "nl.makepad.devhub-cli";
+
+/// Signs a just-built devhub binary on macOS (tools/macos/sign-app.sh: the stable identity
+/// "makepad local signing", else ad-hoc with a one-line hint to run tools/macos/make-signing-identity.sh),
+/// before it is swapped in and started. Never fails a build or an update: an error is logged and the
+/// binary starts as the linker left it (ad-hoc). Nothing on other OSes.
+fn sign_stable(repo: &Path, bin: &Path, id: &str) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let script = repo.join("tools/macos/sign-app.sh");
+    let said = std::process::Command::new("/bin/bash").arg(&script).arg(bin).arg(id).stdin(std::process::Stdio::null()).output();
+    match said {
+        Ok(o) if o.status.success() => {
+            let out = String::from_utf8_lossy(&o.stdout);
+            eprintln!("update: {}", out.lines().last().unwrap_or("signed"));
+        }
+        Ok(o) => eprintln!("update: signing {} as {id} failed ({}); it starts as built: {}", bin.display(), o.status, String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")),
+        Err(e) => eprintln!("update: signing {} as {id}: {e}; it starts as built", bin.display()),
+    }
 }
 
 /// One devhub build at a time ([`build_devhub`], [`build_master_app`]).
@@ -1380,7 +1409,10 @@ pub fn build_master_app(repo: &Path) -> Result<(), String> {
     let mut cmd = crate::os::background(cargo_bin().as_os_str());
     cmd.args(["build", "-j4", "--profile", "host", "-p", APP_NAME, "--bin", APP_NAME, "--target-dir"]).arg(repo.join(APP_TARGET)).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null());
     match cmd.output() {
-        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) if o.status.success() => {
+            sign_stable(repo, &repo.join(APP_TARGET).join("host").join(APP_NAME), APP_SIGN_ID);
+            Ok(())
+        }
         Ok(o) => Err(format!("does not build: {}", build_failure(&o))),
         Err(e) => Err(format!("cargo: {e}")),
     }
