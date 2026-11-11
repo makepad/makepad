@@ -4,13 +4,9 @@ use {
     super::font::{Font, FontId, GlyphId},
     crate::makepad_platform::*,
     fxhash::{FxHashMap, FxHashSet},
-    makepad_font_core::slug::slug_curves,
+    makepad_font_core::slug::{slug_curves, ROW_TEXELS as CURVE_TEX_WIDTH},
 };
 
-#[cfg(target_arch = "wasm32")]
-const CURVE_TEX_WIDTH: usize = 2048;
-#[cfg(target_arch = "wasm32")]
-const BAND_TEX_WIDTH: usize = 2048;
 #[cfg(target_arch = "wasm32")]
 const RGBA_F32_TEXEL_FLOATS: usize = 4;
 /// Soft cap on the append-only `curve_data` buffer (~4 MB of f32). Slug glyphs are only
@@ -63,13 +59,9 @@ pub enum SlugGlyphCacheResult {
 #[cfg(target_arch = "wasm32")]
 pub struct SlugAtlas {
     curve_data: Vec<f32>,
-    band_data: Vec<f32>,
     curve_texture: Texture,
-    band_texture: Texture,
     curve_dirty: bool,
-    band_dirty: bool,
     curve_uploaded_floats: usize,
-    band_uploaded_floats: usize,
     cache_generation: u64,
     uploaded_generation: u64,
     cached_glyphs: FxHashMap<SlugGlyphKey, CachedSlugGlyphInfo>,
@@ -83,7 +75,6 @@ impl SlugAtlas {
     pub fn new(cx: &mut Cx) -> Self {
         let atlas = Self {
             curve_data: Vec::new(),
-            band_data: Vec::new(),
             curve_texture: Texture::new_with_format(
                 cx,
                 TextureFormat::VecRGBAf32 {
@@ -93,19 +84,8 @@ impl SlugAtlas {
                     updated: TextureUpdated::Empty,
                 },
             ),
-            band_texture: Texture::new_with_format(
-                cx,
-                TextureFormat::VecRGBAf32 {
-                    width: 1,
-                    height: 1,
-                    data: None,
-                    updated: TextureUpdated::Empty,
-                },
-            ),
             curve_dirty: false,
-            band_dirty: false,
             curve_uploaded_floats: 0,
-            band_uploaded_floats: 0,
             cache_generation: 0,
             uploaded_generation: 0,
             cached_glyphs: FxHashMap::default(),
@@ -113,9 +93,8 @@ impl SlugAtlas {
             empty_glyphs: FxHashSet::default(),
             needs_reset: false,
         };
-        // Both grow by appended rows and are addressed by absolute texel.
+        // It grows by appended rows and is addressed by absolute texel.
         atlas.curve_texture.set_append_rows(cx, true);
-        atlas.band_texture.set_append_rows(cx, true);
         atlas
     }
 
@@ -130,24 +109,17 @@ impl SlugAtlas {
         }
         self.needs_reset = false;
         self.curve_data.clear();
-        self.band_data.clear();
         self.cached_glyphs.clear();
         self.missing_glyphs.clear();
         self.empty_glyphs.clear();
         self.curve_uploaded_floats = 0;
-        self.band_uploaded_floats = 0;
         self.curve_dirty = true;
-        self.band_dirty = true;
         self.cache_generation = self.cache_generation.wrapping_add(1);
         true
     }
 
     pub fn curve_texture(&self) -> &Texture {
         &self.curve_texture
-    }
-
-    pub fn band_texture(&self) -> &Texture {
-        &self.band_texture
     }
 
     pub fn cache_generation(&self) -> u64 {
@@ -212,17 +184,6 @@ impl SlugAtlas {
                 &mut self.curve_uploaded_floats,
             );
             self.curve_dirty = false;
-        }
-
-        if self.band_dirty {
-            changed |= Self::prepare_append_only_rgba_f32_texture(
-                cx,
-                &self.band_texture,
-                BAND_TEX_WIDTH,
-                &self.band_data,
-                &mut self.band_uploaded_floats,
-            );
-            self.band_dirty = false;
         }
 
         if changed {
@@ -328,12 +289,14 @@ impl SlugAtlas {
 
     fn build_glyph(&mut self, font: &Font, glyph_id: GlyphId) -> Option<SlugGlyphInfo> {
         let glyph = slug_curves(font, glyph_id)?;
+        // The shader reads a glyph with bands along one texture row, so one that doesn't fit
+        // in what's left of this row starts the next.
+        let row_texels_left = CURVE_TEX_WIDTH - (self.curve_data.len() / RGBA_F32_TEXEL_FLOATS) % CURVE_TEX_WIDTH;
+        if glyph.band_count > 0 && glyph.data.len() / RGBA_F32_TEXEL_FLOATS > row_texels_left {
+            self.curve_data.resize(self.curve_data.len() + row_texels_left * RGBA_F32_TEXEL_FLOATS, 0.0);
+        }
         let curve_offset = self.curve_data.len() / 8;
-        self.curve_data.extend_from_slice(&glyph.curves);
-
-        // Text rendering uses the full-curve scan path. The band-accelerated
-        // path has shown correctness issues on some GPU shader compilers.
-        let (band_offset, band_count) = (0, 0);
+        self.curve_data.extend_from_slice(&glyph.data);
         self.curve_dirty = true;
         self.cache_generation = self.cache_generation.wrapping_add(1);
 
@@ -348,9 +311,9 @@ impl SlugAtlas {
             origin_in_ems: glyph.origin_in_ems,
             size_in_ems: glyph.size_in_ems,
             curve_offset,
-            curve_count: glyph.curve_count(),
-            band_offset,
-            band_count,
+            curve_count: glyph.curve_count,
+            band_offset: glyph.band_offset,
+            band_count: glyph.band_count,
             fill_flags: 0,
             source: Default::default(),
         })
@@ -565,31 +528,6 @@ mod tests {
                     panic!("unexpected unavailable result for {ch:?}");
                 }
             }
-        }
-    }
-
-    #[test]
-    fn text_slug_glyphs_use_full_curve_scan() {
-        let font = load_test_font();
-        let face = rustybuzz::ttf_parser::Face::parse(font.data().as_slice(), 0)
-            .expect("font face should parse");
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut atlas = SlugAtlas::new(&mut cx);
-
-        for ch in ['A', 'g', 'W', 'S', 'L'] {
-            let glyph_id = face
-                .glyph_index(ch)
-                .unwrap_or_else(|| panic!("missing glyph for {ch:?}"))
-                .0;
-            let glyph = match atlas.get_or_cache_glyph(font.as_ref(), glyph_id) {
-                SlugGlyphCacheResult::NeedsUpload { glyph, .. }
-                | SlugGlyphCacheResult::Ready(glyph) => glyph,
-                other => panic!("unexpected glyph build result for {ch:?}: {other:?}"),
-            };
-            assert_eq!(
-                glyph.band_count, 0,
-                "text SLUG glyph {ch:?} should force the shader full-curve scan path"
-            );
         }
     }
 

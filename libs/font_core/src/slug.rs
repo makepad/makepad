@@ -1,5 +1,6 @@
 //! Slug curve data of a glyph: its outline as normalised quadratic curves, the form the slug
-//! coverage shader reads from the curve texture (two RGBA32F texels per curve).
+//! coverage shader reads from the curve texture (two RGBA32F texels per curve), and the bands
+//! that let a pixel scan only the curves near it.
 
 use super::{
     font::{Font, GlyphId},
@@ -11,18 +12,25 @@ pub const CUBIC_TO_QUAD_TOLERANCE: f32 = 0.05;
 pub const MAX_CUBIC_SPLIT_DEPTH: usize = 12;
 /// Floats per curve in the curve texture (two RGBA texels).
 pub const CURVE_FLOATS: usize = 8;
+/// Texels in a row of the curve texture. The shader reads a glyph with bands along one row,
+/// so a glyph only gets bands when all its texels fit in one.
+pub const ROW_TEXELS: usize = 2048;
+/// Where the padding quad sits, far above and left of every glyph's unit box.
+const PAD_POINT: f32 = -65536.0;
+/// Slack around a curve's span when we sort it into bands, as a fraction of the glyph's box.
+const BAND_EPSILON: f32 = 1.0 / 1024.0;
 
-/// A glyph's slug curves: its box in ems and the curve floats (`CURVE_FLOATS` per curve).
+/// A glyph's slug curves: its box in ems and what it puts in the curve texture.
 pub struct SlugCurves {
     pub origin_in_ems: Point<f32>,
     pub size_in_ems: Size<f32>,
-    pub curves: Vec<f32>,
-}
-
-impl SlugCurves {
-    pub fn curve_count(&self) -> usize {
-        self.curves.len() / CURVE_FLOATS
-    }
+    /// The curves (`CURVE_FLOATS` each), then the band block if there is one, padded to whole curves.
+    pub data: Vec<f32>,
+    pub curve_count: usize,
+    /// Where the band block starts (texels from the first curve) and the bands per axis.
+    /// No bands (0) means the shader scans every curve.
+    pub band_offset: usize,
+    pub band_count: usize,
 }
 
 /// The slug curves of a glyph; `None` for a glyph without an outline (or without area).
@@ -36,11 +44,80 @@ pub fn slug_curves(font: &Font, glyph_id: GlyphId) -> Option<SlugCurves> {
     if curves.is_empty() {
         return None;
     }
-    let mut floats = Vec::with_capacity(curves.len() * CURVE_FLOATS);
+    let mut data = Vec::with_capacity(curves.len() * CURVE_FLOATS);
     for curve in &curves {
-        floats.extend_from_slice(&[curve.p0.x, curve.p0.y, curve.p1.x, curve.p1.y, curve.p2.x, curve.p2.y, 0.0, 0.0]);
+        data.extend_from_slice(&[curve.p0.x, curve.p0.y, curve.p1.x, curve.p1.y, curve.p2.x, curve.p2.y, 0.0, 0.0]);
     }
-    Some(SlugCurves { origin_in_ems: bounds.origin, size_in_ems: bounds.size, curves: floats })
+    // The glyph gets bands when all its texels fit in one row of the curve texture. We end the
+    // curves with a point quad that no ray ever crosses, which fills out the last group of each list.
+    let (band_offset, band_count) = 'bands: {
+        let band_offset = (curves.len() + 1) * 2;
+        // List entries are curve texel offsets from the glyph's first curve.
+        let pad_entry = (curves.len() * 2) as f32;
+        // Fewer bands make a smaller block.
+        for band_count in [8, 4, 2, 1] {
+            let h_lists = build_band_lists(&curves, band_count, |p| p.y, |p| p.x);
+            let v_lists = build_band_lists(&curves, band_count, |p| p.x, |p| p.y);
+            let list_texels: usize = h_lists.iter().chain(&v_lists).map(|list| list.len().div_ceil(4)).sum();
+            if band_offset + band_count + list_texels > ROW_TEXELS {
+                continue;
+            }
+            data.extend_from_slice(&[PAD_POINT, PAD_POINT, PAD_POINT, PAD_POINT, PAD_POINT, PAD_POINT, 0.0, 0.0]);
+            // A band's texel holds where its H and V lists start (texels from the block) and how
+            // many groups of 4 they have.
+            let meta_start = data.len();
+            data.resize(meta_start + band_count * 4, 0.0);
+            let mut list_texel = band_count;
+            for (axis, lists) in [&h_lists, &v_lists].into_iter().enumerate() {
+                for (band, list) in lists.iter().enumerate() {
+                    let groups = list.len().div_ceil(4);
+                    let meta = meta_start + band * 4 + axis * 2;
+                    data[meta] = list_texel as f32;
+                    data[meta + 1] = groups as f32;
+                    for chunk in list.chunks(4) {
+                        let mut texel = [pad_entry; 4];
+                        for (entry, index) in texel.iter_mut().zip(chunk) {
+                            *entry = (index * 2) as f32;
+                        }
+                        data.extend_from_slice(&texel);
+                    }
+                    list_texel += groups;
+                }
+            }
+            data.resize(data.len().next_multiple_of(CURVE_FLOATS), 0.0);
+            break 'bands (band_offset, band_count);
+        }
+        (0, 0)
+    };
+    Some(SlugCurves { origin_in_ems: bounds.origin, size_in_ems: bounds.size, data, curve_count: curves.len(), band_offset, band_count })
+}
+
+/// Lists the curves a ray along `along` can cross in each band of `across`, furthest-reaching
+/// first, so the shader can stop once the rest of a list sits behind its sample.
+fn build_band_lists(
+    curves: &[QuadCurve],
+    band_count: usize,
+    across: impl Fn(P2) -> f32,
+    along: impl Fn(P2) -> f32,
+) -> Vec<Vec<usize>> {
+    let mut lists = vec![Vec::new(); band_count];
+    let reaches: Vec<f32> = curves.iter().map(|c| along(c.p0).max(along(c.p1)).max(along(c.p2))).collect();
+    let band = |v: f32| ((v.clamp(0.0, 1.0) * band_count as f32).floor() as usize).min(band_count - 1);
+    for (index, curve) in curves.iter().enumerate() {
+        let [a, b, c] = [curve.p0, curve.p1, curve.p2].map(&across);
+        let (min, max) = (a.min(b).min(c), a.max(b).max(c));
+        // A ray only crosses a curve with points on both sides of it, so flat ones never count.
+        if min == max {
+            continue;
+        }
+        for list in &mut lists[band(min - BAND_EPSILON)..=band(max + BAND_EPSILON)] {
+            list.push(index);
+        }
+    }
+    for list in &mut lists {
+        list.sort_by(|a, b| reaches[*b].total_cmp(&reaches[*a]));
+    }
+    lists
 }
 
 #[derive(Clone, Copy, Debug, Default)]

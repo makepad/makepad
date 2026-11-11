@@ -19,6 +19,7 @@ use makepad_font_core::{
     font_atlas::GlyphImageKey,
     geom::{Point, Rect, Size},
     raster::{default_text_atlas_size, Settings, UNRESOLVED_RASTER_RECT},
+    slug::{SlugCurves, ROW_TEXELS},
     MappedBytes,
 };
 use std::collections::{HashMap, HashSet};
@@ -26,7 +27,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 
 /// Width and height of the slug curve texture, in texels (two per curve: 131072 curves).
-const SLUG_WIDTH: usize = 2048;
+const SLUG_WIDTH: usize = ROW_TEXELS;
 const SLUG_ROWS: usize = 128;
 /// How much of an atlas an eviction frees.
 const EVICT_FRACTION: f32 = 0.25;
@@ -632,14 +633,14 @@ impl FontService {
             // nothing to draw: delivered as an empty entry, so the app stops asking
             Payload::Empty => {}
             Payload::Msdf { .. } => return None,
-            Payload::Slug { origin_in_ems, size_in_ems, curves } => {
+            Payload::Slug(curves) => {
                 let font = req.font;
                 let existing = self.slug.as_ref().and_then(|s| s.find(font, req.glyph)).map(|r| r.slot);
                 let slot = match (existing, curves) {
                     (Some(slot), _) => Some(slot),
-                    (None, Work::Rendered(curves)) => match self.place_slug(gpu, world, font, req.glyph, &curves, origin_in_ems, size_in_ems) {
+                    (None, Work::Rendered(curves)) => match self.place_slug(gpu, world, font, req.glyph, &curves) {
                         Ok(slot) => slot,
-                        Err(()) => return Some(Payload::Slug { origin_in_ems, size_in_ems, curves: Work::Rendered(curves) }),
+                        Err(()) => return Some(Payload::Slug(Work::Rendered(curves))),
                     },
                     (None, Work::Elsewhere) => {
                         self.park(Claim::Slug(font, req.glyph), req);
@@ -656,7 +657,7 @@ impl FontService {
                     if let Some(rec) = self.slug.as_mut().and_then(|s| s.by_slot_mut(slot)) {
                         rec.last_use = tick;
                         entry.atlas_kind = glyph::SLUG;
-                        entry.rect = [rec.offset, rec.count, 0, 0];
+                        entry.rect = [rec.offset, rec.count, rec.band_offset, rec.band_count];
                         entry.origin = [rec.origin.x, rec.origin.y];
                         entry.scale = rec.size.width;
                         entry.size_h = rec.size.height;
@@ -794,18 +795,17 @@ impl FontService {
         Place::Slot(slot)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn place_slug(&mut self, gpu: &mut dyn Gpu, world: &mut World, font: u32, glyph: u16, curves: &[f32], origin: Point<f32>, size: Size<f32>) -> Result<Option<u32>, ()> {
+    fn place_slug(&mut self, gpu: &mut dyn Gpu, world: &mut World, font: u32, glyph: u16, curves: &SlugCurves) -> Result<Option<u32>, ()> {
         let tick = self.tick;
-        let count = (curves.len() / 8) as u32;
+        let run = (curves.data.len() / 8) as u32;
         let slot = loop {
             let id = self.next_slot;
             let Some(s) = self.slug.as_mut() else { return Ok(None) };
-            if count > s.capacity_curves() {
+            if run > s.capacity_curves() {
                 self.stats.oversized += 1;
                 return Ok(None);
             }
-            if s.alloc(id, font, glyph, curves, origin, size, tick).is_some() {
+            if s.alloc(id, font, glyph, curves, tick).is_some() {
                 self.next_slot += 1;
                 break id;
             }
@@ -813,7 +813,7 @@ impl FontService {
                 return Err(());
             }
             let fence = RetireFence::capture(world, &self.closed_frames);
-            let taken = self.slug.as_mut().expect("slug atlas").evict_for(count, fence);
+            let taken = self.slug.as_mut().expect("slug atlas").evict_for(run, curves.band_count > 0, fence);
             if taken.is_empty() {
                 self.stats.oversized += 1;
                 return Ok(None);
@@ -831,7 +831,7 @@ impl FontService {
         };
         let s = self.slug.as_ref().expect("slug atlas");
         let rec = s.by_slot(slot).expect("placed slot");
-        let (first, rows, bytes) = s.rows_bytes(rec.offset, rec.count);
+        let (first, rows, bytes) = s.rows_bytes(rec.offset, rec.run);
         let (tex, width) = (s.tex, s.width as u32);
         self.upload(gpu, world, tex, [0, first, width, rows], &bytes);
         Ok(Some(slot))

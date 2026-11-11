@@ -280,8 +280,7 @@ mod.glyph_coverage.SlugCoverage = {
         return self.saturate(coverage)
     }
 
-    // Text takes the full-curve scan: the band-accelerated path has shown correctness issues in
-    // some GPU shader compilers, and text glyphs carry no bands. One walk over the curves serves
+    // Text glyphs too big for bands take the full-curve scan. One walk over the curves serves
     // both rays (each curve's two texels are fetched once, not once per direction): the same sums
     // as scan_horizontal_all + scan_vertical_all, at half the texture reads.
     alpha_at_scan: fn(sample: vec2, px_x: float, px_y: float) -> float {
@@ -336,6 +335,104 @@ mod.glyph_coverage.SlugCoverage = {
         }
 
         return self.calc_coverage(xcov, ycov, xwgt, ywgt)
+    }
+
+    // The run's first texel u, its row's v, and how far u moves per texel.
+    calc_texel_run_uv: fn(tex_size: vec2, first_texel: float) -> vec3 {
+        let row = floor((first_texel + 0.5) / tex_size.x)
+        let du = 1.0 / tex_size.x
+        return vec3((first_texel - row * tex_size.x + 0.5) * du, (row + 0.5) / tex_size.y, du)
+    }
+
+    scan_h_curve: fn(sums: vec2, entry: float, run: vec3, sample_xyxy: vec4, inv_px: float) -> vec3 {
+        let u = run.x + entry * run.z
+        let p12 = self.curve_texture.sample_nearest(vec2(u, run.y), 0.0) - sample_xyxy
+        let p3 = self.curve_texture.sample_nearest(vec2(u + run.z, run.y), 0.0).xy - sample_xyxy.xy
+        var coverage = sums.x
+        var weight = sums.y
+        let code = self.calc_root_code(p12.y, p12.w, p3.y)
+        if code != u32(0) {
+            let r = self.solve_horiz_poly(p12, p3) * inv_px
+            if (code & u32(1)) != u32(0) {
+                coverage = coverage + self.saturate(r.x + 0.5)
+                weight = max(weight, self.saturate(1.0 - abs(r.x) * 2.0))
+            }
+            if code > u32(1) {
+                coverage = coverage - self.saturate(r.y + 0.5)
+                weight = max(weight, self.saturate(1.0 - abs(r.y) * 2.0))
+            }
+        }
+        // z is how far the curve reaches past the sample along the ray, in pixels.
+        return vec3(coverage, weight, max(max(p12.x, p12.z), p3.x) * inv_px)
+    }
+
+    scan_v_curve: fn(sums: vec2, entry: float, run: vec3, sample_xyxy: vec4, inv_px: float) -> vec3 {
+        let u = run.x + entry * run.z
+        let p12 = self.curve_texture.sample_nearest(vec2(u, run.y), 0.0) - sample_xyxy
+        let p3 = self.curve_texture.sample_nearest(vec2(u + run.z, run.y), 0.0).xy - sample_xyxy.xy
+        var coverage = sums.x
+        var weight = sums.y
+        let code = self.calc_root_code(p12.x, p12.z, p3.x)
+        if code != u32(0) {
+            let r = self.solve_vert_poly(p12, p3) * inv_px
+            if (code & u32(1)) != u32(0) {
+                coverage = coverage - self.saturate(r.x + 0.5)
+                weight = max(weight, self.saturate(1.0 - abs(r.x) * 2.0))
+            }
+            if code > u32(1) {
+                coverage = coverage + self.saturate(r.y + 0.5)
+                weight = max(weight, self.saturate(1.0 - abs(r.y) * 2.0))
+            }
+        }
+        return vec3(coverage, weight, max(max(p12.y, p12.w), p3.y) * inv_px)
+    }
+
+    // A text glyph with bands scans only its sample's bands. The glyph sits in one row of the curve
+    // texture (font_core's slug.rs), and reads take lod 0, as a quad's pixels stop at different curves.
+    alpha_at_bands: fn(sample: vec2, px_x: float, px_y: float) -> float {
+        let run = self.calc_texel_run_uv(self.curve_texture.size(), floor(self.slug_curve_offset() + 0.5) * 2.0)
+        let bands_u = run.x + floor(self.slug_band_offset() + 0.5) * run.z
+        let band_count = floor(self.slug_band_count() + 0.5)
+        let h_band = clamp(floor(sample.y * band_count), 0.0, band_count - 1.0)
+        let v_band = clamp(floor(sample.x * band_count), 0.0, band_count - 1.0)
+        let h_list = self.curve_texture.sample_nearest(vec2(bands_u + h_band * run.z, run.y), 0.0).xy
+        let v_list = self.curve_texture.sample_nearest(vec2(bands_u + v_band * run.z, run.y), 0.0).zw
+        let sample_xyxy = vec4(sample.x, sample.y, sample.x, sample.y)
+        let inv_px = vec2(1.0 / px_x, 1.0 / px_y)
+
+        // Lists start with the curves that reach furthest along the ray, so once a group's
+        // last curve ends half a pixel behind the sample, no later one can cover it.
+        var h = vec2(0.0, 0.0)
+        var group = 0.0
+        let h_start = bands_u + h_list.x * run.z
+        // A glyph with bands fits in one 2048-texel row, so a list has at most 256 groups.
+        for i in 0..256 {
+            if group >= h_list.y { break }
+            let entries = self.curve_texture.sample_nearest(vec2(h_start + group * run.z, run.y), 0.0)
+            h = self.scan_h_curve(h, entries.x, run, sample_xyxy, inv_px.x).xy
+            h = self.scan_h_curve(h, entries.y, run, sample_xyxy, inv_px.x).xy
+            h = self.scan_h_curve(h, entries.z, run, sample_xyxy, inv_px.x).xy
+            let last = self.scan_h_curve(h, entries.w, run, sample_xyxy, inv_px.x)
+            h = last.xy
+            if last.z < -0.5 { break }
+            group = group + 1.0
+        }
+
+        var v = vec2(0.0, 0.0)
+        group = 0.0
+        let v_start = bands_u + v_list.x * run.z
+        for i in 0..256 {
+            if group >= v_list.y { break }
+            let entries = self.curve_texture.sample_nearest(vec2(v_start + group * run.z, run.y), 0.0)
+            v = self.scan_v_curve(v, entries.x, run, sample_xyxy, inv_px.y).xy
+            v = self.scan_v_curve(v, entries.y, run, sample_xyxy, inv_px.y).xy
+            v = self.scan_v_curve(v, entries.z, run, sample_xyxy, inv_px.y).xy
+            let last = self.scan_v_curve(v, entries.w, run, sample_xyxy, inv_px.y)
+            v = last.xy
+            if last.z < -0.5 { break }
+            group = group + 1.0
+        }
+        return self.calc_coverage(h.x, v.x, h.y, v.y)
     }
 
     // A glyph with bands scans only its band, one without scans every curve.

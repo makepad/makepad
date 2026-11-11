@@ -226,6 +226,9 @@ script_mod! {
         }
 
         alpha_at: fn(sample: vec2, px_x: float, px_y: float) -> float {
+            if self.slug_band_count() > 0.5 {
+                return self.alpha_at_bands(sample, px_x, px_y)
+            }
             return self.alpha_at_scan(sample, px_x, px_y)
         }
 

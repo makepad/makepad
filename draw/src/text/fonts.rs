@@ -60,7 +60,8 @@ pub struct Fonts {
     atlas_texture: Texture,
     #[cfg(not(target_arch = "wasm32"))]
     slug_curve_texture: Texture,
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Text glyphs keep their bands in the curve texture: a texel stands in for the shader's
+    /// band texture.
     slug_band_texture: Texture,
     #[cfg(target_arch = "wasm32")]
     slug_atlas: SlugAtlas,
@@ -111,7 +112,6 @@ impl Fonts {
                 },
             ),
             slug_curve_texture: Texture::new_with_format(cx, TextureFormat::Unknown),
-            // the curve scan needs no band data: a texel stands in
             slug_band_texture: Texture::new_with_format(
                 cx,
                 TextureFormat::VecRGBAf32 { width: 1, height: 1, data: None, updated: TextureUpdated::Empty },
@@ -166,6 +166,10 @@ impl Fonts {
                     updated: TextureUpdated::Empty,
                 },
             ),
+            slug_band_texture: Texture::new_with_format(
+                cx,
+                TextureFormat::VecRGBAf32 { width: 1, height: 1, data: None, updated: TextureUpdated::Empty },
+            ),
             slug_atlas: SlugAtlas::new(cx),
             slug_min_dpxs_per_em: 0.0,
             msdf_job_sender,
@@ -216,10 +220,7 @@ impl Fonts {
     }
 
     pub fn slug_band_texture(&self) -> &Texture {
-        #[cfg(not(target_arch = "wasm32"))]
-        return &self.slug_band_texture;
-        #[cfg(target_arch = "wasm32")]
-        self.slug_atlas.band_texture()
+        &self.slug_band_texture
     }
 
     pub fn should_use_slug_glyph(&self, dpxs_per_em: f32) -> bool {

@@ -385,8 +385,8 @@ impl GlyphClient {
             size_in_ems: Size::new(e.scale, e.size_h),
             curve_offset: e.rect[0] as usize,
             curve_count: e.rect[1] as usize,
-            band_offset: 0,
-            band_count: 0,
+            band_offset: e.rect[2] as usize,
+            band_count: e.rect[3] as usize,
             fill_flags: 0,
             source: GlyphSource::default(),
         }
