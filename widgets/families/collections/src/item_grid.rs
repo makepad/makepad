@@ -810,7 +810,7 @@ impl ItemGrid {
             // for the release, so a finger that goes on to scroll the rows
             // has chosen nothing.
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                cx.set_key_focus(self.area);
+                cx.set_key_focus_from_user(self.area);
             }
             // A finger held on an item flips it: the one touch gesture that
             // means Toggle, since a finger has no keys to hold.
@@ -927,7 +927,7 @@ impl ItemGrid {
             .fingers
             .is_mouse_held_outside(&[self.area, self.grid.area()]);
         if Self::keeps_keys(self.area.clipped_rect(cx), claimed, abs, held_outside) {
-            cx.set_key_focus(self.area);
+            cx.set_key_focus_from_user(self.area);
         }
     }
 

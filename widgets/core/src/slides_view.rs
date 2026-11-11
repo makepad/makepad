@@ -310,7 +310,7 @@ impl Widget for SlidesView {
                 cx.widget_action(uid, SlidesViewAction::Flipped(self.goal_slide as usize));
             }
             Hit::FingerDown(_fe) => {
-                cx.set_key_focus(self.area);
+                cx.set_key_focus_from_user(self.area);
             }
             _ => (),
         }

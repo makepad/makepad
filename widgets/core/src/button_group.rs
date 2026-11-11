@@ -968,7 +968,7 @@ impl Widget for SegmentedControl {
             Hit::FingerHoverIn(_) => cx.set_cursor(MouseCursor::Hand),
             Hit::FingerHoverOut(_) => cx.set_cursor(MouseCursor::Default),
             Hit::FingerDown(_) => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
             }
             Hit::FingerUp(fe) if fe.is_primary_hit() && fe.is_over && fe.was_tap() => {
                 // The segments were placed where the row was first laid

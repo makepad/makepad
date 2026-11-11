@@ -1,5 +1,6 @@
 use crate::{
     animator::Animate,
+    event::ScrollDirection,
     makepad_derive_widget::*,
     makepad_draw::*,
     scroll_bars::ScrollBars,
@@ -383,7 +384,7 @@ impl Widget for TabBar {
                 if let Some(next) = next {
                     let id = self.tab_order[next];
                     self.set_active_tab_id(cx, Some(id), Animate::Yes);
-                    if let Some((tab, _)) = self.tabs.get(&id) { cx.set_key_focus(tab.area()); }
+                    if let Some((tab, _)) = self.tabs.get(&id) { cx.set_key_focus_from_user(tab.area()); }
                     cx.widget_action(uid, TabBarAction::TabWasPressed(id));
                 }
             }
@@ -426,11 +427,17 @@ impl Widget for TabBar {
                         };
                     }
                 }
-                TabAction::TouchScroll { abs, time } => {
+                TabAction::TouchScroll { abs, abs_start, time, digit_id } => {
                     if let FingerScrollState::Dragging { samples } = &mut self.finger_scroll {
                         let Some(old_abs) = samples.last().map(|s| s.abs) else {
                             return;
                         };
+                        // Like any scroll, it keeps the keyboard up once it goes the tap distance our way.
+                        if ScrollDirection::from_travel(abs - abs_start)
+                            .is_some_and(|direction| direction.allows(Vec2Index::X))
+                        {
+                            cx.fingers.mark_press_as_keeping_key_focus(digit_id);
+                        }
                         samples.push(FingerScrollSample { abs: abs.x, time });
                         if samples.len() > 4 {
                             samples.remove(0);

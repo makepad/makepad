@@ -1124,7 +1124,7 @@ impl Widget for ChipGroup {
                 && !self.area.is_empty()
                 && self.area.rect(cx).contains(e.abs)
             {
-                cx.set_key_focus(self.area);
+                cx.set_key_focus_from_user(self.area);
             }
         }
 
@@ -1164,7 +1164,7 @@ impl Widget for ChipGroup {
                 if let Some(index) = self.pressed_index(actions) {
                     self.focused = index;
                 }
-                cx.set_key_focus(self.area);
+                cx.set_key_focus_from_user(self.area);
                 cx.widget_action(uid, ChipGroupAction::Changed);
             }
             // The clear link is found by name rather than by type: a host

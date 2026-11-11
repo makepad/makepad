@@ -4910,7 +4910,7 @@ impl FlowCanvas {
                 self.target_pan = self.camera.pan;
                 self.target_scale = self.camera.scale;
                 if policy.keyboard {
-                    cx.set_key_focus(self.area);
+                    cx.set_key_focus_from_user(self.area);
                 }
                 if !policy.pointer {
                     self.drag = Some(Drag::Pan {

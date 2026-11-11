@@ -1828,7 +1828,7 @@ impl Widget for PanelControl {
                 if self.editing.is_some() && self.part_at(cx, fe.abs).and_then(Part::field) == self.editing {
                     return;
                 }
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 FOCUSED.with(|f| f.set(Some((self.widget_uid().0, self.draw_bg.area()))));
                 // The key button acts on the release.
                 if self.key.contains(self.local(cx, fe.abs)) {

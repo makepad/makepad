@@ -388,7 +388,7 @@ impl Widget for WebView {
                 return;
             }
             Hit::FingerDown(_) if self.textured.is_open() => {
-                cx.set_key_focus(area);
+                cx.set_key_focus_from_user(area);
                 self.set_focus(cx, true);
             }
             _ => {}

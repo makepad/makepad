@@ -1455,7 +1455,7 @@ impl Widget for ComboBox {
                     if self.is_open {
                         self.close_popup(cx);
                     } else if !dismissed {
-                        self.input.take_key_focus(cx);
+                        self.input.take_key_focus_from_user(cx);
                         self.input.select_all(cx);
                         self.open_popup(cx, false);
                     }

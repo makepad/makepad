@@ -884,6 +884,9 @@ impl Widget for HotkeyEditor {
                             self.cancel_capture(cx);
                         } else {
                             self.start_capture(cx, id);
+                            if self.capturing == Some(id) {
+                                cx.set_key_focus_from_user(self.draw_bg.area());
+                            }
                         }
                     }
                     Some(Spot::Reset(id)) => {

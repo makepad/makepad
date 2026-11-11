@@ -1167,6 +1167,12 @@ impl TextInput {
         self.draw_bg.redraw(cx);
     }
 
+    /// Like [`Self::take_key_focus`], for focus the user gave, e.g., with a press on the box around this field.
+    pub fn take_key_focus_from_user(&mut self, cx: &mut Cx) {
+        self.take_key_focus(cx);
+        cx.set_key_focus_from_user(self.draw_bg.area());
+    }
+
     /// Overrides the height this field asks its parent for.
     ///
     /// For a composer that folds to one line when it loses focus. Pinning the
@@ -3125,7 +3131,10 @@ impl Widget for TextInput {
             let rect = self.draw_bg.area().rect(cx);
             let should_lose_focus = match event {
                 // Handle desktop mouse clicks
-                Event::MouseUp(mu) => !rect.contains(mu.abs),
+                Event::MouseUp(mu) => {
+                    !rect.contains(mu.abs)
+                        && !cx.fingers.is_press_keeping_key_focus(live_id!(mouse).into())
+                }
                 // Handle mobile touch events
                 Event::TouchUpdate(tu) => {
                     let mut should_lose_focus = false;
@@ -3145,7 +3154,10 @@ impl Widget for TextInput {
                             }
                             TouchState::Stop => {
                                 if self.pending_outside_focus_loss_touch == Some(touch.uid) {
-                                    should_lose_focus = !rect.contains(touch.abs);
+                                    should_lose_focus = !rect.contains(touch.abs)
+                                        && !cx.fingers.is_press_keeping_key_focus(
+                                            live_id_num!(touch, touch.uid).into(),
+                                        );
                                     self.pending_outside_focus_loss_touch = None;
                                 }
                             }
@@ -3247,6 +3259,10 @@ impl Widget for TextInput {
                 // Only `draw_walk` shows the IME (it knows where the caret is), so we redraw on focus.
                 // Focus set from a `draw_walk` arrives mid-draw, where a plain `redraw` gets dropped.
                 cx.redraw_area_in_draw(self.draw_bg.area());
+                // We'll show the IME again when we're drawn, so a hide still waiting on a press can't happen.
+                if !self.is_read_only && self.effective_input_mode() != InputMode::None {
+                    cx.cancel_text_ime_hide();
+                }
                 // Sync text state to platform IME before keyboard shows
                 let sel_start_chars = self.text[..self.selection.start().index].chars().count();
                 let sel_end_chars = self.text[..self.selection.end().index].chars().count();
@@ -3288,7 +3304,7 @@ impl Widget for TextInput {
             }) if device.is_primary_hit() && !scrollbar_captured => {
                 cx.claim_finger_drag(digit_id);
                 self.reset_blink_timer(cx);
-                self.set_key_focus(cx);
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 let rel = abs - self.text_area.rect(cx).pos;
                 let Ok(cursor) =
                     self.point_in_lpxs_to_cursor(Point::new(rel.x as f32, rel.y as f32))
@@ -3408,7 +3424,7 @@ impl Widget for TextInput {
                 // Clear preserved cursor - user is dragging to select
                 self.preserved_selection_cursor = None;
                 self.reset_blink_timer(cx);
-                self.set_key_focus(cx);
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 let rel = abs - self.text_area.rect(cx).pos;
                 let Ok(cursor) =
                     self.point_in_lpxs_to_cursor(Point::new(rel.x as f32, rel.y as f32))
@@ -3983,6 +3999,13 @@ impl TextInputRef {
     pub fn take_key_focus(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.take_key_focus(cx);
+        }
+    }
+
+    /// See [`TextInput::take_key_focus_from_user`].
+    pub fn take_key_focus_from_user(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.take_key_focus_from_user(cx);
         }
     }
 

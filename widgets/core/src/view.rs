@@ -1807,8 +1807,9 @@ impl Widget for View {
                         if self.stood_down_press == Some(e.digit_id) {
                             self.stood_down_press = None;
                         }
-                        if self.grab_key_focus {
-                            cx.set_key_focus(self.area());
+                        // A touch waits until it's a tap, so a drag that scrolls from here keeps the keyboard up.
+                        if self.grab_key_focus && !e.device.is_touch() {
+                            cx.set_key_focus_from_user(self.area());
                         }
                         cx.widget_action(uid, ViewAction::FingerDown(e));
                         if self.animator.is_defined {
@@ -1835,6 +1836,12 @@ impl Widget for View {
                         // animation that never started.
                         self.stood_down_press = None;
                     } else {
+                        // A child that keeps the key focus, like a text input it's about to take, wins over us.
+                        if self.grab_key_focus && e.device.is_touch() && e.is_over && e.was_tap()
+                            && !cx.fingers.is_press_keeping_key_focus(e.digit_id)
+                        {
+                            cx.set_key_focus_from_user(self.area());
+                        }
                         cx.widget_action(uid, ViewAction::FingerUp(e));
                         if self.animator.is_defined {
                             self.animator_play(cx, ids!(down.off));

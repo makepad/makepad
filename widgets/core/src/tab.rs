@@ -346,7 +346,9 @@ pub enum TabAction {
     /// A touch finger moved on this tab without a long press (scroll the tab bar).
     TouchScroll {
         abs: Vec2d,
+        abs_start: Vec2d,
         time: f64,
+        digit_id: DigitId,
     },
     /// A touch finger lifted off this tab without a long press (end scroll / flick).
     TouchUp {
@@ -476,7 +478,9 @@ impl Tab {
                             cx,
                             TabAction::TouchScroll {
                                 abs: e.abs,
+                                abs_start: e.abs_start,
                                 time: e.time,
+                                digit_id: e.digit_id,
                             },
                         );
                     }

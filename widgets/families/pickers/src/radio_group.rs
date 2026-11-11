@@ -531,7 +531,7 @@ impl Widget for RadioGroup {
         // focus would be stranded on a row the arrows do not reach.
         if let Event::MouseDown(me) = event {
             if !held_elsewhere && area.rect(cx).contains(me.abs) {
-                cx.set_key_focus(area);
+                cx.set_key_focus_from_user(area);
             }
         }
         if self.disabled {
@@ -552,7 +552,7 @@ impl Widget for RadioGroup {
             // which sends no mouse press at all.
             Hit::FingerDown(_) => {
                 if !held_elsewhere {
-                    cx.set_key_focus(area);
+                    cx.set_key_focus_from_user(area);
                 }
             }
             // The ring is drawn from the focus, so the focus changing is a
