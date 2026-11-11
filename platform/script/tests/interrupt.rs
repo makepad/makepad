@@ -49,4 +49,11 @@ fn another_thread_interrupts_a_looping_script() {
     vm.bx.captured_errors = Some(Vec::new());
     assert_eq!(eval(&mut vm, "cleared", "var n = 0\nfor i in 0..5000 { n = n + 1 }\nn").as_number(), Some(5000.0));
     assert!(vm.take_errors().is_empty());
+
+    // A stop ends a run as uncatchably, and is no error: nothing is raised or reported.
+    vm.bx.interrupt_handle().stop();
+    vm.bx.captured_errors = Some(Vec::new());
+    let stopped = eval(&mut vm, "stopped", "var n = 0\ntry { loop { n = n + 1 } } catch 99");
+    let errors = vm.take_errors();
+    assert!(!stopped.is_err() && stopped.as_number().is_none() && errors.is_empty(), "a stopped run ends with no value and no error: {stopped:?} {errors:#?}");
 }

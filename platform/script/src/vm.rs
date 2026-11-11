@@ -2449,7 +2449,13 @@ impl<'a> ScriptVm<'a> {
             } else {
                 false
             };
-            if instruction_limit_exceeded {
+            if instruction_limit_exceeded && self.bx.interrupt.is_stop() {
+                // (the host's own end of the run: the same bail, and no error of the script's)
+                self.bx.threads.cur().trap.set_on(Some(ScriptTrapOn::Bail(NIL)));
+                if let Some(value) = self.handle_trap_on() {
+                    return value;
+                }
+            } else if instruction_limit_exceeded {
                 let err = if self.bx.interrupt.is_set() {
                     script_err_limit!(self.bx.threads.cur_ref().trap, "script interrupted")
                 } else {

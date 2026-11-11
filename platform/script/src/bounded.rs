@@ -75,7 +75,8 @@ impl EvalReport {
     pub fn limit(&self) -> Option<&str> { self.limit.as_deref() }
 }
 
-/// Script errors that come from a limit (uncatchable resource failures).
+/// Script errors that come from a limit (uncatchable resource failures), by their message
+/// (a source file whose name says `allocation` is no limit).
 fn limit_message(error: &str) -> bool {
     [
         "instruction limit",
@@ -131,7 +132,7 @@ impl ScriptVm<'_> {
         self.bx.heap.charge_native_strings_after = strings_after;
         let mut limit = None;
         if let Some(errors) = self.bx.captured_errors.as_ref() {
-            limit = errors.iter().skip(before).find(|e| limit_message(&e.text)).map(|e| e.text.clone());
+            limit = errors.iter().skip(before).find(|e| limit_message(&e.message)).map(|e| e.text.clone());
         }
         if limit.is_none() && heap.exceeded {
             limit = Some(format!("script heap limit of {} bytes exceeded", limits.heap_bytes));

@@ -59,7 +59,7 @@ const SHADER_PACK_VERSION: u32 = 3;
 const SHADER_PACK_MAGIC: &[u8; 4] = b"MPSP";
 
 /// One draw shader of a pack: its GLSL ES 3.0 code and reflection.
-#[relax_api(handle, eq)]
+#[relax_api(handle, eq, clone)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShaderPackEntry {
     /// [`shader_pack_key`] of the shader objects it serves.
@@ -1157,6 +1157,17 @@ impl PackWriter {
 
 /// Entries as pack bytes.
 pub fn write_shader_pack(entries: &[ShaderPackEntry]) -> Vec<u8> {
+    shader_pack_bytes(entries).0
+}
+
+/// Entries as pack bytes, written by this crate's build (an op: JIT-compiled code reads no
+/// entry's reflection itself).
+#[relax_api]
+pub fn shader_pack_bytes(entries: &[ShaderPackEntry]) -> ShaderPackBytes {
+    ShaderPackBytes(write_pack(entries))
+}
+
+fn write_pack(entries: &[ShaderPackEntry]) -> Vec<u8> {
     fn string<'a>(s: &'a str, strings: &mut Vec<&'a str>) -> u32 {
         match strings.iter().position(|t| *t == s) {
             Some(i) => i as u32,
@@ -1192,8 +1203,17 @@ pub fn write_shader_pack(entries: &[ShaderPackEntry]) -> Vec<u8> {
     w.out
 }
 
-/// The entries of pack bytes, in pack order.
+/// The entries of pack bytes, in pack order: read by this crate's build (`inspect_shader_pack`; JIT-
+/// compiled code builds no entry itself), each a clone of the inspected one.
 pub fn read_shader_pack(bytes: &[u8]) -> Result<Vec<ShaderPackEntry>, String> {
+    let contents = inspect_shader_pack(bytes);
+    match contents.error() {
+        Some(error) => Err(error.to_owned()),
+        None => Ok(contents.view().entries.to_vec()),
+    }
+}
+
+fn read_pack(bytes: &[u8]) -> Result<Vec<ShaderPackEntry>, String> {
     let strings = read_strings(bytes)?;
     let mut entries = Vec::new();
     for (key, offset) in read_index(bytes)? {
@@ -1521,7 +1541,7 @@ impl ShaderPacks {
             Some(recorder) => { recorder.keys.clear(); std::mem::take(&mut recorder.entries) }
             None => Vec::new(),
         };
-        ShaderPackBytes(write_shader_pack(&entries))
+        ShaderPackBytes(write_pack(&entries))
     }
     #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
     #[relax_api]
@@ -1577,7 +1597,7 @@ impl ShaderPackRecord {
     pub fn error(&self) -> Option<&str> { let v = self.view(); v.failed.then_some(v.error) }
     #[relax_api]
     pub fn bytes(&self) -> ShaderPackBytes {
-        ShaderPackBytes(match self.0.as_ref().ok() { Some(entry) => write_shader_pack(std::slice::from_ref(entry)), None => Vec::new() })
+        ShaderPackBytes(match self.0.as_ref().ok() { Some(entry) => write_pack(std::slice::from_ref(entry)), None => Vec::new() })
     }
 }
 #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
@@ -1655,7 +1675,7 @@ impl ShaderPackContents {
     pub fn error(&self) -> Option<&str> { let v = self.view(); v.failed.then_some(v.error) }
 }
 #[relax_api]
-pub fn inspect_shader_pack(bytes: &[u8]) -> ShaderPackContents { ShaderPackContents(read_shader_pack(bytes)) }
+pub fn inspect_shader_pack(bytes: &[u8]) -> ShaderPackContents { ShaderPackContents(read_pack(bytes)) }
 
 #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 fn write_value_to_f32_slots(

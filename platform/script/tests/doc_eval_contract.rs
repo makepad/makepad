@@ -4,7 +4,6 @@
 //! call can neither keep state nor depend on the order frames run in.
 
 use makepad_script::*;
-use std::time::{Duration, Instant};
 
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
@@ -26,18 +25,19 @@ fn call(vm: &mut ScriptVm, root: ScriptValue, name: LiveId, args: &[ScriptValue]
 
 #[test]
 fn runaway_loads_hit_a_limit_and_report_it() {
-    for (name, code) in [
-        ("spin", "loop {}\n;"),
-        ("spin_caught", "try { loop {} } catch { 1 }\n;"),
-        ("recursion", "fn f(x) { f(x + 1) + 1 }\nf(0)\n;"),
-        ("allocation", "let a = []\nfor i in 0..100000000 { a.push({x: i}) }\n;"),
+    // The limits count instructions, call frames and heap bytes, not time: each runaway stops at
+    // its own limit, which the report names, having charged no more than the budgets.
+    for (name, code, kind) in [
+        ("spin", "loop {}\n;", "instruction limit"),
+        ("spin_caught", "try { loop {} } catch { 1 }\n;", "instruction limit"),
+        ("recursion", "fn f(x) { f(x + 1) + 1 }\nf(0)\n;", "call frame limit"),
+        ("allocation", "let a = []\nfor i in 0..100000000 { a.push({x: i}) }\n;", "allocation limit"),
     ] {
         let vm = &mut test_vm();
         let limits = EvalLimits { heap_bytes: 8 << 20, ..EvalLimits::DOC_LOAD.with_instructions(5_000_000) };
-        let t0 = Instant::now();
         let (_, report) = vm.eval_bounded(&limits, |vm| vm.eval(script(name, code)));
-        assert!(report.limit.is_some(), "{name}: no limit reported ({report:?}, errors {:?})", vm.take_errors());
-        assert!(t0.elapsed() < Duration::from_secs(5), "{name} took {:?}", t0.elapsed());
+        assert!(report.limit.as_deref().is_some_and(|l| l.contains(kind)), "{name}: the {kind} is not reported ({report:?}, errors {:?})", vm.take_errors());
+        assert!(report.instructions <= limits.instructions && report.heap.allocated_bytes <= limits.heap_bytes, "{name}: charged past a budget: {report:?}");
     }
 }
 
@@ -139,10 +139,11 @@ fn frame_limits_bound_each_call() {
     let vm = &mut test_vm();
     let (root, _) = vm.eval_bounded(&EvalLimits::DOC_LOAD, |vm| vm.eval(script("doc4", "{ spin: fn(t) { loop {} } fine: fn(t) { t + 1 } }")));
     vm.freeze_document(&[root]);
-    let t0 = Instant::now();
+    // A frame's limit is its instruction budget, not a time: the endless loop runs exactly that
+    // many instructions and stops with the instruction limit.
     let (_, report, _) = call(vm, root, id!(spin), &[0.0f64.into()]);
-    assert!(report.limit.is_some());
-    assert!(t0.elapsed() < Duration::from_secs(2));
+    assert!(report.limit.as_deref().is_some_and(|l| l.contains("instruction limit")), "{report:?}");
+    assert_eq!(report.instructions, EvalLimits::DOC_FRAME.instructions, "{report:?}");
     // The VM is usable after a limit.
     let (v, report, errors) = call(vm, root, id!(fine), &[1.0f64.into()]);
     assert_eq!(v.as_number(), Some(2.0), "{report:?} {errors:?}");
