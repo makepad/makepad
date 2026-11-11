@@ -437,7 +437,7 @@ pub use {
     app_main::*,
     arc_string_mut::ArcStringMut,
     component_list::ComponentList,
-    component_map::ComponentMap,
+    component_map::{ComponentMap, FastHashMap, FastHashSet},
     //makepad_image_formats::image,
     log::*,
     makepad_math::makepad_micro_serde,
