@@ -313,6 +313,8 @@ impl Vulkan {
                 world.to_session(*sid, |q| q.pipeline_ready(id));
             }
         }
+        // upload arenas idle for a while go, frame or not (`next_due` wakes the pump for them)
+        self.spares.trim();
         let allocated = self.dev.allocated.load(Ordering::Relaxed);
         for ((sid, index), texture) in &self.win {
             let id = Id::new(*index, texture.gen);
@@ -489,6 +491,9 @@ impl Backend for Vulkan {
     }
     fn host_gpu(&mut self) -> Option<&mut dyn Gpu> { Some(self) }
     fn step(&mut self, world: &mut World, sid: u32) {
+        // gone to the background: the free upload arenas go now, not once idle
+        #[cfg(target_os = "android")]
+        if super::android::jni::take_backgrounded() { self.spares.release_all(); }
         self.flush(); self.drain(world);
         self.recover(world);
         #[cfg(target_os = "linux")] self.native_drain(world);
@@ -546,6 +551,9 @@ impl Backend for Vulkan {
         let timer = exec::next_timer(world, sid).into_iter().chain(watch).chain(reset).min();
         #[cfg(target_os = "android")]
         let timer = timer.into_iter().chain(self.native_layers.pending.keys().any(|(s, _)| *s == sid).then(|| world.now() + 8_000_000)).min();
+        // the next upload arena going idle, which `drain` gives back without a frame, a millisecond past its time
+        let arena = self.spares.trim_due().map(|due| due + 1_000_000);
+        let timer = timer.into_iter().chain(arena).min();
         #[cfg(any(target_os = "linux", target_os = "android"))]
         { return timer.into_iter().chain(self.media.next_due(sid, world.now())).min(); }
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
