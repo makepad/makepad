@@ -36,11 +36,13 @@ pub struct PageFlip {
     templates: ComponentMap<LiveId, ScriptObjectRef>,
     #[rust]
     pages: ComponentMap<LiveId, WidgetRef>,
-    /// What each page out of sight waits for (see `held_events`): a page
-    /// that is not shown skips frame requests (delivered once it is shown),
-    /// unless its root view sets `background_events: true`.
+    /// Frames a page out of sight isn't waiting on, kept until it's shown
+    /// (see `held_events`), unless its root view sets `background_events: true`.
     #[rust]
     held: HashMap<LiveId, HeldEvents>,
+    /// The page that was shown at the last event every page got.
+    #[rust]
+    shown_page: LiveId,
 }
 
 impl ScriptHook for PageFlip {
@@ -190,9 +192,10 @@ impl Widget for PageFlip {
             for (page_id, page) in self.pages.iter() {
                 let is_hidden = *page_id != active_page;
                 if is_hidden && !page.borrow::<View>().is_some_and(|view| view.background_events)
-                    && self.held.entry(*page_id).or_default().hold(event) {
+                    && self.held.entry(*page_id).or_default().hold(event, *page_id == self.shown_page) {
                     continue;
                 }
+                let next_frame_id_before = cx.next_frame_id();
                 let item_uid = page.widget_uid();
                 let mut handle = |cx: &mut Cx| cx.group_widget_actions(uid, item_uid, |cx| page.handle_event(cx, event, scope));
                 if is_hidden && matches!(event, Event::Actions(_)) {
@@ -200,7 +203,12 @@ impl Widget for PageFlip {
                 } else {
                     handle(cx);
                 }
+                // A hidden page gets the next frame if it asked for one just now.
+                if let Some(held) = self.held.get_mut(page_id).filter(|_| is_hidden) {
+                    held.note_handled(cx.next_frame_id() != next_frame_id_before);
+                }
             }
+            self.shown_page = active_page;
         }
     }
 
