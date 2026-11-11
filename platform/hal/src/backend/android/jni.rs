@@ -14,6 +14,8 @@ static FRAME_RATE_BOOST_TIME: AtomicU64 = AtomicU64::new(0);
 /// The Activity covers its surface until a frame shows on it: at the start and across a pause or
 /// a lost surface.
 static SURFACE_COVERED: AtomicBool = AtomicBool::new(true);
+/// The Activity went to the background since the Vulkan backend last looked (`take_backgrounded`).
+static BACKGROUNDED: AtomicBool = AtomicBool::new(false);
 
 #[link(name = "android")]
 extern "C" {
@@ -68,6 +70,8 @@ fn set_frame_rate_boost(boost: bool) {
 pub(crate) fn surface_presented() {
     if SURFACE_COVERED.swap(false, Ordering::AcqRel) { hide_surface_cover(); }
 }
+/// Whether the Activity went to the background since the last call, so nothing draws for a while.
+pub(crate) fn take_backgrounded() -> bool { BACKGROUNDED.swap(false, Ordering::AcqRel) }
 pub(super) fn hide_surface_cover() {
     SURFACE_COVERED.store(false, Ordering::Release);
     let _ = with_activity(|env, activity| unsafe {
@@ -128,7 +132,10 @@ unsafe extern "system" fn pause(_: *mut JNIEnv, _: jclass) {
     emit_lifecycle(lifecycle::PAUSE);
 }
 unsafe extern "system" fn stop(_: *mut JNIEnv, _: jclass) {
-    if !super::xr::active() { lock(&Shared::global().state).active = false; }
+    if !super::xr::active() {
+        lock(&Shared::global().state).active = false;
+        BACKGROUNDED.store(true, Ordering::Release);
+    }
     emit_lifecycle(lifecycle::BACKGROUND);
 }
 unsafe extern "system" fn destroy(env: *mut JNIEnv, _: jclass) {

@@ -111,6 +111,31 @@ pub(super) struct Spare {
     arenas: Mutex<Arenas>,
 }
 pub(super) type Spares = Arc<Spare>;
+
+impl Spare {
+    /// Releases the free arenas no batch took for `ARENA_IDLE` (an idle app frees its uploads).
+    pub fn trim(&self) {
+        let released = lock(&self.arenas).give(std::iter::empty());
+        drop(released);
+    }
+
+    /// When `trim` should look again (HAL clock ns): a free arena going idle, or the one a batch took
+    /// last, since a batch with no frame gives its arenas back without waking any pump.
+    pub fn trim_due(&self) -> Option<u64> {
+        let arenas = lock(&self.arenas);
+        let now = crate::clock_ns();
+        arenas.free.iter().map(|(_, since)| now.saturating_sub(since.elapsed().as_nanos() as u64)).chain(arenas.lent).min()
+            .map(|since| since + ARENA_IDLE.as_nanos() as u64)
+    }
+
+    /// Releases every free arena now (the app went to the background).
+    #[cfg(target_os = "android")]
+    pub fn release_all(&self) {
+        let released = lock(&self.arenas).release_all();
+        drop(released);
+    }
+}
+
 /// More frames than this in flight at once are not kept for reuse.
 const SPARE_SLOTS: usize = 256;
 
@@ -138,11 +163,14 @@ fn arena_size(need: u64) -> u64 {
 struct Arenas {
     free: Vec<(Arc<Buffer>, std::time::Instant)>,
     bytes: u64,
+    /// when a batch last took one or made its own (HAL clock ns), until `ARENA_IDLE` after
+    lent: Option<u64>,
 }
 
 impl Arenas {
     /// The smallest free arena of at least `want` bytes, else the largest that holds `len`.
     fn take(&mut self, want: u64, len: u64) -> Option<Arc<Buffer>> {
+        self.lent = Some(crate::clock_ns());
         let fits = |min: u64| self.free.iter().enumerate().filter(move |(_, (a, _))| a.size >= min);
         let i = fits(want).min_by_key(|(_, (a, _))| a.size).or_else(|| fits(len).max_by_key(|(_, (a, _))| a.size)).map(|(i, _)| i)?;
         let (arena, _) = self.free.swap_remove(i);
@@ -174,6 +202,7 @@ impl Arenas {
             let (arena, _) = self.free.swap_remove(i);
             self.bytes -= arena.bytes; released.push(arena);
         }
+        self.lent = self.lent.filter(|lent| crate::clock_ns().saturating_sub(*lent) <= ARENA_IDLE.as_nanos() as u64);
         released
     }
 }
