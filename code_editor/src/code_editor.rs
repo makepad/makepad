@@ -1650,7 +1650,7 @@ impl CodeEditor {
                 ..
             }) => {
                 self.animator_play(cx, ids!(focus.on));
-                cx.set_key_focus(self.scroll_bars.area());
+                cx.set_key_focus_from_user(self.scroll_bars.area());
                 let ((cursor, affinity), is_in_gutter) = self.pick(session, abs);
                 session.add_selection(
                     cursor,
@@ -1720,7 +1720,7 @@ impl CodeEditor {
     /// Puts the cursor at `abs`, or selects the word or line there on a double or triple press.
     fn select_at(&mut self, cx: &mut Cx, session: &CodeSession, abs: Vec2d, tap_count: u32) {
         self.animator_play(cx, ids!(focus.on));
-        cx.set_key_focus(self.scroll_bars.area());
+        cx.set_key_focus_from_user(self.scroll_bars.area());
         let ((cursor, affinity), is_in_gutter) = self.pick(session, abs);
         session.set_selection(
             cursor,

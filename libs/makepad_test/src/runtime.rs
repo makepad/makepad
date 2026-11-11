@@ -23,6 +23,10 @@ const LOOK: Duration = Duration::from_secs(1);
 /// A process using under this share of one core (1/n) for its own work (not serving remote
 /// peers), with nothing pending, is idle.
 const IDLE_SHARE: u32 = 20;
+/// An app whose main thread runs nothing and whose other threads stay under this share of one core
+/// (1/n), with nothing pending, only ticks (a simulation stepping, a poll): idle too. A thread at
+/// work runs more.
+const TICK_SHARE: u32 = 2;
 /// Major page faults a second at which a look that ran nothing waited on memory (a swapping box):
 /// a few faults are a mapped file's first read, not swapping.
 const SWAP_FAULTS_PER_S: f64 = 50.0;
@@ -62,6 +66,11 @@ pub struct TestConfig {
     pub startup_pause: Duration,
     pub action_delay: Duration,
     pub keep_open: Duration,
+    /// Run beside other tests' apps (default: `MAKEPAD_TEST_PARALLEL`). App sessions in one test
+    /// executable otherwise take turns: several at once load the box, and a suite whose waits
+    /// count wall time grows flaky under load. A suite whose waits count the app's own time (a
+    /// sim's clock, its frames) can run its apps side by side.
+    pub concurrent: bool,
 }
 
 impl TestConfig {
@@ -101,6 +110,7 @@ impl TestConfig {
             startup_pause: env_duration_ms("MAKEPAD_TEST_STARTUP_DELAY_MS"),
             action_delay: env_duration_ms("MAKEPAD_TEST_ACTION_DELAY_MS"),
             keep_open: env_duration_ms("MAKEPAD_TEST_KEEP_OPEN_MS"),
+            concurrent: parallel_tests_enabled(),
         })
     }
 
@@ -401,9 +411,9 @@ impl TestApp {
         let mut budget = Budget::start(self, budget)?;
         loop {
             self.ensure_running()?;
-            let (since, before) = (Instant::now(), self.client().cpu()?);
+            let (since, before) = (Instant::now(), self.client().cpu(false)?);
             let Some(what) = pending() else { return Ok(()) };
-            budget.asked(since, before, self.client().cpu()?);
+            budget.asked(since, before, self.client().cpu(false)?);
             if budget.look_due() {
                 if let Some(spent) = budget.spent(self)? {
                     return Err(TestError::new(format!("{what}: {spent}")));
@@ -1239,8 +1249,8 @@ where
 {
     // Tests are serialised by default: each one drives a whole app process, so
     // running several at once oversubscribes the machine and makes timing-
-    // sensitive assertions flaky. A suite whose app is cheap enough can opt out.
-    let _guard = (!parallel_tests_enabled()).then(|| {
+    // sensitive assertions flaky. A suite whose waits count the app's own time can opt out.
+    let _guard = (!config.concurrent).then(|| {
         TEST_MUTEX
             .get_or_init(|| Mutex::new(()))
             .lock()
@@ -1301,6 +1311,12 @@ pub fn run_current_package_test<F, R>(
 /// or a long wait's own), or `action_timeout` with the app idle. A loaded box spends neither for
 /// the app: a thread that waits for a core runs no CPU of its own, and one that waits for the JIT
 /// to compile code it runs for the first time has work pending (`waits_on_jit`): neither is idle.
+/// So the idle rule reads what the app's threads wanted, not only what they got: what they ran,
+/// and what its threads (not its UI thread, its serving ones or the JIT's) spent runnable,
+/// waiting for a core (`AppCpu::waited`, Linux's run_delay; macOS and Windows keep none per thread
+/// and read what the app ran alone). (A Fab test's part drag beside 24 busy loops: its brep worker
+/// ran at 17-24% of a core and waited for one the rest, each step 13-16 s, and read as a tick that
+/// sat idle 10 s, J11427, 11-11.)
 /// An app with nothing running (its own threads under 1/[`IDLE_SHARE`] of a core: not what its
 /// threads serving remote peers run, the wait's own asks cost the app CPU, nor what the JIT's own
 /// threads run beside it, its background checks and tier-ups, which bring the app nothing) and
@@ -1321,7 +1337,11 @@ pub fn run_current_package_test<F, R>(
 /// AI hub on loopback with its GPU device): what the test process runs beside the thread driving
 /// the test ([`beside_cpu`]) is progress the app waits for, and while it runs at the idle share the
 /// app is not idle. (A grown part's refine on a cold cache: the app at 0%, the test's hub compiling
-/// its GPU programs, read as "sat idle 10.2 s", 11-10.)
+/// its GPU programs, read as "sat idle 10.2 s", 11-10.) An app whose main thread runs nothing, its
+/// other threads under 1/[`TICK_SHARE`] of a core, with nothing pending, is idle too: a steady
+/// tick is no progress, while a thread at work, at half a core or more, still is. (A Fab test's
+/// wait for a button that never came ran 19 min beside its app's sim ticking at 4-12% of a core,
+/// its main thread parked in poll, L798418, 11-10.)
 struct Budget {
     /// The main thread's CPU the wait may spend.
     limit: Duration,
@@ -1329,10 +1349,14 @@ struct Budget {
     idle_limit: Duration,
     /// The main thread's CPU when the wait began.
     main: Duration,
-    /// When the app was last looked at, and its own CPU then (the process's but serving).
-    last: (Instant, Duration),
+    /// When the app was last looked at, its own CPU then (the process's but serving), its main
+    /// thread's, and what its other threads had waited for a core.
+    last: (Instant, Duration, Duration, Duration),
     /// How long the app has been idle, to the last look.
     idle: Duration,
+    /// Of the idle stretch, how long only a tick ran (its main thread nothing, its other threads
+    /// under 1/[`TICK_SHARE`] of a core), and the CPU they ran in it.
+    ticked: (Duration, Duration),
     /// The process's major page faults at the last look, and of the idle stretch, how long its
     /// looks took some and how many.
     faults: u64,
@@ -1344,21 +1368,26 @@ struct Budget {
     /// What the test process had run beside its driving thread at the last look ([`beside_cpu`]),
     /// and how long, over the whole wait, that alone kept the app from counting as idle.
     beside: (Duration, Duration),
-    /// The time the wait spent asking the app (its closure ran), and the app's own CPU in it,
-    /// since the last look.
-    asked: (Duration, Duration),
+    /// The time the wait spent asking the app (its closure ran), and the app's own CPU and its main
+    /// thread's in it, since the last look.
+    asked: (Duration, Duration, Duration),
 }
 
 impl Budget {
     fn start(app: &TestApp, limit: Duration) -> TestResult<Budget> {
-        let cpu = app.client().cpu()?;
-        Ok(Budget { limit, idle_limit: app.action_timeout(), main: cpu.main, last: (Instant::now(), cpu.own), idle: Duration::ZERO, faults: cpu.faults, memory: (Duration::ZERO, 0), taken: 0, starved: (Duration::ZERO, [0; 3]), beside: (beside_cpu(), Duration::ZERO), asked: (Duration::ZERO, Duration::ZERO) })
+        Ok(Budget::at(limit, app.action_timeout(), app.client().cpu(true)?, Instant::now(), beside_cpu()))
+    }
+
+    /// A wait's budget from the app's CPU `cpu` and the test process's `beside` it at `now`.
+    fn at(limit: Duration, idle_limit: Duration, cpu: crate::remote::AppCpu, now: Instant, beside: Duration) -> Budget {
+        Budget { limit, idle_limit, main: cpu.main, last: (now, cpu.own, cpu.main, cpu.waited), idle: Duration::ZERO, ticked: (Duration::ZERO, Duration::ZERO), faults: cpu.faults, memory: (Duration::ZERO, 0), taken: 0, starved: (Duration::ZERO, [0; 3]), beside: (beside, Duration::ZERO), asked: (Duration::ZERO, Duration::ZERO, Duration::ZERO) }
     }
 
     /// The wait asked the app from `since` (its closure ran): its CPU before and after.
     fn asked(&mut self, since: Instant, before: crate::remote::AppCpu, after: crate::remote::AppCpu) {
         self.asked.0 += since.elapsed();
         self.asked.1 += after.own.saturating_sub(before.own);
+        self.asked.2 += after.main.saturating_sub(before.main);
     }
 
     fn look_due(&self) -> bool {
@@ -1367,33 +1396,45 @@ impl Budget {
 
     /// Looks at the app: once it has spent the whole budget, what it spent, in words.
     fn spent(&mut self, app: &TestApp) -> TestResult<Option<String>> {
-        let cpu = app.client().cpu()?;
-        let now = Instant::now();
+        let cpu = app.client().cpu(true)?;
+        self.judge(cpu, Instant::now(), beside_cpu(), &mut || app.client().settled(), &mut || app.client().waits_on_jit())
+    }
+
+    /// [`Self::spent`] from a look that found `cpu` and the test process's `beside` at `now`;
+    /// `settled` and `waits_on_jit` ask the app, only when the app ran nothing.
+    fn judge(&mut self, cpu: crate::remote::AppCpu, now: Instant, beside: Duration, settled: &mut dyn FnMut() -> TestResult<crate::remote::AppSettled>, waits_on_jit: &mut dyn FnMut() -> TestResult<bool>) -> TestResult<Option<String>> {
         let main = cpu.main.saturating_sub(self.main);
         if main >= self.limit {
             return Ok(Some(format!("its main thread ran {:.1} s of CPU (budget {:.0} s)", main.as_secs_f64(), self.limit.as_secs_f64())));
         }
-        let (then, own) = self.last;
+        let (then, own, main_then, waited) = self.last;
         let over = now - then;
         // what the app ran left alone, over the time it was
-        let (asking, asked) = std::mem::take(&mut self.asked);
+        let (asking, asked, asked_main) = std::mem::take(&mut self.asked);
+        let alone = over.saturating_sub(asking);
         let ran = cpu.own.saturating_sub(own).saturating_sub(asked);
-        let quiet = ran * IDLE_SHARE < over.saturating_sub(asking);
+        // and what it wanted: that, and what its threads waited for a core meanwhile
+        let wanted = ran + cpu.waited.saturating_sub(waited);
+        let quiet = wanted * IDLE_SHARE < alone;
+        // its main thread ran nothing and its other threads only tick: no progress either
+        let ticking = !quiet && cpu.main.saturating_sub(main_then).saturating_sub(asked_main) * IDLE_SHARE < alone && wanted * TICK_SHARE < alone;
         // what the test process ran meanwhile beside this thread: a service the app waits on
-        let beside = beside_cpu();
         let busy_beside = beside.saturating_sub(self.beside.0) * IDLE_SHARE >= over;
         self.beside.0 = beside;
-        if quiet && busy_beside {
+        if (quiet || ticking) && busy_beside {
             self.beside.1 += over;
         }
-        let settled = if quiet && !busy_beside { Some(app.client().settled()?) } else { None };
+        let settled = if (quiet || ticking) && !busy_beside { Some(settled()?) } else { None };
         let (queued, running, taken) = settled.as_ref().and_then(|s| s.pool).unwrap_or(([0; 3], 0, self.taken));
-        // the app ran nothing, with nothing pending (or only pool jobs, none taken since the last
-        // look), and nothing ran beside the test in its own process
-        let stalled = settled.as_ref().is_some_and(|s| s.settled || (s.only_pool && taken == self.taken)) && !app.client().waits_on_jit()?;
+        // the app ran nothing (or only ticked), with nothing pending (or only pool jobs, none taken
+        // since the last look), and nothing ran beside the test in its own process
+        let stalled = settled.as_ref().is_some_and(|s| s.settled || (s.only_pool && taken == self.taken)) && !waits_on_jit()?;
         let faults = cpu.faults.saturating_sub(self.faults);
         if stalled {
             self.idle += over;
+            if ticking {
+                self.ticked = (self.ticked.0 + over, self.ticked.1 + ran);
+            }
             if faults as f64 >= SWAP_FAULTS_PER_S * over.as_secs_f64() {
                 self.memory = (self.memory.0 + over, self.memory.1 + faults);
             }
@@ -1401,9 +1442,9 @@ impl Budget {
                 self.starved = (self.starved.0 + over, queued);
             }
         } else {
-            (self.idle, self.memory, self.starved) = (Duration::ZERO, (Duration::ZERO, 0), (Duration::ZERO, [0; 3]));
+            (self.idle, self.ticked, self.memory, self.starved) = (Duration::ZERO, (Duration::ZERO, Duration::ZERO), (Duration::ZERO, 0), (Duration::ZERO, [0; 3]));
         }
-        self.last = (now, cpu.own);
+        self.last = (now, cpu.own, cpu.main, cpu.waited);
         self.faults = cpu.faults;
         self.taken = taken;
         if self.idle < self.idle_limit {
@@ -1430,8 +1471,12 @@ impl Budget {
                 )
             }
             _ => format!(
-                "it sat idle for {idle:.1} s (budget {budget:.0} s), nothing running and nothing pending{} (its main thread ran {main:.1} s of CPU){beside}",
-                if running > 0 { format!(" ({running} pool jobs on its workers ran no CPU)") } else { String::new() }
+                "it sat idle for {idle:.1} s (budget {budget:.0} s), nothing running and nothing pending{}{} (its main thread ran {main:.1} s of CPU){beside}",
+                if running > 0 { format!(" ({running} pool jobs on its workers ran no CPU)") } else { String::new() },
+                match self.ticked {
+                    (Duration::ZERO, _) => String::new(),
+                    (ticked, cpu) => format!("; for {:.1} s of it only a steady tick ran, {:.0}% of a core, its main thread nothing (no progress)", ticked.as_secs_f64(), 100.0 * cpu.as_secs_f64() / ticked.as_secs_f64()),
+                }
             ),
         }))
     }
@@ -1628,8 +1673,42 @@ fn env_duration_ms(name: &str) -> Duration {
 mod tests {
     use super::{
         button_index, env_duration_ms, sanitize_path_component,
-        snapshot_is_visible, visible_mode_enabled, NodeMatch,
+        snapshot_is_visible, visible_mode_enabled, Budget, NodeMatch,
     };
+    use crate::remote::{AppCpu, AppSettled};
+    use std::time::Instant;
+
+    /// A wait for what never comes fails on the idle rule while the app's other thread ticks a
+    /// steady fifth of a core, its main thread running nothing and nothing pending (a Fab sim
+    /// beside a wait for a button that never came ran 19 min, L798418, 11-10). A thread at work, at
+    /// half a core or more, keeps the wait going, and so does a main thread that runs, and a thread
+    /// a loaded box starves: one that runs a fifth of a core and waits for one the rest wants a
+    /// whole one (J11427, 11-11). An app with nothing running fails as soon on a loaded box.
+    #[test]
+    fn a_steady_tick_is_no_progress_and_work_is() {
+        let secs = Duration::from_secs_f64;
+        // its other threads' CPU, its main thread's and what they waited for a core, a second
+        let wait = |other: f64, main: f64, waited: f64| -> Option<(u64, String)> {
+            let (t0, cpu) = (Instant::now(), |m: f64, own: f64, waited: f64| AppCpu { main: secs(m), own: secs(own), faults: 0, waited: secs(waited) });
+            let mut budget = Budget::at(secs(300.0), secs(10.0), cpu(0.0, 0.0, 0.0), t0, Duration::ZERO);
+            (1..=60u64).find_map(|look| {
+                let n = look as f64;
+                let now = t0 + Duration::from_secs(look);
+                let mut settled = || -> crate::TestResult<AppSettled> { Ok(AppSettled { settled: true, only_pool: false, pool: None }) };
+                let mut on_jit = || -> crate::TestResult<bool> { Ok(false) };
+                budget.judge(cpu(main * n, (main + other) * n, waited * n), now, Duration::ZERO, &mut settled, &mut on_jit).unwrap().map(|why| (look, why))
+            })
+        };
+        let (look, why) = wait(0.2, 0.0, 0.0).expect("a steady tick ends the wait");
+        assert_eq!(look, 10, "after the idle budget: {why}");
+        assert!(why.starts_with("it sat idle for 10.0 s") && why.contains("only a steady tick ran, 20% of a core"), "{why}");
+        assert!(wait(0.6, 0.0, 0.0).is_none(), "a thread at 60% of a core is at work");
+        assert!(wait(0.2, 0.1, 0.0).is_none(), "a main thread that runs is progress");
+        assert!(wait(0.2, 0.0, 0.8).is_none(), "a worker starved of a core it wants is at work");
+        assert_eq!(wait(0.2, 0.0, 0.1).map(|(look, _)| look), Some(10), "a tick that waits a little on a loaded box is still a tick");
+        let (look, why) = wait(0.0, 0.0, 0.02).expect("an app with nothing running is idle on a loaded box");
+        assert!(look == 10 && why.starts_with("it sat idle for 10.0 s") && !why.contains("tick"), "{look}: {why}");
+    }
     use crate::{Selector, TestConfig};
     use makepad_studio_protocol::MouseButton;
     use makepad_a11y::{Node, Role, Rect};

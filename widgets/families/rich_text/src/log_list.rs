@@ -237,6 +237,9 @@ script_mod! {
             // fighting a text selection, no rubber band at the top of a
             // list whose top is ancient history.
             auto_tail: true
+            // We notice a reader scrolling away when an action arrives, and
+            // this is what sends one after a scroll.
+            emit_scroll_actions: true
             bounce_at_start: false
             capture_overload: false
             grab_key_focus: false

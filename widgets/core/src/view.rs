@@ -2,7 +2,7 @@ use {
     crate::makepad_draw::event::{DigitId, FingerLongPressEvent},
     crate::{
         animator::*,
-        held_events::HeldEvents,
+        held_events::{self, HeldEvents},
         gauss_view::{arm_gauss_capture, bind_gauss_snapshot, request_window_gauss},
         makepad_derive_widget::*,
         makepad_draw::*,
@@ -153,9 +153,9 @@ pub struct View {
     #[live(false)]
     block_signal_event: bool,
     /// While hidden (`visible: false`) this view's subtree still gets frame
-    /// requests and actions as they happen (see `held_events`); without it
-    /// frame requests wait until it is shown again and actions are skipped.
-    /// Signals and timers reach a hidden subtree either way.
+    /// requests as they happen (see `held_events`); without it they wait
+    /// until it is shown again. Signals, timers and actions reach a hidden
+    /// subtree either way.
     #[live(false)]
     pub background_events: bool,
     #[rust]
@@ -751,6 +751,13 @@ impl ViewRef {
     pub fn set_scroll_pos(&self, cx: &mut Cx, v: Vec2d) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_scroll_pos(cx, v)
+        }
+    }
+
+    /// See [`View::smooth_scroll_to()`].
+    pub fn smooth_scroll_to(&self, cx: &mut Cx, v: Vec2d) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.smooth_scroll_to(cx, v)
         }
     }
 
@@ -1591,7 +1598,9 @@ impl WidgetNode for View {
             // redraw is a no-op and the visibility change only lands on
             // the next unrelated full repaint (the classic "appears after
             // hot reload" bug). Escalate to a full redraw in that case.
-            if visible && matches!(self.area, Area::Empty) {
+            // Not during the draw walk though, since a view shown then (like a list
+            // filling an item) gets drawn by that same walk.
+            if visible && matches!(self.area, Area::Empty) && !cx.is_in_draw_walk {
                 cx.redraw_all();
             } else {
                 self.redraw(cx);
@@ -1706,6 +1715,9 @@ impl Widget for View {
                 self.handle_event(cx, &held, scope);
             }
         }
+        if !self.visible && matches!(event, Event::Actions(_)) && !held_events::in_hidden_subtree(cx) {
+            return held_events::handle_in_hidden_subtree(cx, |cx| self.handle_event(cx, event, scope));
+        }
 
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
@@ -1807,8 +1819,9 @@ impl Widget for View {
                         if self.stood_down_press == Some(e.digit_id) {
                             self.stood_down_press = None;
                         }
-                        if self.grab_key_focus {
-                            cx.set_key_focus(self.area());
+                        // A touch waits until it's a tap, so a drag that scrolls from here keeps the keyboard up.
+                        if self.grab_key_focus && !e.device.is_touch() {
+                            cx.set_key_focus_from_user(self.area());
                         }
                         cx.widget_action(uid, ViewAction::FingerDown(e));
                         if self.animator.is_defined {
@@ -1835,6 +1848,12 @@ impl Widget for View {
                         // animation that never started.
                         self.stood_down_press = None;
                     } else {
+                        // A child that keeps the key focus, like a text input it's about to take, wins over us.
+                        if self.grab_key_focus && e.device.is_touch() && e.is_over && e.was_tap()
+                            && !cx.fingers.is_press_keeping_key_focus(e.digit_id)
+                        {
+                            cx.set_key_focus_from_user(self.area());
+                        }
                         cx.widget_action(uid, ViewAction::FingerUp(e));
                         if self.animator.is_defined {
                             self.animator_play(cx, ids!(down.off));
@@ -2109,6 +2128,7 @@ impl Widget for View {
 
                 if let Some(scroll_bars) = &mut self.scroll_bars_obj {
                     scroll_bars.set_area(self.area);
+                    scroll_bars.draw_scroll_bars_outside_view(cx);
                     scroll_bars.end_nav_area(cx);
                 };
 
@@ -2226,7 +2246,18 @@ impl View {
     /// first frame is drawn at a position put back from before a rebuild.
     pub fn set_scroll_pos_unclipped(&mut self, cx: &mut Cx, v: Vec2d) {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
+            scroll_bars.stop_motion();
             scroll_bars.set_scroll_pos_no_clip(cx, v);
+        } else {
+            self.layout.scroll = v;
+        }
+    }
+
+    /// Like [`View::set_scroll_pos()`], but our scroll bars ease the content there over a short time.
+    /// A view without scroll bars just jumps there.
+    pub fn smooth_scroll_to(&mut self, cx: &mut Cx, v: Vec2d) {
+        if let Some(scroll_bars) = &mut self.scroll_bars_obj {
+            scroll_bars.smooth_scroll_to(cx, v);
         } else {
             self.layout.scroll = v;
         }

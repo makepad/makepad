@@ -5,7 +5,7 @@ use crate::tween::{
 use crate::{
     animator::*, button::*, label::*, makepad_derive_widget::*, makepad_draw::*, view::*,
     widget::*, widget_match_event::WidgetMatchEvent, widget_tree::CxWidgetExt,
-    event::{BackGestureEdge, BackGestureState, DigitDevice, FingerCancelEvent, TouchPoint, TouchState, TouchUpdateEvent},
+    event::{BackGestureEdge, BackGestureState, DigitDevice, FingerCancelEvent, ScrollEvent, ScrollPhase, TouchPoint, TouchState, TouchUpdateEvent},
     scroll_motion::{critically_damped_spring, estimate_release_velocity, push_sample, FrameClock, ScrollSample},
 };
 use std::{cell::Cell, collections::HashMap};
@@ -33,32 +33,32 @@ enum SlideStart {
     Hide,
 }
 
-/// How far (in the OS's points, so UI zoom doesn't shrink it) a finger must move before we decide
-/// whether it's a swipe back. That's iOS's pan threshold, and at least both platforms' long-press tolerance.
-const SWIPE_BACK_SLOP: f64 = 10.0;
+/// How far (in the OS's points, so UI zoom doesn't shrink it) a finger or trackpad scroll must move before
+/// we decide whether it's a swipe. That's iOS's pan threshold, and at least both platforms' long-press tolerance.
+const SWIPE_SLOP: f64 = 10.0;
 
-/// A swipe back must move at least this many times more sideways than vertically.
-const SWIPE_BACK_DIRECTION_RATIO: f64 = 2.0;
+/// A swipe must move at least this many times more sideways than vertically.
+const SWIPE_DIRECTION_RATIO: f64 = 2.0;
 
 /// We project where a released view would coast to over this long (in seconds)
-/// and go back if that's past halfway, like iOS and react-navigation do.
+/// and finish the transition if that's past halfway, like iOS and react-navigation do.
 const RELEASE_PROJECTION_TIME: f64 = 0.3;
 
 /// The fastest release velocity we honor, in layout px per second.
 const MAX_RELEASE_VELOCITY: f64 = 8000.0;
 
-/// A finger that sat still this long (in seconds) before lifting gets no velocity.
+/// A swipe that sat still this long (in seconds) before letting go gets no velocity.
 const STALE_RELEASE_TIME: f64 = 0.04;
 
 /// The decay rate of the critically damped spring that finishes a released view:
 /// sqrt(1000 / 3), react-navigation's iOS stack spring, which rests after about 0.45 s.
 const RELEASE_SPRING_RATE: f64 = 18.257_418_583_505_537;
 
-/// A committed view springs toward a bit past the edge, so it leaves the screen at speed.
-const COMMIT_OVERSHOOT: f64 = 0.05;
+/// A released view leaving the screen springs toward a bit past the edge, so it leaves at speed.
+const LEAVING_OVERSHOOT: f64 = 0.05;
 
-/// A canceled view counts as back at rest once it's this close (in layout px).
-const CANCEL_LANDING_DISTANCE: f64 = 0.5;
+/// A released view coming to rest counts as there once it's this close (in layout px).
+const LANDING_DISTANCE: f64 = 0.5;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -205,6 +205,14 @@ pub enum StackNavigationTransitionAction {
     InteractivePopCommitted,
     /// The current view slid back and the revealed view was released.
     InteractivePopCancelled,
+    /// A trackpad swipe the other way started, so it can drag in a view over the current one.
+    /// To do that, populate it and call [`StackNavigationRef::set_interactive_push_view()`] right away.
+    InteractivePushStarted,
+    /// The user let go past the threshold, so the push will finish. Record it in your history now,
+    /// or call [`StackNavigationRef::cancel_interactive_push()`] to slide the view back out instead.
+    InteractivePushCommitted,
+    /// The pushed view slid back out (or never came) and was released.
+    InteractivePushCancelled,
 }
 
 #[derive(Script, Widget, Animator)]
@@ -710,40 +718,56 @@ struct SwipeBackCandidate {
     start_abs: Vec2d,
 }
 
-/// What drags the current view away during an interactive pop.
+/// A trackpad scroll gesture that we took the sideways part of.
+#[derive(Clone, Copy, Debug, Default)]
+enum ScrollSwipe {
+    #[default]
+    None,
+    /// We took it over this view (or the root view if `None`),
+    /// and it has scrolled by `travel` so far without clearly going sideways.
+    Candidate { view_id: Option<LiveId>, travel: Vec2d },
+    /// It drives a transition (or did), so none of it reaches the views, not even its momentum.
+    Taken { view_id: Option<LiveId> },
+}
+
+/// What moves the view during an interactive transition.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum InteractivePopDriver {
+enum InteractiveDriver {
     /// The finger with this touch uid, which was at `origin_x` when the view was at rest.
     Touch { uid: u64, origin_x: f64 },
     /// The system back gesture (Android's predictive back), whose progress the view follows.
     BackGesture,
+    /// A trackpad scroll gesture, which moves the view as far as it scrolls sideways.
+    Scroll,
 }
 
 #[derive(Clone, Debug)]
-enum InteractivePopPhase {
+enum InteractivePhase {
     Dragging {
-        driver: InteractivePopDriver,
+        driver: InteractiveDriver,
         /// How far the gesture has moved the view over time, for its release velocity.
         samples: Vec<ScrollSample>,
     },
-    /// The gesture let go, so a spring carries the view off-screen (`is_commit`) or back to rest.
+    /// The gesture let go, so a spring finishes the transition (`is_commit`) or undoes it.
     Releasing {
         is_commit: bool,
         start_progress: f64,
-        /// In widths per second, toward going back.
+        /// In widths per second, toward finishing the transition.
         start_velocity: f64,
         clock: FrameClock,
         next_frame: NextFrame,
     },
 }
 
-/// A pop whose outgoing view is moved by a gesture rather than by its slide animation.
+/// A pop or push whose view is moved by a gesture rather than by its slide animation.
 #[derive(Clone, Debug)]
-struct InteractivePop {
-    phase: InteractivePopPhase,
-    /// How far the outgoing view has slid out, as a fraction of its width.
+struct InteractiveTransition {
+    phase: InteractivePhase,
+    /// Whether the gesture slides a new view in, rather than sliding the current view out.
+    is_push: bool,
+    /// How far the transition has gone, as a fraction of the moving view's width.
     progress: f64,
-    /// 1 if the view slides out to the right, or -1 to the left.
+    /// 1 if the moving view is hidden off to the right, or -1 to the left.
     direction: f64,
 }
 
@@ -759,8 +783,8 @@ pub struct StackNavigation {
     #[live]
     stack_templates: ScriptObjectRef,
 
-    /// Whether swiping a finger right pops the current view.
-    /// The system back gesture always can.
+    /// Whether swiping a finger right pops the current view, and so does a trackpad swipe,
+    /// which can also go the other way to push one. The system back gesture always can pop.
     #[live(true)]
     enable_swipe_back: bool,
 
@@ -774,7 +798,10 @@ pub struct StackNavigation {
     swipe_back_candidate: Option<SwipeBackCandidate>,
 
     #[rust]
-    interactive_pop: Option<InteractivePop>,
+    scroll_swipe: ScrollSwipe,
+
+    #[rust]
+    interactive_transition: Option<InteractiveTransition>,
 
     #[rust]
     templates: HashMap<LiveId, ScriptObjectRef>,
@@ -801,7 +828,8 @@ impl ScriptHook for StackNavigation {
             self.current_view = None;
             self.transition = None;
             self.swipe_back_candidate = None;
-            self.interactive_pop = None;
+            self.scroll_swipe = ScrollSwipe::None;
+            self.interactive_transition = None;
             self.dynamic_views.clear();
             self.dynamic_view_templates.clear();
             self.next_dynamic_view_index = 0;
@@ -839,11 +867,11 @@ impl Widget for StackNavigation {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.step_interactive_pop_release(cx, event);
+        self.step_interactive_release(cx, event);
 
-        let dragging_driver = self.interactive_pop.as_ref().and_then(|pop| match pop.phase {
-            InteractivePopPhase::Dragging { driver, .. } => Some(driver),
-            InteractivePopPhase::Releasing { .. } => None,
+        let dragging_driver = self.interactive_transition.as_ref().and_then(|transition| match transition.phase {
+            InteractivePhase::Dragging { driver, .. } => Some(driver),
+            InteractivePhase::Releasing { .. } => None,
         });
         match (event, dragging_driver) {
             (Event::TouchUpdate(e), Some(driver)) => {
@@ -853,36 +881,27 @@ impl Widget for StackNavigation {
                     .filter(|touch| matches!(touch.state, TouchState::Stop | TouchState::Cancel))
                     .collect();
                 cancel_touches(cx, e, &ended_touches, |cx, cancel_event| self.forward_event_to_views(cx, cancel_event, scope));
-                if let InteractivePopDriver::Touch { uid, origin_x } = driver {
+                if let InteractiveDriver::Touch { uid, origin_x } = driver {
                     match e.touches.iter().find(|touch| touch.uid == uid) {
                         Some(touch) if matches!(touch.state, TouchState::Move) => {
-                            self.drag_interactive_pop(cx, touch.abs.x - origin_x, touch.time);
+                            self.drag_interactive_transition(cx, touch.abs.x - origin_x, touch.time);
                         }
                         // iOS re-sends a finger that didn't move with the time it last moved.
                         Some(touch) if matches!(touch.state, TouchState::Stable) => {}
                         Some(touch) if matches!(touch.state, TouchState::Stop) => {
-                            // A finger that sat still before lifting doesn't fling the view.
-                            let has_paused = matches!(&self.interactive_pop,
-                                Some(InteractivePop { phase: InteractivePopPhase::Dragging { samples, .. }, .. })
-                                    if samples.last().is_some_and(|last| touch.time - last.time > STALE_RELEASE_TIME)
-                            );
-                            self.drag_interactive_pop(cx, touch.abs.x - origin_x, touch.time);
-                            let velocity = if has_paused { 0.0 } else { self.get_interactive_pop_release_velocity(cx) };
-                            let progress = self.interactive_pop.as_ref().map_or(0.0, |pop| pop.progress);
-                            let is_commit = progress + RELEASE_PROJECTION_TIME * velocity >= 0.5;
-                            self.release_interactive_pop(cx, is_commit, velocity);
+                            self.end_interactive_drag(cx, touch.abs.x - origin_x, touch.time);
                         }
                         // The OS took the touch away, or we missed its end.
-                        _ => self.release_interactive_pop(cx, false, 0.0),
+                        _ => self.release_interactive_transition(cx, false, 0.0),
                     }
                 }
             }
             // The OS took the touch away.
-            (Event::FingerCancel(e), Some(InteractivePopDriver::Touch { uid, .. }))
+            (Event::FingerCancel(e), Some(InteractiveDriver::Touch { uid, .. }))
                 if e.digit_id == live_id_num!(touch, uid).into() && cx.fingers.press_taken_away(e.digit_id) =>
             {
                 self.forward_event_to_views(cx, event, scope);
-                self.release_interactive_pop(cx, false, 0.0);
+                self.release_interactive_transition(cx, false, 0.0);
             }
             (Event::LongPress(_), Some(_)) => {}
             (Event::TouchUpdate(e), None) => 'touch: {
@@ -905,7 +924,7 @@ impl Widget for StackNavigation {
                 let Some(candidate) = self.swipe_back_candidate.take() else { break 'touch };
                 let [touch] = e.touches.as_slice() else { break 'touch };
                 if touch.uid != candidate.uid
-                    || is_swipe_taken(cx, touch.uid)
+                    || is_swipe_taken(cx, touch.uid, touch.state == TouchState::Start)
                     || cx.sweep_lock_area().is_some()
                 {
                     break 'touch;
@@ -914,14 +933,14 @@ impl Widget for StackNavigation {
                 match touch.state {
                     TouchState::Start => self.swipe_back_candidate = Some(candidate),
                     TouchState::Move | TouchState::Stable
-                        if delta.length() < cx.windows[e.window_id].native_points_to_layout(SWIPE_BACK_SLOP) =>
+                        if delta.length() < cx.windows[e.window_id].native_points_to_layout(SWIPE_SLOP) =>
                     {
                         self.swipe_back_candidate = Some(candidate);
                     }
                     // A finger that swipes right far enough takes over the current view.
                     TouchState::Move | TouchState::Stable => {
                         let (true, Some(current)) = (
-                            delta.x >= SWIPE_BACK_DIRECTION_RATIO * delta.y.abs() && self.transition.is_none(),
+                            delta.x >= SWIPE_DIRECTION_RATIO * delta.y.abs() && self.transition.is_none(),
                             self.current_view,
                         ) else { break 'touch };
                         // The view's widgets see this touch get canceled, so none of them act on it.
@@ -932,7 +951,7 @@ impl Widget for StackNavigation {
                         cx.release_touch_captures(touch.uid);
                         // This hides the soft keyboard of a text input in the view.
                         cx.set_key_focus(Area::Empty);
-                        let driver = InteractivePopDriver::Touch { uid: touch.uid, origin_x: touch.abs.x };
+                        let driver = InteractiveDriver::Touch { uid: touch.uid, origin_x: touch.abs.x };
                         self.begin_interactive_pop(cx, driver, 1.0, touch.time);
                     }
                     _ => {}
@@ -951,61 +970,62 @@ impl Widget for StackNavigation {
                 }
                 self.forward_event_to_views(cx, event, scope);
             }
+            (Event::Scroll(e), _) => self.handle_scroll(cx, event, e, scope),
             (Event::BackGesture(e), _) => match e.state {
                 // A gesture without a touch is a back button press, which keeps its usual slide.
                 BackGestureState::Start if e.abs.is_some() => {
                     // The view follows the finger, so a swipe from the right edge slides it left.
                     let direction = if e.edge == BackGestureEdge::Right { -1.0 } else { 1.0 };
                     // A swipe that the system took over for its back gesture continues under its control.
-                    let can_take_over = self.interactive_pop.as_ref().map_or(self.transition.is_none(), |pop|
-                        pop.direction == direction && matches!(pop.phase,
-                            InteractivePopPhase::Dragging { driver: InteractivePopDriver::Touch { .. }, .. }
-                            | InteractivePopPhase::Releasing { is_commit: false, .. }
+                    let can_take_over = self.interactive_transition.as_ref().map_or(self.transition.is_none(), |transition|
+                        !transition.is_push && transition.direction == direction && matches!(transition.phase,
+                            InteractivePhase::Dragging { driver: InteractiveDriver::Touch { .. }, .. }
+                            | InteractivePhase::Releasing { is_commit: false, .. }
                         )
                     );
                     // A popover holding the pointer gets the Back instead.
                     if !can_take_over || !self.is_back_owned_by_current_view(cx, Cx::owns_cancel) || cx.sweep_lock_area().is_some() {
                         self.forward_event_to_views(cx, event, scope);
-                    } else if let Some(pop) = &mut self.interactive_pop {
-                        pop.phase = InteractivePopPhase::Dragging {
-                            driver: InteractivePopDriver::BackGesture,
+                    } else if let Some(transition) = &mut self.interactive_transition {
+                        transition.phase = InteractivePhase::Dragging {
+                            driver: InteractiveDriver::BackGesture,
                             samples: Vec::new(),
                         };
                     } else {
-                        self.begin_interactive_pop(cx, InteractivePopDriver::BackGesture, direction, e.time);
+                        self.begin_interactive_pop(cx, InteractiveDriver::BackGesture, direction, e.time);
                     }
                 }
                 // The system smooths the gesture's progress, and eases it back to 0
                 // when the user lets go without going back.
-                BackGestureState::Move if dragging_driver == Some(InteractivePopDriver::BackGesture) => {
-                    let distance = e.progress * self.get_interactive_pop_width(cx);
-                    self.drag_interactive_pop(cx, distance, e.time);
+                BackGestureState::Move if dragging_driver == Some(InteractiveDriver::BackGesture) => {
+                    let distance = e.progress * self.get_interactive_width(cx);
+                    self.drag_interactive_transition(cx, distance, e.time);
                 }
-                BackGestureState::Cancel if dragging_driver == Some(InteractivePopDriver::BackGesture) => {
-                    let velocity = self.get_interactive_pop_release_velocity(cx);
-                    self.release_interactive_pop(cx, false, velocity);
+                BackGestureState::Cancel if dragging_driver == Some(InteractiveDriver::BackGesture) => {
+                    let velocity = self.get_interactive_release_velocity(cx);
+                    self.release_interactive_transition(cx, false, velocity);
                 }
                 _ => self.forward_event_to_views(cx, event, scope),
             },
             // Completing the system back gesture finishes its pop,
             // unless something in front of the view took Back meanwhile.
-            (Event::BackPressed { .. }, Some(InteractivePopDriver::BackGesture)) => {
+            (Event::BackPressed { .. }, Some(InteractiveDriver::BackGesture)) => {
                 let owns_back = self.is_back_owned_by_current_view(cx, Cx::owns_cancel);
-                let velocity = self.get_interactive_pop_release_velocity(cx);
+                let velocity = self.get_interactive_release_velocity(cx);
                 if owns_back && event.back_pressed() {
-                    self.release_interactive_pop(cx, true, velocity);
+                    self.release_interactive_transition(cx, true, velocity);
                 } else {
-                    self.release_interactive_pop(cx, false, velocity);
+                    self.release_interactive_transition(cx, false, velocity);
                     self.forward_event_to_views(cx, event, scope);
                 }
             }
             // Back while the view slides back into place goes back after all. Without predictive back,
             // that's how the system's back gesture ends a swipe it took from us.
-            (Event::BackPressed { .. }, None) if matches!(&self.interactive_pop,
-                Some(InteractivePop { phase: InteractivePopPhase::Releasing { is_commit: false, .. }, .. })
+            (Event::BackPressed { .. }, None) if matches!(&self.interactive_transition,
+                Some(InteractiveTransition { phase: InteractivePhase::Releasing { is_commit: false, .. }, is_push: false, .. })
             ) => {
                 if self.is_back_owned_by_current_view(cx, Cx::owns_cancel) && event.back_pressed() {
-                    self.release_interactive_pop(cx, true, 0.0);
+                    self.release_interactive_transition(cx, true, 0.0);
                 } else {
                     self.forward_event_to_views(cx, event, scope);
                 }
@@ -1050,6 +1070,10 @@ impl WidgetNode for StackNavigation {
             return false;
         }
         let active = match self.transition {
+            // A view that a gesture pushes in only becomes active once the user commits to it.
+            Some(StackNavigationTransition::Push { outgoing, .. }) if self.has_uncommitted_gesture() => {
+                outgoing.unwrap_or(id!(root_view))
+            }
             Some(StackNavigationTransition::Push { incoming, .. }) => incoming,
             Some(StackNavigationTransition::Pop { outgoing, .. }) => outgoing,
             None => self.current_view.unwrap_or(id!(root_view)),
@@ -1276,11 +1300,15 @@ impl StackNavigation {
 
     fn restore_current_visual_state(&mut self, cx: &mut Cx) {
         // A gesture outlives the re-apply, so we put both of its views back where it had them.
-        if let (true, Some(StackNavigationTransition::Pop { incoming, .. })) = (self.interactive_pop.is_some(), self.transition) {
-            if let Some(incoming) = incoming {
-                self.stack_view_ref(cx, incoming).show_at_rest(cx);
+        if let (Some(_), Some(transition)) = (&self.interactive_transition, self.transition) {
+            let view_at_rest = match transition {
+                StackNavigationTransition::Pop { incoming, .. } => incoming,
+                StackNavigationTransition::Push { outgoing, .. } => outgoing,
+            };
+            if let Some(view_id) = view_at_rest {
+                self.stack_view_ref(cx, view_id).show_at_rest(cx);
             }
-            self.set_outgoing_slide(cx);
+            self.set_moving_view_slide(cx);
             return;
         }
         let transition = self.transition.take();
@@ -1316,7 +1344,7 @@ impl StackNavigation {
     }
 
     fn push_view(&mut self, view_id: LiveId, cx: &mut Cx, animate: Animate) {
-        if self.transition.is_some() || self.current_view == Some(view_id) {
+        if self.is_transitioning() || self.current_view == Some(view_id) {
             return;
         }
 
@@ -1351,7 +1379,7 @@ impl StackNavigation {
     }
 
     fn pop_to_view(&mut self, cx: &mut Cx, view_id: Option<LiveId>) {
-        if self.transition.is_some() || self.current_view == view_id {
+        if self.is_transitioning() || self.current_view == view_id {
             return;
         }
         let Some(outgoing) = self.current_view else {
@@ -1481,130 +1509,321 @@ impl StackNavigation {
         }
     }
 
+    /// Lets a trackpad gesture that scrolls sideways move the views like a finger swipe does:
+    /// scrolling toward the left pops the current view, and toward the right pushes one in.
+    fn handle_scroll(&mut self, cx: &mut Cx, event: &Event, e: &ScrollEvent, scope: &mut Scope) {
+        // We keep the sideways part of a gesture we took until it ends, so any other owner means a new gesture.
+        let is_taken_gesture = match self.scroll_swipe {
+            ScrollSwipe::None => false,
+            ScrollSwipe::Candidate { view_id, .. } | ScrollSwipe::Taken { view_id } => {
+                cx.scroll_owner(Vec2Index::X) == self.get_view_area(cx, view_id)
+            }
+        };
+        match self.scroll_swipe {
+            ScrollSwipe::Taken { .. } if is_taken_gesture => {
+                // An app that didn't give us a view to push in gets none of this swipe.
+                if self.transition.is_none() && self.interactive_transition.as_ref().is_some_and(|transition| transition.is_push) {
+                    self.end_interactive_transition(cx, false);
+                }
+                let Some(InteractiveTransition {
+                    phase: InteractivePhase::Dragging { driver: InteractiveDriver::Scroll, samples },
+                    is_push,
+                    ..
+                }) = &self.interactive_transition else { return };
+                let delta = if *is_push { e.scroll.x } else { -e.scroll.x };
+                let distance = samples.last().map_or(0.0, |sample| sample.abs) + delta;
+                match e.phase {
+                    ScrollPhase::Changed => self.drag_interactive_transition(cx, distance, e.time),
+                    ScrollPhase::Ended => self.end_interactive_drag(cx, distance, e.time),
+                    _ => {}
+                }
+            }
+            ScrollSwipe::Candidate { view_id, travel } if is_taken_gesture => {
+                self.forward_event_to_views(cx, event, scope);
+                // The gesture may have locked onto scrolling vertically instead.
+                let area = self.get_view_area(cx, view_id);
+                let is_still_taken = cx.is_scroll_owner(e, area, Vec2Index::X, false);
+                match e.phase {
+                    ScrollPhase::Changed if is_still_taken => {}
+                    ScrollPhase::Touched => return,
+                    _ => {
+                        self.scroll_swipe = ScrollSwipe::None;
+                        return;
+                    }
+                }
+                let travel = travel + e.scroll;
+                if travel.length() < cx.windows[e.window_id].native_points_to_layout(SWIPE_SLOP) {
+                    self.scroll_swipe = ScrollSwipe::Candidate { view_id, travel };
+                    return;
+                }
+                self.scroll_swipe = ScrollSwipe::None;
+                if travel.x.abs() < SWIPE_DIRECTION_RATIO * travel.y.abs() {
+                    return;
+                }
+                if travel.x > 0.0 {
+                    self.begin_interactive_push(cx, InteractiveDriver::Scroll, e.time);
+                } else if view_id.is_some() {
+                    self.begin_interactive_pop(cx, InteractiveDriver::Scroll, 1.0, e.time);
+                } else {
+                    return;
+                }
+                self.scroll_swipe = ScrollSwipe::Taken { view_id };
+            }
+            _ => {
+                // A drag whose gesture ended without the fingers lifting (e.g., the system took it over) slides back.
+                if matches!(&self.interactive_transition,
+                    Some(InteractiveTransition { phase: InteractivePhase::Dragging { driver: InteractiveDriver::Scroll, .. }, .. })
+                ) {
+                    self.release_interactive_transition(cx, false, 0.0);
+                }
+                self.scroll_swipe = ScrollSwipe::None;
+                // Only a trackpad gesture starting on a view that Back would go to (so nothing covers it) can swipe it.
+                // Its sideways part has no owner yet when it starts, while a gesture we let go of is still ours.
+                let candidate_view = (self.enable_swipe_back
+                    && !self.is_transitioning()
+                    && cx.sweep_lock_area().is_none()
+                    && matches!(e.phase, ScrollPhase::Began | ScrollPhase::Changed)
+                    && cx.scroll_owner(Vec2Index::X).is_empty()
+                    && (self.current_view.is_none() || self.is_back_owned_by_current_view(cx, Cx::owns_back_swipe)))
+                    .then_some(self.current_view)
+                    .filter(|view_id| self.get_view_area(cx, *view_id).rect(cx).contains(e.abs));
+                // A list in the view that can't scroll sideways leaves that to us.
+                let container_axes = [candidate_view.is_some(), false];
+                cx.begin_scroll_container(container_axes);
+                self.forward_event_to_views(cx, event, scope);
+                cx.end_scroll_container(container_axes);
+                if let Some(view_id) = candidate_view {
+                    let area = self.get_view_area(cx, view_id);
+                    if cx.is_scroll_owner(e, area, Vec2Index::X, true) {
+                        self.scroll_swipe = ScrollSwipe::Candidate { view_id, travel: e.scroll };
+                    }
+                }
+            }
+        }
+    }
+
     /// Starts popping the current view under a gesture's control at `time`,
     /// revealing the root view until the app picks another one.
-    fn begin_interactive_pop(&mut self, cx: &mut Cx, driver: InteractivePopDriver, direction: f64, time: f64) {
+    fn begin_interactive_pop(&mut self, cx: &mut Cx, driver: InteractiveDriver, direction: f64, time: f64) {
         let Some(outgoing) = self.current_view else { return };
         self.swipe_back_candidate = None;
         self.transition = Some(StackNavigationTransition::Pop { incoming: None, outgoing });
-        let mut samples = Vec::new();
-        push_sample(&mut samples, 0.0, time);
-        self.interactive_pop = Some(InteractivePop {
-            phase: InteractivePopPhase::Dragging { driver, samples },
+        self.interactive_transition = Some(InteractiveTransition {
+            phase: InteractivePhase::Dragging { driver, samples: vec![ScrollSample { abs: 0.0, time }] },
+            is_push: false,
             progress: 0.0,
             direction,
         });
-        self.set_outgoing_slide(cx);
+        self.set_moving_view_slide(cx);
         // The view beneath hasn't been drawn since it got covered.
         self.redraw(cx);
         cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::InteractivePopStarted);
     }
 
-    /// Moves the dragged view to where the gesture has taken it at `time`,
-    /// `distance` layout px from rest.
-    fn drag_interactive_pop(&mut self, cx: &mut Cx, distance: f64, time: f64) {
-        let width = self.get_interactive_pop_width(cx);
-        let Some(InteractivePop {
-            phase: InteractivePopPhase::Dragging { samples, .. },
-            progress,
-            ..
-        }) = &mut self.interactive_pop else { return };
-        push_sample(samples, distance, time);
-        *progress = (distance / width).clamp(0.0, 1.0);
-        self.set_outgoing_slide(cx);
+    /// Starts pushing a view in under a gesture's control at `time`, once the app gives us that view.
+    fn begin_interactive_push(&mut self, cx: &mut Cx, driver: InteractiveDriver, time: f64) {
+        self.interactive_transition = Some(InteractiveTransition {
+            phase: InteractivePhase::Dragging { driver, samples: vec![ScrollSample { abs: 0.0, time }] },
+            is_push: true,
+            progress: 0.0,
+            direction: 1.0,
+        });
+        cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::InteractivePushStarted);
     }
 
-    /// How fast the gesture was moving the view, in widths per second toward going back.
-    fn get_interactive_pop_release_velocity(&mut self, cx: &mut Cx) -> f64 {
-        let width = self.get_interactive_pop_width(cx);
-        let Some(InteractivePop { phase: InteractivePopPhase::Dragging { samples, .. }, .. }) = &self.interactive_pop else {
+    /// Moves the dragged view to where the gesture has taken it at `time`,
+    /// `distance` layout px from where it started.
+    fn drag_interactive_transition(&mut self, cx: &mut Cx, distance: f64, time: f64) {
+        let width = self.get_interactive_width(cx);
+        let Some(InteractiveTransition {
+            phase: InteractivePhase::Dragging { samples, .. },
+            progress,
+            ..
+        }) = &mut self.interactive_transition else { return };
+        push_sample(samples, distance, time);
+        *progress = (distance / width).clamp(0.0, 1.0);
+        self.set_moving_view_slide(cx);
+    }
+
+    /// Moves the dragged view to `distance` at `time` and lets go of it, which finishes the transition
+    /// if the view would coast past halfway. A gesture that sat still before letting go doesn't fling it.
+    fn end_interactive_drag(&mut self, cx: &mut Cx, distance: f64, time: f64) {
+        let has_paused = matches!(&self.interactive_transition,
+            Some(InteractiveTransition { phase: InteractivePhase::Dragging { samples, .. }, .. })
+                if samples.last().is_some_and(|last| time - last.time > STALE_RELEASE_TIME)
+        );
+        self.drag_interactive_transition(cx, distance, time);
+        let velocity = if has_paused { 0.0 } else { self.get_interactive_release_velocity(cx) };
+        let progress = self.interactive_transition.as_ref().map_or(0.0, |transition| transition.progress);
+        let is_commit = progress + RELEASE_PROJECTION_TIME * velocity >= 0.5;
+        self.release_interactive_transition(cx, is_commit, velocity);
+    }
+
+    /// How fast the gesture was moving the view, in widths per second toward finishing the transition.
+    fn get_interactive_release_velocity(&mut self, cx: &mut Cx) -> f64 {
+        let width = self.get_interactive_width(cx);
+        let Some(InteractiveTransition { phase: InteractivePhase::Dragging { samples, .. }, .. }) = &self.interactive_transition else {
             return 0.0;
         };
         let (velocity, _) = estimate_release_velocity(samples);
         velocity.clamp(-MAX_RELEASE_VELOCITY, MAX_RELEASE_VELOCITY) / width
     }
 
-    /// Lets go of the view, which a spring carries off-screen if `is_commit` or else back to rest.
-    /// `velocity` is in widths per second toward going back.
-    fn release_interactive_pop(&mut self, cx: &mut Cx, is_commit: bool, velocity: f64) {
-        let Some(pop) = &mut self.interactive_pop else { return };
-        pop.phase = InteractivePopPhase::Releasing {
+    /// Lets go of the view, which a spring carries to where the transition ends if `is_commit`,
+    /// or else back. `velocity` is in widths per second toward finishing the transition.
+    fn release_interactive_transition(&mut self, cx: &mut Cx, is_commit: bool, velocity: f64) {
+        let Some(transition) = &mut self.interactive_transition else { return };
+        transition.phase = InteractivePhase::Releasing {
             is_commit,
-            start_progress: pop.progress,
+            start_progress: transition.progress,
             // We only keep the part of the velocity that heads where the view is going.
             start_velocity: if is_commit { velocity.max(0.0) } else { velocity.min(0.0) },
             clock: FrameClock::default(),
             next_frame: cx.new_next_frame(),
         };
+        let is_push = transition.is_push;
         if is_commit {
-            cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::InteractivePopCommitted);
+            let action = if is_push {
+                StackNavigationTransitionAction::InteractivePushCommitted
+            } else {
+                StackNavigationTransitionAction::InteractivePopCommitted
+            };
+            cx.widget_action(self.widget_uid(), action);
         }
     }
 
-    fn step_interactive_pop_release(&mut self, cx: &mut Cx, event: &Event) {
-        let Some(InteractivePop { phase: InteractivePopPhase::Releasing { next_frame, .. }, .. }) = &self.interactive_pop else { return };
+    fn step_interactive_release(&mut self, cx: &mut Cx, event: &Event) {
+        let Some(InteractiveTransition { phase: InteractivePhase::Releasing { next_frame, .. }, .. }) = &self.interactive_transition else { return };
         let Some(frame) = next_frame.is_event(event) else { return };
-        let width = self.get_interactive_pop_width(cx);
-        let Some(pop) = &mut self.interactive_pop else { return };
-        let InteractivePopPhase::Releasing { is_commit, start_progress, start_velocity, clock, next_frame } = &mut pop.phase else { return };
+        let width = self.get_interactive_width(cx);
+        let Some(transition) = &mut self.interactive_transition else { return };
+        let InteractivePhase::Releasing { is_commit, start_progress, start_velocity, clock, next_frame } = &mut transition.phase else { return };
         let is_commit = *is_commit;
-        let target = if is_commit { 1.0 + COMMIT_OVERSHOOT } else { 0.0 };
         let elapsed = clock.advance(frame.time);
-        let progress = target + critically_damped_spring(*start_progress - target, *start_velocity, RELEASE_SPRING_RATE, elapsed);
-        let has_landed = if is_commit {
-            progress >= 1.0
-        } else {
-            progress * width <= CANCEL_LANDING_DISTANCE
+        let spring_toward = |target: f64| target + critically_damped_spring(*start_progress - target, *start_velocity, RELEASE_SPRING_RATE, elapsed);
+        // A popped view leaves the screen once committed and a pushed one once undone, aiming a bit past
+        // the edge so it leaves at speed. A view coming to rest lands once it's close enough.
+        let (progress, has_landed) = match (is_commit, transition.is_push) {
+            (true, false) => {
+                let progress = spring_toward(1.0 + LEAVING_OVERSHOOT);
+                (progress, progress >= 1.0)
+            }
+            (false, true) => {
+                let progress = spring_toward(-LEAVING_OVERSHOOT);
+                (progress, progress <= 0.0)
+            }
+            (true, true) => {
+                let progress = spring_toward(1.0);
+                (progress, (1.0 - progress) * width <= LANDING_DISTANCE)
+            }
+            (false, false) => {
+                let progress = spring_toward(0.0);
+                (progress, progress * width <= LANDING_DISTANCE)
+            }
         };
         if has_landed {
-            self.end_interactive_pop(cx, is_commit);
+            self.end_interactive_transition(cx, is_commit);
         } else {
             *next_frame = cx.new_next_frame();
-            pop.progress = progress;
-            self.set_outgoing_slide(cx);
+            transition.progress = progress;
+            self.set_moving_view_slide(cx);
         }
     }
 
-    /// Ends an interactive pop: a commit hides the outgoing view, which then finishes popping
-    /// like a timed pop does, and a cancel puts it back at rest and releases the revealed view.
-    fn end_interactive_pop(&mut self, cx: &mut Cx, is_commit: bool) {
-        self.interactive_pop = None;
-        let Some(StackNavigationTransition::Pop { incoming, outgoing }) = self.transition else { return };
-        let outgoing_ref = self.stack_view_ref(cx, outgoing);
-        if is_commit {
-            if let Some(mut outgoing_view) = outgoing_ref.borrow_mut() {
-                outgoing_view.is_moved_by_gesture = false;
-                outgoing_view.animator_cut(cx, ids!(slide.hide));
-                outgoing_view.begin_hide(cx);
-                outgoing_view.finish_hide(cx);
+    /// Ends an interactive transition: a committed pop finishes like a timed pop does and a committed push
+    /// finishes right away, while undoing either releases the view that the gesture revealed or pushed in.
+    fn end_interactive_transition(&mut self, cx: &mut Cx, is_commit: bool) {
+        let Some(interactive) = self.interactive_transition.take() else { return };
+        match (self.transition, interactive.is_push) {
+            (Some(StackNavigationTransition::Pop { incoming, outgoing }), false) => {
+                let outgoing_ref = self.stack_view_ref(cx, outgoing);
+                if is_commit {
+                    if let Some(mut outgoing_view) = outgoing_ref.borrow_mut() {
+                        outgoing_view.is_moved_by_gesture = false;
+                        outgoing_view.animator_cut(cx, ids!(slide.hide));
+                        outgoing_view.begin_hide(cx);
+                        outgoing_view.finish_hide(cx);
+                    }
+                } else {
+                    self.transition = None;
+                    if let Some(incoming) = incoming {
+                        self.release_view(cx, incoming);
+                    }
+                    outgoing_ref.show_at_rest(cx);
+                    cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::InteractivePopCancelled);
+                }
             }
-        } else {
-            self.transition = None;
-            if let Some(incoming) = incoming {
+            (Some(StackNavigationTransition::Push { incoming, .. }), true) if is_commit => {
+                let incoming_uid = self.stack_view_ref(cx, incoming).widget_uid();
+                self.finish_push_transition(cx, incoming_uid);
+            }
+            (Some(StackNavigationTransition::Push { incoming, .. }), true) => {
+                self.transition = None;
                 self.release_view(cx, incoming);
+                cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::InteractivePushCancelled);
             }
-            outgoing_ref.show_at_rest(cx);
-            cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::InteractivePopCancelled);
+            // The app never gave us a view to push in.
+            (None, true) => cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::InteractivePushCancelled),
+            _ => {}
         }
         self.redraw(cx);
     }
 
-    fn set_outgoing_slide(&mut self, cx: &mut Cx) {
-        let (Some(pop), Some(StackNavigationTransition::Pop { outgoing, .. })) = (&self.interactive_pop, self.transition) else { return };
-        let slide = pop.direction * pop.progress.clamp(0.0, 1.0);
-        let outgoing_ref = self.stack_view_ref(cx, outgoing);
-        let Some(mut outgoing_view) = outgoing_ref.borrow_mut() else { return };
-        outgoing_view.view.visible = true;
-        outgoing_view.is_moved_by_gesture = true;
-        outgoing_view.stop_slide();
-        outgoing_view.slide = slide;
-        outgoing_view.view.redraw(cx);
+    /// Undoes the gesture's pop (or push if `is_push`), sliding its view back where it was.
+    fn cancel_interactive_transition(&mut self, cx: &mut Cx, is_push: bool) {
+        let Some(transition) = self.interactive_transition.as_ref().filter(|transition| transition.is_push == is_push) else { return };
+        let is_unmoved = matches!(transition.phase, InteractivePhase::Dragging { .. }) && transition.progress == 0.0;
+        let is_sliding_back = matches!(transition.phase, InteractivePhase::Releasing { is_commit: false, .. });
+        // A transition the app refuses before it moves ends right away, so the next gesture asks the app again.
+        if is_unmoved {
+            self.end_interactive_transition(cx, false);
+        } else if !is_sliding_back {
+            self.release_interactive_transition(cx, false, 0.0);
+        }
     }
 
-    /// The width of the view an interactive pop moves, which its progress is a fraction of.
-    fn get_interactive_pop_width(&mut self, cx: &mut Cx) -> f64 {
-        let Some(StackNavigationTransition::Pop { outgoing, .. }) = self.transition else { return 1.0 };
-        self.stack_view_ref(cx, outgoing).area().rect(cx).size.x.max(1.0)
+    fn set_moving_view_slide(&mut self, cx: &mut Cx) {
+        let Some(interactive) = &self.interactive_transition else { return };
+        // A popped view slides out as the transition goes, while a pushed view slides in.
+        let (view_id, hidden_fraction) = match (self.transition, interactive.is_push) {
+            (Some(StackNavigationTransition::Pop { outgoing, .. }), false) => (outgoing, interactive.progress),
+            (Some(StackNavigationTransition::Push { incoming, .. }), true) => (incoming, 1.0 - interactive.progress),
+            _ => return,
+        };
+        let slide = interactive.direction * hidden_fraction.clamp(0.0, 1.0);
+        let view_ref = self.stack_view_ref(cx, view_id);
+        let Some(mut view) = view_ref.borrow_mut() else { return };
+        view.view.visible = true;
+        view.is_moved_by_gesture = true;
+        view.stop_slide();
+        view.slide = slide;
+        view.view.redraw(cx);
+    }
+
+    /// The width of the current view, which an interactive transition's progress is a fraction of.
+    fn get_interactive_width(&mut self, cx: &mut Cx) -> f64 {
+        let current_view = self.current_view;
+        self.get_view_area(cx, current_view).rect(cx).size.x.max(1.0)
+    }
+
+    /// The area of the given stack view, or of the root view if `None`.
+    fn get_view_area(&mut self, cx: &mut Cx, view_id: Option<LiveId>) -> Area {
+        match view_id {
+            Some(view_id) => self.stack_view_ref(cx, view_id).area(),
+            None => self.view.widget(cx, ids!(root_view)).area(),
+        }
+    }
+
+    /// Whether a gesture is moving a view before the user has committed to its transition.
+    fn has_uncommitted_gesture(&self) -> bool {
+        self.interactive_transition.as_ref().is_some_and(|transition|
+            !matches!(transition.phase, InteractivePhase::Releasing { is_commit: true, .. })
+        )
+    }
+
+    /// Whether a view is sliding in or out, or a gesture is about to push one in.
+    fn is_transitioning(&self) -> bool {
+        self.transition.is_some() || self.interactive_transition.is_some()
     }
 
     /// Whether the current view's Back scope passes `owns`, e.g., `Cx::owns_cancel`.
@@ -1696,16 +1915,17 @@ impl StackNavigationRef {
     pub fn is_transitioning(&self) -> bool {
         self.borrow()
             .as_ref()
-            .is_some_and(|inner| inner.transition.is_some())
+            .is_some_and(|inner| inner.is_transitioning())
     }
 
     /// Whether a swipe or back gesture is moving the current view and hasn't committed its pop yet.
     /// An app that handles Back itself should leave Back to the stack then, since a back gesture ends with one.
     pub fn has_pending_interactive_pop(&self) -> bool {
         self.borrow().as_ref().is_some_and(|inner| matches!(
-            inner.interactive_pop,
-            Some(InteractivePop {
-                phase: InteractivePopPhase::Dragging { .. } | InteractivePopPhase::Releasing { is_commit: false, .. },
+            inner.interactive_transition,
+            Some(InteractiveTransition {
+                phase: InteractivePhase::Dragging { .. } | InteractivePhase::Releasing { is_commit: false, .. },
+                is_push: false,
                 ..
             })
         ))
@@ -1715,7 +1935,7 @@ impl StackNavigationRef {
     /// or the root view if `None`. Like with `pop_to_view()`, the view must already be populated.
     pub fn set_interactive_pop_view(&self, cx: &mut Cx, view_id: Option<LiveId>) {
         let Some(mut inner) = self.borrow_mut() else { return };
-        let (Some(_), Some(StackNavigationTransition::Pop { incoming, outgoing })) = (&inner.interactive_pop, inner.transition) else { return };
+        let (Some(_), Some(StackNavigationTransition::Pop { incoming, outgoing })) = (&inner.interactive_transition, inner.transition) else { return };
         if view_id == incoming || view_id == Some(outgoing) {
             return;
         }
@@ -1733,27 +1953,48 @@ impl StackNavigationRef {
     /// even if the user already let go of it past the threshold.
     pub fn cancel_interactive_pop(&self, cx: &mut Cx) {
         let Some(mut inner) = self.borrow_mut() else { return };
-        let Some(pop) = &inner.interactive_pop else { return };
-        let is_unmoved = matches!(pop.phase, InteractivePopPhase::Dragging { .. }) && pop.progress == 0.0;
-        let is_sliding_back = matches!(pop.phase, InteractivePopPhase::Releasing { is_commit: false, .. });
-        // A pop the app refuses before it moves ends right away, so the next gesture asks the app again.
-        if is_unmoved {
-            inner.end_interactive_pop(cx, false);
-        } else if !is_sliding_back {
-            inner.release_interactive_pop(cx, false, 0.0);
-        }
+        inner.cancel_interactive_transition(cx, false);
     }
 
-    /// Ends a swipe or back gesture's pop right away: a committed pop finishes and any other is canceled.
-    pub fn end_interactive_pop_without_animation(&self, cx: &mut Cx) {
+    /// Slides the given view in over the current one as a trackpad swipe pushes it,
+    /// or over the root view. Like with `push()`, the view must already be populated.
+    pub fn set_interactive_push_view(&self, cx: &mut Cx, view_id: LiveId) {
         let Some(mut inner) = self.borrow_mut() else { return };
-        let Some(pop) = inner.interactive_pop.take() else { return };
-        match (pop.phase, inner.transition) {
-            (InteractivePopPhase::Releasing { is_commit: true, .. }, Some(StackNavigationTransition::Pop { outgoing, .. })) => {
+        let is_waiting_for_view = inner.transition.is_none()
+            && inner.interactive_transition.as_ref().is_some_and(|transition| transition.is_push);
+        if !is_waiting_for_view || inner.current_view == Some(view_id) {
+            return;
+        }
+        let outgoing = inner.current_view;
+        inner.transition = Some(StackNavigationTransition::Push { incoming: view_id, outgoing });
+        let parent_uid = inner.widget_uid();
+        inner.stack_view_ref(cx, view_id).set_parent_navigation_uid(parent_uid);
+        inner.set_moving_view_slide(cx);
+        inner.redraw(cx);
+    }
+
+    /// Slides the view that a trackpad swipe is pushing in back out,
+    /// even if the user already let go of it past the threshold.
+    pub fn cancel_interactive_push(&self, cx: &mut Cx) {
+        let Some(mut inner) = self.borrow_mut() else { return };
+        inner.cancel_interactive_transition(cx, true);
+    }
+
+    /// Ends a gesture's pop or push right away: a committed one finishes and any other is canceled.
+    pub fn end_interactive_transition_without_animation(&self, cx: &mut Cx) {
+        let Some(mut inner) = self.borrow_mut() else { return };
+        let Some((is_push, is_commit)) = inner.interactive_transition.as_ref().map(|transition| (
+            transition.is_push,
+            matches!(transition.phase, InteractivePhase::Releasing { is_commit: true, .. }),
+        )) else { return };
+        match (inner.transition, is_push) {
+            // A committed pop finishes now, rather than once its view's hide ends.
+            (Some(StackNavigationTransition::Pop { outgoing, .. }), false) if is_commit => {
+                inner.interactive_transition = None;
                 let outgoing_uid = inner.stack_view_ref(cx, outgoing).widget_uid();
                 inner.finish_pop_transition(cx, outgoing_uid);
             }
-            _ => inner.end_interactive_pop(cx, false),
+            _ => inner.end_interactive_transition(cx, is_commit),
         }
     }
 
@@ -1841,14 +2082,13 @@ impl StackNavigationRef {
     /// Returns None if the root view is (or is becoming) the visible one.
     pub fn destination_view(&self) -> Option<LiveId> {
         let inner = self.borrow()?;
+        // The view that a gesture moves away from stays the destination until the user commits.
+        let is_uncommitted = inner.has_uncommitted_gesture();
         match inner.transition {
+            Some(StackNavigationTransition::Push { outgoing, .. }) if is_uncommitted => outgoing,
             Some(StackNavigationTransition::Push { incoming, .. }) => Some(incoming),
-            // A view that a gesture is dragging away stays the destination until the user commits.
-            Some(StackNavigationTransition::Pop { incoming, outgoing }) => match &inner.interactive_pop {
-                Some(InteractivePop { phase: InteractivePopPhase::Releasing { is_commit: true, .. }, .. })
-                | None => incoming,
-                Some(_) => Some(outgoing),
-            },
+            Some(StackNavigationTransition::Pop { outgoing, .. }) if is_uncommitted => Some(outgoing),
+            Some(StackNavigationTransition::Pop { incoming, .. }) => incoming,
             None => inner.current_view,
         }
     }
@@ -1878,11 +2118,18 @@ impl StackNavigationRef {
     }
 }
 
-/// Whether a widget in the view keeps this touch's drag: one that gives it its own meaning,
-/// or a scroller that took its horizontal drag.
-fn is_swipe_taken(cx: &Cx, uid: u64) -> bool {
+/// Whether a widget in the view keeps this touch's drag: one that gives it its own meaning, a scroller that took
+/// its horizontal drag, or the focused one when the press keeps its focus, like a text input being edited.
+fn is_swipe_taken(cx: &Cx, uid: u64, has_just_landed: bool) -> bool {
+    let digit_id = live_id_num!(touch, uid).into();
+    let key_focus = cx.key_focus();
     cx.fingers.is_touch_drag_claimed(uid)
-        || cx.fingers.scroll_drag_owner(live_id_num!(touch, uid).into(), Vec2Index::X).is_some()
+        || cx.fingers.scroll_drag_owner(digit_id, Vec2Index::X).is_some()
+        // A focused text input marks its press as it lands, while a scroller marks it later, so only that counts.
+        || (has_just_landed
+            && cx.fingers.is_press_keeping_key_focus(digit_id)
+            && !key_focus.is_empty()
+            && cx.fingers.find_digit_for_captured_area(key_focus) == Some(digit_id))
 }
 
 /// Shows `dispatch` a copy of `e` with just `touches`, canceled, so widgets that saw them start let go

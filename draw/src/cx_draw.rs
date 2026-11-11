@@ -55,6 +55,7 @@ impl<'a> DerefMut for CxDraw<'a> {
 
 impl<'a> Drop for CxDraw<'a> {
     fn drop(&mut self) {
+        self.cx.is_in_draw_walk = false;
         if !self.fonts.borrow_mut().prepare_textures(self.cx) {
             self.cx.redraw_all();
         }
@@ -72,11 +73,12 @@ impl<'a> Drop for CxDraw<'a> {
 
 impl<'a> CxDraw<'a> {
     pub fn new(cx: &'a mut Cx, draw_event: &'a DrawEvent) -> Self {
+        cx.is_in_draw_walk = true;
         Self::lazy_construct_fonts(cx);
         Self::lazy_construct_nav_tree(cx);
         cx.begin_draw_context();
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
-        fonts.borrow_mut().prepare_atlases_if_needed(cx);
+        fonts.borrow_mut().prepare_atlases_if_needed(cx, draw_event);
         let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
         let mut scratch = cx.global::<CxDrawScratchPool>().0.pop().unwrap_or_default();
         scratch.pass_stack.reserve(16);
@@ -125,16 +127,24 @@ impl<'a> CxDraw<'a> {
         // a finished glyph upgrade (MSDF worker) raises the UI signal: redraw so the next draw
         // applies it, instead of keeping the stand-in glyphs until unrelated input
         cx.signal_hooks.push(|cx| {
-            // ... and a finished system font lookup (or index build) completes its families
-            let waiting = cx
+            // ... and a finished system font lookup (or the index build its text waited for)
+            // completes its families
+            // (fonts borrowed elsewhere count as waited for: the index's news is not lost)
+            let state = cx
                 .get_global_ref::<Rc<RefCell<Fonts>>>()
-                .and_then(|fonts| fonts.try_borrow().ok().map(|fonts| fonts.msdf_results_waiting()))
-                .unwrap_or(false)
-                | crate::text::system_faces::has_news(cx);
+                .map(|fonts| fonts.try_borrow().map(|fonts| (fonts.msdf_results_waiting(), fonts.system_index_waited())));
+            let (msdf, index_waited) = match state {
+                Some(Ok(state)) => state,
+                Some(Err(_)) => (false, true),
+                None => (false, false),
+            };
+            let waiting = msdf | crate::text::system_faces::has_news(cx, index_waited);
             if waiting {
                 cx.redraw_all();
             }
         });
+        #[cfg(target_arch = "wasm32")]
+        cx.event_hooks.push(Fonts::handle_event);
         cx.register_async_load_probe("glyph", |cx| {
             cx.get_global_ref::<Rc<RefCell<Fonts>>>()
                 .and_then(|fonts| fonts.try_borrow().ok().map(|fonts| fonts.pending_glyph_rasters()))

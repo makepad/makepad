@@ -3,12 +3,13 @@ use {
         animator::{Animate, Animator, AnimatorImpl},
         makepad_derive_widget::*,
         makepad_draw::{
-            event::finger::TouchState,
+            event::finger::{DigitId, ScrollDirection, TouchState},
             event::keyboard::CharOffset,
             ime::{
                 AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
                 TextInputConfig, TextInputContentType,
             },
+            shader::draw_text::TextOverflow,
             text::{
                 geom::Point,
                 layouter::{LaidoutText, SelectionRect},
@@ -932,6 +933,10 @@ pub struct TextInput {
     scroll_x: f64,
     #[live]
     empty_text: String,
+    /// Lets the empty text wrap onto more lines, as the text does (a single-line field keeps it on
+    /// one line). Otherwise it stays on one line, ending in "…" if it doesn't fit. On by default.
+    #[live(true)]
+    wrap_empty_text: bool,
     #[live]
     text: String,
     #[live(0.5)]
@@ -988,6 +993,13 @@ pub struct TextInput {
     /// Touch that started outside this input while focused and may blur on release.
     #[rust]
     pending_outside_focus_loss_touch: Option<u64>,
+    /// Our own touch that a scroller took over while we're focused, which blurs us on release wherever it ends,
+    /// unless that scroller keeps the keyboard up.
+    #[rust]
+    pending_scroll_focus_loss_touch: Option<DigitId>,
+    /// A touch on this input that hasn't focused it, and what it has turned out to be so far.
+    #[rust]
+    touch_press: Option<(DigitId, TouchPress)>,
     /// IME composition tracking - byte index where composition starts
     #[rust]
     composition_start: usize,
@@ -1168,6 +1180,12 @@ impl TextInput {
         self.animator_play(cx, ids!(focus.on));
         self.reset_blink_timer(cx);
         self.draw_bg.redraw(cx);
+    }
+
+    /// Like [`Self::take_key_focus`], for focus the user gave, e.g., with a press on the box around this field.
+    pub fn take_key_focus_from_user(&mut self, cx: &mut Cx) {
+        self.take_key_focus(cx);
+        cx.set_key_focus_from_user(self.draw_bg.area());
     }
 
     /// Overrides the height this field asks its parent for.
@@ -1450,13 +1468,20 @@ impl TextInput {
 
     fn draw_text(&mut self, cx: &mut Cx2d) -> Rect {
         let inner_walk = self.inner_walk();
-        let text_rect = if self.text.is_empty() {
+        let text_rect = if self.text.is_empty() && self.wrap_empty_text {
             // The placeholder lays out as the text does. Wrapped in a single-line field, its
             // second line would make the field two lines tall while the centring takes one,
             // and push the first line out of the box.
             let (max_width_in_lpxs, wrap) = self.text_layout_bounds(cx);
             let placeholder = self.draw_text.layout(cx, 0.0, 0.0, max_width_in_lpxs, wrap, self.label_align, &self.empty_text);
             self.draw_text.draw_walk_laidout(cx, inner_walk, &placeholder)
+        } else if self.text.is_empty() {
+            // Only the empty text gets the ellipsis, so we put the typed text's `text_overflow` back after.
+            let text_overflow = std::mem::replace(&mut self.draw_text.text_overflow, TextOverflow::Ellipsis);
+            let text_rect = self.draw_text
+                .draw_walk_with_wrap(cx, inner_walk, self.label_align, false, &self.empty_text);
+            self.draw_text.text_overflow = text_overflow;
+            text_rect
         } else {
             let laidout_text = self.laidout_text.as_ref().unwrap();
             self.draw_text
@@ -1647,7 +1672,8 @@ impl TextInput {
         rect(sel_x, sel_y, sel_width.max(10.0), sel_height.max(20.0))
     }
 
-    fn scroll_to_cursor(&mut self, cx: &mut Cx2d, content_clip_index: usize) {
+    /// `text_height` is the drawn text's height, so it's the empty text's while nothing's typed.
+    fn scroll_to_cursor(&mut self, cx: &mut Cx2d, content_clip_index: usize, text_height: f64) {
         // Compute the final size of the turtle, and obtain its inner dimensions.
         // For multiline inputs, also clamp to the tightest ancestor max height,
         // so that scrolling kicks in even when the TextInput's own walk height
@@ -1729,7 +1755,13 @@ impl TextInput {
         if self.is_multiline {
             let max_scroll_y = (laidout_text_height - height).max(0.0);
             self.cached_max_scroll_y = max_scroll_y;
-            self.scroll_y = self.scroll_y.max(0.0).min(max_scroll_y);
+            // Text shorter than the box (e.g., from a `Fit` min height) sits where `align.y` puts it,
+            // through the same offset that single-line inputs center with.
+            self.scroll_y = if text_height < height {
+                (text_height - height) * self.layout.align.y
+            } else {
+                self.scroll_y.max(0.0).min(max_scroll_y)
+            };
         } else {
             // Single-line: nothing scrolls vertically, so the offset centres the
             // line box in the inner rect instead. Pinning to padding.top would
@@ -1737,8 +1769,6 @@ impl TextInput {
             // than its point size suggests, clip descenders in tight ones. Going
             // through scroll_y keeps every downstream coordinate (hit test, IME,
             // selection rects) consistent, since they all compensate for it.
-            let text_height =
-                (laidout_text.size_in_lpxs.height * self.draw_text.font_scale) as f64;
             let centering = (text_height - height) * 0.5;
             self.cached_max_scroll_y = 0.0;
             // Guard NaN (an unresolved turtle size), which the old clamp
@@ -2286,6 +2316,7 @@ impl TextInput {
         self.composition_start = 0;
         self.composition_end = 0;
         self.pending_outside_focus_loss_touch = None;
+        self.pending_scroll_focus_loss_touch = None;
         // Only hide clipboard actions on mobile platforms where they're supported
         match cx.os_type() {
             OsType::Android(_) | OsType::Ios(_) => {
@@ -3048,7 +3079,7 @@ impl Widget for TextInput {
         self.draw_selection(cx, text_rect);
         self.draw_composition_underline(cx, text_rect);
         self.draw_marks(cx, text_rect);
-        self.scroll_to_cursor(cx, content_clip_index);
+        self.scroll_to_cursor(cx, content_clip_index, text_rect.size.y);
         cx.pop_clip_rect();
         self.draw_scroll_bar(cx);
         self.draw_bg.end(cx);
@@ -3121,13 +3152,16 @@ impl Widget for TextInput {
         let uid = self.widget_uid();
 
         if let Event::FingerCancel(cancel) = event {
-            if cx.fingers.press_taken_away(cancel.digit_id)
-                && self.pending_outside_focus_loss_touch.is_some_and(|uid| {
+            if cx.fingers.press_taken_away(cancel.digit_id) {
+                if self.pending_outside_focus_loss_touch.is_some_and(|uid| {
                     let digit_id: crate::event::DigitId = live_id_num!(touch, uid).into();
                     digit_id == cancel.digit_id
-                })
-            {
-                self.pending_outside_focus_loss_touch = None;
+                }) {
+                    self.pending_outside_focus_loss_touch = None;
+                }
+                if self.pending_scroll_focus_loss_touch == Some(cancel.digit_id) {
+                    self.pending_scroll_focus_loss_touch = None;
+                }
             }
         }
 
@@ -3146,11 +3180,23 @@ impl Widget for TextInput {
             let rect = self.draw_bg.area().rect(cx);
             let should_lose_focus = match event {
                 // Handle desktop mouse clicks
-                Event::MouseUp(mu) => !rect.contains(mu.abs),
+                Event::MouseUp(mu) => {
+                    !rect.contains(mu.abs)
+                        && !cx.fingers.is_press_keeping_key_focus(live_id!(mouse).into())
+                }
                 // Handle mobile touch events
                 Event::TouchUpdate(tu) => {
                     let mut should_lose_focus = false;
                     for touch in &tu.touches {
+                        let digit_id: DigitId = live_id_num!(touch, touch.uid).into();
+                        // We moved with the view our drag scrolled, so it doesn't matter where it ends.
+                        if self.pending_scroll_focus_loss_touch == Some(digit_id)
+                            && !matches!(touch.state, TouchState::Move | TouchState::Stable)
+                        {
+                            self.pending_scroll_focus_loss_touch = None;
+                            should_lose_focus |= touch.state == TouchState::Stop
+                                && !cx.fingers.is_press_keeping_key_focus(digit_id);
+                        }
                         match touch.state {
                             TouchState::Start => {
                                 if rect.contains(touch.abs) {
@@ -3166,7 +3212,8 @@ impl Widget for TextInput {
                             }
                             TouchState::Stop => {
                                 if self.pending_outside_focus_loss_touch == Some(touch.uid) {
-                                    should_lose_focus = !rect.contains(touch.abs);
+                                    should_lose_focus |= !rect.contains(touch.abs)
+                                        && !cx.fingers.is_press_keeping_key_focus(digit_id);
                                     self.pending_outside_focus_loss_touch = None;
                                 }
                             }
@@ -3268,6 +3315,10 @@ impl Widget for TextInput {
                 // Only `draw_walk` shows the IME (it knows where the caret is), so we redraw on focus.
                 // Focus set from a `draw_walk` arrives mid-draw, where a plain `redraw` gets dropped.
                 cx.redraw_area_in_draw(self.draw_bg.area());
+                // We'll show the IME again when we're drawn, so a hide still waiting on a press can't happen.
+                if !self.is_read_only && self.effective_input_mode() != InputMode::None {
+                    cx.cancel_text_ime_hide();
+                }
                 // Sync text state to platform IME before keyboard shows
                 let sel_start_chars = self.text[..self.selection.start().index].chars().count();
                 let sel_end_chars = self.text[..self.selection.end().index].chars().count();
@@ -3300,6 +3351,20 @@ impl Widget for TextInput {
                     cx.show_clipboard_actions(has_selection, selection_rect, cx.keyboard_shift);
                 }
             }
+            // While we hold a press, we also get every other finger that lands, wherever it lands, so we leave those be.
+            Hit::FingerDown(fe) if cx.fingers.find_digit_for_captured_area(self.draw_bg.area()) != Some(fe.digit_id) => {}
+            // A touch waits to see if it's a tap before focusing us, so a drag can scroll our text or the page instead.
+            // Until then, its press keeps a focused input elsewhere from dropping the focus that we might take.
+            Hit::FingerDown(FingerDownEvent {
+                tap_count: 1,
+                device,
+                digit_id,
+                ..
+            }) if device.is_touch() && device.is_primary_hit() && !scrollbar_captured => {
+                self.touch_press = Some((digit_id, TouchPress::Undecided));
+                cx.fingers.mark_press_as_keeping_key_focus(digit_id);
+                self.animator_play(cx, ids!(hover.down));
+            }
             Hit::FingerDown(FingerDownEvent {
                 abs,
                 tap_count,
@@ -3309,7 +3374,7 @@ impl Widget for TextInput {
             }) if device.is_primary_hit() && !scrollbar_captured => {
                 cx.claim_finger_drag(digit_id);
                 self.reset_blink_timer(cx);
-                self.set_key_focus(cx);
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 let rel = abs - self.text_area.rect(cx).pos;
                 let Ok(cursor) =
                     self.point_in_lpxs_to_cursor(Point::new(rel.x as f32, rel.y as f32))
@@ -3367,6 +3432,46 @@ impl Widget for TextInput {
             }
             Hit::FingerUp(fe) => {
                 self.ignore_next_move = false;
+                let touch_press = self.touch_press.take();
+
+                if touch_press == Some((fe.digit_id, TouchPress::Undecided))
+                    && fe.is_over
+                    && ScrollDirection::from_travel(fe.abs - fe.abs_start).is_none()
+                {
+                    self.reset_blink_timer(cx);
+                    cx.set_key_focus_from_user(self.draw_bg.area());
+                    let rel = fe.abs - self.text_area.rect(cx).pos;
+                    if let Ok(cursor) = self.point_in_lpxs_to_cursor(Point::new(rel.x as f32, rel.y as f32)) {
+                        self.set_cursor(cx, cursor, false);
+                    }
+                }
+
+                // A scroller around us took our drag over, so like a drag from anywhere else,
+                // it blurs us when it ends if that scroller hides the keyboard on scroll.
+                if fe.is_sweep
+                    && touch_press == Some((fe.digit_id, TouchPress::Dragging))
+                    && cx.has_key_focus(self.draw_bg.area())
+                {
+                    let touch_state = match event {
+                        Event::TouchUpdate(tu) => tu.touches.iter().find(|touch| Some(touch.uid) == fe.device.touch_uid()).map(|touch| touch.state),
+                        // A claim ended our press early with a cancel, so the finger's still down.
+                        Event::FingerCancel(_) if !cx.fingers.press_taken_away(fe.digit_id) => Some(TouchState::Move),
+                        _ => None,
+                    };
+                    match touch_state {
+                        // It ends with this update, which the check at the top skipped while we still held it.
+                        Some(TouchState::Stop) => {
+                            if !cx.fingers.is_press_keeping_key_focus(fe.digit_id) {
+                                cx.set_key_focus(Area::Empty);
+                                self.handle_focus_lost(cx, uid);
+                            }
+                        }
+                        Some(TouchState::Move | TouchState::Stable) => {
+                            self.pending_scroll_focus_loss_touch = Some(fe.digit_id);
+                        }
+                        _ => {}
+                    }
+                }
 
                 if fe.was_tap() {
                     if let Some(cursor) = self.preserved_selection_cursor.take() {
@@ -3386,8 +3491,16 @@ impl Widget for TextInput {
                     self.animator_play(cx, ids!(hover.off));
                 }
             }
+            // A touch that's already scrolling our text is a drag, not a long press.
+            Hit::FingerLongPress(lp)
+                if matches!(self.touch_press, Some((digit_id, TouchPress::ScrollingText(_))) if digit_id == lp.digit_id) => {}
             Hit::FingerLongPress(lp) => {
                 self.preserved_selection_cursor = None;
+                // A long press focuses us right away, and a drag after it adjusts the selection instead of scrolling.
+                self.touch_press = None;
+                cx.claim_finger_drag(lp.digit_id);
+                self.reset_blink_timer(cx);
+                cx.set_key_focus_from_user(self.draw_bg.area());
 
                 // Select word at long press position
                 let rel = lp.abs - self.text_area.rect(cx).pos;
@@ -3414,6 +3527,35 @@ impl Widget for TextInput {
                 // Skip next move to prevent selection change when finger lifts
                 self.ignore_next_move = true;
             }
+            // A drag doesn't select anything. It scrolls our text if there's more of it that way,
+            // or else leaves the drag to whatever scrolls around us.
+            Hit::FingerMove(fe) if self.touch_press.is_some_and(|(digit_id, _)| digit_id == fe.digit_id) => {
+                let travel = fe.abs - fe.abs_start;
+                if let Some((_, press @ TouchPress::Undecided)) = &mut self.touch_press {
+                    let Some(direction) = ScrollDirection::from_travel(travel) else { return };
+                    // It can't focus us now, so whatever it scrolls decides if an input elsewhere keeps its keyboard.
+                    cx.fingers.unmark_press_as_keeping_key_focus(fe.digit_id);
+                    // Like a wheel scroll, it takes our text if that can move its way, or if we contain our scrolls.
+                    let can_take_drag = self.cached_max_scroll_y > 0.0
+                        && (self.contain_scroll || can_scroll_toward(self.scroll_y, self.cached_max_scroll_y, -travel.y));
+                    *press = if self.is_multiline
+                        && direction.allows(Vec2Index::Y)
+                        && can_take_drag
+                        && cx.is_scroll_area_unblocked(self.draw_bg.area())
+                    {
+                        cx.claim_finger_drag(fe.digit_id);
+                        // Scrolling our text keeps the keyboard up, like any other scroll.
+                        cx.fingers.mark_press_as_keeping_key_focus(fe.digit_id);
+                        TouchPress::ScrollingText(self.scroll_y)
+                    } else {
+                        TouchPress::Dragging
+                    };
+                }
+                if let Some((_, TouchPress::ScrollingText(start_scroll_y))) = self.touch_press {
+                    self.scroll_y = (start_scroll_y - travel.y).clamp(0.0, self.cached_max_scroll_y);
+                    self.draw_bg.redraw(cx);
+                }
+            }
             Hit::FingerMove(FingerMoveEvent {
                 abs,
                 tap_count,
@@ -3429,7 +3571,7 @@ impl Widget for TextInput {
                 // Clear preserved cursor - user is dragging to select
                 self.preserved_selection_cursor = None;
                 self.reset_blink_timer(cx);
-                self.set_key_focus(cx);
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 let rel = abs - self.text_area.rect(cx).pos;
                 let Ok(cursor) =
                     self.point_in_lpxs_to_cursor(Point::new(rel.x as f32, rel.y as f32))
@@ -4014,6 +4156,13 @@ impl TextInputRef {
         }
     }
 
+    /// See [`TextInput::take_key_focus_from_user`].
+    pub fn take_key_focus_from_user(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.take_key_focus_from_user(cx);
+        }
+    }
+
     /// See [`TextInput::set_height`].
     pub fn set_height(&self, cx: &mut Cx, height: Size) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -4323,6 +4472,17 @@ pub enum TextInputAction {
     Escaped,
     Changed(String),
     KeyDownUnhandled(KeyEvent),
+}
+
+/// What a touch on a text input has turned out to be so far.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TouchPress {
+    /// It hasn't moved far enough to be a drag, so it might still be a tap (which focuses the input) or a long press.
+    Undecided,
+    /// A drag scrolling the input's text, which was at this scroll offset when the drag began.
+    ScrollingText(f64),
+    /// A drag that the input leaves to whatever scrolls around it.
+    Dragging,
 }
 
 #[derive(Clone, Copy, Debug)]

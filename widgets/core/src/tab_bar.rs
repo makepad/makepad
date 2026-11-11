@@ -1,5 +1,6 @@
 use crate::{
     animator::Animate,
+    event::ScrollDirection,
     makepad_derive_widget::*,
     makepad_draw::*,
     scroll_bars::ScrollBars,
@@ -263,6 +264,11 @@ pub struct TabBar {
     active_tab_id: Option<LiveId>,
     #[rust]
     prev_active_tab_id: Option<LiveId>,
+    /// The active tab's x position within the bar's content and its width, as of the last draw.
+    #[rust]
+    active_tab_x_and_width: Option<(f64, f64)>,
+    #[rust]
+    was_active_tab_in_view: bool,
     #[rust]
     next_active_tab_id: Option<LiveId>,
 
@@ -383,7 +389,7 @@ impl Widget for TabBar {
                 if let Some(next) = next {
                     let id = self.tab_order[next];
                     self.set_active_tab_id(cx, Some(id), Animate::Yes);
-                    if let Some((tab, _)) = self.tabs.get(&id) { cx.set_key_focus(tab.area()); }
+                    if let Some((tab, _)) = self.tabs.get(&id) { cx.set_key_focus_from_user(tab.area()); }
                     cx.widget_action(uid, TabBarAction::TabWasPressed(id));
                 }
             }
@@ -426,11 +432,17 @@ impl Widget for TabBar {
                         };
                     }
                 }
-                TabAction::TouchScroll { abs, time } => {
+                TabAction::TouchScroll { abs, abs_start, time, digit_id } => {
                     if let FingerScrollState::Dragging { samples } = &mut self.finger_scroll {
                         let Some(old_abs) = samples.last().map(|s| s.abs) else {
                             return;
                         };
+                        // Like any scroll, it keeps the keyboard up once it goes the tap distance our way.
+                        if ScrollDirection::from_travel(abs - abs_start)
+                            .is_some_and(|direction| direction.allows(Vec2Index::X))
+                        {
+                            cx.fingers.mark_press_as_keeping_key_focus(digit_id);
+                        }
                         samples.push(FingerScrollSample { abs: abs.x, time });
                         if samples.len() > 4 {
                             samples.remove(0);
@@ -609,6 +621,9 @@ impl TabBar {
         self.draw_fill
             .draw_walk(cx, Walk::new(Size::fill(), Size::fill()));
 
+        // The tabs were drawn at this scroll offset, which scroll_bars.end() can change
+        // by clamping it or dropping a rubber-band stretch.
+        let drawn_scroll_x = cx.turtle().scroll().x;
         self.scroll_bars.end(cx);
         if let Some(token) = self.semantic_token.take() {
             let mut node = cx.a11y.take_node(token);
@@ -621,40 +636,52 @@ impl TabBar {
 
 
         // After scroll_bars.end() so that view_visible/view_total are up to date.
-        if self.active_tab_id != self.prev_active_tab_id {
-            self.prev_active_tab_id = self.active_tab_id;
-            if let Some(tab_id) = self.active_tab_id {
-                if let Some((tab, _)) = self.tabs.get(&tab_id) {
-                    // Convert the tab's absolute rect to content-relative coordinates.
-                    let abs_rect = tab.area().rect(cx);
-                    let container_pos = self.scroll_bars.area().rect(cx).pos;
-                    let scroll_pos = self.scroll_bars.get_scroll_pos();
-                    let content_x = abs_rect.pos.x - container_pos.x + scroll_pos.x;
-                    let view_visible = self.scroll_bars.get_scroll_view_visible().x;
-
-                    // Calculate the minimal target scroll position.
-                    let target = if content_x < scroll_pos.x {
-                        // Tab is off the left edge — scroll left.
-                        content_x
-                    } else if content_x + abs_rect.size.x > scroll_pos.x + view_visible {
-                        // Tab is off the right edge — scroll right.
-                        (content_x + abs_rect.size.x) - view_visible
-                    } else {
-                        // Already fully visible.
-                        return;
-                    };
-
-                    // Clamp to valid range.
-                    let view_total = self.scroll_bars.get_scroll_view_total().x;
-                    let target = target.max(0.0).min((view_total - view_visible).max(0.0));
-
-                    self.scroll_into_view_anim = Some(ScrollIntoViewAnim {
-                        target_scroll_x: target,
-                        next_frame: cx.new_next_frame(),
-                    });
-                }
-            }
+        let Some(tab_id) = self.active_tab_id else {
+            self.prev_active_tab_id = None;
+            return;
+        };
+        let Some((tab, _)) = self.tabs.get(&tab_id) else { return };
+        // Convert the tab's absolute rect to content-relative coordinates.
+        let abs_rect = tab.area().rect(cx);
+        let container_pos = self.scroll_bars.area().rect(cx).pos;
+        let content_x = abs_rect.pos.x - container_pos.x + drawn_scroll_x;
+        let scroll_pos = self.scroll_bars.get_scroll_pos();
+        let view_visible = self.scroll_bars.get_scroll_view_visible().x;
+        // A newly active tab gets scrolled into view. If it then moves or resizes (e.g., the app sized it after
+        // its first draw), we only scroll to it again if it was in view, so we don't undo the user's scrolling.
+        let has_moved = self.active_tab_x_and_width.is_none_or(|(x, width)| {
+            (x - content_x).abs() > 0.5 || (width - abs_rect.size.x).abs() > 0.5
+        });
+        let should_scroll_into_view = self.prev_active_tab_id != Some(tab_id)
+            || (has_moved && (self.was_active_tab_in_view || self.scroll_into_view_anim.is_some()));
+        self.prev_active_tab_id = Some(tab_id);
+        self.active_tab_x_and_width = Some((content_x, abs_rect.size.x));
+        self.was_active_tab_in_view = content_x >= scroll_pos.x - 0.5
+            && content_x + abs_rect.size.x <= scroll_pos.x + view_visible + 0.5;
+        if !should_scroll_into_view {
+            return;
         }
+
+        // Calculate the minimal target scroll position.
+        let target = if content_x < scroll_pos.x {
+            // Tab is off the left edge, so scroll left.
+            content_x
+        } else if content_x + abs_rect.size.x > scroll_pos.x + view_visible {
+            // Tab is off the right edge, so scroll right.
+            (content_x + abs_rect.size.x) - view_visible
+        } else {
+            // Already fully visible.
+            return;
+        };
+
+        // Clamp to valid range.
+        let view_total = self.scroll_bars.get_scroll_view_total().x;
+        let target = target.max(0.0).min((view_total - view_visible).max(0.0));
+
+        self.scroll_into_view_anim = Some(ScrollIntoViewAnim {
+            target_scroll_x: target,
+            next_frame: cx.new_next_frame(),
+        });
     }
 
     pub fn draw_tab(&mut self, cx: &mut Cx2d, tab_id: LiveId, name: &str, template: LiveId) {

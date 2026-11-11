@@ -2155,7 +2155,7 @@ impl Widget for Waveform {
                 // documents as doing nothing pull focus off whatever had it
                 // and play the focus track — which is a visible edit to the
                 // rest of the window, and "nothing" has to mean nothing.
-                cx.set_key_focus(self.area);
+                cx.set_key_focus_from_user(self.area);
                 self.grab = Some(part);
                 cx.claim_finger_drag(fe.digit_id);
                 self.press_x = fe.abs.x;

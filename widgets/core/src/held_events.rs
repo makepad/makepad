@@ -1,19 +1,21 @@
 //! Per-frame events a hidden subtree does not get while it is hidden.
 //!
 //! A page a `PageFlip` is not showing, and a `View` with `visible: false`,
-//! would otherwise walk all their widgets for every frame request and every
-//! batch of actions of the whole app (a splitter drag sends both on every
-//! move). They skip those while hidden, unless they set
-//! `background_events: true` (a subtree whose frame-driven work must keep
-//! running out of sight).
+//! would otherwise walk all their widgets for every frame request of the
+//! whole app (a splitter drag sends one on every move). They skip those
+//! while hidden, unless they set `background_events: true` (a subtree whose
+//! frame-driven work must keep running out of sight).
 //!
-//! Signals and timers still reach hidden subtrees as they happen: they carry
-//! the background work (a terminal reading its process's output, a chat
-//! receiving streamed tokens, timers, async results) and are rare next to
-//! frames. Frame requests are not lost: the ones made while hidden are
-//! delivered as one frame event at the subtree's first event after it is
-//! shown again. Actions are not kept: they report what happened to widgets,
-//! and a hidden subtree takes no input.
+//! Signals, timers and actions still reach hidden subtrees as they happen:
+//! they carry the background work (a terminal reading its process's output,
+//! a chat receiving streamed tokens, timers, async results, image decodes,
+//! the actions an app's hidden pages wait on). Frame requests are not lost:
+//! the ones made while hidden are delivered as one frame event at the
+//! subtree's first event after it is shown again.
+//!
+//! A widget can tell with `in_hidden_subtree` that it's handling actions
+//! out of sight, like a menu layer that leaves a menu raised on the bus to
+//! a shown layer.
 
 use crate::makepad_platform::*;
 use std::collections::{HashSet, VecDeque};
@@ -49,7 +51,6 @@ impl HeldEvents {
                 self.last_frame = Some((ne.frame, ne.time));
                 true
             }
-            Event::Actions(_) => true,
             event => event.requires_visibility(),
         }
     }
@@ -70,6 +71,26 @@ impl HeldEvents {
         }
         out
     }
+}
+
+/// How many hidden subtrees the event being handled is inside of.
+#[derive(Default)]
+struct HiddenDepth(usize);
+
+/// Hands actions to a hidden subtree, so everything in it sees `in_hidden_subtree`.
+pub(crate) fn handle_in_hidden_subtree(cx: &mut Cx, handle: impl FnOnce(&mut Cx)) {
+    cx.global::<HiddenDepth>().0 += 1;
+    // Caught and passed on, so a panic contained further up doesn't leave the rest of the app "hidden".
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(cx)));
+    cx.global::<HiddenDepth>().0 -= 1;
+    if let Err(panic) = out {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// Whether the actions being handled are going through a hidden subtree.
+pub fn in_hidden_subtree(cx: &Cx) -> bool {
+    cx.get_global_ref::<HiddenDepth>().is_some_and(|depth| depth.0 > 0)
 }
 
 #[cfg(test)]
@@ -135,7 +156,7 @@ mod tests {
 
     const EVERYTHING: [&str; 7] = ["frame[5]", "timer7", "timer7", "timer9", "signal", "actions", "frame[6]"];
     /// What a hidden subtree gets as it happens: the background work.
-    const LIVE: [&str; 4] = ["timer7", "timer7", "timer9", "signal"];
+    const LIVE: [&str; 5] = ["timer7", "timer7", "timer9", "signal", "actions"];
     const REPLAY: [&str; 1] = ["frame[5, 6]"];
 
     #[test]
@@ -157,7 +178,7 @@ mod tests {
 
         background(&mut cx, &mut pages);
         assert_eq!(*one.borrow(), EVERYTHING, "the shown page gets every event");
-        assert_eq!(*two.borrow(), LIVE, "a page out of sight gets its timers and signals, not frames or actions");
+        assert_eq!(*two.borrow(), LIVE, "a page out of sight gets its timers, signals and actions, not frames");
         two.borrow_mut().clear();
         assert_eq!(*three.borrow(), EVERYTHING, "a background_events page keeps getting them");
 
@@ -190,7 +211,7 @@ mod tests {
 
         background(&mut cx, &mut *hidden.borrow_mut::<View>().unwrap());
         background(&mut cx, &mut *kept.borrow_mut::<View>().unwrap());
-        assert_eq!(*hidden_log.borrow(), LIVE, "a hidden view gets its timers and signals, not frames or actions");
+        assert_eq!(*hidden_log.borrow(), LIVE, "a hidden view gets its timers, signals and actions, not frames");
         hidden_log.borrow_mut().clear();
         assert_eq!(*kept_log.borrow(), EVERYTHING, "a hidden background_events view keeps getting them");
 

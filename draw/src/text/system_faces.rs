@@ -113,14 +113,19 @@ impl SystemFaces {
     }
 
     /// Whether a lookup or the index build finished since the last draw took
-    /// it in: the signal hook redraws for it.
-    pub fn has_news(&mut self) -> bool {
+    /// it in: the signal hook redraws for it. The index's arrival is news only
+    /// when a glyph of this `Cx` waited for it (`index_waited`): a `Cx` whose
+    /// text missed nothing, or that draws none, has nothing to draw again, and
+    /// a whole redraw at a moment the background scan sets lands in the
+    /// middle of its work (an offscreen render's one draw drawn twice under
+    /// load, 11-11).
+    pub fn has_news(&mut self, index_waited: bool) -> bool {
         let lookup_done = self.entries.values().any(|entry| matches!(entry, Entry::Pending(task) if task.is_finished()));
         let prewarm_done = self.prewarm.as_ref().is_some_and(|task| task.is_finished());
         if prewarm_done {
             self.prewarm = None;
         }
-        lookup_done || prewarm_done
+        lookup_done || (prewarm_done && index_waited)
     }
 }
 
@@ -139,7 +144,8 @@ pub(crate) fn start_prewarm(cx: &mut Cx) {
     cx.global::<SystemFaces>().start_prewarm(&pool);
 }
 
-/// [`SystemFaces::has_news`] on the `Cx`'s global (false before any lookup).
-pub(crate) fn has_news(cx: &mut Cx) -> bool {
-    cx.has_global::<SystemFaces>() && cx.get_global::<SystemFaces>().has_news()
+/// [`SystemFaces::has_news`] on the `Cx`'s global (false before any lookup);
+/// `index_waited`: a glyph of this `Cx` waited for the installed-font index.
+pub(crate) fn has_news(cx: &mut Cx, index_waited: bool) -> bool {
+    cx.has_global::<SystemFaces>() && cx.get_global::<SystemFaces>().has_news(index_waited)
 }

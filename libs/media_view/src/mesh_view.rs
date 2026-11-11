@@ -1838,7 +1838,7 @@ impl Widget for MeshView {
                 // Click claims key focus for play mode (and takes it away
                 // from the prompt TextInput so WASD doesn't type).
                 self.focused = true;
-                cx.set_key_focus(self.area);
+                cx.set_key_focus_from_user(self.area);
                 cx.set_cursor(MouseCursor::Grabbing);
             }
             Hit::FingerScroll(se) if self.walk_cam.is_none() => {

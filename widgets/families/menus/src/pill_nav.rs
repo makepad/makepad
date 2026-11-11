@@ -2852,7 +2852,7 @@ impl PillNav {
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 self.focus_by_press = !self.focused;
-                cx.set_key_focus(self.draw_bar.area());
+                cx.set_key_focus_from_user(self.draw_bar.area());
                 self.keyboard_mode = false;
                 let touch = fe.device.is_touch();
                 if self.drawn_compact {

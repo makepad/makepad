@@ -1961,7 +1961,7 @@ impl Widget for Sequencer {
                 }
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 self.press(cx, fe.abs - r.pos);
             }
             Hit::FingerMove(fe) => {

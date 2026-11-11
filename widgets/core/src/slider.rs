@@ -3543,7 +3543,7 @@ impl Widget for Slider {
                 self.update_text_input(cx);
 
                 self.text_input.set_is_read_only(cx, true);
-                self.text_input.set_key_focus(cx);
+                cx.set_key_focus_from_user(self.text_input.area());
                 self.text_input.select_all(cx);
                 self.text_input.redraw(cx);
 

@@ -2144,15 +2144,7 @@ impl WidgetTree {
             }));
         }
         for node_uid in subtree {
-            if inner.graph.remove(&node_uid).is_some() {
-                if !inner.dirty.is_empty() {
-                    inner.dirty.remove(&node_uid);
-                }
-                if !inner.detached.is_empty() {
-                    inner.detached.remove(&node_uid);
-                }
-                inner.path_cache.remove(&node_uid);
-            }
+            Self::remove_node(inner, node_uid);
         }
         if mark_structure_dirty {
             inner.structure_dirty = true;
@@ -2195,18 +2187,10 @@ impl WidgetTree {
     }
 
     fn remove_subtree(inner: &mut WidgetTreeInner, uid: WidgetUid) {
-        let Some(node) = inner.graph.remove(&uid) else {
+        let Some((node, detached)) = Self::remove_node(inner, uid) else {
             return;
         };
-        if let Some(uids) = inner.by_name.get_mut(&node.name) {
-            uids.retain(|u| *u != uid);
-        }
-        inner.foreign_listers.remove(&uid);
-
-        inner.dirty.remove(&uid);
-        inner.path_cache.remove(&uid);
         inner.structure_dirty = true;
-        let detached = if inner.detached.is_empty() { Vec::new() } else { inner.detached.remove(&uid).unwrap_or_default() };
 
         for child_uid in node.children.into_iter().chain(detached) {
             let has_same_parent = inner
@@ -2217,6 +2201,25 @@ impl WidgetTree {
                 Self::remove_subtree(inner, child_uid);
             }
         }
+    }
+
+    /// Takes `uid` out of the graph and everything else that keeps it, like the name index,
+    /// returning its node and its `detached` children (which are still in the graph).
+    fn remove_node(inner: &mut WidgetTreeInner, uid: WidgetUid) -> Option<(GraphNode, Vec<WidgetUid>)> {
+        let node = inner.graph.remove(&uid)?;
+        if let Some(uids) = inner.by_name.get_mut(&node.name) {
+            uids.retain(|u| *u != uid);
+            if uids.is_empty() {
+                inner.by_name.remove(&node.name);
+            }
+        }
+        inner.foreign_listers.remove(&uid);
+        if !inner.dirty.is_empty() {
+            inner.dirty.remove(&uid);
+        }
+        inner.path_cache.remove(&uid);
+        let detached = if inner.detached.is_empty() { Vec::new() } else { inner.detached.remove(&uid).unwrap_or_default() };
+        Some((node, detached))
     }
 
     fn rebuild_dense(inner: &mut WidgetTreeInner) {
@@ -2902,8 +2905,8 @@ pub(crate) fn reset_for_test(cx: &mut Cx) {
     *cx.global::<UiRoot>() = UiRoot::default();
 }
 
-fn cancel_scope_resolver(cx: &Cx, candidate: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
-    cx.get_global_ref::<UiRoot>()?.widget.upgrade()?.resolve_cancel_scope(candidate)
+fn cancel_scope_resolver(cx: &Cx, swipe_window: Option<WindowId>, candidate: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
+    cx.get_global_ref::<UiRoot>()?.widget.upgrade()?.resolve_cancel_scope(swipe_window, candidate)
 }
 
 pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {

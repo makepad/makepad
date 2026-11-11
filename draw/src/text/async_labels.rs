@@ -339,7 +339,7 @@ impl LabelCache {
                 // The OS first under a `System` font set, the bundled lazy
                 // faces first otherwise (as `DrawText::layout`).
                 let system_first = cx.font_set().prefers_system_fonts();
-                let index_wait = system_first && !crate::text::system_fonts::index_ready();
+                let index_wait = system_first && !fonts.borrow_mut().system_index_ready();
                 let mut requested = system_first && fonts.borrow_mut().request_system_fallback(key.family, text);
                 if !requested && !index_wait {
                     let mut lazy = false;
@@ -533,7 +533,7 @@ fn prepare(
                 let mut raster = glyph.rasterize(size * dpi);
                 if raster.is_none() {
                     let mut rasterizer = layouter.rasterizer().borrow_mut();
-                    if rasterizer.color_atlas_mut().reset_if_needed() {
+                    if std::mem::take(&mut rasterizer.atlas_overflow_hash) != 0 {
                         rasterizer.on_atlas_reset();
                     }
                     drop(rasterizer);

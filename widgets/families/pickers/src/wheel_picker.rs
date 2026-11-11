@@ -1308,7 +1308,7 @@ impl Widget for WheelPicker {
                 cx.set_cursor(MouseCursor::Grab);
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 let (along, across) = split(vertical, fe.abs);
                 let (_, rect_across) = split(vertical, fe.rect.pos);
                 let col = self.column_at(across - rect_across);

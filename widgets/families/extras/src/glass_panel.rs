@@ -1510,7 +1510,10 @@ impl Widget for GlassRadio {
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 self.down = 1.0;
-                self.set_key_focus(cx);
+                // A touch waits until it clicks us, so a drag that scrolls from here keeps the keyboard up.
+                if !fe.device.is_touch() {
+                    cx.set_key_focus_from_user(self.area());
+                }
                 self.redraw(cx);
             }
             Hit::FingerUp(fe) => {
@@ -1518,6 +1521,9 @@ impl Widget for GlassRadio {
                 // Checkbox semantics: a click toggles this control on or off
                 // independently (with the sliding animation), it is not a radio.
                 if fe.is_over {
+                    if fe.device.is_touch() {
+                        cx.set_key_focus_from_user(self.area());
+                    }
                     self.active_target = if self.active_target > 0.5 { 0.0 } else { 1.0 };
                     self.next_frame = cx.new_next_frame();
                     cx.widget_action_with_data(&self.action_data, uid, GlassRadioAction::Clicked);
@@ -1895,12 +1901,18 @@ impl Widget for GlassButton {
                 self.redraw(cx);
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                if !self.disabled {
-                    self.set_key_focus(cx);
+                // A touch waits until it clicks us, so a drag that scrolls from here keeps the keyboard up.
+                if !self.disabled && !fe.device.is_touch() {
+                    cx.set_key_focus_from_user(self.area());
                 }
                 self.finger_down(cx);
             }
-            Hit::FingerUp(fe) => self.finger_up(cx, fe.is_over),
+            Hit::FingerUp(fe) => {
+                if !self.disabled && fe.is_over && fe.device.is_touch() {
+                    cx.set_key_focus_from_user(self.area());
+                }
+                self.finger_up(cx, fe.is_over);
+            }
             _ => {}
         }
     }
@@ -2230,7 +2242,7 @@ impl Widget for GlassSlider {
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 self.dragging = true;
                 cx.claim_finger_drag(fe.digit_id);
-                self.set_key_focus(cx);
+                cx.set_key_focus_from_user(self.area());
                 if self.set_value_from_x(cx, fe.abs.x) {
                     cx.widget_action_with_data(&self.action_data, uid, GlassSliderAction::Changed);
                 }
@@ -2570,7 +2582,7 @@ impl Widget for GlassSegmented {
                     self.next_frame = cx.new_next_frame();
                     cx.widget_action_with_data(&self.action_data, uid, GlassSegmentedAction::Selected);
                 }
-                self.set_key_focus(cx);
+                cx.set_key_focus_from_user(self.area());
                 self.redraw(cx);
             }
             _ => {}
@@ -3068,6 +3080,9 @@ pub struct GlassFloatingSurface {
     /// to", which is also what a caret already inside the surface counts as.
     #[rust]
     focus_before: Area,
+    /// Whether the user gave `focus_before` its focus, so it gets it back the same way.
+    #[rust]
+    is_focus_before_from_user: bool,
     /// The corner mark's hover mix.
     #[rust]
     hot: f32,
@@ -3163,9 +3178,10 @@ impl GlassFloatingSurface {
     fn take_key_focus(&mut self, cx: &mut Cx, area: Area) {
         if !self.focus_is_inside(cx) {
             self.focus_before = cx.key_focus();
+            self.is_focus_before_from_user = cx.has_key_focus_from_user(self.focus_before);
         }
         self.holds_key_focus = true;
-        cx.set_key_focus(area);
+        cx.set_key_focus_from_user(area);
     }
 
     /// Whether the caret is somewhere this surface draws.
@@ -3214,12 +3230,13 @@ impl GlassFloatingSurface {
     fn drop_key_focus(&mut self, cx: &mut Cx) {
         let took_it = self.holds_key_focus;
         let back = self.focus_before;
+        let is_back_from_user = std::mem::take(&mut self.is_focus_before_from_user);
         self.holds_key_focus = false;
         self.focus_before = Area::Empty;
         if !self.focus_is_inside(cx) {
             return;
         }
-        cx.set_key_focus(if took_it { back } else { Area::Empty });
+        cx.restore_key_focus(if took_it { back } else { Area::Empty }, took_it && is_back_from_user);
     }
 
     /// Come up, or arrive somewhere new, with the lens looking at where it

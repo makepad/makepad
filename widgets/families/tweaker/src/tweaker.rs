@@ -12829,6 +12829,7 @@ impl Tweaker {
                                 width: Fill
                                 height: Fill
                                 is_multiline: true
+                                wrap_empty_text: true
                                 empty_text: "what this widget is about \u{2014} for whoever reads it next"
                                 draw_bg +: {
                                     color: #x1b1b1b
@@ -12862,6 +12863,7 @@ impl Tweaker {
                                 width: Fill
                                 height: Fill
                                 is_multiline: true
+                                wrap_empty_text: true
                                 empty_text: "what must stay true of this widget"
                                 draw_bg +: {
                                     color: #x1b1b1b
@@ -12895,6 +12897,7 @@ impl Tweaker {
                                 width: Fill
                                 height: Fill
                                 is_multiline: true
+                                wrap_empty_text: true
                                 empty_text: "rules that stand over the whole app \u{2014} no selection needed"
                                 draw_bg +: {
                                     color: #x1b1b1b
@@ -13153,6 +13156,7 @@ impl Tweaker {
                             width: Fill
                             height: 56
                             is_multiline: true
+                            wrap_empty_text: true
                             empty_text: "what should change\u{2026} Ctrl+Enter sends \u{00b7} Alt+Enter queues"
                             draw_bg +: {
                                 color: #x1b1b1b

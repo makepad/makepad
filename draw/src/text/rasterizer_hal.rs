@@ -16,7 +16,7 @@ use crate::makepad_platform::{hal_font_wire as wire, HalFontSource, HalGlyphEntr
 use fxhash::{FxHashMap, FxHashSet};
 pub use makepad_font_core::raster::{
     AtlasKind, GlyphSource, MsdfComplexitySettings, MsdfResolutionSettings, OutlineRasterizationMode,
-    RasterizedGlyph, Settings,
+    OutlineSdf, RasterizedGlyph, Settings,
 };
 use makepad_font_core::raster::{plan_color, plan_outline_sdf, COLOR_PADDING};
 
@@ -50,12 +50,16 @@ impl OpenSpec {
     }
 }
 
+/// (the session's font id, request kind, glyphs with their size)
+pub type GlyphRequest = (u32, u32, Vec<(u32, f32)>);
+
 /// What the client has to say to the host this turn.
 #[derive(Default)]
 pub struct Outbox {
     pub opens: Vec<OpenSpec>,
-    /// (the session's font id, request kind, glyphs with their size)
-    pub requests: Vec<(u32, u32, Vec<(u32, f32)>)>,
+    pub requests: Vec<GlyphRequest>,
+    /// Like `requests`, but nothing waits for these: a stand-in draws until they arrive.
+    pub background_requests: Vec<GlyphRequest>,
     pub releases: Vec<(u32, u32)>,
     /// Slots in use since the last sweep: the host keeps them over unused ones when it evicts.
     pub touches: Vec<(u32, u32)>,
@@ -66,7 +70,7 @@ pub struct Outbox {
 
 impl Outbox {
     pub fn is_empty(&self) -> bool {
-        self.opens.is_empty() && self.requests.is_empty() && self.releases.is_empty() && self.touches.is_empty() && self.pending.is_empty()
+        self.opens.is_empty() && self.requests.is_empty() && self.background_requests.is_empty() && self.releases.is_empty() && self.touches.is_empty() && self.pending.is_empty()
     }
 }
 
@@ -118,12 +122,19 @@ pub struct GlyphClient {
     out_opens: Vec<OpenSpec>,
     out_requests: FxHashMap<(u32, u32), Vec<(u32, f32)>>,
     out_releases: Vec<(u32, u32)>,
+    /// The SDFs this frame's text is waiting on with slug curves in their place, per font.
+    out_background_requests: FxHashMap<u32, Vec<(u32, f32)>>,
+    /// The fonts and sizes (as `f32` bits) whose printable ASCII we've already asked for.
+    prewarm_sdf_sizes: FxHashSet<(u32, u32)>,
+    /// The printable ASCII we ask for after this frame's own glyphs: (font, size, glyphs).
+    out_prewarms: Vec<(u32, f32, Vec<GlyphId>)>,
     /// The pending list's storage, handed back by [`GlyphClient::recycle`]: a draw that
     /// waits on glyphs lists them every frame, and that list allocates once, not per frame.
     out_pending: Vec<(u32, u32, u32, u32)>,
-    raster_size: Size<usize>,
     raster_generation: u32,
     slug_generation: u32,
+    /// The raster atlas's height: when it shrinks, the slots past it are gone, or all of them in the background.
+    raster_height: u32,
     /// bumped when entries are taken away (eviction, a new atlas): runs built on them are stale
     epoch: u64,
     /// Glyphs looked up since they were last handed to a draw list (`take_uses`): the keys
@@ -131,6 +142,16 @@ pub struct GlyphClient {
     uses: Vec<GlyphUse>,
     out_touches: Vec<(u32, u32)>,
     frame: u64,
+    /// The frame the slots in use were last touched at.
+    touched_at: u64,
+    /// The host took slots back: the next frame end touches the ones in use, so its next eviction
+    /// knows what's on screen.
+    touch_soon: bool,
+    /// Glyphs the host had no room for (`NO_ROOM`), and the frame each was last drawn in (0: not
+    /// since its answer). They draw without holding a frame back, and are asked for again at a touch.
+    no_room: FxHashMap<(Key, u32), u64>,
+    /// The next touch asks again for the glyphs in `no_room` still drawn.
+    retry_no_room: bool,
 }
 
 impl GlyphClient {
@@ -250,17 +271,87 @@ impl GlyphClient {
                 stand_in = best.map(|b| b.1);
             }
         }
-        if self.requested.insert((key, bits)) {
+        // one the host had no room for is asked for again only at a touch, and never waited for
+        let no_room = self.no_room.get_mut(&(key, bits)).map(|used| *used = frame).is_some();
+        if !no_room && self.requested.insert((key, bits)) {
             self.out_requests.entry((local, kind)).or_default().push((glyph as u32, dpxs));
         }
         // a glyph with a stand-in does not hold the frame back: only a draw with nothing to show
         // for it waits
-        if stand_in.is_none() {
+        if stand_in.is_none() && !no_room {
             self.draw_pending.insert((key, bits));
         }
         match stand_in {
             Some(entry) => Lookup::Ready(entry),
             None => Lookup::Pending,
+        }
+    }
+
+    /// The glyph's SDF if the host has sent it, or else asks for it without holding the frame, so
+    /// the caller draws its slug curves until then. A font's first miss also asks for its ASCII.
+    pub fn get_or_request_outline_sdf(&mut self, font: &Font, glyph: GlyphId, dpxs: f32) -> OutlineSdf {
+        let local = self.local_of(font);
+        if let Some(sdf) = self.held_outline_sdf(local, glyph, dpxs) {
+            return sdf;
+        }
+        // a glyph with no outline (a space) has no SDF to ask the host for
+        if font.glyph_outline_rc(glyph).is_none() {
+            return OutlineSdf::Unavailable;
+        }
+        self.request_outline_sdf(local, glyph, dpxs);
+        if self.prewarm_sdf_sizes.insert((local, dpxs.to_bits())) {
+            let ascii = font.with_ttf_parser_face(|face| (' '..='~').filter_map(|ch| face.glyph_index(ch)).collect::<Vec<_>>());
+            let glyphs = ascii.into_iter().map(|id| id.0).filter(|id| font.glyph_outline_rc(*id).is_some()).collect();
+            self.out_prewarms.push((local, dpxs, glyphs));
+        }
+        OutlineSdf::Pending
+    }
+
+    /// An SDF kept from `get_or_request_outline_sdf` (a prepared run), looked up again by its key:
+    /// one the host took back is asked for again the same way.
+    pub fn refresh_outline_sdf(&mut self, glyph: RasterizedGlyph) -> OutlineSdf {
+        let source = glyph.source;
+        if source.font == 0 {
+            return OutlineSdf::Ready(glyph);
+        }
+        let dpxs = f32::from_bits(source.dpxs_bits);
+        if let Some(sdf) = self.held_outline_sdf(source.font, source.glyph, dpxs) {
+            return sdf;
+        }
+        self.request_outline_sdf(source.font, source.glyph, dpxs);
+        OutlineSdf::Pending
+    }
+
+    /// The SDF if it's held, or `Unavailable` if none is coming; `None` when it has to be asked for.
+    fn held_outline_sdf(&mut self, local: u32, glyph: GlyphId, dpxs: f32) -> Option<OutlineSdf> {
+        if self.failed.contains(&local) {
+            return Some(OutlineSdf::Unavailable);
+        }
+        let bits = dpxs.to_bits();
+        let key: Key = (local, glyph, wire::kind::SDF);
+        let frame = self.frame;
+        if let Some(h) = self.ready.get_mut(&key).and_then(|held| held.iter_mut().find(|h| h.dpxs_bits == bits)) {
+            h.used = frame;
+            let entry = h.entry;
+            if entry.atlas_kind == wire::glyph::EMPTY {
+                return Some(OutlineSdf::Unavailable);
+            }
+            self.uses.push([local, glyph as u32, wire::kind::SDF]);
+            let source = GlyphSource { font: local, glyph, kind: wire::kind::SDF, dpxs_bits: bits };
+            return Some(OutlineSdf::Ready(self.rasterized_from(&entry, source)));
+        }
+        // one the host had no room for draws its slug curves, and is asked for again only at a touch
+        if let Some(used) = self.no_room.get_mut(&(key, bits)) {
+            *used = frame;
+            self.uses.push([local, glyph as u32, wire::kind::SDF]);
+            return Some(OutlineSdf::Unavailable);
+        }
+        None
+    }
+
+    fn request_outline_sdf(&mut self, local: u32, glyph: GlyphId, dpxs: f32) {
+        if self.requested.insert(((local, glyph, wire::kind::SDF), dpxs.to_bits())) {
+            self.out_background_requests.entry(local).or_default().push((glyph as u32, dpxs));
         }
     }
 
@@ -300,9 +391,8 @@ impl GlyphClient {
                 };
                 Some(RasterizedGlyph {
                     atlas_kind: AtlasKind::Unresolved,
-                    // No AtlasInfo is needed to draw an unresolved instance. Its UVs are set
+                    // No AtlasInfo is needed to draw an unresolved instance. Its texels are set
                     // separately from these bounds, which describe the eventual glyph rectangle.
-                    atlas_size: Size::new(1, 1),
                     atlas_image_bounds: Rect::new(Point::new(0, 0), size),
                     atlas_image_padding: padding,
                     atlas_plane: 0,
@@ -342,7 +432,6 @@ impl GlyphClient {
                 wire::glyph::MSDF => AtlasKind::Msdf,
                 _ => AtlasKind::Grayscale,
             },
-            atlas_size: self.raster_size,
             atlas_image_bounds: Rect::new(Point::new(e.rect[0] as usize, e.rect[1] as usize), Size::new(e.rect[2] as usize, e.rect[3] as usize)),
             atlas_image_padding: e.padding as usize,
             atlas_plane: e.plane as u8,
@@ -379,14 +468,22 @@ impl GlyphClient {
         }
     }
 
+    /// The slug curves a kept SDF draws as while it's not held, or `None` while they're on their way.
+    pub fn slug_stand_in(&mut self, source: GlyphSource) -> Option<SlugGlyphInfo> {
+        match self.lookup_local(source.font, source.glyph, 0.0, wire::kind::SLUG) {
+            Lookup::Ready(e) => Some(Self::slug_info(&e)),
+            Lookup::Empty | Lookup::Pending => None,
+        }
+    }
+
     pub fn slug_info(e: &HalGlyphEntry) -> SlugGlyphInfo {
         SlugGlyphInfo {
             origin_in_ems: Point::new(e.origin[0], e.origin[1]),
             size_in_ems: Size::new(e.scale, e.size_h),
             curve_offset: e.rect[0] as usize,
             curve_count: e.rect[1] as usize,
-            band_offset: 0,
-            band_count: 0,
+            band_offset: e.rect[2] as usize,
+            band_count: e.rect[3] as usize,
             fill_flags: 0,
             source: GlyphSource::default(),
         }
@@ -420,19 +517,31 @@ impl GlyphClient {
         }
     }
 
-    pub fn on_atlas(&mut self, kind: u32, width: u32, height: u32, generation: u32) {
+    pub fn on_atlas(&mut self, kind: u32, generation: u32, height: u32) {
         let old = if kind == wire::atlas::SLUG { &mut self.slug_generation } else { &mut self.raster_generation };
         let changed = *old != 0 && *old != generation;
         *old = generation;
-        if kind == wire::atlas::RASTER {
-            self.raster_size = Size::new(width as usize, height as usize);
-        }
         if changed {
             // every entry of the older generation is void
             let slug = kind == wire::atlas::SLUG;
             self.ready.retain(|(_, _, k), _| (*k == wire::kind::SLUG) != slug);
             self.slots.retain(|_, (_, keys)| keys.first().is_none_or(|((_, _, k), _)| (*k == wire::kind::SLUG) != slug));
+            if !slug {
+                self.prewarm_sdf_sizes.clear();
+            }
             self.epoch += 1;
+        }
+        if kind == wire::atlas::RASTER {
+            // the ASCII asked for ahead of time may be gone with the slots a shrink took back
+            if height < self.raster_height {
+                self.prewarm_sdf_sizes.clear();
+            }
+            self.raster_height = height;
+        }
+        // a new size may have room for what had none
+        if !self.no_room.is_empty() {
+            self.retry_no_room = true;
+            self.touch_soon = true;
         }
     }
 
@@ -445,6 +554,17 @@ impl GlyphClient {
             }
             let key: Key = (local, e.glyph as u16, e.kind);
             self.requested.remove(&(key, e.dpxs_bits));
+            if e.atlas_kind == wire::glyph::NO_ROOM {
+                // asked for once more if it's still drawn at the next touch, which tells the host
+                // exactly what's on screen, then only once there may be room
+                if let std::collections::hash_map::Entry::Vacant(v) = self.no_room.entry((key, e.dpxs_bits)) {
+                    v.insert(0);
+                    self.retry_no_room = true;
+                    self.touch_soon = true;
+                }
+                continue;
+            }
+            self.no_room.remove(&(key, e.dpxs_bits));
             let held = self.ready.entry(key).or_default();
             match held.iter_mut().find(|h| h.dpxs_bits == e.dpxs_bits) {
                 Some(h) => {
@@ -474,6 +594,8 @@ impl GlyphClient {
             }
         }
         self.slots.insert(e.slot, (e.slot_gen, keys));
+        // nothing names the plain field's slot any more
+        self.out_releases.push((e.replaces, e.replaces_gen));
     }
 
     pub fn on_evicted(&mut self, slots: &[(u32, u32)]) {
@@ -492,6 +614,8 @@ impl GlyphClient {
                 }
             }
             self.epoch += 1;
+            self.touch_soon = true;
+            self.retry_no_room = true;
         }
     }
 
@@ -503,15 +627,21 @@ impl GlyphClient {
     /// Whether this frame's end sweeps (`sweep`): the caller then names the glyphs its kept
     /// draw lists still show.
     pub fn sweep_due(&self) -> bool {
-        (self.frame + 1) % SWEEP_FRAMES == 0
+        (self.frame + 1).is_multiple_of(SWEEP_FRAMES) || self.touch_soon
     }
 
     /// A glyph a live draw list shows: in use, every size of it held.
     pub fn retained(&mut self, glyph: GlyphUse) {
         let frame = self.frame;
-        if let Some(held) = self.ready.get_mut(&(glyph[0], glyph[1] as u16, glyph[2])) {
+        let key = (glyph[0], glyph[1] as u16, glyph[2]);
+        if let Some(held) = self.ready.get_mut(&key) {
             for h in held.iter_mut() {
                 h.used = frame;
+            }
+        }
+        if !self.no_room.is_empty() {
+            for (_, used) in self.no_room.iter_mut().filter(|((k, _), _)| *k == key) {
+                *used = frame;
             }
         }
     }
@@ -526,16 +656,27 @@ impl GlyphClient {
     /// render target painted again from its kept instances, a code pane at rest) shows its
     /// glyphs without looking them up. Before, they were let go after IDLE_FRAMES, the host
     /// drew other glyphs into their slots, and words went blank or garbled ("Re ax").
+    ///
+    /// Right after the host takes slots back, or has no room for a glyph, the ones this frame drew
+    /// are touched at its end too: a resting screen draws too few frames to say what it still shows.
     pub fn end_frame(&mut self) {
         self.frame += 1;
         // lookups no draw list took (a measurement) are no one's
         self.uses.clear();
-        if self.frame % SWEEP_FRAMES != 0 {
+        let sweep = self.frame.is_multiple_of(SWEEP_FRAMES);
+        let soon = std::mem::take(&mut self.touch_soon);
+        if !soon && !sweep {
             return;
         }
-        let limit = self.frame.saturating_sub(IDLE_FRAMES);
-        self.release_idle(limit);
-        let since = self.frame.saturating_sub(SWEEP_FRAMES);
+        if sweep {
+            let limit = self.frame.saturating_sub(IDLE_FRAMES);
+            self.release_idle(limit);
+            // what's on screen changed since the last sweep, so there may be room now
+            self.retry_no_room = true;
+        }
+        let last = std::mem::replace(&mut self.touched_at, self.frame);
+        // only this frame's glyphs when the host needs to know exactly what's on screen
+        let since = if soon { self.frame - 1 } else { last };
         let mut touched: Vec<(u32, u32)> = Vec::new();
         for held in self.ready.values() {
             for h in held {
@@ -547,6 +688,23 @@ impl GlyphClient {
         touched.sort_unstable();
         touched.dedup();
         self.out_touches = touched;
+        if std::mem::take(&mut self.retry_no_room) {
+            // the host places them once it has this touch, so it can take back what's not drawn now
+            let mut again = Vec::new();
+            self.no_room.retain(|key, used| {
+                let drawn = *used >= since;
+                if drawn {
+                    again.push(*key);
+                }
+                // one still on its way stays until its answer, so that answer isn't news
+                drawn || self.requested.contains(key)
+            });
+            for (key, bits) in again {
+                if self.requested.insert((key, bits)) {
+                    self.out_requests.entry((key.0, key.2)).or_default().push((key.1 as u32, f32::from_bits(bits)));
+                }
+            }
+        }
     }
 
     fn release_idle(&mut self, limit: u64) {
@@ -573,11 +731,28 @@ impl GlyphClient {
     }
 
     pub fn take_outbox(&mut self) -> Outbox {
-        let mut requests: Vec<(u32, u32, Vec<(u32, f32)>)> = self.out_requests.drain().map(|((local, kind), glyphs)| (local, kind, glyphs)).collect();
+        let mut requests: Vec<GlyphRequest> = self.out_requests.drain().map(|((local, kind), glyphs)| (local, kind, glyphs)).collect();
         requests.sort_by_key(|r| (r.0, r.1));
+        let mut background_requests: Vec<GlyphRequest> = self.out_background_requests.drain().map(|(local, glyphs)| (local, wire::kind::SDF, glyphs)).collect();
+        background_requests.sort_by_key(|r| r.0);
+        // the ASCII goes last, so the host starts on this frame's own glyphs
+        for (local, dpxs, ascii) in self.out_prewarms.drain(..) {
+            let bits = dpxs.to_bits();
+            let mut glyphs = Vec::new();
+            for id in ascii {
+                let key: Key = (local, id, wire::kind::SDF);
+                let is_held = self.ready.get(&key).is_some_and(|held| held.iter().any(|h| h.dpxs_bits == bits));
+                if !is_held && !self.no_room.contains_key(&(key, bits)) && self.requested.insert((key, bits)) {
+                    glyphs.push((id as u32, dpxs));
+                }
+            }
+            if !glyphs.is_empty() {
+                background_requests.push((local, wire::kind::SDF, glyphs));
+            }
+        }
         let mut pending = std::mem::take(&mut self.out_pending);
         pending.extend(self.draw_pending.drain().map(|((font, glyph, kind), bits)| (font, glyph as u32, kind, bits)));
-        Outbox { opens: std::mem::take(&mut self.out_opens), requests, releases: std::mem::take(&mut self.out_releases), touches: std::mem::take(&mut self.out_touches), pending }
+        Outbox { opens: std::mem::take(&mut self.out_opens), requests, background_requests, releases: std::mem::take(&mut self.out_releases), touches: std::mem::take(&mut self.out_touches), pending }
     }
 
     /// Takes back an outbox's pending list once the host has been told, for the next frame's.
@@ -673,6 +848,12 @@ impl Rasterizer {
         };
         self.client
             .raster(font, glyph_id, dpxs_per_em, kind, &self.settings)
+    }
+
+    /// See `GlyphClient::get_or_request_outline_sdf`. Sizes below the minimum all use the same
+    /// atlas image, so they all ask for it at the minimum.
+    pub fn get_or_queue_glyph_outline_sdf(&mut self, font: &Font, glyph_id: GlyphId, dpxs_per_em: f32) -> OutlineSdf {
+        self.client.get_or_request_outline_sdf(font, glyph_id, dpxs_per_em.max(self.settings.msdf_resolution.min_dpxs_per_em))
     }
 
     /// See `GlyphClient::refresh`: what a kept glyph draws as now.
@@ -813,6 +994,68 @@ mod tests {
             }
         }
         assert_eq!(touches, vec![(21, 1)], "only the slot drawn since the last sweep is touched");
+    }
+
+    /// A glyph the host had no room for (what's left in its atlas is all on screen) draws as
+    /// nothing without holding the frame back. It's asked for once more right after the next
+    /// touch, which names only what that frame drew, then again only once there may be room.
+    #[test]
+    fn a_glyph_with_no_room_draws_blank_without_waiting_and_is_asked_again_after_a_touch() {
+        let a = instance(0xB6, 400.0);
+        let settings = layouter::Settings::default().loader.rasterizer;
+        let mut client = GlyphClient::default();
+        let shown = client.raster(&a, 51, 20.0, wire::kind::SDF, &settings).expect("planned");
+        let local = shown.source.font;
+        let _ = client.raster(&a, 52, 20.0, wire::kind::SDF, &settings).expect("planned");
+        client.on_ready(local, &[entry(51, 20.0, 61), entry(52, 20.0, 62)]);
+        let _ = client.take_outbox();
+        let asks_for = |out: &Outbox, glyph: u32| out.requests.iter().any(|r| r.2.iter().any(|g| g.0 == glyph));
+        let no_room = HalGlyphEntry { atlas_kind: wire::glyph::NO_ROOM, ..entry(53, 20.0, 0) };
+        // a frame draws 51 and a new glyph the host has no room for
+        let _ = client.raster(&a, 51, 20.0, wire::kind::SDF, &settings);
+        let _ = client.raster(&a, 53, 20.0, wire::kind::SDF, &settings);
+        client.end_frame();
+        assert!(asks_for(&client.take_outbox(), 53));
+        client.on_ready(local, &[no_room]);
+        let blank = client.raster(&a, 53, 20.0, wire::kind::SDF, &settings).expect("planned");
+        assert_eq!(blank.atlas_kind, AtlasKind::Unresolved);
+        let _ = client.raster(&a, 51, 20.0, wire::kind::SDF, &settings);
+        client.end_frame();
+        let out = client.take_outbox();
+        assert!(out.pending.is_empty(), "a glyph with no room doesn't hold the frame");
+        assert_eq!(out.touches, vec![(61, 1)], "only the slot this frame drew");
+        assert!(asks_for(&out, 53), "asked for once more after the touch");
+        // no room again: it stays blank and isn't asked for until something changes
+        client.on_ready(local, &[no_room]);
+        for _ in 0..3 {
+            let _ = client.raster(&a, 53, 20.0, wire::kind::SDF, &settings);
+            client.end_frame();
+            let out = client.take_outbox();
+            assert!(out.pending.is_empty() && out.requests.is_empty() && out.touches.is_empty());
+        }
+        // the host took a slot back, so there may be room now
+        client.on_evicted(&[(62, 1)]);
+        let _ = client.raster(&a, 53, 20.0, wire::kind::SDF, &settings);
+        client.end_frame();
+        assert!(asks_for(&client.take_outbox(), 53));
+        client.on_ready(local, &[entry(53, 20.0, 63)]);
+        assert_eq!(client.raster(&a, 53, 20.0, wire::kind::SDF, &settings).unwrap().atlas_kind, AtlasKind::Grayscale);
+    }
+
+    /// Once the multi-channel field replaces a glyph's plain one, nothing names the plain field's
+    /// slot any more: the session lets go of it, so the host can take it back first.
+    #[test]
+    fn an_upgrade_lets_go_of_the_plain_fields_slot() {
+        let a = instance(0xB7, 400.0);
+        let settings = layouter::Settings::default().loader.rasterizer;
+        let mut client = GlyphClient::default();
+        let g = client.raster(&a, 54, 60.0, wire::kind::AUTO, &settings).expect("planned");
+        client.on_ready(g.source.font, &[HalGlyphEntry { kind: wire::kind::AUTO, ..entry(54, 60.0, 71) }]);
+        let _ = client.take_outbox();
+        let up = HalGlyphEntry { kind: wire::kind::AUTO, atlas_kind: wire::glyph::MSDF, dpxs_bits: 0, replaces: 71, replaces_gen: 1, ..entry(54, 60.0, 72) };
+        client.on_ready(0, &[up]);
+        assert_eq!(client.take_outbox().releases, vec![(71, 1)]);
+        assert_eq!(client.raster(&a, 54, 60.0, wire::kind::AUTO, &settings).unwrap().atlas_kind, AtlasKind::Msdf);
     }
 
     /// A slug glyph kept in a prepared run is looked up again when drawn: curves taken back and

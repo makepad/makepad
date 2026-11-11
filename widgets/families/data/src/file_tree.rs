@@ -1211,7 +1211,7 @@ impl Widget for FileTree {
                     cx.widget_action(uid, FileTreeAction::NodeHoverEnded(node_id));
                 }
                 FileTreeNodeAction::WasClicked => {
-                    cx.set_key_focus(self.scroll_bars.area());
+                    cx.set_key_focus_from_user(self.scroll_bars.area());
                     if let Some(last_selected) = self.selected_node_id {
                         if last_selected != node_id {
                             if let Some(node) = self.tree_nodes.get_mut(&last_selected) {

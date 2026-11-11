@@ -149,7 +149,7 @@ script_mod! {
             }
 
             self.pos = self.geom.pos
-            self.t = mix(self.t_min, self.t_max, self.geom.pos.xy)
+            self.set_atlas_uvs(self.geom.pos.xy)
             self.rotated_pos = rotated
 
             let half_extent = self.rect_size * self.label_scale * 0.5

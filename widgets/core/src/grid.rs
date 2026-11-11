@@ -6,9 +6,6 @@ use {
     std::collections::{HashMap, HashSet},
 };
 
-const MAX_TRACKS: usize = 4096;
-const MAX_CELLS: usize = 65_536;
-
 script_mod! {
     use mod.prelude.widgets_internal.*
 
@@ -500,7 +497,7 @@ pub struct Grid {
     #[rust]
     child_walks: Vec<Walk>,
     #[rust]
-    occupancy: HashSet<usize>,
+    occupancy: HashSet<(usize, usize)>,
     #[rust]
     prior_columns: Vec<Track>,
     #[rust]
@@ -509,12 +506,6 @@ pub struct Grid {
     prior_scalars: [f64; 4],
     #[rust]
     indefinite_logged: [bool; 2],
-    #[rust]
-    placement_cap_logged: bool,
-    #[rust]
-    occupancy_cap_logged: bool,
-    #[rust]
-    placement_failure_logged: bool,
 }
 
 impl ScriptHook for Grid {
@@ -951,19 +942,18 @@ impl Grid {
         }
     }
 
+    /// Where every visible child goes: named and fully explicit items first,
+    /// then each other one at the first free cells in flow order. The
+    /// occupancy is sparse, so a grid of any size places every child.
     fn prepare_placements(&mut self, cx: &mut Cx2d) {
+        let count = self.children.len();
         self.occupancy.clear();
         self.placements.clear();
-        let child_limit = self.children.len().min(MAX_CELLS);
-        if child_limit < self.children.len() && !self.placement_cap_logged {
-            self.placement_cap_logged = true;
-            error!("Grid child placement capped at {MAX_CELLS} entries");
-        }
-        self.placements.resize(child_limit, None);
+        self.placements.resize(count, None);
         self.child_walks.clear();
-        self.child_walks.resize(child_limit, Walk::default());
+        self.child_walks.resize(count, Walk::default());
 
-        for (index, (_, child)) in self.children.iter_mut().take(child_limit).enumerate() {
+        for (index, (_, child)) in self.children.iter_mut().enumerate() {
             if child.visible() {
                 self.child_walks[index] = child.walk(cx);
             }
@@ -971,8 +961,7 @@ impl Grid {
 
         // Named and fully explicit items reserve cells before automatic items,
         // while the final draw still follows source order.
-        let mut occupancy_saturated = false;
-        for index in 0..child_limit {
+        for index in 0..count {
             if !self.children[index].1.visible() {
                 continue;
             }
@@ -980,73 +969,49 @@ impl Grid {
             let named = (cell.area != LiveId(0))
                 .then(|| self.area_map.get(&cell.area).copied())
                 .flatten();
-            let explicit = if let Some(named) = named {
-                Some(named)
-            } else if cell.col != 0 && cell.row != 0 {
-                bounded_placement(
-                    cell.col as usize - 1,
-                    cell.row as usize - 1,
-                    normalized_span(cell.col_span),
-                    normalized_span(cell.row_span),
-                )
-            } else {
-                None
-            };
+            let explicit = named.or_else(|| {
+                (cell.col != 0 && cell.row != 0).then(|| Placement {
+                    col: cell.col as usize - 1,
+                    row: cell.row as usize - 1,
+                    col_span: normalized_span(cell.col_span),
+                    row_span: normalized_span(cell.row_span),
+                })
+            });
             if let Some(placement) = explicit {
                 self.ensure_implicit_tracks(placement);
-                occupancy_saturated |= !occupy(&mut self.occupancy, placement);
+                occupy(&mut self.occupancy, placement);
                 self.placements[index] = Some(placement);
             }
         }
 
-        occupancy_saturated |= self.occupancy.len() >= MAX_CELLS;
-        if occupancy_saturated && !self.occupancy_cap_logged {
-            self.occupancy_cap_logged = true;
-            error!("Grid occupancy capped at {MAX_CELLS} cells; automatic placement stopped");
-        }
-
-        for index in 0..child_limit {
-            if occupancy_saturated {
-                break;
-            }
+        let mut cursor = AutoCursor::default();
+        for index in 0..count {
             if !self.children[index].1.visible() || self.placements[index].is_some() {
                 continue;
             }
             let cell = self.child_walks[index].cell.unwrap_or_default();
-            let col_span = normalized_span(cell.col_span).min(MAX_TRACKS);
-            let row_span = normalized_span(cell.row_span).min(MAX_TRACKS);
             // `then`, not `then_some`: the latter takes its argument by
             // value and so evaluates it whatever the condition says. With a
             // cell at column zero that is `0usize - 1`, which panics in debug
             // and — far worse — wraps to usize::MAX in release, handing the
             // placer a fixed column that cannot exist.
-            let fixed_col = (cell.col != 0).then(|| cell.col as usize - 1);
-            let fixed_row = (cell.row != 0).then(|| cell.row as usize - 1);
+            let item = AutoItem {
+                col_span: normalized_span(cell.col_span),
+                row_span: normalized_span(cell.row_span),
+                fixed_col: (cell.col != 0).then(|| cell.col as usize - 1),
+                fixed_row: (cell.row != 0).then(|| cell.row as usize - 1),
+            };
             let placement = find_auto_placement(
                 &self.occupancy,
-                self.expanded_columns.len(),
-                self.expanded_rows.len(),
-                col_span,
-                row_span,
-                fixed_col,
-                fixed_row,
+                (self.expanded_columns.len(), self.expanded_rows.len()),
+                item,
                 self.auto_flow,
+                &mut cursor,
             );
-            if let Some(placement) = placement {
-                self.ensure_implicit_tracks(placement);
-                if occupy(&mut self.occupancy, placement) {
-                    self.placements[index] = Some(placement);
-                } else {
-                    occupancy_saturated = true;
-                    if !self.occupancy_cap_logged {
-                        self.occupancy_cap_logged = true;
-                        error!("Grid occupancy capped at {MAX_CELLS} cells; automatic placement stopped");
-                    }
-                }
-            } else if !self.placement_failure_logged {
-                self.placement_failure_logged = true;
-                error!("Grid automatic placement exceeded the definite grid limits; child omitted");
-            }
+            self.ensure_implicit_tracks(placement);
+            occupy(&mut self.occupancy, placement);
+            cursor.advance(&self.occupancy, self.auto_flow);
+            self.placements[index] = Some(placement);
         }
     }
 
@@ -1079,138 +1044,130 @@ impl Grid {
 }
 
 fn normalized_span(span: u32) -> usize {
-    usize::try_from(span.max(1)).unwrap_or(MAX_TRACKS)
+    span.max(1) as usize
 }
 
-fn bounded_placement(
-    col: usize,
-    row: usize,
-    col_span: usize,
-    row_span: usize,
-) -> Option<Placement> {
-    if col >= MAX_TRACKS || row >= MAX_TRACKS {
-        return None;
-    }
-    let col_span = col_span.max(1).min(MAX_TRACKS - col);
-    let mut row_span = row_span.max(1).min(MAX_TRACKS - row);
-    row_span = row_span.min((MAX_CELLS / col_span).max(1));
-    Some(Placement {
-        col,
-        row,
-        col_span,
-        row_span,
-    })
-}
-
-fn occupancy_key(col: usize, row: usize) -> usize {
-    row * MAX_TRACKS + col
-}
-
-fn occupy(occupancy: &mut HashSet<usize>, placement: Placement) -> bool {
+/// Marks the cells `placement` covers, keyed by (row, col): sparse, so it
+/// holds a grid of any size, at one entry per covered cell.
+fn occupy(occupancy: &mut HashSet<(usize, usize)>, placement: Placement) {
     for row in placement.row..placement.end_row() {
         for col in placement.col..placement.end_col() {
-            let key = occupancy_key(col, row);
-            if !occupancy.contains(&key) && occupancy.len() >= MAX_CELLS {
-                return false;
-            }
-            occupancy.insert(key);
+            occupancy.insert((row, col));
         }
     }
-    true
 }
 
-fn is_free(occupancy: &HashSet<usize>, placement: Placement) -> bool {
+fn is_free(occupancy: &HashSet<(usize, usize)>, placement: Placement) -> bool {
     (placement.row..placement.end_row()).all(|row| {
-        (placement.col..placement.end_col())
-            .all(|col| !occupancy.contains(&occupancy_key(col, row)))
+        (placement.col..placement.end_col()).all(|col| !occupancy.contains(&(row, col)))
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn find_auto_placement(
-    occupancy: &HashSet<usize>,
-    columns: usize,
-    rows: usize,
+/// An automatically placed item: its spans, and the line it is fixed to on
+/// one axis, if any.
+#[derive(Clone, Copy, Debug)]
+struct AutoItem {
     col_span: usize,
     row_span: usize,
     fixed_col: Option<usize>,
     fixed_row: Option<usize>,
-    flow: AutoFlow,
-) -> Option<Placement> {
-    let col_span = col_span.max(1).min(MAX_TRACKS);
-    let row_span = row_span.max(1).min(MAX_TRACKS);
-    if col_span.checked_mul(row_span)? > MAX_CELLS {
-        return None;
-    }
-    let mut attempts = 0usize;
-    let try_candidate = |col, row| {
-        let placement = bounded_placement(col, row, col_span, row_span)?;
-        (placement.col_span == col_span
-            && placement.row_span == row_span
-            && is_free(occupancy, placement))
-        .then_some(placement)
-    };
+}
 
-    if let Some(col) = fixed_col {
-        for row in 0..=MAX_TRACKS - row_span {
-            if attempts >= MAX_CELLS {
-                break;
-            }
-            attempts += 1;
-            if let Some(placement) = try_candidate(col, row) {
-                return Some(placement);
+/// The first cell in flow order that may be free, in a grid `across` tracks
+/// wide on the flow's inner axis (columns in row flow, rows in column flow):
+/// every cell before it is occupied, so no automatic item can start there and
+/// the scan starts here. It moves only forward while the grid keeps its
+/// width, so filling a grid costs one step per covered cell, not a scan from
+/// the first cell per item; a grid that grew wider starts it over.
+#[derive(Clone, Copy, Debug, Default)]
+struct AutoCursor {
+    across: usize,
+    /// `(major, minor)`: `(row, col)` in row flow, `(col, row)` in column flow.
+    at: (usize, usize),
+}
+
+impl AutoCursor {
+    /// Past the occupied cells it stands on (after a placement).
+    fn advance(&mut self, occupancy: &HashSet<(usize, usize)>, flow: AutoFlow) {
+        if self.across == 0 {
+            return;
+        }
+        while occupancy.contains(&flow_cell(flow, self.at)) {
+            self.at.1 += 1;
+            if self.at.1 == self.across {
+                self.at = (self.at.0 + 1, 0);
             }
         }
-        return None;
     }
-    if let Some(row) = fixed_row {
-        for col in 0..=MAX_TRACKS - col_span {
-            if attempts >= MAX_CELLS {
-                break;
-            }
-            attempts += 1;
-            if let Some(placement) = try_candidate(col, row) {
-                return Some(placement);
-            }
-        }
-        return None;
-    }
+}
 
+/// The `(row, col)` key of a `(major, minor)` flow position.
+fn flow_cell(flow: AutoFlow, (major, minor): (usize, usize)) -> (usize, usize) {
     match flow {
-        AutoFlow::Row => {
-            let columns = columns.max(col_span).min(MAX_TRACKS);
-            for row in 0..=MAX_TRACKS - row_span {
-                for col in 0..=columns - col_span {
-                    if attempts >= MAX_CELLS {
-                        return None;
-                    }
-                    attempts += 1;
-                    if let Some(placement) = try_candidate(col, row) {
-                        return Some(placement);
-                    }
-                }
+        AutoFlow::Row => (major, minor),
+        AutoFlow::Column => (minor, major),
+    }
+}
+
+/// The first place in flow order where `item` fits (dense: earlier holes are
+/// filled). There always is one: the grid grows along its flow without bound,
+/// so the scan ends past the last occupied cell at the latest.
+fn find_auto_placement(
+    occupancy: &HashSet<(usize, usize)>,
+    (columns, rows): (usize, usize),
+    item: AutoItem,
+    flow: AutoFlow,
+    cursor: &mut AutoCursor,
+) -> Placement {
+    let AutoItem { col_span, row_span, .. } = item;
+    let fits = |col: usize, row: usize| {
+        let placement = Placement { col, row, col_span, row_span };
+        is_free(occupancy, placement).then_some(placement)
+    };
+    if let Some(col) = item.fixed_col {
+        let mut row = 0;
+        loop {
+            if let Some(placement) = fits(col, row) {
+                return placement;
             }
-        }
-        AutoFlow::Column => {
-            let rows = rows.max(row_span).min(MAX_TRACKS);
-            for col in 0..=MAX_TRACKS - col_span {
-                for row in 0..=rows - row_span {
-                    if attempts >= MAX_CELLS {
-                        return None;
-                    }
-                    attempts += 1;
-                    if let Some(placement) = try_candidate(col, row) {
-                        return Some(placement);
-                    }
-                }
-            }
+            row += 1;
         }
     }
-    None
+    if let Some(row) = item.fixed_row {
+        let mut col = 0;
+        loop {
+            if let Some(placement) = fits(col, row) {
+                return placement;
+            }
+            col += 1;
+        }
+    }
+
+    let (across, minor_span) = match flow {
+        AutoFlow::Row => (columns, col_span),
+        AutoFlow::Column => (rows, row_span),
+    };
+    if cursor.across != across {
+        *cursor = AutoCursor { across, at: (0, 0) };
+    }
+    // An item wider than the grid starts at its first line, and the grid
+    // grows to hold it.
+    let last_minor = across.max(minor_span) - minor_span;
+    let (mut major, mut minor) = cursor.at;
+    loop {
+        while minor <= last_minor {
+            let (row, col) = flow_cell(flow, (major, minor));
+            if let Some(placement) = fits(col, row) {
+                return placement;
+            }
+            minor += 1;
+        }
+        major += 1;
+        minor = 0;
+    }
 }
 
 fn append_implicit(tracks: &mut Vec<ExpandedTrack>, required: usize, size: f64) {
-    let required = required.min(MAX_TRACKS);
     tracks.reserve(required.saturating_sub(tracks.len()));
     while tracks.len() < required {
         tracks.push(ExpandedTrack {
@@ -1230,8 +1187,8 @@ fn parse_named_areas(rows: &[String]) -> (HashMap<LiveId, Placement>, Vec<String
         .map(|row| row.split_whitespace().collect())
         .collect();
     let width = cells[0].len();
-    if width == 0 || width > MAX_TRACKS || cells.len() > MAX_TRACKS {
-        diagnostics.push("Grid named areas exceed the definite grid limits".to_string());
+    if width == 0 {
+        diagnostics.push("Grid named area rows must not be empty".to_string());
         return (HashMap::new(), diagnostics);
     }
     if cells.iter().any(|row| row.len() != width) {
@@ -1331,7 +1288,7 @@ fn expanded_once_count(track: &Track) -> usize {
         Track::Repeat {
             mode: RepeatMode::Count(count),
             ..
-        } => usize::try_from(*count).unwrap_or(MAX_TRACKS).min(MAX_TRACKS),
+        } => *count as usize,
         _ => 1,
     }
 }
@@ -1348,9 +1305,7 @@ fn expand_tracks(
     let mut remaining_count = declared
         .iter()
         .map(expanded_once_count)
-        .try_fold(0usize, usize::checked_add)
-        .unwrap_or(MAX_TRACKS)
-        .min(MAX_TRACKS);
+        .fold(0usize, usize::saturating_add);
     let mut remaining_measure = declared.iter().fold(0.0, |sum, track| {
         sum + track_count_size(track, definite, &mut eval_expr)
             * expanded_once_count(track) as f64
@@ -1358,9 +1313,6 @@ fn expand_tracks(
     let mut emitted_measure = 0.0;
 
     for track in declared {
-        if output.len() >= MAX_TRACKS {
-            break;
-        }
         let once_count = expanded_once_count(track);
         let once_measure = track_count_size(track, definite, &mut eval_expr);
         let once_total = once_measure * once_count as f64;
@@ -1375,7 +1327,7 @@ fn expand_tracks(
                 let minimum = track_minimum(&repeat_track, definite, &mut eval_expr);
                 let count_size = track_count_size(&repeat_track, definite, &mut eval_expr);
                 let count = match mode {
-                    RepeatMode::Count(count) => usize::try_from(*count).unwrap_or(MAX_TRACKS),
+                    RepeatMode::Count(count) => *count as usize,
                     RepeatMode::AutoFill | RepeatMode::AutoFit => {
                         if let Some(axis) =
                             definite.filter(|_| minimum > 0.0 && count_size > 0.0)
@@ -1392,8 +1344,7 @@ fn expand_tracks(
                             1
                         }
                     }
-                }
-                .min(MAX_TRACKS - output.len());
+                };
                 for _ in 0..count {
                     output.push(ExpandedTrack {
                         track: repeat_track.clone(),
@@ -1747,13 +1698,14 @@ mod tests {
         expand_tracks(&auto, 5.0, Some(130.0), |_| None, &mut output);
         assert_eq!(output.len(), 4); // 20 + 3*30 + three 5px gaps = 125
 
-        let capped = vec![Track::Repeat {
-            mode: RepeatMode::Count(u32::MAX),
+        // A declared count is honoured whole: past the old 4096-track cap.
+        let many = vec![Track::Repeat {
+            mode: RepeatMode::Count(5_000),
             min: TrackLen::Px(1.0),
             max: TrackLen::Px(1.0),
         }];
-        expand_tracks(&capped, 0.0, Some(1.0), |_| None, &mut output);
-        assert_eq!(output.len(), MAX_TRACKS);
+        expand_tracks(&many, 0.0, Some(1.0), |_| None, &mut output);
+        assert_eq!(output.len(), 5_000);
 
         let multiple_auto = vec![
             Track::Repeat {
@@ -1946,79 +1898,70 @@ mod tests {
         occupy(&mut occupancy, overlap);
         assert_eq!(occupancy.len(), 4);
 
-        let placed = find_auto_placement(
-            &occupancy,
-            3,
-            2,
-            2,
-            1,
-            None,
-            None,
-            AutoFlow::Row,
-        )
-        .unwrap();
-        assert_eq!(placed, Placement { col: 0, row: 2, col_span: 2, row_span: 1 });
+        let placed = auto_place(&mut occupancy, (3, 2), &[item(2, 1)], AutoFlow::Row);
+        assert_eq!(placed, [Placement { col: 0, row: 2, col_span: 2, row_span: 1 }]);
+    }
+
+    fn item(col_span: usize, row_span: usize) -> AutoItem {
+        AutoItem { col_span, row_span, fixed_col: None, fixed_row: None }
+    }
+
+    /// Places `items` automatically, one after the other, as `prepare_placements` does once the
+    /// explicit items hold their cells.
+    fn auto_place(
+        occupancy: &mut HashSet<(usize, usize)>,
+        grid: (usize, usize),
+        items: &[AutoItem],
+        flow: AutoFlow,
+    ) -> Vec<Placement> {
+        let mut cursor = AutoCursor::default();
+        items
+            .iter()
+            .map(|item| {
+                let placement = find_auto_placement(occupancy, grid, *item, flow, &mut cursor);
+                occupy(occupancy, placement);
+                cursor.advance(occupancy, flow);
+                placement
+            })
+            .collect()
     }
 
     #[test]
     fn row_and_column_auto_flow_are_stable() {
         let mut occupancy = HashSet::new();
-        let first = find_auto_placement(
-            &occupancy, 2, 2, 1, 1, None, None, AutoFlow::Row,
-        )
-        .unwrap();
-        occupy(&mut occupancy, first);
-        let second = find_auto_placement(
-            &occupancy, 2, 2, 1, 1, None, None, AutoFlow::Row,
-        )
-        .unwrap();
-        assert_eq!((first.col, first.row), (0, 0));
-        assert_eq!((second.col, second.row), (1, 0));
+        let placed = auto_place(&mut occupancy, (2, 2), &[item(1, 1), item(1, 1)], AutoFlow::Row);
+        assert_eq!(placed.iter().map(|p| (p.col, p.row)).collect::<Vec<_>>(), [(0, 0), (1, 0)]);
 
         occupancy.clear();
-        occupy(&mut occupancy, first);
-        let column = find_auto_placement(
-            &occupancy, 2, 2, 1, 1, None, None, AutoFlow::Column,
-        )
-        .unwrap();
-        assert_eq!((column.col, column.row), (0, 1));
+        occupy(&mut occupancy, placed[0]);
+        let column = auto_place(&mut occupancy, (2, 2), &[item(1, 1)], AutoFlow::Column);
+        assert_eq!((column[0].col, column[0].row), (0, 1));
     }
 
+    /// Placement never stops: the old caps (4096 tracks, 65,536 cells) dropped every child past
+    /// them. 66,000 items in a four-column grid reach row 16,499 and cover 66,000 cells; a span
+    /// taller than both caps is held whole, the dense flow still fills the hole beside it, and an
+    /// item too wide for that hole goes below the span; implicit tracks grow to any count.
     #[test]
-    fn implicit_tracks_and_both_allocation_caps_are_bounded() {
-        let placement = bounded_placement(MAX_TRACKS - 1, 0, 100, MAX_CELLS).unwrap();
-        assert_eq!(placement.col_span, 1);
-        assert_eq!(placement.row_span, MAX_TRACKS);
-        assert!(placement.col_span * placement.row_span <= MAX_CELLS);
-        assert!(bounded_placement(MAX_TRACKS, 0, 1, 1).is_none());
-
-        let mut tracks = Vec::new();
-        append_implicit(&mut tracks, usize::MAX, 17.0);
-        assert_eq!(tracks.len(), MAX_TRACKS);
-        assert!(tracks
-            .iter()
-            .all(|track| track.track == Track::Px(17.0)));
+    fn placement_never_stops_past_the_old_caps() {
+        let mut occupancy = HashSet::new();
+        let placed = auto_place(&mut occupancy, (4, 1), &vec![item(1, 1); 66_000], AutoFlow::Row);
+        assert_eq!(placed.last(), Some(&Placement { col: 3, row: 16_499, col_span: 1, row_span: 1 }));
+        assert_eq!(occupancy.len(), 66_000);
 
         let mut occupancy = HashSet::new();
-        assert!(!occupy(
-            &mut occupancy,
-            Placement {
-                col: 0,
-                row: 0,
-                col_span: MAX_TRACKS,
-                row_span: MAX_TRACKS,
-            },
-        ));
-        assert_eq!(occupancy.len(), MAX_CELLS);
-        assert!(!occupy(
-            &mut occupancy,
-            Placement {
-                col: 1,
-                row: 16,
-                col_span: 1,
-                row_span: 1,
-            },
-        ));
+        occupy(&mut occupancy, Placement { col: 0, row: 0, col_span: 1, row_span: 70_000 });
+        let placed = auto_place(&mut occupancy, (2, 70_000), &[item(1, 1), item(2, 1)], AutoFlow::Row);
+        assert_eq!(placed, [
+            Placement { col: 1, row: 0, col_span: 1, row_span: 1 },
+            Placement { col: 0, row: 70_000, col_span: 2, row_span: 1 },
+        ]);
+        assert_eq!(occupancy.len(), 70_003);
+
+        let mut tracks = Vec::new();
+        append_implicit(&mut tracks, 5_000, 17.0);
+        assert_eq!(tracks.len(), 5_000);
+        assert!(tracks.iter().all(|track| track.track == Track::Px(17.0)));
     }
 
     #[test]

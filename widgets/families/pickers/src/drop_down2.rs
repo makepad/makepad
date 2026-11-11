@@ -486,7 +486,9 @@ pub struct DropDown2 {
     visible: bool,
     #[live]
     labels: Vec<String>,
+    #[imperative]
     #[live]
+    #[apply_state]
     selected_item: usize,
     #[live(22.0)]
     item_height: f64,
@@ -1182,6 +1184,9 @@ impl Widget for DropDown2 {
         }
         if action.action == A::EXPAND {
             self.set_active(cx);
+            if self.is_active {
+                cx.set_key_focus_from_user(self.draw_bg.area());
+            }
         } else if action.action == A::COLLAPSE {
             self.set_closed(cx);
         } else if action.action == A::SELECT {
@@ -1457,6 +1462,7 @@ impl Widget for DropDown2 {
                 self.animator_play(cx, ids!(hover.down));
                 self.set_active(cx);
                 if self.is_active {
+                    cx.set_key_focus_from_user(self.draw_bg.area());
                     let pointer = match fe.device {
                         DigitDevice::Touch { uid } => PopupPointer::Touch(uid),
                         _ => PopupPointer::Mouse,

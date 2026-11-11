@@ -1301,7 +1301,7 @@ impl Widget for ColorWheel {
                 cx.set_cursor(MouseCursor::Crosshair);
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 self.dragging = true;
                 cx.claim_finger_drag(fe.digit_id);
                 self.track(cx, uid, fe.abs, false);
@@ -1490,7 +1490,7 @@ impl Widget for ColorArea {
                 cx.set_cursor(MouseCursor::Crosshair);
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 self.dragging = true;
                 cx.claim_finger_drag(fe.digit_id);
                 self.track(cx, uid, fe.abs, false);
@@ -1692,7 +1692,7 @@ impl Widget for ColorAlpha {
                 cx.set_cursor(MouseCursor::Hand);
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 self.dragging = true;
                 cx.claim_finger_drag(fe.digit_id);
                 self.track(cx, uid, fe.abs, false);
@@ -1880,7 +1880,7 @@ impl Widget for ColorHue {
                 cx.set_cursor(MouseCursor::Hand);
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 self.dragging = true;
                 self.track(cx, uid, fe.abs, false);
             }
@@ -3253,7 +3253,7 @@ impl Widget for ColorField {
                     // The swatch beside the text is a shortcut into the
                     // field, not a second control: pressing it puts the
                     // keyboard where the colour is edited.
-                    self.input.set_key_focus(cx);
+                    cx.set_key_focus_from_user(self.input.area());
                 }
             }
         }

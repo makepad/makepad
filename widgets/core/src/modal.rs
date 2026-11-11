@@ -150,6 +150,9 @@ pub struct Modal {
     /// the back navigational gesture (e.g., on Android).
     #[live(true)]
     can_dismiss: bool,
+    /// Whether the user gave `restore_focus` its focus, so it gets it back the same way.
+    #[rust]
+    is_restore_focus_from_user: bool,
     /// Where the keyboard was when the modal opened.
     #[rust]
     restore_focus: Area,
@@ -390,7 +393,10 @@ impl Widget for Modal {
         // Even an invisible `draw_bg` costs the GPU a full-window pass every frame,
         // so a closed modal leaves its overlay empty.
         if self.is_open || self.closing {
-            self.draw_bg.begin(cx, Walk::fill(), self.view.layout);
+            // Our overlay doesn't move with the window body when it pans up to keep a focused
+            // text input above the soft keyboard, so we pan our content up by the same amount.
+            let layout = self.view.layout.with_scroll(dvec2(0.0, cx.keyboard_shift));
+            self.draw_bg.begin(cx, Walk::fill(), layout);
             let bg_view = self.view.widget(cx, ids!(bg_view));
             // the fade: a scrim's alpha, or a glass backdrop's opacity
             let fade = self.fade;
@@ -404,8 +410,12 @@ impl Widget for Modal {
                 Walk::fill().with_abs_pos(Vec2d { x: 0., y: 0. }),
             );
 
+            // We aren't laid out inside any KeyboardView around us, so our text inputs go to the outermost one,
+            // which is the one we pan along with.
+            let ime_scope = std::mem::take(&mut cx.ime_scope);
             let content = self.view.widget(cx, ids!(content));
             let _ = content.draw_all(cx, scope);
+            cx.ime_scope = ime_scope;
             self.draw_bg.end(cx);
         }
 
@@ -499,6 +509,7 @@ impl Modal {
         if !self.is_open {
             // Before this modal moves the keyboard into its content.
             self.restore_focus = cx.key_focus();
+            self.is_restore_focus_from_user = cx.has_key_focus_from_user(self.restore_focus);
         }
         self.is_open = true;
         self.closing = false;
@@ -654,7 +665,7 @@ impl Modal {
         // has now. Not the platform's previous focus: that is the content
         // itself as soon as anything inside it took the keyboard.
         let back = area_after_redraws(cx, std::mem::take(&mut self.restore_focus));
-        cx.set_key_focus(back);
+        cx.restore_key_focus(back, self.is_restore_focus_from_user);
         // Release only this modal's block. A modal closed under another one
         // (the platform nests these) must leave the other's block in place;
         // the plain `unblock_scrolling` pops whichever block is innermost.

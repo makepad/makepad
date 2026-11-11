@@ -1131,7 +1131,7 @@ impl Widget for Dropzone {
                 self.draw_bg.redraw(cx);
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 self.draw_bg.redraw(cx);
             }
             Hit::FingerUp(fe) => {
@@ -2490,7 +2490,7 @@ impl Widget for ImageWell {
                 cx.set_cursor(MouseCursor::Hand);
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 self.draw_bg.redraw(cx);
             }
             Hit::FingerUp(fe) => {

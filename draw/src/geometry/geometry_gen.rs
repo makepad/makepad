@@ -344,7 +344,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     // Each of these standard shader geometries is a single Cx-owned slot shared by
     // every VM. A VM (main or Splash isolate) only gets a *non-owning* handle to it,
     // so tearing an isolate down never frees the slot and the Cx-global shader cache
-    // (which bakes in the geometry id) can't be left pointing at a reclaimed slot.
+    // (whose per-object entries hold the geometry id) can't be left pointing at a reclaimed slot.
     fn shared(vm: &mut ScriptVm, key: LiveId, make: impl FnOnce() -> GeometryGen) -> ScriptValue {
         let id = vm
             .cx_mut()

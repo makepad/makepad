@@ -43,26 +43,16 @@ fn expansion_wraps_test_body() {
     CALLS.with(|calls| assert_eq!(calls.get(), 2));
 }
 
+/// Passes only when the attributes after `#[makepad_test]` reach the `#[test]` wrapper it
+/// generates: `#[should_panic]` makes its panic the pass, and `#[cfg(all())]` keeps it
+/// (`disabled` below is the `#[cfg]` that drops one).
 #[makepad_test]
 #[cfg(all())]
-#[ignore]
 #[should_panic(expected = "boom")]
-fn smoke(_app: TestApp) {
+fn test_attrs_reach_the_wrapper(_app: TestApp) {
     panic!("boom");
 }
 
 #[makepad_test]
 #[cfg(any())]
 fn disabled(_app: MissingType) {}
-
-#[test]
-fn expansion_preserves_test_attrs_on_wrapper() {
-    let _inner: fn(TestApp) = __makepad_test_inner_smoke;
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "smoke", "--ignored"])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
-    assert!(stdout.contains("1 passed"), "{stdout}");
-}

@@ -467,7 +467,7 @@ impl ValueInput {
         let text = if self.format == ValueInputFormat::HoursMinutes { self.format() }
             else { self.value.to_string() };
         self.text_input.set_text(cx, &text);
-        self.text_input.take_key_focus(cx);
+        self.text_input.take_key_focus_from_user(cx);
         self.text_input.select_all(cx);
         self.draw_bg.redraw(cx);
     }
@@ -654,7 +654,7 @@ impl Widget for ValueInput {
             });
             if self.edit_focus && !self.text_input.area().is_empty() {
                 self.edit_focus = false;
-                self.text_input.take_key_focus(cx);
+                self.text_input.take_key_focus_from_user(cx);
             }
         } else {
             let color = self.draw_text.color;
@@ -769,7 +769,7 @@ impl Widget for ValueInput {
                 self.hovered = false; self.draw_bg.redraw(cx);
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 if fe.tap_count >= 2 {
                     if self.track { self.type_here(cx, self.uid); }
                     else { self.enter_edit(cx); }

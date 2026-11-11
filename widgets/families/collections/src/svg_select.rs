@@ -1099,7 +1099,7 @@ impl Widget for SvgSelect {
                 cx.set_cursor(MouseCursor::Default);
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 // A press that landed on nothing is a miss, and a miss
                 // leaves the answer alone. On a picture a miss is ordinary:
                 // most of the room between the parts belongs to no part.

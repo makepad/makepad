@@ -1213,6 +1213,13 @@ impl Image {
         } else {
             rect.size.y.min(height_cap)
         };
+        // A Fit width peeks as NaN too, so it's bounded by its max the same way.
+        let width_cap = cx.walk_max_width(walk).unwrap_or(f64::INFINITY);
+        let avail_width = if rect.size.x.is_nan() {
+            width_cap
+        } else {
+            rect.size.x.min(width_cap)
+        };
         self.draw_bg.fit_scale = vec2(1.0, 1.0);
         self.draw_bg.fit_pan = vec2(0.0, 0.0);
         match self.fit {
@@ -1249,11 +1256,14 @@ impl Image {
                 walk.height = Size::Fixed(avail_height);
             }
             ImageFit::Smallest => {
-                let walk_height = rect.size.x / aspect;
+                let walk_height = avail_width / aspect;
                 if walk_height > avail_height {
                     walk.width = Size::Fixed(avail_height * aspect);
                     walk.height = Size::Fixed(avail_height);
                 } else {
+                    if rect.size.x.is_nan() {
+                        walk.width = Size::Fixed(avail_width);
+                    }
                     walk.height = Size::Fixed(walk_height);
                 }
             }

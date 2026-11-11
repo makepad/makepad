@@ -2937,6 +2937,14 @@ impl DockRef {
         None
     }
 
+    /// Returns the rect of the tab bar that holds the given tab, not the tab's own rect.
+    pub fn tab_bar_rect(&self, cx: &Cx, tab_id: LiveId) -> Option<Rect> {
+        let dock = self.borrow()?;
+        dock.find_tab_bar_of_tab(tab_id)
+            .and_then(|(tabs_id, _)| dock.tab_bars.get(&tabs_id))
+            .map(|tab_bar| tab_bar.tab_bar.bar_rect(cx))
+    }
+
     pub fn drop_target_tab_id(&self, cx: &Cx, abs: Vec2d) -> Option<LiveId> {
         if let Some(dock) = self.borrow() {
             return dock.drop_target_tab_id(cx, abs);
@@ -3042,8 +3050,6 @@ impl DockRef {
     }
 
     /// Starts dragging a tab, showing the grabbing cursor until the drag ends.
-    ///
-    /// On Windows the OLE drag session shows its own drag cursors instead.
     pub fn tab_start_drag(&self, cx: &mut Cx, _tab_id: LiveId, item: DragItem) {
         cx.start_dragging(vec![item]);
         cx.set_cursor(MouseCursor::Grabbing);

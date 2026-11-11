@@ -38,6 +38,7 @@
 //! is the difference between a menu bar that walks and one that stutters.
 
 use crate::{
+    held_events::in_hidden_subtree,
     makepad_derive_widget::*,
     makepad_draw::*,
     overlay_place::{claim_escape, place_overlay, PlaceAlign, PlaceRequest, Placement, Side},
@@ -1231,7 +1232,7 @@ impl Widget for MenuLayer {
             Actions::FOCUS | Actions::SCROLL_INTO_VIEW => {
                 self.levels[level].hi = Some(index);
                 self.levels[level].scroll_to(index);
-                cx.set_key_focus(self.area);
+                cx.set_key_focus_from_user(self.area);
                 self.redraw_menus(cx);
             }
             _ => return ActionResult::Unhandled,
@@ -1496,15 +1497,17 @@ impl Widget for MenuLayer {
             self.tick_hover(cx);
         }
         if let Event::Actions(actions) = event {
+            // A layer out of sight can't show a menu, so it leaves the ones raised on the bus to a shown layer.
+            let is_hidden = in_hidden_subtree(cx);
             let mut request = None;
             let mut set_request = None;
             let mut update = None;
             for a in actions.iter() {
                 match a.downcast_ref::<MenuAction>() {
-                    Some(MenuAction::Open { owner, rows, anchor, place }) => {
+                    Some(MenuAction::Open { owner, rows, anchor, place }) if !is_hidden => {
                         request = Some((*owner, rows.clone(), *anchor, *place));
                     }
-                    Some(MenuAction::OpenSet { owner, rows, anchor, place }) => {
+                    Some(MenuAction::OpenSet { owner, rows, anchor, place }) if !is_hidden => {
                         set_request = Some((*owner, rows.clone(), *anchor, *place));
                     }
                     Some(MenuAction::Close { owner }) if self.open.owner() == Some(*owner) => { self.close(cx); }

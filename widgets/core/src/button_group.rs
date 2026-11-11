@@ -1125,7 +1125,7 @@ impl Widget for SegmentedControl {
                 }
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 // The segments were placed where the row was first laid
                 // out; a parent that aligns its children (centred, or after
                 // a Fill sibling) moves the row afterwards. Place the press

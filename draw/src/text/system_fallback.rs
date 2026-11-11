@@ -49,9 +49,20 @@ pub(crate) struct SystemFallback {
     /// The OS comes before the bundled CJK and emoji faces (a `System`
     /// font set): a miss here is not the end of the chain.
     pub(crate) bundled_after: bool,
+    /// A glyph of this `Cx`'s text waited for the installed-font index
+    /// ([`Self::index_ready`] said no): the index's arrival redraws.
+    pub(crate) index_waited: bool,
 }
 
 impl SystemFallback {
+    /// Whether the installed-font index is built; a no is a glyph that waits
+    /// for it, and the index's arrival redraws for it (`index_waited`).
+    pub(crate) fn index_ready(&mut self) -> bool {
+        let ready = system_fonts::index_ready();
+        self.index_waited |= !ready;
+        ready
+    }
+
     /// Looks up the OS fonts for the characters of `text` the family misses.
     /// True when a face joined the families (lay the text out again).
     pub(crate) fn request(&mut self, layouter: &mut Layouter, family_id: FontFamilyId, text: &str) -> bool {
@@ -61,7 +72,7 @@ impl SystemFallback {
         // The installed-font index is still being built in the background
         // (Linux, Windows, Android): asked again on the redraw it brings,
         // never waited for here.
-        if !system_fonts::index_ready() {
+        if !self.index_ready() {
             return false;
         }
         let family = layouter.get_or_load_font_family(family_id);

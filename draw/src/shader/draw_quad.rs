@@ -452,3 +452,39 @@ impl DrawQuad {
     }
 }
 */
+
+#[cfg(test)]
+mod tests {
+    use super::DrawQuad;
+    use crate::{geometry::geometry_gen::GeometryGen, makepad_platform::*};
+
+    /// Draw objects of the same functions share one compiled shader, and each draws its own
+    /// geometry: a quad over another geometry, made after the stock quad, keeps that geometry
+    /// (the shader caches bound it to the stock quad's).
+    #[test]
+    fn draws_of_one_shader_keep_their_own_geometry() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::makepad_platform::script::script_mod(vm);
+            crate::script_mod(vm);
+            let stock = DrawQuad::script_new_with_default(vm);
+            let geometry = GeometryGen::from_quad_2d(0.0, 0.0, 2.0, 2.0).into_geometry(vm.cx_mut());
+            let own = geometry.geometry_id();
+            let handle = geometry.into_script_handle(vm);
+            let source = script! {
+                use mod.shader.*
+                use mod.draw.*
+                use mod.geom
+                DrawQuad{geom: vertex_buffer(geom.QuadVertex, #(handle))}
+            };
+            let other = vm.eval(source);
+            assert!(stock.draw_vars.draw_shader_id.is_some(), "the stock quad compiles");
+            assert_ne!(stock.draw_vars.geometry_id, Some(own));
+            for round in ["first", "second"] {
+                let quad = DrawQuad::script_from_value(vm, other);
+                assert_eq!(quad.draw_vars.draw_shader_id, stock.draw_vars.draw_shader_id, "{round} quad: one shader for the same functions");
+                assert_eq!(quad.draw_vars.geometry_id, Some(own), "{round} quad: draws its own geometry");
+            }
+        });
+    }
+}

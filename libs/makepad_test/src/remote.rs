@@ -128,7 +128,8 @@ impl std::fmt::Debug for RemoteClient {
 }
 
 /// CPU time an app ran: a thread that waits (for a core on a loaded box, for the JIT to compile
-/// code it runs for the first time, for an event) spends none.
+/// code it runs for the first time, for an event) spends none. And at a look, what its threads
+/// waited for a core.
 pub(crate) struct AppCpu {
     pub(crate) main: Duration,
     /// The whole process's but what its threads serving remote peers ran (answering a test's
@@ -138,6 +139,10 @@ pub(crate) struct AppCpu {
     /// The process's major page faults so far: pages it waited on from disk (swap, or a mapped
     /// file's), what an app that runs no CPU while it waits on memory shows.
     pub(crate) faults: u64,
+    /// What its threads that run now have spent runnable, waiting for a core (`waited`; zero when
+    /// not asked): CPU they wanted and a loaded box did not give them. Not its UI thread's (its CPU
+    /// says its work), nor its serving threads' or the runtime's (under the JIT, its compiles).
+    pub(crate) waited: Duration,
 }
 
 /// Why the app would still change if time moved on (`settled`), as the idle rule reads it.
@@ -167,13 +172,7 @@ impl RemoteClient {
     /// The program is waiting on the JIT right now. Background work (the queues ahead of the
     /// program, tier-ups, the cache's writes) goes on beside a test and is not a reason to wait.
     pub(crate) fn jit_foreground(&self) -> TestResult<bool> {
-        let fail = |what: &str| TestError::new(format!("app remote JIT state: {what}"));
-        let reply = self.get_text("owner", &[])?;
-        let json = reply.lines().find(|line| line.contains("\"queued\"")).ok_or_else(|| fail("the owner's reply carries no queue state"))?;
-        let json = parse_json(json)?;
-        let queued = json.key("queued");
-        let count = |key: &str| json_f64(queued.and_then(|queued| queued.key(key))).ok_or_else(|| fail("the owner's queue state is not a count"));
-        Ok(count("foreground")? + count("main")? > 0.0)
+        Ok(owner_queue(&self.get_text("owner", &[])?)?.queued)
     }
 
     /// Under the JIT, the app's state captured before teardown (the host's `capture`: stacks
@@ -195,25 +194,29 @@ impl RemoteClient {
 
     /// The app's CPU so far (`uicounts`): its main thread's, and its whole process's but what
     /// serving remote peers ran (its serving threads, and its UI thread answering their asks) and
-    /// what the runtime's own threads ran; and its process's major page faults.
-    pub(crate) fn cpu(&self) -> TestResult<AppCpu> {
-        let json = self.get_json("uicounts", &[])?;
+    /// what the runtime's own threads ran; and its process's major page faults. With `waited`,
+    /// what its other threads waited for a core too: a file or two a thread, for a look only.
+    pub(crate) fn cpu(&self, waited: bool) -> TestResult<AppCpu> {
+        let params: &[(&str, &str)] = if waited { &[("waited", "1")] } else { &[] };
+        let json = self.get_json("uicounts", params)?;
         let ns = |key: &str| {
             json_f64(json.key(key))
                 .map(|ns| Duration::from_nanos(ns as u64))
                 .ok_or_else(|| TestError::new(format!("app remote uicounts: no {key}: {json:?}")))
         };
         let faults = json_f64(json.key("faults")).ok_or_else(|| TestError::new(format!("app remote uicounts: no faults: {json:?}")))? as u64;
-        Ok(AppCpu { main: ns("cpu_ns")?, own: ns("process_cpu_ns")?.saturating_sub(ns("served_cpu_ns")?).saturating_sub(ns("runtime_cpu_ns")?), faults })
+        let waited = if waited { ns("waited_ns")? } else { Duration::ZERO };
+        Ok(AppCpu { main: ns("cpu_ns")?, own: ns("process_cpu_ns")?.saturating_sub(ns("served_cpu_ns")?).saturating_sub(ns("runtime_cpu_ns")?), faults, waited })
     }
 
-    /// Under the JIT, the program waits for code it is about to run (`jit_foreground`): an
-    /// install the app waits on, work pending for it. Natively never.
+    /// Under the JIT, the program waits for code it is about to run: a request of it queued on the
+    /// owner (`jit_foreground`), or a thread of it inside a demand compile (`OwnerQueue::waits`).
+    /// Natively never.
     pub(crate) fn waits_on_jit(&self) -> TestResult<bool> {
         if !self.jit {
             return Ok(false);
         }
-        self.jit_foreground()
+        Ok(owner_queue(&self.get_text("owner", &[])?)?.waits())
     }
 
     /// Whether anything would change the app if time moved on (`settled`): a frame, redraw,
@@ -502,6 +505,36 @@ pub fn parse_json(body: &str) -> TestResult<JsonValue> {
         .map_err(|err| TestError::new(format!("bad JSON from app remote: {err:?}\n{body}")))
 }
 
+/// The JIT owner's queue state, from its `owner` reply.
+#[derive(Debug, PartialEq)]
+struct OwnerQueue {
+    /// a request of the program (its main thread's or another of its threads') is queued
+    queued: bool,
+    /// a thread of the program is inside a demand compile: its first call of a fn, from its first
+    /// request until it runs the code
+    demand: bool,
+}
+
+impl OwnerQueue {
+    /// The program waits on the JIT: a queued request is only part of a demand compile's wait.
+    /// Once the owner served it, the thread still waits until it runs again, and on a
+    /// loaded box that is most of it. (A load's worker spent 9 s in lazy compiles at 0.1-1 s a
+    /// round trip, the owner idle 91% of it with nothing queued at the looks: read as "sat idle
+    /// 10.6 s", 11-11.)
+    fn waits(&self) -> bool {
+        self.queued || self.demand
+    }
+}
+
+fn owner_queue(reply: &str) -> TestResult<OwnerQueue> {
+    let fail = |what: &str| TestError::new(format!("app remote JIT state: {what}"));
+    let json = reply.lines().find(|line| line.contains("\"queued\"")).ok_or_else(|| fail("the owner's reply carries no queue state"))?;
+    let json = parse_json(json)?;
+    let queued = json.key("queued");
+    let count = |key: &str| json_f64(queued.and_then(|queued| queued.key(key))).ok_or_else(|| fail(&format!("the owner's queue state has no count `{key}`")));
+    Ok(OwnerQueue { queued: count("foreground")? + count("main")? > 0.0, demand: count("demand")? > 0.0 })
+}
+
 fn json_f64(value: Option<&JsonValue>) -> Option<f64> {
     match value? {
         JsonValue::U64(v) => Some(*v as f64),
@@ -644,6 +677,20 @@ fn format_num(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A thread inside a demand compile waits on the JIT with nothing queued (its request served,
+    /// the thread not running yet): the idle rule must not read that app as idle.
+    #[test]
+    fn a_demand_compile_waits_on_the_jit_with_nothing_queued() {
+        let reply = |queue: &str| format!("{{\"seq\":3,\"serving\":\"idle\",\"queued\":{queue}}}\n{{\"holds\":\"...\"}}");
+        let served = owner_queue(&reply(r#"{"total":0,"foreground":0,"main":0,"demand":1}"#)).unwrap();
+        assert_eq!(served, OwnerQueue { queued: false, demand: true });
+        assert!(served.waits(), "a demand compile whose request was served still waits on the JIT");
+        let quiet = owner_queue(&reply(r#"{"total":2,"foreground":0,"main":0,"demand":0}"#)).unwrap();
+        assert!(!quiet.waits(), "background requests alone are no wait of the program");
+        assert!(owner_queue(&reply(r#"{"total":1,"foreground":1,"main":0,"demand":0}"#)).unwrap().waits(), "a queued program request waits");
+        assert!(owner_queue(&reply(r#"{"total":0,"foreground":0,"main":0}"#)).is_err(), "a reply without the demand count is an error, not a quiet app");
+    }
 
     #[test]
     fn key_names_match_the_remote_spelling() {

@@ -768,7 +768,7 @@ impl Widget for RangeSlider {
                 cx.set_cursor(if b > 0.5 { MouseCursor::Grab } else { MouseCursor::EwResize });
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 if fe.tap_count == 2 {
                     self.reset_to_default(cx);
                     self.slided(cx);

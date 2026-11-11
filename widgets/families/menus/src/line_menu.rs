@@ -1591,7 +1591,7 @@ impl LineMenu {
         match event.hits_with_sweep_area(cx, self.draw_card.area(), self.draw_bg.area()) {
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 self.focus_by_press = !self.focused;
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 self.keyboard_mode = false;
             }
             Hit::FingerUp(fe) if fe.is_primary_hit() && fe.is_over && fe.was_tap() => {
@@ -1644,7 +1644,7 @@ impl LineMenu {
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 self.focus_by_press = !self.focused;
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 self.keyboard_mode = false;
             }
             Hit::FingerUp(fe) if fe.is_primary_hit() && fe.is_over && fe.was_tap() => {

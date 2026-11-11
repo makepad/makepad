@@ -1406,7 +1406,7 @@ impl Widget for DropDown {
                 if self.animator_in_state(cx, ids!(disabled.off)) {
                     self.pointer_focus = true;
                     self.draw_bg.redraw(cx);
-                    cx.set_key_focus(self.draw_bg.area());
+                    cx.set_key_focus_from_user(self.draw_bg.area());
                     self.animator_play(cx, ids!(hover.down));
                     if !self.is_active {
                         self.opening_digit = Some(fe.digit_id);
