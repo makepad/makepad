@@ -1,2 +1,4 @@
 v1 patch out=file
-v2 patch out=file
+# v2: the field removed from App, which APP holds: a restart (its bodies checked first: the later edit
+# is not refused with the first version's body)
+v2 restart out=file note=struct `App` changed its layout, and `live::APP` may hold values of it in the old one

@@ -1,5 +1,7 @@
 // M10: an enum whose derived `Hash` ran (a set holds a value's hash; the derive hashes the
-// variant's discriminant, here its position).
+// variant's discriminant, here its position). Three variants: a set's map entry keeps its own
+// variant in the enum's spare tag values, which an added fourth leaves where they are (with
+// two, rustc's layout of a third moves it, and the edit restarts).
 //  v1: a variant added after the running ones keeps their positions: applies in place, and the
 //      set still finds the held value.
 //  v2: a variant inserted before a running one moves the position its hash is made from: the
@@ -11,6 +13,7 @@ use std::collections::HashSet;
 enum Tab {
     Home,
     Settings,
+    Logs,
 }
 
 thread_local! {

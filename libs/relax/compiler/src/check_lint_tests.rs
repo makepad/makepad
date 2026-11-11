@@ -461,6 +461,33 @@ fn an_unsafe_block_around_asm_is_used() {
     assert_eq!(warnings, ["unnecessary `unsafe` block [unused_unsafe]"]);
 }
 
+/// A closure's unsafe block inside a used one is nested, so unneeded (closures inherit the context),
+/// but a lint attribute a macro's expansion puts around the tokens passed to it covers them, in a
+/// call written in another macro's argument too (hal's `objc_block!` in `msg_send!`): rustc's levels
+/// follow the HIR parents, and the check had looked for attributes only in the body's own text.
+#[test]
+fn an_allow_in_a_macros_expansion_covers_the_tokens_passed_in() {
+    let Some(warnings) = warnings_in_child("check_lint_tests::an_allow_in_a_macros_expansion_covers_the_tokens_passed_in") else {
+        return check_package(r#"
+            macro_rules! boxed {
+                ($body:block) => {{
+                    #[allow(unused_unsafe)]
+                    Box::new(move || $body)
+                }};
+            }
+            macro_rules! call { ($f:expr) => { ($f)() }; }
+            unsafe fn one() -> u32 { 1 }
+            pub fn allowed() -> u32 {
+                unsafe { let f: Box<dyn Fn() -> u32> = boxed!({ unsafe { one() } }); f() + call!(boxed!({ unsafe { one() } })) + one() }
+            }
+            pub fn nested() -> u32 {
+                unsafe { let f: Box<dyn Fn() -> u32> = Box::new(move || unsafe { one() }); f() + one() }
+            }
+        "#, &[]);
+    };
+    assert_eq!(warnings, ["unnecessary `unsafe` block -- because it's nested under this `unsafe` block [unused_unsafe]"]);
+}
+
 /// WARNZERO class 1 (fab slice live_trace.rs:253 and :277, hal vulkan/device.rs:165): a tuple
 /// field read through an overloaded deref (`self: Pin<&mut Self>`, `self: Arc<Self>`, `&Arc<S>`)
 /// is a read of that struct's field; a tuple field nothing reads still is dead.

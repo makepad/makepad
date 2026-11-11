@@ -1,11 +1,10 @@
 // M10: a struct built by byte writes (as a deserializer or a pool builds values): the builder
 // copies a prototype's bytes through `*const u8` / `*mut u8` and writes each field at the byte
 // offset measured on a probe value -- no field place, no offset_of!, no field name in the
-// builder. v1 adds a field: its values need the hidden ext word, which a byte copy takes from
-// the prototype (two values, one block) -- restart.
+// builder. v1 adds a field: a value the builder made may be kept where the struct's type does not
+// show, which its new layout would read wrong -- restart.
 
 use std::mem::{size_of, MaybeUninit};
-use std::sync::Mutex;
 
 struct Rec {
     label: String,
@@ -13,8 +12,6 @@ struct Rec {
     w: u32,
     done: bool,
 }
-
-static KEPT: Mutex<Vec<Rec>> = Mutex::new(Vec::new());
 
 // the byte offsets of Rec's fields, measured on a probe value
 fn offsets(probe: &Rec) -> [usize; 3] {
@@ -46,17 +43,6 @@ fn run() {
     let a = make(&proto, "a", 7);
     println!("out {} {} {}", a.label, a.n, a.w);
     drop(a);
-    {
-        // (the lock goes before code that may panic: a rerun takes it again)
-        let mut kept = KEPT.lock().unwrap();
-        if kept.is_empty() {
-            kept.push(make(&proto, "k", 1));
-            kept.push(Rec { label: "lit".to_string(), n: 2, w: 20, done: true });
-        }
-        for r in kept.iter() {
-            println!("out kept {} {} {} {}", r.label, r.n, r.w, r.done);
-        }
-    }
     drop(proto);
     println!("out ok");
 }

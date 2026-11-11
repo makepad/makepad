@@ -1,8 +1,8 @@
 #!/bin/bash
 # usage: run.sh <makepad binary>: a provided crate (built into the makepad binary) whose sources sit
-# in the application's own tree keeps rustc's layouts in a live session. A live session gives the
-# structs of the application's crates that are not Copy a hidden extension word (the fields a live
-# edit adds live there); a provided crate in that scope took it too, so each such plain type was 8
+# in the application's own tree keeps rustc's layouts in a live session. Live sessions once gave the
+# structs of the application's crates that were not Copy a hidden extension word (where the fields a
+# live edit added lived); a provided crate in that scope took it too, so each such plain type was 8
 # bytes larger than rustc's ("provided type ..: rustc lays it out in 32 bytes .., makepad run in
 # 40"), became opaque, and a program that builds one parked before its first frame ("a field of
 # `ScriptLoc` (`file: String`) is reached from JIT-compiled code"). A handle laid out as rustc lays

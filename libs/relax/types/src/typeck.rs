@@ -2676,8 +2676,7 @@ impl<'a> Fcx<'a> {
                     if !*rest && !bad && self.prog.def(dd).kind != DefKind::Union {
                         if let TyKind::Adt(ad, _, _) = self.tcx.tys.kind(self.shallow(et)).clone() {
                             if let Some(v) = self.tcx.adts.get(&ad).and_then(|a| a.variants.get(vi as usize).cloned()) {
-                                // (a field a live edit removed is a dead slot no code names, M10)
-                                let missing: Vec<String> = v.fields.iter().enumerate().filter(|(i, f)| !mentioned.contains(&(*i as u32)) && !(f.name & 0x8000_0000 == 0 && self.prog.syms.str(f.name).starts_with("__relax_dead_"))).map(|(_, f)| {
+                                let missing: Vec<String> = v.fields.iter().enumerate().filter(|(i, _)| !mentioned.contains(&(*i as u32))).map(|(_, f)| {
                                     if f.name & 0x8000_0000 != 0 { (f.name & 0x7fff_ffff).to_string() } else { self.prog.syms.str(f.name).to_string() }
                                 }).collect();
                                 if !missing.is_empty() {
@@ -3088,15 +3087,8 @@ impl<'a> Fcx<'a> {
                 continue;
             }
             let fname = self.prog.syms.str(f.name).to_string();
-            // a dead slot of a live layout edit (M10) and the fields an edit added (the extension
-            // block gives them their Default) need no value
-            if fname.starts_with("__relax_dead_") || adt.ext_from != u32::MAX && i as u32 >= adt.ext_from {
-                continue;
-            }
             let cname = crate::parser::derive::default_const_name(&ty_name, variant.as_deref(), &fname);
-            // rustc: `#[rust(expr)]` is no declared default for a bare `..`.
-            match self.prog.syms.get(&cname).and_then(|s| self.prog.lookup_in_scope(scope, s, false))
-                .filter(|&cd| !crate::mir::transform::const_check::is_live_default(self.prog, cd)) {
+            match self.prog.syms.get(&cname).and_then(|s| self.prog.lookup_in_scope(scope, s, false)) {
                 Some(cd) => out.push((i as u32, cd)),
                 // rustc: E0063 missing field (a bare `..` fills only fields with a default value)
                 None => self.err(lo, format!("E0063: missing field `{}` in initializer of `{}`; `..` fills only fields declared with a default value (`{}: T = value`){}", fname, ty_name, fname, if adt.n_generics > 0 { "; default values of generic types are not supported yet" } else { "" })),
@@ -3121,11 +3113,7 @@ impl<'a> Fcx<'a> {
         let mut missing: Vec<String> = Vec::new();
         for (i, f) in v.fields.iter().enumerate() {
             if given.contains(&(i as u32)) { continue; }
-            let fname = self.prog.syms.str(f.name).to_string();
-            // a dead slot of a live layout edit (M10) and the fields an edit added (the extension
-            // block gives them their Default) need no value
-            if fname.starts_with("__relax_dead_") || adt.ext_from != u32::MAX && i as u32 >= adt.ext_from { continue; }
-            missing.push(fname);
+            missing.push(self.prog.syms.str(f.name).to_string());
         }
         if missing.is_empty() { return; }
         missing.sort();

@@ -201,11 +201,11 @@ impl Interp<'_> {
     }
 
     /// The values the variants' Direct tags hold: the discriminants, or the tags a live edit kept
-    /// (AdtT::live_tags).
+    /// (AdtT::tag_pin).
     fn adt_tags(&self, ty: TyId) -> R<Vec<u128>> {
         let TyKind::Adt(d, ..) = self.tcx.tys.kind(ty) else { return unsupported("discriminant of a non-enum") };
         let Some(adt) = self.tcx.adts.get(d) else { return unsupported("adt") };
-        if !adt.live_tags.is_empty() { return Ok(adt.live_tags.clone()); }
+        if let Some(pin) = &adt.tag_pin { return Ok(pin.tags.clone()); }
         self.adt_discrs(ty)
     }
 

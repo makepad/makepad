@@ -2016,6 +2016,23 @@ pub fn check_alloc(options: &relax_session::Options, f: &Func, cfg: &RegConfig, 
                 }
             }
         };
+        // The emitters read the terminator's operands at the position of the block's last
+        // instruction, after it ran, and x64 those of a compare fused into the branch at the
+        // position of the instruction before it, after that one ran (copy_reuse): a copy register
+        // serving a read at that position must hold the value then too
+        let (_, ne) = branch_compare(b, &al.uses);
+        let fused = n >= 2 && ne + 1 == n;
+        let late_read = |reported: &mut std::collections::HashSet<(u32, u32)>, dd: &[u64], u: u32, q: u32, st: &St, out: &mut Vec<String>| {
+            let Some((v, Loc::Stack(_))) = home_of(u) else { return };
+            if in_win(v, q).is_some() {
+                return;
+            }
+            let Some(&r) = copy_reg.get(&(q, v)) else { return };
+            let ri = if is_int(v) { r as usize } else { 32 + r as usize };
+            if !st.reg[ri].contains(&v) && dd[v as usize / 64] & (1 << (v % 64)) != 0 && reported.insert((q, v)) {
+                out.push(format!("ra-check {}: branch read of v{} (via v{}) through the copy register at {} (b{}) reads {} holding {:?}", f.name, v, u, q, bi, name(ri), st.reg[ri]));
+            }
+        };
         // exit stores: the region's register -> the home slot, at the block's start (before
         // anything else) and before its terminator
         let exit_store = |st: &mut St, reported: &mut std::collections::HashSet<(u32, u32)>, out: &mut Vec<String>, dd: &[u64], p: u32| {
@@ -2048,11 +2065,19 @@ pub fn check_alloc(options: &relax_session::Options, f: &Func, cfg: &RegConfig, 
                 term_uses(&b.term, &mut tu);
                 for &u in &tu {
                     report(&mut reported, &dd, u.0, p, "terminator read", &st, &mut out);
+                    if n > 0 && !fused {
+                        late_read(&mut reported, &dd, u.0, bs + 2 * (n - 1) as u32 + 1, &st, &mut out);
+                    }
                 }
                 break;
             }
             let i = &b.insts[ii];
             uses_defs(i, &mut us, &mut ds);
+            if fused && ii + 1 == n {
+                for u in &us {
+                    late_read(&mut reported, &dd, u.0, p - 2, &st, &mut out);
+                }
+            }
             // a move between values sharing a slot (pieces of one split value) emits nothing: no
             // read, no store -- d is in the slot only when its source is
             let slot_mov = matches!(*i, Inst::Mov(d, s2) if matches!(al.loc[d.0 as usize], Loc::Stack(_)) && al.loc[d.0 as usize] == al.loc[s2.0 as usize]);
@@ -5407,6 +5432,24 @@ pub fn copy_reuse(options: &relax_session::Options, f: &Func, al: &Alloc) -> Has
                 (None, None) => Some(false),
             }
         };
+        // The emitters make the terminator's reads at the position of the block's last
+        // instruction, after it ran, and x64 makes those of a compare fused into the branch
+        // (branch_compare) at the position of the instruction before it, after that one ran: an
+        // entry there serves them too, so the copy must still hold the value then -- neither u
+        // nor c written from its instruction on, c read after it (or live out). `i = t; len = t;
+        // t = t + 1; branch t < n` with t spilled and i in a register: the step read t through
+        // i's register, and so did the branch, after the step: the old count (the loop ran once
+        // more and wrote one element past its buffer).
+        let n = b.insts.len();
+        let tail = |ii: usize| ii + 1 == n || (ii + 2 == n && branch_compare(b, &al.uses).1 + 1 == n);
+        let read_after = |c: u32, ii: usize| reads.get(&c).and_then(|r| r.last()).is_some_and(|&k| k > ii);
+        let kept_to_end = |ii: usize, u: u32, c: u32| {
+            b.insts[ii..].iter().all(|x| {
+                let mut w = false;
+                for_defs(x, |d| w |= d.0 == u || d.0 == c);
+                !w
+            })
+        };
         // spilled vreg -> (its register copy, that register)
         let mut have: Vec<(u32, u32, u8)> = Vec::new();
         for (ii, i) in b.insts.iter().enumerate() {
@@ -5414,13 +5457,23 @@ pub fn copy_reuse(options: &relax_session::Options, f: &Func, al: &Alloc) -> Has
             if !have.is_empty() {
                 for u in &us {
                     if let Some(&(_, c, r)) = have.iter().find(|h| h.0 == u.0) {
+                        let p = al.inst_pos(bi, ii);
                         match holds(c, ii) {
+                            Some(_) if tail(ii) => {
+                                if kept_to_end(ii, u.0, c) {
+                                    if read_after(c, ii) {
+                                        out.insert((p, u.0), r);
+                                    } else if !no_live_out {
+                                        pending.push((bi as u32, p, u.0, c, r));
+                                    }
+                                }
+                            }
                             Some(true) => {
-                                out.insert((al.inst_pos(bi, ii), u.0), r);
+                                out.insert((p, u.0), r);
                             }
                             // not read again in the block: its register still holds it when the
                             // copy is live out of the block (not redefined since: `have` drops it)
-                            Some(false) if !no_live_out => pending.push((bi as u32, al.inst_pos(bi, ii), u.0, c, r)),
+                            Some(false) if !no_live_out => pending.push((bi as u32, p, u.0, c, r)),
                             _ => {}
                         }
                     }

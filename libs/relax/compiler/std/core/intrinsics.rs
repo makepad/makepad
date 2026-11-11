@@ -159,6 +159,13 @@ pub mod intrinsics_mem {
         /// `T: TrustedLen` for this instantiation (a constant per instance): Vec's extend takes
         /// one loop per iterator type, as real alloc's SpecExtend specialization picks one
         pub fn is_trusted_len<T>() -> bool;
+        /// `T: TrustedRandomAccess` for this instantiation (a constant per instance): Zip takes
+        /// its indexed path, as real core's ZipImpl specialization picks it
+        pub fn is_trusted_random_access<T>() -> bool;
+        /// `T: TrustedRandomAccessNoCoerce` for this instantiation (Zip's indexed fold and size)
+        pub fn is_trusted_random_access_no_coerce<T>() -> bool;
+        /// `<T as TrustedRandomAccessNoCoerce>::MAY_HAVE_SIDE_EFFECT`, false when T is not one
+        pub fn may_have_side_effect<T>() -> bool;
         pub fn drop_in_place<T: crate::marker::PointeeSized>(p: *mut T);
         #[rustc_intrinsic_const_stable_indirect]
         pub fn ptr_read<T>(p: *const T) -> T;

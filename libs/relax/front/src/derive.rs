@@ -66,11 +66,6 @@ pub fn default_const_name(ty: &str, variant: Option<&str>, field: &str) -> Strin
     }
 }
 
-/// Only plain structs take `#[rust(expr)]` defaults (enum variants' fields never grow live).
-fn variant_is_none_live(groups: &[(Option<String>, Vec<FieldDef>)]) -> bool {
-    groups.len() == 1 && groups[0].0.is_none()
-}
-
 impl<'a> Parser<'a> {
 
 
@@ -97,38 +92,16 @@ impl<'a> Parser<'a> {
         }
         let name = String::from_utf8_lossy(self.bytes(it.name.lo, it.name.hi)).trim_start_matches("r#").to_string();
         let mut g = Gen::new(self.edition);
-        // live sessions (M10): a struct field's `#[rust(expr)]` initial value (makepad's) is its
-        // default too, for running values when an edit adds the field (lower.rs ext_project)
-        let live = variant_is_none_live(&groups) && self.session.options.live;
         for (variant, fields) in &groups {
             for f in fields {
-                let Some(fname) = f.name else { continue };
-                // the initial value's tokens: a byte span of the item's tokens, or the attribute's token range
-                let init = match f.default {
-                    Some(e) => {
-                        let ex = self.ast.expr(e);
-                        (ex.lo, ex.hi, None)
-                    }
-                    None if live => match self.rust_attr_expr(self.ast.list(f.attrs)) {
-                        Some(r) => (0, 0, Some(r)),
-                        None => continue,
-                    },
-                    None => continue,
-                };
+                let (Some(fname), Some(e)) = (f.name, f.default) else { continue };
+                let ex = self.ast.expr(e);
+                let (lo, hi) = (ex.lo, ex.hi);
                 let fname = String::from_utf8_lossy(self.bytes(fname.lo, fname.hi)).trim_start_matches("r#").to_string();
-                // a `#[rust(expr)]` initial value is a run-time expression, not a constant of the
-                // program: marked, so the const checker leaves it alone (a real default field
-                // value is an anonymous const like any other)
-                if f.default.is_none() {
-                    tg!(&mut g; #[relax_live_default]);
-                }
                 tg!(&mut g; #[allow(non_upper_case_globals)] const #word(&default_const_name(&name, variant.as_deref(), &fname)) :);
                 self.copy_bytes(&mut g, tok_lo, f.ty_span.0, f.ty_span.1);
                 tg!(&mut g; =);
-                match init.2 {
-                    None => self.copy_bytes(&mut g, tok_lo, init.0, init.1),
-                    Some((a, b)) => self.copy_toks(&mut g, a, b),
-                }
+                self.copy_bytes(&mut g, tok_lo, lo, hi);
                 tg!(&mut g; ;);
             }
         }
@@ -139,22 +112,6 @@ impl<'a> Parser<'a> {
         let items = self.in_expansion(start, |p| p.items_until(T::Eof))?;
         self.extra_items.extend(items);
         Ok(())
-    }
-
-    /// The tokens of a field attribute `#[rust(expr)]` (makepad's initial value): their range.
-    fn rust_attr_expr(&self, attrs: &[Attr]) -> Option<(usize, usize)> {
-        for a in attrs {
-            let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
-            if hi < lo + 3 || self.tok_text(self.toks.at(lo)) != b"rust" || self.tok_text(self.toks.at(lo + 1)) != b"(" {
-                continue;
-            }
-            let (s, e) = (self.toks.at(lo + 2).lo, self.toks.at(hi - 2).hi);
-            if self.tok_text(self.toks.at(hi - 1)) != b")" || e <= s {
-                continue;
-            }
-            return Some((lo + 2, hi - 1));
-        }
-        None
     }
 
     /// Token `i` as the source spelled it (split generic delimiters are restored).

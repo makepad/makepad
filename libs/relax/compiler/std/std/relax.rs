@@ -38,6 +38,7 @@ extern "C" {
     fn __relax_realtime_compiled(ticket: u64) -> bool;
     fn __relax_realtime_lazy(ticket: u64) -> u32;
     fn __relax_realtime_misses() -> u64;
+    fn __relax_realtime_holes() -> u64;
     fn __relax_realtime_thread();
     fn __relax_realtime_arm(on: bool);
 }
@@ -95,6 +96,14 @@ impl Drop for RealtimeArmed {
 /// compile): 0 is the goal; a rise names a hole in what `realtime` reached.
 pub fn realtime_misses() -> u64 {
     unsafe { __relax_realtime_misses() }
+}
+
+/// Holes found so far in what `realtime` reached: real-time code replaced by code whose callees
+/// were not compiled ahead, or code of the set that references fns outside it. Each is reported
+/// when found and walked then; 0 is the invariant (a hole is how a lazy compile can reach a
+/// real-time thread before `realtime_misses` counts one).
+pub fn realtime_holes() -> u64 {
+    unsafe { __relax_realtime_holes() }
 }
 
 /// The calling thread is a real-time thread from now on: its lazy compiles count in

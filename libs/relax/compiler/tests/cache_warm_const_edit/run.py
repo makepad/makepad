@@ -19,6 +19,9 @@ A probe that reads late first calls its reader after the edit: that code comes f
 A const that only values read must land, and a const a type uses must restart, saying why (MUST).
 const_every: one const of a dependency, every way code reads it, all from the warm cache.
 field_*: a struct's field list edited with no reader's text changing; field_every reads one field every way.
+A struct whose fields move takes its new layout where no running value of it is left: lands (MUST); where a
+static holds one (field_every, field_widen) or a frame may (field_running_frame, field_blocked_frame,
+field_short_walk) the edit restarts (MUST), naming the static or the running fn; the relaunch reads it new.
 dyn_*: a trait object made before the edit, its trait's method list edited: the edit restarts (MUST),
 its vtable linked from the disk cache as much as built by this run; dyn_impl_removed: the impl the
 object's vtable holds removed with the code that made it changed: lands (MUST), the object keeps its vtable.
@@ -199,6 +202,12 @@ RUNS_ONCE = r"an initializer runs once"
 EVALUATED = r"evaluated at compile time"
 TYPE_NAMES = r"though its text did not"
 STILL_RUNS = r"still runs the code from before the edit"
+# a struct whose fields move restarts where a running value of it may be left, naming where: a
+# static that holds one, or the fn whose frame does (field_copy_frame's line)
+def HELD_BY(struct, holder):
+    return r"struct `%s` changed its layout, and `[^`]*%s` may hold values of it in the old one" % (struct, holder)
+def FRAME_OF(struct, fn):
+    return r"struct `%s` changed its layout, and `[^`]*%s` is running on thread .+: its frame may hold" % (struct, fn)
 # what an edit must do: consts only values read land, consts a type uses restart with their reason
 MUST = {
     "const_direct": LAND, "const_through": LAND, "const_inlined": LAND, "const_derived": LAND, "const_assoc": LAND,
@@ -210,9 +219,9 @@ MUST = {
     "const_array_ty": IN_TYPE, "const_len": IN_TYPE, "const_array_derived": IN_TYPE, "const_discr": IN_TYPE,
     "const_array_fn": IN_TYPE, "const_array_macro": IN_TYPE, "const_array_alias": IN_TYPE,
     "const_dep_array": IN_TYPE, "const_dep_in_main_type": IN_TYPE, "const_dep_generic_field": IN_TYPE, "const_dep_generic_alias": IN_TYPE,
-    "field_every": LAND, "field_same_size": LAND, "field_two_kinds": LAND, "field_order": LAND, "field_widen": LAND,
+    "field_every": HELD_BY("Frame", "held::HELD"), "field_same_size": LAND, "field_two_kinds": LAND, "field_order": LAND, "field_widen": HELD_BY("Widen", "widen_held::HELD"),
     "field_nested": LAND, "field_const_read": EVALUATED, "field_const_fn": EVALUATED, "field_static": EVALUATED,
-    "field_import": TYPE_NAMES, "field_offset": EVALUATED, "field_running_frame": STILL_RUNS, "field_blocked_frame": STILL_RUNS, "field_short_walk": STILL_RUNS,
+    "field_import": TYPE_NAMES, "field_offset": EVALUATED, "field_running_frame": FRAME_OF("Running", "run"), "field_blocked_frame": FRAME_OF("Blocked", "blocked_reader"), "field_short_walk": FRAME_OF("ShortWalk", "short_walk_reader"),
     "const_other_new": LAND, "static_from_const": RUNS_ONCE, "static_through_fn": RUNS_ONCE, "static_through_new": RUNS_ONCE,
     "const_after_body": LAND, "const_added_module": LAND, "const_skipped": r"a module the boot skipped", "include_macro": LAND, "include_found": LAND, "include_after_body": LAND, "include_added": LAND,
     "rs_include_item": LAND, "rs_include_body": LAND,
@@ -220,7 +229,7 @@ MUST = {
     # a trait object the program made holds the old method table: linked from the disk cache too
     "dyn_method_add": r"old method table", "dyn_method_add_late": r"old method table", "dyn_vtable_fresh": r"old method table", "dyn_impl_removed": LAND,
     # a variant inserted before a held one: lands; restarts when code that ran read the numbers it moves
-    "enum_insert": LAND, "field_copy": LAND, "field_copy_frame": r"is running on thread .+: its frame may hold", "enum_insert_cast": r"read them as numbers", "enum_insert_hash": r"derived `Hash`",
+    "enum_insert": LAND, "field_copy": LAND, "field_copy_frame": FRAME_OF("CpF", "run"), "enum_insert_cast": r"read them as numbers", "enum_insert_hash": r"derived `Hash`",
 }
 # (--cold: the session compiled that module's code itself, so its readers are known: it lands)
 if cold:
@@ -372,9 +381,10 @@ def session(probe, rel, old, new, want):
         save(path, edited.replace(old, new))
         event, offered = verdict(seen, waiting)
         patched = event.get("event") == "patchverified"
-        # the save asked for a restart whole (a patch that held items back for one, `offered`,
-        # is a restart unless the probe's value landed with the rest)
-        restart = event.get("event") == "patchrefused" and event.get("outcome") == "restart" or offered and not patched
+        # the save asked for a restart: whole, or a patch that held items back for one (`offered`).
+        # Either is the save's outcome: a value that reads new after an offered restart did not
+        # land (an unchanged value reads the same either way), so no probe passes on both outcomes
+        restart = event.get("event") == "patchrefused" and event.get("outcome") == "restart" or offered
         # (its line in the log, for the row: written before its event)
         said = lambda: next((l for l in err[mark:] if ": patched (" in l or "a restart applies it" in l or "REFUSED" in l), None)
         wait(lambda: said() is not None, 5 if event or offered else 0)
@@ -386,8 +396,7 @@ def session(probe, rel, old, new, want):
         tick = lambda: int(last().split()[2]) if last() else -1
         since = tick()
         landed = not restart and wait(lambda: tick() > since + 1 and shows_new(last(), probe, want), 2 if patched else 0)
-        if not landed and offered:
-            restart = True
+        if offered:
             line = next((l for l in err[mark:] if "a restart applies it" in l), line)
         # the landing check: old code still on a stack a second after the patch asks for a restart
         if not landed and not restart and patched:

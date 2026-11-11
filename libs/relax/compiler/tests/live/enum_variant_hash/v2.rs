@@ -12,6 +12,7 @@ enum Tab {
     Home,
     About,
     Settings,
+    Logs,
     Help,
 }
 

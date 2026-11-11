@@ -1,7 +1,7 @@
 // Structs run.py edits the field lists of while code reading them runs: no reader's text changes
-// (the reader is in readers.rs, or below the struct). The edit moves a retyped field: its old slot
-// goes dead and it comes again in the extension block, so a reader left on its old code reads the
-// dead slot.
+// (the reader is in readers.rs, or below the struct). An edit that moves a field takes rustc's
+// layout of the new text where no running value of the struct is left, and restarts where one may
+// be: a reader left on its old code would read the field at its old offset.
 use std::sync::OnceLock;
 
 // field_every: an array's length changes (the literal's text with it), read every way

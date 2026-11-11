@@ -7,8 +7,8 @@ usage: restart_in_place.py [--visible]   (run from the workspace root; the JIT r
 
 Copies live_kinds/ to a temporary dir and runs it with its window (`--features window`: a HAL app,
 hidden and muted unless --visible). Once it ticks, a layout edit of the app struct is saved: a field
-added whose `#[rust(..)]` initial value is code (it may name the derive's `vm`, so running values
-cannot take it: the Restart rung). It passes when:
+added (its `#[rust(..)]` initial value code naming the derive's `vm`), which the app struct's value
+the running app holds cannot take: the Restart rung. It passes when:
   - the run ends in this process ("makepad-run: run end:") and no window is made for the next one;
   - the process is the same pid afterwards and is the only one the run left;
   - the app's state came back ("out restored <tick>" at or past the tick before the edit, the

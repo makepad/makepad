@@ -842,7 +842,7 @@ fn gandalf_scope_uses_package_source_and_project_boundaries() {
 fn app_scope_live_layout_edits() {
     const CHILD: &str = "MAKEPAD_RUN_APP_LAYOUT_TEST";
     let Ok(case) = std::env::var(CHILD) else {
-        for case in ["app_lib", "path_crate", "framework", "embedded", "generic_embedded", "pointer", "bound_template", "bound_template_embedded", "derive_default", "live_crate"] {
+        for case in ["app_lib", "path_crate", "framework", "embedded", "generic_embedded", "pointer", "bound_template", "bound_template_embedded", "enums"] {
             let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "lazy_reload_tests::app_scope_live_layout_edits", "--nocapture", "--test-threads=1"])
                 .env(CHILD, case));
@@ -857,17 +857,90 @@ fn app_scope_live_layout_edits() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(if case == "path_crate" { "helper/lib.rs" } else { "lib.rs" });
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let before = r#"
+    let base = r#"
         pub struct State { pub value: u64 }
         pub struct Dormant { pub n: u32 }
         pub fn init(out: &mut State) { *out = State { value: 41 }; }
         pub fn value(out: &mut State) { out.value += 1; }
         pub fn name(out: &mut &str) { *out = std::any::type_name::<State>(); }
+        pub const SIZE: u64 = std::mem::size_of::<State>() as u64;
+        pub fn size(out: &mut [u64; 2]) { let s = &std::mem::size_of::<State>(); *out = [*s as u64, SIZE]; }
+        pub struct Measured { pub n: u32 }
+        static MEASURED: usize = std::mem::size_of::<Measured>();
+        pub fn measured(out: &mut u64) { *out = MEASURED as u64; }
+        pub fn adder(n: u64) -> impl Fn(u64) -> u64 { move |x| x + n }
+        pub fn add_dyn(out: &mut u64) { let f = adder(2); let d: &dyn Fn(u64) -> u64 = &f; *out = d(*out); }
+        pub struct Kept { pub n: u32 }
+        static KEPT: std::sync::Mutex<Vec<Kept>> = std::sync::Mutex::new(Vec::new());
+        pub fn keep(out: &mut u64) { let mut k = KEPT.lock().unwrap(); k.push(Kept { n: 5 }); *out = k.iter().map(|x| x.n as u64).sum(); }
+        pub struct Mixed { pub a: u8, pub s: String, pub c: u16, pub d: u32 }
+        pub fn mixed(out: &mut [u64; 7]) {
+            let m = Mixed { a: 1, s: String::from("xy"), c: 3, d: 4 };
+            *out = [std::mem::size_of::<Mixed>() as u64, std::mem::align_of::<Mixed>() as u64, std::mem::offset_of!(Mixed, a) as u64, std::mem::offset_of!(Mixed, s) as u64,
+                std::mem::offset_of!(Mixed, c) as u64, std::mem::offset_of!(Mixed, d) as u64, m.a as u64 + m.s.len() as u64 + m.c as u64 + m.d as u64];
+        }
+        pub enum Ease { Linear, Pow(f64), Curve(f32, f32, f32, f32) }
+        pub enum Yoyo { Invert, Ease(Ease) }
+        pub enum Held { Nothing, Has(Yoyo) }
     "#;
+    // enums whose values the program holds, for in-place variant edits (M84): E's values in a
+    // Vec, in Options and in Options of Options; F's in Option<F> and in W, which keeps its own
+    // variants in F's spare tag values; a niche-filled enum (Yoyo), a single-variant one, one of
+    // 256 variants (the tag's full width) and a repr(u8) one. `read` folds every value into a
+    // decimal digit, and the sizes rustc gives E and its Options into the last. N's values live
+    // only in `transient`'s locals
+    let before = if case == "enums" {
+        let g: String = (0..256).map(|i| format!("V{i}, ")).collect();
+        base.to_string() + &format!(r#"
+        use std::sync::Mutex;
+        pub enum E {{ A, B(u32), C(u8) }}
+        pub enum F {{ A, B(u32) }}
+        pub enum W {{ A(F), B, C }}
+        pub enum One {{ Only(u32) }}
+        pub enum G {{ {g} }}
+        #[repr(u8)] pub enum R {{ A, B(u16), Q }}
+        pub enum N {{ A(u32), B }}
+        static ES: Mutex<Vec<E>> = Mutex::new(Vec::new());
+        static OS: Mutex<Vec<Option<E>>> = Mutex::new(Vec::new());
+        static OOS: Mutex<Vec<Option<Option<E>>>> = Mutex::new(Vec::new());
+        static FS: Mutex<Vec<(Option<F>, W)>> = Mutex::new(Vec::new());
+        static YS: Mutex<Vec<(Held, One, G)>> = Mutex::new(Vec::new());
+        static RS: Mutex<Vec<R>> = Mutex::new(Vec::new());
+        const _: () = assert!(std::mem::size_of::<E>() == 8 && std::mem::size_of::<Option<E>>() == 8 && std::mem::size_of::<Option<Option<E>>>() == 8);
+        pub fn make(_: &mut u64) {{
+            ES.lock().unwrap().extend([E::A, E::B(7), E::C(3)]);
+            OS.lock().unwrap().extend([Some(E::C(3)), None]);
+            OOS.lock().unwrap().extend([Some(None), None, Some(Some(E::B(7)))]);
+            FS.lock().unwrap().extend([(Some(F::B(7)), W::A(F::A)), (None, W::C)]);
+            YS.lock().unwrap().push((Held::Has(Yoyo::Ease(Ease::Pow(2.0))), One::Only(5), G::V255));
+            RS.lock().unwrap().extend([R::A, R::B(9)]);
+        }}
+        pub fn step(_: &mut u64) {{}}
+        pub fn transient(out: &mut u64) {{
+            let mut n = 0u64;
+            for x in [N::A(7), N::B] {{ n = n * 10 + match x {{ N::A(k) => k as u64, N::B => 5 }}; }}
+            *out = n * 100 + std::mem::size_of::<N>() as u64;
+        }}
+        fn e(x: &E) -> u64 {{ match x {{ E::A => 1, E::B(7) => 2, E::C(3) => 3, _ => 9 }} }}
+        fn r(x: &R) -> u64 {{ match x {{ R::A => 1, R::B(9) => 2, _ => 9 }} }}
+        pub fn read(out: &mut u64) {{
+            let mut n = 0u64;
+            for x in ES.lock().unwrap().iter() {{ n = n * 10 + e(x); }}
+            for x in OS.lock().unwrap().iter() {{ n = n * 10 + x.as_ref().map_or(0, e); }}
+            for x in OOS.lock().unwrap().iter() {{ n = n * 10 + match x {{ Some(Some(x)) => e(x), Some(None) => 8, None => 0 }}; }}
+            for (a, b) in FS.lock().unwrap().iter() {{ n = n * 10 + match (a, b) {{ (Some(F::B(7)), W::A(F::A)) => 1, (None, W::C) => 2, _ => 9 }}; }}
+            for (h, o, g) in YS.lock().unwrap().iter() {{ n = n * 10 + match (h, o, g) {{ (Held::Has(Yoyo::Ease(Ease::Pow(p))), One::Only(5), G::V255) if *p == 2.0 => 1, _ => 9 }}; }}
+            for x in RS.lock().unwrap().iter() {{ n = n * 10 + r(x); }}
+            let rustc = std::mem::size_of::<E>() == 8 && std::mem::size_of::<Option<E>>() == 8 && std::mem::size_of::<Option<Option<E>>>() == 8;
+            *out = n * 10 + if rustc {{ 1 }} else {{ 9 }};
+        }}
+    "#)
+    } else {
+        base.to_string()
+    };
+    let before = before.as_str();
     std::fs::write(&path, before).unwrap();
-    let mut session = crate::Session::default();
-    if case == "derive_default" { session.options.live = true; }
-    let session = Arc::new(session);
+    let session = Arc::new(crate::Session::default());
     let (mut prog, core, lib) = crate::load_with_std(&session, path.to_str().unwrap(), "app_lib", false).unwrap();
     let cfg = crate::cfg::CfgSet::host(&session, &[]);
     let bin_path = dir.join("main.rs");
@@ -895,18 +968,27 @@ fn app_scope_live_layout_edits() {
     let init = def("init", lib);
     let value = def("value", lib);
     let name = def("name", lib);
+    let keep = def("keep", lib);
+    let mixed = def("mixed", lib);
+    let size = def("size", lib);
+    let measured = def("measured", lib);
+    let add_dyn = def("add_dyn", lib);
+    let mixed_def = def("Mixed", lib);
+    let enums = [def("Ease", lib), def("Yoyo", lib), def("Held", lib)];
+    let enum_fns = (case == "enums").then(|| [def("make", lib), def("step", lib), def("read", lib), def("transient", lib)]);
     let mut roots = vec![bin_path.to_string_lossy().into_owned()];
-    if case != "framework" && case != "live_crate" { roots.push(path.to_string_lossy().into_owned()); }
+    // (the "framework" case: the edited crate is outside the app scope, which changes nothing of
+    // its layouts or edits)
+    if case != "framework" { roots.push(path.to_string_lossy().into_owned()); }
     crate::borrowck::event::set_app_scope(roots);
-    // a crate outside the scope that an earlier run of the session handed on (a refused layout
-    // edit of it: the "framework" case below) takes live layouts: its edits patch
-    if case == "live_crate" { crate::layout::set_live_crates(vec![path.to_string_lossy().into_owned()]); }
     crate::layout::set_root_crate(bin);
     crate::layout::LIVE_SESSION.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut tcx = crate::tcx::Tcx::new();
     tcx.collect(&prog);
     assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
     let ty = tcx.tys.intern(TyKind::Adt(state, tcx.tys.mk_list(&[]), RegionArgsId::EMPTY));
+    let mixed_ty = tcx.tys.intern(TyKind::Adt(mixed_def, tcx.tys.mk_list(&[]), RegionArgsId::EMPTY));
+    let enums = enums.map(|e| tcx.tys.intern(TyKind::Adt(e, tcx.tys.mk_list(&[]), RegionArgsId::EMPTY)));
     if case.starts_with("bound_template") {
         use crate::consts::GenericArg;
         use crate::types::{AliasTyKind, BoundVar, RegionKind};
@@ -932,27 +1014,109 @@ fn app_scope_live_layout_edits() {
     let init = entry(&mut u, init);
     let value = entry(&mut u, value);
     let name = entry(&mut u, name);
+    let keep = entry(&mut u, keep);
+    let mixed = entry(&mut u, mixed);
+    let size = entry(&mut u, size);
+    let measured = entry(&mut u, measured);
+    let add_dyn = entry(&mut u, add_dyn);
     let layout = u.layout_of(ty).clone();
-    assert_eq!(layout.ext.is_some(), case != "framework");
-    if case == "derive_default" {
-        let after = before.replace("pub value: u64 }", "pub value: u64, #[rust(make(vm))] pub later: u64 }")
-            .replace("State { value: 41 }", "State { value: 41, later: 5 }")
-            + "\nfn make(_: u32) -> u64 { 5 }\n";
-        let restart = unsafe { reload::apply(up, vec![Edit { file: u.prog.def(state).file, path: path.to_string_lossy().into_owned(), src: after.as_bytes().to_vec() }]) };
-        assert_eq!(restart.rung, Rung::Restart, "{:?}", restart.lines);
-        assert!(restart.lines.iter().any(|l| l.contains("#[rust(..)]") && l.contains("restart the app")), "{:?}", restart.lines);
-        let after = after.replace("make(vm)", "make(3)");
-        let patch = unsafe { reload::apply(up, vec![Edit { file: u.prog.def(state).file, path: path.to_string_lossy().into_owned(), src: after.as_bytes().to_vec() }]) };
-        assert_eq!(patch.rung, Rung::Patch, "{:?}", patch.lines);
-        let after = after + "\npub struct Fresh { #[rust(make(vm))] pub n: u64 }\n";
-        let patch = unsafe { reload::apply(up, vec![Edit { file: u.prog.def(state).file, path: path.to_string_lossy().into_owned(), src: after.into_bytes() }]) };
-        assert_eq!(patch.rung, Rung::Patch, "{:?}", patch.lines);
+    assert_eq!((layout.size, &layout.fields[..]), (8, &[0][..]), "State");
+    // an enum is laid out as rustc lays it in a live session too (M84: a tagged layout with no
+    // niche to give made the program's own size assert fail): Yoyo and Held fill Ease's tag niche
+    let sizes = enums.map(|t| u.layout_of(t).size);
+    assert_eq!(sizes, [24, 24, 24], "Ease, Yoyo, Held");
+    let mut old_value = vec![0u64; (layout.size as usize + 7) / 8];
+    let call = |entry, arg| unsafe { jit::call_jit(up, entry, arg) }.unwrap_or_else(|p| panic!("JIT: {}", p.message));
+    // R11 (M84): a struct of the program that is not Copy is laid out as rustc lays it in a live
+    // session too: its layout, and size_of, align_of and offset_of! in its code, are this test
+    // binary's own for the same definition
+    struct Mixed { a: u8, s: String, c: u16, d: u32 }
+    let m = Mixed { a: 1, s: String::from("xy"), c: 3, d: 4 };
+    let rustc = [std::mem::size_of::<Mixed>(), std::mem::align_of::<Mixed>(), std::mem::offset_of!(Mixed, a), std::mem::offset_of!(Mixed, s),
+        std::mem::offset_of!(Mixed, c), std::mem::offset_of!(Mixed, d)].map(|x| x as u64);
+    let mut out = [0u64; 7];
+    call(mixed, out.as_mut_ptr() as u64);
+    assert_eq!((&out[..6], out[6]), (&rustc[..], m.a as u64 + m.s.len() as u64 + m.c as u64 + m.d as u64), "Mixed in the JIT's code");
+    let ml = u.layout_of(mixed_ty);
+    let laid: Vec<u64> = [ml.size, ml.align].into_iter().chain(ml.fields.iter().copied()).map(u64::from).collect();
+    assert_eq!(laid, rustc, "Mixed's layout");
+    if let Some(fns) = enum_fns {
+        // M84: a variant added to an enum the program holds values of applies in place when
+        // rustc's layout of the new text, or that layout with the running variants' tags kept,
+        // reads every value made before as it was; otherwise the edit restarts, naming the type
+        let [make, step, read, transient] = fns.map(|d| entry(&mut u, d));
+        let file = u.prog.def(state).file;
+        let lib_path = path.to_string_lossy().into_owned();
+        let apply = |src: &str| unsafe { reload::apply(up, vec![Edit { file, path: lib_path.clone(), src: src.as_bytes().to_vec() }]) };
+        let run = |f| {
+            let mut n = 0u64;
+            call(f, &mut n as *mut u64 as u64);
+            n
+        };
+        run(make);
+        assert_eq!(run(read), 12330802121121, "the values before any edit");
+        // R3, R8: a variant appended: rustc's layout reads the running values as before (the
+        // Options keep their None where it was), the new one constructs and matches, and the
+        // const assert of rustc's sizes in the new text holds
+        let v1 = before.replace("C(u8) }", "C(u8), D(u16) }").replace("E::C(3) => 3,", "E::C(3) => 3, E::D(4) => 4,")
+            .replace("pub fn step(_: &mut u64) {}", "pub fn step(_: &mut u64) { ES.lock().unwrap().push(E::D(4)); }");
+        let out = apply(&v1);
+        assert_eq!(out.rung, Rung::Patch, "appended: {:?}", out.lines);
+        run(step);
+        assert_eq!(run(read), 123430802121121, "appended");
+        // R3, R4: a variant inserted before running ones: rustc's tags would move theirs, so the
+        // running tags stay (pinned) and the new one takes the next free value
+        let v2 = v1.replace("pub enum E { A, B(u32)", "pub enum E { A, X, B(u32)").replace("E::D(4) => 4,", "E::D(4) => 4, E::X => 5,")
+            .replace("ES.lock().unwrap().push(E::D(4));", "ES.lock().unwrap().push(E::X); OS.lock().unwrap().push(Some(E::X));");
+        let out = apply(&v2);
+        assert_eq!(out.rung, Rung::Patch, "inserted: {:?}", out.lines);
+        run(step);
+        assert_eq!(run(read), 12345305802121121, "inserted");
+        // R9: a repr(u8) enum's tag is its discriminant: an append applies, an insert restarts
+        let v3 = v2.replace("pub enum R { A, B(u16), Q }", "pub enum R { A, B(u16), Q, C }").replace("R::B(9) => 2,", "R::B(9) => 2, R::C => 3,")
+            .replace("ES.lock().unwrap().push(E::X); OS.lock().unwrap().push(Some(E::X));", "RS.lock().unwrap().push(R::C);");
+        let out = apply(&v3);
+        assert_eq!(out.rung, Rung::Patch, "repr(u8) appended: {:?}", out.lines);
+        run(step);
+        let held = 123453058021211231;
+        assert_eq!(run(read), held, "repr(u8) appended");
+        // R10: N's values live only in a fn's locals: a variant that makes rustc fill a niche
+        // (C's char) where it had a tag takes that new layout, and the code using N is rebuilt
+        assert_eq!(run(transient), 7508, "N before its edit");
+        let v4 = v3.replace("pub enum N { A(u32), B }", "pub enum N { A(u32), B, C(u32, char) }").replace("[N::A(7), N::B]", "[N::A(7), N::B, N::C(3, 'x')]")
+            .replace("N::B => 5 }", "N::B => 5, N::C(k, c) => k as u64 + (c == 'x') as u64 }");
+        let out = apply(&v4);
+        assert_eq!(out.rung, Rung::Patch, "no running value: {:?}", out.lines);
+        assert!(out.lines.iter().any(|l| l.contains("enum `app_lib::N` takes its new layout")), "{:?}", out.lines);
+        assert_eq!(run(transient), 75408, "N in its new layout");
+        assert_eq!(run(read), held, "the running values after N's edit");
+        let restarts = |src: String, what: &str, says: &[&str]| {
+            let out = apply(&src);
+            assert_eq!(out.rung, Rung::Restart, "{what}: {:?}", out.lines);
+            assert!(out.lines.iter().any(|l| says.iter().all(|s| l.contains(s)) && l.contains("restart the app")), "{what}: {:?}", out.lines);
+            assert_eq!(run(read), held, "{what}: the running values after the restart is offered");
+        };
+        restarts(v4.replace("pub enum R { A,", "pub enum R { Z, A,"), "repr(u8) inserted", &["variant `Z` was added", "app_lib::R", "another tag"]);
+        // R6, R7: a niche-filled enum, a single-variant one, a tag of full width, a payload that
+        // grows the enum: restart, and the running sizes stay rustc's
+        restarts(v4.replace("pub enum Yoyo { Invert, Ease(Ease) }", "pub enum Yoyo { Invert, Ease(Ease), Back }"), "niche-filled", &["variant `Back` was added", "Yoyo"]);
+        restarts(v4.replace("pub enum One { Only(u32) }", "pub enum One { Only(u32), Two }"), "single variant", &["variant `Two` was added", "would change from"]);
+        restarts(v4.replace("V255, ", "V255, V256, "), "257 variants", &["variant `V256` was added", "would change from"]);
+        restarts(v4.replace("C(u8), D(u16) }", "C(u8), D(u16), Big([u64; 4]) }"), "grown payload", &["variant `Big` was added", "would change from"]);
+        assert_eq!(enums.map(|t| u.layout_of(t).size), [24, 24, 24], "Ease, Yoyo, Held after the restarts");
+        // R5: F's spare tag values hold Option<F>'s None and W's own variants. With two variants
+        // rustc's layout of a third moves them (Option<F>'s None from 2 to the top value; with
+        // tags kept, above or below, one of them moves too), so the running Options and Ws would
+        // be read wrong: a restart naming a type holding F, F's own values being fine
+        let out = apply(&v4.replace("pub enum F { A, B(u32) }", "pub enum F { A, B(u32), C(u32) }"));
+        assert_eq!(out.rung, Rung::Restart, "two-variant append: {:?}", out.lines);
+        assert!(out.lines.iter().any(|l| l.contains("variant `C` was added") && l.contains("made before the edit would be read wrong") && !l.contains("values of `app_lib::F` ")),
+            "two-variant append names a type holding F: {:?}", out.lines);
+        assert_eq!(run(read), held, "two-variant append: the running values after the restart is offered");
         std::mem::forget(u);
         std::fs::remove_dir_all(dir).unwrap();
         return;
     }
-    let mut old_value = vec![0u64; (layout.size as usize + 7) / 8];
-    let call = |entry, arg| unsafe { jit::call_jit(up, entry, arg) }.unwrap_or_else(|p| panic!("JIT: {}", p.message));
     call(init, old_value.as_mut_ptr() as u64);
     call(value, old_value.as_mut_ptr() as u64);
     assert_eq!(old_value[layout.fields[0] as usize / 8], 42);
@@ -967,41 +1131,92 @@ fn app_scope_live_layout_edits() {
     let actual_name = unsafe { std::slice::from_raw_parts(actual_name[0] as *const u8, actual_name[1]) };
     let actual_name = std::str::from_utf8(actual_name).unwrap();
     assert_eq!(actual_name, crate::typeck::type_name(&u.prog, &u.tcx, ty));
-    let after = before.replace("pub value: u64 }", "pub value: u64, pub extra: u64 }")
+    // M84 step 5, R12: an edit applies in place when no field moves (a rename); one that moves
+    // fields takes rustc's layout of the new text when no running value of the struct is left (the
+    // test holds its values in its own memory, which no static shows), and restarts when one may be
+    let file = u.prog.def(state).file;
+    let lib_path = path.to_string_lossy().into_owned();
+    let apply = |src: &str| unsafe { reload::apply(up, vec![Edit { file, path: lib_path.clone(), src: src.as_bytes().to_vec() }]) };
+    // size_of in code whose text no edit changes (`size`): rebuilt for each new layout, and in a
+    // const it reads (`SIZE`): evaluated again
+    let size_now = || {
+        let mut n = [0u64; 2];
+        call(size, n.as_mut_ptr() as u64);
+        (n[0], n[1])
+    };
+    assert_eq!(size_now(), (8, 8), "size_of::<State>() before the edits");
+    // a trait object of a closure its fn returns (`-> impl Fn`): it holds no State, whatever the
+    // closure's owner returns (that cycle once counted as a holder and restarted every struct edit)
+    let mut n = 1u64;
+    call(add_dyn, &mut n as *mut u64 as u64);
+    assert_eq!(n, 3);
+    let added = before.replace("pub value: u64 }", "pub value: u64, pub extra: u64 }")
         .replace("State { value: 41 }", "State { value: 41, extra: 0 }")
-        .replace("out.value += 1;", "assert_eq!(out.extra, 0); out.extra = 7; out.value += 1; obsolete_style();")
+        .replace("out.value += 1;", "out.value += 1; out.extra += 7; obsolete_style();")
         // Generated child styles register their own function entry. Removing the child
         // removes this helper too; its old body must not be checked against the new names.
         + "\nfn obsolete_style() { let _entry = obsolete_style as fn(); }\n";
-    let patch = unsafe { reload::apply(up, vec![Edit { file: u.prog.def(state).file, path: path.to_string_lossy().into_owned(), src: after.into_bytes() }]) };
-    // A struct outside the app scope keeps its layout fixed: restart. One embedded by value in a
-    // framework type (`Holder`, like the platform's `Option<App>`) patches: its first layout stays.
-    if case == "framework" {
-        assert_eq!(patch.rung, Rung::Restart, "{:?}", patch.lines);
-        assert!(patch.lines.iter().any(|l| l.contains("`app_lib` is outside the app scope") && l.contains("restart the app")), "{:?}", patch.lines);
-        // the refusal hands the crate to the session's next run, which lays it out for live edits
-        let root = crate::vfs::normalize_path(&path.to_string_lossy());
-        assert_eq!(crate::reload::live_crates_next(), vec![root.clone()]);
-        let next = crate::reload::next_run_env(None).unwrap();
-        assert!(next.iter().any(|(k, v)| *k == "MAKEPAD_RUN_LIVE_CRATES" && v.as_deref() == Some(std::ffi::OsStr::new(&root))), "{next:?}");
-        call(value, old_value.as_mut_ptr() as u64);
-    } else {
-        assert_eq!(patch.rung, Rung::Patch, "{:?}", patch.lines);
-        call(value, old_value.as_mut_ptr() as u64); // old allocation receives extra's default
-        let removed = unsafe { reload::apply(up, vec![Edit { file: u.prog.def(state).file, path: path.to_string_lossy().into_owned(), src: before.as_bytes().to_vec() }]) };
-        assert_eq!(removed.rung, Rung::Patch, "{:?}", removed.lines);
-        call(value, old_value.as_mut_ptr() as u64);
-        assert_eq!(old_value[layout.fields[0] as usize / 8], 44);
-        // The previously compiled drop entry was rebuilt in the same transaction.
-        assert!(patch.names.contains(&u.fns[drop_id as usize].name.to_string()));
-        call(drop_entry, old_value.as_mut_ptr() as u64);
-        // A layout-only edit must publish even when no function entry changed.
-        let dormant = before.replace("pub n: u32 }", "pub n: u32, pub added: bool }");
-        let pure = unsafe { reload::apply(up, vec![Edit { file: u.prog.def(state).file, path: path.to_string_lossy().into_owned(), src: dormant.into_bytes() }]) };
-        assert_eq!(pure.rung, Rung::Patch, "{:?}", pure.lines);
-        assert!(pure.names.is_empty(), "{:?}", pure.names);
-
-    }
+    let patch = apply(&added);
+    assert_eq!(patch.rung, Rung::Patch, "field added: {:?}", patch.lines);
+    assert!(patch.lines.iter().any(|l| l.contains("struct `app_lib::State` takes its new layout")), "{:?}", patch.lines);
+    // the drop glue compiled before was rebuilt in the same transaction
+    assert!(patch.names.contains(&u.fns[drop_id as usize].name.to_string()), "{:?}", patch.names);
+    let grown = u.layout_of(ty).clone();
+    assert_eq!((grown.size, size_now()), (16, (16, 16)), "State with its field added: its layout, and size_of in its code and its const (rebuilt: {:?})", patch.names);
+    let mut fresh = vec![0u64; 2];
+    call(init, fresh.as_mut_ptr() as u64);
+    call(value, fresh.as_mut_ptr() as u64);
+    let at = |l: &crate::layout::Layout, v: &[u64], i: usize| v[l.fields[i] as usize / 8];
+    assert_eq!((at(&grown, &fresh, 0), at(&grown, &fresh, 1)), (42, 7), "a value made in the new layout");
+    // a rename keeps every field in its place: the value made before reads on
+    let renamed = added.replace("pub extra: u64", "pub more: u64").replace("extra: 0", "more: 0").replace("out.extra += 7", "out.more += 7");
+    let patch = apply(&renamed);
+    assert_eq!(patch.rung, Rung::Patch, "field renamed: {:?}", patch.lines);
+    assert!(patch.lines.iter().any(|l| l.contains("field `extra` of `app_lib::State` renamed to `more` (value kept)")), "{:?}", patch.lines);
+    call(value, fresh.as_mut_ptr() as u64);
+    assert_eq!((at(&grown, &fresh, 0), at(&grown, &fresh, 1)), (43, 14), "the renamed field's value");
+    // the field removed again: the first layout, which the value made before the edits has
+    let removed = apply(before);
+    assert_eq!(removed.rung, Rung::Patch, "field removed: {:?}", removed.lines);
+    assert_eq!((u.layout_of(ty).size, size_now()), (8, (8, 8)), "State with its field removed: its layout, and size_of in its code and its const");
+    call(value, old_value.as_mut_ptr() as u64);
+    assert_eq!(old_value[layout.fields[0] as usize / 8], 43);
+    call(drop_entry, old_value.as_mut_ptr() as u64);
+    // a static holds values of Kept: a field added to it restarts, naming the static, and the
+    // running code reads them on
+    let mut sum = 0u64;
+    call(keep, &mut sum as *mut u64 as u64);
+    assert_eq!(sum, 5);
+    let held = before.replace("pub struct Kept { pub n: u32 }", "pub struct Kept { pub n: u32, pub m: u32 }").replace("Kept { n: 5 }", "Kept { n: 5, m: 1 }");
+    let restart = apply(&held);
+    assert_eq!(restart.rung, Rung::Restart, "a held struct's field added: {:?}", restart.lines);
+    assert!(restart.lines.iter().any(|l| l.contains("struct `Kept` changed its layout, and `app_lib::KEPT` may hold values of it in the old one") && l.contains("restart the app")),
+        "{:?}", restart.lines);
+    call(keep, &mut sum as *mut u64 as u64);
+    assert_eq!(sum, 10, "Kept's values after the restart is offered");
+    // a held field retyped to one of its size (the same bytes, read as another type) restarts too
+    let retyped = before.replace("pub struct Kept { pub n: u32 }", "pub struct Kept { pub n: f32 }").replace("Kept { n: 5 }", "Kept { n: 5.0 }");
+    let restart = apply(&retyped);
+    assert_eq!(restart.rung, Rung::Restart, "a held struct's field retyped: {:?}", restart.lines);
+    assert!(restart.lines.iter().any(|l| l.contains("struct `Kept` changed its layout, and `app_lib::KEPT` may hold values of it in the old one")), "{:?}", restart.lines);
+    call(keep, &mut sum as *mut u64 as u64);
+    assert_eq!(sum, 15, "Kept's values after the retype's restart is offered");
+    // a static's value was computed from Measured's layout (an initializer runs once): a field
+    // added to it restarts, naming the static, and the running code reads the old value on
+    let mut n = 0u64;
+    call(measured, &mut n as *mut u64 as u64);
+    assert_eq!(n, 4);
+    let restart = apply(&before.replace("pub struct Measured { pub n: u32 }", "pub struct Measured { pub n: u32, pub m: u32 }"));
+    assert_eq!(restart.rung, Rung::Restart, "a struct a static's value measured: {:?}", restart.lines);
+    assert!(restart.lines.iter().any(|l| l.contains("struct `Measured` changed its layout, and the value of `app_lib::MEASURED` was computed from the old one")), "{:?}", restart.lines);
+    call(measured, &mut n as *mut u64 as u64);
+    assert_eq!(n, 4, "MEASURED after the restart is offered");
+    // no code uses Dormant: its new layout publishes with no fn rebuilt
+    let dormant = before.replace("pub struct Dormant { pub n: u32 }", "pub struct Dormant { pub n: u32, pub added: bool }");
+    let pure = apply(&dormant);
+    assert_eq!(pure.rung, Rung::Patch, "{:?}", pure.lines);
+    assert!(pure.lines.iter().any(|l| l.contains("struct `app_lib::Dormant` takes its new layout")), "{:?}", pure.lines);
+    assert!(pure.names.is_empty(), "{:?}", pure.names);
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -1212,6 +1427,7 @@ fn realtime_strict_ready_lazy_and_patch_freeze() {
     let o = edit(src(12, 6));
     assert_eq!(o.rung, Rung::Patch, "{:?}", o.lines);
     assert_eq!(run(value_entry), 12);
+    assert_eq!(crate::jit::__relax_realtime_holes(), 0, "the real-time set had holes (said on stderr)");
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -1318,6 +1534,7 @@ fn realtime_reach_follows_vtables_made_after_the_mark() {
     assert!(!compiled(ticket) || next_built(), "compiled right after the first `Box<Arc2> -> Box<dyn Route>`, with `<Arc2 as Route>::next` lazy");
     wait(ticket);
     assert_eq!(run_rt(cp), (42, 0), "the real-time thread met a lazy compile");
+    assert_eq!(crate::jit::__relax_realtime_holes(), 0, "the real-time set had holes (said on stderr)");
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -1388,6 +1605,7 @@ fn realtime_reach_follows_trait_objects_held_deep_in_the_roots_value() {
         (unsafe { *(cp as *const u32) }, crate::jit::__relax_realtime_misses() - before)
     }).join().unwrap();
     assert_eq!((out, misses), (8, 0), "the real-time thread met lazy compiles (MAKEPAD_RUN_RT_TRACE=1 names them)");
+    assert_eq!(crate::jit::__relax_realtime_holes(), 0, "the real-time set had holes (said on stderr)");
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -1464,6 +1682,7 @@ fn realtime_reach_skips_trait_objects_it_only_makes_itself() {
         (unsafe { *(cp as *const u32) }, crate::jit::__relax_realtime_misses() - before)
     }).join().unwrap();
     assert_eq!((out, misses), (6, 0), "the real-time thread met lazy compiles (MAKEPAD_RUN_RT_TRACE=1 names them)");
+    assert_eq!(crate::jit::__relax_realtime_holes(), 0, "the real-time set had holes (said on stderr)");
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -1542,6 +1761,7 @@ fn realtime_reach_walks_code_that_ran_before_the_mark() {
         (unsafe { *((cp + 4) as *const u32) }, crate::jit::__relax_realtime_misses() - before)
     }).join().unwrap();
     assert_eq!((out, misses), (3 + 5, 0), "the real-time thread met lazy compiles (MAKEPAD_RUN_RT_TRACE=1 names them)");
+    assert_eq!(crate::jit::__relax_realtime_holes(), 0, "the real-time set had holes (said on stderr)");
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -1618,6 +1838,330 @@ fn realtime_reach_covers_float_formatting_and_container_drops() {
     }).join().unwrap();
     let want = format!("{:.3} {}", 2f64 * 1.5, 2f32 / 3.0).len() as u32 + (2 + 2 + 3) + (2 + 7);
     assert_eq!((out, misses), (want, 0), "the real-time thread met lazy compiles (MAKEPAD_RUN_RT_TRACE=1 names them)");
+    assert_eq!(crate::jit::__relax_realtime_holes(), 0, "the real-time set had holes (said on stderr)");
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A tier-up of real-time code whose new code calls fns that never had code (an O2 build, then an
+/// O3 build, each calling a fn nothing called before, which calls another such fn): those are
+/// compiled before the new code is installed, the old code running meanwhile, so the real-time
+/// thread meets no lazy compile. An install whose references were not walked before it is a hole
+/// the install says and counts (realtime_holes), so a pass never rests on the walk after it
+/// winning the race against the real-time thread. (Fab's arm lab met such compiles of thread-local
+/// accessors in its armed loop.)
+#[test]
+fn realtime_tier_up_compiles_new_callees_before_its_install() {
+    const CHILD: &str = "MAKEPAD_RUN_RT_TIER_UP_TEST";
+    if std::env::var(CHILD).is_err() {
+        let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "lazy_reload_tests::realtime_tier_up_compiles_new_callees_before_its_install", "--nocapture", "--test-threads=1", "--format=terse"])
+            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    use relax_backend::rir::{Callee, Func, Inst};
+    use std::sync::atomic::Ordering;
+    crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-rt-tier-up-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+    std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(dir.join("app/src/lib.rs"), "#[inline(never)] pub fn twenty() -> u32 { 20 }\n\
+        #[inline(never)] pub fn three_hundred() -> u32 { 300 }\n\
+        #[inline(never)] pub fn first(out: &mut u32) { *out += 1; }\n\
+        #[inline(never)] pub fn second(out: &mut u32) { *out += twenty(); }\n\
+        #[inline(never)] pub fn third(out: &mut u32) { *out += three_hundred(); }\n\
+        pub fn value(out: &mut u32) { *out = 0; first(out); }\n").unwrap();
+    let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
+    let session = Arc::new(crate::Session::default());
+    let (prog, core, app_crate) = crate::load_with_std(&session, &app, "rt_tier_up_app", false).unwrap();
+    let def = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = crate::program::DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == name).then_some(id)
+    }).unwrap();
+    let defs: Vec<_> = ["value", "first", "second", "third", "twenty", "three_hundred"].iter().map(|n| def(n)).collect();
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    let mut u = crate::jit::Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut crate::jit::Unit;
+    let upn = up as usize;
+    let (slots, root_e) = crate::owner::call(crate::owner::Class::Program, || {
+        let s: Vec<u32> = defs.iter().map(|&d| u.fn_id(crate::jit::FnKey::Inst(d, vec![]))).collect();
+        let e = u.entry(s[0]);
+        (s, e)
+    });
+    let [root, first, second, third, twenty, three_hundred] = slots[..] else { unreachable!() };
+    let ticket = crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::realtime_mark_slots(up, vec![root]) });
+    for _ in 0..5000 {
+        if crate::jit::__relax_realtime_compiled(ticket) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(crate::jit::__relax_realtime_compiled(ticket), "the real-time reach was not compiled in 10 s");
+    let mut cell = [0u32];
+    let cp = cell.as_mut_ptr() as u64;
+    // (value, lazy compiles) of a call on a real-time thread
+    let rt_call = || std::thread::spawn(move || {
+        crate::jit::__relax_realtime_thread();
+        let before = crate::jit::__relax_realtime_misses();
+        unsafe { crate::jit::call_jit(upn as *mut crate::jit::Unit, root_e, cp) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        (unsafe { *(cp as *const u32) }, crate::jit::__relax_realtime_misses() - before)
+    }).join().unwrap();
+    assert_eq!(rt_call(), (1, 0), "the marked code met lazy compiles");
+    for (s, name) in [(second, "second"), (third, "third"), (twenty, "twenty"), (three_hundred, "three_hundred")] {
+        assert!(!u.fns[s as usize].compiled, "`{name}` has code before any code calls it");
+    }
+    // the new code's call goes to `to` where the code it replaces called `from`
+    let redirect = |f: &mut Func, from: u32, to: u32| {
+        let mut n = 0;
+        for b in &mut f.blocks {
+            for i in &mut b.insts {
+                if let Inst::Call(Callee::Fn(t), _, _) = i {
+                    if *t == from {
+                        *t = to;
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    };
+    // O2 (full, as after the first present): its build starts from the slot's RIR, which now calls `second`
+    crate::jit::FIRST_PRESENT.store(true, Ordering::Release);
+    let n = crate::owner::call(crate::owner::Class::Program, || {
+        let mut f = (**u.fns[root as usize].rir.as_ref().expect("the reach keeps the root's RIR")).clone();
+        let n = redirect(&mut f, first, second);
+        u.fns[root as usize].rir = Some(Arc::new(f));
+        n
+    });
+    assert_eq!(n, 1, "the root's RIR calls `first` once");
+    assert!(unsafe { crate::jit::o2_build_now(up, root) }, "the O2 build was dropped at its front");
+    assert_eq!(rt_call(), (20, 0), "O2: the new code (it calls `second`, which calls `twenty`) runs without lazy compiles");
+    assert_eq!(crate::jit::__relax_realtime_holes(), 0, "O2: the new code was installed before its references were walked");
+    // O3 (inspect's edit hook): its code calls `third`
+    let mut n = 0;
+    let mut edit = |f: &mut Func, _: &crate::jit::Unit| n += redirect(f, second, third);
+    assert!(unsafe { crate::jit::compile_tier1_inspect(up, root, Some(&mut edit)) }, "the O3 build was not installed");
+    assert_eq!(n, 1, "the O2 code's RIR calls `second` once");
+    assert_eq!(rt_call(), (300, 0), "O3: the new code (it calls `third`, which calls `three_hundred`) runs without lazy compiles");
+    assert_eq!(crate::jit::__relax_realtime_holes(), 0, "O3: the new code was installed before its references were walked");
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The reach reads the references of the code a real-time slot runs, not those of another version
+/// of it. An earlier run stored `run`'s O2 code (the generic `twice` inlined, `more` called); this
+/// run installs baseline code for it, which calls `twice` (code built before its key's entry was
+/// there, or placed from a startup image older than the entry). The walk must follow the installed
+/// code's calls: the fab arm lab's loop met lazy compiles of closures that only the code it ran
+/// called (11-11).
+#[test]
+fn realtime_reach_reads_the_installed_code() {
+    const CHILD: &str = "MAKEPAD_RUN_RT_INSTALLED_TEST";
+    const DIR: &str = "MAKEPAD_RUN_RT_INSTALLED_TEST_DIR";
+    let Ok(phase) = std::env::var(CHILD) else {
+        let dir = std::env::temp_dir().join(format!("relax-rt-installed-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("app/src")).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+        std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+        std::fs::write(dir.join("app/src/lib.rs"), "#[repr(C)]\n\
+            pub struct Cell { pub x: u32, pub out: u32 }\n\
+            fn twice<F: Fn(u32) -> u32>(f: F, x: u32) -> u32 { f(f(x)) }\n\
+            #[inline(never)] pub fn more(x: u32) -> u32 { x + 1 }\n\
+            pub fn run(c: &mut Cell) { let k = c.x; c.out = more(twice(|v| v * 3 + k, c.x)); }\n").unwrap();
+        for phase in ["earlier", "now"] {
+            let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "lazy_reload_tests::realtime_reach_reads_the_installed_code", "--nocapture", "--test-threads=1", "--format=terse"])
+                .env(CHILD, phase).env(DIR, &dir).env("MAKEPAD_RUN_GANDALF_ALL", "0").env("MAKEPAD_RUN_SPEC", "0"));
+            let out = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success() && out.contains("1 passed"), "{phase}: {out}\n{}", String::from_utf8_lossy(&output.stderr));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    };
+    use std::sync::atomic::Ordering;
+    crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
+    crate::borrowck::lazy::disable_gandalf();
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::path::PathBuf::from(std::env::var_os(DIR).unwrap());
+    std::env::set_var("MAKEPAD_RUN_CACHE_DIR", dir.join("cache"));
+    let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
+    let session = Arc::new(crate::Session::default());
+    let (prog, core, app_crate) = crate::load_with_std(&session, &app, "rt_installed_app", false).unwrap();
+    let run_d = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = crate::program::DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == "run").then_some(id)
+    }).unwrap();
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    let mut u = crate::jit::Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut crate::jit::Unit;
+    let upn = up as usize;
+    let run = crate::owner::call(crate::owner::Class::Program, || {
+        let mut cache = crate::cache::Cache::open(&u, crate::cache::Mode::ReadOnly).unwrap();
+        cache.mode = crate::cache::Mode::On;
+        u.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
+        u.fn_id(crate::jit::FnKey::Inst(run_d, vec![]))
+    });
+    let names = |u: &crate::jit::Unit, ids: &[u32]| ids.iter().map(|&s| u.fns[s as usize].name.clone()).collect::<Vec<_>>();
+    if phase == "earlier" {
+        // the earlier run: `run`'s O2 code, `twice` and the closure inlined, is its stored entry
+        crate::owner::call(crate::owner::Class::Program, || {
+            let (code, map, relocs) = unsafe { crate::jit::compile_fn(up, run) }.unwrap();
+            u.install(run, &code, &relocs, map, 0).unwrap();
+        });
+        crate::jit::FIRST_PRESENT.store(true, Ordering::Release);
+        assert!(unsafe { crate::jit::o2_build_now(up, run) }, "the O2 build was dropped at its front");
+        let spill = crate::owner::call(crate::owner::Class::Program, || {
+            let inlined = names(&u, u.body_deps.get(&run).map_or(&[][..], |v| &v[..]));
+            assert!(inlined.iter().any(|n| n.contains("twice")), "the O2 build inlines `twice` (else this fixture proves nothing): it took in {inlined:?}");
+            u.flush_cache_records();
+            u.cache.as_mut().unwrap().spill_take().unwrap()
+        });
+        assert!(spill.write().unwrap() > 0, "the O2 entry was not written");
+        std::mem::forget(u);
+        return;
+    }
+    // this run: baseline code for `run` (no inlining), built without the stored entry; its RIR
+    // dropped at the install, as drop_completed_body drops it
+    let (run_e, callees) = crate::owner::call(crate::owner::Class::Program, || {
+        let cache = u.cache.take();
+        u.fns[run as usize].baseline_hint.store(true, Ordering::Relaxed);
+        let (code, map, relocs) = unsafe { crate::jit::compile_fn(up, run) }.unwrap();
+        u.cache = cache;
+        u.install(run, &code, &relocs, map, 0).unwrap();
+        let f = &mut u.fns[run as usize];
+        f.rir = None;
+        f.normal_rir = None;
+        f.lowering = None;
+        let mut callees: Vec<u32> = relocs.iter().filter_map(|r| match r.target {
+            relax_backend::rir::Reloc::Call(c) | relax_backend::rir::Reloc::Thunk(c) | relax_backend::rir::Reloc::Slot(c) if c != run => Some(c),
+            _ => None,
+        }).collect();
+        callees.sort_unstable();
+        callees.dedup();
+        (u.entry(run), callees)
+    });
+    let called = names(&u, &callees);
+    assert!(called.iter().any(|n| n.contains("twice")), "the installed code calls `twice` (else this fixture proves nothing): it calls {called:?}");
+    // the earlier run's entry is what a lookup of `run` links now, and it does not call `twice`
+    let stored = crate::owner::call(crate::owner::Class::Program, || {
+        let linked = unsafe { crate::jit::cache_lookup(up, run) }.is_some();
+        (linked, names(&u, &u.cache.as_ref().unwrap().last_callees))
+    });
+    assert!(stored.0 && stored.1.iter().any(|n| n.contains("more")) && !stored.1.iter().any(|n| n.contains("twice")), "the disk cache holds `run`'s O2 entry, which calls `more` and not `twice` (else this fixture proves nothing): linked {}, it calls {:?}", stored.0, stored.1);
+    let ticket = crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::realtime_mark_slots(up, vec![run]) });
+    for _ in 0..5000 {
+        if crate::jit::__relax_realtime_compiled(ticket) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(crate::jit::__relax_realtime_compiled(ticket), "the real-time reach was not compiled in 10 s");
+    let missed: Vec<String> = callees.iter().filter(|&&c| !crate::jit::realtime_reached(c)).map(|&c| u.fns[c as usize].name.to_string()).collect();
+    assert!(missed.is_empty(), "the reach did not take in what the installed code calls: {missed:?} (it read another version's references)");
+    let mut cell = [2u32, 0];
+    let cp = cell.as_mut_ptr() as u64;
+    let (out, misses) = std::thread::spawn(move || {
+        crate::jit::__relax_realtime_thread();
+        let before = crate::jit::__relax_realtime_misses();
+        unsafe { crate::jit::call_jit(upn as *mut crate::jit::Unit, run_e, cp) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        (unsafe { *((cp + 4) as *const u32) }, crate::jit::__relax_realtime_misses() - before)
+    }).join().unwrap();
+    assert_eq!((out, misses), (27, 0), "the real-time thread met lazy compiles (MAKEPAD_RUN_RT_TRACE=1 names them)");
+    assert_eq!(crate::jit::__relax_realtime_holes(), 0, "the real-time set had holes (said on stderr)");
+    std::mem::forget(u);
+}
+
+/// Calls the root's code makes through data other code filled: a trait object in a static (Fab's
+/// slicer `FAN_OUT`, set by the app, read on the cell's loop), filled after the mark, and a fn
+/// pointer in the root's value, filled before it. Neither target is named by code the reach
+/// walks; the static's type (the code names the static) and the fn pointer's signature (every
+/// slot whose address code took with it) close them over, and the real-time thread meets no lazy
+/// compile.
+#[test]
+fn realtime_reach_follows_calls_through_statics_and_fn_pointers() {
+    const CHILD: &str = "MAKEPAD_RUN_RT_DATA_CALLS_TEST";
+    if std::env::var(CHILD).is_err() {
+        let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "lazy_reload_tests::realtime_reach_follows_calls_through_statics_and_fn_pointers", "--nocapture", "--test-threads=1", "--format=terse"])
+            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-rt-data-calls-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+    std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(dir.join("app/src/lib.rs"), "use std::sync::Mutex;\n\
+        pub trait Route { fn next(&mut self) -> u32; }\n\
+        pub struct Ded(pub u32);\n\
+        impl Route for Ded { fn next(&mut self) -> u32 { self.0 += 3; self.0 } }\n\
+        pub static ROUTE: Mutex<Option<Box<dyn Route + Send>>> = Mutex::new(None);\n\
+        #[inline(never)] pub fn more(x: u32) -> u32 { x * 5 + 1 }\n\
+        #[repr(C)]\n\
+        pub struct Cell { pub x: u32, pub out: u32, pub f: Option<fn(u32) -> u32> }\n\
+        pub fn run(c: &mut Cell) {\n\
+            let n = match ROUTE.lock() { Ok(mut r) => r.as_mut().map_or(0, |r| r.next()), Err(_) => 0 };\n\
+            let m = match c.f { Some(f) => f(c.x), None => 0 };\n\
+            c.out = n * 100 + m;\n\
+        }\n\
+        pub fn start(c: &mut Cell) { c.f = Some(more); }\n\
+        pub fn later() { if let Ok(mut r) = ROUTE.lock() { *r = Some(Box::new(Ded(1))); } }\n").unwrap();
+    let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
+    let session = Arc::new(crate::Session::default());
+    let (prog, core, app_crate) = crate::load_with_std(&session, &app, "rt_data_calls_app", false).unwrap();
+    let def = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = crate::program::DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == name).then_some(id)
+    }).unwrap();
+    let (run_d, start_d, later_d, more_d) = (def("run"), def("start"), def("later"), def("more"));
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    let mut u = crate::jit::Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut crate::jit::Unit;
+    let upn = up as usize;
+    let (root, more, [run_e, start_e, later_e]) = crate::owner::call(crate::owner::Class::Program, || {
+        let ids = [run_d, start_d, later_d, more_d].map(|d| u.fn_id(crate::jit::FnKey::Inst(d, vec![])));
+        (ids[0], ids[3], [ids[0], ids[1], ids[2]].map(|id| u.entry(id)))
+    });
+    // the Cell (#[repr(C)]: `x`, `out`, then the fn pointer)
+    let mut cell = [0u64; 2];
+    cell[0] = 2;
+    let cp = cell.as_mut_ptr() as u64;
+    // the fn pointer is stored before the mark, the trait object after it (other code, both)
+    unsafe { crate::jit::call_jit(up, start_e, cp) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+    let ticket = crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::realtime_mark_slots(up, vec![root]) });
+    unsafe { crate::jit::call_jit(up, later_e, 0) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+    for _ in 0..5000 {
+        if crate::jit::__relax_realtime_compiled(ticket) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(crate::jit::__relax_realtime_compiled(ticket), "the real-time reach was not compiled in 10 s");
+    let next = crate::owner::call(crate::owner::Class::Program, || u.fns.iter().position(|f| f.name.contains("Ded as") && f.name.ends_with("::next")));
+    // (each hole on its own: both are said when both are open)
+    let holes: Vec<&str> = [
+        (!next.is_some_and(|n| crate::jit::realtime_reached(n as u32))).then_some("the trait object in the static: `<Ded as Route>::next` not reached"),
+        (!crate::jit::realtime_reached(more)).then_some("the fn pointer in the root's value: `more` not reached"),
+    ].into_iter().flatten().collect();
+    assert!(holes.is_empty(), "{}", holes.join("; "));
+    let (out, misses) = std::thread::spawn(move || {
+        crate::jit::__relax_realtime_thread();
+        let before = crate::jit::__relax_realtime_misses();
+        unsafe { crate::jit::call_jit(upn as *mut crate::jit::Unit, run_e, cp) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        (unsafe { *((cp + 4) as *const u32) }, crate::jit::__relax_realtime_misses() - before)
+    }).join().unwrap();
+    assert_eq!((out, misses), (4 * 100 + 11, 0), "the real-time thread met lazy compiles (MAKEPAD_RUN_RT_TRACE=1 names them)");
+    assert_eq!(crate::jit::__relax_realtime_holes(), 0, "the real-time set had holes (said on stderr)");
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }

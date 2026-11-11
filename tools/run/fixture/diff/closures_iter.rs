@@ -20,6 +20,27 @@ fn work() {
     d!("{}", apply(move || s + "!"));
     let v: Vec<u32> = (1..200).collect();
     d!("{}", v.iter().zip(v.iter().rev()).map(|(a, b)| (a * b) as u64).filter(|x| x % 3 != 0).sum::<u64>());
+    // Zip over random-access sources (slices, chunks, windows, ranges, bytes, Vec and VecDeque iterators) and
+    // through Map/Enumerate/Copied: rustc's indexed path, including the side effects of a longer Map side
+    let mut w: Vec<u64> = (0..37u64).map(|x| x * 3 + 1).collect();
+    d!("{} {:?}", v.iter().zip(w.iter()).map(|(&a, &b)| a as u64 * b).sum::<u64>(), v.iter().zip(w.iter()).rev().take(3).collect::<Vec<_>>());
+    let mut seen = Vec::new();
+    {
+        let mut z = v.iter().map(|&x| { seen.push(x); x as u64 }).zip(w.iter());
+        d!("{:?} {:?} {:?} {:?}", z.size_hint(), z.nth(3), z.next_back(), z.len());
+    }
+    d!("{:?}", seen);
+    seen.clear();
+    let gaps: Vec<u64> = w.iter().map(|&x| { seen.push(x as u32); x }).skip(3).zip(v.iter().skip(1)).map(|(a, &b)| a * 2 + b as u64).collect();
+    d!("{:?} {:?} {}", gaps, seen, v.iter().zip(v.iter().skip(1)).map(|(a, b)| b - a).sum::<u32>());
+    d!("{:?}", v.chunks(7).zip(w.rchunks_exact(5)).map(|(a, b)| a.len() * 10 + b.len()).collect::<Vec<_>>());
+    d!("{:?}", v.windows(2).enumerate().zip(w.iter().copied()).filter(|((i, p), x)| (*i as u64 + p[1] as u64 + x) % 4 == 0).map(|((i, _), x)| i as u64 * x).collect::<Vec<_>>());
+    d!("{:?} {}", w.clone().into_iter().zip(v.iter()).map(|(a, &b)| a + b as u64).max(), (0..50u32).zip(10..20usize).map(|(a, b)| a as usize * b).sum::<usize>());
+    let mut dq: std::collections::VecDeque<u32> = v.iter().copied().take(9).collect();
+    dq.push_front(500);
+    dq.push_front(600);
+    d!("{} {:?}", "hello world".bytes().zip("HELLO".bytes()).filter(|(a, b)| a.eq_ignore_ascii_case(b)).count(), dq.iter().zip(v.iter()).map(|(a, b)| a ^ b).collect::<Vec<_>>());
+    d!("{:?} {}", (0..3).zip(5..7), v.iter().zip(w.iter_mut()).fold(0u64, |s, (&a, b)| { *b += 1; s.wrapping_mul(7) + *b + a as u64 }));
     d!("{:?}", v.windows(3).map(|w| w[0] + w[2] - w[1]).take(5).collect::<Vec<_>>());
     d!("{:?}", v.chunks(40).map(|c| c.iter().sum::<u32>()).collect::<Vec<_>>());
     d!("{:?}", v.iter().step_by(37).flat_map(|&x| [x, x * 2]).collect::<Vec<_>>());

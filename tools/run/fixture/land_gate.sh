@@ -37,6 +37,8 @@
 # Prints "NODEGATE-OK <summary>" or "NODEGATE-FAIL: <steps>"; exit 0 / 1. Every step is a function named step_*;
 # the zone leg is the ONE function step_zone (settle_stress.sh).
 # Fast bucket proofs: GATE_PROVEN in (units joined by ;), GATEUNIT verdicts out.
+# A failed unit names its output files in the run's kept logs (GATEOUT <unit> :: <file>..): the bucket keeps them
+# under the lease's id, where `devhub job result L<id>` reads them.
 mode=${1:-full}
 proven() { case ";${GATE_PROVEN:-};" in *";$1;"*) return 0;; *) return 1;; esac; }
 unit_line() { echo "GATEUNIT $1 $2"; }
@@ -112,6 +114,9 @@ step_checks() {
   # `makepad check --json`'s rows: codes, phases and suggestions as the producers recorded them
   cj=$(bash libs/relax/compiler/tests/check_json/run.sh "$jit" 2>&1); echo "$cj" | grep -E '^[-+]\{|^unexpected|^check_json' | cut -c1-230; case "$cj" in *"check_json: ok"*) ;; *) fail="$fail check-json";; esac
   lc=$(python3 libs/relax/compiler/tests/live/run_cases.py --makepad "$jit" 2>&1) || fail="$fail live-cases"; echo "$lc" | grep -E '^(FAIL|XPASS|live cases)|^         v[0-9]' | cut -c1-230
+  # code a rejected edit left invalidated while a thread was inside it: the return into it parks, with its report
+  # (its whole output kept in the run's logs; a failure shows its steps' detail and names the file)
+  python3 libs/relax/compiler/tests/live_invalid/run.py --makepad "$jit" > "$log/live-invalid" 2>&1 || { fail="$fail live-invalid"; grep -aE '^(FAIL|  )' "$log/live-invalid" | head -40 | cut -c1-230; echo "GATEOUT live-invalid :: live-invalid"; }; grep -aE '^live invalid' "$log/live-invalid" | cut -c1-230
   # the real-time case beside two more copies of itself: their compiles stay off its thread's cores
   # (its failure names the copies that failed and each one's longest call: `rt-lock-copies[1:5289us,3:5056us]`)
   rl=$(python3 libs/relax/compiler/tests/live/run_cases.py --makepad "$jit" --only rt_lock --copies 3 2>&1) || fail="$fail rt-lock-copies[$(echo "$rl" | sed -nE -e 's/^ *copy ([0-9]+): .*stall ([0-9]+) us.*/\1:\2us/p' -e t -e 's/^ *copy ([0-9]+): .*/\1/p' | paste -sd, -)]"; echo "$rl" | grep -E '^(FAIL|XPASS|live cases)|^         v[0-9]|copy [0-9]' | cut -c1-230
@@ -312,10 +317,10 @@ step_devhub() { # devhub's own binary when the bucket diff touches it (0 warning
   CARGO_INCREMENTAL=0 cargo build --profile host -p makepad-devhub --bin makepad-devhub -j8 > "$log/devhub" 2>&1 || { fail="$fail devhub-build"; tail -20 "$log/devhub"; unit_line fail "devhub makepad-devhub"; return 1; }
   if grep -E "^(warning|error)" "$log/devhub" | grep -qv sandbox; then grep -E "^(warning|error)" "$log/devhub" | grep -v sandbox | head -20; fail="$fail devhub-warnings"; unit_line fail "devhub makepad-devhub"; return 1; fi
   # and its tests: the master restarts into this code, a break there stops the orchestration
-  $B test makepad-devhub --lib > "$log/devhub-test" 2>&1 || { fail="$fail devhub-tests"; test_failures "$log/devhub-test"; unit_line fail "devhub makepad-devhub"; return 1; }
+  $B test makepad-devhub --lib > "$log/devhub-test" 2>&1 || { fail="$fail devhub-tests"; test_failures "$log/devhub-test"; echo "GATEOUT devhub makepad-devhub :: devhub-test"; unit_line fail "devhub makepad-devhub"; return 1; }
   grep -E "^test result" "$log/devhub-test" | head -2
   # the build a phone's JIT host embeds (no checkout: tools/run/android_host)
-  $B test makepad-devhub --lib --no-default-features > "$log/devhub-test-bare" 2>&1 || { fail="$fail devhub-tests-no-checkout"; test_failures "$log/devhub-test-bare"; unit_line fail "devhub makepad-devhub"; return 1; }
+  $B test makepad-devhub --lib --no-default-features > "$log/devhub-test-bare" 2>&1 || { fail="$fail devhub-tests-no-checkout"; test_failures "$log/devhub-test-bare"; echo "GATEOUT devhub makepad-devhub :: devhub-test-bare"; unit_line fail "devhub makepad-devhub"; return 1; }
   grep -E "^test result" "$log/devhub-test-bare" | head -1
   unit_line ok "devhub makepad-devhub"
 }
@@ -497,26 +502,36 @@ step_wasmcheck() {
       UNITS_REPRO="bash tools/run/fixture/ci_xcheck.sh wasm32-unknown-unknown lib" cargo_units "$log/wasm" WASMCHECK wasm32-check warnings --lib --target wasm32-unknown-unknown
   done
 }
-# the GPU guards (affected.py `guard` lines): render tests of user-visible effects that broke more than once with
-# every test green, on this node's real GPU under the JIT, after every landing that reaches their package or the
-# JIT. A filter that matches no test fails: a renamed guard is no pass. One unit `guard <pkg>` each: the bucket
+# the GPU guards (affected.py `guard` lines: package, dir, target `lib` or `test:<name>`, filter): render tests of
+# user-visible effects that broke more than once with every test green, on this node's real GPU under the JIT,
+# after every landing that reaches their package or the JIT. A filter that matches no test fails: a renamed guard
+# is no pass; so does a target that is neither. One unit `guard <pkg>` each: the bucket
 # names the landing that changed its inputs, not every landing of the run. One at a time, on the lease's cores
 # (its pools and JIT workers too: MAKEPAD_CPU_CORES).
 step_guards() {
-  local status r bad
-  while read -r _ pkg dir filter; do
-    (cd "$dir" && exec env ${MAKEPAD_RUN_JOBS:+MAKEPAD_CPU_CORES=$MAKEPAD_RUN_JOBS} $B test "$pkg" --lib -- "$filter") > "$log/guard-$pkg" 2>&1
-    status=$?
-    r=$(grep -E '^test result:' "$log/guard-$pkg" | tail -1)
+  local status r bad target_args
+  while read -r _ pkg dir target filter; do
+    case "$target" in
+      lib) target_args="--lib";;
+      test:?*) target_args="--test ${target#test:}";;
+      *) target_args="";;
+    esac
+    if [ -z "$target_args" ]; then
+      echo "guard $pkg: no target $target"; r=""; status=1
+    else
+      (cd "$dir" && exec env ${MAKEPAD_RUN_JOBS:+MAKEPAD_CPU_CORES=$MAKEPAD_RUN_JOBS} $B test "$pkg" $target_args -- "$filter") > "$log/guard-$pkg" 2>&1
+      status=$?
+      r=$(grep -E '^test result:' "$log/guard-$pkg" | tail -1)
+    fi
     echo "guard $pkg $filter: ${r:-no result}"
     bad=1
     case "$r" in
       "test result: ok. 0 passed"*) echo "guard $pkg: no test matches $filter";;
       "test result: ok."*) [ "$status" = 0 ] && bad=0;;
-      *) test_failures "$log/guard-$pkg";;
+      *) [ ! -f "$log/guard-$pkg" ] || test_failures "$log/guard-$pkg";;
     esac
     if [ "$bad" = 0 ]; then unit_line ok "guard $pkg"
-    else fail="$fail guard-$pkg"; echo "GATEREPRO guard $pkg :: makepad test $pkg --lib -- $filter"; unit_line fail "guard $pkg"; fi
+    else fail="$fail guard-$pkg"; echo "GATEREPRO guard $pkg :: makepad test $pkg $target_args -- $filter"; unit_line fail "guard $pkg"; fi
   done < "$log/guards"
 }
 # a cold present takes about PRESENT_CORES cores (its JIT compiling, its first pipelines): five side by side on
@@ -665,12 +680,14 @@ testrun_one() {
     echo "HUNG: ${hung:-no test of a target: between its targets or before them}; its stacks: testrun-$name.hung in the run's kept logs"
     grep -E '"verdict"' "$log/testrun-$name.hung" | head -4 | cut -c1-400
     echo "GATEREPRO $unit :: makepad test $2${4:+ ${*:4}}${hung:+ -- $hung --exact}"
+    echo "GATEOUT $unit :: testrun-$name testrun-$name.hung"
     unit_line fail "$unit"; fail="$fail test:$name"; return
   fi
   if [ "$code" = 0 ]; then echo "$unit: ok ($r, $(grep -c '^test result:' "$log/testrun-$name") targets)"; unit_line ok "$unit"; return; fi
   echo "$unit: FAILED (exit $code; $r)"
   test_failures "$log/testrun-$name"
   echo "GATEREPRO $unit :: makepad test $2${4:+ ${*:4}}"
+  echo "GATEOUT $unit :: testrun-$name"
   unit_line fail "$unit"; fail="$fail test:$name"
 }
 # shard_units <runs file>: the run's units, slowest first (GATE_TIMES: `<unit>=<s>` by `;`, each one's last

@@ -231,20 +231,8 @@ impl Builder<'_> {
                 let n_fields = adt_t.and_then(|a| a.variants.get(variant_index.0 as usize)).map_or(0, |v| v.fields.len());
                 let field_names = (0..n_fields as u32).map(FieldIdx);
 
-                // a live layout edit (M10): a dead slot, or a field an edit added that the literal
-                // leaves out, has no value here; the operands still go by field
-                let prog = self.root.cx.prog;
-                let no_value = |n: FieldIdx| -> Option<Operand> {
-                    let a = adt_t.filter(|a| !a.is_enum && !a.is_union)?;
-                    let f = a.variants.first()?.fields.get(n.0 as usize)?;
-                    let dead = f.name & 0x8000_0000 == 0 && prog.syms.str(f.name).starts_with("__relax_dead_");
-                    (dead || (a.ext_from != u32::MAX && n.0 >= a.ext_from)).then(|| {
-                        let ty = tcx.instantiate_ty(prog, adt_def, &args, f.ty);
-                        Operand::Constant(Box::new(ConstOperand { span: source_info.span, user_ty: None, const_: Const::Val(ConstValue::ZeroSized, ty) }))
-                    })
-                };
                 let operands: Vec<Operand> = match base {
-                    AdtExprBase::None => field_names.filter_map(|n| provided(n).or_else(|| no_value(n))).collect(),
+                    AdtExprBase::None => field_names.filter_map(provided).collect(),
                     AdtExprBase::Base(FruInfo { base, field_types }) => {
                         let BlockAnd(b, place_builder) = self.as_place_builder(block, base)?;
                         block = b;

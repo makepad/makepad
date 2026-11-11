@@ -142,7 +142,7 @@ fn command(priority: Priority) -> Result<(std::process::Command, String), String
     };
     let line: Vec<&str> = low.iter().copied().chain(args.iter().map(String::as_str)).collect();
     let mut cmd = std::process::Command::new(line[0]);
-    cmd.args(&line[1..]).env_remove("MAKEPAD_RUN_RESTORE").env_remove("MAKEPAD_RUN_RESTART_T0").env_remove("MAKEPAD_RUN_LIVE_CRATES").stdin(std::process::Stdio::null());
+    cmd.args(&line[1..]).env_remove("MAKEPAD_RUN_RESTORE").env_remove("MAKEPAD_RUN_RESTART_T0").stdin(std::process::Stdio::null());
     Ok((cmd, shown))
 }
 
@@ -924,9 +924,6 @@ fn restart(h: Handover, state: Option<&[u8]>) {
         }
         let reason = super::RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()).clone();
         cmd.env("MAKEPAD_RUN_RESTART_T0", super::RESTART_SAVED_MS.load(std::sync::atomic::Ordering::Relaxed).to_string());
-        // the session's crates laid out for live edits beyond the app scope (live_crates_next)
-        let live = super::live_crates_next();
-        if live.is_empty() { cmd.env_remove("MAKEPAD_RUN_LIVE_CRATES"); } else { cmd.env("MAKEPAD_RUN_LIVE_CRATES", live.join("\n")); }
         super::restart_begins();
         // the run ends as at exit (exec skips the exit handlers); fd 2 goes back to the terminal
         // now (the transcript tee is a thread of this process: the new one starts its own), so

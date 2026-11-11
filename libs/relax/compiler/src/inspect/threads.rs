@@ -98,6 +98,22 @@ pub fn self_os_id() -> u64 {
         .unwrap_or_else(|_| imp::self_os_id())
 }
 
+/// What thread `id` of this process has spent runnable, waiting for a core, in ns: Linux's
+/// schedstat run_delay (/proc/self/task/<id>/schedstat, its second field; one small file). 0 once
+/// it ended, and where the OS keeps no runnable time per thread (macOS, Windows).
+pub fn waited_ns(id: u64) -> u64 {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/self/task/{id}/schedstat")).unwrap_or_default();
+        stat.split_whitespace().nth(1).and_then(|ns| ns.parse().ok()).unwrap_or(0)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let _ = id;
+        0
+    }
+}
+
 /// Captures thread `t`'s stack (see the module comment). Never the calling thread: a thread that
 /// suspends itself (macOS) never runs again, one that signals itself (Linux) waits for itself.
 pub fn capture(t: &Thread, raw: &mut Raw) -> Result<(), &'static str> {

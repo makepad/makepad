@@ -17,7 +17,6 @@ macro_rules! eprintln {
 }
 
 use relax_types::next_solver::{Goal, ParamEnvId};
-use relax_types::mir::transform::const_check::is_live_default;
 use crate::jit::{self, FnKey, Unit};
 use crate::program::DefKind;
 
@@ -98,7 +97,7 @@ pub(crate) fn body_owners(prog: &crate::program::Program, crates: &[u32]) -> Vec
     let mut own = vec![false; prog.crates.len()];
     for &k in crates { own[k as usize] = true; }
     (0..prog.defs.len()).filter(|&i| own[prog.defs[i].krate as usize]).map(|i| crate::program::DefId(i as u32))
-        .filter(|&d| !is_live_default(prog, d)).filter_map(|d| crate::borrowck::body::CheckedBody::item(prog, d)).map(|b| b.owner).collect()
+        .filter_map(|d| crate::borrowck::body::CheckedBody::item(prog, d)).map(|b| b.owner).collect()
 }
 
 /// The files of each crate the boot's file selection skipped (paths, sorted), as the boot left
@@ -1012,7 +1011,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
     // context); errors in definition order
     {
         let check_times = std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some();
-        let defs: Vec<crate::program::DefId> = (0..u.prog.defs.len()).filter(|&i| own[u.prog.defs[i].krate as usize]).map(|i| crate::program::DefId(i as u32)).filter(|&d| !is_live_default(&u.prog, d)).collect();
+        let defs: Vec<crate::program::DefId> = (0..u.prog.defs.len()).filter(|&i| own[u.prog.defs[i].krate as usize]).map(|i| crate::program::DefId(i as u32)).collect();
         let (prog, tcx) = (&u.prog, &u.tcx);
         let signature = |prog: &crate::program::Program, tcx: &crate::tcx::Tcx, d: crate::program::DefId| {
             let t0 = std::time::Instant::now();
@@ -1080,7 +1079,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
     let wf_lo = relax_types::lint::reported_len();
     if wf_ran {
         let check_times = std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some();
-        let defs: Vec<crate::program::DefId> = (0..u.prog.defs.len()).filter(|&i| own[u.prog.defs[i].krate as usize]).map(|i| crate::program::DefId(i as u32)).filter(|&d| !is_live_default(&u.prog, d)).collect();
+        let defs: Vec<crate::program::DefId> = (0..u.prog.defs.len()).filter(|&i| own[u.prog.defs[i].krate as usize]).map(|i| crate::program::DefId(i as u32)).collect();
         let (prog, tcx) = (&u.prog, &u.tcx);
         let well_formed = |prog: &crate::program::Program, tcx: &crate::tcx::Tcx, d: crate::program::DefId| {
             let t0 = std::time::Instant::now();
@@ -1130,7 +1129,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
     let up: *mut Unit = u;
     let mut fns = Vec::new();
     // the checked crates' definitions only (the program's other bodies are never looked at)
-    for owner in (0..u.prog.defs.len()).filter(|&i| own[u.prog.defs[i].krate as usize]).map(|i| crate::program::DefId(i as u32)).filter(|&d| !is_live_default(&u.prog, d)).filter_map(|d| crate::borrowck::body::CheckedBody::item(&u.prog, d)) {
+    for owner in (0..u.prog.defs.len()).filter(|&i| own[u.prog.defs[i].krate as usize]).map(|i| crate::program::DefId(i as u32)).filter_map(|d| crate::borrowck::body::CheckedBody::item(&u.prog, d)) {
         let d = u.prog.def(owner.owner);
         // the app check needs no seeds: no signature is asked here (each costs a query; Stage's
         // 9,200 took 3.4 s on one thread), the body's own args are used as they are
@@ -1167,7 +1166,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
     }
     // typeck-audit 1.27: anonymous constants outside bodies are body owners of their own (typed
     // and checked on MAKEPAD_RUN_JOBS threads; their results, and the evaluations, in order)
-    let anons: Vec<crate::program::DefId> = fresh_crates.iter().flat_map(|&k| crate::borrowck::body::signature_anon_consts(&u.prog, &u.tcx, k)).filter(|&anon| !is_live_default(&u.prog, anon)).collect();
+    let anons: Vec<crate::program::DefId> = fresh_crates.iter().flat_map(|&k| crate::borrowck::body::signature_anon_consts(&u.prog, &u.tcx, k)).collect();
     let check_anon = |prog: &crate::program::Program, tcx: &crate::tcx::Tcx, anon: crate::program::DefId| {
         let body = tcx.typeck(prog, anon);
         let errs = body.errors.to_vec();
@@ -1324,7 +1323,6 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
     for &k in &fresh_crates {
         let uu = unsafe { &*up };
         for (anon, owner, e) in crate::borrowck::body::body_anon_consts(&uu.prog, &uu.tcx, k) {
-            if is_live_default(&uu.prog, owner) { continue; }
             let errs = settled_def(up, anon, "the constant", || {
                 let outer = uu.tcx.typeck(&uu.prog, owner);
                 let owner_typed = outer.has_expr(e) && outer.expr_typed.get(outer.expr_ix(e));
@@ -1758,7 +1756,6 @@ fn eval_items(up: *mut Unit, own: &[bool], tainted: &std::collections::HashSet<c
     let items: Vec<(crate::program::DefId, bool)> = (0..u.prog.defs.len())
         .filter(|&i| own[u.prog.defs[i].krate as usize])
         .map(|i| crate::program::DefId(i as u32))
-        .filter(|&d| !is_live_default(&u.prog, d))
         .filter_map(|d| match u.prog.def(d).kind {
             DefKind::Static => Some((d, true)),
             DefKind::Const if u.tcx.generic_indices_of(&u.prog, d).types_consts.is_empty() => Some((d, false)),

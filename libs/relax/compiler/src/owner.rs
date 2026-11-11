@@ -164,12 +164,15 @@ static STARTED: std::sync::Once = std::sync::Once::new();
 /// The owner thread ends when no request is left (`stop`).
 static STOP: AtomicBool = AtomicBool::new(false);
 static OWNER_JOIN: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> = std::sync::Mutex::new(None);
-/// Program requests queued: long work on the owner stops for them (program_waiting)
+/// Program requests queued: long work on the owner stops for them (program_waiting, request_waiting)
 static FOREGROUND: AtomicU32 = AtomicU32::new(0);
 /// the main thread's requests queued
 static MAIN_QUEUED: AtomicU32 = AtomicU32::new(0);
 /// the main thread's queued publish requests (its lazy compiles' finishes): served first (pick)
 static MAIN_PUBLISH: AtomicU32 = AtomicU32::new(0);
+/// Job requests queued that a thread waits for (not posted ones): long work stops for them too
+/// (request_waiting)
+static JOBS_WAITING: AtomicU32 = AtomicU32::new(0);
 /// requests queued (any class): the idle owner spins on it
 static QUEUED_N: AtomicU32 = AtomicU32::new(0);
 /// the owner sleeps on WAKE (a push then notifies it; otherwise it is spinning or busy)
@@ -869,12 +872,21 @@ pub fn for_main() -> bool {
 }
 
 /// A program request waits now (a program thread's, a live patch's or its landing check, a structural
-/// step, inspect), or the publish that finishes the main thread's lazy compile: long work on the
-/// owner (the cache's mid-run writes, the settle rebuild) stops for either. (Stopping for the main
-/// thread's alone, a live session's landing checks waited 565-747 ms behind a mid-run write, whose
-/// startup manifest held the owner 1-6 s.)
+/// step, inspect), or the publish that finishes the main thread's lazy compile: a lazy compile
+/// front gives the owner back for either (may_yield), and long work stops for them (request_waiting).
+/// (Stopping for the main thread's alone, a live session's landing checks waited 565-747 ms behind
+/// a mid-run write, whose startup manifest held the owner 1-6 s.)
 pub fn program_waiting() -> bool {
     FOREGROUND.load(Ordering::Relaxed) + MAIN_PUBLISH.load(Ordering::Relaxed) > 0
+}
+
+/// A request waits now that long work on the owner (the cache's mid-run writes, the settle
+/// rebuild) gives the owner back for, at its next check: what `program_waiting` counts, or a Job
+/// a thread waits for (a back end's constant or static, a report, inspect). Background publishes
+/// and posted requests wait for the work to end. (A startup write held the owner 4.7 s with a
+/// back end's Job queued, since it stopped only for program requests.)
+pub fn request_waiting() -> bool {
+    program_waiting() || JOBS_WAITING.load(Ordering::Relaxed) > 0
 }
 
 /// What the owner serves now (diagnostics): "idle", or the class and its requester's name.
@@ -896,13 +908,18 @@ pub fn serving_detail() -> String {
 }
 
 /// The request queue as a JSON object (makepad inspect; atomics only, never the queue's lock):
-/// queued requests, of which foreground (main + app) and main.
+/// queued requests, of which foreground (main + app) and main; and `demand`, 1 while a thread of
+/// the program is inside a demand compile (a first call's lazy compile, from its first request
+/// until it runs the code). A queued request is only part of that wait: once the owner served it,
+/// the thread still waits on its compile until it runs again, and an app whose threads
+/// wait so is not idle (makepad_test's idle rule reads it).
 pub fn queued_note() -> String {
     format!(
-        "{{\"total\":{},\"foreground\":{},\"main\":{}}}",
+        "{{\"total\":{},\"foreground\":{},\"main\":{},\"demand\":{}}}",
         QUEUED_N.load(Ordering::Relaxed),
         FOREGROUND.load(Ordering::Relaxed),
-        MAIN_QUEUED.load(Ordering::Relaxed)
+        MAIN_QUEUED.load(Ordering::Relaxed),
+        u8::from(crate::jit::demand_compile_age().0)
     )
 }
 
@@ -1229,6 +1246,8 @@ fn push(r: usize, class: Class) {
         }
     } else if class == Class::Publish && from_main(r) {
         MAIN_PUBLISH.fetch_add(1, Ordering::Relaxed);
+    } else if class == Class::Job && is_waited(r) {
+        JOBS_WAITING.fetch_add(1, Ordering::Relaxed);
     }
     QUEUED_N.fetch_add(1, Ordering::SeqCst);
     // makepad inspect's timeline: this thread ends the owner's idle wait, spinning or asleep (owner_loop)
@@ -1247,7 +1266,15 @@ fn dequeued(class: usize, r: usize) {
         }
     } else if class == Class::Publish as usize && from_main(r) {
         MAIN_PUBLISH.fetch_sub(1, Ordering::Relaxed);
+    } else if class == Class::Job as usize && is_waited(r) {
+        JOBS_WAITING.fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+/// A queued request a thread waits for (not a posted one).
+fn is_waited(r: usize) -> bool {
+    // SAFETY: a queued request stays alive until the owner releases it
+    unsafe { (*(r as *const Req)).waited }
 }
 
 /// A queued request asked by the program's main thread.
@@ -1907,6 +1934,51 @@ mod tests {
         assert!(APP_RAN.load(Ordering::SeqCst));
     }
 
+    /// Long work on the owner (the cache's mid-run writes, the settle rebuild) asks
+    /// `request_waiting` between its sections and gives the owner back when it says yes. A Job a
+    /// thread waits for counts: a startup write held the owner 4.7 s with a back end's Job queued,
+    /// since it stopped only for program requests. A posted Job and a background thread's publish
+    /// do not: they wait for the work to end.
+    #[test]
+    fn long_owner_work_gives_way_to_a_waited_job() {
+        isolated_test!(long_owner_work_gives_way_to_a_waited_job);
+        static RUNNING: AtomicBool = AtomicBool::new(false);
+        static SECTIONS: AtomicU32 = AtomicU32::new(0);
+        static POSTED_RAN: AtomicBool = AtomicBool::new(false);
+        // the long work: sections until a request waits; then the sections it ran, and whether a
+        // program request waited
+        let work = std::thread::spawn(|| {
+            call(Class::Program, || {
+                RUNNING.store(true, Ordering::SeqCst);
+                while !request_waiting() {
+                    SECTIONS.fetch_add(1, Ordering::SeqCst);
+                    std::thread::yield_now();
+                }
+                (SECTIONS.load(Ordering::SeqCst), program_waiting())
+            })
+        });
+        while !RUNNING.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        post(Class::Job, || POSTED_RAN.store(true, Ordering::SeqCst));
+        let publisher = std::thread::Builder::new().name("run-test-pub".into()).spawn(|| call(Class::Publish, || ())).unwrap();
+        while QUEUED_N.load(Ordering::SeqCst) < 2 {
+            std::thread::yield_now();
+        }
+        // with both queued the work runs more sections
+        let queued_at = SECTIONS.load(Ordering::SeqCst);
+        while SECTIONS.load(Ordering::SeqCst) < queued_at + 3 {
+            assert!(!work.is_finished(), "the long work stopped for a posted Job or a background publish");
+            std::thread::yield_now();
+        }
+        let served_at = call(Class::Job, || SECTIONS.load(Ordering::SeqCst));
+        let (stopped_at, program) = work.join().unwrap();
+        assert!(!program, "a program request waited: the work did not stop for the Job");
+        assert_eq!(served_at, stopped_at, "the waited Job was served when the work gave way, with no section after");
+        assert!(POSTED_RAN.load(Ordering::SeqCst), "the posted Job, queued first, ran before the waited one");
+        publisher.join().unwrap();
+    }
+
     /// The pool apps' deadlock reports (2026-11-08): the owner, pumping for a thread's work, served
     /// that thread's own request, and its wait row kept naming the thread meanwhile while the
     /// requester's named the owner: "run-owner <-> the thread", a cycle for as long as the service
@@ -2190,6 +2262,7 @@ pub(crate) unsafe fn reset_statics() {
     reset(&FOREGROUND, AtomicU32::new(0));
     reset(&MAIN_QUEUED, AtomicU32::new(0));
     reset(&MAIN_PUBLISH, AtomicU32::new(0));
+    reset(&JOBS_WAITING, AtomicU32::new(0));
     reset(&QUEUED_N, AtomicU32::new(0));
     reset(&OWNER_ASLEEP, AtomicBool::new(false));
     reset(&OWNER_SERVING, AtomicBool::new(false));

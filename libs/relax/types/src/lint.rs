@@ -819,10 +819,14 @@ pub fn attrs_at(prog: &Program, def: DefId, file: u32, lo: u32, hi: u32) -> Vec<
     if owner == NO_DEF { return Vec::new(); }
     let od = prog.def(owner);
     if od.file != file || od.item.0 == u32::MAX || !has_body_item(od.kind) { return Vec::new(); }
-    let ast = &prog.files[od.file as usize].ast;
+    let pf = &prog.files[od.file as usize];
+    let ast = &pf.ast;
     let item = ast.item(od.item);
-    // (a span outside the item is none of its body's nodes)
-    if lo < item.lo || lo >= item.hi { return Vec::new(); }
+    // (a span outside the item is none of its body's nodes; one in the text of a macro's
+    // expansion is when the call is written in the item: the attributes the expansion puts
+    // around the tokens passed in, `#[allow(unused_unsafe)] Box::new(move || $body)`, apply to
+    // them, as rustc's levels follow the HIR parents)
+    if !pf.expands_within(lo, item.lo, item.hi) { return Vec::new(); }
     let mut f = Find { ast, lo, hi, stack: Vec::new(), expr: None, binding: None };
     match item.kind {
         ItemKind::Fn(sig, _, _) => {

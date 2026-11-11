@@ -1287,7 +1287,8 @@ pub(crate) fn cmd_stacks(req: &Req, out: &mut Out) {
     let mut partial = Vec::new();
     // a thread parked at a stale access waits in its fault handler: its program frames are the
     // ones recorded at the fault (stale.rs)
-    let frames: Vec<Vec<u64>> = caps.iter().map(|c| events::stale_frames_of(c.t.os_id).unwrap_or_else(|| c.frames.clone()).into_iter().take(depth.max(1) + 1).collect()).collect();
+    let parked: Vec<Option<Vec<u64>>> = caps.iter().map(|c| events::stale_frames_of(c.t.os_id)).collect();
+    let frames: Vec<Vec<u64>> = caps.iter().zip(&parked).map(|(c, p)| p.clone().unwrap_or_else(|| c.frames.clone()).into_iter().take(depth.max(1) + 1).collect()).collect();
     let syms = symbolise(&frames, &mut partial);
     out.measured(&format!("stacks of {} thread(s), captured now", caps.len()), "os capture (no owner)", &partial);
     // identical stacks folded
@@ -1299,9 +1300,12 @@ pub(crate) fn cmd_stacks(req: &Req, out: &mut Out) {
             None => groups.push((key, vec![i])),
         }
     }
-    // stacks with JIT code (the program's threads) first: a reply cut at its size limit drops
-    // runtime threads, not the program's
-    groups.sort_by_key(|g| !caps[g.1[0]].frames.iter().any(|&pc| crate::jit::in_jit_code(pc)));
+    // a thread parked at a stale access first (what `stale` answers about), then the stacks with
+    // JIT code (the program's threads), by the frames shown: a reply cut at its size limit drops
+    // runtime threads, not the program's. (Sorted by its live capture, the parked thread -- in its
+    // fault handler, no JIT frame -- came after every runtime thread: `stale` answered 10 of its
+    // 16 KB before it, and a few busy compile threads more cut it.)
+    groups.sort_by_key(|g| (parked[g.1[0]].is_none(), !frames[g.1[0]].iter().any(|&pc| crate::jit::in_jit_code(pc))));
     for (key, members) in &groups {
         let names: Vec<String> = members.iter().map(|&i| json_str(&format!("{} ({})", caps[i].t.name, tid_label(caps[i].t.os_id)))).collect();
         let c = &caps[members[0]];

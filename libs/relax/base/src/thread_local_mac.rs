@@ -10,7 +10,8 @@
 //! (the compiler places it at a fixed offset from the thread pointer where it can); every other
 //! key keeps a lazily created runtime key (std/thread/local.rs `LazyKey`) in a `static` of its fn,
 //! initialised on the thread's first access, which is observably the same for `const`
-//! initialisers (they have no side effects).
+//! initialisers (they have no side effects), and the thread's cache of its value in a
+//! `#[thread_local]` static beside it (`KeyCache`).
 
 use crate::lexer::T;
 use crate::tg;
@@ -102,11 +103,12 @@ pub fn expand(toks: &[(T, &[u8], u32)], edition: u16) -> Result<TokBuf, String> 
         copy_at(&mut out, &toks[start..i]);
         // (several short `tg!`s: one long template exceeded Relax's own macro expansion when this
         // file runs under the JIT -- see TAILTLS.REPORT.md)
-        // `Option<*const T>`: what the key's fn returns
+        // `*const T` (null: destroyed): what the key's fn returns
         let mut ret = TokBuf::new(edition);
-        tg!(&mut ret; #std() :: option :: Option < * const #append(&ty) >);
+        tg!(&mut ret; * const #append(&ty));
         let mut lazy_key = TokBuf::new(edition);
         tg!(&mut lazy_key; static __RELAX_TLS_KEY : #std() :: thread :: LazyKey < #append(&ty) > = #std() :: thread :: LazyKey :: new () ;);
+        tg!(&mut lazy_key; #[thread_local] static __RELAX_TLS_CACHE : #std() :: thread :: KeyCache = #std() :: thread :: KeyCache :: new () ;);
         tg!(&mut out; const #word(&name) : #std() :: thread :: LocalKey < #append(&ty) > =);
         let mut body = TokBuf::new(edition);
         if konst {
@@ -116,13 +118,13 @@ pub fn expand(toks: &[(T, &[u8], u32)], edition: u16) -> Result<TokBuf, String> 
             let mut keyed = TokBuf::new(edition);
             tg!(&mut keyed; fn __relax_tls_init () -> #append(&ty) { __RELAX_TLS_INIT });
             keyed.append(&lazy_key);
-            tg!(&mut keyed; __RELAX_TLS_KEY . get ( __relax_tls_init ));
+            tg!(&mut keyed; __RELAX_TLS_KEY . get ( & raw const __RELAX_TLS_CACHE , __relax_tls_init ));
             let mut plain = TokBuf::new(edition);
             tg!(&mut plain; #[thread_local] static __RELAX_TLS_VAL : #append(&ty) = __RELAX_TLS_INIT ;);
-            tg!(&mut plain; #std() :: option :: Option :: Some ( & raw const __RELAX_TLS_VAL ));
+            tg!(&mut plain; & raw const __RELAX_TLS_VAL);
             let mut single = TokBuf::new(edition);
             tg!(&mut single; static __RELAX_TLS_VAL : #std() :: thread :: EagerStorage < #append(&ty) > = #std() :: thread :: EagerStorage { value : __RELAX_TLS_INIT } ;);
-            tg!(&mut single; #std() :: option :: Option :: Some ( & raw const __RELAX_TLS_VAL . value ));
+            tg!(&mut single; & raw const __RELAX_TLS_VAL . value);
             tg!(&mut body; fn __relax_tls_get () -> #append(&ret) {
                 #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
                 { #append(&single) }
@@ -133,7 +135,7 @@ pub fn expand(toks: &[(T, &[u8], u32)], edition: u16) -> Result<TokBuf, String> 
             tg!(&mut body; fn __relax_tls_init () -> #append(&ty) { #append(&init) });
             let mut get = TokBuf::new(edition);
             get.append(&lazy_key);
-            tg!(&mut get; __RELAX_TLS_KEY . get ( __relax_tls_init ));
+            tg!(&mut get; __RELAX_TLS_KEY . get ( & raw const __RELAX_TLS_CACHE , __relax_tls_init ));
             tg!(&mut body; fn __relax_tls_get () -> #append(&ret) { #append(&get) });
         }
         tg!(&mut body; #std() :: thread :: LocalKey :: new ( __relax_tls_get ));

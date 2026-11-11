@@ -419,9 +419,9 @@ pub fn note_new(title: &str) -> Note {
 }
 
 /// A plain struct holding a String (the shape of the script VM's `ScriptLoc`: caller-owned, its
-/// methods stay on the constructing side): Rust's repr and not Copy, the structs a live session's
-/// layout gives an extension word in the application's own crates. JIT code builds it by a literal
-/// and reads it; no bound fn takes it (one that did would refuse it: a String is not C-shaped).
+/// methods stay on the constructing side): Rust's repr and not Copy. JIT code builds it by a
+/// literal and reads it; no bound fn takes it (one that did would refuse it: a String is not
+/// C-shaped).
 #[relax_api(plain)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Loc {

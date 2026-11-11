@@ -1,6 +1,7 @@
 //! Live edits of async code: after a patch every new call runs the new code -- an edited async
 //! fn awaited from an async block or an async fn of a file the edit does not touch, an edited
-//! async block, and an edit that also retypes a field of a struct the coroutine holds.
+//! async block, and an edit that also retypes a field of a struct the coroutine holds (retyping
+//! one that holds a niche restarts).
 //! (`live_app` and `in_child` are the live-session harness of reload_items_tests too.)
 use std::sync::Arc;
 
@@ -23,7 +24,7 @@ pub(crate) fn in_child(test: &str, cases: &[&str], body: impl FnOnce(&str)) {
 /// The unit of the running `live_app` (a test that looks into it).
 pub(crate) static LIVE_UNIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// A live session (M10 layouts, an app-scope crate) over crate `app` of `files` (paths under
+/// A live session (an app-scope crate) over crate `app` of `files` (paths under
 /// src/ with their text; lib.rs first), then `run(call, edit)`: `call(name)` runs the crate's
 /// fn `name(out: &mut u64)` (one of `names`, found at load) and returns `*out`; `edit(file,
 /// subs)` applies text substitutions to that file live and returns the outcome.
@@ -192,8 +193,8 @@ fn edited_async_code_runs_on_the_next_call() {
         let driver = if case == "restart" { format!("{DRIVER}{JOB}") } else { DRIVER.to_string() };
         let names: &[&str] = if case == "restart" { &["drive", "drive_job"] } else { &["drive", "drive_outer", "drive_block", "hold", "resume"] };
         live_app(&format!("async-{case}"), &[("lib.rs", LIB), ("driver.rs", &driver)], names, |call, edit| {
-            assert_eq!(call("drive"), 101);
             if case == "restart" {
+                assert_eq!(call("drive"), 101);
                 // `J::go` (an async fn of a trait impl) awaits `run`: its future holds `run`'s, so
                 // it is replaced with it, and a trait impl's fn is not replaced live yet -- the
                 // edit restarts (before, the impl's coroutine kept calling the replaced `run` and
@@ -204,6 +205,23 @@ fn edited_async_code_runs_on_the_next_call() {
                 assert_eq!((call("drive"), call("drive_job")), (101, 101), "nothing of the edit installed");
                 return;
             }
+            // retyping `from` (it holds the niche an `Option<Trace>` keeps its tag in): no value of
+            // Trace is left -- `drive_outer` awaits it on its own stack, and no trait object of a
+            // future that can hold one was made yet -- so it takes rustc's layout of the new text,
+            // and the code using it is rebuilt; the running text again: the same
+            assert_eq!(call("drive_outer"), 1101);
+            let retype_from = [
+                ("pub from: Option<u64>,", "pub from: Option<(u64, u64)>,"),
+                ("Trace { from: Some(1), n: 0 };", "Trace { from: Some((1, 2)), n: 0 };"),
+                ("t.from.unwrap_or(0) + t.n + 100;", "t.from.map_or(0, |(a, b)| a + b) + t.n + 100;"),
+            ];
+            let outcome = edit("lib.rs", &retype_from);
+            assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
+            assert!(outcome.lines.iter().any(|l| l.contains("struct `live_app::Trace` takes its new layout")), "{:?}", outcome.lines);
+            assert_eq!(call("drive_outer"), 1103, "the retyped field's code");
+            let outcome = edit("lib.rs", &retype_from.map(|(a, b)| (b, a)));
+            assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
+            assert_eq!((call("drive_outer"), call("drive")), (1101, 101), "the running text again");
             let mut patch = |subs: &[(&str, &str)]| {
                 let outcome = edit("lib.rs", subs);
                 assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{subs:?}: {:?}", outcome.lines);
@@ -219,14 +237,19 @@ fn edited_async_code_runs_on_the_next_call() {
             // an async block edited in its fn
             patch(&[("*out = 7;", "*out = 8;")]);
             assert_eq!(call("drive_block"), 8, "the edited async block runs");
-            // a field of a struct the coroutine holds across its await retyped, with the async fn's body
-            patch(&[
-                ("pub from: Option<u64>,", "pub from: Option<(u64, u64)>,"),
-                ("Trace { from: Some(1), n: 4 };", "Trace { from: Some((1, 2)), n: 0 };"),
-                ("t.from.unwrap_or(0) + t.n + 200;", "t.from.map_or(0, |(a, b)| a + b) + t.n + 300;"),
+            // a field of a struct the coroutine holds across its await retyped, with the async fn's
+            // body: `drive` and `hold` made trait objects of futures that hold one in their frames
+            // (`run`'s, awaited; their vtables, made this run), which may still be alive -- they
+            // finished, which the edit cannot see: a restart naming one, nothing installed (the
+            // retype of `from` above, before any such object, took its new layout)
+            let outcome = edit("lib.rs", &[
+                ("pub n: u64 }", "pub n: (u64, u64) }"),
+                ("Trace { from: Some(1), n: 4 };", "Trace { from: Some(1), n: (2, 0) };"),
+                ("t.from.unwrap_or(0) + t.n + 200;", "t.from.unwrap_or(0) + t.n.0 + t.n.1 + 300;"),
             ]);
-            assert_eq!(call("drive"), 303, "the async fn's body over the retyped field");
-            assert_eq!(call("drive_outer"), 1303, "the same through the async fn awaiting it");
+            assert_eq!(outcome.rung, crate::reload::Rung::Restart, "{:?}", outcome.lines);
+            assert!(outcome.lines.iter().any(|l| ["drive", "held"].iter().any(|f| l.contains(&format!("struct `Trace` changed its layout, and the running code made trait objects of `live_app::driver::{f}::{{{{closure}}}}`")))), "{:?}", outcome.lines);
+            assert_eq!((call("drive"), call("drive_outer")), (205, 1205), "nothing of the edit installed");
         });
     });
 }

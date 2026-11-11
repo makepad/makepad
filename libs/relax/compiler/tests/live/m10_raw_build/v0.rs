@@ -1,17 +1,11 @@
 // M10: a struct built by raw writes at the offsets offset_of! gives (as reflection crates build
-// values): the hidden ext word of its live layout is never written (here it holds 0xAB bytes),
-// on the stack (MaybeUninit) and on the heap (alloc, then Box::from_raw). Built, read, dropped
-// (its fields once each), and kept in a static next to a value of a struct literal. v1 removes a
-// field with nothing to drop: the offsets the builder computes are still the running layout's,
-// for new values and kept ones. v2 removes a field that owns something to drop (and holds no
-// niche): a raw value's word does not say whether it set that slot -- restart. v3 (on v1) adds a
-// field: its values would need the word -- restart. v4 (on v1) adds a field to a struct built
-// only by literals so far, and a builder writing it at its offset_of! offset -- restart.
+// values), on the stack (MaybeUninit) and on the heap (alloc, then Box::from_raw): built, read and
+// dropped (its fields once each). v1 removes a field: the builder's values may be kept where the
+// struct's type does not show, which its new layout would read wrong -- restart.
 
 use std::alloc::{alloc, Layout};
 use std::mem::{offset_of, size_of, MaybeUninit};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
 
 struct Rec {
     tag: String,
@@ -36,8 +30,6 @@ impl Drop for Note {
         DROPS.fetch_add(self.0, Ordering::SeqCst);
     }
 }
-
-static KEPT: Mutex<Vec<Rec>> = Mutex::new(Vec::new());
 
 unsafe fn fill(p: *mut u8, name: &str, n: u32) {
     std::ptr::write_bytes(p, 0xAB, size_of::<Rec>());
@@ -73,17 +65,6 @@ fn run() {
     let b = on_heap("b", 8);
     println!("out {} {} {} {}", b.tag, b.name, b.n, b.w);
     drop(b);
-    {
-        // (the lock goes before code that may panic: a rerun takes it again)
-        let mut kept = KEPT.lock().unwrap();
-        if kept.is_empty() {
-            kept.push(on_stack("k", 1));
-            kept.push(Rec { tag: "lit".to_string(), name: "l".to_string(), note: Note(2), n: 2, w: 20 });
-        }
-        for r in kept.iter() {
-            println!("out kept {} {} {}", r.tag, r.name, r.n);
-        }
-    }
     let l = Lit { a: "x".to_string(), b: 3 };
     println!("out lit {} {}", l.a, l.b);
     println!("out drops {}", DROPS.load(Ordering::SeqCst) - drops);

@@ -4,6 +4,9 @@
 //! places it at a fixed offset from the thread pointer where the platform has static TLS);
 //! every other key lazily creates one domain-local runtime key (`LazyKey`), and a thread's value
 //! lives in a heap slot whose destructor runs before the runtime deregisters its domain thread.
+//! Such a key's fn reads the slot through a cache in a `#[thread_local]` static of its own
+//! (`KeyCache`): the domain it last found the slot in and the value's address. A thread can run
+//! several domains' code, each with its own values, so a hit needs the running domain.
 
 use alloc::alloc::{handle_alloc_error, GlobalAlloc, Layout, System};
 use core::cell::{Cell, RefCell};
@@ -16,10 +19,28 @@ use core::sync::atomic::Ordering::{AcqRel, Acquire};
 use crate::sys;
 
 /// A thread-local's handle: the fn the expansion made for this key returns the calling thread's
-/// value (None: destroyed), as std's `LocalKey { inner }` (library/std/src/thread/local.rs). The key
+/// value (null: destroyed), as std's `LocalKey { inner }` (library/std/src/thread/local.rs). The key
 /// is a `const`, so a `with` reaches that fn directly (a constant).
 pub struct LocalKey<T: 'static> {
-    inner: fn() -> Option<*const T>,
+    inner: fn() -> *const T,
+}
+
+/// One key's cache on the calling thread (a `#[thread_local]` static the expansion makes beside
+/// the key, zero on every new thread): `tag` is the inverted base of the domain whose slot
+/// `value` points into (0: empty -- no domain's base is all ones). `LazyKey::get` fills it; the
+/// slot's destructor empties it first (`key_dtor`), so later access fails as before.
+pub struct KeyCache {
+    tag: Cell<usize>,
+    value: Cell<*const u8>,
+}
+
+// only a `#[thread_local]` static holds one (on a target without threads, a plain static)
+unsafe impl Sync for KeyCache {}
+
+impl KeyCache {
+    pub const fn new() -> KeyCache {
+        KeyCache { tag: Cell::new(0), value: Cell::new(core::ptr::null()) }
+    }
 }
 
 /// The lazily created runtime key of a thread-local that needs one (lazy initialisation or
@@ -50,7 +71,7 @@ impl<T: 'static> LazyKey<T> {
     pub const fn new() -> Self {
         Self { value: core::cell::UnsafeCell::new(core::mem::MaybeUninit::uninit()), state: Cell::new(0) }
     }
-    pub fn get(&'static self, init: fn() -> T) -> Option<*const T> {
+    pub fn get(&'static self, _cache: *const KeyCache, init: fn() -> T) -> *const T {
         if self.state.get() != 1 {
             let value = init();
             if self.state.get() == 1 {
@@ -62,7 +83,7 @@ impl<T: 'static> LazyKey<T> {
             unsafe { self.value.get().write(core::mem::MaybeUninit::new(value)); }
             self.state.set(1);
         }
-        Some(self.value.get() as *const T)
+        self.value.get() as *const T
     }
 }
 
@@ -84,11 +105,13 @@ impl fmt::Display for AccessError {
 
 impl Error for AccessError {}
 
-/// Header first so one non-generic key destructor can drop any slot type.
+/// Header first so one non-generic key destructor can drop any slot type. `cache`: the owning
+/// thread's cache of the key (the last one filled from this slot).
 #[repr(C)]
 struct Slot<T> {
     drop_slot: unsafe fn(*mut u8),
     key: sys::Key,
+    cache: *const KeyCache,
     value: T,
 }
 
@@ -96,6 +119,7 @@ struct Slot<T> {
 struct SlotHeader {
     drop_slot: unsafe fn(*mut u8),
     key: sys::Key,
+    cache: *const KeyCache,
 }
 
 /// Stored in the key while a slot is being destroyed (and after): access fails.
@@ -117,6 +141,8 @@ extern "C" fn key_dtor(p: *mut c_void) {
         // registered first; a late key's (no drop glue) only after every other destructor ran.
         let header = &*(p as *const SlotHeader);
         let drop_fn = header.drop_slot;
+        // (the cache is the thread's own: this runs on the slot's thread, its block installed)
+        (*header.cache).tag.set(0);
         sys::key_set(header.key, DESTROYED as *const c_void);
         drop_fn(p as *mut u8);
     }
@@ -173,16 +199,31 @@ impl<T: 'static> LazyKey<T> {
         }
     }
 
-    /// The calling thread's value, initialised by `init` on its first access; None once it is
-    /// being destroyed.
-    pub fn get(&'static self, init: fn() -> T) -> Option<*const T> {
+    /// The calling thread's value, initialised by `init` on its first access; null once it is
+    /// being destroyed. A hit in the thread's cache for the running domain is the value.
+    #[inline(always)]
+    pub fn get(&'static self, cache: *const KeyCache, init: fn() -> T) -> *const T {
+        #[cfg(not(target_family = "wasm"))]
+        unsafe {
+            if (*cache).tag.get() == !*core::intrinsics_rt::tls_block() {
+                return (*cache).value.get() as *const T;
+            }
+        }
+        self.get_slow(cache, init)
+    }
+
+    /// The value through the runtime key (creating the key, or the thread's value, when it has
+    /// none yet); the cache then holds it.
+    #[cold]
+    #[inline(never)]
+    fn get_slow(&'static self, cache: *const KeyCache, init: fn() -> T) -> *const T {
         let key = self.os_key();
         let p = key_value(key);
         if p == DESTROYED {
-            return None;
+            return core::ptr::null();
         }
         if p != 0 {
-            return Some(unsafe { &(*(p as *const Slot<T>)).value as *const T });
+            return unsafe { fill(cache, p as *mut Slot<T>) };
         }
         let value = init();
         // init may have initialized this key itself (init-on-init): as std's lazy storage,
@@ -191,14 +232,14 @@ impl<T: 'static> LazyKey<T> {
         let again = sys::key_get(key) as usize;
         if again == DESTROYED {
             drop(value);
-            return None;
+            return core::ptr::null();
         }
         if again != 0 {
             unsafe {
                 let slot = again as *mut Slot<T>;
                 let old = core::mem::replace(&mut (*slot).value, value);
                 drop(old);
-                return Some(&(*slot).value as *const T);
+                return fill(cache, slot);
             }
         }
         let layout = Layout::new::<Slot<T>>();
@@ -207,16 +248,30 @@ impl<T: 'static> LazyKey<T> {
             handle_alloc_error(layout);
         }
         unsafe {
-            slot.write(Slot { drop_slot: drop_slot::<T>, key, value });
+            slot.write(Slot { drop_slot: drop_slot::<T>, key, cache, value });
             sys::key_set(key, slot as *const c_void);
-            Some(&(*slot).value as *const T)
+            fill(cache, slot)
         }
     }
 }
 
+/// `slot` is the calling thread's value of its key in the running domain: the thread's `cache`
+/// holds it from now on (and the slot's destructor empties that cache). The value's address.
+#[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
+unsafe fn fill<T>(cache: *const KeyCache, slot: *mut Slot<T>) -> *const T {
+    let value = &(*slot).value as *const T;
+    (*slot).cache = cache;
+    #[cfg(not(target_family = "wasm"))]
+    {
+        (*cache).value.set(value as *const u8);
+        (*cache).tag.set(!*core::intrinsics_rt::tls_block());
+    }
+    value
+}
+
 impl<T: 'static> LocalKey<T> {
-    /// `inner` returns the calling thread's value (None: destroyed); the expansion's.
-    pub const fn new(inner: fn() -> Option<*const T>) -> LocalKey<T> {
+    /// `inner` returns the calling thread's value (null: destroyed); the expansion's.
+    pub const fn new(inner: fn() -> *const T) -> LocalKey<T> {
         LocalKey { inner }
     }
 
@@ -229,10 +284,11 @@ impl<T: 'static> LocalKey<T> {
 
     #[inline]
     pub fn try_with<F: FnOnce(&T) -> R, R>(&'static self, f: F) -> Result<R, AccessError> {
-        match (self.inner)() {
-            Some(p) => Ok(f(unsafe { &*p })),
-            None => Err(AccessError),
+        let p = (self.inner)();
+        if p.is_null() {
+            return Err(AccessError);
         }
+        Ok(f(unsafe { &*p }))
     }
 }
 

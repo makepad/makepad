@@ -99,11 +99,11 @@ impl AdtT {
         Some(result)
     }
     /// The value variant `index`'s tag holds in a Direct-tagged layout: its discriminant, or the
-    /// tag a live edit kept for it (`live_tags`, M10).
+    /// tag a live edit kept for it (`tag_pin`).
     pub fn tag_for_variant(&self, tcx: &Tcx, prog: &Program, index: u32) -> Option<Discr> {
-        if self.live_tags.is_empty() { return self.discriminant_for_variant(tcx, prog, index); }
+        let Some(pin) = &self.tag_pin else { return self.discriminant_for_variant(tcx, prog, index) };
         let at = self.initial_discriminant(tcx);
-        self.live_tags.get(index as usize).map(|&val| Discr { val, ty: at.ty, bytes: at.bytes })
+        pin.tags.get(index as usize).map(|&val| Discr { val, ty: at.ty, bytes: at.bytes })
     }
     /// The variant whose Direct tag holds `tag` (sign-extended as the tag's type), by
     /// `tag_for_variant`.

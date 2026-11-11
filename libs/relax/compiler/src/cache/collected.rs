@@ -919,7 +919,7 @@ pub enum CollectedRecord<'p> {
     Ready(CollectedDest, crate::image::Writer<'p>),
     /// the store already holds this exact image
     Current,
-    /// stopped for a program request: try again later
+    /// stopped for a waiting request: try again later
     Yielded,
     Failed,
 }

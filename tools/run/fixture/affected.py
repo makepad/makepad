@@ -43,10 +43,15 @@ GATE_PACKAGES = SMOKE + ("makepad-example-counter", "makepad-platform", "makepad
 # A fixed set that stands for the rest (the smoke set's commercial apps for a commercial app)
 JIT_CHECKS = ("makepad-widgets-core", "makepad-platform", "makepad-draw", "makepad-example-counter", "makepad-story-web-export")
 CALC = "makepad-app-calculator"
-# GPU guards, (package, test filter): render tests of a user-visible effect that broke more than once with every
-# test green. The hot bucket runs one on its node's real GPU under the JIT after every landing that reaches its
-# package (land_gate.sh step_guards): the map's zoom into text, its phosphor lens (11-06)
-GUARDS = (("makepad-scope", "gpu_guard"),)
+# GPU guards, (package, target, test filter): render tests of a user-visible effect that broke more than once with
+# every test green. The target is `lib` (the package's library tests) or `test:<name>` (one of its test targets). The
+# hot bucket runs one on its node's real GPU under the JIT after every landing that reaches its package
+# (land_gate.sh step_guards): the map's zoom into text, its phosphor lens (11-06); Fab's far wall face in the
+# headset, its layers even (11-11)
+GUARDS = (
+    ("makepad-scope", "lib", "gpu_guard"),
+    ("makepad-fab", "test:xr_far_face", "a_far_wall_face_shows_no_darker_layers_in_the_headset"),
+)
 # the JIT binary; devhub's binary
 JIT_PACKAGE = "makepad-run"
 DEVHUB_PACKAGE = "makepad-devhub"
@@ -294,7 +299,7 @@ def main():
     compiled, touched = owners(root, packages, files)
     affected = closure(touched, reverse)
     by_name = {p["name"]: d for d, p in packages.items()}
-    missing = [name for name in SMOKE + JIT_CHECKS + tuple(name for name, _ in GUARDS) if name not in by_name]
+    missing = [name for name in SMOKE + JIT_CHECKS + tuple(name for name, _, _ in GUARDS) if name not in by_name]
     if missing:
         raise RuntimeError("smoke or JIT check packages missing from metadata: " + " ".join(missing))
 
@@ -339,9 +344,9 @@ def main():
         # a guard runs under the JIT: a JIT change reaches it as much as one of its package's crates; a guard
         # red since runs whatever the diff reaches, until it passes
         retry_guards = {words[1] for words in live if words[0] == "guard"}
-        for name, test in GUARDS:
+        for name, target, test in GUARDS:
             if workspace or by_name[name] in affected or touched & jit_code or name in retry_guards:
-                print(f"guard {name} {by_name[name].relative_to(root)} {test}")
+                print(f"guard {name} {by_name[name].relative_to(root)} {target} {test}")
         return
     if workspace:
         affected.update(packages)

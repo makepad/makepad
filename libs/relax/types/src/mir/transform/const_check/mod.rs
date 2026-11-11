@@ -85,12 +85,6 @@ impl<'a> ConstCx<'a> {
     /// bodies are not const contexts (a closure is never `const`).
     pub fn body_const_context(prog: &Program, tcx: &Tcx, body: &Body) -> Option<ConstContext> {
         let owner = body.source.owner;
-        // `#[rust(expr)]` field initial values are generated consts holding arbitrary run-time
-        // expressions (front derive.rs default_consts, marked `#[relax_live_default]`): not constants
-        // of the program
-        if is_live_default(prog, owner) {
-            return None;
-        }
         match body.source.kind {
             BodyKind::Const | BodyKind::AnonConst => Some(ConstContext::Const { inline: false }),
             BodyKind::InlineConst => Some(ConstContext::Const { inline: true }),
@@ -154,18 +148,6 @@ pub(crate) fn const_intrinsic(prog: &Program, d: DefId) -> bool {
     let src = prog.src(def.file);
     ast.list(ast.item(def.item).attrs).iter().any(|a| a.toks.hi > a.toks.lo
         && matches!(crate::cfg::tok_str(src, a.toks.lo as usize), b"rustc_const_stable" | b"rustc_const_unstable" | b"rustc_intrinsic_const_stable_indirect"))
-}
-
-/// A `#[relax_live_default]` const is made by the front (derive.rs default_consts) in live
-/// sessions, never part of the program rustc sees. Whole-crate checks skip it; it is checked
-/// on demand when a live edit adds its field.
-pub fn is_live_default(prog: &Program, d: DefId) -> bool {
-    let def = prog.def(d);
-    let ast = &prog.files[def.file as usize].ast;
-    // child defs share their owner's item, including anonymous consts in its type
-    let Some(item) = ast.items.get(def.item.0 as usize) else { return false };
-    let src = prog.src(def.file);
-    ast.list(item.attrs).iter().any(|a| a.toks.hi > a.toks.lo && crate::cfg::tok_str(src, a.toks.lo as usize) == b"relax_live_default")
 }
 
 /// The result of const-checking one body.

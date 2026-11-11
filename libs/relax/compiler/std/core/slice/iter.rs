@@ -143,6 +143,14 @@ impl<'a, T> Iterator for Iter<'a, T> {
         }
         None
     }
+    #[cfg(not(relax_check))]
+    #[doc(hidden)]
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> &'a T {
+        // SAFETY: idx is below the iterator's size where Zip took it, so ptr + idx is an element of the
+        // slice (for a zero-sized T, ptr itself)
+        unsafe { &*self.ptr.add(idx) }
+    }
 }
 
 impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
@@ -183,6 +191,12 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
 }
 
 impl<'a, T> ExactSizeIterator for Iter<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccess for Iter<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccessNoCoerce for Iter<'a, T> {
+    const MAY_HAVE_SIDE_EFFECT: bool = false;
+}
 unsafe impl<'a, T> crate::iter::TrustedLen for Iter<'a, T> {}
 impl<'a, T> FusedIterator for Iter<'a, T> {}
 
@@ -273,6 +287,13 @@ impl<'a, T> Iterator for IterMut<'a, T> {
             }
         }
     }
+    #[cfg(not(relax_check))]
+    #[doc(hidden)]
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> &'a mut T {
+        // SAFETY: as Iter's; no index is taken twice, so the references do not alias
+        unsafe { &mut *self.ptr.add(idx) }
+    }
 }
 
 impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
@@ -295,6 +316,12 @@ impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
 }
 
 impl<'a, T> ExactSizeIterator for IterMut<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccess for IterMut<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccessNoCoerce for IterMut<'a, T> {
+    const MAY_HAVE_SIDE_EFFECT: bool = false;
+}
 unsafe impl<'a, T> crate::iter::TrustedLen for IterMut<'a, T> {}
 impl<'a, T> FusedIterator for IterMut<'a, T> {}
 
@@ -366,6 +393,13 @@ impl<'a, T> Iterator for Windows<'a, T> {
     fn last(mut self) -> Option<Self::Item> {
         self.next_back()
     }
+    #[cfg(not(relax_check))]
+    #[doc(hidden)]
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> &'a [T] {
+        // SAFETY: idx is below the number of windows, so idx + size is within the slice
+        unsafe { super::from_raw_parts(self.v.as_ptr().add(idx), self.size) }
+    }
 }
 impl<'a, T> DoubleEndedIterator for Windows<'a, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
@@ -384,6 +418,12 @@ impl<'a, T> DoubleEndedIterator for Windows<'a, T> {
     }
 }
 impl<'a, T> ExactSizeIterator for Windows<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccess for Windows<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccessNoCoerce for Windows<'a, T> {
+    const MAY_HAVE_SIDE_EFFECT: bool = false;
+}
 impl<'a, T> FusedIterator for Windows<'a, T> {}
 
 // ---------------------------------------------------------------- Chunks
@@ -477,6 +517,18 @@ impl<'a, T> Iterator for Chunks<'a, T> {
     fn last(mut self) -> Option<Self::Item> {
         self.next_back()
     }
+    #[cfg(not(relax_check))]
+    #[doc(hidden)]
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> &'a [T] {
+        let start = idx * self.chunk_size;
+        // SAFETY: idx is below the number of chunks, so start is within the slice and the chunk
+        // ends at its end at the latest
+        unsafe {
+            let len = crate::cmp::min(self.v.len() - start, self.chunk_size);
+            super::from_raw_parts(self.v.as_ptr().add(start), len)
+        }
+    }
 }
 impl<'a, T> DoubleEndedIterator for Chunks<'a, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
@@ -509,6 +561,12 @@ impl<'a, T> DoubleEndedIterator for Chunks<'a, T> {
     }
 }
 impl<'a, T> ExactSizeIterator for Chunks<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccess for Chunks<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccessNoCoerce for Chunks<'a, T> {
+    const MAY_HAVE_SIDE_EFFECT: bool = false;
+}
 impl<'a, T> FusedIterator for Chunks<'a, T> {}
 
 pub struct ChunksMut<'a, T> {
@@ -579,6 +637,17 @@ impl<'a, T> Iterator for ChunksMut<'a, T> {
     fn last(mut self) -> Option<Self::Item> {
         self.next_back()
     }
+    #[cfg(not(relax_check))]
+    #[doc(hidden)]
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> &'a mut [T] {
+        let start = idx * self.chunk_size;
+        // SAFETY: as Chunks'; no index is taken twice, so the chunks do not alias
+        unsafe {
+            let len = crate::cmp::min(self.v.len() - start, self.chunk_size);
+            super::from_raw_parts_mut(self.v.as_mut_ptr().add(start), len)
+        }
+    }
 }
 impl<'a, T> DoubleEndedIterator for ChunksMut<'a, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
@@ -611,6 +680,12 @@ impl<'a, T> DoubleEndedIterator for ChunksMut<'a, T> {
     }
 }
 impl<'a, T> ExactSizeIterator for ChunksMut<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccess for ChunksMut<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccessNoCoerce for ChunksMut<'a, T> {
+    const MAY_HAVE_SIDE_EFFECT: bool = false;
+}
 impl<'a, T> FusedIterator for ChunksMut<'a, T> {}
 
 pub struct ChunksExact<'a, T> {
@@ -695,6 +770,14 @@ impl<'a, T> Iterator for ChunksExact<'a, T> {
     fn last(mut self) -> Option<Self::Item> {
         self.next_back()
     }
+    #[cfg(not(relax_check))]
+    #[doc(hidden)]
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> &'a [T] {
+        let start = idx * self.chunk_size;
+        // SAFETY: idx is below the number of whole chunks
+        unsafe { super::from_raw_parts(self.v.as_ptr().add(start), self.chunk_size) }
+    }
 }
 impl<'a, T> DoubleEndedIterator for ChunksExact<'a, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
@@ -727,6 +810,12 @@ impl<'a, T> DoubleEndedIterator for ChunksExact<'a, T> {
     }
 }
 impl<'a, T> ExactSizeIterator for ChunksExact<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccess for ChunksExact<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccessNoCoerce for ChunksExact<'a, T> {
+    const MAY_HAVE_SIDE_EFFECT: bool = false;
+}
 impl<'a, T> FusedIterator for ChunksExact<'a, T> {}
 
 pub struct ChunksExactMut<'a, T> {
@@ -806,6 +895,14 @@ impl<'a, T> Iterator for ChunksExactMut<'a, T> {
     fn last(mut self) -> Option<Self::Item> {
         self.next_back()
     }
+    #[cfg(not(relax_check))]
+    #[doc(hidden)]
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> &'a mut [T] {
+        let start = idx * self.chunk_size;
+        // SAFETY: as ChunksExact's; no index is taken twice, so the chunks do not alias
+        unsafe { super::from_raw_parts_mut(self.v.as_mut_ptr().add(start), self.chunk_size) }
+    }
 }
 impl<'a, T> DoubleEndedIterator for ChunksExactMut<'a, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
@@ -838,6 +935,12 @@ impl<'a, T> DoubleEndedIterator for ChunksExactMut<'a, T> {
     }
 }
 impl<'a, T> ExactSizeIterator for ChunksExactMut<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccess for ChunksExactMut<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccessNoCoerce for ChunksExactMut<'a, T> {
+    const MAY_HAVE_SIDE_EFFECT: bool = false;
+}
 impl<'a, T> FusedIterator for ChunksExactMut<'a, T> {}
 
 pub struct RChunks<'a, T> {
@@ -910,6 +1013,18 @@ impl<'a, T> Iterator for RChunks<'a, T> {
     fn last(mut self) -> Option<Self::Item> {
         self.next_back()
     }
+    #[cfg(not(relax_check))]
+    #[doc(hidden)]
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> &'a [T] {
+        let end = self.v.len() - idx * self.chunk_size;
+        let start = match end.checked_sub(self.chunk_size) {
+            None => 0,
+            Some(start) => start,
+        };
+        // SAFETY: idx is below the number of chunks, so start..end is within the slice
+        unsafe { super::from_raw_parts(self.v.as_ptr().add(start), end - start) }
+    }
 }
 impl<'a, T> DoubleEndedIterator for RChunks<'a, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
@@ -942,6 +1057,12 @@ impl<'a, T> DoubleEndedIterator for RChunks<'a, T> {
     }
 }
 impl<'a, T> ExactSizeIterator for RChunks<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccess for RChunks<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccessNoCoerce for RChunks<'a, T> {
+    const MAY_HAVE_SIDE_EFFECT: bool = false;
+}
 impl<'a, T> FusedIterator for RChunks<'a, T> {}
 
 pub struct RChunksMut<'a, T> {
@@ -1012,6 +1133,18 @@ impl<'a, T> Iterator for RChunksMut<'a, T> {
     fn last(mut self) -> Option<Self::Item> {
         self.next_back()
     }
+    #[cfg(not(relax_check))]
+    #[doc(hidden)]
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> &'a mut [T] {
+        let end = self.v.len() - idx * self.chunk_size;
+        let start = match end.checked_sub(self.chunk_size) {
+            None => 0,
+            Some(start) => start,
+        };
+        // SAFETY: as RChunks'; no index is taken twice, so the chunks do not alias
+        unsafe { super::from_raw_parts_mut(self.v.as_mut_ptr().add(start), end - start) }
+    }
 }
 impl<'a, T> DoubleEndedIterator for RChunksMut<'a, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
@@ -1044,6 +1177,12 @@ impl<'a, T> DoubleEndedIterator for RChunksMut<'a, T> {
     }
 }
 impl<'a, T> ExactSizeIterator for RChunksMut<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccess for RChunksMut<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccessNoCoerce for RChunksMut<'a, T> {
+    const MAY_HAVE_SIDE_EFFECT: bool = false;
+}
 impl<'a, T> FusedIterator for RChunksMut<'a, T> {}
 
 pub struct RChunksExact<'a, T> {
@@ -1126,6 +1265,15 @@ impl<'a, T> Iterator for RChunksExact<'a, T> {
     fn last(mut self) -> Option<Self::Item> {
         self.next_back()
     }
+    #[cfg(not(relax_check))]
+    #[doc(hidden)]
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> &'a [T] {
+        let end = self.v.len() - idx * self.chunk_size;
+        let start = end - self.chunk_size;
+        // SAFETY: idx is below the number of whole chunks
+        unsafe { super::from_raw_parts(self.v.as_ptr().add(start), self.chunk_size) }
+    }
 }
 impl<'a, T> DoubleEndedIterator for RChunksExact<'a, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
@@ -1158,6 +1306,12 @@ impl<'a, T> DoubleEndedIterator for RChunksExact<'a, T> {
     }
 }
 impl<'a, T> ExactSizeIterator for RChunksExact<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccess for RChunksExact<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccessNoCoerce for RChunksExact<'a, T> {
+    const MAY_HAVE_SIDE_EFFECT: bool = false;
+}
 impl<'a, T> FusedIterator for RChunksExact<'a, T> {}
 
 pub struct RChunksExactMut<'a, T> {
@@ -1235,6 +1389,15 @@ impl<'a, T> Iterator for RChunksExactMut<'a, T> {
     fn last(mut self) -> Option<Self::Item> {
         self.next_back()
     }
+    #[cfg(not(relax_check))]
+    #[doc(hidden)]
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> &'a mut [T] {
+        let end = self.v.len() - idx * self.chunk_size;
+        let start = end - self.chunk_size;
+        // SAFETY: as RChunksExact's; no index is taken twice, so the chunks do not alias
+        unsafe { super::from_raw_parts_mut(self.v.as_mut_ptr().add(start), self.chunk_size) }
+    }
 }
 impl<'a, T> DoubleEndedIterator for RChunksExactMut<'a, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
@@ -1267,6 +1430,12 @@ impl<'a, T> DoubleEndedIterator for RChunksExactMut<'a, T> {
     }
 }
 impl<'a, T> ExactSizeIterator for RChunksExactMut<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccess for RChunksExactMut<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccessNoCoerce for RChunksExactMut<'a, T> {
+    const MAY_HAVE_SIDE_EFFECT: bool = false;
+}
 impl<'a, T> FusedIterator for RChunksExactMut<'a, T> {}
 
 // ---------------------------------------------------------------- Split family

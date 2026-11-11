@@ -114,6 +114,14 @@ impl<A: Step> Iterator for Range<A> {
         let mut s = self;
         s.next_back()
     }
+    #[doc(hidden)]
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> A {
+        // SAFETY: TrustedRandomAccess callers pass an index below the range's length; the
+        // ranges that are TrustedRandomAccess are of Copy integers, so even a repeated read of
+        // one index would be sound
+        unsafe { Step::forward_unchecked(self.start.clone(), idx) }
+    }
 }
 
 impl<A: Step> DoubleEndedIterator for Range<A> {
@@ -142,6 +150,21 @@ impl<A: Step> ExactSizeIterator for Range<A> {}
 // real core: TrustedLen for Range<A: TrustedStep> (Step here is only the integers and char: TrustedStep's set)
 unsafe impl<A: Step> super::TrustedLen for Range<A> {}
 impl<A: Step> FusedIterator for Range<A> {}
+
+// real core: the integer ranges whose length fits in usize are TrustedRandomAccess
+macro_rules! range_trusted_random_access {
+    ($($t:ty)*) => ($(
+        unsafe impl super::TrustedRandomAccess for Range<$t> {}
+        unsafe impl super::TrustedRandomAccessNoCoerce for Range<$t> {
+            const MAY_HAVE_SIDE_EFFECT: bool = false;
+        }
+    )*)
+}
+range_trusted_random_access! { usize u8 u16 isize i8 i16 }
+#[cfg(target_pointer_width = "32")]
+range_trusted_random_access! { u32 i32 }
+#[cfg(target_pointer_width = "64")]
+range_trusted_random_access! { u32 i32 u64 i64 }
 
 impl<A: Step> Iterator for RangeFrom<A> {
     type Item = A;

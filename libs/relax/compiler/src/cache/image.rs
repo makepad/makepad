@@ -440,9 +440,10 @@ impl Cache {
     }
 }
 
-/// The startup image section of a manifest ("PLI8" after the slot list; PLI7 images, whose slots
-/// carry no payload checksum, are not read: the manifest is written again with a new one).
-pub(super) const IMAGE_MAGIC: u32 = 0x3849_4c50;
+/// The startup image section of a manifest ("PLI9" after the slot list; its slots' pending lists
+/// are written empty, unused at the link; older images -- PLI8's slots carry no pending slots,
+/// PLI7's no payload checksum -- are not read: the manifest is written again with a new one).
+pub(super) const IMAGE_MAGIC: u32 = 0x3949_4c50;
 
 /// A loaded manifest's image section, read in place: the store it is mapped from stays open.
 pub(super) struct ManifestImage {
@@ -642,8 +643,11 @@ fn call_targets(payload: &[u8]) -> Option<Vec<&[u8]>> {
     }
     d.str()?;
     d.u8()?;
-    let ni = d.u32()?;
-    for _ in 0..ni { d.bytes()?; }
+    // inlined slots, pending slots
+    for _ in 0..2 {
+        let ni = d.u32()?;
+        for _ in 0..ni { d.bytes()?; }
+    }
     let n = d.u32()?;
     for _ in 0..n { d.bytes()?; d.u8()?; }
     let nc = d.u32()?;
@@ -679,6 +683,11 @@ fn image_slot(tab: &mut ImageTables, out: &mut E, blob: &mut Vec<u8>, entry_key:
     let mut inl = Vec::with_capacity(ni as usize);
     for _ in 0..ni {
         inl.push(tab.keys.id(d.bytes()?));
+    }
+    // (provisional code's pending slots: recorded, not used at the link -- the image's list is
+    // written empty)
+    for _ in 0..d.u32()? {
+        d.bytes()?;
     }
     let n = d.u32()?;
     for _ in 0..n {
@@ -737,6 +746,7 @@ fn image_slot(tab: &mut ImageTables, out: &mut E, blob: &mut Vec<u8>, entry_key:
     for k in inl {
         e.u32(k);
     }
+    e.u32(0);
     e.u32(crates.len() as u32);
     for &c in crates.iter() {
         let next = tab.crates.len() as u32;
@@ -1018,10 +1028,15 @@ pub(crate) struct PrelinkedSlot {
     pub o3: bool,
     /// a live session: the patch flags and copy versions its code reads (jit note_guard_reads)
     pub guards: Vec<relax_backend::rir::Sym>,
+    /// what its code references, as linked here (jit CodeTables::refs: the real-time walk)
+    pub refs: crate::jit::CodeRefs,
     /// O2 code (cache.rs TIER_O2): no O2 build for it this run
     pub o2: bool,
     /// baseline code (cache.rs TIER_BASE): built again at O2 after the first present
     pub base: bool,
+    /// provisional code (cache.rs TIER_PROVISIONAL): its level (baseline 0, O1 1, O2 2), for the
+    /// run summary's count of builds started for such slots (jit note_linked_provisional)
+    pub provisional: Option<u8>,
     /// the kind of its key (its encoding's first byte), for what the install decides by it before
     /// the identity is decoded
     pub kind: Option<KeyKind>,
@@ -1226,6 +1241,10 @@ fn parse_image(img: &'static [u8], store: std::sync::Arc<Store>, crate_ok: impl 
             flat.push(d.u32()?);
         }
         let inl = (a, flat.len());
+        // (a provisional code's pending slots: not used at the link)
+        for _ in 0..d.u32()? {
+            d.u32()?;
+        }
         for _ in 0..d.u32()? {
             flat.push(d.u32()?);
         }
@@ -1733,6 +1752,8 @@ impl Linker {
             im.sym_sym.iter().map(|s| s.flatten().is_some_and(|s| s.off == 0 && matches!(u.syms.kind(s.id), Some(SymKind::Data(_))) && vt_starts.contains(&u.syms.value(s)))).collect()
         };
         let mut makes: Vec<Vec<u64>> = vec![Vec::new(); if is_vt.is_empty() { 0 } else { layout.len() }];
+        // what each slot's code references, as linked
+        let mut refs: Vec<crate::jit::RefList> = (0..layout.len()).map(|_| Default::default()).collect();
         {
             let env = &u.env;
             let syms = &u.syms;
@@ -1751,11 +1772,15 @@ impl Linker {
                                 break;
                             };
                             let v = match t {
-                                IMG_SLOT | IMG_THUNK | IMG_CALL => im.slot_of(ix).map(|x| env.reloc_value(match t { IMG_SLOT => Reloc::Slot(x), IMG_CALL => Reloc::Call(x), _ => Reloc::Thunk(x) })),
+                                IMG_SLOT | IMG_THUNK | IMG_CALL => im.slot_of(ix).map(|x| {
+                                    refs[k].slot(x, t == IMG_THUNK);
+                                    env.reloc_value(match t { IMG_SLOT => Reloc::Slot(x), IMG_CALL => Reloc::Call(x), _ => Reloc::Thunk(x) })
+                                }),
                                 IMG_SYM => im.fresh.get(&ri).copied().or_else(|| im.sym_sym.get(ix as usize).copied().flatten().flatten()).map(|s| {
                                     if live && (s.off == crate::jit::PATCH_FLAG_OFF || s.off == crate::jit::COPY_VER_OFF) {
                                         guards[k].push(s);
                                     }
+                                    refs[k].sym(syms.kind(s.id));
                                     if is_vt.get(ix as usize).copied().unwrap_or(false) && !im.fresh.contains_key(&ri) {
                                         makes[k].push(syms.value(s));
                                     }
@@ -1783,7 +1808,7 @@ impl Linker {
             c.linked.reserve(layout.len());
             c.linked_key.reserve(layout.len());
         }
-        for (k, ((si, id, off, n, trailer), ok)) in layout.into_iter().zip(linked).enumerate() {
+        for (k, (((si, id, off, n, trailer), ok), refs)) in layout.into_iter().zip(linked).zip(refs).enumerate() {
             if !ok {
                 // its bytes stay in the block, unreachable: no table word points there
                 im.failed += 1;
@@ -1809,7 +1834,10 @@ impl Linker {
                 c.linked_key.insert(id, entry);
             }
             let verdict = if tier == TIER_O3 { TierVerdict::None } else { c.tier_verdict_key(entry) };
-            out.push(PrelinkedSlot { id, at: at + off as u64, len: n as u32, trailer, pc, inlined, o3: tier == TIER_O3, guards: if live { std::mem::take(&mut guards[k]) } else { Vec::new() }, o2: tier == TIER_O2, base: tier == TIER_BASE, kind, verdict });
+            let provisional = (tier & super::TIER_PROVISIONAL != 0).then(|| super::tier_level(tier));
+            let level = tier & !super::TIER_PROVISIONAL;
+            let refs = crate::jit::CodeRefs::new(refs);
+            out.push(PrelinkedSlot { id, at: at + off as u64, len: n as u32, trailer, pc, inlined, o3: tier == TIER_O3, guards: if live { std::mem::take(&mut guards[k]) } else { Vec::new() }, refs, o2: level == TIER_O2, base: level == TIER_BASE, provisional, kind, verdict });
         }
         out
     }

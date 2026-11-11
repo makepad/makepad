@@ -30,6 +30,10 @@ thread_local! {
     /// immediates and compare constants from the edges of the 32- and 64-bit ranges, some ops in
     /// place. Off, the generator draws exactly what it always drew (the seeds keep their programs).
     static WIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The rotated-latch programs (rotated_latch_programs_agree, or FUZZ_ROTATED=1 with
+    /// FUZZ_SEED): half the counted loops test at the bottom, the counter's old value copied
+    /// before its step (`k = i; i = i + 1; branch i < n`). Off, the generator draws what it drew.
+    static ROTATED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Constants at the edges of the imm32 forms: a 64-bit op's imm32 is sign-extended, so these
@@ -300,6 +304,30 @@ impl Gen<'_> {
         let src = self.int();
         self.i(Inst::IBinI(IOp::And, W64, n, src, 7));
         self.i(Inst::Iconst(i, 0));
+        if ROTATED.get() && self.r.chance(50) {
+            // the copy k of the old count is read after the loop: live out of the latch, where
+            // the step reads i last and the branch reads it again (copy_reuse, regress_latch_step)
+            let (k, c2) = (self.f.vreg(Cls::I), self.f.vreg(Cls::I));
+            self.i(Inst::Iconst(k, 0));
+            self.i(Inst::ICmp(Cond::Lt, false, c, i, n));
+            let (body, exit) = (self.f.block(), self.f.block());
+            self.f.blocks[self.cur as usize].term = Term::Branch(c, body, exit);
+            self.cur = body;
+            let (ni, nf) = (self.ints.len(), self.flts.len());
+            self.ints.push(i);
+            self.counters.push(i);
+            self.seq(depth + 1);
+            self.counters.pop();
+            self.ints.truncate(ni);
+            self.flts.truncate(nf);
+            self.i(Inst::Mov(k, i));
+            self.i(Inst::IBinI(IOp::Add, W64, i, i, 1));
+            self.i(Inst::ICmp(Cond::Lt, false, c2, i, n));
+            self.f.blocks[self.cur as usize].term = Term::Branch(c2, body, exit);
+            self.cur = exit;
+            self.ints.push(k);
+            return;
+        }
         let (h, body, exit) = (self.f.block(), self.f.block(), self.f.block());
         self.f.blocks[self.cur as usize].term = Term::Jump(h);
         self.cur = h;
@@ -814,6 +842,7 @@ fn random_programs_agree_across_tiers() {
         return;
     }
     WIDE.set(std::env::var_os("FUZZ_WIDE").is_some());
+    ROTATED.set(std::env::var_os("FUZZ_ROTATED").is_some());
     if let Some(s) = std::env::var("FUZZ_SEED").ok().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()) {
         eprintln!("{:?}", check(s));
         if let Ok(dump) = std::env::var("FUZZ_DUMP") {
@@ -855,6 +884,21 @@ fn wide_constant_programs_agree() {
         eprintln!("fuzz: wide {}", e);
     }
     assert!(fails.is_empty(), "wide-constant programs disagree (rerun with FUZZ_WIDE=1 FUZZ_SEED=<hex>):\n{}", fails.join("\n"));
+}
+
+/// The rotated-latch programs: as random_programs_agree_across_tiers, half the counted loops
+/// rotated with the counter's old value copied before its step (ROTATED). Rerun one with
+/// FUZZ_ROTATED=1 FUZZ_SEED=<hex> in random_programs_agree_across_tiers.
+#[test]
+fn rotated_latch_programs_agree() {
+    ROTATED.set(true);
+    let n: u64 = std::env::var("FUZZ_N").ok().and_then(|v| v.parse().ok()).unwrap_or(150);
+    let first: u64 = std::env::var("FUZZ_FIRST").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    let fails: Vec<String> = (first..first + n).filter_map(|k| check(k.wrapping_mul(0x9e37_79b9_7f4a_7c15)).err()).collect();
+    for e in &fails {
+        eprintln!("fuzz: rotated {}", e);
+    }
+    assert!(fails.is_empty(), "rotated-latch programs disagree (rerun with FUZZ_ROTATED=1 FUZZ_SEED=<hex>):\n{}", fails.join("\n"));
 }
 
 /// Seeds the clock-seeded batch found (FUZZ-NEW): they block from then on, in every tier.
@@ -1057,6 +1101,105 @@ fn regress_dead_copy_not_reused() {
                     }
                 }
             }
+        }
+    }
+}
+
+/// The latch of `vec![x; n]` (Vec's extend_with: `while i + 1 < n { write(i, x.clone()); i += 1;
+/// len = i }`, then x moved into slot i) rotated and copy-propagated: `i = t; len = t; t = t + 1;
+/// branch t < n`. With t spilled and i in a register (12 values read 8 times each per iteration
+/// live across the loop and its call: the clone kept as a call), the step reads t through i's
+/// register (copy_reuse); the branch, emitted at the step's position after it ran, read that
+/// register too: the old count. The clone ran n times instead of n - 1 and x went one slot past
+/// the buffer (an O3 build corrupted the heap). Word 41 counts the clones, word 40 is len.
+fn regress_latch_step() -> Func {
+    let mut f = Func::new("regress_latch_step".to_string(), 0);
+    let mem = f.vreg(Cls::I);
+    let ps: Vec<VReg> = (0..3).map(|_| f.vreg(Cls::I)).collect();
+    f.params = std::iter::once(mem).chain(ps.iter().copied()).collect();
+    f.rets = vec![Cls::I];
+    let (b0, body, exit) = (f.block(), f.block(), f.block());
+    let push = |f: &mut Func, b: u32, i: Inst| {
+        f.blocks[b as usize].insts.push(i);
+        f.blocks[b as usize].pos.push(0);
+    };
+    let (h6, n0, n, i, len, t, c0, c) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+    push(&mut f, b0, Inst::Iconst(h6, host6 as *const () as usize as i64));
+    // n in 1..=16: slots 0..n of the buffer
+    push(&mut f, b0, Inst::IBinI(IOp::And, W64, n0, ps[1], 15));
+    push(&mut f, b0, Inst::IBinI(IOp::Add, W64, n, n0, 1));
+    push(&mut f, b0, Inst::Iconst(i, 0));
+    push(&mut f, b0, Inst::Iconst(len, 0));
+    let live: Vec<VReg> = (0..12)
+        .map(|k| {
+            let v = f.vreg(Cls::I);
+            push(&mut f, b0, Inst::IBinI(IOp::Add, W64, v, ps[2], 11 * k as i64 + 1));
+            v
+        })
+        .collect();
+    // the rotated loop's entry test
+    push(&mut f, b0, Inst::IBinI(IOp::Add, W64, t, i, 1));
+    push(&mut f, b0, Inst::ICmp(Cond::Lt, false, c0, t, n));
+    f.blocks[b0 as usize].term = Term::Branch(c0, body, exit);
+    // the slot's address first (i dies there), the clone counted and called, its write
+    let (sh, p, k0, k1, x, z) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+    push(&mut f, body, Inst::IBinI(IOp::Shl, W64, sh, i, 3));
+    push(&mut f, body, Inst::IBin(IOp::Add, W64, p, mem, sh));
+    push(&mut f, body, Inst::Load(Mem::Int(8, false), k0, mem, 8 * 41));
+    push(&mut f, body, Inst::IBinI(IOp::Add, W64, k1, k0, 1));
+    push(&mut f, body, Inst::Store(Mem::Int(8, false), mem, 8 * 41, k1));
+    push(&mut f, body, Inst::Iconst(z, 0));
+    push(&mut f, body, Inst::Call(Callee::Indirect(h6), vec![k1, live[0], ps[0], n, z, z], vec![x]));
+    let mut acc = x;
+    for r in 0..8 {
+        for &l in &live {
+            let a = f.vreg(Cls::I);
+            push(&mut f, body, Inst::IBin(if r % 2 == 0 { IOp::Add } else { IOp::Xor }, W64, a, acc, l));
+            acc = a;
+        }
+    }
+    push(&mut f, body, Inst::Store(Mem::Int(8, false), p, 0, acc));
+    // the latch: `i = t; len = i; t = i + 1` with i copy-propagated to t
+    push(&mut f, body, Inst::Mov(i, t));
+    push(&mut f, body, Inst::Mov(len, t));
+    push(&mut f, body, Inst::IBinI(IOp::Add, W64, t, t, 1));
+    push(&mut f, body, Inst::ICmp(Cond::Lt, false, c, t, n));
+    f.blocks[body as usize].term = Term::Branch(c, body, exit);
+    // x moved into slot i (= n - 1), len stored
+    let (sh2, p2) = (f.vreg(Cls::I), f.vreg(Cls::I));
+    push(&mut f, exit, Inst::IBinI(IOp::Shl, W64, sh2, i, 3));
+    push(&mut f, exit, Inst::IBin(IOp::Add, W64, p2, mem, sh2));
+    push(&mut f, exit, Inst::Store(Mem::Int(8, false), p2, 0, ps[2]));
+    push(&mut f, exit, Inst::Store(Mem::Int(8, false), mem, 8 * 40, len));
+    let mut r = i;
+    for l in live {
+        let a = f.vreg(Cls::I);
+        push(&mut f, exit, Inst::IBin(IOp::Xor, W64, a, r, l));
+        r = a;
+    }
+    f.blocks[exit as usize].term = Term::Ret(vec![r]);
+    f
+}
+
+#[test]
+fn regress_latch_step_branches_on_the_new_count() {
+    let f = regress_latch_step();
+    f.verify().unwrap();
+    assert!(undefined_read(&f).is_none());
+    // (+checkra: the allocation checker reads the branch's operands where the emitters do)
+    let o = options(&[]);
+    for thorough in [false, true] {
+        let code = Code::new(&native(&o, &f, thorough).unwrap_or_else(|e| panic!("thorough={}: {}", thorough, e))).unwrap();
+        let run: extern "C" fn(*mut u64, u64, u64, u64) -> u64 = unsafe { std::mem::transmute(code.ptr()) };
+        for a in [[0x1234_5678, 11, 0x99], [5, 0, 7], [42, 15, 1]] {
+            let mut want_mem = [0u64; WORDS];
+            let want = eval(&f, &mut want_mem, a).unwrap();
+            let mut m = [0u64; WORDS];
+            let got = run(m.as_mut_ptr(), a[0], a[1], a[2]);
+            // the clone count (word 41), len (word 40), the slots, the result
+            assert_eq!((m[41], m[40]), (want_mem[41], want_mem[40]), "thorough={} args {:?}: (clones, len)", thorough, a);
+            assert_eq!(m, want_mem, "thorough={} args {:?}: memory", thorough, a);
+            assert_eq!(got, want, "thorough={} args {:?}: result", thorough, a);
         }
     }
 }

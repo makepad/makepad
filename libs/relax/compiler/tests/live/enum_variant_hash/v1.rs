@@ -11,6 +11,7 @@ use std::collections::HashSet;
 enum Tab {
     Home,
     Settings,
+    Logs,
     Help,
 }
 

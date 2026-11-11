@@ -3,9 +3,10 @@
 # own, `guard <pkg>`, so the bucket names the landing that changed a red guard's inputs, not every landing of the
 # run (MATRIXFX's first guard failed as a step, blamed on all of them, 11-06). A guard runs when the diff reaches
 # its package or the JIT (it runs under the JIT), and while it is red (GATE_RETRY) whatever the diff reaches; not
-# for a diff that reaches neither. A workspace of stub crates under the gate's package names in a temporary git
-# repo, its JIT a stub whose `makepad test` fails the guard when the guarded crate says BROKEN; needs cargo, git
-# and python3, nothing of this tree but the gate's scripts.
+# for a diff that reaches neither. A guard runs its own target: the library's tests or one test target (Fab's). A
+# workspace of stub crates under the gate's package names in a temporary git repo, its JIT a stub whose `makepad
+# test` fails the guard when the guarded crate says BROKEN; needs cargo, git and python3, nothing of this tree but
+# the gate's scripts.
 here=$(cd "$(dirname "$0")" && pwd)
 dir=$(mktemp -d "${TMPDIR:-/tmp}/guard_units.XXXXXX") || exit 2
 trap 'rm -rf -- "$dir"' EXIT
@@ -40,15 +41,21 @@ path = "src/main.rs"
 
 [dependencies]
 guard-units-codegen = { path = "../../libs/relax/codegen" }'
-put tools/run/src/main.rs '// `makepad test <package> --lib -- <filter>` in the package dir: one guard test, failing when the source says
-// BROKEN; each run is said in GUARD_UNITS_LOG
+put tools/run/src/main.rs '// `makepad test <package> --lib -- <filter>` or `--test <name> -- <filter>` in the package dir: one guard
+// test, failing when the source says BROKEN; each run is said in GUARD_UNITS_LOG, as `<package>` for the library,
+// `<package>@<name>` for a test target
 use std::io::Write;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let pkg = args.get(2).cloned().unwrap_or_default();
+    let target = match args.get(3).map(String::as_str) {
+        Some("--lib") => String::new(),
+        Some("--test") => format!("@{}", args.get(4).cloned().unwrap_or_default()),
+        other => panic!("no target: {other:?}"),
+    };
     let src = std::fs::read_to_string("src/lib.rs").unwrap_or_default();
     if let Ok(log) = std::env::var("GUARD_UNITS_LOG") {
-        writeln!(std::fs::OpenOptions::new().create(true).append(true).open(log).unwrap(), "{pkg}").unwrap();
+        writeln!(std::fs::OpenOptions::new().create(true).append(true).open(log).unwrap(), "{pkg}{target}").unwrap();
     }
     if src.contains("BROKEN") {
         println!("test gpu_guard::zoom ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored");
@@ -66,7 +73,9 @@ branch() { # branch <name> <dir> <package> <lib.rs>: one change off the base
 branch scope apps/scope makepad-scope '// BROKEN
 pub fn f() {}'
 branch jit libs/relax/codegen guard-units-codegen 'pub fn f() { let _ = 1; }'
-branch other apps/fab makepad-fab 'pub fn f() {}
+branch fab apps/fab makepad-fab '// BROKEN
+pub fn f() {}'
+branch other apps/stage makepad-stage 'pub fn f() {}
 pub fn g() {}'
 fail=""
 # guard <label> <rev> <ran: guard runs | -> <want: grep -x'd lines, | between> [<none: a line that must not be>]
@@ -86,7 +95,8 @@ guard() {
   [ -z "$5" ] || ! echo "$out" | grep -qF -- "$5" || fail="$fail $1(has \`$5\`)"
 }
 guard scope scope makepad-scope "GATEUNIT fail guard makepad-scope|GATEREPRO guard makepad-scope :: makepad test makepad-scope --lib -- gpu_guard|fail= guard-makepad-scope"
-guard jit jit makepad-scope "GATEUNIT ok guard makepad-scope|fail="
+guard fab fab makepad-fab@xr_far_face "GATEUNIT fail guard makepad-fab|GATEREPRO guard makepad-fab :: makepad test makepad-fab --test xr_far_face -- a_far_wall_face_shows_no_darker_layers_in_the_headset|fail= guard-makepad-fab"
+guard jit jit "makepad-fab@xr_far_face makepad-scope" "GATEUNIT ok guard makepad-fab|GATEUNIT ok guard makepad-scope|fail="
 guard other other - "fail=" "GATEUNIT"
 GATE_RETRY="guard makepad-scope" guard retry other makepad-scope "GATEUNIT ok guard makepad-scope|fail="
 if [ -n "$fail" ]; then echo "guard_units FAILED:$fail"; exit 1; fi

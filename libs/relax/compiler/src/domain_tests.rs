@@ -626,8 +626,8 @@ fn fixture(p: *mut u64) {
 "#;
 
 /// A thread in no domain calls into the run's app: the call writes the app's static (the app's
-/// thread reads every write), its Box and an extension block are in the app's heap, and the
-/// thread is back in no domain after it.
+/// thread reads every write), its Box is in the app's heap, and the thread is back in no domain
+/// after it.
 #[test]
 fn a_native_thread_in_no_domain_calls_into_the_runs_app() {
     isolated_test!(a_native_thread_in_no_domain_calls_into_the_runs_app);
@@ -642,22 +642,19 @@ fn a_native_thread_in_no_domain_calls_into_the_runs_app() {
     wait(|| flags[0].load(Ordering::SeqCst) != 0);
     let (lo, len) = domains().iter().find(|d| d.info.id == domain).and_then(|d| d.heap.as_deref()).expect("the app's heap").range();
     let tap = flags[0].load(Ordering::SeqCst);
-    // tap, n -> the Box's address, the extension block's
+    // tap, n -> the Box's address
     extern "C" fn thunk(p: *mut u8) {
-        let c = unsafe { &mut *(p as *mut [u64; 4]) };
+        let c = unsafe { &mut *(p as *mut [u64; 3]) };
         let tap: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(c[0] as usize) };
         c[2] = tap(c[1]);
-        // (JIT code reaching a value's extension block: the same call on the same thread)
-        let mut word = 0u64;
-        c[3] = crate::lower::rt_ext_get(&mut word as *mut u64 as u64, 64, 16);
     }
     let made = std::thread::spawn(move || {
         (1..=3u64).map(|n| {
-            let mut c = [tap, n, 0, 0];
-            assert!(crate::jit::app_call(thunk, &mut c as *mut [u64; 4] as *mut u8));
+            let mut c = [tap, n, 0];
+            assert!(crate::jit::app_call(thunk, &mut c as *mut [u64; 3] as *mut u8));
             assert_eq!(current(), default_base(), "the call leaves the thread in no domain");
             assert!(crate::zone_alloc::domain::current().is_null(), "and with no heap");
-            (c[2], c[3])
+            c[2]
         }).collect::<Vec<_>>()
     }).join().unwrap();
     flags[1].store(1, Ordering::SeqCst);
@@ -665,9 +662,8 @@ fn a_native_thread_in_no_domain_calls_into_the_runs_app() {
     assert_eq!(flags[2].load(Ordering::SeqCst), 6, "the app's static holds every native call's write");
     assert_eq!(flags[3].load(Ordering::SeqCst), 3);
     let in_heap = |a: u64| (lo as u64..(lo + len) as u64).contains(&a);
-    for (boxed, ext) in made {
+    for boxed in made {
         assert!(in_heap(boxed), "Box {boxed:#x} outside the app's heap");
-        assert!(in_heap(ext), "extension block {ext:#x} outside the app's heap");
     }
     wait(|| info(domain).is_some_and(|i| i.threads == 0 && i.base == 0));
     domains().retain(|d| d.info.id != domain);

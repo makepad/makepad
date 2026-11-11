@@ -68,9 +68,7 @@ macro_rules! padded {
                     Self::FIELDS
                 }
             }
-            // A live session (`makepad run`) gives live-editable structs a hidden extension word
-            // after their fields: sizes are compared with each other, not with rustc's. This
-            // body never needs the padded type's layout itself (only its generic callees do).
+            // This body never needs the padded type's layout itself (only its generic callees do).
             #[inline(never)]
             fn $check() -> usize {
                 let s = $s::boxed();

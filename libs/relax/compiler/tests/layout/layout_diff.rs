@@ -1,6 +1,7 @@
-// Layout differential test: size_of / align_of / offset_of of ~100 types must equal rustc's
+// Layout differential test: size_of / align_of / offset_of of ~100 types, and the bits of niche and
+// tag values, must equal rustc's
 // (rustc_abi univariant field reordering, niches, enum niche filling and tag sizing).
-// Run: tests/layout/run.sh <makepad binary> -- prints DIFF lines, or "layout_diff: N lines equal".
+// Run: tests/layout/run.sh <makepad binary> -- DIFF lines, or "N lines equal", per run.
 #![allow(dead_code)]
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::mem::{align_of, offset_of, size_of};
@@ -16,6 +17,14 @@ macro_rules! sz {
 macro_rules! offs {
     ($t:ty: $($f:tt),*) => {
         println!("{} size {} align {} offsets {:?}", stringify!($t), size_of::<$t>(), align_of::<$t>(), [$(offset_of!($t, $f)),*]);
+    };
+}
+
+// The bit pattern of a value's tag or niche scalar (read as $u from offset 0; each probed type
+// keeps that scalar there): sizes alone miss which invalid value a niche variant takes.
+macro_rules! bits {
+    ($u:ty: $($t:ty = $v:expr),* $(,)?) => {
+        $( { let v: $t = $v; println!("{} = {} bits {}", stringify!($t), stringify!($v), unsafe { std::mem::transmute_copy::<$t, $u>(&v) }); } )*
     };
 }
 
@@ -83,6 +92,15 @@ enum E21 { A(u16, u8), B(u8, u8, u8) }
 enum E22 { A(u32, bool), B(u32), C }
 enum E23 { A((bool, bool)), B }
 enum E24 { A(Option<char>), B, C }
+enum E25 { A = 1, B, C }
+enum E26 { A = 0, B = 254 }
+enum E27 { A = -3, B = -2 }
+enum E28 { A = 0, B = 1000 }
+enum E29 { A = 100, B }
+enum E30 { A = -1, B = 127 }
+enum E31 { A = 1, B = 3, C = 254 }
+enum E32 { A = 0, B = 60000 }
+enum E33 { A = 0, B = 128 }
 
 fn main() {
     sz!(bool, char, u8, u16, u32, u64, u128, i128, usize, f32, f64, (), &u8, &[u8], &str, &dyn Fn(), fn(), *const u8, Box<u8>, Box<[u8]>);
@@ -121,4 +139,11 @@ fn main() {
     offs!((u8, u32, u8): 0, 1, 2);
     offs!((u32, u8, u16, u8): 0, 1, 2, 3);
     offs!((bool, u64): 0, 1);
+    bits!(u8: Option<std::cmp::Ordering> = None, Option<Option<std::cmp::Ordering>> = None, Option<Option<std::cmp::Ordering>> = Some(None), Option<E1> = None, Option<Option<E1>> = None, Option<Option<E1>> = Some(None));
+    bits!(u8: Option<E2> = None, Option<E25> = None, Option<E26> = None, Option<Option<E26>> = None, Option<E27> = None, Option<E29> = None, E26 = E26::B);
+    bits!(u8: Option<bool> = None, Option<Option<bool>> = None, Option<Option<bool>> = Some(None), Result<bool, ()> = Err(()), Option<E5> = None, E5 = E5::B);
+    bits!(u8: E6 = E6::B, E6 = E6::D, Option<E6> = None, E11 = E11::B, Option<E11> = None, Option<R1> = None);
+    bits!(u8: Option<E30> = None, Option<Option<E30>> = None, Option<E31> = None, Option<Option<E31>> = None, Option<E33> = None);
+    bits!(u16: E28 = E28::B, Option<E28> = None, Option<E32> = None, Option<Option<E32>> = None);
+    bits!(u32: Option<char> = None, Option<Option<char>> = None, E7 = E7::B, E7 = E7::C, Option<E7> = None, E24 = E24::B, E24 = E24::C, Option<R3> = None);
 }

@@ -62,6 +62,15 @@ impl<T> Iterator for IntoIter<T> {
         }
         self.next()
     }
+    #[cfg(not(relax_check))]
+    #[doc(hidden)]
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, i: usize) -> T {
+        // SAFETY: i is below the items left where Zip took the iterator, so start + i < end; T
+        // is Copy (the TrustedRandomAccessNoCoerce impl), so reading an item does not take it
+        // from the buffer's drop
+        unsafe { im::ptr_read(im::ptr_add(self.buf.as_ptr() as *const T, self.start + i)) }
+    }
 }
 
 impl<T> DoubleEndedIterator for IntoIter<T> {
@@ -78,6 +87,12 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
 impl<T> ExactSizeIterator for IntoIter<T> {}
 unsafe impl<T> crate::iter::TrustedLen for IntoIter<T> {}
 impl<T> crate::iter::FusedIterator for IntoIter<T> {}
+// real alloc: `T: NonDrop`, its marker for Copy (the indexed reads leave the items in the buffer, and
+// its drop drops start..end)
+#[cfg(not(relax_check))]
+unsafe impl<T: Copy> crate::iter::TrustedRandomAccessNoCoerce for IntoIter<T> {
+    const MAY_HAVE_SIDE_EFFECT: bool = false;
+}
 
 impl<T: Clone> Clone for IntoIter<T> {
     fn clone(&self) -> IntoIter<T> {

@@ -76,7 +76,7 @@ pub fn cmd_live(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
             return 1;
         }
     };
-    // a live session: the crate's structs take the live layout (M10, layout.rs live_editable)
+    // a live session (reload.rs)
     crate::layout::LIVE_SESSION.store(true, std::sync::atomic::Ordering::Relaxed);
     crate::layout::set_root_crate(krate);
     // Single-file live sessions have one app crate and no Cargo unit graph.

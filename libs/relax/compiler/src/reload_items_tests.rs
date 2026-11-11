@@ -254,3 +254,40 @@ fn edits_of_items_apply_live() {
         });
     });
 }
+
+/// An import only the items inside a fn body use (a struct and its `Drop` impl): an edit that
+/// removes those inner items keeps the import, and the next removes the import too. Neither edit
+/// leaves code that names it, so both patch: the old version's inner items are not checked again
+/// against the new text (M83: their bodies failed with "undeclared type" after the import went).
+const INNER: &str = r#"use std::time::Duration;
+
+pub fn holds(out: &mut u64) {
+    struct Guard(u64);
+    impl Drop for Guard {
+        fn drop(&mut self) { let _ = Duration::from_millis(self.0); }
+    }
+    let _g = Guard(1);
+    *out = 1;
+}
+"#;
+
+#[test]
+fn removed_inner_items_are_not_checked_against_the_next_edit() {
+    in_child("reload_items_tests::removed_inner_items_are_not_checked_against_the_next_edit", &["two_saves", "one_save"], |case| {
+        live_app("inner-items", &[("lib.rs", INNER)], &["holds"], |call, edit| {
+            assert_eq!(call("holds"), 1);
+            let inner = "    struct Guard(u64);\n    impl Drop for Guard {\n        fn drop(&mut self) { let _ = Duration::from_millis(self.0); }\n    }\n    let _g = Guard(1);\n    *out = 1;";
+            let subs: &[(&str, &str)] = if case == "two_saves" {
+                let first = edit("lib.rs", &[(inner, "    *out = 2;")]);
+                assert_eq!(first.rung, Rung::Patch, "{:?}", first.lines);
+                assert_eq!(call("holds"), 2);
+                &[("use std::time::Duration;\n", ""), ("*out = 2;", "*out = 3;")]
+            } else {
+                &[(inner, "    *out = 3;"), ("use std::time::Duration;\n", "")]
+            };
+            let outcome = edit("lib.rs", subs);
+            assert_eq!(outcome.rung, Rung::Patch, "{case}: {:?}", outcome.lines);
+            assert_eq!(call("holds"), 3);
+        });
+    });
+}

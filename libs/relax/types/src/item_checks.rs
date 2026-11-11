@@ -3,7 +3,6 @@
 //! indirection (E0072, rustc_ty_utils representability.rs).
 
 use crate::ast;
-use crate::mir::transform::const_check::is_live_default;
 use crate::program::{DefId, DefKind, Program, NO_DEF};
 use crate::tcx::Tcx;
 use crate::types::{TyId, TyKind};
@@ -50,7 +49,6 @@ pub fn duplicate_items(prog: &Program, own: &[bool]) -> Vec<String> {
         let d = DefId(i as u32);
         let def = prog.def(d);
         if !own.get(def.krate as usize).copied().unwrap_or(false) || def.parent == NO_DEF { continue; }
-        if is_live_default(prog, d) { continue; }
         if !matches!(prog.def(def.parent).kind, DefKind::Mod | DefKind::Trait) { continue; }
         // only items the module's source declares (not the compiler's own definitions)
         if prog.item_defs.get(&(def.file, def.item.0)) != Some(&d) { continue; }
@@ -1538,7 +1536,7 @@ pub fn duplicate_symbols(prog: &Program, own: &[bool]) -> Vec<String> {
     for i in 0..prog.defs.len() {
         let d = DefId(i as u32);
         let def = prog.def(d);
-        if !own.get(def.krate as usize).copied().unwrap_or(false) || is_live_default(prog, d) || !matches!(def.kind, K::Fn | K::AssocFn | K::Static) { continue; }
+        if !own.get(def.krate as usize).copied().unwrap_or(false) || !matches!(def.kind, K::Fn | K::AssocFn | K::Static) { continue; }
         if prog.item_defs.get(&(def.file, def.item.0)) != Some(&d) { continue; }
         // (an inherent method's symbol clash is left to a build: the check-pass test
         // lint/non-snake-case/non-snake-ffi-issue-31924 has one)

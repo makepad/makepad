@@ -97,10 +97,6 @@ pub fn eval_const_block(u: &mut Unit, body: &Body, bl: crate::ast::BlockId, t: T
     (v.len() == cx.size(t) as usize).then_some(v)
 }
 
-/// The value of an `offset_of!` naming a field an edit added to a live-editable struct (M10):
-/// the field lives in the value's extension block and has no offset in the running layout.
-pub(crate) const NO_OFFSET: u64 = u64::MAX;
-
 /// Is `pos` of file `file` in an `offset_of!` expansion? Its inline const is answered from the
 /// layout (Ctx::offset_of), in a const and in a fn body alike.
 pub(crate) fn in_offset_of(prog: &crate::program::Program, file: u32, pos: u32) -> bool {
@@ -741,7 +737,9 @@ impl<'a> Ctx<'a> {
                             vals.push(self.eval(b, env, *a)?);
                         }
                         let instance = self.u.tcx.resolve_instance_raw(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), d0, self.u.tcx.tys.list(gargs0)).expect("established instance dispatch");
-                        let relax_types::instance::InstanceKind::Item(d) = instance.def else { return None };
+                        // (an intrinsic resolves to its own instance kind: call_const_fn answers
+                        // the ones it knows, size_of and align_of among them)
+                        let (relax_types::instance::InstanceKind::Item(d) | relax_types::instance::InstanceKind::Intrinsic(d)) = instance.def else { return None };
                         if self.u.prog.def(d).kind == DefKind::Closure { return None; }
                         self.call_const_fn(d, instance.compact_args(&self.u.tcx), vals, t)
                     }
@@ -776,10 +774,8 @@ impl<'a> Ctx<'a> {
                 Some(a.to_le_bytes().to_vec())
             }
             ExprKind::ConstBlock(bl) => {
-                // a field with no offset leaves the constant to its compiled initializer, which
-                // panics saying so where it runs (lowering's offset_of!)
                 let pos = self.u.prog.files[b.file as usize].ast.expr(e).lo;
-                self.offset_of(b, pos, bl).filter(|v| v[..] != NO_OFFSET.to_le_bytes()).or_else(|| self.block(b, env, bl))
+                self.offset_of(b, pos, bl).or_else(|| self.block(b, env, bl))
             }
             ExprKind::Block(bl, l) if l.is_none() => self.block(b, env, bl),
             ExprKind::Unsafe(bl) => self.block(b, env, bl),
@@ -1068,10 +1064,7 @@ impl<'a> Ctx<'a> {
         for e in [recv, *origin] {
             if !matches!(self.kind(b.ty(e)), TyKind::Ptr(false, p) if matches!(self.kind(p), TyKind::Int(crate::program::Prim::U8))) { return None; }
         }
-        let offset = match self.place_offset(b, place, base)? {
-            u32::MAX => NO_OFFSET,
-            o => o as u64,
-        };
+        let offset = self.place_offset(b, place, base)? as u64;
         Some(offset.to_le_bytes().to_vec())
     }
 
@@ -1095,21 +1088,10 @@ impl<'a> Ctx<'a> {
         if self.u.lay.is_unsized(&crate::layout::LayoutCx::new(&self.u.prog), &mut self.u.tcx, t) { return None; }
         let offset = match self.kind(t) {
             TyKind::Tuple(_) => *self.layout(t).fields.get(fi as usize)?,
-            TyKind::Adt(..) => {
-                // a field in a live layout's extension block (M10) has no offset: the place has none
-                let offset = self.struct_field_off(t, fi)?;
-                if offset == u32::MAX && self.layout(t).ext.is_some() {
-                    return Some(u32::MAX);
-                }
-                offset
-            }
+            TyKind::Adt(..) => self.struct_field_off(t, fi)?,
             _ => return None,
         };
-        let outer = self.place_offset(b, x, base)?;
-        if outer == u32::MAX {
-            return Some(u32::MAX);
-        }
-        outer.checked_add(offset)
+        self.place_offset(b, x, base)?.checked_add(offset)
     }
 
     fn fn_pointer(&mut self, t: TyId) -> Option<Vec<u8>> {

@@ -232,7 +232,7 @@ const LEDGER_KEY: u128 = 0;
 // closure is named by its owner's closure ordinal and its text (closure_ordinal), not by its
 // file version and position, in slot keys and types alike; a block-scoped item by its fn and
 // its ordinal there (stable::block_place), not its offset.
-const ENTRY_VERSION: u32 = 32;
+const ENTRY_VERSION: u32 = 34;
 /// the level of a code entry's code (its tier byte)
 const TIER_O1: u8 = 0;
 const TIER_O3: u8 = 1;
@@ -241,6 +241,12 @@ const TIER_O2: u8 = 2;
 /// a run that links it builds it again at O2 after its first present (jit.rs note_base), and
 /// that code replaces the entry
 const TIER_BASE: u8 = 3;
+/// The flag on a tier byte for provisional code: built before one of its inputs was final -- a
+/// body without a clean verdict (SPEC-V: calls to unverified-mode twins, its noalias facts
+/// withheld), or one whose pending slots (rir::Func::pending) are recorded with it. It ranks
+/// below the complete code of its level, which replaces it (a warm launch that links it has it
+/// built again: jit.rs o1v_enqueue), and verify compares it only with code built the same way.
+const TIER_PROVISIONAL: u8 = 0x80;
 
 /// What an earlier run decided for a slot's code below O3 (KIND_TIER; jit.rs stored_tier_verdict).
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -531,9 +537,24 @@ pub struct CacheStats {
     pub link_ns: u64,
     pub verify_same: u64,
     pub verify_diff: u64,
-    /// cached entries of another tier than the verifying build's (an O2 or O3 rebuild replaced
-    /// the first build's entry): not compared
+    /// of verify_diff: the cached entry's recorded inputs (inlined slots, nounwind answers,
+    /// dependency keys) differ from the fresh build's; the same inputs gave other code; the same
+    /// inputs and code, a relocation differs
+    pub verify_diff_inputs: u64,
+    pub verify_diff_code: u64,
+    pub verify_diff_reloc: u64,
+    /// cached entries of another tier than the verifying build's, both at O1 or below and
+    /// complete: not compared
     pub verify_other_tier: u64,
+    /// entries one side built as provisional code (TIER_PROVISIONAL) and the other otherwise, or
+    /// with other pending inputs, both at O1 or below: not compared
+    pub verify_provisional: u64,
+    /// cached entries outside the purity rule, O2 and O3 code (a rebuild replaced the first
+    /// build's entry; the verifying build is base or O1): not compared
+    pub verify_outside: [u64; 2],
+    /// (verify) purity breaches: complete records at O1 or below that name an inlined slot whose
+    /// inline body is provisional (encode_inputs)
+    pub purity_breaches: u64,
     pub packs: u64,
     pub packs_rejected: u64,
     pub index_entries: u64,
@@ -608,8 +629,12 @@ pub(crate) struct PendingRecord {
     pc_map: Vec<(u32, u64)>,
     nounwind: Vec<(u32, bool)>,
     baseline: bool,
+    /// built without a clean verdict (TIER_PROVISIONAL)
+    unverified: bool,
     deps: Vec<u32>,
     inlined: Vec<u32>,
+    /// the body's pending slots (rir::Func::pending; TIER_PROVISIONAL)
+    pending: Vec<u32>,
     /// jit::patch_epoch() at the install: a record is encoded only against the sources it was built from
     epoch: u64,
     /// O3 code: its inlined slots and nounwind inputs (`record_o3`)
@@ -707,9 +732,9 @@ pub struct Cache {
     /// per crate: a const edit reached it, so its startup fingerprint no longer vouches for its
     /// keys (`cert_fps`)
     keys_moved_crates: Vec<bool>,
-    /// the crates that can see a struct field list a live edit changed. Values of that struct have
-    /// a layout no new run gives them (dead slots, the extension block), so no key says what such
-    /// code is made for: these crates' slots neither link stored code nor store their own
+    /// the crates that can see a type a live edit changed. Values of it may have a layout no new
+    /// run gives them (an enum's running tags kept), so no key says what such code is made for:
+    /// these crates' slots neither link stored code nor store their own
     layout_edited: Vec<bool>,
     /// (crate, name) -> what the name finds from the crate (deps.rs name_closure)
     name_memo: HashMap<(u32, deps::Name), u128>,
@@ -790,16 +815,16 @@ pub struct Cache {
     linking_data: HashSet<u128>,
     /// the slots the last linked entry calls (speculative linking follows them)
     pub last_callees: Vec<u32>,
-    /// the slots whose address the last linked entry takes, and the data objects it reads
-    /// (real-time code's reach: jit.rs realtime)
-    pub last_thunks: Vec<u32>,
-    pub last_data: Vec<u64>,
     /// the hit just linked is O3 code; the slots its body inlined (live patches of those
     /// rebuild it)
     pub last_tier1: Option<Vec<u32>>,
     /// the hit just linked is O2 code (a `#[relax(O2)]` slot's, or a slot an earlier run found
     /// hot): no O2 build for it this run
     pub last_o2: bool,
+    /// the entry just decoded is provisional code (TIER_PROVISIONAL): its level (baseline 0, O1 1,
+    /// O2 2), for the run summary's count of builds started for such slots (jit.rs
+    /// linked_provisional): it starts none
+    pub last_provisional: Option<u8>,
     /// the entry just decoded is baseline code (TIER_BASE): lookup moves it to `base_linked`
     pub last_base: bool,
     /// slots linked from TIER_BASE entries and not installed yet (jit.rs install_compiled)
@@ -1143,10 +1168,9 @@ impl Cache {
             slot_keys: HashMap::new(),
             key_waits: false,
             last_callees: Vec::new(),
-            last_thunks: Vec::new(),
-            last_data: Vec::new(),
             last_tier1: None,
             last_o2: false,
+            last_provisional: None,
             last_base: false,
             base_linked: HashSet::new(),
             fnkey_bytes: HashMap::new(),
@@ -1465,7 +1489,7 @@ impl Cache {
     pub(crate) fn note_retier_over(&mut self, u: &Unit, id: u32, base: usize) {
         if !self.has_code_entries() { return; }
         let key = self.slot_key(u, id);
-        let rank = key.and_then(|k| self.entry_tier(k)).map_or(0, |t| tier_rank(t) as usize + 1);
+        let rank = key.and_then(|k| self.entry_tier(k)).map_or(0, |t| tier_level(t) as usize + 1);
         warm_count::add(base + rank, 1);
         if trace_on() { trace_keyed(u, id, &format!("fresh-{}-over:{}", if base == warm_count::RETIER_O3_OVER { "O3" } else { "O2" }, ["none", "base", "O1", "O2", "O3"][rank]), key); }
     }
@@ -3261,8 +3285,10 @@ impl Cache {
             pc_map: pc_map.to_vec(),
             nounwind: rir.map_or_else(Vec::new, |r| r.nounwind_inputs.clone()),
             baseline: rir.is_some_and(|r| r.baseline),
+            unverified: u.fns[id as usize].unverified.load(std::sync::atomic::Ordering::Relaxed),
             deps: record_deps(u, id, &[]),
             inlined: record_inlined(u, id, &[]),
+            pending: rir.map_or_else(Vec::new, |r| r.pending.clone()),
             epoch: crate::jit::patch_epoch(),
             o3: None,
         })
@@ -3282,8 +3308,10 @@ impl Cache {
             pc_map: pc_map.to_vec(),
             nounwind: nounwind.to_vec(),
             baseline: false,
+            unverified: false,
             deps: record_deps(u, id, &extra),
             inlined: record_inlined(u, id, inlined),
+            pending: Vec::new(),
             epoch: crate::jit::patch_epoch(),
             o3: Some((inlined.to_vec(), nounwind.to_vec())),
         })
@@ -3361,8 +3389,9 @@ impl Cache {
         self.linked_key.get(&id).map(|&k| self.tier_verdict_key(k))
     }
 
-    /// The tier rank (baseline 0, O1 1, O2 2, O3 3) of slot `id`'s newest entry, recorded this run
-    /// or stored: None when the slot has no storable key, Some(None) when it has no entry.
+    /// The rank (tier_rank: RANK_O1 and above is complete code at O1 or above) of slot `id`'s
+    /// newest entry, recorded this run or stored: None when the slot has no storable key,
+    /// Some(None) when it has no entry.
     pub(crate) fn slot_entry_rank(&mut self, u: &Unit, id: u32) -> Option<Option<u8>> {
         let key = self.slot_key(u, id)?;
         if self.cert_rejected.contains(&key) && !self.pending_keys.contains(&key) { return Some(None); }
@@ -3442,6 +3471,11 @@ impl Cache {
             if o3.is_some() { warm_count::add(warm_count::O3_SAME, 1); }
             return;
         }
+        // provisional code never replaces an entry that ranks above it
+        if replace && existing && payload_tier(&payload).is_some_and(|new| new & TIER_PROVISIONAL != 0 && self.rec_tier.get(&key).copied().or_else(|| self.entry_tier(key)).is_some_and(|old| tier_rank(old) > tier_rank(new))) {
+            trace_lookup(u, id, "norecord:provisional-below");
+            return;
+        }
         self.pending_keys.insert(key);
         // a replacement of an entry with no recorded tier, and one that moves its slot's tier up
         // (O1 -> O2/O3), count like a stale image slot (record_manifest: rewritten past 2%; the
@@ -3458,7 +3492,13 @@ impl Cache {
         }
         if let Some(t) = payload_tier(&payload) {
             self.rec_tier.insert(key, t);
-            if trace_on() { trace_keyed(u, id, &format!("rec:{}", ["O1", "O3", "O2", "base"].get(t as usize).copied().unwrap_or("?")), Some(key)); }
+            if trace_on() {
+                // (what the record was made from: deferred or the slot as it is now, its RIR's kind
+                // and inlined slots, the code's length)
+                let r = u.fns[id as usize].rir.as_ref();
+                let rir = r.map_or("none".to_string(), |r| format!("{}{} inl {}", if r.baseline { "baseline" } else if r.full { "full" } else { "normal" }, if r.plain_calls { " plain-calls" } else { "" }, r.inl_slots.len()));
+                trace_keyed(u, id, &format!("rec:{}{} {:?}{} rir {} deps {} code {}", ["base", "O1", "O2", "O3"][tier_level(t) as usize], if t & TIER_PROVISIONAL != 0 { "-provisional" } else { "" }, kind, if pending.is_some() { " deferred" } else { "" }, rir, u.body_deps.get(&id).map_or(0, |v| v.len()), code.len()), Some(key));
+            }
         }
         let kc = self.cur_crate;
         self.push_pending(kc, NewEntry { key, kind: KIND_CODE, payload });
@@ -3550,43 +3590,30 @@ impl Cache {
         Some(h.finish128())
     }
 
-    /// The payload of a code entry (O1, or O3 with its inlined slots);
-    /// None: it cannot be stored (`last_why` says why).
-    #[allow(clippy::too_many_arguments)]
-    fn encode_entry(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], o3: Option<(&[u32], &[(u32, bool)])>, kind: RecKind, pending: Option<&PendingRecord>) -> Option<Vec<u8>> {
+    /// An entry's build inputs as encode_entry writes them: the code's level (TIER_O1 / TIER_O3 /
+    /// TIER_O2 / TIER_BASE, TIER_PROVISIONAL on provisional code), the inlined slots and the pending
+    /// ones (each list by key, in key order: the same slots encode the same in every session), the
+    /// nounwind answers and the dependency certificate. Verify compares a cached entry's with the
+    /// fresh build's.
+    fn encode_inputs(&mut self, u: &Unit, id: u32, o3: Option<(&[u32], &[(u32, bool)])>, kind: RecKind, pending: Option<&PendingRecord>, breaches: bool, e: &mut E) -> Option<()> {
         let o2 = kind == RecKind::O2;
-        // unlinked code only: a pool word must still be zero (linked code holds this run's values)
-        for rl in relocs {
-            let o = rl.at as usize;
-            if rl.kind == RelocKind::Pool64 && code.get(o..o + 8).map_or(true, |w| w.iter().any(|b| *b != 0)) {
-                self.stats.unencodable += 1;
-                self.why("linked code");
-                return None;
-            }
-        }
-        self.last_why = "unrecorded reason";
-        if let Some(w) = dump_filter().filter(|_| self.verbose) {
-            let name = crate::syms::stable_fn_name(u, id);
-            if name.contains(w) {
-                for rl in relocs {
-                    let t = match &rl.target {
-                        Reloc::Sym(s) => format!("{} +{}", crate::syms::describe(u, *s), s.off),
-                        Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => format!("slot {}", crate::syms::stable_fn_name(u, *x)),
-                        r => format!("{:?}", r),
-                    };
-                    eprintln!("makepad-run cache: RELOCS rec {} {} {}", name, rl.at, t);
-                }
-            }
-        }
-        let mut e = E::default();
-        e.u32(ENTRY_VERSION);
-        e.str(&u.fns[id as usize].name);
-        // the code's level (TIER_O1 / TIER_O3 / TIER_O2 / TIER_BASE), then its inline inputs
         let base = o3.is_none() && kind == RecKind::First && match pending {
             Some(p) => p.baseline,
             None => u.fns[id as usize].rir.as_ref().is_some_and(|r| r.baseline),
         };
-        e.u8(if o3.is_some() { TIER_O3 } else if o2 { TIER_O2 } else if base { TIER_BASE } else { TIER_O1 });
+        let unverified = base && match pending {
+            Some(p) => p.unverified,
+            None => u.fns[id as usize].unverified.load(std::sync::atomic::Ordering::Relaxed),
+        };
+        // (O3 code is outside the rule: never provisional, never compared)
+        let left: &[u32] = match pending {
+            _ if o3.is_some() => &[],
+            Some(p) => &p.pending,
+            None => u.fns[id as usize].rir.as_ref().map_or(&[][..], |r| r.pending.as_slice()),
+        };
+        let level = if o3.is_some() { TIER_O3 } else if o2 { TIER_O2 } else if base { TIER_BASE } else { TIER_O1 };
+        let provisional = unverified || !left.is_empty();
+        e.u8(if provisional { level | TIER_PROVISIONAL } else { level });
         let inlined;
         let inl = match pending {
             Some(p) => &p.inlined,
@@ -3595,15 +3622,33 @@ impl Cache {
                 &inlined
             }
         };
-        e.u32(inl.len() as u32);
-        for &x in inl {
-            match self.slot_bytes(u, x) {
-                Some(b) => e.bytes(&b),
-                None => {
-                    self.stats.unencodable += 1;
-                    self.why("inlined slot key");
-                    return None;
+        // (verify, `breaches`: a record) the purity rule's invariant: a complete record at O1 or
+        // below names no inlined slot whose inline body is provisional -- that slot would be one
+        // of its pending slots
+        if breaches && !provisional && level != TIER_O2 && level != TIER_O3 {
+            for &x in inl {
+                if x != id && (x as usize) < u.fns.len() && crate::jit::inline_body(&u.fns[x as usize]).is_some_and(|r| !r.pending.is_empty()) {
+                    self.stats.purity_breaches += 1;
+                    if self.verbose {
+                        eprintln!("makepad-run cache: purity breach: {} [{}] inlines {}, whose body is provisional", crate::syms::stable_fn_name(u, id), if level == TIER_BASE { "base" } else { "O1" }, crate::syms::stable_fn_name(u, x));
+                    }
                 }
+            }
+        }
+        for (list, what) in [(inl.as_slice(), "inlined slot key"), (left, "pending slot key")] {
+            let mut keys = Vec::with_capacity(list.len());
+            for &x in list {
+                let Some(b) = self.slot_bytes(u, x) else {
+                    self.stats.unencodable += 1;
+                    self.why(what);
+                    return None;
+                };
+                keys.push(b);
+            }
+            keys.sort_unstable();
+            e.u32(keys.len() as u32);
+            for b in &keys {
+                e.bytes(b);
             }
         }
         // its nounwind inputs: stable keys replace session slots; false answers are included
@@ -3634,6 +3679,40 @@ impl Cache {
             return None;
         };
         e.0.extend_from_slice(&cert);
+        Some(())
+    }
+
+    /// The payload of a code entry (O1, or O3 with its inlined slots);
+    /// None: it cannot be stored (`last_why` says why).
+    #[allow(clippy::too_many_arguments)]
+    fn encode_entry(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], o3: Option<(&[u32], &[(u32, bool)])>, kind: RecKind, pending: Option<&PendingRecord>) -> Option<Vec<u8>> {
+        // unlinked code only: a pool word must still be zero (linked code holds this run's values)
+        for rl in relocs {
+            let o = rl.at as usize;
+            if rl.kind == RelocKind::Pool64 && code.get(o..o + 8).map_or(true, |w| w.iter().any(|b| *b != 0)) {
+                self.stats.unencodable += 1;
+                self.why("linked code");
+                return None;
+            }
+        }
+        self.last_why = "unrecorded reason";
+        if let Some(w) = dump_filter().filter(|_| self.verbose) {
+            let name = crate::syms::stable_fn_name(u, id);
+            if name.contains(w) {
+                for rl in relocs {
+                    let t = match &rl.target {
+                        Reloc::Sym(s) => format!("{} +{}", crate::syms::describe(u, *s), s.off),
+                        Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => format!("slot {}", crate::syms::stable_fn_name(u, *x)),
+                        r => format!("{:?}", r),
+                    };
+                    eprintln!("makepad-run cache: RELOCS rec {} {} {}", name, rl.at, t);
+                }
+            }
+        }
+        let mut e = E::default();
+        e.u32(ENTRY_VERSION);
+        e.str(&u.fns[id as usize].name);
+        self.encode_inputs(u, id, o3, kind, pending, self.mode == Mode::Verify, &mut e)?;
         e.bytes(code);
         e.u32(relocs.len() as u32);
         let mut rw = Vec::new();
@@ -3904,7 +3983,7 @@ impl Cache {
     /// in order, the first `present` of them before the first present; per slot its stable key
     /// encoding and the code entry it maps to, 0 when its code has none) unless the loaded one
     /// already covers it (on the owner thread).
-    /// `stop` (a mid-run write: a program request waits for the owner thread) is asked every 64
+    /// `stop` (a mid-run write: a request waits for the owner thread) is asked every 64
     /// slots; yes drops this record (false comes back) and a later write makes it again.
     pub fn record_manifest(&mut self, u: &Unit, root: u32, order: &[u32], present: usize, stop: &dyn Fn() -> bool) -> bool {
         // past a const edit the slots' code is of two texts: the image would hold new values under
@@ -4051,10 +4130,41 @@ impl Cache {
         flush_front_graphs()
     }
 
+    /// (verbose, at the close) The code entries the cache holds after this run: each key's
+    /// entry, this run's records over the stored ones, by level, complete or provisional. None:
+    /// no code entries.
+    fn census(&self) -> Option<String> {
+        let mut tiers: KeyMap<u8> = KeyMap::default();
+        for (si, st) in self.stores.iter().enumerate() {
+            for (e, ix) in st.index.iter().enumerate() {
+                if ix.kind != KIND_CODE || self.index_at(ix.key) != Some((si as u32, e as u32)) {
+                    continue;
+                }
+                if let Some(t) = st.get_at(e, ix.key).and_then(|(_, p)| payload_tier(p)) {
+                    tiers.insert(ix.key, t);
+                }
+            }
+        }
+        tiers.extend(self.rec_tier.iter().map(|(&k, &t)| (k, t)));
+        if tiers.is_empty() {
+            return None;
+        }
+        let mut n = [[0u64; 2]; 4];
+        for &t in tiers.values() {
+            n[tier_level(t) as usize][usize::from(t & TIER_PROVISIONAL != 0)] += 1;
+        }
+        let provisional: u64 = n.iter().map(|x| x[1]).sum();
+        let levels = ["base", "O1", "O2", "O3"].iter().zip(n).map(|(l, x)| format!("{l} {} + {} provisional", x[0], x[1])).collect::<Vec<_>>().join(", ");
+        Some(format!("{} code entries ({levels}), {} provisional ({:.2}%)", tiers.len(), provisional, 100.0 * provisional as f64 / tiers.len() as f64))
+    }
+
     pub fn flush(&mut self) -> Result<usize, String> {
+        if let Some(c) = self.census().filter(|_| self.verbose) {
+            eprintln!("makepad-run cache: census: {c}");
+        }
         if self.verbose && self.mode == Mode::Verify {
             let s = &self.stats;
-            eprintln!("makepad-run cache: verify: {} identical, {} different, {} of another tier", s.verify_same, s.verify_diff, s.verify_other_tier);
+            eprintln!("makepad-run cache: verify: {} identical, {} different ({} with other recorded inputs, {} code from the same inputs, {} only a relocation), {} of another tier, {} provisional (not compared), outside the rule (not compared): {} O2, {} O3; {} purity breaches", s.verify_same, s.verify_diff, s.verify_diff_inputs, s.verify_diff_code, s.verify_diff_reloc, s.verify_other_tier, s.verify_provisional, s.verify_outside[0], s.verify_outside[1], s.purity_breaches);
         }
         if self.mode == Mode::ReadOnly {
             return Ok(0);
@@ -4291,34 +4401,42 @@ impl Cache {
     /// Indexes the code and data entries this run's spills wrote to this cache's stores, as
     /// `open_written` found them: their entries replace what the index had for their keys, as the
     /// file's own index does. `open`: the stores not opened yet are opened here first (the exit:
-    /// nothing waits for the owner thread then). false: a spill wrote to this cache since the last
-    /// `open_written` (a mid-run startup image waits for the next write, which opens it).
+    /// nothing waits for the owner thread then), again until no spill is left that landed while
+    /// they opened. false: a spill wrote to this cache since the last `open_written` (a mid-run
+    /// startup image waits for the next write, which opens it).
     fn index_written(&mut self, open: bool) -> bool {
-        if open { open_written(&self.dir); }
-        let mine: Vec<(std::sync::Arc<Store>, Vec<(u128, u32)>)> = crate::zone_alloc::kept_with(|| {
-            let mut o = OPENED.lock().unwrap_or_else(|e| e.into_inner());
-            let mut mine = Vec::new();
-            let mut i = 0;
-            while i < o.len() {
-                if o[i].0 == self.dir {
-                    let (_, _, st, _, found) = o.swap_remove(i);
-                    mine.push((st, found));
-                } else {
-                    i += 1;
+        loop {
+            if open { open_written(&self.dir); }
+            let mine: Vec<(std::sync::Arc<Store>, Vec<(u128, u32)>)> = crate::zone_alloc::kept_with(|| {
+                let mut o = OPENED.lock().unwrap_or_else(|e| e.into_inner());
+                let mut mine = Vec::new();
+                let mut i = 0;
+                while i < o.len() {
+                    if o[i].0 == self.dir {
+                        let (_, _, st, _, found) = o.swap_remove(i);
+                        mine.push((st, found));
+                    } else {
+                        i += 1;
+                    }
                 }
+                mine
+            });
+            for (st, found) in &mine {
+                if found.is_empty() { continue; }
+                let si = self.stores.len() as u32;
+                for &(key, e) in found {
+                    self.index.insert(key, (si, e));
+                }
+                self.stores.push(st.clone());
             }
-            mine
-        });
-        for (st, found) in &mine {
-            if found.is_empty() { continue; }
-            let si = self.stores.len() as u32;
-            for &(key, e) in found {
-                self.index.insert(key, (si, e));
-            }
-            self.stores.push(st.clone());
+            crate::zone_alloc::kept_with(|| drop(mine));
+            let left = WRITTEN.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|w| w.0 == self.dir);
+            // at the exit a spill still in flight can land while the stores open: the exit's
+            // manifest gave up on it, and the next start ran without one (after a cold run, its
+            // first warm slice took 8.36 s against 7.13). The exit has stopped the compiles, so
+            // the spills end and these passes with them.
+            if !left || !open { return !left; }
         }
-        crate::zone_alloc::kept_with(|| drop(mine));
-        !WRITTEN.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|w| w.0 == self.dir)
     }
 
     /// The directory of this cache's stores
@@ -4329,13 +4447,23 @@ impl Cache {
 
 /// What a code record is: a first record (O1 / baseline / O3: recorded once, O3 replaces), an O2
 /// build (replaces), a verified O1 rebuild (replaces only an entry below O1)
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum RecKind { First, O2, O1Up }
 
-/// A stored tier's order (the tier bytes are not in tier order): baseline < O1 < O2 < O3.
-fn tier_rank(t: u8) -> u8 {
-    match t { TIER_BASE => 0, TIER_O1 => 1, TIER_O2 => 2, TIER_O3 => 3, _ => 0 }
+/// A stored tier's order (the tier bytes are not in tier order): baseline < O1 < O2 < O3, and
+/// within a level provisional code below complete code (2 * level, + 1 when complete).
+const fn tier_rank(t: u8) -> u8 {
+    let level = match t & !TIER_PROVISIONAL { TIER_O1 => 1, TIER_O2 => 2, TIER_O3 => 3, _ => 0 };
+    2 * level + if t & TIER_PROVISIONAL == 0 { 1 } else { 0 }
 }
+
+/// A stored tier's level: baseline 0, O1 1, O2 2, O3 3.
+const fn tier_level(t: u8) -> u8 {
+    tier_rank(t) / 2
+}
+
+/// The rank of complete O1 code (slot_entry_rank).
+pub(crate) const RANK_O1: u8 = tier_rank(TIER_O1);
 
 /// A code entry payload's tier byte.
 fn payload_tier(p: &[u8]) -> Option<u8> {
@@ -4986,9 +5114,10 @@ fn provided_value(u: &Unit, name: &str) -> Option<u64> {
 impl Cache {
     /// Verify mode: the entry this run would record for slot `id` (fresh code + relocs) against
     /// the cached entry: same declared nounwind inputs, pool-zeroed code and encoded
-    /// relocations. Prints the first difference, including changed conservative answers. None:
-    /// the cached code is another tier than the fresh build's (baseline or O1), so the two say
-    /// nothing about each other.
+    /// relocations. Prints the first difference, including changed conservative answers. None
+    /// (counted here): the cached code is another tier than the fresh build's (baseline or O1), or
+    /// provisional code on either side that was built from other inputs, so the two say nothing
+    /// about each other.
     pub fn verify_entry(&mut self, u: &Unit, id: u32, fresh: &[u8], relocs: &[RelocAt]) -> Option<bool> {
         let key = match self.slot_key(u, id) {
             Some(k) => k,
@@ -4998,22 +5127,113 @@ impl Cache {
             Some((KIND_CODE, p)) => p.to_vec(),
             _ => return Some(true),
         };
-        let fresh_tier = if u.fns[id as usize].rir.as_ref().is_some_and(|r| r.baseline) { TIER_BASE } else { TIER_O1 };
-        if payload_tier(&cached).is_some_and(|t| t != fresh_tier) { return None; }
-        Some(self.verify_same_tier(u, id, &cached, fresh, relocs))
+        let rir = u.fns[id as usize].rir.as_ref();
+        let base = rir.is_some_and(|r| r.baseline);
+        let provisional = base && u.fns[id as usize].unverified.load(std::sync::atomic::Ordering::Relaxed) || rir.is_some_and(|r| !r.pending.is_empty());
+        let fresh_tier = (if base { TIER_BASE } else { TIER_O1 }) | (if provisional { TIER_PROVISIONAL } else { 0 });
+        if let Some(t) = payload_tier(&cached).filter(|t| *t != fresh_tier) {
+            match tier_level(t) {
+                l @ 2..=3 => self.stats.verify_outside[l as usize - 2] += 1,
+                _ if (t | fresh_tier) & TIER_PROVISIONAL != 0 => self.stats.verify_provisional += 1,
+                _ => self.stats.verify_other_tier += 1,
+            }
+            return None;
+        }
+        self.verify_same_tier(u, id, &cached, fresh, relocs, provisional)
     }
 
-    fn verify_same_tier(&mut self, u: &Unit, id: u32, cached: &[u8], fresh: &[u8], relocs: &[RelocAt]) -> bool {
-        let mut d = D { b: cached, p: 0 };
-        if d.u32() != Some(ENTRY_VERSION) || d.str().is_none() { return false; }
-        let Some((start, end)) = skip_build_inputs(&mut d) else { return false };
-        let facts = u.fns[id as usize].rir.as_ref().map_or(&[][..], |r| r.nounwind_inputs.as_slice());
-        let Some(encoded) = self.nounwind_bytes(u, facts) else { return false };
-        if cached[start..end] != encoded {
-            eprintln!("makepad-run cache: VERIFY nounwind inputs differ: {}", crate::syms::stable_fn_name(u, id));
-            return false;
+    /// Verify mode: where two encodings of a record's build inputs part (encode_inputs): the
+    /// level, the pending slots, the inlined slots (the fresh build's that the cached record
+    /// lacks, by name, and how many the other way), else the dependency certificate (the nounwind
+    /// answers are compared before)
+    fn inputs_diff(&mut self, u: &Unit, id: u32, cached: &[u8], fresh: &[u8]) -> String {
+        fn slots(d: &mut D<'_>) -> Option<Vec<Vec<u8>>> {
+            let n = d.u32()?;
+            (0..n).map(|_| d.bytes().map(|b| b.to_vec())).collect()
         }
-        let Some(ccode) = d.bytes() else { return false };
+        let (mut c, mut f) = (D { b: cached, p: 0 }, D { b: fresh, p: 0 });
+        let (ct, ft) = (c.u8(), f.u8());
+        if ct != ft {
+            return format!("level {:?}/{:?}", ct, ft);
+        }
+        let (Some(cl), Some(fl), Some(cp), Some(fp)) = (slots(&mut c), slots(&mut f), slots(&mut c), slots(&mut f)) else { return "unreadable inputs".into() };
+        if cp != fp {
+            return format!("pending {}/{}", cp.len(), fp.len());
+        }
+        if cl == fl {
+            let (cn, fnw) = (c.p, f.p);
+            return match (skip_nounwind_and_cert(&mut c), skip_nounwind_and_cert(&mut f)) {
+                (Some((_, ce)), Some((_, fe))) if cached[cn..ce] != fresh[fnw..fe] => "nounwind answers".into(),
+                _ => "dependency certificate".into(),
+            };
+        }
+        let fresh_only: Vec<String> = record_inlined(u, id, &[]).into_iter().filter(|&x| self.slot_bytes(u, x).is_some_and(|b| !cl.contains(&b))).map(|x| crate::syms::stable_fn_name(u, x)).collect();
+        format!("inlined {}/{}, fresh only {:?}, cached only {}", cl.len(), fl.len(), fresh_only, cl.iter().filter(|b| !fl.contains(b)).count())
+    }
+
+    /// (verify report) how a cached nounwind answer list differs from the fresh build's: the
+    /// answers only one side has and those whose value differs, with the callee's state now
+    fn nounwind_diff(&mut self, u: &Unit, cached: &[u8], facts: &[(u32, bool)]) -> String {
+        let mut d = D { b: cached, p: 0 };
+        let Some(n) = d.u32() else { return "unreadable".into() };
+        let Some(c) = (0..n).map(|_| Some((d.bytes()?.to_vec(), d.u8()? != 0))).collect::<Option<Vec<_>>>() else { return "unreadable".into() };
+        let state = |x: u32| {
+            let f = &u.fns[x as usize];
+            let unv = if f.unverified.load(std::sync::atomic::Ordering::Relaxed) { " unverified" } else { "" };
+            match f.rir.as_ref() {
+                None => format!("no rir{unv}"),
+                Some(r) => format!("{}{}{}{unv}", if r.baseline { "baseline" } else if r.full { "full" } else { "normal" }, if r.plain_calls { " plain-calls" } else { "" }, if r.pending.is_empty() { "" } else { " provisional" }),
+            }
+        };
+        let mut fresh_only = Vec::new();
+        let mut value = Vec::new();
+        let mut keys = Vec::new();
+        for &(x, v) in facts {
+            let Some(k) = self.slot_bytes(u, x) else { continue };
+            match c.iter().find(|e| e.0 == k) {
+                None => fresh_only.push(format!("{}={} [{}]", crate::syms::stable_fn_name(u, x), v, state(x))),
+                Some(e) if e.1 != v => value.push(format!("{}: cached {} fresh {} [{}]", crate::syms::stable_fn_name(u, x), e.1, v, state(x))),
+                _ => {}
+            }
+            keys.push(k);
+        }
+        let cached_only: Vec<String> = c.iter().filter(|e| !keys.contains(&e.0)).map(|e| format!("{}={}", String::from_utf8_lossy(&e.0).chars().filter(|ch| ch.is_ascii_graphic()).take(60).collect::<String>(), e.1)).collect();
+        format!("answers {}/{}; fresh only {:?}; cached only {:?}; value differs {:?}", c.len(), facts.len(), fresh_only, cached_only, value)
+    }
+
+    fn verify_same_tier(&mut self, u: &Unit, id: u32, cached: &[u8], fresh: &[u8], relocs: &[RelocAt], provisional: bool) -> Option<bool> {
+        let mut d = D { b: cached, p: 0 };
+        if d.u32() != Some(ENTRY_VERSION) || d.str().is_none() { return Some(false); }
+        let inputs_at = d.p;
+        let Some((start, end)) = skip_build_inputs(&mut d) else { return Some(false) };
+        let facts = u.fns[id as usize].rir.as_ref().map_or(&[][..], |r| r.nounwind_inputs.as_slice());
+        let Some(encoded) = self.nounwind_bytes(u, facts) else { return Some(false) };
+        // provisional code (both sides: the tiers are equal) built with other pending slots or
+        // nounwind answers: not compared
+        let same_nounwind = cached[start..end] == encoded;
+        let mut fresh_inputs = E::default();
+        let inputs_end = d.p;
+        let encodable = self.encode_inputs(u, id, None, RecKind::First, None, false, &mut fresh_inputs).is_some();
+        let same_inputs = same_nounwind && encodable && fresh_inputs.0[..] == cached[inputs_at..inputs_end];
+        if provisional && !same_inputs {
+            self.stats.verify_provisional += 1;
+            return None;
+        }
+        // only the nounwind answers differ (the cached inputs with the fresh answers in their place
+        // are the fresh inputs): its own class. Answers that differ beside other inlined or
+        // pending slots follow from those (another body asks about other calls): the code
+        // comparison below reports the inputs.
+        let only_nounwind = !same_nounwind && encodable && fresh_inputs.0[..] == [&cached[inputs_at..start], &encoded[..], &cached[end..inputs_end]].concat()[..];
+        if only_nounwind {
+            eprintln!("makepad-run cache: VERIFY nounwind inputs differ: {} ({})", crate::syms::stable_fn_name(u, id), self.nounwind_diff(u, &cached[start..end], facts));
+            self.stats.verify_diff_inputs += 1;
+            return Some(false);
+        }
+        // (the recorded inputs as the fresh build has them -- level, inlined and pending slots,
+        // nounwind answers, dependency keys --: a difference from other inputs is counted apart
+        // from one from the same)
+        let inputs_word = if same_inputs { "same inputs" } else { "recorded inputs differ" };
+        let Some(ccode) = d.bytes() else { return Some(false) };
         let ccode = ccode.to_vec();
         let fz = fresh.to_vec();
         let name = crate::syms::stable_fn_name(u, id);
@@ -5024,7 +5244,10 @@ impl Cache {
                     diffs.push(format!("{}: {:08x}/{:08x}", k, u32::from_le_bytes(ccode[k..k + 4].try_into().unwrap()), u32::from_le_bytes(fz[k..k + 4].try_into().unwrap())));
                 }
             }
-            eprintln!("makepad-run cache: VERIFY code differs: {} ({} vs {} bytes) cached/fresh {:?}", name, ccode.len(), fz.len(), diffs);
+            let why = if same_inputs { String::new() } else { format!(": {}", self.inputs_diff(u, id, &cached[inputs_at..inputs_end], &fresh_inputs.0)) };
+            let level = ["base", "O1", "O2", "O3"][tier_level(cached[inputs_at]) as usize];
+            eprintln!("makepad-run cache: VERIFY code differs: {} [{}] ({} vs {} bytes, {}{}) cached/fresh {:?}", name, level, ccode.len(), fz.len(), inputs_word, why, diffs);
+            if same_inputs { self.stats.verify_diff_code += 1 } else { self.stats.verify_diff_inputs += 1 }
             // the fresh relocations whose encoding the cached entry does not hold (what the two
             // builds' constant pools disagree on)
             if dump_filter().map_or(false, |w| name.contains(w)) {
@@ -5057,7 +5280,7 @@ impl Cache {
                     eprintln!("makepad-run cache: RELOCS fresh {} {} {}", name, rl.at, t);
                 }
             }
-            return false;
+            return Some(false);
         }
         let n = d.u32().unwrap_or(0) as usize;
         let start = d.p;
@@ -5087,12 +5310,16 @@ impl Cache {
             };
             let cbytes = d.b.get(d.p..d.p + e.0.len()).map(|x| x.to_vec());
             if co != *o || ck != Some(rl.kind) || !ok || cbytes.as_deref() != Some(&e.0[..]) {
-                eprintln!("makepad-run cache: VERIFY RELOC differs: {} at {} ({:?} -> {})", name, o, r, match r { Reloc::Sym(s) => crate::syms::describe(u, *s), Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => crate::syms::stable_fn_name(u, *x), _ => String::new() });
-                return false;
+                // (what differs: the cached offset, kind and target bytes against the fresh ones)
+                let first = cbytes.as_deref().map_or(0, |b| b.iter().zip(&e.0).take_while(|(x, y)| x == y).count());
+                let hex = |b: &[u8]| format!("[{}/{}] {}", first, b.len(), b.iter().skip(first.saturating_sub(4)).take(16).map(|x| format!("{:02x}", x)).collect::<String>());
+                eprintln!("makepad-run cache: VERIFY RELOC differs: {} at {} ({:?} -> {}, {}; cached at {} kind {}, target {} / fresh {})", name, o, r, match r { Reloc::Sym(s) => crate::syms::describe(u, *s), Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => crate::syms::stable_fn_name(u, *x), _ => String::new() }, inputs_word, co, if ck == Some(rl.kind) { "same" } else { "differs" }, cbytes.as_deref().map_or(String::from("-"), |b| hex(b)), if ok { hex(&e.0) } else { String::from("unencodable") });
+                if same_inputs { self.stats.verify_diff_reloc += 1 } else { self.stats.verify_diff_inputs += 1 }
+                return Some(false);
             }
             d.p += e.0.len();
         }
-        true
+        Some(true)
     }
 }
 
@@ -5218,11 +5445,13 @@ fn file_ident(path: &str, source: u128, owner: u128, numbering: u128) -> u128 {
 }
 
 fn skip_build_inputs(d: &mut D) -> Option<(usize, usize)> {
-    // the O3 byte and the inlined slots
+    // the tier byte, the inlined slots and the pending ones
     d.u8()?;
-    let n = d.u32()?;
-    for _ in 0..n {
-        d.bytes()?;
+    for _ in 0..2 {
+        let n = d.u32()?;
+        for _ in 0..n {
+            d.bytes()?;
+        }
     }
     skip_nounwind_and_cert(d)
 }
@@ -8214,7 +8443,8 @@ mod data_tests {
     /// A mid-run write indexes the code its spills wrote for the startup manifest, but the owner
     /// thread never opens their stores: the cache writer opens them first (`open_written`), and an
     /// unopened write makes the manifest wait. A store written again after it was opened is
-    /// opened again for its earlier keys and its new ones.
+    /// opened again for its earlier keys and its new ones. The exit's manifest never waits: it
+    /// opens what is left itself.
     #[test]
     fn written_code_is_indexed_only_from_stores_opened_off_the_owner() {
         isolated_test!(written_code_is_indexed_only_from_stores_opened_off_the_owner);
@@ -8235,6 +8465,9 @@ mod data_tests {
         open_written(&c.dir);
         assert!(c.index_written(false), "every write was opened");
         assert!(c.has_index(&first) && c.has_index(&second), "a store opened again keeps its earlier keys");
+        let third = 0x53u128 << 64 | 3;
+        spill(&mut c, third);
+        assert!(c.index_written(true) && c.has_index(&third), "the exit opens an unopened write itself");
         drop(c);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -8593,6 +8826,8 @@ mod nounwind_tests {
         isolated_test!(entries_keep_false_and_true_answers_before_code);
         let mut e = E::default();
         e.u8(0);
+        // no inlined slots, no pending ones
+        e.u32(0);
         e.u32(0);
         let start = e.0.len();
         e.u32(2);
@@ -8714,18 +8949,13 @@ impl Linker {
         Some(s)
     }
 
-    fn link_sym(&mut self, u: &mut Unit, d: &mut D, rw: &mut Vec<Sym>) -> Option<u64> {
-        let s = self.link_symbol(u, d, rw)?;
-        Some(u.syms.value(s))
-    }
-
     /// Retain the encoded target's identity: reverse lookup by address loses aliases and
     /// cannot describe every linked symbol. Data folding must see the same target as cold code.
     /// `rw`: the writable blocks the entry's earlier symbols made, by ordinal (enc_sym).
     fn link_symbol(&mut self, u: &mut Unit, d: &mut D, rw: &mut Vec<Sym>) -> Option<Sym> {
         let tag = d.u8()?;
         let mut s = match tag {
-            // runtime helpers the lowering interns on first use (ext_get / ext_free / divrem128) are interned here the
+            // runtime helpers the lowering interns on first use (divrem128 and the like) are interned here the
             // same way: a warm start links the entry before any lowering has asked for them
             1 => { let n = d.str()?; match u.syms.find_rt(n) { Some(s) => s, None => crate::lower::intern_lazy_rt(u, n)? } }
             2 => {
@@ -9052,7 +9282,6 @@ impl Linker {
             if let Some(hook) = hook { hook(u); }
         }
         let mut callees = Vec::new();
-        let mut thunks = Vec::new();
         let mut data = Vec::new();
         let mut d = D { b: payload, p: 0 };
         if d.u32()? != ENTRY_VERSION {
@@ -9067,7 +9296,11 @@ impl Linker {
             let b = d.bytes()?;
             inl.push(self.slot_of_bytes(u, b)?);
         }
-        // the nounwind inputs and the dependency certificate (checked by cert_valid before)
+        // the pending slots (provisional code: recorded, not used at the link), the nounwind
+        // inputs and the dependency certificate (checked by cert_valid before)
+        for _ in 0..d.u32()? {
+            d.bytes()?;
+        }
         skip_nounwind_and_cert(&mut d)?;
         let code = d.bytes()?.to_vec();
         let n = d.u32()? as usize;
@@ -9077,7 +9310,9 @@ impl Linker {
             let o = d.u32()? as usize;
             let kind = kind_of(d.u8()?)?;
             let tag = d.b.get(d.p).copied()?;
-            let v = match tag {
+            // the relocation keeps what it names (a slot, a symbol): the install records the
+            // code's references from these (jit CodeRefs), as it does for code built this run
+            let target = match tag {
                 20 | 21 | 25 => {
                     d.u8()?;
                     let b = d.bytes()?;
@@ -9086,31 +9321,37 @@ impl Linker {
                         let c = self.cache();
                         u.twin_link_target(id, sid, |b| c.has_stored_entry(u, b))
                     };
-                    if tag == 21 {
-                        thunks.push(sid);
-                    } else {
-                        callees.push(sid);
+                    match tag {
+                        20 => {
+                            callees.push(sid);
+                            Reloc::Slot(sid)
+                        }
+                        25 => {
+                            callees.push(sid);
+                            Reloc::Call(sid)
+                        }
+                        _ => Reloc::Thunk(sid),
                     }
-                    u.env.reloc_value(match tag { 20 => Reloc::Slot(sid), 25 => Reloc::Call(sid), _ => Reloc::Thunk(sid) })
                 }
                 22 => {
                     d.u8()?;
-                    u.env.reloc_value(Reloc::TlsKey)
+                    Reloc::TlsKey
                 }
                 23 => {
                     d.u8()?;
-                    u.env.reloc_value(Reloc::TlsSlow)
+                    Reloc::TlsSlow
                 }
                 24 => {
                     d.u8()?;
-                    u.env.reloc_value(Reloc::Resume)
+                    Reloc::Resume
                 }
                 _ => {
-                    let v = self.link_sym(u, &mut d, &mut rw)?;
+                    let s = self.link_symbol(u, &mut d, &mut rw)?;
+                    let v = u.syms.value(s);
                     if u.syms.data_at(v).is_some() {
                         data.push(v);
                     }
-                    v
+                    Reloc::Sym(s)
                 }
             };
             if o >= code.len() {
@@ -9118,10 +9359,10 @@ impl Linker {
             }
             if let Some(w) = dump_filter().filter(|_| self.cache().verbose) {
                 if _name.contains(w) {
-                    eprintln!("makepad-run cache: link {} at {} {:?} tag {} = {:#x}", _name, o, kind, tag, v);
+                    eprintln!("makepad-run cache: link {} at {} {:?} tag {} = {:#x}", _name, o, kind, tag, u.env.reloc_value(target));
                 }
             }
-            relocs.push(RelocAt { at: o as u32, kind, target: Reloc::Value(v) });
+            relocs.push(RelocAt { at: o as u32, kind, target });
         }
         if let Some(w) = dump_filter().filter(|_| self.cache().verbose) {
             if _name.contains(w) {
@@ -9139,14 +9380,12 @@ impl Linker {
         }
         let pc = raw.into_iter().map(|(o, p)| (o, (*files.get(relax_backend::rir::pos_file(p) as usize).unwrap_or(&u32::MAX) as u64) << 32 | (p & 0xffff_ffff) | (p & !relax_backend::rir::pos_plain(u64::MAX)))).collect();
         self.cache().last_callees = callees;
-        self.cache().last_thunks = thunks;
         // trait objects this code makes: the vtables it names (an impl's removal checks their makers)
         for &a in &data {
             if u.syms.is_vtable(a) {
                 u.note_vtable_maker(a, id);
             }
         }
-        self.cache().last_data = data;
         if !u.aux { crate::harness::reach::note(id, inl.iter().copied()); }
         if !is_o3 {
             // the slots this code took in run inside it: a replacement that calls one instead
@@ -9159,8 +9398,10 @@ impl Linker {
             }
         }
         self.cache().last_tier1 = if is_o3 { Some(inl) } else { None };
-        self.cache().last_o2 = tier == TIER_O2;
-        self.cache().last_base = tier == TIER_BASE;
+        // (O2 code, provisional or not: no O2 build for it this run)
+        self.cache().last_o2 = tier & !TIER_PROVISIONAL == TIER_O2;
+        self.cache().last_base = tier & !TIER_PROVISIONAL == TIER_BASE;
+        self.cache().last_provisional = (tier & TIER_PROVISIONAL != 0).then(|| tier_level(tier));
         Some((code, pc, relocs))
     }
 }

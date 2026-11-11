@@ -535,8 +535,17 @@ pub fn read_leaf(u: &Unit, s: Sym, m: Mem) -> relax_backend::passes::RoRead {
 /// objects it points at (vtables and their supertrait vtables, fn tables, constants holding fn
 /// pointers): what code reading it can call (real-time reach, jit.rs realtime).
 pub(crate) fn data_thunks(u: &Unit, addr: u64, out: &mut Vec<u32>) {
+    let objs: Vec<u32> = u.syms.data_at(addr).into_iter().filter_map(|s| match u.syms.kind(s.id) { Some(SymKind::Data(i)) => Some(i), _ => None }).collect();
+    obj_thunks(u, objs, out);
+}
+
+/// data_thunks for the data object of index `idx` (a code body's reference record names it so).
+pub(crate) fn data_obj_thunks(u: &Unit, idx: u32, out: &mut Vec<u32>) {
+    obj_thunks(u, vec![idx], out);
+}
+
+fn obj_thunks(u: &Unit, mut todo: Vec<u32>, out: &mut Vec<u32>) {
     let mut seen = Vec::new();
-    let mut todo: Vec<u32> = u.syms.data_at(addr).into_iter().filter_map(|s| match u.syms.kind(s.id) { Some(SymKind::Data(i)) => Some(i), _ => None }).collect();
     while let Some(idx) = todo.pop() {
         if seen.contains(&idx) || seen.len() > 4096 {
             continue;

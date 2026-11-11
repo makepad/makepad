@@ -116,6 +116,7 @@ pub fn mix_setup() -> Box<dyn FnMut() -> u64> {
     let mut r = vec![0.0f32; 512];
     Box::new(move || {
         let mut bus = SynthBus::new(RATE);
+        let mut next_voice = 1;
         let mut h = 0u64;
         for b in 0..blocks {
             let t = b as f32 * 512.0 / RATE;
@@ -126,7 +127,8 @@ pub fn mix_setup() -> Box<dyn FnMut() -> u64> {
                 } else {
                     Emitter::panned(i as f32 * 0.3 - 0.7)
                 };
-                bus.play_recipe(&recipes[i], 1.0 + 0.05 * i as f32, 0.8, e, Priority::Normal, 0);
+                bus.play_recipe(next_voice, &recipes[i], 1.0 + 0.05 * i as f32, 0.8, e, Priority::Normal, 0);
+                next_voice += 1;
             }
             bus.tone(1, 220.0 + 40.0 * (t * 3.0).sin(), None, 0.1);
             for (i, spec) in cars.iter().enumerate() {

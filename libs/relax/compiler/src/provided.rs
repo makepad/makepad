@@ -880,7 +880,7 @@ fn std_vec_same(prog: &Program, tcx: &Tcx, probe: &crate::layout::Layouts) -> Op
     }
     let pb = std::mem::size_of::<usize>() as u32;
     let (ls, lv) = (probe.of(&lcx, tcx, st), probe.of(&lcx, tcx, vt));
-    if ls.size != 3 * pb || ls.fields.as_slice() != [0] || lv.size != 3 * pb || lv.ext.is_some() || ls.ext.is_some() {
+    if ls.size != 3 * pb || ls.fields.as_slice() != [0] || lv.size != 3 * pb {
         return None;
     }
     let mut ours = [usize::MAX; 3];
@@ -942,7 +942,6 @@ pub fn same_layout_handles(prog: &Program, tcx: &Tcx, cands: &[(DefId, u32, u32,
                 && offs.len() == adt.variants[0].fields.len()
                 && l.size == *size
                 && l.align == *align
-                && l.ext.is_none()
                 && offs.len() == l.fields.len()
                 && offs.iter().zip(&l.fields).all(|(a, b)| *a == *b as u64)
         })

@@ -20,7 +20,7 @@ use crate::sys;
 
 mod local;
 
-pub use self::local::{AccessError, LazyKey, LocalKey};
+pub use self::local::{AccessError, KeyCache, LazyKey, LocalKey};
 #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
 pub use self::local::EagerStorage;
 

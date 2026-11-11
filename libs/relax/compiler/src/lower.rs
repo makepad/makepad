@@ -246,8 +246,7 @@ pub struct Lcx<'a> {
     /// Body-local answers, discarded if nested constant evaluation re-collects types.
     query_epoch: u64,
     layouts: HashMap<TyId, &'static Layout>,
-    /// Repeated uses of a type need the same cleanup decision, including live-session
-    /// extension allocations.
+    /// Repeated uses of a type need the same cleanup decision.
     drop_types: HashMap<TyId, bool>,
     /// Trait dispatch is fully monomorphized here; repeated calls in this body share it.
     trait_methods: HashMap<DefId, HashMap<Vec<TyId>, crate::instance::Instance>>,
@@ -1119,7 +1118,7 @@ impl<'a> Lcx<'a> {
         self.u.tcx.tys.kind(self.monomorphize(t))
     }
     fn needs_drop_glue(&mut self, t: TyId) -> bool {
-        // These kinds own no values or live-session extension blocks. Avoid even the
+        // These kinds own no values. Avoid even the
         // shared needs_drop query (and the local map) for scalar and pointer operands.
         if matches!(self.u.tcx.tys.kind(t), TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::Never | TyKind::Str | TyKind::Ref(..) | TyKind::Ptr(..) | TyKind::FnPtr(..) | TyKind::FnDef(..)) {
             return false;
@@ -1512,110 +1511,6 @@ impl<'a> Lcx<'a> {
         crate::jit::field_note(site);
     }
 
-    /// A new value of a live-editable struct (M10) has no extension block yet: its ext word
-    /// says so where the value is built ([`EXT_BUILT`]; 0 when the struct has dead slots,
-    /// which code built now does not set -- the drop glue then leaves them alone, ext_drop_fn).
-    fn zero_ext(&mut self, a: VReg, off: i32, t: TyId) {
-        if let Some(e) = self.layout(t).ext {
-            let z = self.iconst(if has_dead_slots(self.u, t) { 0 } else { EXT_BUILT as i64 });
-            let pm = self.pmem();
-            self.emit(Inst::Store(pm, a, off + e as i32, z));
-        }
-    }
-
-    /// Field `fi` of a live-editable struct that an edit added (M10, hotreload.md section 13):
-    /// the value's extension block (allocated, or grown, on first use by a newer version), its
-    /// fields not yet set taken from their `Default`, then the field's place in the block.
-    fn ext_project(&mut self, p: &Place, t: TyId, fi: u32) -> (Place, TyId) {
-        let Some((ext_off, fields, size, align)) = ext_fields(self.u, t) else {
-            self.err(self.pos, "internal: extension field of a struct without an extension word -- makepad run bug, report it".to_string());
-            return (Place::Regs(Vec::new()), self.u.tcx.tys.error);
-        };
-        let (base, boff) = match p {
-            Place::Mem(r, o) => (*r, *o),
-            Place::Regs(_) => {
-                self.err(self.pos, "internal: a live-editable struct in registers -- makepad run bug, report it".to_string());
-                return (Place::Regs(Vec::new()), self.u.tcx.tys.error);
-            }
-        };
-        let slot = self.f.vreg(Cls::I);
-        self.emit(Inst::IBinI(IOp::Add, U64, slot, base, boff as i64 + ext_off as i64));
-        let f: rt_fn_ty!(fn(u64, u64, u64) -> u64) = rt_ext_get;
-        let fs = self.u.syms.intern(crate::syms::SymKind::Rt("ext_get"), f as usize as u64);
-        let (sz, al) = (self.iconst(size as i64), self.iconst(align as i64));
-        let blk = self.f.vreg(Cls::I);
-        self.emit(Inst::Call(Callee::Host(fs), vec![slot, sz, al], vec![blk]));
-        // the fields this value's block does not hold yet (count in the header) get their default
-        let cnt = self.f.vreg(Cls::I);
-        self.emit(Inst::Load(Mem::Int(4, false), cnt, blk, 0));
-        let n = fields.len() as i64;
-        let all = self.iconst(n);
-        let short = self.icmp(Cond::Lt, false, cnt, all);
-        let fill = self.f.block();
-        let done = self.f.block();
-        self.term(Term::Branch(short, fill, done));
-        self.switch(fill);
-        let td = self.u.core_path(&["default", "Default"]);
-        let m = td.and_then(|td| self.u.prog.traits[self.u.prog.def(td).sub as usize].iter().copied().find(|it| self.u.prog.name(*it) == "default"));
-        for (k, &(_, ft, off)) in fields.iter().enumerate() {
-            // a dead slot (a field an edit removed again) that owns nothing needs no value
-            let dead_plain = match self.kind(t) {
-                TyKind::Adt(d, _, _) => self.u.tcx.adts.get(&d).and_then(|a| a.variants[0].fields.get(fields[k].0 as usize).map(|f| f.name)).map_or(false, |n| is_dead_field(self.u, n)),
-                _ => false,
-            } && !self.needs_drop_glue(ft);
-            if dead_plain {
-                continue;
-            }
-            let kk = self.iconst(k as i64);
-            let need = self.icmp(Cond::Le, false, cnt, kk);
-            let init = self.f.block();
-            let next = self.f.block();
-            self.term(Term::Branch(need, init, next));
-            self.switch(init);
-            // a retyped scalar: the old value from its dead base slot, widened
-            let conv = match self.kind(t) {
-                TyKind::Adt(d, args, _) => self.u.tcx.adts.get(&d).and_then(|a| a.ext_conv.iter().find(|c| c.0 == fields[k].0).map(|c| (c.1, self.u.tcx.tys.subst_erasing_regions(a.variants[0].fields[c.1 as usize].ty, self.u.tcx.tys.list(args))))),
-                _ => None,
-            };
-            let lt = self.layout(t);
-            // the field's declared default (`field: T = expr`, `#[rust(expr)]`)
-            let dconst = match self.kind(t) {
-                TyKind::Adt(d, _, _) => self.u.tcx.adts.get(&d).and_then(|a| a.variants[0].fields.get(fields[k].0 as usize).map(|f| f.name)).and_then(|n| self.u.field_default_const(d, n)),
-                _ => None,
-            };
-            match (td, m) {
-                _ if conv.is_some() => {
-                    let (src, st) = conv.unwrap();
-                    let soff = lt.fields.get(src as usize).copied().unwrap_or(0);
-                    let v = self.read_place(&Place::Mem(base, boff + soff as i32), st);
-                    let v = self.cast(v, st, ft);
-                    self.write_place(&Place::Mem(blk, off as i32), ft, v);
-                }
-                _ if dconst.is_some() => {
-                    let v = self.const_val(dconst.unwrap(), Vec::new(), ft);
-                    self.write_place(&Place::Mem(blk, off as i32), ft, v);
-                }
-                (Some(td), Some(m)) if self.u.tcx.type_implements_trait(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), TraitRef { def_id: td, args: vec![GenericArg::Type(ft)] }).must_apply_modulo_regions() => {
-                    let instance = crate::instance::Instance::expect_resolve(&self.u.tcx, &self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), m, &[ft]);
-
-                    let v = self.emit_instance(instance, Vec::new(), ft);
-                    self.write_place(&Place::Mem(blk, off as i32), ft, v);
-                }
-                _ => {
-                    let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, ft);
-                    self.err(self.pos, format!("a field added live to a running struct needs a default, and `{}` has no Default impl -- restart the app", ts));
-                }
-            }
-            self.term(Term::Jump(next));
-            self.switch(next);
-        }
-        self.emit(Inst::Store(Mem::Int(4, false), blk, 0, all));
-        self.term(Term::Jump(done));
-        self.switch(done);
-        let (_, ft, off) = fields.iter().copied().find(|x| x.0 == fi).unwrap_or((fi, self.u.tcx.tys.error, 16));
-        (Place::Mem(blk, off as i32), ft)
-    }
-
     /// Projection to field `fi` of variant `vi` of a place of type `t`.
     fn project(&mut self, p: &Place, t: TyId, vi: u32, fi: u32) -> (Place, TyId) {
         let k = self.kind_ref(t);
@@ -1675,10 +1570,6 @@ impl<'a> Lcx<'a> {
                         let fsz = self.layout(ft).size;
                         self.field_note(t, &adt, fi, o, fsz, l.size, l.align);
                     }
-                }
-                // a field an edit added (M10): in the value's extension block
-                if off == Some(u32::MAX) && l.ext.is_some() {
-                    return self.ext_project(p, t, fi);
                 }
                 match (off, ft) {
                     (Some(off), Some(ft)) => (ft, off, var.fields.len()),
@@ -7153,15 +7044,10 @@ impl<'a> Lcx<'a> {
                 if let Some(v) = self.simd_const_block(*b, t) {
                     return v;
                 }
-                // offset_of!: the offset in the layout the JIT runs (live layouts: an edit keeps
-                // it, a field in the extension block has none), never a projection run on
+                // offset_of!: the offset in the layout the JIT runs, never a projection run on
                 // uninitialized memory (ctfe.rs Ctx::offset_of)
                 if matches!(self.kind(t), TyKind::Int(Prim::Usize)) && crate::ctfe::in_offset_of(&self.u.prog, self.b.file, self.u.prog.files[self.b.file as usize].ast.block(*b).lo) {
                     if let Some(Ok(v)) = self.u.const_block_shared(self.b, *b, t, self.cur_fn).map(|v| <[u8; 8]>::try_from(&v[..])) {
-                        if u64::from_le_bytes(v) == crate::ctfe::NO_OFFSET {
-                            self.panic_here("offset_of! names a field a live edit added: it lives in the value's extension block and has no offset in the running layout -- restart the app");
-                            self.dead();
-                        }
                         return Val::L(vec![self.iconst(i64::from_le_bytes(v))]);
                     }
                 }
@@ -7644,9 +7530,7 @@ impl<'a> Lcx<'a> {
                     self.emit(Inst::SlotAddr(address, slot));
                     address
                 } else {
-                    let a = self.new_slot_for(t);
-                    self.zero_ext(a, 0, t);
-                    a
+                    self.new_slot_for(t)
                 };
                 let place = Place::Mem(a, 0);
                 for (i, (v, _)) in vals.into_iter().enumerate() {
@@ -7937,7 +7821,6 @@ impl<'a> Lcx<'a> {
         };
         let vi = if self.u.prog.def(d).kind == DefKind::Variant { self.u.prog.def(d).sub } else { 0 };
         let a = self.new_slot_for(t);
-        self.zero_ext(a, 0, t);
         let place = Place::Mem(a, 0);
         if let Some(bx) = base {
             return self.lower_struct_update(e, fields, bx, t, vi, a);
@@ -8048,17 +7931,6 @@ impl<'a> Lcx<'a> {
                     let fa = self.place_addr(&src, *ft);
                     self.drop_at(fa, *ft);
                 }
-            }
-            // a live-editable struct's base (M10): its extension block, whose fields moved or
-            // were dropped above, is freed
-            if let Some(e) = self.layout(bt).ext {
-                let ba = self.place_addr(&bp, bt);
-                let blk = self.f.vreg(Cls::I);
-                let pm = self.pmem();
-                self.emit(Inst::Load(pm, blk, ba, e as i32));
-                let f: rt_fn_ty!(fn(u64)) = rt_ext_free;
-                let fs = self.u.syms.intern(crate::syms::SymKind::Rt("ext_free"), f as usize as u64);
-                self.emit(Inst::Call(Callee::Host(fs), vec![blk], Vec::new()));
             }
         }
         for (fi, v, ft) in given {
@@ -11097,6 +10969,30 @@ impl<'a> Lcx<'a> {
                 };
                 Val::L(vec![self.iconst(c as i64)])
             }
+            // `T: TrustedRandomAccess(NoCoerce)` of this instance (real core specializes Zip on them)
+            "is_trusted_random_access" | "is_trusted_random_access_no_coerce" => {
+                let tr = if name == "is_trusted_random_access" { "TrustedRandomAccess" } else { "TrustedRandomAccessNoCoerce" };
+                let c = match (g0, self.u.core_path(&["iter", tr])) {
+                    (Some(g), Some(td)) => self.u.tcx.type_implements_trait(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), TraitRef { def_id: td, args: vec![GenericArg::Type(g)] }).must_apply_modulo_regions(),
+                    _ => false,
+                };
+                Val::L(vec![self.iconst(c as i64)])
+            }
+            // `<T as TrustedRandomAccessNoCoerce>::MAY_HAVE_SIDE_EFFECT` of this instance; false
+            // when T is not one (Zip reads it only on its indexed path)
+            "may_have_side_effect" => {
+                let td = self.u.core_path(&["iter", "TrustedRandomAccessNoCoerce"]);
+                let c = match (g0, td) {
+                    (Some(g), Some(td)) if self.u.tcx.type_implements_trait(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), TraitRef { def_id: td, args: vec![GenericArg::Type(g)] }).must_apply_modulo_regions() => {
+                        self.u.prog.traits[self.u.prog.def(td).sub as usize].iter().copied().find(|it| self.u.prog.name(*it) == "MAY_HAVE_SIDE_EFFECT").map(|c| (c, g))
+                    }
+                    _ => None,
+                };
+                match c {
+                    Some((c, g)) => self.const_val(c, vec![g], t),
+                    None => Val::L(vec![self.iconst(0)]),
+                }
+            }
             // Primitive scalar values have no padding or inactive enum storage.
             "is_primitive_scalar" => {
                 let c = g0.is_some_and(|g| matches!(self.kind_ref(g), TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char));
@@ -12975,9 +12871,6 @@ pub fn glue_func(u: &mut Unit, kind: u8, t: TyId) -> Func {
     if kind >= crate::jit::GLUE_CTOR {
         return ctor_fn(u, (kind - crate::jit::GLUE_CTOR) as u32, t);
     }
-    if kind == crate::jit::GLUE_EXT_DROP {
-        return ext_drop_fn(u, t);
-    }
     if kind == crate::jit::GLUE_DROP
         && u.lay.is_unsized(&crate::layout::LayoutCx::new(&u.prog), &u.tcx, t)
     {
@@ -13123,7 +13016,7 @@ pub fn variant_disc(u: &Unit, adt: &crate::tcx::AdtT, vi: u32) -> Option<i64> {
 }
 
 /// What a variant test compares the enum's tag, read with `remap` off, with: a Direct tag's own
-/// value for variant `vi` (its discriminant, or the tag a live edit kept for it: AdtT::live_tags),
+/// value for variant `vi` (its discriminant, or the tag a live edit kept for it: AdtT::tag_pin),
 /// else the discriminant.
 pub fn variant_key(u: &Unit, l: &Layout, adt: &crate::tcx::AdtT, vi: u32) -> Option<crate::tcx::Discr> {
     match l.enc {
@@ -13137,7 +13030,7 @@ pub fn variant_key(u: &Unit, l: &Layout, adt: &crate::tcx::AdtT, vi: u32) -> Opt
 /// relative = tag - niche_start, in the niche variants' range when relative <= hi - lo).
 /// Uninhabited layouts have no discriminant. `remap` off: a Direct tag's own value (what
 /// variant tests compare with `variant_key`); on: the discriminant, which differs from it once
-/// a live edit inserted a variant (AdtT::live_tags).
+/// a live edit inserted a variant (AdtT::tag_pin).
 pub fn emit_decode_tag(u: &Unit, f: &mut Func, b: u32, pos: u64, raw: Vec<VReg>, l: &Layout, adt: &crate::tcx::AdtT, remap: bool) -> Option<Vec<VReg>> {
     use crate::layout::TagEnc;
     if l.uninhabited { return None; }
@@ -13153,7 +13046,7 @@ pub fn emit_decode_tag(u: &Unit, f: &mut Func, b: u32, pos: u64, raw: Vec<VReg>,
                 }
                 _ => raw,
             };
-            if !remap || adt.live_tags.is_empty() || tag.len() != 1 {
+            if !remap || adt.tag_pin.is_none() || tag.len() != 1 {
                 return Some(tag);
             }
             // a live edit kept the running values' tags (M10): each tag is mapped to its variant's
@@ -13333,14 +13226,15 @@ pub fn decode_tag_const(u: &Unit, raw: i128, l: &Layout, adt: &crate::tcx::AdtT)
     use crate::layout::TagEnc;
     if l.uninhabited { return None; }
     Some(match l.enc {
-        TagEnc::Direct if !adt.live_tags.is_empty() => {
-            // the tags a live edit kept (M10): the variant whose tag it is
+        TagEnc::Direct if adt.tag_pin.is_some() => {
+            // the tags a live edit kept: the variant whose tag it is
+            let pin = adt.tag_pin.as_ref()?;
             let bytes = match l.tag {
                 Some((_, Mem::Int(n, _))) => n as u32,
                 _ => 8,
             };
             let m: u128 = if bytes >= 16 { u128::MAX } else { (1u128 << (bytes * 8)) - 1 };
-            let v = (0..adt.variants.len() as u32).find(|&v| adt.live_tags[v as usize] & m == raw as u128 & m)?;
+            let v = (0..adt.variants.len() as u32).find(|&v| pin.tags[v as usize] & m == raw as u128 & m)?;
             adt.discriminant_for_variant(&u.tcx, &u.prog, v)?.signed_value()
         }
         TagEnc::Direct => {
@@ -13361,281 +13255,6 @@ pub fn decode_tag_const(u: &Unit, raw: i128, l: &Layout, adt: &crate::tcx::AdtT)
     })
 }
 
-/// A live-editable struct's extension (M10, hotreload.md section 13): the ext word's offset and
-/// the fields edits added -- (field index, type, offset in the block), appended in the order the
-/// edits added them so a field keeps its offset in every later version -- with the block's size
-/// and alignment. The block starts with a 16-byte header: fields set (u32), capacity (u32),
-/// alignment (u32).
-pub(crate) fn ext_fields(u: &Unit, t: TyId) -> Option<(u32, Vec<(u32, TyId, u32)>, u32, u32)> {
-    let l = u.layout_of(t);
-    let ext = l.ext?;
-    let (d, args) = match u.tcx.tys.kind(t) {
-        TyKind::Adt(d, a, _) => (*d, a.clone()),
-        _ => return None,
-    };
-    let adt = u.tcx.adts.get(&d)?;
-    let mut out = Vec::new();
-    let (mut off, mut align) = (16u32, 16u32);
-    for fi in 0..adt.variants[0].fields.len() {
-        if l.fields.get(fi) != Some(&u32::MAX) {
-            continue;
-        }
-        let ft = u.tcx.field_ty(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), d, 0, fi as u32, u.tcx.tys.list(args));
-        let fl = u.layout_of(ft);
-        off = crate::layout::round_up(off, fl.align.max(1));
-        align = align.max(fl.align);
-        out.push((fi as u32, ft, off));
-        off += fl.size;
-    }
-    Some((ext, out, crate::layout::round_up(off.max(16), align), align))
-}
-
-/// A slot a live layout edit took the field away from (M10): renamed so no code names it.
-pub(crate) fn is_dead_field(u: &Unit, name: u32) -> bool {
-    name & 0x8000_0000 == 0 && u.prog.syms.str(name).starts_with("__relax_dead_")
-}
-
-/// Whether live-editable struct `t` has dead slots (code built now leaves them unset).
-fn has_dead_slots(u: &Unit, t: TyId) -> bool {
-    match u.tcx.tys.kind(t) {
-        TyKind::Adt(d, _, _) => u.tcx.adts.get(d).map_or(false, |a| a.variants[0].fields.iter().any(|f| is_dead_field(u, f.name))),
-        _ => false,
-    }
-}
-
-/// Drop of a live-editable struct's extension (GLUE_EXT_DROP; its argument is the ext word's
-/// address): the dead slots the value set, then its block's fields and the block. The word is
-/// read as [`ext_word_block`] reads it, so a value whose word nothing wrote (built by raw writes
-/// at `offset_of!` offsets) drops as one with no block that set no dead slot.
-fn ext_drop_fn(u: &mut Unit, t: TyId) -> Func {
-    let name = fn_name(u, &FnKey::Glue(crate::jit::GLUE_EXT_DROP, t));
-    let mut f = Func::new(name, 0);
-    let entry = f.block();
-    let p = f.vreg(Cls::I);
-    f.params.push(p);
-    let word = f.vreg(Cls::I);
-    push(&mut f, entry, Inst::Load(Mem::Int(8, false), word, p, 0));
-    let zero = f.vreg(Cls::I);
-    push(&mut f, entry, Inst::Iconst(zero, 0));
-    let built = f.vreg(Cls::I);
-    push(&mut f, entry, Inst::Iconst(built, EXT_BUILT as i64));
-    // the usual words, decided here: none written by a struct literal of a version without dead
-    // slots (EXT_BUILT) or of one with them (0); anything else asks the runtime
-    let plain = f.vreg(Cls::I);
-    push(&mut f, entry, Inst::ICmp(Cond::Eq, false, plain, word, built));
-    let ask = f.block();
-    let fast = f.block();
-    let out = f.block();
-    f.blocks[entry as usize].term = Term::Branch(plain, fast, ask);
-    let is_zero = f.vreg(Cls::I);
-    push(&mut f, ask, Inst::ICmp(Cond::Eq, false, is_zero, word, zero));
-    let slow = f.block();
-    f.blocks[ask as usize].term = Term::Branch(is_zero, out, slow);
-    // dead slots (removed / retyped fields) of a value built before they died
-    let dead: Vec<(u32, TyId)> = match (u.layout_of(t).ext, u.tcx.tys.kind(t).clone()) {
-        (Some(_), TyKind::Adt(d, args, _)) => {
-            let l = u.layout_of(t);
-            let dead: Vec<(u32, TyId)> = u.tcx.adts.get(&d).map(|a| a.variants[0].fields.iter().enumerate().filter(|(i, fd)| is_dead_field(u, fd.name) && l.fields.get(*i).map_or(false, |o| *o != u32::MAX)).map(|(i, _)| (l.fields[i], u.tcx.field_ty(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), d, 0, i as u32, u.tcx.tys.list(args)))).collect()).unwrap_or_default();
-            dead.into_iter().filter(|(_, ft)| u.needs_drop_glue(*ft)).collect()
-        }
-        _ => Vec::new(),
-    };
-    let ext_off = u.layout_of(t).ext.unwrap_or(0);
-    let drop_dead = |u: &mut Unit, f: &mut Func, b: u32| {
-        let base = f.vreg(Cls::I);
-        push(f, b, Inst::IBinI(IOp::Add, U64, base, p, -(ext_off as i64)));
-        for &(off, ft) in &dead {
-            let a = addr_off(f, b, base, off);
-            call_drop(u, f, b, a, ft);
-        }
-    };
-    // EXT_BUILT: every slot set, no block
-    drop_dead(u, &mut f, fast);
-    f.blocks[fast as usize].term = Term::Jump(out);
-    // another word: a block this runtime made (its header says whether the value set its dead
-    // slots), or nothing the value's code wrote
-    let mut cur = slow;
-    if !dead.is_empty() {
-        let df: rt_fn_ty!(fn(u64) -> u64) = rt_ext_dead_set;
-        let dfs = u.syms.intern(crate::syms::SymKind::Rt("ext_dead_set"), df as usize as u64);
-        let set = f.vreg(Cls::I);
-        push(&mut f, cur, Inst::Call(Callee::Host(dfs), vec![word], vec![set]));
-        let unset = f.vreg(Cls::I);
-        push(&mut f, cur, Inst::ICmp(Cond::Eq, false, unset, set, zero));
-        let dr = f.block();
-        let next = f.block();
-        f.blocks[cur as usize].term = Term::Branch(unset, next, dr);
-        drop_dead(u, &mut f, dr);
-        f.blocks[dr as usize].term = Term::Jump(next);
-        cur = next;
-    }
-    let bf: rt_fn_ty!(fn(u64) -> u64) = rt_ext_block;
-    let bfs = u.syms.intern(crate::syms::SymKind::Rt("ext_block"), bf as usize as u64);
-    let blk = f.vreg(Cls::I);
-    push(&mut f, cur, Inst::Call(Callee::Host(bfs), vec![word], vec![blk]));
-    let isnull = f.vreg(Cls::I);
-    push(&mut f, cur, Inst::ICmp(Cond::Eq, false, isnull, blk, zero));
-    let body = f.block();
-    f.blocks[cur as usize].term = Term::Branch(isnull, out, body);
-    let mut cur = body;
-    let cnt = f.vreg(Cls::I);
-    push(&mut f, cur, Inst::Load(Mem::Int(4, false), cnt, blk, 0));
-    if let Some((_, fields, _, _)) = ext_fields(u, t) {
-        for (k, &(_, ft, off)) in fields.iter().enumerate() {
-            if !u.needs_drop_glue(ft) {
-                continue;
-            }
-            let kk = f.vreg(Cls::I);
-            push(&mut f, cur, Inst::Iconst(kk, k as i64));
-            let set = f.vreg(Cls::I);
-            push(&mut f, cur, Inst::ICmp(Cond::Gt, false, set, cnt, kk));
-            let dr = f.block();
-            let next = f.block();
-            f.blocks[cur as usize].term = Term::Branch(set, dr, next);
-            let a = addr_off(&mut f, dr, blk, off);
-            call_drop(u, &mut f, dr, a, ft);
-            f.blocks[dr as usize].term = Term::Jump(next);
-            cur = next;
-        }
-    }
-    let rf: rt_fn_ty!(fn(u64)) = rt_ext_free;
-    let fs = u.syms.intern(crate::syms::SymKind::Rt("ext_free"), rf as usize as u64);
-    push(&mut f, cur, Inst::Call(Callee::Host(fs), vec![blk], Vec::new()));
-    push(&mut f, cur, Inst::Store(Mem::Int(8, false), p, 0, zero));
-    f.blocks[cur as usize].term = Term::Jump(out);
-    f.blocks[out as usize].term = Term::Ret(Vec::new());
-    for b in f.blocks.iter_mut() {
-        while b.pos.len() < b.insts.len() {
-            b.pos.push(0);
-        }
-    }
-    f
-}
-
-/// The ext word (M10) of a value built by the program's own code (a struct literal) of a
-/// version without dead slots: no extension block, every slot set. Odd, so no block (16-byte
-/// aligned) has this address. A struct literal of a version with dead slots writes 0 (no block,
-/// its dead slots unset).
-pub(crate) const EXT_BUILT: u64 = 0x4c69_7665_4c61_7901;
-
-/// The extension blocks this runtime made and has not freed (M10). An ext word is a block only
-/// when it names one of them: a value built by raw writes at `offset_of!` offsets (reflection
-/// crates, MaybeUninit) never wrote its word, and whatever bytes are there -- a pattern, zero,
-/// what the memory held before -- mean no block and no dead slot set.
-static EXT_BLOCKS: relax_session::sync::Mutex<Option<crate::fxhash::HashSet<u64>>> = relax_session::sync::Mutex::new(None);
-
-/// The block ext word `word` names, or 0 when it names none.
-fn ext_word_block(word: u64) -> u64 {
-    if word == 0 || word & 15 != 0 {
-        return 0;
-    }
-    let blocks = EXT_BLOCKS.lock().unwrap_or_else(|e| e.into_inner());
-    if blocks.as_ref().is_some_and(|b| b.contains(&word)) { word } else { 0 }
-}
-
-fn ext_block_made(blk: u64) {
-    // (the set is the process's, whatever heap the caller's thread is in: run_end drops it)
-    crate::zone_alloc::kept_with(|| { EXT_BLOCKS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(blk); });
-}
-
-/// What this module holds of a run, as a fresh process has it (`run_end`): the blocks of a run
-/// that ended went with its heap (rt_ext_get), and a word of the next run's that holds one's
-/// address (what its memory held) names no block.
-pub(crate) unsafe fn reset_statics() {
-    relax_session::reset_static(&EXT_BLOCKS, relax_session::sync::Mutex::new(None));
-}
-
-/// Forgets block `blk`; false when it is no block of this runtime's.
-fn ext_block_gone(blk: u64) -> bool {
-    EXT_BLOCKS.lock().unwrap_or_else(|e| e.into_inner()).as_mut().is_some_and(|b| b.remove(&blk))
-}
-
-rt_fn! {
-    /// The extension block behind ext word `slot` (M10), allocated (zeroed) or grown to `size`
-    /// (the fields it held keep their offsets); the caller sets the fields beyond its count.
-    /// The header: fields set (u32), capacity (u32), alignment (u32), whether the value set its
-    /// dead slots (u32: its word was EXT_BUILT when the block was made). A block is the run's
-    /// (the run phase: the calling thread's domain heap), so one whose value died without its
-    /// drop goes with the run's heap, as the value's memory does.
-    pub fn rt_ext_get(slot: u64, size: u64, align: u64) -> u64 {
-        unsafe {
-            let _run = relax_session::phase::run();
-            let slot = slot as *mut u64;
-            let word = *slot;
-            let cur = ext_word_block(word);
-            let align = align.max(16) as usize;
-            if cur == 0 {
-                let lay = std::alloc::Layout::from_size_align_unchecked(size as usize, align);
-                let b = std::alloc::alloc_zeroed(lay);
-                if b.is_null() {
-                    std::alloc::handle_alloc_error(lay);
-                }
-                *(b as *mut u32).add(1) = size as u32;
-                *(b as *mut u32).add(2) = align as u32;
-                *(b as *mut u32).add(3) = (word == EXT_BUILT) as u32;
-                ext_block_made(b as u64);
-                *slot = b as u64;
-                return b as u64;
-            }
-            let b = cur as *mut u8;
-            let cap = *(b as *const u32).add(1) as u64;
-            if cap >= size {
-                return cur;
-            }
-            let old_align = *(b as *const u32).add(2) as usize;
-            let lay = std::alloc::Layout::from_size_align_unchecked(size as usize, align.max(old_align));
-            let n = std::alloc::alloc_zeroed(lay);
-            if n.is_null() {
-                std::alloc::handle_alloc_error(lay);
-            }
-            std::ptr::copy_nonoverlapping(b, n, cap as usize);
-            *(n as *mut u32).add(1) = size as u32;
-            *(n as *mut u32).add(2) = align.max(old_align) as u32;
-            ext_block_gone(cur);
-            std::alloc::dealloc(b, std::alloc::Layout::from_size_align_unchecked(cap as usize, old_align));
-            ext_block_made(n as u64);
-            *slot = n as u64;
-            n as u64
-        }
-    }
-}
-
-rt_fn! {
-    /// The block ext word `word` names (M10), or 0 (ext_word_block).
-    pub fn rt_ext_block(word: u64) -> u64 {
-        ext_word_block(word)
-    }
-}
-
-rt_fn! {
-    /// Whether the value whose ext word is `word` set its dead slots: built as EXT_BUILT, or its
-    /// block says so. A word nothing wrote: no.
-    pub fn rt_ext_dead_set(word: u64) -> u64 {
-        if word == EXT_BUILT {
-            return 1;
-        }
-        match ext_word_block(word) {
-            0 => 0,
-            b => unsafe { *(b as *const u32).add(3) as u64 },
-        }
-    }
-}
-
-rt_fn! {
-    /// Frees the extension block ext word `blk` names (its fields were dropped or moved out);
-    /// a word that names none is a no-op.
-    pub fn rt_ext_free(blk: u64) {
-        if blk == 0 || blk & 15 != 0 || !ext_block_gone(blk) {
-            return;
-        }
-        unsafe {
-            let b = blk as *mut u8;
-            let cap = *(b as *const u32).add(1) as usize;
-            let align = *(b as *const u32).add(2) as usize;
-            std::alloc::dealloc(b, std::alloc::Layout::from_size_align_unchecked(cap, align));
-        }
-    }
-}
 
 fn addr_off(f: &mut Func, b: u32, base: VReg, off: u32) -> VReg {
     if off == 0 {
@@ -13761,13 +13380,8 @@ fn drop_glue_body(u: &mut Unit, f: &mut Func, cur: &mut u32, p: VReg, t: TyId) {
                 if let Some((c, may)) = user_drop.take() {
                     items.push((c, p, may));
                 }
-                for (fi, fd) in adt.variants[0].fields.iter().enumerate() {
+                for fi in 0..adt.variants[0].fields.len() {
                     let ft = u.tcx.field_ty(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), d, 0, fi as u32, u.tcx.tys.list(args));
-                    // fields in the extension block (M10) drop with it, below; so do dead slots
-                    // (a value built before their field went holds them, ext_drop_fn)
-                    if l.fields.get(fi) == Some(&u32::MAX) || (l.ext.is_some() && is_dead_field(u, fd.name)) {
-                        continue;
-                    }
                     if u.needs_drop_glue(ft) {
                         let mut a = addr_off(f, *cur, p, l.fields[fi]);
                         if adt.repr_packed != 0 {
@@ -13784,11 +13398,6 @@ fn drop_glue_body(u: &mut Unit, f: &mut Func, cur: &mut u32, p: VReg, t: TyId) {
                         let may = unwind && u.drop_may_unwind(ft);
                         items.push((Callee::Fn(id), a, may));
                     }
-                }
-                if let Some(e) = l.ext {
-                    let a = addr_off(f, *cur, p, e);
-                    let id = u.fn_id(FnKey::Glue(crate::jit::GLUE_EXT_DROP, t));
-                    items.push((Callee::Fn(id), a, unwind));
                 }
                 glue_drop_seq(f, cur, &items);
                 return;
@@ -15590,137 +15199,6 @@ impl CoroFlags {
 
 #[cfg(test)]
 mod query_drop_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static FREES: AtomicUsize = AtomicUsize::new(0);
-    rt_fn! {
-        fn counted_ext_free(blk: u64) {
-            if blk != 0 { FREES.fetch_add(1, Ordering::SeqCst); }
-            rt_ext_free(blk);
-        }
-    }
-
-    /// A run that ends in place forgets its extension blocks: an earlier run's block address in a
-    /// word of the next run's names no block.
-    #[test]
-    fn a_run_end_forgets_its_extension_blocks() {
-        isolated_test!(a_run_end_forgets_its_extension_blocks);
-        let mut word = 0u64;
-        let blk = rt_ext_get(&mut word as *mut u64 as u64, 16, 16);
-        assert!(blk != 0 && ext_word_block(word) == blk, "premise: a block of this run's");
-        unsafe { reset_statics() };
-        assert_eq!(ext_word_block(word), 0, "a block of a run that ended is no block of the next one");
-        rt_ext_free(word);
-        assert_eq!(ext_word_block(word), 0);
-    }
-
-    /// A run's extension blocks are in its heap, made and grown there by its threads: a value that
-    /// dies without its drop leaves no block behind, and the next run's heap holds none of them.
-    #[test]
-    fn the_next_runs_heap_holds_no_extension_blocks_of_the_run_before() {
-        isolated_test!(the_next_runs_heap_holds_no_extension_blocks_of_the_run_before);
-        use crate::zone_alloc::domain::{self, DomainHeap};
-        // (decided at the first compile; this process has not compiled)
-        assert!(crate::zone_alloc::compiler_arena_enabled(), "premise: heaps are routed");
-        let run = DomainHeap::new().expect("a domain heap");
-        let (base, size) = run.range();
-        let held = run.stats().0;
-        let at = &*run as *const DomainHeap as usize;
-        // a thread of the run: a value gets its block, which grows, and the value dies undropped
-        let (made, grown, word) = std::thread::spawn(move || unsafe {
-            domain::enter(at as *const DomainHeap);
-            let mut word = 0u64;
-            let made = rt_ext_get(&mut word as *mut u64 as u64, 32, 16);
-            let grown = rt_ext_get(&mut word as *mut u64 as u64, 4096, 16);
-            domain::enter(std::ptr::null());
-            (made, grown, word)
-        }).join().unwrap();
-        let in_run = |b: u64| (b as usize).wrapping_sub(base) < size;
-        assert!(in_run(made) && in_run(grown), "blocks {made:#x} {grown:#x} outside the run's heap {base:#x}+{size:#x}");
-        assert!(made != grown && ext_word_block(word) == grown);
-        assert!(run.stats().0 >= held + 4096, "the run's heap holds the grown block: {} -> {}", held, run.stats().0);
-        // the run ends: its blocks go with its heap
-        unsafe { reset_statics() };
-        drop(run);
-        let next = DomainHeap::new().expect("the next run's heap");
-        assert_eq!(next.stats().0, 0, "the next run's heap starts empty");
-        assert_eq!(ext_word_block(word), 0, "the old block's address names no block of the next run");
-        rt_ext_free(word);
-    }
-    #[test]
-    fn extension_blocks_are_freed_once_for_trivial_values_and_aggregates() {
-        isolated_test!(extension_blocks_are_freed_once_for_trivial_values_and_aggregates);
-        // the std sources of this checkout (a test binary's target dir need not be next to them)
-        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
-        struct LiveGuard { live: bool, root: u32 }
-        impl Drop for LiveGuard {
-            fn drop(&mut self) {
-                crate::layout::LIVE_SESSION.store(self.live, Ordering::Relaxed);
-                crate::layout::set_root_crate(self.root);
-                crate::borrowck::event::set_app_scope(Vec::new());
-            }
-        }
-        let dir = std::env::temp_dir().join(format!("relax-ext-drop-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("lib.rs");
-        std::fs::write(&path, b"struct Plain { value: u64 }\n").unwrap();
-        let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "extension_drop", false).unwrap();
-        std::fs::remove_file(path).unwrap();
-        std::fs::remove_dir(dir).unwrap();
-        let mut tcx = crate::tcx::Tcx::new();
-        tcx.collect(&prog);
-        assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
-        let mut plain = None;
-        for i in 0..prog.defs.len() {
-            let d = DefId(i as u32);
-            if prog.def(d).krate == krate && prog.name(d) == "Plain" { plain = Some(d); }
-        }
-        let plain = tcx.tys.intern(TyKind::Adt(plain.unwrap(), tcx.tys.mk_list(&[]), crate::types::RegionArgsId::EMPTY));
-        let aggregate = tcx.tys.intern(TyKind::Tuple(tcx.tys.mk_list(&[plain, plain])));
-        let env = crate::tcx::TypingEnv::fully_monomorphized(&prog);
-        for ty in [plain, aggregate] { assert!(!tcx.needs_drop(&prog, env, ty)); }
-        let _live = LiveGuard {
-            live: crate::layout::LIVE_SESSION.swap(true, Ordering::Relaxed),
-            root: crate::layout::root_crate(),
-        };
-        crate::layout::set_root_crate(krate);
-        crate::borrowck::event::set_app_scope(vec![prog.crates[krate as usize].root_path().to_string()]);
-        let mut u = Unit::new(prog, tcx, core);
-        let free: rt_fn_ty!(fn(u64)) = counted_ext_free;
-        u.syms.intern(crate::syms::SymKind::Rt("ext_free"), free as usize as u64);
-        let ext = u.layout_of(plain).ext.expect("live Plain has an extension word");
-        FREES.store(0, Ordering::SeqCst);
-        let mut total = 0;
-        for ty in [plain, aggregate] {
-            assert!(!u.tcx.needs_drop(&u.prog, env, ty));
-            assert!(u.needs_drop_glue(ty));
-            let layout = u.layout_of(ty);
-            // built by raw writes (offset_of! offsets, MaybeUninit): the ext word holds whatever
-            // the memory held, here a fill pattern; it is no block, and its drop frees nothing
-            let mut value = vec![0xABAB_ABAB_ABAB_ABABu64; (layout.size as usize + 7) / 8];
-            let base = value.as_mut_ptr() as u64;
-            let offsets = if ty == plain { vec![ext] } else { vec![layout.fields[0] + ext, layout.fields[1] + ext] };
-            let id = u.fn_id(FnKey::Glue(crate::jit::GLUE_DROP, ty));
-            let entry = u.entry(id);
-            assert!(unsafe { crate::jit::call_jit(&mut *u, entry, base) }.is_ok());
-            assert_eq!(FREES.load(Ordering::SeqCst), total, "a word nothing wrote frees nothing");
-            for &off in &offsets {
-                let blk = rt_ext_get(base + off as u64, 16, 16);
-                assert!(blk != 0 && blk != 0xABAB_ABAB_ABAB_ABAB, "a block of its own");
-            }
-            let result = unsafe { crate::jit::call_jit(&mut *u, entry, base) };
-            assert!(result.is_ok());
-            assert!(u.errors.is_empty(), "{:?}", u.errors);
-            total += offsets.len();
-            assert_eq!(FREES.load(Ordering::SeqCst), total);
-            for off in offsets { assert_eq!(unsafe { *((base + off as u64) as *const u64) }, 0); }
-            // A cleared extension word makes subsequent runtime cleanup a no-op.
-            assert!(unsafe { crate::jit::call_jit(&mut *u, entry, base) }.is_ok());
-            assert_eq!(FREES.load(Ordering::SeqCst), total);
-        }
-        assert_eq!(total, 3);
-    }
     #[test]
     fn queries_during_thread_local_destruction() {
         isolated_test!(queries_during_thread_local_destruction);
@@ -15746,7 +15224,6 @@ mod query_drop_tests {
         }).join().unwrap();
         assert!(result.load(Ordering::Relaxed), "query must remain callable from a TLS destructor");
     }
-
 }
 
 #[cfg(test)]
@@ -15991,10 +15468,6 @@ fn arithmetic_overflow_message(op: BinOp) -> &'static str {
 pub(crate) fn intern_lazy_rt(u: &mut Unit, name: &str) -> Option<relax_backend::rir::Sym> {
     let (kind, addr) = match name {
         "web_memory_base" => ("web_memory_base", crate::web::BASE),
-        "ext_free" => { let f: rt_fn_ty!(fn(u64)) = rt_ext_free; ("ext_free", f as usize as u64) }
-        "ext_get" => { let f: rt_fn_ty!(fn(u64, u64, u64) -> u64) = rt_ext_get; ("ext_get", f as usize as u64) }
-        "ext_block" => { let f: rt_fn_ty!(fn(u64) -> u64) = rt_ext_block; ("ext_block", f as usize as u64) }
-        "ext_dead_set" => { let f: rt_fn_ty!(fn(u64) -> u64) = rt_ext_dead_set; ("ext_dead_set", f as usize as u64) }
         "divrem128" => { let f: rt_fn_ty!(fn(u64, u64, u64, u64, u64) -> WideRet) = rt_divrem128; ("divrem128", f as usize as u64) }
         // the loop counters' helper (a trampoline in the code area)
         "loop_hot" => return Some(crate::jit::loop_hot_sym(u)),

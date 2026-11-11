@@ -1,17 +1,14 @@
 // tests/live_invalid/run.py edits src/work.rs while this runs. A worker thread calls work::step in
 // a loop. An edited step calls `park_here`, which blocks until the test says `free` on stdin: the
-// edited step's frame stays on the worker's stack while the test makes its code invalid. Prints
+// edited step's frame stays on the worker's stack while its code is made invalid. Prints
 // "out start", "out tick <n> <value>" when the value changes, "out parked <x>" when the worker
-// blocks in park_here. "hold0" makes the next call of step block in park_here from its own first
-// version (gen 0), whatever edits came since.
+// blocks in park_here.
 mod work;
 
 use std::io::BufRead;
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 
 pub static FREE: AtomicBool = AtomicBool::new(false);
-/// set by "hold0": the next step (its first version, gen 0) blocks in park_here
-pub static HOLD0: AtomicBool = AtomicBool::new(false);
 
 /// Blocks until the test frees it (its caller's frame stays live meanwhile).
 #[inline(never)]
@@ -29,7 +26,6 @@ fn main() {
         for line in std::io::stdin().lock().lines() {
             match line.as_deref().unwrap_or("quit").trim() {
                 "free" => FREE.store(true, SeqCst),
-                "hold0" => HOLD0.store(true, SeqCst),
                 _ => std::process::exit(0),
             }
         }

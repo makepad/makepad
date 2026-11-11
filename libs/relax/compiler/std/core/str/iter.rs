@@ -191,6 +191,13 @@ impl<'a> Iterator for Bytes<'a> {
             None
         }
     }
+    #[cfg(not(relax_check))]
+    #[doc(hidden)]
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> u8 {
+        // SAFETY: idx is below the bytes left where Zip took the iterator, so front + idx < back
+        unsafe { *self.b.get_unchecked(self.front + idx) }
+    }
 }
 
 impl<'a> DoubleEndedIterator for Bytes<'a> {
@@ -215,6 +222,12 @@ impl<'a> DoubleEndedIterator for Bytes<'a> {
 
 impl<'a> ExactSizeIterator for Bytes<'a> {}
 impl<'a> FusedIterator for Bytes<'a> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a> crate::iter::TrustedRandomAccess for Bytes<'a> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a> crate::iter::TrustedRandomAccessNoCoerce for Bytes<'a> {
+    const MAY_HAVE_SIDE_EFFECT: bool = false;
+}
 
 // ---------------------------------------------------------------- EncodeUtf16
 

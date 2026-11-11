@@ -1247,6 +1247,10 @@ struct Seen {
     cpu: u64,
 }
 
+/// The threads `runtime_cpu_ns` saw at its last look, by id; this look's, kept for its storage;
+/// what the runtime threads that ended since had run.
+static SEEN: relax_session::sync::Mutex<(Vec<Seen>, Vec<Seen>, u64)> = relax_session::sync::Mutex::new((Vec::new(), Vec::new(), 0));
+
 /// The CPU the runtime's own threads have run (not `program_thread`s: its compiles, checks,
 /// monitor and owner), in nanoseconds: none of it is the program's work, and a test's idle rule
 /// leaves it out of the app's (makepad_remote::runtime_cpu_ns, through `relax_runtime_cpu_ns`). A
@@ -1260,9 +1264,6 @@ struct Seen {
 /// UI thread 4-8 ms each on a loaded gate box, 8% of a core at 20 Hz: an idle Fab read as busy for
 /// two minutes.
 pub fn runtime_cpu_ns() -> u64 {
-    // (the threads at the last look, by id; this look's, kept for its storage; what the runtime
-    // threads that ended since had run)
-    static SEEN: relax_session::sync::Mutex<(Vec<Seen>, Vec<Seen>, u64)> = relax_session::sync::Mutex::new((Vec::new(), Vec::new(), 0));
     static HOOKED: std::sync::Once = std::sync::Once::new();
     HOOKED.call_once(|| crate::run_threads::on_thread_end(note_thread_end));
     crate::zone_alloc::kept_with(|| {
@@ -1325,6 +1326,27 @@ fn note_thread_end() {
 /// finds it at its first read, whichever copy of the program's crates reads it.
 pub(crate) extern "C" fn relax_runtime_cpu_ns() -> u64 {
     runtime_cpu_ns()
+}
+
+/// What the runtime's own threads that run now (those [`runtime_cpu_ns`] counts) have spent
+/// runnable, waiting for a core, in ns (`threads::waited_ns`: Linux's run_delay; 0 where the OS
+/// keeps none per thread). None of it is CPU the program wanted: a test's idle rule takes it out of
+/// what the app's threads wanted (makepad_remote::runtime_waited_ns, through
+/// `relax_runtime_waited_ns`), so a busy JIT on a loaded box never holds an idle verdict back. Of
+/// the threads that run now only, as the app's own sum (makepad_hal's `threads_waited_ns`): a thread
+/// that ended takes its wait out of both. A file a runtime thread: read at a test's looks only.
+pub fn runtime_waited_ns() -> u64 {
+    // this look's threads, each named the runtime's or the program's
+    runtime_cpu_ns();
+    crate::zone_alloc::kept_with(|| {
+        let seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        seen.0.iter().filter(|s| s.runtime).map(|s| super::threads::waited_ns(s.id)).sum::<u64>()
+    })
+}
+
+/// [`runtime_waited_ns`] for the program (a loader symbol, jit.rs `loader_symbol`).
+pub(crate) extern "C" fn relax_runtime_waited_ns() -> u64 {
+    runtime_waited_ns()
 }
 
 /// The host's UI thread of a hosted run (run.rs `host_thread`: the process's main thread, on the

@@ -857,6 +857,21 @@ impl<'a, T> Iterator for Iter<'a, T> {
         let n = self.a.len() + self.b.len();
         (n, Some(n))
     }
+    #[cfg(not(relax_check))]
+    #[doc(hidden)]
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> &'a T {
+        // SAFETY: TrustedRandomAccess callers pass an index below the items left, which are a's
+        // and then b's
+        unsafe {
+            let a_len = self.a.len();
+            if idx < a_len {
+                self.a.__iterator_get_unchecked(idx)
+            } else {
+                self.b.__iterator_get_unchecked(idx - a_len)
+            }
+        }
+    }
 }
 
 impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
@@ -873,6 +888,12 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
 
 impl<'a, T> ExactSizeIterator for Iter<'a, T> {}
 impl<'a, T> FusedIterator for Iter<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccess for Iter<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccessNoCoerce for Iter<'a, T> {
+    const MAY_HAVE_SIDE_EFFECT: bool = false;
+}
 
 impl<'a, T: fmt::Debug> fmt::Debug for Iter<'a, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -900,6 +921,21 @@ impl<'a, T> Iterator for IterMut<'a, T> {
         let n = self.a.len() + self.b.len();
         (n, Some(n))
     }
+    #[cfg(not(relax_check))]
+    #[doc(hidden)]
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> &'a mut T {
+        // SAFETY: TrustedRandomAccess callers pass an index below the items left, which are a's
+        // and then b's
+        unsafe {
+            let a_len = self.a.len();
+            if idx < a_len {
+                self.a.__iterator_get_unchecked(idx)
+            } else {
+                self.b.__iterator_get_unchecked(idx - a_len)
+            }
+        }
+    }
 }
 
 impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
@@ -916,6 +952,12 @@ impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
 
 impl<'a, T> ExactSizeIterator for IterMut<'a, T> {}
 impl<'a, T> FusedIterator for IterMut<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccess for IterMut<'a, T> {}
+#[cfg(not(relax_check))]
+unsafe impl<'a, T> crate::iter::TrustedRandomAccessNoCoerce for IterMut<'a, T> {
+    const MAY_HAVE_SIDE_EFFECT: bool = false;
+}
 
 pub struct IntoIter<T> {
     inner: VecDeque<T>,

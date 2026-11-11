@@ -529,12 +529,6 @@ pub(crate) fn crate_views(prog: &crate::program::Program, ifaces: &[u128], atomi
         let ci = &prog.crates[c];
         let mut h = crate::crate_image::fingerprint_head(prog.syms.str(ci.name), ci.root_path(), ci.edition, ci.proc_macro, &ci.cfg.set);
         h.str("view");
-        // its structs and enums take live layouts (a struct's extension word, an enum's tag without
-        // a niche): code built for them is another crate's code, and the app scope that decides it
-        // is in no other key (a crate in one app's scope and outside another's)
-        if crate::layout::live_laid(prog, c as u32) {
-            h.str("live-laid");
-        }
         if atomic.get(c).copied().unwrap_or(true) {
             h.u128(ifaces.get(c).copied().unwrap_or(0));
         }
