@@ -476,16 +476,21 @@ fn fit_mode(texels: &[[u8; 4]; 16], mode: usize, pattern: usize, compsel: usize,
     // Initial endpoints per subset (and plane).
     let mut ends = [[[0f32; 4]; 2]; 3];
     for s in 0..subsets {
-        let pts: Vec<[f32; 4]> = (0..16).filter(|&i| subset_of(mode, pattern, i) == s)
-            .map(|i| { let mut p = [0f32; 4]; for (k, &ch) in chans.iter().enumerate() { p[k] = texels[i][ch] as f32; } p }).collect();
+        let mut points = [[0f32; 4]; 16];
+        let mut count = 0;
+        for i in (0..16).filter(|&i| subset_of(mode, pattern, i) == s) {
+            for (k, &ch) in chans.iter().enumerate() { points[count][k] = texels[i][ch] as f32; }
+            count += 1;
+        }
+        let pts = &mut points[..count];
         match plane1_comp {
-            None => { let (l, h) = fit_line(&pts, comps); ends[s] = [l, h]; }
+            None => { let (l, h) = fit_line(pts, comps); ends[s] = [l, h]; }
             Some(k) => {
                 // Plane 0: the other components along their own line; plane 1: 1D range.
-                let others: Vec<[f32; 4]> = pts.iter().map(|p| { let mut o = *p; o[k] = 0.0; o }).collect();
-                let (l, h) = fit_line(&others, comps);
-                ends[s] = [l, h];
                 let (lo, hi) = pts.iter().fold((255f32, 0f32), |(a, b), p| (a.min(p[k]), b.max(p[k])));
+                for p in pts.iter_mut() { p[k] = 0.0; }
+                let (l, h) = fit_line(pts, comps);
+                ends[s] = [l, h];
                 ends[s][0][k] = lo;
                 ends[s][1][k] = hi;
             }
@@ -501,8 +506,12 @@ fn fit_mode(texels: &[[u8; 4]; 16], mode: usize, pattern: usize, compsel: usize,
         // Best weight per texel (and plane) against the quantised endpoints.
         for i in 0..16 {
             let s = subset_of(mode, pattern, i);
-            let lo: Vec<u8> = (0..comps).map(|k| dequant_endpoint(range, u.endpoints[(s * comps + k) * 2] as u32)).collect();
-            let hi: Vec<u8> = (0..comps).map(|k| dequant_endpoint(range, u.endpoints[(s * comps + k) * 2 + 1] as u32)).collect();
+            let mut lo = [0u8; 4];
+            let mut hi = [0u8; 4];
+            for k in 0..comps {
+                lo[k] = dequant_endpoint(range, u.endpoints[(s * comps + k) * 2] as u32);
+                hi[k] = dequant_endpoint(range, u.endpoints[(s * comps + k) * 2 + 1] as u32);
+            }
             for p in 0..planes {
                 let in_plane = |k: usize| match plane1_comp { None => true, Some(pk) => (p == 1) == (k == pk) };
                 let mut bw = (u32::MAX, 0u32);
@@ -568,29 +577,48 @@ fn enforce_anchors(u: &mut Unpacked) {
     }
 }
 
+struct ModeCandidates {
+    singles: &'static [(usize, usize)],
+    partitioned: &'static [usize],
+}
+
+// Opaque, colour with alpha, grey with alpha. Order decides equal-error ties.
+fn mode_candidates(quality: Quality) -> &'static [ModeCandidates; 3] {
+    match quality {
+        Quality::Fast => &[
+            ModeCandidates { singles: &[(0, 0), (5, 0), (18, 0), (1, 0)], partitioned: &[] },
+            ModeCandidates { singles: &[(10, 0), (12, 0), (14, 0)], partitioned: &[] },
+            ModeCandidates { singles: &[(15, 0), (17, 3), (10, 0), (12, 0), (14, 0)], partitioned: &[] },
+        ],
+        Quality::Default => &[
+            ModeCandidates { singles: &[(0, 0), (5, 0), (18, 0), (1, 0)], partitioned: &[2, 4] },
+            ModeCandidates { singles: &[(10, 0), (12, 0), (14, 0), (13, 3), (11, 3)], partitioned: &[9] },
+            ModeCandidates { singles: &[(15, 0), (17, 3), (10, 0), (12, 0), (14, 0), (13, 3), (11, 3)], partitioned: &[16, 9] },
+        ],
+        Quality::Slow => &[
+            ModeCandidates { singles: &[(0, 0), (5, 0), (18, 0), (1, 0), (6, 0), (6, 1), (6, 2)], partitioned: &[2, 4, 3, 7] },
+            ModeCandidates { singles: &[(10, 0), (12, 0), (14, 0), (13, 3), (11, 3), (13, 0), (13, 1), (13, 2), (11, 0), (11, 1), (11, 2)], partitioned: &[9] },
+            ModeCandidates { singles: &[(15, 0), (17, 3), (10, 0), (12, 0), (14, 0), (13, 3), (11, 3), (13, 0), (13, 1), (13, 2), (11, 0), (11, 1), (11, 2)], partitioned: &[16, 9] },
+        ],
+    }
+}
+
 /// Encode one 4x4 block of RGBA texels.
 pub fn encode_block(texels: &[[u8; 4]; 16], quality: Quality) -> [u8; 16] {
+    encode_block_with_modes(texels, quality, mode_candidates(quality))
+}
+
+fn encode_block_with_modes(texels: &[[u8; 4]; 16], quality: Quality, modes: &[ModeCandidates; 3]) -> [u8; 16] {
     if texels.iter().all(|t| *t == texels[0]) {
         return pack(&Unpacked { mode: MODE_SOLID, solid: texels[0], ..Default::default() });
     }
     let opaque = texels.iter().all(|t| t[3] == 255);
     let grey = texels.iter().all(|t| t[0] == t[1] && t[1] == t[2]);
     let passes = match quality { Quality::Fast => 1, Quality::Default => 2, Quality::Slow => 3 };
-    let mut singles: Vec<(usize, usize)> = Vec::new();
-    let mut partitioned: Vec<usize> = Vec::new();
-    if opaque {
-        singles.extend([(0, 0), (5, 0), (18, 0), (1, 0)]);
-        if quality != Quality::Fast { partitioned.extend([2, 4]); }
-        if quality == Quality::Slow { partitioned.extend([3, 7]); singles.extend([(6, 0), (6, 1), (6, 2)]); }
-    } else {
-        if grey { singles.extend([(15, 0), (17, 3)]); if quality != Quality::Fast { partitioned.push(16); } }
-        singles.extend([(10, 0), (12, 0), (14, 0)]);
-        if quality != Quality::Fast { singles.extend([(13, 3), (11, 3)]); partitioned.push(9); }
-        if quality == Quality::Slow { singles.extend([(13, 0), (13, 1), (13, 2), (11, 0), (11, 1), (11, 2)]); }
-    }
+    let candidates = &modes[if opaque { 0 } else if grey { 2 } else { 1 }];
     let mut best: Option<Candidate> = None;
     let mut consider = |c: Candidate| if best.as_ref().map_or(true, |b| c.err < b.err) { best = Some(c) };
-    for &(mode, compsel) in &singles { consider(fit_mode(texels, mode, 0, compsel, passes)); }
+    for &(mode, compsel) in candidates.singles { consider(fit_mode(texels, mode, 0, compsel, passes)); }
     // One RGB dual-plane candidate (a channel that varies apart from the
     // others, e.g. crossed gradients), its plane chosen by a cheap fit. Slow
     // tries all three planes above.
@@ -598,9 +626,12 @@ pub fn encode_block(texels: &[[u8; 4]; 16], quality: Quality) -> [u8; 16] {
         let compsel = (0..3).min_by_key(|&c| fit_mode(texels, 6, 0, c, 0).err).unwrap_or(0);
         consider(fit_mode(texels, 6, 0, compsel, passes));
     }
-    for &mode in &partitioned {
+    for &mode in candidates.partitioned {
         // Rank patterns by a cheap fit, then refine the best few.
-        let mut ranked: Vec<(u32, usize)> = (0..pattern_count(mode)).map(|p| (fit_mode(texels, mode, p, 0, 0).err, p)).collect();
+        // PATTERNS2 is the largest partition table (30 entries).
+        let mut patterns = [(0u32, 0usize); t::PATTERNS2.len()];
+        let ranked = &mut patterns[..pattern_count(mode)];
+        for (p, rank) in ranked.iter_mut().enumerate() { *rank = (fit_mode(texels, mode, p, 0, 0).err, p); }
         ranked.sort_unstable();
         let keep = match quality { Quality::Slow => 4, _ => 2 };
         for &(_, p) in ranked.iter().take(keep) { consider(fit_mode(texels, mode, p, 0, passes)); }
@@ -618,6 +649,7 @@ pub fn encode_image(rgba: &[u8], width: u32, height: u32, quality: Quality, thre
     let mut out = vec![0u8; bx * by * 16];
     let threads = if threads == 0 { std::thread::available_parallelism().map_or(1, |n| n.get()) } else { threads }.clamp(1, by);
     let rows_per = (by + threads - 1) / threads;
+    let modes = mode_candidates(quality);
     std::thread::scope(|scope| {
         for (chunk, rows) in out.chunks_mut(rows_per * bx * 16).enumerate() {
             scope.spawn(move || {
@@ -629,7 +661,7 @@ pub fn encode_image(rgba: &[u8], width: u32, height: u32, quality: Quality, thre
                         let (px, py) = ((x0 + x).min(w - 1), (y0 + y).min(h - 1));
                         texels[y * 4 + x].copy_from_slice(&rgba[(py * w + px) * 4..][..4]);
                     } }
-                    block.copy_from_slice(&encode_block(&texels, quality));
+                    block.copy_from_slice(&encode_block_with_modes(&texels, quality, modes));
                 }
             });
         }
@@ -700,6 +732,164 @@ mod tests {
                 assert_eq!(back.weights, u.weights, "mode {mode}");
                 assert_eq!((back.pattern, back.compsel), (u.pattern, u.compsel));
             }
+        }
+    }
+
+    #[test]
+    fn encoding_matches_the_old_path_at_every_quality() {
+        let blocks: [[[u8; 4]; 16]; 6] = [
+            std::array::from_fn(|i| { let g = (i * 17) as u8; [g, g, g, 255] }),
+            std::array::from_fn(|i| [(i * 17) as u8, ((i % 4) * 73) as u8, ((i / 4) * 61) as u8, 255]),
+            std::array::from_fn(|i| [(i * 17) as u8, ((i % 4) * 73) as u8, ((i / 4) * 61) as u8, (255 - i * 13) as u8]),
+            std::array::from_fn(|i| if i % 4 < 2 { [21, 184, 37, 255] } else { [232, 16, 153, 255] }),
+            std::array::from_fn(|i| { let g = (i * 17) as u8; [g, g, g, (255 - i * 13) as u8] }),
+            [[71, 39, 220, 123]; 16],
+        ];
+        // Two tile rows exercise shared tables in both serial and parallel image calls.
+        let mut rgba = [0u8; 12 * 8 * 4];
+        for y in 0..8 { for x in 0..12 {
+            let texel = blocks[(y / 4) * 3 + x / 4][(y % 4) * 4 + x % 4];
+            rgba[(y * 12 + x) * 4..][..4].copy_from_slice(&texel);
+        } }
+        for quality in [Quality::Fast, Quality::Default, Quality::Slow] {
+            let mut expected = Vec::new();
+            for (i, texels) in blocks.iter().enumerate() {
+                let old = legacy::encode_block(texels, quality);
+                assert_eq!(encode_block(texels, quality), old, "{quality:?}, block {i}");
+                expected.extend_from_slice(&old);
+            }
+            for threads in [1, 2] {
+                assert_eq!(encode_image(&rgba, 12, 8, quality, threads).unwrap(), expected,
+                    "{quality:?}, {threads} workers");
+            }
+        }
+    }
+
+    // Frozen allocating fitting/selection paths from before scratch reuse. The
+    // unchanged line fit, quantisation, anchor handling and packing are shared.
+    mod legacy {
+        use super::*;
+        fn fit_mode(texels: &[[u8; 4]; 16], mode: usize, pattern: usize, compsel: usize, passes: usize) -> Candidate {
+            let chans = mode_channels(mode);
+            let comps = chans.len();
+            let subsets = SUBSETS[mode] as usize;
+            let dual = PLANES[mode] == 2;
+            let planes = PLANES[mode] as usize;
+            let range = ENDPOINT_RANGE[mode];
+            let q = quantizer(range);
+            let wb = WEIGHT_BITS[mode];
+            let levels = 1u32 << wb;
+            // Which mode component the second plane drives.
+            let plane1_comp = if dual { chans.iter().position(|&ch| ch == compsel) } else { None };
+            let mut u = Unpacked { mode, pattern, compsel, etc1_bias: 13, ..Default::default() };
+            // Initial endpoints per subset (and plane).
+            let mut ends = [[[0f32; 4]; 2]; 3];
+            for s in 0..subsets {
+                let pts: Vec<[f32; 4]> = (0..16).filter(|&i| subset_of(mode, pattern, i) == s)
+                    .map(|i| { let mut p = [0f32; 4]; for (k, &ch) in chans.iter().enumerate() { p[k] = texels[i][ch] as f32; } p }).collect();
+                match plane1_comp {
+                    None => { let (l, h) = fit_line(&pts, comps); ends[s] = [l, h]; }
+                    Some(k) => {
+                        // Plane 0: the other components along their own line; plane 1: 1D range.
+                        let others: Vec<[f32; 4]> = pts.iter().map(|p| { let mut o = *p; o[k] = 0.0; o }).collect();
+                        let (l, h) = fit_line(&others, comps);
+                        ends[s] = [l, h];
+                        let (lo, hi) = pts.iter().fold((255f32, 0f32), |(a, b), p| (a.min(p[k]), b.max(p[k])));
+                        ends[s][0][k] = lo;
+                        ends[s][1][k] = hi;
+                    }
+                }
+            }
+            let mut best: Option<Candidate> = None;
+            for pass in 0..=passes {
+                // Quantise endpoints.
+                for s in 0..subsets { for k in 0..comps {
+                    u.endpoints[(s * comps + k) * 2] = q.to_int[ends[s][0][k].round().clamp(0.0, 255.0) as usize];
+                    u.endpoints[(s * comps + k) * 2 + 1] = q.to_int[ends[s][1][k].round().clamp(0.0, 255.0) as usize];
+                } }
+                // Best weight per texel (and plane) against the quantised endpoints.
+                for i in 0..16 {
+                    let s = subset_of(mode, pattern, i);
+                    let lo: Vec<u8> = (0..comps).map(|k| dequant_endpoint(range, u.endpoints[(s * comps + k) * 2] as u32)).collect();
+                    let hi: Vec<u8> = (0..comps).map(|k| dequant_endpoint(range, u.endpoints[(s * comps + k) * 2 + 1] as u32)).collect();
+                    for p in 0..planes {
+                        let in_plane = |k: usize| match plane1_comp { None => true, Some(pk) => (p == 1) == (k == pk) };
+                        let mut bw = (u32::MAX, 0u32);
+                        for w in 0..levels {
+                            let wv = weight_value(wb, w);
+                            let mut e = 0u32;
+                            for k in 0..comps {
+                                if !in_plane(k) { continue; }
+                                let d = interpolate(lo[k], hi[k], wv) as i32 - texels[i][chans[k]] as i32;
+                                e += (d * d) as u32;
+                            }
+                            if e < bw.0 { bw = (e, w); }
+                        }
+                        u.weights[i * planes + p] = bw.1 as u8;
+                    }
+                }
+                let err = block_error(texels, &decode_unpacked(&u));
+                if best.as_ref().map_or(true, |b| err < b.err) { best = Some(Candidate { u: u.clone(), err }); }
+                if pass == passes || err == 0 { break; }
+                // Least-squares endpoint refit from the chosen weights.
+                for s in 0..subsets { for k in 0..comps {
+                    let p = match plane1_comp { Some(pk) if pk == k => 1, _ => 0 };
+                    let (mut a, mut b, mut c, mut x, mut y) = (0f32, 0f32, 0f32, 0f32, 0f32);
+                    for i in (0..16).filter(|&i| subset_of(mode, pattern, i) == s) {
+                        let w = weight_value(wb, u.weights[i * planes + p] as u32) as f32 / 64.0;
+                        let v = texels[i][chans[k]] as f32;
+                        a += (1.0 - w) * (1.0 - w); b += (1.0 - w) * w; c += w * w;
+                        x += (1.0 - w) * v; y += w * v;
+                    }
+                    let det = a * c - b * b;
+                    if det.abs() > 1e-6 {
+                        ends[s][0][k] = ((c * x - b * y) / det).clamp(0.0, 255.0);
+                        ends[s][1][k] = ((a * y - b * x) / det).clamp(0.0, 255.0);
+                    }
+                } }
+            }
+            let mut cand = best.unwrap();
+            enforce_anchors(&mut cand.u);
+            cand
+        }
+
+        pub fn encode_block(texels: &[[u8; 4]; 16], quality: Quality) -> [u8; 16] {
+            if texels.iter().all(|t| *t == texels[0]) {
+                return pack(&Unpacked { mode: MODE_SOLID, solid: texels[0], ..Default::default() });
+            }
+            let opaque = texels.iter().all(|t| t[3] == 255);
+            let grey = texels.iter().all(|t| t[0] == t[1] && t[1] == t[2]);
+            let passes = match quality { Quality::Fast => 1, Quality::Default => 2, Quality::Slow => 3 };
+            let mut singles: Vec<(usize, usize)> = Vec::new();
+            let mut partitioned: Vec<usize> = Vec::new();
+            if opaque {
+                singles.extend([(0, 0), (5, 0), (18, 0), (1, 0)]);
+                if quality != Quality::Fast { partitioned.extend([2, 4]); }
+                if quality == Quality::Slow { partitioned.extend([3, 7]); singles.extend([(6, 0), (6, 1), (6, 2)]); }
+            } else {
+                if grey { singles.extend([(15, 0), (17, 3)]); if quality != Quality::Fast { partitioned.push(16); } }
+                singles.extend([(10, 0), (12, 0), (14, 0)]);
+                if quality != Quality::Fast { singles.extend([(13, 3), (11, 3)]); partitioned.push(9); }
+                if quality == Quality::Slow { singles.extend([(13, 0), (13, 1), (13, 2), (11, 0), (11, 1), (11, 2)]); }
+            }
+            let mut best: Option<Candidate> = None;
+            let mut consider = |c: Candidate| if best.as_ref().map_or(true, |b| c.err < b.err) { best = Some(c) };
+            for &(mode, compsel) in &singles { consider(fit_mode(texels, mode, 0, compsel, passes)); }
+            // One RGB dual-plane candidate (a channel that varies apart from the
+            // others, e.g. crossed gradients), its plane chosen by a cheap fit. Slow
+            // tries all three planes above.
+            if opaque && quality != Quality::Slow {
+                let compsel = (0..3).min_by_key(|&c| fit_mode(texels, 6, 0, c, 0).err).unwrap_or(0);
+                consider(fit_mode(texels, 6, 0, compsel, passes));
+            }
+            for &mode in &partitioned {
+                // Rank patterns by a cheap fit, then refine the best few.
+                let mut ranked: Vec<(u32, usize)> = (0..pattern_count(mode)).map(|p| (fit_mode(texels, mode, p, 0, 0).err, p)).collect();
+                ranked.sort_unstable();
+                let keep = match quality { Quality::Slow => 4, _ => 2 };
+                for &(_, p) in ranked.iter().take(keep) { consider(fit_mode(texels, mode, p, 0, passes)); }
+            }
+            pack(&best.unwrap().u)
         }
     }
 }

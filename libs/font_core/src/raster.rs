@@ -110,7 +110,6 @@ pub struct MsdfComplexitySettings {
 #[derive(Clone, Copy, Debug)]
 pub struct RasterizedGlyph {
     pub atlas_kind: AtlasKind,
-    pub atlas_size: Size<usize>,
     pub atlas_image_bounds: Rect<usize>,
     pub atlas_image_padding: usize,
     pub atlas_plane: u8,
@@ -133,6 +132,17 @@ pub struct GlyphSource {
     pub kind: u32,
     /// the requested pixels per em, as bits
     pub dpxs_bits: u32,
+}
+
+/// What a look-up of an outline glyph's SDF found. Until it's `Ready`, the text draws the glyph's
+/// slug curves in its place (`GlyphRendering::Hybrid`).
+#[derive(Clone, Copy, Debug)]
+pub enum OutlineSdf {
+    Ready(RasterizedGlyph),
+    /// asked for: the text draws again once it's here
+    Pending,
+    /// none is coming (no outline, no image, or no room for it)
+    Unavailable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -176,8 +186,6 @@ pub fn is_msdf_complexity_acceptable(
 /// outline to render it from.
 pub struct SdfPlan {
     pub key: GlyphImageKey,
-    /// the coverage image (without padding)
-    pub image_size: Size<usize>,
     pub padding: usize,
     pub origin_in_dpxs: Point<f32>,
     pub dpxs_per_em: f32,
@@ -187,17 +195,26 @@ pub struct SdfPlan {
 impl SdfPlan {
     /// The distance field, `key.size` pixels (the coverage plus the padding all around).
     pub fn render(&self, sdfer: &mut Sdfer) -> Image<R> {
-        let mut coverage = Image::new(self.image_size);
-        self.outline
-            .rasterize(self.dpxs_per_em, &mut coverage.subimage_mut(self.image_size.into()));
-        let size = self.image_size + Size::from(self.padding) * 2;
-        let mut sdf = Image::<R>::new(size);
-        sdfer.coverage_to_sdf(
-            &coverage.subimage(self.image_size.into()),
-            &mut sdf.subimage_mut(Rect::from(size)),
-        );
-        sdf
+        render_sdf(sdfer, &self.outline, self.dpxs_per_em, self.key.size)
     }
+
+    /// A copy of the outline for a thread that renders it.
+    pub fn outline(&self) -> GlyphOutline {
+        (*self.outline).clone()
+    }
+}
+
+/// Renders the distance field of `outline`, `size` pixels (the coverage plus the padding all around).
+pub fn render_sdf(sdfer: &mut Sdfer, outline: &GlyphOutline, dpxs_per_em: f32, size: Size<usize>) -> Image<R> {
+    let image_size = size - Size::from(sdfer.settings().padding) * 2;
+    let mut coverage = Image::new(image_size);
+    outline.rasterize(dpxs_per_em, &mut coverage.subimage_mut(image_size.into()));
+    let mut sdf = Image::<R>::new(size);
+    sdfer.coverage_to_sdf(
+        &coverage.subimage(image_size.into()),
+        &mut sdf.subimage_mut(Rect::from(size)),
+    );
+    sdf
 }
 
 pub fn plan_outline_sdf(
@@ -220,7 +237,6 @@ pub fn plan_outline_sdf(
             size: image_size + Size::from(padding) * 2,
             kind: GlyphImageKind::OutlineSdf,
         },
-        image_size,
         padding,
         origin_in_dpxs: bounds_in_ems.origin * dpxs_per_em,
         dpxs_per_em,
@@ -627,16 +643,21 @@ impl RectPacker {
         {
             return false;
         }
-        let mut next_free_rects = Vec::with_capacity(self.free_rects.len().saturating_mul(2));
+        // No free rect is inside another, so none of the ones `used` misses can be inside a piece
+        // cut from one it hits: only the pieces need pruning, which keeps a big atlas's rebuild fast.
+        let mut kept = Vec::with_capacity(self.free_rects.len().saturating_mul(2));
+        let mut pieces = Vec::new();
         for free in self.free_rects.drain(..) {
-            if !rects_intersect(free, used) {
-                next_free_rects.push(free);
-                continue;
+            if rects_intersect(free, used) {
+                split_free_rect(free, used, &mut pieces);
+            } else {
+                kept.push(free);
             }
-            split_free_rect(free, used, &mut next_free_rects);
         }
-        self.free_rects = next_free_rects;
-        prune_contained_rects(&mut self.free_rects);
+        prune_contained_rects(&mut pieces);
+        pieces.retain(|piece| !kept.iter().any(|free| free.contains_rect(*piece)));
+        kept.append(&mut pieces);
+        self.free_rects = kept;
         true
     }
 }

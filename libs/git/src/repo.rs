@@ -954,17 +954,12 @@ impl Repository {
         old_tree_oid: &ObjectId,
         new_tree_oid: &ObjectId,
     ) -> Result<Vec<TreeChange>, GitError> {
-        self.ensure_object_sources()?;
-        let old_tree = self.read_tree(old_tree_oid)?;
-        let new_tree = self.read_tree(new_tree_oid)?;
-        // We need a closure that can call self.read_tree, but self is already borrowed.
-        // Workaround: use the lower-level read_object to avoid borrowing self in closure.
-        let git_dir = self.common_dir.clone();
-        let packs_ref = &self.packs;
-        let alts = &self.alternates;
-        diff::diff_trees(&old_tree, &new_tree, "", &mut |oid| {
-            let obj = read_tree_standalone(&git_dir, oid, packs_ref, alts)?;
-            Ok(obj)
+        self.again(|repo| {
+            repo.ensure_object_sources()?;
+            let old_tree = repo.read_tree(old_tree_oid)?;
+            let new_tree = repo.read_tree(new_tree_oid)?;
+            let (git_dir, packs, alts) = (&repo.common_dir, &repo.packs, &repo.alternates);
+            diff::diff_trees(&old_tree, &new_tree, "", &mut |oid| read_tree_standalone(git_dir, oid, packs, alts))
         })
     }
 
@@ -1003,22 +998,16 @@ impl Repository {
 
         // Try to build HEAD tree file map. If HEAD objects are missing locally
         // (e.g. partial clones), fall back to index/worktree-only status.
-        let head_files = match (|| -> Result<HashMap<String, ObjectId>, GitError> {
-            match self.head_oid() {
-                Ok(head_oid) => {
-                    let commit = self.read_commit(&head_oid)?;
-                    let tree = self.read_tree(&commit.tree)?;
-                    let git_dir = self.common_dir.clone();
-                    let packs = &self.packs;
-                    let alts = &self.alternates;
-                    worktree::flatten_tree(&tree, "", &mut |oid| {
-                        read_tree_standalone(&git_dir, oid, packs, alts)
-                    })
-                }
-                Err(GitError::RefNotFound(_)) => Ok(HashMap::new()),
-                Err(e) => Err(e),
+        let head_files = match self.again(|repo| match repo.head_oid() {
+            Ok(head_oid) => {
+                let commit = repo.read_commit(&head_oid)?;
+                let tree = repo.read_tree(&commit.tree)?;
+                let (git_dir, packs, alts) = (&repo.common_dir, &repo.packs, &repo.alternates);
+                worktree::flatten_tree(&tree, "", &mut |oid| read_tree_standalone(git_dir, oid, packs, alts))
             }
-        })() {
+            Err(GitError::RefNotFound(_)) => Ok(HashMap::new()),
+            Err(e) => Err(e),
+        }) {
             Ok(head_files) => head_files,
             Err(GitError::ObjectNotFound(_)) => {
                 return worktree::compute_status_worktree_only_cancellable(
@@ -1382,13 +1371,11 @@ impl Repository {
         &mut self,
         tree: &ObjectId,
     ) -> Result<HashMap<String, (ObjectId, u32)>, GitError> {
-        self.ensure_object_sources()?;
-        let root = self.read_tree(tree)?;
-        let git_dir = self.common_dir.clone();
-        let packs = &self.packs;
-        let alts = &self.alternates;
-        merge::flatten_tree_with_mode(&root, "", &mut |oid| {
-            read_tree_standalone(&git_dir, oid, packs, alts)
+        self.again(|repo| {
+            repo.ensure_object_sources()?;
+            let root = repo.read_tree(tree)?;
+            let (git_dir, packs, alts) = (&repo.common_dir, &repo.packs, &repo.alternates);
+            merge::flatten_tree_with_mode(&root, "", &mut |oid| read_tree_standalone(git_dir, oid, packs, alts))
         })
     }
 
@@ -1400,16 +1387,16 @@ impl Repository {
         oid_a: &ObjectId,
         oid_b: &ObjectId,
     ) -> Result<Option<ObjectId>, GitError> {
-        self.ensure_object_sources()?;
-        let git_dir = self.common_dir.clone();
-        let packs = &self.packs;
-        let alts = &self.alternates;
-        merge::find_merge_base(oid_a, oid_b, &mut |oid| {
-            let obj = read_object_standalone(&git_dir, oid, packs, alts)?;
-            if obj.kind != ObjectKind::Commit {
-                return Err(GitError::InvalidObject("expected commit".into()));
-            }
-            parse_commit(&obj.data)
+        self.again(|repo| {
+            repo.ensure_object_sources()?;
+            let (git_dir, packs, alts) = (&repo.common_dir, &repo.packs, &repo.alternates);
+            merge::find_merge_base(oid_a, oid_b, &mut |oid| {
+                let obj = read_object_standalone(git_dir, oid, packs, alts)?;
+                if obj.kind != ObjectKind::Commit {
+                    return Err(GitError::InvalidObject("expected commit".into()));
+                }
+                parse_commit(&obj.data)
+            })
         })
     }
 
@@ -1721,6 +1708,20 @@ impl Repository {
         self.alternates = None;
         self.alternate_packs = None;
         true
+    }
+
+    /// `op` once more, over the packs on disk, when it failed and the packs it read are gone: for
+    /// an operation that reads through a snapshot of the packs ([`read_object_standalone`]), which
+    /// cannot list them again itself as [`Self::read_object`] does ([`Self::packs_moved`]). A
+    /// repack meanwhile packed an object that was loose when `op` read the packs and removed its
+    /// file: `devhub push`'s diff of two commits missed a subtree of its tip, written loose by the
+    /// landing's merge a moment before, while the auto maintenance that merge started repacked
+    /// (11-10); a retry a minute later read it. git's operations retry the same way.
+    fn again<T>(&mut self, mut op: impl FnMut(&mut Self) -> Result<T, GitError>) -> Result<T, GitError> {
+        match op(self) {
+            Err(_) if self.packs_moved() => op(self),
+            done => done,
+        }
     }
 
     /// Read the pack indexes now (otherwise at the first object read). A

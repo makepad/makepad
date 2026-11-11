@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use crate::error::GitError;
@@ -184,12 +185,36 @@ pub fn parse_index(data: &[u8]) -> Result<Index, GitError> {
 }
 
 /// Write the index in v2 format.
+/// The lock is taken exclusively; a held lock is refused, never written through.
 pub fn write_index(git_dir: &Path, index: &Index) -> Result<(), GitError> {
     let data = serialize_index(index)?;
     let index_path = git_dir.join("index");
     let lock_path = git_dir.join("index.lock");
-    fs::write(&lock_path, &data)?;
-    fs::rename(&lock_path, &index_path)?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                GitError::InvalidIndex(format!(
+                    "{} is locked: another git writes it ({} exists)",
+                    index_path.display(),
+                    lock_path.display()
+                ))
+            } else {
+                GitError::io_at("create", &lock_path, e)
+            }
+        })?;
+    let written = file.write_all(&data);
+    drop(file);
+    if let Err(e) = written {
+        let _ = fs::remove_file(&lock_path);
+        return Err(GitError::io_at("write", &lock_path, e));
+    }
+    if let Err(e) = fs::rename(&lock_path, &index_path) {
+        let _ = fs::remove_file(&lock_path);
+        return Err(GitError::io_at("rename", &lock_path, e));
+    }
     Ok(())
 }
 
@@ -286,6 +311,38 @@ mod tests {
         assert_eq!(index.entries[0].path, "hello.txt");
         assert_eq!(index.entries[1].path, "world.txt");
         assert_eq!(index.entries[0].oid.to_hex(), "ce013625030ba8dba906f756967f9e9ca394464a");
+    }
+
+    #[test]
+    fn a_held_index_lock_is_refused_and_left_alone() {
+        let dir = crate::test_support::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        let first = Index {
+            version: 2,
+            entries: vec![entry("hello.txt", b"hello\n"), entry("world.txt", b"world\n")],
+        };
+        write_index(&git_dir, &first).unwrap();
+
+        let lock_path = git_dir.join("index.lock");
+        fs::write(&lock_path, b"another writer").unwrap();
+        let second = Index {
+            version: 2,
+            entries: vec![entry("changed.txt", b"changed\n")],
+        };
+        let error = write_index(&git_dir, &second).unwrap_err();
+        assert!(error.to_string().contains("is locked"));
+        assert_eq!(fs::read(&lock_path).unwrap(), b"another writer");
+        let unchanged = read_index(&git_dir).unwrap();
+        assert_eq!(
+            serialize_index(&unchanged).unwrap(),
+            serialize_index(&first).unwrap(),
+            "a refused write must preserve the first index's entries"
+        );
+
+        fs::remove_file(&lock_path).unwrap();
+        write_index(&git_dir, &second).unwrap();
+        assert!(!lock_path.exists());
     }
 
     #[test]
