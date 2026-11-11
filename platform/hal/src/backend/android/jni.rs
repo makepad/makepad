@@ -191,6 +191,7 @@ unsafe extern "system" fn surface_destroyed(_: *mut JNIEnv, _: jclass, _: jobjec
     if super::xr::active() { return; }
     let shared = Shared::global();
     let old = { let mut r = lock(&shared.registry); r.state.destroyed(); r.window.take() };
+    if let Some(release) = &*lock(&shared.release_window) { release(); }
     drop(old);
     emit_lifecycle(lifecycle::SURFACE_LOST); shared.display();
 }
