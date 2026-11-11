@@ -3682,6 +3682,15 @@ impl ScriptVmBase {
     /// A handle another thread uses to stop this VM's runs ([`crate::interrupt`]).
     #[relax_api]
     pub fn interrupt_handle(&self) -> crate::interrupt::ScriptInterrupt { self.interrupt.clone() }
+    /// The host's own end of the run, from a native it is in: the VM is stopped
+    /// ([`crate::interrupt::ScriptInterrupt::stop`]) and the running thread bails here with nil,
+    /// uncatchably and with no error. One call across the API: a host built by another compiler
+    /// than the VM never touches the trap's fields itself.
+    #[relax_api]
+    pub fn stop_run(&mut self) {
+        self.interrupt.stop();
+        self.threads.cur_ref().trap.set_on(Some(ScriptTrapOn::Bail(NIL)));
+    }
     #[inline(always)]
     pub fn body_count(&self) -> usize { self.vm_stat(&mut ScriptCtlReq::new(STAT_BODY_COUNT)) as usize }
     #[relax_api]
