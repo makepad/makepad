@@ -81,6 +81,7 @@ impl Cx {
         self.gpu_info.float16_blend_targets = supports(makepad_hal::format::RGBA16F);
         self.gpu_info.texture_bc7 = supports(makepad_hal::format::BC7);
         self.gpu_info.texture_astc4x4 = supports(makepad_hal::format::ASTC4X4);
+        self.gpu_info.max_texture_size = info.max_texture as usize;
         // Who the GPU is, for apps that size their work to it (a graphics
         // quality tier): the vendor from its PCI id, the driver's device name.
         let name = info.device_name();

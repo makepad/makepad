@@ -20,6 +20,7 @@ use {
 pub struct WGpuInfo {
     pub min_uniform_vectors: u32,
     pub float_color_targets: bool,
+    pub max_texture_size: u32,
     pub vendor: String,
     pub renderer: String,
 }

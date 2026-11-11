@@ -125,6 +125,9 @@ pub struct Cx {
     /// Run on every Event::Signal before the app sees it: subsystems above the platform
     /// (the text system's glyph workers) react to their workers' signals.
     pub signal_hooks: Vec<fn(&mut Cx)>,
+    /// Run on every event before the app sees it, after the signal hooks: subsystems above the
+    /// platform with timers of their own, or that react to the app going to the background.
+    pub event_hooks: Vec<fn(&mut Cx, &Event)>,
 
     pub redraw_id: u64,
     /// The drawing being recorded (`Cx::drawing_id`): one per draw event, and
@@ -1037,6 +1040,7 @@ impl Cx {
 
             new_draw_event: Default::default(),
             signal_hooks: Vec::new(),
+            event_hooks: Vec::new(),
             new_actions: Default::default(),
 
             redraw_id: 1,

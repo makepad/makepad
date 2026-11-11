@@ -31,6 +31,9 @@ pub mod glyph {
     pub const SLUG: u32 = 3;
     /// the glyph has nothing to draw (a space), or cannot be rasterised
     pub const EMPTY: u32 = 4;
+    /// The glyphs on screen fill the atlas, so this one has no room for now: it's drawn as nothing,
+    /// and asked for again once there may be room (after an eviction, a release or a new atlas size).
+    pub const NO_ROOM: u32 = 5;
 }
 
 /// `FontOpened::status`.

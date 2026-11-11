@@ -1,21 +1,22 @@
 use super::{
-    font::{Font, GlyphId},
-    font_atlas::{ColorAtlas, GlyphImageKey, GrayscaleAtlas, MsdfAtlas},
+    font::{Font, FontId, GlyphId},
+    font_atlas::{ColorAtlas, GlyphImageKey, GlyphImageKind, GrayscaleAtlas, MsdfAtlas},
     geom::{Point, Size},
     glyph_outline::GlyphOutline,
-    image::Bgra,
+    image::{Bgra, Image, R},
     msdfer::Msdfer,
     sdfer::Sdfer,
 };
 use fxhash::{FxHashMap, FxHashSet};
 pub use makepad_font_core::raster::{
     AtlasKind, MsdfComplexitySettings, MsdfResolutionSettings, OutlineRasterizationMode,
-    RasterizedGlyph, Settings,
+    OutlineSdf, RasterizedGlyph, Settings,
 };
 use makepad_font_core::raster::{
     plan_color, plan_outline_msdf, plan_outline_sdf, AtlasPlane, AtlasSlot, MultiPlaneAllocator,
-    COLOR_PADDING,
+    SdfPlan, COLOR_PADDING,
 };
+use std::rc::Rc;
 //use std::{fs::File, io::BufWriter, path::Path, slice};
 
 #[derive(Debug)]
@@ -29,8 +30,24 @@ pub struct Rasterizer {
     outline_msdf_ready: FxHashSet<GlyphImageKey>,
     outline_msdf_pending: FxHashSet<GlyphImageKey>,
     outline_msdf_failed: FxHashSet<GlyphImageKey>,
-    queued_msdf_jobs: Vec<QueuedMsdfJob>,
+    queued_msdf_jobs: Vec<QueuedOutlineJob>,
+    /// SDFs on their way, and whether one that finds no room may reset the atlas: a prewarm's can't,
+    /// and neither can a refill's, since a reset wouldn't make room for it.
+    outline_sdf_pending: FxHashMap<GlyphImageKey, bool>,
+    queued_sdf_jobs: Vec<QueuedOutlineJob>,
+    /// SDFs that found no room even in a grown atlas: they draw as slug curves until it resets.
+    outline_sdf_no_room: FxHashSet<GlyphImageKey>,
+    /// The fonts and sizes (as `f32` bits) whose printable ASCII we've already queued.
+    prewarm_sdf_sizes: FxHashSet<(FontId, u32)>,
+    /// The fonts and sizes whose printable ASCII we queue after this frame's own glyphs.
+    queued_sdf_prewarms: Vec<(Rc<Font>, f32)>,
     atlas_epoch: u64,
+    /// 0 means every glyph fit this frame.
+    pub(super) atlas_overflow_hash: u64,
+    /// Only `Fonts` raises this, so a worker's atlas never grows.
+    pub(super) max_atlas_height: usize,
+    /// `Fonts` sets this while it draws the frame that refills an atlas it just emptied.
+    pub(super) refilling: bool,
 }
 
 impl Rasterizer {
@@ -89,7 +106,6 @@ impl Rasterizer {
         }
         Some(RasterizedGlyph {
             source: Default::default(),
-            atlas_size: self.atlas.size(),
             atlas_image_bounds: slot.rect,
             atlas_plane: slot.plane.index(),
             ..published.glyph
@@ -109,7 +125,15 @@ impl Rasterizer {
             outline_msdf_pending: FxHashSet::default(),
             outline_msdf_failed: FxHashSet::default(),
             queued_msdf_jobs: Vec::new(),
+            outline_sdf_pending: FxHashMap::default(),
+            queued_sdf_jobs: Vec::new(),
+            outline_sdf_no_room: FxHashSet::default(),
+            prewarm_sdf_sizes: FxHashSet::default(),
+            queued_sdf_prewarms: Vec::new(),
             atlas_epoch: 0,
+            atlas_overflow_hash: 0,
+            max_atlas_height: atlas_size.height,
+            refilling: false,
         }
     }
 
@@ -144,15 +168,66 @@ impl Rasterizer {
         self.outline_msdf_pending.clear();
         self.outline_msdf_failed.clear();
         self.queued_msdf_jobs.clear();
+        self.outline_sdf_pending.clear();
+        self.queued_sdf_jobs.clear();
+        self.outline_sdf_no_room.clear();
+        self.prewarm_sdf_sizes.clear();
+        self.queued_sdf_prewarms.clear();
         self.atlas_epoch = self.atlas_epoch.wrapping_add(1);
     }
 
-    pub fn queued_msdf_job_count(&self) -> usize {
-        self.queued_msdf_jobs.len()
+    pub fn queued_outline_job_count(&self) -> usize {
+        self.queued_msdf_jobs.len() + self.queued_sdf_jobs.len()
     }
 
-    pub fn take_queued_msdf_jobs(&mut self) -> Vec<QueuedMsdfJob> {
+    pub fn take_queued_msdf_jobs(&mut self) -> Vec<QueuedOutlineJob> {
         std::mem::take(&mut self.queued_msdf_jobs)
+    }
+
+    /// Takes the SDF jobs queued since the last call, with the printable ASCII we prewarm last.
+    pub fn take_queued_sdf_jobs(&mut self) -> Vec<QueuedOutlineJob> {
+        for (font, dpxs_per_em) in std::mem::take(&mut self.queued_sdf_prewarms) {
+            let glyph_ids = font.with_ttf_parser_face(|face| {
+                (' '..='~')
+                    .filter_map(|ch| face.glyph_index(ch))
+                    .collect::<Vec<_>>()
+            });
+            for glyph_id in glyph_ids {
+                if let Some(plan) = plan_outline_sdf(&font, glyph_id.0, dpxs_per_em, &self.settings) {
+                    self.queue_glyph_outline_sdf(&plan, false);
+                }
+            }
+        }
+        std::mem::take(&mut self.queued_sdf_jobs)
+    }
+
+    pub fn apply_completed_outline_job(&mut self, job: CompletedOutlineJob) {
+        match job {
+            CompletedOutlineJob::Msdf(job) => self.apply_completed_msdf_job(job),
+            CompletedOutlineJob::Sdf(job) => self.apply_completed_sdf_job(job),
+        }
+    }
+
+    pub fn apply_completed_sdf_job(&mut self, job: CompletedSdfJob) {
+        if job.epoch != self.atlas_epoch {
+            return;
+        }
+        let Some(may_reset) = self.outline_sdf_pending.remove(&job.key) else {
+            return;
+        };
+        let overflow = self.atlas_overflow_hash;
+        let Some((slot, allocated)) = self.allocate_sdf_slot(job.key.clone()) else {
+            // it draws as slug curves until the atlas resets, and only a glyph on screen outside a
+            // refill counts toward that reset
+            if !may_reset {
+                self.atlas_overflow_hash = overflow;
+            }
+            self.outline_sdf_no_room.insert(job.key);
+            return;
+        };
+        if allocated {
+            self.write_sdf_image(slot, &job.sdf_image);
+        }
     }
 
     pub fn apply_completed_msdf_job(&mut self, job: CompletedMsdfJob) {
@@ -213,14 +288,33 @@ impl Rasterizer {
         self.cached_slots.get(key).copied()
     }
 
+    fn allocate_or_grow<T>(
+        &mut self,
+        key: &GlyphImageKey,
+        allocate: impl Fn(&mut MultiPlaneAllocator, Size<usize>) -> Option<T>,
+    ) -> Option<T> {
+        if let Some(slot) = allocate(&mut self.allocator, key.size) {
+            return Some(slot);
+        }
+        // Straight to the full height, since every step re-uploads all of it.
+        let height = self.max_atlas_height;
+        if height > self.atlas.size().height {
+            self.atlas.grow(height);
+            let used = self.cached_slots.iter().map(|(key, slot)| (slot.rect, (key.kind == GlyphImageKind::OutlineSdf).then_some(slot.plane)));
+            self.allocator.rebuild(self.atlas.size(), used);
+            if let Some(slot) = allocate(&mut self.allocator, key.size) {
+                return Some(slot);
+            }
+        }
+        self.atlas_overflow_hash = self.atlas_overflow_hash.wrapping_add(fxhash::hash64(key));
+        None
+    }
+
     fn allocate_sdf_slot(&mut self, key: GlyphImageKey) -> Option<(AtlasSlot, bool)> {
         if let Some(slot) = self.get_cached_slot(&key) {
             return Some((slot, false));
         }
-        let Some(slot) = self.allocator.allocate_sdf_slot(key.size) else {
-            self.atlas.request_reset();
-            return None;
-        };
+        let slot = self.allocate_or_grow(&key, MultiPlaneAllocator::allocate_sdf_slot)?;
         self.cached_slots.insert(key, slot);
         Some((slot, true))
     }
@@ -229,10 +323,7 @@ impl Rasterizer {
         if let Some(slot) = self.get_cached_slot(&key) {
             return Some((slot, false));
         }
-        let Some(rect) = self.allocator.allocate_shared_slot(key.size) else {
-            self.atlas.request_reset();
-            return None;
-        };
+        let rect = self.allocate_or_grow(&key, MultiPlaneAllocator::allocate_shared_slot)?;
         let slot = AtlasSlot {
             rect,
             plane: AtlasPlane::R,
@@ -327,26 +418,72 @@ impl Rasterizer {
         let (slot, allocated) = self.allocate_sdf_slot(plan.key.clone())?;
         if allocated {
             let sdf_image = plan.render(&mut self.sdfer);
-            let mut image = self.atlas.get_cached_glyph_image_mut(slot.rect);
-            for y in 0..plan.key.size.height {
-                for x in 0..plan.key.size.width {
-                    let point = Point::new(x, y);
-                    let v = sdf_image[point].r();
-                    let old = image[point];
-                    image[point] = slot.plane.set(old, v);
-                }
+            self.write_sdf_image(slot, &sdf_image);
+        }
+        Some(self.build_sdf_glyph(slot, &plan))
+    }
+
+    /// Returns the glyph's SDF if the atlas has it, or else queues it for the worker.
+    ///
+    /// The first time a font misses at some size, we also queue that font's printable ASCII.
+    pub fn get_or_queue_glyph_outline_sdf(
+        &mut self,
+        font: &Rc<Font>,
+        glyph_id: GlyphId,
+        dpxs_per_em: f32,
+    ) -> OutlineSdf {
+        let Some(plan) = plan_outline_sdf(font, glyph_id, dpxs_per_em, &self.settings) else {
+            return OutlineSdf::Unavailable;
+        };
+        if let Some(slot) = self.get_cached_slot(&plan.key) {
+            return OutlineSdf::Ready(self.build_sdf_glyph(slot, &plan));
+        }
+        if self.outline_sdf_no_room.contains(&plan.key) {
+            return OutlineSdf::Unavailable;
+        }
+        self.queue_glyph_outline_sdf(&plan, !self.refilling);
+        if self.prewarm_sdf_sizes.insert((font.id(), plan.dpxs_per_em.to_bits())) {
+            self.queued_sdf_prewarms.push((font.clone(), plan.dpxs_per_em));
+        }
+        OutlineSdf::Pending
+    }
+
+    fn queue_glyph_outline_sdf(&mut self, plan: &SdfPlan, may_reset: bool) {
+        if self.cached_slots.contains_key(&plan.key)
+            || self.outline_sdf_no_room.contains(&plan.key)
+            || self.outline_sdf_pending.contains_key(&plan.key)
+        {
+            return;
+        }
+        self.outline_sdf_pending.insert(plan.key.clone(), may_reset);
+        self.queued_sdf_jobs.push(QueuedOutlineJob {
+            key: plan.key.clone(),
+            outline: plan.outline(),
+            dpxs_per_em: plan.dpxs_per_em,
+            epoch: self.atlas_epoch,
+        });
+    }
+
+    fn write_sdf_image(&mut self, slot: AtlasSlot, sdf_image: &Image<R>) {
+        let mut image = self.atlas.get_cached_glyph_image_mut(slot.rect);
+        for y in 0..slot.rect.size.height {
+            for x in 0..slot.rect.size.width {
+                let point = Point::new(x, y);
+                image[point] = slot.plane.set(image[point], sdf_image[point].r());
             }
         }
-        Some(RasterizedGlyph {
+    }
+
+    fn build_sdf_glyph(&self, slot: AtlasSlot, plan: &SdfPlan) -> RasterizedGlyph {
+        RasterizedGlyph {
             source: Default::default(),
             atlas_kind: AtlasKind::Grayscale,
-            atlas_size: self.atlas.size(),
             atlas_image_bounds: slot.rect,
             atlas_image_padding: plan.padding,
             atlas_plane: slot.plane.index(),
             origin_in_dpxs: plan.origin_in_dpxs,
             dpxs_per_em: plan.dpxs_per_em,
-        })
+        }
     }
 
     fn rasterize_glyph_outline_msdf(
@@ -369,7 +506,6 @@ impl Rasterizer {
                 return Some(RasterizedGlyph {
             source: Default::default(),
                     atlas_kind: AtlasKind::Msdf,
-                    atlas_size: self.atlas.size(),
                     atlas_image_bounds: slot.rect,
                     atlas_image_padding: plan.padding,
                     atlas_plane: AtlasPlane::R.index(),
@@ -395,7 +531,7 @@ impl Rasterizer {
             // The job crosses a thread boundary, so it needs an owned copy of the
             // outline. This deep clone happens at most once per glyph per atlas
             // epoch, guarded by the pending set above.
-            self.queued_msdf_jobs.push(QueuedMsdfJob {
+            self.queued_msdf_jobs.push(QueuedOutlineJob {
                 key,
                 outline: plan.outline(),
                 dpxs_per_em,
@@ -419,7 +555,6 @@ impl Rasterizer {
         Some(RasterizedGlyph {
             source: Default::default(),
             atlas_kind: AtlasKind::Color,
-            atlas_size: self.atlas.size(),
             atlas_image_bounds: slot.rect,
             atlas_image_padding: COLOR_PADDING,
             atlas_plane: AtlasPlane::R.index(),
@@ -429,8 +564,9 @@ impl Rasterizer {
     }
 }
 
+/// A glyph outline for the worker to build an SDF or MSDF image of, depending on its key's kind.
 #[derive(Clone, Debug)]
-pub struct QueuedMsdfJob {
+pub struct QueuedOutlineJob {
     pub key: GlyphImageKey,
     pub outline: GlyphOutline,
     pub dpxs_per_em: f32,
@@ -442,6 +578,19 @@ pub struct CompletedMsdfJob {
     pub key: GlyphImageKey,
     pub pixels: Vec<Bgra>,
     pub epoch: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompletedSdfJob {
+    pub key: GlyphImageKey,
+    pub sdf_image: Image<R>,
+    pub epoch: u64,
+}
+
+#[derive(Clone, Debug)]
+pub enum CompletedOutlineJob {
+    Msdf(CompletedMsdfJob),
+    Sdf(CompletedSdfJob),
 }
 
 #[derive(Debug)]

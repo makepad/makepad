@@ -493,6 +493,7 @@ impl Hal {
             st.world.font_notify = Some(notify.clone());
         }
         let mut info = backend_info_of(&*st.backend.as_ref().expect("backend").1);
+        st.world.max_texture = info.max_texture;
         if req.parent != 0 || req.flags & open_flags::OFFSCREEN_WINDOWS != 0 {
             info.flags &= !info_flags::DIRECT_DISPLAY;
         }
@@ -735,6 +736,7 @@ impl Hal {
                     // glyphs the font workers finished go to the atlas and to the sessions
                     if let Some(gpu) = b.host_gpu() {
                         font::service(gpu, &mut st.world);
+                        font::trim(gpu, &mut st.world);
                     }
                 }
                 // A completion or a lent window's geometry can notify another session while
@@ -748,7 +750,7 @@ impl Hal {
                 // embedded windows' frames (no display link of their own) at display rate
                 let embedded_due = st.world.deliver_embedded_frames(sid, now);
                 let due = st.backend.as_ref().and_then(|(_, b)| b.next_due(&st.world, sid));
-                let due = match (due, embedded_due) { (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b) };
+                let due = [due, embedded_due, font::trim_at(&st.world)].into_iter().flatten().min();
                 if st.world.session(sid).is_none() {
                     // the session was ended under its app (killed, crashed, its parent closed):
                     // the app hears one quit request and ends its run

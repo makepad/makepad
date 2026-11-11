@@ -1682,6 +1682,9 @@ impl Cx {
                 hook(self);
             }
         }
+        for i in 0..self.event_hooks.len() {
+            (self.event_hooks[i])(self, event);
+        }
         if let Event::Shutdown = event {
             // every quit path ends here (a window close, a lost session): the shutdown starts
             crate::cx::relax_quit_started();

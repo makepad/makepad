@@ -76,7 +76,7 @@ impl<'a> CxDraw<'a> {
         Self::lazy_construct_nav_tree(cx);
         cx.begin_draw_context();
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
-        fonts.borrow_mut().prepare_atlases_if_needed(cx);
+        fonts.borrow_mut().prepare_atlases_if_needed(cx, draw_event);
         let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
         let mut scratch = cx.global::<CxDrawScratchPool>().0.pop().unwrap_or_default();
         scratch.pass_stack.reserve(16);
@@ -135,6 +135,8 @@ impl<'a> CxDraw<'a> {
                 cx.redraw_all();
             }
         });
+        #[cfg(target_arch = "wasm32")]
+        cx.event_hooks.push(Fonts::handle_event);
         cx.register_async_load_probe("glyph", |cx| {
             cx.get_global_ref::<Rc<RefCell<Fonts>>>()
                 .and_then(|fonts| fonts.try_borrow().ok().map(|fonts| fonts.pending_glyph_rasters()))

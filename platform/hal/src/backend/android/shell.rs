@@ -196,8 +196,10 @@ impl AndroidBackend {
             // Child domains receive input only through their parent's Forward commands.
             q.drain_with(|mut e, payload| {
                 if remap { e.window = recipient.map_or(Id::default(), |(_, id)| id); }
-                if let Some(HalEvent::Geom { window, x, y, w, h, dpi, state }) = e.decode(payload) {
-                    world.window_geom(sid, window, [x as f32, y as f32, w as f32, h as f32], dpi, state);
+                match e.decode(payload) {
+                    Some(HalEvent::Geom { window, x, y, w, h, dpi, state }) => world.window_geom(sid, window, [x as f32, y as f32, w as f32, h as f32], dpi, state),
+                    Some(HalEvent::Lifecycle { kind }) => world.note_lifecycle(kind),
+                    _ => {}
                 }
                 world.to_session(sid, |q| q.push_with_payload(e, payload));
             });
