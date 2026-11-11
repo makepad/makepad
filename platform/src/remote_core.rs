@@ -584,14 +584,30 @@ pub fn request_from(args: impl Iterator<Item = String>, env: Option<&str>) -> Re
 }
 
 pub fn request() -> Request {
-    match request_from(std::env::args(), std::env::var("MAKEPAD_REMOTE").ok().as_deref()) {
+    let asked = std::env::var("MAKEPAD_REMOTE").ok();
+    // an Android app gets no environment of its own, so `adb shell setprop debug.makepad.remote 1` asks too
+    #[cfg(target_os = "android")]
+    let asked = asked.or_else(|| {
+        let value = makepad_hal::backend::android::system_property("debug.makepad.remote")?;
+        // every makepad app on the device reads it, so a value it can't use is ignored instead of ending the app
+        if let Request::Refused(_) = request_from(std::iter::empty(), Some(&value)) {
+            eprintln!("[makepad-remote] debug.makepad.remote={value} is ignored: 1 asks for the endpoint, 0 turns it off");
+            return None;
+        }
+        Some(value)
+    });
+    match request_from(std::env::args(), asked.as_deref()) {
         Request::Off | Request::Local if std::env::var("MAKEPAD_INSPECT").as_deref() == Ok("1") => Request::On,
+        // nothing outside a release Android or iOS app can reach its socket, and the system kills such
+        // an app without running exit handlers, so its socket and discovery file would only pile up
+        Request::Local if cfg!(all(any(target_os = "android", target_os = "ios", target_os = "tvos"), not(debug_assertions), not(relax))) => Request::Off,
         request => request,
     }
 }
 
 /// True when this process was launched for an agent or a test (`--remote`,
-/// `MAKEPAD_REMOTE=1` or `MAKEPAD_INSPECT=1`); the endpoint itself is open in every process unless `MAKEPAD_REMOTE=0`.
+/// `MAKEPAD_REMOTE=1` or `MAKEPAD_INSPECT=1`); the endpoint itself is open in every process unless `MAKEPAD_REMOTE=0`
+/// (a release Android or iOS app opens it only when asked).
 /// Pure argv + env, usable before the endpoint itself is up: the platform's focus policy reads
 /// it while the first window is being created.
 pub fn requested() -> bool {

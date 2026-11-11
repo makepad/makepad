@@ -20,6 +20,12 @@ extern "C" fn cleanup() {
     let _ = std::fs::remove_file(disc);
 }
 
+/// Removes this process's socket and discovery file now: where the process ends without exit
+/// handlers, or before slow ones (a GPU driver's teardown) run.
+pub fn withdraw() {
+    cleanup();
+}
+
 #[cfg(unix)]
 mod imp {
     use super::*;
@@ -94,6 +100,8 @@ mod imp {
     /// services first: the caps are written now. Returns the socket path.
     pub fn listen(ep: &Endpoint, extra: &str) -> io::Result<PathBuf> {
         let _ = crate::cmd::now_ms();
+        #[cfg(any(target_os = "android", target_os = "ios", target_os = "tvos"))]
+        crate::discovery::remove_stale(ep.hooks());
         let pid = std::process::id();
         let (sock, disc) = paths(pid);
         let _ = std::fs::remove_file(&sock);

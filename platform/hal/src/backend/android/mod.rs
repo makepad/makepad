@@ -8,6 +8,8 @@ mod surface;
 #[cfg(target_os = "android")]
 pub(crate) mod xr;
 #[cfg(target_os = "android")]
+pub use xr::system_property;
+#[cfg(target_os = "android")]
 pub mod jni;
 #[cfg(target_os = "android")]
 pub mod inject;
