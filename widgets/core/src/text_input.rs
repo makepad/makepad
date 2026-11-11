@@ -9,6 +9,7 @@ use {
                 AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
                 TextInputConfig, TextInputContentType,
             },
+            shader::draw_text::TextOverflow,
             text::{
                 geom::Point,
                 layouter::{LaidoutText, SelectionRect},
@@ -929,6 +930,10 @@ pub struct TextInput {
     scroll_x: f64,
     #[live]
     empty_text: String,
+    /// Lets the empty text wrap onto more lines. Otherwise it stays on one line,
+    /// ending in "…" if it doesn't fit.
+    #[live(false)]
+    wrap_empty_text: bool,
     #[live]
     text: String,
     #[live(0.5)]
@@ -1438,9 +1443,16 @@ impl TextInput {
 
     fn draw_text(&mut self, cx: &mut Cx2d) -> Rect {
         let inner_walk = self.inner_walk();
-        let text_rect = if self.text.is_empty() {
+        let text_rect = if self.text.is_empty() && self.wrap_empty_text {
             self.draw_text
                 .draw_walk(cx, inner_walk, self.label_align, &self.empty_text)
+        } else if self.text.is_empty() {
+            // Only the empty text gets the ellipsis, so we put the typed text's `text_overflow` back after.
+            let text_overflow = std::mem::replace(&mut self.draw_text.text_overflow, TextOverflow::Ellipsis);
+            let text_rect = self.draw_text
+                .draw_walk_with_wrap(cx, inner_walk, self.label_align, false, &self.empty_text);
+            self.draw_text.text_overflow = text_overflow;
+            text_rect
         } else {
             let laidout_text = self.laidout_text.as_ref().unwrap();
             self.draw_text
@@ -1631,7 +1643,8 @@ impl TextInput {
         rect(sel_x, sel_y, sel_width.max(10.0), sel_height.max(20.0))
     }
 
-    fn scroll_to_cursor(&mut self, cx: &mut Cx2d, content_clip_index: usize) {
+    /// `text_height` is the drawn text's height, so it's the empty text's while nothing's typed.
+    fn scroll_to_cursor(&mut self, cx: &mut Cx2d, content_clip_index: usize, text_height: f64) {
         // Compute the final size of the turtle, and obtain its inner dimensions.
         // For multiline inputs, also clamp to the tightest ancestor max height,
         // so that scrolling kicks in even when the TextInput's own walk height
@@ -1713,7 +1726,13 @@ impl TextInput {
         if self.is_multiline {
             let max_scroll_y = (laidout_text_height - height).max(0.0);
             self.cached_max_scroll_y = max_scroll_y;
-            self.scroll_y = self.scroll_y.max(0.0).min(max_scroll_y);
+            // Text shorter than the box (e.g., from a `Fit` min height) sits where `align.y` puts it,
+            // through the same offset that single-line inputs center with.
+            self.scroll_y = if text_height < height {
+                (text_height - height) * self.layout.align.y
+            } else {
+                self.scroll_y.max(0.0).min(max_scroll_y)
+            };
         } else {
             // Single-line: nothing scrolls vertically, so the offset centres the
             // line box in the inner rect instead. Pinning to padding.top would
@@ -1721,8 +1740,6 @@ impl TextInput {
             // than its point size suggests, clip descenders in tight ones. Going
             // through scroll_y keeps every downstream coordinate (hit test, IME,
             // selection rects) consistent, since they all compensate for it.
-            let text_height =
-                (laidout_text.size_in_lpxs.height * self.draw_text.font_scale) as f64;
             let centering = (text_height - height) * 0.5;
             self.cached_max_scroll_y = 0.0;
             // Guard NaN (an unresolved turtle size), which the old clamp
@@ -3027,7 +3044,7 @@ impl Widget for TextInput {
         self.draw_selection(cx, text_rect);
         self.draw_composition_underline(cx, text_rect);
         self.draw_marks(cx, text_rect);
-        self.scroll_to_cursor(cx, content_clip_index);
+        self.scroll_to_cursor(cx, content_clip_index, text_rect.size.y);
         cx.pop_clip_rect();
         self.draw_scroll_bar(cx);
         self.draw_bg.end(cx);
