@@ -222,7 +222,7 @@ impl Widget for TexBurst {
                     *px = 0xff00_0000 | (r << 16) | (g << 8) | b;
                 }
                 let format = if use_bc7 && k % 2 == 0 {
-                    let bc7 = makepad_texcomp::bc7::encode_bgra_u32_image(&pixels, 8, 8, 1)
+                    let bc7 = makepad_texcomp::bc7::encode_bgra_u32_image(&pixels, 8, 8, &makepad_texcomp::run_inline)
                         .expect("8x8 BGRA slice matches dimensions");
                     TextureFormat::VecMipCompressed {
                         width: 8,

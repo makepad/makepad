@@ -3,7 +3,7 @@
 //!
 //! Its menu-bar item (where the desktop has a tray) shows the fleet at a glance: devhub's glyph
 //! (off while the master is not read, attention while something red needs a look, busy while
-//! leases run) and the counts as its tooltip. A click opens the window or brings it to the
+//! leases run) and the counts in its menu. A click opens the window or brings it to the
 //! front; the secondary click's menu has the status lines, the worst needs, "Open panel" and
 //! "Quit panel". Closing the window keeps the panel in the tray: nothing is drawn and the
 //! master is asked less often until it opens again.

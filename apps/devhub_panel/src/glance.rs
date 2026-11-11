@@ -61,7 +61,7 @@ impl Glance {
             n if n > NEEDS => lines.push(format!("\u{2026} and {} more", n - NEEDS)),
             _ => {}
         }
-        Glance { glyph, tooltip: format!("devhub panel \u{b7} {word} \u{b7} {running} running \u{b7} {waiting} waiting"), lines }
+        Glance { glyph, tooltip: format!("devhub panel \u{b7} {word}"), lines }
     }
 }
 
