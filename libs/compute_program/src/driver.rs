@@ -356,8 +356,7 @@ fn native(vm: &mut ScriptVm, f: impl FnOnce(&mut ScriptVm, &mut Driver) -> Res<S
 /// cancel is the caller's own end of the program (the app quit, the work gave way to newer
 /// work); raised as an error it was logged as one, at every quit.
 fn cancelled(vm: &mut ScriptVm) -> ScriptValue {
-    vm.bx.interrupt_handle().stop();
-    vm.bx.threads.cur_ref().trap.set_on(Some(ScriptTrapOn::Bail(NIL)));
+    vm.bx.stop_run();
     NIL
 }
 
