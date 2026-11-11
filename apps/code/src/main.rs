@@ -38,7 +38,7 @@ pub struct App {
 }
 
 /// `makepad-app-code [FOLDER] [--approve ask|allowlist|auto] [--context N]`:
-/// the folder defaults to the current directory.
+/// the folder defaults to the home folder.
 fn config_from_args() -> AgentConfig {
     if makepad_code_agent::mock::presentation() {
         return AgentConfig {
@@ -70,7 +70,7 @@ fn config_from_args() -> AgentConfig {
     // run from git stores (makepad run), a relative folder is one of the virtual workspace
     let root = match (root, std::env::var_os("MAKEPAD_RUN_WORKSPACE").filter(|w| !w.is_empty())) {
         (Some(r), Some(ws)) if r.is_relative() => PathBuf::from(ws).join(r),
-        (root, _) => root.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into())),
+        (root, _) => root.unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| ".".into())),
     };
     let session_dir = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".makepad/code/sessions"));
     AgentConfig {

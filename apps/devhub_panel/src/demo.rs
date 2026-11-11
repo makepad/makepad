@@ -102,7 +102,7 @@ fn node(name: &str, role: Role, arch: &str, os: &str, cores: u32, ram: f64, gpu:
         timed: role == Role::Bench,
         hub_rev: "5b2c9e14d0a7f3e8c1b6a9d4e2f0c7b3a8d5e1f6".into(),
         deploy: "5b2c9e14d0a7f3e8c1b6a9d4e2f0c7b3a8d5e1f6,0c4f8e2a6b1d9c3e7f5a2b8d4c6e0f1a3b9d7c5e".into(),
-        hub_proto: makepad_devhub::lease::HUB_PROTO,
+        features: makepad_devhub::lease::FEATURES.iter().map(|f| f.to_string()).collect(),
         ..Default::default()
     };
     DemoNode { view: NodeView { name: name.into(), addr: String::new(), up, dev: up, dev_set: false, caps: up.then_some(caps), ..Default::default() } }

@@ -14,14 +14,13 @@
 //! - [`host`] drives instances through prepare, stage, commit and retire,
 //!   keeps the last good generation when a revision fails, and routes typed
 //!   endpoint writes. It never blocks its thread.
-//! - [`spsc`] is the bounded single-producer single-consumer ring owners use
-//!   to reach a realtime thread, with each end owned by one side.
+//! - [`makepad_lock_free::ring`] is the bounded single-producer single-consumer
+//!   ring owners use to reach a realtime thread, with each end owned by one side.
 //!
 //! Continuous media never enters the value store and never crosses HTTP.
 
 pub mod owner;
 pub mod plan;
-pub mod spsc;
 pub mod value;
 
 #[cfg(not(target_arch = "wasm32"))]

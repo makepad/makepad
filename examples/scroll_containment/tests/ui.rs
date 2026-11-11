@@ -487,10 +487,27 @@ fn touch_dragging_a_nested_scroll_view_with_nothing_to_scroll_drags_the_page(app
 }
 
 #[makepad_test]
-fn touch_dragging_a_multiline_input_never_drags_the_page(app: TestApp) {
+fn touch_dragging_a_multiline_input_drags_the_page_only_when_its_text_cant_scroll_that_way(app: TestApp) {
     let page = reveal_carousel(&app);
     app.locator(Selector::id("short_notes")).touch_drag_by_and_hold(0.0, -60.0);
-    assert_eq!(offsets(&app, ["page"]), [page]);
+    let [page_after] = offsets(&app, ["page"]);
+    assert!(page_after > page + 40.0, "the page followed the finger ({page} -> {page_after})");
+
+    // The notes start out scrolled to the top, so a drag down moves the page.
+    app.locator(Selector::id("notes")).touch_drag_by_and_hold(0.0, 60.0);
+    let [page_down] = offsets(&app, ["page"]);
+    assert!(page_down < page_after - 40.0, "the page followed the finger ({page_after} -> {page_down})");
+
+    // A drag up scrolls the notes instead, so the next drag down scrolls them back.
+    app.locator(Selector::id("notes")).touch_drag_by_and_hold(0.0, -60.0);
+    assert_eq!(offsets(&app, ["page"]), [page_down]);
+    app.locator(Selector::id("notes")).touch_drag_by_and_hold(0.0, 60.0);
+    assert_eq!(offsets(&app, ["page"]), [page_down]);
+
+    // That put them back at the top, so the page gets the next one.
+    app.locator(Selector::id("notes")).touch_drag_by_and_hold(0.0, 60.0);
+    let [page_last] = offsets(&app, ["page"]);
+    assert!(page_last < page_down - 40.0, "the page followed the finger ({page_down} -> {page_last})");
 }
 
 fn open_code_modal(app: &TestApp) {

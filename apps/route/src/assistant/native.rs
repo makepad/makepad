@@ -142,7 +142,7 @@ impl AssistantService {
     /// are in reach (this process, the machine node, a LAN box), else the
     /// OS voice — the hub decides.
     pub fn start(&mut self, cx: &mut Cx) {
-        let speech = SpeechOutput::new("af_heart", cx.thread_spawner());
+        let mut speech = SpeechOutput::new("af_heart", cx.thread_spawner());
         speech.install_audio_output(cx, 0);
         self.speech = Some(speech);
         self.init_agent(cx);

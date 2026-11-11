@@ -726,7 +726,7 @@ impl CalculatorView {
         if navigation.destination_view() == page {
             return;
         }
-        navigation.end_interactive_pop_without_animation(cx);
+        navigation.end_interactive_transition_without_animation(cx);
         match page {
             Some(page) => navigation.push(cx, page),
             None => navigation.pop_to_root(cx),

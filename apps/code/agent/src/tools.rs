@@ -156,6 +156,10 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
 }
 
 fn walk(sb: &Sandbox, dir: &Path, out: &mut Vec<std::path::PathBuf>, limit: usize) {
+    walk_dir(sb, sb.root(), dir, out, limit)
+}
+
+fn walk_dir(sb: &Sandbox, root: &Path, dir: &Path, out: &mut Vec<std::path::PathBuf>, limit: usize) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     let mut entries: Vec<_> = rd.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
@@ -169,10 +173,10 @@ fn walk(sb: &Sandbox, dir: &Path, out: &mut Vec<std::path::PathBuf>, limit: usiz
             continue;
         }
         if ft.is_dir() {
-            if SKIP_DIRS.contains(&name.as_str()) {
+            if SKIP_DIRS.contains(&name.as_str()) || super::index::skips_dir(root, &e.path()) {
                 continue;
             }
-            walk(sb, &e.path(), out, limit);
+            walk_dir(sb, root, &e.path(), out, limit);
         } else {
             out.push(e.path());
         }

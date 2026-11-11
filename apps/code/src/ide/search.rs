@@ -587,7 +587,7 @@ fn walk_files(root: &Path, cancel: &dyn Fn() -> bool) -> Vec<String> {
             }
             let name = e.file_name().to_string_lossy().to_string();
             let rel = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
-            if ft.is_dir() && SKIP_DIRS.contains(&name.as_str()) {
+            if ft.is_dir() && (SKIP_DIRS.contains(&name.as_str()) || makepad_code_agent::index::skips_dir(root, &root.join(&rel))) {
                 continue;
             }
             if let Some(ig) = ignore.as_mut() {

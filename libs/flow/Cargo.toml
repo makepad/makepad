@@ -52,6 +52,7 @@ makepad-strict-json = { path = "../strict_json" }
 # Zero-dependency shared primitives; the core takes its SHA-256 from here so
 # hashing a value links neither the AI hub nor a store crate.
 makepad-core-util = { path = "../core_util" }
+makepad-lock-free = { path = "../lock_free" }
 makepad-ai-hub = { path = "../ai/hub", default-features = false, features = ["llm"], optional = true }
 makepad-audio-decode = { path = "../audio_decode", optional = true }
 makepad-mp4-index = { path = "../mp4_index", optional = true }

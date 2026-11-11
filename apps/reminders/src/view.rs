@@ -1766,7 +1766,7 @@ impl RemindersView {
         let layout = decide_layout(size.x, size.y, Some(self.nav.layout));
         if layout != self.nav.layout {
             // The other layout hides our stack, so a swipe or back gesture on it could never finish.
-            self.view.stack_navigation(cx, ids!(compact.nav)).end_interactive_pop_without_animation(cx);
+            self.view.stack_navigation(cx, ids!(compact.nav)).end_interactive_transition_without_animation(cx);
             self.capture_form(cx);
             let previous = self
                 .list_parent(cx, self.nav.layout.is_compact())

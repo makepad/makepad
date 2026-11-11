@@ -62,7 +62,6 @@ use super::store::{
     ClearInstanceOutcome, CreateInstanceOutcome, FlowStore, FlowStoreConfig, InstanceExecution, LiveOutputs,
     RunControl, RunDriver, RunRefused, SetInputsOutcome, SourceLayout, StartRunOutcome, StoreEvent,
 };
-use super::triple::{triple_buffer, Reader, Writer};
 use super::work::{HostWork, JobLane, SpawnRefused};
 use crate::document::closure::Closure;
 use crate::document::ident::ParamAddr;
@@ -75,6 +74,7 @@ use crate::{
     graph, CreateBatchRequest, CreateBatchResponse, EvalError, FlowResponse, FlowSummary, Graph,
     InputRefs, InputValueDto, InstanceRow, RunRowDto,
 };
+use makepad_lock_free::{triple_buffer, Reader, Writer};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;

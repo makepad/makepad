@@ -274,10 +274,44 @@ impl FileIndex {
     }
 }
 
+/// Folders directly in the home folder that macOS guards with privacy prompts.
+#[cfg(target_os = "macos")]
+const PROTECTED_HOME_DIRS: [&str; 9] = ["Desktop", "Documents", "Downloads", "Pictures", "Movies", "Music", "Library", "Public", ".Trash"];
+#[cfg(not(target_os = "macos"))]
+const PROTECTED_HOME_DIRS: [&str; 0] = [];
+
+/// Whether a walk, a watcher or a restore must stay out of `dir`: a folder
+/// directly in `home` that is hidden (a tool folder such as `.cargo`) or, on
+/// macOS, one of the privacy-protected ones (`Documents`, `Library`, ...).
+/// A `root` inside such a folder was chosen by the person, so it walks.
+pub fn skips_home_dir(home: &Path, root: &Path, dir: &Path) -> bool {
+    if dir.parent() != Some(home) || root.starts_with(dir) {
+        return false;
+    }
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else { return false };
+    name.starts_with('.') || PROTECTED_HOME_DIRS.contains(&name)
+}
+
+/// `skips_home_dir` for the current user's home folder.
+pub fn skips_dir(root: &Path, dir: &Path) -> bool {
+    match home_dir() {
+        Some(home) => skips_home_dir(&home, root, dir),
+        None => false,
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+}
+
 /// The working tree's files under `root` that git does not ignore, sorted,
 /// relative with `/` separators. `.git` is always skipped; symlinked
 /// folders are not followed.
 pub fn walk(root: &Path) -> Vec<String> {
+    walk_in(home_dir().as_deref(), root)
+}
+
+fn walk_in(home: Option<&Path>, root: &Path) -> Vec<String> {
     let mut ignore = GitIgnore::with_user_excludes(root).ok();
     let mut out = Vec::new();
     let mut stack: Vec<(PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
@@ -305,6 +339,9 @@ pub fn walk(root: &Path) -> Vec<String> {
                 }
             }
             if is_dir {
+                if home.is_some_and(|home| skips_home_dir(home, root, &entry.path())) {
+                    continue;
+                }
                 stack.push((entry.path(), path));
             } else {
                 out.push(path);
@@ -352,6 +389,26 @@ mod tests {
         let files = walk(&dir);
         assert_eq!(files, [".gitignore", "lib/.gitignore", "lib/keep.rs", "src/main.rs"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn home_folders_are_skipped_unless_the_root_is_inside() {
+        let home = scratch("home");
+        let skipped = |root: &Path, rel: &str| skips_home_dir(&home, root, &home.join(rel));
+        let mut guarded = vec![".cargo", ".makepad"];
+        if cfg!(target_os = "macos") {
+            guarded.extend(["Desktop", "Documents", "Downloads", "Pictures", "Movies", "Music", "Library", "Public", ".Trash"]);
+        }
+        for name in &guarded {
+            assert!(skipped(&home, name), "{name} directly in home is skipped");
+            assert!(!skipped(&home.join(name).join("proj"), name), "{name} holds the root, so it walks");
+        }
+        assert!(!skipped(&home, "src"), "an ordinary folder walks");
+        assert!(!skips_home_dir(&home, &home, &home.join("src/.cache")), "only folders directly in home count");
+        put(&home, ".cargo/registry/a.rs");
+        put(&home, "src/main.rs");
+        assert_eq!(walk_in(Some(&home), &home), ["src/main.rs"]);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     fn snap(files: &[&str]) -> Snapshot {

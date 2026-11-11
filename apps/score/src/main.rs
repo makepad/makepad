@@ -152,7 +152,6 @@ impl App {
         }
         let piece = &PERFORMANCES[DEFAULT_PIECE];
         self.state.open_bundled_score(
-            cx,
             piece.bytes,
             piece.extension,
             piece.title,

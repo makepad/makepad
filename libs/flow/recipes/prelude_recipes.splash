@@ -268,9 +268,9 @@ mod.flow.Splat = mod.flow.Gen{
     kind: @gen
     domain: "splat"
     type_name: "Splat"
-    /** 1..200; the TripoSplat default is 20. */ steps: 20
-    /** The TripoSplat default is 3. */ guidance: 3.0
-    /** 32768..262144 step 32 */ gaussians: 262144
+    /** 1..200; nil runs the model's own default (TripoSplat 20, Idol 50). */ steps: nil
+    /** Guidance scale; nil runs the model's own default (TripoSplat 3, Idol 4). */ guidance: nil
+    /** 32768..1048576 step 32; TripoSplat caps at 262144. */ gaussians: 262144
     /** 0 is the deterministic default seed. */ seed: 0
     /** Empty selects the hub's best model for the splat domain. */ model: ""
     ports: { in: {prompt: @text, image: @image}, out: {mesh: @mesh} }

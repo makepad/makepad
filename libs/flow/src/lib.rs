@@ -25,8 +25,6 @@ pub mod wire;
 pub mod engine;
 #[cfg(feature = "runtime")]
 pub mod instance;
-#[cfg(feature = "runtime")]
-pub mod triple;
 #[cfg(all(feature = "runtime", not(target_arch = "wasm32")))]
 pub mod runtime;
 #[cfg(feature = "live")]

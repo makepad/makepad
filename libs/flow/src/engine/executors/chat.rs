@@ -203,6 +203,7 @@ impl ChatSeam for HubChat {
             preferred_model,
             max_tokens,
             thinking,
+            claude_model: None,
             system_prompt: system.to_string(),
             tools: Vec::new(),
             wake: None,

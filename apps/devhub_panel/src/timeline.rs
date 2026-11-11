@@ -1562,7 +1562,7 @@ impl FleetTimeline {
                         }
                         v.push(format!("disk {:.0} of {:.0} GB free (floor {:.0})", c.disk_free_gb, c.disk_total_gb, c.disk_floor_gb));
                         if !c.rustc.is_empty() {
-                            v.push(format!("rustc {} \u{b7} hub protocol {}", c.rustc, c.hub_proto));
+                            v.push(format!("rustc {} \u{b7} {} hub features", c.rustc, c.features.len()));
                         }
                         if !c.sick.is_empty() {
                             v.push(format!("cannot link: {}", c.sick));

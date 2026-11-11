@@ -994,7 +994,7 @@ impl NotesView {
     fn end_interactive_pop(&mut self, cx: &mut Cx) {
         self.view
             .stack_navigation(cx, ids!(compact))
-            .end_interactive_pop_without_animation(cx);
+            .end_interactive_transition_without_animation(cx);
         self.revealed_screen = None;
     }
     fn fill_list(&mut self, cx: &mut Cx2d, list: &mut PortalList, uid: WidgetUid) {

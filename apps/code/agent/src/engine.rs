@@ -333,6 +333,7 @@ impl Engine {
             preferred_model: self.cfg.model.clone(),
             max_tokens: Some(8192),
             thinking: Some(false),
+            claude_model: None,
             system_prompt: system,
             tools: specs.to_vec(),
             wake: Some(self.wake.clone()),
