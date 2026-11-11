@@ -270,7 +270,7 @@ impl Cx {
         let mut requested: Option<std::time::Instant> = None;
         let mut host_poll_due = hosted;
         #[cfg(target_os = "android")]
-        let mut performance_hint = if hosted { None } else { makepad_hal::backend::android::performance_hint::PerformanceHint::for_this_thread() };
+        let mut performance_hint = if hosted { None } else { makepad_hal::backend::android::performance_hint::PerformanceHint::for_this_thread(period) };
         'turns: loop {
             // A signal raised with no wake to carry it (before the session opened: its wake
             // reached no pump) is serviced now; `set_*_signal` wakes only on the flag's rising
@@ -307,6 +307,10 @@ impl Cx {
             } else {
                 next_beat.saturating_duration_since(std::time::Instant::now()).as_nanos() as u64
             };
+            #[cfg(target_os = "android")]
+            if let Some(hint) = performance_hint.as_mut() {
+                hint.start_turn(!self.hal_has_work() || self.hal.device_lost);
+            }
             if !self.hal_guarded(true, |cx| cx.hal_pump_events(timeout)) {
                 crate::log!("hal: the last window closed");
                 break 'turns;
@@ -349,18 +353,10 @@ impl Cx {
             // a hosted app beats at its host's Ticks, and at once for its XR window's frames
             let xr_beat = std::mem::take(&mut self.hal.xr_beat);
             if hosted && xr_beat && !quitting && !self.hal.device_lost {
-                #[cfg(target_os = "android")]
-                if let Some(hint) = performance_hint.as_mut().filter(|_| announced) {
-                    hint.start_cycle(std::time::Instant::now());
-                }
                 if !self.hal_guarded(true, |cx| cx.hal_beat()) {
                     self.call_event_handler(&Event::Shutdown);
                     self.hal_submit_batch();
                     break 'turns;
-                }
-                #[cfg(target_os = "android")]
-                if let Some(hint) = performance_hint.as_mut().filter(|_| announced) {
-                    hint.mark_frame_drawn();
                 }
                 self.hal_submit_batch();
             }
@@ -371,6 +367,14 @@ impl Cx {
                 requested = None;
                 if log_enabled() && announced {
                     eprintln!("[hal-client] session={} FrameReady starts draw beat", info.session);
+                }
+                // XR frames keep the headset's pace, not the beat's
+                #[cfg(target_os = "android")]
+                if let Some(hint) = performance_hint.as_mut() {
+                    match self.hal.xr {
+                        Some(_) => hint.skip_frame(),
+                        None => hint.start_frame(self.repaint_id, display_clock),
+                    }
                 }
                 if !self.hal_guarded(true, |cx| cx.hal_beat()) {
                     self.call_event_handler(&Event::Shutdown);
@@ -407,6 +411,10 @@ impl Cx {
             }
             self.hal_run_tasks();
             self.hal_submit_batch();
+            #[cfg(target_os = "android")]
+            if let Some(hint) = performance_hint.as_mut() {
+                hint.finish_frame(self.repaint_id);
+            }
         }
         // the session ends: Quit in the last batch makes the HAL free what it owns (textures,
         // buffers, pipelines, windows)
