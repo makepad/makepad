@@ -489,7 +489,8 @@ mod imp {
     /// Opens the process's makepad-remote endpoint (the one place it is opened, from `Cx::new`,
     /// so every process with a `Cx` gets it): a same-user Unix socket, nothing on the network,
     /// in every app unless `MAKEPAD_REMOTE=0`, so a local agent reaches the apps the person
-    /// started. The `cmd` service answers the remote commands and the GPU ledger's, the `frames`
+    /// started (a release Android or iOS app opens it only when asked, see [`request`]). The
+    /// `cmd` service answers the remote commands and the GPU ledger's, the `frames`
     /// service streams window images, and upper crates add theirs ([`register_service`]: the
     /// `app` service of the AI tools). An instance launched for an agent (`--remote`,
     /// `MAKEPAD_REMOTE=1`, `MAKEPAD_INSPECT=1`) prints `[makepad-remote] pid=<pid> app=<app> socket=<path>`. A port or

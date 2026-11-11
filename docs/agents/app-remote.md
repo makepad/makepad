@@ -49,6 +49,11 @@ Do not discover an instance by taking over another running one. Retain your
 own launch's PID and socket. On code changes, close that instance, rebuild,
 and relaunch before inspecting again.
 
+A release Android or iOS build opens no endpoint unless asked. An Android app
+has no launch flags or environment of its own, so `adb shell setprop
+debug.makepad.remote 1` before launching it asks for one; its socket is in the
+app's cache dir, which `adb shell run-as` reaches in a debuggable APK.
+
 ## Common commands
 
 Each request is one command; the answer is the same JSON as before, one line
