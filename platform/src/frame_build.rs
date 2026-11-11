@@ -448,8 +448,11 @@ impl FrameBuilder {
     pub(crate) fn pipeline_ready(&mut self, id: Id) -> bool {
         match self.pipes.get_mut(id.index as usize) {
             Some(p) if p.id == id => {
+                // A failed pipeline can come back (built again on a new device, or once there's
+                // memory for it), and then its draws, left out so far, paint again.
+                let was_failed = std::mem::take(&mut p.failed);
                 let again = std::mem::replace(&mut p.ready, true);
-                std::mem::take(&mut p.drawn_unready) || again
+                std::mem::take(&mut p.drawn_unready) || again || was_failed
             }
             _ => false,
         }
