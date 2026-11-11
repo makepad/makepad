@@ -183,6 +183,9 @@ impl Cx {
             || self.need_redrawing()
             || next_frames_due
             || self.demo_time_repaint
+            // the next beat runs them (`run_live_edit_if_needed`)
+            || self.pending_script_reapply
+            || self.pending_live_edit_request
             || !self.screenshot_requests.is_empty()
             || !self.draw_shaders.compile_set.is_empty()
             || crate::remote::needs_ticks()
@@ -541,6 +544,7 @@ impl Cx {
             if self.need_redrawing() { count("beat: redraw"); }
             if !self.new_next_frames.is_empty() { count("beat: next frame"); }
             if self.demo_time_repaint { count("beat: demo repaint"); }
+            if self.pending_script_reapply || self.pending_live_edit_request { count("beat: live edit"); }
             if !self.screenshot_requests.is_empty() { count("beat: screenshot"); }
             if !self.draw_shaders.compile_set.is_empty() { count("beat: shaders"); }
             if crate::remote::needs_ticks() { count("beat: remote ticks"); }
