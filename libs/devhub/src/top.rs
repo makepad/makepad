@@ -4,6 +4,8 @@
 //! `nvidia-smi`; macOS `ps`), nothing is asked of the processes.
 
 use makepad_remote::json_str;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// One GPU's live numbers (`nvidia-smi`).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -39,6 +41,90 @@ pub fn nvidia_smi() -> Option<&'static str> {
 fn smi(args: &[&str]) -> Option<String> {
     let o = makepad_remote::group::command(nvidia_smi()?).args(args).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// `ioreg -r -d 1 -w 0 -c <class>` on a Mac: the registry's entries of that class. None elsewhere.
+fn ioreg(class: &str) -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let o = makepad_remote::group::command("/usr/sbin/ioreg").args(["-r", "-d", "1", "-w", "0", "-c", class]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// The GPU time of each process that holds a Mac's GPU, in `ioreg -r -d 1 -w 0 -c
+/// IOGPUDeviceUserClient`: each client's creator (`"IOUserClientCreator" = "pid 487,
+/// WindowServer"`) and the `"accumulatedGPUTime"` (ns) its `AppUsage` lists, summed by pid. A Mac
+/// tells each process's GPU time so without root.
+pub fn parse_gpu_times(text: &str) -> Vec<(u32, u64)> {
+    let number = |rest: &str| rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())].parse::<u64>().ok();
+    let mut by_pid = std::collections::BTreeMap::<u32, u64>::new();
+    for client in text.split("+-o ").skip(1) {
+        let creator = "\"IOUserClientCreator\" = \"pid ";
+        let Some(pid) = client.find(creator).and_then(|at| number(&client[at + creator.len()..])) else { continue };
+        let key = "\"accumulatedGPUTime\"=";
+        let ns: u64 = client.match_indices(key).filter_map(|(at, _)| number(&client[at + key.len()..])).sum();
+        *by_pid.entry(pid as u32).or_default() += ns;
+    }
+    by_pid.into_iter().collect()
+}
+
+/// Each pid's GPU use between two looks at the clients' times ([`parse_gpu_times`]) `span`
+/// apart, % of the GPU. A new pid's time is not all in the span; it and zero deltas are left out.
+pub fn gpu_rates(before: &[(u32, u64)], after: &[(u32, u64)], span: Duration) -> Vec<(u32, f64)> {
+    let span_ns = span.as_nanos().max(1) as f64;
+    after.iter().filter_map(|(pid, ns)| {
+        let was = before.iter().find(|(p, _)| p == pid)?.1;
+        let pct = ns.saturating_sub(was) as f64 * 100.0 / span_ns;
+        (pct > 0.0).then_some((*pid, pct))
+    }).collect()
+}
+
+/// GPU rates placed by `rows` as [`outside_in`] places them (`whose` says `""` for own groups):
+/// in all and by process, busiest first. The hub itself and processes gone from `rows` are left out.
+pub fn gpu_split(rates: &[(u32, f64)], rows: &[ProcRow], me: u32, whose: &dyn Fn(u32) -> Option<String>) -> (f64, Vec<(String, u32, f64)>) {
+    let by_pid: std::collections::HashMap<u32, &ProcRow> = rows.iter().map(|r| (r.pid, r)).collect();
+    let mut v: Vec<(String, u32, f64)> = rates.iter().filter_map(|(pid, pct)| {
+        let r = by_pid.get(pid).filter(|r| r.pid != me)?;
+        match owner(&by_pid, r, me, whose) {
+            Some(w) if w.is_empty() => None,
+            Some(w) => Some((format!("{} ({w})", r.name), *pid, *pct)),
+            None => Some((r.name.clone(), *pid, *pct)),
+        }
+    }).collect();
+    v.sort_by(|a, b| b.2.total_cmp(&a.2));
+    (v.iter().map(|(_, _, p)| p).sum(), v)
+}
+
+/// GPU rates since this caller's previous look. None off a Mac, on the first look, or if the
+/// registry could not be read. Caps and timed verdicts keep independent sampling state.
+pub(crate) fn gpu_since(last: &Mutex<Option<(Instant, Vec<(u32, u64)>)>>) -> Option<Vec<(u32, f64)>> {
+    let times = parse_gpu_times(&ioreg("IOGPUDeviceUserClient")?);
+    let now = Instant::now();
+    let (then, before) = last.lock().unwrap().replace((now, times.clone()))?;
+    Some(gpu_rates(&before, &times, now.duration_since(then)))
+}
+
+/// Per-process GPU use over a half-second look for a start check with no previous sample.
+/// None off a Mac or if the registry could not be read.
+pub fn gpu_look() -> Option<Vec<(u32, f64)>> {
+    let before = parse_gpu_times(&ioreg("IOGPUDeviceUserClient")?);
+    let then = Instant::now();
+    std::thread::sleep(Duration::from_millis(500));
+    let after = parse_gpu_times(&ioreg("IOGPUDeviceUserClient")?);
+    Some(gpu_rates(&before, &after, then.elapsed()))
+}
+
+/// [`gpu_split`] since the previous call (a timed lease's box look, every 10 s) on a Mac. None
+/// elsewhere, on the first call, or if the registry could not be read.
+pub fn gpu_outside(rows: &[ProcRow], whose: &dyn Fn(u32) -> Option<String>) -> Option<(f64, Vec<(String, u32, f64)>)> {
+    static LAST: Mutex<Option<(Instant, Vec<(u32, u64)>)>> = Mutex::new(None);
+    Some(gpu_split(&gpu_since(&LAST)?, rows, std::process::id(), whose))
+}
+
+/// The busiest three users from [`gpu_split`], with their pid and percent of the GPU.
+pub fn gpu_said(on: &[(String, u32, f64)]) -> String {
+    on.iter().take(3).map(|(what, pid, pct)| format!("{what} pid {pid} at {pct:.0}% of the GPU")).collect::<Vec<_>>().join(", ")
 }
 
 /// Every GPU's use now (empty without an NVIDIA driver).
@@ -353,8 +439,14 @@ pub fn compilers_among(rows: &[ProcRow], me: u32, whose: &dyn Fn(u32) -> Option<
 /// of one core) and the busiest three (`WindowServer 34%`, `rustc (the hub's cargo build) 180%`).
 /// A timed start waits while it is [`crate::lease::master::NOISY_CPU_PCT`] or more.
 pub fn outside_among(rows: &[ProcRow], me: u32, whose: &dyn Fn(u32) -> Option<String>) -> (f64, Vec<String>) {
+    outside_where(rows, &|_| true, me, whose)
+}
+
+/// [`outside_among`] of the processes `pick` takes among `rows`, each placed by its parents
+/// among all of them.
+pub fn outside_where(rows: &[ProcRow], pick: &dyn Fn(&ProcRow) -> bool, me: u32, whose: &dyn Fn(u32) -> Option<String>) -> (f64, Vec<String>) {
     let by_pid: std::collections::HashMap<u32, &ProcRow> = rows.iter().map(|r| (r.pid, r)).collect();
-    let mut busy: Vec<(f64, String)> = rows.iter().filter(|r| r.pid != me && r.cpu_pct >= 1.0).filter_map(|r| match owner_of(&by_pid, r, me, whose) {
+    let mut busy: Vec<(f64, String)> = rows.iter().filter(|r| r.pid != me && r.cpu_pct >= 1.0 && pick(r)).filter_map(|r| match owner_of(&by_pid, r, me, whose) {
         Owner::Group(_) => None,
         Owner::Hub(w) if w.starts_with("the hub's prewarm (") => None,
         Owner::Hub(w) => Some((r.cpu_pct, format!("{} ({w}) {:.0}%", r.name, r.cpu_pct))),
@@ -377,7 +469,11 @@ pub fn cpu_of(pids: &[u32]) -> Vec<(u32, f64)> {
 /// what shared its box (a Mac's Spotlight indexing what the last builds wrote; a rustc at 145%
 /// that the report could not place, 11-03).
 pub fn outside(whose: &dyn Fn(u32) -> Option<String>) -> (f64, Vec<(String, f64)>) {
-    let (_, rows) = sample();
+    outside_in(&sample().1, whose)
+}
+
+/// [`outside`] among a look's `rows` ([`processes`]).
+pub fn outside_in(rows: &[ProcRow], whose: &dyn Fn(u32) -> Option<String>) -> (f64, Vec<(String, f64)>) {
     let me = std::process::id();
     let by_pid: std::collections::HashMap<u32, &ProcRow> = rows.iter().map(|r| (r.pid, r)).collect();
     let mut v: Vec<(String, f64)> = rows.iter().filter(|r| r.pid != me && r.cpu_pct >= 1.0).filter_map(|r| match owner(&by_pid, r, me, whose) {
@@ -561,6 +657,31 @@ mod tests {
         assert_eq!(g.len(), 1);
         assert_eq!((g[0].util_pct, g[0].mem_used_gb, g[0].temp_c), (37.0, 4.0, 51.0));
         assert!(parse_gpu_use("").is_empty());
+        let clients = |a: u64, b: u64| format!(r#"+-o AGXDeviceUserClient
+    "IOUserClientCreator" = "pid 5000030, WindowServer"
+    "AppUsage" = ({{"accumulatedGPUTime"={a}}},{{"accumulatedGPUTime"=1000}})
++-o AGXDeviceUserClient
+    "IOUserClientCreator" = "pid 5000031, timedrun"
+    "AppUsage" = ({{"accumulatedGPUTime"={b}}})
++-o AGXDeviceUserClient
+    "IOUserClientCreator" = "pid 5000032, helper"
+    "AppUsage" = ()
++-o AGXDeviceUserClient
+    "IOUserClientCreator" = "pid 5000030, WindowServer"
+    "AppUsage" = ({{"accumulatedGPUTime"=2000}})
+"#);
+        let (mut before, mut after) = (parse_gpu_times(&clients(0, 0)), parse_gpu_times(&clients(300_000_000, 9_000_000_000)));
+        assert_eq!(before, vec![(5_000_030, 3000), (5_000_031, 0), (5_000_032, 0)], "two clients of one pid summed, one with no use at 0");
+        before.extend([(5_000_033, 0), (5_000_000, 0), (5_000_035, 0)]);
+        after.extend([(5_000_033, 2_000_000_000), (5_000_000, 5_000_000_000), (5_000_035, 6_000_000_000), (5_000_036, 7_000_000_000)]);
+        let rates = gpu_rates(&before, &after, Duration::from_secs(10));
+        assert_eq!(rates, vec![(5_000_030, 3.0), (5_000_031, 90.0), (5_000_033, 20.0), (5_000_000, 50.0), (5_000_035, 60.0)], "nanosecond deltas become GPU percentages; a new pid and a zero delta are left out");
+        let row = |pid: u32, pgid: u32, name: &str| ProcRow { pid, ppid: 1, pgid, name: name.into(), ..Default::default() };
+        let rows = [row(5_000_030, 5_000_030, "WindowServer"), row(5_000_031, 5_000_040, "timedrun"), row(5_000_032, 5_000_032, "helper"), row(5_000_033, 5_000_041, "other-run"), row(5_000_000, 5_000_000, "hub")];
+        let whose = |pgid: u32| match pgid { 5_000_040 => Some(String::new()), 5_000_041 => Some("L2 other-lane".into()), _ => None };
+        let (pct, by) = gpu_split(&rates, &rows, 5_000_000, &whose);
+        assert_eq!((pct, by.clone()), (23.0, vec![("other-run (L2 other-lane)".to_string(), 5_000_033, 20.0), ("WindowServer".to_string(), 5_000_030, 3.0)]), "own groups, the hub and gone pids are left out; another lease is named, busiest first, and the rest summed");
+        assert_eq!(gpu_said(&by), "other-run (L2 other-lane) pid 5000033 at 20% of the GPU, WindowServer pid 5000030 at 3% of the GPU");
         let a = parse_proc_stat("cpu  100 0 100 800 0 0 0 0 0 0\ncpu0 1 2 3 4\n").unwrap();
         let b = parse_proc_stat("cpu  200 0 200 1400 0 0 0 0 0 0\n").unwrap();
         assert_eq!(a, (200, 1000));

@@ -34,6 +34,7 @@ pub mod native;
 pub mod panel;
 pub mod patch;
 pub mod prof;
+pub mod replay;
 pub mod sched;
 pub mod ship;
 #[cfg(feature = "checkout")]
@@ -387,6 +388,10 @@ pub struct Caps {
     /// busier than its leases' charges names a lease past its charge and these as what took the rest
     pub busy_leases: Vec<(String, f64)>,
     pub busy_outside: Vec<(String, u32, f64)>,
+    /// A Mac's GPU used outside every lease since the previous look, % of the GPU, and its
+    /// busiest three outside users (what, pid, % of the GPU), what a GPU timing waits on
+    /// ([`sched::Req::gpu`]); None off a Mac, on the first look, or if the registry could not be read
+    pub mac_gpu: Option<(f64, Vec<(String, u32, f64)>)>,
     /// a display / WM session the node can show windows on
     pub display: Option<String>,
     /// what a WM of ours there answered on another hosted wire (its probe): it hosts no app of
@@ -459,8 +464,8 @@ pub struct Caps {
     pub stalls: Vec<String>,
     /// the node's rustc (`1.97.1`; empty: not known)
     pub rustc: String,
-    /// the master-node protocol the hub speaks ([`HUB_PROTO`]; 0: an older hub)
-    pub hub_proto: u32,
+    /// the facilities the hub has ([`FEATURES`]); empty: a hub from before feature reports
+    pub features: Vec<String>,
     /// Optional per-box dev JIT store report.
     pub jit_store: Option<std::sync::Arc<jitstore::Snapshot>>,
     /// the services the node's WM supervises (`~/.makepad/wm/<name>.state`): name, start wall ms
@@ -540,58 +545,44 @@ impl UserSense {
     }
 }
 
-/// The master-node protocol this build speaks: raised when the master starts sending a node word
-/// older hubs lack (2: overlay sources and base blobs; 3: per-lane native trees; 4: detachable
-/// live runs; 5: compiled-file dev JIT inputs, a dep-info mismatch never fails; 6: its restart
-/// ends nothing, so it restarts for its update at once; 7: warm leases use another lane's native
-/// tree and target; 9: a hub build takes the jobs its room was granted, `hub-restart <sha> jobs=N`;
-/// 10: the shards of one tests bucket run share their native tree; 11: `lease-tell`, the lease's
-/// `$DEVHUB_TOLD` file, the tests run's queue; 12: an explicit `--jit` is the run's JIT for any
-/// command, held for it at `$MAKEPAD_LOADER`; 13: `jit-read` / `jit-put`, a `--jit` copied to the
-/// box a lease is granted on; 14: a rev names any nested repository, [`NESTED_PROTO`]; 15: a
-/// lease builds `--for` another box's CPU, [`FOR_CPU_PROTO`]; 16: an apply's prebuild takes the
-/// jobs its room was granted, `apply ... jobs=N`, [`DEPLOY_JOBS_PROTO`]).
-/// Only requests needing a newer facility wait for its self-update; other leases keep using the hub.
-pub const HUB_PROTO: u32 = 16;
-/// The first protocol whose hub builds an apply's prebuild with the jobs its room was granted
-/// (`apply ... jobs=N`, [`sched::Req::deploy_build`]): an older one takes `jobs` for a repository
-/// and refuses the apply.
-pub const DEPLOY_JOBS_PROTO: u32 = 16;
-/// The first protocol whose hub builds a lease `--for` another box ([`sched::Req::cpu_target`]):
-/// an older one would build for its own CPU (`native`) and say nothing.
-pub const FOR_CPU_PROTO: u32 = 15;
+/// The facilities this build's hub has, by name, reported in its caps ([`Caps::features`]). A
+/// request lists the ones its fields need and goes only to a hub that reports them all, in place
+/// of the one protocol number a facility used to raise. A new facility is a new
+/// name here; none is ever renamed or reused.
+pub const FEATURES: &[&str] = &[
+    "ship-done", // a tree lease's shipped sources
+    "overlay", // overlay sources and base blobs
+    "native-trees", // per-lane native trees
+    "detach", // detachable live runs
+    "jit-inputs", // compiled-file dev JIT inputs, a dep-info mismatch never fails
+    "handover", // its restart ends nothing, so it restarts for its update at once
+    "warm-trees", // warm leases use another lane's native tree and target
+    "overlay-edits", // each overlay lease has its own edits
+    "hub-jobs", // a hub build takes the jobs its room was granted, `hub-restart <sha> jobs=N`
+    "shared-native", // the shards of one tests bucket run share their native tree
+    "tell", // `lease-tell`, the lease's `$DEVHUB_TOLD` file, the tests run's queue
+    "jit-ask", // an explicit `--jit` is the run's JIT for any command, held for it at `$MAKEPAD_LOADER`
+    "jit-copy", // `jit-read` / `jit-put`, a `--jit` copied to the box a lease is granted on
+    "nested", // a rev names any nested repository
+    "for-cpu", // a lease builds `--for` another box's CPU
+    "deploy-jobs", // an apply's prebuild takes the jobs its room was granted, `apply ... jobs=N`
+    "gpu-quiet", // a GPU timing (`gpu` in its lease-start) waits for its GPU, not the box's CPU
+];
 
 /// Whether `t` can be a `-C target-cpu` a lease builds for (it goes into the build's flags):
 /// lowercase letters, digits, `-` and `.`.
 pub fn valid_cpu_target(t: &str) -> bool {
     !t.is_empty() && t.len() <= 40 && t.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
 }
-/// The first protocol whose hub takes every nested repository a lease's rev names (its store, its
-/// tree, its overlay); hubs before took makepad and the ledger's paired one
-/// ([`crate::state::PAIRED`]) only.
-pub const NESTED_PROTO: u32 = 14;
-/// The first protocol whose hub builds itself with the jobs its room was granted
-/// ([`crate::lease::sched::Req::hub_build`]): its build may start on fewer cores than it measured.
-pub const HUB_JOBS_PROTO: u32 = 9;
-/// The first protocol whose hub tells a lease's run what its holder says (`lease-tell`, its
-/// `$DEVHUB_TOLD` file, [`TOLD_FILE`]): a tests shard takes its units from the run's queue so, and
-/// waits for it (its hub also shares the native tree of the shards of one run at its pin,
-/// lease/tree.rs [`tree::take_native`], since protocol 10).
-pub const TELL_PROTO: u32 = 11;
-/// The first protocol whose hub runs any command of a lease that asks for a JIT by id (`--jit`)
-/// on that JIT, held for the lease at `$MAKEPAD_LOADER`: an older one ran it without (11-07).
-pub const JIT_ASK_PROTO: u32 = 12;
-/// The first protocol whose hub serves its store's JITs to the master (`jit-read`) and takes one
-/// copied in (`jit-put`): a lease's `--jit` goes to any box of its platform, copied there at its
-/// grant from a box that holds it ([`sched::Sched::jit_source`]).
-pub const JIT_COPY_PROTO: u32 = 13;
 /// In a box's refusal of a timed lease's start: something builds there, and the master places the
 /// lease again on a new look at the box.
 pub const TIMED_AFTER: &str = "timed work starts after it";
-/// The first protocol whose hub restarts at once for its update (a restart ends nothing).
-pub const HANDOVER_PROTO: u32 = 6;
 
 impl Caps {
+    pub fn has(&self, feature: &str) -> bool {
+        self.features.iter().any(|f| f == feature)
+    }
+
     pub fn role(&self) -> Role {
         self.role.unwrap_or(Role::Pool)
     }
@@ -619,7 +610,7 @@ impl Caps {
         let exec_limits = self.exec_limits.map_or("null".into(), |l| l.to_json());
         let slots: Vec<String> = self.slots.iter().map(|(k, n)| format!("\"{}\":{n}", k.as_str())).collect();
         format!(
-            "{{\"exec_limits\":{exec_limits},\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cpu_target\":{},\"cores\":{},\"cpus_shared\":{},\"cpus_timed\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"timed_spare\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"mem_pressure\":{},\"mem_stall\":{:.1},\"trouble\":{},\"wm_wire\":{},\"wm_dark\":{},\"wm_drain\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"hub_proto\":{}{},\"services\":{{{}}},\"user\":{}}}",
+            "{{\"exec_limits\":{exec_limits},\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cpu_target\":{},\"cores\":{},\"cpus_shared\":{},\"cpus_timed\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"timed_spare\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"mem_pressure\":{},\"mem_stall\":{:.1},\"trouble\":{},\"wm_wire\":{},\"wm_dark\":{},\"wm_drain\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"features\":[{}]{}{},\"services\":{{{}}},\"user\":{}}}",
             json_str(&self.rustc),
             json_str(&self.node),
             json_str(&self.arch),
@@ -664,10 +655,11 @@ impl Caps {
             json_str(&self.hub_rev),
             self.hub_rss_mb,
             self.hub_heap_mb,
-            self.hub_proto,
+            self.features.iter().map(|f| json_str(f)).collect::<Vec<_>>().join(","),
             format!(",\"native\":[{}],\"native_trees\":{}{},\"hub_building\":{},\"prewarming\":{},\"busy_leases\":[{}],\"busy_outside\":[{}]", self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json())), self.hub_building, self.prewarming,
                 self.busy_leases.iter().map(|(lease, cores)| format!("{{\"lease\":{},\"cores\":{cores:.2}}}", json_str(lease))).collect::<Vec<_>>().join(","),
                 self.busy_outside.iter().map(|(what, pid, cores)| format!("{{\"what\":{},\"pid\":{pid},\"cores\":{cores:.2}}}", json_str(what))).collect::<Vec<_>>().join(",")),
+            self.mac_gpu.as_ref().map_or(String::new(), |(pct, on)| format!(",\"mac_gpu\":{{\"pct\":{pct:.0},\"on\":[{}]}}", on.iter().map(|(what, pid, pct)| format!("{{\"what\":{},\"pid\":{pid},\"pct\":{pct:.2}}}", json_str(what))).collect::<Vec<_>>().join(","))),
             self.services.iter().map(|(n, t)| format!("{}:{t}", json_str(n))).collect::<Vec<_>>().join(","),
             self.user.as_ref().map_or("null".to_string(), |u| u.to_json()),
         )
@@ -724,7 +716,7 @@ impl Caps {
             wm_dark: s("wm_dark"),
             wm_drain: s("wm_drain"),
             rustc: s("rustc"),
-            hub_proto: f("hub_proto") as u32,
+            features: v.get("features").and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
             jit_store: v.get("jit_store").filter(|v| !v.is_null()).map(|v| std::sync::Arc::new(jitstore::Snapshot::parse(v))),
             services: match v.get("services") {
                 Some(makepad_strict_json::Value::Obj(o)) => o.iter().filter_map(|(k, x)| num(x).map(|t| (k.clone(), t as u64))).collect(),
@@ -744,9 +736,9 @@ impl Caps {
         for b in v.get("busy_leases").and_then(|x| x.as_arr()).unwrap_or(&[]) {
             c.busy_leases.push((b.get("lease").and_then(|x| x.as_str()).unwrap_or("").to_string(), b.get("cores").and_then(num).unwrap_or(0.0)));
         }
-        for b in v.get("busy_outside").and_then(|x| x.as_arr()).unwrap_or(&[]) {
-            c.busy_outside.push((b.get("what").and_then(|x| x.as_str()).unwrap_or("").to_string(), b.get("pid").and_then(num).unwrap_or(0.0) as u32, b.get("cores").and_then(num).unwrap_or(0.0)));
-        }
+        let busy = |b: &makepad_strict_json::Value, unit: &str| (b.get("what").and_then(|x| x.as_str()).unwrap_or("").to_string(), b.get("pid").and_then(num).unwrap_or(0.0) as u32, b.get(unit).and_then(num).unwrap_or(0.0));
+        c.busy_outside = v.get("busy_outside").and_then(|x| x.as_arr()).unwrap_or(&[]).iter().map(|b| busy(b, "cores")).collect();
+        c.mac_gpu = v.get("mac_gpu").and_then(|g| Some((g.get("pct").and_then(num)?, g.get("on").and_then(|x| x.as_arr()).unwrap_or(&[]).iter().map(|b| busy(b, "pct")).collect())));
         if let Some(b) = v.get("battery").filter(|b| b.get("pct").is_some()) {
             c.battery = Some((b.get("pct").and_then(num).unwrap_or(0.0) as u32, b.get("charging").and_then(|x| x.as_bool()).unwrap_or(false)));
         }
@@ -1009,6 +1001,9 @@ mod tests {
 
     #[test]
     fn caps_round_trip() {
+        let empty = Caps::default();
+        assert!(Caps::parse(&empty.to_json()).unwrap().features.is_empty());
+        assert!(Caps::parse("{}").unwrap().features.is_empty());
         let c = Caps {
             exec_limits: Some(crate::os::ExecLimits { total: 2 * 1024 * 1024, per_string: Some(128 * 1024) }),
             node: "node-a".into(),
@@ -1030,6 +1025,7 @@ mod tests {
             cpu_pct: Some(12.5),
             busy_leases: vec![("L7".into(), 11.5), ("L9".into(), 0.25)],
             busy_outside: vec![("indexer --all".into(), 4_000_021, 2.25), ("dumper".into(), 4_000_020, 0.75)],
+            mac_gpu: Some((14.0, vec![("dumper".into(), 4_000_020, 14.0)])),
             display: Some("wm".into()),
             battery: None,
             role: Some(Role::Pool),
@@ -1062,13 +1058,18 @@ mod tests {
             wm_wire: "makepad-wm-0 answered \"makepad-wm mismatch 0123\"".into(),
             wm_dark: "its WM's window is 0x0: no output shows it".into(),
             wm_drain: "screen lease L9 of lane-s (its windows)".into(),
-            hub_proto: HUB_PROTO,
+            features: FEATURES.iter().map(|f| f.to_string()).collect(),
             jit_store: None,
             services: vec![("ai-hub".into(), 1_700_000_000_000)],
             user: Some(UserSense { present: true, idle_ms: Some(42_000), what: "key from its device".into(), idle_min: 3 }),
         };
         assert_eq!(Caps::parse(&c.to_json()), Some(c.clone()));
-        let none = Caps { desk_link: None, user: None, ..c };
+        let wire = c.to_json();
+        let value = makepad_strict_json::parse(wire.as_bytes()).unwrap();
+        let user = &value.get("mac_gpu").unwrap().get("on").unwrap().as_arr().unwrap()[0];
+        assert_eq!(user.get("pct").and_then(num), Some(14.0), "GPU users carry percent of the GPU on the wire");
+        assert!(user.get("cores").is_none(), "GPU use is not CPU cores");
+        let none = Caps { desk_link: None, user: None, mac_gpu: None, ..c };
         assert_eq!(Caps::parse(&none.to_json()), Some(none.clone()));
         assert_eq!((none.cores_for(Kind::Build), none.cores_for(Kind::Test), none.cores_for(Kind::Timed)), (8, 8, 6), "each kind runs on the CPUs it is pinned to");
         let unpinned = Caps { cpus_shared: 0, cpus_timed: 0, ..none };

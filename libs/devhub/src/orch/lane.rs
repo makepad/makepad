@@ -1539,8 +1539,17 @@ fn quiet(ctx: &Ctx) -> Result<String, String> {
     let busy = in_flight(ctx);
     let landed: Vec<(String, String, u64)> = ctx.store.history("land")?.iter().filter_map(|v| crate::land::Entry::parse(&v.to_json())).map(|e| (e.branch, e.cbranch, e.asked_ms)).collect();
     let now = wall_ms();
-    // a lane busy with a lease far over its measure whose agent went silent, then the idle ones
-    let mut rows = ctx.leases.silent_overdue(now);
+    let mut rows = Vec::new();
+    let detached = ctx.leases.detached(now);
+    if !detached.is_empty() {
+        rows.push("agents with running leases and no call of their own waiting on them:".to_string());
+        rows.extend(detached);
+    }
+    let overdue = ctx.leases.silent_overdue(now);
+    if !overdue.is_empty() {
+        rows.push("leases far over their measure whose agent went silent:".to_string());
+        rows.extend(overdue);
+    }
     rows.extend(super::live::restarts_pending(ctx, now));
     let (leases, nodes) = (ctx.leases.view(), ctx.leases.nodes());
     let shard_box = |id: &str| {

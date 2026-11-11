@@ -47,6 +47,14 @@ pub struct Sync {
 /// The words of an apply order that are not repositories.
 const ORDER_WORDS: [&str; 11] = ["at", "build", "jit", "jobs", "landed", "prewarm", "repoint", "restart", "session", "tickcmd", "wait_ms"];
 
+/// Refuse an unread word before an apply moves or builds anything.
+fn order_unknown(o: &Order) -> Option<String> {
+    o.words.iter().skip(1).find(|word| {
+        let Some((key, value)) = word.split_once('=') else { return true };
+        !ORDER_WORDS.contains(&key) && !((key == "makepad" || crate::nested::valid(key)) && git::valid_sha(value))
+    }).cloned()
+}
+
 /// The repositories an apply order moves, each to the commit it names: `makepad=<sha>` and each
 /// nested repository's `<name>=<sha>`, makepad first.
 fn order_repos(o: &Order) -> Vec<(String, String)> {
@@ -215,6 +223,9 @@ impl Sync {
     /// Move the deployment independently of leases, follow live patches, prebuild and apply
     /// the order's safe restart rules; warm the work tree only when idle.
     fn apply(self: &Arc<Self>, o: &Order, out: &mut Vec<String>) {
+        if let Some(word) = order_unknown(o) {
+            return self.refuse(out, format!("sync: apply refused: this hub does not read the word `{word}`"));
+        }
         let Ok(_busy) = self.busy.try_lock() else { return out.push(err_line("an apply is running on this node")) };
         // its hub does not restart under it (the build would start over, 10-30). Said before it
         // looks for a timed lease: a timed start marks first and looks at this after, so one of
@@ -249,9 +260,6 @@ impl Sync {
         let mut plan: Vec<(&str, Store, Option<String>, String)> = Vec::new();
         for (repo, to) in &moves {
             let (repo, to) = (repo.as_str(), to.as_str());
-            if !git::valid_sha(to) {
-                return self.refuse(out, format!("sync: apply refused: {repo}={to} is not a commit id"));
-            }
             let store = match Store::open(repo) {
                 Ok(s) => s,
                 Err(e) => return self.refuse(out, format!("sync: {repo} store: {e}")),
@@ -416,7 +424,7 @@ impl Sync {
                 }
                 *BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()) = None;
             };
-            // on the cores its room was granted, when fewer than it measured (`jobs=N`, [`crate::lease::DEPLOY_JOBS_PROTO`])
+            // on the cores its room was granted, when fewer than it measured (`jobs=N`, `deploy-jobs`)
             let jobs = o.get("jobs").and_then(|n| n.parse::<u32>().ok()).filter(|n| *n > 0);
             let b = build::prebuild(&self.conf, jobs, &jit_built);
             *BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -1036,6 +1044,12 @@ mod tests {
     fn an_apply_moves_each_repository_its_order_names() {
         let (a, b, c, e) = ("a".repeat(40), "b".repeat(40), "c".repeat(40), "e".repeat(40));
         let o = Order { words: format!("apply repo-b={e} makepad={a} commercial={c} build=on restart=auto session=s1 landed=17 prewarm=on jobs=3").split(' ').map(str::to_string).collect(), signer: String::new() };
+        assert_eq!(order_unknown(&o), None);
+        for word in ["jbos=3", "jobs", "commercial=abc", "makepad=bad", "bad/name=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] {
+            let mut bad = Order { words: o.words.clone(), signer: String::new() };
+            bad.words.push(word.into());
+            assert_eq!(order_unknown(&bad).as_deref(), Some(word));
+        }
         assert_eq!(order_repos(&o), [("makepad".to_string(), a.clone()), ("repo-b".to_string(), e.clone()), ("commercial".to_string(), c.clone())]);
         let was = crate::lease::Pin::at(&b).with("commercial", &b);
         assert_eq!(deployed_after(Some(was.clone()), &[("repo-b".into(), e.clone())]), Some(was.clone().with("repo-b", &e)), "what did not move stays");

@@ -247,7 +247,7 @@ pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
     c.sick = sick();
     c.clocksource = clocksource();
     c.rustc = rustc_version();
-    c.hub_proto = super::HUB_PROTO;
+    c.features = super::FEATURES.iter().map(|f| f.to_string()).collect();
     c.services = services();
     c.hub_building = super::exec::hub_building();
     #[cfg(feature = "checkout")]

@@ -4,15 +4,16 @@
 //! crates of cargo's resolved graph ([`linked_dirs`]), minus what no build reads ([`builds`]).
 //! A WM service's roll starts once its code has been still for [`SETTLE_MS`] (landings come in
 //! bursts); the hubs and the master take each devhub build as it ends.
-//! Each roll leaves two lines in `rolls.jsonl` (`devhub rolls`): its target and why, then how it ended.
+//! Each roll leaves two lines in `rolls.jsonl` (`devhub rolls`): its target and why, then how it
+//! ended. A hub seen at a commit its record does not name, no roll of its own under way, gets a
+//! `runs` line of its own (a roll a master restart cut short, a restart whose answer was lost).
 //! - the node hubs (they run apps/devhub, libs/devhub with its panel; only libs/devhub's graph rolls
 //!   them, and what changed in the panel's alone comes along with the next roll): their target is
 //!   the newest devhub build the master completed (its
 //!   per-landing CLI build, [`prebuild`]: never a tip that did not build, never older than a hub
 //!   runs, the same for every box), so they never wait for the master's own restart (Mac hubs lagged
 //!   the deployment for its 30 min uptime, 11-03). A hub newer than the master works with it; a
-//!   landing that raises the hub protocol ([`crate::lease::HUB_PROTO`]) waits for the master to run
-//!   it first, stated on each box as `stalled: master older than protocol N`. The deployment gets
+//!   request needing a feature its hub lacks waits for that feature by name. The deployment gets
 //!   the code (the auto-sync, kicked; a push for the boxes outside it, which a timed run there makes
 //!   wait: an update wait, said once) while leases keep using the work tree. Once `caps.deploy` has
 //!   the code, the master takes the room of its build there (a lease of class `hub-build`, granted
@@ -25,9 +26,9 @@
 //!   lease/jitstore.rs; holders see a reconnect). Only a sync apply or an in-hub selftest makes it wait
 //!   seconds (Windows: its runs, job objects that end with the hub). The hub exits and what keeps
 //!   it (the WM's supervisor, the Mac's LaunchAgent) starts it again through `cargo run`. Its caps
-//!   then name the commit it runs (`devhub nodes`: `hub <sha>`). A hub before protocol 6
-//!   ([`crate::lease::HANDOVER_PROTO`]) restarts only between runs: its box takes no new lease
-//!   until it has (once per box). Only requests needing a newer protocol wait for it. A hub from
+//!   then name the commit it runs (`devhub nodes`: `hub <sha>`). A hub without `handover`
+//!   restarts only between runs: its box takes no new lease until it has (once per box).
+//!   Only requests needing a feature it lacks wait for it. A hub from
 //!   before the self-update needs one restart by hand (it is said once).
 //! - the services the WM supervises (the AI hub): `service-restart` once `caps.deploy` has the code
 //!   and the node's apply has built it, only when the hub does not run that build already (a
@@ -211,6 +212,36 @@ fn note_roll(node: &str, svc: &str, fields: &[(&str, &str)]) {
     }
 }
 
+/// The commit each box's hub runs by the record: the short sha of its newest devhub `runs` line.
+fn hubs_run(text: &str) -> HashMap<String, String> {
+    let mut at = HashMap::new();
+    for l in text.lines().filter(|l| l.contains("\"ended\":\"runs ")) {
+        let Ok(v) = makepad_strict_json::parse(l.as_bytes()) else { continue };
+        let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if let Some(sha) = field("ended").strip_prefix("runs ").filter(|_| field("svc") == "devhub") {
+            at.insert(field("node"), sha.to_string());
+        }
+    }
+    at
+}
+
+/// Whether a hub at `rev` is one the record names `known` (a short sha, or nothing yet).
+fn runs_known(known: &str, rev: &str) -> bool {
+    rev.is_empty() || (!known.is_empty() && rev.starts_with(known))
+}
+
+/// `node`'s hub runs `rev` with no roll of its own under way: a `runs` line when the record
+/// ([`hubs_run`]) has it elsewhere.
+fn note_runs(runs: &Mutex<HashMap<String, String>>, node: &str, rev: &str) {
+    let mut runs = runs.lock().unwrap();
+    let known = runs.get(node).cloned().unwrap_or_default();
+    if runs_known(&known, rev) {
+        return;
+    }
+    note_roll(node, "devhub", &[("from", &known), ("to", rev), ("ended", &format!("runs {}", super::short(rev)))]);
+    runs.insert(node.to_string(), super::short(rev).to_string());
+}
+
 /// `devhub rolls [--node N] [n]`.
 pub fn rolls_cli(args: &[&str]) -> i32 {
     let at = args.iter().position(|a| *a == "--node");
@@ -370,11 +401,17 @@ fn event(ctx: &Ctx, sev: Sev, line: String) {
 }
 
 pub fn start(ctx: Arc<Ctx>) {
-    if let Some(kept) = std::fs::read_to_string(rolls_path()).ok().as_deref().and_then(rolls_kept) {
+    let record = std::fs::read_to_string(rolls_path()).unwrap_or_default();
+    if let Some(kept) = rolls_kept(&record) {
         if let Err(e) = std::fs::write(rolls_path(), kept) {
             event(&ctx, Sev::Warn, format!("update: {}: {e}", rolls_path().display()));
         }
     }
+    // node -> the commit its hub runs by the record: one seen running another, with no roll of
+    // its own under way, gets its `runs` line (a roll that a master restart cut short, a restart
+    // whose answer was lost, its WM's: two hubs moved with no line, 11-10)
+    let runs = Arc::new(Mutex::new(hubs_run(&record)));
+    drop(record);
     // the hubs' target: the commit this master was built at, read now (lazily it would be
     // whatever the checkout moved to since)
     let _ = crate::lease::caps::hub_rev();
@@ -422,8 +459,6 @@ pub fn start(ctx: Arc<Ctx>) {
         // the same for the app this master runs as, if it does
         let mut app_at = mine.clone();
         *APP_GOOD.lock().unwrap() = mine;
-        // the boxes whose hub waits for the master's protocol, and what they show
-        let mut proto_held: HashMap<String, String> = HashMap::new();
         let mut tips_at = String::new();
         loop {
             std::thread::sleep(TICK);
@@ -480,15 +515,8 @@ pub fn start(ctx: Arc<Ctx>) {
                 wait_since = None;
             }
             prebuild(&ctx, &work, &closures["devhub"], (bin == MasterBin::App).then_some(&master_dirs), &mut cli_at, &mut app_at);
-            // the hubs' target: the newest devhub build the master completed, once its protocol is
-            // one this master speaks (a hub newer than the master works with it otherwise)
+            // the hubs' target: the newest devhub build the master completed
             let good = cli_good();
-            let target = hub_target(&good, hub_proto_at(&ctx.repo, &good), crate::lease::HUB_PROTO);
-            if let (Err(why), false) = (&target, good.is_empty()) {
-                if said.insert(format!("proto {good}")) {
-                    event(&ctx, Sev::Info, format!("update: the hubs roll to {} after the master does: stalled: {why}", super::short(&good)));
-                }
-            }
             // each service rolls once its own code settled: the hub's frequent landings never hold
             // back an AI hub whose code is still (11-01: the fleet's AI hubs ran 1 h old code)
             let changed: HashMap<&str, u64> = SERVICES.iter().skip(1).map(|(s, _)| (*s, last_change_ms(&ctx.repo, &work, &closures[*s]))).collect();
@@ -496,7 +524,11 @@ pub fn start(ctx: Arc<Ctx>) {
             // makepad-devhub, which the master's build had refused minutes before)
             for n in ctx.leases.nodes().into_iter().filter(|n| n.up && !matches!(n.role(), crate::lease::Role::Device)) {
                 let Some(c) = n.caps.clone() else { continue };
-                if busy.lock().unwrap().contains(&n.name) || refused.lock().unwrap().get(&n.name).map(String::as_str) == Some(c.deploy.split(',').next().unwrap_or("")) {
+                if busy.lock().unwrap().contains(&n.name) {
+                    continue;
+                }
+                note_runs(&runs, &n.name, &c.hub_rev);
+                if refused.lock().unwrap().get(&n.name).map(String::as_str) == Some(c.deploy.split(',').next().unwrap_or("")) {
                     continue;
                 }
                 // the hub
@@ -506,24 +538,12 @@ pub fn start(ctx: Arc<Ctx>) {
                     && !crate::gitread::is_ancestor(&ctx.repo, &good, &c.hub_rev)
                     && touches(&ctx.repo, &c.hub_rev, &good, hub)
                     && broken.lock().unwrap().get(&n.name).map(String::as_str) != Some(c.deploy.split(',').next().unwrap_or(""));
-                // a box whose hub waits for the master's protocol says so while it waits
-                let stalled = match (&target, lags) {
-                    (Err(why), true) => Some(format!("stalled: {why} (its hub updates to {} after the master)", super::short(&good))),
-                    _ => None,
-                };
-                if proto_held.get(&n.name) != stalled.as_ref() {
-                    ctx.leases.set_updating(&n.name, stalled.as_deref(), false);
-                    match stalled {
-                        Some(s) => proto_held.insert(n.name.clone(), s),
-                        None => proto_held.remove(&n.name),
-                    };
-                }
                 let job = if c.hub_rev.is_empty() {
                     if said.insert(format!("old {}", n.name)) {
                         event(&ctx, Sev::Warn, format!("update: {}'s hub is from before the self-update: restart it once by hand (then devhub updates it by itself)", n.name));
                     }
                     None
-                } else if lags && target.is_ok() {
+                } else if lags {
                     Some(("devhub", hub.clone()))
                 } else {
                     // the WM-supervised services that run there and started before their code's last change
@@ -546,7 +566,7 @@ pub fn start(ctx: Arc<Ctx>) {
                 };
                 let why = closures_why.as_ref().map_or(why.clone(), |c| format!("{c}: {why}"));
                 let (c2, b2, d2, node, br, rf, cur) = (ctx.clone(), busy.clone(), drains.clone(), n.name.clone(), broken.clone(), refused.clone(), current.clone());
-                let (at, deploy) = (changed.get(svc).copied().unwrap_or(0), c.deploy.clone());
+                let (at, deploy, rn) = (changed.get(svc).copied().unwrap_or(0), c.deploy.clone(), runs.clone());
                 let _ = std::thread::Builder::new().name("devhub-update-node".into()).spawn(move || {
                     let end = roll_node(&c2, &node, svc, &dirs, &target, d2, &|| note_roll(&node, svc, &[("from", &from), ("to", &target), ("why", &why)]));
                     let now = c2.leases.nodes().into_iter().find(|n| n.name == node).and_then(|n| n.caps).map_or(String::new(), |c| c.hub_rev);
@@ -560,6 +580,10 @@ pub fn start(ctx: Arc<Ctx>) {
                     };
                     if let Some(ended) = ended {
                         note_roll(&node, svc, &[("to", &target), ("ended", &ended)]);
+                    }
+                    // (before the box leaves `busy`: its next look finds the record current)
+                    if svc == "devhub" && matches!(end, RollEnd::Back) {
+                        rn.lock().unwrap().insert(node.clone(), super::short(&now).to_string());
                     }
                     if matches!(end, RollEnd::Current) {
                         cur.lock().unwrap().insert((node.clone(), svc.to_string()), (at, deploy));
@@ -710,40 +734,6 @@ fn restart_blocker_of(building: bool, sweeping: bool, allapps: bool, pending: Du
         return Some(format!("an allapps run: it restarts as that ends, {} min after the build at the latest", MASTER_DEADLINE.as_secs() / 60));
     }
     None
-}
-
-/// Where the hub protocol is set ([`crate::lease::HUB_PROTO`]).
-const PROTO_FILE: &str = "libs/devhub/src/lease/mod.rs";
-
-/// The hub protocol a source of [`PROTO_FILE`] sets.
-fn proto_in(text: &str) -> Option<u32> {
-    text.lines().find_map(|l| l.trim().strip_prefix("pub const HUB_PROTO: u32 = ")?.strip_suffix(';')?.trim().parse().ok())
-}
-
-/// The hub protocol of devhub at commit `at` (asked once per commit).
-fn hub_proto_at(repo: &Path, at: &str) -> Option<u32> {
-    static KNOWN: Mutex<Option<(String, Option<u32>)>> = Mutex::new(None);
-    let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, p)) = known.as_ref().filter(|(k, _)| k == at) {
-        return *p;
-    }
-    let read = || {
-        let oid = crate::gitread::entries_at(repo, at, &[PROTO_FILE])?.pop().filter(|o| !o.is_empty())?;
-        proto_in(&String::from_utf8(crate::gitread::blob(repo, &oid).ok()?).ok()?)
-    };
-    let p = read();
-    *known = Some((at.to_string(), p));
-    p
-}
-
-/// The hubs roll to `good` (the newest devhub build) when its hub protocol (`proto`) is one this
-/// master (`master`) speaks; Err: why they wait for the master's own restart.
-fn hub_target(good: &str, proto: Option<u32>, master: u32) -> Result<(), String> {
-    match proto {
-        Some(p) if p > master => Err(format!("master older than protocol {p}")),
-        Some(_) => Ok(()),
-        None => Err(format!("the hub protocol at {} cannot be read", super::short(good))),
-    }
 }
 
 /// What a deployment push only waits for (a timed run on the box: `waits: timed lease L.. runs
@@ -968,8 +958,8 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
             }
         }
         updating(None);
-        // A hub before handover (protocol 6) restarts only between runs: it drains, once.
-        let old = caps().is_some_and(|c| c.hub_proto < crate::lease::HANDOVER_PROTO);
+        // A hub without `handover` restarts only between runs: it drains, once.
+        let old = caps().is_some_and(|c| !c.has("handover"));
         if old { ctx.leases.set_updating(node, Some(&format!("its hub updates to {short}; an older hub: no new leases until it restarts")), true); }
         event(ctx, Sev::Info, format!("update: {node} restarts its hub for {short}{}", if old { " once its runs end (an older hub: no new leases until then)" } else { " now (runs and leases go on)" }));
     } else {
@@ -1006,7 +996,7 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
         // a hub build granted fewer cores than it measured (it started now on its box's free
         // ones) builds on that many jobs; an older hub compares the whole word with its
         // deployment, so it gets the sha alone
-        let jobs = room.as_ref().filter(|_| caps().is_some_and(|c| c.hub_proto >= crate::lease::HUB_JOBS_PROTO)).and_then(|held| ctx.leases.hub_build_jobs(&held.id));
+        let jobs = room.as_ref().filter(|_| caps().is_some_and(|c| c.has("hub-jobs"))).and_then(|held| ctx.leases.hub_build_jobs(&held.id));
         let line = if svc == "devhub" { format!("hub-restart {deploy}{}", jobs.map_or(String::new(), |j| format!(" jobs={j}"))) } else { format!("service-restart {svc}") };
         let answer = if present { Ok(vec![format!("{{\"err\":\"waits: a user is at {node}\"}}")]) } else { crate::cli::ask(&ctl, Some(node), word, &line) };
         if answer.is_ok() { down = None; }
@@ -1139,10 +1129,10 @@ pub(crate) struct DeployRoom {
 
 impl DeployRoom {
     /// The jobs its build builds with ([`crate::lease::sched::Sched::hub_build_jobs`]), for a node
-    /// whose hub takes them ([`crate::lease::DEPLOY_JOBS_PROTO`]).
+    /// whose hub reports `deploy-jobs`.
     pub(crate) fn jobs(&self) -> Option<u32> {
         let lm = super::leases()?;
-        let takes = lm.nodes().into_iter().find(|n| n.name == self.held.node).and_then(|n| n.caps).is_some_and(|c| c.hub_proto >= crate::lease::DEPLOY_JOBS_PROTO);
+        let takes = lm.nodes().into_iter().find(|n| n.name == self.held.node).and_then(|n| n.caps).is_some_and(|c| c.has("deploy-jobs"));
         takes.then(|| lm.hub_build_jobs(&self.held.id)).flatten()
     }
 }
@@ -1629,16 +1619,9 @@ mod tests {
     }
 
     /// The hubs follow the newest devhub build, not the master's restart (Mac hubs lagged the
-    /// deployment for the master's 30 min uptime, 11-03); one that speaks a newer protocol than the
-    /// master waits for it, stated.
+    /// deployment for the master's 30 min uptime, 11-03); a hub with newer features works with it.
     #[test]
-    fn hubs_roll_to_the_newest_build_unless_the_master_is_older_than_its_protocol() {
-        let mine = crate::lease::HUB_PROTO;
-        assert_eq!(super::proto_in(include_str!("../lease/mod.rs")), Some(mine), "the protocol is read from its source");
-        assert_eq!(super::hub_target("abc", Some(mine), mine), Ok(()));
-        assert_eq!(super::hub_target("abc", Some(mine - 1), mine), Ok(()), "a hub of an older protocol than the master's");
-        assert_eq!(super::hub_target("abc", Some(mine + 1), mine), Err(format!("master older than protocol {}", mine + 1)));
-        assert!(super::hub_target("abcdef1234567", None, mine).is_err_and(|e| e.contains("cannot be read")));
+    fn hubs_roll_to_the_newest_build() {
         // a landing that leaves the master's code alone keeps the build's verdict; one after a
         // failed build does not
         let mut good = "a".to_string();
@@ -1713,6 +1696,9 @@ mod tests {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let d = super::linked_dirs(&repo, "libs/devhub").unwrap();
         assert!(d.contains("libs/devhub") && d.contains("libs/remote") && d.contains("libs/strict_json"), "{d:?}");
+        for not_linked in ["libs/ai/hub", "libs/ci_judge"] {
+            assert!(!d.contains(not_linked), "{not_linked}: the hubs would roll for AI hub edits: {d:?}");
+        }
         for not_built in ["apps/devhub", "widgets", "draw", "platform"] {
             assert!(!d.contains(not_built), "{not_built}: {d:?}");
         }
@@ -1729,6 +1715,13 @@ mod tests {
         let clock = |ms: u64| format!("t{ms}");
         assert_eq!(super::rolls_text(text, Some("n1"), 10, &clock), "t1 n1 devhub: aaaaaaaaaa -> bbbbbbbbbb: 1 file: a\nt3 n1 devhub: bbbbbbbbbb ended: runs bbbbbbbbbb");
         assert_eq!(super::rolls_text(text, None, 1, &clock), "t3 n1 devhub: bbbbbbbbbb ended: runs bbbbbbbbbb");
+        // the record says what each hub runs: one seen elsewhere gets its own line, once
+        let runs = super::hubs_run(text);
+        assert_eq!((runs.get("n1").map(String::as_str), runs.get("n2")), (Some("bbbbbbbbbb"), None), "{runs:?}");
+        assert!(super::runs_known("bbbbbbbbbb", "bbbbbbbbbbbbbb"), "the hub its last line names");
+        assert!(!super::runs_known("bbbbbbbbbb", "cccccccccccccc"), "moved with no line");
+        assert!(!super::runs_known("", "cccccccccccccc"), "a box the record never named");
+        assert!(super::runs_known("", ""), "a hub that names no commit");
     }
 
     #[test]

@@ -764,6 +764,10 @@ pub struct CiConf {
     /// `checks = "a::b,c::d"`: ignored lib tests the sweep runs on every pass, each its own shard
     /// (too heavy for the crate's tests, such as a whole export matrix)
     pub checks: Vec<String>,
+    /// `runs = "<args>;<args>"`: runs of the crate's own program under the JIT the sweep makes on
+    /// every pass, each with its arguments and its own Linux shard, judged by its exit status (a whole
+    /// export, too heavy for the crate's tests, as a command rather than an ignored test)
+    pub runs: Vec<String>,
 }
 
 impl CiConf {
@@ -788,6 +792,9 @@ impl CiConf {
         if !self.checks.is_empty() {
             out.push(("checks", self.checks.join(",")));
         }
+        if !self.runs.is_empty() {
+            out.push(("runs", self.runs.join(";")));
+        }
         out
     }
 }
@@ -803,13 +810,14 @@ pub fn read_conf(text: &str) -> Result<CiConf, String> {
             "cores" => c.cores = Some(v.parse::<f64>().ok().filter(|n| *n > 0.0).ok_or_else(|| format!("ci.toml: [ci] cores = {v:?}: a positive number"))?),
             "test_features" => c.test_features = v.split(',').map(str::trim).filter(|f| !f.is_empty()).map(str::to_string).collect(),
             "checks" => c.checks = v.split(',').map(str::trim).filter(|t| !t.is_empty()).map(str::to_string).collect(),
+            "runs" => c.runs = v.split(';').map(str::trim).filter(|r| !r.is_empty()).map(str::to_string).collect(),
             "os" => {
                 c.os = v.split(',').map(str::trim).filter(|os| !os.is_empty()).map(Os::of).collect();
                 if c.os.contains(&Os::Any) {
                     return Err(format!("ci.toml: [ci] os = {v:?}: linux, macos or windows"));
                 }
             }
-            _ => return Err(format!("ci.toml: [ci] {k} = {v:?}: unknown (box = \"whole\", cores, test_features, os, checks)")),
+            _ => return Err(format!("ci.toml: [ci] {k} = {v:?}: unknown (box = \"whole\", cores, test_features, os, checks, runs)")),
         }
     }
     Ok(c)
@@ -1415,6 +1423,17 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
             args.extend(["--lib", "--", "--ignored", "--exact", &name]);
             let est = timing(&id).unwrap_or(GUESS_CHECK_SECS);
             extra.push(Shard { id, kind: Kind::Test, os: Os::Linux, gui: false, gpu: gpu_dirs.contains(&k.dir), steps: vec![test_step(&k.dir, &args)], judge: Judge::Tests, est, dirs: Some(vec![k.dir.clone()]), whole: false, cores: None });
+        }
+    }
+    // the runs a crate's ci.toml names: its program with those arguments, each its own shard on Linux on every pass, judged by its exit
+    for k in all.iter().filter(|k| crate_runs_on(tree, &k.dir, Os::Linux)) {
+        for line in conf_at(tree, &k.dir).runs {
+            let id = format!("runs:{}:{}", k.package, line);
+            let est = timing(&id).unwrap_or(GUESS_CHECK_SECS);
+            let mut args: Vec<&str> = vec!["run", &k.package, "--"];
+            args.extend(line.split_whitespace());
+            let step = jit(&args);
+            extra.push(Shard { id, kind: Kind::Test, os: Os::Linux, gui: false, gpu: gpu_dirs.contains(&k.dir), steps: vec![step], judge: Judge::Exit, est, dirs: Some(vec![k.dir.clone()]), whole: false, cores: None });
         }
     }
     // what runs through ci-leg: a tree from before it (a bisect's baseline) has none to ask
@@ -3285,7 +3304,7 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
             cv.notify_all();
         }
         let started = Instant::now();
-        match judge_deferred(&grabs, Path::new(&log_path)) {
+        match judge_deferred(&ctx.repo, &grabs, Path::new(&log_path)) {
             Ok(n) => summary.push_str(&format!("; judged on the master: {n} grabs")),
             Err(e) => {
                 state = "fail";
@@ -3408,7 +3427,7 @@ fn saves_grabs(shard: &Shard) -> bool {
 struct DeferredGrab {
     step: String,
     image: PathBuf,
-    prompt: String,
+    prompt_path: PathBuf,
 }
 
 /// A gate has one smoke run. Its numbered accepts are the manifest: require every file the
@@ -3459,15 +3478,87 @@ fn copy_deferred(held: &Held, log: &Path, dst: &Path) -> Result<Vec<DeferredGrab
         if step.replace(['\r', '\n'], " ") != logged_step {
             return Err(format!("{logged_step}: deferred step differs from its log"));
         }
-        let prompt = std::fs::read_to_string(&prompt_path).map_err(|e| format!("{logged_step}: {}: {e}", prompt_path.display()))?;
-        grabs.push(DeferredGrab { step, image, prompt });
+        grabs.push(DeferredGrab { step, image, prompt_path });
     }
     Ok(grabs)
 }
 
+/// One response from the judge process; keep its original JSON for the evidence file.
+#[derive(Debug)]
+struct JudgeLine {
+    image: PathBuf,
+    yes: bool,
+    raw: String,
+    secs: f64,
+    hub: String,
+    parse_error: bool,
+    why: String,
+    err: Option<String>,
+    json: String,
+}
+
+fn parse_judge_line(line: &str) -> Result<JudgeLine, String> {
+    let v = makepad_strict_json::parse(line.as_bytes()).map_err(|e| format!("vision judge JSON: {e}"))?;
+    let string = |key| v.get(key).and_then(Value::as_str).map(str::to_string).ok_or_else(|| format!("vision judge: missing or invalid {key}"));
+    if v.get("unreachable").is_some() {
+        return Err(string("unreachable")?);
+    }
+    let image = PathBuf::from(string("image")?);
+    if v.get("err").is_some() {
+        return Ok(JudgeLine { image, yes: false, raw: String::new(), secs: 0.0, hub: String::new(), parse_error: false, why: String::new(), err: Some(string("err")?), json: line.into() });
+    }
+    let boolean = |key| v.get(key).and_then(Value::as_bool).ok_or_else(|| format!("vision judge: missing or invalid {key}"));
+    let secs = match v.get("seconds") {
+        Some(Value::F64(n)) => *n,
+        Some(Value::Int(n)) => *n as f64,
+        _ => return Err("vision judge: missing or invalid seconds".into()),
+    };
+    Ok(JudgeLine { image, yes: boolean("yes")?, raw: string("raw")?, secs, hub: string("hub")?, parse_error: boolean("parse_error")?, why: string("why")?, err: None, json: line.into() })
+}
+
+/// The master judges the whole batch in one child, outside devhub's linked crate closure.
+fn run_judge(repo: &Path, pairs: &[(PathBuf, PathBuf)]) -> Result<Vec<JudgeLine>, String> {
+    if pairs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut cmd = std::process::Command::new(super::roll::cargo_bin());
+    cmd.args(["run", "--profile", "host", "-q", "--manifest-path"]).arg(repo.join("Cargo.toml"))
+        .args(["-p", "makepad-ci-judge", "--bin", "makepad-ci-judge", "--"])
+        .stdin(std::process::Stdio::null());
+    for (image, prompt) in pairs {
+        cmd.arg(image).arg(prompt);
+    }
+    let out = cmd.output().map_err(|e| format!("vision judge: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // An unreachable response carries the useful reason even though the child exits with 2.
+    for line in stdout.lines() {
+        if let Ok(v) = makepad_strict_json::parse(line.as_bytes()) {
+            if let Some(why) = v.get("unreachable").and_then(Value::as_str) {
+                return Err(why.to_string());
+            }
+        }
+    }
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let mut tail: Vec<_> = stderr.lines().rev().take(20).collect();
+        tail.reverse();
+        return Err(format!("vision judge: {}\n{}", out.status, tail.join("\n")));
+    }
+    let lines = stdout.lines().map(parse_judge_line).collect::<Result<Vec<_>, _>>()?;
+    if lines.len() != pairs.len() {
+        return Err(format!("vision judge: expected {} responses, got {}", pairs.len(), lines.len()));
+    }
+    for (line, (image, _)) in lines.iter().zip(pairs) {
+        if line.image != *image {
+            return Err(format!("vision judge: expected {}, got {}", image.display(), line.image.display()));
+        }
+    }
+    Ok(lines)
+}
+
 /// Why a judged grab is no pass: the questions answered otherwise than expected; a reply that
 /// cannot be read, with the reply.
-fn failure(v: &makepad_ci_judge::Verdict) -> String {
+fn failure(v: &JudgeLine) -> String {
     match (v.parse_error, v.why.is_empty()) {
         (true, _) => format!("vision parse failed: {}; the reply:\n{}", v.why, v.raw),
         (false, true) => v.raw.clone(),
@@ -3477,52 +3568,47 @@ fn failure(v: &makepad_ci_judge::Verdict) -> String {
 
 /// `ci judge <dir>...`: each saved grab `NN.png` of the dirs judged again against its `NN.txt`
 /// (a CI run's `deferred` dir, or a copy with the acceptance texts rewritten); nothing is written.
-fn judge_saved(dirs: &[&str]) -> Result<String, String> {
+fn judge_saved(repo: &Path, dirs: &[&str]) -> Result<String, String> {
     if dirs.is_empty() {
         return Err("ci judge <dir>...: judges each NN.png there against its NN.txt".into());
     }
-    let judge = makepad_ci_judge::Judge::start();
-    if let Some(why) = judge.unreachable() {
-        return Err(why);
-    }
-    let mut rows = Vec::new();
+    let mut pairs = Vec::new();
     for dir in dirs {
         let mut grabs: Vec<PathBuf> = std::fs::read_dir(dir).map_err(|e| format!("{dir}: {e}"))?.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "png")).collect();
         grabs.sort();
-        for image in grabs {
-            let text = std::fs::read_to_string(image.with_extension("txt")).map_err(|e| format!("{}: {e}", image.with_extension("txt").display()))?;
-            let grab = s(image.display().to_string());
-            rows.push(match judge.judge(&image, &text) {
-                Ok(v) => obj(vec![("grab", grab), ("yes", Value::Bool(v.yes)), ("why", s(if v.yes { String::new() } else { failure(&v) })), ("raw", s(&v.raw)), ("hub", s(&v.hub))]),
-                Err(e) => obj(vec![("grab", grab), ("err", s(e))]),
-            });
-        }
+        pairs.extend(grabs.into_iter().map(|image| { let prompt = image.with_extension("txt"); (image, prompt) }));
+    }
+    let mut rows = Vec::new();
+    for v in run_judge(repo, &pairs)? {
+        let grab = s(v.image.display().to_string());
+        rows.push(match &v.err {
+            None => obj(vec![("grab", grab), ("yes", Value::Bool(v.yes)), ("why", s(if v.yes { String::new() } else { failure(&v) })), ("raw", s(&v.raw)), ("hub", s(&v.hub))]),
+            Some(e) => obj(vec![("grab", grab), ("err", s(e))]),
+        });
     }
     Ok(obj(vec![("judged", Value::Arr(rows))]).to_json())
 }
 
 /// Runs only on a shard worker, with its lease released and no pool lock held.
-fn judge_deferred(grabs: &[DeferredGrab], log: &Path) -> Result<usize, String> {
+fn judge_deferred(repo: &Path, grabs: &[DeferredGrab], log: &Path) -> Result<usize, String> {
     let mut f = std::fs::OpenOptions::new().append(true).open(log).map_err(|e| format!("{}: {e}", log.display()))?;
-    let judge = makepad_ci_judge::Judge::start();
-    if let Some(why) = judge.unreachable() {
-        return Err(format!("{}: {why}", grabs[0].step));
-    }
+    let pairs: Vec<_> = grabs.iter().map(|g| (g.image.clone(), g.prompt_path.clone())).collect();
+    let verdicts = run_judge(repo, &pairs).map_err(|why| format!("{}: {why}", grabs[0].step))?;
     let mut failed = Vec::new();
-    for grab in grabs {
-        match judge.judge(&grab.image, &grab.prompt) {
-            Ok(verdict) => {
+    for (grab, verdict) in grabs.iter().zip(verdicts) {
+        match &verdict.err {
+            None => {
                 writeln!(f, "CI-JUDGE {} on {} in {:.1} s", grab.step, verdict.hub, verdict.secs).map_err(|e| e.to_string())?;
                 for line in verdict.raw.lines() {
                     writeln!(f, "  {line}").map_err(|e| e.to_string())?;
                 }
                 let evidence = grab.image.with_extension("verdict.json");
-                std::fs::write(&evidence, verdict.json().to_json()).map_err(|e| format!("{}: {}: {e}", grab.step, evidence.display()))?;
+                std::fs::write(&evidence, &verdict.json).map_err(|e| format!("{}: {}: {e}", grab.step, evidence.display()))?;
                 if !verdict.yes {
                     failed.push(format!("{}: {}", grab.step, failure(&verdict)));
                 }
             }
-            Err(e) => failed.push(format!("{}: {e}", grab.step)),
+            Some(e) => failed.push(format!("{}: {e}", grab.step)),
         }
     }
     if failed.is_empty() {
@@ -4087,7 +4173,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             Ok(obj(vec![("pair", s(pair.short())), ("arm64", s(&arm.summary)), ("classified", Value::Arr(skipped.iter().map(|sh| s(&sh.id)).collect())), ("shards", Value::Arr(rows))]).to_json())
         }
         Some("run") => Err("ci run needs the calling checkout (use makepad ci run)".into()),
-        Some("judge") => judge_saved(&w[1..]),
+        Some("judge") => judge_saved(&ctx.repo, &w[1..]),
         Some("sweep") => {
             let rest: Vec<&str> = w[1..].iter().copied().filter(|x| *x != "--dry").collect();
             let pair = pair_of(ctx, &rest)?;
@@ -4283,6 +4369,29 @@ pub fn cli(args: &[&str]) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn judge_lines_keep_verdicts_and_report_errors() {
+        let pass = r#"{"image":"01.png","yes":true,"raw":"1: YES - a toolbar","seconds":1.5,"hub":"box-a","parse_error":false,"why":""}"#;
+        let v = parse_judge_line(pass).unwrap();
+        assert_eq!(v.image, Path::new("01.png"));
+        assert!(v.yes && !v.parse_error && v.err.is_none());
+        assert_eq!((v.raw.as_str(), v.secs, v.hub.as_str(), v.why.as_str()), ("1: YES - a toolbar", 1.5, "box-a", ""));
+        assert_eq!(v.json, pass, "evidence keeps the complete printed line");
+        let fail = r#"{"image":"02.png","yes":false,"raw":"1: NO - blank","seconds":2,"hub":"box-a","parse_error":false,"why":"toolbar missing"}"#;
+        let v = parse_judge_line(fail).unwrap();
+        assert!(!v.yes && !v.parse_error && v.err.is_none());
+        assert_eq!(v.secs, 2.0);
+        assert_eq!(failure(&v), "toolbar missing");
+        let v = parse_judge_line(&fail.replace("toolbar missing", "unanswered").replace("\"parse_error\":false", "\"parse_error\":true")).unwrap();
+        assert_eq!(failure(&v), "vision parse failed: unanswered; the reply:\n1: NO - blank");
+        let v = parse_judge_line(r#"{"image":"03.png","err":"prompt unreadable"}"#).unwrap();
+        assert_eq!(v.image, Path::new("03.png"));
+        assert_eq!(v.err.as_deref(), Some("prompt unreadable"));
+        assert_eq!(parse_judge_line(r#"{"unreachable":"no AI fleet"}"#).unwrap_err(), "no AI fleet");
+        assert!(parse_judge_line(r#"{"image":"01.png","yes":true}"#).is_err(), "incomplete verdicts cannot pass");
+        assert!(parse_judge_line("not JSON").is_err());
+    }
 
     /// A unit's digests on this checkout's last three tips are what they were before each source
     /// was read once for all of its crate's documents, from repositories found once, and its
@@ -4530,23 +4639,28 @@ mod tests {
     }
 
     #[test]
-    fn a_named_check_is_its_own_linux_shard_and_its_setting_round_trips() {
+    fn a_named_check_or_run_is_its_own_linux_shard_and_its_settings_round_trip() {
         let t = Tree::mem(vec![
             ("Cargo.toml", "[workspace]\nmembers = [\"apps/story\"]\n"),
             ("apps/story/Cargo.toml", "[package]\nname = \"story\"\n"),
-            ("apps/story/ci.toml", "[ci]\nchecks = \"export::tests::every_profile\"\n"),
+            ("apps/story/ci.toml", "[ci]\nchecks = \"export::tests::every_profile\"\nruns = \"--export-web talks/a.deck.splash\"\n"),
             ("apps/story/src/lib.rs", "#[test]\nfn one_profile() {}\n#[test]\n#[ignore]\nfn every_profile() {}\n"),
         ]);
         let p = sweep_plan(&t, &|_| None, 0);
-        let check = p.iter().find(|s| s.id == "checks:story:every_profile").unwrap_or_else(|| panic!("{:?}", p.iter().map(|s| &s.id).collect::<Vec<_>>()));
-        assert_eq!((check.os, check.kind, check.est), (Os::Linux, Kind::Test, GUESS_CHECK_SECS));
-        assert_eq!(check.steps, vec![jit(&["test", "story", "--lib", "--", "--ignored", "--exact", "export::tests::every_profile"])]);
+        let check = p.iter().find(|s| s.id == "checks:story:every_profile").unwrap_or_else(|| panic!("the named check has its own shard: {:?}", p.iter().map(|s| &s.id).collect::<Vec<_>>()));
+        assert_eq!((check.os, check.kind, check.est), (Os::Linux, Kind::Test, GUESS_CHECK_SECS), "the named check's OS, kind and default estimate");
+        assert_eq!(check.steps, vec![jit(&["test", "story", "--lib", "--", "--ignored", "--exact", "export::tests::every_profile"])], "the named check's exact JIT test command");
+        let run = p.iter().find(|s| s.id == "runs:story:--export-web talks/a.deck.splash").unwrap_or_else(|| panic!("the named run has its own shard: {:?}", p.iter().map(|s| &s.id).collect::<Vec<_>>()));
+        assert_eq!((run.os, run.kind, run.est), (Os::Linux, Kind::Test, GUESS_CHECK_SECS), "the named run's OS, kind and default estimate");
+        assert!(matches!(run.judge, Judge::Exit), "the named run is judged by its exit status");
+        assert_eq!(run.steps, vec![jit(&["run", "story", "--", "--export-web", "talks/a.deck.splash"])], "the named run's JIT command and arguments");
         // its own proof: the crate's tests are another unit, so a pass runs both
-        assert_eq!(units_of(check)[0].section, "job.checks_story_every_profile");
-        assert!(p.iter().any(|s| s.id.starts_with("test:") && s.steps.contains(&jit(&["test", "story"]))));
-        let conf = read_conf("[ci]\nchecks = \"a::b, c\"\n").unwrap();
-        assert_eq!(conf.checks, ["a::b", "c"]);
-        assert_eq!(read_conf(&write_proofs(&conf, &Proofs::new())).unwrap(), conf);
+        assert_eq!(units_of(check)[0].section, "job.checks_story_every_profile", "the named check has its own proof");
+        assert!(p.iter().any(|s| s.id.starts_with("test:") && s.steps.contains(&jit(&["test", "story"]))), "the crate's tests still have a separate shard");
+        let conf = read_conf("[ci]\nchecks = \"a::b, c\"\nruns = \"--x 1; --y\"\n").unwrap();
+        assert_eq!(conf.checks, ["a::b", "c"], "the named checks are split and trimmed");
+        assert_eq!(conf.runs, ["--x 1", "--y"], "the named runs are split and trimmed");
+        assert_eq!(read_conf(&write_proofs(&conf, &Proofs::new())).unwrap(), conf, "the named checks and runs round-trip through proof writing");
     }
 
     #[test]

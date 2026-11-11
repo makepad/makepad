@@ -502,7 +502,7 @@ fn same_group(a: &Caps, b: &Caps) -> bool { a.os == b.os && a.arch == b.arch }
 /// work goes to the pool boxes (the scheduler's pool_takes), and a spare there held a bench box
 /// for nothing.
 fn spare_ok(n: &NodeView, l: &LaneActivity, group: &Caps, pool_in_group: bool) -> bool {
-    n.up && n.dev && !n.role().users() && !(pool_in_group && n.role() == Role::Bench) && !l.boxes.contains(&n.name) && n.caps.as_ref().is_some_and(|c| same_group(c, group) && c.hub_proto >= if l.src == Src::Tree { 7 } else { 5 })
+    n.up && n.dev && !n.role().users() && !(pool_in_group && n.role() == Role::Bench) && !l.boxes.contains(&n.name) && n.caps.as_ref().is_some_and(|c| same_group(c, group) && c.has(if l.src == Src::Tree { "warm-trees" } else { "jit-inputs" }))
 }
 
 /// The group (OS, arch) has an up pool box.
@@ -1111,7 +1111,7 @@ mod tests {
         use crate::lease::sched::NodeView;
         let node = |name: &str, os: &str, role: Role, ram: f64| NodeView {
             name: name.into(), up: true, dev: true,
-            caps: Some(crate::lease::Caps { os: os.into(), arch: "x86_64".into(), hub_proto: 7, ram_avail_gb: ram, role: Some(role), ..Default::default() }),
+            caps: Some(crate::lease::Caps { os: os.into(), arch: "x86_64".into(), features: crate::lease::FEATURES.iter().map(|f| f.to_string()).collect(), ram_avail_gb: ram, role: Some(role), ..Default::default() }),
             ..Default::default()
         };
         let nodes = [node("full", "linux", Role::Pool, 16.0), node("own", "linux", Role::Pool, 16.0), node("free", "linux", Role::Pool, 16.0), node("bench", "linux", Role::Bench, 16.0), node("short", "linux", Role::Pool, 4.0), node("mac", "macos", Role::Pool, 16.0)];

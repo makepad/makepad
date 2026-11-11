@@ -377,6 +377,7 @@ pub fn failure_lines(log: &str) -> Vec<String> {
             || l.starts_with("why ")
             || l.starts_with("GATE ")
             || l.starts_with("GATEUNIT ")
+            || l.starts_with("GATEOUT ")
             || l.starts_with("GATEPROOF ")
             || l.starts_with("NODEGATE-")
             || (l.starts_with('L') && l.split_whitespace().next().is_some_and(|w| w[1..].bytes().all(|b| b.is_ascii_digit())))

@@ -402,6 +402,9 @@ pub fn activity(_pid: u32, _start: u64, _unit: Option<&str>, _usage: &Path, hold
 
 pub fn wait_usage(child: &mut Child) -> std::io::Result<(ExitStatus, Option<f64>, Option<u64>)> { child.wait().map(|s| (s, None, None)) }
 
+/// [`wait_usage`] without waiting: None while the child runs.
+pub fn try_wait_usage(child: &mut Child) -> std::io::Result<Option<(ExitStatus, Option<f64>, Option<u64>)>> { child.try_wait().map(|s| s.map(|s| (s, None, None))) }
+
 /// Resumes the (one) thread of a process created suspended.
 fn resume(pid: u32) -> std::io::Result<()> {
     let snap = Owned(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }.map_err(|_| std::io::Error::last_os_error())?);

@@ -174,6 +174,8 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S]|--needs k=v,..] [-
                                           class: launches and calls, peak cores p50/p90/max, mean, wall
   queue | leases [--all]                  live and waiting leases, positions and reasons
   why-queued <lease>                     each candidate box's start blocker and reservation expiry
+  replay take <from> <to> <out-dir>        export replay inputs on the master (UTC YYYY-MM-DDTHH:MM:SSZ)
+  replay run <dir> <from> <to>             simulate scheduler waits offline from exported inputs
   nodes                                   capabilities, dev switch and leases per node
   node <n> dev on|off                     the node's dev switch (the user's decision)
   node <n> back                           the person hands the node back (on their say-so): the input it saw so
@@ -385,7 +387,7 @@ fn first_of(node: &str, service: &str, lines: Vec<String>) -> Result<Value, Stri
 }
 
 /// The master's control socket, or why there is none.
-fn master() -> Result<Client, String> {
+pub(super) fn master() -> Result<Client, String> {
     let c = control()?;
     if !has(&c, "lease") {
         return Err("the devhub here is not the master (leases live on the master)".into());
@@ -460,6 +462,44 @@ struct Opts {
     /// `--exit-to <file>`: this client's exit, written there as it ends ([`write_exit`])
     exit_to: Option<PathBuf>,
 }
+
+/// Flags handled by the client instead of fields in the lease request.
+#[cfg(test)]
+const LOCAL_FLAGS: &[(&str, &str)] = &[
+    ("--watch-pid", "The holder watches the process and ends its lease when it exits."),
+    ("--keep", "The client copies the command's kept output after the run."),
+    ("--exit-to", "The client writes its exit status for its watcher."),
+    ("--tree", "The client selects how to ship the run's sources."),
+    ("--native", "The client checks the reason for a native build."),
+    ("--input", "The client ships and unpacks the input archives."),
+];
+
+/// Flags whose request fields need a master or git lookup, with the function that sets them.
+#[cfg(test)]
+const RESOLVED_FLAGS: &[(&str, &str, &str)] = &[
+    ("--for", "cpu_target", "for_cpu"),
+    ("--rev", "rev", "parse"),
+];
+
+/// Flag arguments that change the named request JSON key from its build default.
+#[cfg(test)]
+const FLAG_FIELDS: &[(&[&str], &str)] = &[
+    (&["--class", "build-example"], "class"),
+    (&["--cores", "2"], "cores"),
+    (&["--cost", "small"], "cost"),
+    (&["--est-min", "3"], "est_min"),
+    (&["--jit", "x"], "loader"),
+    (&["--lane", "lane-b"], "lane"),
+    (&["--needs", "os=linux"], "needs"),
+    (&["--node", "box-a"], "node"),
+    (&["--prio", "7"], "prio"),
+    (&["--priority", "interactive"], "priority"),
+    (&["--ram-floor-gb", "1"], "ram_floor_gb"),
+    (&["--ram-gb", "2"], "ram_gb"),
+    (&["--repo-dir", "/x"], "repo_dir"),
+    (&["--series", "s1", "--node", "box-a"], "series"),
+    (&["--whole"], "whole"),
+];
 
 /// The flags shared by `lease` and `run`.
 fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> {
@@ -1319,7 +1359,8 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
     }
     if let Some(pkg) = test {
         // a test run that executed no test is no pass
-        let none = if code == 0 { tally.no_pass(&o.cmd) } else { None };
+        let mut none = if code == 0 { tally.no_pass(&o.cmd) } else { None };
+        if let Some(why) = &mut none { crate::testlog::no_pass_hint(why, &root, &rev, &o.cmd); }
         if none.is_some() { code = 1; }
         let verdict = match (code, &none) { (0, _) => "passed".into(), (CANCELLED_EXIT, _) => "cancelled".into(), (LOST_EXIT, _) => "had no verdict (its lease was lost)".into(), (_, Some(why)) => format!("failed: {why}"), _ => "failed".to_string() };
         let _ = writeln!(out, "devhub test: {pkg} {verdict} in {:.3}s (queue {:.3}s, ship {:.3}s, run {:.3}s) on {}", t.elapsed().as_secs_f64(), queue.as_secs_f64(), ship.as_secs_f64(), run.as_secs_f64(), held.node);
@@ -1974,11 +2015,12 @@ fn queue(c: &Client, all: bool) -> i32 {
                 let info = v.get("info").filter(|i| !i.is_null());
                 let run = info.map(|i| s(i, "running")).filter(|r| !r.is_empty()).map_or(String::new(), |r| format!(" running `{r}`"));
                 let ram = info.and_then(|i| i.get("held_mb")).and_then(super::num).map_or(String::new(), |m| format!(" ram {:.1} GB", m / 1024.0));
+                let cores = s(&v, "cores_now");
                 let disk = info.and_then(|i| i.get("disk_mb")).and_then(super::num).map_or(String::new(), |m| format!(" disk {:.1} GB", m / 1024.0));
                 let agent = s(&v, "agent");
                 let past = n(&v, "past_budget");
                 format!(
-                    "{st} {}s ago, beat {}s ago{}{run}{ram}{disk}{}{}",
+                    "{st} {}s ago, beat {}s ago{}{run}{ram}{cores}{disk}{}{}",
                     n(&v, "granted_s"),
                     n(&v, "beat_s"),
                     if agent.is_empty() { String::new() } else { format!(" agent {agent}") },
@@ -2263,6 +2305,7 @@ fn why(id: &str) -> i32 {
 /// The lease words; None: not one of them.
 pub fn cli(args: &[&str]) -> Option<i32> {
     let word = *args.first()?;
+    if word == "replay" { return Some(super::replay::cli(&args[1..])); }
     if word == "inspect" {
         // its options before or after the target (`inspect --lease L <target> <cmd...>`)
         let (target, lease, read_only, at) = crate::cli::inspect_words(&args[1..]);
@@ -2514,6 +2557,50 @@ mod restart_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn every_lease_run_flag_reaches_the_request_or_is_local() {
+        let src = include_str!("client.rs");
+        let body = |name: &str| {
+            let start = src.find(&format!("\nfn {name}(")).unwrap();
+            let function = &src[start..];
+            let end = function.find("\n}").unwrap();
+            &function[function.find('{').unwrap() + 1..end]
+        };
+        let flags: Vec<&str> = body("parse").lines().map(str::trim_start)
+            .filter(|line| line.starts_with('"'))
+            .filter_map(|line| line.split_once("=>"))
+            .flat_map(|(arm, _)| arm.split('|').filter_map(|word| word.trim().split('"').nth(1)))
+            .filter(|flag| flag.starts_with("--") && *flag != "--").collect();
+        assert!(!flags.is_empty(), "parse must contain lease flags");
+        let covered: Vec<&str> = LOCAL_FLAGS.iter().map(|(flag, _)| *flag)
+            .chain(RESOLVED_FLAGS.iter().map(|(flag, _, _)| *flag))
+            .chain(FLAG_FIELDS.iter().map(|(args, _)| args[0])).collect();
+        for flag in &flags {
+            let count = covered.iter().filter(|entry| *entry == flag).count();
+            assert!(count > 0, "`{flag}` is parsed but is in none of LOCAL_FLAGS, RESOLVED_FLAGS, FLAG_FIELDS");
+            assert_eq!(count, 1, "`{flag}` must have exactly one table row");
+        }
+        for flag in covered {
+            assert!(flags.contains(&flag), "`{flag}` has a table row but is not parsed");
+        }
+        for (flag, why) in LOCAL_FLAGS {
+            assert!(!why.is_empty(), "`{flag}` needs a reason it stays local");
+        }
+        for (flag, key, function) in RESOLVED_FLAGS {
+            assert!(super::super::sched::REQ_KEYS.contains(key), "`{flag}` names unknown request key `{key}`");
+            assert!(body(function).contains(&format!("req.{key} =")), "`{flag}` must set req.{key} in {function}");
+        }
+        let baseline = parse("build", Some("lane-a"), &[]).unwrap().req.to_json();
+        let baseline = makepad_strict_json::parse(baseline.as_bytes()).unwrap();
+        for (args, key) in FLAG_FIELDS {
+            let flag = args[0];
+            assert!(super::super::sched::REQ_KEYS.contains(key), "`{flag}` names unknown request key `{key}`");
+            let request = parse("build", Some("lane-a"), args).unwrap().req.to_json();
+            let request = makepad_strict_json::parse(request.as_bytes()).unwrap();
+            assert_ne!(request.get(key), baseline.get(key), "`{flag}` is parsed but `{key}` in the request does not change");
+        }
+    }
+
     /// `run --patch` flags before the command come out of it and give the patched files; the
     /// command's own `--patch` stays. The staged copy keeps the worktree file's mode.
     #[test]
@@ -2604,6 +2691,13 @@ mod tests {
         };
         assert!(line(143.0, 93.5).ends_with("\nbox box-a: NOT QUIET (143% of a core ran outside it on average): its timings are not clean, run it again on a quiet box; load1 max 93.5; outside it 143% of a core (max 300%): WindowServer 34%"), "{}", line(143.0, 93.5));
         assert!(line(20.0, 3.0).ends_with("\nbox box-a: quiet: load1 max 3.0; outside it 20% of a core (max 300%): WindowServer 34%"), "{}", line(20.0, 3.0));
+        // a GPU timing is judged by the GPU busy outside it; the CPU outside it is a figure
+        let gpu = |cpu: f64, gpu: f64| makepad_strict_json::parse(format!(r#"{{"samples":3,"load1_max":4,"outside_cpu_pct":{cpu},"outside_cpu_pct_max":150,"busiest":[["mds_stores",60]],"gpu":true,"outside_gpu_pct":{gpu},"outside_gpu_pct_max":21,"gpu_busiest":[["helper",{gpu}]]}}"#).as_bytes()).unwrap();
+        assert_eq!(unquiet(&gpu(110.0, 3.0)), None, "a Mac's own services at 1.1 cores, its GPU quiet");
+        assert_eq!(unquiet(&gpu(20.0, 14.0)).as_deref(), Some("its GPU was 14% busy outside it on average"));
+        assert_eq!(super::super::master::box_line(&gpu(110.0, 3.0)), "load1 max 4.0; outside it 110% of a core (max 150%): mds_stores 60%; its GPU busy outside it 3% (max 21%): helper 3%");
+        let unmeasured = makepad_strict_json::parse(br#"{"samples":3,"load1_max":4,"outside_cpu_pct":110,"outside_cpu_pct_max":150,"busiest":[],"gpu":true}"#).unwrap();
+        assert_eq!(unquiet(&unmeasured), None, "no GPU use told: not judged on its CPU");
     }
 
     /// `--keep` says what came back, an empty copy too (an empty one said nothing, 11-07).

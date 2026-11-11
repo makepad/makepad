@@ -672,7 +672,7 @@ makepad-run: main panic report: {"kind":"panic","location":"/tree/src/main.rs:3:
     fn a_warm_restarts_reasons_are_not_misses() {
         let log = "testverdict group=1 ran=101 passed=101 failed=0
 makepad live:   /tree/src/lease/exec.rs:2435:1: mod `tests` changed: a module's item list changed -- restart the app
-makepad live:   /tree/src/proto.rs:1:1: const `HUB_PROTO` is used in a type: its users' types change -- restart the app
+makepad live:   /tree/src/proto.rs:1:1: const `BUFFER_SIZE` is used in a type: its users' types change -- restart the app
 makepad live:   /tree/src/jit_misses.rs:147:9: use use crate::x; added here (inside a fn body) -- adding this kind of item is not applied live yet: restart the app
 makepad live: restarting (/tree/src/a.rs, /tree/src/b.rs)
 running 103 tests

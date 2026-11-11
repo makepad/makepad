@@ -69,15 +69,21 @@ pub(crate) fn control() -> Result<Client, String> {
     Ok(c)
 }
 
-/// Once a process: tells the master this agent (`DEVHUB_AGENT`) made a devhub call, the mark
-/// `lane quiet` holds an overdue lease's agent to ([`crate::lease::master::LeaseMaster::silent_overdue`]).
-/// A call that stays open (`job wait`, a test's wait for its lease) is the one call it began as.
+/// At most once a minute per process, including while a request waits for its answer.
+/// Only the agent's own CLI has `DEVHUB_AGENT`; the master's runners do not speak for it.
 fn agent_seen(c: &Client) {
-    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static SAID: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
     let Some(agent) = std::env::var("DEVHUB_AGENT").ok().filter(|a| makepad_devhub_conf::valid_name(a)) else { return };
-    if has(c, "agent-seen") && !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        let _ = ask(c, None, "agent-seen", &format!("agent-seen {agent}"));
-    }
+    let now = std::time::Instant::now();
+    let mut said = SAID.lock().unwrap();
+    if !agent_seen_due(*said, now) || !has(c, "agent-seen") { return; }
+    *said = Some(now);
+    drop(said);
+    let _ = ask_lines(c, None, "agent-seen", &format!("agent-seen {agent}"));
+}
+
+fn agent_seen_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(60))
 }
 
 /// Submission waits out master restarts; application errors still stand.
@@ -138,6 +144,7 @@ fn said_line(l: &str) -> Option<(String, bool)> {
 
 /// Sends one line to a lines service and collects the answer.
 pub fn ask(c: &Client, target: Option<&str>, service: &str, line: &str) -> Result<Vec<String>, String> {
+    if service != "agent-seen" { agent_seen(c); }
     ask_lines(c, target, service, line).map_err(|e| older(target, service, e))
 }
 
@@ -192,7 +199,14 @@ fn ask_lines(c: &Client, target: Option<&str>, service: &str, line: &str) -> Res
         None => {
             let ch = c.open(service, "").map_err(|e| e.to_string())?;
             ch.send(line.as_bytes().to_vec()).map_err(|e| format!("link lost: {e}"))?;
-            got = answer_of(|| ch.recv())?;
+            got = answer_of(|| loop {
+                if service != "agent-seen" { agent_seen(c); }
+                match ch.recv_timeout(Duration::from_secs(60)) {
+                    Ok(event) => break Some(event),
+                    Err(true) => continue,
+                    Err(false) => break None,
+                }
+            })?;
         }
     }
     Ok(got)
@@ -1397,6 +1411,15 @@ pub fn own_argv(repo: &std::path::Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agents_calls_say_it_is_there_once_a_minute() {
+        let now = std::time::Instant::now();
+        assert!(agent_seen_due(None, now));
+        assert!(!agent_seen_due(Some(now), now + Duration::from_millis(59_999)));
+        assert!(agent_seen_due(Some(now), now + Duration::from_secs(60)));
+        assert!(!agent_seen_due(Some(now + Duration::from_secs(60)), now + Duration::from_secs(61)));
+    }
 
     /// What a service says while it waits is not its answer, and an answer is not said.
     #[test]

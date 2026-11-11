@@ -437,7 +437,7 @@ mod tests {
     fn caps(name: &str) -> Caps {
         Caps {
             node: name.into(),
-            hub_proto: crate::lease::HUB_PROTO,
+            features: crate::lease::FEATURES.iter().map(|f| f.to_string()).collect(),
             native_trees: crate::lease::caps::NATIVE_TREES,
             arch: "x86_64".into(),
             os: "linux".into(),

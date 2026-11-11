@@ -854,6 +854,7 @@ impl Live {
         if t.ran == 0 && t.skipped == 0 {
             out.push_str("no test ran");
             if let Some(hint) = crate::testlog::bin_hint(&x.app, &x.test_args) { out.push_str(&format!(": {hint}")); }
+            out.push_str(&crate::testlog::elsewhere_hint(Path::new(&x.tree), &x.rev, &x.app, &x.test_args));
             out.push('\n');
         }
         out.push_str(&p.output);

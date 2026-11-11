@@ -16,6 +16,82 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Cost samples parsed without I/O. Applying a batch preserves the master's learning order.
+#[derive(Default)]
+pub(super) struct CostRecords {
+    jit_peaks: Vec<(Option<String>, f64)>,
+    calls: Vec<(String, String, bool, f64)>,
+    memory: Vec<(String, String, String, Option<String>, Option<f64>)>,
+    records: Vec<(String, String, String, String, Option<String>, u64, Option<f64>, Option<f64>, Option<u64>)>,
+}
+
+impl CostRecords {
+    pub(super) fn push(&mut self, v: &makepad_strict_json::Value) {
+        // (records from before 11-06 say no OS family: they weigh every box's peaks only)
+        let os = |v: &makepad_strict_json::Value| v.get("os").and_then(|o| o.as_str()).filter(|o| !o.is_empty()).map(str::to_string);
+        let lane = |v: &makepad_strict_json::Value| v.get("lane").and_then(|o| o.as_str()).unwrap_or("").to_string();
+        // what a lease's JIT build held, however the lease ended ([`Sched::jit_build_ram`])
+        if let Some(peak) = v.get("jit_peak_gb").and_then(super::num) { self.jit_peaks.push((os(&v), peak)); }
+        // A memory end measures only RAM: its wall, CPU and run time were cut short.
+        if v.get("how").and_then(|h| h.as_str()) == Some("memory") {
+            if let Some(class) = v.get("class").and_then(|v| v.as_str()) {
+                let kind = v.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                self.memory.push((class.to_string(), kind.to_string(), lane(&v), os(&v), v.get("peak_ram_gb").and_then(super::num)));
+            }
+        }
+        // a live call's sample ([`LeaseMaster::ledger_call`]): no wall of its lease's
+        if v.get("how").and_then(|h| h.as_str()) == Some("call") {
+            if let (Some(class), Some(peak)) = (v.get("class").and_then(|v| v.as_str()), v.get("peak_cores").and_then(super::num)) {
+                self.calls.push((class.to_string(), v.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string(), v.get("launch").and_then(|v| v.as_bool()).unwrap_or(false), peak));
+            }
+            return;
+        }
+        // only a run its holder released measures its class: a cancelled one's wall is how
+        // long it was let hang (a story test cancelled after 51 min became its class's
+        // measure on its box, and the next hang's limit twice that, 11-04). JIT build
+        // records and the ones from before then say no `how`. Nor does a released one that
+        // hung or failed (its last run did not end by itself: a crash, a kill, no verdict;
+        // or it stopped a unit as hung): it measures neither time, cores nor RAM.
+        if v.get("how").and_then(|h| h.as_str()).is_some_and(|h| h != "released") { return; }
+        if v.get("unmeasured").and_then(|a| a.as_str()).is_some() { return; }
+        if let (Some(class), Some(wall)) = (v.get("class").and_then(|v| v.as_str()), v.get("wall_ms").and_then(super::num)) {
+            if wall.is_finite() && wall > 0.0 {
+                let kind = v.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                let peak = v.get("peak_ram_gb").and_then(super::num);
+                let cores = v.get("cpu_seconds").and_then(super::num).map(|cpu| cpu * 1000.0 / wall);
+                let run = v.get("run_ms").and_then(super::num).filter(|ms| ms.is_finite() && *ms > 0.0).map(|ms| ms as u64);
+                self.records.push((class.to_string(), kind.to_string(), v.get("node").and_then(|v| v.as_str()).unwrap_or("").to_string(), lane(&v), os(&v), wall as u64, peak, cores, run));
+            }
+        }
+    }
+
+    pub(super) fn apply(self, sched: &mut Sched) {
+        for (os, peak) in self.jit_peaks {
+            sched.record_resources("jit-build", "", Some(peak), None);
+            if let Some(os) = os { sched.record_family_peak(&os, "jit-build", "", Some(peak)); }
+        }
+        for (class, kind, launch, peak) in self.calls {
+            sched.record_call(&class, &kind, launch, peak);
+        }
+        for (class, kind, lane, os, peak) in self.memory {
+            sched.record_resources(&class, &kind, peak, None);
+            if let Some(os) = os {
+                sched.record_family_peak(&os, &class, &kind, peak);
+                sched.record_lane_peak(&os, &lane, &class, &kind, peak);
+            }
+        }
+        for (class, kind, node, lane, os, wall, peak, cores, run) in self.records {
+            sched.record_node_cost(&class, &kind, &node, wall);
+            sched.record_resources(&class, &kind, peak, cores);
+            if let Some(os) = os {
+                sched.record_family_peak(&os, &class, &kind, peak);
+                sched.record_lane_peak(&os, &lane, &class, &kind, peak);
+            }
+            if let Some(run) = run { sched.record_run(&class, &kind, run); }
+        }
+    }
+}
+
 /// `(node, service, line)` -> the answer lines (without the end line).
 pub type Ask = Arc<dyn Fn(&str, &str, &str) -> Result<Vec<String>, String> + Send + Sync>;
 pub type Publish = Arc<dyn Fn(Record) + Send + Sync>;
@@ -53,6 +129,17 @@ struct Marks {
     breaks: Vec<String>,
     probes: Vec<String>,
     paused: bool,
+}
+
+/// The command sent to a hub after its revisions are available there.
+pub(super) fn lease_start_line(l: &Lease, rev: &str, weighed: f64, peak: Option<f64>) -> String {
+    let needs: Vec<String> = l.req.needs.iter().map(|(k, v)| format!("{}:{}", json_str(k), json_str(v))).collect();
+    let warms = l.req.warms.as_deref().map_or(String::new(), |lane| format!(",\"warms\":{}", json_str(lane)));
+    let warms = match l.req.cpu_target.as_deref() { Some(t) => format!("{warms},\"cpu_target\":{}", json_str(t)), None => warms };
+    let peak = peak.map_or("null".to_string(), |g| g.to_string());
+    // (only a hub with `gpu-quiet` takes a GPU timing, [`super::sched::Req::required`])
+    let warms = if l.req.gpu { format!("{warms},\"gpu\":true") } else { warms };
+    format!("lease-start {{\"id\":{},\"lane\":{}{warms},\"kind\":\"{}\",\"src\":\"{}\",\"priority\":\"{}\",\"loader\":{},\"cost\":{{\"cores\":{},\"ram_gb\":{},\"ram_max_gb\":{},\"weighed_gb\":{weighed},\"peak_gb\":{peak}}},\"live\":{},\"needs\":{{{}}},\"rev\":{rev},\"env\":{{}}}}", json_str(&l.id), json_str(&l.req.lane), l.req.kind.as_str(), l.req.src.as_str(), l.priority.as_str(), l.req.loader.as_deref().map_or("null".to_string(), json_str), l.run_cores(), l.cost.ram_gb, l.req.ram_gb.map_or("null".to_string(), |g| g.to_string()), l.req.live, needs.join(","))
 }
 
 pub struct LeaseMaster {
@@ -117,6 +204,8 @@ pub struct LeaseMaster {
     weighing: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// per agent (`DEVHUB_AGENT`): when it last made a devhub call ([`Self::silent_overdue`])
     agents_seen: Mutex<HashMap<String, u64>>,
+    /// Detached agents already said, and the last activity each warning followed.
+    detached_said: Mutex<HashMap<String, u64>>,
     /// per (box, JIT id): the turn of its copy there ([`Self::copy_jit`]); the next finds it there
     copying: Mutex<HashMap<(String, String), Arc<Mutex<()>>>>,
 }
@@ -133,6 +222,8 @@ struct JitCopy {
 const OVERDUE_TIMES: u64 = 5;
 /// ...whose agent made no devhub call for this long.
 pub const AGENT_SILENT_MS: u64 = 15 * 60_000;
+/// A running lease's agent with no call of its own for this long will not wake on it.
+pub const DETACHED_MS: u64 = 5 * 60_000;
 
 /// How long a lease's start waits for its box's hub to come back (a restart for its update takes
 /// seconds) before the lease goes back to the queue.
@@ -379,12 +470,26 @@ pub fn plural(n: usize, one: &str, many: &str) -> String {
 
 /// A timed run whose box spent this much CPU (% of one core, mean) outside it was not quiet.
 pub const NOISY_CPU_PCT: f64 = 50.0;
+/// A GPU timing (a Mac's gpu work, [`super::sched::Req::gpu`]) starts once its box's GPU is busy
+/// less than this (% of the device) outside its leases: the GPU is what it measures. The CPU a
+/// Mac's own services take beside it is not: Spotlight, XProtect and an app's helper kept 0.5-1.2
+/// cores busy on a 16-core Mac at all times, and a gpu lease first in line on it never started
+/// (11-10).
+pub const NOISY_GPU_PCT: f64 = 10.0;
 /// Why a timed run's box was not quiet ([`box_line`]'s `box`), if it was not: what ran outside it
 /// took [`NOISY_CPU_PCT`] on average. Its timings are not clean, and its release line says so: a
 /// timed gate on a Mac a person's desktop shared ran single runs at 56-280 s against 7.6 s, its
 /// numbers handed back as any other's (11-10). Its load is no verdict here: under the run it
 /// counts the run's own threads (a timed build's rustc frontends took a box past its cores).
+///
+/// A GPU timing's (`gpu`) is judged by what it measures: the GPU busy outside it,
+/// [`NOISY_GPU_PCT`] or more on average; the CPU outside it is a figure in its [`box_line`]. One
+/// whose GPU told no use outside it is not judged.
 pub fn unquiet(b: &makepad_strict_json::Value) -> Option<String> {
+    if b.get("gpu").and_then(|g| g.as_bool()) == Some(true) {
+        let outside = b.get("outside_gpu_pct").and_then(super::num)?;
+        return (outside >= NOISY_GPU_PCT).then(|| format!("its GPU was {outside:.0}% busy outside it on average"));
+    }
     let outside = b.get("outside_cpu_pct").and_then(super::num)?;
     (outside >= NOISY_CPU_PCT).then(|| format!("{outside:.0}% of a core ran outside it on average"))
 }
@@ -393,11 +498,15 @@ pub fn unquiet(b: &makepad_strict_json::Value) -> Option<String> {
 /// `load1 max 27.0; outside it 140% of a core (max 210%): mds_stores 120%, XprotectService 30%`.
 pub fn box_line(b: &makepad_strict_json::Value) -> String {
     let n = |k: &str| b.get(k).and_then(super::num).unwrap_or(0.0);
-    let busiest: Vec<String> = b.get("busiest").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|p| {
-        let p = p.as_arr()?;
-        Some(format!("{} {:.0}%", p.first()?.as_str()?, p.get(1).and_then(super::num)?))
-    }).collect();
-    format!("load1 max {:.1}; outside it {:.0}% of a core (max {:.0}%){}", n("load1_max"), n("outside_cpu_pct"), n("outside_cpu_pct_max"), if busiest.is_empty() { String::new() } else { format!(": {}", busiest.join(", ")) })
+    let busiest = |key: &str| {
+        let by: Vec<String> = b.get(key).and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|p| {
+            let p = p.as_arr()?;
+            Some(format!("{} {:.0}%", p.first()?.as_str()?, p.get(1).and_then(super::num)?))
+        }).collect();
+        if by.is_empty() { String::new() } else { format!(": {}", by.join(", ")) }
+    };
+    let gpu = if b.get("outside_gpu_pct").is_some() { format!("; its GPU busy outside it {:.0}% (max {:.0}%){}", n("outside_gpu_pct"), n("outside_gpu_pct_max"), busiest("gpu_busiest")) } else { String::new() };
+    format!("load1 max {:.1}; outside it {:.0}% of a core (max {:.0}%){}{gpu}", n("load1_max"), n("outside_cpu_pct"), n("outside_cpu_pct_max"), busiest("busiest"))
 }
 
 /// The tests a libtest output names under its last `failures:`, at most 20.
@@ -573,6 +682,7 @@ impl LeaseMaster {
             copying: Mutex::default(),
             restored_own: Mutex::new(restored_own),
             agents_seen: Mutex::new(HashMap::new()),
+            detached_said: Mutex::new(HashMap::new()),
             stalls: Mutex::new(HashMap::new()),
             heard: Mutex::new(heard),
             lane_trees: Mutex::new(None),
@@ -776,79 +886,17 @@ impl LeaseMaster {
         if file.metadata().is_ok_and(|m| m.len() < *offset) { *offset = 0; }
         if file.seek(std::io::SeekFrom::Start(*offset)).is_err() { return; }
         let mut reader = std::io::BufReader::new(file);
-        let mut records = Vec::new();
-        let mut memory = Vec::new();
-        let mut calls = Vec::new();
-        let mut jit_peaks = Vec::new();
-        // (records from before 11-06 say no OS family: they weigh every box's peaks only)
-        let os = |v: &makepad_strict_json::Value| v.get("os").and_then(|o| o.as_str()).filter(|o| !o.is_empty()).map(str::to_string);
-        // (a live session weighs its own lane's peaks: [`super::sched::Sched::record_lane_peak`])
-        let lane = |v: &makepad_strict_json::Value| v.get("lane").and_then(|o| o.as_str()).unwrap_or("").to_string();
+        let mut records = CostRecords::default();
         let mut line = String::new();
         loop {
             line.clear();
             if reader.read_line(&mut line).is_err() || !line.ends_with('\n') { break; }
             *offset += line.len() as u64;
             if let Ok(v) = makepad_strict_json::parse(line.as_bytes()) {
-                // what a lease's JIT build held, however the lease ended ([`Sched::jit_build_ram`])
-                if let Some(peak) = v.get("jit_peak_gb").and_then(super::num) { jit_peaks.push((os(&v), peak)); }
-                // A memory end measures only RAM: its wall, CPU and run time were cut short.
-                if v.get("how").and_then(|h| h.as_str()) == Some("memory") {
-                    if let Some(class) = v.get("class").and_then(|v| v.as_str()) {
-                        let kind = v.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                        memory.push((class.to_string(), kind.to_string(), lane(&v), os(&v), v.get("peak_ram_gb").and_then(super::num)));
-                    }
-                }
-                // a live call's sample ([`Self::ledger_call`]): no wall of its lease's
-                if v.get("how").and_then(|h| h.as_str()) == Some("call") {
-                    if let (Some(class), Some(peak)) = (v.get("class").and_then(|v| v.as_str()), v.get("peak_cores").and_then(super::num)) {
-                        calls.push((class.to_string(), v.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string(), v.get("launch").and_then(|v| v.as_bool()).unwrap_or(false), peak));
-                    }
-                    continue;
-                }
-                // only a run its holder released measures its class: a cancelled one's wall is how
-                // long it was let hang (a story test cancelled after 51 min became its class's
-                // measure on its box, and the next hang's limit twice that, 11-04). JIT build
-                // records and the ones from before then say no `how`. Nor does a released one that
-                // hung or failed (its last run did not end by itself: a crash, a kill, no verdict;
-                // or it stopped a unit as hung): it measures neither time, cores nor RAM.
-                if v.get("how").and_then(|h| h.as_str()).is_some_and(|h| h != "released") { continue; }
-                if v.get("unmeasured").and_then(|a| a.as_str()).is_some() { continue; }
-                if let (Some(class), Some(wall)) = (v.get("class").and_then(|v| v.as_str()), v.get("wall_ms").and_then(super::num)) {
-                    if wall.is_finite() && wall > 0.0 {
-                        let kind = v.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                        let peak = v.get("peak_ram_gb").and_then(super::num);
-                        let cores = v.get("cpu_seconds").and_then(super::num).map(|cpu| cpu * 1000.0 / wall);
-                        let run = v.get("run_ms").and_then(super::num).filter(|ms| ms.is_finite() && *ms > 0.0).map(|ms| ms as u64);
-                        records.push((class.to_string(), kind.to_string(), v.get("node").and_then(|v| v.as_str()).unwrap_or("").to_string(), lane(&v), os(&v), wall as u64, peak, cores, run));
-                    }
-                }
+                records.push(&v);
             }
         }
-        let mut sched = self.sched.lock().unwrap();
-        for (os, peak) in jit_peaks {
-            sched.record_resources("jit-build", "", Some(peak), None);
-            if let Some(os) = os { sched.record_family_peak(&os, "jit-build", "", Some(peak)); }
-        }
-        for (class, kind, launch, peak) in calls {
-            sched.record_call(&class, &kind, launch, peak);
-        }
-        for (class, kind, lane, os, peak) in memory {
-            sched.record_resources(&class, &kind, peak, None);
-            if let Some(os) = os {
-                sched.record_family_peak(&os, &class, &kind, peak);
-                sched.record_lane_peak(&os, &lane, &class, &kind, peak);
-            }
-        }
-        for (class, kind, node, lane, os, wall, peak, cores, run) in records {
-            sched.record_node_cost(&class, &kind, &node, wall);
-            sched.record_resources(&class, &kind, peak, cores);
-            if let Some(os) = os {
-                sched.record_family_peak(&os, &class, &kind, peak);
-                sched.record_lane_peak(&os, &lane, &class, &kind, peak);
-            }
-            if let Some(run) = run { sched.record_run(&class, &kind, run); }
-        }
+        records.apply(&mut self.sched.lock().unwrap());
     }
 
     /// Places what fits and carries out the scheduler's actions.
@@ -1284,12 +1332,8 @@ impl LeaseMaster {
                 format!("{{{}}}", sides.join(","))
             }
         };
-        let needs: Vec<String> = l.req.needs.iter().map(|(k, v)| format!("{}:{}", json_str(k), json_str(v))).collect();
-        let warms = l.req.warms.as_deref().map_or(String::new(), |lane| format!(",\"warms\":{}", json_str(lane)));
-        let warms = match l.req.cpu_target.as_deref() { Some(t) => format!("{warms},\"cpu_target\":{}", json_str(t)), None => warms };
         let (weighed, peak) = self.sched.lock().unwrap().ram_weighed(l);
-        let peak = peak.map_or("null".to_string(), |g| g.to_string());
-        let line = format!("lease-start {{\"id\":{},\"lane\":{}{warms},\"kind\":\"{}\",\"src\":\"{}\",\"priority\":\"{}\",\"loader\":{},\"cost\":{{\"cores\":{},\"ram_gb\":{},\"ram_max_gb\":{},\"weighed_gb\":{weighed},\"peak_gb\":{peak}}},\"live\":{},\"needs\":{{{}}},\"rev\":{rev},\"env\":{{}}}}", json_str(&l.id), json_str(&l.req.lane), l.req.kind.as_str(), l.req.src.as_str(), l.priority.as_str(), l.req.loader.as_deref().map_or("null".to_string(), json_str), l.run_cores(), l.cost.ram_gb, l.req.ram_gb.map_or("null".to_string(), |g| g.to_string()), l.req.live, needs.join(","));
+        let line = lease_start_line(l, &rev, weighed, peak);
         let lines = (self.ask)(node, "lease-start", &line)?;
         let first = lines.into_iter().next().ok_or("lease-start: no answer")?;
         let v = makepad_strict_json::parse(first.as_bytes()).map_err(|_| "lease-start: bad answer".to_string())?;
@@ -1796,6 +1840,7 @@ impl LeaseMaster {
         let m = self.clone();
         let _ = std::thread::Builder::new().name("devhub-lease-sched".into()).spawn(move || loop {
             m.pump();
+            m.say_detached(m.now());
             std::thread::sleep(Duration::from_secs(1));
         });
         let m = self.clone();
@@ -2039,6 +2084,46 @@ impl LeaseMaster {
         }).collect()
     }
 
+    /// Agents with granted work and nothing of their own talking to devhub, newest silence last.
+    pub fn detached(&self, now: u64) -> Vec<String> {
+        self.detached_agents(now).into_iter().map(|(_, _, row)| row).collect()
+    }
+
+    fn detached_agents(&self, now: u64) -> Vec<(String, u64, String)> {
+        let leases = self.view();
+        let seen = self.agents_seen.lock().unwrap();
+        let mut agents: BTreeMap<&str, (u64, Vec<&Lease>)> = BTreeMap::new();
+        for l in &leases {
+            if l.state != State::Granted || l.req.kind == Kind::Gate || l.req.upkeep() || l.req.hub_build() { continue; }
+            let Some(agent) = l.req.agent.as_deref().filter(|a| makepad_devhub_conf::valid_name(a) && !a.starts_with("devhub-")) else { continue };
+            let entry = agents.entry(agent).or_insert_with(|| (seen.get(agent).copied().unwrap_or(0), Vec::new()));
+            entry.0 = entry.0.max(l.asked_ms);
+            entry.1.push(l);
+        }
+        drop(seen);
+        let mut rows: Vec<_> = agents.into_iter().filter_map(|(agent, (heard, leases))| {
+            let silent = now.saturating_sub(heard);
+            if silent < DETACHED_MS { return None; }
+            let running: Vec<_> = leases.iter().map(|l| format!("{} {}@{} running {}", l.id, l.req.kind.as_str(), l.node.as_deref().unwrap_or("?"), super::sched::dur(now.saturating_sub(l.granted_ms.unwrap_or(l.asked_ms))))).collect();
+            Some((agent.to_string(), heard, format!("{agent}: {}; nothing of {agent}'s has talked to devhub for {} min (no job wait, lease client or live call): it will not wake on them, resume it", running.join(", "), silent / 60_000)))
+        }).collect();
+        rows.sort_by_key(|(_, heard, _)| *heard);
+        rows
+    }
+
+    /// Once per spell of silence; forget agents when their granted work or silence ends.
+    fn say_detached(&self, now: u64) {
+        let rows = self.detached_agents(now);
+        let mut said = self.detached_said.lock().unwrap();
+        let current: HashMap<_, _> = rows.iter().map(|(agent, heard, _)| (agent.clone(), *heard)).collect();
+        said.retain(|agent, _| current.contains_key(agent));
+        let warnings: Vec<_> = rows.into_iter().filter_map(|(agent, heard, row)| {
+            (said.insert(agent, heard) != Some(heard)).then_some(row)
+        }).collect();
+        drop(said);
+        for row in warnings { self.event(Sev::Warn, row); }
+    }
+
     /// When `agent` last made a devhub call (0: not since this master started).
     pub fn agent_seen_ms(&self, agent: &str) -> u64 {
         self.agents_seen.lock().unwrap().get(agent).copied().unwrap_or(0)
@@ -2049,10 +2134,13 @@ impl LeaseMaster {
         let now = self.now();
         let line = line.strip_prefix(service).filter(|r| r.is_empty() || r.starts_with(' ')).map_or(line, str::trim_start);
         match service {
-            // a devhub call of this agent's ([`crate::cli::control`] says it once a process)
+            // a devhub call of this agent's (its CLI says it at most once a minute)
             "agent-seen" => match line.trim() {
                 agent if makepad_devhub_conf::valid_name(agent) => {
                     self.agents_seen.lock().unwrap().insert(agent.to_string(), now);
+                    // what devhub learned for it since (a bucket red naming its landing), said once
+                    let wall = proto::wall_ms();
+                    out.extend(crate::notes::take(&self.home, agent).into_iter().map(|(ms, line)| crate::notes::said(agent, wall.saturating_sub(ms), &line)));
                     out.push("{}".into());
                 }
                 agent => out.push(err(&format!("agent-seen: {agent:?} is no agent name"))),
@@ -2134,7 +2222,7 @@ impl LeaseMaster {
             "leases" => {
                 let s = self.sched.lock().unwrap();
                 for l in s.view() {
-                    out.push(l.state_line(now, &l.node.as_deref().map(|n| s.addr(n)).unwrap_or_default()));
+                    out.push(s.lease_view_line(&l, now));
                 }
                 if line.split_whitespace().any(|w| w == "all") {
                     for l in s.recent_ended(30) {
@@ -2460,10 +2548,78 @@ mod tests {
         let at = |ms: u64| { clock.store(1_000 + ms, Ordering::SeqCst); m.silent_overdue(1_000 + ms) };
         assert_eq!(at(15 * 60_000), Vec::<String>::new(), "past 5x its 2 min, its ask 15 min ago, no more");
         assert_eq!(at(16 * 60_000), ["waits: L1 test@box-a running 16m00s against its declared 2m00s (8x), its agent AGENT-W made no devhub call for 16 min: `devhub cancel L1` frees the box"]);
+        // a bucket red left for it since is said in the answer, once (crate::notes)
+        crate::notes::leave(&dir, "AGENT-W", "bucket fast FAILED check p").unwrap();
+        let said = serve(&m, "agent-seen", "AGENT-W");
+        assert!(said.starts_with("{\"say\":\"devhub, for AGENT-W (just now): bucket fast FAILED check p\",\"waiting\":false}\n{}"), "{said}");
         assert_eq!(serve(&m, "agent-seen", "AGENT-W"), "{}");
         assert_eq!(at(30 * 60_000), Vec::<String>::new(), "its agent called at 16 min");
         assert_eq!(at(32 * 60_000).len(), 1);
         assert!(serve(&m, "agent-seen", "no agent").contains("\"err\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_agent_whose_running_leases_nothing_of_its_own_waits_on_is_said_once() {
+        let dir = std::env::temp_dir().join(format!("devhub-lease-detached-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut m, _node, clock, recs) = master(&dir);
+        Arc::get_mut(&mut m).unwrap().ensure_rev = Some(Arc::new(|_, _, _, pin, _| Ok(pin.sha.clone())));
+        m.refresh(&[("box-a".to_string(), "box-a:8797".to_string()), ("box-b".to_string(), "box-b:8797".to_string())]);
+        for (lane, agent, node, kind) in [
+            ("wait-a", "AGENT-A", "box-a", Kind::Test),
+            ("live-a", "AGENT-A", "box-a", Kind::Long),
+            ("wait-b", "AGENT-B", "box-b", Kind::Test),
+            ("own", "devhub-x", "box-b", Kind::Test),
+            ("gate", "AGENT-G", "box-b", Kind::Gate),
+            ("prebuild-box-a", "AGENT-U", "box-a", Kind::Build),
+            ("hub-build-box-b", "AGENT-H", "box-b", Kind::Build),
+        ] {
+            let mut req = Req::new(lane, kind);
+            req.src = super::super::Src::Overlay;
+            req.rev = Some(format!("work@{}", "a".repeat(40)));
+            req.agent = Some(agent.to_string());
+            req.node = Some(node.to_string());
+            req.cores = Some(1.0);
+            req.ram_gb = Some(1.0);
+            req.est_min = Some(30.0);
+            req.live = lane == "live-a";
+            if agent == "AGENT-H" { req.master = true; req.class = super::super::sched::HUB_BUILD.to_string(); }
+            let answer = serve(&m, "lease", &req.to_json());
+            assert!(answer.contains("\"state\":\"granted\""), "{lane}: {answer}");
+        }
+        let at = |ms: u64| {
+            clock.store(1_000 + ms, Ordering::SeqCst);
+            m.say_detached(1_000 + ms);
+            m.detached(1_000 + ms)
+        };
+        let warnings = |agent: &str| recs.lock().unwrap().iter().filter(|r| r.sev == Sev::Warn && r.line.starts_with(&format!("{agent}:"))).map(|r| r.line.clone()).collect::<Vec<_>>();
+        assert!(at(4 * 60_000 + 59_000).is_empty(), "not yet detached");
+        assert!(warnings("AGENT-A").is_empty() && warnings("AGENT-B").is_empty());
+        let rows = at(5 * 60_000 + 1_000);
+        assert_eq!(rows, [
+            "AGENT-A: L1 test@box-a running 5m01s, L2 long@box-a running 5m01s; nothing of AGENT-A's has talked to devhub for 5 min (no job wait, lease client or live call): it will not wake on them, resume it",
+            "AGENT-B: L3 test@box-b running 5m01s; nothing of AGENT-B's has talked to devhub for 5 min (no job wait, lease client or live call): it will not wake on them, resume it",
+        ]);
+        assert_eq!(warnings("AGENT-A"), rows[..1]);
+        assert_eq!(warnings("AGENT-B"), rows[1..]);
+        assert_eq!(m.detached_said.lock().unwrap().len(), 2, "no warning for excluded leases");
+        at(6 * 60_000);
+        assert_eq!(serve(&m, "agent-seen", "agent-seen AGENT-A"), "{}");
+        let rows = at(7 * 60_000);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].starts_with("AGENT-B: L3 "));
+        assert_eq!((warnings("AGENT-A").len(), warnings("AGENT-B").len()), (1, 1));
+        let rows = at(11 * 60_000 + 1_000);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].starts_with("AGENT-B:") && rows[1].starts_with("AGENT-A:"), "newest silence last: {rows:?}");
+        assert_eq!((warnings("AGENT-A").len(), warnings("AGENT-B").len()), (2, 1));
+        at(12 * 60_000);
+        assert_eq!((warnings("AGENT-A").len(), warnings("AGENT-B").len()), (2, 1), "said once per silence");
+        for id in ["L1", "L2", "L3"] { m.sched.lock().unwrap().release(id, "done", m.now()); }
+        assert!(at(13 * 60_000).is_empty());
+        assert!(m.detached_said.lock().unwrap().is_empty(), "ended leases leave no warning state");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2659,7 +2815,7 @@ mod tests {
             if self.gone.load(Ordering::SeqCst) {
                 return Err(format!("link lost: cannot reach fleet hub `{node}` at 192.0.2.89:8797: Connection refused (os error 111)"));
             }
-            let caps = super::super::Caps { hub_proto: super::super::HUB_PROTO, node: node.into(), arch: "x86_64".into(), os: "linux".into(), cores: 16, ram_gb: 64.0, ram_avail_gb: 50.0, disk_free_gb: 300.0, disk_total_gb: 1000.0, disk_floor_gb: 25.0, timed: true, display: Some("wm:makepad-wm-0".into()), ..Default::default() };
+            let caps = super::super::Caps { features: super::super::FEATURES.iter().map(|f| f.to_string()).collect(), node: node.into(), arch: "x86_64".into(), os: "linux".into(), cores: 16, ram_gb: 64.0, ram_avail_gb: 50.0, disk_free_gb: 300.0, disk_total_gb: 1000.0, disk_floor_gb: 25.0, timed: true, display: Some("wm:makepad-wm-0".into()), ..Default::default() };
             Ok(vec![match service {
                 "caps" => {
                     let applying = self.apply.load(Ordering::SeqCst);
@@ -2920,7 +3076,7 @@ mod tests {
             Ok(match service {
                 // box-a is a bench box: it keeps its quiet window for timed work
                 "caps" => vec![super::super::Caps {
-                    hub_proto: super::super::HUB_PROTO, node: node.into(), arch: "x86_64".into(), os: "linux".into(), cores: 16, ram_gb: 64.0, ram_avail_gb: 50.0, disk_free_gb: 300.0, disk_total_gb: 1000.0, disk_floor_gb: 25.0, timed: true,
+                    features: super::super::FEATURES.iter().map(|f| f.to_string()).collect(), node: node.into(), arch: "x86_64".into(), os: "linux".into(), cores: 16, ram_gb: 64.0, ram_avail_gb: 50.0, disk_free_gb: 300.0, disk_total_gb: 1000.0, disk_floor_gb: 25.0, timed: true,
                     role: Some(if node == "box-a" { super::super::Role::Bench } else { super::super::Role::Pool }),
                     jit_store: Some(Arc::new(Snapshot { compiler: "rustc-1".into(), ..Store::new(&x.conf().work).snapshot() })),
                     ..Default::default()
@@ -3379,7 +3535,7 @@ mod tests {
         medium.cost_asked = true;
         let c = serve(&m, "lease", &medium.to_json());
         assert!(c.contains("\"state\":\"queued\""), "{c}");
-        assert!(serve(&m, "beat", "L2").contains("node busy"), "the test pegs the box: {}", serve(&m, "beat", "L2"));
+        assert!(serve(&m, "beat", "L2").contains("\"reason\":\"held by L1 (test of a)\""), "it waits while the test runs: {}", serve(&m, "beat", "L2"));
         *node.end_load.lock().unwrap() = Some((4.0, 50.0));
         clock.store(5_000, Ordering::SeqCst);
         serve(&m, "release", "L1 released exit=0");

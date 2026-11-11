@@ -707,7 +707,7 @@ pub(super) fn push_and_apply(c: &Client, repo: &Path, follow: &[(String, String)
     code
 }
 
-/// An apply order's words with the jobs of its room's grant ([`crate::lease::DEPLOY_JOBS_PROTO`]).
+/// An apply order's words with the jobs of its room's grant (`deploy-jobs`).
 fn with_jobs(words: String, jobs: Option<u32>) -> String {
     match jobs {
         Some(j) => format!("{words} jobs={j}"),

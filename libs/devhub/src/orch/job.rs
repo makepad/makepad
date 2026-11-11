@@ -657,11 +657,16 @@ fn finish(ctx: &Ctx, id: &str, r: Result<i32, String>, log: &std::path::Path) {
     let text = std::fs::read_to_string(log).unwrap_or_default();
     let (errors, tail) = digest(&text);
     keep_stall(ctx, id, log);
+    // Source discovery can read many files; do it before taking the state store's lock.
+    let none = get(ctx, id).and_then(|j| {
+        let mut why = matches!(r, Ok(0)).then(|| crate::testlog::Tally::of(&text).no_pass(&j.cmd)).flatten()?;
+        crate::testlog::no_pass_hint(&mut why, std::path::Path::new(&j.repo_dir), &j.rev, &j.cmd);
+        Some(why)
+    });
     let j = set(ctx, id, |j| {
         j.ended_ms = wall_ms();
         j.errors = errors;
         // a test run that executed no test is no pass, whatever its exit
-        let none = matches!(r, Ok(0)).then(|| crate::testlog::Tally::of(&text).no_pass(&j.cmd)).flatten();
         if matches!(r, Ok(makepad_remote::hot::JIT_ERROR_EXIT)) {
             j.errors.clear();
             j.note = makepad_remote::hot::Verdict::from_output(makepad_remote::hot::JIT_ERROR_EXIT, &text)
@@ -875,7 +880,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
                 return Err("job lease-log L<id>".into());
             }
             let path = ctx.logs(LEASE_LOGS).join(format!("{rest}.log"));
-            let bytes = std::fs::read(&path).map_err(|_| format!("{rest} kept no output: a lease released normally keeps none, unless it stalled, a test run failed or a run ended abnormally"))?;
+            let bytes = std::fs::read(&path).map_err(|_| format!("{rest} kept no output: a lease released normally keeps none, unless it stalled, a test run or a bucket's test unit failed, or a run ended abnormally"))?;
             Ok(format!("{{\"text\":{},\"path\":{}}}", json_str(&String::from_utf8_lossy(&bytes)), json_str(&path.display().to_string())))
         }
         "output" => {

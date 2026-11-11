@@ -33,6 +33,7 @@ pub mod held;
 pub mod os;
 pub mod embed;
 pub mod inbox;
+pub mod notes;
 pub mod hot;
 pub mod local;
 pub mod node;

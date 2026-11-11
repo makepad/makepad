@@ -508,6 +508,20 @@ pub fn groups_rss(groups: &[(u32, u64)]) -> Option<u64> {
 /// before anything looked at it. `Child::wait` discards rusage; a process-wide RUSAGE_CHILDREN
 /// delta would mix leases.
 pub fn wait_usage(child: &mut Child) -> std::io::Result<(ExitStatus, Option<f64>, Option<u64>)> {
+    loop {
+        if let Some(reaped) = wait4_usage(child, 0)? { return Ok(reaped); }
+    }
+}
+
+/// [`wait_usage`] without waiting: None while the child runs (`Child::try_wait` discards rusage too).
+pub fn try_wait_usage(child: &mut Child) -> std::io::Result<Option<(ExitStatus, Option<f64>, Option<u64>)>> {
+    const WNOHANG: i32 = 1;
+    wait4_usage(child, WNOHANG)
+}
+
+/// One `wait4` of the child with `options`: None when it has not ended (WNOHANG) or the wait was
+/// interrupted.
+fn wait4_usage(child: &mut Child, options: i32) -> std::io::Result<Option<(ExitStatus, Option<f64>, Option<u64>)>> {
     use std::os::raw::c_long;
     use std::os::unix::process::ExitStatusExt;
     #[repr(C)]
@@ -525,15 +539,18 @@ pub fn wait_usage(child: &mut Child) -> std::io::Result<(ExitStatus, Option<f64>
     extern "C" { fn wait4(pid: i32, status: *mut i32, options: i32, usage: *mut RUsage) -> i32; }
     let mut status = 0;
     let mut usage = RUsage::default();
-    loop {
-        if unsafe { wait4(child.id() as i32, &mut status, 0, &mut usage) } >= 0 {
+    match unsafe { wait4(child.id() as i32, &mut status, options, &mut usage) } {
+        0 => Ok(None),
+        n if n > 0 => {
             let cpu = (usage.user.sec + usage.system.sec) as f64 + (usage.user.usec + usage.system.usec) as f64 / 1_000_000.0;
             // ru_maxrss: bytes on macOS, KiB on Linux
             let maxrss = usage.rest[0].max(0) as u64 * if cfg!(target_os = "macos") { 1 } else { 1024 };
-            return Ok((ExitStatus::from_raw(status), Some(cpu), (maxrss > 0).then_some(maxrss)));
+            Ok(Some((ExitStatus::from_raw(status), Some(cpu), (maxrss > 0).then_some(maxrss))))
         }
-        let e = std::io::Error::last_os_error();
-        if e.kind() != std::io::ErrorKind::Interrupted { return Err(e); }
+        _ => {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted { Ok(None) } else { Err(e) }
+        }
     }
 }
 

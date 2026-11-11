@@ -293,6 +293,11 @@ impl Store {
         result.unwrap_or_else(|e| { eprintln!("devhub: JIT store: {e}"); None })
     }
 
+    /// Whether the store holds the binary of `id`.
+    pub fn has(&self, id: &str) -> bool {
+        Self::valid(id) && self.binary(id).is_file()
+    }
+
     /// The binary of `id` held for `lease` until it ends: a lease's explicit `--jit`, which
     /// placement gives only a box that holds it; missing, the error names what the box holds.
     pub fn held(&self, id: &str, lease: &str) -> Result<PathBuf, String> {
