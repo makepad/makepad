@@ -2127,7 +2127,7 @@ mod imp {
                     // A HAL app's copy / cut chord, as a physical key press gives it (hal_intake):
                     // the focused widget's text goes on the clipboard before the key itself.
                     if let StudioToApp::KeyDown(e) = &msg {
-                        if (e.modifiers.control || e.modifiers.logo) && cx.hal.hosted.is_none() {
+                        if e.modifiers.is_primary() && cx.hal.hosted.is_none() {
                             match e.key_code {
                                 crate::event::KeyCode::KeyC => cx.hal_clipboard_chord(true),
                                 crate::event::KeyCode::KeyX => cx.hal_clipboard_chord(false),

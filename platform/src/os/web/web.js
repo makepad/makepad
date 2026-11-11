@@ -1290,7 +1290,8 @@ export class WasmWebBrowser extends WasmBridge {
                 search: location.search + "",
                 hash: location.hash + "",
                 has_thread_support: this.wasm._has_thread_support,
-                is_phone: WasmBridge.is_phone()
+                is_phone: WasmBridge.is_phone(),
+                primary_is_logo: this.detect.primary_is_logo
             },
             window_info: this.window_info,
         });
@@ -3759,6 +3760,7 @@ export class WasmWebBrowser extends WasmBridge {
 
         this.detect.is_android = this.detect.user_agent.match(/Android/i)
         this.detect.is_add_to_homescreen_safari = this.is_mobile_safari && navigator.standalone
+        this.detect.primary_is_logo = makepad_primary_modifier_is_logo(window.navigator)
     }
 
     ensure_render_quality() {
@@ -4132,11 +4134,13 @@ export class WasmWebBrowser extends WasmBridge {
             var fac = 1
             if (e.deltaMode === 1) fac = 40
             else if (e.deltaMode === 2) fac = window.offsetHeight
+            // a trackpad pinch arrives as a Ctrl+wheel, so a Mac browser's pinch is also a Cmd+wheel
+            let pinch = this.detect.primary_is_logo && e.ctrlKey ? 8 : 0;
 
             this.to_wasm.ToWasmScroll({
                 x: e.pageX,
                 y: e.pageY,
-                modifiers: pack_key_modifier(e),
+                modifiers: pack_key_modifier(e) | pinch,
                 is_touch: !last_was_wheel,
                 scroll_x: e.deltaX * fac,
                 scroll_y: e.deltaY * fac,
@@ -4393,6 +4397,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.handlers.on_keydown = e => {
             this.resume_audio_from_gesture();
             let code = e.keyCode;
+            let primary = this.detect.primary_is_logo ? e.metaKey : e.ctrlKey;
 
             //if (code == 91) {firefox_logo_key = true; e.preventDefault();}
             if (code == 18 || code == 17 || code == 16) e.preventDefault(); // alt
@@ -4401,7 +4406,7 @@ export class WasmWebBrowser extends WasmBridge {
                 e.preventDefault() // Shift+F10: tweaker
             }
             // @section clipboard
-            if ((code === 88 || code == 67) && (e.metaKey || e.ctrlKey)) { // copy or cut
+            if ((code === 88 || code == 67) && primary) { // copy or cut
                 // we need to request the clipboard
                 this.to_wasm.ToWasmTextCopy();
                 this.do_wasm_pump();
@@ -4415,7 +4420,7 @@ export class WasmWebBrowser extends WasmBridge {
             if (code === 89 && (e.metaKey || e.ctrlKey)) e.preventDefault() // all (select all)
             if (code === 83 && (e.metaKey || e.ctrlKey)) e.preventDefault() // ctrl s
             // @section text-input
-            if (code === 90 && (e.metaKey || e.ctrlKey)) {
+            if (code === 90 && primary) {
                 this.update_text_area_pos();
                 ta.value = "";
                 ugly_ime_hack = true;
@@ -4550,6 +4555,13 @@ let web_cursor_map = [
     "grab", //Grab=>24
     "grabbing", //Grabbing=>25    
 ]
+
+// A browser on a Mac, iPhone or iPad takes Command (the logo key) for copy, paste and undo,
+// and every other browser takes Control.
+export function makepad_primary_modifier_is_logo(nav) {
+    const platform = nav.userAgentData?.platform || nav.platform || nav.userAgent || "";
+    return /mac|iphone|ipad|ipod/i.test(platform);
+}
 
 //var firefox_logo_key = false;
 function pack_key_modifier(e) {

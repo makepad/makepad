@@ -168,7 +168,7 @@ unsafe fn view_key(press: ObjcId) -> Option<(KeyCode, u32)> {
 /// A key the shell took for the app, in `win`. Command C / X ask the app for the selection (the
 /// copy / cut chord), Command V pastes the pasteboard's text; their releases are swallowed.
 pub fn key(win: &Win, code: KeyCode, mods: u32, down: bool) {
-    if mods & MOD_LOGO != 0 {
+    if mods & mod_primary() != 0 {
         match code {
             KeyCode::KeyC | KeyCode::KeyX => {
                 if down {

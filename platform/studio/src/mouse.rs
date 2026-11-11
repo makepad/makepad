@@ -11,21 +11,21 @@ pub struct KeyModifiers {
 impl KeyModifiers {
     /// Returns true if the primary key modifier is active (pressed).
     ///
-    /// The primary modifier is Logo key (Command ⌘) on macOS
+    /// The primary modifier is Logo key (Command ⌘) on macOS and iOS
     /// and the Control key on all other platforms.
+    /// On the web it's the one the browser's OS uses.
     pub fn is_primary(&self) -> bool {
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.logo || self.control
-        }
-        #[cfg(target_vendor = "apple")]
-        {
+        if makepad_key_code::primary_modifier_is_logo() {
             self.logo
-        }
-        #[cfg(all(not(target_arch = "wasm32"), not(target_vendor = "apple")))]
-        {
+        } else {
             self.control
         }
+    }
+
+    /// The modifiers with only the primary one held (see [`Self::is_primary`]).
+    pub fn primary() -> Self {
+        let logo = makepad_key_code::primary_modifier_is_logo();
+        Self { logo, control: !logo, ..Default::default() }
     }
 
     pub fn any(&self) -> bool {
@@ -129,5 +129,23 @@ impl MouseButton {
     /// * etc.
     pub fn from_raw_button(raw: usize) -> MouseButton {
         MouseButton::from_bits_retain(1 << raw)
+    }
+}
+
+#[cfg(test)]
+mod key_modifiers_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_platforms_own_modifier_is_primary() {
+        let primary = KeyModifiers::primary();
+        assert_eq!(primary.logo, cfg!(target_vendor = "apple"));
+        assert!(primary.logo != primary.control && !primary.shift && !primary.alt);
+        assert!(primary.is_primary());
+        assert!(KeyModifiers { shift: true, alt: true, ..primary }.is_primary());
+        let other = KeyModifiers { logo: primary.control, control: primary.logo, ..Default::default() };
+        assert!(!other.is_primary());
+        assert!(!KeyModifiers { shift: true, alt: true, ..other }.is_primary());
+        assert!(!KeyModifiers::default().is_primary());
     }
 }

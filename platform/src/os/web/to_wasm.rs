@@ -34,6 +34,7 @@ pub struct WBrowserInfo {
     pub hash: String,
     pub has_thread_support: bool,
     pub is_phone: bool,
+    pub primary_is_logo: bool,
 }
 
 impl Into<OsType> for WBrowserInfo {

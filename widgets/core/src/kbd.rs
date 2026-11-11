@@ -405,9 +405,10 @@ fn key_cap(token: &str) -> String {
     token.to_string()
 }
 
-/// Whether this build's platform prints its modifiers as symbols.
+/// Whether this platform prints its modifiers as symbols, as Apple's do (on
+/// the web, that's when the browser runs on one).
 pub fn modifiers_are_symbols() -> bool {
-    cfg!(target_vendor = "apple")
+    KeyModifiers::primary().logo
 }
 
 /// The caps a shortcut string turns into, for a platform that writes its

@@ -287,18 +287,9 @@ impl MenuShortcut {
         if !self.shift_any && m.shift != self.shift {
             return false;
         }
-        #[cfg(target_arch = "wasm32")]
-        {
-            // The browser hands mac users logo and everyone else control;
-            // either one stands in for `Cmd`.
-            (m.logo || m.control) == (self.cmd || self.ctrl)
-        }
-        #[cfg(all(not(target_arch = "wasm32"), target_vendor = "apple"))]
-        {
+        if KeyModifiers::primary().logo {
             m.logo == self.cmd && m.control == self.ctrl
-        }
-        #[cfg(all(not(target_arch = "wasm32"), not(target_vendor = "apple")))]
-        {
+        } else {
             m.control == (self.cmd || self.ctrl) && !m.logo
         }
     }
@@ -1353,6 +1344,17 @@ mod tests {
     }
 
     #[test]
+    fn cmd_fires_on_the_primary_modifier_only() {
+        let undo = parse_shortcut("Cmd+Z").unwrap();
+        let primary = KeyModifiers::primary();
+        let other = KeyModifiers { logo: primary.control, control: primary.logo, ..Default::default() };
+        let press = |modifiers| KeyEvent { key_code: KeyCode::KeyZ, modifiers, ..Default::default() };
+        assert!(undo.matches(&press(primary)));
+        assert!(!undo.matches(&press(other)));
+        assert!(!undo.matches(&press(KeyModifiers { shift: true, ..primary })));
+    }
+
+    #[test]
     fn parse_shortcut_reads_bare_and_named_keys() {
         assert_eq!(parse_shortcut("Delete").unwrap().key, KeyCode::Delete);
         assert_eq!(parse_shortcut("Home").unwrap().key, KeyCode::Home);
@@ -1449,24 +1451,11 @@ mod tests {
             "Edit",
             vec![MenuEntry::item(live_id!(undo), "Undo", Some("Cmd+Z"))],
         )];
-        // `Cmd` in a shortcut string is the logo modifier on macOS and Ctrl
-        // everywhere else, so the press that fires this item is a different
-        // key on different platforms. Pressing logo unconditionally meant
-        // this test could pass on one platform only.
-        let modifiers = if cfg!(target_vendor = "apple") {
-            KeyModifiers {
-                logo: true,
-                ..Default::default()
-            }
-        } else {
-            KeyModifiers {
-                control: true,
-                ..Default::default()
-            }
-        };
+        // `Cmd` in a shortcut string is the primary modifier, so the press
+        // that fires this item is a different key on different platforms.
         let event = Event::KeyDown(KeyEvent {
             key_code: KeyCode::KeyZ,
-            modifiers,
+            modifiers: KeyModifiers::primary(),
             ..Default::default()
         });
         assert!(!bar.handle_shortcut(&mut cx, &event, true));

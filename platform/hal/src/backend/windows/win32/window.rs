@@ -1370,7 +1370,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             set_forwarded(&w, vk, true);
             w.push(|q, id| q.key_down(id, key.to_index(), repeat, mods));
             // the paste chord brings the clipboard's text (as AppKit's shell does)
-            let paste = (mods & (input::MOD_CONTROL | input::MOD_LOGO) != 0 && key == makepad_key_code::KeyCode::KeyV)
+            let paste = (mods & input::mod_primary() != 0 && key == makepad_key_code::KeyCode::KeyV)
                 || (mods & input::MOD_SHIFT != 0 && key == makepad_key_code::KeyCode::Insert);
             if paste {
                 if let Some(text) = clipboard::read_text() {

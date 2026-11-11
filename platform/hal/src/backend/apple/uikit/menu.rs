@@ -10,7 +10,7 @@ use super::classes::{shielded, win_of};
 use super::keys;
 use super::text;
 use super::window::Win;
-use crate::types::input::MOD_LOGO;
+use crate::types::input::mod_primary;
 use crate::types::*;
 use makepad_apple_sys::*;
 use makepad_key_code::KeyCode;
@@ -249,12 +249,12 @@ pub(super) fn add_view_methods(decl: &mut ClassDecl) {
     }
     extern "C" fn copy(this: &Object, _: Sel, _: ObjcId) {
         if let Some(win) = action_window(this) {
-            shielded("copy", || keys::key(win, KeyCode::KeyC, MOD_LOGO, true));
+            shielded("copy", || keys::key(win, KeyCode::KeyC, mod_primary(), true));
         }
     }
     extern "C" fn cut(this: &Object, _: Sel, _: ObjcId) {
         if let Some(win) = action_window(this) {
-            shielded("cut", || keys::key(win, KeyCode::KeyX, MOD_LOGO, true));
+            shielded("cut", || keys::key(win, KeyCode::KeyX, mod_primary(), true));
         }
     }
     extern "C" fn paste(this: &Object, _: Sel, _: ObjcId) {
@@ -267,8 +267,8 @@ pub(super) fn add_view_methods(decl: &mut ClassDecl) {
             shielded(
                 "select-all",
                 std::panic::AssertUnwindSafe(|| {
-                    keys::key(win, KeyCode::KeyA, MOD_LOGO, true);
-                    keys::key(win, KeyCode::KeyA, MOD_LOGO, false);
+                    keys::key(win, KeyCode::KeyA, mod_primary(), true);
+                    keys::key(win, KeyCode::KeyA, mod_primary(), false);
                 }),
             );
         }

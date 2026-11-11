@@ -155,7 +155,7 @@ impl State {
             return;
         }
         if common::shortcut(mods) {
-            if keycode == makepad_key_code::KeyCode::KeyV {
+            if keycode == makepad_key_code::KeyCode::KeyV && mods & raw::mod_primary() != 0 {
                 self.read_clipboard(selection::Purpose::Paste(recipient), false);
             }
             return;

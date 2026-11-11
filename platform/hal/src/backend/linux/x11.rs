@@ -948,7 +948,7 @@ impl App {
             return;
         }
         if input::shortcut(modifiers) {
-            if code == makepad_key_code::KeyCode::KeyV {
+            if code == makepad_key_code::KeyCode::KeyV && modifiers & raw::mod_primary() != 0 {
                 self.paste(ev.window, false);
             }
             return;

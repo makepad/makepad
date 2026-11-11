@@ -588,6 +588,12 @@ pub mod input {
     /// On a pointer event: the remote endpoint fed it, no person did.
     pub const MOD_INJECTED: u32 = 1 << 31;
 
+    /// The primary modifier's bit, the one copy, cut, paste and undo take:
+    /// `MOD_LOGO` (Command) on Apple platforms and `MOD_CONTROL` everywhere else.
+    pub fn mod_primary() -> u32 {
+        if makepad_key_code::primary_modifier_is_logo() { MOD_LOGO } else { MOD_CONTROL }
+    }
+
     // `MouseDown` / `MouseUp` `button` is the bit mask Cx's `MouseButton` uses (primary 1,
     // secondary 2, middle 4, back 8, forward 16). A key event's `key` is the index of the key in
     // the key-code table both sides share (`makepad_key_code::KEYCODE_VARIANTS`).

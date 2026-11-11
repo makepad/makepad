@@ -527,7 +527,7 @@ unsafe fn process_ns_event(event: ObjcId) {
             }
             let (Some(key), Some(win)) = (keys::get_event_keycode(event), key_window(event)) else { return };
             let mods = keys::event_mods(event);
-            if (mods & (input::MOD_LOGO | input::MOD_CONTROL)) != 0 && key == makepad_key_code::KeyCode::KeyV {
+            if mods & input::mod_primary() != 0 && key == makepad_key_code::KeyCode::KeyV {
                 // the paste chord: the pasteboard's text arrives as an event, ahead of the key
                 let string: ObjcId = msg_send![a.pasteboard.get(), stringForType: NSStringPboardType];
                 if string != nil {

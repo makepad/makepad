@@ -23024,9 +23024,10 @@ impl Widget for Tweaker {
             }
             Event::KeyDown(ke)
                 if ke.key_code == KeyCode::KeyZ
-                    && ke.modifiers.logo
+                    && ke.modifiers.is_primary()
                     && tweak_is_on()
-                    && !self.focus_is_text(cx) =>
+                    && !self.focus_is_text(cx)
+                    && !cx.text_input_has_focus() =>
             {
                 if ke.modifiers.shift {
                     self.redo(cx);

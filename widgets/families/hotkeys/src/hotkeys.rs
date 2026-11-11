@@ -93,10 +93,10 @@ pub enum KeyPlatform {
 }
 
 impl KeyPlatform {
-    /// The platform this build runs on, chosen the way the menu bar and the
-    /// key caps choose it: from the build target's vendor.
+    /// The platform this app runs on, told apart by its primary modifier,
+    /// so on the web it's the browser's OS.
     pub fn current() -> Self {
-        if cfg!(target_vendor = "apple") {
+        if KeyModifiers::primary().logo {
             KeyPlatform::Apple
         } else {
             KeyPlatform::Other
@@ -521,9 +521,7 @@ impl KeyChord {
     }
 
     /// Does this key press make this chord? The modifiers must match
-    /// exactly, so `Mod+N` does not fire while `Mod+Shift+N` is pressed. In
-    /// a browser the primary modifier may arrive as either Control or the
-    /// logo key, and either one is taken for it.
+    /// exactly, so `Mod+N` does not fire while `Mod+Shift+N` is pressed.
     pub fn matches(&self, ke: &KeyEvent) -> bool {
         if ke.key_code != self.key {
             return false;
@@ -532,9 +530,6 @@ impl KeyChord {
         let b = ke.modifiers;
         if a.shift != b.shift || a.alt != b.alt {
             return false;
-        }
-        if cfg!(target_arch = "wasm32") && (a.control != a.logo) {
-            return (b.control || b.logo) && !(b.control && b.logo);
         }
         a.control == b.control && a.logo == b.logo
     }
@@ -1180,5 +1175,27 @@ impl Hotkeys {
             return false;
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn press(key_code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent { key_code, modifiers, ..Default::default() }
+    }
+
+    #[test]
+    fn mod_is_only_the_platforms_primary_modifier() {
+        let primary = KeyModifiers::primary();
+        let other = KeyModifiers { logo: primary.control, control: primary.logo, ..Default::default() };
+        assert_eq!(KeyPlatform::current().primary(), primary);
+        let undo = KeyChord::parse("Mod+Z").unwrap();
+        assert_eq!(undo, KeyChord::primary(KeyCode::KeyZ));
+        assert!(undo.matches(&press(KeyCode::KeyZ, primary)));
+        assert!(!undo.matches(&press(KeyCode::KeyZ, other)));
+        assert!(KeyChord::new(KeyCode::KeyZ, primary).belongs_to_text(KeyPlatform::current()));
+        assert!(!KeyChord::new(KeyCode::KeyZ, other).belongs_to_text(KeyPlatform::current()));
     }
 }
