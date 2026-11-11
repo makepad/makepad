@@ -6,6 +6,10 @@ license = "MIT OR Apache-2.0"
 publish = false
 description = "Shared CI vision judge on the AI fleet"
 
+[[bin]]
+name = "makepad-ci-judge"
+path = "src/main.rs"
+
 [dependencies]
 # Fleet client only: discovery, routing and generation; no local model runtime.
 makepad-ai-hub = { path = "../ai/hub", default-features = false }

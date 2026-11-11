@@ -39,10 +39,11 @@ JIT. The numbers are one day of all lanes (medians / p90):
   - the user's app box: a person's display. Lanes show apps there and never take it;
   - device: phones and headsets, through their own commands.
 - **Self-update**:
-  - the master builds work's tip and execs into it in place: at most every 10 min, within
-    5 min of a landing; leases, queued requests and launches survive it;
-  - each hub rolls to the landed tip (`devhub rolls`), a median 5.8 min after a landing
-    (p90 10.3);
+  - the master builds work's tip (one build at a time; landings during a build go into the
+    next) and execs into each build as it ends: no uptime or settle holds it (that gate went
+    on 11-08: a fix waited 10 min for it); leases, queued requests and launches survive it;
+  - each hub rolls to the same build as it ends (`devhub rolls`), a median 5.8 min after a
+    landing (p90 10.3); its runs and leases survive the restart, holders re-attach;
   - after a landing each box prebuilds its JIT and warms the smoke apps' caches
     (`devhub prewarm`); a lease preempts it.
 

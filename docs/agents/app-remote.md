@@ -57,6 +57,11 @@ lease, or anything for someone typing at a terminal. Otherwise it is refused,
 with the pid it would have reached: on the user's Mac a name is their app, so
 name the pid you mean. `<node>:<name>` through the hub is refused the same way.
 
+A release Android or iOS build opens no endpoint unless asked. An Android app
+has no launch flags or environment of its own, so `adb shell setprop
+debug.makepad.remote 1` before launching it asks for one; its socket is in the
+app's cache dir, which `adb shell run-as` reaches in a debuggable APK.
+
 ## Common commands
 
 Each request is one command; the answer is the same JSON as before, one line

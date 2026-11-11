@@ -255,6 +255,7 @@ workspace.members = [
     "libs/value_pickers",
     "libs/editor_panel",
     "libs/flow",
+    "libs/lock_free",
     # === own MP3 / Ogg Vorbis decoders ===
     "libs/audio_decode",
     # === own Ogg Vorbis encoder (stem side-channels) ===

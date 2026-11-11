@@ -73,9 +73,9 @@ impl GpuSide {
             if ops.is_empty() || self.link.send(GpuMsg::Ops { session: self.session, epoch, ops, reply: None }) {
                 return Ok(Vec::new());
             }
-            return Err(GpuError::DeviceLost);
+            return Err(GpuError::Ended);
         }
-        self.send_later()?.recv().unwrap_or(Err(GpuError::DeviceLost))
+        self.send_later()?.recv().unwrap_or(Err(GpuError::Ended))
     }
 
     /// Sends the batch with a reply, not waiting for it: the device's answer comes on the
@@ -86,7 +86,7 @@ impl GpuSide {
         let epoch = self.stop.load(Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         if !self.link.send(GpuMsg::Ops { session: self.session, epoch, ops, reply: Some(tx) }) {
-            return Err(GpuError::DeviceLost);
+            return Err(GpuError::Ended);
         }
         Ok(rx)
     }
@@ -246,7 +246,7 @@ fn run_program(vm: &mut ScriptVm, program: &Program, config: &SessionConfig) -> 
         let shared = state(vm).shared.clone();
         *lock(&shared.vm_interrupt) = Some(interrupt.clone());
         if shared.cancelled() {
-            interrupt.interrupt();
+            interrupt.stop();
         }
     }
     let mut fuel = limits.fuel;
@@ -329,12 +329,19 @@ fn native(vm: &mut ScriptVm, f: impl FnOnce(&mut ScriptVm, &mut Driver) -> Res<S
     // SAFETY: see `state`.
     let d = unsafe { &mut *state_ptr(vm) };
     if let Some(e) = &d.fatal {
+        if matches!(e, ProgramError::Cancelled) {
+            return cancelled(vm);
+        }
         let m = e.to_string();
         return script_err_limit!(vm.bx.threads.cur_ref().trap, "{}", m);
     }
     match f(vm, d) {
         Ok(v) => v,
         Err(Fail::Arg(m)) => script_err_invalid_args!(vm.bx.threads.cur_ref().trap, "{}", m),
+        Err(Fail::Fatal(ProgramError::Cancelled)) => {
+            d.fatal = Some(ProgramError::Cancelled);
+            cancelled(vm)
+        }
         Err(Fail::Fatal(e)) => {
             let m = e.to_string();
             d.fatal = Some(e);
@@ -343,6 +350,15 @@ fn native(vm: &mut ScriptVm, f: impl FnOnce(&mut ScriptVm, &mut Driver) -> Res<S
             script_err_limit!(vm.bx.threads.cur_ref().trap, "{}", m)
         }
     }
+}
+
+/// A cancelled session's op: the program ends here, uncatchably, and with no script error. A
+/// cancel is the caller's own end of the program (the app quit, the work gave way to newer
+/// work); raised as an error it was logged as one, at every quit.
+fn cancelled(vm: &mut ScriptVm) -> ScriptValue {
+    vm.bx.interrupt_handle().stop();
+    vm.bx.threads.cur_ref().trap.set_on(Some(ScriptTrapOn::Bail(NIL)));
+    NIL
 }
 
 macro_rules! op {
@@ -529,6 +545,8 @@ fn gpu_fatal(e: GpuError) -> ProgramError {
     match e {
         GpuError::Stopped => ProgramError::Cancelled,
         GpuError::DeviceLost => ProgramError::DeviceLost,
+        // (the device's owner is gone, and with it whoever waits on this program)
+        GpuError::Ended => ProgramError::Cancelled,
         GpuError::Failed(why) => ProgramError::Program(format!("the GPU device: {why}")),
     }
 }
@@ -1469,7 +1487,7 @@ fn op_take(vm: &mut ScriptVm, d: &mut Driver, f: ScriptValue) -> Res<ScriptValue
         Fetch::Ready(words, ty) => (words, ty),
         Fetch::Gpu(rx, ty) => match {
             let t = Instant::now();
-            let answer = rx.recv().unwrap_or(Err(GpuError::DeviceLost));
+            let answer = rx.recv().unwrap_or(Err(GpuError::Ended));
             waited(d, t);
             answer
         } {

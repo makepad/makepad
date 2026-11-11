@@ -55,8 +55,11 @@ pub enum GpuOp {
 pub enum GpuError {
     /// The session was interrupted or cancelled: the work not yet run was dropped.
     Stopped,
-    /// The GPU was lost (a reset, a device removed) or its device ended.
+    /// The GPU was lost (a reset, a device removed).
     DeviceLost,
+    /// The device ended: its owner closed it (an app quitting) with the session still open.
+    /// Nothing was lost; the session's work is dropped as a cancel drops it.
+    Ended,
     /// The device refused an op (a buffer it did not admit, a kernel it does not take): why.
     Failed(String),
 }
@@ -66,6 +69,7 @@ impl std::fmt::Display for GpuError {
         match self {
             GpuError::Stopped => write!(f, "stopped"),
             GpuError::DeviceLost => write!(f, "the GPU was lost"),
+            GpuError::Ended => write!(f, "the GPU device ended"),
             GpuError::Failed(why) => write!(f, "{why}"),
         }
     }

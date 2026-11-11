@@ -423,8 +423,10 @@ impl Session {
     /// [`ProgramError::Cancelled`].
     pub fn cancel(&self) {
         self.shared.cancelled.store(true, Ordering::Relaxed);
+        // (a cancel is the caller's own end of the program, no error of the program's: the VM
+        // stops with none)
         if let Some(interrupt) = lock(&self.shared.vm_interrupt).as_ref() {
-            interrupt.interrupt();
+            interrupt.stop();
         }
         self.shared.running.cancel();
         self.shared.stop_gpu();

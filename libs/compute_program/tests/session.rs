@@ -206,12 +206,34 @@ let spin = {x: output(f32) element: fn(i) { var a = float(i) for k in 0..20000 {
 
 #[test]
 fn cancel_ends_a_looping_driver_and_a_waiting_one() {
-    let looping = open("{run: fn(s, p) { var k = 0 loop { k = k + 1 } }}", config(Value::Nil));
+    // what reaches the script error hook (a host logs each line as a script error)
+    static HOOKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    fn hooked(line: &str) {
+        HOOKED.lock().unwrap_or_else(|e| e.into_inner()).push(line.to_string());
+    }
+    makepad_script::inspect_registry::set_error_hook(hooked);
+    // (each is cancelled once it says it runs: in its loop, in its wait)
+    let running = |session: &Session| {
+        let mut updates = Updates::default();
+        while updates.value("runs").is_none() {
+            updates.merge(session.wait());
+        }
+    };
+    let looping = open("{run: fn(s, p) { s.value(\"runs\", true) var k = 0 loop { k = k + 1 } }}", config(Value::Nil));
+    running(&looping);
     looping.cancel();
     assert_eq!(looping.wait_end(), Err(ProgramError::Cancelled));
-    let waiting = open("{run: fn(s, p) { s.wait_inbox() return 1 }}", config(Value::Nil));
+    let waiting = open("{run: fn(s, p) { s.value(\"runs\", true) s.wait_inbox() return 1 }}", config(Value::Nil));
+    running(&waiting);
     waiting.cancel();
     assert_eq!(waiting.wait_end(), Err(ProgramError::Cancelled));
+    // (a program's own error does reach the hook)
+    assert!(run("{run: fn(s, p) { return s.no_such_op(1) }}", config(Value::Nil)).is_err());
+    // a cancel is the caller's own end of the program, no error of the program's
+    let hooked = HOOKED.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(!hooked.is_empty(), "the hook saw no script error at all");
+    let errors: Vec<&String> = hooked.iter().filter(|l| l.contains("cancelled") || l.contains("script interrupted")).collect();
+    assert!(errors.is_empty(), "a cancelled program raised script errors: {errors:#?}");
 }
 
 #[test]

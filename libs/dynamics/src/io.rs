@@ -374,6 +374,8 @@ fn reset_data_internal(m: &Model, d: &mut Data, debug_value: u8) {
     d.solver_nnz.fill(0);
     d.solver_fwdinv.fill(0.0);
     d.ncon = 0;
+    d.sdf_seeds.clear();
+    d.sdf_walks_bounded = 0;
     d.ne = 0;
     d.nf = 0;
     d.nl = 0;

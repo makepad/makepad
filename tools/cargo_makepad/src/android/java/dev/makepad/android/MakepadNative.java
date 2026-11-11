@@ -23,7 +23,7 @@ public class MakepadNative {
     public native static void activityOnDestroy();
     public native static void activityOnWindowFocusChanged(boolean has_focus);
     public static native void onAndroidParams(String cache_path, String data_path, float density, boolean isEmulator, String androidVersion, String buildNumber,
-        String kernelVersion, boolean nightMode);
+        String appBuild, boolean nightMode);
 
     public static native void onNightModeChanged(boolean nightMode);
     public static native void onDisplayRotation(int rotation);

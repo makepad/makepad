@@ -3,7 +3,11 @@
 //! Translated from `src/engine/engine_collision_sdf.c` and its header of the engine named in
 //! CREDITS.md (Apache-2.0, Copyright 2021 DeepMind Technologies Limited);
 //! changed: translated to Rust; Sdf replaces plugin callbacks; a mesh face against an SDF gives one start's
-//! deepest point and the deepest faces are kept (see `process_sdf_corners`).
+//! deepest point and the deepest faces are kept (see `process_sdf_corners`); an SDF meets another SDF or a
+//! primitive through our own search (`sdf`, `walk_midsurface`, `touch_extent`): the reference walks each start down
+//! `d1 + d2 + |max(d1, d2)|`, which is the smaller distance where both are inside, so its points end at the
+//! overlap's rim or tips, scattered from step to step, and report `max(d1, d2)` there (at most half the
+//! overlap): a resting part never settled and a part held hard against another slipped into it.
 
 use crate::data::{Data, PreContact};
 use crate::inline::{at3, at3_mut, at4, at6};
@@ -690,47 +694,6 @@ fn step_frank_wolfe(
     distance(m, d, sdf, x)
 }
 
-fn step_gradient(x: &mut [f64; 3], m: &Model, s: &SdfQuery<'_>, d: &Data, niter: i32) -> f64 {
-    let c = 0.1;
-    let rho = 0.5;
-    let amin = 1e-4;
-    let mut dist = MAXVAL;
-    for _step in 0..niter {
-        let mut grad = [0.0; 3];
-        let mut alpha = 2.0;
-        // the distance at x0 (x before the step) comes with its gradient
-        let dist0 = distance_gradient(m, d, s, &mut grad, x);
-        if grad[0].is_nan()
-            || grad[0] > MAXVAL
-            || grad[0] < -MAXVAL
-            || grad[1].is_nan()
-            || grad[1] > MAXVAL
-            || grad[1] < -MAXVAL
-            || grad[2].is_nan()
-            || grad[2] > MAXVAL
-            || grad[2] < -MAXVAL
-        {
-            return MAXVAL;
-        }
-        let x0 = [x[0], x[1], x[2]];
-        let mut wolfe = -c * alpha * dot3(&grad, &grad);
-        loop {
-            alpha *= rho;
-            wolfe *= rho;
-            add_scl3(x, &x0, &grad, -alpha);
-            dist = distance(m, d, s, x);
-            if !(alpha > amin && dist - dist0 > wolfe) {
-                break;
-            }
-        }
-        if dist0 < dist {
-            copy3(x, &x0);
-            return dist0;
-        }
-    }
-    dist
-}
-
 fn max_vert_dist(triangle: &[f64; 9], p: &[f64; 3]) -> f64 {
     let mut diff = [0.0; 3];
     let mut max_dist2 = 0.0;
@@ -1154,13 +1117,9 @@ pub fn sdf(
 ) -> usize {
     let pos1 = at3(&d.geom_xpos, 3 * g1 as usize);
     let quat1 = at4(&d.geom_xquat, 4 * g1 as usize);
-    let pos2 = at3(&d.geom_xpos, 3 * g2 as usize);
-    let quat2 = at4(&d.geom_xquat, 4 * g2 as usize);
+    let (pos2, quat2) = (*at3(&d.geom_xpos, 3 * g2 as usize), *at4(&d.geom_xquat, 4 * g2 as usize));
     let size1 = at6(&m.geom_aabb, 6 * g1 as usize);
     let size2 = at6(&m.geom_aabb, 6 * g2 as usize);
-    let mut cnt = 0;
-    let mut x = [0.0; 3];
-    let mut y = [0.0; 3];
     let mut vec1 = [0.0; 3];
     let mut vec2 = [0.0; 3];
     let mut aabb1 = [MAXVAL, MAXVAL, MAXVAL, -MAXVAL, -MAXVAL, -MAXVAL];
@@ -1176,8 +1135,8 @@ pub fn sdf(
     let mut offset2 = [0.0; 3];
     let mut rotation2 = [0.0; 9];
     map_pose(pos1, quat1, pos1, quat1, &mut offset2, &mut rotation2);
-    map_pose(pos2, quat2, pos1, quat1, &mut offset21, &mut rotation21);
-    map_pose(pos1, quat1, pos2, quat2, &mut offset12, &mut rotation12);
+    map_pose(&pos2, &quat2, pos1, quat1, &mut offset21, &mut rotation21);
+    map_pose(pos1, quat1, &pos2, &quat2, &mut offset12, &mut rotation12);
     for i in 0..8 {
         vec1[0] = if i & 1 != 0 {
             size1[0] + size1[3]
@@ -1224,7 +1183,7 @@ pub fn sdf(
         aabb[3 + k] = min(aabb1[3 + k], aabb2[3 + k]);
     }
     if aabb[3] < aabb[0] || aabb[4] < aabb[1] || aabb[5] < aabb[2] {
-        return cnt;
+        return 0;
     }
     let mut instance = [0; 2];
     let mut sdf_ptr: [Option<&dyn Sdf>; 2] = [None; 2];
@@ -1257,7 +1216,7 @@ pub fn sdf(
     } else {
         instance[1]
     };
-    let mut sdf = SdfQuery {
+    let sdf = SdfQuery {
         id: &instance,
         relpos: &offset21,
         relmat: &rotation21,
@@ -1265,43 +1224,350 @@ pub fn sdf(
         geomtype: &geomtypes,
         r#type: SDFTYPE_COLLISION,
     };
-    let mut contacts = [0.0; 3 * MAXCONPAIR];
-    let mut i = 0;
-    let mut j = 0;
-    while i < m.opt.sdf_initpoints {
-        x[0] = aabb[0] + (aabb[3] - aabb[0]) * halton(j, 2);
-        x[1] = aabb[1] + (aabb[4] - aabb[1]) * halton(j, 3);
-        x[2] = aabb[2] + (aabb[5] - aabb[2]) * halton(j, 5);
-        mul_mat_vec3(&mut y, &rotation2, &x);
+    // Deviation from the reference (engine_collision_sdf.c mjc_SDF, for an SDF against another SDF or a
+    // primitive, the sphere, capsule, ellipsoid, cylinder and box: each of sdf_initpoints Halton starts in the
+    // boxes' overlap walked down d1 + d2 + |max(d1, d2)| by stepGradient, then one contact per start that ends
+    // inside, at max(d1, d2), the normal from the midsurface's gradient; see the header for why): our own
+    // search. It starts from the pair's touches of its last collision and where the bound on their steps
+    // stopped its walks then, from the centre of the boxes' overlap and from the reference's Halton starts in it
+    // (sdf_initpoints in each cube of the thinner geom's thickness along the overlap's longest side), each walked
+    // until it settles at the deepest point of the two fields' overlap on their midsurface (`walk_midsurface`:
+    // sdf_iterations bounds its steps, not its end); one touch per point where they overlap, at d1 + d2, points
+    // nearer than a hundredth of the overlap's size taken as one (the deeper kept); contacts at the touches and
+    // at the ends of their extent along the midsurface (`touch_extent`), and of more than the driver takes for
+    // the pair, the deepest and those farthest apart.
+    let to_g2 = |p: [f64; 3]| {
+        let (mut y, mut x) = ([0.0; 3], [0.0; 3]);
+        mul_mat_vec3(&mut y, &rotation2, &p);
         add_to3(&mut y, &offset2);
         mul_mat_vec3(&mut x, &rotation12, &y);
         add_to3(&mut x, &offset12);
-        j += 1;
-        i += 1;
-        // Plugin compute starts visualization counters, omitted with that interface.
-        sdf.r#type = SDFTYPE_COLLISION;
-        step_gradient(&mut x, m, &sdf, d, m.opt.sdf_iterations);
-        sdf.r#type = SDFTYPE_INTERSECTION;
-        let dist2 = step_gradient(&mut x, m, &sdf, d, 1);
-        sdf.r#type = SDFTYPE_MIDSURFACE;
-        cnt = add_pre_contact(
-            &mut contacts,
-            &mut con[cnt],
-            &x,
-            pos2,
-            quat2,
-            dist2,
-            cnt,
-            m,
-            &sdf,
-            d,
-            0,
-        );
-        if cnt >= MAXCONPAIR {
-            break;
+        x
+    };
+    let size = ((aabb[3] - aabb[0]).powi(2) + (aabb[4] - aabb[1]).powi(2) + (aabb[5] - aabb[2]).powi(2)).sqrt();
+    let mut seeds = [[0.0; 3]; MAXCONPAIR];
+    let mut nseed = 0;
+    for &(a, b, p) in &d.sdf_seeds {
+        if a == g1 && b == g2 && nseed < MAXCONPAIR {
+            seeds[nseed] = p;
+            nseed += 1;
         }
     }
+    let centre = to_g2([(aabb[0] + aabb[3]) / 2.0, (aabb[1] + aabb[4]) / 2.0, (aabb[2] + aabb[5]) / 2.0]);
+    // sdf_initpoints starts in each cube of the thinner geom's thickness along the overlap's longest side (a pin
+    // in its hole gets them all along it, its foot as many as its whole box would have), the thickness taken no
+    // less than a thousandth of the overlap's size
+    let thick = (3..6).map(|k| 2.0 * min(size1[k], size2[k])).fold(MAXVAL, f64::min).max(1e-3 * size);
+    let longest = (0..3).map(|k| aabb[3 + k] - aabb[k]).fold(0.0, f64::max);
+    let nstart = m.opt.sdf_initpoints.max(0) * (longest / thick).round().max(1.0) as i32;
+    let halton_starts = (0..nstart).map(|j| {
+        to_g2([
+            aabb[0] + (aabb[3] - aabb[0]) * halton(j, 2),
+            aabb[1] + (aabb[4] - aabb[1]) * halton(j, 3),
+            aabb[2] + (aabb[5] - aabb[2]) * halton(j, 5),
+        ])
+    });
+    // the driver's count for the pair (the reference's one per start)
+    let cap = crate::collision_driver::max_contact(m, g1, g2, false).min(con.len());
+    // where the walks settled in the overlap (the touches), then those and the touches' extents
+    let mut touches = [([0.0; 3], 0.0, [0.0; 3]); MAXCONPAIR];
+    let mut ntouch = 0;
+    // the ends of the walks the bound on their steps stopped, which the next collision carries on from there
+    let mut carried = [[0.0; 3]; MAXCONPAIR];
+    let mut ncarried = 0;
+    for x in seeds[..nseed].iter().copied().chain(std::iter::once(centre)).chain(halton_starts) {
+        let walk = walk_midsurface(x, m, d, &sdf, m.opt.sdf_iterations, size);
+        if walk.ended == Walked::Bounded {
+            if d.sdf_walks_bounded == 0 {
+                crate::util_errmem::warning_text(&format!(
+                    "SDF collision: a walk of geoms {g1} and {g2} took sdf_iterations ({}) steps without settling; it carries on in the next collision. Time = {:.4}.",
+                    m.opt.sdf_iterations, d.time
+                ));
+            }
+            d.sdf_walks_bounded += 1;
+            if ncarried < MAXCONPAIR && !carried[..ncarried].iter().any(|c| dist3(c, &walk.end) < 1e-2 * size) {
+                carried[ncarried] = walk.end;
+                ncarried += 1;
+            }
+        }
+        if let Some(touch) = walk.best.filter(|b| b.1 < 0.0) {
+            keep_touch(&mut touches, &mut ntouch, touch, size);
+        }
+    }
+    // each touch's extent: from it, the farthest points of the overlap both ways toward the touch farthest from
+    // it and both ways across that, along the midsurface; a face that meets another, or a line, so gets contacts
+    // over all of it, not only at its deepest point (on which it would rock or pivot). The deepest first; a touch
+    // within the extent of one before it (on its midsurface, within its ends each way) is of the same face or
+    // line, not walked again.
+    let mut found = touches;
+    let mut cnt = ntouch;
+    let mut order: [usize; MAXCONPAIR] = std::array::from_fn(|i| i);
+    order[..ntouch].sort_by(|&i, &j| touches[i].1.total_cmp(&touches[j].1));
+    // the extents walked: from where, its normal, the two ways, and how far each way reaches (+along, -along,
+    // +across, -across)
+    let mut spans = [([0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3], [0.0; 4]); MAXCONPAIR];
+    let mut nspan = 0;
+    for &k in &order[..ntouch] {
+        let (x, _, n) = touches[k];
+        let apart = 1e-2 * size;
+        let within = |span: &([f64; 3], [f64; 3], [f64; 3], [f64; 3], [f64; 4])| {
+            let mut v = [0.0; 3];
+            sub3(&mut v, &x, &span.0);
+            let (u, w) = (dot3(&v, &span.2), dot3(&v, &span.3));
+            dot3(&v, &span.1).abs() < apart && u < span.4[0] + apart && -u < span.4[1] + apart && w < span.4[2] + apart && -w < span.4[3] + apart
+        };
+        if spans[..nspan].iter().any(within) {
+            continue;
+        }
+        let mut along = [0.0; 3];
+        if let Some(j) = (0..ntouch).max_by(|&i, &j| dist3(&touches[i].0, &x).total_cmp(&dist3(&touches[j].0, &x))) {
+            sub3(&mut along, &touches[j].0, &x);
+            let input = along;
+            add_to_scl3(&mut along, &n, -dot3(&input, &n));
+        }
+        if normalize3(&mut along) < apart {
+            // no other touch apart from it: across the normal from its axis least along it
+            let least = (0..3).min_by(|&i, &j| n[i].abs().total_cmp(&n[j].abs())).unwrap_or(0);
+            let mut axis = [0.0; 3];
+            axis[least] = 1.0;
+            cross(&mut along, &n, &axis);
+            normalize3(&mut along);
+        }
+        let mut across = [0.0; 3];
+        cross(&mut across, &n, &along);
+        let mut reach = [0.0; 4];
+        for (way, (t, sign)) in [(along, 1.0), (along, -1.0), (across, 1.0), (across, -1.0)].into_iter().enumerate() {
+            let mut dir = [0.0; 3];
+            scl3(&mut dir, &t, sign);
+            if let Some(end) = touch_extent(x, &dir, m, d, &sdf, size) {
+                let mut v = [0.0; 3];
+                sub3(&mut v, &end.0, &x);
+                reach[way] = dot3(&v, &dir).max(0.0);
+                keep_touch(&mut found, &mut cnt, end, size);
+            }
+        }
+        spans[nspan] = (x, n, along, across, reach);
+        nspan += 1;
+    }
+    // more than the driver takes: the deepest, then each time the one farthest from those taken, so that they
+    // span the touch (the deepest alone may all lie at one end of a line of touch, the other end let through)
+    if cnt > cap && cap > 0 {
+        let deepest = (0..cnt).min_by(|&a, &b| found[a].1.total_cmp(&found[b].1)).unwrap_or(0);
+        found.swap(0, deepest);
+        for taken in 1..cap {
+            let apart = |i: usize| (0..taken).map(|t| dist3(&found[i].0, &found[t].0)).fold(MAXVAL, f64::min);
+            let k = (taken..cnt).max_by(|&a, &b| apart(a).total_cmp(&apart(b))).unwrap_or(taken);
+            found.swap(taken, k);
+        }
+        cnt = cap;
+    }
+    d.sdf_seeds.retain(|&(a, b, _)| a != g1 || b != g2);
+    d.sdf_seeds.extend(touches[..ntouch].iter().map(|f| (g1, g2, f.0)));
+    d.sdf_seeds.extend(carried[..ncarried].iter().filter(|c| !touches[..ntouch].iter().any(|f| dist3(&f.0, c) < 1e-2 * size)).map(|&c| (g1, g2, c)));
+    for (k, &(x, dist, normal)) in found[..cnt].iter().enumerate() {
+        let c = &mut con[k];
+        c.dist = dist;
+        rot_vec_quat(&mut c.normal, &normal, &quat2);
+        rot_vec_quat(&mut c.pos, &x, &quat2);
+        add_to3(&mut c.pos, &pos2);
+        zero3(&mut c.tangent);
+    }
     cnt
+}
+
+/// The two fields of a pair at `x` (the second's frame): each one's distance and gradient (in that frame).
+fn pair_fields(m: &Model, d: &Data, s: &SdfQuery<'_>, x: &[f64; 3]) -> (f64, [f64; 3], f64, [f64; 3]) {
+    let (mut ga, mut gb, mut y) = ([0.0; 3], [0.0; 3], [0.0; 3]);
+    let a = geom_distance_gradient(&mut ga, m, d, s.plugin[0], s.id[0], x, s.geomtype[0]);
+    mul_mat_vec3(&mut y, s.relmat, x);
+    add_to3(&mut y, s.relpos);
+    let mut gy = [0.0; 3];
+    let b = geom_distance_gradient(&mut gy, m, d, s.plugin[1], s.id[1], &y, s.geomtype[1]);
+    mul_mat_tvec3(&mut gb, s.relmat, &gy);
+    (a, ga, b, gb)
+}
+
+/// Keeps a point where the two fields overlap (point, depth, normal) among `found[..*cnt]`: one nearer than a
+/// hundredth of the overlap's `size` to a kept one is the same touch (the deeper kept), and of more than
+/// MAXCONPAIR the shallowest gives way to a deeper one.
+fn keep_touch(found: &mut [([f64; 3], f64, [f64; 3]); MAXCONPAIR], cnt: &mut usize, touch: ([f64; 3], f64, [f64; 3]), size: f64) {
+    if let Some(k) = (0..*cnt).find(|&k| dist3(&found[k].0, &touch.0) < 1e-2 * size) {
+        if touch.1 < found[k].1 {
+            found[k] = touch;
+        }
+    } else if *cnt < MAXCONPAIR {
+        found[*cnt] = touch;
+        *cnt += 1;
+    } else if let Some(k) = (0..*cnt).max_by(|&a, &b| found[a].1.total_cmp(&found[b].1)).filter(|&k| touch.1 < found[k].1) {
+        found[k] = touch;
+    }
+}
+
+/// How closely the two fields' surfaces face each other (their gradients' dot product, negated) where a touch
+/// extends: a face's touch ends at its edge, where one field's gradient turns from the other's.
+const TOUCH_FACING: f64 = 0.98;
+
+/// Ours, not the reference's: from `x`, a touch (where the two fields overlap, on their midsurface, the pair's
+/// second geom's frame), the farthest point along `dir` (along the midsurface) to which the overlap keeps on
+/// the line from it, with the surfaces facing each other there (TOUCH_FACING): steps from `x` double from a
+/// thousandth of the overlap's `size` while they stay in the overlap, then halve between the farthest point in
+/// it and the nearest out until they are under that. The point levelled onto the midsurface, the fields' gap
+/// there (below zero) and the normal; none where the overlap ends within the first step.
+fn touch_extent(x: [f64; 3], dir: &[f64; 3], m: &Model, d: &Data, s: &SdfQuery<'_>, size: f64) -> Option<([f64; 3], f64, [f64; 3])> {
+    let tol = 1e-3 * size;
+    let inside = |r: f64| {
+        let mut p = x;
+        add_to_scl3(&mut p, dir, r);
+        let (a, ga, b, gb) = pair_fields(m, d, s, &p);
+        if !(a.is_finite() && b.is_finite()) || a + b >= 0.0 || dot3(&ga, &gb) > -TOUCH_FACING {
+            return None;
+        }
+        let mut n = [gb[0] - ga[0], gb[1] - ga[1], gb[2] - ga[2]];
+        let span = normalize3(&mut n);
+        if span < MINVAL {
+            return None;
+        }
+        add_to_scl3(&mut p, &n, (a - b) / span);
+        Some((p, a + b, n))
+    };
+    // the farthest point found in the overlap, how far along it is, and how far the nearest point out
+    let (mut end, mut reach, mut out) = (None, 0.0, None::<f64>);
+    let mut step = tol;
+    loop {
+        let r = match out {
+            Some(o) if o - reach < tol => break,
+            Some(o) => (reach + o) / 2.0,
+            None if reach + step > size => break,
+            None => reach + step,
+        };
+        match inside(r) {
+            Some(at) => {
+                end = Some(at);
+                reach = r;
+                step *= 2.0;
+            }
+            None => out = Some(r),
+        }
+    }
+    end
+}
+
+/// How a walk of the midsurface ended.
+#[derive(Clone, Copy, PartialEq)]
+enum Walked {
+    /// at its deepest point, its step shorter than a thousandth of the overlap's size
+    Settled,
+    /// at the bound on its steps, still going: the next collision carries it on from there
+    Bounded,
+    /// off the fields (a distance not finite) or nowhere to go (no gradient)
+    Lost,
+}
+
+struct Walk {
+    /// the deepest point it passed where the surfaces face each other, levelled: there, the fields' gap (their
+    /// distances' sum, the depth where it is below zero) and the normal
+    best: Option<([f64; 3], f64, [f64; 3])>,
+    /// where it stopped
+    end: [f64; 3],
+    ended: Walked,
+}
+
+/// Ours, not the reference's: from `start` (the pair's second geom's frame) to the deepest point of the two
+/// fields' overlap near it, or where they come nearest, on their midsurface. Where the surfaces nearest face each
+/// other, each step levels the two distances along the midsurface's normal and goes down their sum along the
+/// midsurface, by the step length the last two steps' gradients give (none longer than the overlap's `size`); a
+/// point no deeper than the deepest so far (the larger distance least) sends it back there with half the step
+/// taken from it. Where they do not face each other (a point in a hollow of both), it goes to the farther
+/// surface. It ends where its step is shorter than a thousandth of `size` (settled), or after `bound` steps,
+/// still going (the caller carries it on in the next collision), or where a distance is not finite or has no
+/// gradient (lost). Its deepest point, levelled, is where the fields' gap is least: below zero, they overlap by
+/// it, the contact's depth, along the normal out of the first geom into the second.
+fn walk_midsurface(start: [f64; 3], m: &Model, d: &Data, s: &SdfQuery<'_>, bound: i32, size: f64) -> Walk {
+    let tol = 1e-3 * size;
+    let mut x = start;
+    // the deepest point so far (the larger distance least): there, its level, depth, normal, larger distance
+    // and the step taken from it
+    let mut best: Option<([f64; 3], f64, f64, [f64; 3], f64, [f64; 3])> = None;
+    let mut last: Option<([f64; 3], [f64; 3])> = None;
+    let mut alpha = 1.0;
+    let mut ended = Walked::Bounded;
+    let mut steps = 0;
+    while steps < bound.max(1) {
+        steps += 1;
+        let (a, ga, b, gb) = pair_fields(m, d, s, &x);
+        if !(a.is_finite() && b.is_finite()) {
+            ended = Walked::Lost;
+            break;
+        }
+        let facing = dot3(&ga, &gb) < 0.0;
+        if let Some(bst) = best.as_mut().filter(|bst| !facing || max(a, b) >= bst.4) {
+            // no deeper than the deepest point so far: back there, half the step taken from it
+            let input = bst.5;
+            scl3(&mut bst.5, &input, 0.5);
+            if norm3(&bst.5) < tol {
+                ended = Walked::Settled;
+                break;
+            }
+            alpha *= 0.5;
+            x = bst.0;
+            add_to3(&mut x, &bst.5);
+            continue;
+        }
+        if !facing {
+            // the two surfaces nearest do not face each other: toward the farther one by its distance (no
+            // farther than its surface, the fields being distances)
+            let (far, mut g) = if a > b { (a, ga) } else { (b, gb) };
+            if normalize3(&mut g) < MINVAL {
+                ended = Walked::Lost;
+                break;
+            }
+            let reach = min(far.abs().max(tol), size);
+            add_to_scl3(&mut x, &g, if far > 0.0 { -reach } else { reach });
+            last = None;
+            continue;
+        }
+        let mut n = [gb[0] - ga[0], gb[1] - ga[1], gb[2] - ga[2]];
+        let span = normalize3(&mut n);
+        if span < MINVAL {
+            ended = Walked::Lost;
+            break;
+        }
+        // along the normal to where the two distances are level
+        let level = (a - b) / span;
+        // their sum's gradient along the midsurface
+        let mut g = [ga[0] + gb[0], ga[1] + gb[1], ga[2] + gb[2]];
+        let gn = dot3(&g, &n);
+        add_to_scl3(&mut g, &n, -gn);
+        if let Some((x0, g0)) = last {
+            let mut sx = [x[0] - x0[0], x[1] - x0[1], x[2] - x0[2]];
+            let sn = dot3(&sx, &n);
+            add_to_scl3(&mut sx, &n, -sn);
+            let sy = [g[0] - g0[0], g[1] - g0[1], g[2] - g0[2]];
+            let curve = dot3(&sx, &sy);
+            if curve > MINVAL {
+                alpha = min(dot3(&sx, &sx) / curve, size);
+            }
+        }
+        last = Some((x, g));
+        let mut step = [level * n[0] - alpha * g[0], level * n[1] - alpha * g[1], level * n[2] - alpha * g[2]];
+        let len = norm3(&step);
+        if len > size {
+            let input = step;
+            scl3(&mut step, &input, size / len);
+        }
+        best = Some((x, level, a + b, n, max(a, b), step));
+        if len < tol {
+            ended = Walked::Settled;
+            break;
+        }
+        add_to3(&mut x, &step);
+    }
+    let best = best.map(|(at, level, gap, n, _, _)| {
+        let mut p = at;
+        add_to_scl3(&mut p, &n, level);
+        (p, gap, n)
+    });
+    Walk { best, end: x, ended }
 }
 
 // flexElemCallback and mjc_FlexSDF are left untranslated with flex.

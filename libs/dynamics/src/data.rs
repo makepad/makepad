@@ -252,6 +252,13 @@ macro_rules! define_data {
             pub energy: [f64; 2],
             $(pub $name: Vec<$ty>,)*
             pub contact: Vec<Contact>,
+            /// Ours, not the reference's: each field pair's touches of its last collision and the ends of the
+            /// walks the bound on their steps stopped (geom1, geom2, the point in geom2's frame), where the next
+            /// one's search starts (`collision_sdf::sdf`).
+            pub sdf_seeds: Vec<(i32, i32, [f64; 3])>,
+            /// Ours, not the reference's: how many walks of the field pairs' contact search took
+            /// `sdf_iterations` steps without settling (`collision_sdf::sdf`; logged at the first).
+            pub sdf_walks_bounded: u64,
             pub efc_type: Vec<i32>,
             pub efc_id: Vec<i32>,
             pub efc_j_rownnz: Vec<i32>,
@@ -387,6 +394,8 @@ macro_rules! define_data {
                     energy: [0.0; 2],
                     $($name: vec![0 as $ty; m.$nr * $nc],)*
                     contact: Vec::new(),
+                    sdf_seeds: Vec::new(),
+                    sdf_walks_bounded: 0,
                     efc_type: Vec::new(),
                     efc_id: Vec::new(),
                     efc_j_rownnz: Vec::new(),

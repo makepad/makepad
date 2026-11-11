@@ -14,12 +14,15 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.Manifest;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Insets;
+import android.graphics.Paint;
 import android.graphics.Rect;
+import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
@@ -43,9 +46,12 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.util.DisplayMetrics;
 import android.util.Log;
+import android.util.TypedValue;
 import android.view.ActionMode;
 import android.view.Display;
+import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.Menu;
 import android.view.MenuItem;
@@ -72,11 +78,19 @@ import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 import android.text.Editable;
 import android.text.InputType;
+import android.text.Layout;
 import android.text.Selection;
+import android.text.SpannableString;
 import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.style.ReplacementSpan;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.PopupWindow;
+import android.widget.ProgressBar;
+import android.widget.ScrollView;
+import android.widget.TextView;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
 
@@ -103,6 +117,9 @@ class MakepadImeInsets {
     // fallbacks (onApplyWindowInsets, onGlobalLayout) observe a contradictory
     // mix of target and stale insets mid-animation, so they defer to it.
     static boolean imeAnimationInProgress = false;
+
+    // Set by MakepadLegacyImeProbe, which only runs below API 30.
+    static Rect legacyImeProbeFrame = null;
 
     private static int keyboardThresholdPx(View view) {
         return Math.max(1, (int) (view.getResources().getDisplayMetrics().density * MIN_KEYBOARD_HEIGHT_DP));
@@ -145,7 +162,11 @@ class MakepadImeInsets {
 
     private static int visibleFrameBottomOverlapPx(View view) {
         Rect visibleFrame = new Rect();
-        view.getWindowVisibleDisplayFrame(visibleFrame);
+        if (Build.VERSION.SDK_INT < 30 && legacyImeProbeFrame != null) {
+            visibleFrame.set(legacyImeProbeFrame);
+        } else {
+            view.getWindowVisibleDisplayFrame(visibleFrame);
+        }
 
         View root = view.getRootView();
         if (root == null || root.getHeight() <= 0) {
@@ -236,6 +257,48 @@ class MakepadImeInsets {
         int bottomOverlap = bottomOverlapPx(view, insets);
         boolean visible = isVisible(view, bottomOverlap);
         MakepadNative.surfaceOnResizeTextIME(bottomOverlap, visible);
+    }
+}
+
+// An invisible, untouchable ADJUST_RESIZE popup. Below API 30 its visible frame does shrink
+// for the IME, unlike our own window's, so it tells us how much the keyboard covers.
+class MakepadLegacyImeProbe implements ViewTreeObserver.OnGlobalLayoutListener {
+    private final View surface;
+    private final View probe;
+    private final PopupWindow popup;
+
+    @SuppressWarnings("deprecation")
+    MakepadLegacyImeProbe(Context context, View surface) {
+        this.surface = surface;
+        probe = new View(context);
+        popup = new PopupWindow(probe, 0, ViewGroup.LayoutParams.MATCH_PARENT, false);
+        popup.setSoftInputMode(LayoutParams.SOFT_INPUT_ADJUST_RESIZE | LayoutParams.SOFT_INPUT_STATE_UNCHANGED);
+        popup.setInputMethodMode(PopupWindow.INPUT_METHOD_NEEDED);
+        popup.setTouchable(false);
+        popup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        probe.getViewTreeObserver().addOnGlobalLayoutListener(this);
+    }
+
+    void show(View anchor) {
+        anchor.post(() -> {
+            if (!popup.isShowing() && anchor.getWindowToken() != null) {
+                popup.showAtLocation(anchor, Gravity.NO_GRAVITY, 0, 0);
+            }
+        });
+    }
+
+    void dismiss() {
+        probe.getViewTreeObserver().removeOnGlobalLayoutListener(this);
+        popup.dismiss();
+        MakepadImeInsets.legacyImeProbeFrame = null;
+    }
+
+    @Override
+    public void onGlobalLayout() {
+        Rect frame = new Rect();
+        probe.getWindowVisibleDisplayFrame(frame);
+        MakepadImeInsets.legacyImeProbeFrame = frame;
+        MakepadImeInsets.report(surface, null, "legacyImeProbe");
     }
 }
 
@@ -440,6 +503,9 @@ class MakepadSurface
 
         setFocusable(true);
         setFocusableInTouchMode(true);
+        // Makepad draws its own focus. Android's default highlight would gray out the
+        // whole surface whenever it gets focus outside touch mode.
+        setDefaultFocusHighlightEnabled(false);
         requestFocus();
         setOnTouchListener(this);
         setOnKeyListener(this);
@@ -464,11 +530,18 @@ class MakepadSurface
         super.onDetachedFromWindow();
     }
 
+    // The view whose surface the app draws to: only its own surface reaches the app, and only the
+    // newest activity's view takes it over.
+    static MakepadSurface sAppSurface;
+
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
         Surface surface = holder.getSurface();
         //surface.setFrameRate(120f,0);
-        MakepadNative.surfaceOnSurfaceCreated(surface);
+        if (getContext() == MakepadActivity.sCurrent) {
+            sAppSurface = this;
+            MakepadNative.surfaceOnSurfaceCreated(surface);
+        }
     }
 
     @Override
@@ -482,7 +555,10 @@ class MakepadSurface
             }
         }
         Surface surface = holder.getSurface();
-        MakepadNative.surfaceOnSurfaceDestroyed(surface);
+        if (sAppSurface == this) {
+            sAppSurface = null;
+            MakepadNative.surfaceOnSurfaceDestroyed(surface);
+        }
     }
 
     @Override
@@ -492,7 +568,9 @@ class MakepadSurface
                                int height) {
         Surface surface = holder.getSurface();
         //surface.setFrameRate(120f,0);
-        MakepadNative.surfaceOnSurfaceChanged(surface, width, height);
+        if (sAppSurface == this) {
+            MakepadNative.surfaceOnSurfaceChanged(surface, width, height);
+        }
 
     }
 
@@ -597,24 +675,36 @@ class MakepadSurface
         MakepadSystemInsets.report(this, insets);
     }
 
+    // The keys pressed while Ctrl or Meta was held. They're shortcuts,
+    // so letting go of one types nothing, even when Ctrl comes up first.
+    private final HashSet<Integer> mShortcutKeys = new HashSet<>();
+
     // docs says getCharacters are deprecated
     // but somehow on non-latyn input all keyCode and all the relevant fields in the KeyEvent are zeros
     // and only getCharacters has some usefull data
     @SuppressWarnings("deprecation")
     @Override
     public boolean onKey(View v, int keyCode, KeyEvent event) {
+        // Back only reaches the app as BackPressed, which below API 33 the activity sends for a key we don't take.
         // API 36 still passes the back key on to us after the activity's back callback got it as Back.
-        if (keyCode == KeyEvent.KEYCODE_BACK && MakepadActivity.mBackGoesThroughCallback) {
-            return true;
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            return MakepadActivity.mBackGoesThroughCallback;
         }
         if (event.getAction() == KeyEvent.ACTION_DOWN && keyCode != 0) {
             int metaState = event.getMetaState();
             boolean isRepeat = event.getRepeatCount() > 0;
+            if ((metaState & (KeyEvent.META_CTRL_ON | KeyEvent.META_META_ON)) != 0) {
+                mShortcutKeys.add(keyCode);
+            } else {
+                mShortcutKeys.remove(keyCode);
+            }
             MakepadNative.surfaceOnKeyDown(keyCode, metaState, isRepeat);
         }
 
+        boolean shortcut = false;
         if (event.getAction() == KeyEvent.ACTION_UP && keyCode != 0) {
             int metaState = event.getMetaState();
+            shortcut = mShortcutKeys.remove(keyCode);
             MakepadNative.surfaceOnKeyUp(keyCode, metaState);
         }
 
@@ -627,7 +717,7 @@ class MakepadSurface
                 }
             }
 
-            if (character != 0) {
+            if (character != 0 && !shortcut) {
                 MakepadNative.surfaceOnCharacter(character);
             }
         }
@@ -1054,6 +1144,126 @@ class ResizingLayout
     }
 }
 
+// What the cover shows while our first frame waits on shaders the driver hasn't cached yet.
+// It only scrolls when big fonts or a short screen make it taller than the cover.
+class MakepadShaderCompileScreen extends ScrollView {
+    private final TextView mTitle;
+    private final TextView mNote;
+    private final ProgressBar mSpinner;
+
+    MakepadShaderCompileScreen(Context context) {
+        super(context);
+        setFillViewport(true);
+        setFocusable(false);
+        LinearLayout content = new LinearLayout(context);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setGravity(Gravity.CENTER);
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        int padding = Math.round(24 * metrics.density);
+        content.setPadding(padding, padding, padding, padding);
+
+        // An app can show its own image here by shipping a makepad_shader_compile_icon drawable.
+        int iconId = getResources().getIdentifier("makepad_shader_compile_icon", "drawable", context.getPackageName());
+        int launcherIconId = context.getApplicationInfo().icon;
+        Drawable icon = null;
+        if (iconId != 0) {
+            icon = context.getDrawable(iconId);
+        } else if (launcherIconId != 0) {
+            // We draw the launcher icon at twice its usual size, so we load its sharpest density.
+            icon = getResources().getDrawableForDensity(launcherIconId, DisplayMetrics.DENSITY_XXXHIGH, context.getTheme());
+        }
+        if (icon != null) {
+            ImageView iconView = new ImageView(context);
+            iconView.setImageDrawable(icon);
+            iconView.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+            int iconSize = Math.round(96 * metrics.density);
+            LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(iconSize, iconSize);
+            iconParams.bottomMargin = Math.round(40 * metrics.density);
+            content.addView(iconView, iconParams);
+        }
+
+        // The title starts with a gap that the spinner sits in, so the spinner stays with the
+        // first word when the title wraps.
+        final int spinnerSize = Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 20, metrics));
+        final int spinnerGap = Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 12, metrics));
+        SpannableString title = new SpannableString("\u00A0" + context.getString(R.string.makepad_shader_compile_title));
+        title.setSpan(new ReplacementSpan() {
+            @Override
+            public int getSize(Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
+                if (fm != null) {
+                    paint.getFontMetricsInt(fm);
+                }
+                return spinnerSize + spinnerGap;
+            }
+
+            @Override
+            public void draw(Canvas canvas, CharSequence text, int start, int end,
+                float x, int top, int y, int bottom, Paint paint) {
+            }
+        }, 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        mTitle = new TextView(context);
+        mTitle.setText(title);
+        mTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        mTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        mTitle.setGravity(Gravity.CENTER_HORIZONTAL);
+        // TextView.setLineHeight() needs API 28, so we add the spacing it would.
+        int titleLineHeight = Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 24, metrics));
+        mTitle.setLineSpacing(titleLineHeight - mTitle.getPaint().getFontMetricsInt(null), 1f);
+        mSpinner = new ProgressBar(context);
+        mSpinner.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+        mTitle.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override
+            public void onLayoutChange(View view, int left, int top, int right, int bottom,
+                int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                Layout layout = mTitle.getLayout();
+                Paint.FontMetrics fontMetrics = mTitle.getPaint().getFontMetrics();
+                float textCenterY = layout.getLineBaseline(0) + (fontMetrics.ascent + fontMetrics.descent) / 2;
+                // The gap starts at its left edge, or at its right edge in a right-to-left title.
+                float gapStartX = layout.getPrimaryHorizontal(0);
+                if (layout.getParagraphDirection(0) == Layout.DIR_RIGHT_TO_LEFT) {
+                    gapStartX -= spinnerSize;
+                }
+                mSpinner.setTranslationX(left + mTitle.getTotalPaddingLeft() + gapStartX);
+                mSpinner.setTranslationY(top + mTitle.getTotalPaddingTop() + textCenterY - spinnerSize / 2f);
+            }
+        });
+        FrameLayout titleRow = new FrameLayout(context);
+        titleRow.addView(mTitle, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        titleRow.addView(mSpinner, new FrameLayout.LayoutParams(spinnerSize, spinnerSize, Gravity.TOP | Gravity.LEFT));
+        content.addView(titleRow, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        mNote = new TextView(context);
+        mNote.setText(R.string.makepad_shader_compile_note);
+        mNote.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        mNote.setGravity(Gravity.CENTER_HORIZONTAL);
+        mNote.setMaxWidth(Math.round(288 * metrics.density));
+        int noteLineHeight = Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 20, metrics));
+        mNote.setLineSpacing(noteLineHeight - mNote.getPaint().getFontMetricsInt(null), 1f);
+        LinearLayout.LayoutParams noteParams = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        noteParams.topMargin = Math.round(8 * metrics.density);
+        content.addView(mNote, noteParams);
+        addView(content, new ScrollView.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    // We pick light or dark colors the same way Window picks the system bar icons.
+    void applyColors(int backgroundColor) {
+        float luma = (0.2126f * Color.red(backgroundColor) + 0.7152f * Color.green(backgroundColor)
+            + 0.0722f * Color.blue(backgroundColor)) / 255f;
+        boolean lightBackground = luma > 0.5f;
+        Context context = getContext();
+        mTitle.setTextColor(context.getColor(lightBackground
+            ? R.color.makepad_shader_compile_title_light : R.color.makepad_shader_compile_title_dark));
+        mNote.setTextColor(context.getColor(lightBackground
+            ? R.color.makepad_shader_compile_note_light : R.color.makepad_shader_compile_note_dark));
+        mSpinner.setIndeterminateTintList(ColorStateList.valueOf(context.getColor(lightBackground
+            ? R.color.makepad_shader_compile_spinner_light : R.color.makepad_shader_compile_spinner_dark)));
+    }
+}
+
 public class MakepadActivity
     extends Activity
     implements MidiManager.OnDeviceOpenedListener
@@ -1087,6 +1297,7 @@ public class MakepadActivity
     private boolean mNativesDeferred = false;
 
     private MakepadSurface view;
+    private MakepadLegacyImeProbe mLegacyImeProbe;
 
     // JNI notification worker calls this; the provider posts delivery to Android's UI thread.
     public void a11yEvent(int id, int kind, int change, String text) {
@@ -1158,6 +1369,10 @@ public class MakepadActivity
     static HashMap<Long, MakepadWebSocketReader> mActiveWebsocketsReaders = new HashMap<>();
     static HashMap<Long, MakepadSocketStream> mActiveSocketStreams = new HashMap<>();
     private boolean mIsSwitchingActivity = false;
+    // The newest instance, which the app runs in. An older one that's still closing (a launch
+    // came while Back closed it) tells the app nothing more, so the app goes on in the new one.
+    static MakepadActivity sCurrent;
+    private volatile boolean mIsStarted = false;
 
     // Desired system-bar (status/navigation bar) icon tint, set from Rust via
     // setSystemBarAppearance(). true = dark icons (for light app backgrounds).
@@ -1190,6 +1405,7 @@ public class MakepadActivity
     private boolean mSurfaceSnapshotCopyInFlight = false;
     private boolean mSurfaceRecoveryOverlayVisible = false;
     private boolean mIsCoverWaitingForFirstFrame = false;
+    private MakepadShaderCompileScreen mShaderCompileScreen;
 
     // selection handles overlay
     private static final int SELECTION_HANDLE_START = 0;
@@ -1372,6 +1588,7 @@ public class MakepadActivity
             finish();
             return;
         }
+        sCurrent = this;
         // the app's external files folder exists from the first start (the system makes it with
         // the app's ownership): what a developer drops in with adb (a fleet credential, a config)
         // is then readable by the app
@@ -1485,6 +1702,10 @@ public class MakepadActivity
         mSelectionHandleOverlay.addView(mSelectionHandleEnd);
 
         setContentView(mRootLayout);
+        if (Build.VERSION.SDK_INT < 30) {
+            mLegacyImeProbe = new MakepadLegacyImeProbe(this, view);
+            mLegacyImeProbe.show(mRootLayout);
+        }
 
         // Default state: edge to edge, the bars visible and transparent over the
         // app's drawing, their size reported as safe-area insets. Apps that want
@@ -1503,6 +1724,9 @@ public class MakepadActivity
         mVideoPlaybackHandler = new Handler(mVideoPlaybackThread.getLooper());
         mVideoPlayerRunnables = new HashMap<Long, VideoPlayerRunnable>();
 
+        // The app starts as soon as it sees this activity, so its params have to be there first.
+        sendAndroidParams();
+        sendDisplayRotation();
         MakepadNative.activityOnCreate(this);
         registerPhysicalKeyboardListener();
 
@@ -1580,8 +1804,6 @@ public class MakepadActivity
         }
 
         int sdkVersion = Build.VERSION.SDK_INT;
-        sendAndroidParams();
-        sendDisplayRotation();
         // Landscape to reverse landscape (a half turn) changes no configuration,
         // so onConfigurationChanged never hears of it: the display listener does.
         android.hardware.display.DisplayManager displays =
@@ -1610,6 +1832,7 @@ public class MakepadActivity
     @Override
     protected void onStart() {
         super.onStart();
+        mIsStarted = true;
         restoreSurfaceViewForWarmResumeIfNeeded();
         MakepadNative.activityOnStart();
     }
@@ -1628,7 +1851,9 @@ public class MakepadActivity
     protected void onPause() {
         prepareSurfaceSnapshotOverlayForPause();
         super.onPause();
-        MakepadNative.activityOnPause();
+        if (sCurrent == this) {
+            MakepadNative.activityOnPause();
+        }
 
         //% MAIN_ACTIVITY_ON_PAUSE
     }
@@ -1636,7 +1861,10 @@ public class MakepadActivity
     @Override
     protected void onStop() {
         super.onStop();
-        MakepadNative.activityOnStop();
+        mIsStarted = false;
+        if (sCurrent == this) {
+            MakepadNative.activityOnStop();
+        }
     }
 
     @Override
@@ -1648,7 +1876,12 @@ public class MakepadActivity
         // Android recreates the activity right away for a config change the manifest doesn't
         // declare, and the running app moves over to the new one, so it must not shut down here.
         boolean isRecreating = isChangingConfigurations();
+        boolean superseded = sCurrent != this;
         unregisterPhysicalKeyboardListener();
+        if (mLegacyImeProbe != null) {
+            mLegacyImeProbe.dismiss();
+            mLegacyImeProbe = null;
+        }
         if (mNativeLayers != null) { mNativeLayers.close(); mNativeLayers = null; }
         if (mBackCallback != null) {
             getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(mBackCallback);
@@ -1687,15 +1920,25 @@ public class MakepadActivity
         }
         cleanupVideoPlaybackState();
         shutdownVideoPlaybackThread();
-        if (!mIsSwitchingActivity && !isRecreating) {
+        if (!mIsSwitchingActivity && !isRecreating && !superseded) {
             cleanupNetworkState();
             shutdownWebSocketsThread();
             stopLocationUpdates();
         }
         super.onDestroy();
-        if (!isRecreating) {
+        if (!isRecreating && !superseded) {
             MakepadNative.activityOnDestroy();
+            sCurrent = null;
         }
+    }
+
+    // Rust calls this off the UI thread right before the process ends, when the app ended just as
+    // this activity came. A visible one starts its task again, so it comes up in a new process.
+    public void restartTaskInNewProcess() {
+        if (!mIsStarted) return;
+        Intent intent = new Intent(getIntent());
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        getApplicationContext().startActivity(intent);
     }
 
     // Hands this surface to the activity Android recreates for a config change, so the
@@ -1709,6 +1952,7 @@ public class MakepadActivity
         return Math.max(24, (int) (getResources().getDisplayMetrics().density * 24.0f));
     }
 
+    @SuppressWarnings("deprecation")
     private void sendAndroidParams() {
         String cache_path = this.getCacheDir().getAbsolutePath();
         String data_path = this.getFilesDir().getAbsolutePath();
@@ -1717,10 +1961,16 @@ public class MakepadActivity
         String androidVersion = Build.VERSION.RELEASE;
         String buildNumber = Build.DISPLAY;
 
-        // Makepad ignores the kernel version, but the slot stays so the native
-        // signature doesn't change.
+        // Every new or reinstalled APK changes this, so the HAL starts a fresh pipeline cache for it.
+        String appBuild = "";
+        try {
+            android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            appBuild = info.versionName + " (" + info.versionCode + ") " + info.lastUpdateTime;
+        } catch (PackageManager.NameNotFoundException e) {
+            Log.e(LOG_TAG, "No package info for the app build: " + e);
+        }
         boolean nightMode = isNightMode(getResources().getConfiguration());
-        MakepadNative.onAndroidParams(cache_path, data_path, density, isEmulator, androidVersion, buildNumber, "", nightMode);
+        MakepadNative.onAndroidParams(cache_path, data_path, density, isEmulator, androidVersion, buildNumber, appBuild, nightMode);
     }
 
     @Override
@@ -1770,7 +2020,9 @@ public class MakepadActivity
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        MakepadNative.activityOnWindowFocusChanged(hasFocus);
+        if (sCurrent == this) {
+            MakepadNative.activityOnWindowFocusChanged(hasFocus);
+        }
     }
 
     @Override
@@ -2096,6 +2348,9 @@ public class MakepadActivity
                 backgroundView.setBackgroundColor(mAppBackgroundColor);
             }
         }
+        if (mShaderCompileScreen != null) {
+            mShaderCompileScreen.applyColors(mAppBackgroundColor);
+        }
         updateTaskDescription();
     }
 
@@ -2342,6 +2597,7 @@ public class MakepadActivity
             return;
         }
 
+        removeShaderCompileScreen();
         if (mSurfaceCoverOverlay.getVisibility() != View.VISIBLE
             && mSurfaceSnapshotOverlay.getVisibility() != View.VISIBLE) {
             mSurfaceCoverOverlay.setAlpha(1.0f);
@@ -2394,6 +2650,46 @@ public class MakepadActivity
                         view.setVisibility(View.VISIBLE);
                     }
                     clearWarmResumeSurfaceSnapshot();
+                }
+            });
+    }
+
+    // Rust calls this when it has to compile a shader that wasn't cached, which blocks its next frame.
+    public void showShaderCompileScreen() {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (!mIsCoverWaitingForFirstFrame || mSurfaceCoverOverlay == null || mShaderCompileScreen != null) {
+                    return;
+                }
+                mShaderCompileScreen = new MakepadShaderCompileScreen(MakepadActivity.this);
+                mShaderCompileScreen.applyColors(mAppBackgroundColor);
+                mSurfaceCoverOverlay.addView(mShaderCompileScreen, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                mShaderCompileScreen.announceForAccessibility(getString(R.string.makepad_shader_compile_title)
+                    + " " + getString(R.string.makepad_shader_compile_note));
+            }
+        });
+    }
+
+    // Once a frame is drawn the compile is over, so we fade the screen out with its own animation,
+    // since showing the cover again cancels the cover's fade and would leave the screen behind.
+    private void removeShaderCompileScreen() {
+        final MakepadShaderCompileScreen compileScreen = mShaderCompileScreen;
+        if (compileScreen == null) {
+            return;
+        }
+        mShaderCompileScreen = null;
+        compileScreen.animate()
+            .alpha(0.0f)
+            .setDuration(SURFACE_COVER_FADE_OUT_MS)
+            .withEndAction(new Runnable() {
+                @Override
+                public void run() {
+                    ViewGroup parent = (ViewGroup) compileScreen.getParent();
+                    if (parent != null) {
+                        parent.removeView(compileScreen);
+                    }
                 }
             });
     }
@@ -2550,6 +2846,13 @@ public class MakepadActivity
             }
         }
         else {
+            if (Build.VERSION.SDK_INT < 30) {
+                // applyEdgeToEdge() keeps the flags that are set, so the hiding ones have to go first.
+                decorView.setSystemUiVisibility(decorView.getSystemUiVisibility()
+                    & ~(View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY));
+            }
             applyEdgeToEdge();
             if (Build.VERSION.SDK_INT >= 30) {
                 android.view.WindowInsetsController controller = getWindow().getInsetsController();
@@ -3723,21 +4026,29 @@ public class MakepadActivity
     // Some Android skins, like OxygenOS, hold apps to 60Hz unless their window asks for a faster
     // display mode, so Rust turns this on while the user interacts or content keeps moving.
     public void setFrameRateBoost(final boolean boost) {
-        runOnUiThread(() -> {
+        // Always posted, never run inline on the UI thread, so the calls apply in the order Rust made them.
+        mHandler.post(() -> {
             Display display = getWindow().getDecorView().getDisplay();
             int modeId = 0;
             if (boost && display != null) {
                 try {
                     Display.Mode current = display.getMode();
                     Display.Mode topMode = current;
+                    boolean hasOtherRefreshRates = false;
                     for (Display.Mode mode : display.getSupportedModes()) {
-                        if (mode.getPhysicalWidth() == current.getPhysicalWidth()
-                            && mode.getPhysicalHeight() == current.getPhysicalHeight()
-                            && mode.getRefreshRate() > topMode.getRefreshRate()) {
+                        if (mode.getPhysicalWidth() != current.getPhysicalWidth()
+                            || mode.getPhysicalHeight() != current.getPhysicalHeight()) {
+                            continue;
+                        }
+                        hasOtherRefreshRates |= mode.getRefreshRate() != current.getRefreshRate();
+                        if (mode.getRefreshRate() > topMode.getRefreshRate()) {
                             topMode = mode;
                         }
                     }
-                    modeId = topMode.getModeId();
+                    // With just one refresh rate there's nothing to boost to, and setting a mode costs a relayout.
+                    if (hasOtherRefreshRates) {
+                        modeId = topMode.getModeId();
+                    }
                 } catch (IllegalStateException e) {
                     // getMode() throws if the display's info is ever out of sync, and a boost isn't worth a crash.
                     return;

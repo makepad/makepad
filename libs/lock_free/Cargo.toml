@@ -1,0 +1,6 @@
+[package]
+name = "makepad-lock-free"
+version = "0.1.0"
+edition = "2021"
+description = "Lock-free SPSC ring, seqlock cell, triple buffer and one-thread cell"
+license = "MIT OR Apache-2.0"

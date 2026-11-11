@@ -1,0 +1,4 @@
+# rg from the repository root searches the commercial clone too: git ignores apps/commercial
+# (its own repository, with its own .gitignore that keeps its build output out), and rg followed
+# that, so a search for the users of a changed pub type never saw the apps in it.
+!/apps/commercial/
