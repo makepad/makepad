@@ -9,7 +9,9 @@ static ACTIVITY: Mutex<usize> = Mutex::new(0);
 static VM: AtomicUsize = AtomicUsize::new(0);
 static CHOREOGRAPHER: AtomicUsize = AtomicUsize::new(0);
 static FRAME_POSTED: AtomicBool = AtomicBool::new(false);
-static FRAME_RATE_BOOST: AtomicBool = AtomicBool::new(false);
+/// Whether we asked Java for the fastest mode: held across each call to Java, so its calls go
+/// out in the order we decided them.
+static FRAME_RATE_BOOST: Mutex<bool> = Mutex::new(false);
 static FRAME_RATE_BOOST_TIME: AtomicU64 = AtomicU64::new(0);
 /// The Activity covers its surface until a frame shows on it: at the start and across a pause or
 /// a lost surface.
@@ -45,15 +47,19 @@ pub(crate) fn boost_frame_rate() {
     // An XR session paces itself, and without the Choreographer nothing follows the faster mode.
     if super::xr::active() || CHOREOGRAPHER.load(Ordering::Acquire) == 0 { return; }
     FRAME_RATE_BOOST_TIME.store(clock_ns(), Ordering::Release);
-    if FRAME_RATE_BOOST.swap(true, Ordering::AcqRel) { return; }
+    let mut boosted = lock(&FRAME_RATE_BOOST);
+    if std::mem::replace(&mut *boosted, true) { return; }
     set_frame_rate_boost(true);
+    drop(boosted);
     std::thread::spawn(|| loop {
+        let mut boosted = lock(&FRAME_RATE_BOOST);
         let idle = clock_ns().saturating_sub(FRAME_RATE_BOOST_TIME.load(Ordering::Acquire));
         if idle >= FRAME_RATE_BOOST_NS {
-            FRAME_RATE_BOOST.store(false, Ordering::Release);
+            *boosted = false;
             set_frame_rate_boost(false);
             return;
         }
+        drop(boosted);
         std::thread::sleep(Duration::from_nanos(FRAME_RATE_BOOST_NS - idle));
     });
 }
@@ -184,7 +190,9 @@ unsafe extern "system" fn surface_created(env: *mut JNIEnv, _: jclass, surface: 
 unsafe extern "system" fn surface_changed(env: *mut JNIEnv, _: jclass, surface: jobject, w: jint, h: jint) {
     // The window may be new or on another panel now, like after a fold, so we ask again for the
     // fastest mode of the display it's on.
-    if FRAME_RATE_BOOST.load(Ordering::Acquire) && !super::xr::active() { set_frame_rate_boost(true); }
+    let boosted = lock(&FRAME_RATE_BOOST);
+    if *boosted && !super::xr::active() { set_frame_rate_boost(true); }
+    drop(boosted);
     set_surface(env, surface, Some([w.max(0) as u32, h.max(0) as u32]));
 }
 unsafe extern "system" fn surface_destroyed(_: *mut JNIEnv, _: jclass, _: jobject) {
@@ -262,9 +270,12 @@ pub(super) fn back_unhandled() -> bool {
 unsafe extern "system" fn character(_: *mut JNIEnv, _: jclass, code: jint) { boost_frame_rate();
     if let Some(c) = char::from_u32(code as u32) { let mut bytes = [0; 4]; let text = c.encode_utf8(&mut bytes); Shared::global().emit(clock_ns(), |q, id| q.text(id, input::text::TYPED, text.as_bytes())); }
 }
-unsafe extern "system" fn resize_ime(_: *mut JNIEnv, _: jclass, height: jint, open: jboolean) { boost_frame_rate();
+unsafe extern "system" fn resize_ime(_: *mut JNIEnv, _: jclass, height: jint, open: jboolean) {
+    let ime = Some((height.max(0), open != 0));
+    // Every layout pass reports the keyboard again, a boost's own window update too, so only its slide boosts.
+    let changed = std::mem::replace(&mut lock(&Shared::global().state).ime, ime) != ime;
+    if changed && open != 0 { boost_frame_rate(); }
     if open == 0 { *lock(&LAST_IME) = None; }
-    lock(&Shared::global().state).ime = Some((height.max(0), open != 0));
     let height = height.max(0) as f64 / Shared::global().dpi() as f64;
     Shared::global().emit(clock_ns(), |q, id| q.ime_resize(id, height, open != 0));
 }
