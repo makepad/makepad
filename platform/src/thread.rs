@@ -2475,6 +2475,9 @@ struct FanOutShared {
     next: AtomicUsize,
     len: usize,
     stopped: AtomicBool,
+    /// Helpers inside an item, or about to claim one. The caller's `finish` waits for these
+    /// only: a helper that is queued, waiting for a permit or at a checkpoint has no borrow.
+    active: AtomicUsize,
     state: Mutex<BatchState>,
     wake: Condvar,
     pool: Weak<PoolInner>,
@@ -2528,7 +2531,9 @@ impl FanOutShared {
         {
             let mut state = self.state.lock().unwrap();
             state.queued = false;
-            if state.closed {
+            // Admitted after the caller closed the fan-out, or after the last index was
+            // claimed: there is nothing to help with.
+            if state.closed || self.next.load(Ordering::Relaxed) >= self.len {
                 return;
             }
             state.running += 1;
@@ -2550,7 +2555,10 @@ impl FanOutShared {
                     state.panic = Some(panic);
                 }
                 state.closed = true;
-                self.stopped.store(true, Ordering::Release);
+                self.stopped.store(true, Ordering::SeqCst);
+                // The item unwound past its own `leave_item`: the panic is stored first,
+                // so the caller that waits for this helper finds it.
+                self.active.fetch_sub(1, Ordering::SeqCst);
             }
         }
         self.wake.notify_all();
@@ -2567,6 +2575,11 @@ impl FanOutShared {
         // One upgrade per helper, not one per item (the workers share the pool's count).
         let pool = if helper { self.pool.upgrade() } else { None };
         loop {
+            // No index left (or the fan-out is closed): leave before the checkpoint, which
+            // can wait for a permit. Nothing waits for a helper that has no item.
+            if self.stopped.load(Ordering::Acquire) || self.next.load(Ordering::Relaxed) >= self.len {
+                break;
+            }
             let _ = checkpoint();
             if helper
                 && (JOB.with(|j| {
@@ -2578,29 +2591,75 @@ impl FanOutShared {
             {
                 break;
             }
-            if self.stopped.load(Ordering::Acquire) {
+            // A helper is counted before it looks: the caller, which stores `stopped` and then
+            // reads the count, either sees this helper or this helper sees `stopped`.
+            if helper {
+                self.active.fetch_add(1, Ordering::SeqCst);
+            }
+            if self.stopped.load(Ordering::SeqCst) {
+                if helper {
+                    self.leave_item();
+                }
                 break;
             }
             let index = self.next.fetch_add(1, Ordering::Relaxed);
             if index >= self.len {
+                if helper {
+                    self.leave_item();
+                }
                 break;
             }
             unsafe {
                 (self.call)(self.f, index);
             }
+            if helper {
+                self.leave_item();
+            }
         }
     }
+    /// A helper is out of its item. The caller sleeps on `wake` only once it has stored
+    /// `stopped`, so the lock is taken only then.
+    fn leave_item(&self) {
+        if self.active.fetch_sub(1, Ordering::SeqCst) == 1 && self.stopped.load(Ordering::SeqCst) {
+            // (taken and let go: the caller looked at the count under it before its sleep)
+            drop(self.state.lock().unwrap());
+            self.wake.notify_all();
+        }
+    }
+    // The fan-out ends when its items are done: the caller waits for the helpers that are
+    // inside an item (they borrow the closure), never for one that is queued, waiting for a
+    // permit or at a checkpoint. Those find the fan-out closed and leave without touching it.
     fn finish(&self) {
-        self.stopped.store(true, Ordering::Release);
+        self.stopped.store(true, Ordering::SeqCst);
         let mut state = self.state.lock().unwrap();
         state.closed = true;
-        if state.running != 0 {
-            without_permit(move || {
-                while state.running != 0 {
-                    state = self.wake.wait(state).unwrap();
-                }
-                drop(state);
-            });
+        if self.active.load(Ordering::SeqCst) != 0 {
+            // Asleep for them, the caller keeps its permit and lends its token to the budget;
+            // awake, it takes the token back at once. Given up, the permit took a new admission
+            // behind its class's waiters (95-150 ms each time). Never another thread's permit:
+            // a permit is a row of its own thread, which lends it whenever that thread sleeps
+            // (a helper's handed to the caller was lent by the helper's sleeps while the caller
+            // ran on it, and a checkpoint that yielded it then counted it twice: a box's visible
+            // tokens leaked one by one until no pool thread was admitted).
+            let permit = JOB.with(|j| j.borrow().as_ref().and_then(|j| j.permit));
+            if let Some(permit) = permit {
+                makepad_cpu_budget::lend_permit(permit);
+            }
+            while self.active.load(Ordering::SeqCst) != 0 {
+                state = self.wake.wait(state).unwrap();
+            }
+            drop(state);
+            if let Some(permit) = permit {
+                makepad_cpu_budget::take_back_permit(permit);
+                JOB.with(|j| {
+                    let mut context = j.borrow_mut();
+                    let job = context.as_mut().unwrap();
+                    if let Some(raised) = &job.raised {
+                        job.class = Class::of_budget(raised.class.load(Ordering::Relaxed));
+                        makepad_cpu_budget::reclass(permit, job.class.budget());
+                    }
+                });
+            }
         }
     }
 }
@@ -2652,6 +2711,7 @@ impl TaskPool {
             next: AtomicUsize::new(0),
             len,
             stopped: AtomicBool::new(false),
+            active: AtomicUsize::new(0),
             state: Mutex::new(BatchState {
                 running: 0,
                 queued: false,
@@ -2666,7 +2726,10 @@ impl TaskPool {
             helpers: most.saturating_sub(1),
         });
         let parent = FanOutParent(&shared);
-        shared.enqueue();
+        // One item is the caller's own: no helper is asked for.
+        if len > 1 {
+            shared.enqueue();
+        }
         shared.work(false);
         drop(parent);
         let panic = shared.state.lock().unwrap().panic.take();
@@ -3749,6 +3812,8 @@ mod tests {
         "a_scope_job_learns_a_job_of_its_class_waits_past_its_scopes_part",
         "a_long_job_learns_a_higher_class_job_waits_for_its_worker",
         "fan_out_finishes_when_all_helpers_yield_to_visible_work",
+        "a_fan_out_returns_when_its_items_are_done_not_when_its_helpers_are_admitted",
+        "a_fan_out_caller_takes_its_own_token_back_instead_of_a_new_admission",
         "admission_waiters_leave_a_worker_for_higher_classes",
         "a_background_admission_gives_way_to_visible_work_queued_behind_it",
         "scope_wait_releases_its_permit_for_work_that_unblocks_a_child",
@@ -5179,6 +5244,171 @@ mod tests {
         assert!(learned, "the helper learns at its task boundary that a higher-class job waits for its worker");
         assert!(!worker_join(interactive).unwrap(), "the Interactive job itself is not asked to leave");
         assert!(!worker_wanted(), "off a pool worker, with no job, nothing is wanted");
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+    }
+
+    /// A fan-out ends when its items are done. A helper that finished its item and then
+    /// waits at its checkpoint for a permit (the budget is full: a higher class holds it)
+    /// borrows nothing, so the caller does not wait for it. Before, the caller slept until
+    /// that helper was admitted again and found no index left: a cold load's texture encodes
+    /// spent 13.8 s of 32.7 s in fan-outs waiting like that.
+    #[test]
+    fn a_fan_out_returns_when_its_items_are_done_not_when_its_helpers_are_admitted() {
+        in_own_budget!(a_fan_out_returns_when_its_items_are_done_not_when_its_helpers_are_admitted);
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        // Smaller budgets cannot admit a Background helper alongside its caller.
+        if (makepad_cpu_budget::limit() as usize) < 4 {
+            return;
+        }
+        let pool = test_pool(2);
+        let child_pool = pool.clone();
+        let job = pool
+            .submit(Class::Background, move || {
+                let caller = std::thread::current().id();
+                let helper_in_item = AtomicBool::new(false);
+                let helper_done = AtomicBool::new(false);
+                let pressure_ready = AtomicBool::new(false);
+                let ran = AtomicUsize::new(0);
+                // Set once the budget is given back: the fan-out must have returned before.
+                let released = Arc::new(AtomicBool::new(false));
+                let pressure = Arc::new(Mutex::new(None));
+                let watchdog = Mutex::new(None);
+                child_pool.fan_out(2, |_| {
+                    ran.fetch_add(1, Ordering::SeqCst);
+                    if std::thread::current().id() == caller {
+                        wait_for("the helper to take the other item", || helper_in_item.load(Ordering::Acquire));
+                        // Fill the budget and let a higher class wait for a permit: the
+                        // helper's next checkpoint gives its permit up and waits for one.
+                        let held = HeldTokens::new((makepad_cpu_budget::cores() as usize).saturating_sub(2), "fan-out occupant");
+                        let (release, wait_release) = mpsc::channel::<()>();
+                        let waiter = std::thread::spawn(move || {
+                            let permit = makepad_cpu_budget::admit(makepad_cpu_budget::VISIBLE, makepad_cpu_budget::APP, "fan-out waiter");
+                            let _ = wait_release.recv();
+                            makepad_cpu_budget::release(permit);
+                        });
+                        let permit = JOB.with(|j| j.borrow().as_ref().unwrap().permit.unwrap());
+                        wait_for("a higher class waiting for a permit", || makepad_cpu_budget::should_yield(permit));
+                        *pressure.lock().unwrap() = Some((held, release, waiter));
+                        // A fan-out that waits for its helper's permit never returns by itself:
+                        // give the budget back after a while, so that failure is an assert.
+                        let (pressure, released) = (pressure.clone(), released.clone());
+                        *watchdog.lock().unwrap() = Some(std::thread::spawn(move || {
+                            let began = std::time::Instant::now();
+                            while !released.load(Ordering::SeqCst) && began.elapsed() < std::time::Duration::from_secs(3) {
+                                std::thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                            if !released.swap(true, Ordering::SeqCst) {
+                                drop(pressure.lock().unwrap().take());
+                            }
+                        }));
+                        pressure_ready.store(true, Ordering::Release);
+                        // The helper leaves its item under that pressure, before the caller is
+                        // done: what is left for it is its checkpoint (the settle covers the
+                        // few instructions between its item's end and the pool's own count).
+                        wait_for("the helper to finish its item", || helper_done.load(Ordering::Acquire));
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    } else {
+                        helper_in_item.store(true, Ordering::Release);
+                        // It keeps its permit through the item: giving it up here would make
+                        // the item itself wait for the full budget.
+                        wait_for("the budget to fill", || pressure_ready.load(Ordering::Acquire));
+                        helper_done.store(true, Ordering::Release);
+                    }
+                });
+                // Here the helper is out of its item, at its checkpoint or past it.
+                let returned_before_release = !released.swap(true, Ordering::SeqCst);
+                watchdog.into_inner().unwrap().expect("the caller ran an item").join().unwrap();
+                // Dropping the sender releases the waiter's permit; the tokens go with it.
+                if let Some((held, release, waiter)) = pressure.lock().unwrap().take() {
+                    drop(held);
+                    drop(release);
+                    waiter.join().unwrap();
+                }
+                (ran.into_inner(), returned_before_release)
+            })
+            .unwrap();
+        let (ran, returned_before_release) = worker_join(job).unwrap();
+        assert_eq!(ran, 2, "both indices ran");
+        assert!(returned_before_release, "the fan-out returned while the budget was still full");
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+    }
+
+    /// The caller that waits for a helper inside its last item lends its token meanwhile and
+    /// takes it back when the item ends: it is not admitted anew. With the budget full (a higher
+    /// class took the token the caller lent to wait) the fan-out still returns at once.
+    #[test]
+    fn a_fan_out_caller_takes_its_own_token_back_instead_of_a_new_admission() {
+        in_own_budget!(a_fan_out_caller_takes_its_own_token_back_instead_of_a_new_admission);
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        if (makepad_cpu_budget::limit() as usize) < 4 {
+            return;
+        }
+        let pool = test_pool(2);
+        let child_pool = pool.clone();
+        let job = pool
+            .submit(Class::Background, move || {
+                let caller = std::thread::current().id();
+                let helper_in_item = AtomicBool::new(false);
+                let caller_item_done = AtomicBool::new(false);
+                let released = Arc::new(AtomicBool::new(false));
+                let pressure = Arc::new(Mutex::new(None));
+                let watchdog = Mutex::new(None);
+                child_pool.fan_out(2, |_| {
+                    if std::thread::current().id() == caller {
+                        wait_for("the helper to take the other item", || helper_in_item.load(Ordering::Acquire));
+                        // Every other permit is held and a higher class waits for one: it
+                        // takes the token the caller lends when it sleeps for the helper.
+                        let held = HeldTokens::new((makepad_cpu_budget::cores() as usize).saturating_sub(2), "fan-out occupant");
+                        let (release, wait_release) = mpsc::channel::<()>();
+                        let waiter = std::thread::spawn(move || {
+                            let permit = makepad_cpu_budget::admit(makepad_cpu_budget::VISIBLE, makepad_cpu_budget::APP, "fan-out waiter");
+                            let _ = wait_release.recv();
+                            makepad_cpu_budget::release(permit);
+                        });
+                        let permit = JOB.with(|j| j.borrow().as_ref().unwrap().permit.unwrap());
+                        wait_for("a higher class waiting for a permit", || makepad_cpu_budget::should_yield(permit));
+                        *pressure.lock().unwrap() = Some((held, release, waiter));
+                        let (pressure, released) = (pressure.clone(), released.clone());
+                        *watchdog.lock().unwrap() = Some(std::thread::spawn(move || {
+                            let began = std::time::Instant::now();
+                            while !released.load(Ordering::SeqCst) && began.elapsed() < std::time::Duration::from_secs(3) {
+                                std::thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                            if !released.swap(true, Ordering::SeqCst) {
+                                drop(pressure.lock().unwrap().take());
+                            }
+                        }));
+                        caller_item_done.store(true, Ordering::Release);
+                    } else {
+                        helper_in_item.store(true, Ordering::Release);
+                        // Stay in the item, permit held, until the caller sleeps for it (the
+                        // settle covers the caller's way from its item into that sleep).
+                        wait_for("the caller to finish its item", || caller_item_done.load(Ordering::Acquire));
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                });
+                let returned_before_release = !released.swap(true, Ordering::SeqCst);
+                let has_permit = JOB.with(|j| j.borrow().as_ref().unwrap().permit.is_some());
+                // Its permit is a row of its own thread: asleep, the caller gives its token back.
+                // A permit handed over by a helper stayed the helper's thread's, whose sleeps
+                // lent the token the caller ran on; a checkpoint that yielded it counted it again.
+                let lends_its_own = makepad_cpu_budget::lend();
+                if lends_its_own {
+                    makepad_cpu_budget::take_back();
+                }
+                watchdog.into_inner().unwrap().expect("the caller ran an item").join().unwrap();
+                if let Some((held, release, waiter)) = pressure.lock().unwrap().take() {
+                    drop(held);
+                    drop(release);
+                    waiter.join().unwrap();
+                }
+                (returned_before_release, has_permit, lends_its_own)
+            })
+            .unwrap();
+        let (returned_before_release, has_permit, lends_its_own) = worker_join(job).unwrap();
+        assert!(returned_before_release, "the caller came back while the budget was still full, without a new admission");
+        assert!(has_permit, "the caller's job holds a permit again");
+        assert!(lends_its_own, "the caller's permit is its own thread's: asleep, it lends its token");
         worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
     }
 

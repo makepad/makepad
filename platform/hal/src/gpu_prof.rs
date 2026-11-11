@@ -318,7 +318,7 @@ impl Build<'_> {
     /// The FramePacket `serial` belongs to the frame (the frame takes its window packet's
     /// serial, else its first).
     pub fn packet(&mut self, serial: u64, window: bool, meta: &crate::types::FrameMeta) {
-        let names = ["dispatch", "next frame", "draw", "build", "submit", "spare"];
+        let names = ["dispatch", "next frame", "draw", "build", "submit", "gpu-wait"];
         let f = &mut self.st.open[self.i].frame;
         if f.id == 0 || window {
             f.id = serial;

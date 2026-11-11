@@ -19,7 +19,9 @@ use std::{cell::RefCell, rc::Rc};
 /// has no display to pace it; a window system's `FrameReady` takes this place.
 const BEAT: std::time::Duration = std::time::Duration::from_nanos(16_666_667);
 /// Frames a session keeps in flight on the GPU at once before a beat waits for the oldest
-/// to complete (`FrameDone`).
+/// to complete (`FrameDone`), on every path that beats (`Cx::hal_frames_room`): the one bound
+/// that keeps a producer from running ahead of the GPU. The wait is the pump's (`PumpWait::Gpu`),
+/// never a submit's: the backend records a beat's batches without waiting for room.
 const FRAMES_IN_FLIGHT: usize = 2;
 /// Backstop for an in-flight frame whose `FrameDone` has not arrived after this long: the
 /// stalled serial is logged and retired so the event loop never freezes permanently.
@@ -146,6 +148,12 @@ impl Cx {
         self.hal_service_signals();
         self.call_event_handler(&Event::Signal);
         if !self.hal_handle_platform_ops() { self.hal_submit_batch(); return false; }
+        // the caller's loop is held here, in the pump, while its frames fill the GPU: a turn
+        // still brings a frame, at the GPU's pace
+        while present {
+            let Some(wait) = self.hal_frames_wait_ns() else { break };
+            if !self.hal_pump_events(wait, PumpWait::Gpu) { return false; }
+        }
         if present && !self.hal_beat() { self.hal_submit_batch(); return false; }
         let alive = self.hal_handle_platform_ops();
         self.hal_run_tasks();
@@ -383,29 +391,6 @@ impl Cx {
         // a batch renderer beats as the GPU completes frames, not 60 times a second
         let batch = batch_interval().filter(|_| !display_clock && !hosted);
         let period = batch.unwrap_or(BEAT);
-        // the submission serial and timestamp after each of the last beats: a beat waits for
-        // the GPU to have completed the oldest of them, with `FRAME_STALL` as a stall backstop
-        let mut in_flight: std::collections::VecDeque<(u64, std::time::Instant)> = std::collections::VecDeque::new();
-        let retire_in_flight = |cx: &mut Cx, in_flight: &mut std::collections::VecDeque<(u64, std::time::Instant)>| {
-            if cx.hal.device_lost {
-                in_flight.clear();
-                return;
-            }
-            let completed = cx.frame_completed_serial();
-            while in_flight.front().is_some_and(|&(s, _)| completed >= s) {
-                in_flight.pop_front();
-            }
-            while in_flight.len() >= FRAMES_IN_FLIGHT
-                && in_flight.front().is_some_and(|&(_, at)| at.elapsed() >= FRAME_STALL)
-            {
-                let (serial, _) = in_flight.pop_front().unwrap();
-                crate::warning!(
-                    "hal: frame serial {serial} did not complete within {:?}; retiring stalled in-flight slot",
-                    FRAME_STALL
-                );
-            }
-        };
-
         let mut next_beat = std::time::Instant::now();
         // a frame asked for and not yet announced: when, so a lost request is asked again
         let mut requested: Option<std::time::Instant> = None;
@@ -417,7 +402,7 @@ impl Cx {
         #[cfg(target_os = "android")]
         let mut performance_hint = if hosted { None } else { makepad_hal::backend::android::performance_hint::PerformanceHint::for_this_thread(period) };
         'turns: loop {
-            retire_in_flight(self, &mut in_flight);
+            self.hal_frames_room();
             // A signal raised with no wake to carry it (before the session opened: its wake
             // reached no pump) is serviced now; `set_*_signal` wakes only on the flag's rising
             // edge, so left pending it silenced every later wake (a hosted child then slept
@@ -451,13 +436,12 @@ impl Cx {
                     Some(wait) => wait,
                     None => u64::MAX,
                 }
-            } else if in_flight.len() >= FRAMES_IN_FLIGHT {
+            } else if let Some(wait) = self.hal_frames_wait_ns() {
                 gpu_wait = true;
                 // When `FRAMES_IN_FLIGHT` frames are already on the GPU, the pump waits for the
                 // oldest fence's `FrameDone` before starting another beat, bounded by `FRAME_STALL`.
-                (in_flight[0].1 + FRAME_STALL)
-                    .saturating_duration_since(std::time::Instant::now())
-                    .as_nanos() as u64
+                makepad_hal::profile::count("beat waited: frames on the GPU");
+                wait
             } else if display_clock || !self.hal_has_work() {
                 // idle: sleep until an event, a timer the app set, a wake or the next `time_fps` frame;
                 // a frame asked for and not announced is asked again when its wait runs out
@@ -525,9 +509,12 @@ impl Cx {
                     }
                 }
             }
-            // a hosted app beats at its host's Ticks, and at once for its XR window's frames
+            // a hosted app beats at its host's Ticks, and at once for its XR window's frames, both
+            // while its frames on the GPU leave room (an XR frame held keeps its beat for later)
             let xr_beat = std::mem::take(&mut self.hal.xr_beat);
-            if hosted && xr_beat && !quitting && !self.hal.device_lost {
+            if hosted && xr_beat && !quitting && !self.hal.device_lost && !self.hal_frames_room() {
+                self.hal.xr_beat = true;
+            } else if hosted && xr_beat && !quitting && !self.hal.device_lost {
                 if !self.hal_guarded(true, |cx| cx.hal_beat()) {
                     self.call_event_handler(&Event::Shutdown);
                     self.hal_submit_batch();
@@ -556,8 +543,7 @@ impl Cx {
                     continue 'turns;
                 }
             }
-            retire_in_flight(self, &mut in_flight);
-            let gpu_ready = in_flight.len() < FRAMES_IN_FLIGHT;
+            let gpu_ready = self.hal_frames_room();
             let announced = gpu_ready && std::mem::take(&mut self.hal.beat);
             if announced { loop_watch::ready(); }
             let due = std::time::Instant::now() >= next_beat && gpu_ready;
@@ -574,7 +560,6 @@ impl Cx {
                         None => hint.start_frame(self.repaint_id, display_clock),
                     }
                 }
-                let before_serial = self.frame_submission_serial();
                 if !self.hal_guarded(true, |cx| cx.hal_beat()) {
                     self.call_event_handler(&Event::Shutdown);
                     self.hal_submit_batch();
@@ -593,10 +578,6 @@ impl Cx {
                 // offscreen); a beat more than a period late (idle, a stall) starts a new cadence
                 let now = std::time::Instant::now();
                 next_beat = if next_beat + period > now { next_beat + period } else { now + period };
-                let after_serial = self.frame_submission_serial();
-                if after_serial > before_serial {
-                    in_flight.push_back((after_serial, now));
-                }
                 if xr_beat {
                     self.hal_submit_batch();
                     self.hal_xr_frame_out();
@@ -632,11 +613,11 @@ impl Cx {
             }
             self.hal_run_tasks();
             self.hal_submit_batch();
-            self.hal_trace_turn(!in_flight.is_empty());
+            self.hal_trace_turn(!self.hal.in_flight.is_empty());
             self.first_draw_round(display_clock, reasked);
             // what this turn leaves the loop waiting for, read by `loop` without the UI thread
             loop_watch::publish(display_clock && self.hal_has_work(), self.hal.beat,
-                in_flight.len(), in_flight.front().map(|&(_, at)| at), FRAMES_IN_FLIGHT);
+                self.hal.in_flight.len(), self.hal.in_flight.front().map(|&(_, at)| at), FRAMES_IN_FLIGHT);
             #[cfg(target_os = "android")]
             if let Some(hint) = performance_hint.as_mut() {
                 hint.finish_frame(self.repaint_id);
@@ -675,7 +656,13 @@ impl Cx {
             }
             PumpWait::Gpu => {
                 let _g = crate::thread::ui_phase(crate::thread::UiPhase::GpuWait);
-                hal_pump(timeout_ns, &mut buf)
+                let from = makepad_hal::clock_ns();
+                let n = hal_pump(timeout_ns, &mut buf);
+                // the next beat's `gpu-wait` phase: from the first such wait to the last
+                let waited = &mut self.hal.gpu_waited;
+                if waited[0] == 0 { waited[0] = from; }
+                waited[1] = makepad_hal::clock_ns();
+                n
             }
             PumpWait::Nested => hal_pump(timeout_ns, &mut buf),
         };
@@ -797,12 +784,55 @@ impl Cx {
         }
     }
 
+    /// Retires the beats whose frames the GPU completed (and, past `FRAME_STALL`, a stalled
+    /// oldest one) and says whether another beat may start: fewer than `FRAMES_IN_FLIGHT` of
+    /// them on the GPU. Every path that beats asks first (the loop's display or clock beat, a
+    /// host's Tick, a hosted XR frame, an externally driven turn), so a producer is held in its
+    /// pump, not in a submit.
+    pub(super) fn hal_frames_room(&mut self) -> bool {
+        if self.hal.device_lost {
+            self.hal.in_flight.clear();
+            return true;
+        }
+        let completed = self.frame_completed_serial();
+        let in_flight = &mut self.hal.in_flight;
+        while in_flight.front().is_some_and(|&(s, _)| completed >= s) {
+            in_flight.pop_front();
+        }
+        while in_flight.len() >= FRAMES_IN_FLIGHT && in_flight.front().is_some_and(|&(_, at)| at.elapsed() >= FRAME_STALL) {
+            let (serial, _) = in_flight.pop_front().unwrap();
+            crate::warning!("hal: frame serial {serial} did not complete within {:?}; retiring stalled in-flight slot", FRAME_STALL);
+        }
+        in_flight.len() < FRAMES_IN_FLIGHT
+    }
+
+    /// With no room for another beat (`hal_frames_room`): how long the pump may wait for the
+    /// oldest frame's `FrameDone` before `FRAME_STALL` retires it.
+    fn hal_frames_wait_ns(&mut self) -> Option<u64> {
+        if self.hal_frames_room() { return None; }
+        let at = self.hal.in_flight.front().map_or_else(std::time::Instant::now, |&(_, at)| at);
+        Some((at + FRAME_STALL).saturating_duration_since(std::time::Instant::now()).as_nanos() as u64)
+    }
+
     /// The frame beat (what macOS ran on its paint clock): services, next-frame callbacks, the
-    /// draw event, shader compiles, then the passes into commands.
+    /// draw event, shader compiles, then the passes into commands. A beat that submitted frames
+    /// is one in flight until the GPU completes them (`hal_frames_room`).
     pub(super) fn hal_beat(&mut self) -> bool {
+        let before = self.frame_submission_serial();
+        let alive = self.hal_beat_frames();
+        let after = self.frame_submission_serial();
+        if after > before {
+            self.hal.in_flight.push_back((after, std::time::Instant::now()));
+        }
+        alive
+    }
+
+    fn hal_beat_frames(&mut self) -> bool {
         let _phase = crate::thread::ui_phase(crate::thread::UiPhase::Beat);
         self.first_draw.note_beat();
         self.hal.beat_phases = [[0; 2]; 6];
+        // the wait for the GPU that held this beat (`PumpWait::Gpu`): its frames' `gpu-wait`
+        self.hal.beat_phases[5] = std::mem::take(&mut self.hal.gpu_waited);
         let wake = makepad_hal::clock_ns();
         self.hal.beat_phases[0][0] = wake;
         self.hal_trace_beat(wake);

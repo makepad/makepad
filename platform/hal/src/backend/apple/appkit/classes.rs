@@ -188,10 +188,18 @@ fn define_tray_target_class() -> *const Class {
             super::tray::click(sid as u32, tray as u64);
         }));
     }
+    // the pointer left a tray's button (its tracking area's owner)
+    extern "C" fn tray_exited(this: &Object, _sel: Sel, _event: ObjcId) {
+        shielded("tray exit", std::panic::AssertUnwindSafe(|| {
+            let (sid, tray): (usize, usize) = unsafe { (*this.get_ivar("sid"), *this.get_ivar("tray_u64")) };
+            super::tray::pointer_left(sid as u32, tray as u64);
+        }));
+    }
     let mut decl = ClassDecl::new("HalTrayTarget", class!(NSObject)).unwrap();
     unsafe {
         decl.add_method(sel!(trayAction:), tray_action as extern "C" fn(&Object, Sel, ObjcId));
         decl.add_method(sel!(trayClick:), tray_click as extern "C" fn(&Object, Sel, ObjcId));
+        decl.add_method(sel!(mouseExited:), tray_exited as extern "C" fn(&Object, Sel, ObjcId));
     }
     decl.add_ivar::<usize>("sid");
     decl.add_ivar::<usize>("tray_u64");

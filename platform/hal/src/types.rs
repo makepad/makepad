@@ -1107,6 +1107,11 @@ pub mod xr_controller {
     pub const TOUCH_THUMBSTICK: u32 = 1 << 11;
     pub const TOUCH_TRIGGER: u32 = 1 << 12;
     pub const TOUCH_THUMBREST: u32 = 1 << 13;
+    /// The menu held (a long press), from the moment the left controller's menu button, or a
+    /// tracked left hand's menu gesture, has been down a while until its release. The headset
+    /// stream's server sets it on the left controller (its short press pauses the stream), also
+    /// when only a hand holds the gesture.
+    pub const HOLD_MENU: u32 = 1 << 14;
 }
 
 /// One tracked hand (XR_EXT_hand_tracking + XR_FB_hand_tracking_aim; the old backend's
@@ -1385,8 +1390,9 @@ pub struct FrameMeta {
     /// the causing (oldest consumed) input event
     pub input_ns: u64,
     /// start, end per CPU phase of the app's beat (0, 0: none): dispatch (services, timers),
-    /// next-frame callbacks, draw (the draw event walk, shader compiles), then build / submit /
-    /// spare (unused; the pass's build is `build_start_ns..build_end_ns`)
+    /// next-frame callbacks, draw (the draw event walk, shader compiles), then build / submit
+    /// (unused; the pass's build is `build_start_ns..build_end_ns`) and the event loop's wait for
+    /// the GPU before the beat (its frames in flight: `gpu-wait`, not CPU work)
     pub phases: [[u64; 2]; 6],
 }
 

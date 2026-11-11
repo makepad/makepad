@@ -438,6 +438,7 @@ impl Vulkan {
         self.msaa.retain(|_, (target, _)| target.strong_count() > 0);
         self.leases.trim(now);
         self.spares.trim();
+        self.spares.sweep_slots();
         self.programs.retain(|_, state| state.strong_count() > 0);
     }
 

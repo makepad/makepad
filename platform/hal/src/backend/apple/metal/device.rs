@@ -9,8 +9,8 @@ use crate::ledger::{Charge, Pool, Pools};
 use crate::FastMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// What a finished piece of GPU work tells the backend thread. Completion handlers run on
 /// Metal's threads: they push here and wake the pump; `Metal::step` turns them into events.
@@ -77,12 +77,6 @@ pub struct Submission {
 /// own backpressure; past it `commandBuffer` waits inside the driver). Metal's default of 64
 /// holds barely two frames of per-pass buffers for a compositor with a 30-pass frame.
 const QUEUE_MAX_COMMAND_BUFFERS: u64 = 256;
-/// Command buffers made and not completed at once: past it a new one waits for the GPU
-/// (`IN_FLIGHT_WAIT` at most). The queue keeps driver memory for the most command buffers it
-/// ever had alive (1 MB and up each, outside `currentAllocatedSize`, given back only with the
-/// queue): a panel that once had 48 at once held 384 MB of it for the rest of its life.
-const IN_FLIGHT_MAX: u64 = 16;
-const IN_FLIGHT_WAIT: Duration = Duration::from_millis(100);
 
 /// The arena's chunk size: the uniforms, inline instances and upload staging of a batch.
 const CHUNK_BYTES: usize = 4 * 1024 * 1024;
@@ -139,9 +133,10 @@ pub struct Device {
     pub completed: Arc<AtomicU64>,
     /// the sequence number of the newest command buffer created
     pub seq: u64,
-    /// signalled by every completion: a new command buffer waiting for room (`IN_FLIGHT_MAX`)
-    room: Arc<(Mutex<()>, Condvar)>,
-    /// the most command buffers made and not completed at once (what the queue keeps memory for)
+    /// the most command buffers made and not completed at once: the queue keeps driver memory
+    /// for that many (1 MB and up each, outside `currentAllocatedSize`, given back only with the
+    /// queue; a panel that once had 48 at once held 384 MB of it), on the ledger as
+    /// `Pool::CommandBuffers`
     pub peak_in_flight: u64,
     /// frame completions waiting for a command buffer number (`when_completed`)
     waiters: Arc<Mutex<Vec<(u64, crate::completion::CompletionReply)>>>,
@@ -252,7 +247,6 @@ impl Device {
             completed,
             waiters: Default::default(),
             seq: 0,
-            room: Default::default(),
             peak_in_flight: 0,
             mailbox,
             alloc_tx: Some(alloc_tx),
@@ -312,23 +306,14 @@ impl Device {
     /// A new command buffer: enqueued at once so queue order is reserved, numbered, with the
     /// completion handler that publishes its number. Returns the buffer (owned by the caller)
     /// and its number.
+    ///
+    /// Nothing waits here: the caller is a session's thread (an app's UI thread) holding the
+    /// HAL's lock. What bounds the buffers in flight is the event loop, which holds a session's
+    /// next beat while its frames in flight (`FRAMES_IN_FLIGHT`) are on the GPU, so a producer
+    /// that runs ahead waits in its own pump. A cap of 16 here, waited for on a condition
+    /// variable up to 100 ms, held the UI thread inside its submit, and with it every other
+    /// session's.
     pub fn new_command_buffer(&mut self) -> (RcObjcId, u64) {
-        if self.seq.saturating_sub(self.completed.load(Ordering::Acquire)) >= IN_FLIGHT_MAX {
-            // what is encoded goes to the GPU first: the wait is for it
-            self.flush_submissions();
-            crate::profile::count("metal batch waited for room");
-            let deadline = Instant::now() + IN_FLIGHT_WAIT;
-            let (lock, room) = &*self.room;
-            let mut guard = crate::lock(lock);
-            while self.seq.saturating_sub(self.completed.load(Ordering::Acquire)) >= IN_FLIGHT_MAX {
-                let now = Instant::now();
-                if now >= deadline {
-                    crate::profile::count("metal batch waited for room: timed out");
-                    break;
-                }
-                guard = room.wait_timeout(guard, deadline - now).unwrap_or_else(|e| e.into_inner()).0;
-            }
-        }
         let buffer: ObjcId = unsafe { msg_send![self.queue, commandBuffer] };
         let buffer = RcObjcId::from_unowned(NonNull::new(buffer).expect("Metal command buffer"));
         let () = unsafe { msg_send![buffer.as_id(), enqueue] };
@@ -338,14 +323,9 @@ impl Device {
         let completed = self.completed.clone();
         let in_flight = self.in_flight.clone();
         let waiters = self.waiters.clone();
-        let room = self.room.clone();
         let () = unsafe {
             msg_send![buffer.as_id(), addCompletedHandler: &objc_block!(move |cb: ObjcId| {
                 completed.fetch_max(seq, Ordering::AcqRel);
-                {
-                    let _held = crate::lock(&room.0);
-                    room.1.notify_all();
-                }
                 answer_waiters(&waiters, completed.load(Ordering::Acquire));
                 let entry = {
                     let mut queue = lock_in_flight(&in_flight);

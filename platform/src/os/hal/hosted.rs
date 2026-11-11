@@ -498,7 +498,11 @@ impl Cx {
                 if !self.hosted_frames_held() {
                     self.hal_hosted_retry_imports();
                 }
-                if !self.hal_beat() || !self.hal_handle_platform_ops() {
+                // a Tick while this app's frames fill the GPU draws nothing: its demand stands,
+                // and a Tick after one of them completed draws (`hal_frames_room`)
+                let room = self.hal_frames_room();
+                if !room { makepad_hal::profile::count("tick held: frames on the GPU"); }
+                if (room && !self.hal_beat()) || !self.hal_handle_platform_ops() {
                     self.call_event_handler(&Event::Shutdown);
                     return true;
                 }

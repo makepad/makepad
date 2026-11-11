@@ -353,15 +353,19 @@ fn analyze(rec: &Recording) -> Analysis {
         s.hitch = s.interval as f64 > 1.5 * median as f64 && s.interval > budget;
     }
     // a hitch is classed by what grew: the part of its excess over the median frame that the
-    // CPU or the GPU took longer than in a median frame
-    let (mut cpus, mut busys): (Vec<u64>, Vec<u64>) = stats.iter().filter(|s| !rec.frames[s.idx].special() && s.interval > 0).map(|s| (s.cpu_busy, s.busy)).unzip();
-    cpus.sort();
-    busys.sort();
-    let (cpu_med, busy_med) = (percentile(&cpus, 0.5), percentile(&busys, 0.5));
+    // CPU or the GPU took longer than in a median frame. A beat held for the GPU (`gpu-wait`: its
+    // earlier frames still running) grew on the GPU's side, whatever its own passes took.
+    let normal: Vec<&Stat> = stats.iter().filter(|s| !rec.frames[s.idx].special() && s.interval > 0).collect();
+    let med = |f: fn(&Stat) -> u64| {
+        let mut v: Vec<u64> = normal.iter().map(|s| f(s)).collect();
+        v.sort();
+        percentile(&v, 0.5)
+    };
+    let (cpu_med, busy_med, wait_med) = (med(|s| s.cpu_busy), med(|s| s.busy), med(|s| s.gpu_wait));
     for s in stats.iter_mut().filter(|s| s.hitch) {
         let excess = s.interval.saturating_sub(median) as f64;
         let cpu_grew = s.cpu_busy.saturating_sub(cpu_med) as f64;
-        let gpu_grew = s.busy.saturating_sub(busy_med) as f64;
+        let gpu_grew = (s.busy.saturating_sub(busy_med) + s.gpu_wait.saturating_sub(wait_med)) as f64;
         s.class = if cpu_grew >= 0.5 * excess && cpu_grew >= gpu_grew {
             Class::Cpu
         } else if gpu_grew >= 0.5 * excess {

@@ -9,7 +9,7 @@ use crate::font::FrameProgress;
 use crate::types::*;
 use makepad_vulkan::vk;
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -104,14 +104,27 @@ impl Drop for Slot {
 
 /// What one backend's finished batches leave for the next ones: the reset slots and the upload
 /// arenas no batch holds. Shared with its batches in flight (each returns its own).
+///
+/// Nothing here waits: a session's event loop bounds its beats by its frames on the GPU
+/// (`FRAMES_IN_FLIGHT`, every path that beats), so the batches in flight are those of a couple
+/// of beats per session, however many target frames a beat has. Unbounded, a submit worker
+/// slower than the renderer queued seconds of frames, each batch on a fresh slot, descriptor
+/// pools and arena (a phone: 1,439 slots made in 27 s). A wait for room here bounded that by
+/// holding the UI thread inside its submit, under the HAL's state lock, for the GPU to finish
+/// the same beat's earlier batches (17 to 19 batches a beat against 8 allowed: a beat of 75 ms
+/// of GPU work held its UI thread 75 ms in the submit, and every other session's submit and
+/// pump with it).
 #[derive(Default)]
 pub(super) struct Spare {
     slots: Mutex<Vec<Slot>>,
     arenas: Mutex<Arenas>,
-    /// batches made and not yet dropped (completed or abandoned): at `IN_FLIGHT_MAX` the
-    /// renderer waits for room (`Batch::new`) instead of recording ahead of the submit worker
-    in_flight: Mutex<usize>,
-    room: std::sync::Condvar,
+    /// batches made and not yet dropped (completed or abandoned)
+    in_flight: AtomicUsize,
+    /// the most batches in flight at once since the last sweep (`sweep_slots`), and in the sweep
+    /// interval before it: finished batches keep their slots while the slots alive stay within
+    /// the larger, so steady beats reuse every slot and a burst's extra slots go two sweeps on
+    peak: AtomicUsize,
+    last_peak: AtomicUsize,
 }
 pub(super) type Spares = Arc<Spare>;
 
@@ -124,7 +137,27 @@ impl Spare {
 
     /// Batches made and not yet dropped.
     pub fn in_flight(&self) -> usize {
-        *lock(&self.in_flight)
+        self.in_flight.load(Ordering::Acquire)
+    }
+
+    /// The slots kept for reuse: as many as were alive at the busiest moment of this sweep
+    /// interval or the last one.
+    fn slots_wanted(&self) -> usize {
+        self.peak.load(Ordering::Acquire).max(self.last_peak.load(Ordering::Acquire))
+    }
+
+    /// A sweep (`Vulkan::sweep`): the peak of the interval that ended becomes the last one, and
+    /// spare slots beyond what both intervals needed are destroyed.
+    pub fn sweep_slots(&self) {
+        let now = self.in_flight();
+        self.last_peak.store(self.peak.swap(now, Ordering::AcqRel), Ordering::Release);
+        let keep = self.slots_wanted().saturating_sub(now);
+        let gone: Vec<Slot> = {
+            let mut slots = lock(&self.slots);
+            let n = slots.len().saturating_sub(keep);
+            slots.drain(..n).collect()
+        };
+        drop(gone);
     }
 
     /// Releases the free arenas no batch took for `ARENA_IDLE` (an idle app frees its uploads).
@@ -149,18 +182,6 @@ impl Spare {
         drop(released);
     }
 }
-
-/// More slots than this are not kept for reuse: twice the batches that may be in flight.
-const SPARE_SLOTS: usize = 2 * IN_FLIGHT_MAX;
-/// Batches recorded and not yet completed at once; the renderer waits for room at this many
-/// (every target frame of a beat is a batch: a window frame with its effect passes is a few).
-/// Without the bound a submit worker slower than the renderer queued seconds of frames, and the
-/// backlog fed itself: every batch took a fresh slot, descriptor pools and arena (a Snapdragon
-/// 685 swipe: 1,439 slots made in 27 s, none reused, each frame shown 21 s after its recording).
-const IN_FLIGHT_MAX: usize = 8;
-/// The longest one wait for room: the worker may itself wait on the host freeing GPU memory
-/// (`submit_until_room`), which needs the renderer running.
-const IN_FLIGHT_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// The smallest upload arena; arenas grow by powers of two up to `ARENA_MAX`.
 const ARENA_MIN: u64 = 256 * 1024;
@@ -346,19 +367,8 @@ impl Batch {
     /// A batch on a reset slot. `queries`: timestamps it writes (0: none; 2: its own start and
     /// end; more: a profiled frame's passes, `prof`).
     pub fn new(dev: Arc<Device>, spares: &Spares, queries: u32, reserve: u64) -> Result<Self, String> {
-        {
-            let mut n = lock(&spares.in_flight);
-            if *n >= IN_FLIGHT_MAX {
-                crate::profile::count("vk batch waited for room");
-                let waited = std::time::Instant::now();
-                while *n >= IN_FLIGHT_MAX {
-                    let (guard, timeout) = spares.room.wait_timeout(n, IN_FLIGHT_WAIT.saturating_sub(waited.elapsed())).unwrap_or_else(|e| e.into_inner());
-                    n = guard;
-                    if timeout.timed_out() && *n >= IN_FLIGHT_MAX { crate::profile::count("vk batch waited for room: timed out"); break; }
-                }
-            }
-            *n += 1;
-        }
+        let n = spares.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+        spares.peak.fetch_max(n, Ordering::AcqRel);
         let spare = lock(&spares.slots).pop();
         if spare.is_none() { crate::profile::count("vk batch slot made"); }
         let mut b = Self { dev, spares: spares.clone(), reusable: false, pool: vk::CommandPool::null(), cb: vk::CommandBuffer::null(), fence: vk::Fence::null(),
@@ -879,9 +889,8 @@ fn hand_over(scanout: (Arc<dyn super::surface::FramePresenter>, Arc<Image>, Toke
 
 impl Drop for Batch {
     fn drop(&mut self) { unsafe {
-        // room for the renderer's next batch, whatever this one's end
-        { let mut n = lock(&self.spares.in_flight); *n = n.saturating_sub(1); }
-        self.spares.room.notify_all();
+        // made by `new`, whatever this one's end
+        self.spares.in_flight.fetch_sub(1, Ordering::AcqRel);
         // a batch dropped before it completed (never submitted): its timed passes answer nothing
         if let Some(prof) = self.prof.take() { prof.finish(&self.dev, vk::QueryPool::null(), true); }
         for framebuffer in self.framebuffers.drain(..) { self.dev.raw.destroy_framebuffer(framebuffer, None); }
@@ -898,7 +907,8 @@ impl Drop for Batch {
         let reset = self.dev.raw.reset_command_buffer(slot.cb, vk::CommandBufferResetFlags::default())
             .and_then(|_| self.dev.raw.reset_fences(&[slot.fence]));
         if reset.is_err() { crate::profile::count("vk batch slot destroyed (reset failed)"); return; }
+        let wanted = self.spares.slots_wanted().saturating_sub(self.spares.in_flight());
         let mut slots = lock(&self.spares.slots);
-        if slots.len() < SPARE_SLOTS { slots.push(slot); } else { crate::profile::count("vk batch slot destroyed (spares full)"); }
+        if slots.len() < wanted { slots.push(slot); } else { crate::profile::count("vk batch slot destroyed (spares full)"); }
     } }
 }

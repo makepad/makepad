@@ -201,8 +201,14 @@ pub struct HalClient {
     pub(crate) profile_beat: u64,
     pub(crate) profile_input_ns: u64,
     /// this beat's CPU phases (`FrameMeta::phases`): start, end of dispatch, next-frame
-    /// callbacks, draw, then build / submit / spare (unused)
+    /// callbacks, draw, then build / submit (unused) and the wait for the GPU that held it
     pub(crate) beat_phases: [[u64; 2]; 6],
+    /// the pump's waits for the GPU since the last beat (`PumpWait::Gpu`): from the first one's
+    /// start to the last one's end, the next beat's `gpu-wait` phase
+    pub(crate) gpu_waited: [u64; 2],
+    /// the submission serial and time after each beat that submitted frames, until the GPU
+    /// completed them: a beat waits while `FRAMES_IN_FLIGHT` are (`Cx::hal_frames_room`)
+    pub(crate) in_flight: std::collections::VecDeque<(u64, std::time::Instant)>,
     /// the HAL said the GPU device is lost and has not reset it yet: no frames are built
     pub(crate) device_lost: bool,
     /// device replacements so far: GPU contents made on an older generation are gone
@@ -304,6 +310,8 @@ impl Default for HalClient {
             profile_beat: 0,
             profile_input_ns: 0,
             beat_phases: [[0; 2]; 6],
+            gpu_waited: [0; 2],
+            in_flight: std::collections::VecDeque::new(),
             device_lost: false,
             device_generation: 0,
             wake: false,

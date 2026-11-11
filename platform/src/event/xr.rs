@@ -46,6 +46,9 @@ impl XrController {
     pub const TOUCH_THUMBSTICK: u16 = 1 << 11;
     pub const TOUCH_TRIGGER: u16 = 1 << 12;
     pub const TOUCH_THUMBREST: u16 = 1 << 13;
+    /// The menu held (a long press): see `makepad_hal::xr_controller::HOLD_MENU`. On the left
+    /// controller, whether or not it is active (a tracked hand's menu gesture sets it too).
+    pub const HOLD_MENU: u16 = 1 << 14;
     pub fn triggered(&self) -> bool {
         self.trigger > 0.8
     }
@@ -70,6 +73,9 @@ impl XrController {
     }
     pub fn click_menu(&self) -> bool {
         self.buttons & Self::CLICK_MENU != 0
+    }
+    pub fn hold_menu(&self) -> bool {
+        self.buttons & Self::HOLD_MENU != 0
     }
 
     pub fn touch_x(&self) -> bool {
@@ -1070,6 +1076,10 @@ impl XrUpdateEvent {
     }
     pub fn menu_pressed(&self) -> bool {
         self.state.left_hand.menu_pressed() && !self.last.left_hand.menu_pressed()
+    }
+    /// The frame the menu became a hold ([`XrController::HOLD_MENU`]).
+    pub fn held_menu(&self) -> bool {
+        self.state.left_controller.hold_menu() && !self.last.left_controller.hold_menu()
     }
 }
 

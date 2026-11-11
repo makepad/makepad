@@ -21,6 +21,7 @@ use super::window::Win;
 use crate::types::*;
 use makepad_apple_sys::*;
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Tray {
     sid: u32,
@@ -31,7 +32,31 @@ struct Tray {
     targets: Vec<ObjcId>,
     /// `tray_flags::DROPDOWN`: the button's target (a `HalTrayTarget` for `trayClick:`)
     click_target: ObjcId,
+    /// what the item shows now, so an unchanged `set` touches nothing (AppKit orphans a
+    /// tooltip window when the button's image or tooltip is changed under it)
+    shown: Shown,
+    /// the owner of the button's tracking area (its `mouseExited:` applies a held-back
+    /// tooltip) and the area
+    track_target: ObjcId,
+    track_area: ObjcId,
 }
+
+#[derive(Default, PartialEq)]
+struct Shown {
+    /// glyph size and a hash of its alpha bytes
+    image: Option<(u32, u32, u64)>,
+    tooltip: String,
+    /// a tooltip not applied yet because the pointer was over the button
+    pending_tooltip: Option<String>,
+    flags: Option<u32>,
+    /// the menu items as (kind, command, label)
+    items: Option<Vec<(u32, u64, String)>>,
+}
+
+/// How many times a `set` changed the button's image / tooltip / menu (the selftest logs them).
+static IMAGE_SETS: AtomicUsize = AtomicUsize::new(0);
+static TOOLTIP_SETS: AtomicUsize = AtomicUsize::new(0);
+static MENU_SETS: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
     static TRAYS: RefCell<Vec<Tray>> = const { RefCell::new(Vec::new()) };
@@ -58,49 +83,107 @@ pub(super) fn set(sid: u32, id: u64, w: u32, h: u32, flags: u32, alpha: &[u8], t
             let bar: ObjcId = msg_send![class!(NSStatusBar), systemStatusBar];
             let item: ObjcId = msg_send![bar, statusItemWithLength: VARIABLE_LENGTH];
             let () = msg_send![item, retain];
-            TRAYS.with_borrow_mut(|t| t.push(Tray { sid, id, item, menu: nil, targets: Vec::new(), click_target: nil }));
+            TRAYS.with_borrow_mut(|t| t.push(Tray { sid, id, item, menu: nil, targets: Vec::new(), click_target: nil, shown: Shown::default(), track_target: nil, track_area: nil }));
         }
         let item = TRAYS.with_borrow(|t| t.iter().find(|t| t.sid == sid && t.id == id).map(|t| t.item)).unwrap_or(nil);
         if item == nil {
             return;
         }
         let button: ObjcId = msg_send![item, button];
-        if button != nil {
-            let image = template_image(w, h, alpha);
-            let () = msg_send![button, setImage: image];
-            if image != nil {
-                let () = msg_send![image, release];
-            }
-            let () = msg_send![button, setToolTip: str_to_nsstring(tooltip)];
-        }
-        let (menu, targets) = build_menu(sid, id, items);
-        let dropdown = flags & tray_flags::DROPDOWN != 0;
-        // a dropdown tray's button acts itself; the menu is set only while it opens
-        let click_target = if dropdown && button != nil {
+        if created && button != nil {
+            // AppKit tells when the pointer leaves the button: no polling
             let target: ObjcId = msg_send![app().classes().tray_target, new];
             (*target).set_ivar("sid", sid as usize);
             (*target).set_ivar("tray_u64", id as usize);
             (*target).set_ivar("item_u64", 0usize);
-            let () = msg_send![button, setTarget: target];
-            let () = msg_send![button, setAction: sel!(trayClick:)];
-            let _: i64 = msg_send![button, sendActionOn: CLICK_MASK];
-            target
-        } else {
-            if button != nil {
-                // the old target is released below
-                let () = msg_send![button, setTarget: nil];
+            let bounds: NSRect = msg_send![button, bounds];
+            let area: ObjcId = msg_send![class!(NSTrackingArea), alloc];
+            let area: ObjcId = msg_send![area, initWithRect: bounds options: NSTrackignActiveAlways | NSTrackingInVisibleRect | NSTrackingMouseEnteredAndExited owner: target userInfo: nil];
+            let () = msg_send![button, addTrackingArea: area];
+            TRAYS.with_borrow_mut(|t| {
+                if let Some(t) = t.iter_mut().find(|t| t.sid == sid && t.id == id) {
+                    t.track_target = target;
+                    t.track_area = area;
+                }
+            });
+        }
+        let mut shown = TRAYS.with_borrow_mut(|t| t.iter_mut().find(|t| t.sid == sid && t.id == id).map(|t| std::mem::take(&mut t.shown))).unwrap_or_default();
+        if button != nil {
+            let key = (w, h, hash_bytes(alpha));
+            if shown.image != Some(key) {
+                let image = template_image(w, h, alpha);
+                let () = msg_send![button, setImage: image];
+                if image != nil {
+                    let () = msg_send![image, release];
+                }
+                shown.image = Some(key);
+                IMAGE_SETS.fetch_add(1, Ordering::Relaxed);
             }
-            nil
-        };
-        let () = msg_send![item, setMenu: if dropdown { nil } else { menu }];
+            // a tooltip is not changed under the pointer: the new text stays pending (the
+            // difference to `shown.tooltip`) until a `set` finds the pointer elsewhere
+            shown.pending_tooltip = None;
+            if tooltip != shown.tooltip {
+                if pointer_over(button) {
+                    shown.pending_tooltip = Some(tooltip.to_string());
+                } else {
+                    let () = msg_send![button, setToolTip: str_to_nsstring(tooltip)];
+                    shown.tooltip = tooltip.to_string();
+                    TOOLTIP_SETS.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        let dropdown = flags & tray_flags::DROPDOWN != 0;
+        let keys: Vec<(u32, u64, String)> = items.iter().map(|(i, l)| (i.kind, i.cmd, l.clone())).collect();
+        let (mut menu, mut targets, mut click_target) = (nil, Vec::new(), nil);
+        let changed = created || shown.items.as_ref() != Some(&keys) || shown.flags != Some(flags);
+        if changed {
+            (menu, targets) = build_menu(sid, id, items);
+            // a dropdown tray's button acts itself; the menu is set only while it opens
+            click_target = if dropdown && button != nil {
+                let target: ObjcId = msg_send![app().classes().tray_target, new];
+                (*target).set_ivar("sid", sid as usize);
+                (*target).set_ivar("tray_u64", id as usize);
+                (*target).set_ivar("item_u64", 0usize);
+                let () = msg_send![button, setTarget: target];
+                let () = msg_send![button, setAction: sel!(trayClick:)];
+                let _: i64 = msg_send![button, sendActionOn: CLICK_MASK];
+                target
+            } else {
+                if button != nil {
+                    // the old target is released below
+                    let () = msg_send![button, setTarget: nil];
+                }
+                nil
+            };
+            let () = msg_send![item, setMenu: if dropdown { nil } else { menu }];
+            shown.items = Some(keys);
+            shown.flags = Some(flags);
+            MENU_SETS.fetch_add(1, Ordering::Relaxed);
+        }
+        if selftest_on() {
+            eprintln!(
+                "tray selftest: set image {} tooltip {} menu {} times so far",
+                IMAGE_SETS.load(Ordering::Relaxed),
+                TOOLTIP_SETS.load(Ordering::Relaxed),
+                MENU_SETS.load(Ordering::Relaxed)
+            );
+        }
         let old = TRAYS.with_borrow_mut(|t| {
             let t = t.iter_mut().find(|t| t.sid == sid && t.id == id)?;
+            t.shown = shown;
+            if !changed {
+                return None;
+            }
             Some((std::mem::replace(&mut t.menu, menu), std::mem::replace(&mut t.targets, targets), std::mem::replace(&mut t.click_target, click_target)))
         });
         if let Some((old_menu, old_targets, old_click)) = old {
             release(old_menu, &old_targets);
             release(nil, &[old_click]);
         }
+        if !changed {
+            return;
+        }
+        let (menu, click_target) = TRAYS.with_borrow(|t| t.iter().find(|t| t.sid == sid && t.id == id).map(|t| (t.menu, t.click_target))).unwrap_or((nil, nil));
         if created && selftest_on() {
             eprintln!("tray selftest: activation policy {}", super::app::activation_policy_name());
             if dropdown {
@@ -111,6 +194,25 @@ pub(super) fn set(sid: u32, id: u64, w: u32, h: u32, flags: u32, alpha: &[u8], t
             } else {
                 selftest(item, menu);
             }
+        }
+    }
+}
+
+/// The pointer left tray `id`'s button: a tooltip held back while it was over applies now.
+pub(super) fn pointer_left(sid: u32, id: u64) {
+    let Some((item, text)) = TRAYS.with_borrow_mut(|t| {
+        let t = t.iter_mut().find(|t| t.sid == sid && t.id == id)?;
+        let text = t.shown.pending_tooltip.take()?;
+        t.shown.tooltip = text.clone();
+        Some((t.item, text))
+    }) else {
+        return;
+    };
+    unsafe {
+        let button: ObjcId = msg_send![item, button];
+        if button != nil {
+            let () = msg_send![button, setToolTip: str_to_nsstring(&text)];
+            TOOLTIP_SETS.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -261,6 +363,22 @@ pub(super) fn window_at(sid: u32, win: &Win, tray: u64, w: f32, h: f32) {
     win.send_geom();
 }
 
+/// FNV-1a over the glyph's alpha bytes.
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf29ce484222325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3))
+}
+
+/// Whether the pointer is over the status button (screen coordinates, y up).
+unsafe fn pointer_over(button: ObjcId) -> bool {
+    let window: ObjcId = msg_send![button, window];
+    if window == nil {
+        return false;
+    }
+    let frame: NSRect = msg_send![window, frame];
+    let p: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+    p.x >= frame.origin.x && p.x < frame.origin.x + frame.size.width && p.y >= frame.origin.y && p.y < frame.origin.y + frame.size.height
+}
+
 fn selftest_on() -> bool {
     std::env::var_os("MAKEPAD_TRAY_SELFTEST").is_some()
 }
@@ -268,11 +386,18 @@ fn selftest_on() -> bool {
 fn destroy(tray: Tray) {
     unsafe {
         let bar: ObjcId = msg_send![class!(NSStatusBar), systemStatusBar];
+        if tray.track_area != nil {
+            let button: ObjcId = msg_send![tray.item, button];
+            if button != nil {
+                let () = msg_send![button, removeTrackingArea: tray.track_area];
+            }
+            let () = msg_send![tray.track_area, release];
+        }
         let () = msg_send![bar, removeStatusItem: tray.item];
         let () = msg_send![tray.item, release];
     }
     release(tray.menu, &tray.targets);
-    release(nil, &[tray.click_target]);
+    release(nil, &[tray.click_target, tray.track_target]);
 }
 
 fn release(menu: ObjcId, targets: &[ObjcId]) {
