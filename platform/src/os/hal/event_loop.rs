@@ -723,6 +723,28 @@ fn host_os_type() -> OsType {
     return OsType::Unknown;
 }
 
+#[cfg(target_os = "android")]
+impl Cx {
+    /// Android's `OsType` carries the Activity's paths, density and versions, which can come after
+    /// the app starts and come again with each configuration change (followed by a `Display`).
+    pub(crate) fn hal_update_android_os_type(&mut self) {
+        let params = makepad_hal::backend::android::AndroidBackend::params();
+        if params.data_path.is_empty() {
+            return;
+        }
+        self.os_type = OsType::Android(crate::cx::AndroidParams {
+            cache_path: params.cache_path,
+            data_path: params.data_path,
+            density: params.density as f64,
+            is_emulator: params.emulator,
+            has_xr_mode: self.xr_display(),
+            android_version: params.android_version,
+            build_number: params.build_number,
+            night_mode: params.night_mode,
+        });
+    }
+}
+
 /// The app's data directory (Application Support), the device model and the system version.
 #[cfg(any(target_os = "ios", target_os = "tvos"))]
 fn ios_params() -> crate::cx::IosParams {

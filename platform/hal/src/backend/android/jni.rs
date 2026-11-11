@@ -243,7 +243,23 @@ fn key(code: i32) -> u32 {
     let key = makepad_key_code::android::android_to_makepad_key_code(code as u32);
     key.to_index()
 }
-unsafe extern "system" fn key_down(_: *mut JNIEnv, _: jclass, code: jint, meta: jint, repeat: jboolean) { boost_frame_rate(); Shared::global().emit(clock_ns(), |q, id| q.key_down(id, key(code), repeat != 0, mods(meta))); }
+unsafe extern "system" fn key_down(_: *mut JNIEnv, _: jclass, code: jint, meta: jint, repeat: jboolean) { boost_frame_rate();
+    let (code, mods) = (key(code), mods(meta));
+    // the paste chord brings the clipboard's text, ahead of the key (as AppKit's shell does)
+    let paste = if mods & input::MOD_CONTROL != 0 && code == makepad_key_code::KeyCode::KeyV.to_index() {
+        with_activity(|env, activity| {
+            let text = reg::object(env, activity, c"pasteFromClipboard", c"()Ljava/lang/String;", &[]);
+            if ((**env).ExceptionCheck.unwrap())(env) != 0 { ((**env).ExceptionDescribe.unwrap())(env); ((**env).ExceptionClear.unwrap())(env); }
+            let out = reg::string(env, text);
+            if !text.is_null() { ((**env).DeleteLocalRef.unwrap())(env, text); }
+            out
+        }).unwrap_or_default()
+    } else { String::new() };
+    Shared::global().emit(clock_ns(), |q, id| {
+        if !paste.is_empty() { q.text(id, input::text::PASTE, paste.as_bytes()); }
+        q.key_down(id, code, repeat != 0, mods);
+    });
+}
 unsafe extern "system" fn key_up(_: *mut JNIEnv, _: jclass, code: jint, meta: jint) { boost_frame_rate(); Shared::global().emit(clock_ns(), |q, id| q.key_up(id, key(code), mods(meta))); }
 unsafe extern "system" fn back(_: *mut JNIEnv, _: jclass) { boost_frame_rate(); Shared::global().emit(clock_ns(), |q, id| q.back_pressed(id)); }
 /// `x`, `y` are surface pixels (NaN for the back button), `time` the uptime in milliseconds.
@@ -283,6 +299,21 @@ unsafe extern "system" fn ime_action(_: *mut JNIEnv, _: jclass, action: jint) { 
 unsafe extern "system" fn selection_handle(_: *mut JNIEnv, _: jclass, handle: jint, phase: jint, x: jfloat, y: jfloat, time: jlong) { boost_frame_rate();
     let dpi = Shared::global().dpi() as f64;
     Shared::global().emit(time as u64 * 1_000_000, |q, id| q.selection_handle(id, handle as u32, phase as u32, x as f64 / dpi, y as f64 / dpi));
+}
+/// The copy / paste toolbar's actions, as the app already understands them: the copy, cut and
+/// select all chords, and pasted text.
+unsafe extern "system" fn clipboard_action(env: *mut JNIEnv, _: jclass, action: jstring) { boost_frame_rate();
+    let key = match reg::string(env, action).as_str() {
+        "copy" => makepad_key_code::KeyCode::KeyC,
+        "cut" => makepad_key_code::KeyCode::KeyX,
+        "select_all" => makepad_key_code::KeyCode::KeyA,
+        _ => return,
+    }.to_index();
+    Shared::global().emit(clock_ns(), |q, id| { q.key_down(id, key, false, input::MOD_CONTROL); q.key_up(id, key, input::MOD_CONTROL); });
+}
+unsafe extern "system" fn clipboard_paste(env: *mut JNIEnv, _: jclass, content: jstring) { boost_frame_rate();
+    let text = reg::string(env, content);
+    if !text.is_empty() { Shared::global().emit(clock_ns(), |q, id| q.text(id, input::text::PASTE, text.as_bytes())); }
 }
 
 /// The config of the soft keyboard last asked for, while it is up: a focused text input re-sends
@@ -392,6 +423,39 @@ pub(super) fn ime_command(cmd: OsCmd) -> bool {
     }).unwrap_or(false)
 }
 
+pub(super) fn copy_to_clipboard(text: &str) -> bool {
+    with_activity(|env, activity| unsafe {
+        let utf16: Vec<u16> = text.encode_utf16().collect();
+        let s = ((**env).NewString.unwrap())(env, utf16.as_ptr(), utf16.len() as i32);
+        let ok = !s.is_null() && void(env, activity, c"copyToClipboard", c"(Ljava/lang/String;)V", &[jvalue { l: s }]);
+        if ((**env).ExceptionCheck.unwrap())(env) != 0 { ((**env).ExceptionDescribe.unwrap())(env); ((**env).ExceptionClear.unwrap())(env); }
+        if !s.is_null() { ((**env).DeleteLocalRef.unwrap())(env, s); }
+        ok
+    }).unwrap_or(false)
+}
+
+/// The selection's drag handles at `start` / `end`, in window points (the Activity takes pixels).
+pub(super) fn selection_handles(action: u32, start: [f32; 2], end: [f32; 2]) -> bool {
+    let dpi = Shared::global().dpi();
+    let args = [start[0], start[1], end[0], end[1]].map(|v| jvalue { f: v * dpi });
+    with_activity(|env, activity| unsafe { match action {
+        crate::selection_handles::SHOW => void(env, activity, c"showSelectionHandles", c"(FFFF)V", &args),
+        crate::selection_handles::MOVE => void(env, activity, c"updateSelectionHandles", c"(FFFF)V", &args),
+        _ => void(env, activity, c"hideSelectionHandles", c"()V", &[]),
+    } }).unwrap_or(false)
+}
+
+/// The copy / paste toolbar over `area` (window points), or none.
+pub(super) fn clipboard_actions(show: bool, area: [f32; 4], selection: bool) -> bool {
+    let dpi = Shared::global().dpi();
+    let [x, y, w, h] = area.map(|v| v * dpi);
+    with_activity(|env, activity| unsafe {
+        if !show { return void(env, activity, c"dismissClipboardActions", c"()V", &[]); }
+        // the last one is the keyboard's shift, which the Activity doesn't use
+        void(env, activity, c"showClipboardActions", c"(ZIIIII)V", &[jvalue { z: selection as jboolean }, jvalue { i: x as jint }, jvalue { i: y as jint }, jvalue { i: (x + w) as jint }, jvalue { i: (y + h) as jint }, jvalue { i: 0 }])
+    }).unwrap_or(false)
+}
+
 /// Registers the shell's, and the media services' natives in one strict pass. The
 /// returned names are the Java natives no HAL module owns (app-side services); they are never
 /// filled with no-op functions.
@@ -450,6 +514,8 @@ pub fn native_methods() -> Vec<(&'static str, &'static str, *mut c_void)> {
         ("onImeTextStateChanged", "(Ljava/lang/String;IIII)V", ime_state as *mut c_void),
         ("onImeEditorAction", "(I)V", ime_action as *mut c_void),
         ("onSelectionHandleDrag", "(IIFFJ)V", selection_handle as *mut c_void),
+        ("onClipboardAction", "(Ljava/lang/String;)V", clipboard_action as *mut c_void),
+        ("onClipboardPaste", "(Ljava/lang/String;)V", clipboard_paste as *mut c_void),
     ];
     methods.extend(super::a11y::native_methods());
     methods
