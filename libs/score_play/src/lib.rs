@@ -18,9 +18,10 @@
 //! such [`DisplayPosition`] per UI frame. A frame timer never advances or corrects transport.
 //!
 //! Prepared score events live in one immutable complete plan installed before rendering;
-//! they therefore cannot underrun. The bounded [`SpscRing`] carries timestamped transport and
-//! interactive events that actually cross into the audio thread. A later streaming planner
-//! can use the same ring and fixed pending queue without changing the render contract.
+//! they therefore cannot underrun. Timestamped transport and interactive events cross into
+//! the audio thread through a ring the host owns; its callback hands each to
+//! [`PlaybackEngine::queue`], whose fixed pending queue gives a message back while it is full,
+//! so the host keeps it for a later block instead of losing it.
 //!
 //! The crate intentionally has no dependency on Makepad's current platform MIDI type.
 //! [`TimestampedMidiEvent`] retains a host timestamp, timestamp quality, port/group,
@@ -36,7 +37,6 @@ mod metronome;
 mod midi;
 mod practice;
 mod realtime;
-mod ring;
 mod scheduler;
 mod tempo;
 
@@ -65,7 +65,6 @@ pub use realtime::{
     AudioMessage, AudioMessageKind, PlaybackEngine, RenderContext, RenderStatus, SynthBackend,
     SynthEventTiming, TransportLoop,
 };
-pub use ring::SpscRing;
 pub use scheduler::{
     Articulation, CountInSpec, DynamicCurve, HairpinInput, NoteInput, PedalInput,
     PerformancePlan, PlanInput, PlaybackCheckpoint, ScheduleError, ScheduleOptions, Scheduler,

@@ -15,6 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 makepad-flow = { path = "../flow", default-features = false, features = ["live"] }
+makepad-lock-free = { path = "../lock_free" }
 makepad-audio-dsp = { path = "../audio_dsp" }
 makepad-score-player = { path = "../score_player" }
 makepad-audio-synth = { path = "../audio_synth" }

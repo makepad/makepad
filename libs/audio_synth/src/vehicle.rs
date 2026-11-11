@@ -262,6 +262,22 @@ impl EngineLoop {
 
 pub const MAX_LOOPS: usize = 6;
 
+/// A vehicle's recorded loops, sorted by rpm, `None` after the last: a fixed
+/// set, so installing one on the audio thread moves it in place.
+pub type LoopSet = [Option<EngineLoop>; MAX_LOOPS];
+
+/// The set a vehicle plays from `loops`: sorted by rpm, the first MAX_LOOPS
+/// kept. Builds on the calling thread (it frees the Vec), never on the audio thread.
+pub fn loop_set(mut loops: Vec<EngineLoop>) -> LoopSet {
+    loops.sort_by(|a, b| a.rpm.partial_cmp(&b.rpm).unwrap_or(std::cmp::Ordering::Equal));
+    loops.truncate(MAX_LOOPS);
+    let mut set = LoopSet::default();
+    for (slot, l) in set.iter_mut().zip(loops) {
+        *slot = Some(l);
+    }
+    set
+}
+
 /// One vehicle: engine + tyres + road + wind, mono out.
 pub struct VehicleSound {
     pub engine: Engine,
@@ -269,7 +285,7 @@ pub struct VehicleSound {
     pub engine_gain: f32,
     pub tyre_gain: f32,
     /// Recorded loops sorted by rpm (empty = pure synthesis).
-    loops: [Option<EngineLoop>; MAX_LOOPS],
+    loops: LoopSet,
     /// 0 = synthesis only .. 1 = recordings only.
     pub sample_mix: f32,
     scratch: [f32; 256],
@@ -288,20 +304,10 @@ impl VehicleSound {
         }
     }
 
-    /// Install recorded loops (control thread). The previous set is handed
-    /// back so its buffers are freed there, never in the audio callback.
-    pub fn set_loops(&mut self, mut loops: Vec<EngineLoop>, mix: f32) -> Vec<EngineLoop> {
-        loops.sort_by(|a, b| a.rpm.partial_cmp(&b.rpm).unwrap_or(std::cmp::Ordering::Equal));
-        loops.truncate(MAX_LOOPS);
-        let mut old = Vec::new();
-        for slot in self.loops.iter_mut() {
-            if let Some(l) = slot.take() {
-                old.push(l);
-            }
-        }
-        for (slot, l) in self.loops.iter_mut().zip(loops) {
-            *slot = Some(l);
-        }
+    /// Install a loop set; the previous one comes back so its buffers are
+    /// freed by the caller, never in the audio callback.
+    pub fn set_loops(&mut self, loops: LoopSet, mix: f32) -> LoopSet {
+        let old = std::mem::replace(&mut self.loops, loops);
         self.sample_mix = if self.loops[0].is_some() { finite(mix, 0.7).clamp(0.0, 1.0) } else { 0.0 };
         old
     }

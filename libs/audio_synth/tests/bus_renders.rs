@@ -57,12 +57,14 @@ fn recipe_bank_by_family() {
     let mut covered = 0;
     for (family, names) in families {
         let mut bus = SynthBus::new(RATE);
+        let mut next_voice = 1;
         let (mut l, mut r) = (Vec::new(), Vec::new());
         println!("-- {family}");
         for name in names.iter() {
             let recipe = Recipe::parse(builtin(name).unwrap()).unwrap();
             let len = recipe.length().min(4.0) + 0.25;
-            bus.play_recipe(&recipe, 1.0, 1.0, Emitter::FLAT, Priority::Normal, 0);
+            bus.play_recipe(next_voice, &recipe, 1.0, 1.0, Emitter::FLAT, Priority::Normal, 0);
+            next_voice += 1;
             let (a, b) = render(&mut bus, len);
             let (peak, rms, step) = stats(&a);
             println!("   {name:16} len {len:4.2}s peak {peak:6.1} dBFS rms {rms:6.1} step/peak {step:.2}");
@@ -116,6 +118,7 @@ fn car_pass_by_with_doppler() {
 #[test]
 fn race_mix_and_cost() {
     let mut bus = SynthBus::new(RATE);
+    let mut next_voice = 1;
     let cars = ["flat6", "v8", "v10", "inline4_turbo", "v8_flat", "v12"];
     let secs = 10.0;
     let n = (RATE * secs) as usize;
@@ -149,7 +152,8 @@ fn race_mix_and_cost() {
         // Sprinkle impacts and gunfire on top.
         if (t * 10.0) as u32 % 13 == 0 {
             let recipe = Recipe::parse(builtin("impact_metal").unwrap()).unwrap();
-            bus.play_recipe(&recipe, 1.0, 0.6, Emitter::at([10.0, 0.0, -5.0], 60.0), Priority::Normal, 0);
+            bus.play_recipe(next_voice, &recipe, 1.0, 0.6, Emitter::at([10.0, 0.0, -5.0], 60.0), Priority::Normal, 0);
+            next_voice += 1;
         }
         bus.render(cl, cr);
         t += block as f32 / RATE;

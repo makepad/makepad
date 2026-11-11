@@ -6,7 +6,7 @@
 //! here, for whoever composes. Whoever instantiates a graph under a name
 //! forgets its feeds when done ([`forget_instance`]).
 
-use makepad_flow::live::spsc::{ring, Consumer, Producer};
+use makepad_lock_free::{ring, Consumer, Producer};
 use makepad_score_player::Event;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -473,7 +473,7 @@ pub mod midi_out {
 /// in later is matched by name as soon as it is listed) and reads what came
 /// in for its displays ([`midi_in::activity`]).
 pub mod midi_in {
-    use makepad_flow::live::spsc::{ring, Consumer, Producer};
+    use makepad_lock_free::{ring, Consumer, Producer};
     use std::sync::{Mutex, OnceLock};
 
     /// Messages a loop may have waiting.
@@ -739,7 +739,7 @@ pub mod streams {
 /// audio thread. One reader at a time: a graph that plans an input loop
 /// takes a fresh ring ([`audio_in::fresh`]).
 pub mod audio_in {
-    use makepad_flow::live::spsc::{ring, Consumer, Producer};
+    use makepad_lock_free::{ring, Consumer, Producer};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
 

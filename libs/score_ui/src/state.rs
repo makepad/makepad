@@ -399,7 +399,6 @@ impl ScoreAppState {
     /// says why. Returns whether the shipped piece is what is now open.
     pub fn open_bundled_score(
         &mut self,
-        cx: &mut Cx,
         bytes: &[u8],
         extension: &str,
         title: &str,
@@ -413,7 +412,7 @@ impl ScoreAppState {
                 self.ui.selection.clear();
                 self.ui.recentre_now();
                 self.adopt_score_tempo();
-                self.rebuild_playback(cx);
+                self.rebuild_playback();
                 self.ui.status = credit.to_string();
                 true
             }
@@ -539,7 +538,6 @@ impl ScoreAppState {
 
     pub fn handle_mouse_entry(
         &mut self,
-        cx: &mut Cx,
         measure: SemanticId,
         midi: u8,
         horizontal_fraction: f64,
@@ -552,7 +550,7 @@ impl ScoreAppState {
                 self.ui.selection.replace(semantic);
                 self.ui.caret = Some(semantic);
                 self.ui.status = format!("Entered MIDI {midi}");
-                self.rebuild_playback(cx);
+                self.rebuild_playback();
             }
             Err(error) => self.ui.status = error.to_string(),
         }
@@ -575,7 +573,6 @@ impl ScoreAppState {
     /// Commits a drag as one undoable edit, or reports why it could not be.
     pub fn finish_note_drag(
         &mut self,
-        cx: &mut Cx,
         drag: &NoteDrag,
         target: &DragTarget,
         copy: bool,
@@ -585,7 +582,7 @@ impl ScoreAppState {
                 self.ui.selection.replace(semantic);
                 self.ui.caret = Some(semantic);
                 self.ui.status = drag_description(&self.document, drag, target, copy);
-                self.rebuild_playback(cx);
+                self.rebuild_playback();
             }
             Err(error) => self.ui.status = format!("Drop refused · {error}"),
         }
@@ -772,9 +769,10 @@ impl ScoreAppState {
     }
 
     pub fn sync_follow_page(&mut self) {
-        // Hand over any instrument a rebuild preset asked for, and drop the
-        // one the audio thread finished with. Two relaxed loads when idle.
-        self.playback.service_instrument();
+        // Hand over any instrument a rebuild preset asked for and any held
+        // transport command, and drop what the audio thread finished with.
+        // A few relaxed loads when idle.
+        self.playback.service();
         self.settle_instrument();
         self.settle_hover_audition();
         self.playback
@@ -932,10 +930,9 @@ impl ScoreAppState {
         }
     }
 
-    fn rebuild_playback(&mut self, cx: &mut Cx) {
+    fn rebuild_playback(&mut self) {
         self.playback
             .rebuild_plan(self.document.score(), self.practice.tempo, self.practice.count_in);
-        self.playback.install_audio_output(cx);
     }
 
     /// Which instrument is playing.
@@ -1025,7 +1022,7 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
                             if *semitones > 0 { "+" } else { "" },
                             semitones
                         );
-                        state.rebuild_playback(cx);
+                        state.rebuild_playback();
                     }
                     Err(error) => state.ui.status = format!("Transpose refused · {error}"),
                 }
@@ -1045,7 +1042,7 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
                             removed,
                             if removed == 1 { "" } else { "s" }
                         );
-                        state.rebuild_playback(cx);
+                        state.rebuild_playback();
                     }
                     Err(error) => state.ui.status = format!("Delete refused · {error}"),
                 }
@@ -1129,7 +1126,7 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
         }
         ScoreAction::ToggleCountIn => {
             state.practice.count_in = !state.practice.count_in;
-            state.rebuild_playback(cx);
+            state.rebuild_playback();
             state.ui.status = if state.practice.count_in {
                 "Count-in on · one bar before the music"
             } else {
@@ -1234,19 +1231,19 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
         ScoreAction::Undo => {
             let result = state.document.undo();
             state.report(result);
-            state.rebuild_playback(cx);
+            state.rebuild_playback();
         }
         ScoreAction::Redo => {
             let result = state.document.redo();
             state.report(result);
-            state.rebuild_playback(cx);
+            state.rebuild_playback();
         }
         ScoreAction::SetDuration(key) => {
             state.ui.entry_duration = *key;
             if let Some(target) = state.ui.selection.active.or(state.ui.caret) {
                 let result = state.document.set_duration(target, *key);
                 state.report(result);
-                state.rebuild_playback(cx);
+                state.rebuild_playback();
             }
         }
         ScoreAction::EnterPitch(letter) => {
@@ -1258,7 +1255,7 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
                 if let Some(next) = state.ui.caret {
                     state.ui.selection.replace(next);
                 }
-                state.rebuild_playback(cx);
+                state.rebuild_playback();
             } else {
                 state.ui.status = "Click a note to place the entry caret".into();
             }
@@ -1287,7 +1284,7 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
                 };
                 let result = state.document.set_alter(target, alter);
                 state.report(result);
-                state.rebuild_playback(cx);
+                state.rebuild_playback();
             }
         }
         ScoreAction::SetPartGain { part, delta } => {
@@ -1384,7 +1381,7 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
                 PrefToggle::CountIn => {
                     state.prefs.count_in = !state.prefs.count_in;
                     state.practice.count_in = state.prefs.count_in;
-                    state.rebuild_playback(cx);
+                    state.rebuild_playback();
                 }
                 PrefToggle::DarkPaper => state.prefs.dark_paper = !state.prefs.dark_paper,
             }
@@ -1462,7 +1459,7 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
                     } => {
                         let title = entry.title.clone();
                         let opened =
-                            state.open_bundled_score(cx, bytes, extension, &title, credit);
+                            state.open_bundled_score(bytes, extension, &title, credit);
                         state.performance_credit = attribution;
                         opened
                     }
@@ -1511,7 +1508,7 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
                 state.prefs.remember(path);
                 state.prefs.save();
                 state.adopt_score_tempo();
-                state.rebuild_playback(cx);
+                state.rebuild_playback();
                 // The file name, not the score's own title: an imported MIDI
                 // often titles itself after its first track ("Piano right"),
                 // which is not what the user just picked.
@@ -1585,7 +1582,7 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
                 state.ui.recentre_now();
                 state.ui.selection.clear();
                 state.adopt_score_tempo();
-                state.rebuild_playback(cx);
+                state.rebuild_playback();
                 state.ui.status = "New score".into();
             }
         }

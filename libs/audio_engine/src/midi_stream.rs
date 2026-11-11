@@ -17,7 +17,7 @@
 use crate::feed::midi_in::MidiMsg;
 use crate::feed::streams::StreamView;
 use crate::schedule::ClockChunk;
-use makepad_flow::live::spsc::Consumer;
+use makepad_lock_free::Consumer;
 use makepad_score_player::loop_engine::{Inst, LoopEngine, Tempo};
 use makepad_score_player::stream::{Ctl, Msg, Stream, StreamDef};
 use std::sync::Arc;
@@ -182,7 +182,7 @@ impl StreamRun {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_flow::live::spsc::ring;
+    use makepad_lock_free::ring;
     use makepad_score_player::loop_engine::Inst;
 
     /// A message plays `latency` after it arrived, on its sample, whatever

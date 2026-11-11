@@ -195,9 +195,12 @@ fn context(first: u64, frames: usize, sample_rate: u32) -> RenderContext {
     }
 }
 
-fn push_batch<const N: usize>(ring: &SpscRing<AudioMessage, N>, batch: EventBatch) {
+fn push_batch<const PENDING: usize, const PARTS: usize>(
+    engine: &mut PlaybackEngine<TestSynth, PENDING, PARTS>,
+    batch: EventBatch,
+) {
     for event in batch.as_slice().iter().copied() {
-        assert!(ring.push(event).is_ok());
+        assert!(engine.queue(event).is_ok());
     }
 }
 
@@ -206,7 +209,6 @@ fn events_land_at_exact_offsets_inside_a_block() {
     let plan = compile_plan(100, 60.0, vec![exact_note(0.5, 0.25, 7, 64)], 2.0);
     assert_eq!(plan.events()[0].at, 50);
     assert_eq!(plan.events()[1].at, 75);
-    let ring = SpscRing::<AudioMessage, 8>::new();
     let mixer = PartMixer::<1>::new();
     let clock = AtomicAudioClock::new();
     let mut engine = PlaybackEngine::<TestSynth, 16, 1>::new(TestSynth::default());
@@ -214,7 +216,7 @@ fn events_land_at_exact_offsets_inside_a_block() {
     let mut output = [0.0f32; 128];
     let mut channels: [&mut [f32]; 1] = [&mut output];
     assert_eq!(
-        engine.render(context(0, 128, 100), &mut channels, &plan, &ring, &mixer, &clock),
+        engine.render(context(0, 128, 100), &mut channels, &plan, &mixer, &clock),
         RenderStatus::Rendered
     );
     let note_events: Vec<_> = engine
@@ -244,13 +246,12 @@ fn a_queued_play_message_starts_and_keeps_the_transport_running() {
         vec![exact_note(0.0, 0.5, 1, 60), exact_note(1.0, 0.5, 2, 67)],
         2.0,
     );
-    let ring = SpscRing::<AudioMessage, 8>::new();
     let mixer = PartMixer::<1>::new();
     let clock = AtomicAudioClock::new();
     let mut engine = PlaybackEngine::<TestSynth, 16, 1>::new(TestSynth::default());
     assert_eq!(engine.state(), PlaybackState::Stopped);
-    assert!(ring
-        .push(AudioMessage {
+    assert!(engine
+        .queue(AudioMessage {
             at_device_sample: 32,
             sequence: 1,
             kind: AudioMessageKind::Play,
@@ -259,7 +260,7 @@ fn a_queued_play_message_starts_and_keeps_the_transport_running() {
     let mut output = [0.0f32; 128];
     let mut channels: [&mut [f32]; 1] = [&mut output];
     assert_eq!(
-        engine.render(context(0, 128, 1_000), &mut channels, &plan, &ring, &mixer, &clock),
+        engine.render(context(0, 128, 1_000), &mut channels, &plan, &mixer, &clock),
         RenderStatus::Rendered
     );
     assert_eq!(engine.state(), PlaybackState::Playing);
@@ -275,7 +276,7 @@ fn a_queued_play_message_starts_and_keeps_the_transport_running() {
 
     let mut channels: [&mut [f32]; 1] = [&mut output];
     assert_eq!(
-        engine.render(context(128, 128, 1_000), &mut channels, &plan, &ring, &mixer, &clock),
+        engine.render(context(128, 128, 1_000), &mut channels, &plan, &mixer, &clock),
         RenderStatus::Rendered
     );
     assert_eq!(engine.state(), PlaybackState::Playing);
@@ -289,12 +290,11 @@ fn a_queued_play_message_starts_and_keeps_the_transport_running() {
 #[test]
 fn the_timeline_advances_in_plan_samples_per_device_frame() {
     let plan = compile_plan(2_000, 60.0, vec![exact_note(0.0, 0.5, 1, 60)], 8.0);
-    let ring = SpscRing::<AudioMessage, 8>::new();
     let mixer = PartMixer::<1>::new();
     let clock = AtomicAudioClock::new();
     let mut engine = PlaybackEngine::<TestSynth, 16, 1>::new(TestSynth::default());
-    assert!(ring
-        .push(AudioMessage { at_device_sample: 0, sequence: 1, kind: AudioMessageKind::Play })
+    assert!(engine
+        .queue(AudioMessage { at_device_sample: 0, sequence: 1, kind: AudioMessageKind::Play })
         .is_ok());
 
     let mut output = [0.0f32; 100];
@@ -302,7 +302,7 @@ fn the_timeline_advances_in_plan_samples_per_device_frame() {
     let mut ctx = context(0, 100, 1_000);
     ctx.device_sample_rate = 1_000;
     assert_eq!(
-        engine.render(ctx, &mut channels, &plan, &ring, &mixer, &clock),
+        engine.render(ctx, &mut channels, &plan, &mixer, &clock),
         RenderStatus::Rendered
     );
     // 100 device frames at 1 kHz = 0.1 s, which is 200 samples of a 2 kHz plan.
@@ -311,12 +311,12 @@ fn the_timeline_advances_in_plan_samples_per_device_frame() {
 
     // device_sample_rate 0 keeps the old one-for-one behaviour.
     let mut engine = PlaybackEngine::<TestSynth, 16, 1>::new(TestSynth::default());
-    assert!(ring
-        .push(AudioMessage { at_device_sample: 0, sequence: 1, kind: AudioMessageKind::Play })
+    assert!(engine
+        .queue(AudioMessage { at_device_sample: 0, sequence: 1, kind: AudioMessageKind::Play })
         .is_ok());
     let mut channels: [&mut [f32]; 1] = [&mut output];
     assert_eq!(
-        engine.render(context(0, 100, 1_000), &mut channels, &plan, &ring, &mixer, &clock),
+        engine.render(context(0, 100, 1_000), &mut channels, &plan, &mixer, &clock),
         RenderStatus::Rendered
     );
     assert_eq!(engine.timeline_sample(), 100);
@@ -327,7 +327,6 @@ fn the_timeline_advances_in_plan_samples_per_device_frame() {
 #[test]
 fn play_at_the_end_of_the_plan_rewinds_and_runs() {
     let plan = compile_plan(1_000, 60.0, vec![exact_note(0.0, 0.5, 1, 60)], 1.0);
-    let ring = SpscRing::<AudioMessage, 8>::new();
     let mixer = PartMixer::<1>::new();
     let clock = AtomicAudioClock::new();
     let mut engine = PlaybackEngine::<TestSynth, 16, 1>::new(TestSynth::default());
@@ -337,13 +336,12 @@ fn play_at_the_end_of_the_plan_rewinds_and_runs() {
     assert_eq!(engine.timeline_sample(), 0);
     let mut output = [0.0f32; 64];
     let mut channels: [&mut [f32]; 1] = [&mut output];
-    let _ = engine.render(context(0, 64, 1_000), &mut channels, &plan, &ring, &mixer, &clock);
+    let _ = engine.render(context(0, 64, 1_000), &mut channels, &plan, &mixer, &clock);
     assert_eq!(engine.state(), PlaybackState::Playing);
     assert_eq!(engine.timeline_sample(), 64);
 }
 
 fn render_with_blocks(plan: &PerformancePlan, blocks: &[usize], total: usize) -> Vec<f32> {
-    let ring = SpscRing::<AudioMessage, 8>::new();
     let mixer = PartMixer::<1>::new();
     let clock = AtomicAudioClock::new();
     let mut engine = PlaybackEngine::<TestSynth, 32, 1>::new(TestSynth::default());
@@ -361,7 +359,6 @@ fn render_with_blocks(plan: &PerformancePlan, blocks: &[usize], total: usize) ->
                 context(device, frames, plan.tempo_map().sample_rate()),
                 &mut channels,
                 plan,
-                &ring,
                 &mixer,
                 &clock,
             ),
@@ -395,7 +392,6 @@ fn output_is_invariant_to_callback_block_size() {
 fn loop_wrap_is_exact_even_inside_one_large_callback() {
     let mut plan = compile_plan(100, 60.0, vec![exact_note(0.25, 0.5, 1, 60)], 2.0);
     plan.prepare_checkpoint(20);
-    let ring = SpscRing::<AudioMessage, 4>::new();
     let mixer = PartMixer::<1>::new();
     let clock = AtomicAudioClock::new();
     let mut engine = PlaybackEngine::<TestSynth, 16, 1>::new(TestSynth::default());
@@ -404,7 +400,7 @@ fn loop_wrap_is_exact_even_inside_one_large_callback() {
     engine.play(&plan);
     let mut output = [0.0f32; 100];
     let mut channels: [&mut [f32]; 1] = [&mut output];
-    let _ = engine.render(context(1_000, 100, 100), &mut channels, &plan, &ring, &mixer, &clock);
+    let _ = engine.render(context(1_000, 100, 100), &mut channels, &plan, &mixer, &clock);
     let resets: Vec<_> = engine
         .backend()
         .records()
@@ -680,27 +676,26 @@ fn metronome_accents_simple_compound_irregular_and_count_in() {
 #[test]
 fn rapid_hover_releases_prior_audition_voices_without_touching_playback() {
     let plan = compile_plan(1_000, 60.0, Vec::new(), 1.0);
-    let ring = SpscRing::<AudioMessage, 32>::new();
     let mixer = PartMixer::<1>::new();
     let clock = AtomicAudioClock::new();
     let mut audition = AuditionController::<4>::new();
+    let mut engine = PlaybackEngine::<TestSynth, 32, 1>::new(TestSynth::default());
     push_batch(
-        &ring,
+        &mut engine,
         audition
             .audition(0, 0, &[60, 64], 40_000, 5)
             .expect("first chord"),
     );
     push_batch(
-        &ring,
+        &mut engine,
         audition
             .audition(4, 0, &[67], 40_000, 5)
             .expect("second chord"),
     );
     assert_eq!(audition.active_voice_count(), 1);
-    let mut engine = PlaybackEngine::<TestSynth, 32, 1>::new(TestSynth::default());
     let mut output = [0.0f32; 8];
     let mut channels: [&mut [f32]; 1] = [&mut output];
-    let _ = engine.render(context(0, 8, 1_000), &mut channels, &plan, &ring, &mixer, &clock);
+    let _ = engine.render(context(0, 8, 1_000), &mut channels, &plan, &mixer, &clock);
     assert_eq!(engine.backend().voice_count(), 1);
     let audition_offs = engine
         .backend()
@@ -766,15 +761,14 @@ fn scrub_is_rate_limited_deduplicated_and_orders_future_releases() {
     };
 
     let plan = compile_plan(1_000, 60.0, Vec::new(), 1.0);
-    let ring = SpscRing::<AudioMessage, 16>::new();
-    push_batch(&ring, first);
-    push_batch(&ring, second);
     let mixer = PartMixer::<1>::new();
     let clock = AtomicAudioClock::new();
     let mut engine = PlaybackEngine::<TestSynth, 16, 1>::new(TestSynth::default());
+    push_batch(&mut engine, first);
+    push_batch(&mut engine, second);
     let mut output = [0.0f32; 140];
     let mut channels: [&mut [f32]; 1] = [&mut output];
-    let _ = engine.render(context(0, 140, 1_000), &mut channels, &plan, &ring, &mixer, &clock);
+    let _ = engine.render(context(0, 140, 1_000), &mut channels, &plan, &mixer, &clock);
     let scrub_ons: Vec<_> = engine
         .backend()
         .records()
@@ -786,20 +780,6 @@ fn scrub_is_rate_limited_deduplicated_and_orders_future_releases() {
         .collect();
     assert_eq!(scrub_ons, vec![0, 40]);
     assert_eq!(engine.backend().voice_count(), 0);
-}
-
-#[test]
-fn spsc_ring_reports_overflow_and_preserves_fifo_order() {
-    let ring = SpscRing::<u32, 2>::new();
-    assert_eq!(ring.capacity(), 2);
-    assert_eq!(ring.push(10), Ok(()));
-    assert_eq!(ring.push(20), Ok(()));
-    assert_eq!(ring.push(30), Err(30));
-    assert_eq!(ring.overflow_count(), 1);
-    assert_eq!(ring.peek(), Some(10));
-    assert_eq!(ring.pop(), Some(10));
-    assert_eq!(ring.pop(), Some(20));
-    assert_eq!(ring.pop(), None);
 }
 
 #[test]
@@ -828,7 +808,6 @@ fn visual_estimate_and_beat_light_share_the_audio_anchor() {
 #[test]
 fn render_path_performs_no_allocations() {
     let plan = compile_plan(1_000, 120.0, vec![exact_note(0.1, 0.5, 1, 60)], 1.0);
-    let ring = SpscRing::<AudioMessage, 8>::new();
     let mixer = PartMixer::<1>::new();
     let clock = AtomicAudioClock::new();
     let mut engine = PlaybackEngine::<TestSynth, 16, 1>::new(TestSynth::default());
@@ -843,7 +822,6 @@ fn render_path_performs_no_allocations() {
         context(0, 256, 1_000),
         &mut channels,
         &plan,
-        &ring,
         &mixer,
         &clock,
     );

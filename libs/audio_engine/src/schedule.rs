@@ -277,7 +277,7 @@ pub struct TransportState {
     pub playing: bool,
     /// The tempo playing (the control's, or the map's since its last change).
     pub tempo: f64,
-    pub feed: Option<makepad_flow::live::spsc::Consumer<crate::feed::TempoEvent>>,
+    pub feed: Option<makepad_lock_free::Consumer<crate::feed::TempoEvent>>,
     /// Changes waiting for their beat, in beat order (capacity reserved).
     pub pending: Vec<crate::feed::TempoEvent>,
     /// A ramp under way: (start beat, from bpm, to bpm, steps, next step).
@@ -305,7 +305,7 @@ impl LoopState {
 /// their chunk, the reading end of its feed, and its smoothed gains.
 pub struct LoopState {
     pub engine: makepad_score_player::loop_engine::LoopEngine,
-    pub feed: Option<makepad_flow::live::spsc::Consumer<makepad_score_player::Event>>,
+    pub feed: Option<makepad_lock_free::Consumer<makepad_score_player::Event>>,
     pub gain_l: f32,
     pub gain_r: f32,
     pub peak: f32,
@@ -315,7 +315,7 @@ pub struct LoopState {
     /// A MIDI loop of the live score: its MIDI goes out.
     pub midi_live: bool,
     /// An input loop's ring from the audio input.
-    pub input: Option<makepad_flow::live::spsc::Consumer<[f32; 2]>>,
+    pub input: Option<makepad_lock_free::Consumer<[f32; 2]>>,
     /// Its instrument's settings an editor holds live, and the version of
     /// them last set on the engine (none yet: set on the first pass).
     pub live: Option<Arc<crate::feed::LiveParams>>,
@@ -350,7 +350,7 @@ pub struct PadsState {
     pub samples: Arc<[Option<Arc<makepad_score_player::Sample>>]>,
     pub gains: Arc<[f32]>,
     pub voices: Vec<PadVoice>,
-    pub feed: Option<makepad_flow::live::spsc::Consumer<crate::feed::PadHit>>,
+    pub feed: Option<makepad_lock_free::Consumer<crate::feed::PadHit>>,
     pub serial: u64,
     pub gain: f32,
     pub peak: f32,
@@ -362,7 +362,7 @@ pub struct FxNodeState {
     pub peak: f32,
     /// The score's automation: its feed, what waits for its beat, and each
     /// setting's ramp (from, to, start beat, beats) once one began.
-    pub feed: Option<makepad_flow::live::spsc::Consumer<crate::feed::AutomationEvent>>,
+    pub feed: Option<makepad_lock_free::Consumer<crate::feed::AutomationEvent>>,
     pub waiting: Vec<crate::feed::AutomationEvent>,
     pub ramps: [Option<(f32, f32, f64, f64)>; makepad_score_player::fx::MAX_FX_PARAMS],
 }

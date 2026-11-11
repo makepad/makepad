@@ -2,12 +2,10 @@
 //! and instruments, each voice placed in 3D by its own [`Spatial`], a shared
 //! room reverb, and a master compressor + look-ahead limiter.
 //!
-//! Threading: the bus is one value behind the host's lock. The control side
-//! (UI thread) calls the `play_*`/`set_*` methods; the audio thread calls
-//! [`SynthBus::render`]. Neither path allocates once the bus is built: pools
-//! are sized at construction, instruments arrive already built, and anything
-//! that owns heap memory is handed BACK to the caller when replaced so it is
-//! dropped on the control side, never in the callback.
+//! Threading: a host either calls the methods on one thread, or keeps the bus
+//! on its audio thread and sends [`Command`]s (applied with [`SynthBus::apply`]),
+//! receiving everything the bus lets go of as [`Retired`] and its state as a
+//! [`BusView`]. Apply, render and reap neither allocate nor free.
 //!
 //! Voice budget: when a pool is full the quietest voice (placement gain ×
 //! its own level) yields — faded over ~3 ms, never hard-cut — and only to a
@@ -17,11 +15,11 @@
 use crate::dsp::{finite, Osc, Smooth, Wave};
 use crate::dynamics::{Compressor, Ducker, Limiter};
 use crate::engine::{EngineInput, EngineSpec};
-use crate::instrument::Instrument;
+use crate::instrument::{Control, Instrument};
 use crate::recipe::{Recipe, RecipeVoice};
 use crate::reverb::{Reverb, RoomParams, RoomPreset};
 use crate::spatial::{place, Distance, Listener3, Placement3, Spatial, V3};
-use crate::vehicle::{TyreInput, VehicleSound};
+use crate::vehicle::{LoopSet, TyreInput, VehicleSound};
 
 pub const RECIPE_VOICES: usize = 48;
 pub const VEHICLE_VOICES: usize = 12;
@@ -108,6 +106,55 @@ pub enum Priority {
     High,
 }
 
+/// What the bus lets go of: it never frees heap memory itself, so whoever drives it drops these
+/// where freeing is allowed (off the audio thread).
+pub enum Retired {
+    /// An instrument that left the bus: replaced under its key, removed, faded out ([`SynthBus::reap`]),
+    /// or a retiring one cut short to make room.
+    Instrument { key: u64, inst: Box<dyn Instrument> },
+    /// An instrument the bus had no slot for (every slot holds a live instrument).
+    Refused { key: u64, inst: Box<dyn Instrument> },
+    /// A vehicle's replaced loop set, or the given set when no vehicle has its key.
+    Loops(LoopSet),
+}
+
+/// One change to the bus as a value: what a control thread sends to the thread that renders the
+/// bus ([`SynthBus::apply`]). One variant per mutating method, with that method's arguments.
+pub enum Command {
+    Listener(Listener3),
+    Room(RoomParams),
+    Master(f32),
+    GroupGain { group: Group, gain: f32 },
+    InstrumentGroup { key: u64, group: Group },
+    Duck(f32),
+    PlayRecipe { id: u64, recipe: Recipe, pitch: f32, gain: f32, emitter: Emitter, priority: Priority, key: u64 },
+    MoveVoice { id: u64, pos: V3, vel: V3 },
+    StopVoice { id: u64 },
+    Vehicle { key: u64, spec: EngineSpec, engine: EngineInput, tyres: TyreInput, emitter: Emitter, interior: f32, gain: f32 },
+    VehicleStart { key: u64 },
+    VehicleStopEngine { key: u64 },
+    VehicleThump { key: u64, strength: f32 },
+    VehicleRelease { key: u64 },
+    VehicleLoops { key: u64, loops: LoopSet, mix: f32 },
+    EndFrame,
+    Tone { id: u64, freq: f32, wave: Option<Wave>, gain: f32 },
+    ToneSet { id: u64, freq: Option<f32>, gain: Option<f32> },
+    ToneStop { id: u64 },
+    /// Every tone whose `id >> shift == prefix` ([`SynthBus::fade_tones`]); shift 0 names one tone.
+    /// (apply uses `id.checked_shr(shift).unwrap_or(0)`, so a shift of 64 or more matches prefix 0 only.)
+    FadeTones { prefix: u64, shift: u32, secs: f32 },
+    StopAllTones,
+    AddInstrument { key: u64, inst: Box<dyn Instrument>, emitter: Emitter, gain: f32 },
+    RemoveInstrument { key: u64 },
+    FadeInstrument { key: u64, secs: f32 },
+    InstrumentEmitter { key: u64, emitter: Emitter, gain: Option<f32> },
+    NoteOn { key: u64, note: u8, velocity: u8 },
+    NoteOff { key: u64, note: u8 },
+    Control { key: u64, control: Control, value: f32 },
+    Silence,
+    Clear,
+}
+
 struct RecipeSlot {
     active: bool,
     id: u64,
@@ -134,6 +181,8 @@ struct VehicleSlot {
     stopping: bool,
     seen: u64,
     send: f32,
+    /// This voice's incarnation (see [`VehicleView::serial`]).
+    serial: u64,
 }
 
 struct ToneSlot {
@@ -159,8 +208,8 @@ struct InstrumentSlot {
     place: Placement3,
     gain: f32,
     send: f32,
-    /// A retiring slot's gain ramp, 1 -> 0; no lookup finds it. The control side reaps it at 0
-    /// ([`SynthBus::reap_instruments`]), so the callback never drops it.
+    /// A retiring slot's gain ramp, 1 -> 0; no lookup finds it. At 0 it goes to
+    /// [`SynthBus::reap`], so the callback never drops it.
     fade: f32,
     /// Per-sample ramp step; 0 while the slot is live.
     fade_step: f32,
@@ -192,6 +241,39 @@ pub struct BusStats {
     pub blocks: u64,
 }
 
+/// One live vehicle voice, for diagnostics and the control side's view of the bus.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct VehicleView {
+    pub key: u64,
+    pub input: EngineInput,
+    pub gain: f32,
+    pub level: f32,
+    pub interior: f32,
+    pub stopping: bool,
+    /// Which incarnation of `key` this is: a new number each time a drive starts the voice
+    /// (a free or stolen slot, or one that was stopping), so a control thread knows when a
+    /// vehicle needs its loops and starter again.
+    pub serial: u64,
+}
+
+/// What the bus looks like after a block, by value: what its renderer publishes for a control
+/// thread that cannot look at the bus itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BusView {
+    pub rate: f32,
+    pub stats: BusStats,
+    pub recipe_voices: usize,
+    pub tone_voices: usize,
+    /// Instrument slots, retiring ones included.
+    pub instrument_slots: usize,
+    /// The live (not retiring) instruments' keys, `instrument_count` of them.
+    pub instruments: [u64; INSTRUMENT_SLOTS],
+    pub instrument_count: usize,
+    /// The active vehicle voices, `vehicle_count` of them.
+    pub vehicles: [VehicleView; VEHICLE_VOICES],
+    pub vehicle_count: usize,
+}
+
 pub struct SynthBus {
     rate: f32,
     listener: Listener3,
@@ -216,9 +298,10 @@ pub struct SynthBus {
     send: [f32; BLOCK],
     inst_l: [f32; BLOCK],
     inst_r: [f32; BLOCK],
-    next_id: u64,
     seed: u32,
     frame: u64,
+    /// The last vehicle incarnation handed out.
+    serial: u64,
     stats: BusStats,
     shed_level: usize,
 }
@@ -257,6 +340,7 @@ impl SynthBus {
                 stopping: false,
                 seen: 0,
                 send: 0.1,
+                serial: 0,
             })
             .collect();
         let tones = (0..TONE_VOICES)
@@ -303,9 +387,9 @@ impl SynthBus {
             send: [0.0; BLOCK],
             inst_l: [0.0; BLOCK],
             inst_r: [0.0; BLOCK],
-            next_id: 1,
             seed: 0x1234,
             frame: 0,
+            serial: 0,
             stats: BusStats::default(),
             shed_level: 0,
         }
@@ -317,6 +401,93 @@ impl SynthBus {
 
     pub fn stats(&self) -> BusStats {
         self.stats
+    }
+
+    pub fn view(&self) -> BusView {
+        let (recipe_voices, vehicle_count, tone_voices, instrument_slots) = self.live_counts();
+        let mut view = BusView {
+            rate: self.rate,
+            stats: self.stats,
+            recipe_voices,
+            tone_voices,
+            instrument_slots,
+            vehicle_count,
+            ..BusView::default()
+        };
+        for key in self.instrument_keys() {
+            view.instruments[view.instrument_count] = key;
+            view.instrument_count += 1;
+        }
+        for (v, s) in view.vehicles.iter_mut().zip(self.vehicles.iter().filter(|s| s.active)) {
+            *v = VehicleView {
+                key: s.key,
+                input: s.sound.engine.input(),
+                gain: s.place.gain * s.gain.value,
+                level: s.sound.level(),
+                interior: s.sound.engine.interior,
+                stopping: s.stopping,
+                serial: s.serial,
+            };
+        }
+        view
+    }
+
+    /// Apply one command. Allocates and frees nothing: a payload it replaces
+    /// or cannot place goes to `retire`. With [`SynthBus::render`] and
+    /// [`SynthBus::reap`] this is everything the audio thread calls.
+    pub fn apply(&mut self, cmd: Command, retire: &mut impl FnMut(Retired)) {
+        match cmd {
+            Command::Listener(listener) => self.set_listener(listener),
+            Command::Room(room) => self.set_room(room),
+            Command::Master(gain) => self.set_master(gain),
+            Command::GroupGain { group, gain } => self.set_group_gain(group, gain),
+            Command::InstrumentGroup { key, group } => self.set_instrument_group(key, group),
+            Command::Duck(key) => self.set_duck(key),
+            Command::PlayRecipe { id, recipe, pitch, gain, emitter, priority, key } => {
+                self.play_recipe(id, &recipe, pitch, gain, emitter, priority, key);
+            }
+            Command::MoveVoice { id, pos, vel } => self.move_voice(id, pos, vel),
+            Command::StopVoice { id } => self.stop_voice(id),
+            Command::Vehicle { key, spec, engine, tyres, emitter, interior, gain } => {
+                self.vehicle(key, &spec, engine, tyres, emitter, interior, gain);
+            }
+            Command::VehicleStart { key } => self.vehicle_start(key),
+            Command::VehicleStopEngine { key } => self.vehicle_stop_engine(key),
+            Command::VehicleThump { key, strength } => self.vehicle_thump(key, strength),
+            Command::VehicleRelease { key } => self.vehicle_release(key),
+            Command::VehicleLoops { key, loops, mix } => self.vehicle_loops(key, loops, mix, retire),
+            Command::EndFrame => self.end_frame(),
+            Command::Tone { id, freq, wave, gain } => self.tone(id, freq, wave, gain),
+            Command::ToneSet { id, freq, gain } => self.tone_set(id, freq, gain),
+            Command::ToneStop { id } => self.tone_stop(id),
+            Command::FadeTones { prefix, shift, secs } => self.fade_tones(|id| id.checked_shr(shift).unwrap_or(0) == prefix, secs),
+            Command::StopAllTones => self.stop_all_tones(),
+            Command::AddInstrument { key, inst, emitter, gain } => {
+                self.add_instrument(key, inst, emitter, gain, retire);
+            }
+            Command::RemoveInstrument { key } => {
+                self.remove_instrument(key, retire);
+            }
+            Command::FadeInstrument { key, secs } => self.fade_instrument(key, secs),
+            Command::InstrumentEmitter { key, emitter, gain } => self.set_instrument_emitter(key, emitter, gain),
+            Command::NoteOn { key, note, velocity } => {
+                if let Some(inst) = self.instrument_mut(key) {
+                    inst.note_on(note, velocity);
+                }
+            }
+            Command::NoteOff { key, note } => {
+                if let Some(inst) = self.instrument_mut(key) {
+                    inst.note_off(note);
+                }
+            }
+            Command::Control { key, control, value } => {
+                if let Some(inst) = self.instrument_mut(key) {
+                    inst.control(control, value);
+                }
+            }
+            Command::Silence => self.silence(),
+            Command::Clear => self.clear(),
+        }
     }
 
     pub fn set_listener(&mut self, listener: Listener3) {
@@ -376,21 +547,23 @@ impl SynthBus {
 
     /// Start a recipe. `key` (non-zero) makes it replace a still-sounding
     /// voice with the same key (one footstep per body, one pain per enemy).
-    /// Returns the voice id, or `None` when every slot outranks it or it is
+    /// The caller mints `id`, unique per bus, for `move_voice`/`stop_voice`.
+    /// Returns true when started, false when every slot outranks it or it is
     /// out of earshot.
     pub fn play_recipe(
         &mut self,
+        id: u64,
         recipe: &Recipe,
         pitch: f32,
         gain: f32,
         emitter: Emitter,
         priority: Priority,
         key: u64,
-    ) -> Option<u64> {
+    ) -> bool {
         let place = emitter.placement(&self.listener);
         let loudness = place.gain * gain;
         if emitter.positional && place.gain <= 0.0 {
-            return None;
+            return false;
         }
         // Same key: the old voice fades, the new one takes a fresh slot.
         if key != 0 {
@@ -428,13 +601,11 @@ impl SynthBus {
                             None => i,
                         }
                     }
-                    _ => return None,
+                    _ => return false,
                 }
             }
         };
         let seed = self.next_seed();
-        let id = self.next_id;
-        self.next_id += 1;
         let slot = &mut self.recipes[index];
         slot.active = true;
         slot.id = id;
@@ -450,7 +621,7 @@ impl SynthBus {
         slot.fade = 1.0;
         slot.fading = false;
         slot.priority = priority;
-        Some(id)
+        true
     }
 
     /// Move a playing recipe voice (a projectile's whoosh).
@@ -486,7 +657,13 @@ impl SynthBus {
         let place = emitter.placement(&self.listener);
         let frame = self.frame;
         let index = match self.vehicles.iter().position(|s| s.active && s.key == key) {
-            Some(i) => i,
+            Some(i) => {
+                if self.vehicles[i].stopping {
+                    self.serial += 1;
+                    self.vehicles[i].serial = self.serial;
+                }
+                i
+            }
             None => {
                 if emitter.positional && place.gain <= 0.0 {
                     return false;
@@ -510,9 +687,11 @@ impl SynthBus {
                     }
                 };
                 let seed = self.next_seed();
+                self.serial += 1;
                 let slot = &mut self.vehicles[index];
                 slot.active = true;
                 slot.key = key;
+                slot.serial = self.serial;
                 slot.sound.engine.set_spec(*spec);
                 slot.sound.engine.seed(seed);
                 slot.sound.engine.set_input(engine);
@@ -647,16 +826,19 @@ impl SynthBus {
 
     // ── instruments ──────────────────────────────────────────────────────
 
-    /// Add an instrument under `key`. Replacing an existing key hands the
-    /// old instrument back (drop it outside the lock). When every slot is
-    /// taken the new one is handed back in `Err`.
+    /// Add an instrument under `key`, returning true when installed. A live
+    /// key is replaced in place and its old instrument goes to `retire`.
+    /// A full live set refuses the new instrument through `retire` and returns
+    /// false. Otherwise a new slot is used; at capacity the retiring slot with
+    /// the lowest fade goes to `retire` first, so the pool never grows.
     pub fn add_instrument(
         &mut self,
         key: u64,
         inst: Box<dyn Instrument>,
         emitter: Emitter,
         gain: f32,
-    ) -> Result<Option<Box<dyn Instrument>>, Box<dyn Instrument>> {
+        retire: &mut impl FnMut(Retired),
+    ) -> bool {
         let place = emitter.placement(&self.listener);
         let make = |inst| {
             let mut spatial_l = Spatial::new(self.rate);
@@ -682,26 +864,41 @@ impl SynthBus {
         if let Some(slot) = self.instruments.iter_mut().find(|s| s.live() && s.key == key) {
             let new = make(inst);
             let old = std::mem::replace(slot, new);
-            return Ok(Some(old.inst));
+            retire(Retired::Instrument { key, inst: old.inst });
+            return true;
         }
         // Retiring slots fade beside the new ones and do not count.
         if self.instruments.iter().filter(|s| s.live()).count() >= INSTRUMENT_SLOTS {
-            return Err(inst);
+            retire(Retired::Refused { key, inst });
+            return false;
+        }
+        // At capacity (more slots than live instruments, so one is retiring) the quietest
+        // retiring slot makes room.
+        if self.instruments.len() == self.instruments.capacity() {
+            let quietest = self.instruments.iter().enumerate().filter(|(_, s)| !s.live())
+                .min_by(|a, b| a.1.fade.partial_cmp(&b.1.fade).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(i, _)| i);
+            if let Some(i) = quietest {
+                let old = self.instruments.swap_remove(i);
+                retire(Retired::Instrument { key: old.key, inst: old.inst });
+            }
         }
         self.instruments.push(make(inst));
-        Ok(None)
+        true
     }
 
     /// Remove an instrument, handing it back to drop (or to keep).
-    pub fn remove_instrument(&mut self, key: u64) -> Option<Box<dyn Instrument>> {
-        let i = self.instruments.iter().position(|s| s.live() && s.key == key)?;
-        Some(self.instruments.swap_remove(i).inst)
+    pub fn remove_instrument(&mut self, key: u64, retire: &mut impl FnMut(Retired)) -> bool {
+        let Some(i) = self.instruments.iter().position(|s| s.live() && s.key == key) else { return false };
+        let old = self.instruments.swap_remove(i);
+        retire(Retired::Instrument { key, inst: old.inst });
+        true
     }
 
     /// Retire an instrument without a click: held notes release and its
     /// output fades to silence over `secs`. From now on no lookup finds it,
     /// so the same key can be installed again at once;
-    /// [`SynthBus::reap_instruments`] frees it once the fade has run out.
+    /// [`SynthBus::reap`] hands it back once the fade has run out.
     pub fn fade_instrument(&mut self, key: u64, secs: f32) {
         let rate = self.rate;
         if let Some(s) = self.instruments.iter_mut().find(|s| s.live() && s.key == key) {
@@ -711,19 +908,18 @@ impl SynthBus {
     }
 
     /// Hand back every retired instrument whose fade has finished, to be
-    /// dropped by the caller outside its lock.
-    pub fn reap_instruments(&mut self) -> Vec<Box<dyn Instrument>> {
-        let mut done = Vec::new();
+    /// dropped by the caller off the audio thread.
+    pub fn reap(&mut self, retire: &mut impl FnMut(Retired)) {
         let mut i = 0;
         while i < self.instruments.len() {
             let s = &self.instruments[i];
             if !s.live() && s.fade <= 0.0 {
-                done.push(self.instruments.swap_remove(i).inst);
+                let old = self.instruments.swap_remove(i);
+                retire(Retired::Instrument { key: old.key, inst: old.inst });
             } else {
                 i += 1;
             }
         }
-        done
     }
 
     pub fn instrument_mut(&mut self, key: u64) -> Option<&mut (dyn Instrument + 'static)> {
@@ -781,11 +977,12 @@ impl SynthBus {
 
     /// Install recorded engine loops on a vehicle voice (see
     /// [`VehicleSound::set_loops`]); the replaced set comes back to drop.
-    pub fn vehicle_loops(&mut self, key: u64, loops: Vec<crate::vehicle::EngineLoop>, mix: f32) -> Vec<crate::vehicle::EngineLoop> {
-        match self.vehicles.iter_mut().find(|s| s.active && s.key == key) {
+    pub fn vehicle_loops(&mut self, key: u64, loops: LoopSet, mix: f32, retire: &mut impl FnMut(Retired)) {
+        let old = match self.vehicles.iter_mut().find(|s| s.active && s.key == key) {
             Some(s) => s.sound.set_loops(loops, mix),
             None => loops,
-        }
+        };
+        retire(Retired::Loops(old));
     }
 
     /// (key, engine input, placement gain, engine level, interior) of every
@@ -1012,7 +1209,7 @@ mod tests {
     fn a_recipe_plays_through_the_bus_and_ends() {
         let mut bus = SynthBus::new(48_000.0);
         let r = Recipe::parse(builtin("coin").unwrap()).unwrap();
-        assert!(bus.play_recipe(&r, 1.0, 1.0, Emitter::FLAT, Priority::Normal, 0).is_some());
+        assert!(bus.play_recipe(1, &r, 1.0, 1.0, Emitter::FLAT, Priority::Normal, 0));
         let (mut l, mut rr) = (vec![0.0; 48_000], vec![0.0; 48_000]);
         bus.render(&mut l, &mut rr);
         assert!(l.iter().any(|x| x.abs() > 0.01));
@@ -1025,7 +1222,7 @@ mod tests {
         let r = Recipe::parse("sine freq=440 a=0.01 hold=5 d=0.1 s=1 r=0.1").unwrap();
         for i in 0..200 {
             let far = Emitter::at([0.0, 0.0, -(1.0 + i as f32 * 0.1)], 100.0);
-            bus.play_recipe(&r, 1.0, 1.0, far, Priority::Normal, 0);
+            bus.play_recipe(i + 1, &r, 1.0, 1.0, far, Priority::Normal, 0);
         }
         assert!(bus.live_counts().0 <= RECIPE_VOICES);
         assert!(bus.stats().steals > 0);
@@ -1035,8 +1232,8 @@ mod tests {
     fn the_master_never_clips() {
         let mut bus = SynthBus::new(48_000.0);
         let r = Recipe::parse(builtin("explosion_big").unwrap()).unwrap();
-        for _ in 0..20 {
-            bus.play_recipe(&r, 1.0, 4.0, Emitter::FLAT, Priority::High, 0);
+        for i in 0..20 {
+            bus.play_recipe(i + 1, &r, 1.0, 4.0, Emitter::FLAT, Priority::High, 0);
         }
         let (mut l, mut rr) = (vec![0.0; 96_000], vec![0.0; 96_000]);
         bus.render(&mut l, &mut rr);
@@ -1067,9 +1264,129 @@ mod tests {
     }
 
     #[test]
+    fn commands_play_as_the_methods_do() {
+        let mut a = SynthBus::new(48_000.0);
+        let mut b = SynthBus::new(48_000.0);
+        let listener = Listener3 { pos: [2.0, 1.0, 3.0], ..Listener3::default() };
+        let room = RoomPreset::Room.params();
+        let recipe = Recipe::parse(builtin("coin").unwrap()).unwrap();
+        let emitter = Emitter::at([1.0, 0.0, -4.0], 40.0);
+        let spec = crate::engine::preset("v8").unwrap();
+        let engine = EngineInput { rpm: 3000.0, throttle: 0.7, load: 0.5, gear: 2, speed: 12.0 };
+        let tyres = TyreInput { speed: 12.0, load: 1.0, grounded: 4, ..TyreInput::default() };
+        a.set_listener(listener);
+        a.set_room(room);
+        a.set_group_gain(Group::Music, 0.5);
+        assert!(a.play_recipe(1, &recipe, 1.1, 0.6, emitter, Priority::Normal, 0));
+        a.tone(2, 220.0, Some(Wave::Sine), 0.3);
+        a.tone_set(2, Some(330.0), Some(0.2));
+        assert!(a.vehicle(7, &spec, engine, tyres, emitter, 0.25, 0.6));
+        a.end_frame();
+        assert!(a.add_instrument(3, Box::new(Drone), Emitter::FLAT, 0.8, &mut |_| panic!("no retirement")));
+        a.set_instrument_group(3, Group::Music);
+        a.instrument_mut(3).unwrap().note_on(60, 100);
+        for cmd in [
+            Command::Listener(listener),
+            Command::Room(room),
+            Command::GroupGain { group: Group::Music, gain: 0.5 },
+            Command::PlayRecipe { id: 1, recipe, pitch: 1.1, gain: 0.6, emitter, priority: Priority::Normal, key: 0 },
+            Command::Tone { id: 2, freq: 220.0, wave: Some(Wave::Sine), gain: 0.3 },
+            Command::ToneSet { id: 2, freq: Some(330.0), gain: Some(0.2) },
+            Command::Vehicle { key: 7, spec, engine, tyres, emitter, interior: 0.25, gain: 0.6 },
+            Command::EndFrame,
+            Command::AddInstrument { key: 3, inst: Box::new(Drone), emitter: Emitter::FLAT, gain: 0.8 },
+            Command::InstrumentGroup { key: 3, group: Group::Music },
+            Command::NoteOn { key: 3, note: 60, velocity: 100 },
+        ] {
+            b.apply(cmd, &mut |_| panic!("no retirement"));
+        }
+        let (mut al, mut ar) = (vec![0.0; 4800], vec![0.0; 4800]);
+        let (mut bl, mut br) = (vec![0.0; 4800], vec![0.0; 4800]);
+        a.render(&mut al, &mut ar);
+        b.render(&mut bl, &mut br);
+        assert_eq!(al, bl);
+        assert_eq!(ar, br);
+        // CPU timings measure separate renders, not synthesis state.
+        let same_view = |a: &SynthBus, b: &SynthBus| {
+            let (mut a, mut b) = (a.view(), b.view());
+            a.stats.cpu_load = 0.0;
+            a.stats.peak_cpu_load = 0.0;
+            b.stats.cpu_load = 0.0;
+            b.stats.peak_cpu_load = 0.0;
+            assert_eq!(a, b);
+        };
+        same_view(&a, &b);
+        a.fade_instrument(3, 0.05);
+        a.stop_voice(1);
+        a.fade_tones(|id| id == 2, 0.05);
+        a.vehicle_release(7);
+        for cmd in [
+            Command::FadeInstrument { key: 3, secs: 0.05 },
+            Command::StopVoice { id: 1 },
+            Command::FadeTones { prefix: 2, shift: 0, secs: 0.05 },
+            Command::VehicleRelease { key: 7 },
+        ] {
+            b.apply(cmd, &mut |_| panic!("no retirement"));
+        }
+        let (mut al, mut ar) = (vec![0.0; 48_000], vec![0.0; 48_000]);
+        let (mut bl, mut br) = (vec![0.0; 48_000], vec![0.0; 48_000]);
+        a.render(&mut al, &mut ar);
+        b.render(&mut bl, &mut br);
+        assert_eq!(al, bl);
+        assert_eq!(ar, br);
+        for bus in [&mut a, &mut b] {
+            let mut reaped = 0;
+            bus.reap(&mut |r| {
+                assert!(matches!(r, Retired::Instrument { key: 3, .. }));
+                reaped += 1;
+            });
+            assert_eq!(reaped, 1);
+        }
+        same_view(&a, &b);
+    }
+
+    #[test]
+    fn a_full_bus_refuses_cuts_the_oldest_fade_and_never_grows() {
+        let mut bus = SynthBus::new(48_000.0);
+        let capacity = bus.instruments.capacity();
+        let mut retired = Vec::new();
+        for key in 1..=8 {
+            assert!(bus.add_instrument(key, Box::new(Drone), Emitter::FLAT, 1.0, &mut |r| retired.push(r)));
+            assert_eq!(bus.instruments.capacity(), capacity);
+        }
+        assert!(retired.is_empty());
+        assert!(!bus.add_instrument(9, Box::new(Drone), Emitter::FLAT, 1.0, &mut |r| retired.push(r)));
+        assert_eq!(retired.len(), 1);
+        assert!(matches!(retired.pop(), Some(Retired::Refused { key: 9, .. })));
+        assert!(bus.add_instrument(1, Box::new(Drone), Emitter::FLAT, 1.0, &mut |r| retired.push(r)));
+        assert_eq!(retired.len(), 1);
+        assert!(matches!(retired.pop(), Some(Retired::Instrument { key: 1, .. })));
+        assert_eq!(bus.instruments.capacity(), capacity);
+        for key in 1..=8 {
+            bus.fade_instrument(key, key as f32 * 0.1);
+        }
+        let (mut l, mut r) = (vec![0.0; 2400], vec![0.0; 2400]);
+        bus.render(&mut l, &mut r);
+        for key in 11..=18 {
+            assert!(bus.add_instrument(key, Box::new(Drone), Emitter::FLAT, 1.0, &mut |r| retired.push(r)));
+            assert_eq!(bus.instruments.capacity(), capacity);
+        }
+        assert!(retired.is_empty());
+        assert_eq!(bus.instruments.len(), capacity);
+        bus.fade_instrument(11, 0.1);
+        let (mut l, mut r) = ([0.0; 240], [0.0; 240]);
+        bus.render(&mut l, &mut r);
+        assert!(bus.add_instrument(21, Box::new(Drone), Emitter::FLAT, 1.0, &mut |r| retired.push(r)));
+        assert_eq!(retired.len(), 1);
+        assert!(matches!(retired.pop(), Some(Retired::Instrument { key: 1, .. })));
+        assert_eq!(bus.instruments.capacity(), capacity);
+        assert_eq!(bus.view().instrument_count, 8);
+    }
+
+    #[test]
     fn a_retired_instrument_fades_frees_its_key_and_is_reaped() {
         let mut bus = SynthBus::new(48_000.0);
-        assert!(bus.add_instrument(1, Box::new(Drone), Emitter::FLAT, 1.0).is_ok());
+        assert!(bus.add_instrument(1, Box::new(Drone), Emitter::FLAT, 1.0, &mut |_| {}));
         let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
         bus.render(&mut l, &mut r);
         let before = l.iter().fold(0.0f32, |a, x| a.max(x.abs()));
@@ -1077,7 +1394,7 @@ mod tests {
         bus.fade_instrument(1, 0.2);
         assert!(bus.instrument_mut(1).is_none(), "a retiring slot is not found");
         // The same key installs again at once, beside the fading one.
-        assert!(bus.add_instrument(1, Box::new(Drone), Emitter::FLAT, 0.0).is_ok());
+        assert!(bus.add_instrument(1, Box::new(Drone), Emitter::FLAT, 0.0, &mut |_| {}));
         assert_eq!(bus.live_counts().3, 2);
         // The first 50 ms of the fade: no cut, and falling.
         let (mut l, mut r) = (vec![0.0; 2400], vec![0.0; 2400]);
@@ -1086,13 +1403,22 @@ mod tests {
         let (first, later) = (peak(&l[..240]), peak(&l[2160..]));
         assert!(first > before * 0.5, "no cut at the retire: {first} vs {before}");
         assert!(later < first, "falling: {later} after {first}");
-        assert!(bus.reap_instruments().is_empty(), "not reaped mid-fade");
+        let mut reaped = 0;
+        bus.reap(&mut |r| {
+            assert!(matches!(r, Retired::Instrument { key: 1, .. }));
+            reaped += 1;
+        });
+        assert_eq!(reaped, 0, "not reaped mid-fade");
         let (mut l, mut r) = (vec![0.0; 9600], vec![0.0; 9600]);
         bus.render(&mut l, &mut r);
         // Only the room's (slowly decaying) tail is left.
         let after = l[4800..].iter().fold(0.0f32, |a, x| a.max(x.abs()));
         assert!(after < before * 0.5, "the fade ended: {after} vs {before}");
-        assert_eq!(bus.reap_instruments().len(), 1, "the retired one is handed back");
+        bus.reap(&mut |r| {
+            assert!(matches!(r, Retired::Instrument { key: 1, .. }));
+            reaped += 1;
+        });
+        assert_eq!(reaped, 1, "the retired one is handed back");
         assert_eq!(bus.live_counts().3, 1, "the new one stays");
     }
 
@@ -1106,7 +1432,7 @@ mod tests {
         };
         // Music: an instrument in the music group, muted -> near silence.
         let mut bus = SynthBus::new(48_000.0);
-        assert!(bus.add_instrument(1, Box::new(Drone), Emitter::FLAT, 1.0).is_ok());
+        assert!(bus.add_instrument(1, Box::new(Drone), Emitter::FLAT, 1.0, &mut |_| {}));
         bus.set_instrument_group(1, Group::Music);
         let loud = peak(&mut bus);
         bus.set_group_gain(Group::Music, 0.0);
@@ -1142,11 +1468,20 @@ mod tests {
         assert_eq!(bus.live_counts().2, 1, "only the owned tone ended");
     }
 
+    /// An undriven vehicle fades out; its view keeps one incarnation while it is driven and gets
+    /// a new one when a drive revives it from stopping.
     #[test]
     fn an_undriven_vehicle_fades_out() {
         let mut bus = SynthBus::new(48_000.0);
         let spec = crate::engine::preset("v8").unwrap();
+        let serial = |bus: &SynthBus| bus.view().vehicles[..bus.view().vehicle_count].iter().find(|v| v.key == 7).map(|v| v.serial);
         bus.vehicle(7, &spec, EngineInput::default(), TyreInput::default(), Emitter::FLAT, 0.0, 1.0);
+        let first = serial(&bus);
+        bus.vehicle(7, &spec, EngineInput::default(), TyreInput::default(), Emitter::FLAT, 0.0, 1.0);
+        assert_eq!(serial(&bus), first, "driving it again is the same incarnation");
+        bus.vehicle_release(7);
+        bus.vehicle(7, &spec, EngineInput::default(), TyreInput::default(), Emitter::FLAT, 0.0, 1.0);
+        assert!(first.is_some() && serial(&bus) != first, "a drive while stopping starts a new incarnation");
         bus.end_frame();
         let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
         bus.render(&mut l, &mut r);

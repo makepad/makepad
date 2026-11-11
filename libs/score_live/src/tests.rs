@@ -470,7 +470,7 @@ fn game_music_plays_on_a_synth_bus_in_real_time() {
     use makepad_audio_synth::bus::{Emitter, Group, SynthBus};
     let (mut handle, inst) = music(PULSE_A, 48_000.0, Clocking::Realtime).unwrap();
     let mut bus = SynthBus::new(48_000.0);
-    assert!(bus.add_instrument(7, Box::new(inst), Emitter::FLAT, 1.0).is_ok());
+    assert!(bus.add_instrument(7, Box::new(inst), Emitter::FLAT, 1.0, &mut |_| {}));
     bus.set_instrument_group(7, Group::Music);
     // Paced like an audio callback: 10 ms blocks for 0.8 s.
     let (mut l, mut r) = (vec![0.0; 480], vec![0.0; 480]);

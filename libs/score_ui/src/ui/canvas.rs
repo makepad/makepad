@@ -990,6 +990,7 @@ impl Widget for ScoreCanvas {
                     // than decaying towards one, so this eventually stops
                     // asking and the app goes quiet.
                     if state.practice.playing
+                        || state.playback.holds_commands()
                         || state.ui.glide.active
                         || self.motion.moving()
                         || self.zoom_ease.active
@@ -1053,7 +1054,7 @@ impl Widget for ScoreCanvas {
                 self.area.redraw(cx);
             }
             Hit::FingerDown(down) => {
-                cx.set_key_focus(self.area);
+                cx.set_key_focus_from_user(self.area);
                 let semantic = self.semantic_at(state, down.abs);
                 if down.mouse_button().is_some_and(|button| button.is_secondary()) {
                     cx.action(ScoreAction::ContextMenu {
@@ -1216,7 +1217,6 @@ impl Widget for ScoreCanvas {
                     if session.moved {
                         // One gesture, one transaction, one undo step.
                         state.finish_note_drag(
-                            cx,
                             &session.drag,
                             &session.target,
                             session.copy,
@@ -1307,7 +1307,6 @@ impl Widget for ScoreCanvas {
                                     let fraction =
                                         (point.x - bounds.min.x) / bounds.width().max(0.01);
                                     state.handle_mouse_entry(
-                                        cx,
                                         id,
                                         preview_midi(bounds, point),
                                         fraction,
@@ -1467,7 +1466,7 @@ impl Widget for ScoreCanvas {
         self.draw_note_drag(cx);
         self.draw_band(cx);
         let pan = state.ui.pan;
-        let playing = state.practice.playing;
+        let playing = state.practice.playing || state.playback.holds_commands();
         let gliding = state.ui.glide.active;
         self.draw_scroll_bars(cx, rect, pan);
 

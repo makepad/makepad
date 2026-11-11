@@ -5,7 +5,6 @@ use crate::clock::{
 };
 use crate::event::{EventSource, SynthEvent, SynthEventKind};
 use crate::practice::{MixSnapshot, PartMixer};
-use crate::ring::SpscRing;
 use crate::scheduler::PerformancePlan;
 use std::ops::Range;
 
@@ -121,7 +120,6 @@ pub struct RenderContext {
 pub enum RenderStatus {
     Rendered,
     InvalidBuffer,
-    PendingOverflow,
 }
 
 #[derive(Clone, Copy)]
@@ -145,7 +143,6 @@ pub struct PlaybackEngine<B, const PENDING: usize, const PARTS: usize> {
     event_cursor: usize,
     pending: [AudioMessage; PENDING],
     pending_len: usize,
-    pending_overflows: u64,
     loop_count: u64,
     mix_snapshot: [MixSnapshot; PARTS],
     local_discontinuity: LocalDiscontinuity,
@@ -165,7 +162,6 @@ impl<B: SynthBackend, const PENDING: usize, const PARTS: usize>
             event_cursor: 0,
             pending: [AudioMessage::EMPTY; PENDING],
             pending_len: 0,
-            pending_overflows: 0,
             loop_count: 0,
             mix_snapshot: [MixSnapshot {
                 gain: 0.0,
@@ -201,8 +197,21 @@ impl<B: SynthBackend, const PENDING: usize, const PARTS: usize>
         self.loop_count
     }
 
-    pub fn pending_overflow_count(&self) -> u64 {
-        self.pending_overflows
+    /// Take a message for the callback that renders next. Its pending queue is fixed: when
+    /// it is full the message comes back, and the caller keeps it for a later block (the
+    /// ones queued are applied as they fall due, which makes room). Nothing is dropped.
+    pub fn queue(&mut self, message: AudioMessage) -> Result<(), AudioMessage> {
+        if self.pending_len >= PENDING {
+            return Err(message);
+        }
+        let mut index = self.pending_len;
+        while index > 0 && self.pending[index - 1].key() > message.key() {
+            self.pending[index] = self.pending[index - 1];
+            index -= 1;
+        }
+        self.pending[index] = message;
+        self.pending_len += 1;
+        Ok(())
     }
 
     /// Audio-owner convenience. Cross-thread callers should enqueue an `AudioMessage`.
@@ -258,12 +267,11 @@ impl<B: SynthBackend, const PENDING: usize, const PARTS: usize>
         self.event_cursor = plan.lower_bound(self.timeline_sample());
     }
 
-    pub fn render<const RING: usize>(
+    pub fn render(
         &mut self,
         context: RenderContext,
         channels: &mut [&mut [f32]],
         plan: &PerformancePlan,
-        messages: &SpscRing<AudioMessage, RING>,
         mixer: &PartMixer<PARTS>,
         clock: &AtomicAudioClock,
     ) -> RenderStatus {
@@ -281,10 +289,6 @@ impl<B: SynthBackend, const PENDING: usize, const PARTS: usize>
         mixer.snapshot(&mut self.mix_snapshot);
         self.backend.begin_block(&self.mix_snapshot);
         self.apply_local_discontinuity(context.first_device_sample, plan);
-        let overflow_before = self.pending_overflows;
-        while let Some(message) = messages.pop() {
-            self.insert_pending(message);
-        }
 
         let mut offset = 0usize;
         while offset < context.frames {
@@ -360,25 +364,7 @@ impl<B: SynthBackend, const PENDING: usize, const PARTS: usize>
             loop_enabled: self.loop_enabled,
             quality: context.clock_quality,
         });
-        if self.pending_overflows != overflow_before {
-            RenderStatus::PendingOverflow
-        } else {
-            RenderStatus::Rendered
-        }
-    }
-
-    fn insert_pending(&mut self, message: AudioMessage) {
-        if self.pending_len >= PENDING {
-            self.pending_overflows = self.pending_overflows.saturating_add(1);
-            return;
-        }
-        let mut index = self.pending_len;
-        while index > 0 && self.pending[index - 1].key() > message.key() {
-            self.pending[index] = self.pending[index - 1];
-            index -= 1;
-        }
-        self.pending[index] = message;
-        self.pending_len += 1;
+        RenderStatus::Rendered
     }
 
     fn apply_local_discontinuity(&mut self, device_sample: u64, plan: &PerformancePlan) {

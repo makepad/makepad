@@ -27,7 +27,7 @@ use crate::player::{prepare, prepare_slice, transport, ClockMode, Player};
 use crate::render::transport_bpm;
 use makepad_audio_synth::instrument::Instrument;
 use makepad_flow::live::plan::OwnerSlice;
-use makepad_flow::live::spsc::{ring, Consumer, Producer};
+use makepad_lock_free::{ring, Consumer, Producer};
 use makepad_audio_engine::feed::{loop_feed, LoopFeed};
 use makepad_audio_engine::schedule::{migrate_state, ClockChunk, Layout};
 use makepad_audio_engine::CHUNK;

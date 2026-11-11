@@ -2,6 +2,12 @@
 //! `score_play` messages; the audio callback owns the realtime engine and a
 //! physically modelled piano. The SoundFont sampler serves the metronome
 //! click.
+//!
+//! The UI builds each engine (for a plan and the device's rate) and sends it,
+//! and every message, down one ordered ring; the callback adopts an engine
+//! between blocks and hands the one it replaced back on a second ring, so it
+//! never allocates or frees. A command the ring has no room for is held here,
+//! reported, and sent first on a later frame: nothing the user did is lost.
 
 use crate::sound::SoundSettings;
 use makepad_score::model::{EventKind, Rational, Score};
@@ -9,7 +15,7 @@ use makepad_score_play::{
     Articulation as PlayArticulation, AtomicAudioClock, AudioClockSnapshot, AudioMessage,
     AudioMessageKind, AuditionController, ClockQuality, CountInSpec, DisplayPosition, EventBatch,
     Meter, NoteInput, PartMixer, PerformancePlan, PlanInput, PlaybackEngine, RenderContext,
-    ScheduleOptions, Scheduler, ScrubConfig, ScrubController, ScrubHit, ScrubOutcome, SpscRing,
+    ScheduleOptions, Scheduler, ScrubConfig, ScrubController, ScrubHit, ScrubOutcome,
     SynthBackend, SynthEvent, SynthEventKind, SynthEventTiming, TempoMap, TransportLoop,
 };
 use crate::sound::ScoreEngine;
@@ -24,6 +30,7 @@ use makepad_widgets_core::*;
 use std::{
     ops::Range,
     ptr,
+    collections::VecDeque,
     sync::{
         atomic::{AtomicI64, AtomicPtr, AtomicU32, AtomicU64, Ordering},
         Arc,
@@ -310,8 +317,34 @@ impl Drop for InstrumentHandoff {
     }
 }
 
+type Engine = PlaybackEngine<SamplerBackend, PENDING_CAPACITY, PART_CAPACITY>;
+
+/// What the callback renders with: an engine, the plan it plays and the
+/// stream generation it reports. Built on the UI thread and handed over whole.
+struct Playing {
+    engine: Engine,
+    plan: Arc<PerformancePlan>,
+    generation: u32,
+}
+
+/// The UI's commands to the callback, in the order they were given.
+enum ToAudio {
+    /// Render with this from the next block on; the one it replaces goes back.
+    Playing(Box<Playing>),
+    Message(AudioMessage),
+}
+
 pub struct PlaybackBridge {
-    messages: Arc<SpscRing<AudioMessage, MESSAGE_CAPACITY>>,
+    commands: makepad_lock_free::Producer<ToAudio>,
+    /// Engines the callback replaced, dropped here.
+    retired: makepad_lock_free::Consumer<Box<Playing>>,
+    /// The callback's state until `install_audio_output` moves it there.
+    audio: Option<AudioSide>,
+    /// Commands the ring had no room for, sent first, in order, as it drains.
+    held: VecDeque<ToAudio>,
+    /// The current plan has not been sent with an engine yet.
+    plan_unsent: bool,
+    generation: u32,
     clock: Arc<AtomicAudioClock>,
     mixer: Arc<PartMixer<PART_CAPACITY>>,
     plan: Arc<PerformancePlan>,
@@ -329,19 +362,48 @@ pub struct PlaybackBridge {
     /// What the instrument is actually putting out, written by the audio
     /// thread once per rendered span. One relaxed store; read for display.
     peak: Arc<AtomicU32>,
-    installed: bool,
 }
 
 impl PlaybackBridge {
     pub fn new(score: &Score, bpm: f64, count_in: bool) -> Self {
+        let (commands, audio_commands) = makepad_lock_free::ring(MESSAGE_CAPACITY);
+        // Each command retires at most one engine, and one more is rendering:
+        // the callback's push back can never find this ring full.
+        let (audio_retired, retired) = makepad_lock_free::ring(MESSAGE_CAPACITY + 1);
+        let clock = Arc::new(AtomicAudioClock::new());
+        let mixer = Arc::new(PartMixer::new());
+        let device_sample = Arc::new(AtomicU64::new(0));
+        // Zero until a callback reports the device's rate.
+        let device_rate_bits = Arc::new(AtomicU32::new(0));
+        let host_offset_ns = Arc::new(AtomicI64::new(0));
         Self {
-            messages: Arc::new(SpscRing::new()),
-            clock: Arc::new(AtomicAudioClock::new()),
-            mixer: Arc::new(PartMixer::new()),
+            commands,
+            retired,
+            audio: Some(AudioSide {
+                commands: audio_commands,
+                retired: audio_retired,
+                playing: None,
+                refused: None,
+                clock: clock.clone(),
+                mixer: mixer.clone(),
+                device_sample: device_sample.clone(),
+                device_rate_bits: device_rate_bits.clone(),
+                host_offset_ns: host_offset_ns.clone(),
+                fallback_device_sample: 0,
+                // Agent/test instances must never make sound on the user's machine.
+                muted: std::env::var_os("MAKEPAD_SCORE_MUTE").is_some(),
+                #[cfg(test)]
+                received: 0,
+            }),
+            held: VecDeque::new(),
+            plan_unsent: true,
+            generation: 1,
+            clock,
+            mixer,
             plan: Arc::new(compile_plan(score, bpm, count_in)),
-            device_sample: Arc::new(AtomicU64::new(0)),
-            device_rate_bits: Arc::new(AtomicU32::new((PLAN_RATE as f32).to_bits())),
-            host_offset_ns: Arc::new(AtomicI64::new(0)),
+            device_sample,
+            device_rate_bits,
+            host_offset_ns,
             audition: AuditionController::new(),
             scrub: ScrubController::new(ScrubConfig::for_sample_rate(PLAN_RATE)),
             sequence: 1_000_000,
@@ -354,7 +416,6 @@ impl PlaybackBridge {
             instrument: Arc::new(InstrumentHandoff::default()),
             pending_instrument: None,
             peak: Arc::new(AtomicU32::new(0)),
-            installed: false,
         }
     }
 
@@ -399,12 +460,7 @@ impl PlaybackBridge {
     /// the one it replaces — so switching engine mid-phrase is a dissolve,
     /// not a cut, and never a panic.
     pub fn rebuild_instrument(&mut self, engine: ScoreEngine, preset: &PianoPreset) {
-        let rate = f32::from_bits(self.device_rate_bits.load(Ordering::Relaxed));
-        let rate = if rate.is_finite() {
-            rate.clamp(8_000.0, 192_000.0)
-        } else {
-            PLAN_RATE as f32
-        };
+        let rate = self.device_rate().unwrap_or(PLAN_RATE as f32).clamp(8_000.0, 192_000.0);
         // Latest request wins: an older pending build is simply dropped here.
         self.pending_instrument = Some(Box::new(build_engine(engine, rate, preset)));
         self.service_instrument();
@@ -420,9 +476,74 @@ impl PlaybackBridge {
     }
 
 
+    /// A new plan goes to the callback with a fresh engine (the transport
+    /// stops, as a new score should), ahead of anything still held.
     pub fn rebuild_plan(&mut self, score: &Score, bpm: f64, count_in: bool) {
         self.plan = Arc::new(compile_plan(score, bpm, count_in));
-        self.installed = false;
+        self.plan_unsent = true;
+        self.flush();
+    }
+
+    /// Once a frame: the instrument handoff, then the commands still held and
+    /// the engines the callback gave back.
+    pub fn service(&mut self) {
+        self.service_instrument();
+        self.flush();
+    }
+
+    /// Commands are waiting for room in the ring: keep frames coming so they
+    /// go as soon as the callback drains it.
+    /// Only once a callback has run: before that there is no device to wait for.
+    pub fn holds_commands(&self) -> bool {
+        !self.held.is_empty() && !self.plan_unsent
+    }
+
+    /// Send what is held, in order, as far as the ring has room. An engine for
+    /// an unsent plan is built here once a callback has reported the device's
+    /// rate and goes ahead of everything held: no message reaches the callback
+    /// before it has an engine to give it to.
+    fn flush(&mut self) {
+        while let Some(old) = self.retired.pop() {
+            drop(old);
+        }
+        if self.plan_unsent {
+            let Some(rate) = self.device_rate() else { return };
+            self.generation = self.generation.wrapping_add(1).max(1);
+            let engine = Engine::new(SamplerBackend::new(
+                rate,
+                self.sound.clone(),
+                self.instrument.clone(),
+                self.peak.clone(),
+            ));
+            // An engine built for an older plan and never sent is superseded.
+            self.held.retain(|command| !matches!(command, ToAudio::Playing(_)));
+            self.held.push_front(ToAudio::Playing(Box::new(Playing {
+                engine,
+                plan: self.plan.clone(),
+                generation: self.generation,
+            })));
+            self.plan_unsent = false;
+        }
+        while let Some(command) = self.held.pop_front() {
+            if let Err(command) = self.commands.push(command) {
+                self.held.push_front(command);
+                return;
+            }
+        }
+    }
+
+    /// Queue a command behind anything held. The first one that finds the
+    /// ring full is reported; it and the rest go on a later frame.
+    fn send(&mut self, command: ToAudio) {
+        let was_held = self.held.len();
+        self.held.push_back(command);
+        self.flush();
+        if was_held == 0 && !self.held.is_empty() && !self.plan_unsent {
+            log!(
+                "score playback: the audio queue is full ({} commands); later ones are held and sent in order as the callback drains it",
+                self.commands.capacity()
+            );
+        }
     }
 
     pub fn plan(&self) -> &PerformancePlan {
@@ -579,102 +700,135 @@ impl PlaybackBridge {
             kind,
         };
         self.sequence = self.sequence.wrapping_add(1).max(1_000_000);
-        let _ = self.messages.push(message);
+        self.send(ToAudio::Message(message));
     }
 
-    fn push_batch(&self, batch: EventBatch) {
+    fn push_batch(&mut self, batch: EventBatch) {
         for message in batch.as_slice().iter().copied() {
-            let _ = self.messages.push(message);
+            self.send(ToAudio::Message(message));
         }
     }
 
-    /// Installs (or replaces after a plan edit) callback zero. The callback
-    /// allocates nothing: engine, sampler, event storage, and scratch audio
-    /// are fixed before the first quantum.
+    /// Installs callback zero, once. Plans and engines reach it through the
+    /// command ring (see `flush`).
     pub fn install_audio_output(&mut self, cx: &mut Cx) {
-        if self.installed {
+        let Some(mut audio) = self.audio.take() else { return };
+        cx.audio_output(0, move |info, output| audio.render(info, output));
+    }
+}
+
+/// The audio callback's state. It renders with the engine the UI sent last,
+/// and allocates and frees nothing: engines come built and go back whole.
+struct AudioSide {
+    commands: makepad_lock_free::Consumer<ToAudio>,
+    retired: makepad_lock_free::Producer<Box<Playing>>,
+    playing: Option<Box<Playing>>,
+    /// A message the engine's pending queue had no room for; it goes first on
+    /// the next block, ahead of the ring.
+    refused: Option<AudioMessage>,
+    clock: Arc<AtomicAudioClock>,
+    mixer: Arc<PartMixer<PART_CAPACITY>>,
+    device_sample: Arc<AtomicU64>,
+    device_rate_bits: Arc<AtomicU32>,
+    host_offset_ns: Arc<AtomicI64>,
+    fallback_device_sample: u64,
+    muted: bool,
+    /// Messages handed to an engine (tests count what arrived).
+    #[cfg(test)]
+    received: u64,
+}
+
+impl AudioSide {
+    /// Adopt what the UI sent, in order, while the engine has room for it.
+    fn take_commands(&mut self) {
+        loop {
+            if let Some(message) = self.refused.take() {
+                let Some(playing) = self.playing.as_mut() else { return };
+                if let Err(message) = playing.engine.queue(message) {
+                    self.refused = Some(message);
+                    return;
+                }
+                #[cfg(test)]
+                {
+                    self.received += 1;
+                }
+            }
+            let Some(command) = self.commands.pop() else { return };
+            match command {
+                ToAudio::Playing(next) => {
+                    if let Some(old) = self.playing.replace(next) {
+                        if let Err(old) = self.retired.push(old) {
+                            // Unreachable: the retire ring holds more than the
+                            // command ring can ever retire. Never free here.
+                            debug_assert!(false, "the retire ring was full");
+                            std::mem::forget(old);
+                        }
+                    }
+                }
+                ToAudio::Message(message) => {
+                    // `flush` sends an engine before any message.
+                    debug_assert!(self.playing.is_some(), "a message came before an engine");
+                    self.refused = Some(message);
+                }
+            }
+        }
+    }
+
+    fn render(&mut self, info: AudioInfo, output: &mut AudioBuffer) {
+        output.zero();
+        let rate = info.sample_rate.clamp(8_000.0, 384_000.0) as f32;
+        self.device_rate_bits.store(rate.to_bits(), Ordering::Relaxed);
+        self.take_commands();
+        let frames = output.frame_count();
+        let channel_count = output.channel_count();
+        if frames == 0 || channel_count == 0 {
             return;
         }
-        let messages = self.messages.clone();
-        let clock = self.clock.clone();
-        let mixer = self.mixer.clone();
-        let plan = self.plan.clone();
-        let device_sample = self.device_sample.clone();
-        let device_rate_bits = self.device_rate_bits.clone();
-        let host_offset_ns = self.host_offset_ns.clone();
-        let sound = self.sound.clone();
-        let instrument = self.instrument.clone();
-        let peak = self.peak.clone();
-        let mut engine: Option<PlaybackEngine<SamplerBackend, PENDING_CAPACITY, PART_CAPACITY>> = None;
-        let mut fallback_device_sample = 0_u64;
-        let mut stream_generation = 1_u32;
-        // Agent/test instances must never make sound on the user's machine.
-        let muted = std::env::var_os("MAKEPAD_SCORE_MUTE").is_some();
-        cx.audio_output(0, move |info, output| {
-            output.zero();
-            let rate = info.sample_rate.clamp(8_000.0, 384_000.0) as f32;
-            device_rate_bits.store(rate.to_bits(), Ordering::Relaxed);
-            if engine.is_none() {
-                engine = Some(PlaybackEngine::new(SamplerBackend::new(
-                    rate,
-                    sound.clone(),
-                    instrument.clone(),
-                    peak.clone(),
-                )));
-                stream_generation = stream_generation.wrapping_add(1).max(1);
-            }
-            let frames = output.frame_count();
-            let channel_count = output.channel_count();
-            if frames == 0 || channel_count == 0 {
-                return;
-            }
-            let first_device_sample = info
-                .time
-                .filter(|time| time.sample_time.is_finite() && time.sample_time >= 0.0)
-                .map(|time| time.sample_time.round() as u64)
-                .unwrap_or(fallback_device_sample);
-            fallback_device_sample = first_device_sample.saturating_add(frames as u64);
-            device_sample.store(fallback_device_sample, Ordering::Release);
-            let ui_ns = (Cx::time_now().max(0.0) * 1_000_000_000.0) as u64;
-            let presentation_host_ns = info.time.map_or(ui_ns, |time| time.host_time);
-            let offset = i128::from(presentation_host_ns) - i128::from(ui_ns);
-            host_offset_ns.store(
-                offset.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
-                Ordering::Relaxed,
-            );
-            // Muted instances still render (so the transport clock advances and
-            // cursor/state verification works); only the samples are discarded.
-            let context = RenderContext {
-                first_device_sample,
-                device_sample_rate: info.sample_rate.clamp(8_000.0, 384_000.0) as u32,
-                first_presentation_host_ns: presentation_host_ns,
-                frames,
-                output_latency_frames: 0,
-                stream_generation,
-                clock_quality: if info.time.is_some() {
-                    ClockQuality::Exact
-                } else {
-                    ClockQuality::Estimated
-                },
-            };
-            let Some(engine) = engine.as_mut() else { return };
-            if channel_count == 1 {
-                let channel = &mut output.data[..frames];
-                let mut channels: [&mut [f32]; 1] = [channel];
-                let _ = engine.render(context, &mut channels, &plan, &messages, &mixer, &clock);
+        let first_device_sample = info
+            .time
+            .filter(|time| time.sample_time.is_finite() && time.sample_time >= 0.0)
+            .map(|time| time.sample_time.round() as u64)
+            .unwrap_or(self.fallback_device_sample);
+        self.fallback_device_sample = first_device_sample.saturating_add(frames as u64);
+        self.device_sample.store(self.fallback_device_sample, Ordering::Release);
+        let ui_ns = (Cx::time_now().max(0.0) * 1_000_000_000.0) as u64;
+        let presentation_host_ns = info.time.map_or(ui_ns, |time| time.host_time);
+        let offset = i128::from(presentation_host_ns) - i128::from(ui_ns);
+        self.host_offset_ns.store(
+            offset.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
+            Ordering::Relaxed,
+        );
+        // Silence until the UI's first engine arrives (it needs this rate).
+        let Some(playing) = self.playing.as_mut() else { return };
+        let Playing { engine, plan, generation } = &mut **playing;
+        let context = RenderContext {
+            first_device_sample,
+            device_sample_rate: info.sample_rate.clamp(8_000.0, 384_000.0) as u32,
+            first_presentation_host_ns: presentation_host_ns,
+            frames,
+            output_latency_frames: 0,
+            stream_generation: *generation,
+            clock_quality: if info.time.is_some() {
+                ClockQuality::Exact
             } else {
-                let (left, remaining) = output.data.split_at_mut(frames);
-                let right = &mut remaining[..frames];
-                let mut channels: [&mut [f32]; 2] = [left, right];
-                let _ = engine.render(context, &mut channels, &plan, &messages, &mixer, &clock);
-            }
-            // A muted instance renders normally — so the transport clock, cursor
-            // and engine state stay verifiable — and then discards the samples.
-            if muted {
-                output.zero();
-            }
-        });
-        self.installed = true;
+                ClockQuality::Estimated
+            },
+        };
+        if channel_count == 1 {
+            let channel = &mut output.data[..frames];
+            let mut channels: [&mut [f32]; 1] = [channel];
+            let _ = engine.render(context, &mut channels, plan, &self.mixer, &self.clock);
+        } else {
+            let (left, remaining) = output.data.split_at_mut(frames);
+            let right = &mut remaining[..frames];
+            let mut channels: [&mut [f32]; 2] = [left, right];
+            let _ = engine.render(context, &mut channels, plan, &self.mixer, &self.clock);
+        }
+        // A muted instance renders normally — so the transport clock, cursor
+        // and engine state stay verifiable — and then discards the samples.
+        if self.muted {
+            output.zero();
+        }
     }
 }
 
@@ -1149,6 +1303,133 @@ fn rational_f64(value: Rational) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    /// Counts every heap call made on a thread that armed it (the tests that
+    /// stand in for the audio callback); other threads' calls pass through.
+    struct CountingAllocator;
+
+    std::thread_local! {
+        static COUNT_HEAP: Cell<bool> = const { Cell::new(false) };
+    }
+
+    static HEAP_CALLS: AtomicU64 = AtomicU64::new(0);
+
+    fn count_heap_call() {
+        if COUNT_HEAP.with(|armed| armed.get()) {
+            HEAP_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            count_heap_call();
+            // SAFETY: the exact request goes to the system allocator.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            count_heap_call();
+            // SAFETY: the exact request goes to the system allocator.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            count_heap_call();
+            // SAFETY: the pointer and layout came from this allocator.
+            unsafe { System.realloc(pointer, layout, size) }
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            count_heap_call();
+            // SAFETY: the pointer and layout came from this allocator.
+            unsafe { System.dealloc(pointer, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    /// One callback block of 512 frames at 48 kHz, counted: it must make no
+    /// heap call at all.
+    fn audio_block(audio: &mut AudioSide, output: &mut AudioBuffer, n: u64) {
+        let info = AudioInfo {
+            device_id: AudioDeviceId(LiveId(0)),
+            time: Some(AudioTime {
+                sample_time: (n * 512) as f64,
+                host_time: n * 512 * 1_000_000_000 / 48_000,
+                rate_scalar: 1.0,
+            }),
+            sample_rate: 48_000.0,
+        };
+        HEAP_CALLS.store(0, Ordering::Relaxed);
+        COUNT_HEAP.with(|armed| armed.set(true));
+        audio.render(info, output);
+        COUNT_HEAP.with(|armed| armed.set(false));
+        assert_eq!(HEAP_CALLS.load(Ordering::Relaxed), 0, "callback block {n} used the heap");
+    }
+
+    /// A ring full of commands (the callback parked or behind) loses none of
+    /// them: the bridge holds what does not fit and sends it in order, a plan
+    /// edit in the middle hands a fresh engine over and gets the old one back,
+    /// and the callback neither allocates nor frees while it adopts, retires
+    /// and renders.
+    #[test]
+    fn a_full_queue_loses_no_command_and_the_callback_touches_no_heap() {
+        let document = crate::ScoreDocument::demo().unwrap();
+        let mut bridge = PlaybackBridge::new(document.score(), 108.0, false);
+        let mut audio = bridge.audio.take().unwrap();
+        let mut output = AudioBuffer::new_with_size(512, 2);
+        // The app clock's one-time setup (its launch configuration) runs on
+        // the UI thread long before a callback, as it does in the app.
+        let _ = Cx::time_now();
+        // The first block finds no engine: it reports the rate and is silent.
+        audio_block(&mut audio, &mut output, 0);
+        assert!(bridge.device_rate().is_some());
+
+        // The callback parks while the UI sends twice what the ring holds.
+        let base = bridge.plan().tempo_map().initial_bpm().max(1.0);
+        let mut sent = 0_u64;
+        for i in 0..2 * MESSAGE_CAPACITY {
+            bridge.set_tempo(base * (0.5 + i as f64 / (4 * MESSAGE_CAPACITY) as f64));
+            sent += 1;
+        }
+        let last_bpm = base * 0.75;
+        bridge.set_tempo(last_bpm);
+        bridge.play();
+        sent += 2;
+        assert!(bridge.holds_commands(), "a full ring must hold, not drop");
+        assert!(bridge.held.len() > MESSAGE_CAPACITY / 2);
+
+        let first_plan = bridge.plan.clone();
+        let mut n = 1;
+        while n < 64 && (bridge.holds_commands() || !audio.commands.is_empty() || audio.refused.is_some()) {
+            if n == 2 {
+                // A plan edit while commands are held: its engine goes first.
+                bridge.rebuild_plan(document.score(), 108.0, false);
+            }
+            audio_block(&mut audio, &mut output, n);
+            bridge.service();
+            n += 1;
+        }
+        for _ in 0..4 {
+            audio_block(&mut audio, &mut output, n);
+            bridge.service();
+            n += 1;
+        }
+
+        assert_eq!(audio.received, sent, "every message reached an engine");
+        assert!(bridge.held.is_empty() && audio.commands.is_empty());
+        let playing = audio.playing.as_ref().unwrap();
+        assert_eq!(playing.generation, bridge.generation, "the edited plan's engine renders");
+        assert!(Arc::ptr_eq(&playing.plan, &bridge.plan));
+        assert_eq!(playing.engine.state(), PlaybackState::Playing, "the last Play arrived");
+        assert!((playing.engine.tempo_scale() - last_bpm / base).abs() < 1e-9);
+        assert_eq!(bridge.clock_snapshot().state, PlaybackState::Playing);
+        // The replaced engine came back and was dropped here, plan and all.
+        assert_eq!(Arc::strong_count(&first_plan), 1, "the old engine was not handed back");
+    }
     use makepad_piano_model::{Piano, PIANO_PRESETS};
     use makepad_score::model::{Id, Measure};
     use makepad_score_play::PlaybackState;
@@ -1418,15 +1699,14 @@ mod tests {
         let document = crate::ScoreDocument::demo().unwrap();
         let bridge = PlaybackBridge::new(document.score(), 108.0, false);
         let plan = bridge.plan();
-        let ring = SpscRing::<AudioMessage, 8>::new();
         let mixer = PartMixer::<PART_CAPACITY>::new();
         let clock = AtomicAudioClock::new();
         let mut engine =
             PlaybackEngine::<SamplerBackend, PENDING_CAPACITY, PART_CAPACITY>::new(test_backend(
                 Arc::new(SharedSound::default()),
             ));
-        assert!(ring
-            .push(AudioMessage {
+        assert!(engine
+            .queue(AudioMessage {
                 at_device_sample: 0,
                 sequence: 1,
                 kind: AudioMessageKind::Play,
@@ -1450,7 +1730,7 @@ mod tests {
                 stream_generation: 1,
                 clock_quality: ClockQuality::Exact,
             };
-            engine.render(context, &mut channels, plan, &ring, &mixer, &clock);
+            engine.render(context, &mut channels, plan, &mixer, &clock);
             peak = left
                 .iter()
                 .chain(right.iter())
