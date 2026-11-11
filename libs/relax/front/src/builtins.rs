@@ -1073,15 +1073,22 @@ fn expand_buf(p: &crate::parser::Parser, id: u16, lo: usize, hi: usize, call_lo:
                     i += 1;
                 } else {
                     body_lo = i;
-                    let mut depth = 0;
-                    while i < hi {
-                        match kind(i) {
-                            T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
-                            T::CloseParen | T::CloseBracket | T::CloseBrace => depth -= 1,
-                            T::Comma if depth == 0 => break,
-                            _ => {}
+                    // the parser measured the expression (parser.rs cfg_select_arm_ends): a comma
+                    // inside it is not the arm's end. Not measured: up to the first comma.
+                    let measured = p.cfg_select_ends.borrow().iter().find(|e| e.0 == body_lo).map(|e| e.1);
+                    if let Some(end) = measured {
+                        i = end;
+                    } else {
+                        let mut depth = 0;
+                        while i < hi {
+                            match kind(i) {
+                                T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
+                                T::CloseParen | T::CloseBracket | T::CloseBrace => depth -= 1,
+                                T::Comma if depth == 0 => break,
+                                _ => {}
+                            }
+                            i += 1;
                         }
-                        i += 1;
                     }
                     body_hi = i;
                 }
