@@ -216,14 +216,14 @@ fn leaves(prog: &Program, file: u32, ast: &Ast, t: &UseTree, start: u32, item_hi
         UseTree::Name(seg, rename) => {
             let mut segs = prefix.clone();
             segs.push(seg);
-            let end = rename.map_or(seg.name.hi, |r| r.hi);
-            let name = match rename {
+            let end = rename.get().map_or(seg.name.hi, |r| r.hi);
+            let name = match rename.get() {
                 Some(r) => { let n = pf.text(r); if n == "_" { None } else { Some(n.to_string()) } }
                 None => {
                     if seg.kind() == SegKind::SelfValue { prefix.last().map(|s| pf.text(s.name).to_string()) } else { Some(pf.text(seg.name).to_string()) }
                 }
             };
-            let under = rename.is_some_and(|r| pf.text(r) == "_");
+            let under = rename.get().is_some_and(|r| pf.text(r) == "_");
             out.push(Leaf { name, glob: false, empty: false, under, span: (start, end), segs });
         }
         UseTree::Path(seg, child) => {
@@ -483,7 +483,7 @@ fn unused_extern_crates(prog: &Program, sc: &Scope<'_>) {
         let pf = &prog.files[sc.file as usize];
         let shown = pf.text(item.name).to_string();
         if shown == "self" { continue; }
-        let bind_text = rename.map_or(shown.clone(), |r| pf.text(r).to_string());
+        let bind_text = rename.get().map_or(shown.clone(), |r| pf.text(r).to_string());
         if bind_text.starts_with('_') { continue; }
         let bind = prog.syms.intern_late(&bind_text);
         let root = prog.crates[krate as usize].root_mod == sc.module;

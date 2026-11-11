@@ -967,7 +967,7 @@ fn body_local_alias(pf: &crate::parser::ParsedFile, reached: &[bool], j: u32) ->
 /// A module item's head as written: its visibility's tokens (none: private) and the rest
 /// (`mod name`, and the `;` of a module in a file of its own).
 fn mod_head<'a>(pf: &'a crate::parser::ParsedFile, it: &crate::ast::Item) -> (Vec<&'a [u8]>, Vec<&'a [u8]>) {
-    let end = if matches!(it.kind, crate::ast::ItemKind::Mod(Some(_))) { it.name.hi } else { it.hi };
+    let end = if matches!(it.kind, crate::ast::ItemKind::Mod(crate::ast::Opt::Some(_))) { it.name.hi } else { it.hi };
     let head = toks(pf, it.lo, end, &[]);
     let k = head.iter().position(|t| *t == b"mod").unwrap_or(0);
     (head[..k].to_vec(), head[k..].to_vec())
@@ -985,8 +985,8 @@ fn vis_widens(old: &crate::ast::Vis, new: &crate::ast::Vis) -> bool {
 fn fn_body_span(pf: &crate::parser::ParsedFile, kind: &crate::ast::ItemKind) -> Option<(u32, u32)> {
     use crate::ast::ItemKind;
     match kind {
-        ItemKind::Fn(_, Some(b), _) => { let b = pf.ast.block(*b); Some((b.lo, b.hi)) }
-        ItemKind::Fn(sig, None, _) => pf.ast.fn_sig(*sig).lazy_body.map(|r| (pf.tok(r.lo - 1).lo, pf.tok(r.hi).hi)),
+        ItemKind::Fn(_, body, _) if let Some(b) = &body.get() => { let b = pf.ast.block(*b); Some((b.lo, b.hi)) }
+        ItemKind::Fn(sig, body, _) if body.is_none() => pf.ast.fn_sig(*sig).lazy_body.map(|r| (pf.tok(r.lo - 1).lo, pf.tok(r.hi).hi)),
         _ => None,
     }
 }
@@ -1194,7 +1194,7 @@ fn child_items(ast: &crate::ast::Ast, k: &crate::ast::ItemKind) -> Vec<crate::as
     match k {
         Trait(r) => ast.list(ast.row(*r).items).to_vec(),
         Impl(r) => ast.list(ast.row(*r).items).to_vec(),
-        Mod(Some(items)) => ast.list(*items).to_vec(),
+        Mod(crate::ast::Opt::Some(items)) => ast.list(*items).to_vec(),
         ForeignMod(r) => ast.list(ast.row(*r).items).to_vec(),
         _ => Vec::new(),
     }
@@ -1232,7 +1232,7 @@ fn derive_owners(pf: &crate::parser::ParsedFile) -> Vec<Option<(usize, String)>>
     ast.items.iter().map(|it| {
         let ItemKind::Impl(row) = it.kind else { return None };
         let imp = ast.row(row);
-        let trait_ = imp.trait_?;
+        let trait_ = imp.trait_.get()?;
         let Ty::Path(self_ty) = ast.ty(imp.self_ty) else { return None };
         let name = pf.text(ast.segs(self_ty.segs).last()?.name);
         let mut pos = it.lo;
@@ -1923,7 +1923,7 @@ fn classify_moving(prog: &crate::program::Program, old_file: u32, new: &crate::p
     let mut removed_uses: Vec<u32> = Vec::new();
     // A new module (inline or in a file) is collected and checked with every
     // other edit in the transaction, including callers saved before it existed.
-    let addable = |pf: &crate::parser::ParsedFile, k: &ItemKind| matches!(k, ItemKind::Fn(sig, _, _) if pf.ast.fn_sig(*sig).lazy_body.is_some()) || matches!(k, ItemKind::Fn(_, Some(_), _) | ItemKind::Const(..) | ItemKind::Static(..) | ItemKind::Struct(..) | ItemKind::Enum(..) | ItemKind::Union(..) | ItemKind::TypeAlias { .. } | ItemKind::Impl { .. } | ItemKind::Trait(..) | ItemKind::Use { .. } | ItemKind::Mod(_));
+    let addable = |pf: &crate::parser::ParsedFile, k: &ItemKind| matches!(k, ItemKind::Fn(sig, _, _) if pf.ast.fn_sig(*sig).lazy_body.is_some()) || matches!(k, ItemKind::Fn(_, body, _) if body.is_some()) || matches!(k, ItemKind::Const(..) | ItemKind::Static(..) | ItemKind::Struct(..) | ItemKind::Enum(..) | ItemKind::Union(..) | ItemKind::TypeAlias { .. } | ItemKind::Impl { .. } | ItemKind::Trait(..) | ItemKind::Use { .. } | ItemKind::Mod(_));
     let inherent_impl = |pf: &crate::parser::ParsedFile, i: u32| matches!(&pf.ast.items[i as usize].kind, ItemKind::Impl(r) if pf.ast.row(*r).trait_.is_none());
     // an item in a body (`use` in a fn or closure body, a nested fn, a const): part of the edit
     // of the item whose body holds it. In a paired item's body: its body is checked again, and
@@ -1969,7 +1969,7 @@ fn classify_moving(prog: &crate::program::Program, old_file: u32, new: &crate::p
             match np[j as usize] {
                 None if addable(new, &it.kind) => file_root_module(prog, old_file).map(Ok),
                 Some(p) => match (&na.items[p as usize].kind, fwd.get(&p)) {
-                    (ItemKind::Mod(Some(_)), Some(&op_)) if addable(new, &it.kind) => prog.item_defs.get(&(old_file, op_)).map(|d| Ok(prog.def(*d).sub)),
+                    (ItemKind::Mod(crate::ast::Opt::Some(_)), Some(&op_)) if addable(new, &it.kind) => prog.item_defs.get(&(old_file, op_)).map(|d| Ok(prog.def(*d).sub)),
                     (ItemKind::Impl { .. }, Some(&op_)) if inherent_impl(new, p) && addable(new, &it.kind) && matches!(it.kind, ItemKind::Fn(..) | ItemKind::Const(..)) => prog.item_defs.get(&(old_file, op_)).map(|d| Err(*d)),
                     // a fn of a trait impl (an override of a provided method, or one replaced for
                     // a new signature): apply_locked resolves the instances the trait reaches anew
@@ -2031,7 +2031,7 @@ fn classify_moving(prog: &crate::program::Program, old_file: u32, new: &crate::p
             && match op[i as usize] {
                 None => removable(&it.kind),
                 Some(p) => match &oa.items[p as usize].kind {
-                    ItemKind::Mod(Some(_)) => removable(&it.kind),
+                    ItemKind::Mod(crate::ast::Opt::Some(_)) => removable(&it.kind),
                     ItemKind::Impl(_) | ItemKind::Trait(..) if removed.contains(&p) => true,
                     ItemKind::Impl(r) if oa.row(*r).trait_.is_none() => matches!(it.kind, ItemKind::Fn(..) | ItemKind::Const(..)),
                     // a trait impl's fn (not one whose callers hold the future or `impl Trait`
@@ -2091,7 +2091,7 @@ fn classify_moving(prog: &crate::program::Program, old_file: u32, new: &crate::p
         // macro's call (its expansion is items), the `#[test]` a test build takes off a fn.
         // Compared as text, an edit of any of them restarted the app; the module's own text is
         // its head (its inner attributes are among its attributes).
-        let body = |it: &crate::ast::Item| matches!(it.kind, ItemKind::Mod(Some(_))).then(|| vec![(it.name.hi, it.hi)]);
+        let body = |it: &crate::ast::Item| matches!(it.kind, ItemKind::Mod(crate::ast::Opt::Some(_))).then(|| vec![(it.name.hi, it.hi)]);
         let ha = body(a).unwrap_or_else(|| holes(old, &a.kind));
         let hb = body(b).unwrap_or_else(|| holes(new, &b.kind));
         // attributes are part of the item (cfg, derive, repr, inline)
@@ -2818,9 +2818,9 @@ fn converted(u: &Unit, body: &relax_types::typeck::Body, pf: &crate::parser::Par
             if m.args == crate::ast::NO_MAC_ARGS {
                 return;
             }
-            let Some(asm) = ast.mac_arg(m.args).asm else { return };
+            let Some(asm) = ast.mac_arg(m.args).asm.get() else { return };
             for op in ast.list(asm.ops) {
-                for x in [op.input, op.output].into_iter().flatten() {
+                for x in [op.input.get(), op.output.get()].into_iter().flatten() {
                     if body.has_expr(x) {
                         mark(pointee_adt(u, body.ty(x)), None);
                     }
@@ -6771,6 +6771,12 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             }
         }
     }
+    // real-time code's new references are walked before its new code goes in, as a tier-up's are
+    // (jit::realtime_before_install; here on the owner: the walk compiles them now). The precompile
+    // above leaves the uncompiled callees that existed before the edit to the background, and a
+    // real-time thread running the new code met them as lazy stubs (the rt_lock live case: the new
+    // callee's own callee, a std fn with no code yet). The old code runs until the install.
+    let rt: Vec<jit::RtBuild> = staged.iter().map(|(id, c)| jit::realtime_before_install(up, *id, &c.2)).collect();
     for (id, c) in staged {
         let installed = if homes.contains(&id) { jit::install_unforwarded(up, id, &c.0, c.1, &c.2, gen) } else { jit::install_patched(up, id, &c.0, c.1, &c.2, gen) };
         match installed {
@@ -6782,6 +6788,8 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             Err(e) => out.lines.push(format!("link error in {}: {}", (&*up).fns[id as usize].name, e)),
         }
     }
+    // (the slots outside the real-time set are its walk's to take from here: their new code is in)
+    drop(rt);
     for (id, target, cell) in forwards {
         if let Err(e) = jit::install_forward(up, id, target, cell, gen) {
             out.lines.push(format!("link error in {}: {}", (&*up).fns[id as usize].name, e));
@@ -10153,8 +10161,11 @@ mod split_operator_tests {
         assert_eq!(pairs.len(), 4);
         for (i, j) in pairs {
             let (a, b) = (&old.ast.items[i as usize], &new.ast.items[j as usize]);
-            let crate::ast::ItemKind::Fn(_, Some(body), _) = &a.kind else { panic!("expected parsed fn body"); };
-            let body = old.ast.block(*body);
+            let body = match &a.kind {
+                crate::ast::ItemKind::Fn(_, body, _) if let Some(body) = body.get() => body,
+                _ => panic!("expected parsed fn body"),
+            };
+            let body = old.ast.block(body);
             assert!(old.toks.iter().zip(old.toks.iter().skip(1)).any(|(prev, t)|
                 t.lo >= body.lo && t.hi <= body.hi && t.lo > prev.hi && t.lo > 0
                 && matches!(old.src.get(t.lo as usize - 1), Some(b'<' | b'>' | b'&' | b'|' | b'+'))), "no split in item {}", i);
@@ -10282,7 +10293,7 @@ pub fn revision() -> u32 { 0 }
             let old = &prog.files[file as usize];
             let generated: Vec<_> = old.ast.items.iter().filter_map(|it| {
                 let crate::ast::ItemKind::Impl(row) = it.kind else { return None };
-                let trait_ = old.ast.row(row).trait_?;
+                let trait_ = old.ast.row(row).trait_.get()?;
                 Some(old.text(old.ast.segs(trait_.segs).last()?.name))
             }).collect();
             for trait_ in ["Clone", "Debug", "Default", "PartialEq"] {

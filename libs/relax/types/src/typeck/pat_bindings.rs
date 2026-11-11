@@ -31,10 +31,10 @@ impl Fcx<'_> {
                     }
                     out.push(this);
                 }
-                if let Some(sp) = sub { self.collect_bindings(*sp, out, dup); }
+                if let Some(sp) = &sub.get() { self.collect_bindings(*sp, out, dup); }
             }
             Pat::TupleStruct(_, v) | Pat::Tuple(v) | Pat::Slice(v) => for x in ast.list(*v) { self.collect_bindings(*x, out, dup); },
-            Pat::Struct(_, fields, _) => for f in ast.list(*fields) { self.collect_bindings(f.pat, out, dup); },
+            Pat::Struct(_, _, fields) => for f in ast.list(*fields) { self.collect_bindings(f.pat, out, dup); },
             Pat::Ref(_, x) | Pat::Paren(x) | Pat::Box(x) => self.collect_bindings(*x, out, dup),
             Pat::Or(alts) => {
                 let alts: Vec<PatId> = ast.list(*alts).to_vec();

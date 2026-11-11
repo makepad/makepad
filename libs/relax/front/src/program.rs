@@ -1103,7 +1103,7 @@ impl Program {
         if let Some(f) = self.exec_profile_file(file) { f.note(crate::exec_profile::BODY); }
         let pf = &self.files[file as usize];
         let body = match &pf.ast.item(item).kind {
-            ItemKind::Fn(_, Some(b), _) => Ok(Some(*b)),
+            ItemKind::Fn(_, b, _) if b.is_some() => Ok(b.get()),
             ItemKind::Fn(..) => match pf.lazy_body(item, &self.crates[self.file_crate[file as usize] as usize].cfg) {
                 Some(r) => r.map(|x| Some(x.0)),
                 None => Ok(None),
@@ -1458,6 +1458,7 @@ impl Program {
             else { self.load_recipe.push(c.clone()); }
         } }
         let (pool, workers) = crate::preload::start_with_plan(sess, crates, &self.macros, images, bounded, self.sources.clone(), plan);
+        if let Some(sink) = &self.front_sink { pool.set_sink(sink.clone()); }
         self.demand_plan = pool.demand_plan.clone();
         self.pool = Some(pool);
         self.pool_workers = workers;
@@ -1663,22 +1664,13 @@ impl Program {
     /// authored bytes for the file become a view of the image too, and the read snapshots of
     /// every context sharing the registry drop their copy (preload workers and lazy expansion
     /// bind the first context, not the file's own crate's).
-    fn map_image(&self, path: &str, krate: u32, pf: &mut ParsedFile) {
+    /// `imaged`: the parse worker wrote `pf`'s image already (write_image), only the rest is left.
+    fn map_image(&self, path: &str, krate: u32, pf: &mut ParsedFile, imaged: bool) {
         let Some(sink) = &self.front_sink else { return };
-        if pf.image.is_some() { return; }
-        let _profile = crate::load_profile::span(self.session.runtime.profile, "front-image-write", path);
-        if !sink.file(path, pf) { return; }
-        pf.sink = Some(sink.clone());
-        // Worker-parsed bodies are still exclusively owned here.
-        if let Some(mut part) = pf.part.take() {
-            let mut tail = &mut pf.ast;
-            while tail.part.get().is_some_and(|a| a.part.get().is_some()) { tail = tail.part.get_mut().unwrap(); }
-            let mut ast = tail.part.take().expect("parsed part AST");
-            sink.part(pf, &mut part, &mut ast);
-            let mut tail = &mut pf.ast;
-            while tail.part.get().is_some() { tail = tail.part.get_mut().unwrap(); }
-            assert!(tail.part.set(ast).is_ok());
-            assert!(pf.part.set(part).is_ok());
+        if !imaged {
+            if pf.image.is_some() { return; }
+            let _profile = crate::load_profile::span(self.session.runtime.profile, "front-image-write", path);
+            if write_image(sink, path, pf) == 0 { return; }
         }
         if let (crate::arena::Arena::Mapped(src), Some(c)) = (&pf.src, self.crates.get(krate as usize)) {
             if c.context.sources().map_authored(path, &src[..pf.src_len as usize]) {
@@ -1730,6 +1722,8 @@ impl Program {
             }
         }
         let mut ahead = None;
+        // the bytes of the image the worker wrote for `ahead`'s parse (0: none)
+        let mut ahead_image = 0usize;
         let mut src = None;
         let mut verify_image = None;
         let tr = crate::preload::trace();
@@ -1756,12 +1750,16 @@ impl Program {
             match x.parsed {
                 Some((pf, used)) if x.mod_path == self.cur_mod_path && used.replays(&self.macros, &kname, path) => {
                     why = "preloaded";
+                    ahead_image = x.image_bytes;
                     ahead = Some((pf, used, x.prep));
                 }
                 Some((mut pf, _)) => {
                     PARSE_AGAIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    pf.src.truncate(x.src_len);
-                    src = Some(std::mem::take(&mut pf.src).into_vec());
+                    // (the source out of the worker's image is copied: the image stays the run store's)
+                    src = Some(match std::mem::take(&mut pf.src) {
+                        crate::arena::Arena::Mapped(s) => s[..x.src_len].to_vec(),
+                        mut owned => { owned.truncate(x.src_len); owned.into_vec() }
+                    });
                 }
                 None => {
                     PARSE_AGAIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1894,7 +1892,14 @@ impl Program {
             let s = std::str::from_utf8(pf.bytes(lo, hi)).unwrap_or("?");
             self.syms.intern(s);
         }
-        self.map_image(path, krate, &mut pf);
+        // (a parse published as its worker made it keeps the image the worker wrote; one made again
+        // here is written by map_image, and the worker's stays unreferenced in the run store)
+        let imaged = ahead_image > 0 && pf.image.is_some();
+        if imaged {
+            crate::preload::WORKER_IMAGES_USED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::preload::WORKER_IMAGE_BYTES_USED.fetch_add(ahead_image as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.map_image(path, krate, &mut pf, imaged);
         let pf = std::sync::Arc::new(pf);
         // a std file of the program's load: the proc-macro world takes it from here
         if std_file && !self.std_from_shared && SHARING.load(std::sync::atomic::Ordering::Acquire) {
@@ -1986,7 +1991,7 @@ impl Program {
         }
         self.crates[krate as usize].context = v.context;
         let mut pf = v.pf;
-        self.map_image(&v.path, krate, &mut pf);
+        self.map_image(&v.path, krate, &mut pf, false);
         self.files.push(std::sync::Arc::new(pf));
         self.file_paths.push(v.path);
         self.exec_profile_file(self.file_paths.len() as u32 - 1);
@@ -2070,7 +2075,7 @@ impl Program {
                     table.add_exp_uses(&kname, used.uses);
                 }
                 self.front_macro_fragments.insert(self.files.len());
-                self.map_image(&path, krate, &mut pf);
+                self.map_image(&path, krate, &mut pf, false);
                 self.files.push(std::sync::Arc::new(pf));
                 self.file_paths.push(path);
                 self.exec_profile_file(self.file_paths.len() as u32 - 1);
@@ -2322,7 +2327,7 @@ impl Program {
         self.edit_current.insert(boot, new);
         self.crates[krate as usize].context = v.context;
         let mut pf = v.pf;
-        self.map_image(&v.path, krate, &mut pf);
+        self.map_image(&v.path, krate, &mut pf, false);
         self.files.push(std::sync::Arc::new(pf));
         self.file_paths.push(v.path);
         self.exec_profile_file(self.file_paths.len() as u32 - 1);
@@ -2543,7 +2548,7 @@ impl Program {
         let item = pf.ast.item(def.item);
         let mut paths = Vec::new();
         crate::crates::path_attrs_cfg(self.src(def.file), pf.ast.list(item.attrs), &self.crates[module.krate as usize].cfg, &mut paths);
-        if matches!(item.kind, ItemKind::Mod(None)) {
+        if matches!(item.kind, ItemKind::Mod(Opt::None)) {
             let mod_rs = !paths.is_empty() || path.ends_with("/mod.rs");
             return (if mod_rs { dir_of(path).into() } else { format!("{}/{}", dir_of(path), stem_of(path)) }, mod_rs);
         }
@@ -3122,7 +3127,7 @@ impl Program {
                     let mut path_attr = Vec::new();
                     crate::crates::path_attrs_cfg(self.src(file), self.files[file as usize].ast.list(self.files[file as usize].ast.item(iid).attrs), &self.crates[krate as usize].cfg, &mut path_attr);
                     let inline = match &self.files[file as usize].ast.item(iid).kind {
-                        ItemKind::Mod(Some(items)) => Some(self.files[file as usize].ast.list(*items).to_vec()),
+                        ItemKind::Mod(Opt::Some(items)) => Some(self.files[file as usize].ast.list(*items).to_vec()),
                         _ => None,
                     };
                     // rustc_builtin_macros source_util.rs `include!`: the items of an included file
@@ -3265,7 +3270,7 @@ impl Program {
                 Tag::ExternCrate => {
                     // `extern crate foo as bar;` binds `bar` (or `foo`) to the crate root
                     let rename = match &self.files[file as usize].ast.item(iid).kind {
-                        ItemKind::ExternCrate(r) => *r,
+                        ItemKind::ExternCrate(r) => r.get(),
                         _ => None,
                     };
                     let bind = match rename {
@@ -3454,7 +3459,7 @@ impl Program {
                 let kind = &ast.item(ItemId(n)).kind;
                 blocks_in_item_signature(ast, kind, &mut blocks);
                 match kind {
-                    ItemKind::Fn(_, Some(b), _) => blocks.push(*b),
+                    ItemKind::Fn(_, body, _) if let Some(b) = body.get() => blocks.push(b),
                     ItemKind::Const(_, e) | ItemKind::Static(_, _, e) => if let Some(e) = e.get() { blocks_in_expr(ast, e, &mut blocks) },
                     _ => {}
                 }
@@ -3498,7 +3503,7 @@ impl Program {
             let kind = &ast.item(iid).kind;
             blocks_in_item_signature(ast, kind, &mut blocks);
             match kind {
-                ItemKind::Fn(_, Some(b), _) => blocks.push(*b),
+                ItemKind::Fn(_, body, _) if let Some(b) = body.get() => blocks.push(b),
                 // `const _: () = { impl X { .. } };` (bitflags and friends put impls there)
                 ItemKind::Const(_, e) | ItemKind::Static(_, _, e) => if let Some(e) = e.get() { blocks_in_expr(ast, e, &mut blocks) },
                 _ => {}
@@ -3551,13 +3556,13 @@ impl Program {
                 let mut self_only = 0;
                 if seg.kind() == SegKind::SelfValue && !segs.is_empty() {
                     self_only = BOUND_SELF_ONLY;
-                    bind = match rename {
+                    bind = match &rename.get() {
                         Some(r) => self.ident(file, *r),
                         None => segs[segs.len() - 1].1,
                     };
                 } else {
                     segs.push((seg.kind(), s));
-                    bind = match rename {
+                    bind = match &rename.get() {
                         Some(r) => self.ident(file, *r),
                         None => s,
                     };
@@ -3605,7 +3610,7 @@ impl Program {
             let s = std::str::from_utf8(pf.bytes(lo, hi)).unwrap_or("?").to_string();
             self.syms.intern(&s);
         }
-        self.map_image(path, krate, &mut pf);
+        self.map_image(path, krate, &mut pf, false);
         self.files.push(std::sync::Arc::new(pf));
         self.file_paths.push(path.to_string());
         self.exec_profile_file(self.file_paths.len() as u32 - 1);
@@ -3707,7 +3712,7 @@ impl Program {
         if module.parent_mod.is_none() || module.lexical_parent.is_some() { return false; }
         let d = self.def(module.def);
         d.kind == DefKind::Mod && module.file == d.file
-            && matches!(self.files[d.file as usize].ast.item(d.item).kind, ItemKind::Mod(None))
+            && matches!(self.files[d.file as usize].ast.item(d.item).kind, ItemKind::Mod(Opt::None))
     }
 
     /// The module an unresolved import's lookup stopped in: its deepest
@@ -5406,7 +5411,7 @@ pub fn blocks_in_ty(ast: &Ast, t: TyId, out: &mut Vec<BlockId>) {
         Ty::Fn(f) => {
             let f = ast.fn_ptr(*f);
             for x in ast.list(f.params) { blocks_in_ty(ast, *x, out); }
-            if let Some(r) = f.ret { blocks_in_ty(ast, r, out); }
+            if let Some(r) = f.ret.get() { blocks_in_ty(ast, r, out); }
         }
         Ty::ImplTrait(b) | Ty::DynTrait(b, _) => blocks_in_bounds(ast, *b, out),
         Ty::Never | Ty::Infer | Ty::Mac(_) | Ty::ImplicitSelf | Ty::CVarArgs => {}
@@ -5425,7 +5430,7 @@ pub fn blocks_in_bounds(ast: &Ast, bounds: List<Bound>, out: &mut Vec<BlockId>) 
 pub fn blocks_in_path(ast: &Ast, p: &Path, out: &mut Vec<BlockId>) {
     if let Some(q) = ast.qself(p) {
         blocks_in_ty(ast, q.ty, out);
-        if let Some(tp) = &q.trait_path { blocks_in_path(ast, tp, out); }
+        if let Some(tp) = &q.trait_path.get() { blocks_in_path(ast, tp, out); }
     }
     for seg in ast.segs(p.segs) {
         blocks_in_gargs(ast, seg.args(), out);
@@ -5453,7 +5458,7 @@ pub fn blocks_in_gargs(ast: &Ast, id: GenericArgsId, out: &mut Vec<BlockId>) {
         }
         Some(GenericArgs::Paren(ps, r)) => {
             for x in ast.list(*ps) { blocks_in_ty(ast, *x, out); }
-            if let Some(r) = r { blocks_in_ty(ast, *r, out); }
+            if let Some(r) = &r.get() { blocks_in_ty(ast, *r, out); }
         }
         None => {}
     }
@@ -5465,11 +5470,11 @@ fn blocks_in_generics(ast: &Ast, g: &Generics, out: &mut Vec<BlockId>) {
             GenericParamKind::Lifetime(_) => {}
             GenericParamKind::Type(b, d) => {
                 blocks_in_bounds(ast, b, out);
-                if let Some(d) = d { blocks_in_ty(ast, d, out); }
+                if let Some(d) = d.get() { blocks_in_ty(ast, d, out); }
             }
             GenericParamKind::Const(t, d) => {
                 blocks_in_ty(ast, t, out);
-                if let Some(d) = d { blocks_in_expr(ast, d, out); }
+                if let Some(d) = d.get() { blocks_in_expr(ast, d, out); }
             }
         }
     }
@@ -5484,7 +5489,7 @@ fn blocks_in_generics(ast: &Ast, g: &Generics, out: &mut Vec<BlockId>) {
 fn blocks_in_fields(ast: &Ast, fields: List<FieldDef>, out: &mut Vec<BlockId>) {
     for f in ast.list(fields) {
         blocks_in_ty(ast, f.ty, out);
-        if let Some(d) = f.default { blocks_in_expr(ast, d, out); }
+        if let Some(d) = f.default.get() { blocks_in_expr(ast, d, out); }
     }
 }
 
@@ -5503,7 +5508,7 @@ pub fn blocks_in_item_signature(ast: &Ast, kind: &ItemKind, out: &mut Vec<BlockI
             let sig = ast.fn_sig(*s);
             blocks_in_generics(ast, &sig.generics, out);
             for p in ast.list(sig.params) { blocks_in_ty(ast, p.ty, out); }
-            if let Some(r) = sig.ret { blocks_in_ty(ast, r, out); }
+            if let Some(r) = sig.ret.get() { blocks_in_ty(ast, r, out); }
         }
         ItemKind::Struct(_) => {
             let Some(it) = ast.as_struct(kind) else { return };
@@ -5520,14 +5525,14 @@ pub fn blocks_in_item_signature(ast: &Ast, kind: &ItemKind, out: &mut Vec<BlockI
             blocks_in_generics(ast, &it.generics, out);
             for v in ast.list(it.variants) {
                 blocks_in_variant_data(ast, &v.data, out);
-                if let Some(d) = v.disc { blocks_in_expr(ast, d, out); }
+                if let Some(d) = v.disc.get() { blocks_in_expr(ast, d, out); }
             }
         }
         ItemKind::TypeAlias(_) => {
             let Some(it) = ast.as_alias(kind) else { return };
             blocks_in_generics(ast, &it.generics, out);
             blocks_in_bounds(ast, it.bounds, out);
-            if let Some(t) = it.ty { blocks_in_ty(ast, t, out); }
+            if let Some(t) = it.ty.get() { blocks_in_ty(ast, t, out); }
         }
         ItemKind::Const(t, _) => {
             if let Some(t) = t.get() { blocks_in_ty(ast, t, out); }
@@ -5536,7 +5541,7 @@ pub fn blocks_in_item_signature(ast: &Ast, kind: &ItemKind, out: &mut Vec<BlockI
         ItemKind::Impl(_) => {
             let Some(it) = ast.as_impl(kind) else { return };
             blocks_in_generics(ast, &it.generics, out);
-            if let Some(tp) = &it.trait_ { blocks_in_path(ast, tp, out); }
+            if let Some(tp) = &it.trait_.get() { blocks_in_path(ast, tp, out); }
             blocks_in_ty(ast, it.self_ty, out);
         }
         ItemKind::Trait(_) => {
@@ -5574,7 +5579,7 @@ pub fn blocks_in_expr(ast: &Ast, e: ExprId, out: &mut Vec<BlockId>) {
         ExprKind::Match(x, arms) => {
             blocks_in_expr(ast, *x, out);
             for a in ast.list(*arms) {
-                if let Some(g) = a.guard {
+                if let Some(g) = a.guard.get() {
                     blocks_in_expr(ast, g, out);
                 }
                 blocks_in_expr(ast, a.body, out);
@@ -5600,9 +5605,9 @@ pub fn blocks_in_expr(ast: &Ast, e: ExprId, out: &mut Vec<BlockId>) {
         ExprKind::Closure(row) => {
             let ClosureRow { params, ret, body, .. } = ast.row(*row);
             for p in ast.list(*params) {
-                if let Some(t) = p.ty { blocks_in_ty(ast, t, out); }
+                if let Some(t) = p.ty.get() { blocks_in_ty(ast, t, out); }
             }
-            if let Some(r) = ret { blocks_in_ty(ast, *r, out); }
+            if let Some(r) = &ret.get() { blocks_in_ty(ast, *r, out); }
             blocks_in_expr(ast, *body, out)
         }
         ExprKind::Call(f, args) => {
@@ -5757,7 +5762,7 @@ pub fn strip_cfg_nodes(ast: &mut Ast, src: Src, cfg: &CfgSet) {
         strip_attrs_list(src, cfg, ast.field_exprs.vec_mut(), ast.base[10], (&ast.attrs, ast.base[21]), &mut row.fields, |f| f.attrs);
     }
     for x in ast.pats.iter_mut() {
-        if let Pat::Struct(_, fields, _) = x {
+        if let Pat::Struct(_, _, fields) = x {
             strip_attrs_list(src, cfg, ast.field_pats.vec_mut(), ast.base[13], (&ast.attrs, ast.base[21]), fields, |f| f.attrs);
         }
     }
@@ -6049,6 +6054,27 @@ pub struct FilePrep {
     pub lines: usize,
 }
 
+/// Writes the image of a final file `pf` (cfg-stripped, its lazy part parsed if it has one) and of
+/// its part, and maps them (ImageSink): its parse arrays leave the heap. On a parse worker, while it
+/// still owns the parse (preload::parse_job), or at publication (Program::map_image). The bytes
+/// written (0: no image, the arrays stay on the heap).
+pub(crate) fn write_image(sink: &std::sync::Arc<dyn crate::parser::ImageSink>, path: &str, pf: &mut ParsedFile) -> usize {
+    let Some(mut bytes) = sink.file(path, pf) else { return 0 };
+    pf.sink = Some(sink.clone());
+    // the parsed part is still exclusively owned here
+    if let Some(mut part) = pf.part.take() {
+        let mut tail = &mut pf.ast;
+        while tail.part.get().is_some_and(|a| a.part.get().is_some()) { tail = tail.part.get_mut().unwrap(); }
+        let mut ast = tail.part.take().expect("parsed part AST");
+        bytes += sink.part(pf, &mut part, &mut ast);
+        let mut tail = &mut pf.ast;
+        while tail.part.get().is_some() { tail = tail.part.get_mut().unwrap(); }
+        assert!(tail.part.set(ast).is_ok());
+        assert!(pf.part.set(part).is_ok());
+    }
+    bytes
+}
+
 pub fn prepare_file(pf: &mut ParsedFile, cfg: &CfgSet) -> FilePrep {
     let _profile = crate::load_profile::span(cfg.session.runtime.profile, "prepare-file", "cfg / identifiers / bodies");
     let _timing = crate::parse_work::time(5);
@@ -6095,9 +6121,9 @@ fn body_blocks(pf: &mut ParsedFile, cfg: &CfgSet) -> BodyBlocks {
             // a #[test] fn outside a test build is not compiled: the items and imports in its
             // body do not exist (rustc removes it before resolution)
             ItemKind::Fn(..) if !testing && crate::cfg::is_test(pf.src_view(), pf.ast.list(it.attrs)) => {}
-            ItemKind::Fn(_, Some(b), _) => {
+            ItemKind::Fn(_, body, _) if let Some(b) = body.get() => {
                 blocks_in_item_signature(&pf.ast, &it.kind, &mut roots);
-                roots.push(*b)
+                roots.push(b)
             }
             ItemKind::Const(_, e) | ItemKind::Static(_, _, e) => {
                 blocks_in_item_signature(&pf.ast, &it.kind, &mut roots);
@@ -6130,16 +6156,16 @@ fn walk_body_block(ast_m: &mut Ast, src: Src, cfg: &CfgSet, b: BlockId, out: &mu
         for s in ast.stmts(b) {
             match s {
                 Stmt::Item(i) => items.push(*i),
-                Stmt::Expr(e, _) => blocks_in_expr(ast, *e, &mut sub_blocks),
+                Stmt::Expr(_, e) => blocks_in_expr(ast, *e, &mut sub_blocks),
                 Stmt::Let(r) => {
                     let LetStmt { init, else_, ty, .. } = ast.row(*r);
-                    if let Some(t) = ty {
+                    if let Some(t) = &ty.get() {
                         blocks_in_ty(ast, *t, &mut sub_blocks);
                     }
-                    if let Some(e) = init {
+                    if let Some(e) = &init.get() {
                         blocks_in_expr(ast, *e, &mut sub_blocks);
                     }
-                    if let Some(eb) = else_ {
+                    if let Some(eb) = &else_.get() {
                         sub_blocks.push(*eb);
                     }
                 }
@@ -6174,7 +6200,7 @@ fn strip_cfg_stmts(ast: &mut Ast, src: Src, cfg: &CfgSet, b: BlockId) {
             Stmt::Attrs(r) => {
                 let AttrsStmt { attrs, expr, semi } = *ast.row(*r);
                 if crate::cfg::active(src, ast.list(attrs), cfg) {
-                    out.push(Stmt::Expr(expr, semi));
+                    out.push(Stmt::Expr(semi, expr));
                     // the statement's attributes are kept for the lint passes (lint levels, and the
                     // fact that a value had attributes: `#[cfg(..)] { x }` is not an unused-braces case)
                     kept_attrs.push(AttrsStmt { attrs, expr, semi });
@@ -6219,7 +6245,7 @@ pub fn hint_path(defs: &[Def], syms: &Interner, files: &[std::sync::Arc<ParsedFi
         }
         match f.ast.ty(t) {
             Ty::Path(p) => f.ast.segs(p.segs).iter().map(|s| f.text(s.name)).collect::<Vec<_>>().join("::"),
-            Ty::Ref(_, m, x) => format!("&{}{}", if *m { "mut " } else { "" }, ty_text(f, *x, depth + 1)),
+            Ty::Ref(m, _, x) => format!("&{}{}", if *m { "mut " } else { "" }, ty_text(f, *x, depth + 1)),
             Ty::Ptr(m, x) => format!("*{} {}", if *m { "mut" } else { "const" }, ty_text(f, *x, depth + 1)),
             Ty::Slice(x) => format!("[{}]", ty_text(f, *x, depth + 1)),
             Ty::Array(x, _) => format!("[{}; _]", ty_text(f, *x, depth + 1)),
@@ -6237,7 +6263,7 @@ pub fn hint_path(defs: &[Def], syms: &Interner, files: &[std::sync::Arc<ParsedFi
         if def.kind == DefKind::Impl {
             if let Some(f) = files.get(def.file as usize) {
                 if let Some(ImplItem { self_ty, trait_, .. }) = f.ast.as_impl(&f.ast.item(def.item).kind) {
-                    name = match trait_ {
+                    name = match trait_.get() {
                         Some(t) => format!("<{} as {}>", ty_text(f, *self_ty, 0), f.ast.segs(t.segs).iter().map(|s| f.text(s.name)).collect::<Vec<_>>().join("::")),
                         None => format!("<{}>", ty_text(f, *self_ty, 0)),
                     };

@@ -331,7 +331,7 @@ pub fn ast_nested(p: &crate::program::Program) -> Vec<(String, u64)> {
         }
         for p in &a.pats {
             match p {
-                Pat::Path(x) | Pat::TupleStruct(x, _) | Pat::Struct(x, ..) => add("pat Path qself", path(x)),
+                Pat::Path(x) | Pat::TupleStruct(x, _) | Pat::Struct(_, x, ..) => add("pat Path qself", path(x)),
                 _ => add("pat (no nested)", 0),
             }
         }

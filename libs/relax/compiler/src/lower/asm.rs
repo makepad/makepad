@@ -453,7 +453,7 @@ impl<'a> Lcx<'a> {
             let ast = self.ast();
             let b = body.ok_or("a naked fn needs a body")?;
             let stmts = ast.list(ast.block(b).stmts);
-            let [Stmt::Expr(e, _)] = stmts else { return Err("the body of a naked function must be a single `naked_asm!` invocation".to_string()) };
+            let [Stmt::Expr(_, e)] = stmts else { return Err("the body of a naked function must be a single `naked_asm!` invocation".to_string()) };
             let ExprKind::Mac(m) = &ast.expr(*e).kind else { return Err("the body of a naked function must be a single `naked_asm!` invocation".to_string()) };
             let m = ast.row(*m);
             let name = ast.segs(m.path.segs).last().map(|s| self.ident_text(s.name)).unwrap_or("");
@@ -486,7 +486,7 @@ impl<'a> Lcx<'a> {
         if self.u.prog.session.options.no_asm {
             return Err(relax_session::options::asm_blocked(&self.u.prog.file_crate_name(self.b.file)));
         }
-        let spec = margs.asm.ok_or("asm! without operands")?;
+        let spec = margs.asm.get().ok_or("asm! without operands")?;
         let arch = Arch::host();
         let mexprs = ast.list(margs.exprs);
         let templates: Vec<String> = mexprs[..spec.templates as usize]
@@ -546,16 +546,16 @@ impl<'a> Lcx<'a> {
                     let name = format!(".Lrelax_asm_goto_{k}");
                     // (its place in the template is the label's name, a label of the block's own stubs)
                     args.push(Arg::Const(0));
-                    labels.push((name, op.input.ok_or("label operand without a block")?));
+                    labels.push((name, op.input.get().ok_or("label operand without a block")?));
                     continue;
                 }
                 AsmDir::Sym => {
-                    let s = self.asm_sym(op.input.ok_or("sym operand without a path")?)?;
+                    let s = self.asm_sym(op.input.get().ok_or("sym operand without a path")?)?;
                     args.push(Arg::Sym(rasm::SymRef::Sym(s)));
                     continue;
                 }
                 AsmDir::Const => {
-                    let v = self.asm_const(op.input.ok_or("const operand without a value")?)?;
+                    let v = self.asm_const(op.input.get().ok_or("const operand without a value")?)?;
                     args.push(Arg::Const(v));
                     continue;
                 }
@@ -571,7 +571,7 @@ impl<'a> Lcx<'a> {
             let writes_it = !matches!(op.dir, AsmDir::In);
             let mut in_ty = None;
             if reads {
-                let x = op.input.ok_or("input operand without a value")?;
+                let x = op.input.get().ok_or("input operand without a value")?;
                 let t = self.body_ty(x);
                 let rep = self.asm_rep(t)?;
                 if let Some(c) = class {
@@ -588,7 +588,7 @@ impl<'a> Lcx<'a> {
             }
             if writes_it {
                 writes |= 1 << r.bit();
-                if let Some(y) = op.output {
+                if let Some(y) = op.output.get() {
                     let t = self.body_ty(y);
                     let rep = self.asm_rep(t)?;
                     if let Some(c) = class {

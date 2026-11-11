@@ -39,7 +39,7 @@ pub fn check_body(prog: &Program, tcx: &Tcx, body: &Body, block: Option<BlockId>
     if let Some(b) = block {
         // the fn itself
         let ret_ptr = match ast.item(d.item).kind {
-            ItemKind::Fn(s, _, _) => ast.fn_sig(s).ret.filter(|&t| matches!(ast.ty(t), Ty::Ptr(..))).map(|t| (t, ast_ty_pos(ast, t))),
+            ItemKind::Fn(s, _, _) => ast.fn_sig(s).ret.get().filter(|&t| matches!(ast.ty(t), Ty::Ptr(..))).map(|t| (t, ast_ty_pos(ast, t))),
             _ => None,
         };
         let kind = if d.kind == DefKind::AssocFn { "method" } else { "function" };
@@ -129,12 +129,14 @@ impl<'w, 'a> Visitor<'a> for Pre<'w, 'a> {
     fn stmt(&mut self, s: &Stmt, b: BlockId) {
         if let Stmt::Let(r) = *s {
             let l = *self.w.ast.row(r);
-            if let (Pat::Ident { by_ref: false, mutbl: false, sub: None, .. }, Some(init)) = (*self.w.ast.pat(l.pat), l.init) {
-                if let Some(&loc) = self.w.body.pat_local.get(&l.pat.0) { self.w.init.insert(loc, init); }
+            if let (Pat::Ident { by_ref: false, mutbl: false, sub, .. }, Some(init)) = (*self.w.ast.pat(l.pat), l.init.get()) {
+                if sub.is_none() {
+                    if let Some(&loc) = self.w.body.pat_local.get(&l.pat.0) { self.w.init.insert(loc, init); }
+                }
             }
         }
         match *s {
-            Stmt::Expr(e, _) => { let e = unparen(self.w.ast, e); self.w.stmt_like.insert(e.0); }
+            Stmt::Expr(_, e) => { let e = unparen(self.w.ast, e); self.w.stmt_like.insert(e.0); }
             Stmt::Attrs(r) => { let e = unparen(self.w.ast, self.w.ast.row(r).expr); self.w.stmt_like.insert(e.0); }
             _ => {}
         }
@@ -151,7 +153,7 @@ fn unparen(ast: &Ast, mut e: ExprId) -> ExprId {
 /// The tail expression of a block (`Block::expr`).
 fn block_tail(ast: &Ast, b: BlockId) -> Option<ExprId> {
     match *ast.stmts(b).last()? {
-        Stmt::Expr(e, false) => Some(e),
+        Stmt::Expr(false, e) => Some(e),
         Stmt::Attrs(r) => { let a = *ast.row(r); if a.semi { None } else { Some(a.expr) } }
         _ => None,
     }
@@ -477,7 +479,7 @@ impl<'a> Visitor<'a> for L2<'a> {
         let stmts = ast.stmts(b);
         for (i, s) in stmts.iter().enumerate() {
             if reset {
-                let tail = i + 1 == stmts.len() && matches!(*s, Stmt::Expr(_, false));
+                let tail = i + 1 == stmts.len() && matches!(*s, Stmt::Expr(false, _));
                 self.inside_call_args = if tail { saved } else { false };
             }
             self.stmt(s, b);
@@ -542,7 +544,7 @@ impl<'a> Visitor<'a> for L2<'a> {
             }
             ExprKind::Closure(row) => {
                 let c = *ast.row(row);
-                let ret_ptr = c.ret.filter(|&t| matches!(ast.ty(t), Ty::Ptr(..)));
+                let ret_ptr = c.ret.get().filter(|&t| matches!(ast.ty(t), Ty::Ptr(..)));
                 let ret = self.body.closure_sigs.get(&e.0).and_then(|s| match self.kind(s.liberated) { TyKind::FnPtr(_, r, _, _) => Some(r), _ => None });
                 let cx = match (ret_ptr, ret) { (Some(_), Some(r)) => self.fn_cx(r, Some(0), "closure", e.0), _ => None };
                 let saved = (std::mem::replace(&mut self.inside_call_args, false), std::mem::replace(&mut self.closure, e.0), std::mem::replace(&mut self.active, true));
@@ -1784,7 +1786,7 @@ pub fn check_refining_impls(prog: &Program, tcx: &Tcx, own: &[bool]) {
         let item = *ast.item(d.item);
         let ItemKind::Fn(sig, _, _) = item.kind else { continue };
         let sig = *ast.fn_sig(sig);
-        let pos = match sig.ret {
+        let pos = match sig.ret.get() {
             Some(r) => match *ast.ty(r) {
                 Ty::ImplTrait(bs) => ast.list(bs).iter().find_map(|b| if let Bound::Trait { path, .. } = *b { Some(path.lo) } else { None }).unwrap_or(item.name.lo),
                 _ => crate::lint_late::ast_ty_pos(ast, r).unwrap_or(item.name.lo),

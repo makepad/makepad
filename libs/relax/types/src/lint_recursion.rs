@@ -190,19 +190,19 @@ impl<'a> Rec<'a> {
             match *s {
                 Stmt::Let(r) => {
                     let l = *ast.row(r);
-                    if let Some(x) = l.init {
+                    if let Some(x) = l.init.get() {
                         if !self.ev(x) { return false; }
                         // `let _ = <temporary>;`: dropped at the end of the statement
                         if self.drop_for.is_some() && matches!(ast.pat(l.pat), Pat::Wild) && self.is_rvalue(x) && self.rec_drop(x) { return false; }
-                        if matches!(*ast.pat(l.pat), Pat::Ident { by_ref: false, sub: None, .. }) && self.of_drop_for(x) {
+                        if matches!(*ast.pat(l.pat), Pat::Ident { by_ref: false, sub, .. } if sub.is_none()) && self.of_drop_for(x) {
                             if let Some(&li) = self.body.pat_local.get(&l.pat.0) {
                                 if !self.body.res.iter().any(|(_, r)| matches!(r, Res::Local(x) if *x == li)) { unnamed_locals = true; }
                             }
                         }
                     }
-                    if let Some(e) = l.else_ { self.block(e); }
+                    if let Some(e) = l.else_.get() { self.block(e); }
                 }
-                Stmt::Expr(e, _) => {
+                Stmt::Expr(_, e) => {
                     if !self.ev(e) { return false; }
                     // an expression statement's value is a temporary dropped at its end
                     if self.drop_for.is_some() && self.is_rvalue(e) && self.rec_drop(e) { return false; }
@@ -348,7 +348,7 @@ impl<'a> Rec<'a> {
                 if arms.is_empty() { return self.diverging(); }
                 let mut any = false;
                 for a in arms {
-                    if let Some(g) = a.guard {
+                    if let Some(g) = a.guard.get() {
                         let (t, _) = self.cond(g);
                         if !t { continue; }
                     }
@@ -364,7 +364,7 @@ impl<'a> Rec<'a> {
             }
             ExprKind::While(row) => {
                 let w = *ast.row(row);
-                let label = self.label_text(w.label);
+                let label = self.label_text(w.label.get());
                 self.loops.push(LoopCx { label, is_loop: true, brk: false });
                 let (t, f) = self.cond(w.cond);
                 if t && self.block(w.body) { self.cycle = true; }
@@ -377,7 +377,7 @@ impl<'a> Rec<'a> {
                 if let Some(&(d, a, _)) = self.body.for_into.get(&f.iter.0).or_else(|| self.body.for_into.get(&e.0)) {
                     if self.rec_call(d, a, 1) { return false; }
                 }
-                let label = self.label_text(f.label);
+                let label = self.label_text(f.label.get());
                 self.loops.push(LoopCx { label, is_loop: true, brk: false });
                 let mut next_ok = true;
                 if let Some(&(d, a)) = self.body.for_next.get(&f.iter.0).or_else(|| self.body.for_next.get(&e.0)) {

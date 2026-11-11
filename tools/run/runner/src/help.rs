@@ -93,7 +93,11 @@ impl<'a> Page<'a> {
         }
     }
     fn usage(&mut self, text: &str) {
-        let head = format!("{} {}", self.st.head("Usage:"), self.st.spec(text));
+        let text = match text.strip_prefix("makepad ") {
+            Some(rest) => format!("{} {rest}", command()),
+            None => text.to_string(),
+        };
+        let head = format!("{} {}", self.st.head("Usage:"), self.st.spec(&text));
         self.line(&head);
     }
     fn text(&mut self, s: &str) {
@@ -106,12 +110,62 @@ impl<'a> Page<'a> {
     }
 }
 
+/// Whether this binary is the bare runner, `relax` (its host is BARE, whose package is this crate),
+/// rather than the `makepad` binary, which brings its own host.
+pub fn bare() -> bool {
+    crate::host().package == env!("CARGO_PKG_NAME")
+}
+
+/// The command this binary is run as, for titles, usage lines and hints.
+pub fn command() -> &'static str {
+    if bare() { "relax" } else { "makepad" }
+}
+
 fn title(p: &mut Page, what: &str) {
-    let t = format!("{} {}", p.st.name("makepad"), p.st.dim(&format!("{} (beta)", env!("CARGO_PKG_VERSION"))));
+    let t = format!("{} {}", p.st.name(command()), p.st.dim(&format!("{} (beta)", env!("CARGO_PKG_VERSION"))));
     p.line(&format!("{t} \u{2014} {what}"));
 }
 
+/// `relax`'s main page: the commands of the bare runner, which runs any Rust package.
+fn relax_main_page(st: &Style) -> String {
+    let mut p = Page::new(st, 29);
+    title(&mut p, "run a Rust crate from source through the Relax JIT");
+    p.blank();
+    p.usage("relax <command> [options]");
+    p.section("Commands:");
+    p.row("run <package>", "Run a package of the workspace in this folder");
+    p.row("run <git-url> <package>", "Run a package straight from a git repository");
+    p.row("test <package>", "Run a package's tests");
+    p.row("test <file.rs> [filter]", "Run the tests of one file");
+    p.row("check <package>", "Type- and borrow-check without running");
+    p.row("live <file.rs> <edit.rs>...", "Run tests, then apply edits as live patches");
+    p.row("selftest <package>", "Test Relax itself: compile every fn of a package, list failures");
+    p.row("fix --to-strict <package>", "Rewrite relaxed code to plain rustc Rust");
+    p.row("fetch <git-url>", "Fetch a repository into the local store");
+    p.row("export <git-url> <folder>", "Write a repository's files into a folder");
+    p.row("inspect <pid> <question>", "Ask a running program about itself (hangs, stacks, events)");
+    p.row("clean [-p <package>]", "Remove the workspace's target/makepad-run cache");
+    p.row("serve", "Run the warm check server");
+    p.row("help [command]", "Show this help, or a command's page");
+    p.section("Options:");
+    p.width = 16;
+    p.row("--verbose", "Phase timings and info (also MAKEPAD_RUN_VERBOSE=1)");
+    p.row("--quiet", "Hide the compile-error stream");
+    p.row("--no-asm", "Refuse inline assembly (asm!/global_asm!/naked_asm!),\nfor sandboxed uses (also MAKEPAD_RUN_NO_ASM=1)");
+    p.row("--allow-c", "Build C dependencies with cargo and the system C\ncompiler and link them in (also MAKEPAD_RUN_ALLOW_C=1)");
+    p.row("--version", "Print the version and exit");
+    p.row("-h, --help", "Print this help");
+    p.section("Environment:");
+    p.row("MAKEPAD_RUN_HOME", "Where git stores live (default ~/.makepad-run)");
+    p.row("NO_COLOR", "Turn colour off (CLICOLOR_FORCE=1 forces it on)");
+    p.footer("Run `relax help <command>` for details. What does not work yet: libs/relax/KNOWN_GAPS.md");
+    p.out
+}
+
 fn main_page(st: &Style) -> String {
+    if bare() {
+        return relax_main_page(st);
+    }
     let mut p = Page::new(st, 29);
     title(&mut p, "fast JIT loader for makepad Rust apps");
     p.blank();
@@ -158,7 +212,7 @@ fn run_page(st: &Style) -> String {
     title(&mut p, "run an app");
     p.blank();
     p.usage("makepad run [options] <package> [cargo flags] [-- args]");
-    p.line(&format!("       {}", st.spec("makepad run [options] <git-url>[#ref] [--mount <dir>=<git-url>[#ref]]...")));
+    p.line(&format!("       {}", st.spec(&format!("{} run [options] <git-url>[#ref] [--mount <dir>=<git-url>[#ref]]...", command()))));
     p.line(&format!("           {}", st.spec("[--cached] <package> [cargo flags] [-- args]")));
     p.blank();
     p.text("Runs the package of the workspace in the current folder, or of a git");
@@ -454,7 +508,7 @@ pub fn unknown(word: &str) -> i32 {
     let st = Style::new(Stream::Err);
     eprintln!("{} unknown command `{}`", st.red("error:"), word);
     eprintln!();
-    eprintln!("  {}", st.dim("Run `makepad help` to list the commands."));
+    eprintln!("  {}", st.dim(&format!("Run `{} help` to list the commands.", command())));
     2
 }
 

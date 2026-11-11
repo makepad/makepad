@@ -534,7 +534,7 @@ fn collect_mods(p: &ParsedFile, cfg: &crate::cfg::CfgSet, active: bool, items: &
             };
             let mut paths = Vec::new();
             path_attrs(p, p.ast.list(it.attrs), cfg, &mut paths);
-            match body {
+            match &body.get() {
                 None => {
                     if !paths.is_empty() {
                         let rel = if top { base_dir } else { child_dir };

@@ -530,7 +530,7 @@ impl Cx<'_> {
         let scope = self.node_scope(Node::Arm(node), span)?;
         self.pat_hint = pat_span.lo;
         let pattern = Box::new(self.lower_pattern(arm.pat)?);
-        let guard = match arm.guard {
+        let guard = match arm.guard.get() {
             Some(g) => Some(self.mirror_expr(g)?),
             None => None,
         };

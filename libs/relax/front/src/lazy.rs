@@ -269,6 +269,11 @@ impl Plan {
         let lazy_from = eager_prefix(crates);
         let eager_prefix = selected_prefix(crates, stored);
         early.publish(eager_prefix);
+        // The last crate is selected whole when it is built with cfg(test) (its own items are all
+        // demanded, below): the load takes it in full now instead of waiting for the closure
+        // (the plan's eager prefix, part of its image, stays as computed)
+        if rust_lazy && crates.last().is_some_and(|c| c.cfg.set.iter().any(|x| x == "test")) { early.publish(crates.len()); }
+        let by_name = crate_indices_by_name(crates);
         let mut prepared_files = Vec::new();
         let mut unindexed_files = Vec::new();
         let queue = OutlineQueue::default();
@@ -512,6 +517,12 @@ impl Plan {
                                 for (name, reason) in &surface.unknown { eprintln!("rs-outline-fallback: {path:?} {name:?} {reason:?}"); }
                             }
                             expansion_failures.insert((*ci, path.clone(), module.clone()), !surface.unknown.is_empty());
+                            // An unknown expansion forces its file's crate and every crate it depends on
+                            // whole (the closure's inputs, below): when that takes in the last crate, the
+                            // one the closure selects among, the load takes it in full now
+                            if !surface.unknown.is_empty() && crates.last().is_some_and(|last| forced_crates(crates, &by_name, *ci).iter().any(|&k| crates[k].name == last.name)) {
+                                early.publish(crates.len());
+                            }
                             for def in &surface.used.local {
                                 if !table.defs.get(&def.name).is_some_and(|defs| defs.iter().any(|d| d.def_file == def.def_file && d.def_pos == def.def_pos)) { parts[*ci].macros.note_definition(&c.name, def); Arc::make_mut(&mut table).push(def.clone()); }
                             }
@@ -689,16 +700,9 @@ impl Plan {
                     crate::why::event("rs-eager", &file.path, 0, "", Some(crate::why::Cause::new(&file.path, 1, "outline-fallback", why)));
                     if profile { eprintln!("rs-eager: {:?} {why}; dependencies={dependencies}", file.path); }
                     if dependencies {
-                        let mut todo = vec![file.ci];
-                        let mut seen = BTreeSet::new();
-                        while let Some(ci) = todo.pop() {
-                            if !seen.insert(ci) { continue; }
+                        for ci in forced_crates(crates, &by_name, file.ci) {
                             forced.insert(crates[ci].name.clone());
                             force_origin.entry(crates[ci].name.clone()).or_insert((file.path.clone(), why.into()));
-                            todo.extend(crates[ci].image_deps.iter().copied());
-                            for (_, name) in &crates[ci].deps {
-                                todo.extend(crates.iter().enumerate().filter(|(_, c)| c.name == *name).map(|(i, _)| i));
-                            }
                         }
                     }
                 }
@@ -1031,6 +1035,28 @@ pub(super) fn dependency_identities(crates: &[usize], identities: &[u128]) -> Ve
     let mut v: Vec<u128> = crates.iter().map(|&d| identities[d]).collect();
     v.sort_unstable();
     v
+}
+
+/// `crates`' load-order indices by crate name (a library and its binary share one).
+fn crate_indices_by_name(crates: &[PreCrate]) -> BTreeMap<&str, Vec<usize>> {
+    let mut by_name = BTreeMap::<&str, Vec<usize>>::new();
+    for (ci, c) in crates.iter().enumerate() { by_name.entry(c.name.as_str()).or_default().push(ci); }
+    by_name
+}
+
+/// The crates an unindexed expansion in crate `ci` forces whole: `ci` and every crate it depends
+/// on, by image dependency and by name (`by_name`: crate_indices_by_name).
+fn forced_crates(crates: &[PreCrate], by_name: &BTreeMap<&str, Vec<usize>>, ci: usize) -> BTreeSet<usize> {
+    let mut todo = vec![ci];
+    let mut seen = BTreeSet::new();
+    while let Some(ci) = todo.pop() {
+        if !seen.insert(ci) { continue; }
+        todo.extend(crates[ci].image_deps.iter().copied());
+        for (_, name) in &crates[ci].deps {
+            todo.extend(by_name.get(name.as_str()).into_iter().flatten().copied());
+        }
+    }
+    seen
 }
 
 fn eager_prefix(crates: &[PreCrate]) -> usize {

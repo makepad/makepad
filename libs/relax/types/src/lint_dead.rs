@@ -120,7 +120,7 @@ impl<'a> TypeWalker<'a> {
             Ty::Fn(f) => {
                 let f = *ast.fn_ptr(f);
                 for &x in ast.list(f.params) { self.ty(x); }
-                if let Some(r) = f.ret { self.ty(r); }
+                if let Some(r) = f.ret.get() { self.ty(r); }
             }
             Ty::ImplTrait(b) | Ty::DynTrait(b, _) => self.bounds(b),
             Ty::ImplicitSelf => {
@@ -163,7 +163,7 @@ impl<'a> TypeWalker<'a> {
             }
             Some(GenericArgs::Paren(inputs, out)) => {
                 for &t in ast.list(*inputs) { self.ty(t); }
-                if let Some(t) = out { self.ty(*t); }
+                if let Some(t) = &out.get() { self.ty(*t); }
             }
             None => {}
         }
@@ -175,11 +175,11 @@ impl<'a> TypeWalker<'a> {
             match p.kind {
                 GenericParamKind::Type(b, def) => {
                     self.bounds(b);
-                    if let Some(t) = def { self.ty(t); }
+                    if let Some(t) = def.get() { self.ty(t); }
                 }
                 GenericParamKind::Const(t, def) => {
                     self.ty(t);
-                    if let Some(e) = def { self.const_expr(e); }
+                    if let Some(e) = def.get() { self.const_expr(e); }
                 }
                 GenericParamKind::Lifetime(_) => {}
             }
@@ -198,7 +198,7 @@ impl<'a> TypeWalker<'a> {
         for s in ast.segs(p.segs) { self.generic_args(s.args()); }
         if let Some(q) = ast.qself(p) {
             self.ty(q.ty);
-            if let Some(tp) = q.trait_path { self.path(&tp, true); }
+            if let Some(tp) = q.trait_path.get() { self.path(&tp, true); }
         }
     }
 
@@ -231,7 +231,7 @@ impl<'a> TypeWalker<'a> {
         if segs.is_empty() { return; }
         // `<T as Trait>::Assoc`: the trait (above) and the associated item it names
         if let Some(q) = ast.qself(p) {
-            if let Some(tp) = q.trait_path {
+            if let Some(tp) = q.trait_path.get() {
                 if let Some(t) = self.resolve_path_def(&tp, true) {
                     self.use_def(t);
                     if let Some(last) = segs.last() {
@@ -332,12 +332,12 @@ fn item_refs_in(prog: &Program, d: DefId, pub_only: bool) -> Vec<Ref> {
             let sig = *ast.fn_sig(sig);
             for p in ast.list(sig.params) { w.ty(p.ty); }
             // `self` / `&self`: its type is `Self`
-            match sig.self_param {
+            match sig.self_param.get() {
                 Some(SelfParam::Typed(_, t)) => w.ty(t),
                 Some(_) => { if let Some(s) = w.self_def { w.use_def(s); } }
                 None => {}
             }
-            if let Some(r) = sig.ret { w.ty(r); }
+            if let Some(r) = sig.ret.get() { w.ty(r); }
         }
         ItemKind::Struct(r) => {
             let s = *ast.row(r);
@@ -347,13 +347,13 @@ fn item_refs_in(prog: &Program, d: DefId, pub_only: bool) -> Vec<Ref> {
         ItemKind::Enum(r) => {
             for v in ast.list(ast.row(r).variants) {
                 if let VariantData::Struct(l) | VariantData::Tuple(l) = v.data { fields(&mut w, ast, l, false); }
-                if let Some(e) = v.disc { w.const_expr(e); }
+                if let Some(e) = v.disc.get() { w.const_expr(e); }
             }
         }
         ItemKind::TypeAlias(r) => {
             let a = *ast.row(r);
             w.bounds(a.bounds);
-            if let Some(t) = a.ty { w.ty(t); }
+            if let Some(t) = a.ty.get() { w.ty(t); }
         }
         ItemKind::Trait(r) => {
             let t = *ast.row(r);
@@ -361,13 +361,13 @@ fn item_refs_in(prog: &Program, d: DefId, pub_only: bool) -> Vec<Ref> {
         }
         ItemKind::Impl(r) => {
             let i = *ast.row(r);
-            if let Some(tp) = i.trait_ {
+            if let Some(tp) = i.trait_.get() {
                 w.path(&tp, true);
                 // the associated types of a trait impl are part of what the impl exposes
                 // (`Index::Output`, `IntoIterator::IntoIter`)
                 for &it in ast.list(i.items) {
                     if let ItemKind::TypeAlias(r) = ast.item(it).kind {
-                        if let Some(t) = ast.row(r).ty { w.ty(t); }
+                        if let Some(t) = ast.row(r).ty.get() { w.ty(t); }
                     }
                 }
             }
@@ -387,7 +387,7 @@ fn fields(w: &mut TypeWalker, ast: &Ast, l: List<FieldDef>, pub_only: bool) {
     for f in ast.list(l) {
         if pub_only && !matches!(f.vis, Vis::Pub) { continue; }
         w.ty(f.ty);
-        if let Some(e) = f.default { w.const_expr(e); }
+        if let Some(e) = f.default.get() { w.const_expr(e); }
     }
 }
 
@@ -566,7 +566,7 @@ impl<'a> BodyRefs<'a> {
         let (adt, vi) = self.variant_of(d);
         self.use_def(adt);
         match *ast.pat(p) {
-            Pat::Struct(_, fs, _) => {
+            Pat::Struct(_, _, fs) => {
                 let Some(a) = self.tcx.adts.get(&adt) else { return };
                 let Some(var) = a.variants.get(vi as usize) else { return };
                 for f in ast.list(fs) {
@@ -597,7 +597,7 @@ impl<'a> BodyRefs<'a> {
         let ast = self.ast;
         match *ast.pat(p) {
             Pat::Or(_) => {}
-            Pat::Struct(_, fs, _) => {
+            Pat::Struct(_, _, fs) => {
                 if let Some(Res::Def(d)) = self.body.pat_res.get(&p.0) { if self.prog.def(*d).kind == DefKind::Variant { out.push(*d); } }
                 for f in ast.list(fs) { self.necessary_variants(f.pat, out); }
             }
@@ -607,7 +607,9 @@ impl<'a> BodyRefs<'a> {
             }
             Pat::Path(_) | Pat::Ident { .. } => {
                 if let Some(Res::Def(d)) = self.body.pat_res.get(&p.0) { if self.prog.def(*d).kind == DefKind::Variant { out.push(*d); } }
-                if let Pat::Ident { sub: Some(s), .. } = *ast.pat(p) { self.necessary_variants(s, out); }
+                if let Pat::Ident { sub, .. } = *ast.pat(p) {
+                    if let Some(s) = sub.get() { self.necessary_variants(s, out); }
+                }
             }
             Pat::Tuple(ps) | Pat::Slice(ps) => for &x in ast.list(ps) { self.necessary_variants(x, out) },
             Pat::Ref(_, x) | Pat::Paren(x) | Pat::Box(x) => self.necessary_variants(x, out),
@@ -661,7 +663,7 @@ impl<'a> Visitor<'a> for BodyRefs<'a> {
 
     fn stmt(&mut self, s: &Stmt, b: BlockId) {
         if let Stmt::Let(r) = *s {
-            if let Some(t) = self.ast.row(r).ty { self.tw.ty(t); }
+            if let Some(t) = self.ast.row(r).ty.get() { self.tw.ty(t); }
         }
         let _ = b;
         ast_visit::walk_stmt(self, s);
@@ -680,7 +682,7 @@ impl<'a> Visitor<'a> for BodyRefs<'a> {
         let ast = self.ast;
         let was = std::mem::replace(&mut self.in_pat, true);
         match *ast.pat(p) {
-            Pat::Struct(path, ..) | Pat::TupleStruct(path, _) => {
+            Pat::Struct(_, path, ..) | Pat::TupleStruct(path, _) => {
                 self.tw.path_args(&path);
                 self.tw.alias_uses(&path);
                 if let Some(Res::Def(d)) = self.body.pat_res.get(&p.0).copied() { self.handle_res(d); }
@@ -756,8 +758,8 @@ impl<'a> Visitor<'a> for BodyRefs<'a> {
             ExprKind::Cast(_, t) => self.tw.ty(t),
             ExprKind::Closure(row) => {
                 let c = *ast.row(row);
-                for p in ast.list(c.params) { if let Some(t) = p.ty { self.tw.ty(t); } }
-                if let Some(t) = c.ret { self.tw.ty(t); }
+                for p in ast.list(c.params) { if let Some(t) = p.ty.get() { self.tw.ty(t); } }
+                if let Some(t) = c.ret.get() { self.tw.ty(t); }
             }
             ExprKind::Repeat(_, n) => self.tw.const_expr(n),
             ExprKind::Assign(l, r) => {
@@ -793,7 +795,7 @@ pub fn module_items(prog: &Program, m: u32) -> (u32, Vec<ItemId>) {
     let d = prog.def(md.def);
     let ast = &prog.files[d.file as usize].ast;
     match ast.item(d.item).kind {
-        ItemKind::Mod(Some(l)) => (d.file, ast.list(l).to_vec()),
+        ItemKind::Mod(crate::ast::Opt::Some(l)) => (d.file, ast.list(l).to_vec()),
         _ => (md.file, prog.files[md.file as usize].ast.root_items.iter().copied().collect()),
     }
 }
@@ -803,7 +805,7 @@ fn use_leaves(ast: &Ast, t: &UseTree, prefix: &mut Vec<PathSeg>, out: &mut Vec<(
         UseTree::Name(seg, rename) => {
             let mut p = prefix.clone();
             p.push(seg);
-            out.push((p, rename, false));
+            out.push((p, rename.get(), false));
         }
         UseTree::Path(seg, child) => {
             prefix.push(seg);
@@ -871,7 +873,7 @@ impl Reach {
                 None => return false,
             };
             if !self_reach { return true; }
-            let trait_reach = match imp.trait_ {
+            let trait_reach = match imp.trait_.get() {
                 None => None,
                 Some(_) => Some(tcx.impl_trait.get(&d).map_or(true, |&t| !local(t) || defs.contains(&t))),
             };
@@ -1362,10 +1364,10 @@ fn late_lints(cx: &CrateCx<'_>, reach: &Reach, pt: &mut PartTimes) {
         let ItemKind::Mac(m) = &ast.item(iid).kind else { continue };
         let m = ast.row(*m);
         if m.args == NO_MAC_ARGS { continue; }
-        let Some(spec) = ast.mac_arg(m.args).asm else { continue };
+        let Some(spec) = ast.mac_arg(m.args).asm.get() else { continue };
         let mut w = TypeWalker { prog, file, ast, module, params: HashSet::new(), self_def: None, out: Vec::new() };
         for op in ast.list(spec.ops) {
-            if let Some(x) = op.input { w.const_expr(x); }
+            if let Some(x) = op.input.get() { w.const_expr(x); }
         }
         for r in w.out {
             if let Ref::Use(d) = r { s.worklist.push(Work { id: d, propagated: false, own: false }); }
@@ -1693,7 +1695,7 @@ fn field_ast(prog: &Program, adt: DefId, vi: usize, fi: usize) -> (Vec<Attr>, u3
     match list {
         Some(l) => {
             let f = ast.list(l)[fi];
-            (ast.list(f.attrs).to_vec(), f.name.map_or(f.ty_span.0, |n| n.lo))
+            (ast.list(f.attrs).to_vec(), f.name.get().map_or(f.ty_span.0, |n| n.lo))
         }
         None => (Vec::new(), ast.item(def.item).name.lo),
     }

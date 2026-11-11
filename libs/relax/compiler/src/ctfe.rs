@@ -881,13 +881,13 @@ impl<'a> Ctx<'a> {
             match s {
                 Stmt::Let(r) if { let l = self.u.prog.files[file].ast.row(*r); l.init.is_some() && l.else_.is_none() } => {
                     let crate::ast::LetStmt { pat, init, .. } = self.u.prog.files[file].ast.row(*r).clone();
-                    let (pat, x) = (&pat, init.as_ref().unwrap());
+                    let (pat, x) = (&pat, &init.get().unwrap());
                     if matches!(self.u.prog.files[file].ast.pat(*pat), crate::ast::Pat::Wild) {
                         self.eval(b, env, *x)?;
                         continue;
                     }
                     let li = *b.pat_local.get(&pat.0)?;
-                    if !matches!(self.u.prog.files[file].ast.pat(*pat), crate::ast::Pat::Ident { by_ref: false, sub: None, .. }) {
+                    if !matches!(self.u.prog.files[file].ast.pat(*pat), crate::ast::Pat::Ident { by_ref: false, sub, .. } if sub.is_none()) {
                         return None;
                     }
                     let v = self.eval(b, env, *x)?;
@@ -896,8 +896,8 @@ impl<'a> Ctx<'a> {
                     }
                     env[li as usize] = Some(v);
                 }
-                Stmt::Expr(x, false) if k + 1 == n => return self.eval(b, env, *x),
-                Stmt::Expr(x, _) => { self.eval(b, env, *x)?; }
+                Stmt::Expr(false, x) if k + 1 == n => return self.eval(b, env, *x),
+                Stmt::Expr(_, x) => { self.eval(b, env, *x)?; }
                 Stmt::Item(_) => {}
                 _ => return None,
             }
@@ -1026,12 +1026,13 @@ impl<'a> Ctx<'a> {
         // Only the macro expansion, never a user-written pointer-to-integer const.
         if !in_offset_of(&self.u.prog, b.file, pos) { return None; }
         let ast = &self.u.prog.files[b.file as usize].ast;
-        let [Stmt::Let(r1), Stmt::Let(r2), Stmt::Let(r3), Stmt::Expr(tail, false)] = ast.stmts(bl) else { return None };
-        let (crate::ast::LetStmt { pat: up, init: Some(ui), else_: None, .. },
-             crate::ast::LetStmt { pat: bp, init: Some(bi), else_: None, .. },
-             crate::ast::LetStmt { pat: fp, init: Some(fi), else_: None, .. }) = (ast.row(*r1), ast.row(*r2), ast.row(*r3)) else { return None };
+        let [Stmt::Let(r1), Stmt::Let(r2), Stmt::Let(r3), Stmt::Expr(false, tail)] = ast.stmts(bl) else { return None };
+        let (crate::ast::LetStmt { pat: up, init: ui, else_: ue, .. },
+             crate::ast::LetStmt { pat: bp, init: bi, else_: be, .. },
+             crate::ast::LetStmt { pat: fp, init: fi, else_: fe, .. }) = (ast.row(*r1), ast.row(*r2), ast.row(*r3));
+        let (Some(ui), Some(bi), Some(fi), None, None, None) = (&ui.get(), &bi.get(), &fi.get(), ue.get(), be.get(), fe.get()) else { return None };
         for pat in [up, bp, fp] {
-            if !matches!(ast.pat(*pat), crate::ast::Pat::Ident { by_ref: false, mutbl: false, sub: None, .. }) { return None; }
+            if !matches!(ast.pat(*pat), crate::ast::Pat::Ident { by_ref: false, mutbl: false, sub, .. } if sub.is_none()) { return None; }
         }
         let (ul, base, field) = (*b.pat_local.get(&up.0)?, *b.pat_local.get(&bp.0)?, *b.pat_local.get(&fp.0)?);
         let TyKind::Adt(mu, _, _) = self.kind(b.ty(*ui)) else { return None };
@@ -1045,11 +1046,11 @@ impl<'a> Ctx<'a> {
         if !args.is_empty() || b.res.get(&recv.0) != Some(&Res::Local(ul)) || m.derefs != 0 || m.autoref != 1
             || self.u.prog.def(m.def).krate != self.u.core_crate || self.u.prog.name(m.def) != "as_ptr" { return None; }
         let ExprKind::Unsafe(fb) = ast.expr(*fi).kind else { return None };
-        let [Stmt::Expr(addr, false)] = ast.stmts(fb) else { return None };
+        let [Stmt::Expr(false, addr)] = ast.stmts(fb) else { return None };
         let ExprKind::AddrOf(true, false, place) = ast.expr(*addr).kind else { return None };
         // The tail is exactly `unsafe { <*const _>::cast::<u8>(field).offset_from_unsigned(base as *const u8) }`.
         let ExprKind::Unsafe(tb) = ast.expr(*tail).kind else { return None };
-        let [Stmt::Expr(dist, false)] = ast.stmts(tb) else { return None };
+        let [Stmt::Expr(false, dist)] = ast.stmts(tb) else { return None };
         let ExprKind::MethodCall(recv, mrow) = ast.expr(*dist).kind else { return None };
         let m = b.methods.get(&dist.0)?;
         if self.u.prog.def(m.def).krate != self.u.core_crate || self.u.prog.name(m.def) != "offset_from_unsigned" { return None; }
@@ -1520,7 +1521,7 @@ impl<'a> Ctx<'a> {
             env[0] = Some(v);
         }
         for (p, v) in body.param_pats.iter().zip(args) {
-            if !matches!(self.u.prog.files[body.file as usize].ast.pat(*p), crate::ast::Pat::Ident { by_ref: false, sub: None, .. }) {
+            if !matches!(self.u.prog.files[body.file as usize].ast.pat(*p), crate::ast::Pat::Ident { by_ref: false, sub, .. } if sub.is_none()) {
                 return None;
             }
             let li = *body.pat_local.get(&p.0)? as usize;

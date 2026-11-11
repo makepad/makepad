@@ -736,14 +736,14 @@ impl<'a> Parser<'a> {
     }
 
     fn mac_args_inner(&mut self, is_matches: bool, has_msg: bool, is_vec: bool, hi: usize) -> PResult<MacArgs> {
-        let mut a = MacArgs { exprs: List::EMPTY, repeat: false, pat: None, guard: None, asm: None };
+        let mut a = MacArgs { exprs: List::EMPTY, repeat: false, pat: OptPatId::NONE, guard: OptExprId::NONE, asm: Opt::None };
         let mut exprs = Vec::new();
         if is_matches {
             exprs.push(self.expr()?);
             self.expect(T::Comma)?;
-            a.pat = Some(self.pat_top()?);
+            a.pat = OptPatId::from(Some(self.pat_top()?));
             if self.eat(T::KwIf) {
-                a.guard = Some(self.expr()?);
+                a.guard = OptExprId::from(Some(self.expr()?));
             }
             // `assert_matches!(e, pat if guard, "message {}", args)`: the format arguments follow
             if self.eat(T::Comma) && has_msg {
@@ -777,7 +777,7 @@ impl<'a> Parser<'a> {
     /// `asm!(templates.., operands.., options(..), clobber_abi(..))` (Reference
     /// inline-assembly.md [asm.syntax]); template strings become the leading `exprs`.
     fn asm_args(&mut self, hi: usize) -> PResult<MacArgs> {
-        let mut a = MacArgs { exprs: List::EMPTY, repeat: false, pat: None, guard: None, asm: None };
+        let mut a = MacArgs { exprs: List::EMPTY, repeat: false, pat: OptPatId::NONE, guard: OptExprId::NONE, asm: Opt::None };
         let mut spec = AsmArgs { templates: 0, ops: List::EMPTY, options: 0 };
         let mut exprs = Vec::new();
         let mut ops = Vec::new();
@@ -857,12 +857,12 @@ impl<'a> Parser<'a> {
                     _ => return self.err("expected an asm! operand"),
                 };
                 self.pos += 1;
-                let mut op = AsmOp { name, dir, reg: Ident { lo: 0, hi: 0 }, explicit: false, input: None, output: None };
+                let mut op = AsmOp { name: OptIdent::from(name), dir, reg: Ident { lo: 0, hi: 0 }, explicit: false, input: OptExprId::NONE, output: OptExprId::NONE };
                 match dir {
-                    AsmDir::Const | AsmDir::Sym => op.input = Some(self.expr()?),
+                    AsmDir::Const | AsmDir::Sym => op.input = OptExprId::from(Some(self.expr()?)),
                     AsmDir::Label => {
                         if self.kind() != T::OpenBrace { return self.err("expected a block after `label`"); }
-                        op.input = Some(self.expr()?);
+                        op.input = OptExprId::from(Some(self.expr()?));
                     }
                     _ => {
                         self.expect(T::OpenParen)?;
@@ -872,36 +872,36 @@ impl<'a> Parser<'a> {
                         self.expect(T::CloseParen)?;
                         let underscore = |p: &Self| p.is_word(0, b"_") && matches!(p.nth(1), T::Comma | T::CloseParen | T::Eof) ;
                         match dir {
-                            AsmDir::In => op.input = Some(self.expr()?),
+                            AsmDir::In => op.input = OptExprId::from(Some(self.expr()?)),
                             AsmDir::Out | AsmDir::LateOut => {
                                 if underscore(self) || (self.is_word(0, b"_") && self.pos + 1 >= hi) {
                                     self.pos += 1;
                                 } else {
-                                    op.output = Some(self.expr()?);
+                                    op.output = OptExprId::from(Some(self.expr()?));
                                 }
                             }
                             _ => {
                                 let x = self.expr()?;
                                 if self.eat(T::FatArrow) {
-                                    op.input = Some(x);
+                                    op.input = OptExprId::from(Some(x));
                                     if self.is_word(0, b"_") && (self.pos + 1 >= hi || matches!(self.nth(1), T::Comma)) {
                                         self.pos += 1;
                                     } else {
-                                        op.output = Some(self.expr()?);
+                                        op.output = OptExprId::from(Some(self.expr()?));
                                     }
                                 } else {
-                                    op.input = Some(x);
-                                    op.output = Some(x);
+                                    op.input = OptExprId::from(Some(x));
+                                    op.output = OptExprId::from(Some(x));
                                 }
                             }
                         }
                     }
                 }
-                if let Some(x) = op.input {
+                if let Some(x) = op.input.get() {
                     exprs.push(x);
                 }
-                if let Some(x) = op.output {
-                    if Some(x) != op.input {
+                if let Some(x) = op.output.get() {
+                    if Some(x) != op.input.get() {
                         exprs.push(x);
                     }
                 }
@@ -916,7 +916,7 @@ impl<'a> Parser<'a> {
         }
         a.exprs = self.ast.push_list(exprs);
         spec.ops = self.ast.push_list(ops);
-        a.asm = Some(spec);
+        a.asm = Opt::Some(spec);
         Ok(a)
     }
 
@@ -1374,7 +1374,7 @@ impl<'a> Parser<'a> {
             }
             UseTree::Name(sg, rename) => {
                 let name = self.seg_text(sg);
-                let bind = match rename {
+                let bind = match rename.get() {
                     Some(r) => String::from_utf8_lossy(self.bytes(r.lo, r.hi)).trim_start_matches("r#").to_string(),
                     None => name.clone(),
                 };
@@ -2265,7 +2265,7 @@ impl<'a> Parser<'a> {
                     let t = String::from_utf8_lossy(p.tok_text(p.tok())).into_owned();
                     return Err(PErr { pos: p.lo(), msg: format!("macro expansion ignores `{t}` and any tokens following") });
                 }
-                return Ok(vec![Stmt::Expr(e, false)]);
+                return Ok(vec![Stmt::Expr(false, e)]);
             }
             // `include!` in statement position is an expression: its first one, the rest of the
             // file is ignored (rustc_expand base.rs `ExpandInclude::make_expr`, lint incomplete_include)
@@ -2273,7 +2273,7 @@ impl<'a> Parser<'a> {
                 let e = p.expr()?;
                 p.incomplete_include_check();
                 p.skip_to_eof();
-                return Ok(vec![Stmt::Expr(e, false)]);
+                return Ok(vec![Stmt::Expr(false, e)]);
             }
             while p.kind() != T::Eof {
                 // statements of the expansion may be macro calls themselves
@@ -2286,7 +2286,7 @@ impl<'a> Parser<'a> {
                 let had_semi = self.pos > 0 && self.toks.kind_at(self.pos - 1) == T::Semi;
                 if had_semi {
                     match v.last_mut() {
-                        Some(Stmt::Expr(_, semi)) => *semi = true,
+                        Some(Stmt::Expr(semi, _)) => *semi = true,
                         // rustc_expand `flat_map_stmt`: a call with a trailing `;` that expands to
                         // nothing leaves an empty statement (a block's tail stays what it was)
                         None => v.push(Stmt::Empty),
@@ -2719,19 +2719,19 @@ impl<'a> Parser<'a> {
                         m.add_use(&self.cur_module(), bind, vec![String::new(), crate_name]);
                     }
                 }
-                ItemKind::ExternCrate(rename)
+                ItemKind::ExternCrate(OptIdent::from(rename))
             }
             T::KwExtern if matches!(self.nth(1), T::OpenBrace) || (self.nth(2) == T::OpenBrace && is_str(self.nth(1))) => {
                 self.pos += 1;
                 let abi = self.abi()?;
                 let items = self.foreign_items(abi)?;
-                ItemKind::ForeignMod(self.ast.push_row(ForeignModItem { abi, items, unsafe_: 0 }))
+                ItemKind::ForeignMod(self.ast.push_row(ForeignModItem { abi: OptIdent::from(abi), items, unsafe_: 0 }))
             }
             T::KwUnsafe if self.nth(1) == T::KwExtern && (self.nth(2) == T::OpenBrace || (is_str(self.nth(2)) && self.nth(3) == T::OpenBrace)) => {
                 self.pos += 2;
                 let abi = self.abi()?;
                 let items = self.foreign_items(abi)?;
-                ItemKind::ForeignMod(self.ast.push_row(ForeignModItem { abi, items, unsafe_: 1 }))
+                ItemKind::ForeignMod(self.ast.push_row(ForeignModItem { abi: OptIdent::from(abi), items, unsafe_: 1 }))
             }
             T::KwFn | T::KwConst | T::KwAsync | T::KwUnsafe | T::KwExtern
                 if self.fn_ahead() =>
@@ -2740,18 +2740,18 @@ impl<'a> Parser<'a> {
                 // builds before expanding macros in its signature or body.
                 let (n, mut sig, body) = self.with_cfg_active(self.test_fn_active(&attrs), self.pending_shape.len(), |p| p.fn_item())?;
                 if let Some(abi) = self.foreign_abi {
-                    sig.abi = Some(abi);
+                    sig.abi = OptAbi::from(Some(abi));
                     sig.unsafe_ = true;
                 }
                 name = n;
-                ItemKind::Fn(self.ast.push_fn_sig(sig), body, default_)
+                ItemKind::Fn(self.ast.push_fn_sig(sig), OptBlockId::from(body), default_)
             }
             T::Ident if (self.is_word(0, b"safe")) && self.fn_ahead_from(1) => {
                 self.pos += 1;
                 let (n, mut sig, body) = self.with_cfg_active(self.test_fn_active(&attrs), self.pending_shape.len(), |p| p.fn_item())?;
-                if let Some(abi) = self.foreign_abi { sig.abi = Some(abi); }
+                if let Some(abi) = self.foreign_abi { sig.abi = OptAbi::from(Some(abi)); }
                 name = n;
-                ItemKind::Fn(self.ast.push_fn_sig(sig), body, default_)
+                ItemKind::Fn(self.ast.push_fn_sig(sig), OptBlockId::from(body), default_)
             }
             T::KwStruct => {
                 self.pos += 1;
@@ -2801,7 +2801,7 @@ impl<'a> Parser<'a> {
                         _ => VariantData::Unit,
                     };
                     let disc = if self.eat(T::Eq) { Some(self.expr()?) } else { None };
-                    vars.push(Variant { attrs: self.ast.push_list(attrs), name: vname, data, disc });
+                    vars.push(Variant { attrs: self.ast.push_list(attrs), name: vname, data, disc: OptExprId::from(disc) });
                     if !self.eat(T::Comma) {
                         break;
                     }
@@ -2847,7 +2847,7 @@ impl<'a> Parser<'a> {
                 }
                 self.where_clause(&mut generics)?;
                 self.expect(T::Semi)?;
-                ItemKind::TypeAlias(self.ast.push_row(TypeAliasItem { generics, bounds, ty }))
+                ItemKind::TypeAlias(self.ast.push_row(TypeAliasItem { generics, bounds, ty: OptTyId::from(ty) }))
             }
             T::KwConst => {
                 self.pos += 1;
@@ -2872,7 +2872,7 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 name = self.ident_tok()?;
                 if self.eat(T::Semi) {
-                    ItemKind::Mod(None)
+                    ItemKind::Mod(Opt::None)
                 } else {
                     self.expect(T::OpenBrace)?;
                     let mut inner = Vec::new();
@@ -2910,7 +2910,7 @@ impl<'a> Parser<'a> {
                     attrs.extend(inner);
                     let attrs = self.ast.push_list(attrs);
                     let items = self.ast.push_list(items);
-                    return Ok(Some(self.push_item(Item { ranges: [0; 4], default_, attrs, vis, name, kind: ItemKind::Mod(Some(items)), lo, hi: self.prev_hi() })));
+                    return Ok(Some(self.push_item(Item { ranges: [0; 4], default_, attrs, vis, name, kind: ItemKind::Mod(Opt::Some(items)), lo, hi: self.prev_hi() })));
                 }
             }
             T::Ident if self.is_word(0, b"macro_rules") && self.nth(1) == T::Not => {
@@ -3156,14 +3156,14 @@ impl<'a> Parser<'a> {
                 konst,
                 asyncness,
                 unsafe_,
-                abi,
+                abi: OptAbi::from(abi),
                 generics,
-                self_param: self_param.map(|(param, _)| param),
+                self_param: Opt::from(self_param.map(|(param, _)| param)),
                 self_param_pos: self_param.map_or(0, |(_, pos)| pos),
                 params: self.ast.push_list(params),
                 variadic,
-                ret,
-                lazy_body,
+                ret: OptTyId::from(ret),
+                lazy_body: Opt::from(lazy_body),
             },
             body,
         ))
@@ -3296,7 +3296,7 @@ impl<'a> Parser<'a> {
                         }
                         None => None,
                     };
-                    Ok(Some((SelfParam::Ref(lt, m), pos)))
+                    Ok(Some((SelfParam::Ref(OptIdent::from(lt), m), pos)))
                 } else {
                     Ok(None)
                 }
@@ -3314,7 +3314,7 @@ impl<'a> Parser<'a> {
             let ty_lo = self.lo();
             let ty = self.ty_plus()?;
             let ty_span = (ty_lo, self.prev_hi());
-            v.push(FieldDef { attrs: self.ast.push_list(attrs), vis, name: None, ty, default: None, ty_span });
+            v.push(FieldDef { attrs: self.ast.push_list(attrs), vis, name: OptIdent::NONE, ty, default: OptExprId::NONE, ty_span });
             if !self.eat(T::Comma) {
                 break;
             }
@@ -3339,7 +3339,7 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 Some(self.expr()?)
             } else { None };
-            v.push(FieldDef { attrs: self.ast.push_list(attrs), vis, name: Some(name), ty, default, ty_span });
+            v.push(FieldDef { attrs: self.ast.push_list(attrs), vis, name: OptIdent::from(Some(name)), ty, default: OptExprId::from(default), ty_span });
             if self.kind() == T::Comma && self.doc_before() {
                 return self.err("E0585: found a documentation comment that doesn't document anything");
             }
@@ -3470,7 +3470,7 @@ impl<'a> Parser<'a> {
         let items = self.assoc_items();
         self.in_trait = outer_trait;
         let items = items?;
-        Ok(ItemKind::Impl(self.ast.push_row(ImplItem { unsafe_, builtin_derive: false, default_, generics, negative, trait_, self_ty, items })))
+        Ok(ItemKind::Impl(self.ast.push_row(ImplItem { unsafe_, builtin_derive: false, default_, generics, negative, trait_: Opt::from(trait_), self_ty, items })))
     }
 
     fn ty_impl_header(&mut self) -> PResult<TyId> {
@@ -3524,7 +3524,7 @@ impl<'a> Parser<'a> {
                             self.pending_shape.push((TokRange { lo: 0, hi: 0 }, Some(e)));
                         }
                     }
-                    Ok(UseTree::Name(seg, rename))
+                    Ok(UseTree::Name(seg, OptIdent::from(rename)))
                 }
             }
         }
@@ -3580,12 +3580,12 @@ impl<'a> Parser<'a> {
                 self.expect(T::Colon)?;
                 let ty = self.ty()?;
                 let def = if self.eat(T::Eq) { Some(self.const_arg()?) } else { None };
-                params.push(GenericParam { attrs, name, kind: GenericParamKind::Const(ty, def) });
+                params.push(GenericParam { attrs, name, kind: GenericParamKind::Const(ty, OptExprId::from(def)) });
             } else {
                 let name = self.ident_tok()?;
                 let bounds = if self.eat(T::Colon) { self.bounds()? } else { List::EMPTY };
                 let def = if self.eat(T::Eq) { Some(self.ty_plus()?) } else { None };
-                params.push(GenericParam { attrs, name, kind: GenericParamKind::Type(bounds, def) });
+                params.push(GenericParam { attrs, name, kind: GenericParamKind::Type(bounds, OptTyId::from(def)) });
             }
             if !self.eat(T::Comma) {
                 self.expect_gt()?;
@@ -3766,7 +3766,7 @@ impl<'a> Parser<'a> {
             let trait_path = if self.eat(T::KwAs) { Some(self.path(false)?) } else { None };
             self.expect_gt()?;
             qself = QSelfId(self.ast.base[14] + self.ast.qselfs.len() as u32);
-            self.ast.qselfs.push(QSelf { ty, trait_path });
+            self.ast.qselfs.push(QSelf { ty, trait_path: Opt::from(trait_path) });
             self.expect(T::PathSep)?;
         } else if self.eat(T::PathSep) {
             global = true;
@@ -3798,7 +3798,7 @@ impl<'a> Parser<'a> {
                     self.expect(T::CloseParen)?;
                     let ret = if self.eat(T::RArrow) { Some(self.ty()?) } else { None };
                     let tys = self.ast.push_list(tys);
-                    seg.set_args(self.ast.push_gargs(GenericArgs::Paren(tys, ret)));
+                    seg.set_args(self.ast.push_gargs(GenericArgs::Paren(tys, OptTyId::from(ret))));
                 }
             }
             segs.push(seg);
@@ -4076,7 +4076,7 @@ impl<'a> Parser<'a> {
                 };
                 let m = self.eat(T::KwMut);
                 let inner = self.ty_inner(false)?;
-                Ty::Ref(lt, m, inner)
+                Ty::Ref(m, OptIdent::from(lt), inner)
             }
             T::Star => {
                 self.pos += 1;
@@ -4214,7 +4214,7 @@ impl<'a> Parser<'a> {
         self.expect(T::CloseParen)?;
         let ret = if self.eat(T::RArrow) { Some(self.ty()?) } else { None };
         let params = self.ast.push_list(params);
-        Ok(Ty::Fn(self.ast.push_fn_ptr(FnPtr { hrtb, unsafe_, abi, params, ret, variadic })))
+        Ok(Ty::Fn(self.ast.push_fn_ptr(FnPtr { hrtb, unsafe_, abi: OptAbi::from(abi), params, ret: OptTyId::from(ret), variadic })))
     }
 
     // ------------------------------------------------------------ patterns
@@ -4265,17 +4265,17 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 let end = self.pat_range_end()?;
                 self.range_dots = dots;
-                Ok(Some(Pat::Range(Some(start), Some(end), true)))
+                Ok(Some(Pat::Range(OptExprId::from(Some(start)), OptExprId::from(Some(end)), true)))
             }
             T::DotDot => {
                 self.pos += 1;
                 if self.pat_range_end_start() {
                     let end = self.pat_range_end()?;
                     self.range_dots = false;
-                    Ok(Some(Pat::Range(Some(start), Some(end), false)))
+                    Ok(Some(Pat::Range(OptExprId::from(Some(start)), OptExprId::from(Some(end)), false)))
                 } else {
                     self.range_dots = false;
-                    Ok(Some(Pat::Range(Some(start), None, false)))
+                    Ok(Some(Pat::Range(OptExprId::from(Some(start)), OptExprId::NONE, false)))
                 }
             }
             _ => Ok(None),
@@ -4323,7 +4323,7 @@ impl<'a> Parser<'a> {
                 if self.pat_range_end_start() {
                     let end = self.pat_range_end()?;
                     self.range_dots = false;
-                    Pat::Range(None, Some(end), false)
+                    Pat::Range(OptExprId::NONE, OptExprId::from(Some(end)), false)
                 } else {
                     Pat::Rest
                 }
@@ -4332,7 +4332,7 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 let end = self.pat_range_end()?;
                 self.range_dots = false;
-                Pat::Range(None, Some(end), true)
+                Pat::Range(OptExprId::NONE, OptExprId::from(Some(end)), true)
             }
             T::And | T::AndAnd => {
                 self.eat_amp();
@@ -4382,7 +4382,7 @@ impl<'a> Parser<'a> {
                 let mutbl = self.eat(T::KwMut);
                 let name = self.ident_tok_or_self()?;
                 let sub = if self.eat(T::At) { Some(self.pat_no_or()?) } else { None };
-                Pat::Ident { by_ref, mutbl, name, sub }
+                Pat::Ident { by_ref, mutbl, name, sub: OptPatId::from(sub) }
             }
             T::KwBox => {
                 self.pos += 1;
@@ -4421,7 +4421,7 @@ impl<'a> Parser<'a> {
                     if simple && !matches!(self.nth(1), T::DotDot | T::DotDotEq | T::DotDotDot) {
                         let name = self.ident_tok()?;
                         let sub = if self.eat(T::At) { Some(self.pat_no_or()?) } else { None };
-                        Pat::Ident { by_ref: false, mutbl: false, name, sub }
+                        Pat::Ident { by_ref: false, mutbl: false, name, sub: OptPatId::from(sub) }
                     } else {
                         let path = self.path(true)?;
                         match self.kind() {
@@ -4487,7 +4487,7 @@ impl<'a> Parser<'a> {
                 let by_ref = self.eat(T::KwRef);
                 let mutbl = self.eat(T::KwMut);
                 let name = self.ident_tok()?;
-                let mut pat = self.mk_pat(Pat::Ident { by_ref, mutbl, name, sub: None });
+                let mut pat = self.mk_pat(Pat::Ident { by_ref, mutbl, name, sub: OptPatId::NONE });
                 if is_box {
                     pat = self.mk_pat(Pat::Box(pat));
                 }
@@ -4499,7 +4499,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(T::CloseBrace)?;
         let fields = self.ast.push_list(fields);
-        Ok(Pat::Struct(path, fields, rest))
+        Ok(Pat::Struct(rest, path, fields))
     }
 
     // ------------------------------------------------------------ blocks & statements
@@ -4582,7 +4582,7 @@ impl<'a> Parser<'a> {
             let items = self.hosted_derives(&attrs, item_tok)?;
             self.extra_items.extend(items);
         }
-        if let Stmt::Expr(e, semi) = s {
+        if let Stmt::Expr(semi, e) = s {
             if !attrs.is_empty() {
                 // kept for cfg stripping at load
                 let attrs = self.ast.push_list(attrs);
@@ -4623,7 +4623,7 @@ impl<'a> Parser<'a> {
                 self.expect(T::Semi)?;
             }
             let attrs = self.ast.push_list(attrs);
-            let r = self.ast.push_row(LetStmt { attrs, pat, ty, init, else_ });
+            let r = self.ast.push_row(LetStmt { attrs, pat, ty: OptTyId::from(ty), init: OptExprId::from(init), else_: OptBlockId::from(else_) });
             return Ok(Stmt::Let(r));
         }
         if self.at_item_start() {
@@ -4674,10 +4674,10 @@ impl<'a> Parser<'a> {
                     let e = self.postfix(e, lo)?;
                     let e = self.expr_continue(e, 0, 0, lo)?;
                     if self.eat(T::Semi) {
-                        return Ok(Stmt::Expr(e, true));
+                        return Ok(Stmt::Expr(true, e));
                     }
                     if matches!(self.kind(), T::CloseBrace | T::Eof) {
-                        return Ok(Stmt::Expr(e, false));
+                        return Ok(Stmt::Expr(false, e));
                     }
                     return self.err("expected `;` or `}` after expression");
                 }
@@ -4685,10 +4685,10 @@ impl<'a> Parser<'a> {
                     let e = self.postfix(e, lo)?;
                     let e = self.expr_continue(e, 0, 0, lo)?;
                     let semi = self.eat(T::Semi);
-                    return Ok(Stmt::Expr(e, semi));
+                    return Ok(Stmt::Expr(semi, e));
                 }
                 let semi = self.eat(T::Semi);
-                return Ok(Stmt::Expr(e, semi));
+                return Ok(Stmt::Expr(semi, e));
             }
             self.pos = save;
         }
@@ -4701,10 +4701,10 @@ impl<'a> Parser<'a> {
                 if !semi && !matches!(self.kind(), T::CloseBrace | T::Eof) {
                     return self.err("expected `;`");
                 }
-                return Ok(Stmt::Expr(e, semi));
+                return Ok(Stmt::Expr(semi, e));
             }
             let semi = self.eat(T::Semi);
-            return Ok(Stmt::Expr(e, semi));
+            return Ok(Stmt::Expr(semi, e));
         }
         // rustc_parse parser/stmt.rs: parse_stmt_path_start accepts a struct
         // literal after a captured path here. In expression-fragment position
@@ -4722,10 +4722,10 @@ impl<'a> Parser<'a> {
             self.expr()?
         };
         if self.eat(T::Semi) {
-            return Ok(Stmt::Expr(e, true));
+            return Ok(Stmt::Expr(true, e));
         }
         if matches!(self.kind(), T::CloseBrace | T::Eof) {
-            return Ok(Stmt::Expr(e, false));
+            return Ok(Stmt::Expr(false, e));
         }
         self.err("expected `;` or `}` after expression")
     }
@@ -5322,7 +5322,7 @@ impl<'a> Parser<'a> {
                         Ok((pat, guard, body))
                     })?;
                     let attrs = self.ast.push_list(attrs);
-                    arms.push(Arm { attrs, pat, guard, body });
+                    arms.push(Arm { attrs, pat, guard: OptExprId::from(guard), body });
                 }
                 self.pos += 1;
                 let arms = self.ast.push_list(arms);
@@ -5492,7 +5492,7 @@ impl<'a> Parser<'a> {
                 let attrs = self.ast.push_list(attrs);
                 let pat = self.pat_no_or()?;
                 let ty = if self.eat(T::Colon) { Some(self.ty()?) } else { None };
-                params.push(ClosureParam { attrs, pat, ty });
+                params.push(ClosureParam { attrs, pat, ty: OptTyId::from(ty) });
                 if !self.eat(T::Comma) {
                     break;
                 }
@@ -5519,25 +5519,25 @@ impl<'a> Parser<'a> {
             let blo = self.ast.expr(body).lo;
             let stmts = match ret {
                 Some(t) => {
-                    let pat = self.mk_pat(Pat::Ident { by_ref: false, mutbl: false, name, sub: None });
+                    let pat = self.mk_pat(Pat::Ident { by_ref: false, mutbl: false, name, sub: OptPatId::NONE });
                     let segs = self.mk_segs(vec![PathSeg::new(SegKind::Ident, name, GenericArgsId::NONE)], false);
                     let path = Path { segs, lo: blo };
                     let tail = self.mk_expr(ExprKind::Path(path), blo);
-                    let r = self.ast.push_row(LetStmt { attrs: List::EMPTY, pat, ty: Some(t), init: Some(body), else_: None });
-                    vec![Stmt::Let(r), Stmt::Expr(tail, false)]
+                    let r = self.ast.push_row(LetStmt { attrs: List::EMPTY, pat, ty: OptTyId::from(Some(t)), init: OptExprId::from(Some(body)), else_: OptBlockId::NONE });
+                    vec![Stmt::Let(r), Stmt::Expr(false, tail)]
                 }
-                None => vec![Stmt::Expr(body, false)],
+                None => vec![Stmt::Expr(false, body)],
             };
             let stmts = self.ast.push_list(stmts);
             self.ast.blocks.push(Block { attrs: List::EMPTY, stmts, lo: blo, hi: self.prev_hi() });
             let b = BlockId(self.ast.base[3] + self.ast.blocks.len() as u32 - 1);
             let fut = self.mk_expr(ExprKind::Async(crate::ast::ASYNC_CLOSURE_BODY, b), blo);
             let params = self.ast.push_list(params);
-            let row = self.ast.push_row(ClosureRow { is_move, is_async, is_static, params, ret: None, body: fut });
+            let row = self.ast.push_row(ClosureRow { is_move, is_async, is_static, params, ret: OptTyId::NONE, body: fut });
             return Ok(self.mk_expr(ExprKind::Closure(row), lo));
         }
         let params = self.ast.push_list(params);
-        let row = self.ast.push_row(ClosureRow { is_move, is_async, is_static, params, ret, body });
+        let row = self.ast.push_row(ClosureRow { is_move, is_async, is_static, params, ret: OptTyId::from(ret), body });
         Ok(self.mk_expr(ExprKind::Closure(row), lo))
     }
 
@@ -5584,7 +5584,7 @@ impl<'a> Parser<'a> {
         self.cond_check(c, true)?;
         let b = self.block()?;
         self.no_loop_else("while")?;
-        let row = self.ast.push_row(WhileRow { cond: c, body: b, label });
+        let row = self.ast.push_row(WhileRow { cond: c, body: b, label: OptIdent::from(label) });
         Ok(self.mk_expr(ExprKind::While(row), lo))
     }
     fn for_expr(&mut self, label: Option<Ident>, lo: u32) -> PResult<ExprId> {
@@ -5594,7 +5594,7 @@ impl<'a> Parser<'a> {
         let it = self.expr_ns()?;
         let b = self.block()?;
         self.no_loop_else("for")?;
-        let row = self.ast.push_row(ForRow { pat: p, iter: it, body: b, label });
+        let row = self.ast.push_row(ForRow { pat: p, iter: it, body: b, label: OptIdent::from(label) });
         Ok(self.mk_expr(ExprKind::For(row), lo))
     }
 }
@@ -5832,10 +5832,11 @@ pub struct ImageLoc {
 /// lazily parsed part before ParsedFile::part publishes it. Both are no-ops when the arrays do not
 /// qualify or the write fails (they stay on the heap).
 pub trait ImageSink: Send + Sync {
-    /// true: `pf`'s arrays are mapped now (`pf.image` set)
-    fn file(&self, path: &str, pf: &mut ParsedFile) -> bool;
-    /// `part`/`ast`: the file's first lazily parsed part, not yet published
-    fn part(&self, pf: &ParsedFile, part: &mut FilePart, ast: &mut Ast);
+    /// Some(the image's bytes): `pf`'s arrays are mapped now (`pf.image` set)
+    fn file(&self, path: &str, pf: &mut ParsedFile) -> Option<usize>;
+    /// `part`/`ast`: the file's first lazily parsed part, not yet published; the bytes of the image
+    /// written for it (0: none)
+    fn part(&self, pf: &ParsedFile, part: &mut FilePart, ast: &mut Ast) -> usize;
 }
 
 /// A file's LazyCtx (None: the load skipped no body). A restored collected image keeps it
@@ -6026,8 +6027,10 @@ impl ParsedFile {
             h.str("parse-numbering");
             for end in self.ast.ends() { h.u32(end); }
             for it in self.ast.items.iter() {
-                if let ItemKind::Fn(sig, None, _) = it.kind {
-                    if let Some(r) = self.ast.fn_sig(sig).lazy_body { h.u32(r.lo); h.u32(r.hi); }
+                if let ItemKind::Fn(sig, body, _) = it.kind {
+                    if body.is_none() {
+                        if let Some(r) = self.ast.fn_sig(sig).lazy_body.get() { h.u32(r.lo); h.u32(r.hi); }
+                    }
                 }
             }
             match self.lazy.as_ref() {
@@ -6107,7 +6110,7 @@ impl ParsedFile {
     /// None: the item has no skipped body.
     pub fn lazy_body(&self, item: ItemId, cfg: &crate::cfg::CfgSet) -> Option<Result<(BlockId, [u32; 4]), String>> {
         match &self.ast.item(item).kind {
-            ItemKind::Fn(sig, None, _) if self.ast.fn_sig(*sig).lazy_body.is_some() => {}
+            ItemKind::Fn(sig, body, _) if body.is_none() && self.ast.fn_sig(*sig).lazy_body.is_some() => {}
             _ => return None,
         }
 
@@ -6540,7 +6543,7 @@ pub(crate) fn parse_owned_input(sess: &std::sync::Arc<crate::Session>, mut src: 
             return Err((SourceSpan { file: 0, lo: pos, hi: pos }, e.msg));
         }
         let s2_fmt = p.macros.as_ref().map_or(false, |m| m.table.s2_fmt);
-        let skipped = p.ast.items.iter().any(|it| matches!(&it.kind, ItemKind::Fn(sig, None, _) if p.ast.fn_sig(*sig).lazy_body.is_some()));
+        let skipped = p.ast.items.iter().any(|it| matches!(&it.kind, ItemKind::Fn(sig, body, _) if body.is_none() && p.ast.fn_sig(*sig).lazy_body.is_some()));
         let lazy = match lazy_ctx {
             Some((krate, path, module_path)) if (p.lazy_auto && skipped) => Some(Box::new(LazyCtx { krate, path, module_path, mods: std::mem::take(&mut p.lazy_mods), s2_fmt })),
             _ => None,
@@ -6620,7 +6623,7 @@ pub fn parse_part(pf: &ParsedFile, cfg: &crate::cfg::CfgSet) -> (FilePart, Ast) 
     let mut roots = Vec::new();
     for (ii, it) in pf.ast.items.iter().enumerate() {
         let r = match &it.kind {
-            ItemKind::Fn(sig, None, _) => match pf.ast.fn_sig(*sig).lazy_body {
+            ItemKind::Fn(sig, body, _) if body.is_none() => match pf.ast.fn_sig(*sig).lazy_body.get() {
                 Some(r) => r,
                 None => continue,
             },

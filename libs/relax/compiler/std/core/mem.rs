@@ -182,6 +182,14 @@ impl<T: Copy> Clone for MaybeUninit<T> {
 }
 impl<T: Copy> Copy for MaybeUninit<T> {}
 
+impl<T> crate::fmt::Debug for MaybeUninit<T> {
+    fn fmt(&self, f: &mut crate::fmt::Formatter<'_>) -> crate::fmt::Result {
+        let full_name = crate::any::type_name::<Self>();
+        let prefix_len = full_name.find("MaybeUninit").unwrap();
+        f.pad(&full_name[prefix_len..])
+    }
+}
+
 impl<T> MaybeUninit<T> {
     pub const fn new(val: T) -> MaybeUninit<T> {
         MaybeUninit { value: ManuallyDrop::new(val) }

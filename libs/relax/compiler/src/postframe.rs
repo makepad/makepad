@@ -9,7 +9,7 @@ use crate::jit::{wall_ns, MainCompile, FIRST_PRESENT_NS};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
 pub const WINDOW_NS: u64 = 10_000_000_000;
-const STALL_LOG_NS: u64 = 5_000_000;
+pub(crate) const STALL_LOG_NS: u64 = 5_000_000;
 const FRAME_GAP_NS: u64 = 50_000_000;
 /// log lines at most (stalls and gaps; the sums count every one)
 const LOG_MAX: u64 = 300;

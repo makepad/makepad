@@ -76,7 +76,7 @@ pub(crate) fn eval_query_expr(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: 
     match &ex.kind {
         ExprKind::Paren(x) => eval_query_expr(cx, prog, tcx, file, module, *x, ty),
         ExprKind::Block(block, _) | ExprKind::ConstBlock(block) => match f.ast.stmts(*block) {
-            [crate::ast::Stmt::Expr(x, false)] => eval_query_expr(cx, prog, tcx, file, module, *x, ty),
+            [crate::ast::Stmt::Expr(false, x)] => eval_query_expr(cx, prog, tcx, file, module, *x, ty),
             _ => None,
         },
         ExprKind::Lit(LitKind::Int) if integral => {

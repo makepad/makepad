@@ -77,7 +77,7 @@ impl Program {
                 let feats = self.crates[def.krate as usize].features(self);
                 let fn_trait_return = feats.has("impl_trait_in_fn_trait_return");
                 for p in ast.list(sig.params) { self.check_nested_impl_trait(&mut err, ast, p.ty, false, fn_trait_return, true, it.lo); }
-                if let Some(r) = sig.ret { self.check_nested_impl_trait(&mut err, ast, r, false, fn_trait_return, false, it.lo); }
+                if let Some(r) = sig.ret.get() { self.check_nested_impl_trait(&mut err, ast, r, false, fn_trait_return, false, it.lo); }
             }
             let not_permitted = |vis: &Vis| !matches!(vis, Vis::Private);
             match def.kind {
@@ -182,7 +182,7 @@ impl Program {
             Ty::Fn(f) => {
                 let f = ast.fn_ptr(*f);
                 for &x in ast.list(f.params) { self.check_nested_impl_trait(err, ast, x, in_impl, fn_ret_ok, arg_pos, pos); }
-                if let Some(r) = f.ret { self.check_nested_impl_trait(err, ast, r, in_impl, fn_ret_ok, arg_pos, pos); }
+                if let Some(r) = f.ret.get() { self.check_nested_impl_trait(err, ast, r, in_impl, fn_ret_ok, arg_pos, pos); }
             }
             Ty::Path(p) => self.check_nested_in_segs(err, ast, ast.segs(p.segs), in_impl, fn_ret_ok, arg_pos, pos),
             Ty::ImplTrait(bs) => {
@@ -220,7 +220,7 @@ impl Program {
                 },
                 GenericArgs::Paren(ins, out) => {
                     for &x in ast.list(*ins) { self.check_nested_impl_trait(err, ast, x, in_impl, fn_ret_ok, arg_pos, pos); }
-                    if let Some(o) = out {
+                    if let Some(o) = &out.get() {
                         if !fn_ret_ok && ty_holds_impl_trait(ast, *o) {
                             err(pos, "E0562: `impl Trait` is not allowed in the return type of `Fn` trait bounds".into());
                         } else {
@@ -262,7 +262,7 @@ impl Program {
         let (VariantData::Struct(fs) | VariantData::Tuple(fs)) = data else { return };
         let mut seen: Vec<&str> = Vec::new();
         for fd in ast.list(fs) {
-            let Some(n) = fd.name else { continue };
+            let Some(n) = fd.name.get() else { continue };
             let name = f.text(n);
             if seen.contains(&name) {
                 err(n.lo, format!("E0124: field `{name}` is already declared"));
@@ -288,12 +288,14 @@ impl Program {
     /// ast_validation check_decl_no_pat: a trait method without a body takes only plain identifier and `_`
     /// patterns (a `mut` identifier is the lint `patterns_in_fns_without_body`).
     fn patterns_in_bodiless(&self, ast: &Ast, err: &mut impl FnMut(u32, String), it: &Item) {
-        let ItemKind::Fn(sig, None, _) = it.kind else { return };
+        let ItemKind::Fn(sig, body, _) = it.kind else { return };
+        if body.is_some() { return; }
         let sig = ast.fn_sig(sig);
         if sig.lazy_body.is_some() { return; }
         for prm in ast.list(sig.params) {
             match ast.pat(prm.pat) {
-                Pat::Wild | Pat::Ident { by_ref: false, sub: None, .. } => {}
+                Pat::Wild => {}
+                Pat::Ident { by_ref: false, sub, .. } if sub.is_none() => {}
                 _ => err(it.lo, "E0642: patterns aren't allowed in functions without bodies".into()),
             }
         }
@@ -309,7 +311,7 @@ impl Program {
                     GenericArg::Constraint(_, _, bs) => self.bounds_have_self(ast, *bs, depth + 1),
                     _ => false,
                 }),
-                Some(GenericArgs::Paren(ins, out)) => ast.list(*ins).iter().any(|x| self.ty_has_self(ast, *x, depth + 1)) || out.is_some_and(|o| self.ty_has_self(ast, o, depth + 1)),
+                Some(GenericArgs::Paren(ins, out)) => ast.list(*ins).iter().any(|x| self.ty_has_self(ast, *x, depth + 1)) || out.get().is_some_and(|o| self.ty_has_self(ast, o, depth + 1)),
                 None => false,
             })
         };
@@ -320,7 +322,7 @@ impl Program {
             }
             Ty::Ref(_, _, x) | Ty::Ptr(_, x) | Ty::Slice(x) | Ty::Array(x, _) | Ty::Paren(x) => self.ty_has_self(ast, *x, depth + 1),
             Ty::Tuple(l) => ast.list(*l).iter().any(|x| self.ty_has_self(ast, *x, depth + 1)),
-            Ty::Fn(f) => { let f = ast.fn_ptr(*f); ast.list(f.params).iter().any(|x| self.ty_has_self(ast, *x, depth + 1)) || f.ret.is_some_and(|r| self.ty_has_self(ast, r, depth + 1)) }
+            Ty::Fn(f) => { let f = ast.fn_ptr(*f); ast.list(f.params).iter().any(|x| self.ty_has_self(ast, *x, depth + 1)) || f.ret.get().is_some_and(|r| self.ty_has_self(ast, r, depth + 1)) }
             Ty::ImplTrait(bs) | Ty::DynTrait(bs, _) => self.bounds_have_self(ast, *bs, depth + 1),
             _ => false,
         }
@@ -330,7 +332,7 @@ impl Program {
         ast.list(bs).iter().any(|b| match b {
             Bound::Trait { path, .. } => ast.segs(path.segs).iter().any(|s| match ast.gargs(s.args()) {
                 Some(GenericArgs::Angle(v)) => ast.list(*v).iter().any(|a| matches!(a, GenericArg::Type(x) | GenericArg::Binding(_, _, x) if self.ty_has_self(ast, *x, depth + 1))),
-                Some(GenericArgs::Paren(ins, out)) => ast.list(*ins).iter().any(|x| self.ty_has_self(ast, *x, depth + 1)) || out.is_some_and(|o| self.ty_has_self(ast, o, depth + 1)),
+                Some(GenericArgs::Paren(ins, out)) => ast.list(*ins).iter().any(|x| self.ty_has_self(ast, *x, depth + 1)) || out.get().is_some_and(|o| self.ty_has_self(ast, o, depth + 1)),
                 None => false,
             }),
             _ => false,
@@ -347,7 +349,7 @@ impl Program {
     /// A free item / an impl item must have its body (`fn f();`, `const C: u8;`, `type T;`).
     fn body_required(&self, ast: &Ast, err: &mut impl FnMut(u32, String), it: &Item, assoc_in: Option<&str>) {
         let (what, free_what, missing) = match it.kind {
-            ItemKind::Fn(sig, None, _) => ("function", "function", ast.fn_sig(sig).lazy_body.is_none()),
+            ItemKind::Fn(sig, body, _) if body.is_none() => ("function", "function", ast.fn_sig(sig).lazy_body.is_none()),
             ItemKind::Const(_, e) => ("constant", "constant item", e.get().is_none()),
             ItemKind::Static(_, _, e) => ("static", "static item", e.get().is_none()),
             ItemKind::TypeAlias(r) => ("type", "type alias", ast.row(r).ty.is_none()),

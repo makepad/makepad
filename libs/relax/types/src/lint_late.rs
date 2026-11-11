@@ -304,7 +304,7 @@ impl<'a> Late<'a> {
         while let ExprKind::Block(b, _) = self.ast.expr(expr).kind {
             let stmts = self.ast.stmts(b);
             match stmts.last() {
-                Some(Stmt::Expr(e, false)) => expr = *e,
+                Some(Stmt::Expr(false, e)) => expr = *e,
                 _ => break,
             }
         }
@@ -621,11 +621,11 @@ impl<'a> Late<'a> {
         let ast = self.ast;
         match *ast.pat(p) {
             Pat::Wild => out.push((Some(p), top)),
-            Pat::Ident { sub: Some(s), .. } => self.collect_wilds(s, false, out),
+            Pat::Ident { sub, .. } if let Some(s) = sub.get() => self.collect_wilds(s, false, out),
             Pat::TupleStruct(_, ps) | Pat::Tuple(ps) | Pat::Slice(ps) | Pat::Or(ps) => {
                 for &q in ast.list(ps) { self.collect_wilds(q, false, out); }
             }
-            Pat::Struct(_, fs, _) => { for f in ast.list(fs) { self.collect_wilds(f.pat, false, out); } }
+            Pat::Struct(_, _, fs) => { for f in ast.list(fs) { self.collect_wilds(f.pat, false, out); } }
             Pat::Ref(_, x) | Pat::Paren(x) | Pat::Box(x) => self.collect_wilds(x, false, out),
             _ => {}
         }
@@ -867,34 +867,38 @@ impl<'a> Visitor<'a> for Late<'a> {
 
     fn pat(&mut self, p: PatId) {
         match *self.ast.pat(p) {
-            Pat::TupleStruct(path, _) | Pat::Struct(path, _, _) | Pat::Path(path) => {
+            Pat::TupleStruct(path, _) | Pat::Struct(_, path, _) | Pat::Path(path) => {
                 if let Some(Res::Def(d)) = self.body.pat_res.get(&p.0) { self.check_deprecated(*d, path.lo); }
             }
             _ => {}
         }
         // check_match: a by-value binding named like a unit variant of the matched enum (the lint level
         // is that of the enclosing arm, statement, .. attributes)
-        if let Pat::Ident { name, by_ref: false, mutbl: false, sub: None } = *self.ast.pat(p) {
-            if let Some(&l) = self.body.pat_local.get(&p.0) {
-                let mut t = self.body.locals[l as usize].ty;
-                while let TyKind::Ref(_, i, _) = self.kind(t) { t = i; }
-                if let TyKind::Adt(ed, _, _) = self.kind(t) {
-                    let text = self.prog.files[self.body.file as usize].text(name);
-                    if self.tcx.adts.get(&ed).is_some_and(|a| a.is_enum && a.variants.iter().any(|v| v.shape == 0 && self.prog.syms.str(v.name) == text)) {
-                        let en = crate::typeck::ty_to_string(false, self.prog, self.tcx, t);
-                        self.emit(&lint::BINDINGS_WITH_VARIANT_NAME, name.lo, &format!("E0170: pattern binding `{}` is named the same as one of the variants of the type `{}`", text, en));
+        if let Pat::Ident { name, by_ref: false, mutbl: false, sub } = *self.ast.pat(p) {
+            if sub.is_none() {
+                if let Some(&l) = self.body.pat_local.get(&p.0) {
+                    let mut t = self.body.locals[l as usize].ty;
+                    while let TyKind::Ref(_, i, _) = self.kind(t) { t = i; }
+                    if let TyKind::Adt(ed, _, _) = self.kind(t) {
+                        let text = self.prog.files[self.body.file as usize].text(name);
+                        if self.tcx.adts.get(&ed).is_some_and(|a| a.is_enum && a.variants.iter().any(|v| v.shape == 0 && self.prog.syms.str(v.name) == text)) {
+                            let en = crate::typeck::ty_to_string(false, self.prog, self.tcx, t);
+                            self.emit(&lint::BINDINGS_WITH_VARIANT_NAME, name.lo, &format!("E0170: pattern binding `{}` is named the same as one of the variants of the type `{}`", text, en));
+                        }
                     }
                 }
             }
         }
         // rustc NonShorthandFieldPatterns: `field: field` (any binding mode) can be `field`
-        if let Pat::Struct(_, fs, _) = *self.ast.pat(p) {
+        if let Pat::Struct(_, _, fs) = *self.ast.pat(p) {
             let pf = &self.prog.files[self.body.file as usize];
             for f in self.ast.list(fs) {
                 if f.shorthand { continue; }
-                if let Pat::Ident { name, sub: None, .. } = *self.ast.pat(f.pat) {
-                    if self.body.pat_local.contains_key(&f.pat.0) && pf.text(name) == pf.text(f.name) && pf.expansion_kind(name.lo) == pf.expansion_kind(f.name.lo) {
-                        self.emit(&NON_SHORTHAND_FIELD_PATTERNS, f.name.lo, &format!("the `{}:` in this pattern is redundant", pf.text(f.name)));
+                if let Pat::Ident { name, sub, .. } = *self.ast.pat(f.pat) {
+                    if sub.is_none() {
+                        if self.body.pat_local.contains_key(&f.pat.0) && pf.text(name) == pf.text(f.name) && pf.expansion_kind(name.lo) == pf.expansion_kind(f.name.lo) {
+                            self.emit(&NON_SHORTHAND_FIELD_PATTERNS, f.name.lo, &format!("the `{}:` in this pattern is redundant", pf.text(f.name)));
+                        }
                     }
                 }
             }
@@ -910,7 +914,7 @@ impl<'a> Visitor<'a> for Late<'a> {
 
     fn stmt(&mut self, s: &Stmt, _b: BlockId) {
         match *s {
-            Stmt::Expr(e, true) => {
+            Stmt::Expr(true, e) => {
                 let attrs = self.ast.stmt_attrs(e);
                 self.enter_attrs(attrs);
                 self.check_path_statement(e);
@@ -920,7 +924,7 @@ impl<'a> Visitor<'a> for Late<'a> {
             Stmt::Let(r) => {
                 let l = *self.ast.row(r);
                 self.enter_attrs(l.attrs);
-                if let Some(x) = l.init { self.check_non_binding(Some(l.pat), Some(x), self.ast.expr(x).lo); }
+                if let Some(x) = l.init.get() { self.check_non_binding(Some(l.pat), Some(x), self.ast.expr(x).lo); }
                 self.leave_attrs(l.attrs);
             }
             Stmt::Attrs(r) => {
@@ -1023,7 +1027,7 @@ impl<'a> Visitor<'a> for Scan<'a> {
     fn stmt(&mut self, s: &Stmt, b: BlockId) {
         if let Stmt::Let(r) = *s {
             let l = *self.ast.row(r);
-            if let Some(x) = l.init { if self.pat_by_ref(l.pat) { self.borrow(x); } }
+            if let Some(x) = l.init.get() { if self.pat_by_ref(l.pat) { self.borrow(x); } }
         }
         let _ = b;
         ast_visit::walk_stmt(self, s);
@@ -1115,24 +1119,26 @@ impl<'a> Kp<'a> {
                 Stmt::Let(r) => {
                     let l = *self.ast.row(r);
                     self.enter(l.attrs);
-                    if let Some(x) = l.init {
+                    if let Some(x) = l.init.get() {
                         let v = self.eval(x);
-                        if let Some(eb) = l.else_ {
+                        if let Some(eb) = l.else_.get() {
                             let d = self.dead;
                             self.block(eb);
                             self.dead = d;
                         }
-                        if let Pat::Ident { by_ref: false, sub: None, .. } = *self.ast.pat(l.pat) {
-                            if let Some(&loc) = self.body.pat_local.get(&l.pat.0) {
-                                if let Some(i) = self.info.get(loc as usize) {
-                                    if i.assigns == 1 && !i.borrowed && v != V::Unknown { self.env.insert(loc, v); }
+                        if let Pat::Ident { by_ref: false, sub, .. } = *self.ast.pat(l.pat) {
+                            if sub.is_none() {
+                                if let Some(&loc) = self.body.pat_local.get(&l.pat.0) {
+                                    if let Some(i) = self.info.get(loc as usize) {
+                                        if i.assigns == 1 && !i.borrowed && v != V::Unknown { self.env.insert(loc, v); }
+                                    }
                                 }
                             }
                         }
                     }
                     self.leave(l.attrs);
                 }
-                Stmt::Expr(e, semi) => {
+                Stmt::Expr(semi, e) => {
                     let attrs = self.ast.stmt_attrs(e);
                     self.enter(attrs);
                     let v = self.eval(e);
@@ -1285,7 +1291,7 @@ impl<'a> Kp<'a> {
                         match self.pat_matches(a.pat, sv) {
                             Some(false) => continue,
                             Some(true) => {
-                                if let Some(g) = a.guard {
+                                if let Some(g) = a.guard.get() {
                                     match self.eval(g) {
                                         V::Bool(false) => continue,
                                         V::Bool(true) => {}
@@ -1304,7 +1310,7 @@ impl<'a> Kp<'a> {
                     for a in &arms {
                         self.enter(a.attrs);
                         let d = self.branch(|s| {
-                            if let Some(g) = a.guard { s.eval(g); }
+                            if let Some(g) = a.guard.get() { s.eval(g); }
                             s.eval(a.body);
                         });
                         self.leave(a.attrs);
@@ -1628,7 +1634,7 @@ impl<'a> Kp<'a> {
         match *self.ast.pat(p) {
             Pat::Wild => Some(true),
             Pat::Paren(x) => self.pat_matches(x, v),
-            Pat::Ident { by_ref: false, sub: None, .. } => if self.body.pat_local.get(&p.0).is_some() { Some(true) } else { None },
+            Pat::Ident { by_ref: false, sub, .. } if sub.is_none() => if self.body.pat_local.get(&p.0).is_some() { Some(true) } else { None },
             Pat::Lit(e) => {
                 let lv = self.eval(e);
                 match (lv, v) { (V::Int(a), V::Int(b)) => Some(a == b), (V::Bool(a), V::Bool(b)) => Some(a == b), _ => None }
@@ -2180,7 +2186,7 @@ pub(crate) fn ast_ty_pos(ast: &Ast, t: crate::ast::TyId) -> Option<u32> {
         Ty::Path(p) => Some(p.lo),
         Ty::Ref(_, _, x) | Ty::Ptr(_, x) | Ty::Slice(x) | Ty::Array(x, _) | Ty::Paren(x) => ast_ty_pos(ast, x),
         Ty::Tuple(l) => ast.list(l).iter().find_map(|&x| ast_ty_pos(ast, x)),
-        Ty::Fn(f) => { let f = *ast.fn_ptr(f); ast.list(f.params).iter().find_map(|&x| ast_ty_pos(ast, x)).or_else(|| f.ret.and_then(|r| ast_ty_pos(ast, r))) }
+        Ty::Fn(f) => { let f = *ast.fn_ptr(f); ast.list(f.params).iter().find_map(|&x| ast_ty_pos(ast, x)).or_else(|| f.ret.get().and_then(|r| ast_ty_pos(ast, r))) }
         _ => None,
     }
 }
@@ -2192,10 +2198,10 @@ fn ast_extern_fnptrs(pf: &crate::parser::ParsedFile, t: crate::ast::TyId, out: &
         Ty::Fn(f) => {
             let fp = *ast.fn_ptr(f);
             // `extern fn` (the C ABI) or `extern "abi" fn`; `extern "Rust" fn` is the Rust ABI
-            let external = match fp.abi { None => false, Some(None) => true, Some(Some(a)) => pf.text(a).trim_matches('"') != "Rust" };
+            let external = match fp.abi.get() { None => false, Some(None) => true, Some(Some(a)) => pf.text(a).trim_matches('"') != "Rust" };
             if external { out.push(ast_ty_pos(ast, t)); }
             for &p in ast.list(fp.params) { ast_extern_fnptrs(pf, p, out); }
-            if let Some(r) = fp.ret { ast_extern_fnptrs(pf, r, out); }
+            if let Some(r) = fp.ret.get() { ast_extern_fnptrs(pf, r, out); }
         }
         Ty::Ref(_, _, x) | Ty::Ptr(_, x) | Ty::Slice(x) | Ty::Array(x, _) | Ty::Paren(x) => ast_extern_fnptrs(pf, x, out),
         Ty::Tuple(l) => { for &x in ast.list(l) { ast_extern_fnptrs(pf, x, out); } }
@@ -2257,7 +2263,7 @@ impl<'a> Improper<'a> {
             let res = f.check_type(VState::fn_entry(mode, FnPos::Arg), pt);
             self.emit(d, &f, pos, res, mode);
         }
-        if let Some(rt) = fsig.ret {
+        if let Some(rt) = fsig.ret.get() {
             let pos = ast_ty_pos(ast, rt).unwrap_or(item.name.lo);
             let mut f = Ffic { prog: self.prog, tcx: self.tcx, env: self.env(d), krate: def.krate, cache: Default::default(), base_ty: sig.ret, base_mode: mode, adt_env: Default::default() };
             f.base_ty = f.norm(sig.ret);
@@ -2292,7 +2298,7 @@ impl<'a> Improper<'a> {
         for (i, p) in ast.list(fsig.params).iter().enumerate() {
             if let Some(&pt) = sig.params.get(i) { self.check_fnptrs(d, p.ty, pt, VState::fn_entry(mode, FnPos::Arg), mode); }
         }
-        if let Some(rt) = fsig.ret { self.check_fnptrs(d, rt, sig.ret, VState::fn_entry(mode, FnPos::Ret), mode); }
+        if let Some(rt) = fsig.ret.get() { self.check_fnptrs(d, rt, sig.ret, VState::fn_entry(mode, FnPos::Ret), mode); }
     }
 }
 
@@ -2306,7 +2312,7 @@ fn improper_ctypes(prog: &Program, tcx: &Tcx, own: &[bool]) {
         for (ii, it) in pf.ast.items.iter().enumerate() {
             if let ItemKind::ForeignMod(r) = it.kind {
                 let fm = *pf.ast.row(r);
-                for &c in pf.ast.list(fm.items) { foreign_abi.insert((fi as u32, c.0), fm.abi); }
+                for &c in pf.ast.list(fm.items) { foreign_abi.insert((fi as u32, c.0), fm.abi.get()); }
             }
             let _ = ii;
         }
@@ -2346,7 +2352,7 @@ fn improper_ctypes_def(ip: &Improper, foreign_abi: &std::collections::HashMap<(u
             let fsig = *ast.fn_sig(fsig);
             // required trait methods have no body and are not visited (`check_fn`)
             if body.is_none() && fsig.lazy_body.is_none() { return; }
-            let rust = match fsig.abi { None => true, Some(None) => false, Some(Some(a)) => file.text(a).trim_matches('"') == "Rust" };
+            let rust = match fsig.abi.get() { None => true, Some(None) => false, Some(Some(a)) => file.text(a).trim_matches('"') == "Rust" };
             if !rust { ip.check_foreign_fn(d, CItemKind::Definition); } else { ip.check_fn_fnptrs(d, CItemKind::Definition); }
         }
         DefKind::Struct | DefKind::Union | DefKind::Enum => {
@@ -2372,7 +2378,7 @@ fn improper_ctypes_def(ip: &Improper, foreign_abi: &std::collections::HashMap<(u
             let ty_id = match ast.item(def.item).kind {
                 ItemKind::Static(_, ty, _) => Some(ty),
                 ItemKind::Const(ty, _) => ty.get(),
-                ItemKind::TypeAlias(r) => ast.row(r).ty,
+                ItemKind::TypeAlias(r) => ast.row(r).ty.get(),
                 _ => None,
             };
             if let (Some(ty_id), Some(t)) = (ty_id, if def.kind == DefKind::TypeAlias { tcx.type_of(prog, d).ok() } else { tcx.const_ty(prog, d) }) { ip.check_fnptrs(d, ty_id, t, VState::static_entry(), CItemKind::Definition); }
@@ -2591,7 +2597,7 @@ pub fn repr_transparent_fields(prog: &Program, tcx: &Tcx, defs: &[DefId]) {
         for (k, f) in v.fields.iter().enumerate() {
             if !trivial[k] || !contains_repr_c(prog, tcx, f.ty, 0) { continue; }
             if non_trivial > 0 || prev {
-                let pos = fields[k].name.map_or(fields[k].ty_span.0, |n| n.lo);
+                let pos = fields[k].name.get().map_or(fields[k].ty_span.0, |n| n.lo);
                 if lint::external(prog, def.file, pos) { continue; }
                 lint::emit(prog, d, &REPR_TRANSPARENT_NON_ZST_FIELDS, def.file, pos, "zero-sized fields in `repr(transparent)` cannot contain `repr(C)` types");
             } else {

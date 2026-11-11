@@ -406,7 +406,7 @@ impl LifetimeCollector<'_> {
             Some(GenericArgs::Angle(arguments)) => for &arg in ast.list(*arguments) { self.generic_arg(arg); },
             Some(GenericArgs::Paren(inputs, output)) => {
                 for &ty in ast.list(*inputs) { self.ty(ty); }
-                if let Some(ty) = output { self.ty(*ty); }
+                if let Some(ty) = &output.get() { self.ty(*ty); }
             }
             None => {}
         }
@@ -437,7 +437,7 @@ impl LifetimeCollector<'_> {
         } else {
             if let Some(qself) = ast.qself(path) {
                 self.ty(qself.ty);
-                if let Some(path) = qself.trait_path { self.path(&path); }
+                if let Some(path) = qself.trait_path.get() { self.path(&path); }
             }
             for (i, segment) in ast.segs(path.segs).iter().enumerate() {
                 self.args(segment.args());
@@ -515,8 +515,8 @@ impl LifetimeCollector<'_> {
         let ast = &self.prog.files[self.prog.def(self.owner).file as usize].ast;
         match *ast.ty(ty) {
             ast::Ty::Path(path) => self.path(&path),
-            ast::Ty::Ref(name, _, inner) => {
-                self.lifetime(name.map_or(LifetimeKey::Reference(ty.0), |lt| LifetimeKey::Named(lt.lo, lt.hi)));
+            ast::Ty::Ref(_, name, inner) => {
+                self.lifetime(name.get().map_or(LifetimeKey::Reference(ty.0), |lt| LifetimeKey::Named(lt.lo, lt.hi)));
                 self.ty(inner);
             }
             ast::Ty::Ptr(_, inner) | ast::Ty::Slice(inner) | ast::Ty::Array(inner, _) | ast::Ty::Paren(inner) => self.ty(inner),
@@ -524,7 +524,7 @@ impl LifetimeCollector<'_> {
             ast::Ty::Fn(pointer) => {
                 let pointer = ast.fn_ptr(pointer);
                 for &ty in ast.list(pointer.params) { self.ty(ty); }
-                if let Some(ty) = pointer.ret { self.ty(ty); }
+                if let Some(ty) = pointer.ret.get() { self.ty(ty); }
             }
             ast::Ty::DynTrait(bounds, _) => self.bounds(bounds),
             ast::Ty::ImplTrait(bounds) => {
@@ -544,7 +544,7 @@ impl LifetimeCollector<'_> {
                 },
                 GenericParamKind::Type(bounds, default) => {
                     self.bounds(bounds);
-                    if let Some(ty) = default { self.ty(ty); }
+                    if let Some(ty) = default.get() { self.ty(ty); }
                 }
                 GenericParamKind::Const(ty, _) => self.ty(ty),
             }
@@ -582,13 +582,13 @@ pub(crate) fn resolve_bound_vars(tcx: &Tcx, prog: &Program, owner: DefId, parent
         let collector = |constrained| LifetimeCollector { tcx, prog, owner, names: &names, constrained, regions: Vec::new(), has_fully_capturing_opaque: false };
         let mut inputs = collector(true);
         for p in ast.list(sig.params) { inputs.ty(p.ty); }
-        match sig.self_param {
-            Some(ast::SelfParam::Ref(name, _)) => inputs.lifetime(name.map_or(LifetimeKey::SelfReference, |lt| LifetimeKey::Named(lt.lo, lt.hi))),
+        match sig.self_param.get() {
+            Some(ast::SelfParam::Ref(name, _)) => inputs.lifetime(name.get().map_or(LifetimeKey::SelfReference, |lt| LifetimeKey::Named(lt.lo, lt.hi))),
             Some(ast::SelfParam::Typed(_, ty)) => inputs.ty(ty),
             _ => {}
         }
         let mut output = collector(false);
-        if let Some(ty) = sig.ret { output.ty(ty); }
+        if let Some(ty) = sig.ret.get() { output.ty(ty); }
         if sig.asyncness || output.has_fully_capturing_opaque {
             for declaration in &names.declarations {
                 if declaration.binder == BinderId::Item { output.regions.push(declaration.id); }
@@ -677,16 +677,16 @@ impl BoundVarContext<'_> {
             ItemKind::Fn(sig, _, _) => {
                 let sig = ast.fn_sig(sig);
                 self.scopes.push(Scope::ObjectLifetimeDefault(Some(ResolvedArg::StaticLifetime)));
-                match sig.self_param {
-                    Some(ast::SelfParam::Ref(name, _)) => self.visit_lifetime(name.map_or(LifetimeKey::SelfReference, |lt| LifetimeKey::Named(lt.lo, lt.hi)), ast.item(def.item).lo),
+                match sig.self_param.get() {
+                    Some(ast::SelfParam::Ref(name, _)) => self.visit_lifetime(name.get().map_or(LifetimeKey::SelfReference, |lt| LifetimeKey::Named(lt.lo, lt.hi)), ast.item(def.item).lo),
                     Some(ast::SelfParam::Typed(_, ty)) => self.visit_ty(ty),
                     _ => {}
                 }
                 for param in ast.list(sig.params) { self.visit_ty(param.ty); }
                 // (ast_lowering of a foreign fn ignores `async`, rejected by ast validation: no opaque)
                 if let Some(&opaque) = sig.asyncness.then(|| self.prog.node_id_to_def_id.get(&(self.file, relax_front::def_collector::NodeId::AsyncReturn(def.item)))).flatten() {
-                    self.visit_opaque_ty(opaque, Default::default(), sig.ret);
-                } else if let Some(ty) = sig.ret { self.visit_ty(ty); }
+                    self.visit_opaque_ty(opaque, Default::default(), sig.ret.get());
+                } else if let Some(ty) = sig.ret.get() { self.visit_ty(ty); }
                 self.scopes.pop();
                 if let Some(body) = self.prog.fn_body(self.file, def.item).expect("collected body") {
                     self.scopes.push(Scope::Body(self.owner));
@@ -699,18 +699,18 @@ impl BoundVarContext<'_> {
             ItemKind::Union(r) => self.visit_fields(ast.row(r).fields),
             ItemKind::Enum(r) => for variant in ast.list(ast.row(r).variants) {
                 self.visit_variant_data(variant.data);
-                if let Some(expr) = variant.disc { self.visit_anon_const(expr); }
+                if let Some(expr) = variant.disc.get() { self.visit_anon_const(expr); }
             },
             ItemKind::TypeAlias(r) => {
                 let ast::TypeAliasItem { bounds, ty, .. } = *ast.row(r);
                 self.visit_bounds(bounds);
-                if let Some(ty) = ty { self.visit_ty(ty); }
+                if let Some(ty) = ty.get() { self.visit_ty(ty); }
             }
             ItemKind::Trait(r) => self.visit_bounds(ast.row(r).supers),
             ItemKind::TraitAlias(r) => self.visit_bounds(ast.row(r).bounds),
             ItemKind::Impl(r) => {
                 let ast::ImplItem { trait_, self_ty, .. } = *ast.row(r);
-                if let Some(path) = trait_ { self.visit_path(&path, false); }
+                if let Some(path) = trait_.get() { self.visit_path(&path, false); }
                 self.visit_ty(self_ty);
             }
             ItemKind::Const(ty, _) => {
@@ -742,11 +742,11 @@ impl BoundVarContext<'_> {
                     self.push_binder(BinderId::GenericBound(generics.params.lo + i as u32), Vec::new(), BinderScopeType::Normal, false);
                     self.visit_bounds(bounds);
                     self.scopes.pop();
-                    if let Some(ty) = default { self.visit_ty(ty); }
+                    if let Some(ty) = default.get() { self.visit_ty(ty); }
                 }
                 GenericParamKind::Const(ty, default) => {
                     self.visit_ty(ty);
-                    if let Some(expr) = default { self.visit_anon_const(expr); }
+                    if let Some(expr) = default.get() { self.visit_anon_const(expr); }
                 }
             }
         }
@@ -824,9 +824,9 @@ impl BoundVarContext<'_> {
     fn visit_ty(&mut self, ty: ast::TyId) {
         let ast = &self.prog.files[self.file as usize].ast;
         match *ast.ty(ty) {
-            ast::Ty::Ref(name, _, inner) => {
-                let key = name.map_or(LifetimeKey::Reference(ty.0), |lt| LifetimeKey::Named(lt.lo, lt.hi));
-                self.visit_lifetime(key, name.map_or(0, |lt| lt.lo));
+            ast::Ty::Ref(_, name, inner) => {
+                let key = name.get().map_or(LifetimeKey::Reference(ty.0), |lt| LifetimeKey::Named(lt.lo, lt.hi));
+                self.visit_lifetime(key, name.get().map_or(0, |lt| lt.lo));
                 self.scopes.push(Scope::ObjectLifetimeDefault(self.mapped(key)));
                 self.visit_ty(inner);
                 self.scopes.pop();
@@ -843,7 +843,7 @@ impl BoundVarContext<'_> {
                 // resolve_bound_vars.rs:720-749: a fn pointer adds only its binder; the
                 // enclosing object lifetime default reaches its inputs and output.
                 for &ty in ast.list(pointer.params) { self.visit_ty(ty); }
-                if let Some(ty) = pointer.ret { self.visit_ty(ty); }
+                if let Some(ty) = pointer.ret.get() { self.visit_ty(ty); }
                 self.scopes.pop();
             }
             ast::Ty::Path(path) => {
@@ -881,7 +881,7 @@ impl BoundVarContext<'_> {
     fn visit_fields(&mut self, fields: ast::List<ast::FieldDef>) {
         for field in self.prog.files[self.file as usize].ast.list(fields) {
             self.visit_ty(field.ty);
-            if let Some(expr) = field.default { self.visit_anon_const(expr); }
+            if let Some(expr) = field.default.get() { self.visit_anon_const(expr); }
         }
     }
     fn visit_anon_const(&mut self, expr: ast::ExprId) {
@@ -903,11 +903,11 @@ impl BoundVarContext<'_> {
                 ast::Stmt::Let(r) => {
                     let ast::LetStmt { pat, ty, init, else_, .. } = *ast.row(r);
                     self.visit_pat(pat);
-                    if let Some(ty) = ty { self.visit_ty(ty); }
-                    if let Some(expr) = init { self.visit_expr(expr); }
-                    if let Some(block) = else_ { self.visit_block(block); }
+                    if let Some(ty) = ty.get() { self.visit_ty(ty); }
+                    if let Some(expr) = init.get() { self.visit_expr(expr); }
+                    if let Some(block) = else_.get() { self.visit_block(block); }
                 }
-                ast::Stmt::Expr(expr, _) => self.visit_expr(expr),
+                ast::Stmt::Expr(_, expr) => self.visit_expr(expr),
                 ast::Stmt::Attrs(r) => self.visit_expr(ast.row(r).expr),
                 ast::Stmt::Item(_) | ast::Stmt::Empty => {}
             }
@@ -917,15 +917,16 @@ impl BoundVarContext<'_> {
 
     fn visit_pat(&mut self, p: ast::PatId) {
         match *self.prog.files[self.file as usize].ast.pat(p) {
-            ast::Pat::Ident { sub: Some(p), .. } | ast::Pat::Ref(_, p) | ast::Pat::Paren(p) | ast::Pat::Box(p) => self.visit_pat(p),
+            ast::Pat::Ident { sub, .. } if let Some(p) = sub.get() => self.visit_pat(p),
+            ast::Pat::Ref(_, p) | ast::Pat::Paren(p) | ast::Pat::Box(p) => self.visit_pat(p),
             ast::Pat::Lit(e) => self.visit_expr(e),
-            ast::Pat::Range(a, b, _) => { if let Some(e) = a { self.visit_expr(e); } if let Some(e) = b { self.visit_expr(e); } }
+            ast::Pat::Range(a, b, _) => { if let Some(e) = a.get() { self.visit_expr(e); } if let Some(e) = b.get() { self.visit_expr(e); } }
             ast::Pat::Path(p) => self.visit_path(&p, true),
             ast::Pat::TupleStruct(p, ps) => { self.visit_path(&p, true); for p in self.prog.files[self.file as usize].ast.list(ps) { self.visit_pat(*p); } }
-            ast::Pat::Struct(p, fs, _) => { self.visit_path(&p, true); for f in self.prog.files[self.file as usize].ast.list(fs) { self.visit_pat(f.pat); } }
+            ast::Pat::Struct(_, p, fs) => { self.visit_path(&p, true); for f in self.prog.files[self.file as usize].ast.list(fs) { self.visit_pat(f.pat); } }
             ast::Pat::Tuple(ps) | ast::Pat::Slice(ps) | ast::Pat::Or(ps) => for p in self.prog.files[self.file as usize].ast.list(ps) { self.visit_pat(*p); },
             ast::Pat::Mac(m) => { let m = *self.prog.files[self.file as usize].ast.row(m); self.visit_mac(m) }
-            ast::Pat::Wild | ast::Pat::Rest | ast::Pat::Ident { sub: None, .. } => {}
+            ast::Pat::Wild | ast::Pat::Rest | ast::Pat::Ident { .. } => {}
         }
     }
     fn visit_expr(&mut self, e: ast::ExprId) {
@@ -941,9 +942,9 @@ impl BoundVarContext<'_> {
                 let ast::ClosureRow { params, ret, body, .. } = *self.prog.files[self.file as usize].ast.row(row);
                 self.push_binder(BinderId::Closure(e.0), Vec::new(), BinderScopeType::Normal, false);
                 self.scopes.push(Scope::ObjectLifetimeDefault(Some(ResolvedArg::StaticLifetime)));
-                for p in self.prog.files[self.file as usize].ast.list(params) { if let Some(t) = p.ty { self.visit_ty(t); } }
+                for p in self.prog.files[self.file as usize].ast.list(params) { if let Some(t) = p.ty.get() { self.visit_ty(t); } }
                 self.scopes.pop();
-                if let Some(t) = ret { self.visit_ty(t); }
+                if let Some(t) = ret.get() { self.visit_ty(t); }
                 let owner = self.prog.node_id_to_def_id[&(self.file, relax_front::def_collector::NodeId::Closure(e))];
                 self.scopes.push(Scope::Body(owner));
                 for p in self.prog.files[self.file as usize].ast.list(params) { self.visit_pat(p.pat); }
@@ -969,7 +970,7 @@ impl BoundVarContext<'_> {
             ast::ExprKind::If(e, b, other) => { self.visit_expr(e); self.visit_block(b); if let Some(e) = other.get() { self.visit_expr(e); } }
             ast::ExprKind::Let(p, e) => { self.visit_pat(p); self.visit_expr(e); }
             ast::ExprKind::Match(e, arms) => {
-                self.visit_expr(e); for a in self.prog.files[self.file as usize].ast.list(arms) { self.visit_pat(a.pat); if let Some(e) = a.guard { self.visit_expr(e); } self.visit_expr(a.body); }
+                self.visit_expr(e); for a in self.prog.files[self.file as usize].ast.list(arms) { self.visit_pat(a.pat); if let Some(e) = a.guard.get() { self.visit_expr(e); } self.visit_expr(a.body); }
             }
             ast::ExprKind::While(row) => { let ast::WhileRow { cond: e, body: b, .. } = *self.prog.files[self.file as usize].ast.row(row); self.visit_expr(e); self.visit_block(b); }
             ast::ExprKind::For(row) => { let ast::ForRow { pat: p, iter: e, body: b, .. } = *self.prog.files[self.file as usize].ast.row(row); self.visit_pat(p); self.visit_expr(e); self.visit_block(b); }
@@ -989,11 +990,11 @@ impl BoundVarContext<'_> {
         if m.args == ast::NO_MAC_ARGS { return; }
         let args = *self.prog.files[self.file as usize].ast.mac_arg(m.args);
         for e in self.prog.files[self.file as usize].ast.list(args.exprs) { self.visit_expr(*e); }
-        if let Some(p) = args.pat { self.visit_pat(p); } if let Some(e) = args.guard { self.visit_expr(e); }
-        if let Some(asm) = args.asm {
+        if let Some(p) = args.pat.get() { self.visit_pat(p); } if let Some(e) = args.guard.get() { self.visit_expr(e); }
+        if let Some(asm) = args.asm.get() {
             for op in self.prog.files[self.file as usize].ast.list(asm.ops) {
-                if let Some(e) = op.input { if op.dir == ast::AsmDir::Const { self.visit_anon_const(e); } else { self.visit_expr(e); } }
-                if let Some(e) = op.output { self.visit_expr(e); }
+                if let Some(e) = op.input.get() { if op.dir == ast::AsmDir::Const { self.visit_anon_const(e); } else { self.visit_expr(e); } }
+                if let Some(e) = op.output.get() { self.visit_expr(e); }
             }
         }
     }
@@ -1037,13 +1038,13 @@ impl BoundVarContext<'_> {
         // an inferred path's segments that elide lifetimes (asked only for a written constraint)
         let mut elided: Option<Vec<(usize, u32)>> = None;
         if let Some(qself) = ast.qself(path) {
-            if let Some(trait_path) = qself.trait_path { self.visit_path(&trait_path, inferred); }
+            if let Some(trait_path) = qself.trait_path.get() { self.visit_path(&trait_path, inferred); }
         }
         for (i, segment) in ast.segs(path.segs).iter().enumerate() {
             if let Some(GenericArgs::Paren(inputs, output)) = ast.gargs(segment.args()) {
                 self.scopes.push(Scope::ObjectLifetimeDefault(Some(ResolvedArg::StaticLifetime)));
                 for &ty in ast.list(*inputs) { self.visit_ty(ty); }
-                if let Some(ty) = output { self.visit_ty(*ty); }
+                if let Some(ty) = &output.get() { self.visit_ty(*ty); }
                 self.scopes.pop();
                 continue;
             }
@@ -1103,7 +1104,7 @@ impl BoundVarContext<'_> {
             }
         }
         if let Some(qself) = ast.qself(path) {
-            let default = if let Some(trait_path) = qself.trait_path {
+            let default = if let Some(trait_path) = qself.trait_path.get() {
                 let td = self.tcx.resolve_type_path_def(self.prog, self.file, self.module, &trait_path);
                 td.and_then(|td| self.compute_object_lifetime_defaults(td, &trait_path).first().copied()).flatten()
             } else { None };
@@ -1219,7 +1220,7 @@ impl BoundVarContext<'_> {
                     let (segments, reverse_index) = if reverse_segment < path.segs.len() {
                         (path.segs, reverse_segment)
                     } else {
-                        (ast.qself(path)?.trait_path?.segs, reverse_segment - path.segs.len())
+                        (ast.qself(path)?.trait_path.get()?.segs, reverse_segment - path.segs.len())
                     };
                     let index = segments.len().checked_sub(reverse_index + 1)?;
                     let segment = ast.segs(segments)[index];

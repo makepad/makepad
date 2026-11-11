@@ -87,7 +87,7 @@ fn field_defs(p: &Program,d: DefId,variant: usize) -> &[ast::FieldDef] {
 fn fields(s: &Session,d: DefId,variant: usize,fs: &[crate::tcx::FieldT]) -> String {
     let p = &s.unit.prog; let ast = field_defs(p,d,variant);
     fs.iter().enumerate().map(|(i,f)| {
-        let docs = ast.get(i).map(|f|docs_at(p,p.def(d).file,f.name.map_or(f.ty_span.0,|n|n.lo),f.attrs)).unwrap_or_default();
+        let docs = ast.get(i).map(|f|docs_at(p,p.def(d).file,f.name.get().map_or(f.ty_span.0,|n|n.lo),f.attrs)).unwrap_or_default();
         let name = if ast.get(i).is_some_and(|f|f.name.is_none()) { i.to_string() } else { p.syms.str(f.name).into() };
         format!("{{\"name\":{},\"type\":{},\"docs\":{}}}",q(&name),q(&ty(s,f.ty)),q(&docs))
     }).collect::<Vec<_>>().join(",")
@@ -270,7 +270,7 @@ pub fn position(s: &mut Session,path: &str,params: &Json,only: bool) -> Result<S
                                 TyKind::Adt(d,_, _) => {
                                     let def = p.def(*d);
                                     if let Some(f) = field_defs(p,*d,0).get(*index as usize) {
-                                        let pos = f.name.map_or(f.ty_span.0,|n|n.lo); let location = loc(p,def.file,pos);
+                                        let pos = f.name.get().map_or(f.ty_span.0,|n|n.lo); let location = loc(p,def.file,pos);
                                         let value = format!("{{\"kind\":\"field\",\"name\":{},\"type\":{},\"docs\":{},\"definition\":{location}}}",q(name),q(&ty(s,body.ty(id))),q(&docs_at(p,def.file,pos,f.attrs)));
                                         return Ok(answer(value,location,only));
                                     } break;

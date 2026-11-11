@@ -1420,9 +1420,12 @@ fn round42_borrowck_forwards_preemption_after_typeck() {
 #[test]
 fn round50_resolve_weak_candidate_pairing() {
     // Nightly rustc_next_trait_solver/src/solve/eval_ctxt/probe.rs:33-49
-    // @8d1a764 pairs every candidate through the probe. Exercise the actual
-    // unicode-bidi body and its inferred Iterator/Index/
-    // Clone/TextSource obligations. Test assertions stay enabled in release.
+    // @8d1a764 pairs every candidate through the probe. The body has the shape of
+    // unicode-bidi's resolve_weak, the fn this was found on, and its kinds of
+    // obligations: a `?Sized` param with a lifetime-generic trait bound and an
+    // iterator associated type, `&mut Range` and flattened ranges as iterators,
+    // slice Index/IndexMut, Clone, an `impl Iterator` return, a closure and a fn
+    // item as predicates, and Vec extend. Test assertions stay enabled in release.
     let session = std::sync::Arc::new(crate::Session::default());
     let mut prog = Program::new(&session);
     let std = concat!(env!("CARGO_MANIFEST_DIR"), "/../compiler/std");
@@ -1432,10 +1435,79 @@ fn round50_resolve_weak_candidate_pairing() {
         let krate = prog.load_crate(name, &file, 2021, crate::cfg::CfgSet::host(&session, &[]), deps.clone()).unwrap();
         deps.push((prog.syms.intern(name), krate));
     }
-    let file = std::env::var("MAKEPAD_RUN_BIDI_SOURCE").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../libs/unicode/unicode-bidi/src/lib.rs").into());
-    prog.load_crate("unicode_bidi", &file, 2018, crate::cfg::CfgSet::host(&session, &[]), deps).unwrap();
+    let source = r#"
+#![no_std]
+extern crate alloc;
+use alloc::vec::Vec;
+use core::ops::Range;
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Class { Strong, Weak, Neutral, Removed }
+
+pub trait Source<'t> {
+    type Chars: Iterator<Item = char>;
+    fn char_at(&self, index: usize) -> Option<(char, usize)>;
+    fn chars(&'t self) -> Self::Chars;
+}
+
+impl<'t> Source<'t> for str {
+    type Chars = core::str::Chars<'t>;
+    fn char_at(&self, index: usize) -> Option<(char, usize)> {
+        self[index..].chars().next().map(|c| (c, c.len_utf8()))
+    }
+    fn chars(&'t self) -> Self::Chars { str::chars(self) }
+}
+
+pub struct Sequence { pub runs: Vec<Range<usize>>, pub eos: Class }
+
+impl Sequence {
+    pub fn forwards_from(&self, pos: usize, run: usize) -> impl Iterator<Item = usize> + '_ {
+        self.runs[run..].iter().map(move |r| r.start.max(pos)..r.end).flatten()
+    }
+}
+
+fn kept(class: &Class) -> bool { *class != Class::Removed }
+
+pub fn resolve_weak<'a, T: Source<'a> + ?Sized>(text: &'a T, sequence: &Sequence, classes: &mut [Class]) {
+    let mut pending = Vec::new();
+    let mut removed = Vec::new();
+    for (run_index, run) in sequence.runs.iter().enumerate() {
+        for i in &mut run.clone() {
+            if classes[i] == Class::Removed {
+                removed.push(i);
+                continue;
+            }
+            if let Some((_, len)) = text.char_at(i) {
+                let next = sequence.forwards_from(i + len, run_index).map(|j| classes[j]).find(kept).unwrap_or(sequence.eos);
+                classes[i] = match (classes[i], next) {
+                    (Class::Weak, Class::Strong) => Class::Strong,
+                    (_, _) => Class::Neutral,
+                };
+            } else {
+                classes[i] = classes[i - 1];
+            }
+            pending.extend(removed.clone());
+            for j in &pending {
+                classes[*j] = Class::Neutral;
+            }
+            pending.clear();
+            removed.clear();
+        }
+    }
+    for i in sequence.runs.iter().cloned().flatten() {
+        if classes[i] == Class::Weak {
+            classes[i] = Class::Strong;
+        }
+    }
+}
+"#;
+    let dir = std::env::temp_dir().join(format!("relax-round50-pairing-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap(); let path = dir.join("lib.rs");
+    std::fs::write(&path, source).unwrap();
+    prog.load_crate("pairing", path.to_str().unwrap(), 2018, crate::cfg::CfgSet::host(&session, &[]), deps).unwrap();
     prog.prelude_crate = Some(0);
     prog.resolve_imports();
+    std::fs::remove_file(&path).unwrap(); std::fs::remove_dir(&dir).unwrap();
     assert!(prog.errors.is_empty(), "{:?}", prog.errors);
     let mut tcx = Tcx::new(); tcx.collect(&prog);
     let owner = named(&prog, "resolve_weak");

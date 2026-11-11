@@ -23,7 +23,7 @@ turn on features of it ([`turned_on`]): it is checked with them whatever else th
 (land_gate.sh tests). `--runs` prints the tests bucket's: `tests` lines of the packages whose tests it runs under
 the JIT after a landing (land_gate.sh testrun, [`run_units`]): the changed packages and the gate packages the
 diff reaches, as the fast bucket picks its checks; GATE_FULL=1 (the full bucket, daily) runs every package's,
-whatever the diff.
+whatever the diff. A package's test variants ([`variants`]) run beside it, a `tests` line each.
 """
 import json
 import os
@@ -151,6 +151,14 @@ def turned_on(packages, directory):
     return sorted(on)
 
 
+def variants(pkg):
+    """The features a package's tests also run with, each set a unit of its own (its Cargo.toml's
+    `[package.metadata.makepad] test-variants`, e.g. `["web"]`): a feature that swaps what the package
+    builds, which no user turns on and no other build may hold, such as a package's portable `web`
+    build: without a unit of its own nothing built those tests, and they stopped compiling."""
+    return ((pkg.get("metadata") or {}).get("makepad") or {}).get("test-variants") or []
+
+
 def tests_line(packages, name, directory, root):
     """A `tests` line: the package, its directory, and the features its users turn on ([`turned_on`])."""
     on = turned_on(packages, directory)
@@ -268,6 +276,8 @@ def tests_only(root, base, cbase, runs):
     for name, directory in units:
         # (the tests bucket's runs take the package's own features, as `makepad test` does)
         print(f"tests {name} {directory.relative_to(root)}" if runs else tests_line(packages, name, directory, root))
+        for features in variants(packages[directory]) if runs else ():
+            print(f"tests {name} {directory.relative_to(root)} --features {features}")
 
 
 def main():

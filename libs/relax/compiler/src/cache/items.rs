@@ -76,7 +76,7 @@ fn digest_into(pf: &ParsedFile, mut text: Option<&mut Vec<u8>>) -> FileDigest {
             ItemKind::Trait(r) => stack.extend_from_slice(ast.list(ast.row(*r).items)),
             ItemKind::Impl(r) => stack.extend_from_slice(ast.list(ast.row(*r).items)),
             ItemKind::ForeignMod(r) => stack.extend_from_slice(ast.list(ast.row(*r).items)),
-            ItemKind::Mod(Some(items)) => stack.extend_from_slice(ast.list(*items)),
+            ItemKind::Mod(crate::ast::Opt::Some(items)) => stack.extend_from_slice(ast.list(*items)),
             _ => {}
         }
     }
@@ -115,7 +115,7 @@ fn digest_into(pf: &ParsedFile, mut text: Option<&mut Vec<u8>>) -> FileDigest {
             let ItemKind::Fn(sig, body, _) = &it.kind else { continue };
             let s = ast.fn_sig(*sig);
             if s.konst || s.asyncness { continue; }
-            let (blo, bhi, eager) = match (body, s.lazy_body) {
+            let (blo, bhi, eager) = match (&body.get(), s.lazy_body.get()) {
                 (Some(b), _) => { let b = ast.block(*b); (b.lo, b.hi, true) }
                 (None, Some(r)) if r.lo > 0 => (pf.tok(r.lo - 1).lo, pf.tok(r.hi).hi, false),
                 _ => continue,

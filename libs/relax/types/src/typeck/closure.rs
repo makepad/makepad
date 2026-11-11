@@ -167,7 +167,7 @@ impl Fcx<'_> {
         self.env.regions = outer.with_binder(Some(crate::tcx::resolve_bound_vars::BinderId::Closure(e.0)));
         let mut ps = Vec::new();
         for p in params {
-            ps.push(match p.ty { Some(t) => self.lower_ty(t), None => self.fresh(0) });
+            ps.push(match p.ty.get() { Some(t) => self.lower_ty(t), None => self.fresh(0) });
         }
         let bound = self.env.regions.bound_count();
         // rustc_resolve/late.rs:1186-1196: closure output elision is Infer,

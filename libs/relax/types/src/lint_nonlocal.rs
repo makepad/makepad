@@ -52,7 +52,7 @@ impl<'a> Paths<'a> {
         if let Some(q) = ast.qself(p) {
             let (ty, tp) = (q.ty, q.trait_path);
             self.ty(ty);
-            if let Some(tp) = tp { self.path(&tp); }
+            if let Some(tp) = tp.get() { self.path(&tp); }
             return;
         }
         let segs = ast.segs(p.segs);
@@ -70,7 +70,7 @@ impl<'a> Paths<'a> {
                     },
                     GenericArgs::Paren(ins, out) => {
                         for &t in ast.list(ins) { self.ty(t); }
-                        if let Some(t) = out { self.ty(t); }
+                        if let Some(t) = out.get() { self.ty(t); }
                     }
                 }
             }
@@ -104,7 +104,7 @@ impl<'a> Paths<'a> {
             Ty::Fn(f) => {
                 let f = *ast.fn_ptr(f);
                 for &x in ast.list(f.params) { self.ty(x); }
-                if let Some(r) = f.ret { self.ty(r); }
+                if let Some(r) = f.ret.get() { self.ty(r); }
             }
             Ty::ImplTrait(bs) | Ty::DynTrait(bs, _) => self.bounds(bs),
             _ => {}
@@ -139,7 +139,7 @@ pub fn check(prog: &Program, tcx: &Tcx, own: &[bool]) {
             .map(|g| prog.files[d.file as usize].text(g.name).to_string()).collect();
         let mut c = Paths { prog, tcx, file: d.file, module: d.scope, ast, params, out: Vec::new() };
         c.ty(imp.self_ty);
-        if let Some(t) = imp.trait_ { c.path(&t); }
+        if let Some(t) = imp.trait_.get() { c.path(&t); }
         let outermost = peel(prog, impl_parent);
         let has_local_parent = c.out.iter().any(|&(did, _)| {
             if prog.def(did).krate != d.krate { return false; }
@@ -160,7 +160,7 @@ impl<'a> Paths<'a> {
         let ast = self.ast;
         for p in ast.list(g.params) {
             match p.kind {
-                GenericParamKind::Type(bs, def) => { self.bounds(bs); if let Some(t) = def { self.ty(t); } }
+                GenericParamKind::Type(bs, def) => { self.bounds(bs); if let Some(t) = def.get() { self.ty(t); } }
                 GenericParamKind::Const(t, _) => self.ty(t),
                 GenericParamKind::Lifetime(_) => {}
             }
@@ -184,7 +184,7 @@ impl<'a> Paths<'a> {
                 let sig = *ast.fn_sig(sig);
                 self.generics(sig.generics);
                 for p in ast.list(sig.params) { self.ty(p.ty); }
-                if let Some(r) = sig.ret { self.ty(r); }
+                if let Some(r) = sig.ret.get() { self.ty(r); }
             }
             ItemKind::Struct(r) => { let s = *ast.row(r); self.generics(s.generics); self.fields(s.data); }
             ItemKind::Union(r) => { let s = *ast.row(r); self.generics(s.generics); for f in ast.list(s.fields) { self.ty(f.ty); } }
@@ -193,13 +193,13 @@ impl<'a> Paths<'a> {
                 self.generics(e.generics);
                 for v in ast.list(e.variants) { self.fields(v.data); }
             }
-            ItemKind::TypeAlias(r) => { let t = *ast.row(r); self.generics(t.generics); self.bounds(t.bounds); if let Some(x) = t.ty { self.ty(x); } }
+            ItemKind::TypeAlias(r) => { let t = *ast.row(r); self.generics(t.generics); self.bounds(t.bounds); if let Some(x) = t.ty.get() { self.ty(x); } }
             ItemKind::Trait(r) => { let t = *ast.row(r); self.generics(t.generics); self.bounds(t.supers); }
             ItemKind::Impl(r) => {
                 let i = *ast.row(r);
                 self.generics(i.generics);
                 self.ty(i.self_ty);
-                if let Some(t) = i.trait_ { self.path(&t); }
+                if let Some(t) = i.trait_.get() { self.path(&t); }
             }
             ItemKind::Const(t, _) => { if let Some(t) = t.get() { self.ty(t); } }
             ItemKind::Static(_, t, _) => self.ty(t),

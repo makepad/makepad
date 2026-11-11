@@ -39,12 +39,12 @@ pub fn walk_stmt<'a, V: Visitor<'a>>(v: &mut V, s: &Stmt) {
         Stmt::Let(r) => {
             let l = *ast.row(r);
             v.enter_attrs(l.attrs);
-            if let Some(x) = l.init { v.expr(x); }
+            if let Some(x) = l.init.get() { v.expr(x); }
             v.pat(l.pat);
-            if let Some(e) = l.else_ { v.block(e); }
+            if let Some(e) = l.else_.get() { v.block(e); }
             v.leave_attrs(l.attrs);
         }
-        Stmt::Expr(e, _) => {
+        Stmt::Expr(_, e) => {
             let attrs = ast.stmt_attrs(e);
             v.enter_attrs(attrs);
             v.expr(e);
@@ -63,7 +63,7 @@ pub fn walk_stmt<'a, V: Visitor<'a>>(v: &mut V, s: &Stmt) {
 pub fn walk_arm<'a, V: Visitor<'a>>(v: &mut V, a: &Arm) {
     v.enter_attrs(a.attrs);
     v.pat(a.pat);
-    if let Some(g) = a.guard { v.expr(g); }
+    if let Some(g) = a.guard.get() { v.expr(g); }
     v.expr(a.body);
     v.leave_attrs(a.attrs);
 }
@@ -146,8 +146,8 @@ pub fn walk_expr<'a, V: Visitor<'a>>(v: &mut V, e: ExprId) {
             if m.args == NO_MAC_ARGS { return; }
             let args = *ast.mac_arg(m.args);
             walk_exprs(v, args.exprs);
-            if let Some(p) = args.pat { v.pat(p); }
-            if let Some(g) = args.guard { v.expr(g); }
+            if let Some(p) = args.pat.get() { v.pat(p); }
+            if let Some(g) = args.guard.get() { v.expr(g); }
         }
     }
 }
@@ -156,14 +156,14 @@ pub fn walk_pat<'a, V: Visitor<'a>>(v: &mut V, p: PatId) {
     let ast = v.ast();
     match *ast.pat(p) {
         Pat::Wild | Pat::Rest | Pat::Path(_) | Pat::Mac(_) => {}
-        Pat::Ident { sub, .. } => if let Some(s) = sub { v.pat(s) },
+        Pat::Ident { sub, .. } => if let Some(s) = sub.get() { v.pat(s) },
         Pat::Lit(e) => v.expr(e),
         Pat::Range(a, b, _) => {
-            if let Some(x) = a { v.expr(x); }
-            if let Some(x) = b { v.expr(x); }
+            if let Some(x) = a.get() { v.expr(x); }
+            if let Some(x) = b.get() { v.expr(x); }
         }
         Pat::TupleStruct(_, ps) | Pat::Tuple(ps) | Pat::Slice(ps) | Pat::Or(ps) => for &x in ast.list(ps) { v.pat(x); },
-        Pat::Struct(_, fs, _) => {
+        Pat::Struct(_, _, fs) => {
             for f in ast.list(fs) {
                 v.enter_attrs(f.attrs);
                 v.pat(f.pat);

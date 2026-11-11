@@ -148,6 +148,13 @@ impl Regions {
         r.unindexed.store(true, std::sync::atomic::Ordering::Release);
         r
     }
+    /// The settle rebuild's top-up (Types::top_up_from): the kinds and argument lists `live`
+    /// interned past this restored, unused one's counts, appended at the same ids (its maps are
+    /// not built yet: the first use builds them with these).
+    pub(crate) fn top_up_from(&self, live: &Regions) {
+        for i in self.kinds.len()..live.kinds.len() { self.kinds.push(live.kinds[i]); }
+        for i in self.args.len()..live.args.len() { self.args.push(std::sync::Arc::from(&live.args[i][..])); }
+    }
     fn index(&self) {
         use std::sync::atomic::Ordering;
         if !self.unindexed.load(Ordering::Acquire) { return; }

@@ -69,7 +69,7 @@ impl Cx<'_> {
         let iteration = self.synthetic_scope(e, Synthetic::Iteration, ScopeData::Node, span)?;
         let iteration_blocks = self.synthetic_scope(e, Synthetic::Iteration, ScopeData::Destruction, span)?;
         let unit = self.unit_ty();
-        self.breakables.push(Breakable { label: row.label, scope: loop_scope, is_block: false });
+        self.breakables.push(Breakable { label: row.label.get(), scope: loop_scope, is_block: false });
         let built = (|| -> BuildResult<ExprId> {
             let if_then_scope = match self.scope_of(Node::Block(row.body.0), ScopeData::IfThenRescope).or_else(|| self.scope_of(Node::Block(row.body.0), ScopeData::IfThen)) {
                 Some(scope) => scope,
@@ -159,7 +159,7 @@ impl Cx<'_> {
         let next_call = self.scope_wrap(e, next_scope, next_call);
 
         // `None => break`, `Some(<pat>) => <body>`
-        self.breakables.push(Breakable { label: row.label, scope: iteration, is_block: false });
+        self.breakables.push(Breakable { label: row.label.get(), scope: iteration, is_block: false });
         let arms = (|| -> BuildResult<Vec<crate::mir::build::thir::ArmId>> {
             let none_idx = self.lang_variant(DefId(0), LangItem::OptionNone, span)?;
             let some_idx = self.lang_variant(DefId(0), LangItem::OptionSome, span)?;
@@ -553,7 +553,7 @@ impl Cx<'_> {
         let base = if debug { &name["debug_".len()..] } else { name };
         let inner_ty = if debug { self.unit_ty() } else { expr_ty };
         let inner = match base {
-            "matches" => return self.matches_macro(e, &xs, margs.pat, margs.guard, expr_ty),
+            "matches" => return self.matches_macro(e, &xs, margs.pat.get(), margs.guard.get(), expr_ty),
             "assert" => {
                 let Some(&cond) = xs.first() else { return self.unresolved(span, "assert without a condition") };
                 let branch = self.synthetic_scope(e, Synthetic::MacroBranch, ScopeData::Destruction, span)?;

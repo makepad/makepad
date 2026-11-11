@@ -314,7 +314,7 @@ impl<'a> Cx<'a> {
                 } else {
                     BindingMode(ByRef::No, if mutbl { Mutability::Mut } else { Mutability::Not })
                 };
-                let subpattern = match sub {
+                let subpattern = match sub.get() {
                     Some(s) => Some(Box::new(self.lower_pattern(s)?)),
                     None => None,
                 };
@@ -332,7 +332,7 @@ impl<'a> Cx<'a> {
                 let value = self.lit_value(e, ty, span)?;
                 self.valtree_to_pat(&value, span)
             }
-            AstPat::Range(lo, hi, inclusive) => self.lower_pattern_range(lo, hi, inclusive, ty, span),
+            AstPat::Range(lo, hi, inclusive) => self.lower_pattern_range(lo.get(), hi.get(), inclusive, ty, span),
             AstPat::Path(_) => match tb.pat_res.get(&p.0).copied() {
                 Some(Res::Def(d)) => self.lower_path_pat(p.0 | PAT_KEY, d, ty, span),
                 _ => self.pat_unresolved(span, "unresolved path pattern"),
@@ -345,7 +345,7 @@ impl<'a> Cx<'a> {
                 let subpatterns = self.lower_seq_subpats(ast.list(subs), arity, span)?;
                 self.lower_variant_or_leaf(UserTypeKey::Pattern(p.0), ty, Some(d), subpatterns, span)
             }
-            AstPat::Struct(_, fields, _) => {
+            AstPat::Struct(_, _, fields) => {
                 let Some(Res::Def(d)) = tb.pat_res.get(&p.0).copied() else { return self.pat_unresolved(span, "unresolved struct pattern") };
                 let TyKind::Adt(adt, _, _) = *tcx.tys.kind(ty) else { return self.pat_unresolved(span, "struct pattern of a non-ADT type") };
                 let variant = if self.root.cx.prog.def(d).kind == DefKind::Variant { self.root.cx.prog.def(d).sub } else { 0 };

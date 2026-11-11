@@ -742,7 +742,7 @@ pub(crate) fn first_present() {
         let mut d = domains();
         if let Some(x) = d.iter_mut().find(|x| x.info.base == base && x.info.first_frame_ms.is_none()) {
             x.info.first_frame_ms = Some(x.started.elapsed().as_secs_f64() * 1e3);
-            crate::run::domain_present();
+            crate::run::domain_present(format!("{} (id {})", x.info.package, x.info.id));
         }
     }
     CHANGED.notify_all();

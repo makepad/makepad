@@ -269,7 +269,7 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
                 if let Some(p) = &place { self.delegate.fake_read(p.clone(), FakeReadCause::Matched, x.0); }
                 for a in self.ast().list(arms).to_vec() {
                     if let Some(p) = &place { self.walk_pat(a.pat, p.clone(), a.guard.is_some()); }
-                    if let Some(g) = a.guard { self.consume_expr(g); }
+                    if let Some(g) = a.guard.get() { self.consume_expr(g); }
                     self.consume_expr(a.body);
                 }
             }
@@ -363,10 +363,10 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
             match st {
                 Stmt::Let(r) => {
                     let crate::ast::LetStmt { pat, init, else_, .. } = *self.ast().row(r);
-                    if let Some(x) = init { self.walk_local(pat, x, if else_.is_some() { FakeReadCause::Matched } else { FakeReadCause::Let }, false); }
-                    if let Some(b) = else_ { self.walk_block(b); }
+                    if let Some(x) = init.get() { self.walk_local(pat, x, if else_.is_some() { FakeReadCause::Matched } else { FakeReadCause::Let }, false); }
+                    if let Some(b) = else_.get() { self.walk_block(b); }
                 }
-                Stmt::Expr(x, _) => self.consume_expr(x),
+                Stmt::Expr(_, x) => self.consume_expr(x),
                 Stmt::Attrs(r) => self.consume_expr(self.ast().row(r).expr),
                 Stmt::Item(_) | Stmt::Empty => (),
             }
@@ -389,7 +389,7 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
                 } else if let Some(Res::Def(d)) = self.body.pat_res.get(&pat.0) {
                     if matches!(self.cx.prog.def(*d).kind, DefKind::Const | DefKind::AssocConst) { self.delegate.borrow(p.clone(), BorrowKind::Imm); }
                 }
-                if let Some(s) = sub { self.walk_pat(s, p, guard); }
+                if let Some(s) = sub.get() { self.walk_pat(s, p, guard); }
             }
             Pat::Lit(_) | Pat::Range(..) => self.delegate.borrow(p, BorrowKind::Imm),
             Pat::Path(_) => if let Some(Res::Def(d)) = self.body.pat_res.get(&pat.0) {
@@ -405,7 +405,7 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
                     if let Some(t) = self.tcx.place_field_ty(self.cx.prog, self.cx, p.ty(), vi, fi) { self.walk_pat(*sp, p.clone().project(Projection::Field(vi, fi), t), guard); }
                 }
             }
-            Pat::Struct(_, fs, _) => for f in self.ast().list(fs).to_vec() {
+            Pat::Struct(_, _, fs) => for f in self.ast().list(fs).to_vec() {
                 let name = self.cx.prog.files[self.body.file as usize].text(f.name);
                 for fi in 0..self.tcx.place_n_fields(p.ty(), vi) as u32 {
                     if self.tcx.place_field_name(self.cx.prog, p.ty(), vi, fi) == name {
@@ -440,8 +440,8 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
         let xs = self.ast().list(ma.exprs).to_vec();
         match name {
             "matches" => {
-                if let (Some(p), Some(x)) = (ma.pat, xs.first()) { self.walk_local(p, *x, FakeReadCause::Matched, ma.guard.is_some()); }
-                if let Some(g) = ma.guard { self.consume_expr(g); }
+                if let (Some(p), Some(x)) = (ma.pat.get(), xs.first()) { self.walk_local(p, *x, FakeReadCause::Matched, ma.guard.is_some()); }
+                if let Some(g) = ma.guard.get() { self.consume_expr(g); }
             }
             "assert" => {
                 if let Some(x) = xs.first() { self.consume_expr(*x); }

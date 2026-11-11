@@ -190,7 +190,7 @@ impl<'a> Lcx<'a> {
                     out.push(Ob { place: fp, ty: ft, pat: ast.list(*v)[pi] });
                 }
             }
-            Pat::Struct(_, fields, _) => {
+            Pat::Struct(_, _, fields) => {
                 for fp in ast.list(*fields) {
                     let fname = {
                         let tx = self.ident_text(fp.name);
@@ -272,7 +272,7 @@ impl<'a> Lcx<'a> {
             Pat::Ident { sub, .. } => match self.b.pat_res.get(&p.0).copied() {
                 Some(Res::Def(d)) => self.dt_def(&place, ty, p, d),
                 Some(_) => Cl::Opaque,
-                None => match sub {
+                None => match &sub.get() {
                     Some(s) => Cl::Expand(vec![Ob { place, ty, pat: *s }]),
                     None => Cl::Drop,
                 },
@@ -291,14 +291,14 @@ impl<'a> Lcx<'a> {
             }
             Pat::Range(a, b, incl) => {
                 let Some((dmin, dmax, _)) = self.dt_domain(ty) else { return Cl::Opaque };
-                let lo = match a {
+                let lo = match &a.get() {
                     Some(a) => match self.dt_const_int(*a, ty) {
                         Some(v) => v,
                         None => return Cl::Opaque,
                     },
                     None => dmin,
                 };
-                let hi = match b {
+                let hi = match &b.get() {
                     Some(b) => match self.dt_const_int(*b, ty) {
                         Some(v) => {
                             if *incl {

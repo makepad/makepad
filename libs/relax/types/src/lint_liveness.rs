@@ -301,7 +301,7 @@ impl<'c, 'a> Unit<'c, 'a> {
                         }
                     }
                 }
-                if let Some(s) = sub { self.bind_pat(s, define); }
+                if let Some(s) = sub.get() { self.bind_pat(s, define); }
             }
             Pat::Lit(_) | Pat::Range(..) | Pat::Path(_) | Pat::Wild | Pat::Rest | Pat::Mac(_) => {}
             Pat::Or(ps) => {
@@ -318,7 +318,7 @@ impl<'c, 'a> Unit<'c, 'a> {
             Pat::TupleStruct(_, ps) | Pat::Tuple(ps) | Pat::Slice(ps) => {
                 for &x in ast.list(ps) { self.bind_pat(x, define); }
             }
-            Pat::Struct(_, fs, _) => {
+            Pat::Struct(_, _, fs) => {
                 for f in ast.list(fs) {
                     self.enter(f.attrs);
                     self.bind_pat(f.pat, define);
@@ -341,13 +341,13 @@ impl<'c, 'a> Unit<'c, 'a> {
                         if !out.contains(&v) { out.push(v); }
                     }
                 }
-                if let Some(s) = sub { self.by_ref_bindings(s, out); }
+                if let Some(s) = sub.get() { self.by_ref_bindings(s, out); }
             }
             Pat::Lit(_) | Pat::Range(..) | Pat::Path(_) | Pat::Wild | Pat::Rest | Pat::Mac(_) => {}
             Pat::Or(ps) | Pat::TupleStruct(_, ps) | Pat::Tuple(ps) | Pat::Slice(ps) => {
                 for &x in ast.list(ps) { self.by_ref_bindings(x, out); }
             }
-            Pat::Struct(_, fs, _) => { for f in ast.list(fs) { self.by_ref_bindings(f.pat, out); } }
+            Pat::Struct(_, _, fs) => { for f in ast.list(fs) { self.by_ref_bindings(f.pat, out); } }
             Pat::Ref(_, x) | Pat::Paren(x) | Pat::Box(x) => self.by_ref_bindings(x, out),
         }
     }
@@ -357,19 +357,21 @@ impl<'c, 'a> Unit<'c, 'a> {
         let ast = self.cx.ast;
         let mut q = p;
         while let Pat::Paren(x) = *ast.pat(q) { q = x; }
-        if let Pat::Ident { name, sub: None, by_ref: false, .. } = *ast.pat(q) {
-            if self.cx.body.pat_res.get(&q.0).is_none() {
-                if let Some(&l) = self.cx.body.pat_local.get(&q.0) {
-                    self.declared.insert(l);
-                    let v = self.var(l);
-                    self.vars[v as usize].own = true;
-                    self.vars[v as usize].intro.push(name.lo);
-                    let sc = self.cur_scope;
-                    self.decl_scopes.entry(v).or_insert(sc);
-                    if let Some(n) = self.step(Vec::new(), v) {
-                        self.accesses.push(Access { var: v, kind: AccessKind::Param, key: (name.lo, name.hi), node: n, at_entry: false, direct: true, scope: self.cur_scope, init: true });
+        if let Pat::Ident { name, sub, by_ref: false, .. } = *ast.pat(q) {
+            if sub.is_none() {
+                if self.cx.body.pat_res.get(&q.0).is_none() {
+                    if let Some(&l) = self.cx.body.pat_local.get(&q.0) {
+                        self.declared.insert(l);
+                        let v = self.var(l);
+                        self.vars[v as usize].own = true;
+                        self.vars[v as usize].intro.push(name.lo);
+                        let sc = self.cur_scope;
+                        self.decl_scopes.entry(v).or_insert(sc);
+                        if let Some(n) = self.step(Vec::new(), v) {
+                            self.accesses.push(Access { var: v, kind: AccessKind::Param, key: (name.lo, name.hi), node: n, at_entry: false, direct: true, scope: self.cur_scope, init: true });
+                        }
+                        return;
                     }
-                    return;
                 }
             }
         }
@@ -390,7 +392,7 @@ impl<'c, 'a> Unit<'c, 'a> {
         let ast = self.cx.ast;
         match *s {
             Stmt::Item(_) | Stmt::Empty => {}
-            Stmt::Expr(e, _) => {
+            Stmt::Expr(_, e) => {
                 let attrs = ast.stmt_attrs(e);
                 self.enter(attrs);
                 self.expr(e);
@@ -405,10 +407,10 @@ impl<'c, 'a> Unit<'c, 'a> {
             Stmt::Let(r) => {
                 let l = *ast.row(r);
                 self.enter(l.attrs);
-                match l.init {
+                match l.init.get() {
                     Some(init) => {
                         self.expr(init);
-                        if let Some(e) = l.else_ {
+                        if let Some(e) = l.else_.get() {
                             // refutable: the else block diverges
                             let start = self.cur;
                             self.block(e);
@@ -435,7 +437,7 @@ impl<'c, 'a> Unit<'c, 'a> {
         let ast = self.cx.ast;
         let mut q = pat;
         while let Pat::Paren(x) = *ast.pat(q) { q = x; }
-        if !matches!(*ast.pat(q), Pat::Ident { sub: None, by_ref: false, .. }) || self.accesses.len() != from + 1 { return; }
+        if !matches!(*ast.pat(q), Pat::Ident { sub, by_ref: false, .. } if sub.is_none()) || self.accesses.len() != from + 1 { return; }
         let mut tails = Vec::new();
         self.value_tails(init, &mut tails);
         if tails.is_empty() { return; }
@@ -466,7 +468,7 @@ impl<'c, 'a> Unit<'c, 'a> {
     fn block_value_tails(&self, b: BlockId, e: ExprId, out: &mut Vec<(u32, u32)>) {
         let ast = self.cx.ast;
         let tail = match ast.stmts(b).last() {
-            Some(&Stmt::Expr(t, false)) => Some(t),
+            Some(&Stmt::Expr(false, t)) => Some(t),
             Some(&Stmt::Attrs(r)) if !ast.row(r).semi => Some(ast.row(r).expr),
             _ => None,
         };
@@ -752,7 +754,7 @@ impl<'c, 'a> Unit<'c, 'a> {
             self.cur = if self.nodes[starts[i] as usize].has_pred { Some(starts[i]) } else { None };
             self.enter(a.attrs);
             self.bind_pat(a.pat, true);
-            if let Some(g) = a.guard {
+            if let Some(g) = a.guard.get() {
                 // a by-reference binding of a guarded arm is made before the guard, which gets a
                 // reference to it (rustc_mir_build bind_matched_candidate_for_guard: the guard's
                 // local is `&arm_local`), so the arm's binding is read even when nothing names it
@@ -938,23 +940,23 @@ impl<'c, 'a> Unit<'c, 'a> {
             return;
         }
         for &x in exprs { self.expr(x); }
-        if let Some(p) = args.pat {
+        if let Some(p) = args.pat.get() {
             // matches!(e, pat if guard)
             self.bind_pat(p, true);
-            if let Some(g) = args.guard {
+            if let Some(g) = args.guard.get() {
                 // by-reference bindings are read by the guard's reference to them (match_expr)
                 let mut by_ref = Vec::new();
                 self.by_ref_bindings(p, &mut by_ref);
                 if !by_ref.is_empty() { self.step(by_ref, NONE); }
                 self.expr(g);
             }
-        } else if let Some(g) = args.guard {
+        } else if let Some(g) = args.guard.get() {
             self.expr(g);
         }
-        if let Some(asm) = args.asm {
+        if let Some(asm) = args.asm.get() {
             for op in ast.list(asm.ops) {
-                if let Some(i) = op.input { self.expr(i); }
-                if let Some(o) = op.output { self.expr(o); }
+                if let Some(i) = op.input.get() { self.expr(i); }
+                if let Some(o) = op.output.get() { self.expr(o); }
             }
         }
         self.named_args(e);

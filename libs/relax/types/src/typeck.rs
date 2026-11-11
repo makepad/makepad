@@ -871,7 +871,7 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
         return fcx.into_body();
     }
     let (fsig, body) = match &ast.item(d.item).kind {
-        ItemKind::Fn(s, b, _) => (ast.fn_sig(*s), b.or_else(|| prog.fn_body(file, d.item).ok().flatten())),
+        ItemKind::Fn(s, b, _) => (ast.fn_sig(*s), b.get().or_else(|| prog.fn_body(file, d.item).ok().flatten())),
         ItemKind::Const(_, init) | ItemKind::Static(_, _, init) if init.is_some() => {
             let init = &prog.const_body(file, d.item).expect("body_ranges validated initializer").unwrap_or(init.get().unwrap());
             // const/static initializer: checked against the declared type
@@ -904,7 +904,7 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
     }
     let mut pi = 0;
     if fsig.self_param.is_some() {
-        let mutable = matches!(fsig.self_param, Some(SelfParam::Value(true)) | Some(SelfParam::Typed(true, _)));
+        let mutable = matches!(fsig.self_param.get(), Some(SelfParam::Value(true)) | Some(SelfParam::Typed(true, _)));
         let s = prog.syms.get("self").unwrap_or(0);
         let li = fcx.b.locals.len() as u32;
         fcx.b.locals.push(Local { name: s, ty: params[0], mutable, pat: u32::MAX });
@@ -927,7 +927,7 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
     let mut matched_in_coroutine: Vec<(PatId, TyId)> = Vec::new();
     for p in ast.list(fsig.params) {
         let t = if pi < params.len() { params[pi] } else { fcx.tcx.tys.error };
-        let plain = matches!(ast.pat(p.pat), Pat::Ident { by_ref: false, sub: None, .. });
+        let plain = matches!(ast.pat(p.pat), Pat::Ident { by_ref: false, sub, .. } if sub.is_none());
         if async_fn_body && !plain {
             let li = fcx.b.locals.len() as u32;
             fcx.b.locals.push(Local { name: prog.syms.get("_").or_else(|| prog.syms.get("self")).unwrap_or(0), ty: t, mutable: true, pat: u32::MAX - 1 });
@@ -2181,7 +2181,7 @@ impl<'a> Fcx<'a> {
         let structural = peel_lit
             || matches!(ast.pat(p), Pat::Tuple(_) | Pat::TupleStruct(..) | Pat::Struct(..) | Pat::Slice(_))
             || matches!(ast.pat(p), Pat::Path(_) if !pre_const)
-            || matches!(ast.pat(p), Pat::Ident { sub: None, by_ref: false, mutbl: false, .. } if self.ident_pat_is_path(p) && !self.ident_pat_is_const(p));
+            || matches!(ast.pat(p), Pat::Ident { sub, by_ref: false, mutbl: false, .. } if sub.is_none() && self.ident_pat_is_path(p) && !self.ident_pat_is_const(p));
         let mut expected = expected;
         let saved_mode = self.bind_mode;
         if structural {
@@ -2258,7 +2258,7 @@ impl<'a> Fcx<'a> {
                 if !(sub.is_none() && self.ident_pat_is_path(p)) {
                     out.push((self.sym(*name), name.lo));
                 }
-                if let Some(sp) = sub {
+                if let Some(sp) = &sub.get() {
                     let more = self.pat_bindings(*sp, report);
                     add(self, &mut out, more);
                 }
@@ -2267,7 +2267,7 @@ impl<'a> Fcx<'a> {
                 // `..` may appear once (rustc_ast_passes check_pat)
                 let rests = ast.list(*l).iter().filter(|c| match ast.pat(**c) {
                     Pat::Rest => true,
-                    Pat::Ident { sub: Some(s), .. } => matches!(ast.pat(*s), Pat::Rest),
+                    Pat::Ident { sub, .. } if let Some(s) = &sub.get() => matches!(ast.pat(*s), Pat::Rest),
                     _ => false,
                 }).count();
                 if report && rests > 1 {
@@ -2279,10 +2279,12 @@ impl<'a> Fcx<'a> {
                 if report && !matches!(ast.pat(p), Pat::Slice(_)) {
                     let what = if matches!(ast.pat(p), Pat::Tuple(_)) { "tuple" } else { "tuple struct" };
                     for &c in ast.list(*l) {
-                        if let Pat::Ident { name, sub: Some(s), .. } = ast.pat(c) {
-                            if matches!(ast.pat(*s), Pat::Rest) {
-                                let shown = self.prog.syms.str(self.sym(*name)).to_string();
-                                self.err(name.lo, format!("`{shown} @` is not allowed in a {what}"));
+                        if let Pat::Ident { name, sub, .. } = ast.pat(c) {
+                            if let Some(s) = &sub.get() {
+                                if matches!(ast.pat(*s), Pat::Rest) {
+                                    let shown = self.prog.syms.str(self.sym(*name)).to_string();
+                                    self.err(name.lo, format!("`{shown} @` is not allowed in a {what}"));
+                                }
                             }
                         }
                     }
@@ -2292,7 +2294,7 @@ impl<'a> Fcx<'a> {
                     add(self, &mut out, more);
                 }
             }
-            Pat::Struct(_, fields, _) => {
+            Pat::Struct(_, _, fields) => {
                 for fp in ast.list(*fields) {
                     let more = self.pat_bindings(fp.pat, report);
                     add(self, &mut out, more);
@@ -2445,7 +2447,7 @@ impl<'a> Fcx<'a> {
                 self.local_hyg.resize(li as usize + 1, (Some(Vec::new()), 0));
                 self.local_hyg[li as usize] = h;
                 self.scopes.push((s, li));
-                if let Some(sp) = sub {
+                if let Some(sp) = &sub.get() {
                     self.check_pat(*sp, expected);
                 }
             }
@@ -2456,7 +2458,7 @@ impl<'a> Fcx<'a> {
             }
             Pat::Range(a, b, _) => {
                 // rustc pat.rs check_pat_range: each end has the scrutinee's type (demand_eqtype_pat)
-                for end in [a, b].into_iter().flatten() {
+                for end in [a.get(), b.get()].iter().flatten() {
                     let t = self.check_expr(*end, Some(expected));
                     let pos = self.ast().expr(*end).lo;
                     self.demand_eq(expected, t, pos);
@@ -2579,12 +2581,14 @@ impl<'a> Fcx<'a> {
                     if let Pat::Rest = ast.pat(*x) {
                         continue;
                     }
-                    if let Pat::Ident { sub: Some(s), .. } = ast.pat(*x) {
-                        if let Pat::Rest = ast.pat(*s) {
-                            // `name @ ..`: the subslice / subarray
-                            let st = slice_ty.unwrap_or(self.tcx.tys.error);
-                            self.check_pat(*x, st);
-                            continue;
+                    if let Pat::Ident { sub, .. } = ast.pat(*x) {
+                        if let Some(s) = &sub.get() {
+                            if let Pat::Rest = ast.pat(*s) {
+                                // `name @ ..`: the subslice / subarray
+                                let st = slice_ty.unwrap_or(self.tcx.tys.error);
+                                self.check_pat(*x, st);
+                                continue;
+                            }
                         }
                     }
                     self.check_pat(*x, elem);
@@ -2635,7 +2639,7 @@ impl<'a> Fcx<'a> {
                 }
                 self.check_seq_pats(self.ast().list(*v), &fields);
             }
-            Pat::Struct(path, fields, rest) => {
+            Pat::Struct(rest, path, fields) => {
                 let d = self.resolve_struct_path(path);
                 self.b.pat_res.insert(p.0, d);
                 if let Res::Def(dd) = d {
@@ -3659,7 +3663,7 @@ impl<'a> Fcx<'a> {
         if let Some(q) = self.ast().qself(path) {
             // `<T as Trait>::item`
             let self_t = self.lower_ty(q.ty);
-            let tp = match &q.trait_path {
+            let tp = &match q.trait_path.get() {
                 Some(tp) => tp,
                 None => return self.resolve_qself_no_trait(self_t, segs[segs.len() - 1].1, key, path.lo, path),
             };
@@ -4817,7 +4821,7 @@ impl<'a> Fcx<'a> {
         let st = self.shallow(ty);
         if matches!(self.tcx.tys.kind(st), TyKind::Never) { return; }
         let blk = self.ast().block(b);
-        let tail = match self.ast().list(blk.stmts).last() { Some(Stmt::Expr(e, false)) => Some(*e), _ => None };
+        let tail = match self.ast().list(blk.stmts).last() { Some(Stmt::Expr(false, e)) => Some(*e), _ => None };
         let pos = match tail { Some(e) => self.ast().expr(e).lo, None => blk.lo };
         self.coerce_or_unify(ty, unit, tail, pos);
     }
@@ -4853,14 +4857,14 @@ impl<'a> Fcx<'a> {
                     // the annotation normalized in this body's inference context (rustc
                     // gather_locals: FnCtxt::lower_ty -> LoweredTy::from_raw normalizes):
                     // `&<(Wrap<?0>,) as Indirect>::Out` is `&?1` with that projection pending
-                    let decl = match ty {
+                    let decl = match &ty.get() {
                         Some(t) => {
                             let d = self.lower_let_ty_saving_user_provided_ty(*t);
                             Some(if self.tcx.tys.has_assoc(d) { self.norm(d) } else { d })
                         }
                         None => None,
                     };
-                    let t = match init {
+                    let t = match &init.get() {
                         Some(e) => {
                             let it = self.check_expr(*e, decl);
                             match decl {
@@ -4894,14 +4898,14 @@ impl<'a> Fcx<'a> {
                     if self.diverges {
                         diverged = true;
                     }
-                    if let Some(eb) = else_ {
+                    if let Some(eb) = &else_.get() {
                         let save = self.diverges;
                         self.diverges = false;
                         let et = self.check_block(*eb, None);
                         // rustc check_decl_local: the `else` block must have type `!`
                         let es = self.shallow(et);
                         if es != self.tcx.tys.never && !matches!(self.tcx.tys.kind(es), TyKind::Infer(_) | TyKind::Error) {
-                            let pos = match self.ast().stmts(*eb).last() { Some(Stmt::Expr(e, false)) => self.ast().expr(*e).lo, _ => self.ast().block(*eb).hi };
+                            let pos = match self.ast().stmts(*eb).last() { Some(Stmt::Expr(false, e)) => self.ast().expr(*e).lo, _ => self.ast().block(*eb).hi };
                             self.err(pos, "E0308: `else` clause of `let...else` does not diverge".to_string());
                         }
                         self.diverges = save;
@@ -4912,7 +4916,7 @@ impl<'a> Fcx<'a> {
                 }
                 // stripped at load (program::strip_cfg_stmts)
                 Stmt::Item(_) | Stmt::Attrs(..) => {}
-                Stmt::Expr(e, semi) => {
+                Stmt::Expr(semi, e) => {
                     let is_tail = i == n - 1 && !*semi;
                     // (the tail's expectation is as much a hint as the block's)
                     self.soft = is_tail && soft;
@@ -4965,7 +4969,7 @@ impl<'a> Fcx<'a> {
         self.item_blocks.truncate(saved_blocks);
         if diverged {
             self.diverges = true;
-            let tail_is_expr = n > 0 && matches!(self.ast().list(blk.stmts)[n - 1], Stmt::Expr(_, false));
+            let tail_is_expr = n > 0 && matches!(self.ast().list(blk.stmts)[n - 1], Stmt::Expr(false, _));
             if !tail_is_expr {
                 return self.tcx.tys.never;
             }
@@ -4990,7 +4994,7 @@ impl<'a> Fcx<'a> {
     fn check_asm(&mut self, m: &MacCall) -> TyId {
         let ast = self.ast();
         let margs = ast.mac_arg(m.args);
-        let Some(spec) = margs.asm else { return self.tcx.tys.error };
+        let Some(spec) = margs.asm.get() else { return self.tcx.tys.error };
         let mut diverge = spec.options & ASM_NORETURN != 0;
         let ops = ast.list(spec.ops);
         // rustc_ast_lowering asm.rs: `asm_goto_with_outputs`
@@ -5006,7 +5010,7 @@ impl<'a> Fcx<'a> {
                 // rustc check_expr_asm: a label block has unit type or diverges; its divergence is
                 // not the asm's unless every path out of it diverges
                 AsmDir::Label => {
-                    let Some(x) = op.input else { continue };
+                    let Some(x) = op.input.get() else { continue };
                     let previous = self.diverges;
                     let unit = self.tcx.tys.unit;
                     let t = self.check_expr(x, Some(unit));
@@ -5017,20 +5021,20 @@ impl<'a> Fcx<'a> {
                     self.diverges = previous;
                 }
                 AsmDir::Sym | AsmDir::Const => {
-                    if let Some(x) = op.input {
+                    if let Some(x) = op.input.get() {
                         self.check_expr(x, None);
                     }
                 }
                 _ => {
-                    if let Some(x) = op.input {
+                    if let Some(x) = op.input.get() {
                         let t = self.check_expr(x, None);
-                        if let Some(y) = op.output {
+                        if let Some(y) = op.output.get() {
                             if y != x {
                                 let u = self.check_expr(y, Some(t));
                                 let _ = u;
                             }
                         }
-                    } else if let Some(y) = op.output {
+                    } else if let Some(y) = op.output.get() {
                         self.check_expr(y, None);
                     }
                 }
@@ -5304,7 +5308,7 @@ impl<'a> Fcx<'a> {
                         if !then_div {
                             let s = self.shallow(tt);
                             if s != unit && s != self.tcx.tys.never {
-                                let pos = match self.ast().stmts(*then).last() { Some(crate::ast::Stmt::Expr(t2, false)) => self.ast().expr(*t2).lo, _ => lo };
+                                let pos = match self.ast().stmts(*then).last() { Some(crate::ast::Stmt::Expr(false, t2)) => self.ast().expr(*t2).lo, _ => lo };
                                 self.demand_eq(unit, s, pos);
                             }
                         }
@@ -5323,7 +5327,7 @@ impl<'a> Fcx<'a> {
                         let es = self.shallow(et);
                         if ts == self.tcx.tys.never {
                             // the `!` then-branch is `NeverToAny` to the else type
-                            if let Some(crate::ast::Stmt::Expr(t2, false)) = self.ast().stmts(*then).last() { self.set_coerce(t2.0, Coerce::Never, et); }
+                            if let Some(crate::ast::Stmt::Expr(false, t2)) = self.ast().stmts(*then).last() { self.set_coerce(t2.0, Coerce::Never, et); }
                             return et;
                         }
                         if es == self.tcx.tys.never {
@@ -5332,12 +5336,12 @@ impl<'a> Fcx<'a> {
                         }
                         // the then-branch's value is its block's tail expression
                         let tail = match self.ast().stmts(*then).last() {
-                            Some(crate::ast::Stmt::Expr(t2, false)) => vec![*t2],
+                            Some(crate::ast::Stmt::Expr(false, t2)) => vec![*t2],
                             _ => Vec::new(),
                         };
                         // (the error is at the else branch's value: its block's tail, rustc if_cause)
                         let at = match self.ast().expr(*x).kind {
-                            ExprKind::Block(b, _) => match self.ast().stmts(b).last() { Some(crate::ast::Stmt::Expr(t2, false)) => self.ast().expr(*t2).lo, _ => self.ast().expr(*x).lo },
+                            ExprKind::Block(b, _) => match self.ast().stmts(b).last() { Some(crate::ast::Stmt::Expr(false, t2)) => self.ast().expr(*t2).lo, _ => self.ast().expr(*x).lo },
                             _ => self.ast().expr(*x).lo,
                         };
                         self.coerce_many(&tail, tt, *x, et, at)
@@ -5396,7 +5400,7 @@ impl<'a> Fcx<'a> {
                     }
                     let saved = self.scopes.len();
                     self.scopes.extend(arm_bindings[arm_index].iter().copied());
-                    if let Some(g) = arm.guard {
+                    if let Some(g) = arm.guard.get() {
                         let bool_ = self.tcx.tys.bool_;
                         self.check_expr(g, Some(bool_));
                     }
@@ -5441,7 +5445,6 @@ impl<'a> Fcx<'a> {
             ExprKind::While(row) => {
                 let crate::ast::WhileRow { cond: c, body: b, label } = &self.ast().row(*row).clone();
                 let (c, b) = (c, b);
-                let label = &crate::ast::OptIdent::from(*label);
                 let bool_ = self.tcx.tys.bool_;
                 let saved = self.scopes.len();
                 let l = label.map(|x| self.sym_lifetime(x));
@@ -6126,7 +6129,7 @@ impl<'a> Fcx<'a> {
                     }
                 }
             }
-            ExprKind::Closure(row) => { let crate::ast::ClosureRow { params, ret, body, .. } = self.ast().row(*row); self.check_closure(e, self.ast().list(*params), *ret, *body, expected) }
+            ExprKind::Closure(row) => { let crate::ast::ClosureRow { params, ret, body, .. } = self.ast().row(*row); self.check_closure(e, self.ast().list(*params), ret.get(), *body, expected) }
             ExprKind::Mac(m) => self.check_mac(e, self.ast().row(*m), expected, lo),
             ExprKind::Try(x) => self.check_try(e, *x, expected, lo),
             ExprKind::Async(mode, b) => self.check_async_block(e, *mode, *b),
@@ -6179,8 +6182,8 @@ impl<'a> Fcx<'a> {
         let mut found = false;
         for s in ast.list(blk.stmts) {
             match s {
-                Stmt::Expr(e, _) => found = found || self.expr_has_break(*e, 0, label),
-                Stmt::Let(r) => if let Some(e) = &ast.row(*r).init { found = found || self.expr_has_break(*e, 0, label) },
+                Stmt::Expr(_, e) => found = found || self.expr_has_break(*e, 0, label),
+                Stmt::Let(r) => if let Some(e) = &ast.row(*r).init.get() { found = found || self.expr_has_break(*e, 0, label) },
                 _ => {}
             }
         }
@@ -6220,7 +6223,7 @@ impl<'a> Fcx<'a> {
         let ast = self.ast();
         for s in ast.stmts(b) {
             let r = match s {
-                Stmt::Expr(e, _) => self.expr_has_break(*e, depth, label),
+                Stmt::Expr(_, e) => self.expr_has_break(*e, depth, label),
                 Stmt::Let(r) => ast.row(*r).init.map_or(false, |e| self.expr_has_break(e, depth, label)),
                 _ => false,
             };
@@ -7975,11 +7978,11 @@ impl<'a> Fcx<'a> {
                 never
             }
             "matches" | "assert_matches" | "debug_assert_matches" => {
-                if let (Some(&x), Some(p)) = (mexprs.first(), margs.pat) {
+                if let (Some(&x), Some(p)) = (mexprs.first(), margs.pat.get()) {
                     let t = self.check_expr(x, None);
                     let saved = self.scopes.len();
                     self.check_pat(p, t);
-                    if let Some(g) = margs.guard {
+                    if let Some(g) = margs.guard.get() {
                         self.check_expr(g, Some(bool_));
                     }
                     self.scopes.truncate(saved);
@@ -8569,7 +8572,7 @@ pub fn prim_of(tcx: &Tcx, t: TyId) -> Option<Prim> {
 pub fn is_rest_pat(ast: &Ast, p: PatId) -> bool {
     match ast.pat(p) {
         Pat::Rest => true,
-        Pat::Ident { sub: Some(s), .. } => matches!(ast.pat(*s), Pat::Rest),
+        Pat::Ident { sub, .. } if let Some(s) = &sub.get() => matches!(ast.pat(*s), Pat::Rest),
         _ => false,
     }
 }

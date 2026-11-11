@@ -128,7 +128,17 @@ pub struct Preparsed {
     pub prep: Option<crate::program::FilePrep>,
     pub mod_path: String,
     pub src_len: usize,
+    /// the bytes of the image the worker wrote for `parsed` (0: none; parse_job)
+    pub image_bytes: usize,
 }
+
+/// Images parse workers wrote (parse_job), and of those the ones a publication kept (the rest are
+/// parses the load made again or did not take: unreferenced entries in the run store), with bytes,
+/// for the run summary
+pub static WORKER_IMAGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static WORKER_IMAGE_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static WORKER_IMAGES_USED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static WORKER_IMAGE_BYTES_USED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Files of parsed crates taken from an earlier record's images (Pool::previous), for the summary
 pub static PREVIOUS_FILES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -229,6 +239,9 @@ pub struct Pool {
     /// per crate parsed (no crate image): its unchanged files' images from an earlier record
     /// (CrateImages::previous_files), taken instead of a parse when the loader replays them
     previous: Vec<Option<crate::crate_image::PreviousFiles>>,
+    /// what writes a parse's images (the program's front sink): a worker writes them as it ends
+    /// its parse (parse_job), set before the loader starts any crate's parses
+    sink: std::sync::OnceLock<Arc<dyn crate::parser::ImageSink>>,
     st: Mutex<PoolState>,
     cv: Condvar,
 }
@@ -256,6 +269,11 @@ impl Pool {
     pub(crate) fn outline_macros(&self, ci: u32) -> Option<Vec<MacroRef>> {
         self.demand_plan.as_ref()?.outline_macros(ci as usize + self.plan_offset)
     }
+    /// The program's image sink (Program::front_sink), before its first start_parsing.
+    pub fn set_sink(&self, sink: Arc<dyn crate::parser::ImageSink>) {
+        let _ = self.sink.set(sink);
+    }
+
     /// Set queued jobs' scope; entering the crate replaces an early snapshot with the loader's.
     pub fn start_parsing(&self, ci: u32, table: Arc<MacroTable>) {
         let mut st = self.st.lock().unwrap();
@@ -365,7 +383,7 @@ impl Pool {
                 }
                 self.cv.notify_all();
                 drop(st);
-                return Some(parse_job(sess, job, true).1);
+                return Some(parse_job(sess, job, true, self.sink.get()).1);
             }
             let _wait = crate::load_profile::span(sess.runtime.profile, "wait-parse", &key.1);
             st = self.cv.wait(st).unwrap();
@@ -714,7 +732,7 @@ impl Pool {
             match w {
                 Work::Scan(k) => self.scan(k),
                 Work::Parse(job) => {
-                    let ((krate, path), x) = parse_job(sess, job, false);
+                    let ((krate, path), x) = parse_job(sess, job, false, self.sink.get());
                     let mut st = self.st.lock().unwrap();
                     let key = (krate, path);
                     st.running.remove(&key);
@@ -747,8 +765,10 @@ impl Drop for OwnedPlan {
 }
 
 /// Parses one file against its crate's table snapshot. A speculative failure is
-/// retried in the loader's scope; only that scope can certify a parse error.
-fn parse_job(_sess: &std::sync::Arc<crate::Session>, job: Job, in_scope: bool) -> ((u32, String), Preparsed) {
+/// retried in the loader's scope; only that scope can certify a parse error. With a `sink`, the
+/// finished parse's image is written here, by the thread that made it (Program::write_image): the
+/// loader no longer encodes the files it publishes as they are, and their arrays leave the heap now.
+fn parse_job(_sess: &std::sync::Arc<crate::Session>, job: Job, in_scope: bool, sink: Option<&Arc<dyn crate::parser::ImageSink>>) -> ((u32, String), Preparsed) {
     let Job { krate, path, mod_path, src, toks, ctx } = job;
     struct World((bool, bool));
     impl Drop for World {
@@ -785,8 +805,16 @@ fn parse_job(_sess: &std::sync::Arc<crate::Session>, job: Job, in_scope: bool) -
         if pf.lazy.is_some() { let _ = pf.part(&ctx.cfg); }
         prep
     });
+    let mut image_bytes = 0;
+    if let (Some(sink), Some((pf, _))) = (sink, parsed.as_mut()) {
+        image_bytes = crate::program::write_image(sink, &path, pf);
+        if image_bytes > 0 {
+            WORKER_IMAGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            WORKER_IMAGE_BYTES.fetch_add(image_bytes as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
     let verify = ctx.cfg.session.runtime.parse_verify.then(|| VERIFY.get().copied()).flatten();
-    ((krate, path), Preparsed { parsed, prep, mod_path, src_len, verify, error })
+    ((krate, path), Preparsed { parsed, prep, mod_path, src_len, verify, error, image_bytes })
 }
 
 /// MAKEPAD_RUN_BOOT_TRACE=1: boot-path timing and why files were parsed again (stderr `boot-trace`).
@@ -1546,7 +1574,7 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
         let seq = st.scan_seq;
         st.scans.insert((ci, seq), k);
     }
-    let pool = Arc::new(Pool { demand_plan, plan_offset, contexts, crates, parse: jobs >= 2, previous, st: Mutex::new(st), cv: Condvar::new() });
+    let pool = Arc::new(Pool { demand_plan, plan_offset, contexts, crates, parse: jobs >= 2, previous, sink: std::sync::OnceLock::new(), st: Mutex::new(st), cv: Condvar::new() });
     if let Some(plan) = &pool.demand_plan {
         let weak = Arc::downgrade(&pool);
         plan.on_early_publish(move || {
@@ -1950,6 +1978,10 @@ mod lowered_scope_tests {
 pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
     reset(&PREVIOUS_FILES, std::sync::atomic::AtomicU64::new(0));
+    reset(&WORKER_IMAGES, std::sync::atomic::AtomicU64::new(0));
+    reset(&WORKER_IMAGE_BYTES, std::sync::atomic::AtomicU64::new(0));
+    reset(&WORKER_IMAGES_USED, std::sync::atomic::AtomicU64::new(0));
+    reset(&WORKER_IMAGE_BYTES_USED, std::sync::atomic::AtomicU64::new(0));
     reset(&PHASE_NS, [const { std::sync::atomic::AtomicU64::new(0) }; 5]);
     reset(&BY_NAME, Mutex::new(Vec::new()));
     reset(&WAIT_NS, std::sync::atomic::AtomicU64::new(0));

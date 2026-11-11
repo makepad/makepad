@@ -567,73 +567,58 @@ impl SegList {
     }
 }
 
-/// An optional expression in 4 bytes (u32::MAX: none) -- keeps ExprKind at 32 bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OptExprId(pub u32);
+macro_rules! opt_id {
+    ($(#[$m:meta])* $name:ident, $id:ident) => {
+        $(#[$m])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub struct $name(pub u32);
 
-impl OptExprId {
-    pub const NONE: OptExprId = OptExprId(u32::MAX);
-    #[inline]
-    pub fn get(self) -> Option<ExprId> {
-        if self.0 == u32::MAX {
-            None
-        } else {
-            Some(ExprId(self.0))
+        impl $name {
+            pub const NONE: $name = $name(u32::MAX);
+            #[inline]
+            pub fn get(self) -> Option<$id> {
+                if self.0 == u32::MAX { None } else { Some($id(self.0)) }
+            }
+            #[inline]
+            pub fn from(v: Option<$id>) -> $name {
+                v.map_or($name::NONE, |v| $name(v.0))
+            }
+            #[inline]
+            pub fn is_some(self) -> bool {
+                self.0 != u32::MAX
+            }
+            #[inline]
+            pub fn is_none(self) -> bool {
+                self.0 == u32::MAX
+            }
+            #[inline]
+            pub fn map<U>(self, f: impl FnOnce($id) -> U) -> Option<U> {
+                self.get().map(f)
+            }
+            #[inline]
+            pub fn map_or<U>(self, d: U, f: impl FnOnce($id) -> U) -> U {
+                self.get().map_or(d, f)
+            }
         }
-    }
-    #[inline]
-    pub fn from(e: Option<ExprId>) -> OptExprId {
-        e.map_or(OptExprId::NONE, |e| OptExprId(e.0))
-    }
-    #[inline]
-    pub fn is_some(self) -> bool {
-        self.0 != u32::MAX
-    }
-    #[inline]
-    pub fn is_none(self) -> bool {
-        self.0 == u32::MAX
-    }
-    #[inline]
-    pub fn map<U>(self, f: impl FnOnce(ExprId) -> U) -> Option<U> {
-        self.get().map(f)
-    }
-    #[inline]
-    pub fn map_or<U>(self, d: U, f: impl FnOnce(ExprId) -> U) -> U {
-        self.get().map_or(d, f)
-    }
+    };
 }
 
-/// An optional type in 4 bytes (u32::MAX: none).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OptTyId(pub u32);
-
-impl OptTyId {
-    pub const NONE: OptTyId = OptTyId(u32::MAX);
-    #[inline]
-    pub fn get(self) -> Option<TyId> {
-        if self.0 == u32::MAX {
-            None
-        } else {
-            Some(TyId(self.0))
-        }
-    }
-    #[inline]
-    pub fn from(t: Option<TyId>) -> OptTyId {
-        t.map_or(OptTyId::NONE, |t| OptTyId(t.0))
-    }
-    #[inline]
-    pub fn is_some(self) -> bool {
-        self.0 != u32::MAX
-    }
-    #[inline]
-    pub fn is_none(self) -> bool {
-        self.0 == u32::MAX
-    }
-    #[inline]
-    pub fn map<U>(self, f: impl FnOnce(TyId) -> U) -> Option<U> {
-        self.get().map(f)
-    }
-}
+opt_id!(
+    /// An optional expression in 4 bytes (u32::MAX: none) -- keeps ExprKind at 32 bytes.
+    OptExprId, ExprId
+);
+opt_id!(
+    /// An optional type in 4 bytes (u32::MAX: none).
+    OptTyId, TyId
+);
+opt_id!(
+    /// An optional pattern in 4 bytes (u32::MAX: none).
+    OptPatId, PatId
+);
+opt_id!(
+    /// An optional block in 4 bytes (u32::MAX: none).
+    OptBlockId, BlockId
+);
 
 /// An optional name (a label) in 8 bytes (lo == u32::MAX: none).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -663,6 +648,83 @@ impl OptIdent {
     }
     #[inline]
     pub fn map<U>(self, f: impl FnOnce(Ident) -> U) -> Option<U> {
+        self.get().map(f)
+    }
+}
+
+/// A fn's or fn pointer type's ABI in 8 bytes: no `extern` (`get`: None), `extern` alone
+/// (Some(None)) or `extern "abi"` (Some(Some(the string's span))).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OptAbi(Ident);
+
+impl OptAbi {
+    /// no `extern`
+    pub const NONE: OptAbi = OptAbi(Ident { lo: u32::MAX, hi: u32::MAX });
+    /// `extern` without an ABI string
+    pub const EXTERN: OptAbi = OptAbi(Ident { lo: u32::MAX, hi: 0 });
+    #[inline]
+    pub fn get(self) -> Option<Option<Ident>> {
+        if self.0.lo != u32::MAX {
+            Some(Some(self.0))
+        } else if self.0.hi == 0 {
+            Some(None)
+        } else {
+            None
+        }
+    }
+    #[inline]
+    pub fn from(a: Option<Option<Ident>>) -> OptAbi {
+        match a {
+            None => OptAbi::NONE,
+            Some(None) => OptAbi::EXTERN,
+            Some(Some(s)) => OptAbi(s),
+        }
+    }
+    /// an `extern`, with or without a string
+    #[inline]
+    pub fn is_some(self) -> bool {
+        self != OptAbi::NONE
+    }
+    #[inline]
+    pub fn is_none(self) -> bool {
+        self == OptAbi::NONE
+    }
+}
+
+/// An optional compound value with a defined layout, for tree rows (an `Option<T>`'s layout is
+/// unspecified): a tag byte, then the value at its alignment (`#[repr(u8)]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Opt<T> {
+    None,
+    Some(T),
+}
+
+impl<T: Copy> Opt<T> {
+    #[inline]
+    pub fn get(self) -> Option<T> {
+        match self {
+            Opt::None => None,
+            Opt::Some(v) => Some(v),
+        }
+    }
+    #[inline]
+    pub fn from(v: Option<T>) -> Opt<T> {
+        match v {
+            None => Opt::None,
+            Some(v) => Opt::Some(v),
+        }
+    }
+    #[inline]
+    pub fn is_some(self) -> bool {
+        matches!(self, Opt::Some(_))
+    }
+    #[inline]
+    pub fn is_none(self) -> bool {
+        matches!(self, Opt::None)
+    }
+    #[inline]
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Option<U> {
         self.get().map(f)
     }
 }
@@ -714,7 +776,7 @@ const _: () = assert!(std::mem::size_of::<Path>() == 12);
 pub struct QSelf {
     pub ty: TyId,
     /// `<T as Trait>`: the trait path; number of segments of `segs` belonging to it
-    pub trait_path: Option<Path>,
+    pub trait_path: Opt<Path>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -808,7 +870,7 @@ const _: () = assert!(std::mem::size_of::<PathSeg>() == 12);
 pub enum GenericArgs {
     Angle(List<GenericArg>),
     /// `Fn(A, B) -> C`
-    Paren(List<TyId>, Option<TyId>),
+    Paren(List<TyId>, OptTyId),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -847,8 +909,8 @@ pub struct GenericParam {
 #[derive(Debug, Clone, Copy)]
 pub enum GenericParamKind {
     Lifetime(List<Ident>),
-    Type(List<Bound>, Option<TyId>),
-    Const(TyId, Option<ExprId>),
+    Type(List<Bound>, OptTyId),
+    Const(TyId, OptExprId),
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -872,7 +934,7 @@ pub enum WherePred {
 #[derive(Debug, Clone, Copy)]
 pub enum Ty {
     Path(Path),
-    Ref(Option<Ident>, bool, TyId),
+    Ref(bool, OptIdent, TyId),
     Ptr(bool, TyId),
     Slice(TyId),
     Array(TyId, ExprId),
@@ -890,7 +952,7 @@ pub enum Ty {
 }
 
 // Ty was 36 bytes, Pat 36: their macro calls (32 bytes inline) are rows.
-const _: () = assert!(std::mem::size_of::<Ty>() == 20);
+const _: () = assert!(std::mem::size_of::<Ty>() == 16);
 const _: () = assert!(std::mem::size_of::<Pat>() == 24);
 
 #[derive(Debug, Clone, Copy)]
@@ -898,9 +960,9 @@ pub struct FnPtr {
     pub hrtb: List<GenericParam>,
     pub unsafe_: bool,
     /// `extern` / `extern "abi"`: Some(abi string, if written)
-    pub abi: Option<Option<Ident>>,
+    pub abi: OptAbi,
     pub params: List<TyId>,
-    pub ret: Option<TyId>,
+    pub ret: OptTyId,
     pub variadic: bool,
 }
 
@@ -914,13 +976,13 @@ pub enum Pat {
         by_ref: bool,
         mutbl: bool,
         name: Ident,
-        sub: Option<PatId>,
+        sub: OptPatId,
     },
     Lit(ExprId),
-    Range(Option<ExprId>, Option<ExprId>, bool),
+    Range(OptExprId, OptExprId, bool),
     Path(Path),
     TupleStruct(Path, List<PatId>),
-    Struct(Path, List<FieldPat>, bool),
+    Struct(bool, Path, List<FieldPat>),
     Tuple(List<PatId>),
     Slice(List<PatId>),
     Ref(bool, PatId),
@@ -1002,10 +1064,10 @@ pub struct MacArgs {
     /// `vec![x; n]`
     pub repeat: bool,
     /// `matches!(e, pat if guard)`
-    pub pat: Option<PatId>,
-    pub guard: Option<ExprId>,
+    pub pat: OptPatId,
+    pub guard: OptExprId,
     /// `asm!`: the operands and options; the template strings are `exprs[..asm.templates]`
-    pub asm: Option<AsmArgs>,
+    pub asm: Opt<AsmArgs>,
 }
 
 /// Operands of an `asm!` (Reference inline-assembly.md [asm.syntax]).
@@ -1052,22 +1114,22 @@ pub enum AsmDir {
 #[derive(Debug, Clone, Copy)]
 pub struct AsmOp {
     /// `name = ...`
-    pub name: Option<Ident>,
+    pub name: OptIdent,
     pub dir: AsmDir,
     /// the register class (`reg`) or, when `explicit`, the register's string literal token
     pub reg: Ident,
     pub explicit: bool,
     /// in / inout input / const value / sym path expression
-    pub input: Option<ExprId>,
+    pub input: OptExprId,
     /// out / inout output place; None for `_`
-    pub output: Option<ExprId>,
+    pub output: OptExprId,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Arm {
     pub attrs: List<Attr>,
     pub pat: PatId,
-    pub guard: Option<ExprId>,
+    pub guard: OptExprId,
     pub body: ExprId,
 }
 
@@ -1083,7 +1145,7 @@ pub struct FieldExpr {
 pub struct ClosureParam {
     pub attrs: List<Attr>,
     pub pat: PatId,
-    pub ty: Option<TyId>,
+    pub ty: OptTyId,
 }
 
 /// `recv.name::<turbofish>(args)` without the receiver.
@@ -1099,7 +1161,7 @@ pub struct MethodCallRow {
 pub struct WhileRow {
     pub cond: ExprId,
     pub body: BlockId,
-    pub label: Option<Ident>,
+    pub label: OptIdent,
 }
 
 /// `'label: for pat in iter body`
@@ -1108,7 +1170,7 @@ pub struct ForRow {
     pub pat: PatId,
     pub iter: ExprId,
     pub body: BlockId,
-    pub label: Option<Ident>,
+    pub label: OptIdent,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1118,7 +1180,7 @@ pub struct ClosureRow {
     /// `static || ..` (coroutine syntax)
     pub is_static: bool,
     pub params: List<ClosureParam>,
-    pub ret: Option<TyId>,
+    pub ret: OptTyId,
     pub body: ExprId,
 }
 
@@ -1193,9 +1255,9 @@ const _: () = assert!(std::mem::size_of::<Expr>() == 24);
 pub struct LetStmt {
     pub attrs: List<Attr>,
     pub pat: PatId,
-    pub ty: Option<TyId>,
-    pub init: Option<ExprId>,
-    pub else_: Option<BlockId>,
+    pub ty: OptTyId,
+    pub init: OptExprId,
+    pub else_: OptBlockId,
 }
 
 /// An expression statement with outer attributes (`Stmt::Attrs`).
@@ -1211,8 +1273,8 @@ pub struct AttrsStmt {
 pub enum Stmt {
     Let(Row<LetStmt>),
     Item(ItemId),
-    Expr(ExprId, bool),
-    /// an expression statement (`Stmt::Expr(expr, semi)`) with outer attributes; program
+    Expr(bool, ExprId),
+    /// an expression statement (`Stmt::Expr(semi, expr)`) with outer attributes; program
     /// loading strips it by its `#[cfg]` (keeping the statement or dropping it), so later
     /// passes never see it
     Attrs(Row<AttrsStmt>),
@@ -1258,7 +1320,7 @@ pub struct Param {
 #[derive(Debug, Clone, Copy)]
 pub enum SelfParam {
     Value(bool),                // self / mut self
-    Ref(Option<Ident>, bool),   // &'a mut self
+    Ref(OptIdent, bool),   // &'a mut self
     Typed(bool, TyId),          // mut self: Box<Self>
 }
 
@@ -1267,24 +1329,24 @@ pub struct FnSig {
     pub konst: bool,
     pub asyncness: bool,
     pub unsafe_: bool,
-    pub abi: Option<Option<Ident>>, // extern / extern "C"
+    pub abi: OptAbi, // extern / extern "C"
     pub generics: Generics,
-    pub self_param: Option<SelfParam>,
+    pub self_param: Opt<SelfParam>,
     pub self_param_pos: u32, // receiver token position (0 when absent)
     pub params: List<Param>,
     pub variadic: bool,
-    pub ret: Option<TyId>,
+    pub ret: OptTyId,
     /// lazy-body parse mode: the unparsed body's token range (inside the braces)
-    pub lazy_body: Option<TokRange>,
+    pub lazy_body: Opt<TokRange>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct FieldDef {
     pub attrs: List<Attr>,
     pub vis: Vis,
-    pub name: Option<Ident>,
+    pub name: OptIdent,
     pub ty: TyId,
-    pub default: Option<ExprId>,
+    pub default: OptExprId,
     /// source range of the field's type (the default's anonymous const is written with it)
     pub ty_span: (u32, u32),
 }
@@ -1301,13 +1363,13 @@ pub struct Variant {
     pub attrs: List<Attr>,
     pub name: Ident,
     pub data: VariantData,
-    pub disc: Option<ExprId>,
+    pub disc: OptExprId,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum UseTree {
     Path(PathSeg, UseTreeId),
-    Name(PathSeg, Option<Ident>), // rename; `as _` -> Some(ident "_")
+    Name(PathSeg, OptIdent), // rename; `as _` -> Some(ident "_")
     Glob,
     Group(List<UseTree>),
 }
@@ -1341,7 +1403,7 @@ pub struct EnumItem {
 pub struct TypeAliasItem {
     pub generics: Generics,
     pub bounds: List<Bound>,
-    pub ty: Option<TyId>,
+    pub ty: OptTyId,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1367,14 +1429,14 @@ pub struct ImplItem {
     pub default_: bool,
     pub generics: Generics,
     pub negative: bool,
-    pub trait_: Option<Path>,
+    pub trait_: Opt<Path>,
     pub self_ty: TyId,
     pub items: List<ItemId>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ForeignModItem {
-    pub abi: Option<Ident>,
+    pub abi: OptIdent,
     pub items: List<ItemId>,
     /// `unsafe extern { .. }` (a u32 keeps the row free of padding: it is a Pod image row)
     pub unsafe_: u32,
@@ -1385,8 +1447,8 @@ pub struct ForeignModItem {
 #[derive(Debug, Clone, Copy)]
 pub enum ItemKind {
     Use(Row<UseItem>),
-    ExternCrate(Option<Ident>),
-    Fn(FnSigId, Option<BlockId>, bool), // bool: `default fn`
+    ExternCrate(OptIdent),
+    Fn(FnSigId, OptBlockId, bool), // bool: `default fn`
     Struct(Row<StructItem>),
     Union(Row<UnionItem>),
     Enum(Row<EnumItem>),
@@ -1396,7 +1458,7 @@ pub enum ItemKind {
     Trait(Row<TraitItem>),
     TraitAlias(Row<TraitAliasItem>),
     Impl(Row<ImplItem>),
-    Mod(Option<List<ItemId>>),
+    Mod(Opt<List<ItemId>>),
     ForeignMod(Row<ForeignModItem>),
     MacroRules(TokRange),
     Mac(Row<MacCall>),
@@ -1781,7 +1843,7 @@ impl Ast {
     #[inline]
     pub fn stmt_expr(&self, s: &Stmt) -> Option<(ExprId, bool)> {
         match s {
-            Stmt::Expr(e, semi) => Some((*e, *semi)),
+            Stmt::Expr(semi, e) => Some((*e, *semi)),
             Stmt::Attrs(r) => {
                 let a = self.row(*r);
                 Some((a.expr, a.semi))

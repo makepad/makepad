@@ -180,13 +180,13 @@ pub fn start(app: &str) {
         Ok(s) => s,
         Err(e) => {
             // (also when the run is silent: nothing else would say why inspect finds no socket)
-            eprintln!("makepad-remote: pid {} app {}: makepad inspect cannot reach this run: {}", pid, app, e);
+            eprintln!("{t}-remote: pid {} app {}: {t} inspect cannot reach this run: {}", pid, app, e, t = crate::tool_name());
             return;
         }
     };
     // (a `--silent` run's stderr is the program's: a test reading it sees only the program)
     if crate::harness::live::enabled() || !TEST_RUN.load(Relaxed) && !crate::run::silent() {
-        eprintln!("makepad-remote: pid {} app {} socket {} (makepad inspect {} help)", pid, app, sock.display(), pid);
+        eprintln!("{t}-remote: pid {} app {} socket {} ({t} inspect {} help)", pid, app, sock.display(), pid, t = crate::tool_name());
     }
     events::start();
     timeline::hitch_init();

@@ -297,14 +297,14 @@ impl V<'_> {
             match *s {
                 Stmt::Let(r) => {
                     let LetStmt { pat, init, else_, .. } = *self.ast.row(r);
-                    if let Some(x) = init {
+                    if let Some(x) = init.get() {
                         self.expr(x);
                         self.static_mut_ref_let(pat, x);
                     }
                     self.pat(pat, init.map_or(self.ast.block(b).lo, |x| self.ast.expr(x).lo));
-                    if let Some(e) = else_ { self.block(e); }
+                    if let Some(e) = else_.get() { self.block(e); }
                 }
-                Stmt::Expr(e, _) => self.expr(e),
+                Stmt::Expr(_, e) => self.expr(e),
                 Stmt::Attrs(r) => self.expr(self.ast.row(r).expr),
                 Stmt::Item(_) | Stmt::Empty => {}
             }
@@ -314,8 +314,9 @@ impl V<'_> {
     fn pat_pos(&self, p: PatId, fallback: u32) -> u32 {
         match *self.ast.pat(p) {
             Pat::Ident { name, .. } => name.lo,
-            Pat::Lit(e) | Pat::Range(Some(e), _, _) | Pat::Range(None, Some(e), _) => self.ast.expr(e).lo,
-            Pat::Path(ref path) | Pat::TupleStruct(ref path, _) | Pat::Struct(ref path, _, _) => path.lo,
+            Pat::Lit(e) => self.ast.expr(e).lo,
+            Pat::Range(a, b, _) if let Some(e) = a.get().or(b.get()) => self.ast.expr(e).lo,
+            Pat::Path(ref path) | Pat::TupleStruct(ref path, _) | Pat::Struct(_, ref path, _) => path.lo,
             Pat::Ref(_, x) | Pat::Paren(x) | Pat::Box(x) => self.pat_pos(x, fallback),
             Pat::Tuple(ps) | Pat::Slice(ps) | Pat::Or(ps) => self.ast.list(ps).first().map_or(fallback, |x| self.pat_pos(*x, fallback)),
             _ => fallback,
@@ -338,9 +339,10 @@ impl V<'_> {
             }
         }
         match pat {
-            Pat::Ident { sub: Some(s), .. } | Pat::Ref(_, s) | Pat::Paren(s) | Pat::Box(s) => self.pat(s, pos),
+            Pat::Ident { sub, .. } if let Some(s) = sub.get() => self.pat(s, pos),
+            Pat::Ref(_, s) | Pat::Paren(s) | Pat::Box(s) => self.pat(s, pos),
             Pat::Tuple(ps) | Pat::Slice(ps) | Pat::Or(ps) | Pat::TupleStruct(_, ps) => for x in self.ast.list(ps) { self.pat(*x, pos); },
-            Pat::Struct(_, fs, _) => {
+            Pat::Struct(_, _, fs) => {
                 let union = matches!(self.body.pat_res.get(&p.0), Some(Res::Def(d)) if self.prog.def(*d).kind == DefKind::Union);
                 let old = std::mem::replace(&mut self.in_union_destructure, union);
                 for f in self.ast.list(fs) {
@@ -478,7 +480,7 @@ impl V<'_> {
                 self.expr(x);
                 for a in self.ast.list(arms) {
                     self.pat(a.pat, self.ast.expr(a.body).lo);
-                    if let Some(g) = a.guard { self.expr(g); }
+                    if let Some(g) = a.guard.get() { self.expr(g); }
                     self.expr(a.body);
                 }
             }
@@ -517,7 +519,7 @@ impl V<'_> {
                     self.requires_unsafe(lo, Op::UseOfInlineAssembly);
                 }
                 // rustc check_unsafety: a label block of `asm!` is a safe context of its own
-                let labels: Vec<ExprId> = args.asm.map_or(Vec::new(), |asm| self.ast.list(asm.ops).iter().filter(|op| op.dir == AsmDir::Label).filter_map(|op| op.input).collect());
+                let labels: Vec<ExprId> = args.asm.get().map_or(Vec::new(), |asm| self.ast.list(asm.ops).iter().filter(|op| op.dir == AsmDir::Label).filter_map(|op| op.input.get()).collect());
                 if labels.is_empty() {
                     self.exprs(args.exprs);
                 } else {
@@ -531,8 +533,8 @@ impl V<'_> {
                         }
                     }
                 }
-                if let Some(p) = args.pat { self.pat(p, lo); }
-                if let Some(g) = args.guard { self.expr(g); }
+                if let Some(p) = args.pat.get() { self.pat(p, lo); }
+                if let Some(g) = args.guard.get() { self.expr(g); }
                 // format strings' inline `{NAME}` arguments naming a static
                 if !self.body.fmt_named.is_empty() {
                     let named: Vec<DefId> = self.body.fmt_named.iter().filter(|((x, _), _)| *x == e.0)
@@ -686,7 +688,7 @@ pub fn check_impl(prog: &Program, tcx: &Tcx, d: DefId) -> Vec<String> {
     let imp = *ast.row(r);
     let mut out = Vec::new();
     let mut err = |pos: u32, msg: String| out.push(prog.record_error(def.file, pos, "typeck", msg));
-    let Some(path) = imp.trait_ else {
+    let Some(path) = imp.trait_.get() else {
         if imp.unsafe_ { err(item.lo, "E0197: inherent impls cannot be unsafe".into()); }
         return out;
     };

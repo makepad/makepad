@@ -52,11 +52,11 @@ pub(crate) fn top_patterns(prog: &Program, body: &typeck::Body) -> Vec<PatId> {
     let mut inner = std::collections::HashSet::<u32>::new();
     for &p in &all {
         match *ast.pat(p) {
-            P::Ident { sub: Some(s), .. } => {
+            P::Ident { sub, .. } if let Some(s) = sub.get() => {
                 inner.insert(s.0);
             }
             P::TupleStruct(_, v) | P::Tuple(v) | P::Slice(v) | P::Or(v) => inner.extend(ast.list(v).iter().map(|p| p.0)),
-            P::Struct(_, f, _) => inner.extend(ast.list(f).iter().map(|f| f.pat.0)),
+            P::Struct(_, _, f) => inner.extend(ast.list(f).iter().map(|f| f.pat.0)),
             P::Ref(_, x) | P::Paren(x) | P::Box(x) => {
                 inner.insert(x.0);
             }

@@ -76,9 +76,15 @@ impl<'a, T: ?Sized> Pin<&'a T> {
     pub const fn get_ref(self) -> &'a T {
         self.pointer
     }
+    pub unsafe fn map_unchecked<U: ?Sized, F: FnOnce(&T) -> &U>(self, func: F) -> Pin<&'a U> {
+        Pin { pointer: func(self.pointer) }
+    }
 }
 
 impl<'a, T: ?Sized> Pin<&'a mut T> {
+    pub const fn into_ref(self) -> Pin<&'a T> {
+        Pin { pointer: self.pointer }
+    }
     pub const fn get_mut(self) -> &'a mut T
     where
         T: Unpin,

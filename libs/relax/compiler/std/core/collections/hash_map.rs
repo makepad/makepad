@@ -497,6 +497,13 @@ pub struct IterMut<'a, K: 'a, V: 'a> {
     _m: PhantomData<&'a mut (K, V)>,
 }
 
+impl<'a, K, V> IterMut<'a, K, V> {
+    fn iter(&self) -> Iter<'_, K, V> {
+        // SAFETY: the table lives for this borrow, and iteration starts after all yielded entries.
+        Iter { table: unsafe { &*self.table }, pos: self.pos, remaining: self.remaining }
+    }
+}
+
 impl<'a, K, V> Iterator for IterMut<'a, K, V> {
     type Item = (&'a K, &'a mut V);
     fn next(&mut self) -> Option<(&'a K, &'a mut V)> {
@@ -518,9 +525,21 @@ impl<'a, K, V> Iterator for IterMut<'a, K, V> {
 impl<'a, K, V> ExactSizeIterator for IterMut<'a, K, V> {}
 impl<'a, K, V> FusedIterator for IterMut<'a, K, V> {}
 
+impl<'a, K: fmt::Debug, V: fmt::Debug> fmt::Debug for IterMut<'a, K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
 pub struct IntoIter<K, V> {
     table: RawTable<(K, V)>,
     pos: usize,
+}
+
+impl<K, V> IntoIter<K, V> {
+    fn iter(&self) -> Iter<'_, K, V> {
+        Iter { table: &self.table, pos: self.pos, remaining: self.table.len() }
+    }
 }
 
 impl<K, V> Iterator for IntoIter<K, V> {
@@ -540,6 +559,12 @@ impl<K, V> Iterator for IntoIter<K, V> {
 
 impl<K, V> ExactSizeIterator for IntoIter<K, V> {}
 impl<K, V> FusedIterator for IntoIter<K, V> {}
+
+impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for IntoIter<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
 
 pub struct Drain<'a, K: 'a, V: 'a> {
     table: &'a mut RawTable<(K, V)>,
@@ -679,6 +704,12 @@ impl<'a, K, V> Iterator for ValuesMut<'a, K, V> {
 impl<'a, K, V> ExactSizeIterator for ValuesMut<'a, K, V> {}
 impl<'a, K, V> FusedIterator for ValuesMut<'a, K, V> {}
 
+impl<'a, K, V: fmt::Debug> fmt::Debug for ValuesMut<'a, K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.inner.iter().map(|(_, v)| v)).finish()
+    }
+}
+
 pub struct IntoKeys<K, V> {
     inner: IntoIter<K, V>,
 }
@@ -698,6 +729,12 @@ impl<K, V> Iterator for IntoKeys<K, V> {
 
 impl<K, V> ExactSizeIterator for IntoKeys<K, V> {}
 
+impl<K: fmt::Debug, V> fmt::Debug for IntoKeys<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.inner.iter().map(|(k, _)| k)).finish()
+    }
+}
+
 pub struct IntoValues<K, V> {
     inner: IntoIter<K, V>,
 }
@@ -716,6 +753,12 @@ impl<K, V> Iterator for IntoValues<K, V> {
 }
 
 impl<K, V> ExactSizeIterator for IntoValues<K, V> {}
+
+impl<K, V: fmt::Debug> fmt::Debug for IntoValues<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.inner.iter().map(|(_, v)| v)).finish()
+    }
+}
 
 impl<'a, K, V, S> IntoIterator for &'a HashMap<K, V, S> {
     type Item = (&'a K, &'a V);

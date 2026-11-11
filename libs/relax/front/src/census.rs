@@ -298,7 +298,7 @@ impl<'p, 'a> Walker<'p, 'a> {
             match &gp.kind {
                 GenericParamKind::Type(b, d) => {
                     self.bounds(p.ast.list(*b));
-                    if let Some(t) = d {
+                    if let Some(t) = &d.get() {
                         self.ty(*t, false);
                     }
                 }
@@ -357,7 +357,7 @@ impl<'p, 'a> Walker<'p, 'a> {
                         for t in pp.ast.list(*v) {
                             self.ty(*t, false);
                         }
-                        if let Some(t) = r {
+                        if let Some(t) = &r.get() {
                             self.ty(*t, false);
                         }
                     }
@@ -404,7 +404,7 @@ impl<'p, 'a> Walker<'p, 'a> {
                 for t in p.ast.list(f.params) {
                     self.ty(*t, false);
                 }
-                if let Some(t) = f.ret {
+                if let Some(t) = f.ret.get() {
                     self.ty(t, false);
                 }
             }
@@ -427,14 +427,14 @@ impl<'p, 'a> Walker<'p, 'a> {
 
     fn fn_sig(&mut self, sig: &FnSig) {
         self.generics(&sig.generics);
-        if let Some(SelfParam::Typed(_, t)) = &sig.self_param {
+        if let Some(SelfParam::Typed(_, t)) = &sig.self_param.get() {
             self.ty(*t, false);
         }
         for prm in self.p.ast.list(sig.params) {
             self.pat(prm.pat);
             self.ty_pos(prm.ty, 2);
         }
-        if let Some(r) = sig.ret {
+        if let Some(r) = sig.ret.get() {
             self.ty_pos(r, 1);
         }
         if sig.asyncness {
@@ -471,7 +471,7 @@ impl<'p, 'a> Walker<'p, 'a> {
                     self.cen.c[C_SPECIAL] += 1;
                 }
                 self.fn_sig(sig);
-                if let Some(b) = body {
+                if let Some(b) = &body.get() {
                     let blk = p.ast.block(*b);
                     let lines = self.line(blk.hi) - self.line(blk.lo) + 1;
                     let generic = self.is_generic(&sig.generics) || in_generic_impl;
@@ -506,7 +506,7 @@ impl<'p, 'a> Walker<'p, 'a> {
                 for v in self.p.ast.list(*vars) {
                     self.attrs(self.p.ast.list(v.attrs), false);
                     self.variant_data(&v.data);
-                    if let Some(e) = v.disc {
+                    if let Some(e) = v.disc.get() {
                         self.expr(e);
                     }
                 }
@@ -515,7 +515,7 @@ impl<'p, 'a> Walker<'p, 'a> {
                 let TypeAliasItem { generics, bounds, ty } = p.ast.row(*r);
                 self.generics(generics);
                 self.bounds(p.ast.list(*bounds));
-                if let Some(t) = ty {
+                if let Some(t) = &ty.get() {
                     self.ty(*t, false);
                 }
             }
@@ -563,7 +563,7 @@ impl<'p, 'a> Walker<'p, 'a> {
                     self.cen.c[C_SPECIAL] += 1;
                 }
                 self.generics(generics);
-                if let Some(tp) = trait_ {
+                if let Some(tp) = &trait_.get() {
                     self.path(tp);
                     // blanket: self type is (a reference to / Box of) one of the impl's type params
                     if self.is_blanket(generics, *self_ty) {
@@ -584,7 +584,7 @@ impl<'p, 'a> Walker<'p, 'a> {
                     self.item(i, g);
                 }
             }
-            ItemKind::Mod(Some(items)) => {
+            ItemKind::Mod(Opt::Some(items)) => {
                 for &i in self.p.ast.list(*items) {
                     self.item(i, false);
                 }
@@ -683,21 +683,21 @@ impl<'p, 'a> Walker<'p, 'a> {
                     }
                     self.attrs(p.ast.list(*attrs), false);
                     self.pat(*pat);
-                    if let Some(t) = ty {
+                    if let Some(t) = &ty.get() {
                         self.ty(*t, false);
                     }
-                    if let Some(e) = init {
+                    if let Some(e) = &init.get() {
                         let save = self.in_annotated_let;
                         self.in_annotated_let = ty.is_some();
                         self.expr(*e);
                         self.in_annotated_let = save;
                     }
-                    if let Some(b) = else_ {
+                    if let Some(b) = &else_.get() {
                         self.block(*b);
                     }
                 }
                 Stmt::Item(i) => self.item(*i, false),
-                Stmt::Expr(e, _) => self.expr(*e),
+                Stmt::Expr(_, e) => self.expr(*e),
                 Stmt::Attrs(r) => self.expr(p.ast.row(*r).expr),
                 Stmt::Empty => {}
             }
@@ -707,13 +707,13 @@ impl<'p, 'a> Walker<'p, 'a> {
     fn pat(&mut self, id: PatId) {
         let p = self.p;
         match p.ast.pat(id) {
-            Pat::Ident { sub: Some(s), .. } => self.pat(*s),
+            Pat::Ident { sub, .. } if let Some(s) = sub.get() => self.pat(s),
             Pat::TupleStruct(_, v) | Pat::Tuple(v) | Pat::Slice(v) | Pat::Or(v) => {
                 for x in p.ast.list(*v) {
                     self.pat(*x);
                 }
             }
-            Pat::Struct(_, f, _) => {
+            Pat::Struct(_, _, f) => {
                 for x in p.ast.list(*f) {
                     self.pat(x.pat);
                 }
@@ -828,7 +828,7 @@ impl<'p, 'a> Walker<'p, 'a> {
                     }
                     self.attrs(p.ast.list(a.attrs), false);
                     self.pat(a.pat);
-                    if let Some(g) = a.guard {
+                    if let Some(g) = a.guard.get() {
                         self.expr(g);
                     }
                     self.expr(a.body);
@@ -862,11 +862,11 @@ impl<'p, 'a> Walker<'p, 'a> {
                 }
                 for prm in p.ast.list(*params) {
                     self.pat(prm.pat);
-                    if let Some(t) = prm.ty {
+                    if let Some(t) = prm.ty.get() {
                         self.ty(t, false);
                     }
                 }
-                if let Some(t) = ret {
+                if let Some(t) = &ret.get() {
                     self.ty(*t, false);
                 }
                 let save = self.in_for_head;

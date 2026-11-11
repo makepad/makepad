@@ -443,7 +443,7 @@ fn reached(pf: &ParsedFile) -> Vec<(u32, Option<u32>)> {
             ItemKind::Trait(r) => ast.list(ast.row(*r).items),
             ItemKind::Impl(r) => ast.list(ast.row(*r).items),
             ItemKind::ForeignMod(r) => ast.list(ast.row(*r).items),
-            ItemKind::Mod(Some(items)) => ast.list(*items),
+            ItemKind::Mod(crate::ast::Opt::Some(items)) => ast.list(*items),
             _ => &[],
         };
         for k in kids.iter().rev() { stack.push((k.0, Some(i))); }
@@ -564,7 +564,7 @@ fn ty_names(pf: &ParsedFile, t: crate::ast::TyId, params: &[&str], out: &mut Vec
                         },
                         crate::ast::GenericArgs::Paren(l, r) => {
                             for t in ast.list(*l) { ty_names(pf, *t, params, out, depth + 1); }
-                            if let Some(r) = r { ty_names(pf, *r, params, out, depth + 1); }
+                            if let Some(r) = &r.get() { ty_names(pf, *r, params, out, depth + 1); }
                         }
                     }
                 }
@@ -603,7 +603,7 @@ fn use_names(pf: &ParsedFile, t: &UseTree, last: Option<&str>, out: &mut Vec<Nam
         }
         UseTree::Name(seg, rename) => {
             let w = pf.text(seg.name);
-            let bound = match rename {
+            let bound = match &rename.get() {
                 Some(r) => pf.text(*r),
                 None if w == "self" => last.unwrap_or(w),
                 None => w,
@@ -784,7 +784,7 @@ fn file_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: &str) -> Vec
         };
         let header = parent.filter(|&p| matches!(kind_of(p), ItemKind::Impl(_) | ItemKind::ForeignMod(_)));
         match &it.kind {
-            ItemKind::Mod(Some(kids)) => { header_only(&mut cut, ast.list(*kids), false); own(&mut keys); }
+            ItemKind::Mod(crate::ast::Opt::Some(kids)) => { header_only(&mut cut, ast.list(*kids), false); own(&mut keys); }
             ItemKind::ForeignMod(r) => header_only(&mut cut, ast.list(ast.row(*r).items), false),
             ItemKind::Impl(r) => {
                 let im = ast.row(*r);
@@ -798,7 +798,7 @@ fn file_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: &str) -> Vec
                     }
                     let params: Vec<&str> = ast.list(im.generics.params).iter().map(|g| pf.text(g.name)).collect();
                     named_head = ty_names(pf, im.self_ty, &params, &mut keys, 0);
-                    trait_name = im.trait_.as_ref().and_then(|p| ast.segs(p.segs).last()).map(|s| pf.text(s.name)).filter(|t| !t.is_empty()).map(|t| name_of(t.as_bytes()));
+                    trait_name = im.trait_.get().as_ref().and_then(|p| ast.segs(p.segs).last()).map(|s| pf.text(s.name)).filter(|t| !t.is_empty()).map(|t| name_of(t.as_bytes()));
                 }
             }
             ItemKind::Trait(r) => {
@@ -825,7 +825,7 @@ fn file_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: &str) -> Vec
             }
             ItemKind::ExternCrate(alias) => {
                 skip.clear();
-                match alias { Some(a) => keys.push(name_of(pf.text(*a).as_bytes())), None => own(&mut keys) }
+                match &alias.get() { Some(a) => keys.push(name_of(pf.text(*a).as_bytes())), None => own(&mut keys) }
             }
             ItemKind::Mac(_) => { always = true; mac = true; }
             ItemKind::MacroRules(_) => { own(&mut keys); rules = true; }
@@ -857,7 +857,7 @@ pub(crate) fn parse_interface_parts(prog: &Program, parsed: &[std::sync::Arc<Par
         let (Some(pf), Some(Some(dg))) = (parsed.get(f), digests.get(f)) else { continue };
         if pf.part.get().is_some() { continue; }
         let needs = pf.ast.items.iter().enumerate().any(|(i, it)| {
-            matches!(it.kind, ItemKind::Fn(sig, None, _) if pf.ast.fn_sig(sig).lazy_body.is_some())
+            matches!(it.kind, ItemKind::Fn(sig, body, _) if body.is_none() && pf.ast.fn_sig(sig).lazy_body.is_some())
                 && dg.body_span(crate::ast::ItemId(i as u32)).is_none()
                 && { let (mut n, mut inv) = (Vec::new(), Vec::new()); scan(&pf.src, &[(it.lo, it.hi)], &[], &mut n, &mut inv); inv.iter().any(|&m| m & QUIET_BIT == 0 || late_builtin(m)) }
         });
@@ -963,7 +963,7 @@ pub(crate) fn check_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: 
             if let Some(ItemKind::Impl(row)) = item.map(|i| &ast.item(crate::ast::ItemId(i)).kind) {
                 let im = ast.row(*row);
                 let params: Vec<&str> = ast.list(im.generics.params).iter().map(|g| pf.text(g.name)).collect();
-                for s in im.trait_.as_ref().map_or(&[][..], |p| ast.segs(p.segs)) {
+                for s in im.trait_.get().as_ref().map_or(&[][..], |p| ast.segs(p.segs)) {
                     match ast.gargs(s.args()) {
                         Some(crate::ast::GenericArgs::Angle(l)) => for g in ast.list(*l) {
                             match g {
@@ -973,7 +973,7 @@ pub(crate) fn check_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: 
                         },
                         Some(crate::ast::GenericArgs::Paren(l, ret)) => {
                             for t in ast.list(*l) { ty_names(pf, *t, &params, &mut wide, 0); }
-                            if let Some(t) = ret { ty_names(pf, *t, &params, &mut wide, 0); }
+                            if let Some(t) = &ret.get() { ty_names(pf, *t, &params, &mut wide, 0); }
                         }
                         None => {}
                     }

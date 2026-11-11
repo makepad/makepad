@@ -283,7 +283,7 @@ impl Tcx {
         let f = &prog.files[def.file as usize];
         let item = f.ast.item(def.item);
         let ItemKind::Fn(sig_id, _, _) = item.kind else { return Vec::new() };
-        if !matches!(f.ast.fn_sig(sig_id).self_param, Some(crate::ast::SelfParam::Typed(..))) { return Vec::new(); }
+        if !matches!(f.ast.fn_sig(sig_id).self_param.get(), Some(crate::ast::SelfParam::Typed(..))) { return Vec::new(); }
         let parent = prog.def(def.parent);
         let self_ty = match parent.kind {
             DefKind::Impl => match self.impl_self.get(&def.parent) { Some(&t) => t, None => return Vec::new() },
@@ -995,7 +995,7 @@ pub mod obligations {
             w.register_wf(ty, pos);
         }
         let ret = w.normalize(ret);
-        let ret_pos = fsig.ret.and_then(|t| ty_pos(ast, t)).unwrap_or(item.name.lo);
+        let ret_pos = fsig.ret.get().and_then(|t| ty_pos(ast, t)).unwrap_or(item.name.lo);
         w.register_wf(ret, ret_pos);
         w.check_where_clauses(item.lo);
         // If the function has a body, additionally require that the return type is sized.
@@ -1279,7 +1279,7 @@ pub mod obligations {
         let ret = ocx.normalize_ty(&env, sig.ret);
         ocx.register_obligation(Goal { param_env: env.clone(), predicate: collect::trait_predicate(term, vec![GenericArg::Type(ret)]) });
         let bad = ocx.try_evaluate_obligations().into_iter().any(|e| matches!(e, NextSolverError::TrueError(_)));
-        let pos = ast.fn_sig(*s).ret.and_then(|t| ty_pos(ast, t)).unwrap_or(item.name.lo);
+        let pos = ast.fn_sig(*s).ret.get().and_then(|t| ty_pos(ast, t)).unwrap_or(item.name.lo);
         if !bad {
             // the region constraints of the `Termination` proof hold too (resolve_regions; a
             // placeholder one is "implementation of `..` is not general enough")
@@ -1535,7 +1535,7 @@ pub mod obligations {
         for p in ast.list(generics.params) {
             match p.kind {
                 ast::GenericParamKind::Lifetime(_) => continue,
-                ast::GenericParamKind::Type(_, Some(t)) => {
+                ast::GenericParamKind::Type(_, default) if let Some(t) = default.get() => {
                     let d = w.tcx.lower_ty(&cx, w.prog, def.file, def.scope, &env, t);
                     let f = w.tcx.tys.flags(d);
                     if !f.intersects(TypeFlags::HAS_PARAM) && !f.intersects(TypeFlags::HAS_ANY_INFER) && !w.tcx.tys.has_error(d) && crate::wfcheck::obligations::arity_ok(w.tcx, w.prog, d) {

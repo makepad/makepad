@@ -137,7 +137,7 @@ fn link_impl(prog: &mut Program, ii: usize, previous: &crate::fxhash::HashMap<De
     prog.impls[ii].items.retain(|d| !previous.contains_key(d));
     let imp = prog.impls[ii].def;
     let def = prog.def(imp);
-    let Some(path) = ({ let ast = &prog.files[def.file as usize].ast; ast.as_impl(&ast.item(def.item).kind).and_then(|i| i.trait_) }) else { return; };
+    let Some(path) = ({ let ast = &prog.files[def.file as usize].ast; ast.as_impl(&ast.item(def.item).kind).and_then(|i| i.trait_.get()) }) else { return; };
     let segs = path_segs(prog, def.file, &path);
     let Some(trait_def) = prog.resolve_mod_path(def.scope, path.global(), &segs, false, false) else { return; };
     if prog.def(trait_def).kind != DefKind::Trait { return; }
@@ -204,7 +204,7 @@ impl RPITVisitor<'_> {
         let sig = ast.fn_sig(sig);
         let mut visitor = RPITVisitor { prog, file: def.file, synthetics: Vec::new() };
         if sig.asyncness { visitor.synthetics.push(prog.node_id_to_def_id[&(def.file, NodeId::AsyncReturn(def.item))]); }
-        if let Some(ty) = sig.ret { visitor.visit_ty(ty); }
+        if let Some(ty) = sig.ret.get() { visitor.visit_ty(ty); }
         visitor.synthetics
     }
     fn visit_ty(&mut self, ty: crate::ast::TyId) {
@@ -224,7 +224,7 @@ impl RPITVisitor<'_> {
             Ty::Fn(sig) => {
                 let sig = ast.fn_ptr(sig);
                 for &t in ast.list(sig.params) { self.visit_ty(t); }
-                if let Some(t) = sig.ret { self.visit_ty(t); }
+                if let Some(t) = sig.ret.get() { self.visit_ty(t); }
             }
             Ty::DynTrait(bs, _) => self.visit_bounds(bs),
             _ => {}
@@ -252,7 +252,7 @@ impl RPITVisitor<'_> {
             },
             Some(GenericArgs::Paren(ps, ret)) => {
                 for &t in ast.list(*ps) { self.visit_ty(t); }
-                if let Some(t) = ret { self.visit_ty(*t); }
+                if let Some(t) = &ret.get() { self.visit_ty(*t); }
             }
             None => {}
         }

@@ -3134,9 +3134,25 @@ static SETTLE_REQUESTED: AtomicBool = AtomicBool::new(false);
 static FIRST_PRESENT_WALL: AtomicU64 = AtomicU64::new(0);
 /// A domain's first frame re-arms settlement even when its code was already installed.
 static DOMAIN_PRESENT_WALL: AtomicU64 = AtomicU64::new(0);
+/// ... and which domain that was (its package and id), for the settle rebuild's give-up line
+static DOMAIN_PRESENT_NAME: relax_session::sync::Mutex<String> = relax_session::sync::Mutex::new(String::new());
 
-pub(crate) fn domain_present() {
+pub(crate) fn domain_present(name: String) {
+    *DOMAIN_PRESENT_NAME.lock().unwrap_or_else(|e| e.into_inner()) = name;
     DOMAIN_PRESENT_WALL.fetch_max(jit::wall_ns().max(1), Ordering::Release);
+}
+
+/// The settle rebuild of this round stopped trying (every try said not now): the run goes on with
+/// its state as it is. Logged and in the flight recorder, with the domain whose first frame
+/// started the round.
+fn settle_gave_up(tries: u32, why: &str) {
+    let domain = if DOMAIN_PRESENT_WALL.load(Ordering::Acquire) > FIRST_PRESENT_WALL.load(Ordering::Acquire) {
+        format!("domain {}", DOMAIN_PRESENT_NAME.lock().unwrap_or_else(|e| e.into_inner()))
+    } else {
+        "the program".to_string()
+    };
+    crate::inspect::flightrec::event("settle.gave-up", &format!("{domain}: no settle rebuild after {tries} tries (last: {why})"), tries as u64, 0);
+    eprintln!("makepad-run settle rebuild gave up for {domain} after {tries} tries (last: {why}); the run goes on with its state as it is");
 }
 
 static PRESENT_PATH: relax_session::sync::Mutex<Option<std::path::PathBuf>> = relax_session::sync::Mutex::new(None);
@@ -3622,9 +3638,12 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
                         jit::settle_rebuild::Outcome::Done => rebuild_done = true,
                         jit::settle_rebuild::Outcome::Refused(why) => { verbose!("makepad-run settle rebuild refused: {why}"); rebuild_over = true; }
                         jit::settle_rebuild::Outcome::Retry(why) => {
-                            if why != rebuild_said { verbose!("makepad-run settle rebuild deferred (try {rebuild_tries}): {why}"); rebuild_said = why; }
                             rebuild_next = Instant::now() + std::time::Duration::from_secs(1);
-                            if rebuild_tries >= jit::settle_rebuild::TAIL_WAIT + 40 { rebuild_done = true; }
+                            if rebuild_tries >= jit::settle_rebuild::TAIL_WAIT + 40 {
+                                rebuild_done = true;
+                                settle_gave_up(rebuild_tries, &why);
+                            }
+                            if why != rebuild_said { verbose!("makepad-run settle rebuild deferred (try {rebuild_tries}): {why}"); rebuild_said = why; }
                         }
                     }
                 }
@@ -4923,7 +4942,7 @@ fn report_origin(u: &jit::Unit, key: &FnKey) -> (&'static str, String, String) {
                     DefKind::Impl => {
                         tr = "I:".to_string();
                         let pf = &u.prog.files[p.file as usize];
-                        if let Some(crate::ast::ImplItem { trait_: Some(path), .. }) = pf.ast.as_impl(&pf.ast.item(p.item).kind) {
+                        if let Some(crate::ast::ImplItem { trait_: crate::ast::Opt::Some(path), .. }) = pf.ast.as_impl(&pf.ast.item(p.item).kind) {
                             if let Some(seg) = pf.ast.segs(path.segs).last() {
                                 tr.push_str(pf.text(seg.name));
                             }
@@ -5032,6 +5051,7 @@ pub(crate) unsafe fn reset_statics() {
     reset(&SETTLE_REQUESTED, AtomicBool::new(false));
     reset(&FIRST_PRESENT_WALL, AtomicU64::new(0));
     reset(&DOMAIN_PRESENT_WALL, AtomicU64::new(0));
+    reset(&DOMAIN_PRESENT_NAME, relax_session::sync::Mutex::new(String::new()));
     remove_present_report();
     reset(&PRESENT_PATH, relax_session::sync::Mutex::new(None));
     reset(&MONITOR, std::sync::OnceLock::new());

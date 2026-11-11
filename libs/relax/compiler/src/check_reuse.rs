@@ -413,7 +413,7 @@ impl Reuse {
             if let Some(parts) = std::env::var("MAKEPAD_RUN_CHECK_REUSE_TRACE").ok().filter(|v| v.len() > 1) {
                 for (f, p) in prog.file_paths.iter().enumerate().filter(|(_, p)| parts.split(',').any(|q| !q.is_empty() && p.contains(q))) {
                     let pf = &prog.files[f];
-                    let lazy = pf.ast.items.iter().filter(|it| matches!(&it.kind, crate::ast::ItemKind::Fn(sig, None, _) if pf.ast.fn_sig(*sig).lazy_body.is_some())).count();
+                    let lazy = pf.ast.items.iter().filter(|it| matches!(&it.kind, crate::ast::ItemKind::Fn(sig, body, _) if body.is_none() && pf.ast.fn_sig(*sig).lazy_body.is_some())).count();
                     eprintln!("check-reuse-trace: iface text of {} ({} items, {} lazy bodies, src {} of {}):\n{}", p, pf.ast.items.len(), lazy, pf.src_len, pf.src.len(), String::from_utf8_lossy(&crate::cache::file_iface_text(prog, f)));
                 }
             }

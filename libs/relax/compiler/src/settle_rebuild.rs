@@ -407,7 +407,10 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
     // written first, off the owner (the replace writes only what comes after this)
     // ... and the new state's cache opened, off the owner too: the new program is this thread's
     // alone until the replace (what the old cache records meanwhile is written by the replace
-    // and found by the next start)
+    // and found by the next start). The records made so far are encoded first in bounded
+    // publishes, a batch per owner hold, as the run monitor drains them: the call below takes
+    // only what is left (in a cold run thousands, else a long owner hold)
+    super::drain_records_bounded();
     let (spill, settings) = owner::call(owner::Class::Program, || unsafe {
         let u = &mut *up;
         u.flush_cache_records();
@@ -431,6 +434,19 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
     trace(&format!("cache opened in {:.1} ms", ms(t_open)));
     // and the pages the open read once (indexes, ledgers), before the replace
     crate::pack::release_resident();
+    // what was recorded while the cache opened goes the same way, so that the replace's own flush
+    // and spill, on the owner under the front write, are only what the last moments added
+    let t = Instant::now();
+    super::drain_records_bounded();
+    let spill = owner::call(owner::Class::Program, || unsafe {
+        let u = &mut *up;
+        u.flush_cache_records();
+        u.cache.as_mut().and_then(|c| c.spill_take())
+    });
+    if let Some(s) = spill {
+        if let Err(e) = s.write() { return Outcome::Retry(format!("the cache spill failed: {e}")); }
+    }
+    let spill_ms = ms(t);
     let t = Instant::now();
     let replaced = owner::call(owner::Class::Program, || unsafe { replace(up, &sess, mode, fresh, before) });
     let old = match replaced {
@@ -453,8 +469,8 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
     let rss1 = crate::memstat::resident();
     trace("the old state dropped");
     REBUILDS.fetch_add(1, Ordering::Relaxed);
-    if crate::run::VERBOSE.load(Ordering::Relaxed) || crate::memstat::enabled() { eprintln!("makepad-run settle rebuild at t={:.0} ms: {}, restore {:.1} ms, replace on the owner {:.1} ms, old state dropped in {:.1} ms; total {:.1} ms; rss {:.0} -> {:.0} MB",
-        crate::clock::ms_since_start(), encode, restore_ms, replace_ms, drop_ms, ms(t_all), rss0 as f64 / 1048576.0, rss1 as f64 / 1048576.0); }
+    if crate::run::VERBOSE.load(Ordering::Relaxed) || crate::memstat::enabled() { eprintln!("makepad-run settle rebuild at t={:.0} ms: {}, restore {:.1} ms, spill {:.1} ms, replace on the owner {:.1} ms, old state dropped in {:.1} ms; total {:.1} ms; rss {:.0} -> {:.0} MB",
+        crate::clock::ms_since_start(), encode, restore_ms, spill_ms, replace_ms, drop_ms, ms(t_all), rss0 as f64 / 1048576.0, rss1 as f64 / 1048576.0); }
     Outcome::Done
 }
 
@@ -478,9 +494,18 @@ pub(crate) fn replaced_fronts_alive() -> Vec<std::sync::Arc<FrontShared>> {
 /// state (interner top-up, cache, front state) and moves it into the Unit. The old values come
 /// back to be dropped elsewhere.
 unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: crate::cache::Mode, fresh: Fresh, before: Counts) -> Result<Old, String> {
-    let Some(_front) = super::front_write_within(1000) else {
-        return Err("a front reader held on for 1 s".into());
+    let t_r = Instant::now();
+    let mut laps: Vec<(&str, f64)> = Vec::new();
+    let lap = |w: &'static str, laps: &mut Vec<(&'static str, f64)>| laps.push((w, t_r.elapsed().as_secs_f64() * 1e3));
+    // (the steps up to the swap give way to a waiting request: the rebuild is tried again later.
+    // While it waits for the front write the owner serves Job and Publish requests, which a reader
+    // may wait for: there only a program thread's request is held up)
+    let quitting = || crate::jit::QUIT_SEEN.load(Ordering::Relaxed);
+    let yielded = || owner::request_waiting() && !quitting();
+    let Some(_front) = super::front_write_unless(1000, &|| owner::program_waiting() && !quitting()) else {
+        return Err(if owner::program_waiting() && !quitting() { gave_way("front write", t_r) } else { "a front reader held on for 1 s".into() });
     };
+    lap("front write", &mut laps);
     let _f = crate::zone_alloc::compiler_fresh();
     let u = &mut *up;
     let now = Counts::of(&u.prog, &u.tcx);
@@ -492,12 +517,11 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
             return Err(format!("slot {i} is being built"));
         }
     }
-    let t_r = Instant::now();
-    let mut laps: Vec<(&str, f64)> = Vec::new();
-    let lap = |w: &'static str, laps: &mut Vec<(&'static str, f64)>| laps.push((w, t_r.elapsed().as_secs_f64() * 1e3));
     let Fresh { mut prog, mut tcx, collected: _, cache: fresh_cache, added } = fresh;
     // the types interned since the encode, copied from the live interner: ids stay identical
     tcx.tys.top_up_from(&u.tcx.tys).ok_or("the image holds more types than the program")?;
+    lap("top up", &mut laps);
+    if yielded() { return Err(gave_way("top up", t_r)); }
     compare((&u.prog, &u.tcx), (&prog, &tcx))?;
     // the crates the unit bound (Unit::new, bind_added_provided) keep rustc's layout: the restored
     // program has their marks, as the new layouts below have the opaque types
@@ -511,12 +535,11 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
         prog.load_recipe = u.prog.load_recipe.clone();
     }
     lap("compare", &mut laps);
-    // (the steps up to the swap give way to a waiting request: the rebuild is tried again later)
-    let yielded = || owner::request_waiting() && !crate::jit::QUIT_SEEN.load(Ordering::Relaxed);
-    if yielded() { return Err("yielded to a waiting request".into()); }
-    // what was recorded since the spill before the encode (a few entries) is written before the
-    // new cache opens the stores: a rebuild never waits for spills
+    if yielded() { return Err(gave_way("compare", t_r)); }
+    // what was recorded since the spill just before this request (a few entries) is written
+    // before the new cache takes over: a rebuild never waits for spills
     u.flush_cache_records();
+    lap("flush", &mut laps);
     if let Some(s) = u.cache.as_mut().and_then(|c| c.spill_take()) {
         s.write().map_err(|e| format!("the cache spill failed: {e}"))?;
     }
@@ -525,7 +548,7 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
     let _ = mode;
     let mut cache = fresh_cache.ok_or("no cache")?;
     lap("cache open", &mut laps);
-    if yielded() { return Err("yielded to a waiting request".into()); }
+    if yielded() { return Err(gave_way("cache open", t_r)); }
     if let Some(old) = u.cache.as_ref() {
         cache.inherit_run_state(old);
     }
@@ -542,7 +565,7 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
     let query_errors = tcx.dcx.clone();
     let checked_epoch = u.tcx.collect_epoch.load(Ordering::SeqCst);
     lap("front state", &mut laps);
-    if yielded() { return Err("yielded to a waiting request".into()); }
+    if yielded() { return Err(gave_way("front state", t_r)); }
     // the replace: nothing can fail from here
     u.front.retire_memos();
     // the old front state names the old program: no reader may reach it after the replace (a
@@ -597,11 +620,24 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
     // every thread's compiler memos go at its next access (dropped there, by value)
     relax_session::memo_local::retire_all();
     lap("swap", &mut laps);
-    if crate::run::VERBOSE.load(Ordering::Relaxed) {
-        trace(&format!("replace steps (ms to): {}", laps.iter().map(|(w, t)| format!("{w} {t:.1}")).collect::<Vec<_>>().join(", ")));
-        eprintln!("makepad-run settle rebuild replace (ms to): {}", laps.iter().map(|(w, t)| format!("{w} {t:.1}")).collect::<Vec<_>>().join(", "));
+    // where the owner's time went (the flight recorder: a UI compile queued behind a replace)
+    let verbose = crate::run::VERBOSE.load(Ordering::Relaxed);
+    if verbose || crate::inspect::flightrec::on() {
+        let steps = laps.iter().map(|(w, t)| format!("{w} {t:.1}")).collect::<Vec<_>>().join(", ");
+        crate::inspect::flightrec::event("settle.replace", &format!("the replace held the owner {:.1} ms (ms to): {steps}", ms(t_r)), t_r.elapsed().as_micros() as u64, 0);
+        if verbose {
+            trace(&format!("replace steps (ms to): {steps}"));
+            eprintln!("makepad-run settle rebuild replace (ms to): {steps}");
+        }
     }
     Ok(old)
+}
+
+/// The replace stepped aside for a waiting request at `step` (it is tried again later); the flight
+/// recorder notes when, as it notes a whole replace's steps.
+fn gave_way(step: &str, t_r: Instant) -> String {
+    crate::inspect::flightrec::event("settle.yield", &format!("the replace gave the owner back at its {step}, {:.1} ms in: a request waited", ms(t_r)), t_r.elapsed().as_micros() as u64, 0);
+    format!("yielded to a waiting request at its {step}")
 }
 
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.

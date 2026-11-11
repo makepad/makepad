@@ -263,7 +263,7 @@ impl LifetimeResolver<'_> {
                 self.push_generics(BinderId::Item, sig.generics.params);
                 self.visit_generics(&sig.generics);
                 let inputs: Vec<_> = ast.list(sig.params).iter().map(|p| p.ty).collect();
-                self.resolve_fn_signature(BinderId::Item, sig.self_param, &inputs, sig.ret, sig.asyncness);
+                self.resolve_fn_signature(BinderId::Item, sig.self_param.get(), &inputs, sig.ret.get(), sig.asyncness);
                 self.push(LifetimeRibKind::Elided { res: LifetimeRes::Infer, error_in_path: false });
                 for param in ast.list(sig.params) { self.visit_pat(param.pat); }
                 if let Some(body) = self.prog.fn_body(self.file, def.item).expect("collected function body") { self.visit_block(body); }
@@ -290,7 +290,7 @@ impl LifetimeResolver<'_> {
                 self.visit_generics(&generics);
                 for variant in ast.list(variants) {
                     self.visit_variant_data(variant.data);
-                    if let Some(expr) = variant.disc { self.visit_anon_const(expr); }
+                    if let Some(expr) = variant.disc.get() { self.visit_anon_const(expr); }
                 }
                 self.ribs.pop();
             }
@@ -299,7 +299,7 @@ impl LifetimeResolver<'_> {
                 self.push_generics(BinderId::Item, generics.params);
                 self.visit_generics(&generics);
                 self.visit_bounds(bounds);
-                if let Some(ty) = ty { self.visit_ty(ty); }
+                if let Some(ty) = ty.get() { self.visit_ty(ty); }
                 self.ribs.pop();
             }
             ItemKind::Trait(_) | ItemKind::TraitAlias(_) => {
@@ -315,7 +315,7 @@ impl LifetimeResolver<'_> {
                 self.visit_generics(&generics);
                 // late.rs:3549-3552: implicit elided path lifetimes in an impl header are an error.
                 self.push(LifetimeRibKind::AnonymousCreateParameter { binder: BinderId::Item, report_in_path: true });
-                if let Some(path) = trait_ { self.visit_path(&path, false); }
+                if let Some(path) = trait_.get() { self.visit_path(&path, false); }
                 self.visit_ty(self_ty);
                 self.ribs.pop();
                 self.ribs.pop();
@@ -347,7 +347,7 @@ impl LifetimeResolver<'_> {
     fn visit_fields(&mut self, fields: ast::List<ast::FieldDef>) {
         for field in self.prog.files[self.file as usize].ast.list(fields) {
             self.visit_ty(field.ty);
-            if let Some(expr) = field.default { self.visit_anon_const(expr); }
+            if let Some(expr) = field.default.get() { self.visit_anon_const(expr); }
         }
     }
 
@@ -370,11 +370,11 @@ impl LifetimeResolver<'_> {
                 ast::Stmt::Let(r) => {
                     let ast::LetStmt { pat, ty, init, else_, .. } = *ast.row(r);
                     self.visit_pat(pat);
-                    if let Some(ty) = ty { self.visit_ty(ty); }
-                    if let Some(expr) = init { self.visit_expr(expr); }
-                    if let Some(block) = else_ { self.visit_block(block); }
+                    if let Some(ty) = ty.get() { self.visit_ty(ty); }
+                    if let Some(expr) = init.get() { self.visit_expr(expr); }
+                    if let Some(block) = else_.get() { self.visit_block(block); }
                 }
-                ast::Stmt::Expr(expr, _) => self.visit_expr(expr),
+                ast::Stmt::Expr(_, expr) => self.visit_expr(expr),
                 ast::Stmt::Attrs(r) => self.visit_expr(ast.row(r).expr),
                 ast::Stmt::Item(_) | ast::Stmt::Empty => {}
             }
@@ -408,7 +408,7 @@ impl LifetimeResolver<'_> {
         let mut result = Vec::new();
         let mut todo = vec![root];
         while let Some(ty) = todo.pop() {
-            if let ast::Ty::Ref(name, _, inner) = *ast.ty(ty) {
+            if let ast::Ty::Ref(_, name, inner) = *ast.ty(ty) {
                 let mut referent = vec![inner];
                 let mut contains_self = false;
                 while let Some(child) = referent.pop() {
@@ -429,7 +429,7 @@ impl LifetimeResolver<'_> {
                     child_types(ast, child, &mut referent);
                 }
                 if contains_self {
-                    let key = name.map_or(LifetimeKey::Reference(ty.0), |lt| LifetimeKey::Named(lt.lo, lt.hi));
+                    let key = name.get().map_or(LifetimeKey::Reference(ty.0), |lt| LifetimeKey::Named(lt.lo, lt.hi));
                     let res = self.resolution.uses[&key];
                     if !result.contains(&res) { result.push(res); }
                 }
@@ -451,13 +451,13 @@ impl LifetimeResolver<'_> {
                 GenericParamKind::Lifetime(bounds) => for &lt in ast.list(bounds) { self.visit_lifetime(lt); },
                 GenericParamKind::Type(bounds, default) => {
                     self.visit_bounds(bounds);
-                    if let Some(ty) = default { self.visit_ty(ty); }
+                    if let Some(ty) = default.get() { self.visit_ty(ty); }
                 }
                 GenericParamKind::Const(ty, default) => {
                     self.push(LifetimeRibKind::ConstParamTy);
                     self.visit_ty(ty);
                     self.ribs.pop();
-                    if let Some(expr) = default { self.visit_anon_const(expr); }
+                    if let Some(expr) = default.get() { self.visit_anon_const(expr); }
                 }
             }
         }
@@ -537,7 +537,7 @@ impl LifetimeResolver<'_> {
         let ast = &self.prog.files[self.file as usize].ast;
         if let Some(qself) = ast.qself(path) {
             self.visit_ty(qself.ty);
-            if let Some(trait_path) = qself.trait_path { self.visit_path(&trait_path, inferred); }
+            if let Some(trait_path) = qself.trait_path.get() { self.visit_path(&trait_path, inferred); }
         }
         self.resolve_elided_lifetimes_in_path(path, inferred);
         for segment in ast.segs(path.segs) {
@@ -548,13 +548,13 @@ impl LifetimeResolver<'_> {
                     match self.ribs[i].kind {
                         LifetimeRibKind::Generics { binder: Some(binder), poly_trait: true } => {
                             let outer = self.candidates.take();
-                            self.resolve_fn_signature(binder, None, ast.list(*params), *ret, false);
+                            self.resolve_fn_signature(binder, None, ast.list(*params), ret.get(), false);
                             self.candidates = outer;
                             break;
                         }
                         LifetimeRibKind::Item | LifetimeRibKind::Generics { .. } => {
                             for &ty in ast.list(*params) { self.visit_ty(ty); }
-                            if let Some(ty) = ret { self.visit_ty(*ty); }
+                            if let Some(ty) = &ret.get() { self.visit_ty(*ty); }
                             break;
                         }
                         _ => {}
@@ -585,9 +585,9 @@ impl LifetimeResolver<'_> {
     fn visit_ty(&mut self, ty: ast::TyId) {
         let ast = &self.prog.files[self.file as usize].ast;
         match *ast.ty(ty) {
-            ast::Ty::Ref(name, _, inner) => {
-                let key = name.map_or(LifetimeKey::Reference(ty.0), |lt| LifetimeKey::Named(lt.lo, lt.hi));
-                self.resolve_lifetime(key, name, name.map_or(ast.item(self.prog.def(self.owner).item).lo, |lt| lt.lo), false);
+            ast::Ty::Ref(_, name, inner) => {
+                let key = name.get().map_or(LifetimeKey::Reference(ty.0), |lt| LifetimeKey::Named(lt.lo, lt.hi));
+                self.resolve_lifetime(key, name.get(), name.get().map_or(ast.item(self.prog.def(self.owner).item).lo, |lt| lt.lo), false);
                 self.visit_ty(inner);
             }
             ast::Ty::Ptr(_, inner) | ast::Ty::Slice(inner) | ast::Ty::Paren(inner) => self.visit_ty(inner),
@@ -612,7 +612,7 @@ impl LifetimeResolver<'_> {
                 let pointer = ast.fn_ptr(pointer);
                 let outer = self.candidates.take();
                 self.push_generics(BinderId::FnPointer(ty.0), pointer.hrtb);
-                self.resolve_fn_signature(BinderId::FnPointer(ty.0), None, ast.list(pointer.params), pointer.ret, false);
+                self.resolve_fn_signature(BinderId::FnPointer(ty.0), None, ast.list(pointer.params), pointer.ret.get(), false);
                 self.ribs.pop();
                 self.candidates = outer;
             }
@@ -642,8 +642,8 @@ impl LifetimeResolver<'_> {
             match receiver {
                 ast::SelfParam::Value(_) => {},
                 ast::SelfParam::Ref(name, _) => {
-                    let key = name.map_or(LifetimeKey::SelfReference, |lt| LifetimeKey::Named(lt.lo, lt.hi));
-                    self.resolve_lifetime(key, name, self.prog.files[self.file as usize].ast.item(self.prog.def(self.owner).item).lo, false);
+                    let key = name.get().map_or(LifetimeKey::SelfReference, |lt| LifetimeKey::Named(lt.lo, lt.hi));
+                    self.resolve_lifetime(key, name.get(), self.prog.files[self.file as usize].ast.item(self.prog.def(self.owner).item).lo, false);
                     self_candidate = self.resolution.uses.get(&key).copied();
                 }
                 ast::SelfParam::Typed(_, ty) => {
@@ -676,15 +676,16 @@ impl LifetimeResolver<'_> {
     }
     fn visit_pat(&mut self, p: ast::PatId) {
         match *self.prog.files[self.file as usize].ast.pat(p) {
-            ast::Pat::Ident { sub: Some(p), .. } | ast::Pat::Ref(_, p) | ast::Pat::Paren(p) | ast::Pat::Box(p) => self.visit_pat(p),
+            ast::Pat::Ident { sub, .. } if let Some(p) = sub.get() => self.visit_pat(p),
+            ast::Pat::Ref(_, p) | ast::Pat::Paren(p) | ast::Pat::Box(p) => self.visit_pat(p),
             ast::Pat::Lit(e) => self.visit_expr(e),
-            ast::Pat::Range(a, b, _) => { if let Some(e) = a { self.visit_expr(e); } if let Some(e) = b { self.visit_expr(e); } }
+            ast::Pat::Range(a, b, _) => { if let Some(e) = a.get() { self.visit_expr(e); } if let Some(e) = b.get() { self.visit_expr(e); } }
             ast::Pat::Path(p) => self.visit_path(&p, true),
             ast::Pat::TupleStruct(p, ps) => { self.visit_path(&p, true); for p in self.prog.files[self.file as usize].ast.list(ps) { self.visit_pat(*p); } }
-            ast::Pat::Struct(p, fs, _) => { self.visit_path(&p, true); for f in self.prog.files[self.file as usize].ast.list(fs) { self.visit_pat(f.pat); } }
+            ast::Pat::Struct(_, p, fs) => { self.visit_path(&p, true); for f in self.prog.files[self.file as usize].ast.list(fs) { self.visit_pat(f.pat); } }
             ast::Pat::Tuple(ps) | ast::Pat::Slice(ps) | ast::Pat::Or(ps) => for p in self.prog.files[self.file as usize].ast.list(ps) { self.visit_pat(*p); },
             ast::Pat::Mac(m) => { let m = *self.prog.files[self.file as usize].ast.row(m); self.visit_mac(m) }
-            ast::Pat::Wild | ast::Pat::Rest | ast::Pat::Ident { sub: None, .. } => {}
+            ast::Pat::Wild | ast::Pat::Rest | ast::Pat::Ident { .. } => {}
         }
     }
     fn visit_expr(&mut self, e: ast::ExprId) {
@@ -702,10 +703,10 @@ impl LifetimeResolver<'_> {
                 self.push(LifetimeRibKind::Elided { res: LifetimeRes::Infer, error_in_path: false });
                 for p in self.prog.files[self.file as usize].ast.list(params) { self.visit_pat(p.pat); }
                 self.ribs.pop();
-                for p in self.prog.files[self.file as usize].ast.list(params) { if let Some(t) = p.ty { self.visit_ty(t); } }
+                for p in self.prog.files[self.file as usize].ast.list(params) { if let Some(t) = p.ty.get() { self.visit_ty(t); } }
                 self.ribs.pop();
                 self.push(LifetimeRibKind::Elided { res: LifetimeRes::Infer, error_in_path: false });
-                if let Some(t) = ret { self.visit_ty(t); } self.visit_expr(body); self.ribs.pop(); self.candidates = outer;
+                if let Some(t) = ret.get() { self.visit_ty(t); } self.visit_expr(body); self.ribs.pop(); self.candidates = outer;
             }
             ast::ExprKind::Async(_, b) => {
                 let outer = self.candidates.take();
@@ -726,7 +727,7 @@ impl LifetimeResolver<'_> {
             ast::ExprKind::If(e, b, other) => { self.visit_expr(e); self.visit_block(b); if let Some(e) = other.get() { self.visit_expr(e); } }
             ast::ExprKind::Let(p, e) => { self.visit_pat(p); self.visit_expr(e); }
             ast::ExprKind::Match(e, arms) => {
-                self.visit_expr(e); for a in self.prog.files[self.file as usize].ast.list(arms) { self.visit_pat(a.pat); if let Some(e) = a.guard { self.visit_expr(e); } self.visit_expr(a.body); }
+                self.visit_expr(e); for a in self.prog.files[self.file as usize].ast.list(arms) { self.visit_pat(a.pat); if let Some(e) = a.guard.get() { self.visit_expr(e); } self.visit_expr(a.body); }
             }
             ast::ExprKind::While(row) => { let ast::WhileRow { cond: e, body: b, .. } = *self.prog.files[self.file as usize].ast.row(row); self.visit_expr(e); self.visit_block(b); }
             ast::ExprKind::For(row) => { let ast::ForRow { pat: p, iter: e, body: b, .. } = *self.prog.files[self.file as usize].ast.row(row); self.visit_pat(p); self.visit_expr(e); self.visit_block(b); }
@@ -746,11 +747,11 @@ impl LifetimeResolver<'_> {
         if m.args == ast::NO_MAC_ARGS { return; }
         let args = *self.prog.files[self.file as usize].ast.mac_arg(m.args);
         for e in self.prog.files[self.file as usize].ast.list(args.exprs) { self.visit_expr(*e); }
-        if let Some(p) = args.pat { self.visit_pat(p); } if let Some(e) = args.guard { self.visit_expr(e); }
-        if let Some(asm) = args.asm {
+        if let Some(p) = args.pat.get() { self.visit_pat(p); } if let Some(e) = args.guard.get() { self.visit_expr(e); }
+        if let Some(asm) = args.asm.get() {
             for op in self.prog.files[self.file as usize].ast.list(asm.ops) {
-                if let Some(e) = op.input { if op.dir == ast::AsmDir::Const { self.visit_anon_const(e); } else { self.visit_expr(e); } }
-                if let Some(e) = op.output { self.visit_expr(e); }
+                if let Some(e) = op.input.get() { if op.dir == ast::AsmDir::Const { self.visit_anon_const(e); } else { self.visit_expr(e); } }
+                if let Some(e) = op.output.get() { self.visit_expr(e); }
             }
         }
     }
@@ -763,7 +764,7 @@ fn child_types(ast: &ast::Ast, ty: ast::TyId, out: &mut Vec<ast::TyId>) {
         ast::Ty::Fn(pointer) => {
             let pointer = ast.fn_ptr(pointer);
             out.extend_from_slice(ast.list(pointer.params));
-            out.extend(pointer.ret);
+            out.extend(pointer.ret.get());
         }
         ast::Ty::Path(path) => path_types(ast, &path, out),
         ast::Ty::DynTrait(bounds, _) | ast::Ty::ImplTrait(bounds) => bound_types(ast, bounds, out),
@@ -773,7 +774,7 @@ fn child_types(ast: &ast::Ast, ty: ast::TyId, out: &mut Vec<ast::TyId>) {
 fn path_types(ast: &ast::Ast, path: &ast::Path, out: &mut Vec<ast::TyId>) {
     if let Some(qself) = ast.qself(path) {
         out.push(qself.ty);
-        if let Some(path) = qself.trait_path { path_types(ast, &path, out); }
+        if let Some(path) = qself.trait_path.get() { path_types(ast, &path, out); }
     }
     for segment in ast.segs(path.segs) { argument_types(ast, segment.args(), out); }
 }
@@ -787,7 +788,7 @@ fn argument_types(ast: &ast::Ast, args: ast::GenericArgsId, out: &mut Vec<ast::T
                 _ => {}
             }
         },
-        Some(GenericArgs::Paren(inputs, output)) => { out.extend_from_slice(ast.list(*inputs)); out.extend(output); }
+        Some(GenericArgs::Paren(inputs, output)) => { out.extend_from_slice(ast.list(*inputs)); out.extend(output.get()); }
         None => {}
     }
 }

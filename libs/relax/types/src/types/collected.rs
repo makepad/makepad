@@ -166,15 +166,22 @@ impl Types {
     }
 
     /// The settle rebuild (relax-compiler settle_rebuild.rs): `self` was restored from an image of
-    /// `live` encoded while compiles ran, so it holds the rows up to that encode's count. With
-    /// every type check held off (a front write), the rows interned since are copied as they are (same ids)
-    /// and the small tables -- regions, constants, the list arena, the intern tables -- are copied
-    /// whole, so the restored interner equals the live one. Nothing of `live`'s heap is shared
-    /// (it is dropped after the rebuild).
+    /// `live` encoded while compiles ran, so it holds the rows, regions and lists up to that
+    /// encode's counts (append-only arenas: `live` holds the same ones below them). With every type
+    /// check held off (a front write), what `live` interned since is copied past those counts at
+    /// the same ids and positions, and claimed in the intern tables in id and position order, as
+    /// interning claims them; the constants are copied whole (small). The restored interner then
+    /// equals the live one. Nothing of `live`'s heap is shared (it is dropped after the rebuild).
     /// None: `self` holds rows `live` does not.
     pub fn top_up_from(&mut self, live: &Types) -> Option<()> {
         let (n0, n1) = (self.len(), live.len());
         if n0 > n1 { return None; }
+        // `self` is as restore_collected made it: the settle thread's alone from the restore to
+        // here, and nothing interns into it (the restore maps the image, the cache open only reads
+        // the program), so its arenas end at the image's counts and every entry of `live` past
+        // them is new. (The rows' copy from `n0` has always rested on this.)
+        debug_assert!(self.image.as_ref().map_or(0, |i| i.len()) == n0 && self.lists.end() == self.lists.mapped.len()
+            && self.regions.unindexed.load(Ordering::Acquire), "the restored interner was used before its top-up");
         let layout = std::alloc::Layout::array::<Entry>(CHUNK).ok()?;
         for i in n0..n1 {
             let row = *live.entry(TyId(i as u32));
@@ -186,16 +193,23 @@ impl Types {
             unsafe { c.add(i & (CHUNK - 1)).write(row) };
         }
         *self.len.get_mut() = n1 as u32;
-        self.index = index::Index::copy_of(&live.index);
-        let kinds: Vec<RegionKind> = live.regions.kinds.iter().copied().collect();
-        let args: Vec<std::sync::Arc<[RegionId]>> = live.regions.args.iter().map(|a| std::sync::Arc::from(&a[..])).collect();
-        self.regions = Regions::restored(kinds, args);
+        {
+            let mut g = self.index.lock();
+            for i in n0..n1 {
+                let h = self.entry(TyId(i as u32)).hash;
+                self.index.claim(&mut g, h, Self::slot(h, i), || (0..=i).map(|j| {
+                    let h = self.entry(TyId(j as u32)).hash;
+                    (h, Self::slot(h, j))
+                }));
+            }
+        }
+        self.regions.top_up_from(&live.regions);
         // (through the codec: a constant's value tree is a fresh allocation)
         let mut w = Vec::new();
         live.consts.put(&mut w);
         self.consts = Codec::get(&mut Decode::new(&w))?;
         *self.free_regions.get_mut() = live.free_regions.load(Ordering::Relaxed);
-        self.lists = list::Lists::copy_of(&live.lists);
+        self.lists.top_up_from(&live.lists);
         Some(())
     }
 

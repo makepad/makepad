@@ -2784,7 +2784,7 @@ impl Cache {
         kh.u128(self.def_key(u, d));
         let ekey = kh.finish128();
         let owner = dg.hole_owner(item);
-        let lazy = matches!(pf.ast.items.get(owner as usize).map(|it| &it.kind), Some(crate::ast::ItemKind::Fn(_, None, _)));
+        let lazy = matches!(pf.ast.items.get(owner as usize).map(|it| &it.kind), Some(crate::ast::ItemKind::Fn(_, body, _)) if body.is_none());
         let (text_hash, names) = match deps::exp_body(pf, lo, hi, lazy) {
             Some((th, n)) => {
                 if self.mode != Mode::ReadOnly && !self.has_index(&ekey) && self.pending_keys.insert(ekey) {
@@ -6136,6 +6136,8 @@ impl FrontImages {
                         mod_path: f.module,
                         src_len: f.src_len as usize,
                         verify: crate::front::verify().then_some(crate::front::verify_file),
+                        // (restored from its image: no worker wrote one)
+                        image_bytes: 0,
                     },
                 ));
             }
@@ -6236,6 +6238,7 @@ impl FrontImages {
                 mod_path: f.module,
                 src_len: f.src_len as usize,
                 verify: crate::front::verify().then_some(crate::front::verify_file),
+                image_bytes: 0,
             })
         }))
     }
@@ -7750,7 +7753,7 @@ mod cold_tests {
         use crate::parser::ImageSink;
         let sink = FrontSink::for_dir(&dir);
         let mut f = parse();
-        assert!(sink.file(&path, &mut f));
+        assert!(sink.file(&path, &mut f).is_some());
         f.sink = Some(sink.clone());
         let part = f.part(&cfg).unwrap();
         // published mapped: the part and its tree never held heap arrays a reader could see
@@ -8365,7 +8368,7 @@ mod data_tests {
                 Some(crate::macros::MacroScope::new(prog.macros.clone())), &pre[i].name, Some(ctx), true).unwrap();
             let prep = crate::program::prepare_file(&mut pf, &cfg);
             prog.front_files[i].2 = crate::crate_image::file_meta(&path, &pre[i].name, &pf, &used.unwrap(), &prep, false);
-            assert!(sink.file(&path, &mut pf));
+            assert!(sink.file(&path, &mut pf).is_some());
             pf.sink = Some(sink.clone());
             prog.files[i] = std::sync::Arc::new(pf);
             assert!(prog.files[i].part(&cfg).unwrap().toks.is_mapped());
@@ -8413,7 +8416,7 @@ mod data_tests {
             Some(crate::macros::MacroScope::new(prog.macros.clone())), &pre[0].name, Some(ctx), true).unwrap();
         let prep = crate::program::prepare_file(&mut pf, &cfg);
         prog.front_files[0].2 = crate::crate_image::file_meta(&path, &pre[0].name, &pf, &used.unwrap(), &prep, false);
-        assert!(sink.file(&path, &mut pf));
+        assert!(sink.file(&path, &mut pf).is_some());
         pf.sink = Some(sink.clone());
         prog.files[0] = std::sync::Arc::new(pf);
         assert!(prog.files[0].part(&cfg).unwrap().image.is_some());

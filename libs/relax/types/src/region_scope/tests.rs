@@ -282,7 +282,7 @@ fn region_scope_cross_edition_macro_and_forwarded_fragment() {
         for (name, ed) in [("inner", definition), ("forwarded", caller)] {
             let scope = tree.var_scope(local(&b, &p, name)).unwrap();
             let Node::Block(id) = tree.scopes[scope.0 as usize].node else { panic!() };
-            let Some(Stmt::Expr(tail, false)) = p.files[b.file as usize].ast.stmts(BlockId(id)).last() else { panic!() };
+            let Some(Stmt::Expr(false, tail)) = p.files[b.file as usize].ast.stmts(BlockId(id)).last() else { panic!() };
             assert_eq!(tree.is_subscope_of(tree.temporary_scope(*tail).unwrap(), scope), ed >= 2024, "{name}: definition {definition}, caller {caller}");
         }
     }
@@ -294,7 +294,7 @@ fn region_scope_for_and_yield_syntax() {
     let sess = &std::sync::Arc::new(crate::Session::default());
     let pf = crate::parser::parse_owned(sess, b"fn probe() { for x in head() { yield x; } }".to_vec(), 2021).unwrap();
     let mut root = None;
-    for item in pf.ast.items.iter() { if let ItemKind::Fn(_, Some(b), _) = item.kind { root = Some(b); } }
+    for item in pf.ast.items.iter() { if let ItemKind::Fn(_, body, _) = item.kind { if let Some(b) = body.get() { root = Some(b); } } }
     let p = Program::new(sess);
     let tcx = Tcx::new();
     let b = Body::empty(crate::program::NO_DEF, vec![], 0, tcx.tys.unit);

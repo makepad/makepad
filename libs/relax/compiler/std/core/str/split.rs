@@ -241,6 +241,14 @@ impl<'a, P: Pattern<'a>> SplitTerminator<'a, P> {
         self.0.remainder()
     }
 }
+impl<'a, P: Pattern<'a>> Clone for SplitTerminator<'a, P>
+where
+    P::Searcher: Clone,
+{
+    fn clone(&self) -> SplitTerminator<'a, P> {
+        SplitTerminator(self.0.clone())
+    }
+}
 
 impl<'a, P: Pattern<'a>> Iterator for RSplitTerminator<'a, P>
 where
@@ -257,6 +265,14 @@ where
 {
     fn next_back(&mut self) -> Option<&'a str> {
         self.0.next()
+    }
+}
+impl<'a, P: Pattern<'a>> Clone for RSplitTerminator<'a, P>
+where
+    P::Searcher: Clone,
+{
+    fn clone(&self) -> RSplitTerminator<'a, P> {
+        RSplitTerminator(self.0.clone())
     }
 }
 
@@ -323,6 +339,14 @@ impl<'a, P: Pattern<'a>> SplitN<'a, P> {
         self.iter.remainder()
     }
 }
+impl<'a, P: Pattern<'a>> Clone for SplitN<'a, P>
+where
+    P::Searcher: Clone,
+{
+    fn clone(&self) -> SplitN<'a, P> {
+        SplitN { iter: self.iter.clone(), count: self.count }
+    }
+}
 
 impl<'a, P: Pattern<'a>> Iterator for RSplitN<'a, P>
 where
@@ -346,6 +370,14 @@ where
 impl<'a, P: Pattern<'a>> RSplitN<'a, P> {
     pub fn remainder(&self) -> Option<&'a str> {
         self.iter.remainder()
+    }
+}
+impl<'a, P: Pattern<'a>> Clone for RSplitN<'a, P>
+where
+    P::Searcher: Clone,
+{
+    fn clone(&self) -> RSplitN<'a, P> {
+        RSplitN { iter: self.iter.clone(), count: self.count }
     }
 }
 
@@ -376,6 +408,14 @@ where
         }
     }
 }
+impl<'a, P: Pattern<'a>> Clone for MatchIndices<'a, P>
+where
+    P::Searcher: Clone,
+{
+    fn clone(&self) -> MatchIndices<'a, P> {
+        MatchIndices(self.0.clone())
+    }
+}
 
 impl<'a, P: Pattern<'a>> Iterator for RMatchIndices<'a, P>
 where
@@ -400,6 +440,14 @@ where
         }
     }
 }
+impl<'a, P: Pattern<'a>> Clone for RMatchIndices<'a, P>
+where
+    P::Searcher: Clone,
+{
+    fn clone(&self) -> RMatchIndices<'a, P> {
+        RMatchIndices(self.0.clone())
+    }
+}
 
 impl<'a, P: Pattern<'a>> Iterator for Matches<'a, P> {
     type Item = &'a str;
@@ -419,6 +467,14 @@ where
             Some((a, b)) => Some(unsafe { sub(self.0.haystack(), a, b) }),
             None => None,
         }
+    }
+}
+impl<'a, P: Pattern<'a>> Clone for Matches<'a, P>
+where
+    P::Searcher: Clone,
+{
+    fn clone(&self) -> Matches<'a, P> {
+        Matches(self.0.clone())
     }
 }
 
@@ -443,6 +499,14 @@ where
             Some((a, b)) => Some(unsafe { sub(self.0.haystack(), a, b) }),
             None => None,
         }
+    }
+}
+impl<'a, P: Pattern<'a>> Clone for RMatches<'a, P>
+where
+    P::Searcher: Clone,
+{
+    fn clone(&self) -> RMatches<'a, P> {
+        RMatches(self.0.clone())
     }
 }
 

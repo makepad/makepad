@@ -9054,7 +9054,11 @@ unsafe fn compile_slot_on_stack_rt(up: *mut Unit, id: u32) -> u64 {
     let _cost = relax_codegen::fncost::Record::new(id, 0, cost_origin);
     relax_codegen::fncost::event("call", id);
     let on_main = MAIN_TID.load(Ordering::Relaxed) == me() && !owner::is_owner();
-    if on_main {
+    // every program thread's lazy compile is recorded while the flight recorder runs: a long one
+    // is named there with where its time went (an app lock held across a first call is held that
+    // long, and the UI waiting for that lock waits for the compile)
+    let recorded = on_main || !owner::is_owner() && crate::inspect::flightrec::on();
+    if recorded {
         let mut rec = MainCompile { start: wall_ns(), slot: id, how: u8::MAX, ..Default::default() };
         if FIRST_PRESENT.load(Ordering::Relaxed) {
             rec.jobs = BG_ACTIVE.load(Ordering::Relaxed);
@@ -9070,15 +9074,34 @@ unsafe fn compile_slot_on_stack_rt(up: *mut Unit, id: u32) -> u64 {
     let r = compile_slot_on_stack_inner(up, id);
     if on_main {
         crate::postframe::ui_wait_end();
+    }
+    if recorded {
         if let Some(mut rec) = MAIN_REC.with(|c| c.take()) {
             rec.end = wall_ns();
-            crate::postframe::main_compile(&(&*up).fns[id as usize].name, &rec);
-            if main_compile_log() {
-                MAIN_COMPILES.lock().unwrap().push(rec);
+            let name = &(&*up).fns[id as usize].name;
+            if rec.end - rec.start >= crate::postframe::STALL_LOG_NS {
+                lazy_long_event(name, &rec);
+            }
+            if on_main {
+                crate::postframe::main_compile(name, &rec);
+                if main_compile_log() {
+                    MAIN_COMPILES.lock().unwrap().push(rec);
+                }
             }
         }
     }
     r
+}
+
+/// The flight recorder's line for a long lazy compile (`compile.lazy-long`): the thread that made
+/// the first call, the wall time, where it went and how the slot was satisfied (a = slot,
+/// b = wall us).
+fn lazy_long_event(name: &str, r: &MainCompile) {
+    let ms = |ns: u64| ns as f64 / 1e6;
+    let how = MAIN_HOW_NAMES.get(r.how as usize).copied().unwrap_or("?");
+    let text = format!("{:.1} ms on {}: owner queue {:.1}, typeck ahead {:.1}, front {:.1}, back {:.1}, finish {:.1}, in-flight wait {:.1}; {how}; #{} {}",
+        ms(r.end - r.start), os::thread::name(os::thread::current()), ms(r.ns[1]), ms(r.ns[0]), ms(r.ns[2]), ms(r.ns[3]), ms(r.ns[4]), ms(r.ns[5]), r.slot, short_name(name));
+    crate::inspect::flightrec::event("compile.lazy-long", &text, r.slot as u64, (r.end - r.start) / 1000);
 }
 
 unsafe fn compile_slot_on_stack_inner(up: *mut Unit, id: u32) -> u64 {
@@ -9106,6 +9129,7 @@ unsafe fn compile_slot_on_stack_inner(up: *mut Unit, id: u32) -> u64 {
     }
     let _startup = StartupCompile::foreground();
     let class = owner::Class::Program;
+    let on_main = MAIN_TID.load(Ordering::Relaxed) == me();
     // the slot's body (and its small callees') type check runs before its front: other threads
     // keep compiling meanwhile. Code linked ahead or found in the disk cache needs no front end:
     // that is tried first (in a unit call: a check without it saw no cache and type-checked
@@ -9156,9 +9180,8 @@ unsafe fn compile_slot_on_stack_inner(up: *mut Unit, id: u32) -> u64 {
             COMPILE_LAST.store(w0, Ordering::Relaxed);
             busy::note(busy::LAZY);
             if crate::postframe::log_on() && FIRST_PRESENT.load(Ordering::Relaxed) {
-                let mut mine = false;
-                main_rec(|_| mine = true);
-                if mine {
+                // (main's compile: the post-present log names its slot by key)
+                if on_main {
                     let k = crate::zone_alloc::kept_with(|| slot_key(&*up, id));
                     *crate::postframe::LOG_KEY.lock().unwrap() = k;
                 }
@@ -25215,6 +25238,13 @@ pub fn front_try_write() -> Option<std::sync::RwLockWriteGuard<'static, ()>> {
 /// wait for a reader (an app thread that parked for good holding a type check's read lock:
 /// EXITING parks every other thread that asks for the unit lock).
 pub fn front_write_within(ms: u64) -> Option<std::sync::RwLockWriteGuard<'static, ()>> {
+    front_write_unless(ms, &|| false)
+}
+
+/// `front_write_within`, which also gives up once `give_way` holds: an owner request that may be
+/// tried again later steps aside for requests its wait would hold up (the pump serves only Job
+/// and Publish requests: a program thread's request waits for the whole of it).
+pub fn front_write_unless(ms: u64, give_way: &dyn Fn() -> bool) -> Option<std::sync::RwLockWriteGuard<'static, ()>> {
     owner::forbid_in_publish("a front write", u32::MAX);
     let _waiting = crate::preempt::WriterWaiting::new();
     let t0 = std::time::Instant::now();
@@ -25222,12 +25252,12 @@ pub fn front_write_within(ms: u64) -> Option<std::sync::RwLockWriteGuard<'static
         if let Some(g) = front_try_write() {
             return Some(g);
         }
-        if t0.elapsed().as_millis() as u64 >= ms {
+        if t0.elapsed().as_millis() as u64 >= ms || give_way() {
             return None;
         }
         if owner::is_owner() {
             // (a reader may wait for one of the owner's answers)
-            owner::pump_wait(&|| FRONT_RW.try_write().is_ok() || t0.elapsed().as_millis() as u64 >= ms);
+            owner::pump_wait(&|| FRONT_RW.try_write().is_ok() || t0.elapsed().as_millis() as u64 >= ms || give_way());
         } else {
             std::thread::sleep(std::time::Duration::from_micros(200));
         }
@@ -29188,8 +29218,9 @@ unsafe fn realtime_installed(up: *mut Unit, id: u32, refs: &CodeRefs, site: &'st
     realtime_reach_queued(up, new, "new code");
 }
 
-/// A tier-up build of slot `id` (O2, a verified O1 rebuild, a counted build, O3) is built and
-/// about to replace its code: when `id` is real-time code, the slots the new code (`relocs`)
+/// A tier-up build of slot `id` (O2, a verified O1 rebuild, a counted build, O3), or a live
+/// patch's new code of it (reload.rs, on the owner), is built and about to replace its code: when
+/// `id` is real-time code, the slots the new code (`relocs`)
 /// calls or names that the reach has not walked are walked now -- compiled, with everything they
 /// reach -- and the install waits for that. The old code runs until then, so a real-time thread
 /// never meets a lazy stub in the new code. (Queued for the drain after the install instead, a
@@ -29201,7 +29232,7 @@ unsafe fn realtime_installed(up: *mut Unit, id: u32, refs: &CodeRefs, site: &'st
 /// returns is dropped at the end of the install's publish): a walk that took it in between would
 /// read the references of the code this build replaces. Every program's tier-up builds pass here
 /// (the first mark can come while one is in flight): a lock and a map entry each.
-unsafe fn realtime_before_install(up: *mut Unit, id: u32, relocs: &[relax_backend::rir::RelocAt]) -> RtBuild {
+pub(crate) unsafe fn realtime_before_install(up: *mut Unit, id: u32, relocs: &[relax_backend::rir::RelocAt]) -> RtBuild {
     if RT_KEEP.with(|k| k.get()) {
         return RtBuild::NONE;
     }
@@ -29262,7 +29293,7 @@ unsafe fn realtime_before_install(up: *mut Unit, id: u32, relocs: &[relax_backen
 /// `cut`: the walk of the new code's references did not finish (the tiers stopped meanwhile: the
 /// process ends, the unit goes): the site drops its build, the old code stays.
 #[must_use]
-struct RtBuild {
+pub(crate) struct RtBuild {
     slot: Option<(usize, u32)>,
     cut: bool,
 }

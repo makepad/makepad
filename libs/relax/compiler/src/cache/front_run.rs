@@ -114,36 +114,37 @@ impl FrontSink {
 }
 
 impl ImageSink for FrontSink {
-    fn file(&self, path: &str, pf: &mut ParsedFile) -> bool {
-        if pf.src.is_mapped() { return false; }
+    fn file(&self, path: &str, pf: &mut ParsedFile) -> Option<usize> {
+        if pf.src.is_mapped() { return None; }
         let key = Cache::front_key(path, pf.source_hash(path));
         let p = crate::store::profiling();
         let s = crate::load_profile::span(p, "front-image-encode", path);
         let w = crate::front::image(pf);
         drop(s);
         let s = crate::load_profile::span(p, "front-image-append", path);
-        let Some((loc, img)) = self.write(key, &w) else { return false };
+        let (loc, img) = self.write(key, &w)?;
         drop(s);
         let s = crate::load_profile::span(p, "front-image-free", path);
         drop(w);
         drop(s);
         let _s = crate::load_profile::span(p, "front-image-apply", path);
-        if !crate::front::apply(path, pf, img) { return false; }
+        if !crate::front::apply(path, pf, img) { return None; }
         crate::front::RECORDED_FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         pf.image = Some(loc);
-        true
+        Some(img.len())
     }
 
-    fn part(&self, pf: &ParsedFile, fp: &mut FilePart, ast: &mut crate::ast::Ast) {
+    fn part(&self, pf: &ParsedFile, fp: &mut FilePart, ast: &mut crate::ast::Ast) -> usize {
         // the path the file was published (and its image keyed) under
-        let Some((path, hash)) = pf.source_hash.get().cloned() else { return };
-        let Some(w) = crate::front::part_image(pf, fp, ast) else { return };
-        let Some((loc, img)) = self.write(Cache::front_part_key(&path, hash), &w) else { return };
+        let Some((path, hash)) = pf.source_hash.get().cloned() else { return 0 };
+        let Some(w) = crate::front::part_image(pf, fp, ast) else { return 0 };
+        let Some((loc, img)) = self.write(Cache::front_part_key(&path, hash), &w) else { return 0 };
         drop(w);
         if crate::front::map_part(&path, pf, fp, ast, img) {
             crate::front::PARTS_RECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             fp.image = Some(loc);
         }
+        img.len()
     }
 }
 

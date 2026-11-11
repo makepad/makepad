@@ -54,19 +54,19 @@ impl Cx<'_> {
             ast::Stmt::Let(row) => {
                 let ast::LetStmt { pat, ty, init, else_, .. } = *ast.row(row);
                 let pat_span = self.pat_span(pat);
-                let span = match init {
+                let span = match init.get() {
                     Some(init) => self.span(pat_span.lo, self.ast().expr(init).hi.max(pat_span.hi)),
                     None => pat_span,
                 };
                 let remainder_scope = self.node_scope_data(Node::Block(b.0), ScopeData::Remainder(index as u32), span)?;
                 let init_scope = self.node_scope(Node::Statement(node), span)?;
-                let else_block = match else_ {
+                let else_block = match else_.get() {
                     Some(els) => Some(self.mirror_block(els)?),
                     None => None,
                 };
                 self.pat_hint = pat_span.lo;
                 let pattern = self.lower_pattern_for_let(pat, ty.map(|t| (t, pat_span)))?;
-                let initializer = match init {
+                let initializer = match init.get() {
                     Some(init) => Some(self.mirror_expr(init)?),
                     None => None,
                 };

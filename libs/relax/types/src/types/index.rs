@@ -190,10 +190,4 @@ impl<S: Slot> Index<S> {
         Some(Self::of(Box::new(Table { bits, slots: slots.iter().map(|&s| S::atomic(s)).collect() }), count))
     }
 
-    /// A copy of `live`'s current table (nothing claims while it is taken).
-    pub(crate) fn copy_of(live: &Self) -> Self {
-        let g = live.lock();
-        let t = live.table();
-        Self::of(Box::new(Table { bits: t.bits, slots: t.slots.iter().map(|a| S::atomic(S::load(a))).collect() }), g.count)
-    }
 }

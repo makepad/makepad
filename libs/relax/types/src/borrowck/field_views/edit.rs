@@ -80,14 +80,14 @@ impl<'a> FileView<'a> {
         let mut out = Vec::new();
         for (index, stmt) in ast.stmts(block).iter().enumerate() {
             let range = match *stmt {
-                Stmt::Expr(e, semi) => {
+                Stmt::Expr(semi, e) => {
                     let ex = ast.expr(e);
                     let hi = if semi { self.semi_after(ex.hi) } else { Some(ex.hi) };
                     hi.map(|hi| (ex.lo, hi))
                 }
                 Stmt::Let(row) => {
                     let l = ast.row(row);
-                    match (l.init, ast.pat(l.pat)) {
+                    match (l.init.get(), ast.pat(l.pat)) {
                         (Some(init), Pat::Ident { name, .. }) => {
                             let ex = ast.expr(init);
                             self.let_keyword_before(name.lo).and_then(|lo| self.semi_after(ex.hi).map(|hi| (lo, hi)))
@@ -239,17 +239,19 @@ fn rewrite_one(v: &FileView<'_>, r: &FvRecordRaw, n: usize) -> Result<(Vec<Edit>
     let stmts = ast.stmts(stmt.block);
     if let Stmt::Let(row) = stmts[stmt.index] {
         let l = ast.row(row);
-        if let (Some(init), Pat::Ident { by_ref: false, mutbl: false, name, sub: None }) = (l.init, ast.pat(l.pat)) {
-            let init_e = ast.expr(init);
-            if init_e.lo <= r.span.lo && r.span.hi <= init_e.hi && matches!(init_e.kind, ExprKind::AddrOf(false, _, x) if v.is_plain(x)) {
-                let bound = v.pf().text(*name).to_string();
-                let access = v.stmt_ranges(stmt.block).into_iter().find(|s| s.index > stmt.index && s.lo <= r.access.lo && r.access.hi <= s.hi)
-                    .ok_or("the conflicting statement is not later in the same block")?;
-                if v.mentions((access.lo, access.hi), &bound) { return Err("the conflicting statement uses the borrow"); }
-                let init_text = v.text(init_e.lo, init_e.hi);
-                let indent = v.indent_at(access.lo);
-                return Ok((vec![Edit { lo: access.hi, hi: access.hi, text: format!("\n{indent}let {bound} = {init_text};") }],
-                    format!("`{place_text}` borrowed again after the conflicting statement")));
+        if let (Some(init), Pat::Ident { by_ref: false, mutbl: false, name, sub }) = (l.init.get(), ast.pat(l.pat)) {
+            if sub.is_none() {
+                let init_e = ast.expr(init);
+                if init_e.lo <= r.span.lo && r.span.hi <= init_e.hi && matches!(init_e.kind, ExprKind::AddrOf(false, _, x) if v.is_plain(x)) {
+                    let bound = v.pf().text(*name).to_string();
+                    let access = v.stmt_ranges(stmt.block).into_iter().find(|s| s.index > stmt.index && s.lo <= r.access.lo && r.access.hi <= s.hi)
+                        .ok_or("the conflicting statement is not later in the same block")?;
+                    if v.mentions((access.lo, access.hi), &bound) { return Err("the conflicting statement uses the borrow"); }
+                    let init_text = v.text(init_e.lo, init_e.hi);
+                    let indent = v.indent_at(access.lo);
+                    return Ok((vec![Edit { lo: access.hi, hi: access.hi, text: format!("\n{indent}let {bound} = {init_text};") }],
+                        format!("`{place_text}` borrowed again after the conflicting statement")));
+                }
             }
         }
         return Err("the borrow of a field is neither a single statement's nor a `let` re-borrowable after the conflict");
@@ -337,9 +339,10 @@ fn disjoint_rewrite(v: &FileView<'_>, d: &super::DisjointRecord) -> Result<(Vec<
         let stmt = v.enclosing_stmt(span).ok_or("the borrow is not inside a plain statement")?;
         let Stmt::Let(row) = ast.stmts(stmt.block)[stmt.index] else { return Err("the borrow is not a `let`") };
         let l = ast.row(row);
-        let (Some(init), Pat::Ident { by_ref: false, mutbl, name, sub: None }, None, None) = (l.init, *ast.pat(l.pat), l.ty, l.else_) else {
+        let (Some(init), Pat::Ident { by_ref: false, mutbl, name, sub }, None, None) = (l.init.get(), *ast.pat(l.pat), l.ty.get(), l.else_.get()) else {
             return Err("the `let` is not `let <name> = ..;`");
         };
+        if sub.is_some() { return Err("the `let` is not `let <name> = ..;`"); }
         if !matches!(ast.expr(v.unparen(init)).kind, ExprKind::AddrOf(false, true, x) if v.unparen(x) == index_id) { return Err("the `let` does not bind `&mut base[index]`"); }
         let name = format!("{}{}", if mutbl { "mut " } else { "" }, v.pf().text(name));
         Ok((stmt, name, base, i))
@@ -382,7 +385,7 @@ fn relookup(v: &FileView<'_>, lookup: super::Lookup) -> Result<(Vec<Edit>, Strin
         if v.pf().text(segs.last()?.name) != "Some" { return None; }
         let [p] = ast.list(ps) else { return None };
         match *ast.pat(*p) {
-            crate::ast::Pat::Ident { by_ref: false, mutbl, name, sub: None } => Some((v.pf().text(name).to_string(), mutbl)),
+            crate::ast::Pat::Ident { by_ref: false, mutbl, name, sub } if sub.is_none() => Some((v.pf().text(name).to_string(), mutbl)),
             _ => None,
         }
     };
@@ -390,7 +393,7 @@ fn relookup(v: &FileView<'_>, lookup: super::Lookup) -> Result<(Vec<Edit>, Strin
     // it names the variant or binds), `Option::None`, or `_`
     let is_none = |pat: crate::ast::PatId| match *ast.pat(pat) {
         crate::ast::Pat::Wild => true,
-        crate::ast::Pat::Ident { by_ref: false, mutbl: false, name, sub: None } => v.pf().text(name) == "None",
+        crate::ast::Pat::Ident { by_ref: false, mutbl: false, name, sub } if sub.is_none() => v.pf().text(name) == "None",
         crate::ast::Pat::Path(path) => ast.segs(path.segs).last().is_some_and(|s| v.pf().text(s.name) == "None"),
         _ => false,
     };

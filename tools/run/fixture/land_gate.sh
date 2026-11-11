@@ -832,9 +832,11 @@ if [ "$mode" = testrun ]; then
   QBASE=${2:?testrun <base sha> <commercial base sha|->}; QCBASE=${3:--}
   python3 -I "$here/affected.py" --runs "$QBASE" "$QCBASE" > "$log/affected" 2> "$log/affected.err" || { tail -5 "$log/affected.err"; echo "NODEGATE-FAIL: affected"; exit 1; }
   : > "$log/runs"
+  # (a line's words after its directory go to `makepad test`: a package's test variant, affected.py variants)
   while read -r -a f; do
-    if proven "test ${f[1]}"; then echo "test ${f[1]}: proven"; unit_line proven "test ${f[1]}"
-    else printf 'test %s %s\n' "${f[1]}" "${f[2]}" >> "$log/runs"; fi
+    unit=$(unit_of test "${f[@]:1}")
+    if proven "$unit"; then echo "$unit: proven"; unit_line proven "$unit"
+    else echo "test ${f[*]:1}" >> "$log/runs"; fi
   done < <(grep '^tests ' "$log/affected")
   shard_units "$log/runs" || { echo "NODEGATE-FAIL: shard"; exit 1; }
   declare -A PEAK_MB=() TIME_S=()

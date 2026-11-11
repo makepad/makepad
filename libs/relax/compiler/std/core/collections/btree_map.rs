@@ -749,6 +749,13 @@ pub struct IterMut<'a, K: 'a, V: 'a> {
     _m: PhantomData<&'a mut (K, V)>,
 }
 
+impl<'a, K, V> IterMut<'a, K, V> {
+    fn iter(&self) -> Iter<'_, K, V> {
+        // SAFETY: the map lives for this borrow, and the cursors only visit unyielded entries.
+        Iter { map: unsafe { &*self.map }, front: self.front, back: self.back, remaining: self.remaining }
+    }
+}
+
 impl<'a, K, V> Iterator for IterMut<'a, K, V> {
     type Item = (&'a K, &'a mut V);
     fn next(&mut self) -> Option<(&'a K, &'a mut V)> {
@@ -790,6 +797,12 @@ impl<'a, K, V> DoubleEndedIterator for IterMut<'a, K, V> {
 impl<'a, K, V> ExactSizeIterator for IterMut<'a, K, V> {}
 impl<'a, K, V> FusedIterator for IterMut<'a, K, V> {}
 
+impl<'a, K: fmt::Debug, V: fmt::Debug> fmt::Debug for IterMut<'a, K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
 pub struct IntoIter<K, V> {
     map: BTreeMap<K, V>,
 }
@@ -812,6 +825,12 @@ impl<K, V> DoubleEndedIterator for IntoIter<K, V> {
 
 impl<K, V> ExactSizeIterator for IntoIter<K, V> {}
 impl<K, V> FusedIterator for IntoIter<K, V> {}
+
+impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for IntoIter<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.map.iter()).finish()
+    }
+}
 
 pub struct Range<'a, K: 'a, V: 'a> {
     map: &'a BTreeMap<K, V>,
@@ -1037,6 +1056,12 @@ impl<'a, K, V> DoubleEndedIterator for ValuesMut<'a, K, V> {
 
 impl<'a, K, V> ExactSizeIterator for ValuesMut<'a, K, V> {}
 
+impl<'a, K, V: fmt::Debug> fmt::Debug for ValuesMut<'a, K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.inner.iter().map(|(_, v)| v)).finish()
+    }
+}
+
 pub struct IntoKeys<K, V> {
     inner: IntoIter<K, V>,
 }
@@ -1066,6 +1091,12 @@ impl<K, V> DoubleEndedIterator for IntoKeys<K, V> {
 impl<K, V> ExactSizeIterator for IntoKeys<K, V> {}
 impl<K, V> FusedIterator for IntoKeys<K, V> {}
 
+impl<K: fmt::Debug, V> fmt::Debug for IntoKeys<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.inner.map.keys()).finish()
+    }
+}
+
 pub struct IntoValues<K, V> {
     inner: IntoIter<K, V>,
 }
@@ -1094,6 +1125,12 @@ impl<K, V> DoubleEndedIterator for IntoValues<K, V> {
 
 impl<K, V> ExactSizeIterator for IntoValues<K, V> {}
 impl<K, V> FusedIterator for IntoValues<K, V> {}
+
+impl<K, V: fmt::Debug> fmt::Debug for IntoValues<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.inner.map.values()).finish()
+    }
+}
 
 impl<'a, K, V> IntoIterator for &'a BTreeMap<K, V> {
     type Item = (&'a K, &'a V);

@@ -383,7 +383,7 @@ pub fn display_path(prog: &crate::program::Program, d: crate::program::DefId) ->
         s.push_str("::");
     }
     let self_ty = ty_label(file, ii.self_ty, 0);
-    match &ii.trait_ {
+    match &ii.trait_.get() {
         Some(t) => {
             s.push('<');
             s.push_str(&self_ty);
@@ -418,7 +418,7 @@ fn ty_label(file: &crate::parser::ParsedFile, t: crate::ast::TyId, depth: u32) -
     }
     match file.ast.ty(t) {
         Ty::Path(p) => path_label(file, p),
-        Ty::Ref(_, m, inner) => format!("&{}{}", if *m { "mut " } else { "" }, ty_label(file, *inner, depth + 1)),
+        Ty::Ref(m, _, inner) => format!("&{}{}", if *m { "mut " } else { "" }, ty_label(file, *inner, depth + 1)),
         Ty::Ptr(m, inner) => format!("*{} {}", if *m { "mut" } else { "const" }, ty_label(file, *inner, depth + 1)),
         Ty::Slice(inner) => format!("[{}]", ty_label(file, *inner, depth + 1)),
         Ty::Array(inner, _) => format!("[{}; _]", ty_label(file, *inner, depth + 1)),
@@ -1741,14 +1741,14 @@ impl<'a> Lcx<'a> {
                     let mac = ast.row(*row);
                     if mac.args != NO_MAC_ARGS {
                         let args = ast.mac_arg(mac.args);
-                        if args.pat.is_some_and(|p| self.pat_binds_by_ref(p)) {
+                        if args.pat.get().is_some_and(|p| self.pat_binds_by_ref(p)) {
                             if let Some(&x) = ast.list(args.exprs).first() {
                                 self.mark_root(x);
                             }
                         }
-                        if let Some(asm) = args.asm {
+                        if let Some(asm) = args.asm.get() {
                             for op in ast.list(asm.ops) {
-                                if let Some(out) = op.output {
+                                if let Some(out) = op.output.get() {
                                     self.mark_root(out);
                                 }
                             }
@@ -1776,12 +1776,12 @@ impl<'a> Lcx<'a> {
             for stmt in ast.stmts(bl) {
                 if let Stmt::Let(row) = *stmt {
                     let decl = ast.row(row);
-                    if let Some(init) = decl.init {
+                    if let Some(init) = decl.init.get() {
                         if self.pat_binds_by_ref(decl.pat) {
                             self.mark_root(init);
                         }
                     }
-                    if let Some(els) = decl.else_ {
+                    if let Some(els) = decl.else_.get() {
                         if blocks.insert(els.0) {
                             pending.push(els);
                         }
@@ -1953,7 +1953,7 @@ impl<'a> Lcx<'a> {
             return;
         }
         let (fsig, body) = match &ast.item(prog_def_item).kind {
-            ItemKind::Fn(s, b, _) => (*ast.fn_sig(*s), b.or_else(|| self.u.prog.fn_body(self.u.prog.def(def).file, prog_def_item).ok().flatten())),
+            ItemKind::Fn(s, b, _) => (*ast.fn_sig(*s), b.get().or_else(|| self.u.prog.fn_body(self.u.prog.def(def).file, prog_def_item).ok().flatten())),
             ItemKind::Const(_, e) | ItemKind::Static(_, _, e) if e.is_some() => {
                 // const/static initializer thunk: fn(out: *mut T)
                 let e = self.u.prog.const_body(self.u.prog.def(def).file, prog_def_item).expect("checked initializer").unwrap_or(e.get().unwrap());
@@ -2059,7 +2059,7 @@ impl<'a> Lcx<'a> {
                     self.write_place(&pl, t, v);
                     self.own_local(li);
                 }
-                (None, Some(p)) if !matches!(ast.pat(p), Pat::Ident { by_ref: false, sub: None, .. }) && self.needs_drop_glue(t) => {
+                (None, Some(p)) if !matches!(ast.pat(p), Pat::Ident { by_ref: false, sub, .. } if sub.is_none()) && self.needs_drop_glue(t) => {
                     // a parameter pattern (`ref s: S`, `(a, _): (D, D)`, `_: D`): the argument is a
                     // variable of the function like `let _tmp = arg; let pat = _tmp;` (rustc):
                     // what the pattern does not move out drops when the function ends
@@ -2103,7 +2103,7 @@ impl<'a> Lcx<'a> {
             // (type checking accepted it): its end is unreachable
             let blk = ast.block(bid);
             let tail = match ast.list(blk.stmts).last() {
-                Some(Stmt::Expr(x, false)) => Some(*x),
+                Some(Stmt::Expr(false, x)) => Some(*x),
                 _ => None,
             };
             // a tail of type `!` (`fn f(x: !) -> T { x }`) never produces a value either
@@ -2236,7 +2236,7 @@ impl<'a> Lcx<'a> {
         }
         for (p, t, regs, by_ptr) in pv {
             let v = if by_ptr { Val::M(regs[0], 0) } else { Val::L(regs) };
-            if !matches!(ast.pat(p), Pat::Ident { by_ref: false, sub: None, .. }) && self.needs_drop_glue(t) {
+            if !matches!(ast.pat(p), Pat::Ident { by_ref: false, sub, .. } if sub.is_none()) && self.needs_drop_glue(t) {
                 // a parameter pattern (`|(a, _): (D, D)|`): as a fn's, what the pattern does not
                 // move out drops when the closure body ends (it leaked)
                 self.bind_pat_owned(p, v, t, 0);
@@ -2991,8 +2991,8 @@ impl<'a> Lcx<'a> {
     fn probe_before(&mut self, s: &Stmt) {
         let ast = self.ast();
         let pos = match s {
-            Stmt::Let(r) => match ast.row(*r).init { Some(e) => ast.expr(e).lo, None => return },
-            Stmt::Expr(e, _) => ast.expr(*e).lo,
+            Stmt::Let(r) => match ast.row(*r).init.get() { Some(e) => ast.expr(e).lo, None => return },
+            Stmt::Expr(_, e) => ast.expr(*e).lo,
             Stmt::Attrs(r) => ast.expr(ast.row(*r).expr).lo,
             _ => return,
         };
@@ -3086,7 +3086,7 @@ impl<'a> Lcx<'a> {
             }
             // this statement's temporaries (an enclosing statement's stay pending)
             let mark = self.stmt_temps.len();
-            if i + 1 == n && matches!(s, Stmt::Expr(_, false)) && edition < 2024 {
+            if i + 1 == n && matches!(s, Stmt::Expr(false, _)) && edition < 2024 {
                 if let Some(t) = self.tail_marks.last_mut() {
                     *t = Some(mark);
                 }
@@ -3112,9 +3112,9 @@ impl<'a> Lcx<'a> {
                     // a place matched against a pattern: what moves out of it is the pattern's
                     // by-value bindings (E0507/8/9 when the place is borrowed, indexed or of a
                     // Drop type); a plain `let x = place;` moves the whole value (lower_expr)
-                    let plain_move = matches!(ast.pat(*pat), Pat::Ident { sub: None, by_ref: false, .. } | Pat::Wild);
+                    let plain_move = matches!(ast.pat(*pat), Pat::Ident { sub, by_ref: false, .. } if sub.is_none()) || matches!(ast.pat(*pat), Pat::Wild);
                     let mut scrut_read = None;
-                    if let Some(e) = init {
+                    if let Some(e) = &init.get() {
                         if !plain_move && self.is_place_expr(*e) {
                             let mut x = *e;
                             while let ExprKind::Paren(y) = ast.expr(x).kind { x = y; }
@@ -3127,7 +3127,7 @@ impl<'a> Lcx<'a> {
                         }
                     }
                     let scrut_saved = std::mem::replace(&mut self.scrut_read, scrut_read);
-                    match init {
+                    match &init.get() {
                         Some(e) if matches!(ast.pat(*pat), Pat::Wild) && else_.is_none() && self.is_place_expr(*e) => {
                             // `let _ = place;` evaluates the place expression (an index is bounds
                             // checked and panics, an overloaded Index runs) but neither reads,
@@ -3136,7 +3136,7 @@ impl<'a> Lcx<'a> {
                             self.pos = ast.expr(*e).lo;
                             let _ = self.lower_place(*e);
                         }
-                        Some(e) if else_.is_none() && self.is_place_expr(*e) && (matches!(ast.pat(*pat), Pat::Ident { by_ref: true, sub: None, .. }) || self.unsized_ty(t)) => {
+                        Some(e) if else_.is_none() && self.is_place_expr(*e) && (matches!(ast.pat(*pat), Pat::Ident { by_ref: true, sub, .. } if sub.is_none()) || self.unsized_ty(t)) => {
                             // the initializer of `let` is a place expression context: `let ref a =
                             // *"abc"` borrows the place itself (an unsized one cannot be read as a
                             // value; Reference expressions.md place expression contexts)
@@ -3148,7 +3148,7 @@ impl<'a> Lcx<'a> {
                         }
                         Some(e)
                             if else_.is_none()
-                                && !matches!(ast.pat(*pat), Pat::Wild | Pat::Ident { sub: None, .. })
+                                && !matches!(ast.pat(*pat), Pat::Wild) && !matches!(ast.pat(*pat), Pat::Ident { sub, .. } if sub.is_none())
                                 && !self.b.coerce(e.0).is_some()
                                 && self.field_move_path(*e).is_some() =>
                         {
@@ -3166,7 +3166,7 @@ impl<'a> Lcx<'a> {
                         }
                         Some(e)
                             if else_.is_none()
-                                && !matches!(ast.pat(*pat), Pat::Wild | Pat::Ident { sub: None, by_ref: false, .. })
+                                && !matches!(ast.pat(*pat), Pat::Wild) && !matches!(ast.pat(*pat), Pat::Ident { sub, by_ref: false, .. } if sub.is_none())
                                 && !self.b.coerce(e.0).is_some()
                                 && self.is_place_expr(*e)
                                 && (self.pat_binds_by_ref(*pat) || !self.pat_moves_droppable(*pat)) =>
@@ -3217,7 +3217,7 @@ impl<'a> Lcx<'a> {
                             for x in &ext {
                                 self.extend_ops.remove(x);
                             }
-                            match else_ {
+                            match &else_.get() {
                                 None if matches!(ast.pat(*pat), Pat::Wild) => self.drop_val(v, t),
                                 None if !matches!(ast.pat(*pat), Pat::Ident { .. }) && self.needs_drop_glue(t) && self.rvalue_rooted(*e) => {
                                     // `let (x, _) = (a, b);`: the value is a temporary of the
@@ -3351,7 +3351,7 @@ impl<'a> Lcx<'a> {
                 }
                 // stripped at load (program::strip_cfg_stmts)
                 Stmt::Item(_) | Stmt::Empty | Stmt::Attrs(..) => {}
-                Stmt::Expr(e, semi) => {
+                Stmt::Expr(semi, e) => {
                     self.pos = ast.expr(*e).lo;
                     let v = self.lower_expr(*e);
                     // a block's tail is a coercion site (`&self.v` as `&[T]`, `self` as `&dyn Tr`)
@@ -3390,10 +3390,10 @@ impl<'a> Lcx<'a> {
             // a block's tail expression is a temporary scope only from edition 2024
             // (Reference destructors.scope.temporary.edition2024); before, its temporaries
             // live to the end of the enclosing temporary scope
-            let is_tail = i + 1 == n && matches!(s, Stmt::Expr(_, false));
+            let is_tail = i + 1 == n && matches!(s, Stmt::Expr(false, _));
             if !is_tail || edition >= 2024 {
                 if is_tail {
-                    result = self.settle_before_temp_drop(result, self.body_ty(match s { Stmt::Expr(e, _) => *e, _ => ExprId(0) }), mark);
+                    result = self.settle_before_temp_drop(result, self.body_ty(match s { Stmt::Expr(_, e) => *e, _ => ExprId(0) }), mark);
                 }
                 self.drop_stmt_temps_from(mark);
             }
@@ -3569,7 +3569,7 @@ impl<'a> Lcx<'a> {
         self.push_scope();
         let (fp, ft) = self.project(&opl, opt_t, some_vi, 0);
         let v = self.read_place(&fp, ft);
-        if !matches!(self.ast().pat(p), Pat::Ident { by_ref: false, sub: None, .. }) && self.needs_drop_glue(ft) {
+        if !matches!(self.ast().pat(p), Pat::Ident { by_ref: false, sub, .. } if sub.is_none()) && self.needs_drop_glue(ft) {
             // `for _ in ..` / `for (a, _) in ..`: the item lives to the end of the iteration
             let top = self.scopes.len() - 1;
             self.bind_pat_owned(p, v, ft, top);
@@ -4397,12 +4397,12 @@ impl<'a> Lcx<'a> {
                 }
             }
             ExprKind::Block(b, _) | ExprKind::Unsafe(b) => {
-                if let Some(Stmt::Expr(x, false)) = ast.stmts(*b).last() {
+                if let Some(Stmt::Expr(false, x)) = ast.stmts(*b).last() {
                     self.collect_extending(*x, out);
                 }
             }
             ExprKind::If(_, then, els) => {
-                if let Some(Stmt::Expr(x, false)) = ast.stmts(*then).last() {
+                if let Some(Stmt::Expr(false, x)) = ast.stmts(*then).last() {
                     self.collect_extending(*x, out);
                 }
                 if let Some(x) = els.get() { self.collect_extending(x, out); }
@@ -4482,7 +4482,7 @@ impl<'a> Lcx<'a> {
     fn bind_pat(&mut self, p: PatId, v: Val, t: TyId) {
         let ast = self.ast();
         match ast.pat(p) {
-            Pat::Ident { sub: None, by_ref: false, .. } if !self.b.pat_res.contains_key(&p.0) && !self.b.pat_bind_ref.contains_key(&p.0) => {
+            Pat::Ident { sub, by_ref: false, .. } if sub.is_none() && !self.b.pat_res.contains_key(&p.0) && !self.b.pat_bind_ref.contains_key(&p.0) => {
                 if let Some(&li) = self.b.pat_local.get(&p.0) {
                     // an aggregate rvalue in memory is a fresh temporary (or a by-pointer
                     // parameter copy): the local takes it over instead of copying it
@@ -4592,7 +4592,7 @@ impl<'a> Lcx<'a> {
                         self.own_local(li);
                     }
                 }
-                if let Some(s) = sub {
+                if let Some(s) = &sub.get() {
                     self.bind_pat_place(*s, place, t);
                 }
             }
@@ -4638,7 +4638,7 @@ impl<'a> Lcx<'a> {
                     self.bind_pat_field(ast.list(*v)[pi], &fp, ft, vi, fi);
                 }
             }
-            Pat::Struct(_, fields, _) => {
+            Pat::Struct(_, _, fields) => {
                 let vi = self.variant_of_pat(p);
                 for fp in ast.list(*fields) {
                     let fname = { let tx = self.ident_text(fp.name); match crate::ast::tuple_index(tx).ok_or(()) { Ok(n) => n | 0x8000_0000, Err(_) => self.u.prog.syms.get(tx).unwrap_or(u32::MAX) } };
@@ -4802,7 +4802,7 @@ impl<'a> Lcx<'a> {
                 moves || sub.map_or(false, |x| self.pat_moves_droppable(x))
             }
             Pat::TupleStruct(_, v) | Pat::Tuple(v) | Pat::Slice(v) | Pat::Or(v) => ast.list(v).iter().any(|x| self.pat_moves_droppable(*x)),
-            Pat::Struct(_, fs, _) => ast.list(fs).iter().any(|f| self.pat_moves_droppable(f.pat)),
+            Pat::Struct(_, _, fs) => ast.list(fs).iter().any(|f| self.pat_moves_droppable(f.pat)),
             Pat::Ref(_, x) | Pat::Paren(x) | Pat::Box(x) => self.pat_moves_droppable(x),
             _ => false,
         }
@@ -4816,7 +4816,7 @@ impl<'a> Lcx<'a> {
                 (*by_ref && *mutbl) || self.b.pat_bind_ref.get(&p.0) == Some(&2) || sub.map_or(false, |x| self.pat_binds_mut_ref(x))
             }
             Pat::TupleStruct(_, v) | Pat::Tuple(v) | Pat::Slice(v) | Pat::Or(v) => ast.list(*v).iter().any(|x| self.pat_binds_mut_ref(*x)),
-            Pat::Struct(_, fs, _) => ast.list(*fs).iter().any(|f| self.pat_binds_mut_ref(f.pat)),
+            Pat::Struct(_, _, fs) => ast.list(*fs).iter().any(|f| self.pat_binds_mut_ref(f.pat)),
             Pat::Ref(_, x) | Pat::Paren(x) | Pat::Box(x) => self.pat_binds_mut_ref(*x),
             _ => false,
         }
@@ -4834,7 +4834,7 @@ impl<'a> Lcx<'a> {
                     if *by_ref || s.b.pat_bind_ref.contains_key(&p.0) {
                         *found = true;
                     }
-                    if let Some(x) = sub {
+                    if let Some(x) = &sub.get() {
                         walk(s, ast, *x, found);
                     }
                 }
@@ -4843,7 +4843,7 @@ impl<'a> Lcx<'a> {
                         walk(s, ast, *x, found);
                     }
                 }
-                Pat::Struct(_, fs, _) => {
+                Pat::Struct(_, _, fs) => {
                     for f in ast.list(*fs) {
                         walk(s, ast, f.pat, found);
                     }
@@ -5126,7 +5126,7 @@ impl<'a> Lcx<'a> {
                         out.push(li);
                     }
                 }
-                if let Some(s) = sub {
+                if let Some(s) = &sub.get() {
                     self.pat_binding_locals(*s, out);
                 }
             }
@@ -5135,7 +5135,7 @@ impl<'a> Lcx<'a> {
                     self.pat_binding_locals(*x, out);
                 }
             }
-            Pat::Struct(_, fs, _) => {
+            Pat::Struct(_, _, fs) => {
                 for f in ast.list(*fs) {
                     self.pat_binding_locals(f.pat, out);
                 }
@@ -5292,7 +5292,7 @@ impl<'a> Lcx<'a> {
                 if let Some(Res::Def(d)) = self.b.pat_res.get(&p.0).copied() {
                     self.test_def_pat(p, d, place, t, fail);
                 }
-                if let Some(s) = sub {
+                if let Some(s) = &sub.get() {
                     self.test_pat(*s, place, t, fail);
                 }
             }
@@ -5316,7 +5316,7 @@ impl<'a> Lcx<'a> {
                 let fl = matches!(self.kind_ref(t), TyKind::Float(_));
                 let signed = self.int_ty(t).signed;
                 let f64_ = self.is_f64(t);
-                if let Some(a) = a {
+                if let Some(a) = &a.get() {
                     let av = self.lower_expr(*a);
                     let av = self.to_leaves(av, t);
                     let c = self.f.vreg(Cls::I);
@@ -5329,7 +5329,7 @@ impl<'a> Lcx<'a> {
                     self.term(Term::Branch(c, ok, fail));
                     self.switch(ok);
                 }
-                if let Some(b) = b {
+                if let Some(b) = &b.get() {
                     let bv = self.lower_expr(*b);
                     let bv = self.to_leaves(bv, t);
                     let c = self.f.vreg(Cls::I);
@@ -5365,7 +5365,7 @@ impl<'a> Lcx<'a> {
                     self.test_pat(ast.list(*v)[pi], &fp, ft, fail);
                 }
             }
-            Pat::Struct(_, fields, _) => {
+            Pat::Struct(_, _, fields) => {
                 let vi = self.variant_of_pat(p);
                 self.test_variant(p, place, t, fail);
                 for fp in ast.list(*fields) {
@@ -7145,7 +7145,7 @@ impl<'a> Lcx<'a> {
             }
             ExprKind::For(row) => {
                 let crate::ast::ForRow { pat: p, iter: it, body: b, label } = ast.row(*row);
-                self.lower_for(*p, *it, *b, *label);
+                self.lower_for(*p, *it, *b, label.get());
                 self.unit()
             }
             ExprKind::Break(label, x) => {
@@ -10063,10 +10063,10 @@ impl<'a> Lcx<'a> {
     fn or_combos(&self, p: PatId, cap: usize) -> Option<Vec<Vec<(u32, usize)>>> {
         let ast = self.ast();
         let kids: Vec<PatId> = match ast.pat(p) {
-            Pat::Ident { sub, .. } => sub.iter().copied().collect(),
+            Pat::Ident { sub, .. } => sub.get().iter().copied().collect(),
             Pat::Paren(x) | Pat::Box(x) | Pat::Ref(_, x) => vec![*x],
             Pat::Tuple(v) | Pat::TupleStruct(_, v) | Pat::Slice(v) => ast.list(*v).to_vec(),
-            Pat::Struct(_, fs, _) => ast.list(*fs).iter().map(|f| f.pat).collect(),
+            Pat::Struct(_, _, fs) => ast.list(*fs).iter().map(|f| f.pat).collect(),
             Pat::Or(alts) => {
                 let mut out = Vec::new();
                 for (i, a) in ast.list(*alts).iter().copied().enumerate() {
@@ -10171,7 +10171,7 @@ impl<'a> Lcx<'a> {
             }
             // the guard's temporaries (if-let guards) belong to the arm
             let gmark = self.stmt_temps.len();
-            self.enter_arm(x, arm.pat, arm.guard, combos[k].clone(), !tree_mode, &place, pt, root, &temp, next, gmark);
+            self.enter_arm(x, arm.pat, arm.guard.get(), combos[k].clone(), !tree_mode, &place, pt, root, &temp, next, gmark);
             let mark = self.stmt_temps.len();
             let v = self.lower_expr_coerced(arm.body, t);
             if !self.is_never(t) {
@@ -12328,7 +12328,7 @@ impl<'a> Lcx<'a> {
             "assert_matches" => {
                 // rustc core panicking::assert_matches_failed: the value in Debug and the
                 // pattern's source text
-                let (place, xt, ok, bad) = self.lower_macro_match(mexprs[0], margs.pat, margs.guard);
+                let (place, xt, ok, bad) = self.lower_macro_match(mexprs[0], margs.pat.get(), margs.guard.get());
                 self.switch(bad);
                 let v = self.read_place(&place, xt);
                 // the pattern's tokens: after the first top-level comma up to its `if` / comma
@@ -12375,7 +12375,7 @@ impl<'a> Lcx<'a> {
                 self.unit()
             }
             "matches" => {
-                let (_, _, ok, fail) = self.lower_macro_match(mexprs[0], margs.pat, margs.guard);
+                let (_, _, ok, fail) = self.lower_macro_match(mexprs[0], margs.pat.get(), margs.guard.get());
                 let res = self.f.vreg(Cls::I);
                 let join = self.f.block();
                 self.switch(ok);

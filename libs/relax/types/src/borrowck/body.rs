@@ -101,8 +101,8 @@ pub(crate) fn in_body(prog: &Program, owner: DefId, file: u32, lo: u32) -> bool 
     let pf = &prog.files[file as usize];
     let ast = &pf.ast;
     match ast.item(d.item).kind {
-        ItemKind::Fn(_, Some(b), _) => { let b = ast.block(b); pf.expands_within(lo, b.lo, b.hi) }
-        ItemKind::Fn(s, None, _) => match ast.fn_sig(s).lazy_body {
+        ItemKind::Fn(_, body, _) if let Some(b) = body.get() => { let b = ast.block(b); pf.expands_within(lo, b.lo, b.hi) }
+        ItemKind::Fn(s, body, _) if body.is_none() => match ast.fn_sig(s).lazy_body.get() {
             Some(r) if r.hi > r.lo => { let src = prog.src(file); pf.expands_within(lo, src.tok(r.lo as usize).lo, src.tok(r.hi as usize - 1).hi) }
             _ => false,
         },

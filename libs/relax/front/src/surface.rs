@@ -144,13 +144,13 @@ fn scan(ast: &Ast, toks: &[crate::lexer::Tok], items: &[ItemId], fns: &mut Vec<F
     for &id in items {
         let it = ast.item(id);
         match &it.kind {
-            ItemKind::Fn(sig, Some(b), _) => {
+            ItemKind::Fn(sig, body, _) if let Some(b) = body.get() => {
                 let sig = ast.fn_sig(*sig);
                 let own = if sig.konst {
                     Some(0)
                 } else if sig.asyncness {
                     Some(2)
-                } else if returns_impl_trait(ast, sig.ret) {
+                } else if returns_impl_trait(ast, sig.ret.get()) {
                     Some(1)
                 } else {
                     None
@@ -163,7 +163,7 @@ fn scan(ast: &Ast, toks: &[crate::lexer::Tok], items: &[ItemId], fns: &mut Vec<F
                 macro_fn_bodies(toks, *r, &mut v);
                 fns.extend(v.into_iter().map(|block| FnBody { own: None, block }));
             }
-            ItemKind::Mod(Some(v)) => scan(ast, toks, ast.list(*v), fns),
+            ItemKind::Mod(crate::ast::Opt::Some(v)) => scan(ast, toks, ast.list(*v), fns),
             ItemKind::ForeignMod(r) => scan(ast, toks, ast.list(ast.row(*r).items), fns),
             ItemKind::Impl(r) => scan(ast, toks, ast.list(ast.row(*r).items), fns),
             ItemKind::Trait(r) => scan(ast, toks, ast.list(ast.row(*r).items), fns),

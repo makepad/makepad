@@ -266,7 +266,7 @@ mod tests {
     fn tail(prog: &Program, body: &Body) -> u32 {
         let ast = &prog.files[body.file as usize].ast;
         let block = ast.block(body.body.expect("a body"));
-        let Some(crate::ast::Stmt::Expr(tail, false)) = ast.list(block.stmts).last().copied() else { panic!("no tail expression") };
+        let Some(crate::ast::Stmt::Expr(false, tail)) = ast.list(block.stmts).last().copied() else { panic!("no tail expression") };
         tail.0
     }
 

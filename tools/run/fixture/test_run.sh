@@ -35,8 +35,14 @@ $4"
 lib libs/shape test-run-shape 'pub fn area(w: u32) -> u32 { w * w }'
 lib libs/plan test-run-plan 'pub fn floor(w: u32) -> u32 { test_run_shape::area(w) }' '[dependencies]
 test-run-shape = { path = "../shape" }'
-lib libs/user test-run-user 'pub fn one() -> u32 { 1 }' '[dev-dependencies]
-test-run-shape = { path = "../shape" }'
+lib libs/user test-run-user 'pub fn one() -> u32 { 1 }' '[features]
+variant = []
+
+[dev-dependencies]
+test-run-shape = { path = "../shape" }
+
+[package.metadata.makepad]
+test-variants = ["variant"]'
 lib libs/draw makepad-draw 'pub fn fill(w: u32) -> u32 { test_run_shape::area(w) }' '[dependencies]
 test-run-shape = { path = "../shape" }'
 lib libs/other test-run-other 'pub fn two() -> u32 { 2 }' '[features]
@@ -203,9 +209,10 @@ g checkout -q -b wide "$base"
 printf '# a workspace-wide change\n' >> "$dir/repo/Cargo.toml"
 g commit -q -am wide
 gate wide wide ok "makepad-draw" "NODEGATE-OK testrun 1 packages"
-all="makepad-draw makepad-run test-run-other test-run-plan test-run-shape test-run-user"
-# the full bucket: every package's tests on a diff that reaches only the plan, its red among them
-GATE_FULL=1 gate full plan fail "$all" "GATEUNIT fail test test-run-plan|GATEUNIT ok test test-run-other|GATEUNIT ok test makepad-run|GATEUNIT ok test test-run-user|NODEGATE-FAIL: test:test-run-plan"
+all="makepad-draw makepad-run test-run-other test-run-plan test-run-shape test-run-user test-run-user --features variant"
+# the full bucket: every package's tests on a diff that reaches only the plan, its red among them; the user's
+# test variant (a feature that swaps what it builds) a unit of its own beside it
+GATE_FULL=1 gate full plan fail "$all" "GATEUNIT fail test test-run-plan|GATEUNIT ok test test-run-other|GATEUNIT ok test makepad-run|GATEUNIT ok test test-run-user|GATEUNIT ok test test-run-user --features variant|NODEGATE-FAIL: test:test-run-plan"
 # a unit not measured yet is queued at the median measure: the draw (255 s) after the shape and before the plan
 # (red since), not (as the slowest measured) before the shape's 500 s
 GATE_RETRY="test test-run-plan" GATE_TIMES="test test-run-shape=500;test test-run-plan=10" gate median shape ok "makepad-draw test-run-plan test-run-shape" "testrun: 3 units, 765 s of their last measures, the slowest first"

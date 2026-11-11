@@ -121,7 +121,7 @@ impl Cx<'_> {
                 Some((ex.lo, ex.hi))
             }
             Pat::Range(a, b, _) => {
-                let r = [a, b].into_iter().flatten().map(|e| (ast.expr(e).lo, ast.expr(e).hi)).fold(None, |acc, r| Self::merge(acc, Some(r)));
+                let r = [a.get(), b.get()].into_iter().flatten().map(|e| (ast.expr(e).lo, ast.expr(e).hi)).fold(None, |acc, r| Self::merge(acc, Some(r)));
                 // `..=hi` / `lo..` : the operator is part of the pattern
                 r.map(|(lo, hi)| {
                     let hi = if b.is_none() { self.skip_ws_forward(hi).map_or(hi, |(at, c)| if c == b'.' { self.range_op_end(at) } else { hi }) } else { hi };
@@ -139,7 +139,7 @@ impl Cx<'_> {
                 let hi = self.close_after(hi0, inner, b'(', b')');
                 Some((path.lo, hi))
             }
-            Pat::Struct(path, fps, _) => {
+            Pat::Struct(_, path, fps) => {
                 let hi0 = ast.segs(path.segs).last().map(|s| s.name.hi).unwrap_or(path.lo);
                 let inner = ast.list(fps).iter().fold(None, |acc, f| Self::merge(acc, self.pat_range(f.pat).or(Some((f.name.lo, f.name.hi))))).map_or(hi0, |(_, h)| h.max(hi0));
                 let hi = self.close_after(hi0, inner, b'{', b'}');

@@ -82,6 +82,17 @@ pub mod scc;
 
 pub mod solver_work;
 
+/// The command this process runs as, for the lines that tell the user what to type next
+/// (`relax inspect <pid> help`): `makepad` unless the runner set another at start (the bare
+/// `relax` binary sets `relax`). A property of the process, so reset_statics leaves it.
+static TOOL_NAME: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+pub fn set_tool_name(name: &'static str) {
+    let _ = TOOL_NAME.set(name);
+}
+pub fn tool_name() -> &'static str {
+    TOOL_NAME.get().copied().unwrap_or("makepad")
+}
+
 // This crate's source stamp (build.rs, libs/relax/self_stamp.rs): relax-compiler folds it into the codegen identity.
 include!(concat!(env!("OUT_DIR"), "/src_stamp.rs"));
 

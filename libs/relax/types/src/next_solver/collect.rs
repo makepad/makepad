@@ -406,7 +406,7 @@ impl Tcx {
         let ast = &prog.files[def.file as usize].ast;
         let mut callable_output = None;
         let written = if let Some(GenericArgs::Paren(ps, output)) = ast.segs(path.segs).last().and_then(|s| ast.gargs(s.args())) {
-            let (ps, output) = self.lower_fn_trait_bound_args(cx, prog, def.file, def.scope, &mut env, *ps, *output);
+            let (ps, output) = self.lower_fn_trait_bound_args(cx, prog, def.file, def.scope, &mut env, *ps, output.get());
             callable_output = Some(output);
             vec![self.tys.intern(TyKind::Tuple(self.tys.mk_list(&ps)))]
         } else { self.lower_generic_args(cx, prog, def.file, def.scope, &env, &path) };

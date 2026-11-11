@@ -58,7 +58,7 @@ fn place_all(u: &Unit) -> Result<HashMap<String, u64>, String> {
             return Err(format!("{}: global_asm! arguments not understood", path));
         }
         let margs = f.ast.mac_arg(m.args);
-        let Some(spec) = margs.asm else { return Err(format!("{}: global_asm! needs a template", path)) };
+        let Some(spec) = margs.asm.get() else { return Err(format!("{}: global_asm! needs a template", path)) };
         let exprs = f.ast.list(margs.exprs);
         let mut templates = Vec::new();
         for &e in &exprs[..spec.templates as usize] {
@@ -80,10 +80,10 @@ fn place_all(u: &Unit) -> Result<HashMap<String, u64>, String> {
         let mut args = Vec::new();
         let mut names = Vec::new();
         for (k, op) in ops.iter().enumerate() {
-            if let Some(n) = op.name {
+            if let Some(n) = op.name.get() {
                 names.push((f.text(n).to_string(), k as u32));
             }
-            let x = op.input.ok_or("global_asm!: operand without a value")?;
+            let x = op.input.get().ok_or("global_asm!: operand without a value")?;
             match op.dir {
                 AsmDir::Sym => {
                     let a = sym_addr(u, file, module, x)?;

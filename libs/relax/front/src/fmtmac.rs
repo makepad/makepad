@@ -725,7 +725,7 @@ impl<'a> Parser<'a> {
             ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::Loop(b, _) => self.block_may_yield(b),
             ExprKind::If(c, b, other) => self.expr_may_yield(c) || self.block_may_yield(b) || other.get().is_some_and(|x| self.expr_may_yield(x)),
             ExprKind::Let(_, x) => self.expr_may_yield(x),
-            ExprKind::Match(x, arms) => self.expr_may_yield(x) || self.ast.list(arms).iter().any(|a| a.guard.is_some_and(|g| self.expr_may_yield(g)) || self.expr_may_yield(a.body)),
+            ExprKind::Match(x, arms) => self.expr_may_yield(x) || self.ast.list(arms).iter().any(|a| a.guard.get().is_some_and(|g| self.expr_may_yield(g)) || self.expr_may_yield(a.body)),
             ExprKind::While(row) => { let w = self.ast.row(row); self.expr_may_yield(w.cond) || self.block_may_yield(w.body) }
             ExprKind::For(row) => { let f = self.ast.row(row); self.expr_may_yield(f.iter) || self.block_may_yield(f.body) }
             ExprKind::Break(_, x) | ExprKind::Return(x) => x.get().is_some_and(|x| self.expr_may_yield(x)),
@@ -736,7 +736,7 @@ impl<'a> Parser<'a> {
                 let m = self.ast.row(row);
                 if m.args == NO_MAC_ARGS { return true; }
                 let args = self.ast.mac_arg(m.args);
-                self.ast.list(args.exprs).iter().any(|&x| self.expr_may_yield(x)) || args.guard.is_some_and(|x| self.expr_may_yield(x))
+                self.ast.list(args.exprs).iter().any(|&x| self.expr_may_yield(x)) || args.guard.get().is_some_and(|x| self.expr_may_yield(x))
             }
             // Nested async, closure and const bodies do not execute while evaluating this slot.
             ExprKind::Async(..) | ExprKind::Closure(_) | ExprKind::ConstBlock(_)
@@ -746,8 +746,8 @@ impl<'a> Parser<'a> {
 
     fn block_may_yield(&self, b: BlockId) -> bool {
         self.ast.stmts(b).iter().any(|s| match *s {
-            Stmt::Let(row) => { let l = self.ast.row(row); l.init.is_some_and(|x| self.expr_may_yield(x)) || l.else_.is_some_and(|b| self.block_may_yield(b)) }
-            Stmt::Expr(e, _) => self.expr_may_yield(e),
+            Stmt::Let(row) => { let l = self.ast.row(row); l.init.get().is_some_and(|x| self.expr_may_yield(x)) || l.else_.get().is_some_and(|b| self.block_may_yield(b)) }
+            Stmt::Expr(_, e) => self.expr_may_yield(e),
             Stmt::Attrs(row) => self.expr_may_yield(self.ast.row(row).expr),
             Stmt::Item(_) | Stmt::Empty => false,
         })

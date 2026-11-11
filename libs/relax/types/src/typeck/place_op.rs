@@ -40,9 +40,9 @@ impl Fcx<'_> {
                     let mac = self.ast().row(row);
                     if mac.args != NO_MAC_ARGS {
                         let args = self.ast().mac_arg(mac.args);
-                        if args.pat.is_some_and(|pat| self.has_explicit_mut_ref(pat)) { roots.push(self.ast().list(args.exprs)[0]); }
-                        if let Some(asm) = args.asm {
-                            for op in self.ast().list(asm.ops) { if let Some(out) = op.output { roots.push(out); } }
+                        if args.pat.get().is_some_and(|pat| self.has_explicit_mut_ref(pat)) { roots.push(self.ast().list(args.exprs)[0]); }
+                        if let Some(asm) = args.asm.get() {
+                            for op in self.ast().list(asm.ops) { if let Some(out) = op.output.get() { roots.push(out); } }
                         }
                     }
                 }
@@ -78,8 +78,8 @@ impl Fcx<'_> {
             for stmt in self.ast().stmts(block) {
                 if let Stmt::Let(row) = *stmt {
                     let decl = self.ast().row(row);
-                    if let Some(init) = decl.init { if self.has_explicit_mut_ref(decl.pat) { roots.push(init); } }
-                    if let Some(els) = decl.else_ { if blocks.insert(els.0) { pending.push(els); } }
+                    if let Some(init) = decl.init.get() { if self.has_explicit_mut_ref(decl.pat) { roots.push(init); } }
+                    if let Some(els) = decl.else_.get() { if blocks.insert(els.0) { pending.push(els); } }
                 }
             }
         }
@@ -97,9 +97,9 @@ impl Fcx<'_> {
     /// has a binding `ref mut x` (explicit: the implicit ones sit behind a reference).
     fn has_explicit_mut_ref(&self, pat: PatId) -> bool {
         match *self.ast().pat(pat) {
-            Pat::Ident { by_ref, mutbl, sub, .. } => by_ref && mutbl || sub.is_some_and(|pat| self.has_explicit_mut_ref(pat)),
+            Pat::Ident { by_ref, mutbl, sub, .. } => by_ref && mutbl || sub.get().is_some_and(|pat| self.has_explicit_mut_ref(pat)),
             Pat::Tuple(pats) | Pat::TupleStruct(_, pats) | Pat::Slice(pats) | Pat::Or(pats) => self.ast().list(pats).iter().any(|&pat| self.has_explicit_mut_ref(pat)),
-            Pat::Struct(_, fields, _) => self.ast().list(fields).iter().any(|field| self.has_explicit_mut_ref(field.pat)),
+            Pat::Struct(_, _, fields) => self.ast().list(fields).iter().any(|field| self.has_explicit_mut_ref(field.pat)),
             Pat::Ref(_, pat) | Pat::Paren(pat) | Pat::Box(pat) => self.has_explicit_mut_ref(pat),
             Pat::Wild | Pat::Rest | Pat::Lit(_) | Pat::Range(..) | Pat::Path(_) | Pat::Mac(_) => false,
         }

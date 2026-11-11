@@ -250,6 +250,12 @@ impl From<&CStr> for Box<CStr> {
     }
 }
 
+impl Clone for Box<CStr> {
+    fn clone(&self) -> Self {
+        (**self).into()
+    }
+}
+
 impl From<CString> for Box<CStr> {
     fn from(s: CString) -> Box<CStr> {
         s.into_boxed_c_str()

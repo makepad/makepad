@@ -192,18 +192,18 @@ impl Resolve<'_> {
             match *stmt {
                 Stmt::Let(r) => {
                     let crate::ast::LetStmt { pat, init, .. } = *ast.row(r);
-                    if let Some(e) = init {
+                    if let Some(e) = init.get() {
                         self.extend_borrows(e, self.cx.var_parent);
                         if self.explicit_ref(pat) { self.extend_place(e, self.cx.var_parent); }
                         self.expr(e, false);
                     }
                     self.pat(pat);
                 }
-                Stmt::Expr(e, _) => self.expr(e, false),
+                Stmt::Expr(_, e) => self.expr(e, false),
                 Stmt::Attrs(r) => self.expr(ast.row(r).expr, false),
                 Stmt::Item(_) | Stmt::Empty => (),
             }
-            if let Some(els) = if let Stmt::Let(r) = *stmt { ast.row(r).else_ } else { None } {
+            if let Some(els) = if let Stmt::Let(r) = *stmt { ast.row(r).else_.get() } else { None } {
                 self.cx = before;
                 self.block(els, true);
             }
@@ -219,11 +219,12 @@ impl Resolve<'_> {
         }
         let ast = &self.file.ast;
         match *ast.pat(p) {
-            Pat::Ident { sub: Some(s), .. } | Pat::Ref(_, s) | Pat::Paren(s) | Pat::Box(s) => self.pat(s),
+            Pat::Ident { sub, .. } if let Some(s) = sub.get() => self.pat(s),
+            Pat::Ref(_, s) | Pat::Paren(s) | Pat::Box(s) => self.pat(s),
             Pat::Tuple(ps) | Pat::Slice(ps) | Pat::Or(ps) | Pat::TupleStruct(_, ps) => for p in ast.list(ps) { self.pat(*p); },
-            Pat::Struct(_, fs, _) => for f in ast.list(fs) { self.pat(f.pat); },
+            Pat::Struct(_, _, fs) => for f in ast.list(fs) { self.pat(f.pat); },
             Pat::Lit(e) => self.expr(e, false),
-            Pat::Range(a, b, _) => { if let Some(e) = a { self.expr(e, false); } if let Some(e) = b { self.expr(e, false); } }
+            Pat::Range(a, b, _) => { if let Some(e) = a.get() { self.expr(e, false); } if let Some(e) = b.get() { self.expr(e, false); } }
             _ => (),
         }
         self.cx = saved;
@@ -235,7 +236,7 @@ impl Resolve<'_> {
             Pat::Tuple(ps) | Pat::Slice(ps) | Pat::Or(ps) | Pat::TupleStruct(_, ps) => {
                 for p in ast.list(ps) { if self.explicit_ref(*p) { return true; } } false
             }
-            Pat::Struct(_, fs, _) => { for f in ast.list(fs) { if self.explicit_ref(f.pat) { return true; } } false }
+            Pat::Struct(_, _, fs) => { for f in ast.list(fs) { if self.explicit_ref(f.pat) { return true; } } false }
             Pat::Paren(p) | Pat::Box(p) => self.explicit_ref(p),
             _ => false,
         }
@@ -362,7 +363,7 @@ impl Resolve<'_> {
                     let node = Node::Arm(arms.lo + i as u32);
                     self.node(node, true); self.cx.var_parent = self.cx.parent;
                     self.pat(a.pat);
-                    if let Some(g) = a.guard {
+                    if let Some(g) = a.guard.get() {
                         self.enter(node, ScopeData::MatchGuard); self.cx.var_parent = self.cx.parent;
                         self.condition(g);
                     }
@@ -486,8 +487,8 @@ impl Resolve<'_> {
                 if let Some(x) = xs.first() { self.expr(*x, false); }
                 let node = Node::Synthetic(e.0, Synthetic::MacroArm);
                 self.node(node, true); self.cx.var_parent = self.cx.parent;
-                if let Some(p) = args.pat { self.pat(p); }
-                if let Some(g) = args.guard {
+                if let Some(p) = args.pat.get() { self.pat(p); }
+                if let Some(g) = args.guard.get() {
                     self.enter(node, ScopeData::MatchGuard); self.cx.var_parent = self.cx.parent;
                     self.condition(g);
                 }

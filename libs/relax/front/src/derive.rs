@@ -94,7 +94,7 @@ impl<'a> Parser<'a> {
         let mut g = Gen::new(self.edition);
         for (variant, fields) in &groups {
             for f in fields {
-                let (Some(fname), Some(e)) = (f.name, f.default) else { continue };
+                let (Some(fname), Some(e)) = (f.name.get(), f.default.get()) else { continue };
                 let ex = self.ast.expr(e);
                 let (lo, hi) = (ex.lo, ex.hi);
                 let fname = String::from_utf8_lossy(self.bytes(fname.lo, fname.hi)).trim_start_matches("r#").to_string();
@@ -933,7 +933,7 @@ impl Parser<'_> {
                 let f = self.ast.fn_ptr(f);
                 let len = bound.len(); bound.extend_from_slice(self.ast.list(f.hrtb));
                 for &t in self.ast.list(f.params) { self.find_type_parameters(t, names, bound, out); }
-                if let Some(t) = f.ret { self.find_type_parameters(t, names, bound, out); }
+                if let Some(t) = f.ret.get() { self.find_type_parameters(t, names, bound, out); }
                 bound.truncate(len);
             }
             Ty::ImplTrait(bs) | Ty::DynTrait(bs, _) => self.find_bounds_type_parameters(bs, names, bound, out),
@@ -952,7 +952,7 @@ impl Parser<'_> {
             },
             Some(GenericArgs::Paren(ts, ret)) => {
                 for &t in self.ast.list(*ts) { self.find_type_parameters(t, names, bound, out); }
-                if let Some(t) = ret { self.find_type_parameters(*t, names, bound, out); }
+                if let Some(t) = &ret.get() { self.find_type_parameters(*t, names, bound, out); }
             }
             None => {}
         }
@@ -1116,7 +1116,7 @@ impl Parser<'_> {
         for (name, data, fields) in self.deriving_fields(it) {
             let mut values = Vec::new(); let mut pattern = Vec::new();
             for (i, f) in fields.iter().enumerate() {
-                let n = f.name.map_or(i.to_string(), |n| String::from_utf8_lossy(self.bytes(n.lo, n.hi)).into_owned());
+                let n = f.name.get().map_or(i.to_string(), |n| String::from_utf8_lossy(self.bytes(n.lo, n.hi)).into_owned());
                 let mut value = Gen::new(self.edition);
                 if let VariantData::Struct(_) = data {
                     value.word(&n);
@@ -1197,7 +1197,7 @@ impl Parser<'_> {
             for scalar in [true, false] {
                 for (i, f) in fields.iter().enumerate() {
                     if self.maybe_scalar(f.ty) != scalar { continue; }
-                    let n = f.name.map_or(i.to_string(), |n| String::from_utf8_lossy(self.bytes(n.lo, n.hi)).into_owned());
+                    let n = f.name.get().map_or(i.to_string(), |n| String::from_utf8_lossy(self.bytes(n.lo, n.hi)).into_owned());
                     if checks > 0 {
                         check.punct(T::AndAnd);
                     }
@@ -1314,7 +1314,10 @@ mod tests {
         for d in &p.defs {
             if d.kind != DefKind::AssocFn || p.syms.str(d.name) != "clone" { continue; }
             let f = &p.files[d.file as usize];
-            let ItemKind::Fn(_, Some(b), _) = f.ast.item(d.item).kind else { panic!("derive body absent") };
+            let b = match f.ast.item(d.item).kind {
+                ItemKind::Fn(_, body, _) if let Some(b) = body.get() => b,
+                _ => panic!("derive body absent"),
+            };
             let block = f.ast.block(b);
             clone_bodies.push(String::from_utf8_lossy(f.bytes(block.lo, block.hi)).replace(' ', ""));
         }

@@ -428,7 +428,7 @@ impl<'a> Cx<'a> {
         let (tb, ast) = (self.tb(), self.ast());
         let mut out = Vec::new();
         let mut next_param = 0usize;
-        if let Some(self_param) = sig.self_param {
+        if let Some(self_param) = sig.self_param.get() {
             let Some(index) = tb.locals.iter().position(|l| l.pat == u32::MAX) else {
                 return self.unresolved(self.span(0, 0), "self parameter local");
             };

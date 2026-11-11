@@ -481,14 +481,14 @@ impl DefCollector<'_> {
             ItemKind::Fn(sig, _, _) => {
                 let sig = *self.ast.fn_sig(sig);
                 self.visit_generics(sig.generics);
-                if let Some(SelfParam::Typed(_, ty)) = sig.self_param { self.visit_ty(ty, false); }
+                if let Some(SelfParam::Typed(_, ty)) = sig.self_param.get() { self.visit_ty(ty, false); }
                 for p in self.ast.list(sig.params) { self.visit_pat(p.pat); self.visit_ty(p.ty, false); self.bind_pat(p.pat); }
                 if sig.asyncness && self.prog.def(owner).kind != DefKind::ForeignFn {
                     // Nightly :270: the written output is inside the return opaque;
                     // the body is inside the desugared coroutine closure.
                     let ret = self.create_def(NodeId::AsyncReturn(item), None, DefKind::OpaqueTy);
                     let saved = self.with_parent(ret);
-                    if let Some(t) = sig.ret { self.visit_ty(t, true); }
+                    if let Some(t) = sig.ret.get() { self.visit_ty(t, true); }
                     self.parent_def = saved;
                     if let Some(b) = self.prog.fn_body(self.file, item)? {
                         let closure = self.create_def(NodeId::AsyncBody(item), None, DefKind::Closure);
@@ -497,7 +497,7 @@ impl DefCollector<'_> {
                         self.parent_def = saved;
                     }
                 } else {
-                    if let Some(t) = sig.ret { self.visit_ty(t, true); }
+                    if let Some(t) = sig.ret.get() { self.visit_ty(t, true); }
                     if let Some(b) = self.prog.fn_body(self.file, item)? { self.visit_block(b); }
                 }
             }
@@ -510,14 +510,14 @@ impl DefCollector<'_> {
                     let vd = self.prog.variants[self.prog.def(owner).sub as usize][i];
                     let saved = self.with_parent(vd);
                     self.visit_variant_data(v.data);
-                    if let Some(e) = v.disc { self.visit_const(e, Some(ConstRestriction::Discriminant), false); }
+                    if let Some(e) = v.disc.get() { self.visit_const(e, Some(ConstRestriction::Discriminant), false); }
                     self.parent_def = saved;
                 }
             }
             ItemKind::TypeAlias(r) => {
                 let TypeAliasItem { generics, bounds, ty } = *self.ast.row(r);
                 self.visit_generics(generics); self.visit_bounds(bounds, true);
-                if let Some(t) = ty { self.visit_ty(t, true); }
+                if let Some(t) = ty.get() { self.visit_ty(t, true); }
             }
             ItemKind::Const(ty, _) => {
                 if let Some(t) = ty.get() { self.visit_ty(t, false); }
@@ -538,7 +538,7 @@ impl DefCollector<'_> {
             ItemKind::Impl(r) => {
                 let ImplItem { generics, trait_, self_ty, .. } = *self.ast.row(r);
                 self.visit_generics(generics);
-                if let Some(p) = trait_ { self.visit_path(p, false); }
+                if let Some(p) = trait_.get() { self.visit_path(p, false); }
                 self.visit_ty(self_ty, false);
             }
             _ => {}
@@ -551,14 +551,14 @@ impl DefCollector<'_> {
     }
     fn visit_fields(&mut self, fields: List<FieldDef>) {
         for (i, f) in self.ast.list(fields).iter().enumerate() {
-            let name = match f.name {
+            let name = match f.name.get() {
                 Some(name) => self.prog.ident(self.file, name),
                 None => self.prog.syms.intern(&i.to_string()),
             };
             let def = self.create_def(NodeId::Field(fields.lo + i as u32), Some(name), DefKind::Field);
             let saved = self.with_parent(def);
             self.visit_ty(f.ty, false);
-            if let Some(e) = f.default { self.visit_anon_const(e); }
+            if let Some(e) = f.default.get() { self.visit_anon_const(e); }
             self.parent_def = saved;
         }
     }
@@ -575,7 +575,7 @@ impl DefCollector<'_> {
             match p.kind {
                 GenericParamKind::Type(bounds, ty) => {
                     self.visit_bounds(bounds, false);
-                    if let Some(t) = ty {
+                    if let Some(t) = ty.get() {
                         let saved = self.bindings.len();
                         self.const_ribs = true;
                         if self.legacy { self.bindings.push(ValueRib::Forward(self.ast.list(params)[index..].iter().map(|p| p.name).collect())); }
@@ -589,7 +589,7 @@ impl DefCollector<'_> {
                     if self.legacy { self.bindings.push(ValueRib::Constant { reason: ConstRestriction::ParamTy, repeat: false }); }
                     self.visit_ty(ty, false);
                     self.bindings.truncate(saved);
-                    if let Some(e) = val {
+                    if let Some(e) = val.get() {
                         if self.legacy { self.bindings.push(ValueRib::Forward(self.ast.list(params)[index..].iter().map(|p| p.name).collect())); }
                         self.visit_anon_const(e);
                         self.bindings.truncate(saved);
@@ -610,7 +610,7 @@ impl DefCollector<'_> {
     fn visit_path(&mut self, p: Path, opaque: bool) {
         if let Some(q) = self.ast.qself(&p).copied() {
             self.visit_ty(q.ty, opaque);
-            if let Some(path) = q.trait_path { self.visit_path(path, opaque); }
+            if let Some(path) = q.trait_path.get() { self.visit_path(path, opaque); }
         }
         for s in self.ast.segs(p.segs) { self.visit_args(s.args(), opaque); }
     }
@@ -634,7 +634,7 @@ impl DefCollector<'_> {
             },
             Some(GenericArgs::Paren(ps, r)) => {
                 for t in self.ast.list(*ps) { self.visit_ty(*t, opaque); }
-                if let Some(t) = r { self.visit_ty(*t, opaque); }
+                if let Some(t) = &r.get() { self.visit_ty(*t, opaque); }
             }
             None => {}
         }
@@ -654,7 +654,7 @@ impl DefCollector<'_> {
             Ty::Fn(f) => {
                 let f = *self.ast.fn_ptr(f); self.visit_generic_params(f.hrtb);
                 for t in self.ast.list(f.params) { self.visit_ty(*t, opaque); }
-                if let Some(t) = f.ret { self.visit_ty(t, opaque); }
+                if let Some(t) = f.ret.get() { self.visit_ty(t, opaque); }
             }
             Ty::DynTrait(bs, _) => self.visit_bounds(bs, opaque),
             Ty::Mac(m) => { let m = *self.ast.row(m); self.visit_mac(m) }
@@ -664,7 +664,7 @@ impl DefCollector<'_> {
     fn is_potential_trivial_const_arg(&self, e: ExprId) -> bool {
         // rustc_ast/src/ast.rs:1420-1442: exactly one brace layer.
         let e = match self.ast.expr(e).kind {
-            ExprKind::Block(b, l) if l.is_none() => match self.ast.stmts(b) { [Stmt::Expr(e, false)] => *e, _ => e },
+            ExprKind::Block(b, l) if l.is_none() => match self.ast.stmts(b) { [Stmt::Expr(false, e)] => *e, _ => e },
             _ => e,
         };
         match self.ast.expr(e).kind {
@@ -698,11 +698,11 @@ impl DefCollector<'_> {
             match *s {
                 Stmt::Let(r) => {
                     let LetStmt { pat, ty, init, else_, .. } = *self.ast.row(r);
-                    self.visit_pat(pat); if let Some(t) = ty { self.visit_ty(t, false); }
-                    if let Some(e) = init { self.visit_expr(e); } if let Some(b) = else_ { self.visit_block(b); }
+                    self.visit_pat(pat); if let Some(t) = ty.get() { self.visit_ty(t, false); }
+                    if let Some(e) = init.get() { self.visit_expr(e); } if let Some(b) = else_.get() { self.visit_block(b); }
                     self.bind_pat(pat);
                 }
-                Stmt::Expr(e, _) => self.visit_expr(e),
+                Stmt::Expr(_, e) => self.visit_expr(e),
                 Stmt::Attrs(r) => self.visit_expr(self.ast.row(r).expr),
                 Stmt::Item(i) => {
                     if self.checking_defs { self.creates_defs = true; continue; }
@@ -720,15 +720,16 @@ impl DefCollector<'_> {
     }
     fn visit_pat(&mut self, p: PatId) {
         match *self.ast.pat(p) {
-            Pat::Ident { sub: Some(p), .. } | Pat::Ref(_, p) | Pat::Paren(p) | Pat::Box(p) => self.visit_pat(p),
+            Pat::Ident { sub, .. } if let Some(p) = sub.get() => self.visit_pat(p),
+            Pat::Ref(_, p) | Pat::Paren(p) | Pat::Box(p) => self.visit_pat(p),
             Pat::Lit(e) => self.visit_expr(e),
-            Pat::Range(a, b, _) => { if let Some(e) = a { self.visit_expr(e); } if let Some(e) = b { self.visit_expr(e); } }
+            Pat::Range(a, b, _) => { if let Some(e) = a.get() { self.visit_expr(e); } if let Some(e) = b.get() { self.visit_expr(e); } }
             Pat::Path(p) => self.visit_path(p, false),
             Pat::TupleStruct(p, ps) => { self.visit_path(p, false); for p in self.ast.list(ps) { self.visit_pat(*p); } }
-            Pat::Struct(p, fs, _) => { self.visit_path(p, false); for f in self.ast.list(fs) { self.visit_pat(f.pat); } }
+            Pat::Struct(_, p, fs) => { self.visit_path(p, false); for f in self.ast.list(fs) { self.visit_pat(f.pat); } }
             Pat::Tuple(ps) | Pat::Slice(ps) | Pat::Or(ps) => for p in self.ast.list(ps) { self.visit_pat(*p); },
             Pat::Mac(m) => { let m = *self.ast.row(m); self.visit_mac(m) }
-            Pat::Wild | Pat::Rest | Pat::Ident { sub: None, .. } => {}
+            Pat::Wild | Pat::Rest | Pat::Ident { .. } => {}
         }
     }
     fn visit_expr(&mut self, e: ExprId) {
@@ -748,8 +749,8 @@ impl DefCollector<'_> {
                 let def = self.create_def(NodeId::Closure(e), None, DefKind::Closure);
                 let saved = self.with_parent(def);
                 let bindings = self.bindings.len();
-                for p in self.ast.list(params) { self.visit_pat(p.pat); if let Some(t) = p.ty { self.visit_ty(t, false); } self.bind_pat(p.pat); }
-                if let Some(t) = ret { self.visit_ty(t, false); } self.visit_expr(body); self.parent_def = saved;
+                for p in self.ast.list(params) { self.visit_pat(p.pat); if let Some(t) = p.ty.get() { self.visit_ty(t, false); } self.bind_pat(p.pat); }
+                if let Some(t) = ret.get() { self.visit_ty(t, false); } self.visit_expr(body); self.parent_def = saved;
                 self.bindings.truncate(bindings);
             }
             ExprKind::Async(_, b) => {
@@ -786,7 +787,7 @@ impl DefCollector<'_> {
                 for a in self.ast.list(arms) {
                     let bindings = self.bindings.len();
                     self.visit_pat(a.pat); self.bind_pat(a.pat);
-                    if let Some(e) = a.guard { self.visit_expr(e); } self.visit_expr(a.body);
+                    if let Some(e) = a.guard.get() { self.visit_expr(e); } self.visit_expr(a.body);
                     self.bindings.truncate(bindings);
                 }
             }
@@ -817,13 +818,13 @@ impl DefCollector<'_> {
         match *self.ast.pat(p) {
             Pat::Ident { name, sub, .. } => {
                 self.bindings.push(ValueRib::Binding(name));
-                if let Some(p) = sub { self.bind_pat(p); }
+                if let Some(p) = sub.get() { self.bind_pat(p); }
             }
             Pat::Ref(_, p) | Pat::Paren(p) | Pat::Box(p) => self.bind_pat(p),
             Pat::Tuple(ps) | Pat::Slice(ps) | Pat::Or(ps) | Pat::TupleStruct(_, ps) => {
                 for &p in self.ast.list(ps) { self.bind_pat(p); }
             }
-            Pat::Struct(_, fs, _) => for f in self.ast.list(fs) { self.bind_pat(f.pat); },
+            Pat::Struct(_, _, fs) => for f in self.ast.list(fs) { self.bind_pat(f.pat); },
             _ => {}
         }
     }
@@ -908,11 +909,11 @@ impl DefCollector<'_> {
         if m.args == NO_MAC_ARGS { return; }
         let args = *self.ast.mac_arg(m.args);
         for e in self.ast.list(args.exprs) { self.visit_expr(*e); }
-        if let Some(p) = args.pat { self.visit_pat(p); } if let Some(e) = args.guard { self.visit_expr(e); }
-        if let Some(asm) = args.asm {
+        if let Some(p) = args.pat.get() { self.visit_pat(p); } if let Some(e) = args.guard.get() { self.visit_expr(e); }
+        if let Some(asm) = args.asm.get() {
             for op in self.ast.list(asm.ops) {
-                if let Some(e) = op.input { if op.dir == AsmDir::Const { self.visit_anon_const(e); } else { self.visit_expr(e); } }
-                if let Some(e) = op.output { self.visit_expr(e); }
+                if let Some(e) = op.input.get() { if op.dir == AsmDir::Const { self.visit_anon_const(e); } else { self.visit_expr(e); } }
+                if let Some(e) = op.output.get() { self.visit_expr(e); }
             }
         }
     }

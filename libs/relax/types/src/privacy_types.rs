@@ -301,8 +301,9 @@ fn pat_pos(ast: &crate::ast::Ast, p: PatId, fallback: u32) -> u32 {
     use crate::ast::Pat;
     match *ast.pat(p) {
         Pat::Ident { name, .. } => name.lo,
-        Pat::Lit(e) | Pat::Range(Some(e), _, _) | Pat::Range(None, Some(e), _) => ast.expr(e).lo,
-        Pat::Path(ref path) | Pat::TupleStruct(ref path, _) | Pat::Struct(ref path, _, _) => path.lo,
+        Pat::Lit(e) => ast.expr(e).lo,
+        Pat::Range(a, b, _) if let Some(e) = a.get().or(b.get()) => ast.expr(e).lo,
+        Pat::Path(ref path) | Pat::TupleStruct(ref path, _) | Pat::Struct(_, ref path, _) => path.lo,
         Pat::Ref(_, x) | Pat::Paren(x) | Pat::Box(x) => pat_pos(ast, x, fallback),
         Pat::Tuple(ps) | Pat::Slice(ps) | Pat::Or(ps) => ast.list(ps).first().map_or(fallback, |x| pat_pos(ast, *x, fallback)),
         _ => fallback,

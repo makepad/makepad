@@ -458,7 +458,7 @@ impl<'a> Gates<'a> {
                 for v in ast.list(e.variants).to_vec() {
                     let Some(_) = self.attrs(v.attrs) else { continue };
                     self.variant_data(&v.data);
-                    if let Some(d) = v.disc { self.expr(d); }
+                    if let Some(d) = v.disc.get() { self.expr(d); }
                 }
             }
             ItemKind::TypeAlias(r) => {
@@ -468,7 +468,7 @@ impl<'a> Gates<'a> {
                 if ctx == Ctx::Foreign {
                     self.gate("extern_types", pos, "extern types are experimental");
                 }
-                if let Some(ty) = t.ty {
+                if let Some(ty) = t.ty.get() {
                     if ctx == Ctx::Trait {
                         self.gate("associated_type_defaults", pos, "associated type defaults are unstable");
                     }
@@ -512,7 +512,7 @@ impl<'a> Gates<'a> {
                     }
                 }
                 self.generics(&im.generics);
-                if let Some(p) = im.trait_ {
+                if let Some(p) = im.trait_.get() {
                     self.trait_path_sugar(&p);
                     self.path(&p);
                 }
@@ -520,11 +520,11 @@ impl<'a> Gates<'a> {
                 let items = ast.list(im.items).to_vec();
                 self.items(&items, Ctx::Impl);
             }
-            ItemKind::Mod(Some(list)) => {
+            ItemKind::Mod(crate::ast::Opt::Some(list)) => {
                 let items = ast.list(list).to_vec();
                 self.items(&items, Ctx::Free);
             }
-            ItemKind::Mod(None) => {
+            ItemKind::Mod(crate::ast::Opt::None) => {
                 let Some(&d) = self.prog.item_defs.get(&(self.file, id.0)) else { return };
                 let def = self.prog.def(d);
                 if def.kind != DefKind::Mod { return; }
@@ -637,7 +637,7 @@ impl<'a> Gates<'a> {
             Ty::Fn(f) => {
                 let f = *ast.fn_ptr(f);
                 for &t in ast.list(f.params) { self.impl_traits(t, out) }
-                if let Some(r) = f.ret { self.impl_traits(r, out) }
+                if let Some(r) = f.ret.get() { self.impl_traits(r, out) }
             }
             _ => {}
         }
@@ -653,13 +653,13 @@ impl<'a> Gates<'a> {
 
     fn fn_sig(&mut self, sig: &FnSig) {
         self.generics(&sig.generics);
-        if let SelfParam::Typed(_, t) = sig.self_param.unwrap_or(SelfParam::Value(false)) { self.ty(t); }
+        if let SelfParam::Typed(_, t) = sig.self_param.get().unwrap_or(SelfParam::Value(false)) { self.ty(t); }
         for p in self.ast.list(sig.params).to_vec() {
             if self.attrs(p.attrs).is_none() { continue; }
             self.pat(p.pat);
             self.ty(p.ty);
         }
-        if let Some(r) = sig.ret { self.ret_ty(r); }
+        if let Some(r) = sig.ret.get() { self.ret_ty(r); }
     }
 
     /// A return type (`-> !` needs no gate).
@@ -674,11 +674,11 @@ impl<'a> Gates<'a> {
                 GenericParamKind::Lifetime(_) => {}
                 GenericParamKind::Type(b, d) => {
                     self.bounds(b);
-                    if let Some(t) = d { self.ty(t); }
+                    if let Some(t) = d.get() { self.ty(t); }
                 }
                 GenericParamKind::Const(t, d) => {
                     self.ty(t);
-                    if let Some(e) = d { self.expr(e); }
+                    if let Some(e) = d.get() { self.expr(e); }
                 }
             }
         }
@@ -738,7 +738,7 @@ impl<'a> Gates<'a> {
         for f in self.ast.list(l).to_vec() {
             if self.attrs(f.attrs).is_none() { continue; }
             self.ty(f.ty);
-            if let Some(d) = f.default { self.expr(d); }
+            if let Some(d) = f.default.get() { self.expr(d); }
         }
     }
 
@@ -777,7 +777,7 @@ impl<'a> Gates<'a> {
         self.path_stability(p);
         if let Some(q) = self.ast.qself(p).copied() {
             self.ty(q.ty);
-            if let Some(tp) = q.trait_path {
+            if let Some(tp) = q.trait_path.get() {
                 self.trait_path_sugar(&tp);
                 self.path(&tp);
             }
@@ -807,7 +807,7 @@ impl<'a> Gates<'a> {
             GenericArgs::Paren(tys, ret) => {
                 for &t in self.ast.list(tys).to_vec().iter() { self.ty(t); }
                 // `Fn() -> !`: the one return position that gates the never type
-                if let Some(r) = ret { self.ty(r); }
+                if let Some(r) = ret.get() { self.ty(r); }
             }
         }
     }
@@ -826,7 +826,7 @@ impl<'a> Gates<'a> {
                 let f = *ast.fn_ptr(f);
                 self.late_bound_defs(f.hrtb);
                 for &x in ast.list(f.params) { self.ty(x) }
-                if let Some(r) = f.ret { self.ret_ty(r); }
+                if let Some(r) = f.ret.get() { self.ret_ty(r); }
             }
             Ty::Never => {
                 let pos = self.ty_pos(t);
@@ -843,18 +843,18 @@ impl<'a> Gates<'a> {
         let ast = self.ast;
         match *ast.pat(p) {
             Pat::Wild | Pat::Rest | Pat::Mac(_) => {}
-            Pat::Ident { sub, .. } => if let Some(s) = sub { self.pat(s) },
+            Pat::Ident { sub, .. } => if let Some(s) = sub.get() { self.pat(s) },
             Pat::Lit(e) => self.expr(e),
             Pat::Range(a, b, _) => {
-                if let Some(e) = a { self.expr(e) }
-                if let Some(e) = b { self.expr(e) }
+                if let Some(e) = a.get() { self.expr(e) }
+                if let Some(e) = b.get() { self.expr(e) }
             }
             Pat::Path(path) => self.path(&path),
             Pat::TupleStruct(path, l) => {
                 self.path(&path);
                 for &x in ast.list(l) { self.pat(x) }
             }
-            Pat::Struct(path, l, _) => {
+            Pat::Struct(_, path, l) => {
                 self.path(&path);
                 for f in ast.list(l).to_vec() {
                     if self.attrs(f.attrs).is_none() { continue; }
@@ -866,10 +866,10 @@ impl<'a> Gates<'a> {
                 for &x in ast.list(l) {
                     // `[a, X.., b]`: a half-open range in a slice
                     let inner = match *ast.pat(x) {
-                        Pat::Ident { sub: Some(s), .. } => s,
+                        Pat::Ident { sub, .. } if let Some(s) = sub.get() => s,
                         _ => x,
                     };
-                    if matches!(*ast.pat(inner), Pat::Range(Some(_), None, _)) {
+                    if matches!(*ast.pat(inner), Pat::Range(a, b, _) if a.is_some() && b.is_none()) {
                         let pos = self.cur_pos;
                         self.gate("half_open_range_patterns_in_slices", pos, "`X..` patterns in slices are experimental");
                     }
@@ -895,7 +895,7 @@ impl<'a> Gates<'a> {
         self.binders.clear();
         if self.pf.edition >= 2018 { self.body_binders(owner); }
         match item.kind {
-            ItemKind::Fn(_, Some(b), _) => self.block(b),
+            ItemKind::Fn(_, body, _) if let Some(b) = body.get() => self.block(b),
             ItemKind::Const(_, e) | ItemKind::Static(_, _, e) => if let Some(e) = e.get() { self.expr(e) },
             _ => {}
         }
@@ -938,10 +938,10 @@ impl<'a> Gates<'a> {
                 let is_const = self.prog.syms.get(&n).and_then(|s| self.prog.lookup_in_scope(self.scope, s, false))
                     .is_some_and(|d| matches!(self.prog.def(d).kind, DefKind::Const | DefKind::Static | DefKind::Struct | DefKind::Variant | DefKind::AssocConst));
                 if !is_const { self.binders.push((n, false)); }
-                if let Some(s) = sub { self.pat_binders(s); }
+                if let Some(s) = sub.get() { self.pat_binders(s); }
             }
             Pat::TupleStruct(_, l) | Pat::Tuple(l) | Pat::Slice(l) | Pat::Or(l) => for &x in ast.list(l).to_vec().iter() { self.pat_binders(x) },
-            Pat::Struct(_, l, _) => for f in ast.list(l).to_vec() { self.pat_binders(f.pat) },
+            Pat::Struct(_, _, l) => for f in ast.list(l).to_vec() { self.pat_binders(f.pat) },
             Pat::Ref(_, x) | Pat::Paren(x) | Pat::Box(x) => self.pat_binders(x),
             _ => {}
         }
@@ -997,9 +997,9 @@ impl<'a> Gates<'a> {
                     let l = *ast.row(r);
                     if self.attrs(l.attrs).is_none() { continue; }
                     self.pat(l.pat);
-                    if let Some(t) = l.ty { self.ty(t); }
-                    if let Some(e) = l.init { self.expr(e); }
-                    if let Some(eb) = l.else_ { self.block(eb); }
+                    if let Some(t) = l.ty.get() { self.ty(t); }
+                    if let Some(e) = l.init.get() { self.expr(e); }
+                    if let Some(eb) = l.else_.get() { self.block(eb); }
                     if self.pf.edition >= 2018 { self.pat_binders(l.pat); }
                 }
                 Stmt::Item(i) => {
@@ -1011,7 +1011,7 @@ impl<'a> Gates<'a> {
                     }
                     self.item(i, Ctx::Free)
                 }
-                Stmt::Expr(e, _) => self.expr(e),
+                Stmt::Expr(_, e) => self.expr(e),
                 Stmt::Attrs(r) => {
                     let a = *ast.row(r);
                     if self.attrs(a.attrs).is_none() { continue; }
@@ -1076,7 +1076,7 @@ impl<'a> Gates<'a> {
                     self.pat(arm.pat);
                     let mark = self.binders.len();
                     if self.pf.edition >= 2018 { self.pat_binders(arm.pat); }
-                    if let Some(g) = arm.guard { self.expr(g) }
+                    if let Some(g) = arm.guard.get() { self.expr(g) }
                     self.expr(arm.body);
                     self.binders.truncate(mark);
                 }
@@ -1103,7 +1103,7 @@ impl<'a> Gates<'a> {
                 }
                 // rustc_ast_lowering asm.rs lower_inline_asm: `options(may_unwind)` needs asm_unwind
                 if m.args != crate::ast::NO_MAC_ARGS {
-                    if let Some(asm) = ast.mac_arg(m.args).asm {
+                    if let Some(asm) = ast.mac_arg(m.args).asm.get() {
                         if asm.options & crate::ast::ASM_MAY_UNWIND != 0 { self.gate("asm_unwind", ex.lo, "the `may_unwind` option is unstable"); }
                     }
                 }
@@ -1117,9 +1117,9 @@ impl<'a> Gates<'a> {
                 for p in ast.list(c.params).to_vec() {
                     if self.attrs(p.attrs).is_none() { continue; }
                     self.pat(p.pat);
-                    if let Some(t) = p.ty { self.ty(t) }
+                    if let Some(t) = p.ty.get() { self.ty(t) }
                 }
-                if let Some(t) = c.ret { self.ret_ty(t) }
+                if let Some(t) = c.ret.get() { self.ret_ty(t) }
                 self.expr(c.body);
                 self.binders.truncate(mark);
             }

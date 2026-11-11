@@ -85,7 +85,7 @@ impl Tcx {
         let ast = &prog.files[file as usize].ast;
         let first = ast.segs(path.segs).first()?;
         if let Some(qself) = ast.qself(path) {
-            let trait_path = qself.trait_path?;
+            let trait_path = qself.trait_path.get()?;
             let td = self.resolve_type_path_def(prog, file, module, &trait_path)?;
             let name = prog.syms.get(prog.files[file as usize].text(first.name))?;
             return self.trait_assoc(prog, td, name);
@@ -115,7 +115,7 @@ impl Tcx {
         let mut params = Vec::new();
         for &ty in prog.files[file as usize].ast.list(fp.params) { params.push(self.lower_ty(cx, prog, file, module, &env, ty)); }
         let ret = fp.ret.map_or(self.tys.unit, |ty| self.lower_ty(cx, prog, file, module, &env, ty));
-        let header = self.lower_fn_header(cx, prog, file, fp.unsafe_, fp.abi, fp.variadic);
+        let header = self.lower_fn_header(cx, prog, file, fp.unsafe_, fp.abi.get(), fp.variadic);
         self.tys.intern(TyKind::FnPtr(self.tys.mk_list(&params), ret, header, env.regions.bound_count()))
     }
     pub(crate) fn lower_fn_trait_bound_args(&self, cx: &crate::tcx::EvalCx<'_>, prog: &Program, file: u32, module: u32, env: &mut GenEnv, params: ast::List<ast::TyId>, output: Option<ast::TyId>) -> (Vec<TyId>, TyId) {

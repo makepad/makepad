@@ -1428,8 +1428,8 @@ impl Tcx {
         let mut env = self.impl_header_env(prog, im.def, im.file, generics);
         let st = self.lower_ty(cx, prog, im.file, im.module, &env, self_ty);
         env.self_ty = Some(st);
-        let trait_regions = trait_.as_ref().map(|p| self.lower_region_args(cx.infcx, prog, im.file, im.module, &env, p)).unwrap_or(RegionArgsId::EMPTY);
-        let tr = trait_.as_ref().map(|tp| {
+        let trait_regions = trait_.get().as_ref().map(|p| self.lower_region_args(cx.infcx, prog, im.file, im.module, &env, p)).unwrap_or(RegionArgsId::EMPTY);
+        let tr = trait_.get().as_ref().map(|tp| {
             self.resolve_trait_path(cx, prog, im.file, im.module, &env, tp).and_then(|td| {
                 // rustc_hir_analysis/src/coherence/mod.rs:73-94. Freeze impls,
                 // specialization-trait attrs and impl restrictions are feature-gated cuts.
@@ -1573,7 +1573,7 @@ impl Tcx {
                 let discr_ty = self.tys.intern(TyKind::Int(repr_int.unwrap_or(Prim::Isize)));
                 for (vi, v) in ast.list(*vars).iter().enumerate() {
                     let (shape, fields) = self.lower_fields(cx, prog, file, module, &env, &v.data);
-                    let discr = if let Some(e) = v.disc {
+                    let discr = if let Some(e) = v.disc.get() {
                         distance_from_explicit = 0;
                         let did = prog.node_id_to_def_id[&(file, relax_front::def_collector::NodeId::AnonConst(e))];
                         self.const_tys.feed(did, discr_ty);
@@ -1601,7 +1601,7 @@ impl Tcx {
         if let Some(fs) = fields {
             for (i, f) in prog.files[file as usize].ast.list(*fs).iter().enumerate() {
                 let ty = self.lower_ty(cx, prog, file, module, env, f.ty);
-                let name = match f.name {
+                let name = match f.name.get() {
                     Some(n) => {
                         let s = prog.files[file as usize].text(n);
                         prog.syms.get(s).unwrap_or(u32::MAX)
@@ -1678,7 +1678,7 @@ impl Tcx {
         let def = prog.def(d);
         let file = &prog.files[def.file as usize];
         let ItemKind::Fn(sig, _, _) = &file.ast.item(def.item).kind else { return None };
-        Some(match file.ast.fn_sig(*sig).abi {
+        Some(match file.ast.fn_sig(*sig).abi.get() {
             None => Abi::Rust,
             Some(None) => Abi::C,
             Some(Some(a)) => Abi::from_name(&crate::lit::unescape_str(file.text(a))).unwrap_or(Abi::Rust),
@@ -1822,14 +1822,14 @@ impl Tcx {
         for (i, param) in params.enumerate() {
             match param.kind {
                 // the default's lowering starts at this parameter, as fill_type_defaults does
-                GenericParamKind::Type(_, Some(ty)) => {
+                GenericParamKind::Type(_, default) if let Some(ty) = default.get() => {
                     state.lowering.borrow_mut().push(Lowering::Default(d, i));
                     self.lower_ty(&cx, prog, def.file, def.scope, &env, ty);
                     state.lowering.borrow_mut().pop();
                 }
                 GenericParamKind::Const(ty, default) => {
                     let ty = self.lower_ty(&cx, prog, def.file, def.scope, &env, ty);
-                    if let Some(value) = default { self.lower_const_arg(prog, def.file, &env, value, ty); }
+                    if let Some(value) = default.get() { self.lower_const_arg(prog, def.file, &env, value, ty); }
                     if self.validates(prog, def.file) {
                         param_wf.extend(self.const_param_ty_wf(prog, d, param.name.lo, ty));
                     }
@@ -1930,7 +1930,7 @@ impl Tcx {
         };
         let mut params = Vec::new();
         let mut self_kind = 0;
-        if let Some(sp) = &sig.self_param {
+        if let Some(sp) = &sig.self_param.get() {
             let st = env.self_ty.unwrap_or(self.tys.error);
             let t = match sp {
                 ast::SelfParam::Value(_) => {
@@ -1939,7 +1939,7 @@ impl Tcx {
                 }
                 ast::SelfParam::Ref(lt, m) => {
                     self_kind = if *m { 3 } else { 2 };
-                    self.tys.intern(TyKind::Ref(*m, st, env.regions.resolve_key(cx.infcx, &self.tys, lt.map_or(resolve_bound_vars::LifetimeKey::SelfReference, |lt| resolve_bound_vars::LifetimeKey::Named(lt.lo, lt.hi)))))
+                    self.tys.intern(TyKind::Ref(*m, st, env.regions.resolve_key(cx.infcx, &self.tys, lt.get().map_or(resolve_bound_vars::LifetimeKey::SelfReference, |lt| resolve_bound_vars::LifetimeKey::Named(lt.lo, lt.hi)))))
                 }
                 ast::SelfParam::Typed(_, t) => {
                     self_kind = 1;
@@ -1956,7 +1956,7 @@ impl Tcx {
             params.push(self.lower_ty(cx, prog, file, module, &env, p.ty));
         }
         let bound_regions = env.regions.bound_count();
-        let ret = match sig.ret {
+        let ret = match sig.ret.get() {
             Some(r) => {
                 let mut renv = env.clone();
                 renv.opaque_owner = Some(d);
@@ -2101,7 +2101,7 @@ impl Tcx {
             }
         }
         parts.ty_bounds = tyb;
-        let header = self.lower_fn_header(cx, prog, file, sig.unsafe_, sig.abi, sig.variadic);
+        let header = self.lower_fn_header(cx, prog, file, sig.unsafe_, sig.abi.get(), sig.variadic);
         let target_features = self.target_feature_attrs(cx, prog, d, header);
         let header = if target_features.safe_target_features { FnHeader { safety: Safety::Unsafe, ..header } } else { header };
         let mut region_contract = self.region_contract(cx, prog, d, &env);
@@ -2253,7 +2253,7 @@ impl Tcx {
                     if n == "Fn" || n == "FnMut" || n == "FnOnce" || is_async {
                         if let Some(a) = ast.gargs(last.args()) {
                             if let GenericArgs::Paren(ps, r) = a {
-                                let fp = ast::FnPtr { hrtb: *hrtb, unsafe_: false, abi: None, params: *ps, ret: *r, variadic: false };
+                                let fp = ast::FnPtr { hrtb: *hrtb, unsafe_: false, abi: ast::OptAbi::NONE, params: *ps, ret: *r, variadic: false };
                                 let bound = self.lower_fn_pointer(cx, prog, file, module, env, &fp, resolve_bound_vars::BinderId::Trait(path.segs.lo));
                                 if let Some(trait_def) = self.resolve_type_path_def(prog, file, module, path) {
                                     callable_signatures.push(callable::CallableSignature { param: i, trait_def, signature: bound });
@@ -2414,8 +2414,8 @@ impl Tcx {
             }
             ast::Ty::Paren(x) => self.lower_ty(cx, prog, file, module, env, *x),
             ast::Ty::Never => self.tys.never,
-            ast::Ty::Ref(lt, m, x) => {
-                let r = env.regions.resolve_key(cx.infcx, &self.tys, lt.map_or(resolve_bound_vars::LifetimeKey::Reference(t.0), |lt| resolve_bound_vars::LifetimeKey::Named(lt.lo, lt.hi)));
+            ast::Ty::Ref(m, lt, x) => {
+                let r = env.regions.resolve_key(cx.infcx, &self.tys, lt.get().map_or(resolve_bound_vars::LifetimeKey::Reference(t.0), |lt| resolve_bound_vars::LifetimeKey::Named(lt.lo, lt.hi)));
                 let inner = self.lower_ty(cx, prog, file, module, env, *x);
                 self.tys.intern(TyKind::Ref(*m, inner, r))
             }
@@ -2511,7 +2511,7 @@ impl Tcx {
         // not recursive evaluation of arbitrary generic const expressions.
         let unwrapped = match expr.kind {
             ast::ExprKind::Block(block, l) if l.is_none() => match pf.ast.stmts(block) {
-                [ast::Stmt::Expr(inner, false)] => *inner,
+                [ast::Stmt::Expr(false, inner)] => *inner,
                 _ => e,
             },
             _ => e,
@@ -2608,7 +2608,7 @@ impl Tcx {
                 let pts: Vec<TyId> = f.ast.list(*ps).iter().map(|x| self.lower_ty(cx, prog, file, module, env, *x)).collect();
                 // the output is lowered for its diagnostics and nested opaques; the
                 // declaration's clauses come from native collection (item_bounds)
-                if let Some(r) = r { self.lower_ty(cx, prog, file, module, env, *r); }
+                if let Some(r) = &r.get() { self.lower_ty(cx, prog, file, module, env, *r); }
                 let args = vec![self.tys.intern(TyKind::Tuple(self.tys.mk_list(&pts)))];
                 decl.bounds.push((td, args));
             } else {
@@ -2762,7 +2762,7 @@ impl Tcx {
             let mut predicate_bound = env.regions.bound_count();
             match f.ast.gargs(last.args()) {
                 Some(GenericArgs::Paren(ps, r)) => {
-                    let sig = ast::FnPtr { hrtb, unsafe_: false, abi: None, params: *ps, ret: *r, variadic: false };
+                    let sig = ast::FnPtr { hrtb, unsafe_: false, abi: ast::OptAbi::NONE, params: *ps, ret: *r, variadic: false };
                     // rustc_ast_lowering/src/path.rs:517-573 and
                     // rustc_hir_analysis/src/hir_ty_lowering/dyn_trait.rs:348-419
                     // @8d1a764: Args and Output retain the trait's binder.
@@ -2903,7 +2903,7 @@ impl Tcx {
                 path_env.opaque_owner = None; path_env.impl_params.clear();
                 self.lower_ty(cx, prog, file, module, &path_env, q.ty)
             } else { self.lower_ty(cx, prog, file, module, env, q.ty) };
-            if let Some(tp) = &q.trait_path {
+            if let Some(tp) = &q.trait_path.get() {
                 if let Some(td) = self.resolve_type_path_def(prog, file, module, tp) {
                     let name = prog.syms.get(f.text(prog.files[file as usize].ast.segs(p.segs)[p.segs.len() - 1].name)).unwrap_or(u32::MAX);
                     if let Some(ad) = self.trait_assoc(prog, td, name) {
@@ -3173,7 +3173,7 @@ impl Tcx {
         // no args at all: in a type, `Foo` with `struct Foo<A = (isize, char)>` is
         // `Foo<(isize, char)>` when every param has a default (else the args are inferred)
         // (item signatures have nothing to infer from: a missing list is E0107 there, error arguments)
-        if args.is_empty() && cx.infcx.is_some() && !params.iter().all(|p| matches!(p.kind, GenericParamKind::Type(_, Some(_)) | GenericParamKind::Const(_, Some(_)))) {
+        if args.is_empty() && cx.infcx.is_some() && !params.iter().all(|p| matches!(p.kind, GenericParamKind::Type(_, d) if d.is_some()) || matches!(p.kind, GenericParamKind::Const(_, d) if d.is_some())) {
             return false;
         }
         let mut env = self.item_env(prog, d);
@@ -3188,13 +3188,13 @@ impl Tcx {
             }
             cx.state.lowering.borrow_mut().push(key);
             let t = match &params[i].kind {
-                GenericParamKind::Type(_, Some(dt)) => {
+                GenericParamKind::Type(_, default) if let Some(dt) = &default.get() => {
                     let lt = self.lower_ty(cx, prog, def.file, module, &env, *dt);
                     let lt = regions.map_or(lt, |rs| self.subst_decl_regions(lt, &env, rs));
                     self.tys.subst(lt, args)
                 }
                 // a const param's default (`const M: usize = N`): its value, or an earlier param
-                GenericParamKind::Const(ty, Some(de)) => {
+                GenericParamKind::Const(ty, default) if let Some(de) = &default.get() => {
                     let expected = self.lower_ty(cx, prog, def.file, module, &env, *ty);
                     let lt = self.tys.intern(TyKind::Const(self.lower_const_arg(prog, def.file, &env, *de, expected)));
                     self.tys.subst(lt, args)
@@ -3275,7 +3275,7 @@ impl Tcx {
         env.regions.enabled = true;
         let ast = &prog.files[def.file as usize].ast;
         match ast.as_alias(&ast.item(def.item).kind) {
-            Some(TypeAliasItem { ty: Some(t), .. }) => self.lower_ty(cx, prog, def.file, module, &env, *t),
+            Some(TypeAliasItem { ty, .. }) if let Some(t) = &ty.get() => self.lower_ty(cx, prog, def.file, module, &env, *t),
             _ => self.tys.error,
         }
     }
@@ -3337,7 +3337,7 @@ impl Tcx {
                 let def = prog.def(d);
                 let ast = &prog.files[def.file as usize].ast;
                 let pos = match ast.as_alias(&ast.item(def.item).kind) {
-                    Some(TypeAliasItem { ty: Some(t), .. }) => crate::lint_late::ast_ty_pos(ast, *t),
+                    Some(TypeAliasItem { ty, .. }) if let Some(t) = &ty.get() => crate::lint_late::ast_ty_pos(ast, *t),
                     _ => None,
                 };
                 self.err(cx, prog, def.file, pos.unwrap_or(ast.item(def.item).name.lo), format!("E0391: cycle detected when expanding type alias `{}`", prog.def_path(d)));
@@ -3885,8 +3885,8 @@ impl Tcx {
         let mut k = 0;
         for g in ast.list(generics.params) {
             let (tdef, cdef) = match &g.kind {
-                GenericParamKind::Type(_, d) => (*d, None),
-                GenericParamKind::Const(_, d) => (None, *d),
+                GenericParamKind::Type(_, d) => (d.get(), None),
+                GenericParamKind::Const(_, d) => (None, d.get()),
                 GenericParamKind::Lifetime(_) => continue,
             };
             if k >= out.len() {
@@ -4120,7 +4120,7 @@ impl Tcx {
                         let mut args = vec![self_t];
                         for t in written { args.push(self.tys.subst(t, &sub)); }
                         let projection = self.tys.intern(TyKind::Alias(crate::consts::IsRigid::No, AliasTy { kind: AliasTyKind::Projection { def_id: output }, args: self.tys.mk_list(&args), regions: RegionArgsId::EMPTY }));
-                        let ret = match ret { Some(t) => self.lower_ty(cx, prog, pd.file, module, &env, *t), None => self.tys.unit };
+                        let ret = match &ret.get() { Some(t) => self.lower_ty(cx, prog, pd.file, module, &env, *t), None => self.tys.unit };
                         out.push((projection, self.tys.subst(ret, &sub)));
                     }
                 }
@@ -4220,8 +4220,10 @@ impl Tcx {
             if d.name == name && d.kind == DefKind::AssocTy {
                 let env = self.item_env(prog, it);
                 let ast = &prog.files[d.file as usize].ast;
-                if let Some(TypeAliasItem { ty: Some(t), .. }) = ast.as_alias(&ast.item(d.item).kind) {
-                    return Some(self.lower_ty(cx, prog, d.file, d.scope, &env, *t));
+                if let Some(TypeAliasItem { ty, .. }) = ast.as_alias(&ast.item(d.item).kind) {
+                    if let Some(t) = ty.get() {
+                        return Some(self.lower_ty(cx, prog, d.file, d.scope, &env, t));
+                    }
                 }
             }
         }

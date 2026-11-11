@@ -1340,6 +1340,12 @@ impl From<&Path> for Box<Path> {
     }
 }
 
+impl Clone for Box<Path> {
+    fn clone(&self) -> Self {
+        self.to_path_buf().into_boxed_path()
+    }
+}
+
 impl From<PathBuf> for Box<Path> {
     fn from(p: PathBuf) -> Box<Path> {
         p.into_boxed_path()

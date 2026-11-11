@@ -218,7 +218,7 @@ pub fn impl_trait_path_privacy(prog: &Program, tcx: &Tcx, own: &[bool]) -> Vec<S
         if def.kind != DefKind::Impl || !own.get(def.krate as usize).copied().unwrap_or(false) { continue; }
         let ast = &prog.files[def.file as usize].ast;
         let Some(imp) = ast.as_impl(&ast.item(def.item).kind) else { continue };
-        let Some(p) = imp.trait_ else { continue };
+        let Some(p) = imp.trait_.get() else { continue };
         if p.segs.len() < 2 || !p.no_qself() || p.lo >= prog.files[def.file as usize].src_len { continue; }
         let segs = crate::program::path_segs(prog, def.file, &p);
         let module = tcx.item_module(prog, d);
@@ -705,7 +705,7 @@ pub fn generic_param_rules(prog: &Program, d: DefId) -> Vec<String> {
             errors.push(prog.record_error(def.file, item.lo, "parse", "functions cannot be both `const` and `async`".to_string()));
         }
     }
-    let has_default = |p: &crate::ast::GenericParam| matches!(p.kind, GenericParamKind::Type(_, Some(_)) | GenericParamKind::Const(_, Some(_)));
+    let has_default = |p: &crate::ast::GenericParam| matches!(p.kind, GenericParamKind::Type(_, d) if d.is_some()) || matches!(p.kind, GenericParamKind::Const(_, d) if d.is_some());
     if matches!(item.kind, ItemKind::Fn(..) | ItemKind::Impl(..)) {
         for p in params {
             if has_default(p) {
@@ -766,7 +766,7 @@ pub fn entry_point(prog: &Program, root: u32) -> Vec<String> {
     if sig.asyncness {
         return err("E0752: `main` function is not allowed to be `async`");
     }
-    let rust_abi = match sig.abi {
+    let rust_abi = match sig.abi.get() {
         None => true,
         Some(None) => false,
         Some(Some(name)) => prog.files[def.file as usize].text(name) == "\"Rust\"",
@@ -865,7 +865,7 @@ pub fn foreign_blocks(prog: &Program, own: &[bool]) -> Vec<String> {
             if !prog.active(file, &attrs) { continue; }
             match item.kind {
                 ItemKind::ForeignMod(_) => blocks.push(item),
-                ItemKind::Mod(Some(l)) => stack.extend(ast.list(l).iter().copied()),
+                ItemKind::Mod(crate::ast::Opt::Some(l)) => stack.extend(ast.list(l).iter().copied()),
                 _ => {}
             }
         }
@@ -882,7 +882,7 @@ pub fn foreign_blocks(prog: &Program, own: &[bool]) -> Vec<String> {
             let fm = ast.row(r);
             let attrs: Vec<crate::ast::Attr> = ast.list(item.attrs).to_vec();
             // rustc_ast_lowering lower_abi: the block's ABI string names an ABI
-            if let Some(a) = fm.abi {
+            if let Some(a) = fm.abi.get() {
                 let text = pf.text(a);
                 if !crate::types::Abi::is_rustc_name(&crate::lit::unescape_str(text)) {
                     errors.push(prog.record_error(file, a.lo, "typeck", format!("E0703: invalid ABI: found `{}`", crate::lit::unescape_str(text))));
@@ -1008,7 +1008,7 @@ pub fn foreign_blocks(prog: &Program, own: &[bool]) -> Vec<String> {
                 }
                 {
                     // `#[track_caller]` on an item of a block whose ABI is not "Rust" (E0737)
-                    let abi = fm.abi.map_or("C".to_string(), |a| crate::lit::unescape_str(pf.text(a)));
+                    let abi = fm.abi.get().map_or("C".to_string(), |a| crate::lit::unescape_str(pf.text(a)));
                     let sp = prog.src(file);
                     for a in ast.list(ast.item(it).attrs) {
                         let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
@@ -1024,7 +1024,7 @@ pub fn foreign_blocks(prog: &Program, own: &[bool]) -> Vec<String> {
                     }
                     // check_abi: a C-variadic foreign function has a C-like calling convention
                     if sig.variadic {
-                        let abi = fm.abi.map_or(&b"\"C\""[..], |a| pf.bytes(a.lo, a.hi));
+                        let abi = fm.abi.get().map_or(&b"\"C\""[..], |a| pf.bytes(a.lo, a.hi));
                         let abi = abi.strip_prefix(b"\"").and_then(|a| a.strip_suffix(b"\"")).unwrap_or(abi);
                         if !matches!(abi, b"C" | b"C-unwind" | b"cdecl" | b"cdecl-unwind" | b"system" | b"system-unwind" | b"aapcs" | b"aapcs-unwind" | b"win64" | b"win64-unwind" | b"sysv64" | b"sysv64-unwind" | b"efiapi") {
                             errors.push(prog.record_error(file, ast.item(it).lo, "typeck", format!("E0045: C-variadic functions with the \"{}\" calling convention are not supported", String::from_utf8_lossy(abi))));
@@ -1035,7 +1035,7 @@ pub fn foreign_blocks(prog: &Program, own: &[bool]) -> Vec<String> {
                         errors.push(prog.record_error(file, g.name.lo, "typeck", format!("E0044: foreign items may not have {} parameters", what)));
                     }
                     for prm in ast.list(sig.params) {
-                        if !matches!(ast.pat(prm.pat), crate::ast::Pat::Wild | crate::ast::Pat::Ident { by_ref: false, mutbl: false, sub: None, .. }) {
+                        if !matches!(ast.pat(prm.pat), crate::ast::Pat::Wild) && !matches!(ast.pat(prm.pat), crate::ast::Pat::Ident { by_ref: false, mutbl: false, sub, .. } if sub.is_none()) {
                             errors.push(prog.record_error(file, ast.item(it).lo, "typeck", "E0130: patterns aren't allowed in foreign function declarations".to_string()));
                         }
                     }
@@ -1192,7 +1192,7 @@ pub fn attribute_safety(prog: &Program, d: DefId) -> Vec<String> {
         }
         if from_source && name == b"track_caller" {
             if let crate::ast::ItemKind::Fn(sig, _, _) = ast.item(def.item).kind {
-                let abi = match ast.fn_sig(sig).abi { None => None, Some(None) => Some("C".to_string()), Some(Some(a)) => Some(crate::lit::unescape_str(pf.text(a))) };
+                let abi = match ast.fn_sig(sig).abi.get() { None => None, Some(None) => Some("C".to_string()), Some(Some(a)) => Some(crate::lit::unescape_str(pf.text(a))) };
                 if abi.is_some_and(|a| a != "Rust") {
                     errors.push(prog.record_error(def.file, pos, "typeck", "E0737: `#[track_caller]` can only be used with the Rust ABI".to_string()));
                 }
@@ -1447,7 +1447,7 @@ pub fn assoc_const_elision(prog: &Program, d: DefId) -> Vec<String> {
             }
         };
         match ast.ty(t) {
-            Ty::Ref(lt, _, x) => (match lt { None => refs_too, Some(l) => text(*l) == "'_" }) || anon(ast, text, *x, refs_too, depth + 1),
+            Ty::Ref(_, lt, x) => (match &lt.get() { None => refs_too, Some(l) => text(*l) == "'_" }) || anon(ast, text, *x, refs_too, depth + 1),
             Ty::Ptr(_, x) | Ty::Slice(x) | Ty::Array(x, _) | Ty::Paren(x) => anon(ast, text, *x, refs_too, depth + 1),
             Ty::Tuple(l) => ast.list(*l).iter().any(|x| anon(ast, text, *x, refs_too, depth + 1)),
             Ty::Path(p) => ast.segs(p.segs).iter().any(|s| args(s.args(), depth)),
@@ -1459,7 +1459,7 @@ pub fn assoc_const_elision(prog: &Program, d: DefId) -> Vec<String> {
     // a lifetime is in scope: one the impl declares (`impl<'a>`), or an anonymous one its header names
     let declared = iast.list(im.generics.params).iter().any(|p| matches!(p.kind, crate::ast::GenericParamKind::Lifetime(_)));
     let header = declared || anon(iast, &itext, im.self_ty, false, 0)
-        || im.trait_.as_ref().is_some_and(|p| iast.segs(p.segs).iter().any(|s| match iast.gargs(s.args()) {
+        || im.trait_.get().as_ref().is_some_and(|p| iast.segs(p.segs).iter().any(|s| match iast.gargs(s.args()) {
             Some(GenericArgs::Angle(v)) => iast.list(*v).iter().any(|a| matches!(a, GenericArg::Lifetime(l) if itext(*l) == "'_")),
             _ => false,
         }));
@@ -1505,7 +1505,7 @@ pub(crate) fn attribute_target(prog: &Program, d: DefId) -> Option<(&'static str
     let item = ast.item(def.item);
     Some(match def.kind {
         K::Fn | K::AssocFn => {
-            let body = matches!(item.kind, ItemKind::Fn(_, Some(_), _));
+            let body = matches!(item.kind, ItemKind::Fn(_, body, _) if body.is_some());
             let in_trait = def.kind == K::AssocFn && prog.def(def.parent).kind == K::Trait;
             ("functions", true, in_trait && !body, false)
         }
@@ -1672,7 +1672,7 @@ pub fn precise_capture_params(prog: &Program, tcx: &Tcx, d: DefId) -> Vec<String
     let pf = &prog.files[def.file as usize];
     let ast = &pf.ast;
     let ItemKind::Fn(sig, _, _) = ast.item(def.item).kind else { return Vec::new() };
-    let Some(ret) = ast.fn_sig(sig).ret else { return Vec::new() };
+    let Some(ret) = ast.fn_sig(sig).ret.get() else { return Vec::new() };
     // the `use<..>` lists of the opaque types written in the return type
     fn walk(ast: &crate::ast::Ast, t: crate::ast::TyId, out: &mut Vec<(crate::ast::GenericArgsId, crate::ast::TyId)>, depth: u32) {
         if depth > 16 { return; }
