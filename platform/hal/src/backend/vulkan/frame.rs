@@ -627,7 +627,10 @@ impl Vulkan {
             && pass.load[0] == pass_load::CLEAR && (depth.is_none() || pass.load[4] != pass_load::LOAD)
             && pass.damage_since != 0 && pass.damage.len <= 32
             && self.damage_base.get(&base).is_some_and(|(sid, image, frame)| *sid == s.id && *frame == pass.damage_since && image.as_ptr() == Arc::as_ptr(&colors[0].1));
-        let mut key = PassKey { colors: [ABSENT; 4], depth: depth.as_ref().map_or(ABSENT, |d| d.desc.format), load: pass.load, views, fdm: density.is_some(), samples };
+        // a depth nothing reads later stays in tile memory, as on Metal; a profiled pass keeps it, since
+        // each of its split runs loads what the one before stored
+        let depth_kept = depth.is_some() && (batch.prof.is_some() || exec::depth_kept(s, s.id, pass, view, pass.depth));
+        let mut key = PassKey { colors: [ABSENT; 4], depth: depth.as_ref().map_or(ABSENT, |d| d.desc.format), load: pass.load, views, fdm: density.is_some(), samples, depth_kept };
         for (i, c) in &colors { key.colors[*i] = c.desc.format; }
         if partial { key.load[0] = pass_load::LOAD; }
         let render_pass = if let Some(pass) = self.passes.get(&key) { pass.clone() } else {
