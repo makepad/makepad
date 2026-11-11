@@ -12,6 +12,9 @@ use crate::scroll_motion::{
     RUBBER_BAND_STRETCH_STIFFNESS, RUBBER_BAND_TOUCH_RANGE,
 };
 
+/// How long a [`ScrollBar::smooth_scroll_to`] takes, however far it goes.
+const SMOOTH_SCROLL_DURATION_SECS: f64 = 0.4;
+
 script_mod! {
     use mod.prelude.widgets_internal.*
 
@@ -282,6 +285,13 @@ enum ScrollState {
         /// so every scrollable widget decelerates identically.
         fling: Fling,
         next_frame: NextFrame,
+    },
+    /// Easing the content from `from` to `to` (see [`ScrollBar::smooth_scroll_to`]).
+    ScrollingTo {
+        next_frame: NextFrame,
+        from: f64,
+        to: f64,
+        clock: FrameClock,
     },
 }
 
@@ -655,6 +665,28 @@ impl ScrollBar {
         return false;
     }
 
+    /// Smoothly scrolls to `scroll_pos`, easing out over a short time.
+    ///
+    /// Unlike [`ScrollBar::set_scroll_target`], this doesn't need `smoothing`.
+    /// The user scrolling or pressing on the content stops it, just like a fling.
+    pub fn smooth_scroll_to(&mut self, cx: &mut Cx, scroll_pos: f64) {
+        let to = scroll_pos.min(self.scroll_limit()).max(0.);
+        if to == self.scroll_pos {
+            // An earlier smooth scroll would carry us away from here.
+            if matches!(self.scroll_state, ScrollState::ScrollingTo { .. }) {
+                self.scroll_state = ScrollState::Stopped;
+            }
+            return;
+        }
+        self.stop_motion();
+        self.scroll_state = ScrollState::ScrollingTo {
+            next_frame: cx.new_next_frame(),
+            from: self.scroll_pos,
+            to,
+            clock: FrameClock::default(),
+        };
+    }
+
     pub fn scroll_into_view(&mut self, cx: &mut Cx, pos: f64, size: f64, smooth: bool) {
         if pos < self.scroll_pos {
             // scroll up
@@ -755,7 +787,7 @@ impl ScrollBar {
                         self.owns_gesture = false;
                         self.coasting = false;
                         self.momentum_cut_at = None;
-                        if matches!(self.scroll_state, ScrollState::Flick { .. }) {
+                        if matches!(self.scroll_state, ScrollState::Flick { .. } | ScrollState::ScrollingTo { .. }) {
                             self.scroll_state = ScrollState::Stopped;
                         }
                         if was_moving {
@@ -822,8 +854,8 @@ impl ScrollBar {
                     self.overscroll = 0.0;
                     // A wheel scroll takes over from a running bounce; the
                     // spring must stop too, or its next frame would rewrite
-                    // the overscroll just cleared above.
-                    if matches!(self.scroll_state, ScrollState::Bounce { .. }) {
+                    // the overscroll just cleared above. So must a smooth scroll.
+                    if matches!(self.scroll_state, ScrollState::Bounce { .. } | ScrollState::ScrollingTo { .. }) {
                         self.scroll_state = ScrollState::Stopped;
                     }
                     if !self.smoothing.is_none() && e.is_mouse {
@@ -924,11 +956,11 @@ impl ScrollBar {
     }
 
     /// Whether anything is moving this bar's content at `time`: a fling, the bounce,
-    /// a live coast, or active finger-driven scrolling.
+    /// a smooth scroll, a live coast, or active finger-driven scrolling.
     pub fn is_motion_live(&self, time: f64) -> bool {
         matches!(
             self.scroll_state,
-            ScrollState::Flick { .. } | ScrollState::Bounce { .. }
+            ScrollState::Flick { .. } | ScrollState::Bounce { .. } | ScrollState::ScrollingTo { .. }
         ) || self.is_coasting(time)
             || press_settles_finger_scroll(self.last_finger_scroll_time, time)
     }
@@ -946,7 +978,7 @@ impl ScrollBar {
     /// Stop an in-progress momentum fling, the "press to catch the scroll" behavior. Returns
     /// whether a fling was actually stopped. The containing view calls this on any press in
     /// the content, independent of `drag_scrolling`, so kinetic scrolling always halts on a
-    /// tap or click as it does on iOS, Android, and macOS.
+    /// tap or click as it does on iOS, Android, and macOS. A press catches a smooth scroll too.
     pub fn stop_fling(&mut self, time: f64) -> bool {
         if let ScrollState::Flick { fling, .. } = &self.scroll_state {
             // Remember the caught speed briefly: a quick same-direction re-flick
@@ -954,7 +986,7 @@ impl ScrollBar {
             // way Chrome and native scrollers allow.
             self.caught_fling = Some((fling.velocity, time));
         }
-        if self.is_flinging() || self.coasting {
+        if self.is_flinging() || self.coasting || matches!(self.scroll_state, ScrollState::ScrollingTo { .. }) {
             self.scroll_state = ScrollState::Stopped;
             self.coasting = false;
             // Release gesture ownership so a still-live OS momentum stream (e.g. a mouse click
@@ -1316,6 +1348,7 @@ impl ScrollBar {
         }
         self.handle_flick(cx, event, dispatch_action);
         self.handle_bounce(cx, event, dispatch_action);
+        self.handle_scrolling_to(cx, event, dispatch_action);
 
         if self.hide_timer.is_event(event).is_some() {
             self.hide_timer = Timer::default();
@@ -1470,6 +1503,27 @@ impl ScrollBar {
             }
             dispatch_action(cx, self.make_scroll_action());
         }
+    }
+
+    /// Eases the content along the way to where a [`ScrollBar::smooth_scroll_to`] is going.
+    fn handle_scrolling_to(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction),
+    ) {
+        let ScrollState::ScrollingTo { next_frame, from, to, clock } = &mut self.scroll_state else { return };
+        let Some(ne) = next_frame.is_event(event) else { return };
+        cx.boost_frame_rate();
+        let progress = (clock.advance(ne.time) / SMOOTH_SCROLL_DURATION_SECS).min(1.0);
+        let scroll_pos = *from + (*to - *from) * Ease::OutCubic.map(progress);
+        if progress < 1.0 {
+            *next_frame = cx.new_next_frame();
+        } else {
+            self.scroll_state = ScrollState::Stopped;
+        }
+        self.set_scroll_pos_no_action(cx, scroll_pos);
+        dispatch_action(cx, self.make_scroll_action());
     }
 
     fn handle_flick(
