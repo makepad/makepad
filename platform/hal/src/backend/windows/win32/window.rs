@@ -34,6 +34,7 @@ const CLASS: &str = "MakepadHalWindow";
 const DISPATCH_CLASS: &str = "MakepadHalDispatch";
 /// the resize band of a client-sized window, in points
 const RESIZE_EDGE: f64 = 8.0;
+const WM_ENDSESSION: u32 = 0x0016;
 
 #[derive(Clone, Copy)]
 pub(super) struct Press {
@@ -1281,6 +1282,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             w.push(|q, id| q.close_requested(id));
             return LRESULT(0);
         }
+        // the session ends: Windows ends this process once we return, skipping the exit handlers
+        // that remove the makepad-remote endpoint's files
+        WM_ENDSESSION if wparam.0 != 0 => makepad_remote::carrier::unix::withdraw(),
         WM_DESTROY => {
             let key = w.recipient.get();
             a11y::unregister(crate::a11y::window_key(key.0, key.1.index));

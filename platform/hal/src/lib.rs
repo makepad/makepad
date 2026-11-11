@@ -847,6 +847,10 @@ impl Hal {
     /// never runs the driver's exit handlers under a thread inside the driver. Returns once
     /// they are gone. A host API, the last HAL call of every way the host ends; once is enough.
     pub fn before_exit(&self) {
+        // a host may end the process without exit handlers after this (`_exit`, TerminateProcess),
+        // which would leave the makepad-remote endpoint's socket and discovery file behind
+        #[cfg(not(target_arch = "wasm32"))]
+        makepad_remote::carrier::unix::withdraw();
         let backend = {
             let mut guard = lock(&self.state);
             guard.exited = true;

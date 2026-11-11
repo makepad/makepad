@@ -20,6 +20,12 @@ extern "C" fn cleanup() {
     let _ = std::fs::remove_file(disc);
 }
 
+/// Removes this process's socket and discovery file now: where the process ends without exit
+/// handlers, or before slow ones (a GPU driver's teardown) run.
+pub fn withdraw() {
+    cleanup();
+}
+
 #[cfg(unix)]
 mod imp {
     use super::*;
