@@ -402,7 +402,7 @@ class MakepadSurface
     static final int RETURN_KEY_PREVIOUS = 7;
 
     // Keyboard configuration (set by Rust via configureKeyboard)
-    private int mInputMode = INPUT_MODE_TEXT;
+    private int mInputMode = INPUT_MODE_NONE;
     private int mAutocapitalize = AUTOCAP_SENTENCES;
     private int mAutocorrect = AUTOCORRECT_DEFAULT;
     private int mReturnKeyType = RETURN_KEY_DEFAULT;
@@ -608,6 +608,15 @@ class MakepadSurface
             return true;
         }
         if (event.getAction() == KeyEvent.ACTION_DOWN && keyCode != 0) {
+            // An IME that composes a hardware keyboard's typing passes on the keys it doesn't use,
+            // like Enter or the arrows, so we end its composition before the app acts on one.
+            boolean editsText = !KeyEvent.isModifierKey(keyCode) && !event.isSystem()
+                && keyCode != KeyEvent.KEYCODE_CAPS_LOCK && keyCode != KeyEvent.KEYCODE_NUM_LOCK
+                && keyCode != KeyEvent.KEYCODE_SCROLL_LOCK;
+            if (editsText && mInputConnection != null
+                    && BaseInputConnection.getComposingSpanStart(mEditable) >= 0) {
+                mInputConnection.finishComposingText();
+            }
             int metaState = event.getMetaState();
             boolean isRepeat = event.getRepeatCount() > 0;
             MakepadNative.surfaceOnKeyDown(keyCode, metaState, isRepeat);
@@ -618,17 +627,18 @@ class MakepadSurface
             MakepadNative.surfaceOnKeyUp(keyCode, metaState);
         }
 
-        if (event.getAction() == KeyEvent.ACTION_UP || event.getAction() == KeyEvent.ACTION_MULTIPLE) {
+        // A key types its character as it goes down, like in a TextView, since an IME that takes
+        // a hardware key's down (and types it itself) still passes the key's up on to us.
+        if (event.getAction() == KeyEvent.ACTION_DOWN || event.getAction() == KeyEvent.ACTION_MULTIPLE) {
             int character = event.getUnicodeChar();
-            if (character == 0) {
-                String characters = event.getCharacters();
-                if (characters != null && characters.length() > 0) {
-                    character = characters.charAt(0);
-                }
-            }
-
             if (character != 0) {
                 MakepadNative.surfaceOnCharacter(character);
+            } else if (event.getCharacters() != null) {
+                // An IME's text (an emoji, a picked word) can come as one event, so we type all of it.
+                String characters = event.getCharacters();
+                for (int i = 0; i < characters.length(); i += Character.charCount(characters.codePointAt(i))) {
+                    MakepadNative.surfaceOnCharacter(characters.codePointAt(i));
+                }
             }
         }
 
@@ -647,12 +657,15 @@ class MakepadSurface
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
         if (!hasFocus()) return null;
+        // While no field wants the keyboard we're no text editor, like a plain View, so the IME
+        // passes every key on to onKey instead of typing it into a buffer that no field reads.
+        if (mInputMode == INPUT_MODE_NONE) {
+            mInputConnection = null;
+            return null;
+        }
         int inputType = InputType.TYPE_CLASS_TEXT;
 
         switch (mInputMode) {
-            case INPUT_MODE_NONE:
-                inputType = InputType.TYPE_NULL;
-                break;
             case INPUT_MODE_ASCII:
                 // TYPE_TEXT_VARIATION_VISIBLE_PASSWORD shows ASCII keyboard without masking
                 // This is the closest Android equivalent to iOS's UIKeyboardTypeASCIICapable
@@ -818,7 +831,8 @@ class MakepadSurface
         mIsSecure = isSecure;
 
         // If config changed and keyboard is already showing, restart input to apply new settings
-        if (changed && mInputConnection != null && hasFocus()) {
+        // (while no field wants the keyboard there's no connection, and this is what makes one)
+        if (changed && hasFocus()) {
             // Finalize any in-progress composition before restart to avoid stale state
             BaseInputConnection.removeComposingSpans(mEditable);
             InputMethodManager imm = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
@@ -2665,7 +2679,13 @@ public class MakepadActivity
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                if (mNativeLayers != null && mNativeLayers.ownsFocus()) return;
+                if (mNativeLayers != null && mNativeLayers.ownsFocus()) {
+                    // The surface still drops its editor, so it has none when it gets the focus back.
+                    if (!show && view != null) {
+                        view.configureKeyboard(MakepadSurface.INPUT_MODE_NONE, 0, 0, 0, false, false);
+                    }
+                    return;
+                }
                 if (show) {
                     if (view == null || view.getInputMode() == MakepadSurface.INPUT_MODE_NONE) {
                         return;
@@ -2704,6 +2724,11 @@ public class MakepadActivity
                         if (imm != null && view != null) {
                             imm.hideSoftInputFromWindow(view.getWindowToken(), 0);
                         }
+                    }
+                    // No field wants the keyboard now, so the surface stops being a text editor
+                    // (see onCreateInputConnection) until the next field asks for it.
+                    if (view != null && view.getInputMode() != MakepadSurface.INPUT_MODE_NONE) {
+                        view.configureKeyboard(MakepadSurface.INPUT_MODE_NONE, 0, 0, 0, false, false);
                     }
                 }
             }
