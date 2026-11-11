@@ -298,6 +298,9 @@ impl Cx {
                 // idle: sleep until an event, a timer the app set or a wake; a frame asked for
                 // and not announced is asked again when its wait runs out
                 match requested.filter(|_| display_clock && self.hal_has_work()) {
+                    // Android's shell holds a paused app's request till it's back, so it sleeps meanwhile
+                    #[cfg(target_os = "android")]
+                    Some(_) if makepad_hal::backend::android::jni::frame_requests_held() => u64::MAX,
                     Some(at) => (at + REREQUEST).saturating_duration_since(std::time::Instant::now()).as_nanos() as u64,
                     None => u64::MAX,
                 }

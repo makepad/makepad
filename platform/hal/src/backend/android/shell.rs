@@ -27,6 +27,7 @@ pub(super) struct State {
     pub events: Vec<(Option<u32>, EventQueue)>,
     pub ime_session: Option<u32>,
     pub params: AndroidParams,
+    /// the display's frame rate for this app, which each `FrameReady` predicts the next vsync from
     pub refresh: f32,
     pub insets: [f32; 4],
     pub pending: HashSet<(u32, Id)>,
@@ -207,7 +208,9 @@ impl AndroidBackend {
 impl Backend for AndroidBackend {
     fn info(&self) -> HalInfo {
         let info = self.core.info();
-        HalInfo { dpi: Shared::global().dpi(), flags: info.flags | if super::xr::active() { info_flags::XR } else { 0 }, ..info }
+        // the Choreographer (or an XR session's frame loop) answers frame requests at each vsync
+        let display_clock = if self.offscreen { 0 } else { info_flags::DISPLAY_CLOCK };
+        HalInfo { dpi: Shared::global().dpi(), flags: info.flags | display_clock | if super::xr::active() { info_flags::XR } else { 0 }, ..info }
     }
     fn submit(&mut self, world: &mut World, sid: u32, view: &CmdView) {
         self.ensure_host(world);
