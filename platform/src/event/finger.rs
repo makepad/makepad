@@ -1144,6 +1144,20 @@ impl CxFingers {
         })
     }
 
+    /// Like [`Self::is_mouse_held_outside_scrollers`], for a drag scroller that holds the press together with
+    /// widgets inside it (see [`Self::can_take_over_press`]): those took the press before `area` did, so their
+    /// captures, ahead of its own, are inside it. A capture taken after `area`'s still counts.
+    pub fn is_mouse_held_outside_drag_scroller(&self, area: Area) -> bool {
+        let digit_id: DigitId = live_id!(mouse).into();
+        let own = self.captures.iter().position(|c| c.digit_id == digit_id && same_owner(area, c.area));
+        self.captures.iter().enumerate().any(|(i, c)| {
+            c.digit_id == digit_id
+                && own.is_none_or(|own| i > own)
+                && !same_owner(area, c.area)
+                && !self.is_scroll_drag_holder(digit_id, c.area)
+        })
+    }
+
     pub(crate) fn release_digit(&mut self, digit_id: DigitId) {
         self.cancelled.retain(|v| v.digit_id != digit_id);
         self.taken_away.retain(|d| *d != digit_id);
