@@ -262,9 +262,14 @@ pub(super) fn back_unhandled() -> bool {
 unsafe extern "system" fn character(_: *mut JNIEnv, _: jclass, code: jint) { boost_frame_rate();
     if let Some(c) = char::from_u32(code as u32) { let mut bytes = [0; 4]; let text = c.encode_utf8(&mut bytes); Shared::global().emit(clock_ns(), |q, id| q.text(id, input::text::TYPED, text.as_bytes())); }
 }
-unsafe extern "system" fn resize_ime(_: *mut JNIEnv, _: jclass, height: jint, open: jboolean) { boost_frame_rate();
+unsafe extern "system" fn resize_ime(_: *mut JNIEnv, _: jclass, height: jint, open: jboolean) {
+    // Every layout pass (onGlobalLayout) reports the IME state again. An unchanged report is no
+    // news: a frame-rate boost on it sets the window's display mode, which is another layout
+    // pass, as is the boost's end: a loop that keeps the app redrawing.
+    // A closed IME clears LAST_IME on every report, repeated or not, so the next ImeShow is sent.
     if open == 0 { *lock(&LAST_IME) = None; }
-    lock(&Shared::global().state).ime = Some((height.max(0), open != 0));
+    if !state::report_changed(&mut lock(&Shared::global().state).ime, Some((height.max(0), open != 0))) { return; }
+    boost_frame_rate();
     let height = height.max(0) as f64 / Shared::global().dpi() as f64;
     Shared::global().emit(clock_ns(), |q, id| q.ime_resize(id, height, open != 0));
 }
@@ -273,7 +278,9 @@ unsafe extern "system" fn physical_keyboard(_: *mut JNIEnv, _: jclass, connected
     Shared::global().emit(clock_ns(), |q, id| q.physical_keyboard(id, connected != 0));
 }
 unsafe extern "system" fn insets(_: *mut JNIEnv, _: jclass, top: jfloat, right: jfloat, bottom: jfloat, left: jfloat) {
-    lock(&Shared::global().state).insets = [top, right, bottom, left]; Shared::global().display();
+    // an unchanged report would emit an unchanged geometry
+    if !state::report_changed(&mut lock(&Shared::global().state).insets, [top, right, bottom, left]) { return; }
+    Shared::global().display();
 }
 unsafe extern "system" fn ime_state(env: *mut JNIEnv, _: jclass, text: jstring, ss: jint, se: jint, cs: jint, ce: jint) { boost_frame_rate();
     let text = reg::string(env, text);
