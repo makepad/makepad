@@ -1526,6 +1526,27 @@ impl<'p> Graph<'p> {
 mod tests {
     use super::*;
 
+    /// `force_cpu` is process-wide, and tests run in parallel: a test that sets
+    /// it, or that needs the GPU gateway, holds this lock for its whole run.
+    static DEVICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The device lock with `force_cpu(cpu)`; dropping it restores the default.
+    struct Device {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn device(cpu: bool) -> Device {
+        let guard = DEVICE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        force_cpu(cpu);
+        Device { _lock: guard }
+    }
+
+    impl Drop for Device {
+        fn drop(&mut self) {
+            force_cpu(false);
+        }
+    }
+
     /// Checks d(loss)/d(param) against central differences for a graph builder.
     pub(crate) fn grad_check(params: &mut Params, name: &str, build: &dyn Fn(&mut Graph) -> Id) {
         let pid = params.id(name);
@@ -1555,7 +1576,7 @@ mod tests {
 
     #[test]
     fn gradients_match_finite_differences() {
-        force_cpu(true);
+        let _device = device(true);
         let mut rng = Rng::new(7);
         let mut p = Params::new();
         p.declare("x", 12, 8, Init::Normal(1.0), &mut rng);
@@ -1598,7 +1619,7 @@ mod tests {
 
     #[test]
     fn audio_op_gradients_match_finite_differences() {
-        force_cpu(true);
+        let _device = device(true);
         let mut rng = Rng::new(3);
         let st = Stft { n_fft: 64, hop: 16, win: 60 };
         let len = 192;
@@ -1641,6 +1662,7 @@ mod tests {
     /// served from the device weight kept under the original's key.
     #[test]
     fn a_replaced_parameter_is_not_served_from_its_old_key() {
+        let _device = device(false);
         let mut rng = Rng::new(5);
         let mut p = Params::new();
         // 64 x 256 x 128 multiply-adds, over the GPU minimum: with the GPU on (a Mac,

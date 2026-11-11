@@ -8,9 +8,9 @@
 
 use crate::backend::{
     gpu_add_bf16, gpu_attention_packed_bf16, gpu_attention_packed_composite_bf16,
-    gpu_attention_packed_cross_bf16, gpu_attention_packed_cross_composite_bf16,
-    gpu_bf16_round, gpu_concat_rows, gpu_download, gpu_gelu_erf, gpu_slice_cols,
-    gpu_slice_rows, gpu_upload, gpu_weight_cache_evict_prefix, GpuTensor,
+    gpu_attention_packed_cross_bf16, gpu_attention_packed_cross_composite_bf16, gpu_bf16_round,
+    gpu_concat_rows, gpu_download, gpu_gelu_erf, gpu_slice_cols, gpu_slice_rows, gpu_upload,
+    GpuTensor,
 };
 use crate::skin_tokens::{
     fsq_index_to_digits, SkinTokensWeights, SKIN_TOKENS_FSQ_VOCAB,
@@ -19,7 +19,7 @@ use crate::skin_tokens::{
 };
 use crate::skin_tokens_neural::{
     fp32_layer_norm_to_bf16, layer_norm, linear_bf16, linear_bf16_bias_epilogue,
-    linear_bf16_optional_bias, packed_linear_bf16, SKIN_TOKENS_NEURAL_NAMESPACE,
+    linear_bf16_optional_bias, packed_linear_bf16,
 };
 use crate::{emit_progress, DiffusionError, ProgressHook, Result};
 
@@ -1205,15 +1205,6 @@ pub fn normalize_dense_skin_weight_rows_optional(
         }
     }
     Ok(())
-}
-
-/// Evict the shared streamed SkinTokens matrices. Kept here as a decoder-side
-/// lifecycle entry point so a service can unload even when it uses only this
-/// module directly.
-pub fn unload_skin_tokens_decode_weights() -> Result<()> {
-    gpu_weight_cache_evict_prefix(SKIN_TOKENS_NEURAL_NAMESPACE)
-        .map_err(DiffusionError::model)
-        .map(|_| ())
 }
 
 #[cfg(test)]

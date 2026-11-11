@@ -455,14 +455,12 @@ mod indextts_synth {
                         resident.store(true, Ordering::Release);
                     }
                     Err(error) => {
-                        // A cancelled/failed cold load can have populated
-                        // global CUDA namespaces before the owning pipeline
-                        // exists. Clean them on this same thread. If cleanup
-                        // itself fails, retire the thread so TLS destruction
-                        // remains the unconditional fallback.
-                        let cleanup = makepad_ai_common::backend::release_gpu_runtime_namespaces(
-                            &["indextts_"],
-                        );
+                        // A cancelled/failed cold load has dropped the partial
+                        // models and their weight owners. Drain their cached
+                        // weights and the scratch pool on this same thread.
+                        // If cleanup itself fails, retire the thread so TLS
+                        // destruction remains the unconditional fallback.
+                        let cleanup = makepad_ai_common::backend::gpu_runtime_trim();
                         resident.store(false, Ordering::Release);
                         return match cleanup {
                             Ok(_) => Err(diffusion_err(error)),

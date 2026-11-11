@@ -3,7 +3,6 @@
 
 use crate::gpu as cuda;
 use makepad_ai_loader::prof;
-use makepad_ai_loader::quant::bf16_to_f32;
 use makepad_ai_metal as metal;
 
 pub use makepad_ai_loader::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
@@ -73,58 +72,6 @@ where
         );
         if out.is_ok() {
             prof::record(prof::CAT_DENSE_TOTAL, t, ((a.len() + m * n) * 4) as u64);
-        }
-        return Some(out);
-    }
-    None
-}
-
-pub fn try_matmul_nt_ggml_bytes_cached_bf16_words<F>(
-    a_bf16_words: &[u16],
-    bt_ggml_type: u32,
-    m: usize,
-    k: usize,
-    n: usize,
-    cache_namespace: &str,
-    bt_cache_key: &str,
-    load_bt_bytes: F,
-) -> Option<Result<Vec<f32>, String>>
-where
-    F: FnOnce() -> Result<Vec<u8>, String>,
-{
-    if metal::is_available() {
-        let a = a_bf16_words
-            .iter()
-            .copied()
-            .map(bf16_to_f32)
-            .collect::<Vec<_>>();
-        let bt_bytes = match load_bt_bytes() {
-            Ok(bytes) => bytes,
-            Err(err) => return Some(Err(err)),
-        };
-        if let Some(out) = metal::try_matmul_nt_ggml_bytes(&a, &bt_bytes, bt_ggml_type, m, k, n) {
-            return Some(Ok(out));
-        }
-        return None;
-    }
-    if cuda::is_available() {
-        let t = std::time::Instant::now();
-        let out = cuda::try_matmul_nt_ggml_bytes_cached_bf16_words(
-            a_bf16_words,
-            bt_ggml_type,
-            m,
-            k,
-            n,
-            cache_namespace,
-            bt_cache_key,
-            load_bt_bytes,
-        );
-        if out.is_ok() {
-            prof::record(
-                prof::CAT_DENSE_TOTAL,
-                t,
-                (a_bf16_words.len() * 2 + m * n * 4) as u64,
-            );
         }
         return Some(out);
     }

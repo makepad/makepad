@@ -22,9 +22,15 @@ pub fn contains(word: &str) -> bool {
     entry(word).is_some()
 }
 
+/// The dictionary's total frequency (pruned words included). The builder
+/// writes it under the key `"\0total"`, which reads as the empty key: an MKLEX
+/// key ends at its first NUL.
 fn total_frequency() -> f64 {
     static TOTAL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
-    *TOTAL.get_or_init(|| data::words().get("\0total").and_then(|v| v.parse::<f64>().ok()).unwrap_or(6.0e7))
+    *TOTAL.get_or_init(|| {
+        let total = data::words().get("").expect("zh_words.bin has no total (its \\0total key)");
+        total.parse().unwrap_or_else(|_| panic!("zh_words.bin total {total:?} is not a number"))
+    })
 }
 
 fn is_han(c: char) -> bool {
@@ -126,6 +132,9 @@ mod tests {
 
     #[test]
     fn the_dictionary_knows_tags() {
+        // The total is the table's own (its \0total entry), not a constant.
+        let own = crate::g2p::test_tables::WORDS.iter().find(|(key, _)| *key == "\0total").unwrap().1;
+        assert_eq!(total_frequency(), own.parse::<f64>().unwrap());
         assert_eq!(tag("北京"), Some("ns"));
         assert!(contains("天气"));
         assert!(!contains("天气很"));

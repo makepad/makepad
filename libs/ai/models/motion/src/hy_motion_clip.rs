@@ -6,10 +6,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::backend::gpu_weight_cache_evict_prefix;
 use makepad_ai_flux::clip::{ClipTokenChunk, ClipTokenizer};
 use makepad_ai_flux::clip_l::{
-    clip_cache_namespace, ClipLExecutionMode, CompiledClipL, LoadedClipLWeights,
+    ClipLExecutionMode, CompiledClipL, LoadedClipLWeights,
 };
 use crate::hy_motion::HY_MOTION_VECTOR_DIM;
 use crate::{DiffusionError, Result};
@@ -91,16 +90,6 @@ impl HyMotionClipConditioner {
 
     pub fn loaded_tensor_count(&self) -> usize {
         self.weights.tensor_ids.len()
-    }
-
-    /// Release only this CLIP tower's cached CUDA weight buffers. The host
-    /// checkpoint remains loaded, so a later encode can repopulate them.
-    pub fn evict_device_weights(&self) -> Result<usize> {
-        gpu_weight_cache_evict_prefix(&format!(
-            "{}::",
-            clip_cache_namespace(&self.weights)
-        ))
-        .map_err(DiffusionError::model)
     }
 }
 

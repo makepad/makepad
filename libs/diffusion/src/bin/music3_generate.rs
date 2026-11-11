@@ -10,9 +10,9 @@ use makepad_diffusion::music3::{
     MUSIC3_FLOW_STEPS, MUSIC3_NUM_CODEBOOKS, MUSIC3_SAMPLE_RATE,
 };
 use makepad_diffusion::music3_ar::music3_ar_replay;
-use makepad_diffusion::music3_dit::{music3_dit_evict, music3_dit_sample, Music3DitPrepared};
-use makepad_diffusion::music3_lm::{music3_lm_evict, Music3LmPrepared};
-use makepad_diffusion::music3_rvq::{music3_rvq_evict, Music3RvqPrepared};
+use makepad_diffusion::music3_dit::{music3_dit_sample, Music3DitPrepared};
+use makepad_diffusion::music3_lm::Music3LmPrepared;
+use makepad_diffusion::music3_rvq::Music3RvqPrepared;
 use makepad_diffusion::music3_vocoder::Music3Vocoder;
 use makepad_diffusion::music3_weights::Music3Shards;
 use std::path::{Path, PathBuf};
@@ -381,8 +381,8 @@ fn run(weights: &Path, dump: &Path, out: &Path, cpu_voc: bool, ar: bool) -> Resu
             ar_warm,
             t3.elapsed().as_secs_f64()
         );
-        let _ = music3_lm_evict();
-        let _ = music3_rvq_evict();
+        drop(lm);
+        drop(rvq);
     } else {
         let _ = music3_dit_sample(
             &shards,
@@ -405,7 +405,7 @@ fn run(weights: &Path, dump: &Path, out: &Path, cpu_voc: bool, ar: bool) -> Resu
             t3.elapsed().as_secs_f64()
         );
     }
-    let _ = music3_dit_evict();
+    drop(shards);
     write_wav_i16(out, &audio, tokens, MUSIC3_SAMPLE_RATE as u32)?;
     println!("  wrote {} samples={}", out.display(), audio.len() / 2);
 

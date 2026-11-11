@@ -6,14 +6,14 @@ use crate::backend::{
     gpu_add, gpu_attention_packed, gpu_concat_rows, gpu_device_available, gpu_download,
     gpu_layer_norm_mul_add, gpu_linear_nt_cached_bf16_f32acc, gpu_rope_half, gpu_slice_cols,
     gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload, gpu_weight_cache_ensure,
-    gpu_weight_cache_evict_prefix, GpuLinearPart, GpuTensor,
+    GpuLinearPart, GpuTensor,
 };
 use crate::music3::{
     MUSIC3_DIT_CONCAT, MUSIC3_DIT_COND, MUSIC3_DIT_DIM, MUSIC3_DIT_FF, MUSIC3_DIT_FOURIER,
     MUSIC3_DIT_HEAD_DIM, MUSIC3_DIT_HEADS, MUSIC3_DIT_IN_CHANNELS, MUSIC3_DIT_LAYERS,
     MUSIC3_DIT_ROPE,
 };
-use crate::music3_weights::{Music3Shards, MUSIC3_DIT_NAMESPACE};
+use crate::music3_weights::Music3Shards;
 use crate::{DiffusionError, Result};
 use makepad_ai_common::quant::GGML_TYPE_BF16;
 use std::f32::consts::PI;
@@ -43,7 +43,7 @@ fn ensure_linear<'a>(
 ) -> Result<GpuLinearPart<'a>> {
     let ggml_type = weights.linear_ggml_type(name);
     if crate::backend::gpu_quant_linear_type_supported(ggml_type) {
-        crate::backend::gpu_weight_cache_ensure_quant(MUSIC3_DIT_NAMESPACE, name, ggml_type, n, k, || {
+        crate::backend::gpu_weight_cache_ensure_quant(weights.cache_namespace(), name, ggml_type, n, k, || {
             weights.tensor_bytes(name).map_err(|err| err.to_string())
         })
         .map_err(DiffusionError::model)?;
@@ -56,7 +56,7 @@ fn ensure_linear<'a>(
     }
     // Safetensors DiT weights are F32 on disk (converted to bf16 here);
     // GGUF F32/BF16 members take the same length-switched path.
-    gpu_weight_cache_ensure(MUSIC3_DIT_NAMESPACE, name, GGML_TYPE_BF16, n, k, false, || {
+    gpu_weight_cache_ensure(weights.cache_namespace(), name, GGML_TYPE_BF16, n, k, false, || {
         let raw = weights.tensor_bytes(name).map_err(|err| err.to_string())?;
         if raw.len() == n * k * 4 {
             Ok(f32_le_to_bf16(&raw))
@@ -74,15 +74,16 @@ fn ensure_linear<'a>(
 }
 
 fn linear_parts(
+    namespace: &str,
     x: &GpuTensor,
     parts: &[GpuLinearPart<'_>],
     bias: &[f32],
 ) -> Result<GpuTensor> {
     if crate::backend::gpu_quant_linear_type_supported(parts[0].bt_ggml_type) {
-        return crate::backend::gpu_linear_nt_cached(x, MUSIC3_DIT_NAMESPACE, parts, bias)
+        return crate::backend::gpu_linear_nt_cached(x, namespace, parts, bias)
             .map_err(DiffusionError::model);
     }
-    gpu_linear_nt_cached_bf16_f32acc(x, MUSIC3_DIT_NAMESPACE, parts, bias)
+    gpu_linear_nt_cached_bf16_f32acc(x, namespace, parts, bias)
         .map_err(DiffusionError::model)
 }
 
@@ -94,7 +95,7 @@ fn linear(
     bias: &[f32],
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, n, x.cols())?;
-    linear_parts(x, &[part], bias)
+    linear_parts(weights.cache_namespace(), x, &[part], bias)
 }
 
 pub struct Music3DitPrepared {
@@ -210,7 +211,7 @@ fn block(
         ensure_linear(weights, &k_name, MUSIC3_DIT_DIM, MUSIC3_DIT_DIM)?,
         ensure_linear(weights, &v_name, MUSIC3_DIT_DIM, MUSIC3_DIT_DIM)?,
     ];
-    let qkv = linear_parts(&normed, &parts, &[])?;
+    let qkv = linear_parts(weights.cache_namespace(), &normed, &parts, &[])?;
     drop(normed);
     let q = gpu_slice_cols(&qkv, 0, MUSIC3_DIT_DIM).map_err(DiffusionError::model)?;
     let k = gpu_slice_cols(&qkv, MUSIC3_DIT_DIM, MUSIC3_DIT_DIM).map_err(DiffusionError::model)?;
@@ -470,8 +471,4 @@ pub fn music3_dit_sample_window(
         progress(i + 1, steps);
     }
     Ok(x)
-}
-
-pub fn music3_dit_evict() -> Result<usize> {
-    gpu_weight_cache_evict_prefix(&format!("{MUSIC3_DIT_NAMESPACE}::")).map_err(DiffusionError::model)
 }

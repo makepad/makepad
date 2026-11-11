@@ -21,7 +21,7 @@ use crate::flux_lora::FluxLoraStack;
 use crate::flux_text::FluxConditioning;
 use crate::graph_growth::{build_with_graph_growth, GraphReserve};
 use crate::{emit_byte_progress, emit_progress, DiffusionError, ProgressHook, Result};
-use makepad_ai_common::backend::{try_matmul_nt_ggml_bytes, try_matmul_nt_ggml_bytes_cached};
+use makepad_ai_common::backend::try_matmul_nt_ggml_bytes_cached;
 use makepad_ai_common::{
     bf16_to_f32, f16_to_f32, f8_e4m3_to_f32, ggml_pad, ggml_type_size_for_type, BufferUsage,
     Context, Graph, InitParams, Op, Tensor, TensorDesc, TensorId, TensorLayout, TensorType,
@@ -53,7 +53,7 @@ pub struct LoadedFluxTransformerWeights {
     pub f8_weights: bool,
     /// True when any weight is a block-quant GGUF type (Q4_K, …).
     /// Compiled Metal graphs still assume dense F16/BF16/F8, so these
-    /// stay on the lazy `try_matmul_nt_ggml_bytes` path.
+    /// stay on the lazy `try_matmul_nt_ggml_bytes_cached` path.
     pub quantized: bool,
     /// Identity of the LoRA adaptation merged into these weights (empty =
     /// pristine). Each load mints an owner, so patched and
@@ -2546,18 +2546,6 @@ fn linear_rows(
         }
         let mut part_output = if input.rows == 0 {
             Vec::new()
-        } else if let Some(values) = try_matmul_nt_ggml_bytes(
-            &input.data,
-            part.bytes,
-            part.ggml_type,
-            input.rows,
-            input.cols,
-            part.rows,
-        ) {
-            // Pass the resident mmap/arena slice so Metal's pointer-keyed
-            // weight cache can reuse the GPU buffer. `to_vec()` here used to
-            // allocate a new host copy every linear and bust that cache.
-            values
         } else if let Some(result) = try_matmul_nt_ggml_bytes_cached(
             &input.data,
             part.ggml_type,

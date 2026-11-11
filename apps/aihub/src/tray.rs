@@ -6,7 +6,7 @@
 //! * off: thin spokes, hollow centre, faint nodes;
 //! * a problem (a backend on that does not serve, a failed start): the centre is a ring
 //!   with a bar through it;
-//! * a request at work: the nodes grow, alternating with the serving glyph (pulse).
+//! * a request at work: the nodes grow (steady: the menu bar item does not blink).
 
 use crate::settings::{Backend, Settings};
 use makepad_widgets::*;

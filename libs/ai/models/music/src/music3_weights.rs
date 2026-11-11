@@ -9,15 +9,11 @@
 //! `tensor_name_format = native`), same API, per-tensor ggml types so Q4_0
 //! linears stay packed all the way into the device weight cache.
 
+use crate::backend::WeightOwner;
 use crate::music3_quant::Music3GgufFile;
 use crate::{DiffusionError, Result};
 use makepad_ai_common::sharded::ShardedSafetensors;
 use std::path::{Path, PathBuf};
-
-pub const MUSIC3_LM_NAMESPACE: &str = "music3lm";
-pub const MUSIC3_RVQ_NAMESPACE: &str = "music3rvq";
-pub const MUSIC3_DIT_NAMESPACE: &str = "music3dit";
-pub const MUSIC3_VAE_NAMESPACE: &str = "music3vae";
 
 const LABEL: &str = "music3";
 
@@ -27,6 +23,7 @@ enum Music3WeightSource {
 }
 
 pub struct Music3Shards {
+    owner: WeightOwner,
     pub dir: PathBuf,
     source: Music3WeightSource,
 }
@@ -40,6 +37,7 @@ impl Music3Shards {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| file.path.clone());
         Self {
+            owner: WeightOwner::new("music3-shards"),
             dir,
             source: Music3WeightSource::Gguf(file),
         }
@@ -48,9 +46,15 @@ impl Music3Shards {
     pub fn load(dir: impl AsRef<Path>) -> Result<Self> {
         let shards = ShardedSafetensors::load(dir, LABEL)?;
         Ok(Self {
+            owner: WeightOwner::new("music3-shards"),
             dir: shards.dir.clone(),
             source: Music3WeightSource::Safetensors(shards),
         })
+    }
+
+    /// The namespace of the device weights read from these shards.
+    pub fn cache_namespace(&self) -> &str {
+        self.owner.namespace()
     }
 
     pub fn has_tensor(&self, name: &str) -> bool {

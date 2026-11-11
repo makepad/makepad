@@ -12,7 +12,7 @@ use crate::flux2::{
 };
 use crate::flux2_dev_text::{flux2_dev_text_encode, Flux2DevTextPrepared};
 use crate::flux2_klein_text::{
-    flux2_klein_text_encode, flux2_klein_text_release, flux2_klein_tokenize, flux2_klein_tokenizer_load,
+    flux2_klein_text_encode, flux2_klein_tokenize, flux2_klein_tokenizer_load,
     Flux2KleinTextPrepared,
 };
 use crate::flux2_tokenizer::{Flux2Tokenizer, FLUX2_MAX_SEQUENCE_LENGTH};
@@ -258,7 +258,7 @@ impl Flux2KleinPipeline {
             // per call dominated warm TE). MAKEPAD_FLUX2_TE_RELEASE=1 restores
             // the evict-after-encode behavior for VRAM-constrained flows.
             if std::env::var("MAKEPAD_FLUX2_TE_RELEASE").as_deref() == Ok("1") {
-                let _ = flux2_klein_text_release();
+                let _ = self.text_prepared.release_device();
             }
             embeds
         };

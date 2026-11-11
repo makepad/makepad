@@ -11,6 +11,7 @@
 //! made with both zeroed, so parity is exact. Encoder (a2a/inpaint) is not
 //! ported yet.
 
+use crate::backend::WeightOwner;
 use crate::sa3::{
     dyt_rows, linear, par_rows, silu, Sa3Tensors, SA3_AE_CHUNK_TOKENS, SA3_AE_DEPTH, SA3_AE_DIM,
     SA3_AE_FF_INNER, SA3_AE_GROUP, SA3_AE_PATCH, SA3_AE_PATCH_CHANNELS, SA3_AE_STRIDE,
@@ -363,6 +364,7 @@ struct AeDeviceBlock {
 /// Prepared f16 device weights for the AE decoder. The bottleneck
 /// running_std is folded into the latent projection.
 pub struct Sa3AeDevice {
+    owner: WeightOwner,
     latent: F16Weight,
     latent_bias: Vec<f32>,
     blocks: Vec<AeDeviceBlock>,
@@ -404,6 +406,7 @@ impl Sa3AeDecoder {
             }
         }
         Sa3AeDevice {
+            owner: WeightOwner::new("sa3-ae"),
             latent: F16Weight::new("sa3ae.latent", &folded, d, SA3_LATENT_DIM),
             latent_bias: self.latent_b.clone(),
             blocks,
@@ -446,7 +449,7 @@ impl Sa3AeDecoder {
         // row gather: [latent_i, 16 x new_token] per group.
         let lat = gpu_upload(latents, latent_len, SA3_LATENT_DIM).map_err(|e| dev_err("ae upload", e))?;
         let projected =
-            gpu_linear_nt_cached(&lat, "sa3ae", &[device.latent.part()], &device.latent_bias)
+            gpu_linear_nt_cached(&lat, device.owner.namespace(), &[device.latent.part()], &device.latent_bias)
                 .map_err(|e| dev_err("ae latent linear", e))?;
         let new_token = gpu_upload(&self.new_tokens, 1, d).map_err(|e| dev_err("ae new token", e))?;
         let src = gpu_concat_rows(&projected, &new_token).map_err(|e| dev_err("ae assembly src", e))?;
@@ -542,7 +545,7 @@ impl Sa3AeDecoder {
         let stacked = gpu_concat_cols(&[&prev, &tokens, &next]).map_err(|e| dev_err("ae stack", e))?;
         let mapped = gpu_linear_nt_cached(
             &stacked,
-            "sa3ae",
+            device.owner.namespace(),
             &[device.mapping.part()],
             &device.mapping_bias,
         )
@@ -582,11 +585,11 @@ impl Sa3AeDecoder {
 
         let key = |what: &str| format!("b{index}.{what}");
         let a = gpu_dyt(
-            x, d, "sa3ae", &key("pre"), &block.pre_norm.gamma, &block.pre_norm.beta,
+            x, d, device.owner.namespace(), &key("pre"), &block.pre_norm.gamma, &block.pre_norm.beta,
             block.pre_norm.alpha,
         )
         .map_err(|e| dev_err("ae pre dyt", e))?;
-        let qkv = gpu_linear_nt_cached(&a, "sa3ae", &[dev.qkv.part()], &[])
+        let qkv = gpu_linear_nt_cached(&a, device.owner.namespace(), &[dev.qkv.part()], &[])
             .map_err(|e| dev_err("ae qkv", e))?;
         let mut heads_parts = Vec::with_capacity(5);
         for part in 0..5 {
@@ -596,7 +599,7 @@ impl Sa3AeDecoder {
             let normed = gpu_dyt(
                 buf,
                 SA3_HEAD_DIM,
-                "sa3ae",
+                device.owner.namespace(),
                 &key(what),
                 &block.q_norm.gamma,
                 &block.q_norm.beta,
@@ -610,7 +613,7 @@ impl Sa3AeDecoder {
             let normed = gpu_dyt(
                 buf,
                 SA3_HEAD_DIM,
-                "sa3ae",
+                device.owner.namespace(),
                 &key(what),
                 &block.k_norm.gamma,
                 &block.k_norm.beta,
@@ -661,20 +664,20 @@ impl Sa3AeDecoder {
         let attn = chunk_outs.pop().ok_or_else(|| {
             DiffusionError::model("sa3 ae device: empty chunk list")
         })?;
-        let out = gpu_linear_nt_cached(&attn, "sa3ae", &[dev.out.part()], &[])
+        let out = gpu_linear_nt_cached(&attn, device.owner.namespace(), &[dev.out.part()], &[])
             .map_err(|e| dev_err("ae attn out", e))?;
         let x = gpu_add(x, &out).map_err(|e| dev_err("ae attn residual", e))?;
 
         // GLU feedforward (SwiGLU, value first).
         let f = gpu_dyt(
-            &x, d, "sa3ae", &key("ff"), &block.ff_norm.gamma, &block.ff_norm.beta,
+            &x, d, device.owner.namespace(), &key("ff"), &block.ff_norm.gamma, &block.ff_norm.beta,
             block.ff_norm.alpha,
         )
         .map_err(|e| dev_err("ae ff dyt", e))?;
-        let proj = gpu_linear_nt_cached(&f, "sa3ae", &[dev.ff_proj.part()], &block.ff_proj_b)
+        let proj = gpu_linear_nt_cached(&f, device.owner.namespace(), &[dev.ff_proj.part()], &block.ff_proj_b)
             .map_err(|e| dev_err("ae ff proj", e))?;
         let inner = gpu_swiglu_value_gate(&proj).map_err(|e| dev_err("ae swiglu", e))?;
-        let ff = gpu_linear_nt_cached(&inner, "sa3ae", &[dev.ff_out.part()], &block.ff_out_b)
+        let ff = gpu_linear_nt_cached(&inner, device.owner.namespace(), &[dev.ff_out.part()], &block.ff_out_b)
             .map_err(|e| dev_err("ae ff out", e))?;
         gpu_add(&x, &ff).map_err(|e| dev_err("ae ff residual", e))
     }

@@ -28,6 +28,7 @@ pub mod front;
 use crate::nn::{Params, Tensor};
 use crate::weights::{self, Dtype};
 use front::{DitNote, Tokens};
+use makepad_ai_common::backend::WeightOwner;
 use makepad_ai_common::gpu::{self as g, GemmPrecision, GpuLinearPart, GpuTensor};
 use makepad_ai_common::quant::{f32_to_f16, GGML_TYPE_F16};
 use std::collections::HashMap;
@@ -56,7 +57,6 @@ const MEL_MEAN: f32 = -4.92;
 const MEL_VAR: f32 = 8.14;
 /// AdaLN sites: per layer the input and post-attention norms, then the final norm.
 const SITES: usize = 2 * LAYERS + 1;
-const NS: &str = "cantor_dit";
 /// f16 weights and GEMM operands, f32 accumulation and outputs.
 const PRECISION: GemmPrecision = GemmPrecision { f16_accumulate: false, f16_activations: false };
 
@@ -103,6 +103,7 @@ struct StepTables {
 }
 
 pub struct CantorDit {
+    owner: WeightOwner,
     pub params: Params,
     pub phones: HashMap<String, u32>,
     pub voices: Vec<Voice>,
@@ -188,9 +189,10 @@ impl CantorDit {
         if !g::gpu_device_available() {
             return Err(ge("no GPU device backend in this build".into()));
         }
+        let owner = WeightOwner::new("cantor-dit");
         for (name, t) in params.names.iter().zip(&params.vals) {
             if t.rows > 1 && t.cols > 1 && !name.starts_with("voice.") && !name.starts_with("enc.") && !name.ends_with(".dw") && name != "mel_basis" {
-                g::gpu_weight_cache_ensure(NS, name, GGML_TYPE_F16, t.rows, t.cols, false, || Ok(f16_bytes(&t.data))).map_err(ge)?;
+                g::gpu_weight_cache_ensure(owner.namespace(), name, GGML_TYPE_F16, t.rows, t.cols, false, || Ok(f16_bytes(&t.data))).map_err(ge)?;
             }
         }
         let mut res = HashMap::new();
@@ -230,7 +232,7 @@ impl CantorDit {
         let h = host_linear(&vec![0.0; DIM], params.get("dit.cond_mlp.0"), params.get("dit.cond_mlp.0_b"));
         let h: Vec<f32> = h.into_iter().map(silu).collect();
         let uncond_row = host_linear(&h, params.get("dit.cond_mlp.2"), params.get("dit.cond_mlp.2_b"));
-        Ok(CantorDit { params, phones, voices: Vec::new(), res, ones, uncond_row })
+        Ok(CantorDit { owner, params, phones, voices: Vec::new(), res, ones, uncond_row })
     }
 
     pub fn voice(&self, name: &str) -> Option<&Voice> {
@@ -245,13 +247,13 @@ impl CantorDit {
     fn lin(&self, x: &GpuTensor, name: &str) -> Result<GpuTensor, String> {
         let n = self.params.get(name).rows;
         let part = GpuLinearPart { bt_ggml_type: GGML_TYPE_F16, n, cache_key: name, bytes: &[] };
-        g::gpu_linear_nt_cached_with_precision(x, NS, &[part], self.bias(name), PRECISION).map_err(ge)
+        g::gpu_linear_nt_cached_with_precision(x, self.owner.namespace(), &[part], self.bias(name), PRECISION).map_err(ge)
     }
 
     /// Several bias-free weights side by side (`[x W1^T | x W2^T ..]`).
     fn lin_parts(&self, x: &GpuTensor, names: &[&str]) -> Result<GpuTensor, String> {
         let parts: Vec<GpuLinearPart<'_>> = names.iter().map(|n| GpuLinearPart { bt_ggml_type: GGML_TYPE_F16, n: self.params.get(n).rows, cache_key: n, bytes: &[] }).collect();
-        g::gpu_linear_nt_cached_with_precision(x, NS, &parts, &[], PRECISION).map_err(ge)
+        g::gpu_linear_nt_cached_with_precision(x, self.owner.namespace(), &parts, &[], PRECISION).map_err(ge)
     }
 
     /// Linear, SiLU, linear (`<name>.0`, `<name>.2`).

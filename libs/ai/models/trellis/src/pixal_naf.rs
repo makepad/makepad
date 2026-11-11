@@ -8,7 +8,7 @@
 
 use crate::backend::{
     gpu_concat_rows, gpu_conv2d_planar_cached, gpu_gather_cols, gpu_group_norm_planar, gpu_silu,
-    gpu_upload, GpuTensor,
+    gpu_upload, GpuTensor, WeightOwner,
 };
 use crate::pixal3d::bilinear_taps;
 use crate::trellis::TrellisWeights;
@@ -17,6 +17,8 @@ use crate::{DiffusionError, Result};
 use makepad_ai_common::gpu::{
     gpu_pixal_naf_sample, gpu_pixal_pool, gpu_pixal_rope, gpu_planar_tokens_transpose,
 };
+
+use std::sync::Arc;
 
 struct NafConv {
     name: String,
@@ -36,12 +38,13 @@ struct NafBranch {
 
 /// The checkpoint's two convolution stacks, shared across all three NAF stages.
 pub struct PixalNaf {
+    owner: Arc<WeightOwner>,
     branches: [NafBranch; 2],
     periods: Vec<f32>,
 }
 
 impl PixalNaf {
-    pub fn prepare(weights: &TrellisWeights) -> Result<Self> {
+    pub fn prepare(weights: &TrellisWeights, owner: Arc<WeightOwner>) -> Result<Self> {
         let load = |branch: &str, kernel: usize| -> Result<NafBranch> {
             let prefix = format!("naf.image_encoder.{branch}");
             let mut conv = Vec::new();
@@ -77,6 +80,7 @@ impl PixalNaf {
             return Err(DiffusionError::model("invalid Pixal3D NAF RoPE periods"));
         }
         Ok(Self {
+            owner,
             branches: [load("encoder", 1)?, load("sem_encoder", 3)?],
             periods,
         })
@@ -127,7 +131,7 @@ impl PixalNaf {
                     x,
                     width,
                     height,
-                    "p3naf",
+                    self.owner.namespace(),
                     &conv.name,
                     &conv.weight,
                     &conv.bias,
@@ -144,7 +148,7 @@ impl PixalNaf {
                     &padded,
                     width + 2,
                     height + 2,
-                    "p3naf",
+                    self.owner.namespace(),
                     &conv.name,
                     &conv.weight,
                     &conv.bias,
@@ -167,7 +171,7 @@ impl PixalNaf {
                     width,
                     height,
                     8,
-                    "p3naf",
+                    self.owner.namespace(),
                     &norm.name,
                     &norm.weight,
                     &norm.bias,

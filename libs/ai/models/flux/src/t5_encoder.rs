@@ -9,7 +9,7 @@ use crate::graph_growth::{build_with_graph_growth, GraphReserve};
 use crate::t5::T5TokenizedPrompt;
 use crate::{emit_byte_progress, emit_progress, DiffusionError, ProgressHook, Result};
 use makepad_ai_common::backend::{
-    try_get_rows_ggml_bytes, try_get_rows_ggml_bytes_cached, try_matmul_nt_ggml_bytes,
+    try_get_rows_ggml_bytes, try_get_rows_ggml_bytes_cached,
     try_matmul_nt_ggml_bytes_cached,
 };
 use makepad_ai_common::{
@@ -704,16 +704,7 @@ fn linear_rows_ggml_matrix(
             .collect::<Vec<_>>();
         &scaled_input
     };
-    let mut output = if let Some(output) = try_matmul_nt_ggml_bytes(
-        input_values,
-        weight.bytes,
-        weight.ggml_type,
-        input.rows,
-        input.cols,
-        weight.rows,
-    ) {
-        output
-    } else {
+    let mut output = {
         let dequantized = decoded_matrix_f32_cached(weight)?;
         if let Some(output) = try_matmul_nt_f32(
             input_values,

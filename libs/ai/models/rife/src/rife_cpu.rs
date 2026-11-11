@@ -893,7 +893,11 @@ mod tests {
                 }
             })
             .collect();
-        RifeModelWeights { encode, blocks }
+        RifeModelWeights {
+            owner: std::sync::Arc::new(crate::backend::WeightOwner::new("rife")),
+            encode,
+            blocks,
+        }
     }
 
     fn ramp_frame(width: usize, height: usize, phase: u8) -> Vec<u8> {

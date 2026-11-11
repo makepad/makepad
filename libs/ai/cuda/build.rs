@@ -166,12 +166,11 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
         .ok()
         .or_else(detect_local_arch)
         .unwrap_or_else(|| "120a".to_string());
-    // The permanent record, in the build log. It lands only when this script
-    // exits (cargo buffers `cargo:warning` — measured, not assumed), so it
-    // cannot be the thing that reassures somebody mid-build; that is what
-    // `Console` below is for.
-    println!(
-        "cargo:warning=makepad-ai-cuda: building {} CUDA kernels for sm_{arch}, toolkit {}",
+    // The record in the script's output (`cargo build -vv`, or the build
+    // script's stderr cargo shows when it fails). Progress is no warning: the
+    // live channel for somebody waiting is `Console` below.
+    eprintln!(
+        "makepad-ai-cuda: building {} CUDA kernels for sm_{arch}, toolkit {}",
         src_paths.len(),
         cuda_root.display()
     );
@@ -338,7 +337,7 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
     console.line(&format!(
         "makepad-ai-cuda: CUDA kernels built in {kernels_took}. Back to cargo."
     ));
-    println!("cargo:warning=makepad-ai-cuda: CUDA kernels built in {kernels_took}");
+    eprintln!("makepad-ai-cuda: CUDA kernels built in {kernels_took}");
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=ggml_cuda_affine");
@@ -379,8 +378,8 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
 /// still appeared only at the end). For a script that then spends minutes
 /// inside ptxas, that means the only honest live channel is the console
 /// device itself. No console (CI, a piped build, a GUI invocation) simply
-/// means no progress lines; the `cargo:warning` summary still records what
-/// happened.
+/// means no progress lines; the stderr summary (shown with `-vv`) still
+/// records what happened.
 /// Where the kernel progress goes: the terminal, or, when a front end
 /// draws the build itself, the one-line status file it
 /// names in `MAKEPAD_BUILD_STATUS_FILE`, so the lines never land on top of

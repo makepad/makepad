@@ -24,13 +24,11 @@
 use super::*;
 use crate::backend::{
     gpu_add, gpu_device_available, gpu_download, gpu_gather_rows_colblock, gpu_gelu_erf,
-    gpu_layer_norm_pytorch, gpu_upload, gpu_upload_u32, GpuTensor,
+    gpu_layer_norm_pytorch, gpu_upload, gpu_upload_u32, GpuTensor, WeightOwner,
 };
 use crate::indextts_bigvgan::cuda::{conv_gemm, ensure_weight, gm, lin, tap_indices};
 use std::collections::HashMap;
 use std::sync::Mutex;
-
-const NS: &str = "indextts_codec";
 
 /// True when the CUDA device path is available in this build.
 pub fn codec_cuda_available() -> bool {
@@ -89,14 +87,17 @@ impl CodecRunIdx {
 /// pwconv2 biases (the only host-side data the device path needs beyond the
 /// model itself).
 pub struct CodecCudaSession {
+    owner: WeightOwner,
     idx: Mutex<HashMap<usize, CodecRunIdx>>,
     pw2_bias_folded: Vec<Vec<f32>>,
 }
 
 impl CodecCudaSession {
     pub fn new(model: &SemanticCodecDecoder) -> Result<Self> {
+        let owner = WeightOwner::new("indextts-codec");
+        let ns = owner.namespace();
         ensure_weight(
-            NS,
+            ns,
             "embed",
             &pack_conv(&model.embed),
             VOCOS_DIM,
@@ -110,9 +111,9 @@ impl CodecCudaSession {
                     dw[o * 7 * VOCOS_DIM + kk * VOCOS_DIM + o] = block.dw_w[o * 7 + kk];
                 }
             }
-            ensure_weight(NS, &format!("blk{i}.dw"), &dw, VOCOS_DIM, 7 * VOCOS_DIM)?;
+            ensure_weight(ns, &format!("blk{i}.dw"), &dw, VOCOS_DIM, 7 * VOCOS_DIM)?;
             ensure_weight(
-                NS,
+                ns,
                 &format!("blk{i}.pw1"),
                 &block.pw1_w,
                 VOCOS_INTERMEDIATE,
@@ -128,7 +129,7 @@ impl CodecCudaSession {
                 }
             }
             ensure_weight(
-                NS,
+                ns,
                 &format!("blk{i}.pw2"),
                 &pw2,
                 VOCOS_DIM,
@@ -143,15 +144,16 @@ impl CodecCudaSession {
                     .collect(),
             );
         }
-        ensure_weight(NS, "out", &model.out_w, SEMANTIC_CODEC_DIM, VOCOS_DIM)?;
+        ensure_weight(ns, "out", &model.out_w, SEMANTIC_CODEC_DIM, VOCOS_DIM)?;
         ensure_weight(
-            NS,
+            ns,
             "up",
             &pack_conv(&model.up),
             SEMANTIC_CODEC_DIM,
             3 * SEMANTIC_CODEC_DIM,
         )?;
         Ok(Self {
+            owner,
             idx: Mutex::new(HashMap::new()),
             pw2_bias_folded,
         })
@@ -181,9 +183,10 @@ impl CodecCudaSession {
             idx_cache.insert(t, CodecRunIdx::build(t)?);
         }
         let idx = idx_cache.get(&t).expect("just inserted");
+        let ns = self.owner.namespace();
 
         let x = gpu_upload(&quantized, t, SEMANTIC_CODEC_DIM).map_err(gm)?;
-        let h = conv_gemm(&x, &idx.taps7, &idx.zero_1024, NS, "embed", VOCOS_DIM, &model.embed.b)?;
+        let h = conv_gemm(&x, &idx.taps7, &idx.zero_1024, ns, "embed", VOCOS_DIM, &model.embed.b)?;
         let mut h =
             gpu_layer_norm_pytorch(&h, &model.norm.gamma, &model.norm.beta, LN_EPS).map_err(gm)?;
         for (i, block) in model.blocks.iter().enumerate() {
@@ -191,27 +194,27 @@ impl CodecCudaSession {
                 &h,
                 &idx.taps7,
                 &idx.zero_384,
-                NS,
+                ns,
                 &format!("blk{i}.dw"),
                 VOCOS_DIM,
                 &block.dw_b,
             )?;
             let n = gpu_layer_norm_pytorch(&d, &block.norm.gamma, &block.norm.beta, LN_EPS)
                 .map_err(gm)?;
-            let m = lin(&n, NS, &format!("blk{i}.pw1"), VOCOS_INTERMEDIATE, &block.pw1_b)?;
+            let m = lin(&n, ns, &format!("blk{i}.pw1"), VOCOS_INTERMEDIATE, &block.pw1_b)?;
             let g = gpu_gelu_erf(&m).map_err(gm)?;
-            let p = lin(&g, NS, &format!("blk{i}.pw2"), VOCOS_DIM, &self.pw2_bias_folded[i])?;
+            let p = lin(&g, ns, &format!("blk{i}.pw2"), VOCOS_DIM, &self.pw2_bias_folded[i])?;
             h = gpu_add(&h, &p).map_err(gm)?;
         }
         let f = gpu_layer_norm_pytorch(&h, &model.final_norm.gamma, &model.final_norm.beta, LN_EPS)
             .map_err(gm)?;
-        let o = lin(&f, NS, "out", SEMANTIC_CODEC_DIM, &model.out_b)?;
+        let o = lin(&f, ns, "out", SEMANTIC_CODEC_DIM, &model.out_b)?;
         let u = gpu_gather_rows_colblock(&o, &idx.up_gather, None, SEMANTIC_CODEC_DIM).map_err(gm)?;
         let r = conv_gemm(
             &u,
             &idx.taps3,
             &idx.zero_1024,
-            NS,
+            ns,
             "up",
             SEMANTIC_CODEC_DIM,
             &model.up.b,

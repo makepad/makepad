@@ -30,9 +30,11 @@
 //! and [`crate::rife_model`] (device path); this module owns the public API
 //! and all checkpoint validation.
 
+use crate::backend::WeightOwner;
 use crate::{DiffusionError, ProgressHook, Result};
 use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub const RIFE_REPO: &str = "Comfy-Org/frame_interpolation";
 pub const RIFE_REVISION: &str = "9bca6366a22473ccee25602fa82b224d78413960";
@@ -55,7 +57,6 @@ pub const RIFE_LRELU_SLOPE: f32 = 0.2;
 /// Reference `modulo` for v4.26: the coarsest block downsamples by 16 and
 /// then twice by 2, so both padded extents must be multiples of 64.
 pub const RIFE_PAD_MULTIPLE: usize = 64;
-pub const RIFE_CACHE_NAMESPACE: &str = "rife";
 
 /// Block 0 input planes: img0(3) + img1(3) + f0(4) + f1(4) + timestep(1).
 const BLOCK0_IN_PLANES: usize = 15;
@@ -184,6 +185,7 @@ pub struct HeadWeights {
 /// The whole prepared IFNet checkpoint, host side.
 #[derive(Clone, Debug)]
 pub struct RifeModelWeights {
+    pub(crate) owner: Arc<WeightOwner>,
     pub encode: HeadWeights,
     pub blocks: Vec<IfBlockWeights>,
 }
@@ -394,7 +396,11 @@ impl RifeWeights {
                 (index + 1) as f64 / RIFE_NUM_BLOCKS as f64,
             )?;
         }
-        Ok(RifeModelWeights { encode, blocks })
+        Ok(RifeModelWeights {
+            owner: Arc::new(WeightOwner::new("rife")),
+            encode,
+            blocks,
+        })
     }
 }
 
@@ -605,16 +611,6 @@ pub struct RifeFlowField {
     /// `[height, width]`, sigmoid applied: 1.0 = the intermediate takes
     /// frame0's warp entirely.
     pub mask: Vec<f32>,
-}
-
-/// Evict every device-cached RIFE tensor and release idle pool buffers.
-/// Invoke on the same worker thread that ran the model.
-pub fn unload_rife() -> Result<usize> {
-    let evicted =
-        crate::backend::gpu_weight_cache_evict_prefix(&format!("{RIFE_CACHE_NAMESPACE}::"))
-            .map_err(DiffusionError::model)?;
-    crate::backend::gpu_pool_clear();
-    Ok(evicted)
 }
 
 #[cfg(test)]

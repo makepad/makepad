@@ -24,6 +24,8 @@
 //! accumulation) and bf16 flash attention; the geometric encoders and every
 //! head stay f32.
 
+use crate::backend::WeightOwner;
+use std::sync::Arc;
 use crate::backend::{
     gpu_add, gpu_attention_packed_f32, gpu_attention_packed_flash_bf16,
     gpu_birefnet_image_to_patches, gpu_birefnet_tokens_to_planar, gpu_concat_cols,
@@ -62,7 +64,6 @@ const SHARE_TAPS: [usize; 3] = [7, 11, 15];
 const NORM_EPS: f32 = 1e-6;
 const SCALE_FEATURES: usize = 196;
 const UNSHUFFLE: usize = MAPANYTHING_PATCH * MAPANYTHING_PATCH;
-const CACHE_NAMESPACE: &str = "mapanything";
 
 /// Explicit compute mode, chosen at load: it decides which weight copies exist
 /// on the device, so a loaded model runs in exactly one mode.
@@ -300,7 +301,7 @@ fn host_relu(values: Vec<f32>) -> Vec<f32> {
 
 /// 3x3 stride-1 "same" convolution, f32 with FMA math (no TF32).
 pub(crate) struct Conv3 {
-    namespace: &'static str,
+    owner: Arc<WeightOwner>,
     key: String,
     weights: Vec<f32>,
     bias: Option<Vec<f32>>,
@@ -318,7 +319,7 @@ impl Conv3 {
         bias: bool,
     ) -> Result<Self> {
         Ok(Self {
-            namespace: scope.namespace,
+            owner: Arc::clone(&scope.owner),
             key: scope.key(name),
             weights: tensor(weights, &format!("{name}.weight"), outputs * inputs * 9)?,
             bias: if bias {
@@ -343,7 +344,7 @@ impl Conv3 {
             self.inputs,
             x.width,
             x.height,
-            self.namespace,
+            self.owner.namespace(),
             &self.key,
             &self.weights,
             self.outputs,
@@ -351,7 +352,7 @@ impl Conv3 {
         .map_err(model_error)?;
         if let Some(bias) = &self.bias {
             // A leaky slope of 1 is a pure bias add.
-            gpu_realesrgan_bias_lrelu_f32(&out, self.namespace, &format!("{}.bias", self.key), bias, 1.0)
+            gpu_realesrgan_bias_lrelu_f32(&out, self.owner.namespace(), &format!("{}.bias", self.key), bias, 1.0)
                 .map_err(model_error)?;
         }
         Ok(Planar {
@@ -550,6 +551,7 @@ pub struct MapAnything {
 }
 
 fn dino_layer(
+    owner: &Arc<WeightOwner>,
     weights: &dyn TensorSource,
     prefix: &str,
     cache_prefix: &str,
@@ -608,7 +610,7 @@ fn dino_layer(
         linears,
         hidden: HIDDEN,
         mlp: 2 * SWIGLU,
-        namespace: CACHE_NAMESPACE,
+        owner: Arc::clone(owner),
     })
 }
 
@@ -666,7 +668,7 @@ impl MapAnything {
         let weights = Da3WeightFile::load(path)?;
         let weights: &dyn TensorSource = &weights;
         let scope = CacheScope {
-            namespace: CACHE_NAMESPACE,
+            owner: Arc::new(WeightOwner::new("mapanything")),
             key_prefix: format!("{cache_key}/"),
         };
         let patch_dim = 3 * UNSHUFFLE;
@@ -679,12 +681,13 @@ impl MapAnything {
         let mut encoder = Vec::with_capacity(ENCODER_BLOCKS);
         for index in 0..ENCODER_BLOCKS {
             emit_progress(&mut progress, "load MapAnything encoder", index as f64 / 48.0)?;
-            encoder.push(dino_layer(weights, &format!("encoder.model.blocks.{index}"), &scope.key_prefix, precision)?);
+            encoder.push(dino_layer(&scope.owner, weights, &format!("encoder.model.blocks.{index}"), &scope.key_prefix, precision)?);
         }
         let mut share = Vec::with_capacity(SHARE_BLOCKS);
         for index in 0..SHARE_BLOCKS {
             emit_progress(&mut progress, "load MapAnything multi-view transformer", (24 + index) as f64 / 48.0)?;
             share.push(dino_layer(
+                &scope.owner,
                 weights,
                 &format!("info_sharing.self_attention_blocks.{index}"),
                 &scope.key_prefix,

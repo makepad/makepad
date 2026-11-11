@@ -6,19 +6,13 @@
 //! or reproduce the released Python processor's final-FSQ off-by-one bug.
 
 use crate::skin_tokens::SkinTokensWeights;
-use crate::skin_tokens_decode::{
-    decode_skin_tokens_weights, unload_skin_tokens_decode_weights,
-};
+use crate::skin_tokens_decode::decode_skin_tokens_weights;
 use crate::skin_tokens_mesh::SkinTokensMesh;
-use crate::skin_tokens_neural::{
-    encode_mesh_prefix_controlled, encode_vae_condition_controlled,
-    unload_skin_tokens_neural_weights,
-};
+use crate::skin_tokens_neural::{encode_mesh_prefix_controlled, encode_vae_condition_controlled};
 use crate::skin_tokens_output::skin_tokens_rig_glb_with_progress;
 use crate::skin_tokens_qwen::{
-    skin_tokens_qwen_generate, unload_skin_tokens_qwen_weights, SkinTokensGeneration,
-    SkinTokensGenerationGrammar, SkinTokensGenerationParams, SkinTokensGenerationProgress,
-    SkinTokensQwenPrepared,
+    skin_tokens_qwen_generate, SkinTokensGeneration, SkinTokensGenerationGrammar,
+    SkinTokensGenerationParams, SkinTokensGenerationProgress, SkinTokensQwenPrepared,
 };
 use crate::skin_tokens_tokenizer::{
     skin_tokens_detokenize_skeleton, SkinTokensGenerationPhase, SkinTokensSkeleton,
@@ -56,7 +50,7 @@ pub struct SkinTokensPipelineOutput {
 
 /// Header/little-vector state retained across jobs. Large neural matrices are
 /// streamed into the shared CUDA cache on first use and remain resident until
-/// [`unload_skin_tokens_runtime_weights`] runs on this same worker thread.
+/// the pipeline is dropped.
 pub struct SkinTokensPipeline {
     weights: SkinTokensWeights,
     qwen: SkinTokensQwenPrepared,
@@ -240,15 +234,6 @@ fn emit(progress: &mut Option<ProgressHook<'_>>, label: &str, fraction: f64) -> 
         Some(progress) => progress(label, fraction),
         None => Ok(()),
     }
-}
-
-/// Evict all three TokenRig matrix namespaces. Call this only after dropping
-/// every activation/pipeline value, and on the CUDA worker thread which ran
-/// inference so thread-local caches are released deterministically.
-pub fn unload_skin_tokens_runtime_weights() -> Result<()> {
-    let _ = unload_skin_tokens_qwen_weights()?;
-    unload_skin_tokens_decode_weights()?;
-    unload_skin_tokens_neural_weights()
 }
 
 #[cfg(test)]

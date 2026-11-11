@@ -12,7 +12,7 @@ use makepad_diffusion::hy_motion::{
     HY_MOTION_CONTEXT_DIM, HY_MOTION_INPUT_DIM, HY_MOTION_VECTOR_DIM,
 };
 use makepad_diffusion::hy_motion_text::{
-    hy_motion_qwen_encode_precision, hy_motion_qwen_encode_tapped, hy_motion_qwen_evict,
+    hy_motion_qwen_encode_precision, hy_motion_qwen_encode_tapped,
     HyMotionQwenPrecision, HyMotionQwenPrepared, HyMotionQwenTokenizer,
 };
 use makepad_diffusion::hy_motion_transformer::HyMotionDeviceWeights;
@@ -321,7 +321,11 @@ fn run() -> Result<(), String> {
         // released pipeline's residency policy by evicting Qwen before the
         // full-f32 DiT is uploaded, then measure the resulting trajectory.
         let evict_started = Instant::now();
-        let evicted = hy_motion_qwen_evict().map_err(|error| error.to_string())?;
+        let (evicted, _) =
+            makepad_diffusion::backend::gpu_weight_cache_resident(prepared.cache_namespace())
+                .map_err(|error| error.to_string())?;
+        drop(prepared);
+        makepad_diffusion::backend::gpu_pool_clear();
         println!(
             "qwen_evict_tensors={evicted} qwen_evict_s={:.6}",
             evict_started.elapsed().as_secs_f64()

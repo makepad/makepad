@@ -5121,7 +5121,6 @@ mod lifecycle_tests {
     fn actual_generate_refusals_preserve_typed_reject_results_over_http() {
         use crate::client::{ContentProvider, LocalService};
         use std::io::{Read, Write};
-        use std::time::{Duration, Instant};
 
         for refused in [
             AssetAiError::Busy,
@@ -5133,8 +5132,8 @@ mod lifecycle_tests {
             // ws_path:null and silently turned these refusals into Http errors.
             let response = generate_refused(&refused);
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.set_nonblocking(true).unwrap();
-            let url = format!("http://{}", listener.local_addr().unwrap());
+            let address = listener.local_addr().unwrap();
+            let url = format!("http://{address}");
             let request = GenerateRequestJson {
                 model: "flux1-schnell".into(),
                 prompt: Some("old car".into()),
@@ -5147,24 +5146,17 @@ mod lifecycle_tests {
             let expected_body = request.serialize_json().into_bytes();
             std::thread::scope(|scope| {
                 let server = scope.spawn(move || {
-                    let deadline = Instant::now() + Duration::from_secs(3);
-                    let (mut stream, _) = loop {
-                        match listener.accept() {
-                            Ok(stream) => break stream,
-                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
-                                && Instant::now() < deadline => {
-                                std::thread::sleep(Duration::from_millis(1));
-                            }
-                            Err(error) => panic!("refusal fixture accept: {error}"),
-                        }
-                    };
-                    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-                    stream.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+                    // Blocking accept and reads: the fixture waits for the
+                    // client's POST itself, however long a loaded box takes.
+                    // (A stream accepted from a non-blocking listener is
+                    // non-blocking on macOS, so its reads saw WouldBlock
+                    // whenever the POST had not arrived yet.)
+                    let (mut stream, _) = listener.accept().unwrap();
                     let mut head = Vec::new();
                     let mut byte = [0];
                     while !head.ends_with(b"\r\n\r\n") {
                         assert!(head.len() < 16 * 1024, "fixture request head too large");
-                        stream.read_exact(&mut byte).unwrap();
+                        stream.read_exact(&mut byte).expect("the client's POST head");
                         head.push(byte[0]);
                     }
                     let head = String::from_utf8(head).unwrap();
@@ -5185,6 +5177,11 @@ mod lifecycle_tests {
                     Domain::Image, &request, &|| false,
                     &mut |_| panic!("explicit reject must not wait for admission"),
                 );
+                // A client that returned without connecting must fail the
+                // test, not leave the fixture in accept(): this connection
+                // wakes it (EOF on the head). After a real POST it only
+                // reaches the backlog of a listener that is done.
+                drop(std::net::TcpStream::connect(address));
                 server.join().unwrap();
                 assert_eq!(result, Err(refused));
             });

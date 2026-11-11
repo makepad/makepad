@@ -10,9 +10,10 @@
 
 use crate::backend::{
     gpu_add_bf16, gpu_attention_packed_causal_bf16, gpu_attention_packed_cross_bf16,
-    gpu_bf16_round, gpu_concat_cols, gpu_concat_rows, gpu_download, gpu_linear_nt_cached_bf16_f32acc,
-    gpu_rms_norm_mul_bf16, gpu_rope_half_bf16, gpu_slice_cols, gpu_slice_rows, gpu_swiglu_value_gate,
-    gpu_upload, gpu_weight_cache_ensure, gpu_weight_cache_evict_prefix, GpuLinearPart, GpuTensor,
+    gpu_bf16_round, gpu_concat_cols, gpu_concat_rows, gpu_download,
+    gpu_linear_nt_cached_bf16_f32acc, gpu_rms_norm_mul_bf16, gpu_rope_half_bf16, gpu_slice_cols,
+    gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload, gpu_weight_cache_ensure,
+    gpu_weight_cache_evict_prefix, GpuLinearPart, GpuTensor, WeightOwner,
 };
 use crate::flux2::{
     Flux2WeightFile, Qwen3TextConfig, FLUX2_KLEIN_HIDDEN_STATE_TAPS, FLUX2_KLEIN_PAD_TOKEN,
@@ -23,7 +24,6 @@ use crate::{DiffusionError, Result};
 use makepad_ai_common::quant::GGML_TYPE_BF16;
 use std::path::Path;
 
-pub const FLUX2_KLEIN_TE_NAMESPACE: &str = "flux2-te-bf16::qwen3-4b";
 pub const FLUX2_KLEIN_EMBED_TOKENS: &str = "model.embed_tokens.weight";
 
 pub fn flux2_klein_layer_prefix(layer: u32) -> String {
@@ -66,6 +66,7 @@ pub fn flux2_klein_tokenize(
 }
 
 pub struct Flux2KleinTextPrepared {
+    owner: WeightOwner,
     pub config: Qwen3TextConfig,
     input_norm: Vec<Vec<f32>>,
     post_attention_norm: Vec<Vec<f32>>,
@@ -75,6 +76,12 @@ pub struct Flux2KleinTextPrepared {
 }
 
 impl Flux2KleinTextPrepared {
+    /// Evict this encoder's device weights; the next encode re-uploads them.
+    /// Returns the number of buffers freed.
+    pub fn release_device(&self) -> Result<usize> {
+        gpu_weight_cache_evict_prefix(self.owner.namespace()).map_err(DiffusionError::model)
+    }
+
     pub fn prepare(weights: &Flux2WeightFile, config: Qwen3TextConfig) -> Result<Self> {
         let layers = config.layers_required_for_taps() as usize;
         let hidden = config.hidden_size as usize;
@@ -107,6 +114,7 @@ impl Flux2KleinTextPrepared {
             )?);
         }
         Ok(Self {
+            owner: WeightOwner::new("flux2-te-qwen3"),
             config,
             input_norm,
             post_attention_norm,
@@ -174,6 +182,7 @@ fn embed_name(weights: &Flux2WeightFile) -> Result<&'static str> {
 }
 
 fn ensure_linear<'a>(
+    namespace: &str,
     weights: &'a Flux2WeightFile,
     name: &'a str,
     output_cols: usize,
@@ -188,7 +197,7 @@ fn ensure_linear<'a>(
         )));
     }
     gpu_weight_cache_ensure(
-        FLUX2_KLEIN_TE_NAMESPACE,
+        namespace,
         name,
         GGML_TYPE_BF16,
         output_cols,
@@ -206,13 +215,14 @@ fn ensure_linear<'a>(
 }
 
 fn linear_bf16(
+    namespace: &str,
     weights: &Flux2WeightFile,
     input: &GpuTensor,
     name: &str,
     output_cols: usize,
 ) -> Result<GpuTensor> {
-    let part = ensure_linear(weights, name, output_cols, input.cols())?;
-    let output = gpu_linear_nt_cached_bf16_f32acc(input, FLUX2_KLEIN_TE_NAMESPACE, &[part], &[])
+    let part = ensure_linear(namespace, weights, name, output_cols, input.cols())?;
+    let output = gpu_linear_nt_cached_bf16_f32acc(input, namespace, &[part], &[])
         .map_err(DiffusionError::model)?;
     gpu_bf16_round(&output).map_err(DiffusionError::model)
 }
@@ -383,25 +393,28 @@ fn klein_layer(
     let normed = gpu_rms_norm_mul_bf16(
         &input,
         hidden,
-        FLUX2_KLEIN_TE_NAMESPACE,
+        prepared.owner.namespace(),
         &format!("{prefix}input_layernorm.weight"),
         &prepared.input_norm[layer],
         config.rms_norm_eps,
     )
     .map_err(DiffusionError::model)?;
     let q = linear_bf16(
+        prepared.owner.namespace(),
         weights,
         &normed,
         &format!("{prefix}self_attn.q_proj.weight"),
         heads * head_dim,
     )?;
     let k = linear_bf16(
+        prepared.owner.namespace(),
         weights,
         &normed,
         &format!("{prefix}self_attn.k_proj.weight"),
         kv_heads * head_dim,
     )?;
     let v = linear_bf16(
+        prepared.owner.namespace(),
         weights,
         &normed,
         &format!("{prefix}self_attn.v_proj.weight"),
@@ -410,7 +423,7 @@ fn klein_layer(
     let q = gpu_rms_norm_mul_bf16(
         &q,
         head_dim,
-        FLUX2_KLEIN_TE_NAMESPACE,
+        prepared.owner.namespace(),
         &format!("{prefix}self_attn.q_norm.weight"),
         &prepared.q_norm[layer],
         config.rms_norm_eps,
@@ -419,7 +432,7 @@ fn klein_layer(
     let k = gpu_rms_norm_mul_bf16(
         &k,
         head_dim,
-        FLUX2_KLEIN_TE_NAMESPACE,
+        prepared.owner.namespace(),
         &format!("{prefix}self_attn.k_norm.weight"),
         &prepared.k_norm[layer],
         config.rms_norm_eps,
@@ -432,6 +445,7 @@ fn klein_layer(
     let (k, v) = repeat_kv(&k, &v, heads, kv_heads, head_dim)?;
     let attn = masked_causal(&q, &k, &v, heads, scale, real_len)?;
     let attn = linear_bf16(
+        prepared.owner.namespace(),
         weights,
         &attn,
         &format!("{prefix}self_attn.o_proj.weight"),
@@ -442,35 +456,38 @@ fn klein_layer(
     let normed = gpu_rms_norm_mul_bf16(
         &residual,
         hidden,
-        FLUX2_KLEIN_TE_NAMESPACE,
+        prepared.owner.namespace(),
         &format!("{prefix}post_attention_layernorm.weight"),
         &prepared.post_attention_norm[layer],
         config.rms_norm_eps,
     )
     .map_err(DiffusionError::model)?;
     let gate = linear_bf16(
+        prepared.owner.namespace(),
         weights,
         &normed,
         &format!("{prefix}mlp.gate_proj.weight"),
         ffn,
     )?;
-    let up = linear_bf16(weights, &normed, &format!("{prefix}mlp.up_proj.weight"), ffn)?;
+    let up = linear_bf16(
+        prepared.owner.namespace(),
+        weights,
+        &normed,
+        &format!("{prefix}mlp.up_proj.weight"),
+        ffn,
+    )?;
     // TE fused order [up, gate] so value=left, gate=right.
     let fused = gpu_concat_cols(&[&up, &gate]).map_err(DiffusionError::model)?;
     let swiglu = gpu_swiglu_value_gate(&fused).map_err(DiffusionError::model)?;
     let swiglu = gpu_bf16_round(&swiglu).map_err(DiffusionError::model)?;
     let down = linear_bf16(
+        prepared.owner.namespace(),
         weights,
         &swiglu,
         &format!("{prefix}mlp.down_proj.weight"),
         hidden,
     )?;
     gpu_add_bf16(&residual, &down).map_err(DiffusionError::model)
-}
-
-pub fn flux2_klein_text_release() -> Result<usize> {
-    gpu_weight_cache_evict_prefix(&format!("{FLUX2_KLEIN_TE_NAMESPACE}::"))
-        .map_err(DiffusionError::model)
 }
 
 pub fn flux2_klein_tokenizer_load(dir: impl AsRef<Path>) -> Result<H3Tokenizer> {

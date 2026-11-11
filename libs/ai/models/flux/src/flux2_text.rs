@@ -31,18 +31,18 @@
 //! pipeline passes no `position_ids` and `Mistral3Model.forward` defaults to
 //! `cache_position = arange(seq_len)`.
 //!
-//! Weights stay resident in the [`FLUX2_TE_NAMESPACE`] device cache between
+//! Weights stay resident in the prepared encoder's device cache between
 //! prompts (~33.4GB for the 30 executed layers in BF16); call
-//! [`flux2_text_release`] before loading the DiT. The `(131072, 5120)`
-//! embedding matrix is never uploaded — rows stream from the shard file per
-//! token like the H3 encoder does.
+//! [`Flux2TextEncoderPrepared::release_device`] before loading the DiT. The
+//! `(131072, 5120)` embedding matrix is never uploaded — rows stream from the
+//! shard file per token like the H3 encoder does.
 
 use crate::backend::{
     gpu_add_bf16, gpu_attention_packed_causal_bf16, gpu_attention_packed_cross_bf16,
     gpu_bf16_round, gpu_concat_cols, gpu_concat_rows, gpu_download,
     gpu_linear_nt_cached_bf16_f32acc, gpu_rms_norm_mul_bf16, gpu_rope_half_bf16, gpu_slice_cols,
     gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload, gpu_weight_cache_ensure,
-    gpu_weight_cache_evict_prefix, GpuLinearPart, GpuTensor,
+    gpu_weight_cache_evict_prefix, GpuLinearPart, GpuTensor, WeightOwner,
 };
 use crate::flux2::{
     mistral3_layer_prefix, Flux2TextEncoderWeights, Mistral3TextConfig, FLUX2_HIDDEN_STATE_TAPS,
@@ -53,14 +53,11 @@ use crate::{DiffusionError, Result};
 use makepad_ai_common::quant::GGML_TYPE_BF16;
 use makepad_ai_loader::MlxDType;
 
-/// Device weight-cache namespace shared by every FLUX.2 TE prompt; evicted as
-/// one prefix by [`flux2_text_release`].
-pub const FLUX2_TE_NAMESPACE: &str = "flux2-te-bf16::mistral3";
-
 /// Small host-resident per-layer vectors plus the RoPE frequencies. The
 /// large projection matrices remain on disk until their layer first
 /// executes, then live in the device weight cache.
 pub struct Flux2TextEncoderPrepared {
+    owner: WeightOwner,
     pub config: Mistral3TextConfig,
     /// `input_layernorm.weight` for layers `0..30`, decoded to f32.
     input_norm: Vec<Vec<f32>>,
@@ -72,6 +69,12 @@ pub struct Flux2TextEncoderPrepared {
 }
 
 impl Flux2TextEncoderPrepared {
+    /// Evict this encoder's device weights; the next encode re-uploads them.
+    /// Returns the number of buffers freed.
+    pub fn release_device(&self) -> Result<usize> {
+        gpu_weight_cache_evict_prefix(self.owner.namespace()).map_err(DiffusionError::model)
+    }
+
     pub fn prepare(weights: &Flux2TextEncoderWeights, config: Mistral3TextConfig) -> Result<Self> {
         weights.verify_shapes(&config)?;
         let layers = config.layers_required_for_taps() as usize;
@@ -96,6 +99,7 @@ impl Flux2TextEncoderPrepared {
         }
         let rope_inv_freq = mistral3_rope_inv_freq(&config);
         Ok(Self {
+            owner: WeightOwner::new("flux2-te-mistral3"),
             config,
             input_norm,
             post_attention_norm,
@@ -157,6 +161,7 @@ fn require_bf16_shape(
 }
 
 fn ensure_linear<'a>(
+    namespace: &str,
     weights: &Flux2TextEncoderWeights,
     name: &'a str,
     output_cols: usize,
@@ -164,7 +169,7 @@ fn ensure_linear<'a>(
 ) -> Result<GpuLinearPart<'a>> {
     require_bf16_shape(weights, name, &[output_cols as u64, input_cols as u64])?;
     gpu_weight_cache_ensure(
-        FLUX2_TE_NAMESPACE,
+        namespace,
         name,
         GGML_TYPE_BF16,
         output_cols,
@@ -187,25 +192,27 @@ fn ensure_linear<'a>(
 }
 
 fn linear_bf16(
+    namespace: &str,
     weights: &Flux2TextEncoderWeights,
     input: &GpuTensor,
     name: &str,
     output_cols: usize,
 ) -> Result<GpuTensor> {
-    let part = ensure_linear(weights, name, output_cols, input.cols())?;
-    let output = gpu_linear_nt_cached_bf16_f32acc(input, FLUX2_TE_NAMESPACE, &[part], &[])
+    let part = ensure_linear(namespace, weights, name, output_cols, input.cols())?;
+    let output = gpu_linear_nt_cached_bf16_f32acc(input, namespace, &[part], &[])
         .map_err(DiffusionError::model)?;
     gpu_bf16_round(&output).map_err(DiffusionError::model)
 }
 
 fn norm_bf16(
+    namespace: &str,
     input: &GpuTensor,
     group_cols: usize,
     cache_key: &str,
     scale: &[f32],
     eps: f32,
 ) -> Result<GpuTensor> {
-    gpu_rms_norm_mul_bf16(input, group_cols, FLUX2_TE_NAMESPACE, cache_key, scale, eps)
+    gpu_rms_norm_mul_bf16(input, group_cols, namespace, cache_key, scale, eps)
         .map_err(DiffusionError::model)
 }
 
@@ -474,6 +481,7 @@ fn mistral3_layer_forward(
     let prefix = mistral3_layer_prefix(layer as u32);
 
     let normed = norm_bf16(
+        prepared.owner.namespace(),
         &hidden,
         hidden_size,
         &format!("{prefix}input_layernorm.weight"),
@@ -488,11 +496,29 @@ fn mistral3_layer_forward(
     let k_name = format!("{prefix}self_attn.k_proj.weight");
     let v_name = format!("{prefix}self_attn.v_proj.weight");
     let parts = [
-        ensure_linear(weights, &q_name, q_width, hidden_size)?,
-        ensure_linear(weights, &k_name, kv_width, hidden_size)?,
-        ensure_linear(weights, &v_name, kv_width, hidden_size)?,
+        ensure_linear(
+            prepared.owner.namespace(),
+            weights,
+            &q_name,
+            q_width,
+            hidden_size,
+        )?,
+        ensure_linear(
+            prepared.owner.namespace(),
+            weights,
+            &k_name,
+            kv_width,
+            hidden_size,
+        )?,
+        ensure_linear(
+            prepared.owner.namespace(),
+            weights,
+            &v_name,
+            kv_width,
+            hidden_size,
+        )?,
     ];
-    let qkv = gpu_linear_nt_cached_bf16_f32acc(&normed, FLUX2_TE_NAMESPACE, &parts, &[])
+    let qkv = gpu_linear_nt_cached_bf16_f32acc(&normed, prepared.owner.namespace(), &parts, &[])
         .map_err(DiffusionError::model)?;
     let qkv = gpu_bf16_round(&qkv).map_err(DiffusionError::model)?;
     let q = gpu_slice_cols(&qkv, 0, q_width).map_err(DiffusionError::model)?;
@@ -521,6 +547,7 @@ fn mistral3_layer_forward(
         taps.attention_raw = gpu_download(&attention).map_err(DiffusionError::model)?;
     }
     let attention = linear_bf16(
+        prepared.owner.namespace(),
         weights,
         &attention,
         &format!("{prefix}self_attn.o_proj.weight"),
@@ -535,6 +562,7 @@ fn mistral3_layer_forward(
     }
 
     let normed = norm_bf16(
+        prepared.owner.namespace(),
         &residual,
         hidden_size,
         &format!("{prefix}post_attention_layernorm.weight"),
@@ -549,11 +577,24 @@ fn mistral3_layer_forward(
     let up_name = format!("{prefix}mlp.up_proj.weight");
     let gate_name = format!("{prefix}mlp.gate_proj.weight");
     let parts = [
-        ensure_linear(weights, &up_name, ffn, hidden_size)?,
-        ensure_linear(weights, &gate_name, ffn, hidden_size)?,
+        ensure_linear(
+            prepared.owner.namespace(),
+            weights,
+            &up_name,
+            ffn,
+            hidden_size,
+        )?,
+        ensure_linear(
+            prepared.owner.namespace(),
+            weights,
+            &gate_name,
+            ffn,
+            hidden_size,
+        )?,
     ];
-    let up_gate = gpu_linear_nt_cached_bf16_f32acc(&normed, FLUX2_TE_NAMESPACE, &parts, &[])
-        .map_err(DiffusionError::model)?;
+    let up_gate =
+        gpu_linear_nt_cached_bf16_f32acc(&normed, prepared.owner.namespace(), &parts, &[])
+            .map_err(DiffusionError::model)?;
     let up_gate = gpu_bf16_round(&up_gate).map_err(DiffusionError::model)?;
     if let Some(taps) = taps.as_deref_mut() {
         taps.up_gate = gpu_download(&up_gate).map_err(DiffusionError::model)?;
@@ -564,6 +605,7 @@ fn mistral3_layer_forward(
         taps.activated = gpu_download(&activated).map_err(DiffusionError::model)?;
     }
     let update = linear_bf16(
+        prepared.owner.namespace(),
         weights,
         &activated,
         &format!("{prefix}mlp.down_proj.weight"),
@@ -577,12 +619,6 @@ fn mistral3_layer_forward(
         taps.hidden = gpu_download(&out).map_err(DiffusionError::model)?;
     }
     Ok(out)
-}
-
-/// Evict every cached TE weight buffer (~33.4GB) — call before loading the
-/// DiT. Returns the number of buffers freed.
-pub fn flux2_text_release() -> Result<usize> {
-    gpu_weight_cache_evict_prefix(&format!("{FLUX2_TE_NAMESPACE}::")).map_err(DiffusionError::model)
 }
 
 #[cfg(test)]

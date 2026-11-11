@@ -336,12 +336,13 @@ mod exec {
         gpu_download, gpu_layer_norm_pytorch, gpu_linear_f32_resident, gpu_silu, gpu_slice_cols,
         gpu_upload, GpuTensor,
     };
+    use makepad_ai_common::backend::WeightOwner;
     use std::collections::HashMap;
     use std::fs::File;
     use std::io::BufReader;
     use std::path::Path;
+    use std::sync::Arc;
 
-    const NS: &str = "paint-dino";
     const ATTN_SCALE: f32 = 1.0 / 8.0; // 1/sqrt(64)
 
     fn half_to_f32(bits: u16) -> f32 {
@@ -432,6 +433,7 @@ mod exec {
 
     /// facebook/dinov2-giant (`Dinov2Model`) last_hidden_state.
     pub struct DinoVit {
+        owner: Arc<WeightOwner>,
         patch_w: Vec<f32>,
         patch_b: Vec<f32>,
         cls: Vec<f32>,
@@ -477,7 +479,7 @@ mod exec {
     }
 
     impl DinoVit {
-        pub fn load(path: &Path) -> Result<Self, String> {
+        pub fn load(path: &Path, owner: Arc<WeightOwner>) -> Result<Self, String> {
             if !gpu_device_available() {
                 return Err("CUDA unavailable".into());
             }
@@ -552,6 +554,7 @@ mod exec {
                 ));
             }
             Ok(Self {
+                owner,
                 patch_w,
                 patch_b,
                 cls,
@@ -632,7 +635,7 @@ mod exec {
                 PROC_CROP,
                 grid,
                 grid,
-                NS,
+                self.owner.namespace(),
                 "patch",
                 &self.patch_w,
                 &self.patch_b,

@@ -451,7 +451,6 @@ pub fn yue2_score_timing(abc: &str) -> Option<Yue2ScoreTiming> {
     Some(Yue2ScoreTiming { seconds, sections: out })
 }
 
-pub const YUE2_NAMESPACE: &str = "yue2";
 const LABEL: &str = "yue2";
 
 /// The MoT checkpoint (one bf16 safetensors file).

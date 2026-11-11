@@ -9,6 +9,8 @@
 //! [`crate::birefnet_model`]; this module deliberately owns the stable public
 //! image/API contract and all checkpoint validation.
 
+use crate::backend::WeightOwner;
+use std::sync::Arc;
 use crate::{DiffusionError, ProgressHook, Result};
 use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader};
 use std::path::{Path, PathBuf};
@@ -27,7 +29,6 @@ pub const BIREFNET_DEPTHS: [usize; 4] = [2, 2, 18, 2];
 pub const BIREFNET_HEADS: [usize; 4] = [6, 12, 24, 48];
 pub const BIREFNET_BN_EPS: f32 = 1e-5;
 pub const BIREFNET_LN_EPS: f32 = 1e-5;
-pub const BIREFNET_CACHE_NAMESPACE: &str = "birefnet";
 
 pub type BiRefNetCancel<'a> = &'a dyn Fn() -> bool;
 
@@ -352,7 +353,7 @@ impl BiRefNet {
     ) -> Result<Self> {
         check_cancel(cancel)?;
         Ok(Self {
-            model: crate::birefnet_model::BiRefNetModel::prepare(weights, cancel, progress)?,
+            model: crate::birefnet_model::BiRefNetModel::prepare(&Arc::new(WeightOwner::new("birefnet")), weights, cancel, progress)?,
         })
     }
 
@@ -373,18 +374,6 @@ impl BiRefNet {
         check_cancel(cancel)?;
         self.model.matte(image, cancel, progress)
     }
-}
-
-/// Evict every device-cached BiRefNet tensor and release idle activation-pool
-/// buffers before a memory-heavy downstream model (notably TRELLIS) loads.
-/// Invoke this on the same worker thread that ran BiRefNet.
-pub fn unload_birefnet() -> Result<usize> {
-    let evicted = crate::backend::gpu_weight_cache_evict_prefix(&format!(
-        "{BIREFNET_CACHE_NAMESPACE}::"
-    ))
-    .map_err(DiffusionError::model)?;
-    crate::backend::gpu_pool_clear();
-    Ok(evicted)
 }
 
 #[cfg(test)]

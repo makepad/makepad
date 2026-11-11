@@ -3227,6 +3227,8 @@ mod tests {
 
         let mut graph = Graph::new();
         graph.build_forward_expand(&ctx, restored).unwrap();
+        // Views are metadata-only (no plan node, no binding of their own): leaf them to read them back.
+        graph.add_leaf(restored);
         let prepared = prepare_graph(&runtime, &ctx, &graph).unwrap();
         let session = create_graph_session(
             &runtime,

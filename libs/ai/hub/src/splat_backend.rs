@@ -221,8 +221,8 @@ mod native {
     use crate::error::AssetAiError;
     use makepad_ai_common::DiffusionError;
     use makepad_ai_splat::splat_image::SplatImage;
-    use makepad_ai_splat::{unload_splat, Device, SplatModel, SplatParams, SplatPipeline};
-    use makepad_ai_vision::birefnet::{unload_birefnet, BiRefNet, BiRefNetImage, BiRefNetWeights};
+    use makepad_ai_splat::{Device, SplatModel, SplatParams, SplatPipeline};
+    use makepad_ai_vision::birefnet::{BiRefNet, BiRefNetImage, BiRefNetWeights};
     use std::path::PathBuf;
 
     struct Paths {
@@ -271,8 +271,9 @@ mod native {
         /// the weight cache and the activation pool are thread-local.
         pub fn unload(&mut self) -> Result<(), AssetAiError> {
             self.pipeline = None;
-            unload_birefnet().map_err(|err| diffusion_err(self.model, err))?;
-            unload_splat(self.model).map_err(|err| diffusion_err(self.model, err))?;
+            makepad_ai_common::backend::gpu_pool_clear();
+            makepad_ai_common::backend::gpu_runtime_trim()
+                .map_err(|err| diffusion_err(self.model, DiffusionError::model(err)))?;
             self.resident = false;
             Ok(())
         }
@@ -336,7 +337,7 @@ mod native {
                 })();
                 // Always release a partially or fully populated BiRefNet
                 // cache, including on cancellation or an operator error.
-                unload_birefnet().map_err(|err| diffusion_err(self.model, err))?;
+                makepad_ai_common::backend::gpu_pool_clear();
                 let matte = matte_result.map_err(|err| diffusion_err(self.model, err))?;
                 for (pixel, alpha) in rgba.chunks_exact_mut(4).zip(matte.alpha_u8()) {
                     pixel[3] = alpha;

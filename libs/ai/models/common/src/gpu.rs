@@ -2037,22 +2037,6 @@ mod imp {
         None
     }
 
-    pub fn try_matmul_nt_ggml_bytes_cached_bf16_words<F>(
-        _input_bf16_words: &[u16],
-        _bt_ggml_type: u32,
-        _m: usize,
-        _k: usize,
-        _n: usize,
-        _cache_namespace: &str,
-        _bt_cache_key: &str,
-        _load_bt_bytes: F,
-    ) -> Result<Vec<f32>, String>
-    where
-        F: FnOnce() -> Result<Vec<u8>, String>,
-    {
-        Err("CUDA ggml matmul backend is unavailable".to_string())
-    }
-
     pub fn try_get_rows_ggml_bytes_cached<F>(
         _src_ggml_type: u32,
         _n_cols: usize,

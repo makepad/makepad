@@ -24,7 +24,7 @@ mod imp {
     use super::WhisperEncLayerQ8;
     use crate::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
     use crate::quant::{
-        block_elements, block_size, h3_nvfp4_pairs_bytes, quantize_bf16_to_q8_1,
+        block_elements, block_size, h3_nvfp4_pairs_bytes,
         quantize_f32_to_q8_1, GGML_TYPE_BF16, GGML_TYPE_F16, GGML_TYPE_H3_NVFP4_PAIRS,
         GGML_TYPE_F8_E4M3, GGML_TYPE_H3_NVFP4_PAIRS_PRESCALE, GGML_TYPE_NVFP4,
         GGML_TYPE_Q4_0, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0, QK, QK_NVFP4,
@@ -3174,74 +3174,6 @@ mod imp {
             let stream = self.stream;
 
             let input_q8_1 = quantize_f32_to_q8_1(a);
-            let input_ptr = {
-                let input_buffer = self.ensure_input_buffer_bytes(input_q8_1.len())?;
-                input_buffer.write(&input_q8_1, stream)?;
-                input_buffer.ptr.as_ptr().cast::<u8>()
-            };
-            let weight_ptr = {
-                self.cached_tensor_buffer(bt_cache_key, load_bt_bytes)?
-                    .ptr
-                    .as_ptr()
-                    .cast::<u8>()
-            };
-            let output_ptr = { self.ensure_output_buffer_f32(n)?.ptr.as_ptr().cast::<f32>() };
-            let q8_1_blocks = k / QK;
-
-            let status = unsafe {
-                makepad_cuda_nvfp4_q8_1_matvec(
-                    input_ptr,
-                    weight_ptr,
-                    output_ptr,
-                    q8_1_blocks as u32,
-                    n as u32,
-                    stream,
-                )
-            };
-            crate::check(status).map_err(|err| err.to_string())?;
-            self.ensure_output_buffer_f32(n)?.read_f32s(n, stream)
-        }
-
-        fn matmul_nt_ggml_bytes_cached_bf16_words<F>(
-            &mut self,
-            input_bf16_words: &[u16],
-            bt_ggml_type: u32,
-            m: usize,
-            k: usize,
-            n: usize,
-            cache_namespace: &str,
-            bt_cache_key: &str,
-            load_bt_bytes: F,
-        ) -> Result<Vec<f32>, String>
-        where
-            F: FnOnce() -> Result<Vec<u8>, String>,
-        {
-            if bt_ggml_type != GGML_TYPE_NVFP4 {
-                return Err("CUDA ggml matmul only supports NVFP4 today".to_string());
-            }
-            if m != 1 {
-                return Err(format!("CUDA NVFP4 matmul expects m=1, got {m}"));
-            }
-            if input_bf16_words.len() != k {
-                return Err(format!(
-                    "CUDA NVFP4 matmul activation length mismatch: got {} expected {k}",
-                    input_bf16_words.len()
-                ));
-            }
-            if k == 0 || n == 0 {
-                return Ok(Vec::new());
-            }
-            if k % QK != 0 || k % QK_NVFP4 != 0 {
-                return Err(format!(
-                    "CUDA NVFP4 matmul expects k divisible by 64, got {k}"
-                ));
-            }
-
-            self.prepare_device()?;
-            self.prepare_scope(cache_namespace);
-            let stream = self.stream;
-
-            let input_q8_1 = quantize_bf16_to_q8_1(input_bf16_words);
             let input_ptr = {
                 let input_buffer = self.ensure_input_buffer_bytes(input_q8_1.len())?;
                 input_buffer.write(&input_q8_1, stream)?;
@@ -23227,60 +23159,6 @@ mod imp {
         }
     }
 
-    pub fn try_matmul_nt_ggml_bytes_cached_bf16_words<F>(
-        input_bf16_words: &[u16],
-        bt_ggml_type: u32,
-        m: usize,
-        k: usize,
-        n: usize,
-        cache_namespace: &str,
-        bt_cache_key: &str,
-        load_bt_bytes: F,
-    ) -> Result<Vec<f32>, String>
-    where
-        F: FnOnce() -> Result<Vec<u8>, String>,
-    {
-        if bt_ggml_type == GGML_TYPE_BF16 {
-            return with_dense_linear_backend(|backend| {
-                backend.matmul_nt_half_cached(
-                    None,
-                    Some(input_bf16_words),
-                    bt_ggml_type,
-                    m,
-                    k,
-                    n,
-                    cache_namespace,
-                    bt_cache_key,
-                    load_bt_bytes,
-                )
-            });
-        }
-
-        thread_local! {
-            static GGML_CUDA_BACKEND: RefCell<Option<CudaGgmlBackend>> = const { RefCell::new(None) };
-        }
-
-        GGML_CUDA_BACKEND.with(|backend| {
-            let mut backend = backend.borrow_mut();
-            if backend.is_none() {
-                *backend = Some(CudaGgmlBackend::load()?);
-            }
-            backend
-                .as_mut()
-                .expect("ggml CUDA backend was just initialized")
-                .matmul_nt_ggml_bytes_cached_bf16_words(
-                    input_bf16_words,
-                    bt_ggml_type,
-                    m,
-                    k,
-                    n,
-                    cache_namespace,
-                    bt_cache_key,
-                    load_bt_bytes,
-                )
-        })
-    }
-
     pub fn try_get_rows_ggml_bytes_cached<F>(
         src_ggml_type: u32,
         n_cols: usize,
@@ -23499,6 +23377,44 @@ mod imp {
                     assert!(is_nan_word(word), "NaN {:#010x} staged to {word:#06x}", value.to_bits());
                 } else {
                     assert_eq!(word, host_bf16(value), "staged {:#010x}", value.to_bits());
+                }
+            }
+        }
+
+        /// BF16 weights on the keyed dense path take bf16-rounded activations,
+        /// as every CUDA BF16 linear does (Flux's conditioning MLPs on dense
+        /// BF16 checkpoints included). Bound per output, against the exact
+        /// product of the f32 activations and the bf16 weights: rounding an
+        /// activation to bf16 moves it by at most 2^-9 of its magnitude and the
+        /// f32 sum adds at most k * 2^-24, so
+        /// |y - exact| <= (2^-9 + k * 2^-24) * sum_i |a_i * w_i|, asserted with a 2x margin.
+        #[test]
+        fn keyed_bf16_matmul_is_within_bf16_input_rounding() {
+            let (m, k, n) = (3usize, 256usize, 8usize);
+            let mut state = 0x2545_f491_4f6c_dd1du64;
+            let mut next = || {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((state >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+            };
+            let a: Vec<f32> = (0..m * k).map(|_| next() * 3.0).collect();
+            let words: Vec<u16> = (0..n * k).map(|_| host_bf16(next())).collect();
+            let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+            let owner = makepad_ai_loader::WeightOwner::new("cuda-bf16-keyed");
+            let got = try_matmul_nt_ggml_bytes_cached(&a, GGML_TYPE_BF16, m, k, n, owner.namespace(), "w", || Ok(bytes))
+                .expect("keyed BF16 matmul");
+            assert_eq!(got.len(), m * n, "output extent");
+            for row in 0..m {
+                for col in 0..n {
+                    let (mut exact, mut magnitude) = (0f64, 0f64);
+                    for i in 0..k {
+                        let weight = f32::from_bits(u32::from(words[col * k + i]) << 16);
+                        let product = f64::from(a[row * k + i]) * f64::from(weight);
+                        exact += product;
+                        magnitude += product.abs();
+                    }
+                    let bound = 2.0 * (2f64.powi(-9) + k as f64 * 2f64.powi(-24)) * magnitude;
+                    let error = (f64::from(got[row * n + col]) - exact).abs();
+                    assert!(error <= bound, "row {row} col {col}: |{} - {exact}| = {error} exceeds the bf16 bound {bound}", got[row * n + col]);
                 }
             }
         }

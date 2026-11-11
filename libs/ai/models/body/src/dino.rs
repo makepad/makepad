@@ -4,6 +4,8 @@
 //! `gpu_linear_nt_cached_bf16_f32acc`; activations and reductions are f32.
 //! LayerScale is folded into the output projection rows and biases at load.
 
+use crate::backend::WeightOwner;
+use std::sync::Arc;
 use crate::backend::{
     gpu_add, gpu_attention_packed_cross, gpu_attention_packed_flash2_d64, gpu_concat_rows_many,
     gpu_download, gpu_layer_norm_mul_add, gpu_linear_nt_cached_bf16_bias_epilogue,
@@ -22,9 +24,9 @@ use makepad_ai_common::quant::{GGML_TYPE_BF16, GGML_TYPE_F8_E4M3};
 use makepad_ai_loader::MlxDType;
 
 const PATCH_DIM: usize = 3 * PATCH * PATCH;
-const CACHE_NAMESPACE: &str = "body-dinov3-hplus-bf16";
 
 struct Bf16Linear {
+    owner: Arc<WeightOwner>,
     bytes: Vec<u8>,
     key: String,
     out: usize,
@@ -54,6 +56,7 @@ fn quantize_f8(bf16_bytes: &[u8]) -> (Vec<u8>, f32) {
 
 impl Bf16Linear {
     fn load(
+        owner: &Arc<WeightOwner>,
         weights: &BodyWeights,
         name: &str,
         out: usize,
@@ -67,6 +70,7 @@ impl Bf16Linear {
             Vec::new()
         };
         Ok(Self {
+            owner: Arc::clone(owner),
             bytes,
             key: name.to_string(),
             out,
@@ -77,6 +81,7 @@ impl Bf16Linear {
     }
 
     fn load_folded(
+        owner: &Arc<WeightOwner>,
         weights: &BodyWeights,
         name: &str,
         scale_name: &str,
@@ -93,6 +98,7 @@ impl Bf16Linear {
             bias[row] *= scale[row];
         }
         Ok(Self {
+            owner: Arc::clone(owner),
             bytes: f32_to_bf16_bytes(&matrix),
             key: format!("{name}.layerscale_folded"),
             out,
@@ -102,9 +108,10 @@ impl Bf16Linear {
         })
     }
 
-    fn load_patch(weights: &BodyWeights) -> Result<Self> {
+    fn load_patch(owner: &Arc<WeightOwner>, weights: &BodyWeights) -> Result<Self> {
         let name = "backbone.embeddings.patch_embeddings";
         Ok(Self {
+            owner: Arc::clone(owner),
             bytes: bf16_bytes_shaped(
                 weights,
                 &format!("{name}.weight"),
@@ -132,7 +139,7 @@ impl Bf16Linear {
             f8.as_ref().map(|(bytes, scale)| {
                 gpu_linear_nt_cached_f8_mm(
                     input,
-                    CACHE_NAMESPACE,
+                    self.owner.namespace(),
                     &[GpuLinearPart {
                         bt_ggml_type: GGML_TYPE_F8_E4M3,
                         n: self.out,
@@ -167,15 +174,15 @@ impl Bf16Linear {
             bytes: &self.bytes,
         };
         let fast = if self.bias.is_empty() {
-            gpu_linear_nt_cached_bf16_mm(input, CACHE_NAMESPACE, &[part])
+            gpu_linear_nt_cached_bf16_mm(input, self.owner.namespace(), &[part])
         } else {
-            gpu_linear_nt_cached_bf16_bias_epilogue(input, CACHE_NAMESPACE, &[part], &self.bias)
+            gpu_linear_nt_cached_bf16_bias_epilogue(input, self.owner.namespace(), &[part], &self.bias)
         };
         match fast {
             Ok(out) => Ok(out),
             Err(_) => gpu_linear_nt_cached_bf16_f32acc(
                 input,
-                CACHE_NAMESPACE,
+                self.owner.namespace(),
                 &[GpuLinearPart {
                     bt_ggml_type: GGML_TYPE_BF16,
                     n: self.out,
@@ -324,6 +331,7 @@ impl BodyDino {
         weights: &BodyWeights,
         mut progress: Option<ProgressHook>,
     ) -> Result<Self> {
+        let owner = Arc::new(WeightOwner::new("body-dino"));
         let cls = weights.f32_shaped("backbone.embeddings.cls_token", &[1, 1, DINO_DIM])?;
         let registers = weights.f32_shaped(
             "backbone.embeddings.register_tokens",
@@ -332,7 +340,7 @@ impl BodyDino {
         let mut prefix = cls;
         prefix.extend_from_slice(&registers);
 
-        let patch = Bf16Linear::load_patch(weights)?;
+        let patch = Bf16Linear::load_patch(&owner, weights)?;
         let mut layers = Vec::with_capacity(DINO_DEPTH);
         for i in 0..DINO_DEPTH {
             if progress.is_some() {
@@ -347,6 +355,7 @@ impl BodyDino {
                 norm1_w: weights.f32_shaped(&format!("{p}.norm1.weight"), &[DINO_DIM])?,
                 norm1_b: weights.f32_shaped(&format!("{p}.norm1.bias"), &[DINO_DIM])?,
                 q: Bf16Linear::load(
+                    &owner,
                     weights,
                     &format!("{p}.attention.q_proj"),
                     DINO_DIM,
@@ -354,6 +363,7 @@ impl BodyDino {
                     true,
                 )?,
                 k: Bf16Linear::load(
+                    &owner,
                     weights,
                     &format!("{p}.attention.k_proj"),
                     DINO_DIM,
@@ -361,6 +371,7 @@ impl BodyDino {
                     false,
                 )?,
                 v: Bf16Linear::load(
+                    &owner,
                     weights,
                     &format!("{p}.attention.v_proj"),
                     DINO_DIM,
@@ -368,6 +379,7 @@ impl BodyDino {
                     true,
                 )?,
                 out: Bf16Linear::load_folded(
+                    &owner,
                     weights,
                     &format!("{p}.attention.o_proj"),
                     &format!("{p}.layer_scale1.lambda1"),
@@ -377,6 +389,7 @@ impl BodyDino {
                 norm2_w: weights.f32_shaped(&format!("{p}.norm2.weight"), &[DINO_DIM])?,
                 norm2_b: weights.f32_shaped(&format!("{p}.norm2.bias"), &[DINO_DIM])?,
                 gate: Bf16Linear::load(
+                    &owner,
                     weights,
                     &format!("{p}.mlp.gate_proj"),
                     DINO_FFN,
@@ -384,6 +397,7 @@ impl BodyDino {
                     true,
                 )?,
                 up: Bf16Linear::load(
+                    &owner,
                     weights,
                     &format!("{p}.mlp.up_proj"),
                     DINO_FFN,
@@ -391,6 +405,7 @@ impl BodyDino {
                     true,
                 )?,
                 down: Bf16Linear::load_folded(
+                    &owner,
                     weights,
                     &format!("{p}.mlp.down_proj"),
                     &format!("{p}.layer_scale2.lambda1"),

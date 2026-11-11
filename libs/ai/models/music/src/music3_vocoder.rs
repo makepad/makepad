@@ -8,7 +8,10 @@ use crate::music3::{
 use crate::music3_weights::Music3Shards;
 use makepad_ai_sfx::sa3::par_rows;
 use crate::{DiffusionError, Result};
+use makepad_ai_common::backend::WeightOwner;
+use std::borrow::Cow;
 use std::path::Path;
+use std::sync::Arc;
 
 struct Conv {
     w: Vec<f32>,
@@ -32,6 +35,8 @@ struct TConv {
     /// at load): row `r*out_ch+o` = kernel tap `r` (lo) / `r+s` (hi).
     tap_lo: Vec<f32>,
     tap_hi: Vec<f32>,
+    key_lo: String,
+    key_hi: String,
 }
 
 fn tconv_tap_matrices(
@@ -95,6 +100,7 @@ fn norm_weight_conv(g: &[f32], v: &[f32], out_ch: usize, per: usize) -> Vec<f32>
 }
 
 pub struct Music3Vocoder {
+    owner: Arc<WeightOwner>,
     dec_in: Conv,
     conv_in: Conv,
     blocks: Vec<DecBlock>,
@@ -163,6 +169,8 @@ impl Music3Vocoder {
                 padding: stride.div_ceil(2),
                 tap_lo,
                 tap_hi,
+                key_lo: format!("{prefix}.tap_lo"),
+                key_hi: format!("{prefix}.tap_hi"),
             })
         }
         let get = &mut tensor_f32;
@@ -203,6 +211,7 @@ impl Music3Vocoder {
             });
         }
         Ok(Self {
+            owner: Arc::new(WeightOwner::new("music3_vocoder")),
             dec_in,
             conv_in,
             blocks,
@@ -241,7 +250,7 @@ impl Music3Vocoder {
             plane = conv1d(&plane, &self.conv_in);
             for block in &self.blocks {
                 snake(&mut plane, &block.alpha);
-                plane = conv_transpose1d(&plane, &block.up);
+                plane = conv_transpose1d(&plane, &block.up, self.owner.namespace());
                 for unit in &block.units {
                     let mut y = Plane {
                         ch: plane.ch,
@@ -442,9 +451,9 @@ fn conv1d_one_row_range(
     }
 }
 
-fn conv_transpose1d(input: &Plane, conv: &TConv) -> Plane {
+fn conv_transpose1d(input: &Plane, conv: &TConv, namespace: &str) -> Plane {
     let t0 = std::time::Instant::now();
-    let plane = if let Some(plane) = conv_transpose1d_taps(input, conv) {
+    let plane = if let Some(plane) = conv_transpose1d_taps(input, conv, namespace) {
         plane
     } else {
         conv_transpose1d_scatter(input, conv)
@@ -459,7 +468,7 @@ fn conv_transpose1d(input: &Plane, conv: &TConv) -> Plane {
 /// source `(t+pad)/s` and tap `r + s` of source `(t+pad)/s - 1`. Packing
 /// taps `[0,s)` / `[s,2s)` into `[s*out_ch, in_ch]` matrices turns the
 /// whole tconv into `X_tm · W^T` twice plus a bias-seeded interleave.
-fn conv_transpose1d_taps(input: &Plane, conv: &TConv) -> Option<Plane> {
+fn conv_transpose1d_taps(input: &Plane, conv: &TConv, namespace: &str) -> Option<Plane> {
     let len = input.len;
     let s = conv.stride;
     if conv.k != 2 * s || len == 0 || conv.tap_lo.is_empty() {
@@ -477,7 +486,7 @@ fn conv_transpose1d_taps(input: &Plane, conv: &TConv) -> Option<Plane> {
         }
     });
     let t0 = std::time::Instant::now();
-    let (y_lo, y_hi) = tconv_tap_gemms(&x_tm, w_lo, w_hi, len, in_ch, n)?;
+    let (y_lo, y_hi) = tconv_tap_gemms(&x_tm, w_lo, w_hi, len, in_ch, n, namespace, &conv.key_lo, &conv.key_hi)?;
     vperf::add(&vperf::TCONV_GEMM, t0);
     // Bias-seeded interleave: out[o][t] = b[o] + lo[src][r*out_ch+o] + hi[src-1][...].
     let mut out = vec![0f32; out_ch * out_len];
@@ -513,8 +522,11 @@ fn tconv_tap_gemms(
     m: usize,
     k: usize,
     n: usize,
+    namespace: &str,
+    key_lo: &str,
+    key_hi: &str,
 ) -> Option<(Vec<f32>, Vec<f32>)> {
-    use makepad_ai_common::backend::metal::{try_matmul_nt_ggml_bytes_multi, MatmulNtGgmlBytesMatrix};
+    use makepad_ai_common::backend::metal::{try_matmul_nt_ggml_bytes_keyed_multi, MatmulNtGgmlBytesKeyedMatrix};
     use makepad_ai_common::tensor::TensorType;
 
     fn f32_bytes(v: &[f32]) -> &[u8] {
@@ -523,18 +535,28 @@ fn tconv_tap_gemms(
 
     if crate::metal_accel::gemm_enabled() && m * k * n >= 4 * 1024 * 1024 {
         let mats = [
-            MatmulNtGgmlBytesMatrix {
-                bt_bytes: f32_bytes(w_lo),
+            MatmulNtGgmlBytesKeyedMatrix {
+                namespace,
+                cache_key: key_lo,
                 bt_ggml_type: TensorType::F32.ggml_type(),
                 n,
             },
-            MatmulNtGgmlBytesMatrix {
-                bt_bytes: f32_bytes(w_hi),
+            MatmulNtGgmlBytesKeyedMatrix {
+                namespace,
+                cache_key: key_hi,
                 bt_ggml_type: TensorType::F32.ggml_type(),
                 n,
             },
         ];
-        if let Some(mut ys) = try_matmul_nt_ggml_bytes_multi(x_tm, m, k, &mats) {
+        if let Some(mut ys) = try_matmul_nt_ggml_bytes_keyed_multi(x_tm, m, k, &mats, |_, key| {
+            if key == key_lo {
+                Ok(Cow::Borrowed(f32_bytes(w_lo)))
+            } else if key == key_hi {
+                Ok(Cow::Borrowed(f32_bytes(w_hi)))
+            } else {
+                Err(format!("unknown vocoder tap weight: {key}"))
+            }
+        }) {
             if ys.len() == 2
                 && ys.iter().all(|y| {
                     y.len() == m * n && y.iter().any(|v| v.is_finite() && *v != 0.0)
@@ -684,7 +706,7 @@ fn dev_tconv(conv: &TConv, key: &str) -> DevTConv {
     }
 }
 
-fn conv1d_dev(x: &GpuTensor, len: usize, conv: &DevConv) -> Result<GpuTensor> {
+fn conv1d_dev(namespace: &str, x: &GpuTensor, len: usize, conv: &DevConv) -> Result<GpuTensor> {
     let span = (conv.taps.len() - 1) * conv.dilation;
     let out_len = len + 2 * conv.padding - span;
     let padded = if conv.padding > 0 {
@@ -700,7 +722,7 @@ fn conv1d_dev(x: &GpuTensor, len: usize, conv: &DevConv) -> Result<GpuTensor> {
         let shifted =
             gpu_slice_rows(&padded, tap * conv.dilation, out_len).map_err(DiffusionError::model)?;
         let bias: &[f32] = if tap == 0 { &conv.bias } else { &[] };
-        let y = gpu_linear_nt_cached(&shifted, "music3vae", &[weight.part()], bias)
+        let y = gpu_linear_nt_cached(&shifted, namespace, &[weight.part()], bias)
             .map_err(DiffusionError::model)?;
         out = Some(match out {
             None => y,
@@ -710,13 +732,13 @@ fn conv1d_dev(x: &GpuTensor, len: usize, conv: &DevConv) -> Result<GpuTensor> {
     Ok(out.expect("conv taps"))
 }
 
-fn tconv_dev(x: &GpuTensor, len: usize, conv: &DevTConv) -> Result<GpuTensor> {
+fn tconv_dev(namespace: &str, x: &GpuTensor, len: usize, conv: &DevTConv) -> Result<GpuTensor> {
     let s = conv.stride;
     let k = 2 * s;
     let out_len = (len - 1) * s + k - 2 * conv.padding;
-    let y_hi_src = gpu_linear_nt_cached(x, "music3vae", &[conv.lo.part()], &conv.bias_tiled)
+    let y_hi_src = gpu_linear_nt_cached(x, namespace, &[conv.lo.part()], &conv.bias_tiled)
         .map_err(DiffusionError::model)?;
-    let y_lo_src = gpu_linear_nt_cached(x, "music3vae", &[conv.hi.part()], &[])
+    let y_lo_src = gpu_linear_nt_cached(x, namespace, &[conv.hi.part()], &[])
         .map_err(DiffusionError::model)?;
     let mut row_hi = vec![0u32; out_len];
     let mut row_lo = vec![0u32; out_len];
@@ -759,9 +781,9 @@ mod tests {
     #[test]
     fn tconv_taps_matches_scatter_reference() {
         // Same stride/pad family as the real blocks ([8, 8, 4, 2], k = 2s,
-        // pad = ceil(s/2)); sizes stay tiny so the GEMM path is pure CPU.
+        // pad = ceil(s/2)); the final case reaches the Metal GEMM gate.
         for &(in_ch, out_ch, stride, len) in
-            &[(6usize, 4usize, 8usize, 5usize), (5, 3, 4, 7), (4, 2, 2, 9), (3, 5, 8, 1)]
+            &[(6usize, 4usize, 8usize, 5usize), (5, 3, 4, 7), (4, 2, 2, 9), (3, 5, 8, 1), (256, 32, 8, 64)]
         {
             let k = 2 * stride;
             let mut state = 0x9E3779B97F4A7C15u64 ^ (in_ch * 31 + stride) as u64;
@@ -779,14 +801,17 @@ mod tests {
                 padding: stride.div_ceil(2),
                 tap_lo,
                 tap_hi,
+                key_lo: "test.tap_lo".into(),
+                key_hi: "test.tap_hi".into(),
             };
+            let owner = WeightOwner::new("music3_vocoder_test");
             let input = Plane {
                 ch: in_ch,
                 len,
                 data: x,
             };
             let reference = conv_transpose1d_scatter(&input, &conv);
-            let taps = conv_transpose1d_taps(&input, &conv).expect("taps path");
+            let taps = conv_transpose1d_taps(&input, &conv, owner.namespace()).expect("taps path");
             assert_eq!(taps.ch, reference.ch);
             assert_eq!(taps.len, reference.len);
             assert_eq!(taps.data.len(), reference.data.len());
@@ -802,6 +827,7 @@ mod tests {
 }
 
 fn decode_cuda(voc: &Music3Vocoder, latents: &[f32], frames: usize) -> Result<Vec<f32>> {
+    let ns = voc.owner.namespace();
     if latents.len() != MUSIC3_VAE_LATENT * frames {
         return Err(DiffusionError::model("vocoder cuda latent size"));
     }
@@ -842,24 +868,24 @@ fn decode_cuda(voc: &Music3Vocoder, latents: &[f32], frames: usize) -> Result<Ve
             }
         }
         let x = gpu_upload(&x_host, frames, half).map_err(DiffusionError::model)?;
-        let x = gpu_linear_nt_cached(&x, "music3vae", &[dec_in.part()], &voc.dec_in.b)
+        let x = gpu_linear_nt_cached(&x, ns, &[dec_in.part()], &voc.dec_in.b)
             .map_err(DiffusionError::model)?;
-        let mut plane = conv1d_dev(&x, frames, &conv_in)?;
+        let mut plane = conv1d_dev(ns, &x, frames, &conv_in)?;
         let mut len = frames;
         for (alpha, up, units) in &blocks {
             plane = snake_dev(&plane, alpha)?;
-            plane = tconv_dev(&plane, len, up)?;
+            plane = tconv_dev(ns, &plane, len, up)?;
             len *= up.stride;
             for unit in units {
                 let mut y = snake_dev(&plane, &unit.a1)?;
-                y = conv1d_dev(&y, len, &unit.c1)?;
+                y = conv1d_dev(ns, &y, len, &unit.c1)?;
                 y = snake_dev(&y, &unit.a2)?;
-                y = conv1d_dev(&y, len, &unit.c2)?;
+                y = conv1d_dev(ns, &y, len, &unit.c2)?;
                 plane = gpu_add(&plane, &y).map_err(DiffusionError::model)?;
             }
         }
         plane = snake_dev(&plane, &voc.alpha_out)?;
-        plane = conv1d_dev(&plane, len, &conv_out)?;
+        plane = conv1d_dev(ns, &plane, len, &conv_out)?;
         let host = gpu_download(&plane).map_err(DiffusionError::model)?;
         for (i, v) in host.iter().enumerate() {
             stereo[ch * frames * hop + i] = v.tanh();

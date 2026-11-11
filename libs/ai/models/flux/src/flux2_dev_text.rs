@@ -26,9 +26,9 @@
 //! `MAKEPAD_FLUX2_TE_RESIDENT=1` keeps layers cached for TE-only runs.
 
 use crate::backend::{
-    gpu_add_bf16, gpu_attention_packed_causal_bf16, gpu_bf16_round, gpu_concat_cols,
-    gpu_download, gpu_linear_nt_cached_f8_mm, gpu_slice_cols, gpu_swiglu_value_gate, gpu_upload,
-    gpu_weight_cache_ensure, gpu_weight_cache_evict_prefix, GpuLinearPart, GpuTensor,
+    gpu_add_bf16, gpu_attention_packed_causal_bf16, gpu_bf16_round, gpu_concat_cols, gpu_download,
+    gpu_linear_nt_cached_f8_mm, gpu_slice_cols, gpu_swiglu_value_gate, gpu_upload,
+    gpu_weight_cache_ensure, gpu_weight_cache_evict_prefix, GpuLinearPart, GpuTensor, WeightOwner,
 };
 use crate::flux2::{Flux2WeightFile, Mistral3TextConfig, FLUX2_HIDDEN_STATE_TAPS};
 use crate::flux2_text::{
@@ -37,7 +37,6 @@ use crate::flux2_text::{
 use crate::{DiffusionError, Result};
 use makepad_ai_common::quant::GGML_TYPE_F8_E4M3;
 
-pub const FLUX2_DEV_TE_NAMESPACE: &str = "flux2-te-fp8::mistral3";
 pub const FLUX2_DEV_EMBED_TOKENS: &str = "model.embed_tokens.weight";
 
 pub fn flux2_dev_layer_prefix(layer: u32) -> String {
@@ -45,6 +44,7 @@ pub fn flux2_dev_layer_prefix(layer: u32) -> String {
 }
 
 pub struct Flux2DevTextPrepared {
+    owner: WeightOwner,
     pub config: Mistral3TextConfig,
     input_norm: Vec<Vec<f32>>,
     post_attention_norm: Vec<Vec<f32>>,
@@ -66,6 +66,12 @@ fn require_vec(weights: &Flux2WeightFile, name: &str, expected: usize) -> Result
 }
 
 impl Flux2DevTextPrepared {
+    /// Evict this encoder's device weights; the next encode re-uploads them.
+    /// Returns the number of buffers freed.
+    pub fn release_device(&self) -> Result<usize> {
+        gpu_weight_cache_evict_prefix(self.owner.namespace()).map_err(DiffusionError::model)
+    }
+
     pub fn prepare(weights: &Flux2WeightFile, config: Mistral3TextConfig) -> Result<Self> {
         let layers = config.layers_required_for_taps() as usize;
         let hidden = config.hidden_size as usize;
@@ -127,6 +133,7 @@ impl Flux2DevTextPrepared {
             )));
         }
         Ok(Self {
+            owner: WeightOwner::new("flux2-dev-te"),
             config,
             input_norm,
             post_attention_norm,
@@ -156,7 +163,7 @@ fn ensure_f8_linear<'a>(
         )));
     }
     gpu_weight_cache_ensure(
-        FLUX2_DEV_TE_NAMESPACE,
+        prepared.owner.namespace(),
         name,
         GGML_TYPE_F8_E4M3,
         output_cols,
@@ -190,26 +197,26 @@ fn f8_linear(
 ) -> Result<GpuTensor> {
     let (part, (scale, input_scale)) =
         ensure_f8_linear(weights, prepared, name, output_cols, input.cols())?;
-    gpu_linear_nt_cached_f8_mm(input, FLUX2_DEV_TE_NAMESPACE, &[part], scale, input_scale)
-        .map_err(DiffusionError::model)
+    gpu_linear_nt_cached_f8_mm(
+        input,
+        prepared.owner.namespace(),
+        &[part],
+        scale,
+        input_scale,
+    )
+    .map_err(DiffusionError::model)
 }
 
 fn norm_bf16(
+    namespace: &str,
     input: &GpuTensor,
     group_cols: usize,
     cache_key: &str,
     scale: &[f32],
     eps: f32,
 ) -> Result<GpuTensor> {
-    crate::backend::gpu_rms_norm_mul_bf16(
-        input,
-        group_cols,
-        FLUX2_DEV_TE_NAMESPACE,
-        cache_key,
-        scale,
-        eps,
-    )
-    .map_err(DiffusionError::model)
+    crate::backend::gpu_rms_norm_mul_bf16(input, group_cols, namespace, cache_key, scale, eps)
+        .map_err(DiffusionError::model)
 }
 
 fn repeat_kv(
@@ -325,6 +332,7 @@ pub fn flux2_dev_text_encode(
         let prefix = flux2_dev_layer_prefix(layer as u32);
 
         let normed = norm_bf16(
+            prepared.owner.namespace(),
             &hidden,
             hidden_size,
             &format!("{prefix}input_layernorm.weight"),
@@ -372,6 +380,7 @@ pub fn flux2_dev_text_encode(
         let residual = gpu_add_bf16(&hidden, &attention).map_err(DiffusionError::model)?;
 
         let normed = norm_bf16(
+            prepared.owner.namespace(),
             &residual,
             hidden_size,
             &format!("{prefix}post_attention_layernorm.weight"),
@@ -415,9 +424,8 @@ pub fn flux2_dev_text_encode(
         // Layer weights are single-use per encode: evict immediately so the
         // encoder streams beside the resident DiT.
         if !te_resident() {
-            let _ = gpu_weight_cache_evict_prefix(&format!(
-                "{FLUX2_DEV_TE_NAMESPACE}::{prefix}"
-            ));
+            let _ =
+                gpu_weight_cache_evict_prefix(&format!("{}::{prefix}", prepared.owner.namespace()));
         }
     }
 
@@ -431,10 +439,4 @@ pub fn flux2_dev_text_encode(
         taps.hidden_states = tap_hidden;
     }
     Ok((conditioning, taps))
-}
-
-/// Evict everything this encoder cached (norm vectors etc.).
-pub fn flux2_dev_text_release() -> Result<usize> {
-    gpu_weight_cache_evict_prefix(&format!("{FLUX2_DEV_TE_NAMESPACE}::"))
-        .map_err(DiffusionError::model)
 }

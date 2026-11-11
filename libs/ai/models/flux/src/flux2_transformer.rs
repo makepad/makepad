@@ -23,14 +23,13 @@ use crate::backend::{
     gpu_layer_norm_mod_to_bf16buf, gpu_linear_nt_cached_bf16_mm,
     gpu_linear_nt_cached_bf16_mm_from_buf, gpu_linear_nt_cached_bf16_mm_from_buf_to_buf,
     gpu_linear_nt_cached_f8_mm, gpu_linear_nt_cached_f8_mm_from_buf,
-    gpu_linear_nt_cached_f8_mm_from_buf_to_buf,
-    gpu_rms_norm_mul_from_bf16_slab, gpu_rope_interleaved, gpu_silu,
-    gpu_slice_rows, gpu_stream_ring_active, gpu_stream_ring_advance, gpu_stream_ring_prime,
-    gpu_stream_ring_setup,
-    gpu_swiglu_gate_first_from_bf16, gpu_upload, gpu_upload_into,
-    gpu_linear_nt_cached_fp8_dynamic_from_buf, gpu_linear_nt_cached_fp8_dynamic_from_buf_to_buf,
-    gpu_weight_cache_ensure, gpu_weight_cache_ensure_bf16_precision_keyed, gpu_weight_cache_ensure_quant,
-    gpu_weight_cache_evict_prefix, GpuBf16Buf, GpuLinearPart, GpuLinearPrecision, GpuTensor,
+    gpu_linear_nt_cached_f8_mm_from_buf_to_buf, gpu_linear_nt_cached_fp8_dynamic_from_buf,
+    gpu_linear_nt_cached_fp8_dynamic_from_buf_to_buf, gpu_rms_norm_mul_from_bf16_slab,
+    gpu_rope_interleaved, gpu_silu, gpu_slice_rows, gpu_stream_ring_active,
+    gpu_stream_ring_advance, gpu_stream_ring_prime, gpu_stream_ring_setup,
+    gpu_swiglu_gate_first_from_bf16, gpu_upload, gpu_upload_into, gpu_weight_cache_ensure,
+    gpu_weight_cache_ensure_bf16_precision_keyed, gpu_weight_cache_ensure_quant, GpuBf16Buf,
+    GpuLinearPart, GpuLinearPrecision, GpuTensor, WeightOwner,
 };
 use crate::flux2::{Flux2PosId, Flux2TransformerConfig, Flux2WeightFile};
 use crate::{DiffusionError, Result};
@@ -40,7 +39,6 @@ use makepad_ai_common::quant::{
 };
 use std::path::{Path, PathBuf};
 
-pub const FLUX2_DIT_NAMESPACE: &str = "flux2-dit-bf16";
 const LAYER_NORM_EPS: f32 = 1.0e-6;
 const TIME_EMBED_DIM: usize = 256;
 
@@ -59,6 +57,7 @@ pub enum Flux2MlpArithmetic {
 }
 
 pub struct Flux2TransformerWeights {
+    owner: WeightOwner,
     pub path: PathBuf,
     pub config: Flux2TransformerConfig,
     pub file: Flux2WeightFile,
@@ -87,6 +86,7 @@ impl Flux2TransformerWeights {
             ));
         }
         Ok(Self {
+            owner: WeightOwner::new("flux2-dit"),
             path,
             config,
             file,
@@ -119,14 +119,6 @@ impl Flux2TransformerWeights {
             .insert(resolved.to_owned(), (scale, input_scale));
         Ok((scale, input_scale))
     }
-}
-
-pub fn flux2_transformer_release() -> Result<usize> {
-    gpu_weight_cache_evict_prefix(&format!("{FLUX2_DIT_NAMESPACE}::")).map_err(DiffusionError::model)
-}
-
-fn ns(weights: &Flux2TransformerWeights) -> String {
-    format!("{FLUX2_DIT_NAMESPACE}:{}", weights.path.display())
 }
 
 fn alias_one(name: &str) -> Option<String> {
@@ -304,7 +296,7 @@ fn ensure_linear<'a>(
         Some(resolved) if weights.file.tensor(&resolved)?.dtype == "F8_E4M3" => {
             let scales = weights.f8_scale(&resolved)?;
             gpu_weight_cache_ensure(
-                &ns(weights),
+                weights.owner.namespace(),
                 name,
                 GGML_TYPE_F8_E4M3,
                 output_cols,
@@ -323,7 +315,7 @@ fn ensure_linear<'a>(
         Some(resolved) if gguf_kquant_type(weights, &resolved).is_some() => {
             let ggml_type = gguf_kquant_type(weights, &resolved).expect("checked");
             gpu_weight_cache_ensure_quant(
-                &ns(weights),
+                weights.owner.namespace(),
                 name,
                 ggml_type,
                 output_cols,
@@ -340,7 +332,7 @@ fn ensure_linear<'a>(
         }
         _ => {
             gpu_weight_cache_ensure(
-                &ns(weights),
+                weights.owner.namespace(),
                 name,
                 GGML_TYPE_BF16,
                 output_cols,
@@ -371,10 +363,14 @@ fn linear(
 ) -> Result<GpuTensor> {
     let ensured = ensure_linear(weights, name, output_cols, input.cols())?;
     match ensured.f8_scale {
-        Some((scale, input_scale)) => {
-            gpu_linear_nt_cached_f8_mm(input, &ns(weights), &[ensured.part], scale, input_scale)
-        }
-        None => gpu_linear_nt_cached_bf16_mm(input, &ns(weights), &[ensured.part]),
+        Some((scale, input_scale)) => gpu_linear_nt_cached_f8_mm(
+            input,
+            weights.owner.namespace(),
+            &[ensured.part],
+            scale,
+            input_scale,
+        ),
+        None => gpu_linear_nt_cached_bf16_mm(input, weights.owner.namespace(), &[ensured.part]),
     }
     .map_err(DiffusionError::model)
 }
@@ -389,12 +385,14 @@ fn linear_from_buf(
     match ensured.f8_scale {
         Some((scale, input_scale)) => gpu_linear_nt_cached_f8_mm_from_buf(
             input,
-            &ns(weights),
+            weights.owner.namespace(),
             &[ensured.part],
             scale,
             input_scale,
         ),
-        None => gpu_linear_nt_cached_bf16_mm_from_buf(input, &ns(weights), &[ensured.part]),
+        None => {
+            gpu_linear_nt_cached_bf16_mm_from_buf(input, weights.owner.namespace(), &[ensured.part])
+        }
     }
     .map_err(DiffusionError::model)
 }
@@ -409,14 +407,16 @@ fn linear_from_buf_to_buf(
     match ensured.f8_scale {
         Some((scale, input_scale)) => gpu_linear_nt_cached_f8_mm_from_buf_to_buf(
             input,
-            &ns(weights),
+            weights.owner.namespace(),
             &[ensured.part],
             scale,
             input_scale,
         ),
-        None => {
-            gpu_linear_nt_cached_bf16_mm_from_buf_to_buf(input, &ns(weights), &[ensured.part])
-        }
+        None => gpu_linear_nt_cached_bf16_mm_from_buf_to_buf(
+            input,
+            weights.owner.namespace(),
+            &[ensured.part],
+        ),
     }
     .map_err(DiffusionError::model)
 }
@@ -438,7 +438,7 @@ fn fp8_mlp_key(
     if weights.file.tensor(&resolved)?.dtype != "BF16" {
         return Ok(None);
     }
-    let key = format!("{}::{name}::fp8", ns(weights));
+    let key = format!("{}::{name}::fp8", weights.owner.namespace());
     gpu_weight_cache_ensure_bf16_precision_keyed(&key, output_cols, input_cols, GpuLinearPrecision::Fp8F32, || {
         load_linear_bytes(weights, name).map_err(|err| err.to_string())
     })
@@ -829,8 +829,8 @@ fn flux2_ensure_double_ring(weights: &Flux2TransformerWeights) -> Result<bool> {
     if !weights.config.guidance_embed {
         return Ok(false);
     }
-    let namespace = ns(weights);
-    let already = FLUX2_RING_NS.with(|cell| cell.borrow().as_deref() == Some(namespace.as_str()));
+    let namespace = weights.owner.namespace();
+    let already = FLUX2_RING_NS.with(|cell| cell.borrow().as_deref() == Some(namespace));
     if already && gpu_stream_ring_active() {
         // Slots may have been released for the VAE-decode phase.
         gpu_stream_ring_prime().map_err(DiffusionError::model)?;
@@ -841,12 +841,12 @@ fn flux2_ensure_double_ring(weights: &Flux2TransformerWeights) -> Result<bool> {
     for layer in 0..depth {
         let mut group = Vec::with_capacity(8);
         for name in double_block_ring_names(layer) {
-            group.push(ring_tensor_key_and_bytes(weights, &namespace, &name)?);
+            group.push(ring_tensor_key_and_bytes(weights, namespace, &name)?);
         }
         groups.push(group);
     }
     gpu_stream_ring_setup(groups).map_err(DiffusionError::model)?;
-    FLUX2_RING_NS.with(|cell| *cell.borrow_mut() = Some(namespace));
+    FLUX2_RING_NS.with(|cell| *cell.borrow_mut() = Some(namespace.to_owned()));
     Ok(true)
 }
 
@@ -907,7 +907,7 @@ fn flux2_forward_state(
     let txt_count = txt_ids.len();
     FLUX2_DEVICE_STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
-        let namespace = ns(weights);
+        let namespace = weights.owner.namespace();
         let ids_fp = flux2_ids_fingerprint(txt_ids, img_ids);
         let matches = slot.as_ref().is_some_and(|state| {
             state.namespace == namespace
@@ -924,7 +924,7 @@ fn flux2_forward_state(
             let (cos, sin) = flux2_rope_tables(&all_ids, config);
             let half = (config.head_dim / 2) as usize;
             *slot = Some(Flux2DeviceState {
-                namespace,
+                namespace: namespace.to_owned(),
                 img_count,
                 txt_count,
                 gen_tokens,
@@ -1003,7 +1003,7 @@ fn head_rms_slab(
         col_off,
         cols,
         head_dim,
-        &ns(weights),
+        weights.owner.namespace(),
         name,
         &scale,
         LAYER_NORM_EPS,

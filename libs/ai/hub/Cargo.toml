@@ -38,7 +38,7 @@ flux = ["dep:makepad-ai-flux", "dep:makepad-ai-common"]
 # like any other registry model.
 paint = ["dep:makepad-ai-paint", "dep:makepad-gltf", "dep:makepad-remesh", "dep:makepad-xatlas"]
 # Windows/Linux CUDA Hunyuan executor (in the standalone service default).
-paint-cuda = ["paint", "makepad-ai-paint/cuda-taps"]
+paint-cuda = ["paint", "makepad-ai-paint/cuda-taps", "dep:makepad-ai-common"]
 # Real LLM prompt expansion via makepad-ai-llm (Qwen3.5/3.6 GGUF).
 llm = ["dep:makepad-ai-llm"]
 # The CUDA kernels for every local model backend (makepad-ai-cuda `cuda`; Linux/Windows,

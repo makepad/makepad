@@ -27,7 +27,7 @@
 //! The flux-pattern candidate state (T2Dino + decoder prepares re-uploaded
 //! per job) measured ~1.5s of a ~45s warm job — the big DiT matmul weights
 //! already persist across jobs in the thread-local device weight cache
-//! (namespaces t2ss/t2lr/t2hr/t2tex/t2sdec/t2tdec on the server worker
+//! (scoped by weight owners held by TrellisGen on the server worker
 //! thread), and everything else in the job is real per-input compute. A
 //! keep-alive worker owning !Send prepared models is not worth 3%.
 
@@ -974,7 +974,7 @@ mod trellis_gen {
     use crate::error::AssetAiError;
     use makepad_ai_common::backend::gpu_pool_cap_override;
     use makepad_ai_vision::birefnet::{
-        unload_birefnet, BiRefNet, BiRefNetImage, BiRefNetWeights,
+        BiRefNet, BiRefNetImage, BiRefNetWeights,
     };
     use makepad_ai_h3::h3_pipeline::H3NoiseRng;
     use makepad_ai_trellis::trellis::{
@@ -995,9 +995,11 @@ mod trellis_gen {
     };
     use makepad_ai_trellis::trellis_slat::T2SparseDec;
     use makepad_ai_trellis::trellis_vae::T2SsDec;
+    use makepad_ai_common::backend::WeightOwner;
     use makepad_ai_common::DiffusionError;
     use makepad_remesh::{remesh_narrow_band_dc_ctl, SurfaceBvh};
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     /// Job-status writes are expensive. Forward a tick on phase change or
@@ -1048,8 +1050,33 @@ mod trellis_gen {
         matte: PathBuf,
     }
 
+    struct TrellisOwners {
+        ss: Arc<WeightOwner>,
+        lr: Arc<WeightOwner>,
+        hr: Arc<WeightOwner>,
+        tex: Arc<WeightOwner>,
+        shape_dec: Arc<WeightOwner>,
+        tex_dec: Arc<WeightOwner>,
+        naf: Arc<WeightOwner>,
+    }
+
+    impl TrellisOwners {
+        fn new(pixal: bool) -> Self {
+            Self {
+                ss: Arc::new(WeightOwner::new(if pixal { "pixal3d-ss" } else { "trellis-ss" })),
+                lr: Arc::new(WeightOwner::new(if pixal { "pixal3d-lr" } else { "trellis-lr" })),
+                hr: Arc::new(WeightOwner::new(if pixal { "pixal3d-hr" } else { "trellis-hr" })),
+                tex: Arc::new(WeightOwner::new(if pixal { "pixal3d-tex" } else { "trellis-tex" })),
+                shape_dec: Arc::new(WeightOwner::new("trellis-shape-dec")),
+                tex_dec: Arc::new(WeightOwner::new("trellis-tex-dec")),
+                naf: Arc::new(WeightOwner::new("pixal3d-naf")),
+            }
+        }
+    }
+
     pub struct TrellisGen {
         pixal: bool,
+        owners: TrellisOwners,
         paths: Option<Paths>,
         /// The large DiT/sparse-decoder matrices live in makepad-ggml's
         /// thread-local device cache after the first generation. Keep this
@@ -1076,6 +1103,7 @@ mod trellis_gen {
         pub fn new(pixal: bool) -> Self {
             Self {
                 pixal,
+                owners: TrellisOwners::new(pixal),
                 paths: None,
                 resident: false,
             }
@@ -1085,21 +1113,15 @@ mod trellis_gen {
             self.resident
         }
 
-        /// Evict every TRELLIS namespace populated by the generation path.
-        /// DINO and the dense SS decoder are owned GPU tensors and drop at the
-        /// end of a job; the namespaces below are the persistent part.
-        /// This must run on the service worker thread which performed the
-        /// generation because both caches are thread-local by design.
+        /// Drop the owners keeping TRELLIS/Pixal3D weights warm and mint fresh ones.
+        /// Prepared models retain their owners until they drop; DINO and the dense
+        /// SS decoder own GPU tensors that drop at the end of a job.
+        /// Clear the pool on the service worker thread that performed generation
+        /// to drain the dropped owners from its thread-local device cache.
         pub fn unload(&mut self) -> Result<(), AssetAiError> {
-            use makepad_ai_common::backend::{
-                gpu_pool_clear, gpu_weight_cache_evict_prefix,
-            };
+            use makepad_ai_common::backend::gpu_pool_clear;
 
-            unload_birefnet().map_err(diffusion_err)?;
-            for namespace in ["t2ss", "t2lr", "t2hr", "t2tex", "t2sdec", "t2tdec", "p3ss", "p3lr", "p3hr", "p3tex", "p3naf"] {
-                gpu_weight_cache_evict_prefix(&format!("{namespace}::"))
-                    .map_err(trellis_err)?;
-            }
+            self.owners = TrellisOwners::new(self.pixal);
             gpu_pool_clear();
             self.resident = false;
             Ok(())
@@ -1178,8 +1200,7 @@ mod trellis_gen {
                 })();
                 // Always release partially or fully populated BiRefNet caches,
                 // including on cancellation or an operator error.
-                let cleanup_result = unload_birefnet();
-                cleanup_result.map_err(diffusion_err)?;
+                makepad_ai_common::backend::gpu_pool_clear();
                 let matte = matte_result.map_err(diffusion_err)?;
                 for (pixel, alpha) in rgba
                     .chunks_exact_mut(4)
@@ -1198,7 +1219,7 @@ mod trellis_gen {
             }
 
             // Mirrors trellis-generate's run(): preprocess -> prepare all
-            // models (weight caches are process-global per namespace, so jobs
+            // models (this backend holds their weight owners, so jobs
             // after the first are warm) -> cond -> ss -> lr -> upsample ->
             // hr -> decode -> mesh -> glb.
             let img = T2Image::from_rgba8(&rgba, job.width, job.height).map_err(trellis_err)?;
@@ -1246,7 +1267,7 @@ mod trellis_gen {
             cancel.check()?;
             progress(&format!("load ss-flow 2/{loads}"), 0.04);
             let ss_weights = load_flow(&paths.ss_flow,"model.structure_model.").map_err(trellis_err)?;
-            let ss_dit = T2Dit::prepare(ss_weights, if self.pixal {"p3ss"} else {"t2ss"}, T2_SS_CHANNELS, T2_SS_CHANNELS)
+            let ss_dit = T2Dit::prepare(ss_weights, self.owners.ss.clone(), T2_SS_CHANNELS, T2_SS_CHANNELS)
                 .map_err(trellis_err)?;
             cancel.check()?;
             progress(&format!("load ss-dec 3/{loads}"), 0.05);
@@ -1255,17 +1276,17 @@ mod trellis_gen {
             cancel.check()?;
             progress(&format!("load lr-flow 4/{loads}"), 0.06);
             let lr_weights = load_flow(&paths.lr_flow,"model.img2shape_512.").map_err(trellis_err)?;
-            let lr_dit = T2Dit::prepare(lr_weights, if self.pixal {"p3lr"} else {"t2lr"}, T2_SLAT_CHANNELS, T2_SLAT_CHANNELS)
+            let lr_dit = T2Dit::prepare(lr_weights, self.owners.lr.clone(), T2_SLAT_CHANNELS, T2_SLAT_CHANNELS)
                 .map_err(trellis_err)?;
             cancel.check()?;
             progress(&format!("load shape-dec 5/{loads}"), 0.07);
             let shape_dec_weights = TrellisWeights::load(&paths.shape_dec).map_err(trellis_err)?;
             let shape_dec =
-                T2SparseDec::prepare(shape_dec_weights, "t2sdec", 7, true).map_err(trellis_err)?;
+                T2SparseDec::prepare(shape_dec_weights, self.owners.shape_dec.clone(), 7, true).map_err(trellis_err)?;
             cancel.check()?;
             progress(&format!("load hr-flow 6/{loads}"), 0.08);
             let hr_weights = load_flow(&paths.hr_flow,"model.img2shape.").map_err(trellis_err)?;
-            let hr_dit = T2Dit::prepare(hr_weights, if self.pixal {"p3hr"} else {"t2hr"}, T2_SLAT_CHANNELS, T2_SLAT_CHANNELS)
+            let hr_dit = T2Dit::prepare(hr_weights, self.owners.hr.clone(), T2_SLAT_CHANNELS, T2_SLAT_CHANNELS)
                 .map_err(trellis_err)?;
             cancel.check()?;
             // Tex flow + decoder only when the job wants texture: the extra
@@ -1275,7 +1296,7 @@ mod trellis_gen {
                 let tex_weights = load_flow(&paths.tex_flow,"model.shape2txt.").map_err(trellis_err)?;
                 let tex_dit = T2Dit::prepare(
                     tex_weights,
-                    if self.pixal {"p3tex"} else {"t2tex"},
+                    self.owners.tex.clone(),
                     T2_TEX_IN_CHANNELS,
                     T2_SLAT_CHANNELS,
                 )
@@ -1284,7 +1305,7 @@ mod trellis_gen {
                 progress(&format!("load tex-dec 8/{loads}"), 0.09);
                 let tex_dec_weights =
                     TrellisWeights::load(&paths.tex_dec).map_err(trellis_err)?;
-                let tex_dec = T2SparseDec::prepare(tex_dec_weights, "t2tdec", 6, false)
+                let tex_dec = T2SparseDec::prepare(tex_dec_weights, self.owners.tex_dec.clone(), 6, false)
                     .map_err(trellis_err)?;
                 cancel.check()?;
                 Some((tex_dit, tex_dec))
@@ -1317,7 +1338,7 @@ mod trellis_gen {
                 Some((
                     makepad_ai_trellis::pixal_naf::PixalConditioning::new(&cond_512_host,&input_512,512).map_err(trellis_err)?,
                     makepad_ai_trellis::pixal_naf::PixalConditioning::new(&cond_1024_host,&input_1024,1024).map_err(trellis_err)?,
-                    makepad_ai_trellis::pixal_naf::PixalNaf::prepare(&dino_weights).map_err(trellis_err)?,
+                    makepad_ai_trellis::pixal_naf::PixalNaf::prepare(&dino_weights, self.owners.naf.clone()).map_err(trellis_err)?,
                 ))
             } else {None};
             drop(dino);

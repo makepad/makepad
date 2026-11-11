@@ -30,7 +30,9 @@ use crate::unet_forward::{
     VoxelLevel, VoxelPyramid,
 };
 use makepad_ai_common::backend::cuda::{gpu_concat_cols, gpu_download, gpu_upload};
+use makepad_ai_common::backend::WeightOwner;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Default overlay used on the GPU-A paint box. Fleet jobs must not rely on
@@ -47,6 +49,30 @@ pub struct HunyuanBins {
     pub vae: PathBuf,
     pub unet: PathBuf,
     pub dino: PathBuf,
+}
+
+/// Device-weight namespaces retained by the caller across paint jobs.
+#[derive(Clone)]
+pub struct HunyuanOwners {
+    pub vae: Arc<WeightOwner>,
+    pub unet: Arc<WeightOwner>,
+    pub dino: Arc<WeightOwner>,
+}
+
+impl HunyuanOwners {
+    pub fn new() -> Self {
+        Self {
+            vae: Arc::new(WeightOwner::new("paint-vae")),
+            unet: Arc::new(WeightOwner::new("paint-unet")),
+            dino: Arc::new(WeightOwner::new("paint-dino")),
+        }
+    }
+}
+
+impl Default for HunyuanOwners {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub fn weights_root() -> PathBuf {
@@ -119,6 +145,7 @@ pub struct EncodedViews {
 
 pub struct NativeHunyuanExec {
     bins: HunyuanBins,
+    owners: HunyuanOwners,
     vae: Option<SdVae>,
     unet: Option<UnetFirst>,
     dino: Option<DinoVit>,
@@ -126,10 +153,11 @@ pub struct NativeHunyuanExec {
 }
 
 impl NativeHunyuanExec {
-    pub fn at_bins(bins: HunyuanBins) -> Result<Self, PbrError> {
+    pub fn at_bins(bins: HunyuanBins, owners: HunyuanOwners) -> Result<Self, PbrError> {
         required_bins_present_at(&bins).map_err(PbrError::Unavailable)?;
         Ok(Self {
             bins,
+            owners,
             vae: None,
             unet: None,
             dino: None,
@@ -138,7 +166,7 @@ impl NativeHunyuanExec {
     }
 
     pub fn at(root: PathBuf) -> Result<Self, PbrError> {
-        Self::at_bins(bins_at_root(&root))
+        Self::at_bins(bins_at_root(&root), HunyuanOwners::new())
     }
 
     pub fn discover() -> Result<Self, PbrError> {
@@ -324,15 +352,17 @@ impl PaintModelExec for NativeHunyuanExec {
             }
         }
         if self.vae.is_none() {
-            let vae = SdVae::load(&self.bins.vae).map_err(PbrError::Internal)?;
+            let vae = SdVae::load(&self.bins.vae, self.owners.vae.clone()).map_err(PbrError::Internal)?;
             self.vae = Some(vae);
         }
         if self.unet.is_none() {
-            let unet = UnetFirst::load(&self.bins.unet).map_err(PbrError::Internal)?;
+            let unet = UnetFirst::load(&self.bins.unet, self.owners.unet.clone())
+                .map_err(PbrError::Internal)?;
             self.unet = Some(unet);
         }
         if self.dino.is_none() {
-            let dino = DinoVit::load(&self.bins.dino).map_err(PbrError::Internal)?;
+            let dino = DinoVit::load(&self.bins.dino, self.owners.dino.clone())
+                .map_err(PbrError::Internal)?;
             self.dino = Some(dino);
         }
         if self.dino_proj.is_none() {
@@ -572,11 +602,14 @@ mod tests {
     #[test]
     fn at_bins_reports_the_given_vae_path() {
         let missing = PathBuf::from("/cache/paint21/vae/diffusion_pytorch_model.bin");
-        let Err(err) = NativeHunyuanExec::at_bins(HunyuanBins {
-            vae: missing.clone(),
-            unet: PathBuf::from("/cache/paint21/unet/diffusion_pytorch_model.bin"),
-            dino: PathBuf::from("/cache/paint21/dinov2-giant/model.safetensors"),
-        }) else {
+        let Err(err) = NativeHunyuanExec::at_bins(
+            HunyuanBins {
+                vae: missing.clone(),
+                unet: PathBuf::from("/cache/paint21/unet/diffusion_pytorch_model.bin"),
+                dino: PathBuf::from("/cache/paint21/dinov2-giant/model.safetensors"),
+            },
+            HunyuanOwners::new(),
+        ) else {
             panic!("came up without weights")
         };
         match err {

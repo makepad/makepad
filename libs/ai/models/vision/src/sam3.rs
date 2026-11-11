@@ -21,7 +21,9 @@
 //! Fail closed: wrong tensor names/shapes, missing prompt, missing GPU, or a
 //! non-Comfy multiplex header all refuse before a generate.
 
+use crate::backend::WeightOwner;
 use crate::{DiffusionError, ProgressHook, Result};
+use std::sync::Arc;
 use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader};
 use std::path::{Path, PathBuf};
 
@@ -57,7 +59,6 @@ pub const SAM3_SCORE_THRESH: f32 = 0.5;
 /// Interactive-head refinement passes per accepted detection. Two is the
 /// value the reference dumps were produced at.
 pub const SAM3_REFINE_ITERS: usize = 2;
-pub const SAM3_CACHE_NAMESPACE: &str = "sam3-1-multiplex";
 
 /// PE L++ windowed layers keep 24×24 windows; these four layers are global.
 pub const SAM3_GLOBAL_LAYERS: [usize; 4] = [7, 15, 23, 31];
@@ -620,7 +621,7 @@ impl Sam3 {
     ) -> Result<Self> {
         check_cancel(cancel)?;
         Ok(Self {
-            model: crate::sam3_model::Sam3Model::prepare(weights, cancel, progress)?,
+            model: crate::sam3_model::Sam3Model::prepare(&Arc::new(WeightOwner::new("sam3")), weights, cancel, progress)?,
         })
     }
 
@@ -662,17 +663,6 @@ impl Sam3 {
         self.model
             .forward(preprocessed, prompt, cancel, progress)
     }
-}
-
-/// Evict every device-cached SAM3 tensor and release idle activation-pool
-/// buffers. Invoke this on the same worker thread that ran SAM3.
-pub fn unload_sam3() -> Result<usize> {
-    let evicted = crate::backend::gpu_weight_cache_evict_prefix(&format!(
-        "{SAM3_CACHE_NAMESPACE}::"
-    ))
-    .map_err(DiffusionError::model)?;
-    crate::backend::gpu_pool_clear();
-    Ok(evicted)
 }
 
 #[cfg(test)]

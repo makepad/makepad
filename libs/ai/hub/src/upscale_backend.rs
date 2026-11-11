@@ -25,7 +25,7 @@ use crate::subproc_img::png_header;
 use makepad_ai_common::DiffusionError;
 #[cfg(feature = "upscale-native")]
 use makepad_ai_vision::realesrgan::{
-    unload_realesrgan, RealEsrgan, RealEsrganImage, RealEsrganWeights,
+    RealEsrgan, RealEsrganImage, RealEsrganWeights,
 };
 #[cfg(feature = "upscale-native")]
 use std::path::PathBuf;
@@ -168,7 +168,7 @@ impl ContentBackend for UpscaleBackend {
         {
             self.model = None;
             self.model_path = None;
-            unload_realesrgan().map_err(diffusion_err)?;
+            makepad_ai_common::backend::gpu_pool_clear();
         }
         Ok(())
     }

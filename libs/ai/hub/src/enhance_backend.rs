@@ -250,8 +250,7 @@ impl ContentBackend for VideoEnhanceBackend {
         {
             self.upscaler = None;
             self.rife = None;
-            let _ = makepad_ai_vision::realesrgan::unload_realesrgan();
-            let _ = makepad_ai_rife::unload_rife();
+            makepad_ai_common::backend::gpu_pool_clear();
         }
         Ok(())
     }

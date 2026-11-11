@@ -49,18 +49,3 @@ pub use splat_ply::{write_ply, PlySplat};
 pub fn splat_device_available() -> bool {
     backend::gpu_device_available()
 }
-
-/// Evict the selected model's device namespaces and release the activation pool.
-/// Must run on the worker thread that performed the generation — both caches
-/// are thread-local by design.
-pub fn unload_splat(model: SplatModel) -> Result<usize> {
-    // The `_if_loaded` variant behind release_gpu_runtime_namespaces: a cold
-    // or CPU-only thread must not initialize CUDA merely to discover there is
-    // nothing to release. It also trims the activation pool.
-    let prefixes: Vec<String> = model.namespaces()
-        .iter()
-        .map(|namespace| format!("{namespace}::"))
-        .collect();
-    let refs: Vec<&str> = prefixes.iter().map(String::as_str).collect();
-    backend::release_gpu_runtime_namespaces(&refs)
-}

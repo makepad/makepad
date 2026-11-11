@@ -9,7 +9,7 @@
 //!                    [--noise-dir <t2dump dir>] [--seed 42]
 //!                    [--out out.glb] [--stats stats.json]
 
-use makepad_diffusion::backend::{gpu_perf_stats, gpu_pool_cap_override, gpu_pool_clear};
+use makepad_diffusion::backend::{gpu_perf_stats, gpu_pool_cap_override, gpu_pool_clear, WeightOwner};
 use makepad_diffusion::h3_pipeline::H3NoiseRng;
 use makepad_diffusion::trellis::{
     t2_quantize_unique_coords, t2_rope_tables, TrellisWeights, T2_SHAPE_SAMPLER,
@@ -34,6 +34,7 @@ use makepad_zune_png::PngDecoder;
 use std::collections::HashMap;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 fn load_png_rgba(path: &Path) -> Result<T2Image, String> {
@@ -213,35 +214,35 @@ fn run(opts: &HashMap<String, String>) -> Result<(), String> {
     let dino = T2Dino::prepare(&dino_weights).map_err(|err| err.to_string())?;
     let ss_path = models.join("ckpts").join("ss_flow_img_dit_1_3B_64_bf16.safetensors");
     let ss_weights = TrellisWeights::load(&ss_path).map_err(|err| err.to_string())?;
-    let ss_dit = T2Dit::prepare(ss_weights, "t2ss", T2_SS_CHANNELS, T2_SS_CHANNELS)
+    let ss_dit = T2Dit::prepare(ss_weights, Arc::new(WeightOwner::new("t2ss")), T2_SS_CHANNELS, T2_SS_CHANNELS)
         .map_err(|err| err.to_string())?;
     let dec_weights = TrellisWeights::load(&ssdec_path).map_err(|err| err.to_string())?;
     let ss_dec = T2SsDec::prepare(&dec_weights).map_err(|err| err.to_string())?;
     let lr_path = models.join("ckpts").join("slat_flow_img2shape_dit_1_3B_512_bf16.safetensors");
     let lr_weights = TrellisWeights::load(&lr_path).map_err(|err| err.to_string())?;
-    let lr_dit = T2Dit::prepare(lr_weights, "t2lr", T2_SLAT_CHANNELS, T2_SLAT_CHANNELS)
+    let lr_dit = T2Dit::prepare(lr_weights, Arc::new(WeightOwner::new("t2lr")), T2_SLAT_CHANNELS, T2_SLAT_CHANNELS)
         .map_err(|err| err.to_string())?;
     let shape_dec_path = models.join("ckpts").join("shape_dec_next_dc_f16c32_fp16.safetensors");
     let shape_dec_weights = TrellisWeights::load(&shape_dec_path).map_err(|err| err.to_string())?;
-    let shape_dec = T2SparseDec::prepare(shape_dec_weights, "t2sdec", 7, true)
+    let shape_dec = T2SparseDec::prepare(shape_dec_weights, Arc::new(WeightOwner::new("t2sdec")), 7, true)
         .map_err(|err| err.to_string())?;
     let hr_path = models.join("ckpts").join("slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors");
     let hr_weights = TrellisWeights::load(&hr_path).map_err(|err| err.to_string())?;
-    let hr_dit = T2Dit::prepare(hr_weights, "t2hr", T2_SLAT_CHANNELS, T2_SLAT_CHANNELS)
+    let hr_dit = T2Dit::prepare(hr_weights, Arc::new(WeightOwner::new("t2hr")), T2_SLAT_CHANNELS, T2_SLAT_CHANNELS)
         .map_err(|err| err.to_string())?;
     let tex = if texture {
         let tex_path = models
             .join("ckpts")
             .join("slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors");
         let tex_weights = TrellisWeights::load(&tex_path).map_err(|err| err.to_string())?;
-        let tex_dit = T2Dit::prepare(tex_weights, "t2tex", T2_TEX_IN_CHANNELS, T2_SLAT_CHANNELS)
+        let tex_dit = T2Dit::prepare(tex_weights, Arc::new(WeightOwner::new("t2tex")), T2_TEX_IN_CHANNELS, T2_SLAT_CHANNELS)
             .map_err(|err| err.to_string())?;
         let tex_dec_path = models
             .join("ckpts")
             .join("tex_dec_next_dc_f16c32_fp16.safetensors");
         let tex_dec_weights =
             TrellisWeights::load(&tex_dec_path).map_err(|err| err.to_string())?;
-        let tex_dec = T2SparseDec::prepare(tex_dec_weights, "t2tdec", 6, false)
+        let tex_dec = T2SparseDec::prepare(tex_dec_weights, Arc::new(WeightOwner::new("t2tdec")), 6, false)
             .map_err(|err| err.to_string())?;
         Some((tex_dit, tex_dec))
     } else {

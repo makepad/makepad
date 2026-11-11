@@ -6,6 +6,7 @@
 //! CPU f32. Mirrors models/dit.py + models/transformer.py exactly; validated
 //! stage-by-stage against local/sa3_ref/dumps by `sa3-validate`.
 
+use crate::backend::WeightOwner;
 use crate::sa3::{
     apply_rope, attention, expo_fourier, linear, rms_norm_rows, rope_tables, sigmoid, silu,
     Sa3Tensors, SA3_COND_DIM, SA3_COND_TOKENS, SA3_DIT_DEPTH, SA3_DIT_DIM, SA3_DIT_HEADS,
@@ -376,6 +377,7 @@ struct DitDeviceBlock {
 /// Prepared f16 device weights for the DiT (the small f32 vectors stay on
 /// the host inside `Sa3Dit` and are read through `&self` at forward time).
 pub struct Sa3DitDevice {
+    owner: WeightOwner,
     preprocess: F16Weight,
     postprocess: F16Weight,
     project_in: F16Weight,
@@ -426,6 +428,7 @@ impl Sa3Dit {
             })
             .collect();
         Sa3DitDevice {
+            owner: WeightOwner::new("sa3-dit"),
             preprocess: F16Weight::new("sa3dit.pre", &self.preprocess_conv, c, c),
             postprocess: F16Weight::new("sa3dit.post", &self.postprocess_conv, c, c),
             project_in: F16Weight::new("sa3dit.pin", &self.project_in, d, c),
@@ -451,14 +454,14 @@ impl Sa3Dit {
         let cond = gpu_upload(cond_embed, SA3_COND_TOKENS, d).map_err(|e| dev_err("dit cond upload", e))?;
         let mut cross_kv = Vec::with_capacity(self.blocks.len());
         for (i, block) in self.blocks.iter().enumerate() {
-            let kv = gpu_linear_nt_cached(&cond, "sa3dit", &[device.blocks[i].cross_kv.part()], &[])
+            let kv = gpu_linear_nt_cached(&cond, device.owner.namespace(), &[device.blocks[i].cross_kv.part()], &[])
                 .map_err(|e| dev_err("dit cross kv", e))?;
             let k = gpu_slice_cols(&kv, 0, d).map_err(|e| dev_err("dit cross k slice", e))?;
             let v = gpu_slice_cols(&kv, d, d).map_err(|e| dev_err("dit cross v slice", e))?;
             let k = gpu_rms_norm_mul(
                 &k,
                 SA3_HEAD_DIM,
-                "sa3dit",
+                device.owner.namespace(),
                 &format!("b{i}.ckn"),
                 &block.cross_k_norm,
                 SA3_QK_NORM_EPS,
@@ -564,10 +567,10 @@ impl Sa3Dit {
 
         // Input assembly: preprocess conv (1x1) residual, project_in, memory.
         let x_dev = gpu_upload(x, latent_len, c).map_err(|e| dev_err("dit x upload", e))?;
-        let pre = gpu_linear_nt_cached(&x_dev, "sa3dit", &[device.preprocess.part()], &[])
+        let pre = gpu_linear_nt_cached(&x_dev, device.owner.namespace(), &[device.preprocess.part()], &[])
             .map_err(|e| dev_err("dit preprocess", e))?;
         let x_pre = gpu_add(&x_dev, &pre).map_err(|e| dev_err("dit preprocess add", e))?;
-        let projected = gpu_linear_nt_cached(&x_pre, "sa3dit", &[device.project_in.part()], &[])
+        let projected = gpu_linear_nt_cached(&x_pre, device.owner.namespace(), &[device.project_in.part()], &[])
             .map_err(|e| dev_err("dit project in", e))?;
         let mut h = makepad_ai_common::backend::cuda::gpu_concat_rows(&run.memory, &projected)
             .map_err(|e| dev_err("dit memory concat", e))?;
@@ -592,18 +595,18 @@ impl Sa3Dit {
                 false,
             )
             .map_err(|e| dev_err("dit pre mod norm", e))?;
-            let qkv = gpu_linear_nt_cached(&a, "sa3dit", &[dev.qkv.part()], &[])
+            let qkv = gpu_linear_nt_cached(&a, device.owner.namespace(), &[dev.qkv.part()], &[])
                 .map_err(|e| dev_err("dit qkv", e))?;
             let q = gpu_slice_cols(&qkv, 0, d).map_err(|e| dev_err("dit q slice", e))?;
             let k = gpu_slice_cols(&qkv, d, d).map_err(|e| dev_err("dit k slice", e))?;
             let v = gpu_slice_cols(&qkv, 2 * d, d).map_err(|e| dev_err("dit v slice", e))?;
             let q = gpu_rms_norm_mul(
-                &q, SA3_HEAD_DIM, "sa3dit", &format!("b{b}.qn"), &block.self_q_norm,
+                &q, SA3_HEAD_DIM, device.owner.namespace(), &format!("b{b}.qn"), &block.self_q_norm,
                 SA3_QK_NORM_EPS,
             )
             .map_err(|e| dev_err("dit q norm", e))?;
             let k = gpu_rms_norm_mul(
-                &k, SA3_HEAD_DIM, "sa3dit", &format!("b{b}.kn"), &block.self_k_norm,
+                &k, SA3_HEAD_DIM, device.owner.namespace(), &format!("b{b}.kn"), &block.self_k_norm,
                 SA3_QK_NORM_EPS,
             )
             .map_err(|e| dev_err("dit k norm", e))?;
@@ -624,27 +627,27 @@ impl Sa3Dit {
             };
             let attn = gpu_attention_packed(&q, &k, &v, heads, scale)
                 .map_err(|e| dev_err("dit self attention", e))?;
-            let out = gpu_linear_nt_cached(&attn, "sa3dit", &[dev.self_out.part()], &[])
+            let out = gpu_linear_nt_cached(&attn, device.owner.namespace(), &[dev.self_out.part()], &[])
                 .map_err(|e| dev_err("dit self out", e))?;
             h = gpu_gated_residual_mod(&h, &out, &mods, b * 6 * d + 2 * d)
                 .map_err(|e| dev_err("dit self gate", e))?;
 
             // --- cross attention (plain residual, no rope) ---
             let cnorm = gpu_rms_norm_mul(
-                &h, d, "sa3dit", &format!("b{b}.cn"), &block.cross_norm, SA3_NORM_EPS,
+                &h, d, device.owner.namespace(), &format!("b{b}.cn"), &block.cross_norm, SA3_NORM_EPS,
             )
             .map_err(|e| dev_err("dit cross norm", e))?;
-            let cq = gpu_linear_nt_cached(&cnorm, "sa3dit", &[dev.cross_q.part()], &[])
+            let cq = gpu_linear_nt_cached(&cnorm, device.owner.namespace(), &[dev.cross_q.part()], &[])
                 .map_err(|e| dev_err("dit cross q", e))?;
             let cq = gpu_rms_norm_mul(
-                &cq, SA3_HEAD_DIM, "sa3dit", &format!("b{b}.cqn"), &block.cross_q_norm,
+                &cq, SA3_HEAD_DIM, device.owner.namespace(), &format!("b{b}.cqn"), &block.cross_q_norm,
                 SA3_QK_NORM_EPS,
             )
             .map_err(|e| dev_err("dit cross q norm", e))?;
             let (ck, cv) = &run.cross_kv[b];
             let cattn = gpu_attention_packed_cross(&cq, ck, cv, heads, scale)
                 .map_err(|e| dev_err("dit cross attention", e))?;
-            let cout = gpu_linear_nt_cached(&cattn, "sa3dit", &[dev.cross_out.part()], &[])
+            let cout = gpu_linear_nt_cached(&cattn, device.owner.namespace(), &[dev.cross_out.part()], &[])
                 .map_err(|e| dev_err("dit cross out", e))?;
             h = gpu_add(&h, &cout).map_err(|e| dev_err("dit cross residual", e))?;
 
@@ -664,10 +667,10 @@ impl Sa3Dit {
                 false,
             )
             .map_err(|e| dev_err("dit ff mod norm", e))?;
-            let proj = gpu_linear_nt_cached(&f, "sa3dit", &[dev.ff_proj.part()], &block.ff_proj_b)
+            let proj = gpu_linear_nt_cached(&f, device.owner.namespace(), &[dev.ff_proj.part()], &block.ff_proj_b)
                 .map_err(|e| dev_err("dit ff proj", e))?;
             let inner = gpu_swiglu_value_gate(&proj).map_err(|e| dev_err("dit swiglu", e))?;
-            let out = gpu_linear_nt_cached(&inner, "sa3dit", &[dev.ff_out.part()], &block.ff_out_b)
+            let out = gpu_linear_nt_cached(&inner, device.owner.namespace(), &[dev.ff_out.part()], &block.ff_out_b)
                 .map_err(|e| dev_err("dit ff out", e))?;
             h = gpu_gated_residual_mod(&h, &out, &mods, b * 6 * d + 5 * d)
                 .map_err(|e| dev_err("dit ff gate", e))?;
@@ -675,9 +678,9 @@ impl Sa3Dit {
 
         // Strip memory tokens, project out, postprocess conv residual.
         let latents = gpu_slice_rows(&h, mem, latent_len).map_err(|e| dev_err("dit strip memory", e))?;
-        let out = gpu_linear_nt_cached(&latents, "sa3dit", &[device.project_out.part()], &[])
+        let out = gpu_linear_nt_cached(&latents, device.owner.namespace(), &[device.project_out.part()], &[])
             .map_err(|e| dev_err("dit project out", e))?;
-        let post = gpu_linear_nt_cached(&out, "sa3dit", &[device.postprocess.part()], &[])
+        let post = gpu_linear_nt_cached(&out, device.owner.namespace(), &[device.postprocess.part()], &[])
             .map_err(|e| dev_err("dit postprocess", e))?;
         let final_out = gpu_add(&out, &post).map_err(|e| dev_err("dit postprocess add", e))?;
         gpu_download(&final_out).map_err(|e| dev_err("dit download", e))

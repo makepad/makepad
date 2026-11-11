@@ -153,14 +153,6 @@ impl SplatModel {
             Self::Idol => Some(((1.0f64 - 1e-6) / 1e-6).ln() as f32),
         }
     }
-
-    /// Separate device cache namespaces prevent reuse of another release's gammas.
-    pub fn namespaces(self) -> [&'static str; 3] {
-        match self {
-            Self::TripoSplat => ["tsplat-dino", "tsplat-flow", "tsplat-dec"],
-            Self::Idol => ["idol-dino", "idol-flow", "idol-dec"],
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -325,6 +317,7 @@ pub fn check_cancel(cancel: Option<SplatCancel<'_>>) -> Result<()> {
 // ships one flat file per component and never shards).
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct SplatWeights {
     pub path: PathBuf,
     header: MlxSafetensorsHeader,

@@ -708,6 +708,7 @@ mod imp {
         dequant_to_f32, f32_weights_forced, fingerprint, fingerprint_f32, fnv_mix, EncoderLayer,
         WeightSrc, FNV_OFFSET,
     };
+    use makepad_ai_common::backend::WeightOwner;
     use makepad_ai_cuda::launch::{
         gpu_attention_packed_cross_f32, gpu_device_available, gpu_download, gpu_linear_f32_resident,
         gpu_upload, try_matmul_nt_ggml_bytes_cached, try_matmul_nt_q8_0_cached,
@@ -769,6 +770,10 @@ mod imp {
         static WEIGHTS: RefCell<HashMap<ResidentKey, GpuTensor>> =
             RefCell::new(HashMap::new());
         static CROSS_KV: RefCell<HashMap<usize, CrossEntry>> = RefCell::new(HashMap::new());
+        /// Owner of this thread's keyed Q8/F16 matmul weights (`matmul_nt`).
+        static MATMUL_OWNER: RefCell<WeightOwner> = RefCell::new(WeightOwner::new("whisper"));
+        /// Owners of the fused encoder stacks, one per encoder identity.
+        static ENCODER_OWNERS: RefCell<HashMap<u64, WeightOwner>> = RefCell::new(HashMap::new());
     }
 
     struct CrossEntry {
@@ -846,12 +851,19 @@ mod imp {
             if (*ggml_type == 1 || *ggml_type == 8) && !f32_weights_forced() {
                 let key = format!("{:016x}-{n}x{k}", fingerprint(bytes));
                 let ty = *ggml_type;
-                let mut out = if ty == 8 {
-                    // Q8_0 stays 8-bit on the device; the kernel dequantizes in registers.
-                    try_matmul_nt_q8_0_cached(a, m, k, n, "whisper", &key, || Ok(bytes.to_vec()))?
-                } else {
-                    try_matmul_nt_ggml_bytes_cached(a, 1, m, k, n, "whisper", &key, || Ok(bytes.to_vec()))?
-                };
+                let mut out = MATMUL_OWNER.with(|owner| {
+                    let owner = owner.borrow();
+                    if ty == 8 {
+                        // Q8_0 stays 8-bit on the device; the kernel dequantizes in registers.
+                        try_matmul_nt_q8_0_cached(a, m, k, n, owner.namespace(), &key, || {
+                            Ok(bytes.to_vec())
+                        })
+                    } else {
+                        try_matmul_nt_ggml_bytes_cached(a, 1, m, k, n, owner.namespace(), &key, || {
+                            Ok(bytes.to_vec())
+                        })
+                    }
+                })?;
                 if let Some(b) = bias {
                     for row in out.chunks_mut(n) {
                         for (o, bv) in row.iter_mut().zip(b) {
@@ -883,8 +895,8 @@ mod imp {
         final_ln_b: &[f32],
     ) -> Result<Vec<f32>, String> {
         // Include every matrix's identity: layer indices alone alias when a
-        // different model is loaded on the same inference thread. The dense
-        // cache is released with the other "whisper" entries by release_all.
+        // different model is loaded on the same inference thread. The identity
+        // picks the encoder's owner; release_all drops the owners.
         let mut identity = FNV_OFFSET;
         fnv_mix(&mut identity, n_state as u64);
         fnv_mix(&mut identity, n_head as u64);
@@ -923,10 +935,22 @@ mod imp {
                 fc2_b: &layer.mlp_1_b.data,
             });
         }
-        let namespace = format!("whisper::encoder-{identity:016x}");
-        whisper_encoder_stack_q8(
-            x, seq_len, n_state, n_head, &resident_layers, final_ln_w, final_ln_b, &namespace,
-        )
+        ENCODER_OWNERS.with(|owners| {
+            let mut owners = owners.borrow_mut();
+            let owner = owners
+                .entry(identity)
+                .or_insert_with(|| WeightOwner::new("whisper-encoder"));
+            whisper_encoder_stack_q8(
+                x,
+                seq_len,
+                n_state,
+                n_head,
+                &resident_layers,
+                final_ln_w,
+                final_ln_b,
+                owner.namespace(),
+            )
+        })
     }
 
     /// Non-causal, maskless multi-head attention on token-major packed q/k/v
@@ -998,7 +1022,8 @@ mod imp {
     pub(super) fn release_all() {
         CROSS_KV.with(|cache| cache.borrow_mut().clear());
         WEIGHTS.with(|cache| cache.borrow_mut().clear());
-        let _ = makepad_ai_cuda::launch::gpu_weight_cache_evict_prefix_if_loaded("whisper");
+        ENCODER_OWNERS.with(|owners| owners.borrow_mut().clear());
+        MATMUL_OWNER.with(|owner| *owner.borrow_mut() = WeightOwner::new("whisper"));
         let _ = makepad_ai_cuda::launch::gpu_release_cached();
     }
 

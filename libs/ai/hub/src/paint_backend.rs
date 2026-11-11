@@ -40,6 +40,8 @@ use makepad_gltf::{
 use makepad_ai_paint::contract::PbrMaterialSet;
 use makepad_ai_paint::digest;
 use makepad_ai_paint::mesh::TriMesh;
+#[cfg(all(feature = "paint-cuda", any(target_os = "linux", target_os = "windows")))]
+use makepad_ai_paint::native_exec::HunyuanOwners;
 use makepad_ai_paint::pipeline::{
     HunyuanPaintPipeline, MemoryProfile, MockPaintExec, PaintConfig, PaintInputs,
 };
@@ -106,6 +108,8 @@ pub struct PaintBackend {
     vae_path: Option<PathBuf>,
     unet_path: Option<PathBuf>,
     dino_path: Option<PathBuf>,
+    #[cfg(all(feature = "paint-cuda", any(target_os = "linux", target_os = "windows")))]
+    owners: HunyuanOwners,
 }
 
 impl PaintBackend {
@@ -117,6 +121,8 @@ impl PaintBackend {
             vae_path: None,
             unet_path: None,
             dino_path: None,
+            #[cfg(all(feature = "paint-cuda", any(target_os = "linux", target_os = "windows")))]
+            owners: HunyuanOwners::new(),
         }
     }
 }
@@ -286,7 +292,7 @@ impl PaintBackend {
                     .to_string(),
             ));
         };
-        let exec = NativeHunyuanExec::at_bins(HunyuanBins { vae, unet, dino })
+        let exec = NativeHunyuanExec::at_bins(HunyuanBins { vae, unet, dino }, self.owners.clone())
             .map_err(map_pbr_error)?;
         let config = PaintConfig {
             num_views_max: 6,
@@ -438,17 +444,20 @@ impl ContentBackend for PaintBackend {
         self.loaded && !self.deterministic
     }
 
-    /// Drops the paths and the resident flag, and releases the device weight
-    /// cache namespaces the native pipeline filled. The heavy allocations live
-    /// in the worker thread's cache rather than in this struct, so clearing
-    /// fields alone frees nothing — `server::evict_resident` follows this with
-    /// a thread-cache release once nothing is resident, which is what actually
-    /// returns the bytes.
+    /// Drops the paths and resident flag, retires the native paint weight
+    /// owners, and trims the runtime to free their cached device weights.
+    /// Each job's executor and models have already dropped their owner clones.
     fn unload(&mut self) -> Result<(), AssetAiError> {
         self.loaded = false;
         self.unet_path = None;
         self.vae_path = None;
         self.dino_path = None;
+        #[cfg(all(feature = "paint-cuda", any(target_os = "linux", target_os = "windows")))]
+        {
+            self.owners = HunyuanOwners::new();
+            makepad_ai_common::backend::gpu_runtime_trim()
+                .map_err(|e| AssetAiError::Backend(format!("paint unload: {e}")))?;
+        }
         Ok(())
     }
 

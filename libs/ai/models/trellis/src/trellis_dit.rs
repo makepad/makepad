@@ -17,7 +17,7 @@ use crate::backend::{
     gpu_download, gpu_gated_residual_mod,
     gpu_gelu, gpu_layer_norm_mod, gpu_layer_norm_mul_add, gpu_linear_f32_resident,
     gpu_linear_nt_cached, gpu_rms_norm_mul_perhead, gpu_rope_interleaved, gpu_slice_cols,
-    gpu_to_f16, gpu_upload, gpu_weight_cache_ensure, GpuLinearPart, GpuTensor,
+    gpu_to_f16, gpu_upload, gpu_weight_cache_ensure, GpuLinearPart, GpuTensor, WeightOwner,
 };
 use makepad_ai_h3::h3::h3_timestep_embedding;
 use crate::trellis::{
@@ -28,14 +28,16 @@ use crate::{DiffusionError, Result};
 use makepad_ai_loader::MlxDType;
 use makepad_ai_common::quant::{GGML_TYPE_BF16, GGML_TYPE_F16};
 
+use std::sync::Arc;
+
 const MOD_COLS: usize = 6 * T2_MODEL_CHANNELS; // 9216 per block
 const T_FREQ_DIM: usize = 256;
 
-/// Host + device weights for one flow model, prepared once. `namespace`
-/// scopes the device weight cache so all three DiTs stay resident together.
+/// Host + device weights for one flow model, prepared once. The owner scopes
+/// the device weight cache; the caller decides how long it stays warm.
 pub struct T2Dit {
     pub weights: TrellisWeights,
-    pub namespace: &'static str,
+    owner: Arc<WeightOwner>,
     pub in_channels: usize,
     pub out_channels: usize,
     input_w: GpuTensor,
@@ -130,7 +132,7 @@ fn upload_f32(weights: &TrellisWeights, name: &str, rows: usize, cols: usize) ->
 impl T2Dit {
     pub fn prepare(
         weights: TrellisWeights,
-        namespace: &'static str,
+        owner: Arc<WeightOwner>,
         in_channels: usize,
         out_channels: usize,
     ) -> Result<Self> {
@@ -212,7 +214,7 @@ impl T2Dit {
             final_norm_ones: vec![1.0; c],
             final_norm_zeros: vec![0.0; c],
             weights,
-            namespace,
+            owner,
             in_channels,
             out_channels,
         })
@@ -232,7 +234,7 @@ impl T2Dit {
             }
         };
         let want_a16 = crate::backend::gpu_gemm_f16acc_enabled();
-        gpu_weight_cache_ensure(self.namespace, name, ggml_type, n, k, want_a16, || {
+        gpu_weight_cache_ensure(self.owner.namespace(), name, ggml_type, n, k, want_a16, || {
             self.weights.tensor_bytes(name).map_err(|err| err.to_string())
         })
         .map_err(DiffusionError::model)?;
@@ -247,7 +249,7 @@ impl T2Dit {
     fn linear_cached(&self, x: &GpuTensor, name: &str, n: usize, bias: &[f32]) -> Result<GpuTensor> {
         let part = self.ensure_linear(name, n, x.cols())?;
         let parts = [part];
-        gpu_linear_nt_cached(x, self.namespace, &parts, bias).map_err(DiffusionError::model)
+        gpu_linear_nt_cached(x, self.owner.namespace(), &parts, bias).map_err(DiffusionError::model)
     }
 
     /// Host timestep path: sinusoid(1000t) -> mlp -> t_emb, then the shared
@@ -350,7 +352,7 @@ impl T2Dit {
                 &q,
                 T2_HEAD_COUNT,
                 T2_HEAD_DIM,
-                self.namespace,
+                self.owner.namespace(),
                 &format!("{p}.self_attn.q_rms_norm"),
                 &self.self_qn[layer],
                 0.0,
@@ -360,7 +362,7 @@ impl T2Dit {
                 &k,
                 T2_HEAD_COUNT,
                 T2_HEAD_DIM,
-                self.namespace,
+                self.owner.namespace(),
                 &format!("{p}.self_attn.k_rms_norm"),
                 &self.self_kn[layer],
                 0.0,
@@ -405,7 +407,7 @@ impl T2Dit {
                 &q,
                 T2_HEAD_COUNT,
                 T2_HEAD_DIM,
-                self.namespace,
+                self.owner.namespace(),
                 &format!("{cross_prefix}.q_rms_norm"),
                 &self.cross_qn[layer],
                 0.0,
@@ -431,7 +433,7 @@ impl T2Dit {
                     &k,
                     T2_HEAD_COUNT,
                     T2_HEAD_DIM,
-                    self.namespace,
+                    self.owner.namespace(),
                     &format!("{cross_prefix}.k_rms_norm"),
                     &self.cross_kn[layer],
                     0.0,

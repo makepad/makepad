@@ -11,7 +11,7 @@ use crate::backend::{
     gpu_concat_cols, gpu_concat_rows, gpu_download, gpu_gated_residual_mod, gpu_gelu,
     gpu_layer_norm_mod, gpu_layer_norm_mul_add, gpu_layer_norm_mul_add_grouped,
     gpu_linear_f32_resident, gpu_rms_norm_mul, gpu_rope_interleaved, gpu_silu,
-    gpu_slice_cols, gpu_slice_rows, gpu_upload, GpuTensor,
+    gpu_slice_cols, gpu_slice_rows, gpu_upload, GpuTensor, WeightOwner,
 };
 use crate::hy_motion::{
     hy_motion_euler_times, hy_motion_rope_tables, hy_motion_timestep_embedding,
@@ -28,12 +28,11 @@ use crate::hy_motion_weights::{
 };
 use crate::{DiffusionError, Result};
 
-const HY_MOTION_CACHE_NAMESPACE: &str = "hy-motion-1.0-f32";
-
 /// Resident tensors required by the selected execution stage. Matrices and
 /// linear biases live on device; one-dimensional values are retained on host
 /// too for the existing normalization kernels' constant-vector interface.
 pub struct HyMotionDeviceWeights {
+    owner: WeightOwner,
     device: BTreeMap<String, GpuTensor>,
     host_vectors: BTreeMap<String, Vec<f32>>,
     parameter_count: usize,
@@ -117,6 +116,7 @@ impl HyMotionDeviceWeights {
             device.insert(spec.name.clone(), tensor);
         }
         Ok(Self {
+            owner: WeightOwner::new("hy-motion-dit"),
             device,
             host_vectors,
             parameter_count,
@@ -193,7 +193,7 @@ impl HyMotionDeviceWeights {
         gpu_rms_norm_mul(
             input,
             HY_MOTION_HEAD_DIM,
-            HY_MOTION_CACHE_NAMESPACE,
+            self.owner.namespace(),
             weight_name,
             self.vector(weight_name)?,
             HY_MOTION_NORM_EPS,

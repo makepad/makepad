@@ -12,7 +12,7 @@ use crate::backend::{
     gpu_attention_packed_causal_f16, gpu_bf16_round, gpu_concat_cols, gpu_download,
     gpu_linear_nt_cached_bf16_f32acc, gpu_linear_nt_cached_f16_f32acc, gpu_rms_norm_mul,
     gpu_rms_norm_mul_bf16, gpu_rope_half, gpu_slice_cols, gpu_swiglu_value_gate, gpu_upload,
-    gpu_weight_cache_ensure, gpu_weight_cache_evict_prefix, GpuLinearPart, GpuTensor,
+    gpu_weight_cache_ensure, GpuLinearPart, GpuTensor, WeightOwner,
 };
 use makepad_ai_h3::h3::H3ShardedWeights;
 use makepad_ai_h3::h3_tokenizer::H3Tokenizer;
@@ -21,7 +21,6 @@ use crate::{DiffusionError, Result};
 use makepad_ai_common::quant::GGML_TYPE_BF16;
 use makepad_ai_loader::MlxDType;
 
-pub const HY_MOTION_QWEN_NAMESPACE: &str = "hy-motion-qwen3-8b";
 pub const HY_MOTION_QWEN_VOCAB: usize = 151_936;
 pub const HY_MOTION_QWEN_HIDDEN: usize = 4096;
 pub const HY_MOTION_QWEN_LAYERS: usize = 36;
@@ -159,6 +158,7 @@ fn require_bf16_shape(
 }
 
 fn ensure_linear<'a>(
+    namespace: &str,
     weights: &H3ShardedWeights,
     name: &'a str,
     n: usize,
@@ -167,7 +167,7 @@ fn ensure_linear<'a>(
 ) -> Result<GpuLinearPart<'a>> {
     let want_a16 = precision == HyMotionQwenPrecision::F16;
     gpu_weight_cache_ensure(
-        HY_MOTION_QWEN_NAMESPACE,
+        namespace,
         name,
         GGML_TYPE_BF16,
         n,
@@ -185,18 +185,19 @@ fn ensure_linear<'a>(
 }
 
 fn linear_for_precision(
+    namespace: &str,
     weights: &H3ShardedWeights,
     input: &GpuTensor,
     name: &str,
     output_cols: usize,
     precision: HyMotionQwenPrecision,
 ) -> Result<GpuTensor> {
-    let part = ensure_linear(weights, name, output_cols, input.cols(), precision)?;
+    let part = ensure_linear(namespace, weights, name, output_cols, input.cols(), precision)?;
     match precision {
         HyMotionQwenPrecision::Bf16 => {
             let output = gpu_linear_nt_cached_bf16_f32acc(
                 input,
-                HY_MOTION_QWEN_NAMESPACE,
+                namespace,
                 &[part],
                 &[],
             )
@@ -205,7 +206,7 @@ fn linear_for_precision(
         }
         HyMotionQwenPrecision::F16 => gpu_linear_nt_cached_f16_f32acc(
             input,
-            HY_MOTION_QWEN_NAMESPACE,
+            namespace,
             &[part],
             &[],
         )
@@ -215,6 +216,7 @@ fn linear_for_precision(
 
 /// Small host constants and model contract needed by repeated Qwen encodes.
 pub struct HyMotionQwenPrepared {
+    owner: WeightOwner,
     input_norm: Vec<Vec<f32>>,
     post_attention_norm: Vec<Vec<f32>>,
     q_norm: Vec<Vec<f32>>,
@@ -224,6 +226,10 @@ pub struct HyMotionQwenPrepared {
 }
 
 impl HyMotionQwenPrepared {
+    pub fn cache_namespace(&self) -> &str {
+        self.owner.namespace()
+    }
+
     pub fn prepare(weights: &H3ShardedWeights) -> Result<Self> {
         require_bf16_shape(
             weights,
@@ -311,6 +317,7 @@ impl HyMotionQwenPrepared {
             })
             .collect();
         Ok(Self {
+            owner: WeightOwner::new("hy-motion-qwen"),
             input_norm,
             post_attention_norm,
             q_norm,
@@ -447,6 +454,7 @@ fn hy_motion_qwen_encode_inner(
     Vec<HyMotionQwenTap>,
     Vec<HyMotionQwenOperatorTap>,
 )> {
+    let namespace = prepared.cache_namespace();
     let real_sequence = tokens.input_ids.len();
     let sequence = tokens.crop_start + HY_MOTION_TEXT_TOKENS;
     if real_sequence == 0
@@ -517,6 +525,7 @@ fn hy_motion_qwen_encode_inner(
             None
         };
         hidden = qwen_layer(
+            namespace,
             weights,
             prepared,
             layer,
@@ -538,6 +547,7 @@ fn hy_motion_qwen_encode_inner(
         }
     }
     let hidden = norm_for_precision(
+        namespace,
         &hidden,
         HY_MOTION_QWEN_HIDDEN,
         "model.norm",
@@ -582,6 +592,7 @@ fn tap_operator(
 }
 
 fn norm_for_precision(
+    namespace: &str,
     input: &GpuTensor,
     group_cols: usize,
     cache_key: &str,
@@ -592,7 +603,7 @@ fn norm_for_precision(
         HyMotionQwenPrecision::Bf16 => gpu_rms_norm_mul_bf16(
             input,
             group_cols,
-            HY_MOTION_QWEN_NAMESPACE,
+            namespace,
             cache_key,
             scale,
             HY_MOTION_QWEN_RMS_EPS,
@@ -600,7 +611,7 @@ fn norm_for_precision(
         HyMotionQwenPrecision::F16 => gpu_rms_norm_mul(
             input,
             group_cols,
-            HY_MOTION_QWEN_NAMESPACE,
+            namespace,
             cache_key,
             scale,
             HY_MOTION_QWEN_RMS_EPS,
@@ -632,6 +643,7 @@ fn add_for_precision(
 }
 
 fn qwen_layer(
+    namespace: &str,
     weights: &H3ShardedWeights,
     prepared: &HyMotionQwenPrepared,
     layer: usize,
@@ -646,6 +658,7 @@ fn qwen_layer(
     let q_width = HY_MOTION_QWEN_Q_HEADS * HY_MOTION_QWEN_HEAD_DIM;
     let kv_width = HY_MOTION_QWEN_KV_HEADS * HY_MOTION_QWEN_HEAD_DIM;
     let normed = norm_for_precision(
+        namespace,
         &hidden,
         HY_MOTION_QWEN_HIDDEN,
         &format!("{prefix}.input_layernorm"),
@@ -658,20 +671,20 @@ fn qwen_layer(
     let k_name = format!("{prefix}.self_attn.k_proj.weight");
     let v_name = format!("{prefix}.self_attn.v_proj.weight");
     let qkv_parts = [
-        ensure_linear(weights, &q_name, q_width, HY_MOTION_QWEN_HIDDEN, precision)?,
-        ensure_linear(weights, &k_name, kv_width, HY_MOTION_QWEN_HIDDEN, precision)?,
-        ensure_linear(weights, &v_name, kv_width, HY_MOTION_QWEN_HIDDEN, precision)?,
+        ensure_linear(namespace, weights, &q_name, q_width, HY_MOTION_QWEN_HIDDEN, precision)?,
+        ensure_linear(namespace, weights, &k_name, kv_width, HY_MOTION_QWEN_HIDDEN, precision)?,
+        ensure_linear(namespace, weights, &v_name, kv_width, HY_MOTION_QWEN_HIDDEN, precision)?,
     ];
     let qkv = match precision {
         HyMotionQwenPrecision::Bf16 => gpu_linear_nt_cached_bf16_f32acc(
             &normed,
-            HY_MOTION_QWEN_NAMESPACE,
+            namespace,
             &qkv_parts,
             &[],
         ),
         HyMotionQwenPrecision::F16 => gpu_linear_nt_cached_f16_f32acc(
             &normed,
-            HY_MOTION_QWEN_NAMESPACE,
+            namespace,
             &qkv_parts,
             &[],
         ),
@@ -686,6 +699,7 @@ fn qwen_layer(
     tap_operator(&mut debug, "l0_k_proj", &k)?;
     tap_operator(&mut debug, "l0_v_proj", &v)?;
     let q = norm_for_precision(
+        namespace,
         &q,
         HY_MOTION_QWEN_HEAD_DIM,
         &format!("{prefix}.self_attn.q_norm"),
@@ -694,6 +708,7 @@ fn qwen_layer(
     )?;
     tap_operator(&mut debug, "l0_q_norm", &q)?;
     let k = norm_for_precision(
+        namespace,
         &k,
         HY_MOTION_QWEN_HEAD_DIM,
         &format!("{prefix}.self_attn.k_norm"),
@@ -746,6 +761,7 @@ fn qwen_layer(
     let attention = round_for_precision(attention, precision)?;
     tap_operator(&mut debug, "l0_attention_raw", &attention)?;
     let attention = linear_for_precision(
+        namespace,
         weights,
         &attention,
         &format!("{prefix}.self_attn.o_proj.weight"),
@@ -756,6 +772,7 @@ fn qwen_layer(
     let hidden = add_for_precision(&hidden, &attention, precision)?;
 
     let normed = norm_for_precision(
+        namespace,
         &hidden,
         HY_MOTION_QWEN_HIDDEN,
         &format!("{prefix}.post_attention_layernorm"),
@@ -767,6 +784,7 @@ fn qwen_layer(
     let gate_name = format!("{prefix}.mlp.gate_proj.weight");
     let mlp_parts = [
         ensure_linear(
+            namespace,
             weights,
             &up_name,
             HY_MOTION_QWEN_FFN,
@@ -774,6 +792,7 @@ fn qwen_layer(
             precision,
         )?,
         ensure_linear(
+            namespace,
             weights,
             &gate_name,
             HY_MOTION_QWEN_FFN,
@@ -784,13 +803,13 @@ fn qwen_layer(
     let up_gate = match precision {
         HyMotionQwenPrecision::Bf16 => gpu_linear_nt_cached_bf16_f32acc(
             &normed,
-            HY_MOTION_QWEN_NAMESPACE,
+            namespace,
             &mlp_parts,
             &[],
         ),
         HyMotionQwenPrecision::F16 => gpu_linear_nt_cached_f16_f32acc(
             &normed,
-            HY_MOTION_QWEN_NAMESPACE,
+            namespace,
             &mlp_parts,
             &[],
         ),
@@ -809,6 +828,7 @@ fn qwen_layer(
     let activated = round_for_precision(activated, precision)?;
     tap_operator(&mut debug, "l0_mlp_activated", &activated)?;
     let update = linear_for_precision(
+        namespace,
         weights,
         &activated,
         &format!("{prefix}.mlp.down_proj.weight"),
@@ -824,11 +844,6 @@ fn qwen_layer(
 
 const fn half_dim() -> usize {
     HY_MOTION_QWEN_HEAD_DIM / 2
-}
-
-pub fn hy_motion_qwen_evict() -> Result<usize> {
-    gpu_weight_cache_evict_prefix(&format!("{HY_MOTION_QWEN_NAMESPACE}::"))
-        .map_err(DiffusionError::model)
 }
 
 #[cfg(test)]

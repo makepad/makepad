@@ -10,6 +10,8 @@
 //! [`crate::realesrgan_model`]; this module owns the stable public image API
 //! and all checkpoint validation.
 
+use crate::backend::WeightOwner;
+use std::sync::Arc;
 use crate::{DiffusionError, ProgressHook, Result};
 use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader};
 use std::path::{Path, PathBuf};
@@ -27,7 +29,6 @@ pub const REALESRGAN_NUM_BLOCK: usize = 23;
 pub const REALESRGAN_NUM_GROW: usize = 32;
 pub const REALESRGAN_RESIDUAL_SCALE: f32 = 0.2;
 pub const REALESRGAN_LRELU_SLOPE: f32 = 0.2;
-pub const REALESRGAN_CACHE_NAMESPACE: &str = "realesrgan";
 
 pub type RealEsrganCancel<'a> = &'a dyn Fn() -> bool;
 
@@ -279,7 +280,7 @@ impl RealEsrgan {
         check_cancel(cancel)?;
         Ok(Self {
             model: crate::realesrgan_model::RealEsrganModel::prepare(
-                weights, cancel, progress,
+                &Arc::new(WeightOwner::new("realesrgan")), weights, cancel, progress,
             )?,
         })
     }
@@ -313,17 +314,6 @@ impl RealEsrgan {
         check_cancel(cancel)?;
         self.model.upscale_rgb8(image, cancel, progress)
     }
-}
-
-/// Evict every device-cached RealESRGAN tensor and release idle activation
-/// pool buffers.  Invoke on the same worker thread that ran the model.
-pub fn unload_realesrgan() -> Result<usize> {
-    let evicted = crate::backend::gpu_weight_cache_evict_prefix(&format!(
-        "{REALESRGAN_CACHE_NAMESPACE}::"
-    ))
-    .map_err(DiffusionError::model)?;
-    crate::backend::gpu_pool_clear();
-    Ok(evicted)
 }
 
 #[cfg(test)]

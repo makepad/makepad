@@ -9,6 +9,7 @@ use crate::ace::{
     ACE_TE_PAD_ID,
     ACE_TE_HIDDEN, ACE_TE_KV_HEADS, ACE_TE_LAYERS, ACE_TE_Q_HEADS, ACE_TE_ROPE_THETA,
 };
+use crate::backend::WeightOwner;
 use crate::error::{DiffusionError, Result};
 use makepad_ai_h3::h3::H3ShardedWeights;
 use makepad_ai_h3::h3_tokenizer::H3Tokenizer;
@@ -267,6 +268,7 @@ struct TeDeviceLayer {
 }
 
 pub struct AceTeDevice {
+    owner: WeightOwner,
     layers: Vec<TeDeviceLayer>,
     rope_cos_full: Vec<f32>,
     rope_sin_full: Vec<f32>,
@@ -292,6 +294,7 @@ impl AceTextEncoder {
             })
             .collect();
         AceTeDevice {
+            owner: WeightOwner::new("ace-text"),
             layers,
             rope_cos_full: self.rope_cos.clone(),
             rope_sin_full: self.rope_sin.clone(),
@@ -323,9 +326,9 @@ impl AceTextEncoder {
             .map_err(|e| dev_err("ace te rope cos", e))?;
         let rope_sin = gpu_upload(&device.rope_sin_full[..seq * half], seq, half)
             .map_err(|e| dev_err("ace te rope sin", e))?;
-        let lin = |x: &GpuTensor, w: &TeBf16Weight| gpu_linear_nt_cached_bf16_mm(x, "acete", &[w.part()]);
+        let lin = |x: &GpuTensor, w: &TeBf16Weight| gpu_linear_nt_cached_bf16_mm(x, device.owner.namespace(), &[w.part()]);
         let rms = |x: &GpuTensor, group: usize, key: &str, w: &[f32]| -> Result<GpuTensor> {
-            let n = gpu_rms_norm_mul(x, group, "acete", key, w, ACE_RMS_EPS)
+            let n = gpu_rms_norm_mul(x, group, device.owner.namespace(), key, w, ACE_RMS_EPS)
                 .map_err(|e| dev_err("ace te rms", e))?;
             gpu_bf16_round(&n).map_err(|e| dev_err("ace te rms rnd", e))
         };

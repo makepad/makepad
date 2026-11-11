@@ -4,10 +4,12 @@
 //! (transformer_minimax_h3.py / before_denoise.py / scheduling_minimax_h3.py)
 //! exactly — grid math in f64, schedule math in f32, rope angles in f32.
 
+use crate::backend::WeightOwner;
 use crate::{DiffusionError, Result};
 use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub const H3_HIDDEN_SIZE: usize = 5376;
 pub const H3_HEAD_COUNT: usize = 56;
@@ -59,11 +61,7 @@ const ROPE_SPATIAL_SCALE: f64 = 32.0;
 pub struct H3ShardedWeights {
     pub dir: PathBuf,
     source: H3WeightSource,
-    /// Device weight-cache namespace override for a bf16 shard DiT that is
-    /// NOT the canonical tree (the FastH3 distilled transformer): two shard
-    /// sources would otherwise share `h3dit::<tensor name>` keys and the
-    /// resident cache would silently serve one model's weights to the other.
-    dit_namespace_override: Option<String>,
+    owner: Arc<WeightOwner>,
 }
 
 /// Where one canonical tensor lives in the shard set.
@@ -177,7 +175,7 @@ impl H3ShardedWeights {
         Ok(Self {
             dir,
             source: H3WeightSource::Shards { shards, map },
-            dit_namespace_override: None,
+            owner: Arc::new(WeightOwner::new("h3-shards")),
         })
     }
 
@@ -192,7 +190,7 @@ impl H3ShardedWeights {
         Ok(Self {
             dir: path.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
             source: H3WeightSource::Gguf(gguf),
-            dit_namespace_override: None,
+            owner: Arc::new(WeightOwner::new("h3-dit-gguf")),
         })
     }
 
@@ -206,7 +204,7 @@ impl H3ShardedWeights {
         Ok(Self {
             dir: path.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
             source: H3WeightSource::Gguf(gguf),
-            dit_namespace_override: None,
+            owner: Arc::new(WeightOwner::new("h3-te-gguf")),
         })
     }
 
@@ -220,7 +218,7 @@ impl H3ShardedWeights {
         Ok(Self {
             dir: path.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
             source: H3WeightSource::Nvfp4(weights),
-            dit_namespace_override: None,
+            owner: Arc::new(WeightOwner::new("h3-dit-nvfp4")),
         })
     }
 
@@ -234,7 +232,7 @@ impl H3ShardedWeights {
         Ok(Self {
             dir: path.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
             source: H3WeightSource::Nvfp4(weights),
-            dit_namespace_override: None,
+            owner: Arc::new(WeightOwner::new("h3-te-nvfp4")),
         })
     }
 
@@ -448,41 +446,17 @@ impl H3ShardedWeights {
         }
     }
 
-    /// Device weight-cache namespace for the DiT when streamed from this
-    /// source. Variants keep the `h3dit::`-prefixed key space (so the
-    /// backend's unload prefixes catch every variant) while making
-    /// cross-source cache-key collisions impossible.
-    pub fn dit_namespace(&self) -> &str {
-        if let Some(namespace) = &self.dit_namespace_override {
-            return namespace;
-        }
-        match &self.source {
-            H3WeightSource::Shards { .. } => "h3dit",
-            H3WeightSource::Gguf(_) => "h3dit::gg",
-            H3WeightSource::Nvfp4(_) => "h3dit::nv",
-        }
+    pub fn with_owner(mut self, owner: Arc<WeightOwner>) -> Self {
+        self.owner = owner;
+        self
     }
 
-    /// Give a bf16 shard DiT its own `h3dit::`-prefixed namespace (see the
-    /// field doc). The prefix is enforced so the backend's unload sweep
-    /// (`h3dit::` / `h3te::` / `h3vae::`) still retires it.
-    pub fn with_dit_namespace(mut self, namespace: &str) -> Result<Self> {
-        if !namespace.starts_with("h3dit::") || namespace.len() <= "h3dit::".len() {
-            return Err(DiffusionError::workflow(format!(
-                "h3 dit namespace {namespace:?} must be `h3dit::<tag>`"
-            )));
-        }
-        self.dit_namespace_override = Some(namespace.to_string());
-        Ok(self)
+    pub fn cache_namespace(&self) -> &str {
+        self.owner.namespace()
     }
 
-    /// Same for the text encoder ("h3te::"-prefixed).
-    pub fn te_namespace(&self) -> &'static str {
-        match &self.source {
-            H3WeightSource::Shards { .. } => "h3te",
-            H3WeightSource::Gguf(_) => "h3te::gg",
-            H3WeightSource::Nvfp4(_) => "h3te::nv",
-        }
+    pub(crate) fn owner(&self) -> &Arc<WeightOwner> {
+        &self.owner
     }
 }
 

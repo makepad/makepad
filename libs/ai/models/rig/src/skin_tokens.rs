@@ -12,6 +12,7 @@
 //! inference consumes the equivalent flat safetensors conversion (same 672
 //! named tensors); Python/Torch is only used by the parity oracle.
 
+use crate::backend::WeightOwner;
 use crate::{DiffusionError, Result};
 use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader};
 use std::path::Path;
@@ -131,6 +132,8 @@ pub struct SkinTokensCheckpointInventory {
 /// on disk and individual stages upload them on demand, which is important on
 /// the 24-GB reference box where TRELLIS may already be resident.
 pub struct SkinTokensWeights {
+    owner: WeightOwner,
+    qwen_owner: WeightOwner,
     header: MlxSafetensorsHeader,
     inventory: SkinTokensCheckpointInventory,
 }
@@ -142,7 +145,20 @@ impl SkinTokensWeights {
         let inventory = checkpoint_inventory(&header);
         validate_checkpoint_inventory(path, inventory)?;
         validate_architecture_tensors(&header)?;
-        Ok(Self { header, inventory })
+        Ok(Self {
+            owner: WeightOwner::new("skin-tokens"),
+            qwen_owner: WeightOwner::new("skin-tokens-qwen"),
+            header,
+            inventory,
+        })
+    }
+
+    pub(crate) fn cache_namespace(&self) -> &str {
+        self.owner.namespace()
+    }
+
+    pub(crate) fn qwen_cache_namespace(&self) -> &str {
+        self.qwen_owner.namespace()
     }
 
     pub fn header(&self) -> &MlxSafetensorsHeader {

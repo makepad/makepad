@@ -36,19 +36,19 @@ use crate::backend::{
     gpu_gated_residual, gpu_gather_cols, gpu_group_norm_planar, gpu_layer_norm_mul_add,
     gpu_linear_nt_cached_with_precision, gpu_rms_norm_mul, gpu_rope_half, gpu_silu,
     gpu_slice_cols, gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload, gpu_weight_cache_ensure,
-    GemmPrecision, GpuLinearPart, GpuTensor,
+    GemmPrecision, GpuLinearPart, GpuTensor, WeightOwner,
 };
 use crate::h3::H3ShardedWeights;
 use crate::{DiffusionError, Result};
 use makepad_ai_common::quant::GGML_TYPE_F16;
 use makepad_ai_loader::MlxDType;
+use std::sync::Arc;
 
 pub const H3_VAE_PRECISION: GemmPrecision = GemmPrecision {
     f16_accumulate: true,
     f16_activations: false,
 };
 
-pub const H3_VAE_NAMESPACE: &str = "h3vae";
 pub const H3_VAE_LATENT_CHANNELS: usize = 24;
 pub const H3_VAE_DECODER_LAYERS: usize = 36;
 pub const H3_VAE_HEADS: usize = 32;
@@ -340,7 +340,7 @@ fn ensure_linear<'a>(
 ) -> Result<GpuLinearPart<'a>> {
     let want_a16 = H3_VAE_PRECISION.f16_accumulate && m > 1;
     let (dtype, _shape) = weights.tensor_dtype_shape(name)?;
-    gpu_weight_cache_ensure(H3_VAE_NAMESPACE, name, GGML_TYPE_F16, n, k, want_a16, || {
+    gpu_weight_cache_ensure(weights.cache_namespace(), name, GGML_TYPE_F16, n, k, want_a16, || {
         let raw = weights.tensor_bytes(name).map_err(|err| err.to_string())?;
         let mut out = vec![0u8; n * k * 2];
         match dtype {
@@ -378,7 +378,7 @@ fn linear_cached(
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, n, x.cols(), x.rows())?;
     let parts = [part];
-    gpu_linear_nt_cached_with_precision(x, H3_VAE_NAMESPACE, &parts, bias, H3_VAE_PRECISION)
+    gpu_linear_nt_cached_with_precision(x, weights.cache_namespace(), &parts, bias, H3_VAE_PRECISION)
         .map_err(DiffusionError::model)
 }
 
@@ -602,7 +602,7 @@ fn decoder_vit_forward_group(
         let normed = gpu_rms_norm_mul(
             &hidden,
             dim,
-            H3_VAE_NAMESPACE,
+            weights.cache_namespace(),
             &format!("{prefix}.norm1"),
             &prepared.norm1_w[layer],
             H3_VAE_NORM_EPS,
@@ -618,7 +618,7 @@ fn decoder_vit_forward_group(
         ];
         let qkv = gpu_linear_nt_cached_with_precision(
             &normed,
-            H3_VAE_NAMESPACE,
+            weights.cache_namespace(),
             &parts,
             &prepared.qkv_bias[layer],
             H3_VAE_PRECISION,
@@ -633,7 +633,7 @@ fn decoder_vit_forward_group(
         let q = gpu_rms_norm_mul(
             &q,
             H3_VAE_HEAD_DIM,
-            H3_VAE_NAMESPACE,
+            weights.cache_namespace(),
             "qk_norm_ones",
             &prepared.qk_norm_ones,
             H3_VAE_NORM_EPS,
@@ -642,7 +642,7 @@ fn decoder_vit_forward_group(
         let k = gpu_rms_norm_mul(
             &k,
             H3_VAE_HEAD_DIM,
-            H3_VAE_NAMESPACE,
+            weights.cache_namespace(),
             "qk_norm_ones",
             &prepared.qk_norm_ones,
             H3_VAE_NORM_EPS,
@@ -693,7 +693,7 @@ fn decoder_vit_forward_group(
         let normed = gpu_rms_norm_mul(
             &hidden,
             dim,
-            H3_VAE_NAMESPACE,
+            weights.cache_namespace(),
             &format!("{prefix}.norm2"),
             &prepared.norm2_w[layer],
             H3_VAE_NORM_EPS,
@@ -1237,6 +1237,7 @@ struct EncDownBlock {
 /// Host-prepared single-frame encoder weights (temporal slices already
 /// taken); the convs stream into the device cache on first use per key.
 pub struct H3VaeEncoderPrepared {
+    owner: Arc<WeightOwner>,
     conv_in: EncConv,
     blocks: Vec<EncDownBlock>,
     norm_out: EncNorm,
@@ -1356,6 +1357,7 @@ impl H3VaeEncoderPrepared {
             in_channels = out_channels;
         }
         Ok(Self {
+            owner: Arc::clone(weights.owner()),
             conv_in: load_enc_conv3(weights, "encoder.conv_in", H3_VAE_ENC_BLOCK_OUT[0], 3)?,
             blocks,
             norm_out: load_enc_norm(weights, "encoder.norm_out", 1024)?,
@@ -1431,14 +1433,14 @@ fn stride2_indices(src_w: usize, out_w: usize, out_h: usize) -> Vec<u32> {
 
 // --- GPU composition of the reference convs ---------------------------------
 
-fn enc_conv3_reflect(conv: &EncConv, x: &GpuTensor, w: usize, h: usize) -> Result<GpuTensor> {
+fn enc_conv3_reflect(ns: &str, conv: &EncConv, x: &GpuTensor, w: usize, h: usize) -> Result<GpuTensor> {
     debug_assert_eq!(conv.k, 3);
     let padded = gpu_gather_cols(x, &reflect_pad1_indices(w, h)).map_err(DiffusionError::model)?;
     let out = gpu_conv2d_planar_cached(
         &padded,
         w + 2,
         h + 2,
-        H3_VAE_NAMESPACE,
+        ns,
         &conv.name,
         &conv.weight,
         &conv.bias,
@@ -1455,6 +1457,7 @@ fn enc_conv3_reflect(conv: &EncConv, x: &GpuTensor, w: usize, h: usize) -> Resul
 /// The Downsample3d spatial path: asym pad + k3 stride-2 conv; returns the
 /// output and its (w, h).
 fn enc_conv3_down2(
+    ns: &str,
     conv: &EncConv,
     x: &GpuTensor,
     w: usize,
@@ -1466,7 +1469,7 @@ fn enc_conv3_down2(
         &padded,
         w + 1,
         h + 1,
-        H3_VAE_NAMESPACE,
+        ns,
         &conv.name,
         &conv.weight,
         &conv.bias,
@@ -1484,13 +1487,13 @@ fn enc_conv3_down2(
     Ok((sampled, out_w, out_h))
 }
 
-fn enc_conv1x1(conv: &EncConv, x: &GpuTensor, w: usize, h: usize) -> Result<GpuTensor> {
+fn enc_conv1x1(ns: &str, conv: &EncConv, x: &GpuTensor, w: usize, h: usize) -> Result<GpuTensor> {
     debug_assert_eq!(conv.k, 1);
     gpu_conv2d_planar_cached(
         x,
         w,
         h,
-        H3_VAE_NAMESPACE,
+        ns,
         &conv.name,
         &conv.weight,
         &conv.bias,
@@ -1503,13 +1506,13 @@ fn enc_conv1x1(conv: &EncConv, x: &GpuTensor, w: usize, h: usize) -> Result<GpuT
     .map_err(DiffusionError::model)
 }
 
-fn enc_group_norm(norm: &EncNorm, x: &GpuTensor, w: usize, h: usize) -> Result<GpuTensor> {
+fn enc_group_norm(ns: &str, norm: &EncNorm, x: &GpuTensor, w: usize, h: usize) -> Result<GpuTensor> {
     gpu_group_norm_planar(
         x,
         w,
         h,
         H3_VAE_ENC_GROUPS,
-        H3_VAE_NAMESPACE,
+        ns,
         &norm.name,
         &norm.gamma,
         &norm.beta,
@@ -1518,16 +1521,16 @@ fn enc_group_norm(norm: &EncNorm, x: &GpuTensor, w: usize, h: usize) -> Result<G
     .map_err(DiffusionError::model)
 }
 
-fn enc_resnet(resnet: &EncResnet, x: &GpuTensor, w: usize, h: usize) -> Result<GpuTensor> {
-    let mut hidden = enc_group_norm(&resnet.norm1, x, w, h)?;
+fn enc_resnet(ns: &str, resnet: &EncResnet, x: &GpuTensor, w: usize, h: usize) -> Result<GpuTensor> {
+    let mut hidden = enc_group_norm(ns, &resnet.norm1, x, w, h)?;
     hidden = gpu_silu(&hidden).map_err(DiffusionError::model)?;
-    hidden = enc_conv3_reflect(&resnet.conv1, &hidden, w, h)?;
-    hidden = enc_group_norm(&resnet.norm2, &hidden, w, h)?;
+    hidden = enc_conv3_reflect(ns, &resnet.conv1, &hidden, w, h)?;
+    hidden = enc_group_norm(ns, &resnet.norm2, &hidden, w, h)?;
     hidden = gpu_silu(&hidden).map_err(DiffusionError::model)?;
-    hidden = enc_conv3_reflect(&resnet.conv2, &hidden, w, h)?;
+    hidden = enc_conv3_reflect(ns, &resnet.conv2, &hidden, w, h)?;
     match &resnet.shortcut {
         Some(shortcut) => {
-            let residual = enc_conv1x1(shortcut, x, w, h)?;
+            let residual = enc_conv1x1(ns, shortcut, x, w, h)?;
             gpu_add(&residual, &hidden).map_err(DiffusionError::model)
         }
         None => gpu_add(x, &hidden).map_err(DiffusionError::model),
@@ -1542,24 +1545,25 @@ fn encode_tile(
     w: usize,
     h: usize,
 ) -> Result<Vol> {
+    let ns = prepared.owner.namespace();
     let mut x = gpu_upload(pixels, 3, w * h).map_err(DiffusionError::model)?;
     let (mut cur_w, mut cur_h) = (w, h);
-    x = enc_conv3_reflect(&prepared.conv_in, &x, cur_w, cur_h)?;
+    x = enc_conv3_reflect(ns, &prepared.conv_in, &x, cur_w, cur_h)?;
     for block in &prepared.blocks {
         for resnet in &block.resnets {
-            x = enc_resnet(resnet, &x, cur_w, cur_h)?;
+            x = enc_resnet(ns, resnet, &x, cur_w, cur_h)?;
         }
         if let Some(down) = &block.downsample {
-            let (next, next_w, next_h) = enc_conv3_down2(down, &x, cur_w, cur_h)?;
+            let (next, next_w, next_h) = enc_conv3_down2(ns, down, &x, cur_w, cur_h)?;
             x = next;
             cur_w = next_w;
             cur_h = next_h;
         }
     }
-    x = enc_group_norm(&prepared.norm_out, &x, cur_w, cur_h)?;
+    x = enc_group_norm(ns, &prepared.norm_out, &x, cur_w, cur_h)?;
     x = gpu_silu(&x).map_err(DiffusionError::model)?;
-    x = enc_conv3_reflect(&prepared.conv_out, &x, cur_w, cur_h)?;
-    x = enc_conv1x1(&prepared.quant_conv, &x, cur_w, cur_h)?;
+    x = enc_conv3_reflect(ns, &prepared.conv_out, &x, cur_w, cur_h)?;
+    x = enc_conv1x1(ns, &prepared.quant_conv, &x, cur_w, cur_h)?;
     let data = gpu_download(&x).map_err(DiffusionError::model)?;
     Ok(Vol { c: H3_VAE_MOMENT_CHANNELS, f: 1, h: cur_h, w: cur_w, data })
 }

@@ -5,6 +5,8 @@
 //! every convolution is 3x3 stride-1 "same".  The only host transfers in a
 //! warm upscale are the input upload and the final three-plane download.
 
+use crate::backend::WeightOwner;
+use std::sync::Arc;
 use crate::backend::{
     gpu_add, gpu_concat_rows, gpu_conv2d_planar_cached, gpu_device_available,
     gpu_download, gpu_realesrgan_alloc_f16, gpu_realesrgan_alloc_f32,
@@ -16,7 +18,7 @@ use crate::backend::{
 };
 use crate::realesrgan::{
     RealEsrganCancel, RealEsrganImage, RealEsrganUpscale, RealEsrganWeights,
-    REALESRGAN_CACHE_NAMESPACE, REALESRGAN_LRELU_SLOPE, REALESRGAN_NUM_BLOCK,
+    REALESRGAN_LRELU_SLOPE, REALESRGAN_NUM_BLOCK,
     REALESRGAN_NUM_FEAT, REALESRGAN_NUM_GROW, REALESRGAN_RESIDUAL_SCALE,
     REALESRGAN_SCALE,
 };
@@ -59,13 +61,15 @@ fn fast_mode_enabled() -> bool {
 
 /// Prepared host-side checkpoint.  Convolution tensors stay f32; the shared
 /// convolution API performs its own deterministic device packing and caching
-/// under `realesrgan::<name>` on first use.
+/// under this model owner's namespace on first use.
 pub(crate) struct RealEsrganModel {
+    owner: Arc<WeightOwner>,
     convs: HashMap<String, ConvWeight>,
 }
 
 impl RealEsrganModel {
     pub(crate) fn prepare(
+        owner: &Arc<WeightOwner>,
         weights: &RealEsrganWeights,
         cancel: Option<RealEsrganCancel<'_>>,
         mut progress: Option<ProgressHook>,
@@ -119,7 +123,7 @@ impl RealEsrganModel {
         }
         check_cancel(cancel)?;
         crate::emit_progress(&mut progress, "load realesrgan", 1.0)?;
-        Ok(Self { convs })
+        Ok(Self { owner: Arc::clone(owner), convs })
     }
 
     pub(crate) fn upscale(
@@ -200,7 +204,7 @@ impl RealEsrganModel {
         progress: &mut Option<ProgressHook>,
         want_rgb8: bool,
     ) -> Result<ForwardOutput> {
-        const NS: &str = REALESRGAN_CACHE_NAMESPACE;
+        let namespace = self.owner.namespace();
         let feat = REALESRGAN_NUM_FEAT;
         let grow = REALESRGAN_NUM_GROW;
         let slope = REALESRGAN_LRELU_SLOPE;
@@ -229,14 +233,14 @@ impl RealEsrganModel {
         let save32 =
             gpu_realesrgan_alloc_f32(feat, plane).map_err(|e| err("alloc save32", e))?;
         gpu_realesrgan_spine_axpb(
-            &fea32, Some(&fea32), None, &x32, Some((&wide, 0)), feat, NS, "", &[], 0.0,
+            &fea32, Some(&fea32), None, &x32, Some((&wide, 0)), feat, namespace, "", &[], 0.0,
         )
         .map_err(|e| err("seed wide", e))?;
 
         for block in 0..REALESRGAN_NUM_BLOCK {
             check_cancel(cancel)?;
             gpu_realesrgan_spine_axpb(
-                &x32, Some(&x32), None, &save32, None, feat, NS, "", &[], 0.0,
+                &x32, Some(&x32), None, &save32, None, feat, namespace, "", &[], 0.0,
             )
             .map_err(|e| err("save rrdb input", e))?;
             for rdb in 1..=3 {
@@ -258,7 +262,7 @@ impl RealEsrganModel {
                     &x32,
                     Some((&wide, 0)),
                     feat,
-                    NS,
+                    namespace,
                     &name,
                     bias,
                     rscale,
@@ -266,7 +270,7 @@ impl RealEsrganModel {
                 .map_err(|e| err("rdb residual", e))?;
             }
             gpu_realesrgan_spine_axpb(
-                &save32, Some(&x32), None, &x32, Some((&wide, 0)), feat, NS, "", &[], rscale,
+                &save32, Some(&x32), None, &x32, Some((&wide, 0)), feat, namespace, "", &[], rscale,
             )
             .map_err(|e| err("rrdb residual", e))?;
             crate::emit_progress(
@@ -290,7 +294,7 @@ impl RealEsrganModel {
             &fea32,
             None,
             feat,
-            NS,
+            namespace,
             "conv_body",
             body_bias,
             1.0,
@@ -370,7 +374,7 @@ impl RealEsrganModel {
             in_channels,
             width,
             height,
-            REALESRGAN_CACHE_NAMESPACE,
+            self.owner.namespace(),
             name,
             &weight.weights,
             out_channels,
@@ -393,7 +397,7 @@ impl RealEsrganModel {
             tensor,
             row_offset,
             channels,
-            REALESRGAN_CACHE_NAMESPACE,
+            self.owner.namespace(),
             name,
             bias,
             slope,
@@ -422,7 +426,7 @@ impl RealEsrganModel {
             in_channels,
             width,
             height,
-            REALESRGAN_CACHE_NAMESPACE,
+            self.owner.namespace(),
             name,
             &weight.weights,
             out_channels,
@@ -434,7 +438,7 @@ impl RealEsrganModel {
         let bias = &self.weight(name)?.bias;
         gpu_realesrgan_bias_lrelu_f32(
             tensor,
-            REALESRGAN_CACHE_NAMESPACE,
+            self.owner.namespace(),
             name,
             bias,
             slope,
@@ -528,7 +532,7 @@ impl RealEsrganModel {
             input,
             width,
             height,
-            REALESRGAN_CACHE_NAMESPACE,
+            self.owner.namespace(),
             name,
             &weight.weights,
             &weight.bias,

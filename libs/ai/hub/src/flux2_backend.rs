@@ -94,7 +94,10 @@ impl ContentBackend for Flux2Backend {
     }
 
     fn unload(&mut self) -> Result<(), AssetAiError> {
-        self.pipeline = None;
+        if self.pipeline.take().is_some() {
+            makepad_ai_common::backend::gpu_runtime_trim()
+                .map_err(|err| AssetAiError::Backend(format!("{} unload: {err}", self.model_id)))?;
+        }
         Ok(())
     }
 

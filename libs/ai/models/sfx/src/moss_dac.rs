@@ -16,6 +16,7 @@ use std::path::Path;
 
 use crate::error::{DiffusionError, Result};
 use crate::moss::{MOSS_DAC_DECODER_DIM, MOSS_DAC_RATES, MOSS_HOP, MOSS_LATENT_DIM};
+use crate::backend::WeightOwner;
 use crate::sa3::par_rows;
 use crate::torch_pth::PthStateDict;
 use crate::{emit_progress, ProgressHook};
@@ -419,6 +420,7 @@ struct DevBlock {
 }
 
 pub struct MossDacDevice {
+    owner: WeightOwner,
     post_quant: F16Weight,
     post_quant_b: Vec<f32>,
     conv_in: DevConv,
@@ -478,7 +480,7 @@ fn dev_tconv(conv: &TConv, key: &str) -> DevTConv {
     }
 }
 
-fn conv1d_dev(x: &GpuTensor, len: usize, conv: &DevConv) -> Result<GpuTensor> {
+fn conv1d_dev(namespace: &str, x: &GpuTensor, len: usize, conv: &DevConv) -> Result<GpuTensor> {
     let span = (conv.taps.len() - 1) * conv.dilation;
     let out_len = len + 2 * conv.padding - span;
     // zero-pad rows
@@ -495,7 +497,7 @@ fn conv1d_dev(x: &GpuTensor, len: usize, conv: &DevConv) -> Result<GpuTensor> {
         let shifted = gpu_slice_rows(&padded, tap * conv.dilation, out_len)
             .map_err(|e| dev_err("moss dac conv slice", e))?;
         let bias: &[f32] = if tap == 0 { &conv.bias } else { &[] };
-        let y = gpu_linear_nt_cached(&shifted, "mossdac", &[weight.part()], bias)
+        let y = gpu_linear_nt_cached(&shifted, namespace, &[weight.part()], bias)
             .map_err(|e| dev_err("moss dac conv gemm", e))?;
         out = Some(match out {
             None => y,
@@ -505,13 +507,13 @@ fn conv1d_dev(x: &GpuTensor, len: usize, conv: &DevConv) -> Result<GpuTensor> {
     Ok(out.expect("conv has taps"))
 }
 
-fn tconv_dev(x: &GpuTensor, len: usize, conv: &DevTConv) -> Result<GpuTensor> {
+fn tconv_dev(namespace: &str, x: &GpuTensor, len: usize, conv: &DevTConv) -> Result<GpuTensor> {
     let s = conv.stride;
     let k = 2 * s;
     let out_len = (len - 1) * s + k + conv.out_padding - 2 * conv.padding;
-    let y_hi_src = gpu_linear_nt_cached(x, "mossdac", &[conv.lo.part()], &conv.bias_tiled)
+    let y_hi_src = gpu_linear_nt_cached(x, namespace, &[conv.lo.part()], &conv.bias_tiled)
         .map_err(|e| dev_err("moss dac tconv lo", e))?;
-    let y_lo_src = gpu_linear_nt_cached(x, "mossdac", &[conv.hi.part()], &[])
+    let y_lo_src = gpu_linear_nt_cached(x, namespace, &[conv.hi.part()], &[])
         .map_err(|e| dev_err("moss dac tconv hi", e))?;
     // out[t] = y_hi_src[(t+p)/s][block (t+p)%s] + y_lo_src[(t+p)/s - 1][block]
     let mut row_hi = vec![0u32; out_len];
@@ -548,6 +550,7 @@ fn snake_dev(x: &GpuTensor, alpha: &[f32]) -> Result<GpuTensor> {
 impl MossDac {
     pub fn prepare_device(&self) -> MossDacDevice {
         MossDacDevice {
+            owner: WeightOwner::new("moss-dac"),
             post_quant: F16Weight::new(
                 "mossdac.pq",
                 &self.post_quant.w,
@@ -609,9 +612,9 @@ impl MossDac {
             }
         }
         let x = gpu_upload(&x_host, frames, c).map_err(|e| dev_err("moss dac upload", e))?;
-        let x = gpu_linear_nt_cached(&x, "mossdac", &[device.post_quant.part()], &device.post_quant_b)
+        let x = gpu_linear_nt_cached(&x, device.owner.namespace(), &[device.post_quant.part()], &device.post_quant_b)
             .map_err(|e| dev_err("moss dac post quant", e))?;
-        let mut plane = conv1d_dev(&x, frames, &device.conv_in)?;
+        let mut plane = conv1d_dev(device.owner.namespace(), &x, frames, &device.conv_in)?;
         let mut len = frames;
         let block_count = device.blocks.len();
         for (block_index, block) in device.blocks.iter().enumerate() {
@@ -623,18 +626,18 @@ impl MossDac {
                 )?;
             }
             plane = snake_dev(&plane, &block.alpha)?;
-            plane = tconv_dev(&plane, len, &block.up)?;
+            plane = tconv_dev(device.owner.namespace(), &plane, len, &block.up)?;
             len *= block.up.stride;
             for unit in &block.units {
                 let y = snake_dev(&plane, &unit.alpha1)?;
-                let y = conv1d_dev(&y, len, &unit.conv1)?;
+                let y = conv1d_dev(device.owner.namespace(), &y, len, &unit.conv1)?;
                 let y = snake_dev(&y, &unit.alpha2)?;
-                let y = conv1d_dev(&y, len, &unit.conv2)?;
+                let y = conv1d_dev(device.owner.namespace(), &y, len, &unit.conv2)?;
                 plane = gpu_add(&plane, &y).map_err(|e| dev_err("moss dac residual", e))?;
             }
         }
         plane = snake_dev(&plane, &device.alpha_out)?;
-        plane = conv1d_dev(&plane, len, &device.conv_out)?;
+        plane = conv1d_dev(device.owner.namespace(), &plane, len, &device.conv_out)?;
         let mut out = gpu_download(&plane).map_err(|e| dev_err("moss dac download", e))?;
         for v in out.iter_mut() {
             *v = v.tanh();

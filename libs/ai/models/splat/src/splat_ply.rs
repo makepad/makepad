@@ -215,9 +215,18 @@ pub const PLY_PROPERTIES: [&str; 17] = [
     "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
 ];
 
+/// The header line that names the frame the positions and rotations are in.
+/// TripoSplat and Idol write the 3DGS/OpenCV frame (x right, y down, z
+/// forward), the frame 3DGS tools assume for a PLY splat. Our apps' scenes are
+/// y-up; `SplatView::load_bytes` (libs/media_view) reads this line and turns
+/// the splat into that frame, so the data here stays the reference's.
+pub const PLY_FRAME_COMMENT: &str = "comment frame opencv";
+
 /// Serialize to a binary-little-endian 3DGS PLY.
 pub fn write_ply(splats: &[PlySplat]) -> Vec<u8> {
     let mut header = String::from("ply\nformat binary_little_endian 1.0\n");
+    header.push_str(PLY_FRAME_COMMENT);
+    header.push('\n');
     header.push_str(&format!("element vertex {}\n", splats.len()));
     for name in PLY_PROPERTIES {
         header.push_str(&format!("property float {name}\n"));
@@ -376,7 +385,7 @@ mod tests {
             .unwrap()
             + 11;
         let text = String::from_utf8_lossy(&bytes[..header_end]);
-        assert!(text.starts_with("ply\nformat binary_little_endian 1.0\nelement vertex 2\n"));
+        assert!(text.starts_with("ply\nformat binary_little_endian 1.0\ncomment frame opencv\nelement vertex 2\n"));
         assert!(text.contains("property float f_dc_2\n"));
         assert!(text.contains("property float rot_3\n"));
         assert!(!text.contains("f_rest"));

@@ -1238,19 +1238,13 @@ impl MotionWorker {
                         }
                     }
                 }
-                // Qwen and CLIP use the thread-local named CUDA weight cache;
-                // evict those explicitly before dropping the directly-owned
-                // DiT tensors. Finally clear idle activation pools on this
-                // same worker thread. An unload acknowledgement is emitted
-                // only after all three release boundaries complete.
-                let conditioner_evict = pipeline
-                    .evict_conditioner_device_weights()
-                    .map_err(diffusion_error);
+                // Dropping the pipeline retires the Qwen, CLIP and DiT weights;
+                // clearing the pool frees them on this worker thread before
+                // acknowledging the unload.
                 drop(pipeline);
                 makepad_ai_common::backend::gpu_pool_clear();
                 if let Some(events) = shutdown_reply {
-                    let result = conditioner_evict.map(|_| Vec::new());
-                    let _ = events.send(WorkerEvent::Done(result));
+                    let _ = events.send(WorkerEvent::Done(Ok(Vec::new())));
                 }
             })
             .map_err(|error| AssetAiError::Backend(format!("spawn HY-Motion worker: {error}")))?;

@@ -10,6 +10,8 @@
 //! already qualified by TRELLIS and BiRefNet.  There is no subprocess or
 //! alternate model fallback.
 
+use crate::backend::WeightOwner;
+use std::sync::Arc;
 use crate::backend::{
     gpu_add, gpu_attention_packed_f32, gpu_attention_packed_flash_bf16,
     gpu_birefnet_image_to_patches, gpu_birefnet_relu,
@@ -41,7 +43,6 @@ pub const DA3_TAP_LAYERS: [usize; 4] = [4, 11, 17, 23];
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 const PREFIX: &str = "model.";
-const CACHE_NAMESPACE: &str = "da3-metric-large";
 
 /// Exact runtime identity surfaced by the native service and validator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,7 +169,7 @@ pub(crate) struct DinoLayer {
     /// Transformer width and MLP width (ViT-S 384/1536 ... ViT-L 1024/4096).
     pub(crate) hidden: usize,
     pub(crate) mlp: usize,
-    pub(crate) namespace: &'static str,
+    pub(crate) owner: Arc<WeightOwner>,
 }
 
 /// Per-mode transformer linear storage.  Exactly one representation exists
@@ -217,7 +218,7 @@ impl DinoLayer {
     ) -> Result<GpuTensor> {
         gpu_linear_nt_cached_bf16_f32acc(
             x,
-            self.namespace,
+            self.owner.namespace(),
             &[GpuLinearPart {
                 bt_ggml_type: GGML_TYPE_BF16,
                 n,
@@ -304,14 +305,14 @@ pub(crate) fn norm_mods(weights: &dyn TensorSource, prefix: &str, dim: usize) ->
 /// the same tensor names never share a cache entry.
 #[derive(Clone)]
 pub(crate) struct CacheScope {
-    pub(crate) namespace: &'static str,
+    pub(crate) owner: Arc<WeightOwner>,
     pub(crate) key_prefix: String,
 }
 
 impl CacheScope {
-    fn da3() -> Self {
+    fn da3(owner: Arc<WeightOwner>) -> Self {
         Self {
-            namespace: CACHE_NAMESPACE,
+            owner,
             key_prefix: String::new(),
         }
     }
@@ -322,7 +323,7 @@ impl CacheScope {
 }
 
 pub(crate) struct Conv2d {
-    namespace: &'static str,
+    owner: Arc<WeightOwner>,
     key: String,
     weights: Vec<f32>,
     bias: Vec<f32>,
@@ -334,18 +335,6 @@ pub(crate) struct Conv2d {
 }
 
 impl Conv2d {
-    fn load(
-        weights: &dyn TensorSource,
-        name: &str,
-        in_channels: usize,
-        out_channels: usize,
-        kw: usize,
-        kh: usize,
-        bias: bool,
-    ) -> Result<Self> {
-        Self::load_in(&CacheScope::da3(), weights, name, in_channels, out_channels, kw, kh, bias)
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn load_in(
         scope: &CacheScope,
@@ -364,7 +353,7 @@ impl Conv2d {
             vec![0.0; out_channels]
         };
         Ok(Self {
-            namespace: scope.namespace,
+            owner: Arc::clone(&scope.owner),
             key: scope.key(name),
             weights: values,
             bias: bias_values,
@@ -381,7 +370,7 @@ impl Conv2d {
             &input.tensor,
             input.width,
             input.height,
-            self.namespace,
+            self.owner.namespace(),
             &self.key,
             &self.weights,
             &self.bias,
@@ -401,7 +390,7 @@ impl Conv2d {
 }
 
 pub(crate) struct ConvTransposeNoOverlap {
-    namespace: &'static str,
+    owner: Arc<WeightOwner>,
     weight: GpuTensor, // [out_channels * scale^2, in_channels]
     bias: Vec<f32>,
     bias_key: String,
@@ -410,15 +399,6 @@ pub(crate) struct ConvTransposeNoOverlap {
 }
 
 impl ConvTransposeNoOverlap {
-    fn load(
-        weights: &dyn TensorSource,
-        name: &str,
-        channels: usize,
-        scale: usize,
-    ) -> Result<Self> {
-        Self::load_in(&CacheScope::da3(), weights, name, channels, scale)
-    }
-
     pub(crate) fn load_in(
         scope: &CacheScope,
         weights: &dyn TensorSource,
@@ -446,7 +426,7 @@ impl ConvTransposeNoOverlap {
             }
         }
         Ok(Self {
-            namespace: scope.namespace,
+            owner: Arc::clone(&scope.owner),
             weight: upload(&reordered, channels * scale * scale, channels)?,
             bias: tensor(weights, &format!("{name}.bias"), channels)?,
             bias_key: scope.key(name),
@@ -468,7 +448,7 @@ impl ConvTransposeNoOverlap {
             input.height,
             self.out_channels,
             self.scale,
-            self.namespace,
+            self.owner.namespace(),
             &self.bias_key,
             &self.bias,
         )
@@ -518,9 +498,9 @@ pub(crate) struct FusionBlock {
 }
 
 impl FusionBlock {
-    fn load(weights: &dyn TensorSource, index: usize, has_residual: bool) -> Result<Self> {
+    fn load(scope: &CacheScope, weights: &dyn TensorSource, index: usize, has_residual: bool) -> Result<Self> {
         let prefix = format!("{PREFIX}head.scratch.refinenet{index}");
-        Self::load_in(&CacheScope::da3(), weights, &prefix, DA3_DPT_FEATURES, has_residual)
+        Self::load_in(scope, weights, &prefix, DA3_DPT_FEATURES, has_residual)
     }
 
     /// One DPT `FeatureFusionBlock` at `prefix` (`...scratch.refinenetN`).
@@ -747,6 +727,7 @@ impl Da3MetricLarge {
         mut progress: Option<ProgressHook>,
         precision: Da3Precision,
     ) -> Result<Self> {
+        let scope = CacheScope::da3(Arc::new(WeightOwner::new("da3")));
         let patch_dim = 3 * DA3_PATCH * DA3_PATCH;
         let patch_w = tensor(
             weights,
@@ -845,7 +826,7 @@ impl Da3MetricLarge {
                 linears,
                 hidden: DA3_HIDDEN,
                 mlp: DA3_MLP,
-                namespace: CACHE_NAMESPACE,
+                owner: Arc::clone(&scope.owner),
             });
         }
 
@@ -853,7 +834,8 @@ impl Da3MetricLarge {
         let project_channels = [256usize, 512, 1024, 1024];
         let mut projects = Vec::with_capacity(4);
         for (index, &channels) in project_channels.iter().enumerate() {
-            projects.push(Conv2d::load(
+            projects.push(Conv2d::load_in(
+                &scope,
                 weights,
                 &format!("{PREFIX}head.projects.{index}"),
                 DA3_HIDDEN,
@@ -866,7 +848,8 @@ impl Da3MetricLarge {
         let scratch_input = [256usize, 512, 1024, 1024];
         let mut scratch_layers = Vec::with_capacity(4);
         for (index, &channels) in scratch_input.iter().enumerate() {
-            scratch_layers.push(Conv2d::load(
+            scratch_layers.push(Conv2d::load_in(
+                &scope,
                 weights,
                 &format!("{PREFIX}head.scratch.layer{}_rn", index + 1),
                 channels,
@@ -878,7 +861,7 @@ impl Da3MetricLarge {
         }
         let mut fusion = Vec::with_capacity(4);
         for index in 1..=4 {
-            fusion.push(FusionBlock::load(weights, index, index != 4)?);
+            fusion.push(FusionBlock::load(&scope, weights, index, index != 4)?);
         }
         let result = Self {
             patch_w: upload(&patch_w, DA3_HIDDEN, patch_dim)?,
@@ -892,19 +875,22 @@ impl Da3MetricLarge {
                 DA3_HIDDEN,
             )?,
             projects,
-            resize0: ConvTransposeNoOverlap::load(
+            resize0: ConvTransposeNoOverlap::load_in(
+                &scope,
                 weights,
                 &format!("{PREFIX}head.resize_layers.0"),
                 256,
                 4,
             )?,
-            resize1: ConvTransposeNoOverlap::load(
+            resize1: ConvTransposeNoOverlap::load_in(
+                &scope,
                 weights,
                 &format!("{PREFIX}head.resize_layers.1"),
                 512,
                 2,
             )?,
-            resize3: Conv2d::load(
+            resize3: Conv2d::load_in(
+                &scope,
                 weights,
                 &format!("{PREFIX}head.resize_layers.3"),
                 1024,
@@ -915,7 +901,8 @@ impl Da3MetricLarge {
             )?,
             scratch_layers,
             fusion,
-            output_conv1: Conv2d::load(
+            output_conv1: Conv2d::load_in(
+                &scope,
                 weights,
                 &format!("{PREFIX}head.scratch.output_conv1"),
                 256,
@@ -924,7 +911,8 @@ impl Da3MetricLarge {
                 3,
                 true,
             )?,
-            depth_conv: Conv2d::load(
+            depth_conv: Conv2d::load_in(
+                &scope,
                 weights,
                 &format!("{PREFIX}head.scratch.output_conv2.0"),
                 128,
@@ -933,7 +921,8 @@ impl Da3MetricLarge {
                 3,
                 true,
             )?,
-            depth_out: Conv2d::load(
+            depth_out: Conv2d::load_in(
+                &scope,
                 weights,
                 &format!("{PREFIX}head.scratch.output_conv2.2"),
                 32,
@@ -942,7 +931,8 @@ impl Da3MetricLarge {
                 1,
                 true,
             )?,
-            sky_conv: Conv2d::load(
+            sky_conv: Conv2d::load_in(
+                &scope,
                 weights,
                 &format!("{PREFIX}head.scratch.sky_output_conv2.0"),
                 128,
@@ -951,7 +941,8 @@ impl Da3MetricLarge {
                 3,
                 true,
             )?,
-            sky_out: Conv2d::load(
+            sky_out: Conv2d::load_in(
+                &scope,
                 weights,
                 &format!("{PREFIX}head.scratch.sky_output_conv2.2"),
                 32,

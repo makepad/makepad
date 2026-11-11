@@ -242,22 +242,11 @@ mod moss_gen {
         }
 
         pub fn unload(&mut self) -> Result<(), AssetAiError> {
-            let has_device = self
-                .loaded
-                .as_ref()
-                .is_some_and(|(_, device)| device.is_some());
-            if has_device {
-                makepad_ai_common::backend::release_gpu_runtime_namespaces(&[
-                    "mosste::",
-                    "mossdit::",
-                    "mossdac::",
-                ])
-                .map_err(|error| AssetAiError::Backend(format!("moss unload: {error}")))?;
+            let had_device = self.loaded.take().is_some_and(|(_, device)| device.is_some());
+            if had_device {
+                makepad_ai_common::backend::gpu_runtime_trim()
+                    .map_err(|error| AssetAiError::Backend(format!("moss unload: {error}")))?;
             }
-            // `MossPipeline` retains the complete CPU f32 checkpoint and the
-            // optional prepared f16 copy. Keep it on teardown failure so
-            // residency remains truthful and unload can be retried.
-            self.loaded = None;
             Ok(())
         }
 

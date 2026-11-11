@@ -10,6 +10,7 @@
 //!                    [--dino <model.safetensors>] [--ssdec <ss_dec.safetensors>]
 //!                    [--stage dino|ssfwd|ss|all]
 
+use makepad_diffusion::backend::WeightOwner;
 use makepad_diffusion::trellis::{
     t2_quantize_unique_coords, t2_rope_tables, t2_ss_grid_coords, TrellisWeights,
     T2_SHAPE_SAMPLER, T2_SLAT_CHANNELS, T2_SS_CHANNELS, T2_SS_SAMPLER, T2_SS_TOKENS,
@@ -21,6 +22,7 @@ use makepad_diffusion::trellis_slat::T2SparseDec;
 use makepad_diffusion::trellis_vae::T2SsDec;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 // --- minimal .npy reader ---------------------------------------------------
 
@@ -233,7 +235,7 @@ fn run(
         println!("loading ss flow from {}", ss_path.display());
         let weights = TrellisWeights::load(&ss_path).map_err(|err| err.to_string())?;
         let start = std::time::Instant::now();
-        let dit = T2Dit::prepare(weights, "t2ss", T2_SS_CHANNELS, T2_SS_CHANNELS)
+        let dit = T2Dit::prepare(weights, Arc::new(WeightOwner::new("t2ss")), T2_SS_CHANNELS, T2_SS_CHANNELS)
             .map_err(|err| err.to_string())?;
         println!("ss flow prepare: {:.2}s", start.elapsed().as_secs_f64());
 
@@ -431,7 +433,7 @@ fn run_tex(
 
     let tex_path = models.join("ckpts").join("slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors");
     let weights = TrellisWeights::load(&tex_path).map_err(|err| err.to_string())?;
-    let dit = T2Dit::prepare(weights, "t2tex", T2_TEX_IN_CHANNELS, T2_SLAT_CHANNELS)
+    let dit = T2Dit::prepare(weights, Arc::new(WeightOwner::new("t2tex")), T2_TEX_IN_CHANNELS, T2_SLAT_CHANNELS)
         .map_err(|err| err.to_string())?;
 
     // concat cond = shape slat renormalized with the SHAPE stats.
@@ -511,7 +513,7 @@ fn run_tex(
     }
     let dec_path = models.join("ckpts").join("tex_dec_next_dc_f16c32_fp16.safetensors");
     let dec_weights = TrellisWeights::load(&dec_path).map_err(|err| err.to_string())?;
-    let dec = T2SparseDec::prepare(dec_weights, "t2tdec", 6, false).map_err(|err| err.to_string())?;
+    let dec = T2SparseDec::prepare(dec_weights, Arc::new(WeightOwner::new("t2tdec")), 6, false).map_err(|err| err.to_string())?;
     // Use the REFERENCE tex slat so the decode gate is isolated.
     let tex_ref = load("tex_slat_final_feats.npy")?.as_f32()?;
     let start = std::time::Instant::now();
@@ -576,7 +578,7 @@ fn run_slat(
     let lr_path = models.join("ckpts").join("slat_flow_img2shape_dit_1_3B_512_bf16.safetensors");
     let weights = TrellisWeights::load(&lr_path).map_err(|err| err.to_string())?;
     let start = std::time::Instant::now();
-    let dit = T2Dit::prepare(weights, "t2lr", T2_SLAT_CHANNELS, T2_SLAT_CHANNELS)
+    let dit = T2Dit::prepare(weights, Arc::new(WeightOwner::new("t2lr")), T2_SLAT_CHANNELS, T2_SLAT_CHANNELS)
         .map_err(|err| err.to_string())?;
     println!("lr prepare: {:.2}s", start.elapsed().as_secs_f64());
     let plan = t2_step_plan(&T2_SHAPE_SAMPLER);
@@ -625,7 +627,7 @@ fn run_slat(
     let dec_path = models.join("ckpts").join("shape_dec_next_dc_f16c32_fp16.safetensors");
     let dec_weights = TrellisWeights::load(&dec_path).map_err(|err| err.to_string())?;
     let start = std::time::Instant::now();
-    let dec = T2SparseDec::prepare(dec_weights, "t2sdec", 7, true).map_err(|err| err.to_string())?;
+    let dec = T2SparseDec::prepare(dec_weights, Arc::new(WeightOwner::new("t2sdec")), 7, true).map_err(|err| err.to_string())?;
     println!("shape_dec prepare: {:.2}s", start.elapsed().as_secs_f64());
     let start = std::time::Instant::now();
     let hr_coords = dec
@@ -644,7 +646,7 @@ fn run_slat(
     let hr_rope = t2_upload_rope(&t2_rope_tables(&hr_tokens_ref)).map_err(|err| err.to_string())?;
     let hr_path = models.join("ckpts").join("slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors");
     let weights = TrellisWeights::load(&hr_path).map_err(|err| err.to_string())?;
-    let dit_hr = T2Dit::prepare(weights, "t2hr", T2_SLAT_CHANNELS, T2_SLAT_CHANNELS)
+    let dit_hr = T2Dit::prepare(weights, Arc::new(WeightOwner::new("t2hr")), T2_SLAT_CHANNELS, T2_SLAT_CHANNELS)
         .map_err(|err| err.to_string())?;
     let x0 = load("slat_hr_fwd00_x.npy")?.as_f32()?;
     let start = std::time::Instant::now();
@@ -667,7 +669,7 @@ fn run_decode(
     println!("decode: {} tokens", coords.len());
     let dec_path = models.join("ckpts").join("shape_dec_next_dc_f16c32_fp16.safetensors");
     let dec_weights = TrellisWeights::load(&dec_path).map_err(|err| err.to_string())?;
-    let dec = T2SparseDec::prepare(dec_weights, "t2sdec", 7, true).map_err(|err| err.to_string())?;
+    let dec = T2SparseDec::prepare(dec_weights, Arc::new(WeightOwner::new("t2sdec")), 7, true).map_err(|err| err.to_string())?;
     let start = std::time::Instant::now();
     let (feats, out_coords, subs) = dec
         .decode(&slat, coords, None)

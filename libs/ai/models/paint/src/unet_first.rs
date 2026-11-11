@@ -15,14 +15,15 @@ use makepad_ai_common::backend::cuda::{
     gpu_upload, gpu_upsample_nearest2x,
     GpuLinearPart, GpuTensor,
 };
+use makepad_ai_common::backend::WeightOwner;
 use makepad_ai_common::quant::GGML_TYPE_F16;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
+use std::sync::Arc;
 
-pub(crate) const NS: &str = "paint-unet";
 pub(crate) const GN_EPS: f32 = 1e-5;
 pub(crate) const GN_GROUPS: usize = 32;
 pub(crate) const ATTN_GN_EPS: f32 = 1e-6;
@@ -139,6 +140,7 @@ struct CachedLinear {
 }
 
 pub struct UnetFirst {
+    pub(crate) owner: Arc<WeightOwner>,
     w: HashMap<String, W>,
     linear_gpu: RefCell<HashMap<String, CachedLinear>>,
     /// Step-invariant encoder K/V (`{prefix}|{tag}`). Same GEMM, once per job.
@@ -191,7 +193,7 @@ const PREFIXES: &[&str] = &[
 ];
 
 impl UnetFirst {
-    pub fn load(path: &Path) -> Result<Self, String> {
+    pub fn load(path: &Path, owner: Arc<WeightOwner>) -> Result<Self, String> {
         if !gpu_device_available() {
             return Err("CUDA unavailable".into());
         }
@@ -232,6 +234,7 @@ impl UnetFirst {
             ));
         }
         Ok(Self {
+            owner,
             w,
             linear_gpu: RefCell::new(HashMap::new()),
             enc_kv: RefCell::new(HashMap::new()),
@@ -278,7 +281,7 @@ impl UnetFirst {
         if x.is_half() {
             gpu_linear_nt_cached_f16(
                 x,
-                NS,
+                self.owner.namespace(),
                 &[GpuLinearPart {
                     bt_ggml_type: GGML_TYPE_F16,
                     n: lin.n,
@@ -290,7 +293,7 @@ impl UnetFirst {
         } else {
             gpu_linear_nt_cached(
                 x,
-                NS,
+                self.owner.namespace(),
                 &[GpuLinearPart {
                     bt_ggml_type: GGML_TYPE_F16,
                     n: lin.n,
@@ -324,7 +327,7 @@ impl UnetFirst {
         let qkv = if x.is_half() {
             gpu_linear_nt_cached_f16(
                 x,
-                NS,
+                self.owner.namespace(),
                 &[
                     GpuLinearPart {
                         bt_ggml_type: GGML_TYPE_F16,
@@ -350,7 +353,7 @@ impl UnetFirst {
         } else {
             gpu_linear_nt_cached(
                 x,
-                NS,
+                self.owner.namespace(),
                 &[
                     GpuLinearPart {
                         bt_ggml_type: GGML_TYPE_F16,
@@ -542,7 +545,7 @@ impl UnetFirst {
             x,
             width,
             height,
-            NS,
+            self.owner.namespace(),
             prefix,
             &weight.data,
             &bias.data,
@@ -597,7 +600,7 @@ impl UnetFirst {
                 height,
                 xs.len(),
                 GN_GROUPS,
-                NS,
+                self.owner.namespace(),
                 prefix,
                 gamma,
                 beta,
@@ -615,7 +618,7 @@ impl UnetFirst {
                     width,
                     height,
                     GN_GROUPS,
-                    NS,
+                    self.owner.namespace(),
                     prefix,
                     gamma,
                     beta,
@@ -681,7 +684,7 @@ impl UnetFirst {
                 height,
                 y.len(),
                 GN_GROUPS,
-                NS,
+                self.owner.namespace(),
                 &format!("{prefix}.norm2"),
                 &n2w.data,
                 &n2b.data,
@@ -700,7 +703,7 @@ impl UnetFirst {
                     width,
                     height,
                     GN_GROUPS,
-                    NS,
+                    self.owner.namespace(),
                     &format!("{prefix}.norm2"),
                     &n2w.data,
                     &n2b.data,
@@ -738,7 +741,7 @@ impl UnetFirst {
             x.w,
             x.h,
             GN_GROUPS,
-            NS,
+            self.owner.namespace(),
             prefix,
             gamma,
             beta,
@@ -784,7 +787,7 @@ impl UnetFirst {
             x.h,
             out_w,
             out_h,
-            NS,
+            self.owner.namespace(),
             prefix,
             &weight.data,
             &bias.data,
@@ -1111,7 +1114,7 @@ impl UnetFirst {
             width,
             height,
             GN_GROUPS,
-            NS,
+            self.owner.namespace(),
             "unet.conv_norm_out",
             &nw.data,
             &nb.data,
@@ -1143,7 +1146,7 @@ impl UnetFirst {
             width,
             height,
             GN_GROUPS,
-            NS,
+            self.owner.namespace(),
             "unet.conv_norm_out",
             &nw.data,
             &nb.data,
@@ -1229,7 +1232,7 @@ impl UnetFirst {
             width,
             height,
             GN_GROUPS,
-            NS,
+            self.owner.namespace(),
             &format!("{prefix}.norm1"),
             &n1w.data,
             &n1b.data,
@@ -1252,7 +1255,7 @@ impl UnetFirst {
             width,
             height,
             GN_GROUPS,
-            NS,
+            self.owner.namespace(),
             &format!("{prefix}.norm2"),
             &n2w.data,
             &n2b.data,
@@ -1317,7 +1320,7 @@ impl UnetFirst {
             height,
             out_w,
             out_h,
-            NS,
+            self.owner.namespace(),
             prefix,
             &weight.data,
             &bias.data,

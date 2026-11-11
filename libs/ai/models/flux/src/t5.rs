@@ -444,38 +444,56 @@ fn json_f32(value: Option<&JsonValue>, path: &str) -> Result<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::T5Tokenizer;
+    use super::{T5TokenizedPrompt, T5Tokenizer};
+
+    /// A ten-piece Unigram table in the downloaded file's format. Scores are
+    /// chosen so the best split differs from the longest match.
+    const TINY_T5_TABLE: &str = r#"{
+        "added_tokens": [
+            {"id": 0, "content": "<pad>", "special": true},
+            {"id": 1, "content": "</s>", "special": true},
+            {"id": 2, "content": "<unk>", "special": true},
+            {"id": 9, "content": "<extra_id_0>", "special": true}
+        ],
+        "pre_tokenizer": {"type": "Metaspace", "replacement": "▁", "add_prefix_space": true},
+        "model": {"type": "Unigram", "unk_id": 2, "vocab": [
+            ["<pad>", 0.0], ["</s>", 0.0], ["<unk>", -10.0], ["▁", -2.0], ["▁a", -1.0],
+            ["b", -1.5], ["▁ab", -1.0], ["▁abc", -5.0], ["c", -1.5], ["<extra_id_0>", 0.0]
+        ]}
+    }"#;
 
     #[test]
-    fn builds_reference_t5_tokenizer() {
-        let tokenizer = T5Tokenizer::new().unwrap();
-        assert_eq!(tokenizer.vocab_size(), 32_100);
-        assert_eq!(tokenizer.token_to_id("<pad>"), Some(0));
-        assert_eq!(tokenizer.token_to_id("</s>"), Some(1));
-        assert_eq!(tokenizer.token_to_id("<unk>"), Some(2));
-    }
-
-    #[test]
-    fn tokenizes_and_pads_simple_prompt() {
-        let tokenizer = T5Tokenizer::new().unwrap();
-        let tokenized = tokenizer.tokenize("test", 8, true).unwrap();
-        assert_eq!(tokenized.raw_token_ids, vec![794]);
-        assert_eq!(tokenized.eos_index, 1);
-        assert_eq!(tokenized.token_ids, vec![794, 1, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(tokenized.attention_mask, vec![1, 1, 0, 0, 0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn preserves_added_special_tokens() {
-        let tokenizer = T5Tokenizer::new().unwrap();
-        assert_eq!(tokenizer.encode("<extra_id_0>").unwrap(), vec![32_099]);
-    }
-
-    #[test]
-    fn splits_special_tokens_out_of_plain_text() {
-        let tokenizer = T5Tokenizer::new().unwrap();
-        let token_ids = tokenizer.encode("left<extra_id_0>right").unwrap();
-        assert!(token_ids.contains(&32_099));
-        assert_eq!(token_ids.iter().filter(|&&id| id == 32_099).count(), 1);
+    fn tiny_table_normalises_segments_and_pads() {
+        let tokenizer = T5Tokenizer::from_json(TINY_T5_TABLE).expect("inline table parses");
+        assert_eq!(
+            tokenizer.encode("  ab \t\n c ").unwrap(),
+            tokenizer.encode("ab c").unwrap(),
+            "normalisation: whitespace runs collapse to one space and the ends are trimmed"
+        );
+        assert_eq!(
+            tokenizer.encode("abc").unwrap(),
+            vec![6, 8],
+            "segmentation: the highest-scoring split (▁ab + c, -2.5) wins over the longest piece (▁abc, -5)"
+        );
+        assert_eq!(
+            tokenizer.encode("az").unwrap(),
+            vec![4, 2],
+            "unknown pieces: a character no piece covers becomes <unk>"
+        );
+        assert_eq!(
+            tokenizer.encode("ab<extra_id_0>c").unwrap(),
+            vec![6, 9, 3, 8],
+            "special tokens: kept whole as their own id and split out of the surrounding text"
+        );
+        assert_eq!(
+            tokenizer.tokenize("ab", 4, true).unwrap(),
+            T5TokenizedPrompt {
+                raw_token_ids: vec![6],
+                token_ids: vec![6, 1, 0, 0],
+                attention_mask: vec![1, 1, 0, 0],
+                eos_index: 1,
+            },
+            "EOS and padding: </s> follows the text, <pad> fills to max_length, the mask covers text and EOS"
+        );
     }
 }

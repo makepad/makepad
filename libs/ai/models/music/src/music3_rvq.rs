@@ -10,7 +10,7 @@ use crate::music3::{
     MUSIC3_AUDIO_VOCAB, MUSIC3_LM_RMS_EPS, MUSIC3_NUM_CODEBOOKS, MUSIC3_RVQ_FF, MUSIC3_RVQ_HEADS,
     MUSIC3_RVQ_HIDDEN, MUSIC3_RVQ_LAYERS, MUSIC3_RVQ_MAX_POS,
 };
-use crate::music3_weights::{Music3Shards, MUSIC3_RVQ_NAMESPACE};
+use crate::music3_weights::Music3Shards;
 use crate::{DiffusionError, Result};
 
 fn ensure_linear<'a>(
@@ -21,12 +21,12 @@ fn ensure_linear<'a>(
 ) -> Result<GpuLinearPart<'a>> {
     let ggml_type = weights.linear_ggml_type(name);
     if crate::backend::gpu_quant_linear_type_supported(ggml_type) {
-        crate::backend::gpu_weight_cache_ensure_quant(MUSIC3_RVQ_NAMESPACE, name, ggml_type, n, k, || {
+        crate::backend::gpu_weight_cache_ensure_quant(weights.cache_namespace(), name, ggml_type, n, k, || {
             weights.tensor_bytes(name).map_err(|err| err.to_string())
         })
         .map_err(DiffusionError::model)?;
     } else {
-        gpu_weight_cache_ensure(MUSIC3_RVQ_NAMESPACE, name, ggml_type, n, k, false, || {
+        gpu_weight_cache_ensure(weights.cache_namespace(), name, ggml_type, n, k, false, || {
             weights.tensor_bytes(name).map_err(|err| err.to_string())
         })
         .map_err(DiffusionError::model)?;
@@ -40,14 +40,15 @@ fn ensure_linear<'a>(
 }
 
 fn linear_parts(
+    namespace: &str,
     x: &GpuTensor,
     parts: &[GpuLinearPart<'_>],
 ) -> Result<GpuTensor> {
     if crate::backend::gpu_quant_linear_type_supported(parts[0].bt_ggml_type) {
-        return crate::backend::gpu_linear_nt_cached(x, MUSIC3_RVQ_NAMESPACE, parts, &[])
+        return crate::backend::gpu_linear_nt_cached(x, namespace, parts, &[])
             .map_err(DiffusionError::model);
     }
-    gpu_linear_nt_cached_bf16_f32acc(x, MUSIC3_RVQ_NAMESPACE, parts, &[]).map_err(DiffusionError::model)
+    gpu_linear_nt_cached_bf16_f32acc(x, namespace, parts, &[]).map_err(DiffusionError::model)
 }
 
 fn linear(
@@ -57,7 +58,7 @@ fn linear(
     n: usize,
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, n, x.cols())?;
-    linear_parts(x, &[part])
+    linear_parts(weights.cache_namespace(), x, &[part])
 }
 
 pub struct Music3RvqPrepared {
@@ -100,7 +101,7 @@ fn layer_forward(
     let normed = gpu_rms_norm_mul(
         &hidden,
         MUSIC3_RVQ_HIDDEN,
-        MUSIC3_RVQ_NAMESPACE,
+        weights.cache_namespace(),
         &format!("layers.{layer}.input_layernorm"),
         &prepared.input_norm[layer],
         MUSIC3_LM_RMS_EPS,
@@ -114,7 +115,7 @@ fn layer_forward(
         ensure_linear(weights, &k_name, MUSIC3_RVQ_HIDDEN, MUSIC3_RVQ_HIDDEN)?,
         ensure_linear(weights, &v_name, MUSIC3_RVQ_HIDDEN, MUSIC3_RVQ_HIDDEN)?,
     ];
-    let qkv = linear_parts(&normed, &parts)?;
+    let qkv = linear_parts(weights.cache_namespace(), &normed, &parts)?;
     drop(normed);
     let q = crate::backend::gpu_slice_cols(&qkv, 0, MUSIC3_RVQ_HIDDEN).map_err(DiffusionError::model)?;
     let k = crate::backend::gpu_slice_cols(&qkv, MUSIC3_RVQ_HIDDEN, MUSIC3_RVQ_HIDDEN)
@@ -157,7 +158,7 @@ fn layer_forward(
     let normed = gpu_rms_norm_mul(
         &hidden,
         MUSIC3_RVQ_HIDDEN,
-        MUSIC3_RVQ_NAMESPACE,
+        weights.cache_namespace(),
         &format!("layers.{layer}.post_attention_layernorm"),
         &prepared.post_attn_norm[layer],
         MUSIC3_LM_RMS_EPS,
@@ -169,7 +170,7 @@ fn layer_forward(
         ensure_linear(weights, &up_name, MUSIC3_RVQ_FF, MUSIC3_RVQ_HIDDEN)?,
         ensure_linear(weights, &gate_name, MUSIC3_RVQ_FF, MUSIC3_RVQ_HIDDEN)?,
     ];
-    let up_gate = linear_parts(&normed, &parts)?;
+    let up_gate = linear_parts(weights.cache_namespace(), &normed, &parts)?;
     drop(normed);
     let ff = crate::backend::gpu_swiglu_value_gate(&up_gate).map_err(DiffusionError::model)?;
     drop(up_gate);
@@ -226,7 +227,7 @@ fn rvq_forward_gpu_batch(
     gpu_rms_norm_mul(
         &hidden,
         MUSIC3_RVQ_HIDDEN,
-        MUSIC3_RVQ_NAMESPACE,
+        weights.cache_namespace(),
         "norm",
         &prepared.final_norm,
         MUSIC3_LM_RMS_EPS,
@@ -413,11 +414,6 @@ pub fn music3_rvq_audio_head_rows(
         MUSIC3_AUDIO_VOCAB,
     )?;
     gpu_download(&y).map_err(DiffusionError::model)
-}
-
-pub fn music3_rvq_evict() -> Result<usize> {
-    crate::backend::gpu_weight_cache_evict_prefix(&format!("{MUSIC3_RVQ_NAMESPACE}::"))
-        .map_err(DiffusionError::model)
 }
 
 /// Replay one frame of residual codes. `last_hidden` and `semantic_embed` are

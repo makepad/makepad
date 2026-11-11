@@ -115,25 +115,8 @@ where
     out
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct MatmulNtGgmlBytesMatrix<'a> {
-    pub bt_bytes: &'a [u8],
-    pub bt_ggml_type: u32,
-    pub n: usize,
-}
-
-pub fn try_matmul_nt_ggml_bytes_multi(
-    a: &[f32],
-    m: usize,
-    k: usize,
-    matrices: &[MatmulNtGgmlBytesMatrix<'_>],
-) -> Option<Vec<Vec<f32>>> {
-    imp::try_matmul_nt_ggml_bytes_multi(a, m, k, matrices)
-}
-
 /// Same kernels as [`try_matmul_nt_ggml_bytes_keyed`], one activation upload,
-/// one wait. Weights live in the named cache — do not use the uncached multi
-/// path for AR (it re-uploads W whenever the host pointer moves).
+/// one wait. Each weight lives in the named cache under its namespace and key.
 #[derive(Clone, Copy, Debug)]
 pub struct MatmulNtGgmlBytesKeyedMatrix<'a> {
     pub bt_ggml_type: u32,
@@ -954,15 +937,6 @@ mod imp {
         None
     }
 
-    pub(super) fn try_matmul_nt_ggml_bytes_multi(
-        _a: &[f32],
-        _m: usize,
-        _k: usize,
-        _matrices: &[super::MatmulNtGgmlBytesMatrix<'_>],
-    ) -> Option<Vec<Vec<f32>>> {
-        None
-    }
-
     pub(super) fn try_matmul_nt_ggml_bytes_keyed_multi<'a, F>(
         _a: &[f32],
         _m: usize,
@@ -1461,15 +1435,6 @@ mod imp {
     where
         F: FnOnce() -> Result<Cow<'a, [u8]>, String>,
     {
-        None
-    }
-
-    pub(super) fn try_matmul_nt_ggml_bytes_multi(
-        _a: &[f32],
-        _m: usize,
-        _k: usize,
-        _matrices: &[super::MatmulNtGgmlBytesMatrix<'_>],
-    ) -> Option<Vec<Vec<f32>>> {
         None
     }
 
@@ -2575,36 +2540,6 @@ mod imp {
         pad_to(words.saturating_mul(std::mem::size_of::<f32>() / 2), 16)
     }
 
-    fn matmul_cache_tag(bt_ggml_type: u32) -> u8 {
-        match bt_ggml_type {
-            GGML_TYPE_F32 => 2u8,
-            GGML_TYPE_F16 => 3u8,
-            GGML_TYPE_BF16 => 9u8,
-            GGML_TYPE_Q4_0 => 4u8,
-            GGML_TYPE_Q4_1 => 5u8,
-            GGML_TYPE_Q5_0 => 6u8,
-            GGML_TYPE_Q5_1 => 7u8,
-            GGML_TYPE_Q8_0 => 8u8,
-            GGML_TYPE_Q2_K => 10u8,
-            GGML_TYPE_Q3_K => 11u8,
-            GGML_TYPE_Q4_K => 12u8,
-            GGML_TYPE_Q5_K => 13u8,
-            GGML_TYPE_Q6_K => 14u8,
-            _ => 0u8,
-        }
-    }
-
-    fn matmul_batch_tag(bt_ggml_type: u32, index: usize) -> Result<u8, String> {
-        let base = matmul_cache_tag(bt_ggml_type);
-        let slot = u8::try_from(index).map_err(|_| format!("matmul batch index too large: {}", index))?;
-        if slot >= 8 {
-            return Err(format!("matmul batch supports at most 8 outputs, got {}", index + 1));
-        }
-        Ok(128u8
-            .wrapping_add(base.wrapping_mul(8))
-            .wrapping_add(slot))
-    }
-
     fn flash_attn_ext_extra_pad_bytes(
         n_q: usize,
         n_kv: usize,
@@ -3256,7 +3191,6 @@ mod imp {
             self.copy_f32_buffer_contents_readable(buffer, elems)
         }
 
-        #[allow(dead_code)]
         fn get_or_create_cached_f32_buffer(
             &mut self,
             data: &[f32],
@@ -6286,152 +6220,6 @@ mod imp {
             Ok(())
         }
 
-        fn flash_attn_f32_packed(
-            &mut self,
-            q: &[f32],
-            k: &[f32],
-            v: &[f32],
-            n_q: usize,
-            n_kv: usize,
-            n_head: usize,
-            d: usize,
-            scale: f32,
-        ) -> Result<Vec<f32>, String> {
-            if n_q == 0 || n_kv == 0 || n_head == 0 || d == 0 {
-                return Ok(Vec::new());
-            }
-
-            let q_need = n_q
-                .checked_mul(n_head)
-                .and_then(|v| v.checked_mul(d))
-                .ok_or_else(|| "overflow computing flash q size".to_string())?;
-            if q.len() != q_need {
-                return Err(format!(
-                    "flash q len mismatch: got {}, expected {}",
-                    q.len(),
-                    q_need
-                ));
-            }
-
-            let kv_need = n_kv
-                .checked_mul(n_head)
-                .and_then(|v| v.checked_mul(d))
-                .ok_or_else(|| "overflow computing flash kv size".to_string())?;
-            if k.len() != kv_need {
-                return Err(format!(
-                    "flash k len mismatch: got {}, expected {}",
-                    k.len(),
-                    kv_need
-                ));
-            }
-            if v.len() != kv_need {
-                return Err(format!(
-                    "flash v len mismatch: got {}, expected {}",
-                    v.len(),
-                    kv_need
-                ));
-            }
-
-            let out_elems = n_q
-                .checked_mul(n_head)
-                .and_then(|v| v.checked_mul(d))
-                .ok_or_else(|| "overflow computing flash output size".to_string())?;
-            let out_bytes = out_elems
-                .checked_mul(std::mem::size_of::<f32>())
-                .ok_or_else(|| "overflow computing flash output bytes".to_string())?;
-
-            let q_bytes = unsafe {
-                std::slice::from_raw_parts(
-                    q.as_ptr() as *const u8,
-                    q.len() * std::mem::size_of::<f32>(),
-                )
-            };
-            let k_bytes = unsafe {
-                std::slice::from_raw_parts(
-                    k.as_ptr() as *const u8,
-                    k.len() * std::mem::size_of::<f32>(),
-                )
-            };
-            let v_bytes = unsafe {
-                std::slice::from_raw_parts(
-                    v.as_ptr() as *const u8,
-                    v.len() * std::mem::size_of::<f32>(),
-                )
-            };
-
-            let q_buf = self.new_buffer_with_bytes(q_bytes)?;
-            let k_buf = self.new_buffer_with_bytes(k_bytes)?;
-            let v_buf = self.new_buffer_with_bytes(v_bytes)?;
-            let dst_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_OUT, out_bytes)?;
-
-            let params = FlashAttnExtParams::default();
-            let kv_type = Src0Type::F32;
-            let kv_elem_bytes = flash_attn_kv_elem_bytes(kv_type)?;
-            let use_vec = flash_attn_use_vec(n_q, d);
-            let pad_bytes = flash_attn_ext_extra_pad_bytes(
-                n_q,
-                n_kv,
-                n_head,
-                d,
-                kv_elem_bytes,
-                params.has_mask,
-                use_vec,
-            )?;
-            let pad_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_PAD, pad_bytes)?;
-
-            if use_vec {
-                let tmp_bytes = flash_attn_ext_extra_tmp_bytes(n_q, n_head, d, 32)?;
-                let tmp_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_TMP, tmp_bytes)?;
-
-                self.dispatch_flash_attn_ext_vec_f32(
-                    q_buf.as_id(),
-                    k_buf.as_id(),
-                    v_buf.as_id(),
-                    q_buf.as_id(), // unused when has_mask=false
-                    q_buf.as_id(), // unused when has_sinks=false
-                    pad_id,
-                    Some(tmp_id),
-                    dst_id,
-                    n_q,
-                    n_kv,
-                    n_head,
-                    d,
-                    kv_type,
-                    scale,
-                    params.has_mask,
-                    params.has_sinks,
-                    params.max_bias,
-                    params.logit_softcap,
-                )?;
-            } else {
-                let blk_bytes = flash_attn_ext_extra_blk_bytes(n_q, n_kv, params.has_mask, false)?;
-                let blk_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_BLK, blk_bytes)?;
-
-                self.dispatch_flash_attn_ext_f32(
-                    q_buf.as_id(),
-                    k_buf.as_id(),
-                    v_buf.as_id(),
-                    q_buf.as_id(), // unused when has_mask=false
-                    q_buf.as_id(), // unused when has_sinks=false
-                    pad_id,
-                    blk_id,
-                    dst_id,
-                    n_q,
-                    n_kv,
-                    n_head,
-                    d,
-                    kv_type,
-                    scale,
-                    params.has_mask,
-                    params.has_sinks,
-                    params.max_bias,
-                    params.logit_softcap,
-                )?;
-            }
-
-            self.read_f32_buffer(dst_id, out_elems)
-        }
-
         fn flash_attn_f32_from_buffers(
             &mut self,
             q_id: ObjcId,
@@ -6751,6 +6539,7 @@ mod imp {
             }
         }
 
+        #[cfg(test)]
         fn matmul_nt_ggml_bytes_impl(
             &mut self,
             a: &[f32],
@@ -6790,21 +6579,6 @@ mod imp {
             )?;
 
             Ok((dst_buffer, m, n))
-        }
-
-        fn matmul_nt_ggml_bytes(
-            &mut self,
-            a: &[f32],
-            bt_bytes: &[u8],
-            bt_ggml_type: u32,
-            m: usize,
-            k: usize,
-            n: usize,
-        ) -> Result<Vec<f32>, String> {
-            let tag = matmul_cache_tag(bt_ggml_type);
-            let (dst, mr, nr) =
-                self.matmul_nt_ggml_bytes_impl(a, bt_bytes, bt_ggml_type, m, k, n, Some(tag))?;
-            self.read_f32_buffer(dst.as_id(), mr * nr)
         }
 
         /// Dispatch into a destination owned by the caller (the activation pool).
@@ -7250,59 +7024,6 @@ mod imp {
             })?;
             self.wait_queue_idle()?;
             self.act_read("ffy", m * hidden_w)
-        }
-
-        fn matmul_nt_ggml_bytes_multi(
-            &mut self,
-            a: &[f32],
-            m: usize,
-            k: usize,
-            matrices: &[super::MatmulNtGgmlBytesMatrix<'_>],
-        ) -> Result<Vec<Vec<f32>>, String> {
-            if matrices.is_empty() {
-                return Ok(Vec::new());
-            }
-            let mk = m
-                .checked_mul(k)
-                .ok_or_else(|| "matmul overflow computing m*k".to_string())?;
-            if a.len() != mk {
-                return Err(format!(
-                    "lhs len mismatch: got {}, expected {}",
-                    a.len(),
-                    mk
-                ));
-            }
-
-            let a_bytes = unsafe {
-                std::slice::from_raw_parts(
-                    a.as_ptr() as *const u8,
-                    a.len() * std::mem::size_of::<f32>(),
-                )
-            };
-            let src1_buffer = self.new_buffer_with_bytes(a_bytes)?;
-            let outputs = self.with_batch(|this| {
-                let mut outputs = Vec::with_capacity(matrices.len());
-                for (index, matrix) in matrices.iter().enumerate() {
-                    let tag = matmul_batch_tag(matrix.bt_ggml_type, index)?;
-                    let dst = this.matmul_nt_ggml_from_src1_buffer(
-                        src1_buffer.as_id(),
-                        matrix.bt_bytes,
-                        matrix.bt_ggml_type,
-                        m,
-                        k,
-                        matrix.n,
-                        Some(tag),
-                    )?;
-                    outputs.push((dst, matrix.n));
-                }
-                Ok(outputs)
-            })?;
-            self.wait_queue_idle()?;
-            let mut result = Vec::with_capacity(outputs.len());
-            for (buffer, n_out) in outputs {
-                result.push(self.copy_f32_buffer_contents_readable(buffer.as_id(), m * n_out)?);
-            }
-            Ok(result)
         }
 
     }
@@ -8463,7 +8184,18 @@ mod imp {
         k: usize,
         n: usize,
     ) -> Option<Vec<f32>> {
-        with_context(|ctx| ctx.matmul_nt_ggml_bytes(a, bt_bytes, bt_ggml_type, m, k, n))
+        if a.len() != m.checked_mul(k)? || m == 0 || k == 0 || n == 0 {
+            return None;
+        }
+        tensor_try(|| {
+            let a_shape = shape4_from_row_major(&[m, k], 4)?;
+            let out_shape = shape4_from_row_major(&[m, n], 4)?;
+            let a = tensor_upload_f32(a, &a_shape)?;
+            let weight = tensor_upload_bytes(bt_bytes)?;
+            tensor_host_result(&out_shape, |out| {
+                tensor_matmul(&a, 0, &weight, 0, out, m, k, n, bt_ggml_type)
+            })
+        })
     }
 
     pub(super) fn try_matmul_nt_ggml_bytes_keyed<'a, F>(
@@ -8491,15 +8223,6 @@ mod imp {
                 tensor_matmul(&a, 0, &weight, 0, out, m, k, n, bt_ggml_type)
             })
         })
-    }
-
-    pub(super) fn try_matmul_nt_ggml_bytes_multi(
-        a: &[f32],
-        m: usize,
-        k: usize,
-        matrices: &[super::MatmulNtGgmlBytesMatrix<'_>],
-    ) -> Option<Vec<Vec<f32>>> {
-        with_context(|ctx| ctx.matmul_nt_ggml_bytes_multi(a, m, k, matrices))
     }
 
     pub(super) fn try_matmul_nt_ggml_bytes_keyed_multi<'a, F>(
@@ -8675,7 +8398,21 @@ mod imp {
         d: usize,
         scale: f32,
     ) -> Option<Vec<f32>> {
-        with_context(|ctx| ctx.flash_attn_f32_packed(q, k, v, n_q, n_kv, n_head, d, scale))
+        if n_q == 0 || n_kv == 0 || n_head == 0 || d == 0 {
+            return Some(Vec::new());
+        }
+        let width = n_head.checked_mul(d)?;
+        if q.len() != n_q.checked_mul(width)? || k.len() != n_kv.checked_mul(width)? || v.len() != k.len() {
+            return None;
+        }
+        tensor_try(|| {
+            let q_shape = shape4_from_row_major(&[n_q, width], 4)?;
+            let kv_shape = shape4_from_row_major(&[n_kv, width], 4)?;
+            let q = tensor_upload_f32(q, &q_shape)?;
+            let k = tensor_upload_f32(k, &kv_shape)?;
+            let v = tensor_upload_f32(v, &kv_shape)?;
+            tensor_host_result(&q_shape, |out| tensor_attention(&q, 0, &k, 0, &v, 0, out, n_q, n_kv, n_head, d, scale))
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -8889,72 +8626,19 @@ mod imp {
         pad_y: usize,
         im2col_budget_bytes: usize,
     ) -> Option<Vec<f32>> {
-        with_context(|ctx| {
+        tensor_try(|| {
             if width == 0 || height == 0 || in_channels == 0 || out_channels == 0 || kw == 0 || kh == 0 {
                 return Err("conv2d requires non-empty extents".into());
             }
-            let overflow = || "conv2d extent overflow".to_string();
-            let plane = width.checked_mul(height).ok_or_else(overflow)?;
-            let k = in_channels.checked_mul(kh).and_then(|v| v.checked_mul(kw)).ok_or_else(overflow)?;
-            let ow = pad_x.checked_mul(2).and_then(|v| width.checked_add(v))
-                .and_then(|v| v.checked_sub(kw)).and_then(|v| v.checked_add(1)).ok_or_else(overflow)?;
-            let oh = pad_y.checked_mul(2).and_then(|v| height.checked_add(v))
-                .and_then(|v| v.checked_sub(kh)).and_then(|v| v.checked_add(1)).ok_or_else(overflow)?;
-            let pixels = ow.checked_mul(oh).ok_or_else(overflow)?;
-            let output_elems = pixels.checked_mul(out_channels).ok_or_else(overflow)?;
-            if input.len() != in_channels.checked_mul(plane).ok_or_else(overflow)?
-                || weights.len() != out_channels.checked_mul(k).ok_or_else(overflow)?
-                || (!bias.is_empty() && bias.len() != out_channels)
-            {
-                return Err("conv2d input/weight/bias shape mismatch".into());
+            let plane = width.checked_mul(height).ok_or("conv2d extent overflow")?;
+            if input.len() != in_channels.checked_mul(plane).ok_or("conv2d extent overflow")? {
+                return Err("conv2d input shape mismatch".into());
             }
-            let row_bytes = ow.checked_mul(k).and_then(|v| v.checked_mul(4)).ok_or_else(overflow)?;
-            let band_rows = (im2col_budget_bytes / row_bytes).max(1).min(oh);
-            let scratch_bytes = band_rows.checked_mul(row_bytes).ok_or_else(overflow)?;
-            let input_bytes = input.len().checked_mul(4).ok_or_else(overflow)?;
-            let weight_bytes = weights.len().checked_mul(4).ok_or_else(overflow)?;
-            let src = ctx.new_buffer_with_bytes(unsafe {
-                std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), input_bytes)
-            })?;
-            let weight = ctx.new_buffer_with_bytes(unsafe {
-                std::slice::from_raw_parts(weights.as_ptr().cast::<u8>(), weight_bytes)
-            })?;
-            // Reuse one scratch buffer: im2col and GEMM dispatches are ordered in the batch.
-            let scratch = ctx.new_buffer_with_length(scratch_bytes)?;
-            let bands = ctx.with_batch(|ctx| {
-                let mut bands = Vec::new();
-                for r0 in (0..oh).step_by(band_rows) {
-                    let rows = band_rows.min(oh - r0);
-                    let m = rows.checked_mul(ow).ok_or_else(overflow)?;
-                    let dst_bytes = m.checked_mul(out_channels).and_then(|v| v.checked_mul(4)).ok_or_else(overflow)?;
-                    let dst = ctx.new_buffer_with_length(dst_bytes)?;
-                    let origin = r0.saturating_sub(pad_y).min(height);
-                    let src_offset = origin.checked_mul(width).and_then(|v| v.checked_mul(4)).ok_or_else(overflow)?;
-                    ctx.dispatch_im2col_2d_f32(
-                        src.as_id(), src_offset, scratch.as_id(), in_channels,
-                        width, height - origin, plane, kw, kh,
-                        pad_x, pad_y.saturating_sub(r0), ow, rows,
-                    )?;
-                    ctx.matmul_nt_into_buffer(
-                        GGML_TYPE_F32, weight.as_id(), scratch.as_id(), dst.as_id(),
-                        m, k, out_channels,
-                    )?;
-                    bands.push((r0, m, dst));
-                }
-                Ok(bands)
-            })?;
-            ctx.wait_queue_idle()?;
-            let mut out = vec![0.0; output_elems];
-            for (r0, m, dst) in bands {
-                let values = ctx.copy_f32_buffer_contents_readable(dst.as_id(), m * out_channels)?;
-                for c in 0..out_channels {
-                    let b = bias.get(c).copied().unwrap_or(0.0);
-                    for p in 0..m {
-                        out[c * pixels + r0 * ow + p] = values[p * out_channels + c] + b;
-                    }
-                }
-            }
-            Ok(out)
+            let x = crate::gpu_tensor::upload(input, in_channels, plane)?;
+            let out = crate::gpu_tensor::conv2d_planar_banded(
+                &x, width, height, weights, bias, out_channels, kw, kh, pad_x, pad_y, im2col_budget_bytes,
+            )?;
+            crate::gpu_tensor::download(&out)
         })
     }
 

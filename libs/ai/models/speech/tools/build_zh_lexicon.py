@@ -20,7 +20,8 @@ reads them), entries sorted by key bytes:
     zh_words.bin    key: a word the segmenter knows; value: "<freq> <pos>".
                     The key "\\0total" holds the sum of all frequencies (also of
                     the words pruned for size), so word probabilities match the
-                    unpruned dictionary.
+                    unpruned dictionary. A key ends at its first NUL, so the
+                    reader finds the total under the empty key.
 """
 
 import re

@@ -9,9 +9,8 @@ use crate::backend::{
     gpu_add_bf16, gpu_attention_packed_bf16, gpu_attention_packed_cross_bf16,
     gpu_bf16_round, gpu_download, gpu_gather_cols, gpu_gelu_erf, gpu_layer_norm_pytorch,
     gpu_linear_nt_cached_bf16_bias_epilogue, gpu_linear_nt_cached_bf16_f32acc,
-    gpu_linear_nt_cached_bf16_mm, gpu_rms_norm_mul_bf16,
-    gpu_skintokens_michelangelo_fourier, gpu_slice_cols, gpu_upload, gpu_weight_cache_ensure,
-    gpu_weight_cache_evict_prefix, GpuLinearPart, GpuTensor,
+    gpu_linear_nt_cached_bf16_mm, gpu_rms_norm_mul_bf16, gpu_skintokens_michelangelo_fourier,
+    gpu_slice_cols, gpu_upload, gpu_weight_cache_ensure, GpuLinearPart, GpuTensor,
 };
 use crate::skin_tokens::SkinTokensWeights;
 use crate::skin_tokens_condition::{
@@ -21,8 +20,6 @@ use crate::skin_tokens_condition::{
 use crate::{DiffusionError, Result};
 use makepad_ai_common::quant::GGML_TYPE_BF16;
 use makepad_ai_loader::MlxDType;
-
-pub const SKIN_TOKENS_NEURAL_NAMESPACE: &str = "skin-tokens-tokenrig-bf16";
 
 fn check_cancel(cancel: Option<&dyn Fn() -> bool>) -> Result<()> {
     if cancel.is_some_and(|is_cancelled| is_cancelled()) {
@@ -160,7 +157,7 @@ fn ensure_bf16_linear<'a>(
         )));
     }
     gpu_weight_cache_ensure(
-        SKIN_TOKENS_NEURAL_NAMESPACE,
+        weights.cache_namespace(),
         name,
         GGML_TYPE_BF16,
         output_cols,
@@ -295,7 +292,7 @@ pub(crate) fn ensure_packed_bf16_linear<'a>(
         }
     }
     gpu_weight_cache_ensure(
-        SKIN_TOKENS_NEURAL_NAMESPACE,
+        weights.cache_namespace(),
         cache_key,
         GGML_TYPE_BF16,
         width * streams,
@@ -348,13 +345,8 @@ pub(crate) fn linear_bf16_optional_bias(
         }
         None => Vec::new(),
     };
-    let output = gpu_linear_nt_cached_bf16_f32acc(
-        input,
-        SKIN_TOKENS_NEURAL_NAMESPACE,
-        &[part],
-        &bias,
-    )
-    .map_err(DiffusionError::model)?;
+    let output = gpu_linear_nt_cached_bf16_f32acc(input, weights.cache_namespace(), &[part], &bias)
+        .map_err(DiffusionError::model)?;
     gpu_bf16_round(&output).map_err(DiffusionError::model)
 }
 
@@ -393,13 +385,8 @@ pub(crate) fn linear_bf16_bias_epilogue(
             bias.len(),
         )));
     }
-    gpu_linear_nt_cached_bf16_bias_epilogue(
-        input,
-        SKIN_TOKENS_NEURAL_NAMESPACE,
-        &[part],
-        &bias,
-    )
-    .map_err(DiffusionError::model)
+    gpu_linear_nt_cached_bf16_bias_epilogue(input, weights.cache_namespace(), &[part], &bias)
+        .map_err(DiffusionError::model)
 }
 
 /// Exact pinned-Torch bias-free BF16 linear for independently replayed
@@ -411,7 +398,7 @@ pub(crate) fn linear_bf16_mm(
     output_cols: usize,
 ) -> Result<GpuTensor> {
     let part = ensure_bf16_linear(weights, weight_name, output_cols, input.cols())?;
-    gpu_linear_nt_cached_bf16_mm(input, SKIN_TOKENS_NEURAL_NAMESPACE, &[part])
+    gpu_linear_nt_cached_bf16_mm(input, weights.cache_namespace(), &[part])
         .map_err(DiffusionError::model)
 }
 
@@ -441,21 +428,10 @@ pub(crate) fn packed_linear_bf16(
     width: usize,
     heads: usize,
 ) -> Result<GpuTensor> {
-    let part = ensure_packed_bf16_linear(
-        weights,
-        source_names,
-        cache_key,
-        width,
-        heads,
-        input.cols(),
-    )?;
-    let output = gpu_linear_nt_cached_bf16_f32acc(
-        input,
-        SKIN_TOKENS_NEURAL_NAMESPACE,
-        &[part],
-        &[],
-    )
-    .map_err(DiffusionError::model)?;
+    let part =
+        ensure_packed_bf16_linear(weights, source_names, cache_key, width, heads, input.cols())?;
+    let output = gpu_linear_nt_cached_bf16_f32acc(input, weights.cache_namespace(), &[part], &[])
+        .map_err(DiffusionError::model)?;
     gpu_bf16_round(&output).map_err(DiffusionError::model)
 }
 
@@ -987,7 +963,7 @@ fn encode_mesh_prefix_inner(
     let prefix = gpu_rms_norm_mul_bf16(
         &output_linear,
         896,
-        SKIN_TOKENS_NEURAL_NAMESPACE,
+        weights.cache_namespace(),
         "output_proj.1",
         &rms_scale,
         f32::EPSILON,
@@ -1044,14 +1020,6 @@ pub fn encode_mesh_prefix_tapped(
 ) -> Result<(SkinTokensMeshPrefix, SkinTokensMeshEncoderTap)> {
     let (result, taps) = encode_mesh_prefix_inner(weights, condition, true, None)?;
     Ok((result, taps.expect("capture_taps requested")))
-}
-
-/// Evict every streamed TokenRig matrix. Service unload calls this after
-/// dropping resident activation/model state.
-pub fn unload_skin_tokens_neural_weights() -> Result<()> {
-    gpu_weight_cache_evict_prefix(SKIN_TOKENS_NEURAL_NAMESPACE)
-        .map_err(DiffusionError::model)
-        .map(|_| ())
 }
 
 #[cfg(test)]

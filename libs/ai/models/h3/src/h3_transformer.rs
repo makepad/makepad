@@ -26,7 +26,6 @@ use crate::h3::{
 };
 use crate::{DiffusionError, Result};
 
-pub const H3_DIT_NAMESPACE: &str = "h3dit";
 const ADALN_COLS: usize = 6 * H3_HIDDEN_SIZE * 3; // 96768 per block
 const ADALN_STRIDE: usize = 6 * H3_HIDDEN_SIZE; // 32256 per (timestep, modality) row
 const NORM_OUT_COLS: usize = 2 * H3_HIDDEN_SIZE; // shift | scale
@@ -238,7 +237,6 @@ impl H3DitPrepared {
 /// component eviction; only the current block's small table is uploaded during
 /// a forward. This avoids retaining the 26 GB BF16 projection weights.
 pub(crate) struct H3AdaLnCache {
-    namespace: String,
     precision: GemmPrecision,
     values: Vec<Vec<u32>>,
     // [step][layer][row * ADALN_COLS + column]
@@ -246,17 +244,16 @@ pub(crate) struct H3AdaLnCache {
 }
 
 impl H3AdaLnCache {
-    pub(crate) fn matches(&self, weights: &H3ShardedWeights, values: &[Vec<f32>], precision: GemmPrecision) -> bool {
-        self.namespace == weights.dit_namespace()
-            && self.precision == precision
+    pub(crate) fn matches(&self, values: &[Vec<f32>], precision: GemmPrecision) -> bool {
+        self.precision == precision
             && self.values.len() == values.len()
             && self.values.iter().zip(values).all(|(a, b)| {
                 a.iter().copied().eq(b.iter().map(|v| v.to_bits()))
             })
     }
 
-    fn table(&self, weights: &H3ShardedWeights, values: &[f32], precision: GemmPrecision, layer: usize) -> Option<&[f32]> {
-        if self.namespace != weights.dit_namespace() || self.precision != precision {
+    fn table(&self, values: &[f32], precision: GemmPrecision, layer: usize) -> Option<&[f32]> {
+        if self.precision != precision {
             return None;
         }
         let step = self.values.iter().position(|a| a.iter().copied().eq(values.iter().map(|v| v.to_bits())))?;
@@ -290,13 +287,12 @@ impl H3AdaLnCache {
                 Ok(())
             })();
             // Also release this projection when cancelled or when a copy fails.
-            let release = gpu_weight_cache_evict_prefix(&format!("{}::{name}", weights.dit_namespace()))
+            let release = gpu_weight_cache_evict_prefix(&format!("{}::{name}", weights.cache_namespace()))
                 .map_err(DiffusionError::model);
             result?;
             release?;
         }
         Ok(Self {
-            namespace: weights.dit_namespace().to_string(),
             precision,
             values: values.iter().map(|step| step.iter().map(|v| v.to_bits()).collect()).collect(),
             tables,
@@ -333,13 +329,13 @@ fn ensure_linear<'a>(
 ) -> Result<GpuLinearPart<'a>> {
     let ggml_type = weights.linear_ggml_type(name)?;
     if crate::backend::gpu_quant_linear_type_supported(ggml_type) {
-        gpu_weight_cache_ensure_quant(weights.dit_namespace(), name, ggml_type, n, k, || {
+        gpu_weight_cache_ensure_quant(weights.cache_namespace(), name, ggml_type, n, k, || {
             weights.tensor_bytes(name).map_err(|err| err.to_string())
         })
         .map_err(DiffusionError::model)?;
     } else {
         let want_a16 = precision.f16_accumulate && m > 1;
-        gpu_weight_cache_ensure(weights.dit_namespace(), name, ggml_type, n, k, want_a16, || {
+        gpu_weight_cache_ensure(weights.cache_namespace(), name, ggml_type, n, k, want_a16, || {
             weights.tensor_bytes(name).map_err(|err| err.to_string())
         })
         .map_err(DiffusionError::model)?;
@@ -366,7 +362,7 @@ fn linear_cached(
     if out_half {
         gpu_linear_nt_cached_f16_with_precision(
             x,
-            weights.dit_namespace(),
+            weights.cache_namespace(),
             &parts,
             bias,
             precision,
@@ -374,7 +370,7 @@ fn linear_cached(
     } else {
         gpu_linear_nt_cached_with_precision(
             x,
-            weights.dit_namespace(),
+            weights.cache_namespace(),
             &parts,
             bias,
             precision,
@@ -401,7 +397,7 @@ fn qkv_cached(
     let qkv = if out_half {
         gpu_linear_nt_cached_f16_with_precision(
             x,
-            weights.dit_namespace(),
+            weights.cache_namespace(),
             &parts,
             &[],
             precision,
@@ -409,7 +405,7 @@ fn qkv_cached(
     } else {
         gpu_linear_nt_cached_with_precision(
             x,
-            weights.dit_namespace(),
+            weights.cache_namespace(),
             &parts,
             &[],
             precision,
@@ -491,7 +487,7 @@ fn refiner_block(
     let normed = gpu_rms_norm_mul(
         &hidden,
         H3_HIDDEN_SIZE,
-        weights.dit_namespace(),
+        weights.cache_namespace(),
         &format!("{prefix}.norm1"),
         &prepared.refiner_norm1[layer],
         H3_NORM_EPS,
@@ -502,7 +498,7 @@ fn refiner_block(
     let q = gpu_rms_norm_mul(
         &q,
         H3_HEAD_DIM,
-        weights.dit_namespace(),
+        weights.cache_namespace(),
         &format!("{prefix}.attn.norm_q"),
         &prepared.refiner_q_norm[layer],
         H3_NORM_EPS,
@@ -511,7 +507,7 @@ fn refiner_block(
     let k = gpu_rms_norm_mul(
         &k,
         H3_HEAD_DIM,
-        weights.dit_namespace(),
+        weights.cache_namespace(),
         &format!("{prefix}.attn.norm_k"),
         &prepared.refiner_k_norm[layer],
         H3_NORM_EPS,
@@ -534,7 +530,7 @@ fn refiner_block(
     let normed = gpu_rms_norm_mul(
         &hidden,
         H3_HIDDEN_SIZE,
-        weights.dit_namespace(),
+        weights.cache_namespace(),
         &format!("{prefix}.norm2"),
         &prepared.refiner_norm2[layer],
         H3_NORM_EPS,
@@ -617,7 +613,7 @@ pub fn h3_dit_forward(
     text = gpu_rms_norm_mul(
         &text,
         H3_HIDDEN_SIZE,
-        weights.dit_namespace(),
+        weights.cache_namespace(),
         "token_refiner.final_norm",
         &prepared.refiner_final_norm,
         H3_NORM_EPS,
@@ -713,7 +709,7 @@ pub fn h3_dit_forward(
         // rows addressed by adaln_idx. Chunks: shift_msa, scale_msa,
         // gate_msa, shift_mlp, scale_mlp, gate_mlp.
         let cached = prepared.adaln_cache.as_ref()
-            .and_then(|cache| cache.table(weights, &plan.values, precision, layer));
+            .and_then(|cache| cache.table(&plan.values, precision, layer));
         let table = if let Some(table) = cached {
             gpu_upload(table, m_pad, ADALN_COLS).map_err(DiffusionError::model)?
         } else {
@@ -744,7 +740,7 @@ pub fn h3_dit_forward(
         let q = gpu_rms_norm_mul(
             &q,
             H3_HEAD_DIM,
-            weights.dit_namespace(),
+            weights.cache_namespace(),
             &format!("{prefix}.attn.norm_q"),
             &prepared.q_norm[layer],
             H3_NORM_EPS,
@@ -753,7 +749,7 @@ pub fn h3_dit_forward(
         let k = gpu_rms_norm_mul(
             &k,
             H3_HEAD_DIM,
-            weights.dit_namespace(),
+            weights.cache_namespace(),
             &format!("{prefix}.attn.norm_k"),
             &prepared.k_norm[layer],
             H3_NORM_EPS,

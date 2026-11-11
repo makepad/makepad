@@ -15,6 +15,7 @@ use crate::ace::{
     ACE_IN_CHANNELS, ACE_LATENT_DIM, ACE_LYRIC_LAYERS, ACE_PATCH_SIZE, ACE_RMS_EPS,
     ACE_SLIDING_WINDOW, ACE_TE_HIDDEN, ACE_TEXT_HIDDEN, ACE_TIME_FREQ_DIM, ACE_TIMBRE_LAYERS,
 };
+use crate::backend::WeightOwner;
 use crate::error::{DiffusionError, Result};
 use makepad_ai_h3::h3::H3ShardedWeights;
 use makepad_ai_sfx::sa3::{linear, par_rows, rms_norm_rows, silu};
@@ -635,6 +636,7 @@ impl AceConditionEncoder {
                 .collect()
         };
         AceCondDevice {
+            owner: WeightOwner::new("ace-cond"),
             text_proj: Bf16Weight::new("acecond.tp", &self.text_proj, h, ACE_TE_HIDDEN),
             lyric_embed: Bf16Weight::new("acecond.ly", &self.lyric_embed, h, ACE_TEXT_HIDDEN),
             lyric_embed_b: self.lyric_embed_b.clone().unwrap_or_else(|| vec![0f32; h]),
@@ -669,10 +671,10 @@ impl AceConditionEncoder {
         let scale = 1.0 / (hd as f32).sqrt();
         let half = hd / 2;
         let lin = |x: &makepad_ai_common::backend::cuda::GpuTensor, w: &Bf16Weight| {
-            gpu_linear_nt_cached_bf16_mm(x, "acecond", &[w.part()])
+            gpu_linear_nt_cached_bf16_mm(x, device.owner.namespace(), &[w.part()])
         };
         let lin_b = |x: &makepad_ai_common::backend::cuda::GpuTensor, w: &Bf16Weight, bias: &[f32]| {
-            gpu_linear_nt_cached_bf16_bias_epilogue(x, "acecond", &[w.part()], bias)
+            gpu_linear_nt_cached_bf16_bias_epilogue(x, device.owner.namespace(), &[w.part()], bias)
         };
 
         let text_up = gpu_upload(text_hidden, text_len, ACE_TE_HIDDEN)
@@ -688,11 +690,12 @@ impl AceConditionEncoder {
         let ly_sin = gpu_upload(&ly_sin_h, lyric_len, half).map_err(|e| dev_err("ace cond ly sin", e))?;
         for (i, (layer, devb)) in self.lyric_layers.iter().zip(&device.lyric_layers).enumerate() {
             lyrics = cond_enc_layer_dev(
+                device.owner.namespace(),
                 &lyrics, layer, devb, lyric_len, h, q_heads, kv_heads, hd, qdim, group, scale, half,
                 &ly_cos, &ly_sin, i, lin,
             )?;
         }
-        lyrics = ace_rms_two_store(&lyrics, &self.lyric_norm, h, "acecond.ly.norm", ACE_RMS_EPS)?;
+        lyrics = ace_rms_two_store(device.owner.namespace(), &lyrics, &self.lyric_norm, h, "acecond.ly.norm", ACE_RMS_EPS)?;
 
         let tb_up = gpu_upload(refer_audio, refer_frames, ACE_LATENT_DIM)
             .map_err(|e| dev_err("ace cond tb up", e))?;
@@ -703,11 +706,12 @@ impl AceConditionEncoder {
         let tb_sin = gpu_upload(&tb_sin_h, refer_frames, half).map_err(|e| dev_err("ace cond tb sin", e))?;
         for (i, (layer, devb)) in self.timbre_layers.iter().zip(&device.timbre_layers).enumerate() {
             timbre = cond_enc_layer_dev(
+                device.owner.namespace(),
                 &timbre, layer, devb, refer_frames, h, q_heads, kv_heads, hd, qdim, group, scale,
                 half, &tb_cos, &tb_sin, i + 100, lin,
             )?;
         }
-        timbre = ace_rms_two_store(&timbre, &self.timbre_norm, h, "acecond.tb.norm", ACE_RMS_EPS)?;
+        timbre = ace_rms_two_store(device.owner.namespace(), &timbre, &self.timbre_norm, h, "acecond.tb.norm", ACE_RMS_EPS)?;
 
         let text_h = gpu_download(&text).map_err(|e| dev_err("ace cond text dl", e))?;
         let lyrics_h = gpu_download(&lyrics).map_err(|e| dev_err("ace cond ly dl", e))?;
@@ -729,6 +733,7 @@ impl AceConditionEncoder {
 }
 
 fn cond_enc_layer_dev(
+    namespace: &str,
     x: &makepad_ai_common::backend::cuda::GpuTensor,
     layer: &EncLayer,
     devb: &EncDevLayer,
@@ -755,12 +760,12 @@ fn cond_enc_layer_dev(
         gpu_bf16_round, gpu_mul, gpu_rope_half, gpu_silu,
     };
     let _ = (seq, qdim);
-    let normed = ace_rms_two_store(x, &layer.input_ln, dim, &format!("acecond.l{idx}.in"), ACE_RMS_EPS)?;
+    let normed = ace_rms_two_store(namespace, x, &layer.input_ln, dim, &format!("acecond.l{idx}.in"), ACE_RMS_EPS)?;
     let q = lin(&normed, &devb.q).map_err(|e| dev_err("ace cond q", e))?;
     let k = lin(&normed, &devb.k).map_err(|e| dev_err("ace cond k", e))?;
     let v = lin(&normed, &devb.v).map_err(|e| dev_err("ace cond v", e))?;
-    let q = ace_rms_two_store(&q, &layer.q_norm, hd, &format!("acecond.l{idx}.qn"), ACE_RMS_EPS)?;
-    let k = ace_rms_two_store(&k, &layer.k_norm, hd, &format!("acecond.l{idx}.kn"), ACE_RMS_EPS)?;
+    let q = ace_rms_two_store(namespace, &q, &layer.q_norm, hd, &format!("acecond.l{idx}.qn"), ACE_RMS_EPS)?;
+    let k = ace_rms_two_store(namespace, &k, &layer.k_norm, hd, &format!("acecond.l{idx}.kn"), ACE_RMS_EPS)?;
     let q = gpu_rope_half(&q, q_heads, half, rope_cos, rope_sin).map_err(|e| dev_err("ace cond rq", e))?;
     let k = gpu_rope_half(&k, kv_heads, half, rope_cos, rope_sin).map_err(|e| dev_err("ace cond rk", e))?;
     let q = gpu_bf16_round(&q).map_err(|e| dev_err("ace cond rq rnd", e))?;
@@ -778,7 +783,7 @@ fn cond_enc_layer_dev(
     let mut h = gpu_add(x, &proj).map_err(|e| dev_err("ace cond attn add", e))?;
     h = gpu_bf16_round(&h).map_err(|e| dev_err("ace cond attn add rnd", e))?;
 
-    let fnorm = ace_rms_two_store(&h, &layer.post_ln, dim, &format!("acecond.l{idx}.pn"), ACE_RMS_EPS)?;
+    let fnorm = ace_rms_two_store(namespace, &h, &layer.post_ln, dim, &format!("acecond.l{idx}.pn"), ACE_RMS_EPS)?;
     let gate = lin(&fnorm, &devb.gate).map_err(|e| dev_err("ace cond gate", e))?;
     let up = lin(&fnorm, &devb.up).map_err(|e| dev_err("ace cond up", e))?;
     let act = gpu_silu(&gate).map_err(|e| dev_err("ace cond silu", e))?;
@@ -839,6 +844,7 @@ fn apply_time_embed(embed: &TimeEmbed, t: f32, dim: usize) -> (Vec<f32>, Vec<f32
 }
 
 fn apply_time_embed_dev(
+    namespace: &str,
     embed: &TimeEmbed,
     dev: &TimeEmbedDev,
     t: f32,
@@ -855,7 +861,7 @@ fn apply_time_embed_dev(
     let freq = gpu_bf16_round(&freq).map_err(|e| dev_err("ace time freq rnd", e))?;
     let temb = gpu_linear_nt_cached_bf16_bias_epilogue(
         &freq,
-        "acedit",
+        namespace,
         &[dev.linear1.part()],
         &embed.linear1_b,
     )
@@ -864,7 +870,7 @@ fn apply_time_embed_dev(
     let act1 = gpu_bf16_round(&act1).map_err(|e| dev_err("ace time silu1 rnd", e))?;
     let temb = gpu_linear_nt_cached_bf16_bias_epilogue(
         &act1,
-        "acedit",
+        namespace,
         &[dev.linear2.part()],
         &embed.linear2_b,
     )
@@ -873,7 +879,7 @@ fn apply_time_embed_dev(
     let act2 = gpu_bf16_round(&act2).map_err(|e| dev_err("ace time silu2 rnd", e))?;
     let proj = gpu_linear_nt_cached_bf16_bias_epilogue(
         &act2,
-        "acedit",
+        namespace,
         &[dev.time_proj.part()],
         &embed.time_proj_b,
     )
@@ -882,6 +888,7 @@ fn apply_time_embed_dev(
 }
 
 fn ace_rms_two_store(
+    namespace: &str,
     x: &makepad_ai_common::backend::cuda::GpuTensor,
     weight: &[f32],
     group_cols: usize,
@@ -893,7 +900,7 @@ fn ace_rms_two_store(
     if group_cols == 0 || x.cols() % group_cols != 0 || weight.len() != group_cols {
         return Err(DiffusionError::model("ace rms weight broadcast mismatch"));
     }
-    gpu_rms_norm_mul_round_bf16(x, group_cols, "acedit", cache_key, weight, eps)
+    gpu_rms_norm_mul_round_bf16(x, group_cols, namespace, cache_key, weight, eps)
         .map_err(|e| dev_err("ace rms1 fused", e))
 }
 
@@ -1319,6 +1326,7 @@ impl AceDit {
             })
             .collect();
         AceDitDevice {
+            owner: WeightOwner::new("ace-dit"),
             proj_in: Bf16Weight::new("acedit.pin", &pin, d, in_k),
             cond_embed: Bf16Weight::new("acedit.cond", &self.cond_embed_w, d, ACE_DIT_ENCODER_DIM),
             proj_out0: Bf16Weight::new("acedit.pout0", &pout0, out_ch, d),
@@ -1349,7 +1357,7 @@ impl AceDit {
             .map_err(|e| dev_err("ace kv enc up", e))?;
         let enc = gpu_linear_nt_cached_bf16_bias_epilogue(
             &enc_host,
-            "acedit",
+            device.owner.namespace(),
             &[device.cond_embed.part()],
             &self.cond_embed_b,
         )
@@ -1358,6 +1366,7 @@ impl AceDit {
         let mut layers = Vec::with_capacity(self.blocks.len());
         for (bi, (block, devb)) in self.blocks.iter().zip(&device.blocks).enumerate() {
             layers.push(ace_layer_cross_kv(
+                device.owner.namespace(),
                 &enc, block, devb, bi, q_heads, kv_heads, hd, group,
             )?);
         }
@@ -1426,10 +1435,10 @@ impl AceDit {
             gpu_upload_u32,
         };
         let lin = |x: &makepad_ai_common::backend::cuda::GpuTensor, w: &Bf16Weight| {
-            gpu_linear_nt_cached_bf16_mm(x, "acedit", &[w.part()])
+            gpu_linear_nt_cached_bf16_mm(x, device.owner.namespace(), &[w.part()])
         };
         let lin_b = |x: &makepad_ai_common::backend::cuda::GpuTensor, w: &Bf16Weight, bias: &[f32]| {
-            gpu_linear_nt_cached_bf16_bias_epilogue(x, "acedit", &[w.part()], bias)
+            gpu_linear_nt_cached_bf16_bias_epilogue(x, device.owner.namespace(), &[w.part()], bias)
         };
         let d = ACE_DIT_DIM;
         let q_heads = ACE_DIT_HEADS;
@@ -1456,9 +1465,9 @@ impl AceDit {
             (t.to_bits(), (t - t_r).to_bits()),
         );
         let (temb, tproj) = ace_fwd_temb(|| {
-            let (temb_t, proj_t) = apply_time_embed_dev(&self.time, &device.time, t)?;
+            let (temb_t, proj_t) = apply_time_embed_dev(device.owner.namespace(), &self.time, &device.time, t)?;
             let (temb_r, proj_r) =
-                apply_time_embed_dev(&self.time_r, &device.time_r, t - t_r)?;
+                apply_time_embed_dev(device.owner.namespace(), &self.time_r, &device.time_r, t - t_r)?;
             let temb = gpu_add(&temb_t, &temb_r).map_err(|e| dev_err("ace time temb add", e))?;
             let temb = gpu_bf16_round(&temb).map_err(|e| dev_err("ace time temb rnd", e))?;
             let tproj = gpu_add(&proj_t, &proj_r).map_err(|e| dev_err("ace time tproj add", e))?;
@@ -1531,13 +1540,13 @@ impl AceDit {
                     gpu_bf16_round(&mods_g).map_err(|e| dev_err("ace dit mods rnd", e))
                 },
             )?;
-            let rms_self = ace_rms_two_store(&h, &block.self_norm, d, &format!("b{bi}.sn"), ACE_RMS_EPS)?;
+            let rms_self = ace_rms_two_store(device.owner.namespace(), &h, &block.self_norm, d, &format!("b{bi}.sn"), ACE_RMS_EPS)?;
             let normed = ace_adaln_stores(&rms_self, &mods_g, d, 0)?;
             let q = lin(&normed, &devb.q).map_err(|e| dev_err("ace dit q", e))?;
             let k = lin(&normed, &devb.k).map_err(|e| dev_err("ace dit k", e))?;
             let v = lin(&normed, &devb.v).map_err(|e| dev_err("ace dit v", e))?;
-            let q = ace_rms_two_store(&q, &block.self_qn, hd, &format!("b{bi}.qn"), ACE_RMS_EPS)?;
-            let k = ace_rms_two_store(&k, &block.self_kn, hd, &format!("b{bi}.kn"), ACE_RMS_EPS)?;
+            let q = ace_rms_two_store(device.owner.namespace(), &q, &block.self_qn, hd, &format!("b{bi}.qn"), ACE_RMS_EPS)?;
+            let k = ace_rms_two_store(device.owner.namespace(), &k, &block.self_kn, hd, &format!("b{bi}.kn"), ACE_RMS_EPS)?;
             let q = gpu_rope_half_round_bf16(&q, q_heads, half, &rope_cos, &rope_sin)
                 .map_err(|e| dev_err("ace dit rq", e))?;
             let k = gpu_rope_half_round_bf16(&k, kv_heads, half, &rope_cos, &rope_sin)
@@ -1548,9 +1557,9 @@ impl AceDit {
             h = gpu_gated_residual_round_add_bf16(&h, &proj, &mods_g, 2 * d)
                 .map_err(|e| dev_err("ace dit sgate fused", e))?;
 
-            let cn = ace_rms_two_store(&h, &block.cross_norm, d, &format!("b{bi}.cn"), ACE_RMS_EPS)?;
+            let cn = ace_rms_two_store(device.owner.namespace(), &h, &block.cross_norm, d, &format!("b{bi}.cn"), ACE_RMS_EPS)?;
             let cq = lin(&cn, &devb.cross_q).map_err(|e| dev_err("ace dit cq", e))?;
-            let cq = ace_rms_two_store(&cq, &block.cross_qn, hd, &format!("b{bi}.cqn"), ACE_RMS_EPS)?;
+            let cq = ace_rms_two_store(device.owner.namespace(), &cq, &block.cross_qn, hd, &format!("b{bi}.cqn"), ACE_RMS_EPS)?;
             let computed_kv;
             let (ck, cv) = if let Some(cache) = cross_kv {
                 (&cache.layers[bi].0, &cache.layers[bi].1)
@@ -1560,7 +1569,7 @@ impl AceDit {
                 })?;
                 let ck = lin(enc, &devb.cross_k).map_err(|e| dev_err("ace dit ck", e))?;
                 let cv = lin(enc, &devb.cross_v).map_err(|e| dev_err("ace dit cv", e))?;
-                let ck = ace_rms_two_store(&ck, &block.cross_kn, hd, &format!("b{bi}.ckn"), ACE_RMS_EPS)?;
+                let ck = ace_rms_two_store(device.owner.namespace(), &ck, &block.cross_kn, hd, &format!("b{bi}.ckn"), ACE_RMS_EPS)?;
                 computed_kv = expand_gqa_dev(ck, cv, q_heads, kv_heads, hd, group)?;
                 (&computed_kv.0, &computed_kv.1)
             };
@@ -1568,7 +1577,7 @@ impl AceDit {
             let cproj = lin(&cattn, &devb.cross_o).map_err(|e| dev_err("ace dit co", e))?;
             h = gpu_add_bf16(&h, &cproj).map_err(|e| dev_err("ace dit cadd", e))?;
 
-            let rms_mlp = ace_rms_two_store(&h, &block.mlp_norm, d, &format!("b{bi}.mn"), ACE_RMS_EPS)?;
+            let rms_mlp = ace_rms_two_store(device.owner.namespace(), &h, &block.mlp_norm, d, &format!("b{bi}.mn"), ACE_RMS_EPS)?;
             let fnorm = ace_adaln_stores(&rms_mlp, &mods_g, 4 * d, 3 * d)?;
             let gate = lin(&fnorm, &devb.gate).map_err(|e| dev_err("ace dit gate", e))?;
             let up = lin(&fnorm, &devb.up).map_err(|e| dev_err("ace dit up", e))?;
@@ -1675,6 +1684,7 @@ struct EncDevLayer {
 }
 
 pub struct AceCondDevice {
+    owner: WeightOwner,
     text_proj: Bf16Weight,
     lyric_embed: Bf16Weight,
     lyric_embed_b: Vec<f32>,
@@ -1719,6 +1729,7 @@ fn time_embed_dev(prefix: &str, embed: &TimeEmbed, dim: usize) -> TimeEmbedDev {
 }
 
 pub struct AceDitDevice {
+    owner: WeightOwner,
     proj_in: Bf16Weight,
     cond_embed: Bf16Weight,
     proj_out0: Bf16Weight,
@@ -1740,6 +1751,7 @@ pub struct AceCrossKvCache {
 }
 
 fn ace_layer_cross_kv(
+    namespace: &str,
     enc: &makepad_ai_common::backend::cuda::GpuTensor,
     block: &DitBlock,
     devb: &DitDevBlock,
@@ -1754,11 +1766,11 @@ fn ace_layer_cross_kv(
 )> {
     use makepad_ai_sfx::sa3::dev_err;
     use makepad_ai_common::backend::cuda::gpu_linear_nt_cached_bf16_mm;
-    let ck = gpu_linear_nt_cached_bf16_mm(enc, "acedit", &[devb.cross_k.part()])
+    let ck = gpu_linear_nt_cached_bf16_mm(enc, namespace, &[devb.cross_k.part()])
         .map_err(|e| dev_err("ace kv ck", e))?;
-    let cv = gpu_linear_nt_cached_bf16_mm(enc, "acedit", &[devb.cross_v.part()])
+    let cv = gpu_linear_nt_cached_bf16_mm(enc, namespace, &[devb.cross_v.part()])
         .map_err(|e| dev_err("ace kv cv", e))?;
-    let ck = ace_rms_two_store(&ck, &block.cross_kn, hd, &format!("b{bi}.ckn"), ACE_RMS_EPS)?;
+    let ck = ace_rms_two_store(namespace, &ck, &block.cross_kn, hd, &format!("b{bi}.ckn"), ACE_RMS_EPS)?;
     expand_gqa_dev(ck, cv, q_heads, kv_heads, hd, group)
 }
 

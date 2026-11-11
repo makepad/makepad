@@ -29,7 +29,7 @@
 //! prompt at the same canvas reuses the encoded conditioning (host-side,
 //! Send — no worker thread needed) and skips the whole TE phase; a prompt
 //! change re-encodes only the conditioning. Any failed or cancelled H3 job
-//! retires its CUDA namespaces before another job is admitted; a successful
+//! retires its device weight owners before another job is admitted; a successful
 //! bf16 job stays warm until a changed presentation or explicit unload.
 
 use crate::backend::{CancelToken, ArtifactData, BackendCtx, ContentBackend, GenerateParams, ProgressSink};
@@ -47,19 +47,6 @@ pub const DEFAULT_WIDTH: u32 = 640;
 pub const DEFAULT_HEIGHT: u32 = 352;
 pub const DEFAULT_FRAMES: u32 = 124;
 pub const DEFAULT_STEPS: u32 = 50;
-
-/// Every CUDA weight-cache namespace owned by H3. The source-specific
-/// quantized namespaces remain below these prefixes (`h3dit::gg::...`,
-/// `h3dit::nv::...`), so one teardown covers bf16 and both quant tiers.
-#[cfg(any(feature = "video", test))]
-const H3_GPU_NAMESPACE_PREFIXES: [&str; 3] = ["h3te::", "h3dit::", "h3vae::"];
-
-/// Device weight-cache namespace of a [`ROLE_DIT_BF16`] DiT: under the
-/// `h3dit::` prefix (so the unload sweep retires it) and keyed on the
-/// registry model id (so two bf16 DiTs never alias each other's tensors).
-pub fn bf16_dit_namespace(model_id: &str) -> String {
-    format!("h3dit::{model_id}")
-}
 
 /// Truthful device-residency bookkeeping kept separate from tokenizer and
 /// conditioning caches. Those small host-side helpers may survive a staged
@@ -80,18 +67,18 @@ impl H3RuntimeLifecycle {
         self.touched
     }
 
-    /// Clear the resident bit only after every namespace and scratch pool was
-    /// released successfully. A teardown error stays truthfully resident so
+    /// Clear the resident bit only after every device weight owner was retired
+    /// and scratch pools were released successfully. A teardown error stays truthfully resident so
     /// the server can surface it and retry rather than admitting another
     /// heavyweight model over leaked allocations.
     fn release_with(
         &mut self,
-        release: impl FnOnce(&[&str]) -> Result<usize, AssetAiError>,
+        release: impl FnOnce() -> Result<usize, AssetAiError>,
     ) -> Result<usize, AssetAiError> {
         if !self.touched {
             return Ok(0);
         }
-        let released = release(&H3_GPU_NAMESPACE_PREFIXES)?;
+        let released = release()?;
         self.touched = false;
         Ok(released)
     }
@@ -965,7 +952,7 @@ mod h3_gen {
     use crate::backend::{BackendCtx, CancelToken, ProgressSink};
     use crate::error::AssetAiError;
     use makepad_ai_h3::h3_pipeline::{
-        h3_generate_with_control, H3CondCache, H3ComponentFile, H3GenerateParams, H3KeyframeInput,
+        h3_generate_with_control, H3CondCache, H3ComponentFile, H3DeviceOwners, H3GenerateParams, H3KeyframeInput,
         H3ModelSet, H3RunControl, H3WeightFormat,
     };
     use makepad_ai_h3::h3::H3KeyframeAnchor;
@@ -982,14 +969,15 @@ mod h3_gen {
         staged_residency: bool,
         tokenizer: Option<H3Tokenizer>,
         /// Warm conditioning across jobs (host-side, Send — the heavy DiT/VAE
-        /// device weight caches already persist on the worker thread). A
+        /// device weight owners keep caches warm on the worker thread). A
         /// repeat prompt at the same canvas skips the whole TE phase: the TE
-        /// namespace (~66.7GB) otherwise re-streams from disk per job and is
-        /// evicted after — measured ~42s of a 46s repeat job on the 96GB box.
+        /// weights (~66.7GB) otherwise re-stream from disk per job and their
+        /// owner is retired after — measured ~42s of a 46s repeat job on the 96GB box.
         /// Entries mutate only after a successful encode. Pipeline errors
         /// retire device residency immediately; the service-level unload
         /// then clears this host cache before the next job.
         cond_cache: H3CondCache,
+        owners: H3DeviceOwners,
         /// Device residency only. Tokenizer/conditioning state is deliberately
         /// excluded: staged 24/32 GB tiers keep those small host caches while
         /// still requiring a fresh VRAM admission check on every job.
@@ -1004,6 +992,7 @@ mod h3_gen {
                 staged_residency: false,
                 tokenizer: None,
                 cond_cache: H3CondCache::default(),
+                owners: H3DeviceOwners::new(),
                 runtime: super::H3RuntimeLifecycle::default(),
             }
         }
@@ -1047,8 +1036,8 @@ mod h3_gen {
                 super::H3TierKind::Bf16Dit => {
                     // The tree supplies everything but the DiT, which
                     // streams from the shard dir the `dit-bf16` role names.
-                    // Its cache namespace is keyed on the MODEL ID so no two
-                    // bf16 DiTs ever share device-cache keys on one box.
+                    // The owner slot retires its previous checkpoint on a source
+                    // path change so no two bf16 DiTs share device-cache keys.
                     let index = ctx.spec.file_by_role(super::ROLE_DIT_BF16).ok_or_else(|| {
                         AssetAiError::Backend(format!(
                             "model {}: tier manifest lost its {:?} role",
@@ -1071,7 +1060,6 @@ mod h3_gen {
                         dit: Some(H3ComponentFile {
                             path: dit_dir,
                             format: H3WeightFormat::Bf16Shards,
-                            dit_namespace: Some(super::bf16_dit_namespace(&ctx.spec.id)),
                         }),
                         ..H3ModelSet::default()
                     };
@@ -1126,12 +1114,10 @@ mod h3_gen {
                         dit: Some(H3ComponentFile {
                             path: role_path(dit_role)?,
                             format,
-                            dit_namespace: None,
                         }),
                         text_encoder: Some(H3ComponentFile {
                             path: role_path(te_role)?,
                             format,
-                            dit_namespace: None,
                         }),
                         video_vae_path: Some(role_path(super::ROLE_VIDEO_VAE)?),
                         audio_vae_dir: Some(audio_vae_dir),
@@ -1153,9 +1139,13 @@ mod h3_gen {
         }
 
         fn release_runtime(&mut self) -> Result<usize, AssetAiError> {
-            self.runtime.release_with(|prefixes| {
-                makepad_ai_common::backend::release_gpu_runtime_namespaces(prefixes)
-                    .map_err(|error| AssetAiError::Backend(format!("h3 unload: {error}")))
+            let owners = &mut self.owners;
+            self.runtime.release_with(|| {
+                let retired = owners.retire_all()
+                    .map_err(|error| AssetAiError::Backend(format!("h3 unload: {error}")))?;
+                makepad_ai_common::backend::gpu_runtime_trim()
+                    .map_err(|error| AssetAiError::Backend(format!("h3 unload: {error}")))?;
+                Ok(retired)
             })
         }
 
@@ -1257,6 +1247,7 @@ mod h3_gen {
                 h3_generate_with_control(
                     &models_dir,
                     &params,
+                    &mut self.owners,
                     |line| println!("h3: {line}"),
                     &mut ctrl,
                 )
@@ -1814,29 +1805,24 @@ mod tests {
     }
 
     #[test]
-    fn runtime_success_then_unload_releases_exact_h3_namespaces() {
+    fn runtime_success_then_unload_retires_h3_owners() {
         let mut runtime = H3RuntimeLifecycle::default();
         assert!(!runtime.is_resident());
 
-        // A successful bf16 pipeline leaves its compute namespaces warm.
+        // A successful bf16 pipeline keeps its compute owners warm.
         runtime.mark_touched();
         assert!(runtime.is_resident());
 
-        let mut seen = Vec::<String>::new();
         let released = runtime
-            .release_with(|prefixes| {
-                seen.extend(prefixes.iter().map(|prefix| (*prefix).to_string()));
-                Ok(37)
-            })
+            .release_with(|| Ok(37))
             .unwrap();
         assert_eq!(released, 37);
-        assert_eq!(seen, ["h3te::", "h3dit::", "h3vae::"]);
         assert!(!runtime.is_resident());
 
         // Explicit unload is idempotent and must not initialize or revisit a
         // cold CUDA runtime.
         runtime
-            .release_with(|_| panic!("cold unload must not invoke CUDA release"))
+            .release_with(|| panic!("cold unload must not invoke CUDA release"))
             .unwrap();
     }
 
@@ -1845,7 +1831,7 @@ mod tests {
         let mut runtime = H3RuntimeLifecycle::default();
         runtime.mark_touched();
         let error = runtime
-            .release_with(|_| Err(AssetAiError::Backend("synthetic CUDA teardown error".into())))
+            .release_with(|| Err(AssetAiError::Backend("synthetic CUDA teardown error".into())))
             .unwrap_err();
         assert!(error.to_string().contains("synthetic CUDA teardown error"));
         assert!(
@@ -1853,7 +1839,7 @@ mod tests {
             "a failed release must not advertise leaked allocations as cold"
         );
 
-        runtime.release_with(|_| Ok(3)).unwrap();
+        runtime.release_with(|| Ok(3)).unwrap();
         assert!(!runtime.is_resident());
     }
 
@@ -1993,7 +1979,6 @@ mod tests {
             let err = tier_plan_for_spec(&tier_spec("mixed", &[ROLE_DIT_BF16, other])).unwrap_err();
             assert!(err.to_string().contains(ROLE_DIT_BF16), "{err}");
         }
-        assert_eq!(bf16_dit_namespace("fasth3-4step"), "h3dit::fasth3-4step");
     }
 
     /// The GPU gate refuses below-spec AND unknown GPUs (fail closed) and

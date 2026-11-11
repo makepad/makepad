@@ -42,11 +42,10 @@ use crate::backend::{
     gpu_download, gpu_gather_rows_colblock, gpu_gemm_f16acc_enabled, gpu_layer_norm_mul_add,
     gpu_linear_nt_cached, gpu_rms_norm_mod_indexed, gpu_rope_interleaved, gpu_slice_cols,
     gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload, gpu_upload_u32, gpu_wavenet_gate,
-    gpu_weight_cache_ensure, GpuLinearPart, GpuTensor,
+    gpu_weight_cache_ensure, GpuLinearPart, GpuTensor, WeightOwner,
 };
 use makepad_ai_common::quant::{f32_to_f16, GGML_TYPE_F16};
 
-const NS: &str = "indextts_s2mel";
 /// AdaLN sites: per block attention_norm (2i) and ffn_norm (2i+1), plus the
 /// transformer final norm.
 const ADALN_SITES: usize = 2 * DEPTH + 1;
@@ -69,7 +68,7 @@ fn f32_to_f16_bytes(values: &[f32]) -> Vec<u8> {
 }
 
 /// Weight-cached F16 linear over f32 rows; empty bias slice means no bias.
-fn lin(x: &GpuTensor, keys: &[&str], ns_cols: &[usize], bias: &[f32]) -> Result<GpuTensor> {
+fn lin(ns: &str, x: &GpuTensor, keys: &[&str], ns_cols: &[usize], bias: &[f32]) -> Result<GpuTensor> {
     debug_assert_eq!(keys.len(), ns_cols.len());
     let parts: Vec<GpuLinearPart<'_>> = keys
         .iter()
@@ -81,16 +80,16 @@ fn lin(x: &GpuTensor, keys: &[&str], ns_cols: &[usize], bias: &[f32]) -> Result<
             bytes: &[],
         })
         .collect();
-    gpu_linear_nt_cached(x, NS, &parts, bias).map_err(gm)
+    gpu_linear_nt_cached(x, ns, &parts, bias).map_err(gm)
 }
 
-fn ensure_weight(key: &str, w: &[f32], out_dim: usize, in_dim: usize) -> Result<()> {
+fn ensure_weight(ns: &str, key: &str, w: &[f32], out_dim: usize, in_dim: usize) -> Result<()> {
     debug_assert_eq!(w.len(), out_dim * in_dim);
     // Every s2mel gemm has m = t_len rows > 1, so the cached-gemm lookup key
     // carries the ::a16 suffix exactly when f16acc gemms are enabled — the
     // ensure key must match (same rule as trellis_dit::ensure_linear).
     let want_a16 = gpu_gemm_f16acc_enabled();
-    gpu_weight_cache_ensure(NS, key, GGML_TYPE_F16, out_dim, in_dim, want_a16, || {
+    gpu_weight_cache_ensure(ns, key, GGML_TYPE_F16, out_dim, in_dim, want_a16, || {
         Ok(f32_to_f16_bytes(w))
     })
     .map_err(gm)
@@ -111,6 +110,7 @@ struct StepMods {
 /// Session-lifetime device state: cached weights + per-step modulation
 /// tables. Built once per loaded estimator; independent of `t_len`.
 pub struct S2melCudaSession {
+    owner: WeightOwner,
     n_steps: usize,
     steps: Vec<StepMods>,
     /// One `[n_steps, 2*DIM]` table per AdaLN site, rows `[w-1 | b]`.
@@ -124,7 +124,8 @@ impl S2melCudaSession {
         if n_steps == 0 {
             return Err(gm("n_steps must be > 0".into()));
         }
-        Self::ensure_weights(est)?;
+        let owner = WeightOwner::new("indextts-s2mel");
+        Self::ensure_weights(owner.namespace(), est)?;
 
         // Exact reference time accumulation (t_span f64->f32, t += dt f32).
         let t_span: Vec<f32> =
@@ -183,7 +184,7 @@ impl S2melCudaSession {
             adaln_gammas.push(gpu_upload(&adaln.gamma, 1, DIM).map_err(gm)?);
         }
 
-        Ok(Self { n_steps, steps, adaln_tables, adaln_gammas })
+        Ok(Self { owner, n_steps, steps, adaln_tables, adaln_gammas })
     }
 
     /// AdaLN sites in table order: block i attention_norm at 2i, ffn_norm at
@@ -199,25 +200,25 @@ impl S2melCudaSession {
     }
 
     /// Uploads every GEMM weight into the F16 device cache (idempotent).
-    fn ensure_weights(est: &CfmEstimator) -> Result<()> {
+    fn ensure_weights(ns: &str, est: &CfmEstimator) -> Result<()> {
         let merge_in = 2 * MELS + DIM + STYLE;
-        ensure_weight("merge", &est.merge_w, DIM, merge_in)?;
-        ensure_weight("cond_proj", &est.cond_proj_w, DIM, DIM)?;
+        ensure_weight(ns, "merge", &est.merge_w, DIM, merge_in)?;
+        ensure_weight(ns, "cond_proj", &est.cond_proj_w, DIM, DIM)?;
         for (i, block) in est.blocks.iter().enumerate() {
-            ensure_weight(&format!("blk{i}.wqkv"), &block.wqkv, 3 * DIM, DIM)?;
-            ensure_weight(&format!("blk{i}.wo"), &block.wo, DIM, DIM)?;
+            ensure_weight(ns, &format!("blk{i}.wqkv"), &block.wqkv, 3 * DIM, DIM)?;
+            ensure_weight(ns, &format!("blk{i}.wo"), &block.wo, DIM, DIM)?;
             // SwiGLU value (w3) first, gate (w1) second — the fused GEMM
             // output feeds gpu_swiglu_value_gate(value, gate).
-            ensure_weight(&format!("blk{i}.w3"), &block.w3, FFN, DIM)?;
-            ensure_weight(&format!("blk{i}.w1"), &block.w1, FFN, DIM)?;
-            ensure_weight(&format!("blk{i}.w2"), &block.w2, DIM, FFN)?;
-            ensure_weight(&format!("blk{i}.skip"), &block.skip_w, DIM, 2 * DIM)?;
+            ensure_weight(ns, &format!("blk{i}.w3"), &block.w3, FFN, DIM)?;
+            ensure_weight(ns, &format!("blk{i}.w1"), &block.w1, FFN, DIM)?;
+            ensure_weight(ns, &format!("blk{i}.w2"), &block.w2, DIM, FFN)?;
+            ensure_weight(ns, &format!("blk{i}.skip"), &block.skip_w, DIM, 2 * DIM)?;
         }
-        ensure_weight("skip_long", &est.skip_linear_w, DIM, DIM + MELS)?;
-        ensure_weight("conv1", &est.conv1_w, DIM, DIM)?;
-        ensure_weight("res_proj", &est.res_proj_w, DIM, DIM)?;
-        ensure_weight("fl_linear", &est.fl_linear_w, DIM, DIM)?;
-        ensure_weight("conv2", &est.conv2_w, MELS, DIM)?;
+        ensure_weight(ns, "skip_long", &est.skip_linear_w, DIM, DIM + MELS)?;
+        ensure_weight(ns, "conv1", &est.conv1_w, DIM, DIM)?;
+        ensure_weight(ns, "res_proj", &est.res_proj_w, DIM, DIM)?;
+        ensure_weight(ns, "fl_linear", &est.fl_linear_w, DIM, DIM)?;
+        ensure_weight(ns, "conv2", &est.conv2_w, MELS, DIM)?;
         for (l, conv) in est.wn_in.iter().enumerate() {
             debug_assert_eq!((conv.out_ch, conv.in_ch, conv.k), (2 * DIM, DIM, WN_KERNEL));
             // All 5 taps packed into one wide weight [2*DIM, 5*DIM]; the
@@ -232,10 +233,10 @@ impl S2melCudaSession {
                     }
                 }
             }
-            ensure_weight(&format!("wn{l}.tap5"), &wk, 2 * DIM, WN_KERNEL * DIM)?;
+            ensure_weight(ns, &format!("wn{l}.tap5"), &wk, 2 * DIM, WN_KERNEL * DIM)?;
             let rs = &est.wn_res_skip[l];
             debug_assert_eq!((rs.in_ch, rs.k), (DIM, 1));
-            ensure_weight(&format!("wn{l}.rs"), &rs.w, rs.out_ch, DIM)?;
+            ensure_weight(ns, &format!("wn{l}.rs"), &rs.w, rs.out_ch, DIM)?;
         }
         Ok(())
     }
@@ -395,7 +396,7 @@ impl<'a> S2melCudaRun<'a> {
         // into the cond-half template. The null half sees mu = 0, i.e. the
         // projection bias broadcast over time.
         let mu_dev = gpu_upload(mu, t_len, DIM).map_err(gm)?;
-        let cond_dev = lin(&mu_dev, &["cond_proj"], &[DIM], &est.cond_proj_b)?;
+        let cond_dev = lin(session.owner.namespace(), &mu_dev, &["cond_proj"], &[DIM], &est.cond_proj_b)?;
         let cond = gpu_download(&cond_dev).map_err(gm)?;
 
         // Step-constant x_in columns 80..864 (prompt mel | cond | style per
@@ -470,7 +471,7 @@ impl<'a> S2melCudaRun<'a> {
         }
         let xt_dev = gpu_upload(&xt, rows2, MELS).map_err(gm)?;
         let x_in_dev = gpu_concat_cols(&[&xt_dev, &self.cond_cols]).map_err(gm)?;
-        let mut h = lin(&x_in_dev, &["merge"], &[DIM], &self.est.merge_b)?;
+        let mut h = lin(self.session.owner.namespace(), &x_in_dev, &["merge"], &[DIM], &self.est.merge_b)?;
 
         // Transformer with uvit skips (emit i < 6, receive i > 6, LIFO).
         let scale = 1.0 / (HEAD_DIM as f32).sqrt();
@@ -482,10 +483,10 @@ impl<'a> S2melCudaRun<'a> {
                     .pop()
                     .ok_or_else(|| gm("uvit skip underflow".into()))?;
                 let cat = gpu_concat_cols(&[&h, &skip]).map_err(gm)?;
-                h = lin(&cat, &[&format!("blk{i}.skip")], &[DIM], &block.skip_b)?;
+                h = lin(self.session.owner.namespace(), &cat, &[&format!("blk{i}.skip")], &[DIM], &block.skip_b)?;
             }
             let normed = self.adaln(&h, 2 * i, idx)?;
-            let qkv = lin(&normed, &[&format!("blk{i}.wqkv")], &[3 * DIM], &[])?;
+            let qkv = lin(self.session.owner.namespace(), &normed, &[&format!("blk{i}.wqkv")], &[3 * DIM], &[])?;
             let q = gpu_slice_cols(&qkv, 0, DIM).map_err(gm)?;
             let k = gpu_slice_cols(&qkv, DIM, DIM).map_err(gm)?;
             let v = gpu_slice_cols(&qkv, 2 * DIM, DIM).map_err(gm)?;
@@ -504,18 +505,19 @@ impl<'a> S2melCudaRun<'a> {
                 let a_n = gpu_attention_packed(&q_n, &k_n, &v_n, HEADS, scale).map_err(gm)?;
                 gpu_concat_rows(&a_c, &a_n).map_err(gm)?
             };
-            let attn = lin(&attn, &[&format!("blk{i}.wo")], &[DIM], &[])?;
+            let attn = lin(self.session.owner.namespace(), &attn, &[&format!("blk{i}.wo")], &[DIM], &[])?;
             h = gpu_add(&h, &attn).map_err(gm)?;
 
             let normed = self.adaln(&h, 2 * i + 1, idx)?;
             let f = lin(
+                self.session.owner.namespace(),
                 &normed,
                 &[&format!("blk{i}.w3"), &format!("blk{i}.w1")],
                 &[FFN, FFN],
                 &[],
             )?;
             let sw = gpu_swiglu_value_gate(&f).map_err(gm)?;
-            let ff = lin(&sw, &[&format!("blk{i}.w2")], &[DIM], &[])?;
+            let ff = lin(self.session.owner.namespace(), &sw, &[&format!("blk{i}.w2")], &[DIM], &[])?;
             h = gpu_add(&h, &ff).map_err(gm)?;
             if i < DEPTH / 2 {
                 skips.push(gpu_slice_rows(&h, 0, rows2).map_err(gm)?);
@@ -525,10 +527,10 @@ impl<'a> S2melCudaRun<'a> {
 
         // Long skip: skip_linear(cat[x_res, x^T]).
         let cat = gpu_concat_cols(&[&x_res, &xt_dev]).map_err(gm)?;
-        let x_res = lin(&cat, &["skip_long"], &[DIM], &self.est.skip_linear_b)?;
+        let x_res = lin(self.session.owner.namespace(), &cat, &["skip_long"], &[DIM], &self.est.skip_linear_b)?;
 
         // WaveNet over conv1(x_res) rows.
-        let mut wn_x = lin(&x_res, &["conv1"], &[DIM], &self.est.conv1_b)?;
+        let mut wn_x = lin(self.session.owner.namespace(), &x_res, &["conv1"], &[DIM], &self.est.conv1_b)?;
         let mut wn_out: Option<GpuTensor> = None;
         for l in 0..WN_LAYERS {
             // Reflect-padded k5 conv: 5 per-tap gathers (reflect composed
@@ -542,6 +544,7 @@ impl<'a> S2melCudaRun<'a> {
             let g4 = gpu_gather_rows_colblock(&wn_x, &self.tap_idx[4], None, DIM).map_err(gm)?;
             let taps = gpu_concat_cols(&[&g0, &g1, &g2, &g3, &g4]).map_err(gm)?;
             let acc = lin(
+                self.session.owner.namespace(),
                 &taps,
                 &[&format!("wn{l}.tap5")],
                 &[2 * DIM],
@@ -551,7 +554,7 @@ impl<'a> S2melCudaRun<'a> {
             // the GEMM bias above).
             let acts_dev = gpu_wavenet_gate(&acc).map_err(gm)?;
             let rs_conv = &self.est.wn_res_skip[l];
-            let rs = lin(&acts_dev, &[&format!("wn{l}.rs")], &[rs_conv.out_ch], &rs_conv.b)?;
+            let rs = lin(self.session.owner.namespace(), &acts_dev, &[&format!("wn{l}.rs")], &[rs_conv.out_ch], &rs_conv.b)?;
             if l < WN_LAYERS - 1 {
                 let res = gpu_slice_cols(&rs, 0, DIM).map_err(gm)?;
                 wn_x = gpu_add(&wn_x, &res).map_err(gm)?;
@@ -568,11 +571,11 @@ impl<'a> S2melCudaRun<'a> {
         let wn_out = wn_out.ok_or_else(|| gm("wn produced no output".into()))?;
 
         // x = wavenet + res_projection(x_res); FinalLayer; conv2.
-        let res = lin(&x_res, &["res_proj"], &[DIM], &self.est.res_proj_b)?;
+        let res = lin(self.session.owner.namespace(), &x_res, &["res_proj"], &[DIM], &self.est.res_proj_b)?;
         let rows = gpu_add(&wn_out, &res).map_err(gm)?;
         let rows = gpu_layer_norm_mul_add(&rows, &mods.fl_mul, &mods.fl_add, 1e-6).map_err(gm)?;
-        let rows = lin(&rows, &["fl_linear"], &[DIM], &self.est.fl_linear_b)?;
-        let out = lin(&rows, &["conv2"], &[MELS], &self.est.conv2_b)?;
+        let rows = lin(self.session.owner.namespace(), &rows, &["fl_linear"], &[DIM], &self.est.fl_linear_b)?;
+        let out = lin(self.session.owner.namespace(), &rows, &["conv2"], &[MELS], &self.est.conv2_b)?;
         gpu_download(&out).map_err(gm)
     }
 

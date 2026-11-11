@@ -16,7 +16,7 @@ use crate::error::AssetAiError;
 use crate::subproc_img::png_header;
 #[cfg(feature = "matte-native")]
 use makepad_ai_vision::birefnet::{
-    unload_birefnet, BiRefNet, BiRefNetImage, BiRefNetWeights,
+    BiRefNet, BiRefNetImage, BiRefNetWeights,
 };
 #[cfg(feature = "matte-native")]
 use makepad_ai_common::DiffusionError;
@@ -106,7 +106,7 @@ impl ContentBackend for MatteBackend {
                     return Ok(());
                 }
                 if self.model.take().is_some() {
-                    unload_birefnet().map_err(diffusion_err)?;
+                    makepad_ai_common::backend::gpu_pool_clear();
                 }
                 let weights = BiRefNetWeights::load(&path).map_err(diffusion_err)?;
                 let cancel = ctx.cancel.clone();
@@ -145,7 +145,7 @@ impl ContentBackend for MatteBackend {
         {
             self.model = None;
             self.model_path = None;
-            unload_birefnet().map_err(diffusion_err)?;
+            makepad_ai_common::backend::gpu_pool_clear();
         }
         Ok(())
     }

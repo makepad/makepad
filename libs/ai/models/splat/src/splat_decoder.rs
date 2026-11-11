@@ -17,6 +17,7 @@
 //!   anchor = 32 gaussians x (offset 3, SH DC 3, scale 3, rotation 4,
 //!   opacity 1, offset scale 1).
 
+use crate::backend::WeightOwner;
 use crate::splat::{
     level_embedding, pcd_position_embed, pcd_position_embed_v2_freqs, SplatWeights, GS_BLOCKS,
     GS_COND_CHANNELS, GS_FFN, GS_HEADS, GS_HEAD_DIM, GS_IN_CHANNELS, GS_MODEL_CHANNELS,
@@ -30,13 +31,14 @@ use crate::splat_ops::{
 };
 use crate::splat_rand::{sample_probs_row, SplatRng};
 use crate::{DiffusionError, ProgressHook, Result};
+use std::sync::Arc;
 
 /// `MultiHeadAttention(type="cross", qk_rms_norm=True)`.
 struct CrossAttn {
     /// Stable module name for cached RMS gammas; the separate Idol files
     /// share tensor names, so checkpoint prefixes cannot distinguish them.
     name: String,
-    namespace: &'static str,
+    owner: Arc<WeightOwner>,
     to_q: Lin,
     to_kv: Lin,
     q_norm: Vec<f32>,
@@ -47,7 +49,7 @@ struct CrossAttn {
 impl CrossAttn {
     fn load(
         device: Device,
-        model: SplatModel,
+        owner: &Arc<WeightOwner>,
         name: &str,
         weights: &SplatWeights,
         prefix: &str,
@@ -58,7 +60,7 @@ impl CrossAttn {
         let head_dim = channels / heads;
         Ok(Self {
             name: name.to_string(),
-            namespace: model.namespaces()[2],
+            owner: Arc::clone(owner),
             to_q: Lin::new(
                 device,
                 &weights.f32_shaped(&format!("{prefix}.to_q.weight"), &[channels, channels])?,
@@ -98,7 +100,7 @@ impl CrossAttn {
             heads,
             head_dim,
             &self.q_norm,
-            self.namespace,
+            self.owner.namespace(),
             &format!("{}.q_rms_norm", self.name),
         )?;
         let attn = attention(&q, &kv.0, &kv.1, heads, scale)?;
@@ -118,7 +120,7 @@ impl CrossAttn {
             heads,
             head_dim,
             &self.k_norm,
-            self.namespace,
+            self.owner.namespace(),
             &format!("{}.k_rms_norm", self.name),
         )?;
         Ok((k, v))
@@ -128,7 +130,7 @@ impl CrossAttn {
 /// `MultiHeadAttention(type="self", qk_rms_norm=True)`.
 struct SelfAttn {
     name: String,
-    namespace: &'static str,
+    owner: Arc<WeightOwner>,
     to_qkv: Lin,
     q_norm: Vec<f32>,
     k_norm: Vec<f32>,
@@ -136,11 +138,19 @@ struct SelfAttn {
 }
 
 impl SelfAttn {
-    fn load(device: Device, model: SplatModel, name: &str, weights: &SplatWeights, prefix: &str, channels: usize, heads: usize) -> Result<Self> {
+    fn load(
+        device: Device,
+        owner: &Arc<WeightOwner>,
+        name: &str,
+        weights: &SplatWeights,
+        prefix: &str,
+        channels: usize,
+        heads: usize,
+    ) -> Result<Self> {
         let head_dim = channels / heads;
         Ok(Self {
             name: name.to_string(),
-            namespace: model.namespaces()[2],
+            owner: Arc::clone(owner),
             to_qkv: Lin::new(
                 device,
                 &weights.f32_shaped(&format!("{prefix}.to_qkv.weight"), &[3 * channels, channels])?,
@@ -175,7 +185,7 @@ impl SelfAttn {
             heads,
             head_dim,
             &self.q_norm,
-            self.namespace,
+            self.owner.namespace(),
             &format!("{}.q_rms_norm", self.name),
         )?;
         let k = rms_norm_per_head(
@@ -183,7 +193,7 @@ impl SelfAttn {
             heads,
             head_dim,
             &self.k_norm,
-            self.namespace,
+            self.owner.namespace(),
             &format!("{}.k_rms_norm", self.name),
         )?;
         let attn = attention(&q, &k, &v, heads, scale)?;
@@ -251,6 +261,7 @@ pub struct SplatOctree {
 
 impl SplatOctree {
     pub fn prepare(device: Device, model: SplatModel, weights: &SplatWeights) -> Result<Self> {
+        let owner = Arc::new(WeightOwner::new("splat-decoder"));
         let prefix = model.octree_prefix();
         let c = OCT_MODEL_CHANNELS;
         let mut blocks = Vec::with_capacity(OCT_BLOCKS);
@@ -259,7 +270,7 @@ impl SplatOctree {
             blocks.push(OctreeBlock {
                 cross: CrossAttn::load(
                     device,
-                    model,
+                    &owner,
                     &format!("octree.blocks.{i}.cross_attn"),
                     weights,
                     &format!("{p}.cross_attn"),
@@ -488,16 +499,25 @@ pub struct SplatGaussianDecoder {
 
 impl SplatGaussianDecoder {
     pub fn prepare(device: Device, model: SplatModel, weights: &SplatWeights) -> Result<Self> {
+        let owner = Arc::new(WeightOwner::new("splat-decoder"));
         let prefix = model.gs_prefix();
         let c = GS_MODEL_CHANNELS;
         let mut blocks = Vec::with_capacity(GS_BLOCKS);
         for i in 0..GS_BLOCKS {
             let p = format!("{prefix}blocks.{i}");
             blocks.push(GsBlock {
-                self_attn: SelfAttn::load(device, model, &format!("gs.blocks.{i}.self_attn"), weights, &format!("{p}.self_attn"), c, GS_HEADS)?,
+                self_attn: SelfAttn::load(
+                    device,
+                    &owner,
+                    &format!("gs.blocks.{i}.self_attn"),
+                    weights,
+                    &format!("{p}.self_attn"),
+                    c,
+                    GS_HEADS,
+                )?,
                 cross: CrossAttn::load(
                     device,
-                    model,
+                    &owner,
                     &format!("gs.blocks.{i}.cross_attn"),
                     weights,
                     &format!("{p}.cross_attn"),

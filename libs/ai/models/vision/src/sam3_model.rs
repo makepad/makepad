@@ -14,6 +14,8 @@
 //! this pack — interpolated absolute pos only), CLIP causal vs bidirectional
 //! text attention (paper says causal), and pixel-decoder fusion order.
 
+use crate::backend::WeightOwner;
+use std::sync::Arc;
 use crate::backend::{
     gpu_add, gpu_attention_packed, gpu_attention_packed_cross,
     gpu_attention_packed_cross_bias,
@@ -34,7 +36,7 @@ use crate::backend::{
 use makepad_ai_flux::clip::ClipTokenizer;
 use crate::sam3::{
     Sam3Cancel, Sam3Mask, Sam3Preprocessed, Sam3Prompt, Sam3Weights,
-    SAM3_CACHE_NAMESPACE, SAM3_DETECTOR_DIM, SAM3_DETECTOR_HEADS, SAM3_DECODER_DEPTH,
+    SAM3_DETECTOR_DIM, SAM3_DETECTOR_HEADS, SAM3_DECODER_DEPTH,
     SAM3_FUSION_DEPTH, SAM3_GLOBAL_LAYERS, SAM3_INPUT_SIZE, SAM3_LN_EPS, SAM3_NUM_QUERIES,
     SAM3_PAD_ID, SAM3_PATCH, SAM3_POS_BASE, SAM3_REFINE_ITERS, SAM3_SCORE_THRESH, SAM3_TEXT_CTX,
     SAM3_TEXT_DEPTH, SAM3_TEXT_DIM, SAM3_TEXT_HEADS, SAM3_TEXT_MLP, SAM3_VISION_DEPTH,
@@ -87,6 +89,7 @@ fn norm_mods(weights: &Sam3Weights, prefix: &str, dim: usize) -> Result<GpuTenso
 }
 
 fn linear(
+    namespace: &str,
     x: &GpuTensor,
     bytes: &[u8],
     key: &str,
@@ -95,7 +98,7 @@ fn linear(
 ) -> Result<GpuTensor> {
     gpu_linear_nt_cached_bf16_f32acc(
         x,
-        SAM3_CACHE_NAMESPACE,
+        namespace,
         &[GpuLinearPart {
             bt_ggml_type: GGML_TYPE_BF16,
             n,
@@ -114,6 +117,7 @@ fn linear(
 /// spreading it to the decoder/score path cost IoU for ~2ms and was
 /// rejected. The generic model default deliberately selects this policy.
 fn linear_fast(
+    namespace: &str,
     x: &GpuTensor,
     bytes: &[u8],
     key: &str,
@@ -122,7 +126,7 @@ fn linear_fast(
 ) -> Result<GpuTensor> {
     gpu_linear_nt_cached(
         x,
-        SAM3_CACHE_NAMESPACE,
+        namespace,
         &[GpuLinearPart {
             bt_ggml_type: GGML_TYPE_BF16,
             n,
@@ -135,6 +139,7 @@ fn linear_fast(
 }
 
 struct Linear {
+    owner: Arc<WeightOwner>,
     bytes: Vec<u8>,
     key: String,
     n: usize,
@@ -142,9 +147,9 @@ struct Linear {
 }
 
 impl Linear {
-    fn load(weights: &Sam3Weights, name: &str, out: usize, inn: usize) -> Result<Self> {
+    fn load(owner: &Arc<WeightOwner>, weights: &Sam3Weights, name: &str, out: usize, inn: usize) -> Result<Self> {
         Self::load_named(
-            weights,
+            owner, weights,
             name,
             &format!("{name}.weight"),
             Some(&format!("{name}.bias")),
@@ -154,9 +159,9 @@ impl Linear {
     }
 
     /// CLIP / DETR packed QKV lives at `*.in_proj_weight`, not `*.in_proj.weight`.
-    fn load_in_proj(weights: &Sam3Weights, prefix: &str, dim: usize) -> Result<Self> {
+    fn load_in_proj(owner: &Arc<WeightOwner>, weights: &Sam3Weights, prefix: &str, dim: usize) -> Result<Self> {
         Self::load_named(
-            weights,
+            owner, weights,
             &format!("{prefix}.in_proj"),
             &format!("{prefix}.in_proj_weight"),
             Some(&format!("{prefix}.in_proj_bias")),
@@ -166,7 +171,7 @@ impl Linear {
     }
 
     fn load_named(
-        weights: &Sam3Weights,
+        owner: &Arc<WeightOwner>, weights: &Sam3Weights,
         key: &str,
         weight_name: &str,
         bias_name: Option<&str>,
@@ -179,6 +184,7 @@ impl Linear {
             _ => vec![0.0; out],
         };
         Ok(Self {
+            owner: Arc::clone(owner),
             bytes: f32_to_bf16_bytes(&w),
             key: key.to_string(),
             n: out,
@@ -187,11 +193,11 @@ impl Linear {
     }
 
     fn forward(&self, x: &GpuTensor) -> Result<GpuTensor> {
-        linear(x, &self.bytes, &self.key, self.n, &self.bias)
+        linear(self.owner.namespace(), x, &self.bytes, &self.key, self.n, &self.bias)
     }
 
     fn forward_fast(&self, x: &GpuTensor) -> Result<GpuTensor> {
-        linear_fast(x, &self.bytes, &self.key, self.n, &self.bias)
+        linear_fast(self.owner.namespace(), x, &self.bytes, &self.key, self.n, &self.bias)
     }
 }
 
@@ -205,7 +211,7 @@ struct SplitProj {
 }
 
 impl SplitProj {
-    fn load_in_proj(weights: &Sam3Weights, prefix: &str, dim: usize) -> Result<Self> {
+    fn load_in_proj(owner: &Arc<WeightOwner>, weights: &Sam3Weights, prefix: &str, dim: usize) -> Result<Self> {
         let w = weights.f32_shaped(&format!("{prefix}.in_proj_weight"), &[3 * dim, dim])?;
         let bias_name = format!("{prefix}.in_proj_bias");
         let b = if weights.has(&bias_name) {
@@ -215,6 +221,7 @@ impl SplitProj {
         };
         let part = |index: usize, name: &str| -> Linear {
             Linear {
+                owner: Arc::clone(owner),
                 bytes: f32_to_bf16_bytes(&w[index * dim * dim..(index + 1) * dim * dim]),
                 key: format!("{prefix}.in_proj::{name}"),
                 n: dim,
@@ -230,6 +237,7 @@ impl SplitProj {
 }
 
 struct Conv2d {
+    owner: Arc<WeightOwner>,
     key: String,
     weights: Vec<f32>,
     bias: Vec<f32>,
@@ -242,7 +250,7 @@ struct Conv2d {
 
 impl Conv2d {
     fn load(
-        weights: &Sam3Weights,
+        owner: &Arc<WeightOwner>, weights: &Sam3Weights,
         name: &str,
         in_channels: usize,
         out_channels: usize,
@@ -257,6 +265,7 @@ impl Conv2d {
             vec![0.0; out_channels]
         };
         Ok(Self {
+            owner: Arc::clone(owner),
             key: name.to_string(),
             weights: values,
             bias: bias_values,
@@ -273,7 +282,7 @@ impl Conv2d {
             &input.tensor,
             input.width,
             input.height,
-            SAM3_CACHE_NAMESPACE,
+            self.owner.namespace(),
             &self.key,
             &self.weights,
             &self.bias,
@@ -293,6 +302,7 @@ impl Conv2d {
 }
 
 struct ConvTransposeNoOverlap {
+    owner: Arc<WeightOwner>,
     weight: GpuTensor,
     bias: Vec<f32>,
     bias_key: String,
@@ -302,7 +312,7 @@ struct ConvTransposeNoOverlap {
 
 impl ConvTransposeNoOverlap {
     fn load(
-        weights: &Sam3Weights,
+        owner: &Arc<WeightOwner>, weights: &Sam3Weights,
         name: &str,
         in_channels: usize,
         out_channels: usize,
@@ -330,6 +340,7 @@ impl ConvTransposeNoOverlap {
             vec![0.0; out_channels]
         };
         Ok(Self {
+            owner: Arc::clone(owner),
             weight: gpu_upload(&reordered, out_channels * scale * scale, in_channels)
                 .map_err(DiffusionError::model)?,
             bias,
@@ -352,7 +363,7 @@ impl ConvTransposeNoOverlap {
             input.height,
             self.out_channels,
             self.scale,
-            SAM3_CACHE_NAMESPACE,
+            self.owner.namespace(),
             &self.bias_key,
             &self.bias,
         )
@@ -439,17 +450,17 @@ struct SamAttn {
 
 impl SamAttn {
     fn load(
-        weights: &Sam3Weights,
+        owner: &Arc<WeightOwner>, weights: &Sam3Weights,
         prefix: &str,
         in_dim: usize,
         inner_dim: usize,
         heads: usize,
     ) -> Result<Self> {
         Ok(Self {
-            q: Linear::load(weights, &format!("{prefix}.q_proj"), inner_dim, in_dim)?,
-            k: Linear::load(weights, &format!("{prefix}.k_proj"), inner_dim, in_dim)?,
-            v: Linear::load(weights, &format!("{prefix}.v_proj"), inner_dim, in_dim)?,
-            out: Linear::load(weights, &format!("{prefix}.out_proj"), in_dim, inner_dim)?,
+            q: Linear::load(owner, weights, &format!("{prefix}.q_proj"), inner_dim, in_dim)?,
+            k: Linear::load(owner, weights, &format!("{prefix}.k_proj"), inner_dim, in_dim)?,
+            v: Linear::load(owner, weights, &format!("{prefix}.v_proj"), inner_dim, in_dim)?,
+            out: Linear::load(owner, weights, &format!("{prefix}.out_proj"), in_dim, inner_dim)?,
             heads,
         })
     }
@@ -513,6 +524,7 @@ struct InteractiveSam {
 }
 
 pub struct Sam3Model {
+    owner: Arc<WeightOwner>,
     tokenizer: ClipTokenizer,
     patch: Linear,
     pos_spatial: GpuTensor,
@@ -605,20 +617,20 @@ pub struct Sam3Model {
 }
 
 impl InteractiveSam {
-    fn load(weights: &Sam3Weights) -> Result<Self> {
+    fn load(owner: &Arc<WeightOwner>, weights: &Sam3Weights) -> Result<Self> {
         const PE: &str = "tracker.model.interactive_sam_prompt_encoder";
         const MD: &str = "tracker.model.interactive_sam_mask_decoder";
         const IC: &str = "detector.backbone.vision_backbone.interactive_convs";
         let fpn = InteractiveFpn {
-            conv0_up0: ConvTransposeNoOverlap::load(weights, &format!("{IC}.0.dconv_2x2_0"), SAM3_VISION_DIM, 512, 2)?,
-            conv0_up1: ConvTransposeNoOverlap::load(weights, &format!("{IC}.0.dconv_2x2_1"), 512, SAM3_DETECTOR_DIM, 2)?,
-            conv0_1x1: Conv2d::load(weights, &format!("{IC}.0.conv_1x1"), SAM3_DETECTOR_DIM, SAM3_DETECTOR_DIM, 1, true)?,
-            conv0_3x3: Conv2d::load(weights, &format!("{IC}.0.conv_3x3"), SAM3_DETECTOR_DIM, SAM3_DETECTOR_DIM, 3, true)?,
-            conv1_up: ConvTransposeNoOverlap::load(weights, &format!("{IC}.1.dconv_2x2"), SAM3_VISION_DIM, 512, 2)?,
-            conv1_1x1: Conv2d::load(weights, &format!("{IC}.1.conv_1x1"), 512, SAM3_DETECTOR_DIM, 1, true)?,
-            conv1_3x3: Conv2d::load(weights, &format!("{IC}.1.conv_3x3"), SAM3_DETECTOR_DIM, SAM3_DETECTOR_DIM, 3, true)?,
-            conv2_1x1: Conv2d::load(weights, &format!("{IC}.2.conv_1x1"), SAM3_VISION_DIM, SAM3_DETECTOR_DIM, 1, true)?,
-            conv2_3x3: Conv2d::load(weights, &format!("{IC}.2.conv_3x3"), SAM3_DETECTOR_DIM, SAM3_DETECTOR_DIM, 3, true)?,
+            conv0_up0: ConvTransposeNoOverlap::load(owner, weights, &format!("{IC}.0.dconv_2x2_0"), SAM3_VISION_DIM, 512, 2)?,
+            conv0_up1: ConvTransposeNoOverlap::load(owner, weights, &format!("{IC}.0.dconv_2x2_1"), 512, SAM3_DETECTOR_DIM, 2)?,
+            conv0_1x1: Conv2d::load(owner, weights, &format!("{IC}.0.conv_1x1"), SAM3_DETECTOR_DIM, SAM3_DETECTOR_DIM, 1, true)?,
+            conv0_3x3: Conv2d::load(owner, weights, &format!("{IC}.0.conv_3x3"), SAM3_DETECTOR_DIM, SAM3_DETECTOR_DIM, 3, true)?,
+            conv1_up: ConvTransposeNoOverlap::load(owner, weights, &format!("{IC}.1.dconv_2x2"), SAM3_VISION_DIM, 512, 2)?,
+            conv1_1x1: Conv2d::load(owner, weights, &format!("{IC}.1.conv_1x1"), 512, SAM3_DETECTOR_DIM, 1, true)?,
+            conv1_3x3: Conv2d::load(owner, weights, &format!("{IC}.1.conv_3x3"), SAM3_DETECTOR_DIM, SAM3_DETECTOR_DIM, 3, true)?,
+            conv2_1x1: Conv2d::load(owner, weights, &format!("{IC}.2.conv_1x1"), SAM3_VISION_DIM, SAM3_DETECTOR_DIM, 1, true)?,
+            conv2_3x3: Conv2d::load(owner, weights, &format!("{IC}.2.conv_3x3"), SAM3_DETECTOR_DIM, SAM3_DETECTOR_DIM, 3, true)?,
         };
         let no_mem_row =
             weights.f32_shaped("tracker.model.interactivity_no_mem_embed", &[1, 1, SAM3_DETECTOR_DIM])?;
@@ -648,11 +660,11 @@ impl InteractiveSam {
         let load_twoway = |i: usize, skip: bool| -> Result<TwoWayBlock> {
             let p = format!("{MD}.transformer.layers.{i}");
             Ok(TwoWayBlock {
-                self_attn: SamAttn::load(weights, &format!("{p}.self_attn"), SAM3_DETECTOR_DIM, SAM3_DETECTOR_DIM, 8)?,
-                t2i: SamAttn::load(weights, &format!("{p}.cross_attn_token_to_image"), SAM3_DETECTOR_DIM, 128, 8)?,
-                i2t: SamAttn::load(weights, &format!("{p}.cross_attn_image_to_token"), SAM3_DETECTOR_DIM, 128, 8)?,
-                mlp1: Linear::load(weights, &format!("{p}.mlp.lin1"), 2048, SAM3_DETECTOR_DIM)?,
-                mlp2: Linear::load(weights, &format!("{p}.mlp.lin2"), SAM3_DETECTOR_DIM, 2048)?,
+                self_attn: SamAttn::load(owner, weights, &format!("{p}.self_attn"), SAM3_DETECTOR_DIM, SAM3_DETECTOR_DIM, 8)?,
+                t2i: SamAttn::load(owner, weights, &format!("{p}.cross_attn_token_to_image"), SAM3_DETECTOR_DIM, 128, 8)?,
+                i2t: SamAttn::load(owner, weights, &format!("{p}.cross_attn_image_to_token"), SAM3_DETECTOR_DIM, 128, 8)?,
+                mlp1: Linear::load(owner, weights, &format!("{p}.mlp.lin1"), 2048, SAM3_DETECTOR_DIM)?,
+                mlp2: Linear::load(owner, weights, &format!("{p}.mlp.lin2"), SAM3_DETECTOR_DIM, 2048)?,
                 norm1: norm_mods(weights, &format!("{p}.norm1"), SAM3_DETECTOR_DIM)?,
                 norm2: norm_mods(weights, &format!("{p}.norm2"), SAM3_DETECTOR_DIM)?,
                 norm3: norm_mods(weights, &format!("{p}.norm3"), SAM3_DETECTOR_DIM)?,
@@ -671,25 +683,25 @@ impl InteractiveSam {
             mask_ds1_w: weights.f32_shaped(&format!("{PE}.mask_downscaling.3.weight"), &[16, 4, 2, 2])?,
             mask_ds1_b: weights.f32_shaped(&format!("{PE}.mask_downscaling.3.bias"), &[16])?,
             mask_ds1_ln: norm_mods(weights, &format!("{PE}.mask_downscaling.4"), 16)?,
-            mask_ds2: Conv2d::load(weights, &format!("{PE}.mask_downscaling.6"), 16, SAM3_DETECTOR_DIM, 1, true)?,
+            mask_ds2: Conv2d::load(owner, weights, &format!("{PE}.mask_downscaling.6"), 16, SAM3_DETECTOR_DIM, 1, true)?,
             layers: [load_twoway(0, true)?, load_twoway(1, false)?],
             final_attn: SamAttn::load(
-                weights,
+                owner, weights,
                 &format!("{MD}.transformer.final_attn_token_to_image"),
                 SAM3_DETECTOR_DIM,
                 128,
                 8,
             )?,
             final_norm: norm_mods(weights, &format!("{MD}.transformer.norm_final_attn"), SAM3_DETECTOR_DIM)?,
-            up0: ConvTransposeNoOverlap::load(weights, &format!("{MD}.output_upscaling.0"), SAM3_DETECTOR_DIM, 64, 2)?,
+            up0: ConvTransposeNoOverlap::load(owner, weights, &format!("{MD}.output_upscaling.0"), SAM3_DETECTOR_DIM, 64, 2)?,
             up0_ln: norm_mods(weights, &format!("{MD}.output_upscaling.1"), 64)?,
-            up1: ConvTransposeNoOverlap::load(weights, &format!("{MD}.output_upscaling.3"), 64, 32, 2)?,
-            conv_s0: Conv2d::load(weights, &format!("{MD}.conv_s0"), SAM3_DETECTOR_DIM, 32, 1, true)?,
-            conv_s1: Conv2d::load(weights, &format!("{MD}.conv_s1"), SAM3_DETECTOR_DIM, 64, 1, true)?,
+            up1: ConvTransposeNoOverlap::load(owner, weights, &format!("{MD}.output_upscaling.3"), 64, 32, 2)?,
+            conv_s0: Conv2d::load(owner, weights, &format!("{MD}.conv_s0"), SAM3_DETECTOR_DIM, 32, 1, true)?,
+            conv_s1: Conv2d::load(owner, weights, &format!("{MD}.conv_s1"), SAM3_DETECTOR_DIM, 64, 1, true)?,
             hyper0: HyperMlp {
-                l0: Linear::load(weights, &format!("{MD}.output_hypernetworks_mlps.0.layers.0"), SAM3_DETECTOR_DIM, SAM3_DETECTOR_DIM)?,
-                l1: Linear::load(weights, &format!("{MD}.output_hypernetworks_mlps.0.layers.1"), SAM3_DETECTOR_DIM, SAM3_DETECTOR_DIM)?,
-                l2: Linear::load(weights, &format!("{MD}.output_hypernetworks_mlps.0.layers.2"), 32, SAM3_DETECTOR_DIM)?,
+                l0: Linear::load(owner, weights, &format!("{MD}.output_hypernetworks_mlps.0.layers.0"), SAM3_DETECTOR_DIM, SAM3_DETECTOR_DIM)?,
+                l1: Linear::load(owner, weights, &format!("{MD}.output_hypernetworks_mlps.0.layers.1"), SAM3_DETECTOR_DIM, SAM3_DETECTOR_DIM)?,
+                l2: Linear::load(owner, weights, &format!("{MD}.output_hypernetworks_mlps.0.layers.2"), 32, SAM3_DETECTOR_DIM)?,
             },
         })
     }
@@ -697,7 +709,7 @@ impl InteractiveSam {
 
 impl Sam3Model {
     pub fn prepare(
-        weights: &Sam3Weights,
+        owner: &Arc<WeightOwner>, weights: &Sam3Weights,
         cancel: Option<Sam3Cancel<'_>>,
         mut progress: Option<ProgressHook>,
     ) -> Result<Self> {
@@ -711,6 +723,7 @@ impl Sam3Model {
         let tokenizer = ClipTokenizer::new()?;
         emit_progress(&mut progress, "load sam3 vision", 0.05)?;
         let patch = Linear {
+            owner: Arc::clone(owner),
             bytes: f32_to_bf16_bytes(&weights.f32_shaped(
                 "detector.backbone.vision_backbone.trunk.patch_embed.proj.weight",
                 &[SAM3_VISION_DIM, 3, SAM3_PATCH, SAM3_PATCH],
@@ -743,10 +756,10 @@ impl Sam3Model {
             vision.push(VisionBlock {
                 norm1: norm_mods(weights, &format!("{p}.norm1"), SAM3_VISION_DIM)?,
                 norm2: norm_mods(weights, &format!("{p}.norm2"), SAM3_VISION_DIM)?,
-                qkv: Linear::load(weights, &format!("{p}.attn.qkv"), 3 * SAM3_VISION_DIM, SAM3_VISION_DIM)?,
-                proj: Linear::load(weights, &format!("{p}.attn.proj"), SAM3_VISION_DIM, SAM3_VISION_DIM)?,
-                fc1: Linear::load(weights, &format!("{p}.mlp.fc1"), SAM3_VISION_MLP, SAM3_VISION_DIM)?,
-                fc2: Linear::load(weights, &format!("{p}.mlp.fc2"), SAM3_VISION_DIM, SAM3_VISION_MLP)?,
+                qkv: Linear::load(owner, weights, &format!("{p}.attn.qkv"), 3 * SAM3_VISION_DIM, SAM3_VISION_DIM)?,
+                proj: Linear::load(owner, weights, &format!("{p}.attn.proj"), SAM3_VISION_DIM, SAM3_VISION_DIM)?,
+                fc1: Linear::load(owner, weights, &format!("{p}.mlp.fc1"), SAM3_VISION_MLP, SAM3_VISION_DIM)?,
+                fc2: Linear::load(owner, weights, &format!("{p}.mlp.fc2"), SAM3_VISION_DIM, SAM3_VISION_MLP)?,
                 global: SAM3_GLOBAL_LAYERS.contains(&i),
             });
         }
@@ -806,16 +819,16 @@ impl Sam3Model {
             text_blocks.push(TextBlock {
                 ln1: norm_mods(weights, &format!("{p}.ln_1"), SAM3_TEXT_DIM)?,
                 ln2: norm_mods(weights, &format!("{p}.ln_2"), SAM3_TEXT_DIM)?,
-                qkv: Linear::load_in_proj(weights, &format!("{p}.attn"), SAM3_TEXT_DIM)?,
+                qkv: Linear::load_in_proj(owner, weights, &format!("{p}.attn"), SAM3_TEXT_DIM)?,
                 proj: Linear::load(
-                    weights,
+                    owner, weights,
                     &format!("{p}.attn.out_proj"),
                     SAM3_TEXT_DIM,
                     SAM3_TEXT_DIM,
                 )?,
-                fc: Linear::load(weights, &format!("{p}.mlp.c_fc"), SAM3_TEXT_MLP, SAM3_TEXT_DIM)?,
+                fc: Linear::load(owner, weights, &format!("{p}.mlp.c_fc"), SAM3_TEXT_MLP, SAM3_TEXT_DIM)?,
                 proj_out: Linear::load(
-                    weights,
+                    owner, weights,
                     &format!("{p}.mlp.c_proj"),
                     SAM3_TEXT_DIM,
                     SAM3_TEXT_MLP,
@@ -828,7 +841,7 @@ impl Sam3Model {
             SAM3_TEXT_DIM,
         )?;
         let text_resize = Linear::load(
-            weights,
+            owner, weights,
             "detector.backbone.language_backbone.resizer",
             SAM3_DETECTOR_DIM,
             SAM3_TEXT_DIM,
@@ -836,21 +849,21 @@ impl Sam3Model {
 
         emit_progress(&mut progress, "load sam3 neck", 0.62)?;
         let conv0_up0 = ConvTransposeNoOverlap::load(
-            weights,
+            owner, weights,
             "detector.backbone.vision_backbone.convs.0.dconv_2x2_0",
             SAM3_VISION_DIM,
             512,
             2,
         )?;
         let conv0_up1 = ConvTransposeNoOverlap::load(
-            weights,
+            owner, weights,
             "detector.backbone.vision_backbone.convs.0.dconv_2x2_1",
             512,
             SAM3_DETECTOR_DIM,
             2,
         )?;
         let conv0_1x1 = Conv2d::load(
-            weights,
+            owner, weights,
             "detector.backbone.vision_backbone.convs.0.conv_1x1",
             SAM3_DETECTOR_DIM,
             SAM3_DETECTOR_DIM,
@@ -858,7 +871,7 @@ impl Sam3Model {
             true,
         )?;
         let conv0_3x3 = Conv2d::load(
-            weights,
+            owner, weights,
             "detector.backbone.vision_backbone.convs.0.conv_3x3",
             SAM3_DETECTOR_DIM,
             SAM3_DETECTOR_DIM,
@@ -866,14 +879,14 @@ impl Sam3Model {
             true,
         )?;
         let conv1_up = ConvTransposeNoOverlap::load(
-            weights,
+            owner, weights,
             "detector.backbone.vision_backbone.convs.1.dconv_2x2",
             SAM3_VISION_DIM,
             512,
             2,
         )?;
         let conv1_1x1 = Conv2d::load(
-            weights,
+            owner, weights,
             "detector.backbone.vision_backbone.convs.1.conv_1x1",
             512,
             SAM3_DETECTOR_DIM,
@@ -881,7 +894,7 @@ impl Sam3Model {
             true,
         )?;
         let conv1_3x3 = Conv2d::load(
-            weights,
+            owner, weights,
             "detector.backbone.vision_backbone.convs.1.conv_3x3",
             SAM3_DETECTOR_DIM,
             SAM3_DETECTOR_DIM,
@@ -889,7 +902,7 @@ impl Sam3Model {
             true,
         )?;
         let conv2_1x1 = Conv2d::load(
-            weights,
+            owner, weights,
             "detector.backbone.vision_backbone.convs.2.conv_1x1",
             SAM3_VISION_DIM,
             SAM3_DETECTOR_DIM,
@@ -897,7 +910,7 @@ impl Sam3Model {
             true,
         )?;
         let conv2_3x3 = Conv2d::load(
-            weights,
+            owner, weights,
             "detector.backbone.vision_backbone.convs.2.conv_3x3",
             SAM3_DETECTOR_DIM,
             SAM3_DETECTOR_DIM,
@@ -910,26 +923,26 @@ impl Sam3Model {
         for i in 0..SAM3_FUSION_DEPTH {
             let p = format!("detector.transformer.encoder.layers.{i}");
             fusion.push(FusionLayer {
-                self_attn: SplitProj::load_in_proj(weights, &format!("{p}.self_attn"), SAM3_DETECTOR_DIM)?,
+                self_attn: SplitProj::load_in_proj(owner, weights, &format!("{p}.self_attn"), SAM3_DETECTOR_DIM)?,
                 self_out: Linear::load(
-                    weights,
+                    owner, weights,
                     &format!("{p}.self_attn.out_proj"),
                     SAM3_DETECTOR_DIM,
                     SAM3_DETECTOR_DIM,
                 )?,
                 cross: SplitProj::load_in_proj(
-                    weights,
+                    owner, weights,
                     &format!("{p}.cross_attn_image"),
                     SAM3_DETECTOR_DIM,
                 )?,
                 cross_out: Linear::load(
-                    weights,
+                    owner, weights,
                     &format!("{p}.cross_attn_image.out_proj"),
                     SAM3_DETECTOR_DIM,
                     SAM3_DETECTOR_DIM,
                 )?,
-                linear1: Linear::load(weights, &format!("{p}.linear1"), 2048, SAM3_DETECTOR_DIM)?,
-                linear2: Linear::load(weights, &format!("{p}.linear2"), SAM3_DETECTOR_DIM, 2048)?,
+                linear1: Linear::load(owner, weights, &format!("{p}.linear1"), 2048, SAM3_DETECTOR_DIM)?,
+                linear2: Linear::load(owner, weights, &format!("{p}.linear2"), SAM3_DETECTOR_DIM, 2048)?,
                 norm1: norm_mods(weights, &format!("{p}.norm1"), SAM3_DETECTOR_DIM)?,
                 norm2: norm_mods(weights, &format!("{p}.norm2"), SAM3_DETECTOR_DIM)?,
                 norm3: norm_mods(weights, &format!("{p}.norm3"), SAM3_DETECTOR_DIM)?,
@@ -939,29 +952,29 @@ impl Sam3Model {
         for i in 0..SAM3_DECODER_DEPTH {
             let p = format!("detector.transformer.decoder.layers.{i}");
             decoder.push(DecoderLayer {
-                self_attn: SplitProj::load_in_proj(weights, &format!("{p}.self_attn"), SAM3_DETECTOR_DIM)?,
+                self_attn: SplitProj::load_in_proj(owner, weights, &format!("{p}.self_attn"), SAM3_DETECTOR_DIM)?,
                 self_out: Linear::load(
-                    weights,
+                    owner, weights,
                     &format!("{p}.self_attn.out_proj"),
                     SAM3_DETECTOR_DIM,
                     SAM3_DETECTOR_DIM,
                 )?,
-                ca_text: SplitProj::load_in_proj(weights, &format!("{p}.ca_text"), SAM3_DETECTOR_DIM)?,
+                ca_text: SplitProj::load_in_proj(owner, weights, &format!("{p}.ca_text"), SAM3_DETECTOR_DIM)?,
                 ca_text_out: Linear::load(
-                    weights,
+                    owner, weights,
                     &format!("{p}.ca_text.out_proj"),
                     SAM3_DETECTOR_DIM,
                     SAM3_DETECTOR_DIM,
                 )?,
-                cross: SplitProj::load_in_proj(weights, &format!("{p}.cross_attn"), SAM3_DETECTOR_DIM)?,
+                cross: SplitProj::load_in_proj(owner, weights, &format!("{p}.cross_attn"), SAM3_DETECTOR_DIM)?,
                 cross_out: Linear::load(
-                    weights,
+                    owner, weights,
                     &format!("{p}.cross_attn.out_proj"),
                     SAM3_DETECTOR_DIM,
                     SAM3_DETECTOR_DIM,
                 )?,
-                linear1: Linear::load(weights, &format!("{p}.linear1"), 2048, SAM3_DETECTOR_DIM)?,
-                linear2: Linear::load(weights, &format!("{p}.linear2"), SAM3_DETECTOR_DIM, 2048)?,
+                linear1: Linear::load(owner, weights, &format!("{p}.linear1"), 2048, SAM3_DETECTOR_DIM)?,
+                linear2: Linear::load(owner, weights, &format!("{p}.linear2"), SAM3_DETECTOR_DIM, 2048)?,
                 norm1: norm_mods(weights, &format!("{p}.norm1"), SAM3_DETECTOR_DIM)?,
                 norm2: norm_mods(weights, &format!("{p}.norm2"), SAM3_DETECTOR_DIM)?,
                 norm3: norm_mods(weights, &format!("{p}.norm3"), SAM3_DETECTOR_DIM)?,
@@ -969,10 +982,11 @@ impl Sam3Model {
             });
         }
         emit_progress(&mut progress, "load sam3 heads", 0.90)?;
-        let interactive = InteractiveSam::load(weights)?;
+        let interactive = InteractiveSam::load(owner, weights)?;
         static SAM3_GENERATION: std::sync::atomic::AtomicUsize =
             std::sync::atomic::AtomicUsize::new(0);
         let result = Self {
+            owner: Arc::clone(owner),
             tokenizer,
             patch,
             pos_spatial,
@@ -1026,19 +1040,19 @@ impl Sam3Model {
                 SAM3_DETECTOR_DIM,
             )?,
             presence_h0: Linear::load(
-                weights,
+                owner, weights,
                 "detector.transformer.decoder.presence_token_head.layers.0",
                 SAM3_DETECTOR_DIM,
                 SAM3_DETECTOR_DIM,
             )?,
             presence_h1: Linear::load(
-                weights,
+                owner, weights,
                 "detector.transformer.decoder.presence_token_head.layers.1",
                 SAM3_DETECTOR_DIM,
                 SAM3_DETECTOR_DIM,
             )?,
             presence_h2: Linear::load(
-                weights,
+                owner, weights,
                 "detector.transformer.decoder.presence_token_head.layers.2",
                 1,
                 SAM3_DETECTOR_DIM,
@@ -1078,37 +1092,37 @@ impl Sam3Model {
                 idx
             },
             ref_point_h0: Linear::load(
-                weights,
+                owner, weights,
                 "detector.transformer.decoder.ref_point_head.layers.0",
                 SAM3_DETECTOR_DIM,
                 SAM3_DETECTOR_DIM * 2,
             )?,
             ref_point_h1: Linear::load(
-                weights,
+                owner, weights,
                 "detector.transformer.decoder.ref_point_head.layers.1",
                 SAM3_DETECTOR_DIM,
                 SAM3_DETECTOR_DIM,
             )?,
             rpb_x0: Linear::load(
-                weights,
+                owner, weights,
                 "detector.transformer.decoder.boxRPB_embed_x.layers.0",
                 SAM3_DETECTOR_DIM,
                 2,
             )?,
             rpb_x1: Linear::load(
-                weights,
+                owner, weights,
                 "detector.transformer.decoder.boxRPB_embed_x.layers.1",
                 SAM3_DETECTOR_HEADS,
                 SAM3_DETECTOR_DIM,
             )?,
             rpb_y0: Linear::load(
-                weights,
+                owner, weights,
                 "detector.transformer.decoder.boxRPB_embed_y.layers.0",
                 SAM3_DETECTOR_DIM,
                 2,
             )?,
             rpb_y1: Linear::load(
-                weights,
+                owner, weights,
                 "detector.transformer.decoder.boxRPB_embed_y.layers.1",
                 SAM3_DETECTOR_HEADS,
                 SAM3_DETECTOR_DIM,
@@ -1120,7 +1134,7 @@ impl Sam3Model {
             )
             .map_err(DiffusionError::model)?,
             geo_final: Linear::load(
-                weights,
+                owner, weights,
                 "detector.geometry_encoder.final_proj",
                 SAM3_DETECTOR_DIM,
                 SAM3_DETECTOR_DIM,
@@ -1136,26 +1150,26 @@ impl Sam3Model {
                 for i in 0..3 {
                     let p = format!("detector.geometry_encoder.encode.{i}");
                     layers.push(FusionLayer {
-                        self_attn: SplitProj::load_in_proj(weights, &format!("{p}.self_attn"), SAM3_DETECTOR_DIM)?,
+                        self_attn: SplitProj::load_in_proj(owner, weights, &format!("{p}.self_attn"), SAM3_DETECTOR_DIM)?,
                         self_out: Linear::load(
-                            weights,
+                            owner, weights,
                             &format!("{p}.self_attn.out_proj"),
                             SAM3_DETECTOR_DIM,
                             SAM3_DETECTOR_DIM,
                         )?,
                         cross: SplitProj::load_in_proj(
-                            weights,
+                            owner, weights,
                             &format!("{p}.cross_attn_image"),
                             SAM3_DETECTOR_DIM,
                         )?,
                         cross_out: Linear::load(
-                            weights,
+                            owner, weights,
                             &format!("{p}.cross_attn_image.out_proj"),
                             SAM3_DETECTOR_DIM,
                             SAM3_DETECTOR_DIM,
                         )?,
-                        linear1: Linear::load(weights, &format!("{p}.linear1"), 2048, SAM3_DETECTOR_DIM)?,
-                        linear2: Linear::load(weights, &format!("{p}.linear2"), SAM3_DETECTOR_DIM, 2048)?,
+                        linear1: Linear::load(owner, weights, &format!("{p}.linear1"), 2048, SAM3_DETECTOR_DIM)?,
+                        linear2: Linear::load(owner, weights, &format!("{p}.linear2"), SAM3_DETECTOR_DIM, 2048)?,
                         norm1: norm_mods(weights, &format!("{p}.norm1"), SAM3_DETECTOR_DIM)?,
                         norm2: norm_mods(weights, &format!("{p}.norm2"), SAM3_DETECTOR_DIM)?,
                         norm3: norm_mods(weights, &format!("{p}.norm3"), SAM3_DETECTOR_DIM)?,
@@ -1164,37 +1178,37 @@ impl Sam3Model {
                 layers
             },
             bbox0: Linear::load(
-                weights,
+                owner, weights,
                 "detector.transformer.decoder.bbox_embed.layers.0",
                 SAM3_DETECTOR_DIM,
                 SAM3_DETECTOR_DIM,
             )?,
             bbox1: Linear::load(
-                weights,
+                owner, weights,
                 "detector.transformer.decoder.bbox_embed.layers.1",
                 SAM3_DETECTOR_DIM,
                 SAM3_DETECTOR_DIM,
             )?,
             bbox2: Linear::load(
-                weights,
+                owner, weights,
                 "detector.transformer.decoder.bbox_embed.layers.2",
                 4,
                 SAM3_DETECTOR_DIM,
             )?,
             hs_proj: Linear::load(
-                weights,
+                owner, weights,
                 "detector.dot_prod_scoring.hs_proj",
                 SAM3_DETECTOR_DIM,
                 SAM3_DETECTOR_DIM,
             )?,
             prompt_mlp0: Linear::load(
-                weights,
+                owner, weights,
                 "detector.dot_prod_scoring.prompt_mlp.layers.0",
                 2048,
                 SAM3_DETECTOR_DIM,
             )?,
             prompt_mlp1: Linear::load(
-                weights,
+                owner, weights,
                 "detector.dot_prod_scoring.prompt_mlp.layers.1",
                 SAM3_DETECTOR_DIM,
                 2048,
@@ -1205,32 +1219,32 @@ impl Sam3Model {
                 SAM3_DETECTOR_DIM,
             )?,
             prompt_proj: Linear::load(
-                weights,
+                owner, weights,
                 "detector.dot_prod_scoring.prompt_proj",
                 SAM3_DETECTOR_DIM,
                 SAM3_DETECTOR_DIM,
             )?,
             mask_embed0: Linear::load(
-                weights,
+                owner, weights,
                 "detector.segmentation_head.mask_predictor.mask_embed.layers.0",
                 SAM3_DETECTOR_DIM,
                 SAM3_DETECTOR_DIM,
             )?,
             mask_embed1: Linear::load(
-                weights,
+                owner, weights,
                 "detector.segmentation_head.mask_predictor.mask_embed.layers.1",
                 SAM3_DETECTOR_DIM,
                 SAM3_DETECTOR_DIM,
             )?,
             mask_embed2: Linear::load(
-                weights,
+                owner, weights,
                 "detector.segmentation_head.mask_predictor.mask_embed.layers.2",
                 SAM3_DETECTOR_DIM,
                 SAM3_DETECTOR_DIM,
             )?,
             pixel_conv: [
                 Conv2d::load(
-                    weights,
+                    owner, weights,
                     "detector.segmentation_head.pixel_decoder.conv_layers.0",
                     SAM3_DETECTOR_DIM,
                     SAM3_DETECTOR_DIM,
@@ -1238,7 +1252,7 @@ impl Sam3Model {
                     true,
                 )?,
                 Conv2d::load(
-                    weights,
+                    owner, weights,
                     "detector.segmentation_head.pixel_decoder.conv_layers.1",
                     SAM3_DETECTOR_DIM,
                     SAM3_DETECTOR_DIM,
@@ -1246,7 +1260,7 @@ impl Sam3Model {
                     true,
                 )?,
                 Conv2d::load(
-                    weights,
+                    owner, weights,
                     "detector.segmentation_head.pixel_decoder.conv_layers.2",
                     SAM3_DETECTOR_DIM,
                     SAM3_DETECTOR_DIM,
@@ -1283,12 +1297,12 @@ impl Sam3Model {
                 )?,
             ],
             seg_cross: SplitProj::load_in_proj(
-                weights,
+                owner, weights,
                 "detector.segmentation_head.cross_attend_prompt",
                 SAM3_DETECTOR_DIM,
             )?,
             seg_cross_out: Linear::load(
-                weights,
+                owner, weights,
                 "detector.segmentation_head.cross_attend_prompt.out_proj",
                 SAM3_DETECTOR_DIM,
                 SAM3_DETECTOR_DIM,
@@ -1299,7 +1313,7 @@ impl Sam3Model {
                 SAM3_DETECTOR_DIM,
             )?,
             instance_head: Conv2d::load(
-                weights,
+                owner, weights,
                 "detector.segmentation_head.instance_seg_head",
                 SAM3_DETECTOR_DIM,
                 SAM3_DETECTOR_DIM,
@@ -1308,7 +1322,7 @@ impl Sam3Model {
             )?,
             interactive,
             semantic_head: Conv2d::load(
-                weights,
+                owner, weights,
                 "detector.segmentation_head.semantic_seg_head",
                 SAM3_DETECTOR_DIM,
                 1,
@@ -2122,6 +2136,7 @@ impl Sam3Model {
             let added = add_planar(&fpn[feat], &up)?;
             let conv = self.pixel_conv[i].forward(&added)?;
             let normed = group_norm_planar(
+                self.owner.namespace(),
                 &conv,
                 8,
                 &self.pixel_gn_gamma[i],
@@ -2343,7 +2358,7 @@ impl Sam3Model {
             side,
             side / 2,
             side / 2,
-            SAM3_CACHE_NAMESPACE,
+            self.owner.namespace(),
             "interactive.mask_ds0",
             &sam.mask_ds0_w,
             &sam.mask_ds0_b,
@@ -2368,7 +2383,7 @@ impl Sam3Model {
             side / 2,
             side / 4,
             side / 4,
-            SAM3_CACHE_NAMESPACE,
+            self.owner.namespace(),
             "interactive.mask_ds1",
             &sam.mask_ds1_w,
             &sam.mask_ds1_b,
@@ -2657,6 +2672,7 @@ fn relu_planar(p: &Planar) -> Result<Planar> {
 }
 
 fn group_norm_planar(
+    namespace: &str,
     p: &Planar,
     groups: usize,
     gamma: &[f32],
@@ -2669,7 +2685,7 @@ fn group_norm_planar(
             p.width,
             p.height,
             groups,
-            SAM3_CACHE_NAMESPACE,
+            namespace,
             key,
             gamma,
             beta,

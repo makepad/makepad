@@ -15,12 +15,17 @@
 //!   inside the column axis.
 
 use crate::backend::{
-    gpu_add, gpu_attention_packed_cross, gpu_concat_cols, gpu_concat_rows,
+    gpu_add, gpu_attention_packed_cross, gpu_attention_packed_flash2_d64, gpu_concat_cols, gpu_concat_rows,
     gpu_device_available, gpu_download, gpu_gated_residual_mod, gpu_gelu, gpu_layer_norm_mod,
-    gpu_layer_norm_mul_add, gpu_linear_f32_resident, gpu_mul, gpu_rms_norm_mul_perhead,
-    gpu_rope_half, gpu_silu, gpu_slice_cols, gpu_upload, GpuTensor,
+    gpu_layer_norm_mul_add, gpu_linear_f32_resident, gpu_linear_nt_cached_with_precision, gpu_mul,
+    gpu_rms_norm_mul_perhead, gpu_rope_half, gpu_silu, gpu_slice_cols, gpu_upload,
+    gpu_weight_cache_ensure, GemmPrecision, GpuLinearPart, GpuTensor,
 };
+use makepad_ai_loader::quant::{f32_to_f16_rn, GGML_TYPE_F16};
+use crate::backend::WeightOwner;
+use crate::splat::SplatWeights;
 use crate::{DiffusionError, Result};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Device {
@@ -46,6 +51,30 @@ impl Device {
 
 fn model_err(err: String) -> DiffusionError {
     DiffusionError::model(err)
+}
+
+fn check_bias(n: usize, bias: Option<&[f32]>) -> Result<()> {
+    match bias {
+        Some(values) if values.len() != n => {
+            Err(DiffusionError::workflow(format!("splat linear bias {} != {n}", values.len())))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Puts the f16 weight `name` (`[n, k]`, rounded to nearest even like torch
+/// `.half()`) in the device weight cache as `namespace::name`, reading it from
+/// `source` only when the cache does not hold it.
+fn ensure_f16(namespace: &str, source: &SplatWeights, name: &str, n: usize, k: usize) -> Result<()> {
+    gpu_weight_cache_ensure(namespace, name, GGML_TYPE_F16, n, k, false, || {
+        let values = source.f32_shaped(name, &[n, k]).map_err(|err| err.to_string())?;
+        let mut bytes = Vec::with_capacity(values.len() * 2);
+        for value in values {
+            bytes.extend_from_slice(&f32_to_f16_rn(value).to_le_bytes());
+        }
+        Ok(bytes)
+    })
+    .map_err(model_err)
 }
 
 // ---------------------------------------------------------------------------
@@ -159,9 +188,25 @@ impl Ten {
 pub struct Lin {
     pub n: usize,
     pub k: usize,
-    weight: Ten,
-    bias: Option<Ten>,
+    weight: LinWeight,
 }
+
+enum LinWeight {
+    /// f32 weight and bias on the linear's device: the CPU reference, or
+    /// device-resident f32.
+    F32 { weight: Ten, bias: Option<Ten> },
+    /// The reference's `convert_module_to_f16` linears on CUDA: the weight is
+    /// rounded to f16 (torch `.half()`) and lives in the device weight cache
+    /// under its owner's namespace as `key`, its tensor name; the GEMM takes f16
+    /// operands with f32 accumulation and output. No host copy is kept: when
+    /// memory pressure evicted the cache entry, the next call reads the
+    /// tensor from `source` and rounds it again.
+    F16 { owner: Arc<WeightOwner>, key: String, source: Arc<SplatWeights>, bias: Vec<f32> },
+}
+
+/// f16 operands, f32 accumulation and output, whatever the process-wide
+/// Flux precision switches say.
+const F16_OPERANDS: GemmPrecision = GemmPrecision { f16_accumulate: false, f16_activations: false };
 
 impl Lin {
     pub fn new(device: Device, weight: &[f32], n: usize, k: usize, bias: Option<&[f32]>) -> Result<Self> {
@@ -171,21 +216,44 @@ impl Lin {
                 weight.len()
             )));
         }
+        check_bias(n, bias)?;
         let bias = match bias {
-            Some(values) if values.len() == n => Some(Ten::upload(device, values, 1, n)?),
-            Some(values) => {
-                return Err(DiffusionError::workflow(format!(
-                    "splat linear bias {} != {n}",
-                    values.len()
-                )))
-            }
+            Some(values) => Some(Ten::upload(device, values, 1, n)?),
             None => None,
         };
         Ok(Self {
             n,
             k,
-            weight: Ten::upload(device, weight, n, k)?,
-            bias,
+            weight: LinWeight::F32 { weight: Ten::upload(device, weight, n, k)?, bias },
+        })
+    }
+
+    /// The linear `name` (`[n, k]`) of `source`, one the reference runs in
+    /// fp16. On CUDA it takes f16 GEMM operands (see [`LinWeight::F16`]); on
+    /// the CPU it is the f32 reference.
+    pub fn new_f16(
+        device: Device,
+        source: &Arc<SplatWeights>,
+        name: &str,
+        n: usize,
+        k: usize,
+        bias: Option<&[f32]>,
+        owner: &Arc<WeightOwner>,
+    ) -> Result<Self> {
+        if device == Device::Cpu {
+            return Self::new(device, &source.f32_shaped(name, &[n, k])?, n, k, bias);
+        }
+        check_bias(n, bias)?;
+        ensure_f16(owner.namespace(), source, name, n, k)?;
+        Ok(Self {
+            n,
+            k,
+            weight: LinWeight::F16 {
+                owner: Arc::clone(owner),
+                key: name.to_string(),
+                source: source.clone(),
+                bias: bias.map(<[f32]>::to_vec).unwrap_or_default(),
+            },
         })
     }
 }
@@ -202,10 +270,10 @@ pub fn linear(x: &Ten, lin: &Lin) -> Result<Ten> {
             x.cols, lin.k
         )));
     }
-    match &x.inner {
-        Inner::Cpu(values) => {
-            let w = lin.weight.cpu()?;
-            let bias = match &lin.bias {
+    match (&x.inner, &lin.weight) {
+        (Inner::Cpu(values), LinWeight::F32 { weight, bias }) => {
+            let w = weight.cpu()?;
+            let bias = match bias {
                 Some(bias) => Some(bias.cpu()?),
                 None => None,
             };
@@ -224,13 +292,23 @@ pub fn linear(x: &Ten, lin: &Lin) -> Result<Ten> {
             }
             Ok(Ten::from_cpu(out, x.rows, lin.n))
         }
-        Inner::Gpu(tensor) => {
-            let bias = match &lin.bias {
+        (Inner::Gpu(tensor), LinWeight::F32 { weight, bias }) => {
+            let bias = match bias {
                 Some(bias) => Some(bias.gpu()?),
                 None => None,
             };
-            let out = gpu_linear_f32_resident(tensor, lin.weight.gpu()?, bias).map_err(model_err)?;
+            let out = gpu_linear_f32_resident(tensor, weight.gpu()?, bias).map_err(model_err)?;
             Ok(Ten::from_gpu(out))
+        }
+        (Inner::Gpu(tensor), LinWeight::F16 { owner, key, source, bias }) => {
+            ensure_f16(owner.namespace(), source, key, lin.n, lin.k)?;
+            let part = GpuLinearPart { bt_ggml_type: GGML_TYPE_F16, n: lin.n, cache_key: key, bytes: &[] };
+            let out = gpu_linear_nt_cached_with_precision(tensor, owner.namespace(), &[part], bias, F16_OPERANDS)
+                .map_err(model_err)?;
+            Ok(Ten::from_gpu(out))
+        }
+        (Inner::Cpu(_), LinWeight::F16 { .. }) => {
+            Err(DiffusionError::workflow("splat: an f16 linear takes device activations"))
         }
     }
 }
@@ -575,13 +653,20 @@ pub fn attention(q: &Ten, k: &Ten, v: &Ten, heads: usize, scale: f32) -> Result<
             Ok(Ten::from_cpu(out, q.rows, q.cols))
         }
         (Inner::Gpu(qt), Inner::Gpu(kt), Inner::Gpu(vt)) => {
-            // Always the CROSS entry point, even when q and kv are the same
-            // length: TripoSplat's head_dim is 64, which cannot take the
-            // fused FA2 kernel, and the plain self-attention composite
-            // materializes the whole (heads, Lq, Lkv) score tensor — 9.7 GB
-            // for the 12294-token trunk sequence. The cross path chunks over
-            // queries into one bounded scores buffer.
-            let out = gpu_attention_packed_cross(qt, kt, vt, heads, scale).map_err(model_err)?;
+            // head_dim 64 (DINOv3, the flow trunk and both decoders) takes the
+            // FA2 kernel: f16 Q/K/V operands with f32 online softmax and
+            // accumulation. The reference runs every one of these modules in
+            // fp16/bf16 under SDPA, so this is its precision class, and the
+            // scores never leave registers. The f32 composite wrote the whole
+            // (heads, Lq, Lkv) score matrix out in query chunks: 74.5 ms
+            // against 5.6 ms per trunk block on a 24 GB GPU. Other head sizes keep
+            // the CROSS entry point, which bounds its scores buffer.
+            let out = if head_dim == 64 {
+                gpu_attention_packed_flash2_d64(qt, kt, vt, heads, scale)
+            } else {
+                gpu_attention_packed_cross(qt, kt, vt, heads, scale)
+            }
+            .map_err(model_err)?;
             Ok(Ten::from_gpu(out))
         }
         _ => Err(DiffusionError::workflow("splat: mixed-device attention")),

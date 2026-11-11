@@ -97,7 +97,6 @@ struct Hub {
     /// Unix ms each backend came on (or the app launched with it on).
     on_since: [(Backend, u64); 2],
     last_seq: u64,
-    pulse: bool,
     tray_key: String,
     /// A WM node's hub: its `ai-hub.conf` (path and what it said at start).
     node: Option<(PathBuf, NodeConf)>,
@@ -123,7 +122,7 @@ impl Hub {
         let serve = Serve::start();
         serve.plan(Plan::of(&settings, node.as_ref().map(|(_, c)| c)));
         let now = now_ms();
-        Hub { settings, serve, timer: cx.start_interval(0.5), on_since: [(Backend::Claude, now), (Backend::Local, now)], last_seq: u64::MAX, pulse: false, tray_key: String::new(), node }
+        Hub { settings, serve, timer: cx.start_interval(0.5), on_since: [(Backend::Claude, now), (Backend::Local, now)], last_seq: u64::MAX, tray_key: String::new(), node }
     }
 
     fn plan(&self) -> Plan {
@@ -229,10 +228,16 @@ impl Hub {
 
     fn status(&self, p: &Published) -> (tray::Glyph, String) {
         let problem = !p.notes.is_empty();
+        // While something serves, a local backend with no runnable model on disk is not a
+        // problem of the icon (its note stays in the panel).
+        let serving_problem = p.notes.iter().any(|(b, _)| *b != Backend::Local);
         let working = p.control.as_ref().and_then(|c| c.get("active")).and_then(|a| a.as_arr()).is_some_and(|a| !a.is_empty());
         match &p.phase {
-            Phase::Serving if working => (if self.pulse { tray::Glyph::Working } else { tray::Glyph::Serving }, "Serving a request".to_string()),
-            Phase::Serving if problem => (tray::Glyph::Problem, format!("Serving, {}", p.notes[0].1.lines().next().unwrap_or(""))),
+            Phase::Serving if working => (tray::Glyph::Working, "Serving a request".to_string()),
+            Phase::Serving if serving_problem => {
+                let note = p.notes.iter().find(|(b, _)| *b != Backend::Local).map_or("", |n| n.1.as_str());
+                (tray::Glyph::Problem, format!("Serving, {}", note.lines().next().unwrap_or("")))
+            }
             Phase::Serving => (tray::Glyph::Serving, p.addr.map_or("Serving".to_string(), |a| format!("Serving on {a}"))),
             Phase::Starting => (tray::Glyph::Serving, "Starting".to_string()),
             Phase::Stopping => (tray::Glyph::Off, "Stopping".to_string()),
@@ -249,7 +254,6 @@ impl App {
         let Some(hub) = self.hub.as_mut() else { return };
         let p = hub.serve.published();
         let turned_off = hub.idle_check(&p);
-        hub.pulse = !hub.pulse;
         // The tray: set only when what it shows changed.
         let (glyph, status) = hub.status(&p);
         let key = format!("{glyph:?}|{status}|{}", hub.settings.render());

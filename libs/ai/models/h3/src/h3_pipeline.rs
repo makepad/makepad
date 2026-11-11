@@ -17,9 +17,9 @@ use crate::h3::{
     H3_KEYFRAME_NOISE_AUG, H3_TEXT_TAG, H3_VIDEO_PATCH_DIM, H3_VIDEO_SHIFT, H3_VIDEO_TAG,
 };
 use crate::h3_audio_vae::H3AudioVae;
-use crate::backend::GemmPrecision;
+use crate::backend::{gpu_weight_cache_resident, GemmPrecision, WeightOwner};
 use crate::h3_text::{
-    h3_text_encode_progress, h3_text_encoder_evict, H3TextEncoderPrepared, H3VisionImage,
+    h3_text_encode_progress, H3TextEncoderPrepared, H3VisionImage,
     H3VisionSpan,
 };
 use crate::h3_transformer::{h3_dit_forward, H3AdaLnCache, H3DitPrepared};
@@ -28,6 +28,98 @@ use crate::h3_vae::{
     H3VaeDecoderPrepared, H3_VAE_PATCH,
 };
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// Device weight owners of one H3 runtime: the caller keeps them across jobs to keep weights warm.
+pub struct H3DeviceOwners {
+    te: H3OwnerSlot,
+    dit: H3OwnerSlot,
+    vae: H3OwnerSlot,
+}
+
+struct H3OwnerSlot {
+    label: &'static str,
+    source: Option<PathBuf>,
+    owner: Arc<WeightOwner>,
+}
+
+impl H3OwnerSlot {
+    fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            source: None,
+            owner: Arc::new(WeightOwner::new(label)),
+        }
+    }
+
+    fn owner_for(&mut self, source: &Path) -> Result<Arc<WeightOwner>> {
+        if self.source.as_deref().is_some_and(|previous| previous != source) {
+            self.retire()?;
+        }
+        self.source = Some(source.to_path_buf());
+        Ok(Arc::clone(&self.owner))
+    }
+
+    fn retire(&mut self) -> Result<usize> {
+        if Arc::strong_count(&self.owner) != 1 {
+            return Err(DiffusionError::workflow(format!(
+                "h3 {}: weights still held at retire", self.label
+            )));
+        }
+        let ns = self.owner.namespace().to_string();
+        let (count, _) = gpu_weight_cache_resident(&ns).map_err(DiffusionError::model)?;
+        self.owner = Arc::new(WeightOwner::new(self.label));
+        gpu_weight_cache_resident(&ns).map_err(DiffusionError::model)?;
+        Ok(count)
+    }
+}
+
+impl H3DeviceOwners {
+    pub fn new() -> Self {
+        Self {
+            te: H3OwnerSlot::new("h3-te"),
+            dit: H3OwnerSlot::new("h3-dit"),
+            vae: H3OwnerSlot::new("h3-vae"),
+        }
+    }
+
+    pub fn retire_te(&mut self) -> Result<usize> {
+        self.te.retire()
+    }
+
+    pub fn retire_dit(&mut self) -> Result<usize> {
+        self.dit.retire()
+    }
+
+    pub fn retire_vae(&mut self) -> Result<usize> {
+        self.vae.retire()
+    }
+
+    pub fn retire_all(&mut self) -> Result<usize> {
+        let mut count = 0;
+        let mut first_error = None;
+        for result in [self.retire_te(), self.retire_dit(), self.retire_vae()] {
+            match result {
+                Ok(retired) => count += retired,
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(count),
+        }
+    }
+}
+
+impl Default for H3DeviceOwners {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Qwen3-VL special token ids (tokenizer_config.json of the H3 checkpoint).
 pub const H3_TOKEN_VISION_START: u32 = 151652;
@@ -114,7 +206,7 @@ impl H3RunControl<'_> {
 ///   byte parity.
 ///
 /// A hit skips TE load + encode + evict entirely and preserves the warm
-/// DiT/VAE. On a miss the pipeline retires those compute namespaces before
+/// DiT/VAE. On a miss the pipeline retires those compute owners before
 /// loading the TE, then re-streams them for denoise/decode. Entries only
 /// mutate after a fully successful encode; the whole struct is host-side and
 /// `Send`, so the backend owns it directly across jobs.
@@ -214,12 +306,6 @@ pub enum H3WeightFormat {
 pub struct H3ComponentFile {
     pub path: PathBuf,
     pub format: H3WeightFormat,
-    /// Device weight-cache namespace for a [`H3WeightFormat::Bf16Shards`]
-    /// DiT (`h3dit::<tag>`). Required for that format: the canonical tree
-    /// caches under plain `h3dit`, and a second bf16 DiT on the same keys
-    /// would be served the other model's tensors. Ignored by the quantized
-    /// formats, which carry their own namespaces.
-    pub dit_namespace: Option<String>,
 }
 
 /// Explicit per-component weight sources for the quantized tiers. `None`
@@ -491,22 +577,21 @@ fn fl2va_text_encode(
 fn load_dit_weights(
     models_dir: &Path,
     model_set: &Option<H3ModelSet>,
+    owners: &mut H3DeviceOwners,
 ) -> Result<H3ShardedWeights> {
     match model_set.as_ref().and_then(|set| set.dit.as_ref()) {
-        Some(file) => match file.format {
-            H3WeightFormat::Gguf => H3ShardedWeights::load_gguf_dit(&file.path),
-            H3WeightFormat::Nvfp4 => H3ShardedWeights::load_nvfp4_dit(&file.path),
-            H3WeightFormat::Bf16Shards => {
-                let namespace = file.dit_namespace.as_deref().ok_or_else(|| {
-                    DiffusionError::workflow(format!(
-                        "h3 bf16 shard dit {} needs its own dit_namespace",
-                        file.path.display()
-                    ))
-                })?;
-                H3ShardedWeights::load(&file.path)?.with_dit_namespace(namespace)
-            }
-        },
-        None => H3ShardedWeights::load(models_dir.join("transformer")),
+        Some(file) => {
+            let weights = match file.format {
+                H3WeightFormat::Gguf => H3ShardedWeights::load_gguf_dit(&file.path),
+                H3WeightFormat::Nvfp4 => H3ShardedWeights::load_nvfp4_dit(&file.path),
+                H3WeightFormat::Bf16Shards => H3ShardedWeights::load(&file.path),
+            }?;
+            Ok(weights.with_owner(owners.dit.owner_for(&file.path)?))
+        }
+        None => {
+            let path = models_dir.join("transformer");
+            Ok(H3ShardedWeights::load(&path)?.with_owner(owners.dit.owner_for(&path)?))
+        }
     }
 }
 
@@ -514,14 +599,21 @@ fn load_dit_weights(
 fn load_te_weights(
     models_dir: &Path,
     model_set: &Option<H3ModelSet>,
+    owners: &mut H3DeviceOwners,
 ) -> Result<H3ShardedWeights> {
     match model_set.as_ref().and_then(|set| set.text_encoder.as_ref()) {
-        Some(file) => match file.format {
-            H3WeightFormat::Gguf => H3ShardedWeights::load_gguf_te(&file.path),
-            H3WeightFormat::Nvfp4 => H3ShardedWeights::load_nvfp4_te(&file.path),
-            H3WeightFormat::Bf16Shards => H3ShardedWeights::load(&file.path),
-        },
-        None => H3ShardedWeights::load(models_dir.join("text_encoder")),
+        Some(file) => {
+            let weights = match file.format {
+                H3WeightFormat::Gguf => H3ShardedWeights::load_gguf_te(&file.path),
+                H3WeightFormat::Nvfp4 => H3ShardedWeights::load_nvfp4_te(&file.path),
+                H3WeightFormat::Bf16Shards => H3ShardedWeights::load(&file.path),
+            }?;
+            Ok(weights.with_owner(owners.te.owner_for(&file.path)?))
+        }
+        None => {
+            let path = models_dir.join("text_encoder");
+            Ok(H3ShardedWeights::load(&path)?.with_owner(owners.te.owner_for(&path)?))
+        }
     }
 }
 
@@ -548,13 +640,14 @@ fn audio_vae_source(models_dir: &Path, model_set: &Option<H3ModelSet>) -> PathBu
 /// always encodes to the same anchor whatever position it holds.
 fn fl2va_condition_latents_batch(
     vae_path: &Path,
+    owners: &mut H3DeviceOwners,
     canvases: &[&[u8]],
     width: usize,
     height: usize,
     latent_h: usize,
     latent_w: usize,
 ) -> Result<Vec<Vec<f32>>> {
-    let vae_weights = H3ShardedWeights::load(vae_path)?;
+    let vae_weights = H3ShardedWeights::load(vae_path)?.with_owner(owners.vae.owner_for(vae_path)?);
     let prepared = crate::h3_vae::H3VaeEncoderPrepared::prepare(&vae_weights)?;
     let mut out = Vec::with_capacity(canvases.len());
     for canvas in canvases {
@@ -574,7 +667,8 @@ pub fn h3_generate(
     params: &H3GenerateParams,
     progress: impl FnMut(&str),
 ) -> Result<H3GenerateOutput> {
-    h3_generate_with_control(models_dir, params, progress, &mut H3RunControl::default())
+    let mut owners = H3DeviceOwners::new();
+    h3_generate_with_control(models_dir, params, &mut owners, progress, &mut H3RunControl::default())
 }
 
 /// [`h3_generate`] plus an [`H3RunControl`]: structured per-phase/per-step
@@ -583,6 +677,7 @@ pub fn h3_generate(
 pub fn h3_generate_with_control(
     models_dir: &Path,
     params: &H3GenerateParams,
+    owners: &mut H3DeviceOwners,
     mut progress: impl FnMut(&str),
     ctrl: &mut H3RunControl,
 ) -> Result<H3GenerateOutput> {
@@ -768,11 +863,9 @@ pub fn h3_generate_with_control(
             // that ~75 GB resident set, even on the 96 GB node. Only a real
             // conditioning-cache miss takes this path, so same-prompt repeat
             // jobs keep the fast warm DiT/VAE path; changed prompts retire the
-            // old compute namespaces before streaming the TE.
-            let released = crate::backend::release_gpu_runtime_namespaces(&[
-                "h3dit::",
-                "h3vae::",
-            ])?;
+            // old compute owners before streaming the TE.
+            let released = owners.retire_dit()? + owners.retire_vae()?;
+            crate::backend::gpu_runtime_trim().map_err(DiffusionError::model)?;
             if released > 0 {
                 progress(&format!(
                     "te: conditioning changed, released {released} warm DiT/VAE buffers"
@@ -780,7 +873,7 @@ pub fn h3_generate_with_control(
             }
             ctrl.phase("te-load", 0, 0);
             let start = std::time::Instant::now();
-            let te_weights = load_te_weights(models_dir, &params.model_set)?;
+            let te_weights = load_te_weights(models_dir, &params.model_set, owners)?;
             let te_prepared = H3TextEncoderPrepared::prepare(&te_weights)?;
             timings.te_load_s = start.elapsed().as_secs_f64();
             ctrl.check()?;
@@ -817,7 +910,7 @@ pub fn h3_generate_with_control(
             timings.te_encode_s = start.elapsed().as_secs_f64();
             drop(te_prepared);
             drop(te_weights);
-            let freed = h3_text_encoder_evict()?;
+            let freed = owners.retire_te()?;
             progress(&format!(
                 "te: encode {:.2}s ({} tokens{}), {freed} buffers evicted",
                 timings.te_encode_s,
@@ -893,6 +986,7 @@ pub fn h3_generate_with_control(
                 ctrl.phase("keyframe-encode", 0, 0);
                 fl2va_condition_latents_batch(
                     &video_vae_source(models_dir, &params.model_set),
+                    owners,
                     &missing,
                     params.width,
                     params.height,
@@ -933,8 +1027,7 @@ pub fn h3_generate_with_control(
             if params.staged_residency {
                 // The VAE encoder must not co-reside with the DiT on the
                 // 24 GB tier; the decoder re-streams after denoise anyway.
-                let freed = crate::backend::gpu_weight_cache_evict_prefix_if_loaded("h3vae::")
-                    .map_err(DiffusionError::model)?;
+                let freed = owners.retire_vae()?;
                 if freed > 0 {
                     progress(&format!("staged: released {freed} VAE encoder buffers"));
                 }
@@ -959,7 +1052,7 @@ pub fn h3_generate_with_control(
     ctrl.check()?;
     ctrl.phase("dit-load", 0, 0);
     let start = std::time::Instant::now();
-    let dit_weights = load_dit_weights(models_dir, &params.model_set)?;
+    let dit_weights = load_dit_weights(models_dir, &params.model_set, owners)?;
     let mut dit_prepared = H3DitPrepared::prepare(&dit_weights)?;
     let schedule_values: Vec<Vec<f32>> = (0..num_forwards).map(|step| {
         h3_build_row_timesteps_cond(&layout, video_sched.timesteps[step],
@@ -975,7 +1068,7 @@ pub fn h3_generate_with_control(
         let source = params.model_set.as_ref().and_then(|set| set.dit.as_ref())
             .map(|file| file.path.clone()).unwrap_or_else(|| models_dir.join("transformer"));
         let cached = ctrl.cond_cache.as_deref().and_then(|cache| cache.adaln.as_ref())
-            .filter(|(path, cache)| path == &source && cache.matches(&dit_weights, &schedule_values, params.precision))
+            .filter(|(path, cache)| path == &source && cache.matches(&schedule_values, params.precision))
             .map(|(_, cache)| std::sync::Arc::clone(cache));
         let reused = cached.is_some();
         let cache = match cached {
@@ -1045,14 +1138,14 @@ pub fn h3_generate_with_control(
             step + 1
         ));
     }
+    drop(dit_prepared);
     drop(dit_weights);
     if params.staged_residency {
         // 24/32 GB tiers: free the DiT's device weights before the VAE
         // decode claims its compute working set. The pool is left in place —
         // only the weight namespace goes.
         ctrl.phase("dit-unload", 0, 0);
-        let freed = crate::backend::gpu_weight_cache_evict_prefix_if_loaded("h3dit::")
-            .map_err(DiffusionError::model)?;
+        let freed = owners.retire_dit()?;
         progress(&format!("staged: released {freed} DiT weight buffers"));
     }
 
@@ -1069,7 +1162,8 @@ pub fn h3_generate_with_control(
     )?;
     h3_vae_denormalize_latents(&mut latents, num_latent_frames, latent_h, latent_w);
     let start = std::time::Instant::now();
-    let vae_weights = H3ShardedWeights::load(video_vae_source(models_dir, &params.model_set))?;
+    let vae_path = video_vae_source(models_dir, &params.model_set);
+    let vae_weights = H3ShardedWeights::load(&vae_path)?.with_owner(owners.vae.owner_for(&vae_path)?);
     let vae_prepared = H3VaeDecoderPrepared::prepare(&vae_weights)?;
     timings.vae_load_s = start.elapsed().as_secs_f64();
     let start = std::time::Instant::now();
@@ -1100,10 +1194,11 @@ pub fn h3_generate_with_control(
         "vae: decode {:.2}s -> {} frames {}x{}",
         timings.vae_decode_s, decoded.raw.f, decoded.raw.w, decoded.raw.h
     ));
+    drop(vae_prepared);
+    drop(vae_weights);
     if params.staged_residency {
         ctrl.phase("vae-unload", 0, 0);
-        let freed = crate::backend::gpu_weight_cache_evict_prefix_if_loaded("h3vae::")
-            .map_err(DiffusionError::model)?;
+        let freed = owners.retire_vae()?;
         progress(&format!("staged: released {freed} VAE weight buffers"));
     }
 

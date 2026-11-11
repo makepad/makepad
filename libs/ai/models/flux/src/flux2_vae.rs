@@ -11,9 +11,9 @@
 
 use crate::backend::{
     gpu_add, gpu_attention_planar_single, gpu_conv2d_planar_cached, gpu_conv2d_planar_cudnn_f16,
-    gpu_conv2d_planar_strided, gpu_cudnn_require,
-    gpu_device_available, gpu_download, gpu_group_norm_planar, gpu_pool_cap_override,
-    gpu_pool_phase_end, gpu_silu, gpu_upload, gpu_upsample_nearest2x, GpuTensor,
+    gpu_conv2d_planar_strided, gpu_cudnn_require, gpu_device_available, gpu_download,
+    gpu_group_norm_planar, gpu_pool_cap_override, gpu_pool_phase_end, gpu_silu, gpu_upload,
+    gpu_upsample_nearest2x, GpuTensor, WeightOwner,
 };
 use crate::flux2::{
     flux2_pack_latents, flux2_unpack_latents, Flux2PackedLatents, Flux2VaeConfig, Flux2WeightFile,
@@ -21,9 +21,9 @@ use crate::flux2::{
 use crate::{DiffusionError, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const VAE_GROUP_NORM_EPSILON: f32 = 1.0e-6;
-pub const FLUX2_VAE_NAMESPACE: &str = "flux2-vae";
 
 /// How the VAE's stride-1 3x3 convs run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -39,6 +39,7 @@ pub enum Flux2VaeConvs {
 
 #[derive(Clone, Debug)]
 pub struct Flux2VaeWeights {
+    owner: Arc<WeightOwner>,
     pub path: PathBuf,
     pub config: Flux2VaeConfig,
     convs: Flux2VaeConvs,
@@ -118,6 +119,7 @@ impl Flux2VaeWeights {
             )));
         }
         Ok(Self {
+            owner: Arc::new(WeightOwner::new("flux2-vae")),
             path: path.to_path_buf(),
             config: Flux2VaeConfig::flux2_dev(),
             convs,
@@ -273,10 +275,6 @@ fn map_mid_block(prefix: &str, rest: &str) -> String {
     format!("{prefix}.{rest}")
 }
 
-fn namespace(weights: &Flux2VaeWeights) -> String {
-    format!("{FLUX2_VAE_NAMESPACE}:{}", weights.path.display())
-}
-
 pub fn flux2_vae_bn_normalize(packed: &mut Flux2PackedLatents, weights: &Flux2VaeWeights) {
     let plane = packed.token_count();
     let eps = weights.config.batch_norm_eps;
@@ -347,7 +345,7 @@ fn encode_moments(
     }
     gpu_pool_phase_end();
     gpu_pool_cap_override(Some(vae_pool_cap_bytes()));
-    let ns = namespace(weights);
+    let ns = weights.owner.namespace();
     let mut hidden = GpuSpatial {
         tensor: gpu_upload(&image.data, 3, image.width * image.height)
             .map_err(DiffusionError::model)?,
@@ -355,26 +353,48 @@ fn encode_moments(
         height: image.height,
         channels: 3,
     };
-    hidden = conv2d(weights, &ns, &hidden, "encoder.conv_in.weight", "encoder.conv_in.bias", 1, 1)?;
+    hidden = conv2d(
+        weights,
+        ns,
+        &hidden,
+        "encoder.conv_in.weight",
+        "encoder.conv_in.bias",
+        1,
+        1,
+    )?;
     for level in 0..4 {
         let prefix = format!("encoder.down.{level}");
         for block in 0..2 {
-            hidden = resnet(weights, &ns, &hidden, &format!("{prefix}.block.{block}"))?;
+            hidden = resnet(weights, ns, &hidden, &format!("{prefix}.block.{block}"))?;
         }
         if weights.has_tensor(&format!("{prefix}.downsample.conv.weight")) {
-            hidden = downsample(weights, &ns, &hidden, &format!("{prefix}.downsample.conv"))?;
+            hidden = downsample(weights, ns, &hidden, &format!("{prefix}.downsample.conv"))?;
         }
     }
-    hidden = resnet(weights, &ns, &hidden, "encoder.mid.block_1")?;
-    hidden = mid_attn(weights, &ns, &hidden, "encoder.mid.attn_1")?;
-    hidden = resnet(weights, &ns, &hidden, "encoder.mid.block_2")?;
-    hidden = group_norm(weights, &ns, &hidden, "encoder.norm_out.weight", "encoder.norm_out.bias")?;
+    hidden = resnet(weights, ns, &hidden, "encoder.mid.block_1")?;
+    hidden = mid_attn(weights, ns, &hidden, "encoder.mid.attn_1")?;
+    hidden = resnet(weights, ns, &hidden, "encoder.mid.block_2")?;
+    hidden = group_norm(
+        weights,
+        ns,
+        &hidden,
+        "encoder.norm_out.weight",
+        "encoder.norm_out.bias",
+    )?;
     hidden = silu(&hidden)?;
-    hidden = conv2d(weights, &ns, &hidden, "encoder.conv_out.weight", "encoder.conv_out.bias", 1, 1)?;
+    hidden = conv2d(
+        weights,
+        ns,
+        &hidden,
+        "encoder.conv_out.weight",
+        "encoder.conv_out.bias",
+        1,
+        1,
+    )?;
     if weights.has_tensor("encoder.quant_conv.weight") {
         hidden = conv2d(
             weights,
-            &ns,
+            ns,
             &hidden,
             "encoder.quant_conv.weight",
             "encoder.quant_conv.bias",
@@ -443,7 +463,7 @@ pub fn flux2_vae_decode(
     let height = packed.height * 2;
     gpu_pool_phase_end();
     gpu_pool_cap_override(Some(vae_pool_cap_bytes()));
-    let ns = namespace(weights);
+    let ns = weights.owner.namespace();
     let mut hidden = GpuSpatial {
         tensor: gpu_upload(&unpacked, z_channels, width * height).map_err(DiffusionError::model)?,
         width,
@@ -453,7 +473,7 @@ pub fn flux2_vae_decode(
     if weights.has_tensor("decoder.post_quant_conv.weight") {
         hidden = conv2d(
             weights,
-            &ns,
+            ns,
             &hidden,
             "decoder.post_quant_conv.weight",
             "decoder.post_quant_conv.bias",
@@ -461,20 +481,28 @@ pub fn flux2_vae_decode(
             0,
         )?;
     }
-    hidden = conv2d(weights, &ns, &hidden, "decoder.conv_in.weight", "decoder.conv_in.bias", 1, 1)?;
-    hidden = resnet(weights, &ns, &hidden, "decoder.mid.block_1")?;
-    hidden = mid_attn(weights, &ns, &hidden, "decoder.mid.attn_1")?;
-    hidden = resnet(weights, &ns, &hidden, "decoder.mid.block_2")?;
+    hidden = conv2d(
+        weights,
+        ns,
+        &hidden,
+        "decoder.conv_in.weight",
+        "decoder.conv_in.bias",
+        1,
+        1,
+    )?;
+    hidden = resnet(weights, ns, &hidden, "decoder.mid.block_1")?;
+    hidden = mid_attn(weights, ns, &hidden, "decoder.mid.attn_1")?;
+    hidden = resnet(weights, ns, &hidden, "decoder.mid.block_2")?;
     for stage in (0..=3).rev() {
         let prefix = format!("decoder.up.{stage}");
         for block in 0..=2 {
-            hidden = resnet(weights, &ns, &hidden, &format!("{prefix}.block.{block}"))?;
+            hidden = resnet(weights, ns, &hidden, &format!("{prefix}.block.{block}"))?;
         }
         if weights.has_tensor(&format!("{prefix}.upsample.conv.weight")) {
             hidden = upsample(&hidden)?;
             hidden = conv2d(
                 weights,
-                &ns,
+                ns,
                 &hidden,
                 &format!("{prefix}.upsample.conv.weight"),
                 &format!("{prefix}.upsample.conv.bias"),
@@ -483,9 +511,23 @@ pub fn flux2_vae_decode(
             )?;
         }
     }
-    hidden = group_norm(weights, &ns, &hidden, "decoder.norm_out.weight", "decoder.norm_out.bias")?;
+    hidden = group_norm(
+        weights,
+        ns,
+        &hidden,
+        "decoder.norm_out.weight",
+        "decoder.norm_out.bias",
+    )?;
     hidden = silu(&hidden)?;
-    hidden = conv2d(weights, &ns, &hidden, "decoder.conv_out.weight", "decoder.conv_out.bias", 1, 1)?;
+    hidden = conv2d(
+        weights,
+        ns,
+        &hidden,
+        "decoder.conv_out.weight",
+        "decoder.conv_out.bias",
+        1,
+        1,
+    )?;
     let data = gpu_download(&hidden.tensor).map_err(DiffusionError::model)?;
     let image = Flux2VaeImage {
         width: hidden.width,

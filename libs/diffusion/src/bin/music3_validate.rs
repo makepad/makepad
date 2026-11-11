@@ -27,18 +27,18 @@ use makepad_diffusion::music3::{
 use makepad_diffusion::music3_ar::{
     music3_ar_emitted_frames, music3_ar_replay,
 };
-use makepad_diffusion::music3_dit::{music3_dit_evict, music3_dit_forward, Music3DitPrepared};
+use makepad_diffusion::music3_dit::{music3_dit_forward, Music3DitPrepared};
 use makepad_diffusion::music3_lm::{
     music3_decode_attn_from_qkv, music3_down_from_swiglu, music3_embed_audio_frame,
     music3_l0_attn_from_qkv, music3_layer_prefill_pair,
-    music3_lm_evict, music3_lm_head, music3_lm_prefill_pair, music3_mlp_from_attn_resid,
+    music3_lm_head, music3_lm_prefill_pair, music3_mlp_from_attn_resid,
     music3_mlp_from_post_norm, Music3LmPrepared, Music3LmSession, Music3MlpDump,
 };
 use makepad_diffusion::music3_pipeline::{
     music3_generate, music3_planar_stereo, music3_render_hiddens, Music3Generate, Music3Reference,
 };
 use makepad_diffusion::music3_rvq::{
-    music3_rvq_audio_head_rows, music3_rvq_evict, music3_rvq_forward, music3_rvq_forward_pair,
+    music3_rvq_audio_head_rows, music3_rvq_forward, music3_rvq_forward_pair,
     music3_rvq_project_rows, Music3RvqPrepared,
 };
 use makepad_diffusion::music3_reference::{
@@ -1016,7 +1016,7 @@ fn run_lm(weights: &Path, dump: &Path) -> Result<(), String> {
             Err(err) => println!("  skip {name}: {err}"),
         }
     }
-    let _ = music3_lm_evict();
+    drop(shards);
     if hcos < 0.999 || lcos < 0.999 {
         return Err(format!(
             "lm prefill mismatch hidden_cos={hcos:.7} logits_cos={lcos:.7}"
@@ -1056,7 +1056,7 @@ fn run_prefill_layers(weights: &Path, dump: &Path) -> Result<(), String> {
         last_c.len(),
         last_u.len()
     );
-    let _ = music3_lm_evict();
+    drop(shards);
     println!("  layers PASS");
     Ok(())
 }
@@ -1091,7 +1091,7 @@ fn run_rvq(weights: &Path, dump: &Path) -> Result<(), String> {
     println!(
         "  rvq_step0 [{batch}, {seq}, {MUSIC3_RVQ_HIDDEN}] cos={cos:.7} max_abs={max_abs:.3e} mean_abs={mean_abs:.3e}"
     );
-    let _ = music3_rvq_evict();
+    drop(shards);
     if cos < 0.999 {
         return Err(format!("rvq mismatch cos={cos:.7} max_abs={max_abs:.3e}"));
     }
@@ -1126,7 +1126,7 @@ fn run_dit(weights: &Path, dump: &Path) -> Result<(), String> {
     println!(
         "  dit_step0_v_cond [1, {MUSIC3_DIT_IN_CHANNELS}, {tokens}] cos={cos:.7} max_abs={max_abs:.3e} mean_abs={mean_abs:.3e}"
     );
-    let _ = music3_dit_evict();
+    drop(shards);
     if cos < 0.995 {
         return Err(format!("dit mismatch cos={cos:.7} max_abs={max_abs:.3e}"));
     }
@@ -1241,8 +1241,8 @@ fn run_ar(weights: &Path, dump: &Path) -> Result<(), String> {
         "  frame_hiddens [{frames}, {}] cos={cos:.7} max_abs={max_abs:.3e} mean_abs={mean_abs:.3e}",
         MUSIC3_COND_LAYERS * MUSIC3_COND_HIDDEN
     );
-    let _ = music3_lm_evict();
-    let _ = music3_rvq_evict();
+    drop(lm);
+    drop(rvq_w);
     if cos < 0.999 {
         return Err(format!("ar mismatch cos={cos:.7} max_abs={max_abs:.3e}"));
     }
@@ -1364,7 +1364,7 @@ fn run_teacher(weights: &Path, dump: &Path) -> Result<(), String> {
         cond_h = pair.0;
         uncond_h = pair.1;
     }
-    let _ = music3_lm_evict();
+    drop(lm);
     println!("  teacher PASS");
     Ok(())
 }
@@ -1504,7 +1504,7 @@ fn run_l0mlp(weights: &Path) -> Result<(), String> {
         report_l0("f1_off_swiglu.down", &d, &od)?;
     }
 
-    let _ = music3_lm_evict();
+    drop(lm);
     println!("  l0mlp done");
     Ok(())
 }
@@ -1628,7 +1628,7 @@ fn run_layer1(weights: &Path) -> Result<(), String> {
         println!("  L1 attn dumps missing native={attn_path} official={off_attn_path}");
     }
 
-    let _ = music3_lm_evict();
+    drop(lm);
     println!("  layer1 done");
     Ok(())
 }
@@ -1682,7 +1682,7 @@ fn run_layer_n(weights: &Path, layer: usize) -> Result<(), String> {
         &ours,
         &[2, tokens, MUSIC3_LM_HIDDEN],
     );
-    let _ = music3_lm_evict();
+    drop(lm);
     println!("  layer{layer} done");
     Ok(())
 }
@@ -1698,7 +1698,7 @@ fn run_l0attn_offin(weights: &Path) -> Result<(), String> {
     let ours = music3_l0_attn_from_qkv(&lm, &q, &k, &v, tokens).map_err(|e| e.to_string())?;
     let off = load_cmp(&format!("{dir}/official_fullseq_L0_attn.npy"))?;
     report_toks("off_qkv → native attn+o_proj", &ours, &off, tokens)?;
-    let _ = music3_lm_evict();
+    drop(lm);
     println!("  l0attn done");
     Ok(())
 }
@@ -1819,7 +1819,7 @@ fn run_decodeattn(weights: &Path) -> Result<(), String> {
             let _ = run_decode_kernel(&lm, &tag, &qt, &kt, &vt, seq, &off, true)?;
         }
     }
-    let _ = music3_lm_evict();
+    drop(lm);
     println!("  decodeattn done");
     Ok(())
 }
@@ -1928,7 +1928,7 @@ fn run_layer1mlp(weights: &Path) -> Result<(), String> {
         }
     }
 
-    let _ = music3_lm_evict();
+    drop(lm);
     println!("  layer1mlp done");
     Ok(())
 }
@@ -2004,7 +2004,7 @@ fn run_decode1(weights: &Path, dump: &Path) -> Result<(), String> {
             both.len()
         );
     }
-    let _ = music3_lm_evict();
+    drop(lm);
     println!("  decode1 done");
     Ok(())
 }
@@ -2150,7 +2150,7 @@ fn run_rvq_f12(weights: &Path) -> Result<(), String> {
             seq_u.extend_from_slice(&proj[MUSIC3_RVQ_HIDDEN..]);
         }
     }
-    let _ = music3_rvq_evict();
+    drop(rvq);
     println!("  rvqf12 PASS");
     Ok(())
 }
@@ -2212,8 +2212,9 @@ fn run_replay_wav(
         semantic.len(),
         t0.elapsed().as_secs_f64()
     );
-    let _ = music3_lm_evict();
-    let _ = music3_rvq_evict();
+    drop(lm);
+    drop(rvq_w);
+    makepad_diffusion::backend::gpu_pool_clear();
     let audio = music3_render_hiddens(weights, &hiddens, seed, &mut |_, _| {})
         .map_err(|e| e.to_string())?;
     let (left, right) = music3_planar_stereo(&audio).map_err(|e| e.to_string())?;

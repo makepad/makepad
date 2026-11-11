@@ -207,11 +207,10 @@ mod ace_gen {
         }
 
         pub fn unload(&mut self) -> Result<(), AssetAiError> {
-            if self.loaded.is_some() {
-                makepad_ai_common::backend::release_gpu_runtime_namespaces(&["acete::"])
+            if self.loaded.take().is_some() {
+                makepad_ai_common::backend::gpu_runtime_trim()
                     .map_err(|error| AssetAiError::Backend(format!("ace unload: {error}")))?;
             }
-            self.loaded = None;
             Ok(())
         }
 

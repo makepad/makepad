@@ -11,15 +11,16 @@ use makepad_ai_common::backend::cuda::{
     gpu_device_available, gpu_download, gpu_group_norm_planar, gpu_silu, gpu_upload,
     gpu_upsample_nearest2x, GpuTensor,
 };
+use makepad_ai_common::backend::WeightOwner;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
+use std::sync::Arc;
 
 pub const SCALE: f32 = 0.18215;
 pub const GN_EPS: f32 = 1e-6;
 pub const GN_GROUPS: usize = 32;
-const NS: &str = "paint-vae";
 
 struct W {
     data: Vec<f32>,
@@ -33,6 +34,7 @@ impl W {
 }
 
 pub struct SdVae {
+    owner: Arc<WeightOwner>,
     w: HashMap<String, W>,
 }
 
@@ -88,7 +90,7 @@ fn half_to_f32(bits: u16) -> f32 {
 }
 
 impl SdVae {
-    pub fn load(path: &Path) -> Result<Self, String> {
+    pub fn load(path: &Path, owner: Arc<WeightOwner>) -> Result<Self, String> {
         if !gpu_device_available() {
             return Err("CUDA unavailable".into());
         }
@@ -119,7 +121,7 @@ impl SdVae {
         if !w.contains_key("encoder.conv_in.weight") || !w.contains_key("quant_conv.weight") {
             return Err("VAE archive missing encoder.conv_in / quant_conv".into());
         }
-        Ok(Self { w })
+        Ok(Self { owner, w })
     }
 
     fn get(&self, name: &str) -> Result<&W, String> {
@@ -155,7 +157,7 @@ impl SdVae {
             x,
             width,
             height,
-            NS,
+            self.owner.namespace(),
             prefix,
             weight.as_slice(),
             bias.as_slice(),
@@ -188,7 +190,7 @@ impl SdVae {
             height,
             out_w,
             out_h,
-            NS,
+            self.owner.namespace(),
             prefix,
             weight.as_slice(),
             bias.as_slice(),
@@ -218,7 +220,7 @@ impl SdVae {
             width,
             height,
             GN_GROUPS,
-            NS,
+            self.owner.namespace(),
             &format!("{prefix}.norm1"),
             n1w.as_slice(),
             n1b.as_slice(),
@@ -233,7 +235,7 @@ impl SdVae {
             width,
             height,
             GN_GROUPS,
-            NS,
+            self.owner.namespace(),
             &format!("{prefix}.norm2"),
             n2w.as_slice(),
             n2b.as_slice(),
@@ -265,7 +267,7 @@ impl SdVae {
             width,
             height,
             GN_GROUPS,
-            NS,
+            self.owner.namespace(),
             &format!("{prefix}.gn"),
             gn_w.as_slice(),
             gn_b.as_slice(),
@@ -304,7 +306,7 @@ impl SdVae {
             x,
             width,
             height,
-            NS,
+            self.owner.namespace(),
             &weight_names[0],
             weight.as_slice(),
             bias.as_slice(),
@@ -353,7 +355,7 @@ impl SdVae {
             w,
             ht,
             GN_GROUPS,
-            NS,
+            self.owner.namespace(),
             "encoder.conv_norm_out",
             nw.as_slice(),
             nb.as_slice(),
@@ -419,7 +421,7 @@ impl SdVae {
             w,
             ht,
             GN_GROUPS,
-            NS,
+            self.owner.namespace(),
             "decoder.conv_norm_out",
             nw.as_slice(),
             nb.as_slice(),

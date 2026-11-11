@@ -12,6 +12,7 @@
 //!   no tanh.
 
 use crate::ace::{ace_open_shards, ace_tensor_any};
+use crate::backend::WeightOwner;
 use crate::error::{DiffusionError, Result};
 use makepad_ai_h3::h3::H3ShardedWeights;
 use makepad_ai_sfx::sa3::{par_rows, F16Weight};
@@ -39,8 +40,8 @@ pub struct OobleckSpec {
     pub hop: usize,
     pub out_bias: bool,
     pub names: OobleckNames,
-    /// Device weight-cache namespace (distinct per checkpoint family).
-    pub key: &'static str,
+    /// Label for the per-decoder device weight owner.
+    pub label: &'static str,
 }
 
 pub const ACE_OOBLECK: OobleckSpec = OobleckSpec {
@@ -52,7 +53,7 @@ pub const ACE_OOBLECK: OobleckSpec = OobleckSpec {
     hop: crate::ace::ACE_HOP,
     out_bias: false,
     names: OobleckNames::Diffusers,
-    key: "acevae",
+    label: "ace-vae",
 };
 
 pub const YUE2_OOBLECK: OobleckSpec = OobleckSpec {
@@ -64,7 +65,7 @@ pub const YUE2_OOBLECK: OobleckSpec = OobleckSpec {
     hop: 1920,
     out_bias: false,
     names: OobleckNames::StableAudio,
-    key: "yue2vae",
+    label: "yue2-vae",
 };
 
 impl OobleckSpec {
@@ -163,6 +164,7 @@ struct DecBlock {
 }
 
 pub struct OobleckDecoder {
+    owner: WeightOwner,
     spec: OobleckSpec,
     conv_in: Conv,
     blocks: Vec<DecBlock>,
@@ -373,7 +375,7 @@ impl OobleckDecoder {
         let snake_out = load_snake(&weights, &spec.snake_out(), ch)?;
         let conv_out = load_conv(&weights, &spec.conv_out(), spec.audio_channels, ch, 7, 1, 3, spec.out_bias)?;
         emit_progress(&mut progress, "load vae", 1.0)?;
-        Ok(Self { spec, conv_in, blocks, snake_out, conv_out })
+        Ok(Self { owner: WeightOwner::new(spec.label), spec, conv_in, blocks, snake_out, conv_out })
     }
 
     /// Decode token-major `[T, 64]` latents to planar stereo `[left, right]`.
@@ -603,7 +605,7 @@ impl OobleckDecoder {
             Ok((g, out_len))
         }
 
-        let ns = self.spec.key;
+        let ns = self.owner.namespace();
         let conv = &self.conv_in;
         let (y, nlen) = conv_tm(
             &x, len, &conv.w, &conv.b, conv.out_ch, conv.in_ch, conv.k, conv.dilation, conv.padding, "in", ns,

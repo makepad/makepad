@@ -24,12 +24,13 @@ use crate::backend::{
     gpu_gelu_erf, gpu_group_norm_planar, gpu_layer_norm_mod, gpu_linear_f32_resident, gpu_mul,
     gpu_slice_cols, gpu_upload_u32, GpuTensor,
 };
+use crate::backend::WeightOwner;
 use crate::da3::{norm_mods, tensor, upload, CacheScope, Planar, TensorSource};
 use crate::{DiffusionError, Result};
 use makepad_ai_common::gpu::gpu_paint_attn_batched_self;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 const HEADS: usize = 8;
 const GROUPS: usize = 32;
@@ -81,7 +82,7 @@ pub(crate) struct MotionModule {
     gn_gamma: Vec<f32>,
     gn_beta: Vec<f32>,
     gn_key: String,
-    namespace: &'static str,
+    owner: Arc<WeightOwner>,
     proj_in: Linear,
     blocks: [AttentionBlock; 2],
     ff_norm: GpuTensor,
@@ -148,7 +149,7 @@ impl MotionModule {
             gn_gamma: tensor(weights, &format!("{tt}.norm.weight"), c)?,
             gn_beta: tensor(weights, &format!("{tt}.norm.bias"), c)?,
             gn_key: scope.key(&format!("{tt}.norm")),
-            namespace: scope.namespace,
+            owner: scope.owner.clone(),
             proj_in: Linear::load(weights, &format!("{tt}.proj_in"), c, c, true)?,
             blocks: [block(0)?, block(1)?],
             ff_norm: norm_mods(weights, &format!("{tt}.transformer_blocks.0.ff_norm"), c)?,
@@ -235,7 +236,7 @@ impl MotionModule {
             x.width,
             x.height,
             GROUPS,
-            self.namespace,
+            self.owner.namespace(),
             &self.gn_key,
             &self.gn_gamma,
             &self.gn_beta,

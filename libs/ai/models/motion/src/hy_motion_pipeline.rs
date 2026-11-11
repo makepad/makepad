@@ -5,9 +5,9 @@
 //! - [`HyMotionSampler`] owns the full-f32 1.04B DiT + exact wooden decoder;
 //! - [`HyMotionPipeline`] keeps both resident for the lowest repeat latency.
 //!
-//! Memory-constrained callers can run the two stages separately, call
-//! [`HyMotionPromptEncoder::evict_device_weights`], drop the encoder, and
-//! only then load the sampler. High-throughput workers should keep the
+//! Memory-constrained callers can run the two stages separately and drop
+//! the encoder before loading the sampler. Its owners free the Qwen and
+//! CLIP device weights. High-throughput workers should keep the
 //! combined pipeline alive: changing prompts then reuse Qwen's CUDA cache,
 //! CLIP's host checkpoint, and the sampler weights without compromising the
 //! accepted precision contracts.
@@ -44,7 +44,7 @@ use crate::hy_motion_decode::{
     HyMotionWoodenModel,
 };
 use crate::hy_motion_text::{
-    hy_motion_qwen_encode_controlled, hy_motion_qwen_evict,
+    hy_motion_qwen_encode_controlled,
     HyMotionQwenPrepared, HyMotionQwenTokenizer,
 };
 use crate::hy_motion_transformer::HyMotionDeviceWeights;
@@ -179,12 +179,6 @@ pub struct HyMotionPromptRun {
     pub timing: HyMotionPromptTiming,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct HyMotionEvictionReport {
-    pub qwen_tensors: usize,
-    pub clip_tensors: usize,
-}
-
 /// Native Qwen3-8B final-hidden-state + CLIP-L pooler conditioner.
 pub struct HyMotionPromptEncoder {
     qwen_weights: H3ShardedWeights,
@@ -314,15 +308,6 @@ impl HyMotionPromptEncoder {
                 clip_encode_s,
                 total_s: total_started.elapsed().as_secs_f64(),
             },
-        })
-    }
-
-    /// Drop conditioner CUDA caches without discarding tokenizers, shard
-    /// metadata, Qwen constants, or CLIP's host checkpoint.
-    pub fn evict_device_weights(&self) -> Result<HyMotionEvictionReport> {
-        Ok(HyMotionEvictionReport {
-            qwen_tensors: hy_motion_qwen_evict()?,
-            clip_tensors: self.clip.evict_device_weights()?,
         })
     }
 }
@@ -632,10 +617,6 @@ impl HyMotionPipeline {
         control: &mut HyMotionRunControl,
     ) -> Result<HyMotionPromptRun> {
         self.encoder.encode_with_control(prompt, control)
-    }
-
-    pub fn evict_conditioner_device_weights(&self) -> Result<HyMotionEvictionReport> {
-        self.encoder.evict_device_weights()
     }
 
     pub fn generate(

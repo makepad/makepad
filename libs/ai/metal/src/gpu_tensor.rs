@@ -437,9 +437,20 @@ pub fn bias_lrelu_inplace(x: &GpuTensor, bias: &[f32], slope: f32) -> Result<(),
     Ok(())
 }
 
+/// Bytes of im2col scratch per band. A larger convolution runs in more
+/// bands (one output row at least), never refused.
+const CONV2D_IM2COL_BAND_BYTES: usize = 256 * 1024 * 1024;
+
 pub fn conv2d_planar(
     x: &GpuTensor, width: usize, height: usize, weights: &[f32], bias: &[f32],
     out_channels: usize, kw: usize, kh: usize, pad_x: usize, pad_y: usize,
+) -> Result<GpuTensor, String> {
+    conv2d_planar_banded(x, width, height, weights, bias, out_channels, kw, kh, pad_x, pad_y, CONV2D_IM2COL_BAND_BYTES)
+}
+
+pub(crate) fn conv2d_planar_banded(
+    x: &GpuTensor, width: usize, height: usize, weights: &[f32], bias: &[f32],
+    out_channels: usize, kw: usize, kh: usize, pad_x: usize, pad_y: usize, band_bytes: usize,
 ) -> Result<GpuTensor, String> {
     let overflow = || "metal conv2d extent overflow".to_string();
     let plane = width.checked_mul(height).ok_or_else(overflow)?;
@@ -454,7 +465,7 @@ pub fn conv2d_planar(
     let pixels = ow.checked_mul(oh).ok_or_else(overflow)?;
     let weight = upload(weights, out_channels, k)?;
     let row_bytes = extent(ow, k)?;
-    let band_rows = (256 * 1024 * 1024 / row_bytes).max(1).min(oh);
+    let band_rows = (band_bytes / row_bytes).max(1).min(oh);
     let scratch = empty(band_rows * ow, k, false)?;
     let input = x.storage.try_borrow().map_err(|_| "metal conv borrow".to_string())?;
     let scratch_storage = scratch.storage.borrow();
@@ -961,6 +972,29 @@ mod tests {
     }
 
     #[test]
+    fn raw_ggml_matmul_reads_reused_weight_address() {
+        crate::run_model_worker("raw-matmul-address-reuse-test", || {
+            let (m, k, n) = (4, 8, 4);
+            let a = vec![1.0; m * k];
+            let mut weight = vec![1.0f32; n * k];
+            let ptr = weight.as_ptr();
+            fn bytes(values: &[f32]) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), values.len() * 4)
+                }
+            }
+            let first = shim::try_matmul_nt_ggml_bytes(&a, bytes(&weight), GGML_TYPE_F32, m, k, n)
+                .expect("first raw matmul");
+            assert_eq!(first, [8.0; 16], "first call uses original contents");
+            weight.fill(2.0);
+            assert_eq!(weight.as_ptr(), ptr, "weight allocation must be reused");
+            let second = shim::try_matmul_nt_ggml_bytes(&a, bytes(&weight), GGML_TYPE_F32, m, k, n)
+                .expect("second raw matmul");
+            assert_eq!(second, [16.0; 16], "second call uses overwritten contents");
+        });
+    }
+
+    #[test]
     fn keyed_matmuls_match_resident_and_legacy_bits() {
         crate::run_model_worker("keyed-matmul-test", || {
             use makepad_ai_loader::quant::{f32_to_f16, GGML_TYPE_F16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0};
@@ -1149,7 +1183,7 @@ mod tests {
         let q = slice_rows(&q_parent, 1, 2).unwrap();
         let expected = shim::try_flash_attn_f32_packed(&values[32..], &values, &values, 2, 3, 1, 32, 0.125).unwrap();
         let actual = attention_packed(&q, &q_parent, &q_parent, 1, 0.125).unwrap();
-        assert_eq!(download(&actual).unwrap(), expected, "resident flash attention matches the existing kernel");
+        assert_eq!(download(&actual).unwrap(), expected, "attention on a row-view operand matches the host-slice entry");
         let mods = upload(&[99.0, 1.0, 2.0, 3.0, 4.0, -1.0, -2.0, -3.0, -4.0], 1, 9).unwrap();
         let norm_x = upload(&values[..8], 2, 4).unwrap();
         let expected = shim::try_layer_norm_mul_add_f32(&values[..8], &[2, 4], &[1.0, 2.0, 3.0, 4.0], &[4],
@@ -1170,7 +1204,7 @@ mod tests {
         let weights: Vec<f32> = (0..36).map(|i| i as f32 / 32.0).collect();
         let expected = shim::try_conv2d_planar_f32(&values[9..27], 3, 3, 2, &weights, &[0.25, -0.5], 2, 3, 3, 1, 1).unwrap();
         let actual = conv2d_planar(&image, 3, 3, &weights, &[0.25, -0.5], 2, 3, 3, 1, 1).unwrap();
-        assert_eq!(download(&actual).unwrap(), expected, "resident im2col/GEMM/planar transpose matches step 1");
+        assert_eq!(download(&actual).unwrap(), expected, "convolution of a row-view image matches the host-slice entry");
         let (hold, copies) = residency_profile();
         assert_eq!(copies - copies_before, 1, "only the deliberate shared-view write copies");
         eprintln!("tensor residency: lock_hold_high_water_ns={hold}, scenario_cow_copies={}", copies - copies_before);

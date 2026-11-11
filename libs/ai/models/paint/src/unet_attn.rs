@@ -1,7 +1,7 @@
 //! Transformer2D (linear projection) + BasicTransformerBlock without 2.5D
 //! extras: LayerNorm, self-attn, cross-attn, GEGLU-erf feed-forward.
 
-use crate::unet_first::{UnetFirst, ATTN_GN_EPS, GN_GROUPS, LN_EPS, NS};
+use crate::unet_first::{UnetFirst, ATTN_GN_EPS, GN_GROUPS, LN_EPS};
 use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_attention_packed, gpu_attention_packed_cross, gpu_attention_packed_flash_bf16,
     gpu_download, gpu_gelu_erf, gpu_group_norm_planar, gpu_layer_norm_mul_add_cached, gpu_mul,
@@ -191,7 +191,7 @@ impl UnetFirst {
             width,
             height,
             GN_GROUPS,
-            NS,
+            self.owner.namespace(),
             &format!("{prefix}.norm"),
             &nw.data,
             &nb.data,
@@ -241,7 +241,7 @@ impl UnetFirst {
             width,
             height,
             GN_GROUPS,
-            NS,
+            self.owner.namespace(),
             &format!("{prefix}.norm"),
             &nw.data,
             &nb.data,
@@ -300,7 +300,9 @@ impl UnetFirst {
         let w = self.get(&format!("{prefix}.weight"))?;
         let b = self.get(&format!("{prefix}.bias"))?;
         let x32 = as_f32(x)?;
-        let out = gpu_layer_norm_mul_add_cached(&x32, NS, prefix, &w.data, &b.data, LN_EPS)?;
+        let out = gpu_layer_norm_mul_add_cached(
+            &x32, self.owner.namespace(), prefix, &w.data, &b.data, LN_EPS,
+        )?;
         match_half(out, x)
     }
 

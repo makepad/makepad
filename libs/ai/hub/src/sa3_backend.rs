@@ -231,22 +231,11 @@ mod sa3_gen {
         }
 
         pub fn unload(&mut self) -> Result<(), AssetAiError> {
-            let has_device = self
-                .loaded
-                .as_ref()
-                .is_some_and(|(pipeline, _)| pipeline.device_active());
-            if has_device {
-                makepad_ai_common::backend::release_gpu_runtime_namespaces(&[
-                    "sa3te::",
-                    "sa3dit::",
-                    "sa3ae::",
-                ])
-                .map_err(|error| AssetAiError::Backend(format!("sa3 unload: {error}")))?;
+            let had_device = self.loaded.take().is_some_and(|(pipeline, _)| pipeline.device_active());
+            if had_device {
+                makepad_ai_common::backend::gpu_runtime_trim()
+                    .map_err(|error| AssetAiError::Backend(format!("sa3 unload: {error}")))?;
             }
-            // Drop both the CPU f32 pipeline and the tokenizer only after
-            // device teardown succeeded. A failed unload remains truthfully
-            // resident and can be retried.
-            self.loaded = None;
             Ok(())
         }
 

@@ -5,7 +5,7 @@ use crate::unet_attn::{
     as_f32, attn_cross, attn_cross_batched, attn_packed, attn_packed_batched, match_half,
     paint_scale_like, ref_attn_wide_like,
 };
-use crate::unet_first::{BatchAct, UnetFirst, ATTN_GN_EPS, GN_GROUPS, NS};
+use crate::unet_first::{BatchAct, UnetFirst, ATTN_GN_EPS, GN_GROUPS};
 use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_concat_cols, gpu_concat_rows_many, gpu_download,
     gpu_group_norm_nchw, gpu_group_norm_planar, gpu_nchw_to_tokens, gpu_paint_group_norm_batched,
@@ -153,7 +153,7 @@ impl UnetFirst {
                 height,
                 n,
                 GN_GROUPS,
-                NS,
+                self.owner.namespace(),
                 &format!("{prefix}.norm"),
                 &nw.data,
                 &nb.data,
@@ -171,7 +171,7 @@ impl UnetFirst {
                     width,
                     height,
                     GN_GROUPS,
-                    NS,
+                    self.owner.namespace(),
                     &format!("{prefix}.norm"),
                     &nw.data,
                     &nb.data,
@@ -272,7 +272,7 @@ impl UnetFirst {
                         width,
                         height,
                         GN_GROUPS,
-                        NS,
+                        self.owner.namespace(),
                         &format!("{prefix}.norm.ref"),
                         &nw.data,
                         &nb.data,
@@ -501,7 +501,7 @@ impl UnetFirst {
             x.w,
             x.h,
             GN_GROUPS,
-            NS,
+            self.owner.namespace(),
             &format!("{prefix}.norm"),
             &nw.data,
             &nb.data,

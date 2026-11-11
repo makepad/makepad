@@ -28,7 +28,7 @@ use makepad_zune_core::colorspace::ColorSpace;
 use makepad_zune_core::options::EncoderOptions;
 use makepad_zune_png::PngEncoder;
 #[cfg(feature = "segment-native")]
-use makepad_ai_vision::sam3::{unload_sam3, Sam3, Sam3Image, Sam3Weights};
+use makepad_ai_vision::sam3::{Sam3, Sam3Image, Sam3Weights};
 #[cfg(feature = "segment-native")]
 use makepad_ai_common::DiffusionError;
 #[cfg(feature = "segment-native")]
@@ -134,7 +134,7 @@ impl ContentBackend for SegmentBackend {
                     return Ok(());
                 }
                 if self.model.take().is_some() {
-                    unload_sam3().map_err(diffusion_err)?;
+                    makepad_ai_common::backend::gpu_pool_clear();
                 }
                 let weights = Sam3Weights::load(&path).map_err(diffusion_err)?;
                 let cancel = ctx.cancel.clone();
@@ -173,7 +173,7 @@ impl ContentBackend for SegmentBackend {
         {
             self.model = None;
             self.model_path = None;
-            unload_sam3().map_err(diffusion_err)?;
+            makepad_ai_common::backend::gpu_pool_clear();
         }
         Ok(())
     }

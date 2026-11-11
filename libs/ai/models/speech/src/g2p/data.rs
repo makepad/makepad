@@ -126,8 +126,10 @@ pub fn load_default() -> Result<(), String> {
 
 fn tables() -> &'static Tables {
     #[cfg(test)]
-    for_tests();
-    TABLES.get().expect("speech lexicon not loaded: load the Kokoro model (or call g2p::data::load) first")
+    let tables = TABLES.get_or_init(test_tables);
+    #[cfg(not(test))]
+    let tables = TABLES.get().expect("speech lexicon not loaded: load the Kokoro model (or call g2p::data::load) first");
+    tables
 }
 
 pub(crate) fn lexicon() -> Packed {
@@ -142,12 +144,34 @@ pub(crate) fn words() -> Packed {
     Packed::new(&tables().words)
 }
 
-/// Tests read the downloaded tables; without them they fail saying so.
+/// Tests read the few entries they look up ([`super::test_tables`]), packed
+/// here in the MKLEX layout, never the download.
 #[cfg(test)]
-fn for_tests() {
-    if let Err(e) = load_default() {
-        panic!("{e} (set MAKEPAD_G2P_DIR to a dir holding {}, {}, {})", US_LEXICON.name, ZH_PINYIN.name, ZH_WORDS.name);
+fn test_tables() -> Tables {
+    use super::test_tables::{LEXICON, PINYIN, WORDS};
+    Tables { lexicon: pack(LEXICON), pinyin: pack(PINYIN), words: pack(WORDS) }
+}
+
+/// `entries` as an MKLEX table: magic, count, sorted `(key, value)` offset
+/// pairs, then the NUL-terminated strings.
+#[cfg(test)]
+fn pack(entries: &[(&str, &str)]) -> Box<[u8]> {
+    let mut sorted = entries.to_vec();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    let mut index = Vec::with_capacity(sorted.len() * 8);
+    let mut strings = Vec::new();
+    for (key, value) in sorted {
+        for text in [key, value] {
+            index.extend_from_slice(&(strings.len() as u32).to_le_bytes());
+            strings.extend_from_slice(text.as_bytes());
+            strings.push(0);
+        }
     }
+    let mut table = super::packed::MAGIC.to_vec();
+    table.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    table.extend(index);
+    table.extend(strings);
+    table.into_boxed_slice()
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ use crate::moss::{
     MOSS_DIT_FFN, MOSS_DIT_FREQ_DIM, MOSS_DIT_HEADS, MOSS_DIT_HEAD_DIM, MOSS_DIT_LAYERS,
     MOSS_LATENT_DIM, MOSS_ROPE_THETA, MOSS_TEXT_TOKENS, MOSS_TE_HIDDEN,
 };
+use crate::backend::WeightOwner;
 use crate::sa3::{gelu_tanh, linear, par_rows, silu};
 use crate::{emit_byte_progress, ProgressHook};
 
@@ -513,6 +514,7 @@ struct DitDeviceBlock {
 }
 
 pub struct MossDitDevice {
+    owner: WeightOwner,
     patch: F16Weight,
     head: F16Weight,
     blocks: Vec<DitDeviceBlock>,
@@ -568,6 +570,7 @@ impl MossDit {
             })
             .collect();
         MossDitDevice {
+            owner: WeightOwner::new("moss-dit"),
             patch: F16Weight::new("mossdit.patch", &self.patch_w, d, c),
             head: F16Weight::new("mossdit.head", &self.head_w, c, d),
             blocks,
@@ -588,7 +591,7 @@ impl MossDit {
         for (i, block) in self.blocks.iter().enumerate() {
             let kv = gpu_linear_nt_cached(
                 &ctx,
-                "mossdit",
+                device.owner.namespace(),
                 &[device.blocks[i].cross_kv.part()],
                 &device.blocks[i].cross_kv_b,
             )
@@ -598,7 +601,7 @@ impl MossDit {
             let k = gpu_rms_norm_mul(
                 &k,
                 d,
-                "mossdit",
+                device.owner.namespace(),
                 &format!("b{i}.ckn"),
                 &block.cross_norm_k,
                 MOSS_DIT_EPS,
@@ -666,7 +669,7 @@ impl MossDit {
 
         // patchify (k=1 conv == linear over channels), frame-major input.
         let x_dev = gpu_upload(x_tokens, frames, c).map_err(|e| dev_err("moss dit x upload", e))?;
-        let mut h = gpu_linear_nt_cached(&x_dev, "mossdit", &[device.patch.part()], &self.patch_b)
+        let mut h = gpu_linear_nt_cached(&x_dev, device.owner.namespace(), &[device.patch.part()], &self.patch_b)
             .map_err(|e| dev_err("moss dit patch", e))?;
 
         for (b, block) in self.blocks.iter().enumerate() {
@@ -677,14 +680,14 @@ impl MossDit {
             //     RMS norms, interleaved rope, gated residual ---
             let a = gpu_layer_norm_mod(&h, &mods, base + d, base, MOSS_DIT_EPS)
                 .map_err(|e| dev_err("moss dit norm1", e))?;
-            let qkv = gpu_linear_nt_cached(&a, "mossdit", &[dev.self_qkv.part()], &dev.self_qkv_b)
+            let qkv = gpu_linear_nt_cached(&a, device.owner.namespace(), &[dev.self_qkv.part()], &dev.self_qkv_b)
                 .map_err(|e| dev_err("moss dit qkv", e))?;
             let q = gpu_slice_cols(&qkv, 0, d).map_err(|e| dev_err("moss dit q slice", e))?;
             let k = gpu_slice_cols(&qkv, d, d).map_err(|e| dev_err("moss dit k slice", e))?;
             let v = gpu_slice_cols(&qkv, 2 * d, d).map_err(|e| dev_err("moss dit v slice", e))?;
-            let q = gpu_rms_norm_mul(&q, d, "mossdit", &format!("b{b}.qn"), &block.self_norm_q, MOSS_DIT_EPS)
+            let q = gpu_rms_norm_mul(&q, d, device.owner.namespace(), &format!("b{b}.qn"), &block.self_norm_q, MOSS_DIT_EPS)
                 .map_err(|e| dev_err("moss dit q norm", e))?;
-            let k = gpu_rms_norm_mul(&k, d, "mossdit", &format!("b{b}.kn"), &block.self_norm_k, MOSS_DIT_EPS)
+            let k = gpu_rms_norm_mul(&k, d, device.owner.namespace(), &format!("b{b}.kn"), &block.self_norm_k, MOSS_DIT_EPS)
                 .map_err(|e| dev_err("moss dit k norm", e))?;
             let q = gpu_rope_interleaved(&q, heads, &rope.cos, &rope.sin)
                 .map_err(|e| dev_err("moss dit rope q", e))?;
@@ -692,7 +695,7 @@ impl MossDit {
                 .map_err(|e| dev_err("moss dit rope k", e))?;
             let attn = gpu_attention_packed(&q, &k, &v, heads, scale)
                 .map_err(|e| dev_err("moss dit self attention", e))?;
-            let out = gpu_linear_nt_cached(&attn, "mossdit", &[dev.self_out.part()], &block.self_o_b)
+            let out = gpu_linear_nt_cached(&attn, device.owner.namespace(), &[dev.self_out.part()], &block.self_o_b)
                 .map_err(|e| dev_err("moss dit self out", e))?;
             h = gpu_gated_residual_mod(&h, &out, &mods, base + 2 * d)
                 .map_err(|e| dev_err("moss dit self gate", e))?;
@@ -701,24 +704,24 @@ impl MossDit {
             // (gpu_layer_norm_mul_add applies LN * mul + add with NO +1 on mul)
             let cn = gpu_layer_norm_mul_add(&h, &block.norm3_w, &block.norm3_b, MOSS_DIT_EPS)
                 .map_err(|e| dev_err("moss dit norm3", e))?;
-            let cq = gpu_linear_nt_cached(&cn, "mossdit", &[dev.cross_q.part()], &block.cross_q_b)
+            let cq = gpu_linear_nt_cached(&cn, device.owner.namespace(), &[dev.cross_q.part()], &block.cross_q_b)
                 .map_err(|e| dev_err("moss dit cross q", e))?;
-            let cq = gpu_rms_norm_mul(&cq, d, "mossdit", &format!("b{b}.cqn"), &block.cross_norm_q, MOSS_DIT_EPS)
+            let cq = gpu_rms_norm_mul(&cq, d, device.owner.namespace(), &format!("b{b}.cqn"), &block.cross_norm_q, MOSS_DIT_EPS)
                 .map_err(|e| dev_err("moss dit cq norm", e))?;
             let (ck, cv) = &run.cross_kv[b];
             let cattn = gpu_attention_packed_cross(&cq, ck, cv, heads, scale)
                 .map_err(|e| dev_err("moss dit cross attention", e))?;
-            let cout = gpu_linear_nt_cached(&cattn, "mossdit", &[dev.cross_out.part()], &block.cross_o_b)
+            let cout = gpu_linear_nt_cached(&cattn, device.owner.namespace(), &[dev.cross_out.part()], &block.cross_o_b)
                 .map_err(|e| dev_err("moss dit cross out", e))?;
             h = gpu_add(&h, &cout).map_err(|e| dev_err("moss dit cross residual", e))?;
 
             // --- ffn: LN mod, gelu-tanh, gated residual ---
             let f = gpu_layer_norm_mod(&h, &mods, base + 4 * d, base + 3 * d, MOSS_DIT_EPS)
                 .map_err(|e| dev_err("moss dit norm2", e))?;
-            let hidden = gpu_linear_nt_cached(&f, "mossdit", &[dev.ffn0.part()], &block.ffn0_b)
+            let hidden = gpu_linear_nt_cached(&f, device.owner.namespace(), &[dev.ffn0.part()], &block.ffn0_b)
                 .map_err(|e| dev_err("moss dit ffn0", e))?;
             let hidden = gpu_gelu(&hidden).map_err(|e| dev_err("moss dit gelu", e))?;
-            let out = gpu_linear_nt_cached(&hidden, "mossdit", &[dev.ffn2.part()], &block.ffn2_b)
+            let out = gpu_linear_nt_cached(&hidden, device.owner.namespace(), &[dev.ffn2.part()], &block.ffn2_b)
                 .map_err(|e| dev_err("moss dit ffn2", e))?;
             h = gpu_gated_residual_mod(&h, &out, &mods, base + 5 * d)
                 .map_err(|e| dev_err("moss dit ffn gate", e))?;
@@ -733,7 +736,7 @@ impl MossDit {
         let head_mods = gpu_upload(&head_table, 2, d).map_err(|e| dev_err("moss dit head mods", e))?;
         let hn = gpu_layer_norm_mod(&h, &head_mods, d, 0, MOSS_DIT_EPS)
             .map_err(|e| dev_err("moss dit head norm", e))?;
-        let out = gpu_linear_nt_cached(&hn, "mossdit", &[device.head.part()], &self.head_b)
+        let out = gpu_linear_nt_cached(&hn, device.owner.namespace(), &[device.head.part()], &self.head_b)
             .map_err(|e| dev_err("moss dit head", e))?;
         gpu_download(&out).map_err(|e| dev_err("moss dit download", e))
     }

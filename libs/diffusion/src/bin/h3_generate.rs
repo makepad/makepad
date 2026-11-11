@@ -26,7 +26,7 @@
 use makepad_diffusion::backend::GemmPrecision;
 use makepad_diffusion::h3::H3_VIDEO_PATCH_DIM;
 use makepad_diffusion::h3::H3KeyframeAnchor;
-use makepad_diffusion::h3_pipeline::{h3_generate_with_control, H3CondCache, H3GenerateParams, H3KeyframeInput, H3RunControl};
+use makepad_diffusion::h3_pipeline::{h3_generate_with_control, H3CondCache, H3DeviceOwners, H3GenerateParams, H3KeyframeInput, H3RunControl};
 use makepad_diffusion::h3_tokenizer::H3Tokenizer;
 use makepad_zune_core::options::DecoderOptions;
 use makepad_zune_png::PngDecoder;
@@ -335,20 +335,17 @@ fn run(opts: &HashMap<String, String>) -> Result<(), String> {
             return Some(H3ComponentFile {
                 path: std::path::PathBuf::from(path),
                 format: H3WeightFormat::Gguf,
-                dit_namespace: None,
             });
         }
         opts.get(nvfp4_key).map(|path| H3ComponentFile {
             path: std::path::PathBuf::from(path),
             format: H3WeightFormat::Nvfp4,
-            dit_namespace: None,
         })
     };
     let dit_file = if let Some(path) = opts.get("dit-bf16") {
         Some(makepad_diffusion::h3_pipeline::H3ComponentFile {
             path: PathBuf::from(path),
             format: makepad_diffusion::h3_pipeline::H3WeightFormat::Bf16Shards,
-            dit_namespace: Some(format!("h3dit::bench::{}", path)),
         })
     } else { component("dit-gguf", "dit-nvfp4") };
     let te_file = component("te-gguf", "te-nvfp4");
@@ -395,6 +392,7 @@ fn run(opts: &HashMap<String, String>) -> Result<(), String> {
         return Err("--seed-stride requires generated noise; use --own-noise with --dump".into());
     }
     let mut cond_cache = H3CondCache::default();
+    let mut owners = H3DeviceOwners::new();
     for repeat in 0..repeats {
         params.seed = seed.wrapping_add((repeat as u64).wrapping_mul(seed_stride));
         if repeat > 0 && repeat + 1 == repeats {
@@ -407,7 +405,7 @@ fn run(opts: &HashMap<String, String>) -> Result<(), String> {
         let out_dir = if repeats > 1 { out_dir.join(format!("run-{repeat}")) } else { out_dir.clone() };
         std::fs::create_dir_all(&out_dir).map_err(|err| err.to_string())?;
         println!("repeat {}/{} seed {}", repeat + 1, repeats, params.seed);
-        let output = h3_generate_with_control(&models, &params, |line| {
+        let output = h3_generate_with_control(&models, &params, &mut owners, |line| {
             println!("{line}");
             let _ = std::io::stdout().flush();
         }, &mut H3RunControl { cond_cache: Some(&mut cond_cache), ..Default::default() })

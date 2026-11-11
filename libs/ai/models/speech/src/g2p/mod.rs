@@ -10,6 +10,8 @@
 pub mod data;
 pub mod lexicon;
 pub mod packed;
+#[cfg(test)]
+mod test_tables;
 pub mod lts;
 pub mod zh;
 pub mod morph;

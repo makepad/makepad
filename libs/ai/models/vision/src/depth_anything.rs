@@ -18,6 +18,8 @@
 //! models train at 518). Same-shape requests replay a captured CUDA graph,
 //! which matters most for the small model, whose cost is launch-bound.
 
+use crate::backend::WeightOwner;
+use std::sync::Arc;
 use crate::backend::{
     gpu_add, gpu_attention_packed_f32, gpu_attention_packed_flash_bf16,
     gpu_birefnet_image_to_patches, gpu_birefnet_tokens_to_planar, gpu_concat_cols,
@@ -39,7 +41,6 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
 
-const CACHE_NAMESPACE: &str = "depth-anything";
 const HEAD_DIM: usize = 64;
 
 /// Network sizes, read from the checkpoint.
@@ -137,7 +138,7 @@ impl DepthAnything {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("pth") || ext.eq_ignore_ascii_case("pt"));
         // Per-checkpoint cache keys: two checkpoints share tensor names.
         let scope = CacheScope {
-            namespace: CACHE_NAMESPACE,
+            owner: Arc::new(WeightOwner::new("depth-anything")),
             key_prefix: format!("{}:", path.display()),
         };
         if is_pth {
@@ -295,7 +296,7 @@ impl DepthAnything {
                 linears,
                 hidden,
                 mlp,
-                namespace: scope.namespace,
+                owner: Arc::clone(&scope.owner),
             });
         }
 

@@ -245,7 +245,7 @@ mod native {
 
         pub fn unload(&mut self) -> Result<(), AssetAiError> {
             if self.loaded.take().is_some() {
-                makepad_ai_common::backend::release_gpu_runtime_namespaces(&["yue2::", "yue2vae::"])
+                makepad_ai_common::backend::gpu_runtime_trim()
                     .map_err(|error| AssetAiError::Backend(format!("yue2 unload: {error}")))?;
             }
             Ok(())
