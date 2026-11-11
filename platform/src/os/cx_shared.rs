@@ -1689,12 +1689,18 @@ impl Cx {
             crate::remote::finish_capture_on_shutdown(self);
         }
         if let Some(drag) = self.drag_drop.internal_drag_event(event) {
-            // The pointer event goes out first and the drag one is appended, the
-            // way every other backend orders it: a widget that ends its gesture on
-            // FingerUp never sees one otherwise, and stays stuck mid-drag.
-            self.drag_drop.suspend_internal_drag();
-            self.call_event_handler(event);
-            self.drag_drop.resume_internal_drag();
+            if let crate::event::InternalDragEvent::End = drag {
+                // The Escape that calls a drag off belongs to the drag, as in an OS drag: the app
+                // never hears it, so its release has no cancel scope to close.
+                self.cancel_scopes.handle_event(event, false, true, None);
+            } else {
+                // The pointer event goes out first and the drag one is appended, the
+                // way every other backend orders it: a widget that ends its gesture on
+                // FingerUp never sees one otherwise, and stays stuck mid-drag.
+                self.drag_drop.suspend_internal_drag();
+                self.call_event_handler(event);
+                self.drag_drop.resume_internal_drag();
+            }
             match drag {
                 crate::event::InternalDragEvent::Drag(event) => {
                     self.call_event_handler(&Event::Drag(event));
@@ -1744,12 +1750,13 @@ impl Cx {
         // the tweaker's pick — works on the exploded app. (After the pin
         // hook: leaving mid-drag must never strand a hidden cursor.)
         let intercepted = self.sploded_intercept(event);
+        let starts_scroll_gesture = matches!(event, Event::Scroll(e) if self.fingers.scroll_latch.starts_finger_gesture(e));
         // Settle ownership before widget dispatch, including presses consumed by a
         // platform overlay so their release cannot cancel a second thing underneath.
-        let widget_owner = self.cancel_scopes.resolve_widget_owner(event, intercepted, |lookup| {
-            self.cancel_scope_resolver.and_then(|resolve| resolve(self, lookup))
+        let widget_owner = self.cancel_scopes.resolve_widget_owner(event, starts_scroll_gesture, intercepted, |swipe_window, lookup| {
+            self.cancel_scope_resolver.and_then(|resolve| resolve(self, swipe_window, lookup))
         });
-        self.cancel_scopes.handle_event(event, intercepted, widget_owner);
+        self.cancel_scopes.handle_event(event, starts_scroll_gesture, intercepted, widget_owner);
         if intercepted {
             return;
         }

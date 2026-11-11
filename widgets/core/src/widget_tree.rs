@@ -2885,8 +2885,8 @@ pub(crate) fn reset_for_test(cx: &mut Cx) {
     *cx.global::<UiRoot>() = UiRoot::default();
 }
 
-fn cancel_scope_resolver(cx: &Cx, candidate: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
-    cx.get_global_ref::<UiRoot>()?.widget.upgrade()?.resolve_cancel_scope(candidate)
+fn cancel_scope_resolver(cx: &Cx, swipe_window: Option<WindowId>, candidate: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
+    cx.get_global_ref::<UiRoot>()?.widget.upgrade()?.resolve_cancel_scope(swipe_window, candidate)
 }
 
 pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
