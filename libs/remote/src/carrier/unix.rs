@@ -94,6 +94,8 @@ mod imp {
     /// services first: the caps are written now. Returns the socket path.
     pub fn listen(ep: &Endpoint, extra: &str) -> io::Result<PathBuf> {
         let _ = crate::cmd::now_ms();
+        #[cfg(any(target_os = "android", target_os = "ios", target_os = "tvos"))]
+        crate::discovery::remove_stale(ep.hooks());
         let pid = std::process::id();
         let (sock, disc) = paths(pid);
         let _ = std::fs::remove_file(&sock);
