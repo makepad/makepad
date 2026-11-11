@@ -455,8 +455,9 @@ pub enum Cmd {
     /// Is anything still moving: a pending NextFrame, redraw, repaint or
     /// virtual timer due within the next frame?
     Settled(Sender<Reply>),
-    /// The UI thread's own counters (`uicounts`): read on the thread that runs the event loop.
-    UiCounts(Sender<Reply>),
+    /// The UI thread's own counters (`uicounts`): read on the thread that runs the event loop;
+    /// with what the app's other threads waited for a core (`waited=1`).
+    UiCounts(bool, Sender<Reply>),
     CapStop(Sender<Reply>),
     /// `/cap/pause` (true) and `/cap/resume` (false).
     CapPause(bool, Sender<Reply>),
@@ -695,14 +696,30 @@ pub fn request_from(args: impl Iterator<Item = String>, env: Option<&str>) -> Re
 }
 
 pub fn request() -> Request {
-    match request_from(std::env::args(), std::env::var("MAKEPAD_REMOTE").ok().as_deref()) {
+    let asked = std::env::var("MAKEPAD_REMOTE").ok();
+    // an Android app gets no environment of its own, so `adb shell setprop debug.makepad.remote 1` asks too
+    #[cfg(target_os = "android")]
+    let asked = asked.or_else(|| {
+        let value = makepad_hal::backend::android::system_property("debug.makepad.remote")?;
+        // every makepad app on the device reads it, so a value it can't use is ignored instead of ending the app
+        if let Request::Refused(_) = request_from(std::iter::empty(), Some(&value)) {
+            eprintln!("[makepad-remote] debug.makepad.remote={value} is ignored: 1 asks for the endpoint, 0 turns it off");
+            return None;
+        }
+        Some(value)
+    });
+    match request_from(std::env::args(), asked.as_deref()) {
         Request::Off | Request::Local if std::env::var("MAKEPAD_INSPECT").as_deref() == Ok("1") => Request::On,
+        // nothing outside a release Android or iOS app can reach its socket, and the system kills such
+        // an app without running exit handlers, so its socket and discovery file would only pile up
+        Request::Local if cfg!(all(any(target_os = "android", target_os = "ios", target_os = "tvos"), not(debug_assertions), not(relax))) => Request::Off,
         request => request,
     }
 }
 
 /// True when this process was launched for an agent or a test (`--remote`,
-/// `MAKEPAD_REMOTE=1` or `MAKEPAD_INSPECT=1`); the endpoint itself is open in every process unless `MAKEPAD_REMOTE=0`.
+/// `MAKEPAD_REMOTE=1` or `MAKEPAD_INSPECT=1`); the endpoint itself is open in every process unless `MAKEPAD_REMOTE=0`
+/// (a release Android or iOS app opens it only when asked).
 /// Pure argv + env, usable before the endpoint itself is up: the platform's focus policy reads
 /// it while the first window is being created.
 pub fn requested() -> bool {
@@ -845,7 +862,7 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "trace", args: "[topics=a,b] [off=1]", answers: "get / set the trace topics", service: "logs", risk: CmdRisk::Act, params: "\"topics\":{\"type\":\"string\"},\"off\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "step", args: "[frames=1] [fps=60] [wait_loads=1] [w=ID]", answers: "--virtual-clock only: run frames of 1/fps; answers {\"frame\",\"time\"} after the last", service: "ui", risk: CmdRisk::Act, params: "\"frames\":{\"type\":\"integer\"},\"fps\":{\"type\":\"number\"},\"wait_loads\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "settled", args: "", answers: "{\"settled\":bool,\"reasons\":[next_frame|redraw|repaint|timer|step|shaders|loads|pool],\"loads\":{kind:n},\"pool\":{\"queued\":[interactive,visible,background],\"running\":n,\"taken\":n}} (pool: the app pool's jobs waiting for a worker and its CPU permit, on its workers, and taken so far)", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
-    Command { words: "uicounts", args: "", answers: "{\"ins\":n,\"cyc\":n,\"cpu_ns\":n,\"process_cpu_ns\":n,\"served_cpu_ns\":n,\"runtime_cpu_ns\":n,\"faults\":n} of the UI thread so far (ins/cyc: thread_counters, user mode: macOS thread_selfcounts, Linux perf_event; else 0), the CPU of all the process's threads, and of that what serving remote peers cost it (its serving threads, and its UI thread answering their commands) and what the runtime's own threads ran (under makepad run, the JIT's; natively 0), and the process's major page faults so far (getrusage; 0 on Windows)", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
+    Command { words: "uicounts", args: "[waited=1]", answers: "{\"ins\":n,\"cyc\":n,\"cpu_ns\":n,\"process_cpu_ns\":n,\"served_cpu_ns\":n,\"runtime_cpu_ns\":n,\"faults\":n} of the UI thread so far (ins/cyc: thread_counters, user mode: macOS thread_selfcounts, Linux perf_event; else 0), the CPU of all the process's threads, and of that what serving remote peers cost it (its serving threads, and its UI thread answering their commands) and what the runtime's own threads ran (under makepad run, the JIT's; natively 0), and the process's major page faults so far (getrusage; 0 on Windows); waited=1 adds \"waited_ns\":n, what the app's threads that run now (not the UI thread, the serving ones or the runtime's) have spent runnable, waiting for a core (Linux schedstat run_delay; 0 where the OS keeps none per thread: macOS, Windows), a file or two a thread: ask it seldom", service: "ui", risk: CmdRisk::Read, params: "\"waited\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "cap start", args: "path=ABS.mp4 [fps=60] [audio=1] [overwrite=1] [w=ID]", answers: "record the window in process (native pixels, H.264)", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"},\"fps\":{\"type\":\"number\"},\"audio\":{\"type\":\"boolean\"},\"overwrite\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"}", required: &["path"], positional: &[] },
     Command { words: "cap stop", args: "[hashes=1]", answers: "finalize the recording: {\"frames\",\"sz\",\"missing\",\"hash\"}", service: "ui", risk: CmdRisk::Act, params: "\"hashes\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "input record", args: "path=<file>", answers: "record the person's native pointer, wheel, key and text input as the commands that inject it (one line each: ms, presented frame, command)", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"}", required: &["path"], positional: &[] },

@@ -520,8 +520,8 @@ impl Hal {
                 #[cfg(target_os = "android")]
                 // the Activity's events and frame callbacks make the pumps look (no `Wake` for every
                 // app); a GPU result its own session's
-                backend_id::VULKAN => match backend::android::AndroidBackend::new(req.flags, sessions.clone(), notify.clone()) {
-                    Ok(v) => Some(Box::new(v)),
+                backend_id::AUTO | backend_id::VULKAN | backend_id::GL => match backend::android::open(id, req.flags, sessions.clone(), wake.clone(), notify.clone()) {
+                    Ok(b) => Some(b),
                     Err(e) => { eprintln!("[hal-android] {e}"); None }
                 },
                 _ => None,
@@ -560,6 +560,7 @@ impl Hal {
             st.world.font_notify = Some(notify.clone());
         }
         let mut info = backend_info_of(&*st.backend.as_ref().expect("backend").1);
+        st.world.max_texture = info.max_texture;
         if req.parent != 0 || req.flags & open_flags::OFFSCREEN_WINDOWS != 0 {
             info.flags &= !info_flags::DIRECT_DISPLAY;
         }
@@ -817,6 +818,7 @@ impl Hal {
                     // glyphs the font workers finished go to the atlas and to the sessions
                     if let Some(gpu) = b.host_gpu() {
                         font::service(gpu, &mut st.world);
+                        font::trim(gpu, &mut st.world);
                     }
                 }
                 // A completion or a lent window's geometry can notify another session while
@@ -830,7 +832,7 @@ impl Hal {
                 // embedded windows' frames (no display link of their own) at display rate
                 let embedded_due = st.world.deliver_embedded_frames(sid, now);
                 let due = st.backend.as_ref().and_then(|(_, b)| b.next_due(&st.world, sid));
-                let due = match (due, embedded_due) { (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b) };
+                let due = [due, embedded_due, font::trim_at(&st.world)].into_iter().flatten().min();
                 if st.world.session(sid).is_none() {
                     // the session was ended under its app (killed, crashed, its parent closed):
                     // the app hears one quit request and ends its run
@@ -931,6 +933,10 @@ impl Hal {
     /// ends, and the process's exit calls it for the global Hal (`before_exit_at_exit`); once is
     /// enough.
     pub fn before_exit(&self) {
+        // a host may end the process without exit handlers after this (`_exit`, TerminateProcess),
+        // which would leave the makepad-remote endpoint's socket and discovery file behind
+        #[cfg(not(target_arch = "wasm32"))]
+        makepad_remote::carrier::unix::withdraw();
         let backend = {
             let mut guard = lock(&self.state);
             guard.exited = true;

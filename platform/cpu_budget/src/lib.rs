@@ -17,7 +17,6 @@ use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering::Relaxed};
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, Thread};
-use std::time::Instant;
 
 pub const INTERACTIVE: u8 = 0;
 pub const VISIBLE: u8 = 1;
@@ -118,7 +117,9 @@ struct State {
 /// longer at more CPU.
 const JIT_FLOOR: usize = 3;
 struct Budget {
-    origin: Instant,
+    /// `monotonic_ns` at its start: `now` counts from here (wrapping, so an origin set back past the
+    /// clock's own start still counts forward).
+    origin: u64,
     cores: usize,
     limit: usize,
     /// Background's ceiling: below Visible's, and at most the physical cores but one. A background
@@ -149,7 +150,7 @@ impl Budget {
         assert!(cores > 0);
         let limit = cores.saturating_sub(1).max(1);
         Self {
-            origin: Instant::now(), cores, limit,
+            origin: monotonic_ns(), cores, limit,
             background_limit: limit.saturating_sub(2).min(physical.saturating_sub(1)).max(1),
             jit_floor: JIT_FLOOR.min(limit / 4),
             state: Mutex::new(State {
@@ -171,7 +172,7 @@ impl Budget {
             max_strand_wait: AtomicU64::new(0),
         }
     }
-    fn now(&self) -> u64 { self.origin.elapsed().as_nanos().min(u64::MAX as u128) as u64 }
+    fn now(&self) -> u64 { monotonic_ns().wrapping_sub(self.origin) }
     /// How far the JIT's Background jobs are below their floor: it holds only against Visible work.
     fn jit_short(&self, s: &State) -> usize {
         if s.visible == 0 && s.waiting & (1 << VISIBLE) == 0 { return 0; }
@@ -618,6 +619,23 @@ fn me() -> u64 {
 }
 #[cfg(not(any(unix, windows)))]
 fn me() -> u64 { 0 }
+/// Nanoseconds on the platform's monotonic clock, from an arbitrary origin (as
+/// `makepad_platform::monotonic_seconds`). This crate sits below the platform, so on the web it reads
+/// the host clock the platform does: `Instant::now` panics on wasm32-unknown-unknown ("time not
+/// implemented on this platform"), and a page's first pool aborted it.
+#[cfg(not(target_arch = "wasm32"))]
+fn monotonic_ns() -> u64 {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_nanos().min(u64::MAX as u128) as u64
+}
+#[cfg(target_arch = "wasm32")]
+fn monotonic_ns() -> u64 {
+    #[link(wasm_import_module = "env")]
+    extern "C" {
+        fn js_monotonic_now() -> f64;
+    }
+    (unsafe { js_monotonic_now() }.max(0.0) * 1_000_000_000.0) as u64
+}
 static WAIT_HOOK: OnceLock<extern "C" fn(u8)> = OnceLock::new();
 fn global() -> &'static Budget {
     static BUDGET: OnceLock<Budget> = OnceLock::new();

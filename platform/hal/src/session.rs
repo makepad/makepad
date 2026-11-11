@@ -631,6 +631,8 @@ pub struct World {
     /// the font service (made at its first command), and the call its workers wake the pumps with
     pub fonts: Option<Box<crate::font::FontService>>,
     pub font_notify: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    /// the largest texture dimension the device takes (`HalInfo::max_texture`), 0 before a backend opens
+    pub max_texture: u32,
     next_key: u64,
     /// sessions whose queue got an event from another session's command: the caller wakes them
     notified: Vec<u32>,
@@ -731,6 +733,7 @@ impl World {
             next_lent: 0,
             fonts: None,
             font_notify: None,
+            max_texture: 0,
             next_key: 1,
             notified: Vec::new(),
             listeners: Default::default(),
@@ -750,6 +753,17 @@ impl World {
     pub fn font_service(&mut self) -> &mut crate::font::FontService {
         let notify = self.font_notify.clone();
         self.fonts.get_or_insert_with(|| Box::new(crate::font::FontService::new(notify)))
+    }
+
+    /// A shell's `Lifecycle` event on its way to a session: going to the background lets the
+    /// font service give back the memory a grown atlas took, and not take more until it's back.
+    pub(crate) fn note_lifecycle(&mut self, kind: u32) {
+        let Some(fonts) = self.fonts.as_mut() else { return };
+        match kind {
+            crate::types::lifecycle::BACKGROUND => fonts.app_backgrounded(),
+            crate::types::lifecycle::FOREGROUND => fonts.app_foregrounded(),
+            _ => {}
+        }
     }
 
     /// A fresh id of the HAL's own (lent) range: what a session samples a host-owned texture by.
@@ -1527,6 +1541,9 @@ impl World {
                 let (geom, state) = (w.val.geom, w.val.state);
                 self.window_geom(sid, window, geom, dpi, state);
             }
+        }
+        if let Some(crate::HalEvent::Lifecycle { kind }) = event.decode(payload) {
+            self.note_lifecycle(kind);
         }
         if let (Some(hid), Some(crate::HalEvent::FrameReady { next_ns, .. })) = (alias, event.decode(payload)) {
             if !self.lent_beat(sid, hid, next_ns) {

@@ -247,7 +247,7 @@ impl Media {
                 let entry = audio::Entry::from_cmd(entry, ctx);
                 // waits for a block of the old entry that is running: when this returns the old
                 // entry is not called any more
-                *lock(&slot) = entry;
+                slot.replace(entry);
                 true
             }
             HalCmd::Midi { op, port, data, ports } => {
@@ -618,7 +618,7 @@ impl Media {
             if let Some(audio) = sm.audio.take() {
                 let access = lock(&audio);
                 for slot in access.input_cb.iter().chain(access.output_cb.iter()) {
-                    *lock(slot) = None;
+                    slot.replace(None);
                 }
             }
         }

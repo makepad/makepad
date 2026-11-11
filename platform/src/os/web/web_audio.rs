@@ -5,7 +5,13 @@ use {
         web::CxOs,
     },
     crate::{audio::*, makepad_live_id::*, thread::SignalToUI},
-    std::sync::{Arc, Mutex},
+    std::{
+        cell::UnsafeCell,
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc, Mutex,
+        },
+    },
 };
 
 #[repr(C)]
@@ -20,32 +26,51 @@ pub struct WebAudioDevice {
     desc: AudioDeviceDesc,
 }
 
+/// What the page's output entry reaches through its context pointer, and nothing else: the
+/// app's render function (replaced from the UI through a lock-free slot, the old one handed
+/// back to drop there), the device it renders for, and the block buffer. The entry never
+/// locks, so a UI thread busy with `WebAudioAccess` cannot hold the worklet up.
+pub struct WebAudioOutput {
+    render: makepad_lock_free::Slot<AudioOutputFn>,
+    device_id: AtomicU64,
+    /// Touched by the entry only (the page calls it for one block at a time).
+    buffer: UnsafeCell<AudioBuffer>,
+}
+
+// SAFETY: `render` and `device_id` are thread-safe; `buffer` is reached by the entry only.
+unsafe impl Sync for WebAudioOutput {}
+
+impl WebAudioOutput {
+    /// Install (or clear) the render function; the one it replaces drops here, on the caller's
+    /// thread, after the block that may be running it has finished.
+    pub fn set_render(&self, render: Option<AudioOutputFn>) {
+        drop(self.render.replace(render));
+    }
+}
+
 pub struct WebAudioAccess {
     pub audio_input_cb: [Arc<Mutex<Option<AudioInputFn>>>; MAX_AUDIO_DEVICE_INDEX],
-    pub audio_output_cb: [Arc<Mutex<Option<AudioOutputFn>>>; MAX_AUDIO_DEVICE_INDEX],
+    pub output: Arc<WebAudioOutput>,
     pub devices: Vec<WebAudioDevice>,
     change_signal: SignalToUI,
-    self_arc: *const Mutex<WebAudioAccess>,
-    output_device_id: AudioDeviceId,
-    output_buffer: Option<AudioBuffer>,
 }
 
 impl WebAudioAccess {
     pub fn new(os: &mut CxOs, change_signal: SignalToUI) -> Arc<Mutex<Self>> {
         // ok lets request audio inputs and outputs
         os.from_wasm(FromWasmQueryAudioDevices {});
-        let ret = Arc::new(Mutex::new(Self {
+        Arc::new(Mutex::new(Self {
             audio_input_cb: Default::default(),
-            audio_output_cb: Default::default(),
+            output: Arc::new(WebAudioOutput {
+                render: makepad_lock_free::Slot::default(),
+                device_id: AtomicU64::new(0),
+                // A worklet quantum is 128 frames, a script processor's up to 16384: this much
+                // up front, so the entry's resize only changes the length (a larger one grows once).
+                buffer: UnsafeCell::new(AudioBuffer::new_with_size(4096, 2)),
+            }),
             devices: Default::default(),
             change_signal,
-            self_arc: std::ptr::null(),
-            output_buffer: Some(Default::default()),
-            output_device_id: Default::default(),
-        }));
-        let self_arc = ret.clone();
-        ret.lock().unwrap_or_else(|e| e.into_inner()).self_arc = Arc::into_raw(self_arc);
-        ret
+        }))
     }
 
     pub fn to_wasm_audio_device_list(&mut self, tw: ToWasmAudioDeviceList) {
@@ -125,10 +150,12 @@ impl WebAudioAccess {
                 crate::log!("web audio: requested output device is unavailable; using browser default");
                 "".to_string()
             };
-        self.output_device_id = devices[0];
+        self.output.device_id.store(devices[0].0 .0, Ordering::Relaxed);
+        // The page calls the entry with this pointer for as long as it plays: the output lives
+        // as long as this access, which the app keeps for its whole life.
         os.from_wasm(FromWasmStartAudioOutput {
             web_device_id,
-            context_ptr: self.self_arc as u32,
+            context_ptr: Arc::as_ptr(&self.output) as u32,
         });
     }
 
@@ -156,38 +183,27 @@ pub unsafe extern "C" fn wasm_audio_output_entrypoint(
     sample_time: f64,
     heard_at: f64,
 ) -> u32 {
-    let wa = context_ptr as *const Mutex<WebAudioAccess>;
-    let (output_fn, mut output_buffer, device_id) = {
-        let mut wa = (*wa).lock().unwrap_or_else(|e| e.into_inner());
-        (
-            wa.audio_output_cb[0].clone(),
-            wa.output_buffer.take().unwrap(),
-            wa.output_device_id,
-        )
+    // SAFETY: `context_ptr` is the `WebAudioOutput` `use_audio_outputs` gave the page, kept
+    // alive for the app's life; the page calls this entry for one block at a time, so the buffer
+    // is this call's alone
+    let output = &*(context_ptr as *const WebAudioOutput);
+    let buffer = &mut *output.buffer.get();
+    buffer.clear_final_size();
+    buffer.resize(frames as usize, channels as usize);
+    buffer.set_final_size();
+    let info = AudioInfo {
+        device_id: AudioDeviceId(LiveId(output.device_id.load(Ordering::Relaxed))),
+        time: heard_at.is_finite().then(|| AudioTime {
+            sample_time,
+            host_time: (heard_at.max(0.0) * 1e9) as u64,
+            rate_scalar: 1.0,
+        }),
+        sample_rate,
     };
-
-    output_buffer.clear_final_size();
-    output_buffer.resize(frames as usize, channels as usize);
-    output_buffer.set_final_size();
-    let mut output_fn = output_fn.lock().unwrap_or_else(|e| e.into_inner());
-
-    if let Some(output_fn) = &mut *output_fn {
-        output_fn(
-            AudioInfo {
-                device_id,
-                time: heard_at.is_finite().then(|| AudioTime {
-                    sample_time,
-                    host_time: (heard_at.max(0.0) * 1e9) as u64,
-                    rate_scalar: 1.0,
-                }),
-                sample_rate,
-            },
-            &mut output_buffer,
-        );
+    // No render function, or one being replaced: this block is silence.
+    if output.render.with(|render| render(info, &mut *buffer)).is_none() {
+        buffer.zero();
     }
-    let ptr = output_buffer.data.as_ptr();
-
-    (*wa).lock().unwrap_or_else(|e| e.into_inner()).output_buffer = Some(output_buffer);
-
+    let ptr = buffer.data.as_ptr();
     ptr as u32
 }

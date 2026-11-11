@@ -20,6 +20,7 @@ use {
 pub struct WGpuInfo {
     pub min_uniform_vectors: u32,
     pub float_color_targets: bool,
+    pub max_texture_size: u32,
     pub vendor: String,
     pub renderer: String,
 }
@@ -126,6 +127,8 @@ pub struct ToWasmResizeWindow {
 #[derive(ToWasm)]
 pub struct ToWasmAnimationFrame {
     pub time: f64,
+    /// Whether this frame was asked for during the last one, so it comes a display frame after it.
+    pub in_a_row: bool,
 }
 
 #[derive(ToWasm)]

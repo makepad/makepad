@@ -4,8 +4,8 @@
 //! by the next draw (`Cx::hal_take_font_events`).
 
 use super::lent_id;
-use crate::{event::LentId, Cx};
-use std::collections::HashSet;
+use crate::{draw_list::DrawListId, event::LentId, Cx};
+use std::collections::{HashMap, HashSet};
 pub use makepad_hal::font::{wire as hal_font_wire, FontSource as HalFontSource, GlyphEntry as HalGlyphEntry};
 
 /// The glyphs the current draw shows as blank gate its presentation (bounded by the event
@@ -15,6 +15,11 @@ pub use makepad_hal::font::{wire as hal_font_wire, FontSource as HalFontSource, 
 #[derive(Default)]
 pub(crate) struct GlyphWait {
     pub(crate) pending: HashSet<(u32, u32, u32, u32)>,
+    /// Background requests the host hasn't answered yet (font, glyph, kind, size bits).
+    pub(crate) background: HashSet<(u32, u32, u32, u32)>,
+    /// The lists that redraw once `background` empties, with the recording that drew each one's
+    /// stand-ins: a list recorded again since then already drew whatever had arrived.
+    pub(crate) lists_awaiting_background: HashMap<DrawListId, u64>,
     pub(crate) presented: HashSet<makepad_hal::Id>,
     pub(crate) timed_out: bool,
     /// Glyphs the current draw shows blank (reported, answered or not).
@@ -30,11 +35,22 @@ impl GlyphWait {
         self.pending.extend(glyphs.iter().copied());
     }
 
-    /// The host answered these glyphs of `font` (any answer: an image or none).
-    pub(crate) fn answered(&mut self, font: u32, entries: &[HalGlyphEntry]) {
-        for entry in entries.iter().filter(|e| e.replaces == 0) {
-            self.pending.remove(&(font, entry.glyph, entry.kind, entry.dpxs_bits));
+    /// The host answered these glyphs of `font` (any answer: an image or none). True when the
+    /// text should draw again now: an answer to a background request waits for the last of them.
+    pub(crate) fn answered(&mut self, font: u32, entries: &[HalGlyphEntry]) -> bool {
+        let mut redraw = false;
+        for entry in entries {
+            // an upgrade answers no request, but the text that uses it still draws again
+            if entry.replaces != 0 {
+                redraw = true;
+                continue;
+            }
+            let key = (font, entry.glyph, entry.kind, entry.dpxs_bits);
+            let was_pending = self.pending.remove(&key);
+            let was_background = self.background.remove(&key);
+            redraw |= was_pending || !was_background;
         }
+        redraw
     }
 }
 
@@ -62,6 +78,20 @@ impl Cx {
     /// Asks for glyphs (id, pixels per em) of an open font; `kind` is `hal_font_wire::kind`.
     pub fn hal_glyph_request(&mut self, font: u32, kind: u32, glyphs: &[(u32, f32)]) {
         self.hal.frames.w.request_glyphs(font, kind, glyphs);
+    }
+
+    /// `hal_glyph_request` for glyphs nothing waits on, since the app draws stand-ins for them:
+    /// their answers redraw nothing until the last one is in.
+    pub fn hal_glyph_request_background(&mut self, font: u32, kind: u32, glyphs: &[(u32, f32)]) {
+        self.hal.glyph_wait.background.extend(glyphs.iter().map(|(glyph, dpxs)| (font, *glyph, kind, dpxs.to_bits())));
+        self.hal.frames.w.request_glyphs(font, kind, glyphs);
+    }
+
+    /// The list being recorded drew a stand-in for a background glyph, so it redraws once those
+    /// are all in, unless it's recorded again before that.
+    pub fn hal_redraw_list_after_background_glyphs(&mut self, list: DrawListId) {
+        let recording_gen = self.draw_lists[list].recording_gen;
+        self.hal.glyph_wait.lists_awaiting_background.insert(list, recording_gen);
     }
 
     /// Marks unresolved requests used by this draw: (font, glyph, kind, size bits).
@@ -100,16 +130,39 @@ impl Cx {
             E::AtlasEvicted { kind, generation, count, slots } => HalFontEvent::Evicted { kind, generation, slots: hal_font_wire::read_slots(slots, count) },
             _ => return,
         };
+        let had_background_requests = !self.hal.glyph_wait.background.is_empty();
+        let mut redraw_all = true;
         match &event {
             HalFontEvent::Opened { font, status, .. } if *status != hal_font_wire::font_status::OPENED => {
                 self.hal.glyph_wait.pending.retain(|(f, _, _, _)| f != font);
+                self.hal.glyph_wait.background.retain(|(f, _, _, _)| f != font);
             }
-            HalFontEvent::Ready { font, entries } => self.hal.glyph_wait.answered(*font, entries),
+            HalFontEvent::Ready { font, entries } => redraw_all = self.hal.glyph_wait.answered(*font, entries),
             _ => {}
         }
         self.hal.font_events.push(event);
+        // Not in the background, where the text would only ask again for what the host just took
+        // back. The draw once it's back takes these answers.
+        if self.hal.in_background {
+            return;
+        }
         // the text draws again: it takes the answers before it lays out glyphs
-        self.redraw_all();
+        if redraw_all {
+            self.redraw_all();
+        }
+        if had_background_requests && self.hal.glyph_wait.background.is_empty() {
+            let mut redrew_a_list = false;
+            for (list, recording_gen) in std::mem::take(&mut self.hal.glyph_wait.lists_awaiting_background) {
+                if self.draw_lists.checked_index(list).is_some_and(|draw_list| draw_list.recording_gen == recording_gen) {
+                    self.redraw_list(list);
+                    redrew_a_list = true;
+                }
+            }
+            // with no list left to redraw, the text still has to draw once to take these answers
+            if !redrew_a_list {
+                self.redraw_all();
+            }
+        }
     }
 }
 

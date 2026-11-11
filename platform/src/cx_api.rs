@@ -13,7 +13,8 @@ use {
         event::xr::XrAnchor,
         event::{
             video_playback::CameraPreviewMode, DigitId, DragItem, Event, NextFrame, QuitReason,
-            QuitRequestedEvent, ScrollDirection, ScrollEvent, Timer, Trigger, VideoSource,
+            QuitRequestedEvent, ScrollDirection, ScrollEvent, Timer, TouchPoint, Trigger,
+            VideoSource,
         },
         gpu_info::GpuInfo,
         ime::TextInputConfig,
@@ -1709,7 +1710,9 @@ impl Cx {
         config: TextInputConfig,
     ) {
         if !self.keyboard.text_ime_dismissed {
+            self.keyboard.is_text_ime_hide_deferred = false;
             self.ime_area = area;
+            self.ime_area_scope = self.ime_scope;
             let rect = area.rect(self);
             self.publish_hosted_ime(crate::ime::HostedImeState {
                 visible: !config.is_read_only
@@ -1740,10 +1743,41 @@ impl Cx {
         });
     }
 
+    /// Hides the soft keyboard, once no widget is being pressed by a finger.
+    ///
+    /// Hiding it moves everything above it, which would move a pressed widget out from under the finger.
     pub fn hide_text_ime(&mut self) {
-        self.publish_hosted_ime(crate::ime::HostedImeState::default());
+        // A text input that just took the focus already synced its text into iOS's text view, which a hide would wipe,
+        // and it shows the keyboard again anyway.
+        #[cfg(target_os = "ios")]
+        if self.keyboard.is_text_ime_hide_cancelled {
+            return;
+        }
         self.keyboard.reset_text_ime_dismissed();
-        self.platform_ops.push_back(CxOsOp::HideTextIME);
+        self.keyboard.is_text_ime_hide_deferred = true;
+        self.flush_text_ime_hide();
+    }
+
+    /// Cancels a hide of the soft keyboard that's still waiting for a press to end,
+    /// e.g., because a text input that shows it took the key focus again.
+    pub fn cancel_text_ime_hide(&mut self) {
+        self.keyboard.is_text_ime_hide_deferred = false;
+        self.keyboard.is_text_ime_hide_cancelled = true;
+    }
+
+    /// Sends out a hide of the soft keyboard that's been waiting, unless a widget is still being pressed.
+    fn flush_text_ime_hide(&mut self) {
+        if self.keyboard.is_text_ime_hide_deferred && !self.fingers.is_touch_press_held() {
+            self.keyboard.is_text_ime_hide_deferred = false;
+            self.publish_hosted_ime(crate::ime::HostedImeState::default());
+            self.platform_ops.push_back(CxOsOp::HideTextIME);
+        }
+    }
+
+    /// Ends a touch update after it was dispatched.
+    pub(crate) fn end_touch_update(&mut self, touches: &[TouchPoint]) {
+        self.fingers.process_touch_update_end(touches);
+        self.flush_text_ime_hide();
     }
 
     /// Whether keys go to a text field now: the widget with the key focus
@@ -1757,6 +1791,7 @@ impl Cx {
 
     pub fn text_ime_was_dismissed(&mut self) {
         self.publish_hosted_ime(crate::ime::HostedImeState::default());
+        self.keyboard.is_text_ime_hide_deferred = false;
         self.keyboard.set_text_ime_dismissed();
         // A focused TextInput re-pushes ShowTextIME on every draw, so a show op
         // queued by a frame drawn just before this dismissal landed can still be
@@ -2048,6 +2083,7 @@ impl Cx {
     /// Call it once those widgets saw the touch get canceled.
     pub fn release_touch_captures(&mut self, uid: u64) {
         self.fingers.release_digit(live_id_num!(touch, uid).into());
+        self.flush_text_ime_hide();
     }
 
     pub fn sweep_unlock(&mut self, value: Area) {
@@ -2664,6 +2700,11 @@ impl Cx {
         self.ime_area.rect(self)
     }
 
+    /// The `ime_scope` that the focused text input last showed the IME from.
+    pub fn ime_area_scope(&self) -> u64 {
+        self.ime_area_scope
+    }
+
     pub fn update_area_refs(&mut self, old_area: Area, new_area: Area) -> Area {
         if old_area == Area::Empty {
             return new_area;
@@ -2680,6 +2721,22 @@ impl Cx {
 
     pub fn set_key_focus(&mut self, focus_area: Area) {
         self.keyboard.set_key_focus(focus_area);
+    }
+
+    /// Like [`Self::set_key_focus`], for focus the user gave, e.g., by pressing on `focus_area` or tabbing to it.
+    pub fn set_key_focus_from_user(&mut self, focus_area: Area) {
+        self.keyboard.set_key_focus_from_user(focus_area);
+    }
+
+    /// Gives `focus_area` the key focus back, as the user's if `is_from_user`,
+    /// e.g., where it was before a popup took it.
+    pub fn restore_key_focus(&mut self, focus_area: Area, is_from_user: bool) {
+        self.keyboard.restore_key_focus(focus_area, is_from_user);
+    }
+
+    /// Whether `focus_area` has key focus that the user gave it, rather than code.
+    pub fn has_key_focus_from_user(&self, focus_area: Area) -> bool {
+        self.keyboard.has_key_focus_from_user(focus_area)
     }
 
     /// The window lost the keyboard: its key focus is kept (and followed through redraws) for
@@ -2742,6 +2799,21 @@ impl Cx {
         if !self.platform_ops.iter().any(|queued| matches!(queued, CxOsOp::BoostFrameRate)) {
             self.platform_ops.push_back(CxOsOp::BoostFrameRate);
         }
+    }
+
+    /// Whether a screen created now gets its shaders built in the background, ready by the time it opens.
+    /// The HAL compiles pipelines asynchronously, but this only reads true on Android, once the first frame has shown.
+    pub fn is_building_shaders_in_background(&self) -> bool {
+        cfg!(target_os = "android") && crate::first_present_seen()
+    }
+
+    /// Sets whether a frame repaints only the parts of the window that changed, which it does by default.
+    /// Only the Vulkan and GLES backends do that so far.
+    pub fn set_partial_repainting(&mut self, is_enabled: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.draw_damage.set_disabled(!is_enabled);
+        #[cfg(target_arch = "wasm32")]
+        let _ = is_enabled;
     }
 
     pub fn send_trigger(&mut self, area: Area, trigger: Trigger) {

@@ -332,6 +332,8 @@ pub(super) fn lifecycle(kind: u32) {
                 win.focus(false);
             }
         }
+        // nothing draws in the background, so the Metal backend gives back what it can right away
+        lifecycle::BACKGROUND => Shared::global().backgrounded.store(true, Ordering::Release),
         _ => {}
     }
     a.broadcast(kind);

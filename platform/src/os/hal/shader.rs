@@ -6,7 +6,6 @@
 use crate::{
     draw_shader::{CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderId, FnCachedShader},
     draw_vars::DrawVars,
-    geometry::Geometry,
     makepad_live_id::*,
     makepad_script::{apply::Apply, shader_backend::ShaderBackend, value::ScriptValue, ScriptVm},
     script::vm::ScriptVmCx,
@@ -18,15 +17,17 @@ impl DrawVars {
         let Some(io_self) = value.as_object() else { return };
         // the cache is keyed by heap as well as object: a splash isolate has its own heap
         let heap_key = vm.heap_key();
-        if let Some(&shader_id) = vm.host.cx().draw_shaders.cache_object_id_to_shader.get(&(heap_key, io_self)) {
-            self.finalize_cached_shader(vm, shader_id);
+        if let Some(&(shader_id, geometry_id)) = vm.host.cx().draw_shaders.cache_object_id_to_shader.get(&(heap_key, io_self)) {
+            self.finalize_cached_shader(vm, shader_id, geometry_id);
             return;
         }
+        // the object's own geometry: a shader of the same functions or code may draw another
+        let geometry_id = DrawVars::object_geometry(vm, io_self);
         let fnhash = crate::makepad_script::shader_compile::shader_functions_hash(vm.heap(), vm.bx.code_ref(), io_self);
         let pipe = DrawVars::pipeline_state_hash(vm.heap(), io_self);
         if let Some(shader_id) = vm.host.cx().draw_shaders.fn_cached(vm.bx.code_ref(), fnhash) {
-            vm.host.cx_mut().draw_shaders.cache_object_id_to_shader.insert((heap_key, io_self), shader_id);
-            self.finalize_cached_shader(vm, shader_id);
+            vm.host.cx_mut().draw_shaders.cache_object_id_to_shader.insert((heap_key, io_self), (shader_id, geometry_id));
+            self.finalize_cached_shader(vm, shader_id, geometry_id);
             return;
         }
 
@@ -57,7 +58,9 @@ impl DrawVars {
         );
         opts.gles_complete = gl;
         opts.pick = vm.host.cx().pick_variants();
-        let output = crate::makepad_script::shader_compile::compile_shader(vm, io_self, &opts);
+        // the GLSL is Vulkan's dedup key too, so a shader the check below finds needs no SPIR-V
+        opts.defer_spirv = vulkan;
+        let mut output = crate::makepad_script::shader_compile::compile_shader(vm, io_self, &opts);
         if output.has_errors() {
             DrawVars::log_shader_compile_failure(vm, io_self, &output);
             return;
@@ -69,20 +72,14 @@ impl DrawVars {
         if let Some(shader_id) = vm.host.cx().draw_shaders.code_hit(&code, pipe, output.table_consts()) {
             let entry = FnCachedShader { shader: shader_id, reached: Some(FnCachedShader::reached(vm, &output)) };
             let cx = vm.host.cx_mut();
-            cx.draw_shaders.cache_object_id_to_shader.insert((heap_key, io_self), shader_id);
+            cx.draw_shaders.cache_object_id_to_shader.insert((heap_key, io_self), (shader_id, geometry_id));
             cx.draw_shaders.cache_functions_to_shader.insert(fnhash, entry);
-            self.finalize_cached_shader(vm, shader_id);
+            self.finalize_cached_shader(vm, shader_id, geometry_id);
             return;
         }
 
-        // the geometry of the vertex buffer object, before the mapping is made
-        let geometry_id = output.find_vertex_buffer_object(vm, io_self).and_then(|vb_obj| {
-            let buffer_value = vm.value_trap(vb_obj, id!(buffer));
-            let handle = buffer_value.as_handle()?;
-            vm.heap().handle_ref::<Geometry>(handle).map(|g| g.geometry_id())
-        });
         let source = vm.new_object_ref(io_self);
-        let mut mapping = CxDrawShaderMapping::from_shader_output(source, code.clone(), vm, &output, geometry_id);
+        let mut mapping = CxDrawShaderMapping::from_shader_output(source, code.clone(), vm, &output);
         mapping.pick_code = output.pick_code().map(str::to_owned);
         mapping.storage_buffers = output.view().storage_buffers.to_vec();
         mapping.storage_push_size = output.view().storage_push_size;
@@ -122,9 +119,13 @@ impl DrawVars {
                     pick_binding: stage.info.pick_binding().unwrap_or(u32::MAX), pick_texture_base: stage.info.pick_texture_base().unwrap_or(u32::MAX),
                     textures, samplers }.encode())
             };
+            // the multiview stages only where XR passes render multiview: a headset of the HAL's own
+            // (a remote one renders its eyes side by side)
+            let flags = vm.host.cx().hal.info.map_or(0, |i| i.flags);
+            use makepad_hal::info_flags::{MULTIVIEW, XR, XR_OFFSCREEN};
+            let multiview = flags & MULTIVIEW != 0 && flags & XR != 0 && flags & XR_OFFSCREEN == 0;
+            output.build_spirv(vm, multiview);
             let Some(spirv) = output.spirv() else { return };
-            // the multiview stages where the HAL renders multiview passes
-            let multiview = vm.host.cx().hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::MULTIVIEW != 0);
             let normal = match payload(spirv, multiview) { Ok(bytes) => bytes, Err(e) => { crate::error!("Vulkan shader: {e}"); return; } };
             let pick = match output.view().pick_spirv {
                 Some(result) => match payload(result, false) { Ok(bytes) => Some(bytes), Err(e) => { crate::error!("Vulkan pick shader: {e}"); return; } },
@@ -179,7 +180,7 @@ impl DrawVars {
         let cx = vm.host.cx_mut();
         mapping.scope_uniforms_gen = cx.next_uniform_gen();
         cx.draw_shaders.shaders.push(CxDrawShader { debug_id: LiveId(0), pipeline_id: None, mapping });
-        cx.draw_shaders.cache_object_id_to_shader.insert((heap_key, io_self), shader_id);
+        cx.draw_shaders.cache_object_id_to_shader.insert((heap_key, io_self), (shader_id, geometry_id));
         cx.draw_shaders.cache_functions_to_shader.insert(fnhash, entry);
         cx.draw_shaders.cache_code_to_shader.insert((code, pipe), shader_id);
         // the frame builder creates the HAL pipeline at the next beat

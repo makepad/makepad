@@ -157,6 +157,11 @@ impl ScriptHook for DrawVars {
             } else if let Some(v) = backface_culling_value.as_f64() {
                 self.options.backface_culling = v != 0.0;
             }
+
+            // Anything but a positive, finite rate means every frame, and a NaN would never batch.
+            if let Some(v) = vm.value(io_self, id!(time_fps)).as_f64() {
+                self.options.time_fps = if v > 0.0 && v.is_finite() { v } else { 0.0 };
+            }
         }
         // lets fill our values
         if self.draw_shader_id.is_some() {
@@ -292,7 +297,7 @@ impl DrawVars {
         // (the same code is the same shader: only its values were taken; the shader on the draw
         // may be one its holder derived from the old default, a renderer lane's variant)
         let heap_key = vm.heap_key();
-        let was = vm.host.cx().draw_shaders.cache_object_id_to_shader.get(&(heap_key, old_obj)).copied().unwrap_or(old_id);
+        let was = vm.host.cx().draw_shaders.cache_object_id_to_shader.get(&(heap_key, old_obj)).map_or(old_id, |&(id, _)| id);
         if new_id != was {
             let name = vm.heap().object_type_name_in_chain(old_obj).map_or_else(|| "a draw object".to_string(), |n| format!("{n}"));
             crate::log!("live design: {name} (made from its default, kept outside the reloaded tree) draws the edited shader");
@@ -1365,12 +1370,14 @@ impl DrawVars {
             let heap_key = vm.heap_key();
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&(heap_key, io_self)) {
-                    self.finalize_cached_shader(vm, shader_id);
+                if let Some(&(shader_id, geometry_id)) = cx.draw_shaders.cache_object_id_to_shader.get(&(heap_key, io_self)) {
+                    self.finalize_cached_shader(vm, shader_id, geometry_id);
                     return;
                 }
             }
 
+            // the object's own geometry: a shader of the same functions or code may draw another
+            let geometry_id = Self::object_geometry(vm, io_self);
             let fnhash = crate::makepad_script::shader_compile::shader_functions_hash(vm.heap(), vm.bx.code_ref(), io_self);
             let pipe = DrawVars::pipeline_state_hash(vm.heap(), io_self);
             {
@@ -1379,8 +1386,8 @@ impl DrawVars {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
-                        .insert((heap_key, io_self), shader_id);
-                    self.finalize_cached_shader(vm, shader_id);
+                        .insert((heap_key, io_self), (shader_id, geometry_id));
+                    self.finalize_cached_shader(vm, shader_id, geometry_id);
                     return;
                 }
             }
@@ -1393,7 +1400,7 @@ impl DrawVars {
                 if let Some(entry) = lookup.entry() {
                     let desc = entry.to_desc(vm.heap(), io_self);
                     let code = CxDrawShaderCode::Separate { vertex: entry.vertex().to_owned(), fragment: entry.fragment().to_owned() };
-                    self.register_compiled_shader(vm, io_self, code, &desc, heap_key, (fnhash, None), pipe);
+                    self.register_compiled_shader(vm, io_self, code, &desc, (heap_key, geometry_id), (fnhash, None), pipe);
                     return;
                 }
                 Self::log_shader_pack_miss(vm, io_self, key);
@@ -1408,7 +1415,7 @@ impl DrawVars {
                 };
                 let desc = DrawShaderDesc::from_output(vm.heap(), &output);
                 let reached = crate::draw_shader::FnCachedShader::reached(vm, &output);
-                self.register_compiled_shader(vm, io_self, code, &desc, heap_key, (fnhash, Some(reached)), pipe);
+                self.register_compiled_shader(vm, io_self, code, &desc, (heap_key, geometry_id), (fnhash, Some(reached)), pipe);
             }
         }
     }
@@ -1483,7 +1490,7 @@ impl DrawVars {
         io_self: ScriptObject,
         code: CxDrawShaderCode,
         desc: &DrawShaderDesc,
-        heap_key: usize,
+        (heap_key, geometry_id): (usize, Option<GeometryId>),
         (fnhash, reached): (LiveId, Option<(Box<[crate::makepad_script::value::ScriptIp]>, u64)>),
         pipe: LiveId,
     ) {
@@ -1493,37 +1500,17 @@ impl DrawVars {
                 let cx = vm.host.cx_mut();
                 cx.draw_shaders
                     .cache_object_id_to_shader
-                    .insert((heap_key, io_self), shader_id);
+                    .insert((heap_key, io_self), (shader_id, geometry_id));
                 cx.draw_shaders
                     .cache_functions_to_shader
                     .insert(fnhash, crate::draw_shader::FnCachedShader { shader: shader_id, reached });
-                self.finalize_cached_shader(vm, shader_id);
+                self.finalize_cached_shader(vm, shader_id, geometry_id);
                 return;
             }
         }
 
-        let geometry_id = if let Some(vb_obj) = Self::find_vertex_buffer_object(vm.heap(), io_self) {
-            let buffer_value =
-                vm.value_trap(vb_obj, id!(buffer));
-            if let Some(handle) = buffer_value.as_handle() {
-                vm.heap()
-                    .handle_ref::<crate::geometry::Geometry>(handle)
-                    .map(|g: &crate::geometry::Geometry| g.geometry_id())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
         let source = vm.new_object_ref(io_self);
-        let mut mapping = CxDrawShaderMapping::from_desc(
-            source,
-            code.clone(),
-            vm,
-            desc,
-            geometry_id,
-        );
+        let mut mapping = CxDrawShaderMapping::from_desc(source, code.clone(), vm, desc);
         mapping.fill_scope_uniforms_buffer(vm.heap(), &vm.trap());
 
         if !self.bind_dyn_instances(vm, io_self, &mapping) {
@@ -1545,7 +1532,7 @@ impl DrawVars {
         let shader_id = DrawShaderId { index };
         cx.draw_shaders
             .cache_object_id_to_shader
-            .insert((heap_key, io_self), shader_id);
+            .insert((heap_key, io_self), (shader_id, geometry_id));
         cx.draw_shaders
             .cache_functions_to_shader
             .insert(fnhash, crate::draw_shader::FnCachedShader { shader: shader_id, reached });
@@ -1554,6 +1541,15 @@ impl DrawVars {
 
         self.draw_shader_id = Some(shader_id);
         self.geometry_id = geometry_id;
+    }
+
+    /// The geometry the vertex buffer of the shader object `io_self` names
+    /// (a heap walk, no compile): the object's own, which a cached shader of
+    /// the same functions or code, compiled for another object, does not know.
+    pub fn object_geometry(vm: &mut ScriptVm, io_self: ScriptObject) -> Option<GeometryId> {
+        let vb_obj = Self::find_vertex_buffer_object(vm.heap(), io_self)?;
+        let handle = vm.value_trap(vb_obj, id!(buffer)).as_handle()?;
+        vm.heap().handle_ref::<crate::geometry::Geometry>(handle).map(|g| g.geometry_id())
     }
 
     /// The vertex-buffer marker object on the shader object's prototype
@@ -1626,9 +1622,9 @@ impl DrawVars {
         }
     }
 
-    /// Helper to finalize shader setup after finding a cached shader ID.
-    /// Uses the geometry_id stored on the mapping instead of re-running pre_collect_shader_io.
-    pub fn finalize_cached_shader(&mut self, vm: &mut ScriptVm, shader_id: DrawShaderId) {
+    /// Bind a cached shader to this draw: its instance and uniform windows,
+    /// and `geometry_id`, the draw object's own (`Self::object_geometry`).
+    pub fn finalize_cached_shader(&mut self, vm: &mut ScriptVm, shader_id: DrawShaderId, geometry_id: Option<GeometryId>) {
         let cx = vm.host.cx();
         let mapping = &cx.draw_shaders.shaders[shader_id.index].mapping;
 
@@ -1641,8 +1637,7 @@ impl DrawVars {
         // Set draw_shader on self
         self.draw_shader_id = Some(shader_id);
 
-        // Use the geometry_id stored on the mapping
-        self.geometry_id = mapping.geometry_id;
+        self.geometry_id = geometry_id;
     }
 }
 
@@ -1664,7 +1659,6 @@ mod tests {
                 CxDrawShaderCode::Combined { code: String::new() },
                 vm,
                 &desc,
-                None,
             )
         });
         mapping.dyn_uniforms.push_placed(DrawShaderInput {
@@ -1767,7 +1761,7 @@ mod tests {
         // dyn instances first, then the struct's fields (`fields`: id and slots), and textures
         let mut mapping = |dyn_slots: usize, fields: &[(LiveId, usize)], textures: &[LiveId]| {
             let desc = crate::makepad_script::shader_reflection::DrawShaderDesc::default();
-            let mut m = cx.with_vm(|vm| CxDrawShaderMapping::from_desc(ScriptObjectRef::default(), CxDrawShaderCode::Combined { code: String::new() }, vm, &desc, None));
+            let mut m = cx.with_vm(|vm| CxDrawShaderMapping::from_desc(ScriptObjectRef::default(), CxDrawShaderCode::Combined { code: String::new() }, vm, &desc));
             if dyn_slots > 0 {
                 m.dyn_instances.push_placed(input(live_id!(color), 0, dyn_slots));
                 m.instances.push_placed(input(live_id!(color), 0, dyn_slots));

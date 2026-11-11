@@ -3,9 +3,10 @@
 //! JNI_OnLoad and calls [`on_load`], which does what the makepad run host does for a packed app:
 //! registers the shell's natives, sends stdout/stderr to logcat, and runs the app on its own
 //! thread once the Activity exists (the APK's assets come from it).
-use super::jni::with_activity;
+use super::jni::{end_process, with_activity, ACTIVITIES_DESTROYED, ACTIVITY_READY};
 use makepad_jni_sys::*;
 use std::ffi::{c_char, c_int, c_void, CString};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 #[link(name = "log")]
@@ -21,6 +22,7 @@ extern "C" {
     fn dup2(old: c_int, new: c_int) -> c_int;
     fn read(fd: c_int, buf: *mut c_void, n: usize) -> isize;
     fn close(fd: c_int) -> c_int;
+    fn fflush(stream: *mut c_void) -> c_int;
 }
 
 const TAG: &std::ffi::CStr = c"makepad";
@@ -82,7 +84,7 @@ unsafe fn set_assets(env: *mut JNIEnv, activity: jobject) -> Result<(), String> 
 }
 
 /// JNI_OnLoad of a standalone app: registers the natives and starts `app` once the Activity
-/// is created; `activity_ready` gets a global reference to it first (the app-side Android state).
+/// is created; `activity_ready` gets a global reference to each Activity (the app-side Android state).
 /// # Safety
 /// Called by ART with its JavaVM, once per process.
 pub unsafe fn on_load(vm: *mut c_void, app: fn(), activity_ready: unsafe fn(jobject)) -> jint {
@@ -111,30 +113,44 @@ pub unsafe fn on_load(vm: *mut c_void, app: fn(), activity_ready: unsafe fn(jobj
             return JNI_ERR;
         }
     }
-    let spawned = std::thread::Builder::new().name("makepad-app".into()).stack_size(16 << 20).spawn(move || {
-        // The Activity's onCreate registers it right after loading this library.
-        loop {
-            match with_activity(|env, activity| unsafe {
-                activity_ready(((**env).NewGlobalRef.unwrap())(env, activity));
-                set_assets(env, activity)
-            }) {
-                Some(Ok(())) => break,
-                Some(Err(error)) => {
-                    log(&format!("APK assets: {error}"));
-                    break;
+    let _ = ACTIVITY_READY.set(activity_ready);
+    // The app runs on a thread of its own, so its thread-locals are dropped before this thread
+    // ends the process.
+    let spawned = std::thread::Builder::new().name("makepad-host".into()).spawn(move || {
+        let destroyed = ACTIVITIES_DESTROYED.load(Ordering::Acquire);
+        let run = std::thread::Builder::new().name("makepad-app".into()).stack_size(16 << 20).spawn(move || {
+            // The Activity's onCreate registers it right after loading this library.
+            loop {
+                match with_activity(|env, activity| unsafe { set_assets(env, activity) }) {
+                    Some(Ok(())) => break,
+                    Some(Err(error)) => {
+                        log(&format!("APK assets: {error}"));
+                        break;
+                    }
+                    None => std::thread::sleep(Duration::from_millis(2)),
                 }
-                None => std::thread::sleep(Duration::from_millis(2)),
+            }
+            app();
+        });
+        match run.map(|thread| thread.join()) {
+            Ok(Ok(())) => {}
+            // the panic hook logged it
+            Ok(Err(_)) => return,
+            Err(error) => {
+                log(&format!("cannot start the app thread: {error}"));
+                return;
             }
         }
-        app();
-        // The app ended (its Activity finished: Back on the last screen). A later
-        // launch may reuse this process with a new Activity, and nothing would run
-        // it: end the process, so the next launch starts the app again.
+        // The app ended (Back finished its Activity, or it quit), so the process ends too. `_exit`
+        // skips the static destructors, which HWUI's threads may still be using.
         log("the app returned; ending the process");
-        std::process::exit(0);
+        crate::Hal::global().before_exit();
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        unsafe { fflush(std::ptr::null_mut()) };
+        end_process(destroyed)
     });
     if let Err(error) = spawned {
-        log(&format!("cannot start the app thread: {error}"));
+        log(&format!("cannot start the app's host thread: {error}"));
         return JNI_ERR;
     }
     JNI_VERSION_1_6

@@ -162,6 +162,19 @@ function upload_args(texture_id, width, height, ptr, len) {
   return { texture_id, width, height, data: { ptr, len } };
 }
 
+function rect_args(texture_id, image_width, image_height, x, y, width, height, ptr, len) {
+  return {
+    texture_id,
+    image_width,
+    image_height,
+    x,
+    y,
+    width,
+    height,
+    data: { ptr, len },
+  };
+}
+
 function render_target_args(texture_id, width, height, pass_id = 1) {
   return {
     pass_id,
@@ -297,6 +310,9 @@ test("bad dimensions and slices reject before typed scratch or any GL call", () 
     (s) => s.FromWasmAllocTextureImage2D_BGRAu8_32(upload_args(1, 1, 1, 4096, 1)),
     (s) => s.FromWasmAllocTextureImage2D_Ru8(upload_args(1, 1, 1, 0, 1)),
     (s) => s.FromWasmAllocTextureImage2D_Ru8(upload_args(1, 1, 1, 4, 1.5)),
+    (s) => s.FromWasmUpdateTextureRect_BGRAu8_32(rect_args(1, 0, 1, 0, 0, 1, 1, 4, 1)),
+    (s) => s.FromWasmUpdateTextureRect_BGRAu8_32(rect_args(1, 2, 2, 0, 0, 1, 1, 4, 3)),
+    (s) => s.FromWasmUpdateTextureRect_BGRAu8_32(rect_args(1, 1, 1, 0, 0, 1, 1, 4096, 1)),
   ];
   for (const run of cases) {
     const s = subject();
@@ -316,6 +332,7 @@ test("unsafe texture ids reject without indexing the shared texture table", () =
   for (const texture_id of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     const s = subject();
     s.FromWasmAllocTextureImage2D_Ru8(upload_args(texture_id, 1, 1, 4, 1));
+    s.FromWasmUpdateTextureRect_BGRAu8_32(rect_args(texture_id, 1, 1, 0, 0, 1, 1, 4, 1));
     assert.equal(s.textures.length, 0);
     assert.equal(s.gl.calls.create, 0);
     assert.equal(s.gl.calls.binds.length, 0);
@@ -411,6 +428,8 @@ test("same-size updates use sub-images without new allocation or device queries"
     ["FromWasmAllocTextureImage2D_Ru8", upload_args(2, 3, 1, 4, 3), 1],
     ["FromWasmAllocTextureImage2D_RGBAf32", upload_args(3, 1, 1, 4, 4), 1],
     ["FromWasmAllocTextureCube_BGRAu8_32", upload_args(4, 1, 1, 4, 6), 6],
+    // The first rect has no texture to go into, so the whole image allocates one.
+    ["FromWasmUpdateTextureRect_BGRAu8_32", rect_args(5, 1, 1, 0, 0, 1, 1, 4, 1), 1],
   ];
   for (const [method, args, upload_count] of variants) {
     const s = subject();
@@ -425,6 +444,114 @@ test("same-size updates use sub-images without new allocation or device queries"
     assert.equal(s.gl.calls.get_errors, 1);
     assert.equal(s.gl.calls.get_parameters, 0);
   }
+});
+
+test("BGRA rect updates swizzle only the rect into the texture's storage", () => {
+  const s = subject();
+  new Uint32Array(s.memory.buffer, 4, 6).set([
+    0x01020304, 0x11121314, 0x21222324,
+    0x31323334, 0x41424344, 0x51525354,
+  ]);
+  s.FromWasmAllocTextureImage2D_BGRAu8_32(upload_args(8, 3, 2, 4, 6));
+  const texture = s.textures[8];
+  s.FromWasmUpdateTextureRect_BGRAu8_32(rect_args(8, 3, 2, 1, 0, 2, 2, 4, 6));
+  assert.equal(s.textures[8], texture);
+  assert.equal(texture._render_target_valid, true);
+  assert.equal(s.gl.calls.create, 1);
+  assert.equal(s.gl.calls.images.length, 1);
+  assert.equal(s.gl.calls.sub_images.length, 1);
+  assert.deepEqual(s.gl.calls.binds.at(-1), [s.gl.TEXTURE_2D, texture]);
+  const update = s.gl.calls.sub_images[0];
+  assert.deepEqual(update.slice(0, 8), [
+    s.gl.TEXTURE_2D, 0, 1, 0, 2, 2, s.gl.RGBA, s.gl.UNSIGNED_BYTE,
+  ]);
+  assert.deepEqual([...update[8]], [
+    0x12, 0x13, 0x14, 0x11, 0x22, 0x23, 0x24, 0x21,
+    0x42, 0x43, 0x44, 0x41, 0x52, 0x53, 0x54, 0x51,
+  ]);
+
+  // A lost context drops it like every other GL command.
+  s.webgl_context_lost = true;
+  s.FromWasmUpdateTextureRect_BGRAu8_32(rect_args(8, 3, 2, 1, 0, 2, 2, 4, 6));
+  assert.equal(s.gl.calls.sub_images.length, 1);
+});
+
+test("BGRA rect updates send the whole image when the texture can't take just the rect", () => {
+  const fill = (s) => new Uint32Array(s.memory.buffer, 4, 6).fill(0xff102030);
+  const rect = rect_args(10, 3, 2, 1, 1, 1, 1, 4, 6);
+
+  // Nothing on the GPU yet.
+  const fresh = subject();
+  fill(fresh);
+  fresh.FromWasmUpdateTextureRect_BGRAu8_32(rect);
+  assert.equal(fresh.gl.calls.images.length, 1);
+  assert.deepEqual(fresh.gl.calls.images[0].slice(3, 5), [3, 2]);
+  assert.equal(fresh.gl.calls.sub_images.length, 0);
+  assert.equal(fresh.textures[10]._texture_upload_format, "bgra8");
+
+  // The image changed size since its last upload.
+  const resized = subject();
+  fill(resized);
+  resized.FromWasmAllocTextureImage2D_BGRAu8_32(upload_args(10, 3, 1, 4, 3));
+  resized.FromWasmUpdateTextureRect_BGRAu8_32(rect);
+  assert.equal(resized.gl.calls.images.length, 2);
+  assert.deepEqual(resized.gl.calls.images[1].slice(3, 5), [3, 2]);
+  assert.equal(resized.gl.calls.sub_images.length, 0);
+
+  // Its last upload was rejected, so what the texture holds is stale.
+  const poisoned = subject();
+  fill(poisoned);
+  poisoned.FromWasmAllocTextureImage2D_BGRAu8_32(upload_args(10, 3, 2, 4, 6));
+  poisoned.FromWasmAllocTextureImage2D_BGRAu8_32(upload_args(10, 3, 2, 4, 5));
+  assert.equal(poisoned.textures[10]._render_target_valid, false);
+  poisoned.FromWasmUpdateTextureRect_BGRAu8_32(rect);
+  assert.equal(poisoned.gl.calls.images.length, 2);
+  assert.equal(poisoned.gl.calls.sub_images.length, 0);
+  assert.equal(poisoned.textures[10]._render_target_valid, true);
+  assert.equal(poisoned._invalid_texture_upload_ids.has(10), false);
+
+  // A render pass drew into it.
+  const rendered = subject();
+  fill(rendered);
+  rendered.FromWasmAllocTextureImage2D_BGRAu8_32(upload_args(10, 3, 2, 4, 6));
+  rendered.FromWasmBeginRenderTexture(render_target_args(10, 3, 2));
+  assert.equal(rendered.gl.calls.images.length, 2);
+  rendered.FromWasmUpdateTextureRect_BGRAu8_32(rect);
+  assert.equal(rendered.gl.calls.images.length, 3);
+  assert.equal(rendered.gl.calls.sub_images.length, 0);
+  assert.equal(rendered.textures[10]._texture_upload_format, "bgra8");
+  assert.equal(rendered.textures[10]._width, undefined);
+
+  // The rect isn't a nonempty part of the image.
+  for (const [x, y, width, height] of [[2, 0, 2, 1], [0, 2, 1, 1], [0, 0, 0, 1], [-1, 0, 1, 1]]) {
+    const s = subject();
+    fill(s);
+    s.FromWasmAllocTextureImage2D_BGRAu8_32(upload_args(10, 3, 2, 4, 6));
+    s.FromWasmUpdateTextureRect_BGRAu8_32(rect_args(10, 3, 2, x, y, width, height, 4, 6));
+    assert.equal(s.gl.calls.images.length, 1);
+    assert.equal(s.gl.calls.sub_images.length, 1);
+    assert.deepEqual(s.gl.calls.sub_images[0].slice(2, 6), [0, 0, 3, 2]);
+  }
+});
+
+test("a rect upload that throws fails closed and the next rect sends the whole image", () => {
+  const s = subject();
+  new Uint32Array(s.memory.buffer, 4, 6).fill(0xff102030);
+  s.FromWasmAllocTextureImage2D_BGRAu8_32(upload_args(11, 3, 2, 4, 6));
+  const texture = s.textures[11];
+  s.gl.sub_image_throws = true;
+  assert.doesNotThrow(() => {
+    s.FromWasmUpdateTextureRect_BGRAu8_32(rect_args(11, 3, 2, 0, 0, 1, 1, 4, 6));
+  });
+  assert.equal(texture._render_target_valid, false);
+  assert.equal(s._invalid_texture_upload_ids.has(11), true);
+
+  s.gl.sub_image_throws = false;
+  s.FromWasmUpdateTextureRect_BGRAu8_32(rect_args(11, 3, 2, 0, 0, 1, 1, 4, 6));
+  assert.equal(s.textures[11], texture);
+  assert.equal(texture._render_target_valid, true);
+  assert.equal(s._invalid_texture_upload_ids.has(11), false);
+  assert.equal(s.gl.calls.images.length, 2);
 });
 
 test("2D/cube target switches replace transactionally and invalidate stale FBO identity", () => {

@@ -44,6 +44,10 @@ makepad-zune-png = { path = "../libs/zune/zune-png", version = "0.5.2" }
 # Camera frames that arrive as MJPEG.
 makepad-zune-jpeg = { path = "../libs/zune/zune-jpeg", version = "0.5.15" }
 makepad-tsdf = { path = "../libs/tsdf", version = "0.1.0" }
+# The eases behind `event::Ease`, shared with the Animator's `Ease`.
+makepad-tween = { path = "../libs/tween", version = "0.1.0" }
+# The web audio entry's output slot (the worklet thread never locks).
+makepad-lock-free = { path = "../libs/lock_free", version = "0.1.0" }
 smallvec = { version = "1.15", path = "../libs/smallvec" }
 bitflags = { version = "2.10", path = "../libs/bitflags" }
 # The collect-web run mode writes its manifest in this format; a web build

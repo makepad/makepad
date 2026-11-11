@@ -91,6 +91,10 @@ impl PipeState {
     pub fn failure(&self) -> Option<&str> {
         self.program.get().and_then(|r| r.as_ref().err()).map(|s| s.as_str())
     }
+    /// It failed for want of memory (an `E_OUTOFMEMORY` in its error), so it may build once there's room.
+    pub fn out_of_memory(&self) -> bool {
+        self.failure().is_some_and(|e| e.contains(&E_OUTOFMEMORY.to_string()))
+    }
 }
 
 /// D3D11's input-layout semantic suffix of geometry input `index`: `A`..`Z`, then `AA`, `AB`..

@@ -286,7 +286,7 @@ impl AlsaAudioAccess {
                             };
                             if n > 0 {
                                 planar.read(&pcm.samples[..n as usize * 2]);
-                                slot.call(id, pcm.rate, &mut planar);
+                                planar.call(&slot, id, pcm.rate);
                             } else if n == 0 || n == -11 {
                                 std::thread::sleep(std::time::Duration::from_millis(1));
                             } else if n < 0 {
@@ -295,7 +295,7 @@ impl AlsaAudioAccess {
                         } else {
                             planar.frames = pcm.frames;
                             planar.clear();
-                            slot.call(id, pcm.rate, &mut planar);
+                            planar.call(&slot, id, pcm.rate);
                             planar.write(&mut pcm.samples);
                             let mut offset = 0;
                             while offset < pcm.frames && !stopped.load(Ordering::Acquire) {

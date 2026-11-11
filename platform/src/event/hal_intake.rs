@@ -115,6 +115,17 @@ impl Cx {
                 _ => {}
             }
         }
+        // A pending IME hide needs to know when there's no draw coming to wait for.
+        #[cfg(target_os = "android")]
+        if let HalEvent::Lifecycle { kind } = event {
+            match kind {
+                makepad_hal::lifecycle::PAUSE => self.hal.activity_paused = true,
+                makepad_hal::lifecycle::RESUME => self.hal.activity_paused = false,
+                makepad_hal::lifecycle::SURFACE_LOST => self.hal.no_surface = true,
+                makepad_hal::lifecycle::SURFACE_AVAILABLE => self.hal.no_surface = false,
+                _ => {}
+            }
+        }
         match event {
             HalEvent::NativeLayerState { id, what, a, b, data } => self.hal_native_layer_state(id, what, a, b, data),
             HalEvent::GpuProfRecording { bytes } => match makepad_gpu_trace::Recording::decode(bytes) {
@@ -429,6 +440,9 @@ impl Cx {
                 self.call_event_handler(&Event::ImeAction(ImeActionEvent { action }));
             }
             HalEvent::ImeResize { window, height, open } => {
+                // Every closed report lets the next show go out, even one the checks below ignore.
+                #[cfg(target_os = "android")]
+                if !open { self.hal.ime_shown = None; }
                 let window_id = window_id(window);
                 if !self.windows.is_valid(window_id) {
                     return true;
@@ -543,6 +557,8 @@ impl Cx {
             }
             HalEvent::Geom { window, x, y, w, h, dpi, state } => self.hal_window_geom(window_id(window), dvec2(x, y), dvec2(w, h), dpi as f64, state),
             HalEvent::Display { window, dpi, refresh: _ } => {
+                #[cfg(target_os = "android")]
+                self.hal_update_android_os_type();
                 let window_id = window_id(window);
                 if self.windows.is_valid(window_id) {
                     let geom = self.windows[window_id].window_geom.clone();
@@ -714,6 +730,8 @@ impl Cx {
             // ---- app
             // (every backend paints its windows once after the app started)
             HalEvent::Startup {} => {
+                #[cfg(target_os = "android")]
+                self.hal_update_android_os_type();
                 if self.hal.hosted.is_some() {
                     Self::send_studio_message(crate::studio::AppToStudio::BeforeStartup);
                     self.set_physical_keyboard_state(true);
@@ -732,8 +750,17 @@ impl Cx {
                 }
             }
             HalEvent::Lifecycle { kind } => match kind {
-                makepad_hal::lifecycle::FOREGROUND => self.call_event_handler(&Event::Foreground),
-                makepad_hal::lifecycle::BACKGROUND => self.call_event_handler(&Event::Background),
+                makepad_hal::lifecycle::FOREGROUND => {
+                    self.hal.in_background = false;
+                    if !self.hal.font_events.is_empty() {
+                        self.redraw_all();
+                    }
+                    self.call_event_handler(&Event::Foreground);
+                }
+                makepad_hal::lifecycle::BACKGROUND => {
+                    self.hal.in_background = true;
+                    self.call_event_handler(&Event::Background);
+                }
                 makepad_hal::lifecycle::PAUSE => self.call_event_handler(&Event::Pause),
                 makepad_hal::lifecycle::RESUME => {
                     // Java may cover the surface across a pause, and only a present lifts that.
@@ -743,8 +770,12 @@ impl Cx {
                 }
                 // the window's focus has its own event; the surface is the backend's (it rebuilds
                 // the swapchain and reports the geometry), Cx only paints into the new one
-                makepad_hal::lifecycle::FOCUS_GAINED | makepad_hal::lifecycle::FOCUS_LOST | makepad_hal::lifecycle::SURFACE_LOST => {}
-                makepad_hal::lifecycle::SURFACE_AVAILABLE => self.hal_repaint_all(),
+                makepad_hal::lifecycle::FOCUS_GAINED | makepad_hal::lifecycle::FOCUS_LOST => {}
+                makepad_hal::lifecycle::SURFACE_LOST => self.hal.surface_lost = true,
+                makepad_hal::lifecycle::SURFACE_AVAILABLE => {
+                    self.hal.surface_lost = false;
+                    self.hal_repaint_all();
+                }
                 _ => {
                     self.request_quit(QuitReason::App);
                     if !self.hal_handle_platform_ops() {
@@ -865,8 +896,19 @@ impl Cx {
                 if self.windows.is_valid(window_id) {
                     self.hal.beat = true;
                     self.hal.ready_flip = Some(next_ns);
-                    if self.hal.xr.as_ref().is_some_and(|xr| xr.window == window_id) {
+                    if let Some(xr) = self.hal.xr.as_ref().filter(|xr| xr.window == window_id) {
                         self.hal.xr_beat = true;
+                        // the headset's frame comes right before this and is stamped on the same clock
+                        self.hal.frame_interval = next_ns.saturating_sub(xr.display_ns) as f64 / 1e9;
+                    } else {
+                        let flags = self.hal_info_flags();
+                        if flags & makepad_hal::info_flags::DISPLAY_CLOCK != 0 {
+                            self.hal.frame_tick = Some(time);
+                        }
+                        if next_ns > time_ns && flags & makepad_hal::info_flags::DIRECT_DISPLAY == 0 {
+                            // a direct display's `next_ns` is only its next vblank, so there we stay at 0 and wait for the due
+                            self.hal.frame_interval = (next_ns - time_ns) as f64 / 1e9;
+                        }
                     }
                     if let Some(w) = self.hal.windows.get_mut(&window_id.0) {
                         w.paced = true;
@@ -894,6 +936,7 @@ impl Cx {
                     if pass.painted_frame == frame {
                         pass.painted_serial = pass.painted_before;
                         pass.incomplete = true;
+                        pass.left_out = true;
                     }
                 }
             }
@@ -1228,7 +1271,7 @@ impl Cx {
                 }
             }
         }
-        self.fingers.process_touch_update_end(&e.touches);
+        self.end_touch_update(&e.touches);
     }
 
     /// Signals, actions, script tasks and network events the loop services on a wake and on

@@ -15,11 +15,15 @@ pub struct GpuInfo {
     /// that build the matching pipeline variant (Metal; Vulkan where the
     /// device blends RGBA16Float), reported through HAL format capabilities.
     pub float16_blend_targets: bool,
+    /// A pass may mix draws writing different subsets of its colour attachments.
+    pub mixed_output_passes: bool,
     /// Block-compressed texture formats the backend samples and uploads as
     /// [`crate::texture::TextureFormat::VecMipCompressed`]. Off unless the
     /// backend sets them after probing the device.
     pub texture_bc7: bool,
     pub texture_astc4x4: bool,
+    /// The longest side a texture may have, as the backend or WebGL reports it.
+    pub max_texture_size: usize,
     pub performance: GpuPerformance,
     pub vendor: String,
     pub renderer: String,
@@ -36,8 +40,12 @@ impl Default for GpuInfo {
             min_uniform_vectors: 1024,
             float_color_targets: true,
             float16_blend_targets: false,
+            // The web backend enables every attachment of a pass for every draw, so a pass
+            // there cannot yet mix draws with different outputs.
+            mixed_output_passes: cfg!(not(target_arch = "wasm32")),
             texture_bc7: false,
             texture_astc4x4: false,
+            max_texture_size: 8192,
             performance: GpuPerformance::Tier4,
             vendor: "unknown".to_string(),
             renderer: "unknown".to_string(),

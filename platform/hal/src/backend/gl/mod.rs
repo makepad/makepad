@@ -1,13 +1,15 @@
-//! The GLES 3 HAL backend (Linux machines without a usable Vulkan device, or
-//! MAKEPAD_HAL_BACKEND=gl). Same executor contract as Vulkan/Metal/D3D11: commands, generations,
-//! font jobs and lending use the shared executor; resources are keyed by (session, index) with
-//! generations; pipelines come as the GLSL dialect payload Cx's shader compiler emitted.
+//! The GLES 3 HAL backend (Linux machines without a usable Vulkan device, Android devices
+//! without Vulkan 1.1, or MAKEPAD_HAL_BACKEND=gl). Same executor contract as Vulkan/Metal/D3D11:
+//! commands, generations, font jobs and lending use the shared executor; resources are keyed by
+//! (session, index) with generations; pipelines come as the GLSL dialect payload Cx's shader
+//! compiler emitted.
 //!
-//! One GL context, owned by one render thread (render.rs), does all GL work; the hooks here run
-//! inside `hal_submit` and only validate, lay out and queue owned jobs. Windows of the X11 and
-//! Wayland shells present through EGL window surfaces; offscreen windows (hidden runs, tests) use
-//! the surfaceless platform. Images keep their top row first as on the other backends: every
-//! vertex shader of the dialect flips clip-space Y and the present blit flips it back.
+//! One GL context, owned by one render thread (render.rs), does all GL work but Android's compiles
+//! after the first frame (worker.rs); the hooks here run inside `hal_submit` and only validate, lay
+//! out and queue owned jobs. Windows of the X11 and Wayland shells and of Android's Activity present
+//! through EGL window surfaces; offscreen windows (hidden runs, tests) use the surfaceless platform.
+//! Images keep their top row first as on the other backends: every vertex shader of the dialect
+//! flips clip-space Y and the present blit flips it back.
 //!
 //! Every window frame renders into the window's retained image, which the surface shows a copy
 //! of. Under a badge layer of session 0's (`Gpu::badge_layer`: badges, panels and window layers
@@ -15,12 +17,16 @@
 //! composed image, draws the layer over it and presents that. The copies, as all GL work, are
 //! jobs of the render thread, queued ahead of the frame that reads them.
 
+mod cache;
 pub(crate) mod egl;
 mod frame;
 mod program;
 mod render;
 pub mod surface;
 mod sys;
+mod timer;
+#[cfg(target_os = "android")]
+mod worker;
 
 use super::exec::{self, Gpu, PipeStatus};
 use super::{Backend, Pixels};
@@ -109,8 +115,14 @@ pub(crate) struct Composed {
     _charge: Charge,
 }
 
+/// The window system the windows live in: an X11/Wayland shell, or Android's Activity.
+#[cfg(target_os = "linux")]
+type ShellRef = &'static super::linux::Shared;
+#[cfg(target_os = "android")]
+type ShellRef = Box<dyn super::Shell>;
+
 pub struct GlBackend {
-    shell: Option<&'static super::linux::Shared>,
+    shell: Option<ShellRef>,
     info: HalInfo,
     caps: Arc<Caps>,
     queue: Queue,
@@ -124,6 +136,9 @@ pub struct GlBackend {
     programs: HashMap<Vec<u8>, Weak<PipeState>>,
     /// windows' images, by (owner, index)
     win: HashMap<(u32, u32), Tex>,
+    /// the frame a window's kept image holds all of (and that image's key), so the window's next
+    /// pass can repaint just what changed since
+    damage_base: HashMap<(u32, u32), (u64, u64)>,
     aliases: HashMap<(u32, Id), Id>,
     /// the id target of each window's newest pick frame, and the targets missing a draw
     pick_ids: HashMap<(u32, Id), Id>,
@@ -134,11 +149,15 @@ pub struct GlBackend {
     /// the composed image the badge frame being encoded draws into
     compose: Option<Arc<TexObj>>,
     mailbox: Mailbox,
-    /// video, audio, MIDI, camera, dialogs (`backend/linux/media`)
+    /// video, audio, MIDI, camera, dialogs (`backend/linux/media`, `backend/android/media`)
+    #[cfg(target_os = "linux")]
     media: super::linux::media::Media,
+    #[cfg(target_os = "android")]
+    media: super::android::media::AndroidMedia,
 }
 
 impl GlBackend {
+    #[cfg(target_os = "linux")]
     pub fn new(flags: u32, wake: Arc<dyn Fn() + Send + Sync>, notify: Arc<dyn Fn() + Send + Sync>) -> Result<Self, String> {
         if flags & open_flags::OFFSCREEN_WINDOWS != 0 {
             return Self::with_source(wake, Box::new(surface::Offscreen), None);
@@ -149,6 +168,7 @@ impl GlBackend {
     }
 
     /// On a started X11/Wayland shell (the DRM/KMS direct shell presents through Vulkan only).
+    #[cfg(target_os = "linux")]
     pub fn on_shell(wake: Arc<dyn Fn() + Send + Sync>, shell: &'static super::linux::Shared) -> Result<Self, String> {
         let mut backend = Self::with_source(wake, Box::new(super::linux::EglSurfaceSource(shell)), Some(shell))?;
         backend.info.flags |= info_flags::DISPLAY_CLOCK;
@@ -158,19 +178,21 @@ impl GlBackend {
         Ok(backend)
     }
 
-    fn with_source(wake: Arc<dyn Fn() + Send + Sync>, source: Box<dyn surface::EglSurfaceSource>, shell: Option<&'static super::linux::Shared>) -> Result<Self, String> {
+    /// Windows of `shell` present through `source`; without a shell they're offscreen.
+    pub(crate) fn with_source(wake: Arc<dyn Fn() + Send + Sync>, source: Box<dyn surface::EglSurfaceSource>, shell: Option<ShellRef>) -> Result<Self, String> {
         let mailbox = Mailbox::new(wake);
         let pools = Arc::new(Pools::default());
         let (queue, caps, thread) = render::start(source, mailbox.clone(), pools.clone())?;
         // offscreen too: a badge layer is composed into the retained image's copy either way
         let mut info = HalInfo { backend: backend_id::GL, dialect: dialect::GLSL, formats: caps.formats, msaa: 1, dpi: 1.0,
-            flags: info_flags::WINDOW_BADGES | info_flags::WINDOW_LAYERS,
+            flags: info_flags::WINDOW_BADGES | info_flags::WINDOW_LAYERS | info_flags::PARTIAL_REPAINT
+                | if caps.gpu_timer { info_flags::GPU_TIMESTAMPS } else { 0 } | if caps.program_cache_cold { info_flags::PIPELINE_CACHE_COLD } else { 0 },
             max_texture: caps.max_texture, max_window: [caps.max_texture; 2],
             device_kind: if caps.software { device_kind::SOFTWARE } else { device_kind::UNKNOWN }, ..Default::default() };
         info.set_device_name(&caps.renderer);
         if super::log_enabled() { eprintln!("[hal-gl] {} offscreen={} software={}", caps.renderer, shell.is_none(), caps.software); }
         Ok(Self { shell, info, caps, queue, thread: Some(thread), next_key: 1, pools,
-            tex: HashMap::new(), buf: HashMap::new(), pipe: HashMap::new(), programs: HashMap::new(), win: HashMap::new(),
+            tex: HashMap::new(), buf: HashMap::new(), pipe: HashMap::new(), programs: HashMap::new(), win: HashMap::new(), damage_base: HashMap::new(),
             aliases: HashMap::new(), pick_ids: HashMap::new(), pick_pending: HashSet::new(), badged: HashMap::new(), compose: None,
             mailbox, media: Default::default() })
     }
@@ -178,6 +200,22 @@ impl GlBackend {
     /// A software rasterizer (llvmpipe): the default selection prefers hardware Vulkan and GL.
     pub fn software(&self) -> bool {
         self.caps.software
+    }
+
+    /// What Android's `surfaceDestroyed` calls: the render thread lets go of every window
+    /// surface before it returns, as Android asks, or after a second at most.
+    #[cfg(target_os = "android")]
+    pub fn window_release(&self) -> Box<dyn Fn() + Send + Sync> {
+        let queue = self.queue.clone();
+        Box::new(move || {
+            let (done, released) = std::sync::mpsc::sync_channel(1);
+            queue.push_urgent(move |r| { r.ctx.close_all(); let _ = done.send(()); });
+            // before the first frame there's no surface to let go of, while the render thread may be compiling
+            if queue.surfaces.load(Ordering::SeqCst) == 0 { return; }
+            if released.recv_timeout(std::time::Duration::from_secs(1)).is_err() {
+                eprintln!("[hal-gl] the render thread didn't let go of the window within a second");
+            }
+        })
     }
 
     fn token(s: &Session) -> Token {
@@ -225,13 +263,26 @@ impl GlBackend {
             let sid = done.token.sid;
             if !world.session(sid).is_some_and(|s| Arc::ptr_eq(&s.font_frames, &done.token.incarnation)) { continue; }
             match done.event {
-                Event::Frame { target, kind, frame, window } => {
-                    if let Some(s) = world.session_mut(sid) { s.stats.frames += 1; }
-                    if window {
-                        world.window_presented(sid, target, frame, 0, done.time);
-                        if let Some(shell) = self.shell { shell.presented(self.window_key(sid, target)); }
+                Event::Frame { target, kind, frame, window, gpu_ns, ran } => {
+                    // a frame the GPU never ran isn't in the window's image, nor is any frame built on it
+                    if !ran && super::window_frame(kind) {
+                        let (key_sid, key) = self.window_key(sid, target);
+                        if self.damage_base.get(&(key_sid, key.index)).is_some_and(|(_, base)| *base >= frame) {
+                            self.damage_base.remove(&(key_sid, key.index));
+                        }
                     }
-                    world.frame_done(sid, target, kind, frame, 0, done.time, [0.0; 2]);
+                    if let Some(s) = world.session_mut(sid) {
+                        s.stats.frames += 1;
+                        if gpu_ns > 0 { s.stats.gpu_frames += 1; s.stats.gpu_ns_total += gpu_ns; s.stats.gpu_ns_max = s.stats.gpu_ns_max.max(gpu_ns); }
+                    }
+                    if window {
+                        world.window_presented(sid, target, frame, gpu_ns, done.time);
+                        #[cfg(target_os = "linux")]
+                        if let Some(shell) = self.shell { shell.presented(self.window_key(sid, target)); }
+                        #[cfg(target_os = "android")]
+                        super::android::jni::surface_presented();
+                    }
+                    world.frame_done(sid, target, kind, frame, gpu_ns, done.time, [0.0; 2]);
                 }
                 Event::BufferLeases { req, status, leases } => world.to_session(sid, |q| q.buffer_leases(req, status, leases)),
                 Event::Readback { req, status, rect, pixels } => world.to_session(sid, |q| q.readback(req, status, rect, &pixels)),
@@ -333,6 +384,7 @@ impl Backend for GlBackend {
     }
     fn step(&mut self, world: &mut World, sid: u32) {
         self.drain(world);
+        #[cfg(target_os = "linux")]
         if let Some(shell) = self.shell {
             for (owner, id) in shell.drain_events(sid, world) {
                 // a parent close also closes native popups, and an X server can destroy a window
@@ -350,7 +402,10 @@ impl Backend for GlBackend {
         }
         if let Some(s) = world.session_mut(sid) {
             let mut media = std::mem::take(&mut self.media);
+            #[cfg(target_os = "linux")]
             media.step(self, s);
+            #[cfg(target_os = "android")]
+            media.drain(self, s);
             self.media = media;
         }
         exec::step_timers(world, sid);
@@ -359,6 +414,7 @@ impl Backend for GlBackend {
         exec::next_timer(world, sid).into_iter().chain(self.media.next_due(sid, world.now())).min()
     }
     /// The app may make GL contexts of the HAL's share group (GL interop): it hears how.
+    #[cfg(target_os = "linux")]
     fn session_opened(&mut self, world: &mut World, sid: u32) {
         let [display, config, context] = self.caps.share;
         world.to_session(sid, |q| q.gl_share(display, config, context));
@@ -370,12 +426,14 @@ impl Backend for GlBackend {
         self.buf.retain(|k, _| k.0 != sid);
         self.pipe.retain(|k, _| k.0 != sid);
         self.win.retain(|k, _| k.0 != sid);
+        self.damage_base.retain(|k, _| k.0 != sid);
         self.aliases.retain(|k, _| k.0 != sid);
         self.pick_ids.retain(|k, _| k.0 != sid);
         self.pick_pending.retain(|k| k.0 != sid);
         if sid == HOST { self.badged.clear(); }
         self.programs.retain(|_, state| state.strong_count() > 0);
         exec::free_session(world, sid);
+        #[cfg(target_os = "linux")]
         if let Some(shell) = self.shell { shell.session_closed(sid); }
     }
     fn window_pixels(&mut self, world: &mut World, sid: u32, window: Option<Id>) -> Option<Pixels> {
@@ -400,15 +458,24 @@ impl Drop for GlBackend {
 }
 
 impl Gpu for GlBackend {
+    #[cfg(target_os = "android")]
+    fn a11y_notify(&mut self, window: u64, notifications: &[makepad_a11y::Notification]) {
+        super::android::a11y::notify(window, notifications);
+    }
     fn media(&mut self, s: &mut Session, c: &crate::cmds::HalCmd) -> bool {
         let mut media = std::mem::take(&mut self.media);
         let handled = media.command(self, s, c);
         self.media = media;
         handled
     }
+    #[cfg(target_os = "android")]
+    fn auto_adopt(&self) -> bool { self.shell.as_ref().is_some_and(|s| s.auto_adopt()) }
     fn os(&mut self, sid: u32, command: exec::OsCmd) -> bool {
         if matches!(&command, exec::OsCmd::FileDialog { .. }) { return self.media.dialog(sid, command); }
-        if let Some(shell) = self.shell { shell.command(sid, command); true } else { false }
+        #[cfg(target_os = "linux")]
+        { if let Some(shell) = self.shell { shell.command(sid, command); return true; } false }
+        #[cfg(target_os = "android")]
+        { self.shell.as_mut().is_some_and(|s| s.command(sid, command)) }
     }
     fn texture_create(&mut self, s: &mut Session, id: Id, t: &mut TextureObj) -> Result<(), String> {
         let obj = self.new_texture(t.clone()).map_err(|e| { eprintln!("[hal-gl] texture create: {e}"); e })?;
@@ -525,6 +592,11 @@ impl Gpu for GlBackend {
         false
     }
     fn frame(&mut self, s: &mut Session, sid: u32, target: Id, kind: u32, packet: u32, view: &CmdView, now: u64) -> Option<exec::SubmittedFrame> {
+        // a native camera preview follows where the window frame places it
+        #[cfg(target_os = "android")]
+        if kind & !target::FLAGS == target::WINDOW && kind & (target::PICK | target::BADGES | target::REPLAY) == 0 {
+            self.media.native_frame(s, target, packet, view);
+        }
         self.encode_frame(s, sid, target, kind, packet, view, now)
     }
     fn pick(&mut self, s: &mut Session, window: Id, req: u32, pos: [f32; 2]) {
@@ -555,16 +627,24 @@ impl Gpu for GlBackend {
     fn window_closed(&mut self, sid: u32, id: Id) {
         self.win.remove(&(sid, id.index));
         if sid == HOST { self.badged.remove(&id.index); }
+        self.damage_base.remove(&(sid, id.index));
         self.pick_ids.remove(&(sid, id));
         self.queue.push(move |r| r.ctx.close((sid, id)));
     }
     fn badges(&self) -> bool { true }
     fn badge_layer(&mut self, window: Id, on: bool) {
         if on { self.badged.entry(window.index).or_insert(None); } else { self.badged.remove(&window.index); }
+        // The surface showed the composed image under a layer and the window's own image without
+        // one, so after a switch the window's next frame is repainted and presented whole: its
+        // damage is measured against its own image, not against what the surface holds.
+        self.damage_base.remove(&(HOST, window.index));
     }
     fn layer_copy(&mut self, s: &mut Session, window: Id, layer: Id, _now: u64) -> bool { self.copy_into_layer(s, window, layer) }
     fn window_lent(&mut self, sid: u32, id: Id, host: Id, attach: bool) {
+        #[cfg(target_os = "linux")]
         if let Some(shell) = self.shell { shell.lend(host, if attach { sid } else { HOST }, if attach { id } else { host }); }
+        #[cfg(target_os = "android")]
+        if let Some(shell) = &mut self.shell { shell.lent(sid, id, host, attach); }
         if attach {
             self.aliases.insert((sid, id), host);
         } else {
@@ -576,6 +656,7 @@ impl Gpu for GlBackend {
 
 /// Decoded video planes reach GL as uploads into ordinary 2D textures; DMA-BUF planes are
 /// imported by the Vulkan backend only, so the media service falls back to system memory.
+#[cfg(target_os = "linux")]
 impl super::linux::media::Sink for GlBackend {
     fn declare(&mut self, s: &mut Session, id: Id, fmt: u32) {
         if s.textures.get(s.id, id).is_ok() { return; }
@@ -627,6 +708,7 @@ impl super::linux::media::Sink for GlBackend {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn video_row(s: &mut Session, id: Id, desc: &TextureObj) {
     if let Some(row) = s.ledger.get_mut(Kind::Texture, id.index).filter(|r| r.gen == id.gen) {
         row.bytes = desc.bytes;

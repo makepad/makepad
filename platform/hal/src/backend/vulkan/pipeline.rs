@@ -16,7 +16,8 @@ pub(super) const VIDEO_SHAPE: u32 = 6;
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub(super) struct PassKey { pub colors: [u32; 4], pub depth: u32, pub load: [u8; 5], /** 1, or 2: a multiview pass */ pub views: u8, /** a fragment density map attachment after the others */ pub fdm: bool,
-    /** samples per pixel: 1, or an MSAA pass (`Pass::samples`) rendering into multisampled attachments resolved into the pass's own at its end */ pub samples: u8 }
+    /** samples per pixel: 1, or an MSAA pass (`Pass::samples`) rendering into multisampled attachments resolved into the pass's own at its end */ pub samples: u8,
+    /** the depth is stored at the pass's end (`exec::depth_kept`), else nothing reads it and it stays in tile memory */ pub depth_kept: bool }
 
 pub(super) struct RenderPass { pub dev: Arc<Device>, pub raw: vk::RenderPass, pub key: PassKey }
 
@@ -45,9 +46,10 @@ impl RenderPass {
         }
         let depth = vk::AttachmentReference::default().attachment(attachments.len() as u32).layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
         if key.depth != ABSENT {
+            let store = if key.depth_kept { vk::AttachmentStoreOp::STORE } else { vk::AttachmentStoreOp::DONT_CARE };
             attachments.push(vk::AttachmentDescription::default().format(vk_format(key.depth).ok_or("unknown depth format")?)
-                .samples(vk::SampleCountFlags::TYPE_1).load_op(load(4)).store_op(vk::AttachmentStoreOp::STORE)
-                .stencil_load_op(load(4)).stencil_store_op(vk::AttachmentStoreOp::STORE)
+                .samples(vk::SampleCountFlags::TYPE_1).load_op(load(4)).store_op(store)
+                .stencil_load_op(load(4)).stencil_store_op(store)
                 .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL).final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL));
         }
         let mut subpass = vk::SubpassDescription::default().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&colors);
@@ -378,7 +380,7 @@ impl State {
         if program.desc.blend & pipeline_blend::RAW != 0 { return; }
         let mut colors = [ABSENT; 4];
         for i in 0..4 { if program.desc.outputs & (1 << i) != 0 { colors[i] = program.desc.color_formats[i]; } }
-        let key = PassKey { colors, depth: format::DEPTH32F, load: [pass_load::DONT_CARE; 5], views: 1, fdm: false, samples: 1 };
+        let key = PassKey { colors, depth: format::DEPTH32F, load: [pass_load::DONT_CARE; 5], views: 1, fdm: false, samples: 1, depth_kept: true };
         // a data target (R32F depth/shadow values, ids) is drawn without blending
         let blends = matches!(colors[0], format::BGRA8 | format::RGBA8 | format::RGBA16F);
         let flags = Draw::DEPTH_WRITE | if blends { Draw::BLEND } else { 0 };

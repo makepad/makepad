@@ -89,9 +89,13 @@ impl CxMediaApi for Cx {
     }
 
     fn audio_output_box_os(&mut self, index: usize, f: AudioOutputFn) {
+        if index != 0 {
+            crate::log!("web audio plays one output: the render function of output {index} is not used");
+            return;
+        }
         let web_audio = self.os.web_audio();
-        let output_cb = web_audio.lock().unwrap_or_else(|e| e.into_inner()).audio_output_cb[index].clone();
-        *output_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+        let output = web_audio.lock().unwrap_or_else(|e| e.into_inner()).output.clone();
+        output.set_render(Some(f));
     }
 
     fn audio_input_box(&mut self, index: usize, f: AudioInputFn) {

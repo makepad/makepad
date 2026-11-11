@@ -1,8 +1,8 @@
 //! The two atlases the font service owns, on the CPU: the glyph image atlas (BGRA8, four
 //! distance-field planes that colour and multi-channel glyphs share) and the slug curve store
 //! (RGBA32F texels, two per curve). Both are bounded by their texture and give slots back under
-//! pressure, least recently used first; a slot's id is never reused, so an event that names a
-//! slot can never mean another glyph.
+//! pressure, least recently used first (the image atlas can move to a taller texture first); a
+//! slot's id is never reused, so an event that names a slot can never mean another glyph.
 
 use super::pool::Known;
 use super::RetireFence;
@@ -11,7 +11,9 @@ use makepad_font_core::{
     geom::{Point, Rect, Size},
     image::{Bgra, Image},
     raster::{AtlasPlane, AtlasSlot, MultiPlaneAllocator, UNRESOLVED_RASTER_RECT},
+    slug::SlugCurves,
 };
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -145,6 +147,18 @@ impl RasterAtlas {
         true
     }
 
+    /// The first `rows` rows as the texture holds them. They're one run of pixels, and on a
+    /// little-endian target each pixel's bytes are already its BGRA8 bytes, so nothing is copied.
+    pub fn rows_bytes(&self, rows: usize) -> Cow<'_, [u8]> {
+        let pixels = &self.image.as_pixels()[..self.size.width * rows];
+        if cfg!(target_endian = "little") {
+            // SAFETY: `Bgra` is a transparent `u32`, so the slice is `len * 4` initialised bytes
+            Cow::Borrowed(unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) })
+        } else {
+            Cow::Owned(pixels.iter().flat_map(|p| p.bits.to_le_bytes()).collect())
+        }
+    }
+
     /// The rectangle's pixels as the texture holds them (BGRA8 rows).
     pub fn rect_bytes(&self, rect: Rect<usize>) -> Vec<u8> {
         let mut out = Vec::with_capacity(rect.size.width * rect.size.height * 4);
@@ -156,27 +170,25 @@ impl RasterAtlas {
         out
     }
 
-    /// Retires least recently used slots totalling `fraction` of the atlas (slots no session
-    /// holds go first). Their storage is free only after `fence` completes.
-    pub(super) fn evict(&mut self, fraction: f32, fence: Arc<RetireFence>) -> Vec<(u32, SlotRec)> {
-        if self.slots.is_empty() {
+    /// Retires least recently used slots totalling `bytes`: slots no session holds go first, then
+    /// held ones last used before `below` (0: none). Their storage is free only after `fence` completes.
+    pub(super) fn evict(&mut self, bytes: usize, below: u64, fence: Arc<RetireFence>) -> Vec<(u32, SlotRec)> {
+        let mut order: Vec<(bool, u64, u32)> = self.slots.iter().map(|(id, r)| (!r.sessions.is_empty(), r.last_use, *id)).filter(|(held, last_use, _)| !held || *last_use < below).collect();
+        if order.is_empty() {
             return Vec::new();
         }
-        let mut order: Vec<(bool, u64, u32)> = self.slots.iter().map(|(id, r)| (!r.sessions.is_empty(), r.last_use, *id)).collect();
         order.sort();
-        let total = (self.size.width * self.size.height * 4) as f64;
-        let target = total * fraction as f64;
-        let mut freed = 0.0;
+        let mut freed = 0;
         let mut taken = Vec::new();
         for (_, _, id) in order {
             let rec = self.slots.remove(&id).expect("listed slot");
-            freed += (rec.key.size.width * rec.key.size.height * if rec.shared { 4 } else { 1 }) as f64;
+            freed += rec.key.size.width * rec.key.size.height * if rec.shared { 4 } else { 1 };
             self.by_key.remove(&rec.key);
             if !fence.complete() {
                 self.retired.push((rec.slot, rec.shared, fence.clone()));
             }
             taken.push((id, rec));
-            if freed >= target {
+            if freed >= bytes {
                 break;
             }
         }
@@ -186,6 +198,37 @@ impl RasterAtlas {
                 known.raster.remove(&rec.key);
             }
         }
+        self.rebuild();
+        taken
+    }
+
+    /// Whether a session still holds a slot that reaches past the first `rows` rows.
+    pub fn holds_past(&self, rows: usize) -> bool {
+        self.slots.values().any(|r| !r.sessions.is_empty() && r.slot.rect.max().y > rows)
+    }
+
+    /// Moves the atlas to texture `tex`, `height` rows tall. The slots in its first `keep` rows
+    /// stay where they are, so what was drawn from them stays right; the rest are returned.
+    pub(super) fn resize(&mut self, tex: Id, height: usize, keep: usize) -> Vec<(u32, SlotRec)> {
+        let gone: Vec<u32> = self.slots.iter().filter(|(_, r)| r.slot.rect.max().y > keep).map(|(id, _)| *id).collect();
+        let mut taken = Vec::with_capacity(gone.len());
+        {
+            let mut known = known_write(&self.known);
+            for id in gone {
+                let rec = self.slots.remove(&id).expect("listed slot");
+                self.by_key.remove(&rec.key);
+                known.raster.remove(&rec.key);
+                taken.push((id, rec));
+            }
+        }
+        self.retired.retain(|(slot, _, _)| slot.rect.max().y <= keep);
+        let size = Size::new(self.size.width, height);
+        let mut image = Image::new_zeroed(size);
+        let kept = size.width * keep.min(height).min(self.size.height);
+        image.as_mut_pixels()[..kept].copy_from_slice(&self.image.as_pixels()[..kept]);
+        self.image = image;
+        self.size = size;
+        self.tex = tex;
         self.rebuild();
         taken
     }
@@ -241,6 +284,11 @@ pub struct SlugRec {
     /// first curve, and how many
     pub offset: u32,
     pub count: u32,
+    /// the room it takes, in curves (its bands follow its curves)
+    pub run: u32,
+    /// where its band block starts (texels from its first curve) and its bands per axis
+    pub band_offset: u32,
+    pub band_count: u32,
     pub origin: Point<f32>,
     pub size: Size<f32>,
     pub last_use: u64,
@@ -278,9 +326,9 @@ impl SlugStore {
         self.glyphs.len()
     }
 
-    /// Curves of the glyphs held (retired and free runs not counted).
+    /// Room the glyphs held take, in curves (retired and free runs not counted).
     pub fn curves_held(&self) -> u64 {
-        self.glyphs.values().map(|r| r.count as u64).sum()
+        self.glyphs.values().map(|r| r.run as u64).sum()
     }
 
     pub fn capacity_curves(&self) -> u32 {
@@ -300,15 +348,24 @@ impl SlugStore {
         self.glyphs.get_mut(&key)
     }
 
-    fn take_run(&mut self, count: u32) -> Option<u32> {
-        let i = self.free.iter().position(|(_, len)| *len >= count)?;
-        let (start, len) = self.free[i];
-        if len == count {
-            self.free.remove(i);
-        } else {
-            self.free[i] = (start + count, len - count);
+    /// Where a run of `count` curves can start in the free run (start, len); one in a row
+    /// (a glyph with bands) can't cross into the next row.
+    fn fit(&self, (start, len): (u32, u32), count: u32, in_row: bool) -> Option<u32> {
+        let row = (self.width / CURVE_TEXELS) as u32;
+        let at = if in_row && start % row + count > row { start.next_multiple_of(row) } else { start };
+        (at + count <= start + len).then_some(at)
+    }
+
+    fn take_run(&mut self, count: u32, in_row: bool) -> Option<u32> {
+        let (i, at) = self.free.iter().enumerate().find_map(|(i, run)| Some((i, self.fit(*run, count, in_row)?)))?;
+        let (start, len) = self.free.remove(i);
+        let tail = (at + count, start + len - at - count);
+        for (piece_start, piece_len) in [(start, at - start), tail].into_iter().rev() {
+            if piece_len > 0 {
+                self.free.insert(i, (piece_start, piece_len));
+            }
         }
-        Some(start)
+        Some(at)
     }
 
     fn give_run(free: &mut Vec<(u32, u32)>, start: u32, len: u32) {
@@ -325,15 +382,27 @@ impl SlugStore {
     }
 
     /// Stores a glyph's curves; `None` when no run of that length is free.
-    #[allow(clippy::too_many_arguments)]
-    pub fn alloc(&mut self, slot: u32, font: u32, glyph: u16, curves: &[f32], origin: Point<f32>, size: Size<f32>, tick: u64) -> Option<u32> {
-        let count = (curves.len() / CURVE_FLOATS) as u32;
-        let offset = self.take_run(count)?;
+    pub fn alloc(&mut self, slot: u32, font: u32, glyph: u16, curves: &SlugCurves, tick: u64) -> Option<u32> {
+        let run = (curves.data.len() / CURVE_FLOATS) as u32;
+        let offset = self.take_run(run, curves.band_count > 0)?;
         let at = offset as usize * CURVE_FLOATS;
-        self.data[at..at + curves.len()].copy_from_slice(curves);
+        self.data[at..at + curves.data.len()].copy_from_slice(&curves.data);
         self.by_slot.insert(slot, (font, glyph));
         known_write(&self.known).slug.insert((font, glyph));
-        self.glyphs.insert((font, glyph), SlugRec { slot, font, glyph, offset, count, origin, size, last_use: tick, sessions: Vec::new() });
+        self.glyphs.insert((font, glyph), SlugRec {
+            slot,
+            font,
+            glyph,
+            offset,
+            count: curves.curve_count as u32,
+            run,
+            band_offset: curves.band_offset as u32,
+            band_count: curves.band_count as u32,
+            origin: curves.origin_in_ems,
+            size: curves.size_in_ems,
+            last_use: tick,
+            sessions: Vec::new(),
+        });
         Some(slot)
     }
 
@@ -354,24 +423,24 @@ impl SlugStore {
     }
 
     /// Retires least recently used glyphs (those no session holds first) until a run of `need`
-    /// curves will be free after `fence` completes.
-    pub(super) fn evict_for(&mut self, need: u32, fence: Arc<RetireFence>) -> Vec<SlugRec> {
+    /// curves (in one row when `in_row`) will be free after `fence` completes.
+    pub(super) fn evict_for(&mut self, need: u32, in_row: bool, fence: Arc<RetireFence>) -> Vec<SlugRec> {
         let mut order: Vec<(bool, u64, (u32, u16))> = self.glyphs.iter().map(|(k, r)| (!r.sessions.is_empty(), r.last_use, *k)).collect();
         order.sort();
         let mut taken = Vec::new();
         // Choose enough victims for a contiguous run without making that run reusable yet.
         let mut available = self.free.clone();
         for (_, _, key) in order {
-            if available.iter().any(|(_, len)| *len >= need) {
+            if available.iter().any(|run| self.fit(*run, need, in_row).is_some()) {
                 break;
             }
             let rec = self.glyphs.remove(&key).expect("listed glyph");
             self.by_slot.remove(&rec.slot);
-            Self::give_run(&mut available, rec.offset, rec.count);
+            Self::give_run(&mut available, rec.offset, rec.run);
             if fence.complete() {
-                Self::give_run(&mut self.free, rec.offset, rec.count);
+                Self::give_run(&mut self.free, rec.offset, rec.run);
             } else {
-                self.retired.push((rec.offset, rec.count, fence.clone()));
+                self.retired.push((rec.offset, rec.run, fence.clone()));
             }
             taken.push(rec);
         }

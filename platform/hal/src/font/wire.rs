@@ -31,6 +31,9 @@ pub mod glyph {
     pub const SLUG: u32 = 3;
     /// the glyph has nothing to draw (a space), or cannot be rasterised
     pub const EMPTY: u32 = 4;
+    /// The glyphs on screen fill the atlas, so this one has no room for now: it's drawn as nothing,
+    /// and asked for again once there may be room (after an eviction, a release or a new atlas size).
+    pub const NO_ROOM: u32 = 5;
 }
 
 /// `FontOpened::status`.
@@ -53,8 +56,9 @@ pub mod source {
 /// A rasterised glyph as the HAL tells an app. `glyph`, `dpxs_bits` and `kind` repeat the
 /// request. A raster entry names a rectangle of the atlas (`rect` = x, y, w, h in pixels, the
 /// plane its distance field is in) and the metrics Cx draws with; a slug entry names the curves
-/// (`rect[0]` = first curve, `rect[1]` = curve count) and the glyph's box in ems (`origin`,
-/// `scale` = width, `size_h` = height). `slot` / `slot_gen` name the atlas slot: an eviction
+/// (`rect[0]` = first curve, `rect[1]` = curve count, `rect[2]` = where its band block starts in
+/// texels from that curve, `rect[3]` = bands per axis, 0 for none) and the glyph's box in ems
+/// (`origin`, `scale` = width, `size_h` = height). `slot` / `slot_gen` name the atlas slot: an eviction
 /// lists slots. `replaces` != 0: this entry upgrades slot `replaces` (a multi-channel field
 /// replacing a plain one); the app rewrites every entry it holds for that slot.
 #[derive(Clone, Copy, Debug, PartialEq)]

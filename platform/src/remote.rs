@@ -189,7 +189,10 @@ mod imp {
             "step" => route_step(p),
             "settled" => reply_to_answer(ask(Cmd::Settled, 4)),
             // counts so far: a read waits for the UI thread through a stall and misses nothing
-            "uicounts" => reply_to_answer(ask(Cmd::UiCounts, ACTIVITY_WAIT_SECS)),
+            "uicounts" => {
+                let waited = p.flag(&["waited"]);
+                reply_to_answer(ask(move |tx| Cmd::UiCounts(waited, tx), ACTIVITY_WAIT_SECS))
+            }
             "cap pause" => reply_to_answer(ask(|tx| Cmd::CapPause(true, tx), 4)),
             "cap resume" => reply_to_answer(ask(|tx| Cmd::CapPause(false, tx), 4)),
             "front" => reply_to_answer(ask(Cmd::Front, 4)),
@@ -527,7 +530,8 @@ mod imp {
     /// Opens the process's makepad-remote endpoint (the one place it is opened, from `Cx::new`,
     /// so every process with a `Cx` gets it): a same-user Unix socket, nothing on the network,
     /// in every app unless `MAKEPAD_REMOTE=0`, so a local agent reaches the apps the person
-    /// started. The `cmd` service answers the remote commands and the GPU ledger's, the `frames`
+    /// started (a release Android or iOS app opens it only when asked, see [`request`]). The
+    /// `cmd` service answers the remote commands and the GPU ledger's, the `frames`
     /// service streams window images, and upper crates add theirs ([`register_service`]: the
     /// `app` service of the AI tools). An instance launched for an agent (`--remote`,
     /// `MAKEPAD_REMOTE=1`, `MAKEPAD_INSPECT=1`) prints `[makepad-remote] pid=<pid> app=<app> socket=<path>`. A port or
@@ -2333,11 +2337,18 @@ mod imp {
             Cmd::Settled(tx) => {
                 let _ = tx.send(Reply::Text(settled_json(cx)));
             }
-            Cmd::UiCounts(tx) => {
+            Cmd::UiCounts(waited, tx) => {
                 let (ins, cyc) = crate::thread_counters::read().unwrap_or((0, 0));
                 let (cpu, process, served, runtime) = (makepad_hal::clock::thread_cpu_ns(), makepad_hal::clock::process_cpu_ns(), makepad_remote::served_cpu_ns(), makepad_remote::runtime_cpu_ns());
                 let faults = major_faults();
-                let _ = tx.send(Reply::Text(format!("{{\"ins\":{ins},\"cyc\":{cyc},\"cpu_ns\":{cpu},\"process_cpu_ns\":{process},\"served_cpu_ns\":{served},\"runtime_cpu_ns\":{runtime},\"faults\":{faults}}}")));
+                // what the app's other threads wanted and a loaded box did not give them: not this
+                // thread's (its CPU says its work; its waits are mostly to answer asks such as this
+                // one), nor the serving threads', nor the runtime's (a busy JIT is none of the app's)
+                let waited = match waited {
+                    true => format!(",\"waited_ns\":{}", makepad_hal::clock::threads_waited_ns(makepad_remote::own_thread).saturating_sub(makepad_remote::runtime_waited_ns())),
+                    false => String::new(),
+                };
+                let _ = tx.send(Reply::Text(format!("{{\"ins\":{ins},\"cyc\":{cyc},\"cpu_ns\":{cpu},\"process_cpu_ns\":{process},\"served_cpu_ns\":{served},\"runtime_cpu_ns\":{runtime},\"faults\":{faults}{waited}}}")));
             }
             Cmd::Platform(payload) => match *payload
                 .downcast::<PlatformCmd>()

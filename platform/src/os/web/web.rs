@@ -4,7 +4,7 @@ use {
     crate::{
         cx::{Cx, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
-        draw_pass::CxDrawPassParent,
+        draw_pass::{CxDrawPassParent, TickClock},
         event::{
             DragEvent, DragItem, DragResponse, DropEvent, Event, KeyModifiers, MouseDownEvent,
             MouseMoveEvent, MouseUpEvent, NetworkResponse, ScrollEvent, TextClipboardEvent,
@@ -280,6 +280,7 @@ impl Cx {
                     };
                     crate::thread::set_web_available_parallelism(self.cpu_cores);
                     self.gpu_info.float_color_targets = tw.gpu_info.float_color_targets;
+                    self.gpu_info.max_texture_size = tw.gpu_info.max_texture_size as usize;
                     self.gpu_info.init_from_info(
                         tw.gpu_info.min_uniform_vectors,
                         tw.gpu_info.vendor,
@@ -352,6 +353,10 @@ impl Cx {
                     is_animation_frame = Some(tw.time);
                     // A page without threads: this frame may run one deferred job.
                     crate::thread::frame_jobs_new_frame();
+                    if !tw.in_a_row {
+                        self.os.animation_frame_ticks.pause();
+                    }
+                    self.os.animation_frame_ticks.tick(tw.time);
                     if self.new_next_frames.len() != 0 {
                         self.call_next_frame_event(tw.time);
                     }
@@ -377,7 +382,7 @@ impl Cx {
                     } else {
                         panic!()
                     };
-                    self.fingers.process_touch_update_end(&e.touches);
+                    self.end_touch_update(&e.touches);
                 }
 
                 live_id!(ToWasmMouseDown) => {
@@ -1072,14 +1077,19 @@ impl Cx {
         // a cheap empty-queue check and bounded when work is pending.
         self.retire_webgl_resources();
 
-        if self.any_passes_dirty()
+        let wants_animation_frame = self.any_passes_dirty()
             || self.need_redrawing()
             || self.new_next_frames.len() != 0
             || self.demo_time_repaint
             || self.has_pending_webgl_resource_retirements()
-            || self.staged_uploads_pending()
-        {
+            || self.staged_uploads_pending();
+        let ticks = self.os.animation_frame_ticks;
+        if wants_animation_frame {
             self.os.from_wasm(FromWasmRequestAnimationFrame {});
+        } else if let Some(at) = self.time_repaint_tick_wake(ticks.last, ticks.interval) {
+            // The browser often serves this from the display frame it's asked in, where the frame isn't due
+            // yet, so it asks again and lands on its own display frame.
+            self.os.from_wasm(FromWasmRequestAnimationFrameAt { at });
         }
 
         //return wasm pointer to caller
@@ -1090,7 +1100,7 @@ impl Cx {
         self.webgl_staged_uploads();
         let mut passes_todo = Vec::new();
 
-        self.compute_pass_repaint_order(&mut passes_todo);
+        self.compute_pass_repaint_order(&mut passes_todo, time, self.os.animation_frame_ticks.interval);
         self.repaint_id += 1;
         let pass_time = self.pass_time(time);
         for draw_pass_id in &passes_todo {
@@ -1667,6 +1677,7 @@ impl CxOsApi for Cx {
             FromWasmFullScreen::to_js_code(),
             FromWasmNormalScreen::to_js_code(),
             FromWasmRequestAnimationFrame::to_js_code(),
+            FromWasmRequestAnimationFrameAt::to_js_code(),
             FromWasmSetDocumentTitle::to_js_code(),
             FromWasmSetMouseCursor::to_js_code(),
             FromWasmTextCopyResponse::to_js_code(),
@@ -1706,6 +1717,7 @@ impl CxOsApi for Cx {
             FromWasmFreeWebGLResources::to_js_code(),
             FromWasmPollGpuCompletion::to_js_code(),
             FromWasmAllocTextureImage2D_BGRAu8_32::to_js_code(),
+            FromWasmUpdateTextureRect_BGRAu8_32::to_js_code(),
             FromWasmAllocTextureImage2D_Ru8::to_js_code(),
             FromWasmAllocTextureImage2D_RGBAf32::to_js_code(),
             FromWasmAllocTextureCube_BGRAu8_32::to_js_code(),
@@ -1862,6 +1874,8 @@ pub struct CxOs {
     /// The one-line notice that a second window maps to nothing has been
     /// given (`CxOsOp::CreateWindow`).
     pub(crate) second_window_reported: bool,
+    /// The animation frames `time_fps` frames land on.
+    pub(crate) animation_frame_ticks: TickClock,
 }
 
 impl Default for CxOs {
@@ -1891,6 +1905,7 @@ impl Default for CxOs {
             readback_device_lost: false,
             readback_registered_until: 0,
             second_window_reported: false,
+            animation_frame_ticks: TickClock::default(),
         }
     }
 }

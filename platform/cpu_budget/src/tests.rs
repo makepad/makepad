@@ -403,7 +403,7 @@ fn a_wait_behind_an_earlier_job_on_a_strand_is_reported_apart_from_waits_for_a_w
 #[test]
 fn diagnostics_track_waits_culprit_recent_worst_and_utf8_labels() {
     let mut b = budget(6);
-    Arc::get_mut(&mut b).unwrap().origin = Instant::now() - std::time::Duration::from_secs(61);
+    Arc::get_mut(&mut b).unwrap().origin = monotonic_ns().wrapping_sub(61_000_000_000);
     let bg = b.admit(BACKGROUND, HAL, "background culprit");
     let vis = b.admit(VISIBLE, APP, "older visible");
     {

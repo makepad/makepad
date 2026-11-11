@@ -37,7 +37,7 @@ pub fn verify_shader_pack_entry(vm: &mut ScriptVm, io_self: ScriptObject) -> Res
     let key = shader_pack_key(vm, io_self, false);
     let (output, code) = DrawVars::compile_glsl(vm, io_self, false).ok_or("the shader does not compile")?;
     let source = vm.new_object_ref(io_self);
-    let live = CxDrawShaderMapping::from_shader_output(source, code.clone(), vm, &output, None);
+    let live = CxDrawShaderMapping::from_shader_output(source, code.clone(), vm, &output);
     let record = record_shader(vm, io_self);
     let entry = record.entry().ok_or_else(|| record.error().unwrap().to_owned())?;
     let bytes = record.bytes();
@@ -50,7 +50,7 @@ pub fn verify_shader_pack_entry(vm: &mut ScriptVm, io_self: ScriptObject) -> Res
     if back_code != code { return Err("the pack's code differs from the compile's".into()); }
     let source = vm.new_object_ref(io_self);
     let back_desc = back.to_desc(vm.heap(), io_self);
-    let mut packed = CxDrawShaderMapping::from_desc(source, back_code, vm, &back_desc, None);
+    let mut packed = CxDrawShaderMapping::from_desc(source, back_code, vm, &back_desc);
     let mut live = live;
     live.fill_scope_uniforms_buffer(vm.heap(), &NoTrap);
     packed.fill_scope_uniforms_buffer(vm.heap(), &NoTrap);
@@ -100,7 +100,6 @@ fn mapping_difference(a: &crate::draw_shader::CxDrawShaderMapping, b: &crate::dr
             a.table_consts.iter().map(|t| (t.shader_name, &t.doc, &t.name, t.min, t.max, t.step, t.initial, t.value, t.input)).collect::<Vec<_>>(),
             b.table_consts.iter().map(|t| (t.shader_name, &t.doc, &t.name, t.min, t.max, t.step, t.initial, t.value, t.input)).collect::<Vec<_>>(),
         )?;
-        same("geometry_id", a.geometry_id, b.geometry_id)?;
         same("varying_total_slots", a.varying_total_slots, b.varying_total_slots)?;
         same("color_format", a.color_format, b.color_format)?;
         same("blend_op", a.blend_op, b.blend_op)?;

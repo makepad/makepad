@@ -742,12 +742,11 @@ impl Win {
     /// A press in the caption strip that the app has not answered for CAPTION_HUNG_S while the
     /// pointer is dragged: the app is not running its event loop (a long lazy compile, a level
     /// load): the strip moves the window as a hung app's title bar does. A later answer finds
-    /// the press taken. The strip is the app's caption (twice the traffic lights' center it
-    /// asked for), else the native caption height; windows without native buttons have none.
+    /// the press taken.
     fn caption_drag_unanswered(&self, event: ObjcId) {
         const CAPTION_HUNG_S: f64 = 0.25;
         let pending = self.caption_event.get();
-        if pending == nil || self.popup || self.fullscreen.get() {
+        if pending == nil || self.popup {
             return;
         }
         let [at, y] = self.caption_press.get();
@@ -755,16 +754,21 @@ impl Win {
         if now - at < CAPTION_HUNG_S {
             return;
         }
-        let strip = match self.buttons_center_y.get() {
-            Some(center) => 2.0 * center,
-            None => match self.capture_default_window_buttons() {
-                Some(d) => d.caption_height,
-                None => return,
-            },
-        };
-        if y >= 0.0 && y < strip {
+        if self.in_caption_strip(y) {
             self.caption_answer(input::drag_query::CAPTION);
         }
+    }
+
+    /// Whether `y` (points below the window's top edge) is in the strip the traffic lights are
+    /// centered in, which follows zoom. Fullscreen windows and ones without native buttons have none.
+    fn in_caption_strip(&self, y: f64) -> bool {
+        !self.fullscreen.get() && self.traffic_lights().is_some_and(|lights| y >= 0.0 && y < lights.y * 2.0 + lights.h)
+    }
+
+    /// A normal window's first click only activates it, unless it's in the caption strip.
+    /// Panels and popups don't need activating first, so every click reaches them.
+    pub fn accepts_first_mouse(&self, y: f64) -> bool {
+        self.popup || self.dropdown || self.style & window_style::PANEL != 0 || self.in_caption_strip(y)
     }
 
     /// The app's answer to the drag query of the last press. A caption starts the window drag

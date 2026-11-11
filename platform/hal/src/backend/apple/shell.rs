@@ -225,6 +225,8 @@ pub struct Shared {
     pub(super) host: AtomicBool,
     pub(super) logged_present: AtomicBool,
     pub(super) screens: Mutex<Vec<crate::ScreenInfo>>,
+    /// the app went to the background (UIKit) since the Metal backend last gave back what it can
+    pub(super) backgrounded: AtomicBool,
 }
 
 impl Shared {
@@ -246,6 +248,7 @@ impl Shared {
             host: AtomicBool::new(false),
             logged_present: AtomicBool::new(false),
             screens: Mutex::new(Vec::new()),
+            backgrounded: AtomicBool::new(false),
         }
     }
 

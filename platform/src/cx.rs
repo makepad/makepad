@@ -9,7 +9,7 @@ use {
         display_context::DisplayContext,
         draw_list::CxDrawListPool,
         draw_matrix::CxDrawMatrixPool,
-        draw_pass::CxDrawPassPool,
+        draw_pass::{CxDrawPassPool, TimeFpsClock},
         draw_shader::CxDrawShaders,
         event::{
             CancelScope, CancelScopeKind, CxCancelScopes, CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event,
@@ -26,7 +26,7 @@ use {
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
         thread::{SignalToUI, ToUIReceiver},
         uniform_buffer::CxUniformBufferPool,
-        window::CxWindowPool,
+        window::{CxWindowPool, WindowId},
     },
     makepad_futures::{
         executor,
@@ -83,11 +83,13 @@ pub struct Cx {
     /// Studio instead; this is where that arrives, and it is what
     /// `game_input_states` reads while `in_makepad_studio` is set.
     pub(crate) game_input_remote: Vec<crate::event::game_input::GameInputState>,
-    /// Keeps the frame loop running. Which passes repaint is up to each pass's `repaint_next`.
+    /// Keeps the frame loop running. Which passes repaint is up to each pass's `repaint_next`,
+    /// and a `time_fps` shader slow enough to skip frames waits for `Cx::time_repaint_at` instead.
     pub demo_time_repaint: bool,
     /// `draw_pass.time` counts from here, which `Cx::pass_time` moves while no pass owes a time frame.
     pub(crate) pass_time_origin: f64,
     pub(crate) pass_time_rebase: bool,
+    pub(crate) time_fps_clock: TimeFpsClock,
     pub(crate) mouse_cursor: crate::cursor::MouseCursor,
     pub(crate) gpu_info: GpuInfo,
     pub(crate) gpu_admission: crate::gpu_admission::GpuLedger,
@@ -125,6 +127,9 @@ pub struct Cx {
     /// Run on every Event::Signal before the app sees it: subsystems above the platform
     /// (the text system's glyph workers) react to their workers' signals.
     pub signal_hooks: Vec<fn(&mut Cx)>,
+    /// Run on every event before the app sees it, after the signal hooks: subsystems above the
+    /// platform with timers of their own, or that react to the app going to the background.
+    pub event_hooks: Vec<fn(&mut Cx, &Event)>,
 
     pub redraw_id: u64,
     /// The drawing being recorded (`Cx::drawing_id`): one per draw event, and
@@ -157,6 +162,10 @@ pub struct Cx {
     pub(crate) cancel_scopes: CxCancelScopes,
     pub fingers: CxFingers,
     pub(crate) ime_area: Area,
+    /// The innermost view being drawn that moves its content out from under the soft keyboard
+    /// (like `KeyboardView`), by its widget uid, or 0 outside of all of them.
+    pub ime_scope: u64,
+    pub(crate) ime_area_scope: u64,
     pub keyboard_shift: f64,
     pub(crate) drag_drop: CxDragDrop,
     pub(crate) file_dialogs: FileDialogState,
@@ -222,6 +231,8 @@ pub struct Cx {
 
     pub(crate) self_ref: Option<Rc<RefCell<Cx>>>,
     pub(crate) in_draw_event: bool,
+    /// Whether a `CxDraw` is walking the widgets, which ends before the actions it emitted get handled.
+    pub is_in_draw_walk: bool,
 
     /// Display context for the main window, used by AdaptiveView
     pub display_context: DisplayContext,
@@ -292,6 +303,8 @@ pub struct Cx {
     /// The exploded z-layer inspection view. Inert while off.
     pub sploded: SplodedView,
     pub(crate) pick: crate::pick::CxPick,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) draw_damage: crate::draw_damage::CxDrawDamage,
     /// How many `WidgetRef` draw scopes deep the current draw is — the turtle
     /// nesting AS COMPONENTS SEE IT. Maintained by `WidgetRef::draw_walk` and
     /// its siblings, stamped onto every draw call at creation, and used as the
@@ -358,7 +371,8 @@ pub struct Cx {
     /// Selects a cancel scope from the currently active widget hierarchy. The lookup
     /// returns the newest matching scope for a widget UID. Called only for a new
     /// Escape/Back press; widgets install this without a platform dependency on them.
-    pub cancel_scope_resolver: Option<fn(&Cx, &dyn Fn(u64) -> Option<u64>) -> Option<u64>>,
+    /// For a swipe, it also gets the window the swipe starts in.
+    pub cancel_scope_resolver: Option<fn(&Cx, Option<WindowId>, &dyn Fn(u64) -> Option<u64>) -> Option<u64>>,
     /// The tweaker overlay's remote dispatcher (widgets/families/tweaker/src/tweaker.rs).
     /// Registered by the widgets crate at startup, exactly like the widget
     /// tree callbacks above; the /tweak routes in remote.rs delegate here so
@@ -955,7 +969,7 @@ impl Cx {
         self.cancel_scopes.has_press_owner()
     }
 
-    /// Whether a back swipe by a touch starting in the event being delivered belongs to `scope`, a scope
+    /// Whether a back swipe by a touch or trackpad gesture starting in the event being delivered belongs to `scope`, a scope
     /// from [`Self::begin_widget_back_swipe_scope()`] that Back would go to right now. Only meaningful during that event.
     pub fn owns_back_swipe(&self, scope: &CancelScope) -> bool {
         self.cancel_scopes.owns_back_swipe(scope)
@@ -1030,6 +1044,7 @@ impl Cx {
             demo_time_repaint: false,
             pass_time_origin: 0.0,
             pass_time_rebase: true,
+            time_fps_clock: TimeFpsClock::default(),
             mouse_cursor: Default::default(),
             null_texture,
             null_cube_texture,
@@ -1043,6 +1058,7 @@ impl Cx {
             in_makepad_studio: false,
             game_input_remote: Vec::new(),
             in_draw_event: false,
+            is_in_draw_walk: false,
             os_type: OsType::Unknown,
             gpu_info: Default::default(),
             gpu_admission: Default::default(),
@@ -1066,6 +1082,7 @@ impl Cx {
 
             new_draw_event: Default::default(),
             signal_hooks: Vec::new(),
+            event_hooks: Vec::new(),
             new_actions: Default::default(),
 
             redraw_id: 1,
@@ -1087,6 +1104,8 @@ impl Cx {
             drag_drop: Default::default(),
             file_dialogs: Default::default(),
             ime_area: Default::default(),
+            ime_scope: 0,
+            ime_area_scope: 0,
             keyboard_shift: 0.0,
             platform_ops: Default::default(),
             trays: Vec::new(),
@@ -1150,6 +1169,8 @@ impl Cx {
             perf_monitor: Default::default(),
             sploded: Default::default(),
             pick: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            draw_damage: Default::default(),
             nesting_depth: 0,
             nesting_depth_max: 0,
 

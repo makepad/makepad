@@ -620,7 +620,10 @@ impl App {
                 x::XFreePixmap(self.display, bitmap);
                 value
             } else {
-                x::XcursorLibraryLoadCursor(self.display, input::cursor_name(cursor).as_ptr())
+                input::cursor_names(cursor)
+                    .map(|name| x::XcursorLibraryLoadCursor(self.display, name.as_ptr()))
+                    .find(|&handle| handle != 0)
+                    .unwrap_or(0)
             }
         });
         unsafe {

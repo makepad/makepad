@@ -4,11 +4,23 @@ import test from "node:test";
 
 // The GPU safety layer of web.js: the frame watchdog's decisions and the
 // live-bytes ledger (GPU-SAFETY.md).
+// web.js is loaded as text into a function, so its top-level imports cannot stay. Every one
+// is stripped, whatever it imports, and each imported name becomes a parameter that gets a
+// stub: a new import in web.js must not stop these checks from running.
+const imported = [];
 const web_source = readFileSync(new URL("./web.js", import.meta.url), "utf8")
-  .replace(/^import .*wasm_bridge\.js"\n/, "")
+  .replace(/^import\s*\{([^}]*)\}\s*from\s*["'][^"']+["'];?[ \t]*\n/gm, (_, names) => {
+    for (const entry of names.split(",")) {
+      const name = entry.trim().split(/\s+as\s+/).pop();
+      if (name) imported.push(name);
+    }
+    return "";
+  })
   .replace(/^export /gm, "");
+assert.ok(!/^import\s/m.test(web_source), "web.js has an import form this loader does not strip");
+const stubs = { WasmBridge: class { static is_phone() { return false; } } };
 const web = new Function(
-  "WasmBridge",
+  ...imported,
   "window",
   "document",
   "navigator",
@@ -28,7 +40,7 @@ const web = new Function(
     makepad_install_gpu_ledger,
   };`,
 )(
-  class { static is_phone() { return false; } },
+  ...imported.map(name => stubs[name] ?? class {}),
   { addEventListener() {}, navigator: { userAgent: "test" } },
   {},
   { userAgent: "test" },

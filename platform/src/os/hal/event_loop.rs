@@ -88,8 +88,11 @@ impl Cx {
         let supports = |format| info.formats & (1u64 << format) != 0;
         self.gpu_info.float_color_targets = supports(makepad_hal::format::RGBA32F);
         self.gpu_info.float16_blend_targets = supports(makepad_hal::format::RGBA16F);
+        self.gpu_info.mixed_output_passes = info.backend != makepad_hal::backend_id::VULKAN
+            || info.flags & info_flags::MIXED_OUTPUT_PASSES != 0;
         self.gpu_info.texture_bc7 = supports(makepad_hal::format::BC7);
         self.gpu_info.texture_astc4x4 = supports(makepad_hal::format::ASTC4X4);
+        self.gpu_info.max_texture_size = info.max_texture as usize;
         // Who the GPU is, for apps that size their work to it (a graphics
         // quality tier): the vendor from its PCI id, the driver's device name.
         let name = info.device_name();
@@ -256,17 +259,53 @@ impl Cx {
         if self.hosted_frames_held() {
             return false;
         }
+        #[cfg(target_os = "android")]
+        if self.hal.pending_ime_hide {
+            return true;
+        }
         let next_frames_due = !self.new_next_frames.is_empty() && !crate::remote::app_clock::enabled();
         self.any_passes_dirty()
             || (self.need_redrawing() && self.app_draws_now())
             || next_frames_due
             || self.demo_time_repaint
+            // the next beat runs them (`run_live_edit_if_needed`)
+            || self.pending_script_reapply
+            || self.pending_live_edit_request
             || !self.screenshot_requests.is_empty()
             || !self.draw_shaders.compile_set.is_empty()
             || crate::remote::needs_ticks()
             || self.hal_software_video_active()
             || !self.pick.requests.is_empty()
             || self.staged_uploads_pending()
+            || self.hal_time_repaint_due()
+    }
+
+    /// Whether it's time to ask for the next `time_fps` frame: a display answers on its next tick,
+    /// the one nearest the frame's due, and other backends answer at once.
+    fn hal_time_repaint_due(&self) -> bool {
+        !self.hal.surface_lost && self.hal_time_repaint_ask_at().is_some_and(|at| self.hal_now() >= at)
+    }
+
+    /// How long the loop can sleep before it asks for the next `time_fps` frame, or `None` when
+    /// no frame is coming or none can paint (a hosted child that's held, a lost GPU or surface).
+    fn hal_time_repaint_wait_ns(&self) -> Option<u64> {
+        if self.hal.device_lost || self.hal.surface_lost || self.hosted_frames_held() {
+            return None;
+        }
+        let at = self.hal_time_repaint_ask_at()?;
+        Some(((at - self.hal_now()).max(0.0) * 1e9).ceil() as u64)
+    }
+
+    /// When we ask for the next `time_fps` frame: the first moment it may paint, half a tick before its due.
+    fn hal_time_repaint_ask_at(&self) -> Option<f64> {
+        let interval = self.hal.frame_interval;
+        // Android's Choreographer takes a request through the main thread's looper to SurfaceFlinger, which can
+        // take longer than half a tick, so there we ask a quarter tick after the tick before the one it lands on.
+        #[cfg(target_os = "android")]
+        if self.hal_info_flags() & info_flags::DISPLAY_CLOCK != 0 {
+            return self.time_repaint_tick_wake(self.time_fps_clock.frame_time, interval).map(|at| at + interval * 0.25);
+        }
+        self.time_repaint_request_at(interval)
     }
 
     fn hal_run(&mut self) {
@@ -376,7 +415,7 @@ impl Cx {
         // the UI thread's time outside the idle wait, from this turn's wake (`pass_load`)
         let mut busy_from = None;
         #[cfg(target_os = "android")]
-        let mut performance_hint = if hosted { None } else { makepad_hal::backend::android::performance_hint::PerformanceHint::for_this_thread() };
+        let mut performance_hint = if hosted { None } else { makepad_hal::backend::android::performance_hint::PerformanceHint::for_this_thread(period) };
         'turns: loop {
             retire_in_flight(self, &mut in_flight);
             // A signal raised with no wake to carry it (before the session opened: its wake
@@ -402,7 +441,16 @@ impl Cx {
                 // The host schedules logical timers, so an idle child needs no polling.
                 // A lost GPU device draws nothing: the pump sleeps until the HAL's DeviceReset
                 // (or input, a signal) wakes it.
-                u64::MAX
+                // A child's `time_fps` frame that may paint has a Tick coming, and that wakes it. We ask
+                // here too since it may have come due after this turn's demand, and repeats are coalesced.
+                match self.hal_time_repaint_wait_ns() {
+                    Some(0) => {
+                        self.hal_hosted_announce_demand();
+                        u64::MAX
+                    }
+                    Some(wait) => wait,
+                    None => u64::MAX,
+                }
             } else if in_flight.len() >= FRAMES_IN_FLIGHT {
                 gpu_wait = true;
                 // When `FRAMES_IN_FLIGHT` frames are already on the GPU, the pump waits for the
@@ -411,17 +459,26 @@ impl Cx {
                     .saturating_duration_since(std::time::Instant::now())
                     .as_nanos() as u64
             } else if display_clock || !self.hal_has_work() {
-                // idle: sleep until an event, a timer the app set or a wake; a frame asked for
-                // and not announced is asked again when its wait runs out
+                // idle: sleep until an event, a timer the app set, a wake or the next `time_fps` frame;
+                // a frame asked for and not announced is asked again when its wait runs out
                 match requested.filter(|_| display_clock && self.hal_has_work()) {
+                    // Android's shell holds a paused app's request till it's back, so it sleeps meanwhile
+                    #[cfg(target_os = "android")]
+                    Some(_) if makepad_hal::backend::android::jni::frame_requests_held() => u64::MAX,
                     Some(at) => (at + REREQUEST).saturating_duration_since(std::time::Instant::now()).as_nanos() as u64,
                     // (a run that beat and painted nothing wakes to count its rounds: `first_draw`)
-                    None if self.first_draw.armed() && self.first_draw_window() => crate::first_draw::IDLE_ROUND_NS,
-                    None => u64::MAX,
+                    None if self.first_draw.armed() && self.first_draw_window() => {
+                        crate::first_draw::IDLE_ROUND_NS.min(self.hal_time_repaint_wait_ns().unwrap_or(u64::MAX))
+                    }
+                    None => self.hal_time_repaint_wait_ns().unwrap_or(u64::MAX),
                 }
             } else {
                 next_beat.saturating_duration_since(std::time::Instant::now()).as_nanos() as u64
             };
+            #[cfg(target_os = "android")]
+            if let Some(hint) = performance_hint.as_mut() {
+                hint.start_turn(!self.hal_has_work() || self.hal.device_lost);
+            }
             loop_watch::in_pump(timeout > 0);
             self.pass_load.spent(UiTime::Busy, busy_from.take());
             let alive = self.hal_guarded(true, |cx| cx.hal_pump_events(timeout, if gpu_wait { PumpWait::Gpu } else { PumpWait::Idle }));
@@ -471,19 +528,10 @@ impl Cx {
             // a hosted app beats at its host's Ticks, and at once for its XR window's frames
             let xr_beat = std::mem::take(&mut self.hal.xr_beat);
             if hosted && xr_beat && !quitting && !self.hal.device_lost {
-                // (an XR beat always draws a frame)
-                #[cfg(target_os = "android")]
-                if let Some(hint) = performance_hint.as_mut() {
-                    hint.start_cycle(std::time::Instant::now());
-                }
                 if !self.hal_guarded(true, |cx| cx.hal_beat()) {
                     self.call_event_handler(&Event::Shutdown);
                     self.hal_submit_batch();
                     break 'turns;
-                }
-                #[cfg(target_os = "android")]
-                if let Some(hint) = performance_hint.as_mut() {
-                    hint.mark_frame_drawn();
                 }
                 self.hal_submit_batch();
                 self.hal_xr_frame_out();
@@ -518,11 +566,27 @@ impl Cx {
                 if log_enabled() && announced {
                     eprintln!("[hal-client] session={} FrameReady starts draw beat", info.session);
                 }
+                // XR frames keep the headset's pace, not the beat's
+                #[cfg(target_os = "android")]
+                if let Some(hint) = performance_hint.as_mut() {
+                    match self.hal.xr {
+                        Some(_) => hint.skip_frame(),
+                        None => hint.start_frame(self.repaint_id, display_clock),
+                    }
+                }
                 let before_serial = self.frame_submission_serial();
                 if !self.hal_guarded(true, |cx| cx.hal_beat()) {
                     self.call_event_handler(&Event::Shutdown);
                     self.hal_submit_batch();
                     break 'turns;
+                }
+                // A hide still pending after this draw really hides the keyboard,
+                // unless the draw queued a `ShowTextIME` for an input that took focus.
+                #[cfg(target_os = "android")]
+                if self.hal.pending_ime_hide
+                    && !self.platform_ops.iter().any(|queued| matches!(queued, crate::cx_api::CxOsOp::ShowTextIME(..)))
+                {
+                    self.hal_send_pending_ime_hide();
                 }
                 // a fixed cadence: the next beat is one period after this one was DUE, not after
                 // its work ended (that made the period 16.7 ms + the beat's CPU time: ~48 fps
@@ -542,6 +606,15 @@ impl Cx {
                 self.call_event_handler(&Event::Shutdown);
                 self.hal_submit_batch();
                 break 'turns;
+            }
+            // No draw is coming to wait for if no window is ready, the surface is gone, the
+            // Activity is paused or the GPU device is lost, so a hide goes out now.
+            #[cfg(target_os = "android")]
+            if self.hal.pending_ime_hide
+                && (self.hal.no_surface || self.hal.activity_paused || self.hal.device_lost
+                    || !self.windows.id_iter().any(|w| self.hal.window_ready(w)))
+            {
+                self.hal_send_pending_ime_hide();
             }
             // work for the next vsync: ask each window for a frame
             let mut reasked = false;
@@ -564,6 +637,10 @@ impl Cx {
             // what this turn leaves the loop waiting for, read by `loop` without the UI thread
             loop_watch::publish(display_clock && self.hal_has_work(), self.hal.beat,
                 in_flight.len(), in_flight.front().map(|&(_, at)| at), FRAMES_IN_FLIGHT);
+            #[cfg(target_os = "android")]
+            if let Some(hint) = performance_hint.as_mut() {
+                hint.finish_frame(self.repaint_id);
+            }
         }
         loop_watch::publish(false, false, 0, None, FRAMES_IN_FLIGHT);
         // the session ends: Quit in the last batch makes the HAL free what it owns (textures,
@@ -743,6 +820,7 @@ impl Cx {
             if self.need_redrawing() { count("beat: redraw"); }
             if !self.new_next_frames.is_empty() { count("beat: next frame"); }
             if self.demo_time_repaint { count("beat: demo repaint"); }
+            if self.pending_script_reapply || self.pending_live_edit_request { count("beat: live edit"); }
             if !self.screenshot_requests.is_empty() { count("beat: screenshot"); }
             if !self.draw_shaders.compile_set.is_empty() { count("beat: shaders"); }
             if crate::remote::needs_ticks() { count("beat: remote ticks"); }
@@ -750,6 +828,7 @@ impl Cx {
             if !self.pick.requests.is_empty() { count("beat: pick"); }
             if self.hal.compute.beat { count("beat: compute"); }
             if self.staged_uploads_pending() { count("beat: staged upload"); }
+            if self.hal_time_repaint_due() { count("beat: time_fps"); }
         }
         self.hal_service_signals();
         if let Some(hosted) = self.hal.hosted.as_mut() {
@@ -837,6 +916,9 @@ impl Cx {
 
     /// Visible frame work: hidden hosted children keep callbacks and dirty passes pending.
     fn hal_draw_frame(&mut self) -> bool {
+        // `time_fps` frames go by the tick that started the beat, not when it runs, which keeps their dues on
+        // the display's ticks and a late beat from painting one a tick early (the virtual clock has no ticks).
+        let tick = self.hal.frame_tick.take().filter(|_| !crate::remote::app_clock::enabled());
         // the GPU device is lost: nothing is drawn until the HAL's DeviceReset (dirty passes
         // stay dirty and paint then)
         if self.hal.device_lost {
@@ -905,6 +987,21 @@ impl Cx {
                     pending
                 } else { 0 };
                 if pending_glyphs != 0 || pending_pipelines != 0 {
+                    // On a launch whose pipeline cache started cold, the Activity's cover explains this wait.
+                    // No frame has sent it the app's background color yet, so we send that first, for the screen to match.
+                    #[cfg(target_os = "android")]
+                    if !self.hal.shader_compile_screen_requested && first_frame && pending_pipelines != 0
+                        && self.hal_info_flags() & makepad_hal::info_flags::PIPELINE_CACHE_COLD != 0 {
+                        self.hal.shader_compile_screen_requested = true;
+                        let main_passes: Vec<_> = self.windows.id_iter().filter(|id| self.hal.window_ready(*id))
+                            .filter_map(|id| self.windows[id].main_pass_id).collect();
+                        let mut fb = std::mem::take(&mut self.hal.frames);
+                        for pass_id in main_passes {
+                            self.fb_send_app_background(&mut fb, pass_id);
+                        }
+                        fb.w.mobile_ui(makepad_hal::mobile_ui::SHADER_COMPILE_SCREEN, 0);
+                        self.hal.frames = fb;
+                    }
                     if first_frame {
                         crate::cx::first_frame_hold::deferred(pending_glyphs, pending_pipelines);
                         self.first_draw.note_deferred();
@@ -966,7 +1063,7 @@ impl Cx {
         let build_from = self.pass_load.mark();
         let mut fb = std::mem::take(&mut self.hal.frames);
         let mut passes = Vec::new();
-        self.compute_pass_repaint_order(&mut passes);
+        self.compute_pass_repaint_order(&mut passes, tick.unwrap_or(time_now), self.hal.frame_interval);
         if !passes.is_empty() {
             self.repaint_id += 1;
             fb.stats.repaints += 1;
@@ -1018,6 +1115,28 @@ fn host_os_type() -> OsType {
     return OsType::Ios(ios_params());
     #[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
     return OsType::Unknown;
+}
+
+#[cfg(target_os = "android")]
+impl Cx {
+    /// Android's `OsType` carries the Activity's paths, density and versions, which can come after
+    /// the app starts and come again with each configuration change (followed by a `Display`).
+    pub(crate) fn hal_update_android_os_type(&mut self) {
+        let params = makepad_hal::backend::android::AndroidBackend::params();
+        if params.data_path.is_empty() {
+            return;
+        }
+        self.os_type = OsType::Android(crate::cx::AndroidParams {
+            cache_path: params.cache_path,
+            data_path: params.data_path,
+            density: params.density as f64,
+            is_emulator: params.emulator,
+            has_xr_mode: self.xr_display(),
+            android_version: params.android_version,
+            build_number: params.build_number,
+            night_mode: params.night_mode,
+        });
+    }
 }
 
 /// The app's data directory (Application Support), the device model and the system version.

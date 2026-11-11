@@ -1,7 +1,7 @@
-//! Java MediaPlayer control plus worker-owned OES -> RGBA readback -> Vulkan staging.
+//! Java MediaPlayer control plus worker-owned OES -> RGBA readback -> staging into the GPU core's textures.
 //! The EGL context is private to this worker, never shared with the renderer.
 use super::{exception, field, java, lock, method, string, void, Engine, Global, Message, Output, Ticket};
-use crate::{backend::{exec::Gpu, vulkan::Vulkan}, ledger::{Kind, LedgerEntry}, media::*, session::{Session, TextureObj}, types::{format, usage, Attr, Id}};
+use crate::{backend::exec::Gpu, ledger::{Kind, LedgerEntry}, media::*, session::{Session, TextureObj}, types::{format, usage, Attr, Id}};
 use makepad_jni_sys::{registration as reg, *};
 use std::{collections::{HashMap, VecDeque}, ffi::{c_char, c_void, CStr}, sync::{Arc, Mutex, OnceLock}, thread::Thread};
 
@@ -87,7 +87,7 @@ pub(super) fn declare(s: &mut Session, ids: [Id; 4]) -> Result<(), String> {
     }
     Ok(())
 }
-pub(super) fn present(gpu: &mut Vulkan, s: &mut Session, ids: [Id; 4], frame: &Frame) -> Result<bool, String> {
+pub(super) fn present(gpu: &mut dyn Gpu, s: &mut Session, ids: [Id; 4], frame: &Frame) -> Result<bool, String> {
     if frame.planes.is_empty() { return Ok(true); } // audio-only clock update
     let targets = if frame.yuv & yuv::ENABLED != 0 { &ids[1..] } else { &ids[..1] };
     if targets.len() != frame.planes.len() { return Err("video plane/texture count differs".into()); }
@@ -99,20 +99,20 @@ pub(super) fn present(gpu: &mut Vulkan, s: &mut Session, ids: [Id; 4], frame: &F
         if current.bytes == 0 || current.format != desc.format || current.w != desc.w || current.h != desc.h {
             gpu.texture_create(s, *id, &mut desc)?;
         } else { desc.bytes = current.bytes; }
-        // Vulkan's upload resolves the image using the session's extent. Publish
+        // The core's upload resolves the image using the session's extent. Publish
         // the new descriptor before upload, including on the first 1x1 -> frame
         // resize; otherwise an imported video placeholder cannot be resolved.
         s.textures.get_mut(s.id, *id).map_err(|_| "stale video texture")?.val = desc.clone();
         row(s, *id, &desc);
         let bad = s.stats.bad_args;
         gpu.texture_update(s, *id, &desc, 0, [0, 0, desc.w, desc.h], 0, &plane.bytes);
-        if s.stats.bad_args != bad { return Err("Vulkan video staging failed".into()); }
+        if s.stats.bad_args != bad { return Err("video staging failed".into()); }
         desc.uploaded = plane.bytes.len() as u64;
         s.textures.get_mut(s.id, *id).map_err(|_| "stale video texture")?.val = desc.clone();
     }
     Ok(true)
 }
-pub(super) fn release(gpu: &mut Vulkan, s: &mut Session, ids: [Id; 4]) {
+pub(super) fn release(gpu: &mut dyn Gpu, s: &mut Session, ids: [Id; 4]) {
     for id in ids {
         if id.is_none() || s.textures.get(s.id, id).is_err() { continue; }
         gpu.texture_destroy(s.id, id);

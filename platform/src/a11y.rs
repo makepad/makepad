@@ -933,7 +933,7 @@ impl Cx {
                 } else if request.action == Actions::FOCUS {
                     if area.is_valid(self) {
                         self.a11y.requested_focus = request.node;
-                        self.set_key_focus(area);
+                        self.set_key_focus_from_user(area);
                         self.inner_key_focus_change();
                         self.redraw_all();
                         ActionResult::Fallback

@@ -158,6 +158,9 @@ pub(super) struct Swapchain {
     transparent: bool,
     pub dirty: AtomicBool,
     lost: AtomicBool,
+    /// Created un-rotated on a rotated surface: Android says SUBOPTIMAL on every present then,
+    /// and a rebuild would make the same chain.
+    compositor_rotates: bool,
     /// Replaced by a new swapchain; a frame still waiting for an image here is dropped.
     retired: AtomicBool,
     /// The newest frame queued for presentation here (set when the frame is encoded).
@@ -219,7 +222,7 @@ impl Swapchain {
         }
         let index = match result {
             Ok((index, suboptimal)) => {
-                if suboptimal {
+                if suboptimal && !self.compositor_rotates {
                     if log_enabled() { eprintln!("[hal-vulkan] vkAcquireNextImageKHR key={:?}: SUBOPTIMAL_KHR; rebuilding swapchain", self.key); }
                     self.dirty.store(true, Ordering::Release);
                 }
@@ -290,6 +293,7 @@ impl Swapchain {
         }
         match result {
             Ok(false) => Ok(Shown::Presented),
+            Ok(true) if self.compositor_rotates => Ok(Shown::Presented),
             Ok(true) => {
                 if log_enabled() { eprintln!("[hal-vulkan] vkQueuePresentKHR key={:?}: SUBOPTIMAL_KHR; rebuilding swapchain", self.key); }
                 self.dirty.store(true, Ordering::Release); Ok(Shown::Presented)
@@ -421,7 +425,11 @@ impl Windows {
             if log_enabled() { eprintln!("[hal-vulkan] surface format candidate key={key:?} format={:?} features={features:?}", f.format); }
             features.contains(vk::FormatFeatureFlags::BLIT_DST)
         }).ok_or_else(|| format!("no advertised surface format supports BLIT_DST: {formats:?}"))?;
-        let extent = if caps.current_extent.width != u32::MAX { caps.current_extent } else { vk::Extent2D {
+        // Android reports current_extent as of the last queued frame, so it's stale right after a rotation
+        // or resize: when the surface allows it, the chain takes the window's own size (X11 pins it).
+        let fits = (caps.min_image_extent.width..=caps.max_image_extent.width).contains(&requested[0])
+            && (caps.min_image_extent.height..=caps.max_image_extent.height).contains(&requested[1]);
+        let extent = if caps.current_extent.width != u32::MAX && !fits { caps.current_extent } else { vk::Extent2D {
             width: requested[0].clamp(caps.min_image_extent.width, caps.max_image_extent.width),
             height: requested[1].clamp(caps.min_image_extent.height, caps.max_image_extent.height),
         } };
@@ -430,13 +438,8 @@ impl Windows {
         }
         // The window image is rendered upright and blitted, so the chain is created un-rotated and
         // the compositor applies the display rotation (a chain pre-rotated by `current_transform`
-        // would need the blit to rotate too). A pre-rotated surface reports its extent swapped.
-        let (pre_transform, extent) = if caps.supported_transforms.contains(vk::SurfaceTransformFlagsKHR::IDENTITY) {
-            // ROTATE_90, ROTATE_270 and their mirrored forms
-            let swapped = caps.current_transform.as_raw() & 0xAA != 0;
-            let extent = if swapped && caps.current_extent.width != u32::MAX { vk::Extent2D { width: extent.height, height: extent.width } } else { extent };
-            (vk::SurfaceTransformFlagsKHR::IDENTITY, extent)
-        } else { (caps.current_transform, extent) };
+        // would need the blit to rotate too).
+        let pre_transform = if caps.supported_transforms.contains(vk::SurfaceTransformFlagsKHR::IDENTITY) { vk::SurfaceTransformFlagsKHR::IDENTITY } else { caps.current_transform };
         let count = if caps.max_image_count == 0 { caps.min_image_count + 1 } else { (caps.min_image_count + 1).min(caps.max_image_count) };
         let alpha = [if transparent { vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED } else { vk::CompositeAlphaFlagsKHR::OPAQUE }, vk::CompositeAlphaFlagsKHR::OPAQUE, vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED,
             vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED, vk::CompositeAlphaFlagsKHR::INHERIT].into_iter()
@@ -452,6 +455,7 @@ impl Windows {
             .map_err(|e| format!("vkCreateSwapchainKHR size={extent:?} format={:?} color_space={:?} alpha={alpha:?} present_mode=FIFO: {e:?}", fmt.format, fmt.color_space))?;
         let mut out = Swapchain { dev, surface, raw, images: Vec::new(), ready: Vec::new(), size: [extent.width, extent.height],
             host: Mutex::new(()), key, logged_acquire: AtomicBool::new(false), logged_present: AtomicBool::new(false), generation, requested, transparent, dirty: AtomicBool::new(false), lost: AtomicBool::new(false),
+            compositor_rotates: pre_transform != caps.current_transform,
             retired: AtomicBool::new(false), latest: AtomicU64::new(0), pending: Mutex::new(None), blits: Mutex::new(Vec::new()) };
         out.images = unsafe { out.dev.raw.get_swapchain_images(raw) }.map_err(|e| format!("vkGetSwapchainImagesKHR: {e:?}"))?;
         if out.images.is_empty() { return Err("vkGetSwapchainImagesKHR returned no images".into()); }

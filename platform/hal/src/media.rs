@@ -146,6 +146,14 @@ impl AudioEntry {
     }
 }
 
+/// The entry one device slot calls, shared by the thread that replaces it (the HAL's command
+/// thread) and the device's realtime thread: the realtime side never waits or locks (a block that
+/// finds a replace under way, or no entry, is skipped; its caller zeroed the output), and a
+/// replace waits only for the one block already admitted, as `AudioEntry` requires: when it
+/// returns the old entry is not called again, so the app may free its context. Every backend's
+/// slots are these.
+pub type EntrySlot = makepad_lock_free::Slot<AudioEntry>;
+
 /// One audio device as `AudioDevices` lists it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioDeviceInfo {

@@ -70,4 +70,4 @@ pub use cmd::{json_str, now_ms, Out, Req};
 pub use conn::{Channel, ChannelTx, Conn, Event, Hooks};
 pub use endpoint::Endpoint;
 pub use link::Client;
-pub use served::{asked_cpu_ns, charge_served, runtime_cpu_ns, served_count, served_cpu_ns};
+pub use served::{asked_cpu_ns, charge_served, own_thread, runtime_cpu_ns, runtime_waited_ns, served_count, served_cpu_ns};

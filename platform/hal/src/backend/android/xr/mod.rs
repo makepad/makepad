@@ -2433,7 +2433,7 @@ impl HandKey {
 }
 
 /// An Android system property (`adb shell setprop`), if set.
-pub(crate) fn system_property(name: &str) -> Option<String> {
+pub fn system_property(name: &str) -> Option<String> {
     extern "C" { fn __system_property_get(name: *const std::ffi::c_char, value: *mut std::ffi::c_char) -> i32; }
     let name = std::ffi::CString::new(name).ok()?;
     let mut value = [0 as std::ffi::c_char; 92];

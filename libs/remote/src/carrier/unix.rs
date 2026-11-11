@@ -19,8 +19,20 @@ pub fn paths(pid: u32) -> (PathBuf, PathBuf) {
 /// scratch dir made one 121 bytes long, and the JIT in it could not be reached: a capture held a
 /// jitlegs leg to twice its time, 11-05). A desktop Unix: `/tmp/makepad-<uid>`, this user's own
 /// (0700, made by the first endpoint that listens). A phone's app writes only in its own temp
-/// dir, and that one is short.
+/// dir, and that one is short. This crate's own tests use [`test_root`] instead.
 pub fn socket_dir() -> PathBuf {
+    #[cfg(not(test))]
+    {
+        user_socket_dir()
+    }
+    #[cfg(test)]
+    {
+        test_root()
+    }
+}
+
+/// [`socket_dir`] of every process of this user.
+pub(crate) fn user_socket_dir() -> PathBuf {
     #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
     {
         extern "C" {
@@ -30,6 +42,20 @@ pub fn socket_dir() -> PathBuf {
     }
     #[cfg(not(all(unix, not(any(target_os = "android", target_os = "ios")))))]
     std::env::temp_dir()
+}
+
+/// The socket and registry dir of this crate's tests: never the process's own ones. A test process
+/// a live JIT runs is that JIT's process, and the JIT serves its own inspect endpoint there under
+/// the same pid: the tests' endpoint replaced its socket and discovery file, devhub's questions to
+/// the session reached the tests' fixture, and the run never went idle (11-11).
+#[cfg(test)]
+pub(crate) fn test_root() -> PathBuf {
+    let root = user_socket_dir().join("tests");
+    #[cfg(unix)]
+    let _ = imp::make_own(&user_socket_dir()).and_then(|()| imp::make_own(&root));
+    #[cfg(not(unix))]
+    let _ = std::fs::create_dir_all(&root);
+    root
 }
 
 /// [`socket_dir`], made this user's own first (0700; one that is not this user's own directory is
@@ -49,10 +75,12 @@ extern "C" fn cleanup() {
     let _ = std::fs::remove_file(disc);
 }
 
-/// Removes this process's socket and discovery file now, its exit's own work done: the atexit
-/// cleanup runs after every exit handler registered after it (a GPU driver's teardown, which can
-/// take seconds), and a process killed during those (a window manager's stop gives its apps a
-/// grace, then SIGKILL) left its discovery file behind, which the node's hub reads as a crash.
+/// Removes this process's socket and discovery file now: where the process ends without exit
+/// handlers (`_exit`, a Windows session end), or once its exit's own work is done, before slow
+/// ones run. The atexit cleanup runs after every exit handler registered after it (a GPU driver's
+/// teardown, which can take seconds), and a process killed during those (a window manager's stop
+/// gives its apps a grace, then SIGKILL) left its discovery file behind, which the node's hub
+/// reads as a crash.
 pub fn withdraw() {
     cleanup();
 }
@@ -210,6 +238,8 @@ mod imp {
     /// (`"socket_error"`, no caps): a client names the reason instead of finding no app.
     pub fn listen(ep: &Endpoint, extra: &str) -> io::Result<PathBuf> {
         let _ = crate::cmd::now_ms();
+        #[cfg(any(target_os = "android", target_os = "ios", target_os = "tvos"))]
+        crate::discovery::remove_stale(ep.hooks());
         let (sock, disc) = paths(std::process::id());
         let served = serve_announced(ep, extra, &sock, &disc, own_dir);
         {

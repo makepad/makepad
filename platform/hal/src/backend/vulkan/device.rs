@@ -5,8 +5,9 @@ use super::super::log_enabled;
 use makepad_vulkan::{vk, Entry};
 use std::collections::{HashSet, VecDeque};
 use std::ffi::CStr;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -66,7 +67,9 @@ pub struct Device {
     /// header: another device's or driver's data is ignored), so a relaunch does not compile
     /// every pipeline variant from SPIR-V again (`save_pipeline_cache` writes it back).
     pub pipeline_cache: vk::PipelineCache,
-    pipeline_cache_file: Option<PathBuf>,
+    pipeline_cache_file: Option<PipelineCacheFile>,
+    /// The cache started without this app build's pipelines (`info_flags::PIPELINE_CACHE_COLD`).
+    pub pipeline_cache_cold: bool,
     /// Pipelines made since the cache was last saved, and when the last one was (clock_ns).
     pub pipelines_made: AtomicU32,
     pub pipeline_made_ns: AtomicU64,
@@ -484,7 +487,7 @@ impl Device {
         let video_encode = video_family.map(|f| VideoQueue { family: f as u32, queue: unsafe { raw.get_device_queue(f as u32, 0) }, timestamp_bits: video_timestamp_bits,
             more: (1..video_count).map(|i| (unsafe { raw.get_device_queue(f as u32, i) }, Mutex::new(()))).collect(), lock: Mutex::new(()), h265, qp_map: has_qp_map });
         if let Some(v) = &video_encode { if log_enabled() { eprintln!("[hal-vulkan] hardware video encode queue family={}", v.family); } }
-        let (pipeline_cache, pipeline_cache_file) = open_pipeline_cache(&raw, &properties);
+        let (pipeline_cache, pipeline_cache_file, pipeline_cache_cold) = open_pipeline_cache(&raw, &properties);
         Ok(Some(Arc::new(Self {
             queue: unsafe { raw.get_device_queue(family as u32, 0) }, queue_lock: Mutex::new(()), raw, instance: instance.clone(),
             physical, family: family as u32, properties, memory, features, formats,
@@ -492,7 +495,7 @@ impl Device {
             video_encode,
             pools: Default::default(), blocks: Default::default(), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), rebar_fallback_logged: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: has_ycbcr, video_samplers: Mutex::new(Default::default()),
-            pipeline_cache, pipeline_cache_file, pipelines_made: AtomicU32::new(0), pipeline_made_ns: AtomicU64::new(0),
+            pipeline_cache, pipeline_cache_file, pipeline_cache_cold, pipelines_made: AtomicU32::new(0), pipeline_made_ns: AtomicU64::new(0),
         })))
     }
 
@@ -643,14 +646,14 @@ impl Device {
         let raw = unsafe { instance.create_device(physical, &create, None) }.map_err(error)?;
         let memory = unsafe { instance.get_physical_device_memory_properties(physical) };
         let formats = std::array::from_fn(|f| unsafe { instance.get_physical_device_format_properties(physical, super::resources::vk_format(f as u32).unwrap()) });
-        let (pipeline_cache, pipeline_cache_file) = open_pipeline_cache(&raw, &properties);
+        let (pipeline_cache, pipeline_cache_file, pipeline_cache_cold) = open_pipeline_cache(&raw, &properties);
         Ok(Arc::new(Self { instance: instance.clone(), queue: unsafe { raw.get_device_queue(family as u32, 0) },
             raw, physical, queue_lock: Mutex::new(()), family: family as u32, properties, memory, features, formats,
             // a display peer only scans out: the GPU profiler times the rendering device
             timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, multiview: false, compute: false, fdm: false, msaa: 1, life: owner.life.clone(), video_encode: None,
             pools: Default::default(), blocks: Default::default(), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), rebar_fallback_logged: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: false, video_samplers: Mutex::new(Default::default()),
-            pipeline_cache, pipeline_cache_file, pipelines_made: AtomicU32::new(0), pipeline_made_ns: AtomicU64::new(0) }))
+            pipeline_cache, pipeline_cache_file, pipeline_cache_cold, pipelines_made: AtomicU32::new(0), pipeline_made_ns: AtomicU64::new(0) }))
     }
 }
 
@@ -671,59 +674,156 @@ impl Drop for Device {
 }
 
 /// The pipeline cache file of this device and driver, under the app's cache directory
-/// (MAKEPAD_HAL_CACHE_DIR; Android: TMPDIR, the app's cache dir; Apple: Library/Caches; else
+/// (MAKEPAD_HAL_CACHE_DIR; Android: the app's cache dir, else TMPDIR; Apple: Library/Caches; else
 /// XDG_CACHE_HOME, LOCALAPPDATA or ~/.cache). None: pipelines are not kept across runs.
 fn pipeline_cache_file(properties: &vk::PhysicalDeviceProperties) -> Option<PathBuf> {
+    // from the Activity's params, since Android 9 and older don't set TMPDIR
+    #[cfg(target_os = "android")]
+    let android = Some(crate::backend::android::AndroidBackend::params().cache_path).filter(|d| !d.is_empty());
+    #[cfg(not(target_os = "android"))]
+    let android: Option<String> = None;
     let dir = if let Some(d) = std::env::var_os("MAKEPAD_HAL_CACHE_DIR") { PathBuf::from(d) }
-        else if cfg!(target_os = "android") { PathBuf::from(std::env::var_os("TMPDIR")?) }
+        else if cfg!(target_os = "android") { android.map(PathBuf::from).or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))? }
         else if cfg!(target_vendor = "apple") { PathBuf::from(apple_cache_dir()?) }
         else if let Some(d) = std::env::var_os("XDG_CACHE_HOME") { PathBuf::from(d) }
         else if let Some(d) = std::env::var_os("LOCALAPPDATA") { PathBuf::from(d) }
         else { PathBuf::from(std::env::var_os("HOME")?).join(".cache") };
-    Some(dir.join("makepad-hal").join(format!("pipelines-{:x}-{:x}-{:x}.bin", properties.vendor_id, properties.device_id, properties.driver_version)))
+    // outside Android, apps share the user's cache dir, so each app's file has its name in it
+    let app = if cfg!(target_os = "android") { None }
+        else { std::env::current_exe().ok().and_then(|exe| Some(format!("{}-", exe.file_stem()?.to_string_lossy()))) };
+    Some(dir.join("makepad-hal").join(format!("pipelines-{}{:x}-{:x}-{:x}.bin", app.unwrap_or_default(), properties.vendor_id, properties.device_id, properties.driver_version)))
 }
 #[cfg(target_vendor = "apple")]
 fn apple_cache_dir() -> Option<String> { crate::app_cache_dir() }
 #[cfg(not(target_vendor = "apple"))]
 fn apple_cache_dir() -> Option<String> { None }
 
+/// Where a device's pipeline cache is kept between runs.
+struct PipelineCacheFile {
+    path: PathBuf,
+    /// What the file starts with, naming the app build that saved it. The driver data's length
+    /// and hash come next.
+    header: Vec<u8>,
+    /// The driver's cache size when it was opened or last saved. A save only writes past that,
+    /// since a launch that found all its pipelines in the cache doesn't grow it.
+    saved: AtomicUsize,
+}
+
+/// How big `cache` is right now, without copying its data out.
+fn pipeline_cache_size(raw: &makepad_vulkan::Device, cache: vk::PipelineCache) -> usize {
+    let Some(call) = raw.table.get_pipeline_cache_data else { return 0 };
+    let mut size = 0;
+    unsafe { call(raw.handle(), cache, &mut size, std::ptr::null_mut()) }.result().map_or(0, |_| size)
+}
+
 /// The device's pipeline cache, primed from its file when there is one. On a phone's GPU
 /// an app's warm start spent seconds of its HAL thread in vkCreateGraphicsPipelines
 /// (every variant compiled from SPIR-V, every launch) before this.
-fn open_pipeline_cache(raw: &makepad_vulkan::Device, properties: &vk::PhysicalDeviceProperties) -> (vk::PipelineCache, Option<PathBuf>) {
-    let file = pipeline_cache_file(properties);
-    let data = file.as_ref().and_then(|f| std::fs::read(f).ok()).unwrap_or_default();
+fn open_pipeline_cache(raw: &makepad_vulkan::Device, properties: &vk::PhysicalDeviceProperties) -> (vk::PipelineCache, Option<PipelineCacheFile>, bool) {
+    let path = pipeline_cache_file(properties);
+    // we delete files no launch will read: temp files of saves that died midway, and this app's files
+    // for other drivers of its GPU (or on Android, where the folder is the app's own, every other file)
+    if let Some((dir, name)) = path.as_ref().and_then(|p| Some((p.parent()?, p.file_name()?.to_str()?))) {
+        let app_gpu = name.rsplit_once('-').map_or(name, |(app_gpu, _)| app_gpu);
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let file = entry.file_name();
+            let Some(file) = file.to_str().filter(|f| f.starts_with("pipelines-") && *f != name) else { continue };
+            let stale = match file.strip_suffix(".tmp") {
+                Some(tmp) => tmp.rsplit_once('.').and_then(|(_, n)| n.split_once('-')).is_some_and(|(pid, _)| !Path::new("/proc").join(pid).exists()),
+                None => file.ends_with(".bin") && (cfg!(target_os = "android") || file.rsplit_once('-').is_some_and(|(other, _)| other == app_gpu)),
+            };
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+                if log_enabled() { eprintln!("[hal-vulkan] pipeline cache: deleted stale {file}"); }
+            }
+        }
+    }
+    // what changes with each new build of the app, so it starts a fresh cache: on Android the
+    // package's version and last update time, elsewhere the executable's size and mtime
+    #[cfg(target_os = "android")]
+    let build = crate::backend::android::AndroidBackend::params().app_build;
+    #[cfg(not(target_os = "android"))]
+    let build = {
+        // an AppImage runs from a new mount folder each launch, so there we key on the image file,
+        // but only from inside it (APPDIR), since APPIMAGE leaks into the programs an AppImage starts
+        let exe = std::env::current_exe().ok();
+        let appimage = std::env::var_os("APPDIR").filter(|dir| exe.as_ref().is_some_and(|exe| exe.starts_with(dir)))
+            .and_then(|_| std::env::var_os("APPIMAGE")).map(PathBuf::from);
+        let meta = appimage.clone().or(exe).and_then(|f| f.metadata().ok());
+        let mtime = meta.as_ref().and_then(|m| m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()).unwrap_or_default();
+        format!("{} {} {}", appimage.unwrap_or_default().display(), meta.map_or(0, |m| m.len()), mtime.as_nanos())
+    };
+    let header = format!("makepad pipeline cache: {build}\0").into_bytes();
+    let read = path.as_ref().and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
+    let data = read.strip_prefix(header.as_slice()).filter(|rest| rest.len() >= 16).map(|rest| rest.split_at(16))
+        .filter(|(check, data)| check[..8] == (data.len() as u64).to_le_bytes() && check[8..] == fxhash::hash64(*data).to_le_bytes());
+    let data = match data {
+        Some((_, data)) => data,
+        None => {
+            // another build's file, or a damaged one, counts as no cache, so we drop it and this build saves its own
+            if let Some(p) = path.as_ref().filter(|_| !read.is_empty()) {
+                let _ = std::fs::remove_file(p);
+                if log_enabled() { eprintln!("[hal-vulkan] pipeline cache: {} is from another build or damaged, dropped", p.display()); }
+            }
+            &[]
+        }
+    };
     let mut info = vk::PipelineCacheCreateInfo::default();
     if !data.is_empty() { info.initial_data_size = data.len(); info.p_initial_data = data.as_ptr() as *const std::ffi::c_void; }
-    let made = unsafe { raw.create_pipeline_cache(&info, None) }
-        .or_else(|_| unsafe { raw.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None) });
+    // the driver ignores data whose header names another device or cache UUID, and a header
+    // alone has no pipelines in it
+    let warm = data.len() > 32 && data[8..12] == properties.vendor_id.to_le_bytes()
+        && data[12..16] == properties.device_id.to_le_bytes() && data[16..32] == properties.pipeline_cache_uuid;
+    let made = unsafe { raw.create_pipeline_cache(&info, None) }.map(|cache| (cache, !warm))
+        .or_else(|_| unsafe { raw.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None) }.map(|cache| (cache, true)));
     match made {
-        Ok(cache) => {
-            if log_enabled() { eprintln!("[hal-vulkan] pipeline cache: {} bytes from {}", data.len(), file.as_ref().map_or("nowhere".into(), |f| f.display().to_string())); }
-            (cache, file)
+        Ok((cache, cold)) => {
+            // without a file nothing is kept for the next launch, so no launch counts as cold
+            let cold = cold && path.is_some();
+            if log_enabled() { eprintln!("[hal-vulkan] pipeline cache: {} bytes from {} (cold: {cold})", data.len(), path.as_ref().map_or("nowhere".into(), |p| p.display().to_string())); }
+            (cache, path.map(|path| PipelineCacheFile { path, header, saved: AtomicUsize::new(pipeline_cache_size(raw, cache)) }), cold)
         }
-        Err(e) => { eprintln!("[hal-vulkan] pipeline cache: {e:?}; pipelines are compiled every run"); (vk::PipelineCache::null(), None) }
+        Err(e) => { eprintln!("[hal-vulkan] pipeline cache: {e:?}; pipelines are compiled every run"); (vk::PipelineCache::null(), None, false) }
     }
 }
 
 impl Device {
-    /// Writes the pipeline cache when pipelines were made since it was last saved (the file is
-    /// replaced whole, through a rename). Called from the compile worker and at exit.
+    /// Writes the pipeline cache when pipelines were made since it was last saved and the cache
+    /// grew (the file is replaced whole, through a rename). Called from the compile worker and at exit.
     pub fn save_pipeline_cache(&self) {
         if self.pipeline_cache == vk::PipelineCache::null() { return; }
         let Some(file) = &self.pipeline_cache_file else { return };
         if self.pipelines_made.swap(0, Ordering::AcqRel) == 0 { return; }
+        let size = pipeline_cache_size(&self.raw, self.pipeline_cache);
+        if size <= file.saved.load(Ordering::Relaxed) {
+            if log_enabled() { eprintln!("[hal-vulkan] pipeline cache didn't grow ({size} bytes), not saved"); }
+            return;
+        }
         let data = match unsafe { self.raw.get_pipeline_cache_data(self.pipeline_cache) } {
             Ok(d) => d,
             Err(e) => { eprintln!("[hal-vulkan] pipeline cache data: {e:?}"); return; }
         };
-        let tmp = file.with_extension("tmp");
-        let written = file.parent().map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|_| std::fs::write(&tmp, &data))
-            .and_then(|_| std::fs::rename(&tmp, file));
+        // each save writes its own temp file, so two saves at once (ours at exit, or another
+        // instance of the app's) can't publish a mix of both
+        static SAVES: AtomicU32 = AtomicU32::new(0);
+        let tmp = file.path.with_extension(format!("{}-{}.tmp", std::process::id(), SAVES.fetch_add(1, Ordering::Relaxed)));
+        let written = file.path.parent().map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|_| std::fs::File::create(&tmp))
+            .and_then(|mut f| {
+                f.write_all(&file.header)?;
+                f.write_all(&(data.len() as u64).to_le_bytes())?;
+                f.write_all(&fxhash::hash64(&data[..]).to_le_bytes())?;
+                f.write_all(&data)?;
+                // on disk before the rename, so a crash right after a save can't leave a short file
+                f.sync_all()
+            })
+            .and_then(|_| std::fs::rename(&tmp, &file.path));
         match written {
-            Ok(()) => if log_enabled() { eprintln!("[hal-vulkan] pipeline cache saved: {} bytes", data.len()); },
-            Err(e) => eprintln!("[hal-vulkan] pipeline cache {}: {e}", file.display()),
+            Ok(()) => {
+                file.saved.store(data.len(), Ordering::Relaxed);
+                if log_enabled() { eprintln!("[hal-vulkan] pipeline cache saved: {} bytes", data.len()); }
+            }
+            Err(e) => { let _ = std::fs::remove_file(&tmp); eprintln!("[hal-vulkan] pipeline cache {}: {e}", file.path.display()) }
         }
     }
 }

@@ -367,20 +367,6 @@ pub fn heap_in_use_bytes() -> Option<u64> {
     }
 }
 
-/// Keep glibc's trim threshold at 1 MB: its adaptive threshold can otherwise rise
-/// after large frees and retain subsequent allocations in thread arenas.
-/// Call once at startup.
-pub fn return_freed_memory_promptly() {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        const M_TRIM_THRESHOLD: i32 = -1;
-        extern "C" {
-            fn mallopt(param: i32, value: i32) -> i32;
-        }
-        unsafe { mallopt(M_TRIM_THRESHOLD, 1 << 20) };
-    }
-}
-
 /// Give the allocator's free pages back to the system after a burst of work.
 /// Never call on the UI thread: this walks the allocator's arenas or zones.
 pub fn release_free_memory() {

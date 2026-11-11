@@ -19,8 +19,8 @@ pub(super) enum Event {
     Capture { window: Id, surface: Arc<crate::backend::linux::media::capture_surface::Surface> },
     Presented { target: Id, frame: u64 },
     /// `gpu_span`: the frame's first and last timestamps in seconds of the device's clock (the
-    /// frame timer orders a frame's passes by it).
-    Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, gpu_span: [f64; 2] },
+    /// frame timer orders a frame's passes by it). `ran`: the GPU did the frame's work.
+    Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, gpu_span: [f64; 2], ran: bool },
     DispatchTime { name: String, gpu_ns: u64 },
     BufferLeases { req: u32, status: u32, leases: Vec<crate::lease::Lease> },
     Readback { req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
@@ -132,6 +132,22 @@ impl Spare {
         let released = lock(&self.arenas).give(std::iter::empty());
         drop(released);
     }
+
+    /// When `trim` should look again (HAL clock ns): a free arena going idle, or the one a batch took
+    /// last, since a batch with no frame gives its arenas back without waking any pump.
+    pub fn trim_due(&self) -> Option<u64> {
+        let arenas = lock(&self.arenas);
+        let now = crate::clock_ns();
+        arenas.free.iter().map(|(_, since)| now.saturating_sub(since.elapsed().as_nanos() as u64)).chain(arenas.lent).min()
+            .map(|since| since + ARENA_IDLE.as_nanos() as u64)
+    }
+
+    /// Releases every free arena now (the app went to the background).
+    #[cfg(target_os = "android")]
+    pub fn release_all(&self) {
+        let released = lock(&self.arenas).release_all();
+        drop(released);
+    }
 }
 
 /// More slots than this are not kept for reuse: twice the batches that may be in flight.
@@ -170,11 +186,14 @@ fn arena_size(need: u64) -> u64 {
 struct Arenas {
     free: Vec<(Arc<Buffer>, std::time::Instant)>,
     bytes: u64,
+    /// when a batch last took one or made its own (HAL clock ns), until `ARENA_IDLE` after
+    lent: Option<u64>,
 }
 
 impl Arenas {
     /// The smallest free arena of at least `want` bytes, else the largest that holds `len`.
     fn take(&mut self, want: u64, len: u64) -> Option<Arc<Buffer>> {
+        self.lent = Some(crate::clock_ns());
         let fits = |min: u64| self.free.iter().enumerate().filter(move |(_, (a, _))| a.size >= min);
         let i = fits(want).min_by_key(|(_, (a, _))| a.size).or_else(|| fits(len).max_by_key(|(_, (a, _))| a.size)).map(|(i, _)| i)?;
         let (arena, _) = self.free.swap_remove(i);
@@ -206,6 +225,7 @@ impl Arenas {
             let (arena, _) = self.free.swap_remove(i);
             self.bytes -= arena.bytes; released.push(arena);
         }
+        self.lent = self.lent.filter(|lent| crate::clock_ns().saturating_sub(*lent) <= ARENA_IDLE.as_nanos() as u64);
         released
     }
 }
@@ -772,7 +792,7 @@ impl Batch {
                     // all the same, never presented: its app paints again (a dropped frame) or
                     // after DeviceReset (a lost device)
                     token.incarnation.done(frame);
-                    push(token, Event::Frame { target, kind, frame, window: window && !failed, gpu_ns, gpu_span });
+                    push(token, Event::Frame { target, kind, frame, window: window && !failed, gpu_ns, gpu_span, ran: !failed });
                 }
                 Ticket::Copy { token, req, rect } => push(token, Event::Readback {
                     req, rect, status: if failed { readback::FAILED } else { readback::OK }, pixels: Vec::new(),

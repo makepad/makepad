@@ -11,7 +11,7 @@ use std::{
     collections::HashSet,
     ffi::c_void,
     sync::{
-        atomic::{AtomicBool, AtomicI32, Ordering},
+        atomic::{AtomicI32, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -21,48 +21,8 @@ pub const AUDIO_BLOCK_FRAMES: usize = 1024;
 
 pub type Entry = AudioEntry;
 
-#[derive(Default)]
-pub struct Slot {
-    busy: AtomicBool,
-    changing: AtomicBool,
-    entry: UnsafeCell<Option<Entry>>,
-}
-// The atomic admission gate protects the entry; the realtime thread never waits.
-unsafe impl Send for Slot {}
-unsafe impl Sync for Slot {}
-impl Slot {
-    pub fn replace(&self, entry: Option<Entry>) {
-        self.changing.store(true, Ordering::SeqCst);
-        // AudioEntry explicitly requires quiescence before hal_submit returns: after this
-        // finite admitted block, the client may destroy the old context immediately.
-        while self
-            .busy
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            std::hint::spin_loop();
-        }
-        unsafe {
-            *self.entry.get() = entry;
-        }
-        self.busy.store(false, Ordering::SeqCst);
-        self.changing.store(false, Ordering::SeqCst);
-    }
-    fn call(&self, block: &mut AudioBlock) {
-        if self.changing.load(Ordering::SeqCst)
-            || self
-                .busy
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-        {
-            return;
-        }
-        if let Some(entry) = unsafe { *self.entry.get() } {
-            entry.call(block);
-        }
-        self.busy.store(false, Ordering::SeqCst);
-    }
-}
+/// A device slot's entry: the HAL-wide lock-free slot (`media::EntrySlot`).
+pub type Slot = crate::media::EntrySlot;
 
 #[derive(Clone, Default)]
 pub struct Entries([Vec<Arc<Slot>>; 2]);
@@ -311,7 +271,7 @@ unsafe extern "C" fn data_callback(
                 channels: callback.channels as u32,
                 planes: scratch.planes.as_mut_ptr(),
             };
-            callback.slot.call(&mut block);
+            callback.slot.with(|entry| entry.call(&mut block));
             if !callback.input {
                 for channel in 0..callback.channels {
                     for i in 0..count {

@@ -1,76 +1,11 @@
 //! Realtime entries shared by the ALSA and PulseAudio transports.
 use crate::media::{AudioBlock, AudioEntry};
-use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub type Entry = AudioEntry;
 
-/// The realtime side never waits for the control thread. Replacement disables admission,
-/// then waits only for the already admitted block, as required by AudioEntry's ABI.
-#[derive(Default)]
-pub struct Slot {
-    busy: AtomicBool,
-    changing: AtomicBool,
-    entry: UnsafeCell<Option<Entry>>,
-}
-unsafe impl Send for Slot {}
-unsafe impl Sync for Slot {}
-
-impl Slot {
-    pub fn replace(&self, entry: Option<Entry>) {
-        self.changing.store(true, Ordering::SeqCst);
-        while self
-            .busy
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            std::hint::spin_loop();
-        }
-        unsafe {
-            *self.entry.get() = entry;
-        }
-        self.busy.store(false, Ordering::SeqCst);
-        self.changing.store(false, Ordering::SeqCst);
-    }
-
-    pub fn call(&self, device: u64, rate: f64, buffer: &mut Buffer) {
-        if self.changing.load(Ordering::SeqCst)
-            || self
-                .busy
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-        {
-            return;
-        }
-        // The client entry catches its own panic; unwinding through extern C is forbidden.
-        // HAL-side conversion is also caught by each native callback before returning to C.
-        if let Some(entry) = unsafe { *self.entry.get() } {
-            for start in (0..buffer.frames).step_by(super::AUDIO_BLOCK_FRAMES) {
-                let frames = (buffer.frames - start).min(super::AUDIO_BLOCK_FRAMES);
-                let mut planes = unsafe {
-                    [
-                        buffer.samples.as_mut_ptr().add(start),
-                        buffer.samples.as_mut_ptr().add(buffer.capacity + start),
-                    ]
-                };
-                let mut block = AudioBlock {
-                    device,
-                    sample_rate: rate,
-                    sample_time: 0.0,
-                    host_time: 0,
-                    rate_scalar: 1.0,
-                    has_time: 0,
-                    frames: frames as u32,
-                    channels: 2,
-                    planes: planes.as_mut_ptr(),
-                };
-                entry.call(&mut block);
-            }
-        }
-        self.busy.store(false, Ordering::SeqCst);
-    }
-}
+/// A device slot's entry: the HAL-wide lock-free slot (`media::EntrySlot`).
+pub type Slot = crate::media::EntrySlot;
 
 /// Negotiated transport periods are split into this preallocated planar storage. A larger
 /// PulseAudio request is processed in more blocks, never allocated or discarded in a callback.
@@ -80,6 +15,34 @@ pub struct Buffer {
     pub frames: usize,
 }
 impl Buffer {
+    /// Run the slot's entry over the period in `AUDIO_BLOCK_FRAMES` blocks of this storage.
+    /// Skipped (the period keeps what it holds) while the slot has no entry or is replaced.
+    pub fn call(&mut self, slot: &Slot, device: u64, rate: f64) {
+        let (frames, capacity) = (self.frames, self.capacity);
+        let samples = self.samples.as_mut_ptr();
+        slot.with(|entry| {
+            // The client entry catches its own panic; unwinding through extern C is forbidden.
+            // HAL-side conversion is also caught by each native callback before returning to C.
+            for start in (0..frames).step_by(super::AUDIO_BLOCK_FRAMES) {
+                let block_frames = (frames - start).min(super::AUDIO_BLOCK_FRAMES);
+                // SAFETY: both planes lie in `samples` (two planes of `capacity` floats)
+                let mut planes = unsafe { [samples.add(start), samples.add(capacity + start)] };
+                let mut block = AudioBlock {
+                    device,
+                    sample_rate: rate,
+                    sample_time: 0.0,
+                    host_time: 0,
+                    rate_scalar: 1.0,
+                    has_time: 0,
+                    frames: block_frames as u32,
+                    channels: 2,
+                    planes: planes.as_mut_ptr(),
+                };
+                entry.call(&mut block);
+            }
+        });
+    }
+
     pub fn new(frames: usize) -> Self {
         Self {
             samples: vec![0.0; frames * 2],

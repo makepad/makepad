@@ -333,6 +333,12 @@ impl Conn {
     }
 
     pub fn open_timeout(&self, service: &str, args: &str, wait: Duration) -> Result<Channel, (u16, String)> {
+        // OPEN is one control frame (only DATA is chunked). Refuse before
+        // queueing so an oversized call cannot tear down the whole carrier.
+        let bytes = service.len().saturating_add(1).saturating_add(args.len());
+        if bytes > MAX_PAYLOAD {
+            return Err((CLOSE_REFUSED, format!("the encoded call is {bytes} bytes; one call carries {MAX_PAYLOAD}. Send a smaller first part, then append the rest with the service's edit tool.")));
+        }
         if !self.is_usable() {
             return Err((CLOSE_LINK_LOST, self.close_reason()));
         }

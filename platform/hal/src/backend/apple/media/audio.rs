@@ -31,8 +31,8 @@ pub const MAX_AUDIO_DEVICE_INDEX: usize = 32;
 /// A registered entry.
 pub type Entry = AudioEntry;
 
-/// The entry of one device slot. Locked while the entry runs.
-pub type Slot = Arc<Mutex<Option<Entry>>>;
+/// The entry of one device slot: the HAL-wide lock-free slot (`media::EntrySlot`).
+pub type Slot = Arc<crate::media::EntrySlot>;
 
 /// Planar samples: `channels` runs of `frames` floats.
 pub struct Planar {
@@ -52,15 +52,19 @@ impl Planar {
 
 /// Calls the input entry of `slot` with `buffer`, when there is one.
 pub fn call_input(slot: &Slot, device: u64, time: Option<(f64, u64, f64)>, sample_rate: f64, buffer: &Planar) {
-    let guard = slot.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(entry) = *guard else { return };
-    let mut planes: Vec<*mut f32> = (0..buffer.channels).map(|c| buffer.data[c * buffer.frames..].as_ptr() as *mut f32).collect();
-    let (has_time, sample_time, host_time, rate_scalar) = match time {
-        Some((s, h, r)) => (1, s, h, r),
-        None => (0, 0.0, 0, 0.0),
-    };
-    let mut block = AudioBlock { device, sample_rate, sample_time, host_time, rate_scalar, has_time, frames: buffer.frames as u32, channels: buffer.channels as u32, planes: planes.as_mut_ptr() };
-    entry.call(&mut block);
+    slot.with(|entry| {
+        let channels = buffer.channels.min(MAX_AUDIO_BUFFERS);
+        let mut planes = [std::ptr::null_mut::<f32>(); MAX_AUDIO_BUFFERS];
+        for (c, plane) in planes.iter_mut().enumerate().take(channels) {
+            *plane = buffer.data[c * buffer.frames..].as_ptr() as *mut f32;
+        }
+        let (has_time, sample_time, host_time, rate_scalar) = match time {
+            Some((s, h, r)) => (1, s, h, r),
+            None => (0, 0.0, 0, 0.0),
+        };
+        let mut block = AudioBlock { device, sample_rate, sample_time, host_time, rate_scalar, has_time, frames: buffer.frames as u32, channels: channels as u32, planes: planes.as_mut_ptr() };
+        entry.call(&mut block);
+    });
 }
 
 pub struct AudioUnitAccess {
@@ -1069,12 +1073,11 @@ impl AudioUnit {
                     unsafe { std::ptr::write_bytes(plane, 0, frames) };
                     planes[i] = plane;
                 }
-                let guard = slot.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(entry) = *guard {
+                slot.with(|entry| {
                     let (sample_time, host_time, rate_scalar) = unsafe { ((*time_stamp).mSampleTime, (*time_stamp).mHostTime, (*time_stamp).mRateScalar) };
                     let mut block = AudioBlock { device, sample_rate, sample_time, host_time, rate_scalar, has_time: 1, frames: frame_count, channels: channels as u32, planes: planes.as_mut_ptr() };
                     entry.call(&mut block);
-                }
+                });
                 0
             }
         );
@@ -1096,14 +1099,19 @@ impl AudioUnit {
         if let Some(render_block) = self.render_block {
             unsafe {
                 let input_channels = self.input_channels.max(1);
-                // the captured block lives here between calls: it grows when a block is larger
-                let scratch = Mutex::new(Planar::new(0, input_channels));
+                // The captured block lives here between calls, allocated now for the most the unit
+                // renders at once (its contract): a block only changes `frames`, never allocates.
+                // Only the unit's IO thread takes this lock.
+                let most: u32 = msg_send![self.au_audio_unit, maximumFramesToRender];
+                let scratch = Mutex::new(Planar::new((most as usize).max(4096), input_channels));
                 let input_handler = objc_block!(move |_flags: *mut u32, time_stamp: *const AudioTimeStamp, frame_count: u32, _input_bus_number: u64| {
                     let mut buffer = scratch.lock().unwrap_or_else(|e| e.into_inner());
                     let frames = frame_count as usize;
-                    if buffer.frames != frames {
-                        *buffer = Planar::new(frames, input_channels);
+                    if frames * input_channels > buffer.data.len() {
+                        // past the unit's own maximum: grow rather than lose the block
+                        buffer.data.resize(frames * input_channels, 0.0);
                     }
+                    buffer.frames = frames;
                     let mut flags = 0u32;
                     let mut buffer_list = AudioBufferList { mNumberBuffers: input_channels.min(MAX_AUDIO_BUFFERS) as u32, mBuffers: [_AudioBuffer { mNumberChannels: 0, mDataByteSize: 0, mData: 0 as *mut ::std::os::raw::c_void }; MAX_AUDIO_BUFFERS] };
                     for i in 0..input_channels.min(MAX_AUDIO_BUFFERS) {

@@ -48,6 +48,16 @@ struct Pipe {
     epoch: u64,
     announced: bool,
 }
+/// A program that ran out of memory on a live device. Its pipelines keep the failure until a
+/// build made again in the background fits, then they move to that build.
+struct Starved {
+    failed: Arc<PipeState>,
+    next: Option<Arc<PipeState>>,
+    /// when `next` starts, if it isn't running (HAL clock ns)
+    retry_ns: u64,
+}
+/// How long a program that ran out of memory waits to be built again, as on Vulkan.
+const STARVED_RETRY_NS: u64 = 16_000_000;
 
 /// How often the device's memory count is read.
 const COUNT_NS: u64 = 250_000_000;
@@ -64,6 +74,7 @@ pub struct D3d11 {
     compute: HashMap<(u32, u32), compute::Pipe>,
     /// compiled pipelines shared by identical sources and layouts (by `PipeSrc::hash_key`)
     programs: HashMap<u64, Vec<Weak<PipeState>>>,
+    starved: Vec<Starved>,
     /// windows' retained images, by (owner, index)
     win: HashMap<(u32, u32), Tex>,
     /// session 0's windows with a badge layer (by index), and the image each last presented: its
@@ -186,6 +197,7 @@ impl D3d11 {
             pipe: HashMap::new(),
             compute: HashMap::new(),
             programs: HashMap::new(),
+            starved: Vec::new(),
             win: HashMap::new(),
             badged: HashMap::new(),
             compose: None,
@@ -336,6 +348,11 @@ impl D3d11 {
             }
             if let Some(e) = pipe.state.failure() {
                 eprintln!("[hal-d3d11] pipeline {id:?} failed: {}", e.lines().next().unwrap_or(""));
+                // D3D11 can't ask the apps for room, so `step` builds it again until some frees up
+                if pipe.state.out_of_memory() && !self.dev.check_lost() && !self.starved.iter().any(|st| Arc::ptr_eq(&st.failed, &pipe.state)) {
+                    eprintln!("[hal-d3d11] `{}` ran out of memory; building it again until it fits", pipe.state.src.name);
+                    self.starved.push(Starved { failed: pipe.state.clone(), next: None, retry_ns: crate::clock_ns() + STARVED_RETRY_NS });
+                }
                 let log = e.to_owned();
                 world.to_session(*sid, |q| q.pipeline_failed(id, log.as_bytes()));
             } else if pipe.state.ready().is_some() {
@@ -408,6 +425,38 @@ impl Backend for D3d11 {
     }
     fn step(&mut self, world: &mut World, sid: u32) {
         self.recover(world);
+        // A program that ran out of memory is built again until a build fits. Its pipelines move
+        // to that build, and the `drain` below tells them how it went.
+        if !self.starved.is_empty() && !self.dev.check_lost() {
+            let now = crate::clock_ns();
+            for mut st in std::mem::take(&mut self.starved) {
+                // no pipeline uses it anymore
+                if Arc::strong_count(&st.failed) == 1 {
+                    continue;
+                }
+                match st.next.take() {
+                    None if now < st.retry_ns => {}
+                    None => {
+                        let next = PipeState::new(st.failed.src.clone());
+                        self.compile(&next);
+                        st.next = Some(next);
+                    }
+                    Some(next) => match next.program.get() {
+                        None => st.next = Some(next),
+                        Some(_) if next.out_of_memory() => st.retry_ns = now + STARVED_RETRY_NS,
+                        Some(_) => {
+                            for pipe in self.pipe.values_mut().filter(|p| Arc::ptr_eq(&p.state, &st.failed)) {
+                                pipe.state = next.clone();
+                                pipe.epoch = 0;
+                            }
+                            self.programs.entry(next.src.hash_key()).or_default().push(Arc::downgrade(&next));
+                            continue;
+                        }
+                    },
+                }
+                self.starved.push(st);
+            }
+        }
         self.drain(world);
         if let Some(shell) = self.shell {
             for (owner, id) in shell.drain_events(sid, world) {
@@ -428,7 +477,9 @@ impl Backend for D3d11 {
         exec::step_timers(world, sid);
     }
     fn next_due(&self, world: &World, sid: u32) -> Option<u64> {
-        exec::next_timer(world, sid)
+        // timers, and the next build of a program that ran out of memory
+        let retry = self.starved.iter().filter(|st| st.next.is_none()).map(|st| st.retry_ns).min();
+        exec::next_timer(world, sid).into_iter().chain(retry).min()
     }
     fn session_closed(&mut self, world: &mut World, sid: u32) {
         if let Some(shell) = self.shell {
@@ -522,6 +573,8 @@ impl exec::DeviceReset for D3d11 {
             }
         }
         self.programs.clear();
+        // every program is built again below, the ones that ran out of memory too
+        self.starved.clear();
         let mut rebuilt: HashMap<*const PipeState, Arc<PipeState>> = HashMap::new();
         let keys: Vec<(u32, u32)> = self.pipe.keys().copied().collect();
         for key in keys {

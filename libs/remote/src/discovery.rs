@@ -268,16 +268,31 @@ pub(crate) fn rewrite_caps(file: &std::path::Path, caps: &[String]) {
 /// A makepad WM gives its JIT apps an on-disk TMPDIR (`~/.makepad/wm/jit.env`), and `makepad
 /// inspect` from a shell has another: with the files in the temp dir it found none of them
 /// (166, 2026-10-25). Linux (and other Unix with a session): `$XDG_RUNTIME_DIR`, the user's 0700
-/// runtime dir; elsewhere the temp dir (macOS's is per user already).
+/// runtime dir; elsewhere the temp dir (macOS's is per user already). This crate's own tests use
+/// [`crate::carrier::unix::test_root`] instead.
 pub fn registry_dir() -> std::path::PathBuf {
+    #[cfg(not(test))]
+    {
+        registry_dir_of(std::env::var_os("MAKEPAD_REMOTE_REGISTRY"), std::env::var_os("XDG_RUNTIME_DIR"))
+    }
+    #[cfg(test)]
+    {
+        crate::carrier::unix::test_root()
+    }
+}
+
+/// [`registry_dir`] from `MAKEPAD_REMOTE_REGISTRY` and `XDG_RUNTIME_DIR`.
+fn registry_dir_of(registry: Option<std::ffi::OsString>, xdg: Option<std::ffi::OsString>) -> std::path::PathBuf {
     // a run whose TMPDIR is its own (a devhub lease on a Mac) still announces where its node's hub looks
-    if let Some(dir) = std::env::var_os("MAKEPAD_REMOTE_REGISTRY").map(std::path::PathBuf::from).filter(|d| d.is_absolute()) {
+    if let Some(dir) = registry.map(std::path::PathBuf::from).filter(|d| d.is_absolute()) {
         return dir;
     }
     #[cfg(all(unix, not(target_os = "macos")))]
-    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).filter(|d| d.is_absolute() && d.is_dir()) {
+    if let Some(dir) = xdg.map(std::path::PathBuf::from).filter(|d| d.is_absolute() && d.is_dir()) {
         return dir;
     }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    drop(xdg);
     std::env::temp_dir()
 }
 
@@ -338,6 +353,17 @@ pub fn named(list: &[App], name: &str, caller: &Caller) -> Result<App, String> {
 
 fn no_endpoint(spec: &str) -> String {
     format!("no running makepad-remote endpoint `{spec}`")
+}
+
+/// Lists [`apps`] on a thread of its own, which removes the files killed launches left in a phone
+/// app's temp dir. A desktop keeps them, since the devhub reads one left behind as a crash.
+#[cfg(any(target_os = "android", target_os = "ios", target_os = "tvos"))]
+pub(crate) fn remove_stale(hooks: crate::conn::Hooks) {
+    let _ = std::thread::Builder::new().name("makepad-remote-sweep".into()).spawn(move || {
+        (hooks.enter)();
+        let _ = apps();
+        (hooks.exit)();
+    });
 }
 
 /// `spec` is a pid, an app name for `caller` ([`named`]), or a
@@ -426,14 +452,23 @@ mod registry_tests {
     /// The discovery file is in the registry dir, not the temp dir: a process with another TMPDIR
     /// (a WM's JIT apps, `~/.makepad/wm/jit.env`) still lists in `makepad inspect` from a shell.
     /// Its socket is in the socket dir, not the temp dir either (a deep one cannot hold it).
+    /// The registry is the one a run is told (`MAKEPAD_REMOTE_REGISTRY`), else on Linux the
+    /// session's runtime dir, else the temp dir. This crate's tests announce in neither the
+    /// process's own registry nor its socket dir: a live JIT's endpoint is there, under their pid.
     #[test]
     fn discovery_files_go_to_the_registry_dir() {
+        use super::registry_dir_of as of;
+        use std::path::PathBuf;
         let (sock, disc) = crate::carrier::unix::paths(7);
         assert_eq!(disc.parent(), Some(super::registry_dir().as_path()));
         assert_eq!(sock.parent(), Some(crate::carrier::unix::socket_dir().as_path()));
-        #[cfg(all(unix, not(target_os = "macos")))]
-        if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).filter(|d| d.is_absolute() && d.is_dir()) {
-            assert_eq!(super::registry_dir(), xdg);
-        }
+        assert_eq!(of(Some("/told".into()), Some("/".into())), PathBuf::from("/told"), "the registry a run is told comes first");
+        assert_eq!(of(Some("told".into()), None), std::env::temp_dir(), "a relative one is not a registry");
+        let runtime = if cfg!(all(unix, not(target_os = "macos"))) { PathBuf::from("/") } else { std::env::temp_dir() };
+        assert_eq!(of(None, Some("/".into())), runtime, "Linux: the session's runtime dir");
+        assert_eq!(of(None, Some("/no/such/runtime".into())), std::env::temp_dir(), "a runtime dir that is not there is not one");
+        let own = of(std::env::var_os("MAKEPAD_REMOTE_REGISTRY"), std::env::var_os("XDG_RUNTIME_DIR"));
+        assert_ne!(super::registry_dir(), own, "the tests announce in a registry of their own");
+        assert_ne!(crate::carrier::unix::socket_dir(), crate::carrier::unix::user_socket_dir(), "and listen in a socket dir of their own");
     }
 }

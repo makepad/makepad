@@ -211,6 +211,8 @@ pub(crate) struct FrameBuilder {
     /// The pass being built draws all it recorded, from whole pictures: a draw left out for a
     /// pipeline the HAL is still compiling, or a sample of an unfinished picture, clears it.
     pass_whole: bool,
+    /// Of `pass_whole`, its own draws: only a draw left out clears it, not a sample.
+    pass_drew_all: bool,
     /// What staged uploads ([`crate::Texture::set_staged_upload`]) may still send this frame.
     staged_left: usize,
     pub(crate) stats: BuildStats,
@@ -550,8 +552,11 @@ impl FrameBuilder {
     pub(crate) fn pipeline_ready(&mut self, id: Id) -> bool {
         match self.pipes.get_mut(id.index as usize) {
             Some(p) if p.id == id => {
+                // A failed pipeline can come back (built again on a new device, or once there's
+                // memory for it), and then its draws, left out so far, paint again.
+                let was_failed = std::mem::take(&mut p.failed);
                 let again = std::mem::replace(&mut p.ready, true);
-                std::mem::take(&mut p.drawn_unready) || again
+                std::mem::take(&mut p.drawn_unready) || again || was_failed
             }
             _ => false,
         }
@@ -598,6 +603,18 @@ impl FrameBuilder {
         self.pipes.get(pipe).is_some_and(|p| p.ready)
     }
 
+    /// Whether the draws of pipeline `pipe` show this frame, or `None` while the HAL is still compiling it.
+    pub(crate) fn pipeline_draws(&self, pipe: usize) -> Option<bool> {
+        let p = self.pipes.get(pipe)?;
+        if p.failed { Some(false) } else { p.ready.then_some(true) }
+    }
+
+    /// The HAL surface a texture shows when the HAL lent it, as one number.
+    pub(crate) fn lent_surface(&self, id: TextureId) -> Option<u64> {
+        let (_, surface) = self.lent.get(&id.0).filter(|(gen, _)| *gen == id.generation())?;
+        Some((surface.index as u64) << 32 | surface.gen as u64)
+    }
+
     /// The failed pipeline's first shader, and whether a pass waited for it (it paints again,
     /// without those draws).
     pub(crate) fn pipeline_failed(&mut self, id: Id) -> Option<(usize, bool)> {
@@ -610,6 +627,7 @@ impl FrameBuilder {
     /// compilation, or what it samples is not there yet): this paint is not whole.
     pub(crate) fn left_out(&mut self) {
         self.pass_whole = false;
+        self.pass_drew_all = false;
     }
 
     /// Whether the pass just built left no draw out: only such a paint of a window is grabbed.
@@ -625,6 +643,7 @@ impl FrameBuilder {
         if !p.ready && !p.failed {
             p.drawn_unready = true;
             self.pass_whole = false;
+            self.pass_drew_all = false;
             self.want(pipe);
         }
         !self.pipes[pipe].failed
@@ -1344,6 +1363,23 @@ impl Cx {
         self.hal_pick_readback(fb, ticket, original, twin);
     }
 
+    /// The Activity shows our clear color in place of the surface whenever it hasn't drawn yet,
+    /// like at startup or while resuming.
+    #[cfg(target_os = "android")]
+    pub(crate) fn fb_send_app_background(&mut self, fb: &mut FrameBuilder, pass_id: DrawPassId) {
+        if let CxDrawPassParent::Window(w) = self.passes[pass_id].parent {
+            if !self.windows[w].is_popup {
+                let color = self.passes[pass_id].clear_color;
+                let [r, g, b] = [color.x, color.y, color.z].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u32);
+                let argb = 0xFF00_0000 | (r << 16) | (g << 8) | b;
+                if self.hal.app_background_argb != Some(argb) {
+                    self.hal.app_background_argb = Some(argb);
+                    fb.w.mobile_ui(makepad_hal::mobile_ui::APP_BACKGROUND, argb);
+                }
+            }
+        }
+    }
+
     /// One pass into one FramePacket. None when the pass paints nothing now.
     fn fb_pass(&mut self, fb: &mut FrameBuilder, pass_id: DrawPassId, input_ns: u64) -> Option<u64> {
         let picking = self.pick.paint.is_some();
@@ -1351,6 +1387,7 @@ impl Cx {
             // Its compute waits for a pipeline the HAL compiles (a part's field still to bake): it
             // keeps its older picture, which is not what it recorded, and the answer repaints.
             self.passes[pass_id].incomplete = true;
+            self.passes[pass_id].left_out = true;
             return None;
         }
         let build_start = makepad_hal::clock_ns();
@@ -1362,6 +1399,7 @@ impl Cx {
             if uncreated || matches!(self.passes[pass_id].parent, CxDrawPassParent::None) {
                 self.passes[pass_id].paint_dirty = false;
                 self.passes[pass_id].incomplete = false;
+                self.passes[pass_id].left_out = false;
             } else {
                 crate::error!("Draw pass has no draw list!");
             }
@@ -1382,20 +1420,8 @@ impl Cx {
             },
             _ => (None, false),
         };
-        // The Activity shows our clear color in place of the surface whenever it hasn't drawn yet,
-        // like at startup or while resuming.
         #[cfg(target_os = "android")]
-        if let CxDrawPassParent::Window(w) = self.passes[pass_id].parent {
-            if !self.windows[w].is_popup {
-                let color = self.passes[pass_id].clear_color;
-                let [r, g, b] = [color.x, color.y, color.z].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u32);
-                let argb = 0xFF00_0000 | (r << 16) | (g << 8) | b;
-                if self.hal.app_background_argb != Some(argb) {
-                    self.hal.app_background_argb = Some(argb);
-                    self.hal.frames.w.mobile_ui(makepad_hal::mobile_ui::APP_BACKGROUND, argb);
-                }
-            }
-        }
+        self.fb_send_app_background(fb, pass_id);
         if let Some(w) = window {
             if !self.hal.window_ready(w) {
                 // the HAL has not confirmed the window yet: the pass stays dirty
@@ -1451,6 +1477,7 @@ impl Cx {
                 PipelineWait::Compile => {
                     // queued for compilation: compiled at the next draw, the pass stays dirty
                     self.passes[pass_id].incomplete = true;
+                    self.passes[pass_id].left_out = true;
                     fb.stats.held_for_pipelines += 1;
                     makepad_hal::profile::count("pass kept its picture: pipeline compiling");
                     return None;
@@ -1564,6 +1591,20 @@ impl Cx {
                 }
             }
         }
+        // A window image the HAL keeps between frames only needs what changed repainted.
+        let can_repaint_partially = is_window && !stereo && !picking && hosted_target.is_none()
+            && !self.draw_damage.is_disabled
+            && self.hal_info_flags() & makepad_hal::info_flags::PARTIAL_REPAINT != 0;
+        if can_repaint_partially {
+            if let Some((rects, since)) = self.compute_pass_damage(fb, pass_id, pass_rect, (tw as i32, th as i32), serial) {
+                let hal_rects: Vec<[f32; 4]> = rects.iter()
+                    .map(|r| [r.x0 as f32, r.y0 as f32, (r.x1 - r.x0) as f32, (r.y1 - r.y0) as f32])
+                    .collect();
+                pass.damage = fb.w.put_rects(&hal_rects);
+                pass.damage_since = since;
+                self.draw_damage.start_repaint(pass_id, rects);
+            }
+        }
         // SAFETY: Cx does not change it before the submit (module header)
         pass.uniforms = unsafe { Slice::of(self.passes[pass_id].pass_uniforms.as_slice()) };
         pass.name = fb.intern(&self.passes[pass_id].debug_name);
@@ -1576,6 +1617,7 @@ impl Cx {
         let sploded = self.passes[pass_id].sploded.is_some();
         let step = self.passes[pass_id].zbias_step;
         fb.pass_whole = true;
+        fb.pass_drew_all = true;
         if multiview {
             // both eyes in one pass: the draws are built once, the GPU renders each eye's layer
             // with its camera (the uniforms' `_r` matrices are the right eye's)
@@ -1614,6 +1656,7 @@ impl Cx {
             fb.w.pass(pass);
             let mut zbias = 0.0f32;
             self.fb_list(fb, pass_id, list_id, sploded, &mut zbias, step, serial);
+            self.draw_damage.end_repaint();
         }
         let end = makepad_hal::clock_ns();
         let (target, kind) = match (window.filter(|_| is_window), self.passes[pass_id].color_textures.first()) {
@@ -1683,8 +1726,12 @@ impl Cx {
             // (a host, a history pass) waits on. A picture still to paint costs nothing: the
             // last one its producer painted is sampled, a frame older, as before.
             let whole = fb.pass_whole;
+            // A draw left out of this paint shows up later, which the next walk can't see coming.
+            if !whole {
+                self.draw_damage.invalidate_pass(pass_id);
+            }
             let before = self.passes[pass_id].painted_serial;
-            self.passes[pass_id].painted(whole, self.repaint_id);
+            self.passes[pass_id].painted(whole, fb.pass_drew_all, self.repaint_id);
             if whole {
                 self.passes[pass_id].painted_frame = serial;
                 self.passes[pass_id].painted_before = before;
@@ -1832,14 +1879,14 @@ impl Cx {
 
     #[allow(clippy::too_many_arguments)]
     fn fb_draw(&mut self, fb: &mut FrameBuilder, pass_id: DrawPassId, list_id: DrawListId, item_id: usize, list_name: StrId, sploded: bool, zbias: &mut f32, step: f32, uniforms_gen: u64, serial: u64, dump: bool) {
-        let shader_index = {
+        let (shader_index, time_fps) = {
             let (list, _) = self.draw_lists.list_and_upload_budget(list_id);
             let Some(call) = list.draw_items.binding_mut(item_id).kind.draw_call_mut() else {
                 // an emptied slot draws nothing: what it drew goes
                 fb.inst_release((list_id.index(), item_id));
                 return;
             };
-            call.draw_shader_id.index
+            (call.draw_shader_id.index, call.options.time_fps)
         };
         let sh = &self.draw_shaders[shader_index];
         let Some(mut pipe_index) = sh.pipeline_id else {
@@ -1859,8 +1906,7 @@ impl Cx {
         }
         if sh.mapping.uses_time {
             // keeps the frame loop awake; only this pass repaints for it
-            self.demo_time_repaint = true;
-            self.passes[pass_id].repaint_next = true;
+            self.demo_time_repaint |= self.passes[pass_id].request_time_repaint(time_fps, &mut self.time_fps_clock);
         }
         let slots = sh.mapping.instances.total_slots;
 
@@ -2068,6 +2114,7 @@ impl Cx {
             item: item_id as u32,
             list_name,
             bounds: instance_bounds(&sh.mapping, &list.draw_list_uniforms, item, slots, instances, fb.pass_px),
+            damage: self.draw_damage.get_repaint_mask(pass_id, list_id, item_id).unwrap_or(0),
         };
         if dump || sh.mapping.flags.debug_draw {
             let data = item.retained_instances.as_ref().map(|v| v.data()).or(item.instances.as_deref()).unwrap_or(&[]);
@@ -2424,7 +2471,6 @@ mod tests {
                 crate::draw_shader::CxDrawShaderCode::Combined { code: String::new() },
                 vm,
                 &crate::makepad_script::shader_reflection::DrawShaderDesc::default(),
-                None,
             )
         });
         let index = cx.draw_shaders.shaders.len();

@@ -511,6 +511,16 @@ impl Device {
         }
     }
 
+    /// When a chunk `arena_trim` hadn't seen idle at `last_trim` (HAL clock ns) goes idle, if that
+    /// can let one go: a larger chunk, or any chunk while there are more than two.
+    pub fn arena_trim_due(&self, last_trim: u64) -> Option<u64> {
+        self.chunks.iter()
+            .filter(|c| self.chunks.len() > 2 || c.capacity > CHUNK_BYTES)
+            .map(|c| c.used_ns + ARENA_IDLE_NS + 1)
+            .filter(|due| *due > last_trim)
+            .min()
+    }
+
     /// The device's own count of what this process holds on it.
     pub fn device_allocated(&self) -> u64 {
         unsafe { msg_send![self.device, currentAllocatedSize] }

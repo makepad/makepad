@@ -19,6 +19,8 @@ fxhash = { path = "../../libs/fxhash", version = "0.2.1" }
 # window_controls.rs: the hosted window state a WM and its apps exchange (every platform builds
 # it), and the WM-hosted shell's hub protocol frames (backend/linux/wm.rs)
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
+# media.rs: every backend's audio entry slot (the device thread never locks)
+makepad-lock-free = { path = "../../libs/lock_free", version = "0.1.0" }
 
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 makepad-vulkan = { path = "../../libs/vulkan", version = "0.1.0" }

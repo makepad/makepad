@@ -4,7 +4,7 @@ use {
     crate::{
         cx::Cx,
         draw_vars::{DrawVars, DRAW_CALL_UNIFORM_BUFFER_SLOTS},
-        geometry::GeometryId,
+        geometry::{Geometry, GeometryId},
         makepad_live_id::*,
         makepad_script::heap::ScriptHeap,
         makepad_script::pod::{ScriptPodTy, ScriptPodVec},
@@ -46,6 +46,9 @@ pub struct CxDrawShaderOptions {
     /// `alpha_blend: false` must output alpha 1.0 or intend a raw write.
     pub alpha_blend: bool,
     pub backface_culling: bool,
+    /// How many times a second a shader that animates from `draw_pass.time` needs its pass repainted,
+    /// or 0 to repaint it every frame. A small or slow animation looks the same at far fewer frames.
+    pub time_fps: f64,
     /// Scissor rectangle (x, y, width, height) in target pixels, row 0 at
     /// the top; `None` = the whole target. Fragments outside are dropped
     /// before shading, which a `discard` cannot do: a pass that renders
@@ -64,6 +67,7 @@ impl Default for CxDrawShaderOptions {
             depth_test_greater: false,
             alpha_blend: true,
             backface_culling: false,
+            time_fps: 0.0,
             scissor: None,
         }
     }
@@ -140,8 +144,10 @@ pub struct CxDrawShaders {
 
     pub cache_object_reuse_epoch_seen: u64,
     /// Keyed by (heap key, object): an isolate's objects share index space
-    /// with the app heap's and must never hit its entries.
-    pub cache_object_id_to_shader: HashMap<(usize, ScriptObject), DrawShaderId>,
+    /// with the app heap's and must never hit its entries. Each object keeps
+    /// its own geometry beside the shader: objects of the same functions
+    /// share one shader over different geometries.
+    pub cache_object_id_to_shader: HashMap<(usize, ScriptObject), (DrawShaderId, Option<GeometryId>)>,
     pub cache_functions_to_shader: LiveIdMap<LiveId, FnCachedShader>,
     /// Keyed by the generated code and the pipeline state
     /// (`DrawVars::pipeline_state_hash`): one code with another colour
@@ -948,6 +954,15 @@ pub struct DrawShaderTableConst {
     pub negated: bool,
 }
 
+/// Where a shader's vertices can land, so a draw call that changed knows which pixels it touched.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VertexExtent {
+    #[default]
+    Unknown,
+    /// Inside each instance's `rect_pos` and `rect_size`, clipped to its `draw_clip` and the draw list's clip.
+    Rect,
+}
+
 #[derive(Clone)]
 pub struct CxDrawShaderMapping {
     pub source: ScriptObjectRef,
@@ -978,6 +993,9 @@ pub struct CxDrawShaderMapping {
     pub rect_pos: Option<usize>,
     pub rect_size: Option<usize>,
     pub draw_clip: Option<usize>,
+    pub vertex_extent: VertexExtent,
+    /// The stock quad's geometry, which a draw call needs for `vertex_extent` to hold.
+    pub stock_rect_geometry: Option<GeometryId>,
     /// Where an instance keeps the depth it is drawn at, when it keeps one:
     /// the slot `Cx2d::lift_align_range` adds to so already-drawn ink wins
     /// the depth test against ink painted after it.
@@ -995,7 +1013,6 @@ pub struct CxDrawShaderMapping {
     /// Bumped by every patch of `scope_uniforms_buf`; backends that keep a
     /// GPU-side copy of the buffer re-upload when it moves.
     pub scope_uniforms_gen: u64,
-    pub geometry_id: Option<GeometryId>,
     /// Total f32 slots in the varying buffer (instances + explicit varyings).
     /// Produced by shader compilation for frame-packet reflection.
     pub varying_total_slots: usize,
@@ -1160,10 +1177,9 @@ impl CxDrawShaderMapping {
         code: CxDrawShaderCode,
         vm: &mut ScriptVm,
         output: &crate::makepad_script::shader_compile::CompiledShader,
-        geometry_id: Option<GeometryId>,
     ) -> CxDrawShaderMapping {
         let desc = DrawShaderDesc::from_output(vm.heap(), output);
-        Self::from_desc(source, code, vm, &desc, geometry_id)
+        Self::from_desc(source, code, vm, &desc)
     }
 
     /// What is asked later about the shader's script source (where its function is written)
@@ -1195,7 +1211,6 @@ impl CxDrawShaderMapping {
         code: CxDrawShaderCode,
         vm: &mut ScriptVm,
         desc: &DrawShaderDesc,
-        geometry_id: Option<GeometryId>,
     ) -> CxDrawShaderMapping {
         let source_loc = Self::read_source(vm, source.as_object());
         let heap = vm.heap();
@@ -1526,6 +1541,37 @@ impl CxDrawShaderMapping {
             );
         }
 
+        // The stock `DrawQuad` and `DrawText` vertex functions keep every vertex of their stock quad inside
+        // the instance's rect, so we only trust a shader that uses them unchanged.
+        let heap = vm.heap();
+        let get_fn_ip = |object: ScriptObject, name: LiveId| {
+            heap.value(object, name.into(), NoTrap).as_object().and_then(|f| heap.fn_script_ip(f))
+        };
+        // A shader is shared by objects of different geometries here, so the stock quad is the geometry
+        // of the base whose functions it uses unchanged, and a draw call keeps the rect only with that geometry.
+        let stock_rect_geometry = if rect_pos.is_some() && rect_size.is_some() {
+            heap.value(heap.modules_root(), id!(draw).into(), NoTrap).as_object().and_then(|draw| {
+                [(id!(DrawQuad), id!(clip_and_transform_vertex)), (id!(DrawText), id!(slug_dilate))]
+                    .into_iter()
+                    .find_map(|(base, helper)| {
+                        let base = heap.value(draw, base.into(), NoTrap).as_object()?;
+                        let stock_fns = [id!(vertex), helper].into_iter().all(|name| {
+                            get_fn_ip(base, name).is_some_and(|ip| get_fn_ip(source.as_object(), name) == Some(ip))
+                        });
+                        if !stock_fns {
+                            return None;
+                        }
+                        heap.value(base, id!(geom).into(), NoTrap)
+                            .as_object()
+                            .and_then(|geom| heap.value(geom, id!(buffer).into(), NoTrap).as_handle())
+                            .and_then(|buffer| heap.handle_ref::<Geometry>(buffer))
+                            .map(Geometry::geometry_id)
+                    })
+            })
+        } else {
+            None
+        };
+        let vertex_extent = if stock_rect_geometry.is_some() { VertexExtent::Rect } else { VertexExtent::Unknown };
         CxDrawShaderMapping {
             #[cfg(not(target_arch = "wasm32"))]
             storage_buffers: Vec::new(),
@@ -1557,6 +1603,8 @@ impl CxDrawShaderMapping {
             rect_pos,
             rect_size,
             draw_clip,
+            vertex_extent,
+            stock_rect_geometry,
             draw_depth,
             uniform_buffer_bindings,
             scope_uniforms,
@@ -1565,7 +1613,6 @@ impl CxDrawShaderMapping {
             table_consts,
             folded_sites: desc.folded_sites().to_vec(),
             scope_uniforms_gen: 0,
-            geometry_id,
             varying_total_slots: 0,
             color_format,
             blend_op,

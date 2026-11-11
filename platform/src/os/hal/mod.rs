@@ -153,6 +153,9 @@ pub struct HalClient {
     /// the color last given to the Activity to show in place of its surface
     #[cfg(target_os = "android")]
     pub(crate) app_background_argb: Option<u32>,
+    /// the Activity's "compiling shaders" screen was already asked for, which only the first frame needs
+    #[cfg(target_os = "android")]
+    pub(crate) shader_compile_screen_requested: bool,
     /// the oldest input event (HAL ns) consumed since the last frame was built
     pub(crate) input_ns: u64,
     /// a composition is in flight (`Ime` start / update seen, not yet committed or cancelled)
@@ -160,12 +163,33 @@ pub struct HalClient {
     /// the soft keyboard is up and its height (layout points), to drop repeated reports
     pub(crate) ime_visible: bool,
     pub(crate) ime_height: f64,
+    /// The keyboard config we last showed, until our own hide or a closed report clears it. A child
+    /// session embedded in a parent doesn't keep one, since its shows get dropped while unfocused.
+    #[cfg(target_os = "android")]
+    pub(crate) ime_shown: Option<u32>,
+    /// Set by `HideTextIME`, which waits until after the next draw, so that moving focus
+    /// from one text input to another keeps the keyboard up instead of hiding it.
+    #[cfg(target_os = "android")]
+    pub(crate) pending_ime_hide: bool,
+    /// The backend answers no frame requests without a surface or while the Activity is
+    /// paused, so a pending IME hide can't wait for a draw then.
+    #[cfg(target_os = "android")]
+    pub(crate) no_surface: bool,
+    #[cfg(target_os = "android")]
+    pub(crate) activity_paused: bool,
     /// a window announced a frame (`FrameReady`)
     pub(crate) beat: bool,
     /// the flip (HAL ns, 0: unknown) the last `FrameReady` aims at, until a beat takes it
     pub(crate) ready_flip: Option<u64>,
     /// `MAKEPAD_TRACE=frames`: what woke each beat, the next-frame and present gaps
     pub(crate) frame_trace: crate::frame_trace::FrameTrace,
+    /// How far apart the display's ticks are, from the last `FrameReady` that predicted the next
+    /// one (0 when none has), so a `time_fps` frame can take the tick nearest its due.
+    pub(crate) frame_interval: f64,
+    /// The display tick of the `FrameReady` that starts the next beat, which `time_fps` frames go by.
+    pub(crate) frame_tick: Option<f64>,
+    /// The window's surface is gone (Android), so nothing can show a `time_fps` frame till it's back.
+    pub(crate) surface_lost: bool,
     /// A window close is on its way (asked of the window system, or accepted and sent):
     /// since when. Until the HAL answers, the loop sends at once and draws nothing, so a close
     /// never waits behind a slow frame. Bounded by `CLOSE_WAIT` should no answer come.
@@ -220,6 +244,8 @@ pub struct HalClient {
     pub(crate) compute: crate::gpu_compute::ComputeState,
     /// font service answers the text stack has not taken yet
     pub(crate) font_events: Vec<HalFontEvent>,
+    /// The app is in the background: font answers wait for the draw when it's back.
+    pub(crate) in_background: bool,
     pub(crate) glyph_wait: fonts::GlyphWait,
     /// the GLES backend's share group and the Cx thread's GL context (`Cx::with_gl`)
     #[cfg(not(target_os = "android"))]
@@ -253,13 +279,26 @@ impl Default for HalClient {
             internal_drag_items: None,
             #[cfg(target_os = "android")]
             app_background_argb: None,
+            #[cfg(target_os = "android")]
+            shader_compile_screen_requested: false,
             input_ns: 0,
             composing: false,
             ime_visible: false,
             ime_height: 0.0,
+            #[cfg(target_os = "android")]
+            ime_shown: None,
+            #[cfg(target_os = "android")]
+            pending_ime_hide: false,
+            #[cfg(target_os = "android")]
+            no_surface: false,
+            #[cfg(target_os = "android")]
+            activity_paused: false,
             beat: false,
             ready_flip: None,
             frame_trace: crate::frame_trace::FrameTrace::new(),
+            frame_interval: 0.0,
+            frame_tick: None,
+            surface_lost: false,
             close_pending: None,
             xr_beat: false,
             profile_beat: 0,
@@ -290,6 +329,7 @@ impl Default for HalClient {
             compute: Default::default(),
             event_arena_min: 0,
             font_events: Vec::new(),
+            in_background: false,
             glyph_wait: Default::default(),
             #[cfg(not(target_os = "android"))]
             gl: Default::default(),

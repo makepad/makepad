@@ -192,6 +192,15 @@ impl CxScrollLatch {
         self.owners[axis_slot(axis)]
     }
 
+    /// Whether `e` starts a new trackpad gesture, rather than being a wheel, momentum or more of a gesture.
+    pub(crate) fn starts_finger_gesture(&self, e: &ScrollEvent) -> bool {
+        match e.phase {
+            ScrollPhase::Began => true,
+            ScrollPhase::Changed => self.gesture != ScrollGesture::Fingers,
+            _ => false,
+        }
+    }
+
     /// Ends the gesture, so the next scroll event starts a new one.
     pub(crate) fn reset(&mut self) {
         self.gesture = ScrollGesture::Idle;
@@ -681,6 +690,9 @@ pub struct CxFingers {
     scroll_drag_locks: Vec<(DigitId, ScrollDirection)>,
     /// The presses something outside a drag scroller already held when it got them, which it never joins.
     presses_held_outside: Vec<(DigitId, Area)>,
+    /// The presses that leave the key focus where it is, see [`Self::mark_press_as_keeping_key_focus`].
+    presses_keeping_key_focus: Vec<DigitId>,
+    is_touching: bool,
     is_mouse_drag_scrolling_disabled: bool,
 }
 
@@ -923,6 +935,8 @@ impl CxFingers {
         let before = self.cancelled.len();
         self.move_to_cancelled(|v| v.digit_id == digit_id && !v.owner && Some(v.area) != partner);
         if self.cancelled.len() > before {
+            // It's a drag now, not a tap, so it only keeps the key focus if the scroller marks it again.
+            self.unmark_press_as_keeping_key_focus(digit_id);
             let abs = self.captures.iter().find(|v| v.digit_id == digit_id).map(|v| v.abs_start).unwrap_or_default();
             self.queue_cancel(digit_id, abs);
         }
@@ -1177,6 +1191,7 @@ impl CxFingers {
         self.scroll_drag_holders.retain(|(id, _)| *id != digit_id);
         self.scroll_drag_locks.retain(|(id, _)| *id != digit_id);
         self.presses_held_outside.retain(|(id, _)| *id != digit_id);
+        self.presses_keeping_key_focus.retain(|id| *id != digit_id);
     }
 
     /// See [`Cx::set_mouse_drag_scrolling`].
@@ -1254,6 +1269,31 @@ impl CxFingers {
         }
     }
 
+    /// Marks `digit_id`'s press as leaving the key focus where it is, so a focused text input stays focused
+    /// (and keeps its soft keyboard up) even though the press ends outside of it. Call it before the press ends,
+    /// e.g., on `Hit::FingerDown`.
+    pub fn mark_press_as_keeping_key_focus(&mut self, digit_id: DigitId) {
+        if !self.presses_keeping_key_focus.contains(&digit_id) {
+            self.presses_keeping_key_focus.push(digit_id);
+        }
+    }
+
+    /// Undoes [`Self::mark_press_as_keeping_key_focus`], e.g., once a press that might have been a tap turns into a drag.
+    pub fn unmark_press_as_keeping_key_focus(&mut self, digit_id: DigitId) {
+        self.presses_keeping_key_focus.retain(|id| *id != digit_id);
+    }
+
+    /// Whether `digit_id`'s press leaves the key focus where it is, see [`Self::mark_press_as_keeping_key_focus`].
+    pub fn is_press_keeping_key_focus(&self, digit_id: DigitId) -> bool {
+        self.presses_keeping_key_focus.contains(&digit_id)
+    }
+
+    /// Whether a widget holds the press of a finger on the screen,
+    /// counting a finger being lifted until its touch update is done.
+    pub fn is_touch_press_held(&self) -> bool {
+        self.is_touching && !self.captures.is_empty()
+    }
+
     /// Whether two scrollers took `digit_id`'s drag, one along each axis.
     pub fn is_scroll_drag_shared(&self, digit_id: DigitId) -> bool {
         let owners = [Vec2Index::X, Vec2Index::Y].map(|axis| self.scroll_drag_owner(digit_id, axis));
@@ -1325,9 +1365,13 @@ impl CxFingers {
     }
 
     pub(crate) fn process_touch_update_start(&mut self, time: f64, touches: &[TouchPoint]) {
+        if !touches.is_empty() {
+            self.is_touching = true;
+        }
         for touch in touches {
             if let TouchState::Start = touch.state {
                 self.process_tap_count(touch.abs, time);
+                self.tap.digit_id = live_id_num!(touch, touch.uid).into();
             }
         }
     }
@@ -1340,6 +1384,10 @@ impl CxFingers {
     /// after each dispatch, and on a cancel whether or not anything is left
     /// to dispatch to.
     pub fn process_touch_update_end(&mut self, touches: &[TouchPoint]) {
+        // Only clears it, since a host's synthetic touches skip the start above and would defer a hide nothing ever flushes.
+        self.is_touching &= touches
+            .iter()
+            .any(|touch| !matches!(touch.state, TouchState::Stop | TouchState::Cancel));
         for touch in touches {
             let digit_id = live_id_num!(touch, touch.uid).into();
             match touch.state {
@@ -1350,6 +1398,11 @@ impl CxFingers {
                 TouchState::Start | TouchState::Move | TouchState::Stable => {
                     self.cycle_hover_area(digit_id);
                 }
+            }
+            // A press that moved too far to be a tap doesn't count towards a double tap, like on Android and iOS,
+            // so swiping twice from the same spot doesn't make the second swipe a double tap.
+            if digit_id == self.tap.digit_id && touch.abs.distance(&self.tap.last_pos) >= TAP_COUNT_DISTANCE {
+                self.tap.last_time = f64::NEG_INFINITY;
             }
         }
         self.switch_captures();
@@ -2564,7 +2617,9 @@ impl Event {
                         is_sweep: false,
                         cancelled: capture.cancelled,
                     });
-                    if is_over {
+                    // A `capture_overload` parent (e.g., PortalList) gets this release after the pressed item,
+                    // so only the first capture takes the hover, else the item never gets its hover-out.
+                    if is_over && cx.fingers.find_digit_capture(digit_id).is_some_and(|c| c.area == area) {
                         cx.fingers.new_hover_area(digit_id, area);
                     }
                     return event;

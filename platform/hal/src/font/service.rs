@@ -5,20 +5,23 @@
 //! changed rectangles to the host's textures and tells every session that asked where the glyph
 //! is. The atlases belong to the host (session 0): a session's close drops its interest, never
 //! the glyphs, so a relaunched app finds its text already rendered. Under pressure the least
-//! recently used slots are taken back and the sessions that held them are told.
+//! recently used slots are taken back and the sessions that held them are told, though a full
+//! raster atlas first grows to a taller texture, and goes back to its base size once it's idle.
 
-use super::atlas::{RasterAtlas, SlugStore};
+use super::atlas::{RasterAtlas, SlotRec, SlugStore};
 use super::pool::{Claim, Done, HostFont, HostSource, Job, JobKind, Known, Payload, Pool, ReqKey, Work};
 use super::wire::{self, atlas, font_status, glyph, kind, FontSource, GlyphEntry};
 use super::{FrameProgress, RetireFence};
 use crate::backend::exec::{self, Gpu};
 use crate::cmds::HalCmd;
+use crate::ledger::Kind;
 use crate::session::{LentRef, TextureObj, World, HOST};
 use crate::types::*;
 use makepad_font_core::{
     font_atlas::GlyphImageKey,
-    geom::{Point, Rect, Size},
+    geom::{Point, Size},
     raster::{default_text_atlas_size, Settings, UNRESOLVED_RASTER_RECT},
+    slug::{SlugCurves, ROW_TEXELS},
     MappedBytes,
 };
 use std::collections::{HashMap, HashSet};
@@ -26,10 +29,15 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 
 /// Width and height of the slug curve texture, in texels (two per curve: 131072 curves).
-const SLUG_WIDTH: usize = 2048;
+const SLUG_WIDTH: usize = ROW_TEXELS;
 const SLUG_ROWS: usize = 128;
-/// How much of an atlas an eviction frees.
+/// How much of an atlas at its base size an eviction frees (a grown one frees no more at once).
 const EVICT_FRACTION: f32 = 0.25;
+/// The most a grown raster atlas's texture takes up, as much as a 2048x8192 BGRA texture (the
+/// host keeps a copy of the same size). Under 4 GiB of GPU memory it's 1/64 of that memory.
+const MAX_RASTER_BYTES: u64 = 64 * 1024 * 1024;
+/// How long a grown raster atlas waits for new glyphs before it goes back to its base size.
+const RASTER_IDLE_NS: u64 = 300_000_000_000;
 /// Entries per `GlyphsReady` event.
 const ENTRIES_PER_EVENT: usize = 256;
 
@@ -57,8 +65,13 @@ pub struct FontStats {
     /// slots taken back, and how many times the atlas had to
     pub evicted_slots: u64,
     pub evictions: u64,
+    /// times the raster atlas moved to a taller texture, and back to its base size
+    pub growths: u64,
+    pub shrinks: u64,
     /// glyphs that could not be placed even in an empty atlas (delivered as empty)
     pub oversized: u64,
+    /// glyphs answered `NO_ROOM`, since the glyphs on screen filled the atlas
+    pub no_room: u64,
     pub bad: u64,
     /// bytes of the host's atlas textures, slots / glyphs in them
     pub raster_bytes: u64,
@@ -120,7 +133,6 @@ pub struct FontService {
     closed_frames: Vec<Arc<FrameProgress>>,
     /// the lent ids sessions sample the atlases by
     aliases: HashMap<(u32, u32), Id>,
-    next_host_texture: u32,
     next_slot: u32,
     /// The use rank a slot gets (its `last_use`; eviction takes the lowest first): a delivery
     /// ranks `tick`, a `GlyphTouch` (the session drew from it since its last touch) `tick + 1`,
@@ -131,6 +143,15 @@ pub struct FontService {
     session_stats: HashMap<u32, SessionFontStats>,
     /// entries to deliver at the end of the pass: (session, font) -> entries
     out: HashMap<(u32, u32), Vec<GlyphEntry>>,
+    /// When a grown raster atlas goes back to its base size, unless a new glyph comes first.
+    raster_idle_at: Option<u64>,
+    /// The app went to the background, so a grown raster atlas goes back to its base size.
+    backgrounded: bool,
+    /// The app is in the background, where nothing is drawn, so the raster atlas doesn't grow.
+    in_background: bool,
+    /// When the device last refused a taller raster texture. It isn't asked again for an idle
+    /// period, or until the app has been in the background or the device was replaced.
+    grow_refused_at: Option<u64>,
 }
 
 impl FontService {
@@ -154,12 +175,15 @@ impl FontService {
             deferred: Vec::new(),
             closed_frames: Vec::new(),
             aliases: HashMap::new(),
-            next_host_texture: 1,
             next_slot: 1,
             tick: 0,
             stats: FontStats::default(),
             session_stats: HashMap::new(),
             out: HashMap::new(),
+            raster_idle_at: None,
+            backgrounded: false,
+            in_background: false,
+            grow_refused_at: None,
         }
     }
 
@@ -205,6 +229,56 @@ impl FontService {
     /// Jobs queued, running or holding finished pixels until atlas storage is safe to reuse.
     pub fn in_flight(&self) -> usize {
         self.pool.as_ref().map_or(0, |p| p.in_flight()) + self.deferred.len()
+    }
+
+    /// The app went to the background: the next `trim` takes a grown raster atlas back to its
+    /// base size, and a device that refused a taller one may have room once the app is back.
+    pub fn app_backgrounded(&mut self) {
+        self.backgrounded = self.raster_grown();
+        self.in_background = true;
+        self.grow_refused_at = None;
+    }
+
+    /// The app is back from the background: the raster atlas may grow again.
+    pub fn app_foregrounded(&mut self) {
+        self.in_background = false;
+    }
+
+    fn raster_grown(&self) -> bool {
+        self.raster.as_ref().is_some_and(|a| a.size.height > self.settings.atlas_size.height)
+    }
+
+    /// When `trim` has work: a grown raster atlas that went idle, or the app went to the background.
+    pub fn trim_at(&self) -> Option<u64> {
+        if self.backgrounded { Some(0) } else { self.raster_idle_at }
+    }
+
+    /// Takes a grown raster atlas back to its base size: once idle and no session holds a slot in
+    /// its extra rows, keeping the rest, or at once in the background, giving them all back.
+    /// Only between frames.
+    pub fn trim(&mut self, gpu: &mut dyn Gpu, world: &mut World) {
+        let backgrounded = std::mem::take(&mut self.backgrounded);
+        self.raster_idle_at = None;
+        if !self.raster_grown() {
+            return;
+        }
+        let base = self.settings.atlas_size.height;
+        // a held glyph there may still be on screen, or in a frame another session hasn't sent yet
+        if !backgrounded && self.raster.as_ref().is_some_and(|a| a.holds_past(base)) {
+            self.raster_idle_at = Some(world.now() + RASTER_IDLE_NS);
+            return;
+        }
+        // nothing is drawn in the background, so the base rows aren't worth their memory there either
+        let keep = if backgrounded { 0 } else { base };
+        if let Some(taken) = self.move_raster(gpu, world, base, keep) {
+            self.stats.shrinks += 1;
+            self.send_raster_evicted(world, taken);
+            // what waited for slots taken back above has room now
+            for d in std::mem::take(&mut self.deferred) {
+                self.apply(gpu, world, d, false);
+            }
+            self.flush(world);
+        }
     }
 
     fn pool(&mut self) -> &Pool {
@@ -436,14 +510,19 @@ impl FontService {
 
     // ---- the host's textures
 
-    fn host_texture(&mut self, gpu: &mut dyn Gpu, world: &mut World, fmt: u32, w: usize, h: usize, label: StrId, now: u64) -> Option<Id> {
-        let id = Id::new(self.next_host_texture, 1);
-        self.next_host_texture += 1;
+    fn host_texture(&self, gpu: &mut dyn Gpu, world: &mut World, fmt: u32, w: usize, h: usize, label: StrId, now: u64) -> Option<Id> {
+        // the HAL's own range, so a texture the host creates itself never takes an atlas's id
+        let id = world.alloc_lent();
         let host = world.session_mut(HOST)?;
         host.strings.entry(label).or_insert_with(|| if label == LABEL_RASTER { "font glyph atlas".into() } else { "font slug curves".into() });
         let obj = TextureObj { format: fmt, w: w as u32, h: h as u32, depth: 1, mips: 1, usage: usage::SAMPLED, bytes: exec::texture_bytes(fmt, w as u32, h as u32, 1, 1), imported: false, uploaded: 0, lent: None };
         exec::insert_texture(gpu, host, id, obj, Attr { label, ..Default::default() }, now);
-        host.textures.get(HOST, id).is_ok().then_some(id)
+        if host.textures.get(HOST, id).is_ok() {
+            return Some(id);
+        }
+        // nobody creates this id again, so the device needn't wait for room for it
+        gpu.texture_destroy(HOST, id);
+        None
     }
 
     /// Creates the atlas of `kind` on first use. False when the device refused it.
@@ -495,22 +574,17 @@ impl FontService {
             let a = self.slug.as_ref()?;
             (a.tex, format::RGBA32F, a.width as u32, a.rows as u32, a.generation)
         };
-        // the host samples its atlas directly, a session through a lent id
-        let alias = if sid == HOST {
-            tex
-        } else {
-            let alias = world.alloc_lent();
-            let obj = TextureObj { format: fmt, w, h, depth: 1, mips: 1, usage: usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: Some(LentRef { child: HOST, tex, window: Id::NONE }) };
-            let s = world.session_mut(sid)?;
-            s.textures.insert(sid, alias, HOST, obj).ok()?;
-            alias
-        };
+        // every session samples through a lent id, the host too: a move points it at the new texture
+        let alias = world.alloc_lent();
+        let obj = TextureObj { format: fmt, w, h, depth: 1, mips: 1, usage: usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: Some(LentRef { child: HOST, tex, window: Id::NONE }) };
+        let s = world.session_mut(sid)?;
+        s.textures.insert(sid, alias, HOST, obj).ok()?;
         self.aliases.insert((sid, kind), alias);
         world.to_session(sid, |q| q.atlas_info(kind, alias, w, h, generation));
         Some(alias)
     }
 
-    fn upload(&mut self, gpu: &mut dyn Gpu, world: &mut World, tex: Id, rect: [u32; 4], bytes: &[u8]) {
+    fn upload(&self, gpu: &mut dyn Gpu, world: &mut World, tex: Id, rect: [u32; 4], bytes: &[u8]) {
         let Some(host) = world.session_mut(HOST) else { return };
         let Ok(e) = host.textures.get_mut(HOST, tex) else { return };
         e.val.uploaded += bytes.len() as u64;
@@ -521,10 +595,10 @@ impl FontService {
     /// The device was replaced: the atlas textures have new, empty storage under their ids; the
     /// service uploads its own copy of both whole (sessions keep every slot they were told of).
     pub fn device_reset(&mut self, gpu: &mut dyn Gpu, world: &mut World) {
+        self.grow_refused_at = None;
         if let Some(a) = self.raster.as_ref() {
             let (tex, size) = (a.tex, a.size);
-            let bytes = a.rect_bytes(Rect::new(Point::new(0, 0), size));
-            self.upload(gpu, world, tex, [0, 0, size.width as u32, size.height as u32], &bytes);
+            self.upload(gpu, world, tex, [0, 0, size.width as u32, size.height as u32], &a.rows_bytes(size.height));
         }
         if let Some(a) = self.slug.as_ref() {
             let (tex, w, rows) = (a.tex, a.width as u32, a.rows as u32);
@@ -644,14 +718,14 @@ impl FontService {
             // nothing to draw: delivered as an empty entry, so the app stops asking
             Payload::Empty => {}
             Payload::Msdf { .. } => return None,
-            Payload::Slug { origin_in_ems, size_in_ems, curves } => {
+            Payload::Slug(curves) => {
                 let font = req.font;
                 let existing = self.slug.as_ref().and_then(|s| s.find(font, req.glyph)).map(|r| r.slot);
                 let slot = match (existing, curves) {
                     (Some(slot), _) => Some(slot),
-                    (None, Work::Rendered(curves)) => match self.place_slug(gpu, world, font, req.glyph, &curves, origin_in_ems, size_in_ems) {
+                    (None, Work::Rendered(curves)) => match self.place_slug(gpu, world, font, req.glyph, &curves) {
                         Ok(slot) => slot,
-                        Err(()) => return Some(Payload::Slug { origin_in_ems, size_in_ems, curves: Work::Rendered(curves) }),
+                        Err(()) => return Some(Payload::Slug(Work::Rendered(curves))),
                     },
                     (None, Work::Elsewhere) => {
                         self.park(Claim::Slug(font, req.glyph), req);
@@ -668,7 +742,7 @@ impl FontService {
                     if let Some(rec) = self.slug.as_mut().and_then(|s| s.by_slot_mut(slot)) {
                         rec.last_use = tick;
                         entry.atlas_kind = glyph::SLUG;
-                        entry.rect = [rec.offset, rec.count, 0, 0];
+                        entry.rect = [rec.offset, rec.count, rec.band_offset, rec.band_count];
                         entry.origin = [rec.origin.x, rec.origin.y];
                         entry.scale = rec.size.width;
                         entry.size_h = rec.size.height;
@@ -683,6 +757,7 @@ impl FontService {
                     Place::Deferred(ImageData::Sdf(pixels)) => return Some(Payload::Sdf { key, pixels: Work::Rendered(pixels), padding, origin, dpxs, msdf }),
                     Place::Deferred(ImageData::Pixels(_)) => unreachable!("SDF placement retains SDF pixels"),
                     Place::None => {}
+                    Place::NoRoom => entry.atlas_kind = glyph::NO_ROOM,
                     Place::Slot(slot) => {
                         self.fill_raster_entry(&mut entry, slot, origin, dpxs);
                         if let Some((mkey, outline, mdpxs)) = msdf {
@@ -697,6 +772,7 @@ impl FontService {
                     Place::Deferred(ImageData::Pixels(pixels)) => return Some(Payload::Color { key, pixels: Work::Rendered(pixels), padding, origin, dpxs }),
                     Place::Deferred(ImageData::Sdf(_)) => unreachable!("color placement retains color pixels"),
                     Place::None => {}
+                    Place::NoRoom => entry.atlas_kind = glyph::NO_ROOM,
                     Place::Slot(slot) => self.fill_raster_entry(&mut entry, slot, origin, dpxs),
                 }
             }
@@ -787,11 +863,16 @@ impl FontService {
             if a.has_retired() {
                 return Place::Deferred(image);
             }
-            if !self.evict_raster(world) {
+            if !self.make_raster_room(gpu, world, true) {
+                if self.raster.as_ref().is_some_and(|a| a.len() > 0) {
+                    self.stats.no_room += 1;
+                    return Place::NoRoom;
+                }
                 self.stats.oversized += 1;
                 return Place::None;
             }
         };
+        self.note_raster_placed(world.now());
         let a = self.raster.as_mut().expect("raster atlas");
         match image {
             ImageData::Sdf(values) => a.write_sdf(slot, &values),
@@ -806,18 +887,17 @@ impl FontService {
         Place::Slot(slot)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn place_slug(&mut self, gpu: &mut dyn Gpu, world: &mut World, font: u32, glyph: u16, curves: &[f32], origin: Point<f32>, size: Size<f32>) -> Result<Option<u32>, ()> {
+    fn place_slug(&mut self, gpu: &mut dyn Gpu, world: &mut World, font: u32, glyph: u16, curves: &SlugCurves) -> Result<Option<u32>, ()> {
         let tick = self.tick;
-        let count = (curves.len() / 8) as u32;
+        let run = (curves.data.len() / 8) as u32;
         let slot = loop {
             let id = self.next_slot;
             let Some(s) = self.slug.as_mut() else { return Ok(None) };
-            if count > s.capacity_curves() {
+            if run > s.capacity_curves() {
                 self.stats.oversized += 1;
                 return Ok(None);
             }
-            if s.alloc(id, font, glyph, curves, origin, size, tick).is_some() {
+            if s.alloc(id, font, glyph, curves, tick).is_some() {
                 self.next_slot += 1;
                 break id;
             }
@@ -825,7 +905,7 @@ impl FontService {
                 return Err(());
             }
             let fence = RetireFence::capture(world, &self.closed_frames);
-            let taken = self.slug.as_mut().expect("slug atlas").evict_for(count, fence);
+            let taken = self.slug.as_mut().expect("slug atlas").evict_for(run, curves.band_count > 0, fence);
             if taken.is_empty() {
                 self.stats.oversized += 1;
                 return Ok(None);
@@ -843,23 +923,37 @@ impl FontService {
         };
         let s = self.slug.as_ref().expect("slug atlas");
         let rec = s.by_slot(slot).expect("placed slot");
-        let (first, rows, bytes) = s.rows_bytes(rec.offset, rec.count);
+        let (first, rows, bytes) = s.rows_bytes(rec.offset, rec.run);
         let (tex, width) = (s.tex, s.width as u32);
         self.upload(gpu, world, tex, [0, first, width, rows], &bytes);
         Ok(Some(slot))
     }
 
-    /// Takes back a quarter of the raster atlas; false when it holds nothing to take.
-    fn evict_raster(&mut self, world: &mut World) -> bool {
+    /// Makes room in a full raster atlas: slots no session holds go first, then it grows (if
+    /// `grow`), then held slots nobody drew since the last touch. False when only glyphs on
+    /// screen are left: taking one back would just bring it back in place of another.
+    fn make_raster_room(&mut self, gpu: &mut dyn Gpu, world: &mut World, grow: bool) -> bool {
+        self.evict_raster(world, 0) || (grow && self.grow_raster(gpu, world)) || self.evict_raster(world, self.tick)
+    }
+
+    /// Takes back up to a quarter of the raster atlas's base size: slots no session holds, and
+    /// held ones last used before `below` (0: none). False when there's nothing to take.
+    fn evict_raster(&mut self, world: &mut World, below: u64) -> bool {
         let fence = RetireFence::capture(world, &self.closed_frames);
+        let base = self.settings.atlas_size;
         let Some(a) = self.raster.as_mut() else { return false };
-        let taken = a.evict(EVICT_FRACTION, fence);
+        let taken = a.evict(((base.width * base.height * 4) as f32 * EVICT_FRACTION) as usize, below, fence);
         if taken.is_empty() {
             return false;
         }
-        let generation = a.generation;
         self.stats.evictions += 1;
         self.stats.evicted_slots += taken.len() as u64;
+        self.send_raster_evicted(world, taken);
+        true
+    }
+
+    fn send_raster_evicted(&mut self, world: &mut World, taken: Vec<(u32, SlotRec)>) {
+        let generation = self.raster.as_ref().map_or(0, |a| a.generation);
         let mut per_session: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
         for (id, rec) in taken {
             for sid in rec.sessions {
@@ -867,7 +961,69 @@ impl FontService {
             }
         }
         self.send_evicted(world, atlas::RASTER, generation, per_session);
+    }
+
+    /// Moves a full raster atlas to a texture twice as tall, as far as its cap. False when it's that
+    /// tall already, the app is in the background, or the device has no room (not asked again soon).
+    fn grow_raster(&mut self, gpu: &mut dyn Gpu, world: &mut World) -> bool {
+        let now = world.now();
+        if self.in_background || self.grow_refused_at.is_some_and(|at| now < at + RASTER_IDLE_NS) {
+            return false;
+        }
+        let Some(a) = self.raster.as_ref() else { return false };
+        let working_set = crate::gpu_limits::gpu_working_set_bytes();
+        let cap = if working_set == 0 { MAX_RASTER_BYTES } else { MAX_RASTER_BYTES.min(working_set / 64) };
+        let tallest = (cap as usize / (a.size.width * 4)).min(world.max_texture as usize);
+        let (keep, height) = (a.size.height, (a.size.height * 2).min(tallest));
+        if height <= keep {
+            return false;
+        }
+        // memory the atlas can do without never eats into what the UI keeps free on the device
+        let bytes = (a.size.width * height * 4) as u64;
+        let room = gpu.gpu_budget().is_none_or(|(budget, used)| budget.saturating_sub(used) >= bytes + crate::gpu_pressure::ui_reserve(budget));
+        if !room || self.move_raster(gpu, world, height, keep).is_none() {
+            self.grow_refused_at = Some(now);
+            return false;
+        }
+        self.stats.growths += 1;
+        self.note_raster_placed(now);
         true
+    }
+
+    /// Moves the raster atlas to a new texture `height` rows tall that sessions sample by the same
+    /// ids, with the slots in its first `keep` rows where they were. Returns the rest, or `None`.
+    fn move_raster(&mut self, gpu: &mut dyn Gpu, world: &mut World, height: usize, keep: usize) -> Option<Vec<(u32, SlotRec)>> {
+        let now = world.now();
+        let width = self.raster.as_ref()?.size.width;
+        let tex = self.host_texture(gpu, world, format::BGRA8, width, height, LABEL_RASTER, now)?;
+        let a = self.raster.as_mut().expect("raster atlas");
+        let (old, generation) = (a.tex, a.generation);
+        let taken = a.resize(tex, height, keep);
+        // the unresolved texel is in the first row, so the new texture has it too
+        let rows = keep.clamp(1, height);
+        let a = self.raster.as_ref().expect("raster atlas");
+        self.upload(gpu, world, tex, [0, 0, width as u32, rows as u32], &a.rows_bytes(rows));
+        let (w, h) = (width as u32, height as u32);
+        for (&(sid, kind), &alias) in self.aliases.iter().filter(|((_, kind), _)| *kind == atlas::RASTER) {
+            if let Some(e) = world.session_mut(sid).and_then(|s| s.textures.get_mut(sid, alias).ok()) {
+                e.val.w = w;
+                e.val.h = h;
+                e.val.lent = Some(LentRef { child: HOST, tex, window: Id::NONE });
+            }
+            world.to_session(sid, |q| q.atlas_info(kind, alias, w, h, generation));
+        }
+        if let Some(host) = world.session_mut(HOST) {
+            if host.textures.remove(HOST, old).is_ok() {
+                host.ledger.remove(Kind::Texture, old.index);
+                gpu.texture_destroy(HOST, old);
+            }
+        }
+        Some(taken)
+    }
+
+    /// A glyph went into the raster atlas: a grown one stays grown for another idle period.
+    fn note_raster_placed(&mut self, now: u64) {
+        self.raster_idle_at = self.raster_grown().then_some(now + RASTER_IDLE_NS);
     }
 
     fn send_evicted(&mut self, world: &mut World, kind: u32, generation: u32, per_session: HashMap<u32, Vec<(u32, u32)>>) {
@@ -902,10 +1058,13 @@ impl FontService {
             if a.has_retired() {
                 return Some(Payload::Msdf { key, pixels });
             }
-            if !self.evict_raster(world) {
+            // an upgrade the atlas has no spare room for is dropped: it's never worth more memory
+            // or a glyph on screen
+            if !self.make_raster_room(gpu, world, false) {
                 return None;
             }
         };
+        self.note_raster_placed(world.now());
         let a = self.raster.as_mut().expect("raster atlas");
         if !a.write_msdf(new_slot, sdf_slot, &pixels) {
             a.remove(new_slot);
@@ -981,6 +1140,8 @@ enum Place {
     Slot(u32),
     /// no room even in an empty atlas
     None,
+    /// the glyphs on screen fill the atlas (`glyph::NO_ROOM`)
+    NoRoom,
     /// the request waits for another worker, or runs again: nothing to deliver yet
     Waiting,
     /// The pixels are ready, but a pre-eviction frame still owns the space they need.

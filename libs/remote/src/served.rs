@@ -7,9 +7,9 @@
 //! runtime that runs the program has run ([`runtime_cpu_ns`]), none of it the program's work.
 //!
 //! Under `makepad run` the served count and the runtime's CPU are the loader's, which it gives the
-//! program it runs as symbols found at their first use (`relax_served_ns`, `relax_runtime_cpu_ns`):
-//! its endpoint serves the program, and every copy of this crate the program runs counts with it,
-//! whichever provided crates bind. A rustc build has no loader: its count is this crate's own, and
+//! program it runs as symbols found at their first use (`relax_served_ns`, `relax_runtime_cpu_ns`,
+//! `relax_runtime_waited_ns`): its endpoint serves the program, and every copy of this crate the
+//! program runs counts with it, whichever provided crates bind. A rustc build has no loader: its count is this crate's own, and
 //! no runtime runs beside the program.
 
 use std::cell::Cell;
@@ -48,6 +48,25 @@ pub fn runtime_cpu_ns() -> u64 {
         // SAFETY: the loader's `extern "C" fn() -> u64` of that name
         read => unsafe { std::mem::transmute::<usize, extern "C" fn() -> u64>(read)() },
     }
+}
+
+/// What the runtime's threads that run now have spent runnable, waiting for a core, in nanoseconds:
+/// under `makepad run`, the JIT's own (`relax_runtime_waited_ns`), CPU none of the program wanted,
+/// which a test's idle rule takes out of what the app's threads wanted. With no loader, 0.
+pub fn runtime_waited_ns() -> u64 {
+    static READ: OnceLock<usize> = OnceLock::new();
+    match *READ.get_or_init(|| loader_symbol(c"relax_runtime_waited_ns")) {
+        0 => 0,
+        // SAFETY: the loader's `extern "C" fn() -> u64` of that name
+        read => unsafe { std::mem::transmute::<usize, extern "C" fn() -> u64>(read)() },
+    }
+}
+
+/// Whether a thread of this name (as the OS keeps it: Linux cuts it to 15 bytes) is one of this
+/// crate's: its serving and connection threads, all named `makepad-remote-*`. What they run and
+/// wait for is observing a process, never its own work.
+pub fn own_thread(name: &str) -> bool {
+    name.starts_with("makepad-remote")
 }
 
 /// A symbol the loader provides to the programs it runs, or 0 in a process with no loader:

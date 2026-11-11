@@ -14,8 +14,36 @@ pub type TapFn = Box<dyn FnMut(&Planar, f64) + Send>;
 // Loopback device ID - hardcoded for the default system output loopback
 pub const LOOPBACK_DEVICE_ID: u64 = 0xAD10_1004_BACD_BAC0;
 
+/// The channels the capture is configured for (`setChannelCount`).
+const TAP_CHANNELS: usize = 2;
+/// The frames the scratch is allocated for. ScreenCaptureKit names no maximum and hands over
+/// about 1024 frames per buffer at the configured 48 kHz; a larger buffer grows the scratch
+/// rather than lose the block.
+const TAP_FRAMES: usize = 4096;
+/// Room for a sample buffer's AudioBufferList, in u64s for its 8-byte alignment: the list header
+/// and up to 15 buffers (one per channel when the samples are not interleaved).
+const TAP_LIST_WORDS: usize = 32;
+
+/// What a capture block uses: the app's callback and the scratch the block is converted into,
+/// allocated when the capture starts, so a block does not allocate. A replaced or stopped
+/// capture's run comes back from the slot to the thread that replaced it and is dropped there.
+struct TapRun {
+    callback: TapFn,
+    planar: Planar,
+    buffer_list: Vec<u64>,
+}
+
+type TapSlot = makepad_lock_free::Slot<TapRun>;
+
+impl TapRun {
+    fn new(callback: TapFn) -> TapRun {
+        TapRun { callback, planar: Planar::new(TAP_FRAMES, TAP_CHANNELS), buffer_list: vec![0; TAP_LIST_WORDS] }
+    }
+}
+
 pub struct AudioTapAccess {
-    pub audio_input_cb: Arc<Mutex<Option<TapFn>>>,
+    /// The capture's run; the stream's delegate holds a count of it (`Arc::into_raw`).
+    run: Arc<TapSlot>,
     stream: Arc<Mutex<Option<ObjcId>>>,
     delegate: Arc<Mutex<Option<ObjcId>>>,
     is_running: Arc<Mutex<bool>>,
@@ -27,7 +55,7 @@ unsafe impl Sync for AudioTapAccess {}
 impl AudioTapAccess {
     pub fn new() -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
-            audio_input_cb: Arc::new(Mutex::new(None)),
+            run: Arc::new(TapSlot::default()),
             stream: Arc::new(Mutex::new(None)),
             delegate: Arc::new(Mutex::new(None)),
             is_running: Arc::new(Mutex::new(false)),
@@ -55,14 +83,14 @@ impl AudioTapAccess {
 
     /// Start capturing system audio via ScreenCaptureKit
     pub fn start_capture(&mut self, callback: TapFn) {
-        // Store the callback
-        *self.audio_input_cb.lock().unwrap() = Some(callback);
+        // the capture's run, allocated here; a replaced one is dropped here, not on the queue
+        drop(self.run.replace(Some(TapRun::new(callback))));
 
         // Clone Arcs for the completion handler
         let is_running = self.is_running.clone();
         let stream_arc = self.stream.clone();
         let delegate_arc = self.delegate.clone();
-        let audio_input_cb = self.audio_input_cb.clone();
+        let run = self.run.clone();
 
         // ScreenCaptureKit requires async initialization
         unsafe {
@@ -116,7 +144,7 @@ impl AudioTapAccess {
                 let () = msg_send![config, setCapturesAudio: YES];
                 let () = msg_send![config, setExcludesCurrentProcessAudio: NO];
                 let () = msg_send![config, setSampleRate: 48000i32];
-                let () = msg_send![config, setChannelCount: 2i32];
+                let () = msg_send![config, setChannelCount: TAP_CHANNELS as i32];
 
                 // Disable video capture to save resources (set minimal size)
                 let () = msg_send![config, setWidth: 2u64];
@@ -139,7 +167,7 @@ impl AudioTapAccess {
                 let queue = dispatch_queue_create(queue_name.as_ptr(), nil);
 
                 // Clone for inner closures
-                let audio_cb_for_delegate = audio_input_cb.clone();
+                let run_for_delegate = run.clone();
                 let is_running_for_start = is_running.clone();
                 let stream_arc_for_store = stream_arc.clone();
                 let delegate_arc_for_store = delegate_arc.clone();
@@ -149,9 +177,9 @@ impl AudioTapAccess {
                 let delegate: ObjcId = msg_send![delegate_class, alloc];
                 let delegate: ObjcId = msg_send![delegate, init];
 
-                // Store the callback pointer in the delegate
-                let callback_box = Box::new(audio_cb_for_delegate);
-                let callback_ptr = Box::into_raw(callback_box);
+                // The delegate holds a count of the run's slot, which `AudioTapAccess` also
+                // holds, so the slot outlives a stop that races a block on the queue.
+                let callback_ptr = Arc::into_raw(run_for_delegate);
                 (*delegate).set_ivar("audio_callback", callback_ptr as *mut c_void);
 
                 // Add stream output for audio (type 1 = SCStreamOutputTypeAudio)
@@ -173,7 +201,7 @@ impl AudioTapAccess {
                         println!("ScreenCaptureKit: Failed to add stream output (unknown error)");
                     }
                     // Clean up callback
-                    let _ = Box::from_raw(callback_ptr);
+                    drop(Arc::from_raw(callback_ptr));
                     return;
                 }
 
@@ -213,6 +241,8 @@ impl AudioTapAccess {
 
     /// Stop capturing
     pub fn stop_capture(&mut self) {
+        // No block uses the run once this returns; it is dropped here.
+        drop(self.run.replace(None));
         let stream = self.stream.lock().unwrap().take();
         let delegate = self.delegate.lock().unwrap().take();
 
@@ -230,14 +260,13 @@ impl AudioTapAccess {
             unsafe {
                 let callback_ptr: *mut c_void = *(*delegate).get_ivar("audio_callback");
                 if !callback_ptr.is_null() {
-                    let _ = Box::from_raw(callback_ptr as *mut Arc<Mutex<Option<TapFn>>>);
+                    drop(Arc::from_raw(callback_ptr as *const TapSlot));
                 }
                 let () = msg_send![delegate, release];
             }
         }
 
         *self.is_running.lock().unwrap() = false;
-        *self.audio_input_cb.lock().unwrap() = None;
     }
 
     pub fn is_running(&self) -> bool {
@@ -276,8 +305,11 @@ fn define_sc_stream_output_delegate() -> *const Class {
                 return;
             }
 
-            let audio_cb = &*(callback_ptr as *const Arc<Mutex<Option<TapFn>>>);
-            handle_audio_sample(sample_buffer, audio_cb);
+            let slot = &*(callback_ptr as *const TapSlot);
+            if sample_buffer != nil {
+                // a block while the run is replaced or stopped is skipped
+                slot.with(|run| run.block(sample_buffer));
+            }
         }
     }
 
@@ -296,156 +328,157 @@ fn define_sc_stream_output_delegate() -> *const Class {
     decl.register()
 }
 
-/// Handle incoming audio samples from ScreenCaptureKit
-unsafe fn handle_audio_sample(sample_buffer: ObjcId, audio_cb: &Arc<Mutex<Option<TapFn>>>) {
-    if sample_buffer == nil {
-        return;
-    }
-
-    // Get format description first
-    let format_desc: ObjcId = CMSampleBufferGetFormatDescription(sample_buffer);
-    if format_desc == nil {
-        return;
-    }
-
-    let asbd_ptr = CMAudioFormatDescriptionGetStreamBasicDescription(format_desc);
-    if asbd_ptr.is_null() {
-        return;
-    }
-
-    let asbd = &*asbd_ptr;
-    let channel_count = asbd.mChannelsPerFrame as usize;
-    let sample_rate = asbd.mSampleRate;
-    let bits_per_channel = asbd.mBitsPerChannel as usize;
-
-    if channel_count == 0 || bits_per_channel == 0 {
-        return;
-    }
-
-    // Get the number of sample frames from the sample buffer
-    let num_samples = CMSampleBufferGetNumSamples(sample_buffer);
-    if num_samples <= 0 {
-        return;
-    }
-    let frame_count = num_samples as usize;
-
-    // Get the audio buffer list - this is the proper way for audio CMSampleBuffers
-    let mut audio_buffer_list_size: usize = 0;
-    let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-        sample_buffer,
-        &mut audio_buffer_list_size,
-        std::ptr::null_mut(),
-        0,
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        0,
-        std::ptr::null_mut(),
-    );
-
-    if status != 0 || audio_buffer_list_size == 0 {
-        return;
-    }
-
-    // Allocate the AudioBufferList
-    let layout = std::alloc::Layout::from_size_align(audio_buffer_list_size, 8).unwrap();
-    let abl_ptr = std::alloc::alloc(layout) as *mut AudioBufferList;
-    if abl_ptr.is_null() {
-        return;
-    }
-
-    let mut block_buffer: ObjcId = nil;
-    let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-        sample_buffer,
-        std::ptr::null_mut(),
-        abl_ptr,
-        audio_buffer_list_size,
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        0,
-        &mut block_buffer,
-    );
-
-    if status != 0 {
-        std::alloc::dealloc(abl_ptr as *mut u8, layout);
-        return;
-    }
-
-    let abl = &*abl_ptr;
-
-    // Check format flags
-    let is_float = (asbd.mFormatFlags & 1) != 0; // kAudioFormatFlagIsFloat
-    let is_non_interleaved = (asbd.mFormatFlags & 32) != 0; // kAudioFormatFlagIsNonInterleaved
-
-    let mut audio_buffer = Planar::new(frame_count, channel_count);
-
-    if is_non_interleaved {
-        // Non-interleaved: each buffer in the list contains one channel
-        for ch in 0..channel_count.min(abl.mNumberBuffers as usize) {
-            let buf = &*abl.mBuffers.as_ptr().add(ch);
-            if buf.mData.is_null() {
-                continue;
-            }
-
-            let samples_in_buffer = buf.mDataByteSize as usize / (bits_per_channel / 8);
-            let samples_to_copy = samples_in_buffer.min(frame_count);
-
-            if is_float {
-                let float_data =
-                    std::slice::from_raw_parts(buf.mData as *const f32, samples_to_copy);
-                audio_buffer.channel_mut(ch)[..samples_to_copy].copy_from_slice(float_data);
-            } else {
-                // 16-bit integer
-                let i16_data = std::slice::from_raw_parts(buf.mData as *const i16, samples_to_copy);
-                for (i, &sample) in i16_data.iter().enumerate() {
-                    audio_buffer.channel_mut(ch)[i] = sample as f32 / 32768.0;
-                }
-            }
+impl TapRun {
+    /// Converts one ScreenCaptureKit sample buffer into the planar scratch and hands it to the
+    /// callback.
+    unsafe fn block(&mut self, sample_buffer: ObjcId) {
+        // Get format description first
+        let format_desc: ObjcId = CMSampleBufferGetFormatDescription(sample_buffer);
+        if format_desc == nil {
+            return;
         }
-    } else {
-        // Interleaved: single buffer with interleaved channels
-        if abl.mNumberBuffers >= 1 {
-            let buf = &*abl.mBuffers.as_ptr();
-            if !buf.mData.is_null() {
-                let total_samples = buf.mDataByteSize as usize / (bits_per_channel / 8);
-                let expected_samples = frame_count * channel_count;
-                let samples_to_use = total_samples.min(expected_samples);
+
+        let asbd_ptr = CMAudioFormatDescriptionGetStreamBasicDescription(format_desc);
+        if asbd_ptr.is_null() {
+            return;
+        }
+
+        let asbd = &*asbd_ptr;
+        let channel_count = asbd.mChannelsPerFrame as usize;
+        let sample_rate = asbd.mSampleRate;
+        let bits_per_channel = asbd.mBitsPerChannel as usize;
+
+        if channel_count == 0 || bits_per_channel == 0 {
+            return;
+        }
+
+        // Get the number of sample frames from the sample buffer
+        let num_samples = CMSampleBufferGetNumSamples(sample_buffer);
+        if num_samples <= 0 {
+            return;
+        }
+        let frame_count = num_samples as usize;
+
+        // Get the audio buffer list - this is the proper way for audio CMSampleBuffers
+        let mut audio_buffer_list_size: usize = 0;
+        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sample_buffer,
+            &mut audio_buffer_list_size,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+        );
+
+        if status != 0 || audio_buffer_list_size == 0 {
+            return;
+        }
+
+        // The AudioBufferList goes into the room set aside at start; past it, grow rather than
+        // lose the block.
+        let words = audio_buffer_list_size.div_ceil(8);
+        if words > self.buffer_list.len() {
+            self.buffer_list.resize(words, 0);
+        }
+        let abl_ptr = self.buffer_list.as_mut_ptr() as *mut AudioBufferList;
+
+        let mut block_buffer: ObjcId = nil;
+        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sample_buffer,
+            std::ptr::null_mut(),
+            abl_ptr,
+            audio_buffer_list_size,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+            &mut block_buffer,
+        );
+
+        if status != 0 {
+            return;
+        }
+
+        let abl = &*abl_ptr;
+
+        // Check format flags
+        let is_float = (asbd.mFormatFlags & 1) != 0; // kAudioFormatFlagIsFloat
+        let is_non_interleaved = (asbd.mFormatFlags & 32) != 0; // kAudioFormatFlagIsNonInterleaved
+
+        // The block goes into the scratch: past its room, grow rather than lose the block.
+        let samples = frame_count * channel_count;
+        if samples > self.planar.data.len() {
+            self.planar.data.resize(samples, 0.0);
+        }
+        self.planar.frames = frame_count;
+        self.planar.channels = channel_count;
+        self.planar.data[..samples].fill(0.0);
+        let audio_buffer = &mut self.planar;
+
+        if is_non_interleaved {
+            // Non-interleaved: each buffer in the list contains one channel
+            for ch in 0..channel_count.min(abl.mNumberBuffers as usize) {
+                let buf = &*abl.mBuffers.as_ptr().add(ch);
+                if buf.mData.is_null() {
+                    continue;
+                }
+
+                let samples_in_buffer = buf.mDataByteSize as usize / (bits_per_channel / 8);
+                let samples_to_copy = samples_in_buffer.min(frame_count);
 
                 if is_float {
                     let float_data =
-                        std::slice::from_raw_parts(buf.mData as *const f32, samples_to_use);
-                    // De-interleave
-                    for frame in 0..(samples_to_use / channel_count) {
-                        for ch in 0..channel_count {
-                            audio_buffer.channel_mut(ch)[frame] =
-                                float_data[frame * channel_count + ch];
-                        }
-                    }
+                        std::slice::from_raw_parts(buf.mData as *const f32, samples_to_copy);
+                    audio_buffer.channel_mut(ch)[..samples_to_copy].copy_from_slice(float_data);
                 } else {
-                    // 16-bit integer interleaved
-                    let i16_data =
-                        std::slice::from_raw_parts(buf.mData as *const i16, samples_to_use);
-                    for frame in 0..(samples_to_use / channel_count) {
-                        for ch in 0..channel_count {
-                            let sample = i16_data[frame * channel_count + ch];
-                            audio_buffer.channel_mut(ch)[frame] = sample as f32 / 32768.0;
+                    // 16-bit integer
+                    let i16_data = std::slice::from_raw_parts(buf.mData as *const i16, samples_to_copy);
+                    for (i, &sample) in i16_data.iter().enumerate() {
+                        audio_buffer.channel_mut(ch)[i] = sample as f32 / 32768.0;
+                    }
+                }
+            }
+        } else {
+            // Interleaved: single buffer with interleaved channels
+            if abl.mNumberBuffers >= 1 {
+                let buf = &*abl.mBuffers.as_ptr();
+                if !buf.mData.is_null() {
+                    let total_samples = buf.mDataByteSize as usize / (bits_per_channel / 8);
+                    let expected_samples = frame_count * channel_count;
+                    let samples_to_use = total_samples.min(expected_samples);
+
+                    if is_float {
+                        let float_data =
+                            std::slice::from_raw_parts(buf.mData as *const f32, samples_to_use);
+                        // De-interleave
+                        for frame in 0..(samples_to_use / channel_count) {
+                            for ch in 0..channel_count {
+                                audio_buffer.channel_mut(ch)[frame] =
+                                    float_data[frame * channel_count + ch];
+                            }
+                        }
+                    } else {
+                        // 16-bit integer interleaved
+                        let i16_data =
+                            std::slice::from_raw_parts(buf.mData as *const i16, samples_to_use);
+                        for frame in 0..(samples_to_use / channel_count) {
+                            for ch in 0..channel_count {
+                                let sample = i16_data[frame * channel_count + ch];
+                                audio_buffer.channel_mut(ch)[frame] = sample as f32 / 32768.0;
+                            }
                         }
                     }
                 }
             }
         }
-    }
 
-    // Clean up
-    if block_buffer != nil {
-        CFRelease(block_buffer as *const c_void);
-    }
-    std::alloc::dealloc(abl_ptr as *mut u8, layout);
-
-    // Call the callback - try_lock to avoid blocking the audio thread
-    if let Ok(mut guard) = audio_cb.try_lock() {
-        if let Some(cb) = &mut *guard {
-            cb(&audio_buffer, sample_rate);
+        // Clean up
+        if block_buffer != nil {
+            CFRelease(block_buffer as *const c_void);
         }
+
+        (self.callback)(&self.planar, sample_rate);
     }
 }
 

@@ -301,10 +301,18 @@ pub mod info_flags {
     /// The backend replaces a lost device: `DeviceReset` follows `DeviceLost`. Without it a lost
     /// device stays lost for the rest of the session.
     pub const DEVICE_RESET: u32 = 16384;
+    /// The backend keeps compiled pipelines across launches, and this one started with none it can
+    /// use (a fresh install, and on Vulkan an update too), so its first frame compiles them all.
+    pub const PIPELINE_CACHE_COLD: u32 = 32768;
+    /// The backend can repaint just a window pass's `Pass::damage` rects, so it's worth working them out.
+    pub const PARTIAL_REPAINT: u32 = 65536;
+    /// Draws in one pass may write different subsets of its colour attachments.
+    /// Vulkan reports this when independent blend is enabled on the device.
+    pub const MIXED_OUTPUT_PASSES: u32 = 131072;
 
     #[test]
     fn the_flags_are_distinct_bits() {
-        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW, XR_OFFSCREEN, COMPUTE, DRAW_STORAGE_BUFFERS, DEVICE_RESET];
+        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW, XR_OFFSCREEN, COMPUTE, DRAW_STORAGE_BUFFERS, DEVICE_RESET, PIPELINE_CACHE_COLD, PARTIAL_REPAINT, MIXED_OUTPUT_PASSES];
         for (i, a) in all.iter().enumerate() {
             assert!(a.is_power_of_two());
             assert!(all[i + 1..].iter().all(|b| a & b == 0), "flag {a} shares a bit");
@@ -412,12 +420,15 @@ impl OpenReq {
             Ok("offscreen") => (backend_id::HEADLESS, 0),
             Ok("metal") => (backend_id::METAL, window_flags),
             Ok("gl") if cfg!(target_os = "linux") => (backend_id::GL, window_flags | if hidden { open_flags::OFFSCREEN_WINDOWS } else { 0 }),
+            Ok("gl") if cfg!(target_os = "android") => (backend_id::GL, window_flags),
             Ok("vulkan") if cfg!(target_os = "linux") && !hidden => (backend_id::VULKAN, window_flags),
+            Ok("vulkan") if cfg!(target_os = "android") => (backend_id::VULKAN, window_flags),
             Ok("vulkan") => (backend_id::VULKAN, window_flags | open_flags::OFFSCREEN_WINDOWS),
             _ if cfg!(target_vendor = "apple") && hidden => (backend_id::METAL, open_flags::OFFSCREEN_WINDOWS),
             _ if cfg!(target_vendor = "apple") => (backend_id::METAL, window_flags),
             _ if cfg!(target_os = "linux") => (backend_id::AUTO, if hidden { window_flags | open_flags::OFFSCREEN_WINDOWS } else { window_flags }),
-            _ if cfg!(target_os = "android") => (backend_id::VULKAN, window_flags),
+            // Vulkan where the device has 1.1, else GLES (`backend::android::open`)
+            _ if cfg!(target_os = "android") => (backend_id::AUTO, window_flags),
             _ if cfg!(windows) => (backend_id::D3D11, if hidden { window_flags | open_flags::OFFSCREEN_WINDOWS } else { window_flags }),
             _ => (backend_id::HEADLESS, 0),
         };
@@ -882,6 +893,9 @@ pub mod mobile_ui {
     /// `value`: the window's background, 0xAARRGGBB, which the OS shows until the app draws
     /// (a start or a resume).
     pub const APP_BACKGROUND: u32 = 4;
+    /// The first frame waits on pipelines the cache didn't have, so the OS explains the wait until
+    /// the app draws (Android's "compiling shaders" screen; `value` is unused).
+    pub const SHADER_COMPILE_SCREEN: u32 = 5;
 
     pub mod orientation {
         pub const AUTO: u32 = 0;
@@ -1205,6 +1219,11 @@ pub struct Pass {
     pub draws: Range,
     pub name: StrId,
     pub owner: StrId,
+    /// The rects that changed since frame `damage_since` (x, y, w, h in target pixels, `buffers::read_rects`).
+    /// A target that still holds that frame can repaint just these; any other target repaints everything.
+    pub damage: Range,
+    /// The frame `damage` is measured from, or 0 when we don't know what changed.
+    pub damage_since: u64,
 }
 
 unsafe impl Plain for Pass {}
@@ -1275,6 +1294,8 @@ pub struct Draw {
     pub list_name: StrId,
     /// instance AABB in target px; NaN = unknown
     pub bounds: [f32; 4],
+    /// One bit for each of its pass's `damage` rects that this draw touches.
+    pub damage: u32,
 }
 
 impl Draw {

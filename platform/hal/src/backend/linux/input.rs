@@ -254,13 +254,15 @@ pub(super) fn button(code: u32) -> u32 {
         0x110 | 1 => 1,
         0x111 | 3 => 2,
         0x112 | 2 => 4,
-        0x113 | 8 => 8,
-        0x114 | 9 => 16,
+        // most mice send their back/forward thumb buttons as BTN_SIDE/BTN_EXTRA (X11 buttons 8/9),
+        // but some send BTN_BACK (0x116)/BTN_FORWARD (0x115)
+        0x113 | 0x116 | 8 => 8,
+        0x114 | 0x115 | 9 => 16,
         _ => 0,
     }
 }
 
-pub(super) fn cursor_name(cursor: u32) -> &'static CStr {
+fn cursor_name(cursor: u32) -> &'static CStr {
     match cursor {
         2 => c"crosshair",
         3 => c"pointer",
@@ -287,6 +289,16 @@ pub(super) fn cursor_name(cursor: u32) -> &'static CStr {
         25 => c"row-resize",
         _ => c"default",
     }
+}
+
+pub(super) fn cursor_names(cursor: u32) -> impl Iterator<Item = &'static CStr> {
+    // `closedhand` is the Qt/KDE name; `fleur` is a core X cursor, so on X11 it always loads.
+    let fallbacks: &[&CStr] = if cursor == crate::types::cursor::GRABBING {
+        &[c"closedhand", c"fleur"]
+    } else {
+        &[]
+    };
+    std::iter::once(cursor_name(cursor)).chain(fallbacks.iter().copied())
 }
 
 pub(super) const TEXT_MIMES: [&str; 4] = [

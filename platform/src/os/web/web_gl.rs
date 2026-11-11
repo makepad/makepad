@@ -8,7 +8,7 @@ use crate::{
     makepad_wasm_bridge::*,
     os::web::from_wasm::*,
     os::web::CxOs,
-    texture::{CxTexturePool, TextureFormat, TextureId},
+    texture::{CxTexturePool, TextureFormat, TextureId, TextureUpdated},
 };
 use std::collections::BTreeSet;
 
@@ -752,8 +752,9 @@ impl Cx {
                     .draw_call()
                     .map_or(0, |call| call.uniforms_gen);
                 if sh.mapping.uses_time {
-                    self.demo_time_repaint = true;
-                    self.passes[draw_pass_id].repaint_next = true;
+                    let time_fps = draw_item.kind.draw_call().map_or(0.0, |call| call.options.time_fps);
+                    self.demo_time_repaint |=
+                        self.passes[draw_pass_id].request_time_repaint(time_fps, &mut self.time_fps_clock);
                 }
             }
         }
@@ -769,23 +770,41 @@ impl Cx {
     fn webgl_upload_vec_texture(textures: &mut CxTexturePool, os: &mut CxOs, texture_id: TextureId) {
         let cxtexture = &mut textures[texture_id];
         if cxtexture.format.is_vec() {
-            if cxtexture.alloc_vec() {}
-            if !cxtexture.take_updated().is_empty() {
+            // Leave the update pending while the data's taken, so its rect
+            // merges into the next upload instead of getting lost.
+            if let TextureFormat::VecBGRAu8_32 { data: None, .. } = cxtexture.format {
+                return;
+            }
+            let updated = cxtexture.take_updated();
+            if !updated.is_empty() {
+                // An empty update mustn't use up a size change,
+                // or the rect below would miss the texture.
+                let is_new_allocation = cxtexture.alloc_vec();
                 match &cxtexture.format {
                     TextureFormat::VecBGRAu8_32 {
                         width,
                         height,
-                        data,
+                        data: Some(data),
                         ..
                     } => {
+                        if let (TextureUpdated::Partial(rect), false) = (updated, is_new_allocation) {
+                            os.from_wasm(FromWasmUpdateTextureRect_BGRAu8_32 {
+                                texture_id: texture_id.0,
+                                image_width: *width,
+                                image_height: *height,
+                                x: rect.origin.x,
+                                y: rect.origin.y,
+                                width: rect.size.width,
+                                height: rect.size.height,
+                                data: WasmPtrU32::new(data),
+                            });
+                            return;
+                        }
                         os.from_wasm(FromWasmAllocTextureImage2D_BGRAu8_32 {
                             texture_id: texture_id.0,
                             width: *width,
                             height: *height,
-                            data: WasmPtrU32::new(match data {
-                                Some(data) => data,
-                                None => return,
-                            }),
+                            data: WasmPtrU32::new(data),
                         });
                     }
                     // VecMipBGRAu8_32: level 0 only for now (safe, no mip chain).
@@ -1252,6 +1271,7 @@ impl CxOsDrawShader {
 #define VIEW_ID 0
 precision highp float;
 precision highp int;
+precision highp sampler2D;
 precision highp sampler2DShadow;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){{return textureLod(sampler, vec2(pos.x, pos.y), lod);}}
@@ -1267,6 +1287,7 @@ vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 #define VIEW_ID 0
 precision highp float;
 precision highp int;
+precision highp sampler2D;
 precision highp sampler2DShadow;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){{return textureLod(sampler, vec2(pos.x, pos.y), lod);}}

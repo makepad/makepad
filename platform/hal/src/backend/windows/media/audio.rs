@@ -32,8 +32,8 @@ pub const MAX_AUDIO_DEVICE_INDEX: usize = 32;
 /// A registered entry.
 pub type Entry = AudioEntry;
 
-/// The entry of one device slot. Locked while the entry runs.
-pub type Slot = Arc<Mutex<Option<Entry>>>;
+/// The entry of one device slot: the HAL-wide lock-free slot (`media::EntrySlot`).
+pub type Slot = Arc<crate::media::EntrySlot>;
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -465,11 +465,11 @@ impl Planar {
         for (c, p) in planes.iter_mut().enumerate().take(self.channels) {
             *p = self.data[c * frames..].as_mut_ptr();
         }
-        let guard = lock(slot);
-        if let Some(entry) = *guard {
-            let mut block = AudioBlock { device, sample_rate, sample_time: 0.0, host_time: 0, rate_scalar: 0.0, has_time: 0, frames: frames as u32, channels: self.channels as u32, planes: planes.as_mut_ptr() };
+        let channels = self.channels as u32;
+        slot.with(|entry| {
+            let mut block = AudioBlock { device, sample_rate, sample_time: 0.0, host_time: 0, rate_scalar: 0.0, has_time: 0, frames: frames as u32, channels, planes: planes.as_mut_ptr() };
             entry.call(&mut block);
-        }
+        });
     }
 }
 

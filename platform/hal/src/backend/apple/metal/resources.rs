@@ -73,7 +73,9 @@ pub fn create_texture(device: ObjcId, t: &TextureObj, gen: u32, label: &str) -> 
     let d = descriptor.as_id();
     let texture_type = if t.is_cube() {
         MTLTextureType::Cube
-    } else if t.depth > 1 {
+    } else if t.depth > 1 || t.usage & usage::ARRAY != 0 {
+        // An array of one layer is still an array: a shader that declares a
+        // texture array cannot sample a plain 2D texture.
         MTLTextureType::D2Array
     } else {
         MTLTextureType::D2

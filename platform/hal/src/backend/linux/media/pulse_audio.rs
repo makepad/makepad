@@ -375,9 +375,7 @@ impl PulseInputStream {
             let interleaved = std::slice::from_raw_parts(read_ptr as *const f32, byte_count / 4);
             for chunk in interleaved.chunks(input.audio_buffer.capacity() * 2) {
                 input.audio_buffer.read(chunk);
-                input
-                    .input_fn
-                    .call(input.device_id, 48000.0, &mut input.audio_buffer);
+                input.audio_buffer.call(&input.input_fn, input.device_id, 48000.0);
             }
             pa_stream_drop(stream);
         }));
@@ -586,9 +584,7 @@ impl PulseOutputStream {
             for chunk in interleaved.chunks_mut(output.audio_buffer.capacity() * 2) {
                 output.audio_buffer.frames = chunk.len() / 2;
                 output.audio_buffer.clear();
-                output
-                    .output_fn
-                    .call(output.device_id, 48000.0, &mut output.audio_buffer);
+                output.audio_buffer.call(&output.output_fn, output.device_id, 48000.0);
                 output.audio_buffer.write(chunk);
             }
             let flags = if output.clear_on_read {

@@ -130,6 +130,46 @@ pub fn process_cpu_ns() -> u64 {
     times.map_or(0, |()| filetimes_ns([kernel, user]))
 }
 
+/// What the process's threads that run now have spent runnable, waiting for a core, in
+/// nanoseconds: CPU they wanted and a loaded box did not give them, which their CPU time does not
+/// show (a worker at a fifth of a core can want a whole one). Not the calling thread's, nor those
+/// whose names `skip` picks (a name as the OS keeps it: Linux cuts it to 15 bytes). A thread that
+/// ended takes its wait out with it. Linux keeps it per thread (/proc/self/task/<tid>/schedstat,
+/// its second field, run_delay): two small files a thread, so a caller reads it seldom (a test's
+/// wait, once a look). macOS keeps a runnable time only for a whole process (proc_pid_rusage's
+/// ri_runnable_time), where the calling thread's and the skipped ones' cannot be told apart, and
+/// Windows none outside its event tracing: both answer 0.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn threads_waited_ns(skip: impl Fn(&str) -> bool) -> u64 {
+    extern "C" {
+        fn gettid() -> i32;
+    }
+    // SAFETY: no arguments; the calling thread's id
+    let me = unsafe { gettid() }.to_string();
+    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else { return 0 };
+    let mut waited = 0;
+    for task in tasks.flatten() {
+        if task.file_name().to_str() == Some(me.as_str()) {
+            continue;
+        }
+        let path = task.path();
+        if skip(std::fs::read_to_string(path.join("comm")).unwrap_or_default().trim_end()) {
+            continue;
+        }
+        // "<run time> <run_delay> <timeslices>", in ns
+        let stat = std::fs::read_to_string(path.join("schedstat")).unwrap_or_default();
+        waited += stat.split_whitespace().nth(1).and_then(|ns| ns.parse::<u64>().ok()).unwrap_or(0);
+    }
+    waited
+}
+
+/// See the Linux one: this OS keeps no runnable time per thread.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub fn threads_waited_ns(skip: impl Fn(&str) -> bool) -> u64 {
+    let _ = skip;
+    0
+}
+
 #[cfg(not(any(unix, windows)))]
 pub fn raw_ns() -> u64 {
     use std::sync::OnceLock;

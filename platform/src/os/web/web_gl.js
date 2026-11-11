@@ -21,6 +21,14 @@ const MAKEPAD_WEBGL_VIDEO_UPLOAD_FORMAT = "video-rgba8";
 // when no earlier frame is still on the GPU, else at most this often.
 const MAKEPAD_WEBGL_ALLOCATION_CHECK_MS = 2000;
 
+const MAKEPAD_WEBGL_BGRA_IMAGE_UPLOAD = {
+  faces: 1,
+  bytes_per_texel: 4,
+  elements_per_texel: 1,
+  element_size: 4,
+  nearest: false,
+};
+
 // GL error and framebuffer-completeness queries (gl.getError,
 // gl.checkFramebufferStatus) run only when the page sets
 // `window.makepad_gl_checks = true` before the runtime starts: development
@@ -71,6 +79,10 @@ function makepad_safe_sum(left, right) {
   }
   const sum = left + right;
   return Number.isSafeInteger(sum) ? sum : null;
+}
+
+function makepad_swap_red_blue(value) {
+  return ((value & 0xff) << 16) | (value & 0xff00ff00) | ((value >>> 16) & 0xff);
 }
 
 export function makepad_query_webgl_limits(gl) {
@@ -300,7 +312,7 @@ export class WasmWebGL extends WasmWebBrowser {
     }
 
     this.to_wasm.ToWasmXRUpdate(xr_update);
-    this.to_wasm.ToWasmAnimationFrame({ time: time / 1000.0 });
+    this.to_wasm.ToWasmAnimationFrame({ time: time / 1000.0, in_a_row: true });
     this.in_animation_frame = true;
     this.do_wasm_pump();
     this.in_animation_frame = false;
@@ -861,27 +873,27 @@ export class WasmWebGL extends WasmWebBrowser {
     }
   }
 
+  get_bgra_upload_scratch(count) {
+    if (
+      !(this.bgra_upload_scratch instanceof Uint32Array) ||
+      this.bgra_upload_scratch.length < count ||
+      // Not kept at more than twice what uploads need.
+      this.bgra_upload_scratch.length > count * 2
+    ) {
+      this.bgra_upload_scratch = new Uint32Array(count);
+    }
+    return this.bgra_upload_scratch;
+  }
+
   make_bgra_upload_view(admission) {
     const source = this.make_texture_source_view(admission, Uint32Array);
     if (!source) {
       return null;
     }
     try {
-      if (
-        !(this.bgra_upload_scratch instanceof Uint32Array) ||
-        this.bgra_upload_scratch.length < admission.required_elements ||
-        // Not kept at more than twice what uploads need.
-        this.bgra_upload_scratch.length > admission.required_elements * 2
-      ) {
-        this.bgra_upload_scratch = new Uint32Array(admission.required_elements);
-      }
-      const converted = this.bgra_upload_scratch;
+      const converted = this.get_bgra_upload_scratch(admission.required_elements);
       for (let i = 0; i < admission.required_elements; i++) {
-        const value = source[i];
-        converted[i] =
-          ((value & 0xff) << 16) |
-          (value & 0xff00ff00) |
-          ((value >>> 16) & 0xff);
+        converted[i] = makepad_swap_red_blue(source[i]);
       }
       return new Uint8Array(
         converted.buffer,
@@ -1007,6 +1019,21 @@ export class WasmWebGL extends WasmWebBrowser {
     return texture;
   }
 
+  // The texture's storage holds a valid `upload_format` image of this size,
+  // so new data can go into it without allocating.
+  can_update_texture_in_place(texture, width, height, upload_format) {
+    return (
+      texture._texture_upload_width === width &&
+      texture._texture_upload_height === height &&
+      texture._texture_upload_format === upload_format &&
+      texture._width === undefined &&
+      texture._height === undefined &&
+      texture._format === undefined &&
+      texture._depth === undefined &&
+      texture._render_target_valid !== false
+    );
+  }
+
   upload_admitted_texture(admission, upload_format, source, upload) {
     const gl = this.gl;
     const args = admission.args;
@@ -1042,14 +1069,7 @@ export class WasmWebGL extends WasmWebBrowser {
 
     const allocation_changed =
       created ||
-      texture._texture_upload_width !== args.width ||
-      texture._texture_upload_height !== args.height ||
-      texture._texture_upload_format !== upload_format ||
-      texture._width !== undefined ||
-      texture._height !== undefined ||
-      texture._format !== undefined ||
-      texture._depth !== undefined ||
-      texture._render_target_valid === false;
+      !this.can_update_texture_in_place(texture, args.width, args.height, upload_format);
     if (allocation_changed && old_texture) {
       this.invalidate_texture_dependencies(old_texture);
     }
@@ -2813,13 +2833,7 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmAllocTextureImage2D_BGRAu8_32(args) {
-    const admission = this.admit_texture_upload(args, {
-      faces: 1,
-      bytes_per_texel: 4,
-      elements_per_texel: 1,
-      element_size: 4,
-      nearest: false,
-    });
+    const admission = this.admit_texture_upload(args, MAKEPAD_WEBGL_BGRA_IMAGE_UPLOAD);
     if (!admission) return;
     const source = this.make_bgra_upload_view(admission);
     if (!source) return;
@@ -2855,6 +2869,68 @@ export class WasmWebGL extends WasmWebBrowser {
         }
       },
     );
+  }
+
+  // Only the changed rect goes up while the texture holds this image at this
+  // size, otherwise the whole image does.
+  FromWasmUpdateTextureRect_BGRAu8_32(args) {
+    const image = {
+      texture_id: args.texture_id,
+      width: args.image_width,
+      height: args.image_height,
+      data: args.data,
+    };
+    const admission = this.admit_texture_upload(image, MAKEPAD_WEBGL_BGRA_IMAGE_UPLOAD);
+    if (!admission) return;
+    const texture = this.textures[args.texture_id];
+    const right = makepad_safe_sum(args.x, args.width);
+    const bottom = makepad_safe_sum(args.y, args.height);
+    const rect_fits =
+      args.width > 0 &&
+      args.height > 0 &&
+      right !== null &&
+      right <= args.image_width &&
+      bottom !== null &&
+      bottom <= args.image_height;
+    if (
+      !texture ||
+      !rect_fits ||
+      !this.can_update_texture_in_place(texture, args.image_width, args.image_height, "bgra8")
+    ) {
+      return this.FromWasmAllocTextureImage2D_BGRAu8_32(image);
+    }
+    const source = this.make_texture_source_view(admission, Uint32Array);
+    if (!source) return;
+    const gl = this.gl;
+    try {
+      const count = args.width * args.height;
+      const converted = this.get_bgra_upload_scratch(count);
+      let out = 0;
+      for (let y = args.y; y < args.y + args.height; y++) {
+        const row = y * args.image_width + args.x;
+        for (let x = 0; x < args.width; x++) {
+          converted[out++] = makepad_swap_red_blue(source[row + x]);
+        }
+      }
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        args.x,
+        args.y,
+        args.width,
+        args.height,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        new Uint8Array(converted.buffer, 0, count * 4),
+      );
+    } catch (error) {
+      this.reject_texture_upload(
+        image,
+        "gl-upload",
+        `WebGL texture upload failed: ${error && error.message ? error.message : String(error)}`,
+      );
+    }
   }
 
   FromWasmAllocTextureImage2D_Ru8(args) {
@@ -4125,6 +4201,7 @@ export class WasmWebGL extends WasmWebBrowser {
         this[field] = 0;
       }
     }
+    this.clear_frame_timer();
     // Readbacks in flight read objects of the lost context: they end here
     // (their objects went with it) and every ticket fails as device lost.
     for (const capture of this.pending_render_texture_captures || []) {
@@ -4300,6 +4377,7 @@ export class WasmWebGL extends WasmWebBrowser {
       min_uniforms: Math.min(max_vertex_uniforms, max_fragment_uniforms),
       min_uniform_vectors: Math.min(max_vertex_uniforms, max_fragment_uniforms),
       float_color_targets: !!this.ext_color_buffer_float,
+      max_texture_size: gl.getParameter(gl.MAX_TEXTURE_SIZE),
       vendor: gl.getParameter(gl.VENDOR) || "unknown",
       renderer: gl.getParameter(gl.RENDERER) || "unknown",
     };
@@ -4334,6 +4412,7 @@ const MAKEPAD_WEBGL_COMMANDS = [
   "FromWasmFreeWebGLResources",
   "FromWasmDrawCall",
   "FromWasmAllocTextureImage2D_BGRAu8_32",
+  "FromWasmUpdateTextureRect_BGRAu8_32",
   "FromWasmAllocTextureImage2D_Ru8",
   "FromWasmAllocTextureImage2D_RGBAf32",
   "FromWasmAllocTextureCube_BGRAu8_32",

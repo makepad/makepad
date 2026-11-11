@@ -266,6 +266,8 @@ impl Replayer {
                     draws: Range::default(),
                     name: 0,
                     owner: 0,
+                    damage: Range::default(),
+                    damage_since: 0,
                 };
                 w.pass(pass);
                 let n = if pi == cut.pass { cut.draws.min(p.draws.len as usize) } else { p.draws.len as usize };
@@ -309,6 +311,7 @@ impl Replayer {
                         item: d.item,
                         list_name: 0,
                         bounds: d.bounds,
+                        damage: 0,
                     };
                     for _ in 0..times {
                         w.draw(draw);

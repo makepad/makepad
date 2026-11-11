@@ -89,6 +89,16 @@ fn frame_round_trip_and_limit() {
     assert_eq!((f.chan, f.kind, f.flags, f.payload.as_slice()), (7, kind::DATA, 1, &b"hello"[..]));
     assert_eq!(r.next().unwrap().kind, kind::CLOSE);
     assert!(r.next().is_err());
+    // OPEN carries large JSON arguments without DATA fragmentation.
+    let envelope_bytes = "app\ncall editor.replace_source\n{\"source\":\"\"}".len();
+    for bytes in [100 * 1024, 192 * 1024, crate::frame::MAX_PAYLOAD - envelope_bytes] {
+        let payload = format!("app\ncall editor.replace_source\n{{\"source\":\"{}\"}}", "x".repeat(bytes));
+        let mut buf = Vec::new();
+        write_frame(&mut buf, 11, kind::OPEN, 0, payload.as_bytes()).unwrap();
+        let f = FrameReader::new(Box::new(std::io::Cursor::new(buf))).next().unwrap();
+        assert_eq!((f.chan, f.kind, f.flags), (11, kind::OPEN, 0));
+        assert_eq!(f.payload, payload.as_bytes());
+    }
     // a frame announcing more than 1 MiB is refused
     let mut big = ((MAX_FRAME + 1) as u32).to_le_bytes().to_vec();
     big.extend_from_slice(&[0; 16]);
@@ -102,6 +112,12 @@ fn big_message_is_split_and_reassembled() {
     let ep = Endpoint::new("t");
     ep.register("echo", 1, echo());
     let conn = pair(&ep);
+    let oversized = "x".repeat(crate::frame::MAX_PAYLOAD);
+    let Err((code, reason)) = conn.open("echo", &oversized) else { panic!("oversized OPEN accepted") };
+    assert_eq!(code, crate::conn::CLOSE_REFUSED);
+    assert!(reason.contains(&format!("the encoded call is {} bytes", oversized.len() + "echo\n".len())));
+    assert!(reason.contains(&format!("one call carries {}", crate::frame::MAX_PAYLOAD)));
+    // Refusing OPEN must leave the connection usable for the next call.
     let ch = conn.open("echo", "").unwrap();
     let msg: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
     ch.send(msg.clone()).unwrap();
@@ -917,15 +933,12 @@ fn a_run_with_a_deep_tmpdir_is_reached() {
         return;
     }
     let base = std::env::temp_dir().join(format!("makepad-remote-deep-{}", std::process::id()));
-    let (deep, registry) = (base.join("lease").join("d".repeat(120)).join("tmp"), base.join("registry"));
-    for d in [&deep, &registry] {
-        std::fs::create_dir_all(d).unwrap();
-    }
+    let deep = base.join("lease").join("d".repeat(120)).join("tmp");
+    std::fs::create_dir_all(&deep).unwrap();
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "tests::a_run_with_a_deep_tmpdir_is_reached", "--nocapture", "--test-threads=1"])
         .env("MAKEPAD_REMOTE_DEEP_CHILD", "1")
         .env("TMPDIR", &deep)
-        .env("MAKEPAD_REMOTE_REGISTRY", &registry)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -959,7 +972,7 @@ fn a_run_with_a_deep_tmpdir_is_reached() {
     };
     let sock = std::path::PathBuf::from(said);
     assert!(!sock.starts_with(&deep) && sock.starts_with(crate::carrier::unix::socket_dir()), "{}", sock.display());
-    let app = crate::discovery::apps_in(&registry).into_iter().find(|a| a.pid == child.id()).expect("its discovery file");
+    let app = crate::discovery::apps().into_iter().find(|a| a.pid == child.id()).expect("its discovery file");
     assert_eq!((app.socket.as_str(), app.unreachable()), (sock.to_str().unwrap(), None));
     let lines: Vec<String> = Client::new(Target::Unix(sock.clone()), "deep-test").cmd("ping").unwrap().map_while(Result::ok).collect();
     assert_eq!(lines.first().map(String::as_str), Some("{\"pong\":1}"));
