@@ -464,11 +464,18 @@ class MakepadSurface
         super.onDetachedFromWindow();
     }
 
+    // The view whose surface the app draws to: only its own surface reaches the app, and only the
+    // newest activity's view takes it over.
+    static MakepadSurface sAppSurface;
+
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
         Surface surface = holder.getSurface();
         //surface.setFrameRate(120f,0);
-        MakepadNative.surfaceOnSurfaceCreated(surface);
+        if (getContext() == MakepadActivity.sCurrent) {
+            sAppSurface = this;
+            MakepadNative.surfaceOnSurfaceCreated(surface);
+        }
     }
 
     @Override
@@ -482,7 +489,10 @@ class MakepadSurface
             }
         }
         Surface surface = holder.getSurface();
-        MakepadNative.surfaceOnSurfaceDestroyed(surface);
+        if (sAppSurface == this) {
+            sAppSurface = null;
+            MakepadNative.surfaceOnSurfaceDestroyed(surface);
+        }
     }
 
     @Override
@@ -492,7 +502,9 @@ class MakepadSurface
                                int height) {
         Surface surface = holder.getSurface();
         //surface.setFrameRate(120f,0);
-        MakepadNative.surfaceOnSurfaceChanged(surface, width, height);
+        if (sAppSurface == this) {
+            MakepadNative.surfaceOnSurfaceChanged(surface, width, height);
+        }
 
     }
 
@@ -1158,6 +1170,10 @@ public class MakepadActivity
     static HashMap<Long, MakepadWebSocketReader> mActiveWebsocketsReaders = new HashMap<>();
     static HashMap<Long, MakepadSocketStream> mActiveSocketStreams = new HashMap<>();
     private boolean mIsSwitchingActivity = false;
+    // The newest instance, which the app runs in. An older one that's still closing (a launch
+    // came while Back closed it) tells the app nothing more, so the app goes on in the new one.
+    static MakepadActivity sCurrent;
+    private volatile boolean mIsStarted = false;
 
     // Desired system-bar (status/navigation bar) icon tint, set from Rust via
     // setSystemBarAppearance(). true = dark icons (for light app backgrounds).
@@ -1372,6 +1388,7 @@ public class MakepadActivity
             finish();
             return;
         }
+        sCurrent = this;
         // the app's external files folder exists from the first start (the system makes it with
         // the app's ownership): what a developer drops in with adb (a fleet credential, a config)
         // is then readable by the app
@@ -1610,6 +1627,7 @@ public class MakepadActivity
     @Override
     protected void onStart() {
         super.onStart();
+        mIsStarted = true;
         restoreSurfaceViewForWarmResumeIfNeeded();
         MakepadNative.activityOnStart();
     }
@@ -1628,7 +1646,9 @@ public class MakepadActivity
     protected void onPause() {
         prepareSurfaceSnapshotOverlayForPause();
         super.onPause();
-        MakepadNative.activityOnPause();
+        if (sCurrent == this) {
+            MakepadNative.activityOnPause();
+        }
 
         //% MAIN_ACTIVITY_ON_PAUSE
     }
@@ -1636,7 +1656,10 @@ public class MakepadActivity
     @Override
     protected void onStop() {
         super.onStop();
-        MakepadNative.activityOnStop();
+        mIsStarted = false;
+        if (sCurrent == this) {
+            MakepadNative.activityOnStop();
+        }
     }
 
     @Override
@@ -1648,6 +1671,7 @@ public class MakepadActivity
         // Android recreates the activity right away for a config change the manifest doesn't
         // declare, and the running app moves over to the new one, so it must not shut down here.
         boolean isRecreating = isChangingConfigurations();
+        boolean superseded = sCurrent != this;
         unregisterPhysicalKeyboardListener();
         if (mNativeLayers != null) { mNativeLayers.close(); mNativeLayers = null; }
         if (mBackCallback != null) {
@@ -1687,15 +1711,25 @@ public class MakepadActivity
         }
         cleanupVideoPlaybackState();
         shutdownVideoPlaybackThread();
-        if (!mIsSwitchingActivity && !isRecreating) {
+        if (!mIsSwitchingActivity && !isRecreating && !superseded) {
             cleanupNetworkState();
             shutdownWebSocketsThread();
             stopLocationUpdates();
         }
         super.onDestroy();
-        if (!isRecreating) {
+        if (!isRecreating && !superseded) {
             MakepadNative.activityOnDestroy();
+            sCurrent = null;
         }
+    }
+
+    // Rust calls this off the UI thread right before the process ends, when the app ended just as
+    // this activity came. A visible one starts its task again, so it comes up in a new process.
+    public void restartTaskInNewProcess() {
+        if (!mIsStarted) return;
+        Intent intent = new Intent(getIntent());
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        getApplicationContext().startActivity(intent);
     }
 
     // Hands this surface to the activity Android recreates for a config change, so the
@@ -1770,7 +1804,9 @@ public class MakepadActivity
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        MakepadNative.activityOnWindowFocusChanged(hasFocus);
+        if (sCurrent == this) {
+            MakepadNative.activityOnWindowFocusChanged(hasFocus);
+        }
     }
 
     @Override

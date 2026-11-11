@@ -59,7 +59,9 @@ macro_rules! android_jni_entry {
 pub unsafe fn android_on_load(vm: *mut std::ffi::c_void, app: fn()) -> i32 {
     makepad_android_state::jni_on_load(vm);
     unsafe fn activity_ready(activity: makepad_jni_sys::jobject) {
-        if let Some(set) = makepad_android_state::get_activity_setter_fn() {
+        // The setter is handed out only once, and each later Activity needs it too.
+        static SET_ACTIVITY: std::sync::OnceLock<Option<unsafe fn(makepad_jni_sys::jobject)>> = std::sync::OnceLock::new();
+        if let Some(set) = SET_ACTIVITY.get_or_init(makepad_android_state::get_activity_setter_fn) {
             set(activity);
         }
     }
