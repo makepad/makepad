@@ -249,6 +249,19 @@ pub fn clamped_pass(s: &mut Session, target: Id, size: [u32; 2], fits: [u32; 2],
     eprintln!("[hal] pass {size:?} at dpi {dpi} is larger than its attachments {fits:?} (target {target:?}); drawn clipped to them");
 }
 
+/// Whether a pass's depth must be stored: something can read it later. A depth texture that is
+/// not sampled (no `usage::SAMPLED`), that this pass clears (or does not care about) rather than
+/// loads, and that no later pass of the submit loads, is read by nobody: it stays in tile memory
+/// (store DontCare), the w x h x 4 bytes are never written out.
+pub fn depth_kept(s: &Session, sid: u32, pass: &Pass, view: &CmdView, depth: Id) -> bool {
+    let sampled = s.textures.get(sid, depth).map_or(true, |e| e.val.usage & usage::SAMPLED != 0);
+    if sampled || pass.load[4] == pass_load::LOAD {
+        return true;
+    }
+    let at = view.passes.iter().position(|p| std::ptr::eq(p, pass)).unwrap_or(0);
+    view.passes[at + 1..].iter().any(|p| p.depth == depth && p.load[4] == pass_load::LOAD)
+}
+
 /// Session 0's badge `id` moved to `geom` (`None`: it closes): where its window routes the
 /// pointer to it, when it takes input.
 fn badge_moved(world: &mut World, id: Id, geom: Option<[f32; 4]>) {

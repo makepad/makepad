@@ -308,19 +308,6 @@ fn configure_pass(descriptor: ObjcId, pass: &Pass, colors: &[(usize, Id, ObjcId)
     }
 }
 
-/// Whether a pass's depth must be stored: something can read it later. A depth texture that is
-/// not sampled (no `usage::SAMPLED`), that this pass clears (or does not care about) rather than
-/// loads, and that no later pass of the submit loads, is read by nobody: it stays in tile memory
-/// (store DontCare), the w x h x 4 bytes are never written out.
-fn depth_kept(s: &Session, sid: u32, pass: &Pass, view: &CmdView, depth: Id) -> bool {
-    let sampled = s.textures.get(sid, depth).map_or(true, |e| e.val.usage & usage::SAMPLED != 0);
-    if sampled || pass.load[4] == pass_load::LOAD {
-        return true;
-    }
-    let at = view.passes.iter().position(|p| std::ptr::eq(p, pass)).unwrap_or(0);
-    view.passes[at + 1..].iter().any(|p| p.depth == depth && p.load[4] == pass_load::LOAD)
-}
-
 /// A render encoder with the pass's viewport and winding. `sample`: encoder timestamps (devices
 /// without stage-boundary sampling), the first of the group's four.
 fn open_encoder(cb: ObjcId, descriptor: ObjcId, viewport: [f32; 4], sample: Option<(ObjcId, usize)>) -> Option<ObjcId> {
@@ -1259,7 +1246,7 @@ impl Metal {
         let runs = if split.is_some() { runs } else { Vec::new() };
         let stage = samples.as_ref().map_or(false, |x| x.clock.stage);
         let depth_obj = depth.as_ref().map(|(_, o)| *o);
-        let depth_kept = depth.as_ref().is_some_and(|(id, _)| depth_kept(s, sid, pass, view, *id));
+        let depth_kept = depth.as_ref().is_some_and(|(id, _)| exec::depth_kept(s, sid, pass, view, *id));
         let buffer_of = |x: &Arc<PassSamples>| x.buffer.as_ref().map_or(nil, |b| b.as_id());
         let mut split_runs = gpu_prof::SplitRuns::<usize>::default();
         let first_sample: Option<(ObjcId, usize)> = match &split {

@@ -469,6 +469,18 @@ impl FrameBuilder {
         self.pipes.get(pipe).is_some_and(|p| p.ready)
     }
 
+    /// Whether the draws of pipeline `pipe` show this frame, or `None` while the HAL is still compiling it.
+    pub(crate) fn pipeline_draws(&self, pipe: usize) -> Option<bool> {
+        let p = self.pipes.get(pipe)?;
+        if p.failed { Some(false) } else { p.ready.then_some(true) }
+    }
+
+    /// The HAL surface a texture shows when the HAL lent it, as one number.
+    pub(crate) fn lent_surface(&self, id: TextureId) -> Option<u64> {
+        let (_, surface) = self.lent.get(&id.0).filter(|(gen, _)| *gen == id.generation())?;
+        Some((surface.index as u64) << 32 | surface.gen as u64)
+    }
+
     /// The failed pipeline's first shader, and whether a pass waited for it (it paints again,
     /// without those draws).
     pub(crate) fn pipeline_failed(&mut self, id: Id) -> Option<(usize, bool)> {
@@ -1338,6 +1350,20 @@ impl Cx {
                 }
             }
         }
+        // A window image the HAL keeps between frames only needs what changed repainted.
+        let can_repaint_partially = is_window && !stereo && !picking && hosted_target.is_none()
+            && !self.draw_damage.is_disabled
+            && self.hal_info_flags() & makepad_hal::info_flags::PARTIAL_REPAINT != 0;
+        if can_repaint_partially {
+            if let Some((rects, since)) = self.compute_pass_damage(fb, pass_id, pass_rect, (tw as i32, th as i32), serial) {
+                let hal_rects: Vec<[f32; 4]> = rects.iter()
+                    .map(|r| [r.x0 as f32, r.y0 as f32, (r.x1 - r.x0) as f32, (r.y1 - r.y0) as f32])
+                    .collect();
+                pass.damage = fb.w.put_rects(&hal_rects);
+                pass.damage_since = since;
+                self.draw_damage.start_repaint(pass_id, rects);
+            }
+        }
         pass.uniforms = Slice::of(self.passes[pass_id].pass_uniforms.as_slice());
         pass.name = fb.intern(&self.passes[pass_id].debug_name);
         pass.owner = self.draw_lists[list_id].owner.map_or(0, |o| fb.intern(o));
@@ -1387,6 +1413,7 @@ impl Cx {
             fb.w.pass(pass);
             let mut zbias = 0.0f32;
             self.fb_list(fb, pass_id, list_id, sploded, &mut zbias, step, serial);
+            self.draw_damage.end_repaint();
         }
         let end = makepad_hal::clock_ns();
         let (target, kind) = match (window.filter(|_| is_window), self.passes[pass_id].color_textures.first()) {
@@ -1456,6 +1483,10 @@ impl Cx {
             // (a host, a history pass) waits on. A picture still to paint costs nothing: the
             // last one its producer painted is sampled, a frame older, as before.
             let whole = fb.pass_whole;
+            // A draw left out of this paint shows up later, which the next walk can't see coming.
+            if !whole {
+                self.draw_damage.invalidate_pass(pass_id);
+            }
             let before = self.passes[pass_id].painted_serial;
             self.passes[pass_id].painted(whole, self.repaint_id);
             if whole {
@@ -1797,6 +1828,7 @@ impl Cx {
             item: item_id as u32,
             list_name,
             bounds: instance_bounds(&sh.mapping, &list.draw_list_uniforms, item, slots, instances, fb.pass_px),
+            damage: self.draw_damage.get_repaint_mask(pass_id, list_id, item_id).unwrap_or(0),
         };
         if dump || sh.mapping.flags.debug_draw {
             let data = item.retained_instances.as_ref().map(|v| v.data()).or(item.instances.as_deref()).unwrap_or(&[]);
