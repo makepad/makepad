@@ -552,7 +552,7 @@ impl Widget for Rating {
                 cx.set_cursor(MouseCursor::Hand);
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 let x = fe.abs.x - fe.rect.pos.x;
                 let m = self.marks();
                 let landed = m.press(self.value, m.value_at(x), self.clearable);

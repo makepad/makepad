@@ -2679,9 +2679,14 @@ impl FloatingAction {
         })
     }
 
-    fn focus_item(&mut self, cx: &mut Cx, i: usize) {
+    fn focus_item(&mut self, cx: &mut Cx, i: usize, is_from_user: bool) {
         let area = self.item_button_area(i);
-        if !area.is_empty() {
+        if area.is_empty() {
+            return;
+        }
+        if is_from_user {
+            cx.set_key_focus_from_user(area);
+        } else {
             cx.set_key_focus(area);
         }
     }
@@ -2720,7 +2725,7 @@ impl FloatingAction {
             arrow_target(&points, from, origin, dir)
         };
         if let Some(k) = target {
-            self.focus_item(cx, enabled[k]);
+            self.focus_item(cx, enabled[k], true);
         }
     }
 
@@ -2897,12 +2902,12 @@ impl FloatingAction {
             KeyCode::ArrowRight => self.step_focus(cx, focus, dvec2(1.0, 0.0)),
             KeyCode::Home => {
                 if let Some(first) = self.enabled_items().first().copied() {
-                    self.focus_item(cx, first);
+                    self.focus_item(cx, first, true);
                 }
             }
             KeyCode::End => {
                 if let Some(last) = self.enabled_items().last().copied() {
-                    self.focus_item(cx, last);
+                    self.focus_item(cx, last, true);
                 }
             }
             _ if activate => match focus {
@@ -2936,7 +2941,7 @@ impl FloatingAction {
             .filter(|stop| !disabled.contains(stop))
             .collect();
         if let Some(next) = tab_target(&stops, cx.key_focus(), back) {
-            cx.set_key_focus(next);
+            cx.set_key_focus_from_user(next);
         }
     }
 
@@ -3402,7 +3407,7 @@ impl Widget for FloatingAction {
         if self.open && self.focus_first {
             self.focus_first = false;
             if let Some(first) = self.enabled_items().first().copied() {
-                self.focus_item(cx, first);
+                self.focus_item(cx, first, false);
             }
         }
         if self.inline || self.pin_to == FloatingPin::Container {

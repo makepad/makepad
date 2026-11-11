@@ -1165,7 +1165,7 @@ impl Widget for Carousel {
                 });
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 let frame = self.frame(fe.rect.size.x, fe.rect.size.y);
                 let stops = self.track().stops();
                 let dot_stops = if frame.dots_fit(stops) { stops } else { 0 };

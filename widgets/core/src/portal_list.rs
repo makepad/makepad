@@ -4220,7 +4220,7 @@ impl Widget for PortalList {
                     if self.selectable && fe.is_primary_hit() && !on_interactive && !held_elsewhere {
                         let hit = self.hit_test_selection(cx, fe.abs);
                         if let Some((item_id, char_idx)) = hit {
-                            cx.set_key_focus(self.area);
+                            cx.set_key_focus_from_user(self.area);
                             if fe.device.is_touch() {
                                 cx.hide_clipboard_actions();
                             }

@@ -909,7 +909,7 @@ impl Widget for TimeColumn {
                 }
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(area);
+                cx.set_key_focus_from_user(area);
                 if let Some(index) = view.index_at(fe.abs.y - fe.rect.pos.y) {
                     self.pick(cx, index);
                 }

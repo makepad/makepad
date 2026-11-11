@@ -664,7 +664,7 @@ impl Widget for CodeBlock {
                 // The whole block takes focus, not just the control on it:
                 // the copy chord is the reason to have focus here, and it
                 // has to work after a press anywhere on the code.
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 let local = fe.abs - fe.rect.pos;
                 if self.frame().on_copy(local.x, local.y, fe.rect.size.x) {
                     self.copy(cx);

@@ -864,7 +864,7 @@ impl Widget for TreeSelect {
                     }
                     return;
                 }
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 let open = self.open;
                 self.set_open(cx, !open);
             }

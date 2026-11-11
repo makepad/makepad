@@ -2177,7 +2177,7 @@ impl Widget for RichTextEditor {
                 if self.editable {
                     cx.claim_finger_drag(fe.digit_id);
                 }
-                cx.set_key_focus(area);
+                cx.set_key_focus_from_user(area);
                 if let Some(pos) = self.pos_at(cx, fe.abs) {
                     let extend = fe.modifiers.shift;
                     self.move_to(cx, pos, extend);

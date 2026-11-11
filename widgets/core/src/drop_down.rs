@@ -1266,7 +1266,7 @@ impl Widget for DropDown {
             },
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 if self.animator_in_state(cx, ids!(disabled.off)) {
-                    cx.set_key_focus(self.draw_bg.area());
+                    cx.set_key_focus_from_user(self.draw_bg.area());
                     self.animator_play(cx, ids!(hover.down));
                     self.set_active(cx);
                 }

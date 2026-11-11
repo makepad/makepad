@@ -649,7 +649,7 @@ impl Widget for Splitter {
                 if self.collapse != SplitterCollapse::None && !self.bar_reopens && self.fold == SplitterCollapse::None => {}
             Hit::FingerDown(fe) if self.drag_start_align.is_none() && fe.is_primary_hit() => {
                 if self.key_step > 0.0 {
-                    cx.set_key_focus(self.draw_bg.area());
+                    cx.set_key_focus_from_user(self.draw_bg.area());
                 }
                 match self.axis {
                     SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),

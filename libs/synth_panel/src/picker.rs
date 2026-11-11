@@ -88,7 +88,7 @@ impl Widget for SynthPicker {
                 }
                 if out.consumed {
                     if matches!(event, Event::MouseDown(_)) {
-                        cx.set_key_focus(self.draw_bg.area());
+                        cx.set_key_focus_from_user(self.draw_bg.area());
                     }
                     return;
                 }
@@ -104,7 +104,7 @@ impl Widget for SynthPicker {
                 if self.open {
                     self.browser.inline = true;
                     self.browser.open(&self.node);
-                    cx.set_key_focus(self.draw_bg.area());
+                    cx.set_key_focus_from_user(self.draw_bg.area());
                 } else {
                     self.browser.close();
                 }

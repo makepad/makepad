@@ -1586,7 +1586,7 @@ impl Widget for TextFlow {
                 }
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                cx.set_key_focus(self.area);
+                cx.set_key_focus_from_user(self.area);
                 if fe.device.is_touch() {
                     cx.hide_clipboard_actions();
                 }

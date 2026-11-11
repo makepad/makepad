@@ -1287,7 +1287,7 @@ impl Widget for TreeView {
                 }
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                cx.set_key_focus(self.area);
+                cx.set_key_focus_from_user(self.area);
                 let Some((index, zone)) = self.zone_at(fe.abs) else {
                     self.redraw(cx);
                     return;
