@@ -153,6 +153,14 @@ unsafe extern "system" fn params(env: *mut JNIEnv, _: jclass, cache: jstring, da
     state.params = params;
     drop(state);
     Shared::global().display();
+    // The old Android backend kept its GL program binaries in the cache root, and nothing reads them now.
+    static OLD_BINARIES: std::sync::Once = std::sync::Once::new();
+    OLD_BINARIES.call_once(|| {
+        let cache = lock(&Shared::global().state).params.cache_path.clone();
+        std::thread::spawn(move || for entry in std::fs::read_dir(cache).into_iter().flatten().flatten() {
+            if entry.file_name().to_str().is_some_and(|n| n.starts_with("shader_") && n.contains("_av")) { let _ = std::fs::remove_file(entry.path()); }
+        });
+    });
 }
 unsafe extern "system" fn night_mode(_: *mut JNIEnv, _: jclass, night: jboolean) { lock(&Shared::global().state).params.night_mode = night != 0; }
 unsafe extern "system" fn display_rotation(_: *mut JNIEnv, _: jclass, rotation: jint) { lock(&Shared::global().state).params.rotation = rotation.rem_euclid(4) as u32; }
