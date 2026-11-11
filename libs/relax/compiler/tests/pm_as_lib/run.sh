@@ -9,4 +9,4 @@ trap 'rm -f "$ERR"' EXIT
 export MAKEPAD_RUN_CACHE=off CARGO_NET_OFFLINE=true
 OUT=$(cd "$H" && MAKEPAD_RUN_STD=$H/../../std "$1" run --quiet pm-as-lib-app 2>>"$ERR")
 echo "$OUT"
-if [ "$OUT" = "pm_as_lib build: false fallback(a + b) run: false fallback(x)" ]; then echo "pm_as_lib: ok"; else tail -5 "$ERR"; echo "pm_as_lib: FAILED"; exit 1; fi
+if [ "$OUT" = 'pm_as_lib build: false fallback(a + b) run: false fallback(x) fallback("y")' ]; then echo "pm_as_lib: ok"; else tail -5 "$ERR"; echo "pm_as_lib: FAILED"; exit 1; fi

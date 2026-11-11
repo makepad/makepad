@@ -1,0 +1,6 @@
+[package]
+name = "clit-app"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+clit-macro = { path = "../clit-macro" }
