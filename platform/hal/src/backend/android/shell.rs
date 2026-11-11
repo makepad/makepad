@@ -12,14 +12,15 @@ pub struct AndroidParams {
     pub emulator: bool,
     pub android_version: String,
     pub build_number: String,
-    pub kernel_version: String,
+    /// the package's version and last update time, which every new or reinstalled APK changes
+    pub app_build: String,
     /// the system's dark mode (at start, kept current by `onNightModeChanged`)
     pub night_mode: bool,
     /// `Display.getRotation()` in quarter turns (camera orientation; the surface itself arrives upright)
     pub rotation: u32,
 }
 impl Default for AndroidParams {
-    fn default() -> Self { Self { cache_path: String::new(), data_path: String::new(), density: 1., emulator: false, android_version: String::new(), build_number: String::new(), kernel_version: String::new(), night_mode: false, rotation: 0 } }
+    fn default() -> Self { Self { cache_path: String::new(), data_path: String::new(), density: 1., emulator: false, android_version: String::new(), build_number: String::new(), app_build: String::new(), night_mode: false, rotation: 0 } }
 }
 
 pub(super) struct State {
@@ -155,6 +156,7 @@ impl Shell for AndroidShell {
             OsCmd::BackUnhandled => jni::back_unhandled(),
             OsCmd::NativeAppearance { value } => jni::set_native_appearance(value),
             OsCmd::MobileUi { op: mobile_ui::APP_BACKGROUND, value } => jni::set_app_background(value),
+            OsCmd::MobileUi { op: mobile_ui::SHADER_COMPILE_SCREEN, .. } => jni::show_shader_compile_screen(),
             _ => false,
         }
     }

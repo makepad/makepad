@@ -347,7 +347,7 @@ hal_commands! {
     // ---- the mobile system UI (the UIKit shell; other backends ignore them)
     /// `mobile_ui::*` and its value: the status bar's icon tone, the orientations the app
     /// allows, keeping the screen on, the screen edges whose system gestures wait for the app,
-    /// the color shown in place of the window before it draws.
+    /// the color shown in place of the window before it draws, and Android's compile screen.
     MobileUi = 139, mobile_ui { op: u32, value: u32 };
     /// The text selection's drag handles in window `id` (window points): `op` is
     /// `selection_handles::*`, `start` / `end` the handles' anchor points (the bottom of the

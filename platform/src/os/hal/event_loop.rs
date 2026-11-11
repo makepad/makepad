@@ -635,6 +635,21 @@ impl Cx {
                 && !self.hal.glyph_wait.presented.contains(&hal_window_id(id)));
             if (self.hal.externally_driven || first_frame)
                 && (!self.hal.glyph_wait.pending.is_empty() || self.hal.frames.pipelines_pending() != 0) {
+                // On a launch whose pipeline cache started cold, the Activity's cover explains this wait.
+                // No frame has sent it the app's background color yet, so we send that first, for the screen to match.
+                #[cfg(target_os = "android")]
+                if !self.hal.shader_compile_screen_requested && first_frame && self.hal.frames.pipelines_pending() != 0
+                    && self.hal_info_flags() & makepad_hal::info_flags::PIPELINE_CACHE_COLD != 0 {
+                    self.hal.shader_compile_screen_requested = true;
+                    let main_passes: Vec<_> = self.windows.id_iter().filter(|id| self.hal.window_ready(*id))
+                        .filter_map(|id| self.windows[id].main_pass_id).collect();
+                    let mut fb = std::mem::take(&mut self.hal.frames);
+                    for pass_id in main_passes {
+                        self.fb_send_app_background(&mut fb, pass_id);
+                    }
+                    fb.w.mobile_ui(makepad_hal::mobile_ui::SHADER_COMPILE_SCREEN, 0);
+                    self.hal.frames = fb;
+                }
                 if log_enabled() && first_frame {
                     eprintln!("[hal-client] first window FramePacket deferred: pending_glyphs={} pending_pipelines={}; waiting for resources before submission",
                         self.hal.glyph_wait.pending.len(), self.hal.frames.pipelines_pending());
