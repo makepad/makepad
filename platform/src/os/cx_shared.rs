@@ -3,7 +3,7 @@ use {
         area::Area,
         cx::Cx,
         cx_api::CxOsApi,
-        draw_pass::{CxDrawPassParent, DrawPassId},
+        draw_pass::{CxDrawPassParent, DrawPassId, TimeFpsClock, TimeFpsFrames},
         event::{
             DrawEvent, Event, KeyFocusEvent, NextFrameEvent, TextClipboardEvent,
             TimerEvent, TriggerEvent,
@@ -48,6 +48,16 @@ fn screenshot_file_sinks() -> &'static std::sync::Mutex<HashMap<u64, std::path::
     SCREENSHOT_FILE_SINKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Half the time between presents, so a `time_fps` frame takes the present nearest its due, or 0
+/// when there are no presents to go by and it waits for the moment it's due.
+fn time_fps_tolerance(frame_interval: f64) -> f64 {
+    if frame_interval > 0.0 && frame_interval.is_finite() {
+        frame_interval * 0.5
+    } else {
+        0.0
+    }
+}
+
 impl Cx {
     #[allow(dead_code)]
     pub(crate) fn repaint_windows(&mut self) {
@@ -73,6 +83,31 @@ impl Cx {
             }
         }
         false
+    }
+
+    /// When the soonest `time_fps` frame is due, in the clock the backend gives
+    /// `compute_pass_repaint_order`, for a loop that paints as soon as it wakes.
+    pub(crate) fn time_repaint_at(&self) -> Option<f64> {
+        self.time_fps_clock.next_due.filter(|at| at.is_finite())
+    }
+
+    /// When a loop that paints on display ticks should ask for the tick the next `time_fps` frame lands on.
+    /// That's the tick before the one nearest its due, on the grid `interval` apart through `last_tick`.
+    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+    pub(crate) fn time_repaint_tick_wake(&self, last_tick: f64, interval: f64) -> Option<f64> {
+        let due = self.time_repaint_at()?;
+        if !(interval > 0.0 && interval.is_finite()) {
+            return Some(due);
+        }
+        let ticks = ((due - time_fps_tolerance(interval) - last_tick) / interval).ceil().max(1.0);
+        Some(last_tick + (ticks - 1.0) * interval)
+    }
+
+    /// When a loop that waits for its backend to start a frame should ask for the next `time_fps` frame: the
+    /// first moment it may paint, which puts it on the present nearest its due.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn time_repaint_request_at(&self, frame_interval: f64) -> Option<f64> {
+        self.time_repaint_at().map(|due| due - time_fps_tolerance(frame_interval))
     }
 
     /// The window a pass ultimately presents into (through any chain of
@@ -142,7 +177,14 @@ impl Cx {
         self.draw_lists[list_id].redraw_id >= reference
     }
 
-    pub(crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<DrawPassId>) {
+    /// `frame_time` is the flip, tick or moment this repaint is for, in the clock the backend runs `time_fps`
+    /// frames on, and `frame_interval` the display's refresh when the backend knows it, else 0.
+    pub(crate) fn compute_pass_repaint_order(
+        &mut self,
+        passes_todo: &mut Vec<DrawPassId>,
+        frame_time: f64,
+        frame_interval: f64,
+    ) {
         passes_todo.clear();
 
         // A pass whose last handle was dropped lets go of its attachments
@@ -201,6 +243,11 @@ impl Cx {
         // its behalf. The one exception is an explicit `repaint_pass`, which
         // paints it this once.
         let mut time_owed = false;
+        // A `time_fps` pass holds the pass clock between its frames, and once a frame's due the pass
+        // is just dirty, so a paint the backend skips keeps it dirty like any other.
+        let tolerance = time_fps_tolerance(frame_interval);
+        let mut time_held = false;
+        let mut next_due: Option<f64> = None;
         for draw_pass_id in self.passes.id_iter() {
             let requested = self.passes[draw_pass_id].repaint_requested;
             if !requested && live[draw_pass_id.0] != Some(true) {
@@ -210,14 +257,15 @@ impl Cx {
             }
             let repaint_next = std::mem::take(&mut self.passes[draw_pass_id].repaint_next);
             let pass = &self.passes[draw_pass_id];
-            if !(repaint_next || pass.time_owed) {
+            let (was_dirty, frames) = (pass.paint_dirty, pass.time_fps_frames);
+            if !(repaint_next || pass.time_owed || frames.due.is_some()) {
                 continue;
             }
             let live_for_time = live[draw_pass_id.0] == Some(true)
                 && self.pass_live_for_time_repaint(draw_pass_id);
             // A pass that per-window pacing skipped is still dirty, so it keeps owing its frame,
             // but one that can't paint anymore (closed window, stale child) owes nothing.
-            if !pass.paint_dirty || !live_for_time {
+            if !was_dirty || !live_for_time {
                 self.passes[draw_pass_id].time_owed = false;
             }
             if repaint_next && live_for_time {
@@ -225,6 +273,21 @@ impl Cx {
                 self.passes[draw_pass_id].time_owed = true;
             }
             time_owed |= self.passes[draw_pass_id].time_owed;
+            let Some(due) = frames.due else {
+                continue;
+            };
+            // Queued and painted since its `time_fps` shaders last asked, so they're gone.
+            let is_gone = !frames.asked && !was_dirty;
+            if is_gone || !live_for_time || self.passes.0.is_free(draw_pass_id.0) {
+                self.passes[draw_pass_id].time_fps_frames = TimeFpsFrames::default();
+                continue;
+            }
+            time_held = true;
+            if frame_time >= due - tolerance {
+                self.passes[draw_pass_id].paint_dirty = true;
+            } else {
+                next_due = Some(next_due.map_or(due, |next_due| next_due.min(due)));
+            }
         }
 
         // we need this because we don't mark the entire deptree of passes dirty every small paint
@@ -294,6 +357,7 @@ impl Cx {
             if self.passes[draw_pass_id].paint_dirty
                 && (live[draw_pass_id.0] == Some(true) || requested)
             {
+                self.passes[draw_pass_id].time_fps_frames.asked = false;
                 passes_todo.push(draw_pass_id);
                 window_requested |= requested && self.pass_root_window(draw_pass_id).is_some();
             }
@@ -334,8 +398,9 @@ impl Cx {
             }
         };
         passes_todo.sort_by_key(|id| std::cmp::Reverse(depth_of(*id)));
-        self.pass_time_rebase = !time_owed;
+        self.pass_time_rebase = !(time_owed || time_held);
         self.demo_time_repaint = false;
+        self.time_fps_clock = TimeFpsClock { frame_time, tolerance, next_due };
     }
 
     /// Whether a pass's own list was recorded by the current drawing (any of
@@ -2107,7 +2172,7 @@ mod tests {
         let recording_gen = cx.next_uniform_gen();
         let uniforms_gen = cx.next_uniform_gen();
         cx.draw_lists[list.id()].clear_draw_items(2, recording_gen, uniforms_gen);
-        cx.compute_pass_repaint_order(&mut Vec::new());
+        cx.compute_pass_repaint_order(&mut Vec::new(), 0.0, 0.0);
         assert_eq!(sampled(&cx, c), picture(false, false));
     }
 
@@ -2277,7 +2342,7 @@ mod tests {
         assert!(cx.pass_attachment_is_stale(ring_id), "the later drawing dropped the tile");
         cx.frame_drawn_again();
         cx.call_draw_event(0.0);
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(todo.contains(&ring_id), "the tile the first drawing recorded paints");
         assert!(todo.contains(&history_id));
         assert!(cx.pass_attachment_is_stale(ring_id), "kept, its attachment stamp as it was recorded");
@@ -2286,7 +2351,7 @@ mod tests {
         // kept through the next frame, which records no tile either.
         cx.release_painted_recordings();
         cx.call_draw_event(0.0);
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(todo.contains(&ring_id), "kept until it paints whole");
         // Painted whole: an orphan again, as any pass a frame does not record.
         cx.repaint_id += 1;
@@ -2296,7 +2361,7 @@ mod tests {
         cx.release_painted_recordings();
         cx.call_draw_event(0.0);
         cx.passes[ring_id].paint_dirty = true;
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(!todo.contains(&ring_id));
         assert!(!cx.passes[ring_id].kept_recording);
 
@@ -2422,7 +2487,7 @@ mod tests {
         cx.attach_child_pass(child_id, parent_id, Some(list.id()));
         cx.passes[child_id].live_with_parent = true;
         cx.passes[parent_id].paint_dirty = true;
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(todo.contains(&child_id));
         assert!(todo.contains(&parent_id));
 
@@ -2434,29 +2499,29 @@ mod tests {
         cx.draw_lists[list.id()].clear_draw_items(2, recording_gen, uniforms_gen);
         cx.passes[parent_id].paint_dirty = true;
         cx.passes[child_id].paint_dirty = true;
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(!todo.contains(&child_id));
         assert!(todo.contains(&parent_id));
         assert!(!cx.passes[child_id].paint_dirty);
 
         // An explicit request paints an orphan this once.
         cx.repaint_pass(child_id);
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(todo.contains(&child_id));
         cx.passes[child_id].paint_dirty = true;
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(!todo.contains(&child_id));
 
         // Re-attached by the current recording: live again.
         cx.attach_child_pass(child_id, parent_id, Some(list.id()));
         cx.passes[child_id].paint_dirty = true;
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(todo.contains(&child_id));
 
         // A freed attaching list orphans too.
         drop(list);
         cx.passes[child_id].paint_dirty = true;
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(!todo.contains(&child_id));
     }
 
@@ -2493,26 +2558,26 @@ mod tests {
         cx.note_window_redraw();
         cx.in_xr_update = false;
         cx.passes[pass].paint_dirty = true;
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(!todo.contains(&pass), "a headset frame alone paints no window");
         assert!(!cx.any_passes_dirty(), "and asks for no frame");
         // the window's own cause: painted at once
         cx.note_window_redraw();
         assert!(cx.any_passes_dirty(), "the window's own change asks for a frame");
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(todo.contains(&pass), "the window's own change paints it");
         // a grab: painted at once
         cx.passes[pass].paint_dirty = true;
         cx.screenshot_requests.push(makepad_studio_protocol::ScreenshotRequest { request_id: 7, kind_id: 0 });
         assert!(cx.any_passes_dirty(), "a grab wakes the loop");
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(todo.contains(&pass), "a grab paints the window");
         cx.screenshot_requests.clear();
         // a remote present request (repaint_pass) likewise
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(!todo.contains(&pass));
         cx.request_remote_window_present(window);
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(todo.contains(&pass), "an explicit repaint paints the window");
     }
 
@@ -2526,13 +2591,13 @@ mod tests {
 
         cx.passes[animated].repaint_next = true;
         cx.demo_time_repaint = true;
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert_eq!(todo, vec![animated]);
         assert!(!cx.passes[idle].paint_dirty);
 
         // The flag is used up: without another request nothing repaints.
         cx.passes[animated].paint_dirty = false;
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(todo.is_empty());
     }
 
@@ -2548,23 +2613,23 @@ mod tests {
 
         // An animating pass holds the origin, even on a beat that skips painting it.
         cx.passes[pass].repaint_next = true;
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert_eq!(cx.pass_time(101.0), 1.0);
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert_eq!(cx.pass_time(101.5), 1.5);
 
         // Once it painted without asking again, the next repaint starts the clock over.
         cx.passes[pass].paint_dirty = false;
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert_eq!(cx.pass_time(200.0), 0.0);
         assert_eq!(cx.pass_time(200.25), 0.25);
 
         // A pass that still owes a frame but was left behind by a redraw can't paint, so it owes nothing.
         cx.passes[pass].repaint_next = true;
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert_eq!(cx.pass_time(201.0), 1.0);
         cx.redraw_id += 1;
-        cx.compute_pass_repaint_order(&mut todo);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert_eq!(cx.pass_time(300.0), 0.0);
     }
 

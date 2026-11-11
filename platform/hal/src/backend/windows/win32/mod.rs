@@ -196,6 +196,10 @@ struct PaceWin {
     /// when the window last heard FrameReady: a window without a swapchain yet (its first frame
     /// is still being prepared) is paced at the display's nominal rate, not as fast as it asks
     last_ready: Option<std::time::Instant>,
+    /// the vblank its swapchain last synced to: how many there had been, and when it was
+    sync: Option<(u32, u64)>,
+    /// how far apart those vblanks are, which its FrameReady predicts the next frame with
+    refresh: Period,
 }
 
 /// The nominal frame interval of a window that has no frame-latency waitable yet.
@@ -370,12 +374,28 @@ impl Shared {
         }
     }
 
+    /// DXGI's vblank count and time measure `key`'s display however rarely the window presents, since
+    /// we divide by the vblanks between two samples. `None` means the stats broke, so we start over.
+    pub fn measure_refresh(&self, key: Key, stats: Option<makepad_windows_sys::Win32::Graphics::Dxgi::DXGI_FRAME_STATISTICS>) {
+        let sync = stats.filter(|s| s.SyncQPCTime != 0).map(|s| (s.SyncRefreshCount, crate::clock::qpc_to_ns(s.SyncQPCTime)));
+        let mut wins = lock(&self.pacer.wins);
+        let Some(w) = wins.get_mut(&key) else { return };
+        if let (Some((count, time)), Some((last_count, last_time))) = (sync, w.sync) {
+            let refreshes = count.wrapping_sub(last_count);
+            if (1..1000).contains(&refreshes) && time > last_time {
+                w.refresh.sample((time - last_time) / refreshes as u64);
+            }
+        }
+        w.sync = sync;
+    }
+
     /// The swapchain of `key` paces by `waitable` (None: an unpaced popup or a retired chain).
     pub fn set_waitable(&self, key: Key, waitable: Option<Arc<Waitable>>) {
         let mut wins = lock(&self.pacer.wins);
         let w = wins.entry(key).or_default();
         w.waitable = waitable;
         w.credit = false;
+        w.sync = None;
         drop(wins);
         unsafe {
             let _ = SetEvent(self.pacer.event);
@@ -501,7 +521,7 @@ impl Shared {
                         Some(_) if w.credit => {
                             w.demand = false;
                             w.last_ready = Some(now);
-                            ready.push(*key);
+                            ready.push((*key, w.refresh.ns));
                         }
                         Some(h) => waits.push((*key, h.clone())),
                         // no swapchain yet: at the nominal rate
@@ -510,7 +530,7 @@ impl Shared {
                             if due <= now {
                                 w.demand = false;
                                 w.last_ready = Some(now);
-                                ready.push(*key);
+                                ready.push((*key, w.refresh.ns));
                             } else {
                                 let left = due - now;
                                 timeout = Some(timeout.map_or(left, |t| t.min(left)));
@@ -519,8 +539,8 @@ impl Shared {
                     }
                 }
             }
-            let next_ns = crate::clock_ns() + period.ns();
-            for key in ready {
+            for (key, refresh) in ready {
+                let next_ns = period.next_ns(refresh);
                 self.push(key, |q, id| q.frame_ready(id, next_ns));
             }
             let limit = if clocked.is_empty() || ticker.is_some() { MAX_WAIT } else { COMPOSITOR_CLOCK_HANDLES - 1 };
@@ -600,13 +620,14 @@ impl Shared {
             if index < waits.len() {
                 let key = waits[index].0;
                 let mut wins = lock(&self.pacer.wins);
-                if let Some(w) = wins.get_mut(&key) {
+                let refresh = wins.get_mut(&key).and_then(|w| {
                     w.demand = false;
                     w.credit = true;
                     w.last_ready = Some(std::time::Instant::now());
-                }
+                    w.refresh.ns
+                });
                 drop(wins);
-                let next_ns = crate::clock_ns() + period.ns();
+                let next_ns = period.next_ns(refresh);
                 self.push(key, |q, id| q.frame_ready(id, next_ns));
             } else if index == waits.len() {
                 // the control event: demand or the set of windows changed
@@ -643,7 +664,7 @@ fn occluded(status: u32) -> &'static str {
     if status == PRESENT_OCCLUDED { ": the display is off or occluded" } else { "" }
 }
 
-/// The measured interval of the compositor's ticks, for the next frame's predicted time.
+/// The measured interval of the compositor's ticks or a display's vblanks, for the next frame's predicted time.
 #[derive(Default)]
 struct Period {
     last: Option<std::time::Instant>,
@@ -654,17 +675,23 @@ impl Period {
     fn ns(&self) -> u64 {
         self.ns.unwrap_or(NOMINAL_FRAME.as_nanos() as u64)
     }
+    /// When a window's next frame comes: its display's measured interval from now, else the compositor's.
+    fn next_ns(&self, refresh: Option<u64>) -> u64 {
+        crate::clock_ns() + refresh.unwrap_or_else(|| self.ns())
+    }
     /// A tick now: the interval since the last one (when it is a plausible frame) joins the
     /// average. Answers the predicted interval.
     fn tick(&mut self) -> u64 {
         let now = std::time::Instant::now();
         if let Some(last) = self.last.replace(now) {
-            let dt = now.duration_since(last).as_nanos() as u64;
-            if (2_000_000..=50_000_000).contains(&dt) {
-                self.ns = Some(self.ns.map_or(dt, |p| (p * 7 + dt) / 8));
-            }
+            self.sample(now.duration_since(last).as_nanos() as u64);
         }
         self.ns()
+    }
+    fn sample(&mut self, dt: u64) {
+        if (2_000_000..=50_000_000).contains(&dt) {
+            self.ns = Some(self.ns.map_or(dt, |p| (p * 7 + dt) / 8));
+        }
     }
     fn reset(&mut self) {
         self.last = None;

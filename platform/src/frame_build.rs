@@ -1575,10 +1575,10 @@ impl Cx {
 
     #[allow(clippy::too_many_arguments)]
     fn fb_draw(&mut self, fb: &mut FrameBuilder, pass_id: DrawPassId, list_id: DrawListId, item_id: usize, list_name: StrId, sploded: bool, zbias: &mut f32, step: f32, uniforms_gen: u64, serial: u64, dump: bool) {
-        let shader_index = {
+        let (shader_index, time_fps) = {
             let (list, _) = self.draw_lists.list_and_upload_budget(list_id);
             let Some(call) = list.draw_items.binding_mut(item_id).kind.draw_call_mut() else { return };
-            call.draw_shader_id.index
+            (call.draw_shader_id.index, call.options.time_fps)
         };
         let sh = &self.draw_shaders[shader_index];
         let Some(mut pipe_index) = sh.pipeline_id else {
@@ -1598,8 +1598,7 @@ impl Cx {
         }
         if sh.mapping.uses_time {
             // keeps the frame loop awake; only this pass repaints for it
-            self.demo_time_repaint = true;
-            self.passes[pass_id].repaint_next = true;
+            self.demo_time_repaint |= self.passes[pass_id].request_time_repaint(time_fps, &mut self.time_fps_clock);
         }
         let slots = sh.mapping.instances.total_slots;
 

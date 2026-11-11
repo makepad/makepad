@@ -204,6 +204,9 @@ impl Chains {
         }
         // S_OK, or DXGI_STATUS_OCCLUDED (the window is not visible; the frame still counts)
         shell.presented(key);
+        if chain.waitable {
+            shell.measure_refresh(key, unsafe { chain.swap.GetFrameStatistics() }.ok());
+        }
         true
     }
 

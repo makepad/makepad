@@ -300,7 +300,7 @@ export class WasmWebGL extends WasmWebBrowser {
     }
 
     this.to_wasm.ToWasmXRUpdate(xr_update);
-    this.to_wasm.ToWasmAnimationFrame({ time: time / 1000.0 });
+    this.to_wasm.ToWasmAnimationFrame({ time: time / 1000.0, in_a_row: true });
     this.in_animation_frame = true;
     this.do_wasm_pump();
     this.in_animation_frame = false;
@@ -4112,6 +4112,7 @@ export class WasmWebGL extends WasmWebBrowser {
         this[field] = 0;
       }
     }
+    this.clear_frame_timer();
     // Readbacks in flight read objects of the lost context: they end here
     // (their objects went with it) and every ticket fails as device lost.
     for (const capture of this.pending_render_texture_captures || []) {

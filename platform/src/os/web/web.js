@@ -1066,6 +1066,9 @@ export class WasmWebBrowser extends WasmBridge {
         this.thread_stack_arena = [];
         this.thread_stack_size = 2 * 1024 * 1024;
         this.ui_wake_queued = false;
+        this.frame_at = NaN;
+        this.frame_timer = 0;
+        this.frame_timer_at = NaN;
         this.buffer_upload_serial = 0;
         this.loader_removed = false;
         this.loader_seen_animation_frame = false;
@@ -1585,6 +1588,8 @@ export class WasmWebBrowser extends WasmBridge {
         if (this.webgl_context_lost || this.xr !== undefined || this.req_anim_frame_id) {
             return;
         }
+        // A frame asked for during an animation frame comes a display frame after it.
+        const in_a_row = this.in_animation_frame;
         this.req_anim_frame_id = window.requestAnimationFrame(time => {
             this.req_anim_frame_id = 0;
             if (this.wasm == null || this.webgl_context_lost) {
@@ -1617,7 +1622,7 @@ export class WasmWebBrowser extends WasmBridge {
             }
             this.gpu_timer_poll();
             const gpu_query = this.gpu_timer_begin();
-            this.to_wasm.ToWasmAnimationFrame({ time: time / 1000.0 });
+            this.to_wasm.ToWasmAnimationFrame({ time: time / 1000.0, in_a_row });
             this.in_animation_frame = true;
             this.do_wasm_pump();
             this.in_animation_frame = false;
@@ -1631,6 +1636,17 @@ export class WasmWebBrowser extends WasmBridge {
                 this.FromWasmRequestAnimationFrame();
             }
         })
+    }
+
+    FromWasmRequestAnimationFrameAt(args) {
+        this.frame_at = args.at;
+    }
+
+    clear_frame_timer() {
+        if (this.frame_timer) {
+            window.clearTimeout(this.frame_timer);
+            this.frame_timer = 0;
+        }
     }
 
     // GPU watchdog (see makepad_create_gpu_watchdog): polls the frames in
@@ -3693,10 +3709,30 @@ export class WasmWebBrowser extends WasmBridge {
             let to_wasm = this.to_wasm;
             this.to_wasm = this.new_to_wasm();
             from_wasm = this.wasm_process_msg(to_wasm);
+            // The reply says when the next `time_fps` frame wants its animation frame, if it does.
+            this.frame_at = NaN;
             from_wasm.dispatch_on_app();
             const dispatched = from_wasm;
             from_wasm = null;
             dispatched.free();
+            const at = this.frame_at;
+            if (!Number.isFinite(at) || this.req_anim_frame_id || this.xr !== undefined || this.webgl_context_lost) {
+                this.clear_frame_timer();
+            } else if (!this.frame_timer || this.frame_timer_at !== at) {
+                this.clear_frame_timer();
+                this.frame_timer_at = at;
+                const wait = () => {
+                    this.frame_timer = 0;
+                    const now = this.js_monotonic_now();
+                    if (now >= at) {
+                        this.FromWasmRequestAnimationFrame();
+                        return;
+                    }
+                    // setTimeout counts whole milliseconds, so we round up and check again.
+                    this.frame_timer = window.setTimeout(wait, Math.min(Math.ceil((at - now) * 1000.0), 2147483647));
+                };
+                wait();
+            }
             this.update_startup_loader(performance.now() - started);
         } catch (error) {
             let context_lost = this.webgl_context_lost;

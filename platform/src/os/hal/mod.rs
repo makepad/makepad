@@ -151,6 +151,13 @@ pub struct HalClient {
     pub(crate) ime_height: f64,
     /// a window announced a frame (`FrameReady`)
     pub(crate) beat: bool,
+    /// How far apart the display's ticks are, from the last `FrameReady` that predicted the next
+    /// one (0 when none has), so a `time_fps` frame can take the tick nearest its due.
+    pub(crate) frame_interval: f64,
+    /// The display tick of the `FrameReady` that starts the next beat, which `time_fps` frames go by.
+    pub(crate) frame_tick: Option<f64>,
+    /// The window's surface is gone (Android), so nothing can show a `time_fps` frame till it's back.
+    pub(crate) surface_lost: bool,
     /// A window close is on its way (asked of the window system, or accepted and sent):
     /// since when. Until the HAL answers, the loop sends at once and draws nothing, so a close
     /// never waits behind a slow frame. Bounded by `CLOSE_WAIT` should no answer come.
@@ -240,6 +247,9 @@ impl Default for HalClient {
             ime_visible: false,
             ime_height: 0.0,
             beat: false,
+            frame_interval: 0.0,
+            frame_tick: None,
+            surface_lost: false,
             close_pending: None,
             xr_beat: false,
             profile_beat: 0,

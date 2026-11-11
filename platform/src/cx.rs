@@ -9,7 +9,7 @@ use {
         display_context::DisplayContext,
         draw_list::CxDrawListPool,
         draw_matrix::CxDrawMatrixPool,
-        draw_pass::CxDrawPassPool,
+        draw_pass::{CxDrawPassPool, TimeFpsClock},
         draw_shader::CxDrawShaders,
         event::{
             CancelScope, CancelScopeKind, CxCancelScopes, CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event,
@@ -83,11 +83,13 @@ pub struct Cx {
     /// Studio instead; this is where that arrives, and it is what
     /// `game_input_states` reads while `in_makepad_studio` is set.
     pub(crate) game_input_remote: Vec<crate::event::game_input::GameInputState>,
-    /// Keeps the frame loop running. Which passes repaint is up to each pass's `repaint_next`.
+    /// Keeps the frame loop running. Which passes repaint is up to each pass's `repaint_next`,
+    /// and a `time_fps` shader slow enough to skip frames waits for `Cx::time_repaint_at` instead.
     pub demo_time_repaint: bool,
     /// `draw_pass.time` counts from here, which `Cx::pass_time` moves while no pass owes a time frame.
     pub(crate) pass_time_origin: f64,
     pub(crate) pass_time_rebase: bool,
+    pub(crate) time_fps_clock: TimeFpsClock,
     pub(crate) mouse_cursor: crate::cursor::MouseCursor,
     pub(crate) gpu_info: GpuInfo,
     pub(crate) gpu_admission: crate::gpu_admission::GpuLedger,
@@ -1001,6 +1003,7 @@ impl Cx {
             demo_time_repaint: false,
             pass_time_origin: 0.0,
             pass_time_rebase: true,
+            time_fps_clock: TimeFpsClock::default(),
             mouse_cursor: Default::default(),
             null_texture,
             null_cube_texture,

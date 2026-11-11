@@ -45,6 +45,12 @@ pub struct FromWasmNormalScreen {}
 #[derive(FromWasm)]
 pub struct FromWasmRequestAnimationFrame {}
 
+/// Asks for an animation frame once `performance.now()` reaches `at`, in seconds.
+#[derive(FromWasm)]
+pub struct FromWasmRequestAnimationFrameAt {
+    pub at: f64,
+}
+
 #[derive(FromWasm)]
 pub struct FromWasmSetDocumentTitle {
     pub title: String,
