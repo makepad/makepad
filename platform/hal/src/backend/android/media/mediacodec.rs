@@ -217,8 +217,11 @@ impl Drop for Image {
     }
 }
 
+#[allow(non_snake_case)]
 pub mod ndk {
     use super::{c_char, c_void, BufferInfo};
+    use crate::backend::android::xr::sys::ModuleLoader;
+    use std::sync::OnceLock;
     #[link(name = "mediandk")]
     extern "C" {
         pub fn AMediaFormat_new() -> *mut c_void;
@@ -236,7 +239,6 @@ pub mod ndk {
         pub fn AMediaCodec_stop(codec: *mut c_void) -> i32;
         pub fn AMediaCodec_flush(codec: *mut c_void) -> i32;
         pub fn AMediaCodec_delete(codec: *mut c_void) -> i32;
-        pub fn AMediaCodec_getInputFormat(codec: *mut c_void) -> *mut c_void;
         pub fn AMediaCodec_getOutputFormat(codec: *mut c_void) -> *mut c_void;
         pub fn AMediaCodec_dequeueInputBuffer(codec: *mut c_void, timeout_us: i64) -> isize;
         pub fn AMediaCodec_getInputBuffer(codec: *mut c_void, index: usize, size: *mut usize) -> *mut u8;
@@ -245,8 +247,6 @@ pub mod ndk {
         pub fn AMediaCodec_getOutputBuffer(codec: *mut c_void, index: usize, size: *mut usize) -> *mut u8;
         pub fn AMediaCodec_releaseOutputBuffer(codec: *mut c_void, index: usize, render: bool) -> i32;
         pub fn AMediaCodec_setParameters(codec: *mut c_void, params: *const c_void) -> i32;
-        pub fn AMediaCodec_getName(codec: *mut c_void, name: *mut *mut c_char) -> i32;
-        pub fn AMediaCodec_releaseName(codec: *mut c_void, name: *mut c_char);
         pub fn AMediaExtractor_new() -> *mut c_void;
         pub fn AMediaExtractor_delete(ex: *mut c_void) -> i32;
         pub fn AMediaExtractor_setDataSourceFd(ex: *mut c_void, fd: i32, offset: i64, length: i64) -> i32;
@@ -268,5 +268,43 @@ pub mod ndk {
         pub fn AImageReader_newWithUsage(width: i32, height: i32, format: i32, usage: u64, max_images: i32, reader: *mut *mut c_void) -> i32;
         pub fn AImage_getHardwareBuffer(image: *const c_void, buffer: *mut *mut c_void) -> i32;
         pub fn AImage_getTimestamp(image: *const c_void, time: *mut i64) -> i32;
+    }
+
+    const AMEDIA_ERROR_UNSUPPORTED: i32 = -10002;
+
+    // libmediandk only has these from API 28 on, and linking them stops the app from loading at
+    // all on API 26 and 27, so we look them up when first called instead.
+    struct Api28 {
+        _lib: ModuleLoader,
+        get_input_format: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
+        get_name: unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32,
+        release_name: unsafe extern "C" fn(*mut c_void, *mut c_char),
+    }
+
+    fn api28() -> Option<&'static Api28> {
+        static API: OnceLock<Option<Api28>> = OnceLock::new();
+        API.get_or_init(|| {
+            let lib = ModuleLoader::load("libmediandk.so").ok()?;
+            Some(Api28 {
+                get_input_format: lib.get_symbol("AMediaCodec_getInputFormat").ok()?,
+                get_name: lib.get_symbol("AMediaCodec_getName").ok()?,
+                release_name: lib.get_symbol("AMediaCodec_releaseName").ok()?,
+                _lib: lib,
+            })
+        }).as_ref()
+    }
+
+    pub unsafe fn AMediaCodec_getInputFormat(codec: *mut c_void) -> *mut c_void {
+        api28().map_or(std::ptr::null_mut(), |api| (api.get_input_format)(codec))
+    }
+
+    pub unsafe fn AMediaCodec_getName(codec: *mut c_void, name: *mut *mut c_char) -> i32 {
+        api28().map_or(AMEDIA_ERROR_UNSUPPORTED, |api| (api.get_name)(codec, name))
+    }
+
+    pub unsafe fn AMediaCodec_releaseName(codec: *mut c_void, name: *mut c_char) {
+        if let Some(api) = api28() {
+            (api.release_name)(codec, name);
+        }
     }
 }
