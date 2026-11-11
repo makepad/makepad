@@ -368,7 +368,8 @@ struct NativePreview {
 }
 struct SessionMedia {
     output: Output,
-    camera: Worker<camera::Camera>,
+    /// Started on first use, since it lists the cameras every second for as long as it runs.
+    camera: Option<Worker<camera::Camera>>,
     video: Option<Worker<video::Video>>,
     services: Option<Worker<haptics::Services>>,
     players: HashMap<u64, Playback>,
@@ -379,9 +380,12 @@ struct SessionMedia {
     entries: audio::Entries,
 }
 impl SessionMedia {
-    fn new(sid: u32) -> Result<Self, String> {
-        let output = Output::new(sid);
-        Ok(Self { camera: Worker::new(output.clone(), "camera")?, output, video: None, services: None, players: HashMap::new(), native_layers: HashMap::new(), camera_epoch: 0, control: [None, None], entries: audio::Entries::default() })
+    fn new(sid: u32) -> Self {
+        Self { output: Output::new(sid), camera: None, video: None, services: None, players: HashMap::new(), native_layers: HashMap::new(), camera_epoch: 0, control: [None, None], entries: audio::Entries::default() }
+    }
+    fn camera(&mut self) -> Result<&mut Worker<camera::Camera>, String> {
+        if self.camera.is_none() { self.camera = Some(Worker::new(self.output.clone(), "camera")?); }
+        Ok(self.camera.as_mut().unwrap())
     }
     fn video(&mut self) -> Result<&mut Worker<video::Video>, String> {
         if self.video.is_none() { self.video = Some(Worker::new(self.output.clone(), "video")?); }
@@ -392,18 +396,19 @@ impl SessionMedia {
         Ok(self.services.as_mut().unwrap())
     }
     fn control(&mut self, t: Ticket, camera: bool, op: u32, arg: u64) -> Result<(), String> {
-        if camera { self.camera.send(camera::Command::Control(t, op)); }
+        if camera { self.camera()?.send(camera::Command::Control(t, op)); }
         else { self.video()?.send(video::Command::Control(t, op, arg)); }
         Ok(())
     }
     /// A layer outlives a video player unless explicitly destroyed. Transfer a borrowed
     /// playback ticket to independent ownership before the player's cleanup reaches the worker.
     fn detach_native_playback(&mut self, old: Ticket) {
+        let Some(worker) = &mut self.camera else { return; };
         for layer in self.native_layers.values_mut().filter(|layer| layer.ticket == old) {
             layer.ticket = ticket(0);
             layer.owned = true;
-            self.camera.send(camera::Command::Prepare(layer.ticket, layer.source, true));
-            if let Some(geometry) = layer.geometry { self.camera.send(camera::Command::Place(layer.ticket, geometry)); }
+            worker.send(camera::Command::Prepare(layer.ticket, layer.source, true));
+            if let Some(geometry) = layer.geometry { worker.send(camera::Command::Place(layer.ticket, geometry)); }
         }
     }
     fn current(&self, t: Ticket) -> bool {
@@ -423,11 +428,8 @@ pub struct AndroidMedia {
 }
 impl AndroidMedia {
     pub fn new() -> Self { Self::default() }
-    fn session(&mut self, sid: u32) -> Result<&mut SessionMedia, String> {
-        if let std::collections::hash_map::Entry::Vacant(entry) = self.sessions.entry(sid) {
-            entry.insert(SessionMedia::new(sid)?);
-        }
-        Ok(self.sessions.get_mut(&sid).unwrap())
+    fn session(&mut self, sid: u32) -> &mut SessionMedia {
+        self.sessions.entry(sid).or_insert_with(|| SessionMedia::new(sid))
     }
     pub fn command(&mut self, gpu: &mut Vulkan, s: &mut Session, c: &HalCmd) -> bool {
         if matches!(c, HalCmd::NativeLayerCreate { .. } | HalCmd::NativeLayerOp { .. } | HalCmd::NativeLayerDestroy { .. }) { return self.native_command(s, c); }
@@ -435,12 +437,13 @@ impl AndroidMedia {
         if matches!(c, HalCmd::AudioUse { .. } | HalCmd::AudioEntry { .. } | HalCmd::Midi { .. }) { return self.control_command(s, c); }
         if !matches!(c, HalCmd::VideoInput { .. } | HalCmd::VideoPrepare { .. } | HalCmd::VideoControl { .. } | HalCmd::Location { .. } | HalCmd::Permission { .. }) { return false; }
         let result = (|| -> Result<(), String> {
-            let sm = self.session(s.id)?;
+            let sm = self.session(s.id);
             match *c {
                 HalCmd::VideoInput { consumers, inputs } => {
                     if inputs.len() % 16 != 0 { return Err("invalid camera input pairs".into()); }
                     sm.camera_epoch += 1;
-                    sm.camera.send(camera::Command::Inputs(sm.camera_epoch, consumers, read_u64s(inputs).chunks_exact(2).map(|p| (p[0], p[1])).collect()));
+                    let epoch = sm.camera_epoch;
+                    sm.camera()?.send(camera::Command::Inputs(epoch, consumers, read_u64s(inputs).chunks_exact(2).map(|p| (p[0], p[1])).collect()));
                 }
                 HalCmd::VideoPrepare { tex, mode, video, y, u, v, src } => {
                     if mode & video_mode::CAMERA != 0 && src.len() != 16 { return Err("invalid camera source".into()); }
@@ -457,7 +460,7 @@ impl AndroidMedia {
                     sm.players.insert(video, Playback { ticket: t, targets, camera, closing: false, source });
                     if camera {
                         let ids = read_u64s(src);
-                        sm.camera.send(camera::Command::Prepare(t, (ids[0], ids[1]), targets.iter().all(|i| i.is_none())));
+                        sm.camera()?.send(camera::Command::Prepare(t, (ids[0], ids[1]), targets.iter().all(|i| i.is_none())));
                     } else { sm.video()?.send(video::Command::Prepare(t, mode, Arc::from(src))); }
                 }
                 HalCmd::VideoControl { video, op, arg } => {
@@ -495,44 +498,47 @@ impl AndroidMedia {
             HalCmd::NativeLayerCreate { id, kind: layer_kind::CAMERA_PREVIEW, params } => {
                 let source = read_u64s(params);
                 if source.len() != 2 { s.bad(); return true; }
-                match self.session(s.id) {
-                    Ok(sm) => {
-                        if let Some(previous) = sm.native_layers.remove(&id) {
-                            if previous.owned { sm.camera.send(camera::Command::Control(previous.ticket, video_op::CLEANUP)); }
-                            else { sm.camera.send(camera::Command::Place(previous.ticket, Layer { flags: 0, ..Layer::default() })); }
-                        }
-                        let source = (source[0], source[1]);
-                        // The wire source is input+format. Reuse an unbound native playback of
-                        // that source so its existing pause/resume and prepared events survive.
-                        let existing = sm.players.values().find(|p| p.camera && !p.closing && p.source == Some(source)
-                            && p.targets.iter().all(Id::is_none) && !sm.native_layers.values().any(|layer| layer.ticket == p.ticket)).map(|p| p.ticket);
-                        let ticket = existing.unwrap_or_else(|| ticket(0));
-                        let owned = existing.is_none();
-                        if owned { sm.camera.send(camera::Command::Prepare(ticket, source, true)); }
-                        sm.native_layers.insert(id, NativePreview { ticket, source, owned, window: None, geometry: None, seen: false });
-                        s.events.native_layer_state(id, layer_state::REALIZED, layer_mode::COMPOSITED as u64, 0, b"");
-                    }
+                let sm = self.session(s.id);
+                let previous = sm.native_layers.remove(&id);
+                let source = (source[0], source[1]);
+                // The wire source is input+format. Reuse an unbound native playback of
+                // that source so its existing pause/resume and prepared events survive.
+                let existing = sm.players.values().find(|p| p.camera && !p.closing && p.source == Some(source)
+                    && p.targets.iter().all(Id::is_none) && !sm.native_layers.values().any(|layer| layer.ticket == p.ticket)).map(|p| p.ticket);
+                let ticket = existing.unwrap_or_else(|| ticket(0));
+                let owned = existing.is_none();
+                let worker = match sm.camera() {
+                    Ok(worker) => worker,
                     Err(error) => {
                         eprintln!("[hal-android-layer] {error}");
                         s.events.native_layer_state(id, layer_state::REALIZED, layer_mode::UNSUPPORTED as u64, 0, error.as_bytes());
+                        return true;
                     }
+                };
+                if let Some(previous) = previous {
+                    if previous.owned { worker.send(camera::Command::Control(previous.ticket, video_op::CLEANUP)); }
+                    else { worker.send(camera::Command::Place(previous.ticket, Layer { flags: 0, ..Layer::default() })); }
                 }
+                if owned { worker.send(camera::Command::Prepare(ticket, source, true)); }
+                sm.native_layers.insert(id, NativePreview { ticket, source, owned, window: None, geometry: None, seen: false });
+                s.events.native_layer_state(id, layer_state::REALIZED, layer_mode::COMPOSITED as u64, 0, b"");
                 true
             }
             HalCmd::NativeLayerOp { id, op, arg, data } => {
                 let Some(sm) = self.sessions.get_mut(&s.id) else { return false; };
                 let Some(preview) = sm.native_layers.get_mut(&id) else { return false; };
+                let Some(worker) = &mut sm.camera else { return false; };
                 if op == layer_op::CAMERA_SOURCE {
                     let format = read_u64s(data);
                     if format.len() != 1 { s.bad(); return true; }
                     preview.source = (arg, format[0]);
-                    if preview.owned { sm.camera.send(camera::Command::Source(preview.ticket, preview.source)); }
+                    if preview.owned { worker.send(camera::Command::Source(preview.ticket, preview.source)); }
                     else {
-                        sm.camera.send(camera::Command::Place(preview.ticket, Layer { flags: 0, ..Layer::default() }));
+                        worker.send(camera::Command::Place(preview.ticket, Layer { flags: 0, ..Layer::default() }));
                         preview.ticket = ticket(0);
                         preview.owned = true;
-                        sm.camera.send(camera::Command::Prepare(preview.ticket, preview.source, true));
-                        if let Some(geometry) = preview.geometry { sm.camera.send(camera::Command::Place(preview.ticket, geometry)); }
+                        worker.send(camera::Command::Prepare(preview.ticket, preview.source, true));
+                        if let Some(geometry) = preview.geometry { worker.send(camera::Command::Place(preview.ticket, geometry)); }
                     }
                 }
                 true
@@ -540,8 +546,9 @@ impl AndroidMedia {
             HalCmd::NativeLayerDestroy { id } => {
                 let Some(sm) = self.sessions.get_mut(&s.id) else { return false; };
                 let Some(preview) = sm.native_layers.remove(&id) else { return false; };
-                if preview.owned { sm.camera.send(camera::Command::Control(preview.ticket, video_op::CLEANUP)); }
-                else { sm.camera.send(camera::Command::Place(preview.ticket, Layer { flags: 0, ..Layer::default() })); }
+                let Some(worker) = &mut sm.camera else { return false; };
+                if preview.owned { worker.send(camera::Command::Control(preview.ticket, video_op::CLEANUP)); }
+                else { worker.send(camera::Command::Place(preview.ticket, Layer { flags: 0, ..Layer::default() })); }
                 s.events.native_layer_state(id, layer_state::CLOSED, 0, 0, b"");
                 true
             }
@@ -553,6 +560,7 @@ impl AndroidMedia {
     /// or origin conversion. Missing records hide retained previews for this window.
     pub fn native_frame(&mut self, s: &mut Session, window: Id, packet: u32, view: &CmdView) {
         let Some(sm) = self.sessions.get_mut(&s.id).filter(|sm| !sm.native_layers.is_empty()) else { return; };
+        let Some(worker) = &mut sm.camera else { return; };
         let Some(frame) = view.frames.get(packet as usize) else { return; };
         let start = frame.layers.off as usize;
         let Some(end) = start.checked_add(frame.layers.len as usize).filter(|&end| end <= view.layers.len()) else { s.bad(); return; };
@@ -562,12 +570,12 @@ impl AndroidMedia {
                 preview.seen = true;
                 preview.window = Some(window);
                 preview.geometry = Some(*geometry);
-                sm.camera.send(camera::Command::Place(preview.ticket, *geometry));
+                worker.send(camera::Command::Place(preview.ticket, *geometry));
             }
         }
         for preview in sm.native_layers.values_mut() {
             if preview.window == Some(window) && !preview.seen {
-                sm.camera.send(camera::Command::Place(preview.ticket, Layer { flags: 0, ..Layer::default() }));
+                worker.send(camera::Command::Place(preview.ticket, Layer { flags: 0, ..Layer::default() }));
                 preview.window = None;
                 preview.geometry = None;
             }
@@ -577,14 +585,7 @@ impl AndroidMedia {
     /// AudioUse / AudioEntry (lane 0) and Midi (lane 1) go to their control worker.
     fn control_command(&mut self, s: &mut Session, c: &HalCmd) -> bool {
         let lane = if matches!(c, HalCmd::Midi { .. }) { 1 } else { 0 };
-        let state = match self.session(s.id) {
-            Ok(state) => state,
-            Err(error) => {
-                eprintln!("[hal-android-media] cannot start session media: {error}");
-                if lane == 0 { s.events.audio_devices(&[]); } else { s.events.midi_ports(&[]); }
-                return true;
-            }
-        };
+        let state = self.session(s.id);
         let request = match *c {
             HalCmd::AudioEntry { dir, index, entry, ctx } => {
                 if dir > 1 { s.bad(); return true; }
@@ -618,20 +619,21 @@ impl AndroidMedia {
     }
     pub fn dialog(&mut self, sid: u32, command: OsCmd) -> bool {
         if !matches!(command, OsCmd::FileDialog { .. }) { return false; }
-        match self.session(sid).and_then(SessionMedia::services) {
+        match self.session(sid).services() {
             Ok(worker) => { worker.send(haptics::Command::Dialog(command)); true }
             Err(e) => { eprintln!("[hal-android-dialog] {e}"); false }
         }
     }
     fn haptic(&mut self, sid: u32, kind: u32) -> bool {
-        match self.session(sid).and_then(SessionMedia::services) {
+        match self.session(sid).services() {
             Ok(worker) => { worker.send(haptics::Command::Haptic(kind)); true }
             Err(e) => { eprintln!("[hal-android-haptic] {e}"); false }
         }
     }
     pub fn drain(&mut self, gpu: &mut Vulkan, s: &mut Session) {
-        let sm = match self.session(s.id) { Ok(sm) => sm, Err(e) => { eprintln!("[hal-android-media] {e}"); return; } };
-        sm.camera.flush();
+        // nothing to drain until the app's first media command
+        let Some(sm) = self.sessions.get_mut(&s.id) else { return; };
+        if let Some(w) = &mut sm.camera { w.flush(); }
         if let Some(w) = &mut sm.video { w.flush(); }
         if let Some(w) = &mut sm.services { w.flush(); }
         for control in sm.control.iter_mut().flatten() {
@@ -682,7 +684,7 @@ impl AndroidMedia {
     }
     pub fn next_due(&self, sid: u32, now: u64) -> Option<u64> {
         let sm = self.sessions.get(&sid)?;
-        (!sm.camera.pending.is_empty() || sm.video.as_ref().is_some_and(|w| !w.pending.is_empty()) || sm.services.as_ref().is_some_and(|w| !w.pending.is_empty()) || sm.control.iter().flatten().any(|w| !w.pending.is_empty())).then_some(now + 1_000_000)
+        (sm.camera.as_ref().is_some_and(|w| !w.pending.is_empty()) || sm.video.as_ref().is_some_and(|w| !w.pending.is_empty()) || sm.services.as_ref().is_some_and(|w| !w.pending.is_empty()) || sm.control.iter().flatten().any(|w| !w.pending.is_empty())).then_some(now + 1_000_000)
     }
     pub fn session_closed(&mut self, sid: u32) { self.sessions.remove(&sid); }
 }
