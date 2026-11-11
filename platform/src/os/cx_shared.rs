@@ -1689,12 +1689,18 @@ impl Cx {
             crate::remote::finish_capture_on_shutdown(self);
         }
         if let Some(drag) = self.drag_drop.internal_drag_event(event) {
-            // The pointer event goes out first and the drag one is appended, the
-            // way every other backend orders it: a widget that ends its gesture on
-            // FingerUp never sees one otherwise, and stays stuck mid-drag.
-            self.drag_drop.suspend_internal_drag();
-            self.call_event_handler(event);
-            self.drag_drop.resume_internal_drag();
+            if let crate::event::InternalDragEvent::End = drag {
+                // The Escape that calls a drag off belongs to the drag, as in an OS drag: the app
+                // never hears it, so its release has no cancel scope to close.
+                self.cancel_scopes.handle_event(event, false, true, None);
+            } else {
+                // The pointer event goes out first and the drag one is appended, the
+                // way every other backend orders it: a widget that ends its gesture on
+                // FingerUp never sees one otherwise, and stays stuck mid-drag.
+                self.drag_drop.suspend_internal_drag();
+                self.call_event_handler(event);
+                self.drag_drop.resume_internal_drag();
+            }
             match drag {
                 crate::event::InternalDragEvent::Drag(event) => {
                     self.call_event_handler(&Event::Drag(event));
