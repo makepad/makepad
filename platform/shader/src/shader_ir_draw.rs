@@ -978,6 +978,7 @@ fn build_depth_clip(ir: &mut IrModule, xr: bool, xr_depth: GlobalId, view_id: Gl
 
 /// A draw shader's SPIR-V: the window and the XR variant's vertex and
 /// fragment binaries, from one IR compile.
+#[derive(Default)]
 pub struct IrDrawSpirv {
     pub info: IrDrawInfo,
     pub vertex: Vec<u32>,
@@ -1787,14 +1788,14 @@ pub struct DrawSpirvView<'a> {
     pub vertex: &'a [u32],
     pub fragment: &'a [u32],
 }
-pub fn draw_spirv_result(output: &ShaderOutput, types: &impl crate::shader_types::ShaderTypes) -> IrDrawSpirvResult {
-    IrDrawSpirvResult { result: draw_spirv(output, types) }
+/// Without `xr` the XR stages stay empty: only a headset's multiview passes draw with them.
+pub fn draw_spirv_result(output: &ShaderOutput, types: &impl crate::shader_types::ShaderTypes, xr: bool) -> IrDrawSpirvResult {
+    if xr { return IrDrawSpirvResult { result: draw_spirv(output, types) }; }
+    IrDrawSpirvResult { result: draw_variant_spirv(output, types, false).map(|window| [window, IrDrawSpirv::default()]) }
 }
+/// Pick passes are never multiview, so the XR stages stay empty.
 pub fn draw_pick_spirv_result(output: &ShaderOutput, types: &impl crate::shader_types::ShaderTypes) -> IrDrawSpirvResult {
-    IrDrawSpirvResult { result: (|| Ok([
-        draw_variant_spirv_with_pick(output, types, false, true)?,
-        draw_variant_spirv_with_pick(output, types, true, true)?,
-    ]))() }
+    IrDrawSpirvResult { result: draw_variant_spirv_with_pick(output, types, false, true).map(|window| [window, IrDrawSpirv::default()]) }
 }
 impl IrDrawSpirv {
     fn view(&self) -> DrawSpirvView<'_> {

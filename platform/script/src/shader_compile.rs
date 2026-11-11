@@ -37,7 +37,11 @@ pub struct ShaderCompileOptions {
     pub gles_complete: bool,
     pub live_literals: bool,
     pub pick: bool,
+    /// Also builds the XR variant: WGSL's multiview source, or SPIR-V's multiview stages.
     pub xr: bool,
+    /// Vulkan: leaves the SPIR-V for [`CompiledShader::build_spirv`], once the GLSL (the dedup key)
+    /// shows the shader is new.
+    pub defer_spirv: bool,
     pub emit_source: bool,
     pub uniform_packing: makepad_shader::uniform_packing::UniformPacking,
 }
@@ -59,6 +63,7 @@ impl ShaderCompileOptions {
             live_literals,
             pick: false,
             xr: false,
+            defer_spirv: false,
             emit_source: true,
             uniform_packing: makepad_shader::uniform_packing::UniformPacking::Std140,
         }
@@ -143,9 +148,9 @@ pub fn compile_shader(
                 }
             }
             ShaderBackend::Glsl => {
-                if options.use_vulkan {
+                if options.use_vulkan && !options.defer_spirv {
                     spirv = Some(makepad_shader::shader_ir_draw::draw_spirv_result(
-                        &state, vm,
+                        &state, vm, options.xr,
                     ));
                     if options.pick {
                         pick_spirv = Some(makepad_shader::shader_ir_draw::draw_pick_spirv_result(&state, vm));
@@ -238,6 +243,18 @@ impl CompiledShader {
             WARN_INLINED_BYTES / 1024,
             heaviest.join(", ")
         );
+    }
+
+    /// The SPIR-V a `defer_spirv` compile left out, with the XR stages when `xr`.
+    #[relax_api]
+    pub fn build_spirv(&mut self, vm: &ScriptVm, xr: bool) {
+        if self.state.has_errors() {
+            return;
+        }
+        self.spirv = Some(makepad_shader::shader_ir_draw::draw_spirv_result(&self.state, vm, xr));
+        if self.state.pick() {
+            self.pick_spirv = Some(makepad_shader::shader_ir_draw::draw_pick_spirv_result(&self.state, vm));
+        }
     }
 
     /// The finished compile as plain data, in one call: the code, diagnostics and table

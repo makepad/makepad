@@ -50,7 +50,9 @@ impl DrawVars {
         );
         opts.gles_complete = gl;
         opts.pick = vm.host.cx().pick_variants();
-        let output = crate::makepad_script::shader_compile::compile_shader(vm, io_self, &opts);
+        // the GLSL is Vulkan's dedup key too, so a shader the check below finds needs no SPIR-V
+        opts.defer_spirv = vulkan;
+        let mut output = crate::makepad_script::shader_compile::compile_shader(vm, io_self, &opts);
         if output.has_errors() {
             DrawVars::log_shader_compile_failure(vm, io_self, &output);
             return;
@@ -112,9 +114,13 @@ impl DrawVars {
                     pick_binding: stage.info.pick_binding().unwrap_or(u32::MAX), pick_texture_base: stage.info.pick_texture_base().unwrap_or(u32::MAX),
                     textures, samplers }.encode())
             };
+            // the multiview stages only where XR passes render multiview: a headset of the HAL's own
+            // (a remote one renders its eyes side by side)
+            let flags = vm.host.cx().hal.info.map_or(0, |i| i.flags);
+            use makepad_hal::info_flags::{MULTIVIEW, XR, XR_OFFSCREEN};
+            let multiview = flags & MULTIVIEW != 0 && flags & XR != 0 && flags & XR_OFFSCREEN == 0;
+            output.build_spirv(vm, multiview);
             let Some(spirv) = output.spirv() else { return };
-            // the multiview stages where the HAL renders multiview passes
-            let multiview = vm.host.cx().hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::MULTIVIEW != 0);
             let normal = match payload(spirv, multiview) { Ok(bytes) => bytes, Err(e) => { crate::error!("Vulkan shader: {e}"); return; } };
             let pick = match output.view().pick_spirv {
                 Some(result) => match payload(result, false) { Ok(bytes) => Some(bytes), Err(e) => { crate::error!("Vulkan pick shader: {e}"); return; } },

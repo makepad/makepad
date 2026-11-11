@@ -83,6 +83,7 @@ pub fn write_shader_inventory(vm: &mut ScriptVm, label: &str, directory: &Path) 
         ] {
             let mut opts = ShaderCompileOptions::new(backend, false, vulkan, webgl, false);
             opts.pick = backend_name == "metal";
+            opts.xr = backend_name == "spirv";
             let output = compile_shader(vm, *obj, &opts);
             writeln!(frontends, "{name}\t{backend_name}\t{}\t{}", output.ast_function_count(), output.function_count())?;
             if output.has_errors() {
