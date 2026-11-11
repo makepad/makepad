@@ -1,6 +1,6 @@
 use crate::widget::*;
 use crate::animator::*;
-use crate::event::{ScrollEvent, ScrollPhase, TouchState, TAP_COUNT_DISTANCE};
+use crate::event::{ScrollDirection, ScrollEvent, ScrollPhase, TouchState, TAP_COUNT_DISTANCE};
 use crate::makepad_derive_widget::*;
 use crate::makepad_draw::*;
 use crate::scroll_motion::{
@@ -261,6 +261,8 @@ enum ScrollState {
     Stopped,
     Drag {
         samples: Vec<ScrollSample>,
+        /// Whether the press has traveled the tap distance our way, so it's a scroll and not a tap.
+        has_traveled: bool,
     },
     /// The rubber-band bounce at a scroll limit (see `scroll_motion`).
     /// `x0`/`v0` are signed: negative stretches before the start, positive past the end.
@@ -339,6 +341,10 @@ pub struct ScrollBar {
     /// scrollable around it, like CSS `overscroll-behavior: contain`.
     #[live(false)]
     contain_scroll: bool,
+    /// Whether a drag that scrolls us hides the soft keyboard when it ends (the focused text input loses its focus),
+    /// like a tap elsewhere does. It's off by default, since most apps keep the keyboard up while you scroll.
+    #[live(false)]
+    pub hide_keyboard_on_scroll: bool,
     /// Whether the bar fades out once scrolling stops and the pointer leaves it.
     #[live(true)]
     auto_hide: bool,
@@ -1119,6 +1125,7 @@ impl ScrollBar {
                     };
                     self.scroll_state = ScrollState::Drag {
                         samples: vec![ScrollSample { abs, time: fe.time }],
+                        has_traveled: false,
                     };
                     self.drag_claimed = false;
                     self.drag_origin = abs;
@@ -1127,7 +1134,7 @@ impl ScrollBar {
             Hit::FingerMove(e) => match &mut self.scroll_state {
                 // A widget that claimed the drag after we took it (its own hits run after ours) keeps it.
                 ScrollState::Drag { .. } if cx.fingers.is_drag_claimed_by_widget(e.digit_id) => self.stand_down(cx),
-                ScrollState::Drag { samples } => {
+                ScrollState::Drag { samples, has_traveled } => {
                     let new_abs = match self.axis {
                         ScrollAxis::Horizontal => e.abs.x,
                         ScrollAxis::Vertical => e.abs.y,
@@ -1140,13 +1147,16 @@ impl ScrollBar {
                     // another scroller already owns is not this view's — it
                     // stands down, settling from rest.
                     let mut from = samples.last().unwrap().abs;
+                    let travel = e.abs - e.abs_start;
+                    // It's a scroll once it goes the tap distance our way, the rule that locks a drag's direction too.
+                    *has_traveled |= ScrollDirection::from_travel(travel)
+                        .is_some_and(|direction| direction.allows(axis));
                     if !self.drag_claimed {
                         // A drag we share with a scroller along the other axis, or one a widget inside us holds,
                         // keeps to the way it started out, so it doesn't need to be mostly along our axis below.
                         let is_shared = cx.fingers.is_scroll_drag_shared(e.digit_id);
                         // A widget inside us, like a button, keeps the press until it turns out to be a drag our way.
                         let is_held_by_widget = cx.fingers.is_press_held_by_widget(e.digit_id, scroll_area);
-                        let travel = e.abs - e.abs_start;
                         let direction = if is_held_by_widget {
                             cx.lock_drag_direction(e.digit_id, travel)
                         } else {
@@ -1177,6 +1187,9 @@ impl ScrollBar {
                         }
                         self.drag_claimed = true;
                         from = drag_origin(self.drag_origin, new_abs, slop, e.device.is_touch());
+                    }
+                    if *has_traveled && !self.hide_keyboard_on_scroll {
+                        cx.fingers.mark_press_as_keeping_key_focus(e.digit_id);
                     }
                     push_sample(samples, new_abs, e.time);
 
@@ -1235,7 +1248,7 @@ impl ScrollBar {
                     self.drag_claimed = false;
                     self.stop_drag(cx, dispatch_action);
                 }
-                ScrollState::Drag { samples } => {
+                ScrollState::Drag { samples, .. } => {
                     // The press's release settles the fate of any fling it caught:
                     // only a qualifying same-direction flick below adds it back.
                     let caught_fling = self.caught_fling.take();
@@ -1352,6 +1365,10 @@ impl ScrollBar {
                 Hit::FingerDown(fe) if fe.is_primary_hit() => {
                     self.animator_play(cx, ids!(hover.drag));
                     cx.claim_finger_drag(fe.digit_id);
+                    // A press on the bar is for scrolling us, so it keeps the keyboard up like our drags do.
+                    if !self.hide_keyboard_on_scroll {
+                        cx.fingers.mark_press_as_keeping_key_focus(fe.digit_id);
+                    }
                     let rel = fe.abs - fe.rect.pos;
                     let rel = match self.axis {
                         ScrollAxis::Horizontal => rel.x,
