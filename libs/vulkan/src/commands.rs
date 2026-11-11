@@ -18,6 +18,7 @@ pub type PfnCmdBindIndexBuffer = unsafe extern "system" fn(CommandBuffer, Buffer
 pub type PfnCmdBindPipeline = unsafe extern "system" fn(CommandBuffer, PipelineBindPoint, Pipeline) -> ();
 pub type PfnCmdBindVertexBuffers = unsafe extern "system" fn(CommandBuffer, u32, u32, *const Buffer, *const DeviceSize) -> ();
 pub type PfnCmdBlitImage = unsafe extern "system" fn(CommandBuffer, Image, ImageLayout, Image, ImageLayout, u32, *const ImageBlit, Filter) -> ();
+pub type PfnCmdClearAttachments = unsafe extern "system" fn(CommandBuffer, u32, *const ClearAttachment, u32, *const ClearRect) -> ();
 pub type PfnCmdClearColorImage = unsafe extern "system" fn(CommandBuffer, Image, ImageLayout, *const ClearColorValue, u32, *const ImageSubresourceRange) -> ();
 pub type PfnCmdClearDepthStencilImage = unsafe extern "system" fn(CommandBuffer, Image, ImageLayout, *const ClearDepthStencilValue, u32, *const ImageSubresourceRange) -> ();
 pub type PfnCmdControlVideoCodingKHR = unsafe extern "system" fn(CommandBuffer, *const VideoCodingControlInfoKHR) -> ();
@@ -292,6 +293,7 @@ pub struct DeviceTable {
     pub cmd_bind_pipeline: Option<PfnCmdBindPipeline>,
     pub cmd_bind_vertex_buffers: Option<PfnCmdBindVertexBuffers>,
     pub cmd_blit_image: Option<PfnCmdBlitImage>,
+    pub cmd_clear_attachments: Option<PfnCmdClearAttachments>,
     pub cmd_clear_color_image: Option<PfnCmdClearColorImage>,
     pub cmd_clear_depth_stencil_image: Option<PfnCmdClearDepthStencilImage>,
     pub cmd_control_video_coding_khr: Option<PfnCmdControlVideoCodingKHR>,
@@ -415,6 +417,7 @@ impl DeviceTable { pub unsafe fn load(handle: Device, get: PfnGetDeviceProcAddr)
         cmd_bind_pipeline: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdBindPipeline>>(lookup(c"vkCmdBindPipeline")),
         cmd_bind_vertex_buffers: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdBindVertexBuffers>>(lookup(c"vkCmdBindVertexBuffers")),
         cmd_blit_image: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdBlitImage>>(lookup(c"vkCmdBlitImage")),
+        cmd_clear_attachments: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdClearAttachments>>(lookup(c"vkCmdClearAttachments")),
         cmd_clear_color_image: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdClearColorImage>>(lookup(c"vkCmdClearColorImage")),
         cmd_clear_depth_stencil_image: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdClearDepthStencilImage>>(lookup(c"vkCmdClearDepthStencilImage")),
         cmd_control_video_coding_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdControlVideoCodingKHR>>(lookup(c"vkCmdControlVideoCodingKHR")),
@@ -658,6 +661,14 @@ impl crate::Device {
     pub unsafe fn cmd_blit_image(&self, command_buffer: CommandBuffer, src_image: Image, src_image_layout: ImageLayout, dst_image: Image, dst_image_layout: ImageLayout, regions: &[ImageBlit], filter: Filter) -> () {
         let call = self.table.cmd_blit_image.expect("vkCmdBlitImage is unavailable");
         call(command_buffer, src_image, src_image_layout, dst_image, dst_image_layout, regions.len() as _, regions.as_ptr(), filter);
+        ()
+    }
+}
+impl crate::Device {
+    #[inline]
+    pub unsafe fn cmd_clear_attachments(&self, command_buffer: CommandBuffer, attachments: &[ClearAttachment], rects: &[ClearRect]) -> () {
+        let call = self.table.cmd_clear_attachments.expect("vkCmdClearAttachments is unavailable");
+        call(command_buffer, attachments.len() as _, attachments.as_ptr(), rects.len() as _, rects.as_ptr());
         ()
     }
 }

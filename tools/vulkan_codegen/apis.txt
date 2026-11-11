@@ -479,6 +479,7 @@ device vkCmdBindIndexBuffer
 device vkCmdBindPipeline
 device vkCmdBindVertexBuffers
 device vkCmdBlitImage
+device vkCmdClearAttachments
 device vkCmdClearColorImage
 device vkCmdClearDepthStencilImage
 device vkCmdCopyBuffer
