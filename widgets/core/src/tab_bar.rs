@@ -383,7 +383,7 @@ impl Widget for TabBar {
                 if let Some(next) = next {
                     let id = self.tab_order[next];
                     self.set_active_tab_id(cx, Some(id), Animate::Yes);
-                    if let Some((tab, _)) = self.tabs.get(&id) { cx.set_key_focus(tab.area()); }
+                    if let Some((tab, _)) = self.tabs.get(&id) { cx.set_key_focus_from_user(tab.area()); }
                     cx.widget_action(uid, TabBarAction::TabWasPressed(id));
                 }
             }

@@ -837,7 +837,7 @@ impl Widget for EaseCurve {
                 }
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 // A double tap resets, but only a real one: the platform
                 // counts any press within 0.5 s and 5 px of the last, so a
                 // quick re-grab after a short drag also arrives as tap 2.

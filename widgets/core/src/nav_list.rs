@@ -339,7 +339,7 @@ impl Widget for NavList {
             let claimed = (!taken.is_empty()).then(|| taken.clipped_rect(cx));
             let held_outside = cx.fingers.is_mouse_held_outside(&[self.area]);
             if press_keeps_keys(self.area.clipped_rect(cx), claimed, me.abs, held_outside) {
-                cx.set_key_focus(self.area);
+                cx.set_key_focus_from_user(self.area);
             }
         }
         if let Event::Actions(actions) = event {
@@ -352,7 +352,7 @@ impl Widget for NavList {
                     // grouped radio does not toggle off, so re-pressing the
                     // lit row raises nothing and the focus would be left on
                     // the row, where the arrows no longer reach the list.
-                    cx.set_key_focus(self.area);
+                    cx.set_key_focus_from_user(self.area);
                     if moved {
                         cx.widget_action(uid, NavAction::Selected(*id));
                     }
@@ -362,7 +362,7 @@ impl Widget for NavList {
         // The list holds the focus, and the rows have opted out of the tab
         // order, so a nav of five destinations is one stop and not five.
         match event.hits(cx, self.area) {
-            Hit::FingerDown(_) => cx.set_key_focus(self.area),
+            Hit::FingerDown(_) => cx.set_key_focus_from_user(self.area),
             Hit::KeyDown(ke) => {
                 let to = match ke.key_code {
                     KeyCode::ArrowDown | KeyCode::ArrowRight => self.step(1),

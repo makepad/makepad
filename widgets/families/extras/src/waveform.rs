@@ -2155,7 +2155,7 @@ impl Widget for Waveform {
                 // documents as doing nothing pull focus off whatever had it
                 // and play the focus track — which is a visible edit to the
                 // rest of the window, and "nothing" has to mean nothing.
-                cx.set_key_focus(self.area);
+                cx.set_key_focus_from_user(self.area);
                 self.grab = Some(part);
                 cx.claim_finger_drag(fe.digit_id);
                 self.press_x = fe.abs.x;
@@ -2858,7 +2858,7 @@ mod waveform_registration_tests {
         // it — which the module doc and the story's gesture table both say
         // is nothing.
         let asked = format!("{}{}", "lane.grab_at", "(x, y, &self.parsed_regions");
-        let focus = format!("{}{}", "cx.set_key", "_focus(self.area)");
+        let focus = format!("{}{}", "cx.set_key", "_focus_from_user(self.area)");
         let a = body.find(&asked).expect("the press asks what is under it");
         let f = body.find(&focus).expect("the press takes key focus");
         assert!(a < f, "focus is taken after the grab, not before it");

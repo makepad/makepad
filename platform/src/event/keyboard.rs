@@ -13,10 +13,14 @@ pub struct CxKeyboard {
     pub(crate) prev_key_focus: Area,
     pub(crate) next_key_focus: Area,
     pub(crate) key_focus: Area,
-    /// The key focus of each window that lost the keyboard, restored when it gets it back. Kept
-    /// here, not in the window widget, so a redraw while it is away moves it like the live focus
-    /// (update_area): a stale copy would never match the widget's area again.
-    pub(crate) parked_key_focus: Vec<(WindowId, Area)>,
+    /// Whether the user gave `key_focus` its focus, e.g., with a press or Tab, rather than code.
+    pub(crate) is_key_focus_from_user: bool,
+    pub(crate) is_prev_key_focus_from_user: bool,
+    pub(crate) is_next_key_focus_from_user: bool,
+    /// The key focus of each window that lost the keyboard and whether the user gave it, restored
+    /// when it gets it back. Kept here, not in the window widget, so a redraw while it is away moves
+    /// it like the live focus (update_area): a stale copy would never match the widget's area again.
+    pub(crate) parked_key_focus: Vec<(WindowId, Area, bool)>,
     #[allow(dead_code)]
     pub(crate) keys_down: Vec<KeyEvent>,
     pub(crate) text_ime_dismissed: bool,
@@ -39,6 +43,20 @@ impl CxKeyboard {
     pub fn set_key_focus(&mut self, focus_area: Area) {
         self.text_ime_dismissed = false;
         self.next_key_focus = focus_area;
+        self.is_next_key_focus_from_user = false;
+    }
+
+    /// Like [`Self::set_key_focus`], for focus the user gave, e.g., by pressing on `focus_area` or tabbing to it.
+    pub fn set_key_focus_from_user(&mut self, focus_area: Area) {
+        self.set_key_focus(focus_area);
+        self.is_next_key_focus_from_user = true;
+    }
+
+    /// Gives `focus_area` the key focus back, as the user's if `is_from_user`,
+    /// e.g., where it was before a popup took it.
+    pub fn restore_key_focus(&mut self, focus_area: Area, is_from_user: bool) {
+        self.set_key_focus(focus_area);
+        self.is_next_key_focus_from_user = is_from_user;
     }
 
     pub fn key_focus(&self) -> Area {
@@ -47,10 +65,17 @@ impl CxKeyboard {
 
     pub fn revert_key_focus(&mut self) {
         self.next_key_focus = self.prev_key_focus;
+        self.is_next_key_focus_from_user = self.is_prev_key_focus_from_user;
     }
 
     pub fn has_key_focus(&self, focus_area: Area) -> bool {
         self.key_focus == focus_area
+    }
+
+    /// Whether `focus_area` has key focus that the user gave it, rather than code.
+    pub fn has_key_focus_from_user(&self, focus_area: Area) -> bool {
+        // Nothing focused is never the user's, e.g., when a restore finds its area gone.
+        !focus_area.is_empty() && self.key_focus == focus_area && self.is_key_focus_from_user
     }
 
     pub fn set_text_ime_dismissed(&mut self) {
@@ -62,20 +87,20 @@ impl CxKeyboard {
     }
 
     pub fn park_key_focus(&mut self, window: WindowId) {
-        self.parked_key_focus.retain(|(w, _)| *w != window);
-        self.parked_key_focus.push((window, self.key_focus));
+        self.parked_key_focus.retain(|(w, ..)| *w != window);
+        self.parked_key_focus.push((window, self.key_focus, self.is_key_focus_from_user));
         self.set_key_focus(Area::Empty);
     }
 
     pub fn unpark_key_focus(&mut self, window: WindowId) {
-        if let Some(i) = self.parked_key_focus.iter().position(|(w, _)| *w == window) {
-            let (_, area) = self.parked_key_focus.remove(i);
-            self.set_key_focus(area);
+        if let Some(i) = self.parked_key_focus.iter().position(|(w, ..)| *w == window) {
+            let (_, area, is_from_user) = self.parked_key_focus.remove(i);
+            self.restore_key_focus(area, is_from_user);
         }
     }
 
     pub(crate) fn update_area(&mut self, old_area: Area, new_area: Area) {
-        for (_, parked) in self.parked_key_focus.iter_mut() {
+        for (_, parked, _) in self.parked_key_focus.iter_mut() {
             if *parked == old_area {
                 *parked = new_area;
             }
@@ -94,7 +119,9 @@ impl CxKeyboard {
     pub(crate) fn cycle_key_focus_changed(&mut self) -> Option<(Area, Area)> {
         if self.next_key_focus != self.key_focus {
             self.prev_key_focus = self.key_focus;
+            self.is_prev_key_focus_from_user = self.is_key_focus_from_user;
             self.key_focus = self.next_key_focus;
+            self.is_key_focus_from_user = self.is_next_key_focus_from_user;
             return Some((self.prev_key_focus, self.key_focus));
         }
         None

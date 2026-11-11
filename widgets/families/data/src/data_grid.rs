@@ -956,6 +956,10 @@ pub struct DataGrid {
     /// on an area that does not exist yet lands nowhere.
     #[rust]
     edit_focus_pending: bool,
+    /// Whether the grid had the user's key focus when this edit began. Its editor
+    /// takes the focus the same way, and so does the grid when it gets it back.
+    #[rust]
+    is_edit_from_user: bool,
     /// Whether this frame's cell loop drew the editor, so that [`Self::end`]
     /// knows to draw it where the loop did not reach.
     #[rust]
@@ -1873,7 +1877,11 @@ impl DataGrid {
         // Only now does the editor have an area to hand the keyboard to.
         if self.edit_focus_pending {
             self.edit_focus_pending = false;
-            item.as_text_input().take_key_focus(cx);
+            if self.is_edit_from_user {
+                item.as_text_input().take_key_focus_from_user(cx);
+            } else {
+                item.as_text_input().take_key_focus(cx);
+            }
         }
     }
 
@@ -2585,6 +2593,7 @@ impl DataGrid {
         );
         self.editing = Some((row, col));
         self.edit_focus_pending = true;
+        self.is_edit_from_user = cx.has_key_focus_from_user(self.area);
         let display_col = self.data_to_display(col);
         if self.selection != GridSelectMode::Off && self.active_cell() != Some((row, col)) {
             self.selected = Some(self.selection_at(row, display_col));
@@ -2620,7 +2629,7 @@ impl DataGrid {
     fn take_keys_back(&mut self, cx: &mut Cx, row: usize, col: usize) {
         if let Some((_, editor)) = self.get_item(row, col) {
             if cx.has_key_focus(editor.area()) {
-                cx.set_key_focus(self.area);
+                cx.restore_key_focus(self.area, self.is_edit_from_user);
             }
         }
     }
@@ -2655,7 +2664,7 @@ impl DataGrid {
             }
             // The keyboard came from the grid and goes back to it, so the
             // arrows work from the cell the selection just landed on.
-            cx.set_key_focus(self.area);
+            cx.restore_key_focus(self.area, self.is_edit_from_user);
         }
         self.area.redraw(cx);
     }
@@ -2685,7 +2694,7 @@ impl DataGrid {
             self.finish_edit(cx, Some(if ke.modifiers.shift { (0, -1) } else { (0, 1) }));
         } else if editor.escaped(actions) {
             self.cancel_edit(cx);
-            cx.set_key_focus(self.area);
+            cx.restore_key_focus(self.area, self.is_edit_from_user);
         } else if editor.key_focus_lost(actions) {
             self.finish_edit(cx, None);
         }
@@ -3724,7 +3733,7 @@ impl Widget for DataGrid {
             Hit::FingerHoverOut(_) => self.hover_tip(cx, None),
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 if self.grab_key_focus {
-                    cx.set_key_focus(self.area);
+                    cx.set_key_focus_from_user(self.area);
                 }
                 match self.hit_zone(fe.abs) {
                     HitZone::Corner if self.selection != GridSelectMode::Off => {

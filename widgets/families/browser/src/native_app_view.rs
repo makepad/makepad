@@ -98,7 +98,7 @@ impl Widget for NativeAppView {
         let rect = area.rect(cx);
         let hit = event.hits(cx, area);
         match &hit {
-            Hit::FingerDown(_) => { cx.set_key_focus(area); self.focus(cx, true); }
+            Hit::FingerDown(_) => { cx.set_key_focus_from_user(area); self.focus(cx, true); }
             Hit::KeyFocus(_) => self.focus(cx, true),
             Hit::KeyFocusLost(_) => self.focus(cx, false),
             Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => cx.set_cursor(cursor(self.cursor)),

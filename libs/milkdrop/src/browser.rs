@@ -930,7 +930,7 @@ impl MilkdropBrowser {
 
     fn focus_list(&mut self, cx: &mut Cx) {
         let area = self.view.widget(cx, ids!(grid)).area();
-        cx.set_key_focus(area);
+        cx.set_key_focus_from_user(area);
     }
 
     /// The next (`delta` 1) or previous (-1) preset in the shown list.

@@ -506,7 +506,7 @@ impl Widget for RadioButton {
                 if fe.is_over {
                     // Taking focus here rather than on the press means a press dragged
                     // off the button leaves no focus ring behind.
-                    self.set_key_focus(cx);
+                    cx.set_key_focus_from_user(self.area());
                     if self.animator_in_state(cx, ids!(active.off)) {
                         self.animator_play(cx, ids!(active.on));
                         cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);

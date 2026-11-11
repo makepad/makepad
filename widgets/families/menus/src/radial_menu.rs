@@ -1474,6 +1474,9 @@ pub struct RadialMenu {
     /// must not leave the field without it.
     #[rust]
     restore_focus: Area,
+    /// Whether the user gave `restore_focus` its focus, so it gets it back the same way.
+    #[rust]
+    is_restore_focus_from_user: bool,
     /// Opened before the field had an area to give the keyboard to; the
     /// first draw that gives it one does.
     #[rust]
@@ -1657,6 +1660,7 @@ impl RadialMenu {
         // it, so there is no place to remember and give back.
         if self.open.is_none() && !in_field {
             self.restore_focus = cx.key_focus();
+            self.is_restore_focus_from_user = cx.has_key_focus_from_user(self.restore_focus);
         }
         self.stop_dwell(cx);
         // Fitted once, against the deepest ring the tree can open, so that
@@ -1775,10 +1779,11 @@ impl RadialMenu {
             return;
         }
         let restore = area_after_redraws(cx, std::mem::take(&mut self.restore_focus));
+        let is_restore_from_user = std::mem::take(&mut self.is_restore_focus_from_user);
         let focus = cx.key_focus();
         let ours = !self.field_area.is_empty() && focus == self.field_area;
         if ours || focus == restore {
-            cx.set_key_focus(restore);
+            cx.restore_key_focus(restore, is_restore_from_user);
         }
     }
 
@@ -2292,7 +2297,7 @@ impl RadialMenu {
         }
         match event.hits(cx, self.field_area) {
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                cx.set_key_focus(self.field_area);
+                cx.set_key_focus_from_user(self.field_area);
                 if self.open.is_some() {
                     self.aim_at(cx, fe.abs);
                 } else if self.trigger == RadialTrigger::Press {

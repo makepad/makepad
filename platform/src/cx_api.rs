@@ -2556,6 +2556,22 @@ impl Cx {
         self.keyboard.set_key_focus(focus_area);
     }
 
+    /// Like [`Self::set_key_focus`], for focus the user gave, e.g., by pressing on `focus_area` or tabbing to it.
+    pub fn set_key_focus_from_user(&mut self, focus_area: Area) {
+        self.keyboard.set_key_focus_from_user(focus_area);
+    }
+
+    /// Gives `focus_area` the key focus back, as the user's if `is_from_user`,
+    /// e.g., where it was before a popup took it.
+    pub fn restore_key_focus(&mut self, focus_area: Area, is_from_user: bool) {
+        self.keyboard.restore_key_focus(focus_area, is_from_user);
+    }
+
+    /// Whether `focus_area` has key focus that the user gave it, rather than code.
+    pub fn has_key_focus_from_user(&self, focus_area: Area) -> bool {
+        self.keyboard.has_key_focus_from_user(focus_area)
+    }
+
     /// The window lost the keyboard: its key focus is kept (and followed through redraws) for
     /// `unpark_key_focus`, and the live focus is cleared.
     pub fn park_key_focus(&mut self, window: WindowId) {

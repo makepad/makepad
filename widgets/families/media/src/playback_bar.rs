@@ -853,7 +853,7 @@ impl Widget for PlaybackBar {
                 if !self.seekable() || !seeks_at(fe.abs.y - fe.rect.pos.y, self.label_room()) {
                     return;
                 }
-                cx.set_key_focus(self.draw_bg.area());
+                cx.set_key_focus_from_user(self.draw_bg.area());
                 // A fresh gesture: what the last one sent must not hold this
                 // one's first target back.
                 self.gate.rest();

@@ -505,7 +505,7 @@ impl Widget for FloatingPanel {
             // they wanted is marked handled by the time this is read.
             Event::MouseDown(me) => {
                 if panel.contains(me.abs) && me.handled.get().is_empty() && !held_elsewhere {
-                    cx.set_key_focus(self.panel_area);
+                    cx.set_key_focus_from_user(self.panel_area);
                 }
             }
             _ => {}
