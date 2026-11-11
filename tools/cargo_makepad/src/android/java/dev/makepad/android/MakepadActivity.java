@@ -3723,7 +3723,8 @@ public class MakepadActivity
     // Some Android skins, like OxygenOS, hold apps to 60Hz unless their window asks for a faster
     // display mode, so Rust turns this on while the user interacts or content keeps moving.
     public void setFrameRateBoost(final boolean boost) {
-        runOnUiThread(() -> {
+        // Always posted, never run inline on the UI thread, so the calls apply in the order Rust made them.
+        mHandler.post(() -> {
             Display display = getWindow().getDecorView().getDisplay();
             int modeId = 0;
             if (boost && display != null) {
