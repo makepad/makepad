@@ -574,6 +574,10 @@ impl Fonts {
                 HalFontEvent::Evicted { generation: _, slots, .. } => client.on_evicted(&slots),
             }
         }
+        // A glyph keeps its texels until its entry is taken away, which bumps the epoch.
+        let epoch = self.layouter.rasterizer().borrow().epoch();
+        self.atlas_texture.set_content_epoch(cx, epoch);
+        self.slug_curve_texture.set_content_epoch(cx, epoch);
     }
 
     #[cfg(target_arch = "wasm32")]

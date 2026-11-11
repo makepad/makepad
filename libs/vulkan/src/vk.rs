@@ -3714,6 +3714,26 @@ match self.0 {
 }
 } }
 #[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ClearAttachment {
+    pub aspect_mask: ImageAspectFlags,
+    pub color_attachment: u32,
+    pub clear_value: ClearValue,
+}
+impl Default for ClearAttachment { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for ClearAttachment {}
+unsafe impl Sync for ClearAttachment {}
+impl ClearAttachment {
+    #[inline]
+    pub fn aspect_mask(mut self, value: ImageAspectFlags) -> Self { self.aspect_mask = value; self }
+    #[inline]
+    pub fn color_attachment(mut self, value: u32) -> Self { self.color_attachment = value; self }
+    #[inline]
+    pub fn clear_value(mut self, value: ClearValue) -> Self { self.clear_value = value; self }
+}
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub union ClearColorValue {
     pub float32: [f32; 4 as usize],
@@ -3742,6 +3762,26 @@ impl ClearDepthStencilValue {
     pub fn depth(mut self, value: f32) -> Self { self.depth = value; self }
     #[inline]
     pub fn stencil(mut self, value: u32) -> Self { self.stencil = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ClearRect {
+    pub rect: Rect2D,
+    pub base_array_layer: u32,
+    pub layer_count: u32,
+}
+impl Default for ClearRect { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for ClearRect {}
+unsafe impl Sync for ClearRect {}
+impl ClearRect {
+    #[inline]
+    pub fn rect(mut self, value: Rect2D) -> Self { self.rect = value; self }
+    #[inline]
+    pub fn base_array_layer(mut self, value: u32) -> Self { self.base_array_layer = value; self }
+    #[inline]
+    pub fn layer_count(mut self, value: u32) -> Self { self.layer_count = value; self }
 }
 #[repr(C)]
 #[derive(Clone, Copy)]

@@ -247,10 +247,12 @@ pub mod info_flags {
     /// both eyes side by side, and the app hands the result on; the XR window only paces them
     /// (its `XrFrame`s and `FrameReady`s), it is never presented.
     pub const XR_OFFSCREEN: u32 = 2048;
+    /// The backend can repaint just a window pass's `Pass::damage` rects, so it's worth working them out.
+    pub const PARTIAL_REPAINT: u32 = 4096;
 
     #[test]
     fn the_flags_are_distinct_bits() {
-        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW, XR_OFFSCREEN];
+        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW, XR_OFFSCREEN, PARTIAL_REPAINT];
         for (i, a) in all.iter().enumerate() {
             assert!(a.is_power_of_two());
             assert!(all[i + 1..].iter().all(|b| a & b == 0), "flag {a} shares a bit");
@@ -358,12 +360,15 @@ impl OpenReq {
             Ok("offscreen") => (backend_id::HEADLESS, 0),
             Ok("metal") => (backend_id::METAL, window_flags),
             Ok("gl") if cfg!(target_os = "linux") => (backend_id::GL, window_flags | if hidden { open_flags::OFFSCREEN_WINDOWS } else { 0 }),
+            Ok("gl") if cfg!(target_os = "android") => (backend_id::GL, window_flags),
             Ok("vulkan") if cfg!(target_os = "linux") && !hidden => (backend_id::VULKAN, window_flags),
+            Ok("vulkan") if cfg!(target_os = "android") => (backend_id::VULKAN, window_flags),
             Ok("vulkan") => (backend_id::VULKAN, window_flags | open_flags::OFFSCREEN_WINDOWS),
             _ if cfg!(target_vendor = "apple") && hidden => (backend_id::METAL, open_flags::OFFSCREEN_WINDOWS),
             _ if cfg!(target_vendor = "apple") => (backend_id::METAL, window_flags),
             _ if cfg!(target_os = "linux") => (backend_id::AUTO, if hidden { window_flags | open_flags::OFFSCREEN_WINDOWS } else { window_flags }),
-            _ if cfg!(target_os = "android") => (backend_id::VULKAN, window_flags),
+            // Vulkan where the device has 1.1, else GLES (`backend::android::open`)
+            _ if cfg!(target_os = "android") => (backend_id::AUTO, window_flags),
             _ if cfg!(windows) => (backend_id::D3D11, if hidden { window_flags | open_flags::OFFSCREEN_WINDOWS } else { window_flags }),
             _ => (backend_id::HEADLESS, 0),
         };
@@ -1118,6 +1123,11 @@ pub struct Pass {
     pub draws: Range,
     pub name: StrId,
     pub owner: StrId,
+    /// The rects that changed since frame `damage_since` (x, y, w, h in target pixels, `buffers::read_rects`).
+    /// A target that still holds that frame can repaint just these; any other target repaints everything.
+    pub damage: Range,
+    /// The frame `damage` is measured from, or 0 when we don't know what changed.
+    pub damage_since: u64,
 }
 
 unsafe impl Plain for Pass {}
@@ -1186,6 +1196,8 @@ pub struct Draw {
     pub list_name: StrId,
     /// instance AABB in target px; NaN = unknown
     pub bounds: [f32; 4],
+    /// One bit for each of its pass's `damage` rects that this draw touches.
+    pub damage: u32,
 }
 
 impl Draw {

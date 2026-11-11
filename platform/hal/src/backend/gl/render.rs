@@ -19,12 +19,28 @@ pub(super) type Job = Box<dyn FnOnce(&mut Renderer) + Send>;
 
 /// The HAL side's handle to the render thread.
 #[derive(Clone)]
-pub(super) struct Queue(mpsc::Sender<Job>);
+pub(super) struct Queue {
+    jobs: mpsc::Sender<Job>,
+    /// jobs that run before the ones queued ahead of them, as soon as the running one ends
+    #[cfg(target_os = "android")]
+    urgent: Arc<Mutex<Vec<Job>>>,
+    /// how many window surfaces the render thread holds
+    #[cfg(target_os = "android")]
+    pub surfaces: Arc<std::sync::atomic::AtomicUsize>,
+}
 
 impl Queue {
     pub fn push(&self, job: impl FnOnce(&mut Renderer) + Send + 'static) {
         // after the backend is gone the context and all its objects are gone with the thread
-        let _ = self.0.send(Box::new(job));
+        let _ = self.jobs.send(Box::new(job));
+    }
+
+    /// For a job that can't wait behind queued work (Android's surfaceDestroyed, the compile
+    /// worker's answers): it must not depend on anything queued before it.
+    #[cfg(target_os = "android")]
+    pub fn push_urgent(&self, job: impl FnOnce(&mut Renderer) + Send + 'static) {
+        self.urgent.lock().unwrap_or_else(|e| e.into_inner()).push(Box::new(job));
+        self.push(|_| {});
     }
 }
 
@@ -37,10 +53,18 @@ pub(super) struct Caps {
     pub max_ubo: usize,
     pub border_clamp: bool,
     pub float_blend: bool,
+    /// OES_texture_float_linear: RGBA32F and R32F textures can be filtered
+    pub float_linear: bool,
+    /// KHR_parallel_shader_compile: links finish on the driver's threads. EGL may hand out its
+    /// entry point on a driver without the extension, so the extension list decides.
+    pub parallel_compile: bool,
     pub renderer: String,
     /// a software rasterizer: the default selection prefers hardware Vulkan and GL to it
     pub software: bool,
+    /// frames carry their GPU time (`timer.rs`)
+    pub gpu_timer: bool,
     /// the EGL display, config and context of the share group (the `GlShare` event)
+    #[cfg(target_os = "linux")]
     pub share: [u64; 3],
 }
 
@@ -51,7 +75,8 @@ pub(super) struct Token {
 }
 
 pub(super) enum Event {
-    Frame { target: Id, kind: u32, frame: u64, window: bool },
+    /// `gpu_ns`: 0 when the GPU time isn't known. `ran`: the GPU did the frame's work.
+    Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, ran: bool },
     Readback { req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
     Pick { req: u32, ids: Vec<u32> },
 }
@@ -154,7 +179,7 @@ fn half(b: &[u8]) -> [u8; 2] {
 }
 
 pub(super) enum Then {
-    Frame { token: Token, target: Id, kind: u32, frame: u64, window: bool },
+    Frame { token: Token, target: Id, kind: u32, frame: u64, window: bool, timing: Option<(GLuint, u64)> },
     Read { token: Token, req: u32, rect: [u32; 4], read: ReadFormat, pbo: GLuint, pick: Option<[f32; 2]> },
     Copy { token: Token, req: u32, rect: [u32; 4] },
 }
@@ -190,20 +215,36 @@ pub(super) struct Renderer {
     pub copy_fbo: GLuint,
     /// 1x1 textures per sampled shape for a draw that names no texture
     pub fallback: [GLuint; 5],
+    /// nearest samplers per address mode and compare mode, for formats the driver can't filter
+    pub nearest: [GLuint; 8],
     /// the frame's uniform blocks and inline instances, and the instance words as a texture
     pub uniform_arena: GLuint,
     pub instance_arena: GLuint,
     pub arena_words: (GLuint, u32),
     pending: VecDeque<(GLsync, Then)>,
     pub mailbox: Mailbox,
+    /// its own queue's urgent lane, which the compile worker answers through
+    #[cfg(target_os = "android")]
+    pub queue: Queue,
+    /// a window frame has been shown: from then on the compile worker can take compiles
+    #[cfg(target_os = "android")]
+    pub presented: bool,
+    #[cfg(target_os = "android")]
+    pub worker: super::worker::WorkerState,
+    /// made at the first compile, once the app's cache dir is known
+    pub cache: Option<super::cache::ProgramCache>,
+    pub timer: Option<super::timer::GpuTimer>,
     exit: bool,
 }
 
 pub(super) fn start(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox) -> Result<(Queue, Arc<Caps>, std::thread::JoinHandle<()>), String> {
     let (tx, rx) = mpsc::channel::<Job>();
+    let queue = Queue { jobs: tx, #[cfg(target_os = "android")] urgent: Arc::new(Mutex::new(Vec::new())), #[cfg(target_os = "android")] surfaces: Default::default() };
+    #[cfg(target_os = "android")]
+    let own = queue.clone();
     let (ready, made) = mpsc::sync_channel(1);
     let thread = std::thread::Builder::new().name("makepad-gl-render".into()).spawn(move || {
-        match Renderer::new(source, mailbox) {
+        match Renderer::new(source, mailbox, #[cfg(target_os = "android")] own) {
             Ok(r) => {
                 let _ = ready.send(Ok(r.caps.clone()));
                 r.run(rx);
@@ -212,15 +253,15 @@ pub(super) fn start(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox) -> Resu
         }
     }).map_err(|e| format!("render thread: {e}"))?;
     match made.recv() {
-        Ok(Ok(caps)) => Ok((Queue(tx), caps, thread)),
+        Ok(Ok(caps)) => Ok((queue, caps, thread)),
         Ok(Err(e)) => { let _ = thread.join(); Err(e) }
         Err(_) => { let _ = thread.join(); Err("the GL render thread ended during startup".into()) }
     }
 }
 
 impl Renderer {
-    fn new(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox) -> Result<Self, String> {
-        let ctx = Context::new(source)?;
+    fn new(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox, #[cfg(target_os = "android")] queue: Queue) -> Result<Self, String> {
+        let ctx = Context::new(source, #[cfg(target_os = "android")] queue.surfaces.clone())?;
         let gl = &ctx.gl;
         let version = gl.string(sys::VERSION);
         if !version.starts_with("OpenGL ES 3") {
@@ -233,9 +274,11 @@ impl Renderer {
         if has("GL_EXT_texture_compression_bptc") { formats |= 1 << format::BC7; }
         if has("GL_EXT_texture_compression_rgtc") { formats |= 1 << format::BC5; }
         if has("GL_KHR_texture_compression_astc_ldr") { formats |= 1 << format::ASTC4X4; }
-        if let Some(threads) = gl.glMaxShaderCompilerThreadsKHR {
-            if has("GL_KHR_parallel_shader_compile") { unsafe { threads(u32::MAX) } }
+        let parallel_compile = has("GL_KHR_parallel_shader_compile") && gl.glMaxShaderCompilerThreadsKHR.is_some();
+        if let Some(threads) = gl.glMaxShaderCompilerThreadsKHR.filter(|_| parallel_compile) {
+            unsafe { threads(u32::MAX) }
         }
+        let timer = super::timer::GpuTimer::new(gl, &ext);
         let caps = Arc::new(Caps {
             formats,
             max_texture: gl.integer(sys::MAX_TEXTURE_SIZE).min(gl.integer(sys::MAX_RENDERBUFFER_SIZE)).max(2048) as u32,
@@ -244,8 +287,12 @@ impl Renderer {
             max_ubo: gl.integer(sys::MAX_UNIFORM_BLOCK_SIZE).max(16384) as usize,
             border_clamp: has("GL_EXT_texture_border_clamp") || has("GL_OES_texture_border_clamp"),
             float_blend: has("GL_EXT_float_blend"),
+            float_linear: has("GL_OES_texture_float_linear"),
+            parallel_compile,
             renderer: format!("{} ({version})", gl.string(sys::RENDERER)),
             software: ctx.software(),
+            gpu_timer: timer.is_some(),
+            #[cfg(target_os = "linux")]
             share: [ctx.share.display as u64, ctx.share.config as u64, ctx.share.context as u64],
         });
         let mut names = [0; 4];
@@ -262,12 +309,29 @@ impl Renderer {
             (gl.glBlendFuncSeparate)(sys::ONE, sys::ONE_MINUS_SRC_ALPHA, sys::ONE, sys::ONE_MINUS_SRC_ALPHA);
         }
         let fallback = [0, 1, 2, 3, 4].map(|shape| fallback(gl, shape));
+        let nearest = std::array::from_fn(|i| {
+            let mut sampler = 0;
+            unsafe {
+                (gl.glGenSamplers)(1, &mut sampler);
+                (gl.glSamplerParameteri)(sampler, sys::TEXTURE_MAG_FILTER, sys::NEAREST as i32);
+                (gl.glSamplerParameteri)(sampler, sys::TEXTURE_MIN_FILTER, sys::NEAREST_MIPMAP_NEAREST as i32);
+                let wrap = wrap(i as u32 / 2, caps.border_clamp) as i32;
+                for p in [sys::TEXTURE_WRAP_S, sys::TEXTURE_WRAP_T, sys::TEXTURE_WRAP_R] { (gl.glSamplerParameteri)(sampler, p, wrap) }
+                if i % 2 == 1 {
+                    (gl.glSamplerParameteri)(sampler, sys::TEXTURE_COMPARE_MODE, sys::COMPARE_REF_TO_TEXTURE as i32);
+                    (gl.glSamplerParameteri)(sampler, sys::TEXTURE_COMPARE_FUNC, sys::LEQUAL as i32);
+                }
+            }
+            sampler
+        });
         if super::super::log_enabled() {
-            eprintln!("[hal-gl] context: {} ubo_align={} extensions={}", caps.renderer, caps.ubo_align, ext.len());
+            eprintln!("[hal-gl] context: {} ubo_align={} extensions={} float_linear={}", caps.renderer, caps.ubo_align, ext.len(), caps.float_linear);
         }
         Ok(Self { ctx, caps, textures: HashMap::new(), buffers: HashMap::new(), programs: HashMap::new(), linking: Vec::new(),
-            fbos: HashMap::new(), read_fbo: names[0], copy_fbo: names[1], fallback,
-            uniform_arena: names[2], instance_arena: names[3], arena_words: (0, 0), pending: VecDeque::new(), mailbox, exit: false })
+            fbos: HashMap::new(), read_fbo: names[0], copy_fbo: names[1], fallback, nearest,
+            uniform_arena: names[2], instance_arena: names[3], arena_words: (0, 0), pending: VecDeque::new(), mailbox,
+            #[cfg(target_os = "android")] queue, #[cfg(target_os = "android")] presented: false,
+            #[cfg(target_os = "android")] worker: super::worker::WorkerState::Unstarted, cache: None, timer, exit: false })
     }
 
     pub fn exit(&mut self) {
@@ -276,6 +340,11 @@ impl Renderer {
 
     fn run(mut self, rx: Receiver<Job>) {
         loop {
+            #[cfg(target_os = "android")]
+            {
+                let urgent = std::mem::take(&mut *self.queue.urgent.lock().unwrap_or_else(|e| e.into_inner()));
+                for job in urgent { job(&mut self); }
+            }
             let next = match rx.try_recv() {
                 Ok(job) => Some(job),
                 Err(TryRecvError::Disconnected) => break,
@@ -325,9 +394,13 @@ impl Renderer {
     fn complete(&mut self, then: Then, failed: bool) {
         let gl = &self.ctx.gl;
         match then {
-            Then::Frame { token, target, kind, frame, window } => {
+            Then::Frame { token, target, kind, frame, window, timing } => {
+                let gpu_ns = match (timing, &mut self.timer) {
+                    (Some((query, began)), Some(timer)) if !failed => timer.read(gl, query, began),
+                    _ => 0,
+                };
                 token.incarnation.done(frame);
-                self.mailbox.push(token, Event::Frame { target, kind, frame, window });
+                self.mailbox.push(token, Event::Frame { target, kind, frame, window, gpu_ns, ran: !failed });
             }
             Then::Copy { token, req, rect } => {
                 self.mailbox.push(token, Event::Readback { req, rect, status: if failed { readback::FAILED } else { readback::OK }, pixels: Vec::new() });
@@ -502,6 +575,9 @@ impl Renderer {
                 (gl.glGenTextures)(1, &mut tex.0);
                 (gl.glBindTexture)(sys::TEXTURE_2D, tex.0);
                 (gl.glTexStorage2D)(sys::TEXTURE_2D, 1, sys::R32UI, WORD_ROW as i32, rows as i32);
+                // it's sampled without a sampler object, and an integer texture is only complete unfiltered
+                (gl.glTexParameteri)(sys::TEXTURE_2D, sys::TEXTURE_MIN_FILTER, sys::NEAREST as i32);
+                (gl.glTexParameteri)(sys::TEXTURE_2D, sys::TEXTURE_MAG_FILTER, sys::NEAREST as i32);
                 *tex = (tex.0, rows);
             } else {
                 (gl.glBindTexture)(sys::TEXTURE_2D, tex.0);
@@ -612,8 +688,9 @@ impl Renderer {
         self.after_gpu(Then::Copy { token, req, rect });
     }
 
-    /// The window's image goes to its surface. Ok(false): nothing is on screen for it.
-    pub fn present(&mut self, window: (u32, Id), key: u64) -> Result<bool, String> {
+    /// The window's image goes to its surface; `damage` is what changed since its last frame (`None`:
+    /// all of it). Ok(false): nothing is on screen for it.
+    pub fn present(&mut self, window: (u32, Id), key: u64, damage: Option<&[[i32; 4]]>) -> Result<bool, String> {
         let t = self.textures.get(&key).ok_or("the window image has no storage")?;
         let size = [t.desc.w, t.desc.h];
         let gl = &self.ctx.gl;
@@ -622,7 +699,7 @@ impl Renderer {
             attach(gl, sys::FRAMEBUFFER, sys::COLOR_ATTACHMENT0, t, 0);
             (gl.glBindFramebuffer)(sys::FRAMEBUFFER, 0);
         }
-        self.ctx.present(window, self.read_fbo, size)
+        self.ctx.present(window, self.read_fbo, size, damage)
     }
 }
 
@@ -695,6 +772,26 @@ pub(super) fn shape_target(shape: u32) -> GLenum {
     match shape { 1 => sys::TEXTURE_CUBE_MAP, 2 | 4 => sys::TEXTURE_2D_ARRAY, _ => sys::TEXTURE_2D }
 }
 
+/// The wrap mode of a sampler address (0 repeat, 1 edge, 2 transparent border, 3 mirrored repeat).
+pub(super) fn wrap(address: u32, border_clamp: bool) -> GLenum {
+    match address {
+        0 => sys::REPEAT,
+        2 if border_clamp => sys::CLAMP_TO_BORDER,
+        3 => sys::MIRRORED_REPEAT,
+        _ => sys::CLAMP_TO_EDGE,
+    }
+}
+
+/// Whether a filtering sampler keeps a texture of `format` complete. GLES 3 never filters integers,
+/// filters 32-bit floats only with OES_texture_float_linear, and depth only when it compares.
+pub(super) fn filterable(caps: &Caps, format: u32, compare: bool) -> bool {
+    match format {
+        format::RGBA32F | format::R32F => caps.float_linear,
+        format::R32UINT => false,
+        f => compare || !format::is_depth(f),
+    }
+}
+
 /// (internal format, upload format, upload type). BGRA8 is stored as RGBA8: a texture that is
 /// only uploaded keeps the uploaded byte order and swizzles R/B when sampled, a render target
 /// holds the colours the shaders write.
@@ -724,5 +821,6 @@ impl Drop for Renderer {
             for (fence, _) in self.pending.drain(..) { (gl.glDeleteSync)(fence) }
             (gl.glFinish)();
         }
+        if let Some(timer) = &mut self.timer { timer.delete(gl); }
     }
 }

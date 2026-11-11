@@ -6,7 +6,7 @@ pub mod main_lag;
 pub mod headless;
 #[cfg(target_os = "linux")]
 pub mod linux;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod gl;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod vulkan;
@@ -16,6 +16,14 @@ pub mod apple;
 pub mod windows;
 
 use crate::buffers::CmdView;
+
+/// Native window-system work stays outside the GPU core (Vulkan's and GLES's).
+#[cfg(target_os = "android")]
+pub trait Shell: Send {
+    fn command(&mut self, session: u32, cmd: exec::OsCmd) -> bool;
+    fn lent(&mut self, session: u32, alias: crate::types::Id, host: crate::types::Id, attach: bool);
+    fn auto_adopt(&self) -> bool { false }
+}
 
 /// Makes one session's pump look: what a GPU completion calls for the session that owns it
 /// (the pump that steps drains every completion; others' pumps sleep on).
