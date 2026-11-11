@@ -35,6 +35,26 @@ pub struct SplatView {
     loaded: bool,
 }
 
+/// The node scale that brings a splat into the scene's frame. The scene is
+/// y-up (x right, y up, z toward the viewer), and so are FlashWorld's worlds
+/// and any PLY that declares no frame. TripoSplat and Idol write the
+/// 3DGS/OpenCV frame (x right, y down, z forward) and mark it with a
+/// `comment frame opencv` header line (`PLY_FRAME_COMMENT` in the splat
+/// model crate). Such a splat turns 180 degrees about x: y and z negate,
+/// which is a rotation, not a mirror. Only the header is read.
+fn ply_frame_scale(bytes: &[u8]) -> Vec3f {
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line == b"end_header" {
+            break;
+        }
+        if line == b"comment frame opencv" {
+            return vec3f(1.0, -1.0, -1.0);
+        }
+    }
+    vec3f(1.0, 1.0, 1.0)
+}
+
 impl SplatView {
     /// Load a PLY/splat payload. The bytes go to `ViewSplat` through its
     /// typed setter: this widget may live in a host isolate, where a script
@@ -62,7 +82,7 @@ impl SplatView {
             return Err(error);
         };
         splat.set_scene_bytes(bytes.to_vec());
-        splat.set_scale(vec3f(1.0, 1.0, 1.0));
+        splat.set_scale(ply_frame_scale(bytes));
         drop(splat);
         self.loaded = true;
         self.view.view(cx, ids!(scene)).set_visible(cx, true);
