@@ -107,11 +107,12 @@ impl<'a> UastcView<'a> {
 }
 
 /// Encode an RGBA8 mip chain (largest first, each `w*h*4` bytes) to UASTC.
-pub fn encode_mips(mips: &[(u32, u32, &[u8])], quality: uastc::Quality, srgb: bool, threads: usize) -> Result<UastcTexture, String> {
+/// Each level uses `run` (see [`crate::run_inline`]).
+pub fn encode_mips(mips: &[(u32, u32, &[u8])], quality: uastc::Quality, srgb: bool, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync))) -> Result<UastcTexture, String> {
     let alpha = mips.iter().any(|(_, _, rgba)| rgba.chunks_exact(4).any(|p| p[3] != 255));
     let mut levels = Vec::with_capacity(mips.len());
     for &(width, height, rgba) in mips {
-        levels.push(Level { width, height, blocks: uastc::encode_image(rgba, width, height, quality, threads)? });
+        levels.push(Level { width, height, blocks: uastc::encode_image(rgba, width, height, quality, run)? });
     }
     Ok(UastcTexture { levels, alpha, srgb })
 }
@@ -124,7 +125,7 @@ mod tests {
     fn ktx2_round_trip_keeps_levels_and_flags() {
         let base: Vec<u8> = (0..16 * 8).flat_map(|i| [(i * 3) as u8, (i * 7) as u8, 128, if i % 5 == 0 { 100 } else { 255 }]).collect();
         let small: Vec<u8> = (0..8 * 4).flat_map(|i| [(i * 9) as u8, 20, 40, 255]).collect();
-        let tex = encode_mips(&[(16, 8, &base), (8, 4, &small)], uastc::Quality::Fast, true, 1).unwrap();
+        let tex = encode_mips(&[(16, 8, &base), (8, 4, &small)], uastc::Quality::Fast, true, &crate::run_inline).unwrap();
         assert!(tex.alpha);
         let bytes = tex.to_ktx2().unwrap();
         let back = UastcTexture::from_ktx2(&bytes).unwrap();

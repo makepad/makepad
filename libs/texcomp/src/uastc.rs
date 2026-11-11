@@ -640,30 +640,24 @@ fn encode_block_with_modes(texels: &[[u8; 4]; 16], quality: Quality, modes: &[Mo
 }
 
 /// Encode an RGBA8 image (row-major, `width*height*4` bytes) to UASTC,
-/// across `threads` workers (0 = all cores). Edge tiles clamp.
-pub fn encode_image(rgba: &[u8], width: u32, height: u32, quality: Quality, threads: usize) -> Result<Vec<u8>, String> {
+/// using `run` (see [`crate::run_inline`]). Edge tiles clamp.
+pub fn encode_image(rgba: &[u8], width: u32, height: u32, quality: Quality, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync))) -> Result<Vec<u8>, String> {
     let (w, h) = (width as usize, height as usize);
     if rgba.len() < w * h * 4 { return Err(format!("RGBA data too short for {width}x{height}")); }
     if w == 0 || h == 0 { return Ok(Vec::new()); }
     let (bx, by) = ((w + 3) / 4, (h + 3) / 4);
     let mut out = vec![0u8; bx * by * 16];
-    let threads = if threads == 0 { std::thread::available_parallelism().map_or(1, |n| n.get()) } else { threads }.clamp(1, by);
-    let rows_per = (by + threads - 1) / threads;
     let modes = mode_candidates(quality);
-    std::thread::scope(|scope| {
-        for (chunk, rows) in out.chunks_mut(rows_per * bx * 16).enumerate() {
-            scope.spawn(move || {
-                for (j, block) in rows.chunks_exact_mut(16).enumerate() {
-                    let index = chunk * rows_per * bx + j;
-                    let (x0, y0) = ((index % bx) * 4, (index / bx) * 4);
-                    let mut texels = [[0u8; 4]; 16];
-                    for y in 0..4 { for x in 0..4 {
-                        let (px, py) = ((x0 + x).min(w - 1), (y0 + y).min(h - 1));
-                        texels[y * 4 + x].copy_from_slice(&rgba[(py * w + px) * 4..][..4]);
-                    } }
-                    block.copy_from_slice(&encode_block_with_modes(&texels, quality, modes));
-                }
-            });
+    crate::encode_row_chunks(&mut out, bx, run, |y_block_start, rows| {
+        for (j, block) in rows.chunks_exact_mut(16).enumerate() {
+            let index = y_block_start * bx + j;
+            let (x0, y0) = ((index % bx) * 4, (index / bx) * 4);
+            let mut texels = [[0u8; 4]; 16];
+            for y in 0..4 { for x in 0..4 {
+                let (px, py) = ((x0 + x).min(w - 1), (y0 + y).min(h - 1));
+                texels[y * 4 + x].copy_from_slice(&rgba[(py * w + px) * 4..][..4]);
+            } }
+            block.copy_from_slice(&encode_block_with_modes(&texels, quality, modes));
         }
     });
     Ok(out)
@@ -745,7 +739,7 @@ mod tests {
             std::array::from_fn(|i| { let g = (i * 17) as u8; [g, g, g, (255 - i * 13) as u8] }),
             [[71, 39, 220, 123]; 16],
         ];
-        // Two tile rows exercise shared tables in both serial and parallel image calls.
+        // Two tile rows exercise shared tables in the image call.
         let mut rgba = [0u8; 12 * 8 * 4];
         for y in 0..8 { for x in 0..12 {
             let texel = blocks[(y / 4) * 3 + x / 4][(y % 4) * 4 + x % 4];
@@ -758,10 +752,8 @@ mod tests {
                 assert_eq!(encode_block(texels, quality), old, "{quality:?}, block {i}");
                 expected.extend_from_slice(&old);
             }
-            for threads in [1, 2] {
-                assert_eq!(encode_image(&rgba, 12, 8, quality, threads).unwrap(), expected,
-                    "{quality:?}, {threads} workers");
-            }
+            assert_eq!(encode_image(&rgba, 12, 8, quality, &crate::run_inline).unwrap(), expected,
+                "{quality:?}");
         }
     }
 

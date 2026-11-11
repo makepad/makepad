@@ -66,7 +66,7 @@ fn uastc_meets_quality_floors_per_preset() {
         // Measured 2026-09-28: RGB 47.9-53.1 dB, alpha 40.0-41.2 dB, SSIM 0.997-0.9996.
         for (quality, rgb_floor, a_floor, ssim_floor) in [(Quality::Fast, 46.0, 38.5, 0.995), (Quality::Default, 46.5, 39.5, 0.995), (Quality::Slow, 47.0, 39.5, 0.995)] {
             let start = std::time::Instant::now();
-            let blocks = uastc::encode_image(&src, w, h, quality, 0).unwrap();
+            let blocks = uastc::encode_image(&src, w, h, quality, &makepad_texcomp::run_inline).unwrap();
             let ms = start.elapsed().as_secs_f64() * 1000.0;
             assert_eq!(blocks.len(), uastc::encoded_len(w, h));
             let back = uastc::decode_image(&blocks, w, h).unwrap();
@@ -83,13 +83,13 @@ fn uastc_meets_quality_floors_per_preset() {
 fn solid_and_edge_sizes_round_trip() {
     for (w, h) in [(1u32, 1u32), (3, 5), (5, 3), (4, 4), (9, 7)] {
         let src: Vec<u8> = (0..w * h).flat_map(|i| [(i * 37 % 256) as u8, 90, 200, 255]).collect();
-        let blocks = uastc::encode_image(&src, w, h, Quality::Default, 1).unwrap();
+        let blocks = uastc::encode_image(&src, w, h, Quality::Default, &makepad_texcomp::run_inline).unwrap();
         let back = uastc::decode_image(&blocks, w, h).unwrap();
         assert_eq!(back.len(), src.len());
         assert!(psnr(&src, &back, &[0, 1, 2]) > 30.0, "{w}x{h}");
     }
     let solid = [17u8, 34, 51, 68].repeat(16);
-    let blocks = uastc::encode_image(&solid, 4, 4, Quality::Fast, 1).unwrap();
+    let blocks = uastc::encode_image(&solid, 4, 4, Quality::Fast, &makepad_texcomp::run_inline).unwrap();
     assert_eq!(uastc::block_mode(blocks[..16].try_into().unwrap()), Some(uastc::MODE_SOLID));
     assert_eq!(uastc::decode_image(&blocks, 4, 4).unwrap(), solid);
 }
@@ -99,7 +99,7 @@ fn uastc_to_bc7_stays_close_to_uastc() {
     use makepad_texcomp::{bc7, transcode};
     for alpha in [false, true] {
         let (src, w, h) = test_image(alpha);
-        let blocks = uastc::encode_image(&src, w, h, Quality::Default, 0).unwrap();
+        let blocks = uastc::encode_image(&src, w, h, Quality::Default, &makepad_texcomp::run_inline).unwrap();
         let direct = uastc::decode_image(&blocks, w, h).unwrap();
         let start = std::time::Instant::now();
         let bc7_blocks = transcode::uastc_to_bc7_image(&blocks);
@@ -126,7 +126,7 @@ fn uastc_to_astc_is_lossless() {
     for alpha in [false, true] {
         for quality in [Quality::Fast, Quality::Slow] {
             let (src, w, h) = test_image(alpha);
-            let blocks = uastc::encode_image(&src, w, h, quality, 0).unwrap();
+            let blocks = uastc::encode_image(&src, w, h, quality, &makepad_texcomp::run_inline).unwrap();
             let start = std::time::Instant::now();
             let astc_blocks = transcode::uastc_to_astc_image(&blocks);
             let us = start.elapsed().as_secs_f64() * 1e6;
@@ -145,7 +145,7 @@ fn uastc_to_astc_is_lossless() {
 fn uastc_to_bc4_bc5_keep_channel_quality() {
     use makepad_texcomp::rgtc;
     let (src, w, h) = test_image(true);
-    let blocks = uastc::encode_image(&src, w, h, Quality::Default, 0).unwrap();
+    let blocks = uastc::encode_image(&src, w, h, Quality::Default, &makepad_texcomp::run_inline).unwrap();
     // BC5 from RG (a normal map's XY), BC4 from alpha (single channel).
     let bc5 = rgtc::decode_image(&rgtc::uastc_to_bc5_image(&blocks, [0, 1]), w, h, 2);
     let bc4 = rgtc::decode_image(&rgtc::uastc_to_bc4_image(&blocks, 3), w, h, 1);
@@ -163,7 +163,7 @@ fn uastc_to_etc2_rgba_meets_its_floor() {
     use makepad_texcomp::etc;
     for alpha in [false, true] {
         let (src, w, h) = test_image(alpha);
-        let blocks = uastc::encode_image(&src, w, h, Quality::Default, 0).unwrap();
+        let blocks = uastc::encode_image(&src, w, h, Quality::Default, &makepad_texcomp::run_inline).unwrap();
         let start = std::time::Instant::now();
         let etc2 = etc::uastc_to_etc2_rgba_image(&blocks);
         let ms = start.elapsed().as_secs_f64() * 1000.0;

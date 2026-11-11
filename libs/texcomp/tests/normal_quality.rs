@@ -86,8 +86,8 @@ fn bc5_normals_rebuild_z_within_a_degree() {
     // UASTC of X and Y with Z (blue) zeroed: every mode then fits the two
     // channels the shader reads.
     let xy0: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], 0, 255]).collect();
-    let u_rgb = uastc::encode_image(&rgba, w, h, Quality::Fast, 0).unwrap();
-    let u_xy = uastc::encode_image(&xy0, w, h, Quality::Fast, 0).unwrap();
+    let u_rgb = uastc::encode_image(&rgba, w, h, Quality::Fast, &makepad_texcomp::run_inline).unwrap();
+    let u_xy = uastc::encode_image(&xy0, w, h, Quality::Fast, &makepad_texcomp::run_inline).unwrap();
     let decode = |u: &[u8]| uastc::decode_image(u, w, h).unwrap();
     let rows = [
         ("8-bit source, Z rebuilt", angles(&truth, &rgba, 4)),
@@ -96,7 +96,7 @@ fn bc5_normals_rebuild_z_within_a_degree() {
         ("UASTC(XY0) -> ASTC", angles(&truth, &decode(&u_xy), 4)),
         ("UASTC(XY0) -> BC7", angles(&truth, &bc7::decode_image(&transcode::uastc_to_bc7_image(&u_xy), w, h).unwrap(), 4)),
         ("UASTC(XY0) -> BC5", angles(&truth, &rgtc::decode_image(&rgtc::uastc_to_bc5_image(&u_xy, [0, 1]), w, h, 2), 2)),
-        ("BC5 stored", angles(&truth, &rgtc::decode_image(&rgtc::encode_bc5_image(&rgba, w, h, 0), w, h, 2), 2)),
+        ("BC5 stored", angles(&truth, &rgtc::decode_image(&rgtc::encode_bc5_image(&rgba, w, h, &makepad_texcomp::run_inline), w, h, 2), 2)),
     ];
     for (name, (mean, p99, max)) in &rows { println!("{name:24} mean {mean:.3} p99 {p99:.3} max {max:.2} deg"); }
     let get = |name: &str| rows.iter().find(|r| r.0 == name).unwrap().1;

@@ -79,29 +79,23 @@ pub fn encode_bc4(values: &[u8; 16]) -> [u8; 8] {
 }
 
 /// Encode an RGBA8 image's R and G to BC5 (two BC4 blocks per 4x4 tile,
-/// raster order; edge tiles clamp) across `threads` workers (0 = all
-/// cores). Build-time work for two-channel data such as tangent-space
+/// raster order; edge tiles clamp) using `run` (see [`crate::run_inline`]).
+/// Build-time work for two-channel data such as tangent-space
 /// normal maps (X, Y; Z is rebuilt where sampled).
-pub fn encode_bc5_image(rgba: &[u8], width: u32, height: u32, threads: usize) -> Vec<u8> {
+pub fn encode_bc5_image(rgba: &[u8], width: u32, height: u32, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync))) -> Vec<u8> {
     let (w, h) = (width.max(1) as usize, height.max(1) as usize);
     let (bx, by) = (w.div_ceil(4), h.div_ceil(4));
     let mut out = vec![0u8; bx * by * 16];
-    let threads = if threads == 0 { std::thread::available_parallelism().map_or(1, |n| n.get()) } else { threads }.clamp(1, by);
-    let rows_per = by.div_ceil(threads);
-    std::thread::scope(|scope| {
-        for (chunk, rows) in out.chunks_mut(rows_per * bx * 16).enumerate() {
-            scope.spawn(move || {
-                for (j, block) in rows.chunks_exact_mut(16).enumerate() {
-                    let index = chunk * rows_per * bx + j;
-                    let (x0, y0) = ((index % bx) * 4, (index / bx) * 4);
-                    for c in 0..2 {
-                        block[c * 8..c * 8 + 8].copy_from_slice(&encode_bc4(&std::array::from_fn(|i| {
-                            let (x, y) = ((x0 + i % 4).min(w - 1), (y0 + i / 4).min(h - 1));
-                            rgba[(y * w + x) * 4 + c]
-                        })));
-                    }
-                }
-            });
+    crate::encode_row_chunks(&mut out, bx, run, |y_block_start, rows| {
+        for (j, block) in rows.chunks_exact_mut(16).enumerate() {
+            let index = y_block_start * bx + j;
+            let (x0, y0) = ((index % bx) * 4, (index / bx) * 4);
+            for c in 0..2 {
+                block[c * 8..c * 8 + 8].copy_from_slice(&encode_bc4(&std::array::from_fn(|i| {
+                    let (x, y) = ((x0 + i % 4).min(w - 1), (y0 + i / 4).min(h - 1));
+                    rgba[(y * w + x) * 4 + c]
+                })));
+            }
         }
     });
     out
@@ -228,8 +222,8 @@ mod tests {
     #[test]
     fn bc5_ktx2_round_trips_levels_and_content_id() {
         let rgba: Vec<u8> = (0..8 * 8).flat_map(|i| [(i * 4) as u8, (255 - i * 3) as u8, 0, 255]).collect();
-        let base = encode_bc5_image(&rgba, 8, 8, 1);
-        let small = encode_bc5_image(&rgba[..4 * 4 * 4], 4, 4, 2);
+        let base = encode_bc5_image(&rgba, 8, 8, &crate::run_inline);
+        let small = encode_bc5_image(&rgba[..4 * 4 * 4], 4, 4, &crate::run_inline);
         let bytes = bc5_to_ktx2(&[(8, 8, &base), (4, 4, &small)], Some(0x1234)).unwrap();
         let view = Bc5View::parse(&bytes).unwrap();
         assert_eq!(view.content_id, Some(0x1234));

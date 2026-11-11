@@ -836,9 +836,9 @@ pub fn encode_block(texels: &[[u8; 4]; 16]) -> [u8; 16] {
 }
 
 /// Encode a row-major RGBA8 level (`width * height * 4` bytes) into `dst`
-/// (`encoded_len(width, height)` bytes) across `threads` workers (`0` = all
-/// cores). Edge tiles clamp to the nearest in-bounds texel.
-pub fn encode_image_slice(rgba: &[u8], width: u32, height: u32, threads: usize, dst: &mut [u8]) -> Result<(), String> {
+/// (`encoded_len(width, height)` bytes) using `run` (see [`crate::run_inline`]).
+/// Edge tiles clamp to the nearest in-bounds texel.
+pub fn encode_image_slice(rgba: &[u8], width: u32, height: u32, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync)), dst: &mut [u8]) -> Result<(), String> {
     let (w, h) = (width as usize, height as usize);
     let need_src = w.saturating_mul(h).saturating_mul(4);
     if rgba.len() < need_src {
@@ -851,14 +851,8 @@ pub fn encode_image_slice(rgba: &[u8], width: u32, height: u32, threads: usize, 
     if w == 0 || h == 0 {
         return Ok(());
     }
-    let (bx, by) = ((w + 3) / 4, (h + 3) / 4);
+    let bx = (w + 3) / 4;
     let out = &mut dst[..need_dst];
-    let workers = if threads == 0 {
-        std::thread::available_parallelism().map_or(1, |n| n.get()).min((bx * by / 512).max(1))
-    } else {
-        threads
-    }
-    .clamp(1, by);
     let encode_rows = |y_block_start: usize, rows: &mut [u8]| {
         for (j, block) in rows.chunks_exact_mut(16).enumerate() {
             let index = y_block_start * bx + j;
@@ -884,40 +878,30 @@ pub fn encode_image_slice(rgba: &[u8], width: u32, height: u32, threads: usize, 
             block.copy_from_slice(&encode_block(&texels));
         }
     };
-    if workers <= 1 {
-        encode_rows(0, out);
-    } else {
-        let rows_per = by.div_ceil(workers);
-        std::thread::scope(|scope| {
-            for (chunk, rows) in out.chunks_mut(rows_per * bx * 16).enumerate() {
-                let y_block_start = chunk * rows_per;
-                scope.spawn(move || encode_rows(y_block_start, rows));
-            }
-        });
-    }
+    crate::encode_row_chunks(out, bx, run, encode_rows);
     Ok(())
 }
 
 /// Append a BC7-encoded RGBA8 level directly onto `out` without a staging copy.
-pub fn encode_image_into(rgba: &[u8], width: u32, height: u32, threads: usize, out: &mut Vec<u8>) -> Result<(), String> {
+pub fn encode_image_into(rgba: &[u8], width: u32, height: u32, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync)), out: &mut Vec<u8>) -> Result<(), String> {
     let need = encoded_len(width, height);
     let start = out.len();
     out.resize(start + need, 0);
-    encode_image_slice(rgba, width, height, threads, &mut out[start..start + need])
+    encode_image_slice(rgba, width, height, run, &mut out[start..start + need])
 }
 
-/// Encode a row-major RGBA8 image (`width * height * 4` bytes) to BC7 across
-/// `threads` workers (`0` = all cores).
-pub fn encode_image(rgba: &[u8], width: u32, height: u32, threads: usize) -> Result<Vec<u8>, String> {
+/// Encode a row-major RGBA8 image (`width * height * 4` bytes) to BC7
+/// using `run` (see [`crate::run_inline`]).
+pub fn encode_image(rgba: &[u8], width: u32, height: u32, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync))) -> Result<Vec<u8>, String> {
     let mut out = vec![0u8; encoded_len(width, height)];
-    encode_image_slice(rgba, width, height, threads, &mut out)?;
+    encode_image_slice(rgba, width, height, run, &mut out)?;
     Ok(out)
 }
 
 /// Encode a row-major packed `0xAARRGGBB` (`VecBGRAu8_32` / `VecMipBGRAu8_32`)
-/// level (`width * height` `u32` texels) directly into `dst` across `threads`
-/// workers (`0` = all cores).
-pub fn encode_bgra_u32_slice(bgra: &[u32], width: u32, height: u32, threads: usize, dst: &mut [u8]) -> Result<(), String> {
+/// level (`width * height` `u32` texels) directly into `dst` using `run`
+/// (see [`crate::run_inline`]).
+pub fn encode_bgra_u32_slice(bgra: &[u32], width: u32, height: u32, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync)), dst: &mut [u8]) -> Result<(), String> {
     let (w, h) = (width as usize, height as usize);
     let need_src = w.saturating_mul(h);
     if bgra.len() < need_src {
@@ -930,14 +914,8 @@ pub fn encode_bgra_u32_slice(bgra: &[u32], width: u32, height: u32, threads: usi
     if w == 0 || h == 0 {
         return Ok(());
     }
-    let (bx, by) = ((w + 3) / 4, (h + 3) / 4);
+    let bx = (w + 3) / 4;
     let out = &mut dst[..need_dst];
-    let workers = if threads == 0 {
-        std::thread::available_parallelism().map_or(1, |n| n.get()).min((bx * by / 512).max(1))
-    } else {
-        threads
-    }
-    .clamp(1, by);
     let unpack_bgra = |px: u32| [(px >> 16) as u8, (px >> 8) as u8, px as u8, (px >> 24) as u8];
     let encode_rows = |y_block_start: usize, rows: &mut [u8]| {
         for (j, block) in rows.chunks_exact_mut(16).enumerate() {
@@ -963,32 +941,23 @@ pub fn encode_bgra_u32_slice(bgra: &[u32], width: u32, height: u32, threads: usi
             block.copy_from_slice(&encode_block(&texels));
         }
     };
-    if workers <= 1 {
-        encode_rows(0, out);
-    } else {
-        let rows_per = by.div_ceil(workers);
-        std::thread::scope(|scope| {
-            for (chunk, rows) in out.chunks_mut(rows_per * bx * 16).enumerate() {
-                let y_block_start = chunk * rows_per;
-                scope.spawn(move || encode_rows(y_block_start, rows));
-            }
-        });
-    }
+    crate::encode_row_chunks(out, bx, run, encode_rows);
     Ok(())
 }
 
 /// Append a BC7-encoded `0xAARRGGBB` (`u32`) level onto `out`.
-pub fn encode_bgra_u32_into(bgra: &[u32], width: u32, height: u32, threads: usize, out: &mut Vec<u8>) -> Result<(), String> {
+pub fn encode_bgra_u32_into(bgra: &[u32], width: u32, height: u32, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync)), out: &mut Vec<u8>) -> Result<(), String> {
     let need = encoded_len(width, height);
     let start = out.len();
     out.resize(start + need, 0);
-    encode_bgra_u32_slice(bgra, width, height, threads, &mut out[start..start + need])
+    encode_bgra_u32_slice(bgra, width, height, run, &mut out[start..start + need])
 }
 
-/// Encode a row-major `0xAARRGGBB` (`u32`) image to BC7 across `threads` workers.
-pub fn encode_bgra_u32_image(bgra: &[u32], width: u32, height: u32, threads: usize) -> Result<Vec<u8>, String> {
+/// Encode a row-major `0xAARRGGBB` (`u32`) image to BC7 using `run`
+/// (see [`crate::run_inline`]).
+pub fn encode_bgra_u32_image(bgra: &[u32], width: u32, height: u32, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync))) -> Result<Vec<u8>, String> {
     let mut out = vec![0u8; encoded_len(width, height)];
-    encode_bgra_u32_slice(bgra, width, height, threads, &mut out)?;
+    encode_bgra_u32_slice(bgra, width, height, run, &mut out)?;
     Ok(out)
 }
 
