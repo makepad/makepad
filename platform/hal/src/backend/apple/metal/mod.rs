@@ -332,6 +332,8 @@ impl Metal {
         if self.capture.is_some() && now.saturating_sub(self.capture_ns) > CAPTURE_IDLE_NS {
             self.capture = None;
         }
+        // what the backend keeps and nothing uses goes
+        self.dev.arena_trim(crate::clock_ns());
         let allocated = self.dev.device_allocated();
         let completed = self.dev.completed.load(std::sync::atomic::Ordering::Acquire);
         for sid in world.session_ids() {
@@ -431,6 +433,10 @@ impl Backend for Metal {
         let _pool = Pool::new();
         if let Some(shell) = self.shell {
             shell.drain_events(sid, world);
+            // gone to the background: the arena's free chunks past the first two go now, not once idle
+            if shell.backgrounded.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                self.dev.arena_trim(u64::MAX);
+            }
         }
         self.dev.flush_submissions();
         self.drain(world);
@@ -459,7 +465,9 @@ impl Backend for Metal {
                 .min()
         });
         let restore = (sid == HOST && !self.restores.is_empty()).then(|| world.now() + 16_666_667);
-        timer.into_iter().chain(trim).chain(restore).chain(self.native_windows.next_due(sid, world.now())).min()
+        // the arena's next spare chunk going idle, which `housekeeping` gives back even if nothing else wakes the pump
+        let arena = self.dev.arena_trim_due(self.housekept_ns).map(|due| due.max(self.housekept_ns + HOUSEKEEPING_NS));
+        timer.into_iter().chain(trim).chain(restore).chain(arena).chain(self.native_windows.next_due(sid, world.now())).min()
     }
 
     fn session_closed(&mut self, world: &mut World, sid: u32) {
