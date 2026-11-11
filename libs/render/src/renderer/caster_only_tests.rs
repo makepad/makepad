@@ -40,6 +40,22 @@ fn an_explicit_answer_wins() {
     assert!(!casts_as_caster_only(Some(false), false, small_lo, small_hi));
 }
 
+#[test]
+fn a_known_solid_casts_above_the_fallback_span() {
+    let (lo, hi) = bounds(CASTER_ONLY_MAX_SPAN + 1.0);
+    assert!(!casts_as_caster_only(None, false, lo, hi));
+
+    let mut renderer = Renderer::default();
+    let id = "gen/surface/solid";
+    renderer.set_model_casts_shadow(id, true);
+    assert!(casts_as_caster_only(
+        renderer.model_casts_shadow.get(id).copied(),
+        false,
+        lo,
+        hi,
+    ));
+}
+
 /// Setting it re-kicks the bake, and setting the same answer twice does
 /// not — the bake is expensive and the signature is what gates it.
 #[test]

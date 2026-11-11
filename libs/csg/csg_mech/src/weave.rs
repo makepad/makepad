@@ -1092,6 +1092,7 @@ pub fn assembly(w: &Weave, density: f64, hz: f64) -> crate::sim::Assembly {
         lift: 0.0,
         strings: Vec::new(),
         interlocks: w.pairs.iter().map(|&(a, b)| (a as usize, b as usize)).collect(),
+        contact_layer: 0.0,
     }
 }
 

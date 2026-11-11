@@ -260,9 +260,9 @@ const TUBE_TOLERANCE: f64 = 0.3;
 // (Data::sdf_walks_bounded, logged at the first); the parts rarely need it: of the walks of a pin pulled into
 // its hole's wall, 5 in 123 thousand, none of a roller pulled into its bearing's ring or of a ball at rest in its
 // cup. Per 240 Hz step at the 4 substeps fields run at (runner::dynamics_world): a bearing's rings and rollers
-// 0.94 ms, a ball in its cup 0.12 ms, a pin in its hole 0.13 ms; the roller pulled into its ring is kept within
-// 0.04 mm of it, a ball rests in its cup within 3.5 s. A hull meets a field through its faces, one start on each
-// walked at most SDF_ITERATIONS steps to its deepest corner.
+// 0.94 ms, a ball in its cup 0.12 ms, a pin in its hole 0.13 ms; the roller pulled into its ring goes at most
+// 0.044 mm into it on Fast's grids and 0.057 mm on Exact's, a ball rests in its cup within 3.5 s. A hull meets a
+// field through its faces, one start on each walked at most SDF_ITERATIONS steps to its deepest corner.
 const SDF_INITPOINTS: i32 = 8;
 const SDF_ITERATIONS: i32 = 64;
 // What meets what (contype and conaffinity bits). The floor, tubes and the drape ball are SOLID; rods meet rods
@@ -341,10 +341,16 @@ fn simplified(points: &[P3], tol: f64) -> Vec<P3> {
     (0..m).filter(|&k| keep[k]).map(|k| points[k]).collect()
 }
 
+/// A field contact's impedance at first touch in the assembly's soft layer ([`Assembly::contact_layer`]); it
+/// rises to the engine's 0.95 across the layer. At half, a part resting on fields sinks about a micron into them
+/// under its load, past what a read's error takes away; softer lets a resting part creep.
+const LAYER_D0: f64 = 0.5;
+
 fn geom(asm: &Assembly, dt: f64, bits: i32) -> GeomSpec {
+    let solimp = if bits == FIELD && asm.contact_layer > 0.0 { [LAYER_D0, 0.95, asm.contact_layer, 0.5, 2.0] } else { GeomSpec::default().solimp };
     GeomSpec {
         contype: bits, conaffinity: bits, condim: 3,
-        friction: [CONTACT_MU, 0.0, 0.0], margin: 0.0, gap: 0.0,
+        friction: [CONTACT_MU, 0.0, 0.0], margin: 0.0, gap: 0.0, solimp,
         solref: [timeconst(contact_hertz(asm), dt), 1.0], ..GeomSpec::default()
     }
 }

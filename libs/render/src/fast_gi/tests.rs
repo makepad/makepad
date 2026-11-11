@@ -111,6 +111,114 @@ fn ran_out_shader_samples_are_excluded_from_gather_sums_and_backfaces() {
 }
 
 #[test]
+fn scatter_shader_places_atlas_tiles_without_widget_clipping() {
+    let source: String = include_str!("shaders.rs").chars().filter(|c| !c.is_whitespace()).collect();
+    let scatter = source.split_once("mod.draw.DrawGiScatter=").unwrap().1
+        .split_once("mod.draw.FastGiScreen=").unwrap().0;
+    assert!(!scatter.contains("clip_and_transform_vertex("), "retained tiles and unaligned clears have no turtle clip");
+    for expression in [
+        "let a=self.gi_batch.sample_nearest(vec2(0.25,(self.gi_tile.x+0.5)/self.gi_update_size.y),0.0)",
+        "let x=a.x-floor(a.x/self.gi_atlas.z)*self.gi_atlas.z",
+        "let y=floor(a.x/self.gi_atlas.z)",
+        "let base=a.y*self.gi_atlas.w*19.0",
+        "if self.gi_tile.w>0.5 {offset=self.gi_atlas.w*8.0}",
+        "if self.gi_tile.w>1.5 {offset=self.gi_atlas.w*18.0}",
+        "p=vec2(x*w,base+offset+y*w)",
+        "self.pos=self.geom.pos",
+        "let vertex=p+self.geom.pos*self.rect_size",
+        "self.world=self.draw_list.view_transform*vec4(vertex.x,vertex.y,self.draw_depth+self.draw_call.zbias,1.0)",
+        "self.vertex_pos=self.draw_pass.camera_projection*(self.draw_pass.camera_view*self.world)",
+        "if self.gi_tile.x<0.0 {return vec4(0.0,0.0,0.0,0.0)}",
+        "let col=self.gi_tile.y+min(floor(self.pos.x*w),w-1.0)+min(floor(self.pos.y*w),w-1.0)*w",
+        "self.gi_update.sample_nearest(vec2((col+0.5)/self.gi_update_size.x,(self.gi_tile.x+0.5)/self.gi_update_size.y))",
+    ] {
+        let compact: String = expression.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(scatter.contains(&compact), "scatter CPU mirror and unclipped pass projection: {expression}");
+    }
+}
+
+// Check the production row encoder and retained instance layout together.
+// The shader expressions mirrored here are pinned by the test above.
+fn check_scatter_batch_destinations(cx: &Cx, scatter: &DrawGiScatter, cache: &ScatterCache) {
+    let shader = scatter.quad.draw_vars.draw_shader_id.unwrap();
+    let mapping = &cx.draw_shaders[shader.index].mapping;
+    let offset = |id| mapping.instances.inputs.iter().find(|p| p.id == id).unwrap().offset;
+    let tile_offset = offset(live_id!(gi_tile));
+    let size_offset = offset(live_id!(rect_size));
+    let retained = cache.instances.as_ref().unwrap();
+    let capacity = retained.count() / 3;
+    for rows in [capacity, 4, 1, 0, capacity] {
+        let (instances, count) = cache.batch(rows);
+        assert_eq!(count, 3 * rows, "draw exactly the live batch, including after shrinking");
+        assert_eq!(instances.id(), retained.id(), "batch changes reuse the same publication");
+        let records = instances.data()[..count * instances.slots()].chunks_exact(instances.slots());
+        for (i, record) in records.enumerate() {
+            let row = record[tile_offset] as usize;
+            assert_eq!(row, i / 3, "every live row is drawn in order");
+            assert!(row < rows, "unused capacity never reaches the scatter shader");
+        }
+    }
+
+    for config in [
+        GiConfig::default(),
+        GiConfig { grid: [6, 2, 6], ..GiConfig::default() },
+        GiConfig { grid: [4, 2, 4], ..GiConfig::default() },
+    ] {
+        let [_, _, columns, tile_rows] = config.atlas();
+        let probes = config.probe_count();
+        let destinations = [(0, 0), (0, probes - 1), (1, (columns + 1).min(probes - 1)), (2, probes / 2 + 1)];
+        let mut texture = vec![f32::NAN; capacity * 8];
+        for (row, &(cascade, slot)) in destinations.iter().enumerate() {
+            let item = BatchItem { cascade, slot, cell: [-3, 5, 7], hysteresis: REFRESH_HYSTERESIS };
+            texture[row * 8..row * 8 + 8].copy_from_slice(&work::batch_row(&item));
+        }
+        let (instances, count) = cache.batch(destinations.len());
+        for (i, record) in instances.data()[..count * instances.slots()].chunks_exact(instances.slots()).enumerate() {
+            let tile = &record[tile_offset..tile_offset + 4];
+            let row = i / 3;
+            let region = i % 3;
+            let (column, width) = [(0, 8), (64, 10), (164, 1)][region];
+            assert_eq!(tile, &[row as f32, column as f32, width as f32, region as f32], "cached row/column/width/region");
+            assert_eq!(&record[size_offset..size_offset + 2], &[width as f32; 2], "each destination is a complete tile");
+
+            // Normalized nearest lookup: column zero of two, row / capacity
+            // (not / batch length). Sample at texel centres, explicitly LOD 0.
+            let uv = [0.25_f32, (tile[0] + 0.5) / capacity as f32];
+            let texel = (uv[1] * capacity as f32).floor() as usize * 2 + (uv[0] * 2.0).floor() as usize;
+            let a = &texture[texel * 4..texel * 4 + 4];
+            let (cascade, slot) = destinations[row];
+            assert_eq!(&a[..2], &[slot as f32, cascade as f32], "batch destination survives the vertex fetch");
+            let x = a[0] - (a[0] / columns as f32).floor() * columns as f32;
+            let y = (a[0] / columns as f32).floor();
+            let base = a[1] * tile_rows as f32 * 19.0;
+            let mut offset = 0.0;
+            if tile[3] > 0.5 { offset = tile_rows as f32 * 8.0; }
+            if tile[3] > 1.5 { offset = tile_rows as f32 * 18.0; }
+            let origin = [x * tile[2], base + offset + y * tile[2]];
+
+            // The CPU tile closure before 04171b5fdd, using integer texels.
+            let (x, y, base) = (slot % columns, slot / columns, cascade * tile_rows * 19);
+            let old = match region {
+                0 => [x * 8, base + y * 8],
+                1 => [x * 10, base + tile_rows * 8 + y * 10],
+                _ => [x, base + tile_rows * 18 + y],
+            };
+            assert_eq!(origin, old.map(|v| v as f32), "same atlas origin for cascade {cascade}, slot {slot}, region {region}");
+            for (x, y) in [(0, 0), (width - 1, 0), (0, width - 1), (width - 1, width - 1)] {
+                let pos = [(x as f32 + 0.5) / tile[2], (y as f32 + 0.5) / tile[2]];
+                let col = tile[1] + (pos[0] * tile[2]).floor() + (pos[1] * tile[2]).floor() * tile[2];
+                assert_eq!(col as usize, column + y * width + x, "tile corners read the same gather columns; state reads 164");
+                assert_eq!(
+                    [origin[0] + pos[0] * tile[2], origin[1] + pos[1] * tile[2]],
+                    [old[0] as f32 + x as f32 + 0.5, old[1] as f32 + y as f32 + 0.5],
+                    "unclipped tile corners cover the original atlas texel block",
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn gi_shaders_compile_without_errors() {
     use makepad_draw::makepad_platform::makepad_script::script_eval;
     let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -137,6 +245,7 @@ fn gi_shaders_compile_without_errors() {
             (DrawGiRelight::script_new_with_default(vm).quad.draw_vars, "Rgba32F"),
             (DrawGiGather::script_new_with_default(vm).quad.draw_vars, "Rgba16F"),
             (DrawGiScatter::script_new_with_default(vm).quad.draw_vars, "Rgba16F"),
+            (shaders::DrawGiProbeCounts::script_new_with_default(vm).quad.draw_vars, "Bgra8NoBlend"),
         ] {
             let id = vars.draw_shader_id.expect("GI shader registered");
             assert_eq!(format!("{:?}", vm.cx().draw_shaders[id.index].mapping.color_format), format);
@@ -151,6 +260,7 @@ fn gi_shaders_compile_without_errors() {
         let retained = cache.instances.as_ref().unwrap().clone();
         assert_eq!(retained.byte_len(), bytes);
         assert_eq!(retained.count(), 16 * 3, "three regions per batch row");
+        check_scatter_batch_destinations(vm.cx(), &scatter, &cache);
         assert_eq!(cache.prepare(&mut scatter, 16), 0, "unchanged frame encodes zero static bytes");
         assert_eq!(cache.instances.as_ref().unwrap().id(), retained.id(), "same resource avoids an upload");
         assert!(cache.instances.as_ref().unwrap().upload_since(retained.id()).is_empty(), "no unchanged instance bytes uploaded");
@@ -403,6 +513,79 @@ fn emission_keeps_its_hue_and_intensity() {
     assert_eq!(((px >> 16) & 255, (px >> 8) & 255, px & 255), (255, 128, 0), "hue relative to the strongest channel");
     let a = (px >> 24) as f32 / 255.0;
     assert!((a / (1.0 - a) - 3.0).abs() < 0.2, "intensity m/(1+m) decodes back to 3");
+}
+
+fn quad(pos: Vec3f, size: Vec3f, tint: Vec3f, emission: Vec3f) -> Instance {
+    let mesh = Arc::new(Mesh::new(
+        vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+        vec![0, 1, 2, 0, 2, 3], 3, -1, None,
+    ).unwrap());
+    let mut transform = Mat4f::identity();
+    transform.v[0] = size.x; transform.v[5] = size.y; transform.v[10] = size.z;
+    transform.v[12] = pos.x; transform.v[13] = pos.y; transform.v[14] = pos.z;
+    Instance::new(mesh, transform, tint, emission, 1.0).unwrap()
+}
+
+fn decoded_emission(px: u32) -> Vec3f {
+    let alpha = (px >> 24) as f32 / 255.0;
+    vec3f(((px >> 16) & 255) as f32, ((px >> 8) & 255) as f32, (px & 255) as f32)
+        * (alpha / (1.0 - alpha) / 255.0)
+}
+
+#[test]
+fn emissive_quads_scale_with_clipped_area_and_saturate_at_a_full_face() {
+    let layout = VoxelLayout { dims: [BRICK; 3], levels: 1, voxel: 1.0, home: [0.0; 3] };
+    let mut world = VoxelWorld::new(layout);
+    let white = vec3f(1.0, 1.0, 1.0);
+    let emission = vec3f(4.0, 2.0, 0.0);
+    world.update(Some(snapshot(vec![
+        quad(vec3f(0.4, 0.4, 0.5), vec3f(0.2, 0.2, 1.0), white, emission),
+        quad(vec3f(2.0, 0.0, 0.5), white, white, emission),
+        // Clip the two triangles of a large panel across two voxel faces.
+        quad(vec3f(0.0, 2.0, 0.5), vec3f(2.0, 1.0, 1.0), white, emission),
+        // More than a face of emissive area keeps the full radiance.
+        quad(vec3f(3.0, 2.0, 0.25), white, white, emission),
+        quad(vec3f(3.0, 2.0, 0.75), white, white, emission),
+        // A small source straddling a voxel boundary splits its area.
+        quad(vec3f(1.9, 3.4, 0.5), vec3f(0.2, 0.2, 1.0), white, emission),
+    ])), &[[0, 0, 0]]);
+    let read = |cell| decoded_emission(world.emission[layout.texel(0, cell)]);
+    let small = read([0, 0, 0]);
+    let full = read([2, 0, 0]);
+    // The existing 8-bit m/(1+m) encoding quantizes the intensity.
+    assert!((full.x - emission.x).abs() < 0.02, "a full face retains full emission");
+    assert!((small.x - full.x / 25.0).abs() < 0.003, "a 0.2 m square covers 1/25 of a 1 m face");
+    assert!((small.y - small.x * 0.5).abs() < 0.002, "coverage preserves the emission hue");
+    for cell in [[0, 2, 0], [1, 2, 0], [3, 2, 0]] {
+        assert!((read(cell).x - full.x).abs() < 0.02, "full coverage at {cell:?} retains full radiance");
+    }
+    for cell in [[1, 3, 0], [2, 3, 0]] {
+        assert!((read(cell).x - emission.x * 0.02).abs() < 0.003, "only the clipped area contributes at {cell:?}");
+    }
+    assert_eq!(world.solid(0, [3, 0, 0]), Some(false), "an edge-only contact has zero area");
+}
+
+#[test]
+fn voxel_albedo_weights_surface_area_and_dark_surfaces_do_not_dilute_emission() {
+    let layout = VoxelLayout { dims: [BRICK; 3], levels: 1, voxel: 1.0, home: [0.0; 3] };
+    let mut world = VoxelWorld::new(layout);
+    let red = vec3f(1.0, 0.0, 0.0);
+    let blue = vec3f(0.0, 0.0, 1.0);
+    let emission = vec3f(4.0, 0.0, 0.0);
+    world.update(Some(snapshot(vec![
+        // Four red triangles cover a quarter face; two blue triangles
+        // cover the other three quarters. Triangle counts must not matter.
+        quad(vec3f(0.0, 0.0, 0.5), vec3f(0.125, 1.0, 1.0), red, emission),
+        quad(vec3f(0.125, 0.0, 0.5), vec3f(0.125, 1.0, 1.0), red, emission),
+        quad(vec3f(0.25, 0.0, 0.5), vec3f(0.75, 1.0, 1.0), blue, Vec3f::default()),
+        // A dark full face behind them increases total surface area to
+        // two faces, but must not dilute the quarter face of emission.
+        quad(vec3f(0.0, 0.0, 0.75), vec3f(1.0, 1.0, 1.0), blue, Vec3f::default()),
+    ])), &[[0, 0, 0]]);
+    let t = layout.texel(0, [0, 0, 0]);
+    let albedo = world.albedo[t];
+    assert_eq!(((albedo >> 16) & 255, (albedo >> 8) & 255, albedo & 255), (32, 0, 223), "albedo is the area-weighted mean");
+    assert!((decoded_emission(world.emission[t]).x - 1.0).abs() < 0.01, "only the quarter face that emits sets emission coverage");
 }
 
 #[test]

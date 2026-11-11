@@ -11,6 +11,8 @@ use crate::fast_gi::{Instance,Mesh,Snapshot,voxels::gi_image};
 use std::sync::Arc;
 fn rgb(c:Vec4f)->Vec3f{vec3f(c.x,c.y,c.z)}
 fn scaled(mut t:Mat4f,size:Vec3f)->Mat4f{for j in 0..3{t.v[j]*=size.x;t.v[4+j]*=size.y;t.v[8+j]*=size.z;}t}
+// The loader has already multiplied emissiveFactor by emissiveStrength.
+// Read only this draw layer's material; coverage is applied by the worker.
 fn material(m:&LayerMaterial)->(Vec3f,f32){let e=m.surface.as_ref().map(|s|s.definition.emissive).unwrap_or([0.0;3]);(vec3f(e[0],e[1],e[2]),if m.surface.is_some(){1.0-m.metallic.clamp(0.0,1.0)}else{1.0})}
 fn overlaps(i:&Instance,(lo,hi):(Vec3f,Vec3f))->bool{!(i.hi.x<lo.x||i.lo.x>hi.x||i.hi.y<lo.y||i.lo.y>hi.y||i.hi.z<lo.z||i.lo.z>hi.z)}
 /// The cached GI copy of a render geometry (+ its albedo texture).
@@ -26,6 +28,7 @@ fn gi_mesh(cache:&mut crate::fast_gi::MeshCache,cx:&mut Cx,geometry:&Geometry,re
     cache.geometry.entry(key).or_default().push((texture_id,mesh.clone(),generation));
     Some(mesh)
 }
+
 impl Renderer {
     fn gi_shape(&mut self,shape:Shape)->Option<Arc<Mesh>>{
         if let Some(m)=self.gi.meshes.shapes.get(&shape.index()){return Some(m.clone());}
@@ -84,5 +87,60 @@ impl Renderer {
         self.gi_snapshot_omitted=omitted;self.gi.stats.omitted_instances=omitted;
         let triangles=out.iter().map(|i|i.triangles()).sum();
         Snapshot{instances:out,triangles}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_layers_keep_their_own_emission_through_snapshot_and_voxelization() {
+        use crate::fast_gi::voxels::{VoxelLayout, VoxelWorld, BRICK};
+        use crate::material_surface::MaterialSurface;
+        use crate::model::{PbrMaterial, StaticDrawLayer};
+
+        let layer = |x: f32, emissive| {
+            let mut vertices = Vec::new();
+            for (dx, dy) in [(0.0, 0.0), (0.2, 0.0), (0.2, 0.2), (0.0, 0.2)] {
+                vertices.extend_from_slice(&[x + dx, 0.4 + dy, 0.5, 0.0, 0.0, f32::from_bits(0xffff_ffff), 0.0]);
+            }
+            StaticDrawLayer {
+                vertices, indices: vec![0, 1, 2, 0, 2, 3], uvs: vec![[0.0; 2]; 4],
+                texture_png: None, detail_png: None, detail_scale: [1.0; 2],
+                pbr: PbrMaterial { metallic: 0.0, surface: Some(Arc::new(MaterialSurface { emissive, ..Default::default() })), ..Default::default() },
+            }
+        };
+        let layers = vec![layer(0.4, [9.0, 4.5, 0.0]), layer(2.4, [0.0; 3])];
+        let model = StaticModel {
+            vertices: layers.iter().flat_map(|l| l.vertices.iter().copied()).collect(),
+            indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
+            min: vec3f(0.4, 0.4, 0.5), max: vec3f(2.6, 0.6, 0.5),
+            texture_uri: None, texture_png: None, parts: Vec::new(), ground_ao: None,
+            draw_layers: layers, detail_png: None, detail_scale: [1.0; 2], prelit: false,
+            anim_parts: Vec::new(), driven_parts: Vec::new(), sky: None,
+            liquids: Vec::new(), liquid_ranges: Vec::new(), pbr: Default::default(),
+        };
+        // Only CPU geometry/texture handles are allocated; no GPU or window.
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut renderer = Renderer::default();
+        let prepared = PreparedStaticPreview::prepare(model).unwrap();
+        let uploaded = renderer.upload_static_preview(&mut cx, prepared);
+        renderer.install_uploaded_static("layered-emitter", uploaded);
+        renderer.set_models(vec![ModelInstance {
+            model: "layered-emitter".into(), transform: Mat4f::identity(),
+            tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
+            dynamic: false, depth_order: 0.0, part_poses: Vec::new(), custom_material: None, lamps: Default::default(),
+        }]);
+        let snapshot = renderer.gi_snapshot(&mut cx, &World::default(), (Vec3f::default(), vec3f(8.0, 8.0, 8.0)));
+        assert_eq!(snapshot.instances.len(), 2, "one GI instance per model draw layer");
+        assert_eq!(snapshot.instances[0].emission, vec3f(9.0, 4.5, 0.0), "material emission is already scaled");
+        assert_eq!(snapshot.instances[1].emission, Vec3f::default(), "the other layer has no emission");
+        let layout = VoxelLayout { dims: [BRICK; 3], levels: 1, voxel: 1.0, home: [0.0; 3] };
+        let mut voxels = VoxelWorld::new(layout);
+        voxels.update(Some(Arc::new(snapshot)), &[[0, 0, 0]]);
+        assert_ne!(voxels.emission[layout.texel(0, [0, 0, 0])], 0, "the emitting layer contributes light");
+        assert_eq!(voxels.solid(0, [2, 0, 0]), Some(true), "the non-emitting layer is present");
+        assert_eq!(voxels.emission[layout.texel(0, [2, 0, 0])], 0, "emission never spreads to the other layer");
     }
 }

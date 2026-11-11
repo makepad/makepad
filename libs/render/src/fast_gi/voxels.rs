@@ -231,7 +231,27 @@ impl VoxelLayout {
 }
 
 #[derive(Clone, Copy, Default)]
-struct Accum { color: Vec3f, normal: Vec3f, emission: Vec3f, weight: f32 }
+struct Accum { color: Vec3f, normal: Vec3f, emission: Vec3f, weight: f32, emissive_weight: f32 }
+
+impl Accum {
+    /// `weight` is surface area inside the voxel / voxel face area.
+    fn add(&mut self, color: Vec3f, normal: Vec3f, emission: Vec3f, weight: f32) {
+        self.color = self.color + color * weight;
+        self.normal = self.normal + normal * weight;
+        self.weight += weight;
+        let emission = vec3f(emission.x.max(0.0), emission.y.max(0.0), emission.z.max(0.0));
+        if emission.x > 0.0 || emission.y > 0.0 || emission.z > 0.0 {
+            self.emission = self.emission + emission * weight;
+            self.emissive_weight += weight;
+        }
+    }
+
+    fn covered_emission(&self) -> Vec3f {
+        // Area-weighted emissive radiance times min(emissive coverage, 1).
+        // Non-emissive surfaces affect albedo, not the emitter's coverage.
+        self.emission * (1.0 / self.emissive_weight.max(1.0))
+    }
+}
 
 /// What a finished job changed, for the UI thread to upload and to
 /// invalidate probes with.
@@ -422,8 +442,9 @@ impl VoxelWorld {
                 let c = albedo * diffuse;
                 for z in 0..brick { for y in 0..brick { for x in 0..brick {
                     let a = &mut self.accum[cell(x, y, z)];
-                    a.color = a.color + c; a.weight += 1.0;
-                    a.emission = vec3f(a.emission.x.max(emission.x), a.emission.y.max(emission.y), a.emission.z.max(emission.z));
+                    // Distance fields supply no sub-voxel surface area;
+                    // retain their full-cell coverage approximation.
+                    a.add(c, Vec3f::default(), emission, 1.0);
                 }}}
                 continue;
             }
@@ -454,8 +475,7 @@ impl VoxelWorld {
                 };
                 let c = albedo * diffuse;
                 let a = &mut self.accum[cell(x, y, z)];
-                a.color = a.color + c; a.normal = a.normal + n; a.weight += 1.0;
-                a.emission = vec3f(a.emission.x.max(emission.x), a.emission.y.max(emission.y), a.emission.z.max(emission.z));
+                a.add(c, n, emission, 1.0);
             }}}
         }}}
     }
@@ -466,6 +486,7 @@ impl VoxelWorld {
         let b = d.map(|d| d / BRICK);
         let v = layout.voxel_size(level);
         let half = v * 0.5;
+        let inverse_face_area = 1.0 / (v * v);
         self.accum.clear();
         self.accum.resize(layout.level_voxels(), Accum::default());
         let (wlo, whi) = layout.window_box(level, win);
@@ -513,9 +534,10 @@ impl VoxelWorld {
                         if !flags[x / BRICK + b[0] * (y / BRICK + b[1] * (z / BRICK))] { continue; }
                         let center = vec3f((win[0] + x as i32) as f32 + 0.5, (win[1] + y as i32) as f32 + 0.5, (win[2] + z as i32) as f32 + 0.5) * v;
                         if !single && !tri_box_overlap(center, half, p) { continue; }
+                        let weight = tri_box_area(center, half, p) * inverse_face_area;
+                        if weight <= 0.0 { continue; }
                         let a = &mut self.accum[x + d[0] * (y + d[1] * z)];
-                        a.color = a.color + c; a.normal = a.normal + n; a.weight += 1.0;
-                        a.emission = vec3f(a.emission.x.max(inst.emission.x), a.emission.y.max(inst.emission.y), a.emission.z.max(inst.emission.z));
+                        a.add(c, n, inst.emission, weight);
                     }}}
                 }
             }
@@ -532,7 +554,7 @@ impl VoxelWorld {
                 if a.weight > 0.0 {
                     let c = a.color * (1.0 / a.weight);
                     let n = a.normal * (1.0 / a.weight);
-                    let e = a.emission;
+                    let e = a.covered_emission();
                     self.albedo[t] = pack(c.x, c.y, c.z, 255);
                     self.normal[t] = pack(n.x * 0.5 + 0.5, n.y * 0.5 + 0.5, n.z * 0.5 + 0.5, 255);
                     // Hue (authored encoding) + intensity m/(1+m) in alpha.
@@ -553,6 +575,48 @@ impl VoxelWorld {
         if (0..3).any(|a| c[a] < w[a] || c[a] >= w[a] + self.layout.dims[a] as i32) { return None; }
         Some(self.albedo[self.layout.texel(level, c)] >> 24 != 0)
     }
+}
+
+/// Area of the triangle clipped to the voxel's six planes, in world units.
+fn tri_box_area(center: Vec3f, half: f32, tri: [Vec3f; 3]) -> f32 {
+    let tri = tri.map(|p| p - center);
+    if tri.iter().all(|p| p.x.abs() <= half && p.y.abs() <= half && p.z.abs() <= half) {
+        return Vec3f::cross(tri[1] - tri[0], tri[2] - tri[0]).length() * 0.5;
+    }
+    // Clipping a convex polygon by a plane adds at most one vertex:
+    // a triangle clipped by six planes needs at most nine, with no heap work.
+    let mut polygon = [Vec3f::default(); 9];
+    let mut clipped = polygon;
+    polygon[..3].copy_from_slice(&tri);
+    let mut count = 3;
+    for axis in 0..3 { for sign in [-1.0, 1.0] {
+        let distance = |p: Vec3f| half - sign * [p.x, p.y, p.z][axis];
+        let mut previous = polygon[count - 1];
+        let mut previous_distance = distance(previous);
+        let mut next_count = 0;
+        for &current in &polygon[..count] {
+            let current_distance = distance(current);
+            if (previous_distance >= 0.0) != (current_distance >= 0.0) {
+                let t = previous_distance / (previous_distance - current_distance);
+                clipped[next_count] = previous + (current - previous) * t;
+                next_count += 1;
+            }
+            if current_distance >= 0.0 {
+                clipped[next_count] = current;
+                next_count += 1;
+            }
+            previous = current;
+            previous_distance = current_distance;
+        }
+        if next_count < 3 { return 0.0; }
+        std::mem::swap(&mut polygon, &mut clipped);
+        count = next_count;
+    }}
+    let mut area = Vec3f::default();
+    for i in 1..count - 1 {
+        area = area + Vec3f::cross(polygon[i] - polygon[0], polygon[i + 1] - polygon[0]);
+    }
+    area.length() * 0.5
 }
 
 /// Triangle / axis-aligned box overlap (separating axis test, Akenine-Möller).

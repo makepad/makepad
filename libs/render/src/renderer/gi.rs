@@ -78,6 +78,25 @@ impl Renderer {
     /// Whether the GI has something to sample this frame.
     pub fn gi_shading(&self) -> bool { self.gi.shader_features().0 }
 
+    /// Queue GPU-confirmed valid/invalid/untraced probe counts. Call after
+    /// drawing the scene, while its parent pass is active. This adds one tiny
+    /// reduction pass and an asynchronous readback; it never waits for the GPU.
+    /// Returns false when a request is already in flight; a deferred reduction
+    /// is reattached on this draw. Poll before retrying on a later draw/report.
+    /// Backpressure should be retried on a later report/draw, not a tight loop.
+    pub fn request_gi_probe_counts(&mut self, cx: &mut CxDraw) -> Result<bool, makepad_platform::ReadbackError> {
+        self.gi.request_probe_counts(cx)
+    }
+
+    /// Consume only GI's readback ticket, on Event::Signal or the report
+    /// cadence. None means no completed sample. On success `gi_stats()` also
+    /// holds the counts and their request frame; the empty-field guard reports
+    /// once if that sample followed a full sweep in a scene with geometry.
+    /// A reset discards old-generation results. No redraw or GPU wait is needed.
+    pub fn poll_gi_probe_counts(&mut self, cx: &mut Cx) -> Result<Option<crate::GiStats>, makepad_platform::ReadbackError> {
+        self.gi.poll_probe_counts(cx)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn run_fast_gi(
         &mut self,
@@ -122,9 +141,18 @@ impl Renderer {
         if self.gi.stats.batch>0 {if let Some(parent)=self.gi.relight_pass(){self.clustered.parent_shadows(cx.cx,parent);}}
         stats.gi=self.gi.stats;
         if crate::fast_gi::gi_stats_enabled() && self.clustered_frames%120==0 {
+            if let Err(error)=self.poll_gi_probe_counts(cx.cx.cx) {
+                error!("fast GI: probe count readback failed: {error}");
+            }
+            if self.gi.mode()==crate::GiMode::Fast {
+                if let Err(error)=self.request_gi_probe_counts(cx.cx) {
+                    error!("fast GI: probe count request failed: {error}");
+                }
+            }
+            stats.gi=self.gi.stats;
             let g=&stats.gi;
-            log!("fast GI: {} instances / {} triangles ({} outside region), {} probes ({} pending), batch {} of budget {}, {} lights, {}us snapshot, {}us encode ({} static bytes), voxels {} jobs / {} bricks / {:.1}ms, GPU [trace, relight, gather, scatter] mean {:?}ms max120 {:?}ms, sum mean {:.3}ms max120 {:.3}ms max600 {:.3}ms aim {:.3}ms, AO {:.3}ms, {} bytes resident, {} uploaded; building={} unsupported={}",
-                g.instances,g.triangles,g.omitted_instances,g.probes,g.pending_probes,g.batch,g.budget,g.selected_lights,g.snapshot_us,g.encode_us,g.static_encode_bytes,g.voxel_jobs,g.voxel_bricks,g.voxel_ms,g.gpu_ms.map(|v|(v*1000.0).round()/1000.0),g.gpu_peak_ms.map(|v|(v*1000.0).round()/1000.0),g.frame_sum_mean,g.frame_sum_max120,g.frame_sum_max,g.gpu_aim_ms,g.ao_gpu_ms,g.resident_bytes,g.uploads_bytes,g.building,g.rejected_scene);
+            log!("fast GI: {} instances / {} triangles ({} outside region), {} probes ({} pending), {} valid / {} invalid / {} untraced (count request frame {:?}), batch {} of budget {}, {} lights, {}us snapshot, {}us encode ({} static bytes), voxels {} jobs / {} bricks / {:.1}ms, GPU [trace, relight, gather, scatter] mean {:?}ms max120 {:?}ms, sum mean {:.3}ms max120 {:.3}ms max600 {:.3}ms aim {:.3}ms, AO {:.3}ms, {} bytes resident, {} uploaded; building={} unsupported={}",
+                g.instances,g.triangles,g.omitted_instances,g.probes,g.pending_probes,g.valid_probes,g.invalid_probes,g.untraced_probes,g.probe_counts_frame,g.batch,g.budget,g.selected_lights,g.snapshot_us,g.encode_us,g.static_encode_bytes,g.voxel_jobs,g.voxel_bricks,g.voxel_ms,g.gpu_ms.map(|v|(v*1000.0).round()/1000.0),g.gpu_peak_ms.map(|v|(v*1000.0).round()/1000.0),g.frame_sum_mean,g.frame_sum_max120,g.frame_sum_max,g.gpu_aim_ms,g.ao_gpu_ms,g.resident_bytes,g.uploads_bytes,g.building,g.rejected_scene);
         }
     }
 }

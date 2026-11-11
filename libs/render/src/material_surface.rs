@@ -329,34 +329,22 @@ pub fn prepared_texture_upload_stats() -> [usize; 5] {
 /// A texture from an encoded source image in the form this device samples:
 /// with a compression target, a stored Basis form keyed by the source bytes
 /// is used without decoding at all; otherwise `make` decodes and mips it
-/// (and a large result is encoded to Basis in the background for next time).
-pub fn device_texture_from_source(source: &[u8], semantic: PixelSemantic, make: impl FnOnce() -> Result<PreparedTexture, String>) -> Result<PreparedTexture, String> {
+/// (and a large result is encoded to Basis through `encode` for next time).
+/// Runs on a preparation worker and returns after encoding finishes.
+pub fn device_texture_from_source(source: &[u8], semantic: PixelSemantic, make: impl FnOnce() -> Result<PreparedTexture, String>, encode: &(dyn Fn(usize, &(dyn Fn(usize) + Sync)) + Sync)) -> Result<PreparedTexture, String> {
     let (Some(target), Some(store)) = (compressed_texture_target(), prepared_texture_store()) else { return make() };
     // Small images are not compressed: no store lookup for them.
     if source.len() < PREPARED_TEXTURE_CACHE_MIN_SOURCE_BYTES { return make(); }
     let key = basis_texture_key(source, semantic);
     if let Some(texture) = PreparedTexture::from_store(store, key, target, key) { return Ok(texture); }
     let texture = make()?;
-    if texture.width * texture.height >= COMPRESS_MIN_TEXELS { encode_basis_later(key, &texture); }
+    if texture.width * texture.height >= COMPRESS_MIN_TEXELS { encode_basis_later(key, &texture, encode); }
     Ok(texture)
 }
 
-/// One background thread encodes new images to Basis and stores them, so a
-/// first load never waits on the encoder. The queue is bounded: when full, an
-/// image is simply encoded on a later load instead.
-pub(crate) fn encode_basis_later(key: u64, texture: &PreparedTexture) {
-    use std::sync::mpsc::{sync_channel, SyncSender};
-    static QUEUE: std::sync::OnceLock<SyncSender<(u64, PreparedTexture)>> = std::sync::OnceLock::new();
-    let queue = QUEUE.get_or_init(|| {
-        let (sender, receiver) = sync_channel::<(u64, PreparedTexture)>(32);
-        let _ = std::thread::Builder::new().name("basis-encode".into()).spawn(move || {
-            while let Ok((key, texture)) = receiver.recv() {
-                if let (Some(store), Some(ktx)) = (prepared_texture_store(), texture.to_basis(false)) { store.put_basis(key, &ktx); }
-            }
-        });
-        sender
-    });
-    let _ = queue.try_send((key, texture.clone()));
+/// Encode and store a Basis image for later loads using the supplied executor.
+pub(crate) fn encode_basis_later(key: u64, texture: &PreparedTexture, encode: &(dyn Fn(usize, &(dyn Fn(usize) + Sync)) + Sync)) {
+    if let (Some(store), Some(ktx)) = (prepared_texture_store(), texture.to_basis(false, encode)) { store.put_basis(key, &ktx); }
 }
 
 static COMPRESSED_TARGET: std::sync::OnceLock<Option<CompressedTextureFormat>> = std::sync::OnceLock::new();
@@ -499,28 +487,26 @@ impl PreparedTexture {
         store.get_basis(basis_key).and_then(|ktx|Self::from_basis(&ktx,target,hash))
     }
     /// Encode this RGBA chain to Basis/UASTC (KTX2 bytes, one level per mip).
-    pub fn to_basis(&self,srgb:bool)->Option<Vec<u8>>{
-        // Background work: Fast (about 1 dB under Default, 4x quicker) on a
-        // quarter of the cores, so a 4k sky is ready within seconds.
-        let threads=std::thread::available_parallelism().map_or(1,|n|(n.get()/4).max(1));
-        self.to_uastc(srgb,makepad_texcomp::uastc::Quality::Fast,threads).ok()?.to_ktx2().ok()
+    pub fn to_basis(&self,srgb:bool,encode: &(dyn Fn(usize, &(dyn Fn(usize) + Sync)) + Sync))->Option<Vec<u8>>{
+        // Fast (about 1 dB under Default, 4x quicker), using the caller's executor.
+        self.to_uastc(srgb,makepad_texcomp::uastc::Quality::Fast,encode).ok()?.to_ktx2().ok()
     }
     /// This chain's red and green (a normal map's X and Y) as a BC5 KTX2 with
-    /// `content_id`, encoded on `threads` cores (builders).
-    pub fn to_bc5_ktx2(&self,content_id:u64,threads:usize)->Result<Vec<u8>,String>{
+    /// `content_id`, encoded through the supplied executor.
+    pub fn to_bc5_ktx2(&self,content_id:u64,encode: &(dyn Fn(usize, &(dyn Fn(usize) + Sync)) + Sync))->Result<Vec<u8>,String>{
         let (mut w,mut h,mut offset)=(self.width,self.height,0usize);
         let mut levels=Vec::new();
         for _ in 0..=self.max_level {
             let texels=self.data.get(offset..offset+w*h).ok_or("mip chain shorter than its levels")?;
             let rgba:Vec<u8>=texels.iter().flat_map(|t|[(t>>16) as u8,(t>>8) as u8,0,255]).collect();
-            levels.push((w as u32,h as u32,makepad_texcomp::rgtc::encode_bc5_image(&rgba,w as u32,h as u32,threads.max(1))));
+            levels.push((w as u32,h as u32,makepad_texcomp::rgtc::encode_bc5_image(&rgba,w as u32,h as u32,encode)));
             offset+=w*h;w=(w/2).max(1);h=(h/2).max(1);
         }
         let refs:Vec<(u32,u32,&[u8])>=levels.iter().map(|(w,h,d)|(*w,*h,d.as_slice())).collect();
         makepad_texcomp::rgtc::bc5_to_ktx2(&refs,Some(content_id))
     }
-    /// This RGBA chain as UASTC at a chosen quality on `threads` cores (builders).
-    pub fn to_uastc(&self,srgb:bool,quality:makepad_texcomp::uastc::Quality,threads:usize)->Result<makepad_texcomp::basis::UastcTexture,String>{
+    /// This RGBA chain as UASTC at a chosen quality through the supplied executor.
+    pub fn to_uastc(&self,srgb:bool,quality:makepad_texcomp::uastc::Quality,encode: &(dyn Fn(usize, &(dyn Fn(usize) + Sync)) + Sync))->Result<makepad_texcomp::basis::UastcTexture,String>{
         let (mut w,mut h,mut offset)=(self.width,self.height,0usize);
         let mut levels=Vec::new();
         for _ in 0..=self.max_level {
@@ -532,7 +518,7 @@ impl PreparedTexture {
             offset+=n;w=(w/2).max(1);h=(h/2).max(1);
         }
         let refs:Vec<(u32,u32,&[u8])>=levels.iter().map(|(w,h,d)|(*w,*h,d.as_slice())).collect();
-        makepad_texcomp::basis::encode_mips(&refs,quality,srgb,threads.max(1))
+        makepad_texcomp::basis::encode_mips(&refs,quality,srgb,encode)
     }
 }
 

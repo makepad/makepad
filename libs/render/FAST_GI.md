@@ -18,6 +18,45 @@ world starts with `gi: None`, and a script reload clears it for the game to
 redeclare. Ctrl+Shift+F7 cycles display-only diagnostics while the world has GI
 enabled.
 
+## Emission in the voxel field
+
+The voxel path snapshots each model draw layer as its own GI instance, with
+that layer's albedo, emission and diffuse share. The material loader has
+already applied `emissive_strength`; the snapshot does not apply it again.
+Non-emissive layers, such as a lamp's shade, keep zero emission.
+
+On the voxel worker, each world-space triangle is clipped to the voxel box
+and contributes its area inside that box. Albedo (including tint and diffuse
+share) and normals are area-weighted means, so subdividing a surface into more
+triangles does not give it more weight. For a voxel edge `v` and total
+emissive area `Ae`, stored emission is the area-weighted mean of the emitting
+surfaces' radiance multiplied by `min(Ae / (v * v), 1)`. Non-emissive surfaces
+participate in the albedo mean but do not dilute emissive coverage. A
+0.2 × 0.2 m emitting quad in a 1 m voxel therefore supplies 1/25 of its
+material emission; a full-face panel retains full emission. Triangles that
+span voxels contribute only their clipped area to each. Overlapping emitting
+surfaces saturate at full coverage, rather than adding unbounded radiance.
+
+The coverage-weighted emission is encoded as hue plus `m/(1+m)` intensity.
+The trace caches it at a voxel hit; relighting decodes it, applies the existing
+renderer emission gain, and adds it to reflected diffuse light:
+`albedo * light * gi_bounce + emission`. Thus coverage scales the light entering
+the probes without changing material strength or adding shader work. The
+8-bit intensity encoding introduces quantization, especially for dim sources.
+
+This is a scalar surface-coverage approximation, not an exact directional
+projection or visibility union: occupied cells remain conservative blockers
+and use averaged normals. Signed-distance fields do not supply clipped
+triangle areas and retain the full-cell coverage approximation. Each cascade
+uses its own voxel face area; voxel edges are one quarter of probe spacing
+(1 m probe spacing means 0.25 m voxels in the finest cascade).
+
+Area clipping and accumulation run only on the worker when bricks are built
+or rebuilt after scene edits or clipmap scrolling. They add no per-frame UI
+work, GPU reads, textures or ray slots. Clipping uses fixed stack storage
+(a triangle clipped by six planes has at most nine vertices); the worker's
+accumulator adds one `f32` per voxel for emissive coverage.
+
 ## Work and quality controls
 
 ```rust
@@ -253,8 +292,9 @@ binding; it is not a requirement for 17 fragment texture units.
 - Doors, cars and characters use conservative box proxies. Animated mesh
   silhouettes and soft-body deformation are not exact GI geometry.
 - Only local lights with allocated realtime shadows contribute reflected
-  light; other direct lights remain direct-only. Sun bounce outside known
-  CSM coverage is suppressed. Small emitters may be missed by sparse rays.
+  light; other direct lights remain direct-only. Sun relighting traces
+  visibility through the voxel clipmap, independently of CSM coverage.
+  Small emitters may be missed by sparse rays.
 - Non-box static geometry and boxes beyond the local exact budget still use
   coarse distance moments, not exact receiver rays. Blocker tests enforce
   visibility to admitted static boxes and moving OBB proxies, not exact animated
@@ -269,15 +309,52 @@ binding; it is not a requirement for 17 fragment texture units.
 ## Diagnostics
 
 `Renderer::gi_stats()` exposes preparation time, scheduled trace/relight
-rays, memory estimates, selected lights, mover overflow, queue/build state,
-and asynchronous GPU pass timings. `ready_probes` counts updated slots, not
-GPU-confirmed valid probes. Memory estimates exclude driver allocations.
-`set_gi_debug(GiDebug::...)` provides the diagnostic views to other hosts. Probe-state
-colours: green valid, red solid/backface-invalid, magenta traversal exhausted,
-gray uninitialized. Placement statistics count CPU classifications only; GPU
-relighting can invalidate additional probes inside movers. Statistics also
-include placement time, relocated/inactive counts, retained CPU BVH bytes,
-traversal cap, cells with blockers, and full-list overflow cells.
+rays, memory estimates, selected lights, queue/build state, and asynchronous
+GPU pass timings. `probes` is the allocated slot count and `pending_probes`
+is scheduler work, neither evidence that the GPU wrote the field.
+`valid_probes`, `invalid_probes`, and `untraced_probes` count the field's actual
+info-texel state: respectively positive, negative, and zero. Positive state
+includes probes whose confidence is still ramping up. Memory estimates exclude
+driver allocations.
+
+Counts are sampled only every 120 frames with `MAKEPAD_GI_STATS` set, or when
+a tool calls `Renderer::request_gi_probe_counts` after drawing the scene while
+the parent pass is still active. `Renderer::poll_gi_probe_counts` consumes the
+result without blocking (on `Event::Signal`, or at the next stats cadence).
+It returns the updated `GiStats`; `gi_stats()` also retains the last sample.
+`probe_counts_frame: None` means counts are unavailable, not an empty field.
+The periodic line prints all three counts immediately after probes/pending,
+with their request frame (not a GPU submission tag). Because readback is
+asynchronous, the first line has no sample and later lines normally describe
+the previous reporting cadence. If shader compilation deferred the reduction,
+a later request reattaches it; the periodic report retries on its next cadence.
+Failed readbacks log an error and do not publish fabricated zero counts.
+
+The diagnostic pass reads one info texel per probe and reduces to one UNORM8
+texel per cascade (two packed 16-bit counts; untraced is the remainder).
+The existing texture-ticket path reads back 4 bytes per cascade, at most
+12 bytes; it cannot read the float atlas directly. At the default grid this
+is 6,144 field reads in one extra pass per sample, plus a scheduler scan to
+establish sweep coverage. Pass resources are lazy and reused. Readback staging,
+results, and API bookkeeping may allocate on that cadence; there is no new
+per-frame scan, readback polling, GPU pass, or allocation.
+
+Zero valid means no probe can contribute: receivers use their fallback. It is
+expected during warm-up. Once GI is on, geometry is present, and **every slot
+in every cascade has been issued at least once with no pending work**, a
+completed sample with zero valid logs this ERROR once per field lifetime:
+`fast GI: no valid probes after a full sweep: the field is empty`.
+Eligibility is captured with the sample, so a warm-up result cannot fail
+against a later scheduler state. Settle mode's deliberately unissued slots
+do not satisfy a full sweep. The periodic GI report calls this guard through
+the readback poll; explicit tool polls run it too. This is a **runtime report,
+not a failing GPU test**: the render crate's tests do not render on a real
+backend. Its post-land GPU bucket membership follows HAL dependencies and
+does not provide such a rendering test. With logging disabled, tools must
+request/poll counts to run the guard.
+
+`set_gi_debug(GiDebug::...)` provides the diagnostic views to other hosts.
+Probe-state colours: green valid, orange solid/backface-invalid, gray untraced.
 
 `GiConfig::gpu_budget_ms` is GI's own GPU share, default 2.0 ms. The batch
 controller targets 80% (1.6 ms at the default), leaving headroom for cost

@@ -37,6 +37,8 @@ pub(crate) mod voxels;
 mod cascades;
 #[path = "fast_gi/work.rs"]
 mod work;
+#[path = "fast_gi/diagnostics.rs"]
+mod diagnostics;
 use work::{BatchController, FrameTimes, ScatterCache, StageTimes};
 pub use shaders::script_mod;
 pub(crate) use shaders::{DrawGiTrace, DrawGiRelight, DrawGiGather, DrawGiScatter};
@@ -155,6 +157,13 @@ pub struct GiStats {
     pub probes: usize,
     /// Probes waiting for a first trace or an edit re-trace.
     pub pending_probes: usize,
+    /// GPU-confirmed state counts from `probe_counts_frame`, not scheduled work.
+    pub valid_probes: usize,
+    pub invalid_probes: usize,
+    pub untraced_probes: usize,
+    /// GI frame that requested the last completed count (not a GPU submission
+    /// tag). None means counts are unavailable, not a measured zero.
+    pub probe_counts_frame: Option<u64>,
     pub batch: usize,
     pub budget: usize,
     pub traced_rays: usize,
@@ -256,6 +265,7 @@ impl MeshCache {
 pub(crate) struct FastGi {
     mode:GiMode, config:GiConfig, debug:GiDebug, linear_albedo:bool, emission_gain:f32,
     gpu:Option<Gpu>,
+    probe_counts:diagnostics::ProbeCounts,
     /// Textures of a released GPU state, their storage retired at the next frame
     /// (`flush_retired`): off holds no GPU memory.
     retired:Vec<Texture>,
@@ -287,7 +297,7 @@ pub(crate) struct FastGi {
     pub stats:GiStats,
 }
 impl Default for FastGi {
-    fn default()->Self{Self{mode:GiMode::Off,config:GiConfig::default(),debug:GiDebug::Off,linear_albedo:false,emission_gain:1.0,gpu:None,retired:Vec::new(),screen:None,voxels:None,voxel_job:None,generation:0,
+    fn default()->Self{Self{mode:GiMode::Off,config:GiConfig::default(),debug:GiDebug::Off,linear_albedo:false,emission_gain:1.0,gpu:None,probe_counts:diagnostics::ProbeCounts::default(),retired:Vec::new(),screen:None,voxels:None,voxel_job:None,generation:0,
         scene_key:None,scene_center:None,pending_scene:None,scene_bounds:Default::default(),has_scene:false,requested:Vec::new(),committed:Vec::new(),cascades:Vec::new(),
         controller:BatchController::default(),frame_times:FrameTimes::default(),batch:Vec::new(),frame:0,light_key:None,settled:false,scene_stale:false,meshes:MeshCache::default(),ao:ScreenAo::default(),stats:GiStats::default()}}
 }
@@ -322,6 +332,7 @@ impl FastGi {
     pub(crate) fn release(&mut self){
         if let Some(job)=self.voxel_job.take(){job.cancel();}
         self.generation=self.generation.wrapping_add(1);
+        self.probe_counts.release(&mut self.retired);
         if let Some(gpu)=self.gpu.take() {
             self.retired.extend([gpu.field]);
             self.retired.extend(gpu.vox);
@@ -575,7 +586,7 @@ impl FastGi {
             let gpu=self.gpu.as_mut().unwrap();
             let mut data=gpu.batch.take_vec_f32(cx.cx);
             for (i,b) in batch.iter().enumerate() {
-                data[i*8..i*8+8].copy_from_slice(&[b.slot as f32,b.cascade as f32,b.hysteresis,0.0,b.cell[0]as f32,b.cell[1]as f32,b.cell[2]as f32,0.0]);
+                data[i*8..i*8+8].copy_from_slice(&work::batch_row(b));
             }
             gpu.batch.put_back_vec_f32(cx.cx,data,Some(RectUsize::new(PointUsize::new(0,0),SizeUsize::new(2,rows))));
         }
@@ -686,7 +697,8 @@ impl FastGi {
                         }
                         cx2.end_many_instances(many);
                     }
-                    cx2.add_retained_instances_count(&mut gpu.scatter.quad.draw_vars,gpu.scatter_cache.instances.as_ref().unwrap(),rows*3);
+                    let (instances,count)=gpu.scatter_cache.batch(rows);
+                    cx2.add_retained_instances_count(&mut gpu.scatter.quad.draw_vars,instances,count);
                 },
             }
             cx2.end_pass_sized_turtle();stage.list.end(&mut cx2);cx2.end_pass(&stage.pass);

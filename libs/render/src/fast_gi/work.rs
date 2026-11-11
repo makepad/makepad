@@ -117,6 +117,12 @@ impl BatchController {
     }
 }
 
+/// Two RGBA texels: destination slot/cascade/history, then the world cell.
+pub(super) fn batch_row(item: &BatchItem) -> [f32; 8] {
+    [item.slot as f32, item.cascade as f32, item.hysteresis, 0.0,
+        item.cell[0] as f32, item.cell[1] as f32, item.cell[2] as f32, 0.0]
+}
+
 /// Three immutable records per batch row. Destination slots come from the
 /// batch texture in the vertex shader, so changing the list uploads no
 /// scatter instances. Rebuild only for capacity or shader-layout changes.
@@ -126,6 +132,11 @@ pub(super) struct ScatterCache {
 }
 
 impl ScatterCache {
+    /// Submit only the live prefix; stale rows above it must not touch the field.
+    pub fn batch(&self, rows: usize) -> (&makepad_platform::retained_instances::RetainedInstances, usize) {
+        (self.instances.as_ref().expect("prepared scatter instances"), rows * 3)
+    }
+
     pub fn prepare(&mut self, draw: &mut DrawGiScatter, capacity: usize) -> usize {
         let slots = draw.quad.draw_vars.as_slice().len();
         if self.instances.as_ref().is_some_and(|r| r.slots() == slots && r.count() == capacity * 3) {

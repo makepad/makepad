@@ -355,25 +355,23 @@ pub struct DrivenPartInfo<'a> {
     pub rest_transform: Mat4f,
 }
 
-/// Stable FNV-1a signature for the subset of a placed-model frame that can
-/// invalidate static derived state. `DefaultHasher` is intentionally not
-/// used: its algorithm is not a persistence/identity contract.
-/// Longest world-space side, in metres, at which a static that owns no AO
-/// layout stops being treated as a shadow caster in the bake.
+/// Maximum world-space span, in metres, for the fallback sun-depth caster
+/// classification of a static without its own AO layout or a host answer.
 ///
-/// A prop casts onto the world around it; a whole IMPORTED LEVEL is the world
-/// around it, so feeding one into the sun-depth passes shadows its own
-/// interior and every room goes black. 40 m is comfortably above any prop
-/// (the biggest kit building measures ~20) and far below a map.
+/// This guards against one-sided map shells shadowing their own interiors
+/// when the host does not know what a model is. Width does not determine
+/// solidity: a host that knows a model contains closed solids answers true
+/// through [`Renderer::set_model_casts_shadow`], regardless of its span.
 pub(super) const CASTER_ONLY_MAX_SPAN: f32 = 40.0;
 
 /// Does a static WITHOUT its own AO layout join the bake's sun-depth passes?
 ///
 /// `explicit` is the caller's own answer for this model id
-/// ([`Renderer::set_model_casts_shadow`]) and always wins — a host that knows
-/// it is loading a world says so, and no heuristic overrules it. Otherwise a
-/// prelit model (its light is already in COLOR_0, so the sun does not reach
-/// it) and anything level-sized stay out.
+/// ([`Renderer::set_model_casts_shadow`]) and always wins. A host that knows
+/// the model contains closed solids answers true, even above the span limit;
+/// one that knows it is a one-sided map shell can answer false. Only when the
+/// host has no answer do prelit models (light already in COLOR_0) and models
+/// wider than [`CASTER_ONLY_MAX_SPAN`] stay out of the sun-depth passes.
 pub(super) fn casts_as_caster_only(explicit: Option<bool>, prelit: bool, min: Vec3f, max: Vec3f) -> bool {
     if let Some(answer) = explicit {
         return answer;

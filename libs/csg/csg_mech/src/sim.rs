@@ -427,6 +427,10 @@ pub struct Assembly {
     /// Body pairs designed to interlock (a weave's links). A weave whose links each hold at most two others
     /// is a chain; one whose links hold more is mail, which the dynamics engine steps at fewer substeps.
     pub interlocks: Vec<(usize, usize)>,
+    /// A soft layer for contacts between distance fields (mm; 0: none, full stiffness from first touch): their
+    /// stiffness rises to full over this depth. A sim on grids known to [`crate::GAP_TOL`] sets that much, so a
+    /// resting part sits about a micron into what holds it and a read's error does not take its contacts away.
+    pub contact_layer: f64,
 }
 
 impl Assembly {

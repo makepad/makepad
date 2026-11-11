@@ -1,4 +1,4 @@
-//! Cascaded probe-GI kernels: fragment passes only (no compute, no readback).
+//! Cascaded probe-GI kernels: fragment passes only. Diagnostic readback is opt-in.
 //!
 //! Frame: TRACE (per batch probe: place it off geometry, 64 rotated rays
 //! through the voxel clipmap) -> RELIGHT (shade each hit: sun through the
@@ -591,6 +591,8 @@ script_mod! {
             if self.gi_relight.y>0.5 {albedo=srgb_to_linear(albedo)}
             let n=normalize(self.gi_unpack(hit.z)*2.0-vec3(1.0,1.0,1.0))
             // Emission: 5-bit hue per channel + 8-bit intensity m/(1+m).
+            // The voxel worker already weights radiance by emissive surface
+            // coverage. Do not restore full material emission at this hit.
             // The linear lane decodes the hue like an albedo and applies the
             // lanes' glow gain (gi_relight.z).
             let level=floor(hit.w/32768.0)
@@ -778,7 +780,13 @@ script_mod! {
                 if self.gi_tile.w>1.5 {offset=self.gi_atlas.w*18.0}
                 p=vec2(x*w,base+offset+y*w)
             }
-            self.vertex_pos=self.clip_and_transform_vertex(p,self.rect_size)
+            // Scatter records bypass turtle alignment, which normally fills
+            // DrawQuad.draw_clip. Its cached zero clip would collapse every
+            // tile (including clears). These are atlas pixels, not widgets.
+            self.pos=self.geom.pos
+            let vertex=p+self.geom.pos*self.rect_size
+            self.world=self.draw_list.view_transform*vec4(vertex.x,vertex.y,self.draw_depth+self.draw_call.zbias,1.0)
+            self.vertex_pos=self.draw_pass.camera_projection*(self.draw_pass.camera_view*self.world)
         }
         gi_update: texture_2d(float)
         gi_update_size: uniform(vec2(165.0,1.0))
@@ -791,6 +799,38 @@ script_mod! {
         fragment: fn(){self.fb0=self.pixel()}
     }
 
+    // Diagnostic cadence only. One pixel per cascade, two little-endian
+    // u16 counts (valid RG, invalid BA); untraced is the remainder. This
+    // fits the existing UNORM8 ticket readback without copying the atlas.
+    mod.draw.DrawGiProbeCounts = set_type_default() do #(DrawGiProbeCounts::script_shader(vm)) {
+        ..mod.draw.DrawQuad,
+        alpha_blend: false
+        color_format: @Bgra8NoBlend
+        gi_field: texture_2d(float)
+        gi_atlas: uniform(vec4(640.0,1824.0,64.0,32.0))
+        // probes per cascade, cascade count
+        gi_count_size: uniform(vec2(2048.0,3.0))
+        pixel: fn() {
+            let k=min(floor(self.pos.x*self.gi_count_size.y),self.gi_count_size.y-1.0)
+            var valid=0.0
+            var invalid=0.0
+            var slot=0.0
+            loop {
+                if slot>=self.gi_count_size.x {break}
+                let x=slot-floor(slot/self.gi_atlas.z)*self.gi_atlas.z
+                let y=k*self.gi_atlas.w*19.0+self.gi_atlas.w*18.0+floor(slot/self.gi_atlas.z)
+                let state=self.gi_field.sample_nearest((vec2(x,y)+vec2(0.5,0.5))/self.gi_atlas.xy,0.0).w
+                if state>0.0 {valid=valid+1.0}
+                if state<0.0 {invalid=invalid+1.0}
+                slot=slot+1.0
+            }
+            let high=floor(vec2(valid,invalid)/256.0)
+            let low=vec2(valid,invalid)-high*256.0
+            return vec4(low.x,high.x,low.y,high.y)/255.0
+        }
+        fragment: fn(){self.fb0=self.pixel()}
+    }
+
     mod.draw.FastGiScreen = FastGiScreen
     mod.draw.FastGiSampling = FastGiSampling
 }
@@ -798,3 +838,4 @@ script_mod! {
 #[derive(Script,ScriptHook)] #[repr(C)] pub struct DrawGiRelight {#[deref] pub quad:DrawQuad}
 #[derive(Script,ScriptHook)] #[repr(C)] pub struct DrawGiGather {#[deref] pub quad:DrawQuad}
 #[derive(Script,ScriptHook)] #[repr(C)] pub struct DrawGiScatter {#[deref] pub quad:DrawQuad, #[live(vec4(0.0,0.0,1.0,0.0))] pub gi_tile:Vec4f}
+#[derive(Script,ScriptHook)] #[repr(C)] pub struct DrawGiProbeCounts {#[deref] pub quad:DrawQuad}

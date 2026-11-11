@@ -86,6 +86,11 @@ impl Cascade {
 
     pub fn count(&self) -> usize { self.queued.len() }
     pub fn pending(&self) -> usize { self.queue.len() }
+    /// Diagnostic cadence only: an empty queue alone also describes a new
+    /// cascade, or settle mode's unneeded slots that were never issued.
+    pub fn full_sweep_issued(&self) -> bool {
+        self.origin.is_some() && self.pending() == 0 && self.updates.iter().all(|&n| n > 0)
+    }
     pub fn slot(&self, cell: [i32; 3]) -> usize {
         let m = [0, 1, 2].map(|a| cell[a].rem_euclid(self.grid[a] as i32) as usize);
         m[0] + self.grid[0] * (m[1] + self.grid[1] * m[2])

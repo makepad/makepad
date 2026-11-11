@@ -38,6 +38,7 @@ pub mod light_grid;
 pub mod lightmap;
 pub mod model;
 pub mod material_surface;
+pub mod texture_compression;
 pub mod texture_pack;
 pub use makepad_texcomp;
 pub mod renderer;

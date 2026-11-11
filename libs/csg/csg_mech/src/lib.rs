@@ -626,7 +626,7 @@ pub fn assembly(plan: &Plan, parts: &[FinalPart], checks: &[JointCheck], fill: f
             friction: sim::Friction { mu, radius: a.hole.map_or(0.0, |h| h.1), torque: 0.0 },
         })
         .collect();
-    sim::Assembly { bodies, joints, anchors, up: plan.profile.up, sleep: sim::SLEEP_SPEED, workers: 1, contact_margin: 0.0, max_speed: 0.0, contact_hertz: 0.0, substeps: sim::JOINT_SUBSTEPS, ball: None, shake_about: [0.0; 3], shake_tempo: 0.0, lift: 0.0, strings: Vec::new(), interlocks: Vec::new() }
+    sim::Assembly { bodies, joints, anchors, up: plan.profile.up, sleep: sim::SLEEP_SPEED, workers: 1, contact_margin: 0.0, max_speed: 0.0, contact_hertz: 0.0, substeps: sim::JOINT_SUBSTEPS, ball: None, shake_about: [0.0; 3], shake_tempo: 0.0, lift: 0.0, strings: Vec::new(), interlocks: Vec::new(), contact_layer: 0.0 }
 }
 
 

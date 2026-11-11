@@ -588,6 +588,192 @@ impl MeshField {
         let d = self.unsigned(p);
         if self.winding(p) > 0.5 { -d } else { d }
     }
+
+    /// [`MeshField::signed_many`] at points that lie close together (a brick's), the same values,
+    /// the per-point work of a search and a winding number replaced by one gather. An anchor off
+    /// the points' box centre takes one search and one winding number, and the triangles within
+    /// its distance plus twice its farthest point's are gathered: they hold every point's nearest
+    /// triangle and every triangle a segment from the anchor to a point crosses. Each point's
+    /// distance is its nearest of those; its sign is the anchor's where their empty balls overlap,
+    /// else the anchor's winding number plus the signed crossings of the segment between them. A
+    /// closed mesh's winding number is a whole number off it, and changes only across a triangle,
+    /// by one. A mesh that is not closed, and a box with more triangles near it than
+    /// [`CROWDED`], take [`MeshField::signed_many`]; a point whose segment passes through an edge
+    /// or a vertex (exactly, by the exact orientation), or that lies on a triangle off its
+    /// distance's zero, takes its own winding number.
+    pub fn signed_in_box(&self, ps: &[V3]) -> Vec<f32> {
+        self.signed_in_box_by(ps, &mut |_| {})
+    }
+
+    /// [`MeshField::signed_in_box`], telling `route` each point's [`Route`] in their order.
+    pub fn signed_in_box_by(&self, ps: &[V3], route: &mut dyn FnMut(Route)) -> Vec<f32> {
+        let mut all = |r: Route| (0..ps.len()).for_each(|_| route(r));
+        if !self.watertight {
+            all(Route::Open);
+            return self.signed_many(ps);
+        }
+        if ps.is_empty() {
+            return Vec::new();
+        }
+        let (mut lo, mut hi) = (ps[0], ps[0]);
+        for p in ps {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        let c: V3 = std::array::from_fn(|k| lo[k] + (hi[k] - lo[k]) * ANCHOR[k]);
+        let far = ps.iter().map(|&p| len(sub(p, c))).fold(0.0f32, f32::max);
+        let dc = self.unsigned(c);
+        // the slack keeps the reach's own triangles inside the gather
+        let reach = (dc + 2.0 * far) * 1.0001 + 1e-6;
+        let mut near = Vec::new();
+        if !self.gather(c, reach, &mut near) {
+            all(Route::Crowded);
+            return self.signed_many(ps);
+        }
+        // A closed mesh's winding number is whole off it (its dipoles' error far under a half),
+        // and on it, where a triangle's share is a half by its zero's sign.
+        let whole = self.winding(c).round();
+        let v = |p: V3| Vec3d::new(p[0] as f64, p[1] as f64, p[2] as f64);
+        let cd = v(c);
+        let tris: Vec<Near> = near.iter().map(|&t| {
+            let (a, b, e) = self.tri(t);
+            let lo: V3 = std::array::from_fn(|k| a[k].min(b[k]).min(e[k]));
+            let hi: V3 = std::array::from_fn(|k| a[k].max(b[k]).max(e[k]));
+            Near { a, b, e, lo, hi, at: [v(a), v(b), v(e)], side: makepad_csg_math::orient3d(v(a), v(b), v(e), cd) }
+        }).collect();
+        ps.iter().map(|&p| {
+            let mut d = f32::INFINITY;
+            for t in &tris {
+                let e: V3 = std::array::from_fn(|k| (t.lo[k] - p[k]).max(0.0).max(p[k] - t.hi[k]));
+                if dot(e, e) < d * d {
+                    d = d.min(tri_dist(p, t.a, t.b, t.e));
+                }
+            }
+            // The balls round the anchor and the point hold no surface, and the segment between
+            // them lies in the two where they overlap. The margin keeps f32 rounding of the three
+            // lengths on the safe side; a point past it counts its crossings, exactly.
+            if len(sub(p, c)) < (d + dc) * (1.0 - 1e-5) {
+                route(Route::Ball);
+                return if whole > 0.5 { -d } else { d };
+            }
+            match crossings(cd, v(p), c, p, &tris) {
+                Some(n) => {
+                    route(Route::Crossed);
+                    if whole + n as f32 > 0.5 { -d } else { d }
+                }
+                None if d == 0.0 => {
+                    route(Route::On);
+                    0.0
+                }
+                None => {
+                    route(Route::Graze);
+                    if self.winding(p) > 0.5 { -d } else { d }
+                }
+            }
+        }).collect()
+    }
+
+    /// The triangles within `reach` of `c` into `out`, unless there are more than [`CROWDED`].
+    fn gather(&self, c: V3, reach: f32, out: &mut Vec<u32>) -> bool {
+        let mut stack = NodeStack::root();
+        while let Some(i) = stack.pop() {
+            let n = &self.nodes[i as usize];
+            if Self::box_dist2(n, c) > reach * reach {
+                continue;
+            }
+            if n.leaf {
+                for &t in &self.order[n.left as usize..n.right as usize] {
+                    let (a, b, e) = self.tri(t);
+                    if tri_dist(c, a, b, e) <= reach {
+                        out.push(t);
+                        if out.len() > CROWDED {
+                            return false;
+                        }
+                    }
+                }
+            } else {
+                stack.push(n.left);
+                stack.push(n.right);
+            }
+        }
+        true
+    }
+}
+
+/// Where [`MeshField::signed_in_box`] puts the anchor in its points' box: off the centre by
+/// unlike shares on each axis, so that it lies on none of a brick's lattice planes.
+const ANCHOR: [f32; 3] = [0.5309, 0.5147, 0.5071];
+
+/// The triangles near a box past which its points search the tree one by one: the cost
+/// crossover. Measured on a 25k-triangle gear's bricks at 0.2 (every list taken, both ways timed
+/// on the same points): a point costs 1 to 1.5 us on a list of up to 128 triangles, 2 to 8 up to
+/// 1024, 19 at 1025 to 2048 and 63 at 2049 to 4096, and 11 to 27 one by one; past 1024 its cost
+/// on the list more than doubles with the list, so the two meet near 2048.
+pub const CROWDED: usize = 2048;
+
+/// How a point of [`MeshField::signed_in_box`] got its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// The mesh is not closed: its winding number is no whole number, each point takes its own.
+    Open,
+    /// More than [`CROWDED`] triangles near the box: each point searches the tree.
+    Crowded,
+    /// Within the empty balls of the anchor and the point: the anchor's sign.
+    Ball,
+    /// The anchor's winding number and the segment's crossings.
+    Crossed,
+    /// On a triangle, its distance zero.
+    On,
+    /// The segment through an edge or a vertex, or the point on a triangle by a distance over
+    /// zero: its own winding number.
+    Graze,
+}
+
+/// How many [`Route`]s there are.
+pub const ROUTES: usize = 6;
+
+/// A triangle gathered for [`MeshField::signed_in_box`]: its corners, its box, its corners in f64
+/// and the side of its plane the anchor is on (`orient3d`'s sign).
+struct Near {
+    a: V3,
+    b: V3,
+    e: V3,
+    lo: V3,
+    hi: V3,
+    at: [Vec3d; 3],
+    side: f64,
+}
+
+/// The signed crossings of the segment from the anchor `c` to `p` through `tris`: one for each
+/// triangle it passes through from the front of its corners' turn to the back (as the winding
+/// number grows), less one for each the other way. None where it meets a triangle at an edge,
+/// a vertex, or an end (the anchor or the point in its plane, within it), which the exact
+/// orientation tells.
+fn crossings(c: Vec3d, p: Vec3d, cf: V3, pf: V3, tris: &[Near]) -> Option<i32> {
+    use makepad_csg_math::orient3d;
+    let (lo, hi): (V3, V3) = (std::array::from_fn(|k| cf[k].min(pf[k])), std::array::from_fn(|k| cf[k].max(pf[k])));
+    let mut n = 0;
+    for t in tris {
+        if (0..3).any(|k| t.hi[k] < lo[k] || t.lo[k] > hi[k]) {
+            continue;
+        }
+        let [a, b, e] = t.at;
+        let sp = orient3d(a, b, e, p);
+        if t.side > 0.0 && sp > 0.0 || t.side < 0.0 && sp < 0.0 {
+            continue;
+        }
+        let s = [orient3d(c, p, a, b), orient3d(c, p, b, e), orient3d(c, p, e, a)];
+        if s.iter().any(|&v| v > 0.0) && s.iter().any(|&v| v < 0.0) {
+            continue;
+        }
+        if t.side == 0.0 || sp == 0.0 || s.iter().any(|&v| v == 0.0) {
+            return None;
+        }
+        n += if t.side > 0.0 { 1 } else { -1 };
+    }
+    Some(n)
 }
 
 impl MeshField {
@@ -1044,6 +1230,67 @@ mod tests {
         assert!(f.signed([1.8, 0.0, 0.0]) < 0.0);
         assert!(f.signed([-0.8, 0.0, 0.0]) < 0.0);
         assert!(f.signed([2.5, 0.0, 0.0]) > 0.0);
+    }
+
+    /// A tetrahedron, each face turned so that the corner it faces is behind it.
+    fn tetra(corners: [V3; 4]) -> MeshData {
+        let behind = |i: usize, j: usize, k: usize, l: usize| {
+            let w = |p: V3| [p[0] as f64, p[1] as f64, p[2] as f64];
+            let (a, b, c, d) = (w(corners[i]), w(corners[j]), w(corners[k]), w(corners[l]));
+            let (u, v, x) = (f64s::sub(b, a), f64s::sub(c, a), f64s::sub(d, a));
+            f64s::dot(x, [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]) < 0.0
+        };
+        let faces = [[0, 1, 2, 3], [0, 3, 1, 2], [0, 2, 3, 1], [1, 3, 2, 0]];
+        let triangles = faces.iter().map(|&[i, j, k, l]| if behind(i, j, k, l) { [i as u32, j as u32, k as u32] } else { [i as u32, k as u32, j as u32] }).collect();
+        MeshData { positions: corners.to_vec(), triangles }
+    }
+
+    /// A box of points reads by `signed_in_box` as `signed_many` reads it, point by point, by every
+    /// route: about a cube (the anchor's ball, crossings, points on it), across two overlapping
+    /// cubes (crossings to a winding number of two), about a cup open at the top (open), round a
+    /// fine ball with all its triangles near the box (crowded), and along the line from the
+    /// anchor through a tetrahedron's edge and through another's vertex (grazes).
+    #[test]
+    fn a_box_of_points_reads_as_its_points_one_by_one_by_every_route() {
+        let names = ["open", "crowded", "ball", "crossed", "on", "graze"];
+        let mut taken = [0; ROUTES];
+        let mut check = |what: &str, m: MeshData, ps: &[V3]| {
+            let f = MeshField::new(m);
+            let mut by = Vec::new();
+            let got = f.signed_in_box_by(ps, &mut |r| by.push(r));
+            let want = f.signed_many(ps);
+            for (i, &p) in ps.iter().enumerate() {
+                let r = by[i];
+                assert!(got[i] == want[i], "{what}, the {} route: at {p:?} the box reads {}, the points one by one {}", names[r as usize], got[i], want[i]);
+                taken[r as usize] += 1;
+            }
+        };
+        let grid = |lo: V3, hi: V3, n: usize| -> Vec<V3> {
+            (0..n * n * n).map(|i| {
+                let q = [i % n, i / n % n, i / (n * n)];
+                std::array::from_fn(|k| lo[k] + (hi[k] - lo[k]) * q[k] as f32 / (n - 1) as f32)
+            }).collect()
+        };
+        check("cube", cube(false), &grid([-2.0; 3], [2.0; 3], 9));
+        let mut shells = cube(false);
+        let n = shells.positions.len() as u32;
+        let moved: Vec<V3> = shells.positions.iter().map(|p| [p[0] + 1.0, p[1], p[2]]).collect();
+        shells.positions.extend(moved);
+        let more: Vec<[u32; 3]> = shells.triangles.iter().map(|t| [t[0] + n, t[1] + n, t[2] + n]).collect();
+        shells.triangles.extend(more);
+        check("overlapping cubes", shells, &grid([-2.0, -2.0, -2.0], [3.0, 2.0, 2.0], 11));
+        check("open cup", cube(true), &grid([-2.0; 3], [2.0; 3], 5));
+        check("fine ball", ball(40, 80), &grid([-1.5; 3], [1.5; 3], 4));
+        // the anchor of the box -2..2, and a point along x from it: the line meets the edge at
+        // x = 0.5 of one tetrahedron, and the vertex at x = 0.5 of another
+        let (lo, hi) = ([-2.0f32; 3], [2.0f32; 3]);
+        let c: V3 = std::array::from_fn(|k| lo[k] + (hi[k] - lo[k]) * ANCHOR[k]);
+        let ps = [lo, hi, [1.5, c[1], c[2]]];
+        check("an edge on the line", tetra([[0.5, c[1], -1.0], [0.5, c[1], 1.0], [1.2, c[1] + 0.7, 0.0], [1.2, c[1] - 0.7, 0.0]]), &ps);
+        check("a vertex on the line", tetra([[0.5, c[1], c[2]], [1.2, c[1] + 0.7, c[2] - 0.5], [1.2, c[1] - 0.7, c[2] - 0.5], [1.2, c[1], c[2] + 0.8]]), &ps);
+        for (k, n) in taken.iter().enumerate() {
+            assert!(*n > 0, "no point took the {} route", names[k]);
+        }
     }
 
     #[test]

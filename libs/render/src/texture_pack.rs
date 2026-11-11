@@ -183,7 +183,7 @@ fn low_colour(png: &[u8], image: &ImageBuffer) -> bool {
 
 /// Build time: replace every embedded PNG of `glb` with its load-ready KTX2
 /// (decoded once, mipped for its material role, UASTC-encoded at `quality`
-/// on `threads` cores; normal maps BC5-encoded). Content ids are the PNG's prepared-texture key,
+/// through `encode`; normal maps BC5-encoded). Content ids are the PNG's prepared-texture key,
 /// computed here once. Images already KTX2, or not PNG, stay as they are,
 /// and so do pixel-art images: NEAREST-magnified or low-colour (see
 /// [`low_colour`]); those are small and decode cheaply.
@@ -191,13 +191,13 @@ fn low_colour(png: &[u8], image: &ImageBuffer) -> bool {
 /// One PNG in the load-ready form (pre-mipped UASTC, or BC5 for a normal
 /// map, as KTX2 carrying its content id). `None` when the image is low-colour
 /// and stays PNG.
-pub fn load_ready_image(png: &[u8], semantic: PixelSemantic, quality: makepad_texcomp::uastc::Quality, threads: usize) -> Result<Option<Vec<u8>>, String> {
+pub fn load_ready_image(png: &[u8], semantic: PixelSemantic, quality: makepad_texcomp::uastc::Quality, encode: &(dyn Fn(usize, &(dyn Fn(usize) + Sync)) + Sync)) -> Result<Option<Vec<u8>>, String> {
     let image = crate::renderer::decode_generated_png(png, 4096, 256 * 1024 * 1024)?;
     if low_colour(png, &image) { return Ok(None); }
     let prepared = PreparedTexture::prepare(image, semantic);
     let id = crate::material_surface::prepared_texture_key(png, semantic);
-    if matches!(semantic, PixelSemantic::Normal) { return prepared.to_bc5_ktx2(id, threads).map(Some); }
-    prepared.to_uastc(false, quality, threads)?.to_ktx2_with(Some(id)).map(Some)
+    if matches!(semantic, PixelSemantic::Normal) { return prepared.to_bc5_ktx2(id, encode).map(Some); }
+    prepared.to_uastc(false, quality, encode)?.to_ktx2_with(Some(id)).map(Some)
 }
 
 /// [`load_ready_image`], remembered by its exact inputs for this process.
@@ -205,9 +205,9 @@ pub fn load_ready_image(png: &[u8], semantic: PixelSemantic, quality: makepad_te
 /// a wood and a flagstone material) embed byte-identical pattern PNGs, and
 /// each would be re-encoded to UASTC per model. The key is the whole PNG
 /// plus semantic and quality, and the encode is deterministic, so a hit
-/// returns exactly the bytes the encode would. `threads` only splits the
-/// work. Bounded: past 96 MiB of entries the memo starts over.
-fn load_ready_image_memo(png: &[u8], semantic: PixelSemantic, quality: makepad_texcomp::uastc::Quality, threads: usize) -> Result<Option<Vec<u8>>, String> {
+/// returns exactly the bytes the encode would, regardless of executor order.
+/// Bounded: past 96 MiB of entries the memo starts over.
+fn load_ready_image_memo(png: &[u8], semantic: PixelSemantic, quality: makepad_texcomp::uastc::Quality, encode: &(dyn Fn(usize, &(dyn Fn(usize) + Sync)) + Sync)) -> Result<Option<Vec<u8>>, String> {
     use std::collections::HashMap;
     use std::sync::Mutex;
     type Key = (Vec<u8>, u8, u8);
@@ -216,7 +216,7 @@ fn load_ready_image_memo(png: &[u8], semantic: PixelSemantic, quality: makepad_t
     if let Some((map, _)) = MEMO.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         if let Some(hit) = map.get(&key) { return Ok(hit.clone()); }
     }
-    let out = load_ready_image(png, semantic, quality, threads)?;
+    let out = load_ready_image(png, semantic, quality, encode)?;
     let mut memo = MEMO.lock().unwrap_or_else(|e| e.into_inner());
     let (map, bytes) = memo.get_or_insert_with(|| (HashMap::new(), 0));
     let cost = key.0.len() + out.as_ref().map_or(0, |k| k.len());
@@ -226,7 +226,7 @@ fn load_ready_image_memo(png: &[u8], semantic: PixelSemantic, quality: makepad_t
     Ok(out)
 }
 
-pub fn embed_load_ready_images(glb: &[u8], quality: makepad_texcomp::uastc::Quality, threads: usize) -> Result<Option<Vec<u8>>, String> {
+pub fn embed_load_ready_images(glb: &[u8], quality: makepad_texcomp::uastc::Quality, encode: &(dyn Fn(usize, &(dyn Fn(usize) + Sync)) + Sync)) -> Result<Option<Vec<u8>>, String> {
     let parsed = makepad_gltf::parse_glb_bytes(glb).map_err(|e| format!("GLB: {e:?}"))?;
     let semantics = image_semantics(&parsed.document);
     let mut keep_png = nearest_images(&parsed.document);
@@ -238,7 +238,7 @@ pub fn embed_load_ready_images(glb: &[u8], quality: makepad_texcomp::uastc::Qual
     let out = makepad_gltf::embed_ktx2_images(glb, |index, png| {
         if failure.is_some() || !png.starts_with(b"\x89PNG") || keep_png.contains(&index) { return None; }
         let semantic = semantics.get(&index).copied().unwrap_or(PixelSemantic::Color);
-        match load_ready_image_memo(png, semantic, quality, threads) {
+        match load_ready_image_memo(png, semantic, quality, encode) {
             Ok(Some(ktx)) => { changed = true; Some(ktx) }
             Ok(None) => None,
             Err(error) => { failure = Some(format!("image {index}: {error}")); None }
@@ -276,10 +276,10 @@ mod tests {
         let rgba: Vec<u8> = (0..128 * 128).flat_map(|i| [(i % 128 * 2) as u8, (i / 128 * 2) as u8, (i * 7 % 251) as u8, 255]).collect();
         let png = Cx::encode_rgba_as_png(128, 128, &rgba).unwrap();
         for semantic in [PixelSemantic::Color, PixelSemantic::Data, PixelSemantic::Normal, PixelSemantic::MaskedColor] {
-            let fresh = load_ready_image(&png, semantic, makepad_texcomp::uastc::Quality::Fast, 3).unwrap();
+            let fresh = load_ready_image(&png, semantic, makepad_texcomp::uastc::Quality::Fast, &makepad_texcomp::run_inline).unwrap();
             assert!(fresh.is_some());
             for _ in 0..2 {
-                assert_eq!(load_ready_image_memo(&png, semantic, makepad_texcomp::uastc::Quality::Fast, 1).unwrap(), fresh);
+                assert_eq!(load_ready_image_memo(&png, semantic, makepad_texcomp::uastc::Quality::Fast, &makepad_texcomp::run_inline).unwrap(), fresh);
             }
         }
     }
@@ -287,8 +287,8 @@ mod tests {
     #[test]
     fn load_ready_images_replace_pngs_and_load_without_decode() {
         let glb = textured_glb();
-        let ready = embed_load_ready_images(&glb, makepad_texcomp::uastc::Quality::Fast, 2).unwrap().expect("PNGs converted");
-        assert!(embed_load_ready_images(&ready, makepad_texcomp::uastc::Quality::Fast, 2).unwrap().is_none());
+        let ready = embed_load_ready_images(&glb, makepad_texcomp::uastc::Quality::Fast, &makepad_texcomp::run_inline).unwrap().expect("PNGs converted");
+        assert!(embed_load_ready_images(&ready, makepad_texcomp::uastc::Quality::Fast, &makepad_texcomp::run_inline).unwrap().is_none());
         let doc = makepad_gltf::parse_glb_bytes(&ready).unwrap().document;
         // Only images change: nodes (sockets, movers and their extras),
         // samplers, materials, meshes and accessors are kept as they were.
@@ -344,7 +344,7 @@ mod tests {
             0xff00_0000 | b(v[0]) << 16 | b(v[1]) << 8 | b(z)
         }).collect();
         let prepared = PreparedTexture::prepare(image, PixelSemantic::Normal);
-        let ktx = prepared.to_bc5_ktx2(0xabc, 2).unwrap();
+        let ktx = prepared.to_bc5_ktx2(0xabc, &makepad_texcomp::run_inline).unwrap();
         assert!(is_ktx2(&ktx));
         assert_eq!(content_id(&ktx), Some(0xabc));
         crate::material_surface::set_bc5_normal_maps(false);
@@ -379,14 +379,14 @@ mod tests {
             uvs: &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], indices: &[0, 1, 2],
             base_color_png: &flat, metallic_roughness_png: Some(&flat), double_sided: false, colors: None,
         });
-        assert!(embed_load_ready_images(&glb, makepad_texcomp::uastc::Quality::Fast, 2).unwrap().is_none());
+        assert!(embed_load_ready_images(&glb, makepad_texcomp::uastc::Quality::Fast, &makepad_texcomp::run_inline).unwrap().is_none());
         // A rich image magnified NEAREST stays PNG too.
         let rich = textured_glb();
         let mut nearest = rich.clone();
         let (from, to) = (b"\"magFilter\":9729", b"\"magFilter\":9728");
         let at = nearest.windows(from.len()).position(|w| w == from).expect("fixture has a sampler to switch");
         nearest[at..at + to.len()].copy_from_slice(to);
-        assert!(embed_load_ready_images(&nearest, makepad_texcomp::uastc::Quality::Fast, 2).unwrap().is_none());
+        assert!(embed_load_ready_images(&nearest, makepad_texcomp::uastc::Quality::Fast, &makepad_texcomp::run_inline).unwrap().is_none());
         // A generated two-colour pattern (a blend between two colours: at
         // most 256 distinct values) is smooth art and goes to Basis.
         let blend: Vec<u8> = (0..64 * 64).flat_map(|i| { let t = ((i % 64) * 4 + (i / 64)) as u32 % 256; [(40 + t * 150 / 255) as u8, (30 + t * 60 / 255) as u8, (20 + t * 30 / 255) as u8, 255] }).collect();
@@ -396,7 +396,7 @@ mod tests {
             uvs: &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], indices: &[0, 1, 2],
             base_color_png: &png, metallic_roughness_png: None, double_sided: false, colors: None,
         });
-        let ready = embed_load_ready_images(&glb, makepad_texcomp::uastc::Quality::Fast, 2).unwrap().expect("pattern converted");
+        let ready = embed_load_ready_images(&glb, makepad_texcomp::uastc::Quality::Fast, &makepad_texcomp::run_inline).unwrap().expect("pattern converted");
         let doc = makepad_gltf::parse_glb_bytes(&ready).unwrap().document;
         assert_eq!(doc.images_slice()[0].mime_type.as_deref(), Some("image/ktx2"));
     }
