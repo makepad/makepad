@@ -1,4 +1,4 @@
-//! Host-backed tensor handle used by the macOS Metal GpuTensor path.
+//! Shared-buffer tensors on Metal; portable host storage on other platforms.
 
 use std::cell::RefCell;
 #[cfg(target_os = "macos")]
@@ -18,7 +18,12 @@ pub(crate) fn fresh_tensor_id() -> u64 {
 pub struct GpuTensor {
     pub(crate) rows: usize,
     pub(crate) cols: usize,
+    #[cfg(not(target_os = "macos"))]
     pub(crate) data: RefCell<Vec<f32>>,
+    #[cfg(target_os = "macos")]
+    pub(crate) storage: RefCell<TensorStorage>,
+    #[cfg(target_os = "macos")]
+    pub(crate) writer_batch: Cell<u64>,
     #[cfg(target_os = "macos")]
     pub(crate) u32s: RefCell<Vec<u32>>,
     /// Identity of the current contents: fresh at creation and after every
@@ -48,3 +53,20 @@ pub struct GpuLinearPart<'a> {
     pub cache_key: &'a str,
     pub bytes: &'a [u8],
 }
+
+#[cfg(target_os = "macos")]
+pub(crate) struct TensorStorage {
+    pub(crate) buffer: std::sync::Arc<crate::shim::TensorBuffer>,
+    pub(crate) offset: usize,
+}
+
+// Ambiguous inference if GpuTensor ever becomes Sync. RefCell also guards
+// mapped host borrows, while its buffer can be shared immutably across threads.
+const _: fn() = || {
+    trait AmbiguousIfSync<A> { fn check() {} }
+    impl<T: ?Sized> AmbiguousIfSync<()> for T {}
+    impl<T: ?Sized + Sync> AmbiguousIfSync<u8> for T {}
+    let _ = <GpuTensor as AmbiguousIfSync<_>>::check;
+    fn is_send<T: Send>() {}
+    is_send::<GpuTensor>();
+};

@@ -321,6 +321,23 @@ mod tests {
         let c = AppRequest::parse("call calc.add caller=tok1\n{}").unwrap();
         assert_eq!(c, AppRequest::Call { service: "calc".into(), tool: "add".into(), instance: None, args: "{}".into(), caller: Some("tok1".into()) });
         assert_eq!(AppRequest::parse(&c.to_args()).unwrap(), c);
+        assert_eq!(crate::wire::MAX_ARGS_BYTES, makepad_remote::frame::MAX_PAYLOAD);
+        #[cfg(feature = "engine")]
+        assert_eq!(crate::wire::MAX_ARGS_BYTES, makepad_ai_hub::chat_wire::MAX_TOOL_JSON_BYTES);
+        for bytes in [100 * 1024, 192 * 1024] {
+            let args = makepad_strict_json::obj(vec![("source", makepad_strict_json::s("x".repeat(bytes)))]).to_json();
+            let request = AppRequest::Call { service: "calc".into(), tool: "add".into(), instance: None,
+                args: args.clone(), caller: Some("tok1".into()) };
+            let payload = format!("app\n{}", request.to_args());
+            let mut buf = Vec::new();
+            makepad_remote::frame::write_frame(&mut buf, 1, makepad_remote::frame::kind::OPEN, 0, payload.as_bytes()).unwrap();
+            let frame = makepad_remote::frame::FrameReader::new(Box::new(std::io::Cursor::new(buf))).next().unwrap();
+            let payload = String::from_utf8(frame.payload).unwrap();
+            assert_eq!(AppRequest::parse(payload.strip_prefix("app\n").unwrap()).unwrap(), request);
+            let hosted = crate::wire::HostedDown { to: None, msg: crate::wire::ServiceDown::Call(
+                crate::wire::ServiceCall { call_id: "c1".into(), tool: "add".into(), args, caller: Some("tok1".into()) }) };
+            assert_eq!(crate::wire::HostedDown::parse(&hosted.to_json()), Some(hosted));
+        }
         assert_eq!(AppRequest::parse("list").unwrap(), AppRequest::List);
         assert!(AppRequest::parse("call add").is_err());
         assert!(AppRequest::parse("drop").is_err());

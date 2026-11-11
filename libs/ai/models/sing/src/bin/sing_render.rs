@@ -20,6 +20,10 @@ use makepad_ai_sing::{Cantor, F0Mode, RenderOpts};
 use std::time::Instant;
 
 fn main() {
+    makepad_ai_metal::run_model_worker("sing_render", model_main)
+}
+
+fn model_main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let t = Instant::now();

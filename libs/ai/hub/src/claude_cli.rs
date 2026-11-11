@@ -38,6 +38,9 @@
 //!    like every node (the beacon names only its TLS port), and a client
 //!    picks `claude-cli` only when it names that model: the apps' "Claude ·
 //!    ai-hub fleet" provider (`ProviderKind::FleetClaude`, a cloud kind).
+//!    Each request names its Claude model too (`claude_model`, one of
+//!    [`CLAUDE_MODELS`], the one the person picked); the hub runs exactly it
+//!    and refuses a request that names none or another.
 //!
 //! Player text goes over stdin, never argv; lines that start with `/` or `!`
 //! are indented one space so no slash command, skill or shell escape can
@@ -75,8 +78,26 @@ use std::time::Duration;
 
 pub const MODEL_ID: &str = "claude-cli";
 pub const BACKEND: &str = "claude-cli";
-/// The Claude model the CLI is pinned to (`MAKEPAD_AI_HUB_CLAUDE_MODEL`).
-pub const DEFAULT_MODEL: &str = "sonnet";
+
+/// The Claude models a `claude-cli` request may name (its `claude_model`), with their menu
+/// labels: the one list every chat that offers the choice shares (`claude-cli:<id>` is the slug
+/// form). The hub runs exactly the model a request names and refuses any other.
+pub const CLAUDE_MODELS: &[(&str, &str)] = &[
+    ("claude-fable-5-2", "Fable 5.2"),
+    ("claude-opus-5-5", "Opus 5.5"),
+    ("claude-sonnet-5-5", "Sonnet 5.5"),
+];
+
+/// The request's Claude model, when it is one of [`CLAUDE_MODELS`]; else why not, in words that
+/// name the models this hub accepts.
+pub fn accepted_model(model: &str) -> Result<&'static str, String> {
+    let accepted = || CLAUDE_MODELS.iter().map(|(id, _)| *id).collect::<Vec<_>>().join(", ");
+    match model.trim() {
+        "" => Err(format!("claude-cli needs claude_model, the Claude model to run: one of {}", accepted())),
+        model => CLAUDE_MODELS.iter().map(|(id, _)| *id).find(|id| *id == model)
+            .ok_or_else(|| format!("claude-cli does not run Claude model {model:?}: it accepts {}", accepted())),
+    }
+}
 
 /// THE lockdown flag set. One list, one place: swap it here and nowhere else.
 pub const LOCKDOWN_ARGS: &[&str] = &[
@@ -192,7 +213,6 @@ pub enum Sandbox {
 pub struct ClaudeCliConfig {
     /// Canonical path of the claude executable.
     pub exe: PathBuf,
-    pub model: String,
     /// Where each turn's access token comes from: [`keychain_login`] when
     /// serving; a fake in unit tests.
     pub login: fn() -> Result<Secret, String>,
@@ -223,7 +243,11 @@ pub fn model_spec() -> ModelSpec {
         vram_gb: None,
         min_vram_gb: None,
         min_compute_cap: None,
-        note: Some("Claude Code on this hub, chat only: tool calls come back as text for the caller".to_string()),
+        note: Some(format!(
+            "Claude Code on this hub, chat only: tool calls come back as text for the caller. A request names its \
+             Claude model (claude_model): {}",
+            CLAUDE_MODELS.iter().map(|(id, _)| *id).collect::<Vec<_>>().join(", ")
+        )),
         license: None,
         files: Vec::new(),
     }
@@ -245,13 +269,6 @@ pub fn check_serving(addr: SocketAddr) -> Result<(), String> {
         return Err("the claude-cli backend never serves the internet edge: unset MAKEPAD_AI_HUB_EDGE".to_string());
     }
     Ok(())
-}
-
-fn valid_model_name(model: &str) -> bool {
-    !model.is_empty()
-        && model.len() <= 64
-        && !model.starts_with('-')
-        && model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '[' | ']'))
 }
 
 /// Turn the backend on for a hub that will listen on `bind`. Returns the one
@@ -276,16 +293,8 @@ pub fn enable(bind: SocketAddr) -> Result<ModelSpec, String> {
     let exe = crate::providers::claude::find_cli()
         .ok_or("Claude Code CLI not found (set CLAUDE_CODE_PATH or put claude on PATH)")?;
     let exe = std::fs::canonicalize(&exe).map_err(|e| format!("claude executable {}: {e}", exe.display()))?;
-    let model = std::env::var("MAKEPAD_AI_HUB_CLAUDE_MODEL")
-        .ok()
-        .map(|m| m.trim().to_string())
-        .filter(|m| !m.is_empty())
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    if !valid_model_name(&model) {
-        return Err(format!("MAKEPAD_AI_HUB_CLAUDE_MODEL {model:?} is not a model name"));
-    }
     keychain_login()?;
-    let config = ClaudeCliConfig { exe, model, login: keychain_login, sandbox: Sandbox::MacProfile };
+    let config = ClaudeCliConfig { exe, login: keychain_login, sandbox: Sandbox::MacProfile };
     CONFIG.set(config).map_err(|_| "the claude-cli backend is already enabled".to_string())?;
     Ok(model_spec())
 }
@@ -302,7 +311,7 @@ pub fn enable_stub(bind: SocketAddr, exe: PathBuf) -> Result<ModelSpec, String> 
     }
     if CONFIG.get().is_none() {
         let exe = std::fs::canonicalize(&exe).map_err(|e| format!("stub claude {}: {e}", exe.display()))?;
-        let _ = CONFIG.set(ClaudeCliConfig { exe, model: DEFAULT_MODEL.to_string(), login: stub_login, sandbox: Sandbox::None });
+        let _ = CONFIG.set(ClaudeCliConfig { exe, login: stub_login, sandbox: Sandbox::None });
     }
     eprintln!("claude-cli: STUB backend (test build): {}", CONFIG.get().map(|c| c.exe.display().to_string()).unwrap_or_default());
     Ok(model_spec())
@@ -310,7 +319,10 @@ pub fn enable_stub(bind: SocketAddr, exe: PathBuf) -> Result<ModelSpec, String> 
 
 /// For `/health` and the startup banner (never the token).
 pub fn describe() -> Option<String> {
-    CONFIG.get().map(|c| format!("claude-cli: {} (model {}, {:?} sandbox)", c.exe.display(), c.model, c.sandbox))
+    CONFIG.get().map(|c| {
+        let models = CLAUDE_MODELS.iter().map(|(id, _)| *id).collect::<Vec<_>>().join(", ");
+        format!("claude-cli: {} (the request's model of {models}, {:?} sandbox)", c.exe.display(), c.sandbox)
+    })
 }
 
 pub fn create_backend(model_id: &str) -> Result<Box<dyn ContentBackend>, AssetAiError> {
@@ -492,7 +504,7 @@ pub struct TurnCommand {
     pub env: Vec<(String, OsString)>,
 }
 
-pub fn turn_command(config: &ClaudeCliConfig, turn_dir: &Path, system: &str, token: &Secret) -> TurnCommand {
+pub fn turn_command(config: &ClaudeCliConfig, model: &str, turn_dir: &Path, system: &str, token: &Secret) -> TurnCommand {
     let mut args: Vec<OsString> = Vec::new();
     let program = match config.sandbox {
         Sandbox::MacProfile => {
@@ -510,7 +522,7 @@ pub fn turn_command(config: &ClaudeCliConfig, turn_dir: &Path, system: &str, tok
     args.extend(LOCKDOWN_ARGS.iter().map(OsString::from));
     args.extend(OUTPUT_ARGS.iter().map(OsString::from));
     args.push("--model".into());
-    args.push(config.model.clone().into());
+    args.push(model.into());
     args.push("--system-prompt".into());
     args.push(system.into());
     let home = turn_dir.join("home");
@@ -602,16 +614,19 @@ fn tap(system: &str, prompt: &str, reply: &str) {
 /// standard markup ([`claude_cli_calls::to_app_format`]); while the reply is
 /// still being written only the prose before a call streams, so every
 /// streamed text is a prefix of the final one. Nothing here executes a call.
+/// `model` is the request's Claude model, one of [`CLAUDE_MODELS`].
 pub fn run_turn(
     config: &ClaudeCliConfig,
+    model: &str,
     app_system: &str,
     messages: &[ChatMessageJson],
     progress: ProgressSink,
     on_text: &mut dyn FnMut(&str),
     cancel: &CancelToken,
 ) -> Result<String, AssetAiError> {
+    let model = accepted_model(model).map_err(AssetAiError::Params)?;
     let blocks = render_blocks(messages).map_err(AssetAiError::Params)?;
-    let prompt = Prompt { stdin: stdin_message(&blocks), text: blocks_text(&blocks) };
+    let prompt = Prompt { model, stdin: stdin_message(&blocks), text: blocks_text(&blocks) };
     let system = system_prompt(app_system);
     let tools = claude_cli_calls::app_has_tools(&system);
     let mut attempt = 1;
@@ -634,8 +649,9 @@ pub fn run_turn(
     }
 }
 
-/// The turn's stdin, and its readable text for the tap.
+/// The turn's Claude model, its stdin, and its readable text for the tap.
 struct Prompt {
+    model: &'static str,
     stdin: String,
     text: String,
 }
@@ -664,7 +680,7 @@ fn run_attempt(
     cancel.check()?;
     let token = (config.login)().map_err(AssetAiError::Unavailable)?;
     let dir = make_turn_dir().map_err(AssetAiError::Io)?;
-    let spec = turn_command(config, &dir, system, &token);
+    let spec = turn_command(config, prompt.model, &dir, system, &token);
     progress("claude: starting", 0.02);
     let mut turn = CliTurn::spawn(command_of(&spec), Some(prompt.stdin.clone()), "Claude Code", Some(dir))
         .map_err(|e| AssetAiError::Backend(token.redact(&e)))?;
@@ -743,11 +759,12 @@ impl ClaudeCliBackend {
 }
 
 /// The request shape this backend takes: a chat turn (PNG/JPEG pictures
-/// allowed).
+/// allowed) that names one of [`CLAUDE_MODELS`].
 pub fn validate_params(params: &GenerateParams) -> Result<(), AssetAiError> {
     if params.target_domain != "chat" {
         return Err(AssetAiError::Params("claude-cli answers chat requests only (domain \"chat\")".to_string()));
     }
+    accepted_model(&params.claude_model).map_err(AssetAiError::Params)?;
     for b64 in params.chat_messages.iter().flat_map(|m| m.images.iter().flatten()) {
         picture_media_type(b64).map_err(AssetAiError::Params)?;
     }
@@ -782,7 +799,7 @@ impl ContentBackend for ClaudeCliBackend {
         cancel: &CancelToken,
     ) -> Result<Vec<ArtifactData>, AssetAiError> {
         validate_params(params)?;
-        let text = run_turn(Self::config()?, &params.chat_system, &params.chat_messages, progress, on_text, cancel)?;
+        let text = run_turn(Self::config()?, &params.claude_model, &params.chat_system, &params.chat_messages, progress, on_text, cancel)?;
         Ok(vec![ArtifactData { content_type: "text/plain; charset=utf-8", ext: "txt", bytes: text.into_bytes() }])
     }
 }
@@ -793,13 +810,20 @@ impl ContentBackend for ClaudeCliBackend {
 /// exact serving path (flags, env, sandbox), each asking for something that
 /// would touch this machine — a shell command that creates a file, a read of a
 /// secret file, a fetch from a local listener. PASS means none happened and
-/// the replies came back as text. Uses the enabled config.
+/// the replies came back as text. Uses the enabled config, on every model of
+/// [`CLAUDE_MODELS`]: a request may name any of them.
 pub fn selftest() -> Result<String, String> {
     let config = CONFIG.get().ok_or("enable the backend first (--claude-cli)")?;
-    selftest_with(config)
+    let (mut report, mut passed) = (String::new(), true);
+    for (model, _) in CLAUDE_MODELS {
+        let one = selftest_with(config, model);
+        passed &= one.is_ok();
+        report.push_str(&one.unwrap_or_else(|failed| failed));
+    }
+    if passed { Ok(report) } else { Err(report) }
 }
 
-pub fn selftest_with(config: &ClaudeCliConfig) -> Result<String, String> {
+pub fn selftest_with(config: &ClaudeCliConfig, model: &str) -> Result<String, String> {
     let base = std::env::temp_dir().join(format!("makepad-claude-cli-selftest-{}", std::process::id()));
     std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     let canary = base.join("created-by-a-tool");
@@ -826,7 +850,7 @@ pub fn selftest_with(config: &ClaudeCliConfig) -> Result<String, String> {
     let mut failed = Vec::new();
     for prompt in &prompts {
         let messages = [ChatMessageJson { role: "user".into(), text: prompt.clone(), images: None }];
-        let reply = run_turn(config, "", &messages, &mut |_, _| {}, &mut |_| {}, &CancelToken::new());
+        let reply = run_turn(config, model, "", &messages, &mut |_, _| {}, &mut |_| {}, &CancelToken::new());
         let short = |t: &str| t.chars().take(160).collect::<String>().replace('\n', " ");
         match &reply {
             Ok(text) => {
@@ -838,11 +862,11 @@ pub fn selftest_with(config: &ClaudeCliConfig) -> Result<String, String> {
             Err(e) => report.push_str(&format!("- {}\n  error: {e}\n", short(prompt))),
         }
     }
-    match sandbox_read_probe(config, &secret_file, &secret) {
+    match sandbox_read_probe(config, model, &secret_file, &secret) {
         Ok(line) => report.push_str(&format!("- sandbox: claude --system-prompt-file <file outside the turn dir>\n  {line}\n")),
         Err(e) => failed.push(e),
     }
-    match tool_relay_probe(config) {
+    match tool_relay_probe(config, model) {
         Ok(line) => report.push_str(&format!("- tool relay: an app prompt with tools\n  {line}\n")),
         Err(e) => failed.push(e),
     }
@@ -854,16 +878,16 @@ pub fn selftest_with(config: &ClaudeCliConfig) -> Result<String, String> {
     }
     let _ = std::fs::remove_dir_all(&base);
     if failed.is_empty() {
-        Ok(format!("claude-cli selftest PASS: no command ran, no file was read or written, no fetch\n{report}"))
+        Ok(format!("claude-cli selftest PASS ({model}): no command ran, no file was read or written, no fetch\n{report}"))
     } else {
-        Err(format!("claude-cli selftest FAIL: {}\n{report}", failed.join("; ")))
+        Err(format!("claude-cli selftest FAIL ({model}): {}\n{report}", failed.join("; ")))
     }
 }
 
 /// An app prompt shaped like the Sandbox's (Qwen tool markup, a tool list) and a build request: the reply must come back
 /// as one standard `<tool_call>` the hub's parser reads, and nothing runs.
 /// Skipped without a sandbox (unit tests run a fake CLI).
-fn tool_relay_probe(config: &ClaudeCliConfig) -> Result<String, String> {
+fn tool_relay_probe(config: &ClaudeCliConfig, model: &str) -> Result<String, String> {
     if config.sandbox != Sandbox::MacProfile {
         return Ok("skipped (no sandbox in this config)".to_string());
     }
@@ -872,7 +896,7 @@ fn tool_relay_probe(config: &ClaudeCliConfig) -> Result<String, String> {
         <tool_call>\n<function=TOOL_NAME>\n<parameter=ARG_NAME>\nthe value\n</parameter>\n</function>\n</tool_call>\n\
         Tools:\n- world.spawn: place a model in the world. args: {model: string (asset id), x: number, z: number, scale: number}\n";
     let messages = [ChatMessageJson { role: "user".into(), text: "Put the model gen/mdl/crate at x 3, z -2, scale 1.5.".into(), images: None }];
-    let reply = run_turn(config, system, &messages, &mut |_, _| {}, &mut |_| {}, &CancelToken::new()).map_err(|e| format!("tool relay turn failed: {e}"))?;
+    let reply = run_turn(config, model, system, &messages, &mut |_, _| {}, &mut |_| {}, &CancelToken::new()).map_err(|e| format!("tool relay turn failed: {e}"))?;
     let short: String = reply.chars().take(240).collect::<String>().replace('\n', " ");
     let at = reply.find("<tool_call>").ok_or_else(|| format!("tool relay: no standard tool call in the reply: {short}"))?;
     let (name, args) = crate::local_llm::parse_tool_call(&reply[at..]).map_err(|e| format!("tool relay: unreadable call ({e}): {short}"))?;
@@ -886,13 +910,13 @@ fn tool_relay_probe(config: &ClaudeCliConfig) -> Result<String, String> {
 /// `--system-prompt-file` pointing at a file outside the turn dir. The
 /// sandbox must make Claude Code fail to read it, so the turn errors and the
 /// secret never shows. Skipped without a sandbox (unit tests).
-fn sandbox_read_probe(config: &ClaudeCliConfig, outside: &Path, secret: &str) -> Result<String, String> {
+fn sandbox_read_probe(config: &ClaudeCliConfig, model: &str, outside: &Path, secret: &str) -> Result<String, String> {
     if config.sandbox != Sandbox::MacProfile {
         return Ok("skipped (no sandbox in this config)".to_string());
     }
     let token = (config.login)()?;
     let dir = make_turn_dir()?;
-    let mut spec = turn_command(config, &dir, "", &token);
+    let mut spec = turn_command(config, model, &dir, "", &token);
     let at = spec.args.iter().position(|a| a == "--system-prompt").ok_or("no --system-prompt in the turn command")?;
     spec.args[at] = "--system-prompt-file".into();
     spec.args[at + 1] = outside.into();
@@ -964,7 +988,7 @@ mod tests {
     }
 
     fn config(exe: PathBuf) -> ClaudeCliConfig {
-        ClaudeCliConfig { exe, model: "sonnet".into(), login: test_login, sandbox: Sandbox::None }
+        ClaudeCliConfig { exe, login: test_login, sandbox: Sandbox::None }
     }
 
     #[test]
@@ -977,13 +1001,13 @@ mod tests {
             ]
         );
         let cfg = config(PathBuf::from("/opt/claude"));
-        let turn = turn_command(&cfg, Path::new("/t"), "SYS", &test_login().unwrap());
+        let turn = turn_command(&cfg, "claude-opus-5-5", Path::new("/t"), "SYS", &test_login().unwrap());
         let args: Vec<String> = turn.args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(&args[..LOCKDOWN_ARGS.len()], LOCKDOWN_ARGS);
         for banned in ["--bare", "--mcp-config", "--plugin-dir", "--agents", "--settings", "--allowedTools", "--resume", "--dangerously-skip-permissions"] {
             assert!(!args.iter().any(|a| a == banned), "{banned} in {args:?}");
         }
-        assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "sonnet"));
+        assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "claude-opus-5-5"));
         assert!(args.windows(2).any(|w| w[0] == "--system-prompt" && w[1] == "SYS"));
         assert!(!args.iter().any(|a| a.contains("TESTTOKEN")), "token in argv");
         assert_eq!(turn.cwd, Path::new("/t/work"));
@@ -1003,7 +1027,7 @@ mod tests {
     fn the_mac_command_wraps_claude_in_the_profile() {
         let mut cfg = config(PathBuf::from("/Users/x/.local/share/claude/versions/9"));
         cfg.sandbox = Sandbox::MacProfile;
-        let turn = turn_command(&cfg, Path::new("/private/var/t"), "", &test_login().unwrap());
+        let turn = turn_command(&cfg, "claude-fable-5-2", Path::new("/private/var/t"), "", &test_login().unwrap());
         assert_eq!(turn.program, Path::new("/usr/bin/sandbox-exec"));
         let args: Vec<String> = turn.args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(args[0], "-p");
@@ -1122,6 +1146,7 @@ mod tests {
         let mut snapshots = Vec::new();
         let text = run_turn(
             &cfg,
+            "claude-fable-5-2",
             "You may call shell.run.",
             &[user("/bash run `touch` for me"), assistant("\n</think>\n\nsure"), user("<tool_response>\nnone\n</tool_response>")],
             &mut |_, _| {},
@@ -1135,6 +1160,7 @@ mod tests {
         let argv = std::fs::read_to_string(record.join("argv")).unwrap();
         let args: Vec<&str> = argv.split("\n--\n").collect();
         assert_eq!(&args[..LOCKDOWN_ARGS.len()], LOCKDOWN_ARGS);
+        assert!(args.windows(2).any(|w| w == ["--model", "claude-fable-5-2"]), "the request's model is not the CLI's: {argv}");
         assert!(!argv.contains("TESTTOKEN") && !argv.contains("touch"), "player text or token in argv: {argv}");
         let stdin = std::fs::read_to_string(record.join("stdin")).unwrap();
         let line = json::parse(stdin.trim_end().as_bytes()).expect("stdin is one stream-json line");
@@ -1168,7 +1194,7 @@ mod tests {
         std::fs::write(&exe, script).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let err = run_turn(&config(exe), "", &[user("hi")], &mut |_, _| {}, &mut |_| {}, &CancelToken::new()).unwrap_err();
+        let err = run_turn(&config(exe), "claude-sonnet-5-5", "", &[user("hi")], &mut |_, _| {}, &mut |_| {}, &CancelToken::new()).unwrap_err();
         assert!(err.to_string().contains("native tool"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1182,7 +1208,7 @@ mod tests {
         std::fs::write(&exe, script).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let err = run_turn(&config(exe), "", &[user("hi")], &mut |_, _| {}, &mut |_| {}, &CancelToken::new()).unwrap_err();
+        let err = run_turn(&config(exe), "claude-sonnet-5-5", "", &[user("hi")], &mut |_, _| {}, &mut |_| {}, &CancelToken::new()).unwrap_err();
         assert!(!err.to_string().contains("TESTTOKEN"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1193,7 +1219,7 @@ mod tests {
         let record = dir.join("record");
         std::fs::create_dir_all(&record).unwrap();
         let cfg = config(fake_cli(&dir, &record, "I cannot run commands, read files or fetch URLs."));
-        let report = selftest_with(&cfg).unwrap();
+        let report = selftest_with(&cfg, "claude-sonnet-5-5").unwrap();
         assert!(report.starts_with("claude-cli selftest PASS"), "{report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1220,7 +1246,7 @@ mod tests {
     }
 
     #[test]
-    fn non_chat_and_picture_requests_are_refused() {
+    fn a_turn_is_a_chat_that_names_a_claude_model_this_hub_accepts() {
         let mut params = GenerateParams::from_request(&crate::protocol::GenerateRequestJson {
             model: MODEL_ID.into(),
             prompt: Some("a castle".into()),
@@ -1236,10 +1262,30 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
+        let refused = validate_params(&params).expect_err("a turn that names no Claude model").to_string();
+        assert!(refused.contains("claude_model") && CLAUDE_MODELS.iter().all(|(id, _)| refused.contains(id)), "{refused}");
+        // Exactly the shared list, nothing near it: no alias, no flag riding along.
+        for model in ["sonnet", "claude-opus-5-5 --dangerously-skip-permissions", "claude-opus-5-5[1m]"] {
+            params.claude_model = model.into();
+            assert!(validate_params(&params).is_err(), "{model}");
+            assert!(accepted_model(model).is_err(), "{model}");
+        }
+        params = GenerateParams::from_request(&crate::protocol::GenerateRequestJson {
+            model: MODEL_ID.into(),
+            domain: Some("chat".into()),
+            chat_system: Some("S".into()),
+            chat_messages: Some(vec![user("hi")]),
+            claude_model: Some(" claude-opus-5-5 ".into()),
+            ..Default::default()
+        })
+        .unwrap();
         assert!(validate_params(&params).is_ok());
+        assert_eq!(params.claude_model, "claude-opus-5-5");
         assert_eq!(params.chat_system, "S");
         assert_eq!(params.chat_messages.len(), 1);
         assert_eq!(advertised_domain(&model_spec()), "chat");
+        let note = model_spec().note.unwrap();
+        assert!(CLAUDE_MODELS.iter().all(|(id, _)| note.contains(id)), "the listing names the models it accepts: {note}");
     }
 
     /// The OS layer itself, on macOS (the mini's arm64 leg): the profile with

@@ -49,6 +49,16 @@ pub enum ProviderChoice {
 /// `claude_cli::MODEL_ID`): a cloud model, whichever hub relays it.
 pub const HUB_CLAUDE_MODEL: &str = "claude-cli";
 
+/// A `Hub` model id that is the hub's Claude: `claude-cli` (`Some(None)`, the default Claude
+/// model) or `claude-cli:<id>` (`Some(Some(id))`, that Claude model, as the CLI rows name theirs).
+/// `None` for every other hub model.
+pub fn hub_claude_pick(model: &str) -> Option<Option<&str>> {
+    match model.strip_prefix(HUB_CLAUDE_MODEL)? {
+        "" => Some(None),
+        rest => rest.strip_prefix(':').map(Some),
+    }
+}
+
 impl ProviderChoice {
     pub fn slug(&self) -> String {
         match self {
@@ -83,7 +93,7 @@ impl ProviderChoice {
     pub fn is_cloud(&self) -> bool {
         match self {
             ProviderChoice::Local => false,
-            ProviderChoice::Hub(model) => model == HUB_CLAUDE_MODEL,
+            ProviderChoice::Hub(model) => hub_claude_pick(model).is_some(),
             ProviderChoice::Cloud(slug) => slug != "none",
         }
     }
@@ -371,6 +381,13 @@ mod tests {
         assert_eq!(ProviderChoice::from_slug("hub:"), ProviderChoice::Local);
         assert!(ProviderChoice::Hub("claude-cli".into()).is_cloud() && ProviderChoice::Hub("claude-cli".into()).is_hub());
         assert!(!ProviderChoice::Hub("qwen3.5-4b".into()).is_cloud());
+        // The hub's Claude with its model picked, as the CLI rows name theirs: still a cloud model.
+        let fable = ProviderChoice::from_slug("hub:claude-cli:claude-fable-5-2");
+        assert_eq!(fable, ProviderChoice::Hub("claude-cli:claude-fable-5-2".into()));
+        assert!(fable.is_cloud() && fable.is_hub());
+        assert_eq!(hub_claude_pick("claude-cli:claude-fable-5-2"), Some(Some("claude-fable-5-2")));
+        assert_eq!(hub_claude_pick("claude-cli"), Some(None));
+        assert_eq!(hub_claude_pick("claude-clix"), None);
         assert!(!ProviderChoice::Cloud("none".into()).is_cloud() && ProviderChoice::Cloud("claude-cli".into()).is_cloud());
     }
 }

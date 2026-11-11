@@ -6,10 +6,10 @@
 
 use crate::splat::{
     check_cancel, resolve_num_gaussians, splat_cfg_combine, splat_cfg_enabled, splat_euler_step,
-    splat_t_sequence, SplatCancel, SplatWeights, DEFAULT_ERODE_RADIUS, DEFAULT_GUIDANCE,
-    DEFAULT_SEED, DEFAULT_SHIFT, DEFAULT_STEPS, FLOW_CAM_CHANNELS, FLOW_COND2_CHANNELS,
-    FLOW_COND_CHANNELS, FLOW_IN_CHANNELS, FLOW_Q_TOKENS, GAUSSIANS_DEFAULT, GS_OUT_CHANNELS,
-    GS_PER_POINT, SPLAT_CANVAS, VAE_BN_EPS, VAE_PACKED_CHANNELS, VAE_ZERO_PREFIX,
+    splat_t_sequence, SplatCancel, SplatModel, SplatWeights, DEFAULT_ERODE_RADIUS,
+    DEFAULT_SEED, DEFAULT_SHIFT, FLOW_CAM_CHANNELS, FLOW_COND2_CHANNELS,
+    FLOW_COND_CHANNELS, FLOW_IN_CHANNELS, FLOW_Q_TOKENS, GS_OUT_CHANNELS,
+    GS_PER_POINT, SPLAT_CANVAS, VAE_PACKED_CHANNELS, VAE_ZERO_PREFIX,
 };
 use crate::splat_decoder::{SplatGaussianDecoder, SplatOctree};
 use crate::splat_dino::SplatDino;
@@ -33,14 +33,15 @@ pub struct SplatParams {
     pub erode_radius: usize,
 }
 
-impl Default for SplatParams {
-    fn default() -> Self {
+impl SplatParams {
+    /// Start with the selected release's recommended sampling parameters.
+    pub fn for_model(model: SplatModel) -> Self {
         Self {
             seed: DEFAULT_SEED,
-            steps: DEFAULT_STEPS,
-            guidance_scale: DEFAULT_GUIDANCE,
+            steps: model.default_steps(),
+            guidance_scale: model.default_guidance(),
             shift: DEFAULT_SHIFT,
-            num_gaussians: GAUSSIANS_DEFAULT,
+            num_gaussians: model.gaussians_default(),
             erode_radius: DEFAULT_ERODE_RADIUS,
         }
     }
@@ -48,7 +49,7 @@ impl Default for SplatParams {
 
 impl SplatParams {
     /// Clamp every knob into the band the reference documents.
-    pub fn resolved(mut self) -> Self {
+    pub fn resolved(mut self, model: SplatModel) -> Self {
         self.steps = self.steps.clamp(1, 200);
         self.guidance_scale = self.guidance_scale.clamp(0.0, 20.0);
         self.shift = if self.shift.is_finite() && self.shift > 0.0 {
@@ -56,7 +57,7 @@ impl SplatParams {
         } else {
             DEFAULT_SHIFT
         };
-        self.num_gaussians = resolve_num_gaussians(self.num_gaussians);
+        self.num_gaussians = resolve_num_gaussians(model, self.num_gaussians);
         self.erode_radius = self.erode_radius.min(8);
         self
     }
@@ -65,6 +66,7 @@ impl SplatParams {
 /// The prepared model set. Not `Send` in practice — the device tensors are
 /// thread-local by design, so this lives on whichever worker thread built it.
 pub struct SplatPipeline {
+    model: SplatModel,
     device: Device,
     pub dino: SplatDino,
     pub flow: SplatFlow,
@@ -76,9 +78,11 @@ pub struct SplatPipeline {
 impl SplatPipeline {
     pub fn prepare(
         device: Device,
+        model: SplatModel,
         dino_path: &std::path::Path,
         flow_path: &std::path::Path,
-        decoder_path: &std::path::Path,
+        octree_path: &std::path::Path,
+        gs_path: &std::path::Path,
         vae_path: &std::path::Path,
         mut progress: Option<ProgressHook>,
     ) -> Result<Self> {
@@ -86,16 +90,18 @@ impl SplatPipeline {
         let dino = SplatDino::prepare(device, &SplatWeights::load(dino_path)?, hook_ref(&mut sub))?;
         drop(sub);
         let mut sub = band_progress(&mut progress, 0.45, 0.4);
-        let flow = SplatFlow::prepare(device, &SplatWeights::load(flow_path)?, hook_ref(&mut sub))?;
+        let flow = SplatFlow::prepare(device, model, &SplatWeights::load(flow_path)?, hook_ref(&mut sub))?;
         drop(sub);
         emit_progress(&mut progress, "load splat decoder", 0.85)?;
-        let decoder_weights = SplatWeights::load(decoder_path)?;
-        let octree = SplatOctree::prepare(device, &decoder_weights)?;
-        let gaussians = SplatGaussianDecoder::prepare(device, &decoder_weights)?;
+        let octree_weights = SplatWeights::load(octree_path)?;
+        let gs_weights = SplatWeights::load(gs_path)?;
+        let octree = SplatOctree::prepare(device, model, &octree_weights)?;
+        let gaussians = SplatGaussianDecoder::prepare(device, model, &gs_weights)?;
         emit_progress(&mut progress, "load flux2 vae", 0.95)?;
         let vae = Flux2VaeWeights::load(vae_path)?;
         emit_progress(&mut progress, "models ready", 1.0)?;
         Ok(Self {
+            model,
             device,
             dino,
             flow,
@@ -103,6 +109,10 @@ impl SplatPipeline {
             gaussians,
             vae,
         })
+    }
+
+    pub fn model(&self) -> SplatModel {
+        self.model
     }
 
     pub fn device(&self) -> Device {
@@ -126,10 +136,7 @@ impl SplatPipeline {
     /// `Flux2VAEEncoder.encode(x*2 - 1, deterministic=False)` followed by the
     /// 5 zero rows that align `feature2` with `feature1`.
     ///
-    /// The BatchNorm here is TripoSplat's own `nn.BatchNorm1d(128, eps=1e-5)`
-    /// loaded with the released running stats, NOT the FLUX.2 pipeline's
-    /// `eps=1e-4`, so the normalization is done locally instead of through
-    /// `flux2_vae_bn_normalize`.
+    /// TripoSplat uses its own BatchNorm epsilon; Idol uses the VAE config.
     fn encode_vae(&self, planar: &[f32], rng: &mut SplatRng) -> Result<Vec<f32>> {
         let image = Flux2VaeImage {
             width: SPLAT_CANVAS,
@@ -145,7 +152,8 @@ impl SplatPipeline {
             latents[i] = moments[i] + (0.5 * logvar).exp() * rng.normal();
         }
         let mut packed = flux2_pack_latents(&latents, width, height, z)?;
-        bn_normalize(&mut packed, self.vae.bn_mean(), self.vae.bn_var());
+        bn_normalize(&mut packed, self.vae.bn_mean(), self.vae.bn_var(),
+            self.model.vae_bn_eps(self.vae.config.batch_norm_eps));
         let tokens = packed.to_tokens();
         let mut out = vec![0.0f32; VAE_ZERO_PREFIX * VAE_PACKED_CHANNELS];
         out.extend_from_slice(&tokens);
@@ -251,6 +259,11 @@ impl SplatPipeline {
                 &mut splats,
             )?;
         }
+        if let Some(limit) = self.model.ply_opacity_limit() {
+            for splat in &mut splats {
+                splat.opacity = splat.opacity.clamp(-limit, limit);
+            }
+        }
         emit_progress(&mut progress, "decode complete", 1.0)?;
         Ok(write_ply(&splats))
     }
@@ -263,7 +276,7 @@ impl SplatPipeline {
         mut progress: Option<ProgressHook>,
         cancel: Option<SplatCancel<'_>>,
     ) -> Result<Vec<u8>> {
-        let params = params.resolved();
+        let params = params.resolved(self.model);
         let mut rng = SplatRng::new(params.seed);
         emit_progress(&mut progress, "preprocess", 0.0)?;
         let canvas = preprocess(image, params.erode_radius)?;
@@ -312,11 +325,11 @@ impl SplatCondition {
 }
 
 /// `(x - running_mean) / sqrt(running_var + eps)` per packed channel.
-fn bn_normalize(packed: &mut Flux2PackedLatents, mean: &[f32], var: &[f32]) {
+fn bn_normalize(packed: &mut Flux2PackedLatents, mean: &[f32], var: &[f32], eps: f32) {
     let plane = packed.token_count();
     for channel in 0..packed.channels {
         let m = mean[channel];
-        let std = (var[channel] + VAE_BN_EPS).sqrt();
+        let std = (var[channel] + eps).sqrt();
         let start = channel * plane;
         for value in &mut packed.data[start..start + plane] {
             *value = (*value - m) / std;
@@ -327,6 +340,7 @@ fn bn_normalize(packed: &mut Flux2PackedLatents, mean: &[f32], var: &[f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::splat::VAE_BN_EPS;
 
     #[test]
     fn params_resolve_into_the_documented_bands() {
@@ -338,7 +352,7 @@ mod tests {
             erode_radius: 99,
             seed: 7,
         }
-        .resolved();
+        .resolved(SplatModel::TripoSplat);
         assert_eq!(params.steps, 1);
         assert_eq!(params.guidance_scale, 0.0);
         assert_eq!(params.shift, DEFAULT_SHIFT);
@@ -346,11 +360,17 @@ mod tests {
         assert_eq!(params.erode_radius, 8);
         assert_eq!(params.seed, 7);
         // Defaults are the reference's recommended run.
-        let default = SplatParams::default().resolved();
+        let default = SplatParams::for_model(SplatModel::TripoSplat).resolved(SplatModel::TripoSplat);
         assert_eq!(default.steps, 20);
         assert_eq!(default.guidance_scale, 3.0);
         assert_eq!(default.shift, 3.0);
         assert_eq!(default.num_gaussians, 262_144);
+        let idol = SplatParams::for_model(SplatModel::Idol).resolved(SplatModel::Idol);
+        assert_eq!(idol.steps, 50);
+        assert_eq!(idol.guidance_scale, 4.0);
+        assert_eq!(idol.num_gaussians, 262_144);
+        let large = SplatParams { num_gaussians: 2_000_000, ..idol }.resolved(SplatModel::Idol);
+        assert_eq!(large.num_gaussians, 1_048_576);
     }
 
     #[test]
@@ -361,11 +381,23 @@ mod tests {
             channels: 2,
             data: vec![1.0, 3.0],
         };
-        bn_normalize(&mut packed, &[1.0, 1.0], &[0.0, 3.0]);
+        bn_normalize(&mut packed, &[1.0, 1.0], &[0.0, 3.0], VAE_BN_EPS);
         // channel 0: (1-1)/sqrt(0 + 1e-5) = 0
         assert_eq!(packed.data[0], 0.0);
         // channel 1: (3-1)/sqrt(3 + 1e-5)
         assert!((packed.data[1] - 2.0 / (3.0f32 + VAE_BN_EPS).sqrt()).abs() < 1e-6);
+        let vae_eps = 1e-4;
+        for model in [SplatModel::TripoSplat, SplatModel::Idol] {
+            let eps = model.vae_bn_eps(vae_eps);
+            let expected_eps = match model {
+                SplatModel::TripoSplat => VAE_BN_EPS,
+                SplatModel::Idol => vae_eps,
+            };
+            packed.data = vec![2.0, 3.0];
+            bn_normalize(&mut packed, &[1.0, 1.0], &[0.0, 3.0], eps);
+            assert_eq!(packed.data[0], 1.0 / expected_eps.sqrt());
+            assert_eq!(packed.data[1], 2.0 / (3.0 + expected_eps).sqrt());
+        }
     }
 
     #[test]

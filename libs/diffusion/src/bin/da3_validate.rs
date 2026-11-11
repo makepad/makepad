@@ -254,6 +254,10 @@ fn run(
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("da3_validate", model_main)
+}
+
+fn model_main() {
     let mut args = std::env::args_os().skip(1);
     let Some(model_path) = args.next() else {
         eprintln!("usage: da3-validate <model.safetensors> <input.png> <output-dir> [warm-runs]");

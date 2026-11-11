@@ -52,17 +52,17 @@ impl CliKind {
         }
     }
 
-    fn provider(self) -> Box<dyn ChatProvider + Send> {
+    fn provider(self, model: Option<&str>) -> Box<dyn ChatProvider + Send> {
         match self {
             // The in-app chat's turns are tool-driven, with the person waiting.
-            CliKind::ClaudeCode => Box::new(ClaudeCodeChatProvider::new(None).effort("low")),
+            CliKind::ClaudeCode => Box::new(CliModel::claude_provider(model)),
             CliKind::Codex => Box::new(CodexCliChatProvider::new(None)),
         }
     }
 
     /// Whether the CLI is installed here: `None` when it is, else why not.
     pub fn unavailable(self) -> Option<String> {
-        match self.provider().availability() {
+        match self.provider(None).availability() {
             ProviderAvailability::Unavailable { .. } => Some("not installed".into()),
             _ => None,
         }
@@ -211,6 +211,7 @@ fn safe_end(raw: &str, from: usize) -> usize {
 
 pub struct CliModel {
     kind: CliKind,
+    model: Option<String>,
     provider: Box<dyn ChatProvider + Send>,
     system: String,
     history: Vec<ChatMessage>,
@@ -239,9 +240,14 @@ pub struct CliModel {
 
 impl CliModel {
     pub fn new(kind: CliKind) -> CliModel {
+        Self::with_model(kind, None)
+    }
+
+    pub fn with_model(kind: CliKind, model: Option<&str>) -> CliModel {
         CliModel {
             kind,
-            provider: kind.provider(),
+            model: model.map(str::to_string),
+            provider: kind.provider(model),
             system: String::new(),
             history: Vec::new(),
             dynamic: String::new(),
@@ -258,6 +264,10 @@ impl CliModel {
             next_call: 0,
             queued: Vec::new(),
         }
+    }
+
+    pub(super) fn claude_provider(model: Option<&str>) -> ClaudeCodeChatProvider {
+        ClaudeCodeChatProvider::new(model.map(str::to_string)).effort("low")
     }
 
     fn begin(&mut self) {
@@ -432,7 +442,10 @@ impl CliModel {
 
 impl Model for CliModel {
     fn label(&self) -> String {
-        self.kind.label().to_string()
+        match self.model.as_deref() {
+            Some(model) => format!("{} · {}", self.kind.label(), super::models::claude_model_label(model)),
+            None => self.kind.label().to_string(),
+        }
     }
 
     fn configure(&mut self, system: &str, tools: &[ToolDefinition]) -> Result<(), String> {
@@ -474,7 +487,7 @@ impl Model for CliModel {
     fn reset(&mut self) {
         self.cancel();
         // A fresh CLI conversation: a new provider forgets the resume id.
-        self.provider = self.kind.provider();
+        self.provider = self.kind.provider(self.model.as_deref());
         self.history.clear();
         self.images.clear();
     }

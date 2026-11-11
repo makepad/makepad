@@ -12,6 +12,10 @@ use makepad_ai_speech::kokoro::{self, KokoroSpeaker};
 use makepad_ai_speech::SpeechAudio;
 
 fn main() {
+    makepad_ai_common::backend::metal::run_model_worker("tts_test", model_main)
+}
+
+fn model_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let text = args.get(0).cloned().unwrap_or_else(|| "Hello from Kokoro.".to_string());
     let out = args.get(2).cloned().unwrap_or_else(|| "tts_test.wav".to_string());

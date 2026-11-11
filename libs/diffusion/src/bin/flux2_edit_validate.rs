@@ -24,7 +24,6 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 struct Npy {
-    shape: Vec<usize>,
     descr: String,
     data: Vec<u8>,
 }
@@ -60,10 +59,22 @@ fn load_npy(path: &Path) -> Result<Npy, String> {
         .split(',')
         .filter_map(|part| part.trim().parse::<usize>().ok())
         .collect();
+    let item = descr
+        .get(2..)
+        .and_then(|digits| digits.parse::<usize>().ok())
+        .ok_or_else(|| format!("{}: unknown descr {descr}", path.display()))?;
+    let data = &bytes[header_start + header_len..];
+    let expected = shape.iter().product::<usize>() * item;
+    if expected != data.len() {
+        return Err(format!(
+            "{}: shape {shape:?} of {descr} needs {expected} bytes, found {}",
+            path.display(),
+            data.len()
+        ));
+    }
     Ok(Npy {
-        shape,
         descr,
-        data: bytes[header_start + header_len..].to_vec(),
+        data: data.to_vec(),
     })
 }
 
@@ -178,6 +189,10 @@ fn parse_args() -> Result<(PathBuf, PathBuf, bool, bool), String> {
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("flux2_edit_validate", model_main)
+}
+
+fn model_main() {
     if let Err(err) = run() {
         eprintln!("flux2-edit-validate: {err}");
         std::process::exit(1);

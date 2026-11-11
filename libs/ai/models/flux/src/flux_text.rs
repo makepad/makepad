@@ -80,7 +80,15 @@ impl FluxLoadedTextEncoders {
     /// which doubles as the cancel boundary (returning Err unwinds the load).
     pub fn load_split(
         bundle: &FluxResolvedBundle,
+        progress: Option<ProgressHook>,
+    ) -> Result<Self> {
+        Self::load_split_with_owners(bundle, progress, None)
+    }
+
+    pub(crate) fn load_split_with_owners(
+        bundle: &FluxResolvedBundle,
         mut progress: Option<ProgressHook>,
+        owners: Option<(Option<std::sync::Arc<crate::backend::WeightOwner>>, Option<std::sync::Arc<crate::backend::WeightOwner>>)>,
     ) -> Result<Self> {
         let clip_l_path = bundle
             .clip_l_path
@@ -94,13 +102,14 @@ impl FluxLoadedTextEncoders {
         // Combined checkpoints scope each component out of the one file;
         // split bundles pass `None` prefixes and load unchanged.
         let prefixes = bundle.component_prefixes();
-        let clip_l = LoadedClipLWeights::load_component(clip_l_path, prefixes.clip_l)?;
+        let clip_l = LoadedClipLWeights::load_component_with_owner(clip_l_path, prefixes.clip_l, owners.as_ref().and_then(|o| o.0.clone()))?;
         Ok(Self {
             clip_l,
-            t5xxl: LoadedT5xxlWeights::load_component_with_progress(
+            t5xxl: LoadedT5xxlWeights::load_component_with_owner(
                 t5xxl_path,
                 prefixes.t5xxl,
                 progress.take(),
+                owners.and_then(|o| o.1),
             )?,
         })
     }

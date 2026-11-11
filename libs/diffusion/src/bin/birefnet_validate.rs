@@ -243,6 +243,10 @@ fn run(model_path: PathBuf, input_spec: Option<PathBuf>) -> Result<(), String> {
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("birefnet_validate", model_main)
+}
+
+fn model_main() {
     let mut args = std::env::args_os().skip(1);
     let Some(model) = args.next() else {
         eprintln!("usage: birefnet-validate <model.safetensors> [oracle-dir|input.png]");

@@ -675,6 +675,7 @@ mod tests {
             chat_session: String::new(),
             chat_system: String::new(),
             chat_messages: Vec::new(),
+            claude_model: String::new(),
             chat_images: Vec::new(),
             target_domain: "image".to_string(),
             identity_anchor: String::new(),

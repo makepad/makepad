@@ -169,6 +169,10 @@ fn write_npy_u8(path: &Path, shape: &[usize], data: &[u8]) -> Result<(), String>
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("h3_generate", model_main)
+}
+
+fn model_main() {
     let args: Vec<String> = std::env::args().collect();
     let mut opts: HashMap<String, String> = HashMap::new();
     let mut key: Option<String> = None;

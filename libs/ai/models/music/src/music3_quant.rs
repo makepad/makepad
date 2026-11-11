@@ -125,6 +125,7 @@ impl Music3GgufPaths {
 }
 
 pub struct Music3GgufFile {
+    pub(crate) owner: Arc<makepad_ai_common::backend::WeightOwner>,
     pub role: Music3GgufRole,
     pub path: PathBuf,
     pub architecture: String,
@@ -161,6 +162,7 @@ impl Music3GgufFile {
             DiffusionError::model(format!("music3 gguf {}: {err}", path.display()))
         })?;
         Ok(Self {
+            owner: Arc::new(makepad_ai_common::backend::WeightOwner::new("music3")),
             role,
             path,
             architecture,
@@ -576,7 +578,7 @@ impl Music3GgufFile {
     }
 
     pub fn load_keyed_bytes(&self, namespace: &str, key: &str) -> std::result::Result<Vec<u8>, String> {
-        if namespace.ends_with("-f16") {
+        if namespace.ends_with("f16::") {
             self.bf16_as_f16_uncached(key)
                 .ok_or_else(|| format!("music3 bf16-as-f16 {key}"))
         } else {
@@ -590,8 +592,8 @@ impl Music3GgufFile {
         a: &[f32],
         m: usize,
     ) -> Option<Vec<Vec<f32>>> {
-        let ns = format!("music3-{}", self.role.as_str());
-        let ns_f16 = format!("music3-{}-f16", self.role.as_str());
+        let ns = self.owner.namespace();
+        let ns_f16 = format!("{}f16::", self.owner.namespace());
         let mut specs: Vec<(&str, u32, usize, bool)> = Vec::with_capacity(names.len());
         let mut k0 = 0usize;
         for name in names {
@@ -615,7 +617,7 @@ impl Music3GgufFile {
             .map(|(name, ty, n, is_f16)| makepad_ai_common::backend::metal::MatmulNtGgmlBytesKeyedMatrix {
                 bt_ggml_type: *ty,
                 n: *n,
-                namespace: if *is_f16 { ns_f16.as_str() } else { ns.as_str() },
+                namespace: if *is_f16 { ns_f16.as_str() } else { ns },
                 cache_key: name,
             })
             .collect();
@@ -624,7 +626,7 @@ impl Music3GgufFile {
             m,
             k0,
             &mats,
-            |namespace, key| self.load_keyed_bytes(namespace, key),
+            |namespace, key| self.load_keyed_bytes(namespace, key).map(std::borrow::Cow::Owned),
         )
     }
 
@@ -660,8 +662,8 @@ impl Music3GgufFile {
         ty: TensorType,
     ) -> Option<Vec<f32>> {
         let ggml_type = ty.ggml_type();
-        let ns = format!("music3-{}", self.role.as_str());
-        let load = || self.read_bytes_uncached(name).map_err(|err| err.to_string());
+        let ns = self.owner.namespace();
+        let load = || self.read_bytes_uncached(name).map(std::borrow::Cow::Owned).map_err(|err| err.to_string());
         makepad_ai_common::backend::metal::try_matmul_nt_ggml_bytes_keyed(
             a, ggml_type, m, k, n, &ns, name, load,
         )
@@ -675,9 +677,10 @@ impl Music3GgufFile {
         k: usize,
         n: usize,
     ) -> Option<Vec<f32>> {
-        let ns = format!("music3-{}-f16", self.role.as_str());
+        let ns = format!("{}f16::", self.owner.namespace());
         let load = || {
             self.bf16_as_f16_uncached(name)
+                .map(std::borrow::Cow::Owned)
                 .ok_or_else(|| format!("music3 bf16-as-f16 {name}"))
         };
         makepad_ai_common::backend::metal::try_matmul_nt_ggml_bytes_keyed(

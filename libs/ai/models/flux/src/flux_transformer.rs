@@ -1,3 +1,4 @@
+use crate::backend::WeightOwner;
 use crate::backend::{
     create_graph_session, gpu_act_f16_enabled, gpu_attention_packed, gpu_concat_cols,
     gpu_concat_rows,
@@ -18,6 +19,7 @@ use crate::flux::{
 };
 use crate::flux_lora::FluxLoraStack;
 use crate::flux_text::FluxConditioning;
+use crate::graph_growth::{build_with_graph_growth, GraphReserve};
 use crate::{emit_byte_progress, emit_progress, DiffusionError, ProgressHook, Result};
 use makepad_ai_common::backend::{try_matmul_nt_ggml_bytes, try_matmul_nt_ggml_bytes_cached};
 use makepad_ai_common::{
@@ -35,10 +37,10 @@ use std::time::Instant;
 const FLUX_TIMESTEP_EMBED_DIM: i32 = 256;
 const FLUX_LAYER_NORM_EPSILON: f32 = 1.0e-6;
 const DEFAULT_GRAPH_EXTRA_BYTES: usize = 4usize * 1024 * 1024 * 1024;
-const MAX_GRAPH_GROWTH_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Debug)]
 pub struct LoadedFluxTransformerWeights {
+    pub(crate) owner: Arc<WeightOwner>,
     pub ctx: Context,
     pub tensor_ids: BTreeMap<String, TensorId>,
     pub config: FluxTransformerConfig,
@@ -54,10 +56,15 @@ pub struct LoadedFluxTransformerWeights {
     /// stay on the lazy `try_matmul_nt_ggml_bytes` path.
     pub quantized: bool,
     /// Identity of the LoRA adaptation merged into these weights (empty =
-    /// pristine). It is part of [`flux_cache_namespace`], so patched and
+    /// pristine). Each load mints an owner, so patched and
     /// pristine bytes of the same checkpoint can never share a device
     /// weight-cache entry.
     pub lora_fingerprint: String,
+    /// The combined-checkpoint component these weights were read from and
+    /// the adapters merged into them, so a reload with a larger graph
+    /// reserve reads the same bytes.
+    prefix: Option<String>,
+    loras: FluxLoraStack,
     graph_extra_bytes: usize,
 }
 
@@ -177,6 +184,11 @@ struct ResidentMatrix<'a> {
 }
 
 impl LoadedFluxTransformerWeights {
+    pub(crate) fn load_component_with_owner(path: impl AsRef<Path>, prefix: Option<&str>,
+        loras: &FluxLoraStack, progress: Option<ProgressHook>, owner: Option<Arc<WeightOwner>>) -> Result<Self> {
+        Self::load_scoped_with_owner(path, prefix, DEFAULT_GRAPH_EXTRA_BYTES, loras, progress, owner)
+    }
+
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         Self::load_with_extra(path, DEFAULT_GRAPH_EXTRA_BYTES)
     }
@@ -257,7 +269,18 @@ impl LoadedFluxTransformerWeights {
         prefix: Option<&str>,
         extra_bytes: usize,
         loras: &FluxLoraStack,
+        progress: Option<ProgressHook>,
+    ) -> Result<Self> {
+        Self::load_scoped_with_owner(path, prefix, extra_bytes, loras, progress, None)
+    }
+
+    pub(crate) fn load_scoped_with_owner(
+        path: impl AsRef<Path>,
+        prefix: Option<&str>,
+        extra_bytes: usize,
+        loras: &FluxLoraStack,
         mut progress: Option<ProgressHook>,
+        owner: Option<Arc<WeightOwner>>,
     ) -> Result<Self> {
         if crate::flux_gguf::is_gguf_path(&path) {
             if prefix.is_some() {
@@ -274,7 +297,7 @@ impl LoadedFluxTransformerWeights {
                      use the FP8 safetensors checkpoint",
                 ));
             }
-            return crate::flux_gguf::load_weights(path, extra_bytes, progress);
+            return crate::flux_gguf::load_weights_with_owner(path, extra_bytes, progress, owner);
         }
         let header = crate::flux::flux_component_header(path.as_ref(), prefix)?;
         let inspect = FluxTransformerInspection::from_header(&header)?;
@@ -322,6 +345,7 @@ impl LoadedFluxTransformerWeights {
         }
 
         Ok(Self {
+            owner: owner.unwrap_or_else(|| Arc::new(WeightOwner::new("flux_transformer"))),
             ctx,
             tensor_ids,
             config: inspect.config,
@@ -329,6 +353,8 @@ impl LoadedFluxTransformerWeights {
             f8_weights,
             quantized: false,
             lora_fingerprint,
+            prefix: prefix.map(str::to_owned),
+            loras: loras.clone(),
             graph_extra_bytes: extra_bytes,
         })
     }
@@ -341,8 +367,10 @@ impl LoadedFluxTransformerWeights {
         f8_weights: bool,
         quantized: bool,
         extra_bytes: usize,
+        owner: Option<Arc<WeightOwner>>,
     ) -> Self {
         Self {
+            owner: owner.unwrap_or_else(|| Arc::new(WeightOwner::new("flux_transformer"))),
             ctx,
             tensor_ids,
             config,
@@ -352,6 +380,8 @@ impl LoadedFluxTransformerWeights {
             // The GGUF tier refuses LoRAs outright (see
             // `load_scoped_with_loras`), so a from_loaded arena is pristine.
             lora_fingerprint: String::new(),
+            prefix: None,
+            loras: FluxLoraStack::default(),
             graph_extra_bytes: extra_bytes,
         }
     }
@@ -387,9 +417,22 @@ impl LoadedFluxTransformerWeights {
         }
         Ok(parts)
     }
+}
 
+impl GraphReserve for LoadedFluxTransformerWeights {
     fn graph_reserve_bytes(&self) -> usize {
         self.graph_extra_bytes
+    }
+
+    fn reloaded_with_graph_reserve(&self, extra_bytes: usize) -> Result<Self> {
+        Self::load_scoped_with_owner(
+            &self.path,
+            self.prefix.as_deref(),
+            extra_bytes,
+            &self.loras,
+            None,
+            Some(self.owner.clone()),
+        )
     }
 }
 
@@ -506,59 +549,45 @@ impl CompiledFluxTransformer {
         latent_shape: FluxLatentShape,
         progress: &mut Option<ProgressHook>,
     ) -> Result<(CompiledFluxTransformerGraph, FluxTransformerCompileTiming)> {
-        for attempt in 0..=MAX_GRAPH_GROWTH_ATTEMPTS {
-            let build_start = Instant::now();
+        let mut build_start = Instant::now();
+        let graph = build_with_graph_growth(weights, |weights| {
+            build_start = Instant::now();
             emit_progress(progress, "compile transformer graph", 0.0)?;
-            let graph = match build_flux_transformer_graph(weights, conditioning, latent_shape) {
-                Ok(graph) => graph,
-                Err(err) if is_context_oom(&err) && attempt < MAX_GRAPH_GROWTH_ATTEMPTS => {
-                    let next_extra = next_graph_reserve_bytes(weights)?;
-                    *weights = LoadedFluxTransformerWeights::load_with_extra(
-                        weights.path.clone(),
-                        next_extra,
-                    )?;
-                    continue;
-                }
-                Err(err) => return Err(err),
-            };
-            let graph_build_ms = build_start.elapsed().as_secs_f64() * 1000.0;
-            let prepare_start = Instant::now();
-            emit_progress(progress, "compile transformer prepare", 0.35)?;
-            let prepared = prepare_graph(&runtime, &weights.ctx, &graph.graph)?;
-            let fused = prepared
-                .nodes
-                .iter()
-                .filter(|node| !node.fuse_src_ids.is_empty())
-                .count();
-            eprintln!(
-                "flux dit compiled nodes={} fused={} main_buffer={}",
-                prepared.nodes.len(),
-                fused,
-                prepared.main_buffer_size
-            );
-            let graph_prepare_ms = prepare_start.elapsed().as_secs_f64() * 1000.0;
-            let session_start = Instant::now();
-            emit_progress(progress, "compile transformer session", 0.7)?;
-            let session = create_graph_session(
-                &runtime,
-                &weights.ctx,
-                &prepared,
-                BufferStorageMode::Shared,
-                BufferStorageMode::Shared,
-            )?;
-            let session_create_ms = session_start.elapsed().as_secs_f64() * 1000.0;
-            return Ok((
-                CompiledFluxTransformerGraph { graph, session },
-                FluxTransformerCompileTiming {
-                    graph_build_ms,
-                    graph_prepare_ms,
-                    session_create_ms,
-                },
-            ));
-        }
-
-        Err(DiffusionError::model(
-            "flux transformer graph compilation exhausted context growth attempts",
+            build_flux_transformer_graph(weights, conditioning, latent_shape)
+        })?;
+        let graph_build_ms = build_start.elapsed().as_secs_f64() * 1000.0;
+        let prepare_start = Instant::now();
+        emit_progress(progress, "compile transformer prepare", 0.35)?;
+        let prepared = prepare_graph(&runtime, &weights.ctx, &graph.graph)?;
+        let fused = prepared
+            .nodes
+            .iter()
+            .filter(|node| !node.fuse_src_ids.is_empty())
+            .count();
+        eprintln!(
+            "flux dit compiled nodes={} fused={} main_buffer={}",
+            prepared.nodes.len(),
+            fused,
+            prepared.main_buffer_size
+        );
+        let graph_prepare_ms = prepare_start.elapsed().as_secs_f64() * 1000.0;
+        let session_start = Instant::now();
+        emit_progress(progress, "compile transformer session", 0.7)?;
+        let session = create_graph_session(
+            &runtime,
+            &weights.ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )?;
+        let session_create_ms = session_start.elapsed().as_secs_f64() * 1000.0;
+        Ok((
+            CompiledFluxTransformerGraph { graph, session },
+            FluxTransformerCompileTiming {
+                graph_build_ms,
+                graph_prepare_ms,
+                session_create_ms,
+            },
         ))
     }
 
@@ -1424,7 +1453,7 @@ impl LazyFluxTransformer {
                 // Drop the old graph first: its Drop unpins the pool buffers.
                 *slot = None;
                 *slot = Some(FluxDeviceGraphState {
-                    namespace,
+                    namespace: namespace.to_owned(),
                     image_token_count: self.image_token_count,
                     text_token_count: self.text_token_count,
                     f16_activations,
@@ -2537,7 +2566,7 @@ fn linear_rows(
             part.rows,
             &flux_cache_namespace(weights),
             &part.cache_key,
-            || Ok(part.bytes.to_vec()),
+            || Ok(std::borrow::Cow::Borrowed(part.bytes)),
         ) {
             match result {
                 Ok(values) => values,
@@ -2973,23 +3002,8 @@ fn push_debug_heads(
     });
 }
 
-pub(crate) fn flux_cache_namespace(weights: &LoadedFluxTransformerWeights) -> String {
-    flux_namespace_for(&weights.path, &weights.lora_fingerprint)
-}
-
-/// Device/host weight-cache namespace of a transformer arena.
-///
-/// The LoRA fingerprint is part of the identity: merged bytes must never
-/// land in (or be served from) the pristine checkpoint's cache entries.
-/// Pristine loads keep the historical namespace unchanged, and it stays a
-/// strict PREFIX of every adapted one, so evicting the checkpoint evicts all
-/// of its adaptations too.
-fn flux_namespace_for(path: &Path, lora_fingerprint: &str) -> String {
-    if lora_fingerprint.is_empty() {
-        format!("flux_transformer:{}", path.display())
-    } else {
-        format!("flux_transformer:{}#lora:{}", path.display(), lora_fingerprint)
-    }
+pub(crate) fn flux_cache_namespace(weights: &LoadedFluxTransformerWeights) -> &str {
+    weights.owner.namespace()
 }
 
 /// The f16 activation spine requires f16-accumulate gemms, which the F8
@@ -3022,11 +3036,8 @@ fn match_activation_type(ctx: &mut Context, src: TensorId, like: TensorId) -> Re
     cast_activation(ctx, src, ty)
 }
 
-/// Drops every device weight-cache entry belonging to `weights` (the whole
-/// unet, ~24GB in f16 on dev/schnell). The cache keys on the transformer
-/// path and never evicts on its own — call this before replacing a resident
-/// pipeline with a DIFFERENT model on the same thread, or a 32GB card ends
-/// up asked to hold two flux unets. Returns the number of buffers freed.
+/// Immediately evict this owner's device weights and decoded host expansions
+/// before loading a different model. Owner drop also retires device entries.
 pub(crate) fn evict_device_weight_cache(weights: &LoadedFluxTransformerWeights) -> usize {
     // The host f32 expansions key on the same namespace and never evict on
     // their own; a checkpoint (or LoRA) switch must drop them too, or the
@@ -4781,28 +4792,6 @@ fn flux_position_ids(text_token_count: usize, latent_shape: FluxLatentShape) -> 
 mod tests {
     use super::*;
 
-    /// LoRA-merged weights must not share a cache namespace with the
-    /// pristine checkpoint (or with a different adapter set), and the
-    /// pristine namespace must stay a prefix of every adapted one so one
-    /// evict frees them all.
-    #[test]
-    fn cache_namespace_separates_lora_variants_under_one_checkpoint_prefix() {
-        let path = Path::new("/models/flux1-dev-fp8.safetensors");
-        let pristine = flux_namespace_for(path, "");
-        let style = flux_namespace_for(path, "style@0.8");
-        let other = flux_namespace_for(path, "style@0.4");
-        assert_eq!(pristine, "flux_transformer:/models/flux1-dev-fp8.safetensors");
-        assert_ne!(pristine, style);
-        assert_ne!(style, other);
-        assert!(style.starts_with(&pristine));
-        assert!(other.starts_with(&pristine));
-        // A different checkpoint never collides with an adapted one.
-        assert!(
-            !flux_namespace_for(Path::new("/models/flux1-schnell-fp8.safetensors"), "style@0.8")
-                .starts_with(&pristine)
-        );
-    }
-
     #[test]
     fn flux_position_ids_are_axis_major_for_mrope() {
         let latent_shape = FluxLatentShape::from_image_size(32, 16).unwrap();
@@ -4950,15 +4939,4 @@ fn tensor_extents_usize(tensor: &Tensor) -> Result<[usize; 4]> {
         usize::try_from(tensor.ne[3])
             .map_err(|_| DiffusionError::model("flux tensor extent ne3 exceeds usize"))?,
     ])
-}
-
-fn is_context_oom(err: &DiffusionError) -> bool {
-    matches!(err, DiffusionError::Model(message) if message.starts_with("context out of memory allocating "))
-}
-
-fn next_graph_reserve_bytes(weights: &LoadedFluxTransformerWeights) -> Result<usize> {
-    weights
-        .graph_reserve_bytes()
-        .checked_mul(2)
-        .ok_or_else(|| DiffusionError::model("flux graph reserve overflow"))
 }

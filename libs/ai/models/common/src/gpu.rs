@@ -2173,6 +2173,7 @@ mod imp {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
+    /// On Metal, runs the f32 flash kernel (f32 Q, K, V): more exact than CUDA bf16 operands, same call.
     pub fn gpu_attention_packed_flash_bf16(
         _q: &GpuTensor,
         _k: &GpuTensor,
@@ -2180,7 +2181,14 @@ mod imp {
         _head_count: usize,
         _scale: f32,
     ) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::gpu_tensor::attention_packed(_q, _k, _v, _head_count, _scale);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_sdpa_flash_f16(
@@ -3173,7 +3181,14 @@ mod imp {
         _gate_offset: usize,
         _n: usize,
     ) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::gpu_tensor::swiglu_gate_first(_x, _gate_offset, _n);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub struct GpuBf16Buf {
@@ -3717,7 +3732,14 @@ mod imp {
         _head_count: usize,
         _scale: f32,
     ) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::gpu_tensor::attention_packed(_q, _k, _v, _head_count, _scale);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_attention_packed_sliding(
@@ -3973,7 +3995,14 @@ mod imp {
     }
 
     pub fn gpu_slice_cols(_x: &GpuTensor, _start: usize, _len: usize) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::gpu_tensor::slice_cols(_x, _start, _len);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_snake_cols(_x: &GpuTensor, _alpha: &GpuTensor) -> Result<GpuTensor, String> {
@@ -3981,7 +4010,14 @@ mod imp {
     }
 
     pub fn gpu_concat_cols(_parts: &[&GpuTensor]) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::gpu_tensor::concat_cols(_parts);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_slice_rows(_x: &GpuTensor, _start: usize, _len: usize) -> Result<GpuTensor, String> {
@@ -4515,7 +4551,28 @@ mod imp {
         _weights: &[f32],
         _out_channels: usize,
     ) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (_cache_namespace, _weight_cache_key);
+            let plane = _width * _height;
+            if _input.cols() != plane || _in_channels > _input.rows() {
+                return Err(format!(
+                    "gpu_realesrgan_conv3x3_f32 shapes: in {}x{} (use {}), plane {plane}",
+                    _input.rows(), _input.cols(), _in_channels
+                ));
+            }
+            if _weights.len() != _out_channels * _in_channels * 9 {
+                return Err("gpu_realesrgan_conv3x3_f32 weight length mismatch".into());
+            }
+            let input = makepad_ai_metal::gpu_tensor::slice_rows(_input, 0, _in_channels)?;
+            return makepad_ai_metal::gpu_tensor::conv2d_planar(
+                &input, _width, _height, _weights, &[], _out_channels, 3, 3, 1, 1,
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_realesrgan_bias_lrelu_f32(
@@ -4525,7 +4582,15 @@ mod imp {
         _bias: &[f32],
         _slope: f32,
     ) -> Result<(), String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (_cache_namespace, _bias_cache_key);
+            return makepad_ai_metal::gpu_tensor::bias_lrelu_inplace(_tensor, _bias, _slope);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_realesrgan_quantize_rgb8_f32(_x: &GpuTensor) -> Result<Vec<u8>, String> {
@@ -4710,7 +4775,14 @@ mod imp {
     }
 
     pub fn gpu_birefnet_global_avg_pool(_x: &GpuTensor) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::gpu_tensor::global_avg_pool(_x);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_birefnet_broadcast(
@@ -4809,7 +4881,12 @@ mod imp {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
-    pub fn gpu_pool_clear() {}
+    pub fn gpu_pool_clear() {
+        #[cfg(target_os = "macos")]
+        if let Err(error) = makepad_ai_metal::gpu_tensor::pool_clear() {
+            eprintln!("{error}");
+        }
+    }
 
     pub fn gpu_pool_phase_end() {}
 

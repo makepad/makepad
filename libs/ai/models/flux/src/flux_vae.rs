@@ -1,3 +1,4 @@
+use crate::backend::WeightOwner;
 use crate::backend::{
     create_graph_session, gpu_add, gpu_attention_planar_single, gpu_conv2d_planar_cached,
     gpu_device_available, gpu_download, gpu_group_norm_planar, gpu_pool_cap_override,
@@ -6,6 +7,7 @@ use crate::backend::{
     try_matmul_nt_f32, BufferStorageMode, GpuTensor, GraphSession, GraphTensorWrite, Runtime,
 };
 use crate::flux::FluxLatentShape;
+use crate::graph_growth::{build_with_graph_growth, GraphReserve};
 use crate::{emit_progress, DiffusionError, ProgressHook, Result};
 use makepad_ai_common::{
     bf16_to_f32, f16_to_f32, f32_to_f16, ggml_pad, BufferUsage, Context, Graph, InitParams, Op,
@@ -14,17 +16,20 @@ use makepad_ai_common::{
 use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const VAE_GROUP_NORM_EPSILON: f32 = 1.0e-6;
 // Graph intermediates are no_alloc; this only covers input + metadata.
 const DEFAULT_GRAPH_EXTRA_BYTES: usize = 64 * 1024 * 1024;
-const MAX_GRAPH_GROWTH_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Debug)]
 pub struct LoadedFluxVaeWeights {
+    pub(crate) owner: Arc<WeightOwner>,
     pub ctx: Context,
     pub tensor_ids: BTreeMap<String, TensorId>,
     pub path: PathBuf,
+    /// The combined-checkpoint component these weights were read from.
+    prefix: Option<String>,
     graph_extra_bytes: usize,
 }
 
@@ -119,6 +124,11 @@ struct ConvKernel {
 }
 
 impl LoadedFluxVaeWeights {
+    pub(crate) fn load_component_with_owner(path: impl AsRef<Path>, prefix: Option<&str>,
+        owner: Option<Arc<WeightOwner>>) -> Result<Self> {
+        Self::load_scoped_with_owner(path, prefix, DEFAULT_GRAPH_EXTRA_BYTES, owner)
+    }
+
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         Self::load_with_extra(path, DEFAULT_GRAPH_EXTRA_BYTES)
     }
@@ -141,6 +151,15 @@ impl LoadedFluxVaeWeights {
         prefix: Option<&str>,
         extra_bytes: usize,
     ) -> Result<Self> {
+        Self::load_scoped_with_owner(path, prefix, extra_bytes, None)
+    }
+
+    pub(crate) fn load_scoped_with_owner(
+        path: impl AsRef<Path>,
+        prefix: Option<&str>,
+        extra_bytes: usize,
+        owner: Option<Arc<WeightOwner>>,
+    ) -> Result<Self> {
         let header = crate::flux::flux_component_header(path.as_ref(), prefix)?;
         let total_bytes = vae_weight_total_bytes(&header, extra_bytes)?;
         let mut ctx = Context::new(InitParams {
@@ -152,9 +171,11 @@ impl LoadedFluxVaeWeights {
         load_vae_weight_bytes(&mut ctx, &header, &tensor_ids)?;
 
         Ok(Self {
+            owner: owner.unwrap_or_else(|| Arc::new(WeightOwner::new("flux_vae"))),
             ctx,
             tensor_ids,
             path: header.path,
+            prefix: prefix.map(str::to_owned),
             graph_extra_bytes: extra_bytes,
         })
     }
@@ -177,10 +198,6 @@ impl LoadedFluxVaeWeights {
 
     fn has_tensor(&self, name: &str) -> bool {
         self.tensor_ids.contains_key(name)
-    }
-
-    fn graph_reserve_bytes(&self) -> usize {
-        self.graph_extra_bytes
     }
 }
 
@@ -235,39 +252,24 @@ impl CompiledFluxVae {
         weights: &mut LoadedFluxVaeWeights,
         latent_shape: FluxLatentShape,
     ) -> Result<Self> {
-        for attempt in 0..=MAX_GRAPH_GROWTH_ATTEMPTS {
-            let graph = match build_flux_vae_decoder_graph(weights, latent_shape) {
-                Ok(graph) => graph,
-                Err(err) if is_context_oom(&err) && attempt < MAX_GRAPH_GROWTH_ATTEMPTS => {
-                    let next_extra = next_graph_reserve_bytes(weights)?;
-                    *weights =
-                        LoadedFluxVaeWeights::load_with_extra(weights.path.clone(), next_extra)?;
-                    continue;
-                }
-                Err(err) => return Err(err),
-            };
-            let prepared = prepare_graph(&runtime, &weights.ctx, &graph.graph)?;
-            eprintln!(
-                "flux vae compiled main_buffer={} used={} arena={}",
-                prepared.main_buffer_size,
-                weights.ctx.used_mem(),
-                weights.ctx.mem_buffer().len()
-            );
-            let session = create_graph_session(
-                &runtime,
-                &weights.ctx,
-                &prepared,
-                BufferStorageMode::Shared,
-                BufferStorageMode::Shared,
-            )?;
-            return Ok(Self {
-                inner: FluxVaeExecutor::Compiled(CompiledFluxVaeGraph { graph, session }),
-            });
-        }
-
-        Err(DiffusionError::model(
-            "flux vae graph compilation exhausted context growth attempts",
-        ))
+        let graph = build_with_graph_growth(weights, |weights| build_flux_vae_decoder_graph(weights, latent_shape))?;
+        let prepared = prepare_graph(&runtime, &weights.ctx, &graph.graph)?;
+        eprintln!(
+            "flux vae compiled main_buffer={} used={} arena={}",
+            prepared.main_buffer_size,
+            weights.ctx.used_mem(),
+            weights.ctx.mem_buffer().len()
+        );
+        let session = create_graph_session(
+            &runtime,
+            &weights.ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )?;
+        Ok(Self {
+            inner: FluxVaeExecutor::Compiled(CompiledFluxVaeGraph { graph, session }),
+        })
     }
 
     pub fn backend_name(&self) -> &'static str {
@@ -1876,13 +1878,12 @@ struct GpuSpatial {
     channels: usize,
 }
 
-pub(crate) fn flux_vae_cache_namespace(weights: &LoadedFluxVaeWeights) -> String {
-    format!("flux_vae:{}", weights.path.display())
+pub(crate) fn flux_vae_cache_namespace(weights: &LoadedFluxVaeWeights) -> &str {
+    weights.owner.namespace()
 }
 
 /// Drops every device weight-cache entry belonging to these vae weights.
-/// Called on a model switch — combined checkpoints key all components on
-/// the outgoing checkpoint path.
+/// Called on a model switch; owner drop also retires the entries.
 pub(crate) fn evict_device_weight_cache(weights: &LoadedFluxVaeWeights) -> usize {
     crate::backend::gpu_weight_cache_evict_prefix(&flux_vae_cache_namespace(weights)).unwrap_or(0)
 }
@@ -2511,20 +2512,19 @@ fn require_tensor_id(tensor_ids: &BTreeMap<String, TensorId>, name: &str) -> Res
     })
 }
 
+impl GraphReserve for LoadedFluxVaeWeights {
+    fn graph_reserve_bytes(&self) -> usize {
+        self.graph_extra_bytes
+    }
+
+    fn reloaded_with_graph_reserve(&self, extra_bytes: usize) -> Result<Self> {
+        Self::load_scoped_with_owner(&self.path, self.prefix.as_deref(), extra_bytes, Some(self.owner.clone()))
+    }
+}
+
 fn require_tensor<'a>(ctx: &'a Context, id: TensorId) -> Result<&'a Tensor> {
     ctx.tensor(id)
         .ok_or_else(|| DiffusionError::model(format!("invalid flux vae tensor id {}", id)))
-}
-
-fn is_context_oom(err: &DiffusionError) -> bool {
-    matches!(err, DiffusionError::Model(message) if message.starts_with("context out of memory allocating "))
-}
-
-fn next_graph_reserve_bytes(weights: &LoadedFluxVaeWeights) -> Result<usize> {
-    weights
-        .graph_reserve_bytes()
-        .checked_mul(2)
-        .ok_or_else(|| DiffusionError::model("flux vae graph reserve overflow"))
 }
 
 // ---------------------------------------------------------------------------
@@ -3021,9 +3021,11 @@ mod encoder_tests {
         ctx.write_tensor_data(b_id, &f32s_to_le_bytes(&bias)).unwrap();
         tensor_ids.insert(bias_name, b_id);
         LoadedFluxVaeWeights {
+            owner: Arc::new(WeightOwner::new("flux_vae")),
             ctx,
             tensor_ids,
             path: PathBuf::from("<test>"),
+            prefix: None,
             graph_extra_bytes: DEFAULT_GRAPH_EXTRA_BYTES,
         }
     }
@@ -3370,9 +3372,11 @@ mod tests {
             tensor_ids.insert(name.to_string(), id);
         }
         LoadedFluxVaeWeights {
+            owner: Arc::new(WeightOwner::new("flux_vae")),
             ctx,
             tensor_ids,
             path: PathBuf::from("<test>"),
+            prefix: None,
             graph_extra_bytes: 0,
         }
     }

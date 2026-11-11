@@ -19,7 +19,11 @@ fn usage() -> ! {
     std::process::exit(1);
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
+    makepad_diffusion::backend::metal::run_model_worker("flux_decode_latent", || std::process::Termination::report(model_main()))
+}
+
+fn model_main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments: Vec<String> = env::args().skip(1).collect();
     let latent_format = if let Some(index) = arguments.iter().position(|arg| arg == "--latent-format") {
         if index + 1 >= arguments.len() { usage(); }

@@ -73,6 +73,8 @@ mesh = ["matte-native", "depth-native", "dep:makepad-ai-trellis", "dep:makepad-a
 matte-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
 # Native DA3METRIC-LARGE metric depth. Independent of `mesh`.
 depth-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
+# MapAnything multi-view geometry; CUDA only.
+multiview-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common", "dep:makepad-ai-cuda"]
 # Native SAM 3.1 multiplex segmentation. Independent of `mesh`.
 segment-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
 # Native SAM 3D Body pose estimation.
@@ -233,6 +235,11 @@ required-features = ["local"]
 name = "program-bench"
 path = "src/bin/program_bench.rs"
 required-features = ["kernel"]
+
+[[bin]]
+name = "multiview-check"
+path = "src/bin/multiview_check.rs"
+required-features = ["multiview-native"]
 
 [[test]]
 name = "program_remote"

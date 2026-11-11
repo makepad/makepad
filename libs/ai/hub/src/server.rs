@@ -61,9 +61,6 @@ pub struct ServiceHandle {
     pub http_thread: makepad_network::HttpServerThread,
     pub route_thread: JoinHandle<()>,
     pub worker_thread: JoinHandle<()>,
-    /// One per chat lane. They take from the chat admission class only, so a
-    /// chat turn never waits on the heavy worker and vice versa.
-    pub chat_threads: Vec<JoinHandle<()>>,
     /// The per-data-dir lock. Hold this for the life of the daemon (main.rs
     /// never drops its handle). Dropping the handle releases it (tests rely
     /// on that for restarts).
@@ -98,7 +95,7 @@ impl ServiceHandle {
     /// loopback server and every worker thread end, the loaded models are released and the
     /// service locks are dropped. A new [`start_service`] may follow in the same process.
     pub fn stop(self) {
-        let ServiceHandle { activity_monitor, http_thread, route_thread, worker_thread, chat_threads, singleton, shared, mut fleet_run, fleet_view_thread, node_entry, .. } = self;
+        let ServiceHandle { activity_monitor, http_thread, route_thread, worker_thread, singleton, shared, mut fleet_run, fleet_view_thread, node_entry, .. } = self;
         if let Some(entry) = node_entry {
             let _ = std::fs::remove_file(entry);
         }
@@ -123,18 +120,7 @@ impl ServiceHandle {
         crate::fleet_report::stop_probe_workers();
         let _ = route_thread.join();
         let _ = worker_thread.join();
-        for thread in chat_threads {
-            let _ = thread.join();
-        }
         drop(activity_monitor);
-        with_backends(&shared, |backends| {
-            for (id, backend) in backends.iter_mut() {
-                if let Err(error) = backend.unload() {
-                    eprintln!("{}: stop: unload {id}: {error}", crate::SERVICE_NAME);
-                }
-            }
-            backends.clear();
-        });
         shared.residency_claims.lock().unwrap_or_else(|e| e.into_inner()).clear();
         drop(singleton);
     }
@@ -461,8 +447,6 @@ pub fn start_service(mut config: ServiceConfig) -> Result<ServiceHandle, AssetAi
         drop(shared);
         std::thread::park_timeout(Duration::from_secs(5));
     }).expect("spawn fleet view worker");
-    let worker_shared = shared.clone();
-    let worker_thread = std::thread::spawn(move || worker_loop(worker_shared));
     let reaper_shared = shared.clone();
     std::thread::Builder::new()
         .name("ai-hub-lease-reaper".into())
@@ -503,13 +487,15 @@ pub fn start_service(mut config: ServiceConfig) -> Result<ServiceHandle, AssetAi
         })
         .collect();
 
+    let worker_shared = shared.clone();
+    let worker_thread = std::thread::spawn(move || worker_loop(worker_shared, chat_threads));
+
     Ok(ServiceHandle {
         activity_monitor,
         addr,
         http_thread,
         route_thread,
         worker_thread,
-        chat_threads,
         singleton,
         shared,
         fleet_run,
@@ -2091,6 +2077,13 @@ fn route_generate(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::
             return error_json(400, e.to_string());
         }
     }
+    // A claude-cli turn runs the Claude model it names, one of those this hub accepts: any
+    // other is a 400 that lists them, never a queued job that can only fail.
+    if spec.backend == crate::claude_cli::BACKEND {
+        if let Err(e) = crate::claude_cli::accepted_model(&params.claude_model) {
+            return error_json(400, e);
+        }
+    }
     // Admission class. Chat rides the lane worker, which serves several turns
     // from one resident model, so those turns admit alongside each other and
     // alongside heavy work. Everything else keeps one-at-a-time.
@@ -2533,7 +2526,7 @@ fn chat_worker_loop(shared: Arc<ServiceShared>) {
     }
 }
 
-fn worker_loop(shared: Arc<ServiceShared>) {
+fn worker_loop(shared: Arc<ServiceShared>, chat_threads: Vec<JoinHandle<()>>) {
     let mut last_empty_vram_refresh = Instant::now();
     // Whether the device caches this thread owns have already been released
     // for the current idle stretch. Cleared the moment a job runs, so the
@@ -2591,6 +2584,19 @@ fn worker_loop(shared: Arc<ServiceShared>) {
         }
         apply_finished_retention(&shared);
     }
+    // Chat turns can still access the backend map after their concurrent handle
+    // drops. Join the lanes before unloading and clearing it on this worker.
+    for thread in chat_threads {
+        let _ = thread.join();
+    }
+    with_backends(&shared, |backends| {
+        for (id, backend) in backends.iter_mut() {
+            if let Err(error) = backend.unload() {
+                eprintln!("{}: stop: unload {id}: {error}", crate::SERVICE_NAME);
+            }
+        }
+        backends.clear();
+    });
 }
 
 /// The process is told to stop (SIGTERM; a WM restarting its hub): admission closes as

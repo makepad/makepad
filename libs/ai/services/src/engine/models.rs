@@ -7,8 +7,8 @@
 //! - `LocalModel` (`local_model.rs`, feature `localai`) — the machine's
 //!   own model through the hub's chat session.
 //! - [`ClaudeModel`] — the Anthropic Messages API provider from the hub.
-//!   The provider is per-turn and this adapter owns the history, so a
-//!   tool change just rebuilds the provider with the new native tool
+//!   The provider retains the signed transcript. This adapter owns visible
+//!   history, so a tool change rebuilds the provider with the new native tool
 //!   array; the conversation carries on.
 //!
 //! Every adapter turns provider-specific tool-call shapes into one JSON
@@ -45,8 +45,28 @@ pub fn hub_rows(local_only: bool) -> Vec<ProviderRow> {
     super::local_model::hub_rows(local_weights().as_deref(), cfg!(feature = "localai"), local_only)
 }
 
-/// The Anthropic model the cloud adapter asks for.
-pub const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-5";
+/// The shared Claude model list: the hub owns it, since its Claude refuses any model not on it.
+pub use makepad_ai_hub::claude_cli::CLAUDE_MODELS;
+pub const DEFAULT_CLAUDE_MODEL: &str = CLAUDE_MODELS[2].0;
+/// A chat turn's output room: these models always think, and the thinking
+/// counts against it. All three stream up to 128K.
+const CHAT_MAX_TOKENS: u32 = 64_000;
+
+pub(super) fn claude_model_label(model: &str) -> &str {
+    CLAUDE_MODELS.iter().find(|(id, _)| *id == model).map(|(_, label)| *label).unwrap_or(model)
+}
+
+/// A cloud choice's provider and model: `claude-cli:<id>` and
+/// `claude-api:<id>` name one of [`CLAUDE_MODELS`]; a bare slug is the
+/// provider's default (the CLI's own, the API's [`DEFAULT_CLAUDE_MODEL`]).
+pub(super) fn cloud_selection(slug: &str) -> (&str, Option<&str>) {
+    let (base, model) = slug.split_once(':').map_or((slug, None), |(base, model)| (base, Some(model)));
+    let model = model.filter(|model| {
+        (base == "claude-api" || CliKind::from_slug(base) == Some(CliKind::ClaudeCode))
+            && CLAUDE_MODELS.iter().any(|(id, _)| id == model)
+    });
+    (base, model)
+}
 
 /// The rows the provider chip offers, with honest availability.
 pub fn provider_rows(local_only: bool) -> Vec<ProviderRow> {
@@ -57,22 +77,21 @@ pub fn provider_rows(local_only: bool) -> Vec<ProviderRow> {
     // when none of those answers. Every other model the hubs serve (the
     // hub's own Claude Code among them) is a row of its own.
     rows.extend(hub_rows(local_only));
-    let claude_unavailable = if local_only {
-        Some("local AI only".into())
-    } else if claude_key().is_none() {
-        Some("no API key".into())
-    } else {
-        None
-    };
-    rows.push(ProviderRow {
-        choice: ProviderChoice::Cloud("claude-api".into()),
-        label: format!("Claude API · {DEFAULT_CLAUDE_MODEL}"),
-        unavailable: claude_unavailable,
-    });
+    // The Claude API has no menu rows; `claude-api[:<id>]` still resolves as a
+    // saved pick or a launch override (`build_model`).
     // The person's own logged-in CLIs, run on this machine by this app.
     for kind in [CliKind::ClaudeCode, CliKind::Codex] {
         let unavailable = if local_only { Some("local AI only".into()) } else { kind.unavailable() };
-        rows.push(ProviderRow { choice: ProviderChoice::Cloud(kind.slug().into()), label: kind.label().into(), unavailable });
+        rows.push(ProviderRow { choice: ProviderChoice::Cloud(kind.slug().into()), label: kind.label().into(), unavailable: unavailable.clone() });
+        if kind == CliKind::ClaudeCode {
+            for &(id, label) in CLAUDE_MODELS {
+                rows.push(ProviderRow {
+                    choice: ProviderChoice::Cloud(format!("{}:{id}", kind.slug())),
+                    label: format!("{} · {label}", kind.label()),
+                    unavailable: unavailable.clone(),
+                });
+            }
+        }
     }
     // The desktop assistant drives this app's tools through makepad-remote;
     // the conversation is typed there.
@@ -91,9 +110,20 @@ pub fn provider_rows(local_only: bool) -> Vec<ProviderRow> {
     rows
 }
 
-fn claude_key() -> Option<String> {
-    std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.trim().is_empty())
-        .or_else(|| std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok().filter(|k| !k.trim().is_empty()))
+fn claude_auth_from_values(api_key: Option<&str>, oauth_token: Option<&str>) -> Option<ClaudeAuth> {
+    if let Some(key) = api_key.filter(|value| !value.trim().is_empty()) {
+        ClaudeAuth::api_key(key).ok()
+    } else {
+        oauth_token.filter(|value| !value.trim().is_empty())
+            .and_then(|token| ClaudeAuth::oauth_token(token).ok())
+    }
+}
+
+fn claude_key() -> Option<ClaudeAuth> {
+    claude_auth_from_values(
+        std::env::var("ANTHROPIC_API_KEY").ok().as_deref(),
+        std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok().as_deref(),
+    )
 }
 
 /// What a panel starts on instead of the default Local: in a build without
@@ -144,18 +174,23 @@ pub fn build_model(choice: &ProviderChoice, local_only: bool) -> Result<Box<dyn 
                 Err("not installed".into())
             }
         }
-        ProviderChoice::Cloud(slug) if CliKind::from_slug(slug).is_some() => {
-            let kind = CliKind::from_slug(slug).unwrap();
-            match kind.unavailable() {
-                Some(reason) => Err(reason),
-                None => Ok(Box::new(CliModel::new(kind))),
+        ProviderChoice::Cloud(slug) => {
+            let (base, model) = cloud_selection(slug);
+            if let (None, Some((_, ignored))) = (model, slug.split_once(':')) {
+                eprintln!("[ai] ignoring model suffix {ignored:?} for provider {base:?}; using the provider default");
+            }
+            if let Some(kind) = CliKind::from_slug(base) {
+                match kind.unavailable() {
+                    Some(reason) => Err(reason),
+                    None => Ok(Box::new(CliModel::with_model(kind, model))),
+                }
+            } else if base == "claude-api" {
+                let key = claude_key().ok_or_else(|| "no API key".to_string())?;
+                Ok(Box::new(ClaudeModel::new(model.unwrap_or(DEFAULT_CLAUDE_MODEL), key)))
+            } else {
+                Err(format!("provider '{slug}' is not wired yet"))
             }
         }
-        ProviderChoice::Cloud(slug) if slug == "claude-api" => {
-            let key = claude_key().ok_or_else(|| "no API key".to_string())?;
-            Ok(Box::new(ClaudeModel::new(DEFAULT_CLAUDE_MODEL, key)))
-        }
-        ProviderChoice::Cloud(slug) => Err(format!("provider '{slug}' is not wired yet")),
     }
 }
 
@@ -165,11 +200,11 @@ pub use super::no_model::{ClaudeDesktopModel, NoModel, NoModelWithReason};
 
 // -------------------------------------------------------------- ClaudeModel
 
-/// Anthropic's Messages API through the hub's provider. Stateless per
-/// turn: this adapter owns the history and resends it.
+/// Anthropic's Messages API through the hub's provider. The adapter keeps
+/// visible history; the provider retains the full signed transcript.
 pub struct ClaudeModel {
     model: String,
-    api_key: String,
+    auth: ClaudeAuth,
     provider: Option<ClaudeApiChatProvider<BlockingClaudeTransport>>,
     system: String,
     history: Vec<ChatMessage>,
@@ -179,10 +214,10 @@ pub struct ClaudeModel {
 }
 
 impl ClaudeModel {
-    pub fn new(model: &str, api_key: String) -> Self {
+    pub fn new(model: &str, auth: ClaudeAuth) -> Self {
         ClaudeModel {
             model: model.to_string(),
-            api_key,
+            auth,
             provider: None,
             system: String::new(),
             history: Vec::new(),
@@ -216,13 +251,13 @@ impl ClaudeModel {
 
 impl Model for ClaudeModel {
     fn label(&self) -> String {
-        format!("Claude API · {}", self.model)
+        format!("Claude API · {}", claude_model_label(&self.model))
     }
 
     fn configure(&mut self, system: &str, tools: &[ToolDefinition]) -> Result<(), String> {
         self.system = system.to_string();
-        let auth = ClaudeAuth::api_key(self.api_key.clone())?;
-        let api = ClaudeApiConfig::new(ProviderKind::ClaudeCli, auth, self.model.clone());
+        let auth = self.auth.clone();
+        let api = ClaudeApiConfig::new(ProviderKind::ClaudeCli, auth, self.model.clone()).with_max_tokens(CHAT_MAX_TOKENS);
         self.provider = Some(ClaudeApiChatProvider::new(api, Self::native_tools(tools)));
         Ok(())
     }
@@ -307,6 +342,78 @@ impl Model for ClaudeModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_model_choices_resolve_and_keep_their_menu_rows() {
+        assert_eq!(DEFAULT_CLAUDE_MODEL, makepad_ai_hub::providers::claude_api::DEFAULT_CLAUDE_MODEL);
+        let rows = provider_rows(true);
+        assert!(rows.iter().all(|r| !r.choice.slug().starts_with("claude-api")), "the menu offers no Claude API rows");
+        let cli: Vec<_> = rows.iter().filter(|r| r.choice.slug().starts_with("claude-cli")).collect();
+        assert_eq!(cli.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), [
+            "Claude Code (this machine)", "Claude Code (this machine) · Fable 5.2",
+            "Claude Code (this machine) · Opus 5.5", "Claude Code (this machine) · Sonnet 5.5",
+        ]);
+        assert!(cli.iter().all(|r| r.unavailable.as_deref() == Some("local AI only")));
+        for &(id, label) in CLAUDE_MODELS {
+            for base in ["claude-cli", "claude-api"] {
+                let slug = if base == "claude-api" && id == DEFAULT_CLAUDE_MODEL { base.to_string() } else { format!("{base}:{id}") };
+                let choice = ProviderChoice::Cloud(slug.clone());
+                assert_eq!(ProviderChoice::from_slug(&choice.slug()), choice);
+                let (resolved_base, model) = cloud_selection(&slug);
+                assert_eq!((resolved_base, model.unwrap_or(DEFAULT_CLAUDE_MODEL)), (base, id));
+                if base == "claude-cli" {
+                    let row = rows.iter().find(|r| r.choice == choice).expect("the saved slug has its menu row");
+                    assert!(row.label.ends_with(label));
+                    assert_eq!(row.unavailable.as_deref(), Some("local AI only"));
+                }
+                assert!(build_model(&choice, true).is_err(), "suffix cannot bypass local-only lock");
+                if base == "claude-cli" {
+                    let kind = CliKind::from_slug(resolved_base).unwrap();
+                    assert_eq!(kind, CliKind::ClaudeCode);
+                    let mut cli = CliModel::with_model(kind, model);
+                    cli.reset();
+                    assert_eq!(cli.label(), format!("Claude Code (this machine) · {label}"));
+                    // The same provider factory CliModel uses, without launching a CLI.
+                    let args = CliModel::claude_provider(model).arguments("");
+                    assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == id));
+                } else {
+                    let mut api = ClaudeModel::new(model.unwrap_or(DEFAULT_CLAUDE_MODEL), ClaudeAuth::api_key("opaque-test-key").unwrap());
+                    api.configure("", &[]).unwrap();
+                    assert_eq!(api.provider.as_mut().unwrap().availability(),
+                        makepad_ai_hub::chat_wire::ProviderAvailability::Available {
+                            model: id.into(), detail: "api.anthropic.com".into(),
+                        });
+                    assert_eq!(api.label(), format!("Claude API · {label}"));
+                }
+            }
+        }
+        for base in ["claude-cli", "claude-api", "codex-cli"] {
+            let choice = ProviderChoice::Cloud(base.into());
+            assert_eq!(ProviderChoice::from_slug(&choice.slug()), choice);
+            assert_eq!(cloud_selection(base), (base, None));
+            assert_eq!(cloud_selection(&format!("{base}:unknown")), (base, None));
+        }
+        assert_eq!(cloud_selection("codex-cli:claude-fable-5-2"), ("codex-cli", None));
+        assert!(!CliModel::claude_provider(None).arguments("").iter().any(|arg| arg == "--model"));
+    }
+
+    #[test]
+    fn claude_env_values_preserve_auth_kind_and_key_precedence() {
+        for (key, token, oauth) in [
+            (None, None, None), (Some(""), Some("  "), None),
+            (Some("key"), None, Some(false)), (None, Some("token"), Some(true)),
+            (Some("key"), Some("token"), Some(false)), (Some("  "), Some("token"), Some(true)),
+            (Some("invalid\nkey"), Some("token"), None), (None, Some("invalid\ntoken"), None),
+        ] {
+            let auth = claude_auth_from_values(key, token);
+            assert_eq!(auth.as_ref().map(ClaudeAuth::is_oauth), oauth);
+            if let Some(auth) = auth {
+                let mut model = ClaudeModel::new(DEFAULT_CLAUDE_MODEL, auth);
+                model.configure("system", &[]).unwrap();
+                assert_eq!(model.auth.is_oauth(), oauth.unwrap());
+            }
+        }
+    }
 
     #[test]
     fn claude_tool_names_lose_their_dots_on_the_wire() {

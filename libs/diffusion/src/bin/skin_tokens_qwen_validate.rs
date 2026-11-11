@@ -991,6 +991,10 @@ fn run_generation_gate(
 }
 
 fn main() -> Result<(), String> {
+    makepad_diffusion::backend::metal::run_model_worker("skin_tokens_qwen_validate", model_main)
+}
+
+fn model_main() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let checkpoint = args.next().ok_or_else(|| {
         "usage: skin-tokens-qwen-validate <tokenrig.safetensors> <oracle-dir> [warm-runs] [generation-oracle-dir] [none|compatibility|strict|both]"

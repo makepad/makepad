@@ -1,6 +1,11 @@
 //! Offline native encoder + sparse NAF oracle fixture. See trellis/tests.
 #[cfg(feature = "mesh")]
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
+    makepad_ai_common::backend::metal::run_model_worker("pixal_naf_check", || std::process::Termination::report(model_main()))
+}
+
+#[cfg(feature = "mesh")]
+fn model_main() -> Result<(), Box<dyn std::error::Error>> {
     use makepad_ai_trellis::{
         backend::{gpu_download, gpu_upload},
         pixal_naf::PixalNaf,

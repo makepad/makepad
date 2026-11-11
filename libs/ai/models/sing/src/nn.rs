@@ -100,7 +100,9 @@ pub struct Tensor {
     /// Valid rows per item (attention keys past it are masked).
     pub lens: Option<Arc<Vec<u32>>>,
     /// A parameter's identity (0 = none): lets an inference matmul keep the
-    /// weight resident on the GPU under this key.
+    /// weight resident on the GPU under this key. A copy has none: it may be
+    /// changed and stored back (the optimiser's host step), and the weight kept
+    /// under the original's key would then be served for it.
     pub key: u64,
 }
 
@@ -122,7 +124,7 @@ impl Clone for Tensor {
             }),
             seg: self.seg,
             lens: self.lens.clone(),
-            key: self.key,
+            key: 0,
         }
     }
 }
@@ -288,11 +290,21 @@ pub enum Init {
     Normal(f32),
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Params {
+    owner: Arc<makepad_ai_metal::WeightOwner>,
     pub names: Vec<String>,
     pub vals: Vec<Arc<Tensor>>,
     index: HashMap<String, usize>,
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Self {
+            owner: Arc::new(makepad_ai_metal::WeightOwner::new("sing")),
+            names: Vec::new(), vals: Vec::new(), index: HashMap::new(),
+        }
+    }
 }
 
 impl Params {
@@ -939,8 +951,8 @@ impl<'p> Graph<'p> {
         let y = if !self.record && wv.key != 0 && gpu_ok(t, k, n) {
             // Inference with a parameter: keep the weight resident on the GPU.
             let key = format!("w{}", wv.key);
-            let bytes = || Ok(wv.data.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>());
-            makepad_ai_metal::try_matmul_nt_ggml_bytes_keyed(&xv.data, 0, t, k, n, "makepad-ai-sing", &key, bytes)
+            let bytes = || Ok(std::borrow::Cow::Owned(wv.data.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()));
+            makepad_ai_metal::try_matmul_nt_ggml_bytes_keyed(&xv.data, 0, t, k, n, self.params.owner.namespace(), &key, bytes)
                 .unwrap_or_else(|| mm_nt(&xv.data, &wv.data, t, k, n))
         } else {
             mm_nt(&xv.data, &wv.data, t, k, n)
@@ -1622,6 +1634,38 @@ mod tests {
         };
         for name in ["gh", "gn", "pa", "pb"] {
             grad_check(&mut p, name, &build);
+        }
+    }
+
+    /// A parameter changed by copy and replace (the optimiser's host step) is never
+    /// served from the device weight kept under the original's key.
+    #[test]
+    fn a_replaced_parameter_is_not_served_from_its_old_key() {
+        let mut rng = Rng::new(5);
+        let mut p = Params::new();
+        // 64 x 256 x 128 multiply-adds, over the GPU minimum: with the GPU on (a Mac,
+        // no `force_cpu`) the inference linear keeps the weight resident under its key.
+        p.declare("w", 128, 256, Init::Fan(1.0), &mut rng);
+        let x = Tensor::new(64, 256, (0..64 * 256).map(|_| rng.normal()).collect());
+        let w = p.id("w");
+        assert_ne!(p.vals[w].key, 0, "a declared parameter has a key");
+        assert_eq!((*p.vals[w]).clone().key, 0, "a copy has no key");
+        let infer = |p: &Params| {
+            let mut g = Graph::new(p, false);
+            let xi = g.input(x.clone());
+            let wi = g.p("w");
+            let y = g.linear(xi, wi, None);
+            g.val(y).data.clone()
+        };
+        let before = infer(&p);
+        let mut t = (*p.vals[w]).clone();
+        for v in &mut t.data {
+            *v = -*v;
+        }
+        p.vals[w] = Arc::new(t);
+        let after = infer(&p);
+        for (i, (a, b)) in after.iter().zip(&before).enumerate() {
+            assert!((a + b).abs() <= 1e-4 * b.abs().max(1.0), "the changed weight's product at {i}: {a}, before {b}");
         }
     }
 }

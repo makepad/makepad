@@ -39,7 +39,7 @@ cuda = ["makepad-ai-hub/cuda"]
 node = ["localai", "cuda", "makepad-ai-hub/flux", "makepad-ai-hub/paint", "makepad-ai-hub/paint-cuda", "makepad-ai-hub/llm",
     "makepad-ai-hub/tts", "makepad-ai-hub/indextts", "makepad-ai-hub/speech", "makepad-ai-hub/stt", "makepad-ai-hub/video",
     "makepad-ai-hub/interpolate", "makepad-ai-hub/audio", "makepad-ai-hub/mesh", "makepad-ai-hub/matte-native",
-    "makepad-ai-hub/depth-native", "makepad-ai-hub/segment-native", "makepad-ai-hub/body-native", "makepad-ai-hub/upscale-native",
+    "makepad-ai-hub/depth-native", "makepad-ai-hub/multiview-native", "makepad-ai-hub/segment-native", "makepad-ai-hub/body-native", "makepad-ai-hub/upscale-native",
     "makepad-ai-hub/motion-native", "makepad-ai-hub/rig-native", "makepad-ai-hub/splat-native", "makepad-ai-hub/stems-native",
     "makepad-ai-hub/beats-native", "makepad-ai-hub/notes-native", "makepad-ai-hub/kernel"]
 # TEST BUILDS ONLY: MAKEPAD_AI_HUB_CLAUDE_STUB=<fake claude> serves that fake CLI as the

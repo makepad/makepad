@@ -68,9 +68,29 @@ impl AiSettings {
     }
 
     pub fn load() -> AiSettings {
-        match Self::path().and_then(|p| std::fs::read_to_string(p).ok()) {
-            Some(text) => Self::parse(&text),
-            None => AiSettings::default(),
+        Self::load_with_provider("")
+    }
+
+    /// A host supplies the first provider; an explicit saved pick survives relaunch.
+    pub fn load_with_provider(provider: &str) -> AiSettings {
+        let saved = Self::path().and_then(|p| std::fs::read_to_string(p).ok());
+        Self::saved_or_provider(saved.as_deref(), provider)
+    }
+
+    /// The settings a named provider implies: a cloud model lifts the lock.
+    pub fn for_provider(slug: &str) -> AiSettings {
+        let provider = ProviderChoice::from_slug(slug);
+        let local_only = !provider.is_cloud();
+        AiSettings { provider, local_only }
+    }
+
+    fn saved_or_provider(saved: Option<&str>, provider: &str) -> AiSettings {
+        if let Some(text) = saved {
+            Self::parse(text)
+        } else if !provider.trim().is_empty() {
+            Self::for_provider(provider)
+        } else {
+            Self::default()
         }
     }
 
@@ -99,6 +119,16 @@ mod tests {
         let open = AiSettings::parse("provider=claude-api\nlocal_only=false\n");
         assert_eq!(open.provider, ProviderChoice::Cloud("claude-api".into()));
         assert_eq!(AiSettings::parse(&open.render()), open);
+        #[cfg(feature = "engine")]
+        for &(id, _) in makepad_ai_services::engine::models::CLAUDE_MODELS {
+            for base in ["claude-cli", "claude-api"] {
+                let choice = ProviderChoice::from_slug(&format!("{base}:{id}"));
+                let picked = AiSettings { provider: choice.clone(), local_only: false };
+                assert_eq!(AiSettings::saved_or_provider(Some(&picked.render()), "claude-cli"), picked, "saved model beats host default");
+                assert!(s.allows(&choice).is_err(), "model suffix cannot bypass local-only lock");
+            }
+        }
+        assert_eq!(AiSettings::saved_or_provider(None, "claude-cli").provider.slug(), "claude-cli");
         assert_eq!(AiSettings::parse("garbage"), AiSettings::default());
     }
 }

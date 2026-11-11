@@ -88,6 +88,10 @@ fn load_f32_npy(path: &Path) -> Result<(Vec<usize>, Vec<f32>), String> {
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("hy_motion_clip_validate", model_main)
+}
+
+fn model_main() {
     if let Err(error) = run() {
         eprintln!("HY-MOTION-CLIP-VALIDATE-FAILED: {error}");
         std::process::exit(1);

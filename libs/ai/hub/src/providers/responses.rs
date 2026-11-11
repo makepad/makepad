@@ -12,8 +12,9 @@
 //! origin; tests inject a transport, not a public endpoint override.
 
 use crate::chat_wire::{
-    sanitize_public_error, split_delta_text, ChatMessage, ProviderAvailability, ProviderKind,
-    MAX_MESSAGES, MAX_TOOL_CALL_ID, MAX_TOOL_JSON_BYTES, MAX_TURN_TEXT_BYTES,
+    sanitize_public_error, split_delta_text, tool_arguments_too_large, ChatMessage,
+    ProviderAvailability, ProviderKind, MAX_MESSAGES, MAX_TOOL_CALL_ID, MAX_TOOL_JSON_BYTES,
+    MAX_TOOL_RESULT_BYTES, MAX_TURN_TEXT_BYTES,
 };
 use crate::providers::provider::{ChatProvider, ProviderEvent, TurnInput};
 use makepad_strict_json::{self as json, Value};
@@ -25,7 +26,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
-pub const MAX_RESPONSES_BODY: usize = 256 * 1024;
+/// A full argument object can be JSON-escaped again inside a function call.
+/// Retain the previous envelope/text allowance in addition to that payload.
+pub const MAX_RESPONSES_BODY: usize = 2 * MAX_TOOL_JSON_BYTES + 256 * 1024;
 /// Two minutes without any bytes allows model thinking; active responses
 /// continue indefinitely. This is an idle timeout for both OpenAI and Grok.
 pub const RESPONSES_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -398,7 +401,7 @@ fn parse_function_call(item: &Value) -> Result<ParsedFunctionCall, String> {
         .and_then(Value::as_str)
         .ok_or_else(|| "function arguments missing".to_string())?;
     if arguments.len() > MAX_TOOL_JSON_BYTES {
-        return Err("function arguments too large".to_string());
+        return Err(tool_arguments_too_large(arguments.len()));
     }
     Ok(ParsedFunctionCall {
         call_id: call_id.to_string(),
@@ -681,7 +684,7 @@ impl<T: ResponsesTransport> ChatProvider for ResponsesChatProvider<T> {
         if call_id.len() > MAX_CALL_ID {
             return Err("function call_id missing or invalid".to_string());
         }
-        if output.len() > MAX_TOOL_JSON_BYTES {
+        if output.len() > MAX_TOOL_RESULT_BYTES {
             return Err("function output too large".to_string());
         }
         let pending = self.pending_call_id.take().unwrap();

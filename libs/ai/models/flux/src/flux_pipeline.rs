@@ -135,6 +135,15 @@ pub(crate) fn sub_hook_emit_only<'a>(
     })
 }
 
+/// Component identities carried only when a warm rebuild keeps the same model bytes.
+#[derive(Clone)]
+pub struct FluxWeightOwners {
+    pub(crate) transformer: Option<std::sync::Arc<crate::backend::WeightOwner>>,
+    pub(crate) t5: Option<std::sync::Arc<crate::backend::WeightOwner>>,
+    pub(crate) clip: Option<std::sync::Arc<crate::backend::WeightOwner>>,
+    pub(crate) vae: Option<std::sync::Arc<crate::backend::WeightOwner>>,
+}
+
 pub struct FluxPipeline {
     plan: FluxPromptToImagePlan,
     latent_shape: FluxLatentShape,
@@ -174,7 +183,18 @@ impl FluxPipeline {
         plan: FluxPromptToImagePlan,
         image_width: Option<u32>,
         image_height: Option<u32>,
+        hooks: Option<&mut FluxRunHooks>,
+    ) -> Result<(Self, FluxPipelineLoadTiming)> {
+        Self::load_with_owners(plan, image_width, image_height, hooks, None)
+    }
+
+    /// Rebuild with the outgoing component owners when the model identity is unchanged.
+    pub fn load_with_owners(
+        plan: FluxPromptToImagePlan,
+        image_width: Option<u32>,
+        image_height: Option<u32>,
         mut hooks: Option<&mut FluxRunHooks>,
+        owners: Option<FluxWeightOwners>,
     ) -> Result<(Self, FluxPipelineLoadTiming)> {
         let total_start = Instant::now();
         let width = image_width.unwrap_or(plan.generation.width);
@@ -193,7 +213,10 @@ impl FluxPipeline {
             // The t5 weight stream (~9.5GB) reports "load t5 3.2/9.5GB"
             // every ~256MB across this band.
             let mut sub = sub_hook(&mut hooks, 0.02, 0.08);
-            FluxLoadedTextEncoders::load_split(&plan.bundle, crate::hook_ref(&mut sub))?
+            FluxLoadedTextEncoders::load_split_with_owners(
+                &plan.bundle, crate::hook_ref(&mut sub),
+                owners.as_ref().map(|o| (o.clip.clone(), o.t5.clone())),
+            )?
         };
         let text_load_ms = elapsed_ms(text_load_start);
 
@@ -238,11 +261,12 @@ impl FluxPipeline {
             // Any requested LoRA adapters are merged into the arena here,
             // before compile and before any device upload.
             let mut sub = sub_hook(&mut hooks, 0.72, 0.06);
-            LoadedFluxTransformerWeights::load_component_with_loras(
+            LoadedFluxTransformerWeights::load_component_with_owner(
                 &plan.bundle.diffusion_model_path,
                 plan.bundle.component_prefixes().diffusion,
                 &plan.loras,
                 crate::hook_ref(&mut sub),
+                owners.as_ref().and_then(|o| o.transformer.clone()),
             )?
         };
         let transformer_load_ms = elapsed_ms(transformer_load_start);
@@ -285,7 +309,7 @@ impl FluxPipeline {
         hook_emit(&mut hooks, "load vae", 0.90);
         let vae_load_start = Instant::now();
         let mut vae_weights =
-            LoadedFluxVaeWeights::load_component(vae_path, plan.bundle.component_prefixes().vae)?;
+            LoadedFluxVaeWeights::load_component_with_owner(vae_path, plan.bundle.component_prefixes().vae, owners.as_ref().and_then(|o| o.vae.clone()))?;
         let vae_load_ms = elapsed_ms(vae_load_start);
 
         hook_check(&hooks)?;
@@ -343,8 +367,7 @@ impl FluxPipeline {
 
     /// True when this resident pipeline can serve a new job without touching
     /// its weights: the same resolved model files at the same image size
-    /// (paths are the identity — same as the process-global device weight
-    /// cache, which keys on the transformer path). Prompts may differ — swap
+    /// (paths and LoRA fingerprint determine warm reuse). Prompts may differ — swap
     /// them with [`Self::ensure_prompts_with_hooks`]; seed/steps/guidance
     /// are plain [`Self::generate_with_hooks`] arguments.
     pub fn serves_plan(
@@ -356,43 +379,51 @@ impl FluxPipeline {
         plan_reusable(&self.plan, self.latent_shape, plan, image_width, image_height)
     }
 
-    /// Path of the resident diffusion transformer weights — the identity the
-    /// process-global device weight cache keys on (and the part of
-    /// [`Self::serves_plan`] that distinguishes flux1-schnell from
-    /// flux1-dev; vae/text-encoder files are typically shared).
+    /// Diffusion model path used to decide whether a warm rebuild can carry owners.
     pub fn diffusion_model_path(&self) -> &std::path::Path {
         &self.plan.bundle.diffusion_model_path
     }
 
     /// Identity of the LoRA adaptation merged into the resident transformer
-    /// weights (`""` = pristine). The other half of the device weight-cache
-    /// key: a caller replacing this pipeline must evict when EITHER the
+    /// weights (`""` = pristine). A caller replacing this pipeline must evict when either the
     /// checkpoint path or this fingerprint changes.
     pub fn lora_fingerprint(&self) -> &str {
         &self.transformer_weights.lora_fingerprint
     }
 
-    /// Device weight-cache namespaces of every resident component. All four
-    /// key on their source file path, so a combined checkpoint shares one
-    /// evictable checkpoint root.
+    /// Carry only components whose paths, scopes and applied adaptations are unchanged.
+    pub fn weight_owners_for(&self, plan: &FluxPromptToImagePlan) -> FluxWeightOwners {
+        let old = &self.plan.bundle;
+        let new = &plan.bundle;
+        let old_prefixes = old.component_prefixes();
+        let new_prefixes = new.component_prefixes();
+        FluxWeightOwners {
+            transformer: (old.diffusion_model_path == new.diffusion_model_path
+                && old_prefixes.diffusion == new_prefixes.diffusion
+                && self.lora_fingerprint() == plan.loras.fingerprint())
+                .then(|| self.transformer_weights.owner.clone()),
+            t5: (old.t5xxl_path == new.t5xxl_path && old_prefixes.t5xxl == new_prefixes.t5xxl)
+                .then(|| self.text_weights.t5xxl.owner.clone()),
+            clip: (old.clip_l_path == new.clip_l_path && old_prefixes.clip_l == new_prefixes.clip_l)
+                .then(|| self.text_weights.clip_l.owner.clone()),
+            vae: (old.vae_path == new.vae_path && old_prefixes.vae == new_prefixes.vae)
+                .then(|| self.vae_weights.owner.clone()),
+        }
+    }
+
     fn residency_namespaces(&self) -> Vec<String> {
         vec![
-            crate::flux_transformer::flux_cache_namespace(&self.transformer_weights),
-            crate::flux_vae::flux_vae_cache_namespace(&self.vae_weights),
-            crate::t5_encoder::t5_cache_namespace(&self.text_weights.t5xxl),
-            crate::clip_l::clip_cache_namespace(&self.text_weights.clip_l),
+            crate::flux_transformer::flux_cache_namespace(&self.transformer_weights).to_owned(),
+            crate::flux_vae::flux_vae_cache_namespace(&self.vae_weights).to_owned(),
+            crate::t5_encoder::t5_cache_namespace(&self.text_weights.t5xxl).to_owned(),
+            crate::clip_l::clip_cache_namespace(&self.text_weights.clip_l).to_owned(),
         ]
     }
 
-    /// Frees EVERY device weight-cache entry of this pipeline's checkpoint —
-    /// transformer, vae, t5 and clip namespaces (for a combined checkpoint
-    /// they all key on the one file). Dropping the pipeline releases its
-    /// HOST weight arenas but deliberately leaves the device caches warm;
-    /// when a resident pipeline is being REPLACED by a different model on
-    /// the same thread, call this first — the caches never evict on their
-    /// own, and a 24GB card cannot hold two combined FP8 stacks. Also
-    /// clears the OOM-protection registration so the outgoing checkpoint
-    /// stops pinning recovery behavior. Returns the number of buffers freed.
+    /// Immediately evict every component's device weights before a model switch.
+    /// Owner drop also retires weights on the next device entry; this explicit
+    /// path returns memory before loading a replacement and clears OOM protection.
+    /// Returns the backend's eviction total (Metal bytes, CUDA buffers).
     pub fn evict_device_caches(&self) -> usize {
         let _ = crate::backend::gpu_weight_cache_protect_prefixes(Vec::new());
         crate::flux_transformer::evict_device_weight_cache(&self.transformer_weights)
@@ -871,6 +902,7 @@ fn plan_reusable(
         return false;
     };
     latent_shape == current_shape
+        && next.bundle.component_prefixes() == current.bundle.component_prefixes()
         && next.bundle.diffusion_model_path == current.bundle.diffusion_model_path
         && next.bundle.vae_path == current.bundle.vae_path
         && next.bundle.clip_l_path == current.bundle.clip_l_path

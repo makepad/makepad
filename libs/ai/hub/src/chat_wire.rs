@@ -7,8 +7,17 @@ pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 /// Messages retained per session; overflow refuses the send (start a new
 /// session) rather than silently dropping context.
 pub const MAX_MESSAGES: usize = 128;
-/// Serialized tool arguments / results.
-pub const MAX_TOOL_JSON_BYTES: usize = 16 * 1024;
+/// Serialized tool arguments, matching ai-services::wire::MAX_ARGS_BYTES:
+/// the remote OPEN frame's 1 MiB minus its four-byte chan/kind/flags header.
+/// Remote calls also check their actual service/routing fields before sending.
+/// Only actual input is allocated; this ceiling does not size any buffer.
+pub const MAX_TOOL_JSON_BYTES: usize = (1 << 20) - 4;
+/// Serialized tool results retain their independent history/message budget.
+pub const MAX_TOOL_RESULT_BYTES: usize = 16 * 1024;
+
+pub fn tool_arguments_too_large(bytes: usize) -> String {
+    format!("the encoded call is {bytes} bytes; one call carries {MAX_TOOL_JSON_BYTES} (including routing fields). Send a smaller first part, then append the rest with the service's edit tool.")
+}
 /// One streaming delta.
 pub const MAX_DELTA_BYTES: usize = 4 * 1024;
 

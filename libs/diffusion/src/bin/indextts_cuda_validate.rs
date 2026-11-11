@@ -790,6 +790,10 @@ fn stage_codec(dumps: &Path, weights: &Path) -> bool {
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("indextts_cuda_validate", model_main)
+}
+
+fn model_main() {
     let mut dumps = reference_dumps_dir();
     let mut weights = reference_checkpoints_dir();
     let mut stage = "all".to_string();

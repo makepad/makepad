@@ -1470,6 +1470,10 @@ fn run() -> Result<(), String> {
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("skin_tokens_validate", model_main)
+}
+
+fn model_main() {
     if let Err(err) = run() {
         eprintln!("skin-tokens-validate: {err}");
         std::process::exit(1);

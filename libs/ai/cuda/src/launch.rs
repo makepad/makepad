@@ -3361,6 +3361,7 @@ mod imp {
         blas: crate::cublasHandle_t,
         blas_lt: crate::cublasLtHandle_t,
         weight_buffers: HashMap<String, DeviceBuffer>,
+        dead_owners: makepad_ai_loader::DeadOwnerInbox,
         input_f32: Option<DeviceBuffer>,
         input_f32_capacity_bytes: usize,
         input_half: Option<DeviceBuffer>,
@@ -3383,6 +3384,19 @@ mod imp {
     }
 
     impl CudaDenseLinearBackend {
+        /// Frees the weights of owners dropped since the last call (on any thread). The
+        /// device is made current only when there is something to free.
+        fn drain_dead_owners(&mut self) -> Result<(), String> {
+            let mut dead = Vec::new();
+            self.dead_owners.take(|namespace| dead.push(namespace.to_owned()));
+            if dead.is_empty() {
+                return Ok(());
+            }
+            self.prepare_device()?;
+            self.weight_buffers.retain(|key, _| !dead.iter().any(|namespace| key.starts_with(namespace.as_str())));
+            Ok(())
+        }
+
         fn load() -> Result<Self, String> {
             let device_count = crate::device_count().map_err(|err| err.to_string())?;
             if device_count <= 0 {
@@ -3418,6 +3432,7 @@ mod imp {
                 blas,
                 blas_lt,
                 weight_buffers: HashMap::new(),
+                dead_owners: makepad_ai_loader::DeadOwnerInbox::register(),
                 input_f32: None,
                 input_f32_capacity_bytes: 0,
                 input_half: None,
@@ -3509,6 +3524,7 @@ mod imp {
             // DeviceBuffer::write callers elsewhere in this module), but we
             // synchronize anyway because weight uploads are rare and large.
             crate::synchronize_stream(self.stream).map_err(|err| err.to_string())?;
+            self.dead_owners.holds(qualified_key);
             self.weight_buffers
                 .insert(qualified_key.to_owned(), buffer);
             Ok(())
@@ -5128,6 +5144,7 @@ mod imp {
             crate::synchronize_stream(backend.stream).map_err(|e| e.to_string())?;
             perf_count(&PERF_WEIGHT_STREAM_COUNT, 1);
             perf_count(&PERF_WEIGHT_STREAM_BYTES, bf16_bytes as u64);
+            backend.dead_owners.holds(key);
             backend.weight_buffers.insert(key.to_owned(), weight);
             Ok(())
         })
@@ -11434,6 +11451,7 @@ mod imp {
             if status.read_u32s(1, backend.stream)?[0] != 0 {
                 return Err(format!("nonfinite Q8_0 source for {qualified_key}"));
             }
+            backend.dead_owners.holds(qualified_key);
             backend.weight_buffers.insert(qualified_key.to_owned(), buffer);
             Ok(())
         })
@@ -11550,6 +11568,19 @@ mod imp {
         })
     }
 
+    /// Resident entries and bytes on this thread, without initializing CUDA.
+    pub fn gpu_weight_cache_resident(prefix: &str) -> Result<(usize, usize), String> {
+        DENSE_LINEAR_BACKEND.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let Some(backend) = slot.as_mut() else { return Ok((0, 0)); };
+            backend.drain_dead_owners()?;
+            Ok(backend.weight_buffers.iter()
+                .filter(|(key, _)| key.starts_with(prefix))
+                .fold((0, 0), |(count, bytes), (_, buffer)|
+                    (count + 1, bytes + buffer.size_bytes)))
+        })
+    }
+
     /// Drop cached dense-linear weights matching `prefix` without creating a
     /// CUDA backend when this thread has never used one. Lifecycle teardown
     /// uses this variant: unloading a cold/CPU model must not initialize a
@@ -11561,6 +11592,7 @@ mod imp {
                 return Ok(0);
             };
             backend.prepare_device()?;
+            backend.drain_dead_owners()?;
             let keys: Vec<String> = backend
                 .weight_buffers
                 .keys()
@@ -11588,6 +11620,7 @@ mod imp {
                 return Ok(());
             };
             backend.prepare_device()?;
+            backend.drain_dead_owners()?;
             let mut sync_error = None;
             if let Some(ring) = backend.stream_ring.as_ref() {
                 if let Err(error) = crate::synchronize_stream(ring.copy_stream) {
@@ -22436,9 +22469,9 @@ mod imp {
             if backend.is_none() {
                 *backend = Some(CudaDenseLinearBackend::load()?);
             }
-            f(backend
-                .as_mut()
-                .expect("dense CUDA linear backend was just initialized"))
+            let backend = backend.as_mut().expect("dense CUDA linear backend was just initialized");
+            backend.drain_dead_owners()?;
+            f(backend)
         })
     }
 
@@ -23341,6 +23374,21 @@ mod imp {
     #[cfg(test)]
     mod bf16_staging_tests {
         use super::*;
+
+        #[test]
+        fn dropped_owner_retires_cached_weight_on_next_backend_entry() {
+            let owner = makepad_ai_loader::WeightOwner::new("cuda-retirement");
+            let prefix = owner.namespace().to_owned();
+            let key = format!("{prefix}::w");
+            with_dense_linear_backend(|backend| {
+                backend.prepare_device()?;
+                backend.cached_weight_buffer(&key, 16, || Ok(vec![0; 16]))?;
+                Ok(())
+            }).unwrap();
+            assert_eq!(gpu_weight_cache_resident(&prefix).unwrap(), (1, 16), "owner weight was cached");
+            std::thread::spawn(move || drop(owner)).join().unwrap();
+            assert_eq!(gpu_weight_cache_resident(&prefix).unwrap(), (0, 0), "next entry drains dropped owner's weight");
+        }
 
         fn is_nan_word(word: u16) -> bool {
             word & 0x7f80 == 0x7f80 && word & 0x007f != 0

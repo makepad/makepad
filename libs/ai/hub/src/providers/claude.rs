@@ -89,6 +89,11 @@ impl ClaudeCodeChatProvider {
         ClaudeCodeChatProvider { cli: find_cli(), model, mcp: None, resume: None, turn: None, images: Vec::new(), live: false, effort: None, session: None }
     }
 
+    /// The arguments used for a turn, without starting the CLI.
+    pub fn arguments(&self, system: &str) -> Vec<String> {
+        build_args_with_mcp(&self.model, &self.resume, system, self.mcp.as_ref())
+    }
+
     /// One process for the whole conversation (see the module doc).
     pub fn live(mut self) -> Self {
         self.live = true;
@@ -524,7 +529,7 @@ impl ChatProvider for ClaudeCodeChatProvider {
             return self.begin_live(cli, input);
         }
         let mut prompt = render_prompt(input, self.resume.is_some());
-        let mut args = build_args_with_mcp(&self.model, &self.resume, &input.system_with_dynamic(), self.mcp.as_ref());
+        let mut args = self.arguments(&input.system_with_dynamic());
         if let Some(effort) = &self.effort {
             args.push("--effort".into());
             args.push(effort.clone());
@@ -650,6 +655,7 @@ mod tests {
         assert!(args.windows(2).any(|w| w[0] == "--tools" && w[1].is_empty()));
         assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "claude-opus-5-5"));
         let provider = ClaudeCodeChatProvider::new(None);
+        assert!(!provider.arguments("sys").iter().any(|arg| arg == "--model"));
         assert!(!provider.tools_over_mcp());
         assert!(provider.with_mcp(mcp.0.clone(), mcp.1.clone()).tools_over_mcp());
     }

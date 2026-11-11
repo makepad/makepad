@@ -197,6 +197,10 @@ impl Gates {
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("h3_vision_validate", model_main)
+}
+
+fn model_main() {
     let args: Vec<String> = std::env::args().collect();
     let mut opts: HashMap<String, String> = HashMap::new();
     let mut key: Option<String> = None;

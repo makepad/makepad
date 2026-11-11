@@ -1,3 +1,4 @@
+use crate::backend::WeightOwner;
 use crate::backend::{
     compile_graph_session, new_runtime, runtime_available, try_attention_softmax_weighted_sum_f32,
     try_layer_norm_mul_add_f32, try_matmul_nn_f32, try_matmul_nt_f32, BufferStorageMode,
@@ -5,6 +6,7 @@ use crate::backend::{
 };
 use crate::clip::ClipTokenChunk;
 use crate::flux::ClipLTextEncoderConfig;
+use crate::graph_growth::{build_with_graph_growth, GraphReserve};
 use crate::{DiffusionError, Result};
 use makepad_ai_common::backend::{try_get_rows_ggml_bytes_cached, try_matmul_nt_ggml_bytes_cached};
 use makepad_ai_common::{
@@ -14,12 +16,12 @@ use makepad_ai_common::{
 use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const CLIP_L_HEAD_DIM: u32 = 64;
 const CLIP_L_LAYER_NORM_EPSILON: f32 = 1.0e-5;
 const CLIP_L_QUICK_GELU_COEF: f32 = 1.702;
 const DEFAULT_GRAPH_EXTRA_BYTES: usize = 256 << 20;
-const MAX_GRAPH_GROWTH_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClipLModelConfig {
@@ -40,10 +42,13 @@ impl ClipLModelConfig {
 
 #[derive(Clone, Debug)]
 pub struct LoadedClipLWeights {
+    pub(crate) owner: Arc<WeightOwner>,
     pub ctx: Context,
     pub tensor_ids: BTreeMap<String, TensorId>,
     pub config: ClipLModelConfig,
     pub path: PathBuf,
+    /// The combined-checkpoint component these weights were read from.
+    prefix: Option<String>,
     graph_extra_bytes: usize,
     weight_scope: ClipLWeightScope,
 }
@@ -146,13 +151,13 @@ impl LoadedClipLWeights {
     /// `text_projection.weight`), so everything downstream is unchanged and
     /// the weights keep the combined file's path as their cache identity.
     pub fn load_component(path: impl AsRef<Path>, prefix: Option<&str>) -> Result<Self> {
-        match prefix {
-            None => Self::load(path),
-            Some(prefix) => {
-                let header = MlxSafetensorsHeader::load(path.as_ref())?.scoped_to_prefix(prefix)?;
-                Self::load_with_scope_header(header, DEFAULT_GRAPH_EXTRA_BYTES, ClipLWeightScope::All)
-            }
-        }
+        Self::load_component_with_owner(path, prefix, None)
+    }
+
+    pub(crate) fn load_component_with_owner(
+        path: impl AsRef<Path>, prefix: Option<&str>, owner: Option<Arc<WeightOwner>>,
+    ) -> Result<Self> {
+        Self::load_scoped(path.as_ref(), prefix, DEFAULT_GRAPH_EXTRA_BYTES, ClipLWeightScope::All, owner)
     }
 
     fn load_with_scope(
@@ -160,15 +165,18 @@ impl LoadedClipLWeights {
         extra_bytes: usize,
         weight_scope: ClipLWeightScope,
     ) -> Result<Self> {
-        let header = MlxSafetensorsHeader::load(path.as_ref())?;
-        Self::load_with_scope_header(header, extra_bytes, weight_scope)
+        Self::load_scoped(path.as_ref(), None, extra_bytes, weight_scope, None)
     }
 
-    fn load_with_scope_header(
-        header: MlxSafetensorsHeader,
+    /// `prefix` scopes a combined checkpoint to its clip_l component.
+    fn load_scoped(
+        path: &Path,
+        prefix: Option<&str>,
         extra_bytes: usize,
         weight_scope: ClipLWeightScope,
+        owner: Option<Arc<WeightOwner>>,
     ) -> Result<Self> {
+        let header = crate::flux::flux_component_header(path, prefix)?;
         let inspect = ClipLTextEncoderConfig::from_header(&header)?;
         let config = clip_model_config_from_inspection(&inspect)?;
         let total_bytes = clip_weight_total_bytes(&header, extra_bytes, weight_scope)?;
@@ -181,10 +189,12 @@ impl LoadedClipLWeights {
         load_clip_weight_bytes(&mut ctx, &header, &tensor_ids)?;
 
         Ok(Self {
+            owner: owner.unwrap_or_else(|| Arc::new(WeightOwner::new("clip_l"))),
             ctx,
             tensor_ids,
             config,
             path: header.path,
+            prefix: prefix.map(str::to_owned),
             graph_extra_bytes: extra_bytes,
             weight_scope,
         })
@@ -250,35 +260,17 @@ impl CompiledClipL {
         weights: &mut LoadedClipLWeights,
         chunk: &ClipTokenChunk,
     ) -> Result<Self> {
-        for attempt in 0..=MAX_GRAPH_GROWTH_ATTEMPTS {
-            let graph = match build_clip_l_graph(weights, chunk) {
-                Ok(graph) => graph,
-                Err(err) if is_context_oom(&err) && attempt < MAX_GRAPH_GROWTH_ATTEMPTS => {
-                    let next_extra = next_graph_reserve_bytes(weights)?;
-                    *weights = LoadedClipLWeights::load_with_scope(
-                        weights.path.clone(),
-                        next_extra,
-                        weights.weight_scope,
-                    )?;
-                    continue;
-                }
-                Err(err) => return Err(err),
-            };
-            let session = compile_graph_session(
-                &runtime,
-                &weights.ctx,
-                &graph.graph,
-                BufferStorageMode::Shared,
-                BufferStorageMode::Shared,
-            )?;
-            return Ok(Self {
-                inner: ClipLExecutor::Compiled(CompiledClipLGraph { graph, session }),
-            });
-        }
-
-        Err(DiffusionError::model(
-            "clip_l graph compilation exhausted context growth attempts",
-        ))
+        let graph = build_with_graph_growth(weights, |weights| build_clip_l_graph(weights, chunk))?;
+        let session = compile_graph_session(
+            &runtime,
+            &weights.ctx,
+            &graph.graph,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )?;
+        Ok(Self {
+            inner: ClipLExecutor::Compiled(CompiledClipLGraph { graph, session }),
+        })
     }
 
     pub fn backend_name(&self) -> &'static str {
@@ -523,9 +515,13 @@ impl ClipLExecutionMode {
     }
 }
 
-impl LoadedClipLWeights {
+impl GraphReserve for LoadedClipLWeights {
     fn graph_reserve_bytes(&self) -> usize {
         self.graph_extra_bytes
+    }
+
+    fn reloaded_with_graph_reserve(&self, extra_bytes: usize) -> Result<Self> {
+        Self::load_scoped(&self.path, self.prefix.as_deref(), extra_bytes, self.weight_scope, Some(self.owner.clone()))
     }
 }
 
@@ -924,7 +920,7 @@ fn gather_rows_ggml(
         row_indices,
         &clip_cache_namespace(weights),
         name,
-        || Ok(matrix.bytes.to_vec()),
+        || Ok(std::borrow::Cow::Borrowed(matrix.bytes)),
     ) {
         match result {
             Ok(values) => return Ok(values),
@@ -967,7 +963,7 @@ fn linear_rows_ggml(
         weight.rows,
         &clip_cache_namespace(weights),
         weight_name,
-        || Ok(weight.bytes.to_vec()),
+        || Ok(std::borrow::Cow::Borrowed(weight.bytes)),
     ) {
         match result {
             Ok(output) => output,
@@ -1156,13 +1152,12 @@ fn add_rows(lhs: &RowsTensor, rhs: &RowsTensor) -> Result<RowsTensor> {
     RowsTensor::new(lhs.rows, lhs.cols, output)
 }
 
-pub fn clip_cache_namespace(weights: &LoadedClipLWeights) -> String {
-    format!("clip_l:{}", weights.path.display())
+pub fn clip_cache_namespace(weights: &LoadedClipLWeights) -> &str {
+    weights.owner.namespace()
 }
 
 /// Drops every device weight-cache entry belonging to these clip weights.
-/// Called on a model switch — combined checkpoints key all components on
-/// the outgoing checkpoint path.
+/// Called on a model switch; owner drop also retires the entries.
 pub(crate) fn evict_device_weight_cache(weights: &LoadedClipLWeights) -> usize {
     crate::backend::gpu_weight_cache_evict_prefix(&clip_cache_namespace(weights)).unwrap_or(0)
 }
@@ -1645,17 +1640,6 @@ fn require_tensor_id(tensor_ids: &BTreeMap<String, TensorId>, name: &str) -> Res
 fn require_tensor<'a>(ctx: &'a Context, id: TensorId) -> Result<&'a Tensor> {
     ctx.tensor(id)
         .ok_or_else(|| DiffusionError::model(format!("invalid clip_l tensor id {}", id)))
-}
-
-fn is_context_oom(err: &DiffusionError) -> bool {
-    matches!(err, DiffusionError::Model(message) if message.starts_with("context out of memory allocating "))
-}
-
-fn next_graph_reserve_bytes(weights: &LoadedClipLWeights) -> Result<usize> {
-    weights
-        .graph_reserve_bytes()
-        .checked_mul(2)
-        .ok_or_else(|| DiffusionError::model("clip_l graph reserve overflow"))
 }
 
 fn causal_mask_f32_bytes(n_tokens: usize) -> Vec<u8> {

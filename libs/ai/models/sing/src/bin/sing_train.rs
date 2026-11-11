@@ -529,6 +529,10 @@ fn sample_render(dir: &Path, step: usize, ac_p: Option<&Params>, voc_p: Option<&
 }
 
 fn main() {
+    makepad_ai_metal::run_model_worker("sing_train", model_main)
+}
+
+fn model_main() {
     let a = Args(std::env::args().collect());
     let mode = a.0.get(1).cloned().unwrap_or_default();
     if mode == "check" {

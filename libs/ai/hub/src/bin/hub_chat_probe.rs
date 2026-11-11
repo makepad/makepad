@@ -23,6 +23,7 @@ fn main() {
         preferred_model: Some(model),
         max_tokens: Some(16),
         thinking: Some(false),
+        claude_model: None,
         system_prompt: "Reply in a few words.".into(),
         tools: Vec::new(),
         wake: None,

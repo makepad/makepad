@@ -28,6 +28,7 @@ pub mod flux_schedule;
 pub mod flux_text;
 pub mod flux_transformer;
 pub mod flux_vae;
+mod graph_growth;
 pub mod flux2;
 pub mod flux2_dev_text;
 pub mod flux2_klein_text;

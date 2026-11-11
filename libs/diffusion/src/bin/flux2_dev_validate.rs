@@ -145,6 +145,10 @@ window, gulls circling the rusted lantern tower, waves bursting into spray on bl
 long shadows across wind-bent grass, thin volumetric sea mist, shot on 35mm film with fine grain.";
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("flux2_dev_validate", model_main)
+}
+
+fn model_main() {
     if let Err(err) = run() {
         eprintln!("flux2-dev-validate: {err}");
         std::process::exit(1);
@@ -403,6 +407,7 @@ fn run() -> Result<(), String> {
                     data: planar,
                 },
                 strength,
+                latents: None,
             };
             let i2i_request = Flux2GenerateRequest {
                 init: Some(init),

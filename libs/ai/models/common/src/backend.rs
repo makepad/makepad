@@ -8,6 +8,7 @@ pub use crate::gpu as cuda;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub use makepad_ai_cuda::llm_ops;
 pub use makepad_ai_loader::prof;
+pub use makepad_ai_loader::WeightOwner;
 pub use makepad_ai_metal::{BackendCapabilities, BackendInfo, BackendKind};
 
 pub mod metal {
@@ -113,6 +114,16 @@ pub use crate::gpu::{
     gpu_weight_cache_protect_prefixes,
     gpu_upsample_nearest2x, GemmPrecision, GpuBf16Buf, GpuLinearPart, GpuPerfStats, GpuStepGraph, GpuTensor,
 };
+
+/// Resident weight entries and bytes for an owner prefix on the active backend.
+pub fn gpu_weight_cache_resident(prefix: &str) -> std::result::Result<(usize, usize), String> {
+    #[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
+    { return makepad_ai_cuda::launch::gpu_weight_cache_resident(prefix); }
+    #[cfg(target_os = "macos")]
+    { return makepad_ai_metal::gpu_tensor::resident_weights(prefix); }
+    #[cfg(not(any(target_os = "macos", all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))))]
+    { let _ = prefix; Ok((0, 0)) }
+}
 
 pub type GraphSession = MetalGraphSession;
 pub type PreparedGraph = MetalPreparedGraph;

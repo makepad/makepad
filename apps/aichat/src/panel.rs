@@ -1113,9 +1113,9 @@ pub struct AiChatPanel {
     source: ScriptObjectRef,
     #[deref]
     view: View,
-    /// The host's model for this panel, by provider slug (`claude-cli`,
-    /// `codex-cli`, `local`, …); empty keeps the person's saved choice.
-    /// `MAKEPAD_AI_PROVIDER` overrides both.
+    /// The host's initial model, by provider slug (`claude-cli`,
+    /// `codex-cli`, `local`, …), until the person picks one: the saved pick
+    /// wins over it. `MAKEPAD_AI_PROVIDER` overrides both.
     #[live]
     provider: String,
     /// The window's F10 overlay made this panel; any other is the app's own chat.
@@ -1403,7 +1403,11 @@ impl AiChatPanel {
 
     fn settings(&mut self) -> &AiSettings {
         if self.settings.is_none() {
-            self.settings = Some(AiSettings::load());
+            // The launch names the model outright (Claude Desktop, tests).
+            self.settings = Some(match std::env::var(PROVIDER_ENV).ok().filter(|s| !s.trim().is_empty()) {
+                Some(slug) => AiSettings::for_provider(&slug),
+                None => AiSettings::load_with_provider(&self.provider),
+            });
         }
         self.settings.as_ref().unwrap()
     }
@@ -1413,25 +1417,18 @@ impl AiChatPanel {
     fn ensure_engine(&mut self) -> &mut EngineCore {
         if self.engine.is_none() {
             let lease_id = self.widget_uid().0;
-            let mut settings = self.settings().clone();
-            // A host (or the environment) naming its model picks it for
-            // this panel: that is the person's explicit choice for the app.
-            let host = std::env::var(PROVIDER_ENV).ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| self.provider.clone());
-            if !host.trim().is_empty() {
-                settings.provider = ProviderChoice::from_slug(&host);
-                settings.local_only = !settings.provider.is_cloud();
-            } else {
-                // The saved (or default) choice is not built into this app
-                // (Local without `localai`): start on the first provider
-                // that can answer here. Only this panel's copy changes, so
-                // a `localai` build still starts on Local; the lock guards
-                // a local model this build does not have.
-                #[cfg(feature = "engine")]
+            let settings = self.settings().clone();
+            // A saved pick wins over the host default; only an unavailable
+            // default Local choice needs the usual provider fallback.
+            #[cfg(feature = "engine")]
+            let settings = {
+                let mut settings = settings;
                 if let Some(choice) = fallback_choice(&settings.provider) {
                     settings.provider = choice;
                     settings.local_only = false;
                 }
-            }
+                settings
+            };
             // The real models ride the `engine` feature; a build without a
             // runtime (the web page) says so and keeps the tool console.
             #[cfg(feature = "engine")]
@@ -1597,10 +1594,20 @@ impl AiChatPanel {
                 Ok(m) => m,
                 Err(reason) => Box::new(NoModelWithReason::new(reason)),
             };
-            let rows = self.provider_rows.clone();
+            let settings = AiSettings { provider: choice.clone(), local_only };
+            if let Err(reason) = settings.allows(&choice) {
+                self.note(cx, reason);
+                return;
+            }
+            let rows = provider_rows(local_only);
+            self.provider_rows = rows.clone();
             let engine = self.engine.as_mut().unwrap();
             engine.set_model(model);
             engine.set_provider_facts(choice, rows, local_only);
+            if let Err(reason) = settings.save() {
+                self.note(cx, format!("Could not save the provider choice: {reason}"));
+            }
+            self.settings = Some(settings);
         }
         self.view.redraw(cx);
     }

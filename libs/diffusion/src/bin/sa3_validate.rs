@@ -156,6 +156,10 @@ impl Sa3NoiseSource for DumpNoise {
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("sa3_validate", model_main)
+}
+
+fn model_main() {
     let args: Vec<String> = std::env::args().collect();
     let mut opts = std::collections::HashMap::new();
     let mut i = 1;

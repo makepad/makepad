@@ -1,9 +1,11 @@
+use crate::backend::WeightOwner;
 use crate::backend::{
     compile_graph_session, new_runtime, try_add_f32, try_attention_softmax_weighted_sum_f32,
     try_gelu_f32, try_matmul_nn_f32, try_matmul_nt_f32, try_mul_f32, try_rms_norm_mul_f32,
     BufferStorageMode, GraphSession, GraphTensorWrite, Runtime,
 };
 use crate::flux::T5TextEncoderConfig;
+use crate::graph_growth::{build_with_graph_growth, GraphReserve};
 use crate::t5::T5TokenizedPrompt;
 use crate::{emit_byte_progress, emit_progress, DiffusionError, ProgressHook, Result};
 use makepad_ai_common::backend::{
@@ -25,7 +27,6 @@ const T5_LAYER_NORM_EPSILON: f32 = 1.0e-6;
 const T5_RELATIVE_MAX_DISTANCE: u32 = 128;
 const T5_GATED_FF_OUTPUT_INPUT_SCALE: f32 = 1.0 / 32.0;
 const DEFAULT_GRAPH_EXTRA_BYTES: usize = 2usize * 1024 * 1024 * 1024;
-const MAX_GRAPH_GROWTH_ATTEMPTS: usize = 3;
 const T5_FINAL_LAYER_NORM_NAMES: [&str; 2] =
     ["encoder.final_layer_norm.weight", "final_layer_norm.weight"];
 const T5_RELATIVE_ATTENTION_BIAS_NAME: &str =
@@ -55,11 +56,14 @@ impl T5ModelConfig {
 
 #[derive(Clone, Debug)]
 pub struct LoadedT5xxlWeights {
+    pub(crate) owner: Arc<WeightOwner>,
     pub ctx: Context,
     pub tensor_ids: BTreeMap<String, TensorId>,
     pub config: T5ModelConfig,
     pub path: PathBuf,
     relative_attention_bias: Vec<f32>,
+    /// The combined-checkpoint component these weights were read from.
+    prefix: Option<String>,
     graph_extra_bytes: usize,
 }
 
@@ -122,6 +126,11 @@ struct T5AttentionGraphOutput {
 }
 
 impl LoadedT5xxlWeights {
+    pub(crate) fn load_component_with_owner(path: impl AsRef<Path>, prefix: Option<&str>,
+        progress: Option<ProgressHook>, owner: Option<Arc<WeightOwner>>) -> Result<Self> {
+        Self::load_scoped_with_owner(path, prefix, DEFAULT_GRAPH_EXTRA_BYTES, progress, owner)
+    }
+
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         Self::load_with_extra(path, DEFAULT_GRAPH_EXTRA_BYTES)
     }
@@ -166,7 +175,17 @@ impl LoadedT5xxlWeights {
         path: impl AsRef<Path>,
         prefix: Option<&str>,
         extra_bytes: usize,
+        progress: Option<ProgressHook>,
+    ) -> Result<Self> {
+        Self::load_scoped_with_owner(path, prefix, extra_bytes, progress, None)
+    }
+
+    pub(crate) fn load_scoped_with_owner(
+        path: impl AsRef<Path>,
+        prefix: Option<&str>,
+        extra_bytes: usize,
         mut progress: Option<ProgressHook>,
+        owner: Option<Arc<WeightOwner>>,
     ) -> Result<Self> {
         let header = crate::flux::flux_component_header(path.as_ref(), prefix)?;
         let inspect = T5TextEncoderConfig::from_header(&header)?;
@@ -182,11 +201,13 @@ impl LoadedT5xxlWeights {
         load_t5_weight_bytes(&mut ctx, &header, &tensor_ids, &mut progress)?;
 
         Ok(Self {
+            owner: owner.unwrap_or_else(|| Arc::new(WeightOwner::new("t5xxl"))),
             ctx,
             tensor_ids,
             config,
             path: header.path,
             relative_attention_bias,
+            prefix: prefix.map(str::to_owned),
             graph_extra_bytes: extra_bytes,
         })
     }
@@ -208,10 +229,6 @@ impl LoadedT5xxlWeights {
             "missing t5xxl tensor; tried {}",
             names.join(", ")
         )))
-    }
-
-    fn graph_reserve_bytes(&self) -> usize {
-        self.graph_extra_bytes
     }
 
     pub fn relative_attention_bias(&self) -> &[f32] {
@@ -251,6 +268,16 @@ impl LoadedT5xxlWeights {
     }
 }
 
+impl GraphReserve for LoadedT5xxlWeights {
+    fn graph_reserve_bytes(&self) -> usize {
+        self.graph_extra_bytes
+    }
+
+    fn reloaded_with_graph_reserve(&self, extra_bytes: usize) -> Result<Self> {
+        Self::load_scoped_with_owner(&self.path, self.prefix.as_deref(), extra_bytes, None, Some(self.owner.clone()))
+    }
+}
+
 impl CompiledT5xxl {
     pub fn compile(weights: &mut LoadedT5xxlWeights, prompt: &T5TokenizedPrompt) -> Result<Self> {
         let runtime = new_runtime()?;
@@ -262,30 +289,15 @@ impl CompiledT5xxl {
         weights: &mut LoadedT5xxlWeights,
         prompt: &T5TokenizedPrompt,
     ) -> Result<Self> {
-        for attempt in 0..=MAX_GRAPH_GROWTH_ATTEMPTS {
-            let graph = match build_t5xxl_graph(weights, prompt) {
-                Ok(graph) => graph,
-                Err(err) if is_context_oom(&err) && attempt < MAX_GRAPH_GROWTH_ATTEMPTS => {
-                    let next_extra = next_graph_reserve_bytes(weights)?;
-                    *weights =
-                        LoadedT5xxlWeights::load_with_extra(weights.path.clone(), next_extra)?;
-                    continue;
-                }
-                Err(err) => return Err(err),
-            };
-            let session = compile_graph_session(
-                &runtime,
-                &weights.ctx,
-                &graph.graph,
-                BufferStorageMode::Shared,
-                BufferStorageMode::Shared,
-            )?;
-            return Ok(Self { graph, session });
-        }
-
-        Err(DiffusionError::model(
-            "t5xxl graph compilation exhausted context growth attempts",
-        ))
+        let graph = build_with_graph_growth(weights, |weights| build_t5xxl_graph(weights, prompt))?;
+        let session = compile_graph_session(
+            &runtime,
+            &weights.ctx,
+            &graph.graph,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )?;
+        Ok(Self { graph, session })
     }
 
     pub fn execute(&self, weights: &LoadedT5xxlWeights, token_ids: &[i32]) -> Result<T5xxlRun> {
@@ -565,7 +577,7 @@ fn embed_t5_tokens(
             token_ids,
             &t5_cache_namespace(weights),
             "shared.weight",
-            || Ok(embedding.bytes.to_vec()),
+            || Ok(std::borrow::Cow::Borrowed(embedding.bytes)),
         ) {
             Some(Ok(values)) => {
                 return RowsTensor::new(token_ids.len(), model_dim, values);
@@ -630,7 +642,7 @@ fn linear_rows_ggml(
             weight.rows,
             &t5_cache_namespace(weights),
             weight_name,
-            || Ok(weight.bytes.to_vec()),
+            || Ok(std::borrow::Cow::Borrowed(weight.bytes)),
         ) {
             Some(Ok(mut output)) => {
                 if input_scale != 1.0 {
@@ -656,16 +668,13 @@ fn linear_rows_ggml(
     linear_rows_ggml_matrix(input, weight, input_scale)
 }
 
-/// Device weight-cache namespace of these t5 weights: keyed by the source
-/// file path, so combined checkpoints share one evictable checkpoint root
-/// across all components.
-pub(crate) fn t5_cache_namespace(weights: &LoadedT5xxlWeights) -> String {
-    format!("t5xxl:{}", weights.path.display())
+/// Device weight-cache namespace of this loaded component's owner.
+pub(crate) fn t5_cache_namespace(weights: &LoadedT5xxlWeights) -> &str {
+    weights.owner.namespace()
 }
 
 /// Drops every device weight-cache entry belonging to these t5 weights
-/// (raw FP8 payloads + gathered embedding). Called on a model switch —
-/// combined checkpoints key all components on the outgoing checkpoint path.
+/// (raw FP8 payloads + gathered embedding). Called on a model switch.
 pub(crate) fn evict_device_weight_cache(weights: &LoadedT5xxlWeights) -> usize {
     crate::backend::gpu_weight_cache_evict_prefix(&t5_cache_namespace(weights)).unwrap_or(0)
 }
@@ -1913,17 +1922,6 @@ fn shape_dim(entry: &MlxTensorEntry, index: usize) -> Option<u32> {
         .and_then(|&dim| u32::try_from(dim).ok())
 }
 
-fn is_context_oom(err: &DiffusionError) -> bool {
-    matches!(err, DiffusionError::Model(message) if message.starts_with("context out of memory allocating "))
-}
-
-fn next_graph_reserve_bytes(weights: &LoadedT5xxlWeights) -> Result<usize> {
-    weights
-        .graph_reserve_bytes()
-        .checked_mul(2)
-        .ok_or_else(|| DiffusionError::model("t5xxl graph reserve overflow"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2013,6 +2011,7 @@ mod tests {
     #[test]
     fn attention_bias_uses_relative_bias_without_padding_mask() {
         let weights = LoadedT5xxlWeights {
+            owner: std::sync::Arc::new(crate::backend::WeightOwner::new("t5xxl")),
             ctx: makepad_ai_common::Context::new(makepad_ai_common::InitParams {
                 mem_size: 1024,
                 mem_buffer: None,
@@ -2036,6 +2035,7 @@ mod tests {
                 2.0, 12.0, // bucket 2
                 3.0, 13.0, // bucket 3
             ],
+            prefix: None,
             graph_extra_bytes: 0,
         };
         let bytes = attention_bias_f32_bytes(&weights, 2).unwrap();

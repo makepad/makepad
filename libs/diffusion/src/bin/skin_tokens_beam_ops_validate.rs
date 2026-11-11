@@ -24,6 +24,10 @@ fn compare(name: &str, native: &[f32], reference: &[f32], tolerance: f32) -> Res
 }
 
 fn main() -> Result<(), String> {
+    makepad_diffusion::backend::metal::run_model_worker("skin_tokens_beam_ops_validate", model_main)
+}
+
+fn model_main() -> Result<(), String> {
     let prior_beams = 2;
     let sequence = 3;
     let cols = 4;

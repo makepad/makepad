@@ -18,6 +18,7 @@ local-llm = ["dep:makepad-ai-llm"]
 
 [dependencies]
 makepad-widgets-core = { path = "../../widgets/core" }
+makepad-lock-free = { path = "../lock_free" }
 # The hub picks the voice: Kokoro in-process / on the machine node / on a LAN
 # node, else the OS synthesizer (makepad-system-speech). No default features:
 # the image/video/mesh backends are not this crate's business.

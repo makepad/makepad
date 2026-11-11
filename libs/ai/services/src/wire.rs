@@ -70,8 +70,17 @@ pub const MAX_NOTE_BYTES: usize = 256;
 pub const MAX_TASK_BYTES: usize = 4 * 1024;
 /// Bytes of a service's volatile per-turn context.
 pub const MAX_CONTEXT_BYTES: usize = 2 * 1024;
-/// Bytes of a call's argument JSON.
-pub const MAX_ARGS_BYTES: usize = 16 * 1024;
+/// Bytes of a call's argument JSON: the existing remote OPEN payload capacity
+/// (`libs/remote/src/frame.rs`: 1 MiB minus chan/kind/flags). This is a sanity
+/// check, not a buffer allocation. The remote sender also checks the actual
+/// OPEN payload, including its variable service/routing header, before queueing.
+/// Mirrored by ai-hub's chat_wire::MAX_TOOL_JSON_BYTES (neither data-only
+/// crate depends on the remote transport).
+pub const MAX_ARGS_BYTES: usize = (1 << 20) - 4;
+
+pub fn arguments_too_large(bytes: usize) -> String {
+    format!("the encoded call is {bytes} bytes; one call carries {MAX_ARGS_BYTES} (including routing fields). Send a smaller first part, then append the rest with the service's edit tool.")
+}
 /// Longest service id.
 pub const MAX_SERVICE_ID: usize = 24;
 /// Longest tool short name.
@@ -920,7 +929,7 @@ impl ServiceDown {
                     return Err("call: bad tool name".into());
                 }
                 if c.args.len() > MAX_ARGS_BYTES {
-                    return Err("call: args over cap".into());
+                    return Err(arguments_too_large(c.args.len()));
                 }
                 Ok(())
             }
@@ -1078,7 +1087,7 @@ impl AppRequest {
                     .join(" ");
                 let args = if body.trim().is_empty() { "{}".to_string() } else { body.trim().to_string() };
                 if args.len() > MAX_ARGS_BYTES {
-                    return Err("call: the arguments are over the cap".into());
+                    return Err(arguments_too_large(args.len()));
                 }
                 Ok(AppRequest::Call {
                     service: service.to_string(),

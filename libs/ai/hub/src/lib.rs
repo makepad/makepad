@@ -47,6 +47,7 @@ pub mod client;
 mod child_process;
 pub mod control_image;
 pub mod depth_backend;
+pub mod multiview_backend;
 pub mod download;
 mod disk_space;
 mod disk_volume;
@@ -155,6 +156,8 @@ pub mod music3_backend;
 pub mod notes_backend;
 pub mod world_backend;
 
+#[cfg(feature = "flux")]
+mod warm_slot;
 #[cfg(feature = "flux")]
 pub mod flux_backend;
 #[cfg(feature = "flux")]

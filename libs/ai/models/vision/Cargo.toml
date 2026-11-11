@@ -16,3 +16,20 @@ makepad-ai-cuda = { path = "../../cuda", optional = true }
 
 [features]
 cuda = ["dep:makepad-ai-cuda", "makepad-ai-cuda/cuda", "dep:makepad-ai-geometry", "makepad-ai-geometry/cuda"]
+
+[[bin]]
+name = "mapanything-validate"
+path = "src/bin/mapanything_validate.rs"
+
+[[bin]]
+name = "scan-eval"
+path = "src/bin/scan_eval.rs"
+
+[[bin]]
+name = "scan-export"
+path = "src/bin/scan_export.rs"
+
+[[bin]]
+name = "scan-mvs"
+path = "src/bin/scan_mvs.rs"
+required-features = ["cuda"]

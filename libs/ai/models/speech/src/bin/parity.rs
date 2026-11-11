@@ -52,6 +52,10 @@ fn compare_path(label: &str, ours: &[f32], path: &str) -> bool {
 }
 
 fn main() {
+    makepad_ai_common::backend::metal::run_model_worker("parity", model_main)
+}
+
+fn model_main() {
     makepad_ai_speech::g2p::data::load_default().unwrap_or_else(|e| panic!("{e}"));
     // The strict pass runs the pure-Rust reference paths; the Metal tier is
     // timed and sanity-checked separately at the end, because its simdgroup

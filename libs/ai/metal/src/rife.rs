@@ -1,29 +1,44 @@
 //! Practical-RIFE v4.26 ops for the macOS Metal path.
 //!
-//! Fills the exact op set `rife_model.rs` needs and CUDA provides on the
-//! fleet (`libs/ai/cuda/kernels/rife.cu`), in the HOST-BACKED style of this
-//! crate's `GpuTensor`: the convolutions — over 90 % of the FLOPs — ride
-//! the ggml Metal GEMM through `shim::try_matmul_nt_f32` via a strided
-//! im2col, and the cheap elementwise/gather ops (warp, PReLU tail, pixel
-//! shuffle, merge) run banded on the CPU, which on unified memory is the
-//! same RAM the GPU reads. Semantics are transcribed 1:1 from the portable
-//! reference in `makepad-ai-rife::rife_cpu` — that file stays the parity
-//! oracle, and the op-level tests over there compare THIS module against
-//! it on random tensors.
+//! Fills the op set used by `rife_model.rs`. On macOS, inputs are borrowed
+//! from mapped tensor buffers after their GPU writers finish, and host loops
+//! and the existing BLAS convolution write pooled mapped outputs directly.
+//! Arithmetic and public signatures match the portable reference in
+//! `makepad-ai-rife::rife_cpu`; its device parity tests cover this module.
 
 use crate::gpu_types::GpuTensor;
+#[cfg(not(target_os = "macos"))]
 use std::cell::RefCell;
+#[cfg(target_os = "macos")]
+use crate::gpu_tensor::{data, tensor, HostOutput};
+
+#[cfg(not(target_os = "macos"))]
+struct HostOutput(Vec<f32>);
+#[cfg(not(target_os = "macos"))]
+impl HostOutput {
+    fn zeroed(len: usize) -> Result<Self, String> { Ok(Self(vec![0.0; len])) }
+}
+#[cfg(not(target_os = "macos"))]
+impl std::ops::Deref for HostOutput {
+    type Target = [f32];
+    fn deref(&self) -> &[f32] { &self.0 }
+}
+#[cfg(not(target_os = "macos"))]
+impl std::ops::DerefMut for HostOutput {
+    fn deref_mut(&mut self) -> &mut [f32] { &mut self.0 }
+}
 
 pub fn prof_dump() {}
 
 #[cfg(target_os = "macos")]
 pub(crate) fn prof_add(_slot: usize, _started: std::time::Instant) {}
 
-fn tensor(rows: usize, cols: usize, data: Vec<f32>) -> GpuTensor {
+#[cfg(not(target_os = "macos"))]
+fn tensor(rows: usize, cols: usize, data: HostOutput) -> GpuTensor {
     GpuTensor {
         rows,
         cols,
-        data: RefCell::new(data),
+        data: RefCell::new(data.0),
         #[cfg(target_os = "macos")]
         u32s: RefCell::new(Vec::new()),
         #[cfg(target_os = "macos")]
@@ -31,6 +46,7 @@ fn tensor(rows: usize, cols: usize, data: Vec<f32>) -> GpuTensor {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn data(t: &GpuTensor) -> Result<std::cell::Ref<'_, Vec<f32>>, String> {
     t.data
         .try_borrow()
@@ -68,7 +84,7 @@ fn par_bands<T: Send>(out: &mut [T], row_len: usize, work: impl Fn(usize, &mut [
 /// `C[m,n] = A[m,k] * B[k,n]` (both row-major, no transpose) — the shape
 /// the K-major im2col produces.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn matmul_nn_blas(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+fn matmul_nn_blas(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Result<HostOutput, String> {
     extern "C" {
         fn cblas_sgemm(
             order: i32,
@@ -89,7 +105,7 @@ fn matmul_nn_blas(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32
     }
     const ROW_MAJOR: i32 = 101;
     const NO_TRANS: i32 = 111;
-    let mut out = vec![0.0f32; m * n];
+    let mut out = HostOutput::zeroed(m * n)?;
     unsafe {
         cblas_sgemm(
             ROW_MAJOR,
@@ -108,13 +124,13 @@ fn matmul_nn_blas(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32
             n as i32,
         );
     }
-    out
+    Ok(out)
 }
 
 /// CPU fallback for the NN shape.
 #[allow(dead_code)]
-fn matmul_nn_cpu(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; m * n];
+fn matmul_nn_cpu(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Result<HostOutput, String> {
+    let mut out = HostOutput::zeroed(m * n)?;
     par_bands(&mut out, n, |m0, band| {
         for (row_index, row) in band.chunks_mut(n).enumerate() {
             let arow = &a[(m0 + row_index) * k..(m0 + row_index + 1) * k];
@@ -126,14 +142,14 @@ fn matmul_nn_cpu(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32>
             }
         }
     });
-    out
+    Ok(out)
 }
 
 /// Naive CPU GEMM fallback (`C[m,n] = A[m,k] * B[n,k]^T`) for when the
 /// Metal shim declines (tiny sizes / MAKEPAD_DIFFUSION_CPU).
 #[allow(dead_code)]
-fn matmul_nt_cpu(a: &[f32], bt: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; m * n];
+fn matmul_nt_cpu(a: &[f32], bt: &[f32], m: usize, k: usize, n: usize) -> Result<HostOutput, String> {
+    let mut out = HostOutput::zeroed(m * n)?;
     par_bands(&mut out, n, |m0, band| {
         for (row_index, row) in band.chunks_mut(n).enumerate() {
             let arow = &a[(m0 + row_index) * k..(m0 + row_index + 1) * k];
@@ -147,7 +163,7 @@ fn matmul_nt_cpu(a: &[f32], bt: &[f32], m: usize, k: usize, n: usize) -> Vec<f32
             }
         }
     });
-    out
+    Ok(out)
 }
 
 /// `nn.Conv2d(in, out, k, stride, pad)` — im2col into `[N, K]` position-
@@ -233,9 +249,9 @@ pub fn conv2d_planar_strided(
         }
     });
     #[cfg(any(target_os = "macos", target_os = "ios"))]
-    let mut out = matmul_nn_blas(weights, &cols, out_channels, k, n);
+    let mut out = matmul_nn_blas(weights, &cols, out_channels, k, n)?;
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    let mut out = matmul_nn_cpu(weights, &cols, out_channels, k, n);
+    let mut out = matmul_nn_cpu(weights, &cols, out_channels, k, n)?;
     for (oc, row) in out.chunks_mut(n).enumerate() {
         let b = bias[oc];
         for v in row.iter_mut() {
@@ -273,7 +289,7 @@ pub fn conv_transpose2d(
     let sw = (in_width - 1) * stride + 1;
     let sh = (in_height - 1) * stride + 1;
     let xd = data(x)?;
-    let mut stuffed = vec![0.0f32; in_channels * sw * sh];
+    let mut stuffed = HostOutput::zeroed(in_channels * sw * sh)?;
     for ic in 0..in_channels {
         for iy in 0..in_height {
             let src = ic * in_plane + iy * in_width;
@@ -338,7 +354,7 @@ pub fn warp(
     let fd: &[f32] = &fd;
     let max_x = (width - 1) as f32;
     let max_y = (height - 1) as f32;
-    let mut out = vec![0.0f32; channels * plane];
+    let mut out = HostOutput::zeroed(channels * plane)?;
     // Precompute the sample geometry once per pixel; apply to all channels.
     let mut geom = vec![(0usize, 0usize, 0usize, 0usize, 0.0f32, 0.0f32); plane];
     par_bands(&mut geom, width, |py0, band| {
@@ -389,7 +405,7 @@ pub fn res_conv(
     }
     let cd: &[f32] = &cd;
     let rd: &[f32] = &rd;
-    let mut out = vec![0.0f32; channels * plane];
+    let mut out = HostOutput::zeroed(channels * plane)?;
     par_bands(&mut out, plane, |c0, band| {
         for (ci, channel) in band.chunks_mut(plane).enumerate() {
             let c = c0 + ci;
@@ -406,20 +422,24 @@ pub fn res_conv(
 
 pub fn lrelu(x: &GpuTensor, slope: f32) -> Result<GpuTensor, String> {
     let xd = data(x)?;
-    let out = xd
-        .iter()
-        .map(|v| if *v < 0.0 { *v * slope } else { *v })
-        .collect();
+    let mut out = HostOutput::zeroed(xd.len())?;
+    for (dst, &value) in out.iter_mut().zip(xd.iter()) {
+        *dst = if value < 0.0 { value * slope } else { value };
+    }
     Ok(tensor(x.rows, x.cols, out))
 }
 
 pub fn scale(x: &GpuTensor, factor: f32) -> Result<GpuTensor, String> {
     let xd = data(x)?;
-    Ok(tensor(x.rows, x.cols, xd.iter().map(|v| *v * factor).collect()))
+    let mut out = HostOutput::zeroed(xd.len())?;
+    for (dst, value) in out.iter_mut().zip(xd.iter()) { *dst = *value * factor; }
+    Ok(tensor(x.rows, x.cols, out))
 }
 
 pub fn fill(rows: usize, cols: usize, value: f32) -> Result<GpuTensor, String> {
-    Ok(tensor(rows, cols, vec![value; rows * cols]))
+    let mut out = HostOutput::zeroed(rows * cols)?;
+    out.fill(value);
+    Ok(tensor(rows, cols, out))
 }
 
 /// `nn.PixelShuffle(scale)` over `[out_c * scale^2, in_plane]`, plus a per-
@@ -444,7 +464,7 @@ pub fn pixel_shuffle_planar(
     let out_plane = out_w * out_h;
     let xd = data(x)?;
     let xd: &[f32] = &xd;
-    let mut out = vec![0.0f32; out_channels * out_plane];
+    let mut out = HostOutput::zeroed(out_channels * out_plane)?;
     par_bands(&mut out, out_plane, |c0, band| {
         for (ci, channel) in band.chunks_mut(out_plane).enumerate() {
             let c = c0 + ci;

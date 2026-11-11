@@ -2,7 +2,12 @@
 //! pixal_generate <verified-weights-dir> <input.png> <output.glb> [1024|1536] [REPEATS]
 //! Weights use the filenames below; downloads and hashes still use the registry.
 #[cfg(feature = "mesh")]
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
+    makepad_ai_common::backend::metal::run_model_worker("pixal_generate", || std::process::Termination::report(model_main()))
+}
+
+#[cfg(feature = "mesh")]
+fn model_main() -> Result<(), Box<dyn std::error::Error>> {
     use makepad_ai_hub::backend::{BackendCtx, CancelToken, ContentBackend, GenerateParams};
     use makepad_ai_hub::download::Downloader;
     use makepad_ai_hub::protocol::{GenerateRequestJson, PixalOptionsJson};

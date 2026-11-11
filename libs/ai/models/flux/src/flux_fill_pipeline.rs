@@ -32,6 +32,7 @@
 //! PNG decode/encode and u8<->f32 conversion live there, this file only
 //! does tensor math.
 
+use crate::flux_pipeline::FluxWeightOwners;
 use crate::backend::{new_runtime, runtime_available};
 use crate::comfy::FluxPrompts;
 use crate::flux::{
@@ -187,7 +188,18 @@ impl FluxFillPipeline {
         plan: FluxPromptToImagePlan,
         image_width: Option<u32>,
         image_height: Option<u32>,
+        hooks: Option<&mut FluxRunHooks>,
+    ) -> Result<(Self, FluxFillPipelineLoadTiming)> {
+        Self::load_with_owners(plan, image_width, image_height, hooks, None)
+    }
+
+    /// Rebuild with the outgoing component owners when the model identity is unchanged.
+    pub fn load_with_owners(
+        plan: FluxPromptToImagePlan,
+        image_width: Option<u32>,
+        image_height: Option<u32>,
         mut hooks: Option<&mut FluxRunHooks>,
+        owners: Option<FluxWeightOwners>,
     ) -> Result<(Self, FluxFillPipelineLoadTiming)> {
         let total_start = Instant::now();
         let width = image_width.unwrap_or(plan.generation.width);
@@ -204,7 +216,10 @@ impl FluxFillPipeline {
         let text_load_start = Instant::now();
         let mut text_weights = {
             let mut sub = sub_hook(&mut hooks, 0.02, 0.08);
-            FluxLoadedTextEncoders::load_split(&plan.bundle, crate::hook_ref(&mut sub))?
+            FluxLoadedTextEncoders::load_split_with_owners(
+                &plan.bundle, crate::hook_ref(&mut sub),
+                owners.as_ref().map(|o| (o.clip.clone(), o.t5.clone())),
+            )?
         };
         let text_load_ms = crate::flux_pipeline::elapsed_ms(text_load_start);
 
@@ -236,10 +251,12 @@ impl FluxFillPipeline {
         let transformer_load_start = Instant::now();
         let mut transformer_weights = {
             let mut sub = sub_hook(&mut hooks, 0.60, 0.15);
-            LoadedFluxTransformerWeights::load_component_with_progress(
+            LoadedFluxTransformerWeights::load_component_with_owner(
                 &plan.bundle.diffusion_model_path,
                 plan.bundle.component_prefixes().diffusion,
+                &crate::flux_lora::FluxLoraStack::default(),
                 crate::hook_ref(&mut sub),
+                owners.as_ref().and_then(|o| o.transformer.clone()),
             )?
         };
         let transformer_load_ms = crate::flux_pipeline::elapsed_ms(transformer_load_start);
@@ -269,7 +286,7 @@ impl FluxFillPipeline {
         hook_emit(&mut hooks, "load vae", 0.92);
         let vae_load_start = Instant::now();
         let mut vae_weights =
-            LoadedFluxVaeWeights::load_component(vae_path, plan.bundle.component_prefixes().vae)?;
+            LoadedFluxVaeWeights::load_component_with_owner(vae_path, plan.bundle.component_prefixes().vae, owners.as_ref().and_then(|o| o.vae.clone()))?;
         let vae_load_ms = crate::flux_pipeline::elapsed_ms(vae_load_start);
 
         hook_check(&hooks)?;
@@ -335,6 +352,7 @@ impl FluxFillPipeline {
             return false;
         };
         latent_shape == self.latent_shape
+            && plan.bundle.component_prefixes() == self.plan.bundle.component_prefixes()
             && plan.bundle.diffusion_model_path == self.plan.bundle.diffusion_model_path
             && plan.bundle.vae_path == self.plan.bundle.vae_path
             && plan.bundle.clip_l_path == self.plan.bundle.clip_l_path
@@ -345,12 +363,31 @@ impl FluxFillPipeline {
         &self.plan.bundle.diffusion_model_path
     }
 
+    pub fn weight_owners_for(&self, plan: &FluxPromptToImagePlan) -> FluxWeightOwners {
+        let old = &self.plan.bundle;
+        let new = &plan.bundle;
+        let old_prefixes = old.component_prefixes();
+        let new_prefixes = new.component_prefixes();
+        FluxWeightOwners {
+            transformer: (old.diffusion_model_path == new.diffusion_model_path
+                && old_prefixes.diffusion == new_prefixes.diffusion
+                && self.transformer_weights.lora_fingerprint.is_empty())
+                .then(|| self.transformer_weights.owner.clone()),
+            t5: (old.t5xxl_path == new.t5xxl_path && old_prefixes.t5xxl == new_prefixes.t5xxl)
+                .then(|| self.text_weights.t5xxl.owner.clone()),
+            clip: (old.clip_l_path == new.clip_l_path && old_prefixes.clip_l == new_prefixes.clip_l)
+                .then(|| self.text_weights.clip_l.owner.clone()),
+            vae: (old.vae_path == new.vae_path && old_prefixes.vae == new_prefixes.vae)
+                .then(|| self.vae_weights.owner.clone()),
+        }
+    }
+
     fn residency_namespaces(&self) -> Vec<String> {
         vec![
-            crate::flux_transformer::flux_cache_namespace(&self.transformer_weights),
-            crate::flux_vae::flux_vae_cache_namespace(&self.vae_weights),
-            crate::t5_encoder::t5_cache_namespace(&self.text_weights.t5xxl),
-            crate::clip_l::clip_cache_namespace(&self.text_weights.clip_l),
+            crate::flux_transformer::flux_cache_namespace(&self.transformer_weights).to_owned(),
+            crate::flux_vae::flux_vae_cache_namespace(&self.vae_weights).to_owned(),
+            crate::t5_encoder::t5_cache_namespace(&self.text_weights.t5xxl).to_owned(),
+            crate::clip_l::clip_cache_namespace(&self.text_weights.clip_l).to_owned(),
         ]
     }
 

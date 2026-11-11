@@ -40,6 +40,10 @@ fn write_wav_stereo16(path: &std::path::Path, channels: &[Vec<f32>], sample_rate
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("sa3_generate", model_main)
+}
+
+fn model_main() {
     let args: Vec<String> = std::env::args().collect();
     let mut opts = std::collections::HashMap::new();
     let mut i = 1;

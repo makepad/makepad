@@ -59,6 +59,10 @@ fn read_f32_file(path: &std::path::Path) -> Vec<f32> {
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("music3_gguf_generate", model_main)
+}
+
+fn model_main() {
     let args: Vec<String> = std::env::args().collect();
     if arg_flag(&args, "--help") || arg_flag(&args, "-h") {
         eprintln!(

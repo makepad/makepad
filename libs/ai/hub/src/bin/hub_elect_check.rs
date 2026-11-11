@@ -27,6 +27,7 @@ fn main() {
         preferred_model: Some("qwen3.8-27b".into()),
         max_tokens: Some(8),
         thinking: Some(false),
+        claude_model: None,
         system_prompt: "Reply with one word.".into(),
         tools: Vec::new(),
         wake: None,

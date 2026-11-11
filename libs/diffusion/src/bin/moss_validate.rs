@@ -145,6 +145,10 @@ fn compare(tag: &str, ours: &[f32], reference: &[f32]) {
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("moss_validate", model_main)
+}
+
+fn model_main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |flag: &str, default: &str| -> String {
         args.iter()

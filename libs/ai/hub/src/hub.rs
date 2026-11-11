@@ -70,6 +70,7 @@ impl AiHub {
             // need per-turn controls use HubChatConfig directly.
             max_tokens: Some(u32::MAX),
             thinking: None,
+            claude_model: None,
             system_prompt: config.system_prompt,
             tools: config.tools,
             wake: config.wake,

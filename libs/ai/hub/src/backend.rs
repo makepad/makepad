@@ -16,11 +16,11 @@ use crate::protocol::{GenerateRequestJson, RealtimeRequestJson};
 use crate::registry::{FileSpec, ModelSpec};
 use std::path::{Path, PathBuf};
 
-/// Splat-domain gaussian budget bounds, mirrored from
-/// `makepad_ai_splat::{GAUSSIANS_MIN, GAUSSIANS_MAX}` so the wire contract is
-/// enforced in builds without the `splat-native` feature too.
+/// Minimum splat-domain Gaussian budget, enforced without `splat-native` too.
 pub const SPLAT_GAUSSIANS_MIN: u32 = 32_768;
-pub const SPLAT_GAUSSIANS_MAX: u32 = 262_144;
+/// The widest model's maximum (Idol); each model clamps to its own range in
+/// `makepad_ai_splat::resolve_num_gaussians`.
+pub const SPLAT_GAUSSIANS_MAX: u32 = 1_048_576;
 
 /// Normalized generation parameters. Ranges are clamped here; `None` means
 /// "not requested" so each backend can apply its own domain default (image
@@ -89,6 +89,9 @@ pub struct GenerateParams {
     /// rendered prompt (the claude-cli backend). Empty for non-chat jobs.
     pub chat_system: String,
     pub chat_messages: Vec<crate::protocol::ChatMessageJson>,
+    /// The request's `claude_model` (empty when it named none): the Claude model a claude-cli
+    /// turn runs.
+    pub claude_model: String,
     /// Pictures the chat turns carry (`chat_messages[].images`), decoded,
     /// one per distinct key; the rendered prompt holds their markers
     /// (`crate::protocol::chat_image_marker`).
@@ -419,6 +422,7 @@ impl GenerateParams {
             chat_session: request.chat_session.clone().unwrap_or_default(),
             chat_system: if is_chat { request.chat_system.clone().unwrap_or_default() } else { String::new() },
             chat_messages: if is_chat { request.chat_messages.clone().unwrap_or_default() } else { Vec::new() },
+            claude_model: request.claude_model.as_deref().unwrap_or_default().trim().to_string(),
             chat_images: if is_chat {
                 decode_chat_images(request.chat_messages.as_deref())?
             } else {
@@ -1728,6 +1732,7 @@ pub fn backend_compiled(name: &str) -> bool {
         "paint" | "paint-test" => cfg!(feature = "paint"),
         "matte-native" => cfg!(feature = "matte-native"),
         "depth-native" => cfg!(feature = "depth-native"),
+        "multiview-native" => cfg!(feature = "multiview-native"),
         "segment-native" => cfg!(feature = "segment-native"),
         "body-native" => cfg!(feature = "body-native"),
         "upscale-native" => cfg!(feature = "upscale-native"),
@@ -1794,6 +1799,7 @@ pub fn backend_provisioned(name: &str) -> bool {
         "vision" => crate::vision_backend::vision_provisioned(),
         "ocr" => crate::vision_backend::vision_provisioned(),
         "depth-native" => cfg!(feature = "depth-native"),
+        "multiview-native" => cfg!(feature = "multiview-native"),
         "segment-native" => cfg!(feature = "segment-native"),
         "body-native" => cfg!(feature = "body-native"),
         "upscale-native" => cfg!(feature = "upscale-native"),
@@ -2103,7 +2109,7 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         #[cfg(feature = "splat-native")]
         "triposplat" => Ok(Box::new(crate::splat_backend::SplatBackend::new_native(
             &spec.id,
-        ))),
+        )?)),
         #[cfg(not(feature = "splat-native"))]
         "triposplat" => Err(AssetAiError::Unavailable(format!(
             "model {} needs a CUDA build with the 'splat-native' cargo feature",
@@ -2129,6 +2135,15 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         #[cfg(not(feature = "depth-native"))]
         "depth-native" => Err(AssetAiError::Unavailable(format!(
             "model {} needs a build with the 'depth-native' cargo feature",
+            spec.id
+        ))),
+        #[cfg(feature = "multiview-native")]
+        "multiview-native" => Ok(Box::new(
+            crate::multiview_backend::MultiviewBackend::new_native(&spec.id),
+        )),
+        #[cfg(not(feature = "multiview-native"))]
+        "multiview-native" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'multiview-native' cargo feature",
             spec.id
         ))),
         #[cfg(feature = "segment-native")]

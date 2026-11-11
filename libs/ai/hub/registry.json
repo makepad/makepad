@@ -2504,7 +2504,7 @@
    "license": {
     "name": "MIT License (TripoSplat) + DINOv3 License (bundled image encoder)",
     "url": "https://huggingface.co/VAST-AI/TripoSplat",
-    "summary": "TripoSplat code and weights are MIT (VAST-AI; permissive, commercial use allowed, notice retention). The bundled DINOv3 ViT-H image-encoder weights originate from Meta's DINOv3 release under the DINOv3 License: commercial use permitted, but redistribution of those weights or derivatives must carry the DINOv3 License and display 'Built with DINOv3'. This app records acknowledgement only; it does not host or redistribute any weights.",
+    "summary": "TripoSplat code and weights are MIT (VAST-AI; permissive, commercial use allowed, notice retention). The bundled DINOv3 ViT-H image-encoder weights originate from Meta's DINOv3 release under the DINOv3 License: commercial use permitted, but redistribution of those weights or derivatives must carry a copy of the DINOv3 License, and its trade-control terms exclude military, weapons, nuclear and espionage uses. This app records acknowledgement only; it does not host or redistribute any weights.",
     "restriction": "community"
    },
    "vram_gb": 20.0,
@@ -2528,6 +2528,78 @@
      "cache_as": "triposplat/vae/triposplat_vae_decoder_fp16.safetensors",
      "size": 576148442,
      "sha256": "ed0d0c3d43b599e326845d0ec70f3cf77be9a55e2d97627ac3b34d2830763cc8"
+    },
+    {
+     "role": "dino-conditioner",
+     "repo": "VAST-AI/TripoSplat",
+     "path": "clip_vision/dino_v3_vit_h.safetensors",
+     "revision": "56a96e603204ec410c4da60c13ea4fa09a2169a9",
+     "cache_as": "triposplat/clip_vision/dino_v3_vit_h.safetensors",
+     "size": 1681247696,
+     "sha256": "a29ef35101a16966972a0d50732a6f3a608ff7cfffb2afa9bbe9007cb842cc53"
+    },
+    {
+     "role": "vae",
+     "repo": "VAST-AI/TripoSplat",
+     "path": "vae/flux2-vae.safetensors",
+     "revision": "56a96e603204ec410c4da60c13ea4fa09a2169a9",
+     "cache_as": "triposplat/vae/flux2-vae.safetensors",
+     "size": 336213556,
+     "sha256": "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
+    },
+    {
+     "role": "native-matte",
+     "repo": "VAST-AI/TripoSplat",
+     "path": "background_removal/birefnet.safetensors",
+     "revision": "56a96e603204ec410c4da60c13ea4fa09a2169a9",
+     "cache_as": "triposplat/background_removal/birefnet.safetensors",
+     "size": 444473596,
+     "sha256": "9ab37426bf4de0567af6b5d21b16151357149139362e6e8992021b8ce356a154"
+    }
+   ]
+  },
+  {
+   "id": "idol",
+   "domain": "splat",
+   "backend": "triposplat",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "Apache License 2.0 (Idol) + DINOv3 License (image encoder)",
+    "url": "https://huggingface.co/speridlabs/idol",
+    "summary": "Idol weights and SDK are Apache-2.0 (speridlabs; permissive, commercial use allowed). The DINOv3 ViT-H+ image-encoder weights are Meta's, under the DINOv3 License: commercial use permitted; redistribution must carry a copy of the DINOv3 License, and its trade-control terms exclude military, weapons, nuclear and espionage uses. The FLUX.2 VAE is Apache-2.0 and the BiRefNet matte MIT. This app records acknowledgement only; it does not host or redistribute any weights.",
+    "restriction": "community"
+   },
+   "vram_gb": 20.0,
+   "min_vram_gb": 16.0,
+   "note": "Idol (speridlabs, Apache-2.0) single image -> 3D Gaussian splat. It is TripoSplat's architecture retrained, run by the same native Rust/CUDA pipeline. Its own F32 denoiser, octree decoder and Gaussian decoder are pinned at the revision below. The DINOv3 conditioner, FLUX.2 VAE and BiRefNet matte are the same pinned files as triposplat: the same tensors Idol's reference loads, since Idol casts both encoders to bf16 on load. They share one cache. CUDA-only. Request: input_b64 PNG -> one application/x-ply. Params: seed, steps (default 50), guidance (default 4.0, the diffusers scale s; Idol's documented cfg_strength w is s - 1), gaussians (32768..1048576, default 262144, a multiple of 32).",
+   "files": [
+    {
+     "role": "dit",
+     "repo": "speridlabs/idol",
+     "path": "denoiser.safetensors",
+     "revision": "2731c2291fc65a797c5cb627a5e5526fc1490902",
+     "cache_as": "idol/denoiser.safetensors",
+     "size": 1482258308,
+     "sha256": "ded2cacf671bf3978ebc62729087abdbd318ef4752e6805b4c9fc8ffa51fe716"
+    },
+    {
+     "role": "octree-decoder",
+     "repo": "speridlabs/idol",
+     "path": "decoder.safetensors",
+     "revision": "2731c2291fc65a797c5cb627a5e5526fc1490902",
+     "cache_as": "idol/decoder.safetensors",
+     "size": 203171696,
+     "sha256": "9da4d7676bfcadb1c3fdfbff796e6257dadf82d26ec05be7717c79b2b13a1c4e"
+    },
+    {
+     "role": "splat-decoder",
+     "repo": "speridlabs/idol",
+     "path": "decoder_gs.safetensors",
+     "revision": "2731c2291fc65a797c5cb627a5e5526fc1490902",
+     "cache_as": "idol/decoder_gs.safetensors",
+     "size": 949083036,
+     "sha256": "3087eb8ee5763206a53e4078acf2a1bf382dab5147d407ec13a2cf39c04cc544"
     },
     {
      "role": "dino-conditioner",
@@ -2607,6 +2679,58 @@
      "cache_as": "depth/da3-metric-large/model.safetensors",
      "size": 1336734448,
      "sha256": "bbea5b0b3ee389849cffa7ddae89de064a90abd2b055fc5aa99aac68db324776"
+    }
+   ]
+  },
+  {
+   "id": "mapanything-apache",
+   "domain": "multiview",
+   "backend": "multiview-native",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/facebook/map-anything-apache",
+    "summary": "MapAnything (facebook/map-anything-apache) weights are Apache-2.0: permissive use, including commercial, subject to Apache-2.0 conditions.",
+    "restriction": "none"
+   },
+   "vram_gb": 14.0,
+   "note": "MapAnything Apache release (facebook/map-anything-apache, Apache-2.0) multi-view metric 3D reconstruction: the views of one scene (images, with poses, intrinsics and depth where known) -> per-view metric depth, ray directions, camera poses and confidence. About 1.23 B params in one f32 safetensors, run natively (Rust/CUDA, bf16 like the reference's autocast; no Python, Torch or subprocess); the port matches the reference parity tensors. The default multi-view model: listed before the CC-BY-NC checkpoint, and with metric depth inputs it is the more accurate of the two on the synthetic evaluation. vram_gb 14.0 is the measured peak above idle at 32 views, the request maximum (about 6.3 GiB at 6 views). Its weights differ from the CC-BY-NC mapanything checkpoint (same architecture and size): one port serves both.",
+   "files": [
+    {
+     "role": "native-multiview",
+     "repo": "facebook/map-anything-apache",
+     "path": "model.safetensors",
+     "revision": "00f9c245bbcb60522d1ed7f9e9d88462c6e3f38a",
+     "cache_as": "multiview/mapanything-apache/model.safetensors",
+     "size": 4914062480,
+     "sha256": "fa06c0fdccefc5048e072c85935d5789b1e36b307f3859033c17f9dcb9fd5201"
+    }
+   ]
+  },
+  {
+   "id": "mapanything",
+   "domain": "multiview",
+   "backend": "multiview-native",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "Creative Commons Attribution-NonCommercial 4.0",
+    "url": "https://huggingface.co/facebook/map-anything",
+    "summary": "MapAnything (facebook/map-anything) weights are CC-BY-NC-4.0: non-commercial use only, with attribution. Review the model card before any commercial use of the model or its results.",
+    "restriction": "non-commercial"
+   },
+   "vram_gb": 14.0,
+   "note": "MapAnything (facebook/map-anything, CC-BY-NC-4.0) multi-view metric 3D reconstruction: the views of one scene (images, with poses, intrinsics and depth where known) -> per-view metric depth, ray directions, camera poses and confidence. About 1.23 B params in one f32 safetensors, run natively (Rust/CUDA, bf16 like the reference's autocast; no Python, Torch or subprocess); the port matches the reference parity tensors. Opt-in behind its non-commercial licence; mapanything-apache is the default. vram_gb 14.0 is the measured peak above idle at 32 views, the request maximum (about 6.5 GiB at 6 views). The Apache-2.0 release (mapanything-apache) is a different checkpoint of the same architecture: one port serves both.",
+   "files": [
+    {
+     "role": "native-multiview",
+     "repo": "facebook/map-anything",
+     "path": "model.safetensors",
+     "revision": "a1d87e9086706fb9974f3be5a3e3a0ca5401c5aa",
+     "cache_as": "multiview/mapanything/model.safetensors",
+     "size": 4914062480,
+     "sha256": "981f060c64664dff3272b5f5a823d350abe71a2f144444db4cfc325f3ed5a3a0"
     }
    ]
   },

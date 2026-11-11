@@ -10,7 +10,13 @@ fn usage() -> ! {
     std::process::exit(1);
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
+    makepad_diffusion::backend::metal::run_model_worker("flux_clip_smoke", || {
+        std::process::Termination::report(model_main())
+    })
+}
+
+fn model_main() -> Result<(), Box<dyn std::error::Error>> {
     let workflow_path = env::args().nth(1).unwrap_or_else(|| usage());
     let root = env::args().nth(2).unwrap_or_else(|| usage());
 

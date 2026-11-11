@@ -581,45 +581,30 @@ mod fill_worker {
         };
         let is_cancelled = || cancel.is_cancelled();
 
-        if !warm.as_ref().is_some_and(|pipeline| {
-            pipeline.serves_plan(&job.plan, Some(job.width), Some(job.height))
-        }) {
-            if let Some(old) = warm.take() {
-                if old.diffusion_model_path() != job.plan.bundle.diffusion_model_path {
-                    old.evict_device_caches();
+        crate::warm_slot::ensure(
+            warm,
+            (job.plan, job.width, job.height),
+            |pipeline, (plan, width, height)| pipeline.serves_plan(plan, Some(*width), Some(*height)),
+            |old, (plan, _, _)| old.diffusion_model_path() == plan.bundle.diffusion_model_path,
+            |old, (plan, _, _)| old.weight_owners_for(plan),
+            |old, _| { old.evict_device_caches(); },
+            |pipeline, owners, (plan, width, height)| {
+                let mut load_progress = |name: &str, fraction: f64| progress(name, 0.02 + fraction * 0.13);
+                let mut hooks = FluxRunHooks {
+                    progress: &mut load_progress,
+                    cancel: &is_cancelled,
+                };
+                match pipeline {
+                    Some(pipeline) => pipeline
+                        .ensure_prompts_with_hooks(&plan.prompts, Some(&mut hooks))
+                        .map(|_| None),
+                    None => FluxFillPipeline::load_with_owners(
+                        plan, Some(width), Some(height), Some(&mut hooks), owners,
+                    ).map(|(pipeline, _)| Some(pipeline)),
                 }
-                drop(old);
-            }
-        }
-        let load_result = {
-            let mut load_progress = |name: &str, fraction: f64| progress(name, 0.02 + fraction * 0.13);
-            let mut hooks = FluxRunHooks {
-                progress: &mut load_progress,
-                cancel: &is_cancelled,
-            };
-            match warm.as_mut() {
-                Some(pipeline) => pipeline
-                    .ensure_prompts_with_hooks(&job.plan.prompts, Some(&mut hooks))
-                    .map(|_| None),
-                None => FluxFillPipeline::load_with_hooks(
-                    job.plan,
-                    Some(job.width),
-                    Some(job.height),
-                    Some(&mut hooks),
-                )
-                .map(|(pipeline, _load_timing)| Some(pipeline)),
-            }
-        };
-        match load_result {
-            Ok(Some(pipeline)) => *warm = Some(pipeline),
-            Ok(None) => {}
-            Err(err) => {
-                if !matches!(err, DiffusionError::Cancelled) {
-                    *warm = None;
-                }
-                return Err(worker_err(err));
-            }
-        }
+            },
+            |err| matches!(err, DiffusionError::Cancelled),
+        ).map_err(worker_err)?;
         if cancel.is_cancelled() {
             return Err(FluxFillWorkerError::Cancelled);
         }
@@ -633,14 +618,11 @@ mod fill_worker {
                 progress: &mut condition_progress,
                 cancel: &is_cancelled,
             };
-            if let Err(err) =
-                pipeline.prepare_conditioning_with_hooks(&job.image_chw, &job.mask, Some(&mut hooks))
-            {
-                if !matches!(err, DiffusionError::Cancelled) {
-                    *warm = None;
-                }
-                return Err(worker_err(err));
-            }
+            let result = pipeline.prepare_conditioning_with_hooks(
+                &job.image_chw, &job.mask, Some(&mut hooks),
+            );
+            crate::warm_slot::finish(warm, result, |err| matches!(err, DiffusionError::Cancelled))
+                .map_err(worker_err)?;
         }
         if cancel.is_cancelled() {
             return Err(FluxFillWorkerError::Cancelled);
@@ -655,15 +637,8 @@ mod fill_worker {
             };
             pipeline.generate_with_hooks(job.seed, job.steps, job.guidance, Some(&mut hooks))
         };
-        match run {
-            Ok(run) => Ok(run),
-            Err(err) => {
-                if !matches!(err, DiffusionError::Cancelled) {
-                    *warm = None;
-                }
-                Err(worker_err(err))
-            }
-        }
+        crate::warm_slot::finish(warm, run, |err| matches!(err, DiffusionError::Cancelled))
+            .map_err(worker_err)
     }
 }
 
@@ -762,6 +737,7 @@ mod tests {
             chat_session: String::new(),
             chat_system: String::new(),
             chat_messages: Vec::new(),
+            claude_model: String::new(),
             chat_images: Vec::new(),
             target_domain: "image".to_string(),
             identity_anchor: String::new(),

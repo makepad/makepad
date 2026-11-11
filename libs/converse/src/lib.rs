@@ -21,4 +21,4 @@ pub use filter::{FilterDecision, PassthroughFilter, TranscriptFilter};
 #[cfg(feature = "local-llm")]
 pub use qwen_filter::QwenFilter;
 pub use pipeline::{ConverseAction, ConversePipeline};
-pub use speech::{spoken_text, Playback, SpeechOutput};
+pub use speech::{spoken_text, SpeechOutput, SpeechRenderer};

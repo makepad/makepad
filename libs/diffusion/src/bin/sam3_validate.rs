@@ -175,7 +175,7 @@ fn metrics_named(name: &str, actual: &[f32], oracle: &[f32]) -> Result<(f64, f32
 }
 
 fn metrics(actual: &[f32], oracle: &[f32]) -> Result<(), String> {
-    let (cosine, max, mae, iou) = metrics_named("mask", actual, oracle)?;
+    let (cosine, _, mae, iou) = metrics_named("mask", actual, oracle)?;
     println!(
         "TOLERANCE fp16/bf16: cosine>=0.995 mae<=0.02 iou50>=0.90 (dump-locked); max_abs ignored on binary 05"
     );
@@ -450,6 +450,10 @@ fn run(
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("sam3_validate", model_main)
+}
+
+fn model_main() {
     let mut args = std::env::args_os().skip(1);
     let Some(model) = args.next() else {
         eprintln!(

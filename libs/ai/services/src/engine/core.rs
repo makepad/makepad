@@ -854,7 +854,7 @@ impl EngineCore {
                     Ok(Value::Obj(fields)) => {
                         let rest = Value::Obj(fields.into_iter().filter(|(k, _)| k != INSTANCE_KEY).collect());
                         match crate::card::validate_args(&parked.schema, &rest) {
-                            Ok(()) if rest.to_json().len() > MAX_ARGS_BYTES => Err("arguments over the size cap".to_string()),
+                            Ok(()) if rest.to_json().len() > MAX_ARGS_BYTES => Err(arguments_too_large(rest.to_json().len())),
                             Ok(()) => Ok(rest.to_json()),
                             Err(why) => Err(why.join("; ")),
                         }
@@ -1240,7 +1240,7 @@ impl EngineCore {
             t.service_label = self.registry.meta(&endpoint).map(|m| m.display_name).unwrap_or_default();
         }
         if args_json.len() > MAX_ARGS_BYTES {
-            let result = ToolResult::refused(&call_id, "arguments over the size cap");
+            let result = ToolResult::refused(&call_id, arguments_too_large(args_json.len()));
             self.finish_call(&call_id, result, from_console);
             return None;
         }
@@ -1984,11 +1984,11 @@ mod tests {
         assert_eq!(core.state().model_note, "Writing a tool call · 12 KB");
         // A silent model is seen to be taking its time.
         core.pump(0.3);
-        core.pump(42.3);
-        assert_eq!(core.state().model_secs, 42);
+        core.pump(1200.3);
+        assert_eq!(core.state().model_secs, 1200);
         assert!(core.state().status.is_busy(), "Stop stays on offer");
         assert!(core.needs_pump());
-        core.cancel(43.0);
+        core.cancel(1201.0);
         assert_eq!(core.state().status, Status::Idle);
         assert_eq!(core.state().model_note, "");
     }

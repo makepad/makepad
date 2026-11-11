@@ -1,0 +1,444 @@
+// The CUDA f32 PatchMatch search as element kernels on either compute device.
+// p: width, height, views, reference, sources, source_count, radius, step,
+// sigma_spatial, sigma_color, depth_min, depth_max, top_k, iterations, initial,
+// seed (two unsigned 32-bit words, low first).
+// Inputs: images (f32, all views consecutively), shape (i32 width, height,
+// pixel offset per view), cameras (f64 intrinsics then row-major camera-to-world
+// 3x4 per view), and optional initial depth/nx/ny/nz (f32).
+// Publishes depth/nx/ny/nz/cost at initialisation and after each full iteration,
+// plus the value progress {iteration, iterations}. A {stop} inbox key ends it.
+use mod.pod.*
+use mod.math.*
+use mod.kernel.*
+
+// A shift right that brings zeros in (the words are i32: `>>` brings the sign in), for 1..=31 bits.
+fn lsr(x, bits) { (x >> bits) & (int(2147483647) >> (bits - 1)) }
+
+// High word of an unsigned 32x32 product, with wrapping i32 arithmetic.
+fn multiply_high(a, b) {
+    let a0 = a & 65535
+    let a1 = lsr(a, 16)
+    let b0 = b & 65535
+    let b1 = lsr(b, 16)
+    let t = a0 * b0
+    let u = a1 * b0 + (lsr(t, 16))
+    let v = a0 * b1 + (u & 65535)
+    a1 * b1 + (lsr(u, 16)) + (lsr(v, 16))
+}
+
+// SplitMix64, low/high words. Round the signed 53-bit fraction to f32 using
+// guard and sticky bits, so cancellation near zero loses no random bits.
+// This is float(2 * double(z >> 11) / 2^53 - 1), without GPU f64 or u64.
+fn draw(low, high, iteration, pixel, slot) {
+    var lo = low ^ pixel
+    var hi = high ^ (iteration << 16) ^ (slot << 8)
+    let added = lo + int(2135587861)
+    let carry = if (added ^ int(-2147483648)) < (lo ^ int(-2147483648)) { int(1) } else { int(0) }
+    lo = added
+    hi = hi + int(-1640531527) + carry
+    lo = lo ^ ((lsr(lo, 30)) | (hi << 2))
+    hi = hi ^ (lsr(hi, 30))
+    hi = hi * int(484763065) + lo * int(-1084733587) + multiply_high(lo, int(484763065))
+    lo = lo * int(484763065)
+    lo = lo ^ ((lsr(lo, 27)) | (hi << 5))
+    hi = hi ^ (lsr(hi, 27))
+    hi = hi * int(321982955) + lo * int(-1798288965) + multiply_high(lo, int(321982955))
+    lo = lo * int(321982955)
+    lo = lo ^ ((lsr(lo, 31)) | (hi << 1))
+    hi = hi ^ (lsr(hi, 31))
+    // (z with its bottom 11 bits cleared) - 2^63, scaled by 2^-63.
+    lo = lo & int(-2048)
+    hi = hi ^ int(-2147483648)
+    let negative = hi < 0
+    if negative {
+        lo = -lo
+        hi = (hi ^ int(-1)) + if lo == 0 { int(1) } else { int(0) }
+    }
+    var scale = 1.0842021724855044e-19
+    var guard = int(0)
+    var sticky = int(0)
+    for bit in 0..40 {
+        if hi == 0 && (lsr(lo, 24)) == 0 { break }
+        sticky = sticky | guard
+        guard = lo & 1
+        lo = (lsr(lo, 1)) | (hi << 31)
+        hi = lsr(hi, 1)
+        scale = scale * 2.0
+    }
+    if guard != 0 && (sticky != 0 || (lo & 1) != 0) { lo = lo + 1 }
+    let value = float(lo) * scale
+    if negative { -value } else { value }
+}
+
+fn dot3(a, b) { a.x * b.x + a.y * b.y + a.z * b.z }
+fn unit(a) { a / sqrt(dot3(a, a)) }
+fn finite(x) { abs(x) <= 3.4028234663852886e38 }
+
+// The kernel's f32 exp polynomial clamps below -87.3. Splitting that tail
+// preserves expf's subnormal weights and zero at underflow instead of a floor.
+fn weight_exp(x) {
+    if x < -87.3 {
+        let half = exp(x * 0.5)
+        return half * half
+    }
+    exp(x)
+}
+
+fn random_depth(low, high, u) {
+    let inverse = 1.0 / high
+    1.0 / (inverse + (1.0 / low - inverse) * (u + 1.0) * 0.5)
+}
+
+fn random_normal(direction, u1, u2) {
+    let axis = -unit(direction)
+    let tangent = unit(vec3(axis.z, 0.0, -axis.x))
+    let bitangent = vec3(axis.y * tangent.z - axis.z * tangent.y,
+        axis.z * tangent.x - axis.x * tangent.z,
+        axis.x * tangent.y - axis.y * tangent.x)
+    let cosine = (1.0 - u1) * 0.5
+    let azimuth = 3.14159265358979323846 * (u2 + 1.0)
+    let sine = sqrt(1.0 - cosine * cosine)
+    let ca = cos(azimuth)
+    let sa = sin(azimuth)
+    unit(axis * cosine + sine * (tangent * ca + bitangent * sa))
+}
+
+// Invalid samples use -1; valid grayscale values are in [0, 1].
+fn sample(image, width, height, offset, x, y) {
+    if !finite(x) || !finite(y) || x < 0.0 || y < 0.0 || x > float(width - 1) || y > float(height - 1) {
+        return -1.0
+    }
+    let x0 = min(int(floor(x)), width - 1)
+    let y0 = min(int(floor(y)), height - 1)
+    let x1 = min(x0 + 1, width - 1)
+    let y1 = min(y0 + 1, height - 1)
+    let tx = x - float(x0)
+    let ty = y - float(y0)
+    let a = image[offset + y0 * width + x0] * (1.0 - tx) + image[offset + y0 * width + x1] * tx
+    let b = image[offset + y1 * width + x0] * (1.0 - tx) + image[offset + y1 * width + x1] * tx
+    a * (1.0 - ty) + b * ty
+}
+
+{run: fn(s, p) {
+    let width = p.width
+    let height = p.height
+    let reference = p.reference
+    let radius = p.radius
+    let stride = min(p.step, 2 * radius + 1)
+    let samples = floor(2 * radius / stride) + 1
+    let source_count = p.source_count
+    let top_k = min(p.top_k, source_count)
+    // i32 tables take signed values; the wire's two unsigned words are exact.
+    let signed = fn(word) { if word >= 2147483648 { return word - 4294967296 } return word }
+
+    let region = fn(x, y) {
+        x >= int(radius) && y >= int(radius) && x < int(width) - int(radius) && y < int(height) - int(radius)
+    }
+    let ray = fn(x, y) {
+        let r = int(reference) * 16
+        vec3((float(x) - camera[r + 2]) / camera[r], (float(y) - camera[r + 3]) / camera[r + 1], 1.0)
+    }
+    let ncc = fn(source, h, i, x, y) {
+        let r = int(reference)
+        let rw = shape[r * 3]
+        let rh = shape[r * 3 + 1]
+        let ro = shape[r * 3 + 2]
+        let swidth = shape[source * 3]
+        let sheight = shape[source * 3 + 1]
+        let so = shape[source * 3 + 2]
+        let centre = image[ro + i]
+        var sw = 0.0
+        var sr = 0.0
+        var ss = 0.0
+        var srr = 0.0
+        var sss = 0.0
+        var srs = 0.0
+        var first = 0.0
+        for oy in 0..samples {
+            for ox in 0..samples {
+                let dx = float(ox * int(stride)) - float(radius)
+                let dy = float(oy * int(stride)) - float(radius)
+                let qx = float(x) + dx
+                let qy = float(y) + dy
+                var rv = sample(image, rw, rh, ro, qx, qy)
+                if rv < 0.0 { return 2.0 }
+                let w = h[6] * qx + h[7] * qy + h[8]
+                if !finite(w) || w <= 0.0 { return 2.0 }
+                let sx = (h[0] * qx + h[1] * qy + h[2]) / w
+                let sy = (h[3] * qx + h[4] * qy + h[5]) / w
+                var sv = sample(image, swidth, sheight, so, sx, sy)
+                if sv < 0.0 { return 2.0 }
+                if ox == 0 && oy == 0 { first = sv }
+                rv = rv - centre
+                sv = sv - first
+                let wx = dx / sigma_spatial
+                let wy = dy / sigma_spatial
+                let wc = rv / sigma_color
+                let weight = weight_exp(-0.5 * (wx * wx + wy * wy + wc * wc))
+                sw = sw + weight
+                sr = sr + weight * rv
+                ss = ss + weight * sv
+                srr = srr + weight * rv * rv
+                sss = sss + weight * sv * sv
+                srs = srs + weight * rv * sv
+            }
+        }
+        let mr = sr / sw
+        let ms = ss / sw
+        let vr = srr / sw - mr * mr
+        let vs = sss / sw - ms * ms
+        if !finite(vr) || !finite(vs) || vr < 1e-6 || vs < 1e-6 { return 2.0 }
+        let covariance = srs / sw - mr * ms
+        min(2.0, max(0.0, 1.0 - covariance / sqrt(vr * vs)))
+    }
+    let cost_at = fn(i, x, y, depth, normal) {
+        let nd = dot3(normal, ray(x, y))
+        if !finite(depth) || depth <= 0.0 || !finite(normal.x) || !finite(normal.y) || !finite(normal.z) || nd >= 0.0 {
+            return 2.0
+        }
+        let delta = -depth * nd
+        let r = int(reference) * 16
+        var costs = [2.0; source_count]
+        var valid = int(0)
+        for source_slot in 0..source_count {
+            let source = aux[2 + source_slot]
+            let c = source * 16
+            var h = [0.0; 9]
+            for row in 0..3 {
+                h[row * 3] = (camera[c + 4 + row * 3] - camera[c + 13 + row] * normal.x / delta) / camera[r]
+                h[row * 3 + 1] = (camera[c + 5 + row * 3] - camera[c + 13 + row] * normal.y / delta) / camera[r + 1]
+                h[row * 3 + 2] = camera[c + 6 + row * 3] - camera[c + 13 + row] * normal.z / delta
+                h[row * 3 + 2] = h[row * 3 + 2] - (h[row * 3] * camera[r + 2] + h[row * 3 + 1] * camera[r + 3])
+            }
+            for col in 0..3 {
+                h[col] = camera[c] * h[col] + camera[c + 2] * h[6 + col]
+                h[3 + col] = camera[c + 1] * h[3 + col] + camera[c + 3] * h[6 + col]
+            }
+            let v = ncc(source, h, i, x, y)
+            if v < 2.0 {
+                var j = valid
+                valid = valid + 1
+                for shift in 0..source_count {
+                    if j == 0 { break }
+                    if v >= costs[j - 1] { break }
+                    costs[j] = costs[j - 1]
+                    j = j - 1
+                }
+                costs[j] = v
+            }
+        }
+        let count = min(valid, int(top_k))
+        if count == 0 { return 2.0 }
+        var sum = 0.0
+        for j in 0..top_k {
+            if j >= count { break }
+            sum = sum + costs[j]
+        }
+        sum / float(count)
+    }
+
+    let initialise = {
+        label: "patchmatch_initialise"
+        math: "exact32"
+        image: input(f32)
+        camera: input(f32)
+        shape: input(i32)
+        aux: input(i32)
+        sigma_spatial: param(p.sigma_spatial)
+        sigma_color: param(p.sigma_color)
+        depth_min: param(p.depth_min)
+        depth_max: param(p.depth_max)
+        initial: param(0)
+        depth: output(f32)
+        nx: output(f32)
+        ny: output(f32)
+        nz: output(f32)
+        cost: output(f32)
+        element: fn(i) {
+            let x = i % int(width)
+            let y = i / int(width)
+            var d = depth[i]
+            var n = vec3(nx[i], ny[i], nz[i])
+            if int(initial) == 0 {
+                d = random_depth(depth_min, depth_max, draw(aux[0], aux[1], int(65535), i, int(0)))
+                n = random_normal(ray(x, y), draw(aux[0], aux[1], int(65535), i, int(1)), draw(aux[0], aux[1], int(65535), i, int(2)))
+            }
+            depth[i] = d
+            nx[i] = n.x
+            ny[i] = n.y
+            nz[i] = n.z
+            cost[i] = if region(x, y) { cost_at(i, x, y, d, n) } else { 2.0 }
+        }
+    }
+    let sweep = {
+        label: "patchmatch_half_sweep"
+        math: "exact32"
+        image: input(f32)
+        camera: input(f32)
+        shape: input(i32)
+        aux: input(i32)
+        sigma_spatial: param(p.sigma_spatial)
+        sigma_color: param(p.sigma_color)
+        depth_min: param(p.depth_min)
+        depth_max: param(p.depth_max)
+        old_depth: input(f32)
+        old_nx: input(f32)
+        old_ny: input(f32)
+        old_nz: input(f32)
+        old_cost: input(f32)
+        depth: output(f32)
+        nx: output(f32)
+        ny: output(f32)
+        nz: output(f32)
+        cost: output(f32)
+        colour: param(0)
+        iteration: param(0)
+        scale: param(1.0)
+        element: fn(i) {
+            let x = i % int(width)
+            let y = i / int(width)
+            var best_d = old_depth[i]
+            var best_n = vec3(old_nx[i], old_ny[i], old_nz[i])
+            var best_cost = old_cost[i]
+            if region(x, y) && (x % 2 + y % 2) % 2 == int(colour) {
+                var d = best_d
+                var n = best_n
+                var dp = d
+                var np = n
+                var dr = d
+                var nr = n
+                // Eight propagation candidates then five refinements, with one cost call.
+                for trial in 0..13 {
+                    var td = d
+                    var tn = n
+                    if trial < 8 {
+                        // Offsets (0,-1) (0,1) (-1,0) (1,0) (0,-5) (0,5) (-5,0) (5,0).
+                        let reach = (2 * (trial % 2) - 1) * (if trial >= 4 { 5 } else { 1 })
+                        let across = (trial / 2) % 2 == 1
+                        let xx = x + (if across { reach } else { 0 })
+                        let yy = y + (if across { 0 } else { reach })
+                        if !region(xx, yy) { continue }
+                        let j = yy * int(width) + xx
+                        td = old_depth[j]
+                        tn = vec3(old_nx[j], old_ny[j], old_nz[j])
+                    } else {
+                        if trial == 8 {
+                            // Freeze the propagation winner for all five trials.
+                            d = best_d
+                            n = best_n
+                            let it = int(iteration)
+                            let inverse = 1.0 / d + scale * 0.25 * (1.0 / depth_min - 1.0 / depth_max) * draw(aux[0], aux[1], it, i, 0)
+                            dp = 1.0 / min(1.0 / depth_min, max(1.0 / depth_max, inverse))
+                            np = vec3(n.x + scale * 0.5 * draw(aux[0], aux[1], it, i, 1),
+                                n.y + scale * 0.5 * draw(aux[0], aux[1], it, i, 2),
+                                n.z + scale * 0.5 * draw(aux[0], aux[1], it, i, 3))
+                            let direction = ray(x, y)
+                            if dot3(np, np) > 0.0 {
+                                np = unit(np)
+                                if dot3(np, direction) >= 0.0 { np = -np }
+                            } else { np = n }
+                            dr = random_depth(depth_min, depth_max, draw(aux[0], aux[1], it, i, 4))
+                            nr = random_normal(direction, draw(aux[0], aux[1], it, i, 5), draw(aux[0], aux[1], it, i, 6))
+                        }
+                        td = if trial == 8 || trial == 10 { dp } else if trial == 11 { dr } else { d }
+                        tn = if trial == 9 || trial == 10 { np } else if trial == 12 { nr } else { n }
+                    }
+                    let candidate = cost_at(i, x, y, td, tn)
+                    if candidate < best_cost {
+                        best_d = td
+                        best_n = tn
+                        best_cost = candidate
+                    }
+                }
+            }
+            // Copy the untouched colour and border too: every write is this element's.
+            depth[i] = best_d
+            nx[i] = best_n.x
+            ny[i] = best_n.y
+            nz[i] = best_n.z
+            cost[i] = best_cost
+        }
+    }
+
+    let device = {device: if s.device().gpu == nil { "cpu" } else { "gpu" }}
+    // Seed words then source indices, in one small buffer every kernel reads.
+    let aux = s.buffer(i32, 2 + source_count, device)
+    s.write(aux, [signed(p.seed[0]), signed(p.seed[1])], 0)
+    s.write(aux, p.sources, 2)
+    let upload = fn(name, ty) {
+        let from = s.input(name)
+        if device.device == "cpu" { return from }
+        let to = s.buffer(ty, from.len, device)
+        s.copy(from, to)
+        return to
+    }
+    let images = upload("images", f32)
+    let shapes = upload("shape", i32)
+    let cameras = s.buffer(f32, p.views * 16, device)
+    let calibration = s.input("cameras")
+    let r = s.read(calibration, reference * 16, 16)
+    // As in the CUDA adapter: relative poses in f64, narrowed once to f32.
+    // This small preparation is on the driver, since the GPU route has no f64.
+    for view in 0..p.views {
+        let v = s.read(calibration, view * 16, 16)
+        var c = [v[0], v[1], v[2], v[3]]
+        for row in 0..3 {
+            for col in 0..3 {
+                var value = 0.0
+                for k in 0..3 { value = value + v[4 + k * 4 + row] * r[4 + k * 4 + col] }
+                c.push(value)
+            }
+        }
+        for row in 0..3 {
+            var value = 0.0
+            for k in 0..3 { value = value + v[4 + k * 4 + row] * (r[7 + k * 4] - v[7 + k * 4]) }
+            c.push(value)
+        }
+        s.write(cameras, c, view * 16)
+    }
+    let count = width * height
+    let map = fn() {
+        return {depth: s.buffer(f32, count, device), nx: s.buffer(f32, count, device),
+            ny: s.buffer(f32, count, device), nz: s.buffer(f32, count, device), cost: s.buffer(f32, count, device)}
+    }
+    var a = map()
+    var b = map()
+    if p.initial {
+        s.copy(s.input("depth"), a.depth)
+        s.copy(s.input("nx"), a.nx)
+        s.copy(s.input("ny"), a.ny)
+        s.copy(s.input("nz"), a.nz)
+    }
+    s.run(initialise, count, {initial: if p.initial { 1 } else { 0 }}, {image: images, camera: cameras, shape: shapes, aux: aux,
+        depth: a.depth, nx: a.nx, ny: a.ny, nz: a.nz, cost: a.cost})
+    let publish = fn(done) {
+        s.publish("depth", a.depth)
+        s.publish("nx", a.nx)
+        s.publish("ny", a.ny)
+        s.publish("nz", a.nz)
+        s.publish("cost", a.cost)
+        s.value("progress", {iteration: done, iterations: p.iterations})
+        s.progress(if p.iterations == 0 { 1.0 } else { done / p.iterations })
+    }
+    var done = 0
+    var scale = 1.0
+    publish(done)
+    loop {
+        if done >= p.iterations { break }
+        let message = s.inbox({stop: nil})
+        if message.msgs.stop != nil { break }
+        for colour in 0..2 {
+            s.run(sweep, count, {colour: colour, iteration: done % 65536, scale: scale},
+                {image: images, camera: cameras, shape: shapes, aux: aux,
+                    old_depth: a.depth, old_nx: a.nx, old_ny: a.ny, old_nz: a.nz, old_cost: a.cost,
+                    depth: b.depth, nx: b.nx, ny: b.ny, nz: b.nz, cost: b.cost})
+            let swap = a
+            a = b
+            b = swap
+        }
+        done = done + 1
+        scale = scale * 0.5
+        publish(done)
+    }
+    return {iterations: done}
+}}

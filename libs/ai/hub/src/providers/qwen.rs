@@ -347,6 +347,9 @@ pub struct FleetQwenChatProvider<T: FleetTransport> {
     max_tokens: Option<u32>,
     /// `None` preserves the serving model's default thinking mode.
     thinking: Option<bool>,
+    /// The Claude model a turn on a hub's Claude (`claude-cli`) runs, sent as the request's
+    /// `claude_model`; the hub refuses such a turn without one.
+    claude_model: Option<String>,
     /// Models the election leaves out unless they are asked for by name.
     excluded_models: Vec<String>,
     /// Every logical turn gets a fresh sample; admission attempts reuse it.
@@ -457,6 +460,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             // their fixed ceiling, which is merely what they did before.
             max_tokens: Some(u32::MAX),
             thinking: None,
+            claude_model: None,
             excluded_models: Vec::new(),
             sample_seed: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -551,6 +555,13 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
 
     pub fn with_thinking(mut self, thinking: Option<bool>) -> Self {
         self.thinking = thinking;
+        self
+    }
+
+    /// The Claude model to run when the turn goes to a hub's Claude (`claude-cli`): one of
+    /// [`crate::claude_cli::CLAUDE_MODELS`], the model the person picked.
+    pub fn with_claude_model(mut self, model: Option<String>) -> Self {
+        self.claude_model = model.map(|model| model.trim().to_string()).filter(|model| !model.is_empty());
         self
     }
 
@@ -1270,6 +1281,9 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         if let Some(thinking) = self.thinking {
             fields.push(("thinking", Value::Bool(thinking)));
         }
+        if let Some(claude) = self.claude_model.as_ref().filter(|_| model == crate::claude_cli::MODEL_ID) {
+            fields.push(("claude_model", json::s(claude.clone())));
+        }
         let body = json::obj(fields);
         let now = self.transport.now();
         let pending = PendingSubmission {
@@ -1838,15 +1852,20 @@ mod wire_transcript_tests {
         let mut provider = FleetQwenChatProvider::new(transport.clone(), vec!["http://n1:1".into()]);
         assert!(matches!(provider.availability(), ProviderAvailability::Unavailable { .. }));
         let transport = Scripted::default();
-        let mut provider = FleetQwenChatProvider::new(transport.clone(), vec!["http://n1:1".into()]);
+        // A picked Claude model rides only on a turn to the hub's Claude.
+        let mut provider = FleetQwenChatProvider::new(transport.clone(), vec!["http://n1:1".into()])
+            .with_claude_model(Some("claude-fable-5-2".into()));
         provider.begin_turn(&TurnInput::new("SYS", vec![user("hello")])).unwrap();
         assert_eq!(transport.generates.borrow()[0].get("model").and_then(Value::as_str), Some("qwen3.8-27b"));
+        assert!(transport.generates.borrow()[0].get("claude_model").is_none());
         let transport = Scripted::default();
         let mut provider = FleetQwenChatProvider::new(transport.clone(), vec!["http://n1:1".into()])
-            .with_preferred_model(Some("claude-cli".into()));
+            .with_preferred_model(Some("claude-cli".into()))
+            .with_claude_model(Some("claude-fable-5-2".into()));
         provider.begin_turn(&TurnInput::new("SYS", vec![user("hello")])).unwrap();
         let body = &transport.generates.borrow()[0];
         assert_eq!(body.get("model").and_then(Value::as_str), Some("claude-cli"));
+        assert_eq!(body.get("claude_model").and_then(Value::as_str), Some("claude-fable-5-2"));
         assert_eq!(body.get("domain").and_then(Value::as_str), Some("chat"));
         assert_eq!(body.get("chat_system").and_then(Value::as_str), Some("SYS"));
         // Claude reasons natively (no <think> instructions); the fleet Qwen does not.

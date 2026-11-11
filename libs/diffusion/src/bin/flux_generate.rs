@@ -120,7 +120,11 @@ fn parse_args() -> Result<GenerateArgs, Box<dyn std::error::Error>> {
     })
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
+    makepad_diffusion::backend::metal::run_model_worker("flux_generate", || std::process::Termination::report(model_main()))
+}
+
+fn model_main() -> Result<(), Box<dyn std::error::Error>> {
     let total_start = Instant::now();
     let args = parse_args()?;
     let output_path = args.output.clone();

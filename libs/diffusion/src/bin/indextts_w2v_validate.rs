@@ -190,6 +190,10 @@ fn compare(tag: &str, ours: &[f32], reference: &[f32], row_len: usize) -> bool {
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("indextts_w2v_validate", model_main)
+}
+
+fn model_main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |flag: &str| -> Option<String> {
         args.iter()

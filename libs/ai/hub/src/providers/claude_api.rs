@@ -7,8 +7,9 @@
 //! only the transport.
 
 use crate::chat_wire::{
-    sanitize_public_error, split_delta_text, ChatMessage, ChatRole, ProviderAvailability,
-    ProviderKind, MAX_MESSAGES, MAX_TOOL_CALL_ID, MAX_TOOL_JSON_BYTES, MAX_TURN_TEXT_BYTES,
+    sanitize_public_error, split_delta_text, tool_arguments_too_large, ChatMessage, ChatRole,
+    ProviderAvailability, ProviderKind, MAX_MESSAGES, MAX_TOOL_CALL_ID, MAX_TOOL_JSON_BYTES,
+    MAX_TOOL_RESULT_BYTES, MAX_TURN_TEXT_BYTES,
 };
 use crate::providers::provider::{ChatProvider, ProviderEvent, TurnInput};
 use makepad_network::blocking_http::{
@@ -26,16 +27,21 @@ pub const ANTHROPIC_BETA: &str =
 pub const ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 pub const CLAUDE_CODE_OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 pub const CLAUDE_MODEL_ENV: &str = "MAKEPAD_CONTENT_CHAT_CLAUDE_MODEL";
-pub const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-5";
+pub const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-5-5";
+pub const SERVER_SIDE_FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// Allow silent model thinking for two minutes; each arriving byte renews the wait.
 pub const CLAUDE_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
-pub const MAX_CLAUDE_BODY: usize = 256 * 1024;
+/// The API's own request limit, for requests and streamed replies alike: a long tool session's
+/// transcript and a reply of the full output allowance both stay well below it.
+pub const MAX_CLAUDE_BODY: usize = 32 * 1024 * 1024;
 
 const MAX_MODEL_BYTES: usize = 128;
 const MAX_FUNCTION_NAME_BYTES: usize = 64;
-const MAX_SSE_LINE_BYTES: usize = 64 * 1024;
-const MAX_SSE_EVENT_BYTES: usize = 64 * 1024;
+// A provider may put the whole escaped argument object in one input delta.
+// Preserve the existing SSE envelope allowance; buffers grow with actual data.
+const MAX_SSE_LINE_BYTES: usize = 2 * MAX_TOOL_JSON_BYTES + 64 * 1024;
+const MAX_SSE_EVENT_BYTES: usize = MAX_SSE_LINE_BYTES;
 
 /// Opaque Claude credential. It deliberately implements neither `Debug`
 /// nor `Display`.
@@ -175,6 +181,18 @@ impl ClaudeApiConfig {
 
 }
 
+fn uses_server_fallback(model: &str) -> bool {
+    matches!(model, "claude-fable-5-2" | "claude-opus-5-5" | "claude-sonnet-5-5")
+}
+
+/// The `anthropic-beta` header: the OAuth set for a token, the fallback
+/// beta for the models that send `fallbacks`; empty sends no header.
+fn anthropic_beta(config: &ClaudeApiConfig) -> String {
+    let oauth = config.auth.as_ref().is_some_and(ClaudeAuth::is_oauth).then_some(ANTHROPIC_BETA);
+    let fallback = uses_server_fallback(&config.model).then_some(SERVER_SIDE_FALLBACK_BETA);
+    oauth.into_iter().chain(fallback).collect::<Vec<_>>().join(",")
+}
+
 fn missing_credential_reason() -> String {
     format!("{ANTHROPIC_API_KEY_ENV} or {CLAUDE_CODE_OAUTH_TOKEN_ENV} is not set")
 }
@@ -198,6 +216,7 @@ pub trait ClaudeApiTransport: Send + Sync + 'static {
         url: &str,
         auth: &ClaudeAuth,
         body: &[u8],
+        beta: &str,
         cancel: &CancelToken,
         idle_timeout: Duration,
         on_chunk: &mut dyn FnMut(&[u8]),
@@ -209,6 +228,19 @@ pub struct ClaudeRawHttp {
     pub body: Vec<u8>,
 }
 
+fn request_headers(auth: &ClaudeAuth, beta: &str) -> Vec<(&'static str, String)> {
+    let mut headers = vec![("anthropic-version", ANTHROPIC_VERSION.to_string())];
+    if auth.is_oauth() {
+        headers.push(("Authorization", format!("Bearer {}", auth.secret())));
+    } else {
+        headers.push(("x-api-key", auth.secret().to_string()));
+    }
+    if !beta.is_empty() {
+        headers.push(("anthropic-beta", beta.to_string()));
+    }
+    headers
+}
+
 pub struct BlockingClaudeTransport;
 
 impl ClaudeApiTransport for BlockingClaudeTransport {
@@ -217,24 +249,15 @@ impl ClaudeApiTransport for BlockingClaudeTransport {
         url: &str,
         auth: &ClaudeAuth,
         body: &[u8],
+        beta: &str,
         cancel: &CancelToken,
         idle_timeout: Duration,
         on_chunk: &mut dyn FnMut(&[u8]),
     ) -> Result<ClaudeRawHttp, String> {
-        let request = Request::post(url)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .map_err(safe_http_err)?;
-        let request = if auth.is_oauth() {
-            request
-                .bearer(auth.secret())
-                .map_err(safe_http_err)?
-                .header("anthropic-beta", ANTHROPIC_BETA)
-                .map_err(safe_http_err)?
-        } else {
-            request
-                .header("x-api-key", auth.secret())
-                .map_err(safe_http_err)?
-        };
+        let mut request = Request::post(url);
+        for (name, value) in request_headers(auth, beta) {
+            request = request.header(name, &value).map_err(safe_http_err)?;
+        }
         let request = request
             .json_body(body.to_vec())
             .map_err(safe_http_err)?
@@ -380,6 +403,7 @@ pub struct ParsedClaudeStream {
     pub text: String,
     pub deltas: Vec<String>,
     pub function_call: Option<ParsedClaudeToolUse>,
+    pub content: Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -391,6 +415,7 @@ pub struct ParsedClaudeToolUse {
 
 enum BlockState {
     Text,
+    Thinking,
     Tool {
         call_id: String,
         name: String,
@@ -406,6 +431,8 @@ struct ClaudeStreamParser {
     text: String,
     deltas: Vec<String>,
     block: Option<BlockState>,
+    current_content: Option<Value>,
+    content: Vec<Value>,
     function_call: Option<ParsedClaudeToolUse>,
     stop_reason: Option<String>,
     saw_message_stop: bool,
@@ -453,7 +480,20 @@ impl ClaudeStreamParser {
         let block = value
             .get("content_block")
             .ok_or_else(|| "content block missing".to_string())?;
+        self.current_content = Some(block.clone());
         self.block = Some(match block.get("type").and_then(Value::as_str) {
+            Some("thinking") => {
+                if block.get("thinking").is_none() {
+                    set_field(self.current_content.as_mut().unwrap(), "thinking", json::s(""));
+                }
+                BlockState::Thinking
+            }
+            Some("redacted_thinking") => BlockState::Ignored,
+            Some("fallback") => {
+                // Calls from the abandoned model must not reach the tool loop.
+                self.function_call = None;
+                BlockState::Ignored
+            }
             Some("text") => {
                 if let Some(text) = block.get("text") {
                     let text = text
@@ -481,7 +521,10 @@ impl ClaudeStreamParser {
                     last_partial: None,
                 }
             }
-            Some(_) => BlockState::Ignored,
+            Some(_) => {
+                self.current_content = None;
+                BlockState::Ignored
+            },
             None => return Err("content block type missing".to_string()),
         });
         Ok(())
@@ -499,7 +542,16 @@ impl ClaudeStreamParser {
                     .and_then(Value::as_str)
                     .ok_or_else(|| "text delta missing".to_string())?
                     .to_string();
+                append_block_text(self.current_content.as_mut().unwrap(), "text", &text)?;
                 self.append_text(&text)
+            }
+            Some(BlockState::Thinking)
+                if matches!(delta_type, Some("thinking_delta" | "signature_delta")) =>
+            {
+                let field = if delta_type == Some("thinking_delta") { "thinking" } else { "signature" };
+                let fragment = delta.get(field).and_then(Value::as_str)
+                    .ok_or_else(|| "thinking delta missing".to_string())?;
+                append_block_text(self.current_content.as_mut().unwrap(), field, fragment)
             }
             Some(BlockState::Tool { call_id, name, partial_json, last_partial, .. })
                 if delta_type == Some("input_json_delta") =>
@@ -509,7 +561,7 @@ impl ClaudeStreamParser {
                     .and_then(Value::as_str)
                     .ok_or_else(|| "tool input delta missing".to_string())?;
                 if partial_json.len().saturating_add(fragment.len()) > MAX_TOOL_JSON_BYTES {
-                    return Err("tool arguments too large".to_string());
+                    return Err(tool_arguments_too_large(partial_json.len().saturating_add(fragment.len())));
                 }
                 partial_json.push_str(fragment);
                 if last_partial.is_none_or(|last| now.duration_since(last) >= Duration::from_millis(50)) {
@@ -531,7 +583,7 @@ impl ClaudeStreamParser {
             .take()
             .ok_or_else(|| "content block stop without a block".to_string())?
         {
-            BlockState::Text | BlockState::Ignored => Ok(()),
+            BlockState::Text | BlockState::Thinking | BlockState::Ignored => {},
             BlockState::Tool {
                 call_id,
                 name,
@@ -552,14 +604,19 @@ impl ClaudeStreamParser {
                     call_id: call_id.clone(), name: name.clone(), partial_json: arguments.clone(),
                 });
                 validate_tool_arguments(&arguments)?;
+                set_field(self.current_content.as_mut().unwrap(), "input",
+                    json::parse(arguments.as_bytes()).map_err(|_| "invalid tool input".to_string())?);
                 self.function_call = Some(ParsedClaudeToolUse {
                     call_id,
                     name,
                     arguments,
                 });
-                Ok(())
             }
         }
+        if let Some(content) = self.current_content.take() {
+            self.content.push(content);
+        }
+        Ok(())
     }
 
     fn message_delta(&mut self, value: &Value) -> Result<(), String> {
@@ -587,7 +644,7 @@ impl ClaudeStreamParser {
         Ok(())
     }
 
-    fn finish(self) -> Result<ParsedClaudeStream, String> {
+    fn finish(mut self) -> Result<ParsedClaudeStream, String> {
         if self.block.is_some() {
             return Err("truncated content block".to_string());
         }
@@ -603,16 +660,85 @@ impl ClaudeStreamParser {
             (Some("max_tokens"), _) => {
                 return Err("response incomplete: output limit".to_string())
             }
-            (Some("refusal"), _) => return Err("response refused by safety policy".to_string()),
+            (Some("refusal"), _) => {
+                // A declined reply is shown, never sent back: its partial blocks leave the transcript.
+                self.function_call = None;
+                self.content.clear();
+                let notice = if self.text.is_empty() {
+                    "The model declined this request."
+                } else {
+                    "\n\nThe model declined this request."
+                };
+                self.append_text(notice)?;
+            }
             (Some(_), _) => return Err("unsupported claude stop reason".to_string()),
             (None, _) => return Err("claude stop reason missing".to_string()),
+        }
+        if let Some(final_fallback) = self.content.iter().rposition(|block| block_type(block) == "fallback") {
+            self.content = self.content.into_iter().enumerate()
+                .filter(|(index, block)| *index >= final_fallback || !matches!(block_type(block), "thinking" | "redacted_thinking" | "tool_use"))
+                .map(|(_, block)| block).collect();
         }
         Ok(ParsedClaudeStream {
             text: self.text,
             deltas: self.deltas,
             function_call: self.function_call,
+            content: self.content,
         })
     }
+}
+
+fn block_type(block: &Value) -> &str {
+    block.get("type").and_then(Value::as_str).unwrap_or("")
+}
+
+fn set_field(value: &mut Value, key: &str, replacement: Value) {
+    if let Value::Obj(fields) = value {
+        if let Some((_, field)) = fields.iter_mut().find(|(name, _)| name == key) {
+            *field = replacement;
+        } else {
+            fields.push((key.to_string(), replacement));
+        }
+    }
+}
+
+fn append_block_text(block: &mut Value, field: &str, fragment: &str) -> Result<(), String> {
+    if block.get(field).is_none() {
+        set_field(block, field, json::s(""));
+    }
+    if let Value::Obj(fields) = block {
+        if let Some((_, Value::Str(text))) = fields.iter_mut().find(|(name, _)| name == field) {
+            text.push_str(fragment);
+            return Ok(());
+        }
+    }
+    Err("content block has the wrong shape".to_string())
+}
+
+fn strip_thinking(messages: &mut [Value]) {
+    for message in messages {
+        if let Value::Obj(fields) = message {
+            if let Some((_, Value::Arr(blocks))) = fields.iter_mut().find(|(name, _)| name == "content") {
+                blocks.retain(|block| !matches!(block_type(block), "thinking" | "redacted_thinking"));
+            }
+        }
+    }
+}
+
+// Only the newest user message receives this turn's volatile context.
+fn encode_turn_messages(messages: &[ChatMessage], dynamic_context: &str) -> Vec<Value> {
+    let mut encoded = encode_messages(messages);
+    if !dynamic_context.is_empty() {
+        if let Some(index) = messages.iter().filter(|message| message.role != ChatRole::System)
+            .enumerate().filter(|(_, message)| message.role == ChatRole::User).map(|(index, _)| index).last() {
+            let text = encoded[index].get("content").cloned().unwrap();
+            set_field(&mut encoded[index], "content", Value::Arr(vec![
+                json::obj(vec![("type", json::s("text")), ("text", json::s(dynamic_context))]),
+                json::obj(vec![("type", json::s("text")), ("text", text)]),
+            ]));
+        }
+    }
+    encoded
 }
 
 /// Parse one complete, bounded Anthropic SSE body.
@@ -653,7 +779,7 @@ fn validate_function_name(name: &str) -> Result<(), String> {
 
 fn validate_tool_arguments(arguments: &str) -> Result<(), String> {
     if arguments.len() > MAX_TOOL_JSON_BYTES {
-        return Err("tool arguments too large".to_string());
+        return Err(tool_arguments_too_large(arguments.len()));
     }
     match json::parse(arguments.as_bytes()) {
         Ok(Value::Obj(_)) => Ok(()),
@@ -731,47 +857,39 @@ fn build_request_body(
     messages: Vec<Value>,
     native_tools: Option<&Value>,
     tools_enabled: bool,
-) -> Value {
+) -> Result<Value, String> {
+    if messages.last().and_then(|message| message.get("role")).and_then(Value::as_str) == Some("assistant")
+    {
+        return Err("this model requires a user message after the assistant reply".into());
+    }
     let mut pairs = vec![
         ("model", json::s(config.model.clone())),
         ("max_tokens", Value::Int(config.max_tokens as i64)),
         ("stream", Value::Bool(true)),
     ];
+    if uses_server_fallback(&config.model) {
+        pairs.push(("fallbacks", json::s("default")));
+    }
+    // Fable rejects any thinking field, including an explicit disabled value.
+    if config.model == "claude-fable-5-2" {
+        pairs.push(("output_config", json::obj(vec![("effort", json::s("high"))])));
+    }
     if !system.is_empty() {
         pairs.push(("system", json::s(system)));
     }
     if tools_enabled {
         if let Some(tools) = native_tools {
             pairs.push(("tools", tools.clone()));
+            pairs.push(("tool_choice", json::obj(vec![
+                ("type", json::s("auto")), ("disable_parallel_tool_use", Value::Bool(true)),
+            ])));
         }
     }
     pairs.push(("messages", Value::Arr(messages)));
-    json::obj(pairs)
+    Ok(json::obj(pairs))
 }
 
-fn assistant_tool_message(tool: &PendingTool) -> Result<Value, String> {
-    let mut content = Vec::new();
-    if !tool.text.is_empty() {
-        content.push(json::obj(vec![
-            ("type", json::s("text")),
-            ("text", json::s(tool.text.clone())),
-        ]));
-    }
-    let input = json::parse(tool.arguments.as_bytes())
-        .map_err(|_| "tool arguments are not valid json".to_string())?;
-    content.push(json::obj(vec![
-        ("type", json::s("tool_use")),
-        ("id", json::s(tool.call_id.clone())),
-        ("name", json::s(tool.name.clone())),
-        ("input", input),
-    ]));
-    Ok(json::obj(vec![
-        ("role", json::s("assistant")),
-        ("content", Value::Arr(content)),
-    ]))
-}
-
-fn tool_result_message(call_id: &str, output: &str) -> Value {
+fn tool_result_message(call_id: &str, output: &str, is_error: bool) -> Value {
     json::obj(vec![
         ("role", json::s("user")),
         (
@@ -780,6 +898,7 @@ fn tool_result_message(call_id: &str, output: &str) -> Value {
                 ("type", json::s("tool_result")),
                 ("tool_use_id", json::s(call_id)),
                 ("content", json::s(output)),
+                ("is_error", Value::Bool(is_error)),
             ])]),
         ),
     ])
@@ -796,9 +915,6 @@ fn endpoint_detail(url: &str) -> String {
 #[derive(Clone)]
 struct PendingTool {
     call_id: String,
-    name: String,
-    arguments: String,
-    text: String,
 }
 
 enum WorkerOut {
@@ -809,8 +925,6 @@ enum WorkerOut {
 
 struct Active {
     rx: Receiver<WorkerOut>,
-    request_messages: Vec<Value>,
-    restore_tool: Option<PendingTool>,
 }
 
 pub struct ClaudeApiChatProvider<T: ClaudeApiTransport = BlockingClaudeTransport> {
@@ -820,6 +934,7 @@ pub struct ClaudeApiChatProvider<T: ClaudeApiTransport = BlockingClaudeTransport
     cancel: CancelToken,
     active: Option<Active>,
     messages: Vec<Value>,
+    input_messages: Option<Vec<ChatMessage>>,
     system: String,
     tools_enabled: bool,
     pending_tool: Option<PendingTool>,
@@ -838,6 +953,7 @@ impl<T: ClaudeApiTransport> ClaudeApiChatProvider<T> {
             cancel: CancelToken::new(),
             active: None,
             messages: Vec::new(),
+            input_messages: None,
             system: String::new(),
             tools_enabled: true,
             pending_tool: None,
@@ -848,7 +964,6 @@ impl<T: ClaudeApiTransport> ClaudeApiChatProvider<T> {
         &mut self,
         body: Value,
         request_messages: Vec<Value>,
-        restore_tool: Option<PendingTool>,
     ) -> Result<(), String> {
         if self.active.is_some() {
             return Err("a turn is already in flight".to_string());
@@ -859,6 +974,7 @@ impl<T: ClaudeApiTransport> ClaudeApiChatProvider<T> {
             .as_ref()
             .ok_or_else(|| self.config.unavailable_reason.clone())?
             .clone();
+        let beta = anthropic_beta(&self.config);
         let bytes = body.to_json().into_bytes();
         if bytes.len() > MAX_CLAUDE_BODY {
             return Err("request body too large".to_string());
@@ -874,7 +990,7 @@ impl<T: ClaudeApiTransport> ClaudeApiChatProvider<T> {
                 let mut decoder = SseDecoder::default();
                 let mut parser = ClaudeStreamParser::default();
                 let mut parse_error = None;
-                let response = transport.post_messages(&endpoint, &auth, &bytes, &cancel, idle_timeout, &mut |chunk| {
+                let response = transport.post_messages(&endpoint, &auth, &bytes, &beta, &cancel, idle_timeout, &mut |chunk| {
                     if parse_error.is_some() || cancel.is_cancelled() { return; }
                     let result = decoder.push(chunk).and_then(|events| {
                         for event in events {
@@ -924,11 +1040,10 @@ impl<T: ClaudeApiTransport> ClaudeApiChatProvider<T> {
                 }
             })
             .map_err(|_| "failed to start provider worker".to_string())?;
-        self.active = Some(Active {
-            rx,
-            request_messages,
-            restore_tool,
-        });
+        // Once dispatched, this exact prefix belongs to the conversation,
+        // including when the request is later cancelled or fails.
+        self.messages = request_messages;
+        self.active = Some(Active { rx });
         Ok(())
     }
 }
@@ -970,27 +1085,48 @@ impl<T: ClaudeApiTransport> ChatProvider for ClaudeApiChatProvider<T> {
         if self.active.is_some() {
             return Err("a turn is already in flight".to_string());
         }
-        if self.pending_tool.is_some() {
-            return Err("unresolved function call".to_string());
-        }
         if self.config.auth.is_none() {
             return Err(self.config.unavailable_reason.clone());
         }
         validate_turn_messages(&input.messages)?;
-        let messages = encode_messages(&input.messages);
+        let extends = self.input_messages.as_ref()
+            .is_some_and(|previous| input.messages.starts_with(previous));
+        let mut messages;
+        if extends {
+            messages = self.messages.clone();
+            if self.system != input.system || self.tools_enabled != input.tools_enabled {
+                strip_thinking(&mut messages);
+            }
+            if let Some(tool) = &self.pending_tool {
+                messages.push(tool_result_message(&tool.call_id, "cancelled", true));
+            }
+            let mut new_messages = &input.messages[self.input_messages.as_ref().unwrap().len()..];
+            if new_messages.first().is_some_and(|message| message.role == ChatRole::Assistant) {
+                new_messages = &new_messages[1..];
+            }
+            let new_messages: Vec<_> = new_messages.iter()
+                .filter(|message| matches!(message.role, ChatRole::User | ChatRole::Tool))
+                .cloned().collect();
+            messages.extend(encode_turn_messages(&new_messages, &input.dynamic_context));
+        } else {
+            if self.input_messages.is_some() {
+                eprintln!("[chat] input history changed; restarting the transcript without thinking blocks");
+            }
+            messages = encode_turn_messages(&input.messages, &input.dynamic_context);
+        }
         if messages.is_empty() {
             return Err("no input to send".to_string());
         }
-        self.system = input.system_with_dynamic();
-        self.tools_enabled = input.tools_enabled;
         let body = build_request_body(
-            &self.config,
-            &self.system,
-            messages.clone(),
-            self.native_tools.as_ref(),
-            self.tools_enabled,
-        );
-        self.spawn_request(body, messages, None)
+            &self.config, &input.system, messages.clone(),
+            self.native_tools.as_ref(), input.tools_enabled,
+        )?;
+        self.spawn_request(body, messages)?;
+        self.system = input.system.clone();
+        self.tools_enabled = input.tools_enabled;
+        self.input_messages = Some(input.messages.clone());
+        self.pending_tool = None;
+        Ok(())
     }
 
     fn continue_function(&mut self, call_id: &str, output: &str) -> Result<(), String> {
@@ -998,31 +1134,27 @@ impl<T: ClaudeApiTransport> ChatProvider for ClaudeApiChatProvider<T> {
             return Err("a turn is already in flight".to_string());
         }
         validate_call_id(call_id)?;
-        if output.len() > MAX_TOOL_JSON_BYTES {
+        if output.len() > MAX_TOOL_RESULT_BYTES {
             return Err("function output too large".to_string());
         }
-        let tool = match self.pending_tool.as_ref() {
+        match self.pending_tool.as_ref() {
             None => return Err("no function call is awaiting output".to_string()),
             Some(tool) if tool.call_id != call_id => {
                 return Err("mismatched function call id".to_string())
             }
-            Some(tool) => tool.clone(),
+            Some(_) => {},
         };
         let mut messages = self.messages.clone();
-        messages.push(assistant_tool_message(&tool)?);
-        messages.push(tool_result_message(call_id, output));
+        messages.push(tool_result_message(call_id, output, false));
         let body = build_request_body(
             &self.config,
             &self.system,
             messages.clone(),
             self.native_tools.as_ref(),
             self.tools_enabled,
-        );
+        )?;
+        self.spawn_request(body, messages)?;
         self.pending_tool = None;
-        if let Err(error) = self.spawn_request(body, messages, Some(tool.clone())) {
-            self.pending_tool = Some(tool);
-            return Err(error);
-        }
         Ok(())
     }
 
@@ -1034,10 +1166,15 @@ impl<T: ClaudeApiTransport> ChatProvider for ClaudeApiChatProvider<T> {
         match received {
             Ok(WorkerOut::Partial(event)) => vec![event],
             Ok(WorkerOut::Ok(parsed)) => {
-                let Some(active) = self.active.take() else {
+                let Some(_) = self.active.take() else {
                     return vec![ProviderEvent::Error("provider state error".to_string())];
                 };
-                self.messages = active.request_messages;
+                if !parsed.content.is_empty() {
+                    self.messages.push(json::obj(vec![
+                        ("role", json::s("assistant")),
+                        ("content", Value::Arr(parsed.content)),
+                    ]));
+                }
                 let mut events = Vec::new();
                 for delta in &parsed.deltas {
                     for chunk in split_delta_text(delta) {
@@ -1047,9 +1184,6 @@ impl<T: ClaudeApiTransport> ChatProvider for ClaudeApiChatProvider<T> {
                 if let Some(tool) = parsed.function_call {
                     self.pending_tool = Some(PendingTool {
                         call_id: tool.call_id.clone(),
-                        name: tool.name.clone(),
-                        arguments: tool.arguments.clone(),
-                        text: parsed.text,
                     });
                     events.push(ProviderEvent::FunctionCall {
                         call_id: tool.call_id,
@@ -1063,18 +1197,12 @@ impl<T: ClaudeApiTransport> ChatProvider for ClaudeApiChatProvider<T> {
                 events
             }
             Ok(WorkerOut::Err(error)) => {
-                let restore = self.active.take().and_then(|active| active.restore_tool);
-                if let Some(tool) = restore {
-                    self.pending_tool = Some(tool);
-                }
+                self.active = None;
                 vec![ProviderEvent::Error(sanitize_public_error(&error))]
             }
             Err(mpsc::TryRecvError::Empty) => Vec::new(),
             Err(mpsc::TryRecvError::Disconnected) => {
-                let restore = self.active.take().and_then(|active| active.restore_tool);
-                if let Some(tool) = restore {
-                    self.pending_tool = Some(tool);
-                }
+                self.active = None;
                 vec![ProviderEvent::Error("provider worker ended".to_string())]
             }
         }
@@ -1082,10 +1210,7 @@ impl<T: ClaudeApiTransport> ChatProvider for ClaudeApiChatProvider<T> {
 
     fn cancel(&mut self) {
         self.cancel.cancel();
-        let restore = self.active.take().and_then(|active| active.restore_tool);
-        if let Some(tool) = restore {
-            self.pending_tool = Some(tool);
-        }
+        self.active = None;
         self.cancel = CancelToken::new();
     }
 
@@ -1093,6 +1218,7 @@ impl<T: ClaudeApiTransport> ChatProvider for ClaudeApiChatProvider<T> {
         self.cancel.cancel();
         self.active = None;
         self.messages.clear();
+        self.input_messages = None;
         self.system.clear();
         self.pending_tool = None;
         self.cancel = CancelToken::new();
@@ -1112,6 +1238,7 @@ impl<T: ClaudeApiTransport> Drop for ClaudeApiChatProvider<T> {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use std::collections::VecDeque;
     use std::time::Instant;
 
     #[test]
@@ -1189,6 +1316,63 @@ data: {"type":"message_stop"}
         assert_eq!(tool.call_id, "toolu_1");
         assert_eq!(tool.name, "lookup");
         assert_eq!(tool.arguments, r#"{"city":"Amsterdam"}"#);
+        assert_eq!(parsed.content, vec![text_block("Checking. "), json::obj(vec![
+            ("type", json::s("tool_use")), ("id", json::s("toolu_1")), ("name", json::s("lookup")),
+            ("input", json::obj(vec![("city", json::s("Amsterdam"))])),
+        ])]);
+        // The accumulated argument object may exceed 16 KiB, and one delta
+        // may contain it all. Exercise both shapes through the SSE decoder.
+        let arguments = json::obj(vec![("source", json::s("\"\n".repeat(50 * 1024)))]).to_json();
+        for fragment_bytes in [16 * 1024, arguments.len()] {
+            let mut stream = String::from("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_large\",\"name\":\"replace_source\",\"input\":{}}}\n\n");
+            for fragment in arguments.as_bytes().chunks(fragment_bytes) {
+                let delta = json::obj(vec![("type", json::s("content_block_delta")), ("index", Value::Int(0)),
+                    ("delta", json::obj(vec![("type", json::s("input_json_delta")),
+                        ("partial_json", json::s(std::str::from_utf8(fragment).unwrap()))]))]);
+                stream.push_str(&format!("event: content_block_delta\ndata: {}\n\n", delta.to_json()));
+            }
+            stream.push_str("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+            let parsed = parse_claude_stream(stream.as_bytes()).unwrap();
+            assert_eq!(parsed.function_call.unwrap().arguments, arguments);
+        }
+        let fallback = json::parse(br#"{"type":"fallback","from":{"model":"first"},"to":{"model":"second"}}"#).unwrap();
+        let redacted = json::parse(br#"{"type":"redacted_thinking","data":"opaque+/="}"#).unwrap();
+        let blocks = vec![thinking("old"), redacted.clone(), text_block("before"), tool_block("old_call"),
+            fallback.clone(), thinking("also_old"), redacted.clone(), text_block("between"), tool_block("middle_call"),
+            fallback.clone(), thinking("kept"), redacted.clone(), text_block("after"), tool_block("new_call")];
+        let parsed = parse_claude_stream(&stream_blocks(&blocks, "tool_use").body).unwrap();
+        assert_eq!(parsed.content, vec![text_block("before"), fallback.clone(), text_block("between"), fallback,
+            thinking("kept"), redacted, text_block("after"), tool_block("new_call")]);
+        assert_eq!(parsed.function_call.unwrap().call_id, "new_call");
+
+        let wire = br#"event: content_block_start
+data: {"content_block":{"type":"thinking","thinking":"initial ","signature":"s"}}
+
+event: content_block_delta
+data: {"delta":{"type":"thinking_delta","thinking":"thought\n"}}
+
+event: content_block_delta
+data: {"delta":{"type":"signature_delta","signature":"+/="}}
+
+event: content_block_stop
+data: {}
+
+event: message_delta
+data: {"delta":{"stop_reason":"end_turn"}}
+
+event: message_stop
+data: {}
+
+"#;
+        let parsed = parse_claude_stream(wire).unwrap();
+        assert_eq!(parsed.content, vec![json::obj(vec![("type", json::s("thinking")),
+            ("thinking", json::s("initial thought\n")), ("signature", json::s("s+/="))])]);
+        assert!(parsed.text.is_empty());
+        assert!(parsed.deltas.is_empty());
+        let default_thinking = json::obj(vec![("type", json::s("thinking")), ("signature", json::s("opaque"))]);
+        let parsed = parse_claude_stream(&stream_blocks(&[default_thinking], "end_turn").body).unwrap();
+        assert_eq!(parsed.content[0].get("thinking").and_then(Value::as_str), Some(""));
+        assert_eq!(parsed.content[0].get("signature").and_then(Value::as_str), Some("opaque"));
     }
 
     #[test]
@@ -1213,6 +1397,7 @@ data: {"type":"message_stop"}
             _url: &str,
             _auth: &ClaudeAuth,
             _body: &[u8],
+            _beta: &str,
             _cancel: &CancelToken,
             _timeout: Duration,
             _on_chunk: &mut dyn FnMut(&[u8]),
@@ -1248,11 +1433,12 @@ data: {"type":"message_stop"}
         oauth: bool,
         secret_len: usize,
         body: Vec<u8>,
+        beta: String,
     }
 
     struct FakeTransport {
-        seen: Arc<Mutex<Option<SeenRequest>>>,
-        response: Mutex<Option<ClaudeRawHttp>>,
+        seen: Arc<Mutex<Vec<SeenRequest>>>,
+        responses: Mutex<VecDeque<ClaudeRawHttp>>,
     }
 
     impl ClaudeApiTransport for FakeTransport {
@@ -1261,20 +1447,67 @@ data: {"type":"message_stop"}
             url: &str,
             auth: &ClaudeAuth,
             body: &[u8],
+            beta: &str,
             _cancel: &CancelToken,
             _timeout: Duration,
             on_chunk: &mut dyn FnMut(&[u8]),
         ) -> Result<ClaudeRawHttp, String> {
-            *self.seen.lock().unwrap() = Some(SeenRequest {
+            self.seen.lock().unwrap().push(SeenRequest {
                 url: url.to_string(),
                 oauth: auth.is_oauth(),
                 secret_len: auth.secret().len(),
                 body: body.to_vec(),
+                beta: beta.to_string(),
             });
-            let response = self.response.lock().unwrap().take().expect("one response");
+            let response = self.responses.lock().unwrap().pop_front().expect("queued response");
             for chunk in response.body.chunks(17) { on_chunk(chunk); }
             Ok(response)
         }
+    }
+
+    fn automatic_tool_choice() -> Value {
+        json::obj(vec![("type", json::s("auto")), ("disable_parallel_tool_use", Value::Bool(true))])
+    }
+
+    fn thinking(signature: &str) -> Value {
+        json::obj(vec![("type", json::s("thinking")), ("thinking", json::s("")), ("signature", json::s(signature))])
+    }
+
+    fn text_block(text: &str) -> Value {
+        json::obj(vec![("type", json::s("text")), ("text", json::s(text))])
+    }
+
+    fn tool_block(id: &str) -> Value {
+        json::obj(vec![("type", json::s("tool_use")), ("id", json::s(id)), ("name", json::s("lookup")), ("input", json::obj(vec![]))])
+    }
+
+    fn stream_blocks(blocks: &[Value], stop: &str) -> ClaudeRawHttp {
+        let mut body = String::new();
+        for block in blocks {
+            body.push_str(&format!("event: content_block_start\ndata: {}\n\n", json::obj(vec![("content_block", block.clone())]).to_json()));
+            body.push_str("event: content_block_stop\ndata: {}\n\n");
+        }
+        body.push_str(&format!("event: message_delta\ndata: {{\"delta\":{{\"stop_reason\":\"{stop}\"}}}}\n\nevent: message_stop\ndata: {{}}\n\n"));
+        ClaudeRawHttp { status: 200, body: body.into_bytes() }
+    }
+
+    fn finish_response(provider: &mut ClaudeApiChatProvider<FakeTransport>) -> Vec<ProviderEvent> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut events = Vec::new();
+        while provider.active.is_some() {
+            events.extend(provider.poll());
+            assert!(Instant::now() < deadline, "provider worker timed out");
+            std::thread::yield_now();
+        }
+        assert!(!events.iter().any(|event| matches!(event, ProviderEvent::Error(_))), "{events:?}");
+        events
+    }
+
+    fn assert_message_prefix(previous: &Value, next: &Value) {
+        let previous = previous.get("messages").unwrap().to_json();
+        let next = next.get("messages").unwrap().to_json();
+        // The closing array delimiter moves after the appended messages.
+        assert!(next.starts_with(previous.strip_suffix(']').unwrap()), "request history changed");
     }
 
     #[test]
@@ -1301,64 +1534,185 @@ event: message_stop
 data: {"type":"message_stop"}
 
 "#;
-        let seen = Arc::new(Mutex::new(None));
-        let transport = FakeTransport {
-            seen: seen.clone(),
-            response: Mutex::new(Some(ClaudeRawHttp {
-                status: 200,
-                body: response.to_vec(),
-            })),
-        };
-        let auth = ClaudeAuth::oauth_token("opaque-test-token").unwrap();
-        let config = ClaudeApiConfig::new(ProviderKind::OpenAi, auth, DEFAULT_CLAUDE_MODEL);
-        let tools = Value::Arr(vec![json::obj(vec![
-            ("name", json::s("lookup")),
-            (
-                "input_schema",
-                json::obj(vec![("type", json::s("object"))]),
-            ),
-        ])]);
-        let mut provider =
-            ClaudeApiChatProvider::with_transport(config, transport, Some(tools.clone()));
-        provider
-            .begin_turn(&TurnInput::new(
-                "be concise",
-                vec![ChatMessage::new(ChatRole::User, "hello")],
-            ))
-            .expect("begin");
+        for model in ["claude-fable-5-2", "claude-opus-5-5", DEFAULT_CLAUDE_MODEL] {
+            for (oauth, stop_reason, reply) in [(true, "end_turn", "hello"), (false, "refusal", "hello"), (true, "refusal", "")] {
+                let response = std::str::from_utf8(response).unwrap().replace("end_turn", stop_reason);
+                let response = if reply.is_empty() { response.replace(r#""text":"hel""#, r#""text":"""#).replace(r#""text":"lo""#, r#""text":"""#) } else { response };
+                let seen = Arc::new(Mutex::new(Vec::new()));
+                let transport = FakeTransport {
+                    seen: seen.clone(),
+                    responses: Mutex::new(VecDeque::from([ClaudeRawHttp {
+                        status: 200,
+                        body: response.into_bytes(),
+                    }])),
+                };
+                let auth = if oauth { ClaudeAuth::oauth_token("opaque-test-token") } else { ClaudeAuth::api_key("opaque-test-token") }.unwrap();
+                let config = ClaudeApiConfig::new(ProviderKind::OpenAi, auth, model);
+                let headers = request_headers(config.auth.as_ref().unwrap(), &anthropic_beta(&config));
+                let header = |name| headers.iter().find(|(key, _)| *key == name).map(|(_, value)| value.as_str());
+                assert_eq!(header("anthropic-version"), Some(ANTHROPIC_VERSION));
+                if oauth {
+                    assert_eq!(header("Authorization"), Some("Bearer opaque-test-token"));
+                    assert!(header("x-api-key").is_none());
+                } else {
+                    assert_eq!(header("x-api-key"), Some("opaque-test-token"));
+                    assert!(header("Authorization").is_none());
+                }
+                assert_eq!(header("anthropic-beta").unwrap().contains("oauth-2025-04-20"), oauth);
+                assert!(header("anthropic-beta").unwrap().contains(SERVER_SIDE_FALLBACK_BETA));
+                let prefill = encode_messages(&[ChatMessage::new(ChatRole::Assistant, "unfinished")]);
+                assert!(build_request_body(&config, "", prefill, None, true).is_err(), "{model}: no assistant prefill");
+                let tools = Value::Arr(vec![json::obj(vec![
+                    ("name", json::s("lookup")),
+                    (
+                        "input_schema",
+                        json::obj(vec![("type", json::s("object"))]),
+                    ),
+                ])]);
+                let mut provider =
+                    ClaudeApiChatProvider::with_transport(config, transport, Some(tools.clone()));
+                provider
+                    .begin_turn(&TurnInput::new(
+                        "be concise",
+                        vec![ChatMessage::new(ChatRole::User, "hello")],
+                    ))
+                    .expect("begin");
 
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let events = loop {
-            let events = provider.poll();
-            if !events.is_empty() {
-                break events;
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let events = loop {
+                    let events = provider.poll();
+                    if !events.is_empty() {
+                        break events;
+                    }
+                    assert!(Instant::now() < deadline, "provider worker timed out");
+                    std::thread::sleep(Duration::from_millis(1));
+                };
+                let mut expected = Vec::new();
+                let mut full = reply.to_string();
+                if !reply.is_empty() {
+                    expected.extend([ProviderEvent::Delta("hel".into()), ProviderEvent::Delta("lo".into())]);
+                }
+                if stop_reason == "refusal" {
+                    let notice = if reply.is_empty() { "The model declined this request." } else { "\n\nThe model declined this request." };
+                    full.push_str(notice);
+                    expected.push(ProviderEvent::Delta(notice.into()));
+                }
+                expected.push(ProviderEvent::Done { text: full });
+                assert_eq!(events, expected, "{model}: {stop_reason}");
+                assert_eq!(provider.messages.len(), if stop_reason == "refusal" { 1 } else { 2 }, "{model}: a declined reply stays out of the transcript");
+
+                let seen = seen.lock().unwrap().remove(0);
+                assert_eq!(seen.url, CLAUDE_MESSAGES_URL);
+                assert_eq!(seen.oauth, oauth);
+                let beta = if oauth { format!("{ANTHROPIC_BETA},{SERVER_SIDE_FALLBACK_BETA}") } else { SERVER_SIDE_FALLBACK_BETA.to_string() };
+                assert_eq!(seen.beta, beta, "{model}: oauth {oauth}");
+                assert_eq!(seen.secret_len, "opaque-test-token".len());
+                let body = json::parse(&seen.body).expect("request json");
+                assert_eq!(body.get("model").and_then(Value::as_str), Some(model));
+                assert_eq!(body.get("fallbacks").and_then(Value::as_str), Some("default"));
+                assert_eq!(body.get("tool_choice"), Some(&automatic_tool_choice()));
+                if model == "claude-fable-5-2" {
+                    assert!(body.get("thinking").is_none());
+                    assert_eq!(body.get("output_config").and_then(|v| v.get("effort")).and_then(Value::as_str), Some("high"));
+                }
+                assert_eq!(body.get("stream").and_then(Value::as_bool), Some(true));
+                assert_eq!(body.get("system").and_then(Value::as_str), Some("be concise"));
+                assert_eq!(body.get("tools"), Some(&tools));
+                let messages = body.get("messages").and_then(Value::as_arr).unwrap();
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].get("role").and_then(Value::as_str), Some("user"));
+                assert_eq!(messages[0].get("content").and_then(Value::as_str), Some("hello"));
             }
-            assert!(Instant::now() < deadline, "provider worker timed out");
-            std::thread::sleep(Duration::from_millis(1));
-        };
-        assert_eq!(
-            events,
-            vec![
-                ProviderEvent::Delta("hel".into()),
-                ProviderEvent::Delta("lo".into()),
-                ProviderEvent::Done {
-                    text: "hello".into()
-                },
-            ]
-        );
+        }
 
-        let seen = seen.lock().unwrap().take().expect("request captured");
-        assert_eq!(seen.url, CLAUDE_MESSAGES_URL);
-        assert!(seen.oauth);
-        assert_eq!(seen.secret_len, "opaque-test-token".len());
-        let body = json::parse(&seen.body).expect("request json");
-        assert_eq!(body.get("model").and_then(Value::as_str), Some(DEFAULT_CLAUDE_MODEL));
-        assert_eq!(body.get("stream").and_then(Value::as_bool), Some(true));
-        assert_eq!(body.get("system").and_then(Value::as_str), Some("be concise"));
-        assert_eq!(body.get("tools"), Some(&tools));
-        let messages = body.get("messages").and_then(Value::as_arr).unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].get("role").and_then(Value::as_str), Some("user"));
-        assert_eq!(messages[0].get("content").and_then(Value::as_str), Some("hello"));
+        // One conversation: two tool continuations, a final reply, then a new turn.
+        // Also run the same prefix with cancellation while the second call is pending.
+        for cancel_second_tool in [false, true] {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let mut responses = VecDeque::from([
+                stream_blocks(&[thinking("s1"), tool_block("A")], "tool_use"),
+                stream_blocks(&[thinking("s2"), tool_block("B")], "tool_use"),
+                stream_blocks(&[thinking("s3"), text_block("first reply")], "end_turn"),
+                stream_blocks(&[thinking("s4"), text_block("second reply")], "end_turn"),
+            ]);
+            // More replies exercise re-freezing, an edited caller history, and reset.
+            for _ in 0..4 {
+                responses.push_back(stream_blocks(&[thinking("later"), text_block("reply")], "end_turn"));
+            }
+            let transport = FakeTransport { seen: seen.clone(), responses: Mutex::new(responses) };
+            let tools = json::parse(br#"[{"name":"lookup","input_schema":{"type":"object"}}]"#).unwrap();
+            let config = ClaudeApiConfig::new(ProviderKind::OpenAi, ClaudeAuth::oauth_token("test-token").unwrap(), DEFAULT_CLAUDE_MODEL);
+            let mut provider = ClaudeApiChatProvider::with_transport(config, transport, Some(tools.clone()));
+            let mut input = TurnInput::new("fixed system", vec![ChatMessage::new(ChatRole::User, "first question")]);
+            input.dynamic_context = "first context".into();
+            provider.begin_turn(&input).unwrap();
+            finish_response(&mut provider);
+            provider.continue_function("A", "result A").unwrap();
+            finish_response(&mut provider);
+            if cancel_second_tool {
+                provider.cancel();
+            } else {
+                provider.continue_function("B", "result B").unwrap();
+                finish_response(&mut provider);
+                input.messages.push(ChatMessage::new(ChatRole::Assistant, "first reply"));
+            }
+            input.messages.push(ChatMessage::new(ChatRole::User, "second question"));
+            input.dynamic_context = "second context".into();
+            provider.begin_turn(&input).unwrap();
+            finish_response(&mut provider);
+            let requests: Vec<_> = seen.lock().unwrap().iter().map(|request| json::parse(&request.body).unwrap()).collect();
+            assert_eq!(requests.len(), if cancel_second_tool { 3 } else { 4 });
+            for request in &requests {
+                assert_eq!(request.get("system").unwrap().to_json(), requests[0].get("system").unwrap().to_json());
+                assert_eq!(request.get("system").and_then(Value::as_str), Some("fixed system"));
+                assert_eq!(request.get("tools").unwrap().to_json(), tools.to_json());
+                assert_eq!(request.get("tool_choice"), Some(&automatic_tool_choice()));
+            }
+            for pair in requests.windows(2) { assert_message_prefix(&pair[0], &pair[1]); }
+            let messages = requests[1].get("messages").unwrap().as_arr().unwrap();
+            assert_eq!(messages[1].get("content"), Some(&Value::Arr(vec![thinking("s1"), tool_block("A")])));
+            assert_eq!(messages[2], tool_result_message("A", "result A", false));
+            assert_eq!(messages[0].get("content"), Some(&Value::Arr(vec![text_block("first context"), text_block("first question")])));
+            let messages = requests.last().unwrap().get("messages").unwrap().as_arr().unwrap();
+            let previous = &messages[messages.len() - 2];
+            if cancel_second_tool {
+                assert_eq!(*previous, tool_result_message("B", "cancelled", true));
+                assert_eq!(messages[messages.len() - 3].get("content"), Some(&Value::Arr(vec![thinking("s2"), tool_block("B")])));
+            } else {
+                assert_eq!(previous.get("content"), Some(&Value::Arr(vec![thinking("s3"), text_block("first reply")])));
+            }
+            assert_eq!(messages.last().unwrap().get("content"), Some(&Value::Arr(vec![text_block("second context"), text_block("second question")])));
+
+            let before = provider.messages.clone();
+            input.system = "changed system".into();
+            input.messages.push(ChatMessage::new(ChatRole::Assistant, "reply"));
+            input.messages.push(ChatMessage::new(ChatRole::User, "third question"));
+            provider.begin_turn(&input).unwrap();
+            finish_response(&mut provider);
+            let mut stripped = before;
+            strip_thinking(&mut stripped);
+            assert_eq!(&provider.messages[..stripped.len()], stripped.as_slice());
+            input.tools_enabled = false;
+            input.messages.push(ChatMessage::new(ChatRole::Assistant, "reply"));
+            input.messages.push(ChatMessage::new(ChatRole::User, "fourth question"));
+            provider.begin_turn(&input).unwrap();
+            finish_response(&mut provider);
+            let request = json::parse(&seen.lock().unwrap().last().unwrap().body).unwrap();
+            assert!(request.get("tools").is_none());
+            assert!(request.get("tool_choice").is_none());
+            assert!(!request.get("messages").unwrap().to_json().contains("\"thinking\""));
+
+            input.messages = vec![ChatMessage::new(ChatRole::User, "edited history")];
+            provider.begin_turn(&input).unwrap();
+            finish_response(&mut provider);
+            assert_eq!(provider.messages.len(), 2);
+            provider.reset_conversation();
+            input.dynamic_context = "x".repeat(512 * 1024);
+            provider.begin_turn(&input).unwrap();
+            finish_response(&mut provider);
+            assert_eq!(provider.messages.len(), 2);
+            assert!(seen.lock().unwrap().last().unwrap().body.len() > 512 * 1024,
+                "a long session's request goes out");
+        }
     }
 }

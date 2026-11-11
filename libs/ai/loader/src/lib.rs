@@ -20,6 +20,8 @@ pub mod quant_encode;
 pub mod qwen35_convert;
 pub mod quant_iq;
 pub mod quant_iq_tables;
+pub mod weight_owner;
+pub use weight_owner::{DeadOwnerInbox, WeightOwner};
 
 // The safetensors slice is the only format lane T2 re-points consumers to;
 // re-export its types at the crate root so `use makepad_ai_loader::X`

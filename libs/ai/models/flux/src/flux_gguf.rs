@@ -68,7 +68,16 @@ pub fn inspect(path: impl AsRef<Path>) -> Result<FluxGgufInspection> {
 pub fn load_weights(
     path: impl AsRef<Path>,
     extra_bytes: usize,
+    progress: Option<ProgressHook>,
+) -> Result<LoadedFluxTransformerWeights> {
+    load_weights_with_owner(path, extra_bytes, progress, None)
+}
+
+pub(crate) fn load_weights_with_owner(
+    path: impl AsRef<Path>,
+    extra_bytes: usize,
     mut progress: Option<ProgressHook>,
+    owner: Option<Arc<crate::backend::WeightOwner>>,
 ) -> Result<LoadedFluxTransformerWeights> {
     let path = path.as_ref();
     let file = open_gguf(path)?;
@@ -106,6 +115,7 @@ pub fn load_weights(
         false,
         quantized,
         extra_bytes,
+        owner,
     ))
 }
 

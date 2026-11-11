@@ -452,6 +452,10 @@ fn run() -> Result<Vec<Gate>, String> {
 }
 
 fn main() -> ExitCode {
+    makepad_diffusion::backend::metal::run_model_worker("flux2_check_te", model_main)
+}
+
+fn model_main() -> ExitCode {
     match run() {
         Ok(gates) => {
             println!("flux2-check-te: {} stages compared", gates.len());

@@ -7,6 +7,7 @@ description = "Generic multi-view geometry: camera views, PatchMatch stereo, dep
 
 [dependencies]
 makepad-ai-cuda = { path = "../../cuda", optional = true }
+makepad-compute-program = { path = "../../../compute_program", version = "1.0.0" }
 
 [features]
 cuda = ["dep:makepad-ai-cuda", "makepad-ai-cuda/cuda"]

@@ -147,6 +147,10 @@ fn compare(name: &str, ours: &[f32], reference: &[f32]) {
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("h3_validate", model_main)
+}
+
+fn model_main() {
     let args: Vec<String> = std::env::args().collect();
     let mut opts: HashMap<String, String> = HashMap::new();
     let mut key: Option<String> = None;

@@ -961,6 +961,10 @@ fn check(pipe: &Yue2Pipeline, vae_dir: Option<&Path>, dir: &Path, stage: &str, b
 }
 
 fn main() {
+    makepad_ai_common::backend::metal::run_model_worker("yue2_render", model_main)
+}
+
+fn model_main() {
     let args: Vec<String> = std::env::args().collect();
     if arg(&args, "--stage").as_deref() == Some("narlayer") {
         narlayer_bench(arg(&args, "--narlayer-op").as_deref().unwrap_or("all"));

@@ -99,6 +99,10 @@ fn write_wav_mono(path: &Path, samples: &[f32], rate: u32) {
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("indextts_native_bench", model_main)
+}
+
+fn model_main() {
     let mut checkpoints = PathBuf::from("checkpoints");
     let mut ref_wav = PathBuf::from("spk_ref_kokoro.wav");
     let mut out_dir = PathBuf::from(".");

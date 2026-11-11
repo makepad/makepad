@@ -673,6 +673,10 @@ pub struct GenerateRequestJson {
     /// Conversational reasoning control. Absent preserves the model/node
     /// default; `false` asks Qwen to answer without a generated think phase.
     pub thinking: Option<bool>,
+    /// The Claude model a `claude-cli` chat turn runs (`claude_cli::CLAUDE_MODELS`, e.g.
+    /// `claude-fable-5-2`). The claude-cli backend refuses a turn without one, or with one it
+    /// does not list; other backends ignore it.
+    pub claude_model: Option<String>,
 
     // -- speech domain (kokoro + indextts backends) --
     /// Text to speak. (`prompt` is accepted as a fallback when empty.)
@@ -741,8 +745,9 @@ pub struct GenerateRequestJson {
     pub pixal: Option<PixalOptionsJson>,
 
     // -- splat domain (triposplat backend) --
-    /// Target gaussian count for the splat PLY. Default 262144 (the model's
-    /// maximum); clamped to 32768..=262144 and rounded to a multiple of 32,
+    /// Target gaussian count for the splat PLY. TripoSplat clamps to
+    /// 32768..=262144, Idol to 32768..=1048576; default 262144.
+    /// Rounded to a multiple of 32,
     /// the decoder's gaussians-per-anchor stride. More gaussians = more
     /// detail at linear storage and render cost; the denoiser runs once
     /// regardless, only the decode scales.

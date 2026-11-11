@@ -136,6 +136,10 @@ fn read_words(path: &Path) -> Vec<(String, usize, Vec<SungWord>, String, Vec<Str
 }
 
 fn main() {
+    makepad_ai_metal::run_model_worker("sing_eval", model_main)
+}
+
+fn model_main() {
     let whisper = WhisperModel::load_file(&arg("--whisper").expect("--whisper <ggml model>")).expect("whisper model");
     let cantor = Cantor::load(Path::new(&arg("--cantor").expect("--cantor M.mksing"))).expect("cantor");
     let wdir = PathBuf::from(arg("--words").expect("--words DIR"));

@@ -814,8 +814,8 @@ impl Music3GgufRvq {
         hidden: &[f32],
     ) -> Option<()> {
         use makepad_ai_common::backend::metal;
-        let ns = format!("music3-{}", file.role.as_str());
-        let ns_f16 = format!("music3-{}-f16", file.role.as_str());
+        let ns = file.owner.namespace();
+        let ns_f16 = format!("{}f16::", file.owner.namespace());
         let head_dim = MUSIC3_RVQ_HIDDEN / MUSIC3_RVQ_HEADS;
         let scale = 1.0 / (head_dim as f32).sqrt();
         let kv_w = MUSIC3_RVQ_HEADS * head_dim;
@@ -827,13 +827,13 @@ impl Music3GgufRvq {
             let un = format!("layers.{layer}.up_proj.weight");
             let gn = format!("layers.{layer}.gate_proj.weight");
             let dn = format!("layers.{layer}.down_proj.weight");
-            let qm = file.keyed_mat_any(&ns, &ns_f16, &qn)?;
-            let km = file.keyed_mat_any(&ns, &ns_f16, &kn)?;
-            let vm = file.keyed_mat_any(&ns, &ns_f16, &vn)?;
-            let om = file.keyed_mat_any(&ns, &ns_f16, &on)?;
-            let um = file.keyed_mat_any(&ns, &ns_f16, &un)?;
-            let gm = file.keyed_mat_any(&ns, &ns_f16, &gn)?;
-            let dm = file.keyed_mat_any(&ns, &ns_f16, &dn)?;
+            let qm = file.keyed_mat_any(ns, &ns_f16, &qn)?;
+            let km = file.keyed_mat_any(ns, &ns_f16, &kn)?;
+            let vm = file.keyed_mat_any(ns, &ns_f16, &vn)?;
+            let om = file.keyed_mat_any(ns, &ns_f16, &on)?;
+            let um = file.keyed_mat_any(ns, &ns_f16, &un)?;
+            let gm = file.keyed_mat_any(ns, &ns_f16, &gn)?;
+            let dm = file.keyed_mat_any(ns, &ns_f16, &dn)?;
             let in_key = format!("layers.{layer}.input_layernorm.weight");
             let post_key = format!("layers.{layer}.post_attention_layernorm.weight");
             let upload = if layer == 0 { Some(hidden) } else { None };
@@ -913,8 +913,8 @@ impl Music3GgufRvq {
         seq: usize,
     ) -> Option<(Music3GgufRvqSession, Music3GgufRvqSession)> {
         use makepad_ai_common::backend::metal;
-        let ns = format!("music3-{}", file.role.as_str());
-        let ns_f16 = format!("music3-{}-f16", file.role.as_str());
+        let ns = file.owner.namespace();
+        let ns_f16 = format!("{}f16::", file.owner.namespace());
         let head_dim = MUSIC3_RVQ_HIDDEN / MUSIC3_RVQ_HEADS;
         let scale = 1.0 / (head_dim as f32).sqrt();
         let kv_w = seq * MUSIC3_RVQ_HEADS * head_dim;
@@ -931,13 +931,13 @@ impl Music3GgufRvq {
             let un = format!("layers.{layer}.up_proj.weight");
             let gn = format!("layers.{layer}.gate_proj.weight");
             let dn = format!("layers.{layer}.down_proj.weight");
-            let qm = file.keyed_mat_any(&ns, &ns_f16, &qn)?;
-            let km = file.keyed_mat_any(&ns, &ns_f16, &kn)?;
-            let vm = file.keyed_mat_any(&ns, &ns_f16, &vn)?;
-            let om = file.keyed_mat_any(&ns, &ns_f16, &on)?;
-            let um = file.keyed_mat_any(&ns, &ns_f16, &un)?;
-            let gm = file.keyed_mat_any(&ns, &ns_f16, &gn)?;
-            let dm = file.keyed_mat_any(&ns, &ns_f16, &dn)?;
+            let qm = file.keyed_mat_any(ns, &ns_f16, &qn)?;
+            let km = file.keyed_mat_any(ns, &ns_f16, &kn)?;
+            let vm = file.keyed_mat_any(ns, &ns_f16, &vn)?;
+            let om = file.keyed_mat_any(ns, &ns_f16, &on)?;
+            let um = file.keyed_mat_any(ns, &ns_f16, &un)?;
+            let gm = file.keyed_mat_any(ns, &ns_f16, &gn)?;
+            let dm = file.keyed_mat_any(ns, &ns_f16, &dn)?;
             let in_key = format!("layers.{layer}.input_layernorm.weight");
             let post_key = format!("layers.{layer}.post_attention_layernorm.weight");
             let upload = if layer == 0 { Some(hidden_in) } else { None };

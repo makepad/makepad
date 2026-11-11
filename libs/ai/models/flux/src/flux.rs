@@ -1422,6 +1422,84 @@ mod combined_fp8_tests {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(ckpt_path);
     }
+
+    /// A graph build that runs out of its reserve reloads the weights with a
+    /// larger one. Drives that retry with a fake build that fails once, over
+    /// the diffusion component (with a LoRA merged) and the vae component of
+    /// a combined checkpoint: the reload must read the same bytes, from the
+    /// same component, under the same owner.
+    #[test]
+    fn graph_growth_reload_keeps_component_lora_and_owner() {
+        use crate::flux_lora::{FluxLoraRef, FluxLoraStack};
+        use crate::flux_transformer::LoadedFluxTransformerWeights;
+        use crate::flux_vae::LoadedFluxVaeWeights;
+        use crate::graph_growth::{build_with_graph_growth, GraphReserve};
+        use std::sync::Arc;
+
+        fn fails_once<W>(builds: &mut usize) -> impl FnMut(&mut W) -> Result<()> + '_ {
+            move |_| {
+                *builds += 1;
+                if *builds == 1 {
+                    Err(DiffusionError::model("context out of memory allocating 64 bytes"))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let f32_bytes = |values: &[f32]| values.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
+
+        let path = tiny_combined_builder().write("growth.safetensors");
+        // Rank 1 on img_attn.proj: adds 0.25 to every element (3.0 -> 3.25).
+        let lora_path = SafetensorsBuilder::new()
+            .tensor("double_blocks.0.img_attn.proj.lora_A.weight", "F32", &[1, 4], f32_bytes(&[0.5; 4]))
+            .tensor("double_blocks.0.img_attn.proj.lora_B.weight", "F32", &[4, 1], f32_bytes(&[0.5; 4]))
+            .write("growth_lora.safetensors");
+        let loras = FluxLoraStack::new(vec![FluxLoraRef {
+            name: "growth".to_string(),
+            path: lora_path.clone(),
+            strength: 1.0,
+        }]);
+        let proj = "double_blocks.0.img_attn.proj.weight";
+        let proj_bytes = |weights: &LoadedFluxTransformerWeights| {
+            weights.ctx.tensor_data(weights.tensor_id(proj).unwrap()).unwrap().to_vec()
+        };
+
+        let mut transformer = LoadedFluxTransformerWeights::load_scoped_with_loras(
+            &path,
+            Some(FLUX_CKPT_PREFIX_DIFFUSION),
+            1 << 20,
+            &loras,
+            None,
+        )
+        .unwrap();
+        let merged = proj_bytes(&transformer);
+        assert_ne!(merged, vec![0x44u8; 16], "the adapter changes the weight");
+        let owner = transformer.owner.clone();
+        let mut builds = 0;
+        build_with_graph_growth(&mut transformer, fails_once(&mut builds)).unwrap();
+        assert_eq!(builds, 2, "the build runs again after the reload");
+        assert_eq!(transformer.graph_reserve_bytes(), 2 << 20, "the reload doubles the reserve");
+        assert_eq!(transformer.tensor_ids.len(), 8, "the reload reads only the diffusion component");
+        assert_eq!(proj_bytes(&transformer), merged, "the reload keeps the merged LoRA");
+        assert_eq!(transformer.lora_fingerprint, loras.fingerprint());
+        assert!(Arc::ptr_eq(&transformer.owner, &owner), "the reload keeps the owner");
+
+        let mut vae = LoadedFluxVaeWeights::load_scoped_with_owner(&path, Some(FLUX_CKPT_PREFIX_VAE), 1 << 20, None).unwrap();
+        let owner = vae.owner.clone();
+        let mut builds = 0;
+        build_with_graph_growth(&mut vae, fails_once(&mut builds)).unwrap();
+        assert_eq!(builds, 2, "the vae build runs again after the reload");
+        assert_eq!(vae.graph_reserve_bytes(), 2 << 20, "the vae reload doubles the reserve");
+        assert_eq!(
+            vae.tensor_ids.keys().collect::<Vec<_>>(),
+            vec!["decoder.conv_in.bias"],
+            "the vae reload reads only the vae component"
+        );
+        assert!(Arc::ptr_eq(&vae.owner, &owner), "the vae reload keeps the owner");
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(lora_path);
+    }
 }
 
 #[cfg(test)]

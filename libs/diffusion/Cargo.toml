@@ -239,9 +239,5 @@ name = "music3-generate"
 path = "src/bin/music3_generate.rs"
 
 [[bin]]
-name = "music3-native-bench"
-path = "src/bin/music3_generate.rs"
-
-[[bin]]
 name = "ace-validate"
 path = "src/bin/ace_validate.rs"

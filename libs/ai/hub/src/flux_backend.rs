@@ -598,65 +598,31 @@ mod flux_worker {
         };
         let is_cancelled = || cancel.is_cancelled();
 
-        if !warm.as_ref().is_some_and(|pipeline| {
-            pipeline.serves_plan(&job.plan, Some(job.width), Some(job.height))
-        }) {
-            if let Some(old) = warm.take() {
-                // A rebuild on the shared worker. On a MODEL switch
-                // (schnell<->dev) the outgoing checkpoint's device weight
-                // caches must go first: every component (DiT/T5/CLIP/VAE)
-                // keys on the combined checkpoint path, never evicts on its
-                // own, and a 24GB card cannot hold two resident FP8 stacks
-                // (~16GB each). A size-only rebuild of the SAME model skips
-                // the evict and re-uses the device weights outright.
-                // Dropping the pipeline then frees its host weight arenas
-                // (~16GB raw payload) before the new load allocates.
-                //
-                // A LoRA change counts as a model switch: merged weights get
-                // their own cache namespace, so without the evict the
-                // outgoing (pristine or previously-adapted) unet would stay
-                // resident next to the incoming one.
-                if old.diffusion_model_path() != job.plan.bundle.diffusion_model_path
-                    || old.lora_fingerprint() != job.plan.loras.fingerprint()
-                {
-                    old.evict_device_caches();
+        crate::warm_slot::ensure(
+            warm,
+            (job.plan, job.width, job.height),
+            |pipeline, (plan, width, height)| pipeline.serves_plan(plan, Some(*width), Some(*height)),
+            |old, (plan, _, _)| old.diffusion_model_path() == plan.bundle.diffusion_model_path
+                    && old.lora_fingerprint() == plan.loras.fingerprint(),
+            |old, (plan, _, _)| old.weight_owners_for(plan),
+            |old, _| { old.evict_device_caches(); },
+            |pipeline, owners, (plan, width, height)| {
+                let mut load_progress = |name: &str, fraction: f64| progress(name, 0.02 + fraction * 0.33);
+                let mut hooks = FluxRunHooks {
+                    progress: &mut load_progress,
+                    cancel: &is_cancelled,
+                };
+                match pipeline {
+                    Some(pipeline) => pipeline
+                        .ensure_prompts_with_hooks(&plan.prompts, Some(&mut hooks))
+                        .map(|_| None),
+                    None => FluxPipeline::load_with_owners(
+                        plan, Some(width), Some(height), Some(&mut hooks), owners,
+                    ).map(|(pipeline, _)| Some(pipeline)),
                 }
-                drop(old);
-            }
-        }
-        let load_result = {
-            let mut load_progress =
-                |name: &str, fraction: f64| progress(name, 0.02 + fraction * 0.33);
-            let mut hooks = FluxRunHooks {
-                progress: &mut load_progress,
-                cancel: &is_cancelled,
-            };
-            match warm.as_mut() {
-                Some(pipeline) => pipeline
-                    .ensure_prompts_with_hooks(&job.plan.prompts, Some(&mut hooks))
-                    .map(|_| None),
-                None => FluxPipeline::load_with_hooks(
-                    job.plan,
-                    Some(job.width),
-                    Some(job.height),
-                    Some(&mut hooks),
-                )
-                .map(|(pipeline, _load_timing)| Some(pipeline)),
-            }
-        };
-        match load_result {
-            Ok(Some(pipeline)) => *warm = Some(pipeline),
-            Ok(None) => {}
-            Err(err) => {
-                // A cancel unwind is designed-clean — keep the warm pipeline
-                // (its state only mutates after a successful encode). Any
-                // other failure: drop residency, reload cold next job.
-                if !matches!(err, DiffusionError::Cancelled) {
-                    *warm = None;
-                }
-                return Err(worker_err(err));
-            }
-        }
+            },
+            |err| matches!(err, DiffusionError::Cancelled),
+        ).map_err(worker_err)?;
         if cancel.is_cancelled() {
             return Err(FluxWorkerError::Cancelled);
         }
@@ -670,18 +636,8 @@ mod flux_worker {
             };
             pipeline.generate_with_hooks(job.seed, job.steps, job.guidance, Some(&mut hooks))
         };
-        match run {
-            Ok(run) => Ok(run),
-            Err(err) => {
-                // Same policy as the load: cancels keep the warm pipeline,
-                // real mid-run failures drop residency rather than trust
-                // half-finished state.
-                if !matches!(err, DiffusionError::Cancelled) {
-                    *warm = None;
-                }
-                Err(worker_err(err))
-            }
-        }
+        crate::warm_slot::finish(warm, run, |err| matches!(err, DiffusionError::Cancelled))
+            .map_err(worker_err)
     }
 }
 

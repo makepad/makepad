@@ -120,6 +120,10 @@ fn real(args: &[String]) {
 }
 
 fn main() {
+    makepad_ai_common::backend::metal::run_model_worker("zh_eval", model_main)
+}
+
+fn model_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("real") {
         return real(&args);

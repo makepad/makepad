@@ -237,6 +237,10 @@ fn run() -> Result<(), String> {
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("h3_quant_cuda_canary", model_main)
+}
+
+fn model_main() {
     let result = run();
     let evict_result = gpu_weight_cache_evict_prefix_if_loaded(NAMESPACE);
     let trim_result = gpu_runtime_trim();

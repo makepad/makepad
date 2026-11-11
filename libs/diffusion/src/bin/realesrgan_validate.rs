@@ -276,6 +276,10 @@ fn run(
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("realesrgan_validate", model_main)
+}
+
+fn model_main() {
     let mut model = None;
     let mut input = None;
     let mut bench = 0usize;

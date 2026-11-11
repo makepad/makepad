@@ -17,6 +17,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("music3_gguf_inspect", model_main)
+}
+
+fn model_main() {
     let args: Vec<String> = std::env::args().collect();
     let weights = args
         .windows(2)
@@ -78,7 +82,7 @@ fn main() {
     });
     let assembled = assemble_prompt(MUSIC3_PINE_PROMPT, MUSIC3_PINE_LYRICS);
     println!("assembled {} chars", assembled.len());
-    let mut token_ids: Option<Vec<u32>> = None;
+    let token_ids: Option<Vec<u32>>;
     match tokenize_cfg_pair(&tokenizer, MUSIC3_PINE_PROMPT, MUSIC3_PINE_LYRICS) {
         Ok(pairs) => {
             println!(

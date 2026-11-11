@@ -31,7 +31,7 @@ pub fn try_matmul_nt_ggml_bytes(
     out
 }
 
-pub fn try_matmul_nt_ggml_bytes_cached<F>(
+pub fn try_matmul_nt_ggml_bytes_cached<'a, F>(
     a: &[f32],
     bt_ggml_type: u32,
     m: usize,
@@ -42,7 +42,7 @@ pub fn try_matmul_nt_ggml_bytes_cached<F>(
     load_bt_bytes: F,
 ) -> Option<Result<Vec<f32>, String>>
 where
-    F: FnOnce() -> Result<Vec<u8>, String>,
+    F: FnOnce() -> Result<std::borrow::Cow<'a, [u8]>, String>,
 {
     if metal::is_available() {
         match metal::try_matmul_nt_ggml_bytes_keyed(
@@ -69,7 +69,7 @@ where
             n,
             cache_namespace,
             bt_cache_key,
-            load_bt_bytes,
+            || load_bt_bytes().map(std::borrow::Cow::into_owned),
         );
         if out.is_ok() {
             prof::record(prof::CAT_DENSE_TOTAL, t, ((a.len() + m * n) * 4) as u64);
@@ -157,7 +157,7 @@ pub fn try_get_rows_ggml_bytes(
     metal::try_get_rows_ggml_bytes(src, src_ggml_type, n_cols, n_rows, row_indices)
 }
 
-pub fn try_get_rows_ggml_bytes_cached<F>(
+pub fn try_get_rows_ggml_bytes_cached<'a, F>(
     src_ggml_type: u32,
     n_cols: usize,
     n_rows: usize,
@@ -167,7 +167,7 @@ pub fn try_get_rows_ggml_bytes_cached<F>(
     load_src_bytes: F,
 ) -> Option<Result<Vec<f32>, String>>
 where
-    F: FnOnce() -> Result<Vec<u8>, String>,
+    F: FnOnce() -> Result<std::borrow::Cow<'a, [u8]>, String>,
 {
     if metal::is_available() {
         let src_bytes = match load_src_bytes() {
@@ -189,7 +189,7 @@ where
             row_indices,
             cache_namespace,
             src_cache_key,
-            load_src_bytes,
+            || load_src_bytes().map(std::borrow::Cow::into_owned),
         ));
     }
     None

@@ -18,8 +18,9 @@
 //!               Needs --host <private LAN IP>, the fleet key in
 //!               <cache-dir>/fleet, and this Mac's Claude Code login (the
 //!               person's own, from the login keychain; the hub hands the
-//!               child only its access token). Model:
-//!               MAKEPAD_AI_HUB_CLAUDE_MODEL (default sonnet).
+//!               child only its access token). Each turn runs the Claude
+//!               model its request names (`claude_model`, one of
+//!               claude_cli::CLAUDE_MODELS); the hub refuses any other.
 //!   --claude-cli-selftest  enable as --claude-cli, run hostile probe turns
 //!               (shell, file read, fetch) through it plus a sandbox read
 //!               probe with the real binary, print PASS/FAIL, exit.

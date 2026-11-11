@@ -5,6 +5,7 @@
 
 pub mod views;
 pub mod patchmatch;
+pub mod program;
 pub mod fusion;
 pub mod alignment;
 pub mod parallel;

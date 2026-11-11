@@ -124,6 +124,9 @@ pub struct HubChatConfig {
     pub max_tokens: Option<u32>,
     /// Fleet thinking control. `None` preserves the provider default.
     pub thinking: Option<bool>,
+    /// The Claude model a turn on a hub's Claude (`claude-cli`) runs: one of
+    /// [`crate::claude_cli::CLAUDE_MODELS`]. The hub refuses such a turn without one.
+    pub claude_model: Option<String>,
     pub system_prompt: String,
     pub tools: Vec<ToolSpec>,
     pub wake: Option<WakeHook>,
@@ -330,7 +333,8 @@ fn elect_and_run(
                 let provider = FleetQwenChatProvider::new(HttpFleetTransport, vec![base])
                     .with_preferred_model(config.preferred_model.clone())
                     .with_max_tokens(config.max_tokens)
-                    .with_thinking(config.thinking);
+                    .with_thinking(config.thinking)
+                    .with_claude_model(config.claude_model.clone());
                 match run_proxy(provider, &config, first.take(), &msg_rx, &mut images, &mut history, &send, &cancel, route) {
                     ProxyExit::Ended => return,
                     ProxyExit::Reelect(msg) => {
@@ -352,6 +356,7 @@ fn elect_and_run(
             excluded,
         ) {
             Ok((provider, route)) => {
+                let provider = provider.with_claude_model(config.claude_model.clone());
                 if let (false, ChatRoute::Fleet { base, model }) = (config.tools.is_empty(), &route) {
                     if tool_check.judge(base, model, config.thinking, &cancel, &send) == Some(false) {
                         if config.preferred_model.is_none() && !nothing_passed {
@@ -1415,6 +1420,7 @@ mod tests {
         let config = HubChatConfig {
             llm: LocalLlmConfig::new("".into()),
             preferred_model: None,
+            claude_model: None,
             max_tokens: Some(u32::MAX),
             thinking: None,
             system_prompt: "You run the desktop.".into(),
@@ -1504,6 +1510,7 @@ mod tests {
         let config = HubChatConfig {
             llm: LocalLlmConfig::new("".into()),
             preferred_model: None,
+            claude_model: None,
             max_tokens: Some(u32::MAX),
             thinking: None,
             system_prompt: "Answer directly.".into(),
@@ -1549,6 +1556,7 @@ mod tests {
         let config = HubChatConfig {
             llm: LocalLlmConfig::new("".into()),
             preferred_model: None,
+            claude_model: None,
             max_tokens: None,
             thinking: None,
             system_prompt: "Answer directly.".into(),

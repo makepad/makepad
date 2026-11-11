@@ -19,10 +19,10 @@
 
 use crate::splat::{
     level_embedding, pcd_position_embed, pcd_position_embed_v2_freqs, SplatWeights, GS_BLOCKS,
-    GS_COND_CHANNELS, GS_FFN, GS_HEADS, GS_HEAD_DIM, GS_IN_CHANNELS, GS_LAYOUT, GS_MODEL_CHANNELS,
+    GS_COND_CHANNELS, GS_FFN, GS_HEADS, GS_HEAD_DIM, GS_IN_CHANNELS, GS_MODEL_CHANNELS,
     GS_OUT_CHANNELS, GS_PERTURB_SIZE, GS_PER_POINT, OCT_BLOCKS, OCT_COND_CHANNELS, OCT_FFN,
-    OCT_HEADS, OCT_HEAD_DIM, OCT_LEVEL, OCT_MODEL_CHANNELS, OCT_OUT, POS_EMBED_V2_MAX_RES,
-    SPLAT_DEC_NAMESPACE, T_FREQ_DIM,
+    OCT_HEADS, OCT_LEVEL, OCT_MODEL_CHANNELS, OCT_OUT, POS_EMBED_V2_MAX_RES,
+    SplatModel, T_FREQ_DIM,
 };
 use crate::splat_ops::{
     add, attention, gated_residual_mod, gelu_tanh, host_linear, host_silu, layer_norm,
@@ -33,9 +33,10 @@ use crate::{DiffusionError, ProgressHook, Result};
 
 /// `MultiHeadAttention(type="cross", qk_rms_norm=True)`.
 struct CrossAttn {
-    /// Checkpoint prefix, reused as the device weight-cache key for the
-    /// per-head RMS gammas.
+    /// Stable module name for cached RMS gammas; the separate Idol files
+    /// share tensor names, so checkpoint prefixes cannot distinguish them.
     name: String,
+    namespace: &'static str,
     to_q: Lin,
     to_kv: Lin,
     q_norm: Vec<f32>,
@@ -46,6 +47,8 @@ struct CrossAttn {
 impl CrossAttn {
     fn load(
         device: Device,
+        model: SplatModel,
+        name: &str,
         weights: &SplatWeights,
         prefix: &str,
         channels: usize,
@@ -54,7 +57,8 @@ impl CrossAttn {
     ) -> Result<Self> {
         let head_dim = channels / heads;
         Ok(Self {
-            name: prefix.to_string(),
+            name: name.to_string(),
+            namespace: model.namespaces()[2],
             to_q: Lin::new(
                 device,
                 &weights.f32_shaped(&format!("{prefix}.to_q.weight"), &[channels, channels])?,
@@ -94,7 +98,7 @@ impl CrossAttn {
             heads,
             head_dim,
             &self.q_norm,
-            SPLAT_DEC_NAMESPACE,
+            self.namespace,
             &format!("{}.q_rms_norm", self.name),
         )?;
         let attn = attention(&q, &kv.0, &kv.1, heads, scale)?;
@@ -114,7 +118,7 @@ impl CrossAttn {
             heads,
             head_dim,
             &self.k_norm,
-            SPLAT_DEC_NAMESPACE,
+            self.namespace,
             &format!("{}.k_rms_norm", self.name),
         )?;
         Ok((k, v))
@@ -124,6 +128,7 @@ impl CrossAttn {
 /// `MultiHeadAttention(type="self", qk_rms_norm=True)`.
 struct SelfAttn {
     name: String,
+    namespace: &'static str,
     to_qkv: Lin,
     q_norm: Vec<f32>,
     k_norm: Vec<f32>,
@@ -131,10 +136,11 @@ struct SelfAttn {
 }
 
 impl SelfAttn {
-    fn load(device: Device, weights: &SplatWeights, prefix: &str, channels: usize, heads: usize) -> Result<Self> {
+    fn load(device: Device, model: SplatModel, name: &str, weights: &SplatWeights, prefix: &str, channels: usize, heads: usize) -> Result<Self> {
         let head_dim = channels / heads;
         Ok(Self {
-            name: prefix.to_string(),
+            name: name.to_string(),
+            namespace: model.namespaces()[2],
             to_qkv: Lin::new(
                 device,
                 &weights.f32_shaped(&format!("{prefix}.to_qkv.weight"), &[3 * channels, channels])?,
@@ -169,7 +175,7 @@ impl SelfAttn {
             heads,
             head_dim,
             &self.q_norm,
-            SPLAT_DEC_NAMESPACE,
+            self.namespace,
             &format!("{}.q_rms_norm", self.name),
         )?;
         let k = rms_norm_per_head(
@@ -177,7 +183,7 @@ impl SelfAttn {
             heads,
             head_dim,
             &self.k_norm,
-            SPLAT_DEC_NAMESPACE,
+            self.namespace,
             &format!("{}.k_rms_norm", self.name),
         )?;
         let attn = attention(&q, &k, &v, heads, scale)?;
@@ -244,14 +250,17 @@ pub struct SplatOctree {
 }
 
 impl SplatOctree {
-    pub fn prepare(device: Device, weights: &SplatWeights) -> Result<Self> {
+    pub fn prepare(device: Device, model: SplatModel, weights: &SplatWeights) -> Result<Self> {
+        let prefix = model.octree_prefix();
         let c = OCT_MODEL_CHANNELS;
         let mut blocks = Vec::with_capacity(OCT_BLOCKS);
         for i in 0..OCT_BLOCKS {
-            let p = format!("octree.blocks.{i}");
+            let p = format!("{prefix}blocks.{i}");
             blocks.push(OctreeBlock {
                 cross: CrossAttn::load(
                     device,
+                    model,
+                    &format!("octree.blocks.{i}.cross_attn"),
                     weights,
                     &format!("{p}.cross_attn"),
                     c,
@@ -265,31 +274,31 @@ impl SplatOctree {
             device,
             in_proj: Lin::new(
                 device,
-                &weights.f32_shaped("octree.in_proj.weight", &[c, 3])?,
+                &weights.f32_shaped(&format!("{prefix}in_proj.weight"), &[c, 3])?,
                 c,
                 3,
-                Some(&weights.f32_shaped("octree.in_proj.bias", &[c])?),
+                Some(&weights.f32_shaped(&format!("{prefix}in_proj.bias"), &[c])?),
             )?,
             input_layer: Lin::new(
                 device,
-                &weights.f32_shaped("octree.input_layer.weight", &[c, c])?,
+                &weights.f32_shaped(&format!("{prefix}input_layer.weight"), &[c, c])?,
                 c,
                 c,
-                Some(&weights.f32_shaped("octree.input_layer.bias", &[c])?),
+                Some(&weights.f32_shaped(&format!("{prefix}input_layer.bias"), &[c])?),
             )?,
-            l_mlp0_w: weights.f32_shaped("octree.l_embedder.mlp.0.weight", &[c, T_FREQ_DIM])?,
-            l_mlp0_b: weights.f32_shaped("octree.l_embedder.mlp.0.bias", &[c])?,
-            l_mlp2_w: weights.f32_shaped("octree.l_embedder.mlp.2.weight", &[c, c])?,
-            l_mlp2_b: weights.f32_shaped("octree.l_embedder.mlp.2.bias", &[c])?,
-            admod_w: weights.f32_shaped("octree.adaLN_modulation.1.weight", &[6 * c, c])?,
-            admod_b: weights.f32_shaped("octree.adaLN_modulation.1.bias", &[6 * c])?,
+            l_mlp0_w: weights.f32_shaped(&format!("{prefix}l_embedder.mlp.0.weight"), &[c, T_FREQ_DIM])?,
+            l_mlp0_b: weights.f32_shaped(&format!("{prefix}l_embedder.mlp.0.bias"), &[c])?,
+            l_mlp2_w: weights.f32_shaped(&format!("{prefix}l_embedder.mlp.2.weight"), &[c, c])?,
+            l_mlp2_b: weights.f32_shaped(&format!("{prefix}l_embedder.mlp.2.bias"), &[c])?,
+            admod_w: weights.f32_shaped(&format!("{prefix}adaLN_modulation.1.weight"), &[6 * c, c])?,
+            admod_b: weights.f32_shaped(&format!("{prefix}adaLN_modulation.1.bias"), &[6 * c])?,
             blocks,
             out_proj: Lin::new(
                 device,
-                &weights.f32_shaped("octree.out_proj.weight", &[OCT_OUT, c])?,
+                &weights.f32_shaped(&format!("{prefix}out_proj.weight"), &[OCT_OUT, c])?,
                 OCT_OUT,
                 c,
-                Some(&weights.f32_shaped("octree.out_proj.bias", &[OCT_OUT])?),
+                Some(&weights.f32_shaped(&format!("{prefix}out_proj.bias"), &[OCT_OUT])?),
             )?,
             pos_freqs: pcd_position_embed_v2_freqs(c, 3, POS_EMBED_V2_MAX_RES),
         })
@@ -478,15 +487,18 @@ pub struct SplatGaussianDecoder {
 }
 
 impl SplatGaussianDecoder {
-    pub fn prepare(device: Device, weights: &SplatWeights) -> Result<Self> {
+    pub fn prepare(device: Device, model: SplatModel, weights: &SplatWeights) -> Result<Self> {
+        let prefix = model.gs_prefix();
         let c = GS_MODEL_CHANNELS;
         let mut blocks = Vec::with_capacity(GS_BLOCKS);
         for i in 0..GS_BLOCKS {
-            let p = format!("gs.blocks.{i}");
+            let p = format!("{prefix}blocks.{i}");
             blocks.push(GsBlock {
-                self_attn: SelfAttn::load(device, weights, &format!("{p}.self_attn"), c, GS_HEADS)?,
+                self_attn: SelfAttn::load(device, model, &format!("gs.blocks.{i}.self_attn"), weights, &format!("{p}.self_attn"), c, GS_HEADS)?,
                 cross: CrossAttn::load(
                     device,
+                    model,
+                    &format!("gs.blocks.{i}.cross_attn"),
                     weights,
                     &format!("{p}.cross_attn"),
                     c,
@@ -499,37 +511,37 @@ impl SplatGaussianDecoder {
             });
         }
         let perturbation =
-            weights.f32_shaped("gs.points_offset_perturbation", &[GS_PER_POINT, 3])?;
-        let base_offset_scale = weights.f32("gs.base_offset_scale")?;
+            weights.f32_shaped(&format!("{prefix}points_offset_perturbation"), &[GS_PER_POINT, 3])?;
+        let base_offset_scale = weights.f32(&format!("{prefix}base_offset_scale"))?;
         Ok(Self {
             device,
             in_proj: Lin::new(
                 device,
-                &weights.f32_shaped("gs.in_proj.weight", &[c, GS_IN_CHANNELS])?,
+                &weights.f32_shaped(&format!("{prefix}in_proj.weight"), &[c, GS_IN_CHANNELS])?,
                 c,
                 GS_IN_CHANNELS,
-                Some(&weights.f32_shaped("gs.in_proj.bias", &[c])?),
+                Some(&weights.f32_shaped(&format!("{prefix}in_proj.bias"), &[c])?),
             )?,
             input_layer: Lin::new(
                 device,
-                &weights.f32_shaped("gs.input_layer.weight", &[c, c])?,
+                &weights.f32_shaped(&format!("{prefix}input_layer.weight"), &[c, c])?,
                 c,
                 c,
-                Some(&weights.f32_shaped("gs.input_layer.bias", &[c])?),
+                Some(&weights.f32_shaped(&format!("{prefix}input_layer.bias"), &[c])?),
             )?,
             blocks,
             out_proj: Lin::new(
                 device,
-                &weights.f32_shaped("gs.out_proj.weight", &[GS_OUT_CHANNELS, c])?,
+                &weights.f32_shaped(&format!("{prefix}out_proj.weight"), &[GS_OUT_CHANNELS, c])?,
                 GS_OUT_CHANNELS,
                 c,
-                Some(&weights.f32_shaped("gs.out_proj.bias", &[GS_OUT_CHANNELS])?),
+                Some(&weights.f32_shaped(&format!("{prefix}out_proj.bias"), &[GS_OUT_CHANNELS])?),
             )?,
             pos_freqs: pcd_position_embed_v2_freqs(c, 3, POS_EMBED_V2_MAX_RES),
             perturbation,
             base_offset_scale: *base_offset_scale
                 .first()
-                .ok_or_else(|| DiffusionError::model("gs.base_offset_scale is empty"))?,
+                .ok_or_else(|| DiffusionError::model(&format!("{prefix}base_offset_scale is empty")))?,
         })
     }
 
@@ -615,30 +627,23 @@ pub fn softplus(x: f32) -> f32 {
     }
 }
 
-/// Every tensor name the decoder reads.
-pub fn decoder_expected_tensors() -> Vec<(String, Vec<usize>)> {
+/// Every tensor name the octree decoder reads from its checkpoint.
+pub fn octree_expected_tensors(model: SplatModel) -> Vec<(String, Vec<usize>)> {
     let c = OCT_MODEL_CHANNELS;
+    let prefix = model.octree_prefix();
     let mut out = vec![
-        ("octree.in_proj.weight".to_string(), vec![c, 3]),
-        ("octree.in_proj.bias".to_string(), vec![c]),
-        ("octree.input_layer.weight".to_string(), vec![c, c]),
-        ("octree.input_layer.bias".to_string(), vec![c]),
-        ("octree.l_embedder.mlp.0.weight".to_string(), vec![c, T_FREQ_DIM]),
-        ("octree.l_embedder.mlp.0.bias".to_string(), vec![c]),
-        ("octree.l_embedder.mlp.2.weight".to_string(), vec![c, c]),
-        ("octree.l_embedder.mlp.2.bias".to_string(), vec![c]),
-        ("octree.adaLN_modulation.1.weight".to_string(), vec![6 * c, c]),
-        ("octree.adaLN_modulation.1.bias".to_string(), vec![6 * c]),
-        ("octree.out_proj.weight".to_string(), vec![OCT_OUT, c]),
-        ("octree.out_proj.bias".to_string(), vec![OCT_OUT]),
-        ("gs.in_proj.weight".to_string(), vec![c, GS_IN_CHANNELS]),
-        ("gs.in_proj.bias".to_string(), vec![c]),
-        ("gs.input_layer.weight".to_string(), vec![c, c]),
-        ("gs.input_layer.bias".to_string(), vec![c]),
-        ("gs.out_proj.weight".to_string(), vec![GS_OUT_CHANNELS, c]),
-        ("gs.out_proj.bias".to_string(), vec![GS_OUT_CHANNELS]),
-        ("gs.points_offset_perturbation".to_string(), vec![GS_PER_POINT, 3]),
-        ("gs.base_offset_scale".to_string(), vec![]),
+        (format!("{prefix}in_proj.weight"), vec![c, 3]),
+        (format!("{prefix}in_proj.bias"), vec![c]),
+        (format!("{prefix}input_layer.weight"), vec![c, c]),
+        (format!("{prefix}input_layer.bias"), vec![c]),
+        (format!("{prefix}l_embedder.mlp.0.weight"), vec![c, T_FREQ_DIM]),
+        (format!("{prefix}l_embedder.mlp.0.bias"), vec![c]),
+        (format!("{prefix}l_embedder.mlp.2.weight"), vec![c, c]),
+        (format!("{prefix}l_embedder.mlp.2.bias"), vec![c]),
+        (format!("{prefix}adaLN_modulation.1.weight"), vec![6 * c, c]),
+        (format!("{prefix}adaLN_modulation.1.bias"), vec![6 * c]),
+        (format!("{prefix}out_proj.weight"), vec![OCT_OUT, c]),
+        (format!("{prefix}out_proj.bias"), vec![OCT_OUT]),
     ];
     let mut cross = |prefix: String, ctx: usize, heads: usize| {
         out.extend([
@@ -653,13 +658,50 @@ pub fn decoder_expected_tensors() -> Vec<(String, Vec<usize>)> {
         ]);
     };
     for i in 0..OCT_BLOCKS {
-        cross(format!("octree.blocks.{i}.cross_attn"), OCT_COND_CHANNELS, OCT_HEADS);
+        cross(format!("{prefix}blocks.{i}.cross_attn"), OCT_COND_CHANNELS, OCT_HEADS);
+    }
+    for i in 0..OCT_BLOCKS {
+        out.extend([
+            (format!("{prefix}blocks.{i}.mlp.mlp.0.weight"), vec![OCT_FFN, c]),
+            (format!("{prefix}blocks.{i}.mlp.mlp.0.bias"), vec![OCT_FFN]),
+            (format!("{prefix}blocks.{i}.mlp.mlp.2.weight"), vec![c, OCT_FFN]),
+            (format!("{prefix}blocks.{i}.mlp.mlp.2.bias"), vec![c]),
+        ]);
+    }
+    out
+}
+
+/// Every tensor name the gs decoder reads from its checkpoint.
+pub fn gs_expected_tensors(model: SplatModel) -> Vec<(String, Vec<usize>)> {
+    let c = GS_MODEL_CHANNELS;
+    let prefix = model.gs_prefix();
+    let mut out = vec![
+        (format!("{prefix}in_proj.weight"), vec![c, GS_IN_CHANNELS]),
+        (format!("{prefix}in_proj.bias"), vec![c]),
+        (format!("{prefix}input_layer.weight"), vec![c, c]),
+        (format!("{prefix}input_layer.bias"), vec![c]),
+        (format!("{prefix}out_proj.weight"), vec![GS_OUT_CHANNELS, c]),
+        (format!("{prefix}out_proj.bias"), vec![GS_OUT_CHANNELS]),
+        (format!("{prefix}points_offset_perturbation"), vec![GS_PER_POINT, 3]),
+        (format!("{prefix}base_offset_scale"), vec![]),
+    ];
+    let mut cross = |prefix: String, ctx: usize, heads: usize| {
+        out.extend([
+            (format!("{prefix}.to_q.weight"), vec![c, c]),
+            (format!("{prefix}.to_q.bias"), vec![c]),
+            (format!("{prefix}.to_kv.weight"), vec![2 * c, ctx]),
+            (format!("{prefix}.to_kv.bias"), vec![2 * c]),
+            (format!("{prefix}.q_rms_norm.gamma"), vec![heads, c / heads]),
+            (format!("{prefix}.k_rms_norm.gamma"), vec![heads, c / heads]),
+            (format!("{prefix}.to_out.weight"), vec![c, c]),
+            (format!("{prefix}.to_out.bias"), vec![c]),
+        ]);
+    };
+    for i in 0..GS_BLOCKS {
+        cross(format!("{prefix}blocks.{i}.cross_attn"), GS_COND_CHANNELS, GS_HEADS);
     }
     for i in 0..GS_BLOCKS {
-        cross(format!("gs.blocks.{i}.cross_attn"), GS_COND_CHANNELS, GS_HEADS);
-    }
-    for i in 0..GS_BLOCKS {
-        let p = format!("gs.blocks.{i}.self_attn");
+        let p = format!("{prefix}blocks.{i}.self_attn");
         out.extend([
             (format!("{p}.to_qkv.weight"), vec![3 * c, c]),
             (format!("{p}.to_qkv.bias"), vec![3 * c]),
@@ -669,22 +711,18 @@ pub fn decoder_expected_tensors() -> Vec<(String, Vec<usize>)> {
             (format!("{p}.to_out.bias"), vec![c]),
         ]);
         out.extend([
-            (format!("gs.blocks.{i}.norm2.weight"), vec![c]),
-            (format!("gs.blocks.{i}.norm2.bias"), vec![c]),
+            (format!("{prefix}blocks.{i}.norm2.weight"), vec![c]),
+            (format!("{prefix}blocks.{i}.norm2.bias"), vec![c]),
         ]);
     }
-    for (prefix, inner) in [("octree.blocks", OCT_FFN), ("gs.blocks", GS_FFN)] {
-        let count = if prefix.starts_with("octree") { OCT_BLOCKS } else { GS_BLOCKS };
-        for i in 0..count {
-            out.extend([
-                (format!("{prefix}.{i}.mlp.mlp.0.weight"), vec![inner, c]),
-                (format!("{prefix}.{i}.mlp.mlp.0.bias"), vec![inner]),
-                (format!("{prefix}.{i}.mlp.mlp.2.weight"), vec![c, inner]),
-                (format!("{prefix}.{i}.mlp.mlp.2.bias"), vec![c]),
-            ]);
-        }
+    for i in 0..GS_BLOCKS {
+        out.extend([
+            (format!("{prefix}blocks.{i}.mlp.mlp.0.weight"), vec![GS_FFN, c]),
+            (format!("{prefix}blocks.{i}.mlp.mlp.0.bias"), vec![GS_FFN]),
+            (format!("{prefix}blocks.{i}.mlp.mlp.2.weight"), vec![c, GS_FFN]),
+            (format!("{prefix}blocks.{i}.mlp.mlp.2.bias"), vec![c]),
+        ]);
     }
-    let _ = (OCT_HEAD_DIM, GS_LAYOUT);
     out
 }
 
@@ -694,7 +732,8 @@ mod tests {
 
     #[test]
     fn state_dict_contract_matches_the_released_decoder() {
-        let expected = decoder_expected_tensors();
+        let mut expected = octree_expected_tensors(SplatModel::TripoSplat);
+        expected.extend(gs_expected_tensors(SplatModel::TripoSplat));
         let names: Vec<&str> = expected.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"gs.blocks.15.cross_attn.to_kv.weight"));
         assert!(names.contains(&"octree.blocks.3.mlp.mlp.2.bias"));
@@ -705,6 +744,21 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len(), "duplicate tensor name");
+        for model in [SplatModel::TripoSplat, SplatModel::Idol] {
+            let octree = octree_expected_tensors(model);
+            let gs = gs_expected_tensors(model);
+            assert_eq!(octree.len(), 60);
+            assert_eq!(gs.len(), 328);
+            for (tensors, prefix) in [(&octree, model.octree_prefix()), (&gs, model.gs_prefix())] {
+                let mut names: Vec<_> = tensors.iter().map(|(name, _)| name).collect();
+                assert!(names.iter().all(|name| name.starts_with(prefix)));
+                names.sort_unstable();
+                names.dedup();
+                assert_eq!(names.len(), tensors.len(), "duplicate tensor name for {model:?}");
+            }
+            assert!(octree.iter().any(|(name, _)| name == &format!("{}blocks.3.mlp.mlp.2.bias", model.octree_prefix())));
+            assert!(gs.iter().any(|(name, _)| name == &format!("{}points_offset_perturbation", model.gs_prefix())));
+        }
     }
 
     #[test]

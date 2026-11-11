@@ -67,16 +67,101 @@ pub const TRIPOSPLAT_RMBG_SIZE: u64 = 444_473_596;
 pub const TRIPOSPLAT_RMBG_SHA256: &str =
     "9ab37426bf4de0567af6b5d21b16151357149139362e6e8992021b8ce356a154";
 
-/// Device weight-cache namespaces (one per checkpoint) so the whole model
-/// can be evicted by prefix on unload.
-pub const SPLAT_DINO_NAMESPACE: &str = "tsplat-dino";
-pub const SPLAT_FLOW_NAMESPACE: &str = "tsplat-flow";
-pub const SPLAT_DEC_NAMESPACE: &str = "tsplat-dec";
-pub const SPLAT_NAMESPACES: [&str; 3] = [
-    SPLAT_DINO_NAMESPACE,
-    SPLAT_FLOW_NAMESPACE,
-    SPLAT_DEC_NAMESPACE,
-];
+/// The released checkpoints the one splat pipeline runs. Idol (speridlabs) is
+/// TripoSplat's architecture retrained; these methods are the only places the
+/// two releases differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplatModel {
+    TripoSplat,
+    Idol,
+}
+
+impl SplatModel {
+    /// Resolve the distinct hub registry model ids.
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "triposplat" => Some(Self::TripoSplat),
+            "idol" => Some(Self::Idol),
+            _ => None,
+        }
+    }
+
+    /// Each release has its own hub registry id.
+    pub fn id(self) -> &'static str {
+        match self { Self::TripoSplat => "triposplat", Self::Idol => "idol" }
+    }
+
+    /// Idol's separate octree checkpoint omits TripoSplat's module prefix.
+    pub fn octree_prefix(self) -> &'static str {
+        match self { Self::TripoSplat => "octree.", Self::Idol => "" }
+    }
+
+    /// Idol's separate Gaussian checkpoint omits TripoSplat's module prefix.
+    pub fn gs_prefix(self) -> &'static str {
+        match self { Self::TripoSplat => "gs.", Self::Idol => "" }
+    }
+
+    /// TripoSplat combines both decoders; Idol stores the octree separately.
+    pub fn octree_role(self) -> &'static str {
+        match self { Self::TripoSplat => "splat-decoder", Self::Idol => "octree-decoder" }
+    }
+
+    /// Idol stores anchors in pos_pe; TripoSplat regenerates Sobol seed 123.
+    pub fn pos_pe_in_checkpoint(self) -> bool {
+        match self { Self::TripoSplat => false, Self::Idol => true }
+    }
+
+    /// TripoSplat builds its own BatchNorm; Idol uses the FLUX.2 VAE epsilon.
+    pub fn vae_bn_eps(self, vae_config_eps: f32) -> f32 {
+        match self { Self::TripoSplat => VAE_BN_EPS, Self::Idol => vae_config_eps }
+    }
+
+    /// The released samplers recommend different denoising step counts.
+    pub fn default_steps(self) -> usize {
+        match self { Self::TripoSplat => DEFAULT_STEPS, Self::Idol => 50 }
+    }
+
+    /// Idol's default w = 3 becomes s = 4 in the shared diffusers CFG form.
+    pub fn default_guidance(self) -> f32 {
+        match self { Self::TripoSplat => DEFAULT_GUIDANCE, Self::Idol => 4.0 }
+    }
+
+    /// Idol supports a larger Gaussian decode budget than TripoSplat.
+    pub fn gaussians_max(self) -> usize {
+        match self { Self::TripoSplat => 262_144, Self::Idol => 1_048_576 }
+    }
+
+    /// Both releases recommend the same default Gaussian count.
+    pub fn gaussians_default(self) -> usize { 262_144 }
+
+    /// Anchor count for a Gaussian budget: TripoSplat's
+    /// `_validate_num_gaussians` rounds to the nearest decoder stride, Idol's
+    /// `decode` floors (`num_gaussians // per_anchor`).
+    pub fn gaussian_anchors(self, gaussians: usize) -> usize {
+        match self {
+            Self::TripoSplat => (gaussians as f64 / GS_PER_POINT as f64).round() as usize,
+            Self::Idol => gaussians / GS_PER_POINT,
+        }
+    }
+
+    /// Idol's `save_ply` clamps the opacity to [1e-6, 1 - 1e-6] before the
+    /// inverse sigmoid, so a saturated Gaussian is written as a finite logit;
+    /// TripoSplat writes the logit unclamped.
+    pub fn ply_opacity_limit(self) -> Option<f32> {
+        match self {
+            Self::TripoSplat => None,
+            Self::Idol => Some(((1.0f64 - 1e-6) / 1e-6).ln() as f32),
+        }
+    }
+
+    /// Separate device cache namespaces prevent reuse of another release's gammas.
+    pub fn namespaces(self) -> [&'static str; 3] {
+        match self {
+            Self::TripoSplat => ["tsplat-dino", "tsplat-flow", "tsplat-dec"],
+            Self::Idol => ["idol-dino", "idol-flow", "idol-dec"],
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Architecture constants (model.py / triposplat.py).
@@ -195,8 +280,6 @@ pub const GS_OUT_CHANNELS: usize = 480;
 
 /// `TripoSplatPipeline._NUM_GAUSSIANS_MIN` / `_MAX`.
 pub const GAUSSIANS_MIN: usize = 32_768;
-pub const GAUSSIANS_MAX: usize = 262_144;
-pub const GAUSSIANS_DEFAULT: usize = GAUSSIANS_MAX;
 
 /// `run()` defaults.
 pub const DEFAULT_STEPS: usize = 20;
@@ -218,16 +301,13 @@ pub fn gs_layout_range(name: &str) -> Option<(usize, usize)> {
 }
 
 /// `_validate_num_gaussians`: bounds-check then round to a multiple of the
-/// decoder's gaussians-per-anchor. Unlike the reference (which asserts) this
-/// clamps, because the service caps the request itself.
-pub fn resolve_num_gaussians(requested: usize) -> usize {
-    let clamped = requested.clamp(GAUSSIANS_MIN, GAUSSIANS_MAX);
-    if clamped % GS_PER_POINT == 0 {
-        return clamped;
-    }
-    let rounded =
-        ((clamped as f64 / GS_PER_POINT as f64).round() as usize).max(1) * GS_PER_POINT;
-    rounded.clamp(GAUSSIANS_MIN, GAUSSIANS_MAX)
+/// decoder's gaussians-per-anchor, the way the model's release does. Unlike
+/// the reference (which asserts) this clamps, because the service caps the
+/// request itself.
+pub fn resolve_num_gaussians(model: SplatModel, requested: usize) -> usize {
+    let clamped = requested.clamp(GAUSSIANS_MIN, model.gaussians_max());
+    let rounded = model.gaussian_anchors(clamped).max(1) * GS_PER_POINT;
+    rounded.clamp(GAUSSIANS_MIN, model.gaussians_max())
 }
 
 pub type SplatCancel<'a> = &'a dyn Fn() -> bool;
@@ -512,16 +592,20 @@ mod tests {
 
     #[test]
     fn num_gaussians_rounds_to_the_decoder_stride() {
-        assert_eq!(resolve_num_gaussians(262_144), 262_144);
-        assert_eq!(resolve_num_gaussians(32_768), 32_768);
+        assert_eq!(resolve_num_gaussians(SplatModel::TripoSplat, 262_144), 262_144);
+        assert_eq!(resolve_num_gaussians(SplatModel::TripoSplat, 32_768), 32_768);
         // 100_000 is already a multiple of 32 and passes through.
-        assert_eq!(resolve_num_gaussians(100_000), 100_000);
+        assert_eq!(resolve_num_gaussians(SplatModel::TripoSplat, 100_000), 100_000);
         // 100_001 rounds to the nearest multiple (down, here).
-        assert_eq!(resolve_num_gaussians(100_001), 100_000);
-        assert_eq!(resolve_num_gaussians(100_017), 100_032);
-        assert_eq!(resolve_num_gaussians(1), GAUSSIANS_MIN);
-        assert_eq!(resolve_num_gaussians(10_000_000), GAUSSIANS_MAX);
-        assert_eq!(resolve_num_gaussians(50_001) % 32, 0);
+        assert_eq!(resolve_num_gaussians(SplatModel::TripoSplat, 100_001), 100_000);
+        assert_eq!(resolve_num_gaussians(SplatModel::TripoSplat, 100_017), 100_032);
+        assert_eq!(resolve_num_gaussians(SplatModel::TripoSplat, 1), GAUSSIANS_MIN);
+        assert_eq!(resolve_num_gaussians(SplatModel::TripoSplat, 10_000_000), SplatModel::TripoSplat.gaussians_max());
+        assert_eq!(resolve_num_gaussians(SplatModel::TripoSplat, 50_001) % 32, 0);
+        // Idol floors to the stride and allows up to 1,048,576.
+        assert_eq!(resolve_num_gaussians(SplatModel::Idol, 100_017), 100_000);
+        assert_eq!(resolve_num_gaussians(SplatModel::Idol, 1_048_575), 1_048_544);
+        assert_eq!(resolve_num_gaussians(SplatModel::Idol, 10_000_000), 1_048_576);
     }
 
     #[test]

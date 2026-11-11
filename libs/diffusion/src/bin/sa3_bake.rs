@@ -34,6 +34,10 @@ fn fail(msg: &str) -> ! {
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("sa3_bake", model_main)
+}
+
+fn model_main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
         Some("analyze") => analyze_cmd(&args[2..]),
@@ -240,7 +244,7 @@ fn bake_cmd(args: &[String]) {
     // --- phase 1: generate takes -------------------------------------------
     println!("PROGRESS 0.00 load model");
     let mut pipeline_slot: Option<(Sa3Pipeline, Sa3Tokenizer)> = None;
-    let mut ensure_pipeline = |slot: &mut Option<(Sa3Pipeline, Sa3Tokenizer)>| {
+    let ensure_pipeline = |slot: &mut Option<(Sa3Pipeline, Sa3Tokenizer)>| {
         if slot.is_none() {
             let tokenizer =
                 Sa3Tokenizer::load(opts.weights.join("t5gemma-b-b-ul2/tokenizer.model"))

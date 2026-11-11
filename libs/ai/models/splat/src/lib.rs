@@ -1,6 +1,5 @@
-//! TripoSplat (VAST-AI-Research/TripoSplat, MIT): one PNG -> a 3D gaussian
-//! splat PLY, transcribed from the released `model.py` / `triposplat.py` onto
-//! the Makepad CUDA stack.
+//! TripoSplat and Idol run through one native Rust/CUDA pipeline: one PNG
+//! becomes a 3D Gaussian splat PLY using either release's checkpoints.
 //!
 //! Layering follows the other `libs/ai/models/*` family crates: this module
 //! re-exports the shared exec surface, [`splat`] owns the pinned manifest and
@@ -30,8 +29,8 @@ pub mod splat_ply;
 pub mod splat_rand;
 
 pub use splat::{
-    resolve_num_gaussians, SplatCancel, SplatWeights, GAUSSIANS_DEFAULT, GAUSSIANS_MAX,
-    GAUSSIANS_MIN, SPLAT_CANVAS, SPLAT_NAMESPACES, TRIPOSPLAT_DECODER_PATH,
+    resolve_num_gaussians, SplatCancel, SplatModel, SplatWeights,
+    GAUSSIANS_MIN, SPLAT_CANVAS, TRIPOSPLAT_DECODER_PATH,
     TRIPOSPLAT_DECODER_SHA256, TRIPOSPLAT_DECODER_SIZE, TRIPOSPLAT_DINO_PATH,
     TRIPOSPLAT_DINO_SHA256, TRIPOSPLAT_DINO_SIZE, TRIPOSPLAT_DIT_PATH, TRIPOSPLAT_DIT_SHA256,
     TRIPOSPLAT_DIT_SIZE, TRIPOSPLAT_REPO, TRIPOSPLAT_REVISION, TRIPOSPLAT_RMBG_PATH,
@@ -51,14 +50,14 @@ pub fn splat_device_available() -> bool {
     backend::gpu_device_available()
 }
 
-/// Evict every TripoSplat device namespace and release the activation pool.
+/// Evict the selected model's device namespaces and release the activation pool.
 /// Must run on the worker thread that performed the generation — both caches
 /// are thread-local by design.
-pub fn unload_splat() -> Result<usize> {
+pub fn unload_splat(model: SplatModel) -> Result<usize> {
     // The `_if_loaded` variant behind release_gpu_runtime_namespaces: a cold
     // or CPU-only thread must not initialize CUDA merely to discover there is
     // nothing to release. It also trims the activation pool.
-    let prefixes: Vec<String> = SPLAT_NAMESPACES
+    let prefixes: Vec<String> = model.namespaces()
         .iter()
         .map(|namespace| format!("{namespace}::"))
         .collect();

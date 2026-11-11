@@ -231,6 +231,10 @@ fn write_npy_f32_val(path: &str, data: &[f32], shape: &[usize]) -> Result<(), St
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("music3_validate", model_main)
+}
+
+fn model_main() {
     let args: Vec<String> = std::env::args().collect();
     let mut opts = std::collections::HashMap::new();
     let mut i = 1;
@@ -1947,7 +1951,7 @@ fn run_decode1(weights: &Path, dump: &Path) -> Result<(), String> {
     let lm = Music3Shards::load(weights.join("language_model")).map_err(|e| e.to_string())?;
     let lm_prep = Music3LmPrepared::prepare(&lm).map_err(|e| e.to_string())?;
     let rvq_w = Music3Shards::load(weights.join("rvq_depth_decoder")).map_err(|e| e.to_string())?;
-    let (mut cond_s, mut cond_h, mut uncond_s, mut uncond_h) =
+    let (mut cond_s, _, mut uncond_s, _) =
         Music3LmSession::prefill_pair_with_progress(&lm, &lm_prep, &cond, &uncond, &mut |_, _| {})
             .map_err(|e| e.to_string())?;
     let native_fb =
@@ -1982,8 +1986,8 @@ fn run_decode1(weights: &Path, dump: &Path) -> Result<(), String> {
         &fb,
     )
     .map_err(|e| e.to_string())?;
-    cond_h = pair.0;
-    uncond_h = pair.1;
+    let cond_h = pair.0;
+    let uncond_h = pair.1;
     let mut both = cond_h.clone();
     both.extend_from_slice(&uncond_h);
     let off_f1 = load_npy(Path::new(r"C:\ai\music3_compare\official_last_hidden_f1.npy"))?.as_f32()?;
@@ -2335,7 +2339,7 @@ fn load_wav_stereo(path: &Path) -> Result<(Vec<f32>, Vec<f32>, u32), String> {
     let mut left = Vec::with_capacity(frames);
     let mut right = Vec::with_capacity(frames);
     for f in 0..frames {
-        let mut sample = |ch: usize| -> Result<f32, String> {
+        let sample = |ch: usize| -> Result<f32, String> {
             let at = f * frame_bytes + ch * bytes_per;
             Ok(match (tag, bits) {
                 (3, 32) => f32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]),

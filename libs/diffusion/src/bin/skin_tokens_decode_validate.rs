@@ -1008,6 +1008,10 @@ fn compare_transferred_top4(
 }
 
 fn main() -> Result<(), String> {
+    makepad_diffusion::backend::metal::run_model_worker("skin_tokens_decode_validate", model_main)
+}
+
+fn model_main() -> Result<(), String> {
     const USAGE: &str = "usage: skin-tokens-decode-validate <tokenrig.safetensors> <condition-oracle-dir> <decode-oracle-dir> [warm-runs] [generation-oracle-dir] [mesh.glb transfer-oracle-dir]\n       skin-tokens-decode-validate strict-rig <tokenrig.safetensors> <native-strict-generation.json> <mesh.glb> <output.glb>\n       skin-tokens-decode-validate production-rig <tokenrig.safetensors> <mesh.glb> <output.glb> [runs] [seed]";
     let collected = std::env::args().skip(1).collect::<Vec<_>>();
     if let [command, checkpoint, artifact, mesh, output] = collected.as_slice() {

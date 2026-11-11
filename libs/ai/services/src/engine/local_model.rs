@@ -11,7 +11,7 @@
 //! travels the same way.
 
 use crate::engine::{Model, ModelEvent, ModelImage, ToolDefinition};
-use crate::state::{ProviderChoice, ProviderRow, HUB_CLAUDE_MODEL};
+use crate::state::{hub_claude_pick, ProviderChoice, ProviderRow, HUB_CLAUDE_MODEL};
 use makepad_ai_hub::hub::REQUIRED_MODEL_ENV;
 use makepad_ai_hub::hub_chat::{ChatRoute, HubChatConfig, HubChatSession, HubOffer};
 use makepad_ai_hub::local_llm::{ChatEvent, LocalLlmConfig, ToolSpec};
@@ -95,7 +95,7 @@ const WEIGHTS_SEARCH_DEPTH: usize = 2;
 /// projector or music/video part, never a chat model.
 const NON_CHAT_DIRS: &[&str] = &[
     "video", "music", "stems", "stt", "tts", "depth", "loras", "checkpoints", "artifacts", "fleet",
-    "triposplat", "trellis2", "paint21", "flux2-dev", "flux2-dev-q4-24g", "flux2-klein-4b",
+    "triposplat", "idol", "trellis2", "paint21", "flux2-dev", "flux2-dev-q4-24g", "flux2-klein-4b",
 ];
 
 /// The best chat GGUF under `dir`: a Qwen chat model over any other, the
@@ -286,7 +286,19 @@ fn offer_rows(offers: &[HubOffer], weights: Option<&Path>, has_runtime: bool, lo
         }
         let choice = ProviderChoice::Hub(offer.model.clone());
         let unavailable = (local_only && choice.is_cloud()).then(|| "local AI only".to_string());
-        rows.push(ProviderRow { choice, label: offer_label(offer), unavailable });
+        let claude = hub_claude_pick(&offer.model).is_some();
+        rows.push(ProviderRow { choice, label: offer_label(offer), unavailable: unavailable.clone() });
+        // The hub's Claude runs the Claude model the turn names: one row per model, as the
+        // CLI's rows (the bare row is the default, [`super::models::DEFAULT_CLAUDE_MODEL`]).
+        if claude {
+            for &(id, label) in super::models::CLAUDE_MODELS {
+                rows.push(ProviderRow {
+                    choice: ProviderChoice::Hub(format!("{HUB_CLAUDE_MODEL}:{id}")),
+                    label: format!("{} · {label}", offer_label(offer)),
+                    unavailable: unavailable.clone(),
+                });
+            }
+        }
     }
     rows
 }
@@ -353,6 +365,8 @@ pub struct LocalModel {
     /// Exactly this hub model (`ProviderChoice::Hub`), never another;
     /// `None`: the election picks.
     hub_model: Option<String>,
+    /// The Claude model a turn on the hub's Claude runs (`hub:claude-cli:<id>`).
+    claude_model: Option<String>,
     session: Option<HubChatSession>,
     system: String,
     tools: Vec<ToolDefinition>,
@@ -372,6 +386,7 @@ impl LocalModel {
         LocalModel {
             model_path,
             hub_model: None,
+            claude_model: None,
             session: None,
             system: String::new(),
             tools: Vec::new(),
@@ -384,11 +399,22 @@ impl LocalModel {
     }
 
     /// Exactly `model` as a hub serves it (`claude-cli`: the hub's Claude
-    /// Code), at the best-ranked hub that does; no weights load here.
+    /// Code, `claude-cli:<id>`: it on that Claude model), at the best-ranked
+    /// hub that does; no weights load here.
     pub fn for_hub_model(model: &str) -> Self {
         let mut this = LocalModel::new(None);
-        this.hub_model = Some(model.to_string());
-        this.label = format!("AI hub · {}", model_display(model));
+        match hub_claude_pick(model) {
+            Some(pick) => {
+                let claude = pick.unwrap_or(super::models::DEFAULT_CLAUDE_MODEL);
+                this.hub_model = Some(HUB_CLAUDE_MODEL.to_string());
+                this.claude_model = Some(claude.to_string());
+                this.label = format!("AI hub · Claude Code · {}", super::models::claude_model_label(claude));
+            }
+            None => {
+                this.hub_model = Some(model.to_string());
+                this.label = format!("AI hub · {}", model_display(model));
+            }
+        }
         this
     }
 
@@ -412,6 +438,7 @@ impl LocalModel {
             preferred_model: self.hub_model.clone().or_else(|| std::env::var(REQUIRED_MODEL_ENV).ok().map(|m| m.trim().to_string()).filter(|m| !m.is_empty())),
             max_tokens: Some(u32::MAX),
             thinking,
+            claude_model: self.claude_model.clone(),
             system_prompt: self.system.clone(),
             tools,
             wake,
@@ -762,9 +789,9 @@ mod tests {
     #[test]
     fn route_labels_name_node_and_model() {
         let route = ChatRoute::Fleet { base: "http://192.0.2.73:8785".into(), model: "qwen3.8-27b".into() };
-        assert_eq!(route_label(&route), "AI hub · 149 · Qwen3.8 27B");
+        assert_eq!(route_label(&route), "AI hub · 73 · Qwen3.8 27B");
         let claude = ChatRoute::Fleet { base: "https://192.0.2.91:8124".into(), model: HUB_CLAUDE_MODEL.into() };
-        assert_eq!(route_label(&claude), "AI hub · 222 · Claude Code");
+        assert_eq!(route_label(&claude), "AI hub · 91 · Claude Code");
         assert_eq!(makepad_ai_hub::claude_cli::MODEL_ID, HUB_CLAUDE_MODEL);
     }
 
@@ -782,14 +809,24 @@ mod tests {
         let rows = offer_rows(&offers, None, false, false);
         let shown: Vec<(String, String, Option<String>)> = rows.iter().map(|r| (r.choice.slug(), r.label.clone(), r.unavailable.clone())).collect();
         assert_eq!(shown, vec![
-            ("local".into(), "AI hub · 222 · Qwen3.5 4B".into(), None),
-            ("hub:claude-cli".into(), "AI hub · 222 · Claude Code".into(), None),
-            ("hub:qwen3.8-27b".into(), "AI hub · 149 · Qwen3.8 27B".into(), None),
+            ("local".into(), "AI hub · 91 · Qwen3.5 4B".into(), None),
+            ("hub:claude-cli".into(), "AI hub · 91 · Claude Code".into(), None),
+            ("hub:claude-cli:claude-fable-5-2".into(), "AI hub · 91 · Claude Code · Fable 5.2".into(), None),
+            ("hub:claude-cli:claude-opus-5-5".into(), "AI hub · 91 · Claude Code · Opus 5.5".into(), None),
+            ("hub:claude-cli:claude-sonnet-5-5".into(), "AI hub · 91 · Claude Code · Sonnet 5.5".into(), None),
+            ("hub:qwen3.8-27b".into(), "AI hub · 73 · Qwen3.8 27B".into(), None),
         ]);
-        // Local AI only: the hub's Claude is a cloud model.
+        // Each Claude row runs its own model on the hub's Claude; the bare row runs the default.
+        for (slug, claude) in [("claude-cli:claude-fable-5-2", "claude-fable-5-2"), ("claude-cli", super::super::models::DEFAULT_CLAUDE_MODEL)] {
+            let model = LocalModel::for_hub_model(slug);
+            assert_eq!((model.hub_model.as_deref(), model.claude_model.as_deref()), (Some(HUB_CLAUDE_MODEL), Some(claude)), "{slug}");
+        }
+        let qwen = LocalModel::for_hub_model("qwen3.8-27b");
+        assert_eq!((qwen.hub_model.as_deref(), qwen.claude_model), (Some("qwen3.8-27b"), None));
+        // Local AI only: the hub's Claude is a cloud model, on every Claude model.
         let locked = offer_rows(&offers, None, false, true);
-        assert_eq!(locked[1].unavailable.as_deref(), Some("local AI only"));
-        assert_eq!(locked[2].unavailable, None);
+        assert!(locked[1..5].iter().all(|row| row.unavailable.as_deref() == Some("local AI only")), "{locked:?}");
+        assert_eq!(locked[5].unavailable, None);
         // A hub with only its Claude: the election has nothing local to pick.
         let only = offer_rows(&offers[..1], None, false, false);
         assert_eq!(only[0].unavailable.as_deref(), Some("no local model on the hubs"));
@@ -807,6 +844,6 @@ mod tests {
         set_hub_find(HubFind::Found(vec![offer("http://192.0.2.73:8785", "qwen3.8-27b", "llm")]));
         let rows = hub_rows(None, false, false);
         assert_eq!(rows.len(), 1);
-        assert_eq!((rows[0].label.as_str(), rows[0].unavailable.clone()), ("AI hub · 149 · Qwen3.8 27B", None));
+        assert_eq!((rows[0].label.as_str(), rows[0].unavailable.clone()), ("AI hub · 73 · Qwen3.8 27B", None));
     }
 }

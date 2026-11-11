@@ -53,12 +53,12 @@ fn dit_ffn(
     normed: &[f32],
     rows: usize,
 ) -> Result<Vec<f32>> {
-    let ns = format!("music3-{}", file.role.as_str());
+    let ns = file.owner.namespace();
     let in_n = format!("transformer_blocks.{layer}.ff_in.weight");
     let out_n = format!("transformer_blocks.{layer}.ff_out.weight");
     let in_bk = format!("transformer_blocks.{layer}.ff_in.bias");
     let out_bk = format!("transformer_blocks.{layer}.ff_out.bias");
-    if let (Some(ff_in), Some(ff_out)) = (file.keyed_mat(&ns, &in_n), file.keyed_mat(&ns, &out_n)) {
+    if let (Some(ff_in), Some(ff_out)) = (file.keyed_mat(ns, &in_n), file.keyed_mat(ns, &out_n)) {
         if let Some(y) = makepad_ai_common::backend::metal::try_dit_ffn_resident(
             normed,
             rows,
@@ -551,7 +551,7 @@ impl Music3GgufLm {
         use makepad_ai_common::backend::metal;
         use std::sync::OnceLock;
         static LOG: OnceLock<()> = OnceLock::new();
-        let ns = format!("music3-{}", file.role.as_str());
+        let ns = file.owner.namespace();
         let mut hidden = Vec::with_capacity(2 * MUSIC3_LM_HIDDEN);
         hidden.extend_from_slice(embed_c);
         hidden.extend_from_slice(embed_u);
@@ -576,13 +576,13 @@ impl Music3GgufLm {
             let un = format!("{p}.mlp.up_proj.weight");
             let gn = format!("{p}.mlp.gate_proj.weight");
             let dn = format!("{p}.mlp.down_proj.weight");
-            let qm = file.keyed_mat(&ns, &qn)?;
-            let km = file.keyed_mat(&ns, &kn)?;
-            let vm = file.keyed_mat(&ns, &vn)?;
-            let om = file.keyed_mat(&ns, &on)?;
-            let um = file.keyed_mat(&ns, &un)?;
-            let gm = file.keyed_mat(&ns, &gn)?;
-            let dm = file.keyed_mat(&ns, &dn)?;
+            let qm = file.keyed_mat(ns, &qn)?;
+            let km = file.keyed_mat(ns, &kn)?;
+            let vm = file.keyed_mat(ns, &vn)?;
+            let om = file.keyed_mat(ns, &on)?;
+            let um = file.keyed_mat(ns, &un)?;
+            let gm = file.keyed_mat(ns, &gn)?;
+            let dm = file.keyed_mat(ns, &dn)?;
             let in_key = format!("{p}.input_layernorm.weight");
             let qn_key = format!("{p}.self_attn.q_norm.weight");
             let kn_key = format!("{p}.self_attn.k_norm.weight");

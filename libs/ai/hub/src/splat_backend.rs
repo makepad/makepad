@@ -1,8 +1,8 @@
 //! The `triposplat` backend: SPLAT domain — one object image -> a 3D
-//! gaussian splat PLY.
+//! gaussian splat PLY, serving both TripoSplat and Idol.
 //!
-//! Production runs the pinned VAST-AI/TripoSplat checkpoints (MIT code and
-//! weights) through the in-repo port in libs/ai/models/splat on the Makepad
+//! Production runs either release's pinned checkpoints through the shared
+//! in-repo port in libs/ai/models/splat on the Makepad
 //! CUDA stack: native BiRefNet cutout, DINOv3 ViT-H/16+ conditioning, a
 //! FLUX.2 VAE latent condition, the 24-block rectified-flow denoiser over
 //! 8192 splat-latent tokens, and the octree + gaussian decoder. There is no
@@ -21,7 +21,8 @@
 //! the service's `birefnet-hr` entry (same architecture and byte length,
 //! different weights), so it is pinned separately and loaded through the same
 //! native BiRefNet runtime. It is evicted before the much larger TripoSplat
-//! weights stream in, exactly like the TRELLIS path.
+//! weights stream in, exactly like the TRELLIS path. Idol's BiRefNet is the
+//! same ZhengPeng7/BiRefNet checkpoint as TripoSplat's `native-matte` blob.
 
 use crate::backend::{
     ArtifactData, BackendCtx, CancelToken, ContentBackend, GenerateParams, ProgressSink,
@@ -36,20 +37,15 @@ pub struct SplatJob {
     pub width: usize,
     pub height: usize,
     pub seed: u64,
-    pub steps: usize,
-    pub guidance: f32,
-    /// Resolved gaussian budget (clamped and rounded by the model crate).
-    pub gaussians: usize,
+    pub steps: Option<usize>,
+    pub guidance: Option<f32>,
+    /// Requested Gaussian budget; the model crate supplies defaults and limits.
+    pub gaussians: Option<usize>,
     /// True when the input already carries a meaningful alpha matte. False
     /// means the generator must run the native BiRefNet cutout first; it is
     /// never permission to continue unsegmented.
     pub segmented: bool,
 }
-
-/// Reference defaults (`TripoSplatPipeline.run`).
-pub const SPLAT_STEPS_DEFAULT: u32 = 20;
-pub const SPLAT_GUIDANCE_DEFAULT: f32 = 3.0;
-pub const SPLAT_GAUSSIANS_DEFAULT: u32 = 262_144;
 
 /// Pluggable generation: the real path runs the TripoSplat pipeline; tests
 /// plug in a closure. Returns the finished PLY bytes.
@@ -77,11 +73,11 @@ impl SplatBackend {
 
     /// Real constructor used by `create_backend`.
     #[cfg(feature = "splat-native")]
-    pub fn new_native(model_id: &str) -> Self {
-        Self {
+    pub fn new_native(model_id: &str) -> Result<Self, AssetAiError> {
+        Ok(Self {
             model_id: model_id.to_string(),
-            gen: Gen::Native(native::SplatGen::new()),
-        }
+            gen: Gen::Native(native::SplatGen::new(model_id)?),
+        })
     }
 }
 
@@ -192,9 +188,9 @@ impl ContentBackend for SplatBackend {
             width,
             height,
             seed: params.seed,
-            steps: params.steps.unwrap_or(SPLAT_STEPS_DEFAULT).clamp(1, 200) as usize,
-            guidance: params.guidance.unwrap_or(SPLAT_GUIDANCE_DEFAULT),
-            gaussians: params.gaussians.unwrap_or(SPLAT_GAUSSIANS_DEFAULT) as usize,
+            steps: params.steps.map(|steps| steps.clamp(1, 200) as usize),
+            guidance: params.guidance,
+            gaussians: params.gaussians.map(|gaussians| gaussians as usize),
             segmented,
         };
         cancel.check()?;
@@ -225,19 +221,21 @@ mod native {
     use crate::error::AssetAiError;
     use makepad_ai_common::DiffusionError;
     use makepad_ai_splat::splat_image::SplatImage;
-    use makepad_ai_splat::{unload_splat, Device, SplatParams, SplatPipeline};
+    use makepad_ai_splat::{unload_splat, Device, SplatModel, SplatParams, SplatPipeline};
     use makepad_ai_vision::birefnet::{unload_birefnet, BiRefNet, BiRefNetImage, BiRefNetWeights};
     use std::path::PathBuf;
 
     struct Paths {
         dit: PathBuf,
-        decoder: PathBuf,
+        octree: PathBuf,
+        gs: PathBuf,
         dino: PathBuf,
         vae: PathBuf,
         matte: PathBuf,
     }
 
     pub struct SplatGen {
+        model: SplatModel,
         paths: Option<Paths>,
         pipeline: Option<SplatPipeline>,
         /// Set before the first device upload so the service calls `unload`
@@ -245,20 +243,24 @@ mod native {
         resident: bool,
     }
 
-    fn diffusion_err(err: DiffusionError) -> AssetAiError {
+    fn diffusion_err(model: SplatModel, err: DiffusionError) -> AssetAiError {
         match err {
             DiffusionError::Cancelled => AssetAiError::Cancelled,
-            other => AssetAiError::Backend(format!("triposplat: {other}")),
+            other => AssetAiError::Backend(format!("{}: {other}", model.id())),
         }
     }
 
     impl SplatGen {
-        pub fn new() -> Self {
-            Self {
+        pub fn new(model_id: &str) -> Result<Self, AssetAiError> {
+            let model = SplatModel::from_id(model_id).ok_or_else(|| {
+                AssetAiError::Unavailable(format!("unknown splat model {model_id}"))
+            })?;
+            Ok(Self {
+                model,
                 paths: None,
                 pipeline: None,
                 resident: false,
-            }
+            })
         }
 
         pub fn is_resident(&self) -> bool {
@@ -269,8 +271,8 @@ mod native {
         /// the weight cache and the activation pool are thread-local.
         pub fn unload(&mut self) -> Result<(), AssetAiError> {
             self.pipeline = None;
-            unload_birefnet().map_err(diffusion_err)?;
-            unload_splat().map_err(diffusion_err)?;
+            unload_birefnet().map_err(|err| diffusion_err(self.model, err))?;
+            unload_splat(self.model).map_err(|err| diffusion_err(self.model, err))?;
             self.resident = false;
             Ok(())
         }
@@ -279,7 +281,8 @@ mod native {
             ctx.ensure_files()?;
             self.paths = Some(Paths {
                 dit: ctx.path_by_role("dit")?,
-                decoder: ctx.path_by_role("splat-decoder")?,
+                octree: ctx.path_by_role(self.model.octree_role())?,
+                gs: ctx.path_by_role("splat-decoder")?,
                 dino: ctx.path_by_role("dino-conditioner")?,
                 vae: ctx.path_by_role("vae")?,
                 matte: ctx.path_by_role("native-matte")?,
@@ -294,11 +297,11 @@ mod native {
             cancel: &CancelToken,
         ) -> Result<Vec<u8>, AssetAiError> {
             let paths = self.paths.as_ref().ok_or_else(|| {
-                AssetAiError::Backend("triposplat used before ensure_loaded".into())
+                AssetAiError::Backend(format!("{} used before ensure_loaded", self.model.id()))
             })?;
             if !makepad_ai_splat::splat_device_available() {
                 return Err(AssetAiError::Unavailable(
-                    "triposplat requires a CUDA device".to_string(),
+                    format!("{} requires a CUDA device", self.model.id()),
                 ));
             }
             self.resident = true;
@@ -333,8 +336,8 @@ mod native {
                 })();
                 // Always release a partially or fully populated BiRefNet
                 // cache, including on cancellation or an operator error.
-                unload_birefnet().map_err(diffusion_err)?;
-                let matte = matte_result.map_err(diffusion_err)?;
+                unload_birefnet().map_err(|err| diffusion_err(self.model, err))?;
+                let matte = matte_result.map_err(|err| diffusion_err(self.model, err))?;
                 for (pixel, alpha) in rgba.chunks_exact_mut(4).zip(matte.alpha_u8()) {
                     pixel[3] = alpha;
                 }
@@ -353,13 +356,15 @@ mod native {
                 self.pipeline = Some(
                     SplatPipeline::prepare(
                         Device::Cuda,
+                        self.model,
                         &paths.dino,
                         &paths.dit,
-                        &paths.decoder,
+                        &paths.octree,
+                        &paths.gs,
                         &paths.vae,
                         Some(&mut load_hook),
                     )
-                    .map_err(diffusion_err)?,
+                    .map_err(|err| diffusion_err(self.model, err))?,
                 );
             }
             cancel.check()?;
@@ -367,15 +372,19 @@ mod native {
             let pipeline = self
                 .pipeline
                 .as_ref()
-                .ok_or_else(|| AssetAiError::Backend("triposplat pipeline missing".into()))?;
-            let image = SplatImage::new(rgba, job.width, job.height, 4).map_err(diffusion_err)?;
-            let params = SplatParams {
-                seed: job.seed,
-                steps: job.steps,
-                guidance_scale: job.guidance,
-                num_gaussians: job.gaussians,
-                ..SplatParams::default()
-            };
+                .ok_or_else(|| AssetAiError::Backend(format!("{} pipeline missing", self.model.id())))?;
+            let image = SplatImage::new(rgba, job.width, job.height, 4).map_err(|err| diffusion_err(self.model, err))?;
+            let mut params = SplatParams::for_model(self.model);
+            params.seed = job.seed;
+            if let Some(steps) = job.steps {
+                params.steps = steps;
+            }
+            if let Some(guidance) = job.guidance {
+                params.guidance_scale = guidance;
+            }
+            if let Some(gaussians) = job.gaussians {
+                params.num_gaussians = gaussians;
+            }
             let mut run_hook = |label: &str, fraction: f64| {
                 if cancelled() {
                     return Err(DiffusionError::Cancelled);
@@ -385,7 +394,7 @@ mod native {
             };
             pipeline
                 .run(&image, &params, Some(&mut run_hook), Some(&cancelled))
-                .map_err(diffusion_err)
+                .map_err(|err| diffusion_err(self.model, err))
         }
     }
 }
@@ -435,8 +444,9 @@ mod tests {
             "triposplat",
             Box::new(|job: &SplatJob, progress: ProgressSink| {
                 assert_eq!(job.width, 8);
-                assert_eq!(job.gaussians, SPLAT_GAUSSIANS_DEFAULT as usize);
-                assert_eq!(job.steps, SPLAT_STEPS_DEFAULT as usize);
+                assert_eq!(job.gaussians, None);
+                assert_eq!(job.guidance, None);
+                assert_eq!(job.steps, None);
                 assert!(!job.segmented, "an opaque PNG carries no matte");
                 progress("denoise", 0.5);
                 Ok(fake_ply(4))
@@ -465,9 +475,9 @@ mod tests {
             "triposplat",
             Box::new(|job: &SplatJob, _p: ProgressSink| {
                 assert_eq!(job.seed, 99);
-                assert_eq!(job.steps, 8);
-                assert_eq!(job.gaussians, 65_536);
-                assert!((job.guidance - 5.5).abs() < 1e-6);
+                assert_eq!(job.steps, Some(8));
+                assert_eq!(job.gaussians, Some(65_536));
+                assert_eq!(job.guidance, Some(5.5));
                 Ok(fake_ply(1))
             }),
         );
@@ -489,7 +499,7 @@ mod tests {
 
     #[test]
     fn gaussian_budget_is_clamped_on_the_wire() {
-        for (requested, want) in [(1u32, 32_768u32), (10_000_000, 262_144), (65_536, 65_536)] {
+        for (requested, want) in [(1u32, 32_768u32), (10_000_000, 1_048_576), (65_536, 65_536)] {
             let params = GenerateParams::from_request(&GenerateRequestJson {
                 model: "triposplat".to_string(),
                 gaussians: Some(requested),

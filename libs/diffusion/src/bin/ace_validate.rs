@@ -313,6 +313,10 @@ fn stage_prompt() -> bool {
 }
 
 fn main() {
+    makepad_diffusion::backend::metal::run_model_worker("ace_validate", model_main)
+}
+
+fn model_main() {
     let args: Vec<String> = std::env::args().collect();
     let dump = arg_value(&args, "--dump").map(PathBuf::from).unwrap_or_else(default_dump_dir);
     let weights = arg_value(&args, "--weights")

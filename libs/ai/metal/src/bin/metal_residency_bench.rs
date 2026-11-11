@@ -278,6 +278,10 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn main() {
+    makepad_ai_metal::run_model_worker("metal_residency_bench", model_main);
+}
+#[cfg(target_os = "macos")]
+fn model_main() {
     use makepad_ai_metal::MetalRuntime;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
