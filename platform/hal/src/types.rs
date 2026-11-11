@@ -247,10 +247,13 @@ pub mod info_flags {
     /// both eyes side by side, and the app hands the result on; the XR window only paces them
     /// (its `XrFrame`s and `FrameReady`s), it is never presented.
     pub const XR_OFFSCREEN: u32 = 2048;
+    /// The backend keeps compiled pipelines across launches, and this one started with none it can
+    /// use (a fresh install, and on Vulkan an update too), so its first frame compiles them all.
+    pub const PIPELINE_CACHE_COLD: u32 = 32768;
 
     #[test]
     fn the_flags_are_distinct_bits() {
-        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW, XR_OFFSCREEN];
+        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW, XR_OFFSCREEN, PIPELINE_CACHE_COLD];
         for (i, a) in all.iter().enumerate() {
             assert!(a.is_power_of_two());
             assert!(all[i + 1..].iter().all(|b| a & b == 0), "flag {a} shares a bit");
@@ -358,12 +361,15 @@ impl OpenReq {
             Ok("offscreen") => (backend_id::HEADLESS, 0),
             Ok("metal") => (backend_id::METAL, window_flags),
             Ok("gl") if cfg!(target_os = "linux") => (backend_id::GL, window_flags | if hidden { open_flags::OFFSCREEN_WINDOWS } else { 0 }),
+            Ok("gl") if cfg!(target_os = "android") => (backend_id::GL, window_flags),
             Ok("vulkan") if cfg!(target_os = "linux") && !hidden => (backend_id::VULKAN, window_flags),
+            Ok("vulkan") if cfg!(target_os = "android") => (backend_id::VULKAN, window_flags),
             Ok("vulkan") => (backend_id::VULKAN, window_flags | open_flags::OFFSCREEN_WINDOWS),
             _ if cfg!(target_vendor = "apple") && hidden => (backend_id::METAL, open_flags::OFFSCREEN_WINDOWS),
             _ if cfg!(target_vendor = "apple") => (backend_id::METAL, window_flags),
             _ if cfg!(target_os = "linux") => (backend_id::AUTO, if hidden { window_flags | open_flags::OFFSCREEN_WINDOWS } else { window_flags }),
-            _ if cfg!(target_os = "android") => (backend_id::VULKAN, window_flags),
+            // Vulkan where the device has 1.1, else GLES (`backend::android::open`)
+            _ if cfg!(target_os = "android") => (backend_id::AUTO, window_flags),
             _ if cfg!(windows) => (backend_id::D3D11, if hidden { window_flags | open_flags::OFFSCREEN_WINDOWS } else { window_flags }),
             _ => (backend_id::HEADLESS, 0),
         };
@@ -819,6 +825,9 @@ pub mod mobile_ui {
     /// `value`: the window's background, 0xAARRGGBB, which the OS shows until the app draws
     /// (a start or a resume).
     pub const APP_BACKGROUND: u32 = 4;
+    /// The first frame waits on pipelines the cache didn't have, so the OS explains the wait until
+    /// the app draws (Android's "compiling shaders" screen; `value` is unused).
+    pub const SHADER_COMPILE_SCREEN: u32 = 5;
 
     pub mod orientation {
         pub const AUTO: u32 = 0;

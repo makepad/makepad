@@ -546,6 +546,7 @@ device vkGetImageMemoryRequirements
 device vkGetImageSubresourceLayout
 device vkGetMemoryFdKHR
 device vkGetMemoryFdPropertiesKHR
+device vkGetPipelineCacheData
 device vkGetQueryPoolResults
 device vkGetSemaphoreCounterValue
 device vkGetSemaphoreFdKHR

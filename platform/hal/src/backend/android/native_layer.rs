@@ -9,8 +9,6 @@ type Pointer = *mut c_void;
 #[repr(C)]
 struct Rect { left: i32, top: i32, right: i32, bottom: i32 }
 
-#[link(name = "android")]
-extern "C" { fn android_get_device_api_level() -> i32; }
 #[link(name = "dl")]
 extern "C" { fn dlsym(handle: Pointer, name: *const c_char) -> Pointer; }
 extern "C" { fn poll(fds: *mut PollFd, count: usize, timeout: i32) -> i32; }
@@ -18,7 +16,8 @@ extern "C" { fn __system_property_get(name: *const c_char, value: *mut c_char) -
 #[repr(C)]
 struct PollFd { fd: i32, events: i16, revents: i16 }
 
-pub(crate) fn api_level() -> i32 { unsafe { android_get_device_api_level() } }
+// The same read as android_get_device_api_level, which libc only exports from API 29 on.
+pub(crate) fn api_level() -> i32 { super::xr::system_property("ro.build.version.sdk").and_then(|v| v.parse().ok()).unwrap_or(-1) }
 
 // Match Java's Log.isLoggable gate; read once, so disabled tracing is just a cached branch.
 fn trace_enabled() -> bool {
