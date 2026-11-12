@@ -1,8 +1,8 @@
 //! This machine's JITs. A JIT announces itself with its discovery file (written when it starts,
 //! removed when it exits: `makepad_remote::discovery`); the hub rescans the registry every
 //! [`SCAN`] and follows each JIT's `observe` feed over its local Unix socket. `observe` is the
-//! JIT's event ring WITHOUT counting as a watcher, so a hub never makes panics park or arms the
-//! costly detectors: the program runs as if nobody were looking.
+//! JIT's event ring WITHOUT counting as a watcher, so a hub never arms the costly detectors.
+//! A parked panic waits for devhub to decide, just as it waits for a watcher.
 //!
 //! A JIT that goes away is reported: its discovery file still there with the process gone means
 //! it never ran its exit cleanup (a crash, with the tail of its session log as detail); the file
