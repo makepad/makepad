@@ -76,6 +76,21 @@ impl Cx {
         }) }; }
         #[cfg(target_os = "linux")]
         crate::screen::set_hal_direct_screens((info.flags & info_flags::DIRECT_DISPLAY != 0).then(Vec::new));
+        crate::app_main::set_hal_window_manager(info.flags & info_flags::WM_HOSTED != 0);
+        self.hal_take_info(info);
+        // `MAKEPAD_PICK_VARIANTS=1`: every shader also compiles its pick variant from the start
+        // (backend coverage of the pick emitters without an editor driving picks)
+        if std::env::var_os("MAKEPAD_PICK_VARIANTS").is_some() {
+            self.enable_pick_variants();
+        }
+        self.hal.frames.open(info.session, info);
+        self.hal.events = Some(EventStore::new(info.session, 512, 1 << 20));
+        super::register_wake_session(info.session);
+    }
+
+    /// What the HAL's backend draws with: the shader dialect, its formats and the GPU apps size
+    /// their work to. Again when the HAL moves to another backend (`BackendChanged`).
+    pub(crate) fn hal_take_info(&mut self, info: makepad_hal::HalInfo) {
         let supports = |format| info.formats & (1u64 << format) != 0;
         self.gpu_info.float_color_targets = supports(makepad_hal::format::RGBA32F);
         self.gpu_info.float16_blend_targets = supports(makepad_hal::format::RGBA16F);
@@ -100,16 +115,7 @@ impl Cx {
         crate::gpu_info::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_info::set_gpu_working_set_bytes(info.working_set);
         if info.working_set != 0 { self.gpu_admission.set_device_bytes(info.working_set); }
-        crate::app_main::set_hal_window_manager(info.flags & info_flags::WM_HOSTED != 0);
         self.hal.info = Some(info);
-        // `MAKEPAD_PICK_VARIANTS=1`: every shader also compiles its pick variant from the start
-        // (backend coverage of the pick emitters without an editor driving picks)
-        if std::env::var_os("MAKEPAD_PICK_VARIANTS").is_some() {
-            self.enable_pick_variants();
-        }
-        self.hal.frames.open(info.session, info);
-        self.hal.events = Some(EventStore::new(info.session, 512, 1 << 20));
-        super::register_wake_session(info.session);
     }
 
     /// One externally scheduled turn. Hidden contexts still consume events and

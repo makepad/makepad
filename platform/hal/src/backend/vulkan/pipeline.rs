@@ -304,6 +304,16 @@ impl VariantKey {
 /// it may succeed once there is room, so it is not a final failure.
 pub(super) fn out_of_memory(e: &str) -> bool { e.contains("OUT_OF_DEVICE_MEMORY") || e.contains("OUT_OF_HOST_MEMORY") }
 
+/// The first pipeline the driver refused to build from our SPIR-V, which spirv-val passes: old
+/// Adreno compilers answer VK_INCOMPLETE. Android draws with GLES once it's set.
+static REFUSED: OnceLock<String> = OnceLock::new();
+
+fn note_refusal(e: &str) {
+    if e.starts_with("Vulkan: ") && !out_of_memory(e) && !e.ends_with("DEVICE_LOST") { let _ = REFUSED.set(e.to_owned()); }
+}
+
+pub fn refused_pipeline() -> Option<&'static str> { REFUSED.get().map(String::as_str) }
+
 /// A pipeline's create, as the app sent it: the program is made from it (again on a device that
 /// replaced a lost one). `key` names identical creates, which share one program.
 pub(super) struct Source {
@@ -368,7 +378,7 @@ impl State {
         let blends = matches!(colors[0], format::BGRA8 | format::RGBA8 | format::RGBA16F);
         let flags = Draw::DEPTH_WRITE | if blends { Draw::BLEND } else { 0 };
         let made = RenderPass::new(program.dev.clone(), key).and_then(|pass| create_variant(program.clone(), &pass, flags));
-        if let Err(e) = &made { eprintln!("[hal-vulkan] pipeline variant: {e}"); }
+        if let Err(e) = &made { eprintln!("[hal-vulkan] pipeline variant: {e}"); note_refusal(e); }
         // out of memory is not this pipeline's failure: the first draw that needs it tries again
         if made.as_ref().is_err_and(|e| out_of_memory(e)) { return; }
         lock(&self.variants).insert(VariantKey::new(key, flags), made);
@@ -394,7 +404,7 @@ impl State {
         let key = VariantKey::new(pass.key, flags);
         if let Some(made) = lock(&self.variants).get(&key) { return made.as_ref().ok().cloned(); }
         let made = create_variant(program, pass, flags);
-        if let Err(e) = &made { eprintln!("[hal-vulkan] pipeline variant: {e}"); }
+        if let Err(e) = &made { eprintln!("[hal-vulkan] pipeline variant: {e}"); note_refusal(e); }
         // out of memory is not kept: the next draw tries again (the frame skips it meanwhile)
         if made.as_ref().is_err_and(|e| out_of_memory(e)) { return None; }
         lock(&self.variants).entry(key).or_insert(made).as_ref().ok().cloned()
@@ -419,7 +429,7 @@ impl State {
         let key = (video.to_vec(), VariantKey::new(pass.key, flags));
         if let Some(made) = lock(&self.video_variants).get(&key) { return made.as_ref().ok().cloned(); }
         let made = create_variant(program, pass, flags);
-        if let Err(e) = &made { eprintln!("[hal-vulkan] video pipeline variant: {e}"); }
+        if let Err(e) = &made { eprintln!("[hal-vulkan] video pipeline variant: {e}"); note_refusal(e); }
         if made.as_ref().is_err_and(|e| out_of_memory(e)) { return None; }
         lock(&self.video_variants).entry(key).or_insert(made).as_ref().ok().cloned()
     }

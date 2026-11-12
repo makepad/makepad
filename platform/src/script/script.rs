@@ -13,4 +13,7 @@ pub struct CxScriptData {
     /// even when script_vm is temporarily taken by with_vm during script eval.
     pub crate_manifests: crate::makepad_script::ScriptCrateManifests,
     pub live_reload: CxLiveReloadState,
+    /// Runs a closure in the live Splash isolate whose heap has this key, if there is one. The
+    /// widgets crate installs it, since an isolate's objects only read right in its own VM.
+    pub heap_vm_hook: Option<fn(&mut crate::Cx, usize, &mut dyn FnMut(&mut crate::makepad_script::ScriptVm))>,
 }

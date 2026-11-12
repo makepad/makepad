@@ -4,6 +4,8 @@ pub mod state;
 #[cfg(target_os = "android")]
 mod shell;
 #[cfg(target_os = "android")]
+mod gles_fallback;
+#[cfg(target_os = "android")]
 mod surface;
 #[cfg(target_os = "android")]
 pub(crate) mod xr;

@@ -55,7 +55,7 @@ fn every_event_round_trips() {
     q.set_time(77);
     let expected = sample_events(&mut q);
     assert_eq!(expected.len(), EVENT_TABLE.len());
-    assert_eq!(EVENT_TABLE.len(), 104, "55 core (incl. Clipboard, GpuBudget, PayloadSize, MouseCancel, AppMessage, DeviceReset, GpuPressure, Redraw), 6 parent/child (85-90), 13 media, 4 font, 4 direct display/input 1 GL interop and 9 mobile (LongPress, ImeState, ImeAction, ImeResize, PhysicalKeyboard, SelectionHandle, TouchCancel, SafeArea, ImeAnimate) and 2 system back (BackGesture, BackPressed) and 2 tray (TrayMenu, TrayClick) and 2 XR (XrFrame, XrDepth) and 2 accessibility (A11yState, A11yAction) and 1 native layer events and 1 hosted native relay (HostedNativeOut) and 1 GPU profiler readout (GpuProfRecording)");
+    assert_eq!(EVENT_TABLE.len(), 105, "56 core (incl. Clipboard, GpuBudget, PayloadSize, MouseCancel, AppMessage, DeviceReset, BackendChanged, GpuPressure, Redraw), 6 parent/child (85-90), 13 media, 4 font, 4 direct display/input 1 GL interop and 9 mobile (LongPress, ImeState, ImeAction, ImeResize, PhysicalKeyboard, SelectionHandle, TouchCancel, SafeArea, ImeAnimate) and 2 system back (BackGesture, BackPressed) and 2 tray (TrayMenu, TrayClick) and 2 XR (XrFrame, XrDepth) and 2 accessibility (A11yState, A11yAction) and 1 native layer events and 1 hosted native relay (HostedNativeOut) and 1 GPU profiler readout (GpuProfRecording)");
     assert_eq!(EVENT_TABLE.iter().filter(|t| (120..133).contains(&t.0)).count(), 13);
     assert_eq!(EVENT_TABLE.iter().filter(|t| (100..104).contains(&t.0)).count(), 4);
     let tags: std::collections::HashSet<u16> = EVENT_TABLE.iter().map(|t| t.0).collect();

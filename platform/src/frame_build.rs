@@ -161,6 +161,9 @@ pub(crate) struct FrameBuilder {
     retiring: Vec<(u64, PublishReceipt)>,
     pipes: Vec<PipeRec>,
     pipe_by_hash: HashMap<u64, Vec<usize>>,
+    /// How often the HAL moved to another backend: the pipelines made since have the next
+    /// generation, so an answer about an older one is never theirs.
+    backend_changes: u32,
     /// repacked partial uploads, alive until the submit
     staging: Vec<Vec<u8>>,
     ranges: Vec<[u32; 2]>,
@@ -221,6 +224,15 @@ fn instance_bounds(m: &CxDrawShaderMapping, list: &DrawListUniforms, item: &CxDr
 impl FrameBuilder {
     pub(crate) fn open(&mut self, session: u32, info: HalInfo) {
         *self = FrameBuilder { w: CmdWriter::new(session), info, ..Default::default() };
+    }
+
+    /// The HAL draws with another backend now (`BackendChanged`): the pipelines it had are gone,
+    /// so every shader makes its own again.
+    pub(crate) fn backend_changed(&mut self, info: HalInfo) {
+        self.info = info;
+        self.pipes.clear();
+        self.pipe_by_hash.clear();
+        self.backend_changes += 1;
     }
 
     /// The batch is submitted: what the commands pointed at may change again.
@@ -1031,7 +1043,7 @@ impl Cx {
             };
             let blob = CmdWriter::pipeline_blob(desc, code_bytes, &bindings, &layout);
             let pipe = fb.pipes.len();
-            let id = Id::new(pipe as u32, 1);
+            let id = Id::new(pipe as u32, 1 + fb.backend_changes);
             // Cx emits the dialect the HAL advertised. Headless accepts the MSL fallback.
             let dialect = match (code_bytes.is_empty(), fb.info.dialect) {
                 (true, _) => makepad_hal::dialect::NONE,
@@ -1045,7 +1057,7 @@ impl Cx {
             let pick_bytes = mapping.hal_pick_code.as_deref().or_else(|| mapping.pick_code.as_ref().map(|s| s.as_bytes()));
             if let Some(code) = pick_bytes {
                 let pick_index = fb.pipes.len();
-                let pick_id = Id::new(pick_index as u32, 1);
+                let pick_id = Id::new(pick_index as u32, 1 + fb.backend_changes);
                 let mut pick_desc = desc;
                 pick_desc.color_formats = std::array::from_fn(|i| if desc.outputs & (1 << i) != 0 { format::BGRA8 } else { 0 });
                 pick_desc.blend = pipeline_blend::RAW;

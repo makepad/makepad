@@ -116,6 +116,9 @@ pub trait Backend: Send {
     /// driver's exit handlers, which fault a thread still inside it. The last call a backend
     /// gets; no wait with a time limit (a thread that is gone is the only proof).
     fn before_exit(&mut self) {}
+    /// The HAL drops this backend for another one while the process goes on (Android moves to
+    /// GLES): like [`Backend::before_exit`], and what it still owed its sessions is delivered.
+    fn retire(&mut self, _world: &mut World) { self.before_exit(); }
     /// Tests and automation: the next step handles the device as lost (removed by the OS) and
     /// replaces it as a real loss does (`exec::device_reset`). Backends without a device reset
     /// ignore it.

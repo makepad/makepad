@@ -1,5 +1,5 @@
 use super::{jni, surface::{AndroidEglSurfaces, AndroidSurfaces, Registry}};
-use crate::{backend::{exec::{Gpu, OsCmd}, gl::GlBackend, vulkan::Vulkan, Backend, Pixels, Shell}, buffers::{CmdView, EventQueue}, session::{World, HOST}, *};
+use crate::{backend::{exec::{self, Gpu, OsCmd}, gl::GlBackend, vulkan::Vulkan, Backend, Pixels, Shell}, buffers::{CmdView, EventQueue}, session::{World, HOST}, *};
 use std::{collections::HashSet, sync::{Arc, Mutex, MutexGuard, OnceLock}};
 
 pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> { m.lock().unwrap_or_else(|e| e.into_inner()) }
@@ -12,14 +12,15 @@ pub struct AndroidParams {
     pub emulator: bool,
     pub android_version: String,
     pub build_number: String,
-    pub kernel_version: String,
+    /// the package's version and last update time, which every new or reinstalled APK changes
+    pub app_build: String,
     /// the system's dark mode (at start, kept current by `onNightModeChanged`)
     pub night_mode: bool,
     /// `Display.getRotation()` in quarter turns (camera orientation; the surface itself arrives upright)
     pub rotation: u32,
 }
 impl Default for AndroidParams {
-    fn default() -> Self { Self { cache_path: String::new(), data_path: String::new(), density: 1., emulator: false, android_version: String::new(), build_number: String::new(), kernel_version: String::new(), night_mode: false, rotation: 0 } }
+    fn default() -> Self { Self { cache_path: String::new(), data_path: String::new(), density: 1., emulator: false, android_version: String::new(), build_number: String::new(), app_build: String::new(), night_mode: false, rotation: 0 } }
 }
 
 pub(super) struct State {
@@ -163,17 +164,26 @@ impl Shell for AndroidShell {
     }
 }
 
-/// The backend `hal_open` makes on Android: Vulkan where the device has Vulkan 1.1, GLES 3
-/// everywhere else. `MAKEPAD_HAL_BACKEND` (`gl` or `vulkan`, read by `OpenReq::from_env`) or the
-/// `debug.makepad.hal_backend` system property picks one, without falling back to the other.
+/// Vulkan where the device has Vulkan 1.1 and its driver takes our pipelines, else GLES 3.
+/// `MAKEPAD_HAL_BACKEND` or `debug.makepad.hal_backend` (`gl`, `vulkan`) picks one for good.
 pub fn open(backend: u32, flags: u32, sessions: crate::backend::SessionNotify, wake: Arc<dyn Fn() + Send + Sync>, notify: Arc<dyn Fn() + Send + Sync>) -> Result<Box<dyn Backend>, String> {
     let backend = match (backend, super::xr::system_property("debug.makepad.hal_backend").as_deref()) {
         (backend_id::AUTO, Some("gl")) => backend_id::GL,
         (backend_id::AUTO, Some("vulkan")) => backend_id::VULKAN,
         (backend, _) => backend,
     };
+    if backend == backend_id::AUTO && super::gles_fallback::remembered() {
+        match AndroidBackend::with_gl(flags, wake.clone(), notify.clone()) {
+            Ok(gl) => {
+                eprintln!("[hal-android] this Vulkan driver refused our pipelines before, drawing with GLES");
+                return Ok(Box::new(gl));
+            }
+            Err(e) => eprintln!("[hal-android] this Vulkan driver refused our pipelines before, but GLES failed ({e})"),
+        }
+    }
     if backend != backend_id::GL {
-        match AndroidBackend::new(flags, sessions, notify.clone()) {
+        let fallback = (backend == backend_id::AUTO).then(|| wake.clone());
+        match AndroidBackend::new(flags, sessions, notify.clone(), fallback) {
             Ok(vulkan) => return Ok(Box::new(vulkan)),
             Err(e) if backend == backend_id::VULKAN => return Err(e),
             Err(e) => eprintln!("[hal-android] no Vulkan 1.1 ({e}), drawing with GLES"),
@@ -182,21 +192,26 @@ pub fn open(backend: u32, flags: u32, sessions: crate::backend::SessionNotify, w
     Ok(Box::new(AndroidBackend::with_gl(flags, wake, notify)?))
 }
 
-pub struct AndroidBackend { core: Box<dyn Backend>, host: Option<Id>, offscreen: bool }
+/// What makes the GLES core if the Vulkan driver refuses one of our pipelines.
+struct GlesFallback { flags: u32, wake: Arc<dyn Fn() + Send + Sync>, notify: Arc<dyn Fn() + Send + Sync>, driver: [u32; 3] }
+
+pub struct AndroidBackend { core: Box<dyn Backend>, host: Option<Id>, offscreen: bool, gles_fallback: Option<GlesFallback> }
 impl AndroidBackend {
     /// `notify` makes every pump look (the Activity's events and frame callbacks); `sessions` the
-    /// session a GPU result is for.
-    pub fn new(flags: u32, sessions: crate::backend::SessionNotify, notify: Arc<dyn Fn() + Send + Sync>) -> Result<Self, String> {
+    /// session a GPU result is for. With `wake`, a driver that refuses a pipeline gets GLES instead.
+    pub fn new(flags: u32, sessions: crate::backend::SessionNotify, notify: Arc<dyn Fn() + Send + Sync>, wake: Option<Arc<dyn Fn() + Send + Sync>>) -> Result<Self, String> {
         let offscreen = flags & open_flags::OFFSCREEN_WINDOWS != 0;
         // A Quest build carries the OpenXR loader: the host window is shown in an XR session.
-        let source: Box<dyn crate::backend::vulkan::VkSurfaceSource> = match (!offscreen).then(super::xr::XrSurfaces::try_new).flatten() {
-            Some(xr) => Box::new(xr?),
-            None => Box::new(AndroidSurfaces),
+        let (source, xr): (Box<dyn crate::backend::vulkan::VkSurfaceSource>, bool) = match (!offscreen).then(super::xr::XrSurfaces::try_new).flatten() {
+            Some(xr) => (Box::new(xr?), true),
+            None => (Box::new(AndroidSurfaces), false),
         };
         let mut core = Vulkan::with_sources(flags, sessions, source, Box::new(crate::backend::vulkan::shared_images()))?;
         if !offscreen { core.set_shell(Box::new(AndroidShell)); }
+        // an XR session needs Vulkan, so there's nothing to fall back to
+        let gles_fallback = wake.filter(|_| !xr).map(|wake| GlesFallback { flags, wake, notify: notify.clone(), driver: core.driver() });
         lock(&Shared::global().state).wake = Some(notify);
-        Ok(Self { core: Box::new(core), host: None, offscreen })
+        Ok(Self { core: Box::new(core), host: None, offscreen, gles_fallback })
     }
 
     /// GLES 3 through EGL on the Activity's `ANativeWindow`, for devices without Vulkan 1.1.
@@ -206,7 +221,25 @@ impl AndroidBackend {
         let core = GlBackend::with_source(wake, Box::new(AndroidEglSurfaces { offscreen }), shell)?;
         if !offscreen { *lock(&Shared::global().release_window) = Some(core.window_release()); }
         lock(&Shared::global().state).wake = Some(notify);
-        Ok(Self { core: Box::new(core), host: None, offscreen })
+        Ok(Self { core: Box::new(core), host: None, offscreen, gles_fallback: None })
+    }
+
+    /// The Vulkan driver refused one of our pipelines: we move every session to a GLES core, much
+    /// like after a device loss, and note it for this driver and system build.
+    fn fall_back_if_refused(&mut self, world: &mut World) {
+        if self.gles_fallback.is_none() { return; }
+        let Some(why) = crate::backend::vulkan::refused_pipeline() else { return };
+        let Some(fallback) = self.gles_fallback.take() else { return };
+        let gl = match Self::with_gl(fallback.flags, fallback.wake, fallback.notify) {
+            Ok(gl) => gl,
+            Err(e) => return eprintln!("[hal-android] the Vulkan driver refused a pipeline ({why}), and GLES failed ({e})"),
+        };
+        eprintln!("[hal-android] the Vulkan driver refused a pipeline ({why}), drawing with GLES");
+        super::gles_fallback::remember(fallback.driver, why);
+        self.core.retire(world);
+        self.core = gl.core;
+        let info = self.info();
+        if let Some(gpu) = self.core.host_gpu() { exec::backend_changed(gpu, world, info); }
     }
     pub fn params() -> AndroidParams { lock(&Shared::global().state).params.clone() }
     fn ensure_host(&mut self, world: &mut World) {
@@ -248,9 +281,10 @@ impl Backend for AndroidBackend {
         let allowed = owner == Some(sid) || world.session(sid).is_some_and(|s| s.focused && s.parent != 0 && Some(s.parent) == owner);
         lock(&Shared::global().state).ime_session = allowed.then_some(sid);
         self.core.submit(world, sid, view);
+        self.fall_back_if_refused(world);
         self.drain(world);
     }
-    fn step(&mut self, world: &mut World, sid: u32) { self.ensure_host(world); self.drain(world); self.core.step(world, sid); }
+    fn step(&mut self, world: &mut World, sid: u32) { self.ensure_host(world); self.drain(world); self.core.step(world, sid); self.fall_back_if_refused(world); }
     fn next_due(&self, world: &World, sid: u32) -> Option<u64> { self.core.next_due(world, sid) }
     fn window_pixels(&mut self, world: &mut World, sid: u32, window: Option<Id>) -> Option<Pixels> { self.core.window_pixels(world, sid, window) }
     fn host_gpu(&mut self) -> Option<&mut dyn Gpu> { self.core.host_gpu() }

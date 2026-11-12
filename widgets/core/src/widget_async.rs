@@ -1893,6 +1893,13 @@ fn register_task_hooks(cx: &mut Cx) {
         ));
     }
     cx.add_script_timer_dispatch_hook(script_timer_dispatch_hook);
+    cx.script_data.heap_vm_hook = Some(run_in_heap_vm);
+}
+
+/// Runs platform code that holds an isolate's objects (a draw shader's source) in that isolate.
+fn run_in_heap_vm(cx: &mut Cx, heap_key: usize, f: &mut dyn FnMut(&mut ScriptVm)) {
+    let Some(vm_id) = vm_for_heap(cx, heap_key) else { return };
+    contain_isolate_panic("host call", || cx.with_script_vm_id(vm_id, |vm| f(vm)));
 }
 
 /// Routes a firing script timer to the isolate VM that owns its callback. Without this,
