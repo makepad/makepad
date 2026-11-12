@@ -121,10 +121,11 @@ impl<'a> Parser<'a> {
             g.punct(T::Gt);
             g.punct(T::Gt);
         } else {
-            // `Foo<-1>` is lexed with `<-`. Parsing its generic arguments
-            // consumes `<` and leaves `-` in place, just as `>>` leaves `>`.
+            // `Foo<-1>` is lexed with `<-`, `<<T as A>::B as C>::D` with `<<`. Parsing
+            // consumes the first `<` and leaves the rest in place (`-`, `<`), just as `>>`
+            // leaves `>`: the copy puts the `<` back.
             let prev_hi = if i > 0 { self.toks.at(i - 1).hi } else { 0 };
-            if t.kind == T::Minus && t.lo > prev_hi && self.bytes(t.lo - 1, t.lo) == b"<" {
+            if matches!(t.kind, T::Minus | T::Lt) && t.lo > prev_hi && self.bytes(t.lo - 1, t.lo) == b"<" {
                 g.punct(T::Lt);
             }
             g.put(t.kind, &String::from_utf8_lossy(self.tok_text(t)));

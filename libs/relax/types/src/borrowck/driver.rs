@@ -268,11 +268,11 @@ pub fn ensure_coroutine_witnesses(prog: &Program, tcx: &Tcx, owner: DefId) {
         for c in closures_inner_first(prog, tcx, &typeck) {
             if !tcx.coroutines.contains(&(typeck.file, c)) { continue; }
             let owner = CheckedBody { owner: typeck.def, kind: OwnerKind::Closure(crate::ast::ExprId(c)) };
-            let Ok(Ok(mir)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_mir(&root, owner))) else { return };
+            let Ok(Ok(mir)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::memstat::tagged(crate::memstat::Tag::Mir, || build_mir(&root, owner)))) else { return };
             built.push((owner, Box::new(mir)));
         }
         for (_, mir) in &mut built {
-            if mir_promoted(prog, tcx, env, &provider, &mut **mir).is_err() { return; }
+            if crate::memstat::tagged(crate::memstat::Tag::Mir, || mir_promoted(prog, tcx, env, &provider, &mut **mir)).is_err() { return; }
         }
         publish_coroutine_witnesses(prog, tcx, env, &typeck, &built);
     }));
@@ -295,9 +295,9 @@ pub(crate) fn coroutine_obligation_source(prog: &Program, tcx: &Tcx, current: &t
     let mut source = None;
     if let Ok(root) = BuildRoot::new(BuildCx { prog, tcx, env, eval: &eval }, typeck) {
         let owner = CheckedBody { owner: def, kind: OwnerKind::Closure(crate::ast::ExprId(expr)) };
-        if let Ok(mut mir) = build_mir(&root, owner) {
+        if let Ok(mut mir) = crate::memstat::tagged(crate::memstat::Tag::Mir, || build_mir(&root, owner)) {
             let provider = BuildProvider { prog, tcx, memo: Default::default() };
-            if mir_promoted(prog, tcx, env, &provider, &mut mir).is_ok() {
+            if crate::memstat::tagged(crate::memstat::Tag::Mir, || mir_promoted(prog, tcx, env, &provider, &mut mir)).is_ok() {
                 let movable = mir.coroutine.as_ref().is_some_and(|c| c.kind.movability() == crate::mir::Movability::Movable);
                 crate::mir::transform::coroutine::visit_suspend_points(&mir, movable, |saved, await_span| {
                     for local in saved.iter() {
@@ -349,7 +349,7 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
     let mut built: Vec<(CheckedBody, Box<Body>)> = Vec::new();
     for &owner in owners.iter() {
         crate::preempt::point();
-        let mir = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_mir(&root, owner))) {
+        let mir = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::memstat::tagged(crate::memstat::Tag::Mir, || build_mir(&root, owner)))) {
             Ok(Ok(mir)) => mir,
             Ok(Err(e)) => { v.unchecked.push(format!("{name}: {}", describe_build_error(&e.reason))); return; }
             Err(p) => {
@@ -361,7 +361,7 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
         built.push((owner, Box::new(mir)));
     }
     for (owner, mir) in &mut built {
-        match mir_promoted(prog, tcx, env, &provider, &mut **mir) {
+        match crate::memstat::tagged(crate::memstat::Tag::Mir, || mir_promoted(prog, tcx, env, &provider, &mut **mir)) {
             Ok(pre) => {
                 if crate::lint::enabled() {
                     // (a lint of the promoted MIR, rustc runs it at the end of mir_promoted)
@@ -675,8 +675,8 @@ impl FvBodies for MirBodies<'_> {
         let eval = EvalCx::new(prog, tcx, env, cx.state);
         let root = BuildRoot::new(BuildCx { prog, tcx, env, eval: &eval }, &body).ok()?;
         let owner = CheckedBody::item(prog, d)?;
-        let mut mir = build_mir(&root, owner).ok()?;
-        mir_promoted(prog, tcx, env, &BuildProvider { prog, tcx, memo: Default::default() }, &mut mir).ok()?;
+        let mut mir = crate::memstat::tagged(crate::memstat::Tag::Mir, || build_mir(&root, owner)).ok()?;
+        crate::memstat::tagged(crate::memstat::Tag::Mir, || mir_promoted(prog, tcx, env, &BuildProvider { prog, tcx, memo: Default::default() }, &mut mir)).ok()?;
         Some(FvBody { body: mir, env })
     }
 }
@@ -694,8 +694,8 @@ pub fn check_anon_const(cx: &EvalCx<'_>, prog: &Program, tcx: &Tcx, body: &typec
     let eval = EvalCx::new(prog, tcx, env, cx.state);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let root = BuildRoot::new(BuildCx { prog, tcx, env, eval: &eval }, body).ok()?;
-        let mut mir = build_mir(&root, CheckedBody { owner: body.def, kind: OwnerKind::AnonConst(expr) }).ok()?;
-        let pre = mir_promoted(prog, tcx, env, &BuildProvider { prog, tcx, memo: Default::default() }, &mut mir).ok()?;
+        let mut mir = crate::memstat::tagged(crate::memstat::Tag::Mir, || build_mir(&root, CheckedBody { owner: body.def, kind: OwnerKind::AnonConst(expr) })).ok()?;
+        let pre = crate::memstat::tagged(crate::memstat::Tag::Mir, || mir_promoted(prog, tcx, env, &BuildProvider { prog, tcx, memo: Default::default() }, &mut mir)).ok()?;
         Some(pre.const_errors.into_iter().map(|e| {
             let mut d = diagnostics::Diag::new(e.code, e.span, e.message);
             d.labels.push((e.span, String::new(), true));

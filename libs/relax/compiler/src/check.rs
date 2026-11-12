@@ -876,40 +876,41 @@ fn body_times_report() {
 
 fn body_errors(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, options: &crate::options::Options, owner: &crate::borrowck::body::CheckedBody, generic: bool, lints: bool) -> (Vec<(crate::check_order::Stage, String)>, Vec<crate::borrowck::event::GandalfEvent>) {
     use crate::check_order::{Phase, Stage};
+    use crate::memstat::Tag;
     let _quiet = (!lints).then(crate::lint::Suppress::new);
     let d = owner.owner;
     let typeck = Stage::of(Phase::Typeck, 0, d);
     let unsafety_stage = Stage::of(Phase::Mir, crate::check_order::MIR_UNSAFETY, d);
     let patterns = Stage::of(Phase::Mir, crate::check_order::MIR_PATTERNS, d);
     // the syntax-level lints do not wait for the types (rustc runs them before analysis)
-    if lints { body_step(0, || relax_types::lint_early::check_def(prog, tcx, d)); }
+    if lints { body_step(0, || crate::memstat::tagged(Tag::BodyLints, || relax_types::lint_early::check_def(prog, tcx, d))); }
     let body = body_step(1, || if lints { tcx.typeck(prog, d) } else { tcx.typeck_unstored(prog, d) });
     // library stability (E0658) of what the body names
-    let gates = body_step(2, || relax_types::feature_gate::check_stability(prog, &body));
+    let gates = body_step(2, || crate::memstat::tagged(Tag::BodyLints, || relax_types::feature_gate::check_stability(prog, &body)));
     let inner = || -> (Vec<(Stage, String)>, Vec<crate::borrowck::event::GandalfEvent>) {
         if !body.errors.is_empty() {
             if lints { relax_types::lint_dead::note_failed_body(prog, tcx, &body); }
             return (staged(typeck, body.errors.to_vec()).collect(), Vec::new());
         }
         if lints {
-            body_step(3, || {
+            body_step(3, || crate::memstat::tagged(Tag::BodyLints, || {
                 relax_types::lint::check_literals(prog, tcx, &body);
                 relax_types::lint_pass::check_body(prog, tcx, &body);
-            });
+            }));
         }
-        let unsafety = body_step(4, || if lints { relax_types::unsafety::check_body(prog, tcx, &body) }
-            else { relax_types::unsafety::run_body_errors(prog, tcx, &body) });
+        let unsafety = body_step(4, || crate::memstat::tagged(Tag::BodyLints, || if lints { relax_types::unsafety::check_body(prog, tcx, &body) }
+            else { relax_types::unsafety::run_body_errors(prog, tcx, &body) }));
         if !unsafety.is_empty() {
             return (staged(unsafety_stage, unsafety).collect(), Vec::new());
         }
         // rustc_privacy check_mod_privacy: the types of the body's expressions and patterns
-        let privacy = body_step(5, || relax_types::privacy_types::check_body(prog, tcx, &body));
+        let privacy = body_step(5, || crate::memstat::tagged(Tag::BodyLints, || relax_types::privacy_types::check_body(prog, tcx, &body)));
         if !privacy.is_empty() {
             return (staged(Stage::new(Phase::Late, crate::check_order::LATE_PRIVACY), privacy).collect(), Vec::new());
         }
         // E0004 / E0005 and the pattern lints (rustc check_match: its errors stop the body
         // before borrowck); an internal failure of the analysis reports nothing, as in a check
-        let pats = body_step(6, || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| relax_types::pattern_analysis::check_body(prog, tcx, &body))));
+        let pats = body_step(6, || crate::memstat::tagged(Tag::Patterns, || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| relax_types::pattern_analysis::check_body(prog, tcx, &body)))));
         // (binding conflicts of `x @ pat` do not end the checks: borrowck runs after them)
         let mut at_patterns = Vec::new();
         match pats {
@@ -923,14 +924,14 @@ fn body_errors(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, options: &
         if lints && !crate::borrowck::enabled(options) {
             return (staged(patterns, at_patterns).collect(), Vec::new());
         }
-        let v = body_step(7, || crate::borrowck::check_body(&crate::tcx::EvalCx::new(prog, tcx, crate::tcx::TypingEnv::fully_monomorphized(prog), &crate::tcx::EvalState::new()), prog, tcx, &body));
+        let v = body_step(7, || crate::memstat::tagged(Tag::Borrowck, || crate::borrowck::check_body(&crate::tcx::EvalCx::new(prog, tcx, crate::tcx::TypingEnv::fully_monomorphized(prog), &crate::tcx::EvalState::new()), prog, tcx, &body)));
         crate::borrowck::note_verdict(&v);
         if borrowck_unchecked() {
             for x in &v.unchecked { eprintln!("makepad check: borrowck unchecked: {}", x); }
         }
         let args: Vec<_> = if owner.kind == crate::borrowck::body::BodyKind::Function && !generic { Vec::new() } else { body.args.to_vec() };
         let origin = if lints { crate::borrowck::event::Origin::Check } else { crate::borrowck::event::Origin::DeferredCheck };
-        let events = body_step(8, || crate::borrowck::lazy::report_checked(prog, 0, tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst), d, &args, v.errors, origin));
+        let events = body_step(8, || crate::memstat::tagged(Tag::Borrowck, || crate::borrowck::lazy::report_checked(prog, 0, tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst), d, &args, v.errors, origin)));
         (staged(patterns, at_patterns).collect(), events)
     };
     let (mut errs, events) = inner();

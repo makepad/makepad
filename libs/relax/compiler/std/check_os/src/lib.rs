@@ -1,6 +1,6 @@
 //! rustc shim root for the std-os lane (see Cargo.toml). The root mirrors Relax std's
 //! root for the OS modules; `crate::{cell, fmt, ops, ..}` are real core/alloc so the core-side
-//! files (mounted as core_time / core_atomic / core_ffi) resolve their `crate::` paths.
+//! files (mounted as core_time / core_atomic / core_ffi / core_net) resolve their `crate::` paths.
 #![allow(dead_code, unused_imports, unused_unsafe, unused_mut, unused_variables, non_camel_case_types)]
 #![allow(clippy::all)]
 
@@ -30,6 +30,8 @@ pub mod core_time;
 pub mod core_atomic;
 #[path = "../../core/ffi/mod.rs"]
 pub mod core_ffi;
+#[path = "../../core/net/mod.rs"]
+pub mod core_net;
 
 /// `intrinsics_atomic` over real atomics (by width), the same signatures as Relax core's.
 pub mod intrinsics_atomic {

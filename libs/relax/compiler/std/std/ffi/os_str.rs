@@ -156,6 +156,14 @@ impl<T: ?Sized + AsRef<OsStr>> From<&T> for OsString {
     }
 }
 
+/// `"x".parse::<OsString>()`, as real std (it never fails).
+impl core::str::FromStr for OsString {
+    type Err = core::convert::Infallible;
+    fn from_str(s: &str) -> Result<OsString, core::convert::Infallible> {
+        Ok(OsString::from(s))
+    }
+}
+
 impl<'a> From<&'a OsStr> for Cow<'a, OsStr> {
     fn from(s: &'a OsStr) -> Cow<'a, OsStr> {
         Cow::Borrowed(s)

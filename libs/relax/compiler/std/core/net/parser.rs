@@ -2,9 +2,9 @@
 //! in IPv4 octets, at most one "::", embedded IPv4 tail, "[v6%scope]:port"), written with an
 //! explicit cursor instead of closures.
 
-use core::error::Error;
-use core::fmt;
-use core::str::FromStr;
+use crate::error::Error;
+use crate::fmt;
+use crate::str::FromStr;
 
 use super::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 

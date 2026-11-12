@@ -50,7 +50,7 @@ T=libs/relax/compiler/tests
 named="$T/n01_round34_mcg.rs $T/n01_round34_literals_allow.rs $T/borrowck/raw_ptr_capture_accept.rs tools/run/fixture/diff/pr1330_fixes.rs
   $T/impl_header_assoc_const.rs $T/n01_const_provider.rs $T/n01_round35_asm_goto.rs $T/coerce_unsized_pointers.rs $T/derive_gat_hrtb.rs $T/asm_goto_label.rs
   $T/supertrait_assoc_type_bounds.rs $T/const_param_projection_field.rs $T/macro_inner_use.rs $T/macro_file_order.rs $T/macro_file_shadow.rs
-  $T/arch_legacy_const_generics.rs $T/cow_slice_eq.rs $T/macro_tail_cfg.rs $T/macro_matcher_positions.rs $T/macro_forwarded_empty_vis.rs"
+  $T/arch_legacy_const_generics.rs $T/cow_slice_eq.rs $T/macro_tail_cfg.rs $T/macro_matcher_positions.rs $T/macro_forwarded_empty_vis.rs $T/derive_eq_nested_qself.rs $T/core_net_paths.rs $T/path_from_str.rs $T/macro_doc_after_empty_vis.rs"
 [ "$(uname -m)" = x86_64 ] && named="$named $T/n01_round35_target_feature_main_reject.rs"
 for f in "$fx"/accept/*.rs $named "$@"; do case_of "$f" 0; done
 for f in "$fx"/reject/*.rs $T/supertrait_assoc_bound_unmet_reject.rs $T/macro_inner_use_before_module_reject.rs $T/macro_file_before_module_reject.rs \

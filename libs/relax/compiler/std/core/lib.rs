@@ -104,6 +104,7 @@ pub mod sync {
 // ---- std-os: `pub mod time;` (core/time.rs) and `pub mod ffi;` (core/ffi/mod.rs) go here
 pub mod time;
 pub mod ffi;
+pub mod net;
 
 pub mod f64 {
     pub mod consts {

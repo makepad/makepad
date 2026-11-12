@@ -19,18 +19,18 @@ impl UdpSocket {
         each_addr(addr, |a| {
             let s = Socket::new(family_of(a), sn::SOCK_DGRAM)?;
             let mut buf = sn::zeroed();
-            let len = a.encode(&mut buf);
+            let len = super::addr::encode(a, &mut buf);
             s.bind(&buf, len)?;
             Ok(UdpSocket { sock: s })
         })
     }
     pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         let (n, addr) = self.sock.recv_from(buf, false)?;
-        Ok((n, SocketAddr::decode(&addr)?))
+        Ok((n, super::addr::decode(&addr)?))
     }
     pub fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         let (n, addr) = self.sock.recv_from(buf, true)?;
-        Ok((n, SocketAddr::decode(&addr)?))
+        Ok((n, super::addr::decode(&addr)?))
     }
     pub fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], addr: A) -> io::Result<usize> {
         let addr = match addr.to_socket_addrs()?.next() {
@@ -38,16 +38,16 @@ impl UdpSocket {
             None => return Err(io::const_error!(io::ErrorKind::InvalidInput, "no addresses to send data to")),
         };
         let mut storage = sn::zeroed();
-        let len = addr.encode(&mut storage);
+        let len = super::addr::encode(&addr, &mut storage);
         self.sock.send_to(buf, &storage, len)
     }
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
         let (buf, _) = self.sock.name(true)?;
-        SocketAddr::decode(&buf)
+        super::addr::decode(&buf)
     }
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         let (buf, _) = self.sock.name(false)?;
-        SocketAddr::decode(&buf)
+        super::addr::decode(&buf)
     }
     pub fn try_clone(&self) -> io::Result<UdpSocket> {
         Ok(UdpSocket { sock: self.sock.try_clone()? })
@@ -129,7 +129,7 @@ impl UdpSocket {
     pub fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<()> {
         each_addr(addr, |a| {
             let mut buf = sn::zeroed();
-            let len = a.encode(&mut buf);
+            let len = super::addr::encode(a, &mut buf);
             self.sock.connect(&buf, len)
         })
     }

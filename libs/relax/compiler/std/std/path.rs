@@ -1095,6 +1095,13 @@ impl From<OsString> for PathBuf {
         PathBuf { inner: s }
     }
 }
+/// `"a/b".parse::<PathBuf>()`, as real std (it never fails).
+impl core::str::FromStr for PathBuf {
+    type Err = core::convert::Infallible;
+    fn from_str(s: &str) -> Result<PathBuf, core::convert::Infallible> {
+        Ok(PathBuf::from(s))
+    }
+}
 impl From<PathBuf> for OsString {
     fn from(p: PathBuf) -> OsString {
         p.inner

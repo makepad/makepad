@@ -83,13 +83,20 @@ pub enum Tag {
     MacroOutput,
     /// the demand planner: names, bindings, closure, recorded parts (front/src/lazy.rs, demand*.rs, rs_items.rs)
     Planner,
+    /// early and late body lints, stability gates, unsafety, and body privacy
+    BodyLints,
+    /// pattern exhaustiveness and usefulness analysis of a body
+    Patterns,
+    /// building and transforming a body's MIR for the borrow checker
+    Mir,
 }
 
-pub const N_TAGS: usize = 36;
+pub const N_TAGS: usize = 39;
 pub const TAG_NAMES: [&str; N_TAGS] = [
     "other", "boot", "parse", "parse-body", "derive", "macro_rules", "fmt", "mac-other", "load", "resolve", "syms", "sigs", "types",
     "typeck", "gandalf", "lower", "opt", "codegen", "layout", "unit", "cache-load", "cache-store", "ctfe", "O3", "pmhost", "parse-lazy",
     "rx-sources", "rx-schema", "rx-lower", "rx-input", "source", "front-image", "front-record", "program-items", "macro-output", "planner",
+    "body-lints", "patterns", "mir",
 ];
 
 /// 0 undecided, 1 off, 2 on (decided at the first allocation, never changed)

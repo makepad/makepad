@@ -1,9 +1,9 @@
-//! IpAddr / Ipv4Addr / Ipv6Addr (pure; Display and parsing as real core::net).
+//! IpAddr / Ipv4Addr / Ipv6Addr (Display and parsing as real core::net's).
 
-use alloc::string::String;
-use core::cmp::Ordering;
-use core::fmt;
-use core::fmt::Write as _;
+use crate::cmp::Ordering;
+use crate::fmt;
+use crate::fmt::Write as _;
+use crate::string::String;
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum IpAddr {
