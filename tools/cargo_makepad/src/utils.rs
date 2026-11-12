@@ -347,6 +347,9 @@ pub struct AndroidPackageMetadata {
     /// app that genuinely needs MIDI, where API 29's libamidi.so must be
     /// guaranteed-present rather than runtime-loaded).
     pub min_sdk_version: Option<usize>,
+    /// `[package.metadata.makepad.android].hal_backend`, `"gl"` or `"vulkan"`: the backend
+    /// the app draws with on Android, written into the manifest for the HAL.
+    pub hal_backend: Option<String>,
 }
 
 pub fn read_android_package_metadata(build_crate: &str) -> AndroidPackageMetadata {
@@ -394,6 +397,11 @@ pub fn read_android_package_metadata(build_crate: &str) -> AndroidPackageMetadat
                 "warning: ignoring [package.metadata.makepad.android].min_sdk_version = {n}; expected a positive integer API level"
             );
         }
+    }
+    match toml.get_path(&["package", "metadata", "makepad", "android", "hal_backend"]) {
+        Some(Toml::Str(v, _)) if v == "gl" || v == "vulkan" => out.hal_backend = Some(v.clone()),
+        Some(v) => eprintln!("warning: ignoring [package.metadata.makepad.android].hal_backend = {v:?}; expected \"gl\" or \"vulkan\""),
+        None => {}
     }
     out
 }

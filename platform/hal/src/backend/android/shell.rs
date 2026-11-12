@@ -110,6 +110,14 @@ impl Shared {
     }
 }
 
+/// The backend the app picked in its Cargo.toml (`[package.metadata.makepad.android] hal_backend`,
+/// `gl` or `vulkan`), which cargo-makepad writes into the manifest. `vulkan` keeps the default.
+static APP_HAL_BACKEND: OnceLock<String> = OnceLock::new();
+
+pub(super) unsafe extern "system" fn app_hal_backend(env: *mut makepad_jni_sys::JNIEnv, _: makepad_jni_sys::jclass, backend: makepad_jni_sys::jstring) {
+    let _ = APP_HAL_BACKEND.set(makepad_jni_sys::registration::string(env, backend));
+}
+
 struct AndroidShell;
 impl Shell for AndroidShell {
     fn auto_adopt(&self) -> bool { true }
@@ -170,6 +178,7 @@ pub fn open(backend: u32, flags: u32, sessions: crate::backend::SessionNotify, w
     let backend = match (backend, super::xr::system_property("debug.makepad.hal_backend").as_deref()) {
         (backend_id::AUTO, Some("gl")) => backend_id::GL,
         (backend_id::AUTO, Some("vulkan")) => backend_id::VULKAN,
+        (backend_id::AUTO, _) if APP_HAL_BACKEND.get().is_some_and(|b| b == "gl") => backend_id::GL,
         (backend, _) => backend,
     };
     if backend != backend_id::GL {
