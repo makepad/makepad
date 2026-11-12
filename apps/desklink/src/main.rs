@@ -5,7 +5,8 @@
 //! and the history toggle. The machines are the app's, not a window's: every window lists every
 //! machine the app knows (saved hosts in `~/.makepad/desklink/hosts`, `--connect host[:port]`,
 //! the devhub's JIT hosts in `~/.makepad/devhub/desk-links`: PROTOCOL.md "Finding desktops";
-//! never this machine itself) and differs only in which one it shows. Each window streams its
+//! never this machine itself; both files are read again once a second, so a line added while the
+//! viewer runs becomes a tab) and differs only in which one it shows. Each window streams its
 //! machine live at once with the others (no connection pauses or closes for another); windows
 //! on the same machine share its connection and pictures; the window that showed it or had the
 //! focus last sizes a desktop that follows its viewer. A machine no window shows stays connected
@@ -226,10 +227,11 @@ pub(crate) fn port_of(spec: &str) -> (String, u16) {
     }
 }
 
-/// Whether `host` (an address) is this machine.
-fn is_self(host: &str) -> bool {
+/// Whether `host` (an address) is this machine: loopback, or one of `own`
+/// (this machine's interface addresses, read once per listing).
+fn is_self(host: &str, own: &[std::net::IpAddr]) -> bool {
     let Ok(ip) = host.parse::<std::net::IpAddr>() else { return false };
-    ip.is_loopback() || makepad_core_util::netif::interfaces().iter().any(|i| std::net::IpAddr::V4(i.addr) == ip)
+    ip.is_loopback() || own.contains(&ip)
 }
 
 /// A machine's short name for its tab: the name its line gives, else `n` and the address's
@@ -265,7 +267,8 @@ fn parse_desk_links(text: &str) -> Vec<(String, String, u16)> {
         .collect()
 }
 
-/// The desktops to list: `--connect` ones, saved hosts, the devhub's JIT hosts.
+/// The desktops to list: `--connect` ones, saved hosts, the devhub's JIT hosts. Read at launch
+/// and once a second after ([`App::add_new_desktops`]): two small files and the interface list.
 fn hosts() -> Vec<(String, String, u16)> {
     let mut out: Vec<(String, String, u16)> = Vec::new();
     let mut add = |name: String, spec: &str| {
@@ -284,13 +287,14 @@ fn hosts() -> Vec<(String, String, u16)> {
     if args.iter().any(|a| a == "--connect-only") {
         return out;
     }
+    let own: Vec<std::net::IpAddr> = makepad_core_util::netif::interfaces().iter().map(|i| std::net::IpAddr::V4(i.addr)).collect();
     let home = makepad_network::fleet::makepad_home();
     if let Ok(text) = std::fs::read_to_string(home.join("desklink/hosts")) {
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
             let mut parts = line.split_whitespace();
             match (parts.next(), parts.next()) {
                 // this machine is never one of its desktops (`--connect` may still name it)
-                (Some(_), Some(spec)) | (Some(spec), None) if is_self(&port_of(spec).0) => {}
+                (Some(_), Some(spec)) | (Some(spec), None) if is_self(&port_of(spec).0, &own) => {}
                 (Some(name), Some(spec)) => add(name.to_string(), spec),
                 (Some(spec), None) => add(spec.to_string(), spec),
                 _ => {}
@@ -298,7 +302,7 @@ fn hosts() -> Vec<(String, String, u16)> {
         }
     }
     for (name, host, port) in devhub_desktops() {
-        if !is_self(&host) {
+        if !is_self(&host, &own) {
             add(name, &format!("{host}:{port}"));
         }
     }
@@ -465,17 +469,15 @@ pub(crate) fn shortcut(e: &KeyEvent) -> Option<Shortcut> {
 }
 
 impl App {
-    /// A JIT host the devhub lists since the launch (`makepad devhub desk <node> on`) becomes a
-    /// tab, connected and paused like every desktop no window shows (`--connect-only`: none).
-    fn add_devhub_desktops(&mut self) {
-        if std::env::args().any(|a| a == "--connect-only") {
-            return;
-        }
-        for (name, host, port) in devhub_desktops() {
-            if self.conns.iter().any(|c| c.host == host && c.port == port) || is_self(&host) {
-                continue;
+    /// A desktop listed since the launch becomes a tab, connected and paused like every desktop
+    /// no window shows: a line added to the saved hosts while the viewer runs, a JIT host the
+    /// devhub lists (`makepad devhub desk <node> on`). `hosts()` skips this machine and, under
+    /// `--connect-only`, lists the `--connect` desktops alone (open since the launch).
+    fn add_new_desktops(&mut self) {
+        for (name, host, port) in hosts() {
+            if !self.conns.iter().any(|c| c.host == host && c.port == port) {
+                self.conns.push(Connection::open(name, host, port, true, self.signal.clone()));
             }
-            self.conns.push(Connection::open(name, host, port, true, self.signal.clone()));
         }
     }
 }
@@ -1035,7 +1037,7 @@ impl AppMain for App {
             for vi in 0..self.viewers.len() {
                 self.viewer_second(vi);
             }
-            self.add_devhub_desktops();
+            self.add_new_desktops();
             self.refresh(cx);
             self.check_ui_tick(cx);
             if self.restore_dirty {

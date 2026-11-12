@@ -4842,8 +4842,10 @@ impl App {
         }
         self.bar_workspaces = shown;
         let mut base = self.bar_sample.clone();
-        // The middle window control reads "restore" while maximized.
-        base.maximized = self.ui.window(cx, ids!(main_window)).is_fullscreen(cx);
+        // The middle window control reads "restore" while maximized or fullscreen, as the
+        // stock caption's does.
+        let window = self.ui.window(cx, ids!(main_window));
+        base.maximized = window.is_maximized(cx) || window.is_fullscreen(cx);
         let mut segments: Vec<shell::bar::BarSegment> = Vec::new();
         let mut data = base.clone();
         for (seg, (cells, title, rect, is_active, hidden)) in parts.into_iter().enumerate() {
@@ -5060,7 +5062,7 @@ impl App {
         match module {
             BarModule::WindowMin => window.minimize(cx),
             BarModule::WindowMax => {
-                if window.is_fullscreen(cx) {
+                if window.is_maximized(cx) || window.is_fullscreen(cx) {
                     window.restore(cx);
                 } else {
                     window.maximize(cx);

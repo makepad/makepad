@@ -13,7 +13,7 @@
 //! Headset → desktop: `Hello` (eye size, refresh, the decoder's codecs), then one `Pose` per
 //! display frame (the `XrFrame` the app draws with: head, both eyes, controllers, hands; a
 //! sequence number and the headset's sample and display times), `State` (visible / focused),
-//! `Stats` (decode and motion-to-photon per shown picture), `Ping`, `Keyframe`.
+//! `Stats` (decode and motion-to-photon per shown picture), `Ping`, `Keyframe`, `Recenter`.
 //! Desktop → headset: `Welcome` (the picture size, codec and tiles), then per rendered frame one
 //! `Video` per tile (the pose's sequence number, the eyes the picture was rendered with, the
 //! server-side stage durations, one Annex-B access unit), `Pong`, `Bye`, `Note`.
@@ -243,6 +243,9 @@ pub enum XrClientMsg {
     /// [`MIC_RATE`], 16-bit little endian; empty on a state change). `seq` counts the messages
     /// of one ask. Sent in the link's gaps, like `Capture`.
     Mic { seq: u32, state: u8, text: String, pcm: Vec<u8> },
+    /// The wearer recentered: the headset's tracking space moved (its origin, its forward), and
+    /// the poses from here on are in the moved space.
+    Recenter,
 }
 
 /// `XrClientMsg::Report`: what each value is (index) and its label.
@@ -415,6 +418,7 @@ mod tag {
     pub const REPORT: u8 = 8;
     pub const CAPTURE_C: u8 = 9;
     pub const MIC_C: u8 = 10;
+    pub const RECENTER: u8 = 11;
     pub const WELCOME: u8 = 100;
     pub const REFUSED: u8 = 101;
     pub const VIDEO: u8 = 102;
@@ -493,6 +497,7 @@ impl XrClientMsg {
                 o.u32(*seq).u8(*state).str(text).bytes(pcm);
                 o.done()
             }
+            XrClientMsg::Recenter => Out::new(RECENTER).done(),
         }
     }
 
@@ -524,6 +529,7 @@ impl XrClientMsg {
             }
             CAPTURE_C => XrClientMsg::Capture { seq: r.u32()?, part: r.u32()?, parts: r.u32()?, data: r.bytes()?.to_vec() },
             MIC_C => XrClientMsg::Mic { seq: r.u32()?, state: r.u8()?, text: r.str()?, pcm: r.bytes()?.to_vec() },
+            RECENTER => XrClientMsg::Recenter,
             _ => return Err(bad(ty, "client")),
         })
     }
@@ -1119,6 +1125,7 @@ mod tests {
             XrClientMsg::World { voxel_size: 0.02, chunk_edge: 4, bricks: vec![WorldBrick { key: [1, -2, 3], version: 7, payload: vec![1, 2, 3] }, WorldBrick { key: [0, 0, 0], version: 1, payload: Vec::new() }] },
             XrClientMsg::Capture { seq: 3, part: 1, parts: 2, data: vec![9, 8, 7] },
             XrClientMsg::Mic { seq: 4, state: mic_state::FAILED, text: "no microphone".into(), pcm: vec![1, 0, 255, 127] },
+            XrClientMsg::Recenter,
         ];
         for m in client {
             let mut inbox = Inbox::default();

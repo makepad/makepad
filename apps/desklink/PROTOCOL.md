@@ -16,9 +16,12 @@ question). It lists, in this order:
   endpoint in the `caps` the Mac's devhub master asks for every 10 s (`desk_link`:
   `{"on","port","note"}`; `libs/devhub/src/embed.rs`). The master writes the listening ones to
   `~/.makepad/devhub/desk-links`, one `<node> <ip>:<port>` line each, and the viewer adds those as
-  desktops named by node (`quest`), at launch and once a second after (a tab stays when its
-  endpoint goes off and shows it offline). The master already dials every node from its
-  `nodes.conf` over fleet TLS, so nothing new listens or announces.
+  desktops named by node (`quest`). The master already dials every node from its `nodes.conf`
+  over fleet TLS, so nothing new listens or announces.
+
+The viewer reads the saved hosts and the devhub's list at launch and once a second after, so a
+line added to either while it runs becomes a tab. A tab stays when its line goes, and shows its
+desktop offline when the endpoint goes.
 
 `makepad devhub desk <node> on|off` switches a JIT host's endpoint (the node's `desk` service,
 through the master's router; `desk <node>` says what it does). The host registers the switch with
