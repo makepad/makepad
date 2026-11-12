@@ -59,8 +59,9 @@ impl CollisionFn {
     }
 }
 
-/// What one narrowphase task changes besides its pairs' contacts (the reference's per-thread stack and
-/// the Data its colliders share): its pooled vectors, and what the SDF colliders record, which
+/// What one collision task changes besides its outputs (the reference's per-thread stack and the Data
+/// its parts share): its pooled vectors; in the midphase, its chunk's candidate pairs and the BVH nodes it
+/// found active, joined in order after the phase; in the narrowphase, what the SDF colliders record, which
 /// [`merge_collision_tasks`] moves into Data after the phase in pair order, as one task in order leaves it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CollisionTask {
@@ -71,8 +72,10 @@ pub struct CollisionTask {
     /// walks the bound on their steps stopped (Data.sdf_walks_bounded), and the first one's geoms
     pub(crate) sdf_walks_bounded: u64,
     pub(crate) sdf_first_bounded: Option<(i32, i32)>,
-    /// BVH nodes the mesh-field collider found active (Data.bvh_active)
+    /// BVH nodes the midphase or the mesh-field collider found active (Data.bvh_active)
     pub(crate) bvh_marks: Vec<usize>,
+    /// the midphase's candidate geom pairs of the task's broadphase pairs, in order
+    pub(crate) pairs: Vec<Pair>,
 }
 
 /// Moves what `tasks` recorded into `d`: the seeds of the field pairs they collided give way to the new
@@ -373,10 +376,11 @@ pub fn collision(m: &Model, d: &mut Data) {
     let nmaxpairs = nbodyflex*(nbodyflex-1)/2;
     let mut broadphasepair = d.scratch.packed_pair(nmaxpairs);
     let nbfpair = broadphase(m, d, &mut broadphasepair, nmaxpairs);
+    // The midphase: the walk along the model's explicit pairs and exclusions goes first, in pair order;
+    // each broadphase pair's candidates are then found apart (on the pool bound to d) and joined in order.
     let mut last_signature = u32::MAX;
-    let (mut pairadr, mut exadr, mut ncandidate) = (0, 0, 0);
-    // Typed arena storage, retained in Scratch after the collision call.
-    let mut pairs = d.scratch.pair(0);
+    let (mut pairadr, mut exadr) = (0, 0);
+    let mut items = d.scratch.mid_items();
     for i in 0..nbfpair {
         let bf1 = broadphasepair[i].hi as usize; let bf2 = broadphasepair[i].lo as usize;
         let signature = ((bf1 as u32) << 16) + bf2 as u32;
@@ -384,39 +388,41 @@ pub fn collision(m: &Model, d: &mut Data) {
         let mut merged = false; let startadr = pairadr;
         while pairadr < npair && m.pair_signature[pairadr] as u32 <= signature {
             merged = m.pair_signature[pairadr] as u32 == signature;
-            let g1 = m.pair_geom1[pairadr]; let g2 = m.pair_geom2[pairadr];
-            if filter_collision_pair(m, d, g1, g2, pairadr as i32, false, 0, 0) {
-                ncandidate = push_geom_geom(m, &mut pairs, g1, g2, pairadr as i32, ncandidate);
-            }
             pairadr += 1;
         }
-        if !can_collide2(m, bf1, bf2) { continue; }
-        if bf1 >= nbody && bf2 >= nbody { crate::unported!("mjc_ipcOwnsFlexFlex"); }
-        if nexclude != 0 {
-            while exadr < nexclude && (m.exclude_signature[exadr] as u32) < signature { exadr += 1; }
-            if exadr < nexclude && m.exclude_signature[exadr] as u32 == signature { continue; }
-        }
-        let isbody1 = bf1 < nbody; let isbody2 = bf2 < nbody;
-        let bvh1 = if isbody1 { m.body_bvhadr[bf1] } else { m.flex_bvhadr[bf1-nbody] };
-        let bvh2 = if isbody2 { m.body_bvhadr[bf2] } else { m.flex_bvhadr[bf2-nbody] };
-        let geomadr1 = if isbody1 { m.body_geomadr[bf1] } else { -1 };
-        let geomadr2 = if isbody2 { m.body_geomadr[bf2] } else { -1 };
-        if isbody1 && isbody2 && m.body_geomnum[bf1] == 1 && m.body_geomnum[bf2] == 1 {
-            if filter_collision_pair(m, d, geomadr1, geomadr2, -1, merged, startadr, pairadr) {
-                ncandidate = push_geom_geom(m, &mut pairs, geomadr1, geomadr2, -1, ncandidate);
+        let mut bodies = can_collide2(m, bf1, bf2);
+        if bodies {
+            if bf1 >= nbody && bf2 >= nbody { crate::unported!("mjc_ipcOwnsFlexFlex"); }
+            if nexclude != 0 {
+                while exadr < nexclude && (m.exclude_signature[exadr] as u32) < signature { exadr += 1; }
+                if exadr < nexclude && m.exclude_signature[exadr] as u32 == signature { bodies = false; }
             }
-        } else if m.opt.disableflags & DSBL_MIDPHASE == 0 && bvh1 >= 0 && bvh2 >= 0 && !(speculative_enabled(m) && isbody1 && isbody2 && body_pair_has_fast_geom(m, d, bf1, bf2)) {
-            ncandidate = collide_tree(m, d, bf1, bf2, merged, startadr, pairadr, &mut pairs, ncandidate);
-        } else if isbody1 && isbody2 {
-            let geomadr_end1 = geomadr1 + m.body_geomnum[bf1];
-            let geomadr_end2 = geomadr2 + m.body_geomnum[bf2];
-            for g1 in geomadr1..geomadr_end1 { for g2 in geomadr2..geomadr_end2 {
-                if filter_collision_pair(m, d, g1, g2, -1, merged, startadr, pairadr) { ncandidate = push_geom_geom(m, &mut pairs, g1, g2, -1, ncandidate); }
-            } }
-        } else if isbody1 { crate::unported!("mjc_ipcOwnsFlexGeom"); }
-        else { crate::unported!("mjc_ElemElem"); }
+        }
+        items.push(MidItem { bf1, bf2, merged, startadr, pairadr, bodies });
     }
     d.scratch.put_packed_pair(broadphasepair);
+    // Typed arena storage, retained in Scratch after the collision call.
+    let mut pairs = d.scratch.pair(0);
+    if !items.is_empty() {
+        let nthread = num_thread(d);
+        let chunksize = if nthread == 1 { items.len() } else { 1.max(items.len()/(5*nthread)) };
+        let nchunk = items.len().div_ceil(chunksize);
+        let mut tasks = std::mem::take(&mut d.collision_tasks);
+        if tasks.len() < nchunk { tasks.resize_with(nchunk, CollisionTask::default); }
+        {
+            let d: &Data = d;
+            run_parts(&d.threadpool, items.chunks(chunksize).zip(tasks.iter_mut()), |_, (items, task)| midphase_task(m, d, items, task));
+        }
+        for t in &mut tasks[..nchunk] {
+            if pairs.is_empty() { std::mem::swap(&mut pairs, &mut t.pairs); } else { pairs.extend_from_slice(&t.pairs); }
+            t.pairs.clear();
+            for &node in &t.bvh_marks { d.bvh_active[node] = 1; }
+            t.bvh_marks.clear();
+        }
+        d.collision_tasks = tasks;
+    }
+    d.scratch.put_mid_items(items);
+    let mut ncandidate = pairs.len();
     while pairadr < npair {
         let g1 = m.pair_geom1[pairadr]; let g2 = m.pair_geom2[pairadr];
         if filter_collision_pair(m, d, g1, g2, pairadr as i32, false, 0, 0) { ncandidate = push_geom_geom(m, &mut pairs, g1, g2, pairadr as i32, ncandidate); }
@@ -485,7 +491,45 @@ pub fn collide_obb(aabb1: &[f64; 6], aabb2: &[f64; 6], xpos1: Option<&[f64; 3]>,
     true
 }
 
-fn collide_tree(m: &Model, d: &mut Data, bf1: usize, bf2: usize, merged: bool, startadr: usize, pairadr: usize, pairs: &mut Vec<Pair>, mut npair: usize) -> usize {
+/// One broadphase pair's part of the midphase: the model's explicit pairs from `startadr` to `pairadr`
+/// (those the walk reached at its signature), then, when `bodies`, its two bodies' geom pairs.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct MidItem { bf1: usize, bf2: usize, merged: bool, startadr: usize, pairadr: usize, bodies: bool }
+
+/// A chunk of the midphase's broadphase pairs: their candidate geom pairs into the task's `pairs`, in
+/// order, and the BVH nodes found active into its marks.
+fn midphase_task(m: &Model, d: &Data, items: &[MidItem], t: &mut CollisionTask) {
+    let nbody = m.nbody;
+    let CollisionTask { scratch, pairs, bvh_marks, .. } = t;
+    for &MidItem { bf1, bf2, merged, startadr, pairadr, bodies } in items {
+        for k in startadr..pairadr {
+            let g1 = m.pair_geom1[k]; let g2 = m.pair_geom2[k];
+            if filter_collision_pair(m, d, g1, g2, k as i32, false, 0, 0) { push_geom_geom(m, pairs, g1, g2, k as i32, 0); }
+        }
+        if !bodies { continue; }
+        let isbody1 = bf1 < nbody; let isbody2 = bf2 < nbody;
+        let bvh1 = if isbody1 { m.body_bvhadr[bf1] } else { m.flex_bvhadr[bf1-nbody] };
+        let bvh2 = if isbody2 { m.body_bvhadr[bf2] } else { m.flex_bvhadr[bf2-nbody] };
+        let geomadr1 = if isbody1 { m.body_geomadr[bf1] } else { -1 };
+        let geomadr2 = if isbody2 { m.body_geomadr[bf2] } else { -1 };
+        if isbody1 && isbody2 && m.body_geomnum[bf1] == 1 && m.body_geomnum[bf2] == 1 {
+            if filter_collision_pair(m, d, geomadr1, geomadr2, -1, merged, startadr, pairadr) {
+                push_geom_geom(m, pairs, geomadr1, geomadr2, -1, 0);
+            }
+        } else if m.opt.disableflags & DSBL_MIDPHASE == 0 && bvh1 >= 0 && bvh2 >= 0 && !(speculative_enabled(m) && isbody1 && isbody2 && body_pair_has_fast_geom(m, d, bf1, bf2)) {
+            collide_tree(m, d, scratch, bvh_marks, bf1, bf2, merged, startadr, pairadr, pairs, 0);
+        } else if isbody1 && isbody2 {
+            let geomadr_end1 = geomadr1 + m.body_geomnum[bf1];
+            let geomadr_end2 = geomadr2 + m.body_geomnum[bf2];
+            for g1 in geomadr1..geomadr_end1 { for g2 in geomadr2..geomadr_end2 {
+                if filter_collision_pair(m, d, g1, g2, -1, merged, startadr, pairadr) { push_geom_geom(m, pairs, g1, g2, -1, 0); }
+            } }
+        } else if isbody1 { crate::unported!("mjc_ipcOwnsFlexGeom"); }
+        else { crate::unported!("mjc_ElemElem"); }
+    }
+}
+
+fn collide_tree(m: &Model, d: &Data, scratch: &mut Scratch, bvh_marks: &mut Vec<usize>, bf1: usize, bf2: usize, merged: bool, startadr: usize, pairadr: usize, pairs: &mut Vec<Pair>, mut npair: usize) -> usize {
     let isbody1 = bf1 < m.nbody; let isbody2 = bf2 < m.nbody;
     if !can_collide2(m, bf1, bf2) { return npair; }
     if isbody1 && !isbody2 { crate::unported!("mj_collideTree: geom-flex"); }
@@ -497,7 +541,7 @@ fn collide_tree(m: &Model, d: &mut Data, bf1: usize, bf2: usize, merged: bool, s
     let bvh1 = &m.bvh_aabb[6*bvhadr1..]; let bvh2 = &m.bvh_aabb[6*bvhadr2..];
     let mut product = [0.0; 36]; let mut offset = [0.0; 12]; let mut initialize = true;
     let max_stack = (m.body_bvhnum[bf1] + m.body_bvhnum[bf2]) as usize;
-    let mut stack = d.scratch.collision_tree(max_stack);
+    let mut stack = scratch.collision_tree(max_stack);
     let mut nstack = 1;
     stack[0].node1 = 0; stack[0].node2 = 0;
     let start_pair = pairs.len();
@@ -516,14 +560,14 @@ fn collide_tree(m: &Model, d: &mut Data, bf1: usize, bf2: usize, merged: bool, s
             if !filter_sphere(m, d, nodeid1, nodeid2, margin + gap) {
                 if collide_obb(m.geom_aabb[6*g1..6*g1+6].try_into().unwrap(), m.geom_aabb[6*g2..6*g2+6].try_into().unwrap(), Some(at3(&d.geom_xpos, 3*g1)), Some(at9(&d.geom_xmat, 9*g1)), Some(at3(&d.geom_xpos, 3*g2)), Some(at9(&d.geom_xmat, 9*g2)), margin + gap, None, None, &mut initialize) {
                     if filter_collision_pair(m, d, nodeid1, nodeid2, -1, merged, startadr, pairadr) { npair = push_geom_geom(m, pairs, nodeid1, nodeid2, -1, npair); }
-                    if mark_active { d.bvh_active[node1+bvhadr1] = 1; d.bvh_active[node2+bvhadr2] = 1; }
+                    if mark_active { bvh_marks.push(node1+bvhadr1); bvh_marks.push(node2+bvhadr2); }
                 }
             }
             continue;
         }
         let margin = assign_margin(m, m.body_margin[bf1] + m.body_margin[bf2]);
         if !collide_obb(bvh1[6*node1..6*node1+6].try_into().unwrap(), bvh2[6*node2..6*node2+6].try_into().unwrap(), Some(at3(&d.xipos, 3*bf1)), Some(at9(&d.ximat, 9*bf1)), Some(at3(&d.xipos, 3*bf2)), Some(at9(&d.ximat, 9*bf2)), margin, Some(&mut product), Some(&mut offset), &mut initialize) { continue; }
-        if mark_active { d.bvh_active[node1+bvhadr1] = 1; d.bvh_active[node2+bvhadr2] = 1; }
+        if mark_active { bvh_marks.push(node1+bvhadr1); bvh_marks.push(node2+bvhadr2); }
         if !isleaf1 && isleaf2 {
             for i in 0..2 {
                 if child1[2*node1+i] != -1 {
@@ -562,11 +606,11 @@ fn collide_tree(m: &Model, d: &mut Data, bf1: usize, bf2: usize, merged: bool, s
     }
     let end_pair = pairs.len(); let n = end_pair-start_pair;
     if n > 1 {
-        let mut buf = d.scratch.pair(n);
+        let mut buf = scratch.pair(n);
         sort(&mut pairs[start_pair..], &mut buf, n, &mut pair_compare);
-        d.scratch.put_pair(buf);
+        scratch.put_pair(buf);
     }
-    d.scratch.put_collision_tree(stack);
+    scratch.put_collision_tree(stack);
     npair
 }
 

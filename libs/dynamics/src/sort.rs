@@ -13,14 +13,16 @@ fn insertion_sort<T: Copy>(
     end: usize,
     cmp: &mut impl FnMut(&T, &T) -> i32,
 ) {
-    for j in start + 1..end {
-        let tmp = arr[j];
-        let mut i = j as isize - 1;
-        while i >= start as isize && cmp(&arr[i as usize], &tmp) > 0 {
-            arr[(i + 1) as usize] = arr[i as usize];
+    // the run on its own: its indices are checked once, not at every step
+    let run = &mut arr[start..end];
+    for j in 1..run.len() {
+        let tmp = run[j];
+        let mut i = j;
+        while i > 0 && cmp(&run[i - 1], &tmp) > 0 {
+            run[i] = run[i - 1];
             i -= 1;
         }
-        arr[(i + 1) as usize] = tmp;
+        run[i] = tmp;
     }
 }
 
@@ -32,24 +34,24 @@ fn merge<T: Copy>(
     end: usize,
     cmp: &mut impl FnMut(&T, &T) -> i32,
 ) {
-    let mut i = start;
-    let mut j = mid;
-    let mut k = start;
-    while i < mid && j < end {
-        if cmp(&src[i], &src[j]) <= 0 {
-            dest[k] = src[i];
-            k += 1;
+    // the two runs and their destination on their own: their indices are checked once
+    let (a, b) = (&src[start..mid], &src[mid..end]);
+    let out = &mut dest[start..end];
+    let (mut i, mut j, mut k) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        if cmp(&a[i], &b[j]) <= 0 {
+            out[k] = a[i];
             i += 1;
         } else {
-            dest[k] = src[j];
-            k += 1;
+            out[k] = b[j];
             j += 1;
         }
+        k += 1;
     }
-    if i < mid {
-        dest[k..k + mid - i].copy_from_slice(&src[i..mid]);
-    } else if j < end {
-        dest[k..k + end - j].copy_from_slice(&src[j..end]);
+    if i < a.len() {
+        out[k..].copy_from_slice(&a[i..]);
+    } else if j < b.len() {
+        out[k..].copy_from_slice(&b[j..]);
     }
 }
 

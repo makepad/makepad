@@ -6,7 +6,7 @@
 //! Return borrowed vectors to their pool when the scope ends; capacity survives warm steps.
 
 use crate::collision_gjk::CcdBuffer;
-use crate::collision_driver::{Pair, Packed32, Sap, CollisionTree};
+use crate::collision_driver::{Pair, Packed32, Sap, CollisionTree, MidItem};
 use crate::data::{Data, Contact, PreContact};
 use crate::sensor::ContactInfo;
 
@@ -19,6 +19,7 @@ pub struct Scratch {
     packed_pairs: Vec<Vec<Packed32>>,
     saps: Vec<Vec<Sap>>,
     collision_trees: Vec<Vec<CollisionTree>>,
+    mid_items: Vec<Vec<MidItem>>,
     pre_contacts: Vec<Vec<PreContact>>,
     contact_counts: Vec<Vec<i32>>,
     contact_infos: Vec<Vec<ContactInfo>>,
@@ -129,6 +130,13 @@ impl Scratch {
         take_buf(&mut self.packed_pairs, n)
     }
     pub(crate) fn put_packed_pair(&mut self, b: Buf<Packed32>) { self.packed_pairs.push(b.v); }
+    /// The midphase's broadphase pairs, empty, with the room an earlier step left.
+    pub(crate) fn mid_items(&mut self) -> Vec<MidItem> {
+        let mut v = self.mid_items.pop().unwrap_or_default();
+        v.clear();
+        v
+    }
+    pub(crate) fn put_mid_items(&mut self, v: Vec<MidItem>) { self.mid_items.push(v); }
     pub(crate) fn sap(&mut self, n: usize) -> Vec<Sap> {
         // Reuse an undersized vector too: resize grows it, never shrink capacity.
         let pool = &mut self.saps;

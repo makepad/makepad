@@ -32,6 +32,19 @@ impl TaskPool for Striped {
     }
 }
 
+/// A pool that says it has 4 threads and runs a fan-out's indexes on its caller, last first: the parts
+/// still come out in order, each once.
+struct Reverse;
+
+impl TaskPool for Reverse {
+    fn fan_out(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        (0..n).rev().for_each(f);
+    }
+    fn threads(&self) -> usize {
+        4
+    }
+}
+
 /// A pool of `threads` workers, the caller among them, that lends a fan-out only the workers no other
 /// fan-out holds: a fan-out from inside one that holds them all gets none, and its caller runs every task.
 struct Saturable {
@@ -75,7 +88,8 @@ impl TaskPool for Saturable {
     }
 }
 
-/// A pile of every primitive kind dropped on a plane, and a field torus resting on a fixed one.
+/// A pile of every primitive kind dropped on a plane, two dumbbells of three geoms falling on it (their
+/// pairs found through the bodies' BVHs), and a field torus resting on a fixed one.
 fn pile() -> Model {
     let mut s = ModelSpec::default();
     s.option.timestep = 0.005;
@@ -95,6 +109,15 @@ fn pile() -> Model {
             pos: [x, y, z], quat: q.map(|q| q / n), mass: 1.0, ipos: [0.0; 3], inertia: [0.01; 3],
             joints: vec![JointSpec { r#type: JNT_FREE, ..JointSpec::default() }],
             geoms: vec![kinds[i % 5].clone()],
+            ..BodySpec::default()
+        });
+    }
+    for (i, x) in [0.0, 0.3].into_iter().enumerate() {
+        let ball = |x: f64| GeomSpec { r#type: GEOM_SPHERE, size: [0.08, 0.0, 0.0], pos: [x, 0.0, 0.0], ..GeomSpec::default() };
+        s.bodies.push(BodySpec {
+            pos: [x, 0.16, 0.9 + 0.3 * i as f64], mass: 1.0, ipos: [0.0; 3], inertia: [0.01; 3],
+            joints: vec![JointSpec { r#type: JNT_FREE, ..JointSpec::default() }],
+            geoms: vec![ball(-0.15), GeomSpec { r#type: GEOM_CAPSULE, size: [0.03, 0.15, 0.0], quat: [0.7071067811865476, 0.0, 0.7071067811865476, 0.0], ..GeomSpec::default() }, ball(0.15)],
             ..BodySpec::default()
         });
     }
@@ -120,25 +143,30 @@ fn a_bound_pool_spreads_the_narrowphase_with_the_same_results() {
     let m = pile();
     let mut serial = make_data(&m);
     let mut pooled = make_data(&m);
+    let mut reversed = make_data(&m);
     let pool = Arc::new(Striped { threads: 4, fan_outs: AtomicUsize::new(0) });
     bind_thread_pool(&mut pooled, Some(pool.clone()));
+    bind_thread_pool(&mut reversed, Some(Arc::new(Reverse)));
     let (mut contacts, mut seeds) = (0, 0);
     let mut at_40 = None;
     for s in 0..120 {
         step(&m, &mut serial);
         step(&m, &mut pooled);
+        step(&m, &mut reversed);
         if s == 39 {
             at_40 = Some(serial.clone());
         }
         assert_eq!(serial.ncon, pooled.ncon, "contacts at step {s}");
         assert_eq!(&serial.contact[..serial.ncon as usize], &pooled.contact[..pooled.ncon as usize], "contacts at step {s}");
         assert_eq!(serial.sdf_seeds, pooled.sdf_seeds, "the field pairs' seeds at step {s}");
+        assert_eq!(serial.bvh_active, pooled.bvh_active, "the BVH nodes found active at step {s}");
         assert!(serial.qpos == pooled.qpos && serial.qvel == pooled.qvel, "state at step {s}");
+        assert!(serial.qpos == reversed.qpos && serial.qvel == reversed.qvel && serial.contact[..serial.ncon as usize] == reversed.contact[..reversed.ncon as usize], "state at step {s} with a pool that calls its indexes last first");
         contacts = contacts.max(serial.ncon);
         seeds = seeds.max(serial.sdf_seeds.len());
     }
     assert!(contacts > 20 && seeds > 0, "the pile touches ({contacts} contacts) and the tori keep seeds ({seeds})");
-    assert!(pool.fan_outs.load(Ordering::Relaxed) >= 120, "a narrowphase on the pool every step");
+    assert!(pool.fan_outs.load(Ordering::Relaxed) >= 2 * 120, "a midphase and a narrowphase on the pool every step");
     assert!(pooled.collision_tasks.len() > 4, "the pairs in chunks of a fifth of a thread's share: {}", pooled.collision_tasks.len());
 
     // worlds stepped as the tasks of a fan-out that holds every worker: their own fan-outs find the pool full,

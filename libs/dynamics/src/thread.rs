@@ -55,16 +55,23 @@ pub fn num_thread(d: &Data) -> usize {
 /// Runs `f(i, part)` once for each part: on the pool bound to `pool` when there is one and more than one
 /// part, else in index order on the calling thread. Each part holds the outputs its task alone writes, so
 /// the results do not depend on how many threads ran them.
-pub fn run_parts<P: Send>(pool: &ThreadPool, parts: impl ExactSizeIterator<Item = P>, f: impl Fn(usize, P) + Sync) {
+///
+/// On the pool each task takes the next part from the iterator under a lock held for that alone, never
+/// across `f`: a part is handed out once whatever indexes the pool calls, and nothing is allocated. After
+/// the fan-out every part has run, or this panics: a skipped part is a wrong step.
+pub fn run_parts<P: Send>(pool: &ThreadPool, parts: impl ExactSizeIterator<Item = P> + Send, f: impl Fn(usize, P) + Sync) {
     match &pool.0 {
         Some(pool) if parts.len() > 1 => {
-            let slots: Vec<Mutex<Option<P>>> = parts.map(|part| Mutex::new(Some(part))).collect();
-            pool.fan_out(slots.len(), &|i| {
-                let part = slots[i].lock().unwrap_or_else(|e| e.into_inner()).take();
-                if let Some(part) = part {
+            let n = parts.len();
+            let parts = Mutex::new(parts.enumerate());
+            pool.fan_out(n, &|_| {
+                let next = parts.lock().unwrap_or_else(|e| e.into_inner()).next();
+                if let Some((i, part)) = next {
                     f(i, part);
                 }
             });
+            let mut rest = parts.into_inner().unwrap_or_else(|e| e.into_inner());
+            assert!(rest.next().is_none(), "the pool ran fewer tasks than the {n} parts it was given");
         }
         _ => {
             for (i, part) in parts.enumerate() {
