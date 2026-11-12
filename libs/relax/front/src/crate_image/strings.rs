@@ -193,6 +193,7 @@ macro_rules! fields {
 }
 pub(crate) use fields;
 fields!(crate::macros::UseItem, module, path, bind, is_pub);
+fields!(crate::macros::ModItem, pos, end, macro_use, is_pub);
 
 impl<K: Pack + Ord + std::hash::Hash, V: Pack> Pack for HashMap<K, V> {
     fn pack(&self, w: &mut Vec<u8>, s: &mut Strings) {
@@ -216,14 +217,17 @@ impl<T: Pack + Ord + std::hash::Hash> Pack for crate::fxhash::HashSet<T> {
 impl Pack for crate::macros::CrateMods {
     fn pack(&self, w: &mut Vec<u8>, s: &mut Strings) {
         self.root.pack(w, s); self.src.pack(w, s); self.mods.pack(w, s);
+        self.items.pack(w, s); self.inner_macro_use.pack(w, s);
         self.uses.pack(w, s); self.externs.pack(w, s); self.renames.pack(w, s);
     }
     fn unpack(r: &mut Decode<'_>, s: &[String]) -> Option<Self> {
         Some(Self { root: Pack::unpack(r, s)?, src: Pack::unpack(r, s)?, mods: Pack::unpack(r, s)?,
+            items: Pack::unpack(r, s)?, inner_macro_use: Pack::unpack(r, s)?,
             uses: Pack::unpack(r, s)?, externs: Pack::unpack(r, s)?, renames: Pack::unpack(r, s)?, ..Self::default() })
     }
     fn plain_size(&self) -> usize {
         self.root.plain_size() + self.src.plain_size() + self.mods.plain_size()
+            + self.items.plain_size() + self.inner_macro_use.plain_size()
             + self.uses.plain_size() + self.externs.plain_size() + self.renames.plain_size()
     }
 }
@@ -231,6 +235,34 @@ impl Pack for crate::macros::CrateMods {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A restored demand snapshot must preserve private module boundaries and
+    /// the declaration order of modules whose macros escape to their parent.
+    #[test]
+    fn packed_macro_modules_preserve_textual_scope() {
+        use crate::macros::{CrateMods, ModItem};
+        let mut def = crate::macros::parse_def("value", "c", 2021, &[]).unwrap();
+        def.def_mod = "c::definitions".into();
+        def.def_pos = 1;
+        for macro_use in [false, true] {
+            let mut modules = CrateMods { root: "c".into(), ..Default::default() };
+            modules.items.insert("c::before".into(), ModItem { pos: 0, end: 5, ..Default::default() });
+            modules.items.insert("c::definitions".into(), ModItem { pos: 10, end: 30, macro_use, is_pub: false });
+            modules.items.insert("c::after".into(), ModItem { pos: 40, end: 50, ..Default::default() });
+            let mut strings = Strings::default();
+            let mut bytes = Vec::new();
+            modules.pack(&mut bytes, &mut strings);
+            let bytes = strings.finish(bytes);
+            let mut reader = Decode::new(&bytes);
+            let strings = read_table(&mut reader).unwrap();
+            let restored = CrateMods::unpack(&mut reader, &strings).unwrap();
+            assert!(!restored.in_textual_scope(&def, "c::before", None), "an earlier sibling never inherits the macro");
+            assert_eq!(restored.in_textual_scope(&def, "c::after", None), macro_use, "only macro_use lets it escape");
+            assert_eq!(restored.in_textual_scope(&def, "c", Some(31)), macro_use);
+            assert!(!restored.in_textual_scope(&def, "c", Some(9)), "a root call before the module does not inherit it");
+        }
+    }
+
     /// The table keeps first-use ids, finds repeats through growth, and reads back what it wrote.
     #[test]
     fn strings_table_matches_vec_encoding() {

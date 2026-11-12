@@ -109,7 +109,7 @@ pub(crate) fn publish_macros(table: &mut MacroTable, name: &str, defs: &[MacroRe
             }
         }
     }
-    let mods = Arc::new(crate::macros::CrateMods { root: mods.root.clone(), src: mods.src.clone(), mods: mods.mods.clone(), items: mods.items.clone(), uses: mods.uses.clone(), externs, renames: mods.renames.clone(), recursion_limit: mods.recursion_limit, ..Default::default() });
+    let mods = Arc::new(crate::macros::CrateMods { root: mods.root.clone(), src: mods.src.clone(), mods: mods.mods.clone(), items: mods.items.clone(), inner_macro_use: mods.inner_macro_use.clone(), uses: mods.uses.clone(), externs, renames: mods.renames.clone(), recursion_limit: mods.recursion_limit, ..Default::default() });
     table.add_crate(name.to_string(), mods);
     if !macro_use.is_empty() {
         let v = table.macro_use.entry(name.to_string()).or_default();
@@ -613,6 +613,7 @@ impl Pool {
                 cmods.mods.insert(m);
             }
             cmods.items.extend(s.mod_items);
+            cmods.inner_macro_use.extend(s.inner_macro_use);
             for u in s.uses {
                 if let Some(b) = &u.bind {
                     if u.path.last() != Some(b) {
@@ -953,6 +954,8 @@ struct Scanned {
     mods: Vec<String>,
     /// the `mod` item of each module declared in the file
     mod_items: Vec<(String, crate::macros::ModItem)>,
+    /// `#![macro_use]` belongs to this file's module bodies, not their declarations.
+    inner_macro_use: Vec<String>,
     /// `#![recursion_limit = ".."]` in the file's leading inner attributes
     pub(crate) recursion_limit: Option<u32>,
 }
@@ -1086,8 +1089,8 @@ fn decl_attrs(src: &[u8], toks: &[Tok], i: usize, cfg: &CfgSet) -> DeclAttrs {
     out
 }
 
-/// The file's leading inner attributes (`#![..]`) hold their #[cfg]s.
-pub fn file_cfg_active(src: &[u8], toks: &[Tok], cfg: &CfgSet) -> bool {
+/// Leading inner attributes, configured just like the parser's `inner_attrs`.
+fn inner_attrs(src: &[u8], toks: &[Tok], cfg: &CfgSet) -> Vec<Attr> {
     let mut attrs = Vec::new();
     let mut i = 0;
     while i + 2 < toks.len() && toks[i].kind == T::Pound && toks[i + 1].kind == T::Not && toks[i + 2].kind == T::OpenBracket {
@@ -1109,7 +1112,18 @@ pub fn file_cfg_active(src: &[u8], toks: &[Tok], cfg: &CfgSet) -> bool {
         attrs.push(Attr { inner: true, toks: TokRange { lo: (i + 3) as u32, hi: j as u32 } });
         i = j + 1;
     }
-    attrs.is_empty() || crate::cfg::active(Src { src, plain: toks, ext: &[], parts: None }, &attrs, cfg)
+    crate::cfg::expand_cfg_attr_list(Src { src, plain: toks, ext: &[], parts: None }, &attrs, cfg)
+}
+
+/// The file's leading inner attributes (`#![..]`) hold their #[cfg]s.
+pub fn file_cfg_active(src: &[u8], toks: &[Tok], cfg: &CfgSet) -> bool {
+    let attrs = inner_attrs(src, toks, cfg);
+    crate::cfg::active(Src { src, plain: toks, ext: &[], parts: None }, &attrs, cfg)
+}
+
+fn inner_macro_use(src: &[u8], toks: &[Tok], cfg: &CfgSet) -> bool {
+    let p = Src { src, plain: toks, ext: &[], parts: None };
+    inner_attrs(src, toks, cfg).iter().any(|a| a.toks.hi > a.toks.lo && crate::cfg::tok_str(p, a.toks.lo as usize) == b"macro_use")
 }
 
 fn scan_file(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cfg: &CfgSet, context: &crate::source_context::Context) -> Option<Scanned> {
@@ -1168,7 +1182,7 @@ fn file_imports(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, c
     let mut toks = Vec::with_capacity(src.len() / 4);
     crate::lexer::lex(src, edition, &mut toks).ok()?;
     let scan = scan_tokens(path, dir, mpath, krate, edition, cfg, src.len(), src.to_vec().into(), toks, context, ScanSurface::Imports)?;
-    Some(crate::macros::FileImports { uses: scan.uses, aliases: scan.aliases, macro_use: scan.macro_use, mods: scan.mods, mod_items: scan.mod_items })
+    Some(crate::macros::FileImports { uses: scan.uses, aliases: scan.aliases, macro_use: scan.macro_use, mods: scan.mods, mod_items: scan.mod_items, inner_macro_use: scan.inner_macro_use })
 }
 
 /// What a scan reads besides the file's modules.
@@ -1193,8 +1207,10 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
     let mut mod_items: Vec<(String, crate::macros::ModItem)> = Vec::new();
     if !file_cfg_active(&src, &toks, cfg) {
         // `#![cfg(false)]` file: removed with its module; nothing in it counts
-        return Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods: Vec::new(), mod_items: Vec::new(), recursion_limit: None });
+        return Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods: Vec::new(), mod_items: Vec::new(), inner_macro_use: Vec::new(), recursion_limit: None });
     }
+    let mut inner_macro_uses = Vec::new();
+    if inner_macro_use(&src, &toks, cfg) { inner_macro_uses.push(mpath.to_string()); }
     let mut recursion_limit = None;
     {
         let mut i = 0;
@@ -1365,6 +1381,7 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
                         let active = active && file_cfg_active(&src, &toks[i + 3..], cfg);
                         if cur_active && active {
                             mods.push(child_path.clone());
+                            if inner_macro_use(&src, &toks[i + 3..], cfg) { inner_macro_uses.push(child_path.clone()); }
                         }
                         let child_dir = pa.map_or_else(|| format!("{}/{}", cur, name), |p| crate::crates::join_path(&cur, &p));
                         dirs.push((depth + 1, child_dir, child_path, cur_active && active));
@@ -1436,7 +1453,7 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
             i += 1;
         }
     }
-    Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods, mod_items, recursion_limit })
+    Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods, mod_items, inner_macro_use: inner_macro_uses, recursion_limit })
 }
 
 /// Starts the pipeline for `crates` (load order): scans (all crates at once, earliest crate
@@ -1668,6 +1685,7 @@ pub fn check_macros(prog: &mut crate::program::Program, krate: u32, files: &[(u3
             table.macro_use.entry(name.clone()).or_default().extend(scan.macro_use);
             mods.mods.extend(scan.mods);
             mods.items.extend(scan.mod_items);
+            mods.inner_macro_use.extend(scan.inner_macro_use);
             for u in scan.uses { mods.add_use(u); }
         }
         table.add_crate(name.clone(), std::sync::Arc::new(mods));
@@ -1725,6 +1743,7 @@ mod cold_tests {
             mods.externs.extend(deps.iter().map(|dep| (dep.to_string(), dep.to_string())));
             mods.mods.extend(scan.mods);
             mods.items.extend(scan.mod_items);
+            mods.inner_macro_use.extend(scan.inner_macro_use);
             for u in scan.uses {
                 if let Some(bind) = &u.bind {
                     if u.path.last() != Some(bind) { mods.renames.insert(bind.clone()); }
@@ -1867,6 +1886,7 @@ mod cold_tests {
             mods.externs.extend(deps.into_iter().map(|dep| (dep.into(), dep.into())));
             mods.mods.extend(scan.mods);
             mods.items.extend(scan.mod_items);
+            mods.inner_macro_use.extend(scan.inner_macro_use);
             for u in scan.uses {
                 if let Some(bind) = &u.bind {
                     if u.path.last() != Some(bind) { mods.renames.insert(bind.clone()); }
@@ -1969,6 +1989,32 @@ mod lowered_scope_tests {
             let scan = scan_text(path, ".", "fixture", "fixture", 2021, &cfg, source.to_vec().into(), &context).unwrap();
             assert_eq!(scan.macro_use, [expected]);
         }
+    }
+
+    #[test]
+    fn inner_macro_use_is_configured_and_owned_by_the_module_body() {
+        let sess = Arc::new(crate::Session::default());
+        let cfg = CfgSet::host(&sess, &[]);
+        let path = "defs.rs";
+        let context = crate::source_context::Context::new(path, Default::default(), &sess);
+        let source = br#"
+            #![cfg_attr(all(), macro_use)]
+            mod enabled { #![cfg_attr(all(), macro_use)] }
+            mod disabled { #![cfg_attr(any(), macro_use)] }
+            mod removed { #![cfg(any())] #![macro_use] }
+        "#;
+        for declarations_only in [false, true] {
+            let scan = scan_text_mode(path, ".", "c::defs", "c", 2021, &cfg, source.to_vec().into(), &context, declarations_only).unwrap();
+            assert_eq!(scan.inner_macro_use, ["c::defs", "c::defs::enabled"]);
+            assert!(scan.mod_items.iter().all(|(_, item)| !item.macro_use), "inner attributes do not rewrite parent declarations");
+        }
+        let before = file_imports(path, ".", "c::defs", "c", 2021, &cfg, source, &context).unwrap();
+        let changed = String::from_utf8(source.to_vec()).unwrap().replacen("cfg_attr(all(), macro_use)", "cfg_attr(any(), macro_use)", 1);
+        let after = file_imports(path, ".", "c::defs", "c", 2021, &cfg, changed.as_bytes(), &context).unwrap();
+        assert!(!before.same_as(&after), "removing a child-owned attribute changes its import snapshot");
+        let parent = file_imports("root.rs", ".", "c", "c", 2021, &cfg, b"mod defs;", &context).unwrap();
+        assert!(parent.inner_macro_use.is_empty());
+        assert!(!parent.mod_items[0].1.macro_use);
     }
 
 

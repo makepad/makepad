@@ -5,22 +5,26 @@ use relax_base::{memstat, zone_alloc};
 #[global_allocator]
 static ALLOC: memstat::Counting = memstat::Counting;
 
-fn rss_of_burst() -> usize {
+fn rss_of_burst() -> Option<usize> {
     // Linux: the burst arena's resident bytes from smaps (its mapping is named)
-    let Ok(text) = std::fs::read_to_string("/proc/self/smaps") else { return 0 };
+    if !cfg!(target_os = "linux") { return None; }
+    let text = std::fs::read_to_string("/proc/self/smaps").expect("read burst mapping residency");
     let mut on = false;
+    let mut found = false;
     let mut kb = 0usize;
     for line in text.lines() {
         let first = line.split_whitespace().next().unwrap_or("");
         if first.contains('-') && first.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
             on = line.contains("makepad-run-burst");
+            found |= on;
         } else if on {
             if let Some(v) = line.strip_prefix("Rss:") {
                 kb += v.split_whitespace().next().and_then(|x| x.parse::<usize>().ok()).unwrap_or(0);
             }
         }
     }
-    kb << 10
+    // An unsupported mapping label is not a measurement of zero resident bytes.
+    found.then_some(kb << 10)
 }
 
 #[test]
@@ -52,7 +56,15 @@ fn survivors_keep_their_bytes_and_the_rest_goes_back() {
         zone_alloc::burst_trim();
         let r1 = rss_of_burst();
         if cfg!(target_os = "linux") {
-            assert!(r1 + (4 << 20) < r0, "round {round}: burst rss {r0} -> {r1}");
+            match (r0, r1) {
+                (Some(r0), Some(r1)) => assert!(r1 + (4 << 20) < r0, "round {round}: burst rss {r0} -> {r1}"),
+                (None, None) => {
+                    if round == 0 {
+                        eprintln!("burst RSS assertion unavailable: no named burst mappings (Linux may lack CONFIG_ANON_VMA_NAME); survivor bytes and allocator accounting are still checked");
+                    }
+                }
+                _ => panic!("round {round}: burst mapping attribution changed during trim: {r0:?} -> {r1:?}"),
+            }
         }
         kept.extend(survivors);
         // the survivors' bytes are intact, and freeing them later works

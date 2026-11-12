@@ -113,8 +113,9 @@ fn heap_in_use() -> u64 {
 /// The heap check counts the whole process, so what grows it besides the fixture is settled first.
 /// The lazy compiles of the fixture's code are one-off process state that the cycles would
 /// otherwise make in whichever cycle first needs them, which depends on how the threads
-/// interleave (and so on machine load). (Nothing in the cycles reads symbol tables: a stop
-/// reports no thread that is on its way out, so no stack is dumped.)
+/// interleave (and so on machine load). The tier workers also belong to the process:
+/// their lazy start on a hot call must precede the heap baseline. (Nothing in the cycles reads
+/// symbol tables: a stop reports no thread that is on its way out, so no stack is dumped.)
 #[cfg(target_os = "linux")]
 fn warm_process_state(u: &mut Unit, entry: u64) {
     crate::jit::precompile_reachable(u, entry);

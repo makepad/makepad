@@ -267,9 +267,17 @@ impl Fcx<'_> {
                 let hit = self.tcx.adts.get(&d).is_some_and(|a| a.variants.iter().any(|v| {
                     let vd = self.prog.def(v.def);
                     let ast = &self.prog.files[vd.file as usize].ast;
-                    // (a struct's own attributes are its variant's)
-                    let attrs = if vd.kind == DefKind::Variant { ast.list(ast.item(vd.item).attrs).to_vec() } else { ast.list(ast.item(self.prog.def(d).item).attrs).to_vec() };
-                    crate::lang_items::has_attr(self.prog, vd.file, &attrs, "non_exhaustive")
+                    // A variant's item is its enclosing enum. The enum's non_exhaustive
+                    // permits new variants; only the variant's own attribute permits fields.
+                    let attrs = if vd.kind == DefKind::Variant {
+                        let parent = self.prog.def(vd.parent);
+                        let Some(en) = ast.as_enum(&ast.item(parent.item).kind) else { return false };
+                        ast.list(ast.list(en.variants)[vd.sub as usize].attrs)
+                    } else {
+                        // A struct's own attributes are its variant's.
+                        ast.list(ast.item(vd.item).attrs)
+                    };
+                    crate::lang_items::has_attr(self.prog, vd.file, attrs, "non_exhaustive")
                 }));
                 if hit { return Err(CastError::ForeignNonExhaustiveAdt); }
             }

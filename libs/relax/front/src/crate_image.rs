@@ -11,7 +11,7 @@ use crate::{
 use std::sync::Arc;
 
 // A file's metadata records how its parse numbered it (FileMeta::numbering).
-pub const VERSION: u32 = 26;
+pub const VERSION: u32 = 27;
 
 pub(crate) mod strings;
 
@@ -352,13 +352,14 @@ impl Codec for CrateMods {
         self.src.put(w);
         self.mods.put(w);
         self.items.put(w);
+        self.inner_macro_use.put(w);
         self.uses.put(w);
         self.externs.put(w);
         self.renames.put(w);
         self.recursion_limit.put(w);
     }
     fn get(r: &mut Decode<'_>) -> Option<Self> {
-        Some(Self { root: Codec::get(r)?, src: Codec::get(r)?, mods: Codec::get(r)?, items: Codec::get(r)?, uses: Codec::get(r)?, externs: Codec::get(r)?, renames: Codec::get(r)?, recursion_limit: Codec::get(r)?, ..Default::default() })
+        Some(Self { root: Codec::get(r)?, src: Codec::get(r)?, mods: Codec::get(r)?, items: Codec::get(r)?, inner_macro_use: Codec::get(r)?, uses: Codec::get(r)?, externs: Codec::get(r)?, renames: Codec::get(r)?, recursion_limit: Codec::get(r)?, ..Default::default() })
     }
 }
 impl Codec for MacroUse {

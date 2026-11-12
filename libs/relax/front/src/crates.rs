@@ -237,7 +237,7 @@ pub fn load_units(path: &str) -> Result<Vec<CrateUnit>, String> {
         if let Some(k) = t.get("kind") {
             for s in k.arr() {
                 match s.str() {
-                    "lib" | "rlib" => kind_lib = true,
+                    "lib" | "rlib" | "dylib" => kind_lib = true,
                     "proc-macro" => kind_pm = true,
                     "custom-build" => kind_build = true,
                     _ => {}

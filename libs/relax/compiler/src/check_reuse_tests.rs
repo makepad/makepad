@@ -262,6 +262,36 @@ fn a_macro_change_checks_the_crates_its_expansions_reach() {
     changed("macrocall", &[("lib.rs", lib), ("bin.rs", bin)], &[], |d| std::fs::write(d.join("lib.rs"), lib.replace("helper() -> u32 { 1 }", "helper() -> u64 { 1 }")).unwrap(), &[], 0);
 }
 
+/// The parent module declaration is unchanged: the attribute and its cache input
+/// belong to the child file. A fresh process must see both removal and restoration.
+#[test]
+fn child_inner_macro_use_edits_invalidate_cached_scope() {
+    if std::env::var_os(CHILD).is_some() { return; }
+    let lib = "mod defs;\nmod user { pub fn f() -> u32 { value!() } }\npub use user::f;\n";
+    let defs = "#![cfg_attr(all(), macro_use)]\nmacro_rules! value { () => { 7u32 }; }\n";
+    let dir = package("inner-macro-use", &[("lib.rs", lib), ("defs.rs", defs), ("bin.rs", "fn main() { let _ = pkg::f(); }\n")]);
+    let cache = dir.join("cache").to_string_lossy().into_owned();
+    let env = [("MAKEPAD_RUN_CACHE_DIR", cache.as_str())];
+    let first = check_in_child(&dir, true, &env);
+    assert_eq!(first.code, 0, "{first:?}");
+    let warm = check_in_child(&dir, true, &env);
+    assert!(warm.code == 0 && warm.full, "{warm:?}");
+    // The same-length child edit changes only whether macro_use is configured.
+    std::fs::write(dir.join("defs.rs"), defs.replace("all()", "any()")).unwrap();
+    let removed = check_in_child(&dir, true, &env);
+    let cold_cache = dir.join("cold-cache").to_string_lossy().into_owned();
+    let cold = check_in_child(&dir, false, &[("MAKEPAD_RUN_CACHE_DIR", cold_cache.as_str())]);
+    assert_ne!(cold.code, 0, "the macro must no longer escape: {cold:?}");
+    assert_eq!((&removed.diags, removed.code), (&cold.diags, cold.code), "{removed:?} vs {cold:?}");
+    std::fs::write(dir.join("defs.rs"), defs).unwrap();
+    let restored = check_in_child(&dir, true, &env);
+    assert_eq!(restored.code, 0, "{restored:?}");
+    let warm_again = check_in_child(&dir, true, &env);
+    assert!(warm_again.code == 0 && warm_again.full, "{warm_again:?}");
+    assert_eq!(std::fs::read_to_string(dir.join("lib.rs")).unwrap(), lib);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// A feature is in the crate's cfg: flipped, the library (and so the binary) is checked again.
 #[test]
 fn a_feature_flip_checks_again() {

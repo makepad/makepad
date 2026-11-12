@@ -177,6 +177,9 @@ pub struct CrateMods {
     pub mods: crate::fxhash::HashSet<String>,
     /// the `mod` item of each module (not the root)
     pub items: HashMap<String, ModItem>,
+    /// Modules with `#![macro_use]`, owned by the file containing their body.
+    /// Kept separate from the parent-owned `mod` item so a child-only edit replaces it.
+    pub inner_macro_use: crate::fxhash::HashSet<String>,
     /// `use` / `extern crate` bindings per module
     pub uses: HashMap<String, Vec<UseItem>>,
     /// extern prelude: names the crate refers to other crates by -> their crate names
@@ -198,13 +201,15 @@ pub struct FileImports {
     pub macro_use: Vec<String>,
     pub mods: Vec<String>,
     pub mod_items: Vec<(String, ModItem)>,
+    pub inner_macro_use: Vec<String>,
 }
 
 impl FileImports {
     /// The same imports (`mod` items only move with the text around them).
     pub fn same_as(&self, other: &FileImports) -> bool {
         let items = |f: &'_ FileImports| f.mod_items.iter().map(|(m, i)| (m.clone(), i.macro_use, i.is_pub)).collect::<Vec<_>>();
-        self.uses == other.uses && self.aliases == other.aliases && self.macro_use == other.macro_use && self.mods == other.mods && items(self) == items(other)
+        self.uses == other.uses && self.aliases == other.aliases && self.macro_use == other.macro_use && self.mods == other.mods
+            && self.inner_macro_use == other.inner_macro_use && items(self) == items(other)
     }
 }
 
@@ -244,7 +249,7 @@ impl CrateMods {
 
     /// A copy whose scopes are computed afresh on next use.
     fn unresolved(&self) -> CrateMods {
-        CrateMods { root: self.root.clone(), src: self.src.clone(), mods: self.mods.clone(), items: self.items.clone(), uses: self.uses.clone(),
+        CrateMods { root: self.root.clone(), src: self.src.clone(), mods: self.mods.clone(), items: self.items.clone(), inner_macro_use: self.inner_macro_use.clone(), uses: self.uses.clone(),
             externs: self.externs.clone(), renames: self.renames.clone(), recursion_limit: self.recursion_limit, scope: Default::default() }
     }
 
@@ -268,6 +273,8 @@ impl CrateMods {
             if !e.now.mod_items.iter().any(|(n, _)| n == m) { self.items.remove(m); }
         }
         self.items.extend(e.now.mod_items.iter().cloned());
+        for m in &e.was.inner_macro_use { self.inner_macro_use.remove(m); }
+        self.inner_macro_use.extend(e.now.inner_macro_use.iter().cloned());
     }
 
     /// Is the `macro_rules!` `d` of this crate in rustc's legacy (textual) scope in module `from`
@@ -294,9 +301,29 @@ impl CrateMods {
             // `from` is outside `m`: only a `#[macro_use]` module hands its macros to its parent
             let Some(it) = self.items.get(m) else { return true };
             let Some((parent, _)) = m.rsplit_once("::") else { return false };
-            if !it.macro_use { return false; }
+            if !it.macro_use && !self.inner_macro_use.contains(m) { return false; }
             e = it.end;
             m = parent;
+        }
+    }
+
+    /// Rank an in-scope binding by its nearest containing scope and the position
+    /// where it entered that scope. File-module definitions acquire the position
+    /// of the exporting `mod`, not an offset in the child file. Unknown generated
+    /// modules keep the resolver's existing precedence instead.
+    pub(crate) fn textual_binding_key(&self, d: &MacroDef, from: &str) -> Option<(usize, Vec<u32>)> {
+        if d.def_mod.is_empty() { return None; }
+        let mut module = d.def_mod.as_str();
+        let mut positions = vec![d.scope_pos.unwrap_or(d.def_pos)];
+        loop {
+            if from == module || from.strip_prefix(module).is_some_and(|rest| rest.starts_with("::")) {
+                // Two macros exported through the same module have the same
+                // outer position. Break ties by their order inside that module.
+                positions.reverse();
+                return Some((module.split("::").count(), positions));
+            }
+            positions.push(self.items.get(module)?.end);
+            module = module.rsplit_once("::")?.0;
         }
     }
 }
@@ -866,7 +893,7 @@ impl MacroTable {
         if !added {
             return;
         }
-        let cm = CrateMods { root: old.root.clone(), src: old.src.clone(), mods, items: old.items.clone(), uses, externs, renames, recursion_limit: old.recursion_limit, scope: Default::default() };
+        let cm = CrateMods { root: old.root.clone(), src: old.src.clone(), mods, items: old.items.clone(), inner_macro_use: old.inner_macro_use.clone(), uses, externs, renames, recursion_limit: old.recursion_limit, scope: Default::default() };
         self.add_crate(k.to_string(), std::sync::Arc::new(cm));
         // a crate not loaded yet whose scope a parse ahead of its load computed (preloaded files'
         // lookups) copied this crate's names as they were: computed afresh on next use

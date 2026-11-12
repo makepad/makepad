@@ -213,10 +213,15 @@ impl Names {
         self.externs.extend(other.externs);
         self.empty_rules.extend(other.empty_rules);
     }
-    pub fn add(&mut self, ci: usize, module: &str, src: &[u8], toks: &[Tok], _uses: &[crate::macros::UseItem], mods: &[String]) {
+    pub fn add(&mut self, ci: usize, module: &str, src: &[u8], toks: &[Tok], _uses: &[crate::macros::UseItem], mods: &[String], inner_macro_use: &[String]) {
         self.reset_view();
         self.modules.extend(mods.iter().cloned());
         self.modules.insert(module.into());
+        for child in inner_macro_use {
+            if let Some((parent, _)) = child.rsplit_once("::") {
+                self.macro_uses.push((parent.into(), child.clone(), false));
+            }
+        }
         self.scan(ci, module, src, toks);
         for name in fixed_function_macros(src, toks).values().flatten() {
             self.symbols.insert(format!("{module}::{name}"));

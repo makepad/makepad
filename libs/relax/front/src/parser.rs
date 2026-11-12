@@ -1554,10 +1554,24 @@ impl<'a> Parser<'a> {
         id
     }
 
-    /// rustc legacy scope: is the written `macro_rules!` `d` of this file in scope at the cursor
+    /// rustc legacy scope: is the written `macro_rules!` `d` in scope at the cursor
     /// (its enclosing block / module without `#[macro_use]` still open)? Anything not known to be
     /// out of scope counts as in scope.
     fn rules_in_textual_scope(&self, d: &crate::macros::MacroDef, mut at: u32) -> bool {
+        if d.builtin != 0 || d.exported { return true; }
+        if self.bctx.as_ref().is_some_and(|c| c.path != d.def_file) {
+            // A macro handed out of a file module enters the parent only after
+            // its `mod` declaration. Definition offsets belong to the child;
+            // use the module boundaries and this call's authored position.
+            let mut invocation = at;
+            while invocation as usize >= self.src.len() {
+                let Some(call) = region_of(self.exp_map.view(), invocation).filter(|&call| call < invocation) else { break; };
+                invocation = call;
+            }
+            return self.macros.as_ref().and_then(|m| m.table.crates.get(&self.krate))
+                .map_or(true, |c| c.in_textual_scope(d, &self.cur_module(),
+                    ((invocation as usize) < self.src.len()).then_some(invocation)));
+        }
         // Expansion text is appended after the source, not after every written
         // definition in lexical scope. Compare a written definition against the
         // expansion's invocation (following nested expansions), otherwise a later
@@ -1570,7 +1584,7 @@ impl<'a> Parser<'a> {
             }
         }
         let pos = if (at as usize) < self.src.len() { d.scope_pos.unwrap_or(d.def_pos) } else { d.def_pos };
-        if d.builtin != 0 || d.exported || (pos as usize) >= self.src.len() || !self.bctx.as_ref().is_some_and(|c| c.path == d.def_file) {
+        if (pos as usize) >= self.src.len() || !self.bctx.as_ref().is_some_and(|c| c.path == d.def_file) {
             return true;
         }
         // defined further down: not in scope yet
@@ -1671,6 +1685,32 @@ impl<'a> Parser<'a> {
         });
         if out_of_scope {
             r = None;
+        }
+        // Parser-local definitions are preferred by the position-free lookup.
+        // A later file module can nevertheless shadow one of them. Compare only
+        // its known textual bindings here; keep same-file/generated precedence
+        // and qualified or imported bindings on their existing paths.
+        if qual.is_none() && !path.global() {
+            if let (Some(selected), Some(context), Some(modules)) =
+                (r.as_ref(), self.bctx.as_ref(), m.table.crates.get(&self.krate))
+            {
+                if selected.name == name && selected.krate == self.krate && textual(selected) && self.rules_in_textual_scope(selected, seg.name.lo) {
+                    let mut best = selected.clone();
+                    let mut key = None;
+                    for candidate in m.table.defs.get(&name).into_iter().flatten().chain(m.local.iter()).rev() {
+                        if candidate.name != name || candidate.krate != self.krate || candidate.def_file == context.path
+                            || !textual(candidate) || !self.rules_in_textual_scope(candidate, seg.name.lo) { continue; }
+                        if let Some(next) = modules.textual_binding_key(candidate, &module) {
+                            // Allocate position chains only for an actual foreign
+                            // comparison. An unknown selected binding keeps precedence.
+                            if key.is_none() { key = modules.textual_binding_key(&best, &module); }
+                            let Some(previous) = key.as_ref() else { break; };
+                            if next > *previous { key = Some(next); best = candidate.clone(); }
+                        }
+                    }
+                    r = Some(best);
+                }
+            }
         }
         // a module-relative path (`crate::m!`, `self::m!`, `::k::m!`) to this crate's `#[macro_export]` macro:
         // a macro-expanded one is the lint macro_expanded_macro_exports_accessed_by_absolute_paths (lint_early)
@@ -2905,7 +2945,7 @@ impl<'a> Parser<'a> {
                     if no_prelude { self.no_prelude -= 1; }
                     self.scope_stack.truncate(scope_depth);
                     // `#[macro_use]` on the module: its macros stay in scope after it
-                    let escape = attrs.iter().any(|a| a.toks.hi > a.toks.lo && self.tok_text(self.toks.at(a.toks.lo as usize)) == b"macro_use");
+                    let escape = attrs.iter().chain(inner.iter()).any(|a| a.toks.hi > a.toks.lo && self.tok_text(self.toks.at(a.toks.lo as usize)) == b"macro_use");
                     if escape {
                         let outer = self.scope_stack.last().copied().unwrap_or(0);
                         for r in self.rule_scopes.iter_mut().filter(|r| r.1 == scope) { r.1 = outer; }

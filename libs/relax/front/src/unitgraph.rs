@@ -165,7 +165,9 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
         let mut build = false;
         for s in &u.kind {
             match s.as_str() {
-                "lib" | "rlib" => lib = true,
+                // Rust dylibs still expose a Rust crate: compile their source into the JIT
+                // graph, without emitting or loading the native dylib artifact.
+                "lib" | "rlib" | "dylib" => lib = true,
                 "proc-macro" => pm = true,
                 // an integration test target: a root like a bin (its harness runs its tests); an
                 // example (`--example`) is one too

@@ -524,6 +524,17 @@ pub(super) fn start() {
         Err(e) => panic!("failed to start JIT pool worker: {e}"),
     }
 }
+/// A lifecycle test measures retained process heap after its initial setup.
+/// A pool thread allocates runtime state before entering the drain: merely spawning
+/// the drains does not establish that those one-off allocations have happened.
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn warm_workers_for_test() {
+    start();
+    let count = DRAINS.count.load(Ordering::Acquire);
+    while THREADS.get().unwrap().iter().take(count).any(|worker| worker.thread.get().is_none()) {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
 /// The workers leave at their next pick, a job in hand ending first (what compiles was told to stop
 /// by then: `jit::stop_compiling`). Returns once every one has: a job reads the run's unit and the
 /// statics the run's end puts back, so the end never goes on past one. While a job runs on, every

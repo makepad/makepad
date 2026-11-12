@@ -1314,7 +1314,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         let crates: Vec<usize> = g.crates.iter().enumerate().filter_map(|(ci, c)| {
             if g.pkg[ci].1 != *name || c.proc_macro || c.bin { return None; }
             units.units.iter().zip(&g.raw).any(|(u, raw)| {
-                !u.host && u.kind.iter().any(|k| matches!(k.as_str(), "lib" | "rlib"))
+                !u.host && u.kind.iter().any(|k| matches!(k.as_str(), "lib" | "rlib" | "dylib"))
                     && raw.pkg == g.pkg[ci] && raw.name == crate::crates::base_crate_name(&c.name)
             }).then_some(ci)
         }).collect();

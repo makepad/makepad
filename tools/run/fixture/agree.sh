@@ -16,10 +16,12 @@ W=${AGREE_DIR:-$root/target/agree}
 mkdir -p "$W"
 fail=""
 skipped=""
-package() { # package <name> <file> <src file>: a one-crate package holding the case
+package() { # package <name> <file> <src file>: a one-crate package holding the case, and the
+  # directories beside it that its `#[path = "<dir>/..."]` modules name
   mkdir -p "$W/$1/src"
   printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\n' "$1" > "$W/$1/Cargo.toml"
   cp "$2" "$W/$1/src/$3"
+  for d in $(sed -n 's,^#\[path = "\([^/"]*\)/.*,\1,p' "$2" | sort -u); do rm -rf "$W/$1/src/$d"; cp -R "$(dirname "$2")/$d" "$W/$1/src/"; done
 }
 verdict() { # verdict <label> <expected 0|1> <text or empty> <rc> <output>
   got=1; [ "$4" = 0 ] && got=0
@@ -47,10 +49,10 @@ case_of() { # case_of <file> <expected 0|1>
 T=libs/relax/compiler/tests
 named="$T/n01_round34_mcg.rs $T/n01_round34_literals_allow.rs $T/borrowck/raw_ptr_capture_accept.rs tools/run/fixture/diff/pr1330_fixes.rs
   $T/impl_header_assoc_const.rs $T/n01_const_provider.rs $T/n01_round35_asm_goto.rs $T/coerce_unsized_pointers.rs $T/derive_gat_hrtb.rs $T/asm_goto_label.rs
-  $T/supertrait_assoc_type_bounds.rs $T/const_param_projection_field.rs"
+  $T/supertrait_assoc_type_bounds.rs $T/const_param_projection_field.rs $T/macro_inner_use.rs $T/macro_file_order.rs $T/macro_file_shadow.rs"
 [ "$(uname -m)" = x86_64 ] && named="$named $T/n01_round35_target_feature_main_reject.rs"
 for f in "$fx"/accept/*.rs $named "$@"; do case_of "$f" 0; done
-for f in "$fx"/reject/*.rs $T/supertrait_assoc_bound_unmet_reject.rs; do case_of "$f" 1; done
+for f in "$fx"/reject/*.rs $T/supertrait_assoc_bound_unmet_reject.rs $T/macro_inner_use_before_module_reject.rs $T/macro_file_before_module_reject.rs; do case_of "$f" 1; done
 # an x86_64-only reject (the file is empty elsewhere): a load stays unsafe beside the safe SSE2 intrinsics
 [ "$(uname -m)" = x86_64 ] && case_of "$T/sse2_load_requires_unsafe_reject.rs" 1
 for f in "$fx"/reject_bin/*.rs; do
