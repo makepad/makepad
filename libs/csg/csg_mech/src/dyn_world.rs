@@ -445,7 +445,7 @@ fn moving_joint(model: &Model, pair: (i32,i32)) -> Option<usize> {
 }
 
 impl DynWorld {
-    /// Spreads the engine's parallel work (the narrowphase, tactile sensors) over `pool`, or keeps it on the
+    /// Spreads the engine's parallel work (the midphase and narrowphase, tactile sensors) over `pool`, or keeps it on the
     /// stepping thread with None; the steps come out the same either way. The stepping thread helps and waits
     /// for each spread, so a world bound to a pool is never stepped on the UI thread.
     pub fn bind_pool(&mut self, pool: Option<Arc<dyn TaskPool>>) {

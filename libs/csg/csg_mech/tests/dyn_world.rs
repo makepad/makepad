@@ -5,6 +5,9 @@ use makepad_csg_mech::mass::MassProps;
 use makepad_csg_mech::runner;
 use makepad_csg_mech::sim::{AnchorKind, AnchorSpec, Assembly, BodyAction, BodySpec, Friction, JointKind, JointSpec, MechWorld, SolidField, GRAVITY, NEWTON, SLEEP_SPEED};
 use makepad_csg_mech::weave::{self, Frame, SquareLink, Weave, WeaveProfile};
+use makepad_dynamics::thread::TaskPool;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 const DT: f64 = 1.0 / 240.0;
 
@@ -69,6 +72,37 @@ fn mail_runs_on_dynamics_and_stays_linked_hung_and_dragged() {
         linked(&w,&world,480+step);
     }
     assert!(dot(sub(world.poses()[body].com,at),frame.x)>5.0, "the hand must pull the mail");
+}
+
+/// A pool of 16 threads at the apps' workpool's cost per fan-out (the default) that counts its fan-outs and
+/// runs their tasks on the caller.
+struct Counting(AtomicUsize);
+
+impl TaskPool for Counting {
+    fn fan_out(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        (0..n).for_each(f);
+    }
+    fn threads(&self) -> usize {
+        16
+    }
+}
+
+#[test]
+fn big_mail_spreads_its_collision_over_the_pool() {
+    let (wp, link, frame) = setup();
+    let w = weave::mail(&wp, link, frame, [-24.0,-24.0], [24.0,24.0], 0.0, &|_| -1.0);
+    let mut asm = weave::assembly(&w, 1.24e-3, 240.0);
+    let top = w.links.iter().map(|l| dot(l.center(),frame.y)).fold(f64::NEG_INFINITY,f64::max);
+    for (i,l) in w.links.iter().enumerate() {
+        if dot(l.center(),frame.y)>top-1e-6 { fixed(&mut asm,i); }
+    }
+    let mut world = runner::dynamics_world(&asm, scale(frame.y,-GRAVITY), None).unwrap();
+    let pool = Arc::new(Counting(AtomicUsize::new(0)));
+    world.bind_pool(Some(pool.clone()));
+    for _ in 0..4 { world.step(DT); }
+    let fan_outs = pool.0.load(Ordering::Relaxed);
+    assert!(fan_outs >= 4, "the big mail's midphase pays for a fan-out every step: {fan_outs} in 4 steps");
 }
 
 #[test]
