@@ -819,7 +819,7 @@ impl IrFnCompiler {
                 let e = self.expr(ExprKind::TexSize(tex), v2);
                 self.push(ShaderType::Pod(pods.pod_vec2f), e);
             }
-            id!(sample) | id!(sample_lod) | id!(sample_nearest) | id!(sample_repeat) => {
+            id!(sample) | id!(sample_lod) | id!(sample_nearest) | id!(sample_repeat) | id!(sample_aniso_repeat) => {
                 let args_ok = if method_id == id!(sample_lod) {
                     exprs.len() == 2
                 } else if method_id == id!(sample_nearest) {
@@ -835,6 +835,8 @@ impl IrFnCompiler {
                     ShaderSampler { filter: SamplerFilter::Nearest, ..ShaderSampler::default() }
                 } else if method_id == id!(sample_repeat) {
                     ShaderSampler { address: SamplerAddress::Repeat, ..ShaderSampler::default() }
+                } else if method_id == id!(sample_aniso_repeat) {
+                    ShaderSampler { address: SamplerAddress::Repeat, anisotropy: 16, ..ShaderSampler::default() }
                 } else {
                     ShaderSampler::default()
                 };
@@ -863,13 +865,15 @@ impl IrFnCompiler {
             // `sample_grad_repeat`: the same with a repeating sampler (a
             // tiled texture read where implicit derivatives are not
             // defined: inside a branch that differs between pixels).
-            id!(sample_grad) | id!(sample_grad_repeat) => {
+            id!(sample_grad) | id!(sample_grad_repeat) | id!(sample_grad_aniso_repeat) => {
                 if exprs.len() != 3 || !matches!(tex_type, TextureType::Texture2d | TextureType::Texture2dArray) {
                     script_err_invalid_args!(self.trap, "texture.{:?}(coord, dx, dy) takes 3 args, on a 2D texture or 2D array (coord.z = layer)", method_id);
                     return self.push(ShaderType::Pod(pods.pod_vec4f), NO_EXPR);
                 }
                 let sampler = output.get_or_create_sampler(if method_id == id!(sample_grad_repeat) {
                     ShaderSampler { address: SamplerAddress::Repeat, ..ShaderSampler::default() }
+                } else if method_id == id!(sample_grad_aniso_repeat) {
+                    ShaderSampler { address: SamplerAddress::Repeat, anisotropy: 16, ..ShaderSampler::default() }
                 } else {
                     ShaderSampler::default()
                 });
@@ -920,7 +924,7 @@ impl IrFnCompiler {
                     method_id,
                     suggest_from_live_ids(
                         method_id,
-                        &[id!(sample), id!(sample_nearest), id!(sample_repeat), id!(sample_lod), id!(sample_grad), id!(sample_grad_repeat), id!(sample_video), id!(size)]
+                        &[id!(sample), id!(sample_nearest), id!(sample_repeat), id!(sample_aniso_repeat), id!(sample_lod), id!(sample_grad), id!(sample_grad_repeat), id!(sample_grad_aniso_repeat), id!(sample_video), id!(size)]
                     )
                 );
             }
@@ -1216,4 +1220,65 @@ fn is_compute_builtin(op: Builtin) -> bool {
             | Builtin::AtomicMin
             | Builtin::AtomicMax
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anisotropic_samples_opt_in_and_share_the_repeat_sampler() {
+        let mut host = ScriptVmHost::new(0i32, ());
+        let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
+        vm.bx.captured_errors = Some(Vec::new());
+        let source = "use mod.pod.*\nuse mod.math.*\nuse mod.shader\n{
+            geom: shader.vertex_buffer(vec2f, nil)
+            vertex_pos: shader.vertex_position(vec4f)
+            tex: shader.texture_2d(float)
+            layers: shader.texture_2d_array(float)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn() { self.vertex_pos = vec4f(self.geom, 0.0, 1.0) }
+            fragment: fn() {
+                let uv = vec2(0.25, 0.5)
+                let layer = vec3(0.25, 0.5, 0.0)
+                let dx = vec2(0.125, 0.0)
+                let dy = vec2(0.0, 0.125)
+                self.pixel = self.tex.sample_repeat(uv)
+                    + self.tex.sample_grad_repeat(uv, dx, dy)
+                    + self.tex.sample_aniso_repeat(uv)
+                    + self.tex.sample_grad_aniso_repeat(uv, dx, dy)
+                    + self.layers.sample_repeat(layer)
+                    + self.layers.sample_grad_repeat(layer, dx, dy)
+                    + self.layers.sample_aniso_repeat(layer)
+                    + self.layers.sample_grad_aniso_repeat(layer, dx, dy)
+            }
+        }";
+        let shader = vm.eval(ScriptMod::new("", "", "anisotropic_samples", 0, 0, source, &[])).as_object().expect("shader object");
+        let output = crate::shader_ir_draw::compile_draw_shader_ir_with(&mut vm, shader, &Default::default());
+        let errors = vm.take_errors();
+        assert!(errors.is_empty(), "shader evaluation and lowering errors: {errors:?}");
+        assert!(!output.has_errors, "{}", output.error_report());
+        assert_eq!(output.samplers.len(), 2, "only anisotropy separates the samplers");
+        let mut counts = [0; 4];
+        for sample in output.ir.functions.iter().flat_map(|f| &f.exprs).filter_map(|e| {
+            if let ExprKind::Sample(s) = &e.kind { Some(s) } else { None }
+        }) {
+            let (index, anisotropy, grad) = match sample.method {
+                id!(sample_repeat) => (0, 1, false),
+                id!(sample_grad_repeat) => (1, 1, true),
+                id!(sample_aniso_repeat) => (2, 16, false),
+                id!(sample_grad_aniso_repeat) => (3, 16, true),
+                _ => panic!("unexpected texture method"),
+            };
+            counts[index] += 1;
+            assert_eq!(output.samplers[sample.sampler as usize], ShaderSampler {
+                filter: SamplerFilter::Linear, address: SamplerAddress::Repeat,
+                coord: SamplerCoord::Normalized, is_video: false, compare: false, anisotropy,
+            }, "sampler for {:?}", sample.method);
+            assert_eq!(matches!(sample.kind, SampleKind::Grad), grad, "gradient sampling for {:?}", sample.method);
+            assert_eq!(sample.dx != NO_EXPR && sample.dy != NO_EXPR, grad, "gradient operands for {:?}", sample.method);
+        }
+        assert_eq!(counts, [2; 4], "each method lowers on both 2D and array textures");
+        assert_eq!(ShaderSampler::video().anisotropy, 1, "video sampling remains isotropic");
+    }
 }

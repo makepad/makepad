@@ -990,10 +990,11 @@ impl ScriptHeap {
 
     /// Check if garbage collection should be triggered.
     ///
-    /// Uses a growth-based heuristic similar to Lua and V8:
-    /// - Trigger when any heap category has grown by 2x since last GC
-    /// - Use minimum thresholds to avoid GC thrashing on small heaps
-    /// - Objects are weighted more heavily as they're the primary allocation type
+    /// Objects and pods are summed: collect when their sum has doubled since
+    /// the last collection and reached their combined minimum thresholds,
+    /// because a mark costs in proportion to the live set. Strings, arrays,
+    /// handles and regexes double on their own, each with a minimum threshold
+    /// to avoid GC thrashing on small heaps.
 
     #[inline]
     pub fn needs_gc(&self) -> bool {
@@ -1021,17 +1022,17 @@ impl ScriptHeap {
         let pods = self.pods.len() - self.pods_free.len();
         let handles = self.handles.len() - self.handles_free.len();
 
-        // Check each category: must exceed minimum AND have grown by factor
-        if objects >= MIN_OBJECTS && objects >= self.gc_last.objects * GROWTH_FACTOR {
+        // Objects and pods grow together; other categories grow independently.
+        let grown = objects + pods;
+        if grown >= MIN_OBJECTS + MIN_PODS
+            && grown >= (self.gc_last.objects + self.gc_last.pods) * GROWTH_FACTOR
+        {
             return true;
         }
         if strings >= MIN_STRINGS && strings >= self.gc_last.strings * GROWTH_FACTOR {
             return true;
         }
         if arrays >= MIN_ARRAYS && arrays >= self.gc_last.arrays * GROWTH_FACTOR {
-            return true;
-        }
-        if pods >= MIN_PODS && pods >= self.gc_last.pods * GROWTH_FACTOR {
             return true;
         }
         if handles >= MIN_HANDLES && handles >= self.gc_last.handles * GROWTH_FACTOR {
@@ -1045,6 +1046,19 @@ impl ScriptHeap {
         }
 
         false
+    }
+
+    /// Current allocated entries by category, excluding free slots.
+    #[relax_api]
+    pub fn gc_live_counts(&self) -> ScriptHeapGcLast {
+        ScriptHeapGcLast {
+            objects: self.objects.len() - self.objects_free.len(),
+            strings: self.strings.len() - self.strings_free.len(),
+            arrays: self.arrays.len() - self.arrays_free.len(),
+            pods: self.pods.len() - self.pods_free.len(),
+            handles: self.handles.len() - self.handles_free.len(),
+            regexes: self.regexes.len() - self.regexes_free.len(),
+        }
     }
 
     #[inline]

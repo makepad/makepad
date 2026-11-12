@@ -395,14 +395,35 @@ fn sampler_decls(output: &ShaderOutput, out: &mut String) {
         };
         writeln!(
             out,
-            "constexpr sampler _s{}(filter::{}, mip_filter::linear, address::{}, coord::{}{});",
+            "constexpr sampler _s{}(filter::{}, mip_filter::linear, address::{}, coord::{}{}{});",
             idx,
             filter,
             address,
             coord,
-            if sampler.compare { ", compare_func::less_equal" } else { "" }
+            if sampler.compare { ", compare_func::less_equal" } else { "" },
+            if sampler.anisotropy > 1 { format!(", max_anisotropy({})", sampler.anisotropy.min(16)) } else { String::new() }
         )
         .ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shader_output::{SamplerAddress, ShaderSampler};
+
+    #[test]
+    fn sampler_anisotropy_is_emitted_only_when_requested() {
+        let repeat = ShaderSampler { address: SamplerAddress::Repeat, ..Default::default() };
+        let mut output = ShaderOutput::default();
+        output.samplers = vec![ShaderSampler::default(), repeat, ShaderSampler { anisotropy: 16, ..repeat }];
+        let mut source = String::new();
+        sampler_decls(&output, &mut source);
+        assert_eq!(source, concat!(
+            "constexpr sampler _s0(filter::linear, mip_filter::linear, address::clamp_to_edge, coord::normalized);\n",
+            "constexpr sampler _s1(filter::linear, mip_filter::linear, address::repeat, coord::normalized);\n",
+            "constexpr sampler _s2(filter::linear, mip_filter::linear, address::repeat, coord::normalized, max_anisotropy(16));\n",
+        ));
     }
 }
 

@@ -362,6 +362,7 @@ fn private_globals(cx: &TextCx, ir: &IrModule, vertex: bool, out: &mut String) {
 
 /// Which sampler each texture is sampled with, the first sample winning, in
 /// the order the compile reached them (the vertex stage's calls first).
+/// GL binds one sampler per texture, so this rule covers filter, address and anisotropy alike.
 pub fn texture_sampler_bindings(ir: &IrModule) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     let mut seen = vec![false; ir.functions.len()];

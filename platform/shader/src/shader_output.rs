@@ -39,6 +39,8 @@ pub struct ShaderSampler {
     pub is_video: bool,
     /// Compare reference <= stored depth, then linearly filter visibility.
     pub compare: bool,
+    /// The requested anisotropy; 1 leaves anisotropic filtering off.
+    pub anisotropy: u8,
 }
 
 impl Default for ShaderSampler {
@@ -49,6 +51,7 @@ impl Default for ShaderSampler {
             coord: SamplerCoord::Normalized,
             is_video: false,
             compare: false,
+            anisotropy: 1,
         }
     }
 }

@@ -55,7 +55,7 @@ use makepad_live_id::*;
 use std::collections::{HashMap, HashSet};
 /// Bumped whenever the key's recipe or the pack's layout changes; a pack of
 /// another version is refused.
-const SHADER_PACK_VERSION: u32 = 3;
+const SHADER_PACK_VERSION: u32 = 4;
 const SHADER_PACK_MAGIC: &[u8; 4] = b"MPSP";
 
 /// One draw shader of a pack: its GLSL ES 3.0 code and reflection.
@@ -1114,6 +1114,7 @@ impl PackWriter {
             self.u8(code_of(&COORDS, &s.coord));
             self.u8(s.is_video as u8);
             self.u8(s.compare as u8);
+            self.u8(s.anisotropy);
         }
         self.len(e.scope_uniforms.len());
         for su in &e.scope_uniforms {
@@ -1346,6 +1347,7 @@ impl<'a> PackReader<'a> {
                 coord: self.code(&COORDS)?,
                 is_video: self.u8()? != 0,
                 compare: self.u8()? != 0,
+                anisotropy: self.u8()?,
             });
         }
         let n = self.len()?;

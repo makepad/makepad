@@ -75,6 +75,87 @@ fn repeated_eval_reaches_a_steady_heap() {
     assert!(object_slots(&vm) <= slots_warm.max(4096), "object table grew: {} slots", object_slots(&vm));
 }
 
+/// Small pod churn shares the live objects' GC headroom; payload categories
+/// still trigger independently at their own doubling thresholds.
+#[test]
+fn objects_and_pods_share_gc_growth() {
+    let mut vm = test_vm();
+    let (pods, _pods_root) = entry(
+        &mut vm,
+        "use mod.pod.*
+let objects = []
+for i in 0..2048 { objects.push({value: i}) }
+fn(n) { for i in 0..n { let p = vec3f(1, 2, 3) } return objects[0].value }",
+    );
+    let (handles, _handles_root) = entry(
+        &mut vm,
+        "fn(n) { for i in 0..n { let doc = \"<p/>\".parse_html() } return 0 }",
+    );
+    vm.call(pods, &[1usize.into()]);
+    vm.call(handles, &[1usize.into()]);
+    let errors = vm.take_errors();
+    assert!(errors.is_empty(), "setup: pod and handle constructors execute without errors: {errors:?}");
+    vm.gc();
+    let baseline = vm.heap().gc_live_counts();
+    let combined = baseline.objects + baseline.pods;
+    assert!(baseline.objects >= 2048, "a: the large live object set is rooted");
+
+    let value = vm.call(pods, &[(combined - 1).into()]);
+    assert_eq!(value.as_number(), Some(0.0), "a: rooted objects survive the baseline GC");
+    let grown = vm.heap().gc_live_counts();
+    assert!(grown.pods >= 128 && grown.pods > baseline.pods * 2, "a: pods alone exceed their minimum and double");
+    assert_eq!(grown.objects + grown.pods, combined * 2 - 1, "a: combined growth is just below doubling");
+    assert!(!vm.heap().needs_gc(), "a: pod churn below combined doubling does not trigger GC");
+
+    vm.call(pods, &[1usize.into()]);
+    let grown = vm.heap().gc_live_counts();
+    assert_eq!(grown.objects + grown.pods, combined * 2, "b: objects and pods have doubled together");
+    assert!(vm.heap().needs_gc(), "b: combined doubling triggers GC");
+
+    vm.gc();
+    assert_eq!(vm.heap().gc_live_counts().pods, baseline.pods, "c: short-lived pods return to their baseline after GC");
+    assert!(!vm.heap().needs_gc(), "c: collection resets the growth baseline");
+
+    vm.gc();
+    let baseline = vm.heap().gc_live_counts();
+    let strings_to_double = (baseline.strings * 2).max(256) - baseline.strings;
+    for i in 0..strings_to_double - 1 {
+        vm.bx.heap.new_string_from_str(&format!("gc growth temporary string {i}"));
+    }
+    assert!(!vm.heap().needs_gc(), "d strings: below their own threshold does not trigger GC");
+    vm.bx.heap.new_string_from_str("gc growth final temporary string");
+    let grown = vm.heap().gc_live_counts();
+    assert_eq!(grown.strings, (baseline.strings * 2).max(256), "d strings: reach their own doubling threshold and minimum");
+    assert_eq!(grown.objects + grown.pods, baseline.objects + baseline.pods, "d strings: objects and pods did not grow");
+    assert!(vm.heap().needs_gc(), "d strings: strings alone trigger GC");
+
+    vm.gc();
+    let baseline = vm.heap().gc_live_counts();
+    let arrays_to_double = (baseline.arrays * 2).max(128) - baseline.arrays;
+    for _ in 0..arrays_to_double - 1 {
+        vm.bx.heap.new_array();
+    }
+    assert!(!vm.heap().needs_gc(), "d arrays: below their own threshold does not trigger GC");
+    vm.bx.heap.new_array();
+    let grown = vm.heap().gc_live_counts();
+    assert_eq!(grown.arrays, (baseline.arrays * 2).max(128), "d arrays: reach their own doubling threshold and minimum");
+    assert_eq!(grown.objects + grown.pods, baseline.objects + baseline.pods, "d arrays: objects and pods did not grow");
+    assert!(vm.heap().needs_gc(), "d arrays: arrays alone trigger GC");
+
+    vm.gc();
+    let baseline = vm.heap().gc_live_counts();
+    let handles_to_double = (baseline.handles * 2).max(64) - baseline.handles;
+    vm.call(handles, &[(handles_to_double - 1).into()]);
+    assert!(!vm.heap().needs_gc(), "d handles: below their own threshold does not trigger GC");
+    vm.call(handles, &[1usize.into()]);
+    let grown = vm.heap().gc_live_counts();
+    assert_eq!(grown.handles, (baseline.handles * 2).max(64), "d handles: reach their own doubling threshold and minimum");
+    assert_eq!(grown.objects + grown.pods, baseline.objects + baseline.pods, "d handles: objects and pods did not grow");
+    assert!(vm.heap().needs_gc(), "d handles: handles alone trigger GC");
+    let errors = vm.take_errors();
+    assert!(errors.is_empty(), "a-d: script loops execute without errors: {errors:?}");
+}
+
 /// What escapes a loop keeps what it reads: closures made in nested loop bodies
 /// (reading the loop variables, a body `let` and the call scope) and a loop
 /// scope handed out with `scope` stay valid after the call returns, across GC.
