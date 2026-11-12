@@ -647,7 +647,7 @@ impl Builder<'_> {
     ///
     /// Example: when compiling the call to `foo` here:
     ///
-    /// ```ignore (illustrative)
+    /// ```text
     /// foo(bar(), ...)
     /// ```
     ///
@@ -656,7 +656,7 @@ impl Builder<'_> {
     /// unwind (it would ensure that `_X` gets dropped). However, if no unwind occurs, then `_X` will be
     /// unconditionally consumed by the `foo` call:
     ///
-    /// ```ignore (illustrative)
+    /// ```text
     /// _R = CALL(foo, _X, ...)
     /// ```
     ///

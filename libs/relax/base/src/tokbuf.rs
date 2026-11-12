@@ -6,8 +6,13 @@
 //! Templates are written with `tg!`: Rust tokens are the generated tokens, `#method(args)`
 //! calls a builder method for the dynamic parts.
 //!
-//! ```ignore
-//! tg!(g; fn #word(&name) ( & self ) -> #core() :: fmt :: Result { #body(x) });
+//! ```
+//! use relax_base::{tg, tokbuf::TokBuf};
+//! let mut g = TokBuf::new(2021);
+//! let name = "fmt";
+//! tg!(&mut g; fn #word(name) ( & self ) -> #core() :: fmt :: Result { Ok(()) });
+//! assert_eq!(g.s, " fn fmt ( & self ) -> :: __relax_crate_core :: fmt :: Result { Ok ( ( ) ) }");
+//! g.verify("the template"); // the text lexes to exactly these tokens
 //! ```
 
 use crate::ast::ExprId;

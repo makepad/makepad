@@ -249,7 +249,7 @@ impl<'a> Builder<'a> {
     ///
     /// For example, all of these would fail to error if borrowck could see the real CFG (examples
     /// taken from `tests/ui/nll/match-cfg-fake-edges.rs`):
-    /// ```ignore (too many errors, this is already in the test suite)
+    /// ```text
     /// let x = String::new();
     /// let _ = match true {
     ///     _ => {},
@@ -259,7 +259,7 @@ impl<'a> Builder<'a> {
     /// drop(x); //~ ERROR use of moved value
     ///
     /// let x;
-    /// # let y = true;
+    /// let y = true;
     /// match y {
     ///     _ if { x = 2; true } => {},
     ///     // Borrowck must not know the guard is always run.
@@ -267,7 +267,7 @@ impl<'a> Builder<'a> {
     /// };
     ///
     /// let x = String::new();
-    /// # let y = true;
+    /// let y = true;
     /// match y {
     ///     false if { drop(x); true } => {},
     ///     // Borrowck must not know the guard is not run in the `true` case.
@@ -1253,7 +1253,8 @@ struct MatchTreeBranch {
 /// corresponding `success_block`. If none of the patterns matches, we branch to `otherwise_block`.
 ///
 /// Each branch is made of one of more sub-branches, corresponding to or-patterns. E.g.
-/// ```ignore(illustrative)
+/// ```
+/// # let foo = (true, false);
 /// match foo {
 ///     (x, false) | (false, x) => {}
 ///     (true, true) => {}
@@ -1563,7 +1564,7 @@ impl Builder<'_> {
     ///
     /// For example, if we have something like this:
     ///
-    /// ```ignore (illustrative)
+    /// ```text
     /// ...
     /// Some(x) if cond1 => ...
     /// Some(x) => ...
@@ -2230,7 +2231,7 @@ impl Builder<'_> {
     ///
     /// So an input like:
     ///
-    /// ```ignore (illustrative)
+    /// ```text
     /// let place = Foo::new();
     /// match place { foo if inspect(foo)
     ///     => feed(foo), ... }
@@ -2238,7 +2239,7 @@ impl Builder<'_> {
     ///
     /// will be treated as if it were really something like:
     ///
-    /// ```ignore (illustrative)
+    /// ```text
     /// let place = Foo::new();
     /// match place { Foo { .. } if { let tmp1 = &place; inspect(*tmp1) }
     ///     => { let tmp2 = place; feed(tmp2) }, ... }
@@ -2246,7 +2247,7 @@ impl Builder<'_> {
     ///
     /// And an input like:
     ///
-    /// ```ignore (illustrative)
+    /// ```text
     /// let place = Foo::new();
     /// match place { ref mut foo if inspect(foo)
     ///     => feed(foo), ... }
@@ -2254,7 +2255,7 @@ impl Builder<'_> {
     ///
     /// will be treated as if it were really something like:
     ///
-    /// ```ignore (illustrative)
+    /// ```text
     /// let place = Foo::new();
     /// match place { Foo { .. } if { let tmp1 = & &mut place; inspect(*tmp1) }
     ///     => { let tmp2 = &mut place; feed(tmp2) }, ... }
