@@ -3608,6 +3608,104 @@ pub fn vrndq_f32(a: float32x4_t) -> float32x4_t {
     float32x4_t(r)
 }
 
+/// Arm's RecipSqrtEstimate for each 9-bit operand 128..=511 (0.25 to 1 in 1/512 steps): the low
+/// eight bits of its estimate 256..=511 (1 to 2 in 1/256 steps).
+const fn neon_rsqrt_estimates() -> [u8; 384] {
+    let mut table = [0u8; 384];
+    let mut i = 0;
+    while i < 384 {
+        let a = i as u32 + 128;
+        // the middle of the operand's interval: in 1/1024 steps below 0.5, in 1/512 steps from it
+        let a = if a < 256 { a * 2 + 1 } else { (a | 1) * 2 };
+        // the largest b below 2^14 / sqrt(a), then halved to nearest
+        let mut b = 512;
+        while a * (b + 1) * (b + 1) < 1 << 28 {
+            b += 1;
+        }
+        table[i] = ((b + 1) / 2) as u8;
+        i += 1;
+    }
+    table
+}
+
+const NEON_RSQRT_ESTIMATES: [u8; 384] = neon_rsqrt_estimates();
+
+/// FRSQRTE on one f32: Arm's FPRSqrtEstimate under the FPCR every OS sets (round to nearest, no
+/// flush to zero, NaNs kept): an 8-bit estimate of 1/sqrt(x) from the top 8 bits of x's fraction
+/// and the parity of its exponent.
+fn neon_rsqrte_f32(x: f32) -> f32 {
+    let bits = x.to_bits();
+    let sign = bits & 0x8000_0000;
+    let mut exp = ((bits >> 23) & 0xff) as i32;
+    let mut frac = bits & 0x7f_ffff;
+    if exp == 0xff && frac != 0 {
+        // a NaN comes back quieted
+        return f32::from_bits(bits | 0x40_0000);
+    }
+    if exp == 0 && frac == 0 {
+        // a zero gives the infinity of its sign
+        return f32::from_bits(sign | 0x7f80_0000);
+    }
+    if sign != 0 {
+        // any other negative operand gives the default NaN
+        return f32::from_bits(0x7fc0_0000);
+    }
+    if exp == 0xff {
+        return 0.0;
+    }
+    // a subnormal is normalised first
+    if exp == 0 {
+        while frac & 0x40_0000 == 0 {
+            frac <<= 1;
+            exp -= 1;
+        }
+        frac = (frac << 1) & 0x7f_ffff;
+    }
+    // the operand scaled to [0.5, 1) when its exponent is even, to [0.25, 0.5) when it is odd
+    let scaled = if exp & 1 == 0 { 256 | (frac >> 15) } else { 128 | (frac >> 16) };
+    let estimate = NEON_RSQRT_ESTIMATES[(scaled - 128) as usize] as u32;
+    f32::from_bits((((380 - exp) / 2) as u32) << 23 | estimate << 15)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vrsqrteq_f32(a: float32x4_t) -> float32x4_t {
+    let mut r = [0.0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = neon_rsqrte_f32(a.0[i]);
+        i += 1;
+    }
+    float32x4_t(r)
+}
+
+/// FRSQRTS on one f32 pair: Arm's FPRSqrtStepFused, (3 - a * b) / 2 rounded once (the Newton step
+/// that refines FRSQRTE's estimate); an infinity times a zero is 1.5. `a` is negated before the
+/// NaN rules, so a NaN taken from it comes back with its sign flipped.
+fn neon_rsqrts_f32(a: f32, b: f32) -> f32 {
+    let a = -a;
+    if a.is_nan() || b.is_nan() {
+        return neon_result_f32(a, b, 0.0);
+    }
+    if (a.is_infinite() && b == 0.0) || (a == 0.0 && b.is_infinite()) {
+        return 1.5;
+    }
+    // 1.5 + (a / 2) * b in one rounding. Halving the larger operand is exact unless it is below
+    // 2^-125, and then the product is far below 1.5's last place whichever way the half rounds.
+    let (a, b) = if a.abs() >= b.abs() { (a * 0.5, b) } else { (a, b * 0.5) };
+    a.mul_add(b, 1.5)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vrsqrtsq_f32(a: float32x4_t, b: float32x4_t) -> float32x4_t {
+    let mut r = [0.0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = neon_rsqrts_f32(a.0[i], b.0[i]);
+        i += 1;
+    }
+    float32x4_t(r)
+}
+
 #[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vsetq_lane_f32<const LANE: i32>(a: f32, b: float32x4_t) -> float32x4_t {

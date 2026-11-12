@@ -7543,6 +7543,41 @@ fn vrndq_f32() {
 }
 
 #[test]
+fn vrsqrteq_f32() {
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    unsafe {
+        assert!(
+            std::arch::is_aarch64_feature_detected!("neon"),
+            "required native neon coverage unavailable"
+        );
+        for case in 0..RANDOM_CASES + 64 + 24 * 24 * 24 {
+            let p0: hr::float32x4_t = neon_sample(&mut rng, case, 0, 4);
+            let got = hr::vrsqrteq_f32(p0);
+            let expected = real::vrsqrteq_f32(cast(p0));
+            assert_eq!(bytes(&got), bytes(&expected), "case {case}");
+        }
+    }
+}
+
+#[test]
+fn vrsqrtsq_f32() {
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    unsafe {
+        assert!(
+            std::arch::is_aarch64_feature_detected!("neon"),
+            "required native neon coverage unavailable"
+        );
+        for case in 0..RANDOM_CASES + 64 + 24 * 24 * 24 {
+            let p0: hr::float32x4_t = neon_sample(&mut rng, case, 0, 4);
+            let p1: hr::float32x4_t = neon_sample(&mut rng, case, 1, 4);
+            let got = hr::vrsqrtsq_f32(p0, p1);
+            let expected = real::vrsqrtsq_f32(cast(p0), cast(p1));
+            assert_eq!(bytes(&got), bytes(&expected), "case {case}");
+        }
+    }
+}
+
+#[test]
 fn vsetq_lane_f32() {
     unsafe fn compare<const LANE: i32>(p0: f32, p1: hr::float32x4_t, case: usize) {
         let got = hr::vsetq_lane_f32::<LANE>(p0, p1);

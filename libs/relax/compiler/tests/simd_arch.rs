@@ -421,6 +421,9 @@ fn arch() {
     t!(vmlal_u32, uint64x2_t, uint32x2_t, uint32x2_t);
     t!(vmlal_high_u32, uint64x2_t, uint32x4_t, uint32x4_t);
     b!(vuzpq_u32, uint32x4_t, uint32x4_t);
+    // tiny-skia's 1 / sqrt(x): the estimate and its Newton step
+    u!(vrsqrteq_f32, float32x4_t);
+    b!(vrsqrtsq_f32, float32x4_t, float32x4_t);
     // a chain in a loop: adler32-style sums (vector values across iterations)
     bin(
         "chain_adler",
