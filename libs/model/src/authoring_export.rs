@@ -32,6 +32,7 @@ impl Document {
     }
     fn compile_view(&self,cancelled:Option<&dyn Fn()->bool>,preview:bool,cache:Option<&mut crate::CompileCache>)->Result<CompiledModel>{
         if !preview&&self.soft_body().is_none()&&self.scene().is_empty()&&self.rig().morphs.is_empty(){return self.compile_evaluated(cancelled,cache);}
+        let evaluation_timer=crate::build_detail::CompileTimer::new(crate::build_detail::CompilePhase::Evaluation);
         let mut ctx=mesh::Context::new(self.limits().mesh.clone(),cancelled);
         ctx.checkpoint(1)?;
         self.scene().validate(&self.state,self.limits(),&mut ctx)?;
@@ -68,7 +69,9 @@ impl Document {
         evaluated.state.objects=objects;
         drop(cached);
         crate::delivery::expand(&mut evaluated,&mut ctx)?;
+        drop(evaluation_timer);
         let mut product=evaluated.compile_evaluated(cancelled,cache)?;
+        let _assembly_timer=crate::build_detail::CompileTimer::new(crate::build_detail::CompilePhase::GlbAssembly);
         if !preview {if let Some(metadata)=self.soft_body(){
             product.glb=augment_glb_soft_body(&product.glb,metadata).map_err(|_|Error::Invalid("soft-body GLB metadata"))?;
         }}

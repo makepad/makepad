@@ -68,4 +68,6 @@ pub mod stencil;
 pub mod import;
 mod program;
 pub use program::*;
+mod build_detail;
+pub use build_detail::{CompileTimings, GeometryTimings, OperationTiming, ProgramBuildDetail, TextureGenerationTimer, TextureTiming, WeatheringTiming};
 pub use review_pose::*;

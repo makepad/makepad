@@ -18,7 +18,7 @@ struct Region {
 }
 pub(crate) struct Atlas {
     pub png: Vec<u8>,
-    size: [u32; 2],
+    pub(crate) size: [u32; 2],
     regions: BTreeMap<u32, Region>,
     whole_image: bool,
 }

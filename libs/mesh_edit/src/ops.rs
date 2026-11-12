@@ -63,7 +63,7 @@ impl Mesh {
         *self = candidate;
         Ok((result, changes))
     }
-    fn element_ids(&self, ctx: &mut Context<'_>) -> Result<BTreeSet<ElementId>> {
+    pub(crate) fn element_ids(&self, ctx: &mut Context<'_>) -> Result<BTreeSet<ElementId>> {
         let mut ids = BTreeSet::new();
         for v in &self.vertices {
             ctx.checkpoint(1)?;

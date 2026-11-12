@@ -6,7 +6,7 @@
 //! [`Operation`], a program has a few macro operations ([`ProgramOp`]).
 #[path = "program_weathering.rs"]
 mod weathering;
-use crate::{canon::Writer, character::{CharacterSpec, FpsArms}, transform::*, Attachment, CompiledModel, Document, Error, Limits, Operation, RigOperation, SceneOperation, Socket, Transaction, WeightEdit};
+use crate::{canon::Writer, character::{CharacterSpec, FpsArms}, transform::*, Attachment, CompiledModel, Document, Error, Limits, Operation, RigOperation, SceneOperation, Socket, WeightEdit, Workspace};
 use std::{cell::Cell, collections::BTreeMap, time::Duration};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -215,7 +215,7 @@ pub struct ProgramTimings {
     /// Final model compilation, excluding texture work counted above.
     pub compile: Duration,
 }
-pub struct BuiltProgram { pub document: Document, pub compiled: CompiledModel, pub warnings: Vec<String>, pub timings: ProgramTimings }
+pub struct BuiltProgram { pub document: Document, pub compiled: CompiledModel, pub warnings: Vec<String>, pub timings: ProgramTimings, pub detail: crate::ProgramBuildDetail }
 
 /// Readable text for engine errors, for authors rather than engine tests.
 pub fn describe_error(error: &Error) -> String {
@@ -232,37 +232,85 @@ pub fn describe_error(error: &Error) -> String {
 const CHUNK: usize = 64;
 
 struct Runner<'a> {
-    doc: Document,
+    doc: Workspace,
     limits: Limits,
+    program: &'a [ProgramOp],
     pending: Vec<(usize, Operation)>,
-    serial: u64,
+    generation: u64,
+    // Own the already-materialized inputs for error-only replay. Successful
+    // builds neither clone document states nor re-execute these batches.
+    replay_batches: Vec<Vec<ReplayInput>>,
+    replay_bytes: usize,
     cancelled: Option<&'a dyn Fn() -> bool>,
 }
+enum ReplayInput { Program(usize), Expanded(Box<Operation>) }
 impl Runner<'_> {
-    fn flush(&mut self, names: &[String]) -> Result<(), ProgramFailure> {
-        while !self.pending.is_empty() {
-            let take = self.pending.len().min(CHUNK.min(self.limits.max_operations));
-            let batch: Vec<(usize, Operation)> = self.pending.drain(..take).collect();
-            if self.apply(batch.iter().map(|(_, op)| op.clone()).collect()).is_err() {
-                // Replay one by one to attribute the failure to its operation.
-                for (index, op) in batch {
-                    if let Err(error) = self.apply(vec![op]) {
-                        return Err(ProgramFailure { index, op: names.get(index).cloned().unwrap_or_default(), message: describe_error(&error) });
-                    }
-                }
+    fn remember(&mut self, indices: &[usize], operations: Vec<Operation>) {
+        let batch = indices.iter().zip(operations).map(|(&index, operation)| {
+            self.replay_bytes = self.replay_bytes.saturating_add(std::mem::size_of::<ReplayInput>());
+            if matches!(self.program[index], ProgramOp::Op(_) | ProgramOp::Mesh(_)) {
+                ReplayInput::Program(index)
+            } else {
+                self.replay_bytes = self.replay_bytes.saturating_add(operation.memory_bytes());
+                ReplayInput::Expanded(Box::new(operation))
             }
-            let head = self.doc.head();
-            self.doc.checkpoint(head).map_err(|e| ProgramFailure { index: 0, op: "checkpoint".into(), message: describe_error(&e) })?;
+        }).collect();
+        self.replay_batches.push(batch);
+    }
+    fn materialize(&self, batch: &[ReplayInput]) -> crate::Result<Vec<Operation>> {
+        batch.iter().map(|input| match input {
+            ReplayInput::Expanded(op) => Ok((**op).clone()),
+            ReplayInput::Program(index) => match &self.program[*index] {
+                ProgramOp::Op(op) => Ok(op.clone()),
+                ProgramOp::Mesh(mesh) => mesh.operation(&self.limits),
+                _ => unreachable!(),
+            },
+        }).collect()
+    }
+    fn flush(&mut self, names: &[String]) -> Result<(), ProgramFailure> {
+        let _flush = crate::build_detail::GeometryTimer::new(crate::build_detail::GeometryPhase::FlushApply);
+        let chunk = CHUNK.min(self.limits.max_operations);
+        if chunk == 0 && !self.pending.is_empty() {
+            let index = self.pending[0].0;
+            return Err(ProgramFailure { index, op: names.get(index).cloned().unwrap_or_default(), message: "transaction operations budget exceeded".into() });
+        }
+        let mut pending = std::mem::take(&mut self.pending).into_iter();
+        loop {
+            let (indices, operations): (Vec<_>, Vec<_>) = pending.by_ref().take(chunk).unzip();
+            if operations.is_empty() { break; }
+            if let Err((failed, error)) = self.doc.execute_program(&operations, self.replay_bytes, self.cancelled) {
+                let failure = |at: usize, error: Error| {
+                    let index = indices[at];
+                    ProgramFailure { index, op: names.get(index).cloned().unwrap_or_default(), message: describe_error(&error) }
+                };
+                if matches!(error, Error::Mesh(crate::mesh::MeshError::Cancelled)) { return Err(failure(failed, error)); }
+                // End-of-batch validation can find an error introduced by an
+                // earlier operation. Reconstruct the boundary only on failure,
+                // then use the original one-at-a-time attribution behavior.
+                // Drop the damaged workspace before reconstructing, so error
+                // attribution does not pin an additional full model state.
+                self.doc = Workspace::new(self.limits.clone()).map_err(|e| failure(failed, e))?;
+                for batch in &self.replay_batches {
+                    let batch = self.materialize(batch).map_err(|e| failure(failed, e))?;
+                    self.doc.execute_program(&batch, self.replay_bytes, self.cancelled).map_err(|(_, e)| failure(failed, e))?;
+                }
+                let count = operations.len();
+                for (at, op) in operations.into_iter().enumerate() {
+                    let batch = vec![op];
+                    self.doc.execute_program(&batch, self.replay_bytes, self.cancelled).map_err(|(_, e)| failure(at, e))?;
+                    self.remember(&indices[at..at + 1], batch);
+                }
+                self.generation += count as u64 + 1;
+            } else {
+                self.generation += 2; // Former apply followed by checkpoint.
+                self.remember(&indices, operations);
+            }
         }
         Ok(())
     }
-    fn apply(&mut self, operations: Vec<Operation>) -> crate::Result<()> {
-        self.serial += 1;
-        self.doc.apply(Transaction { request_id: format!("program-{}", self.serial), expected: self.doc.head(), operations }, self.cancelled).map(|_| ())
-    }
 }
 
-fn joint_world(doc: &Document) -> Vec<(String, Option<usize>, [f64; 3])> {
+fn joint_world(doc: &Workspace) -> Vec<(String, Option<usize>, [f64; 3])> {
     let Some(skeleton) = doc.skeleton() else { return Vec::new() };
     let mut out: Vec<(String, Option<usize>, [f64; 3])> = Vec::new();
     for j in &skeleton.joints {
@@ -294,13 +342,18 @@ pub fn build_program_with_cache(ops: &[ProgramOp], limits: Limits, fetch: &mut d
 }
 
 fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(&str) -> Result<Vec<u8>, String>, cancelled: Option<&dyn Fn() -> bool>, cache: Option<&mut crate::CompileCache>) -> Result<BuiltProgram, ProgramFailure> {
+    let detail_scope = crate::build_detail::DetailScope::new(ops);
+    let mut weathering_detail = crate::WeatheringTiming::default();
     let geometry_start = ProgramInstant::now();
     let texture_start = texture_time();
     let mut timings = ProgramTimings::default();
     let names: Vec<String> = ops.iter().map(|op| op.name().to_string()).collect();
     let fail = |index: usize, message: String| ProgramFailure { index, op: names.get(index).cloned().unwrap_or_default(), message };
-    let doc = Document::new(limits.clone()).map_err(|e| fail(0, describe_error(&e)))?;
-    let mut run = Runner { doc, limits: limits.clone(), pending: Vec::new(), serial: 0, cancelled };
+    if limits.max_materials == 0 || limits.max_receipts == 0 {
+        return Err(fail(0, describe_error(&Error::Invalid("zero material or receipt limit"))));
+    }
+    let doc = Workspace::new(limits.clone()).map_err(|e| fail(0, describe_error(&e)))?;
+    let mut run = Runner { doc, limits: limits.clone(), program: ops, pending: Vec::new(), generation: 0, replay_batches: Vec::new(), replay_bytes: 0, cancelled };
     let mut warnings = Vec::new();
     let mut bound = std::collections::BTreeSet::new();
     // All entries use this build's fixed Limits. Retain source bytes only for
@@ -319,7 +372,12 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
         match op {
             ProgramOp::Op(op) => run.pending.push((index, op.clone())),
             ProgramOp::Impostor { .. } => {}
-            ProgramOp::Mesh(m) => run.pending.push((index, m.cached_operation(&run.limits, &mut primitives).map_err(|e| fail(index, describe_error(&e)))?)),
+            ProgramOp::Mesh(m) => {
+                let started = ProgramInstant::now();
+                let operation = m.cached_operation(&run.limits, &mut primitives).map_err(|e| fail(index, describe_error(&e)))?;
+                crate::build_detail::record_operation(crate::build_detail::primitive_kind(m).1, 0, started.elapsed());
+                run.pending.push((index, operation));
+            }
             ProgramOp::ImageLayer { material, channel, layer, image } => {
                 use crate::{SurfaceChannel as Ch, SurfaceOperation as S};
                 let image_start = ProgramInstant::now();
@@ -411,7 +469,7 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
                 run.flush(&names)?;
                 let weathering_start = ProgramInstant::now();
                 let (ao, distance, edges, samples) = (ao.clamp(0., 1.), distance.clamp(0.005, 10.), edges.clamp(0., 1.), (*samples).clamp(1, 64) as usize);
-                for op in weathering::weathering_ops(&run.doc, objects.as_deref(), ao, distance, edges, samples) {
+                for op in weathering::weathering_ops(&run.doc, objects.as_deref(), ao, distance, edges, samples, &mut weathering_detail) {
                     run.pending.push((index, op));
                 }
                 timings.weathering += weathering_start.elapsed();
@@ -460,16 +518,27 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
         }
     }
     run.flush(&names)?;
+    drop(run.replay_batches);
+    let document = run.doc.into_document(run.generation, cancelled)
+        .map_err(|e| fail(ops.len(), describe_error(&e)))?;
     timings.textures = texture_time() - texture_start;
     timings.geometry = geometry_start.elapsed().saturating_sub(timings.weathering + timings.textures);
+    crate::build_detail::reset_compile_timings();
     let compile_start = ProgramInstant::now();
     let texture_start = texture_time();
     let compiled = match cache {
-        Some(cache) => run.doc.compile_with_cache(cache, cancelled),
-        None => run.doc.compile(cancelled),
+        Some(cache) => document.compile_with_cache(cache, cancelled),
+        None => document.compile(cancelled),
     }.map_err(|e| ProgramFailure { index: ops.len(), op: "compile".into(), message: describe_error(&e) })?;
     let compile_textures = texture_time() - texture_start;
-    timings.compile = compile_start.elapsed().saturating_sub(compile_textures);
+    let compile_elapsed = compile_start.elapsed();
+    timings.compile = compile_elapsed.saturating_sub(compile_textures);
     timings.textures += compile_textures;
-    Ok(BuiltProgram { document: run.doc, compiled, warnings, timings })
+    let mut detail = detail_scope.finish();
+    detail.geometry_other = timings.geometry.saturating_sub(detail.operations.values().map(|op| op.elapsed).sum::<Duration>() + detail.geometry.total());
+    detail.compile.other = compile_elapsed.saturating_sub(detail.compile.total());
+    detail.vertices = compiled.vertices;
+    detail.triangles = compiled.triangles;
+    detail.weathering = weathering_detail;
+    Ok(BuiltProgram { document, compiled, warnings, timings, detail })
 }

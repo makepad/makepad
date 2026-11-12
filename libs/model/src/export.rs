@@ -1,3 +1,4 @@
+use crate::build_detail::{CompilePhase, CompileTimer};
 use crate::{mesh, AnimationPath, Document, Error, Head, Result, Texture};
 use makepad_gltf::{
     augment_glb_skin, replace_glb_node_animations, write_glb_mesh_textured_parts,
@@ -102,6 +103,7 @@ impl Document {
         cancelled: Option<&dyn Fn() -> bool>,
         mut cache: Option<&mut CompileCache>,
     ) -> Result<CompiledModel> {
+        let packing_timer = CompileTimer::new(CompilePhase::MeshPacking);
         let mut ctx = mesh::Context::new(self.limits().mesh.clone(), cancelled);
         let rich_surface =
             !self.surface().materials.is_empty() || !self.surface().vertex_colors.is_empty();
@@ -254,6 +256,7 @@ impl Document {
                 }
             }
             if rich_surface {
+                let _tangent_timer = CompileTimer::new(CompilePhase::Tangents);
                 for (_, part) in parts.range_mut((name.to_owned(), 0)..).take_while(|((object, _), _)| object == name) {
                     let part = Arc::make_mut(part);
                     part.tangents = part_tangents(part, &mut ctx)?;
@@ -274,6 +277,7 @@ impl Document {
             let used = parts.keys().map(|(_, material)| *material).collect::<std::collections::BTreeSet<_>>();
             cache.textures.retain(|(id, _), _| used.contains(id));
         }
+        drop(packing_timer);
         let atlas = if joint_count > 0 && !rich_surface {
             let mut ranges = crate::atlas::UvBounds::new();
             for ((_, material), part) in &parts {
@@ -290,8 +294,13 @@ impl Document {
             let mut atlas_limits = self.limits().clone();
             atlas_limits.mesh.max_bytes = atlas_limits.mesh.max_bytes.saturating_sub(working);
             let started = crate::program::ProgramInstant::now();
+            let texture_timer = CompileTimer::new(CompilePhase::Textures);
+            let png_before = crate::build_detail::png_time();
             let atlas = crate::atlas::bake(self.materials(), &ranges, &atlas_limits, &mut ctx)?;
             crate::program::record_texture_time(started.elapsed());
+            crate::build_detail::record_texture(None, crate::SurfaceChannel::BaseColor, "atlas", atlas.size[0], atlas.size[1],
+                started.elapsed().saturating_sub(crate::build_detail::png_time() - png_before));
+            drop(texture_timer);
             for ((_, material), part) in &mut parts {
                 for uv in &mut Arc::make_mut(part).uvs {
                     ctx.checkpoint(1)?;
@@ -303,8 +312,12 @@ impl Document {
             None
         };
         let started = crate::program::ProgramInstant::now();
+        let png_before = crate::build_detail::png_time();
         let white = Texture::solid(1, 1, [255; 3], self.limits())?.to_png(self.limits())?;
         crate::program::record_texture_time(started.elapsed());
+        crate::build_detail::record_texture(None, crate::SurfaceChannel::BaseColor, "white", 1, 1,
+            started.elapsed().saturating_sub(crate::build_detail::png_time() - png_before));
+        let packing_timer = CompileTimer::new(CompilePhase::MeshPacking);
         let mut bounds = [[f32::INFINITY; 3], [f32::NEG_INFINITY; 3]];
         let mut vertices = 0;
         let mut primitives = Vec::new();
@@ -361,6 +374,8 @@ impl Document {
             });
         }
         ctx.checkpoint(1)?;
+        drop(packing_timer);
+        let _assembly_timer = CompileTimer::new(CompilePhase::GlbAssembly);
         let mut glb = if atlas.is_some() {
             write_glb_mesh_textured_parts_linear(&views, false)
         } else {
@@ -492,6 +507,7 @@ fn export_surface(
             let source = if let Some(source) = doc.surface().materials.get(id) {
                 source
             } else {
+                let _texture_timer = CompileTimer::new(CompilePhase::Textures);
                 let started = crate::program::ProgramInstant::now();
                 fallback = SurfaceMaterial::from_legacy(
                     doc.materials()
@@ -514,10 +530,12 @@ fn export_surface(
                     hit.texture.clone()
                 } else {
                     let started = crate::program::ProgramInstant::now();
+                    let _texture_timer = CompileTimer::new(CompilePhase::Textures);
                     let texture = (|| -> Result<Option<GlbPbrTexture>> {
                         let Some(image) = source.flatten(channel, doc.limits(), ctx)? else {
                             return Ok(None);
                         };
+                        let png_before = crate::build_detail::png_time();
                         let mips = image.mip_chain(channel.encoding(), doc.limits(), ctx)?;
                         let png = image.to_png(doc.limits())?;
                         let mut mip_pngs = Vec::new();
@@ -526,6 +544,10 @@ fn export_surface(
                             let png = mip.to_png(doc.limits())?;
                             mip_pngs.push(png);
                         }
+                        let kind = layers.iter().find(|layer| layer.visible && layer.opacity > 0.)
+                            .map_or("image", |layer| crate::build_detail::texture_kind(channel, layer));
+                        crate::build_detail::record_texture(Some(*id), channel, kind, image.width, image.height,
+                            started.elapsed().saturating_sub(crate::build_detail::png_time() - png_before));
                         Ok(Some(GlbPbrTexture { png, mip_pngs }))
                     })();
                     crate::program::record_texture_time(started.elapsed());

@@ -637,3 +637,79 @@ mod legacy_decimate {
         }
     }
 }
+
+
+mod normal_staging {
+    use crate::{geometry::*, *};
+    use makepad_csg_math::portable::PortableFloat;
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+    #[test]
+    fn staged_normals_match_original_edit_and_fail_atomically() {
+        let mut ctx=Context::default();
+        let mut cube=Mesh::cube([2.;3],&mut ctx).unwrap();
+        cube.set_vertex_weights(cube.vertices()[0].id,&[JointWeight{joint:3,weight:1.}],&mut ctx).unwrap();
+        cube.pin_uv(&[cube.corners()[0].id],true,&mut ctx).unwrap();
+        let edges=cube.adjacency(&mut ctx).unwrap().edges.keys().copied().collect::<Vec<_>>();
+        cube.set_edge_attributes(edges[0],EdgeAttributes{seam:true,crease:0.},&mut ctx).unwrap();
+        cube.set_edge_attributes(edges[1],EdgeAttributes{seam:false,crease:1.},&mut ctx).unwrap();
+        // Uneven fan normals expose changes in BFS floating-point sum order.
+        let positions=[[0.,0.,0.3],[1.,0.,0.],[1.,1.,0.2],[0.,1.,0.],[-1.,1.,-0.1],
+            [-1.,0.,0.],[-1.,-1.,0.4],[0.,-1.,0.],[1.,-1.,-0.2]];
+        let polygons=(1..=8).map(|i|Polygon::new(vec![0,i,i%8+1])).collect::<Vec<_>>();
+        let fan=Mesh::from_polygons(&positions,&polygons,&mut ctx).unwrap();
+        for source in [&cube,&fan] {
+            for (smooth,angle) in [(false,0.),(true,0.7),(true,std::f64::consts::FRAC_PI_2),(true,std::f64::consts::PI)] {
+                let mut actual=source.clone();let mut expected=source.clone();
+                let changes=actual.recalculate_normals(smooth,angle,&mut Context::default()).unwrap();
+                let (_,reference_changes)=expected.edit(&mut Context::default(),source.corners.len()*256,|mesh,ctx|{
+                    derive_reference(mesh,smooth,angle,ctx)?;Ok(((),Vec::new()))
+                }).unwrap();
+                assert_eq!(changes,reference_changes,"normal edits retain every element ID");
+                assert_eq!(actual,expected,"normal staging must preserve authored mesh data");
+                for (a,b) in actual.corners().iter().zip(expected.corners()) {
+                    assert_eq!(a.normal.unwrap().map(f64::to_bits),b.normal.unwrap().map(f64::to_bits),"corner normal bits differ");
+                }
+                assert_eq!(actual.to_bytes(&mut Context::default()).unwrap(),expected.to_bytes(&mut Context::default()).unwrap());
+            }
+        }
+        let calls=std::cell::Cell::new(0usize);
+        let count=||{calls.set(calls.get()+1);false};
+        let mut probe=cube.clone();let mut measured=Context::new(Limits::default(),Some(&count));
+        probe.recalculate_normals(true,std::f64::consts::PI,&mut measured).unwrap();
+        for stop in [1,calls.get()/2,calls.get()] {
+            let mut mesh=cube.clone();let seen=std::cell::Cell::new(0usize);
+            let cancel=||{seen.set(seen.get()+1);seen.get()==stop};
+            assert_eq!(mesh.recalculate_normals(true,std::f64::consts::PI,&mut Context::new(Limits::default(),Some(&cancel))),Err(MeshError::Cancelled));
+            assert_eq!(mesh,cube,"cancellation at checkpoint {stop} changed the mesh");
+        }
+        for limits in [Limits{max_work:measured.work_used()-1,..Limits::default()},
+            Limits{max_bytes:1,..Limits::default()},Limits{max_face_corners:3,..Limits::default()},
+            Limits{max_weights_per_vertex:0,..Limits::default()}] {
+            let mut mesh=cube.clone();
+            assert!(matches!(mesh.recalculate_normals(true,std::f64::consts::PI,&mut Context::new(limits,None)),Err(MeshError::Budget{..})));
+            assert_eq!(mesh,cube,"budget failure changed the mesh");
+        }
+    }
+
+    // Original edge-scanning derivation, used inside the original Mesh::edit
+    // path above so both normal bytes and retained provenance are compared.
+    fn derive_reference(mesh:&mut Mesh,smooth:bool,angle:f64,ctx:&mut Context<'_>)->Result<()> {
+        let adj=mesh.adjacency(ctx)?;let normals=mesh.faces.iter().map(|f|Ok((f.id,face_geometry(mesh,f.id,ctx)?.normal))).collect::<Result<BTreeMap<_,_>>>()?;
+        let mut results=BTreeMap::new();let cosine=angle.pcos();
+        for (&vertex,faces) in &adj.vertex_faces{let mut remaining=faces.iter().copied().collect::<BTreeSet<_>>();
+            while let Some(&seed)=remaining.first(){let mut queue=VecDeque::from([seed]);remaining.remove(&seed);let mut fan=Vec::new();let mut n=[0.;3];
+                while let Some(face)=queue.pop_front(){ctx.checkpoint(1)?;fan.push(face);n=add(n,normals[&face]);if !smooth{continue;}
+                    for &edge in &adj.vertex_edges[&vertex]{ctx.checkpoint(1)?;let uses=adj.radial(edge);
+                        if uses.len()!=2||mesh.edge_data.get(&edge).is_some_and(|d|d.attributes.crease>0.)||!uses.iter().any(|u|u.face==face){continue;}
+                        let other=uses.iter().find(|u|u.face!=face).unwrap().face;
+                        if dot(normals[&face],normals[&other])+1e-12>=cosine&&remaining.remove(&other){queue.push_back(other);}
+                    }
+                }
+                let len=length(n);for face in fan{results.insert((vertex,face),if len>1e-12{mul(n,1./len)}else{normals[&face]});}
+            }
+        }
+        for face in &mesh.faces{for c in &mut mesh.corners[face.first_corner as usize..(face.first_corner+face.corner_count)as usize]{ctx.checkpoint(1)?;c.normal=Some(results[&(c.vertex,face.id)]);}}
+        Ok(())
+    }
+}

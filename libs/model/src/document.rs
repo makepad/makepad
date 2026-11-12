@@ -203,7 +203,69 @@ impl Workspace {
     pub fn execute(&mut self, ops: &[Operation], cancelled: Option<&dyn Fn() -> bool>) -> Result<Vec<OperationResult>> {
         let mut ctx = mesh::Context::new(self.limits.mesh.clone(), cancelled);
         ctx.checkpoint(1)?;
-        execute_with(&mut self.state, ops, &self.limits, &mut ctx, false)
+        execute_with(&mut self.state, ops, &self.limits, &mut ctx, false, &mut 0)
+    }
+    /// Program batches are disposable on failure; retain the failing operation
+    /// index instead of cloning the state for a successful batch's rollback.
+    pub(crate) fn execute_program(&mut self, ops: &[Operation], retained_bytes: usize, cancelled: Option<&dyn Fn() -> bool>) -> std::result::Result<(), (usize, Error)> {
+        for (index, op) in ops.iter().enumerate() {
+            if cancelled.is_some_and(|c| c()) { return Err((index, Error::Mesh(mesh::MeshError::Cancelled))); }
+            op.check(&self.limits).map_err(|error| (index, error))?;
+        }
+        // Keep the canonical transaction-size contract, without fingerprints,
+        // state hashing, receipts or source-history encoding per batch.
+        let resident = ops.iter().fold(retained_bytes, |n, op| n.saturating_add(op.memory_bytes()));
+        {
+            let mut encoded = Writer::new(self.limits.max_transaction_bytes);
+            write_head(&mut encoded, Head { generation: 0, content: [0; 32] }).map_err(|e| (0, e))?;
+            write_ops(&mut encoded, ops, &self.limits).map_err(|e| (0, e))?;
+            if self.state.memory_bytes().saturating_add(resident).saturating_add(encoded.bytes.len()) > self.limits.mesh.max_bytes {
+                return Err((0, Error::Budget("program working bytes")));
+            }
+        }
+        let mut ctx = mesh::Context::new(self.limits.mesh.clone(), cancelled);
+        ctx.limits.max_bytes = ctx.limits.max_bytes.checked_sub(resident)
+            .ok_or((0, Error::Budget("program working bytes")))?;
+        let mut index = 0;
+        execute_with(&mut self.state, ops, &self.limits, &mut ctx, false, &mut index)
+            .map(|_| ()).map_err(|error| (index, error))
+    }
+    /// Establish the editable checkpoint once, after a successful program.
+    /// The program itself owns its undo history; no intermediate receipts or
+    /// snapshots are needed in the returned document.
+    pub(crate) fn into_document(self, generation: u64, cancelled: Option<&dyn Fn() -> bool>) -> Result<Document> {
+        use crate::build_detail::{GeometryPhase, GeometryTimer};
+        let _history = GeometryTimer::new(GeometryPhase::History);
+        if self.limits.max_receipts == 0 { return Err(Error::Invalid("zero material or receipt limit")); }
+        // The returned checkpoint must remain serializable/reopenable too.
+        // Admit its copies before measurement decodes any temporary state.
+        if self.state.memory_bytes().saturating_mul(3) > self.limits.mesh.max_bytes {
+            return Err(Error::Budget("program checkpoint bytes"));
+        }
+        let mut ctx = mesh::Context::new(self.limits.mesh.clone(), cancelled);
+        let content = state_hash(&self.state, &self.limits, &mut ctx)?;
+        let checkpoint_hash_work = ctx.work_used();
+        let (checkpoint_load_work, checkpoint_source) = checkpoint_load_work(&self.state, &self.limits)?;
+        ctx.checkpoint(0)?;
+        let checkpoint = {
+            let _clone = GeometryTimer::new(GeometryPhase::Clone);
+            self.state.clone()
+        };
+        let document = Document { limits: self.limits, state: self.state, checkpoint,
+            log: Vec::new(), log_memory: Vec::new(), replay_work: Vec::new(), hash_work: Vec::new(),
+            checkpoint_load_work, checkpoint_hash_work, checkpoint_source, cursor: 0,
+            head: Head { generation, content }, receipts: VecDeque::new(), request_identities: BTreeSet::new() };
+        let mut source_ctx = mesh::Context::new(document.limits.mesh.clone(), cancelled);
+        let envelope = encode_source(&SourceParts {
+            head: document.head, checkpoint: CheckpointSource::Measured(checkpoint_source),
+            cursor: 0, log: &[], receipts: &[], identities: &document.request_identities, added_identity: None,
+        }, &document.limits, &mut source_ctx, SOURCE_VERSION)?;
+        let source_bytes = checkpoint_source.bytes.saturating_add(envelope.len());
+        if document.state.memory_bytes().saturating_mul(3).saturating_add(source_bytes) > document.limits.mesh.max_bytes {
+            return Err(Error::Budget("program checkpoint bytes"));
+        }
+        document.admit_history_work(source_ctx.work_used())?;
+        Ok(document)
     }
     /// Add a new object holding `mesh`: what `Operation::ImportMesh` does,
     /// without encoding and re-decoding (and re-validating) the mesh.
@@ -236,6 +298,8 @@ impl Workspace {
     pub fn scene(&self) -> &crate::SceneState {
         &self.state.scene
     }
+    pub fn skeleton(&self) -> Option<&Skeleton> { self.state.skeleton.as_ref() }
+    pub fn surface(&self) -> &crate::SurfaceState { &self.state.surface }
 }
 
 impl Document {
@@ -993,7 +1057,7 @@ pub(crate) fn execute(
     limits: &Limits,
     ctx: &mut mesh::Context,
 ) -> Result<Vec<OperationResult>> {
-    execute_with(state, ops, limits, ctx, true)
+    execute_with(state, ops, limits, ctx, true, &mut 0)
 }
 /// `accounted`: hold each operation to the execution budget minus the rest
 /// of the state (a [`Document`] transaction's admission). A [`Workspace`]
@@ -1005,19 +1069,40 @@ fn execute_with(
     limits: &Limits,
     ctx: &mut mesh::Context,
     accounted: bool,
+    failed_operation: &mut usize,
 ) -> Result<Vec<OperationResult>> {
     if ops.is_empty() || ops.len() > limits.max_operations {
         return Err(Error::Budget("transaction operations"));
     }
     let mut out = Vec::new();
     let execution_budget = ctx.limits.max_bytes;
-    let colored_objects=state.surface.vertex_colors.keys().map(|(name,_)|name).collect::<BTreeSet<_>>();
+    // Stable, fully painted vertices need no provenance copy. Sparse paint
+    // still needs the original interpolation even in an attribute-only batch.
+    let changes_vertices = ops.iter().any(|op| !matches!(op,
+        Operation::Surface(_) | Operation::Selection(_) | Operation::SetMaterial { .. }
+        | Operation::TextureSolid { .. } | Operation::PaintTexture { .. }
+        | Operation::SetClip { .. } | Operation::DeleteClip { .. } | Operation::SetSkeleton { .. }
+        | Operation::AutoWeights { .. } | Operation::SetWeights { .. } | Operation::Transform { .. }
+        | Operation::Smooth { .. } | Operation::CornerNormal { .. } | Operation::EdgeAttributes { .. }
+        | Operation::SetUv { .. } | Operation::ProjectUv { .. } | Operation::AssignMaterial { .. }
+        | Operation::MeshEditing(crate::MeshEditingOperation { action: crate::Action::Normals { .. }, .. })
+    ));
+    let mut color_counts = BTreeMap::new();
+    for (name, _) in state.surface.vertex_colors.keys() { *color_counts.entry(name).or_insert(0usize) += 1; }
+    let colored_objects = color_counts.into_iter().filter_map(|(name, count)|
+        (changes_vertices || state.objects.get(name).is_some_and(|m| count < m.vertices().len())).then_some(name)
+    ).collect::<BTreeSet<_>>();
     let color_source_bytes=state.objects.iter().filter(|(name,_)|colored_objects.contains(name)).map(|(n,m)|n.len()+m.memory_bytes()+128).sum::<usize>();
     if accounted&&color_source_bytes.saturating_add(state.memory_bytes())>execution_budget{return Err(Error::Budget("vertex color provenance snapshot"));}
-    let color_sources=if colored_objects.is_empty(){None}else{Some(state.objects.iter().filter(|(name,_)|colored_objects.contains(name)).map(|(n,m)|(n.clone(),m.clone())).collect::<BTreeMap<_,_>>())};
+    let color_sources = {
+        let _clone = crate::build_detail::GeometryTimer::new(crate::build_detail::GeometryPhase::Clone);
+        if colored_objects.is_empty(){None}else{Some(state.objects.iter().filter(|(name,_)|colored_objects.contains(name)).map(|(n,m)|(n.clone(),m.clone())).collect::<BTreeMap<_,_>>())}
+    };
     drop(colored_objects);
     let mut construction_cache = crate::construction::ConstructionCache::new(ops);
-    for op in ops {
+    for (index, op) in ops.iter().enumerate() {
+        *failed_operation = index;
+        let _operation_timer = crate::build_detail::OperationTimer::new(op);
         if accounted {
             let target = op
                 .object_name()
@@ -1060,9 +1145,13 @@ fn execute_with(
                     let cache=state.scene.evaluated_meshes(state,ctx)?;
                     let mut world=std::collections::BTreeMap::new();
                     for (name,source) in &cache{ctx.checkpoint(1)?;let mut mesh=(**source).clone();let matrix=state.scene.world_matrix(name)?;let ids=mesh.vertices().iter().map(|v|v.id).collect::<Vec<_>>();mesh.transform(&ids,matrix,ctx)?;world.insert(name.clone(),mesh);}
-                    state.surface.apply(op,&world,&state.materials,limits,ctx)?;
-                } else {state.surface.apply(op, &state.objects, &state.materials, limits, ctx)?;}
-                if let Some(start) = texture_start { crate::program::record_texture_time(start.elapsed()); }
+                    state.surface.apply_disposable(op,&world,&state.materials,limits,ctx)?;
+                } else {state.surface.apply_disposable(op, &state.objects, &state.materials, limits, ctx)?;}
+                if let Some(start) = texture_start {
+                    let elapsed = start.elapsed();
+                    crate::program::record_texture_time(elapsed);
+                    crate::build_detail::record_surface(op, &state.surface, elapsed);
+                }
                 out.push(OperationResult::default());
                 continue;
             }
@@ -1087,6 +1176,7 @@ fn execute_with(
                 let png = texture.to_png(limits)?;
                 state.materials.get_mut(material).unwrap().base_color_png = png;
                 crate::program::record_texture_time(texture_start.elapsed());
+                crate::build_detail::record_texture(Some(*material), crate::SurfaceChannel::BaseColor, "solid", *width, *height, texture_start.elapsed());
                 out.push(OperationResult::default());
                 continue;
             }
@@ -1355,6 +1445,7 @@ fn execute_with(
         }
         out.push(result);
     }
+    let _validate = crate::build_detail::GeometryTimer::new(crate::build_detail::GeometryPhase::Validate);
     if state.memory_bytes() > execution_budget {
         return Err(Error::Budget("candidate bytes"));
     }
@@ -2155,6 +2246,73 @@ mod history_budget_tests {
     use super::*;
     fn apply(doc:&mut Document,id:&str,operations:Vec<Operation>)->Result<Applied>{doc.apply(Transaction{request_id:id.into(),expected:doc.head(),operations},None)}
     fn edit(doc:&Document,index:usize)->Operation{Operation::SetUv{object:"body".into(),corner:doc.object("body").unwrap().corners()[0].id,uv:[index as f64*0.01,0.25]}}
+    #[test]
+    fn program_workspace_preserves_product_checkpoint_and_error_attribution() {
+        let limits = Limits::default();
+        let mut operations = vec![Operation::Cube { object: "body".into(), size: [1.; 3] }];
+        // Cross the runner's batch boundary, with surface state already present.
+        let mesh = mesh::Mesh::cube([1.; 3], &mut mesh::Context::default()).unwrap();
+        let vertices = mesh.vertices().iter().map(|v| v.id).collect::<Vec<_>>();
+        operations.push(Operation::Surface(crate::SurfaceOperation::VertexColors {
+            object: "body".into(), vertices: vertices.clone(), colors: vec![[0.2, 0.4, 0.8, 1.]; vertices.len()],
+        }));
+        for i in 0..65 {
+            operations.push(Operation::Surface(crate::SurfaceOperation::VertexPaint {
+                object: "body".into(), vertices: vec![vertices[i % vertices.len()]], color: [0.8, 0.6, 0.4, 1.], opacity: 0.125,
+            }));
+        }
+        let mut reference = Document::new(limits.clone()).unwrap();
+        for (i, batch) in operations.chunks(64).enumerate() {
+            apply(&mut reference, &format!("program-{}", i + 1), batch.to_vec()).unwrap();
+            reference.checkpoint(reference.head()).unwrap();
+        }
+        let program = operations.into_iter().map(crate::ProgramOp::Op).collect::<Vec<_>>();
+        let built = crate::build_program(&program, limits.clone(), &mut |_| unreachable!(), None).unwrap();
+        assert_eq!(built.document.state, reference.state, "unlogged batches preserve authored state");
+        assert_eq!(built.document.head(), reference.head(), "content and generation remain stable");
+        assert_eq!(built.compiled.glb, reference.compile(None).unwrap().glb, "render bytes remain identical");
+        let source = built.document.to_bytes(None).unwrap();
+        let mut reopened = Document::from_bytes(&source, limits.clone(), None).unwrap();
+        assert_eq!(reopened.head(), built.document.head());
+        assert_eq!(reopened.state, built.document.state);
+        assert_eq!(reopened.history_position(), (0, 0));
+        let op = edit(&reopened, 2);
+        apply(&mut reopened, "after-build", vec![op]).unwrap();
+        reopened.undo(reopened.head(), None).unwrap();
+        assert_eq!(reopened.state, built.document.state, "the final checkpoint supports later editing");
+
+        let bad = vec![program[0].clone(), crate::ProgramOp::Op(Operation::Scene(crate::SceneOperation::Node {
+            object: "body".into(), node: crate::SceneNode { parent: Some("missing".into()), ..Default::default() },
+        })), crate::ProgramOp::Op(Operation::SetMaterial { material: 0, value: Material::default() })];
+        let failure = crate::build_program(&bad, limits.clone(), &mut |_| unreachable!(), None).err().unwrap();
+        assert_eq!(failure.index, 1, "batch validation must identify the introducing operation");
+        let oversized = [crate::ProgramOp::Op(Operation::ImportMesh { object: "body".into(), source: vec![0; 2] })];
+        let tiny = Limits { max_transaction_bytes: 1, ..limits };
+        let failure = crate::build_program(&oversized, tiny.clone(), &mut |_| unreachable!(), None).err().unwrap();
+        assert!(failure.message.contains("generated transaction bytes"), "typed operation admission is preserved");
+        assert!(crate::build_program(&program[..1], tiny, &mut |_| unreachable!(), None).is_err(), "canonical transaction byte limits also cover small operations");
+    }
+
+    #[test]
+    fn disposable_vertex_colors_match_atomic_surface_edits() {
+        let limits = Limits::default();
+        let mut doc = Document::new(limits.clone()).unwrap();
+        apply(&mut doc, "body", vec![Operation::Cube { object: "body".into(), size: [1.; 3] }]).unwrap();
+        let ids = doc.object("body").unwrap().vertices().iter().map(|v| v.id).collect::<Vec<_>>();
+        let mut actual = crate::SurfaceState::default();
+        let mut expected = actual.clone();
+        for op in [
+            crate::SurfaceOperation::VertexColors { object: "body".into(), vertices: ids.clone(), colors: vec![[0.2, 0.4, 0.6, 1.]; ids.len()] },
+            crate::SurfaceOperation::VertexColors { object: "body".into(), vertices: vec![ids[0], ids[0]], colors: vec![[0.1, 0.3, 0.5, 0.7], [0.9, 0.7, 0.5, 0.3]] },
+            crate::SurfaceOperation::VertexPaint { object: "body".into(), vertices: vec![ids[1], ids[1]], color: [0.5, 0.25, 0.75, 1.], opacity: 0.25 },
+        ] {
+            actual.apply_disposable(&op, &doc.state.objects, &doc.state.materials, &limits, &mut mesh::Context::default()).unwrap();
+            expected.apply(&op, &doc.state.objects, &doc.state.materials, &limits, &mut mesh::Context::default()).unwrap();
+            assert_eq!(actual, expected);
+            let bits = |surface: &crate::SurfaceState| surface.vertex_colors.iter().map(|(key, color)| (key.clone(), color.map(f64::to_bits))).collect::<Vec<_>>();
+            assert_eq!(bits(&actual), bits(&expected), "every vertex color bit is preserved");
+        }
+    }
     #[test]
     fn admitted_heavy_history_keeps_every_cursor_replayable_and_refuses_growth_atomically(){
         let mut base=Document::new(Limits::default()).unwrap();
