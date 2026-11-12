@@ -1,6 +1,7 @@
 use crate::whisper::quant::*;
 use crate::whisper::tensor::{RawTensor, Tensor};
 use crate::whisper::tokenizer::WhisperTokenizer;
+use makepad_ai_loader::F32Weight;
 use std::collections::HashMap;
 use std::io::{self, Read, Seek};
 use std::sync::OnceLock;
@@ -138,7 +139,7 @@ pub struct WhisperModel {
 
     // decoder
     pub d_pe: Tensor,   // positional embedding [n_text_ctx, n_text_state]
-    pub d_te: Tensor,   // token embedding [n_vocab, n_text_state]
+    pub d_te: F32Weight, // token embedding [n_vocab, n_text_state]
     pub d_ln_w: Tensor, // ln.weight [n_text_state]
     pub d_ln_b: Tensor, // ln.bias [n_text_state]
     pub decoder_layers: Vec<DecoderLayer>,
@@ -367,6 +368,7 @@ impl WhisperModel {
         }
 
         // 6. Build model struct from loaded tensors
+        let weights_owner = std::sync::Arc::new(makepad_ai_loader::WeightOwner::new("whisper"));
         fn take_f32(tensors: &mut HashMap<String, RawTensor>, name: &str) -> Tensor {
             tensors
                 .remove(name)
@@ -439,7 +441,24 @@ impl WhisperModel {
 
         // Decoder global tensors
         let d_pe = take_f32(&mut tensors, "decoder.positional_embedding");
-        let d_te = take_f32(&mut tensors, "decoder.token_embedding.weight");
+        let d_te = {
+            let name = "decoder.token_embedding.weight";
+            let raw = tensors.remove(name)
+                .unwrap_or_else(|| panic!("missing tensor: {}", name));
+            let len = hparams.n_vocab as usize * hparams.n_text_state as usize;
+            let elements = raw.shape.iter().product::<usize>();
+            if elements != len {
+                return Err(io::Error::new(io::ErrorKind::InvalidData,
+                    format!("tensor {name} has {elements} elements, expected {len}")));
+            }
+            match F32Weight::new(&weights_owner, name, len, |out| {
+                raw.to_f32_into(out);
+                Ok::<(), std::convert::Infallible>(())
+            }) {
+                Ok(w) => w,
+                Err(never) => match never {},
+            }
+        };
         let d_ln_w = take_f32(&mut tensors, "decoder.ln.weight");
         let d_ln_b = take_f32(&mut tensors, "decoder.ln.bias");
 
@@ -508,7 +527,7 @@ impl WhisperModel {
         }
 
         Ok(WhisperModel {
-            weights_owner: std::sync::Arc::new(makepad_ai_loader::WeightOwner::new("whisper")),
+            weights_owner,
             #[cfg(any(target_os = "linux", target_os = "android"))]
             vulkan_id: std::sync::Arc::new(()),
             hparams,

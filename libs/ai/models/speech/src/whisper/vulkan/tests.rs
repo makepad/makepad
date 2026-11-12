@@ -104,7 +104,7 @@ fn resident_quantized_matrices_match_cpu() {
             let w = quantized(&values(n * k, 91), &[k, n], ty);
             let bias = tensor(&[n], 43);
             let wf = w.to_f32();
-            let want = cpu(|| Tensor::matmul_t(&rounded_activations(&x), &wf, None));
+            let want = cpu(|| Tensor::matmul_t(&rounded_activations(&x), &wf));
             let got = try_matmul_nt_ggml_bytes(&x.data, &w.data, ty, m, k, n).unwrap();
             close("resident quantised matrix", &got, &want.data, 4e-5);
             let mut want = want.data;
@@ -171,7 +171,7 @@ fn matrices_match_cpu() {
     let w = raw(&values(64 * 37, 91), &[64, 37], false).to_q8_0();
     // Compare the same weight values and per-block rounded activations.
     let wf = w.to_f32();
-    let want = cpu(|| Tensor::matmul_t(&rounded_activations(&x), &wf, None));
+    let want = cpu(|| Tensor::matmul_t(&rounded_activations(&x), &wf));
     let got = try_matmul_nt_ggml_bytes(&x.data, &w.data, w.ggml_type, 7, 64, 37).unwrap();
     close("quantized matrix", &got, &want.data, 3e-5);
     let b = tensor(&[64, 9], 12);
@@ -261,7 +261,7 @@ fn attention_cpu(q: &[f32], k: &[f32], v: &[f32], nq: usize, nk: usize, heads: u
                 data: (0..rows).flat_map(|r| data[r * width + h * 64..r * width + (h + 1) * 64].iter().copied()).collect(),
                 shape: vec![rows, 64],
             };
-            let mut scores = Tensor::matmul_t(&head(q, nq), &head(k, nk), None);
+            let mut scores = Tensor::matmul_t(&head(q, nq), &head(k, nk));
             if let Some(past) = past {
                 for row in 0..nq {
                     for col in past + row + 1..nk { scores.data[row * nk + col] = f32::NEG_INFINITY; }

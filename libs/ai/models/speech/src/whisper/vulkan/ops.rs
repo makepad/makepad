@@ -289,7 +289,7 @@ impl ModelWeights {
             dec_norm: Norm::new(device, &model.d_ln_w.data, &model.d_ln_b.data)?,
             // This tensor is held as f32 by the model. Retaining those
             // values also preserves logits for models with f32 embeddings.
-            logits: Matrix::f32(device, &model.d_te.data, model.hparams.n_vocab as usize, model.hparams.n_text_state as usize)?,
+            logits: Matrix::f32(device, model.d_te.as_slice(), model.hparams.n_vocab as usize, model.hparams.n_text_state as usize)?,
         };
         let width = model.hparams.n_audio_state as usize;
         if width != model.hparams.n_text_state as usize

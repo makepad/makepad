@@ -1,5 +1,5 @@
 use crate::whisper::quant::*;
-use makepad_ai_loader::WeightOwner;
+use makepad_ai_loader::{F32Weight, WeightOwner};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -487,6 +487,17 @@ impl RawTensor {
     pub fn to_f32(&self) -> Tensor {
         let n = self.shape.iter().product::<usize>();
         let mut out = vec![0.0f32; n];
+        self.to_f32_into(&mut out);
+        // Reverse shape from GGML column-major to row-major order.
+        let mut shape = self.shape.clone();
+        shape.reverse();
+        Tensor { data: out, shape }
+    }
+
+    /// Dequantize into the caller's f32 storage.
+    pub fn to_f32_into(&self, out: &mut [f32]) {
+        let n = self.shape.iter().product::<usize>();
+        assert_eq!(out.len(), n, "to_f32_into: output size mismatch");
         match self.ggml_type {
             GGML_TYPE_F32 => {
                 for i in 0..n {
@@ -558,10 +569,6 @@ impl RawTensor {
             }
             t => panic!("unsupported dequantize type {}", t),
         }
-        // Reverse shape from GGML column-major to row-major order.
-        let mut shape = self.shape.clone();
-        shape.reverse();
-        Tensor { data: out, shape }
     }
 
     /// Number of rows (product of all dims except dim0).
@@ -942,11 +949,15 @@ impl Tensor {
     /// weight: [n_vocab, dim], indices: list of i32 -> out: [n_tokens, dim]
     pub fn get_rows(weight: &Tensor, indices: &[i32]) -> Tensor {
         let dim = weight.shape[weight.shape.len() - 1];
+        Self::get_rows_from(&weight.data, dim, indices)
+    }
+
+    pub fn get_rows_from(weight: &[f32], dim: usize, indices: &[i32]) -> Tensor {
         let n = indices.len();
         let mut out = vec![0.0f32; n * dim];
         for (i, &idx) in indices.iter().enumerate() {
             let src_off = idx as usize * dim;
-            out[i * dim..(i + 1) * dim].copy_from_slice(&weight.data[src_off..src_off + dim]);
+            out[i * dim..(i + 1) * dim].copy_from_slice(&weight[src_off..src_off + dim]);
         }
         Tensor {
             data: out,
@@ -999,7 +1010,7 @@ impl Tensor {
     /// Both x and w are f32 Tensors. w has layout [out_features, in_features]
     /// where each row is a contiguous weight vector (ideal for SIMD dot products).
     /// Result is [M, N]. Uses multiple threads for large matmuls.
-    pub fn matmul_t(x: &Tensor, w: &Tensor, owner: Option<&WeightOwner>) -> Tensor {
+    pub fn matmul_t(x: &Tensor, w: &Tensor) -> Tensor {
         let _t = std::time::Instant::now();
         let in_features = w.cols();
         let out_features = w.rows();
@@ -1012,7 +1023,7 @@ impl Tensor {
             batch,
             in_features,
             out_features,
-            owner,
+            None,
         ) {
             crate::whisper::PROF_MATMUL_T.fetch_add(
                 _t.elapsed().as_nanos() as u64,
@@ -1025,12 +1036,43 @@ impl Tensor {
             };
         }
 
+        let out = Self::matmul_t_cpu(x, &w.data, in_features, out_features);
+        crate::whisper::PROF_MATMUL_T.fetch_add(
+            _t.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        crate::whisper::PROF_MATMUL_T_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        out
+    }
+
+    /// Matrix multiply with a resident f32 weight stored [out_features, in_features].
+    pub fn matmul_t_w(x: &Tensor, w: &F32Weight, out_features: usize) -> Tensor {
+        let _t = std::time::Instant::now();
+        let in_features = w.len() / out_features;
+        let batch = x.numel() / in_features;
+        assert_eq!(x.numel(), batch * in_features, "matmul_t: x size mismatch");
+        let out = if let Some(data) = crate::whisper::accel::try_matmul_nt_f32_weight(
+            &x.data, w, batch, in_features, out_features,
+        ) {
+            Tensor { data, shape: vec![batch, out_features] }
+        } else {
+            Self::matmul_t_cpu(x, w.as_slice(), in_features, out_features)
+        };
+        crate::whisper::PROF_MATMUL_T.fetch_add(
+            _t.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        crate::whisper::PROF_MATMUL_T_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        out
+    }
+
+    fn matmul_t_cpu(x: &Tensor, w: &[f32], in_features: usize, out_features: usize) -> Tensor {
+        let batch = x.numel() / in_features;
         let mut out = vec![0.0f32; batch * out_features];
         let out_ptr = SendPtr::new(out.as_mut_ptr());
         let x_data = &x.data;
-        let w_data = &w.data;
         parallel_work_steal(out_features, |o| {
-            let w_row = &w_data[o * in_features..(o + 1) * in_features];
+            let w_row = &w[o * in_features..(o + 1) * in_features];
             for b in 0..batch {
                 let x_row = &x_data[b * in_features..(b + 1) * in_features];
                 unsafe {
@@ -1038,12 +1080,6 @@ impl Tensor {
                 }
             }
         });
-
-        crate::whisper::PROF_MATMUL_T.fetch_add(
-            _t.elapsed().as_nanos() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        crate::whisper::PROF_MATMUL_T_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Tensor {
             data: out,
             shape: vec![batch, out_features],

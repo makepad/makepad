@@ -266,7 +266,7 @@ pub(crate) fn try_decode(model: &WhisperModel, tokens: &[i32], positions: &[i32]
         let mut embedding = Vec::with_capacity(x.len);
         for (&token, &position) in tokens.iter().zip(positions) {
             for d in 0..width {
-                embedding.push(model.d_te.data[token as usize * width + d] + model.d_pe.data[position as usize * width + d]);
+                embedding.push(model.d_te.as_slice()[token as usize * width + d] + model.d_pe.data[position as usize * width + d]);
             }
         }
         let op = &mut ctx.ops;

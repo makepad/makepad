@@ -26,7 +26,7 @@
 //! after the build, transcribes on the CPU.
 //!
 use crate::whisper::model::{DecoderLayer, EncoderLayer};
-use makepad_ai_loader::WeightOwner;
+use makepad_ai_loader::{F32Weight, WeightOwner};
 
 /// Explicit CPU selection is useful for reference runs. Defaults leave the
 /// established Metal/CUDA selection unchanged.
@@ -119,6 +119,57 @@ pub(crate) fn try_matmul_nt_f32(
     owner: Option<&WeightOwner>,
 ) -> Option<Vec<f32>> {
     dispatch!(try_matmul_nt_f32(a, bt, m, k, n) metal(owner))
+}
+
+pub(crate) fn try_matmul_nt_f32_weight(
+    a: &[f32],
+    w: &F32Weight,
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Option<Vec<f32>> {
+    if cpu_selected() { return None; }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if vulkan_selected() {
+        return crate::whisper::vulkan_backend::try_matmul_nt_f32(a, w.as_slice(), m, k, n);
+    }
+    if crate::whisper::metal_backend::is_requested() {
+        if let Some(out) = makepad_ai_common::backend::metal::try_matmul_nt_f32_weight(a, w, m, k, n) {
+            return Some(out);
+        }
+    }
+    crate::whisper::cuda_backend::try_matmul_nt_f32(a, w.as_slice(), m, k, n)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn token_logits_are_the_same_bits_resident_or_copied() {
+    std::thread::spawn(|| {
+        let (m, k, n) = (3, 64, 512);
+        let owner = std::sync::Arc::new(WeightOwner::new("whisper-token-logits-test"));
+        let w = match F32Weight::new(&owner, "decoder.token_embedding.weight", n * k, |out| {
+            for (i, value) in out.iter_mut().enumerate() {
+                *value = ((i % 31) as f32 - 15.0) * 0.037;
+            }
+            Ok::<(), std::convert::Infallible>(())
+        }) {
+            Ok(w) => w,
+            Err(never) => match never {},
+        };
+        let x: Vec<f32> = (0..m * k).map(|i| ((i % 17) as f32 - 8.0) * 0.043).collect();
+        let resident = try_matmul_nt_f32_weight(&x, &w, m, k, n)
+            .expect("resident Metal token logits must run");
+        let copied = crate::whisper::metal_backend::try_matmul_nt_f32(&x, w.as_slice(), m, k, n, None)
+            .expect("copied Metal token logits must run");
+        assert_eq!(resident.len(), m * n, "resident token logits have the expected shape");
+        assert_eq!(copied.len(), m * n, "copied token logits have the expected shape");
+        for (i, (&resident, &copied)) in resident.iter().zip(&copied).enumerate() {
+            assert_eq!(resident.to_bits(), copied.to_bits(),
+                "token logits are bit-identical at index {i}: resident={resident:?}, copied={copied:?}");
+        }
+    })
+    .join()
+    .expect("the token logits bitwise comparison worker must pass");
 }
 
 pub(crate) fn try_matmul_nt_f32_bytes(
