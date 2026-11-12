@@ -128,6 +128,9 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           in the delta; CI reports regressions after push. --dry lists the commits and
                                           every crate new since origin with who depends on it, commercial included,
                                           flagging any only commercial uses
+  push remap <file>                       after a rewrite of origin's history: the push ledger's commits follow
+                                          the rewrite's map (`<old sha> <new sha>` lines); refused unless the
+                                          newest push then names origin/work, so the next push's credits hold
   state [verify|jitlegs|allapps|after|pushes]   the master's workflow state as JSON
   watch [kind,..] [--once] [--until fail] [--match <text>] [--sev err|warn] [--json]
                                           block on events of those kinds (verify jitlegs after allapps push land lanes
@@ -956,6 +959,16 @@ fn shows(c: &Client, all: bool, json: bool) -> i32 {
 }
 
 fn push(c: &Client, words: &[&str], json: bool) -> i32 {
+    if let ["remap", file] = words {
+        let path = match std::fs::canonicalize(file) {
+            Ok(p) => p.to_string_lossy().to_string(),
+            Err(e) => {
+                eprintln!("makepad devhub push remap {file}: {e}");
+                return 2;
+            }
+        };
+        return done(one(c, "push", &format!("push {{\"remap\":{}}}", json_str(&path))), json, &flat);
+    }
     let (mut sha, mut msg, mut parents, mut dry) = (None, None, Vec::new(), false);
     let mut i = 0;
     while i < words.len() {

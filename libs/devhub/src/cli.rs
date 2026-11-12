@@ -33,6 +33,8 @@ call $DH; a landing's CLI goes live when its rebuild finishes
                                           clear it (the next start is cold; --dir: that one cache); refused
                                           while JITs run on it unless --force (they keep running). `ls` with
                                           no --node adds a line per fleet machine, its dev store named
+  reports [pull] [--dir <dir>]            new change reports from makepad.nl's admin inbox into
+                                          local/agent_state/runner-reports/<id>/ (untrusted: review, never apply or run)
   serve [--node <conf>]                   run a hub here without its app (master, or a node with that conf)
   master start                            a master in a session of its own, at this shell's priority; its log
                                           is master.log in devhub's home. A niced shell is refused (zsh runs
@@ -704,6 +706,9 @@ pub fn main(args: &[String]) -> i32 {
     if a.first() == Some(&"cache") {
         return cache(&a[1..]);
     }
+    if a.first() == Some(&"reports") {
+        return crate::reports::cli(&a[1..]);
+    }
     let c = match control() {
         Ok(c) => c,
         Err(e) => {
@@ -1072,6 +1077,11 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
             Some(Value::Obj(units)) => units.iter().map(|(unit, who)| format!("{unit} ({})", crate::bucket::still_since(who.as_str().unwrap_or("?")))).collect::<Vec<_>>().join(", "),
             _ => String::new(),
         };
+        // what a bucket is at now: running or queued since when, and what it waits for
+        if let Some(now) = v.get("now").and_then(Value::as_str) {
+            println!("{now}");
+            continue;
+        }
         if let Some(name) = v.get("still_failing").and_then(Value::as_str) {
             // each with the log of its last look, the failure's own lines in it
             let units = match v.get("units") {

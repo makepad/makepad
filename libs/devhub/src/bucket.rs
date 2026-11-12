@@ -19,6 +19,9 @@
 //! landings reach and takes passes as proofs, and a red no landing's reach caught stayed unseen
 //! (makepad-script's, 11-07). It reports; it gates nothing.
 //! `devhub bucket run <bucket>` starts a bucket's run at once, of the tip then ([`kick`]).
+//! A tests or full run waits while the other holds the pool boxes ([`BOARD`]): it says why in
+//! the master's log as it starts to wait and every 10 min, `devhub bucket` shows each bucket
+//! running or queued since when and on what, and a master restart keeps the waiting run.
 
 use crate::land::{Entry, St};
 use crate::lease::Pin;
@@ -134,8 +137,177 @@ const GATE_NEEDS: &str = "arch=x64,os=linux";
 static LEDGER: Mutex<()> = Mutex::new(());
 /// One tests or full run's shards at a time: a full run's three shards beside a tests run's took
 /// every pool box, and landing gates waited behind the six (11-07). A run that waits starts on
-/// what the other proved.
-static SHARD_RUNS: Mutex<()> = Mutex::new(());
+/// what the other proved. A waiting run says so ([`Board::take`]): a full run asked at 16:46
+/// waited 25 min behind a tests run with no line, no log and nothing in `devhub bucket` (11-12).
+static BOARD: Board = Board::new();
+
+/// How often a run waiting for the pool boxes says it still waits.
+const TURN_SAID: Duration = Duration::from_secs(10 * 60);
+/// How long the run the turn file names ([`TURN_FILE`]) has to be taken up again by a restarted
+/// master before a waiting run takes the boxes: its bucket adopts it as its thread starts.
+const TURN_ADOPT: Duration = Duration::from_secs(2 * 60);
+/// How often a waiting run looks again without a release: the turn file, and its lines.
+const TURN_LOOK: Duration = Duration::from_secs(5);
+/// The pool boxes' turn on disk, beside the logs: the log of the run that holds it, so a
+/// restarted master gives it back to that run (its shards ran on) before a run that only waited.
+const TURN_FILE: &str = "shards.turn";
+
+/// A tests or full run that holds the pool boxes or waits for them.
+#[derive(Clone)]
+struct Turn {
+    log: PathBuf,
+    tip: String,
+    /// since when it holds them
+    since: u64,
+}
+
+/// Who holds the pool boxes ([`BOARD`]), who waits for them, and what each bucket's thread is at.
+struct Board {
+    turns: Mutex<Turns>,
+    freed: std::sync::Condvar,
+    /// each bucket's state now (`running`, `queued`, ..), since when, and what it is at
+    doing: Mutex<BTreeMap<String, (&'static str, u64, String)>>,
+}
+
+struct Turns {
+    holder: Option<Turn>,
+    /// the runs waiting, by log
+    waiting: Vec<PathBuf>,
+}
+
+/// The pool boxes held by a run ([`Board::take`]): free again when it drops.
+struct Held<'a> {
+    board: &'a Board,
+    log: PathBuf,
+}
+
+/// The bucket a run's log is of (`tests-<ms>.log`: `tests`).
+fn bucket_of(log: &Path) -> String {
+    log.file_stem().and_then(|s| s.to_str()).and_then(|s| s.rsplit_once('-')).map_or_else(String::new, |(b, _)| b.to_string())
+}
+
+/// `HH:MM:SS` on the local clock.
+fn clock(ms: u64) -> String {
+    makepad_civil_time::local_or_utc((ms / 1000) as i64).hms()
+}
+
+fn turn_file(log: &Path) -> PathBuf {
+    log.with_file_name(TURN_FILE)
+}
+
+/// The run of `log` is over: its sidecar retired (no verdict) or its row in its bucket's ledger.
+fn run_over(home: &Path, log: &Path) -> bool {
+    let path = log.display().to_string();
+    !log.with_extension("log.run").exists() || rows_of(home, &bucket_of(log)).iter().any(|r| r.get("log").and_then(Value::as_str) == Some(path.as_str()))
+}
+
+impl Board {
+    const fn new() -> Board {
+        Board { turns: Mutex::new(Turns { holder: None, waiting: Vec::new() }), freed: std::sync::Condvar::new(), doing: Mutex::new(BTreeMap::new()) }
+    }
+
+    /// Bucket `name` is at `what` since `since`; None: at nothing.
+    fn doing(&self, name: &str, now: Option<(&'static str, u64, String)>) {
+        let mut doing = self.doing.lock().unwrap_or_else(|e| e.into_inner());
+        match now {
+            Some(now) => { doing.insert(name.to_string(), now); }
+            None => { doing.remove(name); }
+        }
+    }
+
+    /// Takes the pool boxes for the run of `log` (`<bucket>-<asked ms>.log`, its tip `tip`): the
+    /// run the turn file names first (a restarted master's adopted run, its shards running on),
+    /// then the earliest asked. While it waits it says why (`say`) as it starts to wait and every
+    /// [`TURN_SAID`], and its bucket is `queued` in `devhub bucket`.
+    fn take(&self, home: &Path, log: &Path, tip: &str, say: &dyn Fn(String)) -> Held<'_> {
+        let (name, file) = (bucket_of(log), turn_file(log));
+        let mut turns = self.turns.lock().unwrap_or_else(|e| e.into_inner());
+        turns.waiting.push(log.to_path_buf());
+        let (start, mut said, mut unclaimed) = (wall_ms(), None::<u64>, None::<(PathBuf, u64)>);
+        let asked = log_started(log).unwrap_or(start);
+        loop {
+            let now = wall_ms();
+            let named = std::fs::read_to_string(&file).ok().map(|t| PathBuf::from(t.trim_end())).filter(|n| !n.as_os_str().is_empty());
+            let why = if let Some(h) = &turns.holder {
+                Some(format!("the {} run of {} holds them since {} (log {})", bucket_of(&h.log), h.tip, clock(h.since), h.log.display()))
+            } else if let Some(other) = named.as_ref().filter(|n| n.as_path() != log) {
+                let seen = match &unclaimed { Some((p, at)) if p == other => *at, _ => now };
+                unclaimed = Some((other.clone(), seen));
+                let over = run_over(home, other);
+                if over || now.saturating_sub(seen) >= TURN_ADOPT.as_millis() as u64 {
+                    say(format!("bucket {name}: the pool boxes are no one's: the run that held them before the master restart (log {}) {}", other.display(),
+                        if over { "is over" } else { "was not taken up again" }));
+                    if std::fs::read_to_string(&file).is_ok_and(|t| Path::new(t.trim_end()) == other) { let _ = std::fs::remove_file(&file); }
+                    continue;
+                }
+                Some(format!("the {} run of log {} held them before the master restart, and its bucket takes it up again", bucket_of(other), other.display()))
+            } else if named.is_none() {
+                // the earliest asked of those waiting goes first
+                turns.waiting.iter().filter_map(|w| Some((log_started(w)?, w))).filter(|(at, _)| *at < asked).min_by_key(|(at, _)| *at)
+                    .map(|(at, w)| format!("the {} run asked at {} (log {}) goes first", bucket_of(w), clock(at), w.display()))
+            } else { None };
+            let Some(why) = why else { break };
+            self.doing(&name, Some(("queued", asked, format!("its run of {tip} waits for the pool boxes: {why}; log {}", log.display()))));
+            if said.is_none_or(|at| now.saturating_sub(at) >= TURN_SAID.as_millis() as u64) {
+                say(match said {
+                    None => format!("bucket {name}: its run of {tip} (asked {}, log {}) waits for the pool boxes: {why}", clock(asked), log.display()),
+                    Some(_) => format!("bucket {name}: its run of {tip} still waits for the pool boxes after {}: {why}", took(now.saturating_sub(start) / 1000)),
+                });
+                said = Some(now);
+            }
+            turns = self.freed.wait_timeout(turns, TURN_LOOK).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        let now = wall_ms();
+        turns.waiting.retain(|w| w != log);
+        turns.holder = Some(Turn { log: log.to_path_buf(), tip: tip.to_string(), since: now });
+        let temp = file.with_extension("turn.tmp");
+        if let Err(e) = std::fs::write(&temp, log.display().to_string()).and_then(|_| std::fs::rename(&temp, &file)) {
+            say(format!("bucket {name}: {}: {e} (a restarted master gives its run no turn back)", file.display()));
+        }
+        drop(turns);
+        if said.is_some() {
+            say(format!("bucket {name}: its run of {tip} takes the pool boxes after {} of waiting (log {})", took(now.saturating_sub(start) / 1000), log.display()));
+        }
+        self.doing(&name, Some(("running", now, format!("its run of {tip} on the pool boxes{}; log {}", if now > asked + 60_000 { format!(" (asked {})", clock(asked)) } else { String::new() }, log.display()))));
+        Held { board: self, log: log.to_path_buf() }
+    }
+
+    /// The run holding the pool boxes: its log, tip, and since when.
+    fn holder(&self) -> Option<Turn> {
+        self.turns.lock().unwrap_or_else(|e| e.into_inner()).holder.clone()
+    }
+
+    /// `<bucket>: <state> since <HH:MM:SS> (<for>); <what>` of each bucket at something, and of each
+    /// asked to run (its kick file) whose run has not started.
+    fn now_lines(&self, home: &Path, now: u64) -> Vec<String> {
+        let doing = self.doing.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut out = Vec::new();
+        for name in KICKED {
+            let at = doing.get(name);
+            if let Some((state, since, what)) = at {
+                out.push(format!("{name}: {state} since {} ({}); {what}", clock(*since), took(now.saturating_sub(*since) / 1000)));
+            }
+            let asked = kick_file(home, name).metadata().and_then(|m| m.modified()).ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64);
+            if let Some(asked) = asked {
+                out.push(format!("{name}: asked since {} ({}); `devhub bucket run`: its run starts {}", clock(asked), took(now.saturating_sub(asked) / 1000),
+                    if at.is_some() { "as the one above ends" } else { "at its next look" }));
+            }
+        }
+        out
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        let mut turns = self.board.turns.lock().unwrap_or_else(|e| e.into_inner());
+        if turns.holder.as_ref().is_some_and(|h| h.log == self.log) { turns.holder = None; }
+        let file = turn_file(&self.log);
+        if std::fs::read_to_string(&file).is_ok_and(|t| Path::new(t.trim_end()) == self.log) { let _ = std::fs::remove_file(&file); }
+        drop(turns);
+        self.board.freed.notify_all();
+    }
+}
 
 /// A bucket row's tip: work, main, and each other nested repository's commit (`nested`, by name).
 fn tip_value(tip: &Pin) -> Value {
@@ -821,16 +993,30 @@ fn kick_file(home: &Path, name: &str) -> PathBuf {
 }
 
 /// `devhub bucket run <bucket>`: its run starts at once, of the tip then, whether or not a landing
-/// came since its last. The service's answer: `{"said":..}` or `{"error":..}`.
+/// came since its last. The service's answer: `{"said":..}` or `{"error":..}`, which says what
+/// the bucket is at now, and what the run waits for when it cannot start at once.
 pub fn kick(home: &Path, name: &str) -> String {
+    kick_on(&BOARD, home, name, wall_ms())
+}
+
+fn kick_on(board: &Board, home: &Path, name: &str, now: u64) -> String {
     let file = kick_file(home, name);
     let done = if !KICKED.contains(&name) { Err(format!("no bucket `{}`: {}", crate::proto::clean(name, 64), KICKED.join(", "))) }
         else { std::fs::create_dir_all(home.join("bucket-logs")).and_then(|_| std::fs::write(&file, "")).map_err(|e| format!("{}: {e}", file.display())) };
-    match done {
-        Ok(()) => obj(vec![("said", s(&format!("bucket {name}: its run starts at its next look (`devhub bucket` says its verdict)")))]).to_json(),
-        Err(e) => obj(vec![("error", s(&e))]).to_json(),
+    if let Err(e) = done {
+        return obj(vec![("error", s(&e))]).to_json();
     }
+    let at = board.doing.lock().unwrap_or_else(|e| e.into_inner()).get(name).cloned();
+    let then = match (at, board.holder()) {
+        (Some((state, since, what)), _) => format!("; it is {state} since {} ({}): {what}; the asked run starts as that one ends", clock(since), took(now.saturating_sub(since) / 1000)),
+        (None, Some(h)) if SHARDED.contains(&name) => format!("; the {} run of {} holds the pool boxes since {} (log {}): it waits for them, and `devhub bucket` says so", bucket_of(&h.log), h.tip, clock(h.since), h.log.display()),
+        _ => String::new(),
+    };
+    obj(vec![("said", s(&format!("bucket {name}: its run starts at its next look{then} (`devhub bucket` says its state and verdict)")))]).to_json()
 }
+
+/// The buckets whose runs take the pool boxes in turn ([`BOARD`]).
+const SHARDED: [&str; 2] = ["tests", FULL];
 
 /// Bucket `name`'s rows, newest first.
 fn rows_of(home: &Path, name: &str) -> Vec<Value> {
@@ -867,9 +1053,10 @@ fn retry_env(rows: &[Value]) -> String {
     format!("GATE_RETRY={}", units.join(";"))
 }
 
-/// `devhub bucket`'s lines: what each bucket still owes a pass, then the last runs, newest first.
+/// `devhub bucket`'s lines: what each bucket is at now (`{"now":..}`: running or queued since when,
+/// what it waits for), what each still owes a pass, then the last runs, newest first.
 pub fn status(home: &Path) -> Vec<String> {
-    let mut out = Vec::new();
+    let mut out: Vec<String> = BOARD.now_lines(home, wall_ms()).iter().map(|l| obj(vec![("now", s(l))]).to_json()).collect();
     for name in RERUNS.into_iter().chain([FULL]) {
         let still = still_failing(&rows_of(home, name));
         if still.is_empty() { continue; }
@@ -1196,6 +1383,36 @@ pub fn prebuild(home: &Path, repo: &Path, store: &Store, started: u64, base: Opt
     judge("prebuild", home, repo, store, &emit, started, base.as_ref().map(pin_of), &pin_of(tip), |_| Ok(outcome)).map_err(|e| e.to_string())
 }
 
+/// Bucket `name` at a stage of its run ([`Board::doing`]) until this drops.
+struct Stage<'a>(&'a Board, &'a str);
+
+impl<'a> Stage<'a> {
+    fn at(board: &'a Board, name: &'a str, now: (&'static str, u64, String)) -> Stage<'a> {
+        board.doing(name, Some(now));
+        Stage(board, name)
+    }
+}
+
+impl Drop for Stage<'_> {
+    fn drop(&mut self) {
+        self.0.doing(self.1, None);
+    }
+}
+
+/// The newest run of bucket `name` its ledger has no row of: its sidecar `<name>-<ms>.log.run`
+/// newer than `last_start` (its newest row's start; None: it has none), which a restarted master
+/// adopts, a run that ran or one that waited for the pool boxes. A sidecar stays after its row,
+/// and a shard's (`<name>-s<i>-<ms>`) is no run of the bucket's.
+fn unfinished(logs: &Path, name: &str, last_start: Option<u64>) -> Option<(u64, PathBuf)> {
+    let prefix = format!("{name}-");
+    std::fs::read_dir(logs).ok().into_iter().flatten().filter_map(|entry| {
+        let entry = entry.ok()?;
+        let file = entry.file_name();
+        let started: u64 = file.to_str()?.strip_prefix(&prefix)?.strip_suffix(".log.run")?.parse().ok()?;
+        last_start.is_none_or(|last| started > last).then_some((started, entry.path()))
+    }).max_by_key(|(started, _)| *started)
+}
+
 /// Each bucket owns one timer and runs synchronously on its own thread.
 pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: Publish, run: Run, prior: Prior) {
     let name = name.to_string();
@@ -1221,6 +1438,7 @@ pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: 
             }
         };
         let record = |started: u64, base: Option<Pin>, tip: Pin, log: PathBuf| -> Result<Pin, JudgeError> {
+            let _at = Stage::at(&BOARD, &name, ("running", started, format!("its run of {}; log {}", tip_short(&tip), log.display())));
             let result = judge(&name, &home, &repo, &store, &emit, started, base, &tip, |base| match base {
                 Some(base) => {
                     std::fs::create_dir_all(&logs).map_err(|e| format!("bucket logs: {e}"))?;
@@ -1229,17 +1447,11 @@ pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: 
                 None => Ok(Outcome { ok: true, failing: Vec::new(), log: String::new(), summary: "baseline".into(), no_verdict: None }),
             });
             finish_run(&log, result)?;
+            BOARD.doing(&name, Some(("keeping its failed run's JITs", wall_ms(), format!("asks the boxes that ran them to hold them; log {}", log.display()))));
             keep_failed_jits(&name, &home, &log, &ask_node, &emit);
             Ok(tip)
         };
-        let prefix = format!("{name}-");
-        let unfinished = std::fs::read_dir(&logs).ok().into_iter().flatten().filter_map(|entry| {
-            let entry = entry.ok()?;
-            let file = entry.file_name();
-            let started: u64 = file.to_str()?.strip_prefix(&prefix)?.strip_suffix(".log.run")?.parse().ok()?;
-            (latest.is_none() || started > last_start).then_some((started, entry.path()))
-        }).max_by_key(|(started, _)| *started);
-        if let Some((ms, sidecar)) = unfinished {
+        if let Some((ms, sidecar)) = unfinished(&logs, &name, latest.as_ref().map(|_| last_start)) {
             if let Some((pid, started, base, tip)) = read_run(&sidecar).filter(|(_, started, _, _)| *started == ms) {
                 publish(hub_record(&machine, "", 0, "bucket", Sev::Info,
                     format!("bucket {name} adopts its run of {} from before the master restart (pid {pid})", tip_short(&tip)), String::new()));
@@ -1336,28 +1548,32 @@ fn test_rows(home: &Path) -> Vec<Value> {
 
 fn test_run(repo: PathBuf, home: PathBuf, proofs: Arc<crate::gateproof::Store>, full: bool) -> Run {
     Arc::new(move |base, tip, log| {
-        let _one = SHARD_RUNS.lock().unwrap_or_else(|e| e.into_inner());
-        let (units, why) = if full { (Vec::new(), vec![format!("full: every package's tests at {}, no proof reused", tip_short(tip))]) } else { proofs.proven(&repo, &tip.pair()) };
         let rev = match tip_rev(&repo, tip) { Ok(r) => r, Err(e) => return no_verdict(e) };
+        let base = base.expect("tests bucket needs a base");
+        // a run a restarted master adopts is dealt as it was (its shards' leases run on, each
+        // with its sidecar beside its log); a new one over the pool boxes there are now. Its
+        // sidecar comes before its wait for the pool boxes: an asked run that waited took its
+        // kick file, and a master restart in the wait lost it (11-12)
+        let adopted = log.with_extension("log.run").exists().then(|| run_shape(log)).flatten();
+        if adopted.is_none() {
+            if let Some(Err(e)) = log_started(log).map(|started| save_run(log, std::process::id(), started, base, tip)) {
+                eprintln!("bucket {}: {}: {e} (a master restart before it ends loses it)", bucket_of(log), log.display());
+            }
+        }
+        let _turn = BOARD.take(&home, log, &tip_short(tip), &|line| eprintln!("{line}"));
+        let (units, why) = if full { (Vec::new(), vec![format!("full: every package's tests at {}, no proof reused", tip_short(tip))]) } else { proofs.proven(&repo, &tip.pair()) };
         let retry = if full { "GATE_RETRY=".to_string() } else { retry_env(&rows_of(&home, "tests")) };
         let times = times_env(&test_rows(&home));
         let peaks = peaks_env(&test_rows(&home));
         let floor = ram_floor(&test_rows(&home));
         let reach = format!("GATE_FULL={}", if full { "1" } else { "" });
-        let base = base.expect("tests bucket needs a base");
         let (bases, nested) = (base.pair(), nested_bases(base, tip));
-        // a run a restarted master adopts is dealt as it was (its shards' leases run on, each
-        // with its sidecar beside its log); a new one over the pool boxes there are now
-        let adopted = log.with_extension("log.run").exists().then(|| run_shape(log)).flatten();
         let (shards, cores) = match adopted {
             Some(shape) => shape,
             None => {
-                let shape = pool_boxes();
+                let shape = pool_boxes(&bucket_of(log));
                 if let Err(e) = std::fs::write(log, format!("{SHARDS}{} {}\n", shape.0, shape.1)) {
                     return verdict(Err(format!("bucket log {}: {e}", log.display())), "", log);
-                }
-                if let Some(started) = log_started(log) {
-                    let _ = save_run(log, std::process::id(), started, base, tip);
                 }
                 shape
             }
@@ -1501,13 +1717,13 @@ fn run_shape(log: &Path) -> Option<(usize, u32)> {
 }
 
 /// [`test_boxes`], once there is one: a run waits for a pool box as a lease waits for a node.
-fn pool_boxes() -> (usize, u32) {
+fn pool_boxes(name: &str) -> (usize, u32) {
     let mut said = false;
     loop {
         match test_boxes() {
             Ok(shape) => return shape,
             Err(e) if !said => {
-                eprintln!("bucket tests: waits for its boxes: {e}");
+                eprintln!("bucket {name}: waits for its boxes: {e}");
                 said = true;
             }
             Err(_) => {}
@@ -2755,6 +2971,82 @@ mod tests {
         }
         assert_eq!(times_env(&test_rows(&dir)), "GATE_TIMES=test a=20;test b=5", "the full run is the newest measure of `test a`");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A run that waits for the pool boxes says why as it starts to wait, `devhub bucket` shows it
+    /// queued and the holder running, a kick's answer says what the run waits for, and it takes
+    /// the boxes as the holder ends. A waiting run's sidecar is a run a restarted master adopts
+    /// (not a shard's, not one with a row); the run the turn file names takes the boxes back
+    /// before one that waited, and a turn file of a run that is over is no one's. The full
+    /// bucket's asked run waited 25 min behind a tests run with nothing said anywhere (11-12).
+    #[test]
+    fn a_run_waiting_for_the_pool_boxes_says_why_and_a_restart_keeps_the_turn() {
+        let home = std::env::temp_dir().join(format!("devhub-bucket-turn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let logs = home.join("bucket-logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let tip = pin_of(&Pair::new(&"a".repeat(40), &"f".repeat(40)));
+        let wait = Duration::from_secs(10);
+        let silent = |l: String| panic!("a run that takes free boxes says nothing: {l}");
+        let now_has = |board: &Board, what: &str| board.now_lines(&home, wall_ms()).iter().any(|l| l.contains(what));
+        let turn = || std::fs::read_to_string(logs.join(TURN_FILE)).ok();
+        // a tests run holds the boxes; the full bucket's asked run waits, says why, then takes them
+        let board = Board::new();
+        let (tests, full) = (logs.join("tests-100.log"), logs.join("full-200.log"));
+        let held = board.take(&home, &tests, "tipA", &silent);
+        assert_eq!(turn(), Some(tests.display().to_string()), "the holder's log is on disk");
+        assert!(now_has(&board, "tests: running since"), "{:?}", board.now_lines(&home, wall_ms()));
+        let said = kick_on(&board, &home, FULL, wall_ms());
+        assert!(said.contains("the tests run of tipA holds the pool boxes since"), "{said}");
+        assert!(now_has(&board, "full: asked since"), "an asked run not started yet is said");
+        std::fs::remove_file(kick_file(&home, FULL)).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| board.take(&home, &full, "tipB", &|l| { let _ = tx.send(l); }));
+            let line = rx.recv_timeout(wait).expect("a waiting run says so");
+            assert!(line.starts_with("bucket full: its run of tipB (asked ") && line.contains("waits for the pool boxes: the tests run of tipA holds them since") && line.contains(&tests.display().to_string()), "{line}");
+            assert!(now_has(&board, "full: queued since") && now_has(&board, "waits for the pool boxes"), "{:?}", board.now_lines(&home, wall_ms()));
+            assert!(kick_on(&board, &home, FULL, wall_ms()).contains("it is queued since"), "a kick says the run in flight");
+            std::fs::remove_file(kick_file(&home, FULL)).unwrap();
+            drop(held);
+            let line = rx.recv_timeout(wait).expect("it takes the boxes as they free");
+            assert!(line.contains("its run of tipB takes the pool boxes after"), "{line}");
+            let took = waiter.join().unwrap();
+            assert_eq!(turn(), Some(full.display().to_string()));
+            assert!(now_has(&board, "full: running since"), "{:?}", board.now_lines(&home, wall_ms()));
+            drop(took);
+        });
+        assert_eq!(turn(), None, "the boxes are free");
+        // a waiting run's sidecar is a run to adopt, newer than its bucket's last row; a shard's is not
+        save_run(&logs.join("full-300.log"), 1, 300, &tip, &tip).unwrap();
+        save_run(&logs.join("full-s3-400.log"), 1, 400, &tip, &tip).unwrap();
+        save_run(&logs.join("full-50.log"), 1, 50, &tip, &tip).unwrap();
+        assert_eq!(unfinished(&logs, FULL, Some(200)), Some((300, logs.join("full-300.log.run"))));
+        assert_eq!(unfinished(&logs, FULL, Some(300)), None, "a run with a row is no run to adopt");
+        assert_eq!(unfinished(&logs, FULL, None).map(|(ms, _)| ms), Some(300));
+        // after a restart: the run the turn file names takes the boxes back, though asked later
+        let board = Board::new();
+        let held_before = logs.join("tests-500.log");
+        save_run(&held_before, 1, 500, &tip, &tip).unwrap();
+        std::fs::write(logs.join(TURN_FILE), held_before.display().to_string()).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| board.take(&home, &logs.join("full-300.log"), "tipC", &|l| { let _ = tx.send(l); }));
+            let line = rx.recv_timeout(wait).expect("a waiting run says so");
+            assert!(line.contains("held them before the master restart"), "{line}");
+            let back = board.take(&home, &held_before, "tipD", &silent);
+            drop(back);
+            let line = rx.recv_timeout(wait).expect("it takes the boxes as they free");
+            assert!(line.contains("its run of tipC takes the pool boxes"), "{line}");
+            drop(waiter.join().unwrap());
+        });
+        // a turn file of a run that is over (its sidecar retired) is no one's
+        std::fs::write(logs.join(TURN_FILE), logs.join("tests-600.log").display().to_string()).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        drop(board.take(&home, &logs.join("full-700.log"), "tipE", &|l| { let _ = tx.send(l); }));
+        let line = rx.recv_timeout(wait).expect("it says whose turn it took");
+        assert!(line.contains("are no one's") && line.contains("is over"), "{line}");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// Each unit's seconds come from its run's GATETIME line, and the next run deals by the

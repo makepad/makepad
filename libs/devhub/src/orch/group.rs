@@ -523,7 +523,10 @@ impl Groups {
     pub fn credit(&mut self, dir: &Path, since: &str) -> Result<(), String> {
         let own = identity(dir)?.email;
         let range = format!("{since}..{}", self.tip);
-        let log = super::git(dir, &["-c", "core.quotePath=false", "log", "--no-merges", "--format=%x01%an%x02%ae%x02%s%x02%b%x03", "--name-only", &range])?;
+        // what origin/main has is not new: after a rewrite of origin's history a merge can bring its
+        // commits into work's history (`devhub push remap`), and they were credited when promoted
+        let public = "--remotes=origin/main";
+        let log = super::git(dir, &["-c", "core.quotePath=false", "log", "--no-merges", "--format=%x01%an%x02%ae%x02%s%x02%b%x03", "--name-only", &range, "--not", public])?;
         let mut commits: Vec<Landed> = Vec::new();
         for chunk in log.split('\u{1}').skip(1) {
             let (head, files) = chunk.split_once('\u{3}').unwrap_or((chunk, ""));
@@ -532,7 +535,7 @@ impl Groups {
             commits.push(Landed { name: name.into(), email: email.into(), subject: subject.into(), body: body.into(), files: files.lines().filter(|l| !l.trim().is_empty()).map(String::from).collect() });
         }
         // a merge of a PR: what it brought in over its first parent
-        let merges = super::git(dir, &["log", "--merges", "--format=%H %P%x02%s", &range])?;
+        let merges = super::git(dir, &["log", "--merges", "--format=%H %P%x02%s", &range, "--not", public])?;
         for row in merges.lines() {
             let Some((ids, subject)) = row.split_once('\u{2}') else { continue };
             if merged_pr(subject).is_none() {

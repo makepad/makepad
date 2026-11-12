@@ -6,6 +6,8 @@
 //!
 //! Pinned native lane leases on work boxes hold per-lane trees; CI, gates and user boxes keep the
 //! shared tree and its existing exclusions. One lease at a time holds a tree, at its pin too.
+//! A lease without a revision holds no tree: it runs in its lane's directory, beside every tree
+//! lease; such unpinned writers stay one at a time on a box.
 //! Native capacity waits for a free tree; the executor evicts the least recently used one.
 //! Overlays never hold a tree; one lane
 //! serializes its different overlay pins (CI overlays are keyed per pin). Timed and whole-box leases and their queued holds exclude
@@ -30,7 +32,8 @@
 //! otherwise small jobs take hot boxes, then ready pool capacity. A ready box never waits for
 //! an ETA. Exclusive and interactive work may reserve one box for ten minutes (a timed request and
 //! a background leg owed a box: for as long as it waits), only while running leases are its sole
-//! obstacle.
+//! obstacle. One that waits on its own lane's lock held there (its native tree, its overlay at
+//! another pin) reserves none: only that lease's end lets it start.
 //! A reservation never blocks work that fits beside its owner or is expected to end before its
 //! owner could start (backfill). A box at [`WARM_BUSY`] (load, or granted cores or RAM) takes
 //! work only when every box is that busy (the least busy first); below it, bonuses favor a tree
@@ -582,12 +585,36 @@ impl Req {
         // would be in the timings)
         if self.hub_build() || other.hub_build() { return self.kind == Kind::Timed || other.kind == Kind::Timed; }
         let native = self.uses_tree() && other.uses_tree() && (self.native(role) || other.native(role));
-        let kinds = if native { self.kind == Kind::Timed || other.kind == Kind::Timed } else { self.kind.conflicts(self.src, other.kind, other.src) };
-        kinds || (self.whole && other.kind.writes()) || (other.whole && self.kind.writes()) || self.tree_conflicts(other, c) || (self.src == Src::Overlay && other.src == Src::Overlay && self.lane == other.lane && !(self.kind == Kind::Ci && other.kind == Kind::Ci) && self.rev.as_deref().and_then(Pin::of_rev) != other.rev.as_deref().and_then(Pin::of_rev))
+        // a lease in its lane's directory and one in a work tree share nothing ([`Self::in_lane_dir`])
+        let apart = native || self.in_lane_dir() && other.uses_tree() || other.in_lane_dir() && self.uses_tree();
+        let kinds = if apart { self.kind == Kind::Timed || other.kind == Kind::Timed } else { self.kind.conflicts(self.src, other.kind, other.src) };
+        kinds || (self.whole && other.kind.writes()) || (other.whole && self.kind.writes()) || self.tree_conflicts(other, c) || self.other_pin(other)
+    }
+
+    /// One lane serializes its overlays at different pins (CI overlays are keyed per pin).
+    fn other_pin(&self, other: &Req) -> bool {
+        self.src == Src::Overlay && other.src == Src::Overlay && self.lane == other.lane && !(self.kind == Kind::Ci && other.kind == Kind::Ci) && self.rev.as_deref().and_then(Pin::of_rev) != other.rev.as_deref().and_then(Pin::of_rev)
+    }
+
+    /// A conflict with `other` that only their own lane's leases have on a box: its native tree
+    /// (one lease at a time in it, at its pin too) or its overlay at another pin. Not the box's
+    /// shared work tree or its one unpinned writer, which every lane's leases wait for in turn.
+    fn lane_lock(&self, other: &Req, c: &Caps) -> bool {
+        let role = c.role();
+        self.native(role) && other.native(role) && self.tree_conflicts(other, c) || self.other_pin(other)
     }
 
     fn uses_tree(&self) -> bool {
         self.src == Src::Tree && self.kind.writes() && (self.kind == Kind::Ci || self.rev.is_some())
+    }
+
+    /// A tree lease without a revision: it takes no work tree on its box but runs in its lane's
+    /// own directory there, as earlier ships left it (`lease-start`'s "lane dir"), beside every
+    /// work tree; such leases stay one at a time on a box. Counted as a writer of the box's tree,
+    /// it waited on every lane's tree lease there, and they on it (a shell-only copy, `devhub lease
+    /// long -- sh -c ..`, behind another agent's screen lease: L887774, 11-12).
+    fn in_lane_dir(&self) -> bool {
+        self.src == Src::Tree && self.kind.writes() && !self.uses_tree()
     }
 
     fn same_tree(&self, other: &Req, role: Role) -> bool {
@@ -4794,7 +4821,10 @@ impl Sched {
         // A box that drains for its owner takes backfill by a measure only ([`Self::measured_run`]):
         // short asks that said 1 min and ran 3 came in against a launch's last minute, and it
         // started 2 min after its box's work had ended.
-        if !l.req.exclusive() && !self.is_live_job(l) && self.resources(name, l, cost, true).is_ok() {
+        // Nor what would lock the owner out ([`Self::locks_out`]): ending first, it would still
+        // take its hold from it.
+        let locks_out = Self::locks_out(l, owner, c);
+        if !l.req.exclusive() && !self.is_live_job(l) && !locks_out && self.resources(name, l, cost, true).is_ok() {
             let parks = self.drains_box(owner) && !self.live_launch(owner);
             let known = self.live_on_node(name, &owner.id).filter(|r| !(parks && self.is_live_job(r) && Self::parks_for(r, owner))).all(|r| self.expected_end(r).is_some())
                 && self.restoring.values().filter(|(n, ..)| n == name).all(|(.., ended)| self.cleanup_end(name, *ended).is_some());
@@ -4843,7 +4873,8 @@ impl Sched {
         } else {
             format!("; it has queued {}: the box drains for it", dur(queued))
         };
-        Some(Block::by(format!("held for {what}{} (it starts as the box's work ends by its measure: only work that ends first or fits beside it){long}", h.id), &h.id))
+        let why = if locks_out { "it holds the box and cannot run beside this lease: it goes first" } else { "it starts as the box's work ends by its measure: only work that ends first or fits beside it" };
+        Some(Block::by(format!("held for {what}{} ({why}){long}", h.id), &h.id))
     }
 
     fn hot_wait(&self, name: &str, l: &Lease, holds: &Holds) -> Option<Block> {
@@ -4987,7 +5018,7 @@ impl Sched {
     /// queue's asks, a background ask that needed more than a box ever freed at once waited
     /// while smaller asks took each core as it freed.
     fn can_wait(&self, name: &str, l: &Lease, holds: &Holds) -> bool {
-        if l.state != State::Queued { return false; }
+        if l.state != State::Queued || self.lock_wait(name, l) || self.pinned_without_why(l, holds) { return false; }
         if self.timed_wait(name, l).is_some() || self.spare_wait(name, l, holds).is_some() || self.deploy_wait(name, l).is_some() || self.prebuild_wait(name, l).is_some() || self.gap_wait(name, l).is_some() { return false; }
         let Ok(names) = self.candidates(l) else { return false };
         names.iter().any(|n| n.as_str() == name)
@@ -4995,6 +5026,41 @@ impl Sched {
             && self.ready_to_hold(name, l, &self.cost_on(name, l)).is_ok()
             && self.hot_wait(name, l, holds).is_none()
             && (self.drains_box(l) || Self::holds_while_waiting(l) || self.starts_after_ends(name, l))
+    }
+
+    /// A lane's ask that names its box (`--node`) and says no why ([`Self::pinned_for`]: no
+    /// `--series`) while another box could start it now ([`Self::free_elsewhere`]): it waits for
+    /// its box and holds none of it, so the box's other asks go on. Two lanes' tests pinned to a
+    /// box drained it while another stood free, and three asks waited behind them (L893284,
+    /// L893289, 11-12). Once no other box could start it, it holds as any ask does: a pin never
+    /// starves it. Its holder is told to unpin it ([`Self::say_pinned`]). devhub's own asks and
+    /// those that hold while they wait ([`Self::holds_while_waiting`]: timed among them) keep
+    /// their hold, and so does one that says why with `--series`.
+    fn pinned_without_why(&self, l: &Lease, holds: &Holds) -> bool {
+        let Some(named) = l.req.node.as_deref() else { return false };
+        !l.req.devhubs_own() && !Self::holds_while_waiting(l) && self.pinned_for(l, named).is_none() && !self.free_elsewhere(l, holds).is_empty()
+    }
+
+    /// Whether `l` waits on `name` for its lane's lock a running lease holds there
+    /// ([`Req::lane_lock`]: its native tree, its overlay at another pin), neither taking the whole
+    /// box ([`Req::exclusive`]) nor being a live session that parks for it ([`Self::park_live`]).
+    /// Only that lease's end lets `l` start there, whatever room the box frees, and no other lane
+    /// waits for that lock: `l` holds no box meanwhile ([`Self::can_wait`]), other work takes the
+    /// room, and its turn comes back with its age once the lock is free. Holding it, a lane's test
+    /// that waited on its own lane's run in its tree drained its box 36 min against five other
+    /// lanes' asks (L891997, 11-12). A lane cap holds none either ([`Self::ready_to_hold`]). Asks
+    /// that hold their box while they wait ([`Self::holds_while_waiting`]) keep their hold.
+    fn lock_wait(&self, name: &str, l: &Lease) -> bool {
+        let Some(c) = self.nodes.get(name).and_then(|n| n.caps.as_ref()) else { return false };
+        !l.req.exclusive() && !Self::holds_while_waiting(l)
+            && self.live_on_node(name, &l.id).any(|r| !r.req.exclusive() && !(self.is_live_job(r) && Self::parks_for(r, l)) && l.req.lane_lock(&r.req, c))
+    }
+
+    /// Whether `l`, let in on a box `owner` holds, would lock it out there ([`Self::lock_wait`]):
+    /// the owner would give up its hold behind it, and the box fill meanwhile. So `l` comes after
+    /// it, ending first or not ([`Self::held_by`]).
+    fn locks_out(l: &Lease, owner: &Lease, c: &Caps) -> bool {
+        !l.req.exclusive() && !owner.req.exclusive() && !Self::holds_while_waiting(owner) && owner.req.lane_lock(&l.req, c)
     }
 
     /// An ask that has waited [`STARVED_MS`] (a timed or whole one has its own rules; CI and a
@@ -11460,6 +11526,134 @@ mod tests {
         invariants(&s);
     }
 
+    /// An ask whose box has its room but whose lock another lease holds (one lease at a time in
+    /// its tree, a lane's overlay at another pin) waits for that lease's end, not the box's work:
+    /// it holds no box, and other work takes the room beside it. Its tree free, it starts next,
+    /// and while it holds a box for its room no ask that would take its lock gets in ahead of
+    /// it. A lane's test waiting on its own lane's run held its box drained 36 min against five
+    /// other lanes' asks (L891997, 11-12).
+    #[test]
+    fn a_lock_blocked_ask_holds_no_box_and_takes_its_lock_next() {
+        const MIN: u64 = 60_000;
+        let mut s = sched(&[("pool-a", caps(16, 64.0, Role::Pool))]);
+        let ask = |s: &mut Sched, mut r: Req, cores: f64, min: f64, at: u64| {
+            (r.cores, r.est_min) = (Some(cores), Some(min));
+            s.request(r, at)
+        };
+        let tree = |lane: &str| Req { rev: Some(format!("work@{}", "a".repeat(40))), ..req(lane, Kind::Test, Some("pool-a")) };
+        let held = |s: &Sched, id: &str| s.holds.values().any(|h| h.id == id);
+        let first = ask(&mut s, tree("one"), 8.0, 60.0, 0);
+        assert_eq!(grants(&s.tick(0)), vec![first.clone()]);
+        let next = ask(&mut s, tree("one"), 4.0, 10.0, MIN);
+        beat_all(&mut s, MIN);
+        assert!(grants(&s.tick(MIN)).is_empty());
+        assert!(state(&s, &next).1.contains(&format!("held by {first} (test of one): one lease at a time in its tree")), "it waits on its tree: {:?}", state(&s, &next));
+        // past STARVED_MS it would drain its box; the box's room is not what it waits for
+        let beside = ask(&mut s, overlay("two", Some("pool-a"), 6.0), 6.0, 30.0, 12 * MIN);
+        beat_all(&mut s, 12 * MIN);
+        assert_eq!(grants(&s.tick(12 * MIN)), vec![beside.clone()], "other work takes the room beside a lock-blocked ask: {:?}", state(&s, &beside));
+        assert!(!held(&s, &next), "a lock-blocked ask holds no box: {:?}", s.holds);
+        let big = ask(&mut s, overlay("three", Some("pool-a"), 8.0), 8.0, 60.0, 13 * MIN);
+        beat_all(&mut s, 13 * MIN);
+        assert!(grants(&s.tick(13 * MIN)).is_empty(), "8 + 6 + 8 of 16");
+        // its tree free, it goes first: 6 + 4 of 16, and the later 8-core ask waits
+        release_clean(&mut s, &first, 20 * MIN);
+        beat_all(&mut s, 20 * MIN);
+        assert_eq!(grants(&s.tick(20 * MIN)), vec![next.clone()], "once its tree frees it starts next: {:?}", state(&s, &next));
+        assert!(held(&s, &big), "the 8-core ask holds the box for its room: {:?}", state(&s, &big));
+        // a short ask that would take the holder's lock (its lane at another pin) ends first,
+        // but would lock the holder out: it waits behind it
+        let mut other_pin = overlay("three", Some("pool-a"), 2.0);
+        other_pin.rev = Some(format!("work@{}", "b".repeat(40)));
+        let short = ask(&mut s, other_pin, 2.0, 1.0, 21 * MIN);
+        beat_all(&mut s, 21 * MIN);
+        assert!(grants(&s.tick(21 * MIN)).is_empty(), "no backfill takes the lock its box's holder needs: {:?}", state(&s, &short));
+        assert!(state(&s, &short).1.contains(&format!("held for {big} (")), "{:?}", state(&s, &short));
+        assert!(held(&s, &big), "the holder keeps its box: {:?}", s.holds);
+        release_clean(&mut s, &next, 30 * MIN);
+        beat_all(&mut s, 30 * MIN);
+        assert_eq!(grants(&s.tick(30 * MIN)), vec![big.clone()], "{:?}", state(&s, &big));
+        assert!(state(&s, &short).1.contains(&format!("held by {big} (test of three)")) && !held(&s, &short), "{:?}", state(&s, &short));
+        invariants(&s);
+    }
+
+    /// A lease that asks for no revision runs in its lane's own directory on its box and takes no
+    /// work tree there (`lease-start`): it starts beside every tree lease, its own lane's and
+    /// another's. Counted as a tree writer, a shell-only copy waited on another agent's screen
+    /// lease in its box's tree (L887774, 11-12). Such unpinned writers stay one at a time on a
+    /// box, and timed work still waits for it.
+    #[test]
+    fn a_lease_without_a_revision_takes_no_tree() {
+        let mut s = sched(&[("pool-a", caps(16, 64.0, Role::Pool))]);
+        let ask = |s: &mut Sched, mut r: Req, at: u64| {
+            r.cores = Some(2.0);
+            s.request(r, at)
+        };
+        let pinned = |lane: &str, kind: Kind| Req { rev: Some(format!("work@{}", "a".repeat(40))), ..req(lane, kind, Some("pool-a")) };
+        let screen = ask(&mut s, pinned("makepad", Kind::Screen), 0);
+        let build = ask(&mut s, pinned("fab", Kind::Build), 0);
+        assert_eq!(grants(&s.tick(0)), vec![screen.clone(), build.clone()]);
+        let copy = ask(&mut s, req("makepad", Kind::Long, Some("pool-a")), 1);
+        beat_all(&mut s, 1);
+        assert_eq!(grants(&s.tick(1)), vec![copy.clone()], "beside its lane's tree lease and another lane's: {:?}", state(&s, &copy));
+        let second = ask(&mut s, req("mgrcopy", Kind::Long, Some("pool-a")), 2);
+        beat_all(&mut s, 2);
+        assert!(grants(&s.tick(2)).is_empty(), "unpinned writers stay one at a time on a box");
+        assert!(state(&s, &second).1.contains(&format!("held by {copy} (long of makepad)")), "{:?}", state(&s, &second));
+        s.release(&second, "released", 3);
+        let timed = s.request(req("bench", Kind::Timed, Some("pool-a")), 3);
+        release_clean(&mut s, &screen, 4);
+        release_clean(&mut s, &build, 4);
+        beat_all(&mut s, 4);
+        assert!(grants(&s.tick(4)).is_empty(), "timed work waits for it");
+        assert!(state(&s, &timed).1.contains(&format!("held by {copy}")), "{:?}", state(&s, &timed));
+        release_clean(&mut s, &copy, 5);
+        beat_all(&mut s, 5);
+        assert_eq!(grants(&s.tick(5)), vec![timed]);
+        invariants(&s);
+    }
+
+    /// A lane's ask pinned to its box (`--node`) without saying why holds none of it while another
+    /// box could start it now: the box's other work goes on (two lanes' tests pinned to a box
+    /// drained it while another stood free, three asks behind them, L893284 L893289, 11-12).
+    /// Once no other box could start it, it holds as any ask does, and one that says why
+    /// (`--series`) holds as before.
+    #[test]
+    fn a_pin_without_a_why_drains_no_box_while_another_could_start_it() {
+        const MIN: u64 = 60_000;
+        let mut s = sched(&[("pool-a", caps(16, 64.0, Role::Pool)), ("pool-b", caps(16, 64.0, Role::Pool))]);
+        let ask = |s: &mut Sched, lane: &str, node: &str, series: Option<&str>, cores: f64, min: f64, at: u64| {
+            let mut r = overlay(lane, Some(node), cores);
+            (r.est_min, r.series) = (Some(min), series.map(str::to_string));
+            s.request(r, at)
+        };
+        let held = |s: &Sched, id: &str| s.holds.values().any(|h| h.id == id);
+        let tick = |s: &mut Sched, at: u64| { beat_all(s, at); grants(&s.tick(at)) };
+        let first = ask(&mut s, "zero", "pool-a", None, 12.0, 60.0, 0);
+        assert_eq!(tick(&mut s, 0), vec![first.clone()]);
+        let pinned = ask(&mut s, "one", "pool-a", None, 8.0, 5.0, MIN);
+        assert!(tick(&mut s, MIN).is_empty(), "12 + 8 of 16");
+        // past STARVED_MS it drained its box; pool-b could start it now
+        assert!(tick(&mut s, 12 * MIN).is_empty());
+        assert!(!held(&s, &pinned), "a pin with no why holds no box while another could start it: {:?}", s.holds);
+        let beside = ask(&mut s, "two", "pool-a", Some("c"), 4.0, 60.0, 12 * MIN);
+        assert_eq!(tick(&mut s, 12 * MIN), vec![beside.clone()], "the box's other work goes on: {:?}", state(&s, &beside));
+        // pool-b full: no other box could start it, and it holds its box as any ask
+        let other = ask(&mut s, "three", "pool-b", Some("o"), 12.0, 60.0, 13 * MIN);
+        assert_eq!(tick(&mut s, 13 * MIN), vec![other.clone()]);
+        assert!(tick(&mut s, 14 * MIN).is_empty());
+        assert!(held(&s, &pinned), "with no other box for it, a pin waits with its hold: it never starves: {:?}", state(&s, &pinned));
+        release_clean(&mut s, &first, 60 * MIN);
+        assert_eq!(tick(&mut s, 60 * MIN), vec![pinned.clone()]);
+        // one that says why holds its box although pool-b could start it
+        release_clean(&mut s, &other, 61 * MIN);
+        let series = ask(&mut s, "four", "pool-a", Some("s"), 8.0, 5.0, 61 * MIN);
+        assert!(tick(&mut s, 61 * MIN).is_empty(), "4 + 8 + 8 of 16");
+        assert!(tick(&mut s, 72 * MIN).is_empty());
+        assert!(held(&s, &series), "a pin that says why (--series) holds its box as before: {:?}", state(&s, &series));
+        invariants(&s);
+    }
+
     /// A box holder waits for its box as measured, as every other ask does: one definition of what
     /// a box's work takes holds it and starts it. Before, the holder started by charges alone: it
     /// held a box by one definition and started by another (a landing gate held its box at "node
@@ -13363,8 +13557,9 @@ mod tests {
         let (started, shorts) = refill(&mut s, &head, vec![(long, 5 * MIN)], 1.0, Priority::Background, MIN);
         assert!(started.is_some_and(|t| t <= 5 * MIN + 30_000), "started at {started:?}: {shorts:?}");
         // a measured class backfills a draining box, but not while a run of it is past its measure
-        // (on any box): it is "measured, exceeded", a guess again
-        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool)), ("b", caps(16, 64.0, Role::Pool))]);
+        // (on any box): it is "measured, exceeded", a guess again (b too small for the head: a
+        // head pinned with no why drains no box another could start it on)
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool)), ("b", caps(8, 64.0, Role::Pool))]);
         for _ in 0..3 { s.record_node_cost("test short", "test", "a", MIN); }
         let short = |s: &mut Sched, node: &str, at: u64| {
             let mut r = overlay("short", Some(node), 2.0);

@@ -1482,6 +1482,15 @@ fn capture(tree: &Path, changed: &[String], deleted: &[String], old: &BTreeMap<S
     Ok(sources)
 }
 
+/// Of a test session's edited `files`, those no patch takes that its tests still see: a file in a
+/// package that is none of its `inputs` (a data file beside the sources), or one in no package
+/// (`outside`) that the run opened, probed or listed the folder of (`read`: a fixture its tests load
+/// from the workspace). Their tests start again on them. A file outside every package the run never
+/// read keeps the last verdict (a JIT that names no reads keeps it for every such file, as before).
+fn rerun_on(files: &[String], inputs: &BTreeSet<String>, outside: &BTreeSet<String>, read: &BTreeSet<String>) -> Vec<String> {
+    files.iter().filter(|f| !inputs.contains(*f) && (!outside.contains(*f) || read.contains(*f))).cloned().collect()
+}
+
 /// Ships saved files to the box; the JIT's verdict and the first frame after it are the result.
 /// Test callers supply the manifest they just read, including saves the monitor has not heard.
 /// Returns a note when the shipped edit cannot reach the target; tests keep their last verdict.
@@ -1608,6 +1617,7 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         let lines = inputs?;
         let mut inputs = BTreeSet::new();
         let mut outside = BTreeSet::new();
+        let mut read = BTreeSet::new();
         let mut count = None;
         for line in &lines {
             let Ok(v) = makepad_strict_json::parse(line.as_bytes()) else { continue };
@@ -1615,15 +1625,16 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
             if let Some(n) = v.get("count").and_then(Value::as_u64) { count = Some(n); }
             if let Some(path) = v.get("path").and_then(Value::as_str) { inputs.insert(path.to_string()); }
             if let Some(path) = v.get("outside").and_then(Value::as_str) { outside.insert(path.to_string()); }
+            if let Some(path) = v.get("read").and_then(Value::as_str) { read.insert(path.to_string()); }
         }
         if count != Some(inputs.len() as u64) { return Err("live: inputs did not return the complete source list".into()); }
         if x.test {
             // (what the run names in DEVHUB_ALSO is its own, wherever it lies)
             outside.retain(|f| !x.also.iter().any(|a| Path::new(f).starts_with(a)));
-            unread = p.files.iter().filter(|f| !inputs.contains(*f) && !outside.contains(*f)).cloned().collect();
+            unread = rerun_on(&p.files, &inputs, &outside, &read);
             if unread.is_empty() && !p.files.iter().any(|f| inputs.contains(f)) {
                 if x.patch.as_ref().is_some_and(terminal) {
-                    note = Some(format!("{} is in no package of the tests' graph: the last verdict stands", p.files[0]));
+                    note = Some(format!("{} is in no package of the tests' graph and they did not read it: the last verdict stands", p.files[0]));
                 } else {
                     unread = p.files.clone();
                 }
@@ -1682,8 +1693,8 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         event(ctx, Sev::Info, format!("live {id}: {note}"), current.as_ref());
         return;
     }
-    // The running program does not read it, so no patch and no selection can say what it does to
-    // the tests, yet they can read it: a process they start, a data file. The last verdict is
+    // It is none of the running program's sources, so no patch and no selection can say what it
+    // does to the tests, yet they read it or can: a process they start, a data file. The last verdict is
     // about the bytes before it (a broken spritelab main.rs still said 1/1 passed, 11-04).
     if let Some(file) = unread.first() {
         p.reason = format!("{file} is not a source of the running tests: they start again on it");
@@ -2239,6 +2250,25 @@ mod owner_tests {
         assert_eq!(sources["src/was.rs"], "-");
         assert!(base.join("ship/src/a.rs").exists());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A test session's edit that is none of its sources: a data file its tests read (a race
+    /// fixture's game.splash in no package of the graph) starts them again; the last verdict
+    /// stood on such a file and replayed a pass from the bytes before it (RACECARS, FOLIAGE, 11-12).
+    #[test]
+    fn a_data_file_the_tests_read_runs_them_again_and_one_they_never_read_keeps_the_verdict() {
+        let set = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<std::collections::BTreeSet<String>>();
+        let files = ["res/game.splash", "res/notes.md", "res/new/level.splash", "src/data.json", "src/lib.rs"].map(String::from);
+        let inputs = set(&["src/lib.rs"]);
+        let outside = set(&["res/game.splash", "res/notes.md", "res/new/level.splash"]);
+        let rerun = |read: &[&str]| super::rerun_on(&files, &inputs, &outside, &set(read));
+        let fresh = rerun(&["res/game.splash", "res/new/level.splash"]);
+        assert!(fresh.contains(&"res/game.splash".to_string()), "a file outside every package the tests read runs them again: {fresh:?}");
+        assert!(fresh.contains(&"res/new/level.splash".to_string()), "so does one the JIT names as read (in a folder the tests listed): {fresh:?}");
+        assert!(!fresh.contains(&"res/notes.md".to_string()), "a file outside every package the tests never read keeps the verdict: {fresh:?}");
+        assert!(fresh.contains(&"src/data.json".to_string()), "a file in a package that is no source runs them again, read or not: {fresh:?}");
+        assert!(!fresh.contains(&"src/lib.rs".to_string()), "a source is patched, not run again: {fresh:?}");
+        assert_eq!(rerun(&[]), ["src/data.json"], "a JIT that names no reads keeps the verdict for every file outside the packages, as before");
     }
 
     /// Saves that wait for a restart are counted from the first; from the third the hint leads

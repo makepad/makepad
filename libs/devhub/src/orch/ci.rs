@@ -1540,6 +1540,20 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
     if tree.has("libs/relax/compiler/tests/allow_c_cached_check/verify.py") {
         push("live:allow-c-cached".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c_cached_check/verify.py"])], Judge::Exit, 120.0, None);
     }
+    // a build script that calls into a C crate it build-depends on: its own child run compiles
+    // that crate from the run's native build, and a warm run does not run the script again (relax#76)
+    if tree.has("libs/relax/compiler/tests/allow_c_script_native/verify.py") {
+        push("live:allow-c-script-native".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c_script_native/verify.py"])], Judge::Exit, 120.0, None);
+    }
+    // a shared library the build script names in a search folder outside the loader's path: the
+    // program's link arguments (an rpath) reach the native library, and one that fails to load
+    // is linked again on the next run (relax#54)
+    if tree.has("libs/relax/compiler/tests/allow_c_dylib/verify.py") {
+        push("live:allow-c-dylib".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c_dylib/verify.py"])], Judge::Exit, 120.0, None);
+        // and on a Mac, where dyld also binds a dependency to a loaded image of its install name:
+        // the callback lookup's copy of the library must not answer the native library's @rpath
+        push("live:allow-c-dylib-macos".to_string(), Kind::Build, Os::Macos, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c_dylib/verify.py"])], Judge::Exit, 120.0, None);
+    }
     // a save the live session holds, or one that changes nothing the program runs, says so in a
     // line naming the file: a deferred module's file, a save while a restart is pending (relax#33)
     if tree.has("tools/run/fixture/live_gates.sh") {

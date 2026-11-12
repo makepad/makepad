@@ -121,8 +121,9 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S]|--needs k=v,..] [-
                                           each nested checkout's HEAD where R names none), none of the worktree's uncommitted files.
                                           --live: THE lane check; one warm process per lane, package, target and args,
                                           small cost on a hot box; overlay by default, --tree opts out; only affected tests rerun,
-                                          a changed file in a package of its graph the tests' program does not read starts
-                                          them again, one in no package keeps the last verdict and says so.
+                                          a changed file in a package of its graph that is none of its sources starts
+                                          them again, so does one in no package the tests opened, probed or listed the
+                                          folder of (a data file); any other in no package keeps the last verdict and says so.
                                           Without --live: one JIT run, the lane's final check; devhub's measured routing may
                                           pick cargo (saying both walls). --native <reason>: cargo test --release (a tree),
                                           only for native-vs-JIT baselines and timed perf series (or an open JIT miss).
@@ -427,6 +428,16 @@ fn lane_root_of(dir: &Path) -> Option<(PathBuf, String)> {
     Some((root, if rel.is_empty() { ".".into() } else { rel.to_string() }))
 }
 
+/// A lease asked with no `--lane` takes its checkout's name for its lane: in a lane's worktree its
+/// lane, but from the main checkout (or no checkout) `makepad`, whose tree on a box the person's
+/// and main's own leases use. An agent's job there ran in that tree and left its Cargo.toml edited
+/// on a box (a fresh-clone job, 11-12). Refused for an agent other than main and devhub's own,
+/// saying to name the lane; `lane_named`: `DEVHUB_LANE` names it, or this is a lane's worktree.
+fn laneless(lane: &str, lane_named: bool, agent: Option<&str>) -> Option<String> {
+    let agent = agent.filter(|a| !a.is_empty() && *a != "main" && !a.starts_with("devhub-"))?;
+    (!lane_named).then(|| format!("no --lane: from here this lease of {agent} would take lane `{lane}` and its tree on the box, which the person's and main's leases use; name your lane: --lane <lane> (or DEVHUB_LANE=<lane>)"))
+}
+
 /// `--lane`, else `DEVHUB_LANE`, else the worktree's directory name.
 fn default_lane() -> String {
     std::env::var("DEVHUB_LANE").ok().filter(|l| !l.is_empty()).unwrap_or_else(|| {
@@ -549,12 +560,18 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
         i += 2;
     }
     req.check_series()?;
+    let root = lane_root().map(|(root, _)| root);
     if req.lane.is_empty() {
         req.lane = default_lane();
+        let named = std::env::var("DEVHUB_LANE").is_ok_and(|l| !l.is_empty());
+        let in_lane = root.as_deref().is_some_and(|root| !super::ship::is_main_checkout(root));
+        if let Some(why) = laneless(&req.lane, named || in_lane, std::env::var("DEVHUB_AGENT").ok().as_deref()) {
+            return Err(why);
+        }
     }
     // the lane's repo: revisions are looked up and recovered work lands there
     if req.repo_dir.is_none() {
-        req.repo_dir = lane_root().map(|(root, _)| root.to_string_lossy().into_owned());
+        req.repo_dir = root.map(|root| root.to_string_lossy().into_owned());
     }
     // branch names become commits here, once: what ships is what was ordered, however long the
     // lease queues and whatever other landings do to the branches meanwhile
@@ -2599,6 +2616,20 @@ mod tests {
             let request = makepad_strict_json::parse(request.as_bytes()).unwrap();
             assert_ne!(request.get(key), baseline.get(key), "`{flag}` is parsed but `{key}` in the request does not change");
         }
+    }
+
+    /// A lease with no lane from the main checkout would run in tree `makepad` on its box: an
+    /// agent's is refused saying to name its lane (a fresh-clone job left Cargo.toml edited there,
+    /// 11-12); the person's (no agent), main's and devhub's own go on, as does one whose lane is
+    /// named (`DEVHUB_LANE`, a lane's worktree).
+    #[test]
+    fn an_agents_lease_without_a_lane_from_the_main_checkout_is_refused() {
+        let refused = laneless("makepad", false, Some("relaxsite"));
+        assert!(refused.as_deref().is_some_and(|w| w.contains("--lane <lane>") && w.contains("`makepad`")), "an agent is told to name its lane: {refused:?}");
+        assert_eq!(laneless("makepad", false, None), None, "the person's own lease goes on");
+        assert_eq!(laneless("makepad", false, Some("main")), None, "main's goes on");
+        assert_eq!(laneless("makepad", false, Some("devhub-bucket")), None, "devhub's own goes on");
+        assert_eq!(laneless("relaxsite", true, Some("relaxsite")), None, "one whose lane is named goes on");
     }
 
     /// `run --patch` flags before the command come out of it and give the patched files; the
